@@ -38,6 +38,35 @@ impl NodeId {
     pub const EXPANDED: u32 = 1 << 31;
 }
 
+/// Names one function for the tables keyed by function: an index into
+/// `vyrn_lower::World`'s function rows, never reused within one World.
+/// `Program::functions[i]` is `FnId(i)`; the lowering numbers the rest. A
+/// storage index, never an order, so it has no `Ord`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct FnId(pub u32);
+
+impl FnId {
+    /// The id of row `i`.
+    ///
+    /// # Panics
+    ///
+    /// Past `u32::MAX` rows, more functions than a program's memory holds.
+    pub fn nth(i: usize) -> FnId {
+        FnId(u32::try_from(i).expect("more than u32::MAX functions"))
+    }
+
+    pub fn index(self) -> usize {
+        self.0 as usize
+    }
+}
+
+/// Names one protocol member: `Program::protocols[protocol].methods[member]`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct MethodId {
+    pub protocol: u32,
+    pub member: u32,
+}
+
 /// A node's slot for its [`NodeId`]; [`NodeId::NONE`] until numbered. Any two
 /// slots compare equal, so two trees compare by structure alone. `{:?}`
 /// prints every slot alike, so a fingerprint over a tree's debug text ignores
@@ -104,6 +133,28 @@ pub struct Program {
     /// The number of units [`Program::number`] and
     /// [`Program::number_appended`] gave.
     pub units: u32,
+    /// What the program is compiled as, beyond an ordinary build.
+    pub host: Host,
+    /// `module key -> content hash` for every module the loader parsed into
+    /// this program. The kernel's judgment memo keys a body on it
+    /// ([`crate::movecheck::Judgments`]). Empty for a program no load linked.
+    /// Ordered, because a generator program's `Debug` text keys its compiled
+    /// module (`vyrn_genwasm`).
+    pub module_hashes: std::collections::BTreeMap<String, String>,
+}
+
+/// What a program is compiled as, beyond an ordinary build. A flag only
+/// enables names; nothing reads it to refuse.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Host {
+    /// A generator host: the program the engine compiles to run a `gen fn`
+    /// as wasm. Its functions have `is_gen` cleared, so this flag marks the
+    /// whole program as generation code. `vyrn_genwasm::prepare` sets it.
+    pub gen: bool,
+    /// A test host: the program `vyrn test` and `vyrn bench` compile, whose
+    /// functions are lifted `test` and `bench` bodies. It enables test-only
+    /// names such as `assert`.
+    pub test: bool,
 }
 
 /// A `test "name" { body }` or `bench "name" { body }` declaration.

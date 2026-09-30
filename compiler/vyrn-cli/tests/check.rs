@@ -90,3 +90,58 @@ fn every_program_prints_its_stderr() {
         failures.join("\n")
     );
 }
+
+/// Prints what `vyrn check` prints for a program the load refuses, checked in this process.
+fn check_here(root: &str) -> String {
+    let src = std::fs::read_to_string(root).expect("read the program");
+    let std_root = check_dir().join("../../../../std");
+    let opts = vyrn_frontend::loader::LoadOptions {
+        std_root: Some(std_root.to_string_lossy().replace('\\', "/")),
+        ..Default::default()
+    };
+    let engine = vyrn_genwasm::engine();
+    let mut out = String::new();
+    let loaded = vyrn_frontend::project::Memo::load(|| {
+        let resolver = vyrn_frontend::loader::DiskResolver;
+        vyrn_lower::load_warned(&src, root, &opts, &resolver, Some(&*engine)).0
+    });
+    for d in loaded.err().expect("the program is refused") {
+        let file = d.file.as_deref().unwrap_or(root);
+        out += &format!("{file}:{}:{}: {}\n", d.line, d.col, d.message);
+        if let Some(note) = &d.note {
+            out += &format!("  note: {note}\n");
+        }
+    }
+    out
+}
+
+/// Checking one program leaves nothing behind for the next: two programs checked in one
+/// process, then the first again, print what a fresh `vyrn check` prints for each.
+#[test]
+fn a_check_in_one_process_prints_what_a_fresh_process_prints() {
+    vyrn_frontend::movecheck::emit_nothing();
+    let path = |name: &str| {
+        let p = check_dir()
+            .join(name)
+            .canonicalize()
+            .expect("the program exists");
+        p.to_string_lossy()
+            .trim_start_matches(r"\\?\")
+            .replace('\\', "/")
+    };
+    let first = path("where_rule_through_atset.vyrn");
+    let second = path("a_derive_entry_must_match_its_call.vyrn");
+    let fresh = |root: &str| {
+        let out = vyrn()
+            .arg("check")
+            .arg(root)
+            .output()
+            .expect("run vyrn check");
+        assert!(!out.status.success(), "{root} is refused");
+        norm(&out.stderr)
+    };
+    let runs = [check_here(&first), check_here(&second), check_here(&first)];
+    assert_eq!(runs[0], fresh(&first));
+    assert_eq!(runs[1], fresh(&second));
+    assert_eq!(runs[2], runs[0]);
+}

@@ -1118,11 +1118,10 @@ fn why_memory(file: &str) -> ExitCode {
 
     // Only the file asked about. A linked program carries every import's
     // functions, and they are another file's answer.
-    for f in program
-        .functions
-        .iter()
-        .filter(|f| f.module.is_none() && !f.is_extern)
-    {
+    for (i, f) in program.functions.iter().enumerate() {
+        if f.module.is_some() || f.is_extern {
+            continue;
+        }
         let params: Vec<String> = f
             .params
             .iter()
@@ -1139,7 +1138,7 @@ fn why_memory(file: &str) -> ExitCode {
             ),
             None => println!("    transfers: no — the return type {} owns no heap", f.ret),
         }
-        let notes = match own.memory.get(&f.name) {
+        let notes = match own.memory.get(&vyrn_frontend::ast::FnId::nth(i)) {
             Some(n) if !n.is_empty() => n,
             _ => {
                 println!("    (no bindings)");
@@ -3439,6 +3438,10 @@ import {{ benchOne }} from \"std/bench\"
     program.benches.clear();
     program.tests.clear();
     program.number();
+    // As a test host: the lifted bodies are checked again for the lowering's
+    // record, and outside a host `blackBox` is refused, so the core cannot
+    // lower the bodies and their locals leak.
+    program.host.test = true;
 
     // The route and target `vyrn build` ships, so the timing describes the
     // artifact.
@@ -3471,12 +3474,7 @@ import {{ benchOne }} from \"std/bench\"
         stem.to_string()
     };
     let out_path = dir.join(&exe_name);
-    // As a test host: the lifted bodies are checked again for the lowering's
-    // record, and outside a host `blackBox` is refused, so the core cannot
-    // lower the bodies and their locals leak.
-    vyrn_frontend::checker::set_test_host(true);
     let built = build_wasm2c(path, &program, &dsg, &out_path.to_string_lossy(), target);
-    vyrn_frontend::checker::set_test_host(false);
     if built.is_err() {
         let _ = std::fs::remove_dir_all(&dir);
         return (ExitCode::FAILURE, None);
@@ -5353,7 +5351,7 @@ fn bodies_wasm(
     // A body that reaches a `gen fn` compiles the module as a generator host;
     // otherwise it pays for no `vyrn_gen` import. As a test host, the checker
     // accepts `assert`, `assertEq` and `blackBox` in the lifted bodies.
-    vyrn_frontend::checker::set_test_host(true);
+    prog.host.test = true;
     let reach = vyrn_codegen::direct::gen_reach(&prog);
     let generation = (0..bodies.len()).any(|k| reach.contains(&format!("__vyrn_body_{k}")));
     let compiled = if generation {
@@ -5370,7 +5368,6 @@ fn bodies_wasm(
     } else {
         vyrn_codegen::direct::compile(&prog, memo)
     };
-    vyrn_frontend::checker::set_test_host(false);
     let bytes = match compiled {
         Ok(b) => b,
         Err(e) => {

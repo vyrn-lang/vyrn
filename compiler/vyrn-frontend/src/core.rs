@@ -2,7 +2,7 @@
 //! between the checker and an emitter reads. The passes that build, judge
 //! and emit them live in `vyrn-lower` and `vyrn-codegen`.
 
-use crate::ast::{BinOp, Capability, NodeId, Type, UnOp};
+use crate::ast::{BinOp, Capability, FnId, NodeId, Type, UnOp};
 use crate::own::{DropKind, EdgeRow, Exit, Linear};
 
 pub mod check;
@@ -392,8 +392,14 @@ pub enum Target {
 /// [`Callee::ctor`]; an emitter asks which case it is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Callee {
-    /// A function this program declares.
-    Fn,
+    /// A function this program declares, an `impl` function or an `extern`
+    /// included, resolved once where the core names it.
+    Fn(FnId),
+    /// A call by the emitted name alone, which only an emitter makes: through
+    /// a `fn`-typed parameter a specialization bound to a declared function
+    /// or a lambda frame (`vyrn_lower::core::specialize`), or to the function
+    /// a routed builtin's row names.
+    Bound,
     /// A method of an `impl` block, dispatched on its receiver's concrete
     /// type.
     Method,
@@ -432,7 +438,13 @@ impl Callee {
     /// whose capabilities `vyrn_lower::core::Builder::call` synthesizes stores its argument
     /// instead, and storing a heapless value copies it.
     pub fn declared(self) -> bool {
-        matches!(self, Callee::Fn | Callee::Method | Callee::Projection)
+        self.direct() || matches!(self, Callee::Method | Callee::Projection)
+    }
+
+    /// Whether an emitter calls the callee's name directly: a declared
+    /// function, or the target a specialization bound.
+    pub fn direct(self) -> bool {
+        matches!(self, Callee::Fn(_) | Callee::Bound)
     }
 
     /// Whether the callee is a constructor: it puts its argument into the
@@ -1070,7 +1082,10 @@ impl Body {
                 callee, args, kind, ..
             } => format!(
                 "{} {callee}({})",
-                format!("{kind:?}").to_lowercase(),
+                match kind {
+                    Callee::Fn(_) | Callee::Bound => "fn".to_string(),
+                    k => format!("{k:?}").to_lowercase(),
+                },
                 args.iter()
                     .map(|(a, c)| {
                         let a = match a {

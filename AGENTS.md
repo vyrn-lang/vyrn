@@ -130,7 +130,7 @@ cargo nextest run --release --workspace --no-fail-fast --status-level fail
 cargo test --release --manifest-path vyrn-play/Cargo.toml
 VYRN_WASM_MANIFEST=check cargo nextest run --release -p vyrn-cli --no-fail-fast \
   --status-level fail --success-output final --run-ignored only \
-  -E 'binary(kernel) | binary(effects) | binary(typed) | binary(coretables) | binary(coredrive) | binary(wasmhash)'
+  -E 'binary(kernel) | binary(effects) | binary(typed) | binary(coretables) | binary(coredrive) | binary(wasmhash) | binary(parallel)'
 sh ../scripts/check-corpus.sh <main's tree> <out-base>
 sh ../scripts/check-corpus.sh .. <out-head>
 diff -r <out-base> <out-head>

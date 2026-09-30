@@ -84,7 +84,8 @@ A prefix `consume` at an argument takes a field out of a value the caller
 holds: `take(consume p.name)` moves `p.name` and leaves `p` with a hole at
 `.name`. The rest of `p` stays usable. A use of `p` as a whole, or a `drop p`,
 is refused while the hole is open; a store into `p.name` fills it. An element
-is not a place a take reaches: `consume xs[0]` is refused.
+is not a place a take reaches: `consume xs[0]` is refused. A part read as a
+statement, `p.name` or `xs[0].s`, takes nothing and leaves no hole.
 
 ## A result is owned, unless the signature lends it
 
@@ -299,7 +300,9 @@ Each rule has one home. The names below are the entry points.
 
 `core::augment` runs inside `vyrn_lower::analyze`. It builds the core of every
 instance, `test` and `bench` body, then asks `kernel::placement` of each
-frame. The kernel walks the body in placement mode. Where an owned name is
+frame. Both steps read other functions only through summaries, so each runs
+over the bodies on every thread (`core::in_parallel`), and the rows land in
+body order. The kernel walks the body in placement mode. Where an owned name is
 still held at an exit and no release stands there, it records a `Missing` row
 (`MissingKind` says whether at an exit, on a join edge, at an arm's end or at
 a store), treats the name as released and goes on. `augment` turns each row

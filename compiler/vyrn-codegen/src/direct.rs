@@ -345,7 +345,7 @@ fn compile_inner(
     }
 
     // The leak instrument; a generator host never carries it.
-    let audited = vyrn_frontend::loader::audit_build();
+    let audited = vyrn_frontend::loader::audit_build(program.host.gen);
     let mut cx = Cx {
         types,
         lambdas: vyrn_frontend::ast::lambdas(program),
@@ -1884,8 +1884,8 @@ fn lower_body(
         scratch: HashMap::new(),
         rel_slots: HashMap::new(),
         // The release order, decided in `own::place_body`.
-        placed: (cx.world.ownership.releases)
-            .get(&owner)
+        placed: (cx.world.fn_id(&owner))
+            .and_then(|id| cx.world.ownership.releases.get(&id))
             .map(|steps| vyrn_frontend::own::placed(steps))
             .unwrap_or_default(),
         region_depth: 0,
@@ -3878,7 +3878,7 @@ impl<'p> Fn_<'_, 'p> {
                 }
                 // A dispatched method or a builtin routed to a Vyrn function: the callee's
                 // signature answers.
-                _ => match vyrn_frontend::loader::routed_builtin(name)
+                _ => match vyrn_frontend::loader::routed_builtin(name, crate::gen_host())
                     .and_then(|rt| self.cx.sigs.get(rt))
                     .or_else(|| self.cx.sigs.get(name))
                 {
@@ -9223,7 +9223,8 @@ fn builtin_spec(
     name: &str,
     argc: usize,
 ) -> Option<(&'static [Type], Instruction<'static>, &'static Type)> {
-    let Some(Spec::Typed(params, ret)) = vyrn_lower::core::builtin_row(name) else {
+    let Some(Spec::Typed(params, ret)) = vyrn_lower::core::builtin_row(name, crate::gen_host())
+    else {
         return None;
     };
     if params.len() != argc {
@@ -9316,7 +9317,7 @@ fn logs_arity(name: &str) -> usize {
 /// function this program declares or a callee with no row.
 fn core_builtin(callee: &str, kind: Callee) -> Option<&'static Spec> {
     matches!(kind, Callee::Builtin | Callee::Reserved)
-        .then(|| vyrn_lower::core::builtin_row(callee))
+        .then(|| vyrn_lower::core::builtin_row(callee, crate::gen_host()))
         .flatten()
 }
 
@@ -9611,7 +9612,7 @@ impl<'p> Fn_<'_, 'p> {
             };
             if let Rhs::Call {
                 targets,
-                kind: Callee::Fn,
+                kind: Callee::Fn(_) | Callee::Bound,
                 ..
             } = rhs
             {
@@ -10377,6 +10378,15 @@ impl<'p> Fn_<'_, 'p> {
                     self.emit_validation(b, &decl, *line)?;
                     b.ins(&Instruction::Drop);
                 }
+                // A discarded layout read: its address, for the checks on the way.
+                St::Do {
+                    rhs: rhs @ Rhs::Read(p),
+                    line,
+                    ..
+                } if !self.core_rhs_readable(body, rhs) => {
+                    self.core_addr(m, b, body, w, core_discarded(p), *line)?;
+                    b.ins(&Instruction::Drop);
+                }
                 St::Do { rhs, line, .. } => {
                     let got = self.core_rhs_ty(body, rhs, *line)?;
                     self.core_rhs(m, b, body, w, rhs, &got, *line)?;
@@ -10554,7 +10564,7 @@ impl<'p> Fn_<'_, 'p> {
                     Some(t) => Ok(t),
                     None => match self.core_sig(body, callee, *kind, solved, targets) {
                         Some(s) => Ok(s.ret_ty),
-                        None if *kind == Callee::Fn && self.is_extern(callee) => Ok(self
+                        None if kind.direct() && self.is_extern(callee) => Ok(self
                             .cx
                             .externs
                             .get(callee)
@@ -10563,6 +10573,9 @@ impl<'p> Fn_<'_, 'p> {
                     },
                 },
             },
+            Rhs::Read(p) => self
+                .core_place_ty(body, p)
+                .ok_or_else(|| gap("a discarded read the walk does not type", line)),
             _ => unsupported("a discarded value the row does not type", line),
         }
     }
@@ -10949,7 +10962,7 @@ impl<'p> Fn_<'_, 'p> {
             }
             return Ok(Type::Named(decl.name));
         }
-        if kind == Callee::Fn && self.is_extern(callee) {
+        if kind.direct() && self.is_extern(callee) {
             let mut operand = |s: &mut Self, m: &mut Module, b: &mut Frame, i: usize, p: &Type| {
                 s.core_val(m, b, body, w, &args[i].0, p, line)
             };
@@ -12286,10 +12299,10 @@ impl<'p> Fn_<'_, 'p> {
         }
         // A routed builtin is a call to the function its row names.
         let (callee, kind) = match core_builtin(callee, kind) {
-            Some(Spec::Routes(f)) => (*f, Callee::Fn),
+            Some(Spec::Routes(f)) => (*f, Callee::Bound),
             _ => (callee, kind),
         };
-        if kind != Callee::Fn {
+        if !kind.direct() {
             return None;
         }
         // A `modify` parameter crosses as the address of the caller's binding
@@ -12308,7 +12321,7 @@ impl<'p> Fn_<'_, 'p> {
         kind: Callee,
         solved: &[(String, Type)],
     ) -> Option<(&'p Function, Vec<Type>, HashMap<String, Type>)> {
-        let f = (self.cx.generics.get(callee).copied()).filter(|_| kind == Callee::Fn)?;
+        let f = (self.cx.generics.get(callee).copied()).filter(|_| kind.direct())?;
         let (targs, subst) = solved_instance(f, solved)?;
         Some((f, targs, subst))
     }
@@ -12329,7 +12342,7 @@ impl<'p> Fn_<'_, 'p> {
         HashMap<String, Type>,
         Vec<FnTarget>,
     )> {
-        let f = (self.cx.higher_order.get(callee).copied()).filter(|_| kind == Callee::Fn)?;
+        let f = (self.cx.higher_order.get(callee).copied()).filter(|_| kind.direct())?;
         let (targs, subst) = solved_instance(f, solved)?;
         let fns: Vec<&Type> = (f.params.iter())
             .map(|p| &p.ty)
@@ -12954,9 +12967,13 @@ impl<'p> Fn_<'_, 'p> {
                 }
                 Some(v) => self.core_val_readable(body, v),
             },
-            // A discarded value drops at the type the row produces, which only a call row
-            // states; any other `St::Do` would fail in [`Fn_::core_rhs_ty`]. A discarded
-            // layout is a slot of the row's own, given back at the row's end.
+            // A discarded read drops its place's value, or a layout's address.
+            St::Do {
+                rhs: Rhs::Read(p), ..
+            } => self.core_place_ty(body, core_discarded(p)).is_some(),
+            // Any other discarded value drops at the type its call row states
+            // ([`Fn_::core_rhs_ty`]). A discarded layout is a slot of the row's own, given
+            // back at the row's end.
             St::Do { rhs, line, .. } => {
                 self.core_checks_made(body, rhs).is_some()
                     || (self.core_rhs_readable(body, rhs) || self.core_agg_call(body, rhs))
@@ -13097,7 +13114,7 @@ impl<'p> Fn_<'_, 'p> {
     fn core_user_callee(&self, callee: &str, kind: Callee) -> bool {
         matches!(core_builtin(callee, kind), None | Some(Spec::Routes(_)))
             && self.core_named(callee, kind).is_none()
-            && !(kind == Callee::Fn && self.is_extern(callee))
+            && !(kind.direct() && self.is_extern(callee))
             && !callee.starts_with(vyrn_frontend::loader::MEM_PREFIX)
     }
 
@@ -13387,8 +13404,8 @@ impl<'p> Fn_<'_, 'p> {
                     || self.core_args_readable(body, args)
                         && (arg_vals(args).is_some() || self.core_user_callee(callee, *kind))
                         && (self.core_builtin_readable(body, callee, *kind, args)
-                            || (*kind == Callee::Fn && self.is_extern(callee))
-                            || (*kind == Callee::Fn && self.cx.skipped.contains(callee))
+                            || (kind.direct() && self.is_extern(callee))
+                            || (kind.direct() && self.cx.skipped.contains(callee))
                             || self.core_named(callee, *kind).is_some()
                             || self.core_mem_ty(callee, args.len()).is_some()
                             || self
@@ -13563,6 +13580,15 @@ fn core_lets<'r>(s: &'r St, out: &mut Vec<(Name, &'r Rhs)>) {
 fn each_list(ss: &[St], f: &mut dyn FnMut(&[St])) {
     f(ss);
     ss.iter().flat_map(St::lists).for_each(|l| each_list(l, f));
+}
+
+/// The place a discarded read of `p` emits: a key read emits its map's, because a
+/// lookup cannot trap and nothing reads its `Option`.
+fn core_discarded(p: &vyrn_frontend::core::Place) -> &vyrn_frontend::core::Place {
+    match p {
+        vyrn_frontend::core::Place::Key(map, _) => map,
+        p => p,
+    }
 }
 
 /// The parts of the header `base` names, when it is a borrow a loop walks.

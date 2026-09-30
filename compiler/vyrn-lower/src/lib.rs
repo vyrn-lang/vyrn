@@ -22,11 +22,11 @@ mod world;
 pub use pipeline::{check_and_synthesize, gen_engine, load, load_warned, refusals, JUDGE};
 
 pub use core::refuses as kernel_refuses;
-pub use world::{analyze, forget_loaded, hand_on, World};
+pub use world::{analyze, forget_loaded, hand_on, FnRow, World};
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 
-use vyrn_frontend::ast::{Expr, Function, LambdaBody, NodeId, Program, Stmt, Type};
+use vyrn_frontend::ast::{Expr, FnId, Function, LambdaBody, NodeId, Program, Stmt, Type};
 use vyrn_frontend::checker;
 use vyrn_frontend::own::DropKind;
 use vyrn_frontend::types::{
@@ -97,6 +97,9 @@ pub use vyrn_frontend::own::Release;
 #[derive(Debug, Clone)]
 pub struct Instance<'a> {
     pub func: &'a Function,
+    /// `func`'s id, which the plan's rows are keyed by: every instance of a
+    /// generic shares it.
+    pub func_id: FnId,
     /// The type arguments, in the function's own type-parameter order.
     pub type_args: Vec<Type>,
     pub subst: BTreeMap<String, Type>,
@@ -204,19 +207,25 @@ pub struct Lowered<'a> {
     pub places: Vec<PlaceBody<'a>>,
     /// The checker's record every [`NodeTypes`] here was read off.
     pub recorded: std::sync::Arc<checker::Recorded>,
+    /// The name of each [`FnId`] this form numbers, in id order: every
+    /// program function, then every [`PlaceBody`], then every
+    /// [`OutsideBody`]. The World's function table starts with these rows.
+    pub source: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
 pub struct PlaceBody<'a> {
     pub func: &'a Function,
+    pub id: FnId,
     pub facts: NodeTypes<'a>,
 }
 
 /// One body that is no function of the program: a `test` or a `bench`.
 #[derive(Debug, Clone)]
 pub struct OutsideBody<'a> {
-    /// `test@<i>` or `bench@<i>`: the name the checker and `own` key it by.
+    /// `test@<i>` or `bench@<i>`: the name the checker keys it by.
     pub name: String,
+    pub id: FnId,
     pub block: &'a vyrn_frontend::ast::Block,
     pub module: Option<String>,
     pub line: usize,
@@ -645,29 +654,24 @@ fn build<'a>(
     ownership: &vyrn_frontend::own::Ownership,
 ) -> Lowered<'a> {
     let no_steps: Vec<Release> = Vec::new();
-    let by_name: HashMap<&str, &Function> = program
-        .functions
-        .iter()
-        .map(|f| (f.name.as_str(), f))
-        .collect();
+    let by_name = by_name(program);
     let decls = ownership.proto.types();
 
     // The roots are every non-generic function with a body. A `std/mem`
     // primitive, like an `extern`, has none: it lowers to one instruction at
     // each call.
-    let mut queue: VecDeque<(&Function, Vec<Type>)> = program
-        .functions
-        .iter()
-        .filter(|f| {
+    let mut queue: VecDeque<(FnId, &Function, Vec<Type>)> = (program.functions.iter())
+        .enumerate()
+        .filter(|(_, f)| {
             f.type_params.is_empty()
                 && !f.is_extern
                 && !f.name.starts_with(vyrn_frontend::loader::MEM_PREFIX)
         })
-        .map(|f| (f, Vec::new()))
+        .map(|(i, f)| (FnId::nth(i), f, Vec::new()))
         .collect();
     let mut seen: Vec<(String, String)> = queue
         .iter()
-        .map(|(f, _)| (f.name.clone(), String::new()))
+        .map(|(_, f, _)| (f.name.clone(), String::new()))
         .collect();
 
     let mut instances: Vec<Instance<'a>> = Vec::new();
@@ -693,12 +697,29 @@ fn build<'a>(
         }
     }
     let predicates = pw.facts;
+    let mut source: Vec<String> = program.functions.iter().map(|f| f.name.clone()).collect();
+    let mut mint = |name: &str| {
+        source.push(name.to_string());
+        FnId::nth(source.len() - 1)
+    };
+    let mut places: Vec<PlaceBody<'a>> = Vec::new();
+    for (_, f) in vyrn_frontend::project::all(program) {
+        let mut w = Walk::new(recorded, &program.impls, HashMap::new());
+        facts_block(&f.body, &mut Default::default(), &mut w);
+        places.push(PlaceBody {
+            func: f,
+            id: mint(&f.name),
+            facts: w.facts,
+        });
+    }
     let mut outside: Vec<OutsideBody<'a>> = Vec::new();
     for (i, t) in program.tests.iter().enumerate() {
         let mut w = Walk::new(recorded, &program.impls, HashMap::new());
         facts_block(&t.body, &mut Default::default(), &mut w);
+        let name = format!("test@{i}");
         outside.push(OutsideBody {
-            name: format!("test@{i}"),
+            id: mint(&name),
+            name,
             block: &t.body,
             module: t.module.clone(),
             line: t.line,
@@ -708,20 +729,13 @@ fn build<'a>(
     for (i, b) in program.benches.iter().enumerate() {
         let mut w = Walk::new(recorded, &program.impls, HashMap::new());
         facts_block(&b.body, &mut Default::default(), &mut w);
+        let name = format!("bench@{i}");
         outside.push(OutsideBody {
-            name: format!("bench@{i}"),
+            id: mint(&name),
+            name,
             block: &b.body,
             module: b.module.clone(),
             line: b.line,
-            facts: w.facts,
-        });
-    }
-    let mut places: Vec<PlaceBody<'a>> = Vec::new();
-    for (_, f) in vyrn_frontend::project::all(program) {
-        let mut w = Walk::new(recorded, &program.impls, HashMap::new());
-        facts_block(&f.body, &mut Default::default(), &mut w);
-        places.push(PlaceBody {
-            func: f,
             facts: w.facts,
         });
     }
@@ -739,7 +753,7 @@ fn build<'a>(
     // an instantiation. It is solved from the declared type, which the
     // teardown drops by; an unannotated global of such a type fails the gate
     // as a missing instantiation. Only an audited build emits the teardown.
-    if vyrn_frontend::loader::audit_build() {
+    if vyrn_frontend::loader::audit_build(program.host.gen) {
         let mut teardown_calls: Vec<(String, HashMap<String, Type>)> = Vec::new();
         for g in &program.globals {
             let Some(gty) = &g.ty else { continue };
@@ -748,7 +762,7 @@ fn build<'a>(
             else {
                 continue;
             };
-            let Some(target) = by_name.get(f.as_str()) else {
+            let Some((_, target)) = by_name.get(f.as_str()) else {
                 continue;
             };
             if target.type_params.is_empty() {
@@ -771,7 +785,7 @@ fn build<'a>(
         );
     }
 
-    while let Some((func, type_args)) = queue.pop_front() {
+    while let Some((func_id, func, type_args)) = queue.pop_front() {
         let subst: BTreeMap<String, Type> = func
             .type_params
             .iter()
@@ -786,7 +800,7 @@ fn build<'a>(
         // instance, so a step's type is substituted here.
         let releases: Vec<Release> = ownership
             .releases
-            .get(&func.name)
+            .get(&func_id)
             .unwrap_or(&no_steps)
             .iter()
             .map(|r| match &r.kind {
@@ -821,6 +835,7 @@ fn build<'a>(
         lambda_bodies.extend(w.lambda_bodies);
         instances.push(Instance {
             func,
+            func_id,
             type_args,
             subst,
             facts: w.facts,
@@ -837,7 +852,15 @@ fn build<'a>(
         bodies: outside,
         places,
         recorded: recorded.clone(),
+        source,
     }
+}
+
+/// Every program function by name, with its id.
+pub(crate) fn by_name(program: &Program) -> HashMap<&str, (FnId, &Function)> {
+    (program.functions.iter().enumerate())
+        .map(|(i, f)| (f.name.as_str(), (FnId::nth(i), f)))
+        .collect()
 }
 
 /// Every generic function as one instance whose type parameters stand for
@@ -848,20 +871,20 @@ pub fn as_written<'a>(
     ownership: &vyrn_frontend::own::Ownership,
 ) -> Vec<Instance<'a>> {
     let recorded = checker::recorded(program);
-    program
-        .functions
-        .iter()
-        .filter(|f| {
+    (program.functions.iter().enumerate())
+        .filter(|(_, f)| {
             !f.type_params.is_empty()
                 && !f.is_extern
                 && !f.name.starts_with(vyrn_frontend::loader::MEM_PREFIX)
         })
-        .map(|func| {
+        .map(|(i, func)| {
+            let func_id = FnId::nth(i);
             let type_args: Vec<Type> = func.type_params.iter().cloned().map(Type::Param).collect();
             let mut w = Walk::new(&recorded, &program.impls, HashMap::new());
             facts_block(&func.body, &mut Default::default(), &mut w);
             Instance {
                 func,
+                func_id,
                 subst: func
                     .type_params
                     .iter()
@@ -872,7 +895,7 @@ pub fn as_written<'a>(
                 facts: w.facts,
                 releases: ownership
                     .releases
-                    .get(&func.name)
+                    .get(&func_id)
                     .cloned()
                     .unwrap_or_default(),
             }
@@ -891,14 +914,14 @@ pub fn as_written<'a>(
 /// corpus has none; one fails `tests/lowered.rs` as a missing instantiation.
 pub(crate) fn dispatched<'f>(
     releases: &[Release],
-    by_name: &HashMap<&str, &'f Function>,
+    by_name: &HashMap<&str, (FnId, &'f Function)>,
 ) -> Vec<(&'f str, HashMap<String, Type>)> {
     let mut out = Vec::new();
     for r in releases {
         let DropKind::Release(f, recv) = &r.kind else {
             continue;
         };
-        let Some(target) = by_name.get(f.as_str()) else {
+        let Some((_, target)) = by_name.get(f.as_str()) else {
             continue;
         };
         if target.type_params.is_empty() {
@@ -946,10 +969,10 @@ fn fallible_twins(
 fn follow<'a>(
     caller: &str,
     calls: Vec<(String, HashMap<String, Type>)>,
-    by_name: &HashMap<&str, &'a Function>,
+    by_name: &HashMap<&str, (FnId, &'a Function)>,
     decls: &HashMap<String, vyrn_frontend::ast::TypeDecl>,
     seen: &mut Vec<(String, String)>,
-    queue: &mut VecDeque<(&'a Function, Vec<Type>)>,
+    queue: &mut VecDeque<(FnId, &'a Function, Vec<Type>)>,
     unresolved: &mut Vec<Unresolved>,
 ) {
     for (callee, solved) in fallible_twins(calls) {
@@ -968,7 +991,7 @@ fn follow<'a>(
         if callee.starts_with(vyrn_frontend::loader::MEM_PREFIX) {
             continue;
         }
-        let Some(target) = by_name.get(callee) else {
+        let Some(&(id, target)) = by_name.get(callee) else {
             // A generic seeded builtin (`@join`, `close`, `fromArray`) records
             // a solution like a user call, but its row is a signature with no
             // body to instantiate.
@@ -1007,7 +1030,7 @@ fn follow<'a>(
             continue;
         }
         seen.push(key);
-        queue.push_back((target, next));
+        queue.push_back((id, target, next));
     }
 }
 

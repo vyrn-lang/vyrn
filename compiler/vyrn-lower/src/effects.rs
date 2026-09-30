@@ -12,6 +12,7 @@ use std::collections::{HashMap, HashSet};
 
 use vyrn_frontend::ast::{Type, TypeDecl};
 use vyrn_frontend::floor;
+use vyrn_frontend::own::StateCallees;
 
 use vyrn_frontend::core::{rows, Arg, Body, Name, Place, Rhs, St};
 
@@ -107,47 +108,27 @@ impl Judged {
         }
         out
     }
-}
 
-thread_local! {
-    /// [`Judged::state_callees`] by body name, for the program `augment` is
-    /// placing; empty outside it.
-    static STATE_CALLEES: std::cell::RefCell<HashMap<String, Vec<(String, Vec<String>)>>> =
-        std::cell::RefCell::new(HashMap::new());
+    /// [`Judged::state_callees`] of every frame of `refs`, by frame name. A
+    /// frame whose callees store into nothing is left out.
+    pub(crate) fn state_table(&self, refs: &[&Body]) -> StateCallees {
+        refs.iter()
+            .enumerate()
+            .map(|(i, b)| (b.name.clone(), self.state_callees(i)))
+            .filter(|(_, cs)| !cs.is_empty())
+            .collect()
+    }
 }
 
 /// The globals a call to `callee` in the body named `body` may store into,
-/// by the judgment of the program being placed. The kernel ends every borrow
-/// of one of them at the call.
-pub fn writes_state(body: &str, callee: &str) -> Vec<String> {
-    STATE_CALLEES.with(|m| {
-        m.borrow()
-            .get(body)
-            .and_then(|cs| cs.iter().find(|(c, _)| c == callee))
-            .map(|(_, gs)| gs.clone())
-            .unwrap_or_default()
-    })
-}
-
-/// Whether the body named `body` calls a function that stores into module
-/// state, by the judgment of the program being placed.
-pub fn stores_state(body: &str) -> bool {
-    STATE_CALLEES.with(|m| m.borrow().contains_key(body))
-}
-
-/// Record the judgment's module-state callees for every frame of `refs`.
-/// `None` clears them.
-pub(crate) fn set_state_callees(judged: Option<(&Judged, &[&Body])>) {
-    let map = judged
-        .map(|(j, refs)| {
-            refs.iter()
-                .enumerate()
-                .map(|(i, b)| (b.name.clone(), j.state_callees(i)))
-                .filter(|(_, cs)| !cs.is_empty())
-                .collect()
-        })
-        .unwrap_or_default();
-    STATE_CALLEES.with(|m| *m.borrow_mut() = map);
+/// by `state`, the effect judgment of the program being placed. The kernel
+/// ends every borrow of one of them at the call.
+pub fn writes_state(state: &StateCallees, body: &str, callee: &str) -> Vec<String> {
+    state
+        .get(body)
+        .and_then(|cs| cs.iter().find(|(c, _)| c == callee))
+        .map(|(_, gs)| gs.clone())
+        .unwrap_or_default()
 }
 
 /// Returns the effect set of every body in `bodies`, to a fixpoint. `resolve`
@@ -504,6 +485,7 @@ pub(crate) fn judge_built<R>(
     for pr in &lowered.places {
         let inst = crate::Instance {
             func: pr.func,
+            func_id: pr.id,
             type_args: Vec::new(),
             subst: Default::default(),
             facts: pr.facts.clone(),

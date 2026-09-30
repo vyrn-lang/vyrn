@@ -221,12 +221,13 @@ fn forms(lines: &[String], a: usize, b: usize) -> usize {
 /// core's statements. A query added to the emitter must be added here before a
 /// section can be classified as reading it.
 fn rows(lines: &[String], a: usize, b: usize) -> usize {
-    const Q: [&str; 18] = [
+    const Q: [&str; 19] = [
         "body_of",
         "St::",
         "Rhs::",
         "Lit::",
         "Callee::",
+        ".direct()",
         "peek",
         "receiver_row",
         "store_row",

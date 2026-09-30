@@ -11,13 +11,13 @@
 //! that is a leak. A construct this pass does not lower returns a [`Gap`], and
 //! the instance counts as unlowered.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use vyrn_frontend::ast::{
-    ArmBody, BinOp, Binder, Block, Capability, Expr, Function, Id, LambdaBody, MatchArm, NodeId,
-    Pattern, Program, Stmt, Type, TypeDecl, UnOp,
+    ArmBody, BinOp, Binder, Block, Capability, Expr, FnId, Function, Id, LambdaBody, MatchArm,
+    NodeId, Pattern, Program, Stmt, Type, TypeDecl, UnOp,
 };
-use vyrn_frontend::declared::Owned;
+use vyrn_frontend::declared::{CapsOf, NameMemo, Owned};
 use vyrn_frontend::diagnostics::{menu, Diagnostic};
 use vyrn_frontend::movecheck::Refusal;
 use vyrn_frontend::own::{Bucket, DropKind, Exit, Linear, MemoryRow, Ownership, Release};
@@ -29,8 +29,8 @@ use crate::kernel::{MissingKind, Root};
 use crate::rules::{
     say, CONSUMED_BORROW, CONSUME_TAKES_NOTHING, ELEMENT_TAKEN, LOOP_TAKES_NOTHING, SWAP_REMOVE,
 };
-use crate::world::Stated;
-use crate::{Instance, NodeTypes, World};
+use crate::world::{Fns, Stated};
+use crate::{Instance, NodeTypes, OutsideBody, World};
 use vyrn_frontend::core::{
     count_reads, names_in, rows, Arg, Arm, Body, BorrowKind, Callee, Cand, Ctor, Facts, Lit, Name,
     NameInfo, NotOwned, Old, Op, Opaque, Payload, Place, Rhs, Site, St, Target, Test, Use, Val,
@@ -39,10 +39,20 @@ use vyrn_frontend::core::{
 
 /// The path a reader wrote for a place read, as the checker quotes it
 /// (`p.name`, `xs[i]`). `None` where the expression names no place.
-fn reader_path(e: &Expr) -> Option<String> {
+fn reader_path(e: &Expr, places: &HashSet<String>) -> Option<String> {
     vyrn_frontend::ast::place_path(e)
-        .or_else(|| vyrn_frontend::project::element_path(e))
+        .or_else(|| vyrn_frontend::project::element_path(e, places))
         .map(|(_, p)| p)
+}
+
+/// The path a field read takes out of its unnamed receiver: `.q.s` for
+/// `mk().q.s`. `None` under an element.
+fn taken_path(e: &Expr) -> Option<String> {
+    match e {
+        Expr::Field { expr, field, .. } => Some(format!("{}.{field}", taken_path(expr)?)),
+        Expr::Call { name, .. } if name == vyrn_frontend::project::AT => None,
+        _ => Some(String::new()),
+    }
 }
 
 /// The borrow a parameter's capability makes; `None` for `consume`.
@@ -118,11 +128,16 @@ fn reads_a_part(e: &Expr) -> bool {
 /// wording for `for x in consume xs` over a prefix `consume`
 /// (`movecheck::TakeForm`). Both rules are syntactic, so they hold for
 /// heapless types too.
-fn take_names_a_place(e: &Expr, line: usize, by_loop: bool) -> Result<(), Gap> {
+fn take_names_a_place(
+    e: &Expr,
+    places: &HashSet<String>,
+    line: usize,
+    by_loop: bool,
+) -> Result<(), Gap> {
     if vyrn_frontend::ast::place_path(e).is_some() {
         return Ok(());
     }
-    if let Some((root, path)) = vyrn_frontend::project::element_path(e) {
+    if let Some((root, path)) = vyrn_frontend::project::element_path(e, places) {
         let rule = [ELEMENT_TAKEN, SWAP_REMOVE].join("|");
         return refuse(say(&rule, &[("path", &path), ("root", &root)]), line);
     }
@@ -344,9 +359,9 @@ pub fn builtin_rows() -> &'static [(&'static str, Spec)] {
 }
 
 /// The row [`builtin_rows`] holds for `name`. A routed name has a row per
-/// route; this build takes [`vyrn_frontend::loader::routed_builtin`]'s.
-pub fn builtin_row(name: &str) -> Option<&'static Spec> {
-    let routed = vyrn_frontend::loader::routed_builtin(name);
+/// route; a generator host's build takes [`vyrn_frontend::loader::routed_builtin`]'s.
+pub fn builtin_row(name: &str, gen_host: bool) -> Option<&'static Spec> {
+    let routed = vyrn_frontend::loader::routed_builtin(name, gen_host);
     builtin_rows()
         .iter()
         .find(|(n, s)| *n == name && routed.is_none_or(|f| matches!(s, Spec::Routes(g) if *g == f)))
@@ -440,11 +455,12 @@ fn gaps_rhs(body: &Body, r: &Rhs, out: &mut Vec<String>) {
             // The emitter reads a declared function, a constructor, a builtin
             // with a row, and a call through a stored value (one call to its
             // signature's dispatcher). A call through a `fn`-typed parameter
-            // waits on the specialization.
+            // waits on the specialization. A routed name has a row under
+            // either host, so the host is not read.
             if !matches!(
                 kind,
-                Callee::Fn | Callee::Ctor | Callee::Named | Callee::Proven
-            ) && builtin_row(callee).is_none()
+                Callee::Fn(_) | Callee::Bound | Callee::Ctor | Callee::Named | Callee::Proven
+            ) && builtin_row(callee, false).is_none()
                 && !kind.value().is_some_and(|n| !body.params.contains(&n))
             {
                 let tag = match kind {
@@ -539,24 +555,39 @@ fn tally_gaps(inst: &Instance<'_>, out: &Result<Body, Gap>) {
 /// Builds the core of one instance. The first build records candidates and
 /// takes nothing; where [`last_owner`] names any, a second build takes them.
 pub fn build(program: &Program, inst: &Instance<'_>, own: &Ownership) -> Result<Body, Gap> {
-    let out = build_twice(program, inst, own);
+    build_in(program, inst, own, &mut NameMemo::default())
+}
+
+/// [`build`] with the caller's memo of `own`'s name facts.
+pub(crate) fn build_in(
+    program: &Program,
+    inst: &Instance<'_>,
+    own: &Ownership,
+    names: &mut NameMemo,
+) -> Result<Body, Gap> {
+    let out = build_twice(program, inst, own, names);
     if gap_tally_at().is_some() {
         tally_gaps(inst, &out);
     }
     out
 }
 
-fn build_twice(program: &Program, inst: &Instance<'_>, own: &Ownership) -> Result<Body, Gap> {
+fn build_twice(
+    program: &Program,
+    inst: &Instance<'_>,
+    own: &Ownership,
+    names: &mut NameMemo,
+) -> Result<Body, Gap> {
     let none = std::collections::HashSet::new();
     let b1 = vyrn_frontend::prof::phase("placer: build: first");
-    let first = build_seeded(program, inst, own, &none)?;
+    let first = build_seeded(program, inst, own, names, &none)?;
     drop(b1);
     let seed = last_owner(&first);
     if seed.is_empty() {
         return Ok(first);
     }
     let _b2 = vyrn_frontend::prof::phase("placer: build: seeded");
-    build_seeded(program, inst, own, &seed)
+    build_seeded(program, inst, own, names, &seed)
 }
 
 /// The refusals the typed judgment states over the checker's answers at the
@@ -1061,6 +1092,7 @@ fn build_seeded(
     program: &Program,
     inst: &Instance<'_>,
     own: &Ownership,
+    names: &mut NameMemo,
     seed: &std::collections::HashSet<NodeId>,
 ) -> Result<Body, Gap> {
     let (types, produced, solved) = (
@@ -1075,13 +1107,14 @@ fn build_seeded(
     // `Deep` walks, and nothing below reads a kind.
     let no_steps: Vec<Release> = Vec::new();
     let mut placed: HashMap<(Exit, NodeId), Vec<&Release>> = HashMap::new();
-    for r in own.releases.get(&inst.func.name).unwrap_or(&no_steps) {
+    for r in own.releases.get(&inst.func_id).unwrap_or(&no_steps) {
         placed.entry((r.exit, r.site)).or_default().push(r);
     }
     let mut b = Builder {
         program,
         own,
         proto: &own.proto,
+        names,
         types,
         produced,
         solved,
@@ -1177,9 +1210,11 @@ pub fn build_module_state<'a>(
     facts: &NodeTypes<'a>,
 ) -> Result<Body, Gap> {
     let seed = std::collections::HashSet::new();
+    let mut names = NameMemo::default();
     let mut b = Builder::bare(
         program,
         own,
+        &mut names,
         facts,
         &seed,
         String::new(),
@@ -1212,44 +1247,47 @@ pub fn build_module_state<'a>(
     Ok(b.body)
 }
 
-/// The body of a `test` or a `bench`: a block with no
-/// parameters, keyed in the release plan by the synthetic `test@<i>` or
-/// `bench@<i>` name.
+/// The body of a `test` or a `bench`: a block with no parameters.
 pub fn build_outside<'a>(
     program: &'a Program,
     own: &'a Ownership,
-    name: &str,
-    file: Option<String>,
-    block: &Block,
-    facts: &NodeTypes<'a>,
+    names: &mut NameMemo,
+    ob: &OutsideBody<'a>,
 ) -> Result<Body, Gap> {
     let none = std::collections::HashSet::new();
-    let first = build_outside_seeded(program, own, name, file.clone(), block, facts, &none)?;
+    let first = build_outside_seeded(program, own, names, ob, &none)?;
     let seed = last_owner(&first);
     if seed.is_empty() {
         return Ok(first);
     }
-    build_outside_seeded(program, own, name, file, block, facts, &seed)
+    build_outside_seeded(program, own, names, ob, &seed)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn build_outside_seeded<'a>(
     program: &'a Program,
     own: &'a Ownership,
-    name: &str,
-    file: Option<String>,
-    block: &Block,
-    facts: &NodeTypes<'a>,
+    names: &mut NameMemo,
+    ob: &OutsideBody<'a>,
     seed: &std::collections::HashSet<NodeId>,
 ) -> Result<Body, Gap> {
     // No substitution: the body has no type parameters.
     let no_steps: Vec<Release> = Vec::new();
-    let steps = own.releases.get(name).unwrap_or(&no_steps);
+    let steps = own.releases.get(&ob.id).unwrap_or(&no_steps);
     let mut placed: HashMap<(Exit, NodeId), Vec<&Release>> = HashMap::new();
     for r in steps {
         placed.entry((r.exit, r.site)).or_default().push(r);
     }
-    let mut b = Builder::bare(program, own, facts, seed, name.to_string(), file, placed);
+    let (block, file) = (ob.block, ob.module.clone());
+    let mut b = Builder::bare(
+        program,
+        own,
+        names,
+        &ob.facts,
+        seed,
+        ob.name.clone(),
+        file,
+        placed,
+    );
     // The checker types a `test` or `bench` body as a function returning Unit.
     b.ret = Some(Type::Unit);
     b.appends = crate::append::append_candidates(block);
@@ -1279,6 +1317,7 @@ struct Unreached {
 pub fn build_root<'a>(
     program: &'a Program,
     own: &'a Ownership,
+    names: &mut NameMemo,
     facts: &NodeTypes<'a>,
     file: Option<String>,
     binds: Option<&[(String, Type)]>,
@@ -1301,6 +1340,7 @@ pub fn build_root<'a>(
     let mut b = Builder::bare(
         program,
         own,
+        names,
         &facts,
         &seed,
         String::new(),
@@ -1329,6 +1369,7 @@ struct Builder<'a> {
     program: &'a Program,
     own: &'a Ownership,
     proto: &'a Owned,
+    names: &'a mut NameMemo,
     types: HashMap<NodeId, Type>,
     /// The producer type of every typed expression, before the destination's
     /// coercion (see [`Rhs`]); `types` holds what the value must end up as.
@@ -1413,9 +1454,11 @@ struct Builder<'a> {
 
 impl<'a> Builder<'a> {
     /// A builder for a body that is no instance: no substitution.
+    #[allow(clippy::too_many_arguments)]
     fn bare(
         program: &'a Program,
         own: &'a Ownership,
+        names: &'a mut NameMemo,
         facts: &NodeTypes<'a>,
         seed: &'a std::collections::HashSet<NodeId>,
         name: String,
@@ -1433,6 +1476,7 @@ impl<'a> Builder<'a> {
             program,
             own,
             proto: &own.proto,
+            names,
             types,
             produced,
             solved,
@@ -1482,7 +1526,7 @@ impl<'a> Builder<'a> {
     }
 
     fn name(&mut self, source: &str, ty: Type, releases: bool, line: usize) -> Name {
-        let (heap, linear, runs) = self.proto.name_facts(&ty);
+        let (heap, linear, runs) = self.proto.name_facts(&ty, self.names);
         self.body.names.push(NameInfo {
             source: source.to_string(),
             ty,
@@ -1519,7 +1563,7 @@ impl<'a> Builder<'a> {
     /// wrote ([`NameInfo::path`]).
     fn borrow_name(&mut self, e: &'a Expr, ty: Type, line: usize) -> Name {
         let n = self.name("@borrow", ty, false, line);
-        self.body.names[n.index()].path = reader_path(e);
+        self.body.names[n.index()].path = reader_path(e, &self.own.place_names);
         n
     }
 
@@ -1656,7 +1700,7 @@ impl<'a> Builder<'a> {
     fn lends(&self, e: &Expr) -> bool {
         match e {
             Expr::Call { name, args, .. } => {
-                (self.lends_name(name) && !self.copies_an_element(name, args, e))
+                (self.lends_name(name) && !self.copies_a_part(e))
                     || self.hands_back_a_borrow(name, args)
             }
             _ => false,
@@ -2631,6 +2675,7 @@ impl<'a> Builder<'a> {
                     && is_place_read(read)
                     && self.deferred_of(read).is_none()
                 {
+                    let mark = self.after.len();
                     let place = self.place(read, out)?;
                     let n = self.name(name, ty.clone(), false, *line);
                     let rhs = Rhs::Read(place);
@@ -2638,6 +2683,7 @@ impl<'a> Builder<'a> {
                         self.report_reason(&rhs, &ty, false, false, self.lends(read));
                     out.push(St::Let(n, rhs));
                     self.release_receiver(read, out, true);
+                    self.drop_since(mark, out);
                     self.grows(n, name);
                     self.scope.push((name.clone(), n));
                     self.keyed_let(n, s);
@@ -2738,7 +2784,7 @@ impl<'a> Builder<'a> {
                     // names as its receiver.
                     (None, None)
                         if self.region == 0
-                            && crate::append::global_grows(name)
+                            && self.own.accumulators.contains(name)
                             && vyrn_frontend::types::resolve(
                                 &self.ty_of(value)?,
                                 self.proto.types(),
@@ -2980,7 +3026,7 @@ impl<'a> Builder<'a> {
                     return gap("a `for` over what no loop walks", *line);
                 };
                 if *consuming {
-                    take_names_a_place(iter, *line, true)?;
+                    take_names_a_place(iter, &self.own.place_names, *line, true)?;
                 }
                 // `owner` is the name the element rule below asks about: the
                 // named container where the loop borrows it.
@@ -3215,8 +3261,23 @@ impl<'a> Builder<'a> {
             // `p + 8` alone costs four instructions per allocation.
             Stmt::Expr(Expr::Call { name, .. }, _)
                 if vyrn_frontend::loader::audit_hook(name)
-                    && !vyrn_frontend::loader::audit_build() => {}
+                    && !vyrn_frontend::loader::audit_build(self.program.host.gen) => {}
             Stmt::Expr(e, _) if self.optional_if_let(e, sid, out)? => {}
+            // A part read as a statement takes nothing: the part stays in its
+            // place, and an unnamed receiver is released whole.
+            Stmt::Expr(e, _) if reads_a_part(e) && self.deferred_of(e).is_none() => {
+                let mark = self.after.len();
+                let rhs = Rhs::Read(self.place(e, out)?);
+                out.push(St::Do {
+                    rhs,
+                    line: e.line(),
+                    site: sid,
+                });
+                if let Some((r, _, malloc)) = self.pending_receiver.take() {
+                    self.drop_receiver(r, malloc, Vec::new(), out);
+                }
+                self.drop_since(mark, out);
+            }
             Stmt::Expr(e, _) => {
                 let ty = self.ty_of(e).unwrap_or(Type::Unit);
                 let rhs = self.rhs(e, out)?;
@@ -3258,25 +3319,12 @@ impl<'a> Builder<'a> {
         Ok(())
     }
 
-    /// Whether a statement-position call's unbound result is this frame's to
-    /// release right after the call. The caller has checked that the type
-    /// owns heap. Excluded: a lending call, a variant constructor, a `panic`,
-    /// and an `@`-spelled desugar, which the reading site frees,
-    /// except a removal (`@pop`, `@swapRemove`), whose result nothing reads.
+    /// Whether a statement's unbound value is this frame's to release right
+    /// after the statement. The caller has checked that the type owns heap.
+    /// Excluded: a lending call, and a `panic`, which never returns.
     fn discards(&self, e: &Expr) -> bool {
-        let Expr::Call { name, .. } = e else {
-            return false;
-        };
-        !vyrn_frontend::ast::is_panic(name)
-            && (!name.starts_with('@') || prelude::removes(name))
+        !matches!(e, Expr::Call { name, .. } if vyrn_frontend::ast::is_panic(name))
             && !self.lends(e)
-            && !self.constructs(name)
-    }
-
-    /// Whether `name` constructs a sum value: a user enum's variant, or one of
-    /// the five the language declares (`declared::Declared`'s seed).
-    fn constructs(&self, name: &str) -> bool {
-        matches!(name, "Some" | "Ok" | "Err" | "Success" | "Failure") || self.is_variant(name)
     }
 
     /// Marks `n`, bound by a `let` of `name`, as a String accumulator where
@@ -3853,7 +3901,13 @@ impl<'a> Builder<'a> {
             );
             if !indexed
                 || !heap
-                || crate::kernel::writes(l, r.clone(), &self.body.names, &self.body.name)
+                || crate::kernel::writes(
+                    l,
+                    r.clone(),
+                    &self.body.names,
+                    &self.body.name,
+                    &self.own.state_callees,
+                )
             {
                 continue;
             }
@@ -3913,11 +3967,8 @@ impl<'a> Builder<'a> {
                 Some((_, size, _)) => {
                     let solved = self.impl_args(&size, ity);
                     Rhs::Call {
-                        kind: if solved.is_some() {
-                            Callee::Fn
-                        } else {
-                            Callee::Method
-                        },
+                        kind: (self.fn_id(&size).filter(|_| solved.is_some()))
+                            .map_or(Callee::Method, Callee::Fn),
                         callee: size,
                         args: vec![(Arg::Val(Val::Name(it)), Capability::Read)],
                         write_back: false,
@@ -4005,6 +4056,13 @@ impl<'a> Builder<'a> {
             .collect()
     }
 
+    /// The id of the function the program declares under `name`.
+    fn fn_id(&self, name: &str) -> Option<FnId> {
+        (self.program.functions.iter())
+            .position(|f| f.name == name)
+            .map(FnId::nth)
+    }
+
     fn is_map(&self, ty: &Type) -> bool {
         let decls = self.proto.types();
         matches!(vyrn_frontend::types::resolve(ty, &decls), Type::Map(..))
@@ -4066,7 +4124,7 @@ impl<'a> Builder<'a> {
     fn made_scrutinee(&self, e: &'a Expr) -> bool {
         use vyrn_frontend::ast::place_path;
         use vyrn_frontend::project::element_path;
-        place_path(e).is_none() && element_path(e).is_none()
+        place_path(e).is_none() && element_path(e, &self.own.place_names).is_none()
     }
 
     /// The scrutinee of a `match`, `if let` or `?`: the value it switches on,
@@ -4367,21 +4425,22 @@ impl<'a> Builder<'a> {
         callee: &str,
         ix: usize,
     ) -> Result<Val, Gap> {
-        self.read_at(e, out, Some((callee, ix)))
+        let of = self.own.arg_caps.named(callee);
+        self.read_at(e, out, Some((callee, of, ix)))
     }
 
     fn read_at(
         &mut self,
         e: &'a Expr,
         out: &mut Vec<St>,
-        at: Option<(&str, usize)>,
+        at: Option<(&str, CapsOf, usize)>,
     ) -> Result<Val, Gap> {
         let v = self.read_val_inner(e, out)?;
         // The argument-drop key, here rather than in `call`, which sees
         // neither an operator nor a `lazy` field read.
-        if let (Val::Name(t), Some((callee, ix))) = (&v, at) {
+        if let (Val::Name(t), Some((callee, of, ix))) = (&v, at) {
             let t = *t;
-            if self.arg_released(e, t, callee, ix) {
+            if self.arg_released(e, t, callee, of, ix) {
                 self.body.names[t.index()].arg_drop = Some(e.id());
             }
         }
@@ -4415,7 +4474,7 @@ impl<'a> Builder<'a> {
         match e {
             // A call that forwards none of its arguments builds its result
             // afresh (`xs[j].copy()`), whatever it reads.
-            Expr::Call { name, .. } if !mc::call_may_forward(name) => true,
+            Expr::Call { name, .. } if !mc::call_may_forward(name, &self.own.place_names) => true,
             Expr::Call { name, args, .. } => args.iter().all(|a| {
                 let is_root_read = match a {
                     Expr::Var { name: v, .. } => v == root,
@@ -4424,7 +4483,7 @@ impl<'a> Builder<'a> {
                 if !is_root_read {
                     return self.read_only_mentions(a, root, out);
                 }
-                if !mc::call_may_forward(name) {
+                if !mc::call_may_forward(name, &self.own.place_names) {
                     true
                 } else if self.declares(name)
                     && !name.starts_with('@')
@@ -4468,7 +4527,7 @@ impl<'a> Builder<'a> {
     /// ([`NameInfo::releases`], or a forced `lazy` field), and
     /// [`vyrn_frontend::movecheck::arg_verdict`] decides what the callee does
     /// with it.
-    fn arg_released(&self, e: &'a Expr, t: Name, callee: &str, ix: usize) -> bool {
+    fn arg_released(&self, e: &'a Expr, t: Name, callee: &str, of: CapsOf, ix: usize) -> bool {
         use vyrn_frontend::movecheck as mc;
         // A named value is nobody's temporary: `f(s)` hands over what `s`
         // owns, and the binding keeps the row.
@@ -4514,7 +4573,8 @@ impl<'a> Builder<'a> {
         };
         // A view LENDS, unless the element it hands out is a heap-free copy.
         let decls = self.proto.types();
-        let view_copies = mc::lends_result(callee)
+        let views = mc::lends_result(callee, &self.own.place_names);
+        let view_copies = views
             && matches!(
                 vyrn_frontend::types::resolve(&ty, &decls),
                 Type::Array(ref et)
@@ -4526,10 +4586,11 @@ impl<'a> Builder<'a> {
             callee: callee.to_string(),
             ix,
             producer,
+            views,
             view_copies,
             constructs: matches!(callee, "Some" | "Ok" | "Err" | "Success" | "Failure")
                 || self.is_variant(callee),
-            cap: vyrn_frontend::declared::arg_cap(&self.own.arg_caps, callee, ix),
+            cap: self.own.arg_caps.at(of, ix),
         };
         if mc::arg_verdict(&s) == mc::ArgVerdict::Released {
             return true;
@@ -4588,7 +4649,7 @@ impl<'a> Builder<'a> {
         let n = self.name("@thunk", thunk, false, e.line());
         let callee = format!("@thunk{}", n.0);
         self.body.names[n.index()].source = callee.clone();
-        self.body.names[n.index()].path = reader_path(e);
+        self.body.names[n.index()].path = reader_path(e, &self.own.place_names);
         out.push(St::Let(n, Rhs::Read(place)));
         self.release_receiver(e, out, true);
         Ok(Rhs::Call {
@@ -4671,7 +4732,7 @@ impl<'a> Builder<'a> {
         // An element's receiver is `@at`'s argument, and its release is keyed
         // as an argument temporary's.
         if let (false, Expr::Call { name, args, .. }) = (took, e) {
-            if self.arg_released(&args[0], r, name, 0) {
+            if self.arg_released(&args[0], r, name, self.own.arg_caps.named(name), 0) {
                 self.body.names[r.index()].arg_drop = Some(producer);
             }
         }
@@ -4680,9 +4741,17 @@ impl<'a> Builder<'a> {
         // kernel reports it.
         let holes: Vec<String> = match (took, e) {
             (false, _) => Vec::new(),
-            (true, Expr::Field { field, .. }) => vec![format!(".{field}")],
+            (true, Expr::Field { .. }) => match taken_path(e) {
+                Some(path) => vec![path],
+                None => return,
+            },
             (true, _) => return,
         };
+        self.drop_receiver(r, malloc, holes, out);
+    }
+
+    /// Releases the unnamed receiver `r` of a part read, around `holes`.
+    fn drop_receiver(&mut self, r: Name, malloc: bool, holes: Vec<String>, out: &mut Vec<St>) {
         self.body.names[r.index()].holes = holes;
         self.body.names[r.index()].receiver_malloc = malloc;
         out.push(St::Drop(r, Site::None, 0, None));
@@ -4846,7 +4915,7 @@ impl<'a> Builder<'a> {
     /// Builds the lambda's own frame, judged like a function's, and answers
     /// its key. Captures are borrowed inputs and parameters are `read`.
     /// The plan keys its bindings' rows by the lambda's nodes
-    /// under the enclosing function's name. An expression body is a `return`
+    /// under the enclosing function's id. An expression body is a `return`
     /// at no site, so a name still held there is refused, not placed.
     fn lambda_frame(&mut self, e: &'a Expr, caps: &[Val]) -> Result<String, Gap> {
         let Expr::Lambda {
@@ -5043,7 +5112,7 @@ impl<'a> Builder<'a> {
     /// The `consume p` prefix. Its refusals are about the keyword,
     /// which the kernel does not see, so they are stated here.
     fn take_prefix(&mut self, e: &'a Expr, line: usize, out: &mut Vec<St>) -> Result<Val, Gap> {
-        take_names_a_place(e, line, false)?;
+        take_names_a_place(e, &self.own.place_names, line, false)?;
         self.consume_names_a_borrow(e, line)?;
         if self.in_module_state(e) {
             return self.read_val(e, out);
@@ -5205,14 +5274,18 @@ impl<'a> Builder<'a> {
         })
     }
 
-    /// Whether `name(args)` at `e` is a heap element of a temporary
-    /// (`pieces()[0]`), stated as `@copy` of the read (#537): the temporary
-    /// is released whole after the consumer, so the taker must own a copy. A
-    /// type with `impl Copy` is read as any element is.
-    fn copies_an_element(&self, name: &str, args: &[Expr], e: &Expr) -> bool {
-        name == vyrn_frontend::project::AT
-            && args.len() == 2
-            && !is_place_read(&args[0])
+    /// Whether `e` is a heap element of a temporary (`pieces()[0]`) or a
+    /// heap field under one (`pieces()[0].s`), stated as `@copy` of the read
+    /// (#537): the temporary is released whole after the consumer, so the
+    /// taker must own a copy. A type with `impl Copy` is read as any element
+    /// is.
+    fn copies_a_part(&self, e: &Expr) -> bool {
+        let mut at = e;
+        while let Expr::Field { expr, .. } = at {
+            at = expr;
+        }
+        matches!(at, Expr::Call { name, args, .. }
+            if name == vyrn_frontend::project::AT && args.len() == 2 && !is_place_read(&args[0]))
             && self.ty_of(e).is_ok_and(|t| {
                 self.owns(&t) && vyrn_frontend::types::copy_impl(&self.program.impls, &t).is_none()
             })
@@ -5250,6 +5323,14 @@ impl<'a> Builder<'a> {
         r
     }
 
+    /// Releases the temporaries queued in `after` since `mark`, where no
+    /// `rhs` drains them: a place read's key (`m["k".copy()]`) or an operand.
+    fn drop_since(&mut self, mark: usize, out: &mut Vec<St>) {
+        for t in self.after.split_off(mark) {
+            out.push(St::Drop(t, Site::None, 0, None));
+        }
+    }
+
     /// `a && b` as `if a { b } else { false }`, and `a || b` as
     /// `if a { true } else { b }`, storing into a `Bool` temporary on each
     /// edge. The checker refuses any operand but `Bool`.
@@ -5281,9 +5362,7 @@ impl<'a> Builder<'a> {
         taken.push(store(v));
         // The right operand's temporaries are released on its edge, the only
         // path that evaluates it.
-        for t in self.after.split_off(mark) {
-            taken.push(St::Drop(t, Site::None, 0, None));
-        }
+        self.drop_since(mark, &mut taken);
         self.drain -= 1;
         let decided = vec![store(Val::Lit(Lit::Bool(op == BinOp::Or)))];
         let (then, els) = if op == BinOp::And {
@@ -5369,6 +5448,9 @@ impl<'a> Builder<'a> {
                 if let Some(inner) = self.deferred_of(e) {
                     return Ok(self.force(e, inner, out)?);
                 }
+                if self.copies_a_part(e) {
+                    return self.copy_of(e, out);
+                }
                 let fty = self.ty_of(e)?;
                 let place = self.place(expr, out)?;
                 if let Some((r, _, _)) = self.pending_receiver {
@@ -5426,7 +5508,7 @@ impl<'a> Builder<'a> {
                 if self.reads_an_element(name, args, e) {
                     return Ok(Rhs::Read(self.place(e, out)?));
                 }
-                if self.copies_an_element(name, args, e) {
+                if self.copies_a_part(e) {
                     return self.copy_of(e, out);
                 }
                 // A builtin whose argument names its callee is a call to that
@@ -5494,7 +5576,7 @@ impl<'a> Builder<'a> {
                 self.body.mistyped.extend(at);
                 let mut r = self.call(name, args, *line, self.produced(e), out)?;
                 if let Rhs::Call {
-                    kind: Callee::Fn,
+                    kind: Callee::Fn(_),
                     solved,
                     targets,
                     ..
@@ -5864,6 +5946,11 @@ impl<'a> Builder<'a> {
             vyrn_frontend::types::impl_method_name(vyrn_frontend::types::FALLIBLE, &key, m)
         };
         let success = method("success");
+        let (Some(is_success), Some(success_id)) =
+            (self.fn_id(&method("isSuccess")), self.fn_id(&success))
+        else {
+            return gap("a `?` on a type with no `Fallible` impl", line);
+        };
         // The impl's `isSuccess` chooses the arm. Both impl calls are declared
         // functions under the dispatched name and read their argument.
         let held = self.temp(Type::Bool, line);
@@ -5876,7 +5963,7 @@ impl<'a> Builder<'a> {
                 callee: method("isSuccess"),
                 args: vec![(Arg::Val(sv.clone()), Capability::Read)],
                 write_back: false,
-                kind: Callee::Fn,
+                kind: Callee::Fn(is_success),
                 ret: Some(Type::Bool),
                 targets: Vec::new(),
             },
@@ -5904,7 +5991,7 @@ impl<'a> Builder<'a> {
                 callee: success,
                 args: vec![(Arg::Val(sv.clone()), Capability::Read)],
                 write_back: false,
-                kind: Callee::Fn,
+                kind: Callee::Fn(success_id),
                 ret: Some(self.body.names[res.index()].ty.clone()),
                 targets: Vec::new(),
             },
@@ -6080,8 +6167,9 @@ impl<'a> Builder<'a> {
             // A lambda captures by read and takes by read.
             kind = Callee::Value(n);
             vec![Capability::Read; args.len()]
-        } else if let Some(f) = self.program.functions.iter().find(|f| f.name == name) {
-            kind = Callee::Fn;
+        } else if let Some(id) = self.fn_id(name) {
+            kind = Callee::Fn(id);
+            let f = &self.program.functions[id.index()];
             f.params.iter().map(|p| p.capability).collect()
         } else if prelude::signature(name).is_some() {
             kind = Callee::Builtin;
@@ -6145,7 +6233,7 @@ impl<'a> Builder<'a> {
                 | vyrn_frontend::checker::GEN_NEXT_STR
         ) {
             // The generation host's primitives, which exist only
-            // under `checker::set_gen_host`. The host reads what it is
+            // in a generator host (`Host::gen`). The host reads what it is
             // handed, so the guest keeps every argument it owns.
             vec![Capability::Read; args.len()]
         } else if let Some(g) = self.program.globals.iter().find(|g| {
@@ -6168,6 +6256,13 @@ impl<'a> Builder<'a> {
         if caps.len() < args.len() {
             return gap("a call with more arguments than parameters", line);
         }
+        // The capability row an argument's release reads, keyed by the callee
+        // before dispatch.
+        let of = match kind {
+            Callee::Fn(id) => CapsOf::Fn(id),
+            Callee::Value(_) => CapsOf::None,
+            _ => self.own.arg_caps.named(name),
+        };
         let length = prelude::builtin(name).map(|b| b.length);
         if let (Some(prelude::Length::ShrinksByOneIfNotEmpty), Some(recv)) = (length, args.first())
         {
@@ -6219,17 +6314,13 @@ impl<'a> Builder<'a> {
             self.drain += 1;
         }
         let bound = match kind {
-            Callee::Fn => self.targets_of(name, args),
+            Callee::Fn(_) => self.targets_of(name, args),
             _ => Vec::new(),
         };
         let param_tys: Vec<Type> = match kind {
-            Callee::Fn => self
-                .program
-                .functions
-                .iter()
-                .find(|f| f.name == name)
-                .map(|f| f.params.iter().map(|p| p.ty.clone()).collect())
-                .unwrap_or_default(),
+            Callee::Fn(id) => (self.program.functions[id.index()].params.iter())
+                .map(|p| p.ty.clone())
+                .collect(),
             _ => Vec::new(),
         };
         let mut targets = Vec::new();
@@ -6257,10 +6348,8 @@ impl<'a> Builder<'a> {
             // (`declared::arg_cap`); an unanswered position may, the safe
             // direction. A lambda deeper in the argument gets `None` and
             // escapes: a literal retains what it is given.
-            self.call_keeps = matches!(a, Expr::Lambda { .. }).then(|| {
-                vyrn_frontend::declared::arg_cap(&self.own.arg_caps, name, k)
-                    .is_none_or(|c| c == Capability::Consume)
-            });
+            self.call_keeps = matches!(a, Expr::Lambda { .. })
+                .then(|| (self.own.arg_caps.at(of, k)).is_none_or(|c| c == Capability::Consume));
             let global = matches!(a, Expr::Var { name, .. }
                 if self.lookup(name).is_none()
                     && self.program.globals.iter().any(|g| &g.name == name));
@@ -6275,7 +6364,7 @@ impl<'a> Builder<'a> {
                 // A proven crossing is the constructor row, so no reader
                 // checks it again.
                 let t = self.checked_temp(&to, a, line, out)?;
-                if self.arg_released(a, t, name, k) {
+                if self.arg_released(a, t, name, of, k) {
                     self.body.names[t.index()].arg_drop = Some(a.id());
                 }
                 Val::Name(t)
@@ -6293,7 +6382,7 @@ impl<'a> Builder<'a> {
                     self.val(a, out)?
                 }
             } else {
-                self.read_arg(a, out, name, k)?
+                self.read_at(a, out, Some((name, of, k)))?
             };
             self.call_keeps = None;
             if let Val::Name(t) = v {
@@ -6339,10 +6428,11 @@ impl<'a> Builder<'a> {
             (Callee::Reserved, Some(r)) if name == "@copy" => self.copied(r),
             _ => None,
         };
-        let (callee, kind, solved) = match dispatched {
-            Some((f, solved)) => (f, Callee::Fn, solved),
-            None => (name.to_string(), kind, Vec::new()),
-        };
+        let (callee, kind, solved) =
+            match dispatched.and_then(|(f, s)| Some((self.fn_id(&f)?, f, s))) {
+                Some((id, f, solved)) => (f, Callee::Fn(id), solved),
+                None => (name.to_string(), kind, Vec::new()),
+            };
         Ok(Rhs::Call {
             callee,
             args: vs,
@@ -6604,7 +6694,7 @@ pub fn lambda_line(name: &str) -> Option<usize> {
 
 /// The instance of `body` whose `fn`-typed parameters are bound:
 /// each parameter in `bound` leaves the parameter list, a call through it is
-/// [`Callee::Fn`] to its target, and a call that passes it on names that
+/// [`Callee::Bound`] to its target, and a call that passes it on names that
 /// target. A lambda target's captures take the parameter's place; a call
 /// through it passes them first, and a call passing it on takes them after
 /// its own arguments (`direct::ho_args`). A bound parameter read once as a
@@ -6729,11 +6819,11 @@ fn bind_targets(ss: &mut [St], bound: &[(Name, Target)], caps: &[(Name, Vec<Name
         if let Some(v) = kind.value() {
             match bound.iter().find(|(n, _)| *n == v) {
                 Some((_, Target::Fn(f))) => {
-                    *kind = Callee::Fn;
+                    *kind = Callee::Bound;
                     *callee = f.clone();
                 }
                 Some((_, Target::Lambda(key, ..))) => {
-                    *kind = Callee::Fn;
+                    *kind = Callee::Bound;
                     *callee = key.clone();
                     let names = caps.iter().find(|(n, _)| *n == v).map(|(_, ns)| ns);
                     let lead = names.into_iter().flatten();
@@ -7058,13 +7148,14 @@ fn fold_frame(
     body: &Body,
     own: &Ownership,
     out: &mut Facts,
-    bodies: &mut HashMap<String, Option<Stated>>,
+    fns: &mut Fns,
+    bodies: &mut HashMap<FnId, Option<Stated>>,
 ) {
     let proto = &own.proto;
     // Filled at the same site as the fold, so a body the fold does not see is
     // one no emitter may walk either.
     bodies
-        .entry(body.name.clone())
+        .entry(fns.add(&body.name, None))
         .and_modify(|had| *had = None)
         .or_insert_with(|| {
             Some(Stated {
@@ -7237,6 +7328,10 @@ pub fn augment(program: &Program, w: &mut World) {
     let lw = vyrn_frontend::prof::phase("placer: lower_with");
     let lowered = crate::lower_with(program, own);
     drop(lw);
+    w.fns = Fns::source(&lowered.source);
+    for inst in &lowered.instances {
+        w.fns.instance(inst);
+    }
     // `VYRN_KERNEL_TRACE=1` prints every release the placer found owed, and
     // whether it could place it.
     let trace = std::env::var("VYRN_KERNEL_TRACE").is_ok();
@@ -7245,184 +7340,153 @@ pub fn augment(program: &Program, w: &mut World) {
     // pass wrote a row for. A row's node belongs to one function, so only
     // those need a rebuild.
     let mut built: Vec<Option<Body>> = Vec::with_capacity(lowered.instances.len());
-    let mut touched: std::collections::HashSet<String> = Default::default();
+    let mut touched: std::collections::HashSet<FnId> = Default::default();
     // The judgment memo, when the host armed one (`movecheck::Judgments`): a
     // body whose key is unchanged is served its refusals, neither built nor
     // judged. An armed host reads only refusals, not the facts or rows.
     let js = vyrn_frontend::prof::phase("placer: judgments");
     let memo = vyrn_frontend::movecheck::Judgments::open(program);
     drop(js);
-    let _held = crate::append::Held::new(program);
+    own.accumulators = crate::append::global_append_candidates(program);
+    let mut names = NameMemo::default();
     // Every body is built before any is placed: the kernel asks the effect
     // judgment, which joins every body, whether a callee writes module state.
-    // A call into a served body is judged as pure.
-    let mut made: Vec<Made> = Vec::with_capacity(lowered.instances.len());
-    for inst in &lowered.instances {
-        let key = memo
-            .as_ref()
-            .and_then(|m| m.key(inst.func.module.as_deref(), &inst.spelling()));
-        if let Some(rs) = serve(memo.as_ref(), key.as_ref()) {
+    // A call into a served body is judged as pure. `test` and `bench` bodies
+    // are judged like any other.
+    let jobs: Vec<Job> = (lowered.instances.iter().map(Job::Inst))
+        .chain(lowered.bodies.iter().map(Job::Outside))
+        .collect();
+    let keys: Vec<_> = (jobs.iter())
+        .map(|j| memo.as_ref().and_then(|m| j.key(m)))
+        .collect();
+    let served: Vec<Option<Vec<Refusal>>> = (keys.iter())
+        .map(|k| serve(memo.as_ref(), k.as_ref()))
+        .collect();
+    let unserved: Vec<Option<Job>> = (jobs.iter().zip(&served))
+        .map(|(j, s)| s.is_none().then_some(*j))
+        .collect();
+    let shared: &Ownership = own;
+    let firsts = in_parallel(
+        &unserved,
+        |j| j.map_or(0, |j| j.weight()),
+        NameMemo::default,
+        |names, j| {
+            let top = j.map(|j| j.build(program, shared, names));
+            (top, vyrn_frontend::project::missed())
+        },
+    );
+    // In job order, so the gap tally and every node id a projection site
+    // makes come out as on one thread.
+    let mut made: Vec<Made> = Vec::with_capacity(jobs.len());
+    for (((j, key), served), (first, missed)) in jobs.iter().zip(keys).zip(served).zip(firsts) {
+        if let Some(rs) = served {
             made.push(Made::Served(rs));
             continue;
         }
-        let bs = vyrn_frontend::prof::phase("placer: core::build");
-        let top = build(program, inst, own);
-        drop(bs);
+        let top = match first {
+            Some(top) if !missed => top,
+            _ => j.build(program, own, &mut names),
+        };
+        j.tally(&top);
         made.push(Made::Built(key, top));
     }
-    // `test` and `bench` bodies are judged like any other.
-    let os = vyrn_frontend::prof::phase("placer: build_outside");
-    let mut made_outside: Vec<Made> = Vec::with_capacity(lowered.bodies.len());
-    for ob in &lowered.bodies {
-        // Keyed with the line too: the `test@<i>` index is global, so a test
-        // added to an earlier module renumbers every later one.
-        let key = memo
-            .as_ref()
-            .and_then(|m| m.key(ob.module.as_deref(), &format!("{}@{}", ob.name, ob.line)));
-        if let Some(rs) = serve(memo.as_ref(), key.as_ref()) {
-            made_outside.push(Made::Served(rs));
-            continue;
+    // The call relation, from the first build of every body, in job order;
+    // the writes below add the bodies built for the judgment alone.
+    let by_name = crate::by_name(program);
+    let mut calls: HashMap<FnId, Vec<FnId>> = HashMap::new();
+    for (j, m) in jobs.iter().zip(&made) {
+        if let Made::Built(_, Ok(top)) = m {
+            crate::world::add_callees(top, &by_name, calls.entry(j.id()).or_default());
         }
-        let top = build_outside(
-            program,
-            own,
-            &ob.name,
-            ob.module.clone(),
-            ob.block,
-            &ob.facts,
-        );
-        made_outside.push(Made::Built(key, top));
     }
-    drop(os);
     let ej = vyrn_frontend::prof::phase("placer: effects");
-    let mut tops: Vec<(&str, &Body)> = Vec::new();
-    for (inst, m) in lowered.instances.iter().zip(&made) {
-        if let Made::Built(_, Ok(b)) = m {
-            tops.push((inst.func.name.as_str(), b));
-        }
-    }
-    for (ob, m) in lowered.bodies.iter().zip(&made_outside) {
-        if let Made::Built(_, Ok(b)) = m {
-            tops.push((ob.name.as_str(), b));
-        }
-    }
-    crate::effects::judge_built(program, &lowered, own, &tops, |judged, refs, _| {
-        crate::effects::set_state_callees(Some((judged, refs)));
+    let tops: Vec<(&str, &Body)> = (jobs.iter().zip(&made))
+        .filter_map(|(j, m)| match m {
+            Made::Built(_, Ok(b)) => Some((j.owner(), b)),
+            _ => None,
+        })
+        .collect();
+    let state = crate::effects::judge_built(program, &lowered, own, &tops, |judged, refs, _| {
+        judged.state_table(refs)
     });
     drop(tops);
+    own.state_callees = state;
     drop(ej);
     // A hoist asked `kernel::writes` before the effect judgment was held. A
     // frame that hoisted a header and calls a function that stores module
     // state may get a different answer, so it is built again.
-    let unjudged = |m: &Made| {
-        matches!(m, Made::Built(_, Ok(b)) if b.frames().iter().any(|f| {
-            f.names.iter().any(|i| i.walked == Some(Walk::While))
-                && crate::effects::stores_state(&f.name)
-        }))
-    };
-    for (inst, m) in lowered.instances.iter().zip(made.iter_mut()) {
-        if let (true, Made::Built(_, top)) = (unjudged(m), &mut *m) {
-            *top = build(program, inst, own);
+    for (j, m) in jobs.iter().zip(made.iter_mut()) {
+        let Made::Built(_, top) = m else { continue };
+        let unjudged = top.as_ref().is_ok_and(|b| {
+            b.frames().iter().any(|f| {
+                f.names.iter().any(|i| i.walked == Some(Walk::While))
+                    && own.state_callees.contains_key(&f.name)
+            })
+        });
+        if unjudged {
+            *top = j.build(program, own, &mut names);
+            j.tally(top);
         }
     }
-    for (ob, m) in lowered.bodies.iter().zip(made_outside.iter_mut()) {
-        if let (true, Made::Built(_, top)) = (unjudged(m), &mut *m) {
-            *top = build_outside(
-                program,
-                own,
-                &ob.name,
-                ob.module.clone(),
-                ob.block,
-                &ob.facts,
-            );
-        }
-    }
-    for (inst, m) in lowered.instances.iter().zip(made) {
+    // The kernel's walk reads the body and the judgment alone, so it runs on
+    // any thread; its rows land below, in job order.
+    let shared: &Ownership = own;
+    let placed = in_parallel(
+        &made,
+        |m| match m {
+            Made::Built(_, Ok(b)) => b.frames().iter().map(|f| f.stmts.len()).sum(),
+            _ => 0,
+        },
+        || (),
+        |(), m| match m {
+            Made::Built(_, Ok(b)) => placements(b, &shared.state_callees),
+            _ => Vec::new(),
+        },
+    );
+    let mut outside: Vec<Option<Body>> = Vec::with_capacity(lowered.bodies.len());
+    for ((j, m), placed) in jobs.iter().zip(made).zip(placed) {
+        let into = match j {
+            Job::Inst(_) => &mut built,
+            Job::Outside(_) => &mut outside,
+        };
         let (key, made) = match m {
             Made::Served(rs) => {
                 r.kernel.extend(rs);
-                built.push(None);
+                into.push(None);
                 continue;
             }
             Made::Built(key, made) => (key, made),
         };
         let refused_before = r.kernel.len();
         let top = match made {
-            Ok(b) => Some(b),
+            Ok(b) => b,
             Err(g) => {
-                refuse_gap(g, &inst.func.module, &inst.func.name, &mut r);
-                None
-            }
-        };
-        if let Some(top) = &top {
-            // `VYRN_KERNEL_TRACE=<fn>` prints that body's core, lambdas included.
-            if std::env::var("VYRN_KERNEL_TRACE").is_ok_and(|v| v != "1" && top.name.contains(&v)) {
-                eprintln!("{}", top.render());
-            }
-            // A lambda's rows are keyed by its own nodes under the enclosing
-            // function's name, where the emitters read them.
-            place_frames(
-                top,
-                &inst.func.name,
-                own,
-                &mut added,
-                &mut touched,
-                &mut r.kernel,
-                trace,
-            );
-        }
-        let refused = top.as_ref().is_some_and(|t| {
-            typed(
-                program,
-                own,
-                &mut r,
-                t,
-                &inst.func.module,
-                inst.subst.is_empty(),
-            )
-        });
-        let key = key.filter(|_| !refused);
-        remember(memo.as_ref(), key, &r.kernel[refused_before..]);
-        built.push(top);
-    }
-    let mut outside: Vec<Option<Body>> = Vec::with_capacity(lowered.bodies.len());
-    for (ob, m) in lowered.bodies.iter().zip(made_outside) {
-        let (mut key, made) = match m {
-            Made::Served(rs) => {
-                r.kernel.extend(rs);
-                outside.push(None);
+                refuse_gap(g, j.module(), j.owner(), &mut r);
+                remember(memo.as_ref(), key, &r.kernel[refused_before..]);
+                into.push(None);
                 continue;
             }
-            Made::Built(key, made) => (key, made),
         };
-        let refused_before = r.kernel.len();
-        match made {
-            Ok(top) => {
-                if std::env::var("VYRN_KERNEL_TRACE")
-                    .is_ok_and(|v| v != "1" && ob.name.contains(&v))
-                {
-                    eprintln!("{}", top.render());
-                }
-                place_frames(
-                    &top,
-                    &ob.name,
-                    own,
-                    &mut added,
-                    &mut touched,
-                    &mut r.kernel,
-                    trace,
-                );
-                if typed(program, own, &mut r, &top, &ob.module, true) {
-                    key = None;
-                }
-                outside.push(Some(top));
-            }
-            Err(g) => {
-                refuse_gap(g, &ob.module, &ob.name, &mut r);
-                outside.push(None);
-            }
+        // `VYRN_KERNEL_TRACE=<fn>` prints that body's core, lambdas included.
+        if std::env::var("VYRN_KERNEL_TRACE").is_ok_and(|v| v != "1" && top.name.contains(&v)) {
+            eprintln!("{}", top.render());
         }
+        // A lambda's rows are keyed by its own nodes under the enclosing
+        // function's id, where the emitters read them.
+        place_frames(
+            &top,
+            placed,
+            j.id(),
+            own,
+            &mut added,
+            &mut touched,
+            &mut r.kernel,
+            trace,
+        );
+        let refused = typed(program, own, &mut r, &top, j.module(), j.as_written());
+        let key = key.filter(|_| !refused);
         remember(memo.as_ref(), key, &r.kernel[refused_before..]);
+        into.push(Some(top));
     }
     // Every generic function is built once more with its parameters as
     // written, the way the checker typed it, for the judgment alone. It
@@ -7432,11 +7496,11 @@ pub fn augment(program: &Program, w: &mut World) {
         ..own.clone()
     };
     for inst in crate::as_written(program, own) {
-        match build(program, &inst, &written) {
+        match build_in(program, &inst, &written, &mut names) {
             Ok(top) => {
                 typed(program, own, &mut r, &top, &inst.func.module, true);
                 for body in top.frames() {
-                    if let Err(rs) = crate::kernel::placement(body) {
+                    if let Err(rs) = crate::kernel::placement(body, &own.state_callees) {
                         r.kernel.extend(rs);
                     }
                 }
@@ -7449,13 +7513,15 @@ pub fn augment(program: &Program, w: &mut World) {
     for p in &lowered.places {
         let inst = crate::Instance {
             func: p.func,
+            func_id: p.id,
             type_args: Vec::new(),
             subst: Default::default(),
             facts: p.facts.clone(),
             releases: Vec::new(),
         };
-        match build(program, &inst, own) {
+        match build_in(program, &inst, own, &mut names) {
             Ok(top) => {
+                crate::world::add_callees(&top, &by_name, calls.entry(p.id).or_default());
                 typed(program, own, &mut r, &top, &p.func.module, true);
             }
             Err(g) => {
@@ -7473,12 +7539,15 @@ pub fn augment(program: &Program, w: &mut World) {
         match build_root(
             program,
             own,
+            &mut names,
             &lowered.globals,
             g.module.clone(),
             None,
             &g.init,
         ) {
             Ok(top) => {
+                let state = w.fns.add("", None);
+                crate::world::add_callees(&top, &by_name, calls.entry(state).or_default());
                 typed(program, own, &mut r, &top, &g.module, true);
             }
             Err(e) => {
@@ -7498,6 +7567,7 @@ pub fn augment(program: &Program, w: &mut World) {
         match build_root(
             program,
             own,
+            &mut names,
             &lowered.predicates,
             d.module.clone(),
             Some(&binds),
@@ -7530,15 +7600,10 @@ pub fn augment(program: &Program, w: &mut World) {
     // A placed release of a generic declared release is a call the lowering's
     // worklist follows ([`crate::dispatched`]) only once the row is in the
     // plan, so such a program is lowered again below.
-    let by_name: HashMap<&str, &vyrn_frontend::ast::Function> = program
-        .functions
-        .iter()
-        .map(|f| (f.name.as_str(), f))
-        .collect();
     let placed: Vec<Release> = added.values().flatten().cloned().collect();
     let mut dispatches = !crate::dispatched(&placed, &by_name).is_empty();
     for (f, rows) in added {
-        touched.insert(f.clone());
+        touched.insert(f);
         own.releases.entry(f).or_default().extend(rows);
     }
     // A second build for the emitters, after every row the placer added: the
@@ -7546,7 +7611,9 @@ pub fn augment(program: &Program, w: &mut World) {
     // the memo runs no emitter, and served bodies would leave the facts
     // partial, so it stops here.
     if memo.is_some() {
-        crate::effects::set_state_callees(None);
+        w.calls.replace(calls);
+        own.state_callees.clear();
+        own.accumulators.clear();
         (w.refusals, w.typed) = (r.kernel, r.typed);
         return;
     }
@@ -7558,15 +7625,15 @@ pub fn augment(program: &Program, w: &mut World) {
     if folds {
         if let Ok(top) = build_module_state(program, own, &lowered.globals) {
             for body in top.frames() {
-                fold_frame(program, body, own, &mut facts, &mut w.bodies);
+                fold_frame(program, body, own, &mut facts, &mut w.fns, &mut w.bodies);
             }
         }
         for (i, inst) in lowered.instances.iter().enumerate() {
             // Rebuilt only where the pass above wrote a row for this function; the
             // rest fold the body that pass already built.
-            let fresh = if touched.contains(&inst.func.name) {
+            let fresh = if touched.contains(&inst.func_id) {
                 let _p = vyrn_frontend::prof::phase("placer: facts: rebuilt");
-                build(program, inst, own).ok()
+                build_in(program, inst, own, &mut names).ok()
             } else {
                 None
             };
@@ -7574,22 +7641,14 @@ pub fn augment(program: &Program, w: &mut World) {
                 continue;
             };
             for body in top.frames() {
-                fold_frame(program, body, own, &mut facts, &mut w.bodies);
+                fold_frame(program, body, own, &mut facts, &mut w.fns, &mut w.bodies);
             }
         }
         // The same for `test` and `bench` bodies, whose nodes an emitter looks up
         // too.
         for (i, ob) in lowered.bodies.iter().enumerate() {
-            let fresh = if touched.contains(&ob.name) {
-                build_outside(
-                    program,
-                    own,
-                    &ob.name,
-                    ob.module.clone(),
-                    ob.block,
-                    &ob.facts,
-                )
-                .ok()
+            let fresh = if touched.contains(&ob.id) {
+                build_outside(program, own, &mut names, ob).ok()
             } else {
                 None
             };
@@ -7597,7 +7656,7 @@ pub fn augment(program: &Program, w: &mut World) {
                 continue;
             };
             for body in top.frames() {
-                fold_frame(program, body, own, &mut facts, &mut w.bodies);
+                fold_frame(program, body, own, &mut facts, &mut w.fns, &mut w.bodies);
             }
         }
     }
@@ -7617,11 +7676,15 @@ pub fn augment(program: &Program, w: &mut World) {
             if !had.insert(inst.spelling()) {
                 continue;
             }
-            if let Ok(top) = build(program, inst, own) {
+            w.fns.instance(inst);
+            if let Ok(top) = build_in(program, inst, own, &mut names) {
+                crate::world::add_callees(&top, &by_name, calls.entry(inst.func_id).or_default());
                 let mut rows = Added::new();
+                let frames = placements(&top, &own.state_callees);
                 place_frames(
                     &top,
-                    &inst.func.name,
+                    frames,
+                    inst.func_id,
                     own,
                     &mut rows,
                     &mut touched,
@@ -7636,18 +7699,186 @@ pub fn augment(program: &Program, w: &mut World) {
             if !folds {
                 continue;
             }
-            let Ok(top) = build(program, inst, own) else {
+            let Ok(top) = build_in(program, inst, own, &mut names) else {
                 continue;
             };
             for body in top.frames() {
-                fold_frame(program, body, own, &mut facts, &mut w.bodies);
+                fold_frame(program, body, own, &mut facts, &mut w.fns, &mut w.bodies);
             }
         }
         dispatches = !crate::dispatched(&placed, &by_name).is_empty();
     }
+    w.calls.replace(calls);
     w.facts = folds.then_some(facts);
     (w.refusals, w.typed) = (r.kernel, r.typed);
-    crate::effects::set_state_callees(None);
+    own.state_callees.clear();
+    own.accumulators.clear();
+}
+
+/// One body `augment` builds: an instance, or a `test` or `bench` body.
+#[derive(Clone, Copy)]
+enum Job<'l, 'p> {
+    Inst(&'l Instance<'p>),
+    Outside(&'l crate::OutsideBody<'p>),
+}
+
+impl Job<'_, '_> {
+    /// The row the plan's tables and the call relation key the body by.
+    fn id(&self) -> FnId {
+        match self {
+            Job::Inst(inst) => inst.func_id,
+            Job::Outside(ob) => ob.id,
+        }
+    }
+
+    /// The name the effect judgment and a gap's refusal name the body by.
+    fn owner(&self) -> &str {
+        match self {
+            Job::Inst(inst) => &inst.func.name,
+            Job::Outside(ob) => &ob.name,
+        }
+    }
+
+    fn module(&self) -> &Option<String> {
+        match self {
+            Job::Inst(inst) => &inst.func.module,
+            Job::Outside(ob) => &ob.module,
+        }
+    }
+
+    /// Whether the typed judgment reads the body as written: every body but
+    /// a generic instance.
+    fn as_written(&self) -> bool {
+        match self {
+            Job::Inst(inst) => inst.subst.is_empty(),
+            Job::Outside(_) => true,
+        }
+    }
+
+    /// The judgment memo's key. A `test` or `bench` body is keyed with its
+    /// line too: the `test@<i>` index is global, so a test added to an
+    /// earlier module renumbers every later one.
+    fn key(
+        &self,
+        memo: &vyrn_frontend::movecheck::Judgments,
+    ) -> Option<vyrn_frontend::movecheck::JudgmentKey> {
+        match self {
+            Job::Inst(inst) => memo.key(inst.func.module.as_deref(), &inst.spelling()),
+            Job::Outside(ob) => memo.key(ob.module.as_deref(), &format!("{}@{}", ob.name, ob.line)),
+        }
+    }
+
+    /// The expressions the body holds, the measure [`in_parallel`] orders by.
+    fn weight(&self) -> usize {
+        match self {
+            Job::Inst(inst) => inst.facts.exprs.len(),
+            Job::Outside(ob) => ob.facts.exprs.len(),
+        }
+    }
+
+    fn build(&self, program: &Program, own: &Ownership, names: &mut NameMemo) -> Result<Body, Gap> {
+        match self {
+            Job::Inst(inst) => {
+                let _p = vyrn_frontend::prof::phase("placer: core::build");
+                build_twice(program, inst, own, names)
+            }
+            Job::Outside(ob) => {
+                let _p = vyrn_frontend::prof::phase("placer: build_outside");
+                build_outside(program, own, names, ob)
+            }
+        }
+    }
+
+    /// Appends an instance's build to the gap tally, as [`build_in`] does.
+    fn tally(&self, out: &Result<Body, Gap>) {
+        if let (Job::Inst(inst), Some(_)) = (self, gap_tally_at()) {
+            tally_gaps(inst, out);
+        }
+    }
+}
+
+/// How many threads build and place bodies: `VYRN_THREADS`, else the
+/// machine's available parallelism. One works on the calling thread, as a
+/// target without threads (wasm32) does, and keeps `VYRN_KERNEL_TRACE` in
+/// body order.
+fn threads() -> usize {
+    static N: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *N.get_or_init(|| {
+        (std::env::var("VYRN_THREADS").ok())
+            .and_then(|v| v.parse().ok())
+            .filter(|&n| n > 0)
+            .unwrap_or_else(|| std::thread::available_parallelism().map_or(1, |n| n.get()))
+    })
+}
+
+/// Returns `work` of each of `items`, in `items`' order, run on up to
+/// [`threads`] threads. Workers take items from one counter, heaviest first
+/// by `weight`, so the longest body does not start last; `VYRN_SHUFFLE=<seed>`
+/// permutes that order, for the test that holds every output independent of
+/// it. Each worker reads the calling thread's inputs
+/// ([`vyrn_frontend::project::Lent`]), creates no node id, and keeps one `S`
+/// from `fresh` across its items. A panic in a worker panics the caller.
+fn in_parallel<T: Sync, S, R: Send>(
+    items: &[T],
+    weight: impl Fn(&T) -> usize,
+    fresh: impl Fn() -> S + Sync,
+    work: impl Fn(&mut S, &T) -> R + Sync,
+) -> Vec<R> {
+    let mut order: Vec<usize> = (0..items.len()).collect();
+    order.sort_by_key(|&i| std::cmp::Reverse(weight(&items[i])));
+    if let Some(seed) = std::env::var("VYRN_SHUFFLE")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+    {
+        // xorshift64, from a state that is never zero.
+        let mut x = seed | 1;
+        for i in (1..order.len()).rev() {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            order.swap(i, (x % (i as u64 + 1)) as usize);
+        }
+    }
+    let lent = vyrn_frontend::project::lend();
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    // Measure: `next` only grows, and a worker stops once it passes `order`.
+    let worker = || {
+        let _lent = lent.enter();
+        let mut state = fresh();
+        let mut done = Vec::new();
+        while let Some(&i) = order.get(next.fetch_add(1, std::sync::atomic::Ordering::Relaxed)) {
+            done.push((i, work(&mut state, &items[i])));
+        }
+        done
+    };
+    let n = threads().min(items.len());
+    let mut done = if n <= 1 {
+        worker()
+    } else {
+        std::thread::scope(|s| {
+            // A worker recurses as deep as the calling thread, so it gets the
+            // CLI's deep stack, not the platform default (a debug build
+            // overflowed on `limits.rs`'s wide frames).
+            let workers: Vec<_> = (0..n)
+                .map(|_| {
+                    std::thread::Builder::new()
+                        .stack_size(vyrn_frontend::trap::DEEP_STACK_BYTES)
+                        .spawn_scoped(s, || (worker(), vyrn_frontend::prof::take_phases()))
+                        .expect("spawn a placement worker")
+                })
+                .collect();
+            let mut done = Vec::with_capacity(items.len());
+            for w in workers {
+                let (d, phases) = w.join().unwrap_or_else(|e| std::panic::resume_unwind(e));
+                vyrn_frontend::prof::absorb(phases);
+                done.extend(d);
+            }
+            done
+        })
+    };
+    // Each index was taken once, so the sorted list is one result per item.
+    done.sort_unstable_by_key(|(i, _)| *i);
+    done.into_iter().map(|(_, r)| r).collect()
 }
 
 /// One body `augment` built, or served out of the memo.
@@ -7689,7 +7920,7 @@ fn remember(
 /// took it and where the release stands.
 fn report(
     body: &Body,
-    owner: &str,
+    owner: FnId,
     missing: &[crate::kernel::Missing],
     took: &[Option<crate::kernel::Took>],
     released: &[Option<Vec<String>>],
@@ -7714,7 +7945,7 @@ fn report(
     }
     // Taken out and put back at the end, so `own` (whose type table holds
     // every declaration) is not copied per frame, which is per keystroke.
-    let mut rows = std::mem::take(own.memory.entry(owner.to_string()).or_default());
+    let mut rows = std::mem::take(own.memory.entry(owner).or_default());
     for (i, info) in body.names.iter().enumerate() {
         if !info.bound_by_let {
             continue;
@@ -7830,7 +8061,7 @@ fn report(
         rows.push(row);
     }
     rows.sort_by_key(|r| r.line);
-    own.memory.insert(owner.to_string(), rows);
+    own.memory.insert(owner, rows);
 }
 
 /// The "reclaimed at block exit" sentence, with the places a `consume` took
@@ -7864,25 +8095,37 @@ fn discharged(l: &Linear) -> String {
     }
 }
 
-/// The rows `augment` places, by owner, each owner's in placement order.
-type Added = std::collections::BTreeMap<String, Vec<Release>>;
+/// The rows `augment` places, by owner, each owner's in placement order. No
+/// reader depends on the order of owners.
+type Added = HashMap<FnId, Vec<Release>>;
 
-/// Places what one built body owes, frame by frame. `owner` keys the plan's
-/// tables: the function's name, or the synthetic `test@<i>` / `bench@<i>`.
-/// A lambda frame is keyed by its enclosing body's name.
+/// The kernel's placement of each frame of `top`, in frame order.
+fn placements(
+    top: &Body,
+    state: &vyrn_frontend::own::StateCallees,
+) -> Vec<Result<crate::kernel::Placement, Vec<Refusal>>> {
+    let run = |body: &Body| {
+        let _k = vyrn_frontend::prof::phase("placer: kernel::placement");
+        crate::kernel::placement(body, state)
+    };
+    top.frames().into_iter().map(run).collect()
+}
+
+/// Places what one built body owes, frame by frame, from `placed`, its
+/// [`placements`]. `owner` keys the plan's tables: the function, or the
+/// `test` or `bench` body. A lambda frame is keyed by its enclosing body.
+#[allow(clippy::too_many_arguments)]
 fn place_frames(
     top: &Body,
-    owner: &str,
+    placed: Vec<Result<crate::kernel::Placement, Vec<Refusal>>>,
+    owner: FnId,
     own: &mut Ownership,
     added: &mut Added,
-    touched: &mut std::collections::HashSet<String>,
+    touched: &mut std::collections::HashSet<FnId>,
     refusals: &mut Vec<Refusal>,
     trace: bool,
 ) {
-    for body in top.frames() {
-        let ks = vyrn_frontend::prof::phase("placer: kernel::placement");
-        let placed = crate::kernel::placement(body);
-        drop(ks);
+    for (body, placed) in top.frames().into_iter().zip(placed) {
         let crate::kernel::Placement {
             missing,
             took,
@@ -7915,7 +8158,7 @@ fn place_frames(
                     if trace {
                         eprintln!("placer: {} store at {:?} releases", body.name, m.site);
                     }
-                    touched.insert(owner.to_string());
+                    touched.insert(owner);
                 }
                 continue;
             }
@@ -7932,7 +8175,7 @@ fn place_frames(
             if let Some(producer) = info.producer {
                 let fresh = own.placed.producers.insert(producer);
                 if fresh {
-                    touched.insert(owner.to_string());
+                    touched.insert(owner);
                 }
                 continue;
             }
@@ -7964,7 +8207,7 @@ fn place_frames(
                     let rows = own.placed.edges.entry(m.site).or_default();
                     if !rows.iter().any(|(n, e, _)| *n == info.source && *e == edge) {
                         rows.push((info.source.clone(), edge, holes));
-                        touched.insert(owner.to_string());
+                        touched.insert(owner);
                     }
                     continue;
                 }
@@ -7975,7 +8218,7 @@ fn place_frames(
                     let rows = own.placed.edges.entry(m.site).or_default();
                     if !rows.iter().any(|(n, e, _)| *n == name && *e == edge) {
                         rows.push((name, edge, Vec::new()));
-                        touched.insert(owner.to_string());
+                        touched.insert(owner);
                     }
                     continue;
                 }
@@ -7985,7 +8228,7 @@ fn place_frames(
                     let rows = own.placed.arms.entry((m.site, arm)).or_default();
                     if !rows.iter().any(|(n, _)| *n == info.source) {
                         rows.push((info.source.clone(), holes));
-                        touched.insert(owner.to_string());
+                        touched.insert(owner);
                     }
                     continue;
                 }
@@ -7997,26 +8240,32 @@ fn place_frames(
             if info.receiver.is_some() {
                 continue;
             }
+            // An owed release of a temporary has no row to key: the builder
+            // states it (`Builder::discards`, `Builder::drop_receiver`,
+            // `Builder::drop_since`), so one found here is a defect.
             let Some(binding) = info.binding else {
-                continue;
+                panic!(
+                    "placer: `{}` (line {}) in `{}` owes a release at {:?} and has no binding",
+                    info.source, info.line, body.name, m.exit
+                );
             };
             // A row the plan already placed here takes the kernel's hole set,
             // which is per path where the plan's is per binding.
-            if let Some(r) = own.releases.get_mut(owner).and_then(|rows| {
+            if let Some(r) = own.releases.get_mut(&owner).and_then(|rows| {
                 rows.iter_mut()
                     .find(|r| r.exit == m.exit && r.site == m.site && r.binding == binding)
             }) {
                 if trace {
                     eprintln!(
                         "placer: rewrite {} `{}` {:?} -> {:?}",
-                        owner, info.source, m.exit, holes
+                        body.name, info.source, m.exit, holes
                     );
                 }
                 r.holes = Some(holes);
-                touched.insert(owner.to_string());
+                touched.insert(owner);
                 continue;
             }
-            let added = added.entry(owner.to_string()).or_default();
+            let added = added.entry(owner).or_default();
             if added
                 .iter()
                 .any(|r| r.exit == m.exit && r.site == m.site && r.binding == binding)

@@ -11,7 +11,7 @@ use crate::ast::{
     Block, Expr, Function, Id, ImplBlock, LambdaBody, NodeId, Numbering, Program, Stmt, Type,
     TypeDecl,
 };
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// The element-place primitive `@slot(container, index)`: the only indexing
 /// the backends know by name. Unspellable.
@@ -22,12 +22,11 @@ pub const ELEM: &str = "@slot";
 /// written in source. It dispatches to the method named `at`.
 pub const AT: &str = "@at";
 
-/// A field read or an element read: a place, not a value the reader owns.
+/// A field read or an element read rooted in a name: a place, not a value the
+/// reader owns. A part of a call's result (`mk().q.s`) is none.
 pub fn is_place_read(e: &Expr) -> bool {
     match e {
-        Expr::Field { expr, .. } => {
-            matches!(&**expr, Expr::Var { .. } | Expr::Field { .. }) || is_place_read(expr)
-        }
+        Expr::Field { expr, .. } => is_place_read(expr),
         Expr::Call { name, args, .. } => name == AT && args.len() == 2 && is_place_read(&args[0]),
         Expr::Var { .. } => true,
         _ => false,
@@ -161,15 +160,17 @@ pub fn optional_site(
     if !is_optional(f) {
         return Ok(None);
     }
-    let hit = OPT_MEMO.with(|m| {
-        let m = m.borrow();
+    let hit = read(|m| {
         let e = m
-            .as_ref()?
+            .optional
             .get(&(recv_expr.id(), line, key.clone(), method.to_string()))?;
         (e.recv == *recv_expr && e.args == args).then_some(e.tree)
     });
     if let Some(t) = hit {
         return Ok(Some(t));
+    }
+    if frozen_miss() {
+        return Err(LENT_MISS.to_string());
     }
     let mut built = optional_inline(f, recv_expr, args, line)?;
     numbered(|n| {
@@ -179,22 +180,21 @@ pub fn optional_site(
         n.expr(&mut built.place);
     });
     let tree: &'static OptionalProjection = Box::leak(Box::new(built));
-    OPT_MEMO.with(|m| {
-        if let Some(m) = m.borrow_mut().as_mut() {
-            m.insert(
-                (recv_expr.id(), line, key, method.to_string()),
-                OptExpansion {
-                    recv: recv_expr.clone(),
-                    args: args.to_vec(),
-                    tree,
-                },
-            );
-        }
+    insert(|m| {
+        m.optional.insert(
+            (recv_expr.id(), line, key, method.to_string()),
+            OptExpansion {
+                recv: recv_expr.clone(),
+                args: args.to_vec(),
+                tree,
+            },
+        );
     });
     Ok(Some(tree))
 }
 
 /// [`Expansion`] for the optional kind.
+#[derive(Clone)]
 struct OptExpansion {
     recv: Expr,
     args: Vec<Expr>,
@@ -210,28 +210,116 @@ type Key = (NodeId, usize, String, String);
 /// One expansion and the site inputs it was built from. A hit compares the
 /// inputs, because a generator program's node would otherwise answer with
 /// another site's expansion.
+#[derive(Clone)]
 struct Expansion {
     recv: Expr,
     args: Vec<Expr>,
     tree: &'static Projection,
 }
 
-thread_local! {
-    static MEMO: std::cell::RefCell<Option<HashMap<Key, Expansion>>> =
-        const { std::cell::RefCell::new(None) };
-    /// [`MEMO`] for optional projections.
-    static OPT_MEMO: std::cell::RefCell<Option<HashMap<Key, OptExpansion>>> =
-        const { std::cell::RefCell::new(None) };
+/// Every expansion one [`Memo`] holds. Shared, so a thread that builds
+/// bodies reads the loading thread's ([`Lent`]). An insert copies it only
+/// while a lent copy is alive, and none is: a lent memo expands nothing.
+#[derive(Default, Clone)]
+struct Memos {
+    sites: HashMap<Key, Expansion>,
+    optional: HashMap<Key, OptExpansion>,
     /// Store expansions, keyed by the index node: `a[i] = v` has no receiver
     /// node, only the temporary [`store_index`] synthesizes.
     #[allow(clippy::type_complexity)]
-    static STORES: std::cell::RefCell<
-        Option<HashMap<NodeId, (String, Expr, Expr, &'static Block)>>,
-    > = const { std::cell::RefCell::new(None) };
+    stores: HashMap<NodeId, (String, Expr, Expr, &'static Block)>,
     /// The `Schema` literal each `schemaOf<T>()` node stands for, keyed by
     /// the call node, with the target's name. See [`schema`].
-    static SCHEMAS: std::cell::RefCell<Option<HashMap<NodeId, (String, &'static Expr)>>> =
+    schemas: HashMap<NodeId, (String, &'static Expr)>,
+}
+
+thread_local! {
+    /// The open [`Memo`]'s expansions; `None` outside one.
+    static MEMOS: std::cell::RefCell<Option<std::sync::Arc<Memos>>> =
         const { std::cell::RefCell::new(None) };
+    /// Whether this thread reads a lent memo ([`Lent::enter`]).
+    static FROZEN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Whether a site missed the lent memo ([`missed`]).
+    static MISSED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// The error a site answers where the lent memo has no expansion for it.
+const LENT_MISS: &str = "a projection site the lent memo has not expanded";
+
+fn read<T>(f: impl FnOnce(&Memos) -> Option<T>) -> Option<T> {
+    MEMOS.with(|m| f(m.borrow().as_deref()?))
+}
+
+fn insert(f: impl FnOnce(&mut Memos)) {
+    MEMOS.with(|m| {
+        if let Some(m) = m.borrow_mut().as_mut() {
+            f(std::sync::Arc::make_mut(m));
+        }
+    });
+}
+
+/// Whether this thread reads a lent memo, which expands nothing. A miss is
+/// recorded for [`missed`] instead, so node ids are made on the loading
+/// thread alone, in its order.
+fn frozen_miss() -> bool {
+    let frozen = FROZEN.with(|f| f.get());
+    if frozen {
+        MISSED.with(|m| m.set(true));
+    }
+    frozen
+}
+
+/// This thread's input to building a body of the program it loaded: the
+/// open [`Memo`]. Another thread reads it through [`Lent::enter`].
+pub struct Lent {
+    memos: Option<std::sync::Arc<Memos>>,
+    frozen: bool,
+}
+
+pub fn lend() -> Lent {
+    Lent {
+        memos: MEMOS.with(|m| m.borrow().clone()),
+        frozen: true,
+    }
+}
+
+impl Lent {
+    /// Makes this thread read `self` until the guard drops. A site the memo
+    /// has not expanded expands nothing under it: the site answers an error
+    /// and [`missed`] says so, and the caller builds that body again on the
+    /// loading thread.
+    pub fn enter(&self) -> Entered {
+        Entered(Some(swap(Lent {
+            memos: self.memos.clone(),
+            frozen: true,
+        })))
+    }
+}
+
+/// Installs `lent` on this thread and returns what it replaced.
+fn swap(lent: Lent) -> Lent {
+    let was = Lent {
+        memos: MEMOS.with(|m| m.replace(lent.memos)),
+        frozen: FROZEN.with(|f| f.replace(lent.frozen)),
+    };
+    MISSED.with(|m| m.set(false));
+    was
+}
+
+/// Restores what [`Lent::enter`] replaced when it drops.
+pub struct Entered(Option<Lent>);
+
+impl Drop for Entered {
+    fn drop(&mut self) {
+        if let Some(was) = self.0.take() {
+            swap(was);
+        }
+    }
+}
+
+/// Whether a site missed the lent memo since the last call; clears it.
+pub fn missed() -> bool {
+    MISSED.with(|m| m.replace(false))
 }
 
 thread_local! {
@@ -260,10 +348,7 @@ impl Memo {
     /// Runs `load` under a new memo and returns what it loaded with the
     /// memo, which must outlive every compile of it.
     pub fn load<P, E>(load: impl FnOnce() -> Result<P, E>) -> Result<(P, Self), E> {
-        MEMO.with(|m| *m.borrow_mut() = Some(HashMap::new()));
-        OPT_MEMO.with(|m| *m.borrow_mut() = Some(HashMap::new()));
-        STORES.with(|m| *m.borrow_mut() = Some(HashMap::new()));
-        SCHEMAS.with(|m| *m.borrow_mut() = Some(HashMap::new()));
+        MEMOS.with(|m| *m.borrow_mut() = Some(Default::default()));
         let memo = Memo(());
         Ok((load()?, memo))
     }
@@ -271,10 +356,7 @@ impl Memo {
 
 impl Drop for Memo {
     fn drop(&mut self) {
-        MEMO.with(|m| *m.borrow_mut() = None);
-        OPT_MEMO.with(|m| *m.borrow_mut() = None);
-        STORES.with(|m| *m.borrow_mut() = None);
-        SCHEMAS.with(|m| *m.borrow_mut() = None);
+        MEMOS.with(|m| *m.borrow_mut() = None);
     }
 }
 
@@ -282,31 +364,33 @@ impl Drop for Memo {
 /// expanded once while a [`Memo`] is open so the checker types the nodes the
 /// lowering walks. `None` outside a memo.
 pub fn schema(call: &Expr, decl: &TypeDecl) -> Option<&'static Expr> {
-    SCHEMAS.with(|m| {
-        let mut m = m.borrow_mut();
-        let m = m.as_mut()?;
-        let key = call.id();
-        if let Some((_, e)) = m.get(&key).filter(|(n, _)| *n == decl.name) {
-            return Some(*e);
-        }
-        let mut lit = crate::types::schema_struct_lit(decl);
-        numbered(|n| n.expr(&mut lit));
-        let e: &'static Expr = Box::leak(Box::new(lit));
-        m.insert(key, (decl.name.clone(), e));
-        Some(e)
-    })
+    let key = call.id();
+    let hit = read(|m| {
+        let found = m.schemas.get(&key).filter(|(n, _)| *n == decl.name);
+        Some(found.map(|(_, e)| *e))
+    })?;
+    if hit.is_some() {
+        return hit;
+    }
+    let mut lit = crate::types::schema_struct_lit(decl);
+    numbered(|n| n.expr(&mut lit));
+    let e: &'static Expr = Box::leak(Box::new(lit));
+    insert(|m| {
+        m.schemas.insert(key, (decl.name.clone(), e));
+    });
+    Some(e)
 }
 
 /// Returns the literal [`schema`] expanded for `call`.
 pub fn schema_at(call: &Expr) -> Option<&'static Expr> {
     let key = call.id();
-    SCHEMAS.with(|m| m.borrow().as_ref()?.get(&key).map(|(_, e)| *e))
+    read(|m| m.schemas.get(&key).map(|(_, e)| *e))
 }
 
 /// Whether a [`Memo`] is open. A projection store is expanded only then;
 /// without one (the LSP) it would leak a tree per keystroke.
 pub fn memo_open() -> bool {
-    STORES.with(|m| m.borrow().is_some())
+    MEMOS.with(|m| m.borrow().is_some())
 }
 
 /// Returns the shared expansion for `key`, or `build`'s, leaked.
@@ -316,13 +400,15 @@ fn memo(
     args: &[Expr],
     build: impl FnOnce() -> Result<Projection, String>,
 ) -> Result<&'static Projection, String> {
-    let hit = MEMO.with(|m| {
-        let m = m.borrow();
-        let e = m.as_ref()?.get(&key)?;
+    let hit = read(|m| {
+        let e = m.sites.get(&key)?;
         (e.recv == *recv && e.args == args).then_some(e.tree)
     });
     if let Some(t) = hit {
         return Ok(t);
+    }
+    if frozen_miss() {
+        return Err(LENT_MISS.to_string());
     }
     let mut built = build()?;
     numbered(|n| {
@@ -330,17 +416,15 @@ fn memo(
         n.expr(&mut built.place);
     });
     let tree: &'static Projection = Box::leak(Box::new(built));
-    MEMO.with(|m| {
-        if let Some(m) = m.borrow_mut().as_mut() {
-            m.insert(
-                key,
-                Expansion {
-                    recv: recv.clone(),
-                    args: args.to_vec(),
-                    tree,
-                },
-            );
-        }
+    insert(|m| {
+        m.sites.insert(
+            key,
+            Expansion {
+                recv: recv.clone(),
+                args: args.to_vec(),
+                tree,
+            },
+        );
     });
     Ok(tree)
 }
@@ -390,13 +474,11 @@ pub fn store_index(
     };
     numbered(|n| n.block(&mut built));
     let blk: &'static Block = Box::leak(Box::new(built));
-    STORES.with(|m| {
-        if let Some(m) = m.borrow_mut().as_mut() {
-            m.insert(
-                index.id(),
-                (name.to_string(), index.clone(), value.clone(), blk),
-            );
-        }
+    insert(|m| {
+        m.stores.insert(
+            index.id(),
+            (name.to_string(), index.clone(), value.clone(), blk),
+        );
     });
     Ok(Some(blk))
 }
@@ -405,9 +487,8 @@ pub fn store_index(
 /// statement but not the receiver's type (the lowering, `movecheck`). A hit
 /// must match the whole site, as in [`memo`].
 pub fn stored(name: &str, index: &Expr, value: &Expr) -> Option<&'static Block> {
-    STORES.with(|m| {
-        let m = m.borrow();
-        let (n, i, v, blk) = m.as_ref()?.get(&index.id())?;
+    read(|m| {
+        let (n, i, v, blk) = m.stores.get(&index.id())?;
         (n == name && i == index && v == value).then_some(*blk)
     })
 }
@@ -938,32 +1019,22 @@ pub fn all(p: &Program) -> impl Iterator<Item = (&ImplBlock, &Function)> {
         .flat_map(|i| i.places.iter().map(move |f| (i, f)))
 }
 
-thread_local! {
-    /// The user projection names of the program under check, set
-    /// by [`note_place_names`]. A name is an element read like `@at` at every
-    /// site, whatever the receiver: that only widens a borrow verdict.
-    static PLACE_NAMES: std::cell::RefCell<std::collections::HashSet<String>> =
-        std::cell::RefCell::new(std::collections::HashSet::new());
-}
-
-/// Whether `name` is a user projection's name.
-pub(crate) fn named_projection(name: &str) -> bool {
-    PLACE_NAMES.with(|s| s.borrow().contains(name))
-}
-
-/// `@at`, or a user projection's own name: an element read either way.
-pub(crate) fn projection_call(name: &str) -> bool {
-    name == AT || named_projection(name)
+/// `@at`, or one of `places`, the program's user projection names
+/// ([`crate::own::Ownership::place_names`]): an element read either way. A
+/// name is an element read at every site, whatever the receiver: that only
+/// widens a borrow verdict.
+pub fn projection_call(name: &str, places: &HashSet<String>) -> bool {
+    name == AT || places.contains(name)
 }
 
 /// Returns the place an element read looks into, as `(root name, quoted
 /// path)`: `xs[i].key` is `("xs", "xs[i].key")`. [`crate::ast::place_path`]
 /// answers `None` for these, because `xs[i]` is a call to `@at`.
-pub fn element_path(e: &Expr) -> Option<(String, String)> {
+pub fn element_path(e: &Expr, places: &HashSet<String>) -> Option<(String, String)> {
     match e {
-        Expr::Call { name, args, .. } if projection_call(name) => {
+        Expr::Call { name, args, .. } if projection_call(name, places) => {
             let a = args.first()?;
-            let (root, path) = crate::ast::place_path(a).or_else(|| element_path(a))?;
+            let (root, path) = crate::ast::place_path(a).or_else(|| element_path(a, places))?;
             // Quoted as the reader wrote it: `xs[i]`, or `xs.name(..)`.
             if name == AT {
                 Some((root, format!("{path}[{}]", index_text(args.get(1)))))
@@ -973,7 +1044,7 @@ pub fn element_path(e: &Expr) -> Option<(String, String)> {
         }
         // A field of an element, `fs[0].key`, which `place_path` cannot reach.
         Expr::Field { expr, field, .. } => {
-            let (root, path) = element_path(expr)?;
+            let (root, path) = element_path(expr, places)?;
             Some((root, format!("{path}.{field}")))
         }
         _ => None,
@@ -990,16 +1061,9 @@ fn index_text(e: Option<&Expr>) -> String {
     }
 }
 
-/// Records `program`'s projection names. Call it per analysis, so the language
-/// server answers for the program in hand.
-pub fn note_place_names(program: &Program) {
-    PLACE_NAMES.with(|s| {
-        *s.borrow_mut() = program
-            .impls
-            .iter()
-            .flat_map(|i| i.places.iter().map(|p| p.name.clone()))
-            .collect();
-    });
+/// Returns `program`'s user projection names.
+pub fn place_names(program: &Program) -> HashSet<String> {
+    all(program).map(|(_, f)| f.name.clone()).collect()
 }
 
 #[cfg(test)]
@@ -1022,6 +1086,42 @@ mod tests {
         assert_eq!(p.impls[0].places.len(), 1);
         assert_eq!(p.impls[0].methods.len(), 0);
         assert!(!p.functions.iter().any(|f| f.name.contains("__at")));
+    }
+
+    #[test]
+    fn a_lent_memo_expands_nothing_and_says_so() {
+        let p = parse(
+            "type Ring = { data: Array<Int64> }
+             impl Index for Ring {
+                 fn at(read self, i: Int64) -> read Int64 { return self.data[i] }
+             }
+             fn main() { print(1) }
+",
+        );
+        let ring = Type::Named("Ring".into());
+        let recv = Expr::Var {
+            id: Id::NEW,
+            name: "r".into(),
+            line: 1,
+        };
+        let at = || {
+            site(
+                &p.impls,
+                Some(&ring),
+                "at",
+                &recv,
+                &[Expr::Int(0, Id::NEW)],
+                1,
+            )
+        };
+        let ((), _memo) = Memo::load(|| Ok::<(), ()>(())).unwrap();
+        let lent = lend();
+        let entered = lent.enter();
+        assert_eq!(at().err().as_deref(), Some(LENT_MISS));
+        assert!(missed());
+        drop(entered);
+        assert!(at().is_ok_and(|t| t.is_some()));
+        assert!(!missed());
     }
 
     #[test]

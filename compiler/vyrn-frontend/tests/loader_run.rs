@@ -61,13 +61,13 @@ mod tests {
                     b.name
                 );
             }
-            assert_eq!(routed_builtin(b.name), b.route);
+            assert_eq!(routed_builtin(b.name, false), b.route);
         }
         for rt in RT_MODULES {
             assert!(rt.prefix.ends_with('$'), "`{}` must end in `$`", rt.prefix);
             for b in rt.desugared {
                 assert!(
-                    routed_builtin(b).is_none(),
+                    routed_builtin(b, false).is_none(),
                     "`{b}` is a desugar, not a route"
                 );
             }
@@ -83,13 +83,13 @@ mod tests {
                  user declaration of that name would be silently unreachable"
             );
         }
-        assert!(routed_builtin("print").is_none());
+        assert!(routed_builtin("print", false).is_none());
         // A builtin with a free spelling needs no route; an import does the same work.
         // `@charCount` has no free spelling. `lineAt` and `colAt` route anyway:
         // programs call them without an import.
         for (name, gone) in vyrn_frontend::checker::MOVED_TO_STD {
             assert!(
-                routed_builtin(name).is_none(),
+                routed_builtin(name, false).is_none(),
                 "{}; a route for it would shadow what the hint sends the \
                  reader to",
                 gone.rule(name).render()
@@ -113,7 +113,7 @@ mod tests {
         // Both spellings that reach it, and neither is a route: the float case is
         // one case of a type-directed builtin.
         assert!(num.desugared.contains(&"@str") && num.desugared.contains(&"print"));
-        assert!(routed_builtin(F64_STR).is_none());
+        assert!(routed_builtin(F64_STR, false).is_none());
     }
 
     /// [`STRING_FAULT`] needs the same guard: three engines call it, and a prefix
@@ -132,7 +132,7 @@ mod tests {
         // The mention that links the module; a desugar, not a route, because each
         // engine builds it.
         assert!(text.desugared.contains(&"stringFromBytes"));
-        assert!(routed_builtin("stringFromBytes").is_none());
+        assert!(routed_builtin("stringFromBytes", false).is_none());
     }
 
     pub(super) fn map(entries: &[(&str, &str)]) -> MapResolver {

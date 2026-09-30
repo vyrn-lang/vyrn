@@ -120,8 +120,11 @@ the playground serves an embedded `std/`. The loader:
 3. `vyrn_lower::refusals`: `vyrn_lower::analyze`, which runs the placer and
    the judgments, then one list of ownership refusals in source order.
    `analyze` returns the World (`vyrn_lower::World`): the `Ownership` with
-   the checker's record, the core's bodies and facts, and both refusal
-   lists. The emitter reads the same World, handed on from the load through
+   the checker's record, the function table, the call relation
+   (`World::callees` and `World::callers`), the core's bodies and facts,
+   and both refusal lists. The plan's rows and the bodies are keyed by
+   `FnId`; a reader turns a name into an id once, with `World::fn_id`. The
+   emitter reads the same World, handed on from the load through
    `own::Memo`.
 4. `floor::decide`: whether each artifact's target provides what its code
    reaches.
@@ -405,6 +408,8 @@ Rust style).
 |---|---|
 | `VYRN_NO_KERNEL=1` | stands the kernel aside, to attribute a refusal |
 | `VYRN_KERNEL_TRACE=1` | prints each release the placer adds or cannot place |
+| `VYRN_THREADS=<n>` | builds and places bodies on `n` threads; `1` keeps a trace in body order |
+| `VYRN_SHUFFLE=<seed>` | permutes the order the placer's threads take bodies in |
 | `VYRN_LEAK_CHECK=1` | builds with the free audit |
 | `VYRN_WASM_NAMES=1` | writes function names into the module |
 | `VYRN_GENWASM_TRACE=1` | prints the generation engine's phase timings |

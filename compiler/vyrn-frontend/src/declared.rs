@@ -1,7 +1,7 @@
 //! The program-level tables the ownership passes read: for a type, whether it
 //! owns heap, how it is released and whether it must be used ([`Owned`]); for
 //! a program, its declarations, parameter types, constructors and capabilities
-//! ([`Declared`], [`arg_caps`]). Each reads a declaration; the type of an
+//! ([`Declared`], [`ArgCaps`]). Each reads a declaration; the type of an
 //! expression is the checker's record ([`Declared::type_of`]). `None` means
 //! "do not release" and "does not move", so an unnamed type leaks, which is
 //! safe.
@@ -24,14 +24,16 @@ pub struct Owned {
     types: HashMap<String, TypeDecl>,
     /// Whether a type parameter answers as a String does ([`Owned::as_written`]).
     params_own: bool,
-    /// [`Owned::name_facts`] by type, filled on first ask. A clone shares it,
-    /// because a clone answers the same; [`Owned::as_written`] starts its own.
-    name_facts: std::sync::Arc<std::sync::Mutex<HashMap<Type, NameFacts>>>,
 }
 
 /// What a binding of a type needs from its release: whether it owns heap,
 /// whether it is linear, and its [`Owned::declared_releases`].
 pub type NameFacts = (bool, bool, Vec<String>);
+
+/// [`Owned::name_facts`] of one program's tables by type, indexed by
+/// `params_own`. The caller owns it, so each thread that builds bodies keeps
+/// its own.
+pub type NameMemo = [HashMap<Type, NameFacts>; 2];
 
 impl Owned {
     pub fn new(program: &Program) -> Self {
@@ -63,7 +65,6 @@ impl Owned {
                 .collect(),
             types: crate::types::decl_map(program),
             params_own: false,
-            name_facts: Default::default(),
         }
     }
 
@@ -73,7 +74,6 @@ impl Owned {
     pub fn as_written(&self) -> Self {
         Owned {
             params_own: true,
-            name_facts: Default::default(),
             ..self.clone()
         }
     }
@@ -137,10 +137,11 @@ impl Owned {
     }
 
     /// [`Owned::owns_heap`], [`Owned::linear_kind`] and
-    /// [`Owned::declared_releases`] of `ty`, each walk made once per type.
-    pub fn name_facts(&self, ty: &Type) -> NameFacts {
-        let memo = || (self.name_facts.lock()).unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(f) = memo().get(ty) {
+    /// [`Owned::declared_releases`] of `ty`, each walk made once per type and
+    /// `memo`. `memo` serves this program's tables only.
+    pub fn name_facts(&self, ty: &Type, memo: &mut NameMemo) -> NameFacts {
+        let memo = &mut memo[usize::from(self.params_own)];
+        if let Some(f) = memo.get(ty) {
             return f.clone();
         }
         let f = (
@@ -148,7 +149,7 @@ impl Owned {
             self.linear_kind(ty).is_some(),
             self.declared_releases(ty),
         );
-        memo().insert(ty.clone(), f.clone());
+        memo.insert(ty.clone(), f.clone());
         f
     }
 
@@ -550,42 +551,97 @@ impl Declared {
     }
 }
 
-/// Returns each callee's parameter capabilities: every function's, then every
-/// protocol method's (receiver first) over them, since a method call arrives
-/// under its surface name. `movecheck::arg_verdict` and the core both read it.
-pub fn arg_caps(program: &Program) -> HashMap<String, Vec<Capability>> {
-    let mut caps: HashMap<String, Vec<Capability>> = program
-        .functions
-        .iter()
-        .map(|f| {
-            (
-                f.name.clone(),
-                f.params.iter().map(|p| p.capability).collect(),
-            )
-        })
-        .collect();
-    for p in &program.protocols {
-        for m in &p.methods {
-            let mut cs = vec![m.recv];
-            cs.extend(m.param_caps.iter().copied());
-            caps.insert(m.name.clone(), cs);
-        }
-    }
-    caps
+/// Whose capability row answers a call: the callee as the core resolved it,
+/// before dispatch.
+#[derive(Clone, Copy, Debug)]
+pub enum CapsOf {
+    /// A function the program declares.
+    Fn(FnId),
+    /// A protocol member, receiver first, as a caller reads it before
+    /// dispatch (`MethodSig::recv`).
+    Method(MethodId),
+    /// A seeded builtin's row ([`crate::prelude::signature`]).
+    Builtin(&'static Function),
+    /// No row: a call through a value, a constructor, a reserved name.
+    None,
 }
 
-/// Returns the capability of one position: the declaration's, else the seeded
-/// row's. `None` is [`crate::movecheck::ArgVerdict::Unknown`], which frees
-/// nothing.
-pub fn arg_cap(
-    caps: &HashMap<String, Vec<Capability>>,
-    callee: &str,
-    ix: usize,
-) -> Option<Capability> {
-    caps.get(callee)
-        .and_then(|c| c.get(ix))
-        .copied()
-        .or_else(|| crate::prelude::capability(callee, ix))
+/// Every callee's parameter capabilities, keyed by the resolved callee.
+/// `movecheck::arg_verdict` and the core both read it. It reads only
+/// declarations, so one table serves every body.
+#[derive(Clone, Default)]
+pub struct ArgCaps {
+    /// By [`FnId`].
+    fns: Vec<Vec<Capability>>,
+    /// By [`MethodId`]: protocol, then member.
+    methods: Vec<Vec<Vec<Capability>>>,
+    /// The first function under each name, then the last protocol member,
+    /// as a call site's name resolves ([`ArgCaps::named`]).
+    names: HashMap<String, CapsOf>,
+}
+
+impl ArgCaps {
+    pub fn new(program: &Program) -> ArgCaps {
+        let fns: Vec<Vec<Capability>> = (program.functions.iter())
+            .map(|f| f.params.iter().map(|p| p.capability).collect())
+            .collect();
+        let methods = (program.protocols.iter())
+            .map(|p| {
+                (p.methods.iter())
+                    .map(|m| {
+                        std::iter::once(m.recv)
+                            .chain(m.param_caps.iter().copied())
+                            .collect()
+                    })
+                    .collect()
+            })
+            .collect();
+        let mut names = HashMap::new();
+        for (i, p) in program.protocols.iter().enumerate() {
+            for (j, m) in p.methods.iter().enumerate() {
+                let id = MethodId {
+                    protocol: i as u32,
+                    member: j as u32,
+                };
+                names.insert(m.name.clone(), CapsOf::Method(id));
+            }
+        }
+        for (i, f) in program.functions.iter().enumerate().rev() {
+            names.insert(f.name.clone(), CapsOf::Fn(FnId::nth(i)));
+        }
+        ArgCaps {
+            fns,
+            methods,
+            names,
+        }
+    }
+
+    /// Resolves a call site's name once: a function the program declares,
+    /// else a protocol member, else a seeded builtin.
+    pub fn named(&self, name: &str) -> CapsOf {
+        match self.names.get(name) {
+            Some(c) => *c,
+            None => crate::prelude::signature(name).map_or(CapsOf::None, CapsOf::Builtin),
+        }
+    }
+
+    /// The capability of position `ix` of a call to `of`. `None` is
+    /// [`crate::movecheck::ArgVerdict::Unknown`], which frees nothing.
+    pub fn at(&self, of: CapsOf, ix: usize) -> Option<Capability> {
+        match of {
+            CapsOf::Fn(id) => self.fns[id.index()].get(ix).copied(),
+            CapsOf::Method(m) => self.methods[m.protocol as usize][m.member as usize]
+                .get(ix)
+                .copied(),
+            CapsOf::Builtin(f) => f.params.get(ix).map(|p| p.capability),
+            CapsOf::None => None,
+        }
+    }
+
+    /// Whether every position of the function `id` reads.
+    pub fn reads_all(&self, id: FnId) -> bool {
+        self.fns[id.index()].iter().all(|c| *c == Capability::Read)
+    }
 }
 
 #[cfg(test)]

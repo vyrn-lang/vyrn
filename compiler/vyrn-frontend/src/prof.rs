@@ -60,16 +60,34 @@ impl Drop for Phase {
 /// knows it is profiling (`vyrn run --profile`). [`phase`] is the pipeline's
 /// hook and obeys `VYRN_BUILD_PROFILE`.
 pub fn charge(name: &'static str, span: Duration) {
+    add(name, span, 1);
+}
+
+fn add(name: &'static str, span: Duration, count: u64) {
     PHASES.with(|p| {
         let mut p = p.borrow_mut();
         match p.iter_mut().find(|(n, _, _)| *n == name) {
             Some(row) => {
                 row.1 += span;
-                row.2 += 1;
+                row.2 += count;
             }
-            None => p.push((name, span, 1)),
+            None => p.push((name, span, count)),
         }
     });
+}
+
+/// This thread's phases, taken, for [`absorb`] on the thread that prints the
+/// table.
+pub fn take_phases() -> Vec<(&'static str, Duration, u64)> {
+    PHASES.with(|p| std::mem::take(&mut *p.borrow_mut()))
+}
+
+/// Adds another thread's [`take_phases`] to this thread's table. A phase run
+/// on many threads is charged the sum of their spans.
+pub fn absorb(rows: Vec<(&'static str, Duration, u64)>) {
+    for (name, span, count) in rows {
+        add(name, span, count);
+    }
 }
 
 /// Starts timing `name`, or returns `None` when nothing is armed: the only
@@ -80,8 +98,7 @@ pub fn phase(name: &'static str) -> Option<Phase> {
 
 /// Returns the phase table and clears it. Empty when nothing is armed.
 pub fn phase_table() -> String {
-    let rows: Vec<(&'static str, Duration, u64)> =
-        PHASES.with(|p| std::mem::take(&mut *p.borrow_mut()));
+    let rows = take_phases();
     if rows.is_empty() {
         return String::new();
     }

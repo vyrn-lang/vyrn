@@ -135,7 +135,7 @@ fn run_corpus() {
                 }
                 Ok(top) => {
                     for body in top.frames() {
-                        match vyrn_lower::kernel::check(body) {
+                        match vyrn_lower::kernel::check(body, &Default::default()) {
                             Ok(()) => accepted += 1,
                             Err(r) => refused.push(format!(
                                 "{file}: <module state> {}: line {}: {}",
@@ -150,14 +150,7 @@ fn run_corpus() {
         }
         // A `test` or `bench` body is a body but no instance: neither is a function.
         for ob in &lowered.bodies {
-            match vyrn_lower::core::build_outside(
-                &program,
-                &own,
-                &ob.name,
-                ob.module.clone(),
-                ob.block,
-                &ob.facts,
-            ) {
+            match vyrn_lower::core::build_outside(&program, &own, &mut Default::default(), ob) {
                 Err(g) => {
                     if let Some(m) = &g.rule {
                         refused.push(format!("{file}: {}: line {}: {m}", ob.name, g.line));
@@ -173,7 +166,7 @@ fn run_corpus() {
                 }
                 Ok(top) => {
                     for body in top.frames() {
-                        match vyrn_lower::kernel::check(body) {
+                        match vyrn_lower::kernel::check(body, &Default::default()) {
                             Ok(()) => accepted += 1,
                             Err(r) => refused.push(format!(
                                 "{file}: {}: line {}: {}",
@@ -210,7 +203,7 @@ fn run_corpus() {
                 }
                 Ok(top) => {
                     for body in top.frames() {
-                        match vyrn_lower::kernel::check(body) {
+                        match vyrn_lower::kernel::check(body, &Default::default()) {
                             Ok(()) => accepted += 1,
                             Err(r) => {
                                 let tag = format!("{file}:{}", body.name);
