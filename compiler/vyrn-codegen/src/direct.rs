@@ -1884,8 +1884,8 @@ fn lower_body(
         scratch: HashMap::new(),
         rel_slots: HashMap::new(),
         // The release order, decided in `own::place_body`.
-        placed: (cx.world.ownership.releases)
-            .get(&owner)
+        placed: (cx.world.fn_id(&owner))
+            .and_then(|id| cx.world.ownership.releases.get(&id))
             .map(|steps| vyrn_frontend::own::placed(steps))
             .unwrap_or_default(),
         region_depth: 0,

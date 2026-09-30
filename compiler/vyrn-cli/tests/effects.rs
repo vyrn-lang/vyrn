@@ -320,14 +320,7 @@ fn run_corpus() {
             }
         }
         for ob in &lowered.bodies {
-            match vyrn_lower::core::build_outside(
-                &program,
-                &own,
-                &ob.name,
-                ob.module.clone(),
-                ob.block,
-                &ob.facts,
-            ) {
+            match vyrn_lower::core::build_outside(&program, &own, ob) {
                 Ok(b) => outside.push(b),
                 Err(g) => {
                     if show_gaps.as_deref().is_some_and(|w| g.what.contains(w)) {
@@ -352,6 +345,7 @@ fn run_corpus() {
         for pr in &lowered.places {
             let inst = vyrn_lower::Instance {
                 func: pr.func,
+                func_id: pr.id,
                 type_args: Vec::new(),
                 subst: Default::default(),
                 facts: pr.facts.clone(),

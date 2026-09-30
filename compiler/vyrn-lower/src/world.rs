@@ -6,7 +6,7 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, OnceLock};
 
-use vyrn_frontend::ast::Program;
+use vyrn_frontend::ast::{FnId, Program, Type};
 use vyrn_frontend::core::{Body, Facts};
 use vyrn_frontend::diagnostics::{Diagnostic, Severity};
 use vyrn_frontend::movecheck::Refusal;
@@ -20,16 +20,76 @@ pub struct World {
     /// The core's answers per node. `None` for an analysis that feeds no
     /// emitter ([`vyrn_frontend::movecheck::emitting`]).
     pub facts: Option<Facts>,
-    /// The core's bodies by the name each is emitted under ([`crate::spell`]),
-    /// which [`World::body_of`] serves. `None` under a name two bodies share.
-    /// Empty when `facts` is `None`.
-    pub(crate) bodies: HashMap<String, Option<Stated>>,
+    /// The function table: every function, instance and frame the analysis
+    /// met, numbered as [`Fns`] says.
+    pub(crate) fns: Fns,
+    /// The core's bodies, which [`World::body_of`] serves. `None` under a
+    /// name two bodies share. Empty when `facts` is `None`.
+    pub(crate) bodies: HashMap<FnId, Option<Stated>>,
     /// The kernel's hard refusals in the order the placer met them: a double
     /// free, a use after release, a join whose edges disagree, and a rule the
     /// core states about a construct it does lower.
     pub(crate) refusals: Vec<Refusal>,
     /// What the typed judgment refused, as `vyrn check` words it.
     pub(crate) typed: Vec<Diagnostic>,
+}
+
+/// One row of the World's function table.
+#[derive(Debug)]
+pub struct FnRow {
+    /// The name the function is emitted and looked up under ([`crate::spell`]).
+    pub name: String,
+    /// An instance of a generic: the generic's row and the type arguments.
+    pub generic: Option<(FnId, Vec<Type>)>,
+}
+
+/// The function rows in [`FnId`] order: [`crate::Lowered::source`], then
+/// each instance, lambda frame and the module state in the order the placer
+/// meets it. Deterministic, so one program numbers alike on every run; no
+/// output is read in id order.
+#[derive(Default)]
+pub(crate) struct Fns {
+    rows: Vec<FnRow>,
+    /// The first row under each name. A non-generic instance and its frame
+    /// are the function's own row.
+    ids: HashMap<String, FnId>,
+}
+
+impl Fns {
+    /// The table of [`crate::Lowered::source`], one row per name even where a
+    /// projection shares a function's name.
+    pub(crate) fn source(names: &[String]) -> Fns {
+        let mut fns = Fns::default();
+        for name in names {
+            fns.push(name.clone(), None);
+        }
+        fns
+    }
+
+    /// The row named `name`, added with `generic` when there is none.
+    pub(crate) fn add(&mut self, name: &str, generic: Option<(FnId, Vec<Type>)>) -> FnId {
+        match self.ids.get(name) {
+            Some(&id) => id,
+            None => self.push(name.to_string(), generic),
+        }
+    }
+
+    /// The row of `inst`: its function's own row when it has no type
+    /// arguments.
+    pub(crate) fn instance(&mut self, inst: &crate::Instance) -> FnId {
+        if inst.type_args.is_empty() {
+            return inst.func_id;
+        }
+        let generic = Some((inst.func_id, inst.type_args.clone()));
+        self.add(&inst.spelling(), generic)
+    }
+
+    fn push(&mut self, name: String, generic: Option<(FnId, Vec<Type>)>) -> FnId {
+        let id = FnId::nth(self.rows.len());
+        self.ids.entry(name.clone()).or_insert(id);
+        self.rows.push(FnRow { name, generic });
+        id
+    }
 }
 
 /// One body with its check rows stated, and the same body decided
@@ -53,12 +113,28 @@ impl World {
         }
     }
 
-    /// The core's body for the function emitted under `name`: [`crate::spell`]
-    /// of the instance (`max<Int64>`, `main@lambda:26:13`, `test@1`, or the
-    /// empty name for module state). `None` for a gap and for a name two
-    /// bodies share; a reader then walks the source.
+    /// The id of the function emitted under `name`: [`crate::spell`] of the
+    /// instance (`max<Int64>`, `main@lambda:26:13`, `test@1`, or the empty
+    /// name for module state), or a function's own name. A reader outside
+    /// the World looks a name up once, here.
+    pub fn fn_id(&self, name: &str) -> Option<FnId> {
+        self.fns.ids.get(name).copied()
+    }
+
+    /// The row of `id`.
+    ///
+    /// # Panics
+    ///
+    /// If `id` is not this World's.
+    pub fn fn_row(&self, id: FnId) -> &FnRow {
+        &self.fns.rows[id.index()]
+    }
+
+    /// The core's body for the function emitted under `name` ([`World::fn_id`]).
+    /// `None` for a gap and for a name two bodies share; a reader then walks
+    /// the source.
     pub fn body_of(&self, name: &str) -> Option<&Body> {
-        let s = self.bodies.get(name)?.as_ref()?;
+        let s = self.bodies.get(&self.fn_id(name)?)?.as_ref()?;
         if !crate::core::decides() {
             return Some(&s.body);
         }
@@ -110,13 +186,18 @@ impl World {
     ///
     /// # Panics
     ///
-    /// If a body is served under a name other than its own, if bodies exist
-    /// without facts, or if a refusal is not an error.
+    /// If a name's id is not its row's, if a body is served under a name
+    /// other than its own, if bodies exist without facts, or if a refusal is
+    /// not an error.
     pub fn check(&self) {
-        for (name, s) in &self.bodies {
+        for (name, id) in &self.fns.ids {
+            assert_eq!(&self.fn_row(*id).name, name, "a name's id is another row");
+        }
+        for (id, s) in &self.bodies {
             if let Some(s) = s {
                 assert_eq!(
-                    &s.body.name, name,
+                    s.body.name,
+                    self.fn_row(*id).name,
                     "a core body is served under another name"
                 );
             }

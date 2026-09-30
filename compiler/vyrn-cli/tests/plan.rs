@@ -28,30 +28,30 @@ fn analyze_world(src: &str) -> (std::sync::Arc<vyrn_lower::World>, Program) {
 
 /// The kind each binding of `which` is released with, by binding key. A
 /// binding released at several exits carries one kind.
-fn placed(o: &Ownership, which: &str) -> HashMap<NodeId, DropKind> {
-    o.releases
-        .get(which)
+fn placed(w: &vyrn_lower::World, which: &str) -> HashMap<NodeId, DropKind> {
+    (w.fn_id(which))
+        .and_then(|id| w.ownership.releases.get(&id))
         .map(|rows| rows.iter().map(|r| (r.binding, r.kind.clone())).collect())
         .unwrap_or_default()
 }
 
 /// How many bindings in function `which` the frame reclaims.
 fn drop_count(src: &str, which: &str) -> usize {
-    let (o, _) = analyze_src(src);
-    placed(&o, which).len()
+    let (w, _) = analyze_world(src);
+    placed(&w, which).len()
 }
 
 fn drop_kinds(src: &str, which: &str) -> Vec<DropKind> {
-    let (o, _) = analyze_src(src);
-    placed(&o, which).into_values().collect()
+    let (w, _) = analyze_world(src);
+    placed(&w, which).into_values().collect()
 }
 
 /// The release for every `let` in `which`, in source order; `None` where the
 /// frame reclaims nothing.
 fn kepts(src: &str, which: &str) -> Vec<Option<DropKind>> {
-    let (o, p) = analyze_src(src);
+    let (w, p) = analyze_world(src);
     let f = p.functions.iter().find(|f| f.name == which).unwrap();
-    let d = placed(&o, which);
+    let d = placed(&w, which);
     let mut lets = Vec::new();
     let_stmts(&f.body, &mut lets);
     lets.iter().map(|s| d.get(&s.id()).cloned()).collect()
@@ -73,7 +73,7 @@ fn opt_row(t: Type) -> DropKind {
 
 /// Whether `main`'s frame reclaims the binding named `name` at all.
 fn reclaims(src: &str, name: &str) -> bool {
-    let (o, p) = analyze_src(src);
+    let (w, p) = analyze_world(src);
     let f = p.functions.iter().find(|f| f.name == "main").unwrap();
     let mut lets = Vec::new();
     let_stmts(&f.body, &mut lets);
@@ -81,7 +81,7 @@ fn reclaims(src: &str, name: &str) -> bool {
         .iter()
         .find(|s| matches!(s, Stmt::Let { name: n, .. } if n == name))
         .unwrap();
-    placed(&o, "main").contains_key(&s.id())
+    placed(&w, "main").contains_key(&s.id())
 }
 
 /// Every `let` in `body`, in source order, nested blocks included.
@@ -360,7 +360,7 @@ fn a_consuming_loop_gives_its_container_back_at_the_loop() {
     let src = "fn make() -> Array<String> { let mut o: Array<String> = [];                o.push(\"a\"); return o; }                fn main() -> Int64 { let xs = make(); let mut n = 0;                for x in consume xs { n = n + Int64(x.byteLength); } return n; }";
     let (w, _) = analyze_world(src);
     assert!(
-        placed(&w.ownership, "main").is_empty(),
+        placed(&w, "main").is_empty(),
         "the `let` is moved into the loop, so no exit row names it"
     );
     let facts = (w.facts.as_ref()).expect("the placer folded the core's answers");

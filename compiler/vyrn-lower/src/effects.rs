@@ -504,6 +504,7 @@ pub(crate) fn judge_built<R>(
     for pr in &lowered.places {
         let inst = crate::Instance {
             func: pr.func,
+            func_id: pr.id,
             type_args: Vec::new(),
             subst: Default::default(),
             facts: pr.facts.clone(),

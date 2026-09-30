@@ -252,7 +252,7 @@ pub struct Judged {
     pub binders: Vec<LocalBinding>,
     /// Per function, the placer's memory rows ([`crate::own::Ownership::memory`]);
     /// empty for a program the kernel did not judge.
-    pub memory: HashMap<String, Vec<crate::own::MemoryRow>>,
+    pub memory: HashMap<crate::ast::FnId, Vec<crate::own::MemoryRow>>,
 }
 
 /// Like [`analyze_linked`], but runs the pipeline `vyrn check` runs:
@@ -599,15 +599,14 @@ fn analyze_inner(
 /// `vyrn why --memory` uses.
 fn memory_notes(
     program: &crate::ast::Program,
-    memory: &HashMap<String, Vec<crate::own::MemoryRow>>,
+    memory: &HashMap<crate::ast::FnId, Vec<crate::own::MemoryRow>>,
 ) -> Vec<MemoryNote> {
     let mut out = Vec::new();
-    for f in program
-        .functions
-        .iter()
-        .filter(|f| f.module.is_none() && !f.is_extern)
-    {
-        let Some(notes) = memory.get(&f.name) else {
+    for (i, f) in program.functions.iter().enumerate() {
+        if f.module.is_some() || f.is_extern {
+            continue;
+        }
+        let Some(notes) = memory.get(&crate::ast::FnId::nth(i)) else {
             continue;
         };
         for n in notes {

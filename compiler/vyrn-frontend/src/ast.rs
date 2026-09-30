@@ -38,6 +38,28 @@ impl NodeId {
     pub const EXPANDED: u32 = 1 << 31;
 }
 
+/// Names one function for the tables keyed by function: an index into
+/// `vyrn_lower::World`'s function rows, never reused within one World.
+/// `Program::functions[i]` is `FnId(i)`; the lowering numbers the rest. A
+/// storage index, never an order, so it has no `Ord`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct FnId(pub u32);
+
+impl FnId {
+    /// The id of row `i`.
+    ///
+    /// # Panics
+    ///
+    /// Past `u32::MAX` rows, more functions than a program's memory holds.
+    pub fn nth(i: usize) -> FnId {
+        FnId(u32::try_from(i).expect("more than u32::MAX functions"))
+    }
+
+    pub fn index(self) -> usize {
+        self.0 as usize
+    }
+}
+
 /// A node's slot for its [`NodeId`]; [`NodeId::NONE`] until numbered. Any two
 /// slots compare equal, so two trees compare by structure alone. `{:?}`
 /// prints every slot alike, so a fingerprint over a tree's debug text ignores
