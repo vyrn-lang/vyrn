@@ -190,7 +190,6 @@ pub fn compile(program: &Program) -> Result<Vec<u8>, String> {
     if !program.expansions.is_shared() {
         return Err("a compile needs the load's shared projection expansions".to_string());
     }
-    crate::set_gen_host(false);
     compile_inner(program, vyrn_lower::analyze(program))
 }
 
@@ -236,8 +235,9 @@ pub fn gen_reach(program: &Program) -> std::collections::HashSet<String> {
     reach
 }
 
-/// Compiles `program` as a generator: [`compile`] plus the `vyrn_gen` imports and the
-/// lowerings that need them (`listDir`, and `Code` as an opaque `i64` handle).
+/// Compiles `program`, a generator host (`vyrn_genwasm::prepare` sets [`Host::gen`]), with the
+/// `vyrn_gen` imports and the lowerings that need them (`listDir`, and `Code` as an opaque `i64`
+/// handle).
 ///
 /// Takes a program of either table: a generator's program carries the load's, the LSP's is
 /// unshared on purpose, and the generation engine declines a refusal to the interpreter.
@@ -247,9 +247,6 @@ pub fn gen_reach(program: &Program) -> std::collections::HashSet<String> {
 /// [`GenError::Refused`] when the typed judgment refused the program, whether or not it would
 /// run, so no engine caches a module for it; [`GenError::Failed`] when a body has no lowering.
 pub fn compile_gen_host(program: &Program) -> Result<Vec<u8>, GenError> {
-    // Thread-local because `llt_of` reads it, and `llt_of` has other callers: a `Code` is an
-    // `i64` handle only here. Cleared after, so a later `compile` on this thread is unaffected.
-    crate::set_gen_host(true);
     let world = vyrn_lower::analyze(program);
     // The typed judgment's refusals, else the must-use rows: the kernel's
     // other refusals of a generator's program are not the reader's.
@@ -257,12 +254,10 @@ pub fn compile_gen_host(program: &Program) -> Result<Vec<u8>, GenError> {
         [] => world.owed_diagnostics(),
         typed => typed.to_vec(),
     };
-    let r = match refused.is_empty() {
+    match refused.is_empty() {
         true => compile_inner(program, world).map_err(GenError::Failed),
         false => Err(GenError::Refused(refused)),
-    };
-    crate::set_gen_host(false);
-    r
+    }
 }
 
 fn compile_inner(
@@ -273,7 +268,7 @@ fn compile_inner(
     // Imports first — they share the function index space with definitions, so
     // `wasm::Module` panics if one arrives late.
     let wasi = Wasi::declare(&mut m);
-    let gen = crate::gen_host().then(|| gen_imports(&mut m));
+    let gen = program.host.gen.then(|| gen_imports(&mut m));
     let oracle = (matches!(vyrn_lower::check::mode(), vyrn_lower::check::Mode::Count(_))
         && gen.is_none())
     .then(|| Oracle {
@@ -3919,7 +3914,7 @@ impl<'p> Fn_<'_, 'p> {
                 }
                 // A dispatched method or a builtin routed to a Vyrn function: the callee's
                 // signature answers.
-                _ => match vyrn_frontend::loader::routed_builtin(name, crate::gen_host())
+                _ => match vyrn_frontend::loader::routed_builtin(name, self.cx.gen.is_some())
                     .and_then(|rt| self.cx.sigs.get(rt))
                     .or_else(|| self.cx.sigs.get(name))
                 {
@@ -9361,9 +9356,9 @@ fn length_ty(field: &str, base: &Type) -> Option<Type> {
 fn builtin_spec(
     name: &str,
     argc: usize,
+    gen: bool,
 ) -> Option<(&'static [Type], Instruction<'static>, &'static Type)> {
-    let Some(Spec::Typed(params, ret)) = vyrn_lower::core::builtin_row(name, crate::gen_host())
-    else {
+    let Some(Spec::Typed(params, ret)) = vyrn_lower::core::builtin_row(name, gen) else {
         return None;
     };
     if params.len() != argc {
@@ -9454,9 +9449,9 @@ fn logs_arity(name: &str) -> usize {
 
 /// The specification row of the builtin a call row names, or `None` where the row names a
 /// function this program declares or a callee with no row.
-fn core_builtin(callee: &str, kind: Callee) -> Option<&'static Spec> {
+fn core_builtin(cx: &Cx, callee: &str, kind: Callee) -> Option<&'static Spec> {
     matches!(kind, Callee::Builtin | Callee::Reserved)
-        .then(|| vyrn_lower::core::builtin_row(callee, crate::gen_host()))
+        .then(|| vyrn_lower::core::builtin_row(callee, cx.gen.is_some()))
         .flatten()
 }
 
@@ -9930,7 +9925,7 @@ impl<'p> Fn_<'_, 'p> {
                     Rhs::Call {
                         callee, kind, args, ..
                     },
-                ) if matches!(core_builtin(callee, *kind), Some(Spec::Pulls)) => {
+                ) if matches!(core_builtin(self.cx, callee, *kind), Some(Spec::Pulls)) => {
                     let line = body.names[n.index()].line;
                     let [(Arg::Val(Val::Name(s)), _)] = args.as_slice() else {
                         return unsupported("a pull of no named stream", line);
@@ -10209,7 +10204,11 @@ impl<'p> Fn_<'_, 'p> {
                     let barrier = match rhs {
                         Rhs::Call {
                             callee, kind, args, ..
-                        } if matches!(core_builtin(callee, *kind), Some(Spec::Barrier)) => {
+                        } if matches!(
+                            core_builtin(self.cx, callee, *kind),
+                            Some(Spec::Barrier)
+                        ) =>
+                        {
                             Some(args.as_slice())
                         }
                         _ => None,
@@ -10689,8 +10688,8 @@ impl<'p> Fn_<'_, 'p> {
                 targets,
                 ..
             } => match (
-                builtin_spec(callee, args.len()),
-                core_builtin(callee, *kind),
+                builtin_spec(callee, args.len(), self.cx.gen.is_some()),
+                core_builtin(self.cx, callee, *kind),
             ) {
                 (Some((_, _, ret)), _) | (None, Some(Spec::Renders(ret) | Spec::Effect(ret))) => {
                     Ok(ret.clone())
@@ -10764,7 +10763,7 @@ impl<'p> Fn_<'_, 'p> {
         }
         // A place receiver shrinks where it lies ([`Fn_::core_removes`]).
         let ([(Arg::Place(p), _), rest @ ..], Some(Spec::Removes)) =
-            (args, core_builtin(callee, kind))
+            (args, core_builtin(self.cx, callee, kind))
         else {
             return unsupported("a place argument to a builtin other than a removal", line);
         };
@@ -10800,9 +10799,11 @@ impl<'p> Fn_<'_, 'p> {
         }
         // Every [`Spec`] kind is answered here, so a kind added to it fails to compile
         // until this match handles it.
-        match core_builtin(callee, kind) {
+        match core_builtin(self.cx, callee, kind) {
             Some(Spec::Typed(..)) => {
-                let Some((params, ins, ret)) = builtin_spec(callee, args.len()) else {
+                let Some((params, ins, ret)) =
+                    builtin_spec(callee, args.len(), self.cx.gen.is_some())
+                else {
                     return unsupported("a specified builtin at another arity", line);
                 };
                 for ((v, _), p) in args.iter().zip(params) {
@@ -12529,7 +12530,7 @@ impl<'p> Fn_<'_, 'p> {
                 .ok();
         }
         // A routed builtin is a call to the function its row names.
-        let (callee, kind) = match core_builtin(callee, kind) {
+        let (callee, kind) = match core_builtin(self.cx, callee, kind) {
             Some(Spec::Routes(f)) => (*f, Callee::Bound),
             _ => (callee, kind),
         };
@@ -12947,7 +12948,7 @@ impl<'p> Fn_<'_, 'p> {
                                 || self.core_take_part(body, rhs)
                                 || self.core_rebuild(body, rhs)
                                 || matches!(rhs, Rhs::Call { callee, kind, args, .. }
-                                    if matches!(core_builtin(callee, *kind), Some(Spec::Barrier))
+                                    if matches!(core_builtin(self.cx, callee, *kind), Some(Spec::Barrier))
                                         && matches!(args.as_slice(), [(Arg::Val(Val::Name(_)), _)]))
                                 || matches!(rhs, Rhs::Read(vyrn_frontend::core::Place::Elem(s, _))
                                     if self.core_pulls(body, s)))
@@ -13088,7 +13089,7 @@ impl<'p> Fn_<'_, 'p> {
                 Rhs::Call {
                     callee, kind, args, ..
                 },
-            ) if matches!(core_builtin(callee, *kind), Some(Spec::Pulls)) => {
+            ) if matches!(core_builtin(self.cx, callee, *kind), Some(Spec::Pulls)) => {
                 matches!(args.as_slice(), [(Arg::Val(Val::Name(s)), _)]
                     if self.core_stream_elem(body, *s).is_some())
             }
@@ -13288,7 +13289,7 @@ impl<'p> Fn_<'_, 'p> {
                 self.core_removes(body, callee, *kind, args) == Some(true)
                     || self.core_args_readable(body, args)
                         && (arg_vals(args).is_some() || self.core_user_callee(callee, *kind))
-                        && (match core_builtin(callee, *kind) {
+                        && (match core_builtin(self.cx, callee, *kind) {
                             // The result type is the row's, which a stream
                             // reader's operands do not carry.
                             Some(Spec::Builds(_)) => ret.is_some(),
@@ -13331,7 +13332,7 @@ impl<'p> Fn_<'_, 'p> {
         else {
             return false;
         };
-        matches!(core_builtin(callee, *kind), Some(Spec::Rebuilds))
+        matches!(core_builtin(self.cx, callee, *kind), Some(Spec::Rebuilds))
             && matches!(args.split_first(), Some(((Arg::Val(Val::Name(x)), _), rest))
                 if (body.names[x.index()].grows
                     || matches!(
@@ -13348,8 +13349,10 @@ impl<'p> Fn_<'_, 'p> {
     /// [`Fn_::core_user_call`] writes, place arguments included, and not a
     /// builtin, a validated type or a host import, whose readers take values.
     fn core_user_callee(&self, callee: &str, kind: Callee) -> bool {
-        matches!(core_builtin(callee, kind), None | Some(Spec::Routes(_)))
-            && self.core_named(callee, kind).is_none()
+        matches!(
+            core_builtin(self.cx, callee, kind),
+            None | Some(Spec::Routes(_))
+        ) && self.core_named(callee, kind).is_none()
             && !(kind.direct() && self.is_extern(callee))
             && !callee.starts_with(vyrn_frontend::loader::MEM_PREFIX)
     }
@@ -13364,7 +13367,7 @@ impl<'p> Fn_<'_, 'p> {
         kind: Callee,
         args: &[(Arg, vyrn_frontend::ast::Capability)],
     ) -> Option<bool> {
-        if !matches!(core_builtin(callee, kind), Some(Spec::Removes)) {
+        if !matches!(core_builtin(self.cx, callee, kind), Some(Spec::Removes)) {
             return None;
         }
         let [recv, rest @ ..] = args else {
@@ -13557,7 +13560,7 @@ impl<'p> Fn_<'_, 'p> {
         kind: Callee,
         args: &[(Arg, vyrn_frontend::ast::Capability)],
     ) -> bool {
-        match core_builtin(callee, kind) {
+        match core_builtin(self.cx, callee, kind) {
             Some(Spec::Typed(params, _)) => params.len() == args.len(),
             Some(Spec::OwnType | Spec::Barrier) => matches!(args, [(Arg::Val(_), _)]),
             Some(Spec::Renders(_) | Spec::Effect(_)) => matches!(args, [_]),
@@ -14155,7 +14158,7 @@ mod tests {
                 continue;
             };
             assert!(
-                builtin_spec(name, params.len()).is_some(),
+                builtin_spec(name, params.len(), false).is_some(),
                 "`{name}` has a row and no instruction"
             );
         }

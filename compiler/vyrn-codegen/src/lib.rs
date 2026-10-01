@@ -55,24 +55,6 @@ pub(crate) fn extern_abi_ll(ty: &Type) -> &'static str {
     }
 }
 
-thread_local! {
-    /// Whether this module is emitted to run as a generator under the wasm
-    /// engine, where `listDir` is a host import backed by the loader's resolver.
-    /// An ordinary build has no lowering for `listDir`, so the flag gates that
-    /// branch.
-    static GEN_HOST: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-}
-
-/// Whether this thread emits a generator-host module. `llt_of`'s `Code` arm
-/// reads it too.
-pub(crate) fn gen_host() -> bool {
-    GEN_HOST.with(|g| g.get())
-}
-
-pub(crate) fn set_gen_host(on: bool) {
-    GEN_HOST.with(|g| g.set(on));
-}
-
 /// Records the types the emitter derives for expressions, the instances it
 /// emits and the coercion rungs it takes, so a gate can compare them with the
 /// checker's and `vyrn-lower`'s. Every hook records a decision already made.
@@ -879,7 +861,7 @@ pub(crate) fn llt_of(ty: &Type, types: &HashMap<String, TypeDecl>) -> String {
         Type::Enum(ref vs) => enum_ll(enum_slots_of(vs, types)),
         // On a generator host, `Code` is an opaque `i64` handle into the host's
         // piece arena: the one `Named` that survives `resolve` undeclared.
-        Type::Named(ref n) if n == "Code" && gen_host() => "i64".into(),
+        Type::Named(ref n) if n == "Code" => "i64".into(),
         // Unreachable after `resolve` (Named/App/transformers/params reduced away).
         Type::Named(_)
         | Type::App(..)
