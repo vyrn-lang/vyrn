@@ -1,6 +1,6 @@
 ; vyrn lowered v2 -- examples/ownedcontainer.vyrn
 
-fn Owned__Ring__release(self)
+fn Owned$Ring$release(self)
   {
     let @borrow = read self.label
     let @t1! = prim add(lit "release ", @borrow)
@@ -23,7 +23,7 @@ fn Owned__Ring__release(self)
     drop label!
   }
 
-fn Owned__Tally__release(self)
+fn Owned$Tally$release(self)
   {
     let @t1 = read self.total
     let @t2! = builtin @str(read @t1)

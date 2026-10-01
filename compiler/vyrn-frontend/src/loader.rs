@@ -2566,21 +2566,6 @@ fn resolve_aliases(
         for n in names {
             foreign_renames.insert((key.clone(), n.clone()), format!("{prefix}{n}"));
         }
-        // An impl method follows its type's rename: the parser flattens
-        // `impl P for T` to `P__T__m`, and the checker mangles the renamed key,
-        // so the name is `Copy__json$Json__copy`, not `json$Copy__Json__copy`.
-        // Overwrites the entry the loop above wrote, so it runs after it.
-        for im in &m.program.impls {
-            let Some(k) = crate::types::type_key(&im.ty) else {
-                continue;
-            };
-            for me in &im.methods {
-                let old = crate::types::impl_method_name(&im.protocol, &k, &me.name);
-                let new =
-                    crate::types::impl_method_name(&im.protocol, &format!("{prefix}{k}"), &me.name);
-                foreign_renames.insert((key.clone(), old), new);
-            }
-        }
     }
 
     // Protocol method names across every module. A method call dispatches to an
@@ -2789,6 +2774,37 @@ fn resolve_aliases(
                     }
                 }
             }
+        }
+    }
+
+    // An impl method's linked name is the flattening of its protocol and type
+    // key as its module links them, because the checker mangles the names it
+    // sees: `Copy$json$Json$copy`, not `json$Copy$Json$copy`. So an impl method
+    // follows every rename of its protocol or type, and never renames apart on
+    // its own. Overwrites what the passes above wrote, so it runs after them.
+    let mut flattened = Vec::new();
+    for m in modules.iter() {
+        let linked = |n: &str| match rewrites.get(&m.key).and_then(|r| r.get(n)) {
+            Some(r) => r.clone(),
+            None => resolved_name(&foreign_renames, &m.key, n),
+        };
+        for im in &m.program.impls {
+            let Some(k) = crate::types::type_key(&im.ty) else {
+                continue;
+            };
+            let (p, k_linked) = (linked(&im.protocol), linked(&k));
+            for me in &im.methods {
+                let old = crate::types::impl_method_name(&im.protocol, &k, &me.name);
+                let new = crate::types::impl_method_name(&p, &k_linked, &me.name);
+                flattened.push(((m.key.clone(), old), new));
+            }
+        }
+    }
+    for (key, new) in flattened {
+        if key.1 == new {
+            foreign_renames.remove(&key);
+        } else {
+            foreign_renames.insert(key, new);
         }
     }
 
@@ -3415,12 +3431,23 @@ fn link(mut modules: Vec<Module>, root_key: &str) -> Result<Program, Vec<Diagnos
 
     // Every declaration form joins one top-level namespace: a contract name is
     // what `contractOf(Name)` resolves, and a module-state binding
-    // shares no name with another declaration. Flattened impl methods
-    // (`P__Key__m`) cannot collide with a user identifier; they register so
-    // duplicate impls across modules collide here.
+    // shares no name with another declaration. A flattened impl method
+    // (`types::impl_method_name`) stays out: no user identifier spells it, and
+    // the checker refuses two impls of one protocol for one type.
+    let impl_methods: HashSet<String> = (modules.iter())
+        .flat_map(|m| &m.program.impls)
+        .filter_map(|im| Some((im, crate::types::type_key(&im.ty)?)))
+        .flat_map(|(im, k)| {
+            (im.methods.iter())
+                .map(move |me| crate::types::impl_method_name(&im.protocol, &k, &me.name))
+        })
+        .collect();
     for m in &modules {
         for d in decls(&m.program) {
-            if d.injected || (d.kind == DeclKind::Fn && shared_externs.contains(d.name)) {
+            if d.injected
+                || impl_methods.contains(d.name)
+                || (d.kind == DeclKind::Fn && shared_externs.contains(d.name))
+            {
                 continue;
             }
             register(d.name, &m.key, d.exported, &mut clashes);
@@ -3722,17 +3749,18 @@ fn link(mut modules: Vec<Module>, root_key: &str) -> Result<Program, Vec<Diagnos
     // checker cannot compute it, because `imports` are consumed here.
     program.surface_shadows = surface_shadows;
     // One declaration per shared-extern name: the copies are identical, and a
-    // second wasm import is waste. The root's copy, or the first imported, wins.
-    let mut seen_externs: HashSet<String> = program
-        .functions
-        .iter()
-        .filter(|f| f.is_extern && !f.exported)
+    // second wasm import is waste. One per impl method name too, as in one
+    // module: the checker refuses the second impl. The root's copy, or the
+    // first imported, wins.
+    let once = |f: &Function| (f.is_extern && !f.exported) || impl_methods.contains(&f.name);
+    let mut seen: HashSet<String> = (program.functions.iter())
+        .filter(|f| once(f))
         .map(|f| f.name.clone())
         .collect();
     program.functions.extend(
         extra_fns
             .into_iter()
-            .filter(|f| !(f.is_extern && !f.exported && !seen_externs.insert(f.name.clone()))),
+            .filter(|f| !(once(f) && !seen.insert(f.name.clone()))),
     );
     program.protocols.extend(extra_protocols);
     program.contracts.extend(extra_contracts);

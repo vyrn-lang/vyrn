@@ -1,0 +1,5 @@
+// The protocol both `greet_cat.vyrn` and `greet_dog.vyrn` implement.
+
+export protocol Greet {
+    fn greet(self) -> String
+}

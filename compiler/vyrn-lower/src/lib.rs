@@ -533,7 +533,7 @@ impl<'a> FactsVisit<'a> for Walk<'a, '_> {
                 let solved: HashMap<String, Type> = at.iter().cloned().collect();
                 // A record literal solves parameters too, and it is not a call:
                 // only a call, or a `?` on a `Fallible` operand, which the
-                // checker types as a call of `Fallible__Key__success`, adds an
+                // checker types as a call of `Fallible$Key$success`, adds an
                 // instance to the worklist.
                 if matches!(e, Expr::Call { .. } | Expr::Try { .. }) {
                     self.calls.push((callee.clone(), solved.clone()));
@@ -1117,24 +1117,18 @@ pub(crate) fn dispatched<'f>(
     out
 }
 
-/// Adds the `isSuccess` twin of every `Fallible__Key__success` call: `?` on a
+/// Adds the `isSuccess` twin of every `Fallible$Key$success` call: `?` on a
 /// `Fallible` emits both, and the checker records only `success`. Both are the
 /// same impl at the same instantiation.
 fn fallible_twins(
     calls: Vec<(String, HashMap<String, Type>)>,
 ) -> Vec<(String, HashMap<String, Type>)> {
+    let fallible = vyrn_frontend::types::FALLIBLE;
     let mut out = Vec::with_capacity(calls.len());
     for (callee, solved) in calls {
-        if let Some(key) = callee
-            .strip_prefix(&format!("{}__", vyrn_frontend::types::FALLIBLE))
-            .and_then(|rest| rest.strip_suffix("__success"))
-        {
+        if let Some(key) = vyrn_frontend::types::impl_method_key(&callee, fallible, "success") {
             out.push((
-                vyrn_frontend::types::impl_method_name(
-                    vyrn_frontend::types::FALLIBLE,
-                    key,
-                    "isSuccess",
-                ),
+                vyrn_frontend::types::impl_method_name(fallible, key, "isSuccess"),
                 solved.clone(),
             ));
         }

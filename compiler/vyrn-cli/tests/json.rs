@@ -238,7 +238,7 @@ fn a_declared_impl_in_an_injected_module_is_reached_in_both_link_modes() {
              print(emit(v))\n\
              return 0\n\
              }\n",
-            "Owned__json$Json__release",
+            "Owned$json$Json$release",
         ),
         (
             "both.vyrn",
@@ -250,7 +250,7 @@ fn a_declared_impl_in_an_injected_module_is_reached_in_both_link_modes() {
              print(toJson(P { n: 5 }))\n\
              return 0\n\
              }\n",
-            "Owned__json$Json__release",
+            "Owned$json$Json$release",
         ),
     ];
     for (name, src, release) in cases {

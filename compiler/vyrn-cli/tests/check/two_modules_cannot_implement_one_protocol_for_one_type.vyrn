@@ -1,0 +1,8 @@
+import { catSays } from "./an_impl_of_greet_for_pet_1.vyrn"
+import { dogSays } from "./an_impl_of_greet_for_pet_2.vyrn"
+
+fn main() -> Int64 {
+    print(catSays())
+    print(dogSays())
+    return 0
+}

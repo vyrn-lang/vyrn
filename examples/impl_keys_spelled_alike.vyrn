@@ -1,0 +1,32 @@
+// `impl Show for X__Int64` and `impl Show__X for Int64` join their protocol and
+// type key differently, so each keeps its own method.
+
+type X__Int64 = { v: Int64 }
+
+protocol Show {
+    fn label(read self) -> String
+}
+
+protocol Show__X {
+    fn label(read self) -> String
+}
+
+impl Show for X__Int64 {
+    fn label(read self) -> String {
+        return "record"
+    }
+}
+
+impl Show__X for Int64 {
+    fn label(read self) -> String {
+        return "int"
+    }
+}
+
+fn main() -> Int64 {
+    let r = X__Int64 { v: 1 }
+    let n: Int64 = 5
+    print(r.label())
+    print(n.label())
+    return 0
+}

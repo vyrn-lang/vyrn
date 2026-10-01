@@ -1,0 +1,1 @@
+two_modules_cannot_implement_one_protocol_for_one_type.vyrn:3:1: `impl Greet for Pet` collides with `impl Greet for Pet` (line 3) — Vyrn dispatches on the type constructor, so `Pet` may have only one impl of `Greet`; write one generic impl (`impl<T> Greet for Pet<T>`) to cover every instantiation
