@@ -1395,10 +1395,11 @@ fn resolve_d(ty: &Type, types: &dyn Decls, depth: usize) -> Type {
             ),
             None => Type::Unit,
         },
-        // `lazy T` is a stored nullary closure. A record's fields are not
-        // resolved, so `Field.ty` keeps the marker for the read, the codec and
-        // reflection, which force it.
-        Type::Lazy(inner) => Type::Fn(Vec::new(), Box::new(resolve_d(inner, types, depth + 1))),
+        // `lazy T` is a stored nullary closure, `fn() -> T` with `T` as
+        // written, as `resolve` leaves a `fn` type's parts. A record's fields
+        // are not resolved, so `Field.ty` keeps the marker for the read, the
+        // codec and reflection, which force it.
+        Type::Lazy(inner) => Type::Fn(Vec::new(), inner.clone()),
         other => other.clone(),
     }
 }

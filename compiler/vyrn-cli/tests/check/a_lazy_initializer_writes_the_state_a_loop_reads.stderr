@@ -1,0 +1,6 @@
+a_lazy_initializer_writes_the_state_a_loop_reads.vyrn:19:0: `names` is written here while `names` still reads out of it
+line 18: ... and `names` is used again here
+  fix: `names.copy()` on line 18, so `names` is a value of its own
+a_lazy_initializer_writes_the_state_a_loop_reads.vyrn:19:0: `names` is written here while `n` still reads out of it
+line 20: ... and `n` is used again here
+  fix: `n.copy()` on line 18, so `n` is a value of its own

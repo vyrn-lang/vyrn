@@ -30,6 +30,7 @@ pull request.
 - `Option` and `Result` are ordinary declared sums (`| None | Some(T)`, `| Err(E) | Ok(T)`), so one rule serves every sum in every pass.
 - Accumulating validation is the prelude's `Issue { key, path, message }` with `Validation<T> = Valid(T) | Invalid(Array<Issue>)`. A form needs every error at once, and `key` is a stable i18n id.
 - An interpolation whose holes are finite string types is checked by DFA containment. A proof costs nothing at run time, and a failure names a witness string.
+- A `lazy T` field holds a `fn() -> T`, with `T` as written, as every `fn` type keeps its parts. A forced read is a call through that type, so it carries its initializer's effects.
 
 ### Strings and bytes
 
