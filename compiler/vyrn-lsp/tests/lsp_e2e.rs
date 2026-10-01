@@ -4868,6 +4868,41 @@ fn hover_and_hints_name_a_renamed_type_as_its_module_wrote_it() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// The loader gives every declaration and variant of a runtime module a reserved
+/// spelling (`json$Json`, `json$JNull`). Hover and hints name them as `std/json`
+/// wrote them.
+#[test]
+fn hover_and_hints_name_a_runtime_module_type_as_its_module_wrote_it() {
+    let n = SCRATCH_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let dir = std::env::temp_dir().join(format!("vyrn_lsp_rt_{}_{n}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let root = "import { Json } from \"std/json\"\n\
+                fn main() -> Int64 {\n    let j: Json = JNull\n    let k = j\n    return 0\n}\n";
+    let path = dir.join("main.vyrn");
+    std::fs::write(&path, root).unwrap();
+    let uri = file_uri(&path);
+    let mut client = spawn_client();
+    did_open(&mut client, &uri, "vyrn", root);
+    let notif = client.read_notification("textDocument/publishDiagnostics");
+    let diags = notif["params"]["diagnostics"].as_array().unwrap();
+    assert!(diags.is_empty(), "{notif}");
+
+    let k = hover_value(&mut client, &uri, 3, 8).expect("hover on k");
+    let hints: Vec<String> = type_hints(&mut client, &uri)
+        .into_iter()
+        .map(|(_, _, l)| l)
+        .collect();
+    for text in hints.iter().chain([&k]) {
+        assert!(!text.contains('$'), "a reserved name shows: {text}");
+    }
+    assert!(k.contains("let k: Json"), "hover: {k}");
+    assert_eq!(hints, [": Json"], "{hints:?}");
+
+    let _ = client.child.kill();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// `(label, detail)` of every completion item at the position.
 fn completion_details(
     client: &mut LspClient,

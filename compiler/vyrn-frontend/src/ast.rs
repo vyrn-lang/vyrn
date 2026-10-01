@@ -1104,7 +1104,7 @@ impl<'a> std::fmt::Display for Said<'a> {
                     write!(f, "Result<{}, {}>", say(&o.payload[0]), say(&e.payload[0]))
                 }
                 _ => {
-                    let names: Vec<&str> = vs.iter().map(|v| v.name.as_str()).collect();
+                    let names: Vec<String> = vs.iter().map(|v| name(&v.name)).collect();
                     write!(f, "enum {{ {} }}", names.join(" | "))
                 }
             },
@@ -1134,9 +1134,11 @@ impl<'a> std::fmt::Display for Said<'a> {
     }
 }
 
-/// Every declaration whose name two modules declare, keyed by its linked
-/// name: the name its module wrote, and that module.
-/// The loader fills it where it renames apart (`log` becomes `log__from1`).
+/// Every declaration whose name two modules declare, and every declaration and
+/// variant of an injected runtime module, keyed by its linked name: the name
+/// its module wrote, and that module.
+/// The loader fills it where it renames apart (`log` becomes `log__from1`, and
+/// `Json` of `std/json` becomes `json$Json`).
 /// A sentence reads it through a [`Speech`], so a refusal never names a
 /// linked name.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -2500,6 +2502,12 @@ pub fn mentions(e: &Expr, name: &str) -> bool {
         }
         Expr::Consume { place, .. } => mentions(place, name),
         Expr::Binary { lhs, rhs, .. } => mentions(lhs, name) || mentions(rhs, name),
+        // `x.copy()` makes a fresh value: its receiver is read, never aliased.
+        Expr::Call { name: n, args, .. }
+            if n == "@copy" && args.first().is_some_and(|a| place_path(a).is_some()) =>
+        {
+            false
+        }
         Expr::Call { args, .. }
         | Expr::TryConstruct { args, .. }
         | Expr::ArrayLit { elems: args, .. } => args.iter().any(|a| mentions(a, name)),

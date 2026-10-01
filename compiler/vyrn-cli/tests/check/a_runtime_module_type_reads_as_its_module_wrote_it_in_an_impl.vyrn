@@ -1,0 +1,14 @@
+// A sentence about an impl or a bound quotes `std/json`'s type and variants as
+// that module wrote them, though the loader spells them `json$Json`.
+import { Json } from "std/json"
+
+protocol P { fn p(self, x: Json) -> Int64 }
+protocol Q { fn q(self) -> Int64 }
+type T = { a: Int64 }
+impl P for T { fn p(self, x: Int64) -> Int64 { return 1 } }
+impl Q for Json { fn q(self) -> Int64 { return 1 } }
+impl Q for Json { fn q(self) -> Int64 { return 2 } }
+
+fn main() -> Int64 {
+    return 0
+}

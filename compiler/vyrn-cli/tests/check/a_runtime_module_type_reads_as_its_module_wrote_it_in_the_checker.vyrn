@@ -1,0 +1,50 @@
+// A refusal quotes `std/json`'s type and variants as that module wrote them,
+// though the loader spells them `json$Json` and `json$JStr`.
+import { Json } from "std/json"
+
+protocol R { fn r(self) -> Int64 }
+
+fn take(j: Json) -> Int64 { return 1 }
+fn bound<S: R>(x: S) -> Int64 { return x.r() }
+
+fn declared() -> Int64 {
+    let j: Json = JNull
+    let a: Int64 = j
+    return 0
+}
+
+fn argument() -> Int64 {
+    let b = take(1)
+    return 0
+}
+
+fn nested() -> Int64 {
+    let c: Option<Json> = 1
+    return 0
+}
+
+fn payload() -> Int64 {
+    let d = JStr(1, 2)
+    return 0
+}
+
+fn none() -> Int64 {
+    let e = JNull(1)
+    return 0
+}
+
+fn field() -> Int64 {
+    let j: Json = JNull
+    let f: Int64 = j.nosuch
+    return 0
+}
+
+fn satisfied() -> Int64 {
+    let j: Json = JNull
+    let g = bound(j)
+    return 0
+}
+
+fn main() -> Int64 {
+    return 0
+}
