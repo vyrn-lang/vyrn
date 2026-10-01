@@ -3689,6 +3689,15 @@ impl<'a> Checker<'a> {
                         _ => Err(cerr!(line, InferNone)),
                     };
                 }
+                // A binding shadows a variant of its name, as the core reads it.
+                if let Some(b) = self.lookup(scope, name) {
+                    // A name a failed statement bound: its refusals are that
+                    // statement's.
+                    if b.ty == Type::Err {
+                        self.unknown.set(true);
+                    }
+                    return Ok(b.ty);
+                }
                 if let Some(info) = self.resolve_variant(name) {
                     if !info.payload.is_empty() {
                         return self.judged();
@@ -3705,14 +3714,6 @@ impl<'a> Checker<'a> {
                         }
                         _ => Err(cerr!(line, InferBinding, name)),
                     };
-                }
-                if let Some(b) = self.lookup(scope, name) {
-                    // A name a failed statement bound: its refusals are that
-                    // statement's.
-                    if b.ty == Type::Err {
-                        self.unknown.set(true);
-                    }
-                    return Ok(b.ty);
                 }
                 // A bare function name as a value is a stored function value
                 // source: `let g = double` takes its signature.
