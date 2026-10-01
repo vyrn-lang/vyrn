@@ -140,34 +140,41 @@ pub fn walk(top: &Body) -> Vec<Walked> {
     walk_frames(&top.frames())
 }
 
-/// Walks every frame of `bodies`. A body's lambdas are joined only when their
-/// frames are in `bodies`, and each comes after the frame that builds it, as
-/// [`Body::frames`] lists them.
+/// Walks every frame of `bodies`, on every thread. A body's lambdas are
+/// joined only when their frames are in `bodies`, and each comes after the
+/// frame that builds it, as [`Body::frames`] lists them.
 pub fn walk_frames(bodies: &[&Body]) -> Vec<Walked> {
+    let mut out = vyrn_frontend::par::in_parallel(
+        bodies,
+        // A frame's walk takes about 3 us on `site/export.vyrn`; each weighs one.
+        |_| 1,
+        || (),
+        |_, b| {
+            let mut w = Walk {
+                body: b,
+                out: Walked {
+                    name: b.name.clone(),
+                    own: Effects::PURE,
+                    writes: Default::default(),
+                    calls: Vec::new(),
+                    lambdas: Vec::new(),
+                },
+            };
+            rows(&b.stmts).for_each(|(s, _)| w.stmt(s));
+            for info in b.names.iter().filter(|i| !i.borrow) {
+                for r in &info.runs {
+                    w.call(r, None, info.line, false);
+                }
+            }
+            w.out
+        },
+    );
     let index: HashMap<*const Body, usize> = bodies
         .iter()
         .enumerate()
         .map(|(i, b)| (*b as *const Body, i))
         .collect();
-    let mut out = Vec::with_capacity(bodies.len());
-    for (i, b) in bodies.iter().enumerate() {
-        let mut w = Walk {
-            body: b,
-            out: Walked {
-                name: b.name.clone(),
-                own: Effects::PURE,
-                writes: Default::default(),
-                calls: Vec::new(),
-                lambdas: Vec::new(),
-            },
-        };
-        rows(&b.stmts).for_each(|(s, _)| w.stmt(s));
-        for info in b.names.iter().filter(|i| !i.borrow) {
-            for r in &info.runs {
-                w.call(r, None, info.line, false);
-            }
-        }
-        let mut walked = w.out;
+    for (i, (b, walked)) in bodies.iter().zip(&mut out).enumerate() {
         walked.lambdas = (b.lambdas.iter())
             .filter_map(|l| index.get(&(l as *const Body)))
             .map(|j| {
@@ -175,7 +182,6 @@ pub fn walk_frames(bodies: &[&Body]) -> Vec<Walked> {
                     .expect("a lambda frame comes after the frame that builds it")
             })
             .collect();
-        out.push(walked);
     }
     out
 }
