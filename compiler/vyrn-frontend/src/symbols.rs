@@ -56,6 +56,8 @@ pub struct Symbol {
     /// `Some(path)` for a symbol imported by [`analyze_linked`]. A foreign
     /// symbol has `col == 0`, because its columns belong to the other file.
     pub file: Option<String>,
+    /// `let mut` module state; `false` for every other kind.
+    pub mutable: bool,
 }
 
 /// An identifier token's source range, for cursor-to-token mapping.
@@ -777,142 +779,93 @@ fn pin_diagnostics(
     }
 }
 
-/// Resolves a 1-based `(line, col)` cursor to the declaration it names.
-///
-/// A local binding ([`local_at`]) shadows a top-level symbol. Then come
-/// namespace members, typed members, top-level symbols, and builtins, which
-/// hover with `definition: false` because they have no source.
+/// What an identifier token names, in the one order hover, colour and
+/// references read: a local binding ([`local_at`]), a namespace's member, a
+/// member the caller finds, a namespace, a top-level symbol. Builtins come
+/// after, in each caller.
+enum Named<'a, M> {
+    Local(&'a LocalBinding),
+    /// `ns.member`, after an unshadowed namespace. Before top-level symbols, so
+    /// a same-named declaration does not capture a qualified member.
+    NsMember(&'a str, &'a Symbol),
+    Member(M),
+    Namespace(&'a NamespaceInfo),
+    Symbol(&'a Symbol),
+}
+
+/// The first [`Named`] answer for `tok`. A member position (`recv.tok`) names
+/// a member, never a local. `member` is the caller's member rule, asked after
+/// the namespace's members.
+fn resolve_token<'a, M>(
+    analysis: &'a Analysis,
+    tok: &TokenInfo,
+    member: impl FnOnce() -> Option<M>,
+) -> Option<Named<'a, M>> {
+    if !is_member_position(analysis, tok) {
+        if let Some(b) = local_at(analysis, tok) {
+            return Some(Named::Local(b));
+        }
+    }
+    if let Some(recv) = receiver_before_dot(analysis, tok.line, tok.col) {
+        let ns = (analysis.namespaces.iter()).find(|n| n.name == recv.text);
+        if let (None, Some(ns)) = (local_at(analysis, recv), ns) {
+            if let Some(m) = ns.members.iter().find(|m| m.name == tok.text) {
+                return Some(Named::NsMember(&ns.name, m));
+            }
+        }
+    }
+    if let Some(m) = member() {
+        return Some(Named::Member(m));
+    }
+    if let Some(ns) = analysis.namespaces.iter().find(|n| n.name == tok.text) {
+        return Some(Named::Namespace(ns));
+    }
+    top_symbol(analysis, &tok.text).map(Named::Symbol)
+}
+
+/// The top-level symbol named `name`. One of the open document (`file: None`)
+/// shadows an imported one; among candidates the latest declaration wins.
+fn top_symbol<'a>(analysis: &'a Analysis, name: &str) -> Option<&'a Symbol> {
+    (analysis.symbols.iter())
+        .filter(|s| s.name == name)
+        .max_by_key(|s| (s.file.is_none(), s.line))
+}
+
+/// Resolves a 1-based `(line, col)` cursor to the declaration it names, in
+/// [`resolve_token`]'s order. Its member is the `.`-completion entry of that
+/// name on a typed receiver, so hover and completion agree. Then come
+/// builtins, which hover with `definition: false` because they have no source.
 pub fn resolve(analysis: &Analysis, line: usize, col: usize) -> Option<Resolution> {
     // The identifier token covering the cursor (`col` in `[col, end_col)`).
     let tok = analysis
         .tokens
         .iter()
         .find(|t| t.line == line && col >= t.col && col < t.end_col)?;
-
-    // Local bindings first. A member position (`recv.tok`) names a member, never
-    // a binding, as in `references`, so it falls through to the branches below.
-    if !is_member_position(analysis, tok) {
-        if let Some(b) = local_at(analysis, tok) {
-            return Some(local_resolution(analysis, b));
+    let member = || {
+        if !is_member_position(analysis, tok) {
+            return None;
         }
-    }
-
-    // `ns.member`, after an unshadowed namespace, resolves to that module's
-    // export. Before top-level symbols, so a same-named decl does not
-    // capture a qualified member.
-    if let Some(recv) = receiver_before_dot(analysis, tok.line, tok.col) {
-        if local_at(analysis, recv).is_none() {
-            let recv = &recv.text;
-            if let Some(nsi) = analysis.namespaces.iter().find(|n| &n.name == recv) {
-                if let Some(m) = nsi.members.iter().find(|m| m.name == tok.text) {
-                    return Some(Resolution {
-                        name: m.name.clone(),
-                        kind: m.kind,
-                        target_line: m.line,
-                        target_col: m.col,
-                        target_end_col: m.end_col,
-                        target_file: m.file.clone(),
-                        hover: format!(
-                            "{}\n\n— via namespace `{}`",
-                            with_doc(&m.detail, &m.doc),
-                            recv
-                        ),
-                        definition: m.file.is_some(),
-                    });
-                }
-            }
-        }
-    }
-
-    // `receiver.member` with a typed receiver resolves to that member (a field,
-    // a builtin member, a protocol or impl method), from the table
-    // `.`-completion uses, so hover and completion agree. Before the top-level
-    // fallback, so `p.title` is the field.
-    if is_member_position(analysis, tok) {
-        if let Some(c) = member_completions(analysis, tok.line, tok.col)
-            .into_iter()
-            .find(|c| c.label == tok.text)
-        {
-            // A user protocol or impl method is an indexed symbol, so it keeps its
-            // declaration site. A field or builtin method hovers without a jump.
-            let decl = analysis
-                .symbols
-                .iter()
-                .filter(|s| s.name == c.label && s.kind == SymbolKind::Method)
-                .max_by_key(|s| (s.file.is_none(), s.line));
-            return Some(Resolution {
-                name: c.label.clone(),
-                kind: c.kind,
-                target_line: decl.map_or(0, |d| d.line),
-                target_col: decl.map_or(0, |d| d.col),
-                target_end_col: decl.map_or(0, |d| d.end_col),
-                target_file: decl.and_then(|d| d.file.clone()),
-                hover: with_doc(
-                    &c.detail,
-                    &c.doc.clone().or_else(|| decl.and_then(|d| d.doc.clone())),
-                ),
-                definition: decl.is_some(),
-            });
-        }
-    }
-
-    // The namespace binding itself (`ns`), a compile-time name, not a value.
-    if let Some(nsi) = analysis.namespaces.iter().find(|n| n.name == tok.text) {
-        return Some(Resolution {
-            name: nsi.name.clone(),
-            kind: SymbolKind::Type,
-            target_line: 0,
-            target_col: 0,
-            target_end_col: 0,
-            target_file: None,
-            hover: format!(
-                "namespace `{}` — {} exported member(s) (a compile-time name, not a value)",
-                nsi.name,
-                nsi.members.len()
-            ),
-            definition: false,
-        });
-    }
-
-    // Top-level symbols. One of the open document (`file: None`) shadows an
-    // imported one; among candidates the latest declaration wins.
-    let best = analysis
-        .symbols
-        .iter()
-        .filter(|s| s.name == tok.text)
-        .max_by_key(|s| (s.file.is_none(), s.line));
-    if let Some(best) = best {
-        return Some(Resolution {
-            name: best.name.clone(),
-            kind: best.kind,
-            target_line: best.line,
-            target_col: best.col,
-            target_end_col: best.end_col,
-            target_file: best.file.clone(),
-            hover: with_doc(&best.detail, &best.doc),
-            definition: true,
-        });
-    }
-
-    // A built-in method or function name (`push`, `info`, `len`): hover text,
-    // nothing to jump to.
-    if let Some(b) = builtin_method(&tok.text) {
-        return Some(Resolution {
-            name: b.name.to_string(),
-            kind: SymbolKind::Method,
-            target_line: 0,
-            target_col: 0,
-            target_end_col: 0,
-            target_file: None,
-            hover: b.detail.to_string(),
-            definition: false,
-        });
-    }
-
-    // The ambient `Result` and `Option` builtins and their constructors,
-    // imported or not.
-    builtin_type_or_ctor(&tok.text).map(|(kind, hover)| Resolution {
-        name: tok.text.clone(),
+        let c = (member_completions(analysis, tok.line, tok.col).into_iter())
+            .find(|c| c.label == tok.text)?;
+        // A user protocol or impl method is an indexed symbol, so it keeps its
+        // declaration site. A field or builtin method hovers without a jump.
+        let decl = (analysis.symbols.iter())
+            .filter(|s| s.name == c.label && s.kind == SymbolKind::Method)
+            .max_by_key(|s| (s.file.is_none(), s.line));
+        Some((c, decl))
+    };
+    let at = |s: &Symbol, hover: String| Resolution {
+        name: s.name.clone(),
+        kind: s.kind,
+        target_line: s.line,
+        target_col: s.col,
+        target_end_col: s.end_col,
+        target_file: s.file.clone(),
+        hover,
+        definition: true,
+    };
+    let nowhere = |name: &str, kind, hover| Resolution {
+        name: name.to_string(),
         kind,
         target_line: 0,
         target_col: 0,
@@ -920,7 +873,48 @@ pub fn resolve(analysis: &Analysis, line: usize, col: usize) -> Option<Resolutio
         target_file: None,
         hover,
         definition: false,
-    })
+    };
+    match resolve_token(analysis, tok, member) {
+        Some(Named::Local(b)) => Some(local_resolution(analysis, b)),
+        Some(Named::NsMember(ns, m)) => {
+            let hover = format!("{}\n\n— via namespace `{ns}`", with_doc(&m.detail, &m.doc));
+            Some(Resolution {
+                definition: m.file.is_some(),
+                ..at(m, hover)
+            })
+        }
+        Some(Named::Member((c, decl))) => {
+            let doc = c.doc.clone().or_else(|| decl.and_then(|d| d.doc.clone()));
+            let hover = with_doc(&c.detail, &doc);
+            Some(match decl {
+                Some(d) => Resolution {
+                    name: c.label,
+                    kind: c.kind,
+                    ..at(d, hover)
+                },
+                None => nowhere(&c.label, c.kind, hover),
+            })
+        }
+        // The namespace binding itself, a compile-time name, not a value.
+        Some(Named::Namespace(ns)) => Some(nowhere(
+            &ns.name,
+            SymbolKind::Type,
+            format!(
+                "namespace `{}` — {} exported member(s) (a compile-time name, not a value)",
+                ns.name,
+                ns.members.len()
+            ),
+        )),
+        Some(Named::Symbol(s)) => Some(at(s, with_doc(&s.detail, &s.doc))),
+        // A built-in method or function name (`push`, `info`, `len`), then the
+        // ambient `Result` and `Option` and their constructors, imported or not.
+        None => match builtin_method(&tok.text) {
+            Some(b) => Some(nowhere(b.name, SymbolKind::Method, b.detail.to_string())),
+            None => {
+                builtin_type_or_ctor(&tok.text).map(|(kind, hover)| nowhere(&tok.text, kind, hover))
+            }
+        },
+    }
 }
 
 /// The ambient `Result` and `Option` types and their constructors, with their
@@ -1510,6 +1504,164 @@ fn name_col_on_line(tok_info: &[TokenInfo], name: &str, line: usize) -> (usize, 
         .unwrap_or((0, 0))
 }
 
+/// What a [`Decl`] declares, so an index takes the kinds it shows.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Of {
+    Function,
+    Global,
+    ImplMethod,
+    Protocol,
+    Type,
+    Test,
+    Bench,
+}
+
+/// One declaration as a [`Symbol`] at column 0 with no `file`, and the
+/// members an index takes with it: a protocol's methods or an enum's
+/// variants. A variant's line is its type's.
+struct Decl {
+    of: Of,
+    module: Option<String>,
+    sym: Symbol,
+    members: Vec<Symbol>,
+}
+
+/// The declarations of `program` that `keep` admits, given their kind, name,
+/// module and `export`, in outline order: functions, module state, impl
+/// methods, protocols, types, tests, benches. A parser-injected type (line 0)
+/// and a synthetic refinement type (`User.age`) are not declarations. `keep`
+/// runs before any detail is rendered, so an index pays only for what it shows.
+fn decl_symbols(
+    program: &ast::Program,
+    sp: &Spellings,
+    keep: impl Fn(Of, &str, &Option<String>, bool) -> bool,
+) -> Vec<Decl> {
+    let sym = |name: &str, kind, line, detail, doc: Option<String>| Symbol {
+        name: name.to_string(),
+        kind,
+        line,
+        col: 0,
+        end_col: 0,
+        detail,
+        doc,
+        file: None,
+        mutable: false,
+    };
+    let one = |of, module: &Option<String>, sym| Decl {
+        of,
+        module: module.clone(),
+        sym,
+        members: Vec::new(),
+    };
+    let mut out = Vec::new();
+    for f in &program.functions {
+        if keep(Of::Function, &f.name, &f.module, f.exported) {
+            let detail = function_detail(f, sp);
+            out.push(one(
+                Of::Function,
+                &f.module,
+                sym(&f.name, SymbolKind::Function, f.line, detail, f.doc.clone()),
+            ));
+        }
+    }
+    for g in &program.globals {
+        if keep(Of::Global, &g.name, &g.module, false) {
+            let mut s = sym(
+                &g.name,
+                SymbolKind::Global,
+                g.line,
+                global_detail(g, sp),
+                g.doc.clone(),
+            );
+            s.mutable = g.mutable;
+            out.push(one(Of::Global, &g.module, s));
+        }
+    }
+    for imp in &program.impls {
+        for m in imp
+            .methods
+            .iter()
+            .filter(|m| keep(Of::ImplMethod, &m.name, &m.module, false))
+        {
+            let doc = (m.doc.clone())
+                .or_else(|| signature_doc(&program.protocols, &imp.protocol, &m.name));
+            let detail = function_detail(m, sp);
+            out.push(one(
+                Of::ImplMethod,
+                &m.module,
+                sym(&m.name, SymbolKind::Method, m.line, detail, doc),
+            ));
+        }
+    }
+    for p in &program.protocols {
+        if keep(Of::Protocol, &p.name, &p.module, p.exported) {
+            let detail = protocol_detail(p, sp);
+            let mut d = one(
+                Of::Protocol,
+                &p.module,
+                sym(&p.name, SymbolKind::Type, p.line, detail, p.doc.clone()),
+            );
+            d.members = (p.methods.iter())
+                .map(|m| {
+                    sym(
+                        &m.name,
+                        SymbolKind::Method,
+                        m.line,
+                        method_sig_detail(m, sp),
+                        m.doc.clone(),
+                    )
+                })
+                .collect();
+            out.push(d);
+        }
+    }
+    for t in &program.type_decls {
+        if t.line == 0 || t.name.contains('.') || !keep(Of::Type, &t.name, &t.module, t.exported) {
+            continue;
+        }
+        let detail = type_decl_detail(t, &program.type_decls, sp);
+        let mut d = one(
+            Of::Type,
+            &t.module,
+            sym(&t.name, SymbolKind::Type, t.line, detail, t.doc.clone()),
+        );
+        d.members = (crate::types::declared_variants(&t.base)
+            .into_iter()
+            .flatten())
+        .map(|v| {
+            sym(
+                &v.name,
+                SymbolKind::Variant,
+                t.line,
+                variant_detail(&t.name, v, sp),
+                None,
+            )
+        })
+        .collect();
+        out.push(d);
+    }
+    for (of, word, blocks) in [
+        (Of::Test, "test", &program.tests),
+        (Of::Bench, "bench", &program.benches),
+    ] {
+        for b in blocks
+            .iter()
+            .filter(|b| keep(of, &b.name, &b.module, false))
+        {
+            let detail = format!("{word} {:?}", b.name);
+            out.push(one(
+                of,
+                &b.module,
+                sym(&b.name, SymbolKind::Method, b.line, detail, b.doc.clone()),
+            ));
+        }
+    }
+    out
+}
+
+/// The root's declarations, each at its name token. A variant is the first
+/// token of its name between its type's line and the next declaration's. A
+/// test or bench anchors at its keyword, because its name is a string.
 fn index_symbols(
     program: &ast::Program,
     tok_info: &[TokenInfo],
@@ -1517,160 +1669,34 @@ fn index_symbols(
     sp: &Spellings,
 ) -> Vec<Symbol> {
     let mut out = Vec::new();
-
-    for f in &program.functions {
-        let (col, end_col) = name_col_on_line(tok_info, &f.name, f.line);
-        out.push(Symbol {
-            name: f.name.clone(),
-            kind: SymbolKind::Function,
-            line: f.line,
-            col,
-            end_col,
-            detail: function_detail(f, sp),
-            doc: f.doc.clone(),
-            file: None,
-        });
-    }
-
-    // Module-state bindings.
-    for g in &program.globals {
-        let (col, end_col) = name_col_on_line(tok_info, &g.name, g.line);
-        out.push(Symbol {
-            name: g.name.clone(),
-            kind: SymbolKind::Global,
-            line: g.line,
-            col,
-            end_col,
-            detail: global_detail(g, sp),
-            doc: g.doc.clone(),
-            file: None,
-        });
-    }
-
-    for imp in &program.impls {
-        for m in &imp.methods {
-            let (col, end_col) = name_col_on_line(tok_info, &m.name, m.line);
-            out.push(Symbol {
-                name: m.name.clone(),
-                kind: SymbolKind::Method,
-                line: m.line,
-                col,
-                end_col,
-                detail: function_detail(m, sp),
-                doc: m
-                    .doc
-                    .clone()
-                    .or_else(|| signature_doc(&program.protocols, &imp.protocol, &m.name)),
-                file: None,
-            });
-        }
-    }
-
-    for p in &program.protocols {
-        let (col, end_col) = name_col_on_line(tok_info, &p.name, p.line);
-        out.push(Symbol {
-            name: p.name.clone(),
-            kind: SymbolKind::Type,
-            line: p.line,
-            col,
-            end_col,
-            detail: protocol_detail(p, sp),
-            doc: p.doc.clone(),
-            file: None,
-        });
-        for m in &p.methods {
-            let (col, end_col) = name_col_on_line(tok_info, &m.name, m.line);
-            out.push(Symbol {
-                name: m.name.clone(),
-                kind: SymbolKind::Method,
-                line: m.line,
-                col,
-                end_col,
-                detail: method_sig_detail(m, sp),
-                doc: m.doc.clone(),
-                file: None,
-            });
-        }
-    }
-
-    for t in &program.type_decls {
-        // Skip parser-injected types (line 0) and synthetic inline-refinement
-        // types (`User.age`), which are not user symbols.
-        if t.line == 0 || t.name.contains('.') {
-            continue;
-        }
-        let (col, end_col) = name_col_on_line(tok_info, &t.name, t.line);
-        out.push(Symbol {
-            name: t.name.clone(),
-            kind: SymbolKind::Type,
-            line: t.line,
-            col,
-            end_col,
-            detail: type_decl_detail(t, &program.type_decls, sp),
-            doc: t.doc.clone(),
-            file: None,
-        });
-        if let Some(variants) = crate::types::declared_variants(&t.base) {
-            // Variants carry no AST line; find the name token between this decl's
-            // line and the next top-level declaration.
-            let until = lines
-                .iter()
-                .find(|&&l| l > t.line)
-                .copied()
-                .unwrap_or(usize::MAX);
-            for v in variants {
-                let found = tok_info
-                    .iter()
-                    .find(|tt| tt.text == v.name && tt.line >= t.line && tt.line < until);
-                let (col, end_col, vline) = match found {
-                    Some(tt) => (tt.col, tt.end_col, tt.line),
-                    None => (0, 0, t.line),
-                };
-                out.push(Symbol {
-                    name: v.name.clone(),
-                    kind: SymbolKind::Variant,
-                    line: vline,
-                    col,
-                    end_col,
-                    detail: variant_detail(&t.name, v, sp),
-                    doc: None,
-                    file: None,
-                });
+    for d in decl_symbols(program, sp, |_, _, _, _| true) {
+        let mut s = d.sym;
+        let anchor = match d.of {
+            Of::Test => "test",
+            Of::Bench => "bench",
+            _ => &s.name,
+        };
+        (s.col, s.end_col) = name_col_on_line(tok_info, anchor, s.line);
+        let next = lines
+            .iter()
+            .find(|&&l| l > s.line)
+            .copied()
+            .unwrap_or(usize::MAX);
+        out.push(s);
+        for mut m in d.members {
+            match m.kind {
+                SymbolKind::Variant => {
+                    let at = (tok_info.iter())
+                        .find(|t| t.text == m.name && t.line >= m.line && t.line < next);
+                    if let Some(t) = at {
+                        (m.line, m.col, m.end_col) = (t.line, t.col, t.end_col);
+                    }
+                }
+                _ => (m.col, m.end_col) = name_col_on_line(tok_info, &m.name, m.line),
             }
+            out.push(m);
         }
     }
-
-    // Tests appear in the outline. The name is a string literal, so
-    // the symbol anchors at the `test` keyword; kind `Method` renders sensibly.
-    for t in &program.tests {
-        let (col, end_col) = name_col_on_line(tok_info, "test", t.line);
-        out.push(Symbol {
-            name: t.name.clone(),
-            kind: SymbolKind::Method,
-            line: t.line,
-            col,
-            end_col,
-            detail: format!("test {:?}", t.name),
-            doc: t.doc.clone(),
-            file: None,
-        });
-    }
-
-    // Benches appear in the outline like tests, anchored at `bench`.
-    for b in &program.benches {
-        let (col, end_col) = name_col_on_line(tok_info, "bench", b.line);
-        out.push(Symbol {
-            name: b.name.clone(),
-            kind: SymbolKind::Method,
-            line: b.line,
-            col,
-            end_col,
-            detail: format!("bench {:?}", b.name),
-            doc: b.doc.clone(),
-            file: None,
-        });
-    }
-
     out
 }
 
@@ -1704,98 +1730,28 @@ fn index_imported_symbols(
     if imported.is_empty() {
         return Vec::new();
     }
-    let local_of =
-        |module: &str, linked_name: &str| imported.get(&(module, sp.written(linked_name))).copied();
-    let alias_note = |local: &str, linked_name: &str, detail: String| -> String {
-        let original = sp.written(linked_name);
-        if local == original {
-            detail
-        } else {
-            format!("{detail}\n\n— alias of `{original}`")
-        }
+    let local_of = |module: &Option<String>, linked_name: &str| {
+        let module = module.as_deref()?;
+        imported.get(&(module, sp.written(linked_name))).copied()
+    };
+    let keep = |of, name: &str, module: &Option<String>, _| {
+        matches!(of, Of::Function | Of::Protocol | Of::Type) && local_of(module, name).is_some()
     };
     let mut out = Vec::new();
-
-    for f in &linked.functions {
-        if let Some(file) = &f.module {
-            if let Some(local) = local_of(file, &f.name) {
-                out.push(Symbol {
-                    name: local.to_string(),
-                    kind: SymbolKind::Function,
-                    line: f.line,
-                    col: 0,
-                    end_col: 0,
-                    detail: alias_note(local, &f.name, function_detail(f, sp)),
-                    doc: f.doc.clone(),
-                    file: Some(file.clone()),
-                });
-            }
+    for d in decl_symbols(linked, sp, keep) {
+        let mut s = d.sym;
+        let local = local_of(&d.module, &s.name).expect("`keep` admitted it");
+        let original = sp.written(&s.name).to_string();
+        if local != original {
+            s.detail = format!("{}\n\n— alias of `{original}`", s.detail);
         }
-    }
-
-    for p in &linked.protocols {
-        if let Some(file) = &p.module {
-            if let Some(local) = local_of(file, &p.name) {
-                out.push(Symbol {
-                    name: local.to_string(),
-                    kind: SymbolKind::Type,
-                    line: p.line,
-                    col: 0,
-                    end_col: 0,
-                    detail: alias_note(local, &p.name, protocol_detail(p, sp)),
-                    doc: p.doc.clone(),
-                    file: Some(file.clone()),
-                });
-                for m in &p.methods {
-                    out.push(Symbol {
-                        name: m.name.clone(),
-                        kind: SymbolKind::Method,
-                        line: m.line,
-                        col: 0,
-                        end_col: 0,
-                        detail: method_sig_detail(m, sp),
-                        doc: m.doc.clone(),
-                        file: Some(file.clone()),
-                    });
-                }
-            }
-        }
-    }
-
-    for t in &linked.type_decls {
-        // The root indexer's exclusions: parser-injected builtins (line 0) and
-        // synthetic inline-refinement types (`User.age`).
-        if t.line == 0 || t.name.contains('.') {
-            continue;
-        }
-        if let Some(file) = &t.module {
-            if let Some(local) = local_of(file, &t.name) {
-                out.push(Symbol {
-                    name: local.to_string(),
-                    kind: SymbolKind::Type,
-                    line: t.line,
-                    col: 0,
-                    end_col: 0,
-                    detail: alias_note(local, &t.name, type_decl_detail(t, &linked.type_decls, sp)),
-                    doc: t.doc.clone(),
-                    file: Some(file.clone()),
-                });
-                if let Some(variants) = crate::types::declared_variants(&t.base) {
-                    for v in variants {
-                        out.push(Symbol {
-                            name: v.name.clone(),
-                            kind: SymbolKind::Variant,
-                            line: t.line,
-                            col: 0,
-                            end_col: 0,
-                            detail: variant_detail(&t.name, v, sp),
-                            doc: None,
-                            file: Some(file.clone()),
-                        });
-                    }
-                }
-            }
-        }
+        s.name = local.to_string();
+        s.file = d.module.clone();
+        out.push(s);
+        out.extend(d.members.into_iter().map(|m| Symbol {
+            file: d.module.clone(),
+            ..m
+        }));
     }
 
     // A name imported from a generated module carries a banner as its file.
@@ -1885,73 +1841,26 @@ fn namespace_members(
             Err(_) => return Vec::new(),
         },
     };
-    let file = |t: &str| -> Option<String> {
-        if gen_source.is_some() {
-            None
-        } else {
-            Some(t.to_string())
-        }
-    };
+    let file = gen_source.is_none().then(|| target.to_string());
     let Ok(tokens) = lexer::lex(&text) else {
         return Vec::new();
     };
     let (program, _errs) = parser::parse_accum(tokens);
+    let exported = |of, _: &str, _: &Option<String>, exported| {
+        exported && matches!(of, Of::Function | Of::Protocol | Of::Type)
+    };
     let mut out = Vec::new();
-    for f in &program.functions {
-        if f.exported {
-            out.push(Symbol {
-                name: f.name.clone(),
-                kind: SymbolKind::Function,
-                line: f.line,
-                col: 0,
-                end_col: 0,
-                detail: function_detail(f, &Spellings::default()),
-                doc: f.doc.clone(),
-                file: file(target),
-            });
-        }
-    }
-    for p in &program.protocols {
-        if p.exported {
-            out.push(Symbol {
-                name: p.name.clone(),
-                kind: SymbolKind::Type,
-                line: p.line,
-                col: 0,
-                end_col: 0,
-                detail: protocol_detail(p, &Spellings::default()),
-                doc: p.doc.clone(),
-                file: file(target),
-            });
-        }
-    }
-    for t in &program.type_decls {
-        if t.line == 0 || t.name.contains('.') || !t.exported {
-            continue;
-        }
+    for d in decl_symbols(&program, &Spellings::default(), exported) {
         out.push(Symbol {
-            name: t.name.clone(),
-            kind: SymbolKind::Type,
-            line: t.line,
-            col: 0,
-            end_col: 0,
-            detail: type_decl_detail(t, &program.type_decls, &Spellings::default()),
-            doc: t.doc.clone(),
-            file: file(target),
+            file: file.clone(),
+            ..d.sym
         });
-        if let Some(variants) = crate::types::declared_variants(&t.base) {
-            for v in variants {
-                out.push(Symbol {
-                    name: v.name.clone(),
-                    kind: SymbolKind::Variant,
-                    line: t.line,
-                    col: 0,
-                    end_col: 0,
-                    detail: variant_detail(&t.name, v, &Spellings::default()),
-                    doc: None,
-                    file: file(target),
-                });
-            }
+        // A protocol's methods are not reached through the namespace.
+        if d.of == Of::Type {
+            out.extend(d.members.into_iter().map(|m| Symbol {
+                file: file.clone(),
+                ..m
+            }));
         }
     }
     out
@@ -2787,65 +2696,54 @@ pub fn references(analysis: &Analysis, line: usize, col: usize) -> Vec<RefRange>
         return dedup_refs(out);
     }
 
-    // A local binding shadows everything: only the uses that resolve to this
-    // binding, within its function.
-    if let Some(target) = local_at(analysis, tok) {
-        let at = (target.line, target.col);
-        let mut out = Vec::new();
-        for t in &analysis.tokens {
-            if t.text != name || is_member_position(analysis, t) {
-                continue;
-            }
-            if local_at(analysis, t).is_some_and(|b| (b.line, b.col) == at) {
-                out.push(RefRange {
-                    line: t.line,
-                    col: t.col,
-                    end_col: t.end_col,
-                    write: (t.line, t.col) == at,
-                });
-            }
-        }
-        return dedup_refs(out);
-    }
-
-    // A namespace binding: the bare `ns` tokens no local shadows.
-    if analysis.namespaces.iter().any(|n| n.name == name) {
-        let mut out = Vec::new();
-        for t in &analysis.tokens {
-            if t.text != name || is_member_position(analysis, t) || local_at(analysis, t).is_some()
-            {
-                continue;
-            }
-            out.push(RefRange {
-                line: t.line,
-                col: t.col,
-                end_col: t.end_col,
-                write: false,
+    let read = |t: &TokenInfo| RefRange {
+        line: t.line,
+        col: t.col,
+        end_col: t.end_col,
+        write: false,
+    };
+    match resolve_token(analysis, tok, || None::<()>) {
+        // A local binding shadows everything: only the uses that name it.
+        Some(Named::Local(target)) => {
+            let at = (target.line, target.col);
+            let uses = (analysis.tokens.iter()).filter(|t| {
+                t.text == name
+                    && !is_member_position(analysis, t)
+                    && local_at(analysis, t).is_some_and(|b| (b.line, b.col) == at)
             });
+            let out = uses.map(|t| RefRange {
+                write: (t.line, t.col) == at,
+                ..read(t)
+            });
+            dedup_refs(out.collect())
         }
-        return dedup_refs(out);
-    }
-
-    // A top-level symbol: its references, except where an in-scope local of the
-    // same name shadows it.
-    if let Some(sym) = analysis
-        .symbols
-        .iter()
-        .filter(|s| s.name == name)
-        .max_by_key(|s| (s.file.is_none(), s.line))
-    {
-        let (s_line, s_col, s_local) = (sym.line, sym.col, sym.file.is_none());
-        let mut out = references_to(analysis, &name, &[]);
-        if s_local {
-            for r in &mut out {
-                r.write = r.line == s_line && r.col == s_col;
+        // A namespace binding: the bare `ns` tokens no local shadows.
+        Some(Named::Namespace(_)) => {
+            let bare = (analysis.tokens.iter()).filter(|t| {
+                t.text == name
+                    && !is_member_position(analysis, t)
+                    && local_at(analysis, t).is_none()
+            });
+            dedup_refs(bare.map(read).collect())
+        }
+        // A top-level symbol: its references, except where an in-scope local of
+        // the same name shadows it. A bare token after an unrelated `ns.` on its
+        // line is the top-level symbol here, as before any namespace member.
+        Some(Named::Symbol(_) | Named::NsMember(..)) => {
+            let Some(sym) = top_symbol(analysis, &name) else {
+                return Vec::new();
+            };
+            let mut out = references_to(analysis, &name, &[]);
+            if sym.file.is_none() {
+                for r in &mut out {
+                    r.write = r.line == sym.line && r.col == sym.col;
+                }
             }
+            out
         }
-        return out;
+        // Unresolved: an empty list, which suppresses the editor's word-match.
+        Some(Named::Member(())) | None => Vec::new(),
     }
-
-    // Unresolved: an empty list, which suppresses the editor's word-match.
-    Vec::new()
 }
 
 /// Every occurrence of the top-level `name` in this document, for a caller with
@@ -2931,116 +2829,74 @@ pub fn import_spec_at(source: &str, line: usize, col: usize) -> Option<String> {
     is_import.then_some(spec)
 }
 
-/// Resolves an identifier token to a [`SemKind`] and [`SemMods`] with
-/// [`resolve`]'s precedence: local, namespace, symbol, builtin.
+/// Resolves an identifier token to a [`SemKind`] and [`SemMods`] in
+/// [`resolve_token`]'s order. Its member is a record field on a typed local
+/// receiver, a `property`, as member completion finds it. Builtins come last:
+/// free functions colour `macro`, option and result constructors
+/// `enumMember`, method builtins (`push`, `info`) `method`.
 fn classify_token(analysis: &Analysis, tok: &TokenInfo) -> Option<(SemKind, SemMods)> {
-    // 1. Local bindings shadow everything else, except in member position:
-    //    `recv.tok` names a member, as in `references`.
-    if !is_member_position(analysis, tok) {
-        if let Some(b) = local_at(analysis, tok) {
+    let field = || {
+        receiver_before_dot(analysis, tok.line, tok.col)?;
+        let is_field = match resolve_receiver_type(analysis, tok.line, tok.col)? {
+            Type::Named(n) => {
+                (analysis.record_fields.iter()).any(|(tn, c)| *tn == n && c.label == tok.text)
+            }
+            Type::Record(fields) => fields.iter().any(|f| f.name == tok.text),
+            _ => false,
+        };
+        is_field.then_some(())
+    };
+    let plain = SemMods::default();
+    match resolve_token(analysis, tok, field) {
+        Some(Named::Local(b)) => {
             let kind = match b.kind {
                 LocalKind::Param => SemKind::Parameter,
                 LocalKind::Let { .. } | LocalKind::ForVar => SemKind::Variable,
             };
-            let readonly = matches!(
-                b.kind,
-                LocalKind::Let { mutable: false } | LocalKind::ForVar
-            );
             let declaration = b.line == tok.line && b.col == tok.col;
-            // The occurrence where an owning value stops being live, a move
-            // or a `drop`, is marked so a reader need not infer it.
+            // The occurrence where an owning value stops being live, a move or a
+            // `drop`, is marked so a reader need not infer it.
             let last_use = !declaration
-                && analysis
-                    .memory
-                    .iter()
+                && (analysis.memory.iter())
                     .any(|m| m.name == b.name && m.line == b.line && m.last_use == Some(tok.line));
-            return Some((
-                kind,
-                SemMods {
-                    declaration,
-                    readonly,
-                    default_library: false,
-                    last_use,
-                },
-            ));
-        }
-    }
-    // 2. A member access `recv.tok`: first `ns.member`, then a record field on a
-    //    typed receiver, a `property`.
-    if let Some(recv) = receiver_before_dot(analysis, tok.line, tok.col) {
-        if local_at(analysis, recv).is_none() {
-            let recv = &recv.text;
-            if let Some(nsi) = analysis.namespaces.iter().find(|n| &n.name == recv) {
-                if let Some(m) = nsi.members.iter().find(|m| m.name == tok.text) {
-                    return Some((
-                        sem_of_symbol_kind(m.kind),
-                        SemMods {
-                            declaration: false,
-                            readonly: false,
-                            default_library: is_std_file(&m.file),
-                            last_use: false,
-                        },
-                    ));
-                }
-            }
-        }
-        // A record field on a typed local receiver (`u.age`), as member
-        // completion finds it.
-        if let Some(ty) = resolve_receiver_type(analysis, tok.line, tok.col) {
-            let is_field = match &ty {
-                Type::Named(n) => analysis
-                    .record_fields
-                    .iter()
-                    .any(|(tn, c)| tn == n && c.label == tok.text),
-                Type::Record(fields) => fields.iter().any(|f| f.name == tok.text),
-                _ => false,
-            };
-            if is_field {
-                return Some((SemKind::Property, SemMods::default()));
-            }
-        }
-    }
-
-    // 3. The namespace binding itself.
-    if analysis.namespaces.iter().any(|n| n.name == tok.text) {
-        return Some((SemKind::Namespace, SemMods::default()));
-    }
-
-    // 4. Top-level symbols, with [`resolve`]'s precedence. Import specifiers get
-    //    their real kind here, since imported decls are indexed with their file.
-    if let Some(best) = analysis
-        .symbols
-        .iter()
-        .filter(|s| s.name == tok.text)
-        .max_by_key(|s| (s.file.is_none(), s.line))
-    {
-        let declaration = best.file.is_none() && best.line == tok.line && best.col == tok.col;
-        let readonly = best.kind == SymbolKind::Global
-            && best.detail.starts_with("let ")
-            && !best.detail.starts_with("let mut");
-        return Some((
-            sem_of_symbol_kind(best.kind),
-            SemMods {
+            let mods = SemMods {
                 declaration,
-                readonly,
-                default_library: is_std_file(&best.file),
+                readonly: matches!(
+                    b.kind,
+                    LocalKind::Let { mutable: false } | LocalKind::ForVar
+                ),
+                default_library: false,
+                last_use,
+            };
+            Some((kind, mods))
+        }
+        Some(Named::NsMember(_, m)) => {
+            let mods = SemMods {
+                default_library: is_std_file(&m.file),
+                ..plain
+            };
+            Some((sem_of_symbol_kind(m.kind), mods))
+        }
+        Some(Named::Member(())) => Some((SemKind::Property, plain)),
+        Some(Named::Namespace(_)) => Some((SemKind::Namespace, plain)),
+        // Import specifiers get their real kind here, since imported decls are
+        // indexed with their file.
+        Some(Named::Symbol(s)) => {
+            let mods = SemMods {
+                declaration: s.file.is_none() && s.line == tok.line && s.col == tok.col,
+                readonly: s.kind == SymbolKind::Global && !s.mutable,
+                default_library: is_std_file(&s.file),
                 last_use: false,
-            },
-        ));
+            };
+            Some((sem_of_symbol_kind(s.kind), mods))
+        }
+        None if is_macro_builtin(&tok.text) => Some((SemKind::Macro, mods_default_lib())),
+        None if is_constructor_builtin(&tok.text) => {
+            Some((SemKind::EnumMember, mods_default_lib()))
+        }
+        None if builtin_method(&tok.text).is_some() => Some((SemKind::Method, mods_default_lib())),
+        None => None,
     }
-
-    // 5. Compiler builtins: free functions colour `macro`, option and result
-    //    constructors `enumMember`, method builtins (`push`, `info`) `method`.
-    if is_macro_builtin(&tok.text) {
-        return Some((SemKind::Macro, mods_default_lib()));
-    }
-    if is_constructor_builtin(&tok.text) {
-        return Some((SemKind::EnumMember, mods_default_lib()));
-    }
-    if builtin_method(&tok.text).is_some() {
-        return Some((SemKind::Method, mods_default_lib()));
-    }
-    None
 }
 
 /// `SemMods` with only `default_library` set, the builtin shape.
