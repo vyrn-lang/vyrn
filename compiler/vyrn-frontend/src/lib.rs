@@ -143,7 +143,8 @@ pub fn check_and_synthesize(
                 program.number_appended(at);
                 let again;
                 let tail;
-                ((diags, again, refused), tail) = checker::check_appended(program, at);
+                let earlier = record.as_ref().map_or(&[][..], |r| &r.stored.dispatched);
+                ((diags, again, refused), tail) = checker::check_appended(program, at, earlier);
                 if let Some(rec) = record.as_mut() {
                     rec.extend(tail);
                 }
@@ -172,7 +173,7 @@ pub fn check_and_synthesize(
     // The constructors are typed for the record alone: they are generated
     // from declarations that checked.
     if program.functions.len() > from {
-        let (_, tail) = checker::check_appended(program, from);
+        let (_, tail) = checker::check_appended(program, from, &[]);
         if let Some(rec) = record.as_mut() {
             rec.extend(tail);
         }

@@ -15,7 +15,7 @@ use std::collections::{HashMap, HashSet};
 
 use vyrn_frontend::ast::{
     ArmBody, BinOp, Binder, Block, Capability, Expr, FnId, Function, Id, LambdaBody, MatchArm,
-    NodeId, Pattern, Program, SourceBody, Speech, Stmt, Type, TypeDecl, UnOp,
+    MethodId, MethodSig, NodeId, Pattern, Program, SourceBody, Speech, Stmt, Type, TypeDecl, UnOp,
 };
 use vyrn_frontend::declared::{CapsOf, NameMemo, Owned};
 use vyrn_frontend::diagnostics::{menu, Diagnostic};
@@ -1810,13 +1810,25 @@ impl<'a> Builder<'a> {
     }
 
     /// Whether a call by this name lends: `a[i]` and its seeded element row, a
-    /// lending prelude row, a projection. A call that hands its argument back
-    /// depends on the argument ([`Self::lends`]).
+    /// lending prelude row, a projection no function shadows. A call that
+    /// hands its argument back depends on the argument ([`Self::lends`]).
     fn lends_name(&self, name: &str) -> bool {
         name == vyrn_frontend::project::AT
             || name == vyrn_frontend::project::ELEM
             || prelude::lends(name)
-            || self.projection(name).is_some()
+            || self.own.place_names.contains(name)
+    }
+
+    /// The first protocol member named `name`, in declaration order.
+    fn protocol_member(&self, name: &str) -> Option<(MethodId, &'a MethodSig)> {
+        (self.program.protocols.iter().enumerate()).find_map(|(i, p)| {
+            let j = p.methods.iter().position(|m| m.name == name)?;
+            let id = MethodId {
+                protocol: i as u32,
+                member: j as u32,
+            };
+            Some((id, &p.methods[j]))
+        })
     }
 
     fn projection(&self, name: &str) -> Option<&'a Function> {
@@ -2640,16 +2652,12 @@ impl<'a> Builder<'a> {
                 Ok(f) => Place::Field(Box::new(place), f.to_string()),
                 Err(_) if self.projected(&ty) => {
                     let Stmt::IndexSet {
-                        name,
-                        index,
-                        value,
-                        line,
-                        id: _,
+                        index, value, line, ..
                     } = &ss[2 * lets]
                     else {
                         return Ok(None);
                     };
-                    match self.yielded(name, index, value, *line, out)? {
+                    match self.yielded(index, value, *line, out)? {
                         Some((p, _)) => p,
                         None => return Ok(None),
                     }
@@ -2669,13 +2677,12 @@ impl<'a> Builder<'a> {
     /// expanded no such store.
     fn yielded(
         &mut self,
-        name: &str,
         index: &'a Expr,
         value: &'a Expr,
         line: usize,
         out: &mut Vec<St>,
     ) -> Result<Option<(Place, &'a Expr)>, Gap> {
-        let Some(blk) = self.program.expansions.stored(name, index, value) else {
+        let Some(blk) = self.program.expansions.stored(index) else {
             return Ok(None);
         };
         let Some(k) = vyrn_frontend::project::store_node(blk)
@@ -3870,7 +3877,7 @@ impl<'a> Builder<'a> {
         // A user container's element is the place its `atSet` yields,
         // after the projection's prologue.
         let yielded = if self.projected(&bty) {
-            self.yielded(name, index, value, line, out)?
+            self.yielded(index, value, line, out)?
         } else {
             None
         };
@@ -6361,18 +6368,20 @@ impl<'a> Builder<'a> {
             }
         }
         let decls = self.proto.types();
-        let method = self
-            .program
-            .impls
-            .iter()
-            .flat_map(|i| i.methods.iter())
-            .find(|m| m.name == name);
+        // A method call takes the capabilities of the impl it dispatches to:
+        // two protocols may declare one method name with different ones.
+        let method = (self.program.impls.iter())
+            .any(|i| i.methods.iter().any(|m| m.name == name))
+            .then(|| self.dispatched(name, args.first()?))
+            .flatten()
+            .and_then(|(f, solved)| Some((self.fn_id(&f)?, f, solved)));
         // A seeded row whose result is its receiver's own type hands the
         // buffer back through the result, so the receiver is taken by the
         // call.
         let rebuilds = prelude::rebuilds(name);
         // Who the callee is decides each argument position's capability.
         let mut kind = Callee::Reserved;
+        let mut member = None;
         // A binding of function type is asked first, as `Checker::call` asks
         // it: a `fn`-typed parameter `h` shadows a function `h` the program
         // declares, and `h(req)` is a call through the value.
@@ -6400,23 +6409,19 @@ impl<'a> Builder<'a> {
                 caps[0] = Capability::Consume;
             }
             caps
-        } else if let Some(m) = method {
+        } else if let Some((id, ..)) = method {
             kind = Callee::Method;
+            let m = &self.program.functions[id.index()];
             m.params.iter().map(|p| p.capability).collect()
         } else if let Some(p) = self.projection(name) {
             kind = Callee::Projection;
             p.params.iter().map(|p| p.capability).collect()
-        } else if let Some(sig) = self
-            .program
-            .protocols
-            .iter()
-            .flat_map(|p| &p.methods)
-            .find(|m| m.name == name)
-        {
+        } else if let Some((id, sig)) = self.protocol_member(name) {
             // A protocol member no impl answers, called on a bounded type
             // parameter in a generic read as written: its signature is what
             // a caller reads (`MethodSig::recv`).
             kind = Callee::Method;
+            member = Some(id);
             std::iter::once(sig.recv)
                 .chain(sig.param_caps.iter().copied())
                 .collect()
@@ -6476,11 +6481,12 @@ impl<'a> Builder<'a> {
         if caps.len() < args.len() {
             return gap("a call with more arguments than parameters", line);
         }
-        // The capability row an argument's release reads, keyed by the callee
-        // before dispatch.
-        let of = match kind {
-            Callee::Fn(id) => CapsOf::Fn(id),
-            Callee::Value(_) => CapsOf::None,
+        // The capability row an argument's release reads: the impl a method
+        // call dispatches to, the protocol member it resolved, else the name.
+        let of = match (kind, method.as_ref().map(|m| m.0), member) {
+            (Callee::Fn(id), ..) | (Callee::Method, Some(id), _) => CapsOf::Fn(id),
+            (Callee::Method, None, Some(m)) => CapsOf::Method(m),
+            (Callee::Value(_), ..) => CapsOf::None,
             _ => self.own.arg_caps.named(name),
         };
         let length = prelude::builtin(name).map(|b| b.length);
@@ -6644,15 +6650,16 @@ impl<'a> Builder<'a> {
         // A method is a call after dispatch, and so is `x.copy()` of a type
         // with `impl Copy`.
         let dispatched = match (kind, args.first()) {
-            (Callee::Method, Some(r)) => self.dispatched(name, r),
-            (Callee::Reserved, Some(r)) if name == "@copy" => self.copied(r),
+            (Callee::Method, _) => method,
+            (Callee::Reserved, Some(r)) if name == "@copy" => {
+                (self.copied(r)).and_then(|(f, s)| Some((self.fn_id(&f)?, f, s)))
+            }
             _ => None,
         };
-        let (callee, kind, solved) =
-            match dispatched.and_then(|(f, s)| Some((self.fn_id(&f)?, f, s))) {
-                Some((id, f, solved)) => (f, Callee::Fn(id), solved),
-                None => (name.to_string(), kind, Vec::new()),
-            };
+        let (callee, kind, solved) = match dispatched {
+            Some((id, f, solved)) => (f, Callee::Fn(id), solved),
+            None => (name.to_string(), kind, Vec::new()),
+        };
         Ok(Rhs::Call {
             callee,
             args: vs,

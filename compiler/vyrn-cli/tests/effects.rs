@@ -445,18 +445,15 @@ fn run_corpus() {
         }
         let decls = vyrn_frontend::types::decl_map(&program);
         let pure = effects::PureNames::new(&decls);
-        let externs: BTreeSet<&str> = program
-            .functions
-            .iter()
-            .filter(|f| f.is_extern)
-            .map(|f| f.name.as_str())
+        let externs: BTreeMap<&str, Effect> = (program.functions.iter())
+            .filter_map(|f| Some((f.name.as_str(), effects::extern_effect(f)?)))
             .collect();
         let mut resolve = |name: &str| -> Callee {
             if let Some(e) = effects::atom(name) {
                 return Callee::Atom(Effects::of(e));
             }
-            if externs.contains(name) {
-                return Callee::Atom(Effects::of(Effect::Extern));
+            if let Some(&e) = externs.get(name) {
+                return Callee::Atom(Effects::of(e));
             }
             if let Some(idx) = by_name.get(name) {
                 return Callee::Bodies(idx.clone());
@@ -907,9 +904,6 @@ const LATTICE: &[(&str, &str, bool)] = &[
     ("listDir", "fs-list", true),
     ("listDirKinds", "fs-list", true),
     ("args", "args", false),
-    ("hostNowMillis", "clock", false),
-    ("hostMonotonicNanos", "clock", false),
-    ("hostRandomSeed", "random", false),
     ("serveStream", "serve", false),
     ("panic", "trap", true),
     ("@panicAt", "trap", true),

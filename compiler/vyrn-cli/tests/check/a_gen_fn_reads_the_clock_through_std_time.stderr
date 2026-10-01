@@ -1,0 +1,1 @@
+a_gen_fn_reads_the_clock_through_std_time.vyrn:3:0: `gen fn g` is not comptime-pure: it reaches `monotonic` (via g -> monotonic), which reads the clock (generators run at compile time — they may not use `extern`, module state, `print`, `writeFile`, `readLine`, `args`, `readFileBytes`, the clock, entropy, or logging sinks)

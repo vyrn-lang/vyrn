@@ -143,8 +143,8 @@ pub struct Ownership {
     /// Per function, every release step in run order, grouped by
     /// [`Release::site`].
     pub releases: HashMap<FnId, Vec<Release>>,
-    /// The program's user projection names ([`crate::project::place_names`]),
-    /// which the core reads as element reads.
+    /// The names a call reads as a user projection
+    /// ([`crate::project::place_names`]), which the core reads as element reads.
     pub place_names: std::collections::HashSet<String>,
     /// See [`crate::declared::ArgCaps`].
     pub arg_caps: crate::declared::ArgCaps,

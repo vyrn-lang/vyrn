@@ -578,3 +578,22 @@ fn every_generator_example_emits_the_same_source_twice() {
     }
     assert!(failures.is_empty(), "\n{}", failures.join("\n"));
 }
+
+/// `examples/projection_generator_site.vyrn` expands a projection site of its
+/// generator's program and one of its own at one node and line. Only a cold
+/// generator cache loads and checks the generator's program, so the run has
+/// a private one.
+#[test]
+fn a_generator_programs_projection_site_expands_apart_from_its_importers() {
+    let cache = std::env::temp_dir().join(format!("vyrn-projsite-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&cache);
+    let out = Command::new(env!("CARGO_BIN_EXE_vyrn"))
+        .env("VYRN_GEN_CACHE_DIR", &cache)
+        .arg("run")
+        .arg(repo_file("examples/projection_generator_site.vyrn"))
+        .output()
+        .unwrap();
+    let _ = std::fs::remove_dir_all(&cache);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "37\n", "{err}");
+}

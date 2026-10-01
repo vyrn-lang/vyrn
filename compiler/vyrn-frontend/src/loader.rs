@@ -523,12 +523,11 @@ pub struct LoadOptions {
     /// The artifacts the manifest declares, or `None`. The floor
     /// ([`crate::floor`]) runs only when the root is one artifact's entry point.
     pub artifacts: Option<crate::artifacts::ArtifactMap>,
-    /// The projection expansions of this compile, stamped on every program
-    /// the load links, a generator's included. A compile passes
-    /// [`crate::project::Expansions::shared`].
+    /// The projection expansions of this compile, stamped on the program the
+    /// load links. A compile passes [`crate::project::Expansions::shared`].
     pub expansions: std::sync::Arc<crate::project::Expansions>,
-    /// The host's session, stamped like `expansions`; `None` keeps nothing
-    /// between loads.
+    /// The host's session, stamped on every program the load links, a
+    /// generator's included; `None` keeps nothing between loads.
     pub session: Option<std::sync::Arc<crate::session::Session>>,
     /// The generator runs that enclose this load. A host's load is outermost:
     /// the default.
@@ -1800,6 +1799,11 @@ fn run_generator(
     // deeper than this load.
     let mut inner = opts.clone();
     inner.nest.depth += 1;
+    // A generator program's node ids repeat the importer's, so its sites
+    // expand in a table of their own.
+    if opts.expansions.is_shared() {
+        inner.expansions = crate::project::Expansions::shared();
+    }
     let (loaded, _, _, gen_graph, _) =
         load_with_origins(&gen_source, &gen_mod_key, &inner, resolver, engine);
     let mut gen_program = loaded?;

@@ -410,7 +410,7 @@ use crate::types::INT32;
 /// state the diagnostics all belong to, so every other body is typed; it is
 /// `None` when a refusal stands anywhere else.
 pub fn check_accum_with_sites(program: &Program) -> (Appended, Vec<LocalBinding>, Recorded) {
-    let (out, binders, _, derived, refused, made) = check_accum_inner(program, true, 0);
+    let (out, binders, _, derived, refused, made) = check_accum_inner(program, true, 0, &[]);
     ((out, derived, refused), binders, made.unwrap_or_default())
 }
 
@@ -423,7 +423,7 @@ fn check_accum_full(
     Vec<crate::gen::Site>,
     Option<HashSet<String>>,
 ) {
-    let (out, binders, effects, derived, typed, _) = check_accum_inner(program, false, 0);
+    let (out, binders, effects, derived, typed, _) = check_accum_inner(program, false, 0, &[]);
     (out, binders, effects, derived, typed)
 }
 
@@ -434,8 +434,12 @@ fn check_accum_full(
 ///
 /// A body is typed against the declarations alone and reads them by name, so
 /// an earlier body keeps its verdict.
-pub fn check_appended(program: &Program, at: usize) -> (Appended, Recorded) {
-    let (out, _, _, derived, typed, made) = check_accum_inner(program, true, at);
+pub fn check_appended(
+    program: &Program,
+    at: usize,
+    earlier: &[(String, String)],
+) -> (Appended, Recorded) {
+    let (out, _, _, derived, typed, made) = check_accum_inner(program, true, at, earlier);
     ((out, derived, typed), made.unwrap_or_default())
 }
 
@@ -498,6 +502,7 @@ fn check_accum_inner(
     program: &Program,
     recording: bool,
     bodies_from: usize,
+    earlier: &[(String, String)],
 ) -> (
     Vec<Diagnostic>,
     Vec<LocalBinding>,
@@ -1133,19 +1138,22 @@ fn check_accum_inner(
         checker.reader.set(None);
     }
 
-    // 7. Comptime purity of every `gen fn` and its callees, after
-    //    the body checks so a generator's type errors come first.
-    check_comptime_purity(program, &checker.through.borrow(), &mut out);
-    for d in &mut out {
-        d.speak(&program.spellings);
-    }
-
     let mut effects = StoredFnEffects {
         sources: checker.stored_sources.borrow().clone(),
         arg_sources: checker.arg_sources.borrow().clone(),
         calls: checker.stored_calls.borrow().clone(),
         through: checker.through.borrow().clone(),
+        dispatched: checker.dispatched.borrow().clone(),
     };
+
+    // 7. Comptime purity of every `gen fn` and its callees, after
+    //    the body checks so a generator's type errors come first.
+    let dispatched = earlier.iter().chain(&effects.dispatched);
+    check_comptime_purity(program, &effects.through, dispatched, &mut out);
+    for d in &mut out {
+        d.speak(&program.spellings);
+    }
+
     // The outputs name each type parameter as written, not as one solve
     // renamed it ([`Checker::rename_apart`]).
     let written = |t: &mut Type| {
@@ -1601,6 +1609,7 @@ impl Recorded {
         self.stored.arg_sources.extend(tail.stored.arg_sources);
         self.stored.calls.extend(tail.stored.calls);
         self.stored.through.extend(tail.stored.through);
+        self.stored.dispatched.extend(tail.stored.dispatched);
         self.reads.extend(tail.reads);
         self.entries.extend(tail.entries);
     }
@@ -1608,7 +1617,7 @@ impl Recorded {
 
 /// One pass that returns the diagnostics, the root's bindings and the record.
 fn recording_check(program: &Program) -> (Vec<Diagnostic>, Vec<LocalBinding>, Recorded) {
-    let (diags, binders, _, _, _, made) = check_accum_inner(program, true, 0);
+    let (diags, binders, _, _, _, made) = check_accum_inner(program, true, 0, &[]);
     (diags, binders, made.unwrap_or_default())
 }
 
@@ -1715,6 +1724,8 @@ struct Checker<'a> {
     stored_calls: RefCell<Vec<(String, Type)>>,
     /// See [`StoredFnEffects::through`].
     through: RefCell<HashSet<NodeId>>,
+    /// See [`StoredFnEffects::dispatched`].
+    dispatched: RefCell<Vec<(String, String)>>,
     derive_sites: RefCell<Vec<crate::gen::Site>>,
     /// The record [`record`] asks for, or `None`, so the editor's keystroke
     /// path does not pay for it.
@@ -1863,6 +1874,7 @@ impl<'a> Checker<'a> {
             arg_sources: Default::default(),
             stored_calls: Default::default(),
             through: Default::default(),
+            dispatched: Default::default(),
             derive_sites: Default::default(),
             record: recording.then(RefCell::default),
             reader: Default::default(),
@@ -3008,6 +3020,7 @@ impl<'a> Checker<'a> {
                 arg_sources: self.arg_sources.take(),
                 calls: self.stored_calls.take(),
                 through: self.through.take(),
+                dispatched: self.dispatched.take(),
             },
             derive: self.derive_sites.take(),
         }
@@ -3024,6 +3037,7 @@ impl<'a> Checker<'a> {
         *self.arg_sources.borrow_mut() = t.stored.arg_sources;
         *self.stored_calls.borrow_mut() = t.stored.calls;
         *self.through.borrow_mut() = t.stored.through;
+        *self.dispatched.borrow_mut() = t.stored.dispatched;
         *self.derive_sites.borrow_mut() = t.derive;
     }
 
@@ -3041,6 +3055,7 @@ impl<'a> Checker<'a> {
         self.arg_sources.borrow_mut().extend(t.stored.arg_sources);
         self.stored_calls.borrow_mut().extend(t.stored.calls);
         self.through.borrow_mut().extend(t.stored.through);
+        self.dispatched.borrow_mut().extend(t.stored.dispatched);
         self.derive_sites.borrow_mut().extend(t.derive);
         self.reads.borrow_mut().extend(t.reads);
         t.diags
@@ -3090,6 +3105,14 @@ impl<'a> Checker<'a> {
         self.first_error()
     }
 
+    /// Records that the function being checked calls the impl methods
+    /// `to` ([`StoredFnEffects::dispatched`]).
+    fn dispatch(&self, to: impl IntoIterator<Item = String>) {
+        let from = self.cur_fn.borrow();
+        let edges = to.into_iter().map(|m| (from.clone(), m));
+        self.dispatched.borrow_mut().extend(edges);
+    }
+
     /// Hands out the first recorded error as the `Err`; the rest stay in
     /// `errors`.
     fn first_error(&self) -> Result<(), Diagnostic> {
@@ -3114,6 +3137,7 @@ impl<'a> Checker<'a> {
             self.stored_sources.borrow().len(),
             self.arg_sources.borrow().len(),
             self.stored_calls.borrow().len(),
+            self.dispatched.borrow().len(),
         );
         let saved = self.pending_subst.take();
         let mut sc = scope.clone();
@@ -3123,6 +3147,7 @@ impl<'a> Checker<'a> {
         self.stored_sources.borrow_mut().truncate(stored.0);
         self.arg_sources.borrow_mut().truncate(stored.1);
         self.stored_calls.borrow_mut().truncate(stored.2);
+        self.dispatched.borrow_mut().truncate(stored.3);
     }
 
     fn block(&self, block: &Block, ret: &Type, scope: &mut Scope) {
@@ -5566,6 +5591,11 @@ impl<'a> Checker<'a> {
                     params.extend(sig.params.iter().cloned());
                     let mut caps = vec![sig.recv];
                     caps.extend(sig.param_caps.iter().copied());
+                    let every = (self.impl_blocks.iter())
+                        .filter(|i| i.protocol == proto)
+                        .filter_map(|i| crate::types::type_key(&i.ty))
+                        .map(|key| crate::types::impl_method_name(&proto, &key, name));
+                    self.dispatch(every);
                     return self.check_declared_call(
                         &DeclaredCall {
                             key: name,
@@ -5589,6 +5619,7 @@ impl<'a> Checker<'a> {
             match crate::types::type_key(&recv) {
                 Some(key) if self.impls.contains(&(proto.clone(), key.clone())) => {
                     let mangled = crate::types::impl_method_name(&proto, &key, name);
+                    self.dispatch([mangled.clone()]);
                     // Dispatch ends here; the impl method is read as any
                     // declaration, its receiver's capability at index 0.
                     let (mparams, mret) = self
@@ -6934,7 +6965,12 @@ fn extern_abi_type_ok(ty: &Type, allow_unit: bool) -> bool {
 /// module state, or an atom [`crate::effects::gen_refusal`] refuses, naming
 /// the effect and the chain. Every `gen fn` is checked, even one called only
 /// at run time, because any may be an import target.
-fn check_comptime_purity(program: &Program, through: &HashSet<NodeId>, out: &mut Vec<Diagnostic>) {
+fn check_comptime_purity<'a>(
+    program: &Program,
+    through: &HashSet<NodeId>,
+    dispatched: impl Iterator<Item = &'a (String, String)>,
+    out: &mut Vec<Diagnostic>,
+) {
     let gen_fns: Vec<&Function> = program.functions.iter().filter(|f| f.is_gen).collect();
     if gen_fns.is_empty() {
         return;
@@ -6944,48 +6980,26 @@ fn check_comptime_purity(program: &Program, through: &HashSet<NodeId>, out: &mut
         .iter()
         .map(|f| (f.name.as_str(), f))
         .collect();
-    // `hostNowMillis` and its neighbours are no host imports (the shim
-    // implements them); `gen_refusal` refuses them as `clock` and `random`.
-    let extern_fns: std::collections::HashSet<&str> = program
-        .functions
-        .iter()
-        .filter(|f| f.is_extern && crate::trap::host_boundary_extern(&f.name).is_none())
-        .map(|f| f.name.as_str())
+    // A call to a declared extern is refused by its declaration, so a
+    // function spelled like a host-boundary extern is an ordinary one.
+    let extern_refusals: HashMap<&str, String> = (program.functions.iter())
+        .filter_map(|f| Some((f.name.as_str(), crate::effects::extern_gen_refusal(f)?)))
         .collect();
     let global_names: std::collections::HashSet<String> =
         program.globals.iter().map(|g| g.name.clone()).collect();
-    // Method name to impl names, so a method call edge reaches the impl body.
-    let mut method_impls: HashMap<String, Vec<String>> = HashMap::new();
-    for imp in &program.impls {
-        if let Some(key) = crate::types::type_key(&imp.ty) {
-            for m in &imp.methods {
-                method_impls
-                    .entry(m.name.clone())
-                    .or_default()
-                    .push(crate::types::impl_method_name(&imp.protocol, &key, &m.name));
-            }
-        }
+    // A method call edge reaches the impl the check dispatched it to.
+    let mut impls_called: HashMap<&str, Vec<String>> = HashMap::new();
+    for (from, to) in dispatched {
+        impls_called.entry(from).or_default().push(to.clone());
     }
-    let expand = |calls: std::collections::HashSet<String>| -> Vec<String> {
-        let mut out: Vec<String> = Vec::new();
-        for c in calls {
-            if let Some(impls) = method_impls.get(&c) {
-                out.extend(impls.iter().cloned());
-            }
-            out.push(c);
-        }
-        out
-    };
     let direct = |f: &Function| -> Option<String> {
         if touches_globals(f, &global_names) {
             return Some("reads or writes module state".to_string());
         }
-        for c in expand(fn_calls(&f.body, through)) {
-            if let Some(why) = crate::effects::gen_refusal(&c) {
+        for c in fn_calls(&f.body, through) {
+            let why = extern_refusals.get(c.as_str()).cloned();
+            if let Some(why) = why.or_else(|| crate::effects::gen_refusal(&c)) {
                 return Some(why);
-            }
-            if extern_fns.contains(c.as_str()) {
-                return Some(format!("calls the extern `{c}`"));
             }
         }
         None
@@ -7004,10 +7018,9 @@ fn check_comptime_purity(program: &Program, through: &HashSet<NodeId>, out: &mut
             let cur = *path.last().unwrap();
             let Some(f) = fn_map.get(cur) else { continue };
             if !facts.contains_key(cur) {
-                facts.insert(
-                    cur.to_string(),
-                    (direct(f), expand(fn_calls(&f.body, through))),
-                );
+                let mut edges: Vec<String> = fn_calls(&f.body, through).into_iter().collect();
+                edges.extend(impls_called.get(cur).into_iter().flatten().cloned());
+                facts.insert(cur.to_string(), (direct(f), edges));
             }
             let (violation, edges) = &facts[cur];
             if let Some(reason) = violation.clone() {
@@ -7060,7 +7073,8 @@ pub struct StoredLambda {
     pub nested_sigs: Vec<Type>,
 }
 
-/// Whole-program facts about stored function values.
+/// Whole-program call facts a call name does not carry: stored function
+/// values and dispatched protocol methods.
 #[derive(Debug, Clone, Default)]
 pub struct StoredFnEffects {
     pub sources: Vec<StoredSource>,
@@ -7076,6 +7090,11 @@ pub struct StoredFnEffects {
     /// Every call node resolved through a binding of `fn` type, parameter
     /// calls included ([`Checker::call`]); [`fn_calls`] leaves them out.
     pub through: HashSet<NodeId>,
+    /// `(function, impl method)` for each protocol method call the check
+    /// dispatched: the impl a concrete receiver selects, or every impl of the
+    /// protocol for a bounded type parameter. A call names the method, which
+    /// two protocols may share.
+    pub dispatched: Vec<(String, String)>,
 }
 
 impl StoredFnEffects {
@@ -7152,19 +7171,6 @@ pub fn module_state_use(
         .iter()
         .map(|f| (f.name.as_str(), f))
         .collect();
-    // A method name expands to every impl, so an impl reached through a
-    // method call is walked.
-    let mut method_impls: HashMap<String, Vec<String>> = HashMap::new();
-    for imp in &program.impls {
-        if let Some(key) = crate::types::type_key(&imp.ty) {
-            for m in &imp.methods {
-                method_impls
-                    .entry(m.name.clone())
-                    .or_default()
-                    .push(crate::types::impl_method_name(&imp.protocol, &key, &m.name));
-            }
-        }
-    }
     // Breadth-first with parent links, so the first hit is the shortest
     // chain; callees visit in sorted order.
     let mut parent: HashMap<String, Option<String>> = HashMap::from([(root.to_string(), None)]);
@@ -7233,12 +7239,11 @@ pub fn module_state_use(
                 program.spellings.written(&which).to_string(),
             ));
         }
-        let mut callees: Vec<String> = Vec::new();
-        for c in fn_calls(&f.body, &stored.through) {
-            if let Some(impls) = method_impls.get(&c) {
-                callees.extend(impls.iter().cloned());
+        let mut callees: Vec<String> = fn_calls(&f.body, &stored.through).into_iter().collect();
+        for (fname, to) in &stored.dispatched {
+            if fname == &cur {
+                callees.push(to.clone());
             }
-            callees.push(c);
         }
         for (fname, sig) in &stored.calls {
             if fname == &cur {
@@ -7661,6 +7666,34 @@ mod tests {
     }
 
     #[test]
+    fn workers_gate_walks_the_impl_a_method_call_dispatches_to() {
+        // `Pa` and `Qa` both declare `describe`; `handle` calls `P`'s alone.
+        let src = "let mut hits: Int64 = 0
+             type P = { x: Int64 }
+             type Q = { y: Int64 }
+             protocol Pa { fn describe(self) -> Int64 }
+             protocol Qa { fn describe(self) -> Int64 }
+             impl Pa for P { fn describe(self) -> Int64 { return self.x } }
+             impl Qa for Q { fn describe(self) -> Int64 { return self.y + hits } }
+             fn handle(n: Int64) -> Int64 { let p = P { x: n }  return p.describe() }
+";
+        let program = parse(lex(src).unwrap()).unwrap();
+        let stored = stored_fn_effects(&program);
+        assert_eq!(module_state_use(&program, "handle", &stored), None);
+        let reaches_q = src.replace("P { x: n }", "Q { y: n }");
+        let program = parse(lex(&reaches_q).unwrap()).unwrap();
+        let stored = stored_fn_effects(&program);
+        let (chain, global) = module_state_use(&program, "handle", &stored).expect("stateful");
+        assert_eq!(
+            (chain, global.as_str()),
+            (
+                vec!["handle".to_string(), "Qa$Q$describe".to_string()],
+                "hits"
+            )
+        );
+    }
+
+    #[test]
     fn workers_gate_ignores_isolated_stored_values() {
         let src = "let mut hits: Int64 = 0\n\
              fn pure(x: Int64) -> Int64 { return x * 2 }\n\
@@ -7858,7 +7891,7 @@ mod tests {
                 continue;
             }
             assert!(
-                RESERVED.contains(&n) || crate::trap::host_boundary_extern(n).is_some(),
+                RESERVED.contains(&n),
                 "`{n}` is forbidden inside a `gen fn` but is not a name the \
                  compiler owns — it now forbids any user function spelled that way"
             );

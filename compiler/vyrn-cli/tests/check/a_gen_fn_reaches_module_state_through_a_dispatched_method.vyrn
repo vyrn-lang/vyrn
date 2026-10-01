@@ -1,0 +1,36 @@
+let counter: Int64 = 5
+
+type P = { x: Int64 }
+
+type Q = { y: Int64 }
+
+protocol Pa {
+    fn describe(self) -> Int64
+}
+
+protocol Qa {
+    fn describe(self) -> Int64
+}
+
+impl Pa for P {
+    fn describe(self) -> Int64 {
+        return self.x
+    }
+}
+
+impl Qa for Q {
+    fn describe(self) -> Int64 {
+        return self.y + counter
+    }
+}
+
+gen fn g() -> Int64 {
+    let q = Q { y: 1 }
+    return q.describe()
+}
+
+fn main() -> Int64 {
+    let q = Q { y: 1 }
+    print(g() + q.describe())
+    return 0
+}

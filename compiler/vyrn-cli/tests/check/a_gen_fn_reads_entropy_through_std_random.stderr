@@ -1,0 +1,1 @@
+a_gen_fn_reads_entropy_through_std_random.vyrn:3:0: `gen fn g` is not comptime-pure: it reaches `randomSeed` (via g -> randomSeed), which reads entropy (generators run at compile time — they may not use `extern`, module state, `print`, `writeFile`, `readLine`, `args`, `readFileBytes`, the clock, entropy, or logging sinks)
