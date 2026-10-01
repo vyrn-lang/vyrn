@@ -1940,6 +1940,85 @@ fn a_call_named_like_a_projection_member_owns_the_function_result() {
     assert_eq!(run.status.code(), Some(0), "the free audit: {audit}");
 }
 
+// Two protocols declare `eat`, one reading its String and one consuming
+// it. A call passes its temporary as the impl it dispatches to declares, in
+// either impl order: a read where the callee consumes is a double free, a
+// consume where it reads is a leak.
+const SHARED_METHOD_NAME: &str = r#"type P = { x: Int64 }
+
+type Q = { y: Int64 }
+
+protocol Qa {
+    fn eat(read self, s: String) -> Int64
+}
+
+protocol Pa {
+    fn eat(read self, s: consume String) -> Int64
+}
+
+impl Qa for Q {
+    fn eat(read self, s: String) -> Int64 {
+        return s.byteLength + self.y
+    }
+}
+
+impl Pa for P {
+    fn eat(read self, s: consume String) -> Int64 {
+        let t = s
+        return t.byteLength + self.x
+    }
+}
+
+fn mk(n: Int64) -> String {
+    return "ab" + "\{n}"
+}
+
+fn main() -> Int64 {
+    let p = P { x: 1 }
+    let q = Q { y: 2 }
+    print(p.eat(mk(1)))
+    print(q.eat(mk(2)))
+    return 0
+}
+"#;
+
+#[test]
+fn a_method_call_passes_its_argument_as_the_dispatched_impl_declares() {
+    let dir = std::env::temp_dir().join(format!("vyrn-sharedeat-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let (qa, pa) = (
+        SHARED_METHOD_NAME.find("impl Qa").unwrap(),
+        SHARED_METHOD_NAME.find("impl Pa").unwrap(),
+    );
+    let end = SHARED_METHOD_NAME.find("fn mk").unwrap();
+    let swapped = [
+        &SHARED_METHOD_NAME[..qa],
+        &SHARED_METHOD_NAME[pa..end],
+        &SHARED_METHOD_NAME[qa..pa],
+        &SHARED_METHOD_NAME[end..],
+    ]
+    .concat();
+    for (stem, src) in [("qa_first", SHARED_METHOD_NAME), ("pa_first", &swapped)] {
+        let file = dir.join(format!("{stem}.vyrn"));
+        std::fs::write(&file, src).unwrap();
+        let run = Command::new(env!("CARGO_BIN_EXE_vyrn"))
+            .env("VYRN_LEAK_CHECK", "1")
+            .arg("run")
+            .arg(&file)
+            .output()
+            .expect("vyrn run");
+        let audit = String::from_utf8_lossy(&run.stderr);
+        assert_eq!(
+            run.status.code(),
+            Some(0),
+            "{stem}: the free audit: {audit}"
+        );
+        assert_eq!(String::from_utf8_lossy(&run.stdout), "4\n5\n", "{stem}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 // A store into an owned place releases what the place held, and the release
 // is the whole value's: a boxed payload's contents, an element, a String
 // riding in a payload word. Each store below displaced a value whose heap
