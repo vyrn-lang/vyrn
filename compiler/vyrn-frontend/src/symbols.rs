@@ -447,7 +447,12 @@ fn analyze_inner(
     // Declarations the root imports, indexed from the linked program with their
     // file, so hover and go-to-definition reach the imported module.
     if let Some(linked) = &checked {
-        symbols.extend(index_imported_symbols(&program, linked, &origin_index));
+        symbols.extend(index_imported_symbols(
+            &program,
+            linked,
+            &graph,
+            &origin_index,
+        ));
     }
     // Namespace bindings and their exports; needs the linker to map
     // each namespace import to its module.
@@ -1654,25 +1659,36 @@ fn index_symbols(
 /// names the root's imports bring into scope are indexed, with an imported
 /// enum's variants and an imported protocol's methods. Columns are 0, since the
 /// foreign file's tokens are not at hand; `file` names the source module.
+/// `graph` is the load's, which resolves each root import to its module.
 fn index_imported_symbols(
     root: &ast::Program,
     linked: &ast::Program,
+    graph: &crate::loader::ModuleGraph,
     origins: &OriginIndex,
 ) -> Vec<Symbol> {
     let sp = &*linked.spellings;
-    // Each imported original name mapped to the local name the root uses (the
-    // alias, or the original). A symbol is keyed by the local name, to
-    // line up with the root's tokens, and an alias notes its original in hover.
-    let mut local_of: std::collections::HashMap<&str, &str> = std::collections::HashMap::new();
-    for imp in &root.imports {
+    let Some((_, targets, _)) = graph.iter().find(|(k, _, _)| *k == sp.root) else {
+        return Vec::new();
+    };
+    // Each imported (module, original name) mapped to the local name the root
+    // uses (the alias, or the original). A symbol is keyed by the local name,
+    // to line up with the root's tokens, and an alias notes its original in
+    // hover. The module is in the key because the linker renames one of two
+    // modules' declarations of one name, and either may be the root's.
+    let mut imported: std::collections::HashMap<(&str, &str), &str> =
+        std::collections::HashMap::new();
+    for (imp, target) in root.imports.iter().zip(targets) {
         for n in &imp.names {
-            local_of.insert(n.original.as_str(), n.local());
+            imported.insert((target.as_str(), n.original.as_str()), n.local());
         }
     }
-    if local_of.is_empty() {
+    if imported.is_empty() {
         return Vec::new();
     }
-    let alias_note = |local: &str, original: &str, detail: String| -> String {
+    let local_of =
+        |module: &str, linked_name: &str| imported.get(&(module, sp.written(linked_name))).copied();
+    let alias_note = |local: &str, linked_name: &str, detail: String| -> String {
+        let original = sp.written(linked_name);
         if local == original {
             detail
         } else {
@@ -1683,7 +1699,7 @@ fn index_imported_symbols(
 
     for f in &linked.functions {
         if let Some(file) = &f.module {
-            if let Some(&local) = local_of.get(f.name.as_str()) {
+            if let Some(local) = local_of(file, &f.name) {
                 out.push(Symbol {
                     name: local.to_string(),
                     kind: SymbolKind::Function,
@@ -1700,7 +1716,7 @@ fn index_imported_symbols(
 
     for p in &linked.protocols {
         if let Some(file) = &p.module {
-            if let Some(&local) = local_of.get(p.name.as_str()) {
+            if let Some(local) = local_of(file, &p.name) {
                 out.push(Symbol {
                     name: local.to_string(),
                     kind: SymbolKind::Type,
@@ -1734,7 +1750,7 @@ fn index_imported_symbols(
             continue;
         }
         if let Some(file) = &t.module {
-            if let Some(&local) = local_of.get(t.name.as_str()) {
+            if let Some(local) = local_of(file, &t.name) {
                 out.push(Symbol {
                     name: local.to_string(),
                     kind: SymbolKind::Type,
@@ -1767,9 +1783,9 @@ fn index_imported_symbols(
     // Where the module's map claims the symbol, it stands for a real
     // declaration, looked up by original name, since the map is keyed
     // by what the generator emitted.
-    let original_of: std::collections::HashMap<&str, &str> = local_of
+    let original_of: std::collections::HashMap<&str, &str> = imported
         .iter()
-        .map(|(orig, local)| (*local, *orig))
+        .map(|((_, orig), local)| (*local, *orig))
         .collect();
     for s in &mut out {
         if let Some(module) = s.file.clone() {
@@ -3315,6 +3331,40 @@ mod tests {
                 .any(|s| s.name == "getUser" && s.file.is_some()),
             "original name is hidden by the alias"
         );
+    }
+
+    #[test]
+    fn an_imported_name_indexes_the_module_it_came_from() {
+        // `z` imports another module's `pick`, so the linker renames one of
+        // the two; the root's `pick` is still `n`'s.
+        use crate::loader::{LoadOptions, MapResolver};
+        let files = [
+            (
+                "n.vyrn",
+                "/// N pick.\nexport fn pick() -> Int64 { return 1 }",
+            ),
+            (
+                "m.vyrn",
+                "/// M pick.\nexport fn pick() -> Int64 { return 2 }",
+            ),
+            (
+                "z.vyrn",
+                "import * as nn from \"./n\"\nimport { pick } from \"./m\"\n\
+                 export fn zed() -> Int64 { return nn.pick() * 10 + pick() }",
+            ),
+        ];
+        let files = files.map(|(k, v)| (k.to_string(), v.to_string()));
+        let resolver = MapResolver(files.into_iter().collect());
+        let root = "import { pick } from \"./n\"\nimport { zed } from \"./z\"\n\
+                    fn main() -> Int64 { return pick() + zed() }";
+        let a = analyze_linked(root, "main.vyrn", &LoadOptions::default(), &resolver, None);
+        assert!(a.diagnostics.is_empty(), "diags: {:?}", a.diagnostics);
+        let pick = |s: &&Symbol| s.name == "pick" && s.file.is_some();
+        let picks: Vec<_> = (a.symbols.iter().filter(pick))
+            .map(|s| (s.file.as_deref(), s.doc.as_deref(), &*s.detail))
+            .collect();
+        let detail = "fn pick() -> Int64";
+        assert_eq!(picks, [(Some("n.vyrn"), Some("N pick."), detail)]);
     }
 
     #[test]
