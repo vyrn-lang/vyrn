@@ -4794,27 +4794,17 @@ impl<'a> Builder<'a> {
         if mc::arg_verdict(&s) == mc::ArgVerdict::Released {
             return true;
         }
-        // A call through a fn value has no capability row; the answer is the
-        // meet over the signature's closed target set
-        // ([`vyrn_frontend::movecheck::Facts::fnval_clear`]), as in
-        // `examples/rpc.vyrn`'s `cb(Done(..))`.
-        self.fnval_released(callee)
-    }
-
-    /// Whether `callee` names a fn value whose signature the meet cleared.
-    fn fnval_released(&self, callee: &str) -> bool {
-        use vyrn_frontend::movecheck as mc;
-        let Some(n) = self.lookup(callee) else {
-            return false;
-        };
-        let decls = self.proto.types();
-        let Type::Fn(ps, r) = vyrn_frontend::types::resolve(&self.body.names[n.index()].ty, &decls)
-        else {
-            return false;
-        };
-        self.own
-            .fnval_clear
-            .contains(&mc::fn_sig_key(&ps, &r, &decls))
+        // A call through a fn value has no capability row, but every target
+        // reads every argument and keeps nothing: a named function by
+        // `Checker::reads_every_param`, a lambda by its frame's `read`
+        // parameters. As in `examples/rpc.vyrn`'s `cb(Done(..))`.
+        self.lookup(callee).is_some_and(|n| {
+            let ty = &self.body.names[n.index()].ty;
+            matches!(
+                vyrn_frontend::types::resolve(ty, &self.proto.types()),
+                Type::Fn(..)
+            )
+        })
     }
 
     /// The type a forced `lazy` field read yields, where it owns heap.
@@ -5218,6 +5208,7 @@ impl<'a> Builder<'a> {
         }
         for (p, pt) in params.iter().zip(ptys) {
             let m = self.name(&p.name, pt, false, *line);
+            self.body.names[m.index()].borrow_kind = param_borrow(Capability::Read, &p.name);
             self.scope.push((p.name.clone(), m));
             self.body.params.push(m);
         }
@@ -7700,7 +7691,7 @@ pub fn augment(program: &Program, w: &mut World) {
     // armed host reads only refusals, not the facts or rows, so its lowering
     // may leave out the facts of a body it has walked ([`crate::walked`]).
     let js = vyrn_frontend::prof::phase("placer: judgments");
-    let memo = vyrn_frontend::movecheck::Judgments::open(program, &own.fnval_clear);
+    let memo = vyrn_frontend::movecheck::Judgments::open(program);
     drop(js);
     let lw = vyrn_frontend::prof::phase("placer: lower_with");
     let lowered = match memo {

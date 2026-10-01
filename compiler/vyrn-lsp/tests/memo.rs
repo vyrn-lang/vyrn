@@ -166,14 +166,12 @@ const A_CALLS_BACK: &str = "let mut g: Array<Int64> = [1, 2, 3]\n\
     export fn run(f: fn() -> Int64) -> Int64 {\n  return use(f, g)\n}\n";
 
 /// A root whose `poke` returns `body`, beside an `aux` over `aux`, a type no
-/// body of `a` reads. The lambda keeps every one-parameter signature out of
-/// `Facts::fnval_clear`, so `aux`'s type moves no fingerprint part `a` reads.
+/// body of `a` reads.
 fn root_pokes(body: &str, aux: &str) -> String {
     format!(
         "import {{ bump, run }} from \"./a\"\nfn poke() -> Int64 {{\n  return {body}\n}}\n\
          fn aux(x: {aux}) -> {aux} {{\n  return x\n}}\n\
-         fn main() -> Int64 {{\n  let id: fn(Int64) -> Int64 = x -> x\n  \
-         print(run(poke) + id(0))\n  return 0\n}}\n"
+         fn main() -> Int64 {{\n  print(run(poke))\n  return 0\n}}\n"
     )
 }
 
@@ -244,6 +242,33 @@ fn a_root_impl_moves_an_imported_instances_verdict() {
             &[("b.vyrn", IGNORES), ("main.vyrn", &txn(false))],
             &[("main.vyrn", &txn(true))],
             &[("main.vyrn", &txn(false))],
+        ],
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(got.is_none(), "{}", got.unwrap_or_default());
+}
+
+/// A line moved above the root's declarations keeps `ignore<Txn>`'s verdict
+/// served and its diagnostic on the moved line. The root's validated type and
+/// protocol are in the fingerprint by content.
+#[test]
+fn a_moved_root_line_keeps_an_imported_instances_verdict() {
+    let dir = scratch("rootline");
+    let root = |above: &str| {
+        format!(
+            "{above}{}type Port = Int64 where value >= 1\n\
+             protocol Sized {{\n  fn size(self) -> Int64\n}}\n",
+            txn(true)
+        )
+    };
+    let (moved, twice) = (root("\n"), root("\n\n"));
+    let got = drift(
+        &dir,
+        "is never disposed",
+        &[
+            &[("b.vyrn", IGNORES), ("main.vyrn", &root(""))],
+            &[("main.vyrn", &moved)],
+            &[("main.vyrn", &twice)],
         ],
     );
     let _ = std::fs::remove_dir_all(&dir);

@@ -372,6 +372,12 @@ fn census() -> Vec<Row> {
              breaks the `where` rule of `Cols`",
             Kernel::Elsewhere,
         ),
+        row(
+            "r50_lambda_returns_its_read_parameter.vyrn",
+            "rule 2: a lambda takes each parameter by `read`",
+            "`s` may not be returned — it is a `read` parameter, and a return is owned",
+            Kernel::Its,
+        ),
     ]
 }
 

@@ -13,11 +13,14 @@
 //! - `body` adds a `let` after the `{` of the root's last `fn` line;
 //! - `sig` toggles `mut` on the root function other than `main` whose name the
 //!   root spells most often, a signature edit every reader of it sees;
-//! - `line` puts one or two blank lines before the root, moving every line.
+//! - `param` changes the type of the first parameter of the function `sig`
+//!   picks, from its own to `Int32` and back (`Int64` where it is `Int32`);
+//! - `line` puts `1 + i` blank lines before the root, moving every line.
 //!
 //! Only `line` moves a line. Prints the best and the median of `VYRN_RUNS` edits
-//! (5 by default) after three warm-up edits. `VYRN_BUILD_PROFILE=1` adds the
-//! phase table of one more.
+//! (5 by default) after three warm-up edits, then how many bodies one more edit
+//! typed and replayed (`checker::recheck`) and judged and served (the judgment
+//! memo). `VYRN_BUILD_PROFILE=1` adds the phase table of that edit.
 
 use vyrn_frontend::loader::{DiskResolver, LoadOptions, ModuleResolver};
 use vyrn_frontend::manifest::{pinned_blob, Lock};
@@ -123,12 +126,14 @@ fn probe(path: &str, runs: usize) {
     ms.sort_by(|a, b| a.total_cmp(b));
     let _ = vyrn_frontend::prof::phase_table();
     let _ = vyrn_frontend::checker::recheck::tally();
+    vyrn_frontend::movecheck::reset_judgment_tally();
     analyze(&edit(&src, runs + 3));
     let (checked, replayed) = vyrn_frontend::checker::recheck::tally();
+    let (judged, served) = vyrn_frontend::movecheck::judgment_tally();
     eprint!("{}", vyrn_frontend::prof::phase_table());
     let a = analyze(&src);
     println!(
-        "best {:.1} ms  median {:.1} ms  {} diagnostics, {} memory notes, {checked} bodies checked, {replayed} replayed  {path}",
+        "best {:.1} ms  median {:.1} ms  {} diagnostics, {} memory notes, {checked} bodies checked, {replayed} replayed, {judged} judged, {served} served  {path}",
         ms[0],
         ms[ms.len() / 2],
         a.diagnostics.len(),
@@ -152,7 +157,20 @@ fn edit(src: &str, i: usize) -> String {
             src.replacen(&format!("\nfn {name}("), &format!("\nmut fn {name}("), 1)
         }
         Ok("sig") => src.to_string(),
-        Ok("line") => format!("{}{src}", "\n".repeat(1 + i % 2)),
+        Ok("param") if i % 2 == 0 => {
+            let head = format!("\nfn {}(", most_read(src));
+            let at = src.find(&head).expect("the function") + head.len();
+            let colon = at + src[at..].find(": ").expect("a parameter") + 2;
+            let end = colon + src[colon..].find([',', ')']).expect("its type ends");
+            let to = if &src[colon..end] == "Int32" {
+                "Int64"
+            } else {
+                "Int32"
+            };
+            format!("{}{to}{}", &src[..colon], &src[end..])
+        }
+        Ok("param") => src.to_string(),
+        Ok("line") => format!("{}{src}", "\n".repeat(1 + i)),
         _ => format!("{src}\n// keystroke {i}\n"),
     }
 }

@@ -1,10 +1,8 @@
 //! The program-level tables the ownership passes read: for a type, whether it
 //! owns heap, how it is released and whether it must be used ([`Owned`]); for
-//! a program, its declarations, parameter types, constructors and capabilities
-//! ([`Declared`], [`ArgCaps`]). Each reads a declaration; the type of an
-//! expression is the checker's record ([`Declared::type_of`]). `None` means
-//! "do not release" and "does not move", so an unnamed type leaks, which is
-//! safe.
+//! a callee, its parameters' capabilities ([`ArgCaps`]). Each reads a
+//! declaration. `None` means "do not release" and "does not move", so an
+//! unnamed type leaks, which is safe.
 
 use std::collections::HashMap;
 
@@ -463,95 +461,6 @@ pub fn str_temporary(e: &Expr) -> bool {
     }
 }
 
-/// The program-level tables, built once per program.
-pub struct Declared {
-    /// The checker's type for every node, keyed by address. `None` for a
-    /// program the checker never saw.
-    rec: Option<std::sync::Arc<crate::checker::Recorded>>,
-    /// Declared parameter types per user function, for an argument whose own
-    /// expression has no type (an array literal coerced at the call).
-    params: HashMap<String, Vec<Type>>,
-    owned: crate::declared::Owned,
-    /// Every variant constructor to the enum it builds, or `None` where no
-    /// single named type answers: a built-in sum, a name two enums share, or a
-    /// generic enum.
-    variants: HashMap<String, Option<String>>,
-}
-
-impl Declared {
-    pub fn new(program: &Program) -> Self {
-        let mut params: HashMap<String, Vec<Type>> = HashMap::new();
-        for f in &program.functions {
-            params.insert(
-                f.name.clone(),
-                f.params.iter().map(|p| p.ty.clone()).collect(),
-            );
-        }
-        let owned = crate::declared::Owned::new(program);
-        let mut variants: HashMap<String, Option<String>> =
-            ["Some", "Ok", "Err", "Success", "Failure"]
-                .into_iter()
-                .map(|n| (n.to_string(), None))
-                .collect();
-        for d in owned.types().values() {
-            if let Some(vs) = crate::types::declared_variants(&d.base) {
-                for v in vs {
-                    let owner = (d.type_params.is_empty() && !variants.contains_key(&v.name))
-                        .then(|| d.name.clone());
-                    variants.insert(v.name.clone(), owner);
-                }
-            }
-        }
-        Declared {
-            rec: None,
-            owned,
-            variants,
-            params,
-        }
-    }
-
-    /// Attaches the checker's record for this program (see
-    /// [`crate::checker::recorded`]).
-    pub fn recording(mut self, rec: std::sync::Arc<crate::checker::Recorded>) -> Self {
-        self.rec = Some(rec);
-        self
-    }
-
-    pub fn decls(&self) -> &HashMap<String, TypeDecl> {
-        self.owned.types()
-    }
-
-    pub fn owns_heap(&self, ty: &Type) -> bool {
-        crate::declared::owns_heap(ty, self.owned.types())
-    }
-
-    pub fn linear_kind(&self, ty: &Type) -> Option<crate::own::Linear> {
-        self.owned.linear_kind(ty)
-    }
-
-    /// Whether whoever holds a value of `ty` releases it. Unlike
-    /// [`Declared::owns_heap`], a type with no release row (a `Stream`) answers
-    /// false.
-    pub fn releases(&self, ty: &Type) -> bool {
-        self.release_kind(ty).is_some()
-    }
-
-    pub fn release_kind(&self, ty: &Type) -> Option<crate::own::DropKind> {
-        self.owned.release_kind(ty)
-    }
-
-    /// Whether `name` is a variant constructor, whose value holds its argument
-    /// past the call.
-    pub fn constructs(&self, name: &str) -> bool {
-        self.variants.contains_key(name)
-    }
-
-    /// The declared type of `callee`'s parameter `ix`.
-    pub fn param_ty(&self, callee: &str, ix: usize) -> Option<&Type> {
-        self.params.get(callee).and_then(|ps| ps.get(ix))
-    }
-}
-
 /// Whose capability row answers a call: the callee as the core resolved it,
 /// before dispatch.
 #[derive(Clone, Copy, Debug)]
@@ -637,11 +546,6 @@ impl ArgCaps {
             CapsOf::Builtin(f) => f.params.get(ix).map(|p| p.capability),
             CapsOf::None => None,
         }
-    }
-
-    /// Whether every position of the function `id` reads.
-    pub fn reads_all(&self, id: FnId) -> bool {
-        self.fns[id.index()].iter().all(|c| *c == Capability::Read)
     }
 }
 

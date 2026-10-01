@@ -206,6 +206,9 @@ const GENERIC: &str = "\nfn recheckOne<T>(x: T) -> Int64 {\n    return 1\n}\n\nf
 /// A private function of `std/strings`: a root declaration of the same name
 /// renames both apart, which rewrites the module's bodies and keeps its text.
 const COLLIDE: &str = "\nfn isAsciiSpace(b: Int64) -> String {\n    return \"\"\n}\n";
+/// Root declarations the world fingerprint holds: a protocol, an impl of it and
+/// a validated type.
+const SIZED: &str = "\nprotocol RecheckSized {\n    fn recheckSize(self) -> Int64\n}\n\nimpl RecheckSized for RecheckPoint {\n    fn recheckSize(self) -> Int64 {\n        return self.a\n    }\n}\n\ntype RecheckPort = Int64 where value >= 1\n";
 
 /// The edits every program takes, from its text `base`: each kind of
 /// dependency changes once and changes back.
@@ -223,6 +226,8 @@ fn edits(base: &str) -> Vec<Edit> {
     tested.push(TEST_OK);
     let mut collided = tested.clone();
     collided.push(COLLIDE);
+    let mut sized = collided.clone();
+    sized.push(SIZED);
     let steps: Vec<(&'static str, String, bool)> = vec![
         ("no edit", base.to_string(), false),
         ("an edit inside the last function's body", body, false),
@@ -264,7 +269,12 @@ fn edits(base: &str) -> Vec<Edit> {
             all(&collided),
             false,
         ),
-        ("move every line", format!("\n{}", all(&collided)), false),
+        (
+            "add a protocol, an impl and a validated type",
+            all(&sized),
+            false,
+        ),
+        ("move every line", format!("\n{}", all(&sized)), false),
         ("instantiate a generic at two types", all(&[GENERIC]), false),
         ("back to the start", base.to_string(), false),
     ];
@@ -298,12 +308,21 @@ fn corpus_edits_recheck_as_a_fresh_check() {
         "examples/simdbench.vyrn",
     ] {
         let (path, text) = program(rel);
-        // The second edit is inside one body, so most bodies are replayed.
-        let (checked, replayed) = replay(&path, edits(&text))[1];
-        assert!(
-            replayed > checked,
-            "{rel}: {checked} checked, {replayed} replayed"
-        );
+        let steps = edits(&text);
+        let moved = (steps.iter().position(|e| e.what == "move every line"))
+            .expect("the edits move every line");
+        let rechecked = replay(&path, steps);
+        // The second edit is inside one body, so most bodies are replayed. A
+        // moved line moves no part of the world, so other modules' bodies are.
+        for (what, (checked, replayed)) in [
+            ("the body edit", rechecked[1]),
+            ("the moved line", rechecked[moved]),
+        ] {
+            assert!(
+                replayed > checked,
+                "{rel}, {what}: {checked} checked, {replayed} replayed"
+            );
+        }
     }
 }
 
