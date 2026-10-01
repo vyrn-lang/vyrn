@@ -464,7 +464,7 @@ import type { User, Port } from "./user.schema.json"
 - An `impl` applies program-wide, wherever it is written.
 - `main` and `logging` are root-module only. Module state exists in every module and is private to it; `export let` is refused, so export accessor functions.
 
-`import type { .. } from "x.schema.json"` synthesizes validated types from a JSON Schema document. Bounds, lengths and patterns become `where` clauses, `required` decides `Option`, `$defs` entries are importable, and a string `enum` becomes a fieldless enum. A schema keyword Vyrn cannot express is refused, never weakened.
+`import type { .. } from "x.schema.json"` synthesizes validated types from a JSON Schema document. Bounds, lengths and patterns become `where` clauses, `required` decides `Option`, `$defs` entries are importable, and a string `enum` becomes a fieldless enum. A root `title` that is also a `$defs` key is refused. A schema keyword Vyrn cannot express is refused, never weakened.
 
 A remote specifier is `github:owner/repo@ref/path`, `gist:user/id[@rev]/file` or an `https://` URL. The first resolve pins it in `vyrn.lock` as specifier, immutable URL and SHA-256; every later load verifies the hash against the cache under `~/.vyrn/cache`. `--offline` never fetches. A remote module's relative imports stay inside its pinned base.
 

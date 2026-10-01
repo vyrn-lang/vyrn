@@ -1,0 +1,1 @@
+a_schema_cannot_name_its_root_and_a_def_alike.vyrn:0:0: a_root_title_and_a_def_of_one_name.schema.json: the root `title` and `#/$defs/Box` are two schemas named `Box`
