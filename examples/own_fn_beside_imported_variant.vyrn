@@ -1,0 +1,15 @@
+// A function the module declares keeps its name when an imported enum of an
+// injected module brings a variant of the same spelling.
+
+import { Json } from "std/json"
+
+fn JNum(s: String) -> Json {
+    print("own fn ran")
+    return JStr(s.copy())
+}
+
+fn main() -> Int64 {
+    let j = JNum("x")
+    print("done")
+    return 0
+}

@@ -298,6 +298,11 @@ pub fn synthesize(
     // A name is the root (matching `title`) or a `$defs` key.
     let defs = doc.get("$defs");
     let root_title = doc.get("title").and_then(|t| t.as_str());
+    if let Some(title) = root_title.filter(|t| defs.and_then(|d| d.get(t)).is_some()) {
+        return Err(format!(
+            "{module}: the root `title` and `#/$defs/{title}` are two schemas named `{title}`"
+        ));
+    }
 
     let mut pending: Vec<(String, &Json, bool)> = Vec::new();
     match requested {

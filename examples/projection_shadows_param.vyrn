@@ -1,0 +1,30 @@
+// A `let` inside a projection shadows a parameter of its name only in its own
+// block; the inlined body still reads the parameter elsewhere.
+
+type Q = { v: Array<Int64> }
+
+impl Index for Q {
+    fn at(read self, i: Int64) -> read Int64 {
+        return self.v[i]
+    }
+    fn pick(read self, i: Int64) -> read Int64 {
+        if i > 0 {
+            let i = i - 1
+            print(i)
+            let mut j = i
+            j = j + 10
+            print(j)
+        }
+        let k = i
+        print(k)
+        return self.v[i]
+    }
+}
+
+fn main() -> Int64 {
+    let q = Q { v: [10, 20, 30] }
+    let i = 7
+    print(q.pick(2))
+    print(i)
+    return 0
+}

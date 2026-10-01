@@ -213,13 +213,10 @@ pub fn check_accum_with_binders(program: &Program) -> (Vec<Diagnostic>, Vec<Loca
 }
 
 /// Returns the stored-function-value collection the `--workers`
-/// gate needs: the held record's, else a check's. Diagnostics are discarded:
-/// callers have already checked.
+/// gate needs, from a check. Diagnostics are discarded: callers have already
+/// checked. A host holding the check's record reads [`Recorded::stored`].
 pub fn stored_fn_effects(program: &Program) -> StoredFnEffects {
-    match held_now(program) {
-        Some(r) => r.stored.clone(),
-        None => check_accum_full(program).2,
-    }
+    check_accum_full(program).2
 }
 
 /// Names the compiler owns: builtin functions, builtin type names and the sum
@@ -519,7 +516,12 @@ fn check_accum_inner(
     let mut types: HashMap<String, (DeclId, TypeDecl)> = HashMap::new();
     for (i, t) in program.type_decls.iter().enumerate() {
         let name = DeclName(&t.name);
-        if matches!(t.name.as_str(), "Int64" | "Bool" | "Unit") {
+        // A declared type keys its impls by its name (`types::type_key`), and
+        // these are the keys of built-in types.
+        if matches!(
+            t.name.as_str(),
+            "Int64" | "Bool" | "Unit" | "String" | "Option" | "Result"
+        ) {
             out.push(cerr!(t.line, RedefinesBuiltinType, name).in_file(t.module.clone()));
             continue;
         }
@@ -624,27 +626,6 @@ fn check_accum_inner(
         .iter()
         .map(|f| (f.name.clone(), f.type_bounds.clone()))
         .collect();
-    // Each function's parameter capabilities, for checking `modify` call sites.
-    let mut caps: HashMap<String, Vec<Capability>> = program
-        .functions
-        .iter()
-        .map(|f| {
-            (
-                f.name.clone(),
-                f.params.iter().map(|p| p.capability).collect(),
-            )
-        })
-        .collect();
-    // A protocol method under its surface name, receiver first, for the checks
-    // that see only the written name (the lambda-capture rule).
-    for p in &program.protocols {
-        for m in &p.methods {
-            let mut cs = vec![m.recv];
-            cs.extend(m.param_caps.iter().copied());
-            caps.insert(m.name.clone(), cs);
-        }
-    }
-
     // Protocol registries: each method name to its protocol and
     // signature, and which (protocol, type key) pairs are implemented.
     let mut protocol_methods: HashMap<String, Vec<(String, MethodSig)>> = HashMap::new();
@@ -1017,7 +998,6 @@ fn check_accum_inner(
         functions: &program.functions,
         fn_decls: &fn_decls,
         sigs: &sigs,
-        caps: &caps,
         types: &types,
         contracts: &contracts,
         variants: &variants,
@@ -1392,10 +1372,13 @@ fn rooted_where_the_site_owns<'s>(
 ) {
     let mut roots: std::collections::HashSet<String> =
         f.params.iter().map(|p| p.name.clone()).collect();
+    // A `let` that borrows from no root shadows a root of its name.
     for s in prologue {
         if let Stmt::Let { name, value, .. } = s {
             if let_borrows_from(value, &roots) {
                 roots.insert(name.clone());
+            } else {
+                roots.remove(name);
             }
         }
     }
@@ -1606,21 +1589,14 @@ pub fn record(program: &Program) -> Recorded {
     recording_check(program).2
 }
 
-/// Checks the program and holds the record for [`recorded`], so the lowering
-/// does not check again. It never reuses a body: a reused body would leave a
-/// hole in the record.
+/// Checks the program as [`record`] does and returns the diagnostics and the
+/// root's bindings. It never reuses a body.
 pub fn check_accum_recording(program: &Program) -> (Vec<Diagnostic>, Vec<LocalBinding>) {
-    let (diags, binders, made) = recording_check(program);
-    hold(program, std::sync::Arc::new(made));
+    let (diags, binders, _) = recording_check(program);
     (diags, binders)
 }
 
 thread_local! {
-    /// The address of the program a record may be held for, or 0. Sound as a
-    /// key because the guard that sets it borrows the program
-    /// ([`crate::own::Memo::open`]).
-    static HOLDING: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-    static HELD: RefCell<Option<(usize, HeldRecord)>> = const { RefCell::new(None) };
     /// Set by [`record_reads`].
     static READS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
@@ -1632,97 +1608,6 @@ pub fn record_reads() {
     READS.with(|r| r.set(true));
 }
 
-/// A record with the [`Host`] it was made under. The host changes what a
-/// check decides, so a record answers only under the host it was made with.
-pub(crate) type HeldRecord = (Host, std::sync::Arc<Recorded>);
-
-/// Opens the record slot for `program`. Called by [`crate::own::Memo::open`],
-/// so a record lives as long as its analysis.
-pub(crate) fn hold_open(program: &Program) {
-    HOLDING.with(|h| h.set(program as *const Program as usize));
-    hold_forget();
-}
-
-/// Drops the held record and keeps the slot open, for a caller that changes
-/// the program the record typed.
-pub fn hold_forget() {
-    HELD.with(|h| *h.borrow_mut() = None);
-}
-
-/// Closes the record slot. Called by [`crate::own::Memo`]'s `Drop`.
-pub(crate) fn hold_close() {
-    HOLDING.with(|h| h.set(0));
-    hold_forget();
-}
-
-/// The record slot as `vyrn_lower::check_and_synthesize` holds it, from
-/// synthesis to the last judgment, so its three readers share one record. It
-/// stands aside where another holder has the slot, so it never closes theirs.
-pub struct Held(bool);
-
-impl Held {
-    pub fn open(program: &Program) -> Held {
-        if HOLDING.with(|h| h.get()) != 0 {
-            return Held(false);
-        }
-        hold_open(program);
-        Held(true)
-    }
-}
-
-impl Drop for Held {
-    fn drop(&mut self) {
-        if self.0 {
-            hold_close();
-        }
-    }
-}
-
-/// Holds `made`, a record of `program` made under its host, where the slot
-/// is open for it.
-pub fn hold(program: &Program, made: std::sync::Arc<Recorded>) {
-    adopt(program, (program.host, made));
-}
-
-/// Holds `record` for `program` where the slot is open for it. The CLI adopts
-/// the load's record through [`crate::own::Memo::open`]: the `Program` moved,
-/// but the nodes the record keys did not.
-pub(crate) fn adopt(program: &Program, record: HeldRecord) {
-    let key = program as *const Program as usize;
-    if HOLDING.with(|h| h.get()) == key {
-        HELD.with(|h| *h.borrow_mut() = Some((key, record)));
-    }
-}
-
-/// The record held for `program`, with the host flags it was made under.
-pub(crate) fn held(program: &Program) -> Option<HeldRecord> {
-    let key = program as *const Program as usize;
-    HELD.with(|h| {
-        h.borrow()
-            .as_ref()
-            .filter(|(k, _)| *k == key)
-            .map(|(_, r)| r.clone())
-    })
-}
-
-/// The record held for `program` under its host.
-fn held_now(program: &Program) -> Option<std::sync::Arc<Recorded>> {
-    held(program)
-        .filter(|(h, _)| *h == program.host)
-        .map(|(_, r)| r)
-}
-
-/// Returns the record of `program`: the held one if it matches the program
-/// and host flags, else a new one, held for the next ask.
-pub fn recorded(program: &Program) -> std::sync::Arc<Recorded> {
-    if let Some(r) = held_now(program) {
-        return r;
-    }
-    let made = std::sync::Arc::new(record(program));
-    hold(program, made.clone());
-    made
-}
-
 /// What every body is typed against: the declarations and tables steps 1 to 2
 /// of [`check_accum_inner`] build. Shared by the threads that type bodies.
 struct Cx<'a> {
@@ -1732,7 +1617,6 @@ struct Cx<'a> {
     fn_decls: &'a HashMap<String, DeclId>,
     /// Each function's parameter types and result, by [`DeclId::index`].
     sigs: &'a [(Vec<Type>, Type)],
-    caps: &'a HashMap<String, Vec<Capability>>,
     /// The type declarations by name with their ids, which the checker reads
     /// as [`crate::types::Decls`], recording each lookup.
     types: &'a HashMap<String, (DeclId, TypeDecl)>,
@@ -3689,6 +3573,15 @@ impl<'a> Checker<'a> {
                         _ => Err(cerr!(line, InferNone)),
                     };
                 }
+                // A binding shadows a variant of its name, as the core reads it.
+                if let Some(b) = self.lookup(scope, name) {
+                    // A name a failed statement bound: its refusals are that
+                    // statement's.
+                    if b.ty == Type::Err {
+                        self.unknown.set(true);
+                    }
+                    return Ok(b.ty);
+                }
                 if let Some(info) = self.resolve_variant(name) {
                     if !info.payload.is_empty() {
                         return self.judged();
@@ -3705,14 +3598,6 @@ impl<'a> Checker<'a> {
                         }
                         _ => Err(cerr!(line, InferBinding, name)),
                     };
-                }
-                if let Some(b) = self.lookup(scope, name) {
-                    // A name a failed statement bound: its refusals are that
-                    // statement's.
-                    if b.ty == Type::Err {
-                        self.unknown.set(true);
-                    }
-                    return Ok(b.ty);
                 }
                 // A bare function name as a value is a stored function value
                 // source: `let g = double` takes its signature.
@@ -4158,7 +4043,7 @@ impl<'a> Checker<'a> {
                 }
                 // `Output` is the type of the `success` call the backends emit,
                 // so a generic impl solves through the ordinary call path.
-                self.call(
+                self.call_declared(
                     &crate::types::impl_method_name(FALLIBLE, &key, "success"),
                     std::slice::from_ref(expr),
                     &[],
@@ -4769,7 +4654,7 @@ impl<'a> Checker<'a> {
         let Some(m) = self.show_dispatch(t) else {
             return Ok(false);
         };
-        self.call(&m, args, &[], line, scope, Some(&Type::Str), fn_ret)?;
+        self.call_declared(&m, args, &[], line, scope, Some(&Type::Str), fn_ret)?;
         Ok(true)
     }
 
@@ -4819,6 +4704,23 @@ impl<'a> Checker<'a> {
                 return Ok((*ret).clone());
             }
         }
+        self.call_declared(name, args, written, line, scope, expected, fn_ret)
+    }
+
+    /// Types a call that no binding answers for: a builtin, a constructor, a
+    /// declared function, an impl method by its flattened name, or a method
+    /// dispatched on its receiver.
+    #[allow(clippy::too_many_arguments)]
+    fn call_declared(
+        &self,
+        name: &str,
+        args: &[Expr],
+        written: &[Type],
+        line: usize,
+        scope: &Scope,
+        expected: Option<&Type>,
+        fn_ret: Option<&Type>,
+    ) -> Result<Type, Diagnostic> {
         // A removed free-function spelling. Asked here, not at the unknown-name
         // fall-through, because `at` is also a user's `place at`: `at(r, 0)`
         // would otherwise type as a projection.
@@ -5200,7 +5102,7 @@ impl<'a> Checker<'a> {
                     .contains(&(crate::types::COPY.to_string(), key.clone()))
                 {
                     let mangled = crate::types::impl_method_name(crate::types::COPY, &key, "copy");
-                    return self.call(&mangled, args, &[], line, scope, expected, fn_ret);
+                    return self.call_declared(&mangled, args, &[], line, scope, expected, fn_ret);
                 }
             }
             let mut owned_seen = std::collections::HashSet::new();
@@ -5613,6 +5515,7 @@ impl<'a> Checker<'a> {
                     let (mparams, mret) = self
                         .sig(&mangled)
                         .ok_or_else(|| cerr!(line, NotImplemented, recv, proto, name))?;
+                    let mcaps = self.caps(&mangled);
                     return self.check_declared_call(
                         &DeclaredCall {
                             key: mangled.as_str(),
@@ -5620,7 +5523,7 @@ impl<'a> Checker<'a> {
                             params: mparams,
                             ret: mret,
                             type_params: self.type_params(&mangled),
-                            caps: self.caps.get(mangled.as_str()),
+                            caps: mcaps.as_ref(),
                             bounds: self.all_bounds.get(mangled.as_str()),
                             recv: Some(&recv),
                             written: &[],
@@ -5723,6 +5626,7 @@ impl<'a> Checker<'a> {
         // `toString` (`prelude::method_surface`), and other `@` names lose the
         // `@`, which no source can lex.
         let shown = crate::prelude::method_surface(name).trim_start_matches('@');
+        let caps = self.caps(name);
         self.check_declared_call(
             &DeclaredCall {
                 key: name,
@@ -5730,7 +5634,7 @@ impl<'a> Checker<'a> {
                 params,
                 ret,
                 type_params: self.type_params(name).or(seeded_generics.as_ref()),
-                caps: self.caps.get(name).or(seeded_caps.as_ref()),
+                caps: caps.as_ref().or(seeded_caps.as_ref()),
                 // A seeded row's bounds are the typed judgment's.
                 bounds: self.all_bounds.get(name),
                 recv: None,
@@ -6228,12 +6132,10 @@ impl<'a> Checker<'a> {
                 LambdaBody::Block(b) => body_block(b, &mut locals, &mut v),
             }
         }
-        // Names that shadow module state: the lambda's own binders and every
-        // frame (module state is `Scope`'s fall-through, not a frame).
+        // Names that shadow module state: the lambda's parameters and every
+        // frame (module state is `Scope`'s fall-through, not a frame). The
+        // walk adds the body's binders where their scopes start.
         let mut local_names: HashSet<String> = params.iter().map(|p| p.name.clone()).collect();
-        if let LambdaBody::Block(b) = body {
-            collect_binders_block(b, &mut local_names);
-        }
         for frame in scope.iter() {
             local_names.extend(frame.keys().cloned());
         }
@@ -6376,6 +6278,36 @@ impl<'a> Checker<'a> {
                     self.err = Some(m);
                 }
             }
+
+            /// Whether the call `name(args)` takes argument `k` by `consume`.
+            /// A call through a function value reads every argument. A method
+            /// is each protocol's that declares it, narrowed by the type of a
+            /// receiver bound outside the lambda.
+            fn consumes(&self, name: &str, args: &[Expr], k: usize) -> bool {
+                let ck = self.ck;
+                let typed = |n: &str| ck.lookup(self.outer, n).map(|b| b.ty);
+                if typed(name).is_some_and(|t| matches!(ck.base(&t), Type::Fn(..))) {
+                    return false;
+                }
+                if let Some(cs) = ck.caps(name) {
+                    return cs.get(k) == Some(&Capability::Consume);
+                }
+                let key = match args.first() {
+                    Some(Expr::Var { name: r, .. }) => {
+                        typed(r).and_then(|t| crate::types::type_key(&t))
+                    }
+                    _ => None,
+                };
+                (ck.protocol_methods.get(name).into_iter().flatten())
+                    .filter(|(p, _)| {
+                        key.as_ref()
+                            .is_none_or(|key| ck.impls.contains(&(p.clone(), key.clone())))
+                    })
+                    .any(|(_, m)| {
+                        let mut cs = std::iter::once(m.recv).chain(m.param_caps.iter().copied());
+                        cs.nth(k) == Some(Capability::Consume)
+                    })
+            }
         }
 
         impl BodyVisit<'_> for Captures<'_, '_> {
@@ -6412,9 +6344,8 @@ impl<'a> Checker<'a> {
                     } => {
                         // Each argument is checked before it is walked, so the
                         // first violation in source order is reported.
-                        let caps = self.ck.caps.get(name);
                         for (k, a) in args.iter().enumerate() {
-                            if caps.and_then(|c| c.get(k)) == Some(&Capability::Consume) {
+                            if self.consumes(name, args, k) {
                                 if let Expr::Var { name: vn, .. } = a {
                                     if self.is_capture(vn, locals) {
                                         self.fail(rule!(LambdaConsumesCapture, name = vn, line));
@@ -6704,6 +6635,12 @@ impl<'a> Checker<'a> {
     fn sig(&self, name: &str) -> Option<&'a (Vec<Type>, Type)> {
         let sigs = self.sigs;
         self.resolve_fn(name).map(|d| &sigs[d.index()])
+    }
+
+    /// The parameter capabilities of the function named `name`.
+    fn caps(&self, name: &str) -> Option<Vec<Capability>> {
+        let f = &self.functions[self.resolve_fn(name)?.index()];
+        Some(f.params.iter().map(|p| p.capability).collect())
     }
 
     /// The type parameters of the generic function named `name`.
@@ -7233,40 +7170,9 @@ fn touches_globals(f: &Function, globals: &std::collections::HashSet<String>) ->
     if globals.is_empty() {
         return false;
     }
-    let mut local: std::collections::HashSet<String> =
+    let params: std::collections::HashSet<String> =
         f.params.iter().map(|p| p.name.clone()).collect();
-    collect_binders_block(&f.body, &mut local);
-    global_ref_block(&f.body, globals, &local)
-}
-
-/// Collects every name a block binds (`let`, `for` variable); the caller
-/// seeds the parameters.
-fn collect_binders_block(b: &Block, out: &mut std::collections::HashSet<String>) {
-    for s in &b.stmts {
-        match s {
-            Stmt::Let { name, .. } => {
-                out.insert(name.clone());
-            }
-            Stmt::ForIn { var, body, .. } => {
-                out.insert(var.clone());
-                collect_binders_block(body, out);
-            }
-            Stmt::If {
-                then_block,
-                else_block,
-                ..
-            } => {
-                collect_binders_block(then_block, out);
-                if let Some(eb) = else_block {
-                    collect_binders_block(eb, out);
-                }
-            }
-            Stmt::While { body, .. } | Stmt::Region { body, .. } => {
-                collect_binders_block(body, out)
-            }
-            _ => {}
-        }
-    }
+    global_ref_block(&f.body, globals, &params)
 }
 
 /// A name a global answers to and no local shadows is a reference, whether
@@ -7310,9 +7216,9 @@ impl BodyVisit<'_> for GlobalRef<'_> {
     }
 }
 
-/// Whether a block references a global that no local shadows. `local` is the
-/// caller's flat set for the whole function, so a name read above its own
-/// `let` counts as local; the walk adds lambda parameters and nested `let`s.
+/// Whether a block references a global that no local shadows where it is
+/// read. `local` holds the names bound outside the block; the walk adds each
+/// binder of the block for the scope it starts.
 fn global_ref_block(
     b: &Block,
     globals: &std::collections::HashSet<String>,
@@ -7362,14 +7268,15 @@ impl InitRules<'_> {
 }
 
 impl BodyVisit<'_> for InitRules<'_> {
-    const SCOPED: bool = false;
-
-    fn expr(&mut self, e: &Expr, _: &HashSet<String>) -> bool {
+    fn expr(&mut self, e: &Expr, locals: &HashSet<String>) -> bool {
         if self.err.is_some() {
             return false;
         }
         let (own_name, line) = (DeclName(self.own_name), self.line);
         match e {
+            // A binder of the initializer shadows module state and a function
+            // of its name.
+            Expr::Var { name, .. } | Expr::Call { name, .. } if locals.contains(name) => true,
             Expr::Var { name, .. }
                 if self.all_globals.contains(name.as_str()) && !self.ready.contains(name) =>
             {
@@ -7550,43 +7457,6 @@ mod tests {
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].0, "id");
         assert_eq!(calls[0].1, vec![("T".to_string(), Type::Int)]);
-    }
-
-    /// What [`check_accum_recording`] holds equals what [`record`] makes. A
-    /// record is keyed by the program's address only while a
-    /// [`crate::own::Memo`] borrows it, so another program gets its own.
-    #[test]
-    fn the_analysiss_own_check_records_what_the_lowering_reads() {
-        let src = "fn id<T>(x: T) -> T {\n    return x\n}\n\n\
-                   fn main() -> Int64 {\n    let n: Int64 = id(1)\n    return n\n}\n";
-        let p = parse(lex(src).unwrap()).unwrap();
-        let want = record(&p);
-
-        {
-            let _memo = crate::own::Memo::open(&p);
-            let (diags, _) = check_accum_recording(&p);
-            assert!(diags.is_empty(), "{diags:?}");
-            let got = recorded(&p);
-            assert_eq!(got.node_types, want.node_types);
-            assert_eq!(got.joins, want.joins);
-            assert_eq!(got.node_substs.len(), want.node_substs.len());
-            let q = parse(
-                lex("fn main() -> Int64 {
-    return 0
-}
-")
-                .unwrap(),
-            )
-            .unwrap();
-            let other = recorded(&q);
-            assert_ne!(
-                other.node_types, got.node_types,
-                "a record served for the wrong program"
-            );
-        }
-
-        let after = recorded(&p);
-        assert_eq!(after.node_types, want.node_types);
     }
 
     /// A container with an optional projection.

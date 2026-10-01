@@ -1,0 +1,17 @@
+// A `let` in an inner block shadows module state only inside that block, so
+// the read above it still reads module state and the generator is impure.
+let counter: Int64 = 5
+
+gen fn g() -> Int64 {
+    let r = counter
+    if r > 100 {
+        let counter = 1
+        return counter
+    }
+    return r
+}
+
+fn main() -> Int64 {
+    print(g())
+    return 0
+}

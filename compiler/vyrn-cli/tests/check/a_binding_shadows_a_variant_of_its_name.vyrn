@@ -1,0 +1,26 @@
+// A parameter and a `let` shadow the variant of their name, as an inner
+// binding shadows an outer one; the variant is back after the block.
+type E = | A | B
+
+fn f(A: Int64) -> Int64 {
+    return A + 1
+}
+
+fn name(e: E) -> String {
+    return match e {
+        A => "a",
+        B => "b",
+    }
+}
+
+fn main() -> Int64 {
+    print(f(1))
+    if true {
+        let A = 40
+        print(A + 2)
+    }
+    print(name(A))
+    let B = "shadow"
+    print(B)
+    return 0
+}

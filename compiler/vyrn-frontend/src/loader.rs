@@ -616,7 +616,7 @@ pub fn resolve_spec(spec: &str, importer: &str, opts: &LoadOptions) -> Result<St
 /// Options for a load: the std root and the manifest's dependency aliases.
 /// `aliases` maps a bare specifier (`"pad"`) to a real one; a relative target
 /// resolves against `alias_base`, not the importing file.
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct LoadOptions {
     pub std_root: Option<String>,
     pub aliases: std::collections::HashMap<String, String>,
@@ -632,6 +632,19 @@ pub struct LoadOptions {
     /// the load links, a generator's included. A compile passes
     /// [`crate::project::Expansions::shared`].
     pub expansions: std::sync::Arc<crate::project::Expansions>,
+    /// The generator runs that enclose this load. A host's load is outermost:
+    /// the default.
+    pub nest: Nest,
+}
+
+/// The generator runs that enclose a load or a check.
+#[derive(Default, Clone)]
+pub struct Nest {
+    /// How many loads enclose this one. A generator import's own load and a
+    /// load its run makes are one deeper than the load that imports it.
+    pub(crate) depth: u32,
+    /// The `derive` generators running, outermost first.
+    pub(crate) deriving: Vec<String>,
 }
 
 /// Returns the objection, if any, to `importer` importing `imported`.
@@ -762,6 +775,8 @@ struct Work {
     /// `key -> manifest::real_path(key)`. A file's identity does not change
     /// during a load, and [`runtime_fence`] asks for the same keys on every edge.
     real_paths: HashMap<String, Option<String>>,
+    /// Each generation input's hash as this load read it ([`current_input_hash`]).
+    inputs: HashMap<String, Option<String>>,
 }
 
 /// The prefix every declaration of an injected runtime module is renamed to.
@@ -1042,16 +1057,7 @@ pub fn load_with_origins(
     ModuleGraph,
     Option<crate::floor::Pending>,
 ) {
-    // A fresh epoch for the outermost load only; see `current_input_hash`.
-    let depth = LOAD_DEPTH.with(|d| {
-        d.set(d.get() + 1);
-        d.get()
-    });
-    if depth == 1 {
-        LOAD_EPOCH.with(|e| e.set(e.get().wrapping_add(1)));
-    }
-    if depth > GEN_DEPTH_MAX {
-        LOAD_DEPTH.with(|d| d.set(d.get() - 1));
+    if opts.nest.depth >= GEN_DEPTH_MAX {
         // Each nested generator load gets a fresh module-state map, so the
         // import-cycle check never sees a generator that mints a growing
         // argument (`g(x + "1")` from `g(x)`). The depth bound turns that stack
@@ -1070,9 +1076,7 @@ pub fn load_with_origins(
             None,
         );
     }
-    let out = load_with_origins_inner(root_source, root_path, opts, resolver, engine);
-    LOAD_DEPTH.with(|d| d.set(d.get() - 1));
-    out
+    load_with_origins_inner(root_source, root_path, opts, resolver, engine)
 }
 
 fn load_with_origins_inner(
@@ -1226,6 +1230,7 @@ fn load_modules(
         warnings: Vec::new(),
         stack: Vec::new(),
         real_paths: HashMap::new(),
+        inputs: HashMap::new(),
     };
 
     fn visit(
@@ -1522,6 +1527,7 @@ fn load_modules(
                     &w.modules,
                     &w.states,
                     &mut w.identities,
+                    &mut w.inputs,
                     root_key,
                 )?;
                 // A generator import is an import, and the audience rule decides
@@ -1630,7 +1636,7 @@ fn load_modules(
         match crate::floor::objected(&graph, &root_key, map) {
             // A nested generator load is not the artifact; only the outermost
             // load may return a decision for the check that follows it.
-            Some(c) if crate::floor::is_judged(&c) && LOAD_DEPTH.with(|d| d.get()) == 1 => {
+            Some(c) if crate::floor::is_judged(&c) && opts.nest.depth == 0 => {
                 pending = Some(crate::floor::Pending {
                     graph,
                     root: root_key.clone(),
@@ -1676,12 +1682,9 @@ pub(crate) const GEN_MAX_OUTPUT: usize = 4 * 1024 * 1024;
 const GEN_DEPTH_MAX: u32 = 32;
 
 thread_local! {
-    /// Bumped once per outermost load; stamps [`HASH_MEMO`] entries.
-    static LOAD_EPOCH: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
-    /// Re-entrancy depth: generators load modules of their own.
-    static LOAD_DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
-    /// Generator-cache validation's inputs by path; see [`current_input_hash`].
-    static HASH_MEMO: std::cell::RefCell<HashMap<String, InputHash>> =
+    /// Each generation input's last content and its hash, by path; see
+    /// [`current_input_hash`].
+    static HASHES: std::cell::RefCell<HashMap<String, InputHash>> =
         std::cell::RefCell::new(HashMap::new());
 }
 
@@ -1729,6 +1732,7 @@ fn run_generator(
     modules: &[Module],
     states: &HashMap<String, bool>,
     identities: &mut HashMap<String, String>,
+    read: &mut HashMap<String, Option<String>>,
     root_key: &str,
 ) -> Result<(String, Option<String>), Vec<Diagnostic>> {
     let err = |rule: Rule| -> Vec<Diagnostic> { vec![load_error(importer, root_key, line, rule)] };
@@ -1852,10 +1856,10 @@ fn run_generator(
         // `inputs` comes from the entry and so agrees with itself: an empty or
         // forged list passes `all`. The call site decides first: an entry that
         // does not record `gen_mod_key` is not this generation.
-        let valid = |inputs: &[(String, String)]| {
+        let valid = |inputs: &[(String, String)], read: &mut HashMap<String, Option<String>>| {
             inputs.iter().any(|(path, _)| path == &gen_mod_key)
                 && inputs.iter().all(|(path, hash)| {
-                    current_input_hash(resolver, path).unwrap_or_else(|| ABSENT.to_string())
+                    current_input_hash(resolver, path, read).unwrap_or_else(|| ABSENT.to_string())
                         == *hash
                 })
         };
@@ -1863,10 +1867,10 @@ fn run_generator(
         // remembered entry is validated like a read one, and skips the read and
         // the tag check, the cost of a warm keystroke's generator import.
         let remembered = GEN_ENTRIES.with(|m| m.borrow().get(&sources_hash).cloned());
-        let hit = remembered.filter(|e| valid(&e.0)).or_else(|| {
+        let hit = remembered.filter(|e| valid(&e.0, read)).or_else(|| {
             let cached = resolver.gen_cache_get(&sources_hash)?;
             let entry = read_cache_entry(&sources_hash, &cached)?;
-            valid(&entry.0).then(|| Rc::new(entry))
+            valid(&entry.0, read).then(|| Rc::new(entry))
         });
         if let Some(entry) = hit {
             let output = entry.1.clone();
@@ -1889,12 +1893,16 @@ fn run_generator(
     let gen_source = resolver
         .read(&gen_mod_key)
         .map_err(|e| err(rule!(GenModuleReread, module = gen_mod_key, why = e)))?;
+    // The generator's load, its check and every load its run makes nest one
+    // deeper than this load.
+    let mut inner = opts.clone();
+    inner.nest.depth += 1;
     let (loaded, _, _, gen_graph, _) =
-        load_with_origins(&gen_source, &gen_mod_key, opts, resolver, engine);
+        load_with_origins(&gen_source, &gen_mod_key, &inner, resolver, engine);
     let mut gen_program = loaded?;
     // A generator is a runnable program compiled to wasm, so it gets
     // the check and synthesis a root gets.
-    let (gdiags, _, _, _) = crate::check_and_synthesize(&mut gen_program, engine);
+    let (gdiags, _, _, _) = crate::check_and_synthesize(&mut gen_program, engine, &inner.nest);
     if !gdiags.is_empty() {
         return Err(gdiags);
     }
@@ -1920,7 +1928,7 @@ fn run_generator(
     let mut gen_sources: Vec<(String, String)> = Vec::new();
     let mut describable = true;
     for (key, _, _) in &gen_graph {
-        match current_input_hash(resolver, key) {
+        match current_input_hash(resolver, key, read) {
             Some(h) => gen_sources.push((key.clone(), h)),
             None => {
                 describable = false;
@@ -1950,7 +1958,7 @@ fn run_generator(
         crate::gen::GenInputs {
             engine,
             resolver,
-            opts,
+            opts: &inner,
             importer_dir,
             allowed,
             aliased,
@@ -1996,7 +2004,7 @@ fn run_generator(
         // Recorded unconditionally: a hit is validated against the generator
         // module the call site named.
         if !inputs.iter().any(|(p, _)| p == &gen_mod_key) {
-            if let Some(h) = current_input_hash(resolver, &gen_mod_key) {
+            if let Some(h) = current_input_hash(resolver, &gen_mod_key, read) {
                 inputs.push((gen_mod_key.clone(), h));
             }
         }
@@ -2045,20 +2053,17 @@ fn generator_cache_key(
 /// a directory listing (a `dir/` marker, `resolver.list_kinds`). `None` when it
 /// cannot be read; validation reads that as [`ABSENT`].
 ///
-/// Read once per outermost load, because a root that imports several
+/// Read once per load into `inputs`, because a root that imports several
 /// generators validates the same std modules once each, and files do not change
-/// during a load. Only the outermost load bumps the epoch: generators re-enter
-/// the loader, and a nested bump would drop the memo mid-use. A later load
-/// reads the input again, and hashes it only when its content changed.
-fn current_input_hash(resolver: &dyn ModuleResolver, path: &str) -> Option<String> {
-    let epoch = LOAD_EPOCH.with(|e| e.get());
-    if let Some(hit) = HASH_MEMO.with(|m| {
-        m.borrow()
-            .get(path)
-            .filter(|e| e.epoch == epoch)
-            .map(|e| e.hash.clone())
-    }) {
-        return hit;
+/// during a load. A later load reads the input again, and hashes it only when
+/// its content changed ([`HASHES`]).
+fn current_input_hash(
+    resolver: &dyn ModuleResolver,
+    path: &str,
+    inputs: &mut HashMap<String, Option<String>>,
+) -> Option<String> {
+    if let Some(hit) = inputs.get(path) {
+        return hit.clone();
     }
     // A file's text, or a directory's sorted listing, one name per line.
     let content = match path.strip_suffix('/') {
@@ -2068,7 +2073,7 @@ fn current_input_hash(resolver: &dyn ModuleResolver, path: &str) -> Option<Strin
         }),
         None => resolver.read(path).ok(),
     };
-    HASH_MEMO.with(|m| {
+    let hash = HASHES.with(|m| {
         let mut m = m.borrow_mut();
         let hash = match m.get(path).filter(|e| e.content == content) {
             Some(e) => e.hash.clone(),
@@ -2077,19 +2082,19 @@ fn current_input_hash(resolver: &dyn ModuleResolver, path: &str) -> Option<Strin
                 .map(|c| crate::hash::sha256_hex(c.as_bytes())),
         };
         let entry = InputHash {
-            epoch,
             content,
             hash: hash.clone(),
         };
         m.insert(path.to_string(), entry);
         hash
-    })
+    });
+    inputs.insert(path.to_string(), hash.clone());
+    hash
 }
 
-/// A generation input as [`current_input_hash`] last read it.
+/// A generation input's content and its hash, as [`current_input_hash`] last
+/// read it.
 struct InputHash {
-    /// The outermost load that read it.
-    epoch: u64,
     /// The file's text or the directory's listing; `None` when unreadable.
     content: Option<String>,
     /// The sha256 of `content`.
@@ -2413,8 +2418,9 @@ fn resolve_aliases(
 ) -> Spellings {
     // Top-level decl names per module.
     let mut module_decls: HashMap<String, HashSet<String>> = HashMap::new();
-    // `all_names` only lets `rename_apart` mint a collision-free `__fromN`, and
-    // most programs never rename, so it fills on first use.
+    // `all_names` only lets `rename_apart` mint a `__fromN` that no declaration
+    // and no binder spells, and most programs never rename, so it fills on
+    // first use.
     let mut all_names: HashSet<String> = HashSet::new();
     for m in modules.iter() {
         module_decls
@@ -2427,18 +2433,17 @@ fn resolve_aliases(
     // `name_module_count` counts the modules declaring each name, so a
     // namespaced export is renamed only when its name would collide.
     let mut module_exports: HashMap<String, HashSet<String>> = HashMap::new();
-    // Variant names of a module's exported enums, to tell `ns.Enum.Variant(x)`
-    // apart from `someFn(ns.Type, ..)`, which parse the same.
-    let mut module_variants: HashMap<String, HashSet<String>> = HashMap::new();
+    // Variant names of each exported enum per module, to tell
+    // `ns.Enum.Variant(x)` apart from `someFn(ns.Type, ..)`, which parse the same.
+    let mut module_variants: HashMap<String, HashMap<String, HashSet<String>>> = HashMap::new();
     let mut name_module_count: HashMap<String, usize> = HashMap::new();
     for m in modules.iter() {
         let variants = module_variants.entry(m.key.clone()).or_default();
         for t in &m.program.type_decls {
             if t.line != 0 && t.exported {
                 if let Some(vs) = crate::types::declared_variants(&t.base) {
-                    for v in vs {
-                        variants.insert(v.name.clone());
-                    }
+                    let names = vs.iter().map(|v| v.name.clone());
+                    variants.entry(t.name.clone()).or_default().extend(names);
                 }
             }
         }
@@ -2501,6 +2506,9 @@ fn resolve_aliases(
             if all_names.is_empty() {
                 for names in module_decls.values() {
                     all_names.extend(names.iter().cloned());
+                }
+                for m in modules.iter() {
+                    bound_names(&m.program, &mut all_names);
                 }
             }
             let mut n = 0usize;
@@ -2764,16 +2772,19 @@ fn resolve_aliases(
             // A hand importer of an injected module follows its variant renames
             // too: importing an enum brings its variants, which are references,
             // not import names. Only when it imports that enum itself, so a
-            // consumer's own `JStr` variant is not rewritten to `json$JStr`.
+            // consumer's own `JStr` variant is not rewritten to `json$JStr`,
+            // and never over a declaration of the importer's own.
             if !imp.names.is_empty() {
                 if let Some(by_enum) = injected_variants.get(target) {
+                    let own = &module_decls[&m.key];
                     for n in &imp.names {
                         let resolved = resolved_name(&foreign_renames, target, &n.original);
                         if let Some(vars) = by_enum.get(&resolved) {
-                            rewrites
-                                .entry(m.key.clone())
-                                .or_default()
-                                .extend(vars.iter().map(|(k, v)| (k.clone(), v.clone())));
+                            rewrites.entry(m.key.clone()).or_default().extend(
+                                (vars.iter())
+                                    .filter(|(k, _)| !own.contains(*k))
+                                    .map(|(k, v)| (k.clone(), v.clone())),
+                            );
                         }
                     }
                 }
@@ -2996,6 +3007,39 @@ fn type_heads_mut(ty: &mut Type, f: &mut impl FnMut(&mut String)) {
 
 // The scope-aware descent over a body is `ast::body_scope_descent!`.
 
+/// Adds every name a body of `p` binds to `out`: parameters, `let`s, loop
+/// variables, pattern binders and lambda parameters. A renamed reference must
+/// not resolve to one of them.
+fn bound_names(p: &Program, out: &mut HashSet<String>) {
+    struct Binders<'a>(&'a mut HashSet<String>);
+
+    impl BodyVisit<'_> for Binders<'_> {
+        fn bind(&mut self, name: &str, _: usize, _: usize, _: LocalKind, _: Option<&Type>) {
+            self.0.insert(name.to_string());
+        }
+    }
+
+    let fns = p
+        .impls
+        .iter()
+        .flat_map(|i| i.methods.iter().chain(&i.places));
+    for f in p.functions.iter().chain(fns) {
+        out.extend(f.params.iter().map(|q| q.name.clone()));
+        body_block(&f.body, &mut HashSet::new(), &mut Binders(out));
+    }
+    for b in p
+        .tests
+        .iter()
+        .map(|t| &t.body)
+        .chain(p.benches.iter().map(|b| &b.body))
+    {
+        body_block(b, &mut HashSet::new(), &mut Binders(out));
+    }
+    for g in &p.globals {
+        body_expr(&g.init, &HashSet::new(), &mut Binders(out));
+    }
+}
+
 crate::body_scope_descent!(BodyVisit, body_block, body_stmt, body_expr);
 crate::body_scope_descent!(
     BodyVisitMut,
@@ -3014,9 +3058,9 @@ struct NsResolver<'a> {
     foreign_renames: &'a HashMap<(String, String), String>,
     /// Exported decl names (originals) per module: the namespace-reachable surface.
     module_exports: &'a HashMap<String, HashSet<String>>,
-    /// Exported-enum variant names per module, to tell variant construction from
-    /// a type-name argument.
-    module_variants: &'a HashMap<String, HashSet<String>>,
+    /// Variant names of each exported enum per module, to tell variant
+    /// construction from a type-name argument.
+    module_variants: &'a HashMap<String, HashMap<String, HashSet<String>>>,
     module_key: String,
     root_key: String,
     errors: &'a mut Vec<Diagnostic>,
@@ -3030,6 +3074,14 @@ impl NsResolver<'_> {
 
     /// The program-wide symbol a namespace member resolves to, after any
     /// collision rename, or an error if the target does not export it.
+    /// Whether the enum `enum_name` the namespace `ns` exports declares `variant`.
+    fn declares_variant(&self, ns: &str, enum_name: &str, variant: &str) -> bool {
+        (self.ns.get(ns))
+            .and_then(|t| self.module_variants.get(t))
+            .and_then(|enums| enums.get(enum_name))
+            .is_some_and(|vs| vs.contains(variant))
+    }
+
     fn resolve_member(&mut self, ns: &str, member: &str, line: usize) -> Option<String> {
         let target = self.ns.get(ns).cloned()?;
         let exported = self
@@ -3179,14 +3231,15 @@ impl BodyVisitMut for NsResolver<'_> {
                 // the call name is a variant of that module's enums. Otherwise
                 // it is `someFn(ns.Type, ..)`, which parses the same, and the
                 // `Field` arm rewrites `ns.Type`.
-                if let Some(Expr::Field { expr: inner, .. }) = args.first() {
+                if let Some(Expr::Field {
+                    expr: inner,
+                    field: enum_name,
+                    ..
+                }) = args.first()
+                {
                     if let Expr::Var { name: head, .. } = inner.as_ref() {
                         let is_variant_call = self.is_ns(head, locals)
-                            && self
-                                .ns
-                                .get(head)
-                                .and_then(|t| self.module_variants.get(t))
-                                .is_some_and(|vs| vs.contains(name));
+                            && self.declares_variant(head, enum_name, name);
                         if is_variant_call {
                             // Variants are not renamed; drop the qualifier and
                             // keep the call name.
@@ -3242,12 +3295,7 @@ impl BodyVisitMut for NsResolver<'_> {
                         if self.is_ns(head, locals) {
                             let (head, enum_name, variant) =
                                 (head.clone(), enum_name.clone(), field.clone());
-                            let is_variant = self
-                                .ns
-                                .get(&head)
-                                .and_then(|t| self.module_variants.get(t))
-                                .is_some_and(|vs| vs.contains(&variant));
-                            if is_variant {
+                            if self.declares_variant(&head, &enum_name, &variant) {
                                 let _ = self.resolve_member(&head, &enum_name, l);
                                 *e = Expr::Var {
                                     id: Id::NEW,
@@ -3313,12 +3361,15 @@ fn link(mut modules: Vec<Module>, root_key: &str) -> Result<Program, Vec<Diagnos
     // import site in a real file.
     let mut clashes: Vec<(String, String, String)> = Vec::new();
 
-    // Names whose every declaration is a non-exported `extern fn`, in two or
-    // more modules: one host-ABI contract restated per module (std/rpc plants
-    // `extern fn vyrnRpcCall` in every client stub). Renaming would sever the
-    // ABI, so they neither clash nor take part in the foreign-reference check,
-    // and the merge keeps one copy.
+    // Names whose every declaration is a non-exported `extern fn` of one
+    // signature, in two or more modules: one host-ABI contract restated per
+    // module (std/rpc plants `extern fn vyrnRpcCall` in every client stub).
+    // Renaming would sever the ABI, so they neither clash nor take part in the
+    // foreign-reference check, and the merge keeps one copy. Two signatures
+    // are two contracts, which clash.
     let mut extern_totals: HashMap<String, (usize, usize)> = HashMap::new();
+    let mut extern_sigs: HashMap<String, (Vec<&Type>, &Type)> = HashMap::new();
+    let mut two_sigs: HashSet<String> = HashSet::new();
     for m in &modules {
         for f in &m.program.functions {
             if !f.exported {
@@ -3326,13 +3377,21 @@ fn link(mut modules: Vec<Module>, root_key: &str) -> Result<Program, Vec<Diagnos
                 e.0 += 1;
                 if f.is_extern {
                     e.1 += 1;
+                    let sig = (f.params.iter().map(|p| &p.ty).collect(), &f.ret);
+                    if *extern_sigs
+                        .entry(f.name.clone())
+                        .or_insert_with(|| sig.clone())
+                        != sig
+                    {
+                        two_sigs.insert(f.name.clone());
+                    }
                 }
             }
         }
     }
     let shared_externs: HashSet<String> = extern_totals
         .into_iter()
-        .filter(|(_, (total, ext))| *ext == *total && *total >= 2)
+        .filter(|(name, (total, ext))| *ext == *total && *total >= 2 && !two_sigs.contains(name))
         .map(|(name, _)| name)
         .collect();
 
@@ -4376,16 +4435,21 @@ mod tests {
     fn a_generator_chain_nesting_past_the_cap_is_a_diagnostic_not_an_abort() {
         // A nested generator load gets a fresh module-state map, so a chain that
         // mints growing arguments never trips the cycle check. The nesting
-        // counter refuses it.
-        LOAD_DEPTH.with(|d| d.set(GEN_DEPTH_MAX + 1));
+        // depth refuses it.
+        let deep = LoadOptions {
+            nest: Nest {
+                depth: GEN_DEPTH_MAX,
+                ..Nest::default()
+            },
+            ..opts()
+        };
         let (r, _, _, _, _) = load_with_origins(
             "fn main() -> Int64 { return 0 }",
             "main.vyrn",
-            &opts(),
+            &deep,
             &map(&[]),
             None,
         );
-        LOAD_DEPTH.with(|d| d.set(0));
         let e = r.unwrap_err();
         assert!(
             e[0].message.contains("nest more than 32 deep"),

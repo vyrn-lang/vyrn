@@ -166,7 +166,6 @@ fn movecheck_sections() -> Vec<Section> {
         sec("fn hands_back", Job),
         sec("fn views", Job),
         sec("fn in_source_order", Job),
-        sec("fn comptime", Job),
         sec("type Verdict", Job),
         sec("mod tests", Tests),
     ]

@@ -4,5 +4,5 @@ a rule another pass also states	0	0
 a path only a deleted route reached	0	0
 machinery with a copy elsewhere	0	0
 the WASI host and the wasmtime embedding	1162	0
-shared machinery	1268	19
-tests	793	2
+shared machinery	1266	19
+tests	795	2

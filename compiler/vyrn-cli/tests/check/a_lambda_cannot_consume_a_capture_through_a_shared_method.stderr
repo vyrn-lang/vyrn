@@ -1,0 +1,1 @@
+a_lambda_cannot_consume_a_capture_through_a_shared_method.vyrn:33:0: a lambda cannot consume the captured binding `q` (line 33)

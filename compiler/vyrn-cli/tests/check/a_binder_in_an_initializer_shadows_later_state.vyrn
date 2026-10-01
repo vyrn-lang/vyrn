@@ -1,0 +1,13 @@
+// A pattern binder in a module-state initializer shadows the later module
+// state of its name, so the initializer reads no later global.
+let a: Int64 = match Some(1) {
+    Some(c) => c,
+    None => 0,
+}
+
+let c: Int64 = 2
+
+fn main() -> Int64 {
+    print(a + c)
+    return 0
+}

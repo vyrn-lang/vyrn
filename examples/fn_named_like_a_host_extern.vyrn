@@ -1,0 +1,11 @@
+// A function the program declares under a host-boundary extern's name is an
+// ordinary function: the call runs its body, not the runtime shim.
+
+fn hostRandomSeed() -> Int64 {
+    return 42
+}
+
+fn main() -> Int64 {
+    print("\{hostRandomSeed()}")
+    return 0
+}

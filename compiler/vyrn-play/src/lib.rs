@@ -272,7 +272,13 @@ fn load(
     src: &str,
     expansions: std::sync::Arc<vyrn_frontend::project::Expansions>,
 ) -> (
-    Result<vyrn_frontend::ast::Program, Vec<Diagnostic>>,
+    Result<
+        (
+            vyrn_frontend::ast::Program,
+            std::sync::Arc<vyrn_lower::World>,
+        ),
+        Vec<Diagnostic>,
+    >,
     Vec<Diagnostic>,
 ) {
     let engine =
@@ -284,6 +290,7 @@ fn load(
         audience: None,
         artifacts: None,
         expansions,
+        nest: Default::default(),
     };
     let resolver = MapResolver(
         std_modules::STD
@@ -310,11 +317,11 @@ fn compile_result(src: &str) -> Vec<u8> {
     // The load and the backend must walk one expansion of each desugared site
     // (`schemaOf<T>()`, a user container's `a[i]`), or the core's rows, keyed
     // by the load's nodes, miss the backend's.
-    let program = match load(src, vyrn_frontend::project::Expansions::shared()).0 {
+    let (program, world) = match load(src, vyrn_frontend::project::Expansions::shared()).0 {
         Ok(p) => p,
         Err(diags) => return format!("{{\"diagnostics\":{}}}", diags_json(&diags)).into_bytes(),
     };
-    match vyrn_codegen::direct::compile(&program) {
+    match vyrn_codegen::direct::compile(&program, world) {
         Ok(bytes) => bytes,
         // A backend refusal is a diagnostic with no position.
         Err(e) => {

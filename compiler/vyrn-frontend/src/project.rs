@@ -573,21 +573,8 @@ fn substituted(
     let mut rename: HashMap<String, String> = HashMap::new();
     collect_bindings(&mut body, tag, &mut rename);
     if !rename.is_empty() {
-        let renames: HashMap<String, Expr> = rename
-            .iter()
-            .map(|(k, v)| {
-                (
-                    k.clone(),
-                    Expr::Var {
-                        id: Id::NEW,
-                        name: v.clone(),
-                        line,
-                    },
-                )
-            })
-            .collect();
+        rename_uses(&mut body, &rename);
         rename_bindings(&mut body, &rename);
-        subst_block(&mut body, &renames);
     }
 
     let mut prologue = Vec::new();
@@ -789,7 +776,48 @@ fn collect_lambda(e: &mut Expr, tag: &str, out: &mut HashMap<String, String>) {
     }
 }
 
-/// Renames the declaration side of each binding through `map`; [`subst_block`]
+/// Renames each read and store of a name through `map` where a binding of the
+/// body holds the name, so a parameter of the same spelling keeps its name.
+/// Runs before [`rename_bindings`], whose scopes it reads by the old names.
+fn rename_uses(b: &mut Block, map: &HashMap<String, String>) {
+    crate::body_scope_descent!(UseVisit, use_block, use_stmt, use_expr, mut);
+
+    struct Uses<'a>(&'a HashMap<String, String>);
+
+    impl Uses<'_> {
+        fn put(&self, n: &mut String, locals: &std::collections::HashSet<String>) {
+            if !locals.contains(n.as_str()) {
+                return;
+            }
+            if let Some(r) = self.0.get(n.as_str()) {
+                *n = r.clone();
+            }
+        }
+    }
+
+    impl UseVisit for Uses<'_> {
+        fn stmt(&mut self, s: &mut Stmt, locals: &std::collections::HashSet<String>) {
+            match s {
+                Stmt::Assign { name, .. }
+                | Stmt::IndexSet { name, .. }
+                | Stmt::SetField { name, .. }
+                | Stmt::Drop { name, .. } => self.put(name, locals),
+                _ => {}
+            }
+        }
+
+        fn expr(&mut self, e: &mut Expr, locals: &std::collections::HashSet<String>) -> bool {
+            if let Expr::Var { name, .. } = e {
+                self.put(name, locals);
+            }
+            true
+        }
+    }
+
+    use_block(b, &mut std::collections::HashSet::new(), &mut Uses(map));
+}
+
+/// Renames the declaration side of each binding through `map`; [`rename_uses`]
 /// renames the uses.
 fn rename_bindings(b: &mut Block, map: &HashMap<String, String>) {
     crate::body_scope_descent!(RenameVisit, ren_block, ren_stmt, ren_expr, mut);
@@ -811,11 +839,7 @@ fn rename_bindings(b: &mut Block, map: &HashMap<String, String>) {
 
         fn stmt(&mut self, s: &mut Stmt, _: &std::collections::HashSet<String>) {
             match s {
-                Stmt::Let { name, .. }
-                | Stmt::Assign { name, .. }
-                | Stmt::IndexSet { name, .. }
-                | Stmt::SetField { name, .. }
-                | Stmt::Drop { name, .. } => self.put(name),
+                Stmt::Let { name, .. } => self.put(name),
                 Stmt::ForIn { var, .. } => self.put(var),
                 _ => {}
             }

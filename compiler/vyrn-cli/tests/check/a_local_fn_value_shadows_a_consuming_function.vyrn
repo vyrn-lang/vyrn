@@ -1,0 +1,20 @@
+// A local function value shadows the consuming function `eat`; a call
+// through the value reads its argument, so the lambda may pass a capture.
+fn eat(s: consume String) -> Int64 {
+    return 1
+}
+
+fn peek(s: String) -> Int64 {
+    return 2
+}
+
+fn apply(f: fn(Int64) -> Int64) -> Int64 {
+    return f(1)
+}
+
+fn main() -> Int64 {
+    let eat: fn(String) -> Int64 = peek
+    let s = "x" + "y"
+    print(apply(n -> n + eat(s)))
+    return 0
+}

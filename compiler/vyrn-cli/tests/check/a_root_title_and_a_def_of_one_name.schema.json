@@ -1,0 +1,7 @@
+{
+  "title": "Box",
+  "type": "object",
+  "properties": { "inner": { "$ref": "#/$defs/Box" } },
+  "required": ["inner"],
+  "$defs": { "Box": { "type": "string" } }
+}

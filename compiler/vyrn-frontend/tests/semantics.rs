@@ -131,7 +131,7 @@ fn main() -> Int64 {{
     // `schemaOf<T>()` literal inside it; outside it the call has no row.
     // `load_warned`, not `loader::load`, because it synthesizes validated types'
     // constructors and JSON codecs, as the CLI does.
-    let program = vyrn_lower::load_warned(
+    let (program, world) = vyrn_lower::load_warned(
         &wrapped,
         "main.vyrn",
         &opts,
@@ -145,7 +145,7 @@ fn main() -> Int64 {{
 ",
         )
     })?;
-    let bytes = vyrn_codegen::direct::compile(&program)?;
+    let bytes = vyrn_codegen::direct::compile(&program, world)?;
     let out = vyrn_cli::wasmrun::run(
         &bytes,
         vyrn_cli::wasmrun::Run {
@@ -190,7 +190,7 @@ fn run_without(missing: &str, source: &str) -> Result<i64, String> {
         expansions: vyrn_frontend::project::Expansions::shared(),
         ..Default::default()
     };
-    let program = vyrn_lower::load_warned(
+    let (program, _) = vyrn_lower::load_warned(
         source,
         "main.vyrn",
         &opts,

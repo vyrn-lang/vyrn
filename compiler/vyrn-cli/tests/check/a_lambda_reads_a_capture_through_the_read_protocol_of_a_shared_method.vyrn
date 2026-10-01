@@ -1,0 +1,35 @@
+// Two protocols declare `take`, one by `read self` and one by `consume self`.
+// The receiver's type picks `Peek`, so the lambda reads its capture.
+type P = { x: Int64 }
+
+type Q = { y: Int64 }
+
+protocol Peek {
+    fn take(self) -> Int64
+}
+
+protocol Eat {
+    fn take(consume self) -> Int64
+}
+
+impl Peek for P {
+    fn take(self) -> Int64 {
+        return self.x
+    }
+}
+
+impl Eat for Q {
+    fn take(consume self) -> Int64 {
+        return self.y
+    }
+}
+
+fn apply(f: fn(Int64) -> Int64) -> Int64 {
+    return f(1)
+}
+
+fn main() -> Int64 {
+    let p = P { x: 2 }
+    print(apply(n -> n + p.take()))
+    return 0
+}
