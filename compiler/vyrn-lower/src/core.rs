@@ -6894,11 +6894,12 @@ pub fn lambda_spelling(outer: &str, line: usize, col: usize) -> String {
     format!("{outer}@lambda:{line}:{col}")
 }
 
-/// The line of a lambda key [`lambda_spelling`] spelled, which is how
-/// a lambda source is named.
-pub fn lambda_line(name: &str) -> Option<usize> {
+/// The line and column of a lambda key [`lambda_spelling`] spelled, which
+/// is how a lambda source is named.
+pub fn lambda_at(name: &str) -> Option<(usize, usize)> {
     let (_, at) = name.rsplit_once("@lambda:")?;
-    at.split(':').next()?.parse().ok()
+    let (line, col) = at.split_once(':')?;
+    Some((line.parse().ok()?, col.parse().ok()?))
 }
 
 /// The instance of `body` whose `fn`-typed parameters are bound:

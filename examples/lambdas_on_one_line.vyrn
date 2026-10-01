@@ -1,0 +1,24 @@
+// Two lambdas written on one line are two sources. A call through `inc`
+// runs `inc` alone, so it does not write `names`, and the loop may keep
+// reading `names` across the call.
+
+let mut names: Array<String> = []
+
+type Fns = { inc: fn(Int64) -> Int64, wipe: fn() -> Int64 }
+
+fn wipe() -> Int64 {
+    names = []
+    return 0
+}
+
+fn main() -> Int64 {
+    names.push("a" + "b")
+    let fs = Fns { inc: x -> x + 1, wipe: () -> wipe() }
+    let f = fs.inc
+    let mut total: Int64 = 0
+    for n in names {
+        total = total + f(n.byteLength)
+    }
+    print(total)
+    return 0
+}

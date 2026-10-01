@@ -536,18 +536,18 @@ pub(crate) fn judge_built<R>(
             }
         }
     }
-    // A lambda frame is keyed by its defining function and line, as a
-    // lambda source is named.
+    // A lambda frame is keyed by its defining function, line and column, as
+    // a lambda source is named.
     let mut refs: Vec<&Body> = Vec::new();
     let mut top: Vec<usize> = Vec::new();
-    let mut lambda_frames: HashMap<(&str, usize), Vec<usize>> = HashMap::new();
+    let mut lambda_frames: HashMap<(&str, (usize, usize)), Vec<usize>> = HashMap::new();
     for (name, b) in tops {
         for f in b.frames() {
             if std::ptr::eq(f, *b) {
                 top.push(refs.len());
-            } else if let Some(line) = crate::core::lambda_line(&f.name) {
+            } else if let Some(pos) = crate::core::lambda_at(&f.name) {
                 lambda_frames
-                    .entry((name, line))
+                    .entry((name, pos))
                     .or_default()
                     .push(refs.len());
             }
@@ -561,11 +561,8 @@ pub(crate) fn judge_built<R>(
         fns.number(b);
     }
     for f in state.iter().flat_map(|b| b.frames()).skip(1) {
-        if let Some(line) = crate::core::lambda_line(&f.name) {
-            lambda_frames
-                .entry(("", line))
-                .or_default()
-                .push(refs.len());
+        if let Some(pos) = crate::core::lambda_at(&f.name) {
+            lambda_frames.entry(("", pos)).or_default().push(refs.len());
         }
         refs.push(f);
     }
@@ -588,8 +585,8 @@ pub(crate) fn judge_built<R>(
         served_at.push(at);
         by_name.entry(name).or_default().push(at);
         for (k, f) in walked.iter().enumerate().skip(1) {
-            if let Some(line) = crate::core::lambda_line(&f.name) {
-                (lambda_frames.entry((name, line)).or_default()).push(at + k);
+            if let Some(pos) = crate::core::lambda_at(&f.name) {
+                (lambda_frames.entry((name, pos)).or_default()).push(at + k);
             }
         }
         frames.extend(walked.iter());
@@ -655,7 +652,7 @@ pub(crate) fn judge_built<R>(
                 }
             }
             if let Some(l) = &src.lambda {
-                if let Some(i) = lambda_frames.get(&(l.defined_in.as_str(), l.line)) {
+                if let Some(i) = lambda_frames.get(&(l.defined_in.as_str(), (l.line, l.col))) {
                     idx.extend(i.iter().copied());
                 }
             }

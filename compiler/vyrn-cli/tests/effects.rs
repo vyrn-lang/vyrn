@@ -378,18 +378,18 @@ fn run_corpus() {
             }
         }
         // Every frame, outermost first. `top[i]` is the slot of instance `i`'s own
-        // body; a lambda frame is keyed by its enclosing function and line, as the
-        // checker names a lambda source.
+        // body; a lambda frame is keyed by its enclosing function, line and column,
+        // as the checker names a lambda source.
         let mut refs: Vec<&vyrn_frontend::core::Body> = Vec::new();
         let mut top: Vec<usize> = Vec::new();
-        let mut lambda_frames: BTreeMap<(&str, usize), Vec<usize>> = BTreeMap::new();
+        let mut lambda_frames: BTreeMap<(&str, (usize, usize)), Vec<usize>> = BTreeMap::new();
         for (i, b) in bodies.iter().enumerate() {
             for f in b.frames() {
                 if std::ptr::eq(f, b) {
                     top.push(refs.len());
-                } else if let Some(line) = vyrn_lower::core::lambda_line(&f.name) {
+                } else if let Some(at) = vyrn_lower::core::lambda_at(&f.name) {
                     lambda_frames
-                        .entry((insts[i].func.name.as_str(), line))
+                        .entry((insts[i].func.name.as_str(), at))
                         .or_default()
                         .push(refs.len());
                 }
@@ -401,9 +401,9 @@ fn run_corpus() {
         // `bench@<i>` otherwise.
         for b in &outside {
             for f in b.frames() {
-                if let Some(line) = vyrn_lower::core::lambda_line(&f.name) {
+                if let Some(at) = vyrn_lower::core::lambda_at(&f.name) {
                     lambda_frames
-                        .entry((b.name.as_str(), line))
+                        .entry((b.name.as_str(), at))
                         .or_default()
                         .push(refs.len());
                 }
@@ -503,7 +503,7 @@ fn run_corpus() {
                     }
                 }
                 if let Some(l) = &src.lambda {
-                    match lambda_frames.get(&(l.defined_in.as_str(), l.line)) {
+                    match lambda_frames.get(&(l.defined_in.as_str(), (l.line, l.col))) {
                         Some(i) => idx.extend(i.iter().copied()),
                         None => {
                             missing.push(format!("a lambda in {} at line {}", l.defined_in, l.line))
