@@ -99,8 +99,11 @@ the playground serves an embedded `std/`. The loader:
 A thread's later loads reuse what one text alone decides: a module's parse and
 the names it references, keyed by its text, and each generator cache entry the
 load read, validated against its inputs again. So an editor keystroke parses
-only the edited text. It still reads every module and generator input, and
-links the whole program again.
+only the edited text. A host that is told of every file change
+(`loader::watch_disk`) also keeps each file's text, each directory's listing
+and each canonical path under the directories it watches, until
+`loader::disk_changed` names the path. Any other host reads every module and
+generator input on every load. Every load links the whole program again.
 
 `vyrn_lower::check_and_synthesize` then runs, in order, the frontend's
 `check_and_synthesize` (steps 1 and 2) and the judgments in `vyrn-lower`:

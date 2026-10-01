@@ -134,9 +134,15 @@ fn main() -> Int64 {
 
 const OTHER: &str = "export fn helper(x: Int64) -> Int64 {\n    return x + 1\n}\n";
 
+/// A second entry in `data/` adds a declaration that refuses.
 const GEN: &str = r#"export gen fn consts(dir: String) -> String {
+    let many = match listDir(dir) {
+        Ok(names) => names.length > 1,
+        Err(e) => false,
+    }
+    let extra = if many { "\nexport fn m() -> Int64 { return \"many\" }" } else { "" }
     return match readFile("./data/n.txt") {
-        Ok(s) => "export fn n() -> Int64 { return " + s + " }",
+        Ok(s) => "export fn n() -> Int64 { return " + s + " }" + extra,
         Err(e) => e,
     }
 }
@@ -147,10 +153,9 @@ const GEN: &str = r#"export gen fn consts(dir: String) -> String {
 const COLLIDE: &str = "\nfn isAsciiSpace(b: Int64) -> String {\n    return \"\"\n}\n";
 
 /// A root, a module it imports, a generator it imports and the generator's
-/// input: each changes once, and the whole program changes back.
-#[test]
-fn a_reused_load_analyzes_as_a_fresh_one() {
-    let dir = common::scratch("reload");
+/// input, written to a fresh directory.
+fn fixture(tag: &str) -> common::Scratch {
+    let dir = common::scratch(tag);
     for (name, text) in [
         ("main.vyrn", ROOT),
         ("other.vyrn", OTHER),
@@ -161,6 +166,13 @@ fn a_reused_load_analyzes_as_a_fresh_one() {
         std::fs::create_dir_all(file.parent().unwrap()).unwrap();
         std::fs::write(file, text).unwrap();
     }
+    dir
+}
+
+/// Each file of the fixture changes once, and the whole program changes back.
+#[test]
+fn a_reused_load_analyzes_as_a_fresh_one() {
+    let dir = fixture("reload");
     let at = |name: &str| {
         let p = dir.join(name).to_string_lossy().replace('\\', "/");
         (OriginMaps::norm_path_key(&p), p)
@@ -223,4 +235,175 @@ fn a_reused_load_analyzes_as_a_fresh_one() {
         })
         .collect();
     replay(&path, edits);
+}
+
+/// One disk step: the files the test writes, the files the editing thread is
+/// told changed, and whether its analysis must show the writes so far.
+struct DiskStep {
+    what: &'static str,
+    writes: Vec<(&'static str, String)>,
+    events: Vec<&'static str>,
+    seen: bool,
+}
+
+fn step(
+    what: &'static str,
+    writes: &[(&'static str, &str)],
+    events: &[&'static str],
+    seen: bool,
+) -> DiskStep {
+    DiskStep {
+        what,
+        writes: writes.iter().map(|(n, t)| (*n, t.to_string())).collect(),
+        events: events.to_vec(),
+        seen,
+    }
+}
+
+/// Writes each step's files, tells an editing thread that loads the fixture's
+/// root the step's events, and compares its analysis with a fresh thread's.
+/// A seen step equals the fresh analysis. An unseen step equals the editing
+/// thread's previous analysis and differs from the fresh one. Every write
+/// changes the fresh analysis, so an ignored event fails a seen step.
+fn replay_disk(tag: &str, watch: bool, steps: Vec<DiskStep>) {
+    let dir = fixture(tag);
+    let at = |name: &str| dir.join(name).to_string_lossy().replace('\\', "/");
+    let path = at("main.vyrn");
+    let edit = std::sync::Arc::new(Edit {
+        what: "the fixture's root",
+        root: ROOT.to_string(),
+        overlays: HashMap::new(),
+        refused: false,
+    });
+    let (ask, asked) = mpsc::channel::<Vec<String>>();
+    let (tell, told) = mpsc::channel::<String>();
+    let (p, e, root) = (path.clone(), edit.clone(), at(""));
+    let editor = std::thread::Builder::new()
+        .stack_size(64 * 1024 * 1024)
+        .spawn(move || {
+            arm();
+            if watch {
+                vyrn_frontend::loader::watch_disk(&[root]);
+            }
+            for events in asked {
+                for changed in events {
+                    vyrn_frontend::loader::disk_changed(&changed);
+                }
+                tell.send(shown(&analyze(&p, &e)))
+                    .expect("the test listens");
+            }
+        })
+        .expect("spawn the editing thread");
+    let (mut last, mut last_fresh) = (String::new(), String::new());
+    for step in steps {
+        for (name, text) in &step.writes {
+            std::fs::write(at(name), text).unwrap();
+        }
+        let events = step.events.iter().map(|n| at(n)).collect();
+        ask.send(events).expect("the editing thread listens");
+        let reused = told.recv().expect("the editing thread answers");
+        let (p, e) = (path.clone(), edit.clone());
+        let fresh = std::thread::Builder::new()
+            .stack_size(64 * 1024 * 1024)
+            .spawn(move || {
+                arm();
+                shown(&analyze(&p, &e))
+            })
+            .expect("spawn a fresh thread")
+            .join()
+            .expect("the fresh thread panicked");
+        if !step.writes.is_empty() {
+            assert_ne!(
+                fresh, last_fresh,
+                "{}: the write changes nothing",
+                step.what
+            );
+        }
+        if step.seen {
+            if let Some(d) = common::first_diff("analysis", "fresh", &fresh, "reused", &reused) {
+                panic!("{}\n{d}", step.what);
+            }
+        } else {
+            assert_eq!(
+                reused, last,
+                "{}: the editing thread read the disk",
+                step.what
+            );
+            assert_ne!(reused, fresh, "{}", step.what);
+        }
+        (last, last_fresh) = (reused, fresh);
+    }
+    drop(ask);
+    editor.join().expect("the editing thread panicked");
+}
+
+/// A thread that watches the fixture keeps what it read until an event names
+/// the file: a generator's input, an imported module, and an entry created in
+/// a directory a generator lists.
+#[test]
+fn a_watched_load_reads_a_file_again_only_after_its_event() {
+    let refusing = OTHER.replace("return x + 1", "return \"a\"");
+    replay_disk(
+        "reload-watch",
+        true,
+        vec![
+            step("no edit", &[], &[], true),
+            step(
+                "the generator's input changes without an event",
+                &[("data/n.txt", "\"a\"")],
+                &[],
+                false,
+            ),
+            step("its event arrives", &[], &["data/n.txt"], true),
+            step(
+                "the input changes back, with its event",
+                &[("data/n.txt", "1")],
+                &["data/n.txt"],
+                true,
+            ),
+            step(
+                "the other module refuses, with its event",
+                &[("other.vyrn", &refusing)],
+                &["other.vyrn"],
+                true,
+            ),
+            step(
+                "the other module changes back, with its event",
+                &[("other.vyrn", OTHER)],
+                &["other.vyrn"],
+                true,
+            ),
+            step(
+                "a file created in the listed directory, with its event",
+                &[("data/more.txt", "")],
+                &["data/more.txt"],
+                true,
+            ),
+        ],
+    );
+}
+
+/// A thread that is sent no events, as for a client that cannot send them,
+/// reads every edit on disk.
+#[test]
+fn an_unwatched_load_reads_every_edit() {
+    replay_disk(
+        "reload-unwatched",
+        false,
+        vec![
+            step("no edit", &[], &[], true),
+            step(
+                "the generator's input changes",
+                &[("data/n.txt", "\"a\"")],
+                &[],
+                true,
+            ),
+            step(
+                "a file created in the listed directory",
+                &[("data/more.txt", "")],
+                &[],
+                true,
+            ),
+        ],
+    );
 }
