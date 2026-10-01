@@ -6,8 +6,7 @@
 //! The memory map: a [`STACK_BYTES`] shadow stack growing down from
 //! [`STACK_TOP`], then data from [`DATA_BASE`] up, ending below
 //! [`STATICS_LIMIT`]. A frame push past address 0 wraps and the first access
-//! traps, instead of walking into the data. [`abi`] widens `i1` and the other
-//! types wasm lacks, once.
+//! traps, instead of walking into the data.
 
 use std::collections::HashMap;
 pub use wasm_encoder::{BlockType, Instruction, MemArg, ValType};
@@ -46,59 +45,13 @@ pub const HEAP_HEADER_BYTES: u32 = 8_768;
 /// clang's frame alignment on wasm32.
 const FRAME_ALIGN: u32 = 16;
 
-/// Returns the wasm value type an LLVM type crosses a call boundary as, or
-/// `None` for `void`.
-///
-/// `i1`, `i8`, `i16` and `ptr` are `i32`. An aggregate is `i32` too: the
-/// address of its shadow-stack slot. Every vector is wasm's one `v128`: the
-/// instruction decides the lane interpretation, and a mask is all-ones or
-/// all-zeros lanes.
-pub fn abi(ll: &str) -> Option<ValType> {
-    Some(match ll.trim() {
-        "void" => return None,
-        v if v.starts_with('<') => ValType::V128,
-        "double" => ValType::F64,
-        "float" => ValType::F32,
-        "i64" => ValType::I64,
-        _ => ValType::I32,
-    })
-}
-
-/// Returns the wasm parameter and result types of one `RET @NAME(ARGS)`
-/// declaration, each through [`abi`].
-///
-/// # Panics
-///
-/// If `decl` is not of that shape.
-pub fn declare_sig(decl: &str) -> (Vec<ValType>, Vec<ValType>) {
-    let (ret, rest) = decl.split_once(" @").expect("RET @NAME(..)");
-    let args = rest.split_once('(').expect("RET @NAME(..)").1;
-    let args = args.rsplit_once(')').expect("RET @NAME(..)").0;
-    (
-        split_args(args).iter().filter_map(|a| abi(a)).collect(),
-        abi(ret).into_iter().collect(),
-    )
-}
-
-/// Splits a parameter list on top-level commas, so a nested type such as
-/// `void (*)(ptr, i64)` stays one parameter.
-fn split_args(s: &str) -> Vec<String> {
-    let (mut out, mut depth, mut start) = (Vec::new(), 0i32, 0usize);
-    for (i, c) in s.char_indices() {
-        match c {
-            '(' | '{' | '[' => depth += 1,
-            ')' | '}' | ']' => depth -= 1,
-            ',' if depth == 0 => {
-                out.push(s[start..i].trim().to_string());
-                start = i + 1;
-            }
-            _ => {}
-        }
+/// An access at a static offset whose alignment hint is `2^align` bytes.
+pub fn mem_arg(off: u32, align: u32) -> MemArg {
+    MemArg {
+        offset: off as u64,
+        align,
+        memory_index: 0,
     }
-    if !s.trim().is_empty() {
-        out.push(s[start..].trim().to_string());
-    }
-    out
 }
 
 struct Imported {
@@ -922,20 +875,6 @@ mod tests {
             ids.windows(2).all(|w| w[0] < w[1]),
             "sections out of order: {ids:?}"
         );
-    }
-
-    #[test]
-    fn the_boundary_widens_what_wasm_does_not_have() {
-        assert_eq!(abi("i1"), Some(ValType::I32));
-        assert_eq!(abi("i8"), Some(ValType::I32));
-        assert_eq!(abi("i16"), Some(ValType::I32));
-        assert_eq!(abi("i32"), Some(ValType::I32));
-        assert_eq!(abi("ptr"), Some(ValType::I32));
-        assert_eq!(abi("i64"), Some(ValType::I64));
-        assert_eq!(abi("double"), Some(ValType::F64));
-        assert_eq!(abi("float"), Some(ValType::F32));
-        assert_eq!(abi("void"), None);
-        assert_eq!(abi("{ ptr, i64, i64 }"), Some(ValType::I32));
     }
 
     #[test]

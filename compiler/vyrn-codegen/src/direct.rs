@@ -36,10 +36,9 @@ use vyrn_frontend::types as ftypes;
 use vyrn_frontend::types::INT32;
 use vyrn_lower::core::Spec;
 
-use crate::layout::{self, Layout};
-use crate::llt_of;
+use crate::layout::{self, Layout, Shape};
 use crate::wasm::{
-    self, BlockType, Frame, Instruction, MemArg, Module, ValType, HEAP_BASE, MEMORY_COPY,
+    self, mem_arg, BlockType, Frame, Instruction, MemArg, Module, ValType, HEAP_BASE, MEMORY_COPY,
 };
 
 /// Refuses a construct this backend cannot lower, naming it and its line. One message shape for
@@ -121,9 +120,8 @@ struct Gen {
 
 fn gen_imports(m: &mut Module) -> Gen {
     let mut at: HashMap<&str, u32> = HashMap::new();
-    for (decl, name) in crate::CODE_IMPORTS {
-        let (params, results) = wasm::declare_sig(decl);
-        at.insert(name, m.import("vyrn_gen", name, &params, &results));
+    for (name, params, results) in crate::CODE_IMPORTS {
+        at.insert(name, m.import("vyrn_gen", name, params, results));
     }
     // Every field named, so a name that stops being in the list is a panic here
     // rather than an import nothing satisfies.
@@ -153,7 +151,7 @@ struct Ext {
     ret: Type,
 }
 
-/// The wasm signature one `extern fn` crosses as, read off [`crate::extern_abi_ll`] so the ABI is
+/// The wasm signature one `extern fn` crosses as, read off [`crate::extern_abi`] so the ABI is
 /// stated once.
 ///
 /// A `String` crosses as a `(ptr, len)` pair. An export's `String` parameter is one pointer
@@ -165,15 +163,10 @@ fn extern_abi_sig(f: &Function) -> (Vec<ValType>, Vec<ValType>) {
             params.push(ValType::I32);
             params.push(ValType::I64);
         } else {
-            params.extend(wasm::abi(crate::extern_abi_ll(&p.ty)));
+            params.extend(crate::extern_abi(&p.ty));
         }
     }
-    (
-        params,
-        wasm::abi(crate::extern_abi_ll(&f.ret))
-            .into_iter()
-            .collect(),
-    )
+    (params, crate::extern_abi(&f.ret).into_iter().collect())
 }
 
 /// Compiles a whole program to a self-contained `wasm32-wasi` module.
@@ -1009,8 +1002,8 @@ struct Cx<'a> {
     /// the literal's own body instead of a clone. A hit is the program's node, since the program
     /// outlives every walk. A miss is a literal in a leaked desugar, and the caller clones it.
     lambdas: HashMap<NodeId, (&'a str, &'a Expr)>,
-    /// Every layout, parsed once, keyed by `llt_of`'s string: a layout is a function of it alone.
-    layouts: RefCell<HashMap<String, Rc<Layout>>>,
+    /// Every layout, computed once per substituted type.
+    layouts: RefCell<HashMap<Type, Rc<Layout>>>,
     /// The check oracle's host imports and its row labels, under
     /// [`vyrn_lower::check::Mode::Count`]; `None` in every other build.
     oracle: Option<Oracle>,
@@ -1096,8 +1089,8 @@ impl<'a> Cx<'a> {
 
     /// Substitutes the monomorphization this lowering is inside.
     ///
-    /// Every type query on this `Cx` goes through it, so a `Type::Param` never reaches `llt_of`,
-    /// which lowers it to `void` without an error. It substitutes into the type expression before
+    /// Every type query on this `Cx` goes through it, so a `Type::Param` never reaches `shape_of`,
+    /// which lowers it to `Void` without an error. It substitutes into the type expression before
     /// any `App` expands, so `Box<T>` and `fn f<T>` both spelling `T` cannot be confused.
     fn sub(&self, ty: &Type) -> Type {
         if self.subst.is_empty() {
@@ -1107,24 +1100,22 @@ impl<'a> Cx<'a> {
         }
     }
 
-    /// The LLVM shape of `ty`, from `llt_of`, so layout and lowering cannot drift apart.
-    fn ll(&self, ty: &Type) -> String {
-        llt_of(&self.sub(ty), &self.types)
+    /// The machine shape of `ty`.
+    fn shape(&self, ty: &Type) -> Shape {
+        crate::shape_of(&self.sub(ty), &self.types)
     }
 
+    /// The layout of `ty`, or the refusal of a shape past 4 GB.
     fn layout(&self, ty: &Type, line: usize) -> Result<Rc<Layout>, String> {
-        self.layout_ll(self.ll(ty), line)
-    }
-
-    /// The layout of the LLVM shape `ll`, or the refusal of a shape past 4 GB.
-    fn layout_ll(&self, ll: String, line: usize) -> Result<Rc<Layout>, String> {
-        if let Some(l) = self.layouts.borrow().get(&ll) {
+        let ty = self.sub(ty);
+        if let Some(l) = self.layouts.borrow().get(&ty) {
             return Ok(l.clone());
         }
-        let l = layout::of_ll(&ll)
-            .map_err(|e| format!("direct backend: layout of {ll} at line {line}: {e}"))?;
+        let l = crate::shape_of(&ty, &self.types)
+            .layout()
+            .map_err(|e| format!("direct backend: layout of `{ty}` at line {line}: {e}"))?;
         let l = Rc::new(l);
-        self.layouts.borrow_mut().insert(ll, l.clone());
+        self.layouts.borrow_mut().insert(ty, l.clone());
         Ok(l)
     }
 
@@ -1149,15 +1140,27 @@ impl<'a> Cx<'a> {
         crate::sum_variants_of(&self.sub(ty), &self.types)
     }
 
-    /// The load of a scalar `ty` at `off` bytes. It sign-extends as `ty` does, because `llt_of`
-    /// prints `i8` for both `Int8` and `UInt8`.
+    /// The leaf of a scalar `ty`.
+    ///
+    /// # Panics
+    ///
+    /// If `ty` is no scalar. Every caller holds a [`Repr::Scalar`] for `ty`.
+    fn leaf(&self, ty: &Type) -> layout::Leaf {
+        match self.shape(ty) {
+            Shape::Leaf(l) => l,
+            s => panic!("a load or store of `{ty}`, whose shape {s:?} is no scalar"),
+        }
+    }
+
+    /// The load of a scalar `ty` at `off` bytes. It sign-extends as `ty` does, because `Int8`
+    /// and `UInt8` share the leaf `I8`.
     fn load(&self, ty: &Type, off: u32) -> Instruction<'static> {
         let signed = Num::of(&self.resolve(ty)).is_some_and(|n| n.signed);
-        load_of(&self.ll(ty), off, signed)
+        self.leaf(ty).load(off, signed)
     }
 
     fn store(&self, ty: &Type) -> Instruction<'static> {
-        store_of(&self.ll(ty))
+        self.leaf(ty).store()
     }
 
     /// Returns the signature of a body discovered during emission, reserving its function index
@@ -1283,11 +1286,10 @@ impl<'a> Cx<'a> {
         if let Some(why) = self.ty_gap(ty, 0) {
             return unsupported(&why, line);
         }
-        let ll = self.ll(ty);
-        Ok(match wasm::abi(&ll) {
-            _ if ll.starts_with('{') || ll.starts_with('[') => Repr::Agg(self.layout_ll(ll, line)?),
-            Some(v) => Repr::Scalar(v),
-            None => Repr::Unit,
+        Ok(match self.shape(ty) {
+            Shape::Void => Repr::Unit,
+            Shape::Leaf(l) => Repr::Scalar(l.val_type()),
+            Shape::Struct(_) | Shape::Array(..) => Repr::Agg(self.layout(ty, line)?),
         })
     }
 
@@ -1304,7 +1306,7 @@ impl<'a> Cx<'a> {
         let ty = &self.sub(ty);
         match ty {
             // Unreachable for a well-typed program, because [`Cx::sub`] runs first. Kept as a
-            // refusal because `llt_of` prints `void` for a parameter, and `void` is no diagnostic.
+            // refusal because `shape_of` gives `Void` for a parameter, and `Void` is no diagnostic.
             Type::Param(p) => return Some(format!("the unsolved type parameter `{p}`")),
             Type::Named(n) | Type::App(n, _) => match self.types.get(n) {
                 Some(_) => {}
@@ -1955,7 +1957,7 @@ fn lower_body(
     // prologue copies it into a slot of its own, and a `modify` parameter is copy-in/copy-out:
     // copied in here and back out at the epilogue, so the caller sees no write before the call
     // returns.
-    let mut copy_out: Vec<(u32, Place, Repr, Instruction<'static>)> = Vec::new();
+    let mut copy_out: Vec<(u32, Place, Repr, Type)> = Vec::new();
     for (i, p) in f.params.iter().enumerate() {
         let local = shift + i as u32;
         // The declared type, for the same reason as `ret_ty`.
@@ -1982,7 +1984,7 @@ fn lower_body(
                 }
                 Repr::Unit => return unsupported("a `modify` parameter of Unit", f.line),
             };
-            copy_out.push((local, place, r.clone(), cx.store(&p.ty)));
+            copy_out.push((local, place, r.clone(), p.ty.clone()));
             place
         } else {
             match &r {
@@ -2085,12 +2087,12 @@ fn lower_body(
 
     // The `modify` copy-out, once, at the one exit. Stack-neutral, so a scalar result on the
     // stack survives it.
-    for (arg, place, r, store) in &copy_out {
+    for (arg, place, r, ty) in &copy_out {
         match (place, r) {
             (Place::Local(own), _) => {
                 b.ins(&Instruction::LocalGet(*arg));
                 b.ins(&Instruction::LocalGet(*own));
-                b.ins(store);
+                b.ins(&cx.store(ty));
             }
             (Place::Slot(off), Repr::Agg(l)) => {
                 b.ins(&Instruction::LocalGet(*arg));
@@ -3609,7 +3611,7 @@ impl<'p> Fn_<'_, 'p> {
             crate::Rung::FnRetag => Ok(()),
             // Only a pair whose elements share a shape lowers here.
             crate::Rung::Elementwise => {
-                if self.cx.ll(from) == self.cx.ll(to) {
+                if self.cx.shape(from) == self.cx.shape(to) {
                     return Ok(());
                 }
                 unsupported(
@@ -3655,7 +3657,7 @@ impl<'p> Fn_<'_, 'p> {
                         .iter()
                         .position(|g| g.name == f.name)
                         .ok_or_else(|| gap(&format!("the field `{}`", f.name), line))?;
-                    if self.cx.ll(&ff[j].ty) != self.cx.ll(&f.ty) {
+                    if self.cx.shape(&ff[j].ty) != self.cx.shape(&f.ty) {
                         return unsupported(
                             "a record conversion that changes a field's shape",
                             line,
@@ -4722,7 +4724,7 @@ impl<'p> Fn_<'_, 'p> {
     ) -> Option<(Dest, bool)> {
         let l = sig.ret.agg()?;
         let (d, used) = match hint {
-            Some((d, t)) if self.cx.ll(&t) == self.cx.ll(&sig.ret_ty) => (d, true),
+            Some((d, t)) if self.cx.shape(&t) == self.cx.shape(&sig.ret_ty) => (d, true),
             _ => (Dest::Slot(b.alloc(l.size, l.align)), false),
         };
         if sig.in_place.is_none() {
@@ -5044,15 +5046,10 @@ impl<'p> Fn_<'_, 'p> {
 
     /// Lays out a capture block: the captures packed by value, in order.
     fn cap_block(&self, cap_tys: &[Type]) -> Result<Rc<Layout>, String> {
-        let ll = format!(
-            "{{ {} }}",
-            cap_tys
-                .iter()
-                .map(|t| self.cx.ll(t))
-                .collect::<Vec<_>>()
-                .join(", ")
-        );
-        self.cx.layout_ll(ll, 0)
+        Shape::Struct(cap_tys.iter().map(|t| self.cx.shape(t)).collect())
+            .layout()
+            .map(Rc::new)
+            .map_err(|e| format!("direct backend: layout of a capture block: {e}"))
     }
 
     /// Writes a stored function value's tag and payload into `dest`.
@@ -5263,7 +5260,7 @@ struct Walk {
 }
 
 impl<'p> Fn_<'_, 'p> {
-    /// `of_ll` rounds a size up to its alignment, so a size is a stride.
+    /// A layout's size is rounded up to its alignment, so it is a stride.
     fn stride(&self, elem: &Type, line: usize) -> Result<u32, String> {
         Ok(self.cx.layout(elem, line)?.size)
     }
@@ -5552,7 +5549,6 @@ impl<'p> Fn_<'_, 'p> {
             b.copy(16);
             return Ok(());
         }
-        let load = self.cx.load(t, 0);
         let push = |b: &mut Frame| -> Result<(), String> {
             match place {
                 Place::Local(l) => b.ins(&Instruction::LocalGet(l)),
@@ -5560,7 +5556,7 @@ impl<'p> Fn_<'_, 'p> {
                     place
                         .addr(b, 0)
                         .ok_or_else(|| gap("a payload with no address", line))?;
-                    b.ins(&load)
+                    b.ins(&self.cx.load(t, 0))
                 }
             };
             Ok(())
@@ -7083,8 +7079,8 @@ impl<'p> Fn_<'_, 'p> {
             // fails validation. It boxes.
             Repr::Scalar(ValType::V128) => Word::Boxed,
             Repr::Scalar(v) => Word::Ext(v),
-            // Test `words(t) == 2`, not the shape string: a one-slot sum also prints
-            // `{ i64, i64 }`, and a nested sum rides in one boxed slot.
+            // Test `words(t) == 2`, not the shape: a one-slot sum is also two `I64`s,
+            // and a nested sum rides in one boxed slot.
             Repr::Agg(_) if self.cx.words(t) == 2 => Word::Inline2,
             _ => Word::Boxed,
         })
@@ -7149,7 +7145,7 @@ impl<'p> Fn_<'_, 'p> {
         };
         // Build into the consumer's storage when it holds this same type.
         let (dest, used) = match hint {
-            Some((d, t)) if self.cx.ll(&t) == self.cx.ll(ty) => (d, true),
+            Some((d, t)) if self.cx.shape(&t) == self.cx.shape(ty) => (d, true),
             _ => (Dest::Slot(b.alloc(l.size, l.align)), false),
         };
         dest.addr(b, 0);
@@ -8767,15 +8763,6 @@ fn word_at(off: u32) -> MemArg {
     mem_arg(off, 2)
 }
 
-/// An access at a static offset whose alignment hint is `2^align` bytes.
-fn mem_arg(off: u32, align: u32) -> MemArg {
-    MemArg {
-        offset: off as u64,
-        align,
-        memory_index: 0,
-    }
-}
-
 /// A Vyrn integer type: a width, a signedness, and the wasm carrier both imply.
 ///
 /// wasm has only `i32` and `i64` arithmetic, so an `Int8` rides an `i32`. The invariant: a value
@@ -8924,28 +8911,6 @@ fn cmp_i32(op: BinOp) -> Option<Instruction<'static>> {
     )
 }
 
-/// The load for a scalar of LLVM shape `ll` at a static offset, at its natural alignment.
-///
-/// `llt` prints `i8` for both `Int8` and `UInt8`, so `signed` carries [`Num`]'s invariant across
-/// the load. It is ignored where the carrier is the width, and for a `Bool` (a byte of 0 or 1).
-fn load_of(ll: &str, off: u32, signed: bool) -> Instruction<'static> {
-    let m = |align| mem_arg(off, align);
-    match ll {
-        "i64" => Instruction::I64Load(m(3)),
-        "double" => Instruction::F64Load(m(3)),
-        "float" => Instruction::F32Load(m(2)),
-        "i32" | "ptr" => Instruction::I32Load(m(2)),
-        "i16" if signed => Instruction::I32Load16S(m(1)),
-        "i16" => Instruction::I32Load16U(m(1)),
-        "i8" if signed => Instruction::I32Load8S(m(0)),
-        // The four vector spellings share one `v128`: the lane interpretation belongs to
-        // the instruction. `align: 0` understates on purpose, as `@f32x4Load` does: the frame is
-        // only 8-aligned, and an overstated hint is a lie the engine may act on.
-        "<4 x float>" | "<4 x i32>" | "<2 x double>" | "<2 x i64>" => Instruction::V128Load(m(0)),
-        _ => Instruction::I32Load8U(m(0)),
-    }
-}
-
 vyrn_frontend::body_scope_descent!(HoistVisit, hoist_block, hoist_stmt, hoist_expr);
 
 /// The hoist's visitor: hands each node to `fe` or `fs` and stops at a lambda. It ignores scope.
@@ -8975,20 +8940,6 @@ fn each_block(blk: &Block, fe: &mut dyn FnMut(&Expr), fs: &mut dyn FnMut(&Stmt))
         &mut std::collections::HashSet::new(),
         &mut Hoist { fe, fs },
     );
-}
-
-fn store_of(ll: &str) -> Instruction<'static> {
-    let m = |align| mem_arg(0, align);
-    match ll {
-        "i64" => Instruction::I64Store(m(3)),
-        "double" => Instruction::F64Store(m(3)),
-        "float" => Instruction::F32Store(m(2)),
-        "i32" | "ptr" => Instruction::I32Store(m(2)),
-        "i16" => Instruction::I32Store16(m(1)),
-        // See [`load_of`] for the collapse and for the understated hint.
-        "<4 x float>" | "<4 x i32>" | "<2 x double>" | "<2 x i64>" => Instruction::V128Store(m(0)),
-        _ => Instruction::I32Store8(m(0)),
-    }
 }
 
 /// A scalar spilled for a `modify` call: its slot, its local and its load ([`Fn_::spill`]).
@@ -12016,7 +11967,7 @@ impl<'p> Fn_<'_, 'p> {
             let nt = &body.names[n.index()].ty;
             matches!(self.cx.repr(nt, 0), Ok(Repr::Agg(_)))
                 && self.core_unchecked(nt, t)
-                && self.cx.ll(nt) == self.cx.ll(t)
+                && self.cx.shape(nt) == self.cx.shape(t)
         })
     }
 
@@ -14283,25 +14234,32 @@ mod tests {
         );
     }
 
-    /// `Cx::ll` prints `void` for an escaped type parameter, which would shrink a function
+    /// `shape_of` gives `Void` for an escaped type parameter, which would shrink a function
     /// silently. Every type goes through [`Cx::sub`] first; this asserts the refusal outside an
     /// instance and the substitution inside one.
     #[test]
     fn a_type_parameter_is_substituted_before_it_can_reach_a_layout() {
         let t = Type::Param("T".into());
         let mut c = cx();
-        // Outside a monomorphization: refused, and `ll` gives `void`.
+        // Outside a monomorphization: refused, and the shape is `Void`.
         assert!(c.repr(&t, 0).is_err());
-        assert_eq!(c.ll(&t), "void");
+        assert_eq!(c.shape(&t), Shape::Void);
         // Inside one: the type the instantiation fixed, at every entry point.
         c.subst.insert("T".into(), Type::Int);
         assert_eq!(c.repr(&t, 0).unwrap(), Repr::Scalar(ValType::I64));
-        assert_eq!(c.ll(&t), "i64");
+        let i64 = Shape::Leaf(layout::Leaf::I64);
+        assert_eq!(c.shape(&t), i64);
         assert_eq!(c.resolve(&t), Type::Int);
         assert!(c.ty_gap(&t, 0).is_none());
         // Through a constructor too: the element stride depends on `T`.
-        assert_eq!(c.ll(&Type::ArrayN(Box::new(t.clone()), 3)), "[3 x i64]");
-        assert_eq!(c.ll(&Type::option(t)), "{ i64, i64 }");
+        assert_eq!(
+            c.shape(&Type::ArrayN(Box::new(t.clone()), 3)),
+            Shape::Array(3, Box::new(i64.clone()))
+        );
+        assert_eq!(
+            c.shape(&Type::option(t)),
+            Shape::Struct(vec![i64.clone(), i64])
+        );
     }
 
     /// A validated type has its base's representation, so a lowering that forgets the check

@@ -11,9 +11,9 @@
 //! rather than a silent pass.
 
 use std::path::{Path, PathBuf};
-use vyrn_codegen::layout::of_ll;
+use vyrn_codegen::layout::{Leaf, Shape};
 use vyrn_codegen::toolchain::require_tools;
-use vyrn_codegen::wasm::{abi, Instruction, MemArg, Module, ValType};
+use vyrn_codegen::wasm::{Instruction, MemArg, Module, ValType};
 
 fn find_wasmtime() -> Option<PathBuf> {
     require_tools(
@@ -49,7 +49,7 @@ fn import_fd_write(m: &mut Module) -> u32 {
         "wasi_snapshot_preview1",
         "fd_write",
         &[ValType::I32; 4],
-        &[abi("i32").unwrap()],
+        &[ValType::I32],
     )
 }
 
@@ -134,14 +134,16 @@ fn a_frame_and_a_data_segment_and_an_imported_call() {
     );
 }
 
-/// One function writes `{ ptr, i64, i64 }` at the offsets [`of_ll`] computed and
+/// One function writes `{ ptr, i64, i64 }` at the offsets [`Shape::layout`] computed and
 /// another reads it back, with the raw bytes on stdout. A disagreement on an
 /// offset, a silent miscompile otherwise, shows as wrong values. The 4-byte hole
 /// after the pointer (24 bytes, not 20, as clang lays it out) must stay zero.
 #[test]
 #[ignore = "needs wasmtime: `cargo test -p vyrn-codegen -- --ignored` (CI's parity job)"]
 fn a_struct_round_trips_through_the_shadow_stack_at_the_computed_offsets() {
-    let l = of_ll("{ ptr, i64, i64 }").unwrap();
+    let l = Shape::Struct([Leaf::Ptr, Leaf::I64, Leaf::I64].map(Shape::Leaf).to_vec())
+        .layout()
+        .unwrap();
     assert_eq!((l.size, &l.fields[..]), (24, &[0, 8, 16][..]));
     let (p, a, c) = (
         0x1111_1111u32,

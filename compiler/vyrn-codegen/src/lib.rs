@@ -1,5 +1,5 @@
 //! The wasm emitter ([`direct`]) and the helpers and constants it shares with
-//! the rest of the compiler: `llt_of`, the type-to-shape match that [`layout`]
+//! the rest of the compiler: `shape_of`, the type-to-shape match that [`layout`]
 //! measures; [`coerce_plan`], the boundary coercion ladder; generic type-argument
 //! solving; the instantiation limits; the generator-host imports and constants;
 //! and the [`observe`] hooks a gate reads.
@@ -13,6 +13,8 @@ use std::collections::HashMap;
 
 use vyrn_frontend::ast::*;
 use vyrn_frontend::types::solve_param;
+
+use layout::{Leaf, Shape};
 
 /// Returns the index of the arm that tests a tag, and the tag, when a switch has
 /// the `if let` shape: two arms, one testing a tag and one the default. Such a
@@ -34,24 +36,19 @@ pub use vyrn_frontend::trap::{io as io_message, IO as IO_MESSAGES};
 /// at each use site, not to a host import.
 pub use vyrn_frontend::trap::host_boundary_extern;
 
-/// The extern ABI value type of one primitive: `Int64` is `i64`,
-/// sized ints up to 32 bits widen to `i32`, `Bool` is `i32`, floats stay
-/// `double`/`float`, a returned `String` is a bare `ptr`, and `Unit` has no
-/// result. A `String` parameter crosses as a `(ptr, len)` pair and is handled
-/// apart. The wasm emitter maps the answer through [`wasm::abi`]; the ABI has
-/// no second table.
-pub(crate) fn extern_abi_ll(ty: &Type) -> &'static str {
-    match ty {
-        Type::Int => "i64",
-        Type::IntN { bits: 64, .. } => "i64",
-        Type::IntN { .. } => "i32",
-        Type::Float => "double",
-        Type::Float32 => "float",
-        Type::Bool => "i32",
-        Type::Str => "ptr",
-        Type::Unit => "void",
-        // Unreachable: the checker restricts the extern signature domain.
-        _ => "i64",
+/// The wasm type one `extern` parameter or result crosses as: its leaf's
+/// [`layout::Leaf::val_type`], or `None` for `Unit`. A `String` parameter
+/// crosses as a `(ptr, len)` pair and is handled apart.
+///
+/// # Panics
+///
+/// On an aggregate: the checker's `extern_abi_type_ok` admits the scalars,
+/// `String` and `Unit` only.
+pub(crate) fn extern_abi(ty: &Type) -> Option<wasm::ValType> {
+    match shape_of(ty, &HashMap::new()) {
+        Shape::Void => None,
+        Shape::Leaf(l) => Some(l.val_type()),
+        s => unreachable!("the checker admits no `extern` of the shape {s:?}"),
     }
 }
 
@@ -342,34 +339,37 @@ pub(crate) fn wasi_snake(camel: &str) -> String {
         .collect()
 }
 
-/// Every `vyrn_gen` import a generator module makes: a signature in LLVM's
-/// spelling and its import name. [`wasm::declare_sig`] turns each into a wasm
-/// signature through [`wasm::abi`], so `i1`, `i8` and `ptr` widen in one place.
+/// Every `vyrn_gen` import a generator module makes, with its wasm signature,
+/// in import order. An `I32` argument is a guest address except `splice`'s
+/// first, its tag, and `read`'s second, its mode.
 ///
 /// The host side of each is the interpreter's own code (the piece arena,
 /// `render_code`, the splice table, the lexer, the linker), so escaping,
 /// identifier validation and float formatting match by construction.
-pub(crate) const CODE_IMPORTS: &[(&str, &str)] = &[
-    ("i64 @__vyrn_code_text(ptr)", "text"),
-    ("i64 @__vyrn_code_splice(i32, i64, ptr, i64)", "splice"),
-    ("i64 @__vyrn_code_raw_at(ptr, ptr, i64, i64)", "rawAt"),
-    ("i64 @__vyrn_code_concat(i64, i64)", "concat"),
-    ("i64 @__vyrn_code_render(i64)", "render"),
-    // `render` answers with a length and the guest allocates, then `fetch`
-    // copies: the host must not allocate inside guest memory.
-    ("void @__vyrn_gen_fetch(ptr)", "fetch"),
-    // `reflect` asks the host for a value of a named type (`lex`,
-    // `moduleInterface`, `contractOf`) as a flat atom stream; `nextInt` and
-    // `nextStr` pull the atoms in the order the decoder walks the type.
-    // `nextStr` answers with a length, as `render` does.
-    ("void @__vyrn_gen_reflect(i64, ptr)", "reflect"),
-    ("i64 @__vyrn_gen_next_int()", "nextInt"),
-    ("i64 @__vyrn_gen_next_str()", "nextStr"),
-    // The mediated read that serves `readFile`, `readFileBytes` and `listDir`.
-    ("i64 @__vyrn_gen_read(ptr, i32)", "read"),
-];
+pub(crate) const CODE_IMPORTS: &[(&str, &[wasm::ValType], &[wasm::ValType])] = {
+    use wasm::ValType::{I32, I64};
+    &[
+        ("text", &[I32], &[I64]),
+        ("splice", &[I32, I64, I32, I64], &[I64]),
+        ("rawAt", &[I32, I32, I64, I64], &[I64]),
+        ("concat", &[I64, I64], &[I64]),
+        ("render", &[I64], &[I64]),
+        // `render` answers with a length and the guest allocates, then `fetch`
+        // copies: the host must not allocate inside guest memory.
+        ("fetch", &[I32], &[]),
+        // `reflect` asks the host for a value of a named type (`lex`,
+        // `moduleInterface`, `contractOf`) as a flat atom stream; `nextInt` and
+        // `nextStr` pull the atoms in the order the decoder walks the type.
+        // `nextStr` answers with a length, as `render` does.
+        ("reflect", &[I64, I32], &[]),
+        ("nextInt", &[], &[I64]),
+        ("nextStr", &[], &[I64]),
+        // The mediated read that serves `readFile`, `readFileBytes` and `listDir`.
+        ("read", &[I32, I32], &[I64]),
+    ]
+};
 
-/// `@__vyrn_gen_reflect`'s kinds: which builtin the host answers. The argument
+/// The `reflect` import's kinds: which builtin the host answers. The argument
 /// is the module path, the contract name, or the source to lex.
 pub const REFLECT_MODULE_INTERFACE: i64 = 0;
 pub const REFLECT_CONTRACT_OF: i64 = 1;
@@ -383,7 +383,7 @@ pub use vyrn_frontend::checker::{GEN_ENTRY_LEX, GEN_ENTRY_MODULE_INTERFACE, GEN_
 /// `vyrn-genwasm` writes the decoders.
 pub use vyrn_frontend::checker::{GEN_NEXT_INT, GEN_NEXT_STR, GEN_REFLECT};
 
-/// `@__vyrn_code_splice`'s value tags: which interpreter `Val` the host rebuilds
+/// The `splice` import's value tags: which interpreter `Val` the host rebuilds
 /// from the word. Exactly the set `gen::gen_code_splice` accepts; `pub` so the
 /// host reads this numbering.
 pub const TAG_STR: i32 = 0;
@@ -746,8 +746,10 @@ pub(crate) fn plan_disagrees(from: &Type, to: &Type, rung: Rung) -> String {
 ///
 /// The interpreter's `coerce` has no `from`, so it is not held to this plan.
 /// The middle rungs' guards are disjoint except for an integer pair that shares
-/// one LLVM shape (`i8` for `Int8` and `UInt8`), which is why the resize comes
-/// before [`Rung::Identity`].
+/// one leaf (`I8` for `Int8` and `UInt8`), which is why the resize comes before
+/// [`Rung::Identity`]. Equal shapes are one representation, so the rungs that
+/// move bytes unchanged test shape equality. The five SIMD types share `V128`:
+/// the checker, not this plan, keeps an `F32x4` out of an `F64x2`.
 pub fn coerce_plan(from: &Type, to: &Type, types: &HashMap<String, TypeDecl>) -> Rung {
     let (rf, rt) = (
         vyrn_frontend::types::resolve(from, types),
@@ -777,18 +779,18 @@ pub fn coerce_plan(from: &Type, to: &Type, types: &HashMap<String, TypeDecl>) ->
             return Rung::Elementwise
         }
         (Type::ArrayN(fi, _), Type::Array(ti))
-            if fi == ti || llt_of(fi, types) == llt_of(ti, types) =>
+            if fi == ti || shape_of(fi, types) == shape_of(ti, types) =>
         {
             return Rung::Heapify
         }
         (Type::ArrayN(fi, len), Type::SmallArray(ti, n))
-            if llt_of(fi, types) == llt_of(ti, types) && len <= n =>
+            if shape_of(fi, types) == shape_of(ti, types) && len <= n =>
         {
             return Rung::Inline
         }
         _ => {}
     }
-    if llt_of(from, types) == llt_of(to, types) {
+    if shape_of(from, types) == shape_of(to, types) {
         return Rung::Identity;
     }
     // Two shapes of one sum. The variant names decide, so a generic enum at two
@@ -807,31 +809,40 @@ pub fn coerce_plan(from: &Type, to: &Type, types: &HashMap<String, TypeDecl>) ->
     }
 }
 
-/// The shape of a Vyrn type, in LLVM's spelling: the one match from a type to a
-/// memory layout. [`layout::of_ll`] parses what this prints, so size and offset
-/// arithmetic follow lowering. `ty` is resolved here but not substituted; a
-/// caller inside a monomorphized body substitutes first.
-pub(crate) fn llt_of(ty: &Type, types: &HashMap<String, TypeDecl>) -> String {
+/// A payload's word count, stated in [`vyrn_frontend::types`] because `own`
+/// asks the same question of the same types.
+pub(crate) use vyrn_frontend::types::payload_words as payload_words_of;
+
+/// The shape of a Vyrn type: the one match from a type to a memory layout.
+/// `ty` is resolved here but not substituted; a caller inside a monomorphized
+/// body substitutes first.
+pub(crate) fn shape_of(ty: &Type, types: &HashMap<String, TypeDecl>) -> Shape {
+    let leaf = Shape::Leaf;
+    let words = |n: usize| vec![leaf(Leaf::I64); n];
+    let st = Shape::Struct;
     match vyrn_frontend::types::resolve(ty, types) {
-        Type::Int => "i64".into(),
-        Type::IntN { bits, .. } => format!("i{bits}"),
-        Type::Float => "double".into(),
-        Type::Float32 => "float".into(),
-        // The wasm emitter reads the vector spellings back to reach `v128`.
-        Type::F32x4 => "<4 x float>".into(),
+        Type::Int => leaf(Leaf::I64),
+        Type::IntN { bits, .. } => leaf(match bits {
+            8 => Leaf::I8,
+            16 => Leaf::I16,
+            32 => Leaf::I32,
+            64 => Leaf::I64,
+            _ => unreachable!("the frontend builds `IntN` at 8, 16, 32 and 64 bits only"),
+        }),
+        Type::Float => leaf(Leaf::F64),
+        Type::Float32 => leaf(Leaf::F32),
         // `I32x4` and `Mask32x4` share one representation, so an `I32x4`
         // comparison yields a `Mask32x4` with no conversion.
-        Type::I32x4 => "<4 x i32>".into(),
-        // A mask is all-ones or all-zeros at the lane width, not `<N x i1>`.
-        Type::Mask32x4 => "<4 x i32>".into(),
-        Type::F64x2 => "<2 x double>".into(),
-        Type::Mask64x2 => "<2 x i64>".into(),
-        Type::Bool => "i1".into(),
-        Type::Str => "ptr".into(),
+        Type::F32x4 | Type::I32x4 | Type::Mask32x4 | Type::F64x2 | Type::Mask64x2 => {
+            leaf(Leaf::V128)
+        }
+        Type::Bool => leaf(Leaf::I1),
+        // A logger handle is a pointer to its name string.
+        Type::Str | Type::Logger => leaf(Leaf::Ptr),
         // `Never` carries no value, so it lowers like `Unit`.
-        Type::Unit | Type::Never => "void".into(),
+        Type::Unit | Type::Never => Shape::Void,
         // `{ ptr data, i64 len, i64 cap }`.
-        Type::Array(_) => "{ ptr, i64, i64 }".into(),
+        Type::Array(_) => st(vec![leaf(Leaf::Ptr), leaf(Leaf::I64), leaf(Leaf::I64)]),
         // `{ ptr data, i64 len, i64 tag, i64 pay, i64 cur, i64 gen }`. A
         // negative `tag` is a buffer: `data`/`len` are the array and `cur` the
         // read position. Otherwise it is a step: `tag`/`pay` are a `fn` value,
@@ -839,66 +850,53 @@ pub(crate) fn llt_of(ty: &Type, types: &HashMap<String, TypeDecl>) -> String {
         // the step answers `None`, and `data` is null. The pairs sit 8-aligned so
         // `&s + 16` and `&s + 32` are those values. Nothing reads a field whose
         // variant it has not tested.
-        Type::Stream(_) => "{ ptr, i64, i64, i64, i64, i64 }".into(),
+        Type::Stream(_) => st([vec![leaf(Leaf::Ptr)], words(5)].concat()),
         // `{ ptr keys, ptr values, i64 len, i64 cap, ptr idx }`: two parallel
         // buffers sharing one length and capacity; `idx` is `cap * 2` `i64` hash
         // buckets.
-        Type::Map(..) => "{ ptr, ptr, i64, i64, ptr }".into(),
-        Type::ArrayN(inner, n) => format!("[{n} x {}]", llt_of(&inner, types)),
+        Type::Map(..) => st(vec![
+            leaf(Leaf::Ptr),
+            leaf(Leaf::Ptr),
+            leaf(Leaf::I64),
+            leaf(Leaf::I64),
+            leaf(Leaf::Ptr),
+        ]),
+        Type::ArrayN(inner, n) => Shape::Array(n, Box::new(shape_of(&inner, types))),
         // `{ i64 len, i64 cap, ptr data, [N x T] inline }`: `cap == N` means
         // inline, `cap > N` spilled onto `data`.
-        Type::SmallArray(inner, n) => {
-            format!("{{ i64, i64, ptr, [{n} x {}] }}", llt_of(&inner, types))
-        }
-        // A logger handle is a `ptr` to its name string.
-        Type::Logger => "ptr".into(),
-        Type::Record(fields) => {
-            let inner: Vec<String> = fields.iter().map(|f| llt_of(&f.ty, types)).collect();
-            format!("{{ {} }}", inner.join(", "))
-        }
+        Type::SmallArray(inner, n) => st(vec![
+            leaf(Leaf::I64),
+            leaf(Leaf::I64),
+            leaf(Leaf::Ptr),
+            Shape::Array(n, Box::new(shape_of(&inner, types))),
+        ]),
+        Type::Record(fields) => st(fields.iter().map(|f| shape_of(&f.ty, types)).collect()),
         // `{ i64 tag, i64 slot0, ... }`: one slot per payload word of the widest
         // variant, so a two-word payload rides inline, not in a heap box.
-        Type::Enum(ref vs) => enum_ll(enum_slots_of(vs, types)),
+        Type::Enum(ref vs) => st(words(1 + enum_slots_of(vs, types))),
         // On a generator host, `Code` is an opaque `i64` handle into the host's
         // piece arena: the one `Named` that survives `resolve` undeclared.
-        Type::Named(ref n) if n == "Code" => "i64".into(),
-        // Unreachable after `resolve` (Named/App/transformers/params reduced away).
+        Type::Named(ref n) if n == "Code" => leaf(Leaf::I64),
+        // Unreachable after `resolve` (Named/App/transformers/params reduced
+        // away). A bare integer type argument never stands alone: `SmallArray`
+        // consumes it. `Err` is the checker's recovery sentinel, and a program
+        // with an `Err` has diagnostics and never reaches codegen.
         Type::Named(_)
         | Type::App(..)
         | Type::Omit(..)
         | Type::Pick(..)
         | Type::Merge(..)
         | Type::Partial(..)
-        | Type::Param(_) => "void".into(),
-        // A bare integer type argument never stands alone; `SmallArray` consumes
-        // it before lowering.
-        Type::ConstInt(_) => "void".into(),
-        // A stored function value: `{ i64 tag, i64 payload }`. The tag
-        // selects the named function or lifted lambda; the payload is 0 or a
-        // pointer to the malloc'd capture block.
-        Type::Fn(..) => "{ i64, i64 }".into(),
-        // Unreachable: `resolve` answers `Fn([], T)` for a `lazy T` field.
-        Type::Lazy(_) => "{ i64, i64 }".into(),
-        // The checker's recovery sentinel; a program with an `Err` has
-        // diagnostics and never reaches codegen.
-        Type::Err => "void".into(),
+        | Type::Param(_)
+        | Type::ConstInt(_)
+        | Type::Err => Shape::Void,
+        // A stored function value: `{ i64 tag, i64 payload }`. The tag selects
+        // the named function or lifted lambda; the payload is 0 or a pointer to
+        // the malloc'd capture block. `resolve` answers `Fn([], T)` for a
+        // `lazy T` field, so the `Lazy` arm is unreachable.
+        Type::Fn(..) | Type::Lazy(_) => st(words(2)),
     }
 }
-
-/// The shape of a sum with `slots` payload words: `{ i64 }` for 0,
-/// `{ i64, i64 }` for 1, and so on.
-fn enum_ll(slots: usize) -> String {
-    let mut s = String::from("{ i64");
-    for _ in 0..slots {
-        s.push_str(", i64");
-    }
-    s.push_str(" }");
-    s
-}
-
-/// A payload's word count, stated in [`vyrn_frontend::types`] because `own`
-/// asks the same question of the same types.
-pub(crate) use vyrn_frontend::types::payload_words as payload_words_of;
 
 /// The slots one variant's payloads occupy, laid out consecutively.
 fn variant_slots_of(payload: &[Type], types: &HashMap<String, TypeDecl>) -> usize {
@@ -918,8 +916,10 @@ mod tests {
     use super::*;
     use vyrn_frontend::check;
 
+    /// Written out rather than derived, so a change to `shape_of` or to the
+    /// layout arithmetic has to disagree with numbers a person wrote down.
     #[test]
-    fn llt_prints_the_shapes_the_layout_engine_was_verified_on() {
+    fn each_runtime_shape_has_the_layout_written_down() {
         let types: HashMap<String, TypeDecl> = HashMap::new();
         let rec = |fs: &[Type]| {
             Type::Record(
@@ -932,68 +932,115 @@ mod tests {
                     .collect(),
             )
         };
-        let i8t = Type::IntN {
-            bits: 8,
-            signed: false,
-        };
-        let cases: &[(&str, Type)] = &[
-            ("Int64", Type::Int),
+        let int = |bits, signed| Type::IntN { bits, signed };
+        let u8t = int(8, false);
+        let fn0 = || Type::Fn(Vec::new(), Box::new(Type::Int));
+        let cases: Vec<(Type, u32, u32, &[u32])> = vec![
+            (Type::Int, 8, 8, &[]),
+            (int(32, true), 4, 4, &[]),
+            (int(16, true), 2, 2, &[]),
+            (u8t.clone(), 1, 1, &[]),
+            (Type::Bool, 1, 1, &[]),
+            (Type::Float, 8, 8, &[]),
+            (Type::Float32, 4, 4, &[]),
+            (Type::Str, 4, 4, &[]),
+            (Type::F32x4, 16, 16, &[]),
+            (Type::Unit, 0, 1, &[]),
+            // The built-in sums: an `i64` tag plus one slot per payload word.
+            (Type::option(Type::Int), 16, 8, &[0, 8]),
+            (Type::result(Type::Int, Type::Str), 16, 8, &[0, 8]),
+            (Type::option(fn0()), 24, 8, &[0, 8, 16]),
+            // A 4-byte hole after the data pointer.
+            (Type::Array(Box::new(Type::Str)), 24, 8, &[0, 8, 16]),
             (
-                "Int32",
-                Type::IntN {
-                    bits: 32,
-                    signed: true,
-                },
+                Type::Stream(Box::new(Type::Int)),
+                48,
+                8,
+                &[0, 8, 16, 24, 32, 40],
             ),
+            // The trailing index pointer pads the size to 32, not 28.
             (
-                "Int16",
-                Type::IntN {
-                    bits: 16,
-                    signed: true,
-                },
+                Type::Map(Box::new(Type::Str), Box::new(Type::Int)),
+                32,
+                8,
+                &[0, 4, 8, 16, 24],
             ),
-            ("Int8", i8t.clone()),
-            ("Bool", Type::Bool),
-            ("Float64", Type::Float),
-            ("Float32", Type::Float32),
-            ("String", Type::Str),
-            // The built-in sums print the enum rows: one slot per payload word.
-            ("Enum1", Type::option(Type::Int)),
-            ("Enum1", Type::result(Type::Int, Type::Str)),
+            (fn0(), 16, 8, &[0, 8]),
+            (rec(&[]), 0, 1, &[]),
             (
-                "Enum2",
-                Type::option(Type::Fn(Vec::new(), Box::new(Type::Int))),
+                rec(&[Type::Bool, Type::Str, Type::Int, u8t.clone(), Type::Float]),
+                32,
+                8,
+                &[0, 4, 8, 16, 24],
             ),
-            ("Array", Type::Array(Box::new(Type::Str))),
-            ("Map", Type::Map(Box::new(Type::Str), Box::new(Type::Int))),
-            ("Fn", Type::Fn(Vec::new(), Box::new(Type::Int))),
-            ("RecordEmpty", rec(&[])),
+            // A vector's 16-alignment moves it to offset 16 and the size to 32.
+            (rec(&[u8t.clone(), Type::F64x2]), 32, 16, &[0, 16]),
+            (Type::ArrayN(Box::new(Type::I32x4), 3), 48, 16, &[]),
+            (Type::ArrayN(Box::new(Type::Int), 4), 32, 8, &[]),
+            (Type::ArrayN(Box::new(u8t.clone()), 3), 3, 1, &[]),
             (
-                "RecordMixed",
-                rec(&[Type::Bool, Type::Str, Type::Int, i8t.clone(), Type::Float]),
+                Type::SmallArray(Box::new(Type::Int), 4),
+                56,
+                8,
+                &[0, 8, 16, 24],
             ),
-            ("ArrayN_i64", Type::ArrayN(Box::new(Type::Int), 4)),
-            ("ArrayN_i8", Type::ArrayN(Box::new(i8t.clone()), 3)),
-            ("SmallArray_i64", Type::SmallArray(Box::new(Type::Int), 4)),
-            ("SmallArray_i8", Type::SmallArray(Box::new(i8t), 3)),
-            ("SmallArray_str", Type::SmallArray(Box::new(Type::Str), 2)),
+            // The inline buffer ends at 23, and the tail pads to 24.
+            (Type::SmallArray(Box::new(u8t), 3), 24, 8, &[0, 8, 16, 20]),
+            (
+                Type::SmallArray(Box::new(Type::Str), 2),
+                32,
+                8,
+                &[0, 8, 16, 20],
+            ),
         ];
-        for (name, ty) in cases {
-            let want = layout::SHAPES
-                .iter()
-                .find(|(n, _)| n == name)
-                .unwrap_or_else(|| panic!("{name} missing from layout::SHAPES"))
-                .1;
+        for (ty, size, align, fields) in cases {
+            let l = shape_of(&ty, &types).layout().unwrap();
             assert_eq!(
-                &llt_of(ty, &types),
-                want,
-                "llt({name}) drifted from layout::SHAPES"
+                (l.size, l.align, &l.fields[..]),
+                (size, align, fields),
+                "the layout of `{ty}`"
             );
         }
-        for (name, arity) in [("Enum0", 0), ("Enum1", 1), ("Enum2", 2), ("Enum3", 3)] {
-            let want = layout::SHAPES.iter().find(|(n, _)| *n == name).unwrap().1;
-            assert_eq!(enum_ll(arity), want, "enum_ll({arity}) drifted");
+    }
+
+    /// `536870912 * 8` is 2^32, which wraps to zero: a 4 GiB array that would
+    /// pass the frame limit as needing no bytes.
+    #[test]
+    fn a_shape_past_four_gigabytes_is_refused_rather_than_wrapped() {
+        let types = HashMap::new();
+        let i64s = |n| Type::ArrayN(Box::new(Type::Int), n);
+        let byte = Type::IntN {
+            bits: 8,
+            signed: true,
+        };
+        let field = |name: &str, ty| Field {
+            name: name.into(),
+            ty,
+        };
+        for (ty, wrapped) in [
+            (i64s(600_000_000), 505_032_704u64),
+            (i64s(536_870_912), 0),
+            (
+                Type::ArrayN(Box::new(i64s(100_000)), 100_000),
+                2_690_588_672,
+            ),
+            (
+                Type::Record(vec![field("b", byte), field("a", i64s(600_000_000))]),
+                505_032_712,
+            ),
+        ] {
+            let e = shape_of(&ty, &types)
+                .layout()
+                .expect_err(&format!("`{ty}` wrapped to {wrapped} instead"));
+            assert!(
+                e.contains("bytes, past the 4294967295 one shape may occupy")
+                    && e.contains("belongs on the heap as `Array<T>`"),
+                "`{ty}`: {e}"
+            );
         }
+        // The largest shape that fits keeps its exact size.
+        let l = shape_of(&i64s(536_870_911), &types).layout().unwrap();
+        assert_eq!(l.size, 4_294_967_288);
     }
 
     /// One `Type` per variant of the type enum. [`Type::VARIANTS`] and the
@@ -1073,27 +1120,6 @@ mod tests {
             .collect()
     }
 
-    /// Collects the leaf spellings in an `llt_of` string: each scalar word and
-    /// each whole `<N x T>` vector, the unit `of_ll` sizes.
-    fn atoms(ll: &str, out: &mut std::collections::BTreeSet<String>) {
-        fn words(s: &str, out: &mut std::collections::BTreeSet<String>) {
-            for w in s.split(|c: char| !c.is_ascii_alphanumeric()) {
-                // Counts and the `x` after them are grammar, not shapes.
-                if !w.is_empty() && w != "x" && !w.bytes().all(|c| c.is_ascii_digit()) {
-                    out.insert(w.to_string());
-                }
-            }
-        }
-        let mut rest = ll;
-        while let Some(a) = rest.find('<') {
-            let b = a + rest[a..].find('>').expect("a vector spelling closes");
-            words(&rest[..a], out);
-            out.insert(rest[a..=b].to_string());
-            rest = &rest[b + 1..];
-        }
-        words(rest, out);
-    }
-
     /// Every composite shape, over the types it is given: containers, both
     /// generic applications, function types of three arities, and the sized
     /// containers at two capacities.
@@ -1131,13 +1157,10 @@ mod tests {
     }
 
     /// Over a few thousand type trees built from [`layout_seeds`] by [`grow`]
-    /// and [`in_records`]: every tree has a layout, and the leaf spellings they
-    /// print equal those in [`layout::SHAPES`], so no `llt_of` case escapes the
-    /// clang comparison and no row is dead. Only leaves are compared: the
-    /// padding-probe rows are hand-built, and names are not derivable (`Ref`
-    /// prints `{ i64, i64 }`, as a stored `fn` does).
+    /// and [`in_records`]: every tree has a padded layout, and every [`Leaf`]
+    /// is some tree's, so no leaf is dead.
     #[test]
-    fn llt_prints_every_shape_the_layout_engine_was_verified_on() {
+    fn every_type_has_a_padded_layout_and_every_leaf_is_reached() {
         let types = HashMap::new();
         let seeds = layout_seeds();
         // `variant_name` is exhaustive, so a new variant stops this file
@@ -1162,36 +1185,37 @@ mod tests {
             .cloned()
             .collect();
 
-        let mut printed = std::collections::BTreeSet::new();
+        // Exhaustive, so a new leaf has to be given a slot here.
+        let slot = |l: Leaf| match l {
+            Leaf::I1 => 0,
+            Leaf::I8 => 1,
+            Leaf::I16 => 2,
+            Leaf::I32 => 3,
+            Leaf::I64 => 4,
+            Leaf::Ptr => 5,
+            Leaf::F32 => 6,
+            Leaf::F64 => 7,
+            Leaf::V128 => 8,
+        };
+        fn leaves(s: &Shape, out: &mut dyn FnMut(Leaf)) {
+            match s {
+                Shape::Void => {}
+                Shape::Leaf(l) => out(*l),
+                Shape::Struct(ms) => ms.iter().for_each(|m| leaves(m, out)),
+                Shape::Array(_, e) => leaves(e, out),
+            }
+        }
+        let mut reached = [false; 9];
         for ty in &all {
-            let ll = llt_of(ty, &types);
-            let l = layout::of_ll(&ll)
-                .unwrap_or_else(|e| panic!("llt({ty}) = {ll}, which has no layout: {e}"));
-            assert!(l.align.is_power_of_two(), "{ll}: align {}", l.align);
-            assert_eq!(l.size % l.align, 0, "{ll}: size {} is not padded", l.size);
-            atoms(&ll, &mut printed);
+            let s = shape_of(ty, &types);
+            let l = s
+                .layout()
+                .unwrap_or_else(|e| panic!("`{ty}` has no layout: {e}"));
+            assert!(l.align.is_power_of_two(), "`{ty}`: align {}", l.align);
+            assert_eq!(l.size % l.align, 0, "`{ty}`: size {} is not padded", l.size);
+            leaves(&s, &mut |l| reached[slot(l)] = true);
         }
-
-        let mut covered = std::collections::BTreeSet::new();
-        for (_, ll) in layout::SHAPES {
-            atoms(ll, &mut covered);
-        }
-        // `void` has no row: GNU C's `sizeof(void)` is 1 where the engine says
-        // 0. `llt_of` prints it only for types that are never a member.
-        printed.remove("void");
-        covered.remove("void");
-        let missing: Vec<_> = printed.difference(&covered).collect();
-        assert!(
-            missing.is_empty(),
-            "{} type trees print {missing:?}, which layout::SHAPES does not cover — \
-             so clang is never asked about it",
-            all.len()
-        );
-        let dead: Vec<_> = covered.difference(&printed).collect();
-        assert!(
-            dead.is_empty(),
-            "layout::SHAPES spells {dead:?}, which `llt` no longer prints"
-        );
+        assert_eq!(reached, [true; 9], "a leaf no type reaches");
         assert!(all.len() > 4_000, "the corpus shrank to {}", all.len());
     }
 
