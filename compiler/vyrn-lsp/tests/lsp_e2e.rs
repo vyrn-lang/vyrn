@@ -3989,6 +3989,54 @@ fn renaming_a_procedure_in_the_corpus_reaches_every_generated_call_site() {
     let _ = client.child.kill();
 }
 
+/// A project root over the file cap still renames: only the files that name the
+/// declaration are read as candidates, however many `.vyrn` files sit beside them.
+#[test]
+fn rename_in_a_root_with_hundreds_of_unrelated_files_reaches_its_importer() {
+    let dir = std::env::temp_dir().join(format!("vyrn_lsp_bigroot_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("app")).unwrap();
+    std::fs::create_dir_all(dir.join("corpus")).unwrap();
+    std::fs::write(dir.join("vyrn.json"), "{}").unwrap();
+    let decl = "export fn total() -> Int64 {
+    return 1
+}
+";
+    let user = "import { total } from \"./lib\"
+fn main() {
+    print(total())
+}
+";
+    std::fs::write(dir.join("app/lib.vyrn"), decl).unwrap();
+    std::fs::write(dir.join("app/user.vyrn"), user).unwrap();
+    for i in 0..520 {
+        std::fs::write(
+            dir.join(format!("corpus/f{i}.vyrn")),
+            "fn f() -> Int64 {
+    return 2
+}
+",
+        )
+        .unwrap();
+    }
+    let uri = file_uri(&dir.join("app/lib.vyrn"));
+    let mut client = spawn_client();
+    did_open(&mut client, &uri, "vyrn", decl);
+
+    let (l, c) = pos_after(decl, "export fn total");
+    let (changes, err) = rename_at(&mut client, &uri, l, c - 1, "sum");
+    assert!(err.is_none(), "{err:?}");
+    assert_eq!(
+        edits_for(&changes, "app/user.vyrn").len(),
+        2,
+        "{changes:#?}"
+    );
+    assert_eq!(changes.len(), 2, "{changes:#?}");
+
+    let _ = client.child.kill();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// A page imports `recent` directly, in a `<script>` body whose lines are
 /// offset from the file's.
 #[test]
