@@ -61,7 +61,7 @@ fn parser_sections() -> Vec<Section> {
         sec("fn is_member_type_param", Grammar),
         sec("fn mark_member_type_params", Desugar),
         sec("fn at_contract_decl", Grammar),
-        sec("fn unshadow_method_builtins", Desugar),
+        sec("fn answered_methods", Desugar),
         sec("fn parse_bare", Shared),
         sec("    let mut flat = Vec::new();", Desugar),
         sec("struct Parser", Shared),

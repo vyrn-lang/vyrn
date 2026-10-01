@@ -1,0 +1,4 @@
+// Exports a method-form name, for `examples/methodnames.vyrn`.
+export fn remove(x: Int64) -> Int64 {
+    return x + 1
+}

@@ -3054,11 +3054,13 @@ impl BodyVisitMut for NsResolver<'_> {
                 for t in type_args.iter_mut() {
                     self.rewrite_type(t);
                 }
-                // `ns.member(rest)`: the first argument is the bare namespace.
+                // `ns.member(rest)`: the first argument is the bare namespace. The
+                // parser wrote `ns.remove(k)` as `@remove`; the member is `remove`.
                 if let Some(Expr::Var { name: head, .. }) = args.first() {
                     if self.is_ns(head, locals) {
                         let head = head.clone();
-                        if let Some(sym) = self.resolve_member(&head, name, l) {
+                        let member = crate::prelude::method_surface(name);
+                        if let Some(sym) = self.resolve_member(&head, member, l) {
                             *name = sym;
                         }
                         args.remove(0);
