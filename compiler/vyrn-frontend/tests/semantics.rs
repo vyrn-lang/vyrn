@@ -150,10 +150,9 @@ fn main() -> Int64 {{
         &bytes,
         vyrn_cli::wasmrun::Run {
             argv: vec!["main.vyrn".to_string()],
-            stdin_prefix: Vec::new(),
             capture_stdout: true,
             capture_stderr: true,
-            meter: false,
+            ..Default::default()
         },
     )?;
     let said = String::from_utf8_lossy(&out.stderr);

@@ -1,22 +1,22 @@
 command	lines	sentences
 why	660	19
 bench	593	17
-serve, dev	462	7
+serve, dev	458	7
 doc	370	13
-routes	311	4
+routes	310	4
 build	259	17
-fmt	247	13
+fmt	245	13
 (dispatch)	224	12
 dev	222	18
 deps	210	5
 update	195	7
 fix	194	1
-test, bench	132	2
+test, bench	130	2
 build, bench	127	0
 serve	87	8
 add	70	6
 vendor	66	6
-run	61	3
+run	59	3
 emit-gen	57	3
 test	45	2
 new	41	4

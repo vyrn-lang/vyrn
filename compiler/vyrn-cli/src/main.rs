@@ -955,10 +955,9 @@ fn mounted_routes_wasm(
         &bytes,
         wasmrun::Run {
             argv: vec![path.to_string()],
-            stdin_prefix: Vec::new(),
             capture_stdout: true,
             capture_stderr: true,
-            meter: false,
+            ..Default::default()
         },
     )?;
     if out.code != 0 {
@@ -1969,10 +1968,8 @@ fn from_json_cmd(path: &str, type_name: &str, module: &str) -> ExitCode {
     };
     let run = wasmrun::Run {
         argv: vec![key.clone(), json, type_name.to_string(), module.to_string()],
-        stdin_prefix: Vec::new(),
-        capture_stdout: false,
         capture_stderr: true,
-        meter: false,
+        ..Default::default()
     };
     let out = match wasmrun::run(&bytes, run) {
         Ok(out) => out,
@@ -4233,11 +4230,9 @@ fn serve_loop(
     };
     let run = wasmrun::Run {
         argv,
-        stdin_prefix: Vec::new(),
-        capture_stdout: false,
         // Read per call, so a trap logs its wording, not a wasm backtrace.
         capture_stderr: true,
-        meter: false,
+        ..Default::default()
     };
     let mut res = match wasmrun::start(&bytes, &run, None) {
         Ok((res, 0)) => res,
@@ -4285,10 +4280,8 @@ where
     use vyrn_frontend::ast::{Block, Expr, Id, Stmt};
     let run = wasmrun::Run {
         argv,
-        stdin_prefix: Vec::new(),
-        capture_stdout: false,
         capture_stderr: true,
-        meter: false,
+        ..Default::default()
     };
     let bytes = vyrn_codegen::direct::compile(program, world.clone())?;
     let (mut setup, code) = wasmrun::start(&bytes, &run, None)?;
@@ -5262,10 +5255,8 @@ fn run_wasm(
     argv.extend(prog_args.iter().cloned());
     let run = wasmrun::Run {
         argv,
-        stdin_prefix: Vec::new(),
-        capture_stdout: false,
-        capture_stderr: false,
         meter: profile.is_some(),
+        ..Default::default()
     };
     match wasmrun::run(&bytes, run) {
         Ok(out) => {
@@ -5383,11 +5374,9 @@ fn bodies_wasm(
 
     let run = wasmrun::Run {
         argv: vec![path.to_string()],
-        stdin_prefix: Vec::new(),
-        capture_stdout: false,
         // Read per body: a trap's wording is the `FAILED:` message.
         capture_stderr: true,
-        meter: false,
+        ..Default::default()
     };
     let gen = generation.then(|| vyrn_genwasm::GenState::new(&prog));
     let mut res = match wasmrun::start(&bytes, &run, gen) {
@@ -6120,10 +6109,9 @@ fn handle(req: Request) -> Response {
         let bytes = vyrn_codegen::direct::compile(&program, world).expect("the doors compile");
         let run = wasmrun::Run {
             argv: vec![key.clone()],
-            stdin_prefix: Vec::new(),
             capture_stdout: true,
             capture_stderr: true,
-            meter: false,
+            ..Default::default()
         };
         let (mut res, code) = wasmrun::start(&bytes, &run, None).expect("start");
         assert_eq!(code, 0, "main exits 0");
