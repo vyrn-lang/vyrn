@@ -688,9 +688,10 @@ fn check_accum_inner(
             ));
         }
     }
-    let protocol_decls: HashMap<&str, &crate::ast::ProtocolDecl> = program
-        .protocols
+    // The program's own declaration of a prelude protocol's name replaces it.
+    let protocol_decls: HashMap<&str, &crate::ast::ProtocolDecl> = (crate::prelude::protocols())
         .iter()
+        .chain(&program.protocols)
         .map(|p| (p.name.as_str(), p))
         .collect();
     for imp in &program.impls {
@@ -896,9 +897,11 @@ fn check_accum_inner(
         // A named target must be an enum or a record. A validated scalar erases
         // to its base, so its value carries no name to dispatch on.
 
-        // A `Show` impl returns a String. `Show` is known by name, not
-        // declared, so the protocol comparison above does not reach it.
-        if imp.protocol == crate::types::SHOW {
+        // Rendering calls `show` whatever declares `Show`, so a program that
+        // replaces the prelude's declaration must still return a String.
+        if imp.protocol == crate::types::SHOW
+            && program.protocols.iter().any(|p| p.name == imp.protocol)
+        {
             for m in &imp.methods {
                 if m.name == crate::types::SHOW_SHOW && m.ret != Type::Str {
                     out.push(cerr_at!(

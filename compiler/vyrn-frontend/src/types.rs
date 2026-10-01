@@ -316,14 +316,14 @@ pub const ITERATE_SIZE: &str = "size";
 /// A projection, not a method: it is found in the impl's `places`.
 pub const ITERATE_NTH: &str = "nth";
 
-/// The protocols a program implements without declaring them, each with its
-/// methods' receiver and parameter capabilities. An impl of one takes exactly
-/// these, as an impl of a declared protocol takes its declaration's.
+/// The protocols a program implements with no declaration, each with its
+/// members' receiver and parameter capabilities; an impl's members take
+/// these. No declaration states them: `Copy`'s result, `Index`'s key and
+/// element and `Iterate`'s element are each impl's own types, and `Index`'s
+/// members are each optional. The prelude declares the others
+/// (`prelude::protocols`).
 pub const KNOWN_PROTOCOLS: &[(&str, &[(&str, Capability, &[Capability])])] = &[
-    (OWNED, &[(OWNED_RELEASE, Capability::Consume, &[])]),
-    (MUST_USE, &[]),
     (COPY, &[(COPY_COPY, Capability::Read, &[])]),
-    (SHOW, &[(SHOW_SHOW, Capability::Read, &[])]),
     (
         "Index",
         &[
@@ -336,14 +336,6 @@ pub const KNOWN_PROTOCOLS: &[(&str, &[(&str, Capability, &[Capability])])] = &[
         &[
             (ITERATE_SIZE, Capability::Read, &[]),
             (ITERATE_NTH, Capability::Read, &[Capability::Read]),
-        ],
-    ),
-    (HASHABLE, &[("hash", Capability::Read, &[])]),
-    (
-        FALLIBLE,
-        &[
-            ("isSuccess", Capability::Read, &[]),
-            ("success", Capability::Read, &[]),
         ],
     ),
 ];

@@ -10,7 +10,9 @@
 //! `value`, `@list` and `pullAt` allocate but have no contract, because their
 //! result type is one no signature spells.
 
-use crate::ast::{Block, Capability, Expr, Function, Id, Param, Stmt, Type, TypeDecl};
+use crate::ast::{
+    Block, Capability, Expr, Function, Id, Param, Program, ProtocolDecl, Stmt, Type, TypeDecl,
+};
 use crate::effects::Effect;
 use crate::project::ELEM;
 use std::sync::OnceLock;
@@ -19,13 +21,10 @@ use std::sync::OnceLock;
 /// std root still gets these declarations.
 const PRELUDE_SRC: &str = include_str!("prelude.vyrn");
 
-/// Returns the types the compiler puts into every program, the ones builtin
-/// rows name (`Value`, `Schema`, `ModuleInterface`, ...). Each carries line 0,
-/// which is how `loader::is_injected` and the editor's symbol index recognise
-/// one.
-pub fn type_decls() -> &'static [TypeDecl] {
-    static DECLS: OnceLock<Vec<TypeDecl>> = OnceLock::new();
-    DECLS.get_or_init(|| {
+/// The prelude, parsed once.
+fn prelude() -> &'static Program {
+    static PRELUDE: OnceLock<Program> = OnceLock::new();
+    PRELUDE.get_or_init(|| {
         let tokens = crate::lexer::lex(PRELUDE_SRC).expect("the prelude lexes");
         let (mut program, errors) = crate::parser::parse_bare(tokens);
         assert!(
@@ -36,8 +35,23 @@ pub fn type_decls() -> &'static [TypeDecl] {
         for t in &mut program.type_decls {
             t.line = 0;
         }
-        program.type_decls
+        program
     })
+}
+
+/// Returns the types the compiler puts into every program, the ones builtin
+/// rows name (`Value`, `Schema`, `ModuleInterface`, ...). Each carries line 0,
+/// which is how `loader::is_injected` and the editor's symbol index recognise
+/// one.
+pub fn type_decls() -> &'static [TypeDecl] {
+    &prelude().type_decls
+}
+
+/// Returns the protocols the compiler gives a meaning (`Show`, `Owned`, ...).
+/// None enters a program: the checker reads one as the declaration an impl of
+/// that name conforms to when the program declares none.
+pub fn protocols() -> &'static [ProtocolDecl] {
+    &prelude().protocols
 }
 
 /// One seeded signature. `place` is empty for a row that allocates its result;
@@ -1136,9 +1150,9 @@ mod tests {
 
     /// The order matters: the linker keeps the root module's copies, so a
     /// reordered prelude moves every declaration index. Anything but a type
-    /// here would enter every program.
+    /// or a protocol here would enter every program.
     #[test]
-    fn the_prelude_declares_eighteen_types_and_nothing_else() {
+    fn the_prelude_declares_eighteen_types_five_protocols_and_nothing_else() {
         let names: Vec<&str> = type_decls().iter().map(|t| t.name.as_str()).collect();
         assert_eq!(
             names,
@@ -1167,15 +1181,18 @@ mod tests {
             type_decls().iter().all(|t| t.line == 0 && !t.exported),
             "every prelude declaration is line 0 and unexported"
         );
-        let tokens = crate::lexer::lex(PRELUDE_SRC).expect("the prelude lexes");
-        let (p, _) = crate::parser::parse_bare(tokens);
+        let protocols: Vec<&str> = protocols().iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(
+            protocols,
+            ["Owned", "MustUse", "Show", "Hashable", "Fallible"]
+        );
+        let p = prelude();
         assert!(
             p.functions.is_empty()
                 && p.imports.is_empty()
                 && p.impls.is_empty()
-                && p.protocols.is_empty()
                 && p.contracts.is_empty(),
-            "the prelude declares something that is not a type"
+            "the prelude declares something that is not a type or a protocol"
         );
     }
 

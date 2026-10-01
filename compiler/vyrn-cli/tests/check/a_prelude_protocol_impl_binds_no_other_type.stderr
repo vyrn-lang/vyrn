@@ -1,0 +1,1 @@
+a_prelude_protocol_impl_binds_no_other_type.vyrn:2:1: `impl Show for P` binds `type Item`, which protocol `Show` does not declare
