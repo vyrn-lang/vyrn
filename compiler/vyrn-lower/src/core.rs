@@ -4955,7 +4955,7 @@ impl<'a> Builder<'a> {
         } = value
         {
             let t = self.body.spelled(t);
-            let fields = fields.iter().map(|(f, _)| format!("the field `{t}.{f}`"));
+            let fields = fields.iter().map(|(f, _)| format!("{t}.{f}"));
             self.body.names[n.index()].fields = fields.collect();
         }
     }
@@ -8394,7 +8394,7 @@ fn report(
             (_, Some(t)) => {
                 let into = match t.how {
                     crate::kernel::TookHow::Return => "the return".to_string(),
-                    _ => t.by.clone(),
+                    _ => t.by.to_string(),
                 };
                 MemoryRow {
                     name,

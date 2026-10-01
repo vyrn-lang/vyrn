@@ -93,8 +93,8 @@ pub struct NameInfo {
     /// core keeps no statement kinds, so the refusal's wording of that loop
     /// rides on the name.
     pub for_consume: bool,
-    /// For a name a record literal binds: where each part goes, in the
-    /// checker's words ("the field `R.s`"), one per field in order.
+    /// For a name a record literal binds: where each part goes (`R.s`), one
+    /// per field in order.
     /// `Rhs::Make` carries no names. Empty for an array, a map and a variant.
     pub fields: Vec<String>,
     /// For the variable of a `for` over a container the loop does not own:
