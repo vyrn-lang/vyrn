@@ -1,13 +1,17 @@
 /// Row `where-group`. A run of statements that store into the fields of a
 /// `where` record is checked once, after its last statement, with the
-/// record's own wording. `print` ends the run after one push.
+/// record's own wording. `print` ends the run after a store into `c.a` whose
+/// length the checker does not know, so the check runs and fails.
 
 type Cols = { a: Array<Int64>, b: Array<Int64> } where a.length == b.length
 
+fn one() -> Array<Int64> {
+    return [1]
+}
+
 fn main() -> Int64 {
     let mut c = Cols { a: [], b: [] }
-    c.a.push(1)
+    c.a = one()
     print(c.a.length)
-    c.b.push(2)
     return 0
 }

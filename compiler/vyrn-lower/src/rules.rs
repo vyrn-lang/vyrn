@@ -209,6 +209,10 @@ pub const GROUP_CALL: &str = "`{f}` may read the caller's `{name}` while a store
                               into the fields of `{name}`, or after the last";
 pub const GROUP_EXIT: &str = "`{what}` leaves `{name}` with its `where` rule unchecked|finish the \
                               stores into the fields of `{name}` before the `{what}`";
+pub const GROUP_FALSE: &str = "this group of stores into `{name}` ends after line {k} with \
+                               `{name}.{long}` longer than `{name}.{short}`, which breaks the \
+                               `where` rule of `{n}`|store into `{name}.{short}` before any \
+                               statement after line {k} that does not store into `{name}`";
 pub const REMOVE_NOT_MUT: &str = "cannot `{op}` from `{name}` (declared without `mut`)";
 pub const ASSIGN_NOT_MUT: &str = "cannot assign to `{name}` (declared without `mut`)";
 pub const FIELD_NOT_MUT: &str = "cannot mutate a field of `{name}` (declared without `mut`)";

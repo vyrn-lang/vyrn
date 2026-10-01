@@ -266,7 +266,7 @@ pub(crate) fn add_callees(top: &Body, fns: &HashMap<&str, (FnId, &Function)>, ou
 
 /// One body with its check rows stated, and the same body decided
 /// (`elide::decide`) when an emitter first reads it, so `vyrn check` decides
-/// none.
+/// none of these; it walks its own copy of a body with a group of stores.
 pub(crate) struct Stated {
     pub(crate) body: Body,
     pub(crate) decided: OnceLock<Body>,

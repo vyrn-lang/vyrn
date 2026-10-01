@@ -191,7 +191,10 @@ a record name's array field, and a `where` rule's `a.length == b.length` makes
 one term of both (`facts::Term::Col`), except inside a group of stores into
 the record's fields, where each field has its own term until the row that
 checks the rule (`check::Guard::Rule`); `World::body_of` decides a body
-when an emitter first reads it. A right-hand side (`core::Rhs`) is a value, a `Read` or `Take` of a
+when an emitter first reads it. The same walk answers a group's rule check
+that the facts prove false (`elide::refuted`); `vyrn check` states and walks
+its own copy of a body with a group for it, and `typed::groups` refuses each
+such group at its first store. A right-hand side (`core::Rhs`) is a value, a `Read` or `Take` of a
 place, a `Call`, a `Prim` (one row of the primitive table), a `Make` of a
 record, array or variant, or a function name. A place (`core::Place`) is a
 name, a global, a field, an element or a map key. Evaluation order is left

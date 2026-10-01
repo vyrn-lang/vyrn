@@ -395,17 +395,17 @@ fn w(p: consume P) -> Int64 {
         "    print(w(P { a: xs, b: [] }).toString())",
         "array index 2 out of bounds",
     ),
-    // A group that grows one column twice and the other once.
+    // A group that grows one column by an array's length and the other by
+    // one.
     (
         "type P = { a: Array<Int64>, b: Array<Int64> } where a.length == b.length
-fn w(p: modify P) -> Int64 {
-    p.a.push(1)
-    p.a.push(2)
+fn w(p: modify P, q: Array<Int64>) -> Int64 {
+    p.a.append(q)
     p.b.push(3)
     return 0
 }
 ",
-        "    let mut p = P { a: [], b: [] }\n    print(w(p).toString())",
+        "    let mut p = P { a: [], b: [] }\n    print(w(p, [1, 2]).toString())",
         "violates its `where` clause",
     ),
     // A rule with a conjunct beside the lengths is not proved by them.

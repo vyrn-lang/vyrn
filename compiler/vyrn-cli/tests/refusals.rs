@@ -365,6 +365,13 @@ fn census() -> Vec<Row> {
              with the hole still in it",
             Kernel::Its,
         ),
+        row(
+            "r49_a_group_that_ends_with_its_rule_false.vyrn",
+            "a group of stores whose rule check the facts prove false",
+            "this group of stores into `c` ends after line 8 with `c.a` longer than `c.b`, which \
+             breaks the `where` rule of `Cols`",
+            Kernel::Elsewhere,
+        ),
     ]
 }
 

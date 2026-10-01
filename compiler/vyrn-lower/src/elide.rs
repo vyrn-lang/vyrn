@@ -26,7 +26,7 @@ use vyrn_frontend::prelude::{self, Length};
 use vyrn_frontend::prim::Cmp;
 
 use crate::facts::{Lin, State, Term};
-use vyrn_frontend::core::check::{Guard, Verdict};
+use vyrn_frontend::core::check::{Guard, Site, Verdict};
 use vyrn_frontend::core::{Arg, Body, Callee, Ctor, Lit, Name, Op, Place, Rhs, St, Val};
 
 /// The bound an exact `Int64` sum must provably stay within: `2^62`, so no
@@ -39,8 +39,22 @@ pub fn decide(body: &mut Body, decls: &HashMap<String, TypeDecl>) {
     for l in &mut body.lambdas {
         decide(l, decls);
     }
+    refuted(body, decls);
+}
+
+/// A group's rule check that fails wherever it runs: its site, the field the
+/// facts prove longer, and the field they prove shorter, as the rule names
+/// them.
+pub type Refuted = (Site, String, String);
+
+/// Decides the check rows of the one frame `body` as [`decide`] does, without
+/// its lambdas. Answers each rule check that ends a group
+/// ([`crate::typed::groups`]) where the facts prove one field of an equal
+/// pair longer than the other, on every live path. A dead state proves every
+/// goal, so it refutes none.
+pub fn refuted(body: &mut Body, decls: &HashMap<String, TypeDecl>) -> Vec<Refuted> {
     if !any_check(&body.stmts) {
-        return;
+        return Vec::new();
     }
     let mut stmts = std::mem::take(&mut body.stmts);
     let mut w = Walk {
@@ -51,13 +65,16 @@ pub fn decide(body: &mut Body, decls: &HashMap<String, TypeDecl>) {
         memo: HashMap::new(),
         relevant: relevant(body, &stmts),
         open: BTreeSet::new(),
+        refuted: Vec::new(),
     };
     let mut st = State::default();
     for p in &body.params {
         w.fresh(&mut st, *p);
     }
     w.block(st, &mut stmts);
+    let refuted = w.refuted;
     body.stmts = stmts;
+    refuted
 }
 
 fn any_check(ss: &[St]) -> bool {
@@ -89,6 +106,7 @@ struct Walk<'a> {
     /// the record's rule check ([`Guard::Rule`]), each field's length is a
     /// term of its own ([`Walk::col`]).
     open: BTreeSet<Name>,
+    refuted: Vec<Refuted>,
 }
 
 /// What a primitive row states about its result.
@@ -384,12 +402,27 @@ impl Walk<'_> {
             St::Check(c) => {
                 let goals = self.goals(&c.guard);
                 if self.record {
-                    let proved = goals.as_ref().is_some_and(|gs| {
-                        gs.iter()
-                            .all(|g| st.ge0(g).is_some_and(|cert| cert.verify(&st, g)))
-                    });
+                    let holds = |g: &Lin| st.ge0(g).is_some_and(|cert| cert.verify(&st, g));
+                    let proved = goals.as_ref().is_some_and(|gs| gs.iter().all(holds));
                     if proved && provable(&c.guard) {
                         c.verdict = Verdict::Proved;
+                    }
+                    if let (Guard::Rule(r), Some(gs), false) = (&c.guard, &goals, st.dead) {
+                        // Goals come in pairs, `a - b` then `b - a`, per pair
+                        // of the rule; `g < 0` is `-g - 1 >= 0`.
+                        let fails = |g: &Lin| {
+                            g.scale(-1)
+                                .and_then(|n| n.plus(-1))
+                                .is_some_and(|n| holds(&n))
+                        };
+                        let pairs = (self.rule(*r))
+                            .map(vyrn_frontend::types::predicate_equal_lengths)
+                            .unwrap_or_default();
+                        let at = gs.iter().position(fails);
+                        if let Some((i, (a, b))) = at.and_then(|i| Some((i, pairs.get(i / 2)?))) {
+                            let (long, short) = if i % 2 == 0 { (b, a) } else { (a, b) };
+                            self.refuted.push((c.site, long.clone(), short.clone()));
+                        }
                     }
                 }
                 // A passed index, span or shift check states its goals; a

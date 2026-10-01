@@ -7519,7 +7519,17 @@ fn typed(
     // One sentence per line: a declaration's predicate is also the body
     // of its constructor, and the instances of a generic function share
     // their groups.
-    let groups = crate::typed::groups(top, &rules);
+    let (mut groups, ended) = crate::typed::groups(top, &rules, &[]);
+    // The facts come from the check rows, which only an emitter's body
+    // states, so a body with a group states its own copy.
+    if ended {
+        let mut body = stated(program, own, top);
+        let mut refuted = Vec::new();
+        body.each_frame_mut(&mut |f| {
+            refuted.push(crate::elide::refuted(f, own.proto.types()));
+        });
+        groups = crate::typed::groups(&body, &rules, &refuted).0;
+    }
     for u in crate::typed::refused(top, as_written)
         .into_iter()
         .chain(groups)
