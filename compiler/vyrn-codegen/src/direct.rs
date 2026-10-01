@@ -4446,8 +4446,9 @@ impl<'p> Fn_<'_, 'p> {
     }
 
     /// Whether `name` is an `extern fn` or a host-boundary name.
+    /// Whether `name` is a declared `extern fn`, a host-boundary one included.
     fn is_extern(&self, name: &str) -> bool {
-        crate::host_boundary_extern(name).is_some() || self.cx.externs.contains_key(name)
+        self.cx.externs.contains_key(name)
     }
 
     /// Calls an `extern fn` or a host-boundary name; `operand` emits each operand at its
