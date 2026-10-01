@@ -2158,21 +2158,6 @@ impl<'a> Checker<'a> {
                 Reach::Parts => {}
             }
             match ty {
-                Type::Array(i)
-                | Type::ArrayN(i, _)
-                | Type::SmallArray(i, _)
-                | Type::Partial(i)
-                | Type::Stream(i)
-                | Type::Lazy(i)
-                | Type::Omit(i, _)
-                | Type::Pick(i, _) => go(i, types, at, seen),
-                Type::Map(a, b) | Type::Merge(a, b) => {
-                    go(a, types, at, seen) || go(b, types, at, seen)
-                }
-                Type::Record(fs) => fs.iter().any(|f| go(&f.ty, types, at, seen)),
-                Type::Enum(vs) => vs
-                    .iter()
-                    .any(|v| v.payload.iter().any(|p| go(p, types, at, seen))),
                 Type::Named(n) | Type::App(n, _) => {
                     let args = match ty {
                         Type::App(_, a) => a.as_slice(),
@@ -2187,7 +2172,8 @@ impl<'a> Checker<'a> {
                                 r
                             }))
                 }
-                _ => false,
+                Type::Fn(..) => false,
+                _ => ty.children().any(|c| go(c, types, at, seen)),
             }
         }
         go(ty, self, at, &mut Vec::new())

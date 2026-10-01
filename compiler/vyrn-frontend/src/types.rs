@@ -972,75 +972,26 @@ fn num_lit(e: &Expr) -> Option<String> {
     }
 }
 
-/// Visits `ty` and every type inside it.
+/// Visits `ty` and every type inside it, outermost first.
 pub fn walk_type(ty: &Type, f: &mut impl FnMut(&Type)) {
     f(ty);
-    match ty {
-        Type::Array(a)
-        | Type::Stream(a)
-        | Type::Partial(a)
-        | Type::Lazy(a)
-        | Type::ArrayN(a, _)
-        | Type::SmallArray(a, _)
-        | Type::Omit(a, _)
-        | Type::Pick(a, _) => walk_type(a, f),
-        Type::Merge(a, b) | Type::Map(a, b) => {
-            walk_type(a, f);
-            walk_type(b, f);
-        }
-        Type::App(_, args) => {
-            for a in args {
-                walk_type(a, f);
-            }
-        }
-        Type::Record(fields) => {
-            for fl in fields {
-                walk_type(&fl.ty, f);
-            }
-        }
-        Type::Enum(variants) => {
-            for v in variants {
-                for p in &v.payload {
-                    walk_type(p, f);
-                }
-            }
-        }
-        Type::Fn(params, ret) => {
-            for p in params {
-                walk_type(p, f);
-            }
-            walk_type(ret, f);
-        }
-        _ => {}
+    for c in ty.children() {
+        walk_type(c, f);
+    }
+}
+
+/// [`walk_type`], with each type writable. The visitor sees a node before its
+/// parts, so a node it replaces is descended as replaced.
+pub fn walk_type_mut(ty: &mut Type, f: &mut impl FnMut(&mut Type)) {
+    f(ty);
+    for c in ty.children_mut() {
+        walk_type_mut(c, f);
     }
 }
 
 /// How deeply `ty` nests: `Int64` is 1, `Array<Int64>` is 2.
 pub fn type_depth(ty: &Type) -> usize {
-    fn deepest(ts: impl Iterator<Item = usize>) -> usize {
-        ts.max().unwrap_or(0)
-    }
-    1 + match ty {
-        Type::Array(a)
-        | Type::Stream(a)
-        | Type::Partial(a)
-        | Type::Lazy(a)
-        | Type::ArrayN(a, _)
-        | Type::SmallArray(a, _)
-        | Type::Omit(a, _)
-        | Type::Pick(a, _) => type_depth(a),
-        Type::Merge(a, b) | Type::Map(a, b) => type_depth(a).max(type_depth(b)),
-        Type::App(_, args) => deepest(args.iter().map(type_depth)),
-        Type::Record(fields) => deepest(fields.iter().map(|f| type_depth(&f.ty))),
-        Type::Enum(variants) => deepest(
-            variants
-                .iter()
-                .flat_map(|v| v.payload.iter())
-                .map(type_depth),
-        ),
-        Type::Fn(params, ret) => deepest(params.iter().map(type_depth)).max(type_depth(ret)),
-        _ => 0,
-    }
+    1 + ty.children().map(type_depth).max().unwrap_or(0)
 }
 
 /// The deepest a type may nest in an instantiation. Polymorphic recursion
@@ -1105,32 +1056,7 @@ fn size_go(
         other => other,
     };
     let d = depth + 1;
-    let ok = match t {
-        Type::Array(a)
-        | Type::Stream(a)
-        | Type::Partial(a)
-        | Type::Lazy(a)
-        | Type::ArrayN(a, _)
-        | Type::SmallArray(a, _)
-        | Type::Omit(a, _)
-        | Type::Pick(a, _) => size_go(a, types, budget, n, d, seen),
-        Type::Merge(a, b) | Type::Map(a, b) => {
-            size_go(a, types, budget, n, d, seen) && size_go(b, types, budget, n, d, seen)
-        }
-        Type::App(_, args) => args.iter().all(|a| size_go(a, types, budget, n, d, seen)),
-        Type::Record(fields) => fields
-            .iter()
-            .all(|f| size_go(&f.ty, types, budget, n, d, seen)),
-        Type::Enum(variants) => variants
-            .iter()
-            .flat_map(|v| v.payload.iter())
-            .all(|p| size_go(p, types, budget, n, d, seen)),
-        Type::Fn(params, ret) => {
-            params.iter().all(|p| size_go(p, types, budget, n, d, seen))
-                && size_go(ret, types, budget, n, d, seen)
-        }
-        _ => true,
-    };
+    let ok = t.children().all(|c| size_go(c, types, budget, n, d, seen));
     if here.is_some() {
         seen.pop();
     }

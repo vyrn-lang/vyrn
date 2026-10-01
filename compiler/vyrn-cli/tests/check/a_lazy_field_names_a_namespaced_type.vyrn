@@ -1,0 +1,12 @@
+// A `lazy` field's type names a namespaced declaration like any other
+// field's: `lazy shapes.Point` is the module's exported record.
+import * as shapes from "./a_module_exporting_an_enum_and_a_record.vyrn"
+
+type Holder = { p: lazy shapes.Point }
+
+fn main() -> Int64 {
+    let h = Holder { p: () -> shapes.Point { x: 3 } }
+    let p = h.p
+    print(p.x)
+    return 0
+}

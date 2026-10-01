@@ -19,9 +19,9 @@ pub fn is_member_type_param(name: &str) -> bool {
 }
 
 /// Rewrites every `Named(n)` in `ty` that [`is_member_type_param`] accepts into
-/// a [`Type::Param`]; the descent is [`crate::loader::type_nodes_mut`]'s.
+/// a [`Type::Param`].
 fn mark_member_type_params(ty: &mut Type) {
-    crate::loader::type_nodes_mut(ty, &mut |t| {
+    crate::types::walk_type_mut(ty, &mut |t| {
         if let Type::Named(n) = t {
             if is_member_type_param(n) {
                 *t = Type::Param(std::mem::take(n));
