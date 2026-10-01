@@ -3349,6 +3349,13 @@ impl<'p> Fn_<'_, 'p> {
             .ok_or_else(|| gap(&format!("the name `{name}` (not a local)"), line))
     }
 
+    /// The module state the core names `name` ([`vyrn_frontend::core::Place::Global`]),
+    /// which no local shadows.
+    fn global(&self, name: &str, line: usize) -> Result<(Place, Type), String> {
+        (self.cx.globals.get(name).cloned())
+            .ok_or_else(|| gap(&format!("the module state `{name}`"), line))
+    }
+
     fn place_for(&mut self, b: &mut Frame, r: &Repr, line: usize) -> Result<Place, String> {
         Ok(match r {
             Repr::Scalar(v) => Place::Local(b.local(*v)),
@@ -4438,8 +4445,9 @@ impl<'p> Fn_<'_, 'p> {
     }
 
     /// Whether `name` is an `extern fn` or a host-boundary name.
+    /// Whether `name` is a declared `extern fn`, a host-boundary one included.
     fn is_extern(&self, name: &str) -> bool {
-        crate::host_boundary_extern(name).is_some() || self.cx.externs.contains_key(name)
+        self.cx.externs.contains_key(name)
     }
 
     /// Calls an `extern fn` or a host-boundary name; `operand` emits each operand at its
@@ -9661,6 +9669,7 @@ impl<'p> Fn_<'_, 'p> {
                 None => Vec::new(),
             };
             let from = b.mark();
+            let scope = self.scope.len();
             for (i, bn) in arm.binds.iter().enumerate() {
                 let ty = body.names[bn.index()].ty.clone();
                 let layout = matches!(self.cx.repr(&ty, line)?, Repr::Agg(_));
@@ -9688,7 +9697,9 @@ impl<'p> Fn_<'_, 'p> {
             }
             let to = b.mark();
             self.core_stmts(m, b, body, w, &arm.body[arm.reads(on).len()..])?;
-            // A binder's scope is its arm, so its slots go back at the arm's end.
+            // A binder's scope is its arm, so its name and its slots go back
+            // at the arm's end.
+            self.scope.truncate(scope);
             if from < to {
                 b.give_back(from, to);
             }
@@ -9857,7 +9868,7 @@ impl<'p> Fn_<'_, 'p> {
                         // Module state grows at its fixed address, with the
                         // word the module reserved for it.
                         let (place, own) = match core_global(body, *x) {
-                            Some(g) => match (self.lookup(g, line)?.0, self.cx.gappend.get(g)) {
+                            Some(g) => match (self.global(g, line)?.0, self.cx.gappend.get(g)) {
                                 (at @ Place::Static(_), Some(&word)) => (at, Place::Static(word)),
                                 _ => return unsupported("an append with no ownership word", line),
                             },
@@ -11164,7 +11175,7 @@ impl<'p> Fn_<'_, 'p> {
         // the leading argument.
         let through: Vec<(Arg, vyrn_frontend::ast::Capability)>;
         let mut spliced = Vec::new();
-        let (sig, args) = match self.core_through(body, callee, kind) {
+        let (sig, args) = match self.core_through(body, kind) {
             Some((n, sig_ty)) => {
                 through =
                     std::iter::once((Arg::Val(Val::Name(n)), vyrn_frontend::ast::Capability::Read))
@@ -11366,7 +11377,7 @@ impl<'p> Fn_<'_, 'p> {
             }
             // Module state is storage at a fixed address.
             At::Global(name) => {
-                let (place, ty) = self.lookup(name, line)?;
+                let (place, ty) = self.global(name, line)?;
                 let Place::Static(at) = place else {
                     return unsupported("module state that is not static", line);
                 };
@@ -11443,7 +11454,7 @@ impl<'p> Fn_<'_, 'p> {
         match p {
             At::Name(n) => Some(body.names[n.index()].ty.clone()),
             At::Global(name) => {
-                let (place, ty) = self.lookup(name, 0).ok()?;
+                let (place, ty) = self.global(name, 0).ok()?;
                 matches!(place, Place::Static(_)).then_some(ty)
             }
             At::Field(base, f) => {
@@ -12523,7 +12534,7 @@ impl<'p> Fn_<'_, 'p> {
         solved: &[(String, Type)],
         targets: &[Target],
     ) -> Option<Sig> {
-        if let Some((_, t)) = self.core_through(body, callee, kind) {
+        if let Some((_, t)) = self.core_through(body, kind) {
             return self.value_sig(&t);
         }
         if !targets.is_empty() {
@@ -12646,16 +12657,14 @@ impl<'p> Fn_<'_, 'p> {
 
     /// The stored value a call row calls through, and its signature. `None`
     /// also for a parameter a specialization bound.
-    fn core_through(
-        &self,
-        body: &vyrn_frontend::core::Body,
-        callee: &str,
-        kind: Callee,
-    ) -> Option<(Name, Type)> {
-        let n = kind
-            .value()
-            .filter(|_| !self.fn_binds.contains_key(callee))?;
+    fn core_through(&self, body: &vyrn_frontend::core::Body, kind: Callee) -> Option<(Name, Type)> {
+        let n = kind.value()?;
         let info = &body.names[n.index()];
+        // A call through a bound `fn` parameter goes to its binding, and a local
+        // that shadows the parameter is a value like any other.
+        if body.params.contains(&n) && self.fn_binds.contains_key(&info.source) {
+            return None;
+        }
         let sig_ty = crate::normalize_fn_sig(&self.cx.sub(&info.ty), &self.cx.types);
         matches!(sig_ty, Type::Fn(..)).then_some((n, sig_ty))
     }
@@ -13496,11 +13505,11 @@ impl<'p> Fn_<'_, 'p> {
     /// first.
     fn core_first_read(&self, body: &vyrn_frontend::core::Body, s: Option<&St>) -> Option<Name> {
         match s? {
-            St::Let(_, Rhs::Call { callee, kind, .. })
+            St::Let(_, Rhs::Call { kind, .. })
             | St::Do {
-                rhs: Rhs::Call { callee, kind, .. },
+                rhs: Rhs::Call { kind, .. },
                 ..
-            } if self.core_through(body, callee, *kind).is_some() => None,
+            } if self.core_through(body, *kind).is_some() => None,
             St::Let(_, rhs)
                 if self.core_ctor(body, rhs)
                     || self.core_agg_call(body, rhs)

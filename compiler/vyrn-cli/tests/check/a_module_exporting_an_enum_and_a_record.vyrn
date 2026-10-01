@@ -1,0 +1,12 @@
+export type Point = { x: Int64 }
+
+export type Shape =
+    | Circle(Int64)
+    | Dot
+
+export fn size(s: Shape) -> Int64 {
+    return match s {
+        Circle(r) => r,
+        Dot => 0,
+    }
+}

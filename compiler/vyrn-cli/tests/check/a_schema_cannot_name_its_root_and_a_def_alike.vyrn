@@ -1,0 +1,9 @@
+// The root `title` and a `$defs` key name two schemas `Box`; the import is
+// refused, not resolved to whichever the loader met last.
+import type { Box } from "./a_root_title_and_a_def_of_one_name.schema.json"
+
+fn main() -> Int64 {
+    let b: Box = "the root says Box is an object"
+    print(b)
+    return 0
+}

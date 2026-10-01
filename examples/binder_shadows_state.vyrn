@@ -1,0 +1,26 @@
+// A `match` binder and an `if let` binder shadow module state of their name
+// inside their arm only; after the arm, the name reads the module state again.
+
+let mut total: Int64 = 10
+
+fn bump(o: Option<Int64>) -> Int64 {
+    let k = match o {
+        Some(total) => total + 1,
+        None => 0,
+    }
+    total = total + k
+    return total
+}
+
+fn peek(o: Option<Int64>) -> Int64 {
+    if let Some(total) = o {
+        print("\{total}")
+    }
+    return total
+}
+
+fn main() -> Int64 {
+    print("\{bump(Some(3))}") // 14
+    print("\{peek(Some(5))}") // 5, then 14
+    return 0
+}

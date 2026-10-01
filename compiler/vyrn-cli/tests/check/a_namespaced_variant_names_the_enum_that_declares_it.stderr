@@ -1,0 +1,2 @@
+a_namespaced_variant_names_the_enum_that_declares_it.vyrn:6:0: namespace `shapes` (module `a_module_exporting_an_enum_and_a_record.vyrn`) has no exported member `Nope` — namespaces reach exported declarations only, one level deep
+a_namespaced_variant_names_the_enum_that_declares_it.vyrn:7:0: `shapes.Point.Dot` is not a namespaced enum variant (namespaces are one level deep)

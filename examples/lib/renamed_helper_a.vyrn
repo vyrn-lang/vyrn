@@ -1,0 +1,10 @@
+// `helper__from0` is the name the linker would mint for this module's
+// `helper` (`renamed_apart_local.vyrn`).
+fn helper(x: Int64) -> Int64 {
+    return x
+}
+
+export fn fromA() -> Int64 {
+    let helper__from0: fn(Int64) -> Int64 = x -> x * 100
+    return helper(1)
+}
