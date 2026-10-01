@@ -1,0 +1,11 @@
+// A bare call resolves to the nearest binding: the local `f` is no function,
+// so the call is refused instead of reaching `fn f`.
+fn f(x: Int64) -> Int64 {
+    return x + 40
+}
+
+fn main() -> Int64 {
+    let f = 1
+    print(f(2))
+    return 0
+}

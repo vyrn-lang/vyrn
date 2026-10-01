@@ -94,7 +94,7 @@ enum EngineError {
 /// speed, a false accept would run a generator outside its sandbox.
 fn reaches_unserved(program: &Program) -> Option<String> {
     program.functions.iter().find_map(|f| {
-        let mut hits: Vec<String> = vyrn_frontend::checker::fn_calls(&f.body)
+        let mut hits: Vec<String> = vyrn_frontend::checker::fn_calls(&f.body, &Default::default())
             .into_iter()
             .filter(|c| UNSERVED.contains(&c.as_str()))
             .collect();
@@ -324,11 +324,13 @@ fn wrapper_program(program: &Program) -> Option<Program> {
         return None;
     }
     let mut p = program.clone();
-    let argv = |i: usize| call("@at", vec![var("argv"), Expr::Int(i as i64, Id::NEW)]);
+    // The locals are spelled with `@`, which no source can write: a bare call
+    // resolves to a local first, so a generator named `g` would hit one.
+    let argv = |i: usize| call("@at", vec![var("@argv"), Expr::Int(i as i64, Id::NEW)]);
     let mut body = vec![
         Stmt::Let {
             id: Id::NEW,
-            name: "argv".into(),
+            name: "@argv".into(),
             mutable: false,
             ty: None,
             value: call("args", vec![]),
@@ -337,7 +339,7 @@ fn wrapper_program(program: &Program) -> Option<Program> {
         },
         Stmt::Let {
             id: Id::NEW,
-            name: "g".into(),
+            name: "@g".into(),
             mutable: false,
             ty: Some(Type::Str),
             value: argv(0),
@@ -351,7 +353,7 @@ fn wrapper_program(program: &Program) -> Option<Program> {
             cond: Expr::Binary {
                 id: Id::NEW,
                 op: vyrn_frontend::ast::BinOp::Eq,
-                lhs: Box::new(var("g")),
+                lhs: Box::new(var("@g")),
                 rhs: Box::new(Expr::Str(f.name.clone(), Id::NEW)),
                 line: 0,
             },
@@ -362,7 +364,7 @@ fn wrapper_program(program: &Program) -> Option<Program> {
                         // Bound, not passed inline: the release of an
                         // argument temporary is refused.
                         id: Id::NEW,
-                        name: "typeArg".into(),
+                        name: "@typeArg".into(),
                         mutable: false,
                         ty: None,
                         value: call(vyrn_codegen::GEN_ENTRY_TYPE_ARG, vec![]),
@@ -385,7 +387,7 @@ fn wrapper_program(program: &Program) -> Option<Program> {
                                         .iter()
                                         .enumerate()
                                         .map(|(i, par)| match takes_type_arg(f) {
-                                            true => var("typeArg"),
+                                            true => var("@typeArg"),
                                             false => at_type(argv(i + 1), &par.ty),
                                         })
                                         .collect(),
@@ -557,7 +559,7 @@ fn reflect_entries(p: &mut Program) -> Option<()> {
     let reaches = |what: &str| {
         p.functions
             .iter()
-            .any(|f| vyrn_frontend::checker::fn_calls(&f.body).contains(what))
+            .any(|f| vyrn_frontend::checker::fn_calls(&f.body, &Default::default()).contains(what))
     };
     let named = |n: &str| Type::Named(n.to_string());
     let mut dec = Decoders::new(p);

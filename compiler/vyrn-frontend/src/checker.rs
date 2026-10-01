@@ -1135,34 +1135,60 @@ fn check_accum_inner(
 
     // 7. Comptime purity of every `gen fn` and its callees, after
     //    the body checks so a generator's type errors come first.
-    check_comptime_purity(program, &mut out);
+    check_comptime_purity(program, &checker.through.borrow(), &mut out);
     for d in &mut out {
         d.speak(&program.spellings);
     }
 
-    let effects = StoredFnEffects {
+    let mut effects = StoredFnEffects {
         sources: checker.stored_sources.borrow().clone(),
         arg_sources: checker.arg_sources.borrow().clone(),
         calls: checker.stored_calls.borrow().clone(),
+        through: checker.through.borrow().clone(),
     };
+    // The outputs name each type parameter as written, not as one solve
+    // renamed it ([`Checker::rename_apart`]).
+    let written = |t: &mut Type| {
+        if let Some(w) = crate::types::written_params(t) {
+            *t = w;
+        }
+    };
+    for s in effects.sources.iter_mut().chain(&mut effects.arg_sources) {
+        written(&mut s.sig);
+        for t in s.lambda.iter_mut().flat_map(|l| &mut l.nested_sigs) {
+            written(t);
+        }
+    }
+    effects.calls.iter_mut().for_each(|(_, t)| written(t));
+    checker
+        .binder_types
+        .borrow_mut()
+        .values_mut()
+        .for_each(written);
+    let mut derived = checker.derive_sites.take();
+    for site in &mut derived {
+        written(&mut site.ty);
+        written(&mut site.entry);
+    }
     let binders = local_index(program, &checker.binder_types.borrow());
     let typed = (in_bodies == out.len()).then_some(refused);
     let mut seen = HashSet::new();
     let mut reads = checker.reads.take();
     reads.retain(|r| seen.insert(r.clone()));
-    let record = checker.record.map(|r| Recorded {
-        stored: effects.clone(),
-        reads,
-        ..r.into_inner()
+    let record = checker.record.map(|r| {
+        let mut r = r.into_inner();
+        r.node_types.values_mut().for_each(written);
+        r.joins.values_mut().for_each(written);
+        for (_, args) in r.node_substs.values_mut() {
+            args.iter_mut().for_each(|(_, t)| written(t));
+        }
+        Recorded {
+            stored: effects.clone(),
+            reads,
+            ..r
+        }
     });
-    (
-        out,
-        binders,
-        effects,
-        checker.derive_sites.take(),
-        typed,
-        record,
-    )
+    (out, binders, effects, derived, typed, record)
 }
 
 /// What typing one body added to its checker, for [`Checker::absorb`].
@@ -1574,6 +1600,7 @@ impl Recorded {
         self.stored.sources.extend(tail.stored.sources);
         self.stored.arg_sources.extend(tail.stored.arg_sources);
         self.stored.calls.extend(tail.stored.calls);
+        self.stored.through.extend(tail.stored.through);
         self.reads.extend(tail.reads);
         self.entries.extend(tail.entries);
     }
@@ -1686,6 +1713,8 @@ struct Checker<'a> {
     /// Each call through a stored function value, as (enclosing function,
     /// signature).
     stored_calls: RefCell<Vec<(String, Type)>>,
+    /// See [`StoredFnEffects::through`].
+    through: RefCell<HashSet<NodeId>>,
     derive_sites: RefCell<Vec<crate::gen::Site>>,
     /// The record [`record`] asks for, or `None`, so the editor's keystroke
     /// path does not pay for it.
@@ -1702,6 +1731,8 @@ struct Checker<'a> {
     /// The declaration of the call [`Checker::check_declared_call`] just typed
     /// `Err`, for the same wrapper.
     pending_call: RefCell<Option<CallDecl>>,
+    /// The serial [`Checker::rename_apart`] gives the next instantiation.
+    fresh: std::cell::Cell<u32>,
     /// The per-body reuse, on the loading thread's checker when the host
     /// rechecks per function ([`Cx::record_reads`]).
     recheck: Option<recheck::Session<'a>>,
@@ -1831,12 +1862,14 @@ impl<'a> Checker<'a> {
             stored_sources: Default::default(),
             arg_sources: Default::default(),
             stored_calls: Default::default(),
+            through: Default::default(),
             derive_sites: Default::default(),
             record: recording.then(RefCell::default),
             reader: Default::default(),
             reads: Default::default(),
             pending_subst: Default::default(),
             pending_call: Default::default(),
+            fresh: Default::default(),
             recheck: None,
         }
     }
@@ -1852,6 +1885,38 @@ impl<'a> Checker<'a> {
             .filter_map(|p| subst.get(p).map(|t| (p.clone(), t.clone())))
             .collect();
         *self.pending_subst.borrow_mut() = Some((name.to_string(), args));
+    }
+
+    /// Names each of `type_params` apart for one instantiation, as `T'n`:
+    /// the caller's own `T` and the callee's `T` are two parameters while a
+    /// call or a record literal solves. Returns the renaming and, in order,
+    /// each parameter with its fresh name. A sentence prints the written name
+    /// ([`crate::ast::written_param`]), and the check's outputs carry it
+    /// ([`crate::types::written_params`]).
+    fn rename_apart(
+        &self,
+        type_params: &[String],
+    ) -> (HashMap<String, Type>, Vec<(String, String)>) {
+        let n = self.fresh.get();
+        self.fresh.set(n + 1);
+        let pairs: Vec<(String, String)> = (type_params.iter())
+            .map(|tp| (tp.clone(), format!("{tp}'{n}")))
+            .collect();
+        let ren = (pairs.iter())
+            .map(|(tp, f)| (tp.clone(), Type::Param(f.clone())))
+            .collect();
+        (ren, pairs)
+    }
+
+    /// `subst`, solved under [`Checker::rename_apart`]'s `pairs`, keyed by
+    /// the written parameters again.
+    fn solved_as_written(
+        subst: &HashMap<String, Type>,
+        pairs: &[(String, String)],
+    ) -> HashMap<String, Type> {
+        (pairs.iter())
+            .filter_map(|(tp, f)| Some((tp.clone(), subst.get(f)?.clone())))
+            .collect()
     }
 
     // ---- type relations -------------------------------------------------
@@ -2222,15 +2287,17 @@ impl<'a> Checker<'a> {
         !self.open_params(ty).is_empty()
     }
 
-    /// The open parameters in `ty`, by name, in order, without repeats.
+    /// The open parameters in `ty`, by written name, in order, without
+    /// repeats.
     fn open_params(&self, ty: &Type) -> Vec<String> {
         let cur = self.cur_fn.borrow();
         let rigid = self.type_params(&cur);
         let mut out: Vec<String> = Vec::new();
         walk_type(ty, &mut |t| {
             if let Type::Param(n) = t {
-                if !rigid.is_some_and(|ps| ps.contains(n)) && !out.contains(n) {
-                    out.push(n.clone());
+                let w = crate::ast::written_param(n);
+                if !rigid.is_some_and(|ps| ps.contains(n)) && !out.iter().any(|o| o == w) {
+                    out.push(w.to_string());
                 }
             }
         });
@@ -2940,6 +3007,7 @@ impl<'a> Checker<'a> {
                 sources: self.stored_sources.take(),
                 arg_sources: self.arg_sources.take(),
                 calls: self.stored_calls.take(),
+                through: self.through.take(),
             },
             derive: self.derive_sites.take(),
         }
@@ -2955,6 +3023,7 @@ impl<'a> Checker<'a> {
         *self.stored_sources.borrow_mut() = t.stored.sources;
         *self.arg_sources.borrow_mut() = t.stored.arg_sources;
         *self.stored_calls.borrow_mut() = t.stored.calls;
+        *self.through.borrow_mut() = t.stored.through;
         *self.derive_sites.borrow_mut() = t.derive;
     }
 
@@ -2971,6 +3040,7 @@ impl<'a> Checker<'a> {
         self.stored_sources.borrow_mut().extend(t.stored.sources);
         self.arg_sources.borrow_mut().extend(t.stored.arg_sources);
         self.stored_calls.borrow_mut().extend(t.stored.calls);
+        self.through.borrow_mut().extend(t.stored.through);
         self.derive_sites.borrow_mut().extend(t.derive);
         self.reads.borrow_mut().extend(t.reads);
         t.diags
@@ -3689,14 +3759,15 @@ impl<'a> Checker<'a> {
                 self.binop_type(*op, l, r, *line)
             }
             Expr::Call {
-                dot: _,
+                dot,
                 name,
                 args,
                 type_args,
                 line,
                 id: _,
             } => {
-                let t = self.call(name, args, type_args, *line, scope, expected, fn_ret)?;
+                let at = (expr.id(), *dot);
+                let t = self.call(name, at, args, type_args, *line, scope, expected, fn_ret)?;
                 // `schemaOf<T>()` lowers through the literal it stands for, so
                 // the checker types those nodes too (`project::schema`).
                 if let ("schemaOf", [Type::Named(tn) | Type::App(tn, _)], true) =
@@ -3909,16 +3980,17 @@ impl<'a> Checker<'a> {
         };
         let mut provided = std::collections::HashSet::new();
         let mut subst: HashMap<String, Type> = HashMap::new();
+        // The record's parameters are renamed apart from the enclosing
+        // function's, as a callee's are ([`Checker::check_declared_call`]).
+        let (ren, pairs) = self.rename_apart(decl.map_or(&[][..], |d| &d.type_params));
         // The expected type seeds the solve: a field may not determine its
         // parameter (`[]` for `Array<T>`, or `Handle<T>`, which stores no `T`).
-        if decl.is_some_and(|d| !d.type_params.is_empty()) {
+        if !pairs.is_empty() {
             if let Some(want) = expected {
                 let mine = Type::App(
                     name.to_string(),
-                    decl.expect("a declaration with type parameters")
-                        .type_params
-                        .iter()
-                        .map(|tp| Type::Param(tp.clone()))
+                    (pairs.iter())
+                        .map(|(_, f)| Type::Param(f.clone()))
                         .collect(),
                 );
                 let _ = self.unify(&mine, want, &mut subst, line);
@@ -3938,9 +4010,10 @@ impl<'a> Checker<'a> {
             let Some((_, value)) = fields.iter().find(|(fname, _)| fname == &field.name) else {
                 continue; // reported below as a missing field
             };
-            let fty = crate::types::substitute(&field.ty, &subst);
+            let field_ty = crate::types::substitute(&field.ty, &ren);
+            let fty = crate::types::substitute(&field_ty, &subst);
             let vty = self.expr(value, scope, Some(&fty), fn_ret)?;
-            self.unify(&field.ty, &vty, &mut subst, line)?;
+            self.unify(&field_ty, &vty, &mut subst, line)?;
             // A value that echoes the open parameter (`[]` as `Array<T>`)
             // settles nothing.
             subst.retain(|_, arg| !self.mentions_open_param(arg));
@@ -3964,6 +4037,7 @@ impl<'a> Checker<'a> {
         let Some(decl) = decl.filter(|d| !d.type_params.is_empty()) else {
             return Ok(Type::Named(name.to_string()));
         };
+        let subst = Self::solved_as_written(&subst, &pairs);
         for tp in &decl.type_params {
             if !subst.contains_key(tp) {
                 let shape: Vec<String> = decl
@@ -4262,6 +4336,7 @@ impl<'a> Checker<'a> {
         // On a type parameter: both operands the same, and the bound present.
         if let Type::Param(t) = &l {
             if &r != &l {
+                let t = crate::ast::written_param(t);
                 return Err(cerr!(line, ParamOperand, t, r));
             }
             return match op {
@@ -4649,9 +4724,12 @@ impl<'a> Checker<'a> {
         Ok(true)
     }
 
+    /// Types the call `at` (its node, and whether it is written `recv.name(..)`).
+    #[allow(clippy::too_many_arguments)]
     fn call(
         &self,
         name: &str,
+        (node, dot): (NodeId, bool),
         args: &[Expr],
         written: &[Type],
         line: usize,
@@ -4659,9 +4737,11 @@ impl<'a> Checker<'a> {
         expected: Option<&Type>,
         fn_ret: Option<&Type>,
     ) -> Result<Type, Diagnostic> {
-        // A call through a binding of function type (parameter, local, field
-        // or module state). Checked before the builtins, so a binding shadows
-        // a same-named builtin.
+        // A call resolves to the nearest binding in scope, before the builtins
+        // and the declared functions: a binding of function type (parameter,
+        // local or module state) is called through. A bare call that a local
+        // of another type binds is refused; a dot call skips that local,
+        // because no such local can be its target.
         if let Some(binding) = self.lookup(scope, name) {
             if let Type::Fn(ptys, ret) = self.base(&binding.ty) {
                 if ptys.len() != args.len() {
@@ -4692,7 +4772,15 @@ impl<'a> Checker<'a> {
                         .borrow_mut()
                         .push((self.cur_fn.borrow().clone(), self.base(&binding.ty)));
                 }
+                self.through.borrow_mut().insert(node);
                 return Ok((*ret).clone());
+            }
+            if !dot && scope.iter().any(|f| f.contains_key(name)) {
+                return match self.base(&binding.ty) {
+                    // The binding's own refusal was stated where it was bound.
+                    Type::Err => Ok(Type::Err),
+                    ty => Err(cerr!(line, CallsLocal, name, ty)),
+                };
             }
         }
         self.call_declared(name, args, written, line, scope, expected, fn_ret)
@@ -5681,6 +5769,11 @@ impl<'a> Checker<'a> {
             return refused();
         }
         if let Some(type_params) = d.type_params {
+            let (ren, pairs) = self.rename_apart(type_params);
+            let params: &[Type] = &(params.iter())
+                .map(|p| crate::types::substitute(p, &ren))
+                .collect::<Vec<_>>();
+            let ret = &crate::types::substitute(ret, &ren);
             let mut subst: HashMap<String, Type> = HashMap::new();
             // Written type arguments seed the solve in declaration order; the
             // arguments infer the rest. They are the only source for a
@@ -5688,9 +5781,9 @@ impl<'a> Checker<'a> {
             if d.written.len() > type_params.len() {
                 return refused();
             }
-            for (tp, ty) in type_params.iter().zip(d.written) {
+            for ((_, f), ty) in pairs.iter().zip(d.written) {
                 self.ensure_type_exists(ty, line)?;
-                subst.insert(tp.clone(), ty.clone());
+                subst.insert(f.clone(), ty.clone());
             }
             let mut atys: Vec<Type> = vec![Type::Err; args.len()];
             // Pass 1: the non-`fn` arguments bind first, so the lambda in
@@ -5741,7 +5834,8 @@ impl<'a> Checker<'a> {
                         line,
                     )? {
                         if self.recording() {
-                            self.note_subst(d.key, &subst, type_params);
+                            let solved = Self::solved_as_written(&subst, &pairs);
+                            self.note_subst(d.key, &solved, type_params);
                         }
                         return self.judged();
                     }
@@ -5770,20 +5864,21 @@ impl<'a> Checker<'a> {
             }
             // A parameter no argument mentions (`fn newSlots<T>() -> Slots<T>`)
             // is solved from the expected type, and only then.
-            if type_params.iter().any(|tp| !subst.contains_key(tp)) {
+            if pairs.iter().any(|(_, f)| !subst.contains_key(f)) {
                 if let Some(want) = expected {
                     let mut from_ctx: HashMap<String, Type> = HashMap::new();
                     if self.unify(ret, want, &mut from_ctx, line).is_ok() {
-                        for tp in type_params {
-                            if let (false, Some(t)) = (subst.contains_key(tp), from_ctx.get(tp)) {
-                                subst.insert(tp.clone(), t.clone());
+                        for (_, f) in &pairs {
+                            if let (false, Some(t)) = (subst.contains_key(f), from_ctx.get(f)) {
+                                subst.insert(f.clone(), t.clone());
                             }
                         }
                     }
                 }
             }
+            let solved = Self::solved_as_written(&subst, &pairs);
             for tp in type_params {
-                if !subst.contains_key(tp) {
+                if !solved.contains_key(tp) {
                     // An argument already refused leaves its parameter open;
                     // answer `Err` rather than a second sentence.
                     if atys.iter().any(|t| matches!(t, Type::Err)) {
@@ -5794,7 +5889,7 @@ impl<'a> Checker<'a> {
             }
             if let Some(bounds) = d.bounds {
                 for (tp, bs) in bounds {
-                    let Some(concrete) = subst.get(tp) else {
+                    let Some(concrete) = solved.get(tp) else {
                         continue;
                     };
                     // No second sentence for an argument already refused.
@@ -5818,7 +5913,7 @@ impl<'a> Checker<'a> {
             // `fromJson<T>(s)` calls what `std/jsondec`'s generator writes for
             // `T`, and the solve is the one place `T` is known.
             if d.key == "fromJson" {
-                if let Some(t) = subst.get("T") {
+                if let Some(t) = solved.get("T") {
                     self.derive_sites.borrow_mut().push(crate::gen::Site {
                         g: crate::loader::JSON_DECODERS.to_string(),
                         ty: t.clone(),
@@ -5836,7 +5931,7 @@ impl<'a> Checker<'a> {
             // The one place a generic call's type arguments exist; recorded
             // for the backends.
             if self.recording() {
-                self.note_subst(d.key, &subst, type_params);
+                self.note_subst(d.key, &solved, type_params);
             }
             return Ok(rty);
         }
@@ -6116,7 +6211,8 @@ impl<'a> Checker<'a> {
         // module-state binding it touches.
         let mut calls: std::collections::HashSet<String> = Default::default();
         {
-            let mut v = Calls(&mut calls);
+            let through = self.through.borrow();
+            let mut v = Calls(&mut calls, &through);
             let mut locals = HashSet::new();
             match body {
                 LambdaBody::Expr(e) => body_expr(e, &locals, &mut v),
@@ -6433,6 +6529,7 @@ impl<'a> Checker<'a> {
             Type::Param(t) => match subst.get(t) {
                 Some(bound) => {
                     if !self.assignable(aty, bound) {
+                        let t = crate::ast::written_param(t);
                         Err(cerr!(line, ParamConflict, t, bound, aty))
                     } else {
                         Ok(())
@@ -6837,7 +6934,7 @@ fn extern_abi_type_ok(ty: &Type, allow_unit: bool) -> bool {
 /// module state, or an atom [`crate::effects::gen_refusal`] refuses, naming
 /// the effect and the chain. Every `gen fn` is checked, even one called only
 /// at run time, because any may be an import target.
-fn check_comptime_purity(program: &Program, out: &mut Vec<Diagnostic>) {
+fn check_comptime_purity(program: &Program, through: &HashSet<NodeId>, out: &mut Vec<Diagnostic>) {
     let gen_fns: Vec<&Function> = program.functions.iter().filter(|f| f.is_gen).collect();
     if gen_fns.is_empty() {
         return;
@@ -6883,7 +6980,7 @@ fn check_comptime_purity(program: &Program, out: &mut Vec<Diagnostic>) {
         if touches_globals(f, &global_names) {
             return Some("reads or writes module state".to_string());
         }
-        for c in expand(fn_calls(&f.body)) {
+        for c in expand(fn_calls(&f.body, through)) {
             if let Some(why) = crate::effects::gen_refusal(&c) {
                 return Some(why);
             }
@@ -6907,7 +7004,10 @@ fn check_comptime_purity(program: &Program, out: &mut Vec<Diagnostic>) {
             let cur = *path.last().unwrap();
             let Some(f) = fn_map.get(cur) else { continue };
             if !facts.contains_key(cur) {
-                facts.insert(cur.to_string(), (direct(f), expand(fn_calls(&f.body))));
+                facts.insert(
+                    cur.to_string(),
+                    (direct(f), expand(fn_calls(&f.body, through))),
+                );
             }
             let (violation, edges) = &facts[cur];
             if let Some(reason) = violation.clone() {
@@ -6973,6 +7073,9 @@ pub struct StoredFnEffects {
     pub arg_sources: Vec<StoredSource>,
     /// `(function, signature)` for each call through a stored fn value.
     pub calls: Vec<(String, Type)>,
+    /// Every call node resolved through a binding of `fn` type, parameter
+    /// calls included ([`Checker::call`]); [`fn_calls`] leaves them out.
+    pub through: HashSet<NodeId>,
 }
 
 impl StoredFnEffects {
@@ -7131,7 +7234,7 @@ pub fn module_state_use(
             ));
         }
         let mut callees: Vec<String> = Vec::new();
-        for c in fn_calls(&f.body) {
+        for c in fn_calls(&f.body, &stored.through) {
             if let Some(impls) = method_impls.get(&c) {
                 callees.extend(impls.iter().cloned());
             }
@@ -7334,26 +7437,34 @@ fn init_restrictions(
 // impl of `BodyVisit`.
 crate::body_scope_descent!(BodyVisit, body_block, body_stmt, body_expr);
 
-/// Collects the names a call or a `try`-construct reaches. A call inside a
-/// lambda counts for the enclosing function, its monomorphization site.
-struct Calls<'a>(&'a mut HashSet<String>);
+/// Collects the names a call or a `try`-construct reaches, except each call
+/// node in `.1`. A call inside a lambda counts for the enclosing function, its
+/// monomorphization site.
+struct Calls<'a>(&'a mut HashSet<String>, &'a HashSet<NodeId>);
 
 impl BodyVisit<'_> for Calls<'_> {
     const SCOPED: bool = false;
 
     fn expr(&mut self, e: &Expr, _: &HashSet<String>) -> bool {
-        if let Expr::Call { name, .. } | Expr::TryConstruct { name, .. } = e {
-            self.0.insert(name.clone());
+        match e {
+            Expr::Call { .. } if self.1.contains(&e.id()) => {}
+            Expr::Call { name, .. } | Expr::TryConstruct { name, .. } => {
+                self.0.insert(name.clone());
+            }
+            _ => {}
         }
         true
     }
 }
 
-/// Returns every function name called anywhere in `b`.
-pub fn fn_calls(b: &Block) -> HashSet<String> {
+/// Returns every function name called anywhere in `b`. `through` is the
+/// check's [`StoredFnEffects::through`]: a call the checker resolved through
+/// a binding reaches no function. An empty `through` counts every call by its
+/// name.
+pub fn fn_calls(b: &Block, through: &HashSet<NodeId>) -> HashSet<String> {
     let mut out = HashSet::new();
     let mut locals = HashSet::new();
-    body_block(b, &mut locals, &mut Calls(&mut out));
+    body_block(b, &mut locals, &mut Calls(&mut out, through));
     out
 }
 

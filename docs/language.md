@@ -66,6 +66,7 @@ count = count + 1
 
 - Assigning to a binding declared without `mut` is refused.
 - An inner binding shadows an outer one of the same name: a `let`, a `for` variable, a pattern binder and a lambda parameter each start a new binding.
+- A binding also shadows a function of its name in a bare call: `f(x)` calls the local `f` when it has a `fn` type, and is refused when it has another type. A dot call `x.f()` skips a local `f` that is not a function.
 - A binding that holds heap data moves on assignment. `let b = a` makes `a` unusable when `a` owns a `String`, an array, a map or a record that holds one. Write `a.copy()` when both need a value. A value with no heap, such as an `Int64` or a record of numbers, copies.
 
 ## Types

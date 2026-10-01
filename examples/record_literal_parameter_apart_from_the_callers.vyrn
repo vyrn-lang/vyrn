@@ -1,0 +1,15 @@
+// A record literal's type parameter is apart from the enclosing function's
+// parameter of the same name: `Box`'s `T` is `Int64` here, while `mk`'s `T`
+// is `Bool`.
+
+type Box<T> = { items: Array<T>, first: T }
+
+fn mk<T>(x: Int64, y: T) -> Int64 {
+    let b = Box { items: [], first: x }
+    return b.first
+}
+
+fn main() -> Int64 {
+    print(mk(5, true))
+    return 0
+}

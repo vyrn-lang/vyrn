@@ -1208,6 +1208,21 @@ pub fn substitute(ty: &Type, subst: &HashMap<String, Type>) -> Type {
     }
 }
 
+/// `ty` with every renamed-apart parameter (`T'n`) back to its written name
+/// ([`crate::ast::written_param`]), or `None` when it holds none.
+pub fn written_params(ty: &Type) -> Option<Type> {
+    let mut back: HashMap<String, Type> = HashMap::new();
+    walk_type(ty, &mut |t| {
+        if let Type::Param(n) = t {
+            let w = crate::ast::written_param(n);
+            if w.len() < n.len() {
+                back.insert(n.clone(), Type::Param(w.to_string()));
+            }
+        }
+    });
+    (!back.is_empty()).then(|| substitute(ty, &back))
+}
+
 /// The type declarations a helper reads by name. A map reads and records
 /// nothing; the checker records each lookup as a read of the body it checks
 /// ([`crate::ast::Key`]).
