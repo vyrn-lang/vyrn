@@ -1,0 +1,1 @@
+a_gen_fn_reaches_module_state_through_a_dispatched_method.vyrn:27:0: `gen fn g` is not comptime-pure: it reaches `Qa__Q__describe` (via g -> Qa__Q__describe), which reads or writes module state (generators run at compile time — they may not use `extern`, module state, `print`, `writeFile`, `readLine`, `args`, `readFileBytes`, the clock, entropy, or logging sinks)
