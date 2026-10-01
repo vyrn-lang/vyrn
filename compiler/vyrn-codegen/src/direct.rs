@@ -3350,6 +3350,13 @@ impl<'p> Fn_<'_, 'p> {
             .ok_or_else(|| gap(&format!("the name `{name}` (not a local)"), line))
     }
 
+    /// The module state the core names `name` ([`vyrn_frontend::core::Place::Global`]),
+    /// which no local shadows.
+    fn global(&self, name: &str, line: usize) -> Result<(Place, Type), String> {
+        (self.cx.globals.get(name).cloned())
+            .ok_or_else(|| gap(&format!("the module state `{name}`"), line))
+    }
+
     fn place_for(&mut self, b: &mut Frame, r: &Repr, line: usize) -> Result<Place, String> {
         Ok(match r {
             Repr::Scalar(v) => Place::Local(b.local(*v)),
@@ -9662,6 +9669,7 @@ impl<'p> Fn_<'_, 'p> {
                 None => Vec::new(),
             };
             let from = b.mark();
+            let scope = self.scope.len();
             for (i, bn) in arm.binds.iter().enumerate() {
                 let ty = body.names[bn.index()].ty.clone();
                 let layout = matches!(self.cx.repr(&ty, line)?, Repr::Agg(_));
@@ -9689,7 +9697,9 @@ impl<'p> Fn_<'_, 'p> {
             }
             let to = b.mark();
             self.core_stmts(m, b, body, w, &arm.body[arm.reads(on).len()..])?;
-            // A binder's scope is its arm, so its slots go back at the arm's end.
+            // A binder's scope is its arm, so its name and its slots go back
+            // at the arm's end.
+            self.scope.truncate(scope);
             if from < to {
                 b.give_back(from, to);
             }
@@ -9858,7 +9868,7 @@ impl<'p> Fn_<'_, 'p> {
                         // Module state grows at its fixed address, with the
                         // word the module reserved for it.
                         let (place, own) = match core_global(body, *x) {
-                            Some(g) => match (self.lookup(g, line)?.0, self.cx.gappend.get(g)) {
+                            Some(g) => match (self.global(g, line)?.0, self.cx.gappend.get(g)) {
                                 (at @ Place::Static(_), Some(&word)) => (at, Place::Static(word)),
                                 _ => return unsupported("an append with no ownership word", line),
                             },
@@ -11361,7 +11371,7 @@ impl<'p> Fn_<'_, 'p> {
             }
             // Module state is storage at a fixed address.
             At::Global(name) => {
-                let (place, ty) = self.lookup(name, line)?;
+                let (place, ty) = self.global(name, line)?;
                 let Place::Static(at) = place else {
                     return unsupported("module state that is not static", line);
                 };
@@ -11438,7 +11448,7 @@ impl<'p> Fn_<'_, 'p> {
         match p {
             At::Name(n) => Some(body.names[n.index()].ty.clone()),
             At::Global(name) => {
-                let (place, ty) = self.lookup(name, 0).ok()?;
+                let (place, ty) = self.global(name, 0).ok()?;
                 matches!(place, Place::Static(_)).then_some(ty)
             }
             At::Field(base, f) => {
