@@ -144,8 +144,9 @@ directory (default `public`) and the browser runtimes from `web/` in front.
 ### `vyrn fmt [file ...] [--check]`
 
 The canonical formatter: one style, no options. With no files it formats the
-project's `main` and its local imports. `--check` writes nothing, lists the
-files that would change and exits 1 if any would.
+project's `main` and its local imports; if that load fails, it formats `main`
+alone and exits 1. `--check` writes nothing, lists the files that would change
+and exits 1 if any would.
 
 The printer reads the token stream with comments and chooses only the
 whitespace between raw token texts. It sets indentation (4 spaces per brace

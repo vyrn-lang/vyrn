@@ -988,8 +988,8 @@ pub fn routed_callee<'e>(
 }
 
 /// Returns the generated source of every generator module reachable from the
-/// root, as `(banner, source)` pairs in load order, for
-/// `vyrn emit-gen`. Runs the whole load, cache included, and discards the link.
+/// root, as `(banner, source)` pairs in load order. Runs the whole load, cache
+/// included, and discards the link.
 pub fn generated_modules(
     root_source: &str,
     root_path: &str,
@@ -997,11 +997,10 @@ pub fn generated_modules(
     resolver: &dyn ModuleResolver,
     engine: Option<&crate::gen::GenEngine>,
 ) -> Result<Vec<(String, String)>, Vec<Diagnostic>> {
-    let (modules, _, _, _, _) =
-        load_modules(root_source, root_path, opts, resolver, engine).map_err(|(d, _)| d)?;
-    Ok(modules
+    let (graph, _) = module_graph(root_source, root_path, opts, resolver, engine);
+    Ok(graph?
         .into_iter()
-        .filter_map(|m| m.gen_source.map(|s| (m.key, s)))
+        .filter_map(|(key, _, gen)| gen.map(|s| (key, s)))
         .collect())
 }
 
@@ -1041,7 +1040,7 @@ pub type Warnings = Vec<Diagnostic>;
 /// The maps come back whether or not the load succeeds: they are a line-scan of
 /// each generated text, so a `.vyx` whose template fails to lex still maps its
 /// lines. The returned diagnostics are already remapped. A failed load
-/// returns no warnings. The graph is the one [`module_graph_with_sources`]
+/// returns no warnings. The graph is the one [`module_graph`]
 /// derives; the symbol indexer needs it for `import * as ns`, and rebuilding it
 /// there would run a second whole load on every keystroke.
 pub fn load_with_origins(
@@ -1160,41 +1159,20 @@ fn graph_of(modules: &[Module]) -> ModuleGraph {
         .collect()
 }
 
-/// Returns every `(module key, resolved import targets)` pair reachable from the
-/// root, for `vyrn deps`.
+/// Returns every module reachable from the root, with the load's warnings, and
+/// links nothing. A generated module carries its source, since no resolver can
+/// read a banner key. A failed load returns no warnings, as [`load_with_origins`].
 pub fn module_graph(
     root_source: &str,
     root_path: &str,
     opts: &LoadOptions,
     resolver: &dyn ModuleResolver,
     engine: Option<&crate::gen::GenEngine>,
-) -> Result<Vec<(String, Vec<String>)>, Vec<Diagnostic>> {
-    let (modules, _, _, _, _) =
-        load_modules(root_source, root_path, opts, resolver, engine).map_err(|(d, _)| d)?;
-    Ok(modules
-        .into_iter()
-        .map(|m| (m.key, m.import_targets))
-        .collect())
-}
-
-/// Like [`module_graph`], and each entry also carries a generated module's source,
-/// `None` for a file. The symbol indexer lists the exports of an
-/// `import * as ns from gen(..)` namespace from it, since no resolver can read a
-/// banner key.
-#[allow(clippy::type_complexity)]
-pub fn module_graph_with_sources(
-    root_source: &str,
-    root_path: &str,
-    opts: &LoadOptions,
-    resolver: &dyn ModuleResolver,
-    engine: Option<&crate::gen::GenEngine>,
-) -> Result<Vec<(String, Vec<String>, Option<String>)>, Vec<Diagnostic>> {
-    let (modules, _, _, _, _) =
-        load_modules(root_source, root_path, opts, resolver, engine).map_err(|(d, _)| d)?;
-    Ok(modules
-        .into_iter()
-        .map(|m| (m.key, m.import_targets, m.gen_source))
-        .collect())
+) -> (Result<ModuleGraph, Vec<Diagnostic>>, Warnings) {
+    match load_modules(root_source, root_path, opts, resolver, engine) {
+        Ok((modules, _, _, warnings, _)) => (Ok(graph_of(&modules)), warnings),
+        Err((diags, _)) => (Err(diags), Vec::new()),
+    }
 }
 
 /// Loads every module reachable from the root, and returns them with the root

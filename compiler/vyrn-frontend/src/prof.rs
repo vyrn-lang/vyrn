@@ -39,11 +39,18 @@ pub fn read_lines(n: usize) {
     }
 }
 
-/// Whether build phases are timed. Read once, so the hot loader path does not
-/// pay an env lookup per phase.
+/// Whether build phases are timed: [`arm`] or `VYRN_BUILD_PROFILE`. Read once,
+/// so the hot loader path does not pay an env lookup per phase.
 pub fn phases_on() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var("VYRN_BUILD_PROFILE").is_ok_and(|v| v != "0"))
+    *PHASES_ON.get_or_init(|| std::env::var("VYRN_BUILD_PROFILE").is_ok_and(|v| v != "0"))
+}
+
+static PHASES_ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+
+/// Times build phases from here on, as `VYRN_BUILD_PROFILE=1` does. Call it
+/// before the first phase; after one, the answer is already fixed.
+pub fn arm() {
+    let _ = PHASES_ON.set(true);
 }
 
 /// One open phase. It charges its span on drop, so an early `return` still
