@@ -239,7 +239,7 @@ pub struct Program {
     /// Comptime-only: a contract reaches the emitted program only through the
     /// `contractOf(Name)` reflection literal.
     pub contracts: Vec<ContractDecl>,
-    pub impls: Vec<ImplBlock>,
+    pub impls: crate::types::Impls,
     /// Module-state bindings, root module only. Initialized once, in declaration
     /// order, before `main`.
     pub globals: Vec<GlobalDecl>,

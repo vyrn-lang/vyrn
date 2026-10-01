@@ -198,7 +198,7 @@ fn forms() -> Vec<String> {
     out
 }
 
-/// `Program`'s `Vec` fields, in declaration order: a pass reaches a
+/// `Program`'s `Vec` fields and `impls`, in declaration order: a pass reaches a
 /// declaration through one, so the field is the needle. The other fields are
 /// not declarations.
 fn declarations() -> Vec<String> {
@@ -216,7 +216,8 @@ fn declarations() -> Vec<String> {
         let Some((name, ty)) = rest.split_once(':') else {
             continue;
         };
-        if ty.trim_start().starts_with("Vec<") {
+        let ty = ty.trim_start();
+        if ty.starts_with("Vec<") || ty.starts_with("crate::types::Impls") {
             out.push(name.to_string());
         }
     }

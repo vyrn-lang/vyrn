@@ -845,7 +845,7 @@ fn judged(facts: &NodeTypes<'_>, own: &Ownership, sp: &Speech) -> Vec<(usize, St
 fn unbound(
     facts: &NodeTypes<'_>,
     own: &Ownership,
-    impls: &[vyrn_frontend::ast::ImplBlock],
+    impls: &vyrn_frontend::types::Impls,
     outer: &HashMap<String, Vec<String>>,
     sp: &Speech,
 ) -> Vec<(usize, String)> {
@@ -1744,7 +1744,13 @@ impl<'a> Builder<'a> {
             && borrow
             && self.rebound.contains(name)
             && self.owns(ty)
-            && vyrn_frontend::types::copy_impl(&self.program.impls, ty).is_none()
+            && (self.program.impls)
+                .method(
+                    vyrn_frontend::types::COPY,
+                    ty,
+                    vyrn_frontend::types::COPY_COPY,
+                )
+                .is_none()
     }
 
     /// Why a `let` binds a value this frame does not own. It asks
@@ -1924,7 +1930,7 @@ impl<'a> Builder<'a> {
         let Ok(rty) = self.ty_of(recv) else {
             return Ok(false);
         };
-        let Some(f) = vyrn_frontend::project::lookup_in(&self.program.impls, &rty, name) else {
+        let Some((_, f)) = self.program.impls.place(&rty, name) else {
             return Ok(false);
         };
         if !vyrn_frontend::project::is_optional(f) {
@@ -2170,7 +2176,10 @@ impl<'a> Builder<'a> {
                 };
                 let p = self.projection(name).unwrap();
                 let rty = self.ty_of(&args[0])?;
-                Ok(self.under_impl(&p.ret, &rty))
+                Ok(match self.program.impls.place(&rty, name) {
+                    Some((imp, f)) => vyrn_frontend::types::under_head(imp, &rty, &f.ret),
+                    None => p.ret.clone(),
+                })
             }
             None => gap_d(
                 "an expression the checker did not type",
@@ -3816,24 +3825,22 @@ impl<'a> Builder<'a> {
             shape => {
                 let (key, elem) = match shape {
                     Type::Array(e) | Type::ArrayN(e, _) | Type::SmallArray(e, _) => (Type::Int, *e),
-                    other => {
-                        match vyrn_frontend::project::lookup_in(&self.program.impls, bty, "atSet") {
-                            Some(f) => (
-                                f.params
-                                    .get(1)
-                                    .map_or(Type::Int, |p| self.under_impl(&p.ty, bty)),
-                                self.under_impl(&f.ret, bty),
-                            ),
-                            None => {
-                                let ([other], []) = sp.say([&other], []);
-                                let refusal = format!(
+                    other => match self.program.impls.place(bty, "atSet") {
+                        Some((imp, f)) => (
+                            (f.params.get(1)).map_or(Type::Int, |p| {
+                                vyrn_frontend::types::under_head(imp, bty, &p.ty)
+                            }),
+                            vyrn_frontend::types::under_head(imp, bty, &f.ret),
+                        ),
+                        None => {
+                            let ([other], []) = sp.say([&other], []);
+                            let refusal = format!(
                                 "`{name}[i] = ..` needs an Array, a Map, or a type whose impl declares the `atSet` projection (`fn atSet(modify self, ..) -> modify T`), found {other}"
                             );
-                                self.body.mistyped.push((line, refusal));
-                                return gap("a store into an element of what has none", line);
-                            }
+                            self.body.mistyped.push((line, refusal));
+                            return gap("a store into an element of what has none", line);
                         }
-                    }
+                    },
                 };
                 let i = ity.filter(|i| {
                     !coercible(i, &key) && vyrn_frontend::types::resolve(i, decls) != Type::Err
@@ -4167,8 +4174,8 @@ impl<'a> Builder<'a> {
                 field("length")
             }
             _ => match vyrn_frontend::types::iterate_impl(&self.program.impls, ity) {
-                Some((_, size, _)) => {
-                    let solved = self.impl_args(&size, ity);
+                Some((imp, size, _)) => {
+                    let solved = self.impl_args(imp, &size, ity);
                     Rhs::Call {
                         kind: (self.fn_id(&size).filter(|_| solved.is_some()))
                             .map_or(Callee::Method, Callee::Fn),
@@ -4209,51 +4216,29 @@ impl<'a> Builder<'a> {
     }
 
     fn projected_elem(&self, ity: &Type) -> Option<Type> {
-        let key = vyrn_frontend::types::type_key(ity)?;
-        let imp = self.program.impls.iter().find(|i| {
-            vyrn_frontend::types::type_key(&i.ty).as_deref() == Some(key.as_str())
-                && i.places.iter().any(|p| p.name == "nth")
-        })?;
-        let nth = imp.places.iter().find(|p| p.name == "nth")?;
-        Some(self.under_impl(&nth.ret, ity))
-    }
-
-    /// `ty` as an impl's member declares it, under the type arguments of the
-    /// receiver `recv`: `impl<T> .. for Slots<T>` against `Slots<Person>`
-    /// makes T Person.
-    fn under_impl(&self, ty: &Type, recv: &Type) -> Type {
-        let key = vyrn_frontend::types::type_key(recv);
-        let mut subst = HashMap::new();
-        if let Some(imp) =
-            (self.program.impls.iter()).find(|i| vyrn_frontend::types::type_key(&i.ty) == key)
-        {
-            vyrn_frontend::types::solve_param(&imp.ty, recv, &mut subst);
-        }
-        vyrn_frontend::types::substitute(ty, &subst)
+        let (imp, nth) = self.program.impls.place(ity, "nth")?;
+        Some(vyrn_frontend::types::under_head(imp, ity, &nth.ret))
     }
 
     /// Whether a projection answers for `ty`'s element place.
     fn projected(&self, ty: &Type) -> bool {
-        vyrn_frontend::project::lookup_in(&self.program.impls, ty, "atSet").is_some()
+        self.program.impls.place(ty, "atSet").is_some()
     }
 
-    /// The type arguments of a call to the impl function `f` on a receiver
-    /// of type `recv`, in `f`'s order: its impl head's parameters solved
-    /// against the receiver, as [`Builder::under_impl`] solves them. Empty
-    /// for a function with none; `None` where the program declares no `f`
-    /// or the receiver leaves a parameter unsolved.
-    fn impl_args(&self, f: &str, recv: &Type) -> Option<Vec<(String, Type)>> {
+    /// The type arguments of a call to `f`, a function `imp` flattened, on a
+    /// receiver of type `recv`, in `f`'s order: the impl head's parameters
+    /// solved against the receiver. Empty for a function with none; `None`
+    /// where the program declares no `f` or the receiver leaves a parameter
+    /// unsolved.
+    fn impl_args(
+        &self,
+        imp: &vyrn_frontend::ast::ImplBlock,
+        f: &str,
+        recv: &Type,
+    ) -> Option<Vec<(String, Type)>> {
         let g = self.program.functions.iter().find(|g| g.name == f)?;
-        let key = vyrn_frontend::types::type_key(recv)?;
         let mut subst = HashMap::new();
-        if let Some(imp) = self.program.impls.iter().find(|i| {
-            vyrn_frontend::types::type_key(&i.ty).as_deref() == Some(key.as_str())
-                && (i.methods.iter()).any(|m| {
-                    vyrn_frontend::types::impl_method_name(&i.protocol, &key, &m.name) == f
-                })
-        }) {
-            vyrn_frontend::types::solve_param(&imp.ty, recv, &mut subst);
-        }
+        vyrn_frontend::types::solve_param(&imp.ty, recv, &mut subst);
         (g.type_params.iter())
             .map(|p| Some((p.clone(), subst.get(p)?.clone())))
             .collect()
@@ -5501,7 +5486,13 @@ impl<'a> Builder<'a> {
             if name == vyrn_frontend::project::AT && args.len() == 2 && !is_place_read(&args[0]))
             && self.ty_of(e).is_ok_and(|t| {
                 self.owns(&t)
-                    && (vyrn_frontend::types::copy_impl(&self.program.impls, &t).is_none()
+                    && ((self.program.impls)
+                        .method(
+                            vyrn_frontend::types::COPY,
+                            &t,
+                            vyrn_frontend::types::COPY_COPY,
+                        )
+                        .is_none()
                         || (std::ptr::eq(at, e) && self.scrutinee != Some(e.id())))
             })
     }
@@ -6173,9 +6164,11 @@ impl<'a> Builder<'a> {
             vyrn_frontend::types::impl_method_name(vyrn_frontend::types::FALLIBLE, &key, m)
         };
         let success = method("success");
-        let (Some(is_success), Some(success_id)) =
-            (self.fn_id(&method("isSuccess")), self.fn_id(&success))
-        else {
+        let (Some(imp), Some(is_success), Some(success_id)) = (
+            self.program.impls.get(vyrn_frontend::types::FALLIBLE, &key),
+            self.fn_id(&method("isSuccess")),
+            self.fn_id(&success),
+        ) else {
             return gap("a `?` on a type with no `Fallible` impl", line);
         };
         // The impl's `isSuccess` chooses the arm. Both impl calls are declared
@@ -6185,7 +6178,7 @@ impl<'a> Builder<'a> {
             held,
             Rhs::Call {
                 solved: self
-                    .impl_args(&method("isSuccess"), &ity)
+                    .impl_args(imp, &method("isSuccess"), &ity)
                     .unwrap_or_default(),
                 callee: method("isSuccess"),
                 args: vec![(Arg::Val(sv.clone()), Capability::Read)],
@@ -6213,7 +6206,7 @@ impl<'a> Builder<'a> {
         ok.push(St::Let(
             t,
             Rhs::Call {
-                solved: self.impl_args(&success, &ity).unwrap_or_default(),
+                solved: self.impl_args(imp, &success, &ity).unwrap_or_default(),
                 callee: success,
                 args: vec![(Arg::Val(sv.clone()), Capability::Read)],
                 write_back: false,
@@ -6677,13 +6670,13 @@ impl<'a> Builder<'a> {
     fn dispatched(&self, name: &str, recv: &Expr) -> Option<(String, Vec<(String, Type)>)> {
         let rty = self.ty_of(recv).ok()?;
         let key = vyrn_frontend::types::type_key(&rty)?;
-        let fs: std::collections::BTreeMap<String, Vec<(String, Type)>> = self
-            .program
-            .impls
-            .iter()
+        let fs: std::collections::BTreeMap<String, Vec<(String, Type)>> = (self.program.impls)
+            .of_key(&key)
             .filter(|i| i.methods.iter().any(|m| m.name == name))
-            .map(|i| vyrn_frontend::types::impl_method_name(&i.protocol, &key, name))
-            .filter_map(|f| Some((f.clone(), self.impl_args(&f, &rty)?)))
+            .filter_map(|i| {
+                let f = vyrn_frontend::types::impl_method_name(&i.protocol, &key, name);
+                Some((f.clone(), self.impl_args(i, &f, &rty)?))
+            })
             .collect();
         let mut fs = fs.into_iter();
         match (fs.next(), fs.next()) {
@@ -6696,8 +6689,17 @@ impl<'a> Builder<'a> {
     /// type arguments.
     fn copied(&self, recv: &Expr) -> Option<(String, Vec<(String, Type)>)> {
         let rty = self.ty_of(recv).ok()?;
-        let f = vyrn_frontend::types::copy_impl(&self.program.impls, &rty)?;
-        let solved = self.impl_args(&f, &rty)?;
+        let impls = &self.program.impls;
+        let f = impls.method(
+            vyrn_frontend::types::COPY,
+            &rty,
+            vyrn_frontend::types::COPY_COPY,
+        )?;
+        let imp = impls.get(
+            vyrn_frontend::types::COPY,
+            &vyrn_frontend::types::type_key(&rty)?,
+        )?;
+        let solved = self.impl_args(imp, &f, &rty)?;
         Some((f, solved))
     }
 
@@ -7499,8 +7501,7 @@ fn typed(
 ) -> bool {
     let global_mutable = |g: &str| program.globals.iter().any(|d| d.name == g && d.mutable);
     let global_ty = |g: &str| global_ty(program, own, g);
-    let projected =
-        |t: &Type| vyrn_frontend::project::lookup_in(&program.impls, t, "atSet").is_some();
+    let projected = |t: &Type| program.impls.place(t, "atSet").is_some();
     let ruled_within = |t: &Type, path: &[&Place]| ruled_within(&own.proto, t, path);
     let grouped = |t: &Type, path: &[&Place]| grouped(&own.proto, t, path);
     let rules = crate::typed::StoreRules {

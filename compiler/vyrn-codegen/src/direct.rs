@@ -1016,7 +1016,7 @@ struct Cx<'a> {
     oracle: Option<Oracle>,
     /// Every `impl` block, for `place` projection lookup: a projection is not a function, so
     /// `sigs` cannot answer for it.
-    impls: Vec<vyrn_frontend::ast::ImplBlock>,
+    impls: vyrn_frontend::types::Impls,
     sigs: HashMap<String, Sig>,
     rt: Rt,
     /// The `vyrn_gen` host imports on the generator path. `None` in an ordinary build, where those
@@ -6478,7 +6478,7 @@ impl<'p> Fn_<'_, 'p> {
     /// Returns the element type of a user container: the declared return type of its `at`,
     /// with the impl head solved against `ty`, so `peek` need not walk a projection body.
     fn user_elem(&self, ty: &Type) -> Option<Type> {
-        let (imp, f) = vyrn_frontend::project::lookup_impl(&self.cx.impls, ty, "at")?;
+        let (imp, f) = self.cx.impls.place(ty, "at")?;
         let mut subst = HashMap::new();
         crate::solve_param(&imp.ty, ty, &mut subst);
         Some(self.cx.sub(&ftypes::substitute(&f.ret, &subst)))
@@ -14217,7 +14217,7 @@ mod tests {
             lambdas: HashMap::new(),
             layouts: RefCell::default(),
             oracle: None,
-            impls: Vec::new(),
+            impls: Default::default(),
             sigs: HashMap::new(),
             gen: None,
             generics: HashMap::new(),

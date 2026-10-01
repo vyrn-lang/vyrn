@@ -343,7 +343,7 @@ fn apply(ty: &Type, chain: &Chain) -> Type {
 /// under `a[i] = v`, a `for` over a user container and `schemaOf`'s literal.
 struct Walk<'a, 'r> {
     recorded: &'r checker::Recorded,
-    impls: &'a [vyrn_frontend::ast::ImplBlock],
+    impls: &'a vyrn_frontend::types::Impls,
     expansions: &'a vyrn_frontend::project::Expansions,
     facts: NodeTypes<'a>,
     /// `(callee, its solved type arguments by name)`, already concrete.

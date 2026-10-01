@@ -830,11 +830,8 @@ pub fn drops(
         });
         for (n, line) in written {
             let info = &f.names[n.index()];
-            let owned = types::type_key(&info.ty).is_some_and(|k| {
-                program.impls.iter().any(|i| {
-                    i.protocol == types::OWNED && types::type_key(&i.ty).as_ref() == Some(&k)
-                })
-            });
+            let owned = types::type_key(&info.ty)
+                .is_some_and(|k| program.impls.get(types::OWNED, &k).is_some());
             let t = types::resolve(&info.ty, decls);
             let heap = matches!(
                 t,
