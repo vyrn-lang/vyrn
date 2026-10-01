@@ -116,10 +116,11 @@ pub fn lookup_impl_by_key<'a>(
 /// A tree's ids and temporary names derive from its site. It is numbered in
 /// the site's [`NodeId::expansion_unit`], after the trees made there before
 /// it. One thread types a unit's body, in the body's order, so the ids do not
-/// depend on the thread count. The placer's parallel builds only read trees:
-/// they run under [`Expansions::seal`]. An unshared table ([`Expansions::default`],
-/// the editor's) keeps no tree: each ask builds one, [`Expansions::schema`]
-/// answers none, and the lowering inlines no site.
+/// depend on the thread count. The lowering's walks and the placer's parallel
+/// builds only read trees: they run under [`Expansions::seal`]. An unshared
+/// table ([`Expansions::default`], the editor's) keeps no tree: each ask
+/// builds one, [`Expansions::schema`] answers none, and the lowering inlines
+/// no site.
 #[derive(Default)]
 pub struct Expansions {
     shared: bool,
@@ -142,9 +143,11 @@ impl Expansions {
 
     /// Forbids making a tree until the guard drops, for a section that builds
     /// bodies on many threads: there a tree's ids would depend on the thread
-    /// order, so a site typing did not expand panics instead.
+    /// order, so a site typing did not expand panics instead. An unshared
+    /// table stays open: each ask builds a tree of its own, and no pass
+    /// lowers through one, so its ids reach no output.
     pub fn seal(&self) -> Sealed<'_> {
-        let was = std::mem::replace(&mut self.write().sealed, true);
+        let was = std::mem::replace(&mut self.write().sealed, self.shared);
         Sealed { table: self, was }
     }
 

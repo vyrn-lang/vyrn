@@ -7860,7 +7860,7 @@ pub fn augment(program: &Program, w: &mut World) {
     let placed = vyrn_frontend::par::in_parallel(
         &made,
         |m| match m {
-            Made::Built(_, Ok(b)) => b.frames().iter().map(|f| f.stmts.len()).sum(),
+            Made::Built(_, Ok(b)) => b.frames().iter().map(|f| rows(&f.stmts).count()).sum(),
             _ => 0,
         },
         || (),

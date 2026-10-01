@@ -785,6 +785,9 @@ fn build<'a>(
     ownership: &vyrn_frontend::own::Ownership,
     reuse: bool,
 ) -> Lowered<'a> {
+    // Typing expanded every site a walk reads, so the lowering makes no
+    // expansion tree, and its walks run on many threads.
+    let _sealed = program.expansions.seal();
     let mut walks = reuse.then(|| Walks::open(recorded));
     let no_steps: Vec<Release> = Vec::new();
     let by_name = by_name(program);
@@ -831,41 +834,46 @@ fn build<'a>(
     }
     let predicates = pw.facts;
     let id = |body| program.source_id(body);
-    let mut places: Vec<PlaceBody<'a>> = Vec::new();
-    for (i, (_, f)) in (0..).zip(vyrn_frontend::project::all(program)) {
-        let mut w = Walk::new(recorded, program, HashMap::new());
-        facts_block(&f.body, &mut Default::default(), &mut w);
-        places.push(PlaceBody {
+    let place_fns: Vec<&Function> = (vyrn_frontend::project::all(program))
+        .map(|(_, f)| f)
+        .collect();
+    let blocks: Vec<&vyrn_frontend::ast::Block> = (place_fns.iter().map(|f| &f.body))
+        .chain(program.tests.iter().map(|t| &t.body))
+        .chain(program.benches.iter().map(|b| &b.body))
+        .collect();
+    let mut facts = vyrn_frontend::par::in_parallel(
+        &blocks,
+        |b| b.stmts.len(),
+        || (),
+        |_, b| walk(recorded, program, b, HashMap::new()).facts,
+    )
+    .into_iter();
+    let places: Vec<PlaceBody<'a>> = ((0..).zip(place_fns).zip(&mut facts))
+        .map(|((i, f), facts)| PlaceBody {
             func: f,
             id: id(SourceBody::Place(i)),
-            facts: w.facts,
-        });
-    }
+            facts,
+        })
+        .collect();
     let mut outside: Vec<OutsideBody<'a>> = Vec::new();
-    for (i, t) in (0..).zip(&program.tests) {
-        let mut w = Walk::new(recorded, program, HashMap::new());
-        facts_block(&t.body, &mut Default::default(), &mut w);
-        let name = format!("test@{i}");
+    for ((i, t), facts) in (0..).zip(&program.tests).zip(&mut facts) {
         outside.push(OutsideBody {
             id: id(SourceBody::Test(i)),
-            name,
+            name: format!("test@{i}"),
             block: &t.body,
             module: t.module.clone(),
             line: t.line,
-            facts: w.facts,
+            facts,
         });
     }
-    for (i, b) in (0..).zip(&program.benches) {
-        let mut w = Walk::new(recorded, program, HashMap::new());
-        facts_block(&b.body, &mut Default::default(), &mut w);
-        let name = format!("bench@{i}");
+    for ((i, b), facts) in (0..).zip(&program.benches).zip(&mut facts) {
         outside.push(OutsideBody {
             id: id(SourceBody::Bench(i)),
-            name,
+            name: format!("bench@{i}"),
             block: &b.body,
             module: b.module.clone(),
             line: b.line,
-            facts: w.facts,
+            facts,
         });
     }
     follow(
@@ -914,25 +922,59 @@ fn build<'a>(
         );
     }
 
-    while let Some((func_id, func, type_args)) = queue.pop_front() {
-        let subst: BTreeMap<String, Type> = func
-            .type_params
-            .iter()
-            .cloned()
+    // The walks run ahead of the worklist in waves. When `ahead` is empty, the
+    // body just taken and every body queued behind it are walked at once, on
+    // every thread; then each body's calls are followed in queue order, as one
+    // thread would. `ahead` holds a walk for each of the first bodies in the
+    // queue, so a body queued after the wave waits for the next one.
+    let mut ahead: VecDeque<Walked> = VecDeque::new();
+    let subst_of = |func: &Function, type_args: &[Type]| -> BTreeMap<String, Type> {
+        (func.type_params.iter().cloned())
             .zip(type_args.iter().cloned())
-            .collect();
+            .collect()
+    };
+    while let Some((func_id, func, type_args)) = queue.pop_front() {
+        let subst = subst_of(func, &type_args);
         let flat: HashMap<String, Type> = subst.clone().into_iter().collect();
 
-        let w = match walks.as_mut().and_then(|ws| ws.reuse(func_id, &type_args)) {
-            Some(w) => w,
-            None => {
-                let w = walk(recorded, program, &func.body, flat.clone());
-                if let Some(ws) = &mut walks {
-                    ws.keep(func_id, &type_args, &w);
-                }
-                w
+        if ahead.is_empty() {
+            let wave: Vec<_> = std::iter::once((func_id, func, &type_args[..]))
+                .chain(queue.iter().map(|(id, f, args)| (*id, *f, &args[..])))
+                .map(|(id, f, args)| {
+                    (
+                        id,
+                        f,
+                        args,
+                        walks.as_mut().and_then(|ws| ws.reuse(id, args)),
+                    )
+                })
+                .collect();
+            let fresh = vyrn_frontend::par::in_parallel(
+                &wave,
+                |(_, f, _, kept)| kept.as_ref().map_or(f.body.stmts.len(), |_| 0),
+                || (),
+                |_, (_, f, args, kept)| {
+                    let flat = || subst_of(f, args).into_iter().collect();
+                    kept.is_none()
+                        .then(|| walk(recorded, program, &f.body, flat()))
+                },
+            );
+            for ((id, f, args, kept), fresh) in wave.into_iter().zip(fresh) {
+                ahead.push_back(match (kept, fresh) {
+                    (Some(w), _) => w,
+                    // `fresh` holds a walk for every body `kept` does not.
+                    (None, fresh) => {
+                        let flat = subst_of(f, args).into_iter().collect();
+                        let w = fresh.unwrap_or_else(|| walk(recorded, program, &f.body, flat));
+                        if let Some(ws) = &mut walks {
+                            ws.keep(id, args, &w);
+                        }
+                        w
+                    }
+                });
             }
-        };
+        }
+        let w = (ahead.pop_front()).expect("a wave walks the body that starts it");
         // `own` decides against the declaration; an engine emits against the
         // instance, so a step's type is substituted here.
         let releases: Vec<Release> = ownership

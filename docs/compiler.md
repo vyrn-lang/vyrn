@@ -174,7 +174,11 @@ instantiation, with no type parameter left, keyed by its type arguments
 checker's type for each expression, substituted through the instance. The
 walk expands what every engine must see the same way: a projection inlined at
 its access site (`project::site`), an optional projection under `if let`,
-`a[i] = v`, and a `for` over a user container.
+`a[i] = v`, and a `for` over a user container. The worklist runs in waves:
+each wave walks every body the last one found, on every thread, and follows
+their calls in queue order, so the instances and the unresolved calls come out
+as on one thread. The walks read the expansions typing made and make none;
+they run under `Expansions::seal`.
 
 `core::build` lowers each instance into the named core. Every intermediate
 value has a name, every access is a place, and control flow stays
@@ -434,8 +438,8 @@ Rust style).
 |---|---|
 | `VYRN_NO_KERNEL=1` | stands the kernel aside, to attribute a refusal |
 | `VYRN_KERNEL_TRACE=1` | prints each release the placer adds or cannot place |
-| `VYRN_THREADS=<n>` | types, builds and places bodies on `n` threads; `1` keeps a trace in body order |
-| `VYRN_SHUFFLE=<seed>` | permutes the order the checker's and the placer's threads take bodies in |
+| `VYRN_THREADS=<n>` | types, walks, builds and places bodies on `n` threads; `1` keeps a trace in body order |
+| `VYRN_SHUFFLE=<seed>` | permutes the order the checker's, the lowering's and the placer's threads take bodies in |
 | `VYRN_LEAK_CHECK=1` | builds with the free audit |
 | `VYRN_WASM_NAMES=1` | writes function names into the module |
 | `VYRN_GENWASM_TRACE=1` | prints the generation engine's phase timings |
