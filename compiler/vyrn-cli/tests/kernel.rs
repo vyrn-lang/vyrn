@@ -338,6 +338,8 @@ fn one_edit_re_judges_one_body() {
 
 /// A root signature edit re-judges no imported body: no module imports the root, so
 /// the fingerprint an imported body is keyed under leaves the root's functions out.
+/// No lambda of the program has `aux`'s arity, so a key over the fn-value
+/// signatures would move with `aux`'s type.
 #[test]
 fn a_root_signature_edit_re_judges_no_imported_body() {
     vyrn_frontend::movecheck::reuse_judgments();
@@ -353,7 +355,7 @@ fn a_root_signature_edit_re_judges_no_imported_body() {
         write(
             "main.vyrn",
             &format!(
-                "import {{ bTwo }} from \"./b\"\nfn aux(x: {ty}) -> {ty} {{ return x }}\n\
+                "import {{ bTwo }} from \"./b\"\nfn aux(x: {ty}, y: {ty}, z: {ty}) -> {ty} {{ return x }}\n\
                  fn main() -> Int64 {{ return bTwo(2) }}\n"
             ),
         )
@@ -372,6 +374,52 @@ fn a_root_signature_edit_re_judges_no_imported_body() {
         (judged, served),
         (0, cold),
         "a root signature edit serves every imported body"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A line moved above the root's declarations re-judges no imported body: the
+/// fingerprint holds a root type's predicate, a protocol's members and an impl's
+/// methods by content, not by where they sit.
+#[test]
+fn a_moved_root_line_re_judges_no_imported_body() {
+    vyrn_frontend::movecheck::reuse_judgments();
+    let dir = std::env::temp_dir().join(format!("vyrn-judgline-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("scratch");
+    let write = |name: &str, text: &str| std::fs::write(dir.join(name), text).expect("write");
+    write(
+        "b.vyrn",
+        "export fn bTwo(x: Int64) -> Int64 { return x + 2 }\n",
+    );
+    let root = |above: &str| {
+        write(
+            "main.vyrn",
+            &format!(
+                "{above}import {{ bTwo }} from \"./b\"\n\
+                 type Port = Int64 where value >= 1 && value <= 65535\n\
+                 type Pair = {{ a: Int64, b: Int64 }}\n\
+                 protocol Sized {{\n  fn size(self) -> Int64\n}}\n\
+                 impl Sized for Pair {{\n  fn size(self) -> Int64 {{ return self.a }}\n}}\n\
+                 fn main() -> Int64 {{\n  let p: Port = 80\n  \
+                 return bTwo(p) + Pair {{ a: 1, b: 2 }}.size()\n}}\n"
+            ),
+        )
+    };
+    let run = || {
+        vyrn_frontend::movecheck::reset_judgment_tally();
+        load(&dir.join("main.vyrn")).expect("the program loads");
+        vyrn_frontend::movecheck::judgment_tally()
+    };
+    root("");
+    let (cold, _) = run();
+    assert!(cold > 0, "the first run judges every body it can key");
+    root("\n");
+    let (judged, served) = run();
+    assert_eq!(
+        (judged, served),
+        (0, cold),
+        "a moved root line serves every imported body"
     );
     let _ = std::fs::remove_dir_all(&dir);
 }

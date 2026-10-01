@@ -1,0 +1,9 @@
+// A lambda takes each parameter by `read`, as every target of a `fn` type
+// does, so it may not hand one back: the caller frees the argument and the
+// result would free it again.
+fn main() -> Int64 {
+    let g: fn(String) -> String = s -> s
+    let a = "a" + "b"
+    let o = g(a)
+    return o.byteLength
+}

@@ -1022,7 +1022,7 @@ fn generic_function_stores_fn_values_per_instantiation() {
     // A stored fn type mentioning `T` monomorphizes with the body: each
     // instantiation gets its own signature (and, in codegen, its own enum).
     let src = "fn relay<T>(x: T) -> T {\n\
-             let f: fn(T) -> T = v -> v\n\
+             let f: fn(T) -> T = v -> v.copy()\n\
              return f(x) }\n\
              fn main() -> Int64 {\n\
              let n = relay(41)\n\
