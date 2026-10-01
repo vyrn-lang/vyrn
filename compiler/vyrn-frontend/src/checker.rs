@@ -7363,14 +7363,15 @@ impl InitRules<'_> {
 }
 
 impl BodyVisit<'_> for InitRules<'_> {
-    const SCOPED: bool = false;
-
-    fn expr(&mut self, e: &Expr, _: &HashSet<String>) -> bool {
+    fn expr(&mut self, e: &Expr, locals: &HashSet<String>) -> bool {
         if self.err.is_some() {
             return false;
         }
         let (own_name, line) = (DeclName(self.own_name), self.line);
         match e {
+            // A binder of the initializer shadows module state and a function
+            // of its name.
+            Expr::Var { name, .. } | Expr::Call { name, .. } if locals.contains(name) => true,
             Expr::Var { name, .. }
                 if self.all_globals.contains(name.as_str()) && !self.ready.contains(name) =>
             {
