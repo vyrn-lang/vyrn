@@ -414,14 +414,14 @@ fn a_user_type_declares_how_it_is_released() {
     assert_eq!(
         o.proto.release_kind(&Type::Named("Ring".into())),
         Some(DropKind::Release(
-            "Owned__Ring__release".to_string(),
+            "Owned$Ring$release".to_string(),
             Type::Named("Ring".into())
         ))
     );
     assert_eq!(
         drop_kinds(src, "main"),
         vec![DropKind::Release(
-            "Owned__Ring__release".to_string(),
+            "Owned$Ring$release".to_string(),
             Type::Named("Ring".into())
         )]
     );
@@ -487,7 +487,7 @@ fn a_declaration_on_the_cycle_gives_the_types_above_it_their_row_back() {
     assert_eq!(
         o.proto.release_kind(&Type::Named("Node".into())),
         Some(DropKind::Release(
-            "Owned__Node__release".to_string(),
+            "Owned$Node$release".to_string(),
             Type::Named("Node".into())
         ))
     );

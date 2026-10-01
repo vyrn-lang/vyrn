@@ -140,7 +140,7 @@ fn a_copy_of_a_type_with_impl_copy_is_a_call_row_to_the_impl() {
                fn main() -> Int64 { let b = Box { s: \"a\" + \"b\" } let c = b.copy() return 0 }";
     let rows = core_body(src, "main").render();
     assert!(
-        rows.contains("let c! = fn Copy__Box__copy(read b!)"),
+        rows.contains("let c! = fn Copy$Box$copy(read b!)"),
         "{rows}"
     );
 }

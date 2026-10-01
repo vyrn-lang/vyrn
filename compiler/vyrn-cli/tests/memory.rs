@@ -263,7 +263,7 @@ fn why_memory_names_the_reason_each_binding_is_not_reclaimed() {
     // `let second = ticket` takes the value, so the report names both halves of
     // one move.
     has("ticket           moved at line 52 into the binding `second`");
-    has("second           reclaimed at block exit — calling `Owned__Ticket__release`");
+    has("second           reclaimed at block exit — calling `Owned$Ticket$release`");
     // A join arm that yields the binding moves it; the other edge releases
     // it at the join.
     has("joined           moved at line 55 into a store");

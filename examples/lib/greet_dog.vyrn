@@ -1,0 +1,27 @@
+// Declares a private protocol `Speak` and a private type `Pet`, as
+// `greet_cat.vyrn` does, so the linker renames both apart.
+
+import { Greet } from "./greet_kind.vyrn"
+
+protocol Speak {
+    fn speak(self) -> String
+}
+
+type Pet = { n: Int64 }
+
+impl Greet for Pet {
+    fn greet(self) -> String {
+        return "woof"
+    }
+}
+
+impl Speak for Pet {
+    fn speak(self) -> String {
+        return "growl"
+    }
+}
+
+export fn dogSays() -> String {
+    let c = Pet { n: 1 }
+    return c.greet() + " " + c.speak()
+}

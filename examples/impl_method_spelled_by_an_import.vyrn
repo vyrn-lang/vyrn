@@ -1,0 +1,21 @@
+// An imported function spelled like the flattened method of `impl Area for Pt`
+// is not a second declaration of that method.
+
+import { Pt, Area__Pt__area } from "./lib/area_spelling.vyrn"
+
+protocol Area {
+    fn area(self) -> Int64
+}
+
+impl Area for Pt {
+    fn area(self) -> Int64 {
+        return self.x
+    }
+}
+
+fn main() -> Int64 {
+    let p = Pt { x: 7 }
+    print(p.area())
+    print(Area__Pt__area(p))
+    return 0
+}

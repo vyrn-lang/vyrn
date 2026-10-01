@@ -127,17 +127,17 @@ pub fn parse_accum(tokens: Vec<Token>) -> (Program, Vec<Diagnostic>) {
         .type_decls
         .extend(crate::prelude::type_decls().iter().cloned());
     // Flatten each `impl P for T` method into a mangled top-level function
-    // (`P__Key__method`); protocol-method calls resolve to these names by the
-    // receiver's type. Impls on unsupported targets are left for the checker.
+    // (`types::impl_method_name`); protocol-method calls resolve to these names
+    // by the receiver's type. Impls on unsupported targets are left for the
+    // checker.
     //
     // Two impls for one (protocol, type constructor) mangle to one name, so only
     // the first is kept; the checker refuses the overlap by name and line.
     //
-    // This runs before the loader renames anything, so the name holds the type key
-    // as the module spelled it. A renamed module must re-mangle from the renamed
-    // key, not prefix the mangled name: the checker mangles the type it sees
-    // (`Copy__json$Json__copy`, not `json$Copy__Json__copy`). The loader's
-    // injected-module pass does this.
+    // This runs before the loader renames anything, so the name holds the
+    // protocol and type key as the module spelled them. The loader re-mangles
+    // from the renamed ones, because the checker mangles the names it sees
+    // (`Copy$json$Json$copy`, not `json$Copy$Json$copy`).
     let mut flat = Vec::new();
     let mut seen: std::collections::HashSet<String> = Default::default();
     for imp in &program.impls {

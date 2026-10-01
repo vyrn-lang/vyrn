@@ -4,8 +4,8 @@ type_decls	2	15	4	1	0	14	0	36
 functions	2	15	20	1	0	11	14	63
 protocols	1	8	6	0	0	8	0	23
 contracts	0	7	4	0	0	0	0	11
-impls	1	8	13	3	0	5	0	30
+impls	1	9	13	3	0	5	0	31
 globals	1	10	13	1	0	2	0	27
 tests	0	7	2	1	0	1	5	16
 benches	0	7	2	1	0	1	6	17
-all	8	96	64	8	0	46	26	248
+all	8	97	64	8	0	46	26	249

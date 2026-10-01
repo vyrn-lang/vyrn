@@ -1,0 +1,8 @@
+// Exports a function spelled like the flattened method of `impl Area for Pt`
+// (`impl_method_spelled_by_an_import.vyrn`).
+
+export type Pt = { x: Int64 }
+
+export fn Area__Pt__area(p: Pt) -> Int64 {
+    return 100
+}

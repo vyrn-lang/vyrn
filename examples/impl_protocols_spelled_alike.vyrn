@@ -1,0 +1,33 @@
+// `impl Tag for A__B` and `impl Tag__A for B` join their protocol and type key
+// differently, so `b.tag()` calls the impl for `B`.
+
+protocol Tag {
+    fn tag(self) -> Int64
+}
+
+protocol Tag__A {
+    fn tag(self) -> Int64
+}
+
+type A__B = { v: Int64 }
+type B = { v: Int64 }
+
+impl Tag for A__B {
+    fn tag(self) -> Int64 {
+        return 1
+    }
+}
+
+impl Tag__A for B {
+    fn tag(self) -> Int64 {
+        return 2
+    }
+}
+
+fn main() -> Int64 {
+    let a = A__B { v: 0 }
+    let b = B { v: 0 }
+    print("\{a.tag()}")
+    print("\{b.tag()}")
+    return 0
+}

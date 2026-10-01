@@ -1,0 +1,8 @@
+// `two_modules_cannot_implement_one_protocol_for_one_type.vyrn` implements
+// `Greet` for `Pet` from two modules.
+
+export protocol Greet {
+    fn greet(self) -> String
+}
+
+export type Pet = { n: Int64 }
