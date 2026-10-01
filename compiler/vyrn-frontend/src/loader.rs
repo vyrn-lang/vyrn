@@ -2767,8 +2767,9 @@ fn resolve_aliases(
 
 /// The [`Spellings`] of a load: each declaration of a name two modules
 /// declare, by the name `renames` links it under, and the path of each
-/// import. Read before `renames` is applied. An injected module's reserved
-/// spellings stay out: no source wrote them.
+/// import. Read before `renames` is applied. Every declaration and variant of
+/// an injected module is in, under its reserved spelling (`json$Json`), so a
+/// sentence reads it as the module wrote it.
 fn spellings(
     modules: &[Module],
     renames: &HashMap<(String, String), String>,
@@ -2779,13 +2780,24 @@ fn spellings(
         root: root_key.to_string(),
         ..Spellings::default()
     };
-    for m in modules.iter().filter(|m| m.injected.is_none()) {
+    for m in modules {
         for d in decls(&m.program).filter(|d| !d.injected) {
-            if name_module_count.get(d.name).is_some_and(|&n| n >= 2) {
+            if m.injected.is_some() || name_module_count.get(d.name).is_some_and(|&n| n >= 2) {
                 let linked = resolved_name(renames, &m.key, d.name);
                 out.decls
                     .insert(linked, (d.name.to_string(), m.key.clone()));
             }
+        }
+        if let Some(prefix) = m.injected {
+            let variants = (m.program.type_decls.iter())
+                .filter(|t| t.line != 0)
+                .filter_map(|t| crate::types::declared_variants(&t.base))
+                .flatten();
+            for v in variants {
+                let linked = format!("{prefix}{}", v.name);
+                out.decls.insert(linked, (v.name.clone(), m.key.clone()));
+            }
+            continue;
         }
         for (imp, target) in m.program.imports.iter().zip(&m.import_targets) {
             if let ImportSource::Path(p) = &imp.source {

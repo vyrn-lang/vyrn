@@ -14,14 +14,15 @@ use std::collections::HashMap;
 use vyrn_frontend::ast::{NodeId, Type};
 
 use vyrn_frontend::ast::Capability;
+use vyrn_frontend::core::check::Guard;
 use vyrn_frontend::core::{
     rows, Arg, Body, Callee, Name, NameInfo, Place, Rhs, Site, St, Use, Val,
 };
 
 use crate::rules::{
     say, ASSIGN_NOT_MUT, DROP_MODULE_STATE, DROP_NOT_HEAP, DROP_TYPE_PARAM, DROP_UNBOUND,
-    FIELD_NOT_MUT, GROUP_CALL, GROUP_EXIT, GROUP_READ, OUTSIDE_LOOP, REMOVE_NOT_MUT, STORE_NOT_MUT,
-    STORE_RULED,
+    FIELD_NOT_MUT, GROUP_CALL, GROUP_EXIT, GROUP_FALSE, GROUP_READ, OUTSIDE_LOOP, REMOVE_NOT_MUT,
+    STORE_NOT_MUT, STORE_RULED,
 };
 
 /// A step from one type into the type a place holds, for the caller that
@@ -509,18 +510,30 @@ pub(crate) fn row_stores(
 /// turns. A trap ends the program and a return releases a record the frame
 /// owns, so neither shows the record again. The rows after an ended path are
 /// judged as a path of their own.
-pub fn groups(body: &Body, rules: &StoreRules) -> Vec<(usize, String)> {
+///
+/// `refuted` holds, per frame in [`Body::frames`] order, the rule checks
+/// [`crate::elide::refuted`] proved to fail, over `body` with its check rows
+/// stated; each is refused at its group's first store. Also answers whether a
+/// check ends a group, the one case where `refuted` can hold anything.
+pub fn groups(
+    body: &Body,
+    rules: &StoreRules,
+    refuted: &[Vec<crate::elide::Refuted>],
+) -> (Vec<(usize, String)>, bool) {
     let mut out = Vec::new();
-    for f in body.frames() {
+    let mut ended = false;
+    for (i, f) in body.frames().into_iter().enumerate() {
         let mut g = Groups {
             f,
             rules,
+            refuted: refuted.get(i).map_or(&[], |r| r.as_slice()),
+            ended: &mut ended,
             out: &mut out,
         };
         let left = g.walk(&f.stmts, Vec::new());
         g.unchecked(&left);
     }
-    out
+    (out, ended)
 }
 
 /// A group from its first store to its check: the record name, its type, and
@@ -535,6 +548,8 @@ struct Open {
 struct Groups<'b, 'r> {
     f: &'b Body,
     rules: &'b StoreRules<'r>,
+    refuted: &'b [crate::elide::Refuted],
+    ended: &'b mut bool,
     out: &'b mut Vec<(usize, String)>,
 }
 
@@ -586,12 +601,29 @@ impl Groups<'_, '_> {
                     open.clear();
                 }
                 St::Trap => open.clear(),
+                St::Check(c) => {
+                    let Guard::Rule(r) = c.guard else { continue };
+                    let fails = self.refuted.iter().find(|(at, ..)| *at == c.site);
+                    let group = open.iter().find(|o| o.name == r);
+                    if let (Some((_, long, short)), Some(o)) = (fails, group) {
+                        let name = self.src(r);
+                        let args = [
+                            ("long", long.as_str()),
+                            ("short", short.as_str()),
+                            ("name", &name),
+                            ("n", &o.ty),
+                            ("k", &c.site.line.to_string()),
+                        ];
+                        self.say(o.line, GROUP_FALSE, &args);
+                    }
+                }
                 _ => {
                     let checked = match s {
                         St::Do { rhs, .. } => rhs.checks_rule(&self.f.names),
                         _ => None,
                     };
                     if let Some(c) = checked {
+                        *self.ended |= open.iter().any(|o| o.name == c);
                         open.retain(|o| o.name != c);
                         continue;
                     }

@@ -1,0 +1,10 @@
+// A group whose rule check the facts prove false fails wherever it runs, so the checker refuses it.
+type Cols = { a: Array<Int64>, b: Array<Int64> } where a.length == b.length
+
+fn main() -> Int64 {
+    let mut c = Cols { a: [], b: [] }
+    c.a.push(1)
+    c.a.push(2)
+    c.b.push(3)
+    return c.a.length
+}

@@ -1,0 +1,2 @@
+a_runtime_module_type_reads_as_its_module_wrote_it_in_an_impl.vyrn:8:19: `impl P for T` does not match protocol `P` — it declares `fn p(self, Json) -> Int64`, this provides `fn p(self, Int64) -> Int64`
+a_runtime_module_type_reads_as_its_module_wrote_it_in_an_impl.vyrn:10:1: `impl Q for Json` collides with `impl Q for Json` (line 9) — Vyrn dispatches on the type constructor, so `Json` may have only one impl of `Q`; write one generic impl (`impl<T> Q for Json<T>`) to cover every instantiation

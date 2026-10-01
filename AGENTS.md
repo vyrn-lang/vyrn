@@ -136,6 +136,7 @@ sh ../scripts/check-corpus.sh .. <out-head>
 diff -r <out-base> <out-head>
 ```
 The workspace line runs every crate's tests, not only the CLI's: CI does, and a slice that ran `-p vyrn-cli` alone missed 38 failures in `vyrn-frontend` and `vyrn-play` (#545). CI does not run `coredrive`; with one walk it runs unsharded in about 150 s.
+`check-corpus.sh` refuses to run while a tree holds an untracked `.vyrn` file under a corpus root, and prints it. Delete or commit the file first; a stray root makes the two trees differ.
 Add what the change touches:
 - `std/`: `target/release/vyrn doc --std -o ../docs/api --verify`, and commit what it regenerates. Then, from the root, the step "The site's own tests" in `.github/workflows/site.yml`: `compiler/target/release/vyrn test` on `site/export.vyrn` and each `site/app/*.vyrn`, after `python3 scripts/site-history.py > site/data/history.json`. A std module doc is its reference page's description, and the site tests pin it.
 - The lexer's reserved words: `node --test "web/test/*.test.mjs" "editor/vscode/test/*.test.mjs"`; the editor grammar's keywords must equal the lexer's.

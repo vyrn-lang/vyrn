@@ -10,7 +10,7 @@ use std::collections::HashSet;
 use crate::ast::*;
 use crate::consteval;
 use crate::diagnostics::Diagnostic;
-use crate::rules::{rule, DeclName, Rule};
+use crate::rules::{rule, DeclName, Hole, Rule};
 use crate::types::mentions_param as type_mentions_param;
 use crate::types::walk_type;
 use crate::types::Decls;
@@ -450,7 +450,7 @@ pub type Appended = (
 
 /// An impl head as written (`impl<T> Show for Option<T>`), for the overlap
 /// diagnostic.
-fn render_impl_head(imp: &crate::ast::ImplBlock) -> String {
+fn render_impl_head(imp: &crate::ast::ImplBlock) -> Hole {
     let binder = if imp.type_params.is_empty() {
         String::new()
     } else {
@@ -464,7 +464,10 @@ fn render_impl_head(imp: &crate::ast::ImplBlock) -> String {
             .collect();
         format!("<{}>", ps.join(", "))
     };
-    format!("impl{binder} {} for {}", imp.protocol, imp.ty)
+    Hole::Parts(vec![
+        Hole::Text(format!("impl{binder} {} for ", imp.protocol)),
+        Hole::Type(imp.ty.clone()),
+    ])
 }
 
 /// A method signature as the conformance diagnostic quotes it:
@@ -476,20 +479,21 @@ fn render_method_sig(
     params: &[Type],
     caps: &[Capability],
     ret: &Type,
-) -> String {
-    let word = |c: Capability, t: String| match c {
-        Capability::Read => t,
-        Capability::Modify => format!("modify {t}"),
-        Capability::Consume => format!("consume {t}"),
+) -> Hole {
+    let word = |c: Capability| match c {
+        Capability::Read => "",
+        Capability::Modify => "modify ",
+        Capability::Consume => "consume ",
     };
-    let mut ps = vec![word(recv, "self".to_string())];
-    ps.extend(params.iter().enumerate().map(|(i, t)| {
-        word(
-            caps.get(i).copied().unwrap_or(Capability::Read),
-            t.to_string(),
-        )
-    }));
-    format!("fn {name}({}) -> {ret}", ps.join(", "))
+    let mut parts = vec![Hole::Text(format!("fn {name}({}self", word(recv)))];
+    for (i, t) in params.iter().enumerate() {
+        let c = caps.get(i).copied().unwrap_or(Capability::Read);
+        parts.push(Hole::Text(format!(", {}", word(c))));
+        parts.push(Hole::Type(t.clone()));
+    }
+    parts.push(Hole::Text(") -> ".to_string()));
+    parts.push(Hole::Type(ret.clone()));
+    Hole::Parts(parts)
 }
 
 #[allow(clippy::type_complexity)]
@@ -690,7 +694,7 @@ fn check_accum_inner(
     let mut impls: std::collections::HashSet<(String, String)> = Default::default();
     // The impl declared for each (protocol, type constructor) key, so a second
     // one is refused at its declaration, naming both.
-    let mut impl_heads: HashMap<(String, String), (usize, String)> = HashMap::new();
+    let mut impl_heads: HashMap<(String, String), (usize, Hole)> = HashMap::new();
     for imp in &program.impls {
         let mark = out.len();
         // The impl binds exactly the associated types the protocol declares.
@@ -932,7 +936,7 @@ fn check_accum_inner(
                         head,
                         prev,
                         prev_line,
-                        key,
+                        key = DeclName(&key),
                         protocol = imp.protocol
                     )),
                     None => {
@@ -4289,12 +4293,12 @@ impl<'a> Checker<'a> {
             let ev = evs
                 .iter()
                 .find(|v| v.name == vname)
-                .ok_or_else(|| cerr!(line, NotAVariant, vname, sty))?;
+                .ok_or_else(|| cerr!(line, NotAVariant, vname = DeclName(&vname), sty))?;
             if ev.payload.len() != bind.len() {
                 return Err(cerr!(
                     line,
                     PatternArity,
-                    vname,
+                    vname = DeclName(&vname),
                     want = ev.payload.len(),
                     got = bind.len()
                 ));
@@ -5426,7 +5430,7 @@ impl<'a> Checker<'a> {
             let aty = self.expr(&args[0], scope, want.as_ref(), fn_ret)?;
             let (mut t, mut e) = match res_pair {
                 Some(pair) => pair,
-                _ => return Err(cerr!(line, InferVariant, name)),
+                _ => return Err(cerr!(line, InferVariant, name = DeclName(name))),
             };
             // An open half the payload carries takes the payload's type; the
             // other half stays open for the enclosing literal to report.
@@ -5437,7 +5441,13 @@ impl<'a> Checker<'a> {
             let want_ty = if name == "Ok" { &t } else { &e };
             self.prove_coercion(&args[0], want_ty, line)?;
             if !self.coercible(&aty, want_ty) {
-                return Err(cerr!(line, VariantPayload, name, aty, want_ty));
+                return Err(cerr!(
+                    line,
+                    VariantPayload,
+                    name = DeclName(name),
+                    aty,
+                    want_ty
+                ));
             }
             return Ok(Type::result(t, e));
         }
@@ -5445,13 +5455,13 @@ impl<'a> Checker<'a> {
         if let Some(info) = self.resolve_variant(name) {
             let payload = info.payload.clone();
             if payload.is_empty() {
-                return Err(cerr!(line, VariantNoArgs, name));
+                return Err(cerr!(line, VariantNoArgs, name = DeclName(name)));
             }
             if args.len() != payload.len() {
                 return Err(cerr!(
                     line,
                     VariantArity,
-                    name,
+                    name = DeclName(name),
                     want = payload.len(),
                     got = args.len()
                 ));

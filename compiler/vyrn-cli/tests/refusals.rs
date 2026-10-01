@@ -365,6 +365,13 @@ fn census() -> Vec<Row> {
              with the hole still in it",
             Kernel::Its,
         ),
+        row(
+            "r49_a_group_that_ends_with_its_rule_false.vyrn",
+            "a group of stores whose rule check the facts prove false",
+            "this group of stores into `c` ends after line 8 with `c.a` longer than `c.b`, which \
+             breaks the `where` rule of `Cols`",
+            Kernel::Elsewhere,
+        ),
     ]
 }
 
@@ -1160,6 +1167,18 @@ fn the_shapes_the_last_three_rules_unit_tests_pinned_are_still_refused() {
             format!(
                 "fn f(a: modify Array<Int64>, b: Array<Int64>) -> Int64 {{ return a.length }} \
                  fn go() -> Int64 {{ let mut xs: Array<Int64> = [] return f(xs, xs) }}{END}"
+            ),
+        ),
+        (
+            "a modify borrow read again through a copy of a call",
+            "`xs` is passed to `f` as `modify` and read again in the same call — a `modify` \
+             borrow is exclusive",
+            false,
+            format!(
+                "fn f(a: modify Array<Int64>, b: Array<Int64>) -> Int64 {{ return a.length }} \
+                 fn id(a: Array<Int64>) -> Array<Int64> {{ return a }} \
+                 fn go() -> Int64 {{ let mut xs: Array<Int64> = [] \
+                 return f(xs, id(xs).copy()) }}{END}"
             ),
         ),
         (

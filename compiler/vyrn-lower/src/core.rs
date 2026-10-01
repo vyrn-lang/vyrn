@@ -1855,12 +1855,6 @@ impl<'a> Builder<'a> {
         };
         // By the receiver's type: two `impl`s may declare a projection of one
         // name.
-        let Some(f) = vyrn_frontend::project::lookup_in(&self.program.impls, &rty, method) else {
-            return Ok(None);
-        };
-        if vyrn_frontend::project::is_optional(f) {
-            return Ok(None);
-        }
         let p = match self.program.expansions.site(
             &self.program.impls,
             Some(&rty),
@@ -4474,7 +4468,7 @@ impl<'a> Builder<'a> {
                     return gap("a variant the enum does not have", line);
                 };
                 if *seen {
-                    let v = &variants[t as usize].name;
+                    let v = self.body.speech().name(&variants[t as usize].name);
                     self.body
                         .refused
                         .push((line, format!("duplicate `{v}` arm")));
@@ -4487,7 +4481,10 @@ impl<'a> Builder<'a> {
             return Ok(());
         }
         if let Some((v, _)) = variants.iter().zip(&taken).find(|(_, t)| !**t) {
-            let refusal = format!("`match` is missing variant `{}`", v.name);
+            let refusal = format!(
+                "`match` is missing variant `{}`",
+                self.body.speech().name(&v.name)
+            );
             self.body.refused.push((line, refusal));
         }
         Ok(())
@@ -7519,7 +7516,17 @@ fn typed(
     // One sentence per line: a declaration's predicate is also the body
     // of its constructor, and the instances of a generic function share
     // their groups.
-    let groups = crate::typed::groups(top, &rules);
+    let (mut groups, ended) = crate::typed::groups(top, &rules, &[]);
+    // The facts come from the check rows, which only an emitter's body
+    // states, so a body with a group states its own copy.
+    if ended {
+        let mut body = stated(program, own, top);
+        let mut refuted = Vec::new();
+        body.each_frame_mut(&mut |f| {
+            refuted.push(crate::elide::refuted(f, own.proto.types()));
+        });
+        groups = crate::typed::groups(&body, &rules, &refuted).0;
+    }
     for u in crate::typed::refused(top, as_written)
         .into_iter()
         .chain(groups)
