@@ -11,10 +11,8 @@ pub fn run_compiled(program: &vyrn_frontend::ast::Program) -> Result<i64, String
         &bytes,
         vyrn_cli::wasmrun::Run {
             argv: vec!["main.vyrn".to_string()],
-            stdin_prefix: Vec::new(),
-            capture_stdout: false,
             capture_stderr: true,
-            meter: false,
+            ..Default::default()
         },
     )?;
     let said = String::from_utf8_lossy(&out.stderr);

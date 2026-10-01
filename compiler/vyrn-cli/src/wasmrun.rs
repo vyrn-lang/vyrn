@@ -23,12 +23,10 @@ pub struct Outcome {
     pub meter: Option<Meter>,
 }
 
+#[derive(Default)]
 pub struct Run {
     /// `argv[0]` is the program's name; the rest is `args()`.
     pub argv: Vec<String>,
-    /// Bytes standard input serves before this process's own; the test
-    /// harness passes the guest its body's index this way.
-    pub stdin_prefix: Vec<u8>,
     /// Keeps the guest's standard output in [`Outcome::stdout`]; `vyrn routes`
     /// reads its answer out of it.
     pub capture_stdout: bool,
@@ -100,7 +98,6 @@ impl std::error::Error for Exit {}
 struct Host {
     argv: Vec<Vec<u8>>,
     environ: Vec<Vec<u8>>,
-    stdin_prefix: Vec<u8>,
     stdout: Option<Vec<u8>>,
     stderr: Option<Vec<u8>>,
     files: HashMap<i32, std::fs::File>,
@@ -298,7 +295,6 @@ fn open(
                 e
             })
             .collect(),
-        stdin_prefix: run.stdin_prefix.clone(),
         stdout: run.capture_stdout.then(Vec::new),
         stderr: run.capture_stderr.then(Vec::new),
         files: HashMap::new(),
@@ -823,14 +819,7 @@ fn link_wasi(linker: &mut Linker<Host>) -> wasmtime::Result<()> {
                 return BADF;
             };
             let got = if fd == 0 {
-                if !host.stdin_prefix.is_empty() {
-                    let k = host.stdin_prefix.len().min(buf.len());
-                    buf[..k].copy_from_slice(&host.stdin_prefix[..k]);
-                    host.stdin_prefix.drain(..k);
-                    Ok(k)
-                } else {
-                    std::io::stdin().lock().read(buf)
-                }
+                std::io::stdin().lock().read(buf)
             } else {
                 match host.files.get_mut(&fd) {
                     Some(f) => f.read(buf),
@@ -1241,10 +1230,9 @@ fn main() -> Int64 {
     fn quiet() -> Run {
         Run {
             argv: vec!["probe.vyrn".to_string()],
-            stdin_prefix: Vec::new(),
             capture_stdout: true,
             capture_stderr: true,
-            meter: false,
+            ..Run::default()
         }
     }
 
