@@ -545,3 +545,76 @@ fn a_part_read_beside_its_consumed_heap_record_is_refused() {
         String::from_utf8_lossy(&out.stderr)
     );
 }
+
+/// A temporary handed to an in-place callee. `P` is 32 bytes.
+const HEAPLESS: &str = "type P = { x: Float64, y: Float64, z: Float64, w: Float64 }\n\
+    fn shift(p: consume P, s: Float64) -> P {\n\
+    let mut q = p\n\
+    q.x = q.x + s\n\
+    return q\n\
+    }\n\
+    fn main() -> Int64 {\n\
+    let q = shift(P { x: 1.0, y: 0.0, z: 0.0, w: 7654321.0 }, 2.0)\n\
+    print(q.x)\n\
+    return 0\n\
+    }\n";
+
+/// The temporary's own slot is the storage `shift` works in, and `q` takes it over.
+#[test]
+fn a_temporary_handed_to_an_in_place_callee_is_not_moved() {
+    let body = wat_func_containing(HEAPLESS, "7654321");
+    assert_eq!(
+        copies_of(&body, 32),
+        0,
+        "`main` moved the temporary:\n{body}"
+    );
+}
+
+/// The shapes a handed-over slot must not reach: a part read beside its record, and two
+/// results built from temporaries that live at once.
+const KEPT: &str = "type P = { x: Float64, y: Float64, z: Float64, w: Float64 }\n\
+    type In = { p: P, k: Float64 }\n\
+    fn step(a: consume In, r: P) -> In {\n\
+    let mut d = a\n\
+    d.p = P { x: 0.0, y: 0.0, z: 0.0, w: 0.0 }\n\
+    d.k = d.k + r.y\n\
+    return d\n\
+    }\n\
+    fn shift(p: consume P, s: Float64) -> P {\n\
+    let mut q = p\n\
+    q.x = q.x + s\n\
+    return q\n\
+    }\n\
+    fn main() -> Int64 {\n\
+    let x = In { p: P { x: 1.0, y: 2.0, z: 3.0, w: 4.0 }, k: 0.5 }\n\
+    let y = step(x, x.p)\n\
+    print(y.k)\n\
+    let b = shift(P { x: 10.0, y: 0.0, z: 0.0, w: 0.0 }, 1.0)\n\
+    let c = shift(P { x: 20.0, y: 0.0, z: 0.0, w: 0.0 }, 2.0)\n\
+    print(b.x)\n\
+    print(c.x)\n\
+    return 0\n\
+    }\n";
+
+/// The shapes print what a move into a fresh destination prints, under the free audit.
+#[test]
+fn a_handed_over_slot_keeps_what_the_call_reads_and_the_result() {
+    let dir = scratch("handed");
+    let file = dir.join("kept.vyrn");
+    std::fs::write(&file, KEPT).unwrap();
+    let out = vyrn()
+        .arg("run")
+        .arg(&file)
+        .env("VYRN_LEAK_CHECK", "1")
+        .output()
+        .expect("vyrn run");
+    assert_eq!(
+        (
+            out.status.code(),
+            String::from_utf8_lossy(&out.stdout).replace("\r\n", "\n")
+        ),
+        (Some(0), "2.500000\n11.000000\n22.000000\n".to_string()),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}

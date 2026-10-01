@@ -279,7 +279,9 @@ The module's shape:
   entry, and a `modify` one back out at the one exit. A `consume` parameter
   is copied in, unless every `return` yields it (`Sig::in_place`): then it
   is the result, the call has no out-pointer, and the caller moves the
-  argument into the destination, or passes `x`'s storage for `x = f(x, ..)`.
+  argument into the destination. It passes `x`'s storage instead for
+  `x = f(x, ..)`, and for an argument whose extent ends at the call and that
+  holds a frame slot, which the result then takes.
 - Layout (`layout.rs`): sizes, alignments and offsets are read from the shape
   string `llt_of` prints, so layout cannot drift from lowering. Every size is
   a checked `u32`.
