@@ -1,25 +1,25 @@
 command	lines	sentences
-why	594	10
+why	561	10
 bench	541	11
-serve, dev	468	7
+serve, dev	468	6
 (dispatch)	332	4
-doc	331	9
 routes	285	1
+doc	283	9
 build	209	12
 fix	195	1
 update	194	5
 deps	192	3
 fmt	182	5
-dev	171	14
+dev	140	12
 test, bench	130	2
 build, bench	100	0
 (global)	91	2
 run	71	3
 vendor	66	6
 add	58	3
-serve	52	4
 new	42	4
 emit-gen	33	3
 test	25	0
 emit-wat, emit-lowered	23	0
 check	21	0
+serve	10	2

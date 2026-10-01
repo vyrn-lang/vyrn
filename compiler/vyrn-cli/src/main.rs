@@ -1661,6 +1661,34 @@ fn rel_to(path: &str, base: &str) -> String {
         .unwrap_or_else(|| path.to_string())
 }
 
+/// Every file under `dir` with one of the extensions `exts`, as sorted slash
+/// paths. Hidden directories, build output and vendored trees are skipped:
+/// they are not the project.
+fn files_under(dir: &Path, exts: &[&str]) -> Vec<String> {
+    fn walk(dir: &Path, exts: &[&str], out: &mut Vec<String>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for e in entries.flatten() {
+            let (p, name) = (e.path(), e.file_name());
+            let name = name.to_string_lossy();
+            if p.is_dir() {
+                if !(name.starts_with('.')
+                    || ["target", "vendor", "node_modules"].contains(&&*name))
+                {
+                    walk(&p, exts, out);
+                }
+            } else if p.extension().is_some_and(|x| exts.iter().any(|e| x == *e)) {
+                out.push(dos_to_slash(&p.to_string_lossy()));
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(dir, exts, &mut out);
+    out.sort();
+    out
+}
+
 /// Every `importer -> imported` edge in a project, resolved with the loader's
 /// own `resolve_spec`.
 ///
@@ -1668,7 +1696,10 @@ fn rel_to(path: &str, base: &str) -> String {
 /// resolved by `audience::generator_input`, the function that decides that
 /// module's audience; a call naming a directory reaches every source under it.
 fn project_imports(app_dir: &Path, opts: &loader::LoadOptions) -> Vec<(String, String)> {
-    let files = project_sources(app_dir);
+    let files: Vec<(String, String)> = files_under(app_dir, &["vyrn", "vyx"])
+        .into_iter()
+        .filter_map(|path| Some((path.clone(), std::fs::read_to_string(&path).ok()?)))
+        .collect();
     let mut out: Vec<(String, String)> = Vec::new();
     for (path, source) in &files {
         let body = if path.ends_with(".vyx") {
@@ -1725,42 +1756,6 @@ fn project_imports(app_dir: &Path, opts: &loader::LoadOptions) -> Vec<(String, S
     }
     out.sort();
     out.dedup();
-    out
-}
-
-/// Every `.vyrn` / `.vyx` source under `app_dir`, as `(slash path, text)`.
-/// Build output and vendored trees are not the project.
-fn project_sources(app_dir: &Path) -> Vec<(String, String)> {
-    fn walk(dir: &Path, out: &mut Vec<(String, String)>) {
-        let Ok(entries) = std::fs::read_dir(dir) else {
-            return;
-        };
-        for e in entries.filter_map(|e| e.ok()) {
-            let p = e.path();
-            let name = e.file_name().to_string_lossy().to_string();
-            if p.is_dir() {
-                if name.starts_with('.')
-                    || name == "target"
-                    || name == "vendor"
-                    || name == "node_modules"
-                {
-                    continue;
-                }
-                walk(&p, out);
-            } else if matches!(
-                p.extension().and_then(|x| x.to_str()),
-                Some("vyrn") | Some("vyx")
-            ) {
-                if let Ok(text) = std::fs::read_to_string(&p) {
-                    let key = dos_to_slash(&p.to_string_lossy());
-                    out.push((key, text));
-                }
-            }
-        }
-    }
-    let mut out = Vec::new();
-    walk(app_dir, &mut out);
-    out.sort();
     out
 }
 
@@ -1856,7 +1851,7 @@ fn tool_row(
     }
 }
 
-/// The same rule as [`normalize_slashes`], from a `Path`.
+/// [`dos_to_slash`], from a `Path`.
 fn show_path(p: &Path) -> String {
     dos_to_slash(&p.to_string_lossy())
 }
@@ -2252,11 +2247,9 @@ fn discover_doc_modules(
 /// Every `.vyrn` file under `dir`, named `<prefix>` plus its path relative to
 /// `dir` without the extension. Sorted by name.
 fn scan_doc_dir(dir: &str, prefix: &str) -> Result<Vec<DocModule>, ExitCode> {
-    let base = normalize_slashes(dir);
-    let mut paths: Vec<String> = Vec::new();
-    collect_vyrn_files(Path::new(dir), &mut paths);
+    let base = dos_to_slash(dir);
     let mut out = Vec::new();
-    for p in paths {
+    for p in files_under(Path::new(dir), &["vyrn"]) {
         let rel = rel_name(&p, &base);
         // A fenced module has no reader outside the compiler.
         if vyrn_frontend::loader::is_fenced(&format!("{prefix}{rel}")) {
@@ -2276,22 +2269,6 @@ fn scan_doc_dir(dir: &str, prefix: &str) -> Result<Vec<DocModule>, ExitCode> {
     }
     out.sort_by(|a, b| a.name.cmp(&b.name));
     Ok(out)
-}
-
-/// Appends every `.vyrn` file under `dir` to `out`, in sorted directory order.
-fn collect_vyrn_files(dir: &Path, out: &mut Vec<String>) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    let mut items: Vec<PathBuf> = entries.filter_map(|e| e.ok().map(|e| e.path())).collect();
-    items.sort();
-    for path in items {
-        if path.is_dir() {
-            collect_vyrn_files(&path, out);
-        } else if path.extension().and_then(|s| s.to_str()) == Some("vyrn") {
-            out.push(normalize_slashes(&path.to_string_lossy()));
-        }
-    }
 }
 
 /// Every local module `root_file` reaches, named relative to the project.
@@ -2349,16 +2326,10 @@ fn closure_doc_modules(
     Ok(out)
 }
 
-/// A path as this toolchain spells it: `dos_to_slash`, the rule `real_path` and
-/// module keys use.
-fn normalize_slashes(p: &str) -> String {
-    dos_to_slash(p)
-}
-
 /// The module name: `path` relative to `base`, without `.vyrn`. The file stem
 /// when `path` is not under `base`.
 fn rel_name(path: &str, base: &str) -> String {
-    let path = normalize_slashes(path);
+    let path = dos_to_slash(path);
     let stripped = if base.is_empty() {
         path.as_str()
     } else {
@@ -2466,7 +2437,8 @@ fn verify_doc_dir(out_dir: &str, files: &[(String, String)]) -> ExitCode {
     for (rel, content) in files {
         let path = Path::new(out_dir).join(rel);
         match std::fs::read_to_string(&path) {
-            Ok(on_disk) if normalize_slashes_content(&on_disk) == *content => {}
+            // LF, so a CRLF checkout of a generated doc is not drift.
+            Ok(on_disk) if on_disk.replace("\r\n", "\n") == *content => {}
             Ok(_) => {
                 eprintln!("doc drift: {out_dir}/{rel} is out of date — run `vyrn doc` to update");
                 return ExitCode::FAILURE;
@@ -2481,38 +2453,13 @@ fn verify_doc_dir(out_dir: &str, files: &[(String, String)]) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-/// LF newlines, so a CRLF checkout of a generated doc is not drift.
-fn normalize_slashes_content(s: &str) -> String {
-    s.replace("\r\n", "\n")
-}
-
 /// Every `.md` file under `dir`, as `/`-separated paths relative to `dir`.
 fn existing_md_files(dir: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    collect_md_files(Path::new(dir), dir, &mut out);
-    out.sort();
-    out
-}
-
-fn collect_md_files(dir: &Path, base: &str, out: &mut Vec<String>) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    let mut items: Vec<PathBuf> = entries.filter_map(|e| e.ok().map(|e| e.path())).collect();
-    items.sort();
-    for path in items {
-        if path.is_dir() {
-            collect_md_files(&path, base, out);
-        } else if path.extension().and_then(|s| s.to_str()) == Some("md") {
-            let full = normalize_slashes(&path.to_string_lossy());
-            let base = normalize_slashes(base);
-            let rel = full
-                .strip_prefix(&format!("{}/", base.trim_end_matches('/')))
-                .unwrap_or(&full)
-                .to_string();
-            out.push(rel);
-        }
-    }
+    let base = format!("{}/", dos_to_slash(dir).trim_end_matches('/'));
+    files_under(Path::new(dir), &["md"])
+        .into_iter()
+        .map(|f| f.strip_prefix(&base).map_or(f.clone(), str::to_string))
+        .collect()
 }
 
 /// `vyrn fix [file]`: applies the `.copy()` a move diagnostic names and
@@ -3981,53 +3928,11 @@ fn serve_wasm_call(res: &mut wasmrun::Resident, call: ServeCall) -> Result<Serve
 /// `vyrn serve [file] [--port N] [--workers N]`: an HTTP/1.1 host on `std::net`
 /// running the file's `handle`, by default on port 8080. See [`serve_loop`].
 fn serve_cmd(call: &Call) -> Outcome {
-    let (port, workers) = host_flags(call)?;
     let (p, path) = call.root()?;
-    let path = path.as_str();
-    // Appended before the load, so it is checked and every program line keeps
-    // its number.
-    let source = format!("{}\n{SERVE_SHIM}", read_source(path)?);
-    let (mut program, _) = p.checked(path, &source)?;
-    serve_rewrite(&mut program);
-    let program = program;
-    let world = vyrn_lower::analyze(&program);
-
-    if !has_served_handle(&program) {
-        eprintln!("error: `vyrn serve` needs `fn handle(req: Request) -> Response` in {path}");
-        return Err(ExitCode::FAILURE);
-    }
-
-    // Bind before running `main`, so a port clash fails first. `--port 0` lets
-    // the OS pick.
-    let listener = match std::net::TcpListener::bind(("127.0.0.1", port)) {
-        Ok(l) => l,
-        Err(e) => {
-            eprintln!("error: cannot bind port {port}: {e}");
-            return Err(ExitCode::FAILURE);
-        }
-    };
-    let actual_port = listener.local_addr().map(|a| a.port()).unwrap_or(port);
-    let file_label = path.to_string();
-
-    Ok(serve_loop(
-        &program,
-        &world,
-        vec![path.to_string()],
-        listener,
-        workers,
-        None,
-        "serve",
-        move |n| {
-            use std::io::Write;
-            let _ = std::io::stdout().flush();
-            match n {
-                Some(n) => eprintln!(
-                    "serving {file_label} on http://localhost:{actual_port} with {n} workers"
-                ),
-                None => eprintln!("serving {file_label} on http://localhost:{actual_port}"),
-            }
-        },
-    ))
+    serve_loop(call, &p, &path, None, |port, n| match n {
+        Some(n) => eprintln!("serving {path} on http://localhost:{port} with {n} workers"),
+        None => eprintln!("serving {path} on http://localhost:{port}"),
+    })
 }
 
 /// Whether the program has `fn handle(req: Request) -> Response`, exactly. The
@@ -4043,28 +3948,53 @@ fn has_served_handle(program: &vyrn_frontend::ast::Program) -> bool {
     })
 }
 
-/// The serving loop of `vyrn serve` and `vyrn dev`.
+/// The one serving path of `vyrn serve` and `vyrn dev`: loads `root` with the
+/// [`SERVE_SHIM`], binds `--port`, then answers on it until the process ends.
 ///
 /// Without `--workers`, one resident instance answers every request, one at a
 /// time: `_start` runs `main` once and the store stays open, so each request
 /// sees what `main` wrote. With it, [`serve_pool_wasm`] answers, behind
 /// [`refuse_workers_if_stateful`].
 ///
-/// `banner` prints once `main` has run, given the worker count. `assets` is
-/// `vyrn dev`'s static tree.
+/// `banner` prints once `main` has run, given the bound port and the worker
+/// count. `assets` is `vyrn dev`'s static tree.
 fn serve_loop(
-    program: &vyrn_frontend::ast::Program,
-    world: &std::sync::Arc<vyrn_lower::World>,
-    argv: Vec<String>,
-    listener: std::net::TcpListener,
-    workers: Option<usize>,
+    call: &Call,
+    p: &Project,
+    root: &str,
     assets: Option<&DevAssets>,
-    what: &str,
-    banner: impl Fn(Option<usize>) + Send,
-) -> ExitCode {
-    if let Some(n) = workers {
+    banner: impl Fn(u16, Option<usize>) + Send,
+) -> Outcome {
+    let port = call
+        .parsed("--port", "a number in 0..=65535")?
+        .unwrap_or(8080);
+    let workers = call.parsed::<std::num::NonZeroUsize>("--workers", "a positive number")?;
+    let what = call.cmd.name;
+    // Appended before the load, so it is checked and every program line keeps
+    // its number.
+    let source = format!("{}\n{SERVE_SHIM}", read_source(root)?);
+    let (mut program, _) = p.checked(root, &source)?;
+    serve_rewrite(&mut program);
+    let (program, world) = (&program, &vyrn_lower::analyze(&program));
+    if !has_served_handle(program) {
+        eprintln!("error: `vyrn {what}` needs `fn handle(req: Request) -> Response` in {root}");
+        return Err(ExitCode::FAILURE);
+    }
+    // Bound before `main` runs, so a port clash fails first.
+    let listener = std::net::TcpListener::bind(("127.0.0.1", port)).map_err(|e| {
+        eprintln!("error: cannot bind port {port}: {e}");
+        ExitCode::FAILURE
+    })?;
+    let port = listener.local_addr().map_or(port, |a| a.port());
+    let banner = move |n| {
+        use std::io::Write;
+        let _ = std::io::stdout().flush();
+        banner(port, n);
+    };
+    let argv = vec![root.to_string()];
+    if let Some(n) = workers.map(usize::from) {
         if let Some(exit) = refuse_workers_if_stateful(program, world) {
-            return exit;
+            return Err(exit);
         }
         let (tx, rx) = std::sync::mpsc::channel::<std::net::TcpStream>();
         let rx = std::sync::Mutex::new(rx);
@@ -4091,37 +4021,22 @@ fn serve_loop(
             }
             Ok(())
         };
-        return match serve_pool_wasm(program, world, argv, n, each, listen) {
-            Ok(()) => ExitCode::SUCCESS,
-            Err(e) => {
-                eprintln!("error: {e}");
-                ExitCode::FAILURE
-            }
-        };
+        failed(serve_pool_wasm(program, world, argv, n, each, listen))?;
+        return Ok(ExitCode::SUCCESS);
     }
-    let bytes = match vyrn_codegen::direct::compile(program, world.clone()) {
-        Ok(b) => b,
-        Err(e) => {
-            eprintln!("error: {e}");
-            return ExitCode::FAILURE;
-        }
-    };
+    let bytes = failed(vyrn_codegen::direct::compile(program, world.clone()))?;
     let run = wasmrun::Run {
         argv,
         // Read per call, so a trap logs its wording, not a wasm backtrace.
         capture_stderr: true,
         ..Default::default()
     };
-    let mut res = match wasmrun::start(&bytes, &run, None) {
-        Ok((res, 0)) => res,
-        Ok((mut res, code)) => {
+    let mut res = match failed(wasmrun::start(&bytes, &run, None))? {
+        (res, 0) => res,
+        (mut res, code) => {
             eprint!("{}", res.drain_err());
             eprintln!("error: main returned {code}, aborting {what}");
-            return ExitCode::FAILURE;
-        }
-        Err(e) => {
-            eprintln!("error: {e}");
-            return ExitCode::FAILURE;
+            return Err(ExitCode::FAILURE);
         }
     };
     eprint!("{}", res.drain_err());
@@ -4133,7 +4048,7 @@ fn serve_loop(
             Err(_) => continue,
         }
     }
-    ExitCode::SUCCESS
+    Ok(ExitCode::SUCCESS)
 }
 
 /// The `--workers` pool: one resident instance per worker thread, over one
@@ -4241,15 +4156,7 @@ fn refuse_workers_if_stateful(
 /// `vyrn dev [--port N] [--workers N]`: builds the manifest's `client` to wasm,
 /// then serves the `server` root's `handle` with static assets in front (see
 /// [`dev_static_path`]). `public` defaults to `public`.
-/// `--port` (default 8080) and `--workers`, as `serve` and `dev` take them.
-fn host_flags(call: &Call) -> Result<(u16, Option<usize>), ExitCode> {
-    let port = call.parsed("--port", "a number in 0..=65535")?;
-    let workers = call.parsed::<std::num::NonZeroUsize>("--workers", "a positive number")?;
-    Ok((port.unwrap_or(8080), workers.map(usize::from)))
-}
-
 fn dev_cmd(call: &Call) -> Outcome {
-    let (port, workers) = host_flags(call)?;
     let p = Project::of(None, call.flags)?;
     let Some(manifest) = &p.manifest else {
         eprintln!("error: `vyrn dev` needs a vyrn.json with `server` and `client` keys");
@@ -4294,57 +4201,24 @@ fn dev_cmd(call: &Call) -> Outcome {
         return built;
     }
 
-    let source = format!("{}\n{SERVE_SHIM}", read_source(&server_path)?);
-    let (mut program, _) = p.checked(&server_path, &source)?;
-    serve_rewrite(&mut program);
-    let program = program;
-    let world = vyrn_lower::analyze(&program);
-    if !has_served_handle(&program) {
-        eprintln!(
-            "error: the server root `{server_rel}` needs `fn handle(req: Request) -> Response`"
-        );
-        return Err(ExitCode::FAILURE);
-    }
-
-    let listener = match std::net::TcpListener::bind(("127.0.0.1", port)) {
-        Ok(l) => l,
-        Err(e) => {
-            eprintln!("error: cannot bind port {port}: {e}");
-            return Err(ExitCode::FAILURE);
-        }
-    };
-    let actual_port = listener.local_addr().map(|a| a.port()).unwrap_or(port);
     let assets = DevAssets {
         public_dir,
         web_dir,
         wasm: wasm_out,
     };
-
     let public_shown = assets.public_dir.display().to_string();
-
-    Ok(serve_loop(
-        &program,
-        &world,
-        vec![server_path.clone()],
-        listener,
-        workers,
-        Some(&assets),
-        "dev",
-        move |n| {
-            use std::io::Write;
-            let _ = std::io::stdout().flush();
-            eprintln!("dev: serving {server_rel} on http://localhost:{actual_port}");
-            eprintln!("dev:   /rpc/*         -> server `handle` (rpcHandle + your pages)");
-            eprintln!("dev:   /client.wasm   -> built from {client_rel}");
-            eprintln!(
-                "dev:   /vyrn-runtime/ -> web runtimes (wasi-min.js, vyrn-rpc.js, vyrn-query.js)"
-            );
-            eprintln!("dev:   /              -> {public_shown}/");
-            if let Some(n) = n {
-                eprintln!("dev:   workers        -> {n}");
-            }
-        },
-    ))
+    serve_loop(call, &p, &server_path, Some(&assets), |port, n| {
+        eprintln!("dev: serving {server_rel} on http://localhost:{port}");
+        eprintln!("dev:   /rpc/*         -> server `handle` (rpcHandle + your pages)");
+        eprintln!("dev:   /client.wasm   -> built from {client_rel}");
+        eprintln!(
+            "dev:   /vyrn-runtime/ -> web runtimes (wasi-min.js, vyrn-rpc.js, vyrn-query.js)"
+        );
+        eprintln!("dev:   /              -> {public_shown}/");
+        if let Some(n) = n {
+            eprintln!("dev:   workers        -> {n}");
+        }
+    })
 }
 
 /// Static asset roots for `vyrn dev`.
