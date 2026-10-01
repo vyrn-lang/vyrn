@@ -192,26 +192,36 @@ impl std::fmt::Debug for Id {
 }
 
 /// The `{:?}` text of `x` with the number of every `line` and `col` field
-/// outside a string literal left out. With [`Id`]'s text, two trees that
-/// differ only in where they sit print alike, so a fingerprint over it keys
-/// content. The AST has no `char` field, so a `"` always opens or closes a
-/// literal.
+/// and the value of every `doc` field outside a string literal left out.
+/// With [`Id`]'s text, two trees that differ only in where they sit or in
+/// their doc comments print alike, so a fingerprint over it keys what a check
+/// reads. The AST has no `char` field, so a `"` always opens or closes a
+/// literal; a `doc` value is `None` or `Some("..")`, so it ends at the next
+/// `,` or `}` outside one.
 pub fn unplaced(x: &impl std::fmt::Debug) -> String {
     let s = format!("{x:?}");
     let mut out = String::with_capacity(s.len());
-    let (mut quoted, mut escaped, mut position) = (false, false, false);
+    let (mut quoted, mut escaped, mut position, mut doc) = (false, false, false, false);
     for c in s.chars() {
         if position && c.is_ascii_digit() {
             continue;
         }
-        out.push(c);
         position = false;
+        let open = !quoted;
         match c {
             _ if escaped => escaped = false,
             '\\' if quoted => escaped = true,
             '"' => quoted = !quoted,
-            ' ' if !quoted => position = out.ends_with(" line: ") || out.ends_with(" col: "),
             _ => {}
+        }
+        if doc && !(open && matches!(c, ',' | '}')) {
+            continue;
+        }
+        doc = false;
+        out.push(c);
+        if c == ' ' && open {
+            position = out.ends_with(" line: ") || out.ends_with(" col: ");
+            doc = out.ends_with(" doc: ");
         }
     }
     out

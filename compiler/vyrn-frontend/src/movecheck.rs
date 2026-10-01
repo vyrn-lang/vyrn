@@ -299,9 +299,9 @@ pub fn reset_judgment_tally() {
 /// body (it is inlined into its callers), and each validated type's predicate
 /// and module-state initializer. The parts are sorted first because three
 /// sources are hash maps. Every part but a projection is written without its
-/// positions ([`unplaced`]), so a line moved in the root moves no part; a
-/// projection's expansion keeps its lines, which an imported caller's refusal
-/// quotes.
+/// positions and docs ([`unplaced`]), so a line moved or a doc edited in the
+/// root moves no part; a projection's expansion keeps its lines, which an
+/// imported caller's refusal quotes.
 ///
 /// It leaves out the root's functions and module state, which no imported body
 /// reads: no module imports the root, and the link leaves every declared name

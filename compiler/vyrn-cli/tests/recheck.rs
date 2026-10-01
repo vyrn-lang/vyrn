@@ -210,6 +210,8 @@ const COLLIDE: &str = "\nfn isAsciiSpace(b: Int64) -> String {\n    return \"\"\
 /// Root declarations the world fingerprint holds: a protocol, an impl of it and
 /// a validated type.
 const SIZED: &str = "\nprotocol RecheckSized {\n    fn recheckSize(self) -> Int64\n}\n\nimpl RecheckSized for RecheckPoint {\n    fn recheckSize(self) -> Int64 {\n        return self.a\n    }\n}\n\ntype RecheckPort = Int64 where value >= 1\n";
+/// [`SIZED`] with a doc comment on the protocol and on its member.
+const SIZED_DOC: &str = "\n/// Has a size.\nprotocol RecheckSized {\n    /// The size.\n    fn recheckSize(self) -> Int64\n}\n\nimpl RecheckSized for RecheckPoint {\n    fn recheckSize(self) -> Int64 {\n        return self.a\n    }\n}\n\ntype RecheckPort = Int64 where value >= 1\n";
 
 /// The edits every program takes, from its text `base`: each kind of
 /// dependency changes once and changes back.
@@ -229,6 +231,8 @@ fn edits(base: &str) -> Vec<Edit> {
     collided.push(COLLIDE);
     let mut sized = collided.clone();
     sized.push(SIZED);
+    let mut documented = collided.clone();
+    documented.push(SIZED_DOC);
     let steps: Vec<(&'static str, String, bool)> = vec![
         ("no edit", base.to_string(), false),
         ("an edit inside the last function's body", body, false),
@@ -273,6 +277,11 @@ fn edits(base: &str) -> Vec<Edit> {
         (
             "add a protocol, an impl and a validated type",
             all(&sized),
+            false,
+        ),
+        (
+            "document the protocol and its member",
+            all(&documented),
             false,
         ),
         ("move every line", format!("\n{}", all(&sized)), false),

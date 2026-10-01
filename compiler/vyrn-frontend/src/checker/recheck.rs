@@ -22,14 +22,14 @@
 //! decide how the linker rewrites their bodies, the names of their protocols
 //! and contracts, the root's protocols and contracts, every `impl` head, the
 //! root's projection bodies, the host and the surface shadows. The root's
-//! parts are written without their positions ([`unplaced`]): each is checked
-//! on its own, so no body's result holds one of its lines. A rename apart of
-//! another module's declaration changes a name its readers read, so their
-//! reads answer differently. A body whose record rows name a node of another
-//! unit (an inlined projection's expansion) is checked on every check. No
-//! read row names a protocol (`Checker::read` records functions, types,
-//! module state and variants), so what a body reads of a protocol or an
-//! `impl` is in the world.
+//! parts are written without their positions and docs ([`unplaced`]): each
+//! is checked on its own, so no body's result holds one of its lines, and no
+//! check reads a doc. A rename apart of another module's declaration changes
+//! a name its readers read, so their reads answer differently. A body whose
+//! record rows name a node of another unit (an inlined projection's
+//! expansion) is checked on every check. No read row names a protocol
+//! (`Checker::read` records functions, types, module state and variants), so
+//! what a body reads of a protocol or an `impl` is in the world.
 //!
 //! A body's typing reads the declarations and the module state, never what
 //! an earlier body left on the checker: the typing workers take bodies in any
