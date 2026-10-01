@@ -338,6 +338,8 @@ fn one_edit_re_judges_one_body() {
 
 /// A root signature edit re-judges no imported body: no module imports the root, so
 /// the fingerprint an imported body is keyed under leaves the root's functions out.
+/// No lambda of the program has `aux`'s arity, so a key over the fn-value
+/// signatures would move with `aux`'s type.
 #[test]
 fn a_root_signature_edit_re_judges_no_imported_body() {
     vyrn_frontend::movecheck::reuse_judgments();
@@ -353,7 +355,7 @@ fn a_root_signature_edit_re_judges_no_imported_body() {
         write(
             "main.vyrn",
             &format!(
-                "import {{ bTwo }} from \"./b\"\nfn aux(x: {ty}) -> {ty} {{ return x }}\n\
+                "import {{ bTwo }} from \"./b\"\nfn aux(x: {ty}, y: {ty}, z: {ty}) -> {ty} {{ return x }}\n\
                  fn main() -> Int64 {{ return bTwo(2) }}\n"
             ),
         )

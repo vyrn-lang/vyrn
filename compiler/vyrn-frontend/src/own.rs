@@ -143,9 +143,6 @@ pub struct Ownership {
     /// Per function, every release step in run order, grouped by
     /// [`Release::site`].
     pub releases: HashMap<FnId, Vec<Release>>,
-    /// See [`crate::movecheck::Facts::fnval_clear`]. The core asks it at a call
-    /// through a fn value, where no capability row answers.
-    pub fnval_clear: std::collections::HashSet<String>,
     /// The program's user projection names ([`crate::project::place_names`]),
     /// which the core reads as element reads.
     pub place_names: std::collections::HashSet<String>,
@@ -300,15 +297,11 @@ pub fn analyze(program: &Program) -> Ownership {
     let ps = crate::prof::phase("own: Owned::new");
     let proto = Owned::new(program);
     drop(ps);
-    let fs = crate::prof::phase("own: movecheck::facts");
-    let facts = crate::movecheck::facts(program);
-    drop(fs);
     Ownership {
         memory: HashMap::new(),
         proto,
         // Only the placer writes release rows.
         releases: HashMap::new(),
-        fnval_clear: facts.fnval_clear.clone(),
         place_names: crate::project::place_names(program),
         arg_caps: crate::declared::ArgCaps::new(program),
         placed: Placed::default(),

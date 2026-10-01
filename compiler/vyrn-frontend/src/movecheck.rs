@@ -3,14 +3,13 @@
 //! obligation rule is the typed judgment's; this module states none. It sorts
 //! their refusals into source order ([`in_source_order`]), marks a generator's
 //! program ([`comptime`]), memoizes the kernel's per-body judgment for the editor
-//! ([`Judgments`]), and answers the fn-value meet ([`facts`]) and the
-//! argument-temporary screens the core asks at a call ([`arg_verdict`]).
+//! ([`Judgments`]), and answers the argument-temporary screens the core asks
+//! at a call ([`arg_verdict`]).
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 
 use crate::ast::*;
-use crate::declared::Declared;
 use crate::diagnostics::Diagnostic;
 
 /// A call-argument position whose argument expression built the value it hands
@@ -53,173 +52,6 @@ pub enum ArgVerdict {
     /// The consumer rule frees this operand; recorded so both rules
     /// cannot fire on one value.
     AlreadyFreed,
-}
-
-pub struct Facts {
-    /// The fn-value signature keys ([`fn_sig_key`]) whose every target reads
-    /// every position. A call through a fn value names no function, so no
-    /// capability row answers for it. A lambda carries no capability, so a
-    /// signature any lambda could inhabit is never in this set.
-    pub fnval_clear: HashSet<String>,
-}
-
-pub fn facts(program: &Program) -> Facts {
-    let decl = declarations(program);
-    let lets = Lets::over(program, &decl);
-    let caps = crate::declared::ArgCaps::new(program);
-    let mut sig_groups: HashMap<String, (usize, Vec<FnId>)> = HashMap::new();
-    for (i, f) in program.functions.iter().enumerate() {
-        let ps: Vec<Type> = f.params.iter().map(|p| p.ty.clone()).collect();
-        let key = fn_sig_key(&ps, &f.ret, decl.decls());
-        sig_groups
-            .entry(key)
-            .or_insert_with(|| (ps.len(), Vec::new()))
-            .1
-            .push(FnId::nth(i));
-    }
-    let mut fnval_clear: HashSet<String> = HashSet::new();
-    for (key, (arity, members)) in &sig_groups {
-        if lets.arities.contains(arity) || lets.sigs.contains(key) {
-            continue;
-        }
-        let all_clear = !members.is_empty()
-            // A key carries no position, so a member must read every one.
-            && members.iter().all(|m| caps.reads_all(*m));
-        if all_clear {
-            fnval_clear.insert(key.clone());
-        }
-    }
-    Facts { fnval_clear }
-}
-
-/// Runs the checker's record for its effect too: it expands each `place atSet`
-/// store into `project`'s memo, which [`Lets`] reads.
-fn declarations(program: &Program) -> Declared {
-    let rec_span = crate::prof::phase("movecheck: checker::record");
-    let rec = crate::checker::recorded(program);
-    drop(rec_span);
-    Declared::new(program).recording(rec)
-}
-
-crate::body_scope_descent!(LetsVisit, lets_block, lets_stmt, lets_expr);
-
-/// The lambdas that stand the fn-value meet down. An untyped lambda poisons
-/// its arity; one at an argument position with a declared fn type poisons only
-/// that signature. An `a[i] = v` store expanded through a `place atSet`
-/// projection is read as the expansion, the nodes the lowering walks.
-struct Lets<'a> {
-    decl: &'a Declared,
-    expansions: &'a crate::project::Expansions,
-    /// Lambda nodes an argument position already gave a signature.
-    typed: HashSet<NodeId>,
-    /// Index and value nodes a projection store's expansion stands in for.
-    skipped: HashSet<NodeId>,
-    arities: HashSet<usize>,
-    sigs: HashSet<String>,
-    stores: Vec<String>,
-}
-
-impl<'a> LetsVisit<'a> for Lets<'_> {
-    const SCOPED: bool = false;
-
-    fn stmt(&mut self, s: &'a Stmt, _: &HashSet<String>) {
-        let Stmt::IndexSet {
-            name,
-            index,
-            value,
-            line,
-            id: _,
-        } = s
-        else {
-            return;
-        };
-        let Some(blk) = self.expansions.stored(name, index, value) else {
-            return;
-        };
-        self.skipped.insert(index.id());
-        self.skipped.insert(value.id());
-        self.stores.push(format!("store {name}:{line}"));
-        lets_block(blk, &mut HashSet::new(), self);
-    }
-
-    fn expr(&mut self, e: &'a Expr, _: &HashSet<String>) -> bool {
-        if self.skipped.contains(&e.id()) {
-            return false;
-        }
-        match e {
-            // Recorded before the walk reaches the lambda, so it poisons only
-            // its own signature and not its arity.
-            Expr::Call { name, args, .. } => {
-                for (i, a) in args.iter().enumerate() {
-                    if !matches!(a, Expr::Lambda { .. }) {
-                        continue;
-                    }
-                    let Some(pt) = self.decl.param_ty(name, i) else {
-                        continue;
-                    };
-                    if let Type::Fn(ps, r) = crate::types::resolve(pt, self.decl.decls()) {
-                        self.typed.insert(a.id());
-                        self.sigs.insert(fn_sig_key(&ps, &r, self.decl.decls()));
-                    }
-                }
-            }
-            Expr::Lambda { params, .. } => {
-                if !self.typed.contains(&e.id()) {
-                    self.arities.insert(params.len());
-                }
-            }
-            _ => {}
-        }
-        true
-    }
-}
-
-impl<'a> Lets<'a> {
-    /// Walks every function, test and bench body, and no module-state
-    /// initializer.
-    fn over(program: &'a Program, decl: &'a Declared) -> Lets<'a> {
-        let mut v = Lets {
-            decl,
-            expansions: &program.expansions,
-            typed: HashSet::new(),
-            skipped: HashSet::new(),
-            arities: HashSet::new(),
-            sigs: HashSet::new(),
-            stores: Vec::new(),
-        };
-        let mut locals = HashSet::new();
-        let bodies = program
-            .functions
-            .iter()
-            .map(|f| &f.body)
-            .chain(program.tests.iter().map(|t| &t.body))
-            .chain(program.benches.iter().map(|b| &b.body));
-        for b in bodies {
-            lets_block(b, &mut locals, &mut v);
-        }
-        v
-    }
-}
-
-/// Returns the key a fn-value signature meets under: the resolved parameter
-/// and result types. This pass and the core both key on it.
-pub fn fn_sig_key(ps: &[Type], ret: &Type, decls: &HashMap<String, TypeDecl>) -> String {
-    let rps: Vec<Type> = ps.iter().map(|t| crate::types::resolve(t, decls)).collect();
-    format!("{rps:?}->{:?}", crate::types::resolve(ret, decls))
-}
-
-/// Returns what [`Lets`] reads off a program, one sorted line per row: an
-/// untyped lambda's arity, a typed lambda's signature key, or a projection
-/// store. `vyrn-cli/tests/letswalk.rs` prints them over the corpus.
-pub fn lets_outputs(program: &Program) -> Vec<String> {
-    let decl = declarations(program);
-    let lets = Lets::over(program, &decl);
-    let mut out: Vec<String> = lets.arities.iter().map(|n| format!("arity {n}")).collect();
-    out.extend(lets.sigs.iter().map(|k| format!("sig {k}")));
-    out.extend(lets.stores);
-    out.sort();
-    out.dedup();
-    out
 }
 
 /// Whether the builtin `name` hands an argument back: its seeded row returns
@@ -441,11 +273,11 @@ pub struct Judgments {
 impl Judgments {
     /// Opens the cache for `program`, or returns `None` where nothing is
     /// armed. Drops every entry if the declaration fingerprint moved.
-    pub fn open(program: &Program, fnval_clear: &HashSet<String>) -> Option<Judgments> {
+    pub fn open(program: &Program) -> Option<Judgments> {
         if !reusing_judgments() {
             return None;
         }
-        let fp = declaration_fingerprint(program, fnval_clear);
+        let fp = declaration_fingerprint(program);
         JUDGED.with(|j| {
             let mut j = j.borrow_mut();
             if j.0 != fp {
@@ -504,9 +336,8 @@ pub fn reset_judgment_tally() {
 /// one body re-judges no other. It includes each parameter's capability (`read
 /// x` to `consume x` changes what every caller owes), each projection's whole
 /// body (it is inlined into its callers), and each validated type's predicate
-/// and module-state initializer. It includes the fn-value signatures the meet
-/// clears ([`Facts::fnval_clear`]), which a lambda in any body decides. The
-/// parts are sorted first because three sources are hash maps.
+/// and module-state initializer. The parts are sorted first because three
+/// sources are hash maps.
 ///
 /// It leaves out the root's functions and module state, which no imported body
 /// reads: no module imports the root, and the link leaves every declared name
@@ -517,7 +348,7 @@ pub fn reset_judgment_tally() {
 /// by name alone (`ArgCaps::named`). The root's impl methods stay in through
 /// their `impl` blocks, and its types and protocols stay in: an imported
 /// generic is instantiated at a root type and dispatches to the root's impls.
-fn declaration_fingerprint(program: &Program, fnval_clear: &HashSet<String>) -> u64 {
+fn declaration_fingerprint(program: &Program) -> u64 {
     let spelled: HashSet<&str> = (program.protocols.iter())
         .flat_map(|p| p.methods.iter().map(|m| m.name.as_str()))
         .chain((program.impls.iter()).flat_map(|i| i.places.iter().map(|p| p.name.as_str())))
@@ -591,7 +422,6 @@ fn declaration_fingerprint(program: &Program, fnval_clear: &HashSet<String>) -> 
             .iter()
             .map(|(m, n)| format!("s{m:?}/{n}")),
     );
-    parts.extend(fnval_clear.iter().map(|k| format!("c{k}")));
     parts.sort_unstable();
     let mut h: u64 = 0xcbf29ce484222325;
     for p in &parts {

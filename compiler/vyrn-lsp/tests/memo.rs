@@ -166,14 +166,12 @@ const A_CALLS_BACK: &str = "let mut g: Array<Int64> = [1, 2, 3]\n\
     export fn run(f: fn() -> Int64) -> Int64 {\n  return use(f, g)\n}\n";
 
 /// A root whose `poke` returns `body`, beside an `aux` over `aux`, a type no
-/// body of `a` reads. The lambda keeps every one-parameter signature out of
-/// `Facts::fnval_clear`, so `aux`'s type moves no fingerprint part `a` reads.
+/// body of `a` reads.
 fn root_pokes(body: &str, aux: &str) -> String {
     format!(
         "import {{ bump, run }} from \"./a\"\nfn poke() -> Int64 {{\n  return {body}\n}}\n\
          fn aux(x: {aux}) -> {aux} {{\n  return x\n}}\n\
-         fn main() -> Int64 {{\n  let id: fn(Int64) -> Int64 = x -> x\n  \
-         print(run(poke) + id(0))\n  return 0\n}}\n"
+         fn main() -> Int64 {{\n  print(run(poke))\n  return 0\n}}\n"
     )
 }
 

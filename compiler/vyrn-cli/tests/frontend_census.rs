@@ -158,16 +158,11 @@ fn project_sections() -> Vec<Section> {
 }
 
 /// The sections of `movecheck.rs`, in file order. It states no refusal: it is a
-/// driver, a memo, the rows the core reads and the walk that fills them.
+/// driver, a memo and the screens the core reads at a call.
 fn movecheck_sections() -> Vec<Section> {
     use Kind::*;
     vec![
         sec("struct ArgTemp", Job),
-        sec("struct Facts", Job),
-        sec("fn declarations", Shared),
-        sec("struct Lets", Job),
-        sec("fn fn_sig_key", Job),
-        sec("fn lets_outputs", Job),
         sec("fn hands_back", Job),
         sec("fn views", Job),
         sec("fn in_source_order", Job),
