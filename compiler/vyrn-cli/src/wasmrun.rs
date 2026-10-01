@@ -1234,7 +1234,8 @@ fn main() -> Int64 {
             vyrn_lower::load(PROBE, "probe.vyrn", &opts, &files, None).expect("the probe loads");
         let diags = vyrn_lower::check_and_synthesize(&mut program, None);
         assert!(diags.is_empty(), "the probe checks: {diags:?}");
-        vyrn_codegen::direct::compile(&program).expect("the probe compiles")
+        let world = vyrn_lower::analyze(&program);
+        vyrn_codegen::direct::compile(&program, world).expect("the probe compiles")
     }
 
     fn quiet() -> Run {

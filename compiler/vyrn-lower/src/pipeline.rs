@@ -20,18 +20,24 @@ pub fn load(
     resolver: &dyn loader::ModuleResolver,
     engine: Option<&GenEngine>,
 ) -> Result<ast::Program, Vec<Diagnostic>> {
-    load_warned(root_source, root_path, opts, resolver, engine).0
+    let (loaded, _) = load_warned(root_source, root_path, opts, resolver, engine);
+    loaded.map(|(program, _)| program)
 }
 
-/// Like [`load`], and also returns the load's warnings. A warning never changes
-/// an exit code or the program's output; a failed load returns none.
+/// Like [`load`], and also returns the World the check judged and the load's
+/// warnings. The World answers for the program as returned; a host that
+/// changes the program analyses it again ([`crate::analyze`]). A warning never
+/// changes an exit code or the program's output; a failed load returns none.
 pub fn load_warned(
     root_source: &str,
     root_path: &str,
     opts: &loader::LoadOptions,
     resolver: &dyn loader::ModuleResolver,
     engine: Option<&GenEngine>,
-) -> (Result<ast::Program, Vec<Diagnostic>>, loader::Warnings) {
+) -> (
+    Result<(ast::Program, Arc<crate::World>), Vec<Diagnostic>>,
+    loader::Warnings,
+) {
     let load_span = prof::phase("load (total)");
     let (loaded, origins, warnings, _graph, pending) =
         loader::load_with_origins(root_source, root_path, opts, resolver, engine);
@@ -41,9 +47,10 @@ pub fn load_warned(
         Ok(p) => p,
         Err(diags) => return (Err(diags), warnings),
     };
-    let mut diags = check(&mut program, engine, pending).diagnostics;
-    if diags.is_empty() {
-        (Ok(program), warnings)
+    let (judged, world) = check(&mut program, engine, pending);
+    let mut diags = judged.diagnostics;
+    if let (true, Some(world)) = (diags.is_empty(), world) {
+        (Ok((program, world)), warnings)
     } else {
         // A diagnostic at an origin-governed line of a generated module moves to
         // its input file. `origin` states the rule; the LSP applies it too.
@@ -65,38 +72,38 @@ pub fn check_and_synthesize(
     program: &mut ast::Program,
     engine: Option<&GenEngine>,
 ) -> Vec<Diagnostic> {
-    check(program, engine, None).diagnostics
+    check(program, engine, None).0.diagnostics
 }
 
-/// [`check_and_synthesize`] with the floor decision the load returned, if any.
-/// The editor runs it as [`JUDGE`].
+/// [`check_and_synthesize`] with the floor decision the load returned, if any,
+/// and the World the kernel judged, for a program that type-checks.
 fn check(
     program: &mut ast::Program,
     engine: Option<&GenEngine>,
     pending: Option<floor::Pending>,
-) -> symbols::Judged {
+) -> (symbols::Judged, Option<Arc<crate::World>>) {
     let (mut diags, refused, binders, record) =
-        vyrn_frontend::check_and_synthesize(program, engine);
-    // One type record for the readers below: the check's own. The synthesis is
-    // over, so no node moves under its keys, and the guard closes before the
-    // caller can extend the program again.
-    let _held = checker::Held::open(program);
-    if let Some(record) = record {
-        checker::hold(program, std::sync::Arc::new(record));
-    }
+        vyrn_frontend::check_and_synthesize(program, engine, &Default::default());
+    // One type record for the readers below: the check's own, or a new one
+    // where the check made none. The synthesis is over, so no node moves under
+    // its keys.
+    let record = |p: &ast::Program| Arc::new(record.unwrap_or_else(|| checker::record(p)));
     // The checker's ownership refusals and the kernel's form one list, in
     // source order. The core builds bodies only for a program that type-checks.
     let mut memory = Default::default();
+    let mut judged = None;
     if diags.is_empty() {
         let _p = prof::phase("movecheck");
-        let (found, world) = refusals(program);
+        let (found, world) = refusals(program, record(program));
         diags.extend(found);
         memory = world.ownership.memory.clone();
+        judged = Some(world);
     } else if let Some(refused) = refused {
         let _p = prof::phase("lower typed");
         // Each typed refusal stands before the first of the checker's in its
         // file at a later line, so the list keeps the checker's own order.
-        for d in lower_typed(program, refused) {
+        let record = record(program);
+        for d in lower_typed(program, refused, &record) {
             let at = diags
                 .iter()
                 .position(|c| c.file == d.file && c.line > d.line)
@@ -107,32 +114,34 @@ fn check(
     }
     // The floor row a judgment answers: the load deferred the decision until
     // the check supplied the types. Last, so a type error is not answered twice.
-    if diags.is_empty() {
-        if let Some(p) = pending {
-            let _p = prof::phase("floor");
-            diags.extend(floor::decide(p, Some(&crate::effects::reaches(program))));
-        }
+    if let (true, Some(p), Some(world)) = (diags.is_empty(), pending, &judged) {
+        let _p = prof::phase("floor");
+        let reached = crate::effects::reaches(program, &world.ownership.record);
+        diags.extend(floor::decide(p, Some(&reached)));
     }
     let linked = diags
         .iter()
         .find_map(|d| program.spellings.linked_in(&d.message));
     debug_assert!(linked.is_none(), "a refusal names the linked `{linked:?}`");
-    symbols::Judged {
+    let out = symbols::Judged {
         diagnostics: diags,
         binders,
         memory,
-    }
+    };
+    (out, judged)
 }
 
 /// Returns every ownership refusal a program earns, the kernel's, as one
-/// list in source order, and the World the kernel judged. The caller
-/// guarantees the program type-checks.
-pub fn refusals(program: &ast::Program) -> (Vec<Diagnostic>, Arc<crate::World>) {
-    // The placer judges a core body for every instance, and the World is
-    // handed on: a command's next `own::Memo` adopts it. Only this analysis
+/// list in source order, and the World the kernel judged. `record` is the
+/// checker's record of `program`. The caller guarantees the program
+/// type-checks.
+pub fn refusals(
+    program: &ast::Program,
+    record: Arc<checker::Recorded>,
+) -> (Vec<Diagnostic>, Arc<crate::World>) {
+    // The placer judges a core body for every instance. Only this analysis
     // may reuse a judgment (`movecheck::reuse_judgments`).
-    let world = movecheck::judging(|| crate::analyze(program));
-    crate::hand_on(program, &world);
+    let world = crate::world::analyzed(program, record, true);
     // A program the typed judgment refuses gets those refusals alone.
     let mut diags = match world.typed_diagnostics() {
         [] => world.refusal_diagnostics(),
@@ -143,8 +152,8 @@ pub fn refusals(program: &ast::Program) -> (Vec<Diagnostic>, Arc<crate::World>) 
 }
 
 /// Wraps `run`, an engine that compiles and runs a generator, into the engine
-/// a host passes to [`load`], which judges the generator's own program
-/// under [`movecheck::comptime`]. The judgments run inside `run`'s compile
+/// a host passes to [`load`], which judges the generator's own program. The
+/// judgments run inside `run`'s compile
 /// (`direct::compile_gen_host`), which refuses the program the typed judgment
 /// refused, or else the program with a must-use row. A program `run` declines
 /// is refused with its must-use rows here, so it is refused whatever serves
@@ -156,18 +165,18 @@ pub fn gen_engine(
         + 'static,
 ) -> Box<GenEngine> {
     Box::new(move |program, name, args, inputs| {
-        movecheck::comptime(|| {
-            run(program, name, args, inputs).or_else(|| {
-                let owed = crate::analyze(program).owed_diagnostics();
-                (!owed.is_empty()).then_some(Err(GenError::Refused(owed)))
-            })
+        run(program, name, args, inputs).or_else(|| {
+            let owed = crate::analyze(program).owed_diagnostics();
+            (!owed.is_empty()).then_some(Err(GenError::Refused(owed)))
         })
     })
 }
 
 /// The pipeline the editor runs after its load: [`check_and_synthesize`] with
 /// the load's floor decision.
-pub const JUDGE: symbols::Judge = symbols::Judge { check };
+pub const JUDGE: symbols::Judge = symbols::Judge {
+    check: |program, engine, pending| check(program, engine, pending).0,
+};
 
 /// Builds the core of every body the checker typed in a refused program, and
 /// returns the typed judgment's refusals of those bodies.
@@ -177,11 +186,14 @@ pub const JUDGE: symbols::Judge = symbols::Judge { check };
 /// program whose tests, benches or kept impl methods reach one, or with an impl
 /// whose type has no key, is not built. The kernel's refusals are dropped,
 /// because typing comes before the judgments.
-fn lower_typed(program: &mut ast::Program, mut out: HashSet<String>) -> Vec<Diagnostic> {
+fn lower_typed(
+    program: &mut ast::Program,
+    mut out: HashSet<String>,
+    record: &checker::Recorded,
+) -> Vec<Diagnostic> {
     // A method of a refused impl is reached by name, or by a call the checker
     // dispatched on its receiver's type key. A receiver typed by a type
     // parameter may dispatch to any key.
-    let record = checker::recorded(program);
     let impls = &program.impls;
     let refused_method = |out: &HashSet<String>, name: &str, key: Option<&str>| {
         impls.iter().any(|i| {
@@ -272,14 +284,12 @@ fn lower_typed(program: &mut ast::Program, mut out: HashSet<String>) -> Vec<Diag
             program.functions.push(f);
         }
     }
-    // The held record typed the functions just moved out.
-    checker::hold_forget();
+    // `record` typed the functions just moved out, so the analysis checks
+    // again.
     let typed = crate::analyze(program).typed_diagnostics().to_vec();
     let kept = std::mem::take(&mut program.functions);
     let mut back: Vec<(usize, ast::Function)> = at.into_iter().zip(kept).chain(gone).collect();
     back.sort_by_key(|(i, _)| *i);
     program.functions = back.into_iter().map(|(_, f)| f).collect();
-    // The analysis held a record of the program without them.
-    checker::hold_forget();
     typed
 }

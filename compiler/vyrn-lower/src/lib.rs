@@ -22,7 +22,7 @@ mod world;
 pub use pipeline::{check_and_synthesize, gen_engine, load, load_warned, refusals, JUDGE};
 
 pub use core::refuses as kernel_refuses;
-pub use world::{analyze, forget_loaded, hand_on, FnRow, Fns, World};
+pub use world::{analyze, FnRow, Fns, World};
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 
@@ -253,9 +253,8 @@ impl<'a> Lowered<'a> {
 /// The named core of `program`'s root-module instances, as `vyrn emit-lowered`
 /// prints it: the version line, then each body's [`vyrn_frontend::core::Body::render`], or the
 /// gap that stopped it. Root-module only, `vyrn why --memory`'s rule: a linked
-/// program's imports are another file's answer.
-pub fn render(program: &Program, source: &str) -> String {
-    let world = analyze(program);
+/// program's imports are another file's answer. `world` is `program`'s.
+pub fn render(program: &Program, world: &World, source: &str) -> String {
     let own = &world.ownership;
     let lowered = lower_with(program, own);
     let mut out = format!("; vyrn lowered {VERSION} -- {source}\n");
@@ -1052,7 +1051,7 @@ pub fn as_written<'a>(
     program: &'a Program,
     ownership: &vyrn_frontend::own::Ownership,
 ) -> Vec<Instance<'a>> {
-    let recorded = checker::recorded(program);
+    let recorded = &ownership.record;
     (program.functions.iter().enumerate())
         .filter(|(_, f)| {
             !f.type_params.is_empty()
@@ -1288,7 +1287,8 @@ mod tests {
         let mut p = vyrn_frontend::check(src).expect("the fixture checks");
         // The type check alone: the kernel refuses `id`'s return of a `read`
         // parameter, and these tests are about the lowering.
-        let (diags, _, _, _) = vyrn_frontend::check_and_synthesize(&mut p, None);
+        let (diags, _, _, _) =
+            vyrn_frontend::check_and_synthesize(&mut p, None, &Default::default());
         assert!(diags.is_empty(), "{diags:?}");
         p
     }

@@ -6,7 +6,7 @@
 /// `error: ..` line on the guest's stderr comes back as `Err`, the split
 /// `Resident::call_body` makes for a test body.
 pub fn run_compiled(program: &vyrn_frontend::ast::Program) -> Result<i64, String> {
-    let bytes = vyrn_codegen::direct::compile(program)?;
+    let bytes = vyrn_codegen::direct::compile(program, vyrn_lower::analyze(program))?;
     let out = vyrn_cli::wasmrun::run(
         &bytes,
         vyrn_cli::wasmrun::Run {

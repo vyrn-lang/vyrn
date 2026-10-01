@@ -92,7 +92,8 @@ fn instances(path: &str, e: &Edit) -> Vec<String> {
     let Ok(p) = vyrn_lower::load(&e.root, path, &opts, &resolver, Some(&*engine)) else {
         return Vec::new();
     };
-    let world = vyrn_lower::refusals(&p).1;
+    let record = std::sync::Arc::new(vyrn_frontend::checker::record(&p));
+    let world = vyrn_lower::refusals(&p, record).1;
     (world.fn_rows().iter())
         .filter(|r| r.generic.is_some())
         .map(|r| r.name.clone())

@@ -7681,17 +7681,20 @@ struct Refused {
 /// rows. A body the core cannot build, or the kernel
 /// refuses for another reason (a double free, a use after release), is left
 /// as the plan had it.
-pub fn augment(program: &Program, w: &mut World) {
+pub fn augment(program: &Program, w: &mut World, judging: bool) {
     let own = &mut w.ownership;
     let mut r = Refused::default();
     let _p = vyrn_frontend::prof::phase("placer");
-    // The judgment memo, when the host armed one (`movecheck::Judgments`): a
-    // body whose key is unchanged is served its refusals, neither built nor
-    // judged, unless the effect judgment answers its frames otherwise. An
-    // armed host reads only refusals, not the facts or rows, so its lowering
-    // may leave out the facts of a body it has walked ([`crate::walked`]).
+    // The judgment memo, when the host armed one (`movecheck::Judgments`) and
+    // this is the refusal analysis: a body whose key is unchanged is served
+    // its refusals, neither built nor judged, unless the effect judgment
+    // answers its frames otherwise. An armed host reads only refusals, not
+    // the facts or rows, so its lowering may leave out the facts of a body it
+    // has walked ([`crate::walked`]).
     let js = vyrn_frontend::prof::phase("placer: judgments");
-    let memo = vyrn_frontend::movecheck::Judgments::open(program);
+    let memo = judging
+        .then(|| vyrn_frontend::movecheck::Judgments::open(program))
+        .flatten();
     drop(js);
     let lw = vyrn_frontend::prof::phase("placer: lower_with");
     let lowered = match memo {
@@ -8020,14 +8023,12 @@ pub fn augment(program: &Program, w: &mut World) {
         }
     }
     // The lint re-checks the types, which fails two kinds of program by
-    // design: a comptime program (its generator helpers use `lex`, `render`
+    // design: a generator host (its generator helpers use `lex`, `render`
     // and `Token`, which an ordinary check types `<type error>`), and one the
     // typed judgment refused (an unknown name typed `<type error>`, never
     // emitted).
     debug_assert!(
-        vyrn_frontend::movecheck::in_comptime()
-            || !r.typed.is_empty()
-            || crate::lint(&lowered).is_empty(),
+        program.host.gen || !r.typed.is_empty() || crate::lint(&lowered).is_empty(),
         "the lowered form failed its own lint:
   {}",
         crate::lint(&lowered).join(
@@ -8057,9 +8058,10 @@ pub fn augment(program: &Program, w: &mut World) {
     }
     let _p2 = vyrn_frontend::prof::phase("placer: facts rebuild");
     let mut facts = Facts::default();
-    // `vyrn check` emits nothing, so it folds no facts; the worklist below
-    // still places its rows.
-    let folds = vyrn_frontend::movecheck::emitting();
+    // `vyrn check` emits nothing, so its refusal analysis folds no facts; the
+    // worklist below still places its rows. A generator compiled during the
+    // load still needs its facts.
+    let folds = !judging || vyrn_frontend::movecheck::emitting();
     if folds {
         let state = build_module_state(program, own, &w.fns, &lowered.globals);
         let mut tops: Vec<Body> = state.into_iter().collect();

@@ -192,107 +192,10 @@ pub struct Placed {
     pub producers: std::collections::HashSet<NodeId>,
 }
 
-/// Holds the checker's record of one program per command, adopting the
-/// load's through [`hand_on`], and scopes `vyrn_lower::analyze`'s memo
-/// ([`memo_scope`]).
-///
-/// The guard borrows its program, so no other `Program` can take that address
-/// while it is held: a hit is the same program. Any other program analysed
-/// inside the guard (a generator's, during a load) misses and is not cached.
-/// Only the CLI and the editor open one.
-pub struct Memo<'a> {
-    program: std::marker::PhantomData<&'a Program>,
-}
-
-/// A program's identity from the load to the lowering. The `Program` moves in
-/// between, but its `functions` buffer does not, so the buffer address plus the
-/// two lengths a synthesis can change survive the move.
-pub fn ident(program: &Program) -> (usize, usize, usize) {
-    (
-        program.functions.as_ptr() as usize,
-        program.functions.len(),
-        program.type_decls.len(),
-    )
-}
-
-thread_local! {
-    /// The load's checker record, and the [`ident`] of its program.
-    #[allow(clippy::type_complexity)]
-    static LOADED: std::cell::RefCell<
-        Option<((usize, usize, usize), Option<crate::checker::HeldRecord>)>,
-    > = const { std::cell::RefCell::new(None) };
-}
-
-/// Hands the load's checker record to the [`Memo`] the command opens next.
-///
-/// Only for a program with shared expansions
-/// ([`crate::project::Expansions::is_shared`]): there a
-/// projection site keeps one expansion, so the load's nodes are the ones the
-/// command lowers. The editor opens none, because a reused `functions` buffer
-/// would make [`ident`] match two different texts.
-pub fn hand_on(program: &Program) {
-    if !program.expansions.is_shared() {
-        return;
-    }
-    let record = crate::checker::held(program);
-    LOADED.with(|l| *l.borrow_mut() = Some((ident(program), record)));
-}
-
-/// Drops what the load handed on. Call it after rewriting the program in place
-/// (`vyrn serve` renames calls), which [`ident`] cannot see.
-pub fn forget_loaded() {
-    LOADED.with(|l| *l.borrow_mut() = None);
-}
-
-thread_local! {
-    /// The program the open memo answers for, as an address never
-    /// dereferenced, and the count of memos opened on this thread, which
-    /// names the open one. `(0, _)` outside a memo.
-    static MEMO_FOR: std::cell::Cell<(usize, u64)> = const { std::cell::Cell::new((0, 0)) };
-}
-
-/// The open memo's program address and generation, or `None` outside one. A
-/// generation names one [`Memo::open`], so an answer cached under it serves
-/// no later memo.
-pub fn memo_scope() -> Option<(usize, u64)> {
-    Some(MEMO_FOR.with(|p| p.get())).filter(|(at, _)| *at != 0)
-}
-
-impl<'a> Memo<'a> {
-    /// Holds the checker's record of `program` until the guard drops,
-    /// adopting the load's when it was made for this program. The CLI must
-    /// load with shared expansions ([`crate::project::Expansions::shared`]),
-    /// or a projection site is inlined twice under different tags and the
-    /// adopted rows key nothing.
-    pub fn open(program: &'a Program) -> Memo<'a> {
-        MEMO_FOR.with(|p| p.set((program as *const Program as usize, p.get().1 + 1)));
-        let adopted = LOADED
-            .with(|l| l.borrow_mut().take())
-            .filter(|_| program.expansions.is_shared())
-            .filter(|(id, _)| *id == ident(program))
-            .and_then(|(_, r)| r);
-        // The lowering reads the checker's record (`checker::recorded`)
-        // instead of checking the program again.
-        crate::checker::hold_open(program);
-        if let Some(record) = adopted {
-            crate::checker::adopt(program, record);
-        }
-        Memo {
-            program: std::marker::PhantomData,
-        }
-    }
-}
-
-impl Drop for Memo<'_> {
-    fn drop(&mut self) {
-        MEMO_FOR.with(|p| p.set((0, p.get().1)));
-        crate::checker::hold_close();
-    }
-}
-
 /// Analyses ownership across a whole program: the plan before the core's
 /// placer (`vyrn_lower::analyze`) adds the release rows and the memory rows.
-pub fn analyze(program: &Program) -> Ownership {
+/// `record` is the checker's record of `program` as it stands.
+pub fn analyze(program: &Program, record: std::sync::Arc<crate::checker::Recorded>) -> Ownership {
     let _p = crate::prof::phase("own: analyze_now");
     let ps = crate::prof::phase("own: Owned::new");
     let proto = Owned::new(program);
@@ -305,7 +208,7 @@ pub fn analyze(program: &Program) -> Ownership {
         place_names: crate::project::place_names(program),
         arg_caps: crate::declared::ArgCaps::new(program),
         placed: Placed::default(),
-        record: crate::checker::recorded(program),
+        record,
         state_callees: HashMap::new(),
         accumulators: Default::default(),
     }

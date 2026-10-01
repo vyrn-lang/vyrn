@@ -137,8 +137,8 @@ generator input on every load. Every load links the whole program again.
    judgment's state rows are keyed by `FnId`; a frame carries its row
    (`Body::id`), which the placer's serial merge gives a lambda frame. A
    reader turns a name into an id once, with `World::fn_id`. The
-   emitter reads the same World, handed on from the load through
-   `own::Memo`.
+   emitter reads the same World: `vyrn_lower::load_warned` returns it with
+   the program, and a host that changes the program analyses it again.
 4. `floor::decide`: whether each artifact's target provides what its code
    reaches.
 
@@ -246,8 +246,7 @@ The kernel knows no surface syntax. It judges core bodies.
   sized integer is judged by width and signedness.
 
 `movecheck.rs` states no rule. It orders refusals by source
-(`movecheck::in_source_order`), marks a generator's own program
-(`movecheck::comptime`), and memoizes per-body judgments for the editor (`movecheck::Judgments`), so a
+(`movecheck::in_source_order`) and memoizes per-body judgments for the editor (`movecheck::Judgments`), so a
 keystroke re-judges only the bodies whose key changed.
 
 ## The emitter

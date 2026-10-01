@@ -2,11 +2,11 @@
 //! the pipeline's judgments and every emitter read it by reference. It holds
 //! no `Rc` and no cell, so it is `Send + Sync`.
 
-use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, OnceLock};
 
 use vyrn_frontend::ast::{FnId, Function, Key, Program, Type};
+use vyrn_frontend::checker;
 use vyrn_frontend::core::{rows, Body, Callee, Facts, Rhs, St};
 use vyrn_frontend::diagnostics::{Diagnostic, Severity};
 use vyrn_frontend::movecheck::Refusal;
@@ -466,65 +466,25 @@ impl World {
     }
 }
 
-thread_local! {
-    /// The load's World, handed on to the first analysis of its program
-    /// inside the next [`own::Memo`], with the program's [`own::ident`].
-    #[allow(clippy::type_complexity)]
-    static LOADED: RefCell<Option<((usize, usize, usize), Arc<World>)>> =
-        const { RefCell::new(None) };
-    /// The World of the program the open [`own::Memo`] answers for, under that
-    /// memo's generation ([`own::memo_scope`]).
-    static MEMO: RefCell<Option<(u64, Arc<World>)>> = const { RefCell::new(None) };
-}
-
 /// Analyses ownership across `program`, places the releases the plan did not
 /// place ([`crate::core::augment`]), and returns the World every consumer
-/// reads. Served from the open [`own::Memo`] when it holds one for `program`.
+/// reads. It checks `program` again for the record; a host holding the
+/// check's World passes it on instead.
 pub fn analyze(program: &Program) -> Arc<World> {
-    let open = own::memo_scope().map(|(_, g)| g);
-    MEMO.with(|m| drop(m.borrow_mut().take_if(|(g, _)| Some(*g) != open)));
-    let memo = (own::memo_scope())
-        .filter(|(at, _)| *at == program as *const Program as usize)
-        .map(|(_, g)| g);
-    if memo.is_some() {
-        let hit = MEMO.with(|m| m.borrow().as_ref().map(|(_, w)| w.clone()));
-        if let Some(w) = hit.or_else(|| adopt(program)) {
-            MEMO.with(|m| *m.borrow_mut() = memo.map(|g| (g, w.clone())));
-            return w;
-        }
-    }
-    let mut world = World::new(program, own::analyze(program));
-    crate::core::augment(program, &mut world);
+    analyzed(program, Arc::new(checker::record(program)), false)
+}
+
+/// [`analyze`] against `record`, the checker's record of `program`. `judging`
+/// marks the analysis whose refusals [`crate::refusals`] reports, the only one
+/// that may reuse a judgment or skip the emitter's facts.
+pub(crate) fn analyzed(
+    program: &Program,
+    record: Arc<checker::Recorded>,
+    judging: bool,
+) -> Arc<World> {
+    let mut world = World::new(program, own::analyze(program, record));
+    crate::core::augment(program, &mut world, judging);
     #[cfg(debug_assertions)]
     world.check();
-    let world = Arc::new(world);
-    if let Some(g) = memo {
-        MEMO.with(|m| *m.borrow_mut() = Some((g, world.clone())));
-    }
-    world
-}
-
-/// The load's World, when it was made for `program` in a compile scope.
-fn adopt(program: &Program) -> Option<Arc<World>> {
-    (LOADED.with(|l| l.borrow_mut().take()))
-        .filter(|_| program.expansions.is_shared())
-        .filter(|(id, _)| *id == own::ident(program))
-        .map(|(_, w)| w)
-}
-
-/// Hands the load's World and checker record to the [`own::Memo`] the command
-/// opens next ([`own::hand_on`]).
-pub fn hand_on(program: &Program, world: &Arc<World>) {
-    if !program.expansions.is_shared() {
-        return;
-    }
-    own::hand_on(program);
-    LOADED.with(|l| *l.borrow_mut() = Some((own::ident(program), world.clone())));
-}
-
-/// Drops what the load handed on. Call it after rewriting the program in place
-/// (`vyrn serve` renames calls), which [`own::ident`] cannot see.
-pub fn forget_loaded() {
-    own::forget_loaded();
-    LOADED.with(|l| *l.borrow_mut() = None);
+    Arc::new(world)
 }

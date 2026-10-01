@@ -500,10 +500,6 @@ thread_local! {
     /// not run the generator again.
     static DERIVED: std::cell::RefCell<HashMap<[u64; 2], Derived>> =
         std::cell::RefCell::new(HashMap::new());
-    /// The generators running, outermost first. A generator's own program may
-    /// call `derive` (a `std/ui` generator reaches `toJson`), but not reach
-    /// itself.
-    static DERIVING: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
 /// What a derive generator wrote: its functions and type declarations, each
@@ -528,11 +524,14 @@ pub struct Site {
 /// shared subtype's function twice. Its program is `program` cut down to the
 /// functions the generator reaches, checked as a generator's own program is.
 /// The output is not checked here, except each entry's signature against its
-/// site; the caller checks the program it joins.
+/// site; the caller checks the program it joins. `nest` names the generators
+/// running: a generator's own program may call `derive` (a `std/ui` generator
+/// reaches `toJson`), but not reach itself.
 pub fn derive(
     program: &Program,
     sites: &[Site],
     engine: Option<&GenEngine>,
+    nest: &crate::loader::Nest,
 ) -> Result<Derived, Diagnostic> {
     let unplaced = |e: String| Diagnostic::error(0, 0, "check", e);
     let mut out: Derived = (Vec::new(), Vec::new());
@@ -573,15 +572,15 @@ pub fn derive(
         let (fns, decls) = match cached {
             Some(d) => d,
             None => {
-                if DERIVING.with(|d| d.borrow().iter().any(|r| r == g)) {
+                if nest.deriving.iter().any(|r| r == g) {
                     return Err(unplaced(format!(
                         "generator `{g}` reaches `derive({g}, ..)`"
                     )));
                 }
-                DERIVING.with(|d| d.borrow_mut().push(g.to_string()));
+                let mut inner = nest.clone();
+                inner.deriving.push(g.to_string());
                 let fingerprint = crate::hash::sha256_hex(text.as_bytes());
-                let written = run_derive(gen_program, g, arg, fingerprint, engine);
-                DERIVING.with(|d| d.borrow_mut().pop());
+                let written = run_derive(gen_program, g, arg, fingerprint, engine, inner);
                 let written = written.map_err(unplaced)?;
                 DERIVED.with(|d| d.borrow_mut().insert(key, written.clone()));
                 written
@@ -721,13 +720,14 @@ fn canonical(p: &Program) -> String {
 /// Checks and runs generator `g` on `arg`, parses what it wrote, and renames
 /// each function and type it defines to `derive$g$<name>`. `fingerprint`
 /// names the generator's program, so the engine keeps its compiled module
-/// across processes.
+/// across processes. `nest` names `g` among the generators running.
 fn run_derive(
     mut gen_program: Program,
     g: &str,
     arg: Expr,
     fingerprint: String,
     engine: Option<&GenEngine>,
+    nest: crate::loader::Nest,
 ) -> Result<Derived, String> {
     // The first refusal alone, for the checker and the engine's judgments alike.
     let refused = |ds: &[Diagnostic]| -> String {
@@ -736,13 +736,14 @@ fn run_derive(
             .map(|d| format!("generator `{g}` does not check: {}", d.render()))
             .collect()
     };
-    let (diags, _, _, _) = crate::check_and_synthesize(&mut gen_program, engine);
+    let (diags, _, _, _) = crate::check_and_synthesize(&mut gen_program, engine, &nest);
     if !diags.is_empty() {
         return Err(refused(&diags));
     }
     let resolver = crate::loader::MapResolver(HashMap::new());
     let opts = crate::loader::LoadOptions {
         expansions: gen_program.expansions.clone(),
+        nest,
         ..Default::default()
     };
     let src = generate(

@@ -169,6 +169,7 @@ pull request.
 - Releases are placed once, from the core, by one liveness pass. No emitter places a release.
 - What one analysis decided about a program (the kernel's placement, the checker's record) lives on that program's `own::Ownership`, and a pass reads the one it is handed. A thread-local keyed by a program's address answered for another program.
 - Program state lives in one value, the World, owned above the front end by `vyrn-lower`. The front end declares no slot for lowering to fill, and no thread-local or global holds a program's state.
+- The load returns the World its check judged (`vyrn_lower::load_warned`), and the host passes it to every pass over that program. A host that changes the program analyses it again (`vyrn_lower::analyze`); no memo hands a World or a record to the next pass.
 - A table is keyed by a resolved id (function, type, declaration, name), never by a spelling; two bindings that share a name merged their facts. A node id is a function id and a local index, so an edit to one function renumbers nothing else.
 - An id is a storage index, never an order. Diagnostics and emitted functions follow source order, so an incremental check and a fresh one print the same bytes.
 - Each relation has one writer, which sets both directions and deletes in a batch. No hooks and no second storage shape for one relation.

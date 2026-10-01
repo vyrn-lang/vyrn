@@ -213,13 +213,10 @@ pub fn check_accum_with_binders(program: &Program) -> (Vec<Diagnostic>, Vec<Loca
 }
 
 /// Returns the stored-function-value collection the `--workers`
-/// gate needs: the held record's, else a check's. Diagnostics are discarded:
-/// callers have already checked.
+/// gate needs, from a check. Diagnostics are discarded: callers have already
+/// checked. A host holding the check's record reads [`Recorded::stored`].
 pub fn stored_fn_effects(program: &Program) -> StoredFnEffects {
-    match held_now(program) {
-        Some(r) => r.stored.clone(),
-        None => check_accum_full(program).2,
-    }
+    check_accum_full(program).2
 }
 
 /// Names the compiler owns: builtin functions, builtin type names and the sum
@@ -1606,21 +1603,14 @@ pub fn record(program: &Program) -> Recorded {
     recording_check(program).2
 }
 
-/// Checks the program and holds the record for [`recorded`], so the lowering
-/// does not check again. It never reuses a body: a reused body would leave a
-/// hole in the record.
+/// Checks the program as [`record`] does and returns the diagnostics and the
+/// root's bindings. It never reuses a body.
 pub fn check_accum_recording(program: &Program) -> (Vec<Diagnostic>, Vec<LocalBinding>) {
-    let (diags, binders, made) = recording_check(program);
-    hold(program, std::sync::Arc::new(made));
+    let (diags, binders, _) = recording_check(program);
     (diags, binders)
 }
 
 thread_local! {
-    /// The address of the program a record may be held for, or 0. Sound as a
-    /// key because the guard that sets it borrows the program
-    /// ([`crate::own::Memo::open`]).
-    static HOLDING: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-    static HELD: RefCell<Option<(usize, HeldRecord)>> = const { RefCell::new(None) };
     /// Set by [`record_reads`].
     static READS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
@@ -1630,97 +1620,6 @@ thread_local! {
 /// check` does not, and a row costs a push per name lookup.
 pub fn record_reads() {
     READS.with(|r| r.set(true));
-}
-
-/// A record with the [`Host`] it was made under. The host changes what a
-/// check decides, so a record answers only under the host it was made with.
-pub(crate) type HeldRecord = (Host, std::sync::Arc<Recorded>);
-
-/// Opens the record slot for `program`. Called by [`crate::own::Memo::open`],
-/// so a record lives as long as its analysis.
-pub(crate) fn hold_open(program: &Program) {
-    HOLDING.with(|h| h.set(program as *const Program as usize));
-    hold_forget();
-}
-
-/// Drops the held record and keeps the slot open, for a caller that changes
-/// the program the record typed.
-pub fn hold_forget() {
-    HELD.with(|h| *h.borrow_mut() = None);
-}
-
-/// Closes the record slot. Called by [`crate::own::Memo`]'s `Drop`.
-pub(crate) fn hold_close() {
-    HOLDING.with(|h| h.set(0));
-    hold_forget();
-}
-
-/// The record slot as `vyrn_lower::check_and_synthesize` holds it, from
-/// synthesis to the last judgment, so its three readers share one record. It
-/// stands aside where another holder has the slot, so it never closes theirs.
-pub struct Held(bool);
-
-impl Held {
-    pub fn open(program: &Program) -> Held {
-        if HOLDING.with(|h| h.get()) != 0 {
-            return Held(false);
-        }
-        hold_open(program);
-        Held(true)
-    }
-}
-
-impl Drop for Held {
-    fn drop(&mut self) {
-        if self.0 {
-            hold_close();
-        }
-    }
-}
-
-/// Holds `made`, a record of `program` made under its host, where the slot
-/// is open for it.
-pub fn hold(program: &Program, made: std::sync::Arc<Recorded>) {
-    adopt(program, (program.host, made));
-}
-
-/// Holds `record` for `program` where the slot is open for it. The CLI adopts
-/// the load's record through [`crate::own::Memo::open`]: the `Program` moved,
-/// but the nodes the record keys did not.
-pub(crate) fn adopt(program: &Program, record: HeldRecord) {
-    let key = program as *const Program as usize;
-    if HOLDING.with(|h| h.get()) == key {
-        HELD.with(|h| *h.borrow_mut() = Some((key, record)));
-    }
-}
-
-/// The record held for `program`, with the host flags it was made under.
-pub(crate) fn held(program: &Program) -> Option<HeldRecord> {
-    let key = program as *const Program as usize;
-    HELD.with(|h| {
-        h.borrow()
-            .as_ref()
-            .filter(|(k, _)| *k == key)
-            .map(|(_, r)| r.clone())
-    })
-}
-
-/// The record held for `program` under its host.
-fn held_now(program: &Program) -> Option<std::sync::Arc<Recorded>> {
-    held(program)
-        .filter(|(h, _)| *h == program.host)
-        .map(|(_, r)| r)
-}
-
-/// Returns the record of `program`: the held one if it matches the program
-/// and host flags, else a new one, held for the next ask.
-pub fn recorded(program: &Program) -> std::sync::Arc<Recorded> {
-    if let Some(r) = held_now(program) {
-        return r;
-    }
-    let made = std::sync::Arc::new(record(program));
-    hold(program, made.clone());
-    made
 }
 
 /// What every body is typed against: the declarations and tables steps 1 to 2
@@ -7550,43 +7449,6 @@ mod tests {
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].0, "id");
         assert_eq!(calls[0].1, vec![("T".to_string(), Type::Int)]);
-    }
-
-    /// What [`check_accum_recording`] holds equals what [`record`] makes. A
-    /// record is keyed by the program's address only while a
-    /// [`crate::own::Memo`] borrows it, so another program gets its own.
-    #[test]
-    fn the_analysiss_own_check_records_what_the_lowering_reads() {
-        let src = "fn id<T>(x: T) -> T {\n    return x\n}\n\n\
-                   fn main() -> Int64 {\n    let n: Int64 = id(1)\n    return n\n}\n";
-        let p = parse(lex(src).unwrap()).unwrap();
-        let want = record(&p);
-
-        {
-            let _memo = crate::own::Memo::open(&p);
-            let (diags, _) = check_accum_recording(&p);
-            assert!(diags.is_empty(), "{diags:?}");
-            let got = recorded(&p);
-            assert_eq!(got.node_types, want.node_types);
-            assert_eq!(got.joins, want.joins);
-            assert_eq!(got.node_substs.len(), want.node_substs.len());
-            let q = parse(
-                lex("fn main() -> Int64 {
-    return 0
-}
-")
-                .unwrap(),
-            )
-            .unwrap();
-            let other = recorded(&q);
-            assert_ne!(
-                other.node_types, got.node_types,
-                "a record served for the wrong program"
-            );
-        }
-
-        let after = recorded(&p);
-        assert_eq!(after.node_types, want.node_types);
     }
 
     /// A container with an optional projection.

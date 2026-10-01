@@ -1,9 +1,8 @@
 //! The ownership judgment's driver, and the facts the core reads at a call.
 //! Every ownership rule is the kernel's (`vyrn_lower::kernel`) and every
 //! obligation rule is the typed judgment's; this module states none. It sorts
-//! their refusals into source order ([`in_source_order`]), marks a generator's
-//! program ([`comptime`]), memoizes the kernel's per-body judgment for the editor
-//! ([`Judgments`]), and answers the argument-temporary screens the core asks
+//! their refusals into source order ([`in_source_order`]), memoizes the
+//! kernel's per-body judgment for the editor ([`Judgments`]), and answers the argument-temporary screens the core asks
 //! at a call ([`arg_verdict`]).
 
 use std::cell::RefCell;
@@ -151,25 +150,6 @@ pub fn in_source_order(diags: &mut [Diagnostic]) {
     diags.sort_by_key(|d| (files.iter().position(|f| *f == d.file).unwrap_or(0), d.line));
 }
 
-thread_local! {
-    /// Set inside [`comptime`].
-    static COMPTIME: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-}
-
-/// Runs `f` with the program marked as a generator's own, whose lowered form
-/// the core does not lint (`vyrn_lower::core`).
-pub fn comptime<T>(f: impl FnOnce() -> T) -> T {
-    let was = COMPTIME.with(|c| c.replace(true));
-    let out = f();
-    COMPTIME.with(|c| c.set(was));
-    out
-}
-
-/// Whether the program being worked on is a generator's own.
-pub fn in_comptime() -> bool {
-    COMPTIME.with(|c| c.get())
-}
-
 /// The kernel's refusals of one body, with no address in them. A body that
 /// earns none caches an empty list.
 pub type Verdict = Vec<Refusal>;
@@ -215,8 +195,6 @@ thread_local! {
     static REUSE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// Set by [`emit_nothing`].
     static NO_EMIT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-    /// Whether the analysis running now is the one [`judging`] runs.
-    static JUDGING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// The declaration fingerprint and the entries valid under it. A new
     /// fingerprint drops the whole map, so nothing needs eviction.
     static JUDGED: RefCell<(u64, HashMap<JudgmentKey, Judgment>)> =
@@ -236,32 +214,15 @@ pub fn reuse_judgments() {
     REUSE.with(|r| r.set(true));
 }
 
-/// Whether the analysis running now may reuse a judgment: the host armed it,
-/// and [`judging`] runs this analysis.
-pub fn reusing_judgments() -> bool {
-    REUSE.with(|r| r.get()) && JUDGING.with(|j| j.get())
-}
-
 /// Declares that this host emits nothing from the program it checks (`vyrn
 /// check`), so the placer skips the facts only an emitter reads.
 pub fn emit_nothing() {
     NO_EMIT.with(|r| r.set(true));
 }
 
-/// Whether the analysis running now feeds an emitter. Only the analysis
-/// [`judging`] runs can answer no: a generator compiled during the load
-/// still needs its facts.
+/// Whether the host emits from the program it checks: no after [`emit_nothing`].
 pub fn emitting() -> bool {
-    !(NO_EMIT.with(|r| r.get()) && JUDGING.with(|j| j.get()))
-}
-
-/// Runs `f`, the analysis whose refusals `vyrn_lower::refusals` reports. Only
-/// that analysis may reuse a judgment or skip the emitter's facts.
-pub fn judging<T>(f: impl FnOnce() -> T) -> T {
-    JUDGING.with(|j| j.set(true));
-    let out = f();
-    JUDGING.with(|j| j.set(false));
-    out
+    !NO_EMIT.with(|r| r.get())
 }
 
 /// The judgment cache, open for one analysis. It copies the program's module
@@ -274,7 +235,7 @@ impl Judgments {
     /// Opens the cache for `program`, or returns `None` where nothing is
     /// armed. Drops every entry if the declaration fingerprint moved.
     pub fn open(program: &Program) -> Option<Judgments> {
-        if !reusing_judgments() {
+        if !REUSE.with(|r| r.get()) {
             return None;
         }
         let fp = declaration_fingerprint(program);
