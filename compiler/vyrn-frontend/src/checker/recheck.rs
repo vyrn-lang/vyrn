@@ -25,9 +25,11 @@
 //! parts are written without their positions ([`unplaced`]): each is checked
 //! on its own, so no body's result holds one of its lines. A rename apart of
 //! another module's declaration changes a name its readers read, so their
-//! reads answer differently. A body whose record rows name a node of another unit (an
-//! inlined projection's expansion) or that read a protocol is checked on
-//! every check.
+//! reads answer differently. A body whose record rows name a node of another
+//! unit (an inlined projection's expansion) is checked on every check. No
+//! read row names a protocol (`Checker::read` records functions, types,
+//! module state and variants), so what a body reads of a protocol or an
+//! `impl` is in the world.
 //!
 //! A body's typing reads the declarations and the module state, never what
 //! an earlier body left on the checker: the typing workers take bodies in any
