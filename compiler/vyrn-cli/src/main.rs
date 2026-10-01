@@ -957,21 +957,21 @@ fn why_cmd(call: &Call) -> Outcome {
             .ok()
             .map(|t| vyrn_frontend::parser::parse_accum(t).0)
     };
-    let decl = vyrn_frontend::loader::ModuleResolver::read(&DiskResolver, &view.file)
+    let decl = vyrn_frontend::loader::ModuleResolver::read(&p.resolver, &view.file)
         .ok()
         .and_then(|s| parsed(&s))
         .and_then(|p| p.contracts.into_iter().find(|c| c.name == view.name));
     let (Some(mut decl), Some(module)) = (decl, parsed(&source)) else {
         eprintln!("error: cannot lex {path} or {}", view.file);
-        return ExitCode::FAILURE;
+        return Err(ExitCode::FAILURE);
     };
     // The generator's `contractOf` names the module as its importer wrote it.
     decl.module = Some(view.module.clone());
-    let verdict = match contract_verdict(&decl, &module, &path) {
+    let verdict = match contract_verdict(&p, &decl, &module) {
         Ok(v) => v,
         Err(e) => {
             eprintln!("error: std/contract cannot judge {path}: {e}");
-            return ExitCode::FAILURE;
+            return Err(ExitCode::FAILURE);
         }
     };
 
@@ -1095,21 +1095,21 @@ fn main() -> Int64 {
 /// reflects it, and `module`, parsed but not linked, as `moduleInterface`
 /// reflects a module.
 fn contract_verdict(
+    p: &Project,
     decl: &vyrn_frontend::ast::ContractDecl,
     module: &vyrn_frontend::ast::Program,
-    path: &str,
 ) -> Result<ContractVerdict, String> {
     use vyrn_frontend::ast::{Block, Id, Stmt};
     use vyrn_frontend::schema_reflect::{contract_info_lit, module_interface_lit, Origins};
-    let opts = vyrn_frontend::loader::LoadOptions {
+    let opts = loader::LoadOptions {
         expansions: Expansions::shared(),
-        ..load_options(path)
+        ..p.opts.clone()
     };
     let mut prog = vyrn_lower::load(
         WHY_CONTRACT_SRC,
         "why-contract.vyrn",
         &opts,
-        &DiskResolver,
+        &p.resolver,
         None,
     )
     .map_err(|d| d.first().map(|d| d.message.clone()).unwrap_or_default())?;
@@ -1135,11 +1135,9 @@ fn contract_verdict(
     let out = wasmrun::run(
         &bytes,
         wasmrun::Run {
-            argv: Vec::new(),
-            stdin_prefix: Vec::new(),
             capture_stdout: true,
             capture_stderr: true,
-            meter: false,
+            ..Default::default()
         },
     )?;
     if out.code != 0 {
