@@ -239,11 +239,15 @@ The kernel knows no surface syntax. It judges core bodies.
   (`effects::reaches`), and the kernel asks it which globals a call may
   write (`effects::writes_state`), because such a call ends every borrow of
   those globals, its own arguments' too.
-- Typed (`typed.rs`). A value of a validated type is produced only by that
-  type's constructor, a name already of that type, or a literal the checker
-  proved. `typed::judge` walks each store into a validated place and judges
-  its producer. `vyrn_frontend::validate` says which types carry a rule; a
-  sized integer is judged by width and signedness.
+- Typed (`typed.rs`). The `vyrn check` rules over the core rows: a store
+  into a place not declared `mut`, a store group that leaves a `where` rule
+  unchecked, an exit outside a loop, a `drop` that releases nothing, and the
+  rules the builder met at its construct. A value of a validated type is
+  produced only by that type's constructor, a name already of that type, or
+  a literal the checker proved; the census `tests/typed.rs` walks each store
+  into a validated place and judges its producer. `vyrn_frontend::validate`
+  says which types carry a rule; a sized integer is judged by width and
+  signedness.
 
 `movecheck.rs` states no rule. It orders refusals by source
 (`movecheck::in_source_order`) and memoizes per-body judgments for the editor (`movecheck::Judgments`), so a
