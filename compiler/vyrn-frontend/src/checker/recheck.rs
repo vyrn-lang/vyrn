@@ -27,7 +27,10 @@
 //! check reads a doc. A rename apart of another module's declaration changes
 //! a name its readers read, so their reads answer differently. A body whose
 //! record rows name a node of another unit (an inlined projection's
-//! expansion) is checked on every check. No read row names a protocol
+//! expansion, numbered in [`crate::ast::NodeId::expansion_unit`]) is checked
+//! on every check, for two reasons: a replay moves rows into the body's own
+//! unit alone ([`in_unit`]), and the world writes a root projection without
+//! the lines its expansion keeps. No read row names a protocol
 //! (`Checker::read` records functions, types, module state and variants), so
 //! what a body reads of a protocol or an `impl` is in the world.
 //!
