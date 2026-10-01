@@ -337,7 +337,10 @@ pub fn reset_judgment_tally() {
 /// x` to `consume x` changes what every caller owes), each projection's whole
 /// body (it is inlined into its callers), and each validated type's predicate
 /// and module-state initializer. The parts are sorted first because three
-/// sources are hash maps.
+/// sources are hash maps. Every part but a projection is written without its
+/// positions ([`unplaced`]), so a line moved in the root moves no part; a
+/// projection's expansion keeps its lines, which an imported caller's refusal
+/// quotes.
 ///
 /// It leaves out the root's functions and module state, which no imported body
 /// reads: no module imports the root, and the link leaves every declared name
@@ -361,33 +364,21 @@ fn declaration_fingerprint(program: &Program) -> u64 {
             || is_surface_builtin(&f.name)
     };
     let sig = |f: &Function| {
-        let mut bounds: Vec<String> = f
-            .type_bounds
-            .iter()
-            .map(|(k, v)| format!("{k}:{v:?}"))
-            .collect();
-        bounds.sort_unstable();
-        format!(
-            "f{:?}/{}<{:?}{:?}>({:?})->{:?}|{}{}{}{}",
-            f.module,
-            f.name,
-            f.type_params,
-            bounds,
-            f.params,
-            f.ret,
-            f.exported as u8,
-            f.is_extern as u8,
-            f.is_export_extern as u8,
-            f.is_gen as u8,
-        )
+        let mut s = String::from("f");
+        crate::checker::recheck::head(&mut s, f);
+        s
     };
     let mut parts: Vec<String> =
         Vec::with_capacity(program.functions.len() + program.type_decls.len());
     parts.extend(program.functions.iter().filter(read).map(&sig));
     for t in &program.type_decls {
         parts.push(format!(
-            "t{:?}/{}<{:?}>={:?}|{:?}",
-            t.module, t.name, t.type_params, t.base, t.predicate
+            "t{:?}/{}<{:?}>={:?}|{}",
+            t.module,
+            t.name,
+            t.type_params,
+            t.base,
+            unplaced(&t.predicate)
         ));
     }
     for g in program.globals.iter().filter(|g| g.module.is_some()) {
@@ -398,8 +389,11 @@ fn declaration_fingerprint(program: &Program) -> u64 {
     }
     for p in &program.protocols {
         parts.push(format!(
-            "p{:?}/{}<{:?}>={:?}",
-            p.module, p.name, p.assoc, p.methods
+            "p{:?}/{}<{:?}>={}",
+            p.module,
+            p.name,
+            p.assoc,
+            unplaced(&p.methods)
         ));
     }
     for i in &program.impls {

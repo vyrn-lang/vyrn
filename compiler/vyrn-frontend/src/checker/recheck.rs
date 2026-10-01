@@ -21,9 +21,11 @@
 //! only under the same fingerprint: the other modules' texts, which also
 //! decide how the linker rewrites their bodies, the names of their protocols
 //! and contracts, the root's protocols and contracts, every `impl` head, the
-//! root's projection bodies, the host and the surface shadows. A rename apart of another module's
-//! declaration changes a name its readers read, so their reads answer
-//! differently. A body whose record rows name a node of another unit (an
+//! root's projection bodies, the host and the surface shadows. The root's
+//! parts are written without their positions ([`unplaced`]): each is checked
+//! on its own, so no body's result holds one of its lines. A rename apart of
+//! another module's declaration changes a name its readers read, so their
+//! reads answer differently. A body whose record rows name a node of another unit (an
 //! inlined projection's expansion) or that read a protocol is checked on
 //! every check.
 //!
@@ -44,7 +46,7 @@ use std::fmt::Write as _;
 use std::hash::{Hash as _, Hasher as _};
 
 use crate::ast::SourceBody;
-use crate::ast::{DeclId, DeclKind, Function, Key, NamedBlock, Program, ScopeId};
+use crate::ast::{unplaced, DeclId, DeclKind, Function, Key, NamedBlock, Program, ScopeId};
 use crate::diagnostics::Diagnostic;
 
 use super::{Checker, Recorded, Typed};
@@ -217,10 +219,10 @@ impl<'a> Session<'a> {
                 let (_, t) = c.types.get(n)?;
                 let (name, module) = (&t.name, &t.module);
                 let (params, base, predicate) = (&t.type_params, &t.base, &t.predicate);
-                let exported = t.exported;
+                let (exported, predicate) = (t.exported, unplaced(predicate));
                 write!(
                     h,
-                    "{name}|{exported}|{module:?}|{params:?}|{base:?}|{predicate:?}"
+                    "{name}|{exported}|{module:?}|{params:?}|{base:?}|{predicate}"
                 )
             }
             Looked::Decl(DeclKind::Global, n) => {
@@ -458,13 +460,13 @@ fn world(p: &Program) -> u64 {
     for x in &p.protocols {
         let _ = match x.module {
             Some(_) => write!(h, "{}|", x.name),
-            None => write!(h, "{x:?}|"),
+            None => write!(h, "{}|", unplaced(x)),
         };
     }
     for x in &p.contracts {
         let _ = match x.module {
             Some(_) => write!(h, "{}|", x.name),
-            None => write!(h, "{x:?}|"),
+            None => write!(h, "{}|", unplaced(x)),
         };
     }
     for i in &p.impls {
@@ -477,7 +479,7 @@ fn world(p: &Program) -> u64 {
         }
         for f in i.places.iter().filter(|f| f.module.is_none()) {
             head(&mut h, f);
-            let _ = write!(h, "{:?}|{:?}", f.params, f.body);
+            let _ = write!(h, "{}|{}", unplaced(&f.params), unplaced(&f.body));
         }
     }
     h.0.finish()
@@ -485,7 +487,7 @@ fn world(p: &Program) -> u64 {
 
 /// Writes what a reader of `f` reads: all of it but its body, its doc and
 /// its positions.
-fn head(h: &mut Sip, f: &Function) {
+pub(crate) fn head(h: &mut impl std::fmt::Write, f: &Function) {
     let mut bounds: Vec<_> = f.type_bounds.iter().collect();
     bounds.sort();
     let params: Vec<_> = (f.params.iter())

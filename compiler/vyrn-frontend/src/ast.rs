@@ -191,6 +191,32 @@ impl std::fmt::Debug for Id {
     }
 }
 
+/// The `{:?}` text of `x` with the number of every `line` and `col` field
+/// outside a string literal left out. With [`Id`]'s text, two trees that
+/// differ only in where they sit print alike, so a fingerprint over it keys
+/// content. The AST has no `char` field, so a `"` always opens or closes a
+/// literal.
+pub fn unplaced(x: &impl std::fmt::Debug) -> String {
+    let s = format!("{x:?}");
+    let mut out = String::with_capacity(s.len());
+    let (mut quoted, mut escaped, mut position) = (false, false, false);
+    for c in s.chars() {
+        if position && c.is_ascii_digit() {
+            continue;
+        }
+        out.push(c);
+        position = false;
+        match c {
+            _ if escaped => escaped = false,
+            '\\' if quoted => escaped = true,
+            '"' => quoted = !quoted,
+            ' ' if !quoted => position = out.ends_with(" line: ") || out.ends_with(" col: "),
+            _ => {}
+        }
+    }
+    out
+}
+
 /// A whole program. `main` is the entry point.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Program {
