@@ -288,9 +288,9 @@ The module's shape:
   argument into the destination. It passes `x`'s storage instead for
   `x = f(x, ..)`, and for an argument whose extent ends at the call and that
   holds a frame slot, which the result then takes.
-- Layout (`layout.rs`): sizes, alignments and offsets are read from the shape
-  string `llt_of` prints, so layout cannot drift from lowering. Every size is
-  a checked `u32`.
+- Layout (`layout.rs`): `shape_of` maps a type to a `Shape` of `Leaf`s, and
+  sizes, alignments, offsets, loads, stores and the call ABI are all read off
+  it. Equal shapes are one representation. Every size is a checked `u32`.
 - Control flow: `St::If`, `St::Loop`, `St::Block` and `St::Switch` map onto
   wasm's `if`, `block` and `loop`, and `break` and `continue` onto `br`. A body never emits `return`, which would skip the frame's
   epilogue; a `return` is a `br` to the body's outer block.

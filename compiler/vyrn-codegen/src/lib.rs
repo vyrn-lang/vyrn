@@ -1,5 +1,5 @@
 //! The wasm emitter ([`direct`]) and the helpers and constants it shares with
-//! the rest of the compiler: `llt_of`, the type-to-shape match that [`layout`]
+//! the rest of the compiler: `shape_of`, the type-to-shape match that [`layout`]
 //! measures; [`coerce_plan`], the boundary coercion ladder; generic type-argument
 //! solving; the instantiation limits; the generator-host imports and constants;
 //! and the [`observe`] hooks a gate reads.
@@ -743,8 +743,10 @@ pub(crate) fn plan_disagrees(from: &Type, to: &Type, rung: Rung) -> String {
 ///
 /// The interpreter's `coerce` has no `from`, so it is not held to this plan.
 /// The middle rungs' guards are disjoint except for an integer pair that shares
-/// one LLVM shape (`i8` for `Int8` and `UInt8`), which is why the resize comes
-/// before [`Rung::Identity`].
+/// one leaf (`I8` for `Int8` and `UInt8`), which is why the resize comes before
+/// [`Rung::Identity`]. Equal shapes are one representation, so the rungs that
+/// move bytes unchanged test shape equality. The five SIMD types share `V128`:
+/// the checker, not this plan, keeps an `F32x4` out of an `F64x2`.
 pub fn coerce_plan(from: &Type, to: &Type, types: &HashMap<String, TypeDecl>) -> Rung {
     let (rf, rt) = (
         vyrn_frontend::types::resolve(from, types),
@@ -774,18 +776,18 @@ pub fn coerce_plan(from: &Type, to: &Type, types: &HashMap<String, TypeDecl>) ->
             return Rung::Elementwise
         }
         (Type::ArrayN(fi, _), Type::Array(ti))
-            if fi == ti || llt_of(fi, types) == llt_of(ti, types) =>
+            if fi == ti || shape_of(fi, types) == shape_of(ti, types) =>
         {
             return Rung::Heapify
         }
         (Type::ArrayN(fi, len), Type::SmallArray(ti, n))
-            if llt_of(fi, types) == llt_of(ti, types) && len <= n =>
+            if shape_of(fi, types) == shape_of(ti, types) && len <= n =>
         {
             return Rung::Inline
         }
         _ => {}
     }
-    if llt_of(from, types) == llt_of(to, types) {
+    if shape_of(from, types) == shape_of(to, types) {
         return Rung::Identity;
     }
     // Two shapes of one sum. The variant names decide, so a generic enum at two
@@ -802,94 +804,6 @@ pub fn coerce_plan(from: &Type, to: &Type, types: &HashMap<String, TypeDecl>) ->
         (Some(_), Some(_)) => Rung::Rebuild,
         _ => Rung::Refuse,
     }
-}
-
-/// The shape of a Vyrn type, in LLVM's spelling, which the equality sites
-/// compare. `ty` is resolved here but not substituted; a caller inside a
-/// monomorphized body substitutes first.
-pub(crate) fn llt_of(ty: &Type, types: &HashMap<String, TypeDecl>) -> String {
-    match vyrn_frontend::types::resolve(ty, types) {
-        Type::Int => "i64".into(),
-        Type::IntN { bits, .. } => format!("i{bits}"),
-        Type::Float => "double".into(),
-        Type::Float32 => "float".into(),
-        // The wasm emitter reads the vector spellings back to reach `v128`.
-        Type::F32x4 => "<4 x float>".into(),
-        // `I32x4` and `Mask32x4` share one representation, so an `I32x4`
-        // comparison yields a `Mask32x4` with no conversion.
-        Type::I32x4 => "<4 x i32>".into(),
-        // A mask is all-ones or all-zeros at the lane width, not `<N x i1>`.
-        Type::Mask32x4 => "<4 x i32>".into(),
-        Type::F64x2 => "<2 x double>".into(),
-        Type::Mask64x2 => "<2 x i64>".into(),
-        Type::Bool => "i1".into(),
-        Type::Str => "ptr".into(),
-        // `Never` carries no value, so it lowers like `Unit`.
-        Type::Unit | Type::Never => "void".into(),
-        // `{ ptr data, i64 len, i64 cap }`.
-        Type::Array(_) => "{ ptr, i64, i64 }".into(),
-        // `{ ptr data, i64 len, i64 tag, i64 pay, i64 cur, i64 gen }`. A
-        // negative `tag` is a buffer: `data`/`len` are the array and `cur` the
-        // read position. Otherwise it is a step: `tag`/`pay` are a `fn` value,
-        // `cur`/`gen` the `Ref<Int64>` cursor it is called with, `len` is 1 once
-        // the step answers `None`, and `data` is null. The pairs sit 8-aligned so
-        // `&s + 16` and `&s + 32` are those values. Nothing reads a field whose
-        // variant it has not tested.
-        Type::Stream(_) => "{ ptr, i64, i64, i64, i64, i64 }".into(),
-        // `{ ptr keys, ptr values, i64 len, i64 cap, ptr idx }`: two parallel
-        // buffers sharing one length and capacity; `idx` is `cap * 2` `i64` hash
-        // buckets.
-        Type::Map(..) => "{ ptr, ptr, i64, i64, ptr }".into(),
-        Type::ArrayN(inner, n) => format!("[{n} x {}]", llt_of(&inner, types)),
-        // `{ i64 len, i64 cap, ptr data, [N x T] inline }`: `cap == N` means
-        // inline, `cap > N` spilled onto `data`.
-        Type::SmallArray(inner, n) => {
-            format!("{{ i64, i64, ptr, [{n} x {}] }}", llt_of(&inner, types))
-        }
-        // A logger handle is a `ptr` to its name string.
-        Type::Logger => "ptr".into(),
-        Type::Record(fields) => {
-            let inner: Vec<String> = fields.iter().map(|f| llt_of(&f.ty, types)).collect();
-            format!("{{ {} }}", inner.join(", "))
-        }
-        // `{ i64 tag, i64 slot0, ... }`: one slot per payload word of the widest
-        // variant, so a two-word payload rides inline, not in a heap box.
-        Type::Enum(ref vs) => enum_ll(enum_slots_of(vs, types)),
-        // On a generator host, `Code` is an opaque `i64` handle into the host's
-        // piece arena: the one `Named` that survives `resolve` undeclared.
-        Type::Named(ref n) if n == "Code" => "i64".into(),
-        // Unreachable after `resolve` (Named/App/transformers/params reduced away).
-        Type::Named(_)
-        | Type::App(..)
-        | Type::Omit(..)
-        | Type::Pick(..)
-        | Type::Merge(..)
-        | Type::Partial(..)
-        | Type::Param(_) => "void".into(),
-        // A bare integer type argument never stands alone; `SmallArray` consumes
-        // it before lowering.
-        Type::ConstInt(_) => "void".into(),
-        // A stored function value: `{ i64 tag, i64 payload }`. The tag
-        // selects the named function or lifted lambda; the payload is 0 or a
-        // pointer to the malloc'd capture block.
-        Type::Fn(..) => "{ i64, i64 }".into(),
-        // Unreachable: `resolve` answers `Fn([], T)` for a `lazy T` field.
-        Type::Lazy(_) => "{ i64, i64 }".into(),
-        // The checker's recovery sentinel; a program with an `Err` has
-        // diagnostics and never reaches codegen.
-        Type::Err => "void".into(),
-    }
-}
-
-/// The shape of a sum with `slots` payload words: `{ i64 }` for 0,
-/// `{ i64, i64 }` for 1, and so on.
-fn enum_ll(slots: usize) -> String {
-    let mut s = String::from("{ i64");
-    for _ in 0..slots {
-        s.push_str(", i64");
-    }
-    s.push_str(" }");
-    s
 }
 
 /// A payload's word count, stated in [`vyrn_frontend::types`] because `own`

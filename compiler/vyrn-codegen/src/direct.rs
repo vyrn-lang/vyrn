@@ -37,7 +37,6 @@ use vyrn_frontend::types::INT32;
 use vyrn_lower::core::Spec;
 
 use crate::layout::{self, Layout, Shape};
-use crate::llt_of;
 use crate::wasm::{
     self, mem_arg, BlockType, Frame, Instruction, MemArg, Module, ValType, HEAP_BASE, MEMORY_COPY,
 };
@@ -1086,8 +1085,8 @@ impl<'a> Cx<'a> {
 
     /// Substitutes the monomorphization this lowering is inside.
     ///
-    /// Every type query on this `Cx` goes through it, so a `Type::Param` never reaches `llt_of`,
-    /// which lowers it to `void` without an error. It substitutes into the type expression before
+    /// Every type query on this `Cx` goes through it, so a `Type::Param` never reaches `shape_of`,
+    /// which lowers it to `Void` without an error. It substitutes into the type expression before
     /// any `App` expands, so `Box<T>` and `fn f<T>` both spelling `T` cannot be confused.
     fn sub(&self, ty: &Type) -> Type {
         if self.subst.is_empty() {
@@ -1095,11 +1094,6 @@ impl<'a> Cx<'a> {
         } else {
             ftypes::substitute(ty, &self.subst)
         }
-    }
-
-    /// The LLVM shape of `ty`, from `llt_of`, so layout and lowering cannot drift apart.
-    fn ll(&self, ty: &Type) -> String {
-        llt_of(&self.sub(ty), &self.types)
     }
 
     /// The machine shape of `ty`.
@@ -1308,7 +1302,7 @@ impl<'a> Cx<'a> {
         let ty = &self.sub(ty);
         match ty {
             // Unreachable for a well-typed program, because [`Cx::sub`] runs first. Kept as a
-            // refusal because `llt_of` prints `void` for a parameter, and `void` is no diagnostic.
+            // refusal because `shape_of` gives `Void` for a parameter, and `Void` is no diagnostic.
             Type::Param(p) => return Some(format!("the unsolved type parameter `{p}`")),
             Type::Named(n) | Type::App(n, _) => match self.types.get(n) {
                 Some(_) => {}
@@ -3613,7 +3607,7 @@ impl<'p> Fn_<'_, 'p> {
             crate::Rung::FnRetag => Ok(()),
             // Only a pair whose elements share a shape lowers here.
             crate::Rung::Elementwise => {
-                if self.cx.ll(from) == self.cx.ll(to) {
+                if self.cx.shape(from) == self.cx.shape(to) {
                     return Ok(());
                 }
                 unsupported(
@@ -3659,7 +3653,7 @@ impl<'p> Fn_<'_, 'p> {
                         .iter()
                         .position(|g| g.name == f.name)
                         .ok_or_else(|| gap(&format!("the field `{}`", f.name), line))?;
-                    if self.cx.ll(&ff[j].ty) != self.cx.ll(&f.ty) {
+                    if self.cx.shape(&ff[j].ty) != self.cx.shape(&f.ty) {
                         return unsupported(
                             "a record conversion that changes a field's shape",
                             line,
@@ -4726,7 +4720,7 @@ impl<'p> Fn_<'_, 'p> {
     ) -> Option<(Dest, bool)> {
         let l = sig.ret.agg()?;
         let (d, used) = match hint {
-            Some((d, t)) if self.cx.ll(&t) == self.cx.ll(&sig.ret_ty) => (d, true),
+            Some((d, t)) if self.cx.shape(&t) == self.cx.shape(&sig.ret_ty) => (d, true),
             _ => (Dest::Slot(b.alloc(l.size, l.align)), false),
         };
         if sig.in_place.is_none() {
@@ -7081,8 +7075,8 @@ impl<'p> Fn_<'_, 'p> {
             // fails validation. It boxes.
             Repr::Scalar(ValType::V128) => Word::Boxed,
             Repr::Scalar(v) => Word::Ext(v),
-            // Test `words(t) == 2`, not the shape string: a one-slot sum also prints
-            // `{ i64, i64 }`, and a nested sum rides in one boxed slot.
+            // Test `words(t) == 2`, not the shape: a one-slot sum is also two `I64`s,
+            // and a nested sum rides in one boxed slot.
             Repr::Agg(_) if self.cx.words(t) == 2 => Word::Inline2,
             _ => Word::Boxed,
         })
@@ -7147,7 +7141,7 @@ impl<'p> Fn_<'_, 'p> {
         };
         // Build into the consumer's storage when it holds this same type.
         let (dest, used) = match hint {
-            Some((d, t)) if self.cx.ll(&t) == self.cx.ll(ty) => (d, true),
+            Some((d, t)) if self.cx.shape(&t) == self.cx.shape(ty) => (d, true),
             _ => (Dest::Slot(b.alloc(l.size, l.align)), false),
         };
         dest.addr(b, 0);
@@ -11969,7 +11963,7 @@ impl<'p> Fn_<'_, 'p> {
             let nt = &body.names[n.index()].ty;
             matches!(self.cx.repr(nt, 0), Ok(Repr::Agg(_)))
                 && self.core_unchecked(nt, t)
-                && self.cx.ll(nt) == self.cx.ll(t)
+                && self.cx.shape(nt) == self.cx.shape(t)
         })
     }
 
@@ -14236,25 +14230,32 @@ mod tests {
         );
     }
 
-    /// `Cx::ll` prints `void` for an escaped type parameter, which would shrink a function
+    /// `shape_of` gives `Void` for an escaped type parameter, which would shrink a function
     /// silently. Every type goes through [`Cx::sub`] first; this asserts the refusal outside an
     /// instance and the substitution inside one.
     #[test]
     fn a_type_parameter_is_substituted_before_it_can_reach_a_layout() {
         let t = Type::Param("T".into());
         let mut c = cx();
-        // Outside a monomorphization: refused, and `ll` gives `void`.
+        // Outside a monomorphization: refused, and the shape is `Void`.
         assert!(c.repr(&t, 0).is_err());
-        assert_eq!(c.ll(&t), "void");
+        assert_eq!(c.shape(&t), Shape::Void);
         // Inside one: the type the instantiation fixed, at every entry point.
         c.subst.insert("T".into(), Type::Int);
         assert_eq!(c.repr(&t, 0).unwrap(), Repr::Scalar(ValType::I64));
-        assert_eq!(c.ll(&t), "i64");
+        let i64 = Shape::Leaf(layout::Leaf::I64);
+        assert_eq!(c.shape(&t), i64);
         assert_eq!(c.resolve(&t), Type::Int);
         assert!(c.ty_gap(&t, 0).is_none());
         // Through a constructor too: the element stride depends on `T`.
-        assert_eq!(c.ll(&Type::ArrayN(Box::new(t.clone()), 3)), "[3 x i64]");
-        assert_eq!(c.ll(&Type::option(t)), "{ i64, i64 }");
+        assert_eq!(
+            c.shape(&Type::ArrayN(Box::new(t.clone()), 3)),
+            Shape::Array(3, Box::new(i64.clone()))
+        );
+        assert_eq!(
+            c.shape(&Type::option(t)),
+            Shape::Struct(vec![i64.clone(), i64])
+        );
     }
 
     /// A validated type has its base's representation, so a lowering that forgets the check
