@@ -6892,11 +6892,22 @@ fn node_ty(own: &Ownership, node: NodeId) -> Option<Type> {
     own.record.node_types.get(&node).cloned()
 }
 
-/// The type arguments the checker solved at the call `node`, as it typed the
-/// body: before an instance's substitution.
+/// The type arguments the checker solved at the call `node`, as the body
+/// writes them: before an instance's substitution, each parameter by its
+/// written name.
 fn node_solved(own: &Ownership, node: NodeId) -> Option<Vec<(String, Type)>> {
+    use vyrn_frontend::{ast::written_param, types::written_params};
     let (_, s) = own.record.node_substs.get(&node)?;
-    Some(s.clone())
+    Some(
+        (s.iter())
+            .map(|(p, t)| {
+                (
+                    written_param(p).to_string(),
+                    written_params(t).unwrap_or_else(|| t.clone()),
+                )
+            })
+            .collect(),
+    )
 }
 
 /// The declaration the checker recorded at the call `node` it typed `Err`

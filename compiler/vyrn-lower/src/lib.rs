@@ -325,10 +325,10 @@ fn lowered<'a>(
 /// The substitutions in scope at a node, outermost first.
 ///
 /// A generic call's arguments are checked against the callee's parameter types,
-/// so the checker's answer on `[]` in `push(xs, [])` is `Array<T>` with the
-/// callee's `T`. The solution recorded on the call node applies to its subtree.
-/// Applying the stack in order, not merged, keeps a caller's `T` and a callee's
-/// `T` apart: the outer substitution makes the caller's concrete first.
+/// so the checker's answer on `[]` in `push(xs, [])` is `Array<T'n>` with the
+/// callee's `T` renamed apart. The solution recorded on the call node applies
+/// to its subtree. It names only the callee's renamed parameters, so it never
+/// rewrites a caller's `T`.
 type Chain = Vec<HashMap<String, Type>>;
 
 fn apply(ty: &Type, chain: &Chain) -> Type {
@@ -522,25 +522,29 @@ impl<'a> FactsVisit<'a> for Walk<'a, '_> {
         self.facts.exprs.push((e, line));
         let ty = self.recorded(e);
         // A generic call solves its callee's parameters, and the answer
-        // governs the subtree it was solved from (see [`Chain`]).
+        // governs the subtree it was solved from (see [`Chain`]). The subtree
+        // names them renamed apart (`T'n`); the instance names them as written.
         let pushed = match self.recorded.node_substs.get(&key) {
             Some((callee, args)) => {
                 let at: Vec<(String, Type)> = args
                     .iter()
                     .map(|(p, t)| (p.clone(), apply(t, &self.chain)))
                     .collect();
-                let solved: HashMap<String, Type> = at.iter().cloned().collect();
                 // A record literal solves parameters too, and it is not a call:
                 // only a call, or a `?` on a `Fallible` operand, which the
                 // checker types as a call of `Fallible$Key$success`, adds an
                 // instance to the worklist.
                 if matches!(e, Expr::Call { .. } | Expr::Try { .. }) {
-                    self.calls.push((callee.clone(), solved.clone()));
-                    if !at.is_empty() {
-                        self.facts.solved.insert(key, at);
+                    let written: Vec<(String, Type)> = (at.iter())
+                        .map(|(p, t)| (vyrn_frontend::ast::written_param(p).to_string(), t.clone()))
+                        .collect();
+                    self.calls
+                        .push((callee.clone(), written.iter().cloned().collect()));
+                    if !written.is_empty() {
+                        self.facts.solved.insert(key, written);
                     }
                 }
-                self.chain.push(solved);
+                self.chain.push(at.into_iter().collect());
                 true
             }
             None => false,
