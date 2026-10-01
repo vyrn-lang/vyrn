@@ -1,6 +1,7 @@
 //! Keystroke-budget probe for the editor path: `analyze_judged` with
-//! `vyrn_lower::JUDGE`, the wasm generation engine and the judgment memo
-//! armed, as `vyrn-lsp` runs them. `vyrn check` is not a proxy, because it does
+//! `vyrn_lower::JUDGE`, the wasm generation engine, the judgment memo and the
+//! disk memo armed, as `vyrn-lsp` runs them for a client that sends file
+//! events. `vyrn check` is not a proxy, because it does
 //! different work.
 //!
 //! ```text
@@ -91,6 +92,15 @@ fn probe(path: &str, runs: usize) {
         opts.artifacts = m.artifacts;
         resolver.0 = Some(m.dir);
     }
+    // The server watches its workspace folders and the std root.
+    let project = resolver
+        .0
+        .clone()
+        .unwrap_or_else(|| dir.to_string_lossy().into_owned());
+    let roots: Vec<String> = std::iter::once(project)
+        .chain(opts.std_root.clone())
+        .collect();
+    vyrn_frontend::loader::watch_disk(&roots);
     let analyze = |text: &str| {
         vyrn_frontend::analyze_judged(
             text,

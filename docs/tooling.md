@@ -299,6 +299,13 @@ and pinned remotes read from `vyrn_vendor/` or the cache. The editor never
 fetches; an unpinned remote gets a diagnostic that says to run `vyrn check`
 once.
 
+If the client sends `workspace/didChangeWatchedFiles` with relative patterns,
+the server asks for every change under its workspace folders and the std
+root. It then reads a file under them again only after an event names it, so
+a change the client does not report is seen after the server restarts. A
+client without the capability has every module and generator input read on
+each change, as `vyrn check` reads them.
+
 It serves diagnostics, hover, go-to-definition (across files), completion
 (including `.member` completion from protocol impls and record fields),
 document symbols, document highlight, rename (including across a generator

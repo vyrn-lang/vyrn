@@ -126,18 +126,123 @@ pub struct DiskResolver;
 
 impl ModuleResolver for DiskResolver {
     fn read(&self, resolved: &str) -> Result<String, String> {
-        std::fs::read_to_string(resolved).map_err(|e| e.to_string())
+        on_disk(
+            |d| &mut d.reads,
+            resolved,
+            || std::fs::read_to_string(resolved).map_err(|e| e.to_string()),
+        )
     }
     fn list_kinds(&self, resolved: &str) -> Result<Vec<String>, String> {
-        let mut names = read_dir_names(resolved)?;
-        names.sort();
-        Ok(names)
+        on_disk(
+            |d| &mut d.lists,
+            resolved,
+            || {
+                let mut names = read_dir_names(resolved)?;
+                names.sort();
+                Ok(names)
+            },
+        )
     }
     fn gen_cache_get(&self, key: &str) -> Option<String> {
         crate::manifest::gen_cache_get(key)
     }
     fn gen_cache_put(&self, key: &str, value: &str) {
         crate::manifest::gen_cache_put(key, value)
+    }
+}
+
+thread_local! {
+    /// What this thread read under the directories a host watches; see
+    /// [`watch_disk`]. `None` reads the disk on every call.
+    static DISK: std::cell::RefCell<Option<Disk>> = const { std::cell::RefCell::new(None) };
+}
+
+/// The disk as this thread last saw it under `roots`: each answer stands until
+/// [`disk_changed`] names its path. Keyed by the path as the caller spelled it,
+/// because an error names that spelling.
+#[derive(Default)]
+pub(crate) struct Disk {
+    /// The watched directories, each as [`crate::origin::OriginMaps::norm_path_key`]
+    /// spells it, ending in `/`.
+    roots: Vec<String>,
+    reads: HashMap<String, Result<String, String>>,
+    lists: HashMap<String, Result<Vec<String>, String>>,
+    pub(crate) reals: HashMap<String, Option<String>>,
+}
+
+/// Keeps what [`DiskResolver`] reads and lists, and what
+/// [`crate::manifest::real_path`] answers, under `roots`, for every later load
+/// on this thread, until [`disk_changed`] names the path.
+///
+/// For a host that is told of every change under `roots`: the editor, when its
+/// client sends `workspace/didChangeWatchedFiles`. A host without such events
+/// never calls it, and every load reads the disk again. A path outside `roots`
+/// is always read again.
+pub fn watch_disk(roots: &[String]) {
+    let roots = (roots.iter()).map(|r| format!("{}/", key_of(r))).collect();
+    DISK.with(|d| {
+        *d.borrow_mut() = Some(Disk {
+            roots,
+            ..Disk::default()
+        })
+    });
+}
+
+/// Forgets what [`watch_disk`] kept for `path`, for everything under it (a
+/// removed directory), and its directory's listing (a created or removed
+/// entry).
+pub fn disk_changed(path: &str) {
+    let path = key_of(path);
+    let parent = path.rsplit_once('/').map_or("", |(p, _)| p);
+    let stale = |k: &String| {
+        let k = key_of(k);
+        k == path
+            || k.strip_prefix(path.as_str())
+                .is_some_and(|r| r.starts_with('/'))
+    };
+    DISK.with(|d| {
+        if let Some(d) = d.borrow_mut().as_mut() {
+            d.reads.retain(|k, _| !stale(k));
+            d.reals.retain(|k, _| !stale(k));
+            d.lists.retain(|k, _| !stale(k) && key_of(k) != parent);
+        }
+    });
+}
+
+/// `path` as a watched root or an event compares it: slash-separated, without a
+/// trailing slash, and lower-case where the filesystem ignores case.
+fn key_of(path: &str) -> String {
+    crate::origin::OriginMaps::norm_path_key(path.trim_end_matches(['/', '\\']))
+}
+
+/// What the disk answers for `path`: the answer [`watch_disk`] kept, or `read`'s,
+/// kept when `path` lies under a watched root.
+pub(crate) fn on_disk<T: Clone>(
+    table: fn(&mut Disk) -> &mut HashMap<String, T>,
+    path: &str,
+    read: impl FnOnce() -> T,
+) -> T {
+    let watched = DISK.with(|d| {
+        let mut d = d.borrow_mut();
+        let d = d.as_mut()?;
+        let key = key_of(path);
+        if !d.roots.iter().any(|r| key.starts_with(r.as_str())) {
+            return None;
+        }
+        Some(table(d).get(path).cloned())
+    });
+    match watched {
+        None => read(),
+        Some(Some(kept)) => kept,
+        Some(None) => {
+            let answer = read();
+            DISK.with(|d| {
+                if let Some(d) = d.borrow_mut().as_mut() {
+                    table(d).insert(path.to_string(), answer.clone());
+                }
+            });
+            answer
+        }
     }
 }
 

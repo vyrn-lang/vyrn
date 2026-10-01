@@ -17,20 +17,23 @@ mod templates;
 
 use lsp_server::{Connection, Message, Notification, Request, Response};
 use lsp_types::notification::{
-    DidChangeTextDocument, DidCloseTextDocument, DidOpenTextDocument, Notification as _,
-    PublishDiagnostics,
+    DidChangeTextDocument, DidChangeWatchedFiles, DidCloseTextDocument, DidOpenTextDocument,
+    Notification as _, PublishDiagnostics,
 };
+use lsp_types::request::{RegisterCapability, Request as _};
 use lsp_types::{
     CodeAction, CodeActionKind, CodeActionOrCommand, CodeActionParams,
     CodeActionProviderCapability, CompletionItem, CompletionItemKind, CompletionOptions,
     CompletionParams, CompletionResponse, CompletionTextEdit, Diagnostic as LspDiagnostic,
-    DiagnosticSeverity, DidChangeTextDocumentParams, DidCloseTextDocumentParams,
+    DiagnosticSeverity, DidChangeTextDocumentParams, DidChangeWatchedFilesParams,
+    DidChangeWatchedFilesRegistrationOptions, DidCloseTextDocumentParams,
     DidOpenTextDocumentParams, DocumentFormattingParams, DocumentHighlight, DocumentHighlightKind,
     DocumentHighlightParams, DocumentSymbol, DocumentSymbolParams, DocumentSymbolResponse,
-    Documentation, GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverContents, HoverParams,
-    InitializeParams, InitializeResult, InlayHint, InlayHintKind, InlayHintLabel, InlayHintParams,
-    InsertTextFormat, Location, MarkupContent, MarkupKind, OneOf, Position, PrepareRenameResponse,
-    PublishDiagnosticsParams, Range, RenameOptions, RenameParams, SemanticToken,
+    Documentation, FileSystemWatcher, GlobPattern, GotoDefinitionParams, GotoDefinitionResponse,
+    Hover, HoverContents, HoverParams, InitializeParams, InitializeResult, InlayHint,
+    InlayHintKind, InlayHintLabel, InlayHintParams, InsertTextFormat, Location, MarkupContent,
+    MarkupKind, OneOf, Position, PrepareRenameResponse, PublishDiagnosticsParams, Range,
+    Registration, RegistrationParams, RelativePattern, RenameOptions, RenameParams, SemanticToken,
     SemanticTokenModifier, SemanticTokenType, SemanticTokens, SemanticTokensFullOptions,
     SemanticTokensLegend, SemanticTokensOptions, SemanticTokensParams, SemanticTokensRangeParams,
     SemanticTokensRangeResult, SemanticTokensResult, SemanticTokensServerCapabilities,
@@ -240,9 +243,11 @@ fn main() {
                 css_cache: RefCell::new(HashMap::new()),
                 contract_cache: RefCell::new(HashMap::new()),
                 route_facts: RefCell::new(HashMap::new()),
+                watched: Vec::new(),
             };
             // An error here means the client left before `initialize`.
-            if handle_initialize(&connection).is_ok() {
+            if let Ok(watched) = handle_initialize(&connection) {
+                server.watched = watched;
                 main_loop(&connection, &mut server);
             }
             connection
@@ -279,7 +284,13 @@ struct Server {
     /// Per api-module path, the mapped symbols a generating root claims for it.
     /// An empty answer is cached too. [`install_root`] is the only invalidation.
     route_facts: RefCell<HashMap<String, Rc<Vec<MappedSymbol>>>>,
+    /// The directories whose file events the client was asked to send. The
+    /// loader keeps what it read under them once the client accepts.
+    watched: Vec<String>,
 }
+
+/// The id of the one request the server sends: the file-watcher registration.
+const WATCH_REQUEST: &str = "vyrn/watchFiles";
 
 /// One app root's stylesheets, with the signature they were read at.
 struct CssIndex {
@@ -305,9 +316,12 @@ struct AnalyzedSynth {
     tokens: Vec<vyrn_frontend::SemToken>,
 }
 
-fn handle_initialize(connection: &Connection) -> Result<(), ()> {
+/// Answers `initialize`, and asks a client that can send file events for them
+/// under its workspace folders and the std root. Returns those directories, or
+/// none when the client cannot.
+fn handle_initialize(connection: &Connection) -> Result<Vec<String>, ()> {
     let (id, params) = connection.initialize_start().map_err(|_| ())?;
-    let _params: InitializeParams = serde_json::from_value(params).unwrap_or_default();
+    let params: InitializeParams = serde_json::from_value(params).unwrap_or_default();
 
     let capabilities = ServerCapabilities {
         text_document_sync: Some(TextDocumentSyncCapability::Kind(TextDocumentSyncKind::FULL)),
@@ -356,7 +370,54 @@ fn handle_initialize(connection: &Connection) -> Result<(), ()> {
     };
     let value = serde_json::to_value(result).unwrap();
     connection.initialize_finish(id, value).map_err(|_| ())?;
-    Ok(())
+    let events =
+        (params.capabilities.workspace.as_ref()).and_then(|w| w.did_change_watched_files.as_ref());
+    // A base outside the workspace needs a relative pattern.
+    if !events.is_some_and(|e| {
+        e.dynamic_registration == Some(true) && e.relative_pattern_support == Some(true)
+    }) {
+        return Ok(Vec::new());
+    }
+    #[allow(deprecated)]
+    let folders = match params.workspace_folders {
+        Some(fs) => fs.into_iter().map(|f| f.uri).collect(),
+        None => params.root_uri.into_iter().collect::<Vec<_>>(),
+    };
+    let roots: Vec<String> = (folders.iter())
+        .filter_map(|u| u.to_file_path().ok())
+        .map(|p| p.to_string_lossy().replace('\\', "/"))
+        .chain(std_root())
+        .collect();
+    let watchers = (roots.iter())
+        .filter_map(|r| Url::from_directory_path(r).ok())
+        .map(|base| FileSystemWatcher {
+            glob_pattern: GlobPattern::Relative(RelativePattern {
+                base_uri: OneOf::Right(base),
+                pattern: "**/*".to_string(),
+            }),
+            kind: None,
+        })
+        .collect();
+    let register = RegistrationParams {
+        registrations: vec![Registration {
+            id: WATCH_REQUEST.to_string(),
+            method: DidChangeWatchedFiles::METHOD.to_string(),
+            register_options: serde_json::to_value(DidChangeWatchedFilesRegistrationOptions {
+                watchers,
+            })
+            .ok(),
+        }],
+    };
+    let request = Request::new(
+        WATCH_REQUEST.to_string().into(),
+        RegisterCapability::METHOD.to_string(),
+        register,
+    );
+    connection
+        .sender
+        .send(Message::Request(request))
+        .map_err(|_| ())?;
+    Ok(roots)
 }
 
 fn main_loop(connection: &Connection, server: &mut Server) {
@@ -435,7 +496,13 @@ fn main_loop(connection: &Connection, server: &mut Server) {
                     Owed::Nothing => {}
                 }
             }
-            Message::Response(_) => {} // we sent no requests; ignore responses
+            // The loader trusts file events only once the client has agreed to
+            // send them.
+            Message::Response(resp) => {
+                if resp.id == WATCH_REQUEST.to_string().into() && resp.error.is_none() {
+                    vyrn_frontend::loader::watch_disk(&server.watched);
+                }
+            }
         }
     }
 }
@@ -3084,6 +3151,14 @@ fn handle_notification(connection: &Connection, server: &mut Server, notif: Noti
             if let Some(change) = params.content_changes.into_iter().last() {
                 server.docs.insert(uri.clone(), change.text.clone());
                 return Owed::Analyze(uri);
+            }
+        }
+    } else if DidChangeWatchedFiles::METHOD == notif.method {
+        if let Ok(params) = serde_json::from_value::<DidChangeWatchedFilesParams>(notif.params) {
+            for change in params.changes {
+                if let Ok(p) = change.uri.to_file_path() {
+                    vyrn_frontend::loader::disk_changed(&p.to_string_lossy());
+                }
             }
         }
     } else if DidCloseTextDocument::METHOD == notif.method {

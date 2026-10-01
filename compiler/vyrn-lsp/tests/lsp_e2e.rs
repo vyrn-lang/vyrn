@@ -4927,3 +4927,93 @@ fn hover_tells_two_types_of_one_spelling_apart() {
     let _ = client.child.kill();
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A client that sends file events is asked for them under its workspace
+/// folder, and the server reads an edit on disk once the event names the file.
+/// A client that cannot send them has every edit on disk read.
+#[test]
+fn a_disk_edit_is_read_after_its_event_or_always_without_events() {
+    for events in [true, false] {
+        let dir =
+            std::env::temp_dir().join(format!("vyrn-lsp-watch-{events}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let slash = |p: &std::path::Path| p.to_string_lossy().replace('\\', "/");
+        let lib = dir.join("lib.vyrn");
+        std::fs::write(
+            &lib,
+            "export fn double(x: Int64) -> Int64 {\n    return x * 2\n}\n",
+        )
+        .unwrap();
+        let root_text =
+            "import { double } from \"./lib\"\n\nfn main() -> Int64 {\n    return double(21)\n}\n";
+        let uri = format!("file:///{}", slash(&dir.join("main.vyrn")));
+        std::fs::write(dir.join("main.vyrn"), root_text).unwrap();
+
+        let mut client = LspClient::spawn().expect("spawn vyrn-lsp");
+        let caps = match events {
+            true => serde_json::json!({ "workspace": { "didChangeWatchedFiles": {
+                "dynamicRegistration": true, "relativePatternSupport": true
+            } } }),
+            false => serde_json::json!({}),
+        };
+        let init_id = serde_json::json!(1);
+        client.send(&serde_json::json!({
+            "jsonrpc": "2.0", "id": init_id, "method": "initialize",
+            "params": { "capabilities": caps, "processId": null, "workspaceFolders": [
+                { "uri": format!("file:///{}", slash(&dir)), "name": "w" }
+            ] }
+        }));
+        let _ = client.read_response(&init_id);
+        client
+            .send(&serde_json::json!({ "jsonrpc": "2.0", "method": "initialized", "params": {} }));
+        if events {
+            let register = client.read_notification("client/registerCapability");
+            let pattern = &register["params"]["registrations"][0]["registerOptions"]["watchers"][0]
+                ["globPattern"];
+            assert_eq!(pattern["pattern"], "**/*", "{register}");
+            client.send(&serde_json::json!({
+                "jsonrpc": "2.0", "id": register["id"], "result": null
+            }));
+        }
+        let mut version = 1;
+        let mut analyze = |client: &mut LspClient| {
+            let method = if version == 1 { "didOpen" } else { "didChange" };
+            client.send(&serde_json::json!({
+                "jsonrpc": "2.0", "method": format!("textDocument/{method}"),
+                "params": {
+                    "textDocument": {
+                        "uri": uri.clone(), "languageId": "vyrn", "version": version,
+                        "text": root_text
+                    },
+                    "contentChanges": [ { "text": root_text } ]
+                }
+            }));
+            version += 1;
+            let notif = client.read_notification("textDocument/publishDiagnostics");
+            notif["params"]["diagnostics"].as_array().unwrap().len()
+        };
+        assert_eq!(analyze(&mut client), 0, "the program starts clean");
+
+        let text = "export fn double(x: Int64) -> String {\n    return \"a\"\n}\n";
+        std::fs::write(&lib, text).unwrap();
+        let without_event = analyze(&mut client);
+        if events {
+            assert_eq!(
+                without_event, 0,
+                "no event, so the server keeps what it read"
+            );
+            client.send(&serde_json::json!({
+                "jsonrpc": "2.0", "method": "workspace/didChangeWatchedFiles",
+                "params": { "changes": [ { "uri": format!("file:///{}", slash(&lib)), "type": 2 } ] }
+            }));
+            assert_ne!(analyze(&mut client), 0, "the event names the edited file");
+        } else {
+            assert_ne!(
+                without_event, 0,
+                "a client without events has the disk read"
+            );
+        }
+        drop(client);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}

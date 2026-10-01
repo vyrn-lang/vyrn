@@ -294,6 +294,7 @@ pull request.
 - The LSP is a synchronous pure adapter over the front end. No generator logic is compiled into it.
 - The LSP gets no incremental parsing, salsa, incremental sync or delta tokens. Lexing and parsing are under 1% of a keystroke; latency came from repeated pure work, fixed by memoizing it.
 - A keystroke's load reuses only what one text decides, and links every module again: `link` renames a module's declarations by every module's names, the root's included.
+- The LSP trusts its client's file events: under a watched directory it reads a file again only after an event names it. Without the capability it reads the disk on every load, as `vyrn check` does.
 - Remote imports are pinned by SHA-256 in `vyrn.lock`, content-addressed in `~/.vyrn/cache`, vendorable and buildable offline. Only `vyrn update` changes a pin. No semver registry.
 - A manifest that does not parse is an error, never an empty policy.
 - Tools are pinned per project in the same lock, and bytes are shared per user. A pinned tool that cannot resolve fails; it never falls back to `PATH`.
