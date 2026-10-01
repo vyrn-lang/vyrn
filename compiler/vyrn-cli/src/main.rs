@@ -350,9 +350,8 @@ fn real_main() -> ExitCode {
         "check" => {
             vyrn_frontend::movecheck::emit_nothing();
             match loaded(path, &source) {
-                Ok(program) => {
-                    let _memo = shared_desugars(&program);
-                    match vyrn_codegen::check_instantiations(&program) {
+                Ok((program, world)) => {
+                    match vyrn_codegen::check_instantiations(&program, &world) {
                         Ok(()) => {
                             println!("ok");
                             ExitCode::SUCCESS
@@ -370,29 +369,27 @@ fn real_main() -> ExitCode {
             // Generators run in the load; its time is the first row of the
             // table `run_wasm` prints.
             let clock = std::time::Instant::now();
-            let program = match loaded(path, &source) {
+            let (program, world) = match loaded(path, &source) {
                 Ok(p) => p,
                 Err(code) => return code,
             };
             let load = clock.elapsed();
-            let _memo = shared_desugars(&program);
             // What `check` refuses, `run` refuses, with `check`'s sentence: a
             // polymorphic recursion has no finite set of instances.
-            if let Err(e) = vyrn_codegen::check_instantiations(&program) {
+            if let Err(e) = vyrn_codegen::check_instantiations(&program, &world) {
                 eprintln!("error: {e}");
                 return ExitCode::FAILURE;
             }
             let profile = want_profile.then_some(load);
-            run_wasm(path, &program, &prog_args, profile)
+            run_wasm(path, &program, world, &prog_args, profile)
         }
         // The module `build --target wasm` writes and `build` hands wasm2c.
         "emit-wat" => {
-            let program = match loaded(path, &source) {
+            let (program, world) = match loaded(path, &source) {
                 Ok(p) => p,
                 Err(code) => return code,
             };
-            let _memo = shared_desugars(&program);
-            match vyrn_codegen::direct::wat(&program) {
+            match vyrn_codegen::direct::wat(&program, world) {
                 Ok(wat) => {
                     print!("{wat}");
                     ExitCode::SUCCESS
@@ -406,12 +403,11 @@ fn real_main() -> ExitCode {
         // The form the emitter reads, for the root module only: a linked
         // program's imports are another file's answer.
         "emit-lowered" => {
-            let program = match loaded(path, &source) {
+            let (program, world) = match loaded(path, &source) {
                 Ok(p) => p,
                 Err(code) => return code,
             };
-            let _memo = shared_desugars(&program);
-            print!("{}", vyrn_lower::render(&program, path));
+            print!("{}", vyrn_lower::render(&program, &world, path));
             ExitCode::SUCCESS
         }
         "emit-gen" => emit_gen(path, &source, want_maps),
@@ -830,10 +826,8 @@ fn routes_cmd(file: Option<&str>, json: bool) -> ExitCode {
     };
     match vyrn_lower::load(&source, &root_key, &opts, &resolver, Some(&*engine()))
         .map_err(|d| d.first().map(|d| d.message.clone()).unwrap_or_default())
-        .and_then(|p| {
-            let _memo = shared_desugars(&p);
-            mounted_routes_wasm(&root_key, &p)
-        }) {
+        .and_then(|p| mounted_routes_wasm(&root_key, &p))
+    {
         Ok(mounted) => {
             for (method, path, procedure) in mounted {
                 let row = (method, path, procedure, "explicit".to_string());
@@ -956,7 +950,7 @@ fn mounted_routes_wasm(
         false,
     ));
     prog.number();
-    let bytes = vyrn_codegen::direct::compile(&prog)?;
+    let bytes = vyrn_codegen::direct::compile(&prog, vyrn_lower::analyze(&prog))?;
     let out = wasmrun::run(
         &bytes,
         wasmrun::Run {
@@ -1100,8 +1094,9 @@ fn why_memory(file: &str) -> ExitCode {
     } else {
         raw
     };
+    // Unshared, so the load's World keys other trees than this analysis.
     let program = match load_program(&path, &source, Default::default()) {
-        Ok(p) => p,
+        Ok((p, _)) => p,
         Err(code) => return code,
     };
     let world = vyrn_lower::analyze(&program);
@@ -1960,13 +1955,12 @@ fn from_json_cmd(path: &str, type_name: &str, module: &str) -> ExitCode {
         Some(i) => format!("{}/from-json.vyrn", &norm[..i]),
         None => "from-json.vyrn".to_string(),
     };
-    let program = match loaded(&key, FROM_JSON_SRC) {
+    let (program, world) = match loaded(&key, FROM_JSON_SRC) {
         Ok(p) => p,
         Err(code) => return code,
     };
-    let _memo = shared_desugars(&program);
     // Stderr is captured because the wording below rewrites it.
-    let bytes = match vyrn_codegen::direct::compile(&program) {
+    let bytes = match vyrn_codegen::direct::compile(&program, world) {
         Ok(b) => b,
         Err(e) => {
             eprintln!("error: {e}");
@@ -2695,7 +2689,7 @@ fn load_program(
     path: &str,
     source: &str,
     expansions: std::sync::Arc<Expansions>,
-) -> Result<vyrn_frontend::ast::Program, ExitCode> {
+) -> Result<Loaded, ExitCode> {
     let root_key = normalize_slashes(path);
     let opts = vyrn_frontend::loader::LoadOptions {
         expansions,
@@ -2720,21 +2714,19 @@ fn load_program(
     }
 }
 
-/// [`load_program`] with shared expansions, so the load and the command share
-/// one expansion per site. [`shared_desugars`] adopts the load's ownership
-/// judgment, which is sound only if both walk the same nodes.
-fn loaded(path: &str, source: &str) -> Result<vyrn_frontend::ast::Program, ExitCode> {
-    load_program(path, source, Expansions::shared())
-}
+/// A checked program and the World its check judged.
+type Loaded = (
+    vyrn_frontend::ast::Program,
+    std::sync::Arc<vyrn_lower::World>,
+);
 
-/// Holds this command's one ownership analysis of `program`, adopted from the
-/// load.
-///
-/// `a[i]` and `for x in c` over a user container inline a projection at the
-/// access site, and side tables are keyed by node address. [`loaded`]'s table
-/// gives every engine the same expanded tree, so they read the same rows.
-fn shared_desugars(program: &vyrn_frontend::ast::Program) -> vyrn_frontend::own::Memo<'_> {
-    vyrn_frontend::own::Memo::open(program)
+/// [`load_program`] with shared expansions, so the load and the command share
+/// one expansion per site, and the command reads the load's World. Sound only
+/// because both walk the same nodes: `a[i]` and `for x in c` over a user
+/// container inline a projection at the access site, and side tables are keyed
+/// by node address.
+fn loaded(path: &str, source: &str) -> Result<Loaded, ExitCode> {
+    load_program(path, source, Expansions::shared())
 }
 
 /// Prints `file:line:col: message` per diagnostic, the file defaulting to
@@ -3164,11 +3156,10 @@ fn test_cmd(path: &str, rest: &[String]) -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    let program = match loaded(path, &source) {
+    let (program, _) = match loaded(path, &source) {
         Ok(p) => p,
         Err(code) => return code,
     };
-    let _memo = shared_desugars(&program);
     let has_tests = program.tests.iter().any(|t| t.module.is_none());
     if !has_tests {
         println!("no tests");
@@ -3248,11 +3239,10 @@ fn bench_cmd(path: &str, rest: &[String]) -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    let program = match loaded(path, &source) {
+    let (program, _) = match loaded(path, &source) {
         Ok(p) => p,
         Err(code) => return code,
     };
-    let _memo = shared_desugars(&program);
 
     let matches = |name: &str| filter.as_deref().is_none_or(|sub| name.contains(sub));
     let has_selected = program
@@ -3312,7 +3302,7 @@ fn bench_native(
             return (ExitCode::from(2), None);
         }
     };
-    let mut program = match loaded(
+    let (mut program, _) = match loaded(
         path,
         &format!(
             "{source}
@@ -3488,7 +3478,8 @@ import {{ benchOne }} from \"std/bench\"
         stem.to_string()
     };
     let out_path = dir.join(&exe_name);
-    let built = build_wasm2c(path, &program, &out_path.to_string_lossy(), target);
+    let world = vyrn_lower::analyze(&program);
+    let built = build_wasm2c(path, &program, world, &out_path.to_string_lossy(), target);
     if built.is_err() {
         let _ = std::fs::remove_dir_all(&dir);
         return (ExitCode::FAILURE, None);
@@ -4009,9 +4000,6 @@ fn vyrnServeMain() -> Int64 {
 /// `serveStream`'s signature (`consume Stream<String>` to `Unit`).
 fn serve_rewrite(program: &mut vyrn_frontend::ast::Program) {
     use vyrn_frontend::ast::Expr;
-    // The renames leave `own::ident` unchanged, so the next guard would adopt
-    // the load's judgment of the program before them.
-    vyrn_lower::forget_loaded();
     let has_main = program
         .functions
         .iter()
@@ -4121,13 +4109,13 @@ fn serve_cmd(path: &str, rest: &[String]) -> ExitCode {
     // Appended before the load, so it is checked and every program line keeps
     // its number.
     let source = format!("{source}\n{SERVE_SHIM}");
-    let mut program = match loaded(path, &source) {
+    let (mut program, _) = match loaded(path, &source) {
         Ok(p) => p,
         Err(code) => return code,
     };
     serve_rewrite(&mut program);
     let program = program;
-    let _memo = shared_desugars(&program);
+    let world = vyrn_lower::analyze(&program);
 
     if !has_served_handle(&program) {
         eprintln!("error: `vyrn serve` needs `fn handle(req: Request) -> Response` in {path}");
@@ -4148,6 +4136,7 @@ fn serve_cmd(path: &str, rest: &[String]) -> ExitCode {
 
     serve_loop(
         &program,
+        &world,
         vec![path.to_string()],
         listener,
         workers,
@@ -4190,6 +4179,7 @@ fn has_served_handle(program: &vyrn_frontend::ast::Program) -> bool {
 /// `vyrn dev`'s static tree.
 fn serve_loop(
     program: &vyrn_frontend::ast::Program,
+    world: &std::sync::Arc<vyrn_lower::World>,
     argv: Vec<String>,
     listener: std::net::TcpListener,
     workers: Option<usize>,
@@ -4198,7 +4188,7 @@ fn serve_loop(
     banner: impl Fn(Option<usize>) + Send,
 ) -> ExitCode {
     if let Some(n) = workers {
-        if let Some(exit) = refuse_workers_if_stateful(program) {
+        if let Some(exit) = refuse_workers_if_stateful(program, world) {
             return exit;
         }
         let (tx, rx) = std::sync::mpsc::channel::<std::net::TcpStream>();
@@ -4226,7 +4216,7 @@ fn serve_loop(
             }
             Ok(())
         };
-        return match serve_pool_wasm(program, argv, n, each, listen) {
+        return match serve_pool_wasm(program, world, argv, n, each, listen) {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => {
                 eprintln!("error: {e}");
@@ -4234,7 +4224,7 @@ fn serve_loop(
             }
         };
     }
-    let bytes = match vyrn_codegen::direct::compile(program) {
+    let bytes = match vyrn_codegen::direct::compile(program, world.clone()) {
         Ok(b) => b,
         Err(e) => {
             eprintln!("error: {e}");
@@ -4282,6 +4272,7 @@ fn serve_loop(
 /// [`refuse_workers_if_stateful`] proved `handle` touches no module state.
 fn serve_pool_wasm<W, A>(
     program: &vyrn_frontend::ast::Program,
+    world: &std::sync::Arc<vyrn_lower::World>,
     argv: Vec<String>,
     workers: usize,
     worker: W,
@@ -4299,7 +4290,7 @@ where
         capture_stderr: true,
         meter: false,
     };
-    let bytes = vyrn_codegen::direct::compile(program)?;
+    let bytes = vyrn_codegen::direct::compile(program, world.clone())?;
     let (mut setup, code) = wasmrun::start(&bytes, &run, None)?;
     eprint!("{}", setup.drain_err());
     if code != 0 {
@@ -4323,7 +4314,8 @@ where
         };
     }
     quiet.number();
-    let module = wasmrun::compile(&vyrn_codegen::direct::compile(&quiet)?, false)?;
+    let quiet_world = vyrn_lower::analyze(&quiet);
+    let module = wasmrun::compile(&vyrn_codegen::direct::compile(&quiet, quiet_world)?, false)?;
 
     std::thread::scope(|s| {
         let (worker, module, run) = (&worker, &module, &run);
@@ -4355,10 +4347,13 @@ where
 /// Prints the refusal with the call path and returns the exit code, or `None`
 /// when workers are sound. Other effects (`print`, file I/O) are allowed: each
 /// output line stays atomic.
-fn refuse_workers_if_stateful(program: &vyrn_frontend::ast::Program) -> Option<ExitCode> {
+fn refuse_workers_if_stateful(
+    program: &vyrn_frontend::ast::Program,
+    world: &vyrn_lower::World,
+) -> Option<ExitCode> {
     // Calls through stored function values reach every collected source.
-    let stored = vyrn_frontend::checker::stored_fn_effects(program);
-    let (chain, global) = vyrn_frontend::checker::module_state_use(program, "handle", &stored)?;
+    let stored = &world.ownership.record.stored;
+    let (chain, global) = vyrn_frontend::checker::module_state_use(program, "handle", stored)?;
     let path = chain
         .iter()
         .map(|f| format!("`{f}`"))
@@ -4467,13 +4462,13 @@ fn dev_cmd(rest: &[String]) -> ExitCode {
         "{source}
 {SERVE_SHIM}"
     );
-    let mut program = match loaded(&server_path, &source) {
+    let (mut program, _) = match loaded(&server_path, &source) {
         Ok(p) => p,
         Err(code) => return code,
     };
     serve_rewrite(&mut program);
     let program = program;
-    let _memo = shared_desugars(&program);
+    let world = vyrn_lower::analyze(&program);
     if !has_served_handle(&program) {
         eprintln!(
             "error: the server root `{server_rel}` needs `fn handle(req: Request) -> Response`"
@@ -4499,6 +4494,7 @@ fn dev_cmd(rest: &[String]) -> ExitCode {
 
     serve_loop(
         &program,
+        &world,
         vec![server_path.clone()],
         listener,
         workers,
@@ -5249,11 +5245,12 @@ fn write_response_vary(
 fn run_wasm(
     path: &str,
     program: &vyrn_frontend::ast::Program,
+    world: std::sync::Arc<vyrn_lower::World>,
     prog_args: &[String],
     profile: Option<std::time::Duration>,
 ) -> ExitCode {
     let clock = std::time::Instant::now();
-    let bytes = match vyrn_codegen::direct::compile(program) {
+    let bytes = match vyrn_codegen::direct::compile(program, world) {
         Ok(b) => b,
         Err(e) => {
             eprintln!("error: {e}");
@@ -5374,7 +5371,7 @@ fn bodies_wasm(
                 })
             })
     } else {
-        vyrn_codegen::direct::compile(&prog)
+        vyrn_codegen::direct::compile(&prog, vyrn_lower::analyze(&prog))
     };
     let bytes = match compiled {
         Ok(b) => b,
@@ -5480,11 +5477,10 @@ fn build(path: &str, rest: &[String]) -> ExitCode {
         }
     };
 
-    let program = match loaded(path, &source) {
+    let (program, world) = match loaded(path, &source) {
         Ok(p) => p,
         Err(code) => return code,
     };
-    let _memo = shared_desugars(&program);
     let stem = Path::new(path)
         .file_stem()
         .and_then(|s| s.to_str())
@@ -5502,7 +5498,7 @@ fn build(path: &str, rest: &[String]) -> ExitCode {
     // The emitter's module, written as is. The native route starts from the
     // same bytes.
     if wasm {
-        return match vyrn_codegen::direct::compile(&program) {
+        return match vyrn_codegen::direct::compile(&program, world) {
             Ok(bytes) => match std::fs::write(&out_path, bytes) {
                 Ok(()) => {
                     println!("wrote {out_path}");
@@ -5523,6 +5519,7 @@ fn build(path: &str, rest: &[String]) -> ExitCode {
     match build_wasm2c(
         path,
         &program,
+        world,
         &out_path,
         native_target.unwrap_or(DEFAULT_NATIVE_TARGET),
     ) {
@@ -5542,6 +5539,7 @@ fn build(path: &str, rest: &[String]) -> ExitCode {
 fn build_wasm2c(
     path: &str,
     program: &vyrn_frontend::ast::Program,
+    world: std::sync::Arc<vyrn_lower::World>,
     out_path: &str,
     native_target: NativeTarget,
 ) -> Result<(), ()> {
@@ -5584,7 +5582,7 @@ fn build_wasm2c(
         }
     };
 
-    let bytes = match vyrn_codegen::direct::compile(program) {
+    let bytes = match vyrn_codegen::direct::compile(program, world) {
         Ok(b) => b,
         Err(e) => {
             eprintln!("error: {e}");
@@ -6116,9 +6114,10 @@ fn handle(req: Request) -> Response {
         let source = format!("{SRC}\n{SERVE_SHIM}");
         std::fs::write(&file, &source).unwrap();
         let key = file.to_string_lossy().replace('\\', "/");
-        let mut program = loaded(&key, &source).expect("the doors load and check");
+        let (mut program, _) = loaded(&key, &source).expect("the doors load and check");
         serve_rewrite(&mut program);
-        let bytes = vyrn_codegen::direct::compile(&program).expect("the doors compile");
+        let world = vyrn_lower::analyze(&program);
+        let bytes = vyrn_codegen::direct::compile(&program, world).expect("the doors compile");
         let run = wasmrun::Run {
             argv: vec![key.clone()],
             stdin_prefix: Vec::new(),

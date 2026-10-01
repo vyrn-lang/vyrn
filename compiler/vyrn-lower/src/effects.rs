@@ -381,7 +381,10 @@ impl Walk<'_> {
 /// floor keeps its own carrier and line and drops the rows this does not
 /// confirm. A module-scope `let` and a `where` predicate have no instance, so
 /// they are read from the AST with [`vyrn_frontend::floor::call_carrier`].
-pub fn reaches(program: &vyrn_frontend::ast::Program) -> Vec<(String, floor::Capability)> {
+pub fn reaches(
+    program: &vyrn_frontend::ast::Program,
+    record: &std::sync::Arc<vyrn_frontend::checker::Recorded>,
+) -> Vec<(String, floor::Capability)> {
     let mut out: Vec<(String, floor::Capability)> = Vec::new();
     let mut add = |module: Option<&String>, cap: floor::Capability| {
         let key = module.cloned().unwrap_or_default();
@@ -421,7 +424,7 @@ pub fn reaches(program: &vyrn_frontend::ast::Program) -> Vec<(String, floor::Cap
         .filter_map(|e| floor::Capability::of(e).map(|cap| (e, cap)))
         .collect();
 
-    with_judgment(program, |judged, _refs, insts, top| {
+    with_judgment(program, record, |judged, _refs, insts, top| {
         for (i, inst) in insts.iter().enumerate() {
             // A `gen fn` runs at generation time and is never in the artifact,
             // so it reaches no capability of the target; `floor::carried` skips
@@ -442,14 +445,16 @@ pub fn reaches(program: &vyrn_frontend::ast::Program) -> Vec<(String, floor::Cap
 
 /// Hands `then` the judgment over a whole checked program, every frame in the
 /// order judged, the instances that have a core, and `top[i]`, the frame index
-/// of instance `i`'s own body. A callback, because `refs` borrows `bodies`.
+/// of instance `i`'s own body. `record` is the checker's record of `program`.
+/// A callback, because `refs` borrows `bodies`.
 fn with_judgment<R>(
     program: &vyrn_frontend::ast::Program,
+    record: &std::sync::Arc<vyrn_frontend::checker::Recorded>,
     then: impl FnOnce(&Judged, &[&Body], &[&crate::Instance], &[usize]) -> R,
 ) -> R {
-    let lowered = crate::lower(program);
-    let world = crate::analyze(program);
+    let world = crate::world::analyzed(program, record.clone(), false);
     let own = &world.ownership;
+    let lowered = crate::lower_with(program, own);
     let mut bodies = Vec::new();
     let mut insts = Vec::new();
     for inst in &lowered.instances {
@@ -633,7 +638,7 @@ pub(crate) fn judge_built<R>(
         }
         Callee::Unknown
     };
-    let stored = vyrn_frontend::checker::stored_fn_effects(program);
+    let stored = &own.record.stored;
     let mut through = |ty: &Type| -> Callee {
         let ty = &vyrn_frontend::types::resolve(ty, decls);
         if !matches!(ty, Type::Fn(..)) {

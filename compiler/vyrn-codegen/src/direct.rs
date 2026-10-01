@@ -185,18 +185,22 @@ fn extern_abi_sig(f: &Function) -> (Vec<ValType>, Vec<ValType>) {
 ///
 /// Refuses a program whose expansions are unshared
 /// ([`vyrn_frontend::project::Expansions::shared`]): in it a projection or a `schemaOf` has no row
-/// in the core.
-pub fn compile(program: &Program) -> Result<Vec<u8>, String> {
+/// in the core. `world` is `program`'s: the load's ([`vyrn_lower::load_warned`]) or a new one
+/// ([`vyrn_lower::analyze`]).
+pub fn compile(
+    program: &Program,
+    world: std::sync::Arc<vyrn_lower::World>,
+) -> Result<Vec<u8>, String> {
     if !program.expansions.is_shared() {
         return Err("a compile needs the load's shared projection expansions".to_string());
     }
-    compile_inner(program, vyrn_lower::analyze(program))
+    compile_inner(program, world)
 }
 
 /// Returns the module [`compile`] emits, as WAT (`vyrn emit-wat`), so a test can pin its shape.
 /// Printing stays off `compile`, because `vyrn build` writes bytes only.
-pub fn wat(program: &Program) -> Result<String, String> {
-    let bytes = compile(program)?;
+pub fn wat(program: &Program, world: std::sync::Arc<vyrn_lower::World>) -> Result<String, String> {
+    let bytes = compile(program, world)?;
     wasmprinter::print_bytes(&bytes).map_err(|e| e.to_string())
 }
 
@@ -14302,7 +14306,7 @@ mod tests {
                       fn main() -> Int64 { return f(20) }";
         for (what, src) in [("bare", bare), ("in a record", hidden)] {
             let p = linked(src).expect(what);
-            let bytes = compile(&p).expect(what);
+            let bytes = compile(&p, vyrn_lower::analyze(&p)).expect(what);
             assert!(
                 bytes.windows(msg.len()).any(|w| w == msg.as_bytes()),
                 "{what}: no `where` check was emitted"
@@ -14314,9 +14318,9 @@ mod tests {
         let proved = "type Age = Int64 where value >= 18                       fn f(n: Int64) -> Int64 { let a = Age(20) return a }
                       fn main() -> Int64 { return f(20) }";
         let p = linked(proved).unwrap();
-        let small = compile(&p).unwrap();
+        let small = compile(&p, vyrn_lower::analyze(&p)).unwrap();
         let p = linked(bare).unwrap();
-        let big = compile(&p).unwrap();
+        let big = compile(&p, vyrn_lower::analyze(&p)).unwrap();
         assert!(
             big.len() > small.len(),
             "a proven constant emitted a check: {} against {}",
@@ -14338,7 +14342,7 @@ mod tests {
                    fn main() -> Int64 { \
                        return match f(bytes(\"hi\")) { Ok(s) => s.byteLength, Err(e) => 0 - 1 } }";
         let p = linked(src).unwrap();
-        assert!(compile(&p).is_ok());
+        assert!(compile(&p, vyrn_lower::analyze(&p)).is_ok());
     }
 
     /// `.length` in a branch, on every receiver that has one. [`Fn_::length_of`] and
@@ -14360,9 +14364,9 @@ mod tests {
             );
             let p = linked(&src).expect(what);
             assert!(
-                compile(&p).is_ok(),
+                compile(&p, vyrn_lower::analyze(&p)).is_ok(),
                 "{what}: {:?}",
-                compile(&p).unwrap_err()
+                compile(&p, vyrn_lower::analyze(&p)).unwrap_err()
             );
         }
     }
@@ -14395,7 +14399,7 @@ mod tests {
         ];
         for (what, src) in cases {
             let p = linked(src).expect(what);
-            let r = compile(&p);
+            let r = compile(&p, vyrn_lower::analyze(&p));
             assert!(r.is_ok(), "{what}: {}", r.unwrap_err());
         }
     }

@@ -455,10 +455,10 @@ pub fn check_inst_depth<'a>(
 /// Runs `vyrn-lower`'s monomorphization and reports only its depth refusal, for
 /// `vyrn check`; other codegen errors stay outside `check`'s contract.
 /// `vyrn-cli/tests/lowered.rs` asserts over the corpus that every instance the
-/// emitter builds is one the lowering's worklist has.
-pub fn check_instantiations(program: &Program) -> Result<(), String> {
+/// emitter builds is one the lowering's worklist has. `world` is `program`'s.
+pub fn check_instantiations(program: &Program, world: &vyrn_lower::World) -> Result<(), String> {
     let types = vyrn_frontend::types::decl_map(program);
-    for u in vyrn_lower::lower(program).unresolved {
+    for u in vyrn_lower::lower_with(program, &world.ownership).unresolved {
         if u.why == vyrn_lower::Why::PastTheLimit {
             check_inst_depth(&u.callee, u.args.iter(), u.line, &types)?;
         }

@@ -314,5 +314,5 @@ fn run() {
 fn emit(program: &Program) -> Result<Vec<u8>, String> {
     let _lowered = vyrn_lower::lower(program);
     vyrn_codegen::direct::forget_walks();
-    vyrn_codegen::direct::compile(program)
+    vyrn_codegen::direct::compile(program, vyrn_lower::analyze(program))
 }

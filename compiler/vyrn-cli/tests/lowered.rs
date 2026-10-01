@@ -483,7 +483,7 @@ fn gate() {
         }
 
         observe::start();
-        let wasm = vyrn_codegen::direct::compile(&program);
+        let wasm = vyrn_codegen::direct::compile(&program, vyrn_lower::analyze(&program));
         let rows = observe::take();
         let insts = observe::take_insts();
         let crossings = observe::take_crossings();

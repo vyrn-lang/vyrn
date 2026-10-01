@@ -170,11 +170,12 @@ fn a_program_compiled_after_another_in_one_process_is_the_same_bytes() {
             expansions: vyrn_frontend::project::Expansions::shared(),
             ..Default::default()
         };
-        let program = vyrn_lower::load(&src, &key, &opts, &Disk, Some(&*vyrn_genwasm::engine()))
+        let engine = vyrn_genwasm::engine();
+        let (program, world) = vyrn_lower::load_warned(&src, &key, &opts, &Disk, Some(&*engine))
+            .0
             .expect("the example loads");
-        let _own = vyrn_frontend::own::Memo::open(&program);
-        vyrn_codegen::check_instantiations(&program).expect("the example instantiates");
-        vyrn_codegen::direct::compile(&program).expect("the example compiles")
+        vyrn_codegen::check_instantiations(&program, &world).expect("the example instantiates");
+        vyrn_codegen::direct::compile(&program, world).expect("the example compiles")
     };
     let first = build("fnvalarg.vyrn");
     let _other = build("closures2.vyrn");
