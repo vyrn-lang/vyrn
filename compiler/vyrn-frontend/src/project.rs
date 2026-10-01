@@ -291,9 +291,9 @@ fn memo<T>(
 }
 
 impl Expansions {
-    /// Returns the expansion an access site lowers through. `None` means the
-    /// site keeps its own nodes: no user projection answers, and the seeded
-    /// expansion would be the identity.
+    /// Returns the expansion an access site lowers through. `None` means the site keeps its
+    /// own nodes: no user projection answers, the projection is optional
+    /// ([`Expansions::optional_site`] expands it), or the seeded expansion is the identity.
     pub fn site(
         &self,
         impls: &[ImplBlock],
@@ -319,7 +319,7 @@ impl Expansions {
         args: &[Expr],
         line: usize,
     ) -> Result<Option<&'static Projection>, String> {
-        let Some((key, f)) = member(impls, recv, method) else {
+        let Some((key, f)) = member(impls, recv, method).filter(|(_, f)| !is_optional(f)) else {
             return Ok(None);
         };
         memo(

@@ -1855,12 +1855,6 @@ impl<'a> Builder<'a> {
         };
         // By the receiver's type: two `impl`s may declare a projection of one
         // name.
-        let Some(f) = vyrn_frontend::project::lookup_in(&self.program.impls, &rty, method) else {
-            return Ok(None);
-        };
-        if vyrn_frontend::project::is_optional(f) {
-            return Ok(None);
-        }
         let p = match self.program.expansions.site(
             &self.program.impls,
             Some(&rty),
