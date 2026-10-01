@@ -6229,12 +6229,10 @@ impl<'a> Checker<'a> {
                 LambdaBody::Block(b) => body_block(b, &mut locals, &mut v),
             }
         }
-        // Names that shadow module state: the lambda's own binders and every
-        // frame (module state is `Scope`'s fall-through, not a frame).
+        // Names that shadow module state: the lambda's parameters and every
+        // frame (module state is `Scope`'s fall-through, not a frame). The
+        // walk adds the body's binders where their scopes start.
         let mut local_names: HashSet<String> = params.iter().map(|p| p.name.clone()).collect();
-        if let LambdaBody::Block(b) = body {
-            collect_binders_block(b, &mut local_names);
-        }
         for frame in scope.iter() {
             local_names.extend(frame.keys().cloned());
         }
@@ -7234,40 +7232,9 @@ fn touches_globals(f: &Function, globals: &std::collections::HashSet<String>) ->
     if globals.is_empty() {
         return false;
     }
-    let mut local: std::collections::HashSet<String> =
+    let params: std::collections::HashSet<String> =
         f.params.iter().map(|p| p.name.clone()).collect();
-    collect_binders_block(&f.body, &mut local);
-    global_ref_block(&f.body, globals, &local)
-}
-
-/// Collects every name a block binds (`let`, `for` variable); the caller
-/// seeds the parameters.
-fn collect_binders_block(b: &Block, out: &mut std::collections::HashSet<String>) {
-    for s in &b.stmts {
-        match s {
-            Stmt::Let { name, .. } => {
-                out.insert(name.clone());
-            }
-            Stmt::ForIn { var, body, .. } => {
-                out.insert(var.clone());
-                collect_binders_block(body, out);
-            }
-            Stmt::If {
-                then_block,
-                else_block,
-                ..
-            } => {
-                collect_binders_block(then_block, out);
-                if let Some(eb) = else_block {
-                    collect_binders_block(eb, out);
-                }
-            }
-            Stmt::While { body, .. } | Stmt::Region { body, .. } => {
-                collect_binders_block(body, out)
-            }
-            _ => {}
-        }
-    }
+    global_ref_block(&f.body, globals, &params)
 }
 
 /// A name a global answers to and no local shadows is a reference, whether
@@ -7311,9 +7278,9 @@ impl BodyVisit<'_> for GlobalRef<'_> {
     }
 }
 
-/// Whether a block references a global that no local shadows. `local` is the
-/// caller's flat set for the whole function, so a name read above its own
-/// `let` counts as local; the walk adds lambda parameters and nested `let`s.
+/// Whether a block references a global that no local shadows where it is
+/// read. `local` holds the names bound outside the block; the walk adds each
+/// binder of the block for the scope it starts.
 fn global_ref_block(
     b: &Block,
     globals: &std::collections::HashSet<String>,
