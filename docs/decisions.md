@@ -99,6 +99,7 @@ pull request.
 - Audience is a fence against accidental imports, not a secrecy guarantee. The compiler cannot know what a secret is; the capability floor sits under the fence.
 - A module contract (`contract`, a contextual word) is an ordinary library declaration, checked by `std/contract` over `moduleInterface`. The compiler hardcodes no convention.
 - Contracts are closed by default: an export the contract does not name is an error with a did-you-mean. An open rule serves only where names carry no meaning.
+- The contract matching rules have one home, `std/contract`. `vyrn why --contract` runs it compiled; Rust states no matching rule. The did-you-mean distance keeps one Rust twin (`contracts::edit_distance`), pinned to `std/strings:editDistance` by test, because the checker asks it and runs no compiled Vyrn.
 - Mutation on a procedure is declared with `mut fn` and is transport-free. An unmarked procedure is a query; nothing is guessed from a name.
 
 ### Test, bench, logging

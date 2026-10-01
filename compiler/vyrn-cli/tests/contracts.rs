@@ -729,11 +729,13 @@ fn why_contract_reports_every_status_class() {
         "synthesized by the form, which is a fifth status class:\n{text}"
     );
     assert!(
-        text.contains("UNKNOWN   dta: not named by the contract — did you mean `data`?"),
+        text.contains("UNKNOWN   dta: unknown export `dta` — did you mean `data`?"),
         "the did-you-mean:\n{text}"
     );
     assert!(
-        text.contains("UNKNOWN   helper: not named by the contract (it is closed)"),
+        text.contains(
+            "UNKNOWN   helper: unknown export `helper` (contract `Page`, std/ui is closed)"
+        ),
         "the far miss, still reported and never silent:\n{text}"
     );
     assert!(
@@ -754,4 +756,87 @@ fn why_contract_resolves_the_open_component_contract() {
     let text = String::from_utf8_lossy(&out.stdout).to_string();
     assert!(out.status.success(), "{text}");
     assert!(text.contains("contract: Component (std/vyx)"), "{text}");
+}
+
+/// `why --contract` reports what `std/contract` reports, so it agrees with the
+/// generator. An export of the wrong arity is a mismatch, not shape 1.
+#[test]
+fn why_contract_reports_what_the_generator_reports() {
+    let dir = scratch("whygate");
+    std::fs::create_dir_all(dir.join("screens")).unwrap();
+    std::fs::write(
+        dir.join("gen.vyrn"),
+        "export contract Screen {\n\
+         \x20   fn title() -> String = untitled()\n\
+         \x20   fn title(n: Int64) -> String\n\
+         \x20   fn budget() -> Int64\n\
+         }\n\
+         \n\
+         export contract Panel {\n\
+         \x20   fn *(..) -> String\n\
+         }\n\
+         \n\
+         fn untitled() -> String {\n    return \"untitled\"\n}\n\
+         \n\
+         export gen fn screens(dir: String) -> String {\n\
+         \x20   return \"export fn mounted() -> Int64 {\n    return 1\n}\n\"\n\
+         }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("vyrn.json"),
+        "{ \"name\": \"why\", \"main\": \"app.vyrn\", \"roles\": { \"screens\": \"./gen:Screen\", \"panels\": \"./gen:Panel\" } }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("app.vyrn"),
+        "fn main() -> Int64 {\n    return 0\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("screens/home.vyrn"),
+        "export fn title(a: Int64, b: Int64) -> String {\n    return \"home\"\n}\n",
+    )
+    .unwrap();
+    let why = |file: &str| {
+        let out = vyrn()
+            .arg("why")
+            .arg("--contract")
+            .arg(dir.join(file))
+            .output()
+            .expect("why");
+        let text = String::from_utf8_lossy(&out.stdout).to_string();
+        assert!(
+            out.status.success(),
+            "{text}{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        text
+    };
+    let text = why("screens/home.vyrn");
+    assert!(
+        text.contains("MISMATCH  title: `title` must be one of `fn() -> String` or `fn(Int64) -> String`, found `fn(Int64, Int64) -> String`"),
+        "the arity counts:\n{text}"
+    );
+    assert!(
+        text.contains("MISSING   budget: module must export `budget`"),
+        "{text}"
+    );
+
+    std::fs::create_dir_all(dir.join("panels")).unwrap();
+    std::fs::write(
+        dir.join("panels/side.vyrn"),
+        "export fn label() -> String {\n    return \"side\"\n}\n\n\
+         export fn width() -> Int64 {\n    return 1\n}\n",
+    )
+    .unwrap();
+    let text = why("panels/side.vyrn");
+    assert!(
+        text.contains("ok        label: matches the open rule — fn(..) -> String"),
+        "{text}"
+    );
+    assert!(
+        text.contains("MISMATCH  width: `width` must match the open rule `fn(..) -> String`, found `fn() -> Int64`"),
+        "{text}"
+    );
 }

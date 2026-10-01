@@ -331,8 +331,6 @@ fn last_run(comps: &[&str], scope: &str) -> Option<usize> {
 pub struct ContractShape {
     /// `"fn"` or `"let"`, as `std/contract`'s `Export.kind`.
     pub kind: &'static str,
-    /// Parameter type spellings; empty for a `let` shape.
-    pub params: Vec<String>,
     /// Return or value type spelling; `""` for a `Unit` return, as
     /// `std/contract` spells it.
     pub ret: String,
@@ -504,14 +502,13 @@ fn shape_of(m: &ContractMember) -> ContractShape {
     match &m.kind {
         ContractMemberKind::Value { ty, default } => ContractShape {
             kind: "let",
-            params: Vec::new(),
             ret: ty.to_string(),
             spelling: m.spelling(),
             optional: default.is_some(),
             variadic: false,
             line: m.line,
             // A module cannot `export let` (module state is private), so the
-            // snippet is the accessor function `shape_matches` accepts.
+            // snippet is the accessor function `std/contract:matchIndex` accepts.
             snippet: if *ty == Type::Unit {
                 format!("export fn {}() {{\n    $0\n}}", m.name)
             } else {
@@ -528,7 +525,6 @@ fn shape_of(m: &ContractMember) -> ContractShape {
             variadic,
         } => ContractShape {
             kind: "fn",
-            params: params.iter().map(|p| p.to_string()).collect(),
             ret: ret_spelling(ret),
             spelling: m.spelling(),
             optional: default.is_some(),
@@ -593,7 +589,7 @@ pub struct ContractCompletion {
 }
 
 /// Returns the contract members a file's form provides without declaring
-/// them: names [`contract_status`] must not report absent and
+/// them: names `vyrn why --contract` must not report absent and
 /// [`contract_completions`] must not offer.
 ///
 /// A `.vyx`'s `<template>` is its view: `std/vyx` compiles it into an
@@ -784,222 +780,4 @@ pub fn edit_distance(a: &str, b: &str) -> usize {
         }
     }
     d[n][m]
-}
-
-/// A contract's verdict on one name, for `vyrn why --contract`.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum MemberStatus {
-    /// Exported at shape `shape` (0-based, declaration order), the index
-    /// `std/contract:matchedMember` reports.
-    Satisfied { shape: usize },
-    /// A required member the module does not export.
-    Missing,
-    /// An optional member the module does not export; the default applies.
-    Defaulted,
-    /// Provided by the file's form, a `.vyx` `<template>`; see
-    /// [`synthesized_members`].
-    Synthesized,
-    /// Exported at a shape the contract does not declare.
-    Mismatched { found: String },
-    /// An export a closed contract does not name, with the nearest member.
-    Unknown { did_you_mean: Option<String> },
-    /// An export the open rule admits.
-    OpenMatched,
-    /// An export whose shape the open rule rejects.
-    OpenMismatched { found: String },
-}
-
-/// One line of a contract report.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct StatusEntry {
-    pub name: String,
-    /// The declared shapes, joined.
-    pub want: String,
-    pub status: MemberStatus,
-}
-
-/// Returns every member's status, then every other export's, in the order of
-/// `std/contract:checkContract`: members in declaration order, then exports
-/// in source order. `synthesized` members (from [`synthesized_members`]) are
-/// absent from `module_source`; they count as present only when the text does
-/// not declare them.
-pub fn contract_status(
-    view: &ContractView,
-    module_source: &str,
-    synthesized: &[String],
-) -> Vec<StatusEntry> {
-    let Ok(tokens) = crate::lexer::lex(module_source) else {
-        return Vec::new();
-    };
-    let (program, _) = crate::parser::parse_accum(tokens);
-    let exports: Vec<ExportSig> = program
-        .functions
-        .iter()
-        .filter(|f| f.exported)
-        .map(|f| ExportSig {
-            name: f.name.clone(),
-            params: f.params.iter().map(|p| p.ty.to_string()).collect(),
-            ret: ret_spelling(&f.ret),
-        })
-        .collect();
-    let mut out = Vec::new();
-    for m in &view.members {
-        let want = m
-            .shapes
-            .iter()
-            .map(|s| s.spelling.clone())
-            .collect::<Vec<_>>()
-            .join(" or ");
-        let status = match exports.iter().find(|e| e.name == m.name) {
-            None if synthesized.iter().any(|n| *n == m.name) => MemberStatus::Synthesized,
-            None if m.optional => MemberStatus::Defaulted,
-            None => MemberStatus::Missing,
-            Some(e) => match m.shapes.iter().position(|s| shape_matches(s, e)) {
-                Some(i) => MemberStatus::Satisfied { shape: i },
-                None => MemberStatus::Mismatched {
-                    found: e.spelling(),
-                },
-            },
-        };
-        out.push(StatusEntry {
-            name: m.name.clone(),
-            want,
-            status,
-        });
-    }
-    for e in &exports {
-        if view.member(&e.name).is_some() {
-            continue;
-        }
-        let (want, status) = match &view.open_rule {
-            Some(rule) => (
-                rule.spelling.clone(),
-                if shape_matches(rule, e) {
-                    MemberStatus::OpenMatched
-                } else {
-                    MemberStatus::OpenMismatched {
-                        found: e.spelling(),
-                    }
-                },
-            ),
-            None => (
-                String::new(),
-                MemberStatus::Unknown {
-                    did_you_mean: did_you_mean(view, &e.name),
-                },
-            ),
-        };
-        out.push(StatusEntry {
-            name: e.name.clone(),
-            want,
-            status,
-        });
-    }
-    out
-}
-
-/// A module export as a contract member compares it: `std/contract`'s
-/// `Export`.
-struct ExportSig {
-    name: String,
-    params: Vec<String>,
-    ret: String,
-}
-
-impl ExportSig {
-    fn spelling(&self) -> String {
-        let mut out = format!("fn({})", self.params.join(", "));
-        if !self.ret.is_empty() {
-            out.push_str(&format!(" -> {}", self.ret));
-        }
-        out
-    }
-}
-
-/// Returns whether an export satisfies a shape, as
-/// `std/contract:matchesSignature`.
-fn shape_matches(shape: &ContractShape, e: &ExportSig) -> bool {
-    // A `let` member is satisfied by its accessor, an arity-0 `fn`
-    // returning the member's type, as `std/contract:matchIndex` rules.
-    if shape.kind != "fn" {
-        return e.params.is_empty() && type_matches(&shape.ret, &e.ret);
-    }
-    if shape.variadic {
-        return type_matches(&shape.ret, &e.ret);
-    }
-    shape
-        .params
-        .iter()
-        .zip(&e.params)
-        .all(|(p, a)| type_matches(p, a))
-        && type_matches(&shape.ret, &e.ret)
-}
-
-/// Returns the head of a type spelling: `Query<T>` gives `Query`.
-fn head_of(spelling: &str) -> &str {
-    match spelling.find('<') {
-        Some(i) => spelling[..i].trim(),
-        None => spelling.trim(),
-    }
-}
-
-/// Returns whether `actual` satisfies a member's type pattern, as
-/// `std/contract:typeMatches`: equality, except that a type-parameter head
-/// matches any type.
-pub fn type_matches(pattern: &str, actual: &str) -> bool {
-    let ph = head_of(pattern);
-    if crate::parser::is_member_type_param(ph) {
-        return true;
-    }
-    if ph != head_of(actual) {
-        return false;
-    }
-    let pa = split_args(pattern);
-    let aa = split_args(actual);
-    if pa.len() != aa.len() {
-        return false;
-    }
-    pa.iter().zip(&aa).all(|(p, a)| type_matches(p, a))
-}
-
-/// Returns the depth-0 generic arguments of a type spelling.
-fn split_args(spelling: &str) -> Vec<String> {
-    let chars: Vec<char> = spelling.chars().collect();
-    let Some(open) = chars.iter().position(|&c| c == '<') else {
-        return Vec::new();
-    };
-    let mut out: Vec<String> = Vec::new();
-    let mut depth = 1usize;
-    let mut start = open + 1;
-    let mut j = open + 1;
-    while j < chars.len() && depth > 0 {
-        match chars[j] {
-            '<' => depth += 1,
-            '>' => {
-                depth -= 1;
-                if depth == 0 {
-                    out.push(
-                        chars[start..j]
-                            .iter()
-                            .collect::<String>()
-                            .trim()
-                            .to_string(),
-                    );
-                }
-            }
-            ',' if depth == 1 => {
-                out.push(
-                    chars[start..j]
-                        .iter()
-                        .collect::<String>()
-                        .trim()
-                        .to_string(),
-                );
-                start = j + 1;
-            }
-            _ => {}
-        }
-        j += 1;
-    }
-    out
 }
