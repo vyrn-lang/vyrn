@@ -1159,6 +1159,7 @@ fn build_seeded(
         fns,
         proto: &own.proto,
         names,
+        bounds: Some(&inst.func.type_bounds),
         types,
         produced,
         solved,
@@ -1427,6 +1428,9 @@ struct Builder<'a> {
     fns: &'a Fns,
     proto: &'a Owned,
     names: &'a mut NameMemo,
+    /// The bounds of the function's type parameters; `None` for a body that
+    /// is no function.
+    bounds: Option<&'a HashMap<String, Vec<String>>>,
     types: HashMap<NodeId, Type>,
     /// The producer type of every typed expression, before the destination's
     /// coercion (see [`Rhs`]); `types` holds what the value must end up as.
@@ -1544,6 +1548,7 @@ impl<'a> Builder<'a> {
             fns,
             proto: &own.proto,
             names,
+            bounds: None,
             types,
             produced,
             solved,
@@ -1819,10 +1824,18 @@ impl<'a> Builder<'a> {
             || self.own.place_names.contains(name)
     }
 
-    /// The first protocol member named `name`, in declaration order.
-    fn protocol_member(&self, name: &str) -> Option<(MethodId, &'a MethodSig)> {
+    /// The member `name` of the protocol that `recv`'s bound names, where
+    /// `recv` is a bounded type parameter of the body as written. The checker
+    /// dispatched the call through that bound, not through the first
+    /// protocol that declares `name`.
+    fn protocol_member(&self, name: &str, recv: &Expr) -> Option<(MethodId, &'a MethodSig)> {
+        let Type::Param(t) = node_ty(self.own, recv.id())? else {
+            return None;
+        };
+        let bound = self.bounds?.get(&t)?;
         (self.program.protocols.iter().enumerate()).find_map(|(i, p)| {
-            let j = p.methods.iter().position(|m| m.name == name)?;
+            let j = (bound.contains(&p.name))
+                .then(|| p.methods.iter().position(|m| m.name == name))??;
             let id = MethodId {
                 protocol: i as u32,
                 member: j as u32,
@@ -6416,7 +6429,7 @@ impl<'a> Builder<'a> {
         } else if let Some(p) = self.projection(name) {
             kind = Callee::Projection;
             p.params.iter().map(|p| p.capability).collect()
-        } else if let Some((id, sig)) = self.protocol_member(name) {
+        } else if let Some((id, sig)) = (args.first()).and_then(|r| self.protocol_member(name, r)) {
             // A protocol member no impl answers, called on a bounded type
             // parameter in a generic read as written: its signature is what
             // a caller reads (`MethodSig::recv`).
@@ -6674,14 +6687,19 @@ impl<'a> Builder<'a> {
     /// The impl function the method `name` dispatches to on `recv`'s type,
     /// and its type arguments ([`Builder::impl_args`]): the one function the
     /// program declares under a name some protocol with that method mangles.
+    /// A receiver that is a bounded type parameter as written dispatches
+    /// through the protocol its bound names ([`Builder::protocol_member`]).
     fn dispatched(&self, name: &str, recv: &Expr) -> Option<(String, Vec<(String, Type)>)> {
         let rty = self.ty_of(recv).ok()?;
         let key = vyrn_frontend::types::type_key(&rty)?;
+        let bound = (self.protocol_member(name, recv))
+            .map(|(id, _)| &self.program.protocols[id.protocol as usize].name);
         let fs: std::collections::BTreeMap<String, Vec<(String, Type)>> = self
             .program
             .impls
             .iter()
             .filter(|i| i.methods.iter().any(|m| m.name == name))
+            .filter(|i| bound.is_none_or(|p| &i.protocol == p))
             .map(|i| vyrn_frontend::types::impl_method_name(&i.protocol, &key, name))
             .filter_map(|f| Some((f.clone(), self.impl_args(&f, &rty)?)))
             .collect();
