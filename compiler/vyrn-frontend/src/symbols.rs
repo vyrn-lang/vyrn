@@ -1251,16 +1251,24 @@ fn sequence_type_at(
         .cloned()
 }
 
-/// Hover text for the class token under the cursor in a `cls("...")` string:
-/// the CSS rule `std/tw`'s `css()` emits for a utility, or
-/// "safelisted" for a safelist entry. `None` when the cursor is not on a class
-/// token of a linked theme.
+/// The hover of a class token in a `cls("...")` string.
+pub struct ClassHover {
+    pub text: String,
+    /// The class, when the theme safelists it without a rule of its own, so
+    /// the host may add the app's rules.
+    pub safelisted: Option<String>,
+}
+
+/// Hover for the class token under the cursor in a `cls("...")` string: the
+/// CSS rule `std/tw`'s `css()` emits for a utility, or "safelisted" for a
+/// safelist entry. `None` when the cursor is not on a class token of a linked
+/// theme.
 pub fn class_token_hover(
     analysis: &Analysis,
     source: &str,
     line: usize,
     col: usize,
-) -> Option<String> {
+) -> Option<ClassHover> {
     if !cls_call_arg(source, line, col) {
         return None;
     }
@@ -1269,12 +1277,16 @@ pub fn class_token_hover(
     if !alphabet.iter().any(|c| c == &token) {
         return None;
     }
-    match css_rule_for(&analysis.tw_css, &token) {
-        Some(rule) => Some(format!(
-            "**`{token}`** — `{ty_name}` utility class\n\n```css\n{rule}\n```"
-        )),
-        None => Some(format!("**`{token}`** — safelisted (app-styled)")),
-    }
+    Some(match css_rule_for(&analysis.tw_css, &token) {
+        Some(rule) => ClassHover {
+            text: format!("**`{token}`** — `{ty_name}` utility class\n\n```css\n{rule}\n```"),
+            safelisted: None,
+        },
+        None => ClassHover {
+            text: format!("**`{token}`** — safelisted (app-styled)"),
+            safelisted: Some(token),
+        },
+    })
 }
 
 /// The whitespace-delimited token containing the 1-based cursor `col` on `line`:
@@ -3025,10 +3037,10 @@ mod tests {
         assert!(items.iter().any(|c| c.label == "a-2"));
 
         // Hover on `flex` shows its CSS rule; on `a-1`, its rule too.
-        let hv = class_token_hover(&a, src, line, col).expect("hover on class token");
+        let hv = (class_token_hover(&a, src, line, col).expect("hover on class token")).text;
         assert!(hv.contains("display:flex"), "utility CSS: {hv}");
         let col_a1 = src.lines().nth(4).unwrap().find("a-1\")").unwrap() + 1 + 1;
-        let hv2 = class_token_hover(&a, src, line, col_a1).expect("hover a-1");
+        let hv2 = (class_token_hover(&a, src, line, col_a1).expect("hover a-1")).text;
         assert!(hv2.contains("color:red"), "a-1 rule: {hv2}");
     }
 
@@ -3783,7 +3795,7 @@ fn main() -> Int64 {
         assert!(items.iter().any(|c| c.label == "dog"), "{items:?}");
         assert!(!items.iter().any(|c| c.label == "red"), "{items:?}");
         // Hover names the type it answered from.
-        let hv = class_token_hover(&a, src, line, col).expect("hover");
+        let hv = class_token_hover(&a, src, line, col).expect("hover").text;
         assert!(hv.contains("`TwB`"), "{hv}");
     }
 

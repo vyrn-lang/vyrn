@@ -735,36 +735,38 @@ fn handle_hover(server: &Server, params: serde_json::Value) -> Option<Hover> {
         (Some(c), Some(d)) => Some(format!("{c}\n\n{d}")),
         (c, d) => c.or(d),
     };
+    // A resolved name, else a class token, whose hover is not fenced.
     let ordinary = if is_vyrn_uri(uri) {
         lookup(server, uri).and_then(|(analysis, _)| match resolve(analysis, line, col) {
-            Some(r) => Some(r.hover),
-            None => server
-                .docs
-                .get(uri)
-                .and_then(|src| class_token_hover(analysis, src, line, col)),
+            Some(r) => Some(Ok(r.hover)),
+            None => (server.docs.get(uri))
+                .and_then(|src| class_token_hover(analysis, src, line, col))
+                .map(Err),
         })
     } else {
         vyx_forward(server, uri, line, col).and_then(|fwd| {
-            match resolve(&fwd.synth.analysis, fwd.line, fwd.col) {
-                Some(r) => Some(r.hover),
-                None => class_token_hover(
-                    &fwd.synth.analysis,
-                    &fwd.synth.gen_source,
-                    fwd.line,
-                    fwd.col,
-                ),
+            let a = &fwd.synth.analysis;
+            match resolve(a, fwd.line, fwd.col) {
+                Some(r) => Some(Ok(r.hover)),
+                None => class_token_hover(a, &fwd.synth.gen_source, fwd.line, fwd.col).map(Err),
             }
         })
     };
-    let ordinary = ordinary.map(|o| fence_signature(&o));
+    let (ordinary, safelisted) = match ordinary {
+        Some(Ok(hover)) => (Some(fence_signature(&hover)), None),
+        Some(Err(class)) => (Some(class.text), class.safelisted),
+        None => (None, None),
+    };
     let value = match (ordinary, note) {
         (Some(o), Some(n)) => format!("{o}\n\n---\n\n{n}"),
-        (Some(o), None) => o,
+        // A safelisted class has no `std/tw` rule; append the app's own rules.
+        (Some(o), None) => match safelisted {
+            Some(class) => with_app_css(server, uri, o, &class),
+            None => o,
+        },
         (None, Some(n)) => n,
         (None, None) => return None,
     };
-    // A safelisted class has no `std/tw` rule; append the app's own rules.
-    let value = with_app_css(server, uri, value);
     Some(Hover {
         contents: HoverContents::Markup(MarkupContent {
             kind: MarkupKind::Markdown,
@@ -3299,12 +3301,8 @@ const MAX_CSS_LINES: usize = 40;
 /// The most `.vyx` files scanned for `stylesheet "..."` declarations.
 const MAX_VYX_SCAN: usize = 64;
 
-/// `hover` with the app's matching CSS rules appended, if it is the
-/// "safelisted (app-styled)" text; any other hover unchanged.
-fn with_app_css(server: &Server, uri: &Url, hover: String) -> String {
-    let Some(class) = safelisted_class_of(&hover) else {
-        return hover;
-    };
+/// `hover` with the app's CSS rules for the safelisted `class` appended.
+fn with_app_css(server: &Server, uri: &Url, hover: String, class: &str) -> String {
     let Some(path) = uri_path(uri) else {
         return hover;
     };
@@ -3313,7 +3311,7 @@ fn with_app_css(server: &Server, uri: &Url, hover: String) -> String {
         return hover;
     };
     let root = app_root_for(dir);
-    let rules = app_css_rules(server, &root, &class);
+    let rules = app_css_rules(server, &root, class);
     if rules.is_empty() {
         return hover;
     }
@@ -3322,17 +3320,6 @@ fn with_app_css(server: &Server, uri: &Url, hover: String) -> String {
         out.push_str(&format!("\n\n```css\n{rule}\n```\n— {rel}:{line}"));
     }
     out
-}
-
-/// The class name of a safelisted hover (`` **`plang`** -- safelisted
-/// (app-styled)``), or `None` for any other hover text.
-fn safelisted_class_of(hover: &str) -> Option<String> {
-    if !hover.ends_with("— safelisted (app-styled)") {
-        return None;
-    }
-    let rest = hover.strip_prefix("**`")?;
-    let end = rest.find("`**")?;
-    Some(rest[..end].to_string())
 }
 
 /// The app's own rules matching `class`, as `(path relative to the app root,
