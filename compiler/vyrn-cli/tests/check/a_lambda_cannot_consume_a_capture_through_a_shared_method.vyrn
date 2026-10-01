@@ -1,0 +1,36 @@
+// Two protocols declare `take`; the receiver's type picks `Eat`, whose
+// `take` consumes, in either declaration order.
+type P = { x: Int64 }
+
+type Q = { s: String }
+
+protocol Eat {
+    fn take(consume self) -> Int64
+}
+
+protocol Peek {
+    fn take(self) -> Int64
+}
+
+impl Peek for P {
+    fn take(self) -> Int64 {
+        return self.x
+    }
+}
+
+impl Eat for Q {
+    fn take(consume self) -> Int64 {
+        return self.s.byteLength
+    }
+}
+
+fn apply(f: fn(Int64) -> Int64) -> Int64 {
+    return f(1) + f(2)
+}
+
+fn main() -> Int64 {
+    let q = Q { s: "ab" + "cd" }
+    print(apply(n -> n + q.take()))
+    print(q.s)
+    return 0
+}

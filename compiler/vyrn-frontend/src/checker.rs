@@ -624,27 +624,6 @@ fn check_accum_inner(
         .iter()
         .map(|f| (f.name.clone(), f.type_bounds.clone()))
         .collect();
-    // Each function's parameter capabilities, for checking `modify` call sites.
-    let mut caps: HashMap<String, Vec<Capability>> = program
-        .functions
-        .iter()
-        .map(|f| {
-            (
-                f.name.clone(),
-                f.params.iter().map(|p| p.capability).collect(),
-            )
-        })
-        .collect();
-    // A protocol method under its surface name, receiver first, for the checks
-    // that see only the written name (the lambda-capture rule).
-    for p in &program.protocols {
-        for m in &p.methods {
-            let mut cs = vec![m.recv];
-            cs.extend(m.param_caps.iter().copied());
-            caps.insert(m.name.clone(), cs);
-        }
-    }
-
     // Protocol registries: each method name to its protocol and
     // signature, and which (protocol, type key) pairs are implemented.
     let mut protocol_methods: HashMap<String, Vec<(String, MethodSig)>> = HashMap::new();
@@ -1017,7 +996,6 @@ fn check_accum_inner(
         functions: &program.functions,
         fn_decls: &fn_decls,
         sigs: &sigs,
-        caps: &caps,
         types: &types,
         contracts: &contracts,
         variants: &variants,
@@ -1732,7 +1710,6 @@ struct Cx<'a> {
     fn_decls: &'a HashMap<String, DeclId>,
     /// Each function's parameter types and result, by [`DeclId::index`].
     sigs: &'a [(Vec<Type>, Type)],
-    caps: &'a HashMap<String, Vec<Capability>>,
     /// The type declarations by name with their ids, which the checker reads
     /// as [`crate::types::Decls`], recording each lookup.
     types: &'a HashMap<String, (DeclId, TypeDecl)>,
@@ -5614,6 +5591,7 @@ impl<'a> Checker<'a> {
                     let (mparams, mret) = self
                         .sig(&mangled)
                         .ok_or_else(|| cerr!(line, NotImplemented, recv, proto, name))?;
+                    let mcaps = self.caps(&mangled);
                     return self.check_declared_call(
                         &DeclaredCall {
                             key: mangled.as_str(),
@@ -5621,7 +5599,7 @@ impl<'a> Checker<'a> {
                             params: mparams,
                             ret: mret,
                             type_params: self.type_params(&mangled),
-                            caps: self.caps.get(mangled.as_str()),
+                            caps: mcaps.as_ref(),
                             bounds: self.all_bounds.get(mangled.as_str()),
                             recv: Some(&recv),
                             written: &[],
@@ -5724,6 +5702,7 @@ impl<'a> Checker<'a> {
         // `toString` (`prelude::method_surface`), and other `@` names lose the
         // `@`, which no source can lex.
         let shown = crate::prelude::method_surface(name).trim_start_matches('@');
+        let caps = self.caps(name);
         self.check_declared_call(
             &DeclaredCall {
                 key: name,
@@ -5731,7 +5710,7 @@ impl<'a> Checker<'a> {
                 params,
                 ret,
                 type_params: self.type_params(name).or(seeded_generics.as_ref()),
-                caps: self.caps.get(name).or(seeded_caps.as_ref()),
+                caps: caps.as_ref().or(seeded_caps.as_ref()),
                 // A seeded row's bounds are the typed judgment's.
                 bounds: self.all_bounds.get(name),
                 recv: None,
@@ -6375,6 +6354,36 @@ impl<'a> Checker<'a> {
                     self.err = Some(m);
                 }
             }
+
+            /// Whether the call `name(args)` takes argument `k` by `consume`.
+            /// A call through a function value reads every argument. A method
+            /// is each protocol's that declares it, narrowed by the type of a
+            /// receiver bound outside the lambda.
+            fn consumes(&self, name: &str, args: &[Expr], k: usize) -> bool {
+                let ck = self.ck;
+                let typed = |n: &str| ck.lookup(self.outer, n).map(|b| b.ty);
+                if typed(name).is_some_and(|t| matches!(ck.base(&t), Type::Fn(..))) {
+                    return false;
+                }
+                if let Some(cs) = ck.caps(name) {
+                    return cs.get(k) == Some(&Capability::Consume);
+                }
+                let key = match args.first() {
+                    Some(Expr::Var { name: r, .. }) => {
+                        typed(r).and_then(|t| crate::types::type_key(&t))
+                    }
+                    _ => None,
+                };
+                (ck.protocol_methods.get(name).into_iter().flatten())
+                    .filter(|(p, _)| {
+                        key.as_ref()
+                            .is_none_or(|key| ck.impls.contains(&(p.clone(), key.clone())))
+                    })
+                    .any(|(_, m)| {
+                        let mut cs = std::iter::once(m.recv).chain(m.param_caps.iter().copied());
+                        cs.nth(k) == Some(Capability::Consume)
+                    })
+            }
         }
 
         impl BodyVisit<'_> for Captures<'_, '_> {
@@ -6411,9 +6420,8 @@ impl<'a> Checker<'a> {
                     } => {
                         // Each argument is checked before it is walked, so the
                         // first violation in source order is reported.
-                        let caps = self.ck.caps.get(name);
                         for (k, a) in args.iter().enumerate() {
-                            if caps.and_then(|c| c.get(k)) == Some(&Capability::Consume) {
+                            if self.consumes(name, args, k) {
                                 if let Expr::Var { name: vn, .. } = a {
                                     if self.is_capture(vn, locals) {
                                         self.fail(rule!(LambdaConsumesCapture, name = vn, line));
@@ -6703,6 +6711,12 @@ impl<'a> Checker<'a> {
     fn sig(&self, name: &str) -> Option<&'a (Vec<Type>, Type)> {
         let sigs = self.sigs;
         self.resolve_fn(name).map(|d| &sigs[d.index()])
+    }
+
+    /// The parameter capabilities of the function named `name`.
+    fn caps(&self, name: &str) -> Option<Vec<Capability>> {
+        let f = &self.functions[self.resolve_fn(name)?.index()];
+        Some(f.params.iter().map(|p| p.capability).collect())
     }
 
     /// The type parameters of the generic function named `name`.
