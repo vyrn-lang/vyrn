@@ -999,8 +999,8 @@ struct Cx<'a> {
     /// the literal's own body instead of a clone. A hit is the program's node, since the program
     /// outlives every walk. A miss is a literal in a leaked desugar, and the caller clones it.
     lambdas: HashMap<NodeId, (&'a str, &'a Expr)>,
-    /// Every layout, parsed once, keyed by `llt_of`'s string: a layout is a function of it alone.
-    layouts: RefCell<HashMap<String, Rc<Layout>>>,
+    /// Every layout, computed once per substituted type.
+    layouts: RefCell<HashMap<Type, Rc<Layout>>>,
     /// The check oracle's host imports and its row labels, under
     /// [`vyrn_lower::check::Mode::Count`]; `None` in every other build.
     oracle: Option<Oracle>,
@@ -1102,19 +1102,22 @@ impl<'a> Cx<'a> {
         llt_of(&self.sub(ty), &self.types)
     }
 
-    fn layout(&self, ty: &Type, line: usize) -> Result<Rc<Layout>, String> {
-        self.layout_ll(self.ll(ty), line)
+    /// The machine shape of `ty`.
+    fn shape(&self, ty: &Type) -> Shape {
+        crate::shape_of(&self.sub(ty), &self.types)
     }
 
-    /// The layout of the LLVM shape `ll`, or the refusal of a shape past 4 GB.
-    fn layout_ll(&self, ll: String, line: usize) -> Result<Rc<Layout>, String> {
-        if let Some(l) = self.layouts.borrow().get(&ll) {
+    /// The layout of `ty`, or the refusal of a shape past 4 GB.
+    fn layout(&self, ty: &Type, line: usize) -> Result<Rc<Layout>, String> {
+        let ty = self.sub(ty);
+        if let Some(l) = self.layouts.borrow().get(&ty) {
             return Ok(l.clone());
         }
-        let l = layout::of_ll(&ll)
-            .map_err(|e| format!("direct backend: layout of {ll} at line {line}: {e}"))?;
+        let l = crate::shape_of(&ty, &self.types)
+            .layout()
+            .map_err(|e| format!("direct backend: layout of `{ty}` at line {line}: {e}"))?;
         let l = Rc::new(l);
-        self.layouts.borrow_mut().insert(ll, l.clone());
+        self.layouts.borrow_mut().insert(ty, l.clone());
         Ok(l)
     }
 
@@ -1145,7 +1148,7 @@ impl<'a> Cx<'a> {
     ///
     /// If `ty` is no scalar. Every caller holds a [`Repr::Scalar`] for `ty`.
     fn leaf(&self, ty: &Type) -> layout::Leaf {
-        match crate::shape_of(&self.sub(ty), &self.types) {
+        match self.shape(ty) {
             Shape::Leaf(l) => l,
             s => panic!("a load or store of `{ty}`, whose shape {s:?} is no scalar"),
         }
@@ -1285,7 +1288,7 @@ impl<'a> Cx<'a> {
         if let Some(why) = self.ty_gap(ty, 0) {
             return unsupported(&why, line);
         }
-        Ok(match crate::shape_of(&self.sub(ty), &self.types) {
+        Ok(match self.shape(ty) {
             Shape::Void => Repr::Unit,
             Shape::Leaf(l) => Repr::Scalar(l.val_type()),
             Shape::Struct(_) | Shape::Array(..) => Repr::Agg(self.layout(ty, line)?),
@@ -5045,15 +5048,10 @@ impl<'p> Fn_<'_, 'p> {
 
     /// Lays out a capture block: the captures packed by value, in order.
     fn cap_block(&self, cap_tys: &[Type]) -> Result<Rc<Layout>, String> {
-        let ll = format!(
-            "{{ {} }}",
-            cap_tys
-                .iter()
-                .map(|t| self.cx.ll(t))
-                .collect::<Vec<_>>()
-                .join(", ")
-        );
-        self.cx.layout_ll(ll, 0)
+        Shape::Struct(cap_tys.iter().map(|t| self.cx.shape(t)).collect())
+            .layout()
+            .map(Rc::new)
+            .map_err(|e| format!("direct backend: layout of a capture block: {e}"))
     }
 
     /// Writes a stored function value's tag and payload into `dest`.
@@ -5264,7 +5262,7 @@ struct Walk {
 }
 
 impl<'p> Fn_<'_, 'p> {
-    /// `of_ll` rounds a size up to its alignment, so a size is a stride.
+    /// A layout's size is rounded up to its alignment, so it is a stride.
     fn stride(&self, elem: &Type, line: usize) -> Result<u32, String> {
         Ok(self.cx.layout(elem, line)?.size)
     }

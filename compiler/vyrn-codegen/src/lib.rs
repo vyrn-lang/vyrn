@@ -804,10 +804,9 @@ pub fn coerce_plan(from: &Type, to: &Type, types: &HashMap<String, TypeDecl>) ->
     }
 }
 
-/// The shape of a Vyrn type, in LLVM's spelling: the one match from a type to a
-/// memory layout. [`layout::of_ll`] parses what this prints, so size and offset
-/// arithmetic follow lowering. `ty` is resolved here but not substituted; a
-/// caller inside a monomorphized body substitutes first.
+/// The shape of a Vyrn type, in LLVM's spelling, which the equality sites
+/// compare. `ty` is resolved here but not substituted; a caller inside a
+/// monomorphized body substitutes first.
 pub(crate) fn llt_of(ty: &Type, types: &HashMap<String, TypeDecl>) -> String {
     match vyrn_frontend::types::resolve(ty, types) {
         Type::Int => "i64".into(),
@@ -1000,8 +999,10 @@ mod tests {
     use super::*;
     use vyrn_frontend::check;
 
+    /// Written out rather than derived, so a change to `shape_of` or to the
+    /// layout arithmetic has to disagree with numbers a person wrote down.
     #[test]
-    fn llt_prints_the_shapes_the_layout_engine_was_verified_on() {
+    fn each_runtime_shape_has_the_layout_written_down() {
         let types: HashMap<String, TypeDecl> = HashMap::new();
         let rec = |fs: &[Type]| {
             Type::Record(
@@ -1014,68 +1015,115 @@ mod tests {
                     .collect(),
             )
         };
-        let i8t = Type::IntN {
-            bits: 8,
-            signed: false,
-        };
-        let cases: &[(&str, Type)] = &[
-            ("Int64", Type::Int),
+        let int = |bits, signed| Type::IntN { bits, signed };
+        let u8t = int(8, false);
+        let fn0 = || Type::Fn(Vec::new(), Box::new(Type::Int));
+        let cases: Vec<(Type, u32, u32, &[u32])> = vec![
+            (Type::Int, 8, 8, &[]),
+            (int(32, true), 4, 4, &[]),
+            (int(16, true), 2, 2, &[]),
+            (u8t.clone(), 1, 1, &[]),
+            (Type::Bool, 1, 1, &[]),
+            (Type::Float, 8, 8, &[]),
+            (Type::Float32, 4, 4, &[]),
+            (Type::Str, 4, 4, &[]),
+            (Type::F32x4, 16, 16, &[]),
+            (Type::Unit, 0, 1, &[]),
+            // The built-in sums: an `i64` tag plus one slot per payload word.
+            (Type::option(Type::Int), 16, 8, &[0, 8]),
+            (Type::result(Type::Int, Type::Str), 16, 8, &[0, 8]),
+            (Type::option(fn0()), 24, 8, &[0, 8, 16]),
+            // A 4-byte hole after the data pointer.
+            (Type::Array(Box::new(Type::Str)), 24, 8, &[0, 8, 16]),
             (
-                "Int32",
-                Type::IntN {
-                    bits: 32,
-                    signed: true,
-                },
+                Type::Stream(Box::new(Type::Int)),
+                48,
+                8,
+                &[0, 8, 16, 24, 32, 40],
             ),
+            // The trailing index pointer pads the size to 32, not 28.
             (
-                "Int16",
-                Type::IntN {
-                    bits: 16,
-                    signed: true,
-                },
+                Type::Map(Box::new(Type::Str), Box::new(Type::Int)),
+                32,
+                8,
+                &[0, 4, 8, 16, 24],
             ),
-            ("Int8", i8t.clone()),
-            ("Bool", Type::Bool),
-            ("Float64", Type::Float),
-            ("Float32", Type::Float32),
-            ("String", Type::Str),
-            // The built-in sums print the enum rows: one slot per payload word.
-            ("Enum1", Type::option(Type::Int)),
-            ("Enum1", Type::result(Type::Int, Type::Str)),
+            (fn0(), 16, 8, &[0, 8]),
+            (rec(&[]), 0, 1, &[]),
             (
-                "Enum2",
-                Type::option(Type::Fn(Vec::new(), Box::new(Type::Int))),
+                rec(&[Type::Bool, Type::Str, Type::Int, u8t.clone(), Type::Float]),
+                32,
+                8,
+                &[0, 4, 8, 16, 24],
             ),
-            ("Array", Type::Array(Box::new(Type::Str))),
-            ("Map", Type::Map(Box::new(Type::Str), Box::new(Type::Int))),
-            ("Fn", Type::Fn(Vec::new(), Box::new(Type::Int))),
-            ("RecordEmpty", rec(&[])),
+            // A vector's 16-alignment moves it to offset 16 and the size to 32.
+            (rec(&[u8t.clone(), Type::F64x2]), 32, 16, &[0, 16]),
+            (Type::ArrayN(Box::new(Type::I32x4), 3), 48, 16, &[]),
+            (Type::ArrayN(Box::new(Type::Int), 4), 32, 8, &[]),
+            (Type::ArrayN(Box::new(u8t.clone()), 3), 3, 1, &[]),
             (
-                "RecordMixed",
-                rec(&[Type::Bool, Type::Str, Type::Int, i8t.clone(), Type::Float]),
+                Type::SmallArray(Box::new(Type::Int), 4),
+                56,
+                8,
+                &[0, 8, 16, 24],
             ),
-            ("ArrayN_i64", Type::ArrayN(Box::new(Type::Int), 4)),
-            ("ArrayN_i8", Type::ArrayN(Box::new(i8t.clone()), 3)),
-            ("SmallArray_i64", Type::SmallArray(Box::new(Type::Int), 4)),
-            ("SmallArray_i8", Type::SmallArray(Box::new(i8t), 3)),
-            ("SmallArray_str", Type::SmallArray(Box::new(Type::Str), 2)),
+            // The inline buffer ends at 23, and the tail pads to 24.
+            (Type::SmallArray(Box::new(u8t), 3), 24, 8, &[0, 8, 16, 20]),
+            (
+                Type::SmallArray(Box::new(Type::Str), 2),
+                32,
+                8,
+                &[0, 8, 16, 20],
+            ),
         ];
-        for (name, ty) in cases {
-            let want = layout::SHAPES
-                .iter()
-                .find(|(n, _)| n == name)
-                .unwrap_or_else(|| panic!("{name} missing from layout::SHAPES"))
-                .1;
+        for (ty, size, align, fields) in cases {
+            let l = shape_of(&ty, &types).layout().unwrap();
             assert_eq!(
-                &llt_of(ty, &types),
-                want,
-                "llt({name}) drifted from layout::SHAPES"
+                (l.size, l.align, &l.fields[..]),
+                (size, align, fields),
+                "the layout of `{ty}`"
             );
         }
-        for (name, arity) in [("Enum0", 0), ("Enum1", 1), ("Enum2", 2), ("Enum3", 3)] {
-            let want = layout::SHAPES.iter().find(|(n, _)| *n == name).unwrap().1;
-            assert_eq!(enum_ll(arity), want, "enum_ll({arity}) drifted");
+    }
+
+    /// `536870912 * 8` is 2^32, which wraps to zero: a 4 GiB array that would
+    /// pass the frame limit as needing no bytes.
+    #[test]
+    fn a_shape_past_four_gigabytes_is_refused_rather_than_wrapped() {
+        let types = HashMap::new();
+        let i64s = |n| Type::ArrayN(Box::new(Type::Int), n);
+        let byte = Type::IntN {
+            bits: 8,
+            signed: true,
+        };
+        let field = |name: &str, ty| Field {
+            name: name.into(),
+            ty,
+        };
+        for (ty, wrapped) in [
+            (i64s(600_000_000), 505_032_704u64),
+            (i64s(536_870_912), 0),
+            (
+                Type::ArrayN(Box::new(i64s(100_000)), 100_000),
+                2_690_588_672,
+            ),
+            (
+                Type::Record(vec![field("b", byte), field("a", i64s(600_000_000))]),
+                505_032_712,
+            ),
+        ] {
+            let e = shape_of(&ty, &types)
+                .layout()
+                .expect_err(&format!("`{ty}` wrapped to {wrapped} instead"));
+            assert!(
+                e.contains("bytes, past the 4294967295 one shape may occupy")
+                    && e.contains("belongs on the heap as `Array<T>`"),
+                "`{ty}`: {e}"
+            );
         }
+        // The largest shape that fits keeps its exact size.
+        let l = shape_of(&i64s(536_870_911), &types).layout().unwrap();
+        assert_eq!(l.size, 4_294_967_288);
     }
 
     /// One `Type` per variant of the type enum. [`Type::VARIANTS`] and the
@@ -1155,27 +1203,6 @@ mod tests {
             .collect()
     }
 
-    /// Collects the leaf spellings in an `llt_of` string: each scalar word and
-    /// each whole `<N x T>` vector, the unit `of_ll` sizes.
-    fn atoms(ll: &str, out: &mut std::collections::BTreeSet<String>) {
-        fn words(s: &str, out: &mut std::collections::BTreeSet<String>) {
-            for w in s.split(|c: char| !c.is_ascii_alphanumeric()) {
-                // Counts and the `x` after them are grammar, not shapes.
-                if !w.is_empty() && w != "x" && !w.bytes().all(|c| c.is_ascii_digit()) {
-                    out.insert(w.to_string());
-                }
-            }
-        }
-        let mut rest = ll;
-        while let Some(a) = rest.find('<') {
-            let b = a + rest[a..].find('>').expect("a vector spelling closes");
-            words(&rest[..a], out);
-            out.insert(rest[a..=b].to_string());
-            rest = &rest[b + 1..];
-        }
-        words(rest, out);
-    }
-
     /// Every composite shape, over the types it is given: containers, both
     /// generic applications, function types of three arities, and the sized
     /// containers at two capacities.
@@ -1213,13 +1240,10 @@ mod tests {
     }
 
     /// Over a few thousand type trees built from [`layout_seeds`] by [`grow`]
-    /// and [`in_records`]: every tree has a layout, and the leaf spellings they
-    /// print equal those in [`layout::SHAPES`], so no `llt_of` case escapes the
-    /// clang comparison and no row is dead. Only leaves are compared: the
-    /// padding-probe rows are hand-built, and names are not derivable (`Ref`
-    /// prints `{ i64, i64 }`, as a stored `fn` does).
+    /// and [`in_records`]: every tree has a padded layout, and every [`Leaf`]
+    /// is some tree's, so no leaf is dead.
     #[test]
-    fn llt_prints_every_shape_the_layout_engine_was_verified_on() {
+    fn every_type_has_a_padded_layout_and_every_leaf_is_reached() {
         let types = HashMap::new();
         let seeds = layout_seeds();
         // `variant_name` is exhaustive, so a new variant stops this file
@@ -1244,36 +1268,37 @@ mod tests {
             .cloned()
             .collect();
 
-        let mut printed = std::collections::BTreeSet::new();
+        // Exhaustive, so a new leaf has to be given a slot here.
+        let slot = |l: Leaf| match l {
+            Leaf::I1 => 0,
+            Leaf::I8 => 1,
+            Leaf::I16 => 2,
+            Leaf::I32 => 3,
+            Leaf::I64 => 4,
+            Leaf::Ptr => 5,
+            Leaf::F32 => 6,
+            Leaf::F64 => 7,
+            Leaf::V128 => 8,
+        };
+        fn leaves(s: &Shape, out: &mut dyn FnMut(Leaf)) {
+            match s {
+                Shape::Void => {}
+                Shape::Leaf(l) => out(*l),
+                Shape::Struct(ms) => ms.iter().for_each(|m| leaves(m, out)),
+                Shape::Array(_, e) => leaves(e, out),
+            }
+        }
+        let mut reached = [false; 9];
         for ty in &all {
-            let ll = llt_of(ty, &types);
-            let l = layout::of_ll(&ll)
-                .unwrap_or_else(|e| panic!("llt({ty}) = {ll}, which has no layout: {e}"));
-            assert!(l.align.is_power_of_two(), "{ll}: align {}", l.align);
-            assert_eq!(l.size % l.align, 0, "{ll}: size {} is not padded", l.size);
-            atoms(&ll, &mut printed);
+            let s = shape_of(ty, &types);
+            let l = s
+                .layout()
+                .unwrap_or_else(|e| panic!("`{ty}` has no layout: {e}"));
+            assert!(l.align.is_power_of_two(), "`{ty}`: align {}", l.align);
+            assert_eq!(l.size % l.align, 0, "`{ty}`: size {} is not padded", l.size);
+            leaves(&s, &mut |l| reached[slot(l)] = true);
         }
-
-        let mut covered = std::collections::BTreeSet::new();
-        for (_, ll) in layout::SHAPES {
-            atoms(ll, &mut covered);
-        }
-        // `void` has no row: GNU C's `sizeof(void)` is 1 where the engine says
-        // 0. `llt_of` prints it only for types that are never a member.
-        printed.remove("void");
-        covered.remove("void");
-        let missing: Vec<_> = printed.difference(&covered).collect();
-        assert!(
-            missing.is_empty(),
-            "{} type trees print {missing:?}, which layout::SHAPES does not cover — \
-             so clang is never asked about it",
-            all.len()
-        );
-        let dead: Vec<_> = covered.difference(&printed).collect();
-        assert!(
-            dead.is_empty(),
-            "layout::SHAPES spells {dead:?}, which `llt` no longer prints"
-        );
+        assert_eq!(reached, [true; 9], "a leaf no type reaches");
         assert!(all.len() > 4_000, "the corpus shrank to {}", all.len());
     }
 
