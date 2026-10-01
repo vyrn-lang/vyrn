@@ -1,0 +1,7 @@
+fn helper(x: Int64) -> Int64 {
+    return x + 1
+}
+
+export fn fromB() -> Int64 {
+    return helper(1)
+}

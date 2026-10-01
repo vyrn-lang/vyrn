@@ -2413,8 +2413,9 @@ fn resolve_aliases(
 ) -> Spellings {
     // Top-level decl names per module.
     let mut module_decls: HashMap<String, HashSet<String>> = HashMap::new();
-    // `all_names` only lets `rename_apart` mint a collision-free `__fromN`, and
-    // most programs never rename, so it fills on first use.
+    // `all_names` only lets `rename_apart` mint a `__fromN` that no declaration
+    // and no binder spells, and most programs never rename, so it fills on
+    // first use.
     let mut all_names: HashSet<String> = HashSet::new();
     for m in modules.iter() {
         module_decls
@@ -2500,6 +2501,9 @@ fn resolve_aliases(
             if all_names.is_empty() {
                 for names in module_decls.values() {
                     all_names.extend(names.iter().cloned());
+                }
+                for m in modules.iter() {
+                    bound_names(&m.program, &mut all_names);
                 }
             }
             let mut n = 0usize;
@@ -2997,6 +3001,39 @@ fn type_heads_mut(ty: &mut Type, f: &mut impl FnMut(&mut String)) {
 }
 
 // The scope-aware descent over a body is `ast::body_scope_descent!`.
+
+/// Adds every name a body of `p` binds to `out`: parameters, `let`s, loop
+/// variables, pattern binders and lambda parameters. A renamed reference must
+/// not resolve to one of them.
+fn bound_names(p: &Program, out: &mut HashSet<String>) {
+    struct Binders<'a>(&'a mut HashSet<String>);
+
+    impl BodyVisit<'_> for Binders<'_> {
+        fn bind(&mut self, name: &str, _: usize, _: usize, _: LocalKind, _: Option<&Type>) {
+            self.0.insert(name.to_string());
+        }
+    }
+
+    let fns = p
+        .impls
+        .iter()
+        .flat_map(|i| i.methods.iter().chain(&i.places));
+    for f in p.functions.iter().chain(fns) {
+        out.extend(f.params.iter().map(|q| q.name.clone()));
+        body_block(&f.body, &mut HashSet::new(), &mut Binders(out));
+    }
+    for b in p
+        .tests
+        .iter()
+        .map(|t| &t.body)
+        .chain(p.benches.iter().map(|b| &b.body))
+    {
+        body_block(b, &mut HashSet::new(), &mut Binders(out));
+    }
+    for g in &p.globals {
+        body_expr(&g.init, &HashSet::new(), &mut Binders(out));
+    }
+}
 
 crate::body_scope_descent!(BodyVisit, body_block, body_stmt, body_expr);
 crate::body_scope_descent!(
