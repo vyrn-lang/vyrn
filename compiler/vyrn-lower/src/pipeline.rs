@@ -131,7 +131,7 @@ pub fn refusals(program: &ast::Program) -> (Vec<Diagnostic>, Arc<crate::World>) 
     // The placer judges a core body for every instance, and the World is
     // handed on: a command's next `own::Memo` adopts it. Only this analysis
     // may reuse a judgment (`movecheck::reuse_judgments`).
-    let world = movecheck::judging(|| crate::analyze(program));
+    let world = crate::world::analyzed(program, true);
     crate::hand_on(program, &world);
     // A program the typed judgment refuses gets those refusals alone.
     let mut diags = match world.typed_diagnostics() {
@@ -143,8 +143,8 @@ pub fn refusals(program: &ast::Program) -> (Vec<Diagnostic>, Arc<crate::World>) 
 }
 
 /// Wraps `run`, an engine that compiles and runs a generator, into the engine
-/// a host passes to [`load`], which judges the generator's own program
-/// under [`movecheck::comptime`]. The judgments run inside `run`'s compile
+/// a host passes to [`load`], which judges the generator's own program. The
+/// judgments run inside `run`'s compile
 /// (`direct::compile_gen_host`), which refuses the program the typed judgment
 /// refused, or else the program with a must-use row. A program `run` declines
 /// is refused with its must-use rows here, so it is refused whatever serves
@@ -156,11 +156,9 @@ pub fn gen_engine(
         + 'static,
 ) -> Box<GenEngine> {
     Box::new(move |program, name, args, inputs| {
-        movecheck::comptime(|| {
-            run(program, name, args, inputs).or_else(|| {
-                let owed = crate::analyze(program).owed_diagnostics();
-                (!owed.is_empty()).then_some(Err(GenError::Refused(owed)))
-            })
+        run(program, name, args, inputs).or_else(|| {
+            let owed = crate::analyze(program).owed_diagnostics();
+            (!owed.is_empty()).then_some(Err(GenError::Refused(owed)))
         })
     })
 }

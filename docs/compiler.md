@@ -246,8 +246,7 @@ The kernel knows no surface syntax. It judges core bodies.
   sized integer is judged by width and signedness.
 
 `movecheck.rs` states no rule. It orders refusals by source
-(`movecheck::in_source_order`), marks a generator's own program
-(`movecheck::comptime`), and memoizes per-body judgments for the editor (`movecheck::Judgments`), so a
+(`movecheck::in_source_order`) and memoizes per-body judgments for the editor (`movecheck::Judgments`), so a
 keystroke re-judges only the bodies whose key changed.
 
 ## The emitter

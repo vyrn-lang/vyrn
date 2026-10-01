@@ -481,6 +481,13 @@ thread_local! {
 /// place ([`crate::core::augment`]), and returns the World every consumer
 /// reads. Served from the open [`own::Memo`] when it holds one for `program`.
 pub fn analyze(program: &Program) -> Arc<World> {
+    analyzed(program, false)
+}
+
+/// [`analyze`]; `judging` marks the analysis whose refusals
+/// [`crate::refusals`] reports, the only one that may reuse a judgment or
+/// skip the emitter's facts.
+pub(crate) fn analyzed(program: &Program, judging: bool) -> Arc<World> {
     let open = own::memo_scope().map(|(_, g)| g);
     MEMO.with(|m| drop(m.borrow_mut().take_if(|(g, _)| Some(*g) != open)));
     let memo = (own::memo_scope())
@@ -494,7 +501,7 @@ pub fn analyze(program: &Program) -> Arc<World> {
         }
     }
     let mut world = World::new(program, own::analyze(program));
-    crate::core::augment(program, &mut world);
+    crate::core::augment(program, &mut world, judging);
     #[cfg(debug_assertions)]
     world.check();
     let world = Arc::new(world);
