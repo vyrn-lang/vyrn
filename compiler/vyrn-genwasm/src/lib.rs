@@ -878,7 +878,7 @@ fn compile_to_wasm(_key: &str, program: &Program) -> Result<Vec<u8>, EngineError
     })
 }
 
-/// `__vyrn_gen_read`'s modes, shared with the emitter.
+/// The `read` import's modes, shared with the emitter.
 #[cfg(feature = "host")]
 const MODE_READ: i32 = 0;
 #[cfg(feature = "host")]

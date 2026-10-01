@@ -120,9 +120,8 @@ struct Gen {
 
 fn gen_imports(m: &mut Module) -> Gen {
     let mut at: HashMap<&str, u32> = HashMap::new();
-    for (decl, name) in crate::CODE_IMPORTS {
-        let (params, results) = wasm::declare_sig(decl);
-        at.insert(name, m.import("vyrn_gen", name, &params, &results));
+    for (name, params, results) in crate::CODE_IMPORTS {
+        at.insert(name, m.import("vyrn_gen", name, params, results));
     }
     // Every field named, so a name that stops being in the list is a panic here
     // rather than an import nothing satisfies.

@@ -13,7 +13,7 @@
 use std::path::{Path, PathBuf};
 use vyrn_codegen::layout::{Leaf, Shape};
 use vyrn_codegen::toolchain::require_tools;
-use vyrn_codegen::wasm::{abi, Instruction, MemArg, Module, ValType};
+use vyrn_codegen::wasm::{Instruction, MemArg, Module, ValType};
 
 fn find_wasmtime() -> Option<PathBuf> {
     require_tools(
@@ -49,7 +49,7 @@ fn import_fd_write(m: &mut Module) -> u32 {
         "wasi_snapshot_preview1",
         "fd_write",
         &[ValType::I32; 4],
-        &[abi("i32").unwrap()],
+        &[ValType::I32],
     )
 }
 

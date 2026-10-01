@@ -339,34 +339,37 @@ pub(crate) fn wasi_snake(camel: &str) -> String {
         .collect()
 }
 
-/// Every `vyrn_gen` import a generator module makes: a signature in LLVM's
-/// spelling and its import name. [`wasm::declare_sig`] turns each into a wasm
-/// signature through [`wasm::abi`], so `i1`, `i8` and `ptr` widen in one place.
+/// Every `vyrn_gen` import a generator module makes, with its wasm signature,
+/// in import order. An `I32` argument is a guest address except `splice`'s
+/// first, its tag, and `read`'s second, its mode.
 ///
 /// The host side of each is the interpreter's own code (the piece arena,
 /// `render_code`, the splice table, the lexer, the linker), so escaping,
 /// identifier validation and float formatting match by construction.
-pub(crate) const CODE_IMPORTS: &[(&str, &str)] = &[
-    ("i64 @__vyrn_code_text(ptr)", "text"),
-    ("i64 @__vyrn_code_splice(i32, i64, ptr, i64)", "splice"),
-    ("i64 @__vyrn_code_raw_at(ptr, ptr, i64, i64)", "rawAt"),
-    ("i64 @__vyrn_code_concat(i64, i64)", "concat"),
-    ("i64 @__vyrn_code_render(i64)", "render"),
-    // `render` answers with a length and the guest allocates, then `fetch`
-    // copies: the host must not allocate inside guest memory.
-    ("void @__vyrn_gen_fetch(ptr)", "fetch"),
-    // `reflect` asks the host for a value of a named type (`lex`,
-    // `moduleInterface`, `contractOf`) as a flat atom stream; `nextInt` and
-    // `nextStr` pull the atoms in the order the decoder walks the type.
-    // `nextStr` answers with a length, as `render` does.
-    ("void @__vyrn_gen_reflect(i64, ptr)", "reflect"),
-    ("i64 @__vyrn_gen_next_int()", "nextInt"),
-    ("i64 @__vyrn_gen_next_str()", "nextStr"),
-    // The mediated read that serves `readFile`, `readFileBytes` and `listDir`.
-    ("i64 @__vyrn_gen_read(ptr, i32)", "read"),
-];
+pub(crate) const CODE_IMPORTS: &[(&str, &[wasm::ValType], &[wasm::ValType])] = {
+    use wasm::ValType::{I32, I64};
+    &[
+        ("text", &[I32], &[I64]),
+        ("splice", &[I32, I64, I32, I64], &[I64]),
+        ("rawAt", &[I32, I32, I64, I64], &[I64]),
+        ("concat", &[I64, I64], &[I64]),
+        ("render", &[I64], &[I64]),
+        // `render` answers with a length and the guest allocates, then `fetch`
+        // copies: the host must not allocate inside guest memory.
+        ("fetch", &[I32], &[]),
+        // `reflect` asks the host for a value of a named type (`lex`,
+        // `moduleInterface`, `contractOf`) as a flat atom stream; `nextInt` and
+        // `nextStr` pull the atoms in the order the decoder walks the type.
+        // `nextStr` answers with a length, as `render` does.
+        ("reflect", &[I64, I32], &[]),
+        ("nextInt", &[], &[I64]),
+        ("nextStr", &[], &[I64]),
+        // The mediated read that serves `readFile`, `readFileBytes` and `listDir`.
+        ("read", &[I32, I32], &[I64]),
+    ]
+};
 
-/// `@__vyrn_gen_reflect`'s kinds: which builtin the host answers. The argument
+/// The `reflect` import's kinds: which builtin the host answers. The argument
 /// is the module path, the contract name, or the source to lex.
 pub const REFLECT_MODULE_INTERFACE: i64 = 0;
 pub const REFLECT_CONTRACT_OF: i64 = 1;
@@ -380,7 +383,7 @@ pub use vyrn_frontend::checker::{GEN_ENTRY_LEX, GEN_ENTRY_MODULE_INTERFACE, GEN_
 /// `vyrn-genwasm` writes the decoders.
 pub use vyrn_frontend::checker::{GEN_NEXT_INT, GEN_NEXT_STR, GEN_REFLECT};
 
-/// `@__vyrn_code_splice`'s value tags: which interpreter `Val` the host rebuilds
+/// The `splice` import's value tags: which interpreter `Val` the host rebuilds
 /// from the word. Exactly the set `gen::gen_code_splice` accepts; `pub` so the
 /// host reads this numbering.
 pub const TAG_STR: i32 = 0;
