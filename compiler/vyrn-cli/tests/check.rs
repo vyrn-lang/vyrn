@@ -13,6 +13,7 @@ use common::*;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
+use vyrn_frontend::session::Session;
 
 fn check_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/check")
@@ -218,18 +219,19 @@ fn a_build_in_one_process_writes_what_a_fresh_process_writes() {
     assert!(runs[2] == runs[0], "derive.vyrn built after gendemo.vyrn");
 }
 
-/// The editor's analysis leaves nothing behind on its thread: two programs
-/// analysed on one thread, then the first again, give the diagnostics a fresh
-/// thread gives for each. Each thread arms what the editor's thread arms.
+/// The editor's analysis leaves nothing behind in its session: two programs
+/// analysed in one session, then the first again, give the diagnostics a fresh
+/// session gives for each.
 #[test]
 fn an_editor_analysis_on_one_thread_gives_what_a_fresh_thread_gives() {
     let first = root_of(&check_dir().join("mut_a_field_store.vyrn"));
     let second = root_of(&check_dir().join("a_derive_entry_must_match_its_call.vyrn"));
-    let analyze = |root: &str| -> String {
+    let analyze = |root: &str, session: &std::sync::Arc<Session>| -> String {
         let src = std::fs::read_to_string(root).expect("read the program");
         let opts = cli_load(root);
         let opts = vyrn_frontend::loader::LoadOptions {
             expansions: Default::default(),
+            session: Some(session.clone()),
             ..opts
         };
         let engine = vyrn_genwasm::engine();
@@ -247,9 +249,8 @@ fn an_editor_analysis_on_one_thread_gives_what_a_fresh_thread_gives() {
         std::thread::Builder::new()
             .stack_size(64 << 20)
             .spawn(move || {
-                vyrn_frontend::movecheck::reuse_judgments();
-                vyrn_frontend::checker::record_reads();
-                roots.iter().map(|r| analyze(r)).collect()
+                let session = Session::new(true);
+                roots.iter().map(|r| analyze(r, &session)).collect()
             })
             .expect("spawn a thread")
             .join()

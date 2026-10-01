@@ -5,11 +5,11 @@
 //! kernel's per-body judgment for the editor ([`Judgments`]), and answers the argument-temporary screens the core asks
 //! at a call ([`arg_verdict`]).
 
-use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 
 use crate::ast::*;
 use crate::diagnostics::Diagnostic;
+use crate::session::locked;
 
 /// A call-argument position whose argument expression built the value it hands
 /// over, as [`arg_verdict`] reads it.
@@ -191,28 +191,16 @@ pub struct Judgment {
 }
 
 thread_local! {
-    /// Set by [`reuse_judgments`].
-    static REUSE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// Set by [`emit_nothing`].
     static NO_EMIT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-    /// The declaration fingerprint and the entries valid under it. A new
-    /// fingerprint drops the whole map, so nothing needs eviction.
-    static JUDGED: RefCell<(u64, HashMap<JudgmentKey, Judgment>)> =
-        RefCell::new((0, HashMap::new()));
     /// `(judged, reused)` since [`reset_judgment_tally`].
     static TALLY: std::cell::Cell<(u64, u64)> = const { std::cell::Cell::new((0, 0)) };
 }
 
-/// Arms reuse of the kernel's per-body judgment across calls.
-///
-/// A reused body is not built, so the placer adds no release rows for it and
-/// folds none of its frames into the core's facts. Only a host that reads
-/// refusals and lowers nothing (the editor) may arm this. Within one analysis
-/// the missing rows cannot reach another body: `place_frames` keys every table
-/// by node, and a body's other instances share its key's module and hash.
-pub fn reuse_judgments() {
-    REUSE.with(|r| r.set(true));
-}
+/// The judgment memo a session keeps: the declaration fingerprint and the
+/// entries valid under it. A new fingerprint drops the whole map, so nothing
+/// needs eviction.
+pub(crate) type Judged = (u64, HashMap<JudgmentKey, Judgment>);
 
 /// Declares that this host emits nothing from the program it checks (`vyrn
 /// check`), so the placer skips the facts only an emitter reads.
@@ -225,29 +213,37 @@ pub fn emitting() -> bool {
     !NO_EMIT.with(|r| r.get())
 }
 
-/// The judgment cache, open for one analysis. It copies the program's module
-/// hashes once rather than cloning the map per body.
-pub struct Judgments {
+/// The judgment cache of the program's session, open for one analysis. It
+/// copies the program's module hashes once rather than cloning the map per
+/// body.
+///
+/// A served body is not built, so the placer adds no release rows for it and
+/// folds none of its frames into the core's facts. Only a host that reads
+/// refusals and lowers nothing (the editor) arms the memo
+/// ([`crate::session::Session::new`]). Within one analysis the missing rows
+/// cannot reach another body: `place_frames` keys every table by node, and a
+/// body's other instances share its key's module and hash.
+pub struct Judgments<'a> {
     hashes: std::collections::BTreeMap<String, String>,
+    /// The declaration fingerprint this analysis reads and writes under.
+    fp: u64,
+    memo: &'a std::sync::Mutex<Judged>,
 }
 
-impl Judgments {
-    /// Opens the cache for `program`, or returns `None` where nothing is
-    /// armed. Drops every entry if the declaration fingerprint moved.
-    pub fn open(program: &Program) -> Option<Judgments> {
-        if !REUSE.with(|r| r.get()) {
-            return None;
-        }
+impl<'a> Judgments<'a> {
+    /// Opens the cache for `program`, or returns `None` where its session arms
+    /// no memo. Drops every entry if the declaration fingerprint moved.
+    pub fn open(program: &'a Program) -> Option<Judgments<'a>> {
+        let memo = program.session.get()?.judge_memo()?;
         let fp = declaration_fingerprint(program);
-        JUDGED.with(|j| {
-            let mut j = j.borrow_mut();
-            if j.0 != fp {
-                j.0 = fp;
-                j.1.clear();
-            }
-        });
+        let mut j = locked(memo);
+        if j.0 != fp {
+            *j = (fp, HashMap::new());
+        }
         Some(Judgments {
             hashes: program.module_hashes.clone(),
+            fp,
+            memo,
         })
     }
 
@@ -260,9 +256,11 @@ impl Judgments {
     }
 
     /// Takes the entry recorded for `key` out of the memo. The caller puts
-    /// back each entry it serves.
+    /// back each entry it serves. An analysis under another fingerprint since
+    /// [`Judgments::open`] leaves nothing to take.
     pub fn take(&self, key: &JudgmentKey) -> Option<Judgment> {
-        JUDGED.with(|j| j.borrow_mut().1.remove(key))
+        let mut j = locked(self.memo);
+        (j.0 == self.fp).then(|| j.1.remove(key)).flatten()
     }
 
     /// Tallies one keyed body, served or judged.
@@ -279,7 +277,10 @@ impl Judgments {
     /// Records what a body earned. The caller writes an entry only for an
     /// inert body, which only it can tell.
     pub fn put(&self, key: JudgmentKey, judgment: Judgment) {
-        JUDGED.with(|j| j.borrow_mut().1.insert(key, judgment));
+        let mut j = locked(self.memo);
+        if j.0 == self.fp {
+            j.1.insert(key, judgment);
+        }
     }
 }
 

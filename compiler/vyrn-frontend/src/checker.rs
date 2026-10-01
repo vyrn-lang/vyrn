@@ -1010,10 +1010,12 @@ fn check_accum_inner(
         shadows: &program.surface_shadows,
         extern_fns: &extern_fns,
         gen_fns: &gen_fns,
-        record_reads: recording && READS.with(|r| r.get()),
+        record_reads: recording && program.session.get().is_some(),
     };
     let mut checker = Checker::new(&cx, recording);
-    checker.recheck = (cx.record_reads).then(|| recheck::Session::open(program));
+    checker.recheck = (program.session.get())
+        .filter(|_| recording)
+        .map(|s| recheck::Session::open(program, s));
 
     // 2b. Module state, in declaration order. A failed global still binds, as
     //     `Err`, so bodies that read it do not cascade "unknown variable".
@@ -1596,18 +1598,6 @@ pub fn check_accum_recording(program: &Program) -> (Vec<Diagnostic>, Vec<LocalBi
     (diags, binders)
 }
 
-thread_local! {
-    /// Set by [`record_reads`].
-    static READS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-}
-
-/// Arms the read rows ([`Recorded::reads`]) of this thread's recording
-/// checks. A host that rechecks per function (the editor) arms it; `vyrn
-/// check` does not, and a row costs a push per name lookup.
-pub fn record_reads() {
-    READS.with(|r| r.set(true));
-}
-
 /// What every body is typed against: the declarations and tables steps 1 to 2
 /// of [`check_accum_inner`] build. Shared by the threads that type bodies.
 struct Cx<'a> {
@@ -1642,8 +1632,9 @@ struct Cx<'a> {
     extern_fns: &'a std::collections::HashSet<String>,
     /// `gen fn`s, which cannot be function values.
     gen_fns: &'a std::collections::HashSet<String>,
-    /// Whether a recording check records read rows ([`record_reads`]), read
-    /// once on the calling thread so every worker sees the host's choice.
+    /// Whether a recording check records read rows ([`Recorded::reads`]): yes
+    /// in a host with a session ([`crate::session`]), which rechecks per
+    /// function. `vyrn check` has none, and a row costs a push per name lookup.
     record_reads: bool,
 }
 
@@ -1712,7 +1703,7 @@ struct Checker<'a> {
     /// `Err`, for the same wrapper.
     pending_call: RefCell<Option<CallDecl>>,
     /// The per-body reuse, on the loading thread's checker when the host
-    /// rechecks per function ([`record_reads`]).
+    /// rechecks per function ([`Cx::record_reads`]).
     recheck: Option<recheck::Session<'a>>,
 }
 
@@ -6590,7 +6581,7 @@ impl<'a> Checker<'a> {
     }
 
     /// Makes `body` the reader of every lookup until the next call, when the
-    /// check records and the host armed [`record_reads`].
+    /// check records read rows ([`Cx::record_reads`]).
     fn reading(&self, body: SourceBody) {
         self.reader.set(self.record_reads.then_some(body));
     }

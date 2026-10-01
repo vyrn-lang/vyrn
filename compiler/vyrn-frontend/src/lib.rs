@@ -34,6 +34,7 @@ pub mod regex;
 pub mod rules;
 pub mod schema;
 pub mod schema_reflect;
+pub mod session;
 pub mod symbolmap;
 pub mod symbols;
 pub mod toolpin;

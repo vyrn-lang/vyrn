@@ -631,7 +631,7 @@ fn run_corpus() {
             let (audience_kind, who) = match man.as_ref().and_then(|m| m.audience.as_ref()) {
                 None => (AudienceKind::NoFence, String::new()),
                 Some(map) => {
-                    let v = audience::audience_of(&module_key, map);
+                    let v = audience::audience_of(&module_key, map, None);
                     let inside = !map.base.is_empty() && module_key.starts_with(&map.base);
                     let lacks = browser_lacks(e);
                     let ext = e.has(Effect::Extern);

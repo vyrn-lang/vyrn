@@ -8203,7 +8203,7 @@ impl Job<'_, '_> {
     /// The judgment memo's key. A `test` or `bench` body is keyed with its
     /// line too: the `test@<i>` index is global, so a test added to an
     /// earlier module renumbers every later one.
-    fn key(&self, memo: &vyrn_frontend::movecheck::Judgments) -> Option<JudgmentKey> {
+    fn key(&self, memo: &vyrn_frontend::movecheck::Judgments<'_>) -> Option<JudgmentKey> {
         match self {
             Job::Inst(inst) => memo.key(inst.func.module.as_deref(), &inst.spelling()),
             Job::Outside(ob) => memo.key(ob.module.as_deref(), &format!("{}@{}", ob.name, ob.line)),
@@ -8262,7 +8262,7 @@ type Kept = (Vec<Walked>, Vec<Vec<(String, Vec<String>)>>);
 /// body is neither built nor judged, unless the effect judgment answers its
 /// frames otherwise than when it was recorded.
 fn serve(
-    memo: Option<&vyrn_frontend::movecheck::Judgments>,
+    memo: Option<&vyrn_frontend::movecheck::Judgments<'_>>,
     key: Option<&JudgmentKey>,
 ) -> Option<(JudgmentKey, Judgment)> {
     let key = key?;
@@ -8270,9 +8270,9 @@ fn serve(
 }
 
 /// Records one body's refusals, `refused`, for every body with a key. Serving skips placement too, which a host that
-/// armed the memo does not read ([`movecheck::reuse_judgments`]).
+/// armed the memo does not read ([`movecheck::Judgments`]).
 fn remember(
-    memo: Option<&vyrn_frontend::movecheck::Judgments>,
+    memo: Option<&vyrn_frontend::movecheck::Judgments<'_>>,
     key: Option<JudgmentKey>,
     (frames, state): Kept,
     refused: &[Refusal],

@@ -1,7 +1,7 @@
 //! Keystroke-budget probe for the editor path: `analyze_judged` with
-//! `vyrn_lower::JUDGE`, the wasm generation engine, the judgment memo and the
-//! disk memo armed, as `vyrn-lsp` runs them for a client that sends file
-//! events. `vyrn check` is not a proxy, because it does
+//! `vyrn_lower::JUDGE`, the wasm generation engine, and a session with the
+//! judgment memo and the watched disk, as `vyrn-lsp` runs them for a client
+//! that sends file events. `vyrn check` is not a proxy, because it does
 //! different work.
 //!
 //! ```text
@@ -24,17 +24,20 @@
 //! typed and replayed (`checker::recheck`) and judged and served (the judgment
 //! memo). `VYRN_BUILD_PROFILE=1` adds the phase table of that edit.
 
+use std::sync::Arc;
+
 use vyrn_frontend::loader::{DiskResolver, LoadOptions, ModuleResolver};
 use vyrn_frontend::manifest::{pinned_blob, Lock};
+use vyrn_frontend::session::Session;
 
-/// The disk, and a remote import pinned in the project's lock, as the server
-/// reads them.
-struct Resolver(Option<String>);
+/// The session's disk, and a remote import pinned in the project's lock, as
+/// the server reads them.
+struct Resolver(Option<String>, Arc<Session>);
 
 impl ModuleResolver for Resolver {
     fn read(&self, resolved: &str) -> Result<String, String> {
         if !vyrn_frontend::loader::is_remote(resolved) {
-            return DiskResolver.read(resolved);
+            return self.1.read(resolved);
         }
         let dir = self.0.as_deref().ok_or("no project")?;
         let (_, sha) = Lock::in_project(dir)?
@@ -45,7 +48,7 @@ impl ModuleResolver for Resolver {
         pinned_blob(Some(dir), &sha).unwrap_or(Err("not cached".to_string()))
     }
     fn list_kinds(&self, resolved: &str) -> Result<Vec<String>, String> {
-        DiskResolver.list_kinds(resolved)
+        self.1.list_kinds(resolved)
     }
     fn gen_cache_get(&self, key: &str) -> Option<String> {
         DiskResolver.gen_cache_get(key)
@@ -61,12 +64,10 @@ fn main() {
         .and_then(|s| s.parse().ok())
         .unwrap_or(5);
     let files: Vec<String> = std::env::args().skip(1).collect();
-    // The server's analysis thread: its stack, and the memo it arms.
+    // The server's analysis thread: its stack.
     std::thread::Builder::new()
         .stack_size(64 * 1024 * 1024)
         .spawn(move || {
-            vyrn_frontend::movecheck::reuse_judgments();
-            vyrn_frontend::checker::record_reads();
             for path in files {
                 probe(&path, runs);
             }
@@ -83,11 +84,13 @@ fn probe(path: &str, runs: usize) {
         .trim_start_matches(r"\\?\")
         .replace('\\', "/");
     let src = std::fs::read_to_string(&path).unwrap();
+    let session = Session::new(true);
     let mut opts = LoadOptions {
         std_root: vyrn_frontend::manifest::std_root(),
+        session: Some(session.clone()),
         ..Default::default()
     };
-    let mut resolver = Resolver(None);
+    let mut resolver = Resolver(None, session.clone());
     let engine = vyrn_genwasm::engine();
     let dir = std::path::Path::new(&path).parent().unwrap();
     if let Ok(Some(m)) = vyrn_frontend::manifest::find(dir) {
@@ -105,7 +108,7 @@ fn probe(path: &str, runs: usize) {
     let roots: Vec<String> = std::iter::once(project)
         .chain(opts.std_root.clone())
         .collect();
-    vyrn_frontend::loader::watch_disk(&roots);
+    session.watch(&roots);
     let analyze = |text: &str| {
         vyrn_frontend::analyze_judged(
             text,
@@ -127,10 +130,10 @@ fn probe(path: &str, runs: usize) {
         .collect();
     ms.sort_by(|a, b| a.total_cmp(b));
     let _ = vyrn_frontend::prof::phase_table();
-    let _ = vyrn_frontend::checker::recheck::tally();
+    let _ = session.recheck_tally();
     vyrn_frontend::movecheck::reset_judgment_tally();
     analyze(&edit(&src, runs + 3));
-    let (checked, replayed) = vyrn_frontend::checker::recheck::tally();
+    let (checked, replayed) = session.recheck_tally();
     let (judged, served) = vyrn_frontend::movecheck::judgment_tally();
     eprint!("{}", vyrn_frontend::prof::phase_table());
     let a = analyze(&src);

@@ -693,6 +693,7 @@ fn generator_program(program: &Program, g: &str) -> Program {
         module_hashes: Default::default(),
         expansions: program.expansions.clone(),
         spellings: program.spellings.clone(),
+        session: program.session.clone(),
     }
 }
 
@@ -744,6 +745,7 @@ fn run_derive(
     let resolver = crate::loader::MapResolver(HashMap::new());
     let opts = crate::loader::LoadOptions {
         expansions: gen_program.expansions.clone(),
+        session: gen_program.session.0.clone(),
         nest,
         ..Default::default()
     };

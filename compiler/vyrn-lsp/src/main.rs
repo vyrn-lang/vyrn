@@ -9,6 +9,9 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::rc::Rc;
+use std::sync::Arc;
+use vyrn_frontend::loader::ModuleResolver;
+use vyrn_frontend::session::Session;
 use vyrn_genwasm::engine;
 
 mod contracts;
@@ -51,13 +54,26 @@ use vyrn_frontend::{
 use templates::VyxCursor;
 
 /// Analyze `text` through the pipeline `vyrn check` runs, with the project
-/// the document's path lies in; an untitled buffer loads as
-/// [`analyze_judged`] says. `overlays` maps every open buffer's path to its live text, read in place of
-/// the file.
-fn analyze_doc(uri: &Url, text: &str, overlays: &HashMap<String, String>) -> Analysis {
-    let (opts, resolver, path, manifest_error) = match load_context(uri, overlays) {
+/// the document's path lies in, under the server's `session`; an untitled
+/// buffer loads as [`analyze_judged`] says. `overlays` maps every open
+/// buffer's path to its live text, read in place of the file.
+fn analyze_doc(
+    session: &Arc<Session>,
+    uri: &Url,
+    text: &str,
+    overlays: &HashMap<String, String>,
+) -> Analysis {
+    let (opts, resolver, path, manifest_error) = match load_context(session, uri, overlays) {
         Some(ctx) => ctx,
-        None => return analyze_judged(text, None, Some(&*engine()), &vyrn_lower::JUDGE),
+        None => {
+            let opts = vyrn_frontend::loader::LoadOptions {
+                std_root: std_root(),
+                session: Some(session.clone()),
+                ..Default::default()
+            };
+            let linker = Some(("untitled.vyrn", &opts, &**session as &dyn ModuleResolver));
+            return analyze_judged(text, linker, Some(&*engine()), &vyrn_lower::JUDGE);
+        }
     };
     let mut analysis = analyze_judged(
         text,
@@ -85,9 +101,10 @@ fn analyze_doc(uri: &Url, text: &str, overlays: &HashMap<String, String>) -> Ana
     analysis
 }
 
-/// Build the load options + overlay-aware resolver + slash path for `uri`, or
-/// `None` for an untitled buffer with no filesystem path.
+/// Build the load options + overlay-aware resolver + slash path for `uri`
+/// under `session`, or `None` for an untitled buffer with no filesystem path.
 fn load_context(
+    session: &Arc<Session>,
     uri: &Url,
     overlays: &HashMap<String, String>,
 ) -> Option<(
@@ -103,6 +120,7 @@ fn load_context(
         .replace('\\', "/");
     let mut opts = vyrn_frontend::loader::LoadOptions {
         std_root: std_root(),
+        session: Some(session.clone()),
         ..Default::default()
     };
     let found = match std::path::Path::new(&path).parent() {
@@ -126,6 +144,7 @@ fn load_context(
     let resolver = EditorResolver {
         manifest_dir,
         overlays: overlays.clone(),
+        session: session.clone(),
     };
     Some((opts, resolver, path, manifest_error))
 }
@@ -144,6 +163,8 @@ struct EditorResolver {
     /// Live text of every open buffer (slash path -> text). Empty for a plain
     /// analysis.
     overlays: HashMap<String, String>,
+    /// The disk as the server last saw it.
+    session: Arc<Session>,
 }
 
 impl vyrn_frontend::loader::ModuleResolver for EditorResolver {
@@ -156,7 +177,7 @@ impl vyrn_frontend::loader::ModuleResolver for EditorResolver {
             {
                 return Ok(text.clone());
             }
-            return vyrn_frontend::loader::DiskResolver.read(resolved);
+            return self.session.read(resolved);
         }
         let dir = self
             .manifest_dir
@@ -182,7 +203,7 @@ impl vyrn_frontend::loader::ModuleResolver for EditorResolver {
     /// The listings and the generator cache are the disk's; only `read` differs
     /// from a build. The shared cache lets a keystroke reuse a build's generation.
     fn list_kinds(&self, resolved: &str) -> Result<Vec<String>, String> {
-        vyrn_frontend::loader::DiskResolver.list_kinds(resolved)
+        self.session.list_kinds(resolved)
     }
     fn gen_cache_get(&self, key: &str) -> Option<String> {
         vyrn_frontend::loader::DiskResolver.gen_cache_get(key)
@@ -225,16 +246,11 @@ fn main() {
         .name("vyrn-lsp".into())
         .stack_size(64 * 1024 * 1024)
         .spawn(move || {
-            // An unchanged body keeps last keystroke's verdict. The server only
-            // reads refusals; `vyrn` emits, so it does not arm this. Armed here
-            // because the memo is thread-local and this thread analyses.
-            // `VYRN_NO_MEMO=1` stands it aside for measurement.
-            if std::env::var("VYRN_NO_MEMO").is_err() {
-                vyrn_frontend::movecheck::reuse_judgments();
-            }
-            // A per-function recheck reads what each body looked up.
-            vyrn_frontend::checker::record_reads();
             let mut server = Server {
+                // An unchanged body keeps last keystroke's verdict. The server
+                // only reads refusals; `vyrn` emits, so it arms no memo.
+                // `VYRN_NO_MEMO=1` stands it aside for measurement.
+                session: Session::new(std::env::var("VYRN_NO_MEMO").is_err()),
                 docs: HashMap::new(),
                 analyses: HashMap::new(),
                 vyx_owner: HashMap::new(),
@@ -285,8 +301,12 @@ struct Server {
     /// An empty answer is cached too. [`install_root`] is the only invalidation.
     route_facts: RefCell<HashMap<String, Rc<Vec<MappedSymbol>>>>,
     /// The directories whose file events the client was asked to send. The
-    /// loader keeps what it read under them once the client accepts.
+    /// session keeps what it read under them once the client accepts.
     watched: Vec<String>,
+    /// What the analyses keep between keystrokes. One thread analyses: the
+    /// server's own caches are `Rc` and `RefCell`, and each analysis already
+    /// runs its typing and placement on every core.
+    session: Arc<Session>,
 }
 
 /// The id of the one request the server sends: the file-watcher registration.
@@ -500,7 +520,7 @@ fn main_loop(connection: &Connection, server: &mut Server) {
             // send them.
             Message::Response(resp) => {
                 if resp.id == WATCH_REQUEST.to_string().into() && resp.error.is_none() {
-                    vyrn_frontend::loader::watch_disk(&server.watched);
+                    server.session.watch(&server.watched);
                 }
             }
         }
@@ -880,7 +900,7 @@ fn import_path_definition(
         return None;
     }
     let overlays = overlays_of(server);
-    let (opts, _resolver, importer, _) = load_context(uri, &overlays)?;
+    let (opts, _resolver, importer, _) = load_context(&server.session, uri, &overlays)?;
     let target = import_target_file(&spec, &importer, &opts)?;
     let url = Url::from_file_path(target.replace('/', std::path::MAIN_SEPARATOR_STR)).ok()?;
     Some(GotoDefinitionResponse::Scalar(Location {
@@ -1461,7 +1481,7 @@ fn vyx_forward(server: &Server, vyx_uri: &Url, line: usize, col: usize) -> Optio
 /// generate `banner`.
 fn synth_for(server: &Server, owner: &Url, banner: &str) -> Option<Rc<AnalyzedSynth>> {
     let overlays = overlays_of(server);
-    let (opts, resolver, owner_path, _) = load_context(owner, &overlays)?;
+    let (opts, resolver, owner_path, _) = load_context(&server.session, owner, &overlays)?;
     let owner_text = server
         .docs
         .get(owner)
@@ -2246,7 +2266,7 @@ fn contract_ctx(server: &Server, uri: &Url) -> Option<ContractCtx> {
     let dir = std::path::Path::new(&path).parent()?.to_path_buf();
     let app_dir = app_root_for(&dir);
     let overlays = overlays_of(server);
-    let (opts, resolver, _, _) = load_context(uri, &overlays)?;
+    let (opts, resolver, _, _) = load_context(&server.session, uri, &overlays)?;
 
     let mut cache = server.contract_cache.borrow_mut();
     // The same two functions `vyrn why --contract` asks, so the two agree.
@@ -2573,7 +2593,7 @@ fn reanalyze_root(connection: &Connection, server: &mut Server, root_uri: &Url) 
         },
     };
     let overlays = overlays_of(server);
-    let analysis = analyze_doc(root_uri, &text, &overlays);
+    let analysis = analyze_doc(&server.session, root_uri, &text, &overlays);
     install_root(Some(connection), server, root_uri, &text, analysis);
 }
 
@@ -2706,7 +2726,7 @@ fn probe_roots(
             Some(t) => t,
             None => continue,
         };
-        let analysis = analyze_doc(&cand, &text, &overlays);
+        let analysis = analyze_doc(&server.session, &cand, &text, &overlays);
         if claims(&analysis) {
             return Some((cand, analysis));
         }
@@ -2741,7 +2761,7 @@ fn route_facts_for_file(server: &Server, path: &str) -> Rc<Vec<MappedSymbol>> {
                     server.docs.get(&cand).cloned().or_else(|| {
                         uri_path(&cand).and_then(|p| std::fs::read_to_string(p).ok())
                     })?;
-                let a = analyze_doc(&cand, &text, &overlays_of(server));
+                let a = analyze_doc(&server.session, &cand, &text, &overlays_of(server));
                 claims(&a).then_some(a)
             })
     };
@@ -2828,7 +2848,7 @@ fn all_mapped_symbols(server: &Server, path: &str) -> Vec<MappedSymbol> {
         else {
             continue;
         };
-        let a = analyze_doc(&cand, &text, &overlays);
+        let a = analyze_doc(&server.session, &cand, &text, &overlays);
         for m in &a.symbol_maps {
             if vyrn_frontend::symbolmap::same_file(&m.file, path)
                 && !out.iter().any(|o| o.name == m.name && o.line == m.line)
@@ -2910,7 +2930,7 @@ fn handle_rename(server: &Server, params: serde_json::Value) -> Result<Workspace
     let (target, uri) = rename_target(server, &p.text_document_position)?;
     let overlays = overlays_of(server);
     // The manifest's aliases, so an import through one resolves as in the linker.
-    let opts = load_context(&uri, &overlays)
+    let opts = load_context(&server.session, &uri, &overlays)
         .map(|(o, _, _, _)| o)
         .unwrap_or_else(|| vyrn_frontend::loader::LoadOptions {
             std_root: std_root(),
@@ -3157,7 +3177,7 @@ fn handle_notification(connection: &Connection, server: &mut Server, notif: Noti
         if let Ok(params) = serde_json::from_value::<DidChangeWatchedFilesParams>(notif.params) {
             for change in params.changes {
                 if let Ok(p) = change.uri.to_file_path() {
-                    vyrn_frontend::loader::disk_changed(&p.to_string_lossy());
+                    server.session.changed(&p.to_string_lossy());
                 }
             }
         }

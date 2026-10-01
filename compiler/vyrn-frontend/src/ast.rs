@@ -280,6 +280,9 @@ pub struct Program {
     pub expansions: std::sync::Arc<crate::project::Expansions>,
     /// How a sentence spells a declaration the loader renamed apart.
     pub spellings: std::sync::Arc<Spellings>,
+    /// The session of the host that analyses this program. The loader stamps
+    /// the load's; a parsed program has none.
+    pub session: crate::session::SessionRef,
 }
 
 /// What a program is compiled as, beyond an ordinary build. A flag only

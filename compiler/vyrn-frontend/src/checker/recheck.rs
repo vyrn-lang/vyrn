@@ -1,5 +1,6 @@
-//! Per-body reuse for a host that rechecks per function: the editor, which
-//! arms [`super::record_reads`]. `vyrn check` opens no [`Session`].
+//! Per-body reuse for a host that rechecks per function: the editor, whose
+//! [`crate::session::Session`] holds the cache. `vyrn check` opens no
+//! [`Session`].
 //!
 //! The data. Per source body (a function, an `impl` projection, a `test`, a
 //! `bench`), keyed by its text, an [`Entry`] holds what one check of that
@@ -49,12 +50,14 @@ use std::cell::{OnceCell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 use std::hash::{Hash as _, Hasher as _};
+use std::sync::Mutex;
 
 use crate::ast::SourceBody;
 use crate::ast::{unplaced, DeclId, DeclKind, Function, Key, NamedBlock, Program, ScopeId};
 use crate::diagnostics::Diagnostic;
 
 use super::{Checker, Recorded, Typed};
+use crate::session::locked;
 
 /// How many sessions a world outlives unopened. A keystroke opens one per
 /// program it checks: the root's, the synthesis's and each generator's.
@@ -65,28 +68,20 @@ const KEEP: u64 = 64;
 /// away.
 const STALE: u64 = 2;
 
-thread_local! {
-    static CACHE: RefCell<Cache> = RefCell::new(Cache::default());
-}
-
 /// The next [`Entry::serial`].
 static SERIALS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
+/// The entries a host's session keeps between checks.
 #[derive(Default)]
-struct Cache {
-    /// Sessions closed on this thread.
+pub(crate) struct Cache {
+    /// Sessions closed.
     sessions: u64,
     /// Per [`world`], the session that last opened it and how many did.
     worlds: HashMap<u64, (u64, u64)>,
     entries: HashMap<u64, Entry>,
-    /// `(checked, replayed)` bodies since [`tally`] last read it.
-    tally: (u64, u64),
-}
-
-/// Returns how many bodies this thread's sessions checked and replayed since
-/// the last call, and starts the count again.
-pub fn tally() -> (u64, u64) {
-    CACHE.with(|c| std::mem::take(&mut c.borrow_mut().tally))
+    /// `(checked, replayed)` bodies since
+    /// [`crate::session::Session::recheck_tally`] last read it.
+    pub(crate) tally: (u64, u64),
 }
 
 /// What one check of a body's text read and gave.
@@ -140,6 +135,8 @@ impl Text<'_> {
 /// One recording check's view of the cache.
 pub(super) struct Session<'a> {
     program: &'a Program,
+    /// The host's cache.
+    cache: &'a Mutex<Cache>,
     /// [`world`] of the program.
     world: u64,
     /// Each answer by [`Read::id`], fingerprinted once per check.
@@ -152,16 +149,18 @@ pub(super) struct Session<'a> {
 
 impl<'a> Session<'a> {
     /// The session of a check of `program` that records read rows.
-    pub(super) fn open(program: &'a Program) -> Session<'a> {
+    pub(super) fn open(program: &'a Program, host: &'a crate::session::Session) -> Session<'a> {
         let world = world(program);
-        CACHE.with(|c| {
-            let c = &mut *c.borrow_mut();
+        let cache = &host.recheck;
+        {
+            let c = &mut *locked(cache);
             let (last, opens) = c.worlds.entry(world).or_default();
             *last = c.sessions;
             *opens += 1;
-        });
+        }
         Session {
             program,
+            cache,
             world,
             answers: RefCell::default(),
             keys: RefCell::default(),
@@ -315,18 +314,23 @@ impl<'a> Session<'a> {
     }
 }
 
+/// How many sessions opened `world`, or 0 once the cache dropped it, which
+/// happens to an open session's world only while another thread closes
+/// [`KEEP`] sessions.
+fn opens(worlds: &HashMap<u64, (u64, u64)>, world: u64) -> u64 {
+    worlds.get(&world).map_or(0, |w| w.1)
+}
+
 impl Drop for Session<'_> {
     /// Drops every world no session opened for [`KEEP`] sessions, and every
     /// entry its world's sessions did not read for [`STALE`] opens.
     fn drop(&mut self) {
-        CACHE.with(|c| {
-            let c = &mut *c.borrow_mut();
-            c.sessions += 1;
-            let now = c.sessions;
-            c.worlds.retain(|_, (last, _)| *last + KEEP >= now);
-            let worlds = &c.worlds;
-            (c.entries).retain(|_, e| worlds.get(&e.world).is_some_and(|w| w.1 <= e.seen + STALE));
-        });
+        let c = &mut *locked(self.cache);
+        c.sessions += 1;
+        let now = c.sessions;
+        c.worlds.retain(|_, (last, _)| *last + KEEP >= now);
+        let worlds = &c.worlds;
+        (c.entries).retain(|_, e| worlds.get(&e.world).is_some_and(|w| w.1 <= e.seen + STALE));
     }
 }
 
@@ -338,28 +342,26 @@ impl Checker<'_> {
     pub(super) fn replayed(&self, body: SourceBody, text: Text<'_>) -> Option<Typed> {
         let s = self.recheck.as_ref()?;
         let key = s.key(body, text);
-        CACHE.with(|cache| {
-            let cache = &mut *cache.borrow_mut();
-            let e = (cache.entries.get_mut(&key)).filter(|e| {
-                (e.reads.iter()).all(|r| s.answer(self, r.id, &r.looked) == Some(r.answer))
-            })?;
-            e.seen = cache.worlds[&s.world].1;
-            cache.tally.1 += 1;
-            let unit = text.unit();
-            let record = (e.typed.record.as_ref()).map(|r| match e.unit == unit {
-                true => r.clone(),
-                false => in_unit(r, unit),
-            });
-            let reads = e.reads.iter().map(|r| (body, s.key_of(self, r))).collect();
-            let record = record.map(|r| Recorded {
-                entries: vec![(body, e.serial)],
-                ..r
-            });
-            Some(Typed {
-                record,
-                reads,
-                ..e.typed.clone()
-            })
+        let cache = &mut *locked(s.cache);
+        let e = (cache.entries.get_mut(&key)).filter(|e| {
+            (e.reads.iter()).all(|r| s.answer(self, r.id, &r.looked) == Some(r.answer))
+        })?;
+        e.seen = opens(&cache.worlds, s.world);
+        cache.tally.1 += 1;
+        let unit = text.unit();
+        let record = (e.typed.record.as_ref()).map(|r| match e.unit == unit {
+            true => r.clone(),
+            false => in_unit(r, unit),
+        });
+        let reads = e.reads.iter().map(|r| (body, s.key_of(self, r))).collect();
+        let record = record.map(|r| Recorded {
+            entries: vec![(body, e.serial)],
+            ..r
+        });
+        Some(Typed {
+            record,
+            reads,
+            ..e.typed.clone()
         })
     }
 
@@ -370,7 +372,7 @@ impl Checker<'_> {
         let Some(s) = &self.recheck else {
             return;
         };
-        CACHE.with(|c| c.borrow_mut().tally.0 += 1);
+        locked(s.cache).tally.0 += 1;
         let unit = text.unit();
         let rows = t.record.iter().flat_map(|r| {
             (r.node_types.keys())
@@ -388,24 +390,22 @@ impl Checker<'_> {
             reads: Vec::new(),
             ..t.clone()
         };
-        CACHE.with(|c| {
-            let c = &mut *c.borrow_mut();
-            let seen = c.worlds[&s.world].1;
-            let (world, key) = (s.world, s.key(body, text));
-            let serial = SERIALS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            let e = Entry {
-                world,
-                seen,
-                unit,
-                serial,
-                reads,
-                typed,
-            };
-            c.entries.insert(key, e);
-            if let Some(r) = &mut t.record {
-                r.entries.push((body, serial));
-            }
-        });
+        let c = &mut *locked(s.cache);
+        let seen = opens(&c.worlds, s.world);
+        let (world, key) = (s.world, s.key(body, text));
+        let serial = SERIALS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let e = Entry {
+            world,
+            seen,
+            unit,
+            serial,
+            reads,
+            typed,
+        };
+        c.entries.insert(key, e);
+        if let Some(r) = &mut t.record {
+            r.entries.push((body, serial));
+        }
     }
 
     /// Checks one body on this thread: `check` appends its diagnostics to
