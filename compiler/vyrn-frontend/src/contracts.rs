@@ -751,13 +751,12 @@ fn did_you_mean(view: &ContractView, name: &str) -> Option<String> {
         .map(|(_, n)| n.to_string())
 }
 
-/// Damerau-Levenshtein distance (optimal string alignment), the twin of
-/// `std/strings:editDistance`. The Vyrn one is comptime library code, and
-/// the editor cannot run it per keystroke; a test over the same cases pins the
-/// two together.
+/// Damerau-Levenshtein distance (optimal string alignment) in bytes, the twin
+/// of `std/strings:editDistance`. The checker asks it on every `vyrn check` and
+/// the editor on every code action, and neither runs compiled Vyrn; a test over
+/// the same cases pins the two together.
 pub fn edit_distance(a: &str, b: &str) -> usize {
-    let a: Vec<char> = a.chars().collect();
-    let b: Vec<char> = b.chars().collect();
+    let (a, b) = (a.as_bytes(), b.as_bytes());
     let (n, m) = (a.len(), b.len());
     if n == 0 {
         return m;

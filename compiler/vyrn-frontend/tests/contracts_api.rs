@@ -395,6 +395,7 @@ fn edit_distance_matches_the_vyrn_one() {
         ("heaad", "head"),
         ("Haed", "Head"),
         ("component", "contract"),
+        ("tïtlë", "title"),
     ];
     let mut body = String::from(
         "import { editDistance } from \"std/strings\"\nfn main() -> Int64 {\n    let mut bad = 0\n",
