@@ -4136,7 +4136,7 @@ impl<'a> Checker<'a> {
                 }
                 // `Output` is the type of the `success` call the backends emit,
                 // so a generic impl solves through the ordinary call path.
-                self.call(
+                self.call_declared(
                     &crate::types::impl_method_name(FALLIBLE, &key, "success"),
                     std::slice::from_ref(expr),
                     &[],
@@ -4747,7 +4747,7 @@ impl<'a> Checker<'a> {
         let Some(m) = self.show_dispatch(t) else {
             return Ok(false);
         };
-        self.call(&m, args, &[], line, scope, Some(&Type::Str), fn_ret)?;
+        self.call_declared(&m, args, &[], line, scope, Some(&Type::Str), fn_ret)?;
         Ok(true)
     }
 
@@ -4797,6 +4797,23 @@ impl<'a> Checker<'a> {
                 return Ok((*ret).clone());
             }
         }
+        self.call_declared(name, args, written, line, scope, expected, fn_ret)
+    }
+
+    /// Types a call that no binding answers for: a builtin, a constructor, a
+    /// declared function, an impl method by its flattened name, or a method
+    /// dispatched on its receiver.
+    #[allow(clippy::too_many_arguments)]
+    fn call_declared(
+        &self,
+        name: &str,
+        args: &[Expr],
+        written: &[Type],
+        line: usize,
+        scope: &Scope,
+        expected: Option<&Type>,
+        fn_ret: Option<&Type>,
+    ) -> Result<Type, Diagnostic> {
         // A removed free-function spelling. Asked here, not at the unknown-name
         // fall-through, because `at` is also a user's `place at`: `at(r, 0)`
         // would otherwise type as a projection.
@@ -5178,7 +5195,7 @@ impl<'a> Checker<'a> {
                     .contains(&(crate::types::COPY.to_string(), key.clone()))
                 {
                     let mangled = crate::types::impl_method_name(crate::types::COPY, &key, "copy");
-                    return self.call(&mangled, args, &[], line, scope, expected, fn_ret);
+                    return self.call_declared(&mangled, args, &[], line, scope, expected, fn_ret);
                 }
             }
             let mut owned_seen = std::collections::HashSet::new();

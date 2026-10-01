@@ -1,0 +1,21 @@
+// `p.copy()` dispatches to the `impl Copy` method, which no binding shadows:
+// a local spelled like its flattened name is not the callee.
+type P = { s: String }
+
+impl Copy for P {
+    fn copy(self) -> P {
+        return P { s: self.s + "!" }
+    }
+}
+
+fn seven(p: P) -> Int64 {
+    return 7
+}
+
+fn main() -> Int64 {
+    let Copy__P__copy: fn(P) -> Int64 = seven
+    let p = P { s: "a" + "b" }
+    let n: Int64 = p.copy()
+    print(n)
+    return 0
+}
