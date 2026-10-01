@@ -224,18 +224,17 @@ pub fn stored_fn_effects(program: &Program) -> StoredFnEffects {
 /// too, so a user `fn at` does not claim the builtin `at` in every `std/` module.
 pub const RESERVED: &[&str] = &[
     "print",
-    "len",
-    "concat",
     "Some",
     "None",
     "Ok",
     "Err",
     "match",
-    "array",
-    "push",
+    // The sugar writes `@at` for `a[i]` and `@str` (surface `toString`) for
+    // interpolation. `parser::unshadow_method_builtins` gives a sugar node back
+    // to a declaration of its surface, so a user `fn at` or `fn toString` would
+    // take over every index and every hole. Do not remove them.
     "at",
-    "alen",
-    "str",
+    "toString",
     "parse",
     "logger",
     "bytes",
@@ -259,14 +258,12 @@ pub const RESERVED: &[&str] = &[
     // The log levels (`info`, ...) are not reserved: the sugar carries `@info`
     // (see `crate::prelude::Builtin::method`).
     "value",
-    "list",
     "schemaOf",
     "contractOf",
     "jsonSchema",
     "toJson",
     "fromJson",
     "derive",
-    "toString",
     "pop",
     "swapRemove",
     "assert",
@@ -280,12 +277,10 @@ pub const RESERVED: &[&str] = &[
     "unboxStream",
     "pullAt",
     "serveStream",
-    "Int",
     "Int64",
     "Int32",
     "Int16",
     "Int8",
-    "Float",
     "Float64",
     "Float32",
     // `splat` and `lane` are absent: they reach the builtin only through
@@ -306,8 +301,6 @@ pub const RESERVED: &[&str] = &[
 pub enum Gone {
     /// An exported function of this `std/` module; the hint is the import.
     Module(&'static str),
-    /// A removed spelling; the hint is what to write instead.
-    Removed(&'static str),
     /// A name a desugar writes; the hint names the sugar, then the import.
     Desugared {
         module: &'static str,
@@ -320,7 +313,6 @@ impl Gone {
     pub fn rule(&self, name: &str) -> Rule {
         match self {
             Gone::Module(module) => rule!(GoneModule, name, module),
-            Gone::Removed(hint) => rule!(GoneRemoved, hint),
             Gone::Desugared { module, sugar } => rule!(GoneDesugared, name, module, sugar),
         }
     }
@@ -329,9 +321,8 @@ impl Gone {
 /// Names a program may write that do not resolve, and what to write instead.
 /// [`Checker::call`] reads it only for a name that does not resolve.
 ///
-/// A [`Gone::Module`] name must not be in [`RESERVED`]
-/// (`every_moved_name_is_gone_from_reserved`). A [`Gone::Removed`] name must
-/// stay reserved, or a user `fn push` would shadow the hint.
+/// A name here must not be in [`RESERVED`]
+/// (`every_moved_name_is_gone_from_reserved`).
 pub const MOVED_TO_STD: &[(&str, Gone)] = &[
     ("contains", Gone::Module("std/strpred")),
     ("startsWith", Gone::Module("std/strpred")),
@@ -351,47 +342,6 @@ pub const MOVED_TO_STD: &[(&str, Gone)] = &[
             module: "std/storage",
             sugar: "save(path, value)",
         },
-    ),
-    // Each fires for the bare name only: the sugar and method forms carry
-    // `@`-prefixed names (`@str`, `@push`), which no source can lex.
-    (
-        "str",
-        Gone::Removed("`str(x)` was removed; render a value with `x.toString()`"),
-    ),
-    (
-        "concat",
-        Gone::Removed("`concat(a, b)` was removed; concatenate Strings with `a + b`"),
-    ),
-    (
-        "len",
-        Gone::Removed("`len(s)` was removed; a String's byte length is `s.byteLength`"),
-    ),
-    (
-        "list",
-        Gone::Removed(
-            "`list([..])` was removed; write the array literal `[..]` \
-             directly where an `Array<T>` is expected",
-        ),
-    ),
-    (
-        "toString",
-        Gone::Removed("`toString` is a method; write `x.toString()`"),
-    ),
-    (
-        "push",
-        Gone::Removed("`push(xs, v)` was removed; push with `xs.push(v)`"),
-    ),
-    (
-        "at",
-        Gone::Removed("`at(xs, i)` was removed; index with `xs[i]`"),
-    ),
-    (
-        "alen",
-        Gone::Removed("`alen(xs)` was removed; a collection's length is `xs.length`"),
-    ),
-    (
-        "array",
-        Gone::Removed("`array()` was removed; write the array literal `[]`"),
     ),
 ];
 
@@ -4721,12 +4671,6 @@ impl<'a> Checker<'a> {
         expected: Option<&Type>,
         fn_ret: Option<&Type>,
     ) -> Result<Type, Diagnostic> {
-        // A removed free-function spelling. Asked here, not at the unknown-name
-        // fall-through, because `at` is also a user's `place at`: `at(r, 0)`
-        // would otherwise type as a projection.
-        if let Some(g @ Gone::Removed(_)) = moved_to_std(name) {
-            return Err(cerr!(line; g.rule(name)));
-        }
         if (name == "assert" || name == "assertEq") && !*self.in_test.borrow() && !self.host.test {
             return Err(cerr!(line, TestOnly, name));
         }
@@ -7620,39 +7564,16 @@ mod tests {
         assert!(check_src(src).is_ok(), "{:?}", check_src(src));
     }
 
-    /// A `Gone::Module` name is not reserved, or the import the hint names
-    /// could not be written. A `Gone::Removed` name is reserved, or a user
-    /// `fn push` would hide the hint.
+    /// A name with a hint is not reserved, or the import the hint names
+    /// could not be written.
     #[test]
     fn every_moved_name_is_gone_from_reserved() {
-        for (n, g) in MOVED_TO_STD {
-            match g {
-                // A desugared name is an ordinary export: the `Module` rule.
-                Gone::Module(_) | Gone::Desugared { .. } => assert!(
-                    !RESERVED.contains(n),
-                    "`{n}` is both reserved and said to live in a std module"
-                ),
-                Gone::Removed(_) => assert!(
-                    RESERVED.contains(n),
-                    "`{n}` is said to be removed but a program may declare it, \
-                     which would shadow the hint"
-                ),
-            }
+        for (n, _) in MOVED_TO_STD {
+            assert!(
+                !RESERVED.contains(n),
+                "`{n}` is both reserved and said to live in a std module"
+            );
         }
-    }
-
-    /// The sentence each removed spelling in [`MOVED_TO_STD`] gives.
-    #[test]
-    fn removed_spellings_are_rows_of_one_table() {
-        let removed: Vec<&str> = MOVED_TO_STD
-            .iter()
-            .filter(|(_, g)| matches!(g, Gone::Removed(_)))
-            .map(|(n, _)| *n)
-            .collect();
-        assert_eq!(
-            removed,
-            vec!["str", "concat", "len", "list", "toString", "push", "at", "alen", "array"]
-        );
     }
 
     /// A file with exports is a library and needs no `main`; a file with
