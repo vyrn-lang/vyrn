@@ -1,5 +1,5 @@
 //! The disposal obligation, asked of `vyrn check`. The kernel states it as two
-//! rows (`vyrn_lower::rules::NEVER_DISPOSED`, `DISPOSED_TWICE`); `testsweep` lifts
+//! rows (`Rule::NeverDisposed`, `Rule::DisposedTwice`); `testsweep` lifts
 //! these programs into the corpus. The census rows are `r30` and `r31` in
 //! `tests/refusals.rs`; these are the shapes around them.
 

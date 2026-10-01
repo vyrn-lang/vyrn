@@ -301,8 +301,8 @@ Each rule has one home. The names below are the entry points.
 - `vyrn-lower/src/kernel.rs`: the linear judgment. `kernel::check` refuses a
   body; `kernel::placement` reports the releases it is missing.
 - `vyrn-lower/src/typed.rs`: the typed judgment.
-- `vyrn-lower/src/rules.rs`: the words of every refusal the kernel, the
-  typed judgment and the builder state, one row each; `rules::say` fills one.
+- `vyrn-lower/src/rules.rs`: how the kernel, the typed judgment and the
+  builder state a refusal. The rows are `vyrn_frontend::rules::Rule`'s.
 - `vyrn-lower/src/pipeline.rs`: the driver. `vyrn_lower::refusals` returns
   the typed judgment's refusals, or else the kernel's, as one list in source
   order. It states no rule itself.

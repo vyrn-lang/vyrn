@@ -18,7 +18,7 @@ use vyrn_frontend::ast::{
     MethodId, MethodSig, NodeId, Pattern, Program, SourceBody, Speech, Stmt, Type, TypeDecl, UnOp,
 };
 use vyrn_frontend::declared::{CapsOf, NameMemo, Owned};
-use vyrn_frontend::diagnostics::{menu, Diagnostic};
+use vyrn_frontend::diagnostics::Diagnostic;
 use vyrn_frontend::effects::Walked;
 use vyrn_frontend::movecheck::{Judgment, JudgmentKey, Refusal};
 use vyrn_frontend::own::{Bucket, DropKind, Exit, Linear, MemoryRow, Ownership, Release};
@@ -27,9 +27,6 @@ pub use vyrn_frontend::prelude::Spec;
 use vyrn_frontend::project::is_place_read;
 
 use crate::kernel::{MissingKind, Root};
-use crate::rules::{
-    say, CONSUMED_BORROW, CONSUME_TAKES_NOTHING, ELEMENT_TAKEN, LOOP_TAKES_NOTHING, SWAP_REMOVE,
-};
 use crate::world::{Fns, Stated};
 use crate::{Instance, NodeTypes, OutsideBody, World};
 use vyrn_frontend::core::{
@@ -37,6 +34,8 @@ use vyrn_frontend::core::{
     NameInfo, NotOwned, Old, Op, Opaque, Payload, Place, Rhs, Site, St, Target, Test, Use, Val,
     Walk,
 };
+use vyrn_frontend::rule;
+use vyrn_frontend::rules::Rule;
 
 /// The path a field read takes out of its unnamed receiver: `.q.s` for
 /// `mk().q.s`. `None` under an element.
@@ -96,10 +95,10 @@ pub struct Gap {
     pub detail: String,
     pub line: usize,
     /// Set when this is a rule the program breaks rather than a gap: the
-    /// checker's sentence, which the placer reports as a refusal. A rule
+    /// refusal, which the placer reports as it reports the kernel's. A rule
     /// about a keyword lives here because the kernel has none
     /// (`consume make()` and `make()` are one value to it).
-    pub rule: Option<String>,
+    pub rule: Option<Box<Diagnostic>>,
 }
 
 /// Whether `rhs` is a validated type's constructor over a literal, which
@@ -133,14 +132,14 @@ fn take_names_a_place(
         return Ok(());
     }
     if let Some((root, path)) = vyrn_frontend::project::element_path(e, places) {
-        let rule = [ELEMENT_TAKEN, SWAP_REMOVE].join("|");
-        return refuse(say(&rule, &[("path", &path), ("root", &root)]), line);
+        let more = vec![rule!(SwapRemove, root).render()];
+        return refuse(rule!(ElementTaken, path), more, line);
     }
     let rule = match by_loop {
-        true => LOOP_TAKES_NOTHING,
-        false => CONSUME_TAKES_NOTHING,
+        true => rule!(LoopTakesNothing),
+        false => rule!(ConsumeTakesNothing),
     };
-    refuse(say(rule, &[]), line)
+    refuse(rule, Vec::new(), line)
 }
 
 /// The scrutinee a binder borrows: its name, where the construct does not
@@ -320,13 +319,14 @@ fn gap_d<T>(what: &'static str, detail: &str, line: usize) -> Result<T, Gap> {
 }
 
 /// A rule the program breaks. Lowering stops as at a gap, and the placer
-/// reports `message` at `line` as it reports the kernel's refusals.
-fn refuse<T>(message: String, line: usize) -> Result<T, Gap> {
+/// reports `rule` at `line`, with the ways out `more`, as it reports the
+/// kernel's refusals.
+fn refuse<T>(rule: Rule, more: Vec<String>, line: usize) -> Result<T, Gap> {
     Err(Gap {
         what: "a rule the program breaks",
         detail: String::new(),
         line,
-        rule: Some(message),
+        rule: Some(Box::new(crate::rules::refusal(line, rule, more))),
     })
 }
 
@@ -433,11 +433,11 @@ fn returns(ss: &[St]) -> bool {
     })
 }
 
-/// The refusal of a frame that can end without the value it owes.
-fn falls_through(body: &mut Body, owes: &Type, line: usize, what: impl FnOnce() -> String) {
+/// The refusal of a frame that can end without the value it owes, which
+/// `rule` states from the type owed.
+fn falls_through(body: &mut Body, owes: &Type, line: usize, rule: impl FnOnce(String) -> Rule) {
     if *owes != Type::Unit && !returns(&body.stmts) {
-        body.refused
-            .push((line, format!("{} must return {owes} on all paths", what())));
+        body.refused.push((line, rule(owes.to_string()).render()));
     }
 }
 
@@ -625,9 +625,9 @@ fn judged(facts: &NodeTypes<'_>, own: &Ownership, sp: &Speech) -> Vec<(usize, St
             } => Some(match &**rhs {
                 Expr::Str(pat, _) => {
                     let err = vyrn_frontend::regex::compile(pat).err()?;
-                    format!("invalid regex `{pat}`: {err}")
+                    rule!(InvalidRegex, pat, err = err.to_string()).render()
                 }
-                _ => "the right side of `=~` must be a string-literal pattern".to_string(),
+                _ => rule!(MatchNeedsPattern).render(),
             }),
             // A literal operand takes a sized sibling's type
             // (`Checker::expr`'s `adapt_int_literal`), the left one first.
@@ -639,21 +639,14 @@ fn judged(facts: &NodeTypes<'_>, own: &Ownership, sp: &Speech) -> Vec<(usize, St
             }
             Expr::ArrayLit { elems, .. } => {
                 let limit = vyrn_frontend::trap::ARRAY_LIT_LIMIT;
-                if elems.len() > limit {
-                    return Some(format!(
-                        "this array literal has {} elements, past the limit of {limit}\n  \
-                         note: a literal is lowered element by element into one call frame, so \
-                         its length is a compile-time cost on both backends\n  \
-                         note: a table this long belongs in a file the program reads, not in \
-                         the program",
-                        elems.len()
-                    ));
+                let len = elems.len();
+                if len > limit {
+                    return Some(rule!(ArrayLiteralTooLong, len, limit).render());
                 }
                 match resolved(e)? {
-                    Type::SmallArray(_, n) if elems.len() > n => Some(format!(
-                        "this literal has {} elements but the slot is SmallArray<_, {n}>",
-                        elems.len()
-                    )),
+                    Type::SmallArray(_, n) if len > n => {
+                        Some(rule!(SmallArrayOverflow, len, n).render())
+                    }
                     _ => None,
                 }
             }
@@ -676,11 +669,7 @@ fn judged(facts: &NodeTypes<'_>, own: &Ownership, sp: &Speech) -> Vec<(usize, St
             else {
                 return None;
             };
-            return (amt < 0 || amt >= bits).then(|| {
-                format!(
-                    "shift amount {amt} is out of range for a {bits}-bit value (valid range is 0..{bits})"
-                )
-            });
+            return (amt < 0 || amt >= bits).then(|| rule!(ShiftOutOfRange, amt, bits).render());
         }
         if let Some(s) = constant(e) {
             return Some(s);
@@ -691,24 +680,27 @@ fn judged(facts: &NodeTypes<'_>, own: &Ownership, sp: &Speech) -> Vec<(usize, St
         match e {
             Expr::Unary { op, expr, .. } => {
                 let ([t], []) = sp.say([&resolved(expr)?], []);
-                Some(match op {
-                    UnOp::Neg => format!("unary `-` needs a numeric type, found {t}"),
-                    UnOp::Not => format!("unary `!` needs Bool, found {t}"),
-                    UnOp::BitNot => format!("unary `~` needs an integer type, found {t}"),
-                })
+                let r = match op {
+                    UnOp::Neg => rule!(NegNeedsNumber, t),
+                    UnOp::Not => rule!(NotNeedsBool, t),
+                    UnOp::BitNot => rule!(BitNotNeedsInteger, t),
+                };
+                Some(r.render())
             }
-            Expr::Field { expr, field, .. } => Some(match resolved(expr)? {
-                Type::Record(_) => {
-                    format!("type {} has no field `{field}`", sp.ty(recorded(expr)?))
+            Expr::Field { expr, field, .. } => Some(
+                match resolved(expr)? {
+                    Type::Record(_) => {
+                        let ty = sp.ty(recorded(expr)?).to_string();
+                        rule!(NoField, ty, field)
+                    }
+                    Type::Str if field == "length" => rule!(StringLength),
+                    other => {
+                        let ([other], []) = sp.say([&other], []);
+                        rule!(FieldOnNonRecord, field, other)
+                    }
                 }
-                Type::Str if field == "length" => "String has no `length`: use `byteLength` for \
-                                                   bytes or `charCount()` for Unicode scalars"
-                    .to_string(),
-                other => {
-                    let ([other], []) = sp.say([&other], []);
-                    format!("cannot access field `{field}` on non-record type {other}")
-                }
-            }),
+                .render(),
+            ),
             Expr::TryConstruct { name, args, .. } | Expr::Call { name, args, .. }
                 if decls.contains_key(name) =>
             {
@@ -716,40 +708,36 @@ fn judged(facts: &NodeTypes<'_>, own: &Ownership, sp: &Speech) -> Vec<(usize, St
                 let tries = matches!(e, Expr::TryConstruct { .. });
                 let ([], [name]) = sp.say([], [name]);
                 if tries && !matches!(base, Type::Int | Type::Bool | Type::Str) {
-                    return Some(format!(
-                        "`{name}?(..)` is only for validated/nominal scalar types"
-                    ));
+                    return Some(rule!(TryConstructNotScalar, name).render());
                 }
                 let [arg] = &args[..] else {
-                    return Some(if tries {
-                        format!("`{name}?` takes 1 argument, got {}", args.len())
-                    } else {
-                        format!("`{name}` construction takes 1 argument, got {}", args.len())
+                    let got = args.len();
+                    return Some(match tries {
+                        true => rule!(TryConstructArity, name, got).render(),
+                        false => rule!(ConstructArity, name, got).render(),
                     });
                 };
                 let ([base, aty], []) = sp.say([base, recorded(arg)?], []);
-                Some(format!(
-                    "`{name}` is built from {base}, but the argument is {aty}"
-                ))
+                Some(rule!(ConstructFrom, name, base, aty).render())
             }
             // Fields in written order, so the refusal names the first one the
             // reader sees; a missing field only once every value typed.
             Expr::StructLit { name, fields, .. } => {
                 if !decls.contains_key(name) {
-                    return Some(format!("unknown type `{name}`"));
+                    return Some(rule!(UnknownType, n = name).render());
                 }
                 let declared =
                     vyrn_frontend::types::record_fields(&Type::Named(name.clone()), decls);
                 let ([], [name]) = sp.say([], [name]);
                 let Some(declared) = declared else {
-                    return Some(format!("`{name}` is not a record type"));
+                    return Some(rule!(NotRecordType, name).render());
                 };
-                for (k, (fname, _)) in fields.iter().enumerate() {
-                    if !declared.iter().any(|f| &f.name == fname) {
-                        return Some(format!("record `{name}` has no field `{fname}`"));
+                for (k, (field, _)) in fields.iter().enumerate() {
+                    if !declared.iter().any(|f| &f.name == field) {
+                        return Some(rule!(RecordNoField, name, field).render());
                     }
-                    if fields[..k].iter().any(|(g, _)| g == fname) {
-                        return Some(format!("field `{fname}` set twice"));
+                    if fields[..k].iter().any(|(g, _)| g == field) {
+                        return Some(rule!(FieldSetTwice, field).render());
                     }
                 }
                 fields
@@ -758,7 +746,7 @@ fn judged(facts: &NodeTypes<'_>, own: &Ownership, sp: &Speech) -> Vec<(usize, St
                 let f = declared
                     .iter()
                     .find(|f| fields.iter().all(|(g, _)| *g != f.name))?;
-                Some(format!("missing field `{}` for `{name}`", f.name))
+                Some(rule!(MissingField, field = f.name, name).render())
             }
             Expr::Var { name, .. } => {
                 let payload = decls
@@ -768,7 +756,7 @@ fn judged(facts: &NodeTypes<'_>, own: &Ownership, sp: &Speech) -> Vec<(usize, St
                     .find(|v| &v.name == name)?
                     .payload
                     .len();
-                Some(format!("variant `{name}` needs {payload} argument(s)"))
+                Some(rule!(VariantNeedsArgs, name, payload).render())
             }
             Expr::Call {
                 args,
@@ -782,25 +770,17 @@ fn judged(facts: &NodeTypes<'_>, own: &Ownership, sp: &Speech) -> Vec<(usize, St
                 // callee with no parameters has no receiver slot.
                 let dot = usize::from(*dot && !d.params.is_empty());
                 if d.params.len() != args.len() {
-                    return Some(format!(
-                        "`{shown}` expects {} argument(s), got {}",
-                        d.params.len() - dot,
-                        args.len() - dot
-                    ));
+                    let (want, got) = (d.params.len() - dot, args.len() - dot);
+                    return Some(rule!(CallArity, shown, want, got).render());
                 }
                 // A type argument to a callee that declares none would look
                 // honoured if accepted. A method call reads none.
                 if !d.recv && !type_args.is_empty() && d.type_params == 0 {
-                    return Some(format!(
-                        "`{shown}` declares no type parameters, so it takes no type arguments"
-                    ));
+                    return Some(rule!(NoTypeParams, shown).render());
                 }
                 if !d.recv && type_args.len() > d.type_params {
-                    return Some(format!(
-                        "`{shown}` takes {} type argument(s), got {}",
-                        d.type_params,
-                        type_args.len()
-                    ));
+                    let (want, got) = (d.type_params, type_args.len());
+                    return Some(rule!(TypeArity, name = shown, want, got).render());
                 }
                 // The first argument its parameter does not take. A `fn`
                 // parameter's is the checker's `check_fn_arg`.
@@ -815,14 +795,12 @@ fn judged(facts: &NodeTypes<'_>, own: &Ownership, sp: &Speech) -> Vec<(usize, St
                         (!fits).then(|| {
                             let ([pty, aty], [shown]) = sp.say([pty, aty], [&d.shown]);
                             match i.checked_sub(dot) {
-                                Some(k) => format!(
-                                    "`{shown}` argument {} expects {pty}, found {aty}",
-                                    k + 1
-                                ),
-                                None => {
-                                    format!("the receiver of `{shown}` expects {pty}, found {aty}")
+                                Some(k) => {
+                                    rule!(FnValueArgType, name = shown, arg = k + 1, pty, aty)
                                 }
+                                None => rule!(ReceiverType, shown, pty, aty),
                             }
+                            .render()
                         })
                     })
             }
@@ -867,10 +845,7 @@ fn unbound(
     let sentence = |shown: &str, t: &Type, bound: &str| match bound {
         HEAPLESS => {
             let ([t], []) = sp.say([t], []);
-            format!(
-                "`{shown}` forgets or overwrites elements without releasing them, and \
-                 `{t}` owns heap \u{2014} move the elements one at a time instead"
-            )
+            rule!(ForgetsHeap, shown, t).render()
         }
         DECODABLE => {
             // The codec names the offender by its declaration where it has one.
@@ -878,7 +853,7 @@ fn unbound(
                 Err(off) => sp.name(&off),
                 Ok(()) => sp.ty(t).to_string(),
             };
-            format!("`{shown}` cannot decode into `{off}` (not a codable type)")
+            rule!(NotCodable, shown, off).render()
         }
         _ => types::needs_show(shown, t).render_in(sp),
     };
@@ -977,19 +952,15 @@ fn fn_slot(
         // A value of `fn` type, named `subject` in the arity sentence and
         // `owner` in the parameter one.
         let value = |subject: &str, owner: &str, vptys: &[Type]| {
-            Some(
-                match misfit(vptys.len(), Some(vptys), None, &slot, decls)? {
-                    Misfit::Arity(got, _) => format!(
-                    "{subject} is a {got}-argument function value, but `{callee}` argument {n} \
-                     expects {want}"
-                ),
-                    Misfit::Param(a, b) => {
-                        let ([a, b], []) = sp.say([&a, &b], []);
-                        format!("{owner} expects a {a} argument, but `{callee}` will pass it {b}")
-                    }
-                    Misfit::Returns(..) => return None,
-                },
-            )
+            let r = match misfit(vptys.len(), Some(vptys), None, &slot, decls)? {
+                Misfit::Arity(got, _) => rule!(ValueArity, subject, got, callee, n, want),
+                Misfit::Param(a, b) => {
+                    let ([a, b], []) = sp.say([&a, &b], []);
+                    rule!(ValueParam, owner, a, callee, b)
+                }
+                Misfit::Returns(..) => return None,
+            };
+            Some(r.render())
         };
         let says = match arg {
             Expr::Lambda {
@@ -1003,17 +974,14 @@ fn fn_slot(
                     LambdaBody::Block(_) => None,
                 };
                 let says = match misfit(params.len(), None, got, &slot, decls)? {
-                    Misfit::Arity(got, _) => format!(
-                        "this lambda takes {got} parameter(s), but `{callee}` argument {n} \
-                         expects {want}"
-                    ),
+                    Misfit::Arity(got, _) => rule!(LambdaArgArity, got, callee, n, want),
                     Misfit::Returns(t, r) => {
                         let ([t, r], []) = sp.say([&t, &r], []);
-                        format!("this lambda returns {t}, but `{callee}` expects it to return {r}")
+                        rule!(LambdaReturns, t, callee, r)
                     }
                     Misfit::Param(..) => return None,
                 };
-                return Some((*at, says));
+                return Some((*at, says.render()));
             }
             Expr::Var { name: vn, .. } if bound(vn) => match recorded(arg)
                 .map(|t| resolve(t, decls))
@@ -1024,23 +992,18 @@ fn fn_slot(
             Expr::Var { name: vn, .. } => {
                 let g = program.functions.iter().find(|g| g.name == *vn)?;
                 if !g.type_params.is_empty() {
-                    return Some((
-                        line,
-                        format!("`{vn}` is generic and cannot be passed as a function value in v1"),
-                    ));
+                    return Some((line, rule!(GenericFnArg, vn).render()));
                 }
                 let vptys: Vec<Type> = g.params.iter().map(|p| p.ty.clone()).collect();
                 let ([], [vn]) = sp.say([], [vn]);
                 match misfit(vptys.len(), Some(&vptys), None, &slot, decls)? {
-                    Misfit::Arity(got, _) => Some(format!(
-                        "`{vn}` takes {got} argument(s), but `{callee}` argument {n} expects a \
-                         {want}-argument function"
-                    )),
+                    Misfit::Arity(got, _) => {
+                        Some(rule!(FnArity, vn, got, callee, n, want).render())
+                    }
                     Misfit::Param(a, b) => {
                         let ([a, b], []) = sp.say([&a, &b], []);
-                        Some(format!(
-                            "`{vn}` expects a {a} argument, but `{callee}` will pass it {b}"
-                        ))
+                        let owner = format!("`{vn}`");
+                        Some(rule!(ValueParam, owner, a, callee, b).render())
                     }
                     Misfit::Returns(..) => None,
                 }
@@ -1055,13 +1018,7 @@ fn fn_slot(
                             l => l,
                         };
                         let ([aty], []) = sp.say([aty], []);
-                        return Some((
-                            at,
-                            format!(
-                                "`{callee}` argument {n} must be a lambda `|..| ..`, a function \
-                                 name, or an expression of `fn` type; found {aty}"
-                            ),
-                        ));
+                        return Some((at, rule!(NotFnArg, callee, n, aty).render()));
                     }
                 }
             }
@@ -1089,9 +1046,7 @@ fn stored_slot(
             match misfit(ptys.len(), None, Some(got), exp, decls)? {
                 Misfit::Returns(t, r) => {
                     let ([t, exp, r], []) = sp.say([&t, exp, &r], []);
-                    format!(
-                        "this lambda returns {t}, but the expected function type `{exp}` returns {r}"
-                    )
+                    rule!(LambdaReturnsSlot, t, exp, r)
                 }
                 Misfit::Arity(..) | Misfit::Param(..) => return None,
             }
@@ -1101,26 +1056,22 @@ fn stored_slot(
             match misfit(vptys.len(), Some(&vptys), Some(&f.ret), exp, decls)? {
                 Misfit::Arity(got, want) => {
                     let ([exp], [name]) = sp.say([exp], [&f.name]);
-                    format!(
-                        "`{name}` takes {got} argument(s), but the expected function type \
-                         `{exp}` takes {want}"
-                    )
+                    rule!(FnAritySlot, name, got, exp, want)
                 }
                 Misfit::Param(a, b) => {
                     let ([exp, a, b], [name]) = sp.say([exp, &a, &b], [&f.name]);
-                    format!("`{name}` expects a {a} argument, but `{exp}` will pass it {b}")
+                    let owner = format!("`{name}`");
+                    rule!(ValueParam, owner, a, callee = exp, b)
                 }
                 Misfit::Returns(t, r) => {
                     let ([exp, t, r], [name]) = sp.say([exp, &t, &r], [&f.name]);
-                    format!(
-                        "`{name}` returns {t}, but the expected function type `{exp}` returns {r}"
-                    )
+                    rule!(FnReturnsSlot, name, t, exp, r)
                 }
             }
         }
         (None, None) => return None,
     };
-    Some((line, says))
+    Some((line, says.render()))
 }
 
 fn build_seeded(
@@ -1242,7 +1193,9 @@ fn build_seeded(
     cut(&mut out);
     b.body.stmts = out;
     let name = b.body.spelled(&f.name).to_string();
-    falls_through(&mut b.body, &f.ret, f.line, || format!("function `{name}`"));
+    falls_through(&mut b.body, &f.ret, f.line, |owes| {
+        rule!(FunctionFallsThrough, name, owes)
+    });
     Ok(b.body)
 }
 
@@ -1681,18 +1634,7 @@ impl<'a> Builder<'a> {
         let Some(a) = self.loop_aliased.get(m) else {
             return Ok(());
         };
-        refuse(
-            menu(
-                format!(
-                    "`{a}` may not be handed out of an arm inside a loop — the result is \
-                     released on every turn, and `{a}` is bound outside the loop"
-                ),
-                [format!(
-                    "`{a}.copy()` if the arm should hand out a value of its own"
-                )],
-            ),
-            line,
-        )
+        refuse(rule!(HandedOutOfLoopArm, a), Vec::new(), line)
     }
 
     /// Whether a `let` binds a value this frame owns, read off the lowered
@@ -2793,11 +2735,11 @@ impl<'a> Builder<'a> {
                     let decls = self.proto.types();
                     let refusal = match annotation {
                         Some(t) if !vyrn_frontend::types::coercible(&vty, t, decls) => {
-                            let ([t, vty], []) = self.body.speech().say([t, &vty], []);
-                            Some(format!("`{name}` declared {t} but initializer is {vty}"))
+                            let ([declared, vty], []) = self.body.speech().say([t, &vty], []);
+                            Some(rule!(InitMismatch, name, declared, vty).render())
                         }
                         _ if vyrn_frontend::types::resolve(&vty, decls) == Type::Unit => {
-                            Some(format!("cannot bind `{name}` to a Unit value"))
+                            Some(rule!(BindUnit, name).render())
                         }
                         _ => None,
                     };
@@ -2903,7 +2845,7 @@ impl<'a> Builder<'a> {
                 line,
                 id: _,
             } => {
-                if !self.known(name, *line, "assignment to unknown variable") {
+                if !self.known(name, *line, |name| rule!(AssignUnknown, name)) {
                     return Ok(());
                 }
                 let to = match self.lookup(name) {
@@ -2913,8 +2855,8 @@ impl<'a> Builder<'a> {
                 if let (Some(to), Some(vty)) = (&to, node_ty(self.own, value.id())) {
                     if !vyrn_frontend::types::coercible(&vty, to, self.proto.types()) {
                         let ([to, vty], []) = self.body.speech().say([to, &vty], []);
-                        let refusal =
-                            format!("`{}` is {to} but assigned {vty}", self.written(name));
+                        let name = self.written(name);
+                        let refusal = rule!(AssignMismatch, name, to, vty).render();
                         self.body.mistyped.push((*line, refusal));
                     }
                 }
@@ -3036,7 +2978,7 @@ impl<'a> Builder<'a> {
                 line,
                 id: _,
             } => {
-                if !self.known(name, *line, "assignment to field of unknown variable") {
+                if !self.known(name, *line, |name| rule!(FieldAssignUnknown, name)) {
                     return Ok(());
                 }
                 let base = self.named_place(name, *line)?;
@@ -3049,7 +2991,7 @@ impl<'a> Builder<'a> {
                 line,
                 id: _,
             } => {
-                if !self.known(name, *line, "index-assignment to unknown variable") {
+                if !self.known(name, *line, |name| rule!(IndexAssignUnknown, name)) {
                     return Ok(());
                 }
                 let base = self.named_place(name, *line)?;
@@ -3063,7 +3005,7 @@ impl<'a> Builder<'a> {
                 if let (Some(vty), Some(ret)) = (vty, &self.ret) {
                     if !vyrn_frontend::types::coercible(&vty, ret, self.proto.types()) {
                         let ([ret, vty], []) = self.body.speech().say([ret, &vty], []);
-                        let refusal = format!("return type mismatch: expected {ret}, found {vty}");
+                        let refusal = rule!(ReturnMismatch, ret, vty).render();
                         self.body.mistyped.push((*line, refusal));
                     }
                 }
@@ -3166,11 +3108,7 @@ impl<'a> Builder<'a> {
                     let t = vyrn_frontend::types::resolve(&ity, self.proto.types());
                     if t != Type::Err {
                         let ([t], []) = self.body.speech().say([&t], []);
-                        let refusal = format!(
-                            "`for` needs an Array, a String, or a type that declares \
-                             `impl Iterate` (a `size` method and an `nth` projection, \
-                             `fn nth(read self, ..) -> read T`), found {t}"
-                        );
+                        let refusal = rule!(ForNeedsIterable, t).render();
                         self.body.mistyped.push((*line, refusal));
                     }
                     return gap("a `for` over what no loop walks", *line);
@@ -3742,8 +3680,8 @@ impl<'a> Builder<'a> {
                 .as_ref()
                 .map(|fs| fs.iter().find(|f| f.name == field))
             {
-                None => format!("`{name}` is not a record, so it has no field `{field}`"),
-                Some(None) => format!("record `{name}` has no field `{field}`"),
+                None => rule!(NotRecordNoField, name, field).render(),
+                Some(None) => rule!(RecordNoField, name, field).render(),
                 Some(Some(f)) => {
                     let fty = &f.ty;
                     let Some(vty) = node_ty(self.own, value.id()) else {
@@ -3760,11 +3698,10 @@ impl<'a> Builder<'a> {
                     }
                     let ([fty, vty], []) = self.body.speech().say([fty, &vty], []);
                     let refusal = match validated {
-                        true => format!(
-                            "field `{field}` is {fty} (validated); assign an already-constructed `{fty}` value, e.g. `{fty}(..)`"
-                        ),
-                        false => format!("field `{field}` is {fty} but assigned {vty}"),
-                    };
+                        true => rule!(FieldValidated, field, fty),
+                        false => rule!(FieldMismatch, field, fty, vty),
+                    }
+                    .render();
                     self.body.mistyped.push((line, refusal));
                     return Ok(());
                 }
@@ -3800,15 +3737,11 @@ impl<'a> Builder<'a> {
                             && !coercible(&k, &vyrn_frontend::types::resolve(&key, decls)) =>
                     {
                         let ([key, k], []) = sp.say([&key, &k], []);
-                        Some(format!(
-                            "`{name}` is keyed by {key}, but the key here is {k}"
-                        ))
+                        Some(rule!(MapStoreKey, name, key, k))
                     }
                     (_, Some(v)) if !coercible(&v, &val) => {
                         let ([val, v], []) = sp.say([&val, &v], []);
-                        Some(format!(
-                            "`{name}` holds values of type {val} but the stored value is {v}"
-                        ))
+                        Some(rule!(MapStoreValue, name, val, v))
                     }
                     _ => None,
                 }
@@ -3826,9 +3759,7 @@ impl<'a> Builder<'a> {
                             ),
                             None => {
                                 let ([other], []) = sp.say([&other], []);
-                                let refusal = format!(
-                                "`{name}[i] = ..` needs an Array, a Map, or a type whose impl declares the `atSet` projection (`fn atSet(modify self, ..) -> modify T`), found {other}"
-                            );
+                                let refusal = rule!(IndexStoreNoContainer, name, other).render();
                                 self.body.mistyped.push((line, refusal));
                                 return gap("a store into an element of what has none", line);
                             }
@@ -3841,21 +3772,23 @@ impl<'a> Builder<'a> {
                 match (i, vty) {
                     (Some(i), _) if key == Type::Int => {
                         let ([i], []) = sp.say([&i], []);
-                        Some(format!("array index must be an Int64, found {i}"))
+                        Some(rule!(ArrayIndexType, i))
                     }
                     (Some(i), _) => {
                         let ([key, i], []) = sp.say([&key, &i], []);
-                        Some(format!("`{name}[..] = ..` is keyed by {key}, found {i}"))
+                        Some(rule!(IndexStoreKey, name, key, i))
                     }
                     (None, Some(v)) if !coercible(&v, &elem) => {
                         let ([elem, v], []) = sp.say([&elem, &v], []);
-                        Some(format!("`{name}` holds {elem} but the stored value is {v}"))
+                        Some(rule!(ElementMismatch, name, elem, v))
                     }
                     _ => None,
                 }
             }
         };
-        self.body.mistyped.extend(refusal.map(|r| (line, r)));
+        self.body
+            .mistyped
+            .extend(refusal.map(|r| (line, r.render())));
         Ok(())
     }
 
@@ -3932,13 +3865,12 @@ impl<'a> Builder<'a> {
     }
 
     /// Whether a binding or module state answers `name`. Where none does,
-    /// records the refusal: `words` is the sentence before the name.
-    fn known(&mut self, name: &str, line: usize, words: &str) -> bool {
+    /// records the refusal `rule` states of the name.
+    fn known(&mut self, name: &str, line: usize, rule: fn(&str) -> Rule) -> bool {
         if self.answers(name) {
             return true;
         }
-        let refusal = format!("{words} `{name}`");
-        self.body.refused.push((line, refusal));
+        self.body.refused.push((line, rule(name).render()));
         false
     }
 
@@ -3955,7 +3887,7 @@ impl<'a> Builder<'a> {
         let bool = vyrn_frontend::types::resolve(&t, self.proto.types()) == Type::Bool;
         if !bool && t != Type::Err {
             let ([t], []) = self.body.speech().say([&t], []);
-            let refusal = format!("`{word}` condition must be Bool, found {t}");
+            let refusal = rule!(ConditionNotBool, word, t).render();
             self.body.mistyped.push((line, refusal));
         }
         self.read_val(cond, out)
@@ -3971,10 +3903,10 @@ impl<'a> Builder<'a> {
     fn unknown_of(&self, e: &Expr) -> Option<(usize, String)> {
         match e {
             Expr::Var { name, line, id: _ } if !self.answers(name) && !self.is_variant(name) => {
-                Some((*line, format!("unknown variable `{name}`")))
+                Some((*line, rule!(UnknownVariable, name).render()))
             }
             Expr::TryConstruct { name, line, .. } if !self.proto.types().contains_key(name) => {
-                Some((*line, format!("unknown type `{name}`")))
+                Some((*line, rule!(UnknownType, n = name).render()))
             }
             _ => None,
         }
@@ -4001,12 +3933,14 @@ impl<'a> Builder<'a> {
         };
         let refusal = match vyrn_frontend::types::resolve(&ty, self.proto.types()) {
             Type::Array(_) | Type::SmallArray(..) | Type::Err => return,
-            Type::ArrayN(..) => format!(
-                "`{op}` is not available on a fixed-size array (it cannot shrink); use a growable `Array<T>`"
+            Type::ArrayN(..) => rule!(ShrinkFixedArray, op),
+            other => rule!(
+                ShrinkNeedsArray,
+                op,
+                t = self.body.speech().ty(&other).to_string()
             ),
-            other => format!("`{op}` needs an `Array<T>`, found {}", self.body.speech().ty(&other)),
         };
-        self.body.mistyped.push((line, refusal));
+        self.body.mistyped.push((line, refusal.render()));
     }
 
     fn unknown_at(&mut self, e: &Expr) {
@@ -4480,7 +4414,7 @@ impl<'a> Builder<'a> {
                     let v = self.body.speech().name(&variants[t as usize].name);
                     self.body
                         .refused
-                        .push((line, format!("duplicate `{v}` arm")));
+                        .push((line, rule!(DuplicateArm, v).render()));
                     return Ok(());
                 }
                 *seen = true;
@@ -4490,10 +4424,8 @@ impl<'a> Builder<'a> {
             return Ok(());
         }
         if let Some((v, _)) = variants.iter().zip(&taken).find(|(_, t)| !**t) {
-            let refusal = format!(
-                "`match` is missing variant `{}`",
-                self.body.speech().name(&v.name)
-            );
+            let v = self.body.speech().name(&v.name);
+            let refusal = rule!(MissingVariant, v).render();
             self.body.refused.push((line, refusal));
         }
         Ok(())
@@ -4964,7 +4896,7 @@ impl<'a> Builder<'a> {
         } = value
         {
             let t = self.body.spelled(t);
-            let fields = fields.iter().map(|(f, _)| format!("the field `{t}.{f}`"));
+            let fields = fields.iter().map(|(f, _)| format!("{t}.{f}"));
             self.body.names[n.index()].fields = fields.collect();
         }
     }
@@ -5236,7 +5168,9 @@ impl<'a> Builder<'a> {
         cut(&mut stmts);
         self.body.stmts = stmts;
         if let (Some(owes), LambdaBody::Block(_)) = (self.ret.clone(), body) {
-            falls_through(&mut self.body, &owes, *line, || "this lambda".to_string());
+            falls_through(&mut self.body, &owes, *line, |owes| {
+                rule!(LambdaFallsThrough, owes)
+            });
         }
         let frame = std::mem::replace(&mut self.body, outer);
         (
@@ -5353,11 +5287,8 @@ impl<'a> Builder<'a> {
         match &info.borrow_kind {
             // The sentence names the root; the fixes name the path.
             Some(k) if info.borrow && !info.must_use_param => {
-                let msg = say(
-                    CONSUMED_BORROW,
-                    &[("root", &root), ("what", &k.what(&root))],
-                );
-                refuse(menu(msg, k.fixes(&path)), line)
+                let what = k.what(&root);
+                refuse(rule!(ConsumedBorrow, root, what), k.fixes(&path), line)
             }
             _ => Ok(()),
         }
@@ -7647,24 +7578,19 @@ fn rule_check(to: String, n: Name, line: usize) -> St {
 /// builder: the checker typed the body, so every judgment over the core
 /// would otherwise pass over it in silence.
 fn refuse_gap(g: Gap, file: &Option<String>, body: &str, r: &mut Refused) {
-    let Some(message) = g.rule else {
-        let detail = if g.detail.is_empty() {
-            String::new()
-        } else {
-            format!(" `{}`", g.detail)
+    let Some(d) = g.rule else {
+        let (what, detail) = (g.what, g.detail);
+        let rule = match detail.is_empty() {
+            true => rule!(CoreGap, what, body),
+            false => rule!(CoreGapAt, what, detail, body),
         };
-        let message = format!(
-            "internal error: the core cannot state {}{detail}, so `{body}` is not judged",
-            g.what
-        );
         // The typed judgment's list prints whichever pass refused.
-        let d = Diagnostic::error(g.line, 0, "check", message).in_file(file.clone());
+        let d = Diagnostic::refusal(g.line, 0, "check", rule).in_file(file.clone());
         r.typed.push(d);
         return;
     };
     r.kernel.push(Refusal {
-        diagnostic: Diagnostic::error(g.line, 0, "movecheck", crate::rules::spoken(message))
-            .in_file(file.clone()),
+        diagnostic: d.in_file(file.clone()),
         body: body.to_string(),
     });
 }
@@ -8403,7 +8329,7 @@ fn report(
             (_, Some(t)) => {
                 let into = match t.how {
                     crate::kernel::TookHow::Return => "the return".to_string(),
-                    _ => t.by.clone(),
+                    _ => t.by.to_string(),
                 };
                 MemoryRow {
                     name,

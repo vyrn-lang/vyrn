@@ -126,7 +126,7 @@ pull request.
 - No drop flags. An ambiguous join (moved on one path only) gets a release on the other edge or is refused.
 - A join arm that yields a name bound outside the construct moves it; a later use is refused with the `.copy()` fix. Treating the yield as an alias leaked the name on the edges that did not yield it.
 - A projection (a field, element or pattern binder of a place) borrows its root. It may be read, not stored or returned; the fix is `.copy()` or a take.
-- A refusal quotes what the reader wrote, never a compiler temporary (`@t1`): `rules::spoken` panics in a debug build on a sentence that does.
+- A refusal quotes what the reader wrote, never a compiler temporary (`@t1`): `vyrn_lower::rules::refusal` panics in a debug build on a sentence that does.
 - A lend is refused, never tracked through stores. Tracking it would need an alias analysis.
 - `consume <place>` moves a value out of a place; only the taken path dies. No `take` keyword and no `.take()`: an element leaves with `swapRemove`.
 - A statement's value is released where the statement ends. A part read as a statement (`p.f`, `xs[i].f`) takes nothing: only `consume` moves a value out of a place.
@@ -214,7 +214,7 @@ pull request.
 - Error text is canonical Vyrn wording, never the operating system's.
 - The parser refuses nesting deeper than 1,024 with a diagnostic, because remote modules and the LSP parse untrusted input.
 - Diagnostics speak intent: what you asked for, what blocks it, how to fix it. They say read, modify and consume, never "borrow" or "lifetime".
-- A refusal of the lexer, parser, loader or checker is a row in `rules.rs`: a `Rule` names its holes, its sentence and its fixes, and the diagnostic carries the rule with its hole text. Sites that print the same sentence name the same rule. Text written outside the frontend (`vyrn-lower` sentences, generator output, manifest and schema errors) stays a string in `Diagnostic::error`.
+- A refusal of the lexer, parser, loader, checker, kernel, typed judgment or core builder is a row in `vyrn-frontend/src/rules.rs`: a `Rule` names its holes, its sentence and its fixes, and the diagnostic carries the rule with its hole text. Sites that print the same sentence name the same rule. A way out a site picks by its own state is a row too, rendered under another (`Diagnostic::more`). Text written outside these passes (generator output, manifest and schema errors) stays a string in `Diagnostic::error`.
 - The runtime (allocator, strings, maps, arrays, I/O, traps, regions) is Vyrn in `std/runtime`. The raw memory and WASI primitives are declarations in `std/mem`, importable only by `std/runtime`.
 - The WASI calls a module imports are one table, `vyrn_codegen::WASI_IMPORTS`. The emitter declares from it, and a test holds each host (`wasmrun.rs`, `wasi_host.c`) to exactly its rows.
 - A builtin exists only for what Vyrn source cannot express, such as a syscall. Everything expressible is std Vyrn.

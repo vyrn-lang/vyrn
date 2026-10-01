@@ -42,8 +42,11 @@ pub struct Diagnostic {
     /// `"lex"` | `"parse"` | `"check"` | `"movecheck"`.
     pub stage: &'static str,
     pub message: String,
-    /// The row of `rules.rs` that states this diagnostic, if any; `message` is its rendering.
+    /// The row of `rules.rs` that states this diagnostic, if any; `message` is
+    /// its rendering, then a fix line for each of `more`.
     pub rule: Option<Rule>,
+    /// The ways out a site chose by its own state, under the rule's own.
+    pub more: Vec<String>,
     /// A secondary note: the generated location of a diagnostic
     /// remapped to its origin file, or why an origin directive could not be
     /// followed.
@@ -68,6 +71,7 @@ impl Diagnostic {
             stage,
             message,
             rule: None,
+            more: Vec::new(),
             note: None,
             from_generated: false,
         }
@@ -75,9 +79,22 @@ impl Diagnostic {
 
     /// Builds the error that states `rule` for `stage` at `(line, col)`.
     pub fn refusal(line: usize, col: usize, stage: &'static str, rule: Rule) -> Self {
-        let message = rule.render();
+        Diagnostic::refusal_with(line, col, stage, rule, Vec::new())
+    }
+
+    /// Builds the error that states `rule` for `stage` at `(line, col)`, with
+    /// `more` ways out under the row's own.
+    pub fn refusal_with(
+        line: usize,
+        col: usize,
+        stage: &'static str,
+        rule: Rule,
+        more: Vec<String>,
+    ) -> Self {
+        let message = menu(rule.render(), &more);
         Diagnostic {
             rule: Some(rule),
+            more,
             ..Diagnostic::error(line, col, stage, message)
         }
     }
@@ -95,7 +112,7 @@ impl Diagnostic {
     /// diagnostic's module. A diagnostic without a rule keeps its message.
     pub fn speak(&mut self, spellings: &crate::ast::Spellings) {
         if let Some(rule) = &self.rule {
-            self.message = rule.render_in(&spellings.speech(&self.file));
+            self.message = menu(rule.render_in(&spellings.speech(&self.file)), &self.more);
         }
     }
 

@@ -93,8 +93,8 @@ pub struct NameInfo {
     /// core keeps no statement kinds, so the refusal's wording of that loop
     /// rides on the name.
     pub for_consume: bool,
-    /// For a name a record literal binds: where each part goes, in the
-    /// checker's words ("the field `R.s`"), one per field in order.
+    /// For a name a record literal binds: where each part goes (`R.s`), one
+    /// per field in order.
     /// `Rhs::Make` carries no names. Empty for an array, a map and a variant.
     pub fields: Vec<String>,
     /// For the variable of a `for` over a container the loop does not own:
@@ -215,28 +215,24 @@ impl BorrowKind {
     /// The named ways out. `path` is what was read out of the binding. A
     /// capture has none: the checker answers that shape at the capture.
     pub fn fixes(&self, path: &str) -> Vec<String> {
+        use crate::rules::rule;
+        let copy = rule!(CopyBoth, path).render();
         match self {
             // A `fn` type reads every argument, so the function that takes
             // ownership must be a named one, called directly.
-            BorrowKind::Param { of, lambda: true, .. } => vec![
-                format!("`{path}.copy()` if both sides need a value"),
-                format!("a named function with `{of}: consume ..`, called directly, if it should own it"),
-            ],
-            BorrowKind::Param { of, .. } => vec![
-                format!("declare the parameter `{of}: consume ..` if this function should own it"),
-                format!("`{path}.copy()` if both sides need a value"),
-            ],
+            BorrowKind::Param {
+                of, lambda: true, ..
+            } => {
+                vec![copy, rule!(ConsumeNamedFn, of).render()]
+            }
+            BorrowKind::Param { of, .. } => vec![rule!(ConsumeParam, of).render(), copy],
             BorrowKind::Capture => Vec::new(),
             // `for .. in consume` helps only when the whole element is handed
             // on; a field of one is a partial move, so a path gets the copy.
-            BorrowKind::LoopVar { of } if crate::ast::root_of(path) == path => vec![
-                format!("`for {path} in consume {of}` if the loop should take the elements"),
-                format!("`{path}.copy()` if both sides need a value"),
-            ],
-            BorrowKind::LoopVar { .. } => {
-                vec![format!("`{path}.copy()` if both sides need a value")]
+            BorrowKind::LoopVar { of } if crate::ast::root_of(path) == path => {
+                vec![rule!(ForInConsume, path, of).render(), copy]
             }
-            BorrowKind::Place => vec![format!("`{path}.copy()` if both sides need a value")],
+            BorrowKind::LoopVar { .. } | BorrowKind::Place => vec![copy],
         }
     }
 }
