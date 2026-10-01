@@ -18,7 +18,7 @@ Type::Pick	3	1	0	9	0	0	13
 Type::Merge	3	1	0	9	0	0	13
 Type::Partial	3	1	0	9	0	0	13
 Type::Enum	10	5	7	12	1	2	37
-Type::Param	18	2	2	4	5	1	32
+Type::Param	19	2	2	6	5	1	35
 Type::App	14	3	1	11	1	0	30
 Type::Array	27	4	30	10	3	3	77
 Type::ArrayN	14	7	14	10	1	2	48
@@ -31,4 +31,4 @@ Type::Fn	24	5	20	13	1	0	63
 Type::Lazy	6	1	2	12	0	0	21
 Type::Never	2	2	2	3	0	0	9
 Type::Err	80	1	0	3	0	0	84
-all	535	74	374	255	45	28	1311
+all	536	74	374	257	45	28	1314

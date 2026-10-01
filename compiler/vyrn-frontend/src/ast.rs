@@ -1062,6 +1062,13 @@ impl Type {
     }
 }
 
+/// The name a type parameter was written with. The checker renames a
+/// callee's parameters apart as `T'n` while it solves one call, and no
+/// identifier holds a `'`.
+pub fn written_param(n: &str) -> &str {
+    n.split_once('\'').map_or(n, |(w, _)| w)
+}
+
 impl std::fmt::Display for Type {
     /// Writes the type as Vyrn source spells it, by linked names. A sentence
     /// writes it through [`Speech::ty`] instead.
@@ -1097,7 +1104,7 @@ impl<'a> std::fmt::Display for Said<'a> {
             Type::Str => write!(f, "String"),
             Type::Unit => write!(f, "Unit"),
             Type::Named(n) => write!(f, "{}", name(n)),
-            Type::Param(n) => write!(f, "{n}"),
+            Type::Param(n) => write!(f, "{}", written_param(n)),
             Type::Record(fields) => {
                 write!(f, "{{ ")?;
                 for (i, fld) in fields.iter().enumerate() {

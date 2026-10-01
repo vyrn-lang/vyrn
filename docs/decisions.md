@@ -47,6 +47,7 @@ pull request.
 - No inherent methods. `x.m(a)` is `m(x, a)`, so a helper needs no `impl`.
 - Dispatch is static everywhere; there are no vtables. Records are legal impl targets and validated scalars are not.
 - Generic impls are keyed on the type constructor: one impl per protocol and constructor.
+- A generic call or record literal solves its callee's type parameters renamed apart (`T'n`, fresh per instantiation), so a caller's `T` never meets the callee's. A sentence and the check's record carry the written name.
 - Protocols take associated types, not type parameters. No `protocol P<T>` and no `T::Output`: an operator like `?` has nowhere to name the instance.
 - A type declares its properties by implementing compiler-known protocols (`Owned`, `MustUse`, `Fallible`, `Copy`, `Iterate`, `Hashable`, `Show`). Built-ins have seeded rows and a declared row wins, so no hand-written list can fall out of date.
 - A scalar renders through the language's own lowering; `impl Show` is consulted only for a type the language cannot render. Records get no derived `Show`.
