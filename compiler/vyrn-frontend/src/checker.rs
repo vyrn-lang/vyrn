@@ -1370,10 +1370,13 @@ fn rooted_where_the_site_owns<'s>(
 ) {
     let mut roots: std::collections::HashSet<String> =
         f.params.iter().map(|p| p.name.clone()).collect();
+    // A `let` that borrows from no root shadows a root of its name.
     for s in prologue {
         if let Stmt::Let { name, value, .. } = s {
             if let_borrows_from(value, &roots) {
                 roots.insert(name.clone());
+            } else {
+                roots.remove(name);
             }
         }
     }

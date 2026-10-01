@@ -1,0 +1,21 @@
+// A prologue `let` that borrows from no root shadows the parameter of its
+// name, so the place it yields is the frame's own and the site cannot own it.
+type Ledger = { labels: Array<String> }
+
+impl Index for Ledger {
+    fn at(read self, i: Int64) -> read String {
+        return self.labels[i]
+    }
+
+    fn other(read self, src: Ledger) -> read String {
+        let src = Ledger { labels: ["fresh " + "local string, long enough for the heap"] }
+        return src.labels[0]
+    }
+}
+
+fn main() -> Int64 {
+    let led = Ledger { labels: ["alpha" + "!", "beta"] }
+    let o = Ledger { labels: ["omega" + "?"] }
+    print("other: \{led.other(o)}")
+    return 0
+}
