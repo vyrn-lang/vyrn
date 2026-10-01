@@ -84,9 +84,11 @@ free the one and then read the other. The receiver of a rebuilding builtin
 A `consume` record parameter that the function returns on every path, changed
 only field by field, is the result. The function works in the caller's
 storage and writes no separate result, so `b = advance(b, dt)` copies no
-record. A call such as `let c = advance(b, dt)` moves `b` into `c` once. A
-function that returns anything else on one path copies its argument in and
-its result out. Output, traps and releases are the same either way.
+record. `let c = advance(b, dt)` copies none either where `b` was bound in
+the same block and holds a frame slot: `c` takes that slot. Otherwise the
+call moves `b` into `c` once, as for a parameter `b`. A function that
+returns anything else on one path copies its argument in and its result
+out. Output, traps and releases are the same either way.
 
 A receiver follows the same rule: `read self`, `modify self`, `consume self`.
 

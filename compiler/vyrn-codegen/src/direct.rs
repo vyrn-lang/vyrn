@@ -10114,12 +10114,15 @@ impl<'p> Fn_<'_, 'p> {
                     };
                     let part = self.core_part_dest(b, body, w, ss, i, line)?;
                     mark = b.mark();
-                    let back = self.core_back(body, w, ss, i);
+                    let back = self.core_back(body, w, ss, i, &ends[i]);
                     let (dest, place) = if lands {
                         (Some(Dest::Addr(self.core_out(line)?, 0)), None)
                     } else if part.is_some() {
                         (part, None)
-                    } else if let Some((d, p)) = back {
+                    } else if let Some((d, p, from)) = back {
+                        if let Some(a) = from {
+                            w.slot[n.index()] = w.slot[a.index()].take();
+                        }
                         (Some(d), Some(p))
                     } else if body.names[n.index()].source.starts_with('@') {
                         (None, None)
@@ -12304,18 +12307,23 @@ impl<'p> Fn_<'_, 'p> {
         Ok(Some(d))
     }
 
-    /// The storage of `x` where row `i` is `@t = f(.., x, ..)`, the next is `x = @t`, and `f`
-    /// leaves its result in the parameter `x` goes to ([`Sig::in_place`]). The call then runs in
-    /// `x`'s own storage and the store moves nothing. Every other argument is a scalar or a
-    /// layout in frame bytes apart from `x`'s, so none reads that storage while the callee
-    /// writes it: `x = g(x, x)` runs in a copy.
+    /// The storage of `x` where row `i` is `@t = f(.., x, ..)` and `f` leaves its result in the
+    /// parameter `x` goes to ([`Sig::in_place`]), and the name whose frame slot the result takes
+    /// over. The call runs in `x`'s own storage and moves nothing in where either:
+    /// - the next row is `x = @t`. The store moves nothing, and `x` keeps its slot.
+    /// - `x`'s extent ends at row `i` (`ended`) and `x` holds a frame slot of its own
+    ///   ([`Walked::slot`]). No row reads `x` after the call, so `@t` takes the slot.
+    ///
+    /// Every other argument is a scalar or a layout in frame bytes apart from `x`'s, so none
+    /// reads that storage while the callee writes it: `x = step(x, x.p)` reads a copy of `x.p`.
     fn core_back(
         &self,
         body: &vyrn_frontend::core::Body,
         w: &Walked,
         ss: &[St],
         i: usize,
-    ) -> Option<(Dest, Place)> {
+        ended: &[Name],
+    ) -> Option<(Dest, Place, Option<Name>)> {
         let St::Let(
             t,
             Rhs::Call {
@@ -12330,25 +12338,26 @@ impl<'p> Fn_<'_, 'p> {
         else {
             return None;
         };
-        let Some(St::Store {
-            place: vyrn_frontend::core::Place::Name(x),
-            value: Val::Name(v),
-            releases: false,
-            ..
-        }) = ss.get(i + 1)
-        else {
-            return None;
-        };
-        let temp = body.names[t.index()].source.starts_with('@') && w.reads[t.index()] == 1;
-        if v != t || !temp || !targets.is_empty() {
+        if !targets.is_empty() {
             return None;
         }
         let k = self
             .core_sig(body, callee, *kind, solved, targets)?
             .in_place?;
-        let (Arg::Val(Val::Name(a)), Capability::Consume) = args.get(k)? else {
+        let (Arg::Val(Val::Name(x)), Capability::Consume) = args.get(k)? else {
             return None;
         };
+        let stored = matches!(ss.get(i + 1), Some(St::Store {
+                place: vyrn_frontend::core::Place::Name(s),
+                value: Val::Name(v),
+                releases: false,
+                ..
+            }) if s == x && v == t
+                && body.names[t.index()].source.starts_with('@')
+                && w.reads[t.index()] == 1);
+        if !stored && !(ended.contains(x) && w.slot[x.index()].is_some()) {
+            return None;
+        }
         let (place, ty) = self.core_place(w, body, *x)?;
         // The frame bytes a slot name holds, which no other held slot overlaps.
         let span = |p: Place, t: &Type| match p {
@@ -12371,7 +12380,7 @@ impl<'p> Fn_<'_, 'p> {
             Place::Local(l) => Dest::Addr(l, 0),
             Place::Static(_) => return None,
         };
-        (a == x && others).then_some((d, place))
+        others.then_some((d, place, (!stored).then_some(*x)))
     }
 
     /// The local holding the caller's out-pointer.
