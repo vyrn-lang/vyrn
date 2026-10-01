@@ -148,9 +148,7 @@ impl Shape {
             Type::SmallArray(..) => Shape::SmallArray,
             Type::Map(..) => Shape::Map,
             Type::Str => Shape::Str,
-            Type::Int | Type::IntN { .. } | Type::Float | Type::Float32 | Type::Bool => {
-                Shape::Scalar
-            }
+            t if t.is_scalar() => Shape::Scalar,
             Type::Stream(_) => Shape::Stream,
             Type::Logger => Shape::Logger,
             Type::Record(_) => Shape::Record,

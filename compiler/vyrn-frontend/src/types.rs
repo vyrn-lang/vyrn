@@ -159,10 +159,7 @@ pub const SHOW_SHOW: &str = "show";
 /// Whether the language renders `t` itself; such a type never reaches
 /// [`show_dispatch`].
 pub fn renders(t: &Type) -> bool {
-    matches!(
-        t,
-        Type::Int | Type::IntN { .. } | Type::Float | Type::Float32 | Type::Bool | Type::Str
-    )
+    t.is_scalar()
 }
 
 /// The refusal of `shown` at `t`, a type that does not render.

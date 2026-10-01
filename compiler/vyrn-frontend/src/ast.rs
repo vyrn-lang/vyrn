@@ -1060,6 +1060,53 @@ impl Type {
         ])
     }
 
+    /// Returns the element type of an `Array`, `Array<T, N>` or `SmallArray`,
+    /// the sequences an index reads. A `Stream` is pulled, never indexed, so
+    /// it answers `None`; a pass that iterates one names it beside this.
+    pub fn elem(&self) -> Option<&Type> {
+        match self {
+            Type::Array(e) | Type::ArrayN(e, _) | Type::SmallArray(e, _) => Some(e),
+            _ => None,
+        }
+    }
+
+    /// Whether the type is one of the sequences [`Type::elem`] answers for.
+    pub fn is_seq(&self) -> bool {
+        self.elem().is_some()
+    }
+
+    /// `Int64` or a sized integer.
+    pub fn is_integral(&self) -> bool {
+        matches!(self, Type::Int | Type::IntN { .. })
+    }
+
+    /// An integer or a float.
+    pub fn is_numeric(&self) -> bool {
+        self.is_integral() || matches!(self, Type::Float | Type::Float32)
+    }
+
+    /// A number, `Bool` or `String`: a value the language compares, renders and
+    /// validates itself.
+    pub fn is_scalar(&self) -> bool {
+        self.is_numeric() || matches!(self, Type::Bool | Type::Str)
+    }
+
+    /// Returns a SIMD type's lane count and lane type; a mask's lane is a `Bool`.
+    pub fn lanes(&self) -> Option<(u8, Type)> {
+        let int32 = Type::IntN {
+            bits: 32,
+            signed: true,
+        };
+        Some(match self {
+            Type::F32x4 => (4, Type::Float32),
+            Type::I32x4 => (4, int32),
+            Type::F64x2 => (2, Type::Float),
+            Type::Mask32x4 => (4, Type::Bool),
+            Type::Mask64x2 => (2, Type::Bool),
+            _ => return None,
+        })
+    }
+
     /// Every variant's name, as data for coverage tests.
     ///
     /// [`Type::variant_name`] is an exhaustive `match`, so a new variant stops

@@ -1050,7 +1050,7 @@ pub fn member_completions(analysis: &Analysis, line: usize, col: usize) -> Vec<C
         })
         .collect();
     // `arr.length`: the read-only element-count field.
-    if matches!(ty, Type::Array(_) | Type::ArrayN(..) | Type::SmallArray(..)) {
+    if ty.is_seq() {
         out.push(Completion {
             label: "length".to_string(),
             kind: SymbolKind::Field,

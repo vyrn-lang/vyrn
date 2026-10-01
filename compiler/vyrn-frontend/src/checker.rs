@@ -1951,10 +1951,8 @@ impl<'a> Checker<'a> {
                 };
                 let inner = self.chain_ty(&args[0], scope)?;
                 if m == "at" {
-                    if let Type::Array(t) | Type::ArrayN(t, _) | Type::SmallArray(t, _) =
-                        self.base(&inner)
-                    {
-                        return Some(*t);
+                    if let Some(t) = self.base(&inner).elem() {
+                        return Some(t.clone());
                     }
                 }
                 let f = crate::project::lookup_in(self.impl_blocks, &inner, m).or_else(|| {
@@ -2635,10 +2633,7 @@ impl<'a> Checker<'a> {
             }
             return Ok(());
         }
-        if !matches!(
-            t.base,
-            Type::Int | Type::IntN { .. } | Type::Float | Type::Float32 | Type::Bool | Type::Str
-        ) {
+        if !t.base.is_scalar() {
             let name = DeclName(&t.name);
             return Err(cerr!(t.line, ValidatedBaseNotScalar, name));
         }
@@ -2707,19 +2702,8 @@ impl<'a> Checker<'a> {
                 Type::Param(p) => self.param_has_bound(p, bound),
                 _ => crate::types::renders(&base) || self.declares_an_impl(ty, &base, bound),
             },
-            "Num" | "Ord" => matches!(
-                base,
-                Type::Int | Type::Float | Type::Float32 | Type::IntN { .. }
-            ),
-            "Eq" => matches!(
-                base,
-                Type::Int
-                    | Type::Float
-                    | Type::Float32
-                    | Type::IntN { .. }
-                    | Type::Bool
-                    | Type::Str
-            ),
+            "Num" | "Ord" => base.is_numeric(),
+            "Eq" => base.is_scalar(),
             // A user protocol: satisfied if the type implements it.
             _ if self
                 .protocol_methods
@@ -3275,12 +3259,11 @@ impl<'a> Checker<'a> {
                 // A builtin container is keyed by `Int64`, a user one by what
                 // its `atSet` takes.
                 let mut key = Type::Int;
-                let elem = match self.base(&b.ty) {
-                    Type::Array(inner) | Type::ArrayN(inner, _) | Type::SmallArray(inner, _) => {
-                        (*inner).clone()
-                    }
-                    Type::Err => return Ok(()),
-                    _ => {
+                let base = self.base(&b.ty);
+                let elem = match (base.elem(), &base) {
+                    (Some(e), _) => e.clone(),
+                    (None, Type::Err) => return Ok(()),
+                    (None, _) => {
                         // The element type is what `atSet` yields, looked up
                         // by the declared type, which the impl head names.
                         match crate::project::lookup_impl(self.impl_blocks, &b.ty, "atSet") {
@@ -3369,15 +3352,14 @@ impl<'a> Checker<'a> {
                 ..
             } => {
                 let ity = self.expr(iter, scope, None, Some(ret))?;
-                let elem = match self.base(&ity) {
-                    Type::Array(inner) | Type::ArrayN(inner, _) | Type::SmallArray(inner, _) => {
-                        (*inner).clone()
-                    }
+                let base = self.base(&ity);
+                let elem = match (base.elem(), &base) {
+                    (Some(e), _) => e.clone(),
                     // The loop consumes a stream; movecheck checks that.
-                    Type::Stream(inner) => (*inner).clone(),
+                    (None, Type::Stream(inner)) => (**inner).clone(),
                     // A String yields its bytes.
-                    Type::Str => Type::Int,
-                    _ => {
+                    (None, Type::Str) => Type::Int,
+                    (None, _) => {
                         // A user container's element is what its `nth` yields,
                         // looked up by the declared type.
                         match crate::types::iterate_impl(self.impl_blocks, &ity) {
@@ -3654,16 +3636,8 @@ impl<'a> Checker<'a> {
                     // `0.0 - v`, which loses the sign of a zero. On
                     // an `I32x4` it wraps, as the scalar does.
                     UnOp::Neg
-                        if matches!(
-                            t,
-                            Type::Int
-                                | Type::Float
-                                | Type::Float32
-                                | Type::IntN { .. }
-                                | Type::F32x4
-                                | Type::I32x4
-                                | Type::F64x2
-                        ) =>
+                        if t.is_numeric()
+                            || matches!(t, Type::F32x4 | Type::I32x4 | Type::F64x2) =>
                     {
                         Ok(t)
                     }
@@ -3671,14 +3645,8 @@ impl<'a> Checker<'a> {
                     // `~` complements an integer within its width, or
                     // a mask lane-wise. `!` stays the Bool operator.
                     UnOp::BitNot
-                        if matches!(
-                            t,
-                            Type::Int
-                                | Type::IntN { .. }
-                                | Type::Mask32x4
-                                | Type::Mask64x2
-                                | Type::I32x4
-                        ) =>
+                        if t.is_integral()
+                            || matches!(t, Type::Mask32x4 | Type::Mask64x2 | Type::I32x4) =>
                     {
                         Ok(t)
                     }
@@ -3776,11 +3744,7 @@ impl<'a> Checker<'a> {
                 match self.base(&ety) {
                     Type::Err => Ok(Type::Err),
                     // Only on an array, so a record's `length` field still reads.
-                    Type::Array(_) | Type::ArrayN(..) | Type::SmallArray(..)
-                        if field == "length" =>
-                    {
-                        Ok(Type::Int)
-                    }
+                    t if t.is_seq() && field == "length" => Ok(Type::Int),
                     Type::Map(..) if field == "length" => Ok(Type::Int),
                     Type::Str if field == "byteLength" => Ok(Type::Int),
                     // Reading a `lazy T` field forces it and yields `T`.
@@ -4315,12 +4279,6 @@ impl<'a> Checker<'a> {
                 BitAnd | BitOr | BitXor | Shl | Shr => Err(cerr!(line, ParamBitwise, t)),
             };
         }
-        let numeric = |t: &Type| {
-            matches!(
-                t,
-                Type::Int | Type::Float | Type::Float32 | Type::IntN { .. }
-            )
-        };
         let code = Type::Named("Code".to_string());
         match op {
             // `Code + Code` concatenates fragments.
@@ -4351,7 +4309,7 @@ impl<'a> Checker<'a> {
                 Ok(l)
             }
             Add | Sub | Mul | Div => {
-                if l == r && numeric(&l) {
+                if l == r && l.is_numeric() {
                     Ok(l)
                 } else if op == Add && (l == Type::Str || r == Type::Str) {
                     Err(cerr!(line, ConcatOperands, l, r))
@@ -4360,7 +4318,7 @@ impl<'a> Checker<'a> {
                 }
             }
             Rem => {
-                if l == r && matches!(l, Type::Int | Type::IntN { .. }) {
+                if l == r && l.is_integral() {
                     Ok(l)
                 } else if matches!(l, Type::Float | Type::Float32)
                     || matches!(r, Type::Float | Type::Float32)
@@ -4377,14 +4335,14 @@ impl<'a> Checker<'a> {
             }
             // Strings order byte-wise, not by locale.
             Lt | LtEq | Gt | GtEq => {
-                if l == r && (numeric(&l) || l == Type::Str) {
+                if l == r && (l.is_numeric() || l == Type::Str) {
                     Ok(Type::Bool)
                 } else {
                     Err(cerr!(line, CompareOperands, l, r))
                 }
             }
             Eq | NotEq => {
-                if l == r && (numeric(&l) || matches!(l, Type::Bool | Type::Str)) {
+                if l == r && l.is_scalar() {
                     Ok(Type::Bool)
                 } else {
                     Err(cerr!(line, EqualityOperands, l, r))
@@ -4399,10 +4357,9 @@ impl<'a> Checker<'a> {
             }
             // A shift amount has the shifted value's type.
             BitAnd | BitOr | BitXor | Shl | Shr => {
-                let integral = |t: &Type| matches!(t, Type::Int | Type::IntN { .. });
-                if l == r && integral(&l) {
+                if l == r && l.is_integral() {
                     Ok(l)
-                } else if integral(&l) && integral(&r) {
+                } else if l.is_integral() && r.is_integral() {
                     Err(cerr!(line, BitwiseMismatch, l, r))
                 } else {
                     Err(cerr!(line, BitwiseOperands, l, r))
@@ -4451,13 +4408,6 @@ impl<'a> Checker<'a> {
                 (Type::F32x4, Type::Float32, "F32x4", 4)
             }
         };
-        // The lane count of a receiver, for the accessors named per operation.
-        let lanes_of = |t: &Type| -> i64 {
-            match t {
-                Type::F64x2 | Type::Mask64x2 => 2,
-                _ => 4,
-            }
-        };
         match name {
             "F32x4" | "I32x4" | "F64x2" => {
                 let (vec, lane, what, lanes) = width(name);
@@ -4489,15 +4439,10 @@ impl<'a> Checker<'a> {
                 if matches!(v, Type::Err) {
                     return Ok(Type::Err);
                 }
-                // A mask lane reads as a `Bool`.
-                let out = match v {
-                    Type::F32x4 => Type::Float32,
-                    Type::I32x4 => INT32,
-                    Type::F64x2 => Type::Float,
-                    Type::Mask32x4 | Type::Mask64x2 => Type::Bool,
-                    other => return Err(cerr!(line, LaneReceiver, other)),
+                let Some((lanes, out)) = v.lanes() else {
+                    return Err(cerr!(line, LaneReceiver, other = v));
                 };
-                let lanes = lanes_of(&v);
+                let lanes = i64::from(lanes);
                 if crate::types::const_lane(&args[1], lanes).is_none() {
                     return Err(cerr!(line, LaneIndex, max = lanes - 1));
                 }
@@ -4513,15 +4458,12 @@ impl<'a> Checker<'a> {
                 if matches!(v, Type::Err) {
                     return Ok(Type::Err);
                 }
-                let lane = match v {
-                    Type::F32x4 => Type::Float32,
-                    Type::I32x4 => INT32,
-                    Type::F64x2 => Type::Float,
+                let (lanes, lane) = match v.lanes() {
+                    Some((n, lane)) if lane != Type::Bool => (i64::from(n), lane),
                     _ => return Err(cerr!(line, ReplaceLaneReceiver, v)),
                 };
                 // Constant, as for `lane`: the replace-lane opcodes take an
                 // immediate.
-                let lanes = lanes_of(&v);
                 if crate::types::const_lane(&args[1], lanes).is_none() {
                     return Err(cerr!(line, ReplaceLaneIndex, max = lanes - 1));
                 }
@@ -4773,18 +4715,7 @@ impl<'a> Checker<'a> {
             if matches!(a, Type::Err) || matches!(b, Type::Err) {
                 return Ok(Type::Unit);
             }
-            let equatable = |t: &Type| {
-                matches!(
-                    t,
-                    Type::Int
-                        | Type::Float
-                        | Type::Float32
-                        | Type::IntN { .. }
-                        | Type::Bool
-                        | Type::Str
-                )
-            };
-            if a != b || !equatable(&a) {
+            if a != b || !a.is_scalar() {
                 return Err(cerr!(line, AssertEqOperands, a, b));
             }
             return Ok(Type::Unit);
@@ -4865,16 +4796,7 @@ impl<'a> Checker<'a> {
                 "@codeSplice" => {
                     let t = self.base(&self.expr(&args[0], scope, None, fn_ret)?);
                     self.expr(&args[1], scope, Some(&Type::Int), fn_ret)?;
-                    let ok = matches!(
-                        t,
-                        Type::Str
-                            | Type::Int
-                            | Type::IntN { .. }
-                            | Type::Float
-                            | Type::Float32
-                            | Type::Bool
-                            | Type::Err
-                    ) || t == code();
+                    let ok = t.is_scalar() || t == Type::Err || t == code();
                     if !ok {
                         return Err(cerr!(line, QuoteSplice, t));
                     }
@@ -5026,17 +4948,16 @@ impl<'a> Checker<'a> {
                 self.prove_coercion(&args[1], &key, line)?;
                 return Ok(Type::option(*val));
             }
-            let elem = match self.base(&at) {
-                Type::Array(inner) | Type::ArrayN(inner, _) | Type::SmallArray(inner, _) => {
-                    (*inner).clone()
-                }
+            let base = self.base(&at);
+            let elem = match (base.elem(), &base) {
+                (Some(e), _) => e.clone(),
                 // `s[i]` is a byte, as in `bytes(s)`.
-                Type::Str => Type::IntN {
+                (None, Type::Str) => Type::IntN {
                     bits: 8,
                     signed: false,
                 },
-                Type::Err => return Ok(Type::Err),
-                other => return Err(cerr!(line, IndexReceiver, other)),
+                (None, Type::Err) => return Ok(Type::Err),
+                (None, other) => return Err(cerr!(line, IndexReceiver, other)),
             };
             let i = self.base(&self.expr(&args[1], scope, Some(&Type::Int), fn_ret)?);
             if matches!(i, Type::Err) {
@@ -5189,10 +5110,7 @@ impl<'a> Checker<'a> {
             if matches!(src, Type::Err) {
                 return Ok(Type::Err);
             }
-            if !matches!(
-                src,
-                Type::Int | Type::Float | Type::Float32 | Type::IntN { .. }
-            ) {
+            if !src.is_numeric() {
                 return Err(cerr!(line, ConversionType, name, src));
             }
             return Ok(target);
@@ -6889,13 +6807,7 @@ fn intn_range(bits: u8, signed: bool) -> String {
 /// Whether a type may cross an `extern` boundary: a scalar by value, a
 /// `String` as `(ptr, len)`. `allow_unit` is for the return position.
 fn extern_abi_type_ok(ty: &Type, allow_unit: bool) -> bool {
-    match ty {
-        Type::Int | Type::IntN { .. } | Type::Float | Type::Float32 | Type::Bool | Type::Str => {
-            true
-        }
-        Type::Unit => allow_unit,
-        _ => false,
-    }
+    ty.is_scalar() || (allow_unit && *ty == Type::Unit)
 }
 
 /// Refuses a `gen fn` that reaches, through any call chain, an `extern`,
