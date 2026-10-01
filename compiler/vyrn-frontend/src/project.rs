@@ -1055,9 +1055,15 @@ fn index_text(e: Option<&Expr>) -> String {
     }
 }
 
-/// Returns `program`'s user projection names.
+/// Returns the names a call can read as a user projection: `program`'s
+/// projection names that no function has. The checker types `x.f(..)` as an
+/// access only where no function is named `f`, so a function always wins.
 pub fn place_names(program: &Program) -> HashSet<String> {
-    all(program).map(|(_, f)| f.name.clone()).collect()
+    let fns: HashSet<&str> = program.functions.iter().map(|f| f.name.as_str()).collect();
+    (all(program).map(|(_, f)| &f.name))
+        .filter(|n| !fns.contains(n.as_str()))
+        .cloned()
+        .collect()
 }
 
 #[cfg(test)]

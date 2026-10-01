@@ -1808,13 +1808,13 @@ impl<'a> Builder<'a> {
     }
 
     /// Whether a call by this name lends: `a[i]` and its seeded element row, a
-    /// lending prelude row, a projection. A call that hands its argument back
-    /// depends on the argument ([`Self::lends`]).
+    /// lending prelude row, a projection no function shadows. A call that
+    /// hands its argument back depends on the argument ([`Self::lends`]).
     fn lends_name(&self, name: &str) -> bool {
         name == vyrn_frontend::project::AT
             || name == vyrn_frontend::project::ELEM
             || prelude::lends(name)
-            || self.projection(name).is_some()
+            || self.own.place_names.contains(name)
     }
 
     fn projection(&self, name: &str) -> Option<&'a Function> {

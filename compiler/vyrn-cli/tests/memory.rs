@@ -1887,6 +1887,59 @@ fn a_name_held_at_a_returned_match_is_reported_reclaimed_and_is() {
     );
 }
 
+// A function and a projection member of one name: a call `shout(..)` names
+// the function, because a function always wins, so its result owns a String
+// and is not a view into its argument.
+const SHADOWED_PROJECTION: &str = r#"type Ledger = { labels: Array<String> }
+
+impl Index for Ledger {
+    fn at(read self, i: Int64) -> read String {
+        return self.labels[i]
+    }
+
+    fn shout(read self, i: Int64) -> read String {
+        return self.labels[i]
+    }
+}
+
+fn shout(s: String) -> String {
+    return s + "!"
+}
+
+fn main() -> Int64 {
+    let r = shout("ab" + "cd")
+    print(r)
+    return 0
+}
+"#;
+
+#[test]
+fn a_call_named_like_a_projection_member_owns_the_function_result() {
+    let dir = std::env::temp_dir().join(format!("vyrn-shoutproj-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("s.vyrn");
+    std::fs::write(&file, SHADOWED_PROJECTION).unwrap();
+    let vyrn = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_vyrn"))
+            .env("VYRN_LEAK_CHECK", "1")
+            .args(args)
+            .arg(&file)
+            .output()
+            .expect("vyrn")
+    };
+    let why = vyrn(&["why", "--memory"]);
+    let run = vyrn(&["run"]);
+    let _ = std::fs::remove_dir_all(&dir);
+    let text = String::from_utf8_lossy(&why.stdout);
+    assert!(
+        text.contains("r                reclaimed at block exit — freeing the String buffer"),
+        "{text}"
+    );
+    let audit = String::from_utf8_lossy(&run.stderr);
+    assert_eq!(run.status.code(), Some(0), "the free audit: {audit}");
+}
+
 // A store into an owned place releases what the place held, and the release
 // is the whole value's: a boxed payload's contents, an element, a String
 // riding in a payload word. Each store below displaced a value whose heap
