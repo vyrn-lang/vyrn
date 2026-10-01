@@ -290,6 +290,7 @@ fn load(
         audience: None,
         artifacts: None,
         expansions,
+        session: None,
         nest: Default::default(),
     };
     let resolver = MapResolver(

@@ -12,8 +12,10 @@
 //! placer found owed in every body, and `VYRN_KERNEL_TRACE=<fn>` prints that body's core.
 
 use vyrn_frontend::loader::DiskResolver;
+use vyrn_frontend::session::Session;
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use vyrn_frontend::ast::Program;
 
@@ -24,12 +26,14 @@ fn repo_root() -> PathBuf {
     d
 }
 
-fn load(path: &std::path::Path) -> Result<Program, String> {
+/// Loads and checks `path`, under `session` if any.
+fn load(path: &std::path::Path, session: Option<&Arc<Session>>) -> Result<Program, String> {
     let src = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
     let root = path.to_string_lossy().replace('\\', "/");
     let opts = vyrn_frontend::loader::LoadOptions {
         std_root: Some(repo_root().join("std").to_string_lossy().replace('\\', "/")),
         expansions: vyrn_frontend::project::Expansions::shared(),
+        session: session.cloned(),
         ..Default::default()
     };
     // Without the engine, an example that imports through a generator fails to
@@ -91,7 +95,7 @@ fn run_corpus() {
     let mut unexpected: Vec<String> = Vec::new();
     let mut programs = 0usize;
     for path in corpus() {
-        let program = match load(&path) {
+        let program = match load(&path, None) {
             Ok(p) => p,
             Err(e) => {
                 // A program the load refuses is left out only when its fixture
@@ -284,7 +288,7 @@ fn run_corpus() {
 /// left out; so an edit inside one function re-judges only its module's bodies.
 #[test]
 fn one_edit_re_judges_one_body() {
-    vyrn_frontend::movecheck::reuse_judgments();
+    let session = Session::new(true);
     let dir = std::env::temp_dir().join(format!("vyrn-judgmemo-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("scratch");
@@ -302,7 +306,7 @@ fn one_edit_re_judges_one_body() {
     // the keystroke this counts.
     let run = || {
         vyrn_frontend::movecheck::reset_judgment_tally();
-        load(&dir.join("main.vyrn")).expect("the program loads");
+        load(&dir.join("main.vyrn"), Some(&session)).expect("the program loads");
         vyrn_frontend::movecheck::judgment_tally()
     };
 
@@ -342,7 +346,7 @@ fn one_edit_re_judges_one_body() {
 /// signatures would move with `aux`'s type.
 #[test]
 fn a_root_signature_edit_re_judges_no_imported_body() {
-    vyrn_frontend::movecheck::reuse_judgments();
+    let session = Session::new(true);
     let dir = std::env::temp_dir().join(format!("vyrn-judgsig-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("scratch");
@@ -362,7 +366,7 @@ fn a_root_signature_edit_re_judges_no_imported_body() {
     };
     let run = || {
         vyrn_frontend::movecheck::reset_judgment_tally();
-        load(&dir.join("main.vyrn")).expect("the program loads");
+        load(&dir.join("main.vyrn"), Some(&session)).expect("the program loads");
         vyrn_frontend::movecheck::judgment_tally()
     };
     root("Int64");
@@ -383,7 +387,7 @@ fn a_root_signature_edit_re_judges_no_imported_body() {
 /// methods by content, not by where they sit.
 #[test]
 fn a_moved_root_line_re_judges_no_imported_body() {
-    vyrn_frontend::movecheck::reuse_judgments();
+    let session = Session::new(true);
     let dir = std::env::temp_dir().join(format!("vyrn-judgline-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("scratch");
@@ -408,7 +412,7 @@ fn a_moved_root_line_re_judges_no_imported_body() {
     };
     let run = || {
         vyrn_frontend::movecheck::reset_judgment_tally();
-        load(&dir.join("main.vyrn")).expect("the program loads");
+        load(&dir.join("main.vyrn"), Some(&session)).expect("the program loads");
         vyrn_frontend::movecheck::judgment_tally()
     };
     root("");
@@ -426,12 +430,12 @@ fn a_moved_root_line_re_judges_no_imported_body() {
 
 /// Serving a body skips its placement as well as its judgment; that is sound because
 /// placed rows have no reader in a host that armed the memo
-/// ([`vyrn_frontend::movecheck::reuse_judgments`]). The string interpolation injects
+/// ([`vyrn_frontend::movecheck::Judgments`]). The string interpolation injects
 /// `std/text`, whose `decodeUtf8` and `test` block are imported bodies the placer
 /// writes a row for.
 #[test]
 fn a_placed_row_does_not_stop_a_body_being_served() {
-    vyrn_frontend::movecheck::reuse_judgments();
+    let session = Session::new(true);
     let dir = std::env::temp_dir().join(format!("vyrn-judgrows-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("scratch");
@@ -442,7 +446,7 @@ fn a_placed_row_does_not_stop_a_body_being_served() {
     );
     let run = || {
         vyrn_frontend::movecheck::reset_judgment_tally();
-        load(&dir.join("main.vyrn")).expect("the program loads");
+        load(&dir.join("main.vyrn"), Some(&session)).expect("the program loads");
         vyrn_frontend::movecheck::judgment_tally()
     };
     let root = |tail: &str| {

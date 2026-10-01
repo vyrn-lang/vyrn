@@ -31,6 +31,7 @@ use vyrn_frontend::ast::{
 };
 use vyrn_frontend::checker;
 use vyrn_frontend::own::DropKind;
+use vyrn_frontend::session::locked;
 use vyrn_frontend::types::{
     expanded_size, mentions_param, substitute, type_depth, MONO_DEPTH_LIMIT, MONO_SIZE_LIMIT,
 };
@@ -713,39 +714,37 @@ pub(crate) fn walked<'i, 'a>(
 /// next keystroke finds its walk.
 const WALK_STALE: u64 = 2;
 
-thread_local! {
-    static WALKS: std::cell::RefCell<(u64, HashMap<(u64, Vec<Type>), Kept>)> =
-        Default::default();
-}
-
-/// The calls one walk found, and the lowering that last read or wrote them.
-type Kept = (Vec<(String, HashMap<String, Type>)>, u64);
-
-/// The walks a lowering reuses, keyed by the serial of the recheck entry that
-/// holds the body's record ([`checker::Recorded::entries`]) and the type
-/// arguments. Besides the record and the substitution, a walk reads `impls`
+/// The walks a lowering reuses, out of the program's session, keyed by the
+/// serial of the recheck entry that holds the body's record
+/// ([`checker::Recorded::entries`]) and the type arguments. Besides the record and the substitution, a walk reads `impls`
 /// and the expansions. An entry answers only under the recheck world, which
 /// holds every `impl`. A body whose typing expanded a site names a node of
 /// another unit, so no entry holds it.
-struct Walks {
+struct Walks<'a> {
     now: u64,
-    kept: HashMap<(u64, Vec<Type>), Kept>,
+    kept: HashMap<(u64, Vec<Type>), (Vec<(String, HashMap<String, Type>)>, u64)>,
+    /// The session's slot, which holds no walk while this lowering has them.
+    slot: &'a std::sync::Mutex<vyrn_frontend::session::Walks>,
     /// Each function body's serial in this check.
     serials: HashMap<FnId, u64>,
 }
 
-impl Walks {
-    fn open(recorded: &checker::Recorded) -> Walks {
+impl<'a> Walks<'a> {
+    fn open(
+        recorded: &checker::Recorded,
+        slot: &'a std::sync::Mutex<vyrn_frontend::session::Walks>,
+    ) -> Walks<'a> {
         let serials = (recorded.entries.iter())
             .filter_map(|(body, serial)| match body {
                 SourceBody::Fn(i) => Some((FnId::nth(*i as usize), *serial)),
                 _ => None,
             })
             .collect();
-        let (now, kept) = WALKS.with(|w| std::mem::take(&mut *w.borrow_mut()));
+        let (now, kept) = std::mem::take(&mut *locked(slot));
         Walks {
             now: now + 1,
             kept,
+            slot,
             serials,
         }
     }
@@ -770,11 +769,11 @@ impl Walks {
     }
 
     /// Drops every walk unused for [`WALK_STALE`] lowerings and hands the rest
-    /// to the next lowering on this thread.
+    /// to the session's next lowering.
     fn close(mut self) {
         let now = self.now;
         self.kept.retain(|_, (_, used)| *used + WALK_STALE >= now);
-        WALKS.with(|w| *w.borrow_mut() = (now, self.kept));
+        *locked(self.slot) = (now, self.kept);
     }
 }
 
@@ -787,7 +786,9 @@ fn build<'a>(
     // Typing expanded every site a walk reads, so the lowering makes no
     // expansion tree, and its walks run on many threads.
     let _sealed = program.expansions.seal();
-    let mut walks = reuse.then(|| Walks::open(recorded));
+    let mut walks = (program.session.get())
+        .filter(|_| reuse)
+        .map(|s| Walks::open(recorded, &s.walks));
     let no_steps: Vec<Release> = Vec::new();
     let by_name = by_name(program);
     let decls = ownership.proto.types();

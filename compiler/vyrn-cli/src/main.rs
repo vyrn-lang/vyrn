@@ -1219,7 +1219,7 @@ fn why_audience(file: &str) -> ExitCode {
     match (&fenced, &map) {
         (Some(who), _) => println!("  audience: {who}"),
         (None, Some(map)) => {
-            let v = vyrn_frontend::audience::audience_of(&path, map);
+            let v = vyrn_frontend::audience::audience_of(&path, map, None);
             println!("  audience: {} — {}", v.audience.phrase(), v.because());
         }
         (None, None) => {

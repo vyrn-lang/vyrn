@@ -978,6 +978,7 @@ impl Parser {
                 units: 0,
                 expansions: Default::default(),
                 spellings: Default::default(),
+                session: Default::default(),
             },
             errors,
         )

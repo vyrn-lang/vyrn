@@ -140,7 +140,7 @@ pub fn refusals(
     record: Arc<checker::Recorded>,
 ) -> (Vec<Diagnostic>, Arc<crate::World>) {
     // The placer judges a core body for every instance. Only this analysis
-    // may reuse a judgment (`movecheck::reuse_judgments`).
+    // may reuse a judgment (`movecheck::Judgments`).
     let world = crate::world::analyzed(program, record, true);
     // A program the typed judgment refuses gets those refusals alone.
     let mut diags = match world.typed_diagnostics() {

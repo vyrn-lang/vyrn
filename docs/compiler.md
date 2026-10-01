@@ -99,10 +99,10 @@ the playground serves an embedded `std/`. The loader:
 A thread's later loads reuse what one text alone decides: a module's parse and
 the names it references, keyed by its text, and each generator cache entry the
 load read, validated against its inputs again. So an editor keystroke parses
-only the edited text. A host that is told of every file change
-(`loader::watch_disk`) also keeps each file's text, each directory's listing
-and each canonical path under the directories it watches, until
-`loader::disk_changed` names the path. Any other host reads every module and
+only the edited text. A host that is told of every file change keeps, in its
+`session::Session`, each file's text, each directory's listing and each
+canonical path under the directories it watches (`Session::watch`), until
+`Session::changed` names the path. Any other host reads every module and
 generator input on every load. Every load links the whole program again.
 
 `vyrn_lower::check_and_synthesize` then runs, in order, the frontend's
@@ -158,10 +158,11 @@ document as `vyrn_lower::load` does, an untitled buffer as `untitled.vyrn` in
 the working directory, and hands the linked program and the load's pending
 floor decision to the `Judge` it is given (`vyrn_lower::JUDGE`: the steps
 above). Around it the editor keeps what only it needs: the parser's recovery,
-so a partial program is still indexed; the per-body judgment memo; the
-per-body recheck (`checker::recheck`), which types a body again only when
-its text or one of its reads' answers changed; the lowering's walk of each
-body the recheck holds, which the placer's worklist reuses; the diagnostics' columns; and the memory rows the `Judge` copies off the World. `symbols::analyze` and `analyze_linked` run the checker alone. Each
+so a partial program is still indexed; in the `session::Session` its server
+owns, the per-body judgment memo, the per-body recheck (`checker::recheck`),
+which types a body again only when its text or one of its reads' answers
+changed, and the lowering's walk of each body the recheck holds, which the
+placer's worklist reuses; the diagnostics' columns; and the memory rows the `Judge` copies off the World. `symbols::analyze` and `analyze_linked` run the checker alone. Each
 returns diagnostics with columns, the symbol index and the tokens. `vyrn-lsp`
 serves hover, definition, completion, references and rename from that
 `Analysis`, and holds no rule of its own.

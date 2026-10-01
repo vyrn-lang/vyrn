@@ -18,14 +18,8 @@ use std::path::{Path, PathBuf};
 /// path the OS cannot resolve: a remote key, an in-memory module, a missing
 /// file.
 pub fn real_path(path: &str) -> Option<String> {
-    crate::loader::on_disk(
-        |d| &mut d.reals,
-        path,
-        || {
-            let p = Path::new(path).canonicalize().ok()?;
-            Some(dos_to_slash(&p.to_string_lossy()))
-        },
-    )
+    let p = Path::new(path).canonicalize().ok()?;
+    Some(dos_to_slash(&p.to_string_lossy()))
 }
 
 /// Returns a canonical Windows path slash-separated and prefix-free.
@@ -599,7 +593,7 @@ mod tests {
             "an entry point that is not written yet still hangs off that base"
         );
         let key = format!("{canon}/server/store.vyrn");
-        assert_eq!(audience_of(&key, &m).audience, Audience::Server);
+        assert_eq!(audience_of(&key, &m, None).audience, Audience::Server);
     }
 
     /// An artifact entry hangs off the audience base, and a contradictory
