@@ -3368,6 +3368,30 @@ mod tests {
     }
 
     #[test]
+    fn an_imported_impl_binds_nothing_in_the_root() {
+        use crate::loader::{LoadOptions, MapResolver};
+        let api = "export type Box = { n: Int64 }\n\
+                   protocol Size {\n\
+                   fn size(self) -> Int64\n\
+                   }\n\
+                   impl Size for Box {\n\
+                   fn size(self) -> Int64 {\n\
+                   let stray = self.n\n\
+                   return stray\n\
+                   }\n\
+                   }";
+        let resolver = MapResolver([("api.vyrn".to_string(), api.to_string())].into());
+        let root = "import { Box } from \"./api\"\nfn main() -> Int64 { return 0 }";
+        let a = analyze_linked(root, "main.vyrn", &LoadOptions::default(), &resolver, None);
+        assert!(a.diagnostics.is_empty(), "diags: {:?}", a.diagnostics);
+        assert!(
+            !a.locals.iter().any(|b| b.name == "stray"),
+            "{:?}",
+            a.locals
+        );
+    }
+
+    #[test]
     fn analyze_linked_indexes_namespace_members() {
         // `import * as ns` indexes the module's exports for `ns.` completion and
         // `ns.member` hover and go-to-definition.
