@@ -140,15 +140,11 @@ impl std::fmt::Display for Effects {
 /// is pure.
 ///
 /// `extern` has no row: whoever builds the call graph resolves an `extern fn`
-/// declaration ([`Callee::Atom`]). The three host-boundary externs
-/// are rows, because the runtime implements them on every target: a clock and
-/// a seed, not an import.
+/// declaration and asks [`extern_effect`]. A function the program declares
+/// under a host-boundary name is an ordinary function.
 const RUNTIME_ATOMS: &[(&str, Effect)] = &[
     ("runtime$malloc", Effect::Alloc),
     ("mem$grow", Effect::Alloc),
-    ("hostNowMillis", Effect::Clock),
-    ("hostMonotonicNanos", Effect::Clock),
-    ("hostRandomSeed", Effect::Random),
     ("runtime$trap", Effect::Trap),
     ("mem$trap", Effect::Trap),
 ];
@@ -159,6 +155,18 @@ pub fn atoms() -> impl Iterator<Item = (&'static str, Effect)> {
         .iter()
         .filter_map(|b| Some((b.name, b.effect?)))
         .chain(RUNTIME_ATOMS.iter().copied())
+}
+
+/// Returns the effect of a call to `f` if it is an `extern fn`: a
+/// host-boundary extern ([`crate::trap::HOST_EXTERNS`]) reads the clock or
+/// entropy, which the runtime implements on every target; any other is a
+/// host import. `None` for a function with a body.
+pub fn extern_effect(f: &crate::ast::Function) -> Option<Effect> {
+    let host = crate::trap::HOST_EXTERNS
+        .iter()
+        .find(|(n, ..)| *n == f.name);
+    f.is_extern
+        .then(|| host.map_or(Effect::Extern, |(.., e)| *e))
 }
 
 /// Returns the effect of the atom `name`.
@@ -219,19 +227,28 @@ pub fn gen_allows(name: &str) -> bool {
 }
 
 /// Returns why the fence refuses `name`, for the diagnostic's "it ..." clause;
-/// the reason follows the row, not the spelling. The clock and entropy rows
-/// have their own words: those host-boundary names are not host imports.
+/// the reason follows the row, not the spelling.
 pub fn gen_refusal(name: &str) -> Option<String> {
-    if gen_allows(name) {
-        return None;
-    }
-    Some(match atom(name) {
+    (!gen_allows(name)).then(|| refusal(atom(name), name))
+}
+
+/// [`gen_refusal`] for a call to the declared `extern fn` `f`; `None` for a
+/// function with a body. Every extern is refused.
+pub fn extern_gen_refusal(f: &crate::ast::Function) -> Option<String> {
+    Some(refusal(Some(extern_effect(f)?), &f.name))
+}
+
+/// The "it ..." clause for a call to `name` of effect `e`. The clock and
+/// entropy have their own words: a host-boundary extern is no host import.
+fn refusal(e: Option<Effect>, name: &str) -> String {
+    match e {
         Some(Effect::Clock) => "reads the clock".to_string(),
         Some(Effect::Random) => "reads entropy".to_string(),
+        Some(Effect::Extern) => format!("calls the extern `{name}`"),
         // Name the word the source wrote: `@info` is the sugar's internal spelling of
         // `log.info(..)`, and no source can lex it.
         _ => format!("calls `{}`", crate::prelude::method_surface(name)),
-    })
+    }
 }
 
 /// What the effect judgment reads of one frame, before any callee is
@@ -304,15 +321,8 @@ mod tests {
                 Some(&*format!("calls `{n}`"))
             );
         }
-        // The reason is the row, not "the extern".
-        assert_eq!(
-            gen_refusal("hostNowMillis").as_deref(),
-            Some("reads the clock")
-        );
-        assert_eq!(
-            gen_refusal("hostRandomSeed").as_deref(),
-            Some("reads entropy")
-        );
+        // A host-boundary spelling is no atom: its declaration decides.
+        assert!(gen_allows("hostRandomSeed"));
         // The route splits the fs-read row.
         assert!(gen_allows("readFile"));
         assert!(!gen_allows("readFileBytes"));

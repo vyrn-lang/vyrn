@@ -19,7 +19,8 @@ use vyrn_frontend::core::{rows, Arg, Body, Name, Place, Rhs, St};
 /// The lattice's table lives in `vyrn_frontend::effects` because the
 /// generation fence reads it mid-check and cannot see this crate.
 pub use vyrn_frontend::effects::{
-    atom, atoms, gen_allows, gen_refusal, Call, Effect, Effects, Walked, GEN_ATOM_OVERRIDES,
+    atom, atoms, extern_effect, gen_allows, gen_refusal, Call, Effect, Effects, Walked,
+    GEN_ATOM_OVERRIDES,
 };
 
 /// The callee names with no effect of their own and no body to judge: a
@@ -610,18 +611,15 @@ pub(crate) fn judge_built<R>(
     }
     let decls = own.proto.types();
     let pure = PureNames::new(decls);
-    let externs: std::collections::BTreeSet<&str> = program
-        .functions
-        .iter()
-        .filter(|f| f.is_extern)
-        .map(|f| f.name.as_str())
+    let externs: std::collections::BTreeMap<&str, Effect> = (program.functions.iter())
+        .filter_map(|f| Some((f.name.as_str(), extern_effect(f)?)))
         .collect();
     let mut resolve = |name: &str| -> Callee {
         if let Some(e) = atom(name) {
             return Callee::Atom(Effects::of(e));
         }
-        if externs.contains(name) {
-            return Callee::Atom(Effects::of(Effect::Extern));
+        if let Some(&e) = externs.get(name) {
+            return Callee::Atom(Effects::of(e));
         }
         if let Some(idx) = by_name.get(name) {
             return Callee::Bodies(idx.clone());

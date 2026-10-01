@@ -6890,13 +6890,10 @@ fn check_comptime_purity<'a>(
         .iter()
         .map(|f| (f.name.as_str(), f))
         .collect();
-    // `hostNowMillis` and its neighbours are no host imports (the shim
-    // implements them); `gen_refusal` refuses them as `clock` and `random`.
-    let extern_fns: std::collections::HashSet<&str> = program
-        .functions
-        .iter()
-        .filter(|f| f.is_extern && crate::trap::host_boundary_extern(&f.name).is_none())
-        .map(|f| f.name.as_str())
+    // A call to a declared extern is refused by its declaration, so a
+    // function spelled like a host-boundary extern is an ordinary one.
+    let extern_refusals: HashMap<&str, String> = (program.functions.iter())
+        .filter_map(|f| Some((f.name.as_str(), crate::effects::extern_gen_refusal(f)?)))
         .collect();
     let global_names: std::collections::HashSet<String> =
         program.globals.iter().map(|g| g.name.clone()).collect();
@@ -6910,11 +6907,9 @@ fn check_comptime_purity<'a>(
             return Some("reads or writes module state".to_string());
         }
         for c in fn_calls(&f.body) {
-            if let Some(why) = crate::effects::gen_refusal(&c) {
+            let why = extern_refusals.get(c.as_str()).cloned();
+            if let Some(why) = why.or_else(|| crate::effects::gen_refusal(&c)) {
                 return Some(why);
-            }
-            if extern_fns.contains(c.as_str()) {
-                return Some(format!("calls the extern `{c}`"));
             }
         }
         None
@@ -7795,7 +7790,7 @@ mod tests {
                 continue;
             }
             assert!(
-                RESERVED.contains(&n) || crate::trap::host_boundary_extern(n).is_some(),
+                RESERVED.contains(&n),
                 "`{n}` is forbidden inside a `gen fn` but is not a name the \
                  compiler owns — it now forbids any user function spelled that way"
             );
