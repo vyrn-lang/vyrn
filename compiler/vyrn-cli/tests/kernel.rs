@@ -424,6 +424,48 @@ fn a_moved_root_line_re_judges_no_imported_body() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A doc comment edit on a root protocol or its member re-types and re-judges
+/// no body: no check reads a doc, so neither fingerprint holds one.
+#[test]
+fn a_root_protocol_doc_edit_re_types_and_re_judges_no_body() {
+    vyrn_frontend::movecheck::reuse_judgments();
+    vyrn_frontend::checker::record_reads();
+    let dir = std::env::temp_dir().join(format!("vyrn-judgdoc-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("scratch");
+    let write = |name: &str, text: &str| std::fs::write(dir.join(name), text).expect("write");
+    write(
+        "b.vyrn",
+        "export fn bTwo(x: Int64) -> Int64 { return x + 2 }\n",
+    );
+    let root = |doc: &str| {
+        write(
+            "main.vyrn",
+            &format!(
+                "import {{ bTwo }} from \"./b\"\n\
+                 type Pair = {{ a: Int64, b: Int64 }}\n\
+                 /// {doc}\nprotocol Sized {{\n  /// {doc}\n  fn size(self) -> Int64\n}}\n\
+                 impl Sized for Pair {{\n  fn size(self) -> Int64 {{ return self.a }}\n}}\n\
+                 fn main() -> Int64 {{\n  return bTwo(1) + Pair {{ a: 1, b: 2 }}.size()\n}}\n"
+            ),
+        )
+    };
+    let run = || {
+        let _ = vyrn_frontend::checker::recheck::tally();
+        vyrn_frontend::movecheck::reset_judgment_tally();
+        load(&dir.join("main.vyrn")).expect("the program loads");
+        let (typed, _) = vyrn_frontend::checker::recheck::tally();
+        let (judged, served) = vyrn_frontend::movecheck::judgment_tally();
+        (typed, judged, served)
+    };
+    root("The size.");
+    let (_, cold, _) = run();
+    assert!(cold > 0, "the first run judges every body it can key");
+    root("The size, in words.");
+    assert_eq!(run(), (0, 0, cold), "a doc comment edit serves every body");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// Serving a body skips its placement as well as its judgment; that is sound because
 /// placed rows have no reader in a host that armed the memo
 /// ([`vyrn_frontend::movecheck::reuse_judgments`]). The string interpolation injects

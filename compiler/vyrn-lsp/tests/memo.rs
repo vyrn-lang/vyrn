@@ -274,3 +274,28 @@ fn a_moved_root_line_keeps_an_imported_instances_verdict() {
     let _ = std::fs::remove_dir_all(&dir);
     assert!(got.is_none(), "{}", got.unwrap_or_default());
 }
+
+/// A doc comment edited on a root protocol and its member keeps
+/// `ignore<Txn>`'s verdict served: no fingerprint holds a doc.
+#[test]
+fn a_root_protocol_doc_edit_keeps_an_imported_instances_verdict() {
+    let dir = scratch("rootdoc");
+    let root = |doc: &str| {
+        format!(
+            "{}/// {doc}\nprotocol Sized {{\n  /// {doc}\n  fn size(self) -> Int64\n}}\n",
+            txn(true)
+        )
+    };
+    let (first, second) = (root("The size."), root("The size, in words."));
+    let got = drift(
+        &dir,
+        "is never disposed",
+        &[
+            &[("b.vyrn", IGNORES), ("main.vyrn", &root("A size."))],
+            &[("main.vyrn", &first)],
+            &[("main.vyrn", &second)],
+        ],
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(got.is_none(), "{}", got.unwrap_or_default());
+}

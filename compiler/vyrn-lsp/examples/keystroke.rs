@@ -15,7 +15,9 @@
 //!   root spells most often, a signature edit every reader of it sees;
 //! - `param` changes the type of the first parameter of the function `sig`
 //!   picks, from its own to `Int32` and back (`Int64` where it is `Int32`);
-//! - `line` puts `1 + i` blank lines before the root, moving every line.
+//! - `line` puts `1 + i` blank lines before the root, moving every line;
+//! - `doc` appends a protocol whose doc comment and member's doc comment
+//!   name the edit.
 //!
 //! Only `line` moves a line. Prints the best and the median of `VYRN_RUNS` edits
 //! (5 by default) after three warm-up edits, then how many bodies one more edit
@@ -171,6 +173,10 @@ fn edit(src: &str, i: usize) -> String {
         }
         Ok("param") => src.to_string(),
         Ok("line") => format!("{}{src}", "\n".repeat(1 + i)),
+        Ok("doc") => format!(
+            "{src}\n/// Edit {i}.\nprotocol KeystrokeDoc {{\n  /// Edit {i}.\n  \
+             fn keystrokeDoc(self) -> Int64\n}}\n"
+        ),
         _ => format!("{src}\n// keystroke {i}\n"),
     }
 }
