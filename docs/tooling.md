@@ -184,7 +184,8 @@ compile.
 - `vyrn why <file>`: the module's audience, the path segment that decided it,
   and every import chain that reaches it.
 - `vyrn why --contract <file>`: the module contract that governs the file and
-  each export's status against it. Exits 1 if the file has no role.
+  each export's status against it, as `std/contract` reports it. Exits 1 if the
+  file has no role.
 - `vyrn why --memory <file>`: per binding, whether it is reclaimed, how, and the
   reason when it is not. The LSP's hover and inlay hints use the same table and
   wording.

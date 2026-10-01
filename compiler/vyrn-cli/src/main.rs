@@ -952,66 +952,98 @@ fn why_cmd(call: &Call) -> Outcome {
     } else {
         raw
     };
+    let parsed = |text: &str| {
+        vyrn_frontend::lexer::lex(text)
+            .ok()
+            .map(|t| vyrn_frontend::parser::parse_accum(t).0)
+    };
+    let decl = vyrn_frontend::loader::ModuleResolver::read(&DiskResolver, &view.file)
+        .ok()
+        .and_then(|s| parsed(&s))
+        .and_then(|p| p.contracts.into_iter().find(|c| c.name == view.name));
+    let (Some(mut decl), Some(module)) = (decl, parsed(&source)) else {
+        eprintln!("error: cannot lex {path} or {}", view.file);
+        return ExitCode::FAILURE;
+    };
+    // The generator's `contractOf` names the module as its importer wrote it.
+    decl.module = Some(view.module.clone());
+    let verdict = match contract_verdict(&decl, &module, &path) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("error: std/contract cannot judge {path}: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
 
     println!("{path}");
     println!("  role: {}", role.scope);
     println!("  contract: {} ({})", view.name, view.module);
     println!("  declared in: {}", view.file);
     let mut objections = 0;
-    for e in vyrn_frontend::contracts::contract_status(&view, &source, &synthesized) {
-        use vyrn_frontend::contracts::MemberStatus::*;
-        let line = match &e.status {
+    // `checkContract` reports at most one issue per name: a member's, or that
+    // of an export the contract does not name.
+    let mut objection = |name: &str| {
+        let (key, _, message) = verdict.issues.iter().find(|(_, at, _)| at == name)?;
+        objections += 1;
+        let label = match key.as_str() {
+            "contract.missing" => "MISSING ",
+            "contract.type" | "contract.open" => "MISMATCH",
+            "contract.unknown" | "contract.unknown.didYouMean" => "UNKNOWN ",
+            other => other,
+        };
+        Some(format!("{label}  {name}: {message}"))
+    };
+    // The exports `moduleInterface` reflects, in source order.
+    let exports: Vec<&str> = module
+        .functions
+        .iter()
+        .filter(|f| f.exported && !f.is_extern)
+        .map(|f| f.name.as_str())
+        .collect();
+    for m in &view.members {
+        let want = m
+            .shapes
+            .iter()
+            .map(|s| s.spelling.as_str())
+            .collect::<Vec<_>>()
+            .join(" or ");
+        let shape = verdict
+            .matched
+            .iter()
+            .find(|(n, _)| *n == m.name)
+            .map_or(-1, |(_, i)| *i);
+        let line = if shape >= 0 {
+            format!(
+                "ok        {}: shape {} of {} — {want}",
+                m.name,
+                shape + 1,
+                m.shapes.len()
+            )
+        } else if synthesized.contains(&m.name) && !exports.contains(&m.name.as_str()) {
             // The file's form writes it: a `.vyx` has no other way to declare
             // a view.
-            Synthesized => {
-                format!(
-                    "ok        {}: the `<template>` compiles to it — {}",
-                    e.name, e.want
-                )
-            }
-            Satisfied { shape } => {
-                let of = view.member(&e.name).map(|m| m.shapes.len()).unwrap_or(1);
-                format!(
-                    "ok        {}: shape {} of {} — {}",
-                    e.name,
-                    shape + 1,
-                    of,
-                    e.want
-                )
-            }
-            Defaulted => format!("default   {}: absent, optional — {}", e.name, e.want),
-            Missing => {
-                objections += 1;
-                format!("MISSING   {}: required — {}", e.name, e.want)
-            }
-            Mismatched { found } => {
-                objections += 1;
-                format!("MISMATCH  {}: wanted {}, found `{found}`", e.name, e.want)
-            }
-            Unknown {
-                did_you_mean: Some(near),
-            } => {
-                objections += 1;
-                format!(
-                    "UNKNOWN   {}: not named by the contract — did you mean `{near}`?",
-                    e.name
-                )
-            }
-            Unknown { did_you_mean: None } => {
-                objections += 1;
-                format!(
-                    "UNKNOWN   {}: not named by the contract (it is closed)",
-                    e.name
-                )
-            }
-            OpenMatched => format!("ok        {}: matches the open rule — {}", e.name, e.want),
-            OpenMismatched { found } => {
-                objections += 1;
-                format!(
-                    "MISMATCH  {}: the open rule wants {}, found `{found}`",
-                    e.name, e.want
-                )
-            }
+            format!(
+                "ok        {}: the `<template>` compiles to it — {want}",
+                m.name
+            )
+        } else if let Some(line) = objection(&m.name) {
+            line
+        } else {
+            format!("default   {}: absent, optional — {want}", m.name)
+        };
+        println!("  {line}");
+    }
+    for name in exports {
+        if view.member(name).is_some() {
+            continue;
+        }
+        let line = match (objection(name), &view.open_rule) {
+            (Some(line), _) => line,
+            (None, Some(rule)) => format!(
+                "ok        {name}: matches the open rule — {}",
+                rule.spelling
+            ),
+            (None, None) => format!("ok        {name}: std/contract raises no issue"),
         };
         println!("  {line}");
     }
@@ -1023,6 +1055,115 @@ fn why_cmd(call: &Call) -> Outcome {
         );
     }
     Ok(ExitCode::SUCCESS)
+}
+
+/// What `std/contract` says of one module: each member's matched shape
+/// (`matchedMember`, -1 for none) in declaration order, and every
+/// `checkContract` issue as `(key, path, message)`.
+struct ContractVerdict {
+    matched: Vec<(String, i64)>,
+    issues: Vec<(String, String, String)>,
+}
+
+/// The program [`contract_verdict`] compiles. Each stub's body is replaced by a
+/// reflection literal before the compile.
+const WHY_CONTRACT_SRC: &str = r#"import { checkContract, matchedMember } from "std/contract"
+
+fn whyContract() -> ContractInfo {
+    return whyContract()
+}
+
+fn whyModule() -> ModuleInterface {
+    return whyModule()
+}
+
+fn main() -> Int64 {
+    let c = whyContract()
+    let m = whyModule()
+    for x in c.members {
+        print("\{x.name}\t\{matchedMember(m, c, x.name)}")
+    }
+    for i in checkContract(m, c) {
+        print("\{i.key}\t\{i.path}\t\{i.message}")
+    }
+    return 0
+}
+"#;
+
+/// Asks `std/contract` what a generator asks of `module`, so `why --contract`
+/// states no matching rule of its own. `decl` is reflected as `contractOf`
+/// reflects it, and `module`, parsed but not linked, as `moduleInterface`
+/// reflects a module.
+fn contract_verdict(
+    decl: &vyrn_frontend::ast::ContractDecl,
+    module: &vyrn_frontend::ast::Program,
+    path: &str,
+) -> Result<ContractVerdict, String> {
+    use vyrn_frontend::ast::{Block, Id, Stmt};
+    use vyrn_frontend::schema_reflect::{contract_info_lit, module_interface_lit, Origins};
+    let opts = vyrn_frontend::loader::LoadOptions {
+        expansions: Expansions::shared(),
+        ..load_options(path)
+    };
+    let mut prog = vyrn_lower::load(
+        WHY_CONTRACT_SRC,
+        "why-contract.vyrn",
+        &opts,
+        &DiskResolver,
+        None,
+    )
+    .map_err(|d| d.first().map(|d| d.message.clone()).unwrap_or_default())?;
+    for f in &mut prog.functions {
+        let lit = match f.name.as_str() {
+            "whyContract" => contract_info_lit(decl),
+            "whyModule" => {
+                module_interface_lit(module, &std::collections::HashMap::new(), &Origins::new([]))
+            }
+            _ => continue,
+        };
+        f.body = Block {
+            id: Id::NEW,
+            stmts: vec![Stmt::Return {
+                id: Id::NEW,
+                value: Some(lit),
+                line: 0,
+            }],
+        };
+    }
+    prog.number();
+    let bytes = vyrn_codegen::direct::compile(&prog, vyrn_lower::analyze(&prog))?;
+    let out = wasmrun::run(
+        &bytes,
+        wasmrun::Run {
+            argv: Vec::new(),
+            stdin_prefix: Vec::new(),
+            capture_stdout: true,
+            capture_stderr: true,
+            meter: false,
+        },
+    )?;
+    if out.code != 0 {
+        return Err(String::from_utf8_lossy(&out.stderr).into_owned());
+    }
+    let mut verdict = ContractVerdict {
+        matched: Vec::new(),
+        issues: Vec::new(),
+    };
+    for line in String::from_utf8_lossy(&out.stdout).lines() {
+        match line.split('\t').collect::<Vec<_>>()[..] {
+            [name, shape] => verdict.matched.push((
+                name.to_string(),
+                shape.parse().map_err(|_| line.to_string())?,
+            )),
+            [key, at, message] => {
+                verdict
+                    .issues
+                    .push((key.to_string(), at.to_string(), message.to_string()))
+            }
+            _ => return Err(format!("unexpected row `{line}`")),
+        }
+    }
+    Ok(verdict)
 }
 
 /// `vyrn routes [file]`: the resolved wire table, with where each path came
