@@ -474,6 +474,8 @@ rules! {
     FnValueArity { name, want, got }
         "`{name}` is a function value taking {want} argument(s), got {got}";
     FnValueArgType { name, arg, pty, aty } "`{name}` argument {arg} expects {pty}, found {aty}";
+    CallsLocal { name, ty } "`{name}` is a local of type {ty}, not a function"
+        fix "rename the local to call the function `{name}`";
     TestOnly { name }
         "`{name}` is only available inside a `test` block — in ordinary \
         code, use a validated type or return a `Result` to signal failure";

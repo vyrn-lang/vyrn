@@ -1133,7 +1133,7 @@ fn check_accum_inner(
 
     // 7. Comptime purity of every `gen fn` and its callees, after
     //    the body checks so a generator's type errors come first.
-    check_comptime_purity(program, &mut out);
+    check_comptime_purity(program, &checker.through.borrow(), &mut out);
     for d in &mut out {
         d.speak(&program.spellings);
     }
@@ -1142,6 +1142,7 @@ fn check_accum_inner(
         sources: checker.stored_sources.borrow().clone(),
         arg_sources: checker.arg_sources.borrow().clone(),
         calls: checker.stored_calls.borrow().clone(),
+        through: checker.through.borrow().clone(),
     };
     let binders = local_index(program, &checker.binder_types.borrow());
     let typed = (in_bodies == out.len()).then_some(refused);
@@ -1572,6 +1573,7 @@ impl Recorded {
         self.stored.sources.extend(tail.stored.sources);
         self.stored.arg_sources.extend(tail.stored.arg_sources);
         self.stored.calls.extend(tail.stored.calls);
+        self.stored.through.extend(tail.stored.through);
         self.reads.extend(tail.reads);
         self.entries.extend(tail.entries);
     }
@@ -1695,6 +1697,8 @@ struct Checker<'a> {
     /// Each call through a stored function value, as (enclosing function,
     /// signature).
     stored_calls: RefCell<Vec<(String, Type)>>,
+    /// See [`StoredFnEffects::through`].
+    through: RefCell<HashSet<NodeId>>,
     derive_sites: RefCell<Vec<crate::gen::Site>>,
     /// The record [`record`] asks for, or `None`, so the editor's keystroke
     /// path does not pay for it.
@@ -1840,6 +1844,7 @@ impl<'a> Checker<'a> {
             stored_sources: Default::default(),
             arg_sources: Default::default(),
             stored_calls: Default::default(),
+            through: Default::default(),
             derive_sites: Default::default(),
             record: recording.then(RefCell::default),
             reader: Default::default(),
@@ -2949,6 +2954,7 @@ impl<'a> Checker<'a> {
                 sources: self.stored_sources.take(),
                 arg_sources: self.arg_sources.take(),
                 calls: self.stored_calls.take(),
+                through: self.through.take(),
             },
             derive: self.derive_sites.take(),
         }
@@ -2964,6 +2970,7 @@ impl<'a> Checker<'a> {
         *self.stored_sources.borrow_mut() = t.stored.sources;
         *self.arg_sources.borrow_mut() = t.stored.arg_sources;
         *self.stored_calls.borrow_mut() = t.stored.calls;
+        *self.through.borrow_mut() = t.stored.through;
         *self.derive_sites.borrow_mut() = t.derive;
     }
 
@@ -2980,6 +2987,7 @@ impl<'a> Checker<'a> {
         self.stored_sources.borrow_mut().extend(t.stored.sources);
         self.arg_sources.borrow_mut().extend(t.stored.arg_sources);
         self.stored_calls.borrow_mut().extend(t.stored.calls);
+        self.through.borrow_mut().extend(t.stored.through);
         self.derive_sites.borrow_mut().extend(t.derive);
         self.reads.borrow_mut().extend(t.reads);
         t.diags
@@ -3698,14 +3706,15 @@ impl<'a> Checker<'a> {
                 self.binop_type(*op, l, r, *line)
             }
             Expr::Call {
-                dot: _,
+                dot,
                 name,
                 args,
                 type_args,
                 line,
                 id: _,
             } => {
-                let t = self.call(name, args, type_args, *line, scope, expected, fn_ret)?;
+                let at = (expr.id(), *dot);
+                let t = self.call(name, at, args, type_args, *line, scope, expected, fn_ret)?;
                 // `schemaOf<T>()` lowers through the literal it stands for, so
                 // the checker types those nodes too (`project::schema`).
                 if let ("schemaOf", [Type::Named(tn) | Type::App(tn, _)], true) =
@@ -4658,9 +4667,12 @@ impl<'a> Checker<'a> {
         Ok(true)
     }
 
+    /// Types the call `at` (its node, and whether it is written `recv.name(..)`).
+    #[allow(clippy::too_many_arguments)]
     fn call(
         &self,
         name: &str,
+        (node, dot): (NodeId, bool),
         args: &[Expr],
         written: &[Type],
         line: usize,
@@ -4668,9 +4680,11 @@ impl<'a> Checker<'a> {
         expected: Option<&Type>,
         fn_ret: Option<&Type>,
     ) -> Result<Type, Diagnostic> {
-        // A call through a binding of function type (parameter, local, field
-        // or module state). Checked before the builtins, so a binding shadows
-        // a same-named builtin.
+        // A call resolves to the nearest binding in scope, before the builtins
+        // and the declared functions: a binding of function type (parameter,
+        // local or module state) is called through. A bare call that a local
+        // of another type binds is refused; a dot call skips that local,
+        // because no such local can be its target.
         if let Some(binding) = self.lookup(scope, name) {
             if let Type::Fn(ptys, ret) = self.base(&binding.ty) {
                 if ptys.len() != args.len() {
@@ -4701,7 +4715,15 @@ impl<'a> Checker<'a> {
                         .borrow_mut()
                         .push((self.cur_fn.borrow().clone(), self.base(&binding.ty)));
                 }
+                self.through.borrow_mut().insert(node);
                 return Ok((*ret).clone());
+            }
+            if !dot && scope.iter().any(|f| f.contains_key(name)) {
+                return match self.base(&binding.ty) {
+                    // The binding's own refusal was stated where it was bound.
+                    Type::Err => Ok(Type::Err),
+                    ty => Err(cerr!(line, CallsLocal, name, ty)),
+                };
             }
         }
         self.call_declared(name, args, written, line, scope, expected, fn_ret)
@@ -6125,7 +6147,8 @@ impl<'a> Checker<'a> {
         // module-state binding it touches.
         let mut calls: std::collections::HashSet<String> = Default::default();
         {
-            let mut v = Calls(&mut calls);
+            let through = self.through.borrow();
+            let mut v = Calls(&mut calls, &through);
             let mut locals = HashSet::new();
             match body {
                 LambdaBody::Expr(e) => body_expr(e, &locals, &mut v),
@@ -6846,7 +6869,7 @@ fn extern_abi_type_ok(ty: &Type, allow_unit: bool) -> bool {
 /// module state, or an atom [`crate::effects::gen_refusal`] refuses, naming
 /// the effect and the chain. Every `gen fn` is checked, even one called only
 /// at run time, because any may be an import target.
-fn check_comptime_purity(program: &Program, out: &mut Vec<Diagnostic>) {
+fn check_comptime_purity(program: &Program, through: &HashSet<NodeId>, out: &mut Vec<Diagnostic>) {
     let gen_fns: Vec<&Function> = program.functions.iter().filter(|f| f.is_gen).collect();
     if gen_fns.is_empty() {
         return;
@@ -6892,7 +6915,7 @@ fn check_comptime_purity(program: &Program, out: &mut Vec<Diagnostic>) {
         if touches_globals(f, &global_names) {
             return Some("reads or writes module state".to_string());
         }
-        for c in expand(fn_calls(&f.body)) {
+        for c in expand(fn_calls(&f.body, through)) {
             if let Some(why) = crate::effects::gen_refusal(&c) {
                 return Some(why);
             }
@@ -6916,7 +6939,10 @@ fn check_comptime_purity(program: &Program, out: &mut Vec<Diagnostic>) {
             let cur = *path.last().unwrap();
             let Some(f) = fn_map.get(cur) else { continue };
             if !facts.contains_key(cur) {
-                facts.insert(cur.to_string(), (direct(f), expand(fn_calls(&f.body))));
+                facts.insert(
+                    cur.to_string(),
+                    (direct(f), expand(fn_calls(&f.body, through))),
+                );
             }
             let (violation, edges) = &facts[cur];
             if let Some(reason) = violation.clone() {
@@ -6982,6 +7008,9 @@ pub struct StoredFnEffects {
     pub arg_sources: Vec<StoredSource>,
     /// `(function, signature)` for each call through a stored fn value.
     pub calls: Vec<(String, Type)>,
+    /// Every call node resolved through a binding of `fn` type, parameter
+    /// calls included ([`Checker::call`]); [`fn_calls`] leaves them out.
+    pub through: HashSet<NodeId>,
 }
 
 impl StoredFnEffects {
@@ -7140,7 +7169,7 @@ pub fn module_state_use(
             ));
         }
         let mut callees: Vec<String> = Vec::new();
-        for c in fn_calls(&f.body) {
+        for c in fn_calls(&f.body, &stored.through) {
             if let Some(impls) = method_impls.get(&c) {
                 callees.extend(impls.iter().cloned());
             }
@@ -7343,26 +7372,34 @@ fn init_restrictions(
 // impl of `BodyVisit`.
 crate::body_scope_descent!(BodyVisit, body_block, body_stmt, body_expr);
 
-/// Collects the names a call or a `try`-construct reaches. A call inside a
-/// lambda counts for the enclosing function, its monomorphization site.
-struct Calls<'a>(&'a mut HashSet<String>);
+/// Collects the names a call or a `try`-construct reaches, except each call
+/// node in `.1`. A call inside a lambda counts for the enclosing function, its
+/// monomorphization site.
+struct Calls<'a>(&'a mut HashSet<String>, &'a HashSet<NodeId>);
 
 impl BodyVisit<'_> for Calls<'_> {
     const SCOPED: bool = false;
 
     fn expr(&mut self, e: &Expr, _: &HashSet<String>) -> bool {
-        if let Expr::Call { name, .. } | Expr::TryConstruct { name, .. } = e {
-            self.0.insert(name.clone());
+        match e {
+            Expr::Call { .. } if self.1.contains(&e.id()) => {}
+            Expr::Call { name, .. } | Expr::TryConstruct { name, .. } => {
+                self.0.insert(name.clone());
+            }
+            _ => {}
         }
         true
     }
 }
 
-/// Returns every function name called anywhere in `b`.
-pub fn fn_calls(b: &Block) -> HashSet<String> {
+/// Returns every function name called anywhere in `b`. `through` is the
+/// check's [`StoredFnEffects::through`]: a call the checker resolved through
+/// a binding reaches no function. An empty `through` counts every call by its
+/// name.
+pub fn fn_calls(b: &Block, through: &HashSet<NodeId>) -> HashSet<String> {
     let mut out = HashSet::new();
     let mut locals = HashSet::new();
-    body_block(b, &mut locals, &mut Calls(&mut out));
+    body_block(b, &mut locals, &mut Calls(&mut out, through));
     out
 }
 

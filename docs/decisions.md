@@ -52,6 +52,8 @@ pull request.
 - A scalar renders through the language's own lowering; `impl Show` is consulted only for a type the language cannot render. Records get no derived `Show`.
 - Any expression may be a method receiver, evaluated exactly once.
 - A call names a function or a binding. No call on an arbitrary expression (`r.f()` on a field, `xs[0](x)`); bind it first.
+- A bare call `f(x)` resolves to the nearest binding first: a local of `fn` type is called through, a local of another type is refused, and only an unbound name reaches a function. Lexical scope, so a local never silently loses to a function.
+- A dot call `x.m(a)` is taken by a local `m` of `fn` type and skips a local `m` of another type, which cannot be its target. `let count = xs.count()` beside `ys.count()` stays legal.
 - A function value lowers by defunctionalization: one closed tag per source and a direct call per signature. No function pointer or indirect call exists in any module, because whole-program compilation knows every callee.
 - Captures are read-only snapshots taken where the lambda is evaluated. A lambda may not contain another lambda literal, and a function type may not take or return a function.
 - Function values have no `==` and never cross the wire.

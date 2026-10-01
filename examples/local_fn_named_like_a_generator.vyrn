@@ -1,0 +1,16 @@
+// A local function value named like a generator is called through: `twice`
+// reaches no generator, so it has a run-time lowering.
+
+gen fn helper(t: TypeArg) -> String {
+    return "x"
+}
+
+fn twice(x: Int64) -> Int64 {
+    let helper: fn(Int64) -> Int64 = y -> y + 1
+    return helper(x)
+}
+
+fn main() -> Int64 {
+    print("\{twice(1)}")
+    return 0
+}

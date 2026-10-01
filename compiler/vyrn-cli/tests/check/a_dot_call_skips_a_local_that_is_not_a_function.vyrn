@@ -1,0 +1,13 @@
+// A dot call skips a local of another type: `count` the local cannot be the
+// target of `ys.count()`, which calls `fn count`.
+fn count(xs: Array<Int64>) -> Int64 {
+    return xs.length
+}
+
+fn main() -> Int64 {
+    let xs: Array<Int64> = [1, 2]
+    let count = xs.count()
+    let ys: Array<Int64> = [1, 2, 3]
+    print(count + ys.count())
+    return 0
+}

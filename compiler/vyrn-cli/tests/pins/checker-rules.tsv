@@ -169,3 +169,5 @@ checker-rules.vyrn:309:0: cannot infer the element type of `[]`; annotate it, e.
 checker-rules.vyrn:433:0: cannot infer the type of `None`; add an annotation (e.g. `let x: Option<Int64> = None;`)
 checker-rules.vyrn:563:0: call to unknown function `Label`
 checker-rules.vyrn:571:0: call to unknown function `Label`
+checker-rules.vyrn:869:0: `addPair` is a local of type Int64, not a function
+  fix: rename the local to call the function `addPair`
