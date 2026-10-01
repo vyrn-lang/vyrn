@@ -2638,16 +2638,12 @@ impl<'a> Builder<'a> {
                 Ok(f) => Place::Field(Box::new(place), f.to_string()),
                 Err(_) if self.projected(&ty) => {
                     let Stmt::IndexSet {
-                        name,
-                        index,
-                        value,
-                        line,
-                        id: _,
+                        index, value, line, ..
                     } = &ss[2 * lets]
                     else {
                         return Ok(None);
                     };
-                    match self.yielded(name, index, value, *line, out)? {
+                    match self.yielded(index, value, *line, out)? {
                         Some((p, _)) => p,
                         None => return Ok(None),
                     }
@@ -2667,13 +2663,12 @@ impl<'a> Builder<'a> {
     /// expanded no such store.
     fn yielded(
         &mut self,
-        name: &str,
         index: &'a Expr,
         value: &'a Expr,
         line: usize,
         out: &mut Vec<St>,
     ) -> Result<Option<(Place, &'a Expr)>, Gap> {
-        let Some(blk) = self.program.expansions.stored(name, index, value) else {
+        let Some(blk) = self.program.expansions.stored(index) else {
             return Ok(None);
         };
         let Some(k) = vyrn_frontend::project::store_node(blk)
@@ -3868,7 +3863,7 @@ impl<'a> Builder<'a> {
         // A user container's element is the place its `atSet` yields,
         // after the projection's prologue.
         let yielded = if self.projected(&bty) {
-            self.yielded(name, index, value, line, out)?
+            self.yielded(index, value, line, out)?
         } else {
             None
         };

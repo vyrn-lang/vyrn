@@ -243,8 +243,8 @@ pub fn gen_reach(program: &Program) -> std::collections::HashSet<String> {
 /// `vyrn_gen` imports and the lowerings that need them (`listDir`, and `Code` as an opaque `i64`
 /// handle).
 ///
-/// Takes a program of either table: a generator's program carries the load's, the LSP's is
-/// unshared on purpose, and the generation engine declines a refusal to the interpreter.
+/// Takes a program of either table: a compile's generator program carries a shared one, the
+/// LSP's is unshared on purpose, and the generation engine declines a refusal to the interpreter.
 ///
 /// # Errors
 ///
