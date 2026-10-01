@@ -193,6 +193,7 @@ pull request.
 - The emitter never optimizes; the engine that runs the wasm does. No shared emitter trait or instruction-builder abstraction.
 - The sweep never moves a datum. A data address is an untyped constant, so relocating by value could rewrite a user's integer. A dead datum costs no module byte, and the static area ends at the last live datum or reservation.
 - Native code is the same wasm through `wasm2c` and clang `-O2`. No Cranelift route for `build`: against an LLVM baseline it measured 2 to 3x, and `wasm2c` 1.5 to 1.9x.
+- The native route passes no alignment flag. On `nbodycols`, moving the hot loop within a 64-byte line changed native time by under 0.6%. Clang's register allocation of the inlined `advance` changed it by 1.0% when `inplace-copies` changed only its caller, so an emitter change is not judged on a native drift near 1%.
 - `run`, `test`, `bench --check`, `serve` and `dev` run the module in embedded wasmtime.
 - A trapped call into a resident instance (`serve`, `dev`, `test`) keeps the instance. The host restores the stack pointer, call depth and region nesting it read before the call; module state and heap blocks stay as the call left them. Re-instantiating would drop the state every earlier request built.
 - Control flow stays structured in every intermediate form, because wasm accepts only structured control flow.
