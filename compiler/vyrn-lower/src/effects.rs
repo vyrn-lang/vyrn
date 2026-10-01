@@ -203,7 +203,7 @@ pub fn judge<'a>(
     let mut resolved = Vec::with_capacity(frames.len());
     let mut callees: Vec<Callee> = Vec::new();
     let mut named: HashMap<&str, usize> = HashMap::new();
-    let mut typed: HashMap<String, usize> = HashMap::new();
+    let mut typed: HashMap<&Type, usize> = HashMap::new();
     for (i, f) in frames.iter().enumerate() {
         let mut e = f.own;
         let mut to: Vec<usize> = Vec::new();
@@ -217,7 +217,7 @@ pub fn judge<'a>(
                     callees.len() - 1
                 }),
                 Some(ty) => {
-                    let k = *typed.entry(ty.to_string()).or_insert_with(|| {
+                    let k = *typed.entry(ty).or_insert_with(|| {
                         callees.push(through(ty));
                         callees.len() - 1
                     });
