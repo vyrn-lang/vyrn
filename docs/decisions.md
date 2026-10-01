@@ -301,6 +301,7 @@ pull request.
 - `vyrn doc` writes Markdown only. `docs/api/` is committed and CI checks it with `--verify`.
 - `vyrn emit-lowered` is deterministic, promises no format and has no parser.
 - The LSP is a synchronous pure adapter over the front end. No generator logic is compiled into it.
+- The editor never decides which local binding a name names. The check records what each name occurrence in a root body names, by position (`checker::Binders::uses`), and the editor reads it. A token the check did not resolve takes the latest same-named binding at or before its line. A node's `ast::Id` carries the column of the name it spells.
 - The LSP gets no incremental parsing, salsa, incremental sync or delta tokens. Lexing and parsing are under 1% of a keystroke; latency came from repeated pure work, fixed by memoizing it.
 - A keystroke's load reuses only what one text decides, and links every module again: `link` renames a module's declarations by every module's names, the root's included.
 - The LSP trusts its client's file events: under a watched directory it reads a file again only after an event names it. Without the capability it reads the disk on every load, as `vyrn check` does.

@@ -477,8 +477,8 @@ fn hoist_mutating_receiver(e: &mut Expr, line: usize) -> Option<(Vec<Stmt>, Vec<
 /// temporary); the caller keeps its own refusal.
 pub fn store_stmts(place: &Expr, value: &Expr, line: usize) -> Option<Vec<Stmt>> {
     match place {
-        Expr::Var { name, .. } => Some(vec![Stmt::Assign {
-            id: Id::NEW,
+        Expr::Var { name, id, .. } => Some(vec![Stmt::Assign {
+            id: Id::at(id.col()),
             name: name.clone(),
             value: value.clone(),
             line,
@@ -519,8 +519,12 @@ pub fn store_stmts(place: &Expr, value: &Expr, line: usize) -> Option<Vec<Stmt>>
                 (i, v)
             };
             out.extend(moves);
+            let id = match &args[0] {
+                Expr::Var { id, .. } => Id::at(id.col()),
+                _ => Id::NEW,
+            };
             out.push(Stmt::IndexSet {
-                id: Id::NEW,
+                id,
                 name: recv,
                 index,
                 value,
@@ -679,6 +683,15 @@ impl Parser {
             (0, 0)
         } else {
             (self.line(), self.col())
+        }
+    }
+
+    /// The slot of a node that spells the name under the cursor: its column,
+    /// or none inside a hole, as [`Parser::binder_pos`] places a binder.
+    fn spelled(&self) -> Id {
+        match self.in_hole {
+            true => Id::NEW,
+            false => Id::at(self.col()),
         }
     }
 
@@ -2974,21 +2987,19 @@ impl Parser {
             // `drop name`: reclaim a heap value explicitly. It consumes `name`.
             Tok::Drop => {
                 self.advance();
+                let id = self.spelled();
                 let name = self.expect_ident()?;
                 self.eat_semi();
-                Ok(Stmt::Drop {
-                    id: Id::NEW,
-                    name,
-                    line,
-                })
+                Ok(Stmt::Drop { id, name, line })
             }
             Tok::Ident(_) | Tok::Vself if self.tokens[self.pos + 1].tok == Tok::Eq => {
+                let id = self.spelled();
                 let name = self.place_root()?;
                 self.eat(&Tok::Eq)?;
                 let value = self.expr()?;
                 self.eat_semi();
                 Ok(Stmt::Assign {
-                    id: Id::NEW,
+                    id,
                     name,
                     value,
                     line,
@@ -2999,6 +3010,7 @@ impl Parser {
                     && matches!(self.tokens[self.pos + 2].tok, Tok::Ident(_))
                     && self.tokens[self.pos + 3].tok == Tok::Eq =>
             {
+                let id = self.spelled();
                 let name = self.place_root()?;
                 self.eat(&Tok::Dot)?;
                 let field = self.expect_ident()?;
@@ -3006,7 +3018,7 @@ impl Parser {
                 let value = self.expr()?;
                 self.eat_semi();
                 Ok(Stmt::SetField {
-                    id: Id::NEW,
+                    id,
                     name,
                     field,
                     value,
@@ -3542,6 +3554,7 @@ impl Parser {
     fn primary(&mut self) -> Result<Expr, Diagnostic> {
         let line = self.line();
         let col = self.col();
+        let spelled = self.spelled();
         if self.at_lambda() {
             return self.lambda(line);
         }
@@ -3728,7 +3741,7 @@ impl Parser {
                         }
                     } else {
                         Expr::Call {
-                            id: Id::NEW,
+                            id: spelled,
                             dot: false,
                             name,
                             args,
@@ -3740,7 +3753,7 @@ impl Parser {
                     self.struct_lit(name, line)
                 } else {
                     Ok(Expr::Var {
-                        id: Id::NEW,
+                        id: spelled,
                         name,
                         line,
                     })

@@ -79,6 +79,10 @@ pub struct Analysis {
     /// Local bindings (params, lets, for-variables) per function, for variable
     /// hover and go-to-definition.
     pub locals: Vec<LocalBinding>,
+    /// What each identifier occurrence the check resolved names, by its
+    /// `(line, col)`: the index in [`Self::locals`] of its binding, or `None`
+    /// for a name past the locals. A binder names itself. [`local_at`] reads it.
+    pub names: HashMap<(usize, usize), Option<usize>>,
     /// Sorted top-level declaration lines (functions, types, protocols, impls),
     /// which bound a function's line range when finding the enclosing function.
     pub decl_lines: Vec<usize>,
@@ -252,7 +256,7 @@ pub struct Judged {
     /// Every diagnostic, in the order `vyrn check` prints them.
     pub diagnostics: Vec<Diagnostic>,
     /// The root module's bindings, typed.
-    pub binders: Vec<LocalBinding>,
+    pub binders: crate::checker::Binders,
     /// Per function, the placer's memory rows ([`crate::own::Ownership::memory`]);
     /// empty for a program the kernel did not judge.
     pub memory: HashMap<crate::ast::FnId, Vec<crate::own::MemoryRow>>,
@@ -402,14 +406,14 @@ fn analyze_inner(
     let locals = match &mut checked {
         Some(prog) => {
             let cs = crate::prof::phase("check: the analysis's own");
-            let (checked_diags, binders) = match judge {
+            let (checked_diags, binders) = checker::with_uses(|| match judge {
                 Some(judge) => {
                     let judged = (judge.check)(prog, engine, pending);
                     memory = judged.memory;
                     (judged.diagnostics, judged.binders)
                 }
                 None => checker::check_accum_recording(prog),
-            };
+            });
             drop(cs);
             // A diagnostic at an origin-governed line of a generated module moves
             // to its input file and is set aside for that file's URI.
@@ -425,8 +429,13 @@ fn analyze_inner(
         }
         // A parse error stops the check; the recovered statements still bind
         // names the reader hovers, untyped.
-        None => checker::local_index(&program, &Default::default()),
+        None => checker::Binders {
+            locals: checker::local_index(&program, &Default::default()),
+            uses: Default::default(),
+        },
     };
+    let names = name_index(&locals.locals, locals.uses);
+    let locals = locals.locals;
     pin_diagnostics(&mut diags, &kw_cols, &tok_info);
 
     // The symbol map every generated module bakes in, so a symbol
@@ -593,6 +602,7 @@ fn analyze_inner(
         symbols,
         tokens: tok_info,
         locals,
+        names,
         decl_lines,
         fn_lines,
         impl_members,
@@ -609,6 +619,25 @@ fn analyze_inner(
         symbol_maps: origin_index.all,
         spellings,
     }
+}
+
+/// [`Analysis::names`] from the bindings and the check's record of uses. A use
+/// of a binding the index skips (a `test` body's) gets no row.
+fn name_index(
+    locals: &[LocalBinding],
+    uses: checker::Uses,
+) -> HashMap<(usize, usize), Option<usize>> {
+    let at: HashMap<(usize, usize), usize> = (locals.iter().enumerate())
+        .map(|(i, b)| ((b.line, b.col), i))
+        .collect();
+    let mut out: HashMap<_, _> = (uses.into_iter())
+        .filter_map(|(k, to)| match to {
+            Some(p) => Some((k, Some(*at.get(&p)?))),
+            None => Some((k, None)),
+        })
+        .collect();
+    out.extend(at.into_iter().map(|(k, i)| (k, Some(i))));
+    out
 }
 
 /// Every `let` in the root module, with what the ownership analysis decided.
@@ -651,6 +680,7 @@ fn empty_analysis(diagnostics: Vec<Diagnostic>) -> Analysis {
         symbols: Vec::new(),
         tokens: Vec::new(),
         locals: Vec::new(),
+        names: HashMap::new(),
         decl_lines: Vec::new(),
         fn_lines: Vec::new(),
         impl_members: Vec::new(),
@@ -749,12 +779,9 @@ fn pin_diagnostics(
 
 /// Resolves a 1-based `(line, col)` cursor to the declaration it names.
 ///
-/// A local binding in the cursor's enclosing function shadows a top-level
-/// symbol; among same-named locals, the latest at or before the cursor wins.
-/// Scope is by line, not block: a `let` inside an `if` stays visible to the end
-/// of the function, which is wrong only when a name is reused after its block.
-/// Then come namespace members, typed members, top-level symbols, and builtins,
-/// which hover with `definition: false` because they have no source.
+/// A local binding ([`local_at`]) shadows a top-level symbol. Then come
+/// namespace members, typed members, top-level symbols, and builtins, which
+/// hover with `definition: false` because they have no source.
 pub fn resolve(analysis: &Analysis, line: usize, col: usize) -> Option<Resolution> {
     // The identifier token covering the cursor (`col` in `[col, end_col)`).
     let tok = analysis
@@ -765,15 +792,8 @@ pub fn resolve(analysis: &Analysis, line: usize, col: usize) -> Option<Resolutio
     // Local bindings first. A member position (`recv.tok`) names a member, never
     // a binding, as in `references`, so it falls through to the branches below.
     if !is_member_position(analysis, tok) {
-        if let Some(fn_line) = enclosing_fn_line(analysis, line) {
-            let local = analysis
-                .locals
-                .iter()
-                .filter(|b| b.fn_line == fn_line && b.name == tok.text && b.line <= line)
-                .max_by_key(|b| b.line);
-            if let Some(b) = local {
-                return Some(local_resolution(analysis, b));
-            }
+        if let Some(b) = local_at(analysis, tok) {
+            return Some(local_resolution(analysis, b));
         }
     }
 
@@ -781,14 +801,9 @@ pub fn resolve(analysis: &Analysis, line: usize, col: usize) -> Option<Resolutio
     // export. Before top-level symbols, so a same-named decl does not
     // capture a qualified member.
     if let Some(recv) = receiver_before_dot(analysis, tok.line, tok.col) {
-        let shadowed = enclosing_fn_line(analysis, line).is_some_and(|fl| {
-            analysis
-                .locals
-                .iter()
-                .any(|b| b.fn_line == fl && b.name == recv && b.line <= line)
-        });
-        if !shadowed {
-            if let Some(nsi) = analysis.namespaces.iter().find(|n| n.name == recv) {
+        if local_at(analysis, recv).is_none() {
+            let recv = &recv.text;
+            if let Some(nsi) = analysis.namespaces.iter().find(|n| &n.name == recv) {
                 if let Some(m) = nsi.members.iter().find(|m| m.name == tok.text) {
                     return Some(Resolution {
                         name: m.name.clone(),
@@ -1013,14 +1028,9 @@ pub fn completions(analysis: &Analysis) -> Vec<Completion> {
 pub fn member_completions(analysis: &Analysis, line: usize, col: usize) -> Vec<Completion> {
     // A receiver naming an unshadowed namespace offers that module's exports.
     if let Some(recv) = receiver_before_dot(analysis, line, col) {
-        let shadowed = enclosing_fn_line(analysis, line).is_some_and(|fl| {
-            analysis
-                .locals
-                .iter()
-                .any(|b| b.fn_line == fl && b.name == recv && b.line <= line)
-        });
-        if !shadowed {
-            if let Some(nsi) = analysis.namespaces.iter().find(|n| n.name == recv) {
+        if local_at(analysis, recv).is_none() {
+            let recv = &recv.text;
+            if let Some(nsi) = analysis.namespaces.iter().find(|n| &n.name == recv) {
                 return nsi
                     .members
                     .iter()
@@ -1416,7 +1426,7 @@ fn expected_string_type(
 
 /// The identifier before the nearest dot at or before the cursor on `line`: the
 /// receiver of a `.foo` access (namespaces use it too).
-fn receiver_before_dot(analysis: &Analysis, line: usize, col: usize) -> Option<String> {
+fn receiver_before_dot(analysis: &Analysis, line: usize, col: usize) -> Option<&TokenInfo> {
     let dot = analysis
         .tokens
         .iter()
@@ -1427,20 +1437,29 @@ fn receiver_before_dot(analysis: &Analysis, line: usize, col: usize) -> Option<S
         .iter()
         .filter(|t| t.line == line && t.text != "." && t.end_col <= dot.col)
         .max_by_key(|t| t.end_col)?;
-    Some(recv.text.clone())
+    Some(recv)
 }
 
+/// The type of the receiver before the dot at the cursor. Only a local is a
+/// typed receiver here.
 fn resolve_receiver_type(analysis: &Analysis, line: usize, col: usize) -> Option<Type> {
-    let recv = receiver_before_dot(analysis, line, col)?;
-    // The receiver's type from the local index; only locals are method
-    // receivers in practice.
-    let fn_line = enclosing_fn_line(analysis, line)?;
-    let binding = analysis
-        .locals
-        .iter()
-        .filter(|b| b.fn_line == fn_line && b.name == recv && b.line <= line)
-        .max_by_key(|b| b.line)?;
-    binding.ty.clone()
+    local_at(analysis, receiver_before_dot(analysis, line, col)?)?
+        .ty
+        .clone()
+}
+
+/// The local binding the identifier `tok` names. The check's record answers
+/// ([`Analysis::names`]). A token it has no row for, in a buffer that does
+/// not parse or a statement that did not type, takes the latest same-named
+/// binding at or before its line in its function, blind to where a block ends.
+fn local_at<'a>(analysis: &'a Analysis, tok: &TokenInfo) -> Option<&'a LocalBinding> {
+    if let Some(named) = analysis.names.get(&(tok.line, tok.col)) {
+        return named.map(|i| &analysis.locals[i]);
+    }
+    let fn_line = enclosing_fn_line(analysis, tok.line)?;
+    (analysis.locals.iter())
+        .filter(|b| b.fn_line == fn_line && b.name == tok.text && b.line <= tok.line)
+        .max_by_key(|b| b.line)
 }
 
 /// Every top-level declaration line, sorted. It bounds a variant name search to
@@ -2729,21 +2748,6 @@ fn is_member_position(analysis: &Analysis, tok: &TokenInfo) -> bool {
     false
 }
 
-/// The local binding [`resolve`] picks for `name` on `line` in the function at
-/// `fn_line`: the latest same-named binding at or before the line.
-fn binding_for<'a>(
-    analysis: &'a Analysis,
-    fn_line: usize,
-    name: &str,
-    line: usize,
-) -> Option<&'a LocalBinding> {
-    analysis
-        .locals
-        .iter()
-        .filter(|b| b.fn_line == fn_line && b.name == name && b.line <= line)
-        .max_by_key(|b| b.line)
-}
-
 /// References to the binding under the 1-based `(line, col)` cursor, resolved as
 /// hover resolves, never by word match. A local highlights only its in-scope
 /// uses, a top-level symbol its references where no local shadows it, a
@@ -2765,13 +2769,13 @@ pub fn references(analysis: &Analysis, line: usize, col: usize) -> Vec<RefRange>
     // A member occurrence: the same member through the same-named receiver, so
     // unrelated same-named members elsewhere stay out.
     if cursor_member {
-        let recv = receiver_before_dot(analysis, tok.line, tok.col);
+        let recv = receiver_before_dot(analysis, tok.line, tok.col).map(|r| &r.text);
         let mut out = Vec::new();
         for t in &analysis.tokens {
             if t.text != name || !is_member_position(analysis, t) {
                 continue;
             }
-            if receiver_before_dot(analysis, t.line, t.col).as_deref() == recv.as_deref() {
+            if receiver_before_dot(analysis, t.line, t.col).map(|r| &r.text) == recv {
                 out.push(RefRange {
                     line: t.line,
                     col: t.col,
@@ -2785,48 +2789,31 @@ pub fn references(analysis: &Analysis, line: usize, col: usize) -> Vec<RefRange>
 
     // A local binding shadows everything: only the uses that resolve to this
     // binding, within its function.
-    if let Some(fn_line) = enclosing_fn_line(analysis, line) {
-        if let Some(target) = binding_for(analysis, fn_line, &name, line) {
-            let (t_line, t_col) = (target.line, target.col);
-            let mut out = Vec::new();
-            for t in &analysis.tokens {
-                if t.text != name || is_member_position(analysis, t) {
-                    continue;
-                }
-                if enclosing_fn_line(analysis, t.line) != Some(fn_line) {
-                    continue;
-                }
-                match binding_for(analysis, fn_line, &name, t.line) {
-                    Some(b) if b.line == t_line && b.col == t_col => {
-                        let write = t.line == t_line && t.col == t_col;
-                        out.push(RefRange {
-                            line: t.line,
-                            col: t.col,
-                            end_col: t.end_col,
-                            write,
-                        });
-                    }
-                    _ => {}
-                }
+    if let Some(target) = local_at(analysis, tok) {
+        let at = (target.line, target.col);
+        let mut out = Vec::new();
+        for t in &analysis.tokens {
+            if t.text != name || is_member_position(analysis, t) {
+                continue;
             }
-            return dedup_refs(out);
+            if local_at(analysis, t).is_some_and(|b| (b.line, b.col) == at) {
+                out.push(RefRange {
+                    line: t.line,
+                    col: t.col,
+                    end_col: t.end_col,
+                    write: (t.line, t.col) == at,
+                });
+            }
         }
+        return dedup_refs(out);
     }
 
     // A namespace binding: the bare `ns` tokens no local shadows.
     if analysis.namespaces.iter().any(|n| n.name == name) {
         let mut out = Vec::new();
         for t in &analysis.tokens {
-            if t.text != name || is_member_position(analysis, t) {
-                continue;
-            }
-            let shadowed = enclosing_fn_line(analysis, t.line).is_some_and(|fl| {
-                analysis
-                    .locals
-                    .iter()
-                    .any(|b| b.fn_line == fl && b.name == name && b.line <= t.line)
-            });
-            if shadowed {
+            if t.text != name || is_member_position(analysis, t) || local_at(analysis, t).is_some()
+            {
                 continue;
             }
             out.push(RefRange {
@@ -2878,19 +2865,11 @@ pub fn references_to(analysis: &Analysis, name: &str, qualifiers: &[String]) -> 
         }
         if is_member_position(analysis, t) {
             let recv = receiver_before_dot(analysis, t.line, t.col);
-            if !recv.is_some_and(|r| qualifiers.iter().any(|q| *q == r)) {
+            if !recv.is_some_and(|r| qualifiers.iter().any(|q| *q == r.text)) {
                 continue;
             }
-        } else {
-            let shadowed = enclosing_fn_line(analysis, t.line).is_some_and(|fl| {
-                analysis
-                    .locals
-                    .iter()
-                    .any(|b| b.fn_line == fl && b.name == name && b.line <= t.line)
-            });
-            if shadowed {
-                continue;
-            }
+        } else if local_at(analysis, t).is_some() {
+            continue;
         }
         out.push(RefRange {
             line: t.line,
@@ -2955,56 +2934,43 @@ pub fn import_spec_at(source: &str, line: usize, col: usize) -> Option<String> {
 /// Resolves an identifier token to a [`SemKind`] and [`SemMods`] with
 /// [`resolve`]'s precedence: local, namespace, symbol, builtin.
 fn classify_token(analysis: &Analysis, tok: &TokenInfo) -> Option<(SemKind, SemMods)> {
-    let line = tok.line;
-
     // 1. Local bindings shadow everything else, except in member position:
     //    `recv.tok` names a member, as in `references`.
     if !is_member_position(analysis, tok) {
-        if let Some(fn_line) = enclosing_fn_line(analysis, line) {
-            if let Some(b) = analysis
-                .locals
-                .iter()
-                .filter(|b| b.fn_line == fn_line && b.name == tok.text && b.line <= line)
-                .max_by_key(|b| b.line)
-            {
-                let kind = match b.kind {
-                    LocalKind::Param => SemKind::Parameter,
-                    LocalKind::Let { .. } | LocalKind::ForVar => SemKind::Variable,
-                };
-                let readonly = matches!(
-                    b.kind,
-                    LocalKind::Let { mutable: false } | LocalKind::ForVar
-                );
-                let declaration = b.line == tok.line && b.col == tok.col;
-                // The occurrence where an owning value stops being live, a move
-                // or a `drop`, is marked so a reader need not infer it.
-                let last_use = !declaration
-                    && analysis.memory.iter().any(|m| {
-                        m.name == b.name && m.line == b.line && m.last_use == Some(tok.line)
-                    });
-                return Some((
-                    kind,
-                    SemMods {
-                        declaration,
-                        readonly,
-                        default_library: false,
-                        last_use,
-                    },
-                ));
-            }
+        if let Some(b) = local_at(analysis, tok) {
+            let kind = match b.kind {
+                LocalKind::Param => SemKind::Parameter,
+                LocalKind::Let { .. } | LocalKind::ForVar => SemKind::Variable,
+            };
+            let readonly = matches!(
+                b.kind,
+                LocalKind::Let { mutable: false } | LocalKind::ForVar
+            );
+            let declaration = b.line == tok.line && b.col == tok.col;
+            // The occurrence where an owning value stops being live, a move
+            // or a `drop`, is marked so a reader need not infer it.
+            let last_use = !declaration
+                && analysis
+                    .memory
+                    .iter()
+                    .any(|m| m.name == b.name && m.line == b.line && m.last_use == Some(tok.line));
+            return Some((
+                kind,
+                SemMods {
+                    declaration,
+                    readonly,
+                    default_library: false,
+                    last_use,
+                },
+            ));
         }
     }
     // 2. A member access `recv.tok`: first `ns.member`, then a record field on a
     //    typed receiver, a `property`.
     if let Some(recv) = receiver_before_dot(analysis, tok.line, tok.col) {
-        let shadowed = enclosing_fn_line(analysis, line).is_some_and(|fl| {
-            analysis
-                .locals
-                .iter()
-                .any(|b| b.fn_line == fl && b.name == recv && b.line <= line)
-        });
-        if !shadowed {
-            if let Some(nsi) = analysis.namespaces.iter().find(|n| n.name == recv) {
+        if local_at(analysis, recv).is_none() {
+            let recv = &recv.text;
+            if let Some(nsi) = analysis.namespaces.iter().find(|n| &n.name == recv) {
                 if let Some(m) = nsi.members.iter().find(|m| m.name == tok.text) {
                     return Some((
                         sem_of_symbol_kind(m.kind),
@@ -3365,6 +3331,30 @@ mod tests {
             .collect();
         let detail = "fn pick() -> Int64";
         assert_eq!(picks, [(Some("n.vyrn"), Some("N pick."), detail)]);
+    }
+
+    #[test]
+    fn a_name_after_a_block_is_the_outer_binding() {
+        let src = "fn helper() -> Int64 { return 7 }\n\
+                   fn main() -> Int64 {\n\
+                   let mut x = 1\n\
+                   if x > 0 {\n\
+                   let x = \"s\"\n\
+                   let helper = 3\n\
+                   print(x)\n\
+                   print(\"\\{helper}\")\n\
+                   }\n\
+                   x = x + helper()\n\
+                   return x\n\
+                   }";
+        let a = analyze(src);
+        assert!(a.diagnostics.is_empty(), "diags: {:?}", a.diagnostics);
+        for col in [1, 5] {
+            let r = resolve(&a, 10, col).expect("`x` resolves");
+            assert_eq!((r.kind, r.target_line), (SymbolKind::Local, 3), "col {col}");
+        }
+        let r = resolve(&a, 10, 9).expect("`helper` resolves");
+        assert_eq!((r.kind, r.target_line), (SymbolKind::Function, 1));
     }
 
     #[test]

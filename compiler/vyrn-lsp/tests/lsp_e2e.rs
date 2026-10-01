@@ -2309,6 +2309,40 @@ fn document_highlight_is_scope_aware() {
     let _ = client.child.kill();
 }
 
+/// A `let` in a block ends with the block: after it, the name hovers and
+/// highlights as the outer binding again.
+#[test]
+fn a_binding_ends_with_its_block() {
+    let src = "fn main() -> Int64 {
+    let x = 1
+    if x > 0 {
+        let x = \"s\"
+        print(x)
+    }
+    return x
+}
+";
+    let dir = std::env::temp_dir().join(format!("vyrn-lsp-block-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("block.vyrn");
+    std::fs::write(&path, src).unwrap();
+    let uri = file_uri(&path);
+    let mut client = spawn_client();
+    did_open(&mut client, &uri, "vyrn", src);
+
+    let (l, c) = at(src, 7, "x");
+    let hover = hover_value(&mut client, &uri, l, c).expect("hover on the outer `x`");
+    assert!(hover.contains("let x: Int64"), "{hover}");
+    let lines: Vec<u32> = (document_highlight(&mut client, &uri, l, c).iter())
+        .map(|h| h.line)
+        .collect();
+    assert_eq!(lines, [2, 3, 7]);
+
+    let _ = client.child.kill();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// The loader resolves both a relative and a `std/` import string.
 #[test]
 fn definition_on_import_path() {
