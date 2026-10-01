@@ -1,0 +1,33 @@
+// A read through a `lazy` field reads the forced value: `h.f.n` forces
+// `h.f` and reads `n` of the result. Each step forces again, the receiver
+// is released once the read's value is bound, and a part taken out of a
+// forced value is the binding's own.
+
+type Item = { n: Int64, s: String }
+type Holder = { f: lazy Item }
+type Outer = { b: lazy Holder }
+type Bag = { xs: lazy Array<Int64> }
+
+fn holder(k: Int64) -> Holder {
+    let s = "item" + k.toString()
+    return Holder { f: () -> Item { n: s.byteLength, s: s.copy() } }
+}
+
+fn main() -> Int64 {
+    let h = holder(1)
+    print(h.f.n)
+    let s = h.f.s
+    print(s)
+    let o = Outer { b: () -> holder(22) }
+    print(o.b.f.s)
+    print(holder(333).f.n)
+    let both = [h.f.s, o.b.f.s]
+    print(both.length)
+    let bag = Bag { xs: () -> [1, 2, 3] }
+    let mut sum: Int64 = 0
+    for x in bag.xs {
+        sum = sum + x
+    }
+    print(sum + bag.xs[0])
+    return 0
+}

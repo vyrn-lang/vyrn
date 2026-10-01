@@ -1,0 +1,23 @@
+// A forced read runs the field's initializer, so a `lazy Item` read is a
+// call that may write what the initializer writes. The loop still reads
+// `names` when `h.f` runs `wipe`, which replaces it.
+
+let mut names: Array<String> = []
+
+type Item = { n: Int64 }
+type Holder = { f: lazy Item }
+
+fn wipe() -> Item {
+    names = []
+    return Item { n: 1 }
+}
+
+fn main() -> Int64 {
+    names.push("a" + "b")
+    let h = Holder { f: () -> wipe() }
+    for n in names {
+        let i = h.f
+        print(n.byteLength + i.n)
+    }
+    return 0
+}

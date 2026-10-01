@@ -2826,72 +2826,10 @@ fn spellings(
     out
 }
 
-/// Hands every part of a type to a visitor, outermost first: the one descent
-/// the compiler makes over a `Type`.
-///
-/// [`type_names`], [`rewrite_type`], [`NsResolver::rewrite_type`] and
-/// `parser::mark_member_type_params` read it. The hook gets the node, not the
-/// head name, because `mark_member_type_params` replaces a node;
-/// [`type_heads`] and [`type_heads_mut`] give the head name. A macro, because
-/// the readers need both a shared and a unique borrow.
-macro_rules! type_head_descent {
-    ($name:ident $(, $mut_:tt)?) => {
-        pub(crate) fn $name(ty: &$($mut_)? Type, f: &mut impl FnMut(&$($mut_)? Type)) {
-            f(ty);
-            match ty {
-                Type::App(_, args) => {
-                    for a in args {
-                        $name(a, f);
-                    }
-                }
-                Type::Array(a)
-                | Type::Stream(a)
-                | Type::Partial(a)
-                | Type::ArrayN(a, _)
-                | Type::SmallArray(a, _)
-                | Type::Omit(a, _)
-                | Type::Pick(a, _) => $name(a, f),
-                Type::Merge(a, b) => {
-                    $name(a, f);
-                    $name(b, f);
-                }
-                Type::Record(fs) => {
-                    for fl in fs {
-                        $name(&$($mut_)? fl.ty, f);
-                    }
-                }
-                Type::Enum(vs) => {
-                    for v in vs {
-                        for p in &$($mut_)? v.payload {
-                            $name(p, f);
-                        }
-                    }
-                }
-                // Stored function values and maps carry decl
-                // references in their component types too.
-                Type::Fn(params, ret) => {
-                    for p in params {
-                        $name(p, f);
-                    }
-                    $name(ret, f);
-                }
-                Type::Map(k, v) => {
-                    $name(k, f);
-                    $name(v, f);
-                }
-                _ => {}
-            }
-        }
-    };
-}
-
-type_head_descent!(type_nodes);
-type_head_descent!(type_nodes_mut, mut);
-
-/// The same descent, with the hook on a type's head name. `Named` and `App` are
-/// the two constructors that carry one.
+/// Hands every head name in `ty` to `f`, outermost first. `Named` and `App`
+/// are the two constructors that carry one.
 pub(crate) fn type_heads(ty: &Type, f: &mut impl FnMut(&String)) {
-    type_nodes(ty, &mut |t| {
+    crate::types::walk_type(ty, &mut |t| {
         if let Type::Named(n) | Type::App(n, _) = t {
             f(n)
         }
@@ -2899,7 +2837,7 @@ pub(crate) fn type_heads(ty: &Type, f: &mut impl FnMut(&String)) {
 }
 
 fn type_heads_mut(ty: &mut Type, f: &mut impl FnMut(&mut String)) {
-    type_nodes_mut(ty, &mut |t| {
+    crate::types::walk_type_mut(ty, &mut |t| {
         if let Type::Named(n) | Type::App(n, _) = t {
             f(n)
         }

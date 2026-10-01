@@ -2176,21 +2176,6 @@ impl<'a> Checker<'a> {
                 Reach::Parts => {}
             }
             match ty {
-                Type::Array(i)
-                | Type::ArrayN(i, _)
-                | Type::SmallArray(i, _)
-                | Type::Partial(i)
-                | Type::Stream(i)
-                | Type::Lazy(i)
-                | Type::Omit(i, _)
-                | Type::Pick(i, _) => go(i, types, at, seen),
-                Type::Map(a, b) | Type::Merge(a, b) => {
-                    go(a, types, at, seen) || go(b, types, at, seen)
-                }
-                Type::Record(fs) => fs.iter().any(|f| go(&f.ty, types, at, seen)),
-                Type::Enum(vs) => vs
-                    .iter()
-                    .any(|v| v.payload.iter().any(|p| go(p, types, at, seen))),
                 Type::Named(n) | Type::App(n, _) => {
                     let args = match ty {
                         Type::App(_, a) => a.as_slice(),
@@ -2205,7 +2190,8 @@ impl<'a> Checker<'a> {
                                 r
                             }))
                 }
-                _ => false,
+                Type::Fn(..) => false,
+                _ => ty.children().any(|c| go(c, types, at, seen)),
             }
         }
         go(ty, self, at, &mut Vec::new())
@@ -6019,6 +6005,7 @@ impl<'a> Checker<'a> {
                 params,
                 body,
                 line: lline,
+                col: lcol,
                 ..
             } => {
                 if params.len() != ptys.len() {
@@ -6068,7 +6055,7 @@ impl<'a> Checker<'a> {
                     self.unify(&ret, &body_ty, subst, *lline)?;
                 }
                 let sig = crate::types::substitute(expected_fn, subst);
-                self.record_arg_fn(&sig, None, Some(*lline));
+                self.record_arg_fn(&sig, None, Some((*lline, *lcol)));
                 // The core types the literal's closure from this row (a
                 // `consume` position names no target).
                 if let Some(r) = &self.record {
@@ -6132,7 +6119,11 @@ impl<'a> Checker<'a> {
         fn_ret: Option<&Type>,
     ) -> Result<Type, Diagnostic> {
         let Expr::Lambda {
-            params, body, line, ..
+            params,
+            body,
+            line,
+            col,
+            ..
         } = expr
         else {
             unreachable!()
@@ -6221,6 +6212,7 @@ impl<'a> Checker<'a> {
             lambda: Some(StoredLambda {
                 defined_in: self.cur_fn.borrow().clone(),
                 line: *line,
+                col: *col,
                 calls,
                 touches_global,
                 nested_sigs,
@@ -6263,15 +6255,16 @@ impl<'a> Checker<'a> {
     /// literal or a function name (any other `fn` expression forwards a value
     /// already collected). `sig` is the parameter type under the call's
     /// solution, so the concrete signature the instance calls through.
-    fn record_arg_fn(&self, sig: &Type, named: Option<&str>, lambda_line: Option<usize>) {
+    fn record_arg_fn(&self, sig: &Type, named: Option<&str>, lambda_at: Option<(usize, usize)>) {
         self.arg_sources.borrow_mut().push(StoredSource {
             sig: self.base(sig),
             named: named.map(str::to_string),
             // Only the frame key is filled: the workers analysis reads
             // `sources` alone (see `StoredFnEffects::arg_sources`).
-            lambda: lambda_line.map(|line| StoredLambda {
+            lambda: lambda_at.map(|(line, col)| StoredLambda {
                 defined_in: self.cur_fn.borrow().clone(),
                 line,
+                col,
                 calls: HashSet::new(),
                 touches_global: None,
                 nested_sigs: Vec::new(),
@@ -7009,6 +7002,7 @@ pub struct StoredLambda {
     /// The function whose body contains the literal.
     pub defined_in: String,
     pub line: usize,
+    pub col: usize,
     /// Every call name in the body (functions, builtins, methods).
     pub calls: std::collections::HashSet<String>,
     /// The first module-state binding the body reads or writes.
@@ -7027,7 +7021,7 @@ pub struct StoredFnEffects {
     /// Kept apart from `sources` because an argument carries no
     /// defunctionalization tag; the `--workers` analysis reads `sources`
     /// alone, and the effect judgment reads both. Only `sig`, `named` and a
-    /// lambda's `defined_in` and `line` are filled.
+    /// lambda's `defined_in`, `line` and `col` are filled.
     pub arg_sources: Vec<StoredSource>,
     /// `(function, signature)` for each call through a stored fn value.
     pub calls: Vec<(String, Type)>,

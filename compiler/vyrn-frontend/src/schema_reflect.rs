@@ -130,9 +130,9 @@ pub fn module_interface_lit(
     for f in &program.functions {
         if is_root_fn(f) {
             for p in &f.params {
-                collect_type_names(&p.ty, &mut work);
+                crate::loader::type_heads(&p.ty, &mut |n| work.push(n.clone()));
             }
-            collect_type_names(&f.ret, &mut work);
+            crate::loader::type_heads(&f.ret, &mut |n| work.push(n.clone()));
         }
     }
     while let Some(n) = work.pop() {
@@ -141,7 +141,7 @@ pub fn module_interface_lit(
         }
         if let Some(decl) = types.get(&n) {
             // A predicate references `value`, never a type, so only the base adds names.
-            collect_type_names(&decl.base, &mut work);
+            crate::loader::type_heads(&decl.base, &mut |n| work.push(n.clone()));
         }
     }
 
@@ -229,55 +229,6 @@ pub fn contract_info_lit(c: &ContractDecl) -> Expr {
             ("members", array_lit(members)),
         ],
     )
-}
-
-/// Pushes every named type referenced in `ty` onto `out`: the closure walk's
-/// edges.
-fn collect_type_names(ty: &Type, out: &mut Vec<String>) {
-    match ty {
-        Type::Named(n) => out.push(n.clone()),
-        Type::App(n, args) => {
-            out.push(n.clone());
-            for a in args {
-                collect_type_names(a, out);
-            }
-        }
-        Type::Array(a)
-        | Type::Stream(a)
-        | Type::Partial(a)
-        | Type::ArrayN(a, _)
-        | Type::SmallArray(a, _)
-        | Type::Omit(a, _)
-        | Type::Pick(a, _)
-        // A `lazy T` field reaches `T`: deferral changes when the value is
-        // computed, not which declarations the closure carries.
-        | Type::Lazy(a) => collect_type_names(a, out),
-        Type::Merge(a, b) | Type::Map(a, b) => {
-            collect_type_names(a, out);
-            collect_type_names(b, out);
-        }
-        Type::Record(fields) => {
-            for f in fields {
-                collect_type_names(&f.ty, out);
-            }
-        }
-        Type::Enum(variants) => {
-            for v in variants {
-                for p in &v.payload {
-                    collect_type_names(p, out);
-                }
-            }
-        }
-        Type::Fn(params, ret) => {
-            for p in params {
-                collect_type_names(p, out);
-            }
-            collect_type_names(ret, out);
-        }
-        // Primitives, type parameters, loggers and the error sentinel name no
-        // declaration.
-        _ => {}
-    }
 }
 
 fn fn_info_lit(f: &Function, types: &HashMap<String, TypeDecl>, origins: &Origins) -> Expr {

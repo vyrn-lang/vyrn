@@ -590,7 +590,13 @@ impl ContractMember {
     /// [`Type::Param`].
     pub fn type_params(&self) -> Vec<String> {
         let mut out = Vec::new();
-        let mut push = |t: &Type| collect_params(t, &mut out);
+        let mut push = |t: &Type| {
+            crate::types::walk_type(t, &mut |t| {
+                if let Type::Param(n) = t {
+                    out.push(n.clone());
+                }
+            })
+        };
         match &self.kind {
             ContractMemberKind::Value { ty, .. } => push(ty),
             ContractMemberKind::Fn { params, ret, .. } => {
@@ -603,47 +609,6 @@ impl ContractMember {
         out.sort();
         out.dedup();
         out
-    }
-}
-
-fn collect_params(ty: &Type, out: &mut Vec<String>) {
-    match ty {
-        Type::Param(n) => out.push(n.clone()),
-        Type::App(_, args) => {
-            for a in args {
-                collect_params(a, out);
-            }
-        }
-        Type::Array(a)
-        | Type::Stream(a)
-        | Type::Partial(a)
-        | Type::ArrayN(a, _)
-        | Type::SmallArray(a, _)
-        | Type::Omit(a, _)
-        | Type::Pick(a, _) => collect_params(a, out),
-        Type::Merge(a, b) | Type::Map(a, b) => {
-            collect_params(a, out);
-            collect_params(b, out);
-        }
-        Type::Record(fields) => {
-            for f in fields {
-                collect_params(&f.ty, out);
-            }
-        }
-        Type::Enum(variants) => {
-            for v in variants {
-                for p in &v.payload {
-                    collect_params(p, out);
-                }
-            }
-        }
-        Type::Fn(params, ret) => {
-            for p in params {
-                collect_params(p, out);
-            }
-            collect_params(ret, out);
-        }
-        _ => {}
     }
 }
 
@@ -962,6 +927,107 @@ pub enum Type {
 }
 
 impl Type {
+    /// Returns the types `self` is built from, in source order: an element,
+    /// the type arguments, the fields, the variants' payloads, or a function's
+    /// parameters and then its result. A leaf has none.
+    /// [`crate::types::walk_type`] visits every part through it.
+    pub fn children(&self) -> impl Iterator<Item = &Type> {
+        type Parts<'t> = (
+            &'t [Type],
+            &'t [Field],
+            &'t [EnumVariant],
+            [Option<&'t Type>; 2],
+        );
+        let (list, fields, variants, boxes): Parts<'_> = match self {
+            Type::Array(a)
+            | Type::Stream(a)
+            | Type::Partial(a)
+            | Type::Lazy(a)
+            | Type::ArrayN(a, _)
+            | Type::SmallArray(a, _)
+            | Type::Omit(a, _)
+            | Type::Pick(a, _) => (&[], &[], &[], [Some(&**a), None]),
+            Type::Merge(a, b) | Type::Map(a, b) => (&[], &[], &[], [Some(&**a), Some(&**b)]),
+            Type::App(_, args) => (args, &[], &[], [None, None]),
+            Type::Record(fs) => (&[], fs, &[], [None, None]),
+            Type::Enum(vs) => (&[], &[], vs, [None, None]),
+            Type::Fn(params, ret) => (params, &[], &[], [Some(&**ret), None]),
+            // No `_` arm: a new variant must say which types it holds, here
+            // and in `children_mut`.
+            Type::Int
+            | Type::IntN { .. }
+            | Type::Float
+            | Type::Float32
+            | Type::F32x4
+            | Type::I32x4
+            | Type::F64x2
+            | Type::Mask32x4
+            | Type::Mask64x2
+            | Type::Bool
+            | Type::Str
+            | Type::Unit
+            | Type::Named(_)
+            | Type::Param(_)
+            | Type::ConstInt(_)
+            | Type::Logger
+            | Type::Never
+            | Type::Err => (&[], &[], &[], [None, None]),
+        };
+        list.iter()
+            .chain(fields.iter().map(|f| &f.ty))
+            .chain(variants.iter().flat_map(|v| &v.payload))
+            .chain(boxes.into_iter().flatten())
+    }
+
+    /// [`Type::children`], each one writable.
+    pub fn children_mut(&mut self) -> impl Iterator<Item = &mut Type> {
+        type Parts<'t> = (
+            &'t mut [Type],
+            &'t mut [Field],
+            &'t mut [EnumVariant],
+            [Option<&'t mut Type>; 2],
+        );
+        let (list, fields, variants, boxes): Parts<'_> = match self {
+            Type::Array(a)
+            | Type::Stream(a)
+            | Type::Partial(a)
+            | Type::Lazy(a)
+            | Type::ArrayN(a, _)
+            | Type::SmallArray(a, _)
+            | Type::Omit(a, _)
+            | Type::Pick(a, _) => (&mut [], &mut [], &mut [], [Some(&mut **a), None]),
+            Type::Merge(a, b) | Type::Map(a, b) => {
+                (&mut [], &mut [], &mut [], [Some(&mut **a), Some(&mut **b)])
+            }
+            Type::App(_, args) => (args, &mut [], &mut [], [None, None]),
+            Type::Record(fs) => (&mut [], fs, &mut [], [None, None]),
+            Type::Enum(vs) => (&mut [], &mut [], vs, [None, None]),
+            Type::Fn(params, ret) => (params, &mut [], &mut [], [Some(&mut **ret), None]),
+            Type::Int
+            | Type::IntN { .. }
+            | Type::Float
+            | Type::Float32
+            | Type::F32x4
+            | Type::I32x4
+            | Type::F64x2
+            | Type::Mask32x4
+            | Type::Mask64x2
+            | Type::Bool
+            | Type::Str
+            | Type::Unit
+            | Type::Named(_)
+            | Type::Param(_)
+            | Type::ConstInt(_)
+            | Type::Logger
+            | Type::Never
+            | Type::Err => (&mut [], &mut [], &mut [], [None, None]),
+        };
+        list.iter_mut()
+            .chain(fields.iter_mut().map(|f| &mut f.ty))
+            .chain(variants.iter_mut().flat_map(|v| &mut v.payload))
+            .chain(boxes.into_iter().flatten())
+    }
+
     /// Returns `Option<T>` as its variant list: `None` is tag 0 and `Some` tag 1,
     /// the order [`Pattern::Failure`] and [`Pattern::Success`] name.
     /// [`Display`](std::fmt::Display) prints it as `Option<T>`, and
