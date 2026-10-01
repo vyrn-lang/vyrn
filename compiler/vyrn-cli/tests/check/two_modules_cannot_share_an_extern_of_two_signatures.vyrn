@@ -1,0 +1,9 @@
+// Two modules declare a private `extern fn hostAdd` with different
+// signatures: two host contracts under one name clash rather than merge.
+import { useA } from "./a_module_with_a_two_argument_host_extern.vyrn"
+import { useB } from "./a_module_with_a_one_argument_host_extern.vyrn"
+
+fn main() -> Int64 {
+    print(1)
+    return 0
+}

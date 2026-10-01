@@ -1,0 +1,5 @@
+extern fn hostAdd(s: String) -> Int64
+
+export fn useB() -> Int64 {
+    return hostAdd("x")
+}

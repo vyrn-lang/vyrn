@@ -3356,12 +3356,15 @@ fn link(mut modules: Vec<Module>, root_key: &str) -> Result<Program, Vec<Diagnos
     // import site in a real file.
     let mut clashes: Vec<(String, String, String)> = Vec::new();
 
-    // Names whose every declaration is a non-exported `extern fn`, in two or
-    // more modules: one host-ABI contract restated per module (std/rpc plants
-    // `extern fn vyrnRpcCall` in every client stub). Renaming would sever the
-    // ABI, so they neither clash nor take part in the foreign-reference check,
-    // and the merge keeps one copy.
+    // Names whose every declaration is a non-exported `extern fn` of one
+    // signature, in two or more modules: one host-ABI contract restated per
+    // module (std/rpc plants `extern fn vyrnRpcCall` in every client stub).
+    // Renaming would sever the ABI, so they neither clash nor take part in the
+    // foreign-reference check, and the merge keeps one copy. Two signatures
+    // are two contracts, which clash.
     let mut extern_totals: HashMap<String, (usize, usize)> = HashMap::new();
+    let mut extern_sigs: HashMap<String, (Vec<&Type>, &Type)> = HashMap::new();
+    let mut two_sigs: HashSet<String> = HashSet::new();
     for m in &modules {
         for f in &m.program.functions {
             if !f.exported {
@@ -3369,13 +3372,21 @@ fn link(mut modules: Vec<Module>, root_key: &str) -> Result<Program, Vec<Diagnos
                 e.0 += 1;
                 if f.is_extern {
                     e.1 += 1;
+                    let sig = (f.params.iter().map(|p| &p.ty).collect(), &f.ret);
+                    if *extern_sigs
+                        .entry(f.name.clone())
+                        .or_insert_with(|| sig.clone())
+                        != sig
+                    {
+                        two_sigs.insert(f.name.clone());
+                    }
                 }
             }
         }
     }
     let shared_externs: HashSet<String> = extern_totals
         .into_iter()
-        .filter(|(_, (total, ext))| *ext == *total && *total >= 2)
+        .filter(|(name, (total, ext))| *ext == *total && *total >= 2 && !two_sigs.contains(name))
         .map(|(name, _)| name)
         .collect();
 

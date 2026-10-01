@@ -1,0 +1,5 @@
+extern fn hostAdd(a: Int64, b: Int64) -> Int64
+
+export fn useA() -> Int64 {
+    return hostAdd(1, 2)
+}

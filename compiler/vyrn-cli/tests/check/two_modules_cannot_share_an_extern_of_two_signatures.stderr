@@ -1,0 +1,2 @@
+two_modules_cannot_share_an_extern_of_two_signatures.vyrn:4:0: `hostAdd` is declared by both `a_module_with_a_two_argument_host_extern.vyrn` and `a_module_with_a_one_argument_host_extern.vyrn` — a top-level name is program-wide, so two linked modules cannot share one
+  note: import one of them as a namespace instead — `import * as a_module_with_a_one_argument_host_extern from "./a_module_with_a_one_argument_host_extern.vyrn"` reaches its exports as `a_module_with_a_one_argument_host_extern.hostAdd` and keeps them out of the flat namespace
