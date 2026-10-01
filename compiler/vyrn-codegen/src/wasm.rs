@@ -46,6 +46,15 @@ pub const HEAP_HEADER_BYTES: u32 = 8_768;
 /// clang's frame alignment on wasm32.
 const FRAME_ALIGN: u32 = 16;
 
+/// An access at a static offset whose alignment hint is `2^align` bytes.
+pub fn mem_arg(off: u32, align: u32) -> MemArg {
+    MemArg {
+        offset: off as u64,
+        align,
+        memory_index: 0,
+    }
+}
+
 /// Returns the wasm value type an LLVM type crosses a call boundary as, or
 /// `None` for `void`.
 ///

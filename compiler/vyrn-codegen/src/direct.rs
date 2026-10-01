@@ -36,10 +36,10 @@ use vyrn_frontend::types as ftypes;
 use vyrn_frontend::types::INT32;
 use vyrn_lower::core::Spec;
 
-use crate::layout::{self, Layout};
+use crate::layout::{self, Layout, Shape};
 use crate::llt_of;
 use crate::wasm::{
-    self, BlockType, Frame, Instruction, MemArg, Module, ValType, HEAP_BASE, MEMORY_COPY,
+    self, mem_arg, BlockType, Frame, Instruction, MemArg, Module, ValType, HEAP_BASE, MEMORY_COPY,
 };
 
 /// Refuses a construct this backend cannot lower, naming it and its line. One message shape for
@@ -153,7 +153,7 @@ struct Ext {
     ret: Type,
 }
 
-/// The wasm signature one `extern fn` crosses as, read off [`crate::extern_abi_ll`] so the ABI is
+/// The wasm signature one `extern fn` crosses as, read off [`crate::extern_abi`] so the ABI is
 /// stated once.
 ///
 /// A `String` crosses as a `(ptr, len)` pair. An export's `String` parameter is one pointer
@@ -165,15 +165,10 @@ fn extern_abi_sig(f: &Function) -> (Vec<ValType>, Vec<ValType>) {
             params.push(ValType::I32);
             params.push(ValType::I64);
         } else {
-            params.extend(wasm::abi(crate::extern_abi_ll(&p.ty)));
+            params.extend(crate::extern_abi(&p.ty));
         }
     }
-    (
-        params,
-        wasm::abi(crate::extern_abi_ll(&f.ret))
-            .into_iter()
-            .collect(),
-    )
+    (params, crate::extern_abi(&f.ret).into_iter().collect())
 }
 
 /// Compiles a whole program to a self-contained `wasm32-wasi` module.
@@ -1144,15 +1139,27 @@ impl<'a> Cx<'a> {
         crate::sum_variants_of(&self.sub(ty), &self.types)
     }
 
-    /// The load of a scalar `ty` at `off` bytes. It sign-extends as `ty` does, because `llt_of`
-    /// prints `i8` for both `Int8` and `UInt8`.
+    /// The leaf of a scalar `ty`.
+    ///
+    /// # Panics
+    ///
+    /// If `ty` is no scalar. Every caller holds a [`Repr::Scalar`] for `ty`.
+    fn leaf(&self, ty: &Type) -> layout::Leaf {
+        match crate::shape_of(&self.sub(ty), &self.types) {
+            Shape::Leaf(l) => l,
+            s => panic!("a load or store of `{ty}`, whose shape {s:?} is no scalar"),
+        }
+    }
+
+    /// The load of a scalar `ty` at `off` bytes. It sign-extends as `ty` does, because `Int8`
+    /// and `UInt8` share the leaf `I8`.
     fn load(&self, ty: &Type, off: u32) -> Instruction<'static> {
         let signed = Num::of(&self.resolve(ty)).is_some_and(|n| n.signed);
-        load_of(&self.ll(ty), off, signed)
+        self.leaf(ty).load(off, signed)
     }
 
     fn store(&self, ty: &Type) -> Instruction<'static> {
-        store_of(&self.ll(ty))
+        self.leaf(ty).store()
     }
 
     /// Returns the signature of a body discovered during emission, reserving its function index
@@ -1278,11 +1285,10 @@ impl<'a> Cx<'a> {
         if let Some(why) = self.ty_gap(ty, 0) {
             return unsupported(&why, line);
         }
-        let ll = self.ll(ty);
-        Ok(match wasm::abi(&ll) {
-            _ if ll.starts_with('{') || ll.starts_with('[') => Repr::Agg(self.layout_ll(ll, line)?),
-            Some(v) => Repr::Scalar(v),
-            None => Repr::Unit,
+        Ok(match crate::shape_of(&self.sub(ty), &self.types) {
+            Shape::Void => Repr::Unit,
+            Shape::Leaf(l) => Repr::Scalar(l.val_type()),
+            Shape::Struct(_) | Shape::Array(..) => Repr::Agg(self.layout(ty, line)?),
         })
     }
 
@@ -1950,7 +1956,7 @@ fn lower_body(
     // prologue copies it into a slot of its own, and a `modify` parameter is copy-in/copy-out:
     // copied in here and back out at the epilogue, so the caller sees no write before the call
     // returns.
-    let mut copy_out: Vec<(u32, Place, Repr, Instruction<'static>)> = Vec::new();
+    let mut copy_out: Vec<(u32, Place, Repr, Type)> = Vec::new();
     for (i, p) in f.params.iter().enumerate() {
         let local = shift + i as u32;
         // The declared type, for the same reason as `ret_ty`.
@@ -1977,7 +1983,7 @@ fn lower_body(
                 }
                 Repr::Unit => return unsupported("a `modify` parameter of Unit", f.line),
             };
-            copy_out.push((local, place, r.clone(), cx.store(&p.ty)));
+            copy_out.push((local, place, r.clone(), p.ty.clone()));
             place
         } else {
             match &r {
@@ -2080,12 +2086,12 @@ fn lower_body(
 
     // The `modify` copy-out, once, at the one exit. Stack-neutral, so a scalar result on the
     // stack survives it.
-    for (arg, place, r, store) in &copy_out {
+    for (arg, place, r, ty) in &copy_out {
         match (place, r) {
             (Place::Local(own), _) => {
                 b.ins(&Instruction::LocalGet(*arg));
                 b.ins(&Instruction::LocalGet(*own));
-                b.ins(store);
+                b.ins(&cx.store(ty));
             }
             (Place::Slot(off), Repr::Agg(l)) => {
                 b.ins(&Instruction::LocalGet(*arg));
@@ -5547,7 +5553,6 @@ impl<'p> Fn_<'_, 'p> {
             b.copy(16);
             return Ok(());
         }
-        let load = self.cx.load(t, 0);
         let push = |b: &mut Frame| -> Result<(), String> {
             match place {
                 Place::Local(l) => b.ins(&Instruction::LocalGet(l)),
@@ -5555,7 +5560,7 @@ impl<'p> Fn_<'_, 'p> {
                     place
                         .addr(b, 0)
                         .ok_or_else(|| gap("a payload with no address", line))?;
-                    b.ins(&load)
+                    b.ins(&self.cx.load(t, 0))
                 }
             };
             Ok(())
@@ -8762,15 +8767,6 @@ fn word_at(off: u32) -> MemArg {
     mem_arg(off, 2)
 }
 
-/// An access at a static offset whose alignment hint is `2^align` bytes.
-fn mem_arg(off: u32, align: u32) -> MemArg {
-    MemArg {
-        offset: off as u64,
-        align,
-        memory_index: 0,
-    }
-}
-
 /// A Vyrn integer type: a width, a signedness, and the wasm carrier both imply.
 ///
 /// wasm has only `i32` and `i64` arithmetic, so an `Int8` rides an `i32`. The invariant: a value
@@ -8919,28 +8915,6 @@ fn cmp_i32(op: BinOp) -> Option<Instruction<'static>> {
     )
 }
 
-/// The load for a scalar of LLVM shape `ll` at a static offset, at its natural alignment.
-///
-/// `llt` prints `i8` for both `Int8` and `UInt8`, so `signed` carries [`Num`]'s invariant across
-/// the load. It is ignored where the carrier is the width, and for a `Bool` (a byte of 0 or 1).
-fn load_of(ll: &str, off: u32, signed: bool) -> Instruction<'static> {
-    let m = |align| mem_arg(off, align);
-    match ll {
-        "i64" => Instruction::I64Load(m(3)),
-        "double" => Instruction::F64Load(m(3)),
-        "float" => Instruction::F32Load(m(2)),
-        "i32" | "ptr" => Instruction::I32Load(m(2)),
-        "i16" if signed => Instruction::I32Load16S(m(1)),
-        "i16" => Instruction::I32Load16U(m(1)),
-        "i8" if signed => Instruction::I32Load8S(m(0)),
-        // The four vector spellings share one `v128`: the lane interpretation belongs to
-        // the instruction. `align: 0` understates on purpose, as `@f32x4Load` does: the frame is
-        // only 8-aligned, and an overstated hint is a lie the engine may act on.
-        "<4 x float>" | "<4 x i32>" | "<2 x double>" | "<2 x i64>" => Instruction::V128Load(m(0)),
-        _ => Instruction::I32Load8U(m(0)),
-    }
-}
-
 vyrn_frontend::body_scope_descent!(HoistVisit, hoist_block, hoist_stmt, hoist_expr);
 
 /// The hoist's visitor: hands each node to `fe` or `fs` and stops at a lambda. It ignores scope.
@@ -8970,20 +8944,6 @@ fn each_block(blk: &Block, fe: &mut dyn FnMut(&Expr), fs: &mut dyn FnMut(&Stmt))
         &mut std::collections::HashSet::new(),
         &mut Hoist { fe, fs },
     );
-}
-
-fn store_of(ll: &str) -> Instruction<'static> {
-    let m = |align| mem_arg(0, align);
-    match ll {
-        "i64" => Instruction::I64Store(m(3)),
-        "double" => Instruction::F64Store(m(3)),
-        "float" => Instruction::F32Store(m(2)),
-        "i32" | "ptr" => Instruction::I32Store(m(2)),
-        "i16" => Instruction::I32Store16(m(1)),
-        // See [`load_of`] for the collapse and for the understated hint.
-        "<4 x float>" | "<4 x i32>" | "<2 x double>" | "<2 x i64>" => Instruction::V128Store(m(0)),
-        _ => Instruction::I32Store8(m(0)),
-    }
 }
 
 /// A scalar spilled for a `modify` call: its slot, its local and its load ([`Fn_::spill`]).

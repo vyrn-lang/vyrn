@@ -14,6 +14,8 @@ use std::collections::HashMap;
 use vyrn_frontend::ast::*;
 use vyrn_frontend::types::solve_param;
 
+use layout::{Leaf, Shape};
+
 /// Returns the index of the arm that tests a tag, and the tag, when a switch has
 /// the `if let` shape: two arms, one testing a tag and one the default. Such a
 /// switch lowers to a two-way branch. `tags` holds one entry per arm, `None` for
@@ -34,24 +36,19 @@ pub use vyrn_frontend::trap::{io as io_message, IO as IO_MESSAGES};
 /// at each use site, not to a host import.
 pub use vyrn_frontend::trap::host_boundary_extern;
 
-/// The extern ABI value type of one primitive: `Int64` is `i64`,
-/// sized ints up to 32 bits widen to `i32`, `Bool` is `i32`, floats stay
-/// `double`/`float`, a returned `String` is a bare `ptr`, and `Unit` has no
-/// result. A `String` parameter crosses as a `(ptr, len)` pair and is handled
-/// apart. The wasm emitter maps the answer through [`wasm::abi`]; the ABI has
-/// no second table.
-pub(crate) fn extern_abi_ll(ty: &Type) -> &'static str {
-    match ty {
-        Type::Int => "i64",
-        Type::IntN { bits: 64, .. } => "i64",
-        Type::IntN { .. } => "i32",
-        Type::Float => "double",
-        Type::Float32 => "float",
-        Type::Bool => "i32",
-        Type::Str => "ptr",
-        Type::Unit => "void",
-        // Unreachable: the checker restricts the extern signature domain.
-        _ => "i64",
+/// The wasm type one `extern` parameter or result crosses as: its leaf's
+/// [`layout::Leaf::val_type`], or `None` for `Unit`. A `String` parameter
+/// crosses as a `(ptr, len)` pair and is handled apart.
+///
+/// # Panics
+///
+/// On an aggregate: the checker's `extern_abi_type_ok` admits the scalars,
+/// `String` and `Unit` only.
+pub(crate) fn extern_abi(ty: &Type) -> Option<wasm::ValType> {
+    match shape_of(ty, &HashMap::new()) {
+        Shape::Void => None,
+        Shape::Leaf(l) => Some(l.val_type()),
+        s => unreachable!("the checker admits no `extern` of the shape {s:?}"),
     }
 }
 
@@ -899,6 +896,91 @@ fn enum_ll(slots: usize) -> String {
 /// A payload's word count, stated in [`vyrn_frontend::types`] because `own`
 /// asks the same question of the same types.
 pub(crate) use vyrn_frontend::types::payload_words as payload_words_of;
+
+/// The shape of a Vyrn type: the one match from a type to a memory layout.
+/// `ty` is resolved here but not substituted; a caller inside a monomorphized
+/// body substitutes first.
+pub(crate) fn shape_of(ty: &Type, types: &HashMap<String, TypeDecl>) -> Shape {
+    let leaf = Shape::Leaf;
+    let words = |n: usize| vec![leaf(Leaf::I64); n];
+    let st = Shape::Struct;
+    match vyrn_frontend::types::resolve(ty, types) {
+        Type::Int => leaf(Leaf::I64),
+        Type::IntN { bits, .. } => leaf(match bits {
+            8 => Leaf::I8,
+            16 => Leaf::I16,
+            32 => Leaf::I32,
+            64 => Leaf::I64,
+            _ => unreachable!("the frontend builds `IntN` at 8, 16, 32 and 64 bits only"),
+        }),
+        Type::Float => leaf(Leaf::F64),
+        Type::Float32 => leaf(Leaf::F32),
+        // `I32x4` and `Mask32x4` share one representation, so an `I32x4`
+        // comparison yields a `Mask32x4` with no conversion.
+        Type::F32x4 | Type::I32x4 | Type::Mask32x4 | Type::F64x2 | Type::Mask64x2 => {
+            leaf(Leaf::V128)
+        }
+        Type::Bool => leaf(Leaf::I1),
+        // A logger handle is a pointer to its name string.
+        Type::Str | Type::Logger => leaf(Leaf::Ptr),
+        // `Never` carries no value, so it lowers like `Unit`.
+        Type::Unit | Type::Never => Shape::Void,
+        // `{ ptr data, i64 len, i64 cap }`.
+        Type::Array(_) => st(vec![leaf(Leaf::Ptr), leaf(Leaf::I64), leaf(Leaf::I64)]),
+        // `{ ptr data, i64 len, i64 tag, i64 pay, i64 cur, i64 gen }`. A
+        // negative `tag` is a buffer: `data`/`len` are the array and `cur` the
+        // read position. Otherwise it is a step: `tag`/`pay` are a `fn` value,
+        // `cur`/`gen` the `Ref<Int64>` cursor it is called with, `len` is 1 once
+        // the step answers `None`, and `data` is null. The pairs sit 8-aligned so
+        // `&s + 16` and `&s + 32` are those values. Nothing reads a field whose
+        // variant it has not tested.
+        Type::Stream(_) => st([vec![leaf(Leaf::Ptr)], words(5)].concat()),
+        // `{ ptr keys, ptr values, i64 len, i64 cap, ptr idx }`: two parallel
+        // buffers sharing one length and capacity; `idx` is `cap * 2` `i64` hash
+        // buckets.
+        Type::Map(..) => st(vec![
+            leaf(Leaf::Ptr),
+            leaf(Leaf::Ptr),
+            leaf(Leaf::I64),
+            leaf(Leaf::I64),
+            leaf(Leaf::Ptr),
+        ]),
+        Type::ArrayN(inner, n) => Shape::Array(n, Box::new(shape_of(&inner, types))),
+        // `{ i64 len, i64 cap, ptr data, [N x T] inline }`: `cap == N` means
+        // inline, `cap > N` spilled onto `data`.
+        Type::SmallArray(inner, n) => st(vec![
+            leaf(Leaf::I64),
+            leaf(Leaf::I64),
+            leaf(Leaf::Ptr),
+            Shape::Array(n, Box::new(shape_of(&inner, types))),
+        ]),
+        Type::Record(fields) => st(fields.iter().map(|f| shape_of(&f.ty, types)).collect()),
+        // `{ i64 tag, i64 slot0, ... }`: one slot per payload word of the widest
+        // variant, so a two-word payload rides inline, not in a heap box.
+        Type::Enum(ref vs) => st(words(1 + enum_slots_of(vs, types))),
+        // On a generator host, `Code` is an opaque `i64` handle into the host's
+        // piece arena: the one `Named` that survives `resolve` undeclared.
+        Type::Named(ref n) if n == "Code" => leaf(Leaf::I64),
+        // Unreachable after `resolve` (Named/App/transformers/params reduced
+        // away). A bare integer type argument never stands alone: `SmallArray`
+        // consumes it. `Err` is the checker's recovery sentinel, and a program
+        // with an `Err` has diagnostics and never reaches codegen.
+        Type::Named(_)
+        | Type::App(..)
+        | Type::Omit(..)
+        | Type::Pick(..)
+        | Type::Merge(..)
+        | Type::Partial(..)
+        | Type::Param(_)
+        | Type::ConstInt(_)
+        | Type::Err => Shape::Void,
+        // A stored function value: `{ i64 tag, i64 payload }`. The tag selects
+        // the named function or lifted lambda; the payload is 0 or a pointer to
+        // the malloc'd capture block. `resolve` answers `Fn([], T)` for a
+        // `lazy T` field, so the `Lazy` arm is unreachable.
+        Type::Fn(..) | Type::Lazy(_) => st(words(2)),
+    }
+}
 
 /// The slots one variant's payloads occupy, laid out consecutively.
 fn variant_slots_of(payload: &[Type], types: &HashMap<String, TypeDecl>) -> usize {
