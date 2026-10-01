@@ -2764,16 +2764,19 @@ fn resolve_aliases(
             // A hand importer of an injected module follows its variant renames
             // too: importing an enum brings its variants, which are references,
             // not import names. Only when it imports that enum itself, so a
-            // consumer's own `JStr` variant is not rewritten to `json$JStr`.
+            // consumer's own `JStr` variant is not rewritten to `json$JStr`,
+            // and never over a declaration of the importer's own.
             if !imp.names.is_empty() {
                 if let Some(by_enum) = injected_variants.get(target) {
+                    let own = &module_decls[&m.key];
                     for n in &imp.names {
                         let resolved = resolved_name(&foreign_renames, target, &n.original);
                         if let Some(vars) = by_enum.get(&resolved) {
-                            rewrites
-                                .entry(m.key.clone())
-                                .or_default()
-                                .extend(vars.iter().map(|(k, v)| (k.clone(), v.clone())));
+                            rewrites.entry(m.key.clone()).or_default().extend(
+                                (vars.iter())
+                                    .filter(|(k, _)| !own.contains(*k))
+                                    .map(|(k, v)| (k.clone(), v.clone())),
+                            );
                         }
                     }
                 }
