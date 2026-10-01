@@ -16,8 +16,18 @@ fn threads() -> usize {
     })
 }
 
+/// The summed weight below which [`in_parallel`] works on the calling thread,
+/// because starting the workers costs more than they save: about 0.4 ms on 12
+/// threads. Measured on `examples/fib.vyrn`, `examples/bin/server.vyrn` and
+/// `site/export.vyrn`, every call of weight 441 or less ran slower on 12
+/// threads than on 1, and every call of weight 746 or more ran faster but one
+/// typing call of 915 (0.47 ms to 0.54 ms). The callers weigh in their own
+/// units (expressions, statements, rows, items); the measurements cover each.
+const SERIAL_BELOW: usize = 600;
+
 /// Returns `work` of each of `items`, in `items`' order, run on up to
-/// [`threads`] threads. Workers take items from one counter, heaviest first
+/// [`threads`] threads, or on the calling thread when the weights sum below
+/// [`SERIAL_BELOW`]. Workers take items from one counter, heaviest first
 /// by `weight`, so the longest body does not start last; `VYRN_SHUFFLE=<seed>`
 /// permutes that order, for the test that holds every output independent of
 /// it. Each worker keeps one `S` from `fresh` across its items. A panic in a
@@ -28,8 +38,9 @@ pub fn in_parallel<T: Sync, S, R: Send>(
     fresh: impl Fn() -> S + Sync,
     work: impl Fn(&mut S, &T) -> R + Sync,
 ) -> Vec<R> {
+    let weights: Vec<usize> = items.iter().map(weight).collect();
     let mut order: Vec<usize> = (0..items.len()).collect();
-    order.sort_by_cached_key(|&i| std::cmp::Reverse(weight(&items[i])));
+    order.sort_by_key(|&i| std::cmp::Reverse(weights[i]));
     if let Some(seed) = std::env::var("VYRN_SHUFFLE")
         .ok()
         .and_then(|v| v.parse::<u64>().ok())
@@ -53,7 +64,10 @@ pub fn in_parallel<T: Sync, S, R: Send>(
         }
         done
     };
-    let n = threads().min(items.len());
+    let n = match weights.iter().sum::<usize>() {
+        w if w < SERIAL_BELOW => 1,
+        _ => threads().min(items.len()),
+    };
     let mut done = if n <= 1 {
         worker()
     } else {
