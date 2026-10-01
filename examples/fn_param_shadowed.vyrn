@@ -1,0 +1,20 @@
+// A local that shadows a `fn`-typed parameter is a function value of its own:
+// a call through it runs the lambda it holds, not the bound parameter.
+
+fn apply(f: fn(Int64) -> Int64, x: Int64) -> Int64 {
+    let r = f(x)
+    if r > 0 {
+        let f: fn(Int64) -> Int64 = y -> y * 100
+        return f(r)
+    }
+    return r
+}
+
+fn inc(v: Int64) -> Int64 {
+    return v + 1
+}
+
+fn main() -> Int64 {
+    print("\{apply(inc, 1)}")
+    return 0
+}
