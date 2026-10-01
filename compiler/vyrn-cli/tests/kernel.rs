@@ -124,7 +124,7 @@ fn run_corpus() {
             ) {
                 Err(g) => {
                     // A rule the core states is a refusal, not a gap.
-                    if let Some(m) = &g.rule {
+                    if let Some(m) = g.rule.as_ref().map(|d| &d.message) {
                         refused.push(format!("{file}: <module state>: line {}: {m}", g.line));
                         continue;
                     }
@@ -161,7 +161,7 @@ fn run_corpus() {
                 ob,
             ) {
                 Err(g) => {
-                    if let Some(m) = &g.rule {
+                    if let Some(m) = g.rule.as_ref().map(|d| &d.message) {
                         refused.push(format!("{file}: {}: line {}: {m}", ob.name, g.line));
                         continue;
                     }
@@ -191,7 +191,7 @@ fn run_corpus() {
         for inst in &lowered.instances {
             match vyrn_lower::core::build(&program, inst, &own) {
                 Err(g) => {
-                    if let Some(m) = &g.rule {
+                    if let Some(m) = g.rule.as_ref().map(|d| &d.message) {
                         refused.push(format!("{file}: {}: line {}: {m}", inst.spelling(), g.line));
                         continue;
                     }

@@ -2842,7 +2842,7 @@ impl<'a> Checker<'a> {
                     if !self.coercible(&vty, declared) {
                         return Err(cerr!(
                             g.line,
-                            GlobalInitMismatch,
+                            InitMismatch,
                             name = DeclName(&g.name),
                             declared,
                             vty

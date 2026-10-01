@@ -49,11 +49,13 @@ use vyrn_frontend::core::{
     Arg, Arm, Body, BorrowKind, Name, NameInfo, Old, Op, Payload, Place, Rhs, Site, St, Use, Val,
     Walk,
 };
-use vyrn_frontend::diagnostics::{menu, Diagnostic};
+use vyrn_frontend::diagnostics::Diagnostic;
 use vyrn_frontend::movecheck::Refusal;
 use vyrn_frontend::own::{Exit, Linear, StateCallees};
+use vyrn_frontend::rule;
+use vyrn_frontend::rules::Rule;
 
-use crate::rules::{self, *};
+use crate::rules::exit_words;
 
 /// A release the plan owes and did not place: `name` is still held where the
 /// exit at `site` runs, or on one edge of the join at `site`, or at the end
@@ -652,6 +654,12 @@ pub enum By {
     Nothing,
 }
 
+impl vyrn_frontend::rules::IntoHole for By {
+    fn hole(&self) -> vyrn_frontend::rules::Hole {
+        vyrn_frontend::rules::Hole::Text(self.to_string())
+    }
+}
+
 impl std::fmt::Display for By {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match self {
@@ -826,27 +834,30 @@ impl<'b> Kernel<'b> {
     }
 
     /// The must-use refusal of `n`, said at its binding, whichever path
-    /// broke it: [`NEVER_DISPOSED`], or with `twice` [`DISPOSED_TWICE`].
+    /// broke it: [`Rule::NeverDisposed`], or with `twice`
+    /// [`Rule::DisposedTwice`].
     fn obligation(&self, n: Name, twice: bool) -> Refusal {
         let i = &self.body.names[n.index()];
-        let (note, by) = match &i.linear {
-            Some(Linear::Declared(by)) if *by == i.ty.to_string() => (OWED_DECLARED, by.as_str()),
-            Some(Linear::Declared(by)) => (OWED_HELD, by.as_str()),
-            _ => (OWED_STREAM, ""),
+        let declared = match &i.linear {
+            Some(Linear::Declared(by)) => Some(by.as_str()),
+            _ => None,
         };
-        let ([ty], [by]) = self.body.speech().say([&i.ty], [by]);
+        let ([ty], [by]) = self.body.speech().say([&i.ty], [declared.unwrap_or("")]);
         let a = match ty.starts_with(['A', 'E', 'I', 'O', 'U', 'a', 'e', 'i', 'o', 'u']) {
             true => "an",
             false => "a",
         };
-        let args = [("s", i.source.as_str()), ("a", a), ("ty", &ty), ("by", &by)];
-        let rule = if twice {
-            DISPOSED_TWICE
-        } else {
-            NEVER_DISPOSED
+        let s = i.source.as_str();
+        let note = match declared {
+            Some(d) if *d == i.ty.to_string() => rule!(OwedDeclared, ty, s),
+            Some(_) => rule!(OwedHeld, by, ty, s),
+            None => rule!(OwedStream, s),
         };
-        let d = Diagnostic::error(i.line, 0, "movecheck", rules::say(rule, &args))
-            .with_note(rules::say(note, &args));
+        let rule = match twice {
+            true => rule!(DisposedTwice, s, a, ty),
+            false => rule!(NeverDisposed, s, a, ty),
+        };
+        let d = Diagnostic::refusal(i.line, 0, "movecheck", rule).with_note(note.render());
         Refusal {
             diagnostic: d.in_file(self.body.file.clone()),
             body: self.body.name.clone(),
@@ -943,8 +954,8 @@ impl<'b> Kernel<'b> {
                     Some(Alias { via: Some(m), .. }) => self.src(*m),
                     _ => b,
                 };
-                let args = [("b", b), ("ty", self.body.spelled(ty)), ("m", m)];
-                return Err(self.say(SEALED_PAYLOAD, self.here, &args));
+                let ty = self.body.spelled(ty);
+                return Err(self.refuse(self.here, rule!(SealedPayload, b, ty, m)));
             }
             Some(Payload::Hole(p)) => p,
         };
@@ -1199,9 +1210,8 @@ impl<'b> Kernel<'b> {
             for (_, (b, _)) in others {
                 if place(b).is_some_and(|(q, p)| q == r && overlaps(&p, &path)) {
                     let (s, o) = (self.arg_text(st, a), self.arg_text(st, b));
-                    let by = self.by.to_string();
-                    let args = [("s", s.as_str()), ("o", o.as_str()), ("by", &by)];
-                    return Err(self.say(CONSUMED_AND_PASSED, self.here, &args));
+                    let by = &self.by;
+                    return Err(self.refuse(self.here, rule!(ConsumedAndPassed, s, by, o)));
                 }
             }
         }
@@ -1237,8 +1247,9 @@ impl<'b> Kernel<'b> {
                     (Root::G(g), _) if gs.contains(&g) => {
                         let s = self.place_text(p);
                         let place = self.body.spelled(&g);
-                        let args = [("place", place), ("s", &s), ("what", &what)];
-                        return Err(self.say(STATE_READ, self.here, &args));
+                        let here = self.here;
+                        let r = rule!(StateRead, place, s, here, what = &what);
+                        return Err(self.refuse(self.here, r));
                     }
                     (Root::G(_), _) => continue,
                 },
@@ -1263,22 +1274,15 @@ impl<'b> Kernel<'b> {
         };
         // The way out copies the place the alias reads, where it was bound.
         let (src, at) = (self.src_text(st, n), self.body.names[n.index()].line);
-        let at = at.to_string();
-        let args = [
-            ("place", place.as_str()),
-            ("s", self.src(n)),
-            ("what", what),
-            ("src", &src),
-            ("at", &at),
-        ];
-        Err(self.say(ALIAS_READ, *l, &args))
+        let (s, here) = (self.src(n), self.here);
+        Err(self.refuse(*l, rule!(AliasRead, place, s, here, what, src, at)))
     }
 
     /// Refuses a take of an alias, since the place it reads owns the buffer.
     /// Worded per exit as `movecheck.rs` words it.
     fn alias_take(&self, st: &State, n: Name, write_back: bool) -> Refusal {
         let (mut s, src, by) = (self.src(n), self.src_text(st, n), &self.by);
-        let ret = *by == By::Return;
+        let (ret, by_call) = (*by == By::Return, matches!(by, By::Call(_)));
         // A temporary is named by the place it reads when the reader can see
         // it (`sink(if c { d.title } else { "" })`); an element or another
         // temporary is quoted in the sentence below instead.
@@ -1293,56 +1297,22 @@ impl<'b> Kernel<'b> {
         }) = st.alias.get(&n)
         {
             if path.is_empty() {
-                let g = self.body.spelled(g);
-                let never = "nothing may take ownership of module state \
-                             (it lives for the whole module and is never dropped)";
-                let msg = if ret {
-                    format!(
-                        "`{g}` may not be returned — it is module state, \
-                         which nothing may take, and a return is owned"
-                    )
-                } else if matches!(by, By::Call(_)) {
-                    format!(
-                        "module state `{g}` may not be passed to a `consume` \
-                         parameter via {by} — {never}"
-                    )
-                } else {
-                    format!("module state `{g}` may not be consumed by {by} — {never}")
-                };
                 // Only a return has a way out: the caller gets a copy.
-                let fixes = if ret {
-                    vec![format!(
-                        "`{g}.copy()` — the caller releases what it is handed"
-                    )]
-                } else {
-                    Vec::new()
+                let g = self.body.spelled(g);
+                let r = match by_call {
+                    _ if ret => rule!(ReturnedModuleState, s = g),
+                    true => rule!(ModuleStatePassed, g, by),
+                    false => rule!(ModuleStateConsumed, g, by),
                 };
-                return self
-                    .refuse_at::<()>(self.here, menu(msg, fixes))
-                    .unwrap_err();
+                return self.refuse(self.here, r);
             }
             // A projection of module state is module state; the only way out
             // is the copy.
-            let is_module_state = "it is module state, which nothing may take";
-            let (msg, who) = if ret {
-                (
-                    format!("`{s}` may not be returned — {is_module_state}, and a return is owned"),
-                    "caller",
-                )
-            } else {
-                (format!("{} — {is_module_state}", self.may_not(s)), "callee")
+            let r = match ret {
+                true => rule!(ReturnedModuleState, s),
+                false => rule!(TakenModuleState, may_not = self.may_not(s), s),
             };
-            return self
-                .refuse_at::<()>(
-                    self.here,
-                    menu(
-                        msg,
-                        vec![format!(
-                            "`{s}.copy()` — the {who} releases what it is handed"
-                        )],
-                    ),
-                )
-                .unwrap_err();
+            return self.refuse(self.here, r);
         }
         // A loop variable is worded as the loop variable, not its element.
         if let Some(of) = &self.body.names[n.index()].loop_var {
@@ -1378,29 +1348,17 @@ impl<'b> Kernel<'b> {
         // Only an unnamed temporary keeps the place in the sentence; for any
         // other name the menu's `.copy()` names the place.
         let what = if s.starts_with('@') {
-            format!("it is read out of `{src}`, a place that owns it")
+            format!("read out of `{src}`, a place that owns it")
         } else {
-            "it is read out of a place that owns it".to_string()
+            "read out of a place that owns it".to_string()
         };
         let minted = self.body.names[n.index()].path.is_some();
         // A named binding a call takes is refused at the binding, so the
         // `.copy()` lands where the read is. A minted name has no binding.
-        if write_back && matches!(by, By::Call(_)) && !minted {
-            let (here, at) = (self.here, self.body.names[n.index()].line);
-            return self
-                .refuse_at::<()>(
-                    at,
-                    menu(
-                        format!(
-                            "`{s}` is read out of `{src}` here — a place that owns it\nline \
-                             {here}: ... and {by} takes `{s}`, so `{s}` must be a value of its own"
-                        ),
-                        vec![format!(
-                            "`{src}.copy()` if `{s}` should own what {by} rebuilds"
-                        )],
-                    ),
-                )
-                .unwrap_err();
+        if write_back && by_call && !minted {
+            let here = self.here;
+            let at = self.body.names[n.index()].line;
+            return self.refuse(at, rule!(RebuiltBorrow, s, src, here, by));
         }
         // A `drop` names no place: both ways out are about the binding.
         if *by == By::Release {
@@ -1417,44 +1375,22 @@ impl<'b> Kernel<'b> {
                 _ => None,
             }
             .unwrap_or_else(|| "read out of a place that owns it".to_string());
-            return self
-                .refuse_at::<()>(
-                    self.here,
-                    menu(
-                        format!("`{s}` may not be dropped — it is {kind}"),
-                        vec![
-                            format!(
-                                "`consume` the place where `{s}` is bound, so `{s}` takes the \
-                                 value rather than naming it"
-                            ),
-                            "delete the `drop` — the place that owns it releases it".to_string(),
-                        ],
-                    ),
-                )
-                .unwrap_err();
+            return self.refuse(self.here, rule!(DroppedBorrow, s, kind));
         }
         // An export's return: `wasi-min.js` frees every String an export
         // hands back, so the copy is the one way out.
         // [`Kernel::param_take`] says the same for a parameter.
-        let msg = if ret && self.body.export {
-            format!(
-                "`{s}` may not be returned from an exported function — {what}, and the JS \
-                 caller releases what it is handed"
-            )
-        } else if ret {
-            // The clause [`Kernel::param_take`] and the checker use: the exit
-            // is wrong, not the read.
-            format!("`{s}` may not be returned — {what}, and a return is owned")
-        } else {
-            format!("{} — {what}", self.may_not(s))
+        if ret && self.body.export {
+            let more = vec![rule!(CopyForJs, s).render()];
+            return self.refuse_with(self.here, rule!(ReturnedToJs, s, what), more);
+        }
+        // The clause [`Kernel::param_take`] and the checker use for a
+        // return: the exit is wrong, not the read.
+        let r = match ret {
+            true => rule!(ReturnedBorrow, s, what),
+            false => rule!(TakenBorrow, may_not = self.may_not(s), what),
         };
-        let fixes = if ret && self.body.export {
-            vec![rules::say(COPY_FOR_JS, &[("s", s)])]
-        } else {
-            self.place_fixes(st, n)
-        };
-        self.refuse_at::<()>(self.here, menu(msg, fixes))
-            .unwrap_err()
+        self.refuse_with(self.here, r, self.place_fixes(st, n))
     }
 
     /// The ways out of a take of a place read, in `movecheck::Borrow::fixes`'s
@@ -1490,8 +1426,8 @@ impl<'b> Kernel<'b> {
         };
         if self.takes.get() == Taker::Declared && path.contains('[') {
             return vec![
-                format!("`{path}.copy()` — the callee owns its copy"),
-                rules::say(SWAP_REMOVE, &[("root", root)]),
+                rule!(CopyForCallee, path).render(),
+                rule!(SwapRemove, root).render(),
             ];
         }
         let takeable = root != path && self.root_owns(st, n);
@@ -1549,21 +1485,18 @@ impl<'b> Kernel<'b> {
         }
     }
 
-    /// Refuses the rule `r` at `line`, its holes filled from `args` and
-    /// `{here}`, the line of the statement being judged ([`rules::say`]).
-    fn say(&self, r: &str, line: usize, args: &[(&str, &str)]) -> Refusal {
-        let here = self.here.to_string();
-        let args = [args, &[("here", here.as_str())]].concat();
-        self.refuse_at::<()>(line, rules::say(r, &args))
-            .unwrap_err()
+    /// The refusal of `rule` at `line`.
+    fn refuse(&self, line: usize, rule: Rule) -> Refusal {
+        self.refuse_with(line, rule, Vec::new())
     }
 
-    fn refuse_at<T>(&self, line: usize, msg: String) -> Result<T, Refusal> {
-        Err(Refusal {
-            diagnostic: Diagnostic::error(line, 0, "movecheck", rules::spoken(msg))
-                .in_file(self.body.file.clone()),
+    /// The refusal of `rule` at `line`, with the ways out `more` under the
+    /// row's own ([`crate::rules::refusal`]).
+    fn refuse_with(&self, line: usize, rule: Rule, more: Vec<String>) -> Refusal {
+        Refusal {
+            diagnostic: crate::rules::refusal(line, rule, more).in_file(self.body.file.clone()),
             body: self.body.name.clone(),
-        })
+        }
     }
 
     /// A use at `path` after a consume, in the checker's wordings: "already
@@ -1576,38 +1509,29 @@ impl<'b> Kernel<'b> {
         }
         let s = self.src(n);
         let read = format!("{s}{}", path.replace(".[]", "[..]"));
-        // A written `drop` is worded as a `consume` parameter, but the note is
-        // about a read, so a second `drop` omits it.
-        let note = if what == "dropped" {
-            ""
-        } else {
-            "\n  (a `consume` parameter takes ownership; the value can't be used afterward)"
-        };
-        let taker = st.taker.get(&n);
-        let (l, by) = taker.map_or((0, String::new()), |(l, by, _)| (*l, by.to_string()));
-        let line = l.to_string();
-        let args = [
-            ("s", s),
-            ("read", &read),
-            ("what", what),
-            ("note", note),
-            ("by", &by),
-            ("l", &line),
-        ];
-        match taker {
+        let here = self.here;
+        match st.taker.get(&n) {
             // A declared `consume` parameter and a `drop` carry no `.copy()`
             // menu; every other taker does, a builtin sink included. A linear
             // value is worded as `consume` even under a builtin (`close(s)`)
             // ([`NameInfo::linear`]).
-            Some((_, by, t))
+            Some((l, by, t))
                 if *t == Taker::Declared
                     || *by == By::Drop
                     || self.body.names[n.index()].linear.is_some() =>
             {
-                self.say(CONSUMED, self.here, &args)
+                // A written `drop` is worded as a `consume` parameter, but the
+                // note is about a read, so a second `drop` omits it.
+                let r = match what {
+                    "dropped" => rule!(DroppedAfterConsume, read, by, l),
+                    _ => rule!(Consumed, read, what, by, l),
+                };
+                self.refuse(here, r)
             }
-            Some((_, by, _)) if *by != By::Nothing => self.say(MOVED, l, &args),
-            _ => self.say(RELEASED, self.here, &args),
+            Some((l, by, _)) if *by != By::Nothing => {
+                self.refuse(*l, rule!(Moved, s, by, here, what))
+            }
+            _ => self.refuse(here, rule!(Released, s, what)),
         }
     }
 
@@ -1691,10 +1615,10 @@ impl<'b> Kernel<'b> {
             let info = self.info(n);
             return Err(match end {
                 End::Exit(exit, _) => {
-                    let args = [("info", info.as_str()), ("exit", exit_words(exit))];
-                    self.say(HELD_AT_EXIT, self.here, &args)
+                    let exit = exit_words(exit);
+                    self.refuse(self.here, rule!(HeldAtExit, info, exit))
                 }
-                End::Arm(..) => self.say(HELD_AT_ARM_END, self.here, &[("info", &info)]),
+                End::Arm(..) => self.refuse(self.here, rule!(HeldAtArmEnd, info)),
             });
         };
         // The row carries this path's holes, which may differ from the
@@ -1739,7 +1663,7 @@ impl<'b> Kernel<'b> {
                 return Err(r);
             }
             let info = self.info(n);
-            return Err(self.say(RELEASED_UNOWNED, self.here, &[("info", &info)]));
+            return Err(self.refuse(self.here, rule!(ReleasedUnowned, info)));
         }
         // A heapless release frees nothing; the plan places such a row where
         // its edge table wants one, and the ownership state still ends.
@@ -1763,13 +1687,16 @@ impl<'b> Kernel<'b> {
                 // A written `drop` releases by type and cannot skip a hole, so
                 // its menu names the write-back and the deletion. A placed
                 // release is worded as a release.
-                let (l, info) = (self.hole_line(st, n, h).to_string(), self.info(n));
-                let args = [("s", self.src(n)), ("h", h), ("l", &l), ("info", &info)];
-                let f = match self.by == By::Drop {
-                    true => DROP_WITH_HOLE,
-                    false => RELEASED_WITH_HOLE,
+                let r = match self.by == By::Drop {
+                    true => rule!(
+                        DropWithHole,
+                        s = self.src(n),
+                        h,
+                        l = self.hole_line(st, n, h)
+                    ),
+                    false => rule!(ReleasedWithHole, info = self.info(n), h),
                 };
-                return Err(self.say(f, self.here, &args));
+                return Err(self.refuse(self.here, r));
             }
             // Every hole the row skips must be under a place that left.
             if let Some(r) = holes.iter().find(|r| !state.iter().any(|h| covers(h, r))) {
@@ -1783,8 +1710,7 @@ impl<'b> Kernel<'b> {
                     }),
                     _ => {
                         let info = self.info(n);
-                        let args = [("info", info.as_str()), ("h", r)];
-                        return Err(self.say(RELEASED_AROUND, self.here, &args));
+                        return Err(self.refuse(self.here, rule!(ReleasedAround, info, h = r)));
                     }
                 }
             }
@@ -1807,10 +1733,8 @@ impl<'b> Kernel<'b> {
     fn whole(&self, st: &State, n: Name) -> Result<(), Refusal> {
         match st.holes.iter().find(|(h, _)| *h == n) {
             Some((_, path)) => {
-                let l = self.hole_line(st, n, path);
-                let line = l.to_string();
-                let args = [("s", self.src(n)), ("path", path), ("l", &line)];
-                Err(self.say(WHOLE_WITH_HOLE, l, &args))
+                let (l, here) = (self.hole_line(st, n, path), self.here);
+                Err(self.refuse(l, rule!(WholeWithHole, s = self.src(n), path, here, l)))
             }
             None => Ok(()),
         }
@@ -1852,8 +1776,7 @@ impl<'b> Kernel<'b> {
                     Vec::new(),
                 ),
             };
-            let msg = rules::say(ESCAPING_CAPTURE, &[("s", s), ("what", &what)]);
-            return self.refuse_at(line, menu(msg, fixes));
+            return Err(self.refuse_with(line, rule!(EscapingCapture, s, what), fixes));
         }
         Ok(())
     }
@@ -1864,33 +1787,28 @@ impl<'b> Kernel<'b> {
     fn param_take(&self, n: Name, b: &BorrowKind) -> Refusal {
         let (s, capture) = (self.src(n), matches!(b, BorrowKind::Capture));
         let (ret, export) = (self.by == By::Return, self.body.export);
-        let rule = match () {
-            _ if ret && capture => RETURNED_CAPTURE,
-            _ if ret && export => RETURNED_TO_JS,
-            _ if ret => RETURNED_BORROW,
-            _ => TAKEN_BORROW,
+        let what = b.what(s);
+        let r = match () {
+            _ if ret && capture => rule!(ReturnedCapture, s),
+            _ if ret && export => rule!(ReturnedToJs, s, what),
+            _ if ret => rule!(ReturnedBorrow, s, what),
+            _ => rule!(TakenBorrow, may_not = self.may_not(s), what),
         };
         // The ways out, as `movecheck::Borrow::fixes` and `fixes_here` name
         // them. The value a constructor makes owns what it is given: only the
         // copy. An `export extern fn` signature refuses `consume`, so only a
         // copy is left.
-        let (fix, more) = match () {
-            _ if self.takes.get() == Taker::Constructs && !capture => (Some(COPY_TO_OWN), vec![]),
-            _ if ret && capture => (Some(COPY_FOR_CALLER), vec![]),
-            _ if capture => (None, vec![]),
-            _ if export && ret => (Some(COPY_FOR_JS), vec![]),
-            _ if export => (Some(COPY_FROM_JS), vec![]),
-            _ => (None, b.fixes(s)),
+        let more = match () {
+            _ if self.takes.get() == Taker::Constructs && !capture => {
+                vec![rule!(CopyToOwn, s).render()]
+            }
+            _ if ret && capture => vec![rule!(CopyForCaller, s).render()],
+            _ if capture => vec![],
+            _ if export && ret => vec![rule!(CopyForJs, s).render()],
+            _ if export => vec![rule!(CopyFromJs, s).render()],
+            _ => b.fixes(s),
         };
-        let rule = fix.map_or(rule.to_string(), |f| format!("{rule}|{f}"));
-        let (what, may_not) = (b.what(s), self.may_not(s));
-        let args = [
-            ("s", s),
-            ("what", what.as_str()),
-            ("may_not", may_not.as_str()),
-        ];
-        let msg = menu(rules::say(&rule, &args), more);
-        self.refuse_at::<()>(self.here, msg).unwrap_err()
+        self.refuse_with(self.here, r, more)
     }
 
     /// The kind of borrow `n` is, where a take of it is refused by that kind
@@ -1980,8 +1898,8 @@ impl<'b> Kernel<'b> {
             {
                 // Both lines name the storage that moved, not the longer path
                 // read, as in `used_after` and `movecheck::check_use`.
-                let args = [("s", self.src(n)), ("h", h)];
-                return Err(self.say(READ_IN_HOLE, self.hole_line(st, n, h), &args));
+                let (s, here) = (self.src(n), self.here);
+                return Err(self.refuse(self.hole_line(st, n, h), rule!(ReadInHole, s, h, here)));
             }
         }
         Ok(())
@@ -2074,8 +1992,9 @@ impl<'b> Kernel<'b> {
                     .strip_prefix(hp.as_str())
                     .is_some_and(|r| r.starts_with('.'))
         }) {
-            let args = [("s", self.src(n)), ("h", h), ("path", &path)];
-            return Err(self.say(STORE_UNDER_HOLE, self.hole_line(st, n, h), &args));
+            let (s, here) = (self.src(n), self.here);
+            let r = rule!(StoreUnderHole, s, h, here, path = &path);
+            return Err(self.refuse(self.hole_line(st, n, h), r));
         }
         st.holes.retain(|(h, hp)| !(*h == n && overlaps(hp, &path)));
         Ok(())
@@ -2480,14 +2399,13 @@ impl<'b> Kernel<'b> {
                                 self.owe_store(site, holes);
                             } else {
                                 let info = self.info(*n);
-                                let args = [("info", info.as_str())];
-                                return Err(self.say(OVERWRITTEN, self.here, &args));
+                                return Err(self.refuse(self.here, rule!(Overwritten, info)));
                             }
                         }
                         if st.own(*n) == Own::Gone && *old == Old::Released {
                             let info = self.info(*n);
-                            let args = [("info", info.as_str())];
-                            return Err(self.say(RELEASED_BEFORE_STORE, self.here, &args));
+                            let r = rule!(ReleasedBeforeStore, info);
+                            return Err(self.refuse(self.here, r));
                         }
                         st.set_own(*n, if fresh_static { Own::Static } else { Own::Held });
                         // The new value is whole.
@@ -2506,9 +2424,8 @@ impl<'b> Kernel<'b> {
                             self.take(st, k)?;
                         }
                         if *old == Old::Unreleased {
-                            let l = self.line_of(value).to_string();
-                            let args = [("l", l.as_str())];
-                            return Err(self.say(STORE_RELEASES_NOTHING, self.here, &args));
+                            let l = self.line_of(value);
+                            return Err(self.refuse(self.here, rule!(StoreReleasesNothing, l)));
                         }
                         // The kernel tracks whole names, so the rule is over
                         // the root: module state and a `modify` parameter
@@ -2856,14 +2773,14 @@ impl<'b> Kernel<'b> {
         if let Some(g) = took {
             return Err(match (g.taker.get(&n), point) {
                 (Some((l, by, _)), _) if *by != By::Nothing => {
-                    let f = match point {
-                        Point::Join => JOIN_MOVED,
-                        Point::Back => LOOP_MOVED,
+                    let r = match point {
+                        Point::Join => rule!(JoinMoved, s, by),
+                        Point::Back => rule!(LoopMoved, s, by),
                     };
-                    self.say(f, *l, &[("s", s), ("by", &by.to_string())])
+                    self.refuse(*l, r)
                 }
-                (_, Point::Join) => self.say(JOIN_RELEASED, self.here, &[("s", s)]),
-                (_, Point::Back) if heap => self.say(LOOP_RELEASED, self.here, &[("s", s)]),
+                (_, Point::Join) => self.refuse(self.here, rule!(JoinReleased, s)),
+                (_, Point::Back) if heap => self.refuse(self.here, rule!(LoopReleased, s)),
                 _ => return Ok(()),
             });
         }
@@ -2872,7 +2789,7 @@ impl<'b> Kernel<'b> {
             _ if !heap => return Ok(()),
             Point::Join if oa == Own::Gone => return Ok(()),
             Point::Back if oa != ob && !(oa == Own::Static && ob == Own::Held) => {
-                return Err(self.say(LOOP_BOUND, self.here, &[("info", &info())]));
+                return Err(self.refuse(self.here, rule!(LoopBound, info = info())));
             }
             _ => {}
         }
@@ -2884,12 +2801,12 @@ impl<'b> Kernel<'b> {
         // `consume` makes a hole, so the taker is always `consume`.
         let made = ha.iter().find(|h| !hb.contains(h));
         Err(match (point, made) {
-            (Point::Join, _) => self.say(JOIN_HOLE, self.here, &[("info", &info())]),
+            (Point::Join, _) => self.refuse(self.here, rule!(JoinHole, info = info())),
             (Point::Back, Some(h)) => {
-                let args = [("s", s), ("h", &h.replace(".[]", "[..]"))];
-                self.say(LOOP_HOLE, self.hole_line(a, n, h), &args)
+                let r = rule!(LoopHole, s, h = h.replace(".[]", "[..]"));
+                self.refuse(self.hole_line(a, n, h), r)
             }
-            (Point::Back, None) => self.say(LOOP_HOLE_AT, self.here, &[("info", &info())]),
+            (Point::Back, None) => self.refuse(self.here, rule!(LoopHoleAt, info = info())),
         })
     }
 

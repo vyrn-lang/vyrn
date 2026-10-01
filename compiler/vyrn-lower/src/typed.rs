@@ -19,11 +19,8 @@ use vyrn_frontend::core::{
     rows, Arg, Body, Callee, Name, NameInfo, Place, Rhs, Site, St, Use, Val,
 };
 
-use crate::rules::{
-    say, ASSIGN_NOT_MUT, DROP_MODULE_STATE, DROP_NOT_HEAP, DROP_TYPE_PARAM, DROP_UNBOUND,
-    FIELD_NOT_MUT, GROUP_CALL, GROUP_EXIT, GROUP_FALSE, GROUP_READ, OUTSIDE_LOOP, REMOVE_NOT_MUT,
-    STORE_NOT_MUT, STORE_RULED,
-};
+use vyrn_frontend::rule;
+use vyrn_frontend::rules::Rule;
 
 /// A step from one type into the type a place holds, for the caller that
 /// resolves a place's type. `Global` has no base.
@@ -417,15 +414,14 @@ pub fn stores(
             if site.is_some_and(|k| !seen.insert(k)) {
                 return;
             }
-            let rule = match (ruled.is_some(), step, removal) {
-                (true, ..) => STORE_RULED,
-                (_, None, Some(_)) => REMOVE_NOT_MUT,
-                (_, None, None) => ASSIGN_NOT_MUT,
-                (_, Some(Place::Field(..)), _) if !elem => FIELD_NOT_MUT,
-                (_, Some(_), _) => STORE_NOT_MUT,
+            let rule = match (ruled, step, removal) {
+                (Some(n), ..) => rule!(StoreRuled, n, name),
+                (_, None, Some(op)) => rule!(RemoveNotMut, op = &op[1..], name),
+                (_, None, None) => rule!(AssignNotMut, name),
+                (_, Some(Place::Field(..)), _) if !elem => rule!(FieldNotMut, name),
+                (_, Some(_), _) => rule!(StoreNotMut, name),
             };
-            let (n, op) = (ruled.unwrap_or_default(), removal.map_or("", |op| &op[1..]));
-            out.push((line, say(rule, &[("n", &n), ("name", name), ("op", op)])));
+            out.push((line, rule.render()));
         };
         rows(&f.stmts).for_each(|(s, _)| row_stores(s, &f.names, &mut judge));
     }
@@ -585,7 +581,7 @@ impl Groups<'_, '_> {
                     };
                     for o in &open {
                         let name = self.src(o.name);
-                        self.say(*line, GROUP_EXIT, &[("what", what), ("name", &name)]);
+                        self.refuse(*line, rule!(GroupExit, what, name));
                     }
                     open.clear();
                 }
@@ -596,7 +592,7 @@ impl Groups<'_, '_> {
                         .collect();
                     for n in callers {
                         let name = self.src(n);
-                        self.say(*line, GROUP_EXIT, &[("what", what), ("name", &name)]);
+                        self.refuse(*line, rule!(GroupExit, what, name));
                     }
                     open.clear();
                 }
@@ -606,15 +602,8 @@ impl Groups<'_, '_> {
                     let fails = self.refuted.iter().find(|(at, ..)| *at == c.site);
                     let group = open.iter().find(|o| o.name == r);
                     if let (Some((_, long, short)), Some(o)) = (fails, group) {
-                        let name = self.src(r);
-                        let args = [
-                            ("long", long.as_str()),
-                            ("short", short.as_str()),
-                            ("name", &name),
-                            ("n", &o.ty),
-                            ("k", &c.site.line.to_string()),
-                        ];
-                        self.say(o.line, GROUP_FALSE, &args);
+                        let (name, k, n) = (self.src(r), c.site.line, &o.ty);
+                        self.refuse(o.line, rule!(GroupFalse, name, k, long, short, n));
                     }
                 }
                 _ => {
@@ -652,10 +641,10 @@ impl Groups<'_, '_> {
         for o in open {
             let name = self.src(o.name);
             if reads_whole(s, o.name) {
-                self.say(line, GROUP_READ, &[("name", &name)]);
+                self.refuse(line, rule!(GroupRead, name));
             }
             if let Some(f) = self.called(s).filter(|_| self.callers(o.name)) {
-                self.say(line, GROUP_CALL, &[("f", &f), ("name", &name)]);
+                self.refuse(line, rule!(GroupCall, f, name));
             }
         }
     }
@@ -702,8 +691,8 @@ impl Groups<'_, '_> {
     /// Refuses each group in `open`: its store has no check on its path.
     fn unchecked(&mut self, open: &[Open]) {
         for o in open {
-            let name = self.src(o.name);
-            self.say(o.line, STORE_RULED, &[("n", &o.ty), ("name", &name)]);
+            let (n, name) = (&o.ty, self.src(o.name));
+            self.refuse(o.line, rule!(StoreRuled, n, name));
         }
     }
 
@@ -711,8 +700,8 @@ impl Groups<'_, '_> {
         self.f.names[n.index()].source.clone()
     }
 
-    fn say(&mut self, line: usize, rule: &str, args: &[(&str, &str)]) {
-        let u = (line, say(rule, args));
+    fn refuse(&mut self, line: usize, rule: Rule) {
+        let u = (line, rule.render());
         if !self.out.contains(&u) {
             self.out.push(u);
         }
@@ -779,7 +768,7 @@ pub fn loops(body: &Body, seen: &mut std::collections::HashSet<NodeId>) -> Vec<(
                 _ => continue,
             };
             if seen.insert(*site) {
-                out.push((*line, say(OUTSIDE_LOOP, &[("what", what)])));
+                out.push((*line, rule!(OutsideLoop, what).render()));
             }
         }
     }
@@ -818,11 +807,13 @@ pub fn drops(
     let mut out = Vec::new();
     for f in body.frames() {
         for (name, line) in &f.unbound_drops {
-            let rule = match program.globals.iter().any(|g| &g.name == name) {
-                true => DROP_MODULE_STATE,
-                false => DROP_UNBOUND,
+            let global = program.globals.iter().any(|g| &g.name == name);
+            let name = f.spelled(name);
+            let rule = match global {
+                true => rule!(DropModuleState, name),
+                false => rule!(DropUnbound, name),
             };
-            out.push((*line, say(rule, &[("name", f.spelled(name))])));
+            out.push((*line, rule.render()));
         }
         let written = rows(&f.stmts).filter_map(|(s, _)| match s {
             St::Drop(n, _, line, _) if *line > 0 => Some((*n, *line)),
@@ -846,12 +837,13 @@ pub fn drops(
             if owned || heap || t == Type::Err {
                 continue;
             }
-            let rule = match t {
-                Type::Param(_) => DROP_TYPE_PARAM,
-                _ => DROP_NOT_HEAP,
-            };
+            let (name, param) = (&info.source, matches!(t, Type::Param(_)));
             let t = body.speech().ty(&t).to_string();
-            out.push((line, say(rule, &[("name", &info.source), ("t", &t)])));
+            let rule = match param {
+                true => rule!(DropTypeParam, name, t),
+                false => rule!(DropNotHeap, name, t),
+            };
+            out.push((line, rule.render()));
         }
     }
     out

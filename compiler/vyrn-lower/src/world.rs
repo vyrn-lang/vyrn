@@ -354,7 +354,7 @@ impl World {
     /// `out.push(s) out.push(s)` on one line is two mistakes. `file` is `None`
     /// for the root module, which tells `vyrn fix` the edit is its to make.
     /// A must-use row ([`crate::rules::owed`]) is one per binding: file, line
-    /// and the binding it quotes, the first instance's words.
+    /// and the binding it is about, the first instance's words.
     pub fn refusal_diagnostics(&self) -> Vec<Diagnostic> {
         if !crate::core::refuses() {
             return Vec::new();
@@ -370,8 +370,7 @@ impl World {
                     nth.clear();
                 }
                 let d = &r.diagnostic;
-                if crate::rules::owed(&d.message) {
-                    let binding = d.message.split('`').nth(1).unwrap_or_default();
+                if let Some(binding) = crate::rules::owed(d) {
                     return owed.insert((d.file.clone(), d.line, binding.to_string()));
                 }
                 let key = (d.file.clone(), d.line, d.message.clone());
@@ -387,7 +386,7 @@ impl World {
     /// the only kernel refusals a generator's program prints.
     pub fn owed_diagnostics(&self) -> Vec<Diagnostic> {
         let mut owed = self.refusal_diagnostics();
-        owed.retain(|d| crate::rules::owed(&d.message));
+        owed.retain(|d| crate::rules::owed(d).is_some());
         vyrn_frontend::movecheck::in_source_order(&mut owed);
         owed
     }
