@@ -146,3 +146,117 @@ fn a_check_in_one_process_prints_what_a_fresh_process_prints() {
     assert_eq!(runs[1], fresh(&second));
     assert_eq!(runs[2], runs[0]);
 }
+
+/// The options and resolver `vyrn` loads `root` with: the std root and the
+/// nearest manifest's keys.
+fn cli_load(root: &str) -> vyrn_frontend::loader::LoadOptions {
+    let mut opts = vyrn_frontend::loader::LoadOptions {
+        std_root: Some(
+            check_dir()
+                .join("../../../../std")
+                .to_string_lossy()
+                .replace('\\', "/"),
+        ),
+        expansions: vyrn_frontend::project::Expansions::shared(),
+        ..Default::default()
+    };
+    let dir = Path::new(root).parent().expect("a file has a directory");
+    if let Some(m) = vyrn_frontend::manifest::find(dir).expect("the manifest parses") {
+        opts.aliases = m.dependencies.into_iter().collect();
+        opts.alias_base = m.dir;
+        opts.audience = m.audience;
+        opts.artifacts = m.artifacts;
+    }
+    opts
+}
+
+/// A file's absolute path, slash-separated, as `vyrn` keys a root.
+fn root_of(path: &Path) -> String {
+    let p = path.canonicalize().expect("the program exists");
+    p.to_string_lossy()
+        .trim_start_matches(r"\\?\")
+        .replace('\\', "/")
+}
+
+/// Building one program leaves nothing behind for the next: two programs
+/// compiled in one process, then the first again, write the module a fresh
+/// `vyrn build --target wasm` writes for each. The first runs a `derive`
+/// generator, the second a generator import.
+#[test]
+fn a_build_in_one_process_writes_what_a_fresh_process_writes() {
+    let examples = check_dir().join("../../../../examples");
+    let first = root_of(&examples.join("derive.vyrn"));
+    let second = root_of(&examples.join("gendemo.vyrn"));
+    let engine = vyrn_genwasm::engine();
+    let here = |root: &str| -> Vec<u8> {
+        let src = std::fs::read_to_string(root).expect("read the program");
+        let opts = cli_load(root);
+        let resolver = vyrn_frontend::loader::DiskResolver;
+        let (program, world) =
+            vyrn_lower::load_warned(&src, root, &opts, &resolver, Some(&*engine))
+                .0
+                .expect("the program loads");
+        vyrn_codegen::direct::compile(&program, world).expect("the program compiles")
+    };
+    let dir = scratch("one-process-build");
+    let fresh = |root: &str| -> Vec<u8> {
+        let out = dir.join("out.wasm");
+        let run = vyrn()
+            .args(["build", root, "--target", "wasm", "-o"])
+            .arg(&out)
+            .output()
+            .expect("run vyrn build");
+        assert!(run.status.success(), "{}", norm(&run.stderr));
+        std::fs::read(&out).expect("read the module")
+    };
+    let runs = [here(&first), here(&second), here(&first)];
+    assert!(runs[0] == fresh(&first), "derive.vyrn built after nothing");
+    assert!(
+        runs[1] == fresh(&second),
+        "gendemo.vyrn built after derive.vyrn"
+    );
+    assert!(runs[2] == runs[0], "derive.vyrn built after gendemo.vyrn");
+}
+
+/// The editor's analysis leaves nothing behind on its thread: two programs
+/// analysed on one thread, then the first again, give the diagnostics a fresh
+/// thread gives for each. Each thread arms what the editor's thread arms.
+#[test]
+fn an_editor_analysis_on_one_thread_gives_what_a_fresh_thread_gives() {
+    let first = root_of(&check_dir().join("mut_a_field_store.vyrn"));
+    let second = root_of(&check_dir().join("a_derive_entry_must_match_its_call.vyrn"));
+    let analyze = |root: &str| -> String {
+        let src = std::fs::read_to_string(root).expect("read the program");
+        let opts = cli_load(root);
+        let opts = vyrn_frontend::loader::LoadOptions {
+            expansions: Default::default(),
+            ..opts
+        };
+        let engine = vyrn_genwasm::engine();
+        let resolver = vyrn_frontend::loader::DiskResolver;
+        let a = vyrn_frontend::analyze_judged(
+            &src,
+            Some((root, &opts, &resolver)),
+            Some(&*engine),
+            &vyrn_lower::JUDGE,
+        );
+        assert!(!a.diagnostics.is_empty(), "{root} is refused");
+        format!("{:?}", a.diagnostics)
+    };
+    let on_thread = |roots: Vec<String>| -> Vec<String> {
+        std::thread::Builder::new()
+            .stack_size(64 << 20)
+            .spawn(move || {
+                vyrn_frontend::movecheck::reuse_judgments();
+                vyrn_frontend::checker::record_reads();
+                roots.iter().map(|r| analyze(r)).collect()
+            })
+            .expect("spawn a thread")
+            .join()
+            .expect("the analyses finish")
+    };
+    let runs = on_thread(vec![first.clone(), second.clone(), first.clone()]);
+    assert_eq!(runs[0], on_thread(vec![first])[0]);
+    assert_eq!(runs[1], on_thread(vec![second])[0]);
+    assert_eq!(runs[2], runs[0]);
+}
