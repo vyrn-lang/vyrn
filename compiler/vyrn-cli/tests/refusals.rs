@@ -676,6 +676,22 @@ fn the_shapes_rule_twos_unit_tests_pinned_are_still_refused() {
             ),
         ),
         (
+            "a lambda parameter",
+            vec![
+                "`s` may not be passed to a `consume` parameter via `take(..)` — it is a `read` \
+                 parameter",
+                "fix: `s.copy()` if both sides need a value",
+                "fix: a named function with `s: consume ..`, called directly, if it should own it",
+            ],
+            // A lambda has no spelling for a `consume` parameter.
+            vec!["declare the parameter"],
+            format!(
+                "fn take(s: consume String) -> Int64 {{ return s.byteLength }} \
+                 fn go() -> Int64 {{ let g: fn(String) -> Int64 = s -> take(s) \
+                 return g(\"a\" + \"b\") }}{END}"
+            ),
+        ),
+        (
             "a stored loop variable",
             vec![
                 "`x` may not be stored into `push(..)` — it is a loop variable",

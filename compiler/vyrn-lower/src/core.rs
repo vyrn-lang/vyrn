@@ -49,7 +49,8 @@ fn taken_path(e: &Expr) -> Option<String> {
 }
 
 /// The borrow a parameter's capability makes; `None` for `consume`.
-fn param_borrow(cap: Capability, name: &str) -> Option<BorrowKind> {
+/// `lambda` marks a lambda's parameter.
+fn param_borrow(cap: Capability, name: &str, lambda: bool) -> Option<BorrowKind> {
     let cap = match cap {
         Capability::Read => "read",
         Capability::Modify => "modify",
@@ -58,6 +59,7 @@ fn param_borrow(cap: Capability, name: &str) -> Option<BorrowKind> {
     Some(BorrowKind::Param {
         cap,
         of: name.to_string(),
+        lambda,
     })
 }
 
@@ -1227,7 +1229,7 @@ fn build_seeded(
         // still words a refusal about a second name for it.
         b.body.names[n.index()].must_use_param =
             b.proto.must_use(&b.body.names[n.index()].ty.clone());
-        b.body.names[n.index()].borrow_kind = param_borrow(p.capability, &p.name);
+        b.body.names[n.index()].borrow_kind = param_borrow(p.capability, &p.name, false);
         b.body.names[n.index()].mutable = p.capability == Capability::Modify;
         b.scope.push((p.name.clone(), n));
         b.keyed(n, p.id());
@@ -5208,7 +5210,7 @@ impl<'a> Builder<'a> {
         }
         for (p, pt) in params.iter().zip(ptys) {
             let m = self.name(&p.name, pt, false, *line);
-            self.body.names[m.index()].borrow_kind = param_borrow(Capability::Read, &p.name);
+            self.body.names[m.index()].borrow_kind = param_borrow(Capability::Read, &p.name, true);
             self.scope.push((p.name.clone(), m));
             self.body.params.push(m);
         }
