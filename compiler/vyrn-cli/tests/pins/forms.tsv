@@ -20,12 +20,12 @@ Expr::Str	7	2	0	0	6	0	2	2	19
 Expr::Var	25	21	0	0	48	0	3	0	97
 Expr::Unary	4	3	0	0	7	0	0	1	15
 Expr::Binary	3	2	0	1	11	0	0	0	17
-Expr::Call	23	14	0	1	37	0	1	0	76
+Expr::Call	23	14	0	1	38	0	1	0	77
 Expr::Match	9	4	0	0	8	0	0	0	21
 Expr::IfExpr	1	3	0	0	5	0	0	0	9
 Expr::Try	1	2	0	0	4	0	0	0	7
 Expr::StructLit	2	2	0	0	7	0	1	0	12
-Expr::Field	7	2	0	0	13	0	1	0	23
+Expr::Field	7	2	0	0	15	0	1	0	25
 Expr::TryConstruct	1	4	0	0	6	0	0	0	11
 Expr::ArrayLit	5	2	0	0	7	1	0	1	16
 Expr::MapLit	3	2	0	0	4	1	0	0	10
@@ -35,4 +35,4 @@ Pattern::Variant	11	2	0	0	3	0	2	0	18
 Pattern::Success	1	3	0	0	4	0	1	0	9
 Pattern::Failure	1	2	0	0	2	0	0	0	5
 Pattern::Other	2	3	0	0	2	0	1	0	8
-all	151	127	0	2	288	2	26	9	605
+all	151	127	0	2	291	2	26	9	608

@@ -39,10 +39,13 @@ use vyrn_frontend::core::{
 };
 
 /// The path a field read takes out of its unnamed receiver: `.q.s` for
-/// `mk().q.s`. `None` under an element.
-fn taken_path(e: &Expr) -> Option<String> {
+/// `mk().q.s`. `None` under an element. A `forced` read is a receiver of its
+/// own ([`Builder::place`]): `.s` for `h.f.s` where `f` is `lazy`.
+fn taken_path(e: &Expr, forced: &impl Fn(&Expr) -> bool) -> Option<String> {
     match e {
-        Expr::Field { expr, field, .. } => Some(format!("{}.{field}", taken_path(expr)?)),
+        Expr::Field { expr, field, .. } if !forced(e) => {
+            Some(format!("{}.{field}", taken_path(expr, forced)?))
+        }
         Expr::Call { name, .. } if name == vyrn_frontend::project::AT => None,
         _ => Some(String::new()),
     }
@@ -1702,7 +1705,7 @@ impl<'a> Builder<'a> {
             Expr::Var { name: m, .. } => self
                 .lookup(m)
                 .is_some_and(|m| self.body.names[m.index()].borrow),
-            e => is_place_read(e) && self.deferred_of(e).is_none(),
+            e => is_place_read(e) && !self.forces(e),
         };
         *mutable
             && borrow
@@ -2777,7 +2780,7 @@ impl<'a> Builder<'a> {
                     && !copied
                     && (global || !matches!(read, Expr::Var { .. }))
                     && is_place_read(read)
-                    && self.deferred_of(read).is_none()
+                    && !self.forces(read)
                 {
                     let mark = self.frame.after.len();
                     let place = self.place(read, out)?;
@@ -3169,7 +3172,7 @@ impl<'a> Builder<'a> {
                             t
                         }
                     }
-                    _ if !*consuming && is_place_read(iter) => {
+                    _ if !*consuming && is_place_read(iter) && !self.forces(iter) => {
                         // `for p in e.path`: the loop walks a container
                         // somebody else owns.
                         let place = self.place(iter, out)?;
@@ -4805,18 +4808,37 @@ impl<'a> Builder<'a> {
         vyrn_frontend::types::deferred(&f.ty).cloned()
     }
 
+    /// Whether reading `e` forces a `lazy` field at some step. Such a read
+    /// names a part of a fresh value, not a place, though
+    /// [`is_place_read`] answers by its spelling.
+    fn forces(&self, e: &Expr) -> bool {
+        match e {
+            Expr::Field { expr, .. } => self.deferred_of(e).is_some() || self.forces(expr),
+            Expr::Call { args, .. } if reads_a_part(e) => self.forces(&args[0]),
+            _ => false,
+        }
+    }
+
     /// Forces a read of a `lazy T` field: borrows the stored
     /// nullary closure out of the field and calls through it. The result is
     /// fresh on every read; its release is keyed by the read (`arg_released`).
     fn force(&mut self, e: &'a Expr, inner: Type, out: &mut Vec<St>) -> Result<Rhs, Gap> {
-        let place = self.place(e, out)?;
+        let Expr::Field { expr, field, .. } = e else {
+            return gap("a forced read of no field", e.line());
+        };
+        let place = Place::Field(Box::new(self.place(expr, out)?), field.clone());
         let thunk = Type::Fn(Vec::new(), Box::new(inner.clone()));
         let n = self.name("@thunk", thunk, false, e.line());
         let callee = format!("@thunk{}", n.0);
         self.body.names[n.index()].source = callee.clone();
         self.body.names[n.index()].path = self.reader_path(e);
         out.push(St::Let(n, Rhs::Read(place)));
-        self.release_receiver(e, out, true);
+        // The thunk borrows the receiver until the call has run, and the
+        // result owns nothing of it: the receiver goes once the result is
+        // bound.
+        if let Some((r, ..)) = self.frame.pending_receiver.take() {
+            self.frame.after.push(r);
+        }
         Ok(Rhs::Call {
             callee,
             args: Vec::new(),
@@ -4906,7 +4928,7 @@ impl<'a> Builder<'a> {
         // kernel reports it.
         let holes: Vec<String> = match (took, e) {
             (false, _) => Vec::new(),
-            (true, Expr::Field { .. }) => match taken_path(e) {
+            (true, Expr::Field { .. }) => match taken_path(e, &|x| self.deferred_of(x).is_some()) {
                 Some(path) => vec![path],
                 None => return,
             },
@@ -5005,7 +5027,7 @@ impl<'a> Builder<'a> {
             Expr::Lambda { .. } => self.lambda(e, out),
             _ => {
                 let ty = self.ty_of(e)?;
-                if is_place_read(e) && self.owns(&ty) && self.deferred_of(e).is_none() {
+                if is_place_read(e) && self.owns(&ty) && !self.forces(e) {
                     // `best = m.name`: a borrow (`movecheck::names_a_place`),
                     // so a take of it needs a `.copy()`.
                     let place = self.place(e, out)?;
@@ -6234,7 +6256,9 @@ impl<'a> Builder<'a> {
                     Ok(Place::Global(name.clone()))
                 }
             },
-            Expr::Field { expr, field, .. } => {
+            // A `lazy` field's place holds the thunk; a read through it is a
+            // read of the forced value (`h.f.n`).
+            Expr::Field { expr, field, .. } if self.deferred_of(e).is_none() => {
                 let base = self.place(expr, out)?;
                 Ok(Place::Field(Box::new(base), field.clone()))
             }

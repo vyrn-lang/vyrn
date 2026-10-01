@@ -124,6 +124,7 @@ pull request.
 - No drop flags. An ambiguous join (moved on one path only) gets a release on the other edge or is refused.
 - A join arm that yields a name bound outside the construct moves it; a later use is refused with the `.copy()` fix. Treating the yield as an alias leaked the name on the edges that did not yield it.
 - A projection (a field, element or pattern binder of a place) borrows its root. It may be read, not stored or returned; the fix is `.copy()` or a take.
+- A read through a `lazy` field names no place: each read forces the field, and a part of the forced value is the reader's, as a part of a call's result is.
 - A refusal quotes what the reader wrote, never a compiler temporary (`@t1`): `rules::spoken` panics in a debug build on a sentence that does.
 - A lend is refused, never tracked through stores. Tracking it would need an alias analysis.
 - `consume <place>` moves a value out of a place; only the taken path dies. No `take` keyword and no `.take()`: an element leaves with `swapRemove`.
