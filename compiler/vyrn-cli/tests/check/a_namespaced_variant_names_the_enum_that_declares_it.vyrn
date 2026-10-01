@@ -1,0 +1,10 @@
+// `ns.Enum.Variant` names an enum the module exports, and that enum declares
+// the variant; another enum or record of the module does not stand for it.
+import * as shapes from "./a_module_exporting_an_enum_and_a_record.vyrn"
+
+fn main() -> Int64 {
+    let c = shapes.Nope.Circle(5)
+    let d = shapes.Point.Dot
+    print(shapes.size(c) + shapes.size(d))
+    return 0
+}

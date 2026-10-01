@@ -2427,18 +2427,17 @@ fn resolve_aliases(
     // `name_module_count` counts the modules declaring each name, so a
     // namespaced export is renamed only when its name would collide.
     let mut module_exports: HashMap<String, HashSet<String>> = HashMap::new();
-    // Variant names of a module's exported enums, to tell `ns.Enum.Variant(x)`
-    // apart from `someFn(ns.Type, ..)`, which parse the same.
-    let mut module_variants: HashMap<String, HashSet<String>> = HashMap::new();
+    // Variant names of each exported enum per module, to tell
+    // `ns.Enum.Variant(x)` apart from `someFn(ns.Type, ..)`, which parse the same.
+    let mut module_variants: HashMap<String, HashMap<String, HashSet<String>>> = HashMap::new();
     let mut name_module_count: HashMap<String, usize> = HashMap::new();
     for m in modules.iter() {
         let variants = module_variants.entry(m.key.clone()).or_default();
         for t in &m.program.type_decls {
             if t.line != 0 && t.exported {
                 if let Some(vs) = crate::types::declared_variants(&t.base) {
-                    for v in vs {
-                        variants.insert(v.name.clone());
-                    }
+                    let names = vs.iter().map(|v| v.name.clone());
+                    variants.entry(t.name.clone()).or_default().extend(names);
                 }
             }
         }
@@ -3017,9 +3016,9 @@ struct NsResolver<'a> {
     foreign_renames: &'a HashMap<(String, String), String>,
     /// Exported decl names (originals) per module: the namespace-reachable surface.
     module_exports: &'a HashMap<String, HashSet<String>>,
-    /// Exported-enum variant names per module, to tell variant construction from
-    /// a type-name argument.
-    module_variants: &'a HashMap<String, HashSet<String>>,
+    /// Variant names of each exported enum per module, to tell variant
+    /// construction from a type-name argument.
+    module_variants: &'a HashMap<String, HashMap<String, HashSet<String>>>,
     module_key: String,
     root_key: String,
     errors: &'a mut Vec<Diagnostic>,
@@ -3033,6 +3032,14 @@ impl NsResolver<'_> {
 
     /// The program-wide symbol a namespace member resolves to, after any
     /// collision rename, or an error if the target does not export it.
+    /// Whether the enum `enum_name` the namespace `ns` exports declares `variant`.
+    fn declares_variant(&self, ns: &str, enum_name: &str, variant: &str) -> bool {
+        (self.ns.get(ns))
+            .and_then(|t| self.module_variants.get(t))
+            .and_then(|enums| enums.get(enum_name))
+            .is_some_and(|vs| vs.contains(variant))
+    }
+
     fn resolve_member(&mut self, ns: &str, member: &str, line: usize) -> Option<String> {
         let target = self.ns.get(ns).cloned()?;
         let exported = self
@@ -3182,14 +3189,15 @@ impl BodyVisitMut for NsResolver<'_> {
                 // the call name is a variant of that module's enums. Otherwise
                 // it is `someFn(ns.Type, ..)`, which parses the same, and the
                 // `Field` arm rewrites `ns.Type`.
-                if let Some(Expr::Field { expr: inner, .. }) = args.first() {
+                if let Some(Expr::Field {
+                    expr: inner,
+                    field: enum_name,
+                    ..
+                }) = args.first()
+                {
                     if let Expr::Var { name: head, .. } = inner.as_ref() {
                         let is_variant_call = self.is_ns(head, locals)
-                            && self
-                                .ns
-                                .get(head)
-                                .and_then(|t| self.module_variants.get(t))
-                                .is_some_and(|vs| vs.contains(name));
+                            && self.declares_variant(head, enum_name, name);
                         if is_variant_call {
                             // Variants are not renamed; drop the qualifier and
                             // keep the call name.
@@ -3245,12 +3253,7 @@ impl BodyVisitMut for NsResolver<'_> {
                         if self.is_ns(head, locals) {
                             let (head, enum_name, variant) =
                                 (head.clone(), enum_name.clone(), field.clone());
-                            let is_variant = self
-                                .ns
-                                .get(&head)
-                                .and_then(|t| self.module_variants.get(t))
-                                .is_some_and(|vs| vs.contains(&variant));
-                            if is_variant {
+                            if self.declares_variant(&head, &enum_name, &variant) {
                                 let _ = self.resolve_member(&head, &enum_name, l);
                                 *e = Expr::Var {
                                     id: Id::NEW,
