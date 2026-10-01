@@ -2,12 +2,21 @@
 # Runs `vyrn check` over the corpus roots of TREE with TREE's release
 # binary, from TREE's root, and writes each root's stdout, stderr and exit code
 # under OUT. Two trees' OUT directories compare with `diff -r`.
+# Refuses to run while TREE holds an untracked `.vyrn` file under a corpus root:
+# the run would count it as a root, and the two trees would differ by it.
 # Usage: scripts/check-corpus.sh TREE OUT
 set -eu
 tree=$(cd "$1" && pwd)
 mkdir -p "$2"
 out=$(cd "$2" && pwd)
 cd "$tree"
+stray=$(git status --short --untracked-files=all -- examples std site compiler/vyrn-cli/tests |
+  grep '^?? .*\.vyrn$' || true)
+if [ -n "$stray" ]; then
+  echo "refused: untracked .vyrn files under the corpus roots of $tree:" >&2
+  echo "$stray" >&2
+  exit 1
+fi
 find examples std site compiler/vyrn-cli/tests -name '*.vyrn' -not -path '*/target/*' | sort |
   xargs -P "$(nproc)" -I{} sh -c '
     f="$1"; o="$2/$(echo "$f" | tr / _)"
