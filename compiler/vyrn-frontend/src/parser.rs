@@ -2371,9 +2371,6 @@ impl Parser {
             // The second mask: two 64-bit lanes are a different count and width.
             "F64x2" => Type::F64x2,
             "Mask64x2" => Type::Mask64x2,
-            // Point the removed unsized names at the sized spellings.
-            "Int" => return Err(refuse!("parse", self.line(), self.col(), IntUnsized)),
-            "Float" => return Err(refuse!("parse", self.line(), self.col(), FloatUnsized)),
             "Bool" => Type::Bool,
             "String" => Type::Str,
             "Unit" => Type::Unit,

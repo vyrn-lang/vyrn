@@ -1,0 +1,11 @@
+// A spelling the language removed is an ordinary name: a program may declare it.
+fn len(xs: Array<Int64>) -> Int64 { return xs.length * 10 }
+fn concat(a: String, b: String) -> String { return a + "+" + b }
+
+fn main() -> Int64 {
+    let push = 3
+    let xs: Array<Int64> = [4, 5]
+    print(concat("a", "b"))
+    print(len(xs) + push)
+    return 0
+}

@@ -45,6 +45,7 @@ pull request.
 
 - Protocol conformance is explicit (`impl P for T`) and checked where it is written: a missing method or an extra method is refused.
 - No inherent methods. `x.m(a)` is `m(x, a)`, so a helper needs no `impl`.
+- Compatibility hints for removed spellings were dropped on 2026-10-01 by the user's decision: a use of `str`, `concat`, `len`, `list`, `push`, `alen`, `array`, `Int` or `Float` gets the sentence any unknown name gets, and those names are free to declare. `at` and `toString` stay reserved, because the sugar for `a[i]` and for interpolation would otherwise call a user's declaration.
 - Dispatch is static everywhere; there are no vtables. Records are legal impl targets and validated scalars are not.
 - Generic impls are keyed on the type constructor: one impl per protocol and constructor.
 - A generic call or record literal solves its callee's type parameters renamed apart (`T'n`, fresh per instantiation), so a caller's `T` never meets the callee's. A sentence and the check's record carry the written name.

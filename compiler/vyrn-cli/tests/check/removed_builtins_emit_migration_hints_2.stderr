@@ -1,1 +1,0 @@
-removed_builtins_emit_migration_hints_2.vyrn:1:0: `concat(a, b)` was removed; concatenate Strings with `a + b`

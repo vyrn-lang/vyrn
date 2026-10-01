@@ -643,7 +643,6 @@ rules! {
         fix "take `{param}: String` and store `{param}.copy()`";
     GoneModule { name, module }
         "`{name}` is `{module}`'s — add `import {{ {name} }} from \"{module}\"`";
-    GoneRemoved { hint } "{hint}";
     GoneDesugared { name, module, sugar }
         "`{name}` is `{module}`'s, and `{sugar}` writes through it — add \
         `import {{ {name} }} from \"{module}\"`";
