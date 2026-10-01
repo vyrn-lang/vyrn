@@ -284,6 +284,7 @@ fn load(
         audience: None,
         artifacts: None,
         expansions,
+        nest: Default::default(),
     };
     let resolver = MapResolver(
         std_modules::STD

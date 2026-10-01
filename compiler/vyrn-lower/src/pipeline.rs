@@ -76,7 +76,7 @@ fn check(
     pending: Option<floor::Pending>,
 ) -> symbols::Judged {
     let (mut diags, refused, binders, record) =
-        vyrn_frontend::check_and_synthesize(program, engine);
+        vyrn_frontend::check_and_synthesize(program, engine, &Default::default());
     // One type record for the readers below: the check's own. The synthesis is
     // over, so no node moves under its keys, and the guard closes before the
     // caller can extend the program again.
