@@ -1,0 +1,15 @@
+// A declared type keys its impls by its name, so a record named `Option`
+// would share the built-in `Option`'s impls; the name is refused.
+type Option = { name: String }
+
+impl<T> Owned for Option<T> {
+    fn release(consume self) {
+        print("released a builtin Option")
+    }
+}
+
+fn main() -> Int64 {
+    let o = Option { name: "a name long enough to sit on the heap" }
+    print(o.name)
+    return 0
+}

@@ -519,7 +519,12 @@ fn check_accum_inner(
     let mut types: HashMap<String, (DeclId, TypeDecl)> = HashMap::new();
     for (i, t) in program.type_decls.iter().enumerate() {
         let name = DeclName(&t.name);
-        if matches!(t.name.as_str(), "Int64" | "Bool" | "Unit") {
+        // A declared type keys its impls by its name (`types::type_key`), and
+        // these are the keys of built-in types.
+        if matches!(
+            t.name.as_str(),
+            "Int64" | "Bool" | "Unit" | "String" | "Option" | "Result"
+        ) {
             out.push(cerr!(t.line, RedefinesBuiltinType, name).in_file(t.module.clone()));
             continue;
         }
