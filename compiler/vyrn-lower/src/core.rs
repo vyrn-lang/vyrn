@@ -1177,30 +1177,9 @@ fn build_seeded(
             refused,
             mistyped,
         },
-        scope: Vec::new(),
-        by_binding: HashMap::new(),
+        frame: Frame::default(),
         temps: 0,
-        pending_receiver: None,
-        drain: 0,
-        scrutinee: None,
-        after: Vec::new(),
-        after_of_rhs: Vec::new(),
-        held: Vec::new(),
-        owed: None,
-        stream_loops: Vec::new(),
-        walks: Vec::new(),
-        reading: Vec::new(),
         seed,
-        loop_marks: Vec::new(),
-        loop_aliased: HashMap::new(),
-        rebinding: false,
-        call_keeps: None,
-        pending_closure: None,
-        appends: std::collections::HashSet::new(),
-        rebound: std::collections::HashSet::new(),
-        region: 0,
-        ret: None,
-        released: None,
         closed: false,
     };
     let f: &Function = inst.func;
@@ -1208,7 +1187,7 @@ fn build_seeded(
     // `map<Int64, Int64>`'s `f` is `fn(Int64) -> Int64`, the shape stored
     // sources are keyed by. Every other type comes substituted in the rows.
     let subst: HashMap<String, Type> = inst.subst.clone().into_iter().collect();
-    b.ret = Some(vyrn_frontend::types::substitute(&f.ret, &subst));
+    b.frame.ret = Some(vyrn_frontend::types::substitute(&f.ret, &subst));
     // A declared release (`impl Owned for T { fn release(consume self) }`)
     // frees `self`'s parts, and nothing releases `self` again: the kernel owns
     // `self` there, so a part taken twice is refused, but owes no release of it.
@@ -1218,7 +1197,7 @@ fn build_seeded(
         let owned = p.capability == Capability::Consume && b.owns(&pty) && !is_release;
         let n = b.name(&p.name, pty, owned, f.line);
         if is_release {
-            b.released = Some(n);
+            b.frame.released = Some(n);
             b.body.names[n.index()].borrow = false;
         }
         // A `read` or `modify` parameter is never taken; the
@@ -1229,12 +1208,12 @@ fn build_seeded(
             b.proto.must_use(&b.body.names[n.index()].ty.clone());
         b.body.names[n.index()].borrow_kind = param_borrow(p.capability, &p.name);
         b.body.names[n.index()].mutable = p.capability == Capability::Modify;
-        b.scope.push((p.name.clone(), n));
+        b.frame.scope.push((p.name.clone(), n));
         b.keyed(n, p.id());
         b.body.params.push(n);
     }
-    b.appends = crate::append::append_candidates(&f.body);
-    rebound(&f.body, &mut b.rebound);
+    b.frame.appends = crate::append::append_candidates(&f.body);
+    rebound(&f.body, &mut b.frame.rebound);
     let mut out = Vec::new();
     b.block(&f.body, &mut out)?;
     cut(&mut out);
@@ -1339,9 +1318,9 @@ fn build_outside_seeded<'a>(
         placed,
     );
     // The checker types a `test` or `bench` body as a function returning Unit.
-    b.ret = Some(Type::Unit);
-    b.appends = crate::append::append_candidates(block);
-    rebound(block, &mut b.rebound);
+    b.frame.ret = Some(Type::Unit);
+    b.frame.appends = crate::append::append_candidates(block);
+    rebound(block, &mut b.frame.rebound);
     let mut out = Vec::new();
     b.block(block, &mut out)?;
     cut(&mut out);
@@ -1402,7 +1381,7 @@ pub fn build_root<'a>(
     b.closed = binds.is_some();
     for (name, ty) in binds.unwrap_or_default() {
         let n = b.name(name, ty.clone(), false, e.line());
-        b.scope.push((name.clone(), n));
+        b.frame.scope.push((name.clone(), n));
         b.body.params.push(n);
     }
     let mut out = Vec::new();
@@ -1432,11 +1411,28 @@ struct Builder<'a> {
     solved: HashMap<NodeId, Vec<(String, Type)>>,
     placed: HashMap<(Exit, NodeId), Vec<&'a Release>>,
     body: Body,
+    frame: Frame,
+    temps: u32,
+    /// The constructs this build may take their named scrutinee at, as
+    /// [`last_owner`] decided over the previous build. Empty on the first.
+    seed: &'a std::collections::HashSet<NodeId>,
+    /// A `where` predicate's body: it sees its binds and no module state.
+    closed: bool,
+}
+
+/// The state of the body a [`Builder`] is building: its scopes, loops,
+/// pending temporaries and names. A lambda's body is built in a frame of its
+/// own, which [`Builder::lambda_frame`] swaps in whole and swaps back.
+#[derive(Default)]
+struct Frame {
+    /// The body's String accumulators ([`crate::append::append_candidates`]).
+    appends: std::collections::HashSet<String>,
+    /// The names the body stores into whole ([`rebound`]).
+    rebound: std::collections::HashSet<String>,
     scope: Vec<(String, Name)>,
     /// The plan keys a release by the node that owns the value: a `Stmt::Let`,
     /// a parameter, or the construct that owns a temporary.
     by_binding: HashMap<NodeId, Name>,
-    temps: u32,
     /// An unnamed receiver minted for a field or element read, with the node
     /// that produced it, so the read can release it when the plan says the
     /// frame owns it.
@@ -1468,9 +1464,6 @@ struct Builder<'a> {
     /// no turn reached yet, or `None`. A `return`, a `?` and a `break` release
     /// them ([`Builder::release_unreached`]).
     walks: Vec<Option<Unreached>>,
-    /// The constructs this build may take their named scrutinee at, as
-    /// [`last_owner`] decided over the previous build. Empty on the first.
-    seed: &'a std::collections::HashSet<NodeId>,
     /// One entry per enclosing loop: the name count when its body opened. A
     /// name below the innermost entry is bound outside the loop, so handing
     /// it out of a join arm frees it once per turn ([`Builder::alias_out`]).
@@ -1496,10 +1489,6 @@ struct Builder<'a> {
     /// projection declares `read self`, so no construct of its body is its
     /// receiver's last owner ([`Builder::takes_scrutinee`]).
     reading: Vec<Name>,
-    /// The body's String accumulators ([`crate::append::append_candidates`]).
-    appends: std::collections::HashSet<String>,
-    /// The names the body stores into whole ([`rebound`]).
-    rebound: std::collections::HashSet<String>,
     /// How many `region`s enclose the statement. An arena buffer cannot
     /// grow, so an append inside one is the `concat` call.
     region: u32,
@@ -1510,8 +1499,6 @@ struct Builder<'a> {
     /// The receiver of a declared release, which the frame does not own
     /// ([`Builder::owns_boxes`]).
     released: Option<Name>,
-    /// A `where` predicate's body: it sees its binds and no module state.
-    closed: bool,
 }
 
 impl<'a> Builder<'a> {
@@ -1562,30 +1549,9 @@ impl<'a> Builder<'a> {
                 refused,
                 mistyped,
             },
-            scope: Vec::new(),
-            by_binding: HashMap::new(),
+            frame: Frame::default(),
             temps: 0,
-            pending_receiver: None,
-            drain: 0,
-            scrutinee: None,
-            after: Vec::new(),
-            after_of_rhs: Vec::new(),
-            held: Vec::new(),
-            owed: None,
-            stream_loops: Vec::new(),
-            walks: Vec::new(),
-            reading: Vec::new(),
             seed,
-            loop_marks: Vec::new(),
-            loop_aliased: HashMap::new(),
-            rebinding: false,
-            call_keeps: None,
-            pending_closure: None,
-            appends: std::collections::HashSet::new(),
-            rebound: std::collections::HashSet::new(),
-            region: 0,
-            ret: None,
-            released: None,
             closed: false,
         }
     }
@@ -1666,7 +1632,7 @@ impl<'a> Builder<'a> {
     fn keyed(&mut self, n: Name, binding: NodeId) {
         assert_ne!(binding, NodeId::NONE, "a binding keyed by no node");
         self.body.names[n.index()].binding = Some(binding);
-        self.by_binding.insert(binding, n);
+        self.frame.by_binding.insert(binding, n);
     }
 
     /// Refuses binding, by a `let` or an argument temporary, a join whose arm
@@ -1676,7 +1642,7 @@ impl<'a> Builder<'a> {
         let Rhs::Val(Val::Name(m)) = rhs else {
             return Ok(());
         };
-        let Some(a) = self.loop_aliased.get(m) else {
+        let Some(a) = self.frame.loop_aliased.get(m) else {
             return Ok(());
         };
         refuse(
@@ -1740,7 +1706,7 @@ impl<'a> Builder<'a> {
         };
         *mutable
             && borrow
-            && self.rebound.contains(name)
+            && self.frame.rebound.contains(name)
             && self.owns(ty)
             && vyrn_frontend::types::copy_impl(&self.program.impls, ty).is_none()
     }
@@ -1933,11 +1899,11 @@ impl<'a> Builder<'a> {
             _ => None,
         };
         if let Some(n) = held {
-            self.reading.push(n);
+            self.frame.reading.push(n);
         }
         let r = self.optional_body(p, pattern, then_block, else_block, sid, name, line, out);
         if held.is_some() {
-            self.reading.pop();
+            self.frame.reading.pop();
         }
         r
     }
@@ -1964,7 +1930,7 @@ impl<'a> Builder<'a> {
         self.block(else_block, &mut miss)?;
         self.edge_drops(sid, 1, &mut miss)?;
         let mut hit = Vec::new();
-        let mark = self.scope.len();
+        let mark = self.frame.scope.len();
         for s in &p.hit {
             self.stmt(s, &mut hit)?;
         }
@@ -1979,12 +1945,12 @@ impl<'a> Builder<'a> {
                 let place = self.place(&p.place, &mut hit)?;
                 let n = self.name(bind, ty, false, line);
                 hit.push(St::Let(n, Rhs::Read(place)));
-                self.scope.push((bind.name.clone(), n));
+                self.frame.scope.push((bind.name.clone(), n));
             }
         }
         self.block(then_block, &mut hit)?;
         self.edge_drops(sid, 0, &mut hit)?;
-        self.scope.truncate(mark);
+        self.frame.scope.truncate(mark);
         out.push(St::If {
             cond,
             then: miss,
@@ -2105,9 +2071,9 @@ impl<'a> Builder<'a> {
     /// go after it.
     fn bind(&mut self, n: Name, rhs: Rhs, out: &mut Vec<St>) {
         if matches!(rhs, Rhs::Prim(Op::Closure(_), ..)) {
-            self.body.names[n.index()].closure_reads = self.pending_closure.take();
+            self.body.names[n.index()].closure_reads = self.frame.pending_closure.take();
         }
-        let owed = match (&rhs, self.owed.take()) {
+        let owed = match (&rhs, self.frame.owed.take()) {
             (Rhs::Make(Ctor::Record(r, _), _), Some((to, line))) if *r == to => Some((to, line)),
             _ => None,
         };
@@ -2117,13 +2083,14 @@ impl<'a> Builder<'a> {
         if let Some((to, line)) = owed {
             out.push(rule_check(to, n, line));
         }
-        for t in std::mem::take(&mut self.after_of_rhs) {
+        for t in std::mem::take(&mut self.frame.after_of_rhs) {
             out.push(St::Drop(t, Site::None, 0, None));
         }
     }
 
     fn lookup(&self, name: &str) -> Option<Name> {
-        self.scope
+        self.frame
+            .scope
             .iter()
             .rev()
             .find(|(n, _)| n == name)
@@ -2188,7 +2155,7 @@ impl<'a> Builder<'a> {
             return Ok(());
         };
         for r in rows {
-            match self.by_binding.get(&r.binding) {
+            match self.frame.by_binding.get(&r.binding) {
                 // The core states no row for a name it does not own: a payload
                 // binder of a non-consuming construct names its scrutinee's
                 // payload, released once at the scrutinee. A consuming loop's
@@ -2304,12 +2271,12 @@ impl<'a> Builder<'a> {
                 let (sv, consuming) =
                     self.scrutinee(scrutinee, mid, Some(arms_span(*mline, arms)), out)?;
                 let owns = self.owns_boxes(scrutinee, consuming);
-                let held = self.held.len();
+                let held = self.frame.held.len();
                 let mut core_arms = Vec::new();
                 for (i, arm) in arms.iter().enumerate() {
-                    self.held.truncate(held);
+                    self.frame.held.truncate(held);
                     let mut body = Vec::new();
-                    let mark = self.scope.len();
+                    let mark = self.frame.scope.len();
                     let binds = self.bind_pattern(
                         &arm.pattern,
                         &sty,
@@ -2328,7 +2295,7 @@ impl<'a> Builder<'a> {
                     // nothing reaches the statement after the switch.
                     self.drops_at(Exit::Scrutinee, mid, &mut body)?;
                     self.return_exit(Some(v), sid, line, &mut body)?;
-                    self.scope.truncate(mark);
+                    self.frame.scope.truncate(mark);
                     core_arms.push(Arm {
                         binds,
                         frees: Some(frees),
@@ -2366,9 +2333,9 @@ impl<'a> Builder<'a> {
         if self.return_through(e, sid, line, out)? {
             return Ok(());
         }
-        let held = self.held.len();
+        let held = self.frame.held.len();
         let v = self.val(e, out)?;
-        self.held.truncate(held);
+        self.frame.held.truncate(held);
         self.return_exit(Some(v), sid, line, out)
     }
 
@@ -2380,12 +2347,12 @@ impl<'a> Builder<'a> {
     /// variable inside the body's block, so the variable's scope ends at
     /// the block's site and a row for it can be keyed there.
     fn block_with(&mut self, blk: &'a Block, head: Vec<St>, out: &mut Vec<St>) -> Result<(), Gap> {
-        let mark = self.scope.len();
+        let mark = self.frame.scope.len();
         let site = blk.id();
         let mut body = head;
         self.stmt_list(&blk.stmts, &mut body)?;
         self.drops_at(Exit::Block, site, &mut body)?;
-        self.scope.truncate(mark);
+        self.frame.scope.truncate(mark);
         out.push(St::Block {
             site,
             body,
@@ -2412,7 +2379,7 @@ impl<'a> Builder<'a> {
         let mut open: Vec<(Name, String, usize)> = Vec::new();
         let mut k = 0;
         while k < ss.len() {
-            let (scope, at) = (self.scope.len(), out.len());
+            let (scope, at) = (self.frame.scope.len(), out.len());
             // A window spans its temps, its store and the stores back.
             let (span, r) = match self.nested_store(&ss[k..], out) {
                 Ok(Some(n)) => (n, Ok(())),
@@ -2444,7 +2411,7 @@ impl<'a> Builder<'a> {
                 // among them is not read as falling through ([`returns`]).
                 out.truncate(at);
                 out.push(St::Trap);
-                self.scope.truncate(scope);
+                self.frame.scope.truncate(scope);
                 if let [Stmt::Let {
                     name,
                     line,
@@ -2454,7 +2421,7 @@ impl<'a> Builder<'a> {
                 {
                     let n = self.name(name, Type::Err, false, *line);
                     self.body.names[n.index()].mutable = *mutable;
-                    self.scope.push((name.clone(), n));
+                    self.frame.scope.push((name.clone(), n));
                 }
             }
             let members = self.grouped_in(&out[at..]);
@@ -2723,11 +2690,11 @@ impl<'a> Builder<'a> {
         let t = self.name(temp, ty, false, line);
         // The parser binds the temp `let mut` ([`moves_out`]).
         self.body.names[t.index()].mutable = true;
-        self.scope.push((temp.to_string(), t));
+        self.frame.scope.push((temp.to_string(), t));
         let mut rows = Vec::new();
         let lowered = self.stmt(store, &mut rows);
-        if let Some(at) = self.scope.iter().rposition(|(_, n)| *n == t) {
-            self.scope.remove(at);
+        if let Some(at) = self.frame.scope.iter().rposition(|(_, n)| *n == t) {
+            self.frame.scope.remove(at);
         }
         lowered?;
         let mut placed = false;
@@ -2760,11 +2727,11 @@ impl<'a> Builder<'a> {
     }
 
     fn stmt(&mut self, s: &'a Stmt, out: &mut Vec<St>) -> Result<(), Gap> {
-        let held = std::mem::take(&mut self.held);
+        let held = std::mem::take(&mut self.frame.held);
         let r = self.stmt_rows(s, out);
-        self.held = held;
+        self.frame.held = held;
         r?;
-        match self.owed.take() {
+        match self.frame.owed.take() {
             Some((to, line)) => gap_d("a check of a validated record no binding took", &to, line),
             None => Ok(()),
         }
@@ -2812,7 +2779,7 @@ impl<'a> Builder<'a> {
                     && is_place_read(read)
                     && self.deferred_of(read).is_none()
                 {
-                    let mark = self.after.len();
+                    let mark = self.frame.after.len();
                     let place = self.place(read, out)?;
                     let n = self.name(name, ty.clone(), false, *line);
                     let rhs = Rhs::Read(place);
@@ -2822,7 +2789,7 @@ impl<'a> Builder<'a> {
                     self.release_receiver(read, out, true);
                     self.drop_since(mark, out);
                     self.grows(n, name);
-                    self.scope.push((name.clone(), n));
+                    self.frame.scope.push((name.clone(), n));
                     self.keyed_let(n, s);
                     return Ok(());
                 }
@@ -2831,9 +2798,9 @@ impl<'a> Builder<'a> {
                 let (rhs, ty) = match check {
                     Some(to) => (self.check(&to, value, *line, out)?, Type::Named(to)),
                     None if copied => {
-                        let outer = std::mem::take(&mut self.after);
+                        let outer = std::mem::take(&mut self.frame.after);
                         let rhs = self.copy_of(value, out);
-                        self.after_of_rhs = std::mem::replace(&mut self.after, outer);
+                        self.frame.after_of_rhs = std::mem::replace(&mut self.frame.after, outer);
                         (rhs?, ty)
                     }
                     None => (self.rhs(value, out)?, ty),
@@ -2885,7 +2852,7 @@ impl<'a> Builder<'a> {
                     self.release_receiver(value, out, false);
                 }
                 self.grows(n, name);
-                self.scope.push((name.clone(), n));
+                self.frame.scope.push((name.clone(), n));
                 self.keyed_let(n, s);
             }
             Stmt::Assign {
@@ -2916,13 +2883,15 @@ impl<'a> Builder<'a> {
                     None => None,
                 };
                 let grown = match (n, &check) {
-                    (Some(n), None) if self.region == 0 && self.body.names[n.index()].grows => {
+                    (Some(n), None)
+                        if self.frame.region == 0 && self.body.names[n.index()].grows =>
+                    {
                         crate::append::self_append_spine(name, value).map(|parts| (n, parts))
                     }
                     // Module state grows through a read of it, which the row
                     // names as its receiver.
                     (None, None)
-                        if self.region == 0
+                        if self.frame.region == 0
                             && self.own.accumulators.contains(name)
                             && vyrn_frontend::types::resolve(
                                 &self.ty_of(value)?,
@@ -2946,13 +2915,13 @@ impl<'a> Builder<'a> {
                     }
                     _ => None,
                 };
-                self.rebinding = grown.is_none();
+                self.frame.rebinding = grown.is_none();
                 let v = match (check, grown) {
                     (_, Some((n, parts))) => self.str_append(n, &parts, *line, out),
                     (Some(to), None) => self.checked_temp(&to, value, *line, out).map(Val::Name),
                     _ => self.val(value, out),
                 };
-                self.rebinding = false;
+                self.frame.rebinding = false;
                 let v = v?;
                 let ty = match n {
                     Some(n) => self.body.names[n.index()].ty.clone(),
@@ -3016,7 +2985,7 @@ impl<'a> Builder<'a> {
                 });
                 // [`Builder::str_append`] queues its operand temporaries so the
                 // store stays next to its row.
-                for t in std::mem::take(&mut self.after_of_rhs) {
+                for t in std::mem::take(&mut self.frame.after_of_rhs) {
                     out.push(St::Drop(t, Site::None, 0, None));
                 }
             }
@@ -3051,7 +3020,7 @@ impl<'a> Builder<'a> {
                     Some(e) => node_ty(self.own, e.id()),
                     None => Some(Type::Unit),
                 };
-                if let (Some(vty), Some(ret)) = (vty, &self.ret) {
+                if let (Some(vty), Some(ret)) = (vty, &self.frame.ret) {
                     if !vyrn_frontend::types::coercible(&vty, ret, self.proto.types()) {
                         let ([ret, vty], []) = self.body.speech().say([ret, &vty], []);
                         let refusal = format!("return type mismatch: expected {ret}, found {vty}");
@@ -3063,7 +3032,7 @@ impl<'a> Builder<'a> {
                         return Ok(());
                     }
                 }
-                let v = match (value, self.ret.clone()) {
+                let v = match (value, self.frame.ret.clone()) {
                     (Some(e), Some(r)) => Some(self.proven_val(e, Some(&r), *line, out)?),
                     (Some(e), None) => Some(self.val(e, out)?),
                     (None, _) => None,
@@ -3071,7 +3040,7 @@ impl<'a> Builder<'a> {
                 self.return_exit(v, sid, *line, out)?;
             }
             Stmt::Break { line, id: _ } => {
-                if let Some(Some(u)) = self.walks.last().cloned() {
+                if let Some(Some(u)) = self.frame.walks.last().cloned() {
                     self.release_unreached(&u, out);
                 }
                 self.drops_at(Exit::Break, sid, out)?;
@@ -3127,11 +3096,11 @@ impl<'a> Builder<'a> {
                     }],
                     site: NodeId::NONE,
                 });
-                self.loop_marks.push(self.body.names.len());
-                self.walks.push(None);
+                self.frame.loop_marks.push(self.body.names.len());
+                self.frame.walks.push(None);
                 let r = self.block(body, &mut l);
-                self.walks.pop();
-                self.loop_marks.pop();
+                self.frame.walks.pop();
+                self.frame.loop_marks.pop();
                 r?;
                 self.hoist_headers(&mut l, *line, out);
                 out.push(St::Loop { body: l, site: sid });
@@ -3206,7 +3175,7 @@ impl<'a> Builder<'a> {
                         let place = self.place(iter, out)?;
                         // No drain encloses the receiver temporary, so it
                         // stays held and the judgment sees it.
-                        self.pending_receiver = None;
+                        self.frame.pending_receiver = None;
                         let t = self.borrow_name(iter, ity.clone(), *line);
                         self.body.names[t.index()].walked = Some(Walk::For);
                         out.push(St::Let(t, Rhs::Read(place)));
@@ -3239,7 +3208,7 @@ impl<'a> Builder<'a> {
                     Type::Stream(_)
                 );
                 if streaming {
-                    self.stream_loops.push(it);
+                    self.frame.stream_loops.push(it);
                 }
                 // `for x in xs` walks a named index: the length read once
                 // before the loop, and a counter from zero that steps right
@@ -3338,7 +3307,7 @@ impl<'a> Builder<'a> {
                 }
                 // Before the variable: each turn binds its own element, so it
                 // may leave a join arm; the container, below the mark, may not.
-                self.loop_marks.push(self.body.names.len());
+                self.frame.loop_marks.push(self.body.names.len());
                 let x = self.name(var, ety, owned, *line);
                 self.body.cands.push((ekey, x, Cand::Elem));
                 // The container outlives the loop, so a refusal names the
@@ -3365,17 +3334,17 @@ impl<'a> Builder<'a> {
                 if let Some((_, i)) = counter {
                     self.step(i, &mut head);
                 }
-                let mark = self.scope.len();
-                self.scope.push((var.clone(), x));
-                self.walks.push(unreached);
+                let mark = self.frame.scope.len();
+                self.frame.scope.push((var.clone(), x));
+                self.frame.walks.push(unreached);
                 let r = self.block_with(body, head, &mut l);
-                self.walks.pop();
-                self.loop_marks.pop();
+                self.frame.walks.pop();
+                self.frame.loop_marks.pop();
                 r?;
-                self.scope.truncate(mark);
+                self.frame.scope.truncate(mark);
                 out.push(St::Loop { body: l, site: sid });
                 if streaming {
-                    self.stream_loops.pop();
+                    self.frame.stream_loops.pop();
                     // Pulled to its end or left by a `break`, the stream is
                     // closed here by its last owner, the loop. A binding's
                     // stream is always disposed of here, so a later use is a
@@ -3410,14 +3379,14 @@ impl<'a> Builder<'a> {
             // A part read as a statement takes nothing: the part stays in its
             // place, and an unnamed receiver is released whole.
             Stmt::Expr(e, _) if reads_a_part(e) && self.deferred_of(e).is_none() => {
-                let mark = self.after.len();
+                let mark = self.frame.after.len();
                 let rhs = Rhs::Read(self.place(e, out)?);
                 out.push(St::Do {
                     rhs,
                     line: e.line(),
                     site: sid,
                 });
-                if let Some((r, _, malloc)) = self.pending_receiver.take() {
+                if let Some((r, _, malloc)) = self.frame.pending_receiver.take() {
                     self.drop_receiver(r, malloc, Vec::new(), out);
                 }
                 self.drop_since(mark, out);
@@ -3425,7 +3394,7 @@ impl<'a> Builder<'a> {
             Stmt::Expr(e, _) => {
                 let ty = self.ty_of(e).unwrap_or(Type::Unit);
                 let rhs = self.rhs(e, out)?;
-                if self.owns(&ty) || self.owed.is_some() {
+                if self.owns(&ty) || self.frame.owed.is_some() {
                     let owns = self.owns(&ty);
                     let t = self.temp(ty, e.line());
                     self.bind(t, rhs, out);
@@ -3442,7 +3411,7 @@ impl<'a> Builder<'a> {
                             site: sid,
                         });
                     }
-                    for t in std::mem::take(&mut self.after_of_rhs) {
+                    for t in std::mem::take(&mut self.frame.after_of_rhs) {
                         out.push(St::Drop(t, Site::None, 0, None));
                     }
                 }
@@ -3451,9 +3420,9 @@ impl<'a> Builder<'a> {
             // it, and the closing brace is the runtime's, so the body is an
             // ordinary block here.
             Stmt::Region { body, .. } => {
-                self.region += 1;
+                self.frame.region += 1;
                 let r = self.block(body, out);
-                self.region -= 1;
+                self.frame.region -= 1;
                 r?;
                 if let Some(St::Block { region, .. }) = out.last_mut() {
                     *region = true;
@@ -3475,7 +3444,7 @@ impl<'a> Builder<'a> {
     /// the whitelist admits the name.
     fn grows(&mut self, n: Name, name: &str) {
         let info = &mut self.body.names[n.index()];
-        info.grows = self.appends.contains(name)
+        info.grows = self.frame.appends.contains(name)
             && vyrn_frontend::types::resolve(&info.ty, self.proto.types()) == Type::Str;
     }
 
@@ -3490,8 +3459,8 @@ impl<'a> Builder<'a> {
         line: usize,
         out: &mut Vec<St>,
     ) -> Result<Val, Gap> {
-        let outer = std::mem::take(&mut self.after);
-        self.drain += 1;
+        let outer = std::mem::take(&mut self.frame.after);
+        self.frame.drain += 1;
         let mut args = vec![(Arg::Val(Val::Name(s)), Capability::Read)];
         let read = parts.iter().try_for_each(|p| {
             args.push((
@@ -3500,8 +3469,8 @@ impl<'a> Builder<'a> {
             ));
             Ok(())
         });
-        self.drain -= 1;
-        self.after_of_rhs = std::mem::replace(&mut self.after, outer);
+        self.frame.drain -= 1;
+        self.frame.after_of_rhs = std::mem::replace(&mut self.frame.after, outer);
         read?;
         let t = self.temp(Type::Str, line);
         out.push(St::Let(
@@ -3584,10 +3553,10 @@ impl<'a> Builder<'a> {
     /// The rows a `return` or a `?` runs for every enclosing `for`, innermost
     /// first: the elements no turn reached, then the stream it walks, closed.
     fn leave_loops(&mut self, out: &mut Vec<St>) {
-        for u in self.walks.clone().iter().rev().flatten() {
+        for u in self.frame.walks.clone().iter().rev().flatten() {
             self.release_unreached(u, out);
         }
-        for it in self.stream_loops.iter().rev() {
+        for it in self.frame.stream_loops.iter().rev() {
             if self.stream_owed(*it) {
                 out.push(St::Drop(*it, Site::None, 0, None));
             }
@@ -4133,17 +4102,19 @@ impl<'a> Builder<'a> {
             Ok(None) => return gap("a `for` over a container with no `nth`", line),
             Err(e) => return gap_d("a projection this site cannot inline", &e, line),
         };
-        let mark = self.scope.len();
-        self.scope
+        let mark = self.frame.scope.len();
+        self.frame
+            .scope
             .push((vyrn_frontend::project::FOR_RECV.to_string(), it));
-        self.scope
+        self.frame
+            .scope
             .push((vyrn_frontend::project::FOR_INDEX.to_string(), i));
         let r = p
             .prologue
             .iter()
             .try_for_each(|s| self.stmt(s, out))
             .and_then(|()| self.place(&p.place, out));
-        self.scope.truncate(mark);
+        self.frame.scope.truncate(mark);
         r
     }
 
@@ -4307,8 +4278,9 @@ impl<'a> Builder<'a> {
             Expr::Var { name, .. } => Some(name),
             _ => None,
         };
-        let released =
-            receiver.is_some_and(|r| self.released.is_some() && self.lookup(r) == self.released);
+        let released = receiver.is_some_and(|r| {
+            self.frame.released.is_some() && self.lookup(r) == self.frame.released
+        });
         !released && (consuming || self.made_scrutinee(e))
     }
 
@@ -4379,9 +4351,9 @@ impl<'a> Builder<'a> {
                 }
             },
             _ => {
-                let outer = self.scrutinee.replace(e.id());
+                let outer = self.frame.scrutinee.replace(e.id());
                 let v = self.val(e, out);
-                self.scrutinee = outer;
+                self.frame.scrutinee = outer;
                 match v? {
                     Val::Name(t) => {
                         self.keyed(t, construct);
@@ -4402,7 +4374,11 @@ impl<'a> Builder<'a> {
     /// stated in the core, so the kernel refuses a later read.
     fn takes_scrutinee(&self, n: Name, lines: Option<(usize, usize)>) -> bool {
         let info = &self.body.names[n.index()];
-        lines.is_some() && info.releases && info.heap && !info.borrow && !self.reading.contains(&n)
+        lines.is_some()
+            && info.releases
+            && info.heap
+            && !info.borrow
+            && !self.frame.reading.contains(&n)
     }
 
     /// Whether the construct took the temporary `t` it owns: the payloads
@@ -4599,7 +4575,7 @@ impl<'a> Builder<'a> {
             // `_` never enters the scope, but its payload is real and a
             // consumed scrutinee's arm still owes its release.
             if name != "_" {
-                self.scope.push((name, n));
+                self.frame.scope.push((name, n));
             }
             binds.push(n);
         }
@@ -4879,8 +4855,8 @@ impl<'a> Builder<'a> {
             _ if owns => {
                 let v = self.val(e, out)?;
                 if let Val::Name(t) = v {
-                    if self.body.names[t.index()].releases && !self.after.contains(&t) {
-                        self.after.push(t);
+                    if self.body.names[t.index()].releases && !self.frame.after.contains(&t) {
+                        self.frame.after.push(t);
                     }
                 }
                 Ok(v)
@@ -4901,18 +4877,18 @@ impl<'a> Builder<'a> {
     /// operator. Outside such a drain the receiver stays held and the
     /// judgment refuses it.
     fn release_receiver(&mut self, e: &'a Expr, out: &mut Vec<St>, borrowed: bool) {
-        let Some((r, producer, malloc)) = self.pending_receiver.take() else {
+        let Some((r, producer, malloc)) = self.frame.pending_receiver.take() else {
             return;
         };
         let node = e.id();
         let took = self.ty_of(e).is_ok_and(|t| self.owns(&t));
         if borrowed && took {
             if self.own.placed.producers.contains(&producer) {
-                if !self.after.contains(&r) {
+                if !self.frame.after.contains(&r) {
                     self.body.names[r.index()].arg_drop = Some(producer);
-                    self.after.push(r);
+                    self.frame.after.push(r);
                 }
-            } else if self.drain > 0 {
+            } else if self.frame.drain > 0 {
                 self.body.names[r.index()].producer = Some(producer);
             }
             return;
@@ -4965,7 +4941,7 @@ impl<'a> Builder<'a> {
     fn val(&mut self, e: &'a Expr, out: &mut Vec<St>) -> Result<Val, Gap> {
         // The rebind flag covers this expression only: in
         // `n = n + size(if c { names } else { .. })` the join still owns.
-        let rebinding = std::mem::take(&mut self.rebinding);
+        let rebinding = std::mem::take(&mut self.frame.rebinding);
         if let Some(l) = lit_of(e).or_else(|| self.schema(e)) {
             return Ok(Val::Lit(l));
         }
@@ -5182,18 +5158,20 @@ impl<'a> Builder<'a> {
         );
         self.body.name = lambda_spelling(&outer.name, *line, *col);
         self.body.id = self.fns.id(&self.body.name);
-        let saved = (
-            std::mem::take(&mut self.scope),
-            std::mem::take(&mut self.by_binding),
-            std::mem::take(&mut self.after),
-            std::mem::take(&mut self.after_of_rhs),
-            self.pending_receiver.take(),
-            std::mem::replace(&mut self.drain, 0),
-            std::mem::take(&mut self.stream_loops),
-            std::mem::take(&mut self.walks),
-            std::mem::take(&mut self.held),
+        let mut rebound_names = std::collections::HashSet::new();
+        if let LambdaBody::Block(b) = body {
+            rebound(b, &mut rebound_names);
+        }
+        // `appends` stays empty: no store in a lambda body is an append
+        // target ([`crate::append::append_candidates`]).
+        let outer_frame = std::mem::replace(
+            &mut self.frame,
+            Frame {
+                ret,
+                rebound: rebound_names,
+                ..Frame::default()
+            },
         );
-        let outer_ret = std::mem::replace(&mut self.ret, ret);
         for c in caps {
             let Val::Name(n) = c else {
                 continue;
@@ -5203,13 +5181,13 @@ impl<'a> Builder<'a> {
             let m = self.name(&source, ty, false, *line);
             // A capture is the enclosing frame's; the kernel refuses a take.
             self.body.names[m.index()].borrow_kind = Some(BorrowKind::Capture);
-            self.scope.push((source, m));
+            self.frame.scope.push((source, m));
             self.body.params.push(m);
         }
         for (p, pt) in params.iter().zip(ptys) {
             let m = self.name(&p.name, pt, false, *line);
             self.body.names[m.index()].borrow_kind = param_borrow(Capability::Read, &p.name);
-            self.scope.push((p.name.clone(), m));
+            self.frame.scope.push((p.name.clone(), m));
             self.body.params.push(m);
         }
         let mut stmts = Vec::new();
@@ -5226,22 +5204,11 @@ impl<'a> Builder<'a> {
         };
         cut(&mut stmts);
         self.body.stmts = stmts;
-        if let (Some(owes), LambdaBody::Block(_)) = (self.ret.clone(), body) {
+        if let (Some(owes), LambdaBody::Block(_)) = (self.frame.ret.clone(), body) {
             falls_through(&mut self.body, &owes, *line, || "this lambda".to_string());
         }
         let frame = std::mem::replace(&mut self.body, outer);
-        (
-            self.scope,
-            self.by_binding,
-            self.after,
-            self.after_of_rhs,
-            self.pending_receiver,
-            self.drain,
-            self.stream_loops,
-            self.walks,
-            self.held,
-        ) = saved;
-        self.ret = outer_ret;
+        self.frame = outer_frame;
         r?;
         let key = frame.name.clone();
         self.body.lambdas.push(frame);
@@ -5266,7 +5233,7 @@ impl<'a> Builder<'a> {
 
     /// [`NameInfo::closure_reads`] for one lambda literal.
     fn closure_reads(&mut self, e: &Expr, caps: &[Val]) -> Option<Vec<Name>> {
-        if self.call_keeps.take() == Some(false) {
+        if self.frame.call_keeps.take() == Some(false) {
             return None;
         }
         let Expr::Lambda { body, .. } = e else {
@@ -5371,7 +5338,7 @@ impl<'a> Builder<'a> {
         // above the loop mark, so each turn's element is its own.
         (m < mark
             && self.body.names[m].releases
-            && self.loop_marks.last().is_some_and(|lm| m < *lm))
+            && self.frame.loop_marks.last().is_some_and(|lm| m < *lm))
         .then(|| self.body.names[m].source.clone())
     }
 
@@ -5393,7 +5360,7 @@ impl<'a> Builder<'a> {
     ) -> Result<Val, Gap> {
         let ty = self.ty_of(e)?;
         let place = self.place(e, out)?;
-        self.pending_receiver = None;
+        self.frame.pending_receiver = None;
         if keeps_hole {
             if let Some((n, path)) = crate::kernel::root_of(&place) {
                 // A hole the walk cannot skip is not stated: a declared
@@ -5458,9 +5425,9 @@ impl<'a> Builder<'a> {
     /// temporary the read left (`pieces()` of `pieces()[0]`) is dropped once
     /// the copy is bound.
     fn copy_of(&mut self, e: &'a Expr, out: &mut Vec<St>) -> Result<Rhs, Gap> {
-        self.drain += 1;
+        self.frame.drain += 1;
         let v = self.read_at(e, out, None);
-        self.drain -= 1;
+        self.frame.drain -= 1;
         let copied = (self.copied(e)).and_then(|(f, s)| Some((self.fn_id(&f)?, f, s)));
         let (callee, kind, solved) = match copied {
             Some((id, f, solved)) => (f, Callee::Fn(id), solved),
@@ -5493,7 +5460,7 @@ impl<'a> Builder<'a> {
             && self.ty_of(e).is_ok_and(|t| {
                 self.owns(&t)
                     && (vyrn_frontend::types::copy_impl(&self.program.impls, &t).is_none()
-                        || (std::ptr::eq(at, e) && self.scrutinee != Some(e.id())))
+                        || (std::ptr::eq(at, e) && self.frame.scrutinee != Some(e.id())))
             })
     }
 
@@ -5522,19 +5489,19 @@ impl<'a> Builder<'a> {
     /// follows; an enclosing expression's are kept aside meanwhile, so a
     /// nested read cannot drop what an outer one is about to read.
     fn rhs(&mut self, e: &'a Expr, out: &mut Vec<St>) -> Result<Rhs, Gap> {
-        let outer = std::mem::take(&mut self.after);
-        let held = self.held.len();
+        let outer = std::mem::take(&mut self.frame.after);
+        let held = self.frame.held.len();
         let r = self.rhs_inner(e, out);
-        self.held.truncate(held);
-        let mine = std::mem::replace(&mut self.after, outer);
-        self.after_of_rhs = mine;
+        self.frame.held.truncate(held);
+        let mine = std::mem::replace(&mut self.frame.after, outer);
+        self.frame.after_of_rhs = mine;
         r
     }
 
     /// Releases the temporaries queued in `after` since `mark`, where no
     /// `rhs` drains them: a place read's key (`m["k".copy()]`) or an operand.
     fn drop_since(&mut self, mark: usize, out: &mut Vec<St>) {
-        for t in self.after.split_off(mark) {
+        for t in self.frame.after.split_off(mark) {
             out.push(St::Drop(t, Site::None, 0, None));
         }
     }
@@ -5542,7 +5509,7 @@ impl<'a> Builder<'a> {
     /// Holds the temporary `t` until its consumer runs, where it owns heap.
     fn hold(&mut self, t: Name) {
         if self.body.names[t.index()].releases {
-            self.held.push(t);
+            self.frame.held.push(t);
         }
     }
 
@@ -5551,7 +5518,7 @@ impl<'a> Builder<'a> {
     /// temporary (a scrutinee) is the plan's.
     fn leave_try(&mut self, tid: NodeId, out: &mut Vec<St>) -> Result<(), Gap> {
         self.leave_loops(out);
-        for &t in &self.held {
+        for &t in &self.frame.held {
             if self.body.names[t.index()].binding.is_none() {
                 out.push(St::Drop(t, Site::None, 0, None));
             }
@@ -5582,16 +5549,16 @@ impl<'a> Builder<'a> {
         };
         // The left operand runs where the expression does, and the emitter
         // drains its temporaries at the operator (`Fn_::binary`).
-        self.drain += 1;
+        self.frame.drain += 1;
         let cond = self.read_val(lhs, out)?;
-        let mark = self.after.len();
+        let mark = self.frame.after.len();
         let mut taken = Vec::new();
         let v = self.read_val(rhs, &mut taken)?;
         taken.push(store(v));
         // The right operand's temporaries are released on its edge, the only
         // path that evaluates it.
         self.drop_since(mark, &mut taken);
-        self.drain -= 1;
+        self.frame.drain -= 1;
         let decided = vec![store(Val::Lit(Lit::Bool(op == BinOp::Or)))];
         let (then, els) = if op == BinOp::And {
             (taken, decided)
@@ -5646,7 +5613,7 @@ impl<'a> Builder<'a> {
                 }
                 // An operator drains its operands' temporaries in both
                 // compiled backends (`binary`, `gen_binary`).
-                self.drain += 1;
+                self.frame.drain += 1;
                 // A String `+` is `@concat`, and a comparison and a `=~` read
                 // operands the same way, so an allocating operand is an
                 // argument at `(@concat, side)`. A `+` concatenates where its
@@ -5669,7 +5636,7 @@ impl<'a> Builder<'a> {
                 } else {
                     self.read_val(rhs, out)?
                 };
-                self.drain -= 1;
+                self.frame.drain -= 1;
                 Ok(Rhs::Prim(Op::Bin(*op), vec![a, b], self.produced(e)))
             }
             Expr::Field { expr, field, .. } => {
@@ -5681,7 +5648,7 @@ impl<'a> Builder<'a> {
                 }
                 let fty = self.ty_of(e)?;
                 let place = self.place(expr, out)?;
-                if let Some((r, _, _)) = self.pending_receiver {
+                if let Some((r, _, _)) = self.frame.pending_receiver {
                     self.body.names[r.index()].receiver = Some(e.id());
                 }
                 if self.owns(&fty) {
@@ -5748,7 +5715,7 @@ impl<'a> Builder<'a> {
                     let cap = if name == "value" {
                         Capability::Consume
                     } else {
-                        self.after.push(t);
+                        self.frame.after.push(t);
                         Capability::Read
                     };
                     return Ok(Rhs::Call {
@@ -5849,7 +5816,7 @@ impl<'a> Builder<'a> {
                     .is_some_and(|d| d.predicate.is_some())
                     && !self.proven(e, &to)
                 {
-                    self.owed = Some((name.clone(), *line));
+                    self.frame.owed = Some((name.clone(), *line));
                 }
                 Ok(Rhs::Make(
                     Ctor::Record(
@@ -5891,7 +5858,7 @@ impl<'a> Builder<'a> {
                 let res = self.temp(ty, *line);
                 let c = self.condition(cond, "if", *line, out)?;
                 let mark = self.body.names.len();
-                let held = self.held.len();
+                let held = self.frame.held.len();
                 let mut t = Vec::new();
                 let tv = self.val(then_branch, &mut t)?;
                 let mut aliased = self.alias_out(&tv, mark);
@@ -5907,7 +5874,7 @@ impl<'a> Builder<'a> {
                 });
                 self.edge_drops(site, 0, &mut t)?;
                 let mut f = Vec::new();
-                self.held.truncate(held);
+                self.frame.held.truncate(held);
                 match else_branch {
                     Some(eb) => {
                         let ev = self.val(eb, &mut f)?;
@@ -5925,7 +5892,7 @@ impl<'a> Builder<'a> {
                         self.edge_drops(site, 1, &mut f)?;
                         self.join_borrows(res, &[then_v, else_v]);
                         if let Some(a) = aliased {
-                            self.loop_aliased.insert(res, a);
+                            self.frame.loop_aliased.insert(res, a);
                         }
                     }
                     None => return gap("an `if` expression without `else`", *line),
@@ -5952,13 +5919,13 @@ impl<'a> Builder<'a> {
                     self.scrutinee(scrutinee, mid, Some(arms_span(*line, arms)), out)?;
                 let owns = self.owns_boxes(scrutinee, consuming);
                 let outer = self.body.names.len();
-                let held = self.held.len();
+                let held = self.frame.held.len();
                 let mut core_arms = Vec::new();
                 let mut yields = Vec::new();
                 for (i, arm) in arms.iter().enumerate() {
-                    self.held.truncate(held);
+                    self.frame.held.truncate(held);
                     let mut body = Vec::new();
-                    let mark = self.scope.len();
+                    let mark = self.frame.scope.len();
                     let binds = self.bind_pattern(
                         &arm.pattern,
                         &sty,
@@ -5971,7 +5938,7 @@ impl<'a> Builder<'a> {
                         ArmBody::Expr(ae) => {
                             let v = self.val(ae, &mut body)?;
                             if let Some(a) = self.alias_out(&v, outer) {
-                                self.loop_aliased.insert(res, a);
+                                self.frame.loop_aliased.insert(res, a);
                             }
                             yields.push(v.clone());
                             body.push(St::Store {
@@ -5988,7 +5955,7 @@ impl<'a> Builder<'a> {
                     }
                     let frees = self.arm_frees(mid, i as u32, &binds, &mut body);
                     self.edge_drops(mid, i as u32, &mut body)?;
-                    self.scope.truncate(mark);
+                    self.frame.scope.truncate(mark);
                     core_arms.push(Arm {
                         binds,
                         frees: Some(frees),
@@ -6032,7 +5999,7 @@ impl<'a> Builder<'a> {
                 }
                 // Failure: the exit's drops, then the propagated value leaves.
                 let mut fail = Vec::new();
-                let mark = self.scope.len();
+                let mark = self.frame.scope.len();
                 // Each binder is keyed by a node of the `?`: the error by the
                 // `?` itself, the value by its operand.
                 let fb = self.bind_pattern(
@@ -6049,7 +6016,7 @@ impl<'a> Builder<'a> {
                 self.leave_try(tid, &mut fail)?;
                 // An `Option` fails with `None` of the frame's result; a
                 // `Result` with its error binder taken into `Err`.
-                let value = match (fb.first(), self.ret.clone()) {
+                let value = match (fb.first(), self.frame.ret.clone()) {
                     (Some(n), Some(rt)) => {
                         let t = self.temp(rt.clone(), *line);
                         fail.push(St::Let(
@@ -6076,9 +6043,9 @@ impl<'a> Builder<'a> {
                     is_try: true,
                     line: *line,
                 });
-                self.scope.truncate(mark);
+                self.frame.scope.truncate(mark);
                 let mut ok = Vec::new();
-                let mark = self.scope.len();
+                let mark = self.frame.scope.len();
                 let ob = self.bind_pattern(
                     &Pattern::Success(Binder {
                         id: Id(expr.id()),
@@ -6104,7 +6071,7 @@ impl<'a> Builder<'a> {
                 });
                 let ok_frees = self.arm_frees(tid, 1, &ob, &mut ok);
                 let fail_frees = self.arm_frees(tid, 0, &fb, &mut fail);
-                self.scope.truncate(mark);
+                self.frame.scope.truncate(mark);
                 out.push(St::Switch {
                     on: sv,
                     arms: vec![
@@ -6136,7 +6103,7 @@ impl<'a> Builder<'a> {
             Expr::Lambda { .. } => {
                 let caps = self.captures(e);
                 // Waits for the name `bind` gives ([`Builder::pending_closure`]).
-                self.pending_closure = self.closure_reads(e, &caps);
+                self.frame.pending_closure = self.closure_reads(e, &caps);
                 let key = self.lambda_frame(e, &caps)?;
                 Ok(Rhs::Prim(Op::Closure(key), caps, self.produced(e)))
             }
@@ -6281,9 +6248,9 @@ impl<'a> Builder<'a> {
                 let base = self.place(&args[0], out)?;
                 // The receiver is this read's; a field read in the index would
                 // release it as its own.
-                let receiver = self.pending_receiver.take();
+                let receiver = self.frame.pending_receiver.take();
                 let i = self.read_val(&args[1], out)?;
-                self.pending_receiver = receiver;
+                self.frame.pending_receiver = receiver;
                 if self.is_map(&bty) {
                     Ok(Place::Key(Box::new(base), i))
                 } else {
@@ -6300,7 +6267,7 @@ impl<'a> Builder<'a> {
                                 e,
                                 Expr::Call { name, .. } if !name.starts_with('@')
                             );
-                            self.pending_receiver = Some((t, e.id(), malloc));
+                            self.frame.pending_receiver = Some((t, e.id(), malloc));
                         }
                         Ok(Place::Name(t))
                     }
@@ -6529,7 +6496,7 @@ impl<'a> Builder<'a> {
         }
         let drains = !lends_here;
         if drains {
-            self.drain += 1;
+            self.frame.drain += 1;
         }
         let bound = match kind {
             Callee::Fn(_) => self.targets_of(name, args),
@@ -6566,7 +6533,7 @@ impl<'a> Builder<'a> {
             // (`declared::arg_cap`); an unanswered position may, the safe
             // direction. A lambda deeper in the argument gets `None` and
             // escapes: a literal retains what it is given.
-            self.call_keeps = matches!(a, Expr::Lambda { .. })
+            self.frame.call_keeps = matches!(a, Expr::Lambda { .. })
                 .then(|| (self.own.arg_caps.at(of, k)).is_none_or(|c| c == Capability::Consume));
             let global = matches!(a, Expr::Var { name, .. }
                 if self.lookup(name).is_none()
@@ -6602,13 +6569,13 @@ impl<'a> Builder<'a> {
             } else {
                 self.read_at(a, out, Some((name, of, k)))?
             };
-            self.call_keeps = None;
+            self.frame.call_keeps = None;
             if let Val::Name(t) = v {
                 // Queue the drop `read_arg`'s key stands for. The key also
                 // stands on a borrow (a forced `lazy` field); only a name
                 // this frame releases is dropped.
                 let info = &self.body.names[t.index()];
-                if info.releases && info.arg_drop.is_some() && !self.after.contains(&t) {
+                if info.releases && info.arg_drop.is_some() && !self.frame.after.contains(&t) {
                     temps_to_drop.push(t);
                 }
             }
@@ -6619,9 +6586,9 @@ impl<'a> Builder<'a> {
         }
         vs.extend(forwarded);
         if drains {
-            self.drain -= 1;
+            self.frame.drain -= 1;
         }
-        self.after.extend(temps_to_drop);
+        self.frame.after.extend(temps_to_drop);
         // `Int32(n)` and its siblings convert between scalars. The operand is
         // read above like any argument, so the keying and drains stay.
         if let (Some(to), [(Arg::Val(v), _)]) = (

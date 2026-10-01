@@ -1,0 +1,17 @@
+// A block-bodied lambda inside a `for` hands its own local out of an `if`
+// arm. The local is the lambda's, bound inside its frame, so no turn of the
+// enclosing loop releases it twice.
+
+fn main() -> Int64 {
+    let mut n: Int64 = 0
+    for i in [1, 2] {
+        let f: fn(Bool) -> Int64 = c -> {
+            let a = "x" + "y"
+            let r = if c { a } else { "z" }
+            return r.byteLength
+        }
+        n = n + f(true)
+    }
+    print(n)
+    return 0
+}
