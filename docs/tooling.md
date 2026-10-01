@@ -114,6 +114,8 @@ Runs the root file's `bench "name" { ... }` blocks in declaration order.
 - `--compare <baseline.json> [--threshold <factor>]`: compares each min with
   the baseline's, corrected for the host's speed, and fails only on a bench
   slower by more than the factor.
+- `--ungate <file>`: with `--compare`, names benches, one per line (`#` starts
+  a comment), whose regressions are reported and do not fail the command.
 
 `--check` excludes `--json` and `--compare`. The harness is imported from
 `std/bench` and loaded with the program once, never merged into it.
@@ -197,13 +199,13 @@ path the router mounts, with its source. It reads what generators wrote
 a path. `--json` attaches each route's declaration from the generator symbol
 maps.
 
-### `vyrn emit-*`: dumps to stdout
+### The `emit-*` commands dump to stdout
 
-- `emit-wat [file]`: the module `build --target wasm` writes, as WAT.
-- `emit-lowered [file]`: the named core the emitter reads, root module only.
+- `vyrn emit-wat [file]`: the module `build --target wasm` writes, as WAT.
+- `vyrn emit-lowered [file]`: the named core the emitter reads, root module only.
   The text is deterministic and starts with a version line; its format promises
   no stability, and nothing parses it.
-- `emit-gen [file] [--maps]`: the source of every module a generator import
+- `vyrn emit-gen [file] [--maps]`: the source of every module a generator import
   synthesizes, each under a `// ==== ... ====` banner naming its call site.
   `--maps` prints each module's symbol map as one JSON document per line, with
   the banners on stderr.

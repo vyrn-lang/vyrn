@@ -1,4 +1,4 @@
-//! `vyrn`, the Vyrn driver. `USAGE` lists the commands.
+//! `vyrn`, the Vyrn driver. `COMMANDS` lists the commands.
 //!
 //! `--deny-warnings` (or `VYRN_DENY_WARNINGS=1`) turns any load warning into a
 //! failure. Without it, warnings go to stderr and change no exit code and no
@@ -18,10 +18,6 @@ mod remote;
 // In the library target because `vyrn-frontend`'s tests run their programs
 // through it too.
 use vyrn_cli::wasmrun;
-
-const USAGE: &str = "usage: vyrn <run|check|fix|emit-wat|emit-lowered|emit-gen|build|test|bench|serve|fmt> [file.vyrn] [-o out] [--target wasm] [--native-target v1|v2|v3|v4|native] [--offline] [--deny-warnings]\n       vyrn build [file.vyrn] [-o out]   (the same wasm `--target wasm` writes, through wasm2c and clang to a native executable; needs wabt and simde under tools/, or $VYRN_WASM2C and $VYRN_SIMDE)\n       vyrn run [file.vyrn] [args...]   (trailing args reach the program's args())\n       vyrn run --profile [file.vyrn] [args...]   (where the run spent its time, to stderr; the flag counts only BEFORE the file, so a program can have one of its own. Rows are the phases of the compile and the run, with the operations the guest executed)\n       vyrn check --profile [file.vyrn]   (the same, for generation alone: `check` runs every `gen fn` and stops. Needs a cold generator cache to mean anything)\n       vyrn test [file.vyrn] [--name <substring>]\n       vyrn bench [file.vyrn] [--name <substring>] [--check | --json | --compare <baseline.json> [--threshold <factor>]]   (native timing; --check runs each once, compiled; --json machine-readable; --compare flags regressions)\n       vyrn serve [file.vyrn] [--port N] [--workers N]   (HTTP host; needs `fn handle(req: Request) -> Response`)\n       vyrn dev [--port N] [--workers N]   (fullstack: build client to wasm + serve server root, static, runtimes)\n       vyrn fmt [file.vyrn ...] [--check]   (canonical formatter; no files = project main + local imports)\n       vyrn fmt --from-json <file.json> [--as <Type>] [--from <module>]   (print the JSON file as VON)\n       vyrn doc [file|dir] [-o <dir>] [--std] [--verify]   (Markdown API docs; default docs/api/; --verify is the drift gate)\n       vyrn fix [file.vyrn]   (apply the `.copy()` a move diagnostic names, in the file given; every other fix on the menu is a decision and is refused)
-       vyrn why <file>   (a module's audience, the path segment that decided it, and every import chain that reaches it)\n       vyrn why --contract <file>   (which module contract governs a file, and every export's status against it)\n       vyrn why --memory <file>   (per binding: whether it is reclaimed, how, and the reason when it is not)\n       vyrn why --capability <fs|stdin|args|extern> <entry-or-artifact-name>   (every import chain that pulls that capability into the artifact's closure)\n       vyrn routes [file.vyrn] [--json]   (the resolved wire table: every derived, pinned, hand-written and page path the router mounts, with its source; --json attaches each route's declaration from the symbol map)\n       vyrn emit-gen [file.vyrn] [--maps]   (--maps prints each generated module's symbol map as JSON, one per line)\n\
-       vyrn new <name> | vyrn add <specifier> [--name alias] | vyrn update [--locked] [alias] | vyrn vendor [--check] | vyrn deps [artifact]   (deps: every declared artifact's module graph, then the toolchain)\n       vyrn --version   (also -V)";
 
 /// Whether `--version` / `-V` names this program: only among the leading
 /// options. After the subcommand or file it belongs to the program being run.
@@ -73,7 +69,10 @@ impl GlobalFlags {
         let named = match args.iter().position(|a| a == "--native-target") {
             Some(i) => {
                 let Some(v) = args.get(i + 1).cloned() else {
-                    eprintln!("error: --native-target needs a value (one of: {NATIVE_TARGETS})");
+                    eprintln!(
+                        "error: --native-target needs a value (one of: {})",
+                        NativeTarget::names()
+                    );
                     return Err(ExitCode::from(2));
                 };
                 args.drain(i..=i + 1);
@@ -85,7 +84,10 @@ impl GlobalFlags {
         };
         if let Some((from, v)) = named {
             let Some(t) = NativeTarget::parse(&v) else {
-                eprintln!("error: unknown {from} `{v}` (expected one of: {NATIVE_TARGETS})");
+                eprintln!(
+                    "error: unknown {from} `{v}` (expected one of: {})",
+                    NativeTarget::names()
+                );
                 return Err(ExitCode::from(2));
             };
             flags.native_target = Some(t);
@@ -128,20 +130,24 @@ enum NativeTarget {
     Native,
 }
 
-/// The values `--native-target` and `vyrn.json`'s `nativeTarget` accept, for
-/// diagnostics. Keep in step with `NativeTarget::parse`.
-const NATIVE_TARGETS: &str = "v1, v2, v3, v4, native";
-
 impl NativeTarget {
+    /// Each target and its spelling in `--native-target` and `vyrn.json`'s
+    /// `nativeTarget`.
+    const ALL: [(NativeTarget, &'static str); 5] = [
+        (NativeTarget::V1, "v1"),
+        (NativeTarget::V2, "v2"),
+        (NativeTarget::V3, "v3"),
+        (NativeTarget::V4, "v4"),
+        (NativeTarget::Native, "native"),
+    ];
+
     fn parse(s: &str) -> Option<NativeTarget> {
-        Some(match s {
-            "v1" => NativeTarget::V1,
-            "v2" => NativeTarget::V2,
-            "v3" => NativeTarget::V3,
-            "v4" => NativeTarget::V4,
-            "native" => NativeTarget::Native,
-            _ => return None,
-        })
+        Self::ALL.iter().find(|t| t.1 == s).map(|t| t.0)
+    }
+
+    /// Every spelling, for a diagnostic.
+    fn names() -> String {
+        Self::ALL.map(|t| t.1).join(", ")
     }
 
     /// The `-march=` value, or `None` off x86-64.
@@ -234,12 +240,6 @@ fn real_main() -> ExitCode {
 
 fn dispatch(args: &mut Vec<String>) -> Outcome {
     let flags = GlobalFlags::take(args)?;
-    // Drained so the "no extra arguments" check below holds, but never from
-    // `run`: its tail is the program's own `args()`.
-    let want_maps = args.iter().any(|a| a == "--maps");
-    if args.get(1).map(|a| a.as_str()) != Some("run") {
-        args.retain(|a| a != "--maps");
-    }
     // Off `run`, `--profile` reports the build phases, and `main` prints the
     // table. `run_wasm` prints its own, with the guest's operation count.
     if flags.profile && args.get(1).map(String::as_str) != Some("run") {
@@ -251,107 +251,328 @@ fn dispatch(args: &mut Vec<String>) -> Outcome {
         println!("vyrn {}", env!("CARGO_PKG_VERSION"));
         return Ok(ExitCode::SUCCESS);
     }
-    if args.len() < 2 {
-        eprintln!("{USAGE}");
+    let Some(name) = args.get(1) else {
+        eprintln!("{}", usage());
         return Err(ExitCode::from(2));
+    };
+    let Some(cmd) = COMMANDS.iter().find(|c| c.name == name) else {
+        let names: Vec<&str> = COMMANDS.iter().map(|c| c.name).collect();
+        eprintln!(
+            "unknown command `{name}` (expected one of: {})",
+            names.join(", ")
+        );
+        return Err(ExitCode::from(2));
+    };
+    (cmd.run)(&Call::parse(cmd, flags, &args[2..])?)
+}
+
+/// One `vyrn` command. The usage screen, the unknown-command sentence, the
+/// argument parser and `docs/tooling.md`'s drift test read this row, so a
+/// command or a flag is stated once.
+struct Cmd {
+    name: &'static str,
+    pos: Pos,
+    flags: &'static [Flag],
+    /// The usage screen's gloss of the command.
+    about: &'static str,
+    run: fn(&Call) -> Outcome,
+}
+
+/// The positional arguments a command takes.
+enum Pos {
+    None,
+    /// `[file.vyrn]`, else the manifest's `main`: [`Call::root`].
+    File,
+    /// `[file.vyrn]`, then the program's own arguments, verbatim. The file is
+    /// the first argument or none, so a flag after it is the program's.
+    Program,
+    /// Exactly one, named for the usage screen.
+    One(&'static str),
+    /// At most one.
+    Maybe(&'static str),
+    /// Any number.
+    Many(&'static str),
+}
+
+/// A flag: its spelling, the placeholder of its value (`None` for a switch)
+/// and the usage screen's gloss (`""` when the command's gloss covers it).
+struct Flag(&'static str, Option<&'static str>, &'static str);
+
+/// The flags [`GlobalFlags::take`] reads, before or after the command.
+const GLOBAL_FLAGS: &[Flag] = &[
+    Flag("--offline", None, "never touch the network; a lock or cache miss is an error (also VYRN_OFFLINE=1)"),
+    Flag("--deny-warnings", None, "a load warning fails the command (also VYRN_DENY_WARNINGS=1)"),
+    Flag("--native-target", Some("target"), "the native build's microarchitecture, over vyrn.json's `nativeTarget` (also VYRN_NATIVE_TARGET)"),
+    Flag("--profile", None, "where the time went, to stderr; it counts only before the file, so a program can take its own"),
+];
+
+const PORT: Flag = Flag("--port", Some("N"), "default 8080; 0 lets the OS pick");
+const WORKERS: Flag = Flag(
+    "--workers",
+    Some("N"),
+    "N instances; refused if `handle` reaches module state",
+);
+
+/// A [`Cmd`] row by position, so the table reads one command to a line.
+const fn cmd(
+    name: &'static str,
+    pos: Pos,
+    run: fn(&Call) -> Outcome,
+    about: &'static str,
+    flags: &'static [Flag],
+) -> Cmd {
+    Cmd {
+        name,
+        pos,
+        flags,
+        about,
+        run,
     }
-    let cmd = args[1].as_str();
-    let rest = &args[2..];
-    match cmd {
-        "new" => {
-            let Some(name) = rest.first() else {
-                eprintln!("usage: vyrn new <name>");
-                return Err(ExitCode::from(2));
-            };
-            return Ok(scaffold(name));
+}
+
+/// Every command, in the order of the usage screen and `docs/tooling.md`.
+#[rustfmt::skip]
+const COMMANDS: &[Cmd] = &[
+    cmd("run", Pos::Program, run_cmd, "compiles and runs; trailing args reach the program's args()", &[]),
+    cmd("check", Pos::File, check_cmd, "loads, checks and judges the program, runs every generator, and prints ok", &[]),
+    cmd("fix", Pos::File, fix_cmd, "applies the `.copy()` a move diagnostic names, in the file given; every other fix on the menu is a decision and is refused", &[]),
+    cmd("build", Pos::File, build, "a native executable: the module through wasm2c and clang (needs wabt and simde under tools/, or $VYRN_WASM2C and $VYRN_SIMDE)", &[
+        Flag("-o", Some("out"), ""),
+        Flag("--target", Some("wasm"), "writes the module itself, with no LLVM, clang or sysroot"),
+    ]),
+    cmd("test", Pos::File, test_cmd, "runs the root file's `test` blocks", &[Flag("--name", Some("substring"), "")]),
+    cmd("bench", Pos::File, bench_cmd, "times the root file's `bench` blocks natively", &[
+        Flag("--name", Some("substring"), ""),
+        Flag("--check", None, "runs each once, compiled, with no timing; excludes --json and --compare"),
+        Flag("--json", None, "the machine-readable report"),
+        Flag("--compare", Some("baseline.json"), "fails on a bench slower than the baseline's by the threshold"),
+        Flag("--threshold", Some("factor"), "the regression factor for --compare (default 1.5)"),
+        Flag("--ungate", Some("file"), "bench names, one per line, whose regressions --compare reports and does not fail"),
+    ]),
+    cmd("serve", Pos::File, serve_cmd, "an HTTP host for `fn handle(req: Request) -> Response`", &[PORT, WORKERS]),
+    cmd("dev", Pos::None, dev_cmd, "fullstack: builds vyrn.json's `client` to wasm, then serves its `server`, static files and the runtimes", &[PORT, WORKERS]),
+    cmd("fmt", Pos::Many("file.vyrn"), fmt_cmd, "the canonical formatter; no files = the project's main and its local imports", &[
+        Flag("--check", None, "writes nothing and lists the files that would change"),
+        Flag("--from-json", Some("file.json"), "prints the JSON file as VON instead, headed by `import type`"),
+        Flag("--as", Some("Type"), "the type --from-json names (default Config)"),
+        Flag("--from", Some("module"), "the module --from-json imports it from (default ./config.vyrn)"),
+    ]),
+    cmd("doc", Pos::Maybe("file|dir"), doc_cmd, "Markdown API docs", &[
+        Flag("-o", Some("dir"), "default docs/api/"),
+        Flag("--std", None, "documents the std modules too, or the whole std library alone"),
+        Flag("--verify", None, "writes nothing and fails on drift"),
+    ]),
+    cmd("why", Pos::One("file"), why_cmd, "a module's audience, the path segment that decided it, and every import chain that reaches it", &[
+        Flag("--contract", None, "which module contract governs the file, and every export's status against it"),
+        Flag("--memory", None, "per binding: whether it is reclaimed, how, and the reason when it is not"),
+        Flag("--capability", Some("capability"), "every import chain that pulls the capability into the artifact the file argument names"),
+    ]),
+    cmd("routes", Pos::File, routes_cmd, "the resolved wire table: every derived, pinned, hand-written and page path the router mounts, with its source", &[
+        Flag("--json", None, "attaches each route's declaration from the symbol map"),
+    ]),
+    cmd("emit-wat", Pos::File, emit_wat, "the module `build --target wasm` writes, as WAT", &[]),
+    cmd("emit-lowered", Pos::File, emit_lowered, "the named core the emitter reads, root module only", &[]),
+    cmd("emit-gen", Pos::File, emit_gen, "the source of every generated module, each under a banner naming its call site", &[
+        Flag("--maps", None, "each generated module's symbol map instead, one JSON document per line"),
+    ]),
+    cmd("new", Pos::One("name"), scaffold, "scaffolds vyrn.json, src/main.vyrn and .gitignore", &[]),
+    cmd("add", Pos::One("github:|gist:|https: specifier"), add, "fetches and pins a remote module and adds it to `dependencies`", &[
+        Flag("--name", Some("alias"), ""),
+    ]),
+    cmd("update", Pos::Maybe("alias|tool"), update, "re-resolves and re-pins the remote dependencies and toolchain tools", &[
+        Flag("--locked", None, "reads through the existing pins and never writes the lock"),
+    ]),
+    cmd("vendor", Pos::None, vendor, "copies every locked blob into vyrn_vendor/", &[
+        Flag("--check", None, "verifies each one is there and intact"),
+    ]),
+    cmd("deps", Pos::Maybe("artifact"), deps, "every declared artifact's module graph, then the toolchain", &[]),
+];
+
+impl Cmd {
+    /// `vyrn <name> <positionals> <flags>`, for the usage screen.
+    fn synopsis(&self) -> String {
+        let mut line = format!("vyrn {}", self.name);
+        match self.pos {
+            Pos::None => {}
+            Pos::File => line.push_str(" [file.vyrn]"),
+            Pos::Program => line.push_str(" [file.vyrn] [args...]"),
+            Pos::One(n) => line.push_str(&format!(" <{n}>")),
+            Pos::Maybe(n) => line.push_str(&format!(" [{n}]")),
+            Pos::Many(n) => line.push_str(&format!(" [{n} ...]")),
         }
-        "deps" => return deps(flags, rest.first().map(|s| s.as_str())),
-        "why" => return why_cmd(flags, rest),
-        "add" => return add(flags, rest),
-        "update" => {
-            let locked = rest.iter().any(|a| a == "--locked");
-            let alias = rest.iter().find(|a| !a.starts_with('-'));
-            return update(flags, alias.map(|s| s.as_str()), locked);
+        for f in self.flags {
+            line.push_str(&f.synopsis());
         }
-        "vendor" => return vendor(flags, rest.first().is_some_and(|a| a == "--check")),
-        "fmt" => return fmt_cmd(flags, rest),
-        "doc" => return doc_cmd(flags, rest),
-        "dev" => return dev_cmd(flags, rest),
-        "routes" => {
-            let json = rest.iter().any(|a| a == "--json");
-            // The first positional anywhere: `vyrn routes --json app.vyrn`.
-            let file = rest.iter().find(|a| !a.starts_with('-'));
-            return routes_cmd(flags, file.map(|s| s.as_str()), json);
+        line
+    }
+}
+
+impl Flag {
+    /// ` [--name <value>]`.
+    fn synopsis(&self) -> String {
+        match self.1 {
+            Some(v) => format!(" [{} <{v}>]", self.0),
+            None => format!(" [{}]", self.0),
         }
-        _ => {}
+    }
+}
+
+/// The usage screen: every command with its gloss and its flags' glosses, then
+/// the global flags.
+fn usage() -> String {
+    let mut out = String::from("usage: vyrn <command> [arguments] [global flags]\n");
+    for c in COMMANDS {
+        out.push_str(&format!("  {}\n      {}\n", c.synopsis(), c.about));
+        for f in c.flags.iter().filter(|f| !f.2.is_empty()) {
+            out.push_str(&format!("      {}: {}\n", f.0, f.2));
+        }
+    }
+    out.push_str("global flags:\n");
+    for f in GLOBAL_FLAGS {
+        out.push_str(&format!("  {}\n      {}\n", f.synopsis().trim(), f.2));
+    }
+    out.push_str("  vyrn --version (also -V)");
+    out
+}
+
+/// One command line, parsed against its [`Cmd`] row.
+struct Call {
+    cmd: &'static Cmd,
+    flags: GlobalFlags,
+    /// The file of a [`Pos::File`] or [`Pos::Program`] command, if named.
+    file: Option<String>,
+    /// The other positionals; a [`Pos::Program`]'s are the program's.
+    pos: Vec<String>,
+    /// Each flag given, with its value, in command-line order.
+    given: Vec<(&'static str, Option<String>)>,
+}
+
+impl Call {
+    /// Splits `rest` into the row's flags and positionals.
+    ///
+    /// # Errors
+    ///
+    /// An unknown flag, a flag with no value, or the wrong count of
+    /// positionals: printed with the command's usage line, exit 2.
+    fn parse(cmd: &'static Cmd, flags: GlobalFlags, rest: &[String]) -> Result<Call, ExitCode> {
+        let mut call = Call {
+            cmd,
+            flags,
+            file: None,
+            pos: Vec::new(),
+            given: Vec::new(),
+        };
+        let most = match cmd.pos {
+            Pos::Program => {
+                let named = rest.first().filter(|a| !a.starts_with('-'));
+                call.file = named.cloned();
+                call.pos = rest[named.map_or(0, |_| 1)..].to_vec();
+                return Ok(call);
+            }
+            Pos::None => 0,
+            Pos::File | Pos::One(_) | Pos::Maybe(_) => 1,
+            Pos::Many(_) => usize::MAX,
+        };
+        let mut args = rest.iter();
+        while let Some(a) = args.next() {
+            match cmd.flags.iter().find(|f| f.0 == a) {
+                Some(Flag(name, None, _)) => call.given.push((name, None)),
+                Some(Flag(name, Some(what), _)) => match args.next() {
+                    Some(v) => call.given.push((name, Some(v.clone()))),
+                    None => return Err(call.refuse(&format!("{name} needs a value: <{what}>"))),
+                },
+                None if a.len() > 1 && a.starts_with('-') => {
+                    return Err(call.refuse(&format!("unexpected argument `{a}`")))
+                }
+                None => call.pos.push(a.clone()),
+            }
+        }
+        if let Some(extra) = call.pos.get(most) {
+            return Err(call.refuse(&format!("unexpected argument `{extra}`")));
+        }
+        match cmd.pos {
+            Pos::One(n) if call.pos.is_empty() => Err(call.refuse(&format!("missing <{n}>"))),
+            Pos::File => {
+                call.file = call.pos.pop();
+                Ok(call)
+            }
+            _ => Ok(call),
+        }
     }
 
-    // The remaining commands take an optional file; without one, the manifest
-    // supplies `main`.
-    let (file, rest) = match rest.first().filter(|a| !a.starts_with('-')) {
-        Some(p) => (Some(p.as_str()), &rest[1..]),
-        None => (None, rest),
-    };
-    let p = Project::of(file, flags)?;
-    let Some(path) = file.map(str::to_string).or_else(|| p.main()) else {
-        eprintln!("error: no input file, and no vyrn.json with a `main` found");
-        eprintln!("{USAGE}");
-        return Err(ExitCode::from(2));
-    };
-    let path = path.as_str();
-    match cmd {
-        "build" => return build(&p, path, rest),
-        "test" => return test_cmd(&p, path, rest),
-        "bench" => return bench_cmd(&p, path, rest),
-        "serve" => return serve_cmd(&p, path, rest),
-        _ => {}
+    /// Prints `error: <why>` and the command's usage line; returns exit 2.
+    fn refuse(&self, why: &str) -> ExitCode {
+        eprintln!("error: {why}");
+        eprintln!("usage: {}", self.cmd.synopsis());
+        ExitCode::from(2)
     }
-    // `run` forwards trailing arguments to the program's `args()`.
-    if !rest.is_empty() && cmd != "run" {
-        eprintln!("{USAGE}");
-        return Err(ExitCode::from(2));
+
+    /// Whether the switch `flag` was given.
+    fn has(&self, flag: &str) -> bool {
+        self.value_of(flag).is_some()
     }
-    let source = read_source(path)?;
-    match cmd {
-        "fix" => fix_cmd(&p, path, &source),
-        // `check` must predict the one thing `build` can fail to finish:
-        // unbounded monomorphization, visible only while emitting (audit A5.2).
-        "check" => {
-            vyrn_frontend::movecheck::emit_nothing();
-            let (program, world) = p.checked(path, &source)?;
-            instantiable(&program, &world)?;
-            println!("ok");
-            Ok(ExitCode::SUCCESS)
-        }
-        "run" => {
-            // Generators run in the load; its time is the first row of the
-            // table `run_wasm` prints.
-            let clock = std::time::Instant::now();
-            let (program, world) = p.checked(path, &source)?;
-            let load = clock.elapsed();
-            instantiable(&program, &world)?;
-            let profile = flags.profile.then_some(load);
-            Ok(run_wasm(path, &program, world, rest, profile))
-        }
-        // The module `build --target wasm` writes and `build` hands wasm2c.
-        "emit-wat" => {
-            let (program, world) = p.checked(path, &source)?;
-            print!("{}", failed(vyrn_codegen::direct::wat(&program, world))?);
-            Ok(ExitCode::SUCCESS)
-        }
-        // The form the emitter reads, for the root module only: a linked
-        // program's imports are another file's answer.
-        "emit-lowered" => {
-            let (program, world) = p.checked(path, &source)?;
-            print!("{}", vyrn_lower::render(&program, &world, path));
-            Ok(ExitCode::SUCCESS)
-        }
-        "emit-gen" => emit_gen(&p, path, &source, want_maps),
-        other => {
-            eprintln!("unknown command `{other}` (expected run, check, fix, emit-wat, emit-lowered, emit-gen, build, test, bench, or serve)");
-            Err(ExitCode::from(2))
+
+    /// The value of `flag`; the last one when it was given twice.
+    fn value(&self, flag: &str) -> Option<&str> {
+        self.value_of(flag)?.as_deref()
+    }
+
+    /// The value of `flag` parsed as `T`, or `None` when it was not given.
+    ///
+    /// # Errors
+    ///
+    /// A value that does not parse: `<flag> needs <what>`, exit 2.
+    fn parsed<T: std::str::FromStr>(&self, flag: &str, what: &str) -> Result<Option<T>, ExitCode> {
+        self.value(flag)
+            .map(|v| {
+                v.parse()
+                    .map_err(|_| self.refuse(&format!("{flag} needs {what}")))
+            })
+            .transpose()
+    }
+
+    /// `Some(value)` for a flag given; panics on a flag the row does not
+    /// declare, so a misspelling fails the first test that reaches it.
+    fn value_of(&self, flag: &str) -> Option<&Option<String>> {
+        assert!(
+            self.cmd.flags.iter().any(|f| f.0 == flag),
+            "`vyrn {}` declares no flag {flag}",
+            self.cmd.name
+        );
+        self.given.iter().rev().find(|g| g.0 == flag).map(|g| &g.1)
+    }
+
+    /// The only positional of a [`Pos::One`] or [`Pos::Maybe`] command.
+    fn arg(&self) -> Option<&str> {
+        self.pos.first().map(String::as_str)
+    }
+
+    /// The root file and its project: the file the command names, else the
+    /// manifest's `main`.
+    ///
+    /// # Errors
+    ///
+    /// Neither exists: printed with the usage line, exit 2. The project's own
+    /// errors as [`Project::of`].
+    fn root(&self) -> Result<(Project, String), ExitCode> {
+        let p = Project::of(self.file.as_deref(), self.flags)?;
+        match self.file.clone().or_else(|| p.main()) {
+            Some(path) => Ok((p, path)),
+            None => Err(self.refuse("no input file, and no vyrn.json with a `main` found")),
         }
     }
+}
+
+/// `vyrn check [file]`. It must predict the one thing `build` can fail to
+/// finish: unbounded monomorphization, visible only while emitting (audit
+/// A5.2).
+fn check_cmd(call: &Call) -> Outcome {
+    let (p, path) = call.root()?;
+    vyrn_frontend::movecheck::emit_nothing();
+    let (program, world) = p.checked(&path, &read_source(&path)?)?;
+    instantiable(&program, &world)?;
+    println!("ok");
+    Ok(ExitCode::SUCCESS)
 }
 
 /// What `check` refuses, `run` refuses, with `check`'s sentence: a polymorphic
@@ -376,14 +597,33 @@ fn failed<T, E: std::fmt::Display>(r: Result<T, E>) -> Result<T, ExitCode> {
 ///
 /// `--maps` prints each module's symbol map instead, one JSON document
 /// per line with the banners on stderr, so `> api.map.json` writes the file.
-fn emit_gen(p: &Project, path: &str, source: &str, maps: bool) -> Outcome {
-    let root_key = dos_to_slash(path);
-    let graph = p.graph(path, source)?;
+/// `vyrn emit-wat [file]`: the module `build --target wasm` writes and
+/// `build` hands wasm2c.
+fn emit_wat(call: &Call) -> Outcome {
+    let (p, path) = call.root()?;
+    let (program, world) = p.checked(&path, &read_source(&path)?)?;
+    print!("{}", failed(vyrn_codegen::direct::wat(&program, world))?);
+    Ok(ExitCode::SUCCESS)
+}
+
+/// `vyrn emit-lowered [file]`: the form the emitter reads, for the root module
+/// only. A linked program's imports are another file's answer.
+fn emit_lowered(call: &Call) -> Outcome {
+    let (p, path) = call.root()?;
+    let (program, world) = p.checked(&path, &read_source(&path)?)?;
+    print!("{}", vyrn_lower::render(&program, &world, &path));
+    Ok(ExitCode::SUCCESS)
+}
+
+fn emit_gen(call: &Call) -> Outcome {
+    let (p, path) = call.root()?;
+    let root_key = dos_to_slash(&path);
+    let graph = p.graph(&path, &read_source(&path)?)?;
     let mods = generated(&graph);
     if mods.is_empty() {
         eprintln!("(no generator imports in {root_key})");
     }
-    if maps {
+    if call.has("--maps") {
         let mut any = false;
         for (banner, src) in mods {
             if let Some(json) = vyrn_frontend::symbolmap::json_of(src) {
@@ -579,7 +819,8 @@ impl Project {
             (None, None) => Ok(DEFAULT_NATIVE_TARGET),
             (None, Some((dir, v))) => NativeTarget::parse(v).ok_or_else(|| {
                 eprintln!(
-                    "error: unknown `nativeTarget` `{v}` in {dir}/vyrn.json (expected one of: {NATIVE_TARGETS})"
+                    "error: unknown `nativeTarget` `{v}` in {dir}/vyrn.json (expected one of: {})",
+                    NativeTarget::names()
                 );
                 ExitCode::from(2)
             }),
@@ -596,18 +837,19 @@ fn read_source(path: &str) -> Result<String, ExitCode> {
 }
 
 /// `vyrn new <name>`: scaffolds vyrn.json, src/main.vyrn and .gitignore.
-fn scaffold(name: &str) -> ExitCode {
+fn scaffold(call: &Call) -> Outcome {
+    let name = call.arg().unwrap_or_default();
     // The name is interpolated raw into vyrn.json and src/main.vyrn; a quote,
     // a backslash or a control character would write a manifest no later
     // command can parse.
     if name.contains('"') || name.contains('\\') || name.chars().any(char::is_control) {
         eprintln!("error: project name cannot contain `\"`, `\\`, or control characters");
-        return ExitCode::FAILURE;
+        return Err(ExitCode::FAILURE);
     }
     let root = Path::new(name);
     if root.exists() {
         eprintln!("error: `{name}` already exists");
-        return ExitCode::FAILURE;
+        return Err(ExitCode::FAILURE);
     }
     let manifest = format!(
         "{{\n    \"name\": \"{name}\",\n    \"main\": \"src/main.vyrn\",\n    \"dependencies\": {{}}\n}}\n"
@@ -624,75 +866,32 @@ fn scaffold(name: &str) -> ExitCode {
         if let Some(dir) = path.parent() {
             if let Err(e) = std::fs::create_dir_all(dir) {
                 eprintln!("error: cannot create {}: {e}", dir.display());
-                return ExitCode::FAILURE;
+                return Err(ExitCode::FAILURE);
             }
         }
         if let Err(e) = std::fs::write(&path, content) {
             eprintln!("error: cannot write {}: {e}", path.display());
-            return ExitCode::FAILURE;
+            return Err(ExitCode::FAILURE);
         }
     }
     println!("created {name}/ (vyrn.json, src/main.vyrn) — try: cd {name} && vyrn run");
-    ExitCode::SUCCESS
+    Ok(ExitCode::SUCCESS)
 }
 
 /// `vyrn why`: dispatches to the audience, `--contract`, `--memory` or
 /// `--capability` report. `--contract` prints the contract that governs a
 /// module and the status of each of its members; it exits 1 when the file is
 /// in no role.
-fn why_cmd(flags: GlobalFlags, args: &[String]) -> Outcome {
-    const USAGE: &str = "usage: vyrn why <file> | vyrn why --contract <file> | \
-         vyrn why --memory <file> | vyrn why --capability <fs|stdin|args|extern> <entry-or-artifact-name>";
-    let mut file: Option<String> = None;
-    let mut contract = false;
-    let mut memory = false;
-    let mut capability: Option<String> = None;
-    let mut i = 0;
-    while i < args.len() {
-        match args[i].as_str() {
-            "--contract" => {
-                contract = true;
-                i += 1;
-            }
-            "--memory" => {
-                memory = true;
-                i += 1;
-            }
-            "--capability" => {
-                let Some(cap) = args.get(i + 1) else {
-                    eprintln!(
-                        "error: `--capability` needs a capability (one of: {})",
-                        vyrn_frontend::floor::CAPABILITIES
-                    );
-                    eprintln!("{USAGE}");
-                    return Err(ExitCode::from(2));
-                };
-                capability = Some(cap.clone());
-                i += 2;
-            }
-            other if !other.starts_with('-') => {
-                file = Some(other.to_string());
-                i += 1;
-            }
-            other => {
-                eprintln!("error: unknown `vyrn why` option `{other}`");
-                eprintln!("{USAGE}");
-                return Err(ExitCode::from(2));
-            }
-        }
+fn why_cmd(call: &Call) -> Outcome {
+    let (flags, file) = (call.flags, call.arg().unwrap_or_default());
+    if let Some(cap) = call.value("--capability") {
+        return why_capability(flags, cap, file);
     }
-    let Some(file) = file else {
-        eprintln!("{USAGE}");
-        return Err(ExitCode::from(2));
-    };
-    if let Some(cap) = capability {
-        return why_capability(flags, &cap, &file);
+    if call.has("--memory") {
+        return why_memory(flags, file);
     }
-    if memory {
-        return why_memory(flags, &file);
-    }
-    if !contract {
-        return why_audience(flags, &file);
+    if !call.has("--contract") {
+        return why_audience(flags, file);
     }
     let path = match Path::new(&file).canonicalize() {
         Ok(p) => dos_to_slash(&p.to_string_lossy()),
@@ -835,13 +1034,8 @@ fn why_cmd(flags: GlobalFlags, args: &[String]) -> Outcome {
 /// (`--json` only, for each route's declaration), and the arguments of the
 /// program's `mount(..)` call for hand-written lists ([`mounted_routes_wasm`]).
 /// The channels are unioned.
-fn routes_cmd(flags: GlobalFlags, file: Option<&str>, json: bool) -> Outcome {
-    let p = Project::of(file, flags)?;
-    let Some(path) = file.map(str::to_string).or_else(|| p.main()) else {
-        eprintln!("error: no input file, and no vyrn.json with a `main` found");
-        eprintln!("usage: vyrn routes [file]");
-        return Err(ExitCode::from(2));
-    };
+fn routes_cmd(call: &Call) -> Outcome {
+    let (p, path) = call.root()?;
     let root_key = dos_to_slash(&path);
     let source = read_source(&root_key)?;
     let graph = p.graph(&root_key, &source)?;
@@ -897,7 +1091,7 @@ fn routes_cmd(flags: GlobalFlags, file: Option<&str>, json: bool) -> Outcome {
             "note: only derived routes are listed — the mounted router could not be read: {e}"
         ),
     }
-    if json {
+    if call.has("--json") {
         return Ok(routes_json(&mods, rows));
     }
     if rows.is_empty() {
@@ -1729,8 +1923,9 @@ fn print_toolchain(start: &Path, pins: &[(String, String)]) {
 ///
 /// A lone artifact named `main` prints its graph with no header. A manifest
 /// that declares no artifacts is not an error: it prints the toolchain alone.
-fn deps(flags: GlobalFlags, name: Option<&str>) -> Outcome {
-    let p = Project::of(None, flags)?;
+fn deps(call: &Call) -> Outcome {
+    let name = call.arg();
+    let p = Project::of(None, call.flags)?;
     let Some(manifest) = &p.manifest else {
         eprintln!("error: no vyrn.json found upward from here");
         return Err(ExitCode::FAILURE);
@@ -1813,34 +2008,19 @@ fn deps(flags: GlobalFlags, name: Option<&str>) -> Outcome {
 ///
 /// The input need only lex. A file that does not is reported and left
 /// untouched; the others still format, and the exit is non-zero.
-fn fmt_cmd(flags: GlobalFlags, rest: &[String]) -> Outcome {
+fn fmt_cmd(call: &Call) -> Outcome {
+    let flags = call.flags;
     // A converter, not a formatter run: it prints and writes nothing.
-    if let Some(i) = rest.iter().position(|a| a == "--from-json") {
-        let Some(path) = rest.get(i + 1).filter(|a| !a.starts_with('-')) else {
-            eprintln!("error: --from-json needs a .json file");
-            eprintln!("{USAGE}");
-            return Err(ExitCode::from(2));
-        };
-        let flag = |name: &str, fallback: &str| -> String {
-            rest.iter()
-                .position(|a| a == name)
-                .and_then(|k| rest.get(k + 1))
-                .cloned()
-                .unwrap_or_else(|| fallback.to_string())
-        };
+    if let Some(path) = call.value("--from-json") {
         return from_json_cmd(
             flags,
             path,
-            &flag("--as", "Config"),
-            &flag("--from", "./config.vyrn"),
+            call.value("--as").unwrap_or("Config"),
+            call.value("--from").unwrap_or("./config.vyrn"),
         );
     }
-    let check = rest.iter().any(|a| a == "--check");
-    let files: Vec<String> = rest
-        .iter()
-        .filter(|a| !a.starts_with('-'))
-        .cloned()
-        .collect();
+    let check = call.has("--check");
+    let files = call.pos.clone();
 
     let mut had_error = false;
     // No files: the project's `main` and its local imports. Remote modules are
@@ -1864,9 +2044,7 @@ fn fmt_cmd(flags: GlobalFlags, rest: &[String]) -> Outcome {
         }
     }
     if targets.is_empty() {
-        eprintln!("error: no input files, and no vyrn.json with a `main` found");
-        eprintln!("{USAGE}");
-        return Err(ExitCode::from(2));
+        return Err(call.refuse("no input files, and no vyrn.json with a `main` found"));
     }
 
     let mut would_change: Vec<String> = Vec::new();
@@ -2019,28 +2197,9 @@ struct DocModule {
 ///
 /// `--verify` writes nothing and exits 1 if the output directory differs from
 /// what would be generated.
-fn doc_cmd(flags: GlobalFlags, rest: &[String]) -> Outcome {
-    let with_std = rest.iter().any(|a| a == "--std");
-    let verify = rest.iter().any(|a| a == "--verify");
-    let out_dir = match rest.iter().position(|a| a == "-o") {
-        Some(i) => match rest.get(i + 1) {
-            Some(d) => d.clone(),
-            None => {
-                eprintln!("error: -o needs a directory");
-                return Err(ExitCode::from(2));
-            }
-        },
-        None => "docs/api".to_string(),
-    };
-    // The one positional (a file or directory); flags and the `-o` value excluded.
-    let target = rest
-        .iter()
-        .enumerate()
-        .filter(|(i, a)| !a.starts_with('-') && !(*i > 0 && rest[*i - 1] == "-o"))
-        .map(|(_, a)| a.clone())
-        .next();
-
-    let modules = discover_doc_modules(flags, target.as_deref(), with_std)?;
+fn doc_cmd(call: &Call) -> Outcome {
+    let out_dir = call.value("-o").unwrap_or("docs/api");
+    let modules = discover_doc_modules(call, call.arg(), call.has("--std"))?;
     if modules.is_empty() {
         eprintln!("error: no modules to document");
         return Err(ExitCode::from(2));
@@ -2054,10 +2213,10 @@ fn doc_cmd(flags: GlobalFlags, rest: &[String]) -> Outcome {
     }
     files.sort_by(|a, b| a.0.cmp(&b.0));
 
-    Ok(if verify {
-        verify_doc_dir(&out_dir, &files)
+    Ok(if call.has("--verify") {
+        verify_doc_dir(out_dir, &files)
     } else {
-        write_doc_dir(&out_dir, &files)
+        write_doc_dir(out_dir, &files)
     })
 }
 
@@ -2067,21 +2226,19 @@ fn doc_cmd(flags: GlobalFlags, rest: &[String]) -> Outcome {
 /// - nothing, with a manifest `main`: that file's closure;
 /// - nothing, with `--std`: the whole std library.
 fn discover_doc_modules(
-    flags: GlobalFlags,
+    call: &Call,
     target: Option<&str>,
     with_std: bool,
 ) -> Result<Vec<DocModule>, ExitCode> {
     if let Some(dir) = target.filter(|t| Path::new(t).is_dir()) {
         return scan_doc_dir(dir, "");
     }
-    let p = Project::of(target, flags)?;
+    let p = Project::of(target, call.flags)?;
     if let Some(root) = target.map(str::to_string).or_else(|| p.main()) {
         return closure_doc_modules(&p, &root, with_std);
     }
     if !with_std {
-        eprintln!("error: no input file or directory, and no vyrn.json with a `main` found");
-        eprintln!("{USAGE}");
-        return Err(ExitCode::from(2));
+        return Err(call.refuse("no input file or directory, and no vyrn.json with a `main` found"));
     }
     match std_root() {
         Some(root) => scan_doc_dir(&root, "std/"),
@@ -2365,15 +2522,17 @@ fn collect_md_files(dir: &Path, base: &str, out: &mut Vec<String>) {
 /// It edits only the file given; a diagnostic in an import is reported. A round
 /// applies at most one edit per line and is kept only if the diagnostic count
 /// falls, so the file never compiles worse than it did.
-fn fix_cmd(p: &Project, path: &str, source: &str) -> Outcome {
-    let root_key = dos_to_slash(path);
+fn fix_cmd(call: &Call) -> Outcome {
+    let (p, path) = call.root()?;
+    let source = read_source(&path)?;
+    let root_key = dos_to_slash(&path);
     let mut text = source.to_string();
     let mut rounds = 0usize;
     let mut applied: Vec<String> = Vec::new();
     let mut refused: Vec<String> = Vec::new();
 
     loop {
-        let diags = fix_diagnostics(p, &root_key, &text);
+        let diags = fix_diagnostics(&p, &root_key, &text);
         let mine: Vec<&vyrn_frontend::diagnostics::Diagnostic> = diags
             .iter()
             .filter(|d| d.stage == "movecheck" && d.file.is_none())
@@ -2433,7 +2592,7 @@ fn fix_cmd(p: &Project, path: &str, source: &str) -> Outcome {
             break;
         }
         // A round that does not reduce the count is discarded whole.
-        if fix_diagnostics(p, &root_key, &next).len() >= diags.len() {
+        if fix_diagnostics(&p, &root_key, &next).len() >= diags.len() {
             refused.push(format!(
                 "{root_key}: {} edit(s) rolled back — they did not reduce the diagnostics",
                 this_round.len()
@@ -2452,7 +2611,7 @@ fn fix_cmd(p: &Project, path: &str, source: &str) -> Outcome {
 
     p.save_lock()?;
     if text != source {
-        if let Err(e) = std::fs::write(path, &text) {
+        if let Err(e) = std::fs::write(&path, &text) {
             eprintln!("error: cannot write {path}: {e}");
             return Err(ExitCode::FAILURE);
         }
@@ -2601,13 +2760,10 @@ fn print_diagnostics(diags: &[Diagnostic], root_key: &str, marker: &str) {
 
 /// `vyrn add <specifier> [--name alias]`: fetches and pins a remote module and
 /// records it in vyrn.json's dependencies.
-fn add(flags: GlobalFlags, rest: &[String]) -> Outcome {
-    let Some(spec) = rest.first().filter(|s| !s.starts_with('-')) else {
-        eprintln!("usage: vyrn add <github:|gist:|https: specifier> [--name alias]");
-        return Err(ExitCode::from(2));
-    };
+fn add(call: &Call) -> Outcome {
+    let spec = call.arg().unwrap_or_default();
     let spec = if spec.ends_with(".vyrn") || spec.ends_with(".json") {
-        spec.clone()
+        spec.to_string()
     } else {
         format!("{spec}.vyrn")
     };
@@ -2615,21 +2771,15 @@ fn add(flags: GlobalFlags, rest: &[String]) -> Outcome {
         eprintln!("error: `add` takes a remote specifier (github:/gist:/https:)");
         return Err(ExitCode::FAILURE);
     }
-    let alias = match rest.iter().position(|a| a == "--name") {
-        Some(i) => match rest.get(i + 1) {
-            Some(a) => a.clone(),
-            None => {
-                eprintln!("error: --name needs a value");
-                return Err(ExitCode::from(2));
-            }
-        },
+    let alias = match call.value("--name") {
+        Some(a) => a.to_string(),
         None => Path::new(&spec)
             .file_stem()
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_else(|| "dep".to_string()),
     };
 
-    let p = Project::of(None, flags)?;
+    let p = Project::of(None, call.flags)?;
     let Some(manifest) = &p.manifest else {
         eprintln!("error: no vyrn.json found — run `vyrn new` or create one first");
         return Err(ExitCode::FAILURE);
@@ -2781,7 +2931,8 @@ fn verify_tool(
 /// `--locked` re-resolves nothing and never saves the lock: it fetches only
 /// what the caches miss, verifies every byte against the lock, and refuses a
 /// mismatch.
-fn update(flags: GlobalFlags, alias: Option<&str>, locked: bool) -> Outcome {
+fn update(call: &Call) -> Outcome {
+    let (flags, alias, locked) = (call.flags, call.arg(), call.has("--locked"));
     let p = Project::of(None, flags)?;
     let Some(manifest) = &p.manifest else {
         eprintln!("error: no vyrn.json found");
@@ -2861,8 +3012,9 @@ fn update(flags: GlobalFlags, alias: Option<&str>, locked: bool) -> Outcome {
 
 /// `vyrn vendor [--check]`: copies every locked blob into the vendor directory,
 /// or with `--check` verifies each is there.
-fn vendor(flags: GlobalFlags, check: bool) -> Outcome {
-    let p = Project::of(None, flags)?;
+fn vendor(call: &Call) -> Outcome {
+    let check = call.has("--check");
+    let p = Project::of(None, call.flags)?;
     let Some(manifest) = &p.manifest else {
         eprintln!("error: no vyrn.json found");
         return Err(ExitCode::FAILURE);
@@ -2966,20 +3118,10 @@ fn json_pretty(j: &vyrn_frontend::schema::Json, depth: usize) -> String {
 /// `vyrn test [file] [--name <substring>]`: runs the root file's `test` blocks
 /// in declaration order and exits 1 if any failed. A file with no tests prints
 /// `no tests` and exits 0.
-fn test_cmd(p: &Project, path: &str, rest: &[String]) -> Outcome {
-    let mut filter: Option<String> = None;
-    let mut i = 0;
-    while i < rest.len() {
-        if rest[i] == "--name" && i + 1 < rest.len() {
-            filter = Some(rest[i + 1].clone());
-            i += 2;
-        } else {
-            eprintln!("test: unexpected argument `{}`", rest[i]);
-            return Err(ExitCode::from(2));
-        }
-    }
-
-    let (program, _) = p.checked(path, &read_source(path)?)?;
+fn test_cmd(call: &Call) -> Outcome {
+    let (p, path) = call.root()?;
+    let filter = call.value("--name");
+    let (program, _) = p.checked(&path, &read_source(&path)?)?;
     let has_tests = program.tests.iter().any(|t| t.module.is_none());
     if !has_tests {
         println!("no tests");
@@ -2988,14 +3130,14 @@ fn test_cmd(p: &Project, path: &str, rest: &[String]) -> Outcome {
     let bodies: Vec<Body> = program
         .tests
         .iter()
-        .filter(|t| t.module.is_none() && filter.as_deref().is_none_or(|s| t.name.contains(s)))
+        .filter(|t| t.module.is_none() && filter.is_none_or(|s| t.name.contains(s)))
         .map(|t| Body {
             name: t.name.clone(),
             body: t.body.clone(),
             line: t.line,
         })
         .collect();
-    Ok(bodies_wasm(path, &program, "test", &bodies))
+    Ok(bodies_wasm(&path, &program, "test", &bodies))
 }
 
 /// `vyrn bench`: runs the root file's `bench` blocks in declaration order.
@@ -3008,53 +3150,26 @@ fn test_cmd(p: &Project, path: &str, rest: &[String]) -> Outcome {
 /// - `--compare <baseline.json>`: see [`bench_compare`].
 ///
 /// `--check` excludes `--json` and `--compare`.
-fn bench_cmd(p: &Project, path: &str, rest: &[String]) -> Outcome {
-    let mut filter: Option<String> = None;
-    let mut check = false;
-    let mut json = false;
-    let mut compare: Option<String> = None;
-    let mut threshold: f64 = 1.5;
-    let mut ungate: Option<String> = None;
-    let mut i = 0;
-    while i < rest.len() {
-        if rest[i] == "--name" && i + 1 < rest.len() {
-            filter = Some(rest[i + 1].clone());
-            i += 2;
-        } else if rest[i] == "--check" {
-            check = true;
-            i += 1;
-        } else if rest[i] == "--json" {
-            json = true;
-            i += 1;
-        } else if rest[i] == "--compare" && i + 1 < rest.len() {
-            compare = Some(rest[i + 1].clone());
-            i += 2;
-        } else if rest[i] == "--ungate" && i + 1 < rest.len() {
-            ungate = Some(rest[i + 1].clone());
-            i += 2;
-        } else if rest[i] == "--threshold" && i + 1 < rest.len() {
-            match rest[i + 1].parse::<f64>() {
-                Ok(t) if t > 0.0 => threshold = t,
-                _ => {
-                    eprintln!("bench: --threshold needs a positive number");
-                    return Err(ExitCode::from(2));
-                }
-            }
-            i += 2;
-        } else {
-            eprintln!("bench: unexpected argument `{}`", rest[i]);
-            return Err(ExitCode::from(2));
-        }
-    }
-
+fn bench_cmd(call: &Call) -> Outcome {
+    let filter = call.value("--name");
+    let (check, json, compare) = (
+        call.has("--check"),
+        call.has("--json"),
+        call.value("--compare"),
+    );
+    let threshold = match call.parsed::<f64>("--threshold", "a positive number")? {
+        None => 1.5,
+        Some(t) if t > 0.0 => t,
+        Some(_) => return Err(call.refuse("--threshold needs a positive number")),
+    };
     if check && (json || compare.is_some()) {
-        eprintln!("bench: --check cannot be combined with --json or --compare");
-        return Err(ExitCode::from(2));
+        return Err(call.refuse("--check cannot be combined with --json or --compare"));
     }
 
-    let (program, _) = p.checked(path, &read_source(path)?)?;
+    let (p, path) = call.root()?;
+    let (program, _) = p.checked(&path, &read_source(&path)?)?;
 
-    let matches = |name: &str| filter.as_deref().is_none_or(|sub| name.contains(sub));
+    let matches = |name: &str| filter.is_none_or(|sub| name.contains(sub));
     let has_selected = program
         .benches
         .iter()
@@ -3075,19 +3190,15 @@ fn bench_cmd(p: &Project, path: &str, rest: &[String]) -> Outcome {
                 line: b.line,
             })
             .collect();
-        return Ok(bodies_wasm(path, &program, "bench", &bodies));
+        return Ok(bodies_wasm(&path, &program, "bench", &bodies));
     }
     if let Some(baseline) = compare {
+        let ungate = call.value("--ungate");
         return Ok(bench_compare(
-            p,
-            path,
-            filter.as_deref(),
-            &baseline,
-            threshold,
-            ungate.as_deref(),
+            &p, &path, filter, baseline, threshold, ungate,
         ));
     }
-    let (code, _) = bench_native(p, path, filter.as_deref(), json, false)?;
+    let (code, _) = bench_native(&p, &path, filter, json, false)?;
     Ok(code)
 }
 
@@ -3869,35 +3980,10 @@ fn serve_wasm_call(res: &mut wasmrun::Resident, call: ServeCall) -> Result<Serve
 
 /// `vyrn serve [file] [--port N] [--workers N]`: an HTTP/1.1 host on `std::net`
 /// running the file's `handle`, by default on port 8080. See [`serve_loop`].
-fn serve_cmd(p: &Project, path: &str, rest: &[String]) -> Outcome {
-    let mut port: u16 = 8080;
-    let mut workers: Option<usize> = None;
-    let mut i = 0;
-    while i < rest.len() {
-        if rest[i] == "--port" && i + 1 < rest.len() {
-            match rest[i + 1].parse::<u16>() {
-                Ok(p) => port = p,
-                Err(_) => {
-                    eprintln!("serve: --port needs a number in 0..=65535");
-                    return Err(ExitCode::from(2));
-                }
-            }
-            i += 2;
-        } else if rest[i] == "--workers" && i + 1 < rest.len() {
-            match rest[i + 1].parse::<usize>() {
-                Ok(n) if n >= 1 => workers = Some(n),
-                _ => {
-                    eprintln!("serve: --workers needs a positive number");
-                    return Err(ExitCode::from(2));
-                }
-            }
-            i += 2;
-        } else {
-            eprintln!("serve: unexpected argument `{}`", rest[i]);
-            return Err(ExitCode::from(2));
-        }
-    }
-
+fn serve_cmd(call: &Call) -> Outcome {
+    let (port, workers) = host_flags(call)?;
+    let (p, path) = call.root()?;
+    let path = path.as_str();
     // Appended before the load, so it is checked and every program line keeps
     // its number.
     let source = format!("{}\n{SERVE_SHIM}", read_source(path)?);
@@ -4155,36 +4241,16 @@ fn refuse_workers_if_stateful(
 /// `vyrn dev [--port N] [--workers N]`: builds the manifest's `client` to wasm,
 /// then serves the `server` root's `handle` with static assets in front (see
 /// [`dev_static_path`]). `public` defaults to `public`.
-fn dev_cmd(flags: GlobalFlags, rest: &[String]) -> Outcome {
-    let mut port: u16 = 8080;
-    let mut workers: Option<usize> = None;
-    let mut i = 0;
-    while i < rest.len() {
-        if rest[i] == "--port" && i + 1 < rest.len() {
-            match rest[i + 1].parse::<u16>() {
-                Ok(p) => port = p,
-                Err(_) => {
-                    eprintln!("dev: --port needs a number in 0..=65535");
-                    return Err(ExitCode::from(2));
-                }
-            }
-            i += 2;
-        } else if rest[i] == "--workers" && i + 1 < rest.len() {
-            match rest[i + 1].parse::<usize>() {
-                Ok(n) if n >= 1 => workers = Some(n),
-                _ => {
-                    eprintln!("dev: --workers needs a positive number");
-                    return Err(ExitCode::from(2));
-                }
-            }
-            i += 2;
-        } else {
-            eprintln!("dev: unexpected argument `{}`", rest[i]);
-            return Err(ExitCode::from(2));
-        }
-    }
+/// `--port` (default 8080) and `--workers`, as `serve` and `dev` take them.
+fn host_flags(call: &Call) -> Result<(u16, Option<usize>), ExitCode> {
+    let port = call.parsed("--port", "a number in 0..=65535")?;
+    let workers = call.parsed::<std::num::NonZeroUsize>("--workers", "a positive number")?;
+    Ok((port.unwrap_or(8080), workers.map(usize::from)))
+}
 
-    let p = Project::of(None, flags)?;
+fn dev_cmd(call: &Call) -> Outcome {
+    let (port, workers) = host_flags(call)?;
+    let p = Project::of(None, call.flags)?;
     let Some(manifest) = &p.manifest else {
         eprintln!("error: `vyrn dev` needs a vyrn.json with `server` and `client` keys");
         return Err(ExitCode::FAILURE);
@@ -4223,16 +4289,7 @@ fn dev_cmd(flags: GlobalFlags, rest: &[String]) -> Outcome {
     let wasm_out = dev_dir.join("client.wasm");
     let _ = std::fs::remove_file(&wasm_out); // a stale wasm must not mask a failed build
     eprintln!("dev: building client {client_rel} -> wasm");
-    let built = build(
-        &p,
-        &client_path,
-        &[
-            "--target".to_string(),
-            "wasm".to_string(),
-            "-o".to_string(),
-            wasm_out.to_string_lossy().into_owned(),
-        ],
-    );
+    let built = build_to(&p, &client_path, Some(&wasm_out.to_string_lossy()), true);
     if !wasm_out.is_file() {
         return built;
     }
@@ -5012,9 +5069,21 @@ fn write_response_vary(
     let _ = stream.flush();
 }
 
-/// `vyrn run`: compiles the program and runs it in the embedded wasmtime; the
-/// exit code is the guest's. `profile` is the load's time under
-/// `vyrn run --profile` (see [`wasm_profile`]).
+/// `vyrn run [file] [args...]`. Generators run in the load, so its time is the
+/// first row of the table `run_wasm` prints.
+fn run_cmd(call: &Call) -> Outcome {
+    let (p, path) = call.root()?;
+    let clock = std::time::Instant::now();
+    let (program, world) = p.checked(&path, &read_source(&path)?)?;
+    let load = clock.elapsed();
+    instantiable(&program, &world)?;
+    let profile = call.flags.profile.then_some(load);
+    Ok(run_wasm(&path, &program, world, &call.pos, profile))
+}
+
+/// Compiles the program and runs it in the embedded wasmtime; the exit code is
+/// the guest's. `profile` is the load's time under `vyrn run --profile` (see
+/// [`wasm_profile`]).
 fn run_wasm(
     path: &str,
     program: &vyrn_frontend::ast::Program,
@@ -5201,29 +5270,21 @@ fn bodies_wasm(
     }
 }
 
-fn build(p: &Project, path: &str, rest: &[String]) -> Outcome {
-    let mut out: Option<String> = None;
-    let mut wasm = false;
-    let mut i = 0;
-    while i < rest.len() {
-        if rest[i] == "-o" && i + 1 < rest.len() {
-            out = Some(rest[i + 1].clone());
-            i += 2;
-        } else if rest[i] == "--target" && i + 1 < rest.len() {
-            match rest[i + 1].as_str() {
-                "wasm" | "wasm32-wasi" => wasm = true,
-                other => {
-                    eprintln!("build: unknown target `{other}` (expected `wasm`)");
-                    return Err(ExitCode::from(2));
-                }
-            }
-            i += 2;
-        } else {
-            eprintln!("build: unexpected argument `{}`", rest[i]);
-            return Err(ExitCode::from(2));
+fn build(call: &Call) -> Outcome {
+    let wasm = match call.value("--target") {
+        None => false,
+        Some("wasm" | "wasm32-wasi") => true,
+        Some(other) => {
+            return Err(call.refuse(&format!("unknown target `{other}` (expected `wasm`)")))
         }
-    }
+    };
+    let (p, path) = call.root()?;
+    build_to(&p, &path, call.value("-o"), wasm)
+}
 
+/// Builds `path` to `out`, by default its stem in the working directory: the
+/// module itself under `wasm`, else a native executable.
+fn build_to(p: &Project, path: &str, out: Option<&str>, wasm: bool) -> Outcome {
     // Before the compile, so a misspelled `nativeTarget` fails first. A wasm
     // build ignores it.
     let native_target = if wasm { None } else { Some(p.native_target()?) };
@@ -5232,7 +5293,7 @@ fn build(p: &Project, path: &str, rest: &[String]) -> Outcome {
         .file_stem()
         .and_then(|s| s.to_str())
         .unwrap_or("a");
-    let out_path = out.unwrap_or_else(|| {
+    let out_path = out.map(str::to_string).unwrap_or_else(|| {
         if wasm {
             format!("{stem}.wasm")
         } else if cfg!(windows) {
@@ -5421,6 +5482,38 @@ fn build_wasm2c(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `docs/tooling.md` names each command of the table as `` `vyrn <name>``,
+    /// names no other, and spells every flag the table declares.
+    #[test]
+    fn the_tooling_doc_indexes_every_command_and_flag() {
+        let doc = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../docs/tooling.md"
+        ))
+        .expect("docs/tooling.md");
+        let word = |c: char| c.is_ascii_lowercase() || c == '-';
+        let mut named: Vec<&str> = doc
+            .match_indices("`vyrn ")
+            .map(|(i, m)| &doc[i + m.len()..])
+            .map(|rest| &rest[..rest.find(|c| !word(c)).unwrap_or(rest.len())])
+            .filter(|w| !w.is_empty() && !w.starts_with('-'))
+            .collect();
+        named.sort();
+        named.dedup();
+        let mut commands: Vec<&str> = COMMANDS.iter().map(|c| c.name).collect();
+        commands.sort();
+        assert_eq!(named, commands, "docs/tooling.md and COMMANDS disagree");
+        let flags = GLOBAL_FLAGS
+            .iter()
+            .chain(COMMANDS.iter().flat_map(|c| c.flags));
+        for Flag(name, _, _) in flags {
+            let spelled = doc.match_indices(name).any(|(i, _)| {
+                !doc[i + name.len()..].starts_with(|c: char| c.is_alphanumeric() || c == '-')
+            });
+            assert!(spelled, "docs/tooling.md never spells {name}");
+        }
+    }
 
     fn table(entries: &[(&str, f64)]) -> Vec<(String, f64)> {
         entries.iter().map(|(n, m)| (n.to_string(), *m)).collect()

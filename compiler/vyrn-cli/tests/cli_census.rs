@@ -17,8 +17,8 @@ enum Kind {
     ///
     /// The payload names the command, so this kind tiles a second time. Commands
     /// that share a path share an entry (`"serve, dev"`). `"(global)"` is the
-    /// flags read before the subcommand; `"(dispatch)"` is `real_main`, which
-    /// holds the `check`, `run` and `emit-*` arms inline.
+    /// flags read before the subcommand; `"(dispatch)"` is `real_main`, the
+    /// command table and the argument parser.
     Cmd(&'static str),
     /// A rule the CLI states that the frontend, the lowering or the emitter also
     /// states. The deletion candidates.
@@ -83,7 +83,9 @@ fn main_sections() -> Vec<Section> {
         sec("enum NativeTarget", Cmd("build, bench")),
         sec("fn main", Shared),
         sec("fn real_main", Cmd("(dispatch)")),
+        sec("fn check_cmd", Cmd("check")),
         sec("fn failed", Shared),
+        sec("fn emit_wat", Cmd("emit-wat, emit-lowered")),
         sec("fn emit_gen", Cmd("emit-gen")),
         sec("fn generated", Shared),
         sec("fn scaffold", Cmd("new")),
@@ -131,7 +133,7 @@ fn main_sections() -> Vec<Section> {
         sec("fn pump_stream", Shared),
         sec("enum WsIn", Shared),
         sec("fn write_response", Shared),
-        sec("fn run_wasm", Cmd("run")),
+        sec("fn run_cmd", Cmd("run")),
         sec("struct Body", Cmd("test, bench")),
         sec("fn build", Cmd("build")),
         sec("fn build_wasm2c", Cmd("build")),
