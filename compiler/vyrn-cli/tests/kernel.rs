@@ -432,8 +432,7 @@ fn a_moved_root_line_re_judges_no_imported_body() {
 /// no body: no check reads a doc, so neither fingerprint holds one.
 #[test]
 fn a_root_protocol_doc_edit_re_types_and_re_judges_no_body() {
-    vyrn_frontend::movecheck::reuse_judgments();
-    vyrn_frontend::checker::record_reads();
+    let session = Session::new(true);
     let dir = std::env::temp_dir().join(format!("vyrn-judgdoc-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("scratch");
@@ -455,10 +454,10 @@ fn a_root_protocol_doc_edit_re_types_and_re_judges_no_body() {
         )
     };
     let run = || {
-        let _ = vyrn_frontend::checker::recheck::tally();
+        let _ = session.recheck_tally();
         vyrn_frontend::movecheck::reset_judgment_tally();
-        load(&dir.join("main.vyrn")).expect("the program loads");
-        let (typed, _) = vyrn_frontend::checker::recheck::tally();
+        load(&dir.join("main.vyrn"), Some(&session)).expect("the program loads");
+        let (typed, _) = session.recheck_tally();
         let (judged, served) = vyrn_frontend::movecheck::judgment_tally();
         (typed, judged, served)
     };
