@@ -11,7 +11,7 @@ dev	222	18
 deps	210	5
 update	195	7
 fix	194	1
-test, bench	132	2
+test, bench	133	2
 build, bench	127	0
 serve	87	8
 add	70	6

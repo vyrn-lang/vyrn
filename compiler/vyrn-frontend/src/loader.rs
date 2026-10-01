@@ -126,123 +126,18 @@ pub struct DiskResolver;
 
 impl ModuleResolver for DiskResolver {
     fn read(&self, resolved: &str) -> Result<String, String> {
-        on_disk(
-            |d| &mut d.reads,
-            resolved,
-            || std::fs::read_to_string(resolved).map_err(|e| e.to_string()),
-        )
+        std::fs::read_to_string(resolved).map_err(|e| e.to_string())
     }
     fn list_kinds(&self, resolved: &str) -> Result<Vec<String>, String> {
-        on_disk(
-            |d| &mut d.lists,
-            resolved,
-            || {
-                let mut names = read_dir_names(resolved)?;
-                names.sort();
-                Ok(names)
-            },
-        )
+        let mut names = read_dir_names(resolved)?;
+        names.sort();
+        Ok(names)
     }
     fn gen_cache_get(&self, key: &str) -> Option<String> {
         crate::manifest::gen_cache_get(key)
     }
     fn gen_cache_put(&self, key: &str, value: &str) {
         crate::manifest::gen_cache_put(key, value)
-    }
-}
-
-thread_local! {
-    /// What this thread read under the directories a host watches; see
-    /// [`watch_disk`]. `None` reads the disk on every call.
-    static DISK: std::cell::RefCell<Option<Disk>> = const { std::cell::RefCell::new(None) };
-}
-
-/// The disk as this thread last saw it under `roots`: each answer stands until
-/// [`disk_changed`] names its path. Keyed by the path as the caller spelled it,
-/// because an error names that spelling.
-#[derive(Default)]
-pub(crate) struct Disk {
-    /// The watched directories, each as [`crate::origin::OriginMaps::norm_path_key`]
-    /// spells it, ending in `/`.
-    roots: Vec<String>,
-    reads: HashMap<String, Result<String, String>>,
-    lists: HashMap<String, Result<Vec<String>, String>>,
-    pub(crate) reals: HashMap<String, Option<String>>,
-}
-
-/// Keeps what [`DiskResolver`] reads and lists, and what
-/// [`crate::manifest::real_path`] answers, under `roots`, for every later load
-/// on this thread, until [`disk_changed`] names the path.
-///
-/// For a host that is told of every change under `roots`: the editor, when its
-/// client sends `workspace/didChangeWatchedFiles`. A host without such events
-/// never calls it, and every load reads the disk again. A path outside `roots`
-/// is always read again.
-pub fn watch_disk(roots: &[String]) {
-    let roots = (roots.iter()).map(|r| format!("{}/", key_of(r))).collect();
-    DISK.with(|d| {
-        *d.borrow_mut() = Some(Disk {
-            roots,
-            ..Disk::default()
-        })
-    });
-}
-
-/// Forgets what [`watch_disk`] kept for `path`, for everything under it (a
-/// removed directory), and its directory's listing (a created or removed
-/// entry).
-pub fn disk_changed(path: &str) {
-    let path = key_of(path);
-    let parent = path.rsplit_once('/').map_or("", |(p, _)| p);
-    let stale = |k: &String| {
-        let k = key_of(k);
-        k == path
-            || k.strip_prefix(path.as_str())
-                .is_some_and(|r| r.starts_with('/'))
-    };
-    DISK.with(|d| {
-        if let Some(d) = d.borrow_mut().as_mut() {
-            d.reads.retain(|k, _| !stale(k));
-            d.reals.retain(|k, _| !stale(k));
-            d.lists.retain(|k, _| !stale(k) && key_of(k) != parent);
-        }
-    });
-}
-
-/// `path` as a watched root or an event compares it: slash-separated, without a
-/// trailing slash, and lower-case where the filesystem ignores case.
-fn key_of(path: &str) -> String {
-    crate::origin::OriginMaps::norm_path_key(path.trim_end_matches(['/', '\\']))
-}
-
-/// What the disk answers for `path`: the answer [`watch_disk`] kept, or `read`'s,
-/// kept when `path` lies under a watched root.
-pub(crate) fn on_disk<T: Clone>(
-    table: fn(&mut Disk) -> &mut HashMap<String, T>,
-    path: &str,
-    read: impl FnOnce() -> T,
-) -> T {
-    let watched = DISK.with(|d| {
-        let mut d = d.borrow_mut();
-        let d = d.as_mut()?;
-        let key = key_of(path);
-        if !d.roots.iter().any(|r| key.starts_with(r.as_str())) {
-            return None;
-        }
-        Some(table(d).get(path).cloned())
-    });
-    match watched {
-        None => read(),
-        Some(Some(kept)) => kept,
-        Some(None) => {
-            let answer = read();
-            DISK.with(|d| {
-                if let Some(d) = d.borrow_mut().as_mut() {
-                    table(d).insert(path.to_string(), answer.clone());
-                }
-            });
-            answer
-        }
     }
 }
 
@@ -628,10 +523,12 @@ pub struct LoadOptions {
     /// The artifacts the manifest declares, or `None`. The floor
     /// ([`crate::floor`]) runs only when the root is one artifact's entry point.
     pub artifacts: Option<crate::artifacts::ArtifactMap>,
-    /// The projection expansions of this compile, stamped on every program
-    /// the load links, a generator's included. A compile passes
-    /// [`crate::project::Expansions::shared`].
+    /// The projection expansions of this compile, stamped on the program the
+    /// load links. A compile passes [`crate::project::Expansions::shared`].
     pub expansions: std::sync::Arc<crate::project::Expansions>,
+    /// The host's session, stamped on every program the load links, a
+    /// generator's included; `None` keeps nothing between loads.
+    pub session: Option<std::sync::Arc<crate::session::Session>>,
     /// The generator runs that enclose this load. A host's load is outermost:
     /// the default.
     pub nest: Nest,
@@ -660,8 +557,8 @@ fn audience_objection(
 ) -> Option<Diagnostic> {
     use crate::audience;
     let map = opts.audience.as_ref()?;
-    let from = audience::audience_of(importer, map);
-    let to = audience::audience_of(imported, map);
+    let from = audience::audience_of(importer, map, opts.session.as_deref());
+    let to = audience::audience_of(imported, map, opts.session.as_deref());
     if !audience::widens(from.audience, to.audience) {
         return None;
     }
@@ -704,7 +601,10 @@ fn runtime_fence(
     let mut real = |p: &str| {
         real_paths
             .entry(p.to_string())
-            .or_insert_with(|| crate::manifest::real_path(p))
+            .or_insert_with(|| match &opts.session {
+                Some(s) => s.real_path(p),
+                None => crate::manifest::real_path(p),
+            })
             .clone()
     };
     let mut is = |key: &str, spec: &str| {
@@ -1102,6 +1002,7 @@ fn load_with_origins_inner(
             let graph = graph_of(&modules);
             let linked = link(modules, &root_key).map(|mut p| {
                 p.expansions = opts.expansions.clone();
+                p.session = crate::session::SessionRef(opts.session.clone());
                 p
             });
             (linked, origins, warnings, graph, pending)
@@ -1363,6 +1264,7 @@ fn load_modules(
                     module_hashes: BTreeMap::new(),
                     expansions: Default::default(),
                     spellings: Default::default(),
+                    session: Default::default(),
                 },
                 import_targets: Vec::new(),
                 gen_source: None,
@@ -1869,7 +1771,7 @@ fn run_generator(
         let remembered = GEN_ENTRIES.with(|m| m.borrow().get(&sources_hash).cloned());
         let hit = remembered.filter(|e| valid(&e.0, read)).or_else(|| {
             let cached = resolver.gen_cache_get(&sources_hash)?;
-            let entry = read_cache_entry(&sources_hash, &cached)?;
+            let entry = read_cache_entry(&sources_hash, &cached, opts.session.as_deref())?;
             valid(&entry.0, read).then(|| Rc::new(entry))
         });
         if let Some(entry) = hit {
@@ -1897,6 +1799,11 @@ fn run_generator(
     // deeper than this load.
     let mut inner = opts.clone();
     inner.nest.depth += 1;
+    // A generator program's node ids repeat the importer's, so its sites
+    // expand in a table of their own.
+    if opts.expansions.is_shared() {
+        inner.expansions = crate::project::Expansions::shared();
+    }
     let (loaded, _, _, gen_graph, _) =
         load_with_origins(&gen_source, &gen_mod_key, &inner, resolver, engine);
     let mut gen_program = loaded?;
@@ -2138,10 +2045,16 @@ fn render_cache_entry(key: &str, inputs: &[(String, String)], output: &str) -> S
 /// user can still read the key.
 ///
 /// A superseded format is a silent miss. Anything else that fails, including a
-/// `v3` entry with a bad tag, is a miss with a warning.
-fn read_cache_entry(key: &str, text: &str) -> Option<CacheEntry> {
+/// `v3` entry with a bad tag, is a miss with a warning, once per key in a
+/// `session`.
+fn read_cache_entry(
+    key: &str,
+    text: &str,
+    session: Option<&crate::session::Session>,
+) -> Option<CacheEntry> {
+    let warn = || warn_foreign_entry(key, session);
     let Some(first_nl) = text.find('\n') else {
-        warn_foreign_entry(key);
+        warn();
         return None;
     };
     let header = &text[..first_nl];
@@ -2151,7 +2064,7 @@ fn read_cache_entry(key: &str, text: &str) -> Option<CacheEntry> {
     // list satisfies `all` vacuously.
     let count = header.rsplit(' ').next().unwrap_or("");
     if count.parse::<usize>() == Ok(0) {
-        warn_foreign_entry(key);
+        warn();
         return None;
     }
     let Some(rest) = header
@@ -2163,22 +2076,22 @@ fn read_cache_entry(key: &str, text: &str) -> Option<CacheEntry> {
             .iter()
             .any(|t| header.starts_with(&format!("{t} ")))
         {
-            warn_foreign_entry(key);
+            warn();
         }
         return None;
     };
     let Some((tag, count)) = rest.split_once(' ') else {
-        warn_foreign_entry(key);
+        warn();
         return None;
     };
     let Ok(n) = count.parse::<usize>() else {
-        warn_foreign_entry(key);
+        warn();
         return None;
     };
     // `count` is the tail of the header line, so the body starts where it does.
     let body = &text[first_nl - count.len()..];
     if entry_tag(key, body) != tag {
-        warn_foreign_entry(key);
+        warn();
         return None;
     }
     let mut idx = first_nl + 1;
@@ -2194,16 +2107,10 @@ fn read_cache_entry(key: &str, text: &str) -> Option<CacheEntry> {
     Some((inputs, text[idx..].to_string()))
 }
 
-thread_local! {
-    /// Keys already reported by [`warn_foreign_entry`]. The LSP validates the
-    /// same entry on every keystroke, so each key warns once.
-    static WARNED_ENTRIES: std::cell::RefCell<HashSet<String>> =
-        std::cell::RefCell::new(HashSet::new());
-}
-
-fn warn_foreign_entry(key: &str) {
-    let first = WARNED_ENTRIES.with(|w| w.borrow_mut().insert(key.to_string()));
-    if !first {
+/// Warns of a foreign entry. The LSP validates the same entry on every
+/// keystroke, so a session warns once per key.
+fn warn_foreign_entry(key: &str, session: Option<&crate::session::Session>) {
+    if session.is_some_and(|s| !s.first_warning(key)) {
         return;
     }
     eprintln!("warning: ignoring generator cache entry `{key}`: this compiler did not write it");
@@ -2566,21 +2473,6 @@ fn resolve_aliases(
         for n in names {
             foreign_renames.insert((key.clone(), n.clone()), format!("{prefix}{n}"));
         }
-        // An impl method follows its type's rename: the parser flattens
-        // `impl P for T` to `P__T__m`, and the checker mangles the renamed key,
-        // so the name is `Copy__json$Json__copy`, not `json$Copy__Json__copy`.
-        // Overwrites the entry the loop above wrote, so it runs after it.
-        for im in &m.program.impls {
-            let Some(k) = crate::types::type_key(&im.ty) else {
-                continue;
-            };
-            for me in &im.methods {
-                let old = crate::types::impl_method_name(&im.protocol, &k, &me.name);
-                let new =
-                    crate::types::impl_method_name(&im.protocol, &format!("{prefix}{k}"), &me.name);
-                foreign_renames.insert((key.clone(), old), new);
-            }
-        }
     }
 
     // Protocol method names across every module. A method call dispatches to an
@@ -2789,6 +2681,37 @@ fn resolve_aliases(
                     }
                 }
             }
+        }
+    }
+
+    // An impl method's linked name is the flattening of its protocol and type
+    // key as its module links them, because the checker mangles the names it
+    // sees: `Copy$json$Json$copy`, not `json$Copy$Json$copy`. So an impl method
+    // follows every rename of its protocol or type, and never renames apart on
+    // its own. Overwrites what the passes above wrote, so it runs after them.
+    let mut flattened = Vec::new();
+    for m in modules.iter() {
+        let linked = |n: &str| match rewrites.get(&m.key).and_then(|r| r.get(n)) {
+            Some(r) => r.clone(),
+            None => resolved_name(&foreign_renames, &m.key, n),
+        };
+        for im in &m.program.impls {
+            let Some(k) = crate::types::type_key(&im.ty) else {
+                continue;
+            };
+            let (p, k_linked) = (linked(&im.protocol), linked(&k));
+            for me in &im.methods {
+                let old = crate::types::impl_method_name(&im.protocol, &k, &me.name);
+                let new = crate::types::impl_method_name(&p, &k_linked, &me.name);
+                flattened.push(((m.key.clone(), old), new));
+            }
+        }
+    }
+    for (key, new) in flattened {
+        if key.1 == new {
+            foreign_renames.remove(&key);
+        } else {
+            foreign_renames.insert(key, new);
         }
     }
 
@@ -3415,12 +3338,23 @@ fn link(mut modules: Vec<Module>, root_key: &str) -> Result<Program, Vec<Diagnos
 
     // Every declaration form joins one top-level namespace: a contract name is
     // what `contractOf(Name)` resolves, and a module-state binding
-    // shares no name with another declaration. Flattened impl methods
-    // (`P__Key__m`) cannot collide with a user identifier; they register so
-    // duplicate impls across modules collide here.
+    // shares no name with another declaration. A flattened impl method
+    // (`types::impl_method_name`) stays out: no user identifier spells it, and
+    // the checker refuses two impls of one protocol for one type.
+    let impl_methods: HashSet<String> = (modules.iter())
+        .flat_map(|m| &m.program.impls)
+        .filter_map(|im| Some((im, crate::types::type_key(&im.ty)?)))
+        .flat_map(|(im, k)| {
+            (im.methods.iter())
+                .map(move |me| crate::types::impl_method_name(&im.protocol, &k, &me.name))
+        })
+        .collect();
     for m in &modules {
         for d in decls(&m.program) {
-            if d.injected || (d.kind == DeclKind::Fn && shared_externs.contains(d.name)) {
+            if d.injected
+                || impl_methods.contains(d.name)
+                || (d.kind == DeclKind::Fn && shared_externs.contains(d.name))
+            {
                 continue;
             }
             register(d.name, &m.key, d.exported, &mut clashes);
@@ -3722,17 +3656,18 @@ fn link(mut modules: Vec<Module>, root_key: &str) -> Result<Program, Vec<Diagnos
     // checker cannot compute it, because `imports` are consumed here.
     program.surface_shadows = surface_shadows;
     // One declaration per shared-extern name: the copies are identical, and a
-    // second wasm import is waste. The root's copy, or the first imported, wins.
-    let mut seen_externs: HashSet<String> = program
-        .functions
-        .iter()
-        .filter(|f| f.is_extern && !f.exported)
+    // second wasm import is waste. One per impl method name too, as in one
+    // module: the checker refuses the second impl. The root's copy, or the
+    // first imported, wins.
+    let once = |f: &Function| (f.is_extern && !f.exported) || impl_methods.contains(&f.name);
+    let mut seen: HashSet<String> = (program.functions.iter())
+        .filter(|f| once(f))
         .map(|f| f.name.clone())
         .collect();
     program.functions.extend(
         extra_fns
             .into_iter()
-            .filter(|f| !(f.is_extern && !f.exported && !seen_externs.insert(f.name.clone()))),
+            .filter(|f| !(once(f) && !seen.insert(f.name.clone()))),
     );
     program.protocols.extend(extra_protocols);
     program.contracts.extend(extra_contracts);
@@ -4465,13 +4400,13 @@ mod tests {
         let key = "k";
         let inputs = [("data/a.txt".to_string(), "deadbeef".to_string())];
         let v3 = render_cache_entry(key, &inputs, "export fn n() -> Int64 { return 1 }");
-        assert!(read_cache_entry(key, &v3).is_some());
+        assert!(read_cache_entry(key, &v3, None).is_some());
         for older in [
             "v2 1\ndata/a.txt\tdeadbeef\nx",
             "v1\ndata/a.txt\tdeadbeef\nx",
         ] {
             assert!(
-                read_cache_entry(key, older).is_none(),
+                read_cache_entry(key, older, None).is_none(),
                 "an entry in an older format must not parse: {older:?}"
             );
         }
@@ -4485,7 +4420,10 @@ mod tests {
         let inputs = [("data/a.txt".to_string(), "deadbeef".to_string())];
         let output = "export fn n() -> Int64 { return 1 }";
         let honest = render_cache_entry(key, &inputs, output);
-        assert!(read_cache_entry(key, &honest).is_some(), "the control");
+        assert!(
+            read_cache_entry(key, &honest, None).is_some(),
+            "the control"
+        );
 
         // An entry declaring zero inputs satisfies `all` vacuously.
         let vacuous = format!(
@@ -4496,33 +4434,36 @@ mod tests {
             }
         );
         assert!(
-            read_cache_entry(key, &vacuous).is_none(),
+            read_cache_entry(key, &vacuous, None).is_none(),
             "an entry recording no inputs describes no generation"
         );
 
         // The output swapped under an otherwise honest record.
         let swapped = honest.replace("return 1", "return 999");
         assert!(
-            read_cache_entry(key, &swapped).is_none(),
+            read_cache_entry(key, &swapped, None).is_none(),
             "the tag covers the generated source"
         );
 
         // The recorded inputs rewritten to files that happen to match.
         let relabelled = honest.replace("data/a.txt", "data/z.txt");
         assert!(
-            read_cache_entry(key, &relabelled).is_none(),
+            read_cache_entry(key, &relabelled, None).is_none(),
             "the tag covers the recorded inputs"
         );
 
         // A valid entry moved to another lookup key.
         assert!(
-            read_cache_entry("other-key", &honest).is_none(),
+            read_cache_entry("other-key", &honest, None).is_none(),
             "the tag covers the lookup key"
         );
 
         // A file in no format at all.
         for junk in ["", "\n", "v3\n", "v3 x y\n", "not an entry at all\n"] {
-            assert!(read_cache_entry(key, junk).is_none(), "junk: {junk:?}");
+            assert!(
+                read_cache_entry(key, junk, None).is_none(),
+                "junk: {junk:?}"
+            );
         }
     }
 
@@ -4533,7 +4474,7 @@ mod tests {
         let key = "k";
         let body = format!("{}\ndata/a.txt\tdeadbeef\nout", u64::MAX);
         let entry = format!("{CACHE_ENTRY_TAG} {} {body}", entry_tag(key, &body));
-        assert!(read_cache_entry(key, &entry).is_none());
+        assert!(read_cache_entry(key, &entry, None).is_none());
     }
 
     #[test]

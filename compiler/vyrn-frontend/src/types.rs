@@ -98,19 +98,30 @@ pub fn type_key(ty: &Type) -> Option<String> {
     }
 }
 
-/// The flattened name of an `impl` method, e.g. `Show__Int64__show`.
+/// The flattened name of an `impl` method, e.g. `Show$Int64$show`. `$` is no
+/// identifier character, so no source spells one. A type key may hold `$`
+/// (`Copy$json$Json$copy`); a protocol or method name never does, so the first
+/// and the last `$` delimit the key.
 pub fn impl_method_name(protocol: &str, type_key: &str, method: &str) -> String {
-    format!("{protocol}__{type_key}__{method}")
+    debug_assert!(
+        !protocol.contains('$') && !method.contains('$'),
+        "`impl {protocol}` method `{method}` holds the flattening separator"
+    );
+    format!("{protocol}${type_key}${method}")
 }
 
-/// The protocol member an [`impl_method_name`] names, or `None` for a name no
-/// impl flattened.
+/// The type key of the `protocol` method `method` that `name` flattens, or
+/// `None` for any other name.
+pub fn impl_method_key<'a>(name: &'a str, protocol: &str, method: &str) -> Option<&'a str> {
+    let rest = name.strip_prefix(protocol)?.strip_prefix('$')?;
+    rest.strip_suffix(method)?.strip_suffix('$')
+}
+
+/// The protocol member an [`impl_method_name`] names, or `None` for a name
+/// with fewer than two `$`. A derived name (`derive$g$f`) reads as `f`.
 pub fn impl_method_member(name: &str) -> Option<&str> {
-    let mut parts = name.splitn(3, "__");
-    match (parts.next(), parts.next(), parts.next()) {
-        (Some(p), Some(t), Some(m)) if !p.is_empty() && !t.is_empty() && !m.is_empty() => Some(m),
-        _ => None,
-    }
+    let (_, rest) = name.split_once('$')?;
+    rest.rsplit_once('$').map(|(_, m)| m)
 }
 
 /// The protocol `?` resolves through for an operand that is neither `Option`
@@ -1195,6 +1206,21 @@ pub fn substitute(ty: &Type, subst: &HashMap<String, Type>) -> Type {
         Type::Lazy(inner) => Type::Lazy(Box::new(substitute(inner, subst))),
         other => other.clone(),
     }
+}
+
+/// `ty` with every renamed-apart parameter (`T'n`) back to its written name
+/// ([`crate::ast::written_param`]), or `None` when it holds none.
+pub fn written_params(ty: &Type) -> Option<Type> {
+    let mut back: HashMap<String, Type> = HashMap::new();
+    walk_type(ty, &mut |t| {
+        if let Type::Param(n) = t {
+            let w = crate::ast::written_param(n);
+            if w.len() < n.len() {
+                back.insert(n.clone(), Type::Param(w.to_string()));
+            }
+        }
+    });
+    (!back.is_empty()).then(|| substitute(ty, &back))
 }
 
 /// The type declarations a helper reads by name. A map reads and records

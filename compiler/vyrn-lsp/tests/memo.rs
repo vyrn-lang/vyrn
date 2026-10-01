@@ -3,8 +3,10 @@
 //! equal those of a fresh server that analyzes the same files once.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use vyrn_frontend::loader::{DiskResolver, LoadOptions};
+use vyrn_frontend::session::Session;
 
 fn scratch(tag: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("vyrn-memo-{tag}-{}", std::process::id()));
@@ -13,13 +15,14 @@ fn scratch(tag: &str) -> PathBuf {
     dir
 }
 
-/// The root's diagnostics and memory notes, as the server analyzes it, on the
-/// calling thread and so under that thread's memo.
-fn analyze(root: &Path) -> String {
+/// The root's diagnostics and memory notes, as the server analyzes it under
+/// `session`.
+fn analyze(root: &Path, session: &Arc<Session>) -> String {
     let path = root.to_string_lossy().replace('\\', "/");
     let text = std::fs::read_to_string(root).expect("read the root");
     let opts = LoadOptions {
         std_root: vyrn_frontend::manifest::std_root(),
+        session: Some(session.clone()),
         ..Default::default()
     };
     let a = vyrn_frontend::analyze_judged(
@@ -31,14 +34,11 @@ fn analyze(root: &Path) -> String {
     format!("{:#?}\n{:#?}\n{:#?}", a.diagnostics, a.remapped, a.memory)
 }
 
-/// Runs `f` on a thread with the server's stack and an armed memo of its own.
-fn server<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
+/// Runs `f` on a thread with the server's stack and a session of its own.
+fn server<T: Send + 'static>(f: impl FnOnce(&Arc<Session>) -> T + Send + 'static) -> T {
     std::thread::Builder::new()
         .stack_size(64 * 1024 * 1024)
-        .spawn(move || {
-            vyrn_frontend::movecheck::reuse_judgments();
-            f()
-        })
+        .spawn(move || f(&Session::new(true)))
         .expect("spawn")
         .join()
         .expect("the analysis panicked")
@@ -61,16 +61,16 @@ fn drift(dir: &Path, turns: &str, steps: &[&[(&str, &str)]]) -> Option<String> {
                 .collect()
         })
         .collect();
-    server(move || {
+    server(move |session| {
         let root = dir.join("main.vyrn");
         let mut turned = false;
         for (i, step) in steps.iter().enumerate() {
             for (file, text) in step {
                 std::fs::write(dir.join(file), text).expect("write");
             }
-            let editor = analyze(&root);
+            let editor = analyze(&root, session);
             let r = root.clone();
-            let fresh = server(move || analyze(&r));
+            let fresh = server(move |fresh| analyze(&r, fresh));
             turned |= fresh.contains(&turns);
             if editor != fresh {
                 return Some(format!(
@@ -269,6 +269,31 @@ fn a_moved_root_line_keeps_an_imported_instances_verdict() {
             &[("b.vyrn", IGNORES), ("main.vyrn", &root(""))],
             &[("main.vyrn", &moved)],
             &[("main.vyrn", &twice)],
+        ],
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(got.is_none(), "{}", got.unwrap_or_default());
+}
+
+/// A doc comment edited on a root protocol and its member keeps
+/// `ignore<Txn>`'s verdict served: no fingerprint holds a doc.
+#[test]
+fn a_root_protocol_doc_edit_keeps_an_imported_instances_verdict() {
+    let dir = scratch("rootdoc");
+    let root = |doc: &str| {
+        format!(
+            "{}/// {doc}\nprotocol Sized {{\n  /// {doc}\n  fn size(self) -> Int64\n}}\n",
+            txn(true)
+        )
+    };
+    let (first, second) = (root("The size."), root("The size, in words."));
+    let got = drift(
+        &dir,
+        "is never disposed",
+        &[
+            &[("b.vyrn", IGNORES), ("main.vyrn", &root("A size."))],
+            &[("main.vyrn", &first)],
+            &[("main.vyrn", &second)],
         ],
     );
     let _ = std::fs::remove_dir_all(&dir);

@@ -1,0 +1,10 @@
+import { monotonic } from "std/time"
+
+gen fn g() -> Int64 {
+    return monotonic()
+}
+
+fn main() -> Int64 {
+    print(g())
+    return 0
+}

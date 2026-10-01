@@ -1,6 +1,6 @@
 ; vyrn lowered v2 -- examples/releaseacrossexit.vyrn
 
-fn Owned__Ring__release(self)
+fn Owned$Ring$release(self)
   {
     let @borrow = read self.label
     let @t1! = prim add(lit "release ", @borrow)

@@ -1,0 +1,30 @@
+// A dot call is taken by a local of `fn` type: `5.inc()` calls the local
+// `inc`, not `fn inc`, and a dot call skips the local `count`, which is no
+// function. `step` calls the generator's name through a local, so it still
+// has a run-time lowering.
+
+fn inc(x: Int64) -> Int64 {
+    return x + 1
+}
+
+fn count(xs: Array<Int64>) -> Int64 {
+    return xs.length
+}
+
+gen fn shout(t: TypeArg) -> String {
+    return "x"
+}
+
+fn step(x: Int64) -> Int64 {
+    let shout: fn(Int64) -> Int64 = y -> y * 10
+    return x.shout()
+}
+
+fn main() -> Int64 {
+    let inc: fn(Int64) -> Int64 = y -> y + 100
+    let xs: Array<Int64> = [1, 2]
+    let count = xs.count()
+    let ys: Array<Int64> = [1, 2, 3]
+    print("\{5.inc()} \{ys.count() + count} \{step(4)}")
+    return 0
+}

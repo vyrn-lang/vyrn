@@ -31,6 +31,7 @@ use vyrn_frontend::ast::{
 };
 use vyrn_frontend::checker;
 use vyrn_frontend::own::DropKind;
+use vyrn_frontend::session::locked;
 use vyrn_frontend::types::{
     expanded_size, mentions_param, substitute, type_depth, MONO_DEPTH_LIMIT, MONO_SIZE_LIMIT,
 };
@@ -487,10 +488,8 @@ impl<'a> FactsVisit<'a> for Walk<'a, '_> {
         match s {
             // The writing half of a projection: `a[i] = v` on a receiver with
             // a user `place atSet`, as the checker built and shared it.
-            Stmt::IndexSet {
-                name, index, value, ..
-            } => {
-                if let Some(blk) = self.expansions.stored(name, index, value) {
+            Stmt::IndexSet { index, .. } => {
+                if let Some(blk) = self.expansions.stored(index) {
                     facts_block(blk, &mut Default::default(), self);
                 }
             }
@@ -533,7 +532,7 @@ impl<'a> FactsVisit<'a> for Walk<'a, '_> {
                 let solved: HashMap<String, Type> = at.iter().cloned().collect();
                 // A record literal solves parameters too, and it is not a call:
                 // only a call, or a `?` on a `Fallible` operand, which the
-                // checker types as a call of `Fallible__Key__success`, adds an
+                // checker types as a call of `Fallible$Key$success`, adds an
                 // instance to the worklist.
                 if matches!(e, Expr::Call { .. } | Expr::Try { .. }) {
                     self.calls.push((callee.clone(), solved.clone()));
@@ -713,39 +712,37 @@ pub(crate) fn walked<'i, 'a>(
 /// next keystroke finds its walk.
 const WALK_STALE: u64 = 2;
 
-thread_local! {
-    static WALKS: std::cell::RefCell<(u64, HashMap<(u64, Vec<Type>), Kept>)> =
-        Default::default();
-}
-
-/// The calls one walk found, and the lowering that last read or wrote them.
-type Kept = (Vec<(String, HashMap<String, Type>)>, u64);
-
-/// The walks a lowering reuses, keyed by the serial of the recheck entry that
-/// holds the body's record ([`checker::Recorded::entries`]) and the type
-/// arguments. Besides the record and the substitution, a walk reads `impls`
+/// The walks a lowering reuses, out of the program's session, keyed by the
+/// serial of the recheck entry that holds the body's record
+/// ([`checker::Recorded::entries`]) and the type arguments. Besides the record and the substitution, a walk reads `impls`
 /// and the expansions. An entry answers only under the recheck world, which
 /// holds every `impl`. A body whose typing expanded a site names a node of
 /// another unit, so no entry holds it.
-struct Walks {
+struct Walks<'a> {
     now: u64,
-    kept: HashMap<(u64, Vec<Type>), Kept>,
+    kept: HashMap<(u64, Vec<Type>), (Vec<(String, HashMap<String, Type>)>, u64)>,
+    /// The session's slot, which holds no walk while this lowering has them.
+    slot: &'a std::sync::Mutex<vyrn_frontend::session::Walks>,
     /// Each function body's serial in this check.
     serials: HashMap<FnId, u64>,
 }
 
-impl Walks {
-    fn open(recorded: &checker::Recorded) -> Walks {
+impl<'a> Walks<'a> {
+    fn open(
+        recorded: &checker::Recorded,
+        slot: &'a std::sync::Mutex<vyrn_frontend::session::Walks>,
+    ) -> Walks<'a> {
         let serials = (recorded.entries.iter())
             .filter_map(|(body, serial)| match body {
                 SourceBody::Fn(i) => Some((FnId::nth(*i as usize), *serial)),
                 _ => None,
             })
             .collect();
-        let (now, kept) = WALKS.with(|w| std::mem::take(&mut *w.borrow_mut()));
+        let (now, kept) = std::mem::take(&mut *locked(slot));
         Walks {
             now: now + 1,
             kept,
+            slot,
             serials,
         }
     }
@@ -770,11 +767,11 @@ impl Walks {
     }
 
     /// Drops every walk unused for [`WALK_STALE`] lowerings and hands the rest
-    /// to the next lowering on this thread.
+    /// to the session's next lowering.
     fn close(mut self) {
         let now = self.now;
         self.kept.retain(|_, (_, used)| *used + WALK_STALE >= now);
-        WALKS.with(|w| *w.borrow_mut() = (now, self.kept));
+        *locked(self.slot) = (now, self.kept);
     }
 }
 
@@ -787,7 +784,9 @@ fn build<'a>(
     // Typing expanded every site a walk reads, so the lowering makes no
     // expansion tree, and its walks run on many threads.
     let _sealed = program.expansions.seal();
-    let mut walks = reuse.then(|| Walks::open(recorded));
+    let mut walks = (program.session.get())
+        .filter(|_| reuse)
+        .map(|s| Walks::open(recorded, &s.walks));
     let no_steps: Vec<Release> = Vec::new();
     let by_name = by_name(program);
     let decls = ownership.proto.types();
@@ -1117,24 +1116,18 @@ pub(crate) fn dispatched<'f>(
     out
 }
 
-/// Adds the `isSuccess` twin of every `Fallible__Key__success` call: `?` on a
+/// Adds the `isSuccess` twin of every `Fallible$Key$success` call: `?` on a
 /// `Fallible` emits both, and the checker records only `success`. Both are the
 /// same impl at the same instantiation.
 fn fallible_twins(
     calls: Vec<(String, HashMap<String, Type>)>,
 ) -> Vec<(String, HashMap<String, Type>)> {
+    let fallible = vyrn_frontend::types::FALLIBLE;
     let mut out = Vec::with_capacity(calls.len());
     for (callee, solved) in calls {
-        if let Some(key) = callee
-            .strip_prefix(&format!("{}__", vyrn_frontend::types::FALLIBLE))
-            .and_then(|rest| rest.strip_suffix("__success"))
-        {
+        if let Some(key) = vyrn_frontend::types::impl_method_key(&callee, fallible, "success") {
             out.push((
-                vyrn_frontend::types::impl_method_name(
-                    vyrn_frontend::types::FALLIBLE,
-                    key,
-                    "isSuccess",
-                ),
+                vyrn_frontend::types::impl_method_name(fallible, key, "isSuccess"),
                 solved.clone(),
             ));
         }

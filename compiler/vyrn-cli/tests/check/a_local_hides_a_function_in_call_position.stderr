@@ -1,0 +1,2 @@
+a_local_hides_a_function_in_call_position.vyrn:9:0: `f` is a local of type Int64, not a function
+  fix: rename the local to call the function `f`

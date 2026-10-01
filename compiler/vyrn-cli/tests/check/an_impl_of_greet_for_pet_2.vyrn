@@ -1,0 +1,12 @@
+import { Greet, Pet } from "./a_protocol_and_a_type_two_modules_implement.vyrn"
+
+impl Greet for Pet {
+    fn greet(self) -> String {
+        return "woof"
+    }
+}
+
+export fn dogSays() -> String {
+    let c = Pet { n: 1 }
+    return c.greet()
+}

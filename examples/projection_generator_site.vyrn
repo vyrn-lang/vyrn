@@ -1,0 +1,25 @@
+/// A projection site in a generator program and one in its importer, at the
+/// same node and line: each expands its own program's `pick`, so `probe`
+/// reads element 2 and this prints 37.
+import { mk } from "./lib/gen_projection_site"
+import { v } from mk("x")
+
+export type Q = { v: Array<Int64> }
+
+impl Index for Q {
+    fn at(read self, i: Int64) -> read Int64 {
+        return self.v[i]
+    }
+    fn pick(read self, i: Int64) -> read Int64 {
+        return self.v[2]
+    }
+}
+
+fn probe(q: Q) -> Int64 {
+    return q.pick(1)
+}
+
+fn main() -> Int64 {
+    print(probe(Q { v: [10, 20, 30] }) + v())
+    return 0
+}

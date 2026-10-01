@@ -1,34 +1,35 @@
-//! The editor's load reuse (`vyrn_frontend::loader`'s per-thread memos):
-//! after every edit of a sequence, the analysis of a thread that has loaded
-//! every earlier text gives what a fresh thread's analysis gives, byte for
+//! The editor's load reuse (the loader's memos and the session's disk):
+//! after every edit of a sequence, the analysis of a session that has loaded
+//! every earlier text gives what a fresh session's analysis gives, byte for
 //! byte.
 //!
-//! Both threads run the editor's pipeline (`analyze_judged` with
-//! `vyrn_lower::JUDGE` and the generation engine), arm the judgment memo and
-//! the read rows, and read the same open buffers.
+//! Both sessions run the editor's pipeline (`analyze_judged` with
+//! `vyrn_lower::JUDGE` and the generation engine) with the judgment memo, on
+//! threads of their own, and read the same open buffers.
 
 use std::collections::HashMap;
-use std::sync::mpsc;
+use std::sync::{mpsc, Arc};
 
 use vyrn_frontend::loader::{DiskResolver, LoadOptions, ModuleResolver};
 use vyrn_frontend::origin::OriginMaps;
+use vyrn_frontend::session::Session;
 use vyrn_frontend::Analysis;
 
 mod common;
 
-/// The disk, with some files' text replaced, as the editor's open buffers
-/// replace them, keyed by [`OriginMaps::norm_path_key`].
-struct Overlaid(HashMap<String, String>);
+/// The session's disk, with some files' text replaced, as the editor's open
+/// buffers replace them, keyed by [`OriginMaps::norm_path_key`].
+struct Overlaid(HashMap<String, String>, Arc<Session>);
 
 impl ModuleResolver for Overlaid {
     fn read(&self, resolved: &str) -> Result<String, String> {
         match self.0.get(&OriginMaps::norm_path_key(resolved)) {
             Some(text) => Ok(text.clone()),
-            None => DiskResolver.read(resolved),
+            None => self.1.read(resolved),
         }
     }
     fn list_kinds(&self, resolved: &str) -> Result<Vec<String>, String> {
-        DiskResolver.list_kinds(resolved)
+        self.1.list_kinds(resolved)
     }
     fn gen_cache_get(&self, key: &str) -> Option<String> {
         DiskResolver.gen_cache_get(key)
@@ -56,12 +57,13 @@ fn shown(a: &Analysis) -> String {
     )
 }
 
-fn analyze(path: &str, e: &Edit) -> Analysis {
+fn analyze(path: &str, e: &Edit, session: &Arc<Session>) -> Analysis {
     let opts = LoadOptions {
         std_root: vyrn_frontend::manifest::std_root(),
+        session: Some(session.clone()),
         ..Default::default()
     };
-    let resolver = Overlaid(e.overlays.clone());
+    let resolver = Overlaid(e.overlays.clone(), session.clone());
     let engine = vyrn_genwasm::engine();
     vyrn_frontend::analyze_judged(
         &e.root,
@@ -71,14 +73,8 @@ fn analyze(path: &str, e: &Edit) -> Analysis {
     )
 }
 
-/// Arms what the editor's analysis thread arms.
-fn arm() {
-    vyrn_frontend::movecheck::reuse_judgments();
-    vyrn_frontend::checker::record_reads();
-}
-
-/// Replays `edits` over the program at `path` on one editing thread, and
-/// compares each analysis with a fresh thread's.
+/// Replays `edits` over the program at `path` in one editing session, and
+/// compares each analysis with a fresh session's.
 fn replay(path: &str, edits: Vec<Edit>) {
     let edits = std::sync::Arc::new(edits);
     let (ask, asked) = mpsc::channel::<usize>();
@@ -87,9 +83,9 @@ fn replay(path: &str, edits: Vec<Edit>) {
     let editor = std::thread::Builder::new()
         .stack_size(64 * 1024 * 1024)
         .spawn(move || {
-            arm();
+            let session = Session::new(true);
             for i in asked {
-                let shown = shown(&analyze(&p, &es[i]));
+                let shown = shown(&analyze(&p, &es[i], &session));
                 tell.send(shown).expect("the test listens");
             }
         })
@@ -101,8 +97,7 @@ fn replay(path: &str, edits: Vec<Edit>) {
         let fresh = std::thread::Builder::new()
             .stack_size(64 * 1024 * 1024)
             .spawn(move || {
-                arm();
-                let a = analyze(&p, &es[i]);
+                let a = analyze(&p, &es[i], &Session::new(true));
                 (shown(&a), a.diagnostics)
             })
             .expect("spawn a fresh thread")
@@ -237,7 +232,7 @@ fn a_reused_load_analyzes_as_a_fresh_one() {
     replay(&path, edits);
 }
 
-/// One disk step: the files the test writes, the files the editing thread is
+/// One disk step: the files the test writes, the files the editing session is
 /// told changed, and whether its analysis must show the writes so far.
 struct DiskStep {
     what: &'static str,
@@ -260,10 +255,10 @@ fn step(
     }
 }
 
-/// Writes each step's files, tells an editing thread that loads the fixture's
-/// root the step's events, and compares its analysis with a fresh thread's.
+/// Writes each step's files, tells an editing session that loads the fixture's
+/// root the step's events, and compares its analysis with a fresh session's.
 /// A seen step equals the fresh analysis. An unseen step equals the editing
-/// thread's previous analysis and differs from the fresh one. Every write
+/// session's previous analysis and differs from the fresh one. Every write
 /// changes the fresh analysis, so an ignored event fails a seen step.
 fn replay_disk(tag: &str, watch: bool, steps: Vec<DiskStep>) {
     let dir = fixture(tag);
@@ -281,15 +276,15 @@ fn replay_disk(tag: &str, watch: bool, steps: Vec<DiskStep>) {
     let editor = std::thread::Builder::new()
         .stack_size(64 * 1024 * 1024)
         .spawn(move || {
-            arm();
+            let session = Session::new(true);
             if watch {
-                vyrn_frontend::loader::watch_disk(&[root]);
+                session.watch(&[root]);
             }
             for events in asked {
                 for changed in events {
-                    vyrn_frontend::loader::disk_changed(&changed);
+                    session.changed(&changed);
                 }
-                tell.send(shown(&analyze(&p, &e)))
+                tell.send(shown(&analyze(&p, &e, &session)))
                     .expect("the test listens");
             }
         })
@@ -305,10 +300,7 @@ fn replay_disk(tag: &str, watch: bool, steps: Vec<DiskStep>) {
         let (p, e) = (path.clone(), edit.clone());
         let fresh = std::thread::Builder::new()
             .stack_size(64 * 1024 * 1024)
-            .spawn(move || {
-                arm();
-                shown(&analyze(&p, &e))
-            })
+            .spawn(move || shown(&analyze(&p, &e, &Session::new(true))))
             .expect("spawn a fresh thread")
             .join()
             .expect("the fresh thread panicked");
@@ -337,7 +329,7 @@ fn replay_disk(tag: &str, watch: bool, steps: Vec<DiskStep>) {
     editor.join().expect("the editing thread panicked");
 }
 
-/// A thread that watches the fixture keeps what it read until an event names
+/// A session that watches the fixture keeps what it read until an event names
 /// the file: a generator's input, an imported module, and an entry created in
 /// a directory a generator lists.
 #[test]
@@ -383,7 +375,7 @@ fn a_watched_load_reads_a_file_again_only_after_its_event() {
     );
 }
 
-/// A thread that is sent no events, as for a client that cannot send them,
+/// A session that is sent no events, as for a client that cannot send them,
 /// reads every edit on disk.
 #[test]
 fn an_unwatched_load_reads_every_edit() {

@@ -485,8 +485,8 @@ pub struct ArgCaps {
     fns: Vec<Vec<Capability>>,
     /// By [`MethodId`]: protocol, then member.
     methods: Vec<Vec<Vec<Capability>>>,
-    /// The first function under each name, then the last protocol member,
-    /// as a call site's name resolves ([`ArgCaps::named`]).
+    /// The first function under each name ([`ArgCaps::named`]). A protocol
+    /// member is not here: the core names the member it resolved.
     names: HashMap<String, CapsOf>,
 }
 
@@ -507,15 +507,6 @@ impl ArgCaps {
             })
             .collect();
         let mut names = HashMap::new();
-        for (i, p) in program.protocols.iter().enumerate() {
-            for (j, m) in p.methods.iter().enumerate() {
-                let id = MethodId {
-                    protocol: i as u32,
-                    member: j as u32,
-                };
-                names.insert(m.name.clone(), CapsOf::Method(id));
-            }
-        }
         for (i, f) in program.functions.iter().enumerate().rev() {
             names.insert(f.name.clone(), CapsOf::Fn(FnId::nth(i)));
         }
@@ -527,7 +518,7 @@ impl ArgCaps {
     }
 
     /// Resolves a call site's name once: a function the program declares,
-    /// else a protocol member, else a seeded builtin.
+    /// else a seeded builtin.
     pub fn named(&self, name: &str) -> CapsOf {
         match self.names.get(name) {
             Some(c) => *c,

@@ -862,6 +862,12 @@ fn weighs(r: Rod) -> Int64 {
     }
     return k
 }
+// A bare call resolves to the nearest binding, so a local of another type
+// hides the function of its name.
+fn callsLocal() -> Int64 {
+    let addPair = 1
+    return addPair(1, 2)
+}
 fn main() -> Int64 {
     return 0
 }

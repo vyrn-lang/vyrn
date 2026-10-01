@@ -192,26 +192,36 @@ impl std::fmt::Debug for Id {
 }
 
 /// The `{:?}` text of `x` with the number of every `line` and `col` field
-/// outside a string literal left out. With [`Id`]'s text, two trees that
-/// differ only in where they sit print alike, so a fingerprint over it keys
-/// content. The AST has no `char` field, so a `"` always opens or closes a
-/// literal.
+/// and the value of every `doc` field outside a string literal left out.
+/// With [`Id`]'s text, two trees that differ only in where they sit or in
+/// their doc comments print alike, so a fingerprint over it keys what a check
+/// reads. The AST has no `char` field, so a `"` always opens or closes a
+/// literal; a `doc` value is `None` or `Some("..")`, so it ends at the next
+/// `,` or `}` outside one.
 pub fn unplaced(x: &impl std::fmt::Debug) -> String {
     let s = format!("{x:?}");
     let mut out = String::with_capacity(s.len());
-    let (mut quoted, mut escaped, mut position) = (false, false, false);
+    let (mut quoted, mut escaped, mut position, mut doc) = (false, false, false, false);
     for c in s.chars() {
         if position && c.is_ascii_digit() {
             continue;
         }
-        out.push(c);
         position = false;
+        let open = !quoted;
         match c {
             _ if escaped => escaped = false,
             '\\' if quoted => escaped = true,
             '"' => quoted = !quoted,
-            ' ' if !quoted => position = out.ends_with(" line: ") || out.ends_with(" col: "),
             _ => {}
+        }
+        if doc && !(open && matches!(c, ',' | '}')) {
+            continue;
+        }
+        doc = false;
+        out.push(c);
+        if c == ' ' && open {
+            position = out.ends_with(" line: ") || out.ends_with(" col: ");
+            doc = out.ends_with(" doc: ");
         }
     }
     out
@@ -270,6 +280,9 @@ pub struct Program {
     pub expansions: std::sync::Arc<crate::project::Expansions>,
     /// How a sentence spells a declaration the loader renamed apart.
     pub spellings: std::sync::Arc<Spellings>,
+    /// The session of the host that analyses this program. The loader stamps
+    /// the load's; a parsed program has none.
+    pub session: crate::session::SessionRef,
 }
 
 /// What a program is compiled as, beyond an ordinary build. A flag only
@@ -1062,6 +1075,13 @@ impl Type {
     }
 }
 
+/// The name a type parameter was written with. The checker renames a
+/// callee's parameters apart as `T'n` while it solves one call, and no
+/// identifier holds a `'`.
+pub fn written_param(n: &str) -> &str {
+    n.split_once('\'').map_or(n, |(w, _)| w)
+}
+
 impl std::fmt::Display for Type {
     /// Writes the type as Vyrn source spells it, by linked names. A sentence
     /// writes it through [`Speech::ty`] instead.
@@ -1097,7 +1117,7 @@ impl<'a> std::fmt::Display for Said<'a> {
             Type::Str => write!(f, "String"),
             Type::Unit => write!(f, "Unit"),
             Type::Named(n) => write!(f, "{}", name(n)),
-            Type::Param(n) => write!(f, "{n}"),
+            Type::Param(n) => write!(f, "{}", written_param(n)),
             Type::Record(fields) => {
                 write!(f, "{{ ")?;
                 for (i, fld) in fields.iter().enumerate() {

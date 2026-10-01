@@ -60,6 +60,10 @@ pub struct Fns {
     /// The first row under each name. A non-generic instance and its frame
     /// are the function's own row.
     ids: HashMap<String, FnId>,
+    /// The projections' rows ([`crate::Lowered::places`]). Two impls may
+    /// declare a projection of one name, so a projection's body carries its
+    /// row and no reader asks for one by name.
+    places: Vec<FnId>,
 }
 
 impl Fns {
@@ -74,12 +78,18 @@ impl Fns {
         for inst in &lowered.instances {
             fns.instance(inst);
         }
+        fns.places = lowered.places.iter().map(|p| p.id).collect();
         fns
     }
 
     /// The first row named `name`.
     pub(crate) fn id(&self, name: &str) -> Option<FnId> {
-        self.ids.get(name).copied()
+        let id = self.ids.get(name).copied();
+        debug_assert!(
+            id.is_none_or(|id| !self.places.contains(&id)),
+            "`{name}` asked a projection's row by name, which another impl's projection may share"
+        );
+        id
     }
 
     /// The row named `name`, added when there is none.
@@ -118,6 +128,16 @@ impl Fns {
         top.each_frame_mut(&mut |b| {
             ids.push(*b.id.get_or_insert_with(|| self.add(&b.name)));
         });
+        // A lambda frame is spelled by its outer body, line and column. Two
+        // projections inlined into one body could each bring a lambda at one
+        // line and column from two files; the frames would then share a row,
+        // and with it a body and its releases. No program reaches this: the
+        // core states no body for a caller that inlines a lambda.
+        debug_assert!(
+            (1..ids.len()).all(|i| !ids[..i].contains(&ids[i])),
+            "two frames of `{}` share a row",
+            top.name
+        );
         ids
     }
 

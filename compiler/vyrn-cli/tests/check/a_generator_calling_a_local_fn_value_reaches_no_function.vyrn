@@ -1,0 +1,17 @@
+// The local `helper` is a function value, so `helper(1)` calls it and the
+// generator reaches no module state through `fn helper`.
+let counter: Int64 = 5
+
+fn helper(x: Int64) -> Int64 {
+    return x + counter
+}
+
+gen fn g() -> Int64 {
+    let helper: fn(Int64) -> Int64 = x -> x + 1
+    return helper(1)
+}
+
+fn main() -> Int64 {
+    print(g() + helper(0))
+    return 0
+}

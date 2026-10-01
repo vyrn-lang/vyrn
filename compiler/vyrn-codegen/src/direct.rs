@@ -211,8 +211,13 @@ pub fn wat(program: &Program, world: std::sync::Arc<vyrn_lower::World>) -> Resul
 /// a function nothing calls is the wrong answer. A call to a skipped name refuses at its site.
 ///
 /// Public because the driver asks whether a `test` body must compile as generation, and the
-/// answer must be this one, not a second walk.
-pub fn gen_reach(program: &Program) -> std::collections::HashSet<String> {
+/// answer must be this one, not a second walk. `world` is [`compile`]'s: its checker record
+/// says which calls go through a binding.
+pub fn gen_reach(
+    program: &Program,
+    world: &vyrn_lower::World,
+) -> std::collections::HashSet<String> {
+    let through = &world.ownership.record.stored.through;
     let mut reach: std::collections::HashSet<String> = program
         .functions
         .iter()
@@ -225,7 +230,7 @@ pub fn gen_reach(program: &Program) -> std::collections::HashSet<String> {
             if f.is_extern || reach.contains(&f.name) {
                 continue;
             }
-            if vyrn_frontend::checker::fn_calls(&f.body)
+            if vyrn_frontend::checker::fn_calls(&f.body, through)
                 .iter()
                 .any(|c| reach.contains(c))
             {
@@ -243,8 +248,8 @@ pub fn gen_reach(program: &Program) -> std::collections::HashSet<String> {
 /// `vyrn_gen` imports and the lowerings that need them (`listDir`, and `Code` as an opaque `i64`
 /// handle).
 ///
-/// Takes a program of either table: a generator's program carries the load's, the LSP's is
-/// unshared on purpose, and the generation engine declines a refusal to the interpreter.
+/// Takes a program of either table: a compile's generator program carries a shared one, the
+/// LSP's is unshared on purpose, and the generation engine declines a refusal to the interpreter.
 ///
 /// # Errors
 ///
@@ -315,7 +320,7 @@ fn compile_inner(
         .collect();
     // Three kinds of function define nothing and are skipped: lowering an unspecializable shell
     // would fail the build over a function nothing calls. The fourth kind is [`gen_reach`]'s.
-    let gen_reach = gen_reach(program);
+    let gen_reach = gen_reach(program, &world);
     let mut generics: HashMap<String, &Function> = HashMap::new();
     let mut higher_order: HashMap<String, &Function> = HashMap::new();
     let mut user: Vec<&Function> = Vec::new();

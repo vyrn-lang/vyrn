@@ -4,7 +4,7 @@
 // and the one whose damage is quietest. A method the protocol never declared is
 // not an extra piece of surface on the type: protocol-method resolution keys on
 // the names the PROTOCOL declares, so `perimeter` flattens to a
-// `Shape__Sq__perimeter` that nothing can reach, and `s.perimeter()` answers
+// `Shape$Sq$perimeter` that nothing can reach, and `s.perimeter()` answers
 // `call to unknown function `perimeter``. It compiled, and it was dead.
 //
 // The typo is the shape that costs an afternoon. `aera` sits next to a working

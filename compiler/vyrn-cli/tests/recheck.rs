@@ -1,20 +1,21 @@
 //! The editor's per-body recheck (`vyrn_frontend::checker::recheck`): after
-//! every edit of a sequence, the analysis of a thread that has analysed every
-//! earlier text gives what a fresh thread's analysis gives, byte for byte.
+//! every edit of a sequence, the analysis of a session that has analysed every
+//! earlier text gives what a fresh session's analysis gives, byte for byte.
 //!
-//! Both threads run the editor's pipeline (`analyze_judged` with
-//! `vyrn_lower::JUDGE` and the generation engine) and arm the judgment memo.
-//! Only the editing thread arms `record_reads`, so the fresh analysis checks
-//! every body and walks every body the lowering reaches. It also witnesses
-//! that a replayed body writes what a checked one writes, and that a reused
-//! walk adds to the worklist what a walk adds.
+//! Both sessions run the editor's pipeline (`analyze_judged` with
+//! `vyrn_lower::JUDGE` and the generation engine) with the judgment memo. Each
+//! fresh analysis has a session of its own, so it checks every body and walks
+//! every body the lowering reaches. It also witnesses that a replayed body
+//! writes what a checked one writes, and that a reused walk adds to the
+//! worklist what a walk adds.
 
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::mpsc;
+use std::sync::{mpsc, Arc};
 
 use vyrn_frontend::loader::{DiskResolver, LoadOptions, ModuleResolver};
 use vyrn_frontend::origin::OriginMaps;
+use vyrn_frontend::session::Session;
 use vyrn_frontend::Analysis;
 
 mod common;
@@ -72,9 +73,9 @@ fn shown(a: &Analysis, instances: &[String]) -> String {
 }
 
 /// The analysis of `e` in the project `path` lies in, loaded as the editor
-/// loads it.
-fn analyze(path: &str, e: &Edit) -> Analysis {
-    let (opts, resolver) = linker(path, e);
+/// loads it under `session`.
+fn analyze(path: &str, e: &Edit, session: &Arc<Session>) -> Analysis {
+    let (opts, resolver) = linker(path, e, session);
     let engine = vyrn_genwasm::engine();
     vyrn_frontend::analyze_judged(
         &e.root,
@@ -86,8 +87,8 @@ fn analyze(path: &str, e: &Edit) -> Analysis {
 
 /// The generic instances the editor's lowering of `e` makes, in the World's
 /// order; none for a program that does not load.
-fn instances(path: &str, e: &Edit) -> Vec<String> {
-    let (opts, resolver) = linker(path, e);
+fn instances(path: &str, e: &Edit, session: &Arc<Session>) -> Vec<String> {
+    let (opts, resolver) = linker(path, e, session);
     let engine = vyrn_genwasm::engine();
     let Ok(p) = vyrn_lower::load(&e.root, path, &opts, &resolver, Some(&*engine)) else {
         return Vec::new();
@@ -101,10 +102,11 @@ fn instances(path: &str, e: &Edit) -> Vec<String> {
 }
 
 /// The load options and the resolver of `e` in the project `path` lies in,
-/// as the editor loads it.
-fn linker(path: &str, e: &Edit) -> (LoadOptions, Overlaid) {
+/// as the editor loads it under `session`.
+fn linker(path: &str, e: &Edit, session: &Arc<Session>) -> (LoadOptions, Overlaid) {
     let mut opts = LoadOptions {
         std_root: vyrn_frontend::manifest::std_root(),
+        session: Some(session.clone()),
         ..Default::default()
     };
     let mut resolver = Overlaid {
@@ -122,22 +124,19 @@ fn linker(path: &str, e: &Edit) -> (LoadOptions, Overlaid) {
     (opts, resolver)
 }
 
-/// Runs `f` on a fresh thread with the editor's stack and judgment memo.
+/// Runs `f` on a fresh thread with the editor's stack.
 fn on_fresh_thread<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
     std::thread::Builder::new()
         .stack_size(64 * 1024 * 1024)
-        .spawn(move || {
-            vyrn_frontend::movecheck::reuse_judgments();
-            f()
-        })
+        .spawn(f)
         .expect("spawn an analysis thread")
         .join()
         .expect("the analysis thread panicked")
 }
 
-/// Replays `edits` over the program at `path` on one editing thread, and
-/// compares each analysis with a fresh thread's. Returns how many bodies the
-/// editing thread checked and replayed for each edit.
+/// Replays `edits` over the program at `path` in one editing session, and
+/// compares each analysis with a fresh session's. Returns how many bodies the
+/// editing session checked and replayed for each edit.
 fn replay(path: &Path, edits: Vec<Edit>) -> Vec<(u64, u64)> {
     let path = path.to_string_lossy().replace('\\', "/");
     let edits = std::sync::Arc::new(edits);
@@ -147,13 +146,12 @@ fn replay(path: &Path, edits: Vec<Edit>) -> Vec<(u64, u64)> {
     let editor = std::thread::Builder::new()
         .stack_size(64 * 1024 * 1024)
         .spawn(move || {
-            vyrn_frontend::movecheck::reuse_judgments();
-            vyrn_frontend::checker::record_reads();
+            let session = Session::new(true);
             for i in asked {
-                let _ = vyrn_frontend::checker::recheck::tally();
-                let a = analyze(&p, &es[i]);
-                let tally = vyrn_frontend::checker::recheck::tally();
-                let shown = shown(&a, &instances(&p, &es[i]));
+                let _ = session.recheck_tally();
+                let a = analyze(&p, &es[i], &session);
+                let tally = session.recheck_tally();
+                let shown = shown(&a, &instances(&p, &es[i], &session));
                 tell.send((shown, tally)).expect("the test listens");
             }
         })
@@ -164,8 +162,11 @@ fn replay(path: &Path, edits: Vec<Edit>) -> Vec<(u64, u64)> {
         let (incremental, (checked, replayed)) = told.recv().expect("the editing thread answers");
         let (p, es) = (path.clone(), edits.clone());
         let fresh = on_fresh_thread(move || {
-            let a = analyze(&p, &es[i]);
-            (shown(&a, &instances(&p, &es[i])), a.diagnostics)
+            let a = analyze(&p, &es[i], &Session::new(true));
+            (
+                shown(&a, &instances(&p, &es[i], &Session::new(true))),
+                a.diagnostics,
+            )
         });
         let parse = fresh.1.iter().find(|d| d.stage == "parse");
         assert!(parse.is_none(), "{path}, {}: {parse:?}", e.what);
@@ -210,6 +211,8 @@ const COLLIDE: &str = "\nfn isAsciiSpace(b: Int64) -> String {\n    return \"\"\
 /// Root declarations the world fingerprint holds: a protocol, an impl of it and
 /// a validated type.
 const SIZED: &str = "\nprotocol RecheckSized {\n    fn recheckSize(self) -> Int64\n}\n\nimpl RecheckSized for RecheckPoint {\n    fn recheckSize(self) -> Int64 {\n        return self.a\n    }\n}\n\ntype RecheckPort = Int64 where value >= 1\n";
+/// [`SIZED`] with a doc comment on the protocol and on its member.
+const SIZED_DOC: &str = "\n/// Has a size.\nprotocol RecheckSized {\n    /// The size.\n    fn recheckSize(self) -> Int64\n}\n\nimpl RecheckSized for RecheckPoint {\n    fn recheckSize(self) -> Int64 {\n        return self.a\n    }\n}\n\ntype RecheckPort = Int64 where value >= 1\n";
 
 /// The edits every program takes, from its text `base`: each kind of
 /// dependency changes once and changes back.
@@ -229,6 +232,8 @@ fn edits(base: &str) -> Vec<Edit> {
     collided.push(COLLIDE);
     let mut sized = collided.clone();
     sized.push(SIZED);
+    let mut documented = collided.clone();
+    documented.push(SIZED_DOC);
     let steps: Vec<(&'static str, String, bool)> = vec![
         ("no edit", base.to_string(), false),
         ("an edit inside the last function's body", body, false),
@@ -273,6 +278,11 @@ fn edits(base: &str) -> Vec<Edit> {
         (
             "add a protocol, an impl and a validated type",
             all(&sized),
+            false,
+        ),
+        (
+            "document the protocol and its member",
+            all(&documented),
             false,
         ),
         ("move every line", format!("\n{}", all(&sized)), false),

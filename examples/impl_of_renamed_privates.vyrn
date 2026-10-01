@@ -1,0 +1,12 @@
+// Two modules each declare a private `Speak` and a private `Pet` and implement
+// both protocols for `Pet`. The linker renames the protocol and the type apart,
+// and each impl method follows the rename.
+
+import { catSays } from "./lib/greet_cat.vyrn"
+import { dogSays } from "./lib/greet_dog.vyrn"
+
+fn main() -> Int64 {
+    print(catSays())
+    print(dogSays())
+    return 0
+}

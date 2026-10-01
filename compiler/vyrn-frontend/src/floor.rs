@@ -154,7 +154,7 @@ pub fn extern_imports(program: &Program) -> std::collections::HashSet<String> {
     program
         .functions
         .iter()
-        .filter(|f| f.is_extern && crate::trap::host_boundary_extern(&f.name).is_none())
+        .filter(|f| crate::effects::extern_effect(f) == Some(crate::effects::Effect::Extern))
         .map(|f| f.name.clone())
         .collect()
 }

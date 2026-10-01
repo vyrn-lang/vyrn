@@ -172,8 +172,14 @@ pub enum NotOwned {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BorrowKind {
     /// A `read` or `modify` parameter, or a second name for one: the
-    /// capability, and the parameter's own spelling.
-    Param { cap: &'static str, of: String },
+    /// capability, and the parameter's own spelling. `lambda` marks a
+    /// lambda's parameter, which is always `read` and has no spelling for
+    /// another capability.
+    Param {
+        cap: &'static str,
+        of: String,
+        lambda: bool,
+    },
     /// A name of the enclosing frame that a lambda frame reads.
     /// The closure observes it; the frame that made it still owns it.
     Capture,
@@ -196,8 +202,8 @@ impl BorrowKind {
         // `movecheck::Borrow::what` does.
         let at = crate::ast::root_of(at);
         match self {
-            BorrowKind::Param { cap, of } if at == of => format!("a `{cap}` parameter"),
-            BorrowKind::Param { cap, of } => {
+            BorrowKind::Param { cap, of, .. } if at == of => format!("a `{cap}` parameter"),
+            BorrowKind::Param { cap, of, .. } => {
                 format!("a second name for the `{cap}` parameter `{of}`")
             }
             BorrowKind::Capture => "a captured binding".to_string(),
@@ -206,11 +212,16 @@ impl BorrowKind {
         }
     }
 
-    /// The named ways out, in `movecheck::Borrow::fixes`'s
-    /// order and words. `path` is what was read out of the binding. A capture
-    /// has none: the checker answers that shape at the capture.
+    /// The named ways out. `path` is what was read out of the binding. A
+    /// capture has none: the checker answers that shape at the capture.
     pub fn fixes(&self, path: &str) -> Vec<String> {
         match self {
+            // A `fn` type reads every argument, so the function that takes
+            // ownership must be a named one, called directly.
+            BorrowKind::Param { of, lambda: true, .. } => vec![
+                format!("`{path}.copy()` if both sides need a value"),
+                format!("a named function with `{of}: consume ..`, called directly, if it should own it"),
+            ],
             BorrowKind::Param { of, .. } => vec![
                 format!("declare the parameter `{of}: consume ..` if this function should own it"),
                 format!("`{path}.copy()` if both sides need a value"),

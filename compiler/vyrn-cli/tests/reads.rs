@@ -4,7 +4,8 @@
 use std::sync::Arc;
 
 use vyrn_frontend::ast::{DeclId, DeclKind, FnId, Key, Program, ScopeId};
-use vyrn_frontend::loader::DiskResolver;
+use vyrn_frontend::loader::{DiskResolver, LoadOptions};
+use vyrn_frontend::session::Session;
 use vyrn_lower::World;
 
 mod common;
@@ -37,16 +38,20 @@ test \"a doubles\" { assertEq(a(), 2) }
 /// The edit to the root: it declares `half`.
 const HALF: &str = "fn half(x: Int64) -> Int64 { return x / 2 }\n";
 
-/// The World of the linked program. The load links and does not check, so
-/// the root before the edit, which the checker refuses, has a World too.
+/// The World of the linked program, in a session, so the check records its
+/// reads. The load links and does not check, so the root before the edit,
+/// which the checker refuses, has a World too.
 fn world(lib: &str, root: &str) -> (Arc<World>, Program) {
-    vyrn_frontend::checker::record_reads();
+    let opts = LoadOptions {
+        session: Some(Session::new(false)),
+        ..Default::default()
+    };
     let dir = common::scratch("reads");
     std::fs::write(dir.join("lib.vyrn"), lib).expect("write the module");
     let path = dir.join("main.vyrn");
     std::fs::write(&path, root).expect("write the root");
     let path = path.to_string_lossy().replace('\\', "/");
-    let p = vyrn_frontend::loader::load(root, &path, &Default::default(), &DiskResolver, None)
+    let p = vyrn_frontend::loader::load(root, &path, &opts, &DiskResolver, None)
         .unwrap_or_else(|d| panic!("{}", d.first().map(|d| d.render()).unwrap_or_default()));
     let w = vyrn_lower::analyze(&p);
     w.check();

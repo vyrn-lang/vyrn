@@ -109,8 +109,9 @@ pub fn lookup_impl_by_key<'a>(
 
 /// The projection expansions of one compile: one tree per access site, which
 /// the checker, the ownership passes, the lowering and the emitter all walk.
-/// Every program a load links shares one: [`crate::loader::LoadOptions`]
-/// carries it and the loader stamps it on each [`Program`]. Trees are leaked,
+/// [`crate::loader::LoadOptions`] carries it and the loader stamps it on the
+/// program it links. A generator's load gets a table of its own, because a
+/// generator program's node ids repeat its importer's. Trees are leaked,
 /// because passes key side tables by their node ids.
 ///
 /// A tree's ids and temporary names derive from its site. It is numbered in
@@ -190,32 +191,20 @@ impl PartialEq for Expansions {
     }
 }
 
-/// An access site: its anchor node, line, receiver type key, member name. The
-/// line is needed because the table spans a load, which checks whole
-/// generator programs, whose ids repeat the root's, so two equal sites can
-/// differ only in their line.
-type Key = (NodeId, usize, String, String);
-
-/// One expansion and the site inputs it was built from. A hit compares the
-/// inputs, because a generator program's node would otherwise answer with
-/// another site's expansion.
-struct Expansion<T: 'static> {
-    recv: Expr,
-    args: Vec<Expr>,
-    tree: &'static T,
-}
+/// An access site: its anchor node, receiver type key, member name. A node
+/// names one site because each program has a table of its own.
+type Key = (NodeId, String, String);
 
 #[derive(Default)]
 struct Tables {
-    sites: HashMap<Key, Expansion<Projection>>,
-    optional: HashMap<Key, Expansion<OptionalProjection>>,
+    sites: HashMap<Key, &'static Projection>,
+    optional: HashMap<Key, &'static OptionalProjection>,
     /// Store expansions, keyed by the index node: `a[i] = v` has no receiver
     /// node, only the temporary [`Expansions::store_index`] synthesizes.
-    #[allow(clippy::type_complexity)]
-    stores: HashMap<NodeId, (String, Expr, Expr, &'static Block)>,
+    stores: HashMap<NodeId, &'static Block>,
     /// The `Schema` literal each `schemaOf<T>()` node stands for, keyed by
-    /// the call node, with the target's name. See [`Expansions::schema`].
-    schemas: HashMap<NodeId, (String, &'static Expr)>,
+    /// the call node. See [`Expansions::schema`].
+    schemas: HashMap<NodeId, &'static Expr>,
     /// How many nodes each expansion unit holds.
     used: HashMap<u32, u32>,
     /// Whether [`Expansions::seal`] holds the table: no tree may be made.
@@ -253,24 +242,18 @@ impl Tables {
     }
 }
 
-/// Answers `key` from its table (`get`, `get_mut`) if the site's inputs
-/// match, else builds it through [`Tables::expand`] and keeps it when `ex` is
-/// shared.
-#[allow(clippy::too_many_arguments)]
+/// Answers `key` from its table (`get`, `get_mut`), else builds it on `line`
+/// through [`Tables::expand`] and keeps it when `ex` is shared.
 fn memo<T>(
     ex: &Expansions,
-    get: fn(&Tables) -> &HashMap<Key, Expansion<T>>,
-    get_mut: fn(&mut Tables) -> &mut HashMap<Key, Expansion<T>>,
+    get: fn(&Tables) -> &HashMap<Key, &'static T>,
+    get_mut: fn(&mut Tables) -> &mut HashMap<Key, &'static T>,
     key: Key,
-    recv: &Expr,
-    args: &[Expr],
+    line: usize,
     build: impl FnOnce(&str) -> Result<T, String>,
     number: impl FnOnce(&mut T, &mut Numbering),
 ) -> Result<&'static T, String> {
-    let hit = |t: &Tables| {
-        let e = get(t).get(&key)?;
-        (e.recv == *recv && e.args == args).then_some(e.tree)
-    };
+    let hit = |t: &Tables| get(t).get(&key).copied();
     // A read lock first: after the checker, every ask is a hit.
     if let Some(tree) = hit(&ex.read()).filter(|_| ex.shared) {
         return Ok(tree);
@@ -279,16 +262,9 @@ fn memo<T>(
     if let Some(tree) = hit(&t).filter(|_| ex.shared) {
         return Ok(tree);
     }
-    let tree = t.expand(key.0, key.1, build, number)?;
+    let tree = t.expand(key.0, line, build, number)?;
     if ex.shared {
-        get_mut(&mut t).insert(
-            key,
-            Expansion {
-                recv: recv.clone(),
-                args: args.to_vec(),
-                tree,
-            },
-        );
+        get_mut(&mut t).insert(key, tree);
     }
     Ok(tree)
 }
@@ -329,9 +305,8 @@ impl Expansions {
             self,
             |t| &t.sites,
             |t| &mut t.sites,
-            (anchor, line, key, method.to_string()),
-            recv_expr,
-            args,
+            (anchor, key, method.to_string()),
+            line,
             |tag| inline(f, recv_expr, args, line, tag),
             |built, n| {
                 built.prologue.iter_mut().for_each(|s| n.stmt(s));
@@ -359,9 +334,8 @@ impl Expansions {
             self,
             |t| &t.optional,
             |t| &mut t.optional,
-            (recv_expr.id(), line, key, method.to_string()),
-            recv_expr,
-            args,
+            (recv_expr.id(), key, method.to_string()),
+            line,
             |tag| optional_inline(f, recv_expr, args, line, tag),
             |built, n| {
                 built.prologue.iter_mut().for_each(|s| n.stmt(s));
@@ -381,8 +355,7 @@ impl Expansions {
             return None;
         }
         let key = call.id();
-        let found =
-            |t: &Tables| (t.schemas.get(&key).filter(|(n, _)| *n == decl.name)).map(|(_, e)| *e);
+        let found = |t: &Tables| t.schemas.get(&key).copied();
         if let Some(e) = found(&self.read()) {
             return Some(e);
         }
@@ -398,13 +371,13 @@ impl Expansions {
                 |lit, n| n.expr(lit),
             )
             .ok()?;
-        t.schemas.insert(key, (decl.name.clone(), e));
+        t.schemas.insert(key, e);
         Some(e)
     }
 
     /// Returns the literal [`Expansions::schema`] expanded for `call`.
     pub fn schema_at(&self, call: &Expr) -> Option<&'static Expr> {
-        self.read().schemas.get(&call.id()).map(|(_, e)| *e)
+        self.read().schemas.get(&call.id()).copied()
     }
 
     /// Returns the statements `a[i] = v` lowers as through a user `place
@@ -419,7 +392,7 @@ impl Expansions {
         value: &Expr,
         aty: &Type,
     ) -> Result<Option<&'static Block>, String> {
-        if let Some(b) = self.stored(name, index, value) {
+        if let Some(b) = self.stored(index) {
             return Ok(Some(b));
         }
         let line = index.line();
@@ -462,21 +435,15 @@ impl Expansions {
             |b, n| n.block(b),
         )?;
         if self.shared {
-            t.stores.insert(
-                index.id(),
-                (name.to_string(), index.clone(), value.clone(), blk),
-            );
+            t.stores.insert(index.id(), blk);
         }
         Ok(Some(blk))
     }
 
     /// Returns the store expansion the checker built, for a reader that has
     /// the statement but not the receiver's type (the lowering, `movecheck`).
-    /// A hit must match the whole site, as a [`Expansions::site`] hit does.
-    pub fn stored(&self, name: &str, index: &Expr, value: &Expr) -> Option<&'static Block> {
-        let t = self.read();
-        let (n, i, v, blk) = t.stores.get(&index.id())?;
-        (n == name && i == index && v == value).then_some(*blk)
+    pub fn stored(&self, index: &Expr) -> Option<&'static Block> {
+        self.read().stores.get(&index.id()).copied()
     }
 
     /// Returns the element read of `for x in iter` over a user container: its
@@ -1088,9 +1055,15 @@ fn index_text(e: Option<&Expr>) -> String {
     }
 }
 
-/// Returns `program`'s user projection names.
+/// Returns the names a call can read as a user projection: `program`'s
+/// projection names that no function has. The checker types `x.f(..)` as an
+/// access only where no function is named `f`, so a function always wins.
 pub fn place_names(program: &Program) -> HashSet<String> {
-    all(program).map(|(_, f)| f.name.clone()).collect()
+    let fns: HashSet<&str> = program.functions.iter().map(|f| f.name.as_str()).collect();
+    (all(program).map(|(_, f)| &f.name))
+        .filter(|n| !fns.contains(n.as_str()))
+        .cloned()
+        .collect()
 }
 
 #[cfg(test)]

@@ -14,6 +14,7 @@
 use std::fmt::Display;
 
 use crate::ast::TypeDecl;
+use crate::effects::Effect;
 
 /// The most Vyrn calls in flight at once, on every engine.
 ///
@@ -258,17 +259,22 @@ pub const IO: &[(&str, &str)] = &[
     ("butf8", "bytes are not valid UTF-8"),
 ];
 
-/// The host-boundary externs: `(Vyrn extern name, C shim symbol)`.
+/// The host-boundary externs: `(Vyrn extern name, C shim symbol, the
+/// effect of a call to the declaration)`.
 ///
 /// They are not host imports: the C runtime shim implements them on
 /// every target (native `timespec_get` and CSPRNG, wasi `clock_time_get` and
 /// `random_get`), honoring `VYRN_FIXED_TIME` and `VYRN_FIXED_SEED`. The
 /// frontend needs the list too: the floor must know `std/time` imports
 /// no host function.
-pub const HOST_EXTERNS: &[(&str, &str)] = &[
-    ("hostNowMillis", "__vyrn_now_millis"),
-    ("hostMonotonicNanos", "__vyrn_monotonic_nanos"),
-    ("hostRandomSeed", "__vyrn_random_seed"),
+pub const HOST_EXTERNS: &[(&str, &str, Effect)] = &[
+    ("hostNowMillis", "__vyrn_now_millis", Effect::Clock),
+    (
+        "hostMonotonicNanos",
+        "__vyrn_monotonic_nanos",
+        Effect::Clock,
+    ),
+    ("hostRandomSeed", "__vyrn_random_seed", Effect::Random),
 ];
 
 /// Returns the shim symbol for a [`HOST_EXTERNS`] name, or `None` for an
@@ -276,8 +282,8 @@ pub const HOST_EXTERNS: &[(&str, &str)] = &[
 pub fn host_boundary_extern(name: &str) -> Option<&'static str> {
     HOST_EXTERNS
         .iter()
-        .find(|(n, _)| *n == name)
-        .map(|(_, sym)| *sym)
+        .find(|(n, ..)| *n == name)
+        .map(|(_, sym, _)| *sym)
 }
 
 /// Returns one [`IO`] entry by name.

@@ -1,0 +1,10 @@
+import { randomSeed } from "std/random"
+
+gen fn g() -> Int64 {
+    return randomSeed()
+}
+
+fn main() -> Int64 {
+    print(g())
+    return 0
+}

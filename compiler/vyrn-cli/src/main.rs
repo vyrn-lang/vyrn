@@ -1219,7 +1219,7 @@ fn why_audience(file: &str) -> ExitCode {
     match (&fenced, &map) {
         (Some(who), _) => println!("  audience: {who}"),
         (None, Some(map)) => {
-            let v = vyrn_frontend::audience::audience_of(&path, map);
+            let v = vyrn_frontend::audience::audience_of(&path, map, None);
             println!("  audience: {} — {}", v.audience.phrase(), v.because());
         }
         (None, None) => {
@@ -5357,7 +5357,8 @@ fn bodies_wasm(
     // otherwise it pays for no `vyrn_gen` import. As a test host, the checker
     // accepts `assert`, `assertEq` and `blackBox` in the lifted bodies.
     prog.host.test = true;
-    let reach = vyrn_codegen::direct::gen_reach(&prog);
+    let world = vyrn_lower::analyze(&prog);
+    let reach = vyrn_codegen::direct::gen_reach(&prog, &world);
     let generation = (0..bodies.len()).any(|k| reach.contains(&format!("__vyrn_body_{k}")));
     let compiled = if generation {
         vyrn_genwasm::prepare(&mut prog)
@@ -5371,7 +5372,7 @@ fn bodies_wasm(
                 })
             })
     } else {
-        vyrn_codegen::direct::compile(&prog, vyrn_lower::analyze(&prog))
+        vyrn_codegen::direct::compile(&prog, world)
     };
     let bytes = match compiled {
         Ok(b) => b,

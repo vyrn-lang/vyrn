@@ -622,15 +622,16 @@ fn generator_program(program: &Program, g: &str) -> Program {
         .map(|s| (s.name.as_str(), &s.init))
         .collect();
     let mut keep: std::collections::HashSet<String> = std::collections::HashSet::new();
-    // The injected runtime modules (`$` names) stay whole: the emitter calls
-    // into `std/runtime` where no source does. The impls and contracts stay
-    // whole, so their flattened methods and what their defaults call stay too.
+    // Every `$` name stays whole: an injected runtime module's, because the
+    // emitter calls into `std/runtime` where no source does, and an impl's
+    // flattened method. The contracts stay whole, so what their defaults call
+    // stays too.
     let mut work: Vec<String> = vec![g.to_string()];
     work.extend(
         program
             .functions
             .iter()
-            .filter(|f| f.name.contains('$') || crate::types::impl_method_member(&f.name).is_some())
+            .filter(|f| f.name.contains('$'))
             .map(|f| f.name.clone()),
     );
     for d in program
@@ -692,6 +693,7 @@ fn generator_program(program: &Program, g: &str) -> Program {
         module_hashes: Default::default(),
         expansions: program.expansions.clone(),
         spellings: program.spellings.clone(),
+        session: program.session.clone(),
     }
 }
 
@@ -743,6 +745,7 @@ fn run_derive(
     let resolver = crate::loader::MapResolver(HashMap::new());
     let opts = crate::loader::LoadOptions {
         expansions: gen_program.expansions.clone(),
+        session: gen_program.session.0.clone(),
         nest,
         ..Default::default()
     };
