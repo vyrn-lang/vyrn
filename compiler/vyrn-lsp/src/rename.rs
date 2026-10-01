@@ -451,7 +451,7 @@ pub fn workspace_edit(
         changes.insert(decl_uri.clone(), edits);
     }
 
-    for cand in candidates(&target.file, overlays)? {
+    for cand in candidates(&target.file, &names, overlays)? {
         if cand.uri == *decl_uri {
             continue;
         }
@@ -550,13 +550,16 @@ fn edit_at(
     }
 }
 
-/// Every project source a rename might touch: the `.vyrn` files under the
-/// declaration's app root, and the `<script>` bodies of its `.vyx` files.
+/// Every project source a rename might touch: the files under the declaration's
+/// app root whose text contains one of `names`, since a reference is a token of
+/// that spelling; `.vyx` files contribute their `<script>` bodies.
 ///
-/// The cap is a refusal, not a truncation: a file the walk never reached is a
-/// call site the rename never rewrites.
+/// The cap is a refusal, not a truncation, and counts only those files: a root
+/// of any size is walked, but a file that names the declaration and was never
+/// read is a call site the rename never rewrites.
 fn candidates(
     decl_file: &str,
+    names: &[Wanted],
     overlays: &HashMap<String, String>,
 ) -> Result<Vec<Candidate>, String> {
     let decl = std::path::Path::new(decl_file);
@@ -564,27 +567,32 @@ fn candidates(
         return Ok(Vec::new());
     };
     let root = crate::app_root_for(dir);
+    let mut paths = Vec::new();
+    crate::collect_sources(&root, 0, usize::MAX, &["vyrn", "vyx"], &mut paths);
     let mut files = Vec::new();
-    // Walk one past the cap, so a project of exactly the cap is not refused.
-    crate::collect_sources(&root, 0, MAX_RENAME_FILES + 1, &["vyrn", "vyx"], &mut files);
-    if files.len() > MAX_RENAME_FILES {
-        return Err(format!(
-            "this project has more than {MAX_RENAME_FILES} source files under {} — \
-             rename cannot promise to reach every call site, so it has changed nothing",
-            root.display()
-        ));
-    }
-    let mut out = Vec::new();
-    for path in files {
+    for path in paths {
         let slash = path.to_string_lossy().replace('\\', "/");
-        let text = match overlays
+        let Some(text) = overlays
             .get(&vyrn_frontend::origin::OriginMaps::norm_path_key(&slash))
             .cloned()
             .or_else(|| std::fs::read_to_string(&path).ok())
-        {
-            Some(t) => t,
-            None => continue,
+        else {
+            continue;
         };
+        if names.iter().any(|w| text.contains(&w.old)) {
+            files.push((path, slash, text));
+        }
+    }
+    if files.len() > MAX_RENAME_FILES {
+        return Err(format!(
+            "more than {MAX_RENAME_FILES} source files under {} mention `{}` — \
+             rename cannot promise to reach every call site, so it has changed nothing",
+            root.display(),
+            names[0].old
+        ));
+    }
+    let mut out = Vec::new();
+    for (path, slash, text) in files {
         let Ok(uri) = Url::from_file_path(&path) else {
             continue;
         };
