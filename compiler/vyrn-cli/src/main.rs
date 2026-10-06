@@ -967,7 +967,33 @@ fn why_cmd(call: &Call) -> Outcome {
     };
     // The generator's `contractOf` names the module as its importer wrote it.
     decl.module = Some(view.module.clone());
-    let verdict = match contract_verdict(&p, &decl, &module) {
+    // A `.vyrn` module is reflected linked, as `moduleInterface` reflects it: a
+    // page that does not compile has no interface to judge. A `.vyx` page is
+    // reflected from its source, as `vyxPageInterface` reflects it.
+    let interface = if path.ends_with(".vyx") {
+        use vyrn_frontend::schema_reflect::{module_interface_lit, Origins};
+        module_interface_lit(&module, &Default::default(), &Origins::new([]))
+    } else {
+        let importer_dir = path.rsplit_once('/').map_or(".", |(d, _)| d);
+        let linked = vyrn_frontend::gen::linked_module_interface(
+            Some(&*engine()),
+            &p.resolver,
+            &p.opts,
+            importer_dir,
+            &path,
+            &path,
+            &source,
+            &mut Vec::new(),
+        );
+        match linked {
+            Ok(lit) => lit,
+            Err(diags) => {
+                print_diagnostics(&diags, &path, "");
+                return Err(ExitCode::FAILURE);
+            }
+        }
+    };
+    let verdict = match contract_verdict(&p, &decl, interface) {
         Ok(v) => v,
         Err(e) => {
             eprintln!("error: std/contract cannot judge {path}: {e}");
@@ -1092,15 +1118,15 @@ fn main() -> Int64 {
 
 /// Asks `std/contract` what a generator asks of `module`, so `why --contract`
 /// states no matching rule of its own. `decl` is reflected as `contractOf`
-/// reflects it, and `module`, parsed but not linked, as `moduleInterface`
-/// reflects a module.
+/// reflects it, and `interface` is the `moduleInterface` literal of the module.
 fn contract_verdict(
     p: &Project,
     decl: &vyrn_frontend::ast::ContractDecl,
-    module: &vyrn_frontend::ast::Program,
+    interface: vyrn_frontend::ast::Expr,
 ) -> Result<ContractVerdict, String> {
     use vyrn_frontend::ast::{Block, Id, Stmt};
-    use vyrn_frontend::schema_reflect::{contract_info_lit, module_interface_lit, Origins};
+    use vyrn_frontend::schema_reflect::contract_info_lit;
+    let mut interface = Some(interface);
     let opts = loader::LoadOptions {
         expansions: Expansions::shared(),
         ..p.opts.clone()
@@ -1116,9 +1142,7 @@ fn contract_verdict(
     for f in &mut prog.functions {
         let lit = match f.name.as_str() {
             "whyContract" => contract_info_lit(decl),
-            "whyModule" => {
-                module_interface_lit(module, &std::collections::HashMap::new(), &Origins::new([]))
-            }
+            "whyModule" => interface.take().expect("one whyModule"),
             _ => continue,
         };
         f.body = Block {

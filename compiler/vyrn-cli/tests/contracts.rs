@@ -840,3 +840,78 @@ fn why_contract_reports_what_the_generator_reports() {
         "{text}"
     );
 }
+
+/// Writes a project whose `screens` role is `Screen`, with `types.vyrn`
+/// exporting `Item` and a `screens/` page body of the caller's choosing.
+fn linked_project(tag: &str, page: &str) -> PathBuf {
+    let dir = scratch(tag);
+    std::fs::create_dir_all(dir.join("screens")).unwrap();
+    std::fs::write(
+        dir.join("gen.vyrn"),
+        "export contract Screen {\n    fn item() -> Item\n}\n",
+    )
+    .unwrap();
+    std::fs::write(dir.join("types.vyrn"), "export type Item = { id: Int64 }\n").unwrap();
+    std::fs::write(
+        dir.join("vyrn.json"),
+        "{ \"name\": \"why\", \"main\": \"app.vyrn\", \"roles\": { \"screens\": \"./gen:Screen\" } }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("app.vyrn"),
+        "fn main() -> Int64 {\n    return 0\n}\n",
+    )
+    .unwrap();
+    std::fs::write(dir.join("screens/home.vyrn"), page).unwrap();
+    dir
+}
+
+/// `why --contract` judges the linked module, as `moduleInterface` does: a
+/// page returning `m.Item` through `import * as m` is `Item`, not a mismatch.
+#[test]
+fn why_contract_reads_the_linked_module() {
+    let dir = linked_project(
+        "whylink",
+        "import * as m from \"../types\"\n\n\
+         export fn item() -> m.Item {\n    return m.Item { id: 1 }\n}\n",
+    );
+    let out = vyrn()
+        .arg("why")
+        .arg("--contract")
+        .arg(dir.join("screens/home.vyrn"))
+        .output()
+        .expect("why");
+    let text = String::from_utf8_lossy(&out.stdout).to_string();
+    assert!(
+        out.status.success(),
+        "{text}{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(text.contains("ok        item: shape 1 of 1"), "{text}");
+    assert!(!text.contains("MISMATCH"), "{text}");
+}
+
+/// A page that does not link prints the loader's diagnostics and exits 1, with
+/// no contract report.
+#[test]
+fn why_contract_prints_the_diagnostics_of_a_page_that_does_not_compile() {
+    let dir = linked_project(
+        "whybroken",
+        "import * as m from \"../absent\"\n\n\
+         export fn item() -> m.Item {\n    return m.Item { id: 1 }\n}\n",
+    );
+    let out = vyrn()
+        .arg("why")
+        .arg("--contract")
+        .arg(dir.join("screens/home.vyrn"))
+        .output()
+        .expect("why");
+    assert_eq!(out.status.code(), Some(1));
+    assert!(
+        out.stdout.is_empty(),
+        "{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("home.vyrn:0:0: cannot load"), "{err}");
+}

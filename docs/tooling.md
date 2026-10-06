@@ -179,13 +179,17 @@ change to `std/` commits the regenerated `docs/api/`.
 ### `vyrn why`
 
 Explains a verdict from the source tree. It works on a file that does not
-compile.
+compile, except `--contract`.
 
 - `vyrn why <file>`: the module's audience, the path segment that decided it,
   and every import chain that reaches it.
 - `vyrn why --contract <file>`: the module contract that governs the file and
-  each export's status against it, as `std/contract` reports it. Exits 1 if the
-  file has no role.
+  each export's status against it, as `std/contract` reports it. A `.vyrn`
+  module is linked first, as `moduleInterface` links it, so a type reached
+  through `import * as m` reads as the generator reads it; a module that does
+  not link prints the loader's diagnostics and exits 1, with no report. A
+  `.vyx` page is read from its `<script>`, as `vyxPageInterface` reads it. Exits
+  1 if the file has no role.
 - `vyrn why --memory <file>`: per binding, whether it is reclaimed, how, and the
   reason when it is not. The LSP's hover and inlay hints use the same table and
   wording.
