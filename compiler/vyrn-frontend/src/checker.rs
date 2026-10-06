@@ -1022,10 +1022,10 @@ fn check_accum_inner(
         |c, &(i, f)| c.signature_and_body(SourceBody::Fn(i), f),
     );
     // One allocation for the types the bodies add, not one per doubling.
-    if let Some(r) = &checker.record {
+    if let Some(r) = &mut checker.acc.borrow_mut().record {
         let all = typed.iter().chain(replayed.iter().flatten());
         let n = (all.filter_map(|t| t.record.as_ref())).map(|p| p.node_types.len());
-        r.borrow_mut().node_types.reserve(n.sum());
+        r.node_types.reserve(n.sum());
     }
     let mut typed = typed.into_iter();
     for (&(i, f), r) in bodies.iter().zip(replayed) {
@@ -1061,13 +1061,8 @@ fn check_accum_inner(
         checker.reader.set(None);
     }
 
-    let mut effects = StoredFnEffects {
-        sources: checker.stored_sources.borrow().clone(),
-        arg_sources: checker.arg_sources.borrow().clone(),
-        calls: checker.stored_calls.borrow().clone(),
-        through: checker.through.borrow().clone(),
-        dispatched: checker.dispatched.borrow().clone(),
-    };
+    let mut acc = checker.acc.take();
+    let mut effects = std::mem::take(&mut acc.stored);
 
     // 7. Comptime purity of every `gen fn` and its callees, after
     //    the body checks so a generator's type errors come first.
@@ -1092,38 +1087,68 @@ fn check_accum_inner(
         }
     }
     effects.calls.iter_mut().for_each(|(_, t)| written(t));
-    checker
-        .binder_types
-        .borrow_mut()
-        .values_mut()
-        .for_each(written);
-    let mut derived = checker.derive_sites.take();
+    acc.binders.values_mut().for_each(written);
+    let mut derived = acc.derive;
     for site in &mut derived {
         written(&mut site.ty);
         written(&mut site.entry);
     }
-    let binders = local_index(program, &checker.binder_types.borrow());
+    let binders = local_index(program, &acc.binders);
     let typed = (in_bodies == out.len()).then_some(refused);
     let mut seen = HashSet::new();
-    let mut reads = checker.reads.take();
+    let mut reads = acc.reads;
     reads.retain(|r| seen.insert(r.clone()));
-    let record = checker.record.map(|r| Recorded {
+    let record = acc.record.map(|r| Recorded {
         stored: effects.clone(),
         reads,
-        ..r.into_inner()
+        ..r
     });
     (out, binders, effects, derived, typed, record)
 }
 
-/// What typing one body added to its checker, for [`Checker::absorb`].
+/// What typing adds to a checker. [`Checker::acc`] holds the sum over every
+/// body typed so far; [`Checker::taken`] cuts one body's part out and
+/// [`Checker::absorb`] adds it back. A field is listed here and in
+/// [`Typed::extend`], nowhere else.
 #[derive(Clone, Default)]
 struct Typed {
+    /// A body's diagnostics. The accumulator never holds any: `errors` does.
     diags: Vec<Diagnostic>,
+    /// The record [`record`] asks for, or `None`, so the editor's keystroke
+    /// path does not pay for it.
     record: Option<Recorded>,
+    /// The read rows, in the order read ([`Recorded::reads`]).
     reads: Vec<(SourceBody, Key)>,
+    /// The type of every root-module binding, keyed by binder position, for
+    /// editor hover. A binding in a statement that did not type has no row.
     binders: HashMap<(usize, usize), Type>,
     stored: StoredFnEffects,
     derive: Vec<crate::gen::Site>,
+}
+
+impl Typed {
+    /// An empty accumulation that records when `recording`.
+    fn empty(recording: bool) -> Typed {
+        Typed {
+            record: recording.then(Default::default),
+            ..Default::default()
+        }
+    }
+
+    /// Adds `t` after `self`. A binder's first answer stands: a desugar types
+    /// a copy again.
+    fn extend(&mut self, t: Typed) {
+        self.diags.extend(t.diags);
+        if let (Some(r), Some(part)) = (&mut self.record, t.record) {
+            r.extend(part);
+        }
+        self.reads.extend(t.reads);
+        for (at, ty) in t.binders {
+            self.binders.entry(at).or_insert(ty);
+        }
+        self.stored.extend(t.stored);
+        self.derive.extend(t.derive);
+    }
 }
 
 /// The expressions `f`'s body holds, the measure
@@ -1510,11 +1535,7 @@ impl Recorded {
         self.joins.extend(tail.joins);
         self.node_substs.extend(tail.node_substs);
         self.calls.extend(tail.calls);
-        self.stored.sources.extend(tail.stored.sources);
-        self.stored.arg_sources.extend(tail.stored.arg_sources);
-        self.stored.calls.extend(tail.stored.calls);
-        self.stored.through.extend(tail.stored.through);
-        self.stored.dispatched.extend(tail.stored.dispatched);
+        self.stored.extend(tail.stored);
         self.reads.extend(tail.reads);
         self.entries.extend(tail.entries);
     }
@@ -1585,9 +1606,8 @@ struct Checker<'a> {
     /// depth is outer: a heap value assigned to it would dangle when the
     /// region frees.
     region_floor: RefCell<Vec<usize>>,
-    /// The type of every root-module binding, keyed by binder position, for
-    /// editor hover. A binding in a statement that did not type has no row.
-    binder_types: RefCell<HashMap<(usize, usize), Type>>,
+    /// Everything typing has added so far ([`Typed`]).
+    acc: RefCell<Typed>,
     /// Whether the function being checked is the root module's. Only the root
     /// is indexed: two modules share a position.
     in_root: std::cell::Cell<bool>,
@@ -1616,27 +1636,9 @@ struct Checker<'a> {
     /// The line of the enclosing statement, for a literal, which carries none.
     stmt_line: RefCell<usize>,
     cur_fn: RefCell<String>,
-    /// Every lambda or named function that flows into a stored function value.
-    stored_sources: RefCell<Vec<StoredSource>>,
-    /// Every lambda or function name passed straight to a `fn`-typed
-    /// parameter. See [`StoredFnEffects::arg_sources`].
-    arg_sources: RefCell<Vec<StoredSource>>,
-    /// Each call through a stored function value, as (enclosing function,
-    /// signature).
-    stored_calls: RefCell<Vec<(String, Type)>>,
-    /// See [`StoredFnEffects::through`].
-    through: RefCell<HashSet<NodeId>>,
-    /// See [`StoredFnEffects::dispatched`].
-    dispatched: RefCell<Vec<(String, String)>>,
-    derive_sites: RefCell<Vec<crate::gen::Site>>,
-    /// The record [`record`] asks for, or `None`, so the editor's keystroke
-    /// path does not pay for it.
-    record: Option<RefCell<Recorded>>,
     /// The source body being checked, when the check records: every name
     /// lookup then records a read row for it ([`Checker::reading`]).
     reader: std::cell::Cell<Option<SourceBody>>,
-    /// The read rows, in the order read ([`Recorded::reads`]).
-    reads: RefCell<Vec<(SourceBody, Key)>>,
     /// The substitution the innermost generic call just solved, for the
     /// [`Checker::expr`] wrapper that knows the call node's address. A nested
     /// call consumes and clears it before its caller writes one.
@@ -1761,7 +1763,7 @@ impl<'a> Checker<'a> {
             cx,
             cur_bounds: Default::default(),
             region_floor: Default::default(),
-            binder_types: Default::default(),
+            acc: RefCell::new(Typed::empty(recording)),
             in_root: Default::default(),
             errors: Default::default(),
             globals: Default::default(),
@@ -1772,15 +1774,7 @@ impl<'a> Checker<'a> {
             here: Default::default(),
             stmt_line: Default::default(),
             cur_fn: Default::default(),
-            stored_sources: Default::default(),
-            arg_sources: Default::default(),
-            stored_calls: Default::default(),
-            through: Default::default(),
-            dispatched: Default::default(),
-            derive_sites: Default::default(),
-            record: recording.then(RefCell::default),
             reader: Default::default(),
-            reads: Default::default(),
             pending_subst: Default::default(),
             pending_call: Default::default(),
             fresh: Default::default(),
@@ -1789,7 +1783,7 @@ impl<'a> Checker<'a> {
     }
 
     fn recording(&self) -> bool {
-        self.record.is_some()
+        self.acc.borrow().record.is_some()
     }
 
     /// Hands the solved type arguments to the [`Checker::expr`] wrapper,
@@ -2826,8 +2820,8 @@ impl<'a> Checker<'a> {
             if !lambda.is_empty() {
                 refused.insert(g.name.clone());
                 let key = g.init.id();
-                if let Some(r) = &self.record {
-                    r.borrow_mut().node_types.remove(&key);
+                if let Some(r) = &mut self.acc.borrow_mut().record {
+                    r.node_types.remove(&key);
                 }
             }
             out.extend(lambda.into_iter().map(|d| d.in_file(g.module.clone())));
@@ -2891,57 +2885,27 @@ impl<'a> Checker<'a> {
     }
 
     /// Takes what this checker accumulated, as one body's [`Typed`] with
-    /// `diags`, and leaves the accumulations empty.
+    /// `diags`, and leaves the accumulation empty.
     fn taken(&self, diags: Vec<Diagnostic>) -> Typed {
+        let mut acc = self.acc.borrow_mut();
+        let empty = Typed::empty(acc.record.is_some());
         Typed {
             diags,
-            record: self.record.as_ref().map(|r| r.take()),
-            reads: self.reads.take(),
-            binders: self.binder_types.take(),
-            stored: StoredFnEffects {
-                sources: self.stored_sources.take(),
-                arg_sources: self.arg_sources.take(),
-                calls: self.stored_calls.take(),
-                through: self.through.take(),
-                dispatched: self.dispatched.take(),
-            },
-            derive: self.derive_sites.take(),
+            ..std::mem::replace(&mut *acc, empty)
         }
     }
 
-    /// Puts back accumulations [`Checker::taken`] took, over empty ones.
+    /// Puts back an accumulation [`Checker::taken`] took, over an empty one.
     fn put(&self, t: Typed) {
-        if let (Some(r), Some(part)) = (&self.record, t.record) {
-            *r.borrow_mut() = part;
-        }
-        *self.reads.borrow_mut() = t.reads;
-        *self.binder_types.borrow_mut() = t.binders;
-        *self.stored_sources.borrow_mut() = t.stored.sources;
-        *self.arg_sources.borrow_mut() = t.stored.arg_sources;
-        *self.stored_calls.borrow_mut() = t.stored.calls;
-        *self.through.borrow_mut() = t.stored.through;
-        *self.dispatched.borrow_mut() = t.stored.dispatched;
-        *self.derive_sites.borrow_mut() = t.derive;
+        *self.acc.borrow_mut() = t;
     }
 
-    /// Adds one body's [`Typed`] to this checker's accumulations, as typing
+    /// Adds one body's [`Typed`] to this checker's accumulation, as typing
     /// it here would have, and returns its diagnostics.
-    fn absorb(&self, t: Typed) -> Vec<Diagnostic> {
-        if let (Some(r), Some(part)) = (&self.record, t.record) {
-            r.borrow_mut().extend(part);
-        }
-        let mut binders = self.binder_types.borrow_mut();
-        for (at, ty) in t.binders {
-            binders.entry(at).or_insert(ty);
-        }
-        self.stored_sources.borrow_mut().extend(t.stored.sources);
-        self.arg_sources.borrow_mut().extend(t.stored.arg_sources);
-        self.stored_calls.borrow_mut().extend(t.stored.calls);
-        self.through.borrow_mut().extend(t.stored.through);
-        self.dispatched.borrow_mut().extend(t.stored.dispatched);
-        self.derive_sites.borrow_mut().extend(t.derive);
-        self.reads.borrow_mut().extend(t.reads);
-        t.diags
+    fn absorb(&self, mut t: Typed) -> Vec<Diagnostic> {
+        let diags = std::mem::take(&mut t.diags);
+        self.acc.borrow_mut().extend(t);
+        diags
     }
 
     fn function(&self, f: &Function) -> Result<(), Diagnostic> {
@@ -2955,8 +2919,7 @@ impl<'a> Checker<'a> {
         if col == 0 || !self.in_root.get() {
             return;
         }
-        self.binder_types
-            .borrow_mut()
+        (self.acc.borrow_mut().binders)
             .entry((line, col))
             .or_insert(ty);
     }
@@ -2993,7 +2956,7 @@ impl<'a> Checker<'a> {
     fn dispatch(&self, to: impl IntoIterator<Item = String>) {
         let from = self.cur_fn.borrow();
         let edges = to.into_iter().map(|m| (from.clone(), m));
-        self.dispatched.borrow_mut().extend(edges);
+        self.acc.borrow_mut().stored.dispatched.extend(edges);
     }
 
     /// Hands out the first recorded error as the `Err`; the rest stay in
@@ -3016,21 +2979,25 @@ impl<'a> Checker<'a> {
     /// reads `pending_subst` for the access site's own node.
     fn record_desugar(&self, scope: &Scope, run: impl FnOnce(&Self, &mut Scope)) {
         let mark = self.errors.borrow().len();
-        let stored = (
-            self.stored_sources.borrow().len(),
-            self.arg_sources.borrow().len(),
-            self.stored_calls.borrow().len(),
-            self.dispatched.borrow().len(),
-        );
+        let stored = {
+            let s = &self.acc.borrow().stored;
+            (
+                s.sources.len(),
+                s.arg_sources.len(),
+                s.calls.len(),
+                s.dispatched.len(),
+            )
+        };
         let saved = self.pending_subst.take();
         let mut sc = scope.clone();
         run(self, &mut sc);
         *self.pending_subst.borrow_mut() = saved;
         self.errors.borrow_mut().truncate(mark);
-        self.stored_sources.borrow_mut().truncate(stored.0);
-        self.arg_sources.borrow_mut().truncate(stored.1);
-        self.stored_calls.borrow_mut().truncate(stored.2);
-        self.dispatched.borrow_mut().truncate(stored.3);
+        let s = &mut self.acc.borrow_mut().stored;
+        s.sources.truncate(stored.0);
+        s.arg_sources.truncate(stored.1);
+        s.calls.truncate(stored.2);
+        s.dispatched.truncate(stored.3);
     }
 
     fn block(&self, block: &Block, ret: &Type, scope: &mut Scope) {
@@ -3440,9 +3407,9 @@ impl<'a> Checker<'a> {
         expected: Option<&Type>,
         fn_ret: Option<&Type>,
     ) -> Result<Type, Diagnostic> {
-        let Some(record) = &self.record else {
+        if !self.recording() {
             return self.expr_inner(expr, scope, expected, fn_ret);
-        };
+        }
         let t = self.expr_inner(expr, scope, expected, fn_ret)?;
         let key = expr.id();
         assert_ne!(
@@ -3452,8 +3419,7 @@ impl<'a> Checker<'a> {
         );
         let pending = self.pending_subst.take();
         let call = self.pending_call.take();
-        {
-            let mut r = record.borrow_mut();
+        if let Some(r) = &mut self.acc.borrow_mut().record {
             if let Some(d) = call {
                 r.calls.insert(key, d);
             }
@@ -3571,11 +3537,12 @@ impl<'a> Checker<'a> {
                 if let Some((sptys, sret)) = self.sig(name) {
                     self.storable_named_fn(name, *line)?;
                     let sig = Type::Fn(sptys.clone(), Box::new(sret.clone()));
-                    self.stored_sources.borrow_mut().push(StoredSource {
+                    let source = StoredSource {
                         sig: self.base(&sig),
                         named: Some(name.clone()),
                         lambda: None,
-                    });
+                    };
+                    self.acc.borrow_mut().stored.sources.push(source);
                     return Ok(sig);
                 }
                 self.judged()
@@ -4673,11 +4640,11 @@ impl<'a> Checker<'a> {
                 // attribution.
                 let frame = scope.iter().rposition(|f| f.contains_key(name));
                 if frame != Some(1) {
-                    self.stored_calls
-                        .borrow_mut()
-                        .push((self.cur_fn.borrow().clone(), self.base(&binding.ty)));
+                    let caller = self.cur_fn.borrow().clone();
+                    let sig = self.base(&binding.ty);
+                    self.acc.borrow_mut().stored.calls.push((caller, sig));
                 }
-                self.through.borrow_mut().insert(node);
+                self.acc.borrow_mut().stored.through.insert(node);
                 return Ok((*ret).clone());
             }
             if !dot && scope.iter().any(|f| f.contains_key(name)) {
@@ -5196,7 +5163,7 @@ impl<'a> Checker<'a> {
             if let Err(off) = crate::codec::encodable(&at, self) {
                 return Err(cerr!(line, ToJsonUncodable, off));
             }
-            self.derive_sites.borrow_mut().push(crate::gen::Site {
+            self.acc.borrow_mut().derive.push(crate::gen::Site {
                 g: crate::loader::JSON_ENCODERS.to_string(),
                 entry: Type::Fn(vec![at.clone()], Box::new(Type::Str)),
                 ty: at,
@@ -5223,7 +5190,7 @@ impl<'a> Checker<'a> {
             if let Err(off) = crate::codec::encodable(&at, self) {
                 return Err(cerr!(line, DeriveUncodable, g, off));
             }
-            self.derive_sites.borrow_mut().push(crate::gen::Site {
+            self.acc.borrow_mut().derive.push(crate::gen::Site {
                 g: g.clone(),
                 entry: Type::Fn(vec![at.clone()], Box::new(Type::Str)),
                 ty: at,
@@ -5812,7 +5779,7 @@ impl<'a> Checker<'a> {
             // `T`, and the solve is the one place `T` is known.
             if d.key == "fromJson" {
                 if let Some(t) = solved.get("T") {
-                    self.derive_sites.borrow_mut().push(crate::gen::Site {
+                    self.acc.borrow_mut().derive.push(crate::gen::Site {
                         g: crate::loader::JSON_DECODERS.to_string(),
                         ty: t.clone(),
                         line,
@@ -5995,9 +5962,8 @@ impl<'a> Checker<'a> {
                 self.record_arg_fn(&sig, None, Some((*lline, *lcol)));
                 // The core types the literal's closure from this row (a
                 // `consume` position names no target).
-                if let Some(r) = &self.record {
-                    let key = arg.id();
-                    r.borrow_mut().node_types.insert(key, sig);
+                if let Some(r) = &mut self.acc.borrow_mut().record {
+                    r.node_types.insert(arg.id(), sig);
                 }
                 Ok(true)
             }
@@ -6095,7 +6061,7 @@ impl<'a> Checker<'a> {
         self.check_lambda_body_captures(body, scope, &mut locals, *line)?;
         // Stored calls in the body belong to this lambda's summary, not the
         // enclosing function's: the body runs wherever the value is invoked.
-        let calls_before = self.stored_calls.borrow().len();
+        let calls_before = self.acc.borrow().stored.calls.len();
         match body {
             LambdaBody::Expr(e) => {
                 // The core refuses a body the slot does not take.
@@ -6106,7 +6072,7 @@ impl<'a> Checker<'a> {
             }
             LambdaBody::Block(b) => self.block(b, &ret, &mut inner),
         }
-        let nested_sigs: Vec<Type> = self.stored_calls.borrow()[calls_before..]
+        let nested_sigs: Vec<Type> = self.acc.borrow().stored.calls[calls_before..]
             .iter()
             .map(|(_, s)| s.clone())
             .collect();
@@ -6114,8 +6080,8 @@ impl<'a> Checker<'a> {
         // module-state binding it touches.
         let mut calls: std::collections::HashSet<String> = Default::default();
         {
-            let through = self.through.borrow();
-            let mut v = Calls(&mut calls, &through);
+            let acc = self.acc.borrow();
+            let mut v = Calls(&mut calls, &acc.stored.through);
             let mut locals = HashSet::new();
             match body {
                 LambdaBody::Expr(e) => body_expr(e, &locals, &mut v),
@@ -6143,7 +6109,7 @@ impl<'a> Checker<'a> {
                 }
             })
             .cloned();
-        self.stored_sources.borrow_mut().push(StoredSource {
+        self.acc.borrow_mut().stored.sources.push(StoredSource {
             sig: sig.clone(),
             named: None,
             lambda: Some(StoredLambda {
@@ -6180,7 +6146,7 @@ impl<'a> Checker<'a> {
                 first
             ));
         }
-        self.stored_sources.borrow_mut().push(StoredSource {
+        self.acc.borrow_mut().stored.sources.push(StoredSource {
             sig: sig.clone(),
             named: Some(name.to_string()),
             lambda: None,
@@ -6193,7 +6159,7 @@ impl<'a> Checker<'a> {
     /// already collected). `sig` is the parameter type under the call's
     /// solution, so the concrete signature the instance calls through.
     fn record_arg_fn(&self, sig: &Type, named: Option<&str>, lambda_at: Option<(usize, usize)>) {
-        self.arg_sources.borrow_mut().push(StoredSource {
+        let source = StoredSource {
             sig: self.base(sig),
             named: named.map(str::to_string),
             // Only the frame key is filled: the workers analysis reads
@@ -6206,7 +6172,8 @@ impl<'a> Checker<'a> {
                 touches_global: None,
                 nested_sigs: Vec::new(),
             }),
-        });
+        };
+        self.acc.borrow_mut().stored.arg_sources.push(source);
     }
 
     /// Refuses a generic, `extern` or `gen` function used as a value.
@@ -6598,7 +6565,7 @@ impl<'a> Checker<'a> {
                     name.to_string(),
                 ),
             };
-            self.reads.borrow_mut().push((f, key));
+            self.acc.borrow_mut().reads.push((f, key));
         }
         hit.map(|(_, t)| t)
     }
@@ -6970,6 +6937,15 @@ pub struct StoredFnEffects {
 }
 
 impl StoredFnEffects {
+    /// Adds `tail`'s facts after `self`'s.
+    fn extend(&mut self, tail: StoredFnEffects) {
+        self.sources.extend(tail.sources);
+        self.arg_sources.extend(tail.arg_sources);
+        self.calls.extend(tail.calls);
+        self.through.extend(tail.through);
+        self.dispatched.extend(tail.dispatched);
+    }
+
     /// Returns every function a `fn`-typed value may be, stored or passed.
     pub fn every_source(&self) -> impl Iterator<Item = &StoredSource> {
         self.sources.iter().chain(self.arg_sources.iter())
