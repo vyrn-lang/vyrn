@@ -104,6 +104,24 @@ pub fn line(msg: &str) -> String {
     format!("{PREFIX}{msg}\n")
 }
 
+/// Splits a guest's stderr at its last trap line: the output before it, and
+/// the message after [`PREFIX`] without the final newline. The message is
+/// `None` when no line starts with the prefix.
+pub fn split(stderr: &str) -> (&str, Option<&str>) {
+    let at = stderr
+        .match_indices(PREFIX)
+        .map(|(i, _)| i)
+        .filter(|&i| i == 0 || stderr.as_bytes()[i - 1] == b'\n')
+        .last();
+    match at {
+        Some(i) => (
+            &stderr[..i],
+            Some(stderr[i + PREFIX.len()..].trim_end_matches('\n')),
+        ),
+        None => (stderr, None),
+    }
+}
+
 /// `a / 0` on an integer.
 pub const DIV_ZERO: &str = "division by zero";
 /// `a % 0` on an integer. Distinct from [`DIV_ZERO`] because the operator is.
@@ -344,5 +362,14 @@ mod tests {
             validation("Range", true),
             "validation failed: `Range` violates its `where` clause"
         );
+    }
+
+    /// The split takes the last line that starts with the prefix; a prefix
+    /// inside a line is output.
+    #[test]
+    fn the_split_is_the_inverse_of_the_framing() {
+        let said = format!("out: error: x\n{}", line("a error: b"));
+        assert_eq!(split(&said), ("out: error: x\n", Some("a error: b")));
+        assert_eq!(split("out\n"), ("out\n", None));
     }
 }

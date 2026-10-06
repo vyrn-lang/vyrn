@@ -11,6 +11,9 @@
 //! `wasmtime` is an external dependency.
 
 #[cfg(feature = "host")]
+pub mod wasi;
+
+#[cfg(feature = "host")]
 use std::path::PathBuf;
 #[cfg(feature = "host")]
 use std::sync::mpsc;
@@ -899,38 +902,6 @@ pub enum Atom {
     Str(Vec<u8>),
 }
 
-#[derive(Default)]
-#[cfg(feature = "host")]
-struct Streams {
-    /// NUL-terminated argv, argv[0] first, as `args_get` writes it.
-    argv: Vec<Vec<u8>>,
-    stdout: Vec<u8>,
-    stderr: Vec<u8>,
-    gen: GenState,
-    /// The linear memory, held rather than looked up per call: a separate shim
-    /// module exports it, and imports are called from both modules.
-    mem: Option<wasmtime::Memory>,
-}
-
-#[cfg(feature = "host")]
-impl GenHost for Streams {
-    fn gen(&mut self) -> &mut GenState {
-        &mut self.gen
-    }
-    fn memory(&self) -> Option<wasmtime::Memory> {
-        self.mem
-    }
-}
-
-/// A store that can serve the `vyrn_gen` imports through [`link`]: this crate's
-/// generation run, and the driver's `test` run of a module that reaches a
-/// generator.
-#[cfg(feature = "host")]
-pub trait GenHost {
-    fn gen(&mut self) -> &mut GenState;
-    fn memory(&self) -> Option<wasmtime::Memory>;
-}
-
 /// The host side of the `vyrn_gen` imports: the code arena, the atom stream,
 /// the stash, and the declarations `contractOf` and `lex` read.
 #[derive(Default)]
@@ -1106,23 +1077,6 @@ enum Served {
     Lit(Box<Expr>),
 }
 
-/// `proc_exit`, carried out of the guest as an error: the only way to stop it.
-#[derive(Debug)]
-#[cfg(feature = "host")]
-struct Exit(i32);
-
-#[cfg(feature = "host")]
-#[cfg(feature = "host")]
-impl std::fmt::Display for Exit {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "exit {}", self.0)
-    }
-}
-
-#[cfg(feature = "host")]
-#[cfg(feature = "host")]
-impl std::error::Error for Exit {}
-
 /// A host-side refusal carried out as a trap: a read outside the declared
 /// inputs, or a value with no splice rule. Both abort generation; neither may
 /// reach the generator as a value.
@@ -1131,7 +1085,6 @@ impl std::error::Error for Exit {}
 struct Denied(String);
 
 #[cfg(feature = "host")]
-#[cfg(feature = "host")]
 impl std::fmt::Display for Denied {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&self.0)
@@ -1139,23 +1092,24 @@ impl std::fmt::Display for Denied {
 }
 
 #[cfg(feature = "host")]
-#[cfg(feature = "host")]
 impl std::error::Error for Denied {}
 
 /// Serves the `vyrn_gen` imports [`vyrn_codegen::direct::compile_gen_host`]
-/// emits, on any [`GenHost`] store. Splicing, escaping and float formatting
-/// are the frontend's own functions (`vyrn_frontend::gen`).
+/// emits. Splicing, escaping and float formatting are the frontend's own
+/// functions (`vyrn_frontend::gen`). [`wasi::instantiate`] links them for every
+/// module.
 #[cfg(feature = "host")]
-pub fn link<T: GenHost + 'static>(linker: &mut wasmtime::Linker<T>) -> wasmtime::Result<()> {
+fn link<X: 'static>(linker: &mut wasmtime::Linker<wasi::Guest<X>>) -> wasmtime::Result<()> {
     use wasmtime::{Caller, Error, Result};
+    type T<X> = wasi::Guest<X>;
     // `read` resolves and stashes; `fetch` copies the stash into a buffer the
     // guest allocated, so the host never allocates in linear memory.
     linker.func_wrap(
         "vyrn_gen",
         "read",
-        |mut caller: Caller<'_, T>, path: i32, mode: i32| -> Result<i64> {
+        |mut caller: Caller<'_, T<X>>, path: i32, mode: i32| -> Result<i64> {
             let (data, host) = guest_mem(&mut caller)?;
-            let streams = host.gen();
+            let streams = &mut host.gen;
             let path = cstr(data, path)?;
             let caps = streams.caps.as_ref().ok_or_else(|| Error::msg("no host"))?;
             caps.req
@@ -1177,9 +1131,9 @@ pub fn link<T: GenHost + 'static>(linker: &mut wasmtime::Linker<T>) -> wasmtime:
     linker.func_wrap(
         "vyrn_gen",
         "fetch",
-        |mut caller: Caller<'_, T>, dest: i32| -> Result<()> {
+        |mut caller: Caller<'_, T<X>>, dest: i32| -> Result<()> {
             let (data, host) = guest_mem(&mut caller)?;
-            let streams = host.gen();
+            let streams = &mut host.gen;
             let stash = std::mem::take(&mut streams.stash);
             let slot = data
                 .get_mut(dest as usize..dest as usize + stash.len())
@@ -1194,9 +1148,9 @@ pub fn link<T: GenHost + 'static>(linker: &mut wasmtime::Linker<T>) -> wasmtime:
     linker.func_wrap(
         "vyrn_gen",
         "text",
-        |mut caller: Caller<'_, T>, s: i32| -> Result<i64> {
+        |mut caller: Caller<'_, T<X>>, s: i32| -> Result<i64> {
             let (data, host) = guest_mem(&mut caller)?;
-            let streams = host.gen();
+            let streams = &mut host.gen;
             let text = cstr(data, s)?;
             Ok(streams.intern(vec![CodePiece::Text(text)]))
         },
@@ -1204,9 +1158,9 @@ pub fn link<T: GenHost + 'static>(linker: &mut wasmtime::Linker<T>) -> wasmtime:
     linker.func_wrap(
         "vyrn_gen",
         "rawAt",
-        |mut caller: Caller<'_, T>, s: i32, path: i32, line: i64, col: i64| -> Result<i64> {
+        |mut caller: Caller<'_, T<X>>, s: i32, path: i32, line: i64, col: i64| -> Result<i64> {
             let (data, host) = guest_mem(&mut caller)?;
-            let streams = host.gen();
+            let streams = &mut host.gen;
             let text = cstr(data, s)?;
             let path = cstr(data, path)?;
             Ok(streams.intern(vec![CodePiece::Origin {
@@ -1220,21 +1174,21 @@ pub fn link<T: GenHost + 'static>(linker: &mut wasmtime::Linker<T>) -> wasmtime:
     linker.func_wrap(
         "vyrn_gen",
         "splice",
-        |mut caller: Caller<'_, T>, tag: i32, bits: i64, p: i32, ctx: i64| -> Result<i64> {
+        |mut caller: Caller<'_, T<X>>, tag: i32, bits: i64, p: i32, ctx: i64| -> Result<i64> {
             let (data, host) = guest_mem(&mut caller)?;
-            let streams = host.gen();
+            let streams = &mut host.gen;
             let val = splice_value(tag, bits, p, data, streams)?;
             // A splice violation traps.
             let pieces = vyrn_frontend::gen::gen_code_splice(&val, ctx)
                 .map_err(|m| Error::new(Denied(m)))?;
-            Ok(caller.data_mut().gen().intern(pieces))
+            Ok(caller.data_mut().gen.intern(pieces))
         },
     )?;
     linker.func_wrap(
         "vyrn_gen",
         "concat",
-        |mut caller: Caller<'_, T>, a: i64, b: i64| -> Result<i64> {
-            let s = caller.data_mut().gen();
+        |mut caller: Caller<'_, T<X>>, a: i64, b: i64| -> Result<i64> {
+            let s = &mut caller.data_mut().gen;
             let mut pieces = s.pieces(a)?.clone();
             pieces.extend(s.pieces(b)?.iter().cloned());
             Ok(s.intern(pieces))
@@ -1243,8 +1197,8 @@ pub fn link<T: GenHost + 'static>(linker: &mut wasmtime::Linker<T>) -> wasmtime:
     linker.func_wrap(
         "vyrn_gen",
         "render",
-        |mut caller: Caller<'_, T>, h: i64| -> Result<i64> {
-            let s = caller.data_mut().gen();
+        |mut caller: Caller<'_, T<X>>, h: i64| -> Result<i64> {
+            let s = &mut caller.data_mut().gen;
             let text = vyrn_frontend::gen::render_code(s.pieces(h)?);
             s.stash = text.into_bytes();
             Ok(s.stash.len() as i64)
@@ -1257,9 +1211,9 @@ pub fn link<T: GenHost + 'static>(linker: &mut wasmtime::Linker<T>) -> wasmtime:
     linker.func_wrap(
         "vyrn_gen",
         "reflect",
-        |mut caller: Caller<'_, T>, kind: i64, arg: i32| -> Result<()> {
+        |mut caller: Caller<'_, T<X>>, kind: i64, arg: i32| -> Result<()> {
             let (data, host) = guest_mem(&mut caller)?;
-            let streams = host.gen();
+            let streams = &mut host.gen;
             let arg = cstr(data, arg)?;
             match kind {
                 // Needs the resolver, so it goes to the host thread.
@@ -1312,8 +1266,8 @@ pub fn link<T: GenHost + 'static>(linker: &mut wasmtime::Linker<T>) -> wasmtime:
     linker.func_wrap(
         "vyrn_gen",
         "nextInt",
-        |mut caller: Caller<'_, T>| -> Result<i64> {
-            match caller.data_mut().gen().next_atom()? {
+        |mut caller: Caller<'_, T<X>>| -> Result<i64> {
+            match caller.data_mut().gen.next_atom()? {
                 Atom::Int(n) => Ok(*n),
                 Atom::Str(_) => Err(Error::msg("reflected value: expected an Int atom")),
             }
@@ -1323,8 +1277,8 @@ pub fn link<T: GenHost + 'static>(linker: &mut wasmtime::Linker<T>) -> wasmtime:
     linker.func_wrap(
         "vyrn_gen",
         "nextStr",
-        |mut caller: Caller<'_, T>| -> Result<i64> {
-            let s = caller.data_mut().gen();
+        |mut caller: Caller<'_, T<X>>| -> Result<i64> {
+            let s = &mut caller.data_mut().gen;
             let bytes = match s.next_atom()? {
                 Atom::Str(b) => b.clone(),
                 Atom::Int(_) => return Err(Error::msg("reflected value: expected a Str atom")),
@@ -1338,10 +1292,10 @@ pub fn link<T: GenHost + 'static>(linker: &mut wasmtime::Linker<T>) -> wasmtime:
 
 /// The guest's memory and its store data, held at once.
 #[cfg(feature = "host")]
-fn guest_mem<'a, T: GenHost>(
-    caller: &'a mut wasmtime::Caller<'_, T>,
-) -> wasmtime::Result<(&'a mut [u8], &'a mut T)> {
-    let Some(mem) = caller.data().memory() else {
+fn guest_mem<'a, X>(
+    caller: &'a mut wasmtime::Caller<'_, wasi::Guest<X>>,
+) -> wasmtime::Result<(&'a mut [u8], &'a mut wasi::Guest<X>)> {
+    let Some(mem) = caller.data().wasi.mem else {
         return Err(wasmtime::Error::msg("generator has no memory"));
     };
     Ok(mem.data_and_store_mut(caller))
@@ -1387,26 +1341,6 @@ fn splice_value(
         vyrn_codegen::TAG_F32 => Spliced::F32(f32::from_bits(bits as u32)),
         other => return Err(wasmtime::Error::msg(format!("bad splice tag {other}"))),
     })
-}
-
-#[cfg(feature = "host")]
-const ERRNO_SUCCESS: i32 = 0;
-#[cfg(feature = "host")]
-const ERRNO_BADF: i32 = 8;
-#[cfg(feature = "host")]
-const ERRNO_SPIPE: i32 = 29;
-
-#[cfg(feature = "host")]
-fn wr32(data: &mut [u8], at: i32, v: u32) -> Option<()> {
-    let at = at as usize;
-    data.get_mut(at..at + 4)?.copy_from_slice(&v.to_le_bytes());
-    Some(())
-}
-
-#[cfg(feature = "host")]
-fn rd32(data: &[u8], at: i32) -> Option<u32> {
-    let at = at as usize;
-    Some(u32::from_le_bytes(data.get(at..at + 4)?.try_into().ok()?))
 }
 
 /// The key of a compiled artifact: the generator's whole module closure, not
@@ -1631,10 +1565,10 @@ fn run_hosted(
     }
 }
 
-/// Instantiates the module and returns the source it framed on stdout.
+/// Instantiates the module under [`wasi::Policy::generator`] and returns the
+/// source it framed on stdout.
 ///
-/// Embedded rather than spawned: the `wasmtime` CLI's launch measured ~106 ms. WASI is a hand-written minimum;
-/// every other import traps.
+/// Embedded rather than spawned: the `wasmtime` CLI's launch measured ~106 ms.
 #[cfg(feature = "host")]
 fn run_wasm(
     module: &wasmtime::Module,
@@ -1645,241 +1579,66 @@ fn run_wasm(
     fuel: u64,
     caps: Caps,
 ) -> Result<String, EngineError> {
-    use wasmtime::*;
-
-    let engine = wasm_engine();
-    let mut linker: Linker<Streams> = Linker::new(engine);
-    let wasi = "wasi_snapshot_preview1";
-    link(&mut linker).map_err(|e| EngineError::Failed(e.to_string()))?;
-
-    // The only import that does work.
-    linker
-        .func_wrap(
-            wasi,
-            "fd_write",
-            |mut caller: Caller<'_, Streams>, fd: i32, iovs: i32, iovs_len: i32, nwritten: i32| {
-                let Some(mem) = caller.data().mem else {
-                    return ERRNO_BADF;
-                };
-                if fd != 1 && fd != 2 {
-                    return ERRNO_BADF;
-                }
-                let (data, streams) = mem.data_and_store_mut(&mut caller);
-                let mut text = Vec::new();
-                let mut written = 0u32;
-                for i in 0..iovs_len {
-                    let head = iovs + i * 8;
-                    let (Some(base), Some(len)) = (rd32(data, head), rd32(data, head + 4)) else {
-                        return ERRNO_BADF;
-                    };
-                    let Some(chunk) = data.get(base as usize..(base + len) as usize) else {
-                        return ERRNO_BADF;
-                    };
-                    text.extend_from_slice(chunk);
-                    written += len;
-                }
-                if fd == 1 {
-                    streams.stdout.extend_from_slice(&text);
-                } else {
-                    streams.stderr.extend_from_slice(&text);
-                }
-                match wr32(data, nwritten, written) {
-                    Some(()) => ERRNO_SUCCESS,
-                    None => ERRNO_BADF,
-                }
-            },
-        )
-        .map_err(|e| EngineError::Failed(e.to_string()))?;
-
-    // A character device (a tty) as every stdio fd's type.
-    linker
-        .func_wrap(
-            wasi,
-            "fd_fdstat_get",
-            |mut caller: Caller<'_, Streams>, fd: i32, buf: i32| {
-                let Some(mem) = caller.data().mem else {
-                    return ERRNO_BADF;
-                };
-                if fd > 2 {
-                    return ERRNO_BADF;
-                }
-                let (data, _) = mem.data_and_store_mut(&mut caller);
-                let Some(slot) = data.get_mut(buf as usize..buf as usize + 24) else {
-                    return ERRNO_BADF;
-                };
-                slot.fill(0);
-                slot[0] = 2; // filetype: character_device
-                ERRNO_SUCCESS
-            },
-        )
-        .map_err(|e| EngineError::Failed(e.to_string()))?;
-
-    linker
-        .func_wrap(wasi, "proc_exit", |code: i32| -> Result<()> {
-            Err(Error::new(Exit(code)))
-        })
-        .map_err(|e| EngineError::Failed(e.to_string()))?;
-    linker
-        .func_wrap(wasi, "fd_close", |_: i32| ERRNO_SUCCESS)
-        .map_err(|e| EngineError::Failed(e.to_string()))?;
-    linker
-        .func_wrap(wasi, "fd_seek", |_: i32, _: i64, _: i32, _: i32| {
-            ERRNO_SPIPE
-        })
-        .map_err(|e| EngineError::Failed(e.to_string()))?;
-    // The generator's arguments; the artifact is argument-independent because
-    // they arrive here.
-    linker
-        .func_wrap(
-            wasi,
-            "args_sizes_get",
-            |mut caller: Caller<'_, Streams>, count: i32, size: i32| {
-                let Some(mem) = caller.data().mem else {
-                    return ERRNO_BADF;
-                };
-                let (data, streams) = mem.data_and_store_mut(&mut caller);
-                let n = streams.argv.len() as u32;
-                let bytes: u32 = streams.argv.iter().map(|a| a.len() as u32).sum();
-                match (wr32(data, count, n), wr32(data, size, bytes)) {
-                    (Some(()), Some(())) => ERRNO_SUCCESS,
-                    _ => ERRNO_BADF,
-                }
-            },
-        )
-        .map_err(|e| EngineError::Failed(e.to_string()))?;
-    linker
-        .func_wrap(
-            wasi,
-            "args_get",
-            |mut caller: Caller<'_, Streams>, ptrs: i32, buf: i32| {
-                let Some(mem) = caller.data().mem else {
-                    return ERRNO_BADF;
-                };
-                let (data, streams) = mem.data_and_store_mut(&mut caller);
-                let argv = std::mem::take(&mut streams.argv);
-                let mut at = buf;
-                for (i, arg) in argv.iter().enumerate() {
-                    let Some(slot) = data.get_mut(at as usize..at as usize + arg.len()) else {
-                        return ERRNO_BADF;
-                    };
-                    slot.copy_from_slice(arg);
-                    if wr32(data, ptrs + i as i32 * 4, at as u32).is_none() {
-                        return ERRNO_BADF;
-                    }
-                    at += arg.len() as i32;
-                }
-                let (_, streams) = mem.data_and_store_mut(&mut caller);
-                streams.argv = argv;
-                ERRNO_SUCCESS
-            },
-        )
-        .map_err(|e| EngineError::Failed(e.to_string()))?;
-    // No environment: a generator gets none under either engine.
-    linker
-        .func_wrap(
-            wasi,
-            "environ_sizes_get",
-            |mut caller: Caller<'_, Streams>, count: i32, size: i32| {
-                let Some(mem) = caller.data().mem else {
-                    return ERRNO_BADF;
-                };
-                let (data, _) = mem.data_and_store_mut(&mut caller);
-                match (wr32(data, count, 0), wr32(data, size, 0)) {
-                    (Some(()), Some(())) => ERRNO_SUCCESS,
-                    _ => ERRNO_BADF,
-                }
-            },
-        )
-        .map_err(|e| EngineError::Failed(e.to_string()))?;
-    linker
-        .func_wrap(wasi, "environ_get", |_: i32, _: i32| ERRNO_SUCCESS)
-        .map_err(|e| EngineError::Failed(e.to_string()))?;
-    // argv[0] is the program name, which `args()` skips.
-    let mut world = Streams {
-        gen: GenState {
-            caps: Some(caps),
-            types,
-            contracts,
-            type_arg,
-            ..GenState::default()
-        },
-        ..Streams::default()
+    let gen = GenState {
+        caps: Some(caps),
+        types,
+        contracts,
+        type_arg,
+        ..GenState::default()
     };
-    world.argv.push(b"gen\0".to_vec());
-    world
-        .argv
-        .extend(argv.iter().map(|a| [a.as_bytes(), b"\0"].concat()));
-
-    let mut store = Store::new(engine, world);
-    store
-        .set_fuel(fuel)
-        .map_err(|e| EngineError::Failed(e.to_string()))?;
-
-    // Any other import is a generator this path does not serve; it traps
-    // rather than answers wrong.
-    linker
-        .define_unknown_imports_as_traps(module)
-        .map_err(|e| EngineError::Failed(e.to_string()))?;
-    let inst = linker
-        .instantiate(&mut store, module)
-        .map_err(|e| EngineError::Failed(format!("instantiate: {e}")))?;
-
-    let result = {
-        let start = inst
-            .get_typed_func::<(), ()>(&mut store, "_start")
-            .map_err(|e| EngineError::Failed(format!("_start: {e}")))?;
-        store.data_mut().mem = match inst.get_export(&mut store, "memory") {
-            Some(Extern::Memory(m)) => Some(m),
-            _ => return Err(EngineError::Failed("generator has no memory".into())),
-        };
-        start.call(&mut store, ())
+    // argv[0] is the program name, which `args()` skips.
+    let argv: Vec<String> = std::iter::once("gen".to_string())
+        .chain(argv.iter().cloned())
+        .collect();
+    let policy = wasi::Policy::generator(fuel);
+    let (mut store, inst) = wasi::instantiate(module, &policy, &argv, gen, (), |_| Ok(()))
+        .map_err(EngineError::Failed)?;
+    let result = match inst.get_typed_func::<(), ()>(&mut store, "_start") {
+        Ok(start) => start.call(&mut store, ()),
+        Err(e) => return Err(EngineError::Failed(format!("_start: {e}"))),
     };
     if std::env::var("VYRN_GENWASM_TRACE").is_ok() {
         // The fuel a real generator spends, which sizes `wasm_fuel`.
         let spent = fuel - store.get_fuel().unwrap_or(0);
         eprintln!("genwasm fuel: {spent}");
     }
-    let streams = store.into_data();
-    match result {
+    let guest = store.into_data();
+    match wasi::exit_code(result) {
+        Ok(0) => {}
+        // The guest failed on its own terms. The prefix comes off because
+        // generation takes the bare message and the loader adds context.
+        Ok(code) => {
+            let err = String::from_utf8_lossy(guest.wasi.stderr.as_deref().unwrap_or_default());
+            return Err(EngineError::Failed(
+                match vyrn_frontend::trap::split(&err).1 {
+                    Some(msg) => msg.to_string(),
+                    None => format!("generator exited with {code}"),
+                },
+            ));
+        }
         // Out of fuel is reworded as the step-budget message.
-        Err(e) if e.downcast_ref::<Trap>() == Some(&Trap::OutOfFuel) => {
+        Err(e) if e.downcast_ref::<wasmtime::Trap>() == Some(&wasmtime::Trap::OutOfFuel) => {
             return Err(EngineError::Failed(
                 "generator exceeded its step budget".into(),
             ))
         }
-        Ok(()) => {}
-        Err(e) => match e.downcast_ref::<Exit>() {
-            Some(Exit(0)) => {}
-            // The guest failed on its own terms; its message is the last line
-            // of stderr. The `error: ` prefix comes off because generation
-            // takes the bare message and the loader adds context.
-            Some(Exit(code)) => {
-                let err = String::from_utf8_lossy(&streams.stderr);
-                let msg = err.trim_end().lines().last().unwrap_or_default();
-                let msg = msg.strip_prefix("error: ").unwrap_or(msg).to_string();
-                return Err(EngineError::Failed(if msg.is_empty() {
-                    format!("generator exited with {code}")
-                } else {
-                    msg
-                }));
-            }
-            // The message comes from the payload, not `e`: wasmtime wraps a
-            // host error in a guest backtrace.
-            None if e.downcast_ref::<Denied>().is_some() => {
-                return Err(EngineError::Failed(
-                    e.downcast_ref::<Denied>().unwrap().0.clone(),
-                ))
-            }
-            None => return Err(EngineError::Failed(format!("generator trapped: {e}"))),
-        },
+        // The message comes from the payload, not `e`: wasmtime wraps a host
+        // error in a guest backtrace.
+        Err(e) => {
+            return Err(EngineError::Failed(match e.downcast_ref::<Denied>() {
+                Some(Denied(msg)) => msg.clone(),
+                None => format!("generator trapped: {e}"),
+            }))
+        }
     }
     // The last reflected value has no following `reflect` to check it.
-    streams
+    guest
         .gen
         .drained()
         .map_err(|e| EngineError::Failed(e.to_string()))?;
     // Compile-time prints go to the compiler's stdout, never into the source.
-    let (prints, source) = match unframe_result(&streams.stdout) {
+    let stdout = guest.wasi.stdout.unwrap_or_default();
+    let (prints, source) = match unframe_result(&stdout) {
         Ok(framed) => framed,
         Err(why) => return Err(decline(why)),
     };

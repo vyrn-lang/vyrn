@@ -299,7 +299,7 @@ pub mod observe {
 /// order. `std/mem` names each in lowerCamelCase: `fd_write` is `fdWrite`.
 ///
 /// Each host implements exactly this set, and a test on each side compares its set with this
-/// table: `vyrn-cli/src/wasmrun.rs` for the embedded engine, `wasi_host.c` for the wasm2c
+/// table: `vyrn-genwasm/src/wasi.rs` for the embedded engine, `wasi_host.c` for the wasm2c
 /// route. `std/mem` declares each call as a Vyrn function and `web/wasi-min.js` implements it
 /// for the browser, degraded: no argv, EOF on stdin, no preopens, every `path_open` NOENT.
 pub const WASI_IMPORTS: &[(&str, &[wasm::ValType], &[wasm::ValType])] = {
