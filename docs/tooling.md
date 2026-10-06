@@ -57,11 +57,11 @@ generator cache to mean anything.
 
 ### `vyrn fix [file]`
 
-Applies the `.copy()` that a move diagnostic names, in the file given. Every
-other fix on the menu (`consume`, `for x in consume xs`) changes an API or a
-caller's contract, so `fix` refuses it. A round applies at most one edit per
-line and is kept only if the diagnostic count falls. A diagnostic in an imported
-file is reported, not edited.
+Applies the `.copy()` that a diagnostic carries as a `Fix`, at the line and
+column the diagnostic gives, in the file given. Every other fix on the menu
+(`consume`, `for x in consume xs`) changes an API or a caller's contract, so
+`fix` refuses it. A diagnostic with no `Fix` is reported, so is one in an
+imported file. A round is kept only if the diagnostic count falls.
 
 ### `vyrn build [file] [-o out] [--target wasm]`
 

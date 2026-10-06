@@ -106,9 +106,9 @@ fn it_refuses_a_use_after_consume_because_the_menu_names_no_edit() {
 }
 
 #[test]
-fn it_refuses_a_line_where_the_path_appears_twice() {
-    // The diagnostic carries a line and no column, so two occurrences of the path on one
-    // line leave the tool unable to say which one it is about.
+fn it_copies_each_of_two_occurrences_on_one_line() {
+    // The diagnostic carries the column of each path, so a line that takes the
+    // same name twice needs no choice between the two.
     let src = "fn twice(s: read String) -> Array<String> {\n\
                    let mut out: Array<String> = []\n\
                    out.push(s) out.push(s)\n\
@@ -116,8 +116,45 @@ fn it_refuses_a_line_where_the_path_appears_twice() {
                }\n\
                fn main() -> Int64 { return 0 }\n";
     let (log, after) = fix("twice", src);
-    assert_eq!(after, src, "the file must be untouched");
-    assert!(log.contains("appears 2 times on the line"), "{log}");
+    assert!(
+        after.contains("out.push(s.copy()) out.push(s.copy())"),
+        "{after}"
+    );
+    assert!(log.contains("2 fix(es) applied, 0 left"), "{log}");
+    assert!(checks("twice-after", &after), "{after}");
+}
+
+#[test]
+fn it_copies_a_name_on_a_later_line_than_the_statement() {
+    let src = "type Box = { a: String, b: String }\n\
+               fn g(s: read String) -> Box {\n\
+                   return Box {\n\
+                       a: \"x\",\n\
+                       b: s,\n\
+                   }\n\
+               }\n\
+               fn main() -> Int64 { return 0 }\n";
+    let (_, after) = fix("later-line", src);
+    assert!(after.contains("b: s.copy(),"), "{after}");
+    assert!(checks("later-line-after", &after), "{after}");
+}
+
+#[test]
+fn it_copies_a_value_where_it_was_moved_rather_than_where_it_is_used_again() {
+    let src = "fn f() -> Array<String> {\n\
+                   let s = \"a\" + \"b\"\n\
+                   let mut out: Array<String> = []\n\
+                   out.push(s)\n\
+                   out.push(s)\n\
+                   return out\n\
+               }\n\
+               fn main() -> Int64 { return 0 }\n";
+    let (_, after) = fix("moved", src);
+    assert!(
+        after.contains("out.push(s.copy())\nout.push(s)\n"),
+        "{after}"
+    );
+    assert!(checks("moved-after", &after), "{after}");
 }
 
 #[test]

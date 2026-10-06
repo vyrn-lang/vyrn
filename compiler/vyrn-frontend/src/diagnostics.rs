@@ -47,6 +47,10 @@ pub struct Diagnostic {
     pub rule: Option<Rule>,
     /// The ways out a site chose by its own state, under the rule's own.
     pub more: Vec<String>,
+    /// The edits among the ways out that a program can apply, by position.
+    /// A way out whose position is unknown has no entry here, only its line in
+    /// the menu.
+    pub fixes: Vec<Fix>,
     /// A secondary note: the generated location of a diagnostic
     /// remapped to its origin file, or why an origin directive could not be
     /// followed.
@@ -72,6 +76,7 @@ impl Diagnostic {
             message,
             rule: None,
             more: Vec::new(),
+            fixes: Vec::new(),
             note: None,
             from_generated: false,
         }
@@ -130,6 +135,11 @@ impl Diagnostic {
         }
     }
 
+    /// Adds the edits `fixes` that a program can apply.
+    pub fn with_fixes(self, fixes: Vec<Fix>) -> Self {
+        Diagnostic { fixes, ..self }
+    }
+
     pub fn with_note(self, note: String) -> Self {
         Diagnostic {
             note: Some(note),
@@ -144,8 +154,16 @@ impl Diagnostic {
     }
 }
 
-/// Opens a fix line under a refusal's sentence; `vyrn fix` reads a menu by it.
-pub const FIX: &str = "fix: ";
+/// An edit that resolves a diagnostic.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Fix {
+    /// Insert `.copy()` at the 1-based `(line, col)`: the column just past the
+    /// end of the path whose value is taken.
+    Copy { line: usize, col: usize },
+}
+
+/// Opens a fix line under a refusal's sentence.
+const FIX: &str = "fix: ";
 
 /// Appends one `  fix: ...` line per way out of `sentence`, in order.
 pub fn menu(sentence: String, fixes: impl IntoIterator<Item = impl std::fmt::Display>) -> String {
