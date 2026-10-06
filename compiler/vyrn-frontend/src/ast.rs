@@ -1939,6 +1939,19 @@ impl Block {
 }
 
 impl Param {
+    /// Returns a `read` parameter no source token spells: line 0, column 0, no
+    /// id yet. A caller sets another capability with struct update.
+    pub fn synth(name: impl Into<String>, ty: Type) -> Self {
+        Param {
+            id: Id::NEW,
+            name: name.into(),
+            capability: Capability::Read,
+            ty,
+            line: 0,
+            col: 0,
+        }
+    }
+
     pub fn id(&self) -> NodeId {
         self.id.0
     }
