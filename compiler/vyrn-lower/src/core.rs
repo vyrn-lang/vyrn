@@ -1329,13 +1329,7 @@ impl<'a> Builder<'a> {
                 inst.spelling(),
                 inst.func.is_export_extern,
             ),
-            Source::Block(ob) => (
-                Some(ob.id),
-                None,
-                fns.id(&ob.name),
-                ob.name.clone(),
-                false,
-            ),
+            Source::Block(ob) => (Some(ob.id), None, fns.id(&ob.name), ob.name.clone(), false),
             Source::Globals(_) | Source::Expr { .. } => {
                 (None, None, fns.id(""), String::new(), false)
             }
