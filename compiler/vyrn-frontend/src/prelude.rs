@@ -162,9 +162,10 @@ impl Shape {
 /// What a call does to its receiver's length: the fact a pass that removes a
 /// bounds check may carry across the call (obligation O3). Every other operand
 /// is read, so it keeps its length and its elements.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum Length {
     /// States nothing, so the pass forgets what it knew.
+    #[default]
     Unknown,
     Keeps,
     GrowsByOne,
@@ -176,8 +177,9 @@ pub enum Length {
 }
 
 /// What a call does to its receiver's elements, in the sense of [`Length`].
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum Elements {
+    #[default]
     Unknown,
     /// Every position that survives the call holds the element it held.
     KeepsEachPosition,
@@ -190,6 +192,7 @@ pub enum Elements {
 /// the parser's method spelling, the core's [`Spec`], the effect lattice's
 /// atom, the loader's route and the editor's completion, hover and colour read
 /// this row. `vyrn_codegen::direct` dispatches on the name itself.
+#[derive(Default)]
 pub struct Builtin {
     pub name: &'static str,
     /// The contract a call is checked against, as a user declaration would
@@ -220,10 +223,6 @@ pub struct Builtin {
     /// alone. `None` for a row typed by its `sig`, by a hand arm, or not
     /// typed as a call.
     pub typed: Option<Typed>,
-    /// Whether a hand arm in the checker types the call although the row has
-    /// a `sig`: the type needs a receiver's kind, a `mut` binding, a contract
-    /// or generator name, or a type from context. [`checkable`] skips it.
-    pub arm: bool,
 }
 
 /// The refusal of an operand found at another type than its parameter's.
@@ -254,24 +253,18 @@ pub struct Typed {
 
 /// Splits a vector builtin's name into its type and operation as written:
 /// `@f32x4Nearest` is `F32x4` and `nearest`.
-pub fn simd_words(name: &str) -> (&'static str, String) {
-    let ty = if name.starts_with("@i32x4") {
-        "I32x4"
-    } else if name.starts_with("@f64x2") {
-        "F64x2"
-    } else {
-        "F32x4"
+pub fn simd_words(name: &str) -> (String, String) {
+    // Every vector name is `@`, a five-character type word, then the operation.
+    let (ty, op) = name[1..].split_at(5);
+    let first = |s: &str, f: fn(char) -> String| {
+        s.chars()
+            .next()
+            .map_or_else(String::new, |c| f(c) + &s[1..])
     };
-    let op = name
-        .trim_start_matches("@f32x4")
-        .trim_start_matches("@i32x4")
-        .trim_start_matches("@f64x2");
-    let mut it = op.chars();
-    let op = match it.next() {
-        Some(c) => c.to_lowercase().collect::<String>() + it.as_str(),
-        None => String::new(),
-    };
-    (ty, op)
+    (
+        first(ty, |c| c.to_uppercase().to_string()),
+        first(op, |c| c.to_lowercase().to_string()),
+    )
 }
 
 fn panic_arity(_: &str, _: usize, got: usize) -> Rule {
@@ -298,19 +291,7 @@ fn panic_type(_: &str, _: usize, _: &Type, t: &Type) -> Rule {
 fn b(name: &'static str) -> Builtin {
     Builtin {
         name,
-        sig: None,
-        method: None,
-        on: &[],
-        spec: None,
-        effect: None,
-        route: None,
-        gen_route: None,
-        hover: None,
-        length: Length::Unknown,
-        elements: Elements::Unknown,
-        arity: None,
-        typed: None,
-        arm: false,
+        ..Default::default()
     }
 }
 
@@ -392,9 +373,6 @@ impl Builtin {
             t.stops = n;
         }
         self
-    }
-    fn arm(self) -> Self {
-        Builtin { arm: true, ..self }
     }
     fn resizes(self, length: Length, elements: Elements) -> Self {
         Builtin {
@@ -500,7 +478,7 @@ fn table() -> Vec<Builtin> {
     let mut rows = vec![
         // The pushed value goes into the array. The receiver is `read` because
         // `push` rebuilds the array rather than mutating it (see [`rebuilds`]).
-        b("@push").arm().takes(&[2], takes_two)
+        b("@push").takes(&[2], takes_two)
             .sig(row(
                 "@push",
                 &["T"],
@@ -534,14 +512,13 @@ fn table() -> Vec<Builtin> {
             &["self", "i"],
         )),
         // `modify`: both write the array back, so the binding must be `mut`.
-        b("@pop").arm().takes(&[1], takes_none)
+        b("@pop").takes(&[1], takes_none)
             .sig(row("@pop", &["T"], &[("self", Modify, arr(t()))], opt(t()), &[]))
             .method("pop", &[Array, SmallArray])
             .spec(Spec::Removes)
             .hover("array.pop() -> Option<T> — remove and return the last element (None if empty)")
             .resizes(Length::ShrinksByOneIfNotEmpty, Elements::KeepsEachPosition),
         b("@swapRemove")
-            .arm()
             .takes(&[2], |_, _, got| rule!(SwapRemoveArity, got = got.saturating_sub(1)))
             .sig(row(
                 "@swapRemove",
@@ -624,7 +601,7 @@ fn table() -> Vec<Builtin> {
             .spec(Spec::Finds)
             .hover("map.has(key) -> Bool — whether the map contains the key"),
         // Shrinks the map in place, as `@pop` does an array.
-        b("@remove").arm()
+        b("@remove")
             .sig(row(
                 "@remove",
                 &["K", "V"],
@@ -861,7 +838,7 @@ fn table() -> Vec<Builtin> {
             .sig(row("assert", &[], &[("c", Read, Bool)], Unit, &[]))
             .spec(Spec::Asserts)
             .effect(Trap),
-        b("assertEq").arm().takes(&[2], takes_two)
+        b("assertEq").takes(&[2], takes_two)
             .sig(row(
                 "assertEq",
                 &["T"],
@@ -871,7 +848,7 @@ fn table() -> Vec<Builtin> {
             ))
             .spec(Spec::Asserts)
             .effect(Trap),
-        b("blackBox").arm().takes(&[1], takes_one)
+        b("blackBox").takes(&[1], takes_one)
             .sig(row("blackBox", &["T"], &[("x", Read, t())], t(), &[]))
             .spec(Spec::Barrier),
         // A stream's close frees what its producer was handed (the array's
@@ -920,7 +897,7 @@ fn table() -> Vec<Builtin> {
             .hover("serveStream(stream) -> Unit — hand a `Stream<String>` of encoded frames to the serving host, which writes each one and closes the stream the first time a write fails; `std/http`'s `sse` is the one to call"),
         // The argument is an address, so nothing is consumed; the result's
         // stream type carries the disposal obligation.
-        b("unboxStream").arm().takes(&[1], takes_one)
+        b("unboxStream").takes(&[1], takes_one)
             .sig(row("unboxStream", &["T"], &[("a", Read, Int)], stm(t()), &[]))
             .spec(Spec::Builds(stm(t())))
             .hover("unboxStream(address) -> Stream<T> — take a boxed stream back out; needs its type from the annotation: `let s: Stream<T> = unboxStream(a)`"),
@@ -952,11 +929,10 @@ fn table() -> Vec<Builtin> {
         // Every allocating builtin needs a row, or an unannotated binding to its
         // result has no type and leaks. `toJson`'s parameter is a union: inert.
         b("toJson")
-            .arm()
             .takes(&[1], |_, _, got| rule!(ToJsonArity, got))
             .sig(row("toJson", &[], &[("x", Read, Unit)], Str, &[])),
         // The generator is a name, not a value, and `x` any type: both inert.
-        b("derive").arm().sig(row(
+        b("derive").sig(row(
             "derive",
             &[],
             &[("g", Read, Unit), ("x", Read, Unit)],
@@ -1101,7 +1077,7 @@ fn table() -> Vec<Builtin> {
             .effect(GenOnly),
         // The argument is a contract name, not a value: inert. The checker
         // refuses anything but a declared contract name.
-        b("contractOf").arm()
+        b("contractOf")
             .sig(row(
                 "contractOf",
                 &[],
@@ -1277,11 +1253,11 @@ pub fn signature(name: &str) -> Option<&'static Function> {
 }
 
 /// Returns the row a call site is type-checked against, as a user declaration
-/// would be, or `None` for a lending row or one a hand arm types
-/// ([`Builtin::arm`]).
+/// would be, or `None` for an inert row: a lending one, or one with a `Unit`
+/// parameter (no builtin takes a real `Unit`, so the spelling is the marker).
 pub fn checkable(name: &str) -> Option<&'static Function> {
     let f = signature(name)?;
-    (!lends(name) && !builtin(name).is_some_and(|b| b.arm)).then_some(f)
+    (!lends(name) && !f.params.iter().any(|p| p.ty == Type::Unit)).then_some(f)
 }
 
 /// Returns each row's name and result type for [`crate::declared`], skipping a
@@ -1418,30 +1394,18 @@ mod tests {
         }
     }
 
-    /// A call is typed one way: by its row's `sig`, by `typed`, or by a hand
-    /// arm. A `Unit` parameter is inert, so its row lends or has an arm.
+    /// A typed row admits only counts its parameters cover.
     #[test]
-    fn every_row_is_typed_one_way() {
+    fn every_typed_row_counts_within_its_parameters() {
         for b in builtins() {
-            let n = b.name;
+            let Some(t) = &b.typed else { continue };
+            let counts = b.arity.as_ref().map(|a| a.counts.as_slice());
+            let fits = counts.is_some_and(|c| c.iter().all(|&k| k <= t.params.len()));
             assert!(
-                !(b.arm && b.typed.is_some()),
-                "`{n}` has a typed row and an arm"
+                fits && t.stops <= t.params.len(),
+                "`{}` counts past its parameters",
+                b.name
             );
-            assert!(
-                !b.arm || b.sig.is_some(),
-                "`{n}` marks an arm over no `sig`"
-            );
-            let unit = (b.sig.iter()).any(|f| f.params.iter().any(|p| p.ty == Type::Unit));
-            assert!(!unit || b.arm || lends(n), "`{n}` has an inert parameter");
-            if let Some(t) = &b.typed {
-                let counts = b.arity.as_ref().map(|a| a.counts.as_slice());
-                let fits = counts.is_some_and(|c| c.iter().all(|&k| k <= t.params.len()));
-                assert!(
-                    fits && t.stops <= t.params.len(),
-                    "`{n}` counts past its parameters"
-                );
-            }
         }
     }
 

@@ -4492,7 +4492,7 @@ impl<'a> Checker<'a> {
             "@f32x4Load" | "@f32x4Store" | "@i32x4Load" | "@i32x4Store" | "@f64x2Load"
             | "@f64x2Store" => {
                 let what = crate::prelude::simd_words(name).0;
-                let (vec, lane) = match what {
+                let (vec, lane) = match what.as_str() {
                     "I32x4" => (Type::I32x4, INT32),
                     "F64x2" => (Type::F64x2, Type::Float),
                     _ => (Type::F32x4, Type::Float32),
