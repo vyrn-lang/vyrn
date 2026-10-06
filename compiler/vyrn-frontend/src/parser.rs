@@ -223,7 +223,7 @@ fn if_let(pattern: Pattern, scrutinee: Expr, then: Block, els: Option<Block>, li
         arms: vec![arm(pattern, then), arm(Pattern::Other, els)],
         line,
     };
-    Stmt::Expr(m, Id::NEW)
+    Stmt::expr(m)
 }
 
 fn as_fn_body(src: &str) -> String {
@@ -272,16 +272,7 @@ pub fn place_receiver(
                 name: tmp.clone(),
                 mutable: true,
                 ty: None,
-                value: Expr::Field {
-                    id: Id::NEW,
-                    expr: Box::new(Expr::Var {
-                        id: Id::NEW,
-                        name: parent.clone(),
-                        line,
-                    }),
-                    field: field.clone(),
-                    line,
-                },
+                value: Expr::field(Expr::var(parent.clone(), line), field.clone(), line),
                 line,
                 col: 0,
             });
@@ -291,11 +282,7 @@ pub fn place_receiver(
                     id: Id::NEW,
                     name: parent,
                     field: field.clone(),
-                    value: Expr::Var {
-                        id: Id::NEW,
-                        name: tmp.clone(),
-                        line,
-                    },
+                    value: Expr::var(tmp.clone(), line),
                     line,
                 },
             );
@@ -307,35 +294,13 @@ pub fn place_receiver(
             let (parent, mut hoists, mut pre, mut post) = place_receiver(&args[0], line)?;
             let tmp = format!("{parent}[]");
             let idx = format!("{tmp}idx");
-            hoists.push(Stmt::Let {
-                id: Id::NEW,
-                name: idx.clone(),
-                mutable: false,
-                ty: None,
-                value: args[1].clone(),
+            hoists.push(Stmt::let_(idx.clone(), args[1].clone(), line));
+            let index = Expr::var(idx, line);
+            let load = Expr::call(
+                "@at",
+                vec![Expr::var(parent.clone(), line), index.clone()],
                 line,
-                col: 0,
-            });
-            let index = Expr::Var {
-                id: Id::NEW,
-                name: idx,
-                line,
-            };
-            let load = Expr::Call {
-                id: Id::NEW,
-                dot: false,
-                type_args: Vec::new(),
-                name: "@at".to_string(),
-                args: vec![
-                    Expr::Var {
-                        id: Id::NEW,
-                        name: parent.clone(),
-                        line,
-                    },
-                    index.clone(),
-                ],
-                line,
-            };
+            );
             pre.push(Stmt::Let {
                 id: Id::NEW,
                 name: tmp.clone(),
@@ -351,11 +316,7 @@ pub fn place_receiver(
                     id: Id::NEW,
                     name: parent,
                     index,
-                    value: Expr::Var {
-                        id: Id::NEW,
-                        name: tmp.clone(),
-                        line,
-                    },
+                    value: Expr::var(tmp.clone(), line),
                     line,
                 },
             );
@@ -395,20 +356,8 @@ pub fn hoist_operand(e: Expr, name: String, hoists: &mut Vec<Stmt>, line: usize)
     if !reads_place(&e) {
         return e;
     }
-    hoists.push(Stmt::Let {
-        id: Id::NEW,
-        name: name.clone(),
-        mutable: false,
-        ty: None,
-        value: e,
-        line,
-        col: 0,
-    });
-    Expr::Var {
-        id: Id::NEW,
-        name,
-        line,
-    }
+    hoists.push(Stmt::let_(name.clone(), e, line));
+    Expr::var(name, line)
 }
 
 /// Rewrites the receiver of a mutating method (`r.a.pop()`,
@@ -435,14 +384,10 @@ fn hoist_mutating_receiver(e: &mut Expr, line: usize) -> Option<(Vec<Stmt>, Vec<
     // the other arguments run first.
     for (n, arg) in args.iter_mut().enumerate().skip(1) {
         let tmp = format!("{recv}[]arg{n}");
-        let taken = std::mem::replace(arg, Expr::Int(0, Id::NEW));
+        let taken = std::mem::replace(arg, Expr::int(0));
         *arg = hoist_operand(taken, tmp, &mut hoists, line);
     }
-    args[0] = Expr::Var {
-        id: Id::NEW,
-        name: recv,
-        line,
-    };
+    args[0] = Expr::var(recv, line);
     hoists.extend(pre);
     Some((hoists, post))
 }
@@ -2785,22 +2730,15 @@ impl Parser {
                 arms: vec![
                     MatchArm {
                         pattern: Pattern::Variant(variant.clone(), arm_binds),
-                        body: ArmBody::Expr(Expr::Var {
-                            id: Id::NEW,
-                            name: b.name.clone(),
-                            line,
-                        }),
+                        body: ArmBody::Expr(Expr::var(b.name.clone(), line)),
                     },
                     MatchArm {
                         pattern: Pattern::Other,
-                        body: ArmBody::Expr(Expr::Call {
-                            id: Id::NEW,
-                            dot: false,
-                            type_args: Vec::new(),
-                            name: "panic".to_string(),
-                            args: vec![Expr::Str(msg.clone(), Id::NEW)],
+                        body: ArmBody::Expr(Expr::call(
+                            "panic",
+                            vec![Expr::str(msg.clone())],
                             line,
-                        }),
+                        )),
                     },
                 ],
                 line,
@@ -3063,7 +3001,7 @@ impl Parser {
                 // they move the receiver out and back below.
                 let mut e = e;
                 if let Some((mut pre, post)) = hoist_mutating_receiver(&mut e, line) {
-                    pre.push(Stmt::Expr(e, Id::NEW));
+                    pre.push(Stmt::expr(e));
                     pre.extend(post);
                     return Ok(self.spliced(pre));
                 }
@@ -3128,7 +3066,7 @@ impl Parser {
                 if let Expr::Match { stmt_pos, .. } = &mut e {
                     *stmt_pos = true;
                 }
-                Ok(Stmt::Expr(e, Id::NEW))
+                Ok(Stmt::expr(e))
             }
         }
     }
@@ -3237,11 +3175,7 @@ impl Parser {
             arms: vec![
                 MatchArm {
                     pattern: Pattern::Success(Binder::synthetic("@v")),
-                    body: ArmBody::Expr(Expr::Var {
-                        id: Id::NEW,
-                        name: "@v".to_string(),
-                        line,
-                    }),
+                    body: ArmBody::Expr(Expr::var("@v", line)),
                 },
                 MatchArm {
                     pattern: Pattern::Failure(Binder::synthetic("@e")),
@@ -3437,12 +3371,7 @@ impl Parser {
                     };
                     return self.struct_lit(format!("{ns}.{name}"), line);
                 } else {
-                    return Ok(Expr::Field {
-                        id: Id::NEW,
-                        expr: Box::new(e),
-                        field: name,
-                        line,
-                    });
+                    return Ok(Expr::field(e, name, line));
                 }
             }
             Tok::LBracket => {
@@ -3453,14 +3382,7 @@ impl Parser {
                 let idx = self.expr()?;
                 self.no_struct = saved;
                 self.eat(&Tok::RBracket)?;
-                return Ok(Expr::Call {
-                    id: Id::NEW,
-                    dot: false,
-                    type_args: Vec::new(),
-                    name: "@at".to_string(),
-                    args: vec![e, idx],
-                    line,
-                });
+                return Ok(Expr::call("@at", vec![e, idx], line));
             }
             _ => Ok(e),
         }
@@ -3550,15 +3472,11 @@ impl Parser {
             return Err(refuse!("parse", line, col, LambdaNotHere, form, fix));
         }
         match self.advance() {
-            Tok::Int(v) => Ok(Expr::Int(v, Id::NEW)),
+            Tok::Int(v) => Ok(Expr::int(v)),
             Tok::Byte(v) => Ok(Expr::Byte(v, Id::NEW)),
             Tok::Float(v) => Ok(Expr::Float(v, Id::NEW)),
-            Tok::Str(s) => Ok(Expr::Str(s, Id::NEW)),
-            Tok::Vself => Ok(Expr::Var {
-                id: Id::NEW,
-                name: "self".to_string(),
-                line,
-            }),
+            Tok::Str(s) => Ok(Expr::str(s)),
+            Tok::Vself => Ok(Expr::var("self", line)),
             Tok::TemplateStr { parts, exprs } => self.template(parts, exprs, line, col),
             Tok::True => Ok(Expr::Bool(true, Id::NEW)),
             Tok::False => Ok(Expr::Bool(false, Id::NEW)),
@@ -3763,22 +3681,15 @@ impl Parser {
     ) -> Result<Expr, Diagnostic> {
         let mut pieces: Vec<Expr> = Vec::new();
         if !parts[0].is_empty() {
-            pieces.push(Expr::Str(parts[0].clone(), Id::NEW));
+            pieces.push(Expr::str(parts[0].clone()));
         }
         for (k, src) in exprs.iter().enumerate() {
             let e = self.parse_hole(src, line, col)?;
             // `@str` and `@concat` are unlexable, so a user call to `str` or `concat`
             // gets the migration hint.
-            pieces.push(Expr::Call {
-                id: Id::NEW,
-                dot: false,
-                type_args: Vec::new(),
-                name: "@str".to_string(),
-                args: vec![e],
-                line,
-            });
+            pieces.push(Expr::call("@str", vec![e], line));
             if !parts[k + 1].is_empty() {
-                pieces.push(Expr::Str(parts[k + 1].clone(), Id::NEW));
+                pieces.push(Expr::str(parts[k + 1].clone()));
             }
         }
         // There is at least one hole, so `pieces` is non-empty; a lone piece is
@@ -3786,14 +3697,7 @@ impl Parser {
         let mut iter = pieces.into_iter();
         let mut acc = iter.next().unwrap();
         for p in iter {
-            acc = Expr::Call {
-                id: Id::NEW,
-                dot: false,
-                type_args: Vec::new(),
-                name: "@concat".to_string(),
-                args: vec![acc, p],
-                line,
-            };
+            acc = Expr::call("@concat", vec![acc, p], line);
         }
         Ok(acc)
     }
@@ -3854,20 +3758,13 @@ impl Parser {
         }
         let parts_lit = Expr::ArrayLit {
             id: Id::NEW,
-            elems: parts.into_iter().map(|s| Expr::Str(s, Id::NEW)).collect(),
+            elems: parts.into_iter().map(Expr::str).collect(),
             line,
         };
         let mut values = Vec::new();
         for src in &exprs {
             let e = self.parse_hole(src, line, col)?;
-            values.push(Expr::Call {
-                id: Id::NEW,
-                dot: false,
-                type_args: Vec::new(),
-                name: "value".to_string(),
-                args: vec![e],
-                line,
-            });
+            values.push(Expr::call("value", vec![e], line));
         }
         let values_lit = Expr::ArrayLit {
             id: Id::NEW,
@@ -3875,14 +3772,7 @@ impl Parser {
             line,
         };
         // `@list` is unlexable, like `@str`.
-        let wrap = |e| Expr::Call {
-            id: Id::NEW,
-            dot: false,
-            type_args: Vec::new(),
-            name: "@list".to_string(),
-            args: vec![e],
-            line,
-        };
+        let wrap = |e| Expr::call("@list", vec![e], line);
         // The built-in `template` tag yields the `Template` record; any other tag is a
         // call `tag(parts, values)`.
         if tag == "template" {
@@ -3896,14 +3786,11 @@ impl Parser {
                 line,
             });
         }
-        Ok(Expr::Call {
-            id: Id::NEW,
-            dot: false,
-            type_args: Vec::new(),
-            name: tag,
-            args: vec![wrap(parts_lit), wrap(values_lit)],
+        Ok(Expr::call(
+            tag,
+            vec![wrap(parts_lit), wrap(values_lit)],
             line,
-        })
+        ))
     }
 
     /// Desugars a `vyrn"..."` code quote into a `Code` expression.
@@ -3947,14 +3834,7 @@ impl Parser {
                 },
             });
         };
-        let code_text = |s: &str| Expr::Call {
-            id: Id::NEW,
-            dot: false,
-            type_args: Vec::new(),
-            name: "@codeText".to_string(),
-            args: vec![Expr::Str(s.to_string(), Id::NEW)],
-            line,
-        };
+        let code_text = |s: &str| Expr::call("@codeText", vec![Expr::str(s)], line);
         for (i, part) in parts.iter().enumerate() {
             if !part.is_empty() {
                 add(&mut acc, code_text(part));
@@ -3962,14 +3842,7 @@ impl Parser {
             if i < exprs.len() {
                 let ctx = self.hole_context(&parts, &exprs, i);
                 let value = self.parse_hole(&exprs[i], line, col)?;
-                let splice = Expr::Call {
-                    id: Id::NEW,
-                    dot: false,
-                    type_args: Vec::new(),
-                    name: "@codeSplice".to_string(),
-                    args: vec![value, Expr::Int(ctx, Id::NEW)],
-                    line,
-                };
+                let splice = Expr::call("@codeSplice", vec![value, Expr::int(ctx)], line);
                 add(&mut acc, splice);
             }
         }
@@ -4117,14 +3990,7 @@ impl Parser {
     /// A module using `save` must import `writeAtomic` from `std/storage`; the read
     /// helpers need no import.
     fn storage_desugar(name: &str, args: &[Expr], line: usize) -> Option<Expr> {
-        let call = |n: &str, a: Vec<Expr>| Expr::Call {
-            id: Id::NEW,
-            dot: false,
-            type_args: Vec::new(),
-            name: n.to_string(),
-            args: a,
-            line,
-        };
+        let call = |n: &str, a: Vec<Expr>| Expr::call(n, a, line);
         // `load(TypeName, path)` takes a type name as an argument; the desugar turns it
         // into the type argument `fromJson<T>(s)` takes.
         let decode = |t: &Expr, text: Expr| Expr::Call {
@@ -4138,11 +4004,7 @@ impl Parser {
             },
             line,
         };
-        let var = |n: &str| Expr::Var {
-            id: Id::NEW,
-            name: n.to_string(),
-            line,
-        };
+        let var = |n: &str| Expr::var(n, line);
         match (name, args.len()) {
             ("save", 2) => Some(call(
                 "writeAtomic",

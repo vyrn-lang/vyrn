@@ -1474,24 +1474,9 @@ fn check_named_blocks(
             // The head is synthetic but the body is the real node, so what the
             // checker records lands on the nodes `own` and the lowering walk.
             let synthetic = Function {
-                name: format!("{noun}@{i}"),
-                exported: false,
                 module: t.module.clone(),
-                doc: None,
-                type_params: Vec::new(),
-                type_bounds: Default::default(),
-                params: Vec::new(),
-                ret: Type::Unit,
-                body: Block {
-                    id: Id::NEW,
-                    stmts: Vec::new(),
-                },
                 line: t.line,
-                col: 0,
-                is_extern: false,
-                is_export_extern: false,
-                is_gen: false,
-                is_mut: false,
+                ..Function::synth(format!("{noun}@{i}"), Vec::new(), Type::Unit, Vec::new())
             };
             if let Err(s) = checker.function_body(&synthetic, &t.body) {
                 out.push(s.in_file(t.module.clone()));

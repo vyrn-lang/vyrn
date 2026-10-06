@@ -4977,15 +4977,11 @@ impl<'p> Fn_<'_, 'p> {
                 LambdaBody::Block(b) => b.clone(),
                 LambdaBody::Expr(e) if self.cx.repr(&ret, line)? == Repr::Unit => Block {
                     id: Id::NEW,
-                    stmts: vec![Stmt::Expr((**e).clone(), Id::NEW)],
+                    stmts: vec![Stmt::expr((**e).clone())],
                 },
                 LambdaBody::Expr(e) => Block {
                     id: Id::NEW,
-                    stmts: vec![Stmt::Return {
-                        id: Id::NEW,
-                        value: Some((**e).clone()),
-                        line,
-                    }],
+                    stmts: vec![Stmt::ret((**e).clone(), line)],
                 },
             };
         }
@@ -5013,11 +5009,7 @@ impl<'p> Fn_<'_, 'p> {
         )?;
         let srcs = cap_names
             .iter()
-            .map(|n| Expr::Var {
-                id: Id::NEW,
-                name: n.clone(),
-                line,
-            })
+            .map(|n| Expr::var(n.clone(), line))
             .collect();
         Ok((
             FnTarget {

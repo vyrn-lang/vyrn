@@ -1123,11 +1123,7 @@ fn contract_verdict(
         };
         f.body = Block {
             id: Id::NEW,
-            stmts: vec![Stmt::Return {
-                id: Id::NEW,
-                value: Some(lit),
-                line: 0,
-            }],
+            stmts: vec![Stmt::ret(lit, 0)],
         };
     }
     prog.number();
@@ -1307,31 +1303,14 @@ fn mounted_routes_wasm(
     let mut stmts: Vec<Stmt> = calls
         .into_iter()
         .map(|args| {
-            Stmt::Expr(
-                Expr::Call {
-                    id: Id::NEW,
-                    dot: false,
-                    type_args: Vec::new(),
-                    name: "print".to_string(),
-                    args: vec![Expr::Call {
-                        id: Id::NEW,
-                        dot: false,
-                        type_args: Vec::new(),
-                        name: "mountedRows".to_string(),
-                        args,
-                        line: 0,
-                    }],
-                    line: 0,
-                },
-                Id::NEW,
-            )
+            Stmt::expr(Expr::call(
+                "print",
+                vec![Expr::call("mountedRows", args, 0)],
+                0,
+            ))
         })
         .collect();
-    stmts.push(Stmt::Return {
-        id: Id::NEW,
-        value: Some(Expr::Int(0, Id::NEW)),
-        line: 0,
-    });
+    stmts.push(Stmt::ret(Expr::int(0), 0));
     prog.functions.push(synth_fn(
         "main".to_string(),
         Block { id: Id::NEW, stmts },
@@ -2801,21 +2780,10 @@ fn synth_fn(
     door: bool,
 ) -> vyrn_frontend::ast::Function {
     vyrn_frontend::ast::Function {
-        name,
-        exported: false,
-        module: None,
-        doc: None,
-        type_params: Vec::new(),
-        type_bounds: Default::default(),
-        params: Vec::new(),
-        ret,
         body,
         line,
-        col: 0,
-        is_extern: false,
         is_export_extern: door,
-        is_gen: false,
-        is_mut: false,
+        ..vyrn_frontend::ast::Function::synth(name, Vec::new(), ret, Vec::new())
     }
 }
 
@@ -3330,95 +3298,49 @@ import {{ benchOne }} from \"std/bench\"
             b.line,
             false,
         ));
-        let body_ref = Expr::Var {
-            id: Id::NEW,
-            name: format!("__vyrn_bench_body_{slot}"),
-            line: 0,
-        };
+        let body_ref = Expr::var(format!("__vyrn_bench_body_{slot}"), 0);
         if json {
-            measure_calls.push(Expr::Call {
-                id: Id::NEW,
-                dot: false,
-                type_args: Vec::new(),
-                name: "benchMeasure".to_string(),
-                args: vec![Expr::Str(b.name.clone(), Id::NEW), body_ref],
-                line: 0,
-            });
-        } else {
-            harness_stmts.push(Stmt::Expr(
-                Expr::Call {
-                    id: Id::NEW,
-                    dot: false,
-                    type_args: Vec::new(),
-                    name: "benchOne".to_string(),
-                    args: vec![
-                        Expr::Str(b.name.clone(), Id::NEW),
-                        Expr::Int(width, Id::NEW),
-                        body_ref,
-                    ],
-                    line: 0,
-                },
-                Id::NEW,
+            measure_calls.push(Expr::call(
+                "benchMeasure",
+                vec![Expr::str(b.name.clone()), body_ref],
+                0,
             ));
+        } else {
+            harness_stmts.push(Stmt::expr(Expr::call(
+                "benchOne",
+                vec![Expr::str(b.name.clone()), Expr::int(width), body_ref],
+                0,
+            )));
         }
     }
     if json {
         // `print(benchJson([benchMeasure(..), ..], "native", "O2"))`.
-        harness_stmts.push(Stmt::Expr(
-            Expr::Call {
-                id: Id::NEW,
-                dot: false,
-                type_args: Vec::new(),
-                name: "print".to_string(),
-                args: vec![Expr::Call {
-                    id: Id::NEW,
-                    dot: false,
-                    type_args: Vec::new(),
-                    name: "benchJson".to_string(),
-                    args: vec![
-                        Expr::ArrayLit {
-                            id: Id::NEW,
-                            elems: measure_calls,
-                            line: 0,
-                        },
-                        Expr::Str("native".to_string(), Id::NEW),
-                        Expr::Str("O2".to_string(), Id::NEW),
-                    ],
-                    line: 0,
-                }],
-                line: 0,
-            },
-            Id::NEW,
-        ));
+        harness_stmts.push(Stmt::expr(Expr::call(
+            "print",
+            vec![Expr::call(
+                "benchJson",
+                vec![
+                    Expr::ArrayLit {
+                        id: Id::NEW,
+                        elems: measure_calls,
+                        line: 0,
+                    },
+                    Expr::str("native"),
+                    Expr::str("O2"),
+                ],
+                0,
+            )],
+            0,
+        )));
     } else {
-        harness_stmts.push(Stmt::Expr(
-            Expr::Call {
-                id: Id::NEW,
-                dot: false,
-                type_args: Vec::new(),
-                name: "print".to_string(),
-                args: vec![Expr::Str(String::new(), Id::NEW)],
-                line: 0,
-            },
-            Id::NEW,
-        ));
-        harness_stmts.push(Stmt::Expr(
-            Expr::Call {
-                id: Id::NEW,
-                dot: false,
-                type_args: Vec::new(),
-                name: "print".to_string(),
-                args: vec![Expr::Str(format!("{} benches", selected.len()), Id::NEW)],
-                line: 0,
-            },
-            Id::NEW,
-        ));
+        harness_stmts.push(Stmt::expr(Expr::call("print", vec![Expr::str("")], 0)));
+        harness_stmts.push(Stmt::expr(Expr::call(
+            "print",
+            vec![Expr::str(format!("{} benches", selected.len()))],
+            0,
+        )));
     }
-    harness_stmts.push(Stmt::Return {
-        id: Id::NEW,
-        value: Some(Expr::Int(0, Id::NEW)),
-        line: 0,
-    });
+    harness_stmts.push(Stmt::ret(Expr::int(0), 0));
 
     program.functions.retain(|f| f.name != "main");
     program.functions.push(synth_fn(
@@ -4225,11 +4147,7 @@ where
     {
         main.body = Block {
             id: Id::NEW,
-            stmts: vec![Stmt::Return {
-                id: Id::NEW,
-                value: Some(Expr::Int(0, Id::NEW)),
-                line: main.line,
-            }],
+            stmts: vec![Stmt::ret(Expr::int(0), main.line)],
         };
     }
     quiet.number();
@@ -5190,11 +5108,7 @@ fn bodies_wasm(
     // nothing else.
     let main = Block {
         id: Id::NEW,
-        stmts: vec![Stmt::Return {
-            id: Id::NEW,
-            value: Some(Expr::Int(0, Id::NEW)),
-            line: 0,
-        }],
+        stmts: vec![Stmt::ret(Expr::int(0), 0)],
     };
     prog.functions
         .push(synth_fn("main".to_string(), main, Type::Int, 0, false));

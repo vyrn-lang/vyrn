@@ -741,7 +741,7 @@ fn f() -> Int64 {\n    other.listPastes()\n    return store.listPastes()\n}\n";
     fn gen(name: &str, arg: &str) -> ImportSource {
         ImportSource::Generator {
             name: name.to_string(),
-            args: vec![Expr::Str(arg.to_string(), Id::NEW)],
+            args: vec![Expr::str(arg)],
             line: 1,
         }
     }
