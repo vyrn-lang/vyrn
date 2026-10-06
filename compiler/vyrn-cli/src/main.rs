@@ -902,12 +902,9 @@ fn why_cmd(call: &Call) -> Outcome {
     };
     let p = Project::of(Some(&path), flags)?;
 
-    // The app root: the nearest `vyrn.json` upward, else the file's own
-    // directory.
-    let app_dir = match &p.manifest {
-        Some(m) => PathBuf::from(&m.dir),
-        None => PathBuf::from(path.rsplit_once('/').map_or(".", |(d, _)| d)),
-    };
+    // The editor's app root, so both name the same roles.
+    let app_dir =
+        vyrn_frontend::manifest::app_root(Path::new(path.rsplit_once('/').map_or(".", |(d, _)| d)));
     // The manifest already read is passed in, never re-read: two readers of one
     // file are two policies when one of them fails.
     let doc = p.manifest.as_ref().map(|m| &m.doc);

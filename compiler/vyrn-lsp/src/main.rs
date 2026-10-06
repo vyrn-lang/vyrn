@@ -2169,7 +2169,7 @@ fn contract_ctx(server: &Server, uri: &Url) -> Option<ContractCtx> {
     };
 
     let dir = std::path::Path::new(&path).parent()?.to_path_buf();
-    let app_dir = app_root_for(&dir);
+    let app_dir = vyrn_frontend::manifest::app_root(&dir);
     let overlays = overlays_of(server);
     let (opts, resolver, _, _) = load_context(&server.session, uri, &overlays)?;
 
@@ -2553,8 +2553,8 @@ fn install_root(
 
 /// The most `.vyrn` roots discovery analyzes for one `.vyx`.
 const MAX_OWNER_CANDIDATES: usize = 48;
-/// The most directory levels discovery walks up looking for an app root.
-const MAX_WALK_UP: usize = 8;
+/// The deepest directory level `collect_sources` descends to.
+const MAX_COLLECT_DEPTH: usize = 8;
 
 /// Wire `vyx_uri`'s owner, discovering it without publishing. A no-op for a
 /// `.vyx` already owned or known ownerless.
@@ -2711,7 +2711,7 @@ fn mounting_roots(path: &str, gens: &[&str]) -> Vec<Url> {
     let Some(dir) = file.parent() else {
         return Vec::new();
     };
-    let app_root = app_root_for(dir);
+    let app_root = vyrn_frontend::manifest::app_root(dir);
     let mut files = Vec::new();
     collect_vyrn(&app_root, 0, &mut files);
     let mut scored: Vec<(usize, std::path::PathBuf)> = files
@@ -2855,7 +2855,7 @@ fn candidate_owners(vyx_path: &str) -> Vec<Url> {
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
-    let app_root = app_root_for(vyx_dir);
+    let app_root = vyrn_frontend::manifest::app_root(vyx_dir);
 
     let mut files = Vec::new();
     collect_vyrn(&app_root, 0, &mut files);
@@ -2864,7 +2864,7 @@ fn candidate_owners(vyx_path: &str) -> Vec<Url> {
         .into_iter()
         .map(|p| {
             let src = std::fs::read_to_string(&p).unwrap_or_default();
-            let generator = has_generator_import(&src);
+            let generator = vyrn_frontend::manifest::has_generator_import(&src);
             let names_dir = !dir_name.is_empty() && src.contains(&dir_name);
             let mut score = 0;
             if generator {
@@ -2885,57 +2885,6 @@ fn candidate_owners(vyx_path: &str) -> Vec<Url> {
         .collect()
 }
 
-/// The app root for a `.vyx`'s directory: the nearest ancestor (within
-/// [`MAX_WALK_UP`]) containing `vyrn.json`, else the nearest ancestor that holds
-/// a generator-importing `.vyrn`, else `vyx_dir` itself.
-fn app_root_for(vyx_dir: &std::path::Path) -> std::path::PathBuf {
-    let mut fallback: Option<std::path::PathBuf> = None;
-    let mut dir = vyx_dir.to_path_buf();
-    for _ in 0..MAX_WALK_UP {
-        if dir.join("vyrn.json").is_file() {
-            return dir;
-        }
-        if fallback.is_none() && dir_has_generator_root(&dir) {
-            fallback = Some(dir.clone());
-        }
-        match dir.parent() {
-            Some(p) => dir = p.to_path_buf(),
-            None => break,
-        }
-    }
-    fallback.unwrap_or_else(|| vyx_dir.to_path_buf())
-}
-
-/// Whether `dir` directly holds a `.vyrn` importing a page or component
-/// generator: the app-root signal without a `vyrn.json`.
-fn dir_has_generator_root(dir: &std::path::Path) -> bool {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return false;
-    };
-    for e in entries.flatten() {
-        let p = e.path();
-        if p.extension().and_then(|x| x.to_str()) == Some("vyrn") {
-            if let Ok(src) = std::fs::read_to_string(&p) {
-                if has_generator_import(&src) {
-                    return true;
-                }
-            }
-        }
-    }
-    false
-}
-
-/// Whether a `.vyrn` source mentions a page or component generator, the roots
-/// that own `.vyx` files. A textual test.
-fn has_generator_import(src: &str) -> bool {
-    src.contains("pagesThemed")
-        || src.contains("componentsThemed")
-        || src.contains("pages(")
-        || src.contains("components(")
-        || src.contains("pages ")
-        || src.contains("components ")
-}
-
 /// The `.vyrn` files under `dir`, at most [`MAX_OWNER_CANDIDATES`].
 fn collect_vyrn(dir: &std::path::Path, depth: usize, out: &mut Vec<std::path::PathBuf>) {
     collect_sources(dir, depth, MAX_OWNER_CANDIDATES, &["vyrn"], out);
@@ -2951,7 +2900,7 @@ fn collect_sources(
     exts: &[&str],
     out: &mut Vec<std::path::PathBuf>,
 ) {
-    if out.len() >= cap || depth > MAX_WALK_UP {
+    if out.len() >= cap || depth > MAX_COLLECT_DEPTH {
         return;
     }
     let Ok(entries) = std::fs::read_dir(dir) else {
@@ -3201,7 +3150,7 @@ fn with_app_css(server: &Server, uri: &Url, hover: String, class: &str) -> Strin
     let Some(dir) = file.parent() else {
         return hover;
     };
-    let root = app_root_for(dir);
+    let root = vyrn_frontend::manifest::app_root(dir);
     let rules = app_css_rules(server, &root, class);
     if rules.is_empty() {
         return hover;

@@ -188,7 +188,9 @@ compile, except `--contract`.
   module is linked first, as `moduleInterface` links it, so a type reached
   through `import * as m` reads as the generator reads it; a module that does
   not link prints the loader's diagnostics and exits 1, with no report. A
-  `.vyx` page is read from its `<script>`, as `vyxPageInterface` reads it. Exits
+  `.vyx` page is read from its `<script>`, as `vyxPageInterface` reads it. The
+  app root is the editor's: the nearest `vyrn.json`, else the nearest directory
+  holding a page or component generator root, else the file's directory. Exits
   1 if the file has no role.
 - `vyrn why --memory <file>`: per binding, whether it is reclaimed, how, and the
   reason when it is not. The LSP's hover and inlay hints use the same table and

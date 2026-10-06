@@ -131,6 +131,56 @@ pub fn find(start: &Path) -> Result<Option<Manifest>, String> {
     }
 }
 
+/// The most directory levels [`app_root`] walks up.
+const APP_ROOT_WALK_UP: usize = 8;
+
+/// The app root for the directory `start`: the nearest ancestor containing
+/// `vyrn.json`, else the nearest ancestor that directly holds a `.vyrn` naming
+/// a page or component generator, else `start`. The walk covers `start` and
+/// seven ancestors. The editor and `vyrn why --contract` both use it.
+pub fn app_root(start: &Path) -> PathBuf {
+    let mut fallback: Option<PathBuf> = None;
+    let mut dir = start.to_path_buf();
+    for _ in 0..APP_ROOT_WALK_UP {
+        if dir.join("vyrn.json").is_file() {
+            return dir;
+        }
+        if fallback.is_none() && dir_has_generator_root(&dir) {
+            fallback = Some(dir.clone());
+        }
+        match dir.parent() {
+            Some(p) => dir = p.to_path_buf(),
+            None => break,
+        }
+    }
+    fallback.unwrap_or_else(|| start.to_path_buf())
+}
+
+/// Whether `dir` directly holds a `.vyrn` importing a page or component
+/// generator: the app-root signal without a `vyrn.json`.
+fn dir_has_generator_root(dir: &Path) -> bool {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return false;
+    };
+    entries.flatten().any(|e| {
+        let p = e.path();
+        p.extension().and_then(|x| x.to_str()) == Some("vyrn")
+            && std::fs::read_to_string(&p).is_ok_and(|src| has_generator_import(&src))
+    })
+}
+
+/// Whether a `.vyrn` source mentions a page or component generator, the roots
+/// that own `.vyx` files. A textual heuristic: a comment or a string that
+/// spells `pages(` counts.
+pub fn has_generator_import(src: &str) -> bool {
+    src.contains("pagesThemed")
+        || src.contains("componentsThemed")
+        || src.contains("pages(")
+        || src.contains("components(")
+        || src.contains("pages ")
+        || src.contains("components ")
+}
+
 /// Builds a [`Manifest`] from a parsed document rooted at `slash_dir`: the
 /// one place the audience base is formed, testable without a file. `Err` is a
 /// contradictory declaration (an artifact), which travels with an unparseable
