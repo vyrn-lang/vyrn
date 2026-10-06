@@ -108,7 +108,7 @@ generator input on every load. Every load links the whole program again.
 `vyrn_lower::check_and_synthesize` then runs, in order, the frontend's
 `check_and_synthesize` (steps 1 and 2) and the judgments in `vyrn-lower`:
 
-1. `checker::check_accum_with_json_types`: names, types, calls, `mut`,
+1. `checker::check_accum_with_sites`: names, types, calls, `mut`,
    all-paths return, and each `where` predicate against constant arguments
    (`consteval.rs`). The checker records every expression's type in
    `checker::Recorded`, keyed by node address. Every later pass reads types
@@ -315,7 +315,7 @@ The module's shape:
 UTF-8, number formatting, file and console I/O, and the trap printer. It is
 ordinary Vyrn over the primitives of `std/mem`, whose functions have no body:
 the emitter lowers each call to one wasm instruction or one host import
-(`Fn_::mem_prim`). The map value paths (`map_set`, `map_tally`, `map_at`)
+(`mem_ins`). The map value paths (`map_set`, `map_tally`, `map_at`)
 stay emitted in `direct.rs`: under wasmtime one extra call level costs 14%
 on k-nucleotide, and their per-type value steps have no Vyrn home. They move
 when the wasm route inlines runtime leaf calls.
