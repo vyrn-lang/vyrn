@@ -620,7 +620,6 @@ fn candidates(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use vyrn_frontend::ast::Id;
 
     #[test]
     fn a_generated_name_keeps_its_prefix_and_swaps_the_declaration_it_stands_for() {
@@ -741,7 +740,7 @@ fn f() -> Int64 {\n    other.listPastes()\n    return store.listPastes()\n}\n";
     fn gen(name: &str, arg: &str) -> ImportSource {
         ImportSource::Generator {
             name: name.to_string(),
-            args: vec![Expr::Str(arg.to_string(), Id::NEW)],
+            args: vec![Expr::str(arg)],
             line: 1,
         }
     }

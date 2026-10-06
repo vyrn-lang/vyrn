@@ -737,6 +737,29 @@ pub struct Function {
 }
 
 impl Function {
+    /// Returns a function no source spells: line 0, column 0, in the root
+    /// module, with no doc, type parameters or flags. A caller sets the rest
+    /// with struct update.
+    pub fn synth(name: impl Into<String>, params: Vec<Param>, ret: Type, stmts: Vec<Stmt>) -> Self {
+        Function {
+            name: name.into(),
+            exported: false,
+            module: None,
+            doc: None,
+            type_params: Vec::new(),
+            type_bounds: Default::default(),
+            params,
+            ret,
+            body: Block { id: Id::NEW, stmts },
+            line: 0,
+            col: 0,
+            is_extern: false,
+            is_export_extern: false,
+            is_gen: false,
+            is_mut: false,
+        }
+    }
+
     /// Returns the name's column span, or `(0, 0)` (the whole line) for a
     /// synthesized function.
     pub fn name_span(&self) -> (usize, usize) {
@@ -1797,6 +1820,48 @@ macro_rules! stmt_slot {
 }
 
 impl Expr {
+    /// Returns an integer literal with no id yet.
+    pub fn int(n: i64) -> Self {
+        Expr::Int(n, Id::NEW)
+    }
+
+    /// Returns a string literal with no id yet.
+    pub fn str(s: impl Into<String>) -> Self {
+        Expr::Str(s.into(), Id::NEW)
+    }
+
+    /// Returns a name read at `line`, with no id yet.
+    pub fn var(name: impl Into<String>, line: usize) -> Self {
+        Expr::Var {
+            name: name.into(),
+            line,
+            id: Id::NEW,
+        }
+    }
+
+    /// Returns a call written `name(args)`, with no type arguments and no id
+    /// yet.
+    pub fn call(name: impl Into<String>, args: Vec<Expr>, line: usize) -> Self {
+        Expr::Call {
+            name: name.into(),
+            args,
+            dot: false,
+            type_args: Vec::new(),
+            line,
+            id: Id::NEW,
+        }
+    }
+
+    /// Returns `expr.field`, with no id yet.
+    pub fn field(expr: Expr, field: impl Into<String>, line: usize) -> Self {
+        Expr::Field {
+            expr: Box::new(expr),
+            field: field.into(),
+            line,
+            id: Id::NEW,
+        }
+    }
+
     pub fn id(&self) -> NodeId {
         slot!(self, &).0
     }
@@ -1827,6 +1892,34 @@ impl Expr {
 }
 
 impl Stmt {
+    /// Returns an expression statement with no id yet.
+    pub fn expr(e: Expr) -> Self {
+        Stmt::Expr(e, Id::NEW)
+    }
+
+    /// Returns `let name = value` at `line`: immutable, untyped, no column, no
+    /// id yet.
+    pub fn let_(name: impl Into<String>, value: Expr, line: usize) -> Self {
+        Stmt::Let {
+            name: name.into(),
+            mutable: false,
+            ty: None,
+            value,
+            line,
+            col: 0,
+            id: Id::NEW,
+        }
+    }
+
+    /// Returns `return value` at `line`, with no id yet.
+    pub fn ret(value: Expr, line: usize) -> Self {
+        Stmt::Return {
+            value: Some(value),
+            line,
+            id: Id::NEW,
+        }
+    }
+
     pub fn id(&self) -> NodeId {
         stmt_slot!(self, &).0
     }
@@ -2550,6 +2643,38 @@ pub fn exprs_one(s: &Stmt, f: &mut dyn FnMut(&Expr, &std::collections::HashSet<S
     ast_stmt(s, &mut std::collections::HashSet::new(), &mut Exprs(f));
 }
 
+struct Each<'f>(&'f mut dyn FnMut(&Expr) -> bool);
+
+impl AstVisit<'_> for Each<'_> {
+    const SCOPED: bool = false;
+
+    fn expr(&mut self, e: &Expr, _: &std::collections::HashSet<String>) -> bool {
+        (self.0)(e)
+    }
+}
+
+/// Calls `f` on every expression of `b` before its children, in source order.
+/// `f` returns `false` to skip the expression's children.
+pub fn each_expr(b: &Block, f: &mut dyn FnMut(&Expr) -> bool) {
+    ast_block(b, &mut std::collections::HashSet::new(), &mut Each(f));
+}
+
+struct Binders<'f>(&'f mut dyn FnMut(&str));
+
+impl AstVisit<'_> for Binders<'_> {
+    const SCOPED: bool = false;
+
+    fn bind(&mut self, name: &str, _: usize, _: usize, _: LocalKind, _: Option<&Type>) {
+        (self.0)(name)
+    }
+}
+
+/// Calls `f` with every name `b` binds: `let`s, loop variables, pattern binders
+/// and lambda parameters.
+pub fn each_binding(b: &Block, f: &mut dyn FnMut(&str)) {
+    ast_block(b, &mut std::collections::HashSet::new(), &mut Binders(f));
+}
+
 /// Appends the id of every statement and expression in `e`.
 pub fn node_ids(e: &Expr, out: &mut Vec<NodeId>) {
     ast_expr(e, &std::collections::HashSet::new(), &mut Ids(out));
@@ -2642,78 +2767,36 @@ pub fn sub_blocks(s: &Stmt) -> Vec<&Block> {
     }
 }
 
-/// Returns whether the statement, nested blocks included, names the binding.
-pub fn stmt_mentions(s: &Stmt, name: &str) -> bool {
-    let here = match s {
-        Stmt::Let { value, .. }
-        | Stmt::Assign { value, .. }
-        | Stmt::SetField { value, .. }
-        | Stmt::Expr(value, _) => mentions(value, name),
-        Stmt::IndexSet { index, value, .. } => mentions(index, name) || mentions(value, name),
-        Stmt::If { cond: e, .. } | Stmt::While { cond: e, .. } => mentions(e, name),
-        Stmt::ForIn { iter, .. } => mentions(iter, name),
-        Stmt::Return { value, .. } => value.as_ref().is_some_and(|e| mentions(e, name)),
-        Stmt::Drop { name: n, .. } => n == name,
-        _ => false,
-    };
-    here || sub_blocks(s)
-        .iter()
-        .any(|b| b.stmts.iter().any(|s| stmt_mentions(s, name)))
-}
-
 /// Returns whether some path through `e` names the binding. A lambda body
 /// counts though it may never run: narrowing it would widen what compiles.
 pub fn mentions(e: &Expr, name: &str) -> bool {
-    let block = |b: &Block| b.stmts.iter().any(|s| stmt_mentions(s, name));
-    match e {
-        Expr::Var { name: n, .. } => n == name,
-        Expr::Int(_, _)
-        | Expr::Byte(_, _)
-        | Expr::Float(_, _)
-        | Expr::Bool(_, _)
-        | Expr::Str(_, _) => false,
-        Expr::Unary { expr, .. } | Expr::Try { expr, .. } | Expr::Field { expr, .. } => {
-            mentions(expr, name)
+    struct Mentions<'n>(&'n str, bool);
+
+    impl AstVisit<'_> for Mentions<'_> {
+        const SCOPED: bool = false;
+
+        fn stmt(&mut self, s: &Stmt, _: &std::collections::HashSet<String>) {
+            self.1 |= matches!(s, Stmt::Drop { name, .. } if name == self.0);
         }
-        Expr::Consume { place, .. } => mentions(place, name),
-        Expr::Binary { lhs, rhs, .. } => mentions(lhs, name) || mentions(rhs, name),
-        // `x.copy()` makes a fresh value: its receiver is read, never aliased.
-        Expr::Call { name: n, args, .. }
-            if n == "@copy" && args.first().is_some_and(|a| place_path(a).is_some()) =>
-        {
-            false
+
+        fn expr(&mut self, e: &Expr, _: &std::collections::HashSet<String>) -> bool {
+            match e {
+                Expr::Var { name, .. } => self.1 |= name == self.0,
+                // `x.copy()` makes a fresh value: its receiver is read, never aliased.
+                Expr::Call { name, args, .. }
+                    if name == "@copy" && args.first().is_some_and(|a| place_path(a).is_some()) =>
+                {
+                    return false;
+                }
+                _ => {}
+            }
+            !self.1
         }
-        Expr::Call { args, .. }
-        | Expr::TryConstruct { args, .. }
-        | Expr::ArrayLit { elems: args, .. } => args.iter().any(|a| mentions(a, name)),
-        Expr::MapLit { entries, .. } => entries
-            .iter()
-            .any(|(k, v)| mentions(k, name) || mentions(v, name)),
-        Expr::StructLit { fields, .. } => fields.iter().any(|(_, v)| mentions(v, name)),
-        Expr::Match {
-            scrutinee, arms, ..
-        } => {
-            mentions(scrutinee, name)
-                || arms.iter().any(|a| match &a.body {
-                    ArmBody::Expr(e) => mentions(e, name),
-                    ArmBody::Block(b) => block(b),
-                })
-        }
-        Expr::IfExpr {
-            cond,
-            then_branch,
-            else_branch,
-            ..
-        } => {
-            mentions(cond, name)
-                || mentions(then_branch, name)
-                || else_branch.as_ref().is_some_and(|b| mentions(b, name))
-        }
-        Expr::Lambda { body, .. } => match body {
-            LambdaBody::Expr(e) => mentions(e, name),
-            LambdaBody::Block(b) => block(b),
-        },
     }
+
+    let mut v = Mentions(name, false);
+    ast_expr(e, &std::collections::HashSet::new(), &mut v);
+    v.1
 }
 
 /// Returns the place `e` reads as `(root, path)`: `r.a.b` gives

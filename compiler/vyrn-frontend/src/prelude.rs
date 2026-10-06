@@ -11,7 +11,7 @@
 //! result type is one no signature spells.
 
 use crate::ast::{
-    Block, Capability, Expr, Function, Id, Param, Program, ProtocolDecl, Stmt, Type, TypeDecl,
+    Capability, Expr, Function, Id, Param, Program, ProtocolDecl, Stmt, Type, TypeDecl,
 };
 use crate::effects::Effect;
 use crate::project::ELEM;
@@ -66,58 +66,39 @@ fn row(
     place: &[&str],
 ) -> Function {
     Function {
-        name: name.to_string(),
-        exported: false,
-        module: None,
-        doc: None,
         type_params: type_params.iter().map(|s| s.to_string()).collect(),
-        type_bounds: Default::default(),
-        params: params
-            .iter()
-            .map(|(n, c, t)| Param {
-                id: Id::NEW,
-                name: n.to_string(),
-                capability: *c,
-                ty: t.clone(),
-                line: 0,
-                col: 0,
-            })
-            .collect(),
-        ret,
-        body: Block {
-            id: Id::NEW,
-            stmts: match place.is_empty() {
-                true => Vec::new(),
-                false => vec![Stmt::Return {
+        ..Function::synth(
+            name,
+            params
+                .iter()
+                .map(|(n, c, t)| Param {
                     id: Id::NEW,
-                    value: Some(Expr::Call {
-                        id: Id::NEW,
-                        dot: false,
-                        type_args: Vec::new(),
-                        name: ELEM.to_string(),
-                        args: place
+                    name: n.to_string(),
+                    capability: *c,
+                    ty: t.clone(),
+                    line: 0,
+                    col: 0,
+                })
+                .collect(),
+            ret,
+            match place.is_empty() {
+                true => Vec::new(),
+                false => vec![Stmt::ret(
+                    Expr::call(
+                        ELEM,
+                        place
                             .iter()
                             .map(|a| match a.parse::<i64>() {
-                                Ok(n) => Expr::Int(n, Id::NEW),
-                                Err(_) => Expr::Var {
-                                    id: Id::NEW,
-                                    name: (*a).to_string(),
-                                    line: 0,
-                                },
+                                Ok(n) => Expr::int(n),
+                                Err(_) => Expr::var(*a, 0),
                             })
                             .collect(),
-                        line: 0,
-                    }),
-                    line: 0,
-                }],
+                        0,
+                    ),
+                    0,
+                )],
             },
-        },
-        line: 0,
-        col: 0,
-        is_extern: false,
-        is_export_extern: false,
-        is_gen: false,
-        is_mut: false,
+        )
     }
 }
 

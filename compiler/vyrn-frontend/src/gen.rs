@@ -218,10 +218,10 @@ pub fn gen_lex_tokens_lit(source: &str) -> Expr {
                 id: Id::NEW,
                 name: "Token".to_string(),
                 fields: vec![
-                    ("kind".to_string(), Expr::Str(kind, Id::NEW)),
-                    ("text".to_string(), Expr::Str(text, Id::NEW)),
-                    ("line".to_string(), Expr::Int(line, Id::NEW)),
-                    ("col".to_string(), Expr::Int(col, Id::NEW)),
+                    ("kind".to_string(), Expr::str(kind)),
+                    ("text".to_string(), Expr::str(text)),
+                    ("line".to_string(), Expr::int(line)),
+                    ("col".to_string(), Expr::int(col)),
                 ],
                 line: 0,
             })

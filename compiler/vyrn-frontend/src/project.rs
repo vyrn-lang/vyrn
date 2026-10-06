@@ -7,8 +7,7 @@
 //! ownership passes and the lowering key side tables by node.
 
 use crate::ast::{
-    Block, Expr, Function, Id, ImplBlock, LambdaBody, NodeId, Numbering, Program, Stmt, Type,
-    TypeDecl,
+    Block, Expr, Function, Id, ImplBlock, NodeId, Numbering, Program, Stmt, Type, TypeDecl,
 };
 use crate::types::Impls;
 use std::collections::{HashMap, HashSet};
@@ -347,11 +346,7 @@ impl Expansions {
             return Ok(Some(b));
         }
         let line = index.line();
-        let recv = Expr::Var {
-            id: Id::NEW,
-            name: name.to_string(),
-            line,
-        };
+        let recv = Expr::var(name, line);
         let Some(p) = self.site_at(
             index.id(),
             impls,
@@ -488,7 +483,7 @@ fn substituted(
     // A `let n` inside a projection must not capture a caller's `n`, or be
     // captured by it.
     let mut rename: HashMap<String, String> = HashMap::new();
-    collect_bindings(&mut body, tag, &mut rename);
+    collect_bindings(&body, tag, &mut rename);
     if !rename.is_empty() {
         rename_uses(&mut body, &rename);
         rename_bindings(&mut body, &rename);
@@ -499,31 +494,15 @@ fn substituted(
     // The receiver is a place: a `let` would copy the container.
     map.insert("self".to_string(), recv.clone());
     for (p, a) in f.params[1..].iter().zip(args) {
-        let uses = count_uses(&body, &p.name);
+        let uses = count_uses(&body, &p.name, true);
         // A use under a lambda or a loop runs once per call or turn, so only an
         // eager use outside both counts as exactly once.
-        if uses == 1 && uses_outside_lambdas(&body, &p.name) == 1 && !is_under_loop(&body, &p.name)
-        {
+        if uses == 1 && count_uses(&body, &p.name, false) == 1 && !is_under_loop(&body, &p.name) {
             map.insert(p.name.clone(), a.clone());
         } else {
             let tmp = format!("@p{tag}.{}", p.name);
-            prologue.push(Stmt::Let {
-                id: Id::NEW,
-                name: tmp.clone(),
-                mutable: false,
-                ty: None,
-                value: a.clone(),
-                line,
-                col: 0,
-            });
-            map.insert(
-                p.name.clone(),
-                Expr::Var {
-                    id: Id::NEW,
-                    name: tmp,
-                    line,
-                },
-            );
+            prologue.push(Stmt::let_(tmp.clone(), a.clone(), line));
+            map.insert(p.name.clone(), Expr::var(tmp, line));
         }
     }
     subst_block(&mut body, &map);
@@ -633,64 +612,10 @@ pub const FOR_INDEX: &str = "@i.i";
 /// Maps every binding a projection body introduces to an unspellable name.
 /// Lambda parameters and pattern binders count: [`subst_block`] walks through
 /// lambdas, so an unrenamed `|i| i + 1` would have its `i` substituted.
-fn collect_bindings(b: &mut Block, tag: &str, out: &mut HashMap<String, String>) {
-    for s in &mut b.stmts {
-        match s {
-            Stmt::Let { name, .. } => {
-                out.insert(name.clone(), format!("@b{tag}.{name}"));
-            }
-            Stmt::If {
-                then_block,
-                else_block,
-                ..
-            } => {
-                collect_bindings(then_block, tag, out);
-                if let Some(e) = else_block {
-                    collect_bindings(e, tag, out);
-                }
-            }
-            Stmt::Expr(Expr::Match { arms, .. }, _) => {
-                for arm in arms {
-                    if let crate::ast::ArmBody::Block(b) = &mut arm.body {
-                        collect_bindings(b, tag, out);
-                    }
-                }
-            }
-            Stmt::While { body, .. } | Stmt::Region { body, .. } => {
-                collect_bindings(body, tag, out)
-            }
-            Stmt::ForIn { var, body, .. } => {
-                out.insert(var.clone(), format!("@b{tag}.{var}"));
-                collect_bindings(body, tag, out);
-            }
-            _ => {}
-        }
-    }
-    // Lambdas and `match` arm binders live in expressions, which the walk
-    // above never enters. Revisiting a sub-block re-inserts the same entries.
-    walk_block(b, &mut |e: &mut Expr| {
-        collect_lambda(e, tag, out);
-        if let Expr::Match { arms, .. } = e {
-            for arm in arms {
-                for n in arm.pattern.binders() {
-                    out.insert(n.name.clone(), format!("@b{tag}.{n}"));
-                }
-            }
-        }
+fn collect_bindings(b: &Block, tag: &str, out: &mut HashMap<String, String>) {
+    crate::ast::each_binding(b, &mut |n| {
+        out.insert(n.to_string(), format!("@b{tag}.{n}"));
     });
-}
-
-fn collect_lambda(e: &mut Expr, tag: &str, out: &mut HashMap<String, String>) {
-    let Expr::Lambda { params, body, .. } = e else {
-        return;
-    };
-    for p in params.iter() {
-        out.insert(p.name.clone(), format!("@b{tag}.{p}"));
-    }
-    match body {
-        LambdaBody::Expr(inner) => collect_lambda(inner, tag, out),
-        LambdaBody::Block(b) => collect_bindings(b, tag, out),
-    }
 }
 
 /// Renames each read and store of a name through `map` where a binding of the
@@ -786,60 +711,29 @@ fn rename_bindings(b: &mut Block, map: &HashMap<String, String>) {
     ren_block(b, &mut std::collections::HashSet::new(), &mut Rename(map));
 }
 
-fn count_uses(b: &Block, name: &str) -> usize {
+/// How many times `name` is read in `b`; a read in a lambda body counts only
+/// when `through_lambdas` is set.
+fn count_uses(b: &Block, name: &str, through_lambdas: bool) -> usize {
     let mut n = 0;
-    let mut probe = b.clone();
-    let map: HashMap<String, Expr> = HashMap::new();
-    count_block(&mut probe, name, &mut n, &map);
-    n
-}
-
-/// How many times `name` is read outside any lambda body in `b`.
-fn uses_outside_lambdas(b: &Block, name: &str) -> usize {
-    let mut probe = b.clone();
-    walk_block(&mut probe, &mut |e: &mut Expr| {
-        if let Expr::Lambda { body, .. } = e {
-            *body = LambdaBody::Block(Block {
-                id: Id::NEW,
-                stmts: Vec::new(),
-            });
+    crate::ast::each_expr(b, &mut |e| {
+        match e {
+            Expr::Var { name: v, .. } => n += usize::from(v == name),
+            Expr::Lambda { .. } => return through_lambdas,
+            _ => {}
         }
+        true
     });
-    count_uses(&probe, name)
-}
-
-fn count_block(b: &mut Block, name: &str, n: &mut usize, _m: &HashMap<String, Expr>) {
-    let mut counter = |e: &mut Expr| {
-        if matches!(e, Expr::Var { name: v, .. } if v == name) {
-            *n += 1;
-        }
-    };
-    walk_block(b, &mut counter);
+    n
 }
 
 /// Whether `name` is read inside a loop body.
 fn is_under_loop(b: &Block, name: &str) -> bool {
-    fn go(b: &Block, name: &str, in_loop: bool) -> bool {
-        for s in &b.stmts {
-            match s {
-                Stmt::While { body, .. } | Stmt::ForIn { body, .. } => {
-                    if count_uses(body, name) > 0 || go(body, name, true) {
-                        return true;
-                    }
-                }
-                _ => {
-                    if crate::ast::sub_blocks(s)
-                        .into_iter()
-                        .any(|b| go(b, name, in_loop))
-                    {
-                        return true;
-                    }
-                }
-            }
-        }
-        false
-    }
-    go(b, name, false)
+    b.stmts.iter().any(|s| match s {
+        Stmt::While { body, .. } | Stmt::ForIn { body, .. } => count_uses(body, name, true) > 0,
+        _ => crate::ast::sub_blocks(s)
+            .into_iter()
+            .any(|b| is_under_loop(b, name)),
+    })
 }
 
 fn subst_block(b: &mut Block, map: &HashMap<String, Expr>) {
@@ -902,10 +796,7 @@ pub(crate) fn walk_program(program: &mut Program, f: &mut impl FnMut(&mut Expr))
 pub fn walk_bare(e: &mut Expr, f: &mut impl FnMut(&mut Expr)) {
     let mut b = Block {
         id: Id::NEW,
-        stmts: vec![Stmt::Expr(
-            std::mem::replace(e, Expr::Int(0, Id::NEW)),
-            Id::NEW,
-        )],
+        stmts: vec![Stmt::expr(std::mem::replace(e, Expr::int(0)))],
     };
     walk_block(&mut b, f);
     let Some(Stmt::Expr(back, _)) = b.stmts.pop() else {
@@ -914,19 +805,9 @@ pub fn walk_bare(e: &mut Expr, f: &mut impl FnMut(&mut Expr)) {
     *e = back;
 }
 
-/// Whether `e` has an address: a variable, or a field or element of a place.
-pub fn is_place(e: &Expr) -> bool {
-    match e {
-        Expr::Var { .. } => true,
-        Expr::Field { expr, .. } => is_place(expr),
-        Expr::Call { name, args, .. } if (name == AT || name == ELEM) && args.len() == 2 => {
-            is_place(&args[0])
-        }
-        _ => false,
-    }
-}
-
-/// The variable a place is rooted at, e.g. `self` for `self.data[i]`.
+/// The variable a place is rooted at, e.g. `self` for `self.data[i]`. `None`
+/// when `e` has no address: a variable, and a field or element of a place, have
+/// one.
 pub fn place_root(e: &Expr) -> Option<String> {
     match e {
         Expr::Var { name, .. } => Some(name.clone()),
@@ -942,11 +823,9 @@ pub fn place_root(e: &Expr) -> Option<String> {
 /// return from.
 pub fn has_try(b: &Block) -> bool {
     let mut found = false;
-    let mut probe = b.clone();
-    walk_block(&mut probe, &mut |e: &mut Expr| {
-        if matches!(e, Expr::Try { .. }) {
-            found = true;
-        }
+    crate::ast::each_expr(b, &mut |e| {
+        found |= matches!(e, Expr::Try { .. });
+        !found
     });
     found
 }
@@ -1048,20 +927,9 @@ mod tests {
              fn main() { print(1) }
 ",
         );
-        let recv = Expr::Var {
-            id: Id::NEW,
-            name: "r".into(),
-            line: 1,
-        };
+        let recv = Expr::var("r", 1);
         let ring = Type::Named("Ring".into());
-        ex.site(
-            &p.impls,
-            Some(&ring),
-            "at",
-            &recv,
-            &[Expr::Int(0, Id::NEW)],
-            1,
-        )
+        ex.site(&p.impls, Some(&ring), "at", &recv, &[Expr::int(0)], 1)
     }
 
     #[test]
@@ -1090,20 +958,12 @@ mod tests {
              fn main() { print(1) }\n",
         );
         let (_, f) = p.impls.place(&Type::Named("Ring".into()), "at").unwrap();
-        let recv = Expr::Var {
-            id: Id::NEW,
-            name: "r".into(),
-            line: 1,
-        };
+        let recv = Expr::var("r", 1);
         let idx = Expr::Binary {
             id: Id::NEW,
             op: crate::ast::BinOp::Add,
-            lhs: Box::new(Expr::Var {
-                id: Id::NEW,
-                name: "k".into(),
-                line: 1,
-            }),
-            rhs: Box::new(Expr::Int(1, Id::NEW)),
+            lhs: Box::new(Expr::var("k", 1)),
+            rhs: Box::new(Expr::int(1)),
             line: 1,
         };
         let pr = inline(f, &recv, std::slice::from_ref(&idx), 1, "t").unwrap();
@@ -1129,22 +989,7 @@ mod tests {
              fn main() { print(1) }\n",
         );
         let (_, f) = p.impls.place(&Type::Named("Ring".into()), "at").unwrap();
-        let pr = inline(
-            f,
-            &Expr::Var {
-                id: Id::NEW,
-                name: "r".into(),
-                line: 5,
-            },
-            &[Expr::Var {
-                id: Id::NEW,
-                name: "side".into(),
-                line: 5,
-            }],
-            5,
-            "t",
-        )
-        .unwrap();
+        let pr = inline(f, &Expr::var("r", 5), &[Expr::var("side", 5)], 5, "t").unwrap();
         assert!(
             pr.prologue
                 .iter()
@@ -1156,12 +1001,8 @@ mod tests {
 
     #[test]
     fn a_builtin_container_expands_to_nothing() {
-        let recv = Expr::Var {
-            id: Id::NEW,
-            name: "a".into(),
-            line: 3,
-        };
-        let args = [Expr::Int(2, Id::NEW)];
+        let recv = Expr::var("a", 3);
+        let args = [Expr::int(2)];
         let ex = Expansions::shared();
         for ty in [
             Type::Array(Box::new(Type::Int)),
@@ -1208,18 +1049,7 @@ mod tests {
              fn main() { print(1) }\n",
         );
         let (_, f) = p.impls.place(&Type::Named("Ring".into()), "at").unwrap();
-        let pr = inline(
-            f,
-            &Expr::Var {
-                id: Id::NEW,
-                name: "r".into(),
-                line: 1,
-            },
-            &[Expr::Int(3, Id::NEW)],
-            1,
-            "t",
-        )
-        .unwrap();
+        let pr = inline(f, &Expr::var("r", 1), &[Expr::int(3)], 1, "t").unwrap();
         assert_eq!(pr.prologue.len(), 1);
         assert!(
             matches!(&pr.prologue[0], Stmt::Let { name, .. } if name.starts_with("@b") && name.ends_with(".j"))
@@ -1239,18 +1069,7 @@ mod tests {
              fn main() { print(1) }\n",
         );
         let (_, f) = p.impls.place(&Type::Named("Ring".into()), "at").unwrap();
-        let mut pr = inline(
-            f,
-            &Expr::Var {
-                id: Id::NEW,
-                name: "r".into(),
-                line: 1,
-            },
-            &[Expr::Int(1, Id::NEW)],
-            1,
-            "t",
-        )
-        .unwrap();
+        let mut pr = inline(f, &Expr::var("r", 1), &[Expr::int(1)], 1, "t").unwrap();
         // After renaming, `i` has no use outside the lambda, so the argument
         // binds a temporary.
         assert!(
@@ -1274,7 +1093,7 @@ mod tests {
                     seen_lambda = true;
                     assert_eq!(params.len(), 1);
                     assert!(params[0].starts_with("@b"), "binder renamed: {}", params[0]);
-                    if let LambdaBody::Expr(inner) = body {
+                    if let crate::ast::LambdaBody::Expr(inner) = body {
                         assert!(
                             matches!(inner.as_ref(), Expr::Binary { .. }),
                             "the lambda body still computes from its own binder"

@@ -207,7 +207,7 @@ mod tests {
             last.module.is_some(),
             "the last function must be another module's"
         );
-        let diags = vyrn_frontend::checker::check_accum(&program);
+        let diags = vyrn_frontend::checker::check_accum_recording(&program).0;
         let text: Vec<String> = diags.iter().map(|d| d.render()).collect();
         assert!(text.is_empty(), "{text:?}");
     }
@@ -1215,7 +1215,7 @@ mod gen_tests {
     fn run_with(root: &str, r: &dyn ModuleResolver) -> Result<i64, String> {
         let program = load(root, "main.vyrn", &shared_opts(), r, Some(&*engine()))
             .map_err(|ds| ds.iter().map(|d| d.render()).collect::<Vec<_>>().join("\n"))?;
-        let diags = vyrn_frontend::checker::check_accum(&program);
+        let diags = vyrn_frontend::checker::check_accum_recording(&program).0;
         if let Some(d) = diags.first() {
             return Err(d.render());
         }
@@ -1237,7 +1237,7 @@ mod gen_tests {
     /// The message a load+check produced.
     fn gen_err(root: &str, files: &[(&str, &str)]) -> String {
         match load(root, "main.vyrn", &opts(), &map(files), Some(&*engine())) {
-            Ok(p) => match vyrn_frontend::checker::check_accum(&p).first() {
+            Ok(p) => match vyrn_frontend::checker::check_accum_recording(&p).0.first() {
                 Some(d) => d.message.clone(),
                 None => panic!("expected an error, load+check succeeded"),
             },

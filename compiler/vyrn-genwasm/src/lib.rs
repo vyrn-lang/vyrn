@@ -329,17 +329,9 @@ fn wrapper_program(program: &Program) -> Option<Program> {
     let mut p = program.clone();
     // The locals are spelled with `@`, which no source can write: a bare call
     // resolves to a local first, so a generator named `g` would hit one.
-    let argv = |i: usize| call("@at", vec![var("@argv"), Expr::Int(i as i64, Id::NEW)]);
+    let argv = |i: usize| Expr::call("@at", vec![Expr::var("@argv", 0), Expr::int(i as i64)], 0);
     let mut body = vec![
-        Stmt::Let {
-            id: Id::NEW,
-            name: "@argv".into(),
-            mutable: false,
-            ty: None,
-            value: call("args", vec![]),
-            line: 0,
-            col: 0,
-        },
+        Stmt::let_("@argv", Expr::call("args", vec![], 0), 0),
         Stmt::Let {
             id: Id::NEW,
             name: "@g".into(),
@@ -356,57 +348,44 @@ fn wrapper_program(program: &Program) -> Option<Program> {
             cond: Expr::Binary {
                 id: Id::NEW,
                 op: vyrn_frontend::ast::BinOp::Eq,
-                lhs: Box::new(var("@g")),
-                rhs: Box::new(Expr::Str(f.name.clone(), Id::NEW)),
+                lhs: Box::new(Expr::var("@g", 0)),
+                rhs: Box::new(Expr::str(f.name.clone())),
                 line: 0,
             },
             then_block: Block {
                 id: Id::NEW,
                 stmts: takes_type_arg(f)
-                    .then(|| Stmt::Let {
-                        // Bound, not passed inline: the release of an
-                        // argument temporary is refused.
-                        id: Id::NEW,
-                        name: "@typeArg".into(),
-                        mutable: false,
-                        ty: None,
-                        value: call(vyrn_codegen::GEN_ENTRY_TYPE_ARG, vec![]),
-                        line: 0,
-                        col: 0,
+                    // Bound, not passed inline: the release of an argument
+                    // temporary is refused.
+                    .then(|| {
+                        Stmt::let_(
+                            "@typeArg",
+                            Expr::call(vyrn_codegen::GEN_ENTRY_TYPE_ARG, vec![], 0),
+                            0,
+                        )
                     })
                     .into_iter()
                     .chain([
                         // Framed between marker lines; see `unframe_result`.
-                        Stmt::Expr(
-                            call("print", vec![Expr::Str(RESULT_BEGIN.into(), Id::NEW)]),
-                            Id::NEW,
-                        ),
-                        Stmt::Expr(
-                            call(
-                                "print",
-                                vec![call(
-                                    &f.name,
-                                    f.params
-                                        .iter()
-                                        .enumerate()
-                                        .map(|(i, par)| match takes_type_arg(f) {
-                                            true => var("@typeArg"),
-                                            false => at_type(argv(i + 1), &par.ty),
-                                        })
-                                        .collect(),
-                                )],
-                            ),
-                            Id::NEW,
-                        ),
-                        Stmt::Expr(
-                            call("print", vec![Expr::Str(RESULT_END.into(), Id::NEW)]),
-                            Id::NEW,
-                        ),
-                        Stmt::Return {
-                            id: Id::NEW,
-                            value: Some(Expr::Int(0, Id::NEW)),
-                            line: 0,
-                        },
+                        Stmt::expr(Expr::call("print", vec![Expr::str(RESULT_BEGIN)], 0)),
+                        Stmt::expr(Expr::call(
+                            "print",
+                            vec![Expr::call(
+                                &f.name,
+                                f.params
+                                    .iter()
+                                    .enumerate()
+                                    .map(|(i, par)| match takes_type_arg(f) {
+                                        true => Expr::var("@typeArg", 0),
+                                        false => at_type(argv(i + 1), &par.ty),
+                                    })
+                                    .collect(),
+                                0,
+                            )],
+                            0,
+                        )),
+                        Stmt::expr(Expr::call("print", vec![Expr::str(RESULT_END)], 0)),
+                        Stmt::ret(Expr::int(0), 0),
                     ])
                     .collect(),
             },
@@ -416,17 +395,15 @@ fn wrapper_program(program: &Program) -> Option<Program> {
     }
     // Unreachable: `run` checks the target first. Falling off the chain would
     // emit an empty module, so read past the end of `args()` and trap instead.
-    body.push(Stmt::Expr(
-        call("print", vec![argv(1_000_000_000)]),
-        Id::NEW,
-    ));
-    body.push(Stmt::Return {
-        id: Id::NEW,
-        value: Some(Expr::Int(0, Id::NEW)),
-        line: 0,
-    });
+    body.push(Stmt::expr(Expr::call(
+        "print",
+        vec![argv(1_000_000_000)],
+        0,
+    )));
+    body.push(Stmt::ret(Expr::int(0), 0));
 
-    p.functions.push(func("main", Vec::new(), Type::Int, body));
+    p.functions
+        .push(Function::synth("main", Vec::new(), Type::Int, body));
     prepare(&mut p)?;
     Some(p)
 }
@@ -491,26 +468,6 @@ fn unframe_result(stdout: &[u8]) -> Result<(Vec<u8>, Vec<u8>), &'static str> {
 // decoders are ordinary Vyrn, so a change to record lowering cannot make the
 // two walks disagree.
 
-fn func(name: &str, params: Vec<Param>, ret: Type, stmts: Vec<Stmt>) -> Function {
-    Function {
-        name: name.to_string(),
-        exported: false,
-        module: None,
-        doc: None,
-        type_params: Vec::new(),
-        type_bounds: Default::default(),
-        params,
-        ret,
-        body: Block { id: Id::NEW, stmts },
-        line: 0,
-        col: 0,
-        is_extern: false,
-        is_export_extern: false,
-        is_gen: false,
-        is_mut: false,
-    }
-}
-
 /// One `args()[i]` read back at the parameter's declared type. The `None` arm
 /// of `parse` is unreachable, because [`dispatchable`] admits only what argv
 /// carries; its `0` gives the `match` a type.
@@ -522,36 +479,17 @@ fn at_type(e: Expr, ty: &Type) -> Expr {
     Expr::Match {
         id: Id::NEW,
         stmt_pos: false,
-        scrutinee: Box::new(call("parse", vec![e])),
+        scrutinee: Box::new(Expr::call("parse", vec![e], 0)),
         arms: vec![
             MatchArm {
                 pattern: Pattern::Variant("Some".into(), vec![Binder::synthetic("v")]),
-                body: ArmBody::Expr(var("v")),
+                body: ArmBody::Expr(Expr::var("v", 0)),
             },
             MatchArm {
                 pattern: Pattern::Variant("None".into(), Vec::new()),
-                body: ArmBody::Expr(Expr::Int(0, Id::NEW)),
+                body: ArmBody::Expr(Expr::int(0)),
             },
         ],
-        line: 0,
-    }
-}
-
-fn call(name: &str, args: Vec<Expr>) -> Expr {
-    Expr::Call {
-        id: Id::NEW,
-        dot: false,
-        type_args: Vec::new(),
-        name: name.to_string(),
-        args,
-        line: 0,
-    }
-}
-
-fn var(name: &str) -> Expr {
-    Expr::Var {
-        id: Id::NEW,
-        name: name.to_string(),
         line: 0,
     }
 }
@@ -579,23 +517,17 @@ fn reflect_entries(p: &mut Program) -> Option<()> {
     let mut entry =
         |name: String, params: Vec<Param>, ret: Type, kind: i64, arg: Expr, d: &mut Decoders| {
             let body = d.decode(&ret)?;
-            entries.push(func(
+            entries.push(Function::synth(
                 &name,
                 params,
                 ret,
                 vec![
-                    Stmt::Expr(
-                        call(
-                            vyrn_codegen::GEN_REFLECT,
-                            vec![Expr::Int(kind, Id::NEW), arg],
-                        ),
-                        Id::NEW,
-                    ),
-                    Stmt::Return {
-                        id: Id::NEW,
-                        value: Some(body),
-                        line: 0,
-                    },
+                    Stmt::expr(Expr::call(
+                        vyrn_codegen::GEN_REFLECT,
+                        vec![Expr::int(kind), arg],
+                        0,
+                    )),
+                    Stmt::ret(body, 0),
                 ],
             ));
             Some(())
@@ -607,7 +539,7 @@ fn reflect_entries(p: &mut Program) -> Option<()> {
             vec![str_param("path")],
             named("ModuleInterface"),
             vyrn_codegen::REFLECT_MODULE_INTERFACE,
-            var("path"),
+            Expr::var("path", 0),
             &mut dec,
         )?;
     }
@@ -618,7 +550,7 @@ fn reflect_entries(p: &mut Program) -> Option<()> {
             Vec::new(),
             named("TypeArg"),
             vyrn_codegen::REFLECT_TYPE_ARG,
-            Expr::Str(String::new(), Id::NEW),
+            Expr::str(""),
             &mut dec,
         )?;
     }
@@ -630,7 +562,7 @@ fn reflect_entries(p: &mut Program) -> Option<()> {
             vec![str_param("src")],
             Type::Array(Box::new(named("Token"))),
             vyrn_codegen::REFLECT_LEX,
-            var("src"),
+            Expr::var("src", 0),
             &mut dec,
         )?;
     }
@@ -648,7 +580,7 @@ fn reflect_entries(p: &mut Program) -> Option<()> {
                 Vec::new(),
                 named("ContractInfo"),
                 vyrn_codegen::REFLECT_CONTRACT_OF,
-                Expr::Str(name, Id::NEW),
+                Expr::str(name),
                 &mut dec,
             )?;
         }
@@ -683,18 +615,18 @@ impl Decoders {
     /// scalar, else a call to a decoder materialized on demand.
     fn decode(&mut self, ty: &Type) -> Option<Expr> {
         Some(match vyrn_frontend::types::resolve(ty, &self.types) {
-            Type::Str => call(vyrn_codegen::GEN_NEXT_STR, vec![]),
-            Type::Int | Type::IntN { .. } => call(vyrn_codegen::GEN_NEXT_INT, vec![]),
+            Type::Str => Expr::call(vyrn_codegen::GEN_NEXT_STR, vec![], 0),
+            Type::Int | Type::IntN { .. } => Expr::call(vyrn_codegen::GEN_NEXT_INT, vec![], 0),
             Type::Bool => Expr::Binary {
                 id: Id::NEW,
                 op: vyrn_frontend::ast::BinOp::Eq,
-                lhs: Box::new(call(vyrn_codegen::GEN_NEXT_INT, vec![])),
-                rhs: Box::new(Expr::Int(1, Id::NEW)),
+                lhs: Box::new(Expr::call(vyrn_codegen::GEN_NEXT_INT, vec![], 0)),
+                rhs: Box::new(Expr::int(1)),
                 line: 0,
             },
             _ => {
                 let name = self.materialize(ty)?;
-                call(&name, vec![])
+                Expr::call(&name, vec![], 0)
             }
         })
     }
@@ -726,7 +658,7 @@ impl Decoders {
                         name: "n".into(),
                         mutable: false,
                         ty: Some(Type::Int),
-                        value: call(vyrn_codegen::GEN_NEXT_INT, vec![]),
+                        value: Expr::call(vyrn_codegen::GEN_NEXT_INT, vec![], 0),
                         line: 0,
                         col: 0,
                     },
@@ -748,7 +680,7 @@ impl Decoders {
                         name: "i".into(),
                         mutable: true,
                         ty: Some(Type::Int),
-                        value: Expr::Int(0, Id::NEW),
+                        value: Expr::int(0),
                         line: 0,
                         col: 0,
                     },
@@ -757,8 +689,8 @@ impl Decoders {
                         cond: Expr::Binary {
                             id: Id::NEW,
                             op: vyrn_frontend::ast::BinOp::Lt,
-                            lhs: Box::new(var("i")),
-                            rhs: Box::new(var("n")),
+                            lhs: Box::new(Expr::var("i", 0)),
+                            rhs: Box::new(Expr::var("n", 0)),
                             line: 0,
                         },
                         body: Block {
@@ -769,7 +701,7 @@ impl Decoders {
                                 Stmt::Assign {
                                     id: Id::NEW,
                                     name: "xs".into(),
-                                    value: call("@push", vec![var("xs"), elem]),
+                                    value: Expr::call("@push", vec![Expr::var("xs", 0), elem], 0),
                                     line: 0,
                                 },
                                 Stmt::Assign {
@@ -778,8 +710,8 @@ impl Decoders {
                                     value: Expr::Binary {
                                         id: Id::NEW,
                                         op: vyrn_frontend::ast::BinOp::Add,
-                                        lhs: Box::new(var("i")),
-                                        rhs: Box::new(Expr::Int(1, Id::NEW)),
+                                        lhs: Box::new(Expr::var("i", 0)),
+                                        rhs: Box::new(Expr::int(1)),
                                         line: 0,
                                     },
                                     line: 0,
@@ -788,11 +720,7 @@ impl Decoders {
                         },
                         line: 0,
                     },
-                    Stmt::Return {
-                        id: Id::NEW,
-                        value: Some(var("xs")),
-                        line: 0,
-                    },
+                    Stmt::ret(Expr::var("xs", 0), 0),
                 ]
             }
             // One tag atom, then the payload only when it is there.
@@ -804,26 +732,18 @@ impl Decoders {
                         cond: Expr::Binary {
                             id: Id::NEW,
                             op: vyrn_frontend::ast::BinOp::Eq,
-                            lhs: Box::new(call(vyrn_codegen::GEN_NEXT_INT, vec![])),
-                            rhs: Box::new(Expr::Int(1, Id::NEW)),
+                            lhs: Box::new(Expr::call(vyrn_codegen::GEN_NEXT_INT, vec![], 0)),
+                            rhs: Box::new(Expr::int(1)),
                             line: 0,
                         },
                         then_block: Block {
                             id: Id::NEW,
-                            stmts: vec![Stmt::Return {
-                                id: Id::NEW,
-                                value: Some(call("Some", vec![some])),
-                                line: 0,
-                            }],
+                            stmts: vec![Stmt::ret(Expr::call("Some", vec![some], 0), 0)],
                         },
                         else_block: None,
                         line: 0,
                     },
-                    Stmt::Return {
-                        id: Id::NEW,
-                        value: Some(var("None")),
-                        line: 0,
-                    },
+                    Stmt::ret(Expr::var("None", 0), 0),
                 ]
             }
             // Fields in declaration order, which the host pushed: both sides
@@ -835,20 +755,20 @@ impl Decoders {
                 for f in &fields {
                     lit.push((f.name.clone(), self.decode(&f.ty)?));
                 }
-                vec![Stmt::Return {
-                    id: Id::NEW,
-                    value: Some(Expr::StructLit {
+                vec![Stmt::ret(
+                    Expr::StructLit {
                         id: Id::NEW,
                         name: rec.clone(),
                         fields: lit,
                         line: 0,
-                    }),
-                    line: 0,
-                }]
+                    },
+                    0,
+                )]
             }
             _ => return None,
         };
-        self.fns.push(func(&name, Vec::new(), ty.clone(), body));
+        self.fns
+            .push(Function::synth(&name, Vec::new(), ty.clone(), body));
         Some(name)
     }
 }
