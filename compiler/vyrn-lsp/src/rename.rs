@@ -620,7 +620,6 @@ fn candidates(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use vyrn_frontend::ast::Id;
 
     #[test]
     fn a_generated_name_keeps_its_prefix_and_swaps_the_declaration_it_stands_for() {
