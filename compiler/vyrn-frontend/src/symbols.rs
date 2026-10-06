@@ -1810,7 +1810,7 @@ fn index_namespaces(
     linker: Option<Linker<'_>>,
     origins: &OriginIndex,
 ) -> Vec<NamespaceInfo> {
-    let Some((root_path, opts, resolver)) = linker else {
+    let Some((root_path, _, resolver)) = linker else {
         return Vec::new();
     };
     if !root.imports.iter().any(|i| i.namespace.is_some()) {
@@ -1820,8 +1820,6 @@ fn index_namespaces(
     // module's generated source: a namespace may name a generated module whose
     // banner key no resolver can read. The graph is the one `analyze_inner`'s
     // load built; rebuilding it would run a second load per keystroke.
-    let _ = resolver;
-    let _ = opts;
     let root_key = crate::loader::normalize(root_path);
     let Some((_, targets, _)) = graph.iter().find(|(k, _, _)| *k == root_key) else {
         return Vec::new();

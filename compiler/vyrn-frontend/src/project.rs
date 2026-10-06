@@ -789,8 +789,7 @@ fn rename_bindings(b: &mut Block, map: &HashMap<String, String>) {
 fn count_uses(b: &Block, name: &str) -> usize {
     let mut n = 0;
     let mut probe = b.clone();
-    let map: HashMap<String, Expr> = HashMap::new();
-    count_block(&mut probe, name, &mut n, &map);
+    count_block(&mut probe, name, &mut n);
     n
 }
 
@@ -808,7 +807,7 @@ fn uses_outside_lambdas(b: &Block, name: &str) -> usize {
     count_uses(&probe, name)
 }
 
-fn count_block(b: &mut Block, name: &str, n: &mut usize, _m: &HashMap<String, Expr>) {
+fn count_block(b: &mut Block, name: &str, n: &mut usize) {
     let mut counter = |e: &mut Expr| {
         if matches!(e, Expr::Var { name: v, .. } if v == name) {
             *n += 1;
