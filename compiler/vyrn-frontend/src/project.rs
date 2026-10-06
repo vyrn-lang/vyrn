@@ -409,7 +409,7 @@ impl Expansions {
         line: usize,
     ) -> Result<Option<&'static Projection>, String> {
         let var = |name: &str| Expr::Var {
-            id: Id(iter.id()),
+            id: Id::of(iter.id()),
             name: name.to_string(),
             line,
         };

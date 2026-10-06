@@ -5858,7 +5858,7 @@ impl<'a> Builder<'a> {
                 // `?` itself, the value by its operand.
                 let fb = self.bind_pattern(
                     &Pattern::Failure(Binder {
-                        id: Id(tid),
+                        id: Id::of(tid),
                         ..Binder::synthetic("@err")
                     }),
                     &ity,
@@ -5902,7 +5902,7 @@ impl<'a> Builder<'a> {
                 let mark = self.frame.scope.len();
                 let ob = self.bind_pattern(
                     &Pattern::Success(Binder {
-                        id: Id(expr.id()),
+                        id: Id::of(expr.id()),
                         ..Binder::synthetic("@ok")
                     }),
                     &ity,

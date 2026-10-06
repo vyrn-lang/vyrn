@@ -93,6 +93,8 @@ pub struct LocalBinding {
     /// What the check decided, else what the source declares. `None` for an
     /// unannotated `let` in a body the check did not reach.
     pub ty: Option<Type>,
+    /// Whether the source writes the type: an annotated `let`, a parameter.
+    pub annotated: bool,
     /// 1-based line of the name.
     pub line: usize,
     /// 1-based name column.
@@ -104,6 +106,21 @@ pub struct LocalBinding {
 }
 
 pub use crate::ast::LocalKind;
+
+/// The root module's bindings and what each of its name occurrences names.
+#[derive(Debug, Clone, Default)]
+pub struct Binders {
+    /// Every binding, in source order ([`local_index`]).
+    pub locals: Vec<LocalBinding>,
+    /// Each name occurrence a root body resolved, by its `(line, col)`: the
+    /// position of the local binder it names, or `None` for a name past the
+    /// locals (module state, a function, a variant). Empty unless the editor
+    /// asked ([`with_uses`]).
+    pub uses: Uses,
+}
+
+/// Occurrence position to binder position ([`Binders::uses`]).
+pub type Uses = HashMap<(usize, usize), Option<(usize, usize)>>;
 
 crate::body_scope_descent!(BinderIndex, index_block, index_stmt, index_expr);
 
@@ -138,6 +155,7 @@ impl LocalIndex<'_> {
                 .get(&(line, col))
                 .cloned()
                 .or_else(|| declared.cloned()),
+            annotated: declared.is_some(),
             line,
             col,
             end_col: col + name.chars().count(),
@@ -207,7 +225,7 @@ pub(crate) fn local_index(
 /// does not suppress errors in the others. Inside a single function body the
 /// check is still first-error (recovery there is the same class of work as
 /// parser recovery, and is deferred).
-pub fn check_accum_with_binders(program: &Program) -> (Vec<Diagnostic>, Vec<LocalBinding>) {
+pub fn check_accum_with_binders(program: &Program) -> (Vec<Diagnostic>, Binders) {
     let (out, binders, _, _, _) = check_accum_full(program);
     (out, binders)
 }
@@ -353,7 +371,7 @@ use crate::types::INT32;
 /// bindings and the record. The refused set holds the functions and module
 /// state the diagnostics all belong to, so every other body is typed; it is
 /// `None` when a refusal stands anywhere else.
-pub fn check_accum_with_sites(program: &Program) -> (Appended, Vec<LocalBinding>, Recorded) {
+pub fn check_accum_with_sites(program: &Program) -> (Appended, Binders, Recorded) {
     let (out, binders, _, derived, refused, made) = check_accum_inner(program, true, 0, &[]);
     ((out, derived, refused), binders, made.unwrap_or_default())
 }
@@ -362,7 +380,7 @@ fn check_accum_full(
     program: &Program,
 ) -> (
     Vec<Diagnostic>,
-    Vec<LocalBinding>,
+    Binders,
     StoredFnEffects,
     Vec<crate::gen::Site>,
     Option<HashSet<String>>,
@@ -465,7 +483,7 @@ fn check_accum_inner(
     earlier: &[(String, String)],
 ) -> (
     Vec<Diagnostic>,
-    Vec<LocalBinding>,
+    Binders,
     StoredFnEffects,
     Vec<crate::gen::Site>,
     Option<HashSet<String>>,
@@ -961,6 +979,7 @@ fn check_accum_inner(
         extern_fns: &extern_fns,
         gen_fns: &gen_fns,
         record_reads: recording && program.session.get().is_some(),
+        record_uses: USES.with(|u| u.get()),
     };
     let mut checker = Checker::new(&cx, recording);
     checker.recheck = (program.session.get())
@@ -1124,7 +1143,10 @@ fn check_accum_inner(
         written(&mut site.ty);
         written(&mut site.entry);
     }
-    let binders = local_index(program, &checker.binder_types.borrow());
+    let binders = Binders {
+        locals: local_index(program, &checker.binder_types.borrow()),
+        uses: checker.uses.take(),
+    };
     let typed = (in_bodies == out.len()).then_some(refused);
     let mut seen = HashSet::new();
     let mut reads = checker.reads.take();
@@ -1144,6 +1166,7 @@ struct Typed {
     record: Option<Recorded>,
     reads: Vec<(SourceBody, Key)>,
     binders: HashMap<(usize, usize), Type>,
+    uses: Uses,
     stored: StoredFnEffects,
     derive: Vec<crate::gen::Site>,
 }
@@ -1557,7 +1580,7 @@ impl Recorded {
 }
 
 /// One pass that returns the diagnostics, the root's bindings and the record.
-fn recording_check(program: &Program) -> (Vec<Diagnostic>, Vec<LocalBinding>, Recorded) {
+fn recording_check(program: &Program) -> (Vec<Diagnostic>, Binders, Recorded) {
     let (diags, binders, _, _, _, made) = check_accum_inner(program, true, 0, &[]);
     (diags, binders, made.unwrap_or_default())
 }
@@ -1570,9 +1593,23 @@ pub fn record(program: &Program) -> Recorded {
 
 /// Checks the program as [`record`] does and returns the diagnostics and the
 /// root's bindings. It never reuses a body.
-pub fn check_accum_recording(program: &Program) -> (Vec<Diagnostic>, Vec<LocalBinding>) {
+pub fn check_accum_recording(program: &Program) -> (Vec<Diagnostic>, Binders) {
     let (diags, binders, _) = recording_check(program);
     (diags, binders)
+}
+
+thread_local! {
+    /// Set by [`with_uses`].
+    static USES: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Runs `f` with this thread's checks recording [`Binders::uses`]. The editor
+/// asks; `vyrn check` does not, and a row costs a lookup per name.
+pub fn with_uses<T>(f: impl FnOnce() -> T) -> T {
+    let outer = USES.with(|u| u.replace(true));
+    let r = f();
+    USES.with(|u| u.set(outer));
+    r
 }
 
 /// What every body is typed against: the declarations and tables steps 1 to 2
@@ -1610,6 +1647,9 @@ struct Cx<'a> {
     /// in a host with a session ([`crate::session`]), which rechecks per
     /// function. `vyrn check` has none, and a row costs a push per name lookup.
     record_reads: bool,
+    /// Whether the check records [`Binders::uses`] ([`with_uses`]), read once
+    /// on the calling thread.
+    record_uses: bool,
 }
 
 /// One body's typing state over a [`Cx`], which it reads through `Deref`.
@@ -1624,6 +1664,8 @@ struct Checker<'a> {
     /// The type of every root-module binding, keyed by binder position, for
     /// editor hover. A binding in a statement that did not type has no row.
     binder_types: RefCell<HashMap<(usize, usize), Type>>,
+    /// What each root-module name occurrence names ([`Binders::uses`]).
+    uses: RefCell<Uses>,
     /// Whether the function being checked is the root module's. Only the root
     /// is indexed: two modules share a position.
     in_root: std::cell::Cell<bool>,
@@ -1728,6 +1770,9 @@ struct VariantInfo {
 struct Binding {
     ty: Type,
     mutable: bool,
+    /// The binder's `(line, col)`; `(0, 0)` for module state, a predicate's
+    /// field and a desugar's binder.
+    at: (usize, usize),
 }
 
 /// A stack of lexical frames, innermost last, and whether a name the frames do
@@ -1798,6 +1843,7 @@ impl<'a> Checker<'a> {
             cur_bounds: Default::default(),
             region_floor: Default::default(),
             binder_types: Default::default(),
+            uses: Default::default(),
             in_root: Default::default(),
             errors: Default::default(),
             globals: Default::default(),
@@ -2651,7 +2697,14 @@ impl<'a> Checker<'a> {
         }
         let mut scope = Scope::closed();
         for (name, ty) in binds {
-            scope[0].insert(name, Binding { ty, mutable: false });
+            scope[0].insert(
+                name,
+                Binding {
+                    ty,
+                    mutable: false,
+                    at: (0, 0),
+                },
+            );
         }
         let pty = self.expr(pred, &scope, None, None)?;
         if self.base(&pty) != Type::Bool {
@@ -2845,6 +2898,7 @@ impl<'a> Checker<'a> {
                 Ok(t) => Binding {
                     ty: t,
                     mutable: g.mutable,
+                    at: (0, 0),
                 },
                 Err(s) => {
                     out.extend(s.map(|d| d.in_file(g.module.clone())));
@@ -2852,6 +2906,7 @@ impl<'a> Checker<'a> {
                     Binding {
                         ty: Type::Err,
                         mutable: g.mutable,
+                        at: (0, 0),
                     }
                 }
             };
@@ -2934,6 +2989,7 @@ impl<'a> Checker<'a> {
             record: self.record.as_ref().map(|r| r.take()),
             reads: self.reads.take(),
             binders: self.binder_types.take(),
+            uses: self.uses.take(),
             stored: StoredFnEffects {
                 sources: self.stored_sources.take(),
                 arg_sources: self.arg_sources.take(),
@@ -2952,6 +3008,7 @@ impl<'a> Checker<'a> {
         }
         *self.reads.borrow_mut() = t.reads;
         *self.binder_types.borrow_mut() = t.binders;
+        *self.uses.borrow_mut() = t.uses;
         *self.stored_sources.borrow_mut() = t.stored.sources;
         *self.arg_sources.borrow_mut() = t.stored.arg_sources;
         *self.stored_calls.borrow_mut() = t.stored.calls;
@@ -2970,6 +3027,10 @@ impl<'a> Checker<'a> {
         for (at, ty) in t.binders {
             binders.entry(at).or_insert(ty);
         }
+        let mut uses = self.uses.borrow_mut();
+        for (at, to) in t.uses {
+            uses.entry(at).or_insert(to);
+        }
         self.stored_sources.borrow_mut().extend(t.stored.sources);
         self.arg_sources.borrow_mut().extend(t.stored.arg_sources);
         self.stored_calls.borrow_mut().extend(t.stored.calls);
@@ -2982,6 +3043,30 @@ impl<'a> Checker<'a> {
 
     fn function(&self, f: &Function) -> Result<(), Diagnostic> {
         self.function_body(f, &f.body)
+    }
+
+    /// Records the binder the root's name occurrence `id` at `line` names
+    /// ([`Binders::uses`]), when the editor asked. A binder a desugar made
+    /// has no position, and an expansion's node is spelled at its projection.
+    fn note_use(&self, scope: &Scope, name: &str, line: usize, id: Id) {
+        let expanded = id.0.unit() >= NodeId::EXPANDED;
+        if !self.record_uses || id.col() == 0 || !self.in_root.get() || expanded {
+            return;
+        }
+        let at = match scope.iter().rev().find_map(|f| f.get(name)) {
+            Some(b) if b.at.1 == 0 => return,
+            Some(b) => Some(b.at),
+            None => None,
+        };
+        self.uses.borrow_mut().entry((line, id.col())).or_insert(at);
+    }
+
+    /// Binds `name` in the innermost frame at its binder's position `at`, and
+    /// records its type for the editor.
+    fn bind(&self, scope: &mut Scope, name: &str, ty: Type, mutable: bool, at: (usize, usize)) {
+        self.bind_seen(Some(ty.clone()), at.0, at.1);
+        let frame = scope.last_mut().expect("a scope has a frame");
+        frame.insert(name.to_string(), Binding { ty, mutable, at });
     }
 
     /// Records a root-module binding's type for the editor, at its binder's
@@ -3011,14 +3096,7 @@ impl<'a> Checker<'a> {
         scope.push(HashMap::new());
         for p in &f.params {
             let mutable = p.capability == Capability::Modify;
-            self.bind_seen(Some(p.ty.clone()), p.line, p.col);
-            scope.last_mut().unwrap().insert(
-                p.name.clone(),
-                Binding {
-                    ty: p.ty.clone(),
-                    mutable,
-                },
-            );
+            self.bind(&mut scope, &p.name, p.ty.clone(), mutable, (p.line, p.col));
         }
         self.block(body, &f.ret, &mut scope);
         self.first_error()
@@ -3117,16 +3195,18 @@ impl<'a> Checker<'a> {
                     Binding {
                         ty: Type::Err,
                         mutable: *mutable,
+                        at: (*line, *col),
                     },
                 );
             }
-            Stmt::ForIn { var, .. } => {
+            Stmt::ForIn { var, line, col, .. } => {
                 // The failed arm never pushed the loop frame; bind in the block's.
                 scope.last_mut().unwrap().insert(
                     var.clone(),
                     Binding {
                         ty: Type::Err,
                         mutable: false,
+                        at: (*line, *col),
                     },
                 );
             }
@@ -3136,6 +3216,13 @@ impl<'a> Checker<'a> {
 
     fn stmt(&self, stmt: &Stmt, ret: &Type, scope: &mut Scope) -> Result<(), Diagnostic> {
         *self.stmt_line.borrow_mut() = stmt.line();
+        if let Stmt::Assign { name, line, id, .. }
+        | Stmt::SetField { name, line, id, .. }
+        | Stmt::IndexSet { name, line, id, .. }
+        | Stmt::Drop { name, line, id } = stmt
+        {
+            self.note_use(scope, name, *line, *id);
+        }
         match stmt {
             Stmt::Let {
                 name,
@@ -3163,14 +3250,7 @@ impl<'a> Checker<'a> {
                     None if self.base(&vty) == Type::Unit => Type::Err,
                     None => vty,
                 };
-                self.bind_seen(Some(bty.clone()), *line, *col);
-                scope.last_mut().unwrap().insert(
-                    name.clone(),
-                    Binding {
-                        ty: bty,
-                        mutable: *mutable,
-                    },
-                );
+                self.bind(scope, name, bty, *mutable, (*line, *col));
                 Ok(())
             }
             Stmt::Assign {
@@ -3370,15 +3450,8 @@ impl<'a> Checker<'a> {
                         }
                     }
                 };
-                self.bind_seen(Some(elem.clone()), *line, *col);
                 scope.push(HashMap::new());
-                scope.last_mut().unwrap().insert(
-                    var.clone(),
-                    Binding {
-                        ty: elem,
-                        mutable: false,
-                    },
-                );
+                self.bind(scope, var, elem, false, (*line, *col));
                 self.block(body, ret, scope);
                 scope.pop();
                 // A `for` over a user container reads each element through its
@@ -3387,7 +3460,11 @@ impl<'a> Checker<'a> {
                     if let Ok(Some(p)) = self.expansions.for_element(self.impls, &ity, iter, *line)
                     {
                         self.record_desugar(scope, |c, sc| {
-                            let bind = |ty| Binding { ty, mutable: false };
+                            let bind = |ty| Binding {
+                                ty,
+                                mutable: false,
+                                at: (0, 0),
+                            };
                             sc.push(HashMap::from([
                                 (crate::project::FOR_RECV.to_string(), bind(ity.clone())),
                                 (crate::project::FOR_INDEX.to_string(), bind(Type::Int)),
@@ -3476,6 +3553,17 @@ impl<'a> Checker<'a> {
         expected: Option<&Type>,
         fn_ret: Option<&Type>,
     ) -> Result<Type, Diagnostic> {
+        if let Expr::Var { name, line, id }
+        | Expr::Call {
+            name,
+            line,
+            id,
+            dot: false,
+            ..
+        } = expr
+        {
+            self.note_use(scope, name, *line, *id);
+        }
         let Some(record) = &self.record else {
             return self.expr_inner(expr, scope, expected, fn_ret);
         };
@@ -4198,13 +4286,12 @@ impl<'a> Checker<'a> {
             if !bind.is_empty() {
                 inner.push(HashMap::new());
                 for (bname, pty) in bind.iter().zip(&ev.payload) {
-                    self.bind_seen(Some(pty.clone()), bname.line, bname.col);
-                    inner.last_mut().unwrap().insert(
-                        bname.name.clone(),
-                        Binding {
-                            ty: pty.clone(),
-                            mutable: false,
-                        },
+                    self.bind(
+                        &mut inner,
+                        &bname.name,
+                        pty.clone(),
+                        false,
+                        (bname.line, bname.col),
                     );
                 }
             }
@@ -5987,14 +6074,7 @@ impl<'a> Checker<'a> {
                 let mut inner = scope.clone();
                 inner.push(HashMap::new());
                 for (pn, pty) in params.iter().zip(&ptys) {
-                    self.bind_seen(Some(pty.clone()), pn.line, pn.col);
-                    inner.last_mut().unwrap().insert(
-                        pn.name.clone(),
-                        Binding {
-                            ty: pty.clone(),
-                            mutable: false,
-                        },
-                    );
+                    self.bind(&mut inner, &pn.name, pty.clone(), false, (pn.line, pn.col));
                 }
                 let mut locals: HashSet<String> = params.iter().map(|p| p.name.clone()).collect();
                 self.check_lambda_body_captures(body, scope, &mut locals, *lline)?;
@@ -6118,14 +6198,7 @@ impl<'a> Checker<'a> {
         let mut inner = scope.clone();
         inner.push(HashMap::new());
         for (pn, pty) in params.iter().zip(ptys) {
-            self.bind_seen(Some(pty.clone()), pn.line, pn.col);
-            inner.last_mut().unwrap().insert(
-                pn.name.clone(),
-                Binding {
-                    ty: pty.clone(),
-                    mutable: false,
-                },
-            );
+            self.bind(&mut inner, &pn.name, pty.clone(), false, (pn.line, pn.col));
         }
         let mut locals: HashSet<String> = params.iter().map(|p| p.name.clone()).collect();
         self.check_lambda_body_captures(body, scope, &mut locals, *line)?;

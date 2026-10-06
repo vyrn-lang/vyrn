@@ -688,37 +688,16 @@ fn is_dev_entry(source: &str) -> bool {
     imports_rpc && calls_server
 }
 
-/// Fence a hover's signature as ` ```vyrn ` for highlighting. `symbols.rs`
-/// builds plain prose; the fence is presentation, so it lives in the adapter.
-///
-/// Two shapes carry a signature: a first paragraph starting with a declaration
-/// keyword, and a builtin method's one-liner whose prose follows an em dash.
-/// Anything else is left alone.
-fn fence_signature(hover: &str) -> String {
-    let (head, rest) = match hover.find("\n\n") {
-        Some(i) => (&hover[..i], &hover[i..]),
-        None => (hover, ""),
-    };
-    const DECL: &[&str] = &[
-        "fn ",
-        "gen fn ",
-        "mut fn ",
-        "type ",
-        "let ",
-        "protocol ",
-        "impl ",
-        "contract ",
-    ];
-    if DECL.iter().any(|d| head.starts_with(d)) {
-        return format!("```vyrn\n{head}\n```{rest}");
+/// The hover of a resolved name, its signature fenced as ` ```vyrn ` for
+/// highlighting. `symbols.rs` supplies the signature and the prose after it;
+/// the fence is presentation, so it lives in the adapter. A hover without a
+/// signature is sent as it is.
+fn fence_signature(r: &vyrn_frontend::Resolution) -> String {
+    match &r.signature {
+        Some(sig) if r.doc.is_empty() => format!("```vyrn\n{sig}\n```"),
+        Some(sig) => format!("```vyrn\n{sig}\n```\n\n{}", r.doc),
+        None => r.hover.clone(),
     }
-    // A builtin method detail: the fence takes the half before the em dash.
-    if let Some((sig, doc)) = head.split_once(" — ") {
-        if !sig.contains('\n') && sig.contains('(') && sig.contains("->") {
-            return format!("```vyrn\n{sig}\n```\n\n{doc}{rest}");
-        }
-    }
-    hover.to_string()
 }
 
 fn handle_hover(server: &Server, params: serde_json::Value) -> Option<Hover> {
@@ -735,36 +714,38 @@ fn handle_hover(server: &Server, params: serde_json::Value) -> Option<Hover> {
         (Some(c), Some(d)) => Some(format!("{c}\n\n{d}")),
         (c, d) => c.or(d),
     };
+    // A resolved name, else a class token, whose hover is not fenced.
     let ordinary = if is_vyrn_uri(uri) {
         lookup(server, uri).and_then(|(analysis, _)| match resolve(analysis, line, col) {
-            Some(r) => Some(r.hover),
-            None => server
-                .docs
-                .get(uri)
-                .and_then(|src| class_token_hover(analysis, src, line, col)),
+            Some(r) => Some(Ok(fence_signature(&r))),
+            None => (server.docs.get(uri))
+                .and_then(|src| class_token_hover(analysis, src, line, col))
+                .map(Err),
         })
     } else {
         vyx_forward(server, uri, line, col).and_then(|fwd| {
-            match resolve(&fwd.synth.analysis, fwd.line, fwd.col) {
-                Some(r) => Some(r.hover),
-                None => class_token_hover(
-                    &fwd.synth.analysis,
-                    &fwd.synth.gen_source,
-                    fwd.line,
-                    fwd.col,
-                ),
+            let a = &fwd.synth.analysis;
+            match resolve(a, fwd.line, fwd.col) {
+                Some(r) => Some(Ok(fence_signature(&r))),
+                None => class_token_hover(a, &fwd.synth.gen_source, fwd.line, fwd.col).map(Err),
             }
         })
     };
-    let ordinary = ordinary.map(|o| fence_signature(&o));
+    let (ordinary, safelisted) = match ordinary {
+        Some(Ok(hover)) => (Some(hover), None),
+        Some(Err(class)) => (Some(class.text), class.safelisted),
+        None => (None, None),
+    };
     let value = match (ordinary, note) {
         (Some(o), Some(n)) => format!("{o}\n\n---\n\n{n}"),
-        (Some(o), None) => o,
+        // A safelisted class has no `std/tw` rule; append the app's own rules.
+        (Some(o), None) => match safelisted {
+            Some(class) => with_app_css(server, uri, o, &class),
+            None => o,
+        },
         (None, Some(n)) => n,
         (None, None) => return None,
     };
-    // A safelisted class has no `std/tw` rule; append the app's own rules.
-    let value = with_app_css(server, uri, value);
     Some(Hover {
         contents: HoverContents::Markup(MarkupContent {
             kind: MarkupKind::Markdown,
@@ -1810,7 +1791,7 @@ fn handle_inlay_hint(server: &Server, params: serde_json::Value) -> Option<Vec<I
 }
 
 /// A `: Type` label after the name of every binding in lines `from..=to` whose
-/// line does not already say its type (`let p = o.copy()` -> `p: Outer`). The
+/// source does not already say its type (`let p = o.copy()` -> `p: Outer`). The
 /// type is the analysis's, as hover renders it.
 fn type_hints(analysis: &Analysis, src: &str, from: usize, to: usize) -> Vec<InlayHint> {
     let lines: Vec<&str> = src.lines().collect();
@@ -1831,7 +1812,8 @@ fn type_hints(analysis: &Analysis, src: &str, from: usize, to: usize) -> Vec<Inl
 }
 
 /// The `: Type` label a binding earns on the author's own `line`, or `None`
-/// when the analysis gives it no type or the line already says it.
+/// when the analysis gives it no type or the source already says it: an
+/// annotation, or an initializer on `line` that shows it.
 ///
 /// `end_col` is the 1-based column just past the name in `line`. The spelling is
 /// hover's renderer, [`vyrn_frontend::type_to_string`].
@@ -1846,7 +1828,7 @@ fn type_hint_label(
         return None;
     }
     let label = vyrn_frontend::type_to_string(b.ty.as_ref()?, spellings);
-    if spells_type(line, end_col, &label) {
+    if b.annotated || init_shows_type(line, end_col, &label) {
         return None;
     }
     Some(label)
@@ -1964,22 +1946,19 @@ fn name_ends_at(line: &str, col: usize, name: &str) -> bool {
     chars[end - len..end].iter().collect::<String>() == name
 }
 
-/// Whether the text after a binding's name already says its type. `end_col` is
-/// the 1-based char column just past the name, `ty` the rendered type. True for:
+/// Whether the initializer after a binding's name already says its type.
+/// `end_col` is the 1-based char column just past the name, `ty` the rendered
+/// type. True for:
 ///
-/// * a written annotation (`let x: Int64 = ..`);
 /// * a literal, which is its own evidence (`3`, `"s"`, `true`, `[1, 2]`);
 /// * an initializer that opens with the type's own name (`Outer { .. }`,
 ///   `Color.Red`).
 ///
 /// Anything else hides the type. In doubt the answer is false: a hint too many
 /// is noise, a hint too few is the feature not working.
-fn spells_type(line: &str, end_col: usize, ty: &str) -> bool {
+fn init_shows_type(line: &str, end_col: usize, ty: &str) -> bool {
     let rest: String = line.chars().skip(end_col.saturating_sub(1)).collect();
     let rest = rest.trim_start();
-    if rest.starts_with(':') {
-        return true;
-    }
     // The binding's `=` is the first one after its name, so a comparison inside
     // the initializer (`a == b`) cannot be mistaken for it.
     let Some((_, init)) = rest.split_once('=') else {
@@ -3299,12 +3278,8 @@ const MAX_CSS_LINES: usize = 40;
 /// The most `.vyx` files scanned for `stylesheet "..."` declarations.
 const MAX_VYX_SCAN: usize = 64;
 
-/// `hover` with the app's matching CSS rules appended, if it is the
-/// "safelisted (app-styled)" text; any other hover unchanged.
-fn with_app_css(server: &Server, uri: &Url, hover: String) -> String {
-    let Some(class) = safelisted_class_of(&hover) else {
-        return hover;
-    };
+/// `hover` with the app's CSS rules for the safelisted `class` appended.
+fn with_app_css(server: &Server, uri: &Url, hover: String, class: &str) -> String {
     let Some(path) = uri_path(uri) else {
         return hover;
     };
@@ -3313,7 +3288,7 @@ fn with_app_css(server: &Server, uri: &Url, hover: String) -> String {
         return hover;
     };
     let root = app_root_for(dir);
-    let rules = app_css_rules(server, &root, &class);
+    let rules = app_css_rules(server, &root, class);
     if rules.is_empty() {
         return hover;
     }
@@ -3322,17 +3297,6 @@ fn with_app_css(server: &Server, uri: &Url, hover: String) -> String {
         out.push_str(&format!("\n\n```css\n{rule}\n```\n— {rel}:{line}"));
     }
     out
-}
-
-/// The class name of a safelisted hover (`` **`plang`** -- safelisted
-/// (app-styled)``), or `None` for any other hover text.
-fn safelisted_class_of(hover: &str) -> Option<String> {
-    if !hover.ends_with("— safelisted (app-styled)") {
-        return None;
-    }
-    let rest = hover.strip_prefix("**`")?;
-    let end = rest.find("`**")?;
-    Some(rest[..end].to_string())
 }
 
 /// The app's own rules matching `class`, as `(path relative to the app root,
@@ -3642,6 +3606,7 @@ mod tests {
             name: "e".to_string(),
             kind: LocalKind::Let { mutable: false },
             ty: Some(ty.clone()),
+            annotated: false,
             line: 1,
             col: 5,
             end_col: 6,
@@ -3656,6 +3621,26 @@ mod tests {
             "one renderer"
         );
         assert_ne!(label, ty.to_string(), "`Display` drops the payloads");
+    }
+
+    /// The annotation is the parser's, not the line's: a binding the AST
+    /// marks annotated earns no hint, whatever its line spells.
+    #[test]
+    fn an_annotated_binding_earns_no_hint() {
+        let b = vyrn_frontend::LocalBinding {
+            name: "n".to_string(),
+            kind: LocalKind::Let { mutable: false },
+            ty: Some(Type::Int),
+            annotated: true,
+            line: 1,
+            col: 5,
+            end_col: 6,
+            fn_line: 1,
+        };
+        assert_eq!(
+            type_hint_label(&b, &Default::default(), "let n = pick()", 6),
+            None
+        );
     }
 
     /// The emoji is 1 char and 2 UTF-16 units, so every column past it differs

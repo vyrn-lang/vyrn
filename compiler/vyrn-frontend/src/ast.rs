@@ -163,16 +163,32 @@ pub struct MethodId {
     pub member: u32,
 }
 
-/// A node's slot for its [`NodeId`]; [`NodeId::NONE`] until numbered. Any two
-/// slots compare equal, so two trees compare by structure alone. `{:?}`
+/// A node's slot for its [`NodeId`], [`NodeId::NONE`] until numbered, and
+/// the 1-based column of the name the node spells, 0 when a desugar built it.
+/// Any two slots compare equal, so two trees compare by structure alone. `{:?}`
 /// prints every slot alike, so a fingerprint over a tree's debug text ignores
 /// ids too; `{:#?}` prints the id as `#unit.local`.
 #[derive(Clone, Copy, Default)]
-pub struct Id(pub NodeId);
+pub struct Id(pub NodeId, u32);
 
 impl Id {
     /// The slot a node is built with.
-    pub const NEW: Id = Id(NodeId::NONE);
+    pub const NEW: Id = Id(NodeId::NONE, 0);
+
+    /// The slot of a node whose name is spelled at column `col`.
+    pub fn at(col: usize) -> Id {
+        Id(NodeId::NONE, col as u32)
+    }
+
+    /// The slot of the node numbered `node`, which spells no name.
+    pub fn of(node: NodeId) -> Id {
+        Id(node, 0)
+    }
+
+    /// The column of the name the node spells, 0 for none.
+    pub fn col(self) -> usize {
+        self.1 as usize
+    }
 }
 
 impl PartialEq for Id {
@@ -1899,7 +1915,7 @@ impl Numbering {
 
     fn next(&mut self, slot: &mut Id) {
         self.0.local += 1;
-        *slot = Id(self.0);
+        slot.0 = self.0;
     }
 
     pub fn function(&mut self, f: &mut Function) {

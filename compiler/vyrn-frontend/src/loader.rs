@@ -2271,14 +2271,17 @@ fn decls(p: &Program) -> impl Iterator<Item = Decl<'_>> {
         )
 }
 
-/// The owning-module slot of everything a module holds, tests and benches
-/// included. A contract's names the library a diagnostic blames, a
-/// global's carries the same-module initializer rule, and a test's
-/// or bench's lets `vyrn test <root>` run the root's alone. Separate from
-/// [`decls`] because the borrow is unique.
+/// The owning-module slot of everything a module holds, tests, benches and
+/// impl members included. A contract's names the library a diagnostic blames,
+/// a global's carries the same-module initializer rule, a test's or bench's
+/// lets `vyrn test <root>` run the root's alone, and an impl member's keeps
+/// the editor's root index to the root. Separate from [`decls`] because the
+/// borrow is unique.
 fn decl_modules_mut(p: &mut Program) -> impl Iterator<Item = &mut Option<String>> {
+    let members = (p.impls.iter_mut()).flat_map(|i| i.methods.iter_mut().chain(&mut i.places));
     (p.type_decls.iter_mut().map(|t| &mut t.module))
         .chain(p.functions.iter_mut().map(|f| &mut f.module))
+        .chain(members.map(|f| &mut f.module))
         .chain(p.protocols.iter_mut().map(|pr| &mut pr.module))
         .chain(p.contracts.iter_mut().map(|c| &mut c.module))
         .chain(p.globals.iter_mut().map(|g| &mut g.module))
