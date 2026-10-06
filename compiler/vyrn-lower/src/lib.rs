@@ -21,7 +21,6 @@ mod world;
 
 pub use pipeline::{check_and_synthesize, gen_engine, load, load_warned, refusals, JUDGE};
 
-pub use core::refuses as kernel_refuses;
 pub use world::{analyze, FnRow, Fns, World};
 
 use std::collections::{BTreeMap, HashMap, VecDeque};

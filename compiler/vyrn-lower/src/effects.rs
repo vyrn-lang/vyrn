@@ -135,11 +135,6 @@ pub fn writes_state(state: &StateCallees, frame: Option<FnId>, callee: &str) -> 
         .unwrap_or_default()
 }
 
-/// Every frame of `top`, walked, in [`Body::frames`] order.
-pub fn walk(top: &Body) -> Vec<Walked> {
-    walk_frames(&top.frames())
-}
-
 /// Walks every frame of `bodies`, on every thread. A body's lambdas are
 /// joined only when their frames are in `bodies`, and each comes after the
 /// frame that builds it, as [`Body::frames`] lists them.
