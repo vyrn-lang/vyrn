@@ -148,7 +148,7 @@ pub fn module_interface_lit(
     let mut type_infos = Vec::new();
     for t in &program.type_decls {
         // Skip injected (line 0) and synthetic (`Name.field`) declarations.
-        if !t.exported || t.line == 0 || t.name.contains('.') {
+        if !t.exported || t.line == 0 || is_synthetic(&t.name) {
             continue;
         }
         // Own declarations always; foreign ones when the closure reaches them.
@@ -325,7 +325,7 @@ fn push_node(
     nodes: &mut Vec<Expr>,
 ) -> (i64, String) {
     if let Type::Named(n) = ty {
-        if let Some(d) = types.get(n).filter(|_| n.contains('.')) {
+        if let Some(d) = types.get(n).filter(|_| is_synthetic(n)) {
             let pred = d.predicate.as_ref().map(crate::checker::pred_summary);
             return push_node(&d.base, pred, types, nodes);
         }

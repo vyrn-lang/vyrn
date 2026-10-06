@@ -621,7 +621,7 @@ fn type_schema(ty: &Type, cx: &mut SchemaCx) -> String {
                 return "{\"$ref\":\"#\"}".to_string();
             }
             let types = cx.types;
-            if n.contains('.') {
+            if is_synthetic(n) {
                 return match types.decl(n) {
                     Some(d) => named_schema(d, cx),
                     None => "{}".to_string(),
