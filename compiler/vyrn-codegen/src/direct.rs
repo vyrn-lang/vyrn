@@ -358,7 +358,6 @@ fn compile_inner(
         lambdas: vyrn_frontend::ast::lambdas(program),
         layouts: RefCell::default(),
         oracle,
-        impls: program.impls.clone(),
         sigs: HashMap::new(),
         rt,
         gen,
@@ -405,7 +404,15 @@ fn compile_inner(
     for g in &program.globals {
         let ty = match &g.ty {
             Some(t) => t.clone(),
-            None => top_level(&cx).peek(&g.init, g.line)?,
+            None => match cx.world.ownership.record.node_types.get(&g.init.id()) {
+                Some(t) => cx.sub(t),
+                None => {
+                    return unsupported(
+                        "a module-state initializer the checker did not type",
+                        g.line,
+                    )
+                }
+            },
         };
         let l = cx.layout(&ty, g.line)?;
         if cx.repr(&ty, g.line)? == Repr::Unit {
@@ -456,7 +463,7 @@ fn compile_inner(
 
     for f in &user {
         let sig = cx.sigs[&f.name].clone();
-        crate::observe::note_inst(crate::observe::Site::Wasm, &f.name, &[]);
+        crate::observe::note_inst(&f.name, &[]);
         lower_fn(&mut m, f, &sig, &cx, HashMap::new())?;
     }
 
@@ -491,9 +498,7 @@ fn compile_inner(
             // A `Key::Lambda` has no program name to record. The other kinds are one callee at one
             // list of type arguments, which `vyrn-lower`'s worklist keys on.
             match &p.key {
-                Key::Generic(n, args) | Key::Ho(n, args, _) => {
-                    crate::observe::note_inst(crate::observe::Site::Wasm, n, args)
-                }
+                Key::Generic(n, args) | Key::Ho(n, args, _) => crate::observe::note_inst(n, args),
                 Key::Lambda(..) => {}
             }
             cx.subst = p.subst.clone();
@@ -994,9 +999,6 @@ struct Cx<'a> {
     /// The check oracle's host imports and its row labels, under
     /// [`vyrn_lower::check::Mode::Count`]; `None` in every other build.
     oracle: Option<Oracle>,
-    /// Every `impl` block, for `place` projection lookup: a projection is not a function, so
-    /// `sigs` cannot answer for it.
-    impls: Vec<vyrn_frontend::ast::ImplBlock>,
     sigs: HashMap<String, Sig>,
     rt: Rt,
     /// The `vyrn_gen` host imports on the generator path. `None` in an ordinary build, where those
@@ -1047,7 +1049,7 @@ struct Cx<'a> {
     /// The `std/mem` declarations by primitive name: each states the types [`mem_ins`] lowers.
     mem: HashMap<&'a str, &'a Function>,
     /// The program's analysis: the release steps placed per function, the `Owned` table they
-    /// were decided with, the checker's record ([`Fn_::peek`] reads an expression's type off it),
+    /// were decided with, the checker's record (a module-state initializer's type),
     /// and the core's bodies and facts, the only source of the releases this emitter emits.
     world: std::sync::Arc<vyrn_lower::World>,
     /// The log threshold, as an ordinal. Compile-time, so a disabled log site emits no write.
@@ -1731,9 +1733,6 @@ struct Fn_<'a, 'p> {
     /// The holes the walk in progress must skip, relative to the place it looks at. Taken at the
     /// top of [`Fn_::rel_at`], so a walk into anything but a record starts empty.
     rel_holes: Vec<String>,
-    /// The type a value is being built for, innermost last. `None` and `Some(x)` do not name their
-    /// `T`, so the sum constructors read it here.
-    expect: Vec<Type>,
     /// Inside a specialization, each `fn`-typed parameter's direct-call target. Empty in
     /// an ordinary function, so no function table exists.
     fn_binds: HashMap<String, FnBinding>,
@@ -1779,7 +1778,6 @@ fn top_level<'a, 'p>(cx: &'a Cx<'p>) -> Fn_<'a, 'p> {
         region_depth: 0,
         region_marks: Vec::new(),
         rel_holes: Vec::new(),
-        expect: Vec::new(),
         fn_binds: HashMap::new(),
         str_append: HashMap::new(),
         dest_used: false,
@@ -3443,7 +3441,7 @@ impl<'p> Fn_<'_, 'p> {
         // must not, or `T = Age` would silently skip `Age`'s validation.
         let (from, to) = (&self.cx.sub(from), &self.cx.sub(to));
         let rung = crate::coerce_plan(from, to, &self.cx.types);
-        crate::observe::note_rung(crate::observe::Site::Wasm, from, to, rung);
+        crate::observe::note_rung(from, to, rung);
         match rung {
             // A `Never` comes from a `panic` that ended in `unreachable`; the polymorphic stack
             // satisfies `to`.
@@ -3704,159 +3702,6 @@ impl<'p> Fn_<'_, 'p> {
         let held = b.local(v);
         b.ins(&Instruction::LocalSet(held));
         Ok(held)
-    }
-
-    /// The concrete type a record literal produces. A generic record's type arguments come
-    /// from the site's expectation first, then from the field values, and must be solved
-    /// before the slot is allocated because `Box<Int64>` and `Box<Bool>` differ in size.
-    ///
-    /// The expectation must come first: a `fn` field under a parameter would otherwise be
-    /// built for the open `fn(P) -> T` and register a variant no dispatcher covers.
-    fn applied_record(
-        &mut self,
-        name: &str,
-        fields: &[(String, Expr)],
-        line: usize,
-    ) -> Result<Type, String> {
-        let named = Type::Named(name.to_string());
-        let Some(decl) = self
-            .cx
-            .types
-            .get(name)
-            .filter(|d| !d.type_params.is_empty())
-            .cloned()
-        else {
-            return Ok(named);
-        };
-        // `Named("Box")` has no arguments, so these field types carry the declaration's
-        // parameters, not this body's.
-        let declared = self
-            .cx
-            .fields(&named)
-            .ok_or_else(|| gap(&format!("the record literal `{name}`"), line))?;
-        let want = self.expect.last().map(|t| self.cx.sub(t));
-        let mut solved = crate::expected_type_args(want.as_ref(), name, Some(&decl));
-        for f in &declared {
-            let e = fields
-                .iter()
-                .find(|(n, _)| *n == f.name)
-                .map(|(_, e)| e)
-                .ok_or_else(|| gap(&format!("the missing field `{}`", f.name), line))?;
-            // The value is read against the declared field type, so `vals: []` types as the
-            // field's `Array<T>`.
-            self.expect.push(vyrn_frontend::types::substitute(
-                &self.cx.sub(&f.ty),
-                &solved,
-            ));
-            let t = self.peek(e, line);
-            self.expect.pop();
-            let t = self.cx.sub(&t?);
-            if crate::settles_type_args(e) {
-                crate::solve_param(&f.ty, &t, &mut solved);
-            }
-        }
-        Ok(crate::applied_type(
-            Some(&decl),
-            name,
-            &declared.iter().map(|f| f.ty.clone()).collect::<Vec<_>>(),
-            &declared
-                .iter()
-                .map(|f| vyrn_frontend::types::substitute(&f.ty, &solved))
-                .collect::<Vec<_>>(),
-        ))
-    }
-
-    /// The checker's type for `e`, read by node. [`Fn_::peek_inner`] answers for the AST this
-    /// backend builds itself.
-    fn peek(&mut self, e: &Expr, line: usize) -> Result<Type, String> {
-        let t = match self
-            .cx
-            .world
-            .ownership
-            .record
-            .node_types
-            .get(&e.id())
-            .cloned()
-        {
-            Some(t) => self.cx.sub(&t),
-            None => self.peek_inner(e, line)?,
-        };
-        if crate::observe::on() {
-            crate::observe::record(
-                crate::observe::Site::Peek,
-                crate::observe::kind_of(e),
-                e.id(),
-                &self.cx.subst,
-                &t,
-            );
-        }
-        Ok(t)
-    }
-
-    /// A type for AST the checker never saw: the trees this backend builds at an emit site,
-    /// such as the `@rel` receiver of an implicit release, a desugared element read, or a
-    /// dispatched call. Any other kind is a gap, not a guess.
-    fn peek_inner(&mut self, e: &Expr, line: usize) -> Result<Type, String> {
-        Ok(match e {
-            Expr::Int(_, _) | Expr::Byte(_, _) => Type::Int,
-            Expr::Float(_, _) => Type::Float,
-            Expr::Bool(_, _) => Type::Bool,
-            Expr::Str(_, _) => Type::Str,
-            Expr::Var { name, .. } => self.lookup(name, line)?.1,
-            Expr::Field { expr, field, .. } => {
-                let base = self.peek(expr, line)?;
-                match length_ty(field, &self.cx.resolve(&base)) {
-                    Some(t) => t,
-                    // A read of a `lazy T` field is a forced `T`.
-                    None => vyrn_frontend::types::forced(&self.field_of(&base, field, line)?.1),
-                }
-            }
-            Expr::StructLit {
-                name,
-                fields,
-                line,
-                id: _,
-            } => self.applied_record(name, fields, *line)?,
-            Expr::Call { name, args, .. } => match name.as_str() {
-                "blackBox" if args.len() == 1 => self.peek(&args[0], line)?,
-                // `vyrn_frontend::project::AT` and `ELEM`; a match pattern cannot name a path.
-                "@at" | "@slot" | "@swapRemove" if args.len() == 2 => {
-                    let a = self.peek(&args[0], line)?;
-                    match self.cx.resolve(&a) {
-                        Type::Array(i) | Type::ArrayN(i, _) | Type::SmallArray(i, _) => *i,
-                        Type::Str => Type::IntN {
-                            bits: 8,
-                            signed: false,
-                        },
-                        // `m[k]` is an `Option`, not the element.
-                        Type::Map(_, v) if name != "@swapRemove" => Type::option(*v),
-                        // A user container's `place at`. The declared type keys it, because
-                        // an impl head names the alias that `resolve` has lost.
-                        other => match self.user_elem(&a) {
-                            Some(t) => t,
-                            None => {
-                                return unsupported(&format!("a branch indexing `{other}`"), line)
-                            }
-                        },
-                    }
-                }
-                // A dispatched method or a builtin routed to a Vyrn function: the callee's
-                // signature answers.
-                _ => match vyrn_frontend::loader::routed_builtin(name, self.cx.gen.is_some())
-                    .and_then(|rt| self.cx.sigs.get(rt))
-                    .or_else(|| self.cx.sigs.get(name))
-                {
-                    Some(s) => s.ret_ty.clone(),
-                    None => return unsupported(&format!("a branch yielding `{name}`"), line),
-                },
-            },
-            other => {
-                return unsupported(
-                    &format!("a synthesized {}", crate::observe::kind_of(other)),
-                    line,
-                )
-            }
-        })
     }
 
     /// A `=~` pattern's DFA in the data segment: `(table, accept, start)`. Interned at the use
@@ -4989,12 +4834,7 @@ impl<'p> Fn_<'_, 'p> {
         let Type::Fn(ptys, ret) = sig_ty else {
             return unsupported("a lambda in a non-function position", *line);
         };
-        // The expected-type stack must not leak into the lifted body: its own
-        // storage boundaries push their own types.
-        let saved = std::mem::take(&mut self.expect);
-        let r = self.lift_lambda(m, e, ptys, ret, None, *line);
-        self.expect = saved;
-        r
+        self.lift_lambda(m, e, ptys, ret, None, *line)
     }
 
     /// Returns the dispatcher for one signature, reserving its index on first use.
@@ -5046,7 +4886,6 @@ impl<'p> Fn_<'_, 'p> {
         field: &str,
         line: usize,
     ) -> Result<Option<Type>, String> {
-        // [`length_ty`] decides, here and in `peek`: one table for both paths.
         if length_ty(field, &self.cx.resolve(base)).is_none() {
             return Ok(None);
         }
@@ -6296,15 +6135,6 @@ impl<'p> Fn_<'_, 'p> {
         b.ins(&Instruction::LocalGet(stale));
         b.ins(&Instruction::Call(self.cx.rt.free));
         Ok(())
-    }
-
-    /// Returns the element type of a user container: the declared return type of its `at`,
-    /// with the impl head solved against `ty`, so `peek` need not walk a projection body.
-    fn user_elem(&self, ty: &Type) -> Option<Type> {
-        let (imp, f) = vyrn_frontend::project::lookup_impl(&self.cx.impls, ty, "at")?;
-        let mut subst = HashMap::new();
-        crate::solve_param(&imp.ty, ty, &mut subst);
-        Some(self.cx.sub(&ftypes::substitute(&f.ret, &subst)))
     }
 
     fn pop_at(
@@ -9129,8 +8959,7 @@ const OFLAGS_CREAT_TRUNC: i32 = 1 | 8;
 
 /// The type of `.length` or `.byteLength` on `base`, or `None`. `base` is already resolved.
 ///
-/// Neither name is a field, so [`Fn_::length_of`] (the load) and [`Fn_::peek`] (its type) both
-/// read this one list.
+/// Neither name is a field, so every site that reads one asks this list.
 fn length_ty(field: &str, base: &Type) -> Option<Type> {
     matches!(
         (field, base),
@@ -9533,9 +9362,7 @@ impl<'p> Fn_<'_, 'p> {
             let Some(lit) = self.literal(key) else {
                 continue;
             };
-            let saved = std::mem::take(&mut self.expect);
             let _ = self.lift_lambda(m, lit, ptys, ret, Some(caps), lit.line());
-            self.expect = saved;
         }
     }
 
@@ -13948,7 +13775,6 @@ mod tests {
             lambdas: HashMap::new(),
             layouts: RefCell::default(),
             oracle: None,
-            impls: Vec::new(),
             sigs: HashMap::new(),
             gen: None,
             generics: HashMap::new(),
@@ -14082,8 +13908,7 @@ mod tests {
     }
 
     /// A branch yielding `Ok(..)`/`Err(..)`, the shape `std/json` re-wraps a `stringFromBytes`
-    /// result with, is typed by its position. `peek` refuses one with no `Result` expected, but
-    /// no program reaches that state, so only the positive is asserted.
+    /// result with, is typed by its position.
     #[test]
     fn a_branch_yields_a_result_when_the_position_names_one() {
         let src = "fn f(b: Array<UInt8>) -> Result<String, String> { \
@@ -14097,8 +13922,7 @@ mod tests {
         assert!(compile(&p, vyrn_lower::analyze(&p)).is_ok());
     }
 
-    /// `.length` in a branch, on every receiver that has one. [`Fn_::length_of`] and
-    /// [`Fn_::peek`] both read [`length_ty`].
+    /// `.length` in a branch, on every receiver that has one ([`length_ty`]).
     #[test]
     fn a_branch_reads_a_length_on_every_receiver_that_has_one() {
         let each = [
@@ -14123,8 +13947,7 @@ mod tests {
         }
     }
 
-    /// Each shape below compiles outside a branch and must type inside one: `peek` reads what
-    /// the emitting path reads.
+    /// Each shape below compiles outside a branch and must type inside one.
     #[test]
     fn a_branch_types_every_shape_the_emitting_path_lowers() {
         let cases = [

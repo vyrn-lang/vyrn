@@ -130,8 +130,6 @@ fn sections() -> Vec<Section> {
         sec("fn place_for", Mapping, Neither),
         sec("fn coerce", Mapping, Neither),
         sec("fn emit_validation", Mapping, Neither),
-        sec("fn applied_record", Mapping, Core),
-        sec("fn peek", Shared, Both),
         sec("fn regex_dfa", Builtin, Neither),
         sec("fn str_bin", Mapping, Neither),
         sec("fn host", Builtin, Neither),
@@ -214,18 +212,17 @@ fn forms(lines: &[String], a: usize, b: usize) -> usize {
 }
 
 /// Counts the core reads in a span: the [`Cx`] queries that reach
-/// `vyrn_lower::core`, the record's two type answers, [`Fn_::peek`], and the
+/// `vyrn_lower::core`, the record's two type answers and the
 /// core's statements. A query added to the emitter must be added here before a
 /// section can be classified as reading it.
 fn rows(lines: &[String], a: usize, b: usize) -> usize {
-    const Q: [&str; 19] = [
+    const Q: [&str; 18] = [
         "body_of",
         "St::",
         "Rhs::",
         "Lit::",
         "Callee::",
         ".direct()",
-        "peek",
         "receiver_row",
         "store_row",
         "store_fact",
