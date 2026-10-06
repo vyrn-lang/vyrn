@@ -17,8 +17,8 @@ enum Kind {
     ///
     /// The payload names the command, so this kind tiles a second time. Commands
     /// that share a path share an entry (`"serve, dev"`). `"(global)"` is the
-    /// flags read before the subcommand; `"(dispatch)"` is `real_main`, which
-    /// holds the `check`, `run` and `emit-*` arms inline.
+    /// flags read before the subcommand; `"(dispatch)"` is `real_main`, the
+    /// command table and the argument parser.
     Cmd(&'static str),
     /// A rule the CLI states that the frontend, the lowering or the emitter also
     /// states. The deletion candidates.
@@ -79,12 +79,15 @@ fn main_sections() -> Vec<Section> {
     use Kind::*;
     vec![
         sec("mod remote", Shared),
-        sec("fn offline", Cmd("(global)")),
+        sec("fn wants_version", Cmd("(global)")),
         sec("enum NativeTarget", Cmd("build, bench")),
         sec("fn main", Shared),
         sec("fn real_main", Cmd("(dispatch)")),
+        sec("fn check_cmd", Cmd("check")),
+        sec("fn failed", Shared),
+        sec("fn emit_wat", Cmd("emit-wat, emit-lowered")),
         sec("fn emit_gen", Cmd("emit-gen")),
-        sec("fn nearest_manifest", Shared),
+        sec("fn generated", Shared),
         sec("fn scaffold", Cmd("new")),
         sec("fn why_cmd", Cmd("why")),
         sec("fn routes_cmd", Cmd("routes")),
@@ -101,14 +104,11 @@ fn main_sections() -> Vec<Section> {
         sec("fn deps", Cmd("deps")),
         sec("fn fmt_cmd", Cmd("fmt")),
         sec("const FROM_JSON_SRC", Cmd("fmt")),
-        sec("fn fmt_project_files", Cmd("fmt")),
         sec("struct DocModule", Cmd("doc")),
         sec("fn closure_doc_modules", Cmd("doc")),
         sec("fn render_doc_index", Cmd("doc")),
-        sec("fn lock_home", Shared),
         sec("fn fix_cmd", Cmd("fix")),
         sec("fn synth_fn", Shared),
-        sec("fn load_program", Shared),
         sec("fn add", Cmd("add")),
         sec("fn update_tool", Cmd("update")),
         sec("fn update", Cmd("update")),
@@ -133,7 +133,7 @@ fn main_sections() -> Vec<Section> {
         sec("fn pump_stream", Shared),
         sec("enum WsIn", Shared),
         sec("fn write_response", Shared),
-        sec("fn run_wasm", Cmd("run")),
+        sec("fn run_cmd", Cmd("run")),
         sec("struct Body", Cmd("test, bench")),
         sec("fn build", Cmd("build")),
         sec("fn build_wasm2c", Cmd("build")),

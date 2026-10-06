@@ -1,13 +1,13 @@
 //! The editor's contract queries over the real `std/ui:Page` and
 //! `std/vyx:Component` declarations: role resolution, completion, hover,
-//! definition positions, did-you-mean and the `vyrn why --contract` report. The
-//! LSP is a pure adapter over these functions.
+//! definition positions and did-you-mean. The LSP is a pure adapter over these
+//! functions.
 
 mod common;
 
 use vyrn_frontend::contracts::{
-    contract_completions, contract_fixes, contract_member_hover, contract_status, edit_distance,
-    load_contract, role_for, roles_from_manifest, synthesized_members, MemberStatus, RoleScope,
+    contract_completions, contract_fixes, contract_member_hover, edit_distance, load_contract,
+    role_for, roles_from_manifest, synthesized_members, RoleScope,
 };
 use vyrn_frontend::loader::{DiskResolver, LoadOptions};
 
@@ -395,6 +395,7 @@ fn edit_distance_matches_the_vyrn_one() {
         ("heaad", "head"),
         ("Haed", "Head"),
         ("component", "contract"),
+        ("tïtlë", "title"),
     ];
     let mut body = String::from(
         "import { editDistance } from \"std/strings\"\nfn main() -> Int64 {\n    let mut bad = 0\n",
@@ -459,67 +460,6 @@ fn a_templateless_vyx_synthesizes_nothing() {
         )
         .is_empty(),
         "a template tag inside the script is a string, not a section"
-    );
-}
-
-#[test]
-fn status_covers_every_class() {
-    let v = page();
-    let st = contract_status(&v, "", &[]);
-    assert_eq!(
-        st[0].status,
-        MemberStatus::Defaulted,
-        "head defaults to noHead()"
-    );
-    assert_eq!(
-        st[1].status,
-        MemberStatus::Defaulted,
-        "data defaults to noQuery()"
-    );
-
-    let st = contract_status(&v, "export fn head() -> Int64 {\n    return 1\n}\n", &[]);
-    assert_eq!(
-        st[0].status,
-        MemberStatus::Mismatched {
-            found: "fn() -> Int64".into()
-        }
-    );
-
-    let st = contract_status(&v, "export fn dta() -> Int64 {\n    return 1\n}\n", &[]);
-    let unknown = st.iter().find(|e| e.name == "dta").unwrap();
-    assert_eq!(
-        unknown.status,
-        MemberStatus::Unknown {
-            did_you_mean: Some("data".into())
-        }
-    );
-}
-
-/// An open contract admits any name but still constrains the shape.
-#[test]
-fn status_checks_the_open_rule() {
-    let v = load_contract(
-        "std/vyx",
-        "Component",
-        &repo("examples/bin/server.vyrn"),
-        &opts(),
-        &DiskResolver,
-    )
-    .unwrap();
-    let st = contract_status(
-        &v,
-        "import { Html } from \"std/html\"\n\
-         export fn anythingAtAll() -> Html {\n    return h()\n}\n\
-         export fn wrong() -> Int64 {\n    return 1\n}\n",
-        &[],
-    );
-    assert_eq!(st[0].name, "anythingAtAll");
-    assert_eq!(st[0].status, MemberStatus::OpenMatched);
-    assert_eq!(
-        st[1].status,
-        MemberStatus::OpenMismatched {
-            found: "fn() -> Int64".into()
-        }
     );
 }
 

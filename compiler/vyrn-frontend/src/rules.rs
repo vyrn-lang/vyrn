@@ -1,7 +1,9 @@
-//! The rules the lexer, parser, loader and checker state, one row each: the
-//! rule, the holes its sentence names, the sentence, and the fixes `vyrn fix`
-//! reads under it. A [`Diagnostic`](crate::diagnostics::Diagnostic) built from
-//! a [`Rule`] carries it, and its message is [`Rule::render`].
+//! The rules the compiler states, one row each: the rule, the holes its
+//! sentence names, the sentence, and the fixes `vyrn fix` reads under it. The
+//! lexer, parser, loader and checker state the first rows; the ownership and
+//! typed judgments in `vyrn-lower` state the rows after them. A
+//! [`Diagnostic`](crate::diagnostics::Diagnostic) built from a [`Rule`]
+//! carries it, and its message is [`Rule::render`].
 
 use crate::ast::{Speech, Spellings, Type};
 use crate::diagnostics::menu;
@@ -143,6 +145,7 @@ impl IntoHole for DeclName<'_> {
 
 /// Builds `Rule::$rule`. A hole is filled by the variable of its name or by
 /// `hole = expr`, either through [`IntoHole`].
+#[macro_export]
 macro_rules! rule {
     (@hole $h:ident) => {
         $crate::rules::IntoHole::hole(&$h)
@@ -154,7 +157,7 @@ macro_rules! rule {
         $crate::rules::Rule::$rule { $($h: $crate::rules::rule!(@hole $h $($e)?)),* }
     };
 }
-pub(crate) use rule;
+pub use rule;
 
 /// Builds the error that states `Rule::$rule` for `$stage` at `($line, $col)`.
 macro_rules! refuse {
@@ -333,7 +336,7 @@ rules! {
     GlobalStream { name }
         "module state `{name}` may not be a `Stream` — a stream's \
         lifetime is a scope, and module state is never dropped";
-    GlobalInitMismatch { name, declared, vty }
+    InitMismatch { name, declared, vty }
         "`{name}` declared {declared} but initializer is {vty}";
     RegionEscape { name }
         "cannot store a heap value into `{name}`, which \
@@ -640,7 +643,6 @@ rules! {
         fix "take `{param}: String` and store `{param}.copy()`";
     GoneModule { name, module }
         "`{name}` is `{module}`'s — add `import {{ {name} }} from \"{module}\"`";
-    GoneRemoved { hint } "{hint}";
     GoneDesugared { name, module, sugar }
         "`{name}` is `{module}`'s, and `{sugar}` writes through it — add \
         `import {{ {name} }} from \"{module}\"`";
@@ -915,4 +917,326 @@ rules! {
     NotImportedList { what, name, list }
         "{what} `{name}` is defined in `{list}` but not imported here — add \
         it to an `import {{ .. }} from` list";
+
+    // The ownership and typed judgments' rules, which `vyrn-lower` states.
+    // A hole there is text the site renders: a type as its body speaks it,
+    // or a clause such as a taker or a borrow's kind. A row named for a way
+    // out (`CopyForJs`, `SwapRemove`) renders one fix line, which a site
+    // adds under another row when its own state picks it.
+    //
+    // Shapes A to D: the kernel's flow rules, at a use (A), where a scope
+    // ends (B), where edges join (C) and at a loop's back edge (D).
+
+    // A use after a declared `consume`, a `drop`, or a linear value's take.
+    Consumed { read, what, by, l }
+        "`{read}` is {what} here but was already consumed by {by} on line {l}\n  (a \
+        `consume` parameter takes ownership; the value can't be used afterward)";
+    DroppedAfterConsume { read, by, l }
+        "`{read}` is dropped here but was already consumed by {by} on line {l}";
+    // A use after any other take, at the take.
+    Moved { s, by, here, what }
+        "`{s}` was moved here into {by}\nline {here}: ... and `{s}` is {what} again here"
+        fix "`{s}.copy()` if both sides need a value";
+    // A use after a placed release.
+    Released { s, what } "`{s}` is {what} here after it was released";
+    // A read of an alias whose place was written, at the write.
+    AliasRead { place, s, here, what, src, at }
+        "`{place}` is written here while `{s}` still reads out of it\nline {here}: ... and \
+        `{s}` is {what} again here"
+        fix "`{src}.copy()` on line {at}, so `{s}` is a value of its own";
+    // A `consume` argument and a place overlapping it, handed to one call.
+    ConsumedAndPassed { s, by, o }
+        "`{s}` is consumed by {by}, and `{o}` is passed to the same call, so the callee could \
+        read what it frees"
+        fix "`{s}.copy()` for the `consume` parameter";
+    // An argument that reads a global the callee stores into.
+    StateRead { place, s, here, what }
+        "`{place}` is written here while `{s}` still reads out of it\nline {here}: ... and \
+        `{s}` is {what} again here";
+    WholeWithHole { s, path, here, l }
+        "`{s}{path}` was taken out of `{s}` here\nline {here}: ... and `{s}` is used as a \
+        whole here, with the hole still in it"
+        fix "`{s}{path}.copy()` on line {l} if `{s}` is still needed whole"
+        fix "write `{s}{path}` back before this line";
+    ReadInHole { s, h, here }
+        "`{s}{h}` was moved here into `consume`\nline {here}: ... and `{s}{h}` is used again \
+        here"
+        fix "`{s}{h}.copy()` if both sides need a value";
+    StoreUnderHole { s, h, here, path }
+        "`{s}{h}` was moved here into `consume`\nline {here}: ... and `{s}{path}` is written \
+        here, under the hole";
+    // A payload binder handed on out of a type that declares `release`.
+    SealedPayload { b, ty, m }
+        "`{b}` may not be handed to a `consume` parameter: `{ty}` declares `release`, which \
+        reads it; consume `{m}` or copy `{b}`";
+    // A written `drop` of a name with a hole.
+    DropWithHole { s, h, l }
+        "`{s}` may not be dropped — `{s}{h}` was taken out of it on line {l}, and `drop` \
+        releases the whole binding"
+        fix "write `{s}{h}` back before the `drop`, so the binding is whole again"
+        fix "delete the `drop` — the parts still here are released when the block exits";
+    ReleasedWithHole { info, h }
+        "{info} is released whole although a `consume` took `{h}` out of it";
+    ReleasedAround { info, h } "{info} is released around `{h}` on a path that did not take it";
+    Overwritten { info }
+        "{info} is overwritten while still held — the old value is never released";
+    ReleasedBeforeStore { info }
+        "{info} is released before a store although it holds nothing";
+    HeldAtExit { info, exit } "{info} is still held at {exit} — no release is placed for it";
+    HeldAtArmEnd { info }
+        "{info} is still held where its arm ends — no release is placed for it";
+    JoinMoved { s, by }
+        "`{s}` was moved here into {by} on one path and not on the other, and nothing \
+        releases it where the paths join";
+    JoinReleased { s }
+        "`{s}` is released on one path and still held on another where the paths join";
+    JoinHole { info } "{info} has a `consume` hole on one edge of a join and not on another";
+    LoopMoved { s, by }
+        "`{s}` is consumed by {by} inside a loop, so it would be used again on the next \
+        iteration";
+    LoopReleased { s }
+        "`{s}` is released inside a loop, so it would be used again on the next iteration";
+    LoopBound { info } "{info} is bound inside a loop that would use it again on the next turn";
+    LoopHole { s, h }
+        "`{s}{h}` is consumed by `consume` inside a loop, so it would be used again on the \
+        next iteration"
+        fix "`{s}{h}.copy()` if both sides need a value";
+    LoopHoleAt { info }
+        "{info} has a `consume` hole at a loop's back edge it did not have at entry";
+
+    // A linear binding a path leaves held, or disposes of inside a loop or on
+    // one branch only, said once at the binding. `owed` in `vyrn-lower`
+    // recognizes these two rows.
+    NeverDisposed { s, a, ty } "`{s}` is {a} `{ty}` and is never disposed";
+    // A linear binding used after its disposal, at the binding.
+    DisposedTwice { s, a, ty } "`{s}` is {a} `{ty}` and is disposed more than once";
+    // The note under either must-use row, by the row that obliges the type. A
+    // stream's release is pushed by its own lowering, so `drop` on one
+    // reclaims nothing; a declared type has no `close` and is not iterable
+    // unless it says so.
+    OwedStream { s }
+        "a stream must be consumed with `for … in`, forwarded by returning it, or released \
+        with `close({s})` — on every path";
+    OwedDeclared { ty, s }
+        "`{ty}` declares `impl MustUse`, so a value of it must be handed on by name — passed \
+        to a call, forwarded by returning it, or released with `drop {s}` — on every path";
+    // A container: the reader wrote `Array<Txn>` and the row is `Txn`'s.
+    OwedHeld { by, ty, s }
+        "`{by}` declares `impl MustUse` and a `{ty}` holds one, so the container must be \
+        handed on by name — passed to a call, forwarded by returning it, or released with \
+        `drop {s}`, which releases each element — on every path";
+
+    // Shape E, the flow-free rules: the kernel's at its use sites.
+
+    // A `return` of a closure's captured binding.
+    ReturnedCapture { s }
+        "`{s}` may not be returned from a closure — it is a captured binding, and the \
+        closure's result is its caller's";
+    // A `return` of a borrow from an `export extern fn`: the JS caller releases
+    // what it is handed.
+    ReturnedToJs { s, what }
+        "`{s}` may not be returned from an exported function — it is {what}, and the JS \
+        caller releases what it is handed";
+    ReturnedBorrow { s, what } "`{s}` may not be returned — it is {what}, and a return is owned";
+    // A take of a borrow; `may_not` names the taker.
+    TakenBorrow { may_not, what } "{may_not} — it is {what}";
+    CopyToOwn { s } "`{s}.copy()` if the value should own it";
+    CopyForCaller { s } "`{s}.copy()` if the caller needs its own value";
+    CopyForJs { s } "`{s}.copy()` — an `export extern fn` owns its result";
+    CopyFromJs { s }
+        "`{s}.copy()` — an `export extern fn` may not take ownership of a String its JS \
+        caller releases";
+    CopyForCallee { path } "`{path}.copy()` — the callee owns its copy";
+    CopyBoth { path } "`{path}.copy()` if both sides need a value";
+    ConsumeParam { of } "declare the parameter `{of}: consume ..` if this function should own it";
+    ConsumeNamedFn { of }
+        "a named function with `{of}: consume ..`, called directly, if it should own it";
+    ForInConsume { path, of } "`for {path} in consume {of}` if the loop should take the elements";
+    ConsumePrefix { path, root }
+        "`consume {path}` if `{root}` should give it up — the field is dead afterwards";
+    // Module state read whole, handed to a `consume` parameter.
+    ModuleStatePassed { g, by }
+        "module state `{g}` may not be passed to a `consume` parameter via {by} — nothing may \
+        take ownership of module state (it lives for the whole module and is never dropped)";
+    ModuleStateConsumed { g, by }
+        "module state `{g}` may not be consumed by {by} — nothing may take ownership of \
+        module state (it lives for the whole module and is never dropped)";
+    // Module state, or a projection of it, returned.
+    ReturnedModuleState { s }
+        "`{s}` may not be returned — it is module state, which nothing may take, and a return \
+        is owned"
+        fix "`{s}.copy()` — the caller releases what it is handed";
+    TakenModuleState { may_not, s } "{may_not} — it is module state, which nothing may take"
+        fix "`{s}.copy()` — the callee releases what it is handed";
+    // A named binding read out of a place, which a call rebuilds.
+    RebuiltBorrow { s, src, here, by }
+        "`{s}` is read out of `{src}` here — a place that owns it\nline {here}: ... and {by} \
+        takes `{s}`, so `{s}` must be a value of its own"
+        fix "`{src}.copy()` if `{s}` should own what {by} rebuilds";
+    DroppedBorrow { s, kind } "`{s}` may not be dropped — it is {kind}"
+        fix "`consume` the place where `{s}` is bound, so `{s}` takes the value rather than \
+            naming it"
+        fix "delete the `drop` — the place that owns it releases it";
+    EscapingCapture { s, what }
+        "`{s}` may not be captured by a closure that outlives this call — it is {what}";
+    ReleasedUnowned { info } "{info} is released although the body does not own it";
+    StoreReleasesNothing { l } "a store into a place that owns heap releases nothing (line {l})";
+
+    // Shape E: the builder's, at the construct.
+
+    ElementTaken { path } "`{path}` may not be taken — an element is not a place a take reaches";
+    SwapRemove { root }
+        "`{root}.swapRemove(..)` returns the element and leaves the container one shorter";
+    LoopTakesNothing {}
+        "`consume` here has nothing to take — the loop already owns a container that is not a \
+        binding"
+        fix "drop the `consume`: the elements are already owned";
+    ConsumeTakesNothing {}
+        "`consume` here has nothing to take — the value is already owned, so there is no \
+        place to leave a hole in"
+        fix "drop the `consume`: the value is already owned";
+    ConsumedBorrow { root, what } "`{root}` may not be consumed — it is {what}";
+    HandedOutOfLoopArm { a }
+        "`{a}` may not be handed out of an arm inside a loop — the result is released on \
+        every turn, and `{a}` is bound outside the loop"
+        fix "`{a}.copy()` if the arm should hand out a value of its own";
+
+    // Shape E: `typed`'s, over every row.
+
+    StoreRuled { n, name }
+        "cannot mutate a field of `{n}` in place (its `where` invariant could be broken \
+        mid-update); rebuild it: `{name} = {n} {{ .. }}`";
+    GroupRead { name }
+        "`{name}` is read whole while a store into its field leaves its `where` rule \
+        unchecked"
+        fix "read `{name}` before the first store into its fields, or after the last";
+    GroupCall { f, name }
+        "`{f}` may read the caller's `{name}` while a store into its field leaves its `where` \
+        rule unchecked"
+        fix "call `{f}` before the first store into the fields of `{name}`, or after the last";
+    GroupExit { what, name } "`{what}` leaves `{name}` with its `where` rule unchecked"
+        fix "finish the stores into the fields of `{name}` before the `{what}`";
+    GroupFalse { name, k, long, short, n }
+        "this group of stores into `{name}` ends after line {k} with `{name}.{long}` longer \
+        than `{name}.{short}`, which breaks the `where` rule of `{n}`"
+        fix "store into `{name}.{short}` before any statement after line {k} that does not \
+            store into `{name}`";
+    RemoveNotMut { op, name } "cannot `{op}` from `{name}` (declared without `mut`)";
+    AssignNotMut { name } "cannot assign to `{name}` (declared without `mut`)";
+    FieldNotMut { name } "cannot mutate a field of `{name}` (declared without `mut`)";
+    StoreNotMut { name } "cannot store into `{name}` (declared without `mut`)";
+    OutsideLoop { what } "`{what}` outside a loop";
+    DropModuleState { name }
+        "cannot `drop` module state `{name}` — it lives for the whole module and is reclaimed \
+        at process exit";
+    DropUnbound { name } "`drop` of unbound variable `{name}`";
+    DropTypeParam { name, t }
+        "cannot `drop` `{name}`: its type `{t}` is a type parameter, so this body cannot know \
+        whether the rule below holds for the instance — a plain record would be released \
+        here where `drop` on it directly is refused. Release the value where its concrete \
+        type is known, or `consume` the heap field and `drop` that";
+    DropNotHeap { name, t }
+        "`drop` needs a heap value (a String, an Array, a Map, a Ref, or an Option/Result \
+        carrying one, or a type declaring `impl Owned`), but `{name}` is {t}";
+
+    // A body the core builder did not build: a defect in the builder, since
+    // the checker typed the body.
+    CoreGap { what, body } "internal error: the core cannot state {what}, so `{body}` is not judged";
+    CoreGapAt { what, detail, body }
+        "internal error: the core cannot state {what} `{detail}`, so `{body}` is not judged";
+
+    // The checker's sentences for what it types `Err`, which the builder
+    // states from the facts.
+
+    FunctionFallsThrough { name, owes } "function `{name}` must return {owes} on all paths";
+    LambdaFallsThrough { owes } "this lambda must return {owes} on all paths";
+    ShiftOutOfRange { amt, bits }
+        "shift amount {amt} is out of range for a {bits}-bit value (valid range is 0..{bits})";
+    InvalidRegex { pat, err } "invalid regex `{pat}`: {err}";
+    MatchNeedsPattern {} "the right side of `=~` must be a string-literal pattern";
+    ArrayLiteralTooLong { len, limit }
+        "this array literal has {len} elements, past the limit of {limit}\n  note: a literal \
+        is lowered element by element into one call frame, so its length is a compile-time \
+        cost on both backends\n  note: a table this long belongs in a file the program \
+        reads, not in the program";
+    SmallArrayOverflow { len, n } "this literal has {len} elements but the slot is SmallArray<_, {n}>";
+    NegNeedsNumber { t } "unary `-` needs a numeric type, found {t}";
+    NotNeedsBool { t } "unary `!` needs Bool, found {t}";
+    BitNotNeedsInteger { t } "unary `~` needs an integer type, found {t}";
+    NoField { ty, field } "type {ty} has no field `{field}`";
+    StringLength {}
+        "String has no `length`: use `byteLength` for bytes or `charCount()` for Unicode \
+        scalars";
+    FieldOnNonRecord { field, other } "cannot access field `{field}` on non-record type {other}";
+    TryConstructNotScalar { name } "`{name}?(..)` is only for validated/nominal scalar types";
+    TryConstructArity { name, got } "`{name}?` takes 1 argument, got {got}";
+    ConstructArity { name, got } "`{name}` construction takes 1 argument, got {got}";
+    ConstructFrom { name, base, aty } "`{name}` is built from {base}, but the argument is {aty}";
+    NotRecordType { name } "`{name}` is not a record type";
+    RecordNoField { name, field } "record `{name}` has no field `{field}`";
+    FieldSetTwice { field } "field `{field}` set twice";
+    MissingField { field, name } "missing field `{field}` for `{name}`";
+    VariantNeedsArgs { name, payload } "variant `{name}` needs {payload} argument(s)";
+    CallArity { shown, want, got } "`{shown}` expects {want} argument(s), got {got}";
+    NoTypeParams { shown }
+        "`{shown}` declares no type parameters, so it takes no type arguments";
+    ReceiverType { shown, pty, aty } "the receiver of `{shown}` expects {pty}, found {aty}";
+    ForgetsHeap { shown, t }
+        "`{shown}` forgets or overwrites elements without releasing them, and `{t}` owns heap \
+        \u{2014} move the elements one at a time instead";
+    NotCodable { shown, off } "`{shown}` cannot decode into `{off}` (not a codable type)";
+    LambdaArgArity { got, callee, n, want }
+        "this lambda takes {got} parameter(s), but `{callee}` argument {n} expects {want}";
+    LambdaReturns { t, callee, r }
+        "this lambda returns {t}, but `{callee}` expects it to return {r}";
+    // `subject` and `owner` name the value: its binding, or "this".
+    ValueArity { subject, got, callee, n, want }
+        "{subject} is a {got}-argument function value, but `{callee}` argument {n} expects \
+        {want}";
+    ValueParam { owner, a, callee, b }
+        "{owner} expects a {a} argument, but `{callee}` will pass it {b}";
+    GenericFnArg { vn } "`{vn}` is generic and cannot be passed as a function value in v1";
+    FnArity { vn, got, callee, n, want }
+        "`{vn}` takes {got} argument(s), but `{callee}` argument {n} expects a {want}-argument \
+        function";
+    NotFnArg { callee, n, aty }
+        "`{callee}` argument {n} must be a lambda `|..| ..`, a function name, or an expression \
+        of `fn` type; found {aty}";
+    LambdaReturnsSlot { t, exp, r }
+        "this lambda returns {t}, but the expected function type `{exp}` returns {r}";
+    FnAritySlot { name, got, exp, want }
+        "`{name}` takes {got} argument(s), but the expected function type `{exp}` takes {want}";
+    FnReturnsSlot { name, t, exp, r }
+        "`{name}` returns {t}, but the expected function type `{exp}` returns {r}";
+    BindUnit { name } "cannot bind `{name}` to a Unit value";
+    AssignMismatch { name, to, vty } "`{name}` is {to} but assigned {vty}";
+    ReturnMismatch { ret, vty } "return type mismatch: expected {ret}, found {vty}";
+    ForNeedsIterable { t }
+        "`for` needs an Array, a String, or a type that declares `impl Iterate` (a `size` \
+        method and an `nth` projection, `fn nth(read self, ..) -> read T`), found {t}";
+    NotRecordNoField { name, field } "`{name}` is not a record, so it has no field `{field}`";
+    FieldValidated { field, fty }
+        "field `{field}` is {fty} (validated); assign an already-constructed `{fty}` value, \
+        e.g. `{fty}(..)`";
+    FieldMismatch { field, fty, vty } "field `{field}` is {fty} but assigned {vty}";
+    MapStoreKey { name, key, k } "`{name}` is keyed by {key}, but the key here is {k}";
+    MapStoreValue { name, val, v }
+        "`{name}` holds values of type {val} but the stored value is {v}";
+    IndexStoreNoContainer { name, other }
+        "`{name}[i] = ..` needs an Array, a Map, or a type whose impl declares the `atSet` \
+        projection (`fn atSet(modify self, ..) -> modify T`), found {other}";
+    ArrayIndexType { i } "array index must be an Int64, found {i}";
+    IndexStoreKey { name, key, i } "`{name}[..] = ..` is keyed by {key}, found {i}";
+    ElementMismatch { name, elem, v } "`{name}` holds {elem} but the stored value is {v}";
+    AssignUnknown { name } "assignment to unknown variable `{name}`";
+    FieldAssignUnknown { name } "assignment to field of unknown variable `{name}`";
+    IndexAssignUnknown { name } "index-assignment to unknown variable `{name}`";
+    ConditionNotBool { word, t } "`{word}` condition must be Bool, found {t}";
+    UnknownVariable { name } "unknown variable `{name}`";
+    ShrinkFixedArray { op }
+        "`{op}` is not available on a fixed-size array (it cannot shrink); use a growable \
+        `Array<T>`";
+    ShrinkNeedsArray { op, t } "`{op}` needs an `Array<T>`, found {t}";
+    DuplicateArm { v } "duplicate `{v}` arm";
+    MissingVariant { v } "`match` is missing variant `{v}`";
 }

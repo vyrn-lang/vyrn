@@ -18,7 +18,7 @@ use vyrn_frontend::ast::{
     MethodId, MethodSig, NodeId, Pattern, Program, SourceBody, Speech, Stmt, Type, TypeDecl, UnOp,
 };
 use vyrn_frontend::declared::{CapsOf, NameMemo, Owned};
-use vyrn_frontend::diagnostics::{menu, Diagnostic};
+use vyrn_frontend::diagnostics::Diagnostic;
 use vyrn_frontend::effects::Walked;
 use vyrn_frontend::movecheck::{Judgment, JudgmentKey, Refusal};
 use vyrn_frontend::own::{Bucket, DropKind, Exit, Linear, MemoryRow, Ownership, Release};
@@ -27,9 +27,6 @@ pub use vyrn_frontend::prelude::Spec;
 use vyrn_frontend::project::is_place_read;
 
 use crate::kernel::{MissingKind, Root};
-use crate::rules::{
-    say, CONSUMED_BORROW, CONSUME_TAKES_NOTHING, ELEMENT_TAKEN, LOOP_TAKES_NOTHING, SWAP_REMOVE,
-};
 use crate::world::{Fns, Stated};
 use crate::{Instance, NodeTypes, OutsideBody, World};
 use vyrn_frontend::core::{
@@ -37,12 +34,17 @@ use vyrn_frontend::core::{
     NameInfo, NotOwned, Old, Op, Opaque, Payload, Place, Rhs, Site, St, Target, Test, Use, Val,
     Walk,
 };
+use vyrn_frontend::rule;
+use vyrn_frontend::rules::Rule;
 
 /// The path a field read takes out of its unnamed receiver: `.q.s` for
-/// `mk().q.s`. `None` under an element.
-fn taken_path(e: &Expr) -> Option<String> {
+/// `mk().q.s`. `None` under an element. A `forced` read is a receiver of its
+/// own ([`Builder::place`]): `.s` for `h.f.s` where `f` is `lazy`.
+fn taken_path(e: &Expr, forced: &impl Fn(&Expr) -> bool) -> Option<String> {
     match e {
-        Expr::Field { expr, field, .. } => Some(format!("{}.{field}", taken_path(expr)?)),
+        Expr::Field { expr, field, .. } if !forced(e) => {
+            Some(format!("{}.{field}", taken_path(expr, forced)?))
+        }
         Expr::Call { name, .. } if name == vyrn_frontend::project::AT => None,
         _ => Some(String::new()),
     }
@@ -96,10 +98,10 @@ pub struct Gap {
     pub detail: String,
     pub line: usize,
     /// Set when this is a rule the program breaks rather than a gap: the
-    /// checker's sentence, which the placer reports as a refusal. A rule
+    /// refusal, which the placer reports as it reports the kernel's. A rule
     /// about a keyword lives here because the kernel has none
     /// (`consume make()` and `make()` are one value to it).
-    pub rule: Option<String>,
+    pub rule: Option<Box<Diagnostic>>,
 }
 
 /// Whether `rhs` is a validated type's constructor over a literal, which
@@ -133,14 +135,14 @@ fn take_names_a_place(
         return Ok(());
     }
     if let Some((root, path)) = vyrn_frontend::project::element_path(e, places) {
-        let rule = [ELEMENT_TAKEN, SWAP_REMOVE].join("|");
-        return refuse(say(&rule, &[("path", &path), ("root", &root)]), line);
+        let more = vec![rule!(SwapRemove, root).render()];
+        return refuse(rule!(ElementTaken, path), more, line);
     }
     let rule = match by_loop {
-        true => LOOP_TAKES_NOTHING,
-        false => CONSUME_TAKES_NOTHING,
+        true => rule!(LoopTakesNothing),
+        false => rule!(ConsumeTakesNothing),
     };
-    refuse(say(rule, &[]), line)
+    refuse(rule, Vec::new(), line)
 }
 
 /// The scrutinee a binder borrows: its name, where the construct does not
@@ -320,13 +322,14 @@ fn gap_d<T>(what: &'static str, detail: &str, line: usize) -> Result<T, Gap> {
 }
 
 /// A rule the program breaks. Lowering stops as at a gap, and the placer
-/// reports `message` at `line` as it reports the kernel's refusals.
-fn refuse<T>(message: String, line: usize) -> Result<T, Gap> {
+/// reports `rule` at `line`, with the ways out `more`, as it reports the
+/// kernel's refusals.
+fn refuse<T>(rule: Rule, more: Vec<String>, line: usize) -> Result<T, Gap> {
     Err(Gap {
         what: "a rule the program breaks",
         detail: String::new(),
         line,
-        rule: Some(message),
+        rule: Some(Box::new(crate::rules::refusal(line, rule, more))),
     })
 }
 
@@ -433,11 +436,11 @@ fn returns(ss: &[St]) -> bool {
     })
 }
 
-/// The refusal of a frame that can end without the value it owes.
-fn falls_through(body: &mut Body, owes: &Type, line: usize, what: impl FnOnce() -> String) {
+/// The refusal of a frame that can end without the value it owes, which
+/// `rule` states from the type owed.
+fn falls_through(body: &mut Body, owes: &Type, line: usize, rule: impl FnOnce(String) -> Rule) {
     if *owes != Type::Unit && !returns(&body.stmts) {
-        body.refused
-            .push((line, format!("{} must return {owes} on all paths", what())));
+        body.refused.push((line, rule(owes.to_string()).render()));
     }
 }
 
@@ -625,9 +628,9 @@ fn judged(facts: &NodeTypes<'_>, own: &Ownership, sp: &Speech) -> Vec<(usize, St
             } => Some(match &**rhs {
                 Expr::Str(pat, _) => {
                     let err = vyrn_frontend::regex::compile(pat).err()?;
-                    format!("invalid regex `{pat}`: {err}")
+                    rule!(InvalidRegex, pat, err = err.to_string()).render()
                 }
-                _ => "the right side of `=~` must be a string-literal pattern".to_string(),
+                _ => rule!(MatchNeedsPattern).render(),
             }),
             // A literal operand takes a sized sibling's type
             // (`Checker::expr`'s `adapt_int_literal`), the left one first.
@@ -639,21 +642,14 @@ fn judged(facts: &NodeTypes<'_>, own: &Ownership, sp: &Speech) -> Vec<(usize, St
             }
             Expr::ArrayLit { elems, .. } => {
                 let limit = vyrn_frontend::trap::ARRAY_LIT_LIMIT;
-                if elems.len() > limit {
-                    return Some(format!(
-                        "this array literal has {} elements, past the limit of {limit}\n  \
-                         note: a literal is lowered element by element into one call frame, so \
-                         its length is a compile-time cost on both backends\n  \
-                         note: a table this long belongs in a file the program reads, not in \
-                         the program",
-                        elems.len()
-                    ));
+                let len = elems.len();
+                if len > limit {
+                    return Some(rule!(ArrayLiteralTooLong, len, limit).render());
                 }
                 match resolved(e)? {
-                    Type::SmallArray(_, n) if elems.len() > n => Some(format!(
-                        "this literal has {} elements but the slot is SmallArray<_, {n}>",
-                        elems.len()
-                    )),
+                    Type::SmallArray(_, n) if len > n => {
+                        Some(rule!(SmallArrayOverflow, len, n).render())
+                    }
                     _ => None,
                 }
             }
@@ -676,11 +672,7 @@ fn judged(facts: &NodeTypes<'_>, own: &Ownership, sp: &Speech) -> Vec<(usize, St
             else {
                 return None;
             };
-            return (amt < 0 || amt >= bits).then(|| {
-                format!(
-                    "shift amount {amt} is out of range for a {bits}-bit value (valid range is 0..{bits})"
-                )
-            });
+            return (amt < 0 || amt >= bits).then(|| rule!(ShiftOutOfRange, amt, bits).render());
         }
         if let Some(s) = constant(e) {
             return Some(s);
@@ -691,24 +683,27 @@ fn judged(facts: &NodeTypes<'_>, own: &Ownership, sp: &Speech) -> Vec<(usize, St
         match e {
             Expr::Unary { op, expr, .. } => {
                 let ([t], []) = sp.say([&resolved(expr)?], []);
-                Some(match op {
-                    UnOp::Neg => format!("unary `-` needs a numeric type, found {t}"),
-                    UnOp::Not => format!("unary `!` needs Bool, found {t}"),
-                    UnOp::BitNot => format!("unary `~` needs an integer type, found {t}"),
-                })
+                let r = match op {
+                    UnOp::Neg => rule!(NegNeedsNumber, t),
+                    UnOp::Not => rule!(NotNeedsBool, t),
+                    UnOp::BitNot => rule!(BitNotNeedsInteger, t),
+                };
+                Some(r.render())
             }
-            Expr::Field { expr, field, .. } => Some(match resolved(expr)? {
-                Type::Record(_) => {
-                    format!("type {} has no field `{field}`", sp.ty(recorded(expr)?))
+            Expr::Field { expr, field, .. } => Some(
+                match resolved(expr)? {
+                    Type::Record(_) => {
+                        let ty = sp.ty(recorded(expr)?).to_string();
+                        rule!(NoField, ty, field)
+                    }
+                    Type::Str if field == "length" => rule!(StringLength),
+                    other => {
+                        let ([other], []) = sp.say([&other], []);
+                        rule!(FieldOnNonRecord, field, other)
+                    }
                 }
-                Type::Str if field == "length" => "String has no `length`: use `byteLength` for \
-                                                   bytes or `charCount()` for Unicode scalars"
-                    .to_string(),
-                other => {
-                    let ([other], []) = sp.say([&other], []);
-                    format!("cannot access field `{field}` on non-record type {other}")
-                }
-            }),
+                .render(),
+            ),
             Expr::TryConstruct { name, args, .. } | Expr::Call { name, args, .. }
                 if decls.contains_key(name) =>
             {
@@ -716,40 +711,36 @@ fn judged(facts: &NodeTypes<'_>, own: &Ownership, sp: &Speech) -> Vec<(usize, St
                 let tries = matches!(e, Expr::TryConstruct { .. });
                 let ([], [name]) = sp.say([], [name]);
                 if tries && !matches!(base, Type::Int | Type::Bool | Type::Str) {
-                    return Some(format!(
-                        "`{name}?(..)` is only for validated/nominal scalar types"
-                    ));
+                    return Some(rule!(TryConstructNotScalar, name).render());
                 }
                 let [arg] = &args[..] else {
-                    return Some(if tries {
-                        format!("`{name}?` takes 1 argument, got {}", args.len())
-                    } else {
-                        format!("`{name}` construction takes 1 argument, got {}", args.len())
+                    let got = args.len();
+                    return Some(match tries {
+                        true => rule!(TryConstructArity, name, got).render(),
+                        false => rule!(ConstructArity, name, got).render(),
                     });
                 };
                 let ([base, aty], []) = sp.say([base, recorded(arg)?], []);
-                Some(format!(
-                    "`{name}` is built from {base}, but the argument is {aty}"
-                ))
+                Some(rule!(ConstructFrom, name, base, aty).render())
             }
             // Fields in written order, so the refusal names the first one the
             // reader sees; a missing field only once every value typed.
             Expr::StructLit { name, fields, .. } => {
                 if !decls.contains_key(name) {
-                    return Some(format!("unknown type `{name}`"));
+                    return Some(rule!(UnknownType, n = name).render());
                 }
                 let declared =
                     vyrn_frontend::types::record_fields(&Type::Named(name.clone()), decls);
                 let ([], [name]) = sp.say([], [name]);
                 let Some(declared) = declared else {
-                    return Some(format!("`{name}` is not a record type"));
+                    return Some(rule!(NotRecordType, name).render());
                 };
-                for (k, (fname, _)) in fields.iter().enumerate() {
-                    if !declared.iter().any(|f| &f.name == fname) {
-                        return Some(format!("record `{name}` has no field `{fname}`"));
+                for (k, (field, _)) in fields.iter().enumerate() {
+                    if !declared.iter().any(|f| &f.name == field) {
+                        return Some(rule!(RecordNoField, name, field).render());
                     }
-                    if fields[..k].iter().any(|(g, _)| g == fname) {
-                        return Some(format!("field `{fname}` set twice"));
+                    if fields[..k].iter().any(|(g, _)| g == field) {
+                        return Some(rule!(FieldSetTwice, field).render());
                     }
                 }
                 fields
@@ -758,7 +749,7 @@ fn judged(facts: &NodeTypes<'_>, own: &Ownership, sp: &Speech) -> Vec<(usize, St
                 let f = declared
                     .iter()
                     .find(|f| fields.iter().all(|(g, _)| *g != f.name))?;
-                Some(format!("missing field `{}` for `{name}`", f.name))
+                Some(rule!(MissingField, field = f.name, name).render())
             }
             Expr::Var { name, .. } => {
                 let payload = decls
@@ -768,7 +759,7 @@ fn judged(facts: &NodeTypes<'_>, own: &Ownership, sp: &Speech) -> Vec<(usize, St
                     .find(|v| &v.name == name)?
                     .payload
                     .len();
-                Some(format!("variant `{name}` needs {payload} argument(s)"))
+                Some(rule!(VariantNeedsArgs, name, payload).render())
             }
             Expr::Call {
                 args,
@@ -782,25 +773,17 @@ fn judged(facts: &NodeTypes<'_>, own: &Ownership, sp: &Speech) -> Vec<(usize, St
                 // callee with no parameters has no receiver slot.
                 let dot = usize::from(*dot && !d.params.is_empty());
                 if d.params.len() != args.len() {
-                    return Some(format!(
-                        "`{shown}` expects {} argument(s), got {}",
-                        d.params.len() - dot,
-                        args.len() - dot
-                    ));
+                    let (want, got) = (d.params.len() - dot, args.len() - dot);
+                    return Some(rule!(CallArity, shown, want, got).render());
                 }
                 // A type argument to a callee that declares none would look
                 // honoured if accepted. A method call reads none.
                 if !d.recv && !type_args.is_empty() && d.type_params == 0 {
-                    return Some(format!(
-                        "`{shown}` declares no type parameters, so it takes no type arguments"
-                    ));
+                    return Some(rule!(NoTypeParams, shown).render());
                 }
                 if !d.recv && type_args.len() > d.type_params {
-                    return Some(format!(
-                        "`{shown}` takes {} type argument(s), got {}",
-                        d.type_params,
-                        type_args.len()
-                    ));
+                    let (want, got) = (d.type_params, type_args.len());
+                    return Some(rule!(TypeArity, name = shown, want, got).render());
                 }
                 // The first argument its parameter does not take. A `fn`
                 // parameter's is the checker's `check_fn_arg`.
@@ -815,14 +798,12 @@ fn judged(facts: &NodeTypes<'_>, own: &Ownership, sp: &Speech) -> Vec<(usize, St
                         (!fits).then(|| {
                             let ([pty, aty], [shown]) = sp.say([pty, aty], [&d.shown]);
                             match i.checked_sub(dot) {
-                                Some(k) => format!(
-                                    "`{shown}` argument {} expects {pty}, found {aty}",
-                                    k + 1
-                                ),
-                                None => {
-                                    format!("the receiver of `{shown}` expects {pty}, found {aty}")
+                                Some(k) => {
+                                    rule!(FnValueArgType, name = shown, arg = k + 1, pty, aty)
                                 }
+                                None => rule!(ReceiverType, shown, pty, aty),
                             }
+                            .render()
                         })
                     })
             }
@@ -867,10 +848,7 @@ fn unbound(
     let sentence = |shown: &str, t: &Type, bound: &str| match bound {
         HEAPLESS => {
             let ([t], []) = sp.say([t], []);
-            format!(
-                "`{shown}` forgets or overwrites elements without releasing them, and \
-                 `{t}` owns heap \u{2014} move the elements one at a time instead"
-            )
+            rule!(ForgetsHeap, shown, t).render()
         }
         DECODABLE => {
             // The codec names the offender by its declaration where it has one.
@@ -878,7 +856,7 @@ fn unbound(
                 Err(off) => sp.name(&off),
                 Ok(()) => sp.ty(t).to_string(),
             };
-            format!("`{shown}` cannot decode into `{off}` (not a codable type)")
+            rule!(NotCodable, shown, off).render()
         }
         _ => types::needs_show(shown, t).render_in(sp),
     };
@@ -977,19 +955,15 @@ fn fn_slot(
         // A value of `fn` type, named `subject` in the arity sentence and
         // `owner` in the parameter one.
         let value = |subject: &str, owner: &str, vptys: &[Type]| {
-            Some(
-                match misfit(vptys.len(), Some(vptys), None, &slot, decls)? {
-                    Misfit::Arity(got, _) => format!(
-                    "{subject} is a {got}-argument function value, but `{callee}` argument {n} \
-                     expects {want}"
-                ),
-                    Misfit::Param(a, b) => {
-                        let ([a, b], []) = sp.say([&a, &b], []);
-                        format!("{owner} expects a {a} argument, but `{callee}` will pass it {b}")
-                    }
-                    Misfit::Returns(..) => return None,
-                },
-            )
+            let r = match misfit(vptys.len(), Some(vptys), None, &slot, decls)? {
+                Misfit::Arity(got, _) => rule!(ValueArity, subject, got, callee, n, want),
+                Misfit::Param(a, b) => {
+                    let ([a, b], []) = sp.say([&a, &b], []);
+                    rule!(ValueParam, owner, a, callee, b)
+                }
+                Misfit::Returns(..) => return None,
+            };
+            Some(r.render())
         };
         let says = match arg {
             Expr::Lambda {
@@ -1003,17 +977,14 @@ fn fn_slot(
                     LambdaBody::Block(_) => None,
                 };
                 let says = match misfit(params.len(), None, got, &slot, decls)? {
-                    Misfit::Arity(got, _) => format!(
-                        "this lambda takes {got} parameter(s), but `{callee}` argument {n} \
-                         expects {want}"
-                    ),
+                    Misfit::Arity(got, _) => rule!(LambdaArgArity, got, callee, n, want),
                     Misfit::Returns(t, r) => {
                         let ([t, r], []) = sp.say([&t, &r], []);
-                        format!("this lambda returns {t}, but `{callee}` expects it to return {r}")
+                        rule!(LambdaReturns, t, callee, r)
                     }
                     Misfit::Param(..) => return None,
                 };
-                return Some((*at, says));
+                return Some((*at, says.render()));
             }
             Expr::Var { name: vn, .. } if bound(vn) => match recorded(arg)
                 .map(|t| resolve(t, decls))
@@ -1024,23 +995,18 @@ fn fn_slot(
             Expr::Var { name: vn, .. } => {
                 let g = program.functions.iter().find(|g| g.name == *vn)?;
                 if !g.type_params.is_empty() {
-                    return Some((
-                        line,
-                        format!("`{vn}` is generic and cannot be passed as a function value in v1"),
-                    ));
+                    return Some((line, rule!(GenericFnArg, vn).render()));
                 }
                 let vptys: Vec<Type> = g.params.iter().map(|p| p.ty.clone()).collect();
                 let ([], [vn]) = sp.say([], [vn]);
                 match misfit(vptys.len(), Some(&vptys), None, &slot, decls)? {
-                    Misfit::Arity(got, _) => Some(format!(
-                        "`{vn}` takes {got} argument(s), but `{callee}` argument {n} expects a \
-                         {want}-argument function"
-                    )),
+                    Misfit::Arity(got, _) => {
+                        Some(rule!(FnArity, vn, got, callee, n, want).render())
+                    }
                     Misfit::Param(a, b) => {
                         let ([a, b], []) = sp.say([&a, &b], []);
-                        Some(format!(
-                            "`{vn}` expects a {a} argument, but `{callee}` will pass it {b}"
-                        ))
+                        let owner = format!("`{vn}`");
+                        Some(rule!(ValueParam, owner, a, callee, b).render())
                     }
                     Misfit::Returns(..) => None,
                 }
@@ -1055,13 +1021,7 @@ fn fn_slot(
                             l => l,
                         };
                         let ([aty], []) = sp.say([aty], []);
-                        return Some((
-                            at,
-                            format!(
-                                "`{callee}` argument {n} must be a lambda `|..| ..`, a function \
-                                 name, or an expression of `fn` type; found {aty}"
-                            ),
-                        ));
+                        return Some((at, rule!(NotFnArg, callee, n, aty).render()));
                     }
                 }
             }
@@ -1089,9 +1049,7 @@ fn stored_slot(
             match misfit(ptys.len(), None, Some(got), exp, decls)? {
                 Misfit::Returns(t, r) => {
                     let ([t, exp, r], []) = sp.say([&t, exp, &r], []);
-                    format!(
-                        "this lambda returns {t}, but the expected function type `{exp}` returns {r}"
-                    )
+                    rule!(LambdaReturnsSlot, t, exp, r)
                 }
                 Misfit::Arity(..) | Misfit::Param(..) => return None,
             }
@@ -1101,26 +1059,22 @@ fn stored_slot(
             match misfit(vptys.len(), Some(&vptys), Some(&f.ret), exp, decls)? {
                 Misfit::Arity(got, want) => {
                     let ([exp], [name]) = sp.say([exp], [&f.name]);
-                    format!(
-                        "`{name}` takes {got} argument(s), but the expected function type \
-                         `{exp}` takes {want}"
-                    )
+                    rule!(FnAritySlot, name, got, exp, want)
                 }
                 Misfit::Param(a, b) => {
                     let ([exp, a, b], [name]) = sp.say([exp, &a, &b], [&f.name]);
-                    format!("`{name}` expects a {a} argument, but `{exp}` will pass it {b}")
+                    let owner = format!("`{name}`");
+                    rule!(ValueParam, owner, a, callee = exp, b)
                 }
                 Misfit::Returns(t, r) => {
                     let ([exp, t, r], [name]) = sp.say([exp, &t, &r], [&f.name]);
-                    format!(
-                        "`{name}` returns {t}, but the expected function type `{exp}` returns {r}"
-                    )
+                    rule!(FnReturnsSlot, name, t, exp, r)
                 }
             }
         }
         (None, None) => return None,
     };
-    Some((line, says))
+    Some((line, says.render()))
 }
 
 fn build_seeded(
@@ -1179,30 +1133,9 @@ fn build_seeded(
             refused,
             mistyped,
         },
-        scope: Vec::new(),
-        by_binding: HashMap::new(),
+        frame: Frame::default(),
         temps: 0,
-        pending_receiver: None,
-        drain: 0,
-        scrutinee: None,
-        after: Vec::new(),
-        after_of_rhs: Vec::new(),
-        held: Vec::new(),
-        owed: None,
-        stream_loops: Vec::new(),
-        walks: Vec::new(),
-        reading: Vec::new(),
         seed,
-        loop_marks: Vec::new(),
-        loop_aliased: HashMap::new(),
-        rebinding: false,
-        call_keeps: None,
-        pending_closure: None,
-        appends: std::collections::HashSet::new(),
-        rebound: std::collections::HashSet::new(),
-        region: 0,
-        ret: None,
-        released: None,
         closed: false,
     };
     let f: &Function = inst.func;
@@ -1210,7 +1143,7 @@ fn build_seeded(
     // `map<Int64, Int64>`'s `f` is `fn(Int64) -> Int64`, the shape stored
     // sources are keyed by. Every other type comes substituted in the rows.
     let subst: HashMap<String, Type> = inst.subst.clone().into_iter().collect();
-    b.ret = Some(vyrn_frontend::types::substitute(&f.ret, &subst));
+    b.frame.ret = Some(vyrn_frontend::types::substitute(&f.ret, &subst));
     // A declared release (`impl Owned for T { fn release(consume self) }`)
     // frees `self`'s parts, and nothing releases `self` again: the kernel owns
     // `self` there, so a part taken twice is refused, but owes no release of it.
@@ -1220,7 +1153,7 @@ fn build_seeded(
         let owned = p.capability == Capability::Consume && b.owns(&pty) && !is_release;
         let n = b.name(&p.name, pty, owned, f.line);
         if is_release {
-            b.released = Some(n);
+            b.frame.released = Some(n);
             b.body.names[n.index()].borrow = false;
         }
         // A `read` or `modify` parameter is never taken; the
@@ -1231,18 +1164,20 @@ fn build_seeded(
             b.proto.must_use(&b.body.names[n.index()].ty.clone());
         b.body.names[n.index()].borrow_kind = param_borrow(p.capability, &p.name, false);
         b.body.names[n.index()].mutable = p.capability == Capability::Modify;
-        b.scope.push((p.name.clone(), n));
+        b.frame.scope.push((p.name.clone(), n));
         b.keyed(n, p.id());
         b.body.params.push(n);
     }
-    b.appends = crate::append::append_candidates(&f.body);
-    rebound(&f.body, &mut b.rebound);
+    b.frame.appends = crate::append::append_candidates(&f.body);
+    rebound(&f.body, &mut b.frame.rebound);
     let mut out = Vec::new();
     b.block(&f.body, &mut out)?;
     cut(&mut out);
     b.body.stmts = out;
     let name = b.body.spelled(&f.name).to_string();
-    falls_through(&mut b.body, &f.ret, f.line, || format!("function `{name}`"));
+    falls_through(&mut b.body, &f.ret, f.line, |owes| {
+        rule!(FunctionFallsThrough, name, owes)
+    });
     Ok(b.body)
 }
 
@@ -1341,9 +1276,9 @@ fn build_outside_seeded<'a>(
         placed,
     );
     // The checker types a `test` or `bench` body as a function returning Unit.
-    b.ret = Some(Type::Unit);
-    b.appends = crate::append::append_candidates(block);
-    rebound(block, &mut b.rebound);
+    b.frame.ret = Some(Type::Unit);
+    b.frame.appends = crate::append::append_candidates(block);
+    rebound(block, &mut b.frame.rebound);
     let mut out = Vec::new();
     b.block(block, &mut out)?;
     cut(&mut out);
@@ -1404,7 +1339,7 @@ pub fn build_root<'a>(
     b.closed = binds.is_some();
     for (name, ty) in binds.unwrap_or_default() {
         let n = b.name(name, ty.clone(), false, e.line());
-        b.scope.push((name.clone(), n));
+        b.frame.scope.push((name.clone(), n));
         b.body.params.push(n);
     }
     let mut out = Vec::new();
@@ -1434,11 +1369,28 @@ struct Builder<'a> {
     solved: HashMap<NodeId, Vec<(String, Type)>>,
     placed: HashMap<(Exit, NodeId), Vec<&'a Release>>,
     body: Body,
+    frame: Frame,
+    temps: u32,
+    /// The constructs this build may take their named scrutinee at, as
+    /// [`last_owner`] decided over the previous build. Empty on the first.
+    seed: &'a std::collections::HashSet<NodeId>,
+    /// A `where` predicate's body: it sees its binds and no module state.
+    closed: bool,
+}
+
+/// The state of the body a [`Builder`] is building: its scopes, loops,
+/// pending temporaries and names. A lambda's body is built in a frame of its
+/// own, which [`Builder::lambda_frame`] swaps in whole and swaps back.
+#[derive(Default)]
+struct Frame {
+    /// The body's String accumulators ([`crate::append::append_candidates`]).
+    appends: std::collections::HashSet<String>,
+    /// The names the body stores into whole ([`rebound`]).
+    rebound: std::collections::HashSet<String>,
     scope: Vec<(String, Name)>,
     /// The plan keys a release by the node that owns the value: a `Stmt::Let`,
     /// a parameter, or the construct that owns a temporary.
     by_binding: HashMap<NodeId, Name>,
-    temps: u32,
     /// An unnamed receiver minted for a field or element read, with the node
     /// that produced it, so the read can release it when the plan says the
     /// frame owns it.
@@ -1470,9 +1422,6 @@ struct Builder<'a> {
     /// no turn reached yet, or `None`. A `return`, a `?` and a `break` release
     /// them ([`Builder::release_unreached`]).
     walks: Vec<Option<Unreached>>,
-    /// The constructs this build may take their named scrutinee at, as
-    /// [`last_owner`] decided over the previous build. Empty on the first.
-    seed: &'a std::collections::HashSet<NodeId>,
     /// One entry per enclosing loop: the name count when its body opened. A
     /// name below the innermost entry is bound outside the loop, so handing
     /// it out of a join arm frees it once per turn ([`Builder::alias_out`]).
@@ -1498,10 +1447,6 @@ struct Builder<'a> {
     /// projection declares `read self`, so no construct of its body is its
     /// receiver's last owner ([`Builder::takes_scrutinee`]).
     reading: Vec<Name>,
-    /// The body's String accumulators ([`crate::append::append_candidates`]).
-    appends: std::collections::HashSet<String>,
-    /// The names the body stores into whole ([`rebound`]).
-    rebound: std::collections::HashSet<String>,
     /// How many `region`s enclose the statement. An arena buffer cannot
     /// grow, so an append inside one is the `concat` call.
     region: u32,
@@ -1512,8 +1457,6 @@ struct Builder<'a> {
     /// The receiver of a declared release, which the frame does not own
     /// ([`Builder::owns_boxes`]).
     released: Option<Name>,
-    /// A `where` predicate's body: it sees its binds and no module state.
-    closed: bool,
 }
 
 impl<'a> Builder<'a> {
@@ -1564,30 +1507,9 @@ impl<'a> Builder<'a> {
                 refused,
                 mistyped,
             },
-            scope: Vec::new(),
-            by_binding: HashMap::new(),
+            frame: Frame::default(),
             temps: 0,
-            pending_receiver: None,
-            drain: 0,
-            scrutinee: None,
-            after: Vec::new(),
-            after_of_rhs: Vec::new(),
-            held: Vec::new(),
-            owed: None,
-            stream_loops: Vec::new(),
-            walks: Vec::new(),
-            reading: Vec::new(),
             seed,
-            loop_marks: Vec::new(),
-            loop_aliased: HashMap::new(),
-            rebinding: false,
-            call_keeps: None,
-            pending_closure: None,
-            appends: std::collections::HashSet::new(),
-            rebound: std::collections::HashSet::new(),
-            region: 0,
-            ret: None,
-            released: None,
             closed: false,
         }
     }
@@ -1668,7 +1590,7 @@ impl<'a> Builder<'a> {
     fn keyed(&mut self, n: Name, binding: NodeId) {
         assert_ne!(binding, NodeId::NONE, "a binding keyed by no node");
         self.body.names[n.index()].binding = Some(binding);
-        self.by_binding.insert(binding, n);
+        self.frame.by_binding.insert(binding, n);
     }
 
     /// Refuses binding, by a `let` or an argument temporary, a join whose arm
@@ -1678,21 +1600,10 @@ impl<'a> Builder<'a> {
         let Rhs::Val(Val::Name(m)) = rhs else {
             return Ok(());
         };
-        let Some(a) = self.loop_aliased.get(m) else {
+        let Some(a) = self.frame.loop_aliased.get(m) else {
             return Ok(());
         };
-        refuse(
-            menu(
-                format!(
-                    "`{a}` may not be handed out of an arm inside a loop — the result is \
-                     released on every turn, and `{a}` is bound outside the loop"
-                ),
-                [format!(
-                    "`{a}.copy()` if the arm should hand out a value of its own"
-                )],
-            ),
-            line,
-        )
+        refuse(rule!(HandedOutOfLoopArm, a), Vec::new(), line)
     }
 
     /// Whether a `let` binds a value this frame owns, read off the lowered
@@ -1738,11 +1649,11 @@ impl<'a> Builder<'a> {
             Expr::Var { name: m, .. } => self
                 .lookup(m)
                 .is_some_and(|m| self.body.names[m.index()].borrow),
-            e => is_place_read(e) && self.deferred_of(e).is_none(),
+            e => is_place_read(e) && !self.forces(e),
         };
         *mutable
             && borrow
-            && self.rebound.contains(name)
+            && self.frame.rebound.contains(name)
             && self.owns(ty)
             && vyrn_frontend::types::copy_impl(&self.program.impls, ty).is_none()
     }
@@ -1947,11 +1858,11 @@ impl<'a> Builder<'a> {
             _ => None,
         };
         if let Some(n) = held {
-            self.reading.push(n);
+            self.frame.reading.push(n);
         }
         let r = self.optional_body(p, pattern, then_block, else_block, sid, name, line, out);
         if held.is_some() {
-            self.reading.pop();
+            self.frame.reading.pop();
         }
         r
     }
@@ -1978,7 +1889,7 @@ impl<'a> Builder<'a> {
         self.block(else_block, &mut miss)?;
         self.edge_drops(sid, 1, &mut miss)?;
         let mut hit = Vec::new();
-        let mark = self.scope.len();
+        let mark = self.frame.scope.len();
         for s in &p.hit {
             self.stmt(s, &mut hit)?;
         }
@@ -1993,12 +1904,12 @@ impl<'a> Builder<'a> {
                 let place = self.place(&p.place, &mut hit)?;
                 let n = self.name(bind, ty, false, line);
                 hit.push(St::Let(n, Rhs::Read(place)));
-                self.scope.push((bind.name.clone(), n));
+                self.frame.scope.push((bind.name.clone(), n));
             }
         }
         self.block(then_block, &mut hit)?;
         self.edge_drops(sid, 0, &mut hit)?;
-        self.scope.truncate(mark);
+        self.frame.scope.truncate(mark);
         out.push(St::If {
             cond,
             then: miss,
@@ -2119,9 +2030,9 @@ impl<'a> Builder<'a> {
     /// go after it.
     fn bind(&mut self, n: Name, rhs: Rhs, out: &mut Vec<St>) {
         if matches!(rhs, Rhs::Prim(Op::Closure(_), ..)) {
-            self.body.names[n.index()].closure_reads = self.pending_closure.take();
+            self.body.names[n.index()].closure_reads = self.frame.pending_closure.take();
         }
-        let owed = match (&rhs, self.owed.take()) {
+        let owed = match (&rhs, self.frame.owed.take()) {
             (Rhs::Make(Ctor::Record(r, _), _), Some((to, line))) if *r == to => Some((to, line)),
             _ => None,
         };
@@ -2131,13 +2042,14 @@ impl<'a> Builder<'a> {
         if let Some((to, line)) = owed {
             out.push(rule_check(to, n, line));
         }
-        for t in std::mem::take(&mut self.after_of_rhs) {
+        for t in std::mem::take(&mut self.frame.after_of_rhs) {
             out.push(St::Drop(t, Site::None, 0, None));
         }
     }
 
     fn lookup(&self, name: &str) -> Option<Name> {
-        self.scope
+        self.frame
+            .scope
             .iter()
             .rev()
             .find(|(n, _)| n == name)
@@ -2202,7 +2114,7 @@ impl<'a> Builder<'a> {
             return Ok(());
         };
         for r in rows {
-            match self.by_binding.get(&r.binding) {
+            match self.frame.by_binding.get(&r.binding) {
                 // The core states no row for a name it does not own: a payload
                 // binder of a non-consuming construct names its scrutinee's
                 // payload, released once at the scrutinee. A consuming loop's
@@ -2318,12 +2230,12 @@ impl<'a> Builder<'a> {
                 let (sv, consuming) =
                     self.scrutinee(scrutinee, mid, Some(arms_span(*mline, arms)), out)?;
                 let owns = self.owns_boxes(scrutinee, consuming);
-                let held = self.held.len();
+                let held = self.frame.held.len();
                 let mut core_arms = Vec::new();
                 for (i, arm) in arms.iter().enumerate() {
-                    self.held.truncate(held);
+                    self.frame.held.truncate(held);
                     let mut body = Vec::new();
-                    let mark = self.scope.len();
+                    let mark = self.frame.scope.len();
                     let binds = self.bind_pattern(
                         &arm.pattern,
                         &sty,
@@ -2342,7 +2254,7 @@ impl<'a> Builder<'a> {
                     // nothing reaches the statement after the switch.
                     self.drops_at(Exit::Scrutinee, mid, &mut body)?;
                     self.return_exit(Some(v), sid, line, &mut body)?;
-                    self.scope.truncate(mark);
+                    self.frame.scope.truncate(mark);
                     core_arms.push(Arm {
                         binds,
                         frees: Some(frees),
@@ -2380,9 +2292,9 @@ impl<'a> Builder<'a> {
         if self.return_through(e, sid, line, out)? {
             return Ok(());
         }
-        let held = self.held.len();
+        let held = self.frame.held.len();
         let v = self.val(e, out)?;
-        self.held.truncate(held);
+        self.frame.held.truncate(held);
         self.return_exit(Some(v), sid, line, out)
     }
 
@@ -2394,12 +2306,12 @@ impl<'a> Builder<'a> {
     /// variable inside the body's block, so the variable's scope ends at
     /// the block's site and a row for it can be keyed there.
     fn block_with(&mut self, blk: &'a Block, head: Vec<St>, out: &mut Vec<St>) -> Result<(), Gap> {
-        let mark = self.scope.len();
+        let mark = self.frame.scope.len();
         let site = blk.id();
         let mut body = head;
         self.stmt_list(&blk.stmts, &mut body)?;
         self.drops_at(Exit::Block, site, &mut body)?;
-        self.scope.truncate(mark);
+        self.frame.scope.truncate(mark);
         out.push(St::Block {
             site,
             body,
@@ -2426,7 +2338,7 @@ impl<'a> Builder<'a> {
         let mut open: Vec<(Name, String, usize)> = Vec::new();
         let mut k = 0;
         while k < ss.len() {
-            let (scope, at) = (self.scope.len(), out.len());
+            let (scope, at) = (self.frame.scope.len(), out.len());
             // A window spans its temps, its store and the stores back.
             let (span, r) = match self.nested_store(&ss[k..], out) {
                 Ok(Some(n)) => (n, Ok(())),
@@ -2458,7 +2370,7 @@ impl<'a> Builder<'a> {
                 // among them is not read as falling through ([`returns`]).
                 out.truncate(at);
                 out.push(St::Trap);
-                self.scope.truncate(scope);
+                self.frame.scope.truncate(scope);
                 if let [Stmt::Let {
                     name,
                     line,
@@ -2468,7 +2380,7 @@ impl<'a> Builder<'a> {
                 {
                     let n = self.name(name, Type::Err, false, *line);
                     self.body.names[n.index()].mutable = *mutable;
-                    self.scope.push((name.clone(), n));
+                    self.frame.scope.push((name.clone(), n));
                 }
             }
             let members = self.grouped_in(&out[at..]);
@@ -2732,11 +2644,11 @@ impl<'a> Builder<'a> {
         let t = self.name(temp, ty, false, line);
         // The parser binds the temp `let mut` ([`moves_out`]).
         self.body.names[t.index()].mutable = true;
-        self.scope.push((temp.to_string(), t));
+        self.frame.scope.push((temp.to_string(), t));
         let mut rows = Vec::new();
         let lowered = self.stmt(store, &mut rows);
-        if let Some(at) = self.scope.iter().rposition(|(_, n)| *n == t) {
-            self.scope.remove(at);
+        if let Some(at) = self.frame.scope.iter().rposition(|(_, n)| *n == t) {
+            self.frame.scope.remove(at);
         }
         lowered?;
         let mut placed = false;
@@ -2769,11 +2681,11 @@ impl<'a> Builder<'a> {
     }
 
     fn stmt(&mut self, s: &'a Stmt, out: &mut Vec<St>) -> Result<(), Gap> {
-        let held = std::mem::take(&mut self.held);
+        let held = std::mem::take(&mut self.frame.held);
         let r = self.stmt_rows(s, out);
-        self.held = held;
+        self.frame.held = held;
         r?;
-        match self.owed.take() {
+        match self.frame.owed.take() {
             Some((to, line)) => gap_d("a check of a validated record no binding took", &to, line),
             None => Ok(()),
         }
@@ -2793,11 +2705,11 @@ impl<'a> Builder<'a> {
                     let decls = self.proto.types();
                     let refusal = match annotation {
                         Some(t) if !vyrn_frontend::types::coercible(&vty, t, decls) => {
-                            let ([t, vty], []) = self.body.speech().say([t, &vty], []);
-                            Some(format!("`{name}` declared {t} but initializer is {vty}"))
+                            let ([declared, vty], []) = self.body.speech().say([t, &vty], []);
+                            Some(rule!(InitMismatch, name, declared, vty).render())
                         }
                         _ if vyrn_frontend::types::resolve(&vty, decls) == Type::Unit => {
-                            Some(format!("cannot bind `{name}` to a Unit value"))
+                            Some(rule!(BindUnit, name).render())
                         }
                         _ => None,
                     };
@@ -2819,9 +2731,9 @@ impl<'a> Builder<'a> {
                     && !copied
                     && (global || !matches!(read, Expr::Var { .. }))
                     && is_place_read(read)
-                    && self.deferred_of(read).is_none()
+                    && !self.forces(read)
                 {
-                    let mark = self.after.len();
+                    let mark = self.frame.after.len();
                     let place = self.place(read, out)?;
                     let n = self.name(name, ty.clone(), false, *line);
                     let rhs = Rhs::Read(place);
@@ -2831,7 +2743,7 @@ impl<'a> Builder<'a> {
                     self.release_receiver(read, out, true);
                     self.drop_since(mark, out);
                     self.grows(n, name);
-                    self.scope.push((name.clone(), n));
+                    self.frame.scope.push((name.clone(), n));
                     self.keyed_let(n, s);
                     return Ok(());
                 }
@@ -2840,9 +2752,9 @@ impl<'a> Builder<'a> {
                 let (rhs, ty) = match check {
                     Some(to) => (self.check(&to, value, *line, out)?, Type::Named(to)),
                     None if copied => {
-                        let outer = std::mem::take(&mut self.after);
+                        let outer = std::mem::take(&mut self.frame.after);
                         let rhs = self.copy_of(value, out);
-                        self.after_of_rhs = std::mem::replace(&mut self.after, outer);
+                        self.frame.after_of_rhs = std::mem::replace(&mut self.frame.after, outer);
                         (rhs?, ty)
                     }
                     None => (self.rhs(value, out)?, ty),
@@ -2894,7 +2806,7 @@ impl<'a> Builder<'a> {
                     self.release_receiver(value, out, false);
                 }
                 self.grows(n, name);
-                self.scope.push((name.clone(), n));
+                self.frame.scope.push((name.clone(), n));
                 self.keyed_let(n, s);
             }
             Stmt::Assign {
@@ -2903,7 +2815,7 @@ impl<'a> Builder<'a> {
                 line,
                 id: _,
             } => {
-                if !self.known(name, *line, "assignment to unknown variable") {
+                if !self.known(name, *line, |name| rule!(AssignUnknown, name)) {
                     return Ok(());
                 }
                 let to = match self.lookup(name) {
@@ -2913,8 +2825,8 @@ impl<'a> Builder<'a> {
                 if let (Some(to), Some(vty)) = (&to, node_ty(self.own, value.id())) {
                     if !vyrn_frontend::types::coercible(&vty, to, self.proto.types()) {
                         let ([to, vty], []) = self.body.speech().say([to, &vty], []);
-                        let refusal =
-                            format!("`{}` is {to} but assigned {vty}", self.written(name));
+                        let name = self.written(name);
+                        let refusal = rule!(AssignMismatch, name, to, vty).render();
                         self.body.mistyped.push((*line, refusal));
                     }
                 }
@@ -2925,13 +2837,15 @@ impl<'a> Builder<'a> {
                     None => None,
                 };
                 let grown = match (n, &check) {
-                    (Some(n), None) if self.region == 0 && self.body.names[n.index()].grows => {
+                    (Some(n), None)
+                        if self.frame.region == 0 && self.body.names[n.index()].grows =>
+                    {
                         crate::append::self_append_spine(name, value).map(|parts| (n, parts))
                     }
                     // Module state grows through a read of it, which the row
                     // names as its receiver.
                     (None, None)
-                        if self.region == 0
+                        if self.frame.region == 0
                             && self.own.accumulators.contains(name)
                             && vyrn_frontend::types::resolve(
                                 &self.ty_of(value)?,
@@ -2955,13 +2869,13 @@ impl<'a> Builder<'a> {
                     }
                     _ => None,
                 };
-                self.rebinding = grown.is_none();
+                self.frame.rebinding = grown.is_none();
                 let v = match (check, grown) {
                     (_, Some((n, parts))) => self.str_append(n, &parts, *line, out),
                     (Some(to), None) => self.checked_temp(&to, value, *line, out).map(Val::Name),
                     _ => self.val(value, out),
                 };
-                self.rebinding = false;
+                self.frame.rebinding = false;
                 let v = v?;
                 let ty = match n {
                     Some(n) => self.body.names[n.index()].ty.clone(),
@@ -3025,7 +2939,7 @@ impl<'a> Builder<'a> {
                 });
                 // [`Builder::str_append`] queues its operand temporaries so the
                 // store stays next to its row.
-                for t in std::mem::take(&mut self.after_of_rhs) {
+                for t in std::mem::take(&mut self.frame.after_of_rhs) {
                     out.push(St::Drop(t, Site::None, 0, None));
                 }
             }
@@ -3036,7 +2950,7 @@ impl<'a> Builder<'a> {
                 line,
                 id: _,
             } => {
-                if !self.known(name, *line, "assignment to field of unknown variable") {
+                if !self.known(name, *line, |name| rule!(FieldAssignUnknown, name)) {
                     return Ok(());
                 }
                 let base = self.named_place(name, *line)?;
@@ -3049,7 +2963,7 @@ impl<'a> Builder<'a> {
                 line,
                 id: _,
             } => {
-                if !self.known(name, *line, "index-assignment to unknown variable") {
+                if !self.known(name, *line, |name| rule!(IndexAssignUnknown, name)) {
                     return Ok(());
                 }
                 let base = self.named_place(name, *line)?;
@@ -3060,10 +2974,10 @@ impl<'a> Builder<'a> {
                     Some(e) => node_ty(self.own, e.id()),
                     None => Some(Type::Unit),
                 };
-                if let (Some(vty), Some(ret)) = (vty, &self.ret) {
+                if let (Some(vty), Some(ret)) = (vty, &self.frame.ret) {
                     if !vyrn_frontend::types::coercible(&vty, ret, self.proto.types()) {
                         let ([ret, vty], []) = self.body.speech().say([ret, &vty], []);
-                        let refusal = format!("return type mismatch: expected {ret}, found {vty}");
+                        let refusal = rule!(ReturnMismatch, ret, vty).render();
                         self.body.mistyped.push((*line, refusal));
                     }
                 }
@@ -3072,7 +2986,7 @@ impl<'a> Builder<'a> {
                         return Ok(());
                     }
                 }
-                let v = match (value, self.ret.clone()) {
+                let v = match (value, self.frame.ret.clone()) {
                     (Some(e), Some(r)) => Some(self.proven_val(e, Some(&r), *line, out)?),
                     (Some(e), None) => Some(self.val(e, out)?),
                     (None, _) => None,
@@ -3080,7 +2994,7 @@ impl<'a> Builder<'a> {
                 self.return_exit(v, sid, *line, out)?;
             }
             Stmt::Break { line, id: _ } => {
-                if let Some(Some(u)) = self.walks.last().cloned() {
+                if let Some(Some(u)) = self.frame.walks.last().cloned() {
                     self.release_unreached(&u, out);
                 }
                 self.drops_at(Exit::Break, sid, out)?;
@@ -3136,11 +3050,11 @@ impl<'a> Builder<'a> {
                     }],
                     site: NodeId::NONE,
                 });
-                self.loop_marks.push(self.body.names.len());
-                self.walks.push(None);
+                self.frame.loop_marks.push(self.body.names.len());
+                self.frame.walks.push(None);
                 let r = self.block(body, &mut l);
-                self.walks.pop();
-                self.loop_marks.pop();
+                self.frame.walks.pop();
+                self.frame.loop_marks.pop();
                 r?;
                 self.hoist_headers(&mut l, *line, out);
                 out.push(St::Loop { body: l, site: sid });
@@ -3166,11 +3080,7 @@ impl<'a> Builder<'a> {
                     let t = vyrn_frontend::types::resolve(&ity, self.proto.types());
                     if t != Type::Err {
                         let ([t], []) = self.body.speech().say([&t], []);
-                        let refusal = format!(
-                            "`for` needs an Array, a String, or a type that declares \
-                             `impl Iterate` (a `size` method and an `nth` projection, \
-                             `fn nth(read self, ..) -> read T`), found {t}"
-                        );
+                        let refusal = rule!(ForNeedsIterable, t).render();
                         self.body.mistyped.push((*line, refusal));
                     }
                     return gap("a `for` over what no loop walks", *line);
@@ -3209,13 +3119,13 @@ impl<'a> Builder<'a> {
                             t
                         }
                     }
-                    _ if !*consuming && is_place_read(iter) => {
+                    _ if !*consuming && is_place_read(iter) && !self.forces(iter) => {
                         // `for p in e.path`: the loop walks a container
                         // somebody else owns.
                         let place = self.place(iter, out)?;
                         // No drain encloses the receiver temporary, so it
                         // stays held and the judgment sees it.
-                        self.pending_receiver = None;
+                        self.frame.pending_receiver = None;
                         let t = self.borrow_name(iter, ity.clone(), *line);
                         self.body.names[t.index()].walked = Some(Walk::For);
                         out.push(St::Let(t, Rhs::Read(place)));
@@ -3248,7 +3158,7 @@ impl<'a> Builder<'a> {
                     Type::Stream(_)
                 );
                 if streaming {
-                    self.stream_loops.push(it);
+                    self.frame.stream_loops.push(it);
                 }
                 // `for x in xs` walks a named index: the length read once
                 // before the loop, and a counter from zero that steps right
@@ -3347,7 +3257,7 @@ impl<'a> Builder<'a> {
                 }
                 // Before the variable: each turn binds its own element, so it
                 // may leave a join arm; the container, below the mark, may not.
-                self.loop_marks.push(self.body.names.len());
+                self.frame.loop_marks.push(self.body.names.len());
                 let x = self.name(var, ety, owned, *line);
                 self.body.cands.push((ekey, x, Cand::Elem));
                 // The container outlives the loop, so a refusal names the
@@ -3374,17 +3284,17 @@ impl<'a> Builder<'a> {
                 if let Some((_, i)) = counter {
                     self.step(i, &mut head);
                 }
-                let mark = self.scope.len();
-                self.scope.push((var.clone(), x));
-                self.walks.push(unreached);
+                let mark = self.frame.scope.len();
+                self.frame.scope.push((var.clone(), x));
+                self.frame.walks.push(unreached);
                 let r = self.block_with(body, head, &mut l);
-                self.walks.pop();
-                self.loop_marks.pop();
+                self.frame.walks.pop();
+                self.frame.loop_marks.pop();
                 r?;
-                self.scope.truncate(mark);
+                self.frame.scope.truncate(mark);
                 out.push(St::Loop { body: l, site: sid });
                 if streaming {
-                    self.stream_loops.pop();
+                    self.frame.stream_loops.pop();
                     // Pulled to its end or left by a `break`, the stream is
                     // closed here by its last owner, the loop. A binding's
                     // stream is always disposed of here, so a later use is a
@@ -3419,14 +3329,14 @@ impl<'a> Builder<'a> {
             // A part read as a statement takes nothing: the part stays in its
             // place, and an unnamed receiver is released whole.
             Stmt::Expr(e, _) if reads_a_part(e) && self.deferred_of(e).is_none() => {
-                let mark = self.after.len();
+                let mark = self.frame.after.len();
                 let rhs = Rhs::Read(self.place(e, out)?);
                 out.push(St::Do {
                     rhs,
                     line: e.line(),
                     site: sid,
                 });
-                if let Some((r, _, malloc)) = self.pending_receiver.take() {
+                if let Some((r, _, malloc)) = self.frame.pending_receiver.take() {
                     self.drop_receiver(r, malloc, Vec::new(), out);
                 }
                 self.drop_since(mark, out);
@@ -3434,7 +3344,7 @@ impl<'a> Builder<'a> {
             Stmt::Expr(e, _) => {
                 let ty = self.ty_of(e).unwrap_or(Type::Unit);
                 let rhs = self.rhs(e, out)?;
-                if self.owns(&ty) || self.owed.is_some() {
+                if self.owns(&ty) || self.frame.owed.is_some() {
                     let owns = self.owns(&ty);
                     let t = self.temp(ty, e.line());
                     self.bind(t, rhs, out);
@@ -3451,7 +3361,7 @@ impl<'a> Builder<'a> {
                             site: sid,
                         });
                     }
-                    for t in std::mem::take(&mut self.after_of_rhs) {
+                    for t in std::mem::take(&mut self.frame.after_of_rhs) {
                         out.push(St::Drop(t, Site::None, 0, None));
                     }
                 }
@@ -3460,9 +3370,9 @@ impl<'a> Builder<'a> {
             // it, and the closing brace is the runtime's, so the body is an
             // ordinary block here.
             Stmt::Region { body, .. } => {
-                self.region += 1;
+                self.frame.region += 1;
                 let r = self.block(body, out);
-                self.region -= 1;
+                self.frame.region -= 1;
                 r?;
                 if let Some(St::Block { region, .. }) = out.last_mut() {
                     *region = true;
@@ -3484,7 +3394,7 @@ impl<'a> Builder<'a> {
     /// the whitelist admits the name.
     fn grows(&mut self, n: Name, name: &str) {
         let info = &mut self.body.names[n.index()];
-        info.grows = self.appends.contains(name)
+        info.grows = self.frame.appends.contains(name)
             && vyrn_frontend::types::resolve(&info.ty, self.proto.types()) == Type::Str;
     }
 
@@ -3499,8 +3409,8 @@ impl<'a> Builder<'a> {
         line: usize,
         out: &mut Vec<St>,
     ) -> Result<Val, Gap> {
-        let outer = std::mem::take(&mut self.after);
-        self.drain += 1;
+        let outer = std::mem::take(&mut self.frame.after);
+        self.frame.drain += 1;
         let mut args = vec![(Arg::Val(Val::Name(s)), Capability::Read)];
         let read = parts.iter().try_for_each(|p| {
             args.push((
@@ -3509,8 +3419,8 @@ impl<'a> Builder<'a> {
             ));
             Ok(())
         });
-        self.drain -= 1;
-        self.after_of_rhs = std::mem::replace(&mut self.after, outer);
+        self.frame.drain -= 1;
+        self.frame.after_of_rhs = std::mem::replace(&mut self.frame.after, outer);
         read?;
         let t = self.temp(Type::Str, line);
         out.push(St::Let(
@@ -3593,10 +3503,10 @@ impl<'a> Builder<'a> {
     /// The rows a `return` or a `?` runs for every enclosing `for`, innermost
     /// first: the elements no turn reached, then the stream it walks, closed.
     fn leave_loops(&mut self, out: &mut Vec<St>) {
-        for u in self.walks.clone().iter().rev().flatten() {
+        for u in self.frame.walks.clone().iter().rev().flatten() {
             self.release_unreached(u, out);
         }
-        for it in self.stream_loops.iter().rev() {
+        for it in self.frame.stream_loops.iter().rev() {
             if self.stream_owed(*it) {
                 out.push(St::Drop(*it, Site::None, 0, None));
             }
@@ -3742,8 +3652,8 @@ impl<'a> Builder<'a> {
                 .as_ref()
                 .map(|fs| fs.iter().find(|f| f.name == field))
             {
-                None => format!("`{name}` is not a record, so it has no field `{field}`"),
-                Some(None) => format!("record `{name}` has no field `{field}`"),
+                None => rule!(NotRecordNoField, name, field).render(),
+                Some(None) => rule!(RecordNoField, name, field).render(),
                 Some(Some(f)) => {
                     let fty = &f.ty;
                     let Some(vty) = node_ty(self.own, value.id()) else {
@@ -3760,11 +3670,10 @@ impl<'a> Builder<'a> {
                     }
                     let ([fty, vty], []) = self.body.speech().say([fty, &vty], []);
                     let refusal = match validated {
-                        true => format!(
-                            "field `{field}` is {fty} (validated); assign an already-constructed `{fty}` value, e.g. `{fty}(..)`"
-                        ),
-                        false => format!("field `{field}` is {fty} but assigned {vty}"),
-                    };
+                        true => rule!(FieldValidated, field, fty),
+                        false => rule!(FieldMismatch, field, fty, vty),
+                    }
+                    .render();
                     self.body.mistyped.push((line, refusal));
                     return Ok(());
                 }
@@ -3800,15 +3709,11 @@ impl<'a> Builder<'a> {
                             && !coercible(&k, &vyrn_frontend::types::resolve(&key, decls)) =>
                     {
                         let ([key, k], []) = sp.say([&key, &k], []);
-                        Some(format!(
-                            "`{name}` is keyed by {key}, but the key here is {k}"
-                        ))
+                        Some(rule!(MapStoreKey, name, key, k))
                     }
                     (_, Some(v)) if !coercible(&v, &val) => {
                         let ([val, v], []) = sp.say([&val, &v], []);
-                        Some(format!(
-                            "`{name}` holds values of type {val} but the stored value is {v}"
-                        ))
+                        Some(rule!(MapStoreValue, name, val, v))
                     }
                     _ => None,
                 }
@@ -3826,9 +3731,7 @@ impl<'a> Builder<'a> {
                             ),
                             None => {
                                 let ([other], []) = sp.say([&other], []);
-                                let refusal = format!(
-                                "`{name}[i] = ..` needs an Array, a Map, or a type whose impl declares the `atSet` projection (`fn atSet(modify self, ..) -> modify T`), found {other}"
-                            );
+                                let refusal = rule!(IndexStoreNoContainer, name, other).render();
                                 self.body.mistyped.push((line, refusal));
                                 return gap("a store into an element of what has none", line);
                             }
@@ -3841,21 +3744,23 @@ impl<'a> Builder<'a> {
                 match (i, vty) {
                     (Some(i), _) if key == Type::Int => {
                         let ([i], []) = sp.say([&i], []);
-                        Some(format!("array index must be an Int64, found {i}"))
+                        Some(rule!(ArrayIndexType, i))
                     }
                     (Some(i), _) => {
                         let ([key, i], []) = sp.say([&key, &i], []);
-                        Some(format!("`{name}[..] = ..` is keyed by {key}, found {i}"))
+                        Some(rule!(IndexStoreKey, name, key, i))
                     }
                     (None, Some(v)) if !coercible(&v, &elem) => {
                         let ([elem, v], []) = sp.say([&elem, &v], []);
-                        Some(format!("`{name}` holds {elem} but the stored value is {v}"))
+                        Some(rule!(ElementMismatch, name, elem, v))
                     }
                     _ => None,
                 }
             }
         };
-        self.body.mistyped.extend(refusal.map(|r| (line, r)));
+        self.body
+            .mistyped
+            .extend(refusal.map(|r| (line, r.render())));
         Ok(())
     }
 
@@ -3932,13 +3837,12 @@ impl<'a> Builder<'a> {
     }
 
     /// Whether a binding or module state answers `name`. Where none does,
-    /// records the refusal: `words` is the sentence before the name.
-    fn known(&mut self, name: &str, line: usize, words: &str) -> bool {
+    /// records the refusal `rule` states of the name.
+    fn known(&mut self, name: &str, line: usize, rule: fn(&str) -> Rule) -> bool {
         if self.answers(name) {
             return true;
         }
-        let refusal = format!("{words} `{name}`");
-        self.body.refused.push((line, refusal));
+        self.body.refused.push((line, rule(name).render()));
         false
     }
 
@@ -3955,7 +3859,7 @@ impl<'a> Builder<'a> {
         let bool = vyrn_frontend::types::resolve(&t, self.proto.types()) == Type::Bool;
         if !bool && t != Type::Err {
             let ([t], []) = self.body.speech().say([&t], []);
-            let refusal = format!("`{word}` condition must be Bool, found {t}");
+            let refusal = rule!(ConditionNotBool, word, t).render();
             self.body.mistyped.push((line, refusal));
         }
         self.read_val(cond, out)
@@ -3971,10 +3875,10 @@ impl<'a> Builder<'a> {
     fn unknown_of(&self, e: &Expr) -> Option<(usize, String)> {
         match e {
             Expr::Var { name, line, id: _ } if !self.answers(name) && !self.is_variant(name) => {
-                Some((*line, format!("unknown variable `{name}`")))
+                Some((*line, rule!(UnknownVariable, name).render()))
             }
             Expr::TryConstruct { name, line, .. } if !self.proto.types().contains_key(name) => {
-                Some((*line, format!("unknown type `{name}`")))
+                Some((*line, rule!(UnknownType, n = name).render()))
             }
             _ => None,
         }
@@ -4001,12 +3905,14 @@ impl<'a> Builder<'a> {
         };
         let refusal = match vyrn_frontend::types::resolve(&ty, self.proto.types()) {
             Type::Array(_) | Type::SmallArray(..) | Type::Err => return,
-            Type::ArrayN(..) => format!(
-                "`{op}` is not available on a fixed-size array (it cannot shrink); use a growable `Array<T>`"
+            Type::ArrayN(..) => rule!(ShrinkFixedArray, op),
+            other => rule!(
+                ShrinkNeedsArray,
+                op,
+                t = self.body.speech().ty(&other).to_string()
             ),
-            other => format!("`{op}` needs an `Array<T>`, found {}", self.body.speech().ty(&other)),
         };
-        self.body.mistyped.push((line, refusal));
+        self.body.mistyped.push((line, refusal.render()));
     }
 
     fn unknown_at(&mut self, e: &Expr) {
@@ -4142,17 +4048,19 @@ impl<'a> Builder<'a> {
             Ok(None) => return gap("a `for` over a container with no `nth`", line),
             Err(e) => return gap_d("a projection this site cannot inline", &e, line),
         };
-        let mark = self.scope.len();
-        self.scope
+        let mark = self.frame.scope.len();
+        self.frame
+            .scope
             .push((vyrn_frontend::project::FOR_RECV.to_string(), it));
-        self.scope
+        self.frame
+            .scope
             .push((vyrn_frontend::project::FOR_INDEX.to_string(), i));
         let r = p
             .prologue
             .iter()
             .try_for_each(|s| self.stmt(s, out))
             .and_then(|()| self.place(&p.place, out));
-        self.scope.truncate(mark);
+        self.frame.scope.truncate(mark);
         r
     }
 
@@ -4316,8 +4224,9 @@ impl<'a> Builder<'a> {
             Expr::Var { name, .. } => Some(name),
             _ => None,
         };
-        let released =
-            receiver.is_some_and(|r| self.released.is_some() && self.lookup(r) == self.released);
+        let released = receiver.is_some_and(|r| {
+            self.frame.released.is_some() && self.lookup(r) == self.frame.released
+        });
         !released && (consuming || self.made_scrutinee(e))
     }
 
@@ -4388,9 +4297,9 @@ impl<'a> Builder<'a> {
                 }
             },
             _ => {
-                let outer = self.scrutinee.replace(e.id());
+                let outer = self.frame.scrutinee.replace(e.id());
                 let v = self.val(e, out);
-                self.scrutinee = outer;
+                self.frame.scrutinee = outer;
                 match v? {
                     Val::Name(t) => {
                         self.keyed(t, construct);
@@ -4411,7 +4320,11 @@ impl<'a> Builder<'a> {
     /// stated in the core, so the kernel refuses a later read.
     fn takes_scrutinee(&self, n: Name, lines: Option<(usize, usize)>) -> bool {
         let info = &self.body.names[n.index()];
-        lines.is_some() && info.releases && info.heap && !info.borrow && !self.reading.contains(&n)
+        lines.is_some()
+            && info.releases
+            && info.heap
+            && !info.borrow
+            && !self.frame.reading.contains(&n)
     }
 
     /// Whether the construct took the temporary `t` it owns: the payloads
@@ -4480,7 +4393,7 @@ impl<'a> Builder<'a> {
                     let v = self.body.speech().name(&variants[t as usize].name);
                     self.body
                         .refused
-                        .push((line, format!("duplicate `{v}` arm")));
+                        .push((line, rule!(DuplicateArm, v).render()));
                     return Ok(());
                 }
                 *seen = true;
@@ -4490,10 +4403,8 @@ impl<'a> Builder<'a> {
             return Ok(());
         }
         if let Some((v, _)) = variants.iter().zip(&taken).find(|(_, t)| !**t) {
-            let refusal = format!(
-                "`match` is missing variant `{}`",
-                self.body.speech().name(&v.name)
-            );
+            let v = self.body.speech().name(&v.name);
+            let refusal = rule!(MissingVariant, v).render();
             self.body.refused.push((line, refusal));
         }
         Ok(())
@@ -4608,7 +4519,7 @@ impl<'a> Builder<'a> {
             // `_` never enters the scope, but its payload is real and a
             // consumed scrutinee's arm still owes its release.
             if name != "_" {
-                self.scope.push((name, n));
+                self.frame.scope.push((name, n));
             }
             binds.push(n);
         }
@@ -4838,18 +4749,37 @@ impl<'a> Builder<'a> {
         vyrn_frontend::types::deferred(&f.ty).cloned()
     }
 
+    /// Whether reading `e` forces a `lazy` field at some step. Such a read
+    /// names a part of a fresh value, not a place, though
+    /// [`is_place_read`] answers by its spelling.
+    fn forces(&self, e: &Expr) -> bool {
+        match e {
+            Expr::Field { expr, .. } => self.deferred_of(e).is_some() || self.forces(expr),
+            Expr::Call { args, .. } if reads_a_part(e) => self.forces(&args[0]),
+            _ => false,
+        }
+    }
+
     /// Forces a read of a `lazy T` field: borrows the stored
     /// nullary closure out of the field and calls through it. The result is
     /// fresh on every read; its release is keyed by the read (`arg_released`).
     fn force(&mut self, e: &'a Expr, inner: Type, out: &mut Vec<St>) -> Result<Rhs, Gap> {
-        let place = self.place(e, out)?;
+        let Expr::Field { expr, field, .. } = e else {
+            return gap("a forced read of no field", e.line());
+        };
+        let place = Place::Field(Box::new(self.place(expr, out)?), field.clone());
         let thunk = Type::Fn(Vec::new(), Box::new(inner.clone()));
         let n = self.name("@thunk", thunk, false, e.line());
         let callee = format!("@thunk{}", n.0);
         self.body.names[n.index()].source = callee.clone();
         self.body.names[n.index()].path = self.reader_path(e);
         out.push(St::Let(n, Rhs::Read(place)));
-        self.release_receiver(e, out, true);
+        // The thunk borrows the receiver until the call has run, and the
+        // result owns nothing of it: the receiver goes once the result is
+        // bound.
+        if let Some((r, ..)) = self.frame.pending_receiver.take() {
+            self.frame.after.push(r);
+        }
         Ok(Rhs::Call {
             callee,
             args: Vec::new(),
@@ -4888,8 +4818,8 @@ impl<'a> Builder<'a> {
             _ if owns => {
                 let v = self.val(e, out)?;
                 if let Val::Name(t) = v {
-                    if self.body.names[t.index()].releases && !self.after.contains(&t) {
-                        self.after.push(t);
+                    if self.body.names[t.index()].releases && !self.frame.after.contains(&t) {
+                        self.frame.after.push(t);
                     }
                 }
                 Ok(v)
@@ -4910,18 +4840,18 @@ impl<'a> Builder<'a> {
     /// operator. Outside such a drain the receiver stays held and the
     /// judgment refuses it.
     fn release_receiver(&mut self, e: &'a Expr, out: &mut Vec<St>, borrowed: bool) {
-        let Some((r, producer, malloc)) = self.pending_receiver.take() else {
+        let Some((r, producer, malloc)) = self.frame.pending_receiver.take() else {
             return;
         };
         let node = e.id();
         let took = self.ty_of(e).is_ok_and(|t| self.owns(&t));
         if borrowed && took {
             if self.own.placed.producers.contains(&producer) {
-                if !self.after.contains(&r) {
+                if !self.frame.after.contains(&r) {
                     self.body.names[r.index()].arg_drop = Some(producer);
-                    self.after.push(r);
+                    self.frame.after.push(r);
                 }
-            } else if self.drain > 0 {
+            } else if self.frame.drain > 0 {
                 self.body.names[r.index()].producer = Some(producer);
             }
             return;
@@ -4939,7 +4869,7 @@ impl<'a> Builder<'a> {
         // kernel reports it.
         let holes: Vec<String> = match (took, e) {
             (false, _) => Vec::new(),
-            (true, Expr::Field { .. }) => match taken_path(e) {
+            (true, Expr::Field { .. }) => match taken_path(e, &|x| self.deferred_of(x).is_some()) {
                 Some(path) => vec![path],
                 None => return,
             },
@@ -4964,7 +4894,7 @@ impl<'a> Builder<'a> {
         } = value
         {
             let t = self.body.spelled(t);
-            let fields = fields.iter().map(|(f, _)| format!("the field `{t}.{f}`"));
+            let fields = fields.iter().map(|(f, _)| format!("{t}.{f}"));
             self.body.names[n.index()].fields = fields.collect();
         }
     }
@@ -4974,7 +4904,7 @@ impl<'a> Builder<'a> {
     fn val(&mut self, e: &'a Expr, out: &mut Vec<St>) -> Result<Val, Gap> {
         // The rebind flag covers this expression only: in
         // `n = n + size(if c { names } else { .. })` the join still owns.
-        let rebinding = std::mem::take(&mut self.rebinding);
+        let rebinding = std::mem::take(&mut self.frame.rebinding);
         if let Some(l) = lit_of(e).or_else(|| self.schema(e)) {
             return Ok(Val::Lit(l));
         }
@@ -5038,7 +4968,7 @@ impl<'a> Builder<'a> {
             Expr::Lambda { .. } => self.lambda(e, out),
             _ => {
                 let ty = self.ty_of(e)?;
-                if is_place_read(e) && self.owns(&ty) && self.deferred_of(e).is_none() {
+                if is_place_read(e) && self.owns(&ty) && !self.forces(e) {
                     // `best = m.name`: a borrow (`movecheck::names_a_place`),
                     // so a take of it needs a `.copy()`.
                     let place = self.place(e, out)?;
@@ -5191,18 +5121,20 @@ impl<'a> Builder<'a> {
         );
         self.body.name = lambda_spelling(&outer.name, *line, *col);
         self.body.id = self.fns.id(&self.body.name);
-        let saved = (
-            std::mem::take(&mut self.scope),
-            std::mem::take(&mut self.by_binding),
-            std::mem::take(&mut self.after),
-            std::mem::take(&mut self.after_of_rhs),
-            self.pending_receiver.take(),
-            std::mem::replace(&mut self.drain, 0),
-            std::mem::take(&mut self.stream_loops),
-            std::mem::take(&mut self.walks),
-            std::mem::take(&mut self.held),
+        let mut rebound_names = std::collections::HashSet::new();
+        if let LambdaBody::Block(b) = body {
+            rebound(b, &mut rebound_names);
+        }
+        // `appends` stays empty: no store in a lambda body is an append
+        // target ([`crate::append::append_candidates`]).
+        let outer_frame = std::mem::replace(
+            &mut self.frame,
+            Frame {
+                ret,
+                rebound: rebound_names,
+                ..Frame::default()
+            },
         );
-        let outer_ret = std::mem::replace(&mut self.ret, ret);
         for c in caps {
             let Val::Name(n) = c else {
                 continue;
@@ -5212,13 +5144,13 @@ impl<'a> Builder<'a> {
             let m = self.name(&source, ty, false, *line);
             // A capture is the enclosing frame's; the kernel refuses a take.
             self.body.names[m.index()].borrow_kind = Some(BorrowKind::Capture);
-            self.scope.push((source, m));
+            self.frame.scope.push((source, m));
             self.body.params.push(m);
         }
         for (p, pt) in params.iter().zip(ptys) {
             let m = self.name(&p.name, pt, false, *line);
             self.body.names[m.index()].borrow_kind = param_borrow(Capability::Read, &p.name, true);
-            self.scope.push((p.name.clone(), m));
+            self.frame.scope.push((p.name.clone(), m));
             self.body.params.push(m);
         }
         let mut stmts = Vec::new();
@@ -5235,22 +5167,13 @@ impl<'a> Builder<'a> {
         };
         cut(&mut stmts);
         self.body.stmts = stmts;
-        if let (Some(owes), LambdaBody::Block(_)) = (self.ret.clone(), body) {
-            falls_through(&mut self.body, &owes, *line, || "this lambda".to_string());
+        if let (Some(owes), LambdaBody::Block(_)) = (self.frame.ret.clone(), body) {
+            falls_through(&mut self.body, &owes, *line, |owes| {
+                rule!(LambdaFallsThrough, owes)
+            });
         }
         let frame = std::mem::replace(&mut self.body, outer);
-        (
-            self.scope,
-            self.by_binding,
-            self.after,
-            self.after_of_rhs,
-            self.pending_receiver,
-            self.drain,
-            self.stream_loops,
-            self.walks,
-            self.held,
-        ) = saved;
-        self.ret = outer_ret;
+        self.frame = outer_frame;
         r?;
         let key = frame.name.clone();
         self.body.lambdas.push(frame);
@@ -5275,7 +5198,7 @@ impl<'a> Builder<'a> {
 
     /// [`NameInfo::closure_reads`] for one lambda literal.
     fn closure_reads(&mut self, e: &Expr, caps: &[Val]) -> Option<Vec<Name>> {
-        if self.call_keeps.take() == Some(false) {
+        if self.frame.call_keeps.take() == Some(false) {
             return None;
         }
         let Expr::Lambda { body, .. } = e else {
@@ -5353,11 +5276,8 @@ impl<'a> Builder<'a> {
         match &info.borrow_kind {
             // The sentence names the root; the fixes name the path.
             Some(k) if info.borrow && !info.must_use_param => {
-                let msg = say(
-                    CONSUMED_BORROW,
-                    &[("root", &root), ("what", &k.what(&root))],
-                );
-                refuse(menu(msg, k.fixes(&path)), line)
+                let what = k.what(&root);
+                refuse(rule!(ConsumedBorrow, root, what), k.fixes(&path), line)
             }
             _ => Ok(()),
         }
@@ -5380,7 +5300,7 @@ impl<'a> Builder<'a> {
         // above the loop mark, so each turn's element is its own.
         (m < mark
             && self.body.names[m].releases
-            && self.loop_marks.last().is_some_and(|lm| m < *lm))
+            && self.frame.loop_marks.last().is_some_and(|lm| m < *lm))
         .then(|| self.body.names[m].source.clone())
     }
 
@@ -5402,7 +5322,7 @@ impl<'a> Builder<'a> {
     ) -> Result<Val, Gap> {
         let ty = self.ty_of(e)?;
         let place = self.place(e, out)?;
-        self.pending_receiver = None;
+        self.frame.pending_receiver = None;
         if keeps_hole {
             if let Some((n, path)) = crate::kernel::root_of(&place) {
                 // A hole the walk cannot skip is not stated: a declared
@@ -5467,9 +5387,9 @@ impl<'a> Builder<'a> {
     /// temporary the read left (`pieces()` of `pieces()[0]`) is dropped once
     /// the copy is bound.
     fn copy_of(&mut self, e: &'a Expr, out: &mut Vec<St>) -> Result<Rhs, Gap> {
-        self.drain += 1;
+        self.frame.drain += 1;
         let v = self.read_at(e, out, None);
-        self.drain -= 1;
+        self.frame.drain -= 1;
         let copied = (self.copied(e)).and_then(|(f, s)| Some((self.fn_id(&f)?, f, s)));
         let (callee, kind, solved) = match copied {
             Some((id, f, solved)) => (f, Callee::Fn(id), solved),
@@ -5502,7 +5422,7 @@ impl<'a> Builder<'a> {
             && self.ty_of(e).is_ok_and(|t| {
                 self.owns(&t)
                     && (vyrn_frontend::types::copy_impl(&self.program.impls, &t).is_none()
-                        || (std::ptr::eq(at, e) && self.scrutinee != Some(e.id())))
+                        || (std::ptr::eq(at, e) && self.frame.scrutinee != Some(e.id())))
             })
     }
 
@@ -5531,19 +5451,19 @@ impl<'a> Builder<'a> {
     /// follows; an enclosing expression's are kept aside meanwhile, so a
     /// nested read cannot drop what an outer one is about to read.
     fn rhs(&mut self, e: &'a Expr, out: &mut Vec<St>) -> Result<Rhs, Gap> {
-        let outer = std::mem::take(&mut self.after);
-        let held = self.held.len();
+        let outer = std::mem::take(&mut self.frame.after);
+        let held = self.frame.held.len();
         let r = self.rhs_inner(e, out);
-        self.held.truncate(held);
-        let mine = std::mem::replace(&mut self.after, outer);
-        self.after_of_rhs = mine;
+        self.frame.held.truncate(held);
+        let mine = std::mem::replace(&mut self.frame.after, outer);
+        self.frame.after_of_rhs = mine;
         r
     }
 
     /// Releases the temporaries queued in `after` since `mark`, where no
     /// `rhs` drains them: a place read's key (`m["k".copy()]`) or an operand.
     fn drop_since(&mut self, mark: usize, out: &mut Vec<St>) {
-        for t in self.after.split_off(mark) {
+        for t in self.frame.after.split_off(mark) {
             out.push(St::Drop(t, Site::None, 0, None));
         }
     }
@@ -5551,7 +5471,7 @@ impl<'a> Builder<'a> {
     /// Holds the temporary `t` until its consumer runs, where it owns heap.
     fn hold(&mut self, t: Name) {
         if self.body.names[t.index()].releases {
-            self.held.push(t);
+            self.frame.held.push(t);
         }
     }
 
@@ -5560,7 +5480,7 @@ impl<'a> Builder<'a> {
     /// temporary (a scrutinee) is the plan's.
     fn leave_try(&mut self, tid: NodeId, out: &mut Vec<St>) -> Result<(), Gap> {
         self.leave_loops(out);
-        for &t in &self.held {
+        for &t in &self.frame.held {
             if self.body.names[t.index()].binding.is_none() {
                 out.push(St::Drop(t, Site::None, 0, None));
             }
@@ -5591,16 +5511,16 @@ impl<'a> Builder<'a> {
         };
         // The left operand runs where the expression does, and the emitter
         // drains its temporaries at the operator (`Fn_::binary`).
-        self.drain += 1;
+        self.frame.drain += 1;
         let cond = self.read_val(lhs, out)?;
-        let mark = self.after.len();
+        let mark = self.frame.after.len();
         let mut taken = Vec::new();
         let v = self.read_val(rhs, &mut taken)?;
         taken.push(store(v));
         // The right operand's temporaries are released on its edge, the only
         // path that evaluates it.
         self.drop_since(mark, &mut taken);
-        self.drain -= 1;
+        self.frame.drain -= 1;
         let decided = vec![store(Val::Lit(Lit::Bool(op == BinOp::Or)))];
         let (then, els) = if op == BinOp::And {
             (taken, decided)
@@ -5655,7 +5575,7 @@ impl<'a> Builder<'a> {
                 }
                 // An operator drains its operands' temporaries in both
                 // compiled backends (`binary`, `gen_binary`).
-                self.drain += 1;
+                self.frame.drain += 1;
                 // A String `+` is `@concat`, and a comparison and a `=~` read
                 // operands the same way, so an allocating operand is an
                 // argument at `(@concat, side)`. A `+` concatenates where its
@@ -5678,7 +5598,7 @@ impl<'a> Builder<'a> {
                 } else {
                     self.read_val(rhs, out)?
                 };
-                self.drain -= 1;
+                self.frame.drain -= 1;
                 Ok(Rhs::Prim(Op::Bin(*op), vec![a, b], self.produced(e)))
             }
             Expr::Field { expr, field, .. } => {
@@ -5690,7 +5610,7 @@ impl<'a> Builder<'a> {
                 }
                 let fty = self.ty_of(e)?;
                 let place = self.place(expr, out)?;
-                if let Some((r, _, _)) = self.pending_receiver {
+                if let Some((r, _, _)) = self.frame.pending_receiver {
                     self.body.names[r.index()].receiver = Some(e.id());
                 }
                 if self.owns(&fty) {
@@ -5757,7 +5677,7 @@ impl<'a> Builder<'a> {
                     let cap = if name == "value" {
                         Capability::Consume
                     } else {
-                        self.after.push(t);
+                        self.frame.after.push(t);
                         Capability::Read
                     };
                     return Ok(Rhs::Call {
@@ -5858,7 +5778,7 @@ impl<'a> Builder<'a> {
                     .is_some_and(|d| d.predicate.is_some())
                     && !self.proven(e, &to)
                 {
-                    self.owed = Some((name.clone(), *line));
+                    self.frame.owed = Some((name.clone(), *line));
                 }
                 Ok(Rhs::Make(
                     Ctor::Record(
@@ -5900,7 +5820,7 @@ impl<'a> Builder<'a> {
                 let res = self.temp(ty, *line);
                 let c = self.condition(cond, "if", *line, out)?;
                 let mark = self.body.names.len();
-                let held = self.held.len();
+                let held = self.frame.held.len();
                 let mut t = Vec::new();
                 let tv = self.val(then_branch, &mut t)?;
                 let mut aliased = self.alias_out(&tv, mark);
@@ -5916,7 +5836,7 @@ impl<'a> Builder<'a> {
                 });
                 self.edge_drops(site, 0, &mut t)?;
                 let mut f = Vec::new();
-                self.held.truncate(held);
+                self.frame.held.truncate(held);
                 match else_branch {
                     Some(eb) => {
                         let ev = self.val(eb, &mut f)?;
@@ -5934,7 +5854,7 @@ impl<'a> Builder<'a> {
                         self.edge_drops(site, 1, &mut f)?;
                         self.join_borrows(res, &[then_v, else_v]);
                         if let Some(a) = aliased {
-                            self.loop_aliased.insert(res, a);
+                            self.frame.loop_aliased.insert(res, a);
                         }
                     }
                     None => return gap("an `if` expression without `else`", *line),
@@ -5961,13 +5881,13 @@ impl<'a> Builder<'a> {
                     self.scrutinee(scrutinee, mid, Some(arms_span(*line, arms)), out)?;
                 let owns = self.owns_boxes(scrutinee, consuming);
                 let outer = self.body.names.len();
-                let held = self.held.len();
+                let held = self.frame.held.len();
                 let mut core_arms = Vec::new();
                 let mut yields = Vec::new();
                 for (i, arm) in arms.iter().enumerate() {
-                    self.held.truncate(held);
+                    self.frame.held.truncate(held);
                     let mut body = Vec::new();
-                    let mark = self.scope.len();
+                    let mark = self.frame.scope.len();
                     let binds = self.bind_pattern(
                         &arm.pattern,
                         &sty,
@@ -5980,7 +5900,7 @@ impl<'a> Builder<'a> {
                         ArmBody::Expr(ae) => {
                             let v = self.val(ae, &mut body)?;
                             if let Some(a) = self.alias_out(&v, outer) {
-                                self.loop_aliased.insert(res, a);
+                                self.frame.loop_aliased.insert(res, a);
                             }
                             yields.push(v.clone());
                             body.push(St::Store {
@@ -5997,7 +5917,7 @@ impl<'a> Builder<'a> {
                     }
                     let frees = self.arm_frees(mid, i as u32, &binds, &mut body);
                     self.edge_drops(mid, i as u32, &mut body)?;
-                    self.scope.truncate(mark);
+                    self.frame.scope.truncate(mark);
                     core_arms.push(Arm {
                         binds,
                         frees: Some(frees),
@@ -6041,7 +5961,7 @@ impl<'a> Builder<'a> {
                 }
                 // Failure: the exit's drops, then the propagated value leaves.
                 let mut fail = Vec::new();
-                let mark = self.scope.len();
+                let mark = self.frame.scope.len();
                 // Each binder is keyed by a node of the `?`: the error by the
                 // `?` itself, the value by its operand.
                 let fb = self.bind_pattern(
@@ -6058,7 +5978,7 @@ impl<'a> Builder<'a> {
                 self.leave_try(tid, &mut fail)?;
                 // An `Option` fails with `None` of the frame's result; a
                 // `Result` with its error binder taken into `Err`.
-                let value = match (fb.first(), self.ret.clone()) {
+                let value = match (fb.first(), self.frame.ret.clone()) {
                     (Some(n), Some(rt)) => {
                         let t = self.temp(rt.clone(), *line);
                         fail.push(St::Let(
@@ -6085,9 +6005,9 @@ impl<'a> Builder<'a> {
                     is_try: true,
                     line: *line,
                 });
-                self.scope.truncate(mark);
+                self.frame.scope.truncate(mark);
                 let mut ok = Vec::new();
-                let mark = self.scope.len();
+                let mark = self.frame.scope.len();
                 let ob = self.bind_pattern(
                     &Pattern::Success(Binder {
                         id: Id(expr.id()),
@@ -6113,7 +6033,7 @@ impl<'a> Builder<'a> {
                 });
                 let ok_frees = self.arm_frees(tid, 1, &ob, &mut ok);
                 let fail_frees = self.arm_frees(tid, 0, &fb, &mut fail);
-                self.scope.truncate(mark);
+                self.frame.scope.truncate(mark);
                 out.push(St::Switch {
                     on: sv,
                     arms: vec![
@@ -6145,7 +6065,7 @@ impl<'a> Builder<'a> {
             Expr::Lambda { .. } => {
                 let caps = self.captures(e);
                 // Waits for the name `bind` gives ([`Builder::pending_closure`]).
-                self.pending_closure = self.closure_reads(e, &caps);
+                self.frame.pending_closure = self.closure_reads(e, &caps);
                 let key = self.lambda_frame(e, &caps)?;
                 Ok(Rhs::Prim(Op::Closure(key), caps, self.produced(e)))
             }
@@ -6276,7 +6196,9 @@ impl<'a> Builder<'a> {
                     Ok(Place::Global(name.clone()))
                 }
             },
-            Expr::Field { expr, field, .. } => {
+            // A `lazy` field's place holds the thunk; a read through it is a
+            // read of the forced value (`h.f.n`).
+            Expr::Field { expr, field, .. } if self.deferred_of(e).is_none() => {
                 let base = self.place(expr, out)?;
                 Ok(Place::Field(Box::new(base), field.clone()))
             }
@@ -6290,9 +6212,9 @@ impl<'a> Builder<'a> {
                 let base = self.place(&args[0], out)?;
                 // The receiver is this read's; a field read in the index would
                 // release it as its own.
-                let receiver = self.pending_receiver.take();
+                let receiver = self.frame.pending_receiver.take();
                 let i = self.read_val(&args[1], out)?;
-                self.pending_receiver = receiver;
+                self.frame.pending_receiver = receiver;
                 if self.is_map(&bty) {
                     Ok(Place::Key(Box::new(base), i))
                 } else {
@@ -6309,7 +6231,7 @@ impl<'a> Builder<'a> {
                                 e,
                                 Expr::Call { name, .. } if !name.starts_with('@')
                             );
-                            self.pending_receiver = Some((t, e.id(), malloc));
+                            self.frame.pending_receiver = Some((t, e.id(), malloc));
                         }
                         Ok(Place::Name(t))
                     }
@@ -6537,7 +6459,7 @@ impl<'a> Builder<'a> {
         }
         let drains = !lends_here;
         if drains {
-            self.drain += 1;
+            self.frame.drain += 1;
         }
         let bound = match kind {
             Callee::Fn(_) => self.targets_of(name, args),
@@ -6574,7 +6496,7 @@ impl<'a> Builder<'a> {
             // (`declared::arg_cap`); an unanswered position may, the safe
             // direction. A lambda deeper in the argument gets `None` and
             // escapes: a literal retains what it is given.
-            self.call_keeps = matches!(a, Expr::Lambda { .. })
+            self.frame.call_keeps = matches!(a, Expr::Lambda { .. })
                 .then(|| (self.own.arg_caps.at(of, k)).is_none_or(|c| c == Capability::Consume));
             let global = matches!(a, Expr::Var { name, .. }
                 if self.lookup(name).is_none()
@@ -6610,13 +6532,13 @@ impl<'a> Builder<'a> {
             } else {
                 self.read_at(a, out, Some((name, of, k)))?
             };
-            self.call_keeps = None;
+            self.frame.call_keeps = None;
             if let Val::Name(t) = v {
                 // Queue the drop `read_arg`'s key stands for. The key also
                 // stands on a borrow (a forced `lazy` field); only a name
                 // this frame releases is dropped.
                 let info = &self.body.names[t.index()];
-                if info.releases && info.arg_drop.is_some() && !self.after.contains(&t) {
+                if info.releases && info.arg_drop.is_some() && !self.frame.after.contains(&t) {
                     temps_to_drop.push(t);
                 }
             }
@@ -6627,9 +6549,9 @@ impl<'a> Builder<'a> {
         }
         vs.extend(forwarded);
         if drains {
-            self.drain -= 1;
+            self.frame.drain -= 1;
         }
-        self.after.extend(temps_to_drop);
+        self.frame.after.extend(temps_to_drop);
         // `Int32(n)` and its siblings convert between scalars. The operand is
         // read above like any argument, so the keying and drains stay.
         if let (Some(to), [(Arg::Val(v), _)]) = (
@@ -6912,11 +6834,12 @@ pub fn lambda_spelling(outer: &str, line: usize, col: usize) -> String {
     format!("{outer}@lambda:{line}:{col}")
 }
 
-/// The line of a lambda key [`lambda_spelling`] spelled, which is how
-/// a lambda source is named.
-pub fn lambda_line(name: &str) -> Option<usize> {
+/// The line and column of a lambda key [`lambda_spelling`] spelled, which
+/// is how a lambda source is named.
+pub fn lambda_at(name: &str) -> Option<(usize, usize)> {
     let (_, at) = name.rsplit_once("@lambda:")?;
-    at.split(':').next()?.parse().ok()
+    let (line, col) = at.split_once(':')?;
+    Some((line.parse().ok()?, col.parse().ok()?))
 }
 
 /// The instance of `body` whose `fn`-typed parameters are bound:
@@ -7647,24 +7570,19 @@ fn rule_check(to: String, n: Name, line: usize) -> St {
 /// builder: the checker typed the body, so every judgment over the core
 /// would otherwise pass over it in silence.
 fn refuse_gap(g: Gap, file: &Option<String>, body: &str, r: &mut Refused) {
-    let Some(message) = g.rule else {
-        let detail = if g.detail.is_empty() {
-            String::new()
-        } else {
-            format!(" `{}`", g.detail)
+    let Some(d) = g.rule else {
+        let (what, detail) = (g.what, g.detail);
+        let rule = match detail.is_empty() {
+            true => rule!(CoreGap, what, body),
+            false => rule!(CoreGapAt, what, detail, body),
         };
-        let message = format!(
-            "internal error: the core cannot state {}{detail}, so `{body}` is not judged",
-            g.what
-        );
         // The typed judgment's list prints whichever pass refused.
-        let d = Diagnostic::error(g.line, 0, "check", message).in_file(file.clone());
+        let d = Diagnostic::refusal(g.line, 0, "check", rule).in_file(file.clone());
         r.typed.push(d);
         return;
     };
     r.kernel.push(Refusal {
-        diagnostic: Diagnostic::error(g.line, 0, "movecheck", crate::rules::spoken(message))
-            .in_file(file.clone()),
+        diagnostic: d.in_file(file.clone()),
         body: body.to_string(),
     });
 }
@@ -8403,7 +8321,7 @@ fn report(
             (_, Some(t)) => {
                 let into = match t.how {
                     crate::kernel::TookHow::Return => "the return".to_string(),
-                    _ => t.by.clone(),
+                    _ => t.by.to_string(),
                 };
                 MemoryRow {
                     name,

@@ -30,6 +30,7 @@ pull request.
 - `Option` and `Result` are ordinary declared sums (`| None | Some(T)`, `| Err(E) | Ok(T)`), so one rule serves every sum in every pass.
 - Accumulating validation is the prelude's `Issue { key, path, message }` with `Validation<T> = Valid(T) | Invalid(Array<Issue>)`. A form needs every error at once, and `key` is a stable i18n id.
 - An interpolation whose holes are finite string types is checked by DFA containment. A proof costs nothing at run time, and a failure names a witness string.
+- A `lazy T` field holds a `fn() -> T`, with `T` as written, as every `fn` type keeps its parts. A forced read is a call through that type, so it carries its initializer's effects.
 
 ### Strings and bytes
 
@@ -45,6 +46,7 @@ pull request.
 
 - Protocol conformance is explicit (`impl P for T`) and checked where it is written: a missing method or an extra method is refused.
 - No inherent methods. `x.m(a)` is `m(x, a)`, so a helper needs no `impl`.
+- Compatibility hints for removed spellings were dropped on 2026-10-01 by the user's decision: a use of `str`, `concat`, `len`, `list`, `push`, `alen`, `array`, `Int` or `Float` gets the sentence any unknown name gets, and those names are free to declare. `at` and `toString` stay reserved, because the sugar for `a[i]` and for interpolation would otherwise call a user's declaration.
 - Dispatch is static everywhere; there are no vtables. Records are legal impl targets and validated scalars are not.
 - Generic impls are keyed on the type constructor: one impl per protocol and constructor.
 - A generic call or record literal solves its callee's type parameters renamed apart (`T'n`, fresh per instantiation), so a caller's `T` never meets the callee's. A sentence and the check's record carry the written name.
@@ -102,6 +104,7 @@ pull request.
 - Audience is a fence against accidental imports, not a secrecy guarantee. The compiler cannot know what a secret is; the capability floor sits under the fence.
 - A module contract (`contract`, a contextual word) is an ordinary library declaration, checked by `std/contract` over `moduleInterface`. The compiler hardcodes no convention.
 - Contracts are closed by default: an export the contract does not name is an error with a did-you-mean. An open rule serves only where names carry no meaning.
+- The contract matching rules have one home, `std/contract`. `vyrn why --contract` runs it compiled; Rust states no matching rule. The did-you-mean distance keeps one Rust twin (`contracts::edit_distance`), pinned to `std/strings:editDistance` by test, because the checker asks it and runs no compiled Vyrn.
 - Mutation on a procedure is declared with `mut fn` and is transport-free. An unmarked procedure is a query; nothing is guessed from a name.
 
 ### Test, bench, logging
@@ -126,7 +129,8 @@ pull request.
 - No drop flags. An ambiguous join (moved on one path only) gets a release on the other edge or is refused.
 - A join arm that yields a name bound outside the construct moves it; a later use is refused with the `.copy()` fix. Treating the yield as an alias leaked the name on the edges that did not yield it.
 - A projection (a field, element or pattern binder of a place) borrows its root. It may be read, not stored or returned; the fix is `.copy()` or a take.
-- A refusal quotes what the reader wrote, never a compiler temporary (`@t1`): `rules::spoken` panics in a debug build on a sentence that does.
+- A read through a `lazy` field names no place: each read forces the field, and a part of the forced value is the reader's, as a part of a call's result is.
+- A refusal quotes what the reader wrote, never a compiler temporary (`@t1`): `vyrn_lower::rules::refusal` panics in a debug build on a sentence that does.
 - A lend is refused, never tracked through stores. Tracking it would need an alias analysis.
 - `consume <place>` moves a value out of a place; only the taken path dies. No `take` keyword and no `.take()`: an element leaves with `swapRemove`.
 - A statement's value is released where the statement ends. A part read as a statement (`p.f`, `xs[i].f`) takes nothing: only `consume` moves a value out of a place.
@@ -214,7 +218,7 @@ pull request.
 - Error text is canonical Vyrn wording, never the operating system's.
 - The parser refuses nesting deeper than 1,024 with a diagnostic, because remote modules and the LSP parse untrusted input.
 - Diagnostics speak intent: what you asked for, what blocks it, how to fix it. They say read, modify and consume, never "borrow" or "lifetime".
-- A refusal of the lexer, parser, loader or checker is a row in `rules.rs`: a `Rule` names its holes, its sentence and its fixes, and the diagnostic carries the rule with its hole text. Sites that print the same sentence name the same rule. Text written outside the frontend (`vyrn-lower` sentences, generator output, manifest and schema errors) stays a string in `Diagnostic::error`.
+- A refusal of the lexer, parser, loader, checker, kernel, typed judgment or core builder is a row in `vyrn-frontend/src/rules.rs`: a `Rule` names its holes, its sentence and its fixes, and the diagnostic carries the rule with its hole text. Sites that print the same sentence name the same rule. A way out a site picks by its own state is a row too, rendered under another (`Diagnostic::more`). Text written outside these passes (generator output, manifest and schema errors) stays a string in `Diagnostic::error`.
 - The runtime (allocator, strings, maps, arrays, I/O, traps, regions) is Vyrn in `std/runtime`. The raw memory and WASI primitives are declarations in `std/mem`, importable only by `std/runtime`.
 - The WASI calls a module imports are one table, `vyrn_codegen::WASI_IMPORTS`. The emitter declares from it, and a test holds each host (`wasmrun.rs`, `wasi_host.c`) to exactly its rows.
 - A builtin exists only for what Vyrn source cannot express, such as a syscall. Everything expressible is std Vyrn.
@@ -306,6 +310,7 @@ pull request.
 - The LSP trusts its client's file events: under a watched directory it reads a file again only after an event names it. Without the capability it reads the disk on every load, as `vyrn check` does.
 - Remote imports are pinned by SHA-256 in `vyrn.lock`, content-addressed in `~/.vyrn/cache`, vendorable and buildable offline. Only `vyrn update` changes a pin. No semver registry.
 - A manifest that does not parse is an error, never an empty policy.
+- A `vyrn` command reads `vyrn.json` and `vyrn.lock` once, into one `Project`. Every load it makes reports through it: the lock is saved, the diagnostics and warnings print one way, and `--offline` and `--deny-warnings` reach every load.
 - Tools are pinned per project in the same lock, and bytes are shared per user. A pinned tool that cannot resolve fails; it never falls back to `PATH`.
 - clang is discovered and recorded, never pinned, because it links against the host's libc.
 - Vyrn does not build tools from source, wrap a package manager, or take a crate for curl, git or tar.

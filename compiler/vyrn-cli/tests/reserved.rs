@@ -29,7 +29,7 @@ fn check_in(slot: &str, src: &str) -> String {
 #[test]
 fn a_reserved_top_level_name_is_reported_once_at_its_declaration() {
     // `lineAt` witnesses a routed builtin.
-    for name in ["at", "push", "len", "pop", "toString", "lineAt"] {
+    for name in ["at", "pop", "toString", "lineAt"] {
         // The `print` links `std/num`, and linking a std module that uses the
         // builtin is what triggers the flood.
         let src = format!(

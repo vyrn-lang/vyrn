@@ -1,13 +1,8 @@
-//! The typed judgment over the named core: a name of a
-//! validated type is produced only by that type's constructor, a name already
-//! of the type, or a literal the checker proved. Every name is bound once
-//! (`St::Let`), so it is a use-def walk: [`judge`] records what bound each
-//! name and judges the producer of every store into a place the caller calls
-//! validated. Which types carry a rule is [`vyrn_frontend::validate`]'s; the
-//! caller asks it. A sized integer is judged by width: a producer of the same
-//! width and signedness crosses nothing. The module also holds the must-use
-//! [`obligation`] and the `vyrn check` rules [`stores`], [`loops`],
-//! [`refused`] and [`drops`].
+//! The typed judgment's `vyrn check` rules over the named core: [`stores`]
+//! into a place not declared `mut` or under a `where` rule, the [`groups`] of
+//! stores into a record with a `where` rule, a `break` or `continue` outside
+//! a loop ([`loops`]), the rules the builder met at its construct
+//! ([`refused`]), and a `drop` that cannot release what it names ([`drops`]).
 
 use std::collections::HashMap;
 
@@ -19,334 +14,8 @@ use vyrn_frontend::core::{
     rows, Arg, Body, Callee, Name, NameInfo, Place, Rhs, Site, St, Use, Val,
 };
 
-use crate::rules::{
-    say, ASSIGN_NOT_MUT, DROP_MODULE_STATE, DROP_NOT_HEAP, DROP_TYPE_PARAM, DROP_UNBOUND,
-    FIELD_NOT_MUT, GROUP_CALL, GROUP_EXIT, GROUP_FALSE, GROUP_READ, OUTSIDE_LOOP, REMOVE_NOT_MUT,
-    STORE_NOT_MUT, STORE_RULED,
-};
-
-/// A step from one type into the type a place holds, for the caller that
-/// resolves a place's type. `Global` has no base.
-#[derive(Debug, Clone, Copy)]
-pub enum Step<'a> {
-    Field(&'a str),
-    Elem,
-    Key,
-    Global(&'a str),
-}
-
-/// What produced the value a store put into a validated place.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum How {
-    /// The type's own constructor, `Age(n)`, where the predicate runs. A
-    /// record literal of a validated record type is the same answer: every
-    /// engine runs the generated constructor at it (a cross-field
-    /// `where`).
-    Constructor,
-    /// A name already of the type.
-    ByName,
-    /// A literal, or another crossing the checker proved at compile time
-    /// ([`Callee::Proven`]).
-    Literal,
-    /// A primitive over literals only, into a sized integer. The checker
-    /// ranges it where the two share a sign (`-200` into an `Int8` is
-    /// refused); otherwise it wraps, as `-1` into a `UInt8` is 255.
-    Constant,
-    /// A raw value reaching a validated slot, by kind: what the judgment
-    /// refuses.
-    Finding(&'static str),
-}
-
-impl How {
-    pub fn kind(&self) -> &'static str {
-        match self {
-            How::Constructor => "by-constructor",
-            How::ByName => "by-name",
-            How::Literal => "by-literal",
-            How::Constant => "by-constant",
-            How::Finding(k) => k,
-        }
-    }
-
-    pub fn is_finding(&self) -> bool {
-        matches!(self, How::Finding(_))
-    }
-}
-
-/// One store the judgment looked at.
-#[derive(Debug, Clone)]
-pub struct Store {
-    /// The body, by index into the slice handed to [`judge`].
-    pub body: usize,
-    /// The place, as the core spells it.
-    pub place: String,
-    /// The name of the declaration whose producer must have run.
-    pub ty: String,
-    /// A callee's name, a place or a name as the core spells it, or `@lit`,
-    /// `@prim` or `@make`.
-    pub producer: String,
-    pub line: usize,
-    pub how: How,
-}
-
-/// The judgment's answer.
-#[derive(Debug, Default)]
-pub struct Judged {
-    /// Every store into a validated place, in body order.
-    pub stores: Vec<Store>,
-    /// Stores into a sized integer whose producer has no type the caller
-    /// resolves, such as a read of a generic parameter's place. Counted, not
-    /// guessed; zero over the corpus.
-    pub unjudged: usize,
-}
-
-impl Judged {
-    pub fn findings(&self) -> impl Iterator<Item = &Store> {
-        self.stores.iter().filter(|s| s.how.is_finding())
-    }
-}
-
-/// Judges every store in `bodies`, each a frame of the core.
-///
-/// `validated` maps a destination type to the name of the declaration whose
-/// producer must have run for it (a named type with a `where`, or a sized
-/// integer), or `None` where no rule applies. `step` says what a place holds.
-/// Both answer from the program's declarations, which the judgment does not
-/// hold.
-pub fn judge(
-    bodies: &[&Body],
-    validated: &mut dyn FnMut(&Type) -> Option<String>,
-    step: &mut dyn FnMut(Option<&Type>, Step) -> Option<Type>,
-) -> Judged {
-    let mut out = Judged::default();
-    for (i, b) in bodies.iter().enumerate() {
-        let mut w = Walk {
-            body: b,
-            index: i,
-            born: HashMap::new(),
-            validated,
-            step,
-            out: &mut out,
-        };
-        rows(&b.stmts).for_each(|(s, _)| w.stmt(s));
-    }
-    out
-}
-
-struct Walk<'a, 'b> {
-    body: &'a Body,
-    index: usize,
-    /// What bound each name: the use-def edge.
-    born: HashMap<Name, &'a Rhs>,
-    validated: &'b mut dyn FnMut(&Type) -> Option<String>,
-    step: &'b mut dyn FnMut(Option<&Type>, Step) -> Option<Type>,
-    out: &'b mut Judged,
-}
-
-impl<'a> Walk<'a, '_> {
-    fn stmt(&mut self, s: &'a St) {
-        match s {
-            St::Let(n, rhs) => {
-                self.born.insert(*n, rhs);
-                let info = &self.body.names[n.index()];
-                let ty = info.ty.clone();
-                self.judge_store(ty.clone(), info.source.clone(), info.line, rhs, Some(ty));
-            }
-            St::Store {
-                place, value, line, ..
-            } => {
-                if let Some(ty) = self.place_ty(place) {
-                    // The producer is the `let` that bound the name in this
-                    // frame, or the name itself when a parameter, capture or
-                    // arm binder bound it.
-                    let outside;
-                    let rhs: &Rhs = match value {
-                        Val::Name(n) => match self.born.get(n).copied() {
-                            Some(r) => r,
-                            None => {
-                                outside = Rhs::Val(Val::Name(*n));
-                                &outside
-                            }
-                        },
-                        Val::Lit(_) => {
-                            outside = Rhs::Val(value.clone());
-                            &outside
-                        }
-                    };
-                    let place = self.spell(place);
-                    let named = match value {
-                        Val::Name(n) => Some(self.body.names[n.index()].ty.clone()),
-                        Val::Lit(_) => None,
-                    };
-                    self.judge_store(ty, place, *line, rhs, named);
-                }
-            }
-            St::If { .. }
-            | St::Loop { .. }
-            | St::Block { .. }
-            | St::Switch { .. }
-            | St::Do { .. }
-            | St::Drop(..)
-            | St::Row { .. }
-            | St::Break { .. }
-            | St::Continue { .. }
-            | St::Return { .. }
-            | St::Trap
-            | St::Check(_) => {}
-        }
-    }
-
-    /// `to` is the place's type, `rhs` what the store was given, and `named`
-    /// the type of the name `rhs` was bound to.
-    ///
-    /// A read converts nothing, so where the declarations cannot resolve the
-    /// place it reads, `named` answers. A place of a validated type holds only
-    /// what this judgment let in, so a read of it is a producer of that type.
-    fn judge_store(
-        &mut self,
-        to: Type,
-        place: String,
-        line: usize,
-        rhs: &Rhs,
-        named: Option<Type>,
-    ) {
-        let from = match rhs {
-            Rhs::Read(_) | Rhs::Take(_) => self.rhs_ty(rhs).or(named),
-            _ => self.rhs_ty(rhs),
-        };
-        let ctor = matches!(rhs, Rhs::Call { callee, .. } if last(callee) == spelling(&to));
-        // A narrowing is a producer of another width, so a guess would read
-        // every untyped integer store as one.
-        if from.is_none()
-            && matches!(to, Type::IntN { .. })
-            && !ctor
-            && !matches!(rhs, Rhs::Val(Val::Lit(_)))
-        {
-            self.out.unjudged += 1;
-            return;
-        }
-        let Some(name) = (self.validated)(&to) else {
-            return;
-        };
-        let how = match rhs {
-            Rhs::Call {
-                kind: Callee::Proven,
-                ..
-            } => How::Literal,
-            _ if ctor => How::Constructor,
-            Rhs::Val(Val::Lit(_)) => How::Literal,
-            // Only into a sized integer: a named type's predicate owes a
-            // producer whatever the operands are.
-            Rhs::Prim(_, vs, _)
-                if matches!(to, Type::IntN { .. })
-                    && !vs.is_empty()
-                    && vs.iter().all(|v| matches!(v, Val::Lit(_))) =>
-            {
-                How::Constant
-            }
-            // A producer already of the type, or of the same integer width and
-            // signedness (`Int` and `Int64`), crosses nothing
-            // (`validate::required`, `validate::narrows`).
-            _ if from
-                .as_ref()
-                .is_some_and(|f| *f == to || same_width(f, &to)) =>
-            {
-                How::ByName
-            }
-            Rhs::Make(..) => How::Constructor,
-            Rhs::Call { .. } => How::Finding("other-call"),
-            Rhs::Prim(..) => How::Finding("primitive"),
-            Rhs::Read(_) | Rhs::Take(_) => How::Finding("read-of-place"),
-            Rhs::Val(Val::Name(_)) => How::Finding("other-name"),
-        };
-        self.out.stores.push(Store {
-            body: self.index,
-            place,
-            ty: name,
-            producer: match rhs {
-                Rhs::Call {
-                    kind: Callee::Proven,
-                    args,
-                    ..
-                } if matches!(args.as_slice(), [(Arg::Val(Val::Lit(_)), _)]) => "@lit".into(),
-                Rhs::Call { callee, .. } => callee.clone(),
-                Rhs::Prim(..) => "@prim".into(),
-                Rhs::Make(..) => "@make".into(),
-                Rhs::Read(p) | Rhs::Take(p) => self.spell(p),
-                Rhs::Val(Val::Name(n)) => self.body.names[n.index()].source.clone(),
-                Rhs::Val(Val::Lit(_)) => "@lit".into(),
-            },
-            line,
-            how,
-        });
-    }
-
-    /// The type a right-hand side produces, where the core or the
-    /// declarations name one. A literal and a record literal have none.
-    fn rhs_ty(&mut self, rhs: &Rhs) -> Option<Type> {
-        match rhs {
-            Rhs::Val(Val::Name(n)) => Some(self.body.names[n.index()].ty.clone()),
-            Rhs::Read(p) | Rhs::Take(p) => self.place_ty(p),
-            Rhs::Call { ret, .. } => ret.clone(),
-            Rhs::Prim(_, _, ty) => ty.clone(),
-            Rhs::Make(..) | Rhs::Val(Val::Lit(_)) => None,
-        }
-    }
-
-    fn place_ty(&mut self, p: &Place) -> Option<Type> {
-        match p {
-            Place::Name(n) => Some(self.body.names[n.index()].ty.clone()),
-            Place::Global(g) => (self.step)(None, Step::Global(g)),
-            Place::Field(base, f) => {
-                let b = self.place_ty(base);
-                (self.step)(b.as_ref(), Step::Field(f))
-            }
-            Place::Elem(base, _) => {
-                let b = self.place_ty(base);
-                (self.step)(b.as_ref(), Step::Elem)
-            }
-            Place::Key(base, _) => {
-                let b = self.place_ty(base);
-                (self.step)(b.as_ref(), Step::Key)
-            }
-        }
-    }
-
-    fn spell(&self, p: &Place) -> String {
-        match p {
-            Place::Name(n) => self.body.names[n.index()].source.clone(),
-            Place::Global(g) => g.clone(),
-            Place::Field(b, f) => format!("{}.{f}", self.spell(b)),
-            Place::Elem(b, _) => format!("{}[]", self.spell(b)),
-            Place::Key(b, _) => format!("{}{{}}", self.spell(b)),
-        }
-    }
-}
-
-fn same_width(from: &Type, to: &Type) -> bool {
-    vyrn_frontend::validate::width(from).is_some()
-        && vyrn_frontend::validate::width(to).is_some()
-        && !vyrn_frontend::validate::narrows(from, to)
-}
-
-/// The name of a type's own producer: a named type's name, else its spelling,
-/// which names its conversion (`UInt8`).
-fn spelling(t: &Type) -> String {
-    match t {
-        Type::Named(n) => n.clone(),
-        other => other.to_string(),
-    }
-}
-
-/// The last segment of a callee's spelling: `mod.Age` and `Age` name one
-/// declaration.
-fn last(callee: &str) -> &str {
-    callee
-        .rsplit(['.', ':', '/'])
-        .next()
-        .unwrap_or(callee)
-        .trim_start_matches('@')
-}
+use vyrn_frontend::rule;
+use vyrn_frontend::rules::Rule;
 
 /// The facts [`stores`] reads about the program's declarations.
 pub struct StoreRules<'a> {
@@ -417,15 +86,14 @@ pub fn stores(
             if site.is_some_and(|k| !seen.insert(k)) {
                 return;
             }
-            let rule = match (ruled.is_some(), step, removal) {
-                (true, ..) => STORE_RULED,
-                (_, None, Some(_)) => REMOVE_NOT_MUT,
-                (_, None, None) => ASSIGN_NOT_MUT,
-                (_, Some(Place::Field(..)), _) if !elem => FIELD_NOT_MUT,
-                (_, Some(_), _) => STORE_NOT_MUT,
+            let rule = match (ruled, step, removal) {
+                (Some(n), ..) => rule!(StoreRuled, n, name),
+                (_, None, Some(op)) => rule!(RemoveNotMut, op = &op[1..], name),
+                (_, None, None) => rule!(AssignNotMut, name),
+                (_, Some(Place::Field(..)), _) if !elem => rule!(FieldNotMut, name),
+                (_, Some(_), _) => rule!(StoreNotMut, name),
             };
-            let (n, op) = (ruled.unwrap_or_default(), removal.map_or("", |op| &op[1..]));
-            out.push((line, say(rule, &[("n", &n), ("name", name), ("op", op)])));
+            out.push((line, rule.render()));
         };
         rows(&f.stmts).for_each(|(s, _)| row_stores(s, &f.names, &mut judge));
     }
@@ -585,7 +253,7 @@ impl Groups<'_, '_> {
                     };
                     for o in &open {
                         let name = self.src(o.name);
-                        self.say(*line, GROUP_EXIT, &[("what", what), ("name", &name)]);
+                        self.refuse(*line, rule!(GroupExit, what, name));
                     }
                     open.clear();
                 }
@@ -596,7 +264,7 @@ impl Groups<'_, '_> {
                         .collect();
                     for n in callers {
                         let name = self.src(n);
-                        self.say(*line, GROUP_EXIT, &[("what", what), ("name", &name)]);
+                        self.refuse(*line, rule!(GroupExit, what, name));
                     }
                     open.clear();
                 }
@@ -606,15 +274,8 @@ impl Groups<'_, '_> {
                     let fails = self.refuted.iter().find(|(at, ..)| *at == c.site);
                     let group = open.iter().find(|o| o.name == r);
                     if let (Some((_, long, short)), Some(o)) = (fails, group) {
-                        let name = self.src(r);
-                        let args = [
-                            ("long", long.as_str()),
-                            ("short", short.as_str()),
-                            ("name", &name),
-                            ("n", &o.ty),
-                            ("k", &c.site.line.to_string()),
-                        ];
-                        self.say(o.line, GROUP_FALSE, &args);
+                        let (name, k, n) = (self.src(r), c.site.line, &o.ty);
+                        self.refuse(o.line, rule!(GroupFalse, name, k, long, short, n));
                     }
                 }
                 _ => {
@@ -652,10 +313,10 @@ impl Groups<'_, '_> {
         for o in open {
             let name = self.src(o.name);
             if reads_whole(s, o.name) {
-                self.say(line, GROUP_READ, &[("name", &name)]);
+                self.refuse(line, rule!(GroupRead, name));
             }
             if let Some(f) = self.called(s).filter(|_| self.callers(o.name)) {
-                self.say(line, GROUP_CALL, &[("f", &f), ("name", &name)]);
+                self.refuse(line, rule!(GroupCall, f, name));
             }
         }
     }
@@ -702,8 +363,8 @@ impl Groups<'_, '_> {
     /// Refuses each group in `open`: its store has no check on its path.
     fn unchecked(&mut self, open: &[Open]) {
         for o in open {
-            let name = self.src(o.name);
-            self.say(o.line, STORE_RULED, &[("n", &o.ty), ("name", &name)]);
+            let (n, name) = (&o.ty, self.src(o.name));
+            self.refuse(o.line, rule!(StoreRuled, n, name));
         }
     }
 
@@ -711,8 +372,8 @@ impl Groups<'_, '_> {
         self.f.names[n.index()].source.clone()
     }
 
-    fn say(&mut self, line: usize, rule: &str, args: &[(&str, &str)]) {
-        let u = (line, say(rule, args));
+    fn refuse(&mut self, line: usize, rule: Rule) {
+        let u = (line, rule.render());
         if !self.out.contains(&u) {
             self.out.push(u);
         }
@@ -779,7 +440,7 @@ pub fn loops(body: &Body, seen: &mut std::collections::HashSet<NodeId>) -> Vec<(
                 _ => continue,
             };
             if seen.insert(*site) {
-                out.push((*line, say(OUTSIDE_LOOP, &[("what", what)])));
+                out.push((*line, rule!(OutsideLoop, what).render()));
             }
         }
     }
@@ -818,11 +479,13 @@ pub fn drops(
     let mut out = Vec::new();
     for f in body.frames() {
         for (name, line) in &f.unbound_drops {
-            let rule = match program.globals.iter().any(|g| &g.name == name) {
-                true => DROP_MODULE_STATE,
-                false => DROP_UNBOUND,
+            let global = program.globals.iter().any(|g| &g.name == name);
+            let name = f.spelled(name);
+            let rule = match global {
+                true => rule!(DropModuleState, name),
+                false => rule!(DropUnbound, name),
             };
-            out.push((*line, say(rule, &[("name", f.spelled(name))])));
+            out.push((*line, rule.render()));
         }
         let written = rows(&f.stmts).filter_map(|(s, _)| match s {
             St::Drop(n, _, line, _) if *line > 0 => Some((*n, *line)),
@@ -846,12 +509,13 @@ pub fn drops(
             if owned || heap || t == Type::Err {
                 continue;
             }
-            let rule = match t {
-                Type::Param(_) => DROP_TYPE_PARAM,
-                _ => DROP_NOT_HEAP,
-            };
+            let (name, param) = (&info.source, matches!(t, Type::Param(_)));
             let t = body.speech().ty(&t).to_string();
-            out.push((line, say(rule, &[("name", &info.source), ("t", &t)])));
+            let rule = match param {
+                true => rule!(DropTypeParam, name, t),
+                false => rule!(DropNotHeap, name, t),
+            };
+            out.push((line, rule.render()));
         }
     }
     out

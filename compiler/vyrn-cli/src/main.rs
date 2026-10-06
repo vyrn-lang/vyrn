@@ -1,4 +1,4 @@
-//! `vyrn`, the Vyrn driver. `USAGE` lists the commands.
+//! `vyrn`, the Vyrn driver. `COMMANDS` lists the commands.
 //!
 //! `--deny-warnings` (or `VYRN_DENY_WARNINGS=1`) turns any load warning into a
 //! failure. Without it, warnings go to stderr and change no exit code and no
@@ -19,16 +19,6 @@ mod remote;
 // through it too.
 use vyrn_cli::wasmrun;
 
-const USAGE: &str = "usage: vyrn <run|check|fix|emit-wat|emit-lowered|emit-gen|build|test|bench|serve|fmt> [file.vyrn] [-o out] [--target wasm] [--native-target v1|v2|v3|v4|native] [--offline] [--deny-warnings]\n       vyrn build [file.vyrn] [-o out]   (the same wasm `--target wasm` writes, through wasm2c and clang to a native executable; needs wabt and simde under tools/, or $VYRN_WASM2C and $VYRN_SIMDE)\n       vyrn run [file.vyrn] [args...]   (trailing args reach the program's args())\n       vyrn run --profile [file.vyrn] [args...]   (where the run spent its time, to stderr; the flag counts only BEFORE the file, so a program can have one of its own. Rows are the phases of the compile and the run, with the operations the guest executed)\n       vyrn check --profile [file.vyrn]   (the same, for generation alone: `check` runs every `gen fn` and stops. Needs a cold generator cache to mean anything)\n       vyrn test [file.vyrn] [--name <substring>]\n       vyrn bench [file.vyrn] [--name <substring>] [--check | --json | --compare <baseline.json> [--threshold <factor>]]   (native timing; --check runs each once, compiled; --json machine-readable; --compare flags regressions)\n       vyrn serve [file.vyrn] [--port N] [--workers N]   (HTTP host; needs `fn handle(req: Request) -> Response`)\n       vyrn dev [--port N] [--workers N]   (fullstack: build client to wasm + serve server root, static, runtimes)\n       vyrn fmt [file.vyrn ...] [--check]   (canonical formatter; no files = project main + local imports)\n       vyrn fmt --from-json <file.json> [--as <Type>] [--from <module>]   (print the JSON file as VON)\n       vyrn doc [file|dir] [-o <dir>] [--std] [--verify]   (Markdown API docs; default docs/api/; --verify is the drift gate)\n       vyrn fix [file.vyrn]   (apply the `.copy()` a move diagnostic names, in the file given; every other fix on the menu is a decision and is refused)
-       vyrn why <file>   (a module's audience, the path segment that decided it, and every import chain that reaches it)\n       vyrn why --contract <file>   (which module contract governs a file, and every export's status against it)\n       vyrn why --memory <file>   (per binding: whether it is reclaimed, how, and the reason when it is not)\n       vyrn why --capability <fs|stdin|args|extern> <entry-or-artifact-name>   (every import chain that pulls that capability into the artifact's closure)\n       vyrn routes [file.vyrn] [--json]   (the resolved wire table: every derived, pinned, hand-written and page path the router mounts, with its source; --json attaches each route's declaration from the symbol map)\n       vyrn emit-gen [file.vyrn] [--maps]   (--maps prints each generated module's symbol map as JSON, one per line)\n\
-       vyrn new <name> | vyrn add <specifier> [--name alias] | vyrn update [--locked] [alias] | vyrn vendor [--check] | vyrn deps [artifact]   (deps: every declared artifact's module graph, then the toolchain)\n       vyrn --version   (also -V)";
-
-/// `--offline` or `VYRN_OFFLINE=1`: never touch the network; a lock or cache
-/// miss is an error.
-fn offline(args: &[String]) -> bool {
-    args.iter().any(|a| a == "--offline") || std::env::var("VYRN_OFFLINE").is_ok()
-}
-
 /// Whether `--version` / `-V` names this program: only among the leading
 /// options. After the subcommand or file it belongs to the program being run.
 fn wants_version(args: &[String]) -> bool {
@@ -38,16 +28,86 @@ fn wants_version(args: &[String]) -> bool {
         .any(|a| a == "--version" || a == "-V")
 }
 
-/// Whether the environment forbids the network. `real_main` normalizes
-/// `--offline` into `VYRN_OFFLINE`, so the variable is the whole answer.
-fn env_offline() -> bool {
-    std::env::var("VYRN_OFFLINE").is_ok()
+/// The flags every command shares, each also set by an environment variable.
+/// `real_main` takes them off the command line once; nothing else reads them
+/// from the command line or the environment.
+#[derive(Clone, Copy, Default)]
+struct GlobalFlags {
+    /// `--offline` or `VYRN_OFFLINE`: never touch the network; a lock or cache
+    /// miss is an error.
+    offline: bool,
+    /// `--deny-warnings` or `VYRN_DENY_WARNINGS`: a load that produced warnings
+    /// fails.
+    deny_warnings: bool,
+    /// `--native-target` or `VYRN_NATIVE_TARGET`; `None` defers to the
+    /// manifest's `nativeTarget`.
+    native_target: Option<NativeTarget>,
+    /// `--profile` before the file.
+    profile: bool,
 }
 
-/// `--deny-warnings` or `VYRN_DENY_WARNINGS=1`: a load that produced warnings
-/// fails. `real_main` normalizes the flag into the environment.
-fn deny_warnings() -> bool {
-    std::env::var("VYRN_DENY_WARNINGS").is_ok()
+impl GlobalFlags {
+    /// Takes the global flags out of `args`, `args[1]` being the command.
+    /// `--profile` counts only before the file, as `--version` does:
+    /// `vyrn run app.vyrn --profile` is a flag for `app.vyrn`.
+    ///
+    /// # Errors
+    ///
+    /// A missing or unknown native target: printed, exit 2. It is validated
+    /// here so a typo is one clear error, not a clang error.
+    fn take(args: &mut Vec<String>) -> Result<GlobalFlags, ExitCode> {
+        let mut take = |flag: &str| {
+            let had = args.iter().any(|a| a == flag);
+            args.retain(|a| a != flag);
+            had
+        };
+        let mut flags = GlobalFlags {
+            offline: take("--offline") || std::env::var("VYRN_OFFLINE").is_ok(),
+            deny_warnings: take("--deny-warnings") || std::env::var("VYRN_DENY_WARNINGS").is_ok(),
+            ..GlobalFlags::default()
+        };
+        let named = match args.iter().position(|a| a == "--native-target") {
+            Some(i) => {
+                let Some(v) = args.get(i + 1).cloned() else {
+                    eprintln!(
+                        "error: --native-target needs a value (one of: {})",
+                        NativeTarget::names()
+                    );
+                    return Err(ExitCode::from(2));
+                };
+                args.drain(i..=i + 1);
+                Some(("--native-target", v))
+            }
+            None => std::env::var("VYRN_NATIVE_TARGET")
+                .ok()
+                .map(|v| ("VYRN_NATIVE_TARGET", v)),
+        };
+        if let Some((from, v)) = named {
+            let Some(t) = NativeTarget::parse(&v) else {
+                eprintln!(
+                    "error: unknown {from} `{v}` (expected one of: {})",
+                    NativeTarget::names()
+                );
+                return Err(ExitCode::from(2));
+            };
+            flags.native_target = Some(t);
+        }
+        let head = args
+            .iter()
+            .skip(2)
+            .position(|a| !a.starts_with('-'))
+            .map_or(args.len(), |i| i + 2)
+            .max(2.min(args.len()));
+        let at = args
+            .get(2.min(args.len())..head)
+            .and_then(|h| h.iter().position(|a| a == "--profile"));
+        // Removed once, so a program's own `--profile` further along survives.
+        if let Some(i) = at {
+            args.remove(i + 2);
+            flags.profile = true;
+        }
+        Ok(flags)
+    }
 }
 
 /// The microarchitecture a native build is compiled for.
@@ -70,20 +130,24 @@ enum NativeTarget {
     Native,
 }
 
-/// The values `--native-target` and `vyrn.json`'s `nativeTarget` accept, for
-/// diagnostics. Keep in step with `NativeTarget::parse`.
-const NATIVE_TARGETS: &str = "v1, v2, v3, v4, native";
-
 impl NativeTarget {
+    /// Each target and its spelling in `--native-target` and `vyrn.json`'s
+    /// `nativeTarget`.
+    const ALL: [(NativeTarget, &'static str); 5] = [
+        (NativeTarget::V1, "v1"),
+        (NativeTarget::V2, "v2"),
+        (NativeTarget::V3, "v3"),
+        (NativeTarget::V4, "v4"),
+        (NativeTarget::Native, "native"),
+    ];
+
     fn parse(s: &str) -> Option<NativeTarget> {
-        Some(match s {
-            "v1" => NativeTarget::V1,
-            "v2" => NativeTarget::V2,
-            "v3" => NativeTarget::V3,
-            "v4" => NativeTarget::V4,
-            "native" => NativeTarget::Native,
-            _ => return None,
-        })
+        Self::ALL.iter().find(|t| t.1 == s).map(|t| t.0)
+    }
+
+    /// Every spelling, for a diagnostic.
+    fn names() -> String {
+        Self::ALL.map(|t| t.1).join(", ")
     }
 
     /// The `-march=` value, or `None` off x86-64.
@@ -109,37 +173,6 @@ impl NativeTarget {
 /// v2, not v1: without SSE4.1, `F32x4.trunc` scalarizes to four `truncf`
 /// calls (0.43x of C); SSE4.1's `roundps` makes the loop 2.1x faster.
 const DEFAULT_NATIVE_TARGET: NativeTarget = NativeTarget::V2;
-
-/// Resolves the native target for a build rooted at `root`: `--native-target`
-/// (via `VYRN_NATIVE_TARGET`), then the `nativeTarget` of the manifest that
-/// governs `root`'s directory, then the default.
-fn native_target_for(root: &str) -> Result<NativeTarget, String> {
-    if let Ok(v) = std::env::var("VYRN_NATIVE_TARGET") {
-        // A bad value here was set in the environment directly.
-        return NativeTarget::parse(&v).ok_or_else(|| {
-            format!("unknown VYRN_NATIVE_TARGET `{v}` (expected one of: {NATIVE_TARGETS})")
-        });
-    }
-    let start = Path::new(root)
-        .parent()
-        .map(|p| p.to_path_buf())
-        .filter(|p| !p.as_os_str().is_empty())
-        .or_else(|| std::env::current_dir().ok());
-    let Some(m) = start.and_then(|d| nearest_manifest(&d)) else {
-        return Ok(DEFAULT_NATIVE_TARGET);
-    };
-    let Some(v) = m.native_target else {
-        return Ok(DEFAULT_NATIVE_TARGET);
-    };
-    // A misspelled target must not fall back to the default: the binary would
-    // be built for something other than what the user wrote.
-    NativeTarget::parse(&v).ok_or_else(|| {
-        format!(
-            "unknown `nativeTarget` `{v}` in {}/vyrn.json (expected one of: {NATIVE_TARGETS})",
-            m.dir
-        )
-    })
-}
 
 /// Every flag a native clang invocation needs. `bench_native` and `build` both
 /// call it, so the benchmark measures the binary `build` ships.
@@ -194,228 +227,369 @@ fn main() -> ExitCode {
         .unwrap_or(ExitCode::FAILURE)
 }
 
+/// A command's result. `Err` is a failure the command has already printed, so
+/// `?` passes it up unchanged.
+type Outcome = Result<ExitCode, ExitCode>;
+
 fn real_main() -> ExitCode {
     let mut args: Vec<String> = std::env::args().collect();
-    let is_offline = offline(&args);
-    if is_offline {
-        // Normalized so every later resolver construction sees it.
-        std::env::set_var("VYRN_OFFLINE", "1");
+    match dispatch(&mut args) {
+        Ok(code) | Err(code) => code,
     }
-    args.retain(|a| a != "--offline");
-    if args.iter().any(|a| a == "--deny-warnings") {
-        std::env::set_var("VYRN_DENY_WARNINGS", "1");
-    }
-    args.retain(|a| a != "--deny-warnings");
-    // Validated here so a typo is one clear error, not a clang error.
-    if let Some(i) = args.iter().position(|a| a == "--native-target") {
-        let Some(v) = args.get(i + 1).cloned() else {
-            eprintln!("error: --native-target needs a value (one of: {NATIVE_TARGETS})");
-            return ExitCode::from(2);
-        };
-        if NativeTarget::parse(&v).is_none() {
-            eprintln!("error: unknown --native-target `{v}` (expected one of: {NATIVE_TARGETS})");
-            return ExitCode::from(2);
-        }
-        std::env::set_var("VYRN_NATIVE_TARGET", &v);
-        args.drain(i..=i + 1);
-    }
-    // Drained so the "no extra arguments" check below holds, but never from
-    // `run`: its tail is the program's own `args()`.
-    let want_maps = args.iter().any(|a| a == "--maps");
-    if args.get(1).map(|a| a.as_str()) != Some("run") {
-        args.retain(|a| a != "--maps");
-    }
-    // `--profile` counts only before the file, as `--version` does:
-    // `vyrn run app.vyrn --profile` is a flag for `app.vyrn`.
-    let head = args
-        .iter()
-        .skip(2)
-        .position(|a| !a.starts_with('-'))
-        .map_or(args.len(), |i| i + 2)
-        .max(2.min(args.len()));
-    let at = args
-        .get(2.min(args.len())..head)
-        .and_then(|h| h.iter().position(|a| a == "--profile"));
-    let want_profile = at.is_some();
-    // Removed once, so a program's own `--profile` further along survives.
-    if let Some(i) = at {
-        args.remove(i + 2);
-    }
+}
+
+fn dispatch(args: &mut Vec<String>) -> Outcome {
+    let flags = GlobalFlags::take(args)?;
     // Off `run`, `--profile` reports the build phases, and `main` prints the
     // table. `run_wasm` prints its own, with the guest's operation count.
-    if want_profile && args.get(1).map(String::as_str) != Some("run") {
-        std::env::set_var("VYRN_BUILD_PROFILE", "1");
+    if flags.profile && args.get(1).map(String::as_str) != Some("run") {
+        vyrn_frontend::prof::arm();
     }
     // Before the usage screen, which exits 2: a package manager reads that as
     // a broken install. The release workflow checks the tag against this line.
-    if wants_version(&args) {
+    if wants_version(args) {
         println!("vyrn {}", env!("CARGO_PKG_VERSION"));
-        return ExitCode::SUCCESS;
+        return Ok(ExitCode::SUCCESS);
     }
-    if args.len() < 2 {
-        eprintln!("{USAGE}");
-        return ExitCode::from(2);
-    }
-    let cmd = args[1].as_str();
+    let Some(name) = args.get(1) else {
+        eprintln!("{}", usage());
+        return Err(ExitCode::from(2));
+    };
+    let Some(cmd) = COMMANDS.iter().find(|c| c.name == name) else {
+        let names: Vec<&str> = COMMANDS.iter().map(|c| c.name).collect();
+        eprintln!(
+            "unknown command `{name}` (expected one of: {})",
+            names.join(", ")
+        );
+        return Err(ExitCode::from(2));
+    };
+    (cmd.run)(&Call::parse(cmd, flags, &args[2..])?)
+}
 
-    if cmd == "new" {
-        let Some(name) = args.get(2) else {
-            eprintln!("usage: vyrn new <name>");
-            return ExitCode::from(2);
+/// One `vyrn` command. The usage screen, the unknown-command sentence, the
+/// argument parser and `docs/tooling.md`'s drift test read this row, so a
+/// command or a flag is stated once.
+struct Cmd {
+    name: &'static str,
+    pos: Pos,
+    flags: &'static [Flag],
+    /// The usage screen's gloss of the command.
+    about: &'static str,
+    run: fn(&Call) -> Outcome,
+}
+
+/// The positional arguments a command takes.
+enum Pos {
+    None,
+    /// `[file.vyrn]`, else the manifest's `main`: [`Call::root`].
+    File,
+    /// `[file.vyrn]`, then the program's own arguments, verbatim. The file is
+    /// the first argument or none, so a flag after it is the program's.
+    Program,
+    /// Exactly one, named for the usage screen.
+    One(&'static str),
+    /// At most one.
+    Maybe(&'static str),
+    /// Any number.
+    Many(&'static str),
+}
+
+/// A flag: its spelling, the placeholder of its value (`None` for a switch)
+/// and the usage screen's gloss (`""` when the command's gloss covers it).
+struct Flag(&'static str, Option<&'static str>, &'static str);
+
+/// The flags [`GlobalFlags::take`] reads, before or after the command.
+const GLOBAL_FLAGS: &[Flag] = &[
+    Flag("--offline", None, "never touch the network; a lock or cache miss is an error (also VYRN_OFFLINE=1)"),
+    Flag("--deny-warnings", None, "a load warning fails the command (also VYRN_DENY_WARNINGS=1)"),
+    Flag("--native-target", Some("target"), "the native build's microarchitecture, over vyrn.json's `nativeTarget` (also VYRN_NATIVE_TARGET)"),
+    Flag("--profile", None, "where the time went, to stderr; it counts only before the file, so a program can take its own"),
+];
+
+const PORT: Flag = Flag("--port", Some("N"), "default 8080; 0 lets the OS pick");
+const WORKERS: Flag = Flag(
+    "--workers",
+    Some("N"),
+    "N instances; refused if `handle` reaches module state",
+);
+
+/// A [`Cmd`] row by position, so the table reads one command to a line.
+const fn cmd(
+    name: &'static str,
+    pos: Pos,
+    run: fn(&Call) -> Outcome,
+    about: &'static str,
+    flags: &'static [Flag],
+) -> Cmd {
+    Cmd {
+        name,
+        pos,
+        flags,
+        about,
+        run,
+    }
+}
+
+/// Every command, in the order of the usage screen and `docs/tooling.md`.
+#[rustfmt::skip]
+const COMMANDS: &[Cmd] = &[
+    cmd("run", Pos::Program, run_cmd, "compiles and runs; trailing args reach the program's args()", &[]),
+    cmd("check", Pos::File, check_cmd, "loads, checks and judges the program, runs every generator, and prints ok", &[]),
+    cmd("fix", Pos::File, fix_cmd, "applies the `.copy()` a move diagnostic names, in the file given; every other fix on the menu is a decision and is refused", &[]),
+    cmd("build", Pos::File, build, "a native executable: the module through wasm2c and clang (needs wabt and simde under tools/, or $VYRN_WASM2C and $VYRN_SIMDE)", &[
+        Flag("-o", Some("out"), ""),
+        Flag("--target", Some("wasm"), "writes the module itself, with no LLVM, clang or sysroot"),
+    ]),
+    cmd("test", Pos::File, test_cmd, "runs the root file's `test` blocks", &[Flag("--name", Some("substring"), "")]),
+    cmd("bench", Pos::File, bench_cmd, "times the root file's `bench` blocks natively", &[
+        Flag("--name", Some("substring"), ""),
+        Flag("--check", None, "runs each once, compiled, with no timing; excludes --json and --compare"),
+        Flag("--json", None, "the machine-readable report"),
+        Flag("--compare", Some("baseline.json"), "fails on a bench slower than the baseline's by the threshold"),
+        Flag("--threshold", Some("factor"), "the regression factor for --compare (default 1.5)"),
+        Flag("--ungate", Some("file"), "bench names, one per line, whose regressions --compare reports and does not fail"),
+    ]),
+    cmd("serve", Pos::File, serve_cmd, "an HTTP host for `fn handle(req: Request) -> Response`", &[PORT, WORKERS]),
+    cmd("dev", Pos::None, dev_cmd, "fullstack: builds vyrn.json's `client` to wasm, then serves its `server`, static files and the runtimes", &[PORT, WORKERS]),
+    cmd("fmt", Pos::Many("file.vyrn"), fmt_cmd, "the canonical formatter; no files = the project's main and its local imports", &[
+        Flag("--check", None, "writes nothing and lists the files that would change"),
+        Flag("--from-json", Some("file.json"), "prints the JSON file as VON instead, headed by `import type`"),
+        Flag("--as", Some("Type"), "the type --from-json names (default Config)"),
+        Flag("--from", Some("module"), "the module --from-json imports it from (default ./config.vyrn)"),
+    ]),
+    cmd("doc", Pos::Maybe("file|dir"), doc_cmd, "Markdown API docs", &[
+        Flag("-o", Some("dir"), "default docs/api/"),
+        Flag("--std", None, "documents the std modules too, or the whole std library alone"),
+        Flag("--verify", None, "writes nothing and fails on drift"),
+    ]),
+    cmd("why", Pos::One("file"), why_cmd, "a module's audience, the path segment that decided it, and every import chain that reaches it", &[
+        Flag("--contract", None, "which module contract governs the file, and every export's status against it"),
+        Flag("--memory", None, "per binding: whether it is reclaimed, how, and the reason when it is not"),
+        Flag("--capability", Some("capability"), "every import chain that pulls the capability into the artifact the file argument names"),
+    ]),
+    cmd("routes", Pos::File, routes_cmd, "the resolved wire table: every derived, pinned, hand-written and page path the router mounts, with its source", &[
+        Flag("--json", None, "attaches each route's declaration from the symbol map"),
+    ]),
+    cmd("emit-wat", Pos::File, emit_wat, "the module `build --target wasm` writes, as WAT", &[]),
+    cmd("emit-lowered", Pos::File, emit_lowered, "the named core the emitter reads, root module only", &[]),
+    cmd("emit-gen", Pos::File, emit_gen, "the source of every generated module, each under a banner naming its call site", &[
+        Flag("--maps", None, "each generated module's symbol map instead, one JSON document per line"),
+    ]),
+    cmd("new", Pos::One("name"), scaffold, "scaffolds vyrn.json, src/main.vyrn and .gitignore", &[]),
+    cmd("add", Pos::One("github:|gist:|https: specifier"), add, "fetches and pins a remote module and adds it to `dependencies`", &[
+        Flag("--name", Some("alias"), ""),
+    ]),
+    cmd("update", Pos::Maybe("alias|tool"), update, "re-resolves and re-pins the remote dependencies and toolchain tools", &[
+        Flag("--locked", None, "reads through the existing pins and never writes the lock"),
+    ]),
+    cmd("vendor", Pos::None, vendor, "copies every locked blob into vyrn_vendor/", &[
+        Flag("--check", None, "verifies each one is there and intact"),
+    ]),
+    cmd("deps", Pos::Maybe("artifact"), deps, "every declared artifact's module graph, then the toolchain", &[]),
+];
+
+impl Cmd {
+    /// `vyrn <name> <positionals> <flags>`, for the usage screen.
+    fn synopsis(&self) -> String {
+        let mut line = format!("vyrn {}", self.name);
+        match self.pos {
+            Pos::None => {}
+            Pos::File => line.push_str(" [file.vyrn]"),
+            Pos::Program => line.push_str(" [file.vyrn] [args...]"),
+            Pos::One(n) => line.push_str(&format!(" <{n}>")),
+            Pos::Maybe(n) => line.push_str(&format!(" [{n}]")),
+            Pos::Many(n) => line.push_str(&format!(" [{n} ...]")),
+        }
+        for f in self.flags {
+            line.push_str(&f.synopsis());
+        }
+        line
+    }
+}
+
+impl Flag {
+    /// ` [--name <value>]`.
+    fn synopsis(&self) -> String {
+        match self.1 {
+            Some(v) => format!(" [{} <{v}>]", self.0),
+            None => format!(" [{}]", self.0),
+        }
+    }
+}
+
+/// The usage screen: every command with its gloss and its flags' glosses, then
+/// the global flags.
+fn usage() -> String {
+    let mut out = String::from("usage: vyrn <command> [arguments] [global flags]\n");
+    for c in COMMANDS {
+        out.push_str(&format!("  {}\n      {}\n", c.synopsis(), c.about));
+        for f in c.flags.iter().filter(|f| !f.2.is_empty()) {
+            out.push_str(&format!("      {}: {}\n", f.0, f.2));
+        }
+    }
+    out.push_str("global flags:\n");
+    for f in GLOBAL_FLAGS {
+        out.push_str(&format!("  {}\n      {}\n", f.synopsis().trim(), f.2));
+    }
+    out.push_str("  vyrn --version (also -V)");
+    out
+}
+
+/// One command line, parsed against its [`Cmd`] row.
+struct Call {
+    cmd: &'static Cmd,
+    flags: GlobalFlags,
+    /// The file of a [`Pos::File`] or [`Pos::Program`] command, if named.
+    file: Option<String>,
+    /// The other positionals; a [`Pos::Program`]'s are the program's.
+    pos: Vec<String>,
+    /// Each flag given, with its value, in command-line order.
+    given: Vec<(&'static str, Option<String>)>,
+}
+
+impl Call {
+    /// Splits `rest` into the row's flags and positionals.
+    ///
+    /// # Errors
+    ///
+    /// An unknown flag, a flag with no value, or the wrong count of
+    /// positionals: printed with the command's usage line, exit 2.
+    fn parse(cmd: &'static Cmd, flags: GlobalFlags, rest: &[String]) -> Result<Call, ExitCode> {
+        let mut call = Call {
+            cmd,
+            flags,
+            file: None,
+            pos: Vec::new(),
+            given: Vec::new(),
         };
-        return scaffold(name);
-    }
-    if cmd == "deps" {
-        return deps(args.get(2).map(|s| s.as_str()));
-    }
-    if cmd == "why" {
-        return why_cmd(&args[2..]);
-    }
-    if cmd == "add" {
-        return add(&args[2..], is_offline);
-    }
-    if cmd == "update" {
-        let locked = args[2..].iter().any(|a| a == "--locked");
-        let alias = args[2..].iter().find(|a| !a.starts_with('-'));
-        return update(alias.map(|s| s.as_str()), locked);
-    }
-    if cmd == "vendor" {
-        return vendor(args.get(2).is_some_and(|a| a == "--check"));
-    }
-    if cmd == "fmt" {
-        return fmt_cmd(&args[2..]);
-    }
-    if cmd == "doc" {
-        return doc_cmd(&args[2..]);
-    }
-    if cmd == "dev" {
-        return dev_cmd(&args[2..]);
-    }
-    if cmd == "routes" {
-        let json = args[2..].iter().any(|a| a == "--json");
-        // The first positional anywhere: `vyrn routes --json app.vyrn`.
-        let file = args[2..]
-            .iter()
-            .find(|a| !a.starts_with('-'))
-            .map(|s| s.as_str());
-        return routes_cmd(file, json);
-    }
-
-    // The remaining commands take an optional file; without one, the manifest
-    // supplies `main`.
-    let (path, rest) = match args.get(2).filter(|a| !a.starts_with('-')) {
-        Some(p) => (p.clone(), &args[3..]),
-        None => match manifest_main() {
-            Some(p) => (p, &args[2..]),
-            None => {
-                eprintln!("error: no input file, and no vyrn.json with a `main` found");
-                eprintln!("{USAGE}");
-                return ExitCode::from(2);
+        let most = match cmd.pos {
+            Pos::Program => {
+                let named = rest.first().filter(|a| !a.starts_with('-'));
+                call.file = named.cloned();
+                call.pos = rest[named.map_or(0, |_| 1)..].to_vec();
+                return Ok(call);
             }
-        },
-    };
-
-    if cmd == "build" {
-        return build(&path, rest);
-    }
-    if cmd == "test" {
-        return test_cmd(&path, rest);
-    }
-    if cmd == "bench" {
-        return bench_cmd(&path, rest);
-    }
-    if cmd == "serve" {
-        return serve_cmd(&path, rest);
-    }
-    // `run` forwards trailing arguments to the program's `args()`.
-    if !rest.is_empty() && cmd != "run" {
-        eprintln!("{USAGE}");
-        return ExitCode::from(2);
-    }
-    let prog_args = rest.to_vec();
-    let path = path.as_str();
-
-    let source = match std::fs::read_to_string(path) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("error: cannot read {path}: {e}");
-            return ExitCode::from(2);
-        }
-    };
-
-    match cmd {
-        "fix" => fix_cmd(path, &source),
-        // `check` must predict the one thing `build` can fail to finish:
-        // unbounded monomorphization, visible only while emitting (audit A5.2).
-        "check" => {
-            vyrn_frontend::movecheck::emit_nothing();
-            match loaded(path, &source) {
-                Ok((program, world)) => {
-                    match vyrn_codegen::check_instantiations(&program, &world) {
-                        Ok(()) => {
-                            println!("ok");
-                            ExitCode::SUCCESS
-                        }
-                        Err(e) => {
-                            eprintln!("error: {e}");
-                            ExitCode::FAILURE
-                        }
-                    }
+            Pos::None => 0,
+            Pos::File | Pos::One(_) | Pos::Maybe(_) => 1,
+            Pos::Many(_) => usize::MAX,
+        };
+        let mut args = rest.iter();
+        while let Some(a) = args.next() {
+            match cmd.flags.iter().find(|f| f.0 == a) {
+                Some(Flag(name, None, _)) => call.given.push((name, None)),
+                Some(Flag(name, Some(what), _)) => match args.next() {
+                    Some(v) => call.given.push((name, Some(v.clone()))),
+                    None => return Err(call.refuse(&format!("{name} needs a value: <{what}>"))),
+                },
+                None if a.len() > 1 && a.starts_with('-') => {
+                    return Err(call.refuse(&format!("unexpected argument `{a}`")))
                 }
-                Err(code) => code,
+                None => call.pos.push(a.clone()),
             }
         }
-        "run" => {
-            // Generators run in the load; its time is the first row of the
-            // table `run_wasm` prints.
-            let clock = std::time::Instant::now();
-            let (program, world) = match loaded(path, &source) {
-                Ok(p) => p,
-                Err(code) => return code,
-            };
-            let load = clock.elapsed();
-            // What `check` refuses, `run` refuses, with `check`'s sentence: a
-            // polymorphic recursion has no finite set of instances.
-            if let Err(e) = vyrn_codegen::check_instantiations(&program, &world) {
-                eprintln!("error: {e}");
-                return ExitCode::FAILURE;
+        if let Some(extra) = call.pos.get(most) {
+            return Err(call.refuse(&format!("unexpected argument `{extra}`")));
+        }
+        match cmd.pos {
+            Pos::One(n) if call.pos.is_empty() => Err(call.refuse(&format!("missing <{n}>"))),
+            Pos::File => {
+                call.file = call.pos.pop();
+                Ok(call)
             }
-            let profile = want_profile.then_some(load);
-            run_wasm(path, &program, world, &prog_args, profile)
-        }
-        // The module `build --target wasm` writes and `build` hands wasm2c.
-        "emit-wat" => {
-            let (program, world) = match loaded(path, &source) {
-                Ok(p) => p,
-                Err(code) => return code,
-            };
-            match vyrn_codegen::direct::wat(&program, world) {
-                Ok(wat) => {
-                    print!("{wat}");
-                    ExitCode::SUCCESS
-                }
-                Err(e) => {
-                    eprintln!("error: {e}");
-                    ExitCode::FAILURE
-                }
-            }
-        }
-        // The form the emitter reads, for the root module only: a linked
-        // program's imports are another file's answer.
-        "emit-lowered" => {
-            let (program, world) = match loaded(path, &source) {
-                Ok(p) => p,
-                Err(code) => return code,
-            };
-            print!("{}", vyrn_lower::render(&program, &world, path));
-            ExitCode::SUCCESS
-        }
-        "emit-gen" => emit_gen(path, &source, want_maps),
-        other => {
-            eprintln!("unknown command `{other}` (expected run, check, fix, emit-wat, emit-lowered, emit-gen, build, test, bench, or serve)");
-            ExitCode::from(2)
+            _ => Ok(call),
         }
     }
+
+    /// Prints `error: <why>` and the command's usage line; returns exit 2.
+    fn refuse(&self, why: &str) -> ExitCode {
+        eprintln!("error: {why}");
+        eprintln!("usage: {}", self.cmd.synopsis());
+        ExitCode::from(2)
+    }
+
+    /// Whether the switch `flag` was given.
+    fn has(&self, flag: &str) -> bool {
+        self.value_of(flag).is_some()
+    }
+
+    /// The value of `flag`; the last one when it was given twice.
+    fn value(&self, flag: &str) -> Option<&str> {
+        self.value_of(flag)?.as_deref()
+    }
+
+    /// The value of `flag` parsed as `T`, or `None` when it was not given.
+    ///
+    /// # Errors
+    ///
+    /// A value that does not parse: `<flag> needs <what>`, exit 2.
+    fn parsed<T: std::str::FromStr>(&self, flag: &str, what: &str) -> Result<Option<T>, ExitCode> {
+        self.value(flag)
+            .map(|v| {
+                v.parse()
+                    .map_err(|_| self.refuse(&format!("{flag} needs {what}")))
+            })
+            .transpose()
+    }
+
+    /// `Some(value)` for a flag given; panics on a flag the row does not
+    /// declare, so a misspelling fails the first test that reaches it.
+    fn value_of(&self, flag: &str) -> Option<&Option<String>> {
+        assert!(
+            self.cmd.flags.iter().any(|f| f.0 == flag),
+            "`vyrn {}` declares no flag {flag}",
+            self.cmd.name
+        );
+        self.given.iter().rev().find(|g| g.0 == flag).map(|g| &g.1)
+    }
+
+    /// The only positional of a [`Pos::One`] or [`Pos::Maybe`] command.
+    fn arg(&self) -> Option<&str> {
+        self.pos.first().map(String::as_str)
+    }
+
+    /// The root file and its project: the file the command names, else the
+    /// manifest's `main`.
+    ///
+    /// # Errors
+    ///
+    /// Neither exists: printed with the usage line, exit 2. The project's own
+    /// errors as [`Project::of`].
+    fn root(&self) -> Result<(Project, String), ExitCode> {
+        let p = Project::of(self.file.as_deref(), self.flags)?;
+        match self.file.clone().or_else(|| p.main()) {
+            Some(path) => Ok((p, path)),
+            None => Err(self.refuse("no input file, and no vyrn.json with a `main` found")),
+        }
+    }
+}
+
+/// `vyrn check [file]`. It must predict the one thing `build` can fail to
+/// finish: unbounded monomorphization, visible only while emitting (audit
+/// A5.2).
+fn check_cmd(call: &Call) -> Outcome {
+    let (p, path) = call.root()?;
+    vyrn_frontend::movecheck::emit_nothing();
+    let (program, world) = p.checked(&path, &read_source(&path)?)?;
+    instantiable(&program, &world)?;
+    println!("ok");
+    Ok(ExitCode::SUCCESS)
+}
+
+/// What `check` refuses, `run` refuses, with `check`'s sentence: a polymorphic
+/// recursion has no finite set of instances.
+fn instantiable(
+    program: &vyrn_frontend::ast::Program,
+    world: &vyrn_lower::World,
+) -> Result<(), ExitCode> {
+    failed(vyrn_codegen::check_instantiations(program, world))
+}
+
+/// A pass's `Err` printed as `error: ..`, exit 1.
+fn failed<T, E: std::fmt::Display>(r: Result<T, E>) -> Result<T, ExitCode> {
+    r.map_err(|e| {
+        eprintln!("error: {e}");
+        ExitCode::FAILURE
+    })
 }
 
 /// `vyrn emit-gen [file] [--maps]`: prints the source of every generated module
@@ -423,110 +597,259 @@ fn real_main() -> ExitCode {
 ///
 /// `--maps` prints each module's symbol map instead, one JSON document
 /// per line with the banners on stderr, so `> api.map.json` writes the file.
-fn emit_gen(path: &str, source: &str, maps: bool) -> ExitCode {
-    let root_key = normalize_slashes(path);
-    let opts = load_options(&root_key);
-    let resolver = make_resolver(&root_key);
-    let result = loader::generated_modules(source, &root_key, &opts, &resolver, Some(&*engine()));
-    // Pins are saved even when the run fails. A pin the disk refused fails the
-    // command: a fetched remote must land in vyrn.lock.
-    if let Err(code) = save_lock(&resolver) {
-        return code;
-    }
-    match result {
-        Ok(mods) => {
-            if mods.is_empty() {
-                eprintln!("(no generator imports in {root_key})");
-            }
-            if maps {
-                let mut any = false;
-                for (banner, src) in mods {
-                    if let Some(json) = vyrn_frontend::symbolmap::json_of(&src) {
-                        eprintln!("// ==== {banner} ====");
-                        println!("{json}");
-                        any = true;
-                    }
-                }
-                if !any {
-                    eprintln!("(no generated module in {root_key} carries a symbol map)");
-                }
-                return ExitCode::SUCCESS;
-            }
-            for (banner, src) in mods {
-                println!("// ==== {banner} ====");
-                print!("{src}");
-                if !src.ends_with('\n') {
-                    println!();
-                }
-                println!();
-            }
-            ExitCode::SUCCESS
-        }
-        Err(diags) => {
-            print_diagnostics(&diags, &root_key, "");
-            ExitCode::FAILURE
-        }
-    }
+/// `vyrn emit-wat [file]`: the module `build --target wasm` writes and
+/// `build` hands wasm2c.
+fn emit_wat(call: &Call) -> Outcome {
+    let (p, path) = call.root()?;
+    let (program, world) = p.checked(&path, &read_source(&path)?)?;
+    print!("{}", failed(vyrn_codegen::direct::wat(&program, world))?);
+    Ok(ExitCode::SUCCESS)
 }
 
-use vyrn_frontend::loader::{self, DiskResolver};
+/// `vyrn emit-lowered [file]`: the form the emitter reads, for the root module
+/// only. A linked program's imports are another file's answer.
+fn emit_lowered(call: &Call) -> Outcome {
+    let (p, path) = call.root()?;
+    let (program, world) = p.checked(&path, &read_source(&path)?)?;
+    print!("{}", vyrn_lower::render(&program, &world, &path));
+    Ok(ExitCode::SUCCESS)
+}
+
+fn emit_gen(call: &Call) -> Outcome {
+    let (p, path) = call.root()?;
+    let root_key = dos_to_slash(&path);
+    let graph = p.graph(&path, &read_source(&path)?)?;
+    let mods = generated(&graph);
+    if mods.is_empty() {
+        eprintln!("(no generator imports in {root_key})");
+    }
+    if call.has("--maps") {
+        let mut any = false;
+        for (banner, src) in mods {
+            if let Some(json) = vyrn_frontend::symbolmap::json_of(src) {
+                eprintln!("// ==== {banner} ====");
+                println!("{json}");
+                any = true;
+            }
+        }
+        if !any {
+            eprintln!("(no generated module in {root_key} carries a symbol map)");
+        }
+        return Ok(ExitCode::SUCCESS);
+    }
+    for (banner, src) in mods {
+        println!("// ==== {banner} ====");
+        print!("{src}");
+        if !src.ends_with('\n') {
+            println!();
+        }
+        println!();
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+/// The generated modules of a graph, as `(banner, source)` in load order.
+fn generated(graph: &loader::ModuleGraph) -> Vec<(&str, &str)> {
+    graph
+        .iter()
+        .filter_map(|(key, _, gen)| Some((key.as_str(), gen.as_deref()?)))
+        .collect()
+}
+
+use vyrn_frontend::diagnostics::Diagnostic;
+use vyrn_frontend::loader;
 
 use vyrn_frontend::manifest::{
     dos_to_slash, find as find_manifest, real_path, std_root, web_root, Manifest,
 };
 
-/// [`find_manifest`]; an unreadable manifest prints why and exits 2.
-fn nearest_manifest(start: &Path) -> Option<Manifest> {
-    match find_manifest(start) {
-        Ok(m) => m,
-        Err(e) => {
+/// One command's project, read once: the nearest `vyrn.json` above the start
+/// directory, the load options and the lock-aware resolver it implies, and the
+/// global flags. Every load reports through [`Project::report`], so each one
+/// saves the lock and prints its diagnostics and warnings the same way.
+struct Project {
+    manifest: Option<Manifest>,
+    opts: loader::LoadOptions,
+    /// Files, plus remotes through the lock, the cache and the network.
+    resolver: remote::RemoteResolver,
+    flags: GlobalFlags,
+}
+
+impl Project {
+    /// The project that governs `file`'s directory, or the working directory's
+    /// for `None` or a bare file name.
+    ///
+    /// # Errors
+    ///
+    /// A manifest or a lock that will not parse: printed, exit 2. A pin the
+    /// compiler cannot read is not the absence of a pin, so nothing re-pins to
+    /// whatever the network serves.
+    fn of(file: Option<&str>, flags: GlobalFlags) -> Result<Project, ExitCode> {
+        let dir = file
+            .and_then(|f| Path::new(f).parent())
+            .filter(|d| !d.as_os_str().is_empty())
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+        Project::at(&dir, flags)
+    }
+
+    /// The project that governs `dir`. The lock sits beside the manifest, else
+    /// in `dir`. Errors as [`Project::of`].
+    fn at(dir: &Path, flags: GlobalFlags) -> Result<Project, ExitCode> {
+        let fail = |e: String| {
             eprintln!("error: {e}");
-            std::process::exit(2);
+            ExitCode::from(2)
+        };
+        let manifest = find_manifest(dir).map_err(fail)?;
+        let mut opts = loader::LoadOptions {
+            std_root: std_root(),
+            ..Default::default()
+        };
+        let lock = match &manifest {
+            Some(m) => {
+                opts.aliases = m.dependencies.iter().cloned().collect();
+                opts.alias_base = m.dir.clone();
+                opts.audience = m.audience.clone();
+                opts.artifacts = m.artifacts.clone();
+                Path::new(&m.dir).join("vyrn.lock")
+            }
+            None => dir.join("vyrn.lock"),
+        };
+        let resolver = remote::RemoteResolver {
+            lock: std::cell::RefCell::new(remote::Lock::load(lock).map_err(fail)?),
+            project_dir: manifest.as_ref().map(|m| m.dir.clone()),
+            offline: flags.offline,
+        };
+        Ok(Project {
+            manifest,
+            opts,
+            resolver,
+            flags,
+        })
+    }
+
+    /// The manifest's `main`, resolved relative to the manifest's directory.
+    fn main(&self) -> Option<String> {
+        let m = self.manifest.as_ref()?;
+        Some(format!("{}/{}", m.dir, m.main.as_ref()?))
+    }
+
+    /// Saves the pins added since the last save. A failed write is an error:
+    /// an unpinned build is not reproducible.
+    fn save_lock(&self) -> Result<(), ExitCode> {
+        let mut lock = self.resolver.lock.borrow_mut();
+        if lock.dirty {
+            if let Err(e) = lock.save() {
+                eprintln!("error: cannot write {}: {e}", lock.path.display());
+                return Err(ExitCode::FAILURE);
+            }
+            lock.dirty = false;
+            eprintln!("pinned new remote imports in {}", lock.path.display());
+        }
+        Ok(())
+    }
+
+    /// Saves the lock, then prints a load's diagnostics, or its warnings when
+    /// it succeeded, to stderr before the command's own output. A diagnostic's
+    /// file defaults to `root`.
+    ///
+    /// # Errors
+    ///
+    /// The load failed, or it warned under `--deny-warnings`: printed, exit 1.
+    fn report<T>(
+        &self,
+        root: &str,
+        (result, warnings): (Result<T, Vec<Diagnostic>>, loader::Warnings),
+    ) -> Result<T, ExitCode> {
+        // Pins are saved even when the load failed.
+        self.save_lock()?;
+        let root_key = dos_to_slash(root);
+        let t = result.map_err(|diags| {
+            print_diagnostics(&diags, &root_key, "");
+            ExitCode::FAILURE
+        })?;
+        if !warnings.is_empty() {
+            print_diagnostics(&warnings, &root_key, "warning: ");
+            if self.flags.deny_warnings {
+                eprintln!(
+                    "error: {} warning(s) — refused by --deny-warnings",
+                    warnings.len()
+                );
+                return Err(ExitCode::FAILURE);
+            }
+        }
+        Ok(t)
+    }
+
+    /// Loads and checks `root`, with shared expansions so the command reads the
+    /// load's World. Sound only because both walk the same nodes: `a[i]` and
+    /// `for x in c` over a user container inline a projection at the access
+    /// site, and side tables are keyed by node address.
+    fn checked(&self, root: &str, source: &str) -> Result<Loaded, ExitCode> {
+        let opts = loader::LoadOptions {
+            expansions: Expansions::shared(),
+            ..self.opts.clone()
+        };
+        let key = dos_to_slash(root);
+        let loaded = vyrn_lower::load_warned(source, &key, &opts, &self.resolver, Some(&*engine()));
+        self.report(root, loaded)
+    }
+
+    /// Every module `root` reaches, loaded and not checked.
+    fn graph(&self, root: &str, source: &str) -> Result<loader::ModuleGraph, ExitCode> {
+        let key = dos_to_slash(root);
+        let graph =
+            loader::module_graph(source, &key, &self.opts, &self.resolver, Some(&*engine()));
+        self.report(root, graph)
+    }
+
+    /// The native target: the global flag, then the manifest's
+    /// `nativeTarget`, then the default.
+    ///
+    /// # Errors
+    ///
+    /// A misspelled `nativeTarget`: printed, exit 2. It must not fall back to
+    /// the default, or the binary is built for something the user did not
+    /// write.
+    fn native_target(&self) -> Result<NativeTarget, ExitCode> {
+        let written =
+            (self.manifest.as_ref()).and_then(|m| Some((&m.dir, m.native_target.as_ref()?)));
+        match (self.flags.native_target, written) {
+            (Some(t), _) => Ok(t),
+            (None, None) => Ok(DEFAULT_NATIVE_TARGET),
+            (None, Some((dir, v))) => NativeTarget::parse(v).ok_or_else(|| {
+                eprintln!(
+                    "error: unknown `nativeTarget` `{v}` in {dir}/vyrn.json (expected one of: {})",
+                    NativeTarget::names()
+                );
+                ExitCode::from(2)
+            }),
         }
     }
 }
 
-/// The manifest's `main`, resolved relative to the manifest's directory.
-fn manifest_main() -> Option<String> {
-    let cwd = std::env::current_dir().ok()?;
-    let m = nearest_manifest(&cwd)?;
-    let main = m.main?;
-    Some(format!("{}/{main}", m.dir))
-}
-
-/// LoadOptions for a root file: the std root and the nearest manifest's settings.
-fn load_options(root: &str) -> vyrn_frontend::loader::LoadOptions {
-    let mut opts = vyrn_frontend::loader::LoadOptions {
-        std_root: std_root(),
-        ..Default::default()
-    };
-    let start = Path::new(root)
-        .parent()
-        .map(|p| p.to_path_buf())
-        .filter(|p| !p.as_os_str().is_empty())
-        .or_else(|| std::env::current_dir().ok());
-    if let Some(m) = start.and_then(|d| nearest_manifest(&d)) {
-        opts.aliases = m.dependencies.into_iter().collect();
-        opts.alias_base = m.dir;
-        opts.audience = m.audience;
-        opts.artifacts = m.artifacts;
-    }
-    opts
+/// Reads a file a command names. Unreadable: printed, exit 2.
+fn read_source(path: &str) -> Result<String, ExitCode> {
+    std::fs::read_to_string(path).map_err(|e| {
+        eprintln!("error: cannot read {path}: {e}");
+        ExitCode::from(2)
+    })
 }
 
 /// `vyrn new <name>`: scaffolds vyrn.json, src/main.vyrn and .gitignore.
-fn scaffold(name: &str) -> ExitCode {
+fn scaffold(call: &Call) -> Outcome {
+    let name = call.arg().unwrap_or_default();
     // The name is interpolated raw into vyrn.json and src/main.vyrn; a quote,
     // a backslash or a control character would write a manifest no later
     // command can parse.
     if name.contains('"') || name.contains('\\') || name.chars().any(char::is_control) {
         eprintln!("error: project name cannot contain `\"`, `\\`, or control characters");
-        return ExitCode::FAILURE;
+        return Err(ExitCode::FAILURE);
     }
     let root = Path::new(name);
     if root.exists() {
         eprintln!("error: `{name}` already exists");
-        return ExitCode::FAILURE;
+        return Err(ExitCode::FAILURE);
     }
     let manifest = format!(
         "{{\n    \"name\": \"{name}\",\n    \"main\": \"src/main.vyrn\",\n    \"dependencies\": {{}}\n}}\n"
@@ -543,102 +866,55 @@ fn scaffold(name: &str) -> ExitCode {
         if let Some(dir) = path.parent() {
             if let Err(e) = std::fs::create_dir_all(dir) {
                 eprintln!("error: cannot create {}: {e}", dir.display());
-                return ExitCode::FAILURE;
+                return Err(ExitCode::FAILURE);
             }
         }
         if let Err(e) = std::fs::write(&path, content) {
             eprintln!("error: cannot write {}: {e}", path.display());
-            return ExitCode::FAILURE;
+            return Err(ExitCode::FAILURE);
         }
     }
     println!("created {name}/ (vyrn.json, src/main.vyrn) — try: cd {name} && vyrn run");
-    ExitCode::SUCCESS
+    Ok(ExitCode::SUCCESS)
 }
 
 /// `vyrn why`: dispatches to the audience, `--contract`, `--memory` or
 /// `--capability` report. `--contract` prints the contract that governs a
 /// module and the status of each of its members; it exits 1 when the file is
 /// in no role.
-fn why_cmd(args: &[String]) -> ExitCode {
-    const USAGE: &str = "usage: vyrn why <file> | vyrn why --contract <file> | \
-         vyrn why --memory <file> | vyrn why --capability <fs|stdin|args|extern> <entry-or-artifact-name>";
-    let mut file: Option<String> = None;
-    let mut contract = false;
-    let mut memory = false;
-    let mut capability: Option<String> = None;
-    let mut i = 0;
-    while i < args.len() {
-        match args[i].as_str() {
-            "--contract" => {
-                contract = true;
-                i += 1;
-            }
-            "--memory" => {
-                memory = true;
-                i += 1;
-            }
-            "--capability" => {
-                let Some(cap) = args.get(i + 1) else {
-                    eprintln!(
-                        "error: `--capability` needs a capability (one of: {})",
-                        vyrn_frontend::floor::CAPABILITIES
-                    );
-                    eprintln!("{USAGE}");
-                    return ExitCode::from(2);
-                };
-                capability = Some(cap.clone());
-                i += 2;
-            }
-            other if !other.starts_with('-') => {
-                file = Some(other.to_string());
-                i += 1;
-            }
-            other => {
-                eprintln!("error: unknown `vyrn why` option `{other}`");
-                eprintln!("{USAGE}");
-                return ExitCode::from(2);
-            }
-        }
+fn why_cmd(call: &Call) -> Outcome {
+    let (flags, file) = (call.flags, call.arg().unwrap_or_default());
+    if let Some(cap) = call.value("--capability") {
+        return why_capability(flags, cap, file);
     }
-    let Some(file) = file else {
-        eprintln!("{USAGE}");
-        return ExitCode::from(2);
-    };
-    if let Some(cap) = capability {
-        return why_capability(&cap, &file);
+    if call.has("--memory") {
+        return why_memory(flags, file);
     }
-    if memory {
-        return why_memory(&file);
-    }
-    if !contract {
-        return why_audience(&file);
+    if !call.has("--contract") {
+        return why_audience(flags, file);
     }
     let path = match Path::new(&file).canonicalize() {
         Ok(p) => dos_to_slash(&p.to_string_lossy()),
         Err(e) => {
             eprintln!("error: cannot read {file}: {e}");
-            return ExitCode::from(2);
+            return Err(ExitCode::from(2));
         }
     };
-    let Some(dir) = Path::new(&path).parent().map(|p| p.to_path_buf()) else {
-        eprintln!("error: {file} has no directory");
-        return ExitCode::from(2);
-    };
-    let opts = load_options(&path);
+    let p = Project::of(Some(&path), flags)?;
 
     // The app root: the nearest `vyrn.json` upward, else the file's own
     // directory.
-    let manifest = nearest_manifest(&dir);
-    let app_dir = manifest
-        .as_ref()
-        .map(|m| PathBuf::from(&m.dir))
-        .unwrap_or_else(|| dir.clone());
+    let app_dir = match &p.manifest {
+        Some(m) => PathBuf::from(&m.dir),
+        None => PathBuf::from(path.rsplit_once('/').map_or(".", |(d, _)| d)),
+    };
     // The manifest already read is passed in, never re-read: two readers of one
     // file are two policies when one of them fails.
-    let doc = manifest.as_ref().map(|m| &m.doc);
+    let doc = p.manifest.as_ref().map(|m| &m.doc);
     let roots = vyrn_frontend::manifest::role_roots(&app_dir, doc);
-    let roles = vyrn_frontend::contracts::roles_for_project(doc, &roots, &opts, &DiskResolver);
+    let roles = vyrn_frontend::contracts::roles_for_project(doc, &roots, &p.opts, &p.resolver);
     let Some(role) = vyrn_frontend::contracts::role_for(&path, &roles) else {
+        p.save_lock()?;
         println!("{path}");
         println!("  no contract: this file is in no role");
         if vyrn_frontend::contracts::is_projection(&path) {
@@ -654,17 +930,17 @@ fn why_cmd(args: &[String]) -> ExitCode {
                 println!("  role: {} -> {}:{}", r.scope, r.module, r.contract);
             }
         }
-        return ExitCode::FAILURE;
+        return Ok(ExitCode::FAILURE);
     };
     let manifest = dos_to_slash(&app_dir.join("vyrn.json").to_string_lossy());
-    let Some(view) =
-        vyrn_frontend::contracts::load_role_contract(role, &manifest, &opts, &DiskResolver)
-    else {
+    let view = vyrn_frontend::contracts::load_role_contract(role, &manifest, &p.opts, &p.resolver);
+    p.save_lock()?;
+    let Some(view) = view else {
         eprintln!(
             "error: cannot resolve contract `{}:{}`",
             role.module, role.contract
         );
-        return ExitCode::FAILURE;
+        return Err(ExitCode::FAILURE);
     };
 
     // A `.vyx`'s module is its `<script>`, plus the `<template>`, which compiles
@@ -676,66 +952,98 @@ fn why_cmd(args: &[String]) -> ExitCode {
     } else {
         raw
     };
+    let parsed = |text: &str| {
+        vyrn_frontend::lexer::lex(text)
+            .ok()
+            .map(|t| vyrn_frontend::parser::parse_accum(t).0)
+    };
+    let decl = vyrn_frontend::loader::ModuleResolver::read(&p.resolver, &view.file)
+        .ok()
+        .and_then(|s| parsed(&s))
+        .and_then(|p| p.contracts.into_iter().find(|c| c.name == view.name));
+    let (Some(mut decl), Some(module)) = (decl, parsed(&source)) else {
+        eprintln!("error: cannot lex {path} or {}", view.file);
+        return Err(ExitCode::FAILURE);
+    };
+    // The generator's `contractOf` names the module as its importer wrote it.
+    decl.module = Some(view.module.clone());
+    let verdict = match contract_verdict(&p, &decl, &module) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("error: std/contract cannot judge {path}: {e}");
+            return Err(ExitCode::FAILURE);
+        }
+    };
 
     println!("{path}");
     println!("  role: {}", role.scope);
     println!("  contract: {} ({})", view.name, view.module);
     println!("  declared in: {}", view.file);
     let mut objections = 0;
-    for e in vyrn_frontend::contracts::contract_status(&view, &source, &synthesized) {
-        use vyrn_frontend::contracts::MemberStatus::*;
-        let line = match &e.status {
+    // `checkContract` reports at most one issue per name: a member's, or that
+    // of an export the contract does not name.
+    let mut objection = |name: &str| {
+        let (key, _, message) = verdict.issues.iter().find(|(_, at, _)| at == name)?;
+        objections += 1;
+        let label = match key.as_str() {
+            "contract.missing" => "MISSING ",
+            "contract.type" | "contract.open" => "MISMATCH",
+            "contract.unknown" | "contract.unknown.didYouMean" => "UNKNOWN ",
+            other => other,
+        };
+        Some(format!("{label}  {name}: {message}"))
+    };
+    // The exports `moduleInterface` reflects, in source order.
+    let exports: Vec<&str> = module
+        .functions
+        .iter()
+        .filter(|f| f.exported && !f.is_extern)
+        .map(|f| f.name.as_str())
+        .collect();
+    for m in &view.members {
+        let want = m
+            .shapes
+            .iter()
+            .map(|s| s.spelling.as_str())
+            .collect::<Vec<_>>()
+            .join(" or ");
+        let shape = verdict
+            .matched
+            .iter()
+            .find(|(n, _)| *n == m.name)
+            .map_or(-1, |(_, i)| *i);
+        let line = if shape >= 0 {
+            format!(
+                "ok        {}: shape {} of {} — {want}",
+                m.name,
+                shape + 1,
+                m.shapes.len()
+            )
+        } else if synthesized.contains(&m.name) && !exports.contains(&m.name.as_str()) {
             // The file's form writes it: a `.vyx` has no other way to declare
             // a view.
-            Synthesized => {
-                format!(
-                    "ok        {}: the `<template>` compiles to it — {}",
-                    e.name, e.want
-                )
-            }
-            Satisfied { shape } => {
-                let of = view.member(&e.name).map(|m| m.shapes.len()).unwrap_or(1);
-                format!(
-                    "ok        {}: shape {} of {} — {}",
-                    e.name,
-                    shape + 1,
-                    of,
-                    e.want
-                )
-            }
-            Defaulted => format!("default   {}: absent, optional — {}", e.name, e.want),
-            Missing => {
-                objections += 1;
-                format!("MISSING   {}: required — {}", e.name, e.want)
-            }
-            Mismatched { found } => {
-                objections += 1;
-                format!("MISMATCH  {}: wanted {}, found `{found}`", e.name, e.want)
-            }
-            Unknown {
-                did_you_mean: Some(near),
-            } => {
-                objections += 1;
-                format!(
-                    "UNKNOWN   {}: not named by the contract — did you mean `{near}`?",
-                    e.name
-                )
-            }
-            Unknown { did_you_mean: None } => {
-                objections += 1;
-                format!(
-                    "UNKNOWN   {}: not named by the contract (it is closed)",
-                    e.name
-                )
-            }
-            OpenMatched => format!("ok        {}: matches the open rule — {}", e.name, e.want),
-            OpenMismatched { found } => {
-                objections += 1;
-                format!(
-                    "MISMATCH  {}: the open rule wants {}, found `{found}`",
-                    e.name, e.want
-                )
-            }
+            format!(
+                "ok        {}: the `<template>` compiles to it — {want}",
+                m.name
+            )
+        } else if let Some(line) = objection(&m.name) {
+            line
+        } else {
+            format!("default   {}: absent, optional — {want}", m.name)
+        };
+        println!("  {line}");
+    }
+    for name in exports {
+        if view.member(name).is_some() {
+            continue;
+        }
+        let line = match (objection(name), &view.open_rule) {
+            (Some(line), _) => line,
+            (None, Some(rule)) => format!(
+                "ok        {name}: matches the open rule — {}",
+                rule.spelling
+            ),
+            (None, None) => format!("ok        {name}: std/contract raises no issue"),
         };
         println!("  {line}");
     }
@@ -746,7 +1054,114 @@ fn why_cmd(args: &[String]) -> ExitCode {
             "  — {objections} objection(s); the generator that consumes this module is the gate"
         );
     }
-    ExitCode::SUCCESS
+    Ok(ExitCode::SUCCESS)
+}
+
+/// What `std/contract` says of one module: each member's matched shape
+/// (`matchedMember`, -1 for none) in declaration order, and every
+/// `checkContract` issue as `(key, path, message)`.
+struct ContractVerdict {
+    matched: Vec<(String, i64)>,
+    issues: Vec<(String, String, String)>,
+}
+
+/// The program [`contract_verdict`] compiles. Each stub's body is replaced by a
+/// reflection literal before the compile.
+const WHY_CONTRACT_SRC: &str = r#"import { checkContract, matchedMember } from "std/contract"
+
+fn whyContract() -> ContractInfo {
+    return whyContract()
+}
+
+fn whyModule() -> ModuleInterface {
+    return whyModule()
+}
+
+fn main() -> Int64 {
+    let c = whyContract()
+    let m = whyModule()
+    for x in c.members {
+        print("\{x.name}\t\{matchedMember(m, c, x.name)}")
+    }
+    for i in checkContract(m, c) {
+        print("\{i.key}\t\{i.path}\t\{i.message}")
+    }
+    return 0
+}
+"#;
+
+/// Asks `std/contract` what a generator asks of `module`, so `why --contract`
+/// states no matching rule of its own. `decl` is reflected as `contractOf`
+/// reflects it, and `module`, parsed but not linked, as `moduleInterface`
+/// reflects a module.
+fn contract_verdict(
+    p: &Project,
+    decl: &vyrn_frontend::ast::ContractDecl,
+    module: &vyrn_frontend::ast::Program,
+) -> Result<ContractVerdict, String> {
+    use vyrn_frontend::ast::{Block, Id, Stmt};
+    use vyrn_frontend::schema_reflect::{contract_info_lit, module_interface_lit, Origins};
+    let opts = loader::LoadOptions {
+        expansions: Expansions::shared(),
+        ..p.opts.clone()
+    };
+    let mut prog = vyrn_lower::load(
+        WHY_CONTRACT_SRC,
+        "why-contract.vyrn",
+        &opts,
+        &p.resolver,
+        None,
+    )
+    .map_err(|d| d.first().map(|d| d.message.clone()).unwrap_or_default())?;
+    for f in &mut prog.functions {
+        let lit = match f.name.as_str() {
+            "whyContract" => contract_info_lit(decl),
+            "whyModule" => {
+                module_interface_lit(module, &std::collections::HashMap::new(), &Origins::new([]))
+            }
+            _ => continue,
+        };
+        f.body = Block {
+            id: Id::NEW,
+            stmts: vec![Stmt::Return {
+                id: Id::NEW,
+                value: Some(lit),
+                line: 0,
+            }],
+        };
+    }
+    prog.number();
+    let bytes = vyrn_codegen::direct::compile(&prog, vyrn_lower::analyze(&prog))?;
+    let out = wasmrun::run(
+        &bytes,
+        wasmrun::Run {
+            capture_stdout: true,
+            capture_stderr: true,
+            ..Default::default()
+        },
+    )?;
+    if out.code != 0 {
+        return Err(String::from_utf8_lossy(&out.stderr).into_owned());
+    }
+    let mut verdict = ContractVerdict {
+        matched: Vec::new(),
+        issues: Vec::new(),
+    };
+    for line in String::from_utf8_lossy(&out.stdout).lines() {
+        match line.split('\t').collect::<Vec<_>>()[..] {
+            [name, shape] => verdict.matched.push((
+                name.to_string(),
+                shape.parse().map_err(|_| line.to_string())?,
+            )),
+            [key, at, message] => {
+                verdict
+                    .issues
+                    .push((key.to_string(), at.to_string(), message.to_string()))
+            }
+            _ => return Err(format!("unexpected row `{line}`")),
+        }
+    }
+    Ok(verdict)
 }
 
 /// `vyrn routes [file]`: the resolved wire table, with where each path came
@@ -758,37 +1173,12 @@ fn why_cmd(args: &[String]) -> ExitCode {
 /// (`--json` only, for each route's declaration), and the arguments of the
 /// program's `mount(..)` call for hand-written lists ([`mounted_routes_wasm`]).
 /// The channels are unioned.
-fn routes_cmd(file: Option<&str>, json: bool) -> ExitCode {
-    let path = match file.map(|s| s.to_string()).or_else(manifest_main) {
-        Some(p) => p,
-        None => {
-            eprintln!("error: no input file, and no vyrn.json with a `main` found");
-            eprintln!("usage: vyrn routes [file]");
-            return ExitCode::from(2);
-        }
-    };
-    let root_key = normalize_slashes(&path);
-    let source = match std::fs::read_to_string(&root_key) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("error: cannot read {root_key}: {e}");
-            return ExitCode::from(2);
-        }
-    };
-    let opts = load_options(&root_key);
-    let resolver = make_resolver(&root_key);
-    let result = loader::generated_modules(&source, &root_key, &opts, &resolver, Some(&*engine()));
-    // Pins survive a failed run; a pin the disk refuses fails the command.
-    if let Err(code) = save_lock(&resolver) {
-        return code;
-    }
-    let mods = match result {
-        Ok(m) => m,
-        Err(diags) => {
-            print_diagnostics(&diags, &root_key, "");
-            return ExitCode::FAILURE;
-        }
-    };
+fn routes_cmd(call: &Call) -> Outcome {
+    let (p, path) = call.root()?;
+    let root_key = dos_to_slash(&path);
+    let source = read_source(&root_key)?;
+    let graph = p.graph(&root_key, &source)?;
+    let mods = generated(&graph);
     // `(method, path, procedure, source)`, de-duplicated: a page or api
     // directory reached through two roots generates the same table twice.
     let mut rows: Vec<(String, String, String, String)> = Vec::new();
@@ -822,9 +1212,9 @@ fn routes_cmd(file: Option<&str>, json: bool) -> ExitCode {
     // rows above are still true.
     let opts = loader::LoadOptions {
         expansions: Expansions::shared(),
-        ..opts
+        ..p.opts.clone()
     };
-    match vyrn_lower::load(&source, &root_key, &opts, &resolver, Some(&*engine()))
+    match vyrn_lower::load(&source, &root_key, &opts, &p.resolver, Some(&*engine()))
         .map_err(|d| d.first().map(|d| d.message.clone()).unwrap_or_default())
         .and_then(|p| mounted_routes_wasm(&root_key, &p))
     {
@@ -840,12 +1230,12 @@ fn routes_cmd(file: Option<&str>, json: bool) -> ExitCode {
             "note: only derived routes are listed — the mounted router could not be read: {e}"
         ),
     }
-    if json {
-        return routes_json(&mods, rows);
+    if call.has("--json") {
+        return Ok(routes_json(&mods, rows));
     }
     if rows.is_empty() {
         println!("(no derived routes in {root_key})");
-        return ExitCode::SUCCESS;
+        return Ok(ExitCode::SUCCESS);
     }
     // A projection puts two methods on one path.
     rows.sort_by(|a, b| (&a.1, &a.0).cmp(&(&b.1, &b.0)));
@@ -874,7 +1264,7 @@ fn routes_cmd(file: Option<&str>, json: bool) -> ExitCode {
     for (method, path, proc, src) in &rows {
         println!("{method:w0$}  {path:w1$}  {proc:w2$}  {src}");
     }
-    ExitCode::SUCCESS
+    Ok(ExitCode::SUCCESS)
 }
 
 /// `vyrn routes`'s hand-written channel: the arguments of every `mount(..)` the
@@ -955,10 +1345,9 @@ fn mounted_routes_wasm(
         &bytes,
         wasmrun::Run {
             argv: vec![path.to_string()],
-            stdin_prefix: Vec::new(),
             capture_stdout: true,
             capture_stderr: true,
-            meter: false,
+            ..Default::default()
         },
     )?;
     if out.code != 0 {
@@ -995,7 +1384,7 @@ fn mounted_routes_wasm(
 /// `vyrn routes --json`: the wire table, each route with the declaration its
 /// symbol map names. `origin` is `null` for a route no map covers.
 fn routes_json(
-    mods: &[(String, String)],
+    mods: &[(&str, &str)],
     directives: Vec<(String, String, String, String)>,
 ) -> ExitCode {
     /// `(method, path, procedure, source, origin)`.
@@ -1073,32 +1462,25 @@ fn json_str(s: &str) -> String {
 /// `vyrn why --memory <file>`: what the ownership analysis decided about every
 /// binding in the file, and why. It prints `own::Ownership::memory` and
 /// re-derives nothing. Exit 0 whenever it could answer.
-fn why_memory(file: &str) -> ExitCode {
+fn why_memory(flags: GlobalFlags, file: &str) -> Outcome {
     let path = match Path::new(file).canonicalize() {
         Ok(p) => dos_to_slash(&p.to_string_lossy()),
         Err(e) => {
             eprintln!("error: cannot read {file}: {e}");
-            return ExitCode::from(2);
+            return Err(ExitCode::from(2));
         }
     };
-    let raw = match std::fs::read_to_string(&path) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("error: cannot read {file}: {e}");
-            return ExitCode::from(2);
-        }
-    };
+    let raw = read_source(&path)?;
     // A `.vyx`'s module is its `<script>`.
     let source = if path.ends_with(".vyx") {
         vyx_script_body(&raw).unwrap_or_default()
     } else {
         raw
     };
+    let p = Project::of(Some(&path), flags)?;
     // Unshared, so the load's World keys other trees than this analysis.
-    let program = match load_program(&path, &source, Default::default()) {
-        Ok((p, _)) => p,
-        Err(code) => return code,
-    };
+    let loaded = vyrn_lower::load_warned(&source, &path, &p.opts, &p.resolver, Some(&*engine()));
+    let (program, _) = p.report(&path, loaded)?;
     let world = vyrn_lower::analyze(&program);
     let own = &world.ownership;
 
@@ -1177,28 +1559,23 @@ fn why_memory(file: &str) -> ExitCode {
     for (reason, count) in &leaked {
         println!("    {count:>5}  {reason}");
     }
-    ExitCode::SUCCESS
+    Ok(ExitCode::SUCCESS)
 }
 
 /// `vyrn why <file>`: the audience of a module, the path segment that decided
 /// it, and every import chain that reaches it. Exit 0 whenever it could answer,
 /// 2 only when the file cannot be read.
-fn why_audience(file: &str) -> ExitCode {
+fn why_audience(flags: GlobalFlags, file: &str) -> Outcome {
     let Some(path) = real_path(file) else {
         eprintln!("error: cannot read {file}");
-        return ExitCode::from(2);
+        return Err(ExitCode::from(2));
     };
-    let Some(dir) = Path::new(&path).parent().map(|p| p.to_path_buf()) else {
-        eprintln!("error: {file} has no directory");
-        return ExitCode::from(2);
+    let p = Project::of(Some(&path), flags)?;
+    let app_slash = match &p.manifest {
+        Some(m) => m.dir.clone(),
+        None => path.rsplit_once('/').map_or(".", |(d, _)| d).to_string(),
     };
-    let manifest = nearest_manifest(&dir);
-    let app_dir = manifest
-        .as_ref()
-        .map(|m| PathBuf::from(&m.dir))
-        .unwrap_or_else(|| dir.clone());
-    let app_slash = dos_to_slash(&app_dir.to_string_lossy());
-    let map = manifest.as_ref().and_then(|m| m.audience.clone());
+    let map = p.manifest.as_ref().and_then(|m| m.audience.as_ref());
 
     println!("{path}");
     // The compiler declares the audience of these two modules, by path identity
@@ -1232,7 +1609,7 @@ fn why_audience(file: &str) -> ExitCode {
 
     // Read off the sources, with no load: the file asked about may be the one
     // that does not compile.
-    let edges = project_imports(&app_dir);
+    let edges = project_imports(Path::new(&app_slash), &p.opts);
     let chains = import_chains(&path, &edges);
     if chains.is_empty() {
         println!("  imported by: nothing in this project reaches it");
@@ -1243,7 +1620,7 @@ fn why_audience(file: &str) -> ExitCode {
             println!("    {}", pretty.join(" -> "));
         }
     }
-    ExitCode::SUCCESS
+    Ok(ExitCode::SUCCESS)
 }
 
 /// `vyrn why --capability <cap> <entry-or-artifact-name>`: every import chain
@@ -1255,33 +1632,29 @@ fn why_audience(file: &str) -> ExitCode {
 /// with the fence and the floor disarmed, so it answers for a refused tree.
 /// Exit 0 whenever it could answer, 2 for an unknown capability or an argument
 /// that names no artifact.
-fn why_capability(cap: &str, name: &str) -> ExitCode {
+fn why_capability(flags: GlobalFlags, cap: &str, name: &str) -> Outcome {
     use vyrn_frontend::floor::{self, Capability};
     let Some(cap) = Capability::parse(cap) else {
         eprintln!(
             "error: unknown capability `{cap}` (expected one of: {})",
             floor::CAPABILITIES
         );
-        return ExitCode::from(2);
+        return Err(ExitCode::from(2));
     };
     // An entry's path or an artifact's name. File identity first, so two
     // spellings of one file name one artifact.
     let path = real_path(name);
-    let start = path
-        .as_deref()
-        .and_then(|p| Path::new(p).parent().map(|d| d.to_path_buf()))
-        .or_else(|| std::env::current_dir().ok());
-    let manifest = start.as_deref().and_then(nearest_manifest);
-    let Some(manifest) = manifest else {
+    let p = Project::of(path.as_deref(), flags)?;
+    let Some(manifest) = &p.manifest else {
         eprintln!("error: no vyrn.json found upward from `{name}`");
-        return ExitCode::from(2);
+        return Err(ExitCode::from(2));
     };
     let Some(map) = manifest.artifacts.as_ref() else {
         eprintln!(
             "error: {}/vyrn.json declares no artifacts, so nothing in this project has a target",
             manifest.dir
         );
-        return ExitCode::from(2);
+        return Err(ExitCode::from(2));
     };
     let artifact = path
         .as_deref()
@@ -1295,7 +1668,7 @@ fn why_capability(cap: &str, name: &str) -> ExitCode {
             manifest.dir,
             declared.join(", ")
         );
-        return ExitCode::from(2);
+        return Err(ExitCode::from(2));
     };
 
     println!("{}", artifact.entry);
@@ -1312,23 +1685,21 @@ fn why_capability(cap: &str, name: &str) -> ExitCode {
         }
     );
 
-    let mut opts = load_options(&artifact.entry);
-    opts.audience = None;
-    opts.artifacts = None;
-    let source = match std::fs::read_to_string(&artifact.entry) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("error: cannot read {}: {e}", artifact.entry);
-            return ExitCode::from(2);
-        }
+    let opts = loader::LoadOptions {
+        audience: None,
+        artifacts: None,
+        ..p.opts.clone()
     };
-    let (graph, root_key) = match loader::capability_graph(
+    let source = read_source(&artifact.entry)?;
+    let graph = loader::capability_graph(
         &source,
         &artifact.entry,
         &opts,
-        &DiskResolver,
+        &p.resolver,
         Some(&*engine()),
-    ) {
+    );
+    p.save_lock()?;
+    let (graph, root_key) = match graph {
         Ok(g) => g,
         Err(diags) => {
             eprintln!("error: cannot link artifact `{}`", artifact.name);
@@ -1339,7 +1710,7 @@ fn why_capability(cap: &str, name: &str) -> ExitCode {
                     d.message
                 );
             }
-            return ExitCode::from(2);
+            return Err(ExitCode::from(2));
         }
     };
     let edges: Vec<(String, String)> = graph
@@ -1383,7 +1754,7 @@ fn why_capability(cap: &str, name: &str) -> ExitCode {
             cap.name()
         );
     }
-    ExitCode::SUCCESS
+    Ok(ExitCode::SUCCESS)
 }
 
 /// Bounds on both import walks: an exhaustive enumeration of a real graph does
@@ -1429,17 +1800,47 @@ fn rel_to(path: &str, base: &str) -> String {
         .unwrap_or_else(|| path.to_string())
 }
 
+/// Every file under `dir` with one of the extensions `exts`, as sorted slash
+/// paths. Hidden directories, build output and vendored trees are skipped:
+/// they are not the project.
+fn files_under(dir: &Path, exts: &[&str]) -> Vec<String> {
+    fn walk(dir: &Path, exts: &[&str], out: &mut Vec<String>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for e in entries.flatten() {
+            let (p, name) = (e.path(), e.file_name());
+            let name = name.to_string_lossy();
+            if p.is_dir() {
+                if !(name.starts_with('.')
+                    || ["target", "vendor", "node_modules"].contains(&&*name))
+                {
+                    walk(&p, exts, out);
+                }
+            } else if p.extension().is_some_and(|x| exts.iter().any(|e| x == *e)) {
+                out.push(dos_to_slash(&p.to_string_lossy()));
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(dir, exts, &mut out);
+    out.sort();
+    out
+}
+
 /// Every `importer -> imported` edge in a project, resolved with the loader's
 /// own `resolve_spec`.
 ///
 /// A generator import contributes edges too. A call naming one file is
 /// resolved by `audience::generator_input`, the function that decides that
 /// module's audience; a call naming a directory reaches every source under it.
-fn project_imports(app_dir: &Path) -> Vec<(String, String)> {
-    let files = project_sources(app_dir);
+fn project_imports(app_dir: &Path, opts: &loader::LoadOptions) -> Vec<(String, String)> {
+    let files: Vec<(String, String)> = files_under(app_dir, &["vyrn", "vyx"])
+        .into_iter()
+        .filter_map(|path| Some((path.clone(), std::fs::read_to_string(&path).ok()?)))
+        .collect();
     let mut out: Vec<(String, String)> = Vec::new();
     for (path, source) in &files {
-        let opts = load_options(path);
         let body = if path.ends_with(".vyx") {
             vyx_script_body(source).unwrap_or_default()
         } else {
@@ -1464,7 +1865,7 @@ fn project_imports(app_dir: &Path) -> Vec<(String, String)> {
                     _ => continue,
                 },
             };
-            let Ok(resolved) = vyrn_frontend::loader::resolve_spec(&spec, path, &opts) else {
+            let Ok(resolved) = vyrn_frontend::loader::resolve_spec(&spec, path, opts) else {
                 continue;
             };
             let stripped = resolved
@@ -1494,42 +1895,6 @@ fn project_imports(app_dir: &Path) -> Vec<(String, String)> {
     }
     out.sort();
     out.dedup();
-    out
-}
-
-/// Every `.vyrn` / `.vyx` source under `app_dir`, as `(slash path, text)`.
-/// Build output and vendored trees are not the project.
-fn project_sources(app_dir: &Path) -> Vec<(String, String)> {
-    fn walk(dir: &Path, out: &mut Vec<(String, String)>) {
-        let Ok(entries) = std::fs::read_dir(dir) else {
-            return;
-        };
-        for e in entries.filter_map(|e| e.ok()) {
-            let p = e.path();
-            let name = e.file_name().to_string_lossy().to_string();
-            if p.is_dir() {
-                if name.starts_with('.')
-                    || name == "target"
-                    || name == "vendor"
-                    || name == "node_modules"
-                {
-                    continue;
-                }
-                walk(&p, out);
-            } else if matches!(
-                p.extension().and_then(|x| x.to_str()),
-                Some("vyrn") | Some("vyx")
-            ) {
-                if let Ok(text) = std::fs::read_to_string(&p) {
-                    let key = dos_to_slash(&p.to_string_lossy());
-                    out.push((key, text));
-                }
-            }
-        }
-    }
-    let mut out = Vec::new();
-    walk(app_dir, &mut out);
-    out.sort();
     out
 }
 
@@ -1625,7 +1990,7 @@ fn tool_row(
     }
 }
 
-/// The same rule as [`normalize_slashes`], from a `Path`.
+/// [`dos_to_slash`], from a `Path`.
 fn show_path(p: &Path) -> String {
     dos_to_slash(&p.to_string_lossy())
 }
@@ -1635,10 +2000,7 @@ fn show_path(p: &Path) -> String {
 ///
 /// Nothing here touches the network: a pin resolves through vendor and the
 /// content-addressed cache, and an unresolved one prints as unresolved.
-fn print_toolchain(start: &Path) {
-    let pins = nearest_manifest(start)
-        .map(|m| m.toolchain)
-        .unwrap_or_default();
+fn print_toolchain(start: &Path, pins: &[(String, String)]) {
     let pin = |tool: &str| {
         pins.iter()
             .find(|(n, _)| n == tool)
@@ -1695,14 +2057,12 @@ fn print_toolchain(start: &Path) {
 ///
 /// A lone artifact named `main` prints its graph with no header. A manifest
 /// that declares no artifacts is not an error: it prints the toolchain alone.
-fn deps(name: Option<&str>) -> ExitCode {
-    let Some(cwd) = std::env::current_dir().ok() else {
-        eprintln!("error: cannot read the current directory");
-        return ExitCode::FAILURE;
-    };
-    let Some(manifest) = nearest_manifest(&cwd) else {
+fn deps(call: &Call) -> Outcome {
+    let name = call.arg();
+    let p = Project::of(None, call.flags)?;
+    let Some(manifest) = &p.manifest else {
         eprintln!("error: no vyrn.json found upward from here");
-        return ExitCode::FAILURE;
+        return Err(ExitCode::FAILURE);
     };
     let dir = PathBuf::from(&manifest.dir);
     let artifacts = manifest.artifacts.as_ref();
@@ -1717,7 +2077,7 @@ fn deps(name: Option<&str>) -> ExitCode {
                     manifest.dir,
                     declared.join(", ")
                 );
-                return ExitCode::from(2);
+                return Err(ExitCode::from(2));
             }
         },
         (Some(map), None) => map.list.iter().collect(),
@@ -1726,7 +2086,7 @@ fn deps(name: Option<&str>) -> ExitCode {
                 "error: {}/vyrn.json declares no artifacts, so it declares no `{want}`",
                 manifest.dir
             );
-            return ExitCode::from(2);
+            return Err(ExitCode::from(2));
         }
         (None, None) => Vec::new(),
     };
@@ -1735,8 +2095,8 @@ fn deps(name: Option<&str>) -> ExitCode {
             "{}/vyrn.json declares no artifacts, so there is no module graph to report",
             manifest.dir
         );
-        print_toolchain(&dir);
-        return ExitCode::SUCCESS;
+        print_toolchain(&dir, &manifest.toolchain);
+        return Ok(ExitCode::SUCCESS);
     }
 
     let bare = list.len() == 1 && list[0].name == "main";
@@ -1756,37 +2116,24 @@ fn deps(name: Option<&str>) -> ExitCode {
                 )
             );
         }
-        let root_key = &artifact.entry;
-        let source = match std::fs::read_to_string(root_key) {
-            Ok(s) => s,
-            Err(e) => {
-                eprintln!("error: cannot read {root_key}: {e}");
-                failed = true;
-                continue;
-            }
+        let graph = read_source(&artifact.entry).and_then(|s| p.graph(&artifact.entry, &s));
+        let Ok(graph) = graph else {
+            failed = true;
+            continue;
         };
-        let opts = load_options(root_key);
-        match loader::module_graph(&source, root_key, &opts, &DiskResolver, Some(&*engine())) {
-            Ok(graph) => {
-                for (module, imports) in graph {
-                    println!("{module}");
-                    for i in imports {
-                        println!("  -> {i}");
-                    }
-                }
-            }
-            Err(diags) => {
-                print_diagnostics(&diags, root_key, "");
-                failed = true;
+        for (module, imports, _) in graph {
+            println!("{module}");
+            for i in imports {
+                println!("  -> {i}");
             }
         }
     }
-    print_toolchain(&dir);
-    if failed {
+    print_toolchain(&dir, &manifest.toolchain);
+    Ok(if failed {
         ExitCode::FAILURE
     } else {
         ExitCode::SUCCESS
-    }
+    })
 }
 
 /// `vyrn fmt [file ...] [--check]`: formats each file in place, or with no
@@ -1795,50 +2142,46 @@ fn deps(name: Option<&str>) -> ExitCode {
 ///
 /// The input need only lex. A file that does not is reported and left
 /// untouched; the others still format, and the exit is non-zero.
-fn fmt_cmd(rest: &[String]) -> ExitCode {
+fn fmt_cmd(call: &Call) -> Outcome {
+    let flags = call.flags;
     // A converter, not a formatter run: it prints and writes nothing.
-    if let Some(i) = rest.iter().position(|a| a == "--from-json") {
-        let Some(path) = rest.get(i + 1).filter(|a| !a.starts_with('-')) else {
-            eprintln!("error: --from-json needs a .json file");
-            eprintln!("{USAGE}");
-            return ExitCode::from(2);
-        };
-        let flag = |name: &str, fallback: &str| -> String {
-            rest.iter()
-                .position(|a| a == name)
-                .and_then(|k| rest.get(k + 1))
-                .cloned()
-                .unwrap_or_else(|| fallback.to_string())
-        };
+    if let Some(path) = call.value("--from-json") {
         return from_json_cmd(
+            flags,
             path,
-            &flag("--as", "Config"),
-            &flag("--from", "./config.vyrn"),
+            call.value("--as").unwrap_or("Config"),
+            call.value("--from").unwrap_or("./config.vyrn"),
         );
     }
-    let check = rest.iter().any(|a| a == "--check");
-    let files: Vec<String> = rest
-        .iter()
-        .filter(|a| !a.starts_with('-'))
-        .cloned()
-        .collect();
+    let check = call.has("--check");
+    let files = call.pos.clone();
 
-    let targets: Vec<String> = if files.is_empty() {
-        match fmt_project_files() {
-            Ok(t) => t,
-            Err(code) => return code,
-        }
-    } else {
-        files
-    };
+    let mut had_error = false;
+    // No files: the project's `main` and its local imports. Remote modules are
+    // pinned and generated ones have no file, so neither is formatted. A load
+    // that fails formats `main` alone and fails the command.
+    let mut targets = files;
     if targets.is_empty() {
-        eprintln!("error: no input files, and no vyrn.json with a `main` found");
-        eprintln!("{USAGE}");
-        return ExitCode::from(2);
+        let p = Project::of(None, flags)?;
+        if let Some(main) = p.main() {
+            targets = match p.graph(&main, &read_source(&main)?) {
+                Ok(graph) => graph
+                    .into_iter()
+                    .filter(|(key, _, gen)| gen.is_none() && !loader::is_remote(key))
+                    .map(|(key, _, _)| key)
+                    .collect(),
+                Err(_) => {
+                    had_error = true;
+                    vec![dos_to_slash(&main)]
+                }
+            };
+        }
+    }
+    if targets.is_empty() {
+        return Err(call.refuse("no input files, and no vyrn.json with a `main` found"));
     }
 
     let mut would_change: Vec<String> = Vec::new();
-    let mut had_error = false;
     let mut written = 0usize;
     for path in &targets {
         // The formatter would lex a `.vyx` template as Vyrn tokens and put spaces
@@ -1890,9 +2233,9 @@ fn fmt_cmd(rest: &[String]) -> ExitCode {
             println!("{f}");
         }
         if !would_change.is_empty() || had_error {
-            return ExitCode::FAILURE;
+            return Err(ExitCode::FAILURE);
         }
-        return ExitCode::SUCCESS;
+        return Ok(ExitCode::SUCCESS);
     }
     if written > 0 {
         println!(
@@ -1902,11 +2245,11 @@ fn fmt_cmd(rest: &[String]) -> ExitCode {
     } else if !had_error {
         println!("already formatted");
     }
-    if had_error {
+    Ok(if had_error {
         ExitCode::FAILURE
     } else {
         ExitCode::SUCCESS
-    }
+    })
 }
 
 /// The converter `vyrn fmt --from-json` runs, written in Vyrn so there is one
@@ -1940,49 +2283,26 @@ fn main() -> Int64 {
 /// `vyrn fmt --from-json <file.json> [--as <Type>] [--from <module>]`: prints a
 /// JSON file as VON, headed by an `import type` line. Every nested object
 /// arrives as a `Map`. Nothing is written to disk.
-fn from_json_cmd(path: &str, type_name: &str, module: &str) -> ExitCode {
-    let json = match std::fs::read_to_string(path) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("error: cannot read {path}: {e}");
-            return ExitCode::from(2);
-        }
-    };
+fn from_json_cmd(flags: GlobalFlags, path: &str, type_name: &str, module: &str) -> Outcome {
+    let json = read_source(path)?;
     // A key beside the input file, so `std/` resolves as it would there. No
     // file is read at it.
-    let norm = normalize_slashes(path);
+    let norm = dos_to_slash(path);
     let key = match norm.rfind('/') {
         Some(i) => format!("{}/from-json.vyrn", &norm[..i]),
         None => "from-json.vyrn".to_string(),
     };
-    let (program, world) = match loaded(&key, FROM_JSON_SRC) {
-        Ok(p) => p,
-        Err(code) => return code,
-    };
+    let (program, world) = Project::of(Some(&key), flags)?.checked(&key, FROM_JSON_SRC)?;
     // Stderr is captured because the wording below rewrites it.
-    let bytes = match vyrn_codegen::direct::compile(&program, world) {
-        Ok(b) => b,
-        Err(e) => {
-            eprintln!("error: {e}");
-            return ExitCode::FAILURE;
-        }
-    };
+    let bytes = failed(vyrn_codegen::direct::compile(&program, world))?;
     let run = wasmrun::Run {
         argv: vec![key.clone(), json, type_name.to_string(), module.to_string()],
-        stdin_prefix: Vec::new(),
-        capture_stdout: false,
         capture_stderr: true,
-        meter: false,
+        ..Default::default()
     };
-    let out = match wasmrun::run(&bytes, run) {
-        Ok(out) => out,
-        Err(e) => {
-            eprintln!("error: {e}");
-            return ExitCode::FAILURE;
-        }
-    };
+    let out = failed(wasmrun::run(&bytes, run))?;
     if out.code == 0 {
-        return ExitCode::SUCCESS;
+        return Ok(ExitCode::SUCCESS);
     }
     // The trap names a position in the converter, which the user cannot open;
     // the input file's name replaces it.
@@ -1995,45 +2315,7 @@ fn from_json_cmd(path: &str, type_name: &str, module: &str) -> ExitCode {
         .map(|(m, _)| m)
         .unwrap_or(msg);
     eprintln!("error: {path}: {msg}");
-    ExitCode::from((out.code & 0xff) as u8)
-}
-
-/// The project's `main` and its local imports: a bare `vyrn fmt`'s targets.
-/// Remote imports are pinned, never formatted in place.
-fn fmt_project_files() -> Result<Vec<String>, ExitCode> {
-    let Some(main) = manifest_main() else {
-        return Ok(Vec::new());
-    };
-    let source = match std::fs::read_to_string(&main) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("error: cannot read {main}: {e}");
-            return Err(ExitCode::FAILURE);
-        }
-    };
-    let root_key = normalize_slashes(&main);
-    let opts = load_options(&root_key);
-    let resolver = make_resolver(&root_key);
-    match loader::module_graph(&source, &root_key, &opts, &resolver, Some(&*engine())) {
-        Ok(graph) => {
-            let mut seen = std::collections::HashSet::new();
-            let mut out = Vec::new();
-            for (module, _imports) in graph {
-                if vyrn_frontend::loader::is_remote(&module) {
-                    continue;
-                }
-                if seen.insert(module.clone()) {
-                    out.push(module);
-                }
-            }
-            Ok(out)
-        }
-        Err(diags) => {
-            // A graph error falls back to the main file alone.
-            print_diagnostics(&diags, &root_key, "");
-            Ok(vec![root_key])
-        }
-    }
+    Ok(ExitCode::from((out.code & 0xff) as u8))
 }
 
 /// A module to document. `name` (`std/json`, `routes/home`) is the page heading
@@ -2049,34 +2331,12 @@ struct DocModule {
 ///
 /// `--verify` writes nothing and exits 1 if the output directory differs from
 /// what would be generated.
-fn doc_cmd(rest: &[String]) -> ExitCode {
-    let with_std = rest.iter().any(|a| a == "--std");
-    let verify = rest.iter().any(|a| a == "--verify");
-    let out_dir = match rest.iter().position(|a| a == "-o") {
-        Some(i) => match rest.get(i + 1) {
-            Some(d) => d.clone(),
-            None => {
-                eprintln!("error: -o needs a directory");
-                return ExitCode::from(2);
-            }
-        },
-        None => "docs/api".to_string(),
-    };
-    // The one positional (a file or directory); flags and the `-o` value excluded.
-    let target = rest
-        .iter()
-        .enumerate()
-        .filter(|(i, a)| !a.starts_with('-') && !(*i > 0 && rest[*i - 1] == "-o"))
-        .map(|(_, a)| a.clone())
-        .next();
-
-    let modules = match discover_doc_modules(target.as_deref(), with_std) {
-        Ok(m) => m,
-        Err(code) => return code,
-    };
+fn doc_cmd(call: &Call) -> Outcome {
+    let out_dir = call.value("-o").unwrap_or("docs/api");
+    let modules = discover_doc_modules(call, call.arg(), call.has("--std"))?;
     if modules.is_empty() {
         eprintln!("error: no modules to document");
-        return ExitCode::from(2);
+        return Err(ExitCode::from(2));
     }
 
     let mut files: Vec<(String, String)> = Vec::new();
@@ -2087,10 +2347,11 @@ fn doc_cmd(rest: &[String]) -> ExitCode {
     }
     files.sort_by(|a, b| a.0.cmp(&b.0));
 
-    if verify {
-        return verify_doc_dir(&out_dir, &files);
-    }
-    write_doc_dir(&out_dir, &files)
+    Ok(if call.has("--verify") {
+        verify_doc_dir(out_dir, &files)
+    } else {
+        write_doc_dir(out_dir, &files)
+    })
 }
 
 /// The modules to document:
@@ -2098,28 +2359,26 @@ fn doc_cmd(rest: &[String]) -> ExitCode {
 /// - a directory: every `.vyrn` under it, named relative to it;
 /// - nothing, with a manifest `main`: that file's closure;
 /// - nothing, with `--std`: the whole std library.
-fn discover_doc_modules(target: Option<&str>, with_std: bool) -> Result<Vec<DocModule>, ExitCode> {
-    match target {
-        Some(t) if Path::new(t).is_dir() => scan_doc_dir(t, ""),
-        Some(t) => closure_doc_modules(t, with_std),
+fn discover_doc_modules(
+    call: &Call,
+    target: Option<&str>,
+    with_std: bool,
+) -> Result<Vec<DocModule>, ExitCode> {
+    if let Some(dir) = target.filter(|t| Path::new(t).is_dir()) {
+        return scan_doc_dir(dir, "");
+    }
+    let p = Project::of(target, call.flags)?;
+    if let Some(root) = target.map(str::to_string).or_else(|| p.main()) {
+        return closure_doc_modules(&p, &root, with_std);
+    }
+    if !with_std {
+        return Err(call.refuse("no input file or directory, and no vyrn.json with a `main` found"));
+    }
+    match std_root() {
+        Some(root) => scan_doc_dir(&root, "std/"),
         None => {
-            if let Some(main) = manifest_main() {
-                closure_doc_modules(&main, with_std)
-            } else if with_std {
-                match std_root() {
-                    Some(root) => scan_doc_dir(&root, "std/"),
-                    None => {
-                        eprintln!("error: --std given but no std library found (set VYRN_STD)");
-                        Err(ExitCode::FAILURE)
-                    }
-                }
-            } else {
-                eprintln!(
-                    "error: no input file or directory, and no vyrn.json with a `main` found"
-                );
-                eprintln!("{USAGE}");
-                Err(ExitCode::from(2))
-            }
+            eprintln!("error: --std given but no std library found (set VYRN_STD)");
+            Err(ExitCode::FAILURE)
         }
     }
 }
@@ -2127,11 +2386,9 @@ fn discover_doc_modules(target: Option<&str>, with_std: bool) -> Result<Vec<DocM
 /// Every `.vyrn` file under `dir`, named `<prefix>` plus its path relative to
 /// `dir` without the extension. Sorted by name.
 fn scan_doc_dir(dir: &str, prefix: &str) -> Result<Vec<DocModule>, ExitCode> {
-    let base = normalize_slashes(dir);
-    let mut paths: Vec<String> = Vec::new();
-    collect_vyrn_files(Path::new(dir), &mut paths);
+    let base = dos_to_slash(dir);
     let mut out = Vec::new();
-    for p in paths {
+    for p in files_under(Path::new(dir), &["vyrn"]) {
         let rel = rel_name(&p, &base);
         // A fenced module has no reader outside the compiler.
         if vyrn_frontend::loader::is_fenced(&format!("{prefix}{rel}")) {
@@ -2153,59 +2410,27 @@ fn scan_doc_dir(dir: &str, prefix: &str) -> Result<Vec<DocModule>, ExitCode> {
     Ok(out)
 }
 
-/// Appends every `.vyrn` file under `dir` to `out`, in sorted directory order.
-fn collect_vyrn_files(dir: &Path, out: &mut Vec<String>) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    let mut items: Vec<PathBuf> = entries.filter_map(|e| e.ok().map(|e| e.path())).collect();
-    items.sort();
-    for path in items {
-        if path.is_dir() {
-            collect_vyrn_files(&path, out);
-        } else if path.extension().and_then(|s| s.to_str()) == Some("vyrn") {
-            out.push(normalize_slashes(&path.to_string_lossy()));
-        }
-    }
-}
-
 /// Every local module `root_file` reaches, named relative to the project.
 /// `with_std` adds the std modules reached, as `std/<rel>`. Remote and
 /// generated modules are never documented.
-fn closure_doc_modules(root_file: &str, with_std: bool) -> Result<Vec<DocModule>, ExitCode> {
-    let source = match std::fs::read_to_string(root_file) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("error: cannot read {root_file}: {e}");
-            return Err(ExitCode::FAILURE);
-        }
-    };
-    let root_key = normalize_slashes(root_file);
-    let opts = load_options(&root_key);
-    let resolver = make_resolver(&root_key);
-    let std_root = opts.std_root.as_deref().map(normalize_slashes);
+fn closure_doc_modules(
+    p: &Project,
+    root_file: &str,
+    with_std: bool,
+) -> Result<Vec<DocModule>, ExitCode> {
+    let source = read_source(root_file)?;
+    let root_key = dos_to_slash(root_file);
+    let std_root = p.opts.std_root.as_deref().map(dos_to_slash);
     // Local module names are relative to the manifest's directory, else the
     // root file's.
-    let base = nearest_manifest(Path::new(&root_key).parent().unwrap_or(Path::new(".")))
-        .map(|m| m.dir)
-        .unwrap_or_else(|| {
-            root_key
-                .rsplit_once('/')
-                .map(|(d, _)| d.to_string())
-                .unwrap_or_default()
-        });
-
-    let result =
-        loader::module_graph_with_sources(&source, &root_key, &opts, &resolver, Some(&*engine()));
-    // Pins survive a failed run; a pin the disk refuses fails the command.
-    save_lock(&resolver)?;
-    let graph = match result {
-        Ok(g) => g,
-        Err(diags) => {
-            print_diagnostics(&diags, &root_key, "");
-            return Err(ExitCode::FAILURE);
-        }
+    let base = match &p.manifest {
+        Some(m) => m.dir.clone(),
+        None => root_key
+            .rsplit_once('/')
+            .map(|(d, _)| d.to_string())
+            .unwrap_or_default(),
     };
+    let graph = p.graph(&root_key, &source)?;
 
     let mut seen = std::collections::HashSet::new();
     let mut out = Vec::new();
@@ -2240,16 +2465,10 @@ fn closure_doc_modules(root_file: &str, with_std: bool) -> Result<Vec<DocModule>
     Ok(out)
 }
 
-/// A path as this toolchain spells it: `dos_to_slash`, the rule `real_path` and
-/// module keys use.
-fn normalize_slashes(p: &str) -> String {
-    dos_to_slash(p)
-}
-
 /// The module name: `path` relative to `base`, without `.vyrn`. The file stem
 /// when `path` is not under `base`.
 fn rel_name(path: &str, base: &str) -> String {
-    let path = normalize_slashes(path);
+    let path = dos_to_slash(path);
     let stripped = if base.is_empty() {
         path.as_str()
     } else {
@@ -2357,7 +2576,8 @@ fn verify_doc_dir(out_dir: &str, files: &[(String, String)]) -> ExitCode {
     for (rel, content) in files {
         let path = Path::new(out_dir).join(rel);
         match std::fs::read_to_string(&path) {
-            Ok(on_disk) if normalize_slashes_content(&on_disk) == *content => {}
+            // LF, so a CRLF checkout of a generated doc is not drift.
+            Ok(on_disk) if on_disk.replace("\r\n", "\n") == *content => {}
             Ok(_) => {
                 eprintln!("doc drift: {out_dir}/{rel} is out of date — run `vyrn doc` to update");
                 return ExitCode::FAILURE;
@@ -2372,91 +2592,13 @@ fn verify_doc_dir(out_dir: &str, files: &[(String, String)]) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-/// LF newlines, so a CRLF checkout of a generated doc is not drift.
-fn normalize_slashes_content(s: &str) -> String {
-    s.replace("\r\n", "\n")
-}
-
 /// Every `.md` file under `dir`, as `/`-separated paths relative to `dir`.
 fn existing_md_files(dir: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    collect_md_files(Path::new(dir), dir, &mut out);
-    out.sort();
-    out
-}
-
-fn collect_md_files(dir: &Path, base: &str, out: &mut Vec<String>) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    let mut items: Vec<PathBuf> = entries.filter_map(|e| e.ok().map(|e| e.path())).collect();
-    items.sort();
-    for path in items {
-        if path.is_dir() {
-            collect_md_files(&path, base, out);
-        } else if path.extension().and_then(|s| s.to_str()) == Some("md") {
-            let full = normalize_slashes(&path.to_string_lossy());
-            let base = normalize_slashes(base);
-            let rel = full
-                .strip_prefix(&format!("{}/", base.trim_end_matches('/')))
-                .unwrap_or(&full)
-                .to_string();
-            out.push(rel);
-        }
-    }
-}
-
-/// The lock file's path and the project directory for a root file: beside the
-/// manifest when there is one, else beside the root file.
-fn lock_home(root_key: &str) -> (PathBuf, Option<String>) {
-    let start = Path::new(root_key)
-        .parent()
-        .map(|p| p.to_path_buf())
-        .filter(|p| !p.as_os_str().is_empty())
-        .or_else(|| std::env::current_dir().ok());
-    if let Some(m) = start.clone().and_then(|d| nearest_manifest(&d)) {
-        return (Path::new(&m.dir).join("vyrn.lock"), Some(m.dir));
-    }
-    let dir = start.unwrap_or_else(|| PathBuf::from("."));
-    (dir.join("vyrn.lock"), None)
-}
-
-/// The CLI resolver: files, plus remotes through the lock, the cache and the
-/// network. A lock file that will not parse exits here, so nothing re-pins to
-/// whatever the network serves.
-fn make_resolver(root_key: &str) -> remote::RemoteResolver {
-    let (lock_path, project_dir) = lock_home(root_key);
-    remote::RemoteResolver {
-        lock: std::cell::RefCell::new(load_lock(lock_path)),
-        project_dir,
-        offline: env_offline(),
-    }
-}
-
-/// [`remote::Lock::load`]; a damaged lock prints the line and exits 2. A pin
-/// the compiler cannot read is not the absence of a pin.
-fn load_lock(path: PathBuf) -> remote::Lock {
-    match remote::Lock::load(path) {
-        Ok(l) => l,
-        Err(e) => {
-            eprintln!("error: {e}");
-            std::process::exit(2);
-        }
-    }
-}
-
-/// Saves the pins the load added. A failed write is an error: an
-/// unpinned build is not reproducible.
-fn save_lock(resolver: &remote::RemoteResolver) -> Result<(), ExitCode> {
-    let lock = resolver.lock.borrow();
-    if lock.dirty {
-        if let Err(e) = lock.save() {
-            eprintln!("error: cannot write {}: {e}", lock.path.display());
-            return Err(ExitCode::FAILURE);
-        }
-        eprintln!("pinned new remote imports in {}", lock.path.display());
-    }
-    Ok(())
+    let base = format!("{}/", dos_to_slash(dir).trim_end_matches('/'));
+    files_under(Path::new(dir), &["md"])
+        .into_iter()
+        .map(|f| f.strip_prefix(&base).map_or(f.clone(), str::to_string))
+        .collect()
 }
 
 /// `vyrn fix [file]`: applies the `.copy()` a move diagnostic names and
@@ -2466,15 +2608,17 @@ fn save_lock(resolver: &remote::RemoteResolver) -> Result<(), ExitCode> {
 /// It edits only the file given; a diagnostic in an import is reported. A round
 /// applies at most one edit per line and is kept only if the diagnostic count
 /// falls, so the file never compiles worse than it did.
-fn fix_cmd(path: &str, source: &str) -> ExitCode {
-    let root_key = normalize_slashes(path);
+fn fix_cmd(call: &Call) -> Outcome {
+    let (p, path) = call.root()?;
+    let source = read_source(&path)?;
+    let root_key = dos_to_slash(&path);
     let mut text = source.to_string();
     let mut rounds = 0usize;
     let mut applied: Vec<String> = Vec::new();
     let mut refused: Vec<String> = Vec::new();
 
     loop {
-        let diags = fix_diagnostics(&root_key, &text);
+        let diags = fix_diagnostics(&p, &root_key, &text);
         let mine: Vec<&vyrn_frontend::diagnostics::Diagnostic> = diags
             .iter()
             .filter(|d| d.stage == "movecheck" && d.file.is_none())
@@ -2534,7 +2678,7 @@ fn fix_cmd(path: &str, source: &str) -> ExitCode {
             break;
         }
         // A round that does not reduce the count is discarded whole.
-        if fix_diagnostics(&root_key, &next).len() >= diags.len() {
+        if fix_diagnostics(&p, &root_key, &next).len() >= diags.len() {
             refused.push(format!(
                 "{root_key}: {} edit(s) rolled back — they did not reduce the diagnostics",
                 this_round.len()
@@ -2551,10 +2695,11 @@ fn fix_cmd(path: &str, source: &str) -> ExitCode {
         }
     }
 
+    p.save_lock()?;
     if text != source {
-        if let Err(e) = std::fs::write(path, &text) {
+        if let Err(e) = std::fs::write(&path, &text) {
             eprintln!("error: cannot write {path}: {e}");
-            return ExitCode::FAILURE;
+            return Err(ExitCode::FAILURE);
         }
     }
     for a in &applied {
@@ -2565,15 +2710,13 @@ fn fix_cmd(path: &str, source: &str) -> ExitCode {
     }
     println!("{} fix(es) applied, {} left", applied.len(), refused.len());
     // Not a gate: `vyrn check` is.
-    ExitCode::SUCCESS
+    Ok(ExitCode::SUCCESS)
 }
 
 /// Loads `text` as `root_key` and returns every diagnostic, printing nothing.
 /// The checker's and the kernel's ownership refusals arrive as one list.
-fn fix_diagnostics(root_key: &str, text: &str) -> Vec<vyrn_frontend::diagnostics::Diagnostic> {
-    let opts = load_options(root_key);
-    let resolver = make_resolver(root_key);
-    match vyrn_lower::load_warned(text, root_key, &opts, &resolver, Some(&*engine())).0 {
+fn fix_diagnostics(p: &Project, root_key: &str, text: &str) -> Vec<Diagnostic> {
+    match vyrn_lower::load_warned(text, root_key, &p.opts, &p.resolver, Some(&*engine())).0 {
         Ok(_) => Vec::new(),
         Err(d) => d,
     }
@@ -2682,61 +2825,16 @@ fn synth_fn(
     }
 }
 
-/// Loads and checks a root file. Prints the diagnostics on failure and the
-/// warnings on success, to stderr and before the command's own output; every
-/// command that builds a program loads here.
-fn load_program(
-    path: &str,
-    source: &str,
-    expansions: std::sync::Arc<Expansions>,
-) -> Result<Loaded, ExitCode> {
-    let root_key = normalize_slashes(path);
-    let opts = vyrn_frontend::loader::LoadOptions {
-        expansions,
-        ..load_options(&root_key)
-    };
-    let resolver = make_resolver(&root_key);
-    let (result, warnings) =
-        vyrn_lower::load_warned(source, &root_key, &opts, &resolver, Some(&*engine()));
-    // Pins are saved even when a later stage fails.
-    save_lock(&resolver)?;
-    match result {
-        Ok(p) => {
-            if print_warnings(&warnings, &root_key) {
-                return Err(ExitCode::FAILURE);
-            }
-            Ok(p)
-        }
-        Err(diags) => {
-            print_diagnostics(&diags, &root_key, "");
-            Err(ExitCode::FAILURE)
-        }
-    }
-}
-
 /// A checked program and the World its check judged.
 type Loaded = (
     vyrn_frontend::ast::Program,
     std::sync::Arc<vyrn_lower::World>,
 );
 
-/// [`load_program`] with shared expansions, so the load and the command share
-/// one expansion per site, and the command reads the load's World. Sound only
-/// because both walk the same nodes: `a[i]` and `for x in c` over a user
-/// container inline a projection at the access site, and side tables are keyed
-/// by node address.
-fn loaded(path: &str, source: &str) -> Result<Loaded, ExitCode> {
-    load_program(path, source, Expansions::shared())
-}
-
 /// Prints `file:line:col: message` per diagnostic, the file defaulting to
 /// `root_key`, with its note below. `marker` is `""` for an error and
 /// `"warning: "` for a warning.
-fn print_diagnostics(
-    diags: &[vyrn_frontend::diagnostics::Diagnostic],
-    root_key: &str,
-    marker: &str,
-) {
+fn print_diagnostics(diags: &[Diagnostic], root_key: &str, marker: &str) {
     for d in diags {
         let file = d.file.as_deref().unwrap_or(root_key);
         eprintln!("{}:{}:{}: {}{}", file, d.line, d.col, marker, d.message);
@@ -2746,74 +2844,45 @@ fn print_diagnostics(
     }
 }
 
-/// Prints a load's warnings to stderr. Returns whether the run fails, which it
-/// does only under `--deny-warnings`.
-fn print_warnings(warnings: &[vyrn_frontend::diagnostics::Diagnostic], root_key: &str) -> bool {
-    if warnings.is_empty() {
-        return false;
-    }
-    print_diagnostics(warnings, root_key, "warning: ");
-    if deny_warnings() {
-        eprintln!(
-            "error: {} warning(s) — refused by --deny-warnings",
-            warnings.len()
-        );
-        return true;
-    }
-    false
-}
-
 /// `vyrn add <specifier> [--name alias]`: fetches and pins a remote module and
 /// records it in vyrn.json's dependencies.
-fn add(rest: &[String], _offline: bool) -> ExitCode {
-    let Some(spec) = rest.first().filter(|s| !s.starts_with('-')) else {
-        eprintln!("usage: vyrn add <github:|gist:|https: specifier> [--name alias]");
-        return ExitCode::from(2);
-    };
+fn add(call: &Call) -> Outcome {
+    let spec = call.arg().unwrap_or_default();
     let spec = if spec.ends_with(".vyrn") || spec.ends_with(".json") {
-        spec.clone()
+        spec.to_string()
     } else {
         format!("{spec}.vyrn")
     };
     if !vyrn_frontend::loader::is_remote(&spec) {
         eprintln!("error: `add` takes a remote specifier (github:/gist:/https:)");
-        return ExitCode::FAILURE;
+        return Err(ExitCode::FAILURE);
     }
-    let alias = match rest.iter().position(|a| a == "--name") {
-        Some(i) => match rest.get(i + 1) {
-            Some(a) => a.clone(),
-            None => {
-                eprintln!("error: --name needs a value");
-                return ExitCode::from(2);
-            }
-        },
+    let alias = match call.value("--name") {
+        Some(a) => a.to_string(),
         None => Path::new(&spec)
             .file_stem()
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_else(|| "dep".to_string()),
     };
 
-    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let Some(manifest) = nearest_manifest(&cwd) else {
+    let p = Project::of(None, call.flags)?;
+    let Some(manifest) = &p.manifest else {
         eprintln!("error: no vyrn.json found — run `vyrn new` or create one first");
-        return ExitCode::FAILURE;
+        return Err(ExitCode::FAILURE);
     };
 
     // Fetch here, so a typo fails at once and the next build can run offline.
-    let resolver = make_resolver(&format!("{}/vyrn.json", manifest.dir));
-    if let Err(e) = vyrn_frontend::loader::ModuleResolver::read(&resolver, &spec) {
-        eprintln!("error: {e}");
-        return ExitCode::FAILURE;
-    }
-    if save_lock(&resolver).is_err() {
-        return ExitCode::FAILURE;
-    }
+    failed(vyrn_frontend::loader::ModuleResolver::read(
+        &p.resolver,
+        &spec,
+    ))?;
+    p.save_lock()?;
 
     // Rewrites the document already read; key order stays stable.
     let manifest_path = Path::new(&manifest.dir).join("vyrn.json");
     use vyrn_frontend::schema::Json;
-    let mut fields = match manifest.doc {
-        Json::Obj(f) => f,
+    let mut fields = match &manifest.doc {
+        Json::Obj(f) => f.clone(),
         _ => Vec::new(),
     };
     let dep_entry = (alias.clone(), Json::Str(spec.clone()));
@@ -2827,10 +2896,10 @@ fn add(rest: &[String], _offline: bool) -> ExitCode {
     }
     if let Err(e) = std::fs::write(&manifest_path, json_pretty(&Json::Obj(fields), 0)) {
         eprintln!("error: cannot write {}: {e}", manifest_path.display());
-        return ExitCode::FAILURE;
+        return Err(ExitCode::FAILURE);
     }
     println!("added `{alias}` -> {spec}");
-    ExitCode::SUCCESS
+    Ok(ExitCode::SUCCESS)
 }
 
 /// Fetches every platform's published artifact of one pinned tool into the
@@ -2838,10 +2907,15 @@ fn add(rest: &[String], _offline: bool) -> ExitCode {
 ///
 /// Every platform, so a networked machine records the hashes for one that is
 /// not. A platform with no upstream artifact is reported and skipped.
-fn update_tool(name: &str, version: &str, lock: &mut remote::Lock) -> Result<(), String> {
+fn update_tool(
+    name: &str,
+    version: &str,
+    lock: &mut remote::Lock,
+    offline: bool,
+) -> Result<(), String> {
     use vyrn_frontend::toolpin;
     // Before the retain below drops the old pins.
-    if env_offline() {
+    if offline {
         return Err(format!(
             "{name} {version} must be fetched from the network, and --offline / \
              VYRN_OFFLINE forbids it"
@@ -2891,6 +2965,7 @@ fn verify_tool(
     version: &str,
     lock: &remote::Lock,
     project_dir: Option<&str>,
+    offline: bool,
 ) -> Result<(), String> {
     use vyrn_frontend::toolpin;
     let platform = if toolpin::tool_platforms(name) == ["any"] {
@@ -2909,7 +2984,7 @@ fn verify_tool(
         // The resolver's refusal names the platforms the lock covers.
         return toolpin::pinned_tool(project_dir, lock, name, version).map(|_| ());
     };
-    if env_offline() {
+    if offline {
         // The resolver's refusal for a locked miss.
         return Err(format!(
             "`{spec}` is locked (sha256 {sha}) but not cached, and this is an \
@@ -2942,14 +3017,13 @@ fn verify_tool(
 /// `--locked` re-resolves nothing and never saves the lock: it fetches only
 /// what the caches miss, verifies every byte against the lock, and refuses a
 /// mismatch.
-fn update(alias: Option<&str>, locked: bool) -> ExitCode {
-    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let Some(manifest) = nearest_manifest(&cwd) else {
+fn update(call: &Call) -> Outcome {
+    let (flags, alias, locked) = (call.flags, call.arg(), call.has("--locked"));
+    let p = Project::of(None, flags)?;
+    let Some(manifest) = &p.manifest else {
         eprintln!("error: no vyrn.json found");
-        return ExitCode::FAILURE;
+        return Err(ExitCode::FAILURE);
     };
-    let (lock_path, project_dir) = lock_home(&format!("{}/vyrn.json", manifest.dir));
-    let mut lock = load_lock(lock_path);
     let tools: Vec<(String, String)> = manifest
         .toolchain
         .iter()
@@ -2979,23 +3053,22 @@ fn update(alias: Option<&str>, locked: bool) -> ExitCode {
                 "error: vyrn.json declares no `toolchain.{a}` — add it, then run \
                  `vyrn update {a}` to pin it"
             );
-            return ExitCode::FAILURE;
+            return Err(ExitCode::FAILURE);
         }
         eprintln!("nothing to update");
-        return ExitCode::SUCCESS;
+        return Ok(ExitCode::SUCCESS);
     }
+    let dir = Some(manifest.dir.as_str());
     for (name, version) in &tools {
-        let r = if locked {
-            verify_tool(name, version, &lock, project_dir.as_deref())
+        let mut lock = p.resolver.lock.borrow_mut();
+        failed(if locked {
+            verify_tool(name, version, &lock, dir, flags.offline)
         } else {
-            update_tool(name, version, &mut lock)
-        };
-        if let Err(e) = r {
-            eprintln!("error: {e}");
-            return ExitCode::FAILURE;
-        }
+            update_tool(name, version, &mut lock, flags.offline)
+        })?;
     }
     for (name, spec) in &targets {
+        let mut lock = p.resolver.lock.borrow_mut();
         // Removing the entry makes a normal run re-resolve it; a locked run
         // reads through the existing pin, which verifies the hash.
         if !locked {
@@ -3008,36 +3081,31 @@ fn update(alias: Option<&str>, locked: bool) -> ExitCode {
                 "error: `{name}` ({spec}) is not pinned in vyrn.lock — run \
                  `vyrn update {name}` once online to pin it"
             );
-            return ExitCode::FAILURE;
+            return Err(ExitCode::FAILURE);
         }
     }
-    let resolver = remote::RemoteResolver {
-        lock: std::cell::RefCell::new(lock),
-        project_dir,
-        offline: env_offline(),
-    };
     for (_, spec) in &targets {
-        if let Err(e) = vyrn_frontend::loader::ModuleResolver::read(&resolver, spec) {
-            eprintln!("error: {e}");
-            return ExitCode::FAILURE;
-        }
+        failed(vyrn_frontend::loader::ModuleResolver::read(
+            &p.resolver,
+            spec,
+        ))?;
     }
-    if !locked && save_lock(&resolver).is_err() {
-        return ExitCode::FAILURE;
+    if !locked {
+        p.save_lock()?;
     }
-    ExitCode::SUCCESS
+    Ok(ExitCode::SUCCESS)
 }
 
 /// `vyrn vendor [--check]`: copies every locked blob into the vendor directory,
 /// or with `--check` verifies each is there.
-fn vendor(check: bool) -> ExitCode {
-    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let Some(manifest) = nearest_manifest(&cwd) else {
+fn vendor(call: &Call) -> Outcome {
+    let check = call.has("--check");
+    let p = Project::of(None, call.flags)?;
+    let Some(manifest) = &p.manifest else {
         eprintln!("error: no vyrn.json found");
-        return ExitCode::FAILURE;
+        return Err(ExitCode::FAILURE);
     };
-    let (lock_path, _) = lock_home(&format!("{}/vyrn.json", manifest.dir));
-    let lock = load_lock(lock_path);
+    let lock = p.resolver.lock.borrow();
     let vend = remote::vendor_dir(&manifest.dir);
     let cache = remote::cache_dir();
     let mut missing = 0;
@@ -3066,7 +3134,7 @@ fn vendor(check: bool) -> ExitCode {
                     std::fs::create_dir_all(&vend).and_then(|_| std::fs::write(&vendored, &bytes))
                 {
                     eprintln!("error: cannot vendor `{spec}`: {e}");
-                    return ExitCode::FAILURE;
+                    return Err(ExitCode::FAILURE);
                 }
                 println!("vendored `{spec}`");
             }
@@ -3084,14 +3152,14 @@ fn vendor(check: bool) -> ExitCode {
             "{missing} entr{} not vendored",
             if missing == 1 { "y" } else { "ies" }
         );
-        return ExitCode::FAILURE;
+        return Err(ExitCode::FAILURE);
     }
     println!(
         "vendor is complete ({} entr{})",
         lock.entries.len(),
         if lock.entries.len() == 1 { "y" } else { "ies" }
     );
-    ExitCode::SUCCESS
+    Ok(ExitCode::SUCCESS)
 }
 
 /// Pretty-prints a Json value with a 4-space indent, keys in their order.
@@ -3136,46 +3204,26 @@ fn json_pretty(j: &vyrn_frontend::schema::Json, depth: usize) -> String {
 /// `vyrn test [file] [--name <substring>]`: runs the root file's `test` blocks
 /// in declaration order and exits 1 if any failed. A file with no tests prints
 /// `no tests` and exits 0.
-fn test_cmd(path: &str, rest: &[String]) -> ExitCode {
-    let mut filter: Option<String> = None;
-    let mut i = 0;
-    while i < rest.len() {
-        if rest[i] == "--name" && i + 1 < rest.len() {
-            filter = Some(rest[i + 1].clone());
-            i += 2;
-        } else {
-            eprintln!("test: unexpected argument `{}`", rest[i]);
-            return ExitCode::from(2);
-        }
-    }
-
-    let source = match std::fs::read_to_string(path) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("error: cannot read {path}: {e}");
-            return ExitCode::from(2);
-        }
-    };
-    let (program, _) = match loaded(path, &source) {
-        Ok(p) => p,
-        Err(code) => return code,
-    };
+fn test_cmd(call: &Call) -> Outcome {
+    let (p, path) = call.root()?;
+    let filter = call.value("--name");
+    let (program, _) = p.checked(&path, &read_source(&path)?)?;
     let has_tests = program.tests.iter().any(|t| t.module.is_none());
     if !has_tests {
         println!("no tests");
-        return ExitCode::SUCCESS;
+        return Ok(ExitCode::SUCCESS);
     }
     let bodies: Vec<Body> = program
         .tests
         .iter()
-        .filter(|t| t.module.is_none() && filter.as_deref().is_none_or(|s| t.name.contains(s)))
+        .filter(|t| t.module.is_none() && filter.is_none_or(|s| t.name.contains(s)))
         .map(|t| Body {
             name: t.name.clone(),
             body: t.body.clone(),
             line: t.line,
         })
         .collect();
-    bodies_wasm(path, &program, "test", &bodies)
+    Ok(bodies_wasm(&path, &program, "test", &bodies))
 }
 
 /// `vyrn bench`: runs the root file's `bench` blocks in declaration order.
@@ -3188,70 +3236,33 @@ fn test_cmd(path: &str, rest: &[String]) -> ExitCode {
 /// - `--compare <baseline.json>`: see [`bench_compare`].
 ///
 /// `--check` excludes `--json` and `--compare`.
-fn bench_cmd(path: &str, rest: &[String]) -> ExitCode {
-    let mut filter: Option<String> = None;
-    let mut check = false;
-    let mut json = false;
-    let mut compare: Option<String> = None;
-    let mut threshold: f64 = 1.5;
-    let mut ungate: Option<String> = None;
-    let mut i = 0;
-    while i < rest.len() {
-        if rest[i] == "--name" && i + 1 < rest.len() {
-            filter = Some(rest[i + 1].clone());
-            i += 2;
-        } else if rest[i] == "--check" {
-            check = true;
-            i += 1;
-        } else if rest[i] == "--json" {
-            json = true;
-            i += 1;
-        } else if rest[i] == "--compare" && i + 1 < rest.len() {
-            compare = Some(rest[i + 1].clone());
-            i += 2;
-        } else if rest[i] == "--ungate" && i + 1 < rest.len() {
-            ungate = Some(rest[i + 1].clone());
-            i += 2;
-        } else if rest[i] == "--threshold" && i + 1 < rest.len() {
-            match rest[i + 1].parse::<f64>() {
-                Ok(t) if t > 0.0 => threshold = t,
-                _ => {
-                    eprintln!("bench: --threshold needs a positive number");
-                    return ExitCode::from(2);
-                }
-            }
-            i += 2;
-        } else {
-            eprintln!("bench: unexpected argument `{}`", rest[i]);
-            return ExitCode::from(2);
-        }
-    }
-
+fn bench_cmd(call: &Call) -> Outcome {
+    let filter = call.value("--name");
+    let (check, json, compare) = (
+        call.has("--check"),
+        call.has("--json"),
+        call.value("--compare"),
+    );
+    let threshold = match call.parsed::<f64>("--threshold", "a positive number")? {
+        None => 1.5,
+        Some(t) if t > 0.0 => t,
+        Some(_) => return Err(call.refuse("--threshold needs a positive number")),
+    };
     if check && (json || compare.is_some()) {
-        eprintln!("bench: --check cannot be combined with --json or --compare");
-        return ExitCode::from(2);
+        return Err(call.refuse("--check cannot be combined with --json or --compare"));
     }
 
-    let source = match std::fs::read_to_string(path) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("error: cannot read {path}: {e}");
-            return ExitCode::from(2);
-        }
-    };
-    let (program, _) = match loaded(path, &source) {
-        Ok(p) => p,
-        Err(code) => return code,
-    };
+    let (p, path) = call.root()?;
+    let (program, _) = p.checked(&path, &read_source(&path)?)?;
 
-    let matches = |name: &str| filter.as_deref().is_none_or(|sub| name.contains(sub));
+    let matches = |name: &str| filter.is_none_or(|sub| name.contains(sub));
     let has_selected = program
         .benches
         .iter()
         .any(|b| b.module.is_none() && matches(&b.name));
     if !has_selected {
         println!("no benches");
-        return ExitCode::SUCCESS;
+        return Ok(ExitCode::SUCCESS);
     }
 
     if check {
@@ -3265,54 +3276,41 @@ fn bench_cmd(path: &str, rest: &[String]) -> ExitCode {
                 line: b.line,
             })
             .collect();
-        return bodies_wasm(path, &program, "bench", &bodies);
+        return Ok(bodies_wasm(&path, &program, "bench", &bodies));
     }
     if let Some(baseline) = compare {
-        return bench_compare(
-            path,
-            filter.as_deref(),
-            &baseline,
-            threshold,
-            ungate.as_deref(),
-        );
+        let ungate = call.value("--ungate");
+        return Ok(bench_compare(
+            &p, &path, filter, baseline, threshold, ungate,
+        ));
     }
-    let (code, _) = bench_native(path, filter.as_deref(), json, false);
-    code
+    let (code, _) = bench_native(&p, &path, filter, json, false)?;
+    Ok(code)
 }
 
 /// Lifts the selected bench bodies to functions, replaces `main` with a
 /// `std/bench` harness, builds it on the native route and runs it. With
 /// `capture`, returns the harness's stdout.
 fn bench_native(
+    p: &Project,
     path: &str,
     filter: Option<&str>,
     json: bool,
     capture: bool,
-) -> (ExitCode, Option<String>) {
+) -> Result<(ExitCode, Option<String>), ExitCode> {
     use vyrn_frontend::ast::{Block, Expr, Id, Stmt, Type};
 
     // The harness import is appended, so every original line keeps its number.
     // One load, not two: the loader's name-privacy rename works only across
     // modules it sees in one load, and a merged second load bound `std/bench`'s
     // private calls to a user function of the same name.
-    let source = match std::fs::read_to_string(path) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("error: cannot read {path}: {e}");
-            return (ExitCode::from(2), None);
-        }
-    };
-    let (mut program, _) = match loaded(
-        path,
-        &format!(
-            "{source}
+    let source = read_source(path)?;
+    let source = format!(
+        "{source}
 import {{ benchOne }} from \"std/bench\"
 "
-        ),
-    ) {
-        Ok(p) => p,
-        Err(code) => return (code, None),
-    };
+    );
+    let (mut program, _) = p.checked(path, &source)?;
 
     let selected: Vec<vyrn_frontend::ast::NamedBlock> = program
         .benches
@@ -3449,13 +3447,7 @@ import {{ benchOne }} from \"std/bench\"
 
     // The route and target `vyrn build` ships, so the timing describes the
     // artifact.
-    let target = match native_target_for(path) {
-        Ok(t) => t,
-        Err(e) => {
-            eprintln!("error: {e}");
-            return (ExitCode::FAILURE, None);
-        }
-    };
+    let target = p.native_target()?;
     let stem = Path::new(path)
         .file_stem()
         .and_then(|s| s.to_str())
@@ -3470,7 +3462,7 @@ import {{ benchOne }} from \"std/bench\"
     ));
     if let Err(e) = std::fs::create_dir_all(&dir) {
         eprintln!("error: cannot create temp dir {}: {e}", dir.display());
-        return (ExitCode::FAILURE, None);
+        return Err(ExitCode::FAILURE);
     }
     let exe_name = if cfg!(windows) {
         format!("{stem}.exe")
@@ -3482,7 +3474,7 @@ import {{ benchOne }} from \"std/bench\"
     let built = build_wasm2c(path, &program, world, &out_path.to_string_lossy(), target);
     if built.is_err() {
         let _ = std::fs::remove_dir_all(&dir);
-        return (ExitCode::FAILURE, None);
+        return Err(ExitCode::FAILURE);
     }
     // `VYRN_BENCH_KEEP` leaves the temp dir (the wasm, the C, the binary) for a
     // debugger: a binary that faults dies before its report line.
@@ -3510,7 +3502,7 @@ import {{ benchOne }} from \"std/bench\"
                     out_path.display()
                 );
                 cleanup(&dir);
-                return (ExitCode::FAILURE, None);
+                return Err(ExitCode::FAILURE);
             }
         }
     } else {
@@ -3522,12 +3514,12 @@ import {{ benchOne }} from \"std/bench\"
                     out_path.display()
                 );
                 cleanup(&dir);
-                return (ExitCode::FAILURE, None);
+                return Err(ExitCode::FAILURE);
             }
         }
     };
     cleanup(&dir);
-    (ExitCode::from(code), out)
+    Ok((ExitCode::from(code), out))
 }
 
 /// The bench names an ungate file lists: one per line, `#` starts a comment.
@@ -3580,6 +3572,7 @@ fn baseline_is_placeholder(doc: &vyrn_frontend::schema::Json) -> bool {
 /// benches and compares each min against the baseline's, corrected by
 /// [`bench_host_scale`]. Only a `Verdict::Regressed` fails the command.
 fn bench_compare(
+    p: &Project,
     path: &str,
     filter: Option<&str>,
     baseline_path: &str,
@@ -3614,7 +3607,10 @@ fn bench_compare(
         }
     };
 
-    let (run_code, captured) = bench_native(path, filter, true, true);
+    let (run_code, captured) = match bench_native(p, path, filter, true, true) {
+        Ok(run) => run,
+        Err(code) => return code,
+    };
     let run_json = match captured {
         Some(j) => j,
         None => return run_code, // the run failed; its error already printed
@@ -4070,89 +4066,12 @@ fn serve_wasm_call(res: &mut wasmrun::Resident, call: ServeCall) -> Result<Serve
 
 /// `vyrn serve [file] [--port N] [--workers N]`: an HTTP/1.1 host on `std::net`
 /// running the file's `handle`, by default on port 8080. See [`serve_loop`].
-fn serve_cmd(path: &str, rest: &[String]) -> ExitCode {
-    let mut port: u16 = 8080;
-    let mut workers: Option<usize> = None;
-    let mut i = 0;
-    while i < rest.len() {
-        if rest[i] == "--port" && i + 1 < rest.len() {
-            match rest[i + 1].parse::<u16>() {
-                Ok(p) => port = p,
-                Err(_) => {
-                    eprintln!("serve: --port needs a number in 0..=65535");
-                    return ExitCode::from(2);
-                }
-            }
-            i += 2;
-        } else if rest[i] == "--workers" && i + 1 < rest.len() {
-            match rest[i + 1].parse::<usize>() {
-                Ok(n) if n >= 1 => workers = Some(n),
-                _ => {
-                    eprintln!("serve: --workers needs a positive number");
-                    return ExitCode::from(2);
-                }
-            }
-            i += 2;
-        } else {
-            eprintln!("serve: unexpected argument `{}`", rest[i]);
-            return ExitCode::from(2);
-        }
-    }
-
-    let source = match std::fs::read_to_string(path) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("error: cannot read {path}: {e}");
-            return ExitCode::from(2);
-        }
-    };
-    // Appended before the load, so it is checked and every program line keeps
-    // its number.
-    let source = format!("{source}\n{SERVE_SHIM}");
-    let (mut program, _) = match loaded(path, &source) {
-        Ok(p) => p,
-        Err(code) => return code,
-    };
-    serve_rewrite(&mut program);
-    let program = program;
-    let world = vyrn_lower::analyze(&program);
-
-    if !has_served_handle(&program) {
-        eprintln!("error: `vyrn serve` needs `fn handle(req: Request) -> Response` in {path}");
-        return ExitCode::FAILURE;
-    }
-
-    // Bind before running `main`, so a port clash fails first. `--port 0` lets
-    // the OS pick.
-    let listener = match std::net::TcpListener::bind(("127.0.0.1", port)) {
-        Ok(l) => l,
-        Err(e) => {
-            eprintln!("error: cannot bind port {port}: {e}");
-            return ExitCode::FAILURE;
-        }
-    };
-    let actual_port = listener.local_addr().map(|a| a.port()).unwrap_or(port);
-    let file_label = path.to_string();
-
-    serve_loop(
-        &program,
-        &world,
-        vec![path.to_string()],
-        listener,
-        workers,
-        None,
-        "serve",
-        move |n| {
-            use std::io::Write;
-            let _ = std::io::stdout().flush();
-            match n {
-                Some(n) => eprintln!(
-                    "serving {file_label} on http://localhost:{actual_port} with {n} workers"
-                ),
-                None => eprintln!("serving {file_label} on http://localhost:{actual_port}"),
-            }
-        },
-    )
+fn serve_cmd(call: &Call) -> Outcome {
+    let (p, path) = call.root()?;
+    serve_loop(call, &p, &path, None, |port, n| match n {
+        Some(n) => eprintln!("serving {path} on http://localhost:{port} with {n} workers"),
+        None => eprintln!("serving {path} on http://localhost:{port}"),
+    })
 }
 
 /// Whether the program has `fn handle(req: Request) -> Response`, exactly. The
@@ -4168,28 +4087,53 @@ fn has_served_handle(program: &vyrn_frontend::ast::Program) -> bool {
     })
 }
 
-/// The serving loop of `vyrn serve` and `vyrn dev`.
+/// The one serving path of `vyrn serve` and `vyrn dev`: loads `root` with the
+/// [`SERVE_SHIM`], binds `--port`, then answers on it until the process ends.
 ///
 /// Without `--workers`, one resident instance answers every request, one at a
 /// time: `_start` runs `main` once and the store stays open, so each request
 /// sees what `main` wrote. With it, [`serve_pool_wasm`] answers, behind
 /// [`refuse_workers_if_stateful`].
 ///
-/// `banner` prints once `main` has run, given the worker count. `assets` is
-/// `vyrn dev`'s static tree.
+/// `banner` prints once `main` has run, given the bound port and the worker
+/// count. `assets` is `vyrn dev`'s static tree.
 fn serve_loop(
-    program: &vyrn_frontend::ast::Program,
-    world: &std::sync::Arc<vyrn_lower::World>,
-    argv: Vec<String>,
-    listener: std::net::TcpListener,
-    workers: Option<usize>,
+    call: &Call,
+    p: &Project,
+    root: &str,
     assets: Option<&DevAssets>,
-    what: &str,
-    banner: impl Fn(Option<usize>) + Send,
-) -> ExitCode {
-    if let Some(n) = workers {
+    banner: impl Fn(u16, Option<usize>) + Send,
+) -> Outcome {
+    let port = call
+        .parsed("--port", "a number in 0..=65535")?
+        .unwrap_or(8080);
+    let workers = call.parsed::<std::num::NonZeroUsize>("--workers", "a positive number")?;
+    let what = call.cmd.name;
+    // Appended before the load, so it is checked and every program line keeps
+    // its number.
+    let source = format!("{}\n{SERVE_SHIM}", read_source(root)?);
+    let (mut program, _) = p.checked(root, &source)?;
+    serve_rewrite(&mut program);
+    let (program, world) = (&program, &vyrn_lower::analyze(&program));
+    if !has_served_handle(program) {
+        eprintln!("error: `vyrn {what}` needs `fn handle(req: Request) -> Response` in {root}");
+        return Err(ExitCode::FAILURE);
+    }
+    // Bound before `main` runs, so a port clash fails first.
+    let listener = std::net::TcpListener::bind(("127.0.0.1", port)).map_err(|e| {
+        eprintln!("error: cannot bind port {port}: {e}");
+        ExitCode::FAILURE
+    })?;
+    let port = listener.local_addr().map_or(port, |a| a.port());
+    let banner = move |n| {
+        use std::io::Write;
+        let _ = std::io::stdout().flush();
+        banner(port, n);
+    };
+    let argv = vec![root.to_string()];
+    if let Some(n) = workers.map(usize::from) {
         if let Some(exit) = refuse_workers_if_stateful(program, world) {
-            return exit;
+            return Err(exit);
         }
         let (tx, rx) = std::sync::mpsc::channel::<std::net::TcpStream>();
         let rx = std::sync::Mutex::new(rx);
@@ -4216,39 +4160,22 @@ fn serve_loop(
             }
             Ok(())
         };
-        return match serve_pool_wasm(program, world, argv, n, each, listen) {
-            Ok(()) => ExitCode::SUCCESS,
-            Err(e) => {
-                eprintln!("error: {e}");
-                ExitCode::FAILURE
-            }
-        };
+        failed(serve_pool_wasm(program, world, argv, n, each, listen))?;
+        return Ok(ExitCode::SUCCESS);
     }
-    let bytes = match vyrn_codegen::direct::compile(program, world.clone()) {
-        Ok(b) => b,
-        Err(e) => {
-            eprintln!("error: {e}");
-            return ExitCode::FAILURE;
-        }
-    };
+    let bytes = failed(vyrn_codegen::direct::compile(program, world.clone()))?;
     let run = wasmrun::Run {
         argv,
-        stdin_prefix: Vec::new(),
-        capture_stdout: false,
         // Read per call, so a trap logs its wording, not a wasm backtrace.
         capture_stderr: true,
-        meter: false,
+        ..Default::default()
     };
-    let mut res = match wasmrun::start(&bytes, &run, None) {
-        Ok((res, 0)) => res,
-        Ok((mut res, code)) => {
+    let mut res = match failed(wasmrun::start(&bytes, &run, None))? {
+        (res, 0) => res,
+        (mut res, code) => {
             eprint!("{}", res.drain_err());
             eprintln!("error: main returned {code}, aborting {what}");
-            return ExitCode::FAILURE;
-        }
-        Err(e) => {
-            eprintln!("error: {e}");
-            return ExitCode::FAILURE;
+            return Err(ExitCode::FAILURE);
         }
     };
     eprint!("{}", res.drain_err());
@@ -4260,7 +4187,7 @@ fn serve_loop(
             Err(_) => continue,
         }
     }
-    ExitCode::SUCCESS
+    Ok(ExitCode::SUCCESS)
 }
 
 /// The `--workers` pool: one resident instance per worker thread, over one
@@ -4285,10 +4212,8 @@ where
     use vyrn_frontend::ast::{Block, Expr, Id, Stmt};
     let run = wasmrun::Run {
         argv,
-        stdin_prefix: Vec::new(),
-        capture_stdout: false,
         capture_stderr: true,
-        meter: false,
+        ..Default::default()
     };
     let bytes = vyrn_codegen::direct::compile(program, world.clone())?;
     let (mut setup, code) = wasmrun::start(&bytes, &run, None)?;
@@ -4370,39 +4295,11 @@ fn refuse_workers_if_stateful(
 /// `vyrn dev [--port N] [--workers N]`: builds the manifest's `client` to wasm,
 /// then serves the `server` root's `handle` with static assets in front (see
 /// [`dev_static_path`]). `public` defaults to `public`.
-fn dev_cmd(rest: &[String]) -> ExitCode {
-    let mut port: u16 = 8080;
-    let mut workers: Option<usize> = None;
-    let mut i = 0;
-    while i < rest.len() {
-        if rest[i] == "--port" && i + 1 < rest.len() {
-            match rest[i + 1].parse::<u16>() {
-                Ok(p) => port = p,
-                Err(_) => {
-                    eprintln!("dev: --port needs a number in 0..=65535");
-                    return ExitCode::from(2);
-                }
-            }
-            i += 2;
-        } else if rest[i] == "--workers" && i + 1 < rest.len() {
-            match rest[i + 1].parse::<usize>() {
-                Ok(n) if n >= 1 => workers = Some(n),
-                _ => {
-                    eprintln!("dev: --workers needs a positive number");
-                    return ExitCode::from(2);
-                }
-            }
-            i += 2;
-        } else {
-            eprintln!("dev: unexpected argument `{}`", rest[i]);
-            return ExitCode::from(2);
-        }
-    }
-
-    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let Some(manifest) = nearest_manifest(&cwd) else {
+fn dev_cmd(call: &Call) -> Outcome {
+    let p = Project::of(None, call.flags)?;
+    let Some(manifest) = &p.manifest else {
         eprintln!("error: `vyrn dev` needs a vyrn.json with `server` and `client` keys");
-        return ExitCode::FAILURE;
+        return Err(ExitCode::FAILURE);
     };
     let doc = &manifest.doc;
     use vyrn_frontend::schema::Json;
@@ -4414,11 +4311,11 @@ fn dev_cmd(rest: &[String]) -> ExitCode {
     };
     let Some(server_rel) = get_str("server") else {
         eprintln!("error: vyrn.json is missing a `\"server\"` entry (the module with `handle`)");
-        return ExitCode::FAILURE;
+        return Err(ExitCode::FAILURE);
     };
     let Some(client_rel) = get_str("client") else {
         eprintln!("error: vyrn.json is missing a `\"client\"` entry (the wasm module to build)");
-        return ExitCode::FAILURE;
+        return Err(ExitCode::FAILURE);
     };
     let public_rel = get_str("public").unwrap_or_else(|| "public".to_string());
     let server_path = format!("{}/{server_rel}", manifest.dir);
@@ -4427,94 +4324,40 @@ fn dev_cmd(rest: &[String]) -> ExitCode {
 
     let Some(web_dir) = web_root() else {
         eprintln!("error: could not find the `web/` runtime directory (set VYRN_WEB)");
-        return ExitCode::FAILURE;
+        return Err(ExitCode::FAILURE);
     };
 
     let dev_dir = PathBuf::from(format!("{}/.vyrn-dev", manifest.dir));
     if let Err(e) = std::fs::create_dir_all(&dev_dir) {
         eprintln!("error: cannot create {}: {e}", dev_dir.display());
-        return ExitCode::FAILURE;
+        return Err(ExitCode::FAILURE);
     }
     let wasm_out = dev_dir.join("client.wasm");
     let _ = std::fs::remove_file(&wasm_out); // a stale wasm must not mask a failed build
     eprintln!("dev: building client {client_rel} -> wasm");
-    let build_code = build(
-        &client_path,
-        &[
-            "--target".to_string(),
-            "wasm".to_string(),
-            "-o".to_string(),
-            wasm_out.to_string_lossy().into_owned(),
-        ],
-    );
+    let built = build_to(&p, &client_path, Some(&wasm_out.to_string_lossy()), true);
     if !wasm_out.is_file() {
-        return build_code;
+        return built;
     }
 
-    let source = match std::fs::read_to_string(&server_path) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("error: cannot read {server_path}: {e}");
-            return ExitCode::FAILURE;
-        }
-    };
-    let source = format!(
-        "{source}
-{SERVE_SHIM}"
-    );
-    let (mut program, _) = match loaded(&server_path, &source) {
-        Ok(p) => p,
-        Err(code) => return code,
-    };
-    serve_rewrite(&mut program);
-    let program = program;
-    let world = vyrn_lower::analyze(&program);
-    if !has_served_handle(&program) {
-        eprintln!(
-            "error: the server root `{server_rel}` needs `fn handle(req: Request) -> Response`"
-        );
-        return ExitCode::FAILURE;
-    }
-
-    let listener = match std::net::TcpListener::bind(("127.0.0.1", port)) {
-        Ok(l) => l,
-        Err(e) => {
-            eprintln!("error: cannot bind port {port}: {e}");
-            return ExitCode::FAILURE;
-        }
-    };
-    let actual_port = listener.local_addr().map(|a| a.port()).unwrap_or(port);
     let assets = DevAssets {
         public_dir,
         web_dir,
         wasm: wasm_out,
     };
-
     let public_shown = assets.public_dir.display().to_string();
-
-    serve_loop(
-        &program,
-        &world,
-        vec![server_path.clone()],
-        listener,
-        workers,
-        Some(&assets),
-        "dev",
-        move |n| {
-            use std::io::Write;
-            let _ = std::io::stdout().flush();
-            eprintln!("dev: serving {server_rel} on http://localhost:{actual_port}");
-            eprintln!("dev:   /rpc/*         -> server `handle` (rpcHandle + your pages)");
-            eprintln!("dev:   /client.wasm   -> built from {client_rel}");
-            eprintln!(
-                "dev:   /vyrn-runtime/ -> web runtimes (wasi-min.js, vyrn-rpc.js, vyrn-query.js)"
-            );
-            eprintln!("dev:   /              -> {public_shown}/");
-            if let Some(n) = n {
-                eprintln!("dev:   workers        -> {n}");
-            }
-        },
-    )
+    serve_loop(call, &p, &server_path, Some(&assets), |port, n| {
+        eprintln!("dev: serving {server_rel} on http://localhost:{port}");
+        eprintln!("dev:   /rpc/*         -> server `handle` (rpcHandle + your pages)");
+        eprintln!("dev:   /client.wasm   -> built from {client_rel}");
+        eprintln!(
+            "dev:   /vyrn-runtime/ -> web runtimes (wasi-min.js, vyrn-rpc.js, vyrn-query.js)"
+        );
+        eprintln!("dev:   /              -> {public_shown}/");
+        if let Some(n) = n {
+            eprintln!("dev:   workers        -> {n}");
+        }
+    })
 }
 
 /// Static asset roots for `vyrn dev`.
@@ -5239,9 +5082,21 @@ fn write_response_vary(
     let _ = stream.flush();
 }
 
-/// `vyrn run`: compiles the program and runs it in the embedded wasmtime; the
-/// exit code is the guest's. `profile` is the load's time under
-/// `vyrn run --profile` (see [`wasm_profile`]).
+/// `vyrn run [file] [args...]`. Generators run in the load, so its time is the
+/// first row of the table `run_wasm` prints.
+fn run_cmd(call: &Call) -> Outcome {
+    let (p, path) = call.root()?;
+    let clock = std::time::Instant::now();
+    let (program, world) = p.checked(&path, &read_source(&path)?)?;
+    let load = clock.elapsed();
+    instantiable(&program, &world)?;
+    let profile = call.flags.profile.then_some(load);
+    Ok(run_wasm(&path, &program, world, &call.pos, profile))
+}
+
+/// Compiles the program and runs it in the embedded wasmtime; the exit code is
+/// the guest's. `profile` is the load's time under `vyrn run --profile` (see
+/// [`wasm_profile`]).
 fn run_wasm(
     path: &str,
     program: &vyrn_frontend::ast::Program,
@@ -5262,10 +5117,8 @@ fn run_wasm(
     argv.extend(prog_args.iter().cloned());
     let run = wasmrun::Run {
         argv,
-        stdin_prefix: Vec::new(),
-        capture_stdout: false,
-        capture_stderr: false,
         meter: profile.is_some(),
+        ..Default::default()
     };
     match wasmrun::run(&bytes, run) {
         Ok(out) => {
@@ -5384,11 +5237,9 @@ fn bodies_wasm(
 
     let run = wasmrun::Run {
         argv: vec![path.to_string()],
-        stdin_prefix: Vec::new(),
-        capture_stdout: false,
         // Read per body: a trap's wording is the `FAILED:` message.
         capture_stderr: true,
-        meter: false,
+        ..Default::default()
     };
     let gen = generation.then(|| vyrn_genwasm::GenState::new(&prog));
     let mut res = match wasmrun::start(&bytes, &run, gen) {
@@ -5433,60 +5284,30 @@ fn bodies_wasm(
     }
 }
 
-fn build(path: &str, rest: &[String]) -> ExitCode {
-    let mut out: Option<String> = None;
-    let mut wasm = false;
-    let mut i = 0;
-    while i < rest.len() {
-        if rest[i] == "-o" && i + 1 < rest.len() {
-            out = Some(rest[i + 1].clone());
-            i += 2;
-        } else if rest[i] == "--target" && i + 1 < rest.len() {
-            match rest[i + 1].as_str() {
-                "wasm" | "wasm32-wasi" => wasm = true,
-                other => {
-                    eprintln!("build: unknown target `{other}` (expected `wasm`)");
-                    return ExitCode::from(2);
-                }
-            }
-            i += 2;
-        } else {
-            eprintln!("build: unexpected argument `{}`", rest[i]);
-            return ExitCode::from(2);
+fn build(call: &Call) -> Outcome {
+    let wasm = match call.value("--target") {
+        None => false,
+        Some("wasm" | "wasm32-wasi") => true,
+        Some(other) => {
+            return Err(call.refuse(&format!("unknown target `{other}` (expected `wasm`)")))
         }
-    }
+    };
+    let (p, path) = call.root()?;
+    build_to(&p, &path, call.value("-o"), wasm)
+}
 
+/// Builds `path` to `out`, by default its stem in the working directory: the
+/// module itself under `wasm`, else a native executable.
+fn build_to(p: &Project, path: &str, out: Option<&str>, wasm: bool) -> Outcome {
     // Before the compile, so a misspelled `nativeTarget` fails first. A wasm
     // build ignores it.
-    let native_target = if wasm {
-        None
-    } else {
-        match native_target_for(path) {
-            Ok(t) => Some(t),
-            Err(e) => {
-                eprintln!("error: {e}");
-                return ExitCode::from(2);
-            }
-        }
-    };
-
-    let source = match std::fs::read_to_string(path) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("error: cannot read {path}: {e}");
-            return ExitCode::from(2);
-        }
-    };
-
-    let (program, world) = match loaded(path, &source) {
-        Ok(p) => p,
-        Err(code) => return code,
-    };
+    let native_target = if wasm { None } else { Some(p.native_target()?) };
+    let (program, world) = p.checked(path, &read_source(path)?)?;
     let stem = Path::new(path)
         .file_stem()
         .and_then(|s| s.to_str())
         .unwrap_or("a");
-    let out_path = out.unwrap_or_else(|| {
+    let out_path = out.map(str::to_string).unwrap_or_else(|| {
         if wasm {
             format!("{stem}.wasm")
         } else if cfg!(windows) {
@@ -5499,37 +5320,17 @@ fn build(path: &str, rest: &[String]) -> ExitCode {
     // The emitter's module, written as is. The native route starts from the
     // same bytes.
     if wasm {
-        return match vyrn_codegen::direct::compile(&program, world) {
-            Ok(bytes) => match std::fs::write(&out_path, bytes) {
-                Ok(()) => {
-                    println!("wrote {out_path}");
-                    ExitCode::SUCCESS
-                }
-                Err(e) => {
-                    eprintln!("error: cannot write {out_path}: {e}");
-                    ExitCode::FAILURE
-                }
-            },
-            Err(e) => {
-                eprintln!("error: {e}");
-                ExitCode::FAILURE
-            }
-        };
-    }
-
-    match build_wasm2c(
-        path,
-        &program,
-        world,
-        &out_path,
-        native_target.unwrap_or(DEFAULT_NATIVE_TARGET),
-    ) {
-        Ok(()) => {
-            println!("wrote {out_path}");
-            ExitCode::SUCCESS
+        let bytes = failed(vyrn_codegen::direct::compile(&program, world))?;
+        if let Err(e) = std::fs::write(&out_path, bytes) {
+            eprintln!("error: cannot write {out_path}: {e}");
+            return Err(ExitCode::FAILURE);
         }
-        Err(()) => ExitCode::FAILURE,
+    } else {
+        let target = native_target.unwrap_or(DEFAULT_NATIVE_TARGET);
+        build_wasm2c(path, &program, world, &out_path, target).map_err(|()| ExitCode::FAILURE)?;
     }
+    println!("wrote {out_path}");
+    Ok(ExitCode::SUCCESS)
 }
 
 /// The native route: the program's wasm through wasm2c to C, compiled by clang
@@ -5695,6 +5496,38 @@ fn build_wasm2c(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `docs/tooling.md` names each command of the table as `` `vyrn <name>``,
+    /// names no other, and spells every flag the table declares.
+    #[test]
+    fn the_tooling_doc_indexes_every_command_and_flag() {
+        let doc = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../docs/tooling.md"
+        ))
+        .expect("docs/tooling.md");
+        let word = |c: char| c.is_ascii_lowercase() || c == '-';
+        let mut named: Vec<&str> = doc
+            .match_indices("`vyrn ")
+            .map(|(i, m)| &doc[i + m.len()..])
+            .map(|rest| &rest[..rest.find(|c| !word(c)).unwrap_or(rest.len())])
+            .filter(|w| !w.is_empty() && !w.starts_with('-'))
+            .collect();
+        named.sort();
+        named.dedup();
+        let mut commands: Vec<&str> = COMMANDS.iter().map(|c| c.name).collect();
+        commands.sort();
+        assert_eq!(named, commands, "docs/tooling.md and COMMANDS disagree");
+        let flags = GLOBAL_FLAGS
+            .iter()
+            .chain(COMMANDS.iter().flat_map(|c| c.flags));
+        for Flag(name, _, _) in flags {
+            let spelled = doc.match_indices(name).any(|(i, _)| {
+                !doc[i + name.len()..].starts_with(|c: char| c.is_alphanumeric() || c == '-')
+            });
+            assert!(spelled, "docs/tooling.md never spells {name}");
+        }
+    }
 
     fn table(entries: &[(&str, f64)]) -> Vec<(String, f64)> {
         entries.iter().map(|(n, m)| (n.to_string(), *m)).collect()
@@ -6115,16 +5948,17 @@ fn handle(req: Request) -> Response {
         let source = format!("{SRC}\n{SERVE_SHIM}");
         std::fs::write(&file, &source).unwrap();
         let key = file.to_string_lossy().replace('\\', "/");
-        let (mut program, _) = loaded(&key, &source).expect("the doors load and check");
+        let (mut program, _) = Project::of(Some(&key), GlobalFlags::default())
+            .and_then(|p| p.checked(&key, &source))
+            .expect("the doors load and check");
         serve_rewrite(&mut program);
         let world = vyrn_lower::analyze(&program);
         let bytes = vyrn_codegen::direct::compile(&program, world).expect("the doors compile");
         let run = wasmrun::Run {
             argv: vec![key.clone()],
-            stdin_prefix: Vec::new(),
             capture_stdout: true,
             capture_stderr: true,
-            meter: false,
+            ..Default::default()
         };
         let (mut res, code) = wasmrun::start(&bytes, &run, None).expect("start");
         assert_eq!(code, 0, "main exits 0");

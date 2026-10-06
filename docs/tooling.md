@@ -114,6 +114,8 @@ Runs the root file's `bench "name" { ... }` blocks in declaration order.
 - `--compare <baseline.json> [--threshold <factor>]`: compares each min with
   the baseline's, corrected for the host's speed, and fails only on a bench
   slower by more than the factor.
+- `--ungate <file>`: with `--compare`, names benches, one per line (`#` starts
+  a comment), whose regressions are reported and do not fail the command.
 
 `--check` excludes `--json` and `--compare`. The harness is imported from
 `std/bench` and loaded with the program once, never merged into it.
@@ -144,8 +146,9 @@ directory (default `public`) and the browser runtimes from `web/` in front.
 ### `vyrn fmt [file ...] [--check]`
 
 The canonical formatter: one style, no options. With no files it formats the
-project's `main` and its local imports. `--check` writes nothing, lists the
-files that would change and exits 1 if any would.
+project's `main` and its local imports; if that load fails, it formats `main`
+alone and exits 1. `--check` writes nothing, lists the files that would change
+and exits 1 if any would.
 
 The printer reads the token stream with comments and chooses only the
 whitespace between raw token texts. It sets indentation (4 spaces per brace
@@ -181,7 +184,8 @@ compile.
 - `vyrn why <file>`: the module's audience, the path segment that decided it,
   and every import chain that reaches it.
 - `vyrn why --contract <file>`: the module contract that governs the file and
-  each export's status against it. Exits 1 if the file has no role.
+  each export's status against it, as `std/contract` reports it. Exits 1 if the
+  file has no role.
 - `vyrn why --memory <file>`: per binding, whether it is reclaimed, how, and the
   reason when it is not. The LSP's hover and inlay hints use the same table and
   wording.
@@ -196,13 +200,13 @@ path the router mounts, with its source. It reads what generators wrote
 a path. `--json` attaches each route's declaration from the generator symbol
 maps.
 
-### `vyrn emit-*`: dumps to stdout
+### The `emit-*` commands dump to stdout
 
-- `emit-wat [file]`: the module `build --target wasm` writes, as WAT.
-- `emit-lowered [file]`: the named core the emitter reads, root module only.
+- `vyrn emit-wat [file]`: the module `build --target wasm` writes, as WAT.
+- `vyrn emit-lowered [file]`: the named core the emitter reads, root module only.
   The text is deterministic and starts with a version line; its format promises
   no stability, and nothing parses it.
-- `emit-gen [file] [--maps]`: the source of every module a generator import
+- `vyrn emit-gen [file] [--maps]`: the source of every module a generator import
   synthesizes, each under a `// ==== ... ====` banner naming its call site.
   `--maps` prints each module's symbol map as one JSON document per line, with
   the banners on stderr.

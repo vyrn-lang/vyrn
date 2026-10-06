@@ -19,9 +19,9 @@ pub fn is_member_type_param(name: &str) -> bool {
 }
 
 /// Rewrites every `Named(n)` in `ty` that [`is_member_type_param`] accepts into
-/// a [`Type::Param`]; the descent is [`crate::loader::type_nodes_mut`]'s.
+/// a [`Type::Param`].
 fn mark_member_type_params(ty: &mut Type) {
-    crate::loader::type_nodes_mut(ty, &mut |t| {
+    crate::types::walk_type_mut(ty, &mut |t| {
         if let Type::Named(n) = t {
             if is_member_type_param(n) {
                 *t = Type::Param(std::mem::take(n));
@@ -2371,9 +2371,6 @@ impl Parser {
             // The second mask: two 64-bit lanes are a different count and width.
             "F64x2" => Type::F64x2,
             "Mask64x2" => Type::Mask64x2,
-            // Point the removed unsized names at the sized spellings.
-            "Int" => return Err(refuse!("parse", self.line(), self.col(), IntUnsized)),
-            "Float" => return Err(refuse!("parse", self.line(), self.col(), FloatUnsized)),
             "Bool" => Type::Bool,
             "String" => Type::Str,
             "Unit" => Type::Unit,

@@ -77,7 +77,7 @@ fn loader_sections() -> Vec<Section> {
         sec("fn is_injected", Shared),
         sec("enum DeclKind", Shared),
         sec("fn resolve_aliases", Job),
-        sec("macro_rules! type_head_descent", Shared),
+        sec("fn type_heads", Shared),
         sec("crate::body_scope_descent!", Shared),
         sec("struct NsResolver", Job),
         sec("fn link", Job),
