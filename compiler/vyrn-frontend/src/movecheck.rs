@@ -63,11 +63,11 @@ pub fn hands_back(name: &str) -> bool {
 }
 
 /// Whether a call to `name` may return storage one of its arguments holds.
-/// `@concat`, `@str`, `@copy` and a seeded row that neither hands back, views
-/// nor lends build a fresh value. Anything else may, which errs toward a leak.
-/// `places` are the program's user projection names.
+/// A row marked [`crate::prelude::Builtin::fresh`] and a seeded row that neither
+/// hands back, views nor lends build a fresh value. Anything else may, which
+/// errs toward a leak. `places` are the program's user projection names.
 pub fn call_may_forward(name: &str, places: &HashSet<String>) -> bool {
-    if matches!(name, "@concat" | "@str" | "@copy") {
+    if crate::prelude::builtin(name).is_some_and(|b| b.fresh) {
         return false;
     }
     // `@push`'s row returns `Array<T>`, not a bare parameter, yet hands its

@@ -223,6 +223,9 @@ pub struct Builtin {
     /// alone. `None` for a row typed by its `sig`, by a hand arm, or not
     /// typed as a call.
     pub typed: Option<Typed>,
+    /// Whether the result is built afresh: it shares no storage with an
+    /// operand ([`crate::movecheck::call_may_forward`]).
+    pub fresh: bool,
 }
 
 /// The refusal of an operand found at another type than its parameter's.
@@ -373,6 +376,12 @@ impl Builtin {
             t.stops = n;
         }
         self
+    }
+    fn fresh(self) -> Self {
+        Builtin {
+            fresh: true,
+            ..self
+        }
     }
     fn resizes(self, length: Length, elements: Elements) -> Self {
         Builtin {
@@ -648,6 +657,7 @@ fn table() -> Vec<Builtin> {
             ))
             .method("toString", &[Shape::Str, Scalar])
             .spec(Spec::Renders(Str))
+            .fresh()
             .hover("x.toString() -> String — render a number, Bool, or String"),
         // The number of Unicode scalar values, O(n). Method-only, so it has no
         // free spelling to import; it stays routed.
@@ -672,6 +682,7 @@ fn table() -> Vec<Builtin> {
             .takes(&[1], takes_none)
             .method("copy", &[Shape::Str, Array, ArrayN, SmallArray, Map, Record, Enum])
             .spec(Spec::OwnType)
+            .fresh()
             .hover("x.copy() -> T — a value of the receiver's type that shares no heap with it; deep and structural. A handle copies as the value it is, so the copy names the same thing"),
         // Insert-or-add in one probe. The key is read: a miss copies it in.
         b("@tally")
@@ -911,7 +922,7 @@ fn table() -> Vec<Builtin> {
             .spec(Spec::Rebuilds)
             .resizes(Length::Unknown, Elements::KeepsEachPosition),
         // String `a + b` and interpolation: copies both and allocates.
-        b("@concat").sig(row(
+        b("@concat").fresh().sig(row(
             "@concat",
             &[],
             &[("a", Read, Str), ("b", Read, Str)],
