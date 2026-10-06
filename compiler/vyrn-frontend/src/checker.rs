@@ -1600,17 +1600,14 @@ struct Cx<'a> {
 /// One body's typing state over a [`Cx`], which it reads through `Deref`.
 struct Checker<'a> {
     cx: &'a Cx<'a>,
-    /// Bounds of the function being checked.
-    cur_bounds: RefCell<HashMap<String, Vec<String>>>,
+    /// The function being checked ([`Checker::enter`]).
+    frame: RefCell<Frame>,
     /// Scope depths at each enclosing `region` entry. A binding below the top
     /// depth is outer: a heap value assigned to it would dangle when the
     /// region frees.
     region_floor: RefCell<Vec<usize>>,
     /// Everything typing has added so far ([`Typed`]).
     acc: RefCell<Typed>,
-    /// Whether the function being checked is the root module's. Only the root
-    /// is indexed: two modules share a position.
-    in_root: std::cell::Cell<bool>,
     /// A body's statement errors, cleared per function. A failed `let` or
     /// `for` binds its name to [`Type::Err`] so later uses do not cascade.
     errors: RefCell<Vec<Diagnostic>>,
@@ -1622,20 +1619,11 @@ struct Checker<'a> {
     in_test: RefCell<bool>,
     /// Inside a `bench` body: `blackBox` is legal, as in a `test`.
     in_bench: RefCell<bool>,
-    /// Inside a `gen fn` body: `Code` and the code-quote builtins are legal.
-    /// A `gen fn` body is never emitted.
-    in_gen: RefCell<bool>,
     /// Whether the unit [`Checker::unit`] runs typed a node [`Checker::judged`],
     /// or read a name typed [`Type::Err`].
     unknown: std::cell::Cell<bool>,
-    /// The module being checked; `None` is the root. With `shadows`
-    /// ([`ast::Program::surface_shadows`], filled by the loader), it decides
-    /// whether `render`, `rawAt`, `raw` or `lex` is the builtin or a function
-    /// this module declares or imports.
-    here: RefCell<Option<String>>,
     /// The line of the enclosing statement, for a literal, which carries none.
     stmt_line: RefCell<usize>,
-    cur_fn: RefCell<String>,
     /// The source body being checked, when the check records: every name
     /// lookup then records a read row for it ([`Checker::reading`]).
     reader: std::cell::Cell<Option<SourceBody>>,
@@ -1651,6 +1639,40 @@ struct Checker<'a> {
     /// The per-body reuse, on the loading thread's checker when the host
     /// rechecks per function ([`Cx::record_reads`]).
     recheck: Option<recheck::Session<'a>>,
+}
+
+/// What the checker knows of the function it is typing. [`Checker::enter`]
+/// replaces it whole at the start of a body and nothing restores it, so
+/// between two bodies it is the last one's.
+#[derive(Default)]
+struct Frame {
+    /// Inside a `gen fn` body: `Code` and the code-quote builtins are legal.
+    /// A `gen fn` body is never emitted.
+    in_gen: bool,
+    /// The module being checked; `None` is the root. With `shadows`
+    /// ([`ast::Program::surface_shadows`], filled by the loader), it decides
+    /// whether `render`, `rawAt`, `raw` or `lex` is the builtin or a function
+    /// this module declares or imports.
+    here: Option<String>,
+    /// Whether the module is the root. Only the root is indexed: two modules
+    /// share a position.
+    in_root: bool,
+    /// The function's type parameters and their bounds.
+    bounds: HashMap<String, Vec<String>>,
+    /// The function's name.
+    name: String,
+}
+
+impl Frame {
+    fn of(f: &Function, host: Host) -> Frame {
+        Frame {
+            in_gen: in_gen_of(f, host),
+            here: f.module.clone(),
+            in_root: f.module.is_none(),
+            bounds: f.type_bounds.clone(),
+            name: f.name.clone(),
+        }
+    }
 }
 
 impl<'a> std::ops::Deref for Checker<'a> {
@@ -1761,19 +1783,15 @@ impl<'a> Checker<'a> {
     fn new(cx: &'a Cx<'a>, recording: bool) -> Checker<'a> {
         Checker {
             cx,
-            cur_bounds: Default::default(),
+            frame: Default::default(),
             region_floor: Default::default(),
             acc: RefCell::new(Typed::empty(recording)),
-            in_root: Default::default(),
             errors: Default::default(),
             globals: Default::default(),
             in_test: Default::default(),
             in_bench: Default::default(),
-            in_gen: Default::default(),
             unknown: Default::default(),
-            here: Default::default(),
             stmt_line: Default::default(),
-            cur_fn: Default::default(),
             reader: Default::default(),
             pending_subst: Default::default(),
             pending_call: Default::default(),
@@ -2175,8 +2193,8 @@ impl<'a> Checker<'a> {
     /// The open parameters in `ty`, by written name, in order, without
     /// repeats.
     fn open_params(&self, ty: &Type) -> Vec<String> {
-        let cur = self.cur_fn.borrow();
-        let rigid = self.type_params(&cur);
+        let cur = self.frame.borrow();
+        let rigid = self.type_params(&cur.name);
         let mut out: Vec<String> = Vec::new();
         walk_type(ty, &mut |t| {
             if let Type::Param(n) = t {
@@ -2286,13 +2304,13 @@ impl<'a> Checker<'a> {
             // `Code` and `Token` are builtin and generation-only, so no backend
             // sees them. A user declaration of the name wins.
             Type::Named(n) if n == "Code" && self.decl("Code").is_none() => {
-                if !*self.in_gen.borrow() {
+                if !self.frame.borrow().in_gen {
                     return Err(cerr!(line, GenOnlyType, name = "Code"));
                 }
                 return Ok(());
             }
             Type::Named(n) if n == "Token" && self.decl("Token").is_none() => {
-                if !*self.in_gen.borrow() {
+                if !self.frame.borrow().in_gen {
                     return Err(cerr!(line, GenOnlyType, name = "Token"));
                 }
                 return Ok(());
@@ -2623,8 +2641,8 @@ impl<'a> Checker<'a> {
     /// Whether the current function's parameter `t` carries `bound`, where
     /// `Num` implies `Ord` and `Ord` implies `Eq`.
     fn param_has_bound(&self, t: &str, bound: &str) -> bool {
-        let bounds = self.cur_bounds.borrow();
-        let bs = match bounds.get(t) {
+        let frame = self.frame.borrow();
+        let bs = match frame.bounds.get(t) {
             Some(b) => b,
             None => return false,
         };
@@ -2845,8 +2863,7 @@ impl<'a> Checker<'a> {
         self.reading(body);
         // Signature validation runs outside `function()` and must accept a
         // `Code` type in a `gen fn` signature.
-        *self.in_gen.borrow_mut() = in_gen_of(f, self.host);
-        *self.here.borrow_mut() = f.module.clone();
+        self.enter(Frame::of(f, self.host));
         let r = (|| -> Result<(), Diagnostic> {
             for p in &f.params {
                 // A function value cannot cross the host boundary, nor a
@@ -2912,11 +2929,16 @@ impl<'a> Checker<'a> {
         self.function_body(f, &f.body)
     }
 
+    /// Makes `frame` the function being checked.
+    fn enter(&self, frame: Frame) {
+        *self.frame.borrow_mut() = frame;
+    }
+
     /// Records a root-module binding's type for the editor, at its binder's
     /// position. The first answer stands: a desugar re-types a copy.
     fn bind_seen(&self, ty: Option<Type>, line: usize, col: usize) {
         let Some(ty) = ty else { return };
-        if col == 0 || !self.in_root.get() {
+        if col == 0 || !self.frame.borrow().in_root {
             return;
         }
         (self.acc.borrow_mut().binders)
@@ -2927,11 +2949,7 @@ impl<'a> Checker<'a> {
     /// Checks `f` with `body` as its body. A `test` or `bench` has a synthetic
     /// head and its real body node, because the record is keyed by address.
     fn function_body(&self, f: &Function, body: &Block) -> Result<(), Diagnostic> {
-        *self.cur_bounds.borrow_mut() = f.type_bounds.clone();
-        *self.cur_fn.borrow_mut() = f.name.clone();
-        *self.in_gen.borrow_mut() = in_gen_of(f, self.host);
-        *self.here.borrow_mut() = f.module.clone();
-        self.in_root.set(f.module.is_none());
+        self.enter(Frame::of(f, self.host));
         self.errors.borrow_mut().clear();
         // A local shadows a global of the same name.
         let mut scope = Scope::open();
@@ -2954,8 +2972,8 @@ impl<'a> Checker<'a> {
     /// Records that the function being checked calls the impl methods
     /// `to` ([`StoredFnEffects::dispatched`]).
     fn dispatch(&self, to: impl IntoIterator<Item = String>) {
-        let from = self.cur_fn.borrow();
-        let edges = to.into_iter().map(|m| (from.clone(), m));
+        let from = self.frame.borrow();
+        let edges = to.into_iter().map(|m| (from.name.clone(), m));
         self.acc.borrow_mut().stored.dispatched.extend(edges);
     }
 
@@ -3844,7 +3862,7 @@ impl<'a> Checker<'a> {
         // `Token` has no declaration; `types::record_fields` states its
         // fields. A synthesized decoder builds one in generation code
         // (`vyrn_genwasm`'s `Decoders::materialize`).
-        if decl.is_none() && !(name == "Token" && *self.in_gen.borrow()) {
+        if decl.is_none() && !(name == "Token" && self.frame.borrow().in_gen) {
             return self.judged();
         }
         let Some(rfields) = crate::types::record_fields(&Type::Named(name.to_string()), self)
@@ -4640,7 +4658,7 @@ impl<'a> Checker<'a> {
                 // attribution.
                 let frame = scope.iter().rposition(|f| f.contains_key(name));
                 if frame != Some(1) {
-                    let caller = self.cur_fn.borrow().clone();
+                    let caller = self.frame.borrow().name.clone();
                     let sig = self.base(&binding.ty);
                     self.acc.borrow_mut().stored.calls.push((caller, sig));
                 }
@@ -4744,7 +4762,7 @@ impl<'a> Checker<'a> {
         // refusal about the element type.
 
         // Generation-only: no backend lowers it, so the one refusal lives here.
-        if name == "moduleInterface" && !*self.in_gen.borrow() {
+        if name == "moduleInterface" && !self.frame.borrow().in_gen {
             return Err(cerr!(line, GenOnly, name = "moduleInterface"));
         }
         // Code quotes, generation-only. `@codeText`/`@codeSplice`
@@ -4755,7 +4773,7 @@ impl<'a> Checker<'a> {
             && !self.shadows_here(name)
             && self.lookup(scope, name).is_none();
         if matches!(name, "@codeText" | "@codeSplice") || is_surface_builtin {
-            if !*self.in_gen.borrow() {
+            if !self.frame.borrow().in_gen {
                 let surface = match name {
                     "render" => "`render` is",
                     "rawAt" => "`rawAt` is",
@@ -5138,7 +5156,7 @@ impl<'a> Checker<'a> {
         }
         // `contractOf(C)`: the argument is a contract name, not a value.
         if name == "contractOf" {
-            if !*self.in_gen.borrow() {
+            if !self.frame.borrow().in_gen {
                 return Err(cerr!(line, GenOnly, name = "contractOf"));
             }
             if args.len() != 1 {
@@ -6113,7 +6131,7 @@ impl<'a> Checker<'a> {
             sig: sig.clone(),
             named: None,
             lambda: Some(StoredLambda {
-                defined_in: self.cur_fn.borrow().clone(),
+                defined_in: self.frame.borrow().name.clone(),
                 line: *line,
                 col: *col,
                 calls,
@@ -6165,7 +6183,7 @@ impl<'a> Checker<'a> {
             // Only the frame key is filled: the workers analysis reads
             // `sources` alone (see `StoredFnEffects::arg_sources`).
             lambda: lambda_at.map(|(line, col)| StoredLambda {
-                defined_in: self.cur_fn.borrow().clone(),
+                defined_in: self.frame.borrow().name.clone(),
                 line,
                 col,
                 calls: HashSet::new(),
@@ -6529,7 +6547,7 @@ impl<'a> Checker<'a> {
     /// shadows an unreserved surface builtin in this module only.
     fn shadows_here(&self, name: &str) -> bool {
         self.shadows
-            .contains(&(self.here.borrow().clone(), name.to_string()))
+            .contains(&(self.frame.borrow().here.clone(), name.to_string()))
     }
 
     /// The innermost frame's binding of `name`, else module state when the
@@ -6560,7 +6578,7 @@ impl<'a> Checker<'a> {
                 Some((d, _)) => Key::Decl(*d),
                 None => Key::Miss(
                     ScopeId {
-                        module: self.here.borrow().clone(),
+                        module: self.frame.borrow().here.clone(),
                     },
                     name.to_string(),
                 ),
