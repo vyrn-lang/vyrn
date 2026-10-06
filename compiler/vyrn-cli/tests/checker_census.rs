@@ -79,7 +79,7 @@ fn sections() -> Vec<Section> {
         sec("fn let_borrows_from", Desugar),
         sec("fn count_yields", Shared),
         sec("fn check_named_blocks", Refusal),
-        sec("fn check_accum", Shared),
+        sec("struct CallDecl", Shared),
         sec("struct Recorded", Judgment),
         sec("struct Checker", Shared),
         sec("fn base", Judgment),
