@@ -5,7 +5,7 @@
 //! yielding [`ELEM`] of a parameter says the result lends; the return type is
 //! what the declared reading puts on a binding. A parameter spelled `Unit` is
 //! inert (a union or a type name no signature spells), and so is a lending
-//! row's result; [`checkable`] and [`returns`] skip them. A bound
+//! row's result; [`returns`] skips a lending row. A bound
 //! ([`HEAPLESS`], [`DECODABLE`], `Show`) states a rule about a type argument.
 //! `value`, `@list` and `pullAt` allocate but have no contract, because their
 //! result type is one no signature spells.
@@ -15,6 +15,7 @@ use crate::ast::{
 };
 use crate::effects::Effect;
 use crate::project::ELEM;
+use crate::rules::{rule, Rule};
 use std::sync::OnceLock;
 
 /// The language's prelude, as Vyrn source. Embedded so a bare file with no
@@ -162,9 +163,7 @@ impl Shape {
             Type::SmallArray(..) => Shape::SmallArray,
             Type::Map(..) => Shape::Map,
             Type::Str => Shape::Str,
-            Type::Int | Type::IntN { .. } | Type::Float | Type::Float32 | Type::Bool => {
-                Shape::Scalar
-            }
+            t if t.is_scalar() => Shape::Scalar,
             Type::Stream(_) => Shape::Stream,
             Type::Logger => Shape::Logger,
             Type::Record(_) => Shape::Record,
@@ -177,9 +176,10 @@ impl Shape {
 /// What a call does to its receiver's length: the fact a pass that removes a
 /// bounds check may carry across the call (obligation O3). Every other operand
 /// is read, so it keeps its length and its elements.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum Length {
     /// States nothing, so the pass forgets what it knew.
+    #[default]
     Unknown,
     Keeps,
     GrowsByOne,
@@ -191,8 +191,9 @@ pub enum Length {
 }
 
 /// What a call does to its receiver's elements, in the sense of [`Length`].
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum Elements {
+    #[default]
     Unknown,
     /// Every position that survives the call holds the element it held.
     KeepsEachPosition,
@@ -205,6 +206,7 @@ pub enum Elements {
 /// the parser's method spelling, the core's [`Spec`], the effect lattice's
 /// atom, the loader's route and the editor's completion, hover and colour read
 /// this row. `vyrn_codegen::direct` dispatches on the name itself.
+#[derive(Default)]
 pub struct Builtin {
     pub name: &'static str,
     /// The contract a call is checked against, as a user declaration would
@@ -229,21 +231,84 @@ pub struct Builtin {
     /// ([`Spec::Rebuilds`]) nor shrinks it ([`Spec::Removes`]).
     pub length: Length,
     pub elements: Elements,
+    /// The operand counts a call admits, checked before anything types it.
+    pub arity: Option<Arity>,
+    /// How the checker types a call's operands and result from this row
+    /// alone. `None` for a row typed by its `sig`, by a hand arm, or not
+    /// typed as a call.
+    pub typed: Option<Typed>,
+    /// Whether the result is built afresh: it shares no storage with an
+    /// operand ([`crate::movecheck::call_may_forward`]).
+    pub fresh: bool,
+}
+
+/// The refusal of an operand found at another type than its parameter's.
+pub type RefuseType = fn(&str, usize, &Type, &Type) -> Rule;
+
+/// The operand counts a row admits and the refusal of any other.
+pub struct Arity {
+    pub counts: Vec<usize>,
+    /// The refusal of another count, from the row's name, the first admitted
+    /// count and the count found.
+    pub refuse: fn(&str, usize, usize) -> Rule,
+}
+
+/// How the checker types a call's operands and result from its row alone.
+pub struct Typed {
+    /// Each operand's type, in order. An admitted count below its length
+    /// reads a prefix.
+    pub params: Vec<Type>,
+    pub ret: Type,
+    /// `None` types each operand against its parameter and refuses none.
+    pub wrong_type: Option<RefuseType>,
+    /// How many leading operands, already refused (`Err`), make the call
+    /// `Err`. A later refused operand is passed, so the call keeps `ret` and
+    /// a use of it can be refused too: `render`'s operand and `bytes`'
+    /// offsets.
+    pub stops: usize,
+}
+
+/// Splits a vector builtin's name into its type and operation as written:
+/// `@f32x4Nearest` is `F32x4` and `nearest`.
+pub fn simd_words(name: &str) -> (String, String) {
+    // Every vector name is `@`, a five-character type word, then the operation.
+    let (ty, op) = name[1..].split_at(5);
+    let first = |s: &str, f: fn(char) -> String| {
+        s.chars()
+            .next()
+            .map_or_else(String::new, |c| f(c) + &s[1..])
+    };
+    (
+        first(ty, |c| c.to_uppercase().to_string()),
+        first(op, |c| c.to_lowercase().to_string()),
+    )
+}
+
+fn panic_arity(_: &str, _: usize, got: usize) -> Rule {
+    rule!(PanicArity, got)
+}
+
+// The spelling a refusal names is the row's, without the `@` no source can lex.
+fn takes_one(n: &str, _: usize, got: usize) -> Rule {
+    rule!(TakesOne, name = n.trim_start_matches('@'), got)
+}
+
+fn takes_two(n: &str, _: usize, got: usize) -> Rule {
+    rule!(TakesTwo, name = n.trim_start_matches('@'), got)
+}
+
+fn takes_none(n: &str, _: usize, _: usize) -> Rule {
+    rule!(TakesNone, name = n.trim_start_matches('@'))
+}
+
+fn panic_type(_: &str, _: usize, _: &Type, t: &Type) -> Rule {
+    rule!(PanicType, t)
 }
 
 fn b(name: &'static str) -> Builtin {
     Builtin {
         name,
-        sig: None,
-        method: None,
-        on: &[],
-        spec: None,
-        effect: None,
-        route: None,
-        gen_route: None,
-        hover: None,
-        length: Length::Unknown,
-        elements: Elements::Unknown,
+        ..Default::default()
     }
 }
 
@@ -295,6 +360,43 @@ impl Builtin {
             ..self
         }
     }
+    fn takes(self, counts: &[usize], refuse: fn(&str, usize, usize) -> Rule) -> Self {
+        let counts = counts.to_vec();
+        Builtin {
+            arity: Some(Arity { counts, refuse }),
+            ..self
+        }
+    }
+    /// Types a call's operands and result from the row. `refuse` is the
+    /// refusal of an operand at another type than its parameter's, from the
+    /// row's name, the operand's index, the parameter and the type found;
+    /// `None` refuses none.
+    fn typed(self, params: Vec<Type>, ret: Type, wrong_type: Option<RefuseType>) -> Self {
+        let stops = params.len();
+        let typed = Typed {
+            params,
+            ret,
+            wrong_type,
+            stops,
+        };
+        Builtin {
+            typed: Some(typed),
+            ..self
+        }
+    }
+    /// Passes a refused operand after the first `n` ([`Typed::stops`]).
+    fn stops(mut self, n: usize) -> Self {
+        if let Some(t) = &mut self.typed {
+            t.stops = n;
+        }
+        self
+    }
+    fn fresh(self) -> Self {
+        Builtin {
+            fresh: true,
+            ..self
+        }
+    }
     fn resizes(self, length: Length, elements: Elements) -> Self {
         Builtin {
             length,
@@ -335,8 +437,51 @@ fn table() -> Vec<Builtin> {
     // instruction. A bit view reads the same 64 bits at the other type, so it
     // is not a conversion.
     let one = |n, p: &Type, r: &Type| b(n).spec(Spec::Typed(vec![p.clone()], r.clone()));
-    let two = |n, p: &Type, r: &Type| b(n).spec(Spec::Typed(vec![p.clone(), p.clone()], r.clone()));
     let (f4, d2) = (Type::F32x4, Type::F64x2);
+    // A vector row the checker types alone, in the vector surface's words.
+    let ctor = |n, lane: Type, vec: Type, k: usize| {
+        let lanes: fn(&str, usize, usize) -> Rule =
+            |what, lanes, got| rule!(LaneCount, what, lanes, got);
+        b(n).spec(Spec::Lanes).takes(&[k], lanes).typed(
+            vec![lane; k],
+            vec,
+            Some(|what, _, lane, t| rule!(LaneType, what = format!("`{what}(..)`"), lane, t)),
+        )
+    };
+    let splat = |n, lane: &Type, vec: &Type| {
+        b(n).spec(Spec::Typed(vec![lane.clone()], vec.clone()))
+            .takes(&[1], |n, _, got| {
+                rule!(SplatArity, what = simd_words(n).0, got)
+            })
+            .typed(
+                vec![lane.clone()],
+                vec.clone(),
+                Some(|n, _, lane, t| {
+                    let what = format!("`{}.splat(..)`", simd_words(n).0);
+                    rule!(LaneType, what, lane, t)
+                }),
+            )
+    };
+    let vector_arity: fn(&str, usize, usize) -> Rule = |n, want, got| {
+        let (what, op) = simd_words(n);
+        rule!(VectorOpArity, what, op, want, got)
+    };
+    // `load` and `store` type their operands by hand: the receiver is an array
+    // binding of the lane type.
+    let mem = |n, k: usize| b(n).spec(Spec::Lanes).takes(&[k], vector_arity);
+    let op = |n, k: usize, vec: &Type| {
+        b(n).spec(Spec::Typed(vec![vec.clone(); k], vec.clone()))
+            .takes(&[k], vector_arity)
+            .typed(
+                vec![vec.clone(); k],
+                vec.clone(),
+                Some(|n, _, _, t| {
+                    let (ty, what) = simd_words(n);
+                    rule!(VectorOpType, ty, what, t)
+                }),
+            )
+    };
+    let code = || Type::Named("Code".to_string());
     let level = |name, method| {
         b(name)
             .sig(row(
@@ -356,7 +501,7 @@ fn table() -> Vec<Builtin> {
     let mut rows = vec![
         // The pushed value goes into the array. The receiver is `read` because
         // `push` rebuilds the array rather than mutating it (see [`rebuilds`]).
-        b("@push")
+        b("@push").takes(&[2], takes_two)
             .sig(row(
                 "@push",
                 &["T"],
@@ -390,13 +535,14 @@ fn table() -> Vec<Builtin> {
             &["self", "i"],
         )),
         // `modify`: both write the array back, so the binding must be `mut`.
-        b("@pop")
+        b("@pop").takes(&[1], takes_none)
             .sig(row("@pop", &["T"], &[("self", Modify, arr(t()))], opt(t()), &[]))
             .method("pop", &[Array, SmallArray])
             .spec(Spec::Removes)
             .hover("array.pop() -> Option<T> — remove and return the last element (None if empty)")
             .resizes(Length::ShrinksByOneIfNotEmpty, Elements::KeepsEachPosition),
         b("@swapRemove")
+            .takes(&[2], |_, _, got| rule!(SwapRemoveArity, got = got.saturating_sub(1)))
             .sig(row(
                 "@swapRemove",
                 &["T"],
@@ -469,6 +615,7 @@ fn table() -> Vec<Builtin> {
             .hover("array.copyFrom(src) -> Array<T> — overwrite the elements with `src`'s, reusing the buffer; element type must not own heap")
             .resizes(Length::SetToLenOf(1), Elements::Unknown),
         b("@toArray")
+            .takes(&[1], takes_none)
             .method("toArray", &[SmallArray])
             .spec(Spec::Builds(arr(t())))
             .hover("smallArray.toArray() -> Array<T> — copy a SmallArray's elements out to a growable Array"),
@@ -524,6 +671,7 @@ fn table() -> Vec<Builtin> {
             ))
             .method("toString", &[Shape::Str, Scalar])
             .spec(Spec::Renders(Str))
+            .fresh()
             .hover("x.toString() -> String — render a number, Bool, or String"),
         // The number of Unicode scalar values, O(n). Method-only, so it has no
         // free spelling to import; it stays routed.
@@ -545,8 +693,10 @@ fn table() -> Vec<Builtin> {
         // A deep copy of an owned heap value. Completion offers it where the
         // type owns heap by its shape; on a scalar it is the identity.
         b("@copy")
+            .takes(&[1], takes_none)
             .method("copy", &[Shape::Str, Array, ArrayN, SmallArray, Map, Record, Enum])
             .spec(Spec::OwnType)
+            .fresh()
             .hover("x.copy() -> T — a value of the receiver's type that shares no heap with it; deep and structural. A handle copies as the value it is, so the copy names the same thing"),
         // Insert-or-add in one probe. The key is read: a miss copies it in.
         b("@tally")
@@ -587,43 +737,53 @@ fn table() -> Vec<Builtin> {
         // `allTrue` are the wasm instructions' names, which leave `any` and `all`
         // free.
         b("@lane")
+            .takes(&[2], |_, _, got| rule!(LaneArity, got))
             .method("lane", &[])
             .spec(Spec::Lanes)
             .hover("vector.lane(k) -> T — read lane `k` of an `F32x4`, `I32x4`, `F64x2` or mask; `k` is a compile-time constant inside the width"),
         b("@replaceLane")
+            .takes(&[3], |_, _, got| rule!(ReplaceLaneArity, got = got.saturating_sub(1)))
             .method("replaceLane", &[])
             .spec(Spec::Lanes)
             .hover("vector.replaceLane(k, x) -> Vector — the same vector with lane `k` set to `x`; `k` is a compile-time constant inside the width"),
         b("@anyTrue")
+            .takes(&[1], |n, _, got| rule!(MaskArity, what = &n[1..], got = got.saturating_sub(1)))
             .method("anyTrue", &[])
             .spec(Spec::Lanes)
             .hover("mask.anyTrue() -> Bool — whether any lane of a comparison mask is set"),
         b("@allTrue")
+            .takes(&[1], |n, _, got| rule!(MaskArity, what = &n[1..], got = got.saturating_sub(1)))
             .method("allTrue", &[])
             .spec(Spec::Lanes)
             .hover("mask.allTrue() -> Bool — whether every lane of a comparison mask is set"),
-        b("F32x4").spec(Spec::Lanes),
-        b("I32x4").spec(Spec::Lanes),
-        b("F64x2").spec(Spec::Lanes),
-        b("@f32x4Load").spec(Spec::Lanes),
-        b("@f32x4Store").spec(Spec::Lanes),
-        b("@i32x4Load").spec(Spec::Lanes),
-        b("@i32x4Store").spec(Spec::Lanes),
-        b("@f64x2Load").spec(Spec::Lanes),
-        b("@f64x2Store").spec(Spec::Lanes),
-        one("@f32x4Splat", &Type::Float32, &f4),
-        one("@i32x4Splat", &i32_, &Type::I32x4),
-        one("@f64x2Splat", &Float, &d2),
-        two("@f32x4Min", &f4, &f4),
-        two("@f32x4Max", &f4, &f4),
-        one("@f32x4Sqrt", &f4, &f4),
-        one("@f32x4Ceil", &f4, &f4),
-        one("@f32x4Floor", &f4, &f4),
-        one("@f32x4Trunc", &f4, &f4),
-        one("@f32x4Nearest", &f4, &f4),
-        two("@f64x2Min", &d2, &d2),
-        two("@f64x2Max", &d2, &d2),
-        one("@f64x2Sqrt", &d2, &d2),
+        ctor("F32x4", Type::Float32, f4.clone(), 4),
+        ctor("I32x4", i32_.clone(), Type::I32x4, 4),
+        ctor("F64x2", Float, d2.clone(), 2),
+        mem("@f32x4Load", 2),
+        mem("@f32x4Store", 3),
+        mem("@i32x4Load", 2),
+        mem("@i32x4Store", 3),
+        mem("@f64x2Load", 2),
+        mem("@f64x2Store", 3),
+        splat("@f32x4Splat", &Type::Float32, &f4),
+        splat("@i32x4Splat", &i32_, &Type::I32x4),
+        splat("@f64x2Splat", &Float, &d2),
+        // `min` and `max` follow IEEE-754-2019 `minimum` (wasm's rule): NaN
+        // propagates and `-0.0 < +0.0`. Not `minNum` (`llvm.minnum`,
+        // `f32::min`). `nearest` rounds ties to even, not away from zero.
+        // They sit on the type name so `ceil` stays free for `std/math`. By
+        // measurement: `I32x4` has none of these, `abs` is one line of
+        // `floatBits`, and `F64x2` has no rounding.
+        op("@f32x4Min", 2, &f4),
+        op("@f32x4Max", 2, &f4),
+        op("@f32x4Sqrt", 1, &f4),
+        op("@f32x4Ceil", 1, &f4),
+        op("@f32x4Floor", 1, &f4),
+        op("@f32x4Trunc", 1, &f4),
+        op("@f32x4Nearest", 1, &f4),
+        op("@f64x2Min", 2, &d2),
+        op("@f64x2Max", 2, &d2),
+        op("@f64x2Sqrt", 1, &d2),
         one("floatBits", &Float, &u64_()).sig(row(
             "floatBits",
             &[],
@@ -643,7 +803,17 @@ fn table() -> Vec<Builtin> {
         // offsets change nothing about ownership.
         b("bytes")
             .sig(row("bytes", &[], &[("s", Read, Str)], arr(u8_()), &[]))
-            .spec(Spec::Builds(arr(u8_()))),
+            .spec(Spec::Builds(arr(u8_())))
+            .takes(&[1, 3], |_, _, got| rule!(BytesArity, got))
+            .typed(
+                vec![Str, Int, Int],
+                arr(u8_()),
+                Some(|_, i, _, t| match i {
+                    0 => rule!(BytesType, t),
+                    _ => rule!(BytesOffsets, n = t),
+                }),
+            )
+            .stops(1),
         // A `Result`, because the bytes may not be UTF-8. Spelling it `String`
         // released the aggregate as a String buffer and crashed native code.
         b("stringFromBytes")
@@ -683,13 +853,21 @@ fn table() -> Vec<Builtin> {
         b("panic")
             .sig(row("panic", &[], &[("m", Read, Str)], Unit, &[]))
             .spec(Spec::Traps)
-            .effect(Trap),
-        b(crate::ast::PANIC_AT).spec(Spec::Traps).effect(Trap),
+            .effect(Trap)
+            .takes(&[1], panic_arity)
+            .typed(vec![Str], Type::Never, Some(panic_type)),
+        // The stamped form: the site is a literal the loader wrote, which no
+        // user can spell because `@panicAt` does not lex.
+        b(crate::ast::PANIC_AT)
+            .spec(Spec::Traps)
+            .effect(Trap)
+            .takes(&[2], panic_arity)
+            .typed(vec![Str, Str], Type::Never, Some(panic_type)),
         b("assert")
             .sig(row("assert", &[], &[("c", Read, Bool)], Unit, &[]))
             .spec(Spec::Asserts)
             .effect(Trap),
-        b("assertEq")
+        b("assertEq").takes(&[2], takes_two)
             .sig(row(
                 "assertEq",
                 &["T"],
@@ -699,7 +877,7 @@ fn table() -> Vec<Builtin> {
             ))
             .spec(Spec::Asserts)
             .effect(Trap),
-        b("blackBox")
+        b("blackBox").takes(&[1], takes_one)
             .sig(row("blackBox", &["T"], &[("x", Read, t())], t(), &[]))
             .spec(Spec::Barrier),
         // A stream's close frees what its producer was handed (the array's
@@ -748,11 +926,12 @@ fn table() -> Vec<Builtin> {
             .hover("serveStream(stream) -> Unit — hand a `Stream<String>` of encoded frames to the serving host, which writes each one and closes the stream the first time a write fails; `std/http`'s `sse` is the one to call"),
         // The argument is an address, so nothing is consumed; the result's
         // stream type carries the disposal obligation.
-        b("unboxStream")
+        b("unboxStream").takes(&[1], takes_one)
             .sig(row("unboxStream", &["T"], &[("a", Read, Int)], stm(t()), &[]))
             .spec(Spec::Builds(stm(t())))
             .hover("unboxStream(address) -> Stream<T> — take a boxed stream back out; needs its type from the annotation: `let s: Stream<T> = unboxStream(a)`"),
         b("pullAt")
+            .takes(&[1], takes_one)
             .spec(Spec::Builds(opt(t())))
             .hover("pullAt(address) -> Option<T> — one element from the stream in that box; needs its type from the annotation: `let x: Option<T> = pullAt(a)`"),
         b("@pull").spec(Spec::Pulls),
@@ -761,7 +940,7 @@ fn table() -> Vec<Builtin> {
             .spec(Spec::Rebuilds)
             .resizes(Length::Unknown, Elements::KeepsEachPosition),
         // String `a + b` and interpolation: copies both and allocates.
-        b("@concat").sig(row(
+        b("@concat").fresh().sig(row(
             "@concat",
             &[],
             &[("a", Read, Str), ("b", Read, Str)],
@@ -778,7 +957,9 @@ fn table() -> Vec<Builtin> {
             .effect(WriteOutput),
         // Every allocating builtin needs a row, or an unannotated binding to its
         // result has no type and leaks. `toJson`'s parameter is a union: inert.
-        b("toJson").sig(row("toJson", &[], &[("x", Read, Unit)], Str, &[])),
+        b("toJson")
+            .takes(&[1], |_, _, got| rule!(ToJsonArity, got))
+            .sig(row("toJson", &[], &[("x", Read, Unit)], Str, &[])),
         // The generator is a name, not a value, and `x` any type: both inert.
         b("derive").sig(row(
             "derive",
@@ -936,10 +1117,26 @@ fn table() -> Vec<Builtin> {
             .effect(GenOnly),
         b("lex")
             .spec(Spec::Routes(crate::checker::GEN_ENTRY_LEX))
-            .effect(GenOnly),
-        b("render").spec(Spec::Host).effect(GenOnly),
-        b("raw").spec(Spec::Host).effect(GenOnly),
-        b("rawAt").spec(Spec::Host).effect(GenOnly),
+            .effect(GenOnly)
+            .takes(&[1], takes_one)
+            .typed(vec![Str], arr(Type::Named("Token".to_string())), None),
+        b("render")
+            .spec(Spec::Host)
+            .effect(GenOnly)
+            .takes(&[1], takes_one)
+            .typed(vec![code()], Str, Some(|_, _, _, t| rule!(RenderType, t)))
+            .stops(0),
+        b("raw")
+            .spec(Spec::Host)
+            .effect(GenOnly)
+            .takes(&[1], takes_one)
+            .typed(vec![Str], code(), None),
+        // The origin lets `render` map diagnostics inside the text back.
+        b("rawAt")
+            .spec(Spec::Host)
+            .effect(GenOnly)
+            .takes(&[4], |_, _, got| rule!(RawAtArity, got))
+            .typed(vec![Str, Str, Int, Int], code(), None),
         b("@codeText").spec(Spec::Host).effect(GenOnly),
         b("@codeSplice").spec(Spec::Host).effect(GenOnly),
         b(crate::checker::GEN_REFLECT).spec(Spec::Host),
@@ -1218,6 +1415,21 @@ mod tests {
                 resizes,
                 b.length != Length::Unknown,
                 "`{}` resizes an array: {resizes}",
+                b.name
+            );
+        }
+    }
+
+    /// A typed row admits only counts its parameters cover.
+    #[test]
+    fn every_typed_row_counts_within_its_parameters() {
+        for b in builtins() {
+            let Some(t) = &b.typed else { continue };
+            let counts = b.arity.as_ref().map(|a| a.counts.as_slice());
+            let fits = counts.is_some_and(|c| c.iter().all(|&k| k <= t.params.len()));
+            assert!(
+                fits && t.stops <= t.params.len(),
+                "`{}` counts past its parameters",
                 b.name
             );
         }

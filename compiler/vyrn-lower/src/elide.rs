@@ -129,7 +129,7 @@ enum Kind {
 impl Walk<'_> {
     fn kind(&self, n: Name) -> Kind {
         match vyrn_frontend::types::resolve(&self.body.names[n.index()].ty, self.decls) {
-            Type::Array(_) | Type::ArrayN(..) | Type::SmallArray(..) | Type::Str => Kind::Seq,
+            t if t.is_seq() || t == Type::Str => Kind::Seq,
             t => match vyrn_frontend::validate::width(&t) {
                 Some((bits, signed)) => Kind::Int(bits, signed),
                 None => Kind::Other,
@@ -158,10 +158,8 @@ impl Walk<'_> {
     /// term is the length of every field of a class ([`Term::Col`]).
     fn col(&self, r: Name, f: &str) -> Option<(u32, u32)> {
         let seq = |t: &Type| {
-            matches!(
-                vyrn_frontend::types::resolve(t, self.decls),
-                Type::Array(_) | Type::ArrayN(..) | Type::SmallArray(..) | Type::Str
-            )
+            let t = vyrn_frontend::types::resolve(t, self.decls);
+            t.is_seq() || t == Type::Str
         };
         let ty = &self.body.names[r.index()].ty;
         let fields = vyrn_frontend::types::record_fields(ty, self.decls)?;

@@ -208,9 +208,9 @@ record, array or variant, or a function name. A place (`core::Place`) is a
 name, a global, a field, an element or a map key. Evaluation order is left
 to right, and the naming fixes it.
 
-`core::build_module_state` lowers the module-state initializers,
-`core::build_outside` a `test` or `bench` body, and `core::build_root` a
-module-state initializer or a `where` predicate for the typed judgment alone. `core::builtin_rows` collects the
+`core::build_module_state` lowers the module-state initializers
+and `core::build_outside` a `test` or `bench` body. A module-state initializer or a
+`where` predicate is also built for the typed judgment alone. `core::builtin_rows` collects the
 `prelude::Builtin` rows the core states as calls, `Prim` rows or rebuilds (`core::Spec`).
 
 A construct `core::build` cannot state returns a `Gap`. The instance is then
@@ -467,8 +467,11 @@ spent its time, per phase (`prof.rs`).
   `.stderr`, never a program in a Rust string.
 - A new builtin: one `prelude::Builtin` row, with its contract (a capability
   per parameter), method spelling, `Spec`, effect, route, length effect and
-  editor text; its body in `std/runtime` when it can be Vyrn, otherwise a
-  lowering in `direct.rs`.
+  editor text; its operand count (`takes`) and, when no `sig` types it, its
+  operand and result types (`typed`); `fresh` when the result shares no
+  storage with an operand. A row whose typing needs a receiver's kind or a
+  name keeps one arm in the checker. Its body is in `std/runtime` when it can
+  be Vyrn, otherwise a lowering in `direct.rs`.
 - A new trap wording: `vyrn_frontend::trap`, and nowhere else.
 - A new effect: the builtin row's `effect`, or `effects::RUNTIME_ATOMS` for a
   runtime function, then the floor's table.

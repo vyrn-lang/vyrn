@@ -224,7 +224,7 @@ pull request.
 - The WASI calls a module imports are one table, `vyrn_codegen::WASI_IMPORTS`. The emitter declares from it, and a test holds each host (`vyrn-genwasm/src/wasi.rs`, `wasi_host.c`) to exactly its rows.
 - The embedded WASI host is one file, `vyrn-genwasm/src/wasi.rs`, behind a `Policy`. A program run gets the process (environment, working directory as fd 3, stdin, clocks, random); a generator gets none of it, and a test fails if a call that reads the process reaches its link set.
 - A builtin exists only for what Vyrn source cannot express, such as a syscall. Everything expressible is std Vyrn.
-- Every fact about a builtin (contract, method spelling, core `Spec`, effect, route, length and element effect, editor text) is one `prelude::Builtin` row. A pass reads the row, never its own list of names.
+- Every fact about a builtin (contract, method spelling, core `Spec`, effect, route, length and element effect, editor text) is one `prelude::Builtin` row. A pass reads the row, never its own list of names. The checker counts a builtin call's operands from the row's `arity`, and types a row marked `typed` from the row alone.
 - Hot per-element paths stay inline in the emitter (indexing, the call-depth counter, the map value paths), because one wasmtime call level costs 14 to 270% there.
 - A `for` over any indexed container is one index walk in the core. A user container supplies its `size` call and its `nth` element read; it gets no loop of its own.
 - A `read` or `modify` aggregate parameter is the caller's storage, used in place, while no module state can name that storage; the checker's exclusive-`modify` rule covers the parameters. A per-callee effect gate waits until the effect judgment attributes every call.
@@ -307,6 +307,7 @@ pull request.
 - `vyrn doc` writes Markdown only. `docs/api/` is committed and CI checks it with `--verify`.
 - `vyrn emit-lowered` is deterministic, promises no format and has no parser.
 - The LSP is a synchronous pure adapter over the front end. No generator logic is compiled into it.
+- The editor never decides which local binding a name names. The check records what each name occurrence in a root body names, by position (`checker::Binders::uses`), and the editor reads it. A token the check did not resolve takes the latest same-named binding at or before its line. A node's `ast::Id` carries the column of the name it spells.
 - The LSP gets no incremental parsing, salsa, incremental sync or delta tokens. Lexing and parsing are under 1% of a keystroke; latency came from repeated pure work, fixed by memoizing it.
 - A keystroke's load reuses only what one text decides, and links every module again: `link` renames a module's declarations by every module's names, the root's included.
 - The LSP trusts its client's file events: under a watched directory it reads a file again only after an event names it. Without the capability it reads the disk on every load, as `vyrn check` does.

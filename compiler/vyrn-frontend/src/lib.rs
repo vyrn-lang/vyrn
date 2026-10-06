@@ -119,7 +119,7 @@ pub fn check_and_synthesize(
 ) -> (
     Vec<diagnostics::Diagnostic>,
     Option<std::collections::HashSet<String>>,
-    Vec<checker::LocalBinding>,
+    checker::Binders,
     Option<checker::Recorded>,
 ) {
     let check_span = prof::phase("check");
