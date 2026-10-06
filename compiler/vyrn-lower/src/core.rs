@@ -7598,67 +7598,58 @@ pub fn augment(program: &Program, w: &mut World, judging: bool) {
     // judgment, which joins every body, whether a callee writes module state.
     // A served body gives the judgment its frames as last judged. `test` and
     // `bench` bodies are judged like any other.
-    let jobs: Vec<Job> = (lowered.instances.iter().map(Job::Inst))
+    let pending: Vec<Pending> = (lowered.instances.iter().map(Job::Inst))
         .chain(lowered.bodies.iter().map(Job::Outside))
-        .collect();
-    let keys: Vec<_> = (jobs.iter())
-        .map(|j| memo.as_ref().and_then(|m| j.key(m)))
-        .collect();
-    let served: Vec<Option<(JudgmentKey, Judgment)>> = (keys.iter())
-        .map(|k| serve(memo.as_ref(), k.as_ref()))
-        .collect();
-    let unserved: Vec<Option<Job>> = (jobs.iter().zip(&served))
-        .map(|(j, s)| s.is_none().then_some(*j))
+        .map(|job| {
+            let key = memo.as_ref().and_then(|m| job.key(m));
+            let served = serve(memo.as_ref(), key.as_ref());
+            Pending { job, key, served }
+        })
         .collect();
     let (shared, fns): (&Ownership, &Fns) = (own, &w.fns);
     // Typing expanded every projection site a first build reads.
     let sealed = program.expansions.seal();
     let firsts = vyrn_frontend::par::in_parallel(
-        &unserved,
-        |j| j.map_or(0, |j| j.weight()),
+        &pending,
+        |p| p.served.as_ref().map_or(p.job.weight(), |_| 0),
         NameMemo::default,
-        |names, j| j.map(|j| j.build(program, shared, fns, names)),
+        |names, p| (p.served.is_none()).then(|| p.job.build(program, shared, fns, names)),
     );
     drop(sealed);
     // In job order, so every row a lambda frame takes comes out as on one
     // thread.
-    let mut made: Vec<Made> = Vec::with_capacity(jobs.len());
-    for (((j, key), served), first) in jobs.iter().zip(keys).zip(served).zip(firsts) {
-        if let Some((key, judgment)) = served {
-            made.push(Made::Served(key, judgment));
-            continue;
-        }
-        // `unserved` holds every job `served` does not, so `first` is `Some`.
-        let mut top = first.unwrap_or_else(|| j.build(program, own, &w.fns, &mut names));
-        if let Ok(b) = &mut top {
-            w.fns.number(b);
-        }
-        made.push(Made::Built(key, top));
+    let mut states: Vec<JobState> = Vec::with_capacity(pending.len());
+    for (Pending { job, key, served }, first) in pending.into_iter().zip(firsts) {
+        let made = match served {
+            Some((key, judgment)) => Made::Served(key, judgment),
+            None => {
+                // `first` is `Some` for every job `served` does not hold.
+                let mut top = first.unwrap_or_else(|| job.build(program, own, &w.fns, &mut names));
+                if let Ok(b) = &mut top {
+                    w.fns.number(b);
+                }
+                Made::Built(key, top)
+            }
+        };
+        states.push(JobState {
+            job,
+            made,
+            kept: None,
+        });
     }
     // The call relation, from the first build of every body, in job order;
     // the writes below add the bodies built for the judgment alone.
     let by_name = crate::by_name(program);
     let mut calls: HashMap<FnId, Vec<FnId>> = HashMap::new();
-    for (j, m) in jobs.iter().zip(&made) {
-        if let Made::Built(_, Ok(top)) = m {
-            crate::world::add_callees(top, &by_name, calls.entry(j.id()).or_default());
+    for s in &states {
+        if let Made::Built(_, Ok(top)) = &s.made {
+            crate::world::add_callees(top, &by_name, calls.entry(s.job.id()).or_default());
         }
     }
     let ej = vyrn_frontend::prof::phase("placer: effects");
-    let (tops, built_at): (Vec<(&str, &Body)>, Vec<usize>) = (jobs.iter().zip(&made).enumerate())
-        .filter_map(|(i, (j, m))| match m {
-            Made::Built(_, Ok(b)) => Some(((j.owner(), b), i)),
-            _ => None,
-        })
-        .unzip();
+    let tops: Vec<(&str, &Body)> = states.iter().filter_map(JobState::built).collect();
     // A body that did not build gives the judgment nothing, served or not.
-    let (late, late_at): (Vec<(&str, &[Walked])>, Vec<usize>) =
-        (jobs.iter().zip(&made).enumerate())
-            .filter_map(|(i, (j, m))| match m {
-                Made::Served(_, s) if !s.frames.is_empty() => Some(((j.owner(), &s.frames[..]), i)),
-                _ => None,
-            })
-            .unzip();
+    let late: Vec<(&str, &[Walked])> = states.iter().filter_map(JobState::answered).collect();
     let (mut state, read, answers) = crate::effects::judge_built(
         program,
         &lowered,
@@ -7671,9 +7662,10 @@ pub fn augment(program: &Program, w: &mut World, judging: bool) {
                 (at..at + n).map(|i| judged.state_callees(i)).collect()
             };
             // What the memo keeps of each body built with a key.
-            let read: Vec<Option<Kept>> = (top.iter().zip(&tops).zip(&built_at))
-                .map(|((t, (_, b)), i)| {
-                    let Made::Built(Some(_), _) = &made[*i] else {
+            let read: Vec<Option<Kept>> = (top.iter().zip(&tops))
+                .zip(states.iter().filter(|s| s.built().is_some()))
+                .map(|((t, (_, b)), s)| {
+                    let Made::Built(Some(_), _) = &s.made else {
                         return None;
                     };
                     let n = b.frames().len();
@@ -7688,42 +7680,42 @@ pub fn augment(program: &Program, w: &mut World, judging: bool) {
         },
     );
     drop((tops, late));
-    let mut kept: Vec<Option<Kept>> = (0..jobs.len()).map(|_| None).collect();
-    for (i, r) in built_at.into_iter().zip(read) {
-        kept[i] = r;
+    for (s, r) in (states.iter_mut().filter(|s| s.built().is_some())).zip(read) {
+        s.kept = r;
     }
     // A served verdict read the answer the judgment gave its frames then. A
     // body that gets another answer now is built and judged again, before
     // `own` holds the answer, as on its first build.
-    for (i, rows) in late_at.into_iter().zip(answers) {
-        let Made::Served(key, s) = &made[i] else {
+    for (s, rows) in (states.iter_mut().filter(|s| s.answered().is_some())).zip(answers) {
+        let Made::Served(key, served) = &s.made else {
             continue;
         };
-        if s.state == rows {
+        if served.state == rows {
             continue;
         }
-        let (key, frames) = (key.clone(), s.frames.clone());
-        let j = &jobs[i];
-        let mut top = j.build(program, own, &w.fns, &mut names);
+        let (key, frames) = (key.clone(), served.frames.clone());
+        let mut top = s.job.build(program, own, &w.fns, &mut names);
         if let Ok(b) = &mut top {
             w.fns.number(b);
-            crate::world::add_callees(b, &by_name, calls.entry(j.id()).or_default());
+            crate::world::add_callees(b, &by_name, calls.entry(s.job.id()).or_default());
             for (f, r) in b.frames().iter().zip(&rows) {
                 if let (Some(id), false) = (f.id, r.is_empty()) {
                     state.insert(id, r.clone());
                 }
             }
         }
-        kept[i] = Some((frames, rows));
-        made[i] = Made::Built(Some(key), top);
+        s.kept = Some((frames, rows));
+        s.made = Made::Built(Some(key), top);
     }
     own.state_callees = state;
     drop(ej);
     // A hoist asked `kernel::writes` before the effect judgment was held. A
     // frame that hoisted a header and calls a function that stores module
     // state may get a different answer, so it is built again.
-    for (j, m) in jobs.iter().zip(made.iter_mut()) {
-        let Made::Built(_, top) = m else { continue };
+    for s in &mut states {
+        let Made::Built(_, top) = &mut s.made else {
+            continue;
+        };
         let unjudged = top.as_ref().is_ok_and(|b| {
             b.frames().iter().any(|f| {
                 f.names.iter().any(|i| i.walked == Some(Walk::While))
@@ -7731,26 +7723,35 @@ pub fn augment(program: &Program, w: &mut World, judging: bool) {
             })
         });
         if unjudged {
-            *top = j.build(program, own, &w.fns, &mut names);
+            *top = s.job.build(program, own, &w.fns, &mut names);
         }
     }
     // The kernel's walk reads the body and the judgment alone, so it runs on
     // any thread; its rows land below, in job order.
     let shared: &Ownership = own;
     let placed = vyrn_frontend::par::in_parallel(
-        &made,
-        |m| match m {
+        &states,
+        |s| match &s.made {
             Made::Built(_, Ok(b)) => b.frames().iter().map(|f| rows(&f.stmts).count()).sum(),
             _ => 0,
         },
         || (),
-        |(), m| match m {
+        |(), s| match &s.made {
             Made::Built(_, Ok(b)) => placements(b, &shared.state_callees),
             _ => Vec::new(),
         },
     );
     let mut outside: Vec<Option<Body>> = Vec::with_capacity(lowered.bodies.len());
-    for (((j, m), placed), kept) in jobs.iter().zip(made).zip(placed).zip(kept) {
+    for (
+        JobState {
+            job: j,
+            made: m,
+            kept,
+        },
+        placed,
+    ) in states.into_iter().zip(placed)
+    {
+        let j = &j;
         let into = match j {
             Job::Inst(_) => &mut built,
             Job::Outside(_) => &mut outside,
@@ -8111,6 +8112,41 @@ impl Job<'_, '_> {
                 let _p = vyrn_frontend::prof::phase("placer: build_outside");
                 build_outside(program, own, fns, names, ob)
             }
+        }
+    }
+}
+
+/// One body `augment` has not yet built or served: its memo key, and the
+/// memo's answer for it.
+struct Pending<'l, 'p> {
+    job: Job<'l, 'p>,
+    key: Option<JudgmentKey>,
+    served: Option<(JudgmentKey, Judgment)>,
+}
+
+/// One body `augment` works on, in job order: the instances, then the `test`
+/// and `bench` bodies.
+struct JobState<'l, 'p> {
+    job: Job<'l, 'p>,
+    made: Made,
+    /// What the memo keeps of the body ([`Kept`]), when it was judged.
+    kept: Option<Kept>,
+}
+
+impl JobState<'_, '_> {
+    /// The body's owner and core, when it built.
+    fn built(&self) -> Option<(&str, &Body)> {
+        match &self.made {
+            Made::Built(_, Ok(b)) => Some((self.job.owner(), b)),
+            _ => None,
+        }
+    }
+
+    /// The body's owner and the frames the memo served, when it served any.
+    fn answered(&self) -> Option<(&str, &[Walked])> {
+        match &self.made {
+            Made::Served(_, s) if !s.frames.is_empty() => Some((self.job.owner(), &s.frames[..])),
+            _ => None,
         }
     }
 }
