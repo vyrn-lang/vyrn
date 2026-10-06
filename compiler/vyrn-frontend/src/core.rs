@@ -46,6 +46,9 @@ pub struct NameInfo {
     /// from the place. The kernel needs this to refuse a take of a parameter.
     pub borrow_kind: Option<BorrowKind>,
     pub line: usize,
+    /// The statement the name was made under, [`NodeId::NONE`] outside one.
+    /// With the name, it keys [`Body::ends`].
+    pub stmt: NodeId,
     /// The node the plan keys this binding by (a `Stmt::Let`, a parameter).
     /// `None` for a temporary this pass minted.
     pub binding: Option<NodeId>,
@@ -254,6 +257,16 @@ pub enum Site {
     /// The join whose edge owes this release, and the edge: 0/1 for an
     /// `if`'s then/else, the arm's source index for a `match`.
     Edge(NodeId, u32),
+}
+
+impl Site {
+    /// The node of a [`Site::Node`], [`NodeId::NONE`] for any other site.
+    pub fn node(self) -> NodeId {
+        match self {
+            Site::Node(n) => n,
+            _ => NodeId::NONE,
+        }
+    }
 }
 
 /// The value of a literal. The width is not here: an integer literal's type
@@ -979,6 +992,12 @@ pub struct Body {
     /// The same for a rule about the checker's types that holds as written,
     /// not per instance: a non-Bool condition, a `for` over what no loop walks.
     pub mistyped: Vec<(usize, String)>,
+    /// Where the reader spelled a take of a heap name, keyed by the statement
+    /// and the name: the line and the column just past its path. `None` where
+    /// the statement takes the name twice, so a refusal cannot tell which take
+    /// it is about. A name read out of a place is the temporary that read
+    /// made.
+    pub ends: std::collections::HashMap<(NodeId, Name), Option<(usize, usize)>>,
 }
 
 /// The shape of a candidate construct, which `vyrn_lower::core::last_owner` asks.

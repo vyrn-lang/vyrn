@@ -3290,6 +3290,11 @@ impl Parser {
             }
             Tok::Dot => {
                 self.advance();
+                // A name on another line than its dot has no column a fix can use.
+                let id = match self.line() == line {
+                    true => self.spelled(),
+                    false => Id::NEW,
+                };
                 let name = self.expect_ident()?;
                 if *self.peek() == Tok::LParen {
                     // `recv.name(args)` is sugar for `name(recv, args)`.
@@ -3371,7 +3376,12 @@ impl Parser {
                     };
                     return self.struct_lit(format!("{ns}.{name}"), line);
                 } else {
-                    return Ok(Expr::field(e, name, line));
+                    return Ok(Expr::Field {
+                        id,
+                        expr: Box::new(e),
+                        field: name,
+                        line,
+                    });
                 }
             }
             Tok::LBracket => {
