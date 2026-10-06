@@ -1985,10 +1985,8 @@ impl<'a> Checker<'a> {
                 };
                 let inner = self.chain_ty(&args[0], scope)?;
                 if m == "at" {
-                    if let Type::Array(t) | Type::ArrayN(t, _) | Type::SmallArray(t, _) =
-                        self.base(&inner)
-                    {
-                        return Some(*t);
+                    if let Some(t) = self.base(&inner).elem() {
+                        return Some(t.clone());
                     }
                 }
                 let (_, f) = (self.impls.place(&inner, m))
@@ -2664,10 +2662,7 @@ impl<'a> Checker<'a> {
             }
             return Ok(());
         }
-        if !matches!(
-            t.base,
-            Type::Int | Type::IntN { .. } | Type::Float | Type::Float32 | Type::Bool | Type::Str
-        ) {
+        if !t.base.is_scalar() {
             let name = DeclName(&t.name);
             return Err(cerr!(t.line, ValidatedBaseNotScalar, name));
         }
@@ -2743,19 +2738,8 @@ impl<'a> Checker<'a> {
                 Type::Param(p) => self.param_has_bound(p, bound),
                 _ => crate::types::renders(&base) || self.declares_an_impl(ty, &base, bound),
             },
-            "Num" | "Ord" => matches!(
-                base,
-                Type::Int | Type::Float | Type::Float32 | Type::IntN { .. }
-            ),
-            "Eq" => matches!(
-                base,
-                Type::Int
-                    | Type::Float
-                    | Type::Float32
-                    | Type::IntN { .. }
-                    | Type::Bool
-                    | Type::Str
-            ),
+            "Num" | "Ord" => base.is_numeric(),
+            "Eq" => base.is_scalar(),
             // A user protocol: satisfied if the type implements it.
             _ if self
                 .protocol_methods
@@ -3338,12 +3322,11 @@ impl<'a> Checker<'a> {
                 // A builtin container is keyed by `Int64`, a user one by what
                 // its `atSet` takes.
                 let mut key = Type::Int;
-                let elem = match self.base(&b.ty) {
-                    Type::Array(inner) | Type::ArrayN(inner, _) | Type::SmallArray(inner, _) => {
-                        (*inner).clone()
-                    }
-                    Type::Err => return Ok(()),
-                    _ => {
+                let base = self.base(&b.ty);
+                let elem = match (base.elem(), &base) {
+                    (Some(e), _) => e.clone(),
+                    (None, Type::Err) => return Ok(()),
+                    (None, _) => {
                         // The element type is what `atSet` yields, looked up
                         // by the declared type, which the impl head names.
                         match self.impls.place(&b.ty, "atSet") {
@@ -3432,15 +3415,14 @@ impl<'a> Checker<'a> {
                 ..
             } => {
                 let ity = self.expr(iter, scope, None, Some(ret))?;
-                let elem = match self.base(&ity) {
-                    Type::Array(inner) | Type::ArrayN(inner, _) | Type::SmallArray(inner, _) => {
-                        (*inner).clone()
-                    }
+                let base = self.base(&ity);
+                let elem = match (base.elem(), &base) {
+                    (Some(e), _) => e.clone(),
                     // The loop consumes a stream; movecheck checks that.
-                    Type::Stream(inner) => (*inner).clone(),
+                    (None, Type::Stream(inner)) => (**inner).clone(),
                     // A String yields its bytes.
-                    Type::Str => Type::Int,
-                    _ => {
+                    (None, Type::Str) => Type::Int,
+                    (None, _) => {
                         // A user container's element is what its `nth` yields,
                         // looked up by the declared type.
                         match crate::types::iterate_impl(self.impls, &ity) {
@@ -3723,16 +3705,8 @@ impl<'a> Checker<'a> {
                     // `0.0 - v`, which loses the sign of a zero. On
                     // an `I32x4` it wraps, as the scalar does.
                     UnOp::Neg
-                        if matches!(
-                            t,
-                            Type::Int
-                                | Type::Float
-                                | Type::Float32
-                                | Type::IntN { .. }
-                                | Type::F32x4
-                                | Type::I32x4
-                                | Type::F64x2
-                        ) =>
+                        if t.is_numeric()
+                            || matches!(t, Type::F32x4 | Type::I32x4 | Type::F64x2) =>
                     {
                         Ok(t)
                     }
@@ -3740,14 +3714,8 @@ impl<'a> Checker<'a> {
                     // `~` complements an integer within its width, or
                     // a mask lane-wise. `!` stays the Bool operator.
                     UnOp::BitNot
-                        if matches!(
-                            t,
-                            Type::Int
-                                | Type::IntN { .. }
-                                | Type::Mask32x4
-                                | Type::Mask64x2
-                                | Type::I32x4
-                        ) =>
+                        if t.is_integral()
+                            || matches!(t, Type::Mask32x4 | Type::Mask64x2 | Type::I32x4) =>
                     {
                         Ok(t)
                     }
@@ -3845,11 +3813,7 @@ impl<'a> Checker<'a> {
                 match self.base(&ety) {
                     Type::Err => Ok(Type::Err),
                     // Only on an array, so a record's `length` field still reads.
-                    Type::Array(_) | Type::ArrayN(..) | Type::SmallArray(..)
-                        if field == "length" =>
-                    {
-                        Ok(Type::Int)
-                    }
+                    t if t.is_seq() && field == "length" => Ok(Type::Int),
                     Type::Map(..) if field == "length" => Ok(Type::Int),
                     Type::Str if field == "byteLength" => Ok(Type::Int),
                     // Reading a `lazy T` field forces it and yields `T`.
@@ -4382,12 +4346,6 @@ impl<'a> Checker<'a> {
                 BitAnd | BitOr | BitXor | Shl | Shr => Err(cerr!(line, ParamBitwise, t)),
             };
         }
-        let numeric = |t: &Type| {
-            matches!(
-                t,
-                Type::Int | Type::Float | Type::Float32 | Type::IntN { .. }
-            )
-        };
         let code = Type::Named("Code".to_string());
         match op {
             // `Code + Code` concatenates fragments.
@@ -4418,7 +4376,7 @@ impl<'a> Checker<'a> {
                 Ok(l)
             }
             Add | Sub | Mul | Div => {
-                if l == r && numeric(&l) {
+                if l == r && l.is_numeric() {
                     Ok(l)
                 } else if op == Add && (l == Type::Str || r == Type::Str) {
                     Err(cerr!(line, ConcatOperands, l, r))
@@ -4427,7 +4385,7 @@ impl<'a> Checker<'a> {
                 }
             }
             Rem => {
-                if l == r && matches!(l, Type::Int | Type::IntN { .. }) {
+                if l == r && l.is_integral() {
                     Ok(l)
                 } else if matches!(l, Type::Float | Type::Float32)
                     || matches!(r, Type::Float | Type::Float32)
@@ -4444,14 +4402,14 @@ impl<'a> Checker<'a> {
             }
             // Strings order byte-wise, not by locale.
             Lt | LtEq | Gt | GtEq => {
-                if l == r && (numeric(&l) || l == Type::Str) {
+                if l == r && (l.is_numeric() || l == Type::Str) {
                     Ok(Type::Bool)
                 } else {
                     Err(cerr!(line, CompareOperands, l, r))
                 }
             }
             Eq | NotEq => {
-                if l == r && (numeric(&l) || matches!(l, Type::Bool | Type::Str)) {
+                if l == r && l.is_scalar() {
                     Ok(Type::Bool)
                 } else {
                     Err(cerr!(line, EqualityOperands, l, r))
@@ -4466,10 +4424,9 @@ impl<'a> Checker<'a> {
             }
             // A shift amount has the shifted value's type.
             BitAnd | BitOr | BitXor | Shl | Shr => {
-                let integral = |t: &Type| matches!(t, Type::Int | Type::IntN { .. });
-                if l == r && integral(&l) {
+                if l == r && l.is_integral() {
                     Ok(l)
-                } else if integral(&l) && integral(&r) {
+                } else if l.is_integral() && r.is_integral() {
                     Err(cerr!(line, BitwiseMismatch, l, r))
                 } else {
                     Err(cerr!(line, BitwiseOperands, l, r))
@@ -4483,6 +4440,33 @@ impl<'a> Checker<'a> {
                 }
             }
         }
+    }
+
+    /// Types a call to a builtin its row types alone ([`crate::prelude::Typed`]):
+    /// each operand against its parameter, in the row's words. The count is
+    /// checked before ([`crate::prelude::Arity`]).
+    fn typed_row(
+        &self,
+        name: &str,
+        row: &crate::prelude::Typed,
+        args: &[Expr],
+        line: usize,
+        scope: &Scope,
+        fn_ret: Option<&Type>,
+    ) -> Result<Type, Diagnostic> {
+        for (i, (a, want)) in args.iter().zip(&row.params).enumerate() {
+            let t = self.base(&self.expr(a, scope, Some(want), fn_ret)?);
+            let Some(refuse) = row.wrong_type else {
+                continue;
+            };
+            match t {
+                Type::Err if i < row.stops => return Ok(Type::Err),
+                Type::Err => {}
+                t if t != *want => return Err(cerr!(line; refuse(name, i, want, &t))),
+                _ => {}
+            }
+        }
+        Ok(row.ret.clone())
     }
 
     /// Types the vector builtins for `F32x4`, `I32x4` and `F64x2`.
@@ -4508,63 +4492,16 @@ impl<'a> Checker<'a> {
             }
             Ok(None)
         };
-        // A builtin name's vector type, lane type, spelling and lane count.
-        let width = |n: &str| -> (Type, Type, &'static str, i64) {
-            if n.starts_with("@i32x4") || n == "I32x4" {
-                (Type::I32x4, INT32, "I32x4", 4)
-            } else if n.starts_with("@f64x2") || n == "F64x2" {
-                (Type::F64x2, Type::Float, "F64x2", 2)
-            } else {
-                (Type::F32x4, Type::Float32, "F32x4", 4)
-            }
-        };
-        // The lane count of a receiver, for the accessors named per operation.
-        let lanes_of = |t: &Type| -> i64 {
-            match t {
-                Type::F64x2 | Type::Mask64x2 => 2,
-                _ => 4,
-            }
-        };
         match name {
-            "F32x4" | "I32x4" | "F64x2" => {
-                let (vec, lane, what, lanes) = width(name);
-                if args.len() as i64 != lanes {
-                    return Err(cerr!(line, LaneCount, what, lanes, got = args.len()));
-                }
-                for a in args {
-                    if let Some(e) = lane_arg(a, &lane, &format!("`{what}(..)`"))? {
-                        return Ok(e);
-                    }
-                }
-                Ok(vec)
-            }
-            "@f32x4Splat" | "@i32x4Splat" | "@f64x2Splat" => {
-                let (vec, lane, what, _) = width(name);
-                if args.len() != 1 {
-                    return Err(cerr!(line, SplatArity, what, got = args.len()));
-                }
-                if let Some(e) = lane_arg(&args[0], &lane, &format!("`{what}.splat(..)`"))? {
-                    return Ok(e);
-                }
-                Ok(vec)
-            }
             "@lane" => {
-                if args.len() != 2 {
-                    return Err(cerr!(line, LaneArity, got = args.len()));
-                }
                 let v = self.base(&self.expr(&args[0], scope, None, fn_ret)?);
                 if matches!(v, Type::Err) {
                     return Ok(Type::Err);
                 }
-                // A mask lane reads as a `Bool`.
-                let out = match v {
-                    Type::F32x4 => Type::Float32,
-                    Type::I32x4 => INT32,
-                    Type::F64x2 => Type::Float,
-                    Type::Mask32x4 | Type::Mask64x2 => Type::Bool,
-                    other => return Err(cerr!(line, LaneReceiver, other)),
+                let Some((lanes, out)) = v.lanes() else {
+                    return Err(cerr!(line, LaneReceiver, other = v));
                 };
-                let lanes = lanes_of(&v);
+                let lanes = i64::from(lanes);
                 if crate::types::const_lane(&args[1], lanes).is_none() {
                     return Err(cerr!(line, LaneIndex, max = lanes - 1));
                 }
@@ -4573,22 +4510,16 @@ impl<'a> Checker<'a> {
             // `v.replaceLane(k, x)`, on a vector only: masks come only from
             // comparison.
             "@replaceLane" => {
-                if args.len() != 3 {
-                    return Err(cerr!(line, ReplaceLaneArity, got = args.len() - 1));
-                }
                 let v = self.base(&self.expr(&args[0], scope, None, fn_ret)?);
                 if matches!(v, Type::Err) {
                     return Ok(Type::Err);
                 }
-                let lane = match v {
-                    Type::F32x4 => Type::Float32,
-                    Type::I32x4 => INT32,
-                    Type::F64x2 => Type::Float,
+                let (lanes, lane) = match v.lanes() {
+                    Some((n, lane)) if lane != Type::Bool => (i64::from(n), lane),
                     _ => return Err(cerr!(line, ReplaceLaneReceiver, v)),
                 };
                 // Constant, as for `lane`: the replace-lane opcodes take an
                 // immediate.
-                let lanes = lanes_of(&v);
                 if crate::types::const_lane(&args[1], lanes).is_none() {
                     return Err(cerr!(line, ReplaceLaneIndex, max = lanes - 1));
                 }
@@ -4600,14 +4531,7 @@ impl<'a> Checker<'a> {
             // A mask reduced to one `Bool`. Masks only: on a float vector it
             // would hide the NaN rule that `v != F32x4.splat(0.0)` states.
             "@anyTrue" | "@allTrue" => {
-                let what = if name == "@anyTrue" {
-                    "anyTrue"
-                } else {
-                    "allTrue"
-                };
-                if args.len() != 1 {
-                    return Err(cerr!(line, MaskArity, what, got = args.len() - 1));
-                }
+                let what = &name[1..];
                 let m = self.base(&self.expr(&args[0], scope, None, fn_ret)?);
                 if matches!(m, Type::Err) {
                     return Ok(Type::Err);
@@ -4621,19 +4545,13 @@ impl<'a> Checker<'a> {
             // an array, `i` counted in elements, bounds-checked once.
             "@f32x4Load" | "@f32x4Store" | "@i32x4Load" | "@i32x4Store" | "@f64x2Load"
             | "@f64x2Store" => {
-                let (vec, lane, what, _) = width(name);
+                let what = crate::prelude::simd_words(name).0;
+                let (vec, lane) = match what.as_str() {
+                    "I32x4" => (Type::I32x4, INT32),
+                    "F64x2" => (Type::F64x2, Type::Float),
+                    _ => (Type::F32x4, Type::Float32),
+                };
                 let store = name.ends_with("Store");
-                let want = if store { 3 } else { 2 };
-                if args.len() != want {
-                    return Err(cerr!(
-                        line,
-                        VectorOpArity,
-                        what,
-                        op = if store { "store" } else { "load" },
-                        want,
-                        got = args.len()
-                    ));
-                }
                 // `store` writes through a binding; into a temporary it would
                 // be lost, as for `xs.pop()`.
                 if store && !matches!(&args[0], Expr::Var { .. }) {
@@ -4675,52 +4593,9 @@ impl<'a> Checker<'a> {
                 }
                 Ok(Type::Unit)
             }
-            // `min` and `max` follow IEEE-754-2019 `minimum` (wasm's rule): NaN
-            // propagates and `-0.0 < +0.0`. Not `minNum` (`llvm.minnum`,
-            // `f32::min`). `nearest` rounds ties to even, not away from zero.
-            // They sit on the type name so `ceil` stays free for `std/math`.
-            //
-            // By measurement: `I32x4` has none of these, `abs` is
-            // one line of `floatBits`, and `F64x2` has no rounding.
-            "@f32x4Min" | "@f32x4Max" | "@f32x4Sqrt" | "@f32x4Ceil" | "@f32x4Floor"
-            | "@f32x4Trunc" | "@f32x4Nearest" | "@f64x2Min" | "@f64x2Max" | "@f64x2Sqrt" => {
-                let (vec, _, ty, _) = width(name);
-                let m = &name[6..];
-                let want = if m == "Min" || m == "Max" { 2 } else { 1 };
-                let what = m.to_lowercase();
-                if args.len() != want {
-                    return Err(cerr!(
-                        line,
-                        VectorOpArity,
-                        what = ty,
-                        op = what,
-                        want,
-                        got = args.len()
-                    ));
-                }
-                for a in args {
-                    let t = self.base(&self.expr(a, scope, Some(&vec), fn_ret)?);
-                    if matches!(t, Type::Err) {
-                        return Ok(Type::Err);
-                    }
-                    if t != vec {
-                        return Err(cerr!(line, VectorOpType, ty, what, t));
-                    }
-                }
-                Ok(vec)
-            }
             // Undo the parser's capital, so the message names what was written.
             other => {
-                let (_, _, ty, _) = width(other);
-                let m = other
-                    .trim_start_matches("@f32x4")
-                    .trim_start_matches("@i32x4")
-                    .trim_start_matches("@f64x2");
-                let mut it = m.chars();
-                let m = match it.next() {
-                    Some(c) => c.to_lowercase().collect::<String>() + it.as_str(),
-                    None => m.to_string(),
-                };
+                let (ty, m) = crate::prelude::simd_words(other);
                 Err(cerr!(line, VectorNoMethod, ty, m))
             }
         }
@@ -4831,66 +4706,12 @@ impl<'a> Checker<'a> {
         if (name == "assert" || name == "assertEq") && !*self.in_test.borrow() && !self.host.test {
             return Err(cerr!(line, TestOnly, name));
         }
-        if name == "assertEq" {
-            if args.len() != 2 {
-                return Err(cerr!(line, TakesTwo, name = "assertEq", got = args.len()));
-            }
-            let a = self.base(&self.expr(&args[0], scope, None, fn_ret)?);
-            let b = self.base(&self.expr(&args[1], scope, Some(&a), fn_ret)?);
-            if matches!(a, Type::Err) || matches!(b, Type::Err) {
-                return Ok(Type::Unit);
-            }
-            let equatable = |t: &Type| {
-                matches!(
-                    t,
-                    Type::Int
-                        | Type::Float
-                        | Type::Float32
-                        | Type::IntN { .. }
-                        | Type::Bool
-                        | Type::Str
-                )
-            };
-            if a != b || !equatable(&a) {
-                return Err(cerr!(line, AssertEqOperands, a, b));
-            }
-            return Ok(Type::Unit);
-        }
-
-        // `blackBox<T>(v: T) -> T`: identity the optimizer cannot see through,
-        // so the work producing `v` survives and does not fold.
-        if name == "blackBox" {
-            if !*self.in_test.borrow() && !*self.in_bench.borrow() && !self.host.test {
-                return Err(cerr!(line, BlackBoxOutsideBench));
-            }
-            if args.len() != 1 {
-                return Err(cerr!(line, TakesOne, name = "blackBox", got = args.len()));
-            }
-            let t = self.expr(&args[0], scope, expected, fn_ret)?;
-            return Ok(t);
-        }
-
-        // `panic(msg) -> Never`. The stamped form appends the site: a literal
-        // the loader wrote, which no user can spell because `@panicAt` does
-        // not lex.
-        if crate::ast::is_panic(name) {
-            let want = if name == "panic" { 1 } else { 2 };
-            if args.len() != want {
-                return Err(cerr!(line, PanicArity, got = args.len()));
-            }
-            let t = self.base(&self.expr(&args[0], scope, Some(&Type::Str), fn_ret)?);
-            if matches!(t, Type::Err) {
-                return Ok(Type::Err);
-            }
-            if t != Type::Str {
-                return Err(cerr!(line, PanicType, t));
-            }
-            // Cannot fail, but typed anyway: a backend reads every node's
-            // recorded type, and an untyped node has none.
-            if want == 2 {
-                let _ = self.expr(&args[1], scope, Some(&Type::Str), fn_ret);
-            }
-            return Ok(Type::Never);
+        if name == "blackBox"
+            && !*self.in_test.borrow()
+            && !*self.in_bench.borrow()
+            && !self.host.test
+        {
+            return Err(cerr!(line, BlackBoxOutsideBench));
         }
 
         // Every builtin whose whole contract is a row in `prelude::rows` is
@@ -4907,10 +4728,9 @@ impl<'a> Checker<'a> {
         // are the desugar of a `vyrn"..."` literal. The surface names are
         // common words and not reserved: a function or binding of the same
         // name in THIS module shadows them (not one in another module).
-        let is_surface_builtin = crate::ast::is_surface_builtin(name)
-            && !self.shadows_here(name)
-            && self.lookup(scope, name).is_none();
-        if matches!(name, "@codeText" | "@codeSplice") || is_surface_builtin {
+        let surface = crate::ast::is_surface_builtin(name);
+        let unshadowed = !self.shadows_here(name) && self.lookup(scope, name).is_none();
+        if matches!(name, "@codeText" | "@codeSplice") || (surface && unshadowed) {
             if !*self.in_gen.borrow() {
                 let surface = match name {
                     "render" => "`render` is",
@@ -4932,91 +4752,44 @@ impl<'a> Checker<'a> {
                 "@codeSplice" => {
                     let t = self.base(&self.expr(&args[0], scope, None, fn_ret)?);
                     self.expr(&args[1], scope, Some(&Type::Int), fn_ret)?;
-                    let ok = matches!(
-                        t,
-                        Type::Str
-                            | Type::Int
-                            | Type::IntN { .. }
-                            | Type::Float
-                            | Type::Float32
-                            | Type::Bool
-                            | Type::Err
-                    ) || t == code();
+                    let ok = t.is_scalar() || t == Type::Err || t == code();
                     if !ok {
                         return Err(cerr!(line, QuoteSplice, t));
                     }
                     return Ok(code());
                 }
-                "render" => {
-                    if args.len() != 1 {
-                        return Err(cerr!(line, TakesOne, name = "render", got = args.len()));
-                    }
-                    let t = self.base(&self.expr(&args[0], scope, Some(&code()), fn_ret)?);
-                    if !matches!(t, Type::Err) && t != code() {
-                        return Err(cerr!(line, RenderType, t));
-                    }
-                    return Ok(Type::Str);
-                }
-                // The origin lets `render` map diagnostics inside the text back.
-                "rawAt" => {
-                    if args.len() != 4 {
-                        return Err(cerr!(line, RawAtArity, got = args.len()));
-                    }
-                    self.expr(&args[0], scope, Some(&Type::Str), fn_ret)?;
-                    self.expr(&args[1], scope, Some(&Type::Str), fn_ret)?;
-                    self.expr(&args[2], scope, Some(&Type::Int), fn_ret)?;
-                    self.expr(&args[3], scope, Some(&Type::Int), fn_ret)?;
-                    return Ok(code());
-                }
-                "raw" => {
-                    if args.len() != 1 {
-                        return Err(cerr!(line, TakesOne, name = "raw", got = args.len()));
-                    }
-                    self.expr(&args[0], scope, Some(&Type::Str), fn_ret)?;
-                    return Ok(code());
-                }
-                "lex" => {
-                    if args.len() != 1 {
-                        return Err(cerr!(line, TakesOne, name = "lex", got = args.len()));
-                    }
-                    self.expr(&args[0], scope, Some(&Type::Str), fn_ret)?;
-                    return Ok(Type::Array(Box::new(Type::Named("Token".to_string()))));
-                }
-                _ => unreachable!(),
+                _ => {}
             }
         }
-
-        // `bytes(s)` is the whole string's UTF-8; `bytes(s, start, end)` a
-        // half-open byte range, 19x faster than a byte loop. No
-        // character-boundary check: `slice` checks before it calls. Out of
-        // range traps with the wording of `s[i]`.
-        if name == "bytes" {
-            if args.len() != 1 && args.len() != 3 {
-                return Err(cerr!(line, BytesArity, got = args.len()));
-            }
-            let t = self.base(&self.expr(&args[0], scope, Some(&Type::Str), fn_ret)?);
-            if matches!(t, Type::Err) {
-                return Ok(Type::Err);
-            }
-            if t != Type::Str {
-                return Err(cerr!(line, BytesType, t));
-            }
-            for a in args.iter().skip(1) {
-                let n = self.base(&self.expr(a, scope, Some(&Type::Int), fn_ret)?);
-                if !matches!(n, Type::Err) && n != Type::Int {
-                    return Err(cerr!(line, BytesOffsets, n));
+        // A surface builtin a declaration here shadows is that declaration's.
+        if let Some(row) = crate::prelude::builtin(name).filter(|_| !surface || unshadowed) {
+            if let Some(a) = &row.arity {
+                if !a.counts.contains(&args.len()) {
+                    return Err(cerr!(line; (a.refuse)(name, a.counts[0], args.len())));
                 }
             }
-            return Ok(Type::Array(Box::new(Type::IntN {
-                bits: 8,
-                signed: false,
-            })));
+            if let Some(typed) = &row.typed {
+                return self.typed_row(name, typed, args, line, scope, fn_ret);
+            }
+        }
+        if name == "assertEq" {
+            let a = self.base(&self.expr(&args[0], scope, None, fn_ret)?);
+            let b = self.base(&self.expr(&args[1], scope, Some(&a), fn_ret)?);
+            if matches!(a, Type::Err) || matches!(b, Type::Err) {
+                return Ok(Type::Unit);
+            }
+            if a != b || !a.is_scalar() {
+                return Err(cerr!(line, AssertEqOperands, a, b));
+            }
+            return Ok(Type::Unit);
+        }
+        // `blackBox<T>(v: T) -> T`: identity the optimizer cannot see through,
+        // so the work producing `v` survives and does not fold.
+        if name == "blackBox" {
+            return self.expr(&args[0], scope, expected, fn_ret);
         }
 
         if name == "@push" {
-            if args.len() != 2 {
-                return Err(cerr!(line, TakesTwo, name = "push", got = args.len()));
-            }
             let at = self.expr(&args[0], scope, None, fn_ret)?;
             // The result keeps the receiver's kind, so `xs = xs.push(v)` keeps
             // a `SmallArray<T, N>` binding.
@@ -5093,17 +4866,16 @@ impl<'a> Checker<'a> {
                 self.prove_coercion(&args[1], &key, line)?;
                 return Ok(Type::option(*val));
             }
-            let elem = match self.base(&at) {
-                Type::Array(inner) | Type::ArrayN(inner, _) | Type::SmallArray(inner, _) => {
-                    (*inner).clone()
-                }
+            let base = self.base(&at);
+            let elem = match (base.elem(), &base) {
+                (Some(e), _) => e.clone(),
                 // `s[i]` is a byte, as in `bytes(s)`.
-                Type::Str => Type::IntN {
+                (None, Type::Str) => Type::IntN {
                     bits: 8,
                     signed: false,
                 },
-                Type::Err => return Ok(Type::Err),
-                other => return Err(cerr!(line, IndexReceiver, other)),
+                (None, Type::Err) => return Ok(Type::Err),
+                (None, other) => return Err(cerr!(line, IndexReceiver, other)),
             };
             let i = self.base(&self.expr(&args[1], scope, Some(&Type::Int), fn_ret)?);
             if matches!(i, Type::Err) {
@@ -5121,9 +4893,6 @@ impl<'a> Checker<'a> {
         // `movecheck` reads box as a disposal and unbox as an acquisition, so
         // a chain that fails to close its source does not compile.
         if name == "unboxStream" || name == "pullAt" {
-            if args.len() != 1 {
-                return Err(cerr!(line, TakesOne, name, got = args.len()));
-            }
             let at = self.expr(&args[0], scope, Some(&Type::Int), fn_ret)?;
             let at = self.base(&at);
             if !matches!(at, Type::Err) && at != Type::Int {
@@ -5148,9 +4917,6 @@ impl<'a> Checker<'a> {
             return Ok(exp.clone());
         }
         if name == "@pop" {
-            if args.len() != 1 {
-                return Err(cerr!(line, TakesNone, name = "pop"));
-            }
             let elem = self.mut_array_receiver(&args[0], scope, line, "pop")?;
             return Ok(match elem {
                 Type::Err => Type::Err,
@@ -5159,9 +4925,6 @@ impl<'a> Checker<'a> {
         }
         // O(1) unordered remove: the last element moves into slot `i`.
         if name == "@swapRemove" {
-            if args.len() != 2 {
-                return Err(cerr!(line, SwapRemoveArity, got = args.len() - 1));
-            }
             let elem = self.mut_array_receiver(&args[0], scope, line, "swapRemove")?;
             let i = self.base(&self.expr(&args[1], scope, Some(&Type::Int), fn_ret)?);
             if !matches!(i, Type::Int | Type::Err) {
@@ -5172,9 +4935,6 @@ impl<'a> Checker<'a> {
         // The one conversion from `SmallArray<T, N>` to `Array<T>`; an `Array`
         // receiver is accepted too, as a copy.
         if name == "@toArray" {
-            if args.len() != 1 {
-                return Err(cerr!(line, TakesNone, name = "toArray"));
-            }
             let at = self.expr(&args[0], scope, None, fn_ret)?;
             let elem = match self.base(&at) {
                 Type::SmallArray(inner, _) | Type::Array(inner) => (*inner).clone(),
@@ -5188,9 +4948,6 @@ impl<'a> Checker<'a> {
         // Copy` overrides) and for a `Stream` (two consumers, one cursor). A
         // scalar is accepted, so one generic `x.copy()` serves every instance.
         if name == "@copy" {
-            if args.len() != 1 {
-                return Err(cerr!(line, TakesNone, name = "copy"));
-            }
             let t = self.expr(&args[0], scope, None, fn_ret)?;
             if matches!(self.base(&t), Type::Err) {
                 return Ok(Type::Err);
@@ -5253,20 +5010,15 @@ impl<'a> Checker<'a> {
             if matches!(src, Type::Err) {
                 return Ok(Type::Err);
             }
-            if !matches!(
-                src,
-                Type::Int | Type::Float | Type::Float32 | Type::IntN { .. }
-            ) {
+            if !src.is_numeric() {
                 return Err(cerr!(line, ConversionType, name, src));
             }
             return Ok(target);
         }
         // Vector builtins. The methods arrive under internal names
         // the parser assigns, so a user `fn min` or `fn lane` is untouched.
-        if matches!(
-            name,
-            "F32x4" | "I32x4" | "F64x2" | "@lane" | "@replaceLane" | "@anyTrue" | "@allTrue"
-        ) || name.starts_with("@f32x4")
+        if matches!(name, "@lane" | "@replaceLane" | "@anyTrue" | "@allTrue")
+            || name.starts_with("@f32x4")
             || name.starts_with("@i32x4")
             || name.starts_with("@f64x2")
         {
@@ -5309,9 +5061,6 @@ impl<'a> Checker<'a> {
             }
         }
         if name == "toJson" {
-            if args.len() != 1 {
-                return Err(cerr!(line, ToJsonArity, got = args.len()));
-            }
             let at = self.expr(&args[0], scope, None, fn_ret)?;
             if matches!(at, Type::Err) {
                 return Ok(Type::Str);
@@ -6932,13 +6681,7 @@ fn intn_range(bits: u8, signed: bool) -> String {
 /// Whether a type may cross an `extern` boundary: a scalar by value, a
 /// `String` as `(ptr, len)`. `allow_unit` is for the return position.
 fn extern_abi_type_ok(ty: &Type, allow_unit: bool) -> bool {
-    match ty {
-        Type::Int | Type::IntN { .. } | Type::Float | Type::Float32 | Type::Bool | Type::Str => {
-            true
-        }
-        Type::Unit => allow_unit,
-        _ => false,
-    }
+    ty.is_scalar() || (allow_unit && *ty == Type::Unit)
 }
 
 /// Refuses a `gen fn` that reaches, through any call chain, an `extern`,

@@ -224,7 +224,7 @@ pull request.
 - The WASI calls a module imports are one table, `vyrn_codegen::WASI_IMPORTS`. The emitter declares from it, and a test holds each host (`vyrn-genwasm/src/wasi.rs`, `wasi_host.c`) to exactly its rows.
 - The embedded WASI host is one file, `vyrn-genwasm/src/wasi.rs`, behind a `Policy`. A program run gets the process (environment, working directory as fd 3, stdin, clocks, random); a generator gets none of it, and a test fails if a call that reads the process reaches its link set.
 - A builtin exists only for what Vyrn source cannot express, such as a syscall. Everything expressible is std Vyrn.
-- Every fact about a builtin (contract, method spelling, core `Spec`, effect, route, length and element effect, editor text) is one `prelude::Builtin` row. A pass reads the row, never its own list of names.
+- Every fact about a builtin (contract, method spelling, core `Spec`, effect, route, length and element effect, editor text) is one `prelude::Builtin` row. A pass reads the row, never its own list of names. The checker counts a builtin call's operands from the row's `arity`, and types a row marked `typed` from the row alone.
 - Hot per-element paths stay inline in the emitter (indexing, the call-depth counter, the map value paths), because one wasmtime call level costs 14 to 270% there.
 - A `for` over any indexed container is one index walk in the core. A user container supplies its `size` call and its `nth` element read; it gets no loop of its own.
 - A `read` or `modify` aggregate parameter is the caller's storage, used in place, while no module state can name that storage; the checker's exclusive-`modify` rule covers the parameters. A per-callee effect gate waits until the effect judgment attributes every call.

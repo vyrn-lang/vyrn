@@ -3613,9 +3613,9 @@ impl<'a> Builder<'a> {
                 }
             }
             shape => {
-                let (key, elem) = match shape {
-                    Type::Array(e) | Type::ArrayN(e, _) | Type::SmallArray(e, _) => (Type::Int, *e),
-                    other => match self.program.impls.place(bty, "atSet") {
+                let (key, elem) = match shape.elem() {
+                    Some(e) => (Type::Int, e.clone()),
+                    None => match self.program.impls.place(bty, "atSet") {
                         Some((imp, f)) => (
                             (f.params.get(1)).map_or(Type::Int, |p| {
                                 vyrn_frontend::types::under_head(imp, bty, &p.ty)
@@ -3623,7 +3623,7 @@ impl<'a> Builder<'a> {
                             vyrn_frontend::types::under_head(imp, bty, &f.ret),
                         ),
                         None => {
-                            let ([other], []) = sp.say([&other], []);
+                            let ([other], []) = sp.say([&shape], []);
                             let refusal = rule!(IndexStoreNoContainer, name, other).render();
                             self.body.mistyped.push((line, refusal));
                             return gap("a store into an element of what has none", line);
@@ -3963,9 +3963,7 @@ impl<'a> Builder<'a> {
         let field = |f: &str| Rhs::Read(Place::Field(Box::new(Place::Name(it)), f.to_string()));
         Ok(match vyrn_frontend::types::resolve(ity, &decls) {
             Type::Str => field("byteLength"),
-            Type::Array(_) | Type::ArrayN(..) | Type::SmallArray(..) | Type::Map(..) => {
-                field("length")
-            }
+            t if t.is_seq() || matches!(t, Type::Map(..)) => field("length"),
             _ => match vyrn_frontend::types::iterate_impl(&self.program.impls, ity) {
                 Some((imp, size, _)) => {
                     let solved = self.impl_args(imp, &size, ity);
@@ -4069,15 +4067,15 @@ impl<'a> Builder<'a> {
 
     fn elem_ty(&self, ty: &Type, line: usize) -> Result<Type, Gap> {
         let decls = self.proto.types();
-        match vyrn_frontend::types::resolve(ty, &decls) {
-            Type::Array(e) | Type::ArrayN(e, _) | Type::SmallArray(e, _) | Type::Stream(e) => {
-                Ok(*e)
-            }
+        let t = vyrn_frontend::types::resolve(ty, &decls);
+        match (t.elem(), &t) {
+            (Some(e), _) => Ok(e.clone()),
+            (None, Type::Stream(e)) => Ok((**e).clone()),
             // A `for` over a String yields each byte as an `Int64`, the
             // checker's type; `s[i]` is a `UInt8` and never reaches here.
-            Type::Str => Ok(Type::Int),
-            Type::Map(_, v) => Ok(*v),
-            t => gap_d("an element of a non-container", &t.to_string(), line),
+            (None, Type::Str) => Ok(Type::Int),
+            (None, Type::Map(_, v)) => Ok((**v).clone()),
+            (None, t) => gap_d("an element of a non-container", &t.to_string(), line),
         }
     }
 
@@ -7415,11 +7413,7 @@ fn ruled_steps(own: &Owned, ty: &Type, path: &[&Place]) -> Vec<(usize, String)> 
                 let elem_of_length_only = match (step, path.get(k + 1)) {
                     (Place::Field(_, f), Some(Place::Elem(..))) => {
                         fields.iter().any(|x| {
-                            &x.name == f
-                                && matches!(
-                                    vyrn_frontend::types::resolve(&x.ty, decls),
-                                    Type::Array(_) | Type::ArrayN(..) | Type::SmallArray(..)
-                                )
+                            &x.name == f && vyrn_frontend::types::resolve(&x.ty, decls).is_seq()
                         }) && !vyrn_frontend::consteval::whole_reads(pred).contains(f)
                     }
                     _ => false,
@@ -7433,9 +7427,7 @@ fn ruled_steps(own: &Owned, ty: &Type, path: &[&Place]) -> Vec<(usize, String)> 
             (Place::Field(_, f), _) => vyrn_frontend::types::record_fields(&at, decls)
                 .and_then(|fs| fs.into_iter().find(|x| &x.name == f))
                 .map(|x| x.ty),
-            (Place::Elem(..), Type::Array(e) | Type::ArrayN(e, _) | Type::SmallArray(e, _)) => {
-                Some(*e)
-            }
+            (Place::Elem(..), t) => t.elem().cloned(),
             (Place::Key(..), Type::Map(_, v)) => Some(*v),
             _ => None,
         };

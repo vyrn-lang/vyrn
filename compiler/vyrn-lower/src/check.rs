@@ -218,7 +218,7 @@ fn place_guards(body: &Body, tys: &Types<'_>, p: &Place, out: &mut Vec<(Rule, Gu
         Place::Elem(b, i) => {
             place_guards(body, tys, b, out);
             let rule = match place_ty(body, tys, b) {
-                Some(Type::Array(_) | Type::ArrayN(..) | Type::SmallArray(..)) => Rule::ArrayIndex,
+                Some(t) if t.is_seq() => Rule::ArrayIndex,
                 Some(Type::Str) => Rule::StringIndex,
                 _ => return,
             };
@@ -238,7 +238,8 @@ fn place_ty(body: &Body, tys: &Types<'_>, p: &Place) -> Option<Type> {
             _ => return None,
         },
         Place::Elem(b, _) => match place_ty(body, tys, b)? {
-            Type::Array(e) | Type::ArrayN(e, _) | Type::SmallArray(e, _) | Type::Stream(e) => *e,
+            t if t.is_seq() => t.elem()?.clone(),
+            Type::Stream(e) => *e,
             Type::Str => Type::IntN {
                 bits: 8,
                 signed: false,
