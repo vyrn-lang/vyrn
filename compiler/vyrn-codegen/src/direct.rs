@@ -1628,23 +1628,6 @@ impl Dest {
     }
 }
 
-/// Where the parts of a made layout come from. A record, array or map literal
-/// writes each part at an offset the layout decides, and the core's row names it as a [`Val`].
-struct Parts<'a, 'c>(&'a vyrn_frontend::core::Body, &'a [Val], &'c mut Walked);
-
-impl<'a> Parts<'a, '_> {
-    fn len(&self) -> usize {
-        self.1.len()
-    }
-
-    /// Where the `i`th part's own row wrote it ([`Fn_::core_part_at`]).
-    fn built(&mut self, i: usize) -> Option<Dest> {
-        match self.1[i] {
-            Val::Name(n) => self.2.built[n.index()].take(),
-            Val::Lit(_) => None,
-        }
-    }
-}
 /// The spelling a lifted lambda's shell is named by, followed by the name of
 /// the function that holds the literal: `@lambda main`. Reserved, so no Vyrn
 /// identifier can be it.
@@ -1750,7 +1733,7 @@ struct Fn_<'a, 'p> {
     core_key: String,
     /// This frame's own core body, which [`Fn_::core_body`] walks. `None` for
     /// a frame the core states no body for, which [`lower_body`] refuses.
-    core: Option<std::rc::Rc<vyrn_frontend::core::Body>>,
+    core: Option<&'a vyrn_frontend::core::Body>,
     /// The release rows held back for the read an exit hands back — see
     /// [`Fn_::core_releases`].
     core_rows: Vec<(Name, Vec<String>)>,
@@ -1795,12 +1778,12 @@ fn lower_globals_init(m: &mut Module, program: &Program, cx: &Cx<'_>) -> Result<
     let mut b = Frame::new(&[], &[], &[], 0);
     let mut f = top_level(cx);
     let from_core = cx.world.body_of("").filter(|core| {
+        f.core = Some(core);
         f.core_enter(core);
-        f.core = Some(std::rc::Rc::new((*core).clone()));
-        f.core_walkable(core, None)
+        f.core_walkable(None)
     });
     match &from_core {
-        Some(core) => f.core_body(m, &mut b, core)?,
+        Some(_) => f.core_body(m, &mut b)?,
         None => {
             if let Some(g) = program.globals.first() {
                 return unsupported("a module-state initializer the core did not state", g.line);
@@ -1894,7 +1877,7 @@ fn lower_body(
         .unwrap_or_else(|| f.name.clone());
 
     let mut b = Frame::new(&params, &results, &[], 0);
-    let core = core_body(key, f, &binds, cx).map(std::rc::Rc::new);
+    let core = core_body(key, f, &binds, cx);
     let mut cx_fn = Fn_ {
         ret: sig.ret.clone(),
         // As declared, not resolved: a function returning `Age` validates at its `return`,
@@ -1909,11 +1892,11 @@ fn lower_body(
         fn_binds: binds,
         owner,
         core_key: key.to_string(),
-        core,
+        core: core.as_ref(),
         ..top_level(cx)
     };
-    if let Some(core) = cx_fn.core.clone() {
-        cx_fn.core_enter(&core);
+    if let Some(core) = cx_fn.core {
+        cx_fn.core_enter(core);
     }
 
     // An aggregate parameter arrives as the caller's address. The one [`Sig::in_place`] names is
@@ -2011,18 +1994,14 @@ fn lower_body(
     b.ins(&Instruction::Block(BlockType::Empty));
     cx_fn.depth += 1;
     // A body the screen reads whole is walked from the core; any other body is refused.
-    if let Some(core) = cx_fn.core.clone() {
+    if let Some(core) = cx_fn.core {
         cx_fn.core_lift_targets(m, &core.stmts);
     }
-    let from_core = cx_fn
-        .core
-        .clone()
-        .filter(|core| cx_fn.core_walkable(core, stmts));
-    let Some(core) = from_core else {
+    if cx_fn.core.is_none() || !cx_fn.core_walkable(stmts) {
         let what = format!("the body of `{}` the core did not state", cx_fn.owner);
         return unsupported(&what, f.line);
-    };
-    cx_fn.core_body(m, &mut b, &core)?;
+    }
+    cx_fn.core_body(m, &mut b)?;
     // The checker proves a value-returning body never falls off its end; the validator needs
     // `unreachable`. Any other body leaves the trap block as a `return` does.
     if matches!(sig.ret, Repr::Scalar(_)) {
@@ -4340,8 +4319,6 @@ impl<'p> Fn_<'_, 'p> {
         &mut self,
         m: &mut Module,
         b: &mut Frame,
-        body: &vyrn_frontend::core::Body,
-        w: &mut Walked,
         prim: &str,
         args: &[(Val, vyrn_frontend::ast::Capability)],
         at: Option<&Type>,
@@ -4350,8 +4327,8 @@ impl<'p> Fn_<'_, 'p> {
         // `addr` and `adopt` change the type and nothing else: the operand's
         // wasm value is already the answer.
         if let ("addr" | "adopt", [(v, _)]) = (prim, args) {
-            let t = self.core_ty(body, v, &Type::Int);
-            self.core_val(m, b, body, w, v, &t, line)?;
+            let t = self.core_ty(v, &Type::Int);
+            self.core_val(m, b, v, &t, line)?;
             return match (prim, at) {
                 ("addr", _) => Ok(INT32),
                 (_, Some(t)) => Ok(t.clone()),
@@ -4370,7 +4347,7 @@ impl<'p> Fn_<'_, 'p> {
             b.ins(i);
         }
         for ((v, _), p) in args.iter().zip(&decl.params) {
-            self.core_val(m, b, body, w, v, &p.ty, line)?;
+            self.core_val(m, b, v, &p.ty, line)?;
         }
         for i in &after {
             b.ins(i);
@@ -4742,7 +4719,7 @@ impl<'p> Fn_<'_, 'p> {
         dest: Dest,
         sig_ty: &Type,
         target: FnTarget,
-        caps: &mut Parts,
+        caps: &[Val],
         line: usize,
     ) -> Result<(), String> {
         let cap_tys = target.sig.params[..target.ncaps].to_vec();
@@ -5679,19 +5656,21 @@ impl<'p> Fn_<'_, 'p> {
         &mut self,
         m: &mut Module,
         b: &mut Frame,
-        body: &vyrn_frontend::core::Body,
-        w: &mut Walked,
         decl: &TypeDecl,
         n: Name,
         line: usize,
     ) -> Result<(), String> {
-        let row = core_check(w, line, |g| matches!(g, Guard::Rule(m) if *m == n))?;
+        let row = core_check(
+            &mut self.core_w,
+            line,
+            |g| matches!(g, Guard::Rule(m) if *m == n),
+        )?;
         let Some(row) = self.row(b, row) else {
             return Ok(());
         };
         if row.verdict == Verdict::Kept {
             let ty = Type::Named(decl.name.clone());
-            self.core_val(m, b, body, w, &Val::Name(n), &ty, line)?;
+            self.core_val(m, b, &Val::Name(n), &ty, line)?;
             self.emit_validation(b, decl, line)?;
             b.ins(&Instruction::Drop);
             return Ok(());
@@ -5705,10 +5684,10 @@ impl<'p> Fn_<'_, 'p> {
             let at =
                 vyrn_frontend::core::Place::Field(Box::new(vyrn_frontend::core::Place::Name(n)), f);
             if let Repr::Agg(_) = self.cx.repr(&ty, line)? {
-                let (_, off) = self.core_addr(m, b, body, w, &at, line)?;
+                let (_, off) = self.core_addr(m, b, &at, line)?;
                 self.core_step(b, off);
             } else {
-                self.core_read(m, b, body, w, &at, line)?;
+                self.core_read(m, b, &at, line)?;
             }
         }
         b.ins(&Instruction::Call(index));
@@ -5813,7 +5792,7 @@ impl<'p> Fn_<'_, 'p> {
         b: &mut Frame,
         dest: Dest,
         elem: &Type,
-        elems: &mut Parts,
+        elems: &[Val],
         line: usize,
     ) -> Result<(), String> {
         let stride = self.stride(elem, line)?;
@@ -5845,7 +5824,7 @@ impl<'p> Fn_<'_, 'p> {
         decl: &[Field],
         l: &Layout,
         order: &[usize],
-        parts: &mut Parts,
+        parts: &[Val],
         line: usize,
     ) -> Result<(), String> {
         for (i, f) in decl.iter().enumerate() {
@@ -5871,13 +5850,12 @@ impl<'p> Fn_<'_, 'p> {
         &mut self,
         m: &mut Module,
         b: &mut Frame,
-        parts: &mut Parts,
+        parts: &[Val],
         i: usize,
         want: &Type,
         line: usize,
     ) -> Result<(), String> {
-        let Parts(body, vs, w) = parts;
-        self.core_val(m, b, body, w, &vs[i], want, line)
+        self.core_val(m, b, &parts[i], want, line)
     }
 
     /// Leaves aggregate part `i` at `dest`, the parent's storage at the part's offset.
@@ -5887,19 +5865,18 @@ impl<'p> Fn_<'_, 'p> {
         &mut self,
         m: &mut Module,
         b: &mut Frame,
-        parts: &mut Parts,
+        parts: &[Val],
         i: usize,
         dest: Dest,
         size: u32,
         ty: &Type,
         line: usize,
     ) -> Result<(), String> {
-        if parts.built(i).is_some() {
+        if self.part_built(&parts[i]).is_some() {
             return Ok(());
         }
-        let Parts(body, vs, w) = parts;
         dest.addr(b, 0);
-        self.core_val(m, b, body, w, &vs[i], ty, line)?;
+        self.core_val(m, b, &parts[i], ty, line)?;
         agg_landed(b, size, false);
         Ok(())
     }
@@ -5915,7 +5892,7 @@ impl<'p> Fn_<'_, 'p> {
         b: &mut Frame,
         dest: Dest,
         inner: &Type,
-        elems: &mut Parts,
+        elems: &[Val],
         taken: Option<u32>,
         line: usize,
         used: bool,
@@ -6789,7 +6766,7 @@ impl<'p> Fn_<'_, 'p> {
         b: &mut Frame,
         ty: &Type,
         tag: u64,
-        args: &mut Parts,
+        args: &[Val],
         payload: &[Type],
         line: usize,
         hint: Option<(Dest, Type)>,
@@ -6820,7 +6797,7 @@ impl<'p> Fn_<'_, 'p> {
                 b.copy(16);
             } else {
                 dest.addr(b, l.fields[slot]);
-                match args.built(i) {
+                match self.part_built(&args[i]) {
                     Some(boxed) => {
                         boxed.addr(b, 0);
                         b.ins(&Instruction::I64ExtendI32U);
@@ -7149,7 +7126,7 @@ impl<'p> Fn_<'_, 'p> {
         b: &mut Frame,
         dest: Dest,
         mty: &Type,
-        parts: &mut Parts,
+        parts: &[Val],
         line: usize,
     ) -> Result<(), String> {
         let Type::Map(key_t, val) = self.cx.resolve(mty) else {
@@ -7388,7 +7365,7 @@ impl<'p> Fn_<'_, 'p> {
         b: &mut Frame,
         hdr: u32,
         l: &Layout,
-        parts: &mut Parts,
+        parts: &[Val],
         key: usize,
         key_t: &Type,
         val: &Type,
@@ -8331,7 +8308,7 @@ impl<'p> Fn_<'_, 'p> {
         ty: &Type,
         inner: &Type,
         n: usize,
-        parts: &mut Parts,
+        parts: &[Val],
         line: usize,
     ) -> Result<(), String> {
         let l = self.cx.layout(ty, line)?;
@@ -9108,17 +9085,12 @@ struct Walked {
     checks: Vec<(Check, bool)>,
 }
 
-impl<'p> Fn_<'_, 'p> {
+impl<'a, 'p> Fn_<'a, 'p> {
     /// Emit the rows held back for the read an exit hands back, in the order
     /// the core stated them.
-    fn core_releases(
-        &mut self,
-        m: &mut Module,
-        b: &mut Frame,
-        body: &vyrn_frontend::core::Body,
-    ) -> Result<(), String> {
+    fn core_releases(&mut self, m: &mut Module, b: &mut Frame) -> Result<(), String> {
         for (name, holes) in std::mem::take(&mut self.core_rows) {
-            self.core_release(m, b, body, name, &holes)?;
+            self.core_release(m, b, name, &holes)?;
         }
         Ok(())
     }
@@ -9131,10 +9103,10 @@ impl<'p> Fn_<'_, 'p> {
         &mut self,
         m: &mut Module,
         b: &mut Frame,
-        body: &vyrn_frontend::core::Body,
         name: Name,
         holes: &[String],
     ) -> Result<(), String> {
+        let body = self.body();
         let Some(step) = body.names[name.index()].binding else {
             return unsupported("a release row whose binding the plan does not key", 0);
         };
@@ -9153,13 +9125,12 @@ impl<'p> Fn_<'_, 'p> {
         &mut self,
         m: &mut Module,
         b: &mut Frame,
-        body: &vyrn_frontend::core::Body,
-        w: &Walked,
         n: Name,
         holes: &Option<Vec<String>>,
         line: usize,
     ) -> Result<(), String> {
-        let Some((place, ty)) = self.core_place(w, body, n) else {
+        let body = self.body();
+        let Some((place, ty)) = self.core_place(n) else {
             return unsupported("a release of a name with no place", line);
         };
         let info = &body.names[n.index()];
@@ -9185,17 +9156,16 @@ impl<'p> Fn_<'_, 'p> {
         &mut self,
         m: &mut Module,
         b: &mut Frame,
-        body: &vyrn_frontend::core::Body,
-        w: &mut Walked,
         on: &Val,
         arms: &[Arm],
         owns: bool,
         line: usize,
     ) -> Result<(), String> {
+        let body = self.body();
         let Val::Name(n) = on else {
             return unsupported("a switch on a value the row does not name", line);
         };
-        let Some((place, sty)) = self.core_place(w, body, *n) else {
+        let Some((place, sty)) = self.core_place(*n) else {
             return unsupported("a switch on a name with no place", line);
         };
         let Some(sum) = self.sum_of(&sty) else {
@@ -9222,7 +9192,7 @@ impl<'p> Fn_<'_, 'p> {
             probes.push(match a.test {
                 Test::Tag(t) => (Some(t as usize), None),
                 Test::Else => (None, None),
-                Test::Holds(h) => match self.core_place(w, body, h) {
+                Test::Holds(h) => match self.core_place(h) {
                     Some((Place::Local(l), _)) => (Some(0), Some(l)),
                     _ => return unsupported("a switch on a predicate with no local", line),
                 },
@@ -9273,10 +9243,10 @@ impl<'p> Fn_<'_, 'p> {
                     }
                     _ => self.bind_payload(b, addr, &sl, &ptys, i, &ty, line, free_box)?,
                 };
-                self.core_bind(body, w, *bn, at, ty)?;
+                self.core_bind(*bn, at, ty)?;
             }
             let to = b.mark();
-            self.core_stmts(m, b, body, w, &arm.body[arm.reads(on).len()..])?;
+            self.core_stmts(m, b, &arm.body[arm.reads(on).len()..])?;
             // A binder's scope is its arm, so its name and its slots go back
             // at the arm's end.
             self.scope.truncate(scope);
@@ -9287,6 +9257,14 @@ impl<'p> Fn_<'_, 'p> {
         }
         self.chain_close(b, &chain);
         Ok(())
+    }
+
+    /// The frame's core body.
+    ///
+    /// Every caller runs under [`lower_body`]'s or [`lower_globals_init`]'s screen, which refuses
+    /// a frame whose core is `None`.
+    fn body(&self) -> &'a vyrn_frontend::core::Body {
+        self.core.expect("a walk runs only in a frame with a core")
     }
 
     /// Reset the walk state for `core`, one entry per name; [`Fn_::core_body`] walks it.
@@ -9312,23 +9290,10 @@ impl<'p> Fn_<'_, 'p> {
     ///
     /// Runs only where [`Fn_::core_walkable`] says the rows carry the whole body;
     /// [`lower_body`] refuses any other.
-    fn core_body(
-        &mut self,
-        m: &mut Module,
-        b: &mut Frame,
-        body: &vyrn_frontend::core::Body,
-    ) -> Result<(), String> {
-        let mut w = std::mem::take(&mut self.core_w);
-        let r = self.core_stmts(m, b, body, &mut w, &body.stmts);
-        let idle = w
-            .checks
-            .iter()
-            .find(|(_, ran)| !ran)
-            .map(|(c, _)| c.site.line);
-        self.core_w = w;
-        r?;
-        match idle {
-            Some(line) => unsupported("a check row no construct ran", line),
+    fn core_body(&mut self, m: &mut Module, b: &mut Frame) -> Result<(), String> {
+        self.core_stmts(m, b, &self.body().stmts)?;
+        match self.core_w.checks.iter().find(|(_, ran)| !ran) {
+            Some((c, _)) => unsupported("a check row no construct ran", c.site.line),
             None => Ok(()),
         }
     }
@@ -9366,15 +9331,19 @@ impl<'p> Fn_<'_, 'p> {
         }
     }
 
+    /// Where the row that wrote part `v` built it, taken once ([`Fn_::core_part_at`]).
+    fn part_built(&mut self, v: &Val) -> Option<Dest> {
+        match v {
+            Val::Name(n) => self.core_w.built[n.index()].take(),
+            Val::Lit(_) => None,
+        }
+    }
+
     /// Where one of the core's names lives: the place this walk bound it at, or
     /// the scope's.
-    fn core_place(
-        &self,
-        w: &Walked,
-        body: &vyrn_frontend::core::Body,
-        n: Name,
-    ) -> Option<(Place, Type)> {
-        if let Some(p) = w.at[n.index()].clone() {
+    fn core_place(&self, n: Name) -> Option<(Place, Type)> {
+        let body = self.body();
+        if let Some(p) = self.core_w.at[n.index()].clone() {
             return Some(p);
         }
         let info = &body.names[n.index()];
@@ -9385,25 +9354,19 @@ impl<'p> Fn_<'_, 'p> {
         self.lookup(&info.source, info.line).ok()
     }
 
-    fn core_stmts(
-        &mut self,
-        m: &mut Module,
-        b: &mut Frame,
-        body: &vyrn_frontend::core::Body,
-        w: &mut Walked,
-        ss: &[St],
-    ) -> Result<(), String> {
-        let ends = vyrn_lower::core::extent_ends(ss, &w.occurs);
+    fn core_stmts(&mut self, m: &mut Module, b: &mut Frame, ss: &[St]) -> Result<(), String> {
+        let body = self.body();
+        let ends = vyrn_lower::core::extent_ends(ss, &self.core_w.occurs);
         let mut due = Vec::new();
         let (mut last, mut mark): (Option<usize>, u32) = (None, b.mark());
         for (i, s) in ss.iter().enumerate() {
             if let St::Check(c) = s {
-                w.checks.push((c.clone(), false));
+                self.core_w.checks.push((c.clone(), false));
                 continue;
             }
             if let Some(j) = last {
-                core_row_done(b, w, &ss[j], mark);
-                self.core_give_back(b, w, &mut due, &ends[j]);
+                core_row_done(b, &self.core_w, &ss[j], mark);
+                self.core_give_back(b, &mut due, &ends[j]);
             }
             (last, mark) = (Some(i), b.mark());
             if let St::Store {
@@ -9412,11 +9375,11 @@ impl<'p> Fn_<'_, 'p> {
                 ..
             } = s
             {
-                if w.at[n.index()].is_none() && self.core_joins(body, *n) {
+                if self.core_w.at[n.index()].is_none() && self.core_joins(*n) {
                     let ty = body.names[n.index()].ty.clone();
                     let r = self.cx.repr(&ty, *line)?;
-                    let off = self.core_slot(b, w, *n, &r, *line)?;
-                    self.core_bind(body, w, *n, Place::Slot(off), ty)?;
+                    let off = self.core_slot(b, *n, &r, *line)?;
+                    self.core_bind(*n, Place::Slot(off), ty)?;
                 }
             }
             match s {
@@ -9427,7 +9390,7 @@ impl<'p> Fn_<'_, 'p> {
                     rhs @ Rhs::Call {
                         callee, kind, args, ..
                     },
-                ) if self.core_rebuild(body, rhs) => {
+                ) if self.core_rebuild(rhs) => {
                     let line = body.names[n.index()].line;
                     let Some(((Arg::Val(Val::Name(x)), _), rest)) = args.split_first() else {
                         return unsupported("a rebuild of no named receiver", line);
@@ -9451,8 +9414,7 @@ impl<'p> Fn_<'_, 'p> {
                                 _ => return unsupported("an append with no ownership word", line),
                             },
                             None => {
-                                let Some((Place::Local(l), _)) = self.core_place(w, body, *x)
-                                else {
+                                let Some((Place::Local(l), _)) = self.core_place(*x) else {
                                     return unsupported(
                                         "an append into a place with no local",
                                         line,
@@ -9466,7 +9428,7 @@ impl<'p> Fn_<'_, 'p> {
                         };
                         let mut operand =
                             |f: &mut Self, m: &mut Module, b: &mut Frame, k: usize| {
-                                f.core_val(m, b, body, w, &rest[k].0, &Type::Str, line)
+                                f.core_val(m, b, &rest[k].0, &Type::Str, line)
                             };
                         let parts = rest.len();
                         self.append_in_place(
@@ -9480,33 +9442,20 @@ impl<'p> Fn_<'_, 'p> {
                             line,
                         )?;
                     } else {
-                        self.core_call(
-                            m,
-                            b,
-                            body,
-                            w,
-                            callee,
-                            *kind,
-                            &[],
-                            &[],
-                            args,
-                            None,
-                            None,
-                            line,
-                        )?;
+                        self.core_call(m, b, callee, *kind, &[], &[], args, None, None, line)?;
                         b.ins(&Instruction::Drop);
                     }
-                    w.at[n.index()] = self.core_place(w, body, *x);
+                    self.core_w.at[n.index()] = self.core_place(*x);
                     // With no store to put it back, the result holds the
                     // receiver's slot for its own extent, unless the receiver
                     // lives on to be stored again: a join after the rebuild
                     // puts the result back into it.
                     if self
-                        .core_rebuilt(body, ss, i + 1 + drops_ahead(ss[i + 1..].iter()))
+                        .core_rebuilt(ss, i + 1 + drops_ahead(ss[i + 1..].iter()))
                         .is_none()
-                        && !self.core_restored(body, *x)
+                        && !self.core_restored(*x)
                     {
-                        w.slot[n.index()] = w.slot[x.index()].take();
+                        self.core_w.slot[n.index()] = self.core_w.slot[x.index()].take();
                     }
                 }
                 // The head of a `for` over a stream: the element goes into a
@@ -9522,150 +9471,150 @@ impl<'p> Fn_<'_, 'p> {
                     let [(Arg::Val(Val::Name(s)), _)] = args.as_slice() else {
                         return unsupported("a pull of no named stream", line);
                     };
-                    let Some(elem) = self.core_stream_elem(body, *s) else {
+                    let Some(elem) = self.core_stream_elem(*s) else {
                         return unsupported("a pull of no stream", line);
                     };
-                    let src = self.core_addr_local(b, w, body, *s, line)?;
+                    let src = self.core_addr_local(b, *s, line)?;
                     let r = self.cx.repr(&elem, line)?;
                     let place = self.place_for(b, &r, line)?;
                     let has = self.stream_next(m, b, src, place, &elem, line)?;
-                    w.pulled[n.index()] = Some((place, elem));
-                    self.core_bind(body, w, *n, Place::Local(has), Type::Bool)?;
+                    self.core_w.pulled[n.index()] = Some((place, elem));
+                    self.core_bind(*n, Place::Local(has), Type::Bool)?;
                 }
                 St::Let(n, Rhs::Read(vyrn_frontend::core::Place::Elem(s, c)))
-                    if self.core_pulls(body, s) =>
+                    if self.core_pulls(s) =>
                 {
                     let line = body.names[n.index()].line;
                     let Some((place, ty)) = (match c {
-                        Val::Name(c) => w.pulled[c.index()].take(),
+                        Val::Name(c) => self.core_w.pulled[c.index()].take(),
                         Val::Lit(_) => None,
                     }) else {
                         return unsupported("an element read of a stream no pull wrote", line);
                     };
-                    self.core_bind(body, w, *n, place, ty)?;
+                    self.core_bind(*n, place, ty)?;
                 }
                 // The store that puts the rebuilt receiver back, which the
                 // rebuild already wrote.
-                St::Store { .. } if self.core_rebuilt(body, ss, i).is_some() => {}
+                St::Store { .. } if self.core_rebuilt(ss, i).is_some() => {}
                 // A module-state receiver is read at its address by the
                 // append, and by nothing else.
                 St::Let(n, _) if core_global(body, *n).is_some() => {}
                 // A layout made, built into the binding's own slot. The slot must exist before
                 // the parts are written, and a record or array is never on the operand stack.
-                St::Let(n, rhs) if self.core_makes(body, &self.core_made_ty(body, *n), rhs) => {
+                St::Let(n, rhs) if self.core_makes(&self.core_made_ty(*n), rhs) => {
                     let info = &body.names[n.index()];
                     let line = info.line;
-                    let taken = w.bufs[n.index()].take();
-                    if let Some(dest) = self.core_part_dest(b, body, w, ss, i, line)? {
-                        let Some(at) = self.core_part_at(body, ss, i, w) else {
+                    let taken = self.core_w.bufs[n.index()].take();
+                    if let Some(dest) = self.core_part_dest(b, ss, i, line)? {
+                        let Some(at) = self.core_part_at(ss, i) else {
                             return unsupported("a part with no parent", line);
                         };
                         let ty = at.ty;
                         mark = b.mark();
-                        self.core_make(m, b, body, w, dest, &ty, rhs, taken, line)?;
+                        self.core_make(m, b, dest, &ty, rhs, taken, line)?;
                         continue;
                     }
                     // The storage a part took before this row.
-                    let pre = w.built[n.index()].take();
-                    if self.core_lands(body, ss, i, &w.reads) {
+                    let pre = self.core_w.built[n.index()].take();
+                    if self.core_lands(ss, i, &self.core_w.reads) {
                         let dest = Dest::Addr(self.core_out(line)?, 0);
                         let ty = self.ret_ty.clone();
-                        self.core_make(m, b, body, w, dest, &ty, rhs, taken, line)?;
-                        w.landed = Some(*n);
+                        self.core_make(m, b, dest, &ty, rhs, taken, line)?;
+                        self.core_w.landed = Some(*n);
                         continue;
                     }
-                    let ty = self.core_made_ty(body, *n);
+                    let ty = self.core_made_ty(*n);
                     let r = self.cx.repr(&ty, line)?;
                     if !matches!(r, Repr::Agg(_)) {
                         return unsupported("a made layout with no layout", line);
                     }
                     let place = match pre {
                         Some(Dest::Slot(off)) => Place::Slot(off),
-                        _ => Place::Slot(self.core_slot(b, w, *n, &r, line)?),
+                        _ => Place::Slot(self.core_slot(b, *n, &r, line)?),
                     };
                     let dest = Dest::of(place).expect("a slot is a destination");
-                    self.core_make(m, b, body, w, dest, &ty, rhs, taken, line)?;
-                    self.core_bind(body, w, *n, place, ty)?;
+                    self.core_make(m, b, dest, &ty, rhs, taken, line)?;
+                    self.core_bind(*n, place, ty)?;
                 }
                 // A layout taken out of a field in part position: the header moves to the part's
                 // offset, as `consume t.d` in a literal does, and the field is the hole the
                 // root's release carries.
-                St::Let(n, Rhs::Take(p)) if self.core_part_at(body, ss, i, w).is_some() => {
+                St::Let(n, Rhs::Take(p)) if self.core_part_at(ss, i).is_some() => {
                     let line = body.names[n.index()].line;
-                    let Some(dest) = self.core_part_dest(b, body, w, ss, i, line)? else {
+                    let Some(dest) = self.core_part_dest(b, ss, i, line)? else {
                         return unsupported("a taken layout with no parent", line);
                     };
                     let Repr::Agg(l) = self.cx.repr(&body.names[n.index()].ty, line)? else {
                         return unsupported("a taken layout with no layout", line);
                     };
                     dest.addr(b, 0);
-                    let (_, off) = self.core_addr(m, b, body, w, p, line)?;
+                    let (_, off) = self.core_addr(m, b, p, line)?;
                     self.core_step(b, off);
                     agg_landed(b, l.size, false);
                 }
                 // A header a loop walks, taken apart once so every element and length read in
                 // the loop reads the parts. The kernel ends the borrow at any write under the
                 // container, so the parts cannot go stale.
-                St::Let(n, Rhs::Read(p)) if self.core_walked(body, *n) => {
+                St::Let(n, Rhs::Read(p)) if self.core_walked(*n) => {
                     // An outer loop walks this header too, and nothing in it moves the header.
-                    if let Some(walk) = core_header(w, p) {
-                        w.walks[n.index()] = Some(walk);
+                    if let Some(walk) = core_header(&self.core_w, p) {
+                        self.core_w.walks[n.index()] = Some(walk);
                         continue;
                     }
                     let info = &body.names[n.index()];
                     let (line, ty) = (info.line, info.ty.clone());
                     if let Repr::Agg(_) = self.cx.repr(&ty, line)? {
-                        let (_, off) = self.core_addr(m, b, body, w, p, line)?;
+                        let (_, off) = self.core_addr(m, b, p, line)?;
                         self.core_step(b, off);
                     } else {
-                        self.core_read(m, b, body, w, p, line)?;
+                        self.core_read(m, b, p, line)?;
                     }
-                    w.walks[n.index()] = Some(self.walk(b, &ty, line)?);
+                    self.core_w.walks[n.index()] = Some(self.walk(b, &ty, line)?);
                 }
                 // A layout read out of a place, or taken and handed back: the place's address in
                 // a local, as for a layout parameter.
-                St::Let(n, Rhs::Read(p) | Rhs::Take(p)) if self.core_alias(body, *n).is_some() => {
+                St::Let(n, Rhs::Read(p) | Rhs::Take(p)) if self.core_alias(*n).is_some() => {
                     let line = body.names[n.index()].line;
-                    let (ty, off) = self.core_addr(m, b, body, w, p, line)?;
+                    let (ty, off) = self.core_addr(m, b, p, line)?;
                     self.core_step(b, off);
                     let Place::Local(l) = self.place_for(b, &Repr::Scalar(ValType::I32), line)?
                     else {
                         return unsupported("an address with no local", line);
                     };
                     b.ins(&Instruction::LocalSet(l));
-                    self.core_bind(body, w, *n, Place::Local(l), ty)?;
+                    self.core_bind(*n, Place::Local(l), ty)?;
                 }
                 // A literal's growable array: `@list` takes the literal, which was made in its
                 // heap buffer, so the name takes its place.
-                St::Let(n, _) if self.core_lists(body).iter().any(|(_, a)| a == n) => {
+                St::Let(n, _) if self.core_lists().iter().any(|(_, a)| a == n) => {
                     let info = &body.names[n.index()];
-                    let Some(&(x, _)) = self.core_lists(body).iter().find(|(_, a)| a == n) else {
+                    let Some(&(x, _)) = self.core_lists().iter().find(|(_, a)| a == n) else {
                         return unsupported("a list of no literal", info.line);
                     };
                     // A literal made as its parent's part has no place of its
                     // own: the part the parent reads is this name.
-                    if let Some(d) = w.built[x.index()].take() {
-                        w.built[n.index()] = Some(d);
+                    if let Some(d) = self.core_w.built[x.index()].take() {
+                        self.core_w.built[n.index()] = Some(d);
                         continue;
                     }
-                    let Some((place, _)) = self.core_place(w, body, x) else {
+                    let Some((place, _)) = self.core_place(x) else {
                         return unsupported("a list of a literal with no place", info.line);
                     };
-                    w.slot[n.index()] = w.slot[x.index()].take();
-                    self.core_bind(body, w, *n, place, info.ty.clone())?;
+                    self.core_w.slot[n.index()] = self.core_w.slot[x.index()].take();
+                    self.core_bind(*n, place, info.ty.clone())?;
                 }
                 // A move of a layout: the name takes the moved name's place and slot extent.
-                St::Let(n, Rhs::Val(Val::Name(x))) if self.core_renames(body, *n).is_some() => {
+                St::Let(n, Rhs::Val(Val::Name(x))) if self.core_renames(*n).is_some() => {
                     let info = &body.names[n.index()];
-                    let Some((place, _)) = self.core_place(w, body, *x) else {
+                    let Some((place, _)) = self.core_place(*x) else {
                         return unsupported("a move of a name with no place", info.line);
                     };
-                    w.slot[n.index()] = w.slot[x.index()].take();
-                    self.core_bind(body, w, *n, place, info.ty.clone())?;
+                    self.core_w.slot[n.index()] = self.core_w.slot[x.index()].take();
+                    self.core_bind(*n, place, info.ty.clone())?;
                 }
-                St::Let(n, _) if self.core_copies(body, *n).is_some() => {
+                St::Let(n, _) if self.core_copies(*n).is_some() => {
                     let line = body.names[n.index()].line;
-                    let Some(p) = self.core_copies(body, *n) else {
+                    let Some(p) = self.core_copies(*n) else {
                         return unsupported("a copy of no place", line);
                     };
                     let ty = body.names[n.index()].ty.clone();
@@ -9673,12 +9622,12 @@ impl<'p> Fn_<'_, 'p> {
                     let Repr::Agg(l) = &r else {
                         return unsupported("a copy of no layout", line);
                     };
-                    let slot = self.core_slot(b, w, *n, &r, line)?;
+                    let slot = self.core_slot(b, *n, &r, line)?;
                     b.slot(slot);
-                    let (_, off) = self.core_addr(m, b, body, w, &p, line)?;
+                    let (_, off) = self.core_addr(m, b, &p, line)?;
                     self.core_step(b, off);
                     agg_landed(b, l.size, false);
-                    self.core_bind(body, w, *n, Place::Slot(slot), ty)?;
+                    self.core_bind(*n, Place::Slot(slot), ty)?;
                 }
                 // An aggregate call result, written through the out-pointer ([`Fn_::out_ptr`])
                 // into the binding's slot, or into the caller's storage when the next `return`
@@ -9687,9 +9636,9 @@ impl<'p> Fn_<'_, 'p> {
                 St::Let(
                     n,
                     rhs @ (Rhs::Call { .. } | Rhs::Read(vyrn_frontend::core::Place::Key(..))),
-                ) if self.core_agg_call(body, rhs) => {
+                ) if self.core_agg_call(rhs) => {
                     let line = body.names[n.index()].line;
-                    let lands = self.core_lands(body, ss, i, &w.reads);
+                    let lands = self.core_lands(ss, i, &self.core_w.reads);
                     let ty = if lands {
                         self.ret_ty.clone()
                     } else {
@@ -9699,22 +9648,22 @@ impl<'p> Fn_<'_, 'p> {
                     let Repr::Agg(l) = &r else {
                         return unsupported("an aggregate call with no layout", line);
                     };
-                    let part = self.core_part_dest(b, body, w, ss, i, line)?;
+                    let part = self.core_part_dest(b, ss, i, line)?;
                     mark = b.mark();
-                    let back = self.core_back(body, w, ss, i, &ends[i]);
+                    let back = self.core_back(ss, i, &ends[i]);
                     let (dest, place) = if lands {
                         (Some(Dest::Addr(self.core_out(line)?, 0)), None)
                     } else if part.is_some() {
                         (part, None)
                     } else if let Some((d, p, from)) = back {
                         if let Some(a) = from {
-                            w.slot[n.index()] = w.slot[a.index()].take();
+                            self.core_w.slot[n.index()] = self.core_w.slot[a.index()].take();
                         }
                         (Some(d), Some(p))
                     } else if body.names[n.index()].source.starts_with('@') {
                         (None, None)
                     } else {
-                        let off = self.core_slot(b, w, *n, &r, line)?;
+                        let off = self.core_slot(b, *n, &r, line)?;
                         (Some(Dest::Slot(off)), Some(Place::Slot(off)))
                     };
                     let from = b.mark();
@@ -9736,8 +9685,6 @@ impl<'p> Fn_<'_, 'p> {
                             self.core_call(
                                 m,
                                 b,
-                                body,
-                                w,
                                 callee,
                                 *kind,
                                 solved,
@@ -9749,7 +9696,7 @@ impl<'p> Fn_<'_, 'p> {
                             )?;
                         }
                         Rhs::Read(vyrn_frontend::core::Place::Key(base, k)) => {
-                            let (mty, off) = self.core_addr(m, b, body, w, base, line)?;
+                            let (mty, off) = self.core_addr(m, b, base, line)?;
                             self.core_step(b, off);
                             let mty = self.cx.resolve(&mty);
                             let Type::Map(_, val) = &mty else {
@@ -9758,7 +9705,7 @@ impl<'p> Fn_<'_, 'p> {
                             let val = (**val).clone();
                             let mut key =
                                 |s: &mut Self, m: &mut Module, b: &mut Frame, t: &Type| {
-                                    s.core_val(m, b, body, w, k, t, line)
+                                    s.core_val(m, b, k, t, line)
                                 };
                             self.map_at(m, b, &mty, &val, &mut key, line)?;
                         }
@@ -9769,17 +9716,17 @@ impl<'p> Fn_<'_, 'p> {
                         // The name holds the call's own slot, to the end of
                         // its extent.
                         (None, _) => {
-                            w.slot[n.index()] = Some((from, b.mark()));
+                            self.core_w.slot[n.index()] = Some((from, b.mark()));
                             let a = b.local(ValType::I32);
                             b.ins(&Instruction::LocalSet(a));
-                            self.core_bind(body, w, *n, Place::Local(a), ty)?;
+                            self.core_bind(*n, Place::Local(a), ty)?;
                         }
                         (Some(_), place) => {
                             agg_landed(b, l.size, used);
                             match place {
-                                Some(place) => self.core_bind(body, w, *n, place, ty)?,
+                                Some(place) => self.core_bind(*n, place, ty)?,
                                 None if part.is_some() => {}
-                                None => w.landed = Some(*n),
+                                None => self.core_w.landed = Some(*n),
                             }
                         }
                     }
@@ -9787,7 +9734,7 @@ impl<'p> Fn_<'_, 'p> {
                 St::Let(n, rhs) => {
                     let info = &body.names[n.index()];
                     let line = info.line;
-                    self.core_rhs(m, b, body, w, rhs, &info.ty, line)?;
+                    self.core_rhs(m, b, rhs, &info.ty, line)?;
                     if self.core_unit(&info.ty) {
                         continue;
                     }
@@ -9806,15 +9753,15 @@ impl<'p> Fn_<'_, 'p> {
                         _ => None,
                     };
                     if let Some([(Arg::Val(Val::Name(x)), _)]) = barrier {
-                        w.slot[n.index()] = w.slot[x.index()].take();
+                        self.core_w.slot[n.index()] = self.core_w.slot[x.index()].take();
                     }
                     // A temporary the next statement reads once, first, and nothing else reads
                     // stays on the operand stack. Every other name takes a local, in row order.
                     if info.binding.is_none()
-                        && w.reads[n.index()] == 1
-                        && self.core_first_read(body, next_row(ss, i)) == Some(*n)
+                        && self.core_w.reads[n.index()] == 1
+                        && self.core_first_read(next_row(ss, i)) == Some(*n)
                     {
-                        w.held = Some(*n);
+                        self.core_w.held = Some(*n);
                         continue;
                     }
                     let r = self.cx.repr(&info.ty, line)?;
@@ -9826,10 +9773,10 @@ impl<'p> Fn_<'_, 'p> {
                         return unsupported("a core `let` of an aggregate", line);
                     };
                     b.ins(&Instruction::LocalSet(l));
-                    self.core_bind(body, w, *n, place, info.ty.clone())?;
+                    self.core_bind(*n, place, info.ty.clone())?;
                     if let (true, Some(site)) = (info.grows, info.binding) {
                         let literal = matches!(rhs, Rhs::Val(Val::Lit(Lit::Str(_))));
-                        self.core_word(b, w, *n, l, site, literal);
+                        self.core_word(b, *n, l, site, literal);
                     }
                 }
                 St::Store {
@@ -9838,7 +9785,7 @@ impl<'p> Fn_<'_, 'p> {
                     line,
                     ..
                 } if self.core_unit(&body.names[n.index()].ty) => {
-                    self.core_val(m, b, body, w, value, &Type::Unit, *line)?;
+                    self.core_val(m, b, value, &Type::Unit, *line)?;
                 }
                 St::Store {
                     place: vyrn_frontend::core::Place::Name(n),
@@ -9850,7 +9797,7 @@ impl<'p> Fn_<'_, 'p> {
                     // The temporary an `if` expression joins through is stored
                     // by each branch and bound by the `let` after them,
                     // so the first store it meets takes its slot.
-                    let (l, ty) = match self.core_place(w, body, *n) {
+                    let (l, ty) = match self.core_place(*n) {
                         Some((Place::Local(l), ty)) => (l, ty),
                         Some(_) => {
                             return unsupported("a core store into a place with no local", *line)
@@ -9861,7 +9808,7 @@ impl<'p> Fn_<'_, 'p> {
                             let Place::Local(l) = self.place_for(b, &r, *line)? else {
                                 return unsupported("a core store of an aggregate", *line);
                             };
-                            self.core_bind(body, w, *n, Place::Local(l), ty.clone())?;
+                            self.core_bind(*n, Place::Local(l), ty.clone())?;
                             (l, ty)
                         }
                     };
@@ -9875,7 +9822,7 @@ impl<'p> Fn_<'_, 'p> {
                             return unsupported("a core store that releases an aggregate", *line)
                         }
                     };
-                    self.core_val(m, b, body, w, value, &ty, *line)?;
+                    self.core_val(m, b, value, &ty, *line)?;
                     b.ins(&Instruction::LocalSet(l));
                     self.free_snap(m, b, snap, *line)?;
                     if let Some(&at) = self.str_append.get(&l) {
@@ -9892,7 +9839,7 @@ impl<'p> Fn_<'_, 'p> {
                     releases,
                     ..
                 } => {
-                    let (mty, off) = self.core_addr(m, b, body, w, base, *line)?;
+                    let (mty, off) = self.core_addr(m, b, base, *line)?;
                     self.core_step(b, off);
                     let Type::Map(key_t, val) = self.cx.resolve(&mty) else {
                         return unsupported("a key store into no map", *line);
@@ -9901,8 +9848,8 @@ impl<'p> Fn_<'_, 'p> {
                     b.ins(&Instruction::LocalSet(hdr));
                     let l = self.cx.layout(&mty, *line)?;
                     let kv = [k.clone(), value.clone()];
-                    let mut parts = Parts(body, &kv, w);
-                    self.map_set(m, b, hdr, &l, &mut parts, 0, &key_t, &val, *releases, *line)?;
+                    let parts = &kv;
+                    self.map_set(m, b, hdr, &l, parts, 0, &key_t, &val, *releases, *line)?;
                 }
                 // `x = @t` after a call that ran in `x`'s storage ([`Fn_::core_back`]).
                 St::Store {
@@ -9910,8 +9857,8 @@ impl<'p> Fn_<'_, 'p> {
                     value: Val::Name(t),
                     releases: false,
                     ..
-                } if (self.core_place(w, body, *x))
-                    .is_some_and(|p| Some(p.0) == self.core_place(w, body, *t).map(|q| q.0)) => {}
+                } if (self.core_place(*x))
+                    .is_some_and(|p| Some(p.0) == self.core_place(*t).map(|q| q.0)) => {}
                 // A place with an address, for `x = v`, `r.f = v` and `a[i] = v`: the address,
                 // the old value kept aside where the row releases it, the value landed, the old
                 // value freed. A layout lands as a byte copy. A module-state String has its
@@ -9924,7 +9871,7 @@ impl<'p> Fn_<'_, 'p> {
                     holes,
                     ..
                 } => {
-                    let (ty, off) = self.core_addr(m, b, body, w, place, *line)?;
+                    let (ty, off) = self.core_addr(m, b, place, *line)?;
                     self.core_step(b, off);
                     let snap = if *releases {
                         let a = b.local(ValType::I32);
@@ -9934,7 +9881,7 @@ impl<'p> Fn_<'_, 'p> {
                     } else {
                         None
                     };
-                    self.core_val(m, b, body, w, value, &ty, *line)?;
+                    self.core_val(m, b, value, &ty, *line)?;
                     match self.cx.repr(&ty, *line)? {
                         Repr::Agg(l) => agg_landed(b, l.size, false),
                         _ => {
@@ -9967,7 +9914,7 @@ impl<'p> Fn_<'_, 'p> {
                     )
                     && !self.loops.is_empty() =>
                 {
-                    self.core_val(m, b, body, w, cond, &Type::Bool, 0)?;
+                    self.core_val(m, b, cond, &Type::Bool, 0)?;
                     b.ins(&Instruction::I32Eqz);
                     let brk = self.loops.last().expect("a loop is open").0;
                     let out = self.br_to(brk);
@@ -9976,14 +9923,14 @@ impl<'p> Fn_<'_, 'p> {
                 // `block { loop { .. br 0 } }`: `St::Break` targets the block and `St::Continue`
                 // the loop. `St::Loop` is infinite, so the back edge is unconditional.
                 St::Loop { body: inner, .. } => {
-                    let over = w.over.len();
+                    let over = self.core_w.over.len();
                     for p in ss[..i].iter().rev() {
                         match p {
                             St::Let(h, Rhs::Read(r))
                                 if body.names[h.index()].walked
                                     == Some(vyrn_frontend::core::Walk::While) =>
                             {
-                                w.over.push((r.clone(), *h))
+                                self.core_w.over.push((r.clone(), *h))
                             }
                             _ => break,
                         }
@@ -9996,10 +9943,10 @@ impl<'p> Fn_<'_, 'p> {
                     self.depth += 1;
                     self.loops.push((brk, cont, self.region_depth));
                     let scope = self.scope.len();
-                    let r = self.core_stmts(m, b, body, w, inner);
+                    let r = self.core_stmts(m, b, inner);
                     self.scope.truncate(scope);
                     self.loops.pop();
-                    w.over.truncate(over);
+                    self.core_w.over.truncate(over);
                     r?;
                     let back = self.br_to(cont);
                     b.ins(&Instruction::Br(back));
@@ -10025,15 +9972,15 @@ impl<'p> Fn_<'_, 'p> {
                 St::If {
                     cond, then, els, ..
                 } => {
-                    self.core_val(m, b, body, w, cond, &Type::Bool, 0)?;
+                    self.core_val(m, b, cond, &Type::Bool, 0)?;
                     b.ins(&Instruction::If(BlockType::Empty));
                     self.depth += 1;
                     let mark = self.scope.len();
-                    self.core_stmts(m, b, body, w, then)?;
+                    self.core_stmts(m, b, then)?;
                     self.scope.truncate(mark);
                     if !els.is_empty() {
                         b.ins(&Instruction::Else);
-                        self.core_stmts(m, b, body, w, els)?;
+                        self.core_stmts(m, b, els)?;
                         self.scope.truncate(mark);
                     }
                     self.depth -= 1;
@@ -10050,13 +9997,13 @@ impl<'p> Fn_<'_, 'p> {
                     if *region {
                         self.region_enter(b);
                         self.region_depth += 1;
-                        let r = self.core_stmts(m, b, body, w, inner);
+                        let r = self.core_stmts(m, b, inner);
                         self.region_depth -= 1;
                         let mark = self.region_marks.pop().expect("one mark per open region");
                         r?;
                         self.region_exit(b, mark);
                     } else {
-                        self.core_stmts(m, b, body, w, inner)?;
+                        self.core_stmts(m, b, inner)?;
                     }
                     self.scope.truncate(scope);
                 }
@@ -10068,17 +10015,17 @@ impl<'p> Fn_<'_, 'p> {
                         // parameter it is left in ([`Sig::in_place`]) is there.
                         (Some(Val::Name(n)), Some(size)) => {
                             let out = self.core_out(*line)?;
-                            let home = self.core_place(w, body, *n).map(|(p, _)| p)
-                                == Some(Place::Local(out));
-                            if w.landed.take() != Some(*n) && !home {
+                            let home =
+                                self.core_place(*n).map(|(p, _)| p) == Some(Place::Local(out));
+                            if self.core_w.landed.take() != Some(*n) && !home {
                                 Dest::Addr(out, 0).addr(b, 0);
-                                self.core_addr_of(b, w, body, *n, *line)?;
+                                self.core_addr_of(b, *n, *line)?;
                                 agg_landed(b, size, false);
                             }
                         }
                         (Some(v), _) => {
                             let want = self.ret_ty.clone();
-                            self.core_val(m, b, body, w, v, &want, *line)?;
+                            self.core_val(m, b, v, &want, *line)?;
                         }
                         (None, _) if matches!(self.ret, Repr::Unit) => {}
                         (None, _) => {
@@ -10088,7 +10035,7 @@ impl<'p> Fn_<'_, 'p> {
                             )
                         }
                     }
-                    self.core_releases(m, b, body)?;
+                    self.core_releases(m, b)?;
                     // Every region scope this return leaves pops rather than frees: a value
                     // built in a region points into the arena, and the caller owns it.
                     self.exit_regions_above(b, 0, false);
@@ -10102,7 +10049,7 @@ impl<'p> Fn_<'_, 'p> {
                         next_row(ss, i),
                         Some(St::Row { .. } | St::Return { value: Some(_), .. })
                     ) {
-                        self.core_releases(m, b, body)?;
+                        self.core_releases(m, b)?;
                     }
                 }
                 St::Switch {
@@ -10111,8 +10058,8 @@ impl<'p> Fn_<'_, 'p> {
                     owns,
                     line,
                     ..
-                } => self.core_switch(m, b, body, w, on, arms, *owns, *line)?,
-                St::Drop(n, _, line, holes) => self.core_drop(m, b, body, w, *n, holes, *line)?,
+                } => self.core_switch(m, b, on, arms, *owns, *line)?,
+                St::Drop(n, _, line, holes) => self.core_drop(m, b, *n, holes, *line)?,
                 St::Trap => {
                     b.ins(&Instruction::Unreachable);
                 }
@@ -10120,22 +10067,22 @@ impl<'p> Fn_<'_, 'p> {
                 St::Check(_) => {}
                 // An expression for its effect. What it leaves on the stack
                 // is dropped, or the enclosing block's type will not check.
-                St::Do { rhs, line, .. } if self.core_checks_made(body, rhs).is_some() => {
-                    let (decl, n) = self.core_checks_made(body, rhs).expect("the guard's");
-                    self.core_rule_check(m, b, body, w, &decl, n, *line)?;
+                St::Do { rhs, line, .. } if self.core_checks_made(rhs).is_some() => {
+                    let (decl, n) = self.core_checks_made(rhs).expect("the guard's");
+                    self.core_rule_check(m, b, &decl, n, *line)?;
                 }
                 // A discarded layout read: its address, for the checks on the way.
                 St::Do {
                     rhs: rhs @ Rhs::Read(p),
                     line,
                     ..
-                } if !self.core_rhs_readable(body, rhs) => {
-                    self.core_addr(m, b, body, w, core_discarded(p), *line)?;
+                } if !self.core_rhs_readable(rhs) => {
+                    self.core_addr(m, b, core_discarded(p), *line)?;
                     b.ins(&Instruction::Drop);
                 }
                 St::Do { rhs, line, .. } => {
-                    let got = self.core_rhs_ty(body, rhs, *line)?;
-                    self.core_rhs(m, b, body, w, rhs, &got, *line)?;
+                    let got = self.core_rhs_ty(rhs, *line)?;
+                    self.core_rhs(m, b, rhs, &got, *line)?;
                     if self.cx.repr(&got, *line)? != Repr::Unit {
                         b.ins(&Instruction::Drop);
                     }
@@ -10143,60 +10090,39 @@ impl<'p> Fn_<'_, 'p> {
             }
         }
         if let Some(j) = last {
-            core_row_done(b, w, &ss[j], mark);
-            self.core_give_back(b, w, &mut due, &ends[j]);
+            core_row_done(b, &self.core_w, &ss[j], mark);
+            self.core_give_back(b, &mut due, &ends[j]);
         }
         Ok(())
     }
 
     /// Places core name `n` in a slot and records the frame marks around it until
     /// [`Fn_::core_give_back`] hands the slot back.
-    fn core_slot(
-        &mut self,
-        b: &mut Frame,
-        w: &mut Walked,
-        n: Name,
-        r: &Repr,
-        line: usize,
-    ) -> Result<u32, String> {
+    fn core_slot(&mut self, b: &mut Frame, n: Name, r: &Repr, line: usize) -> Result<u32, String> {
         let from = b.mark();
         let Place::Slot(off) = self.place_for(b, r, line)? else {
             return unsupported("a layout with no slot", line);
         };
-        w.slot[n.index()] = Some((from, b.mark()));
+        self.core_w.slot[n.index()] = Some((from, b.mark()));
         Ok(off)
     }
 
     /// Holds a slot for the ownership word of accumulator `n` (in local `l`) for `n`'s
     /// extent, as [`Fn_::core_slot`] does for a layout.
-    fn core_word(
-        &mut self,
-        b: &mut Frame,
-        w: &mut Walked,
-        n: Name,
-        l: u32,
-        site: NodeId,
-        literal: bool,
-    ) {
+    fn core_word(&mut self, b: &mut Frame, n: Name, l: u32, site: NodeId, literal: bool) {
         let from = b.mark();
         let at = b.alloc(4, 4);
-        w.slot[n.index()] = Some((from, b.mark()));
+        self.core_w.slot[n.index()] = Some((from, b.mark()));
         self.str_append_shadow(b, l, at, site, literal);
     }
 
     /// Gives back the slots of names whose extent ended at the row just walked. A release
     /// deferred to the row's exit still reads its slot, so `due` waits until `core_rows` is empty.
-    fn core_give_back(
-        &mut self,
-        b: &mut Frame,
-        w: &mut Walked,
-        due: &mut Vec<Name>,
-        ended: &[Name],
-    ) {
+    fn core_give_back(&mut self, b: &mut Frame, due: &mut Vec<Name>, ended: &[Name]) {
         due.extend_from_slice(ended);
         if self.core_rows.is_empty() {
             for n in due.drain(..) {
-                if let Some((from, to)) = w.slot[n.index()].take() {
+                if let Some((from, to)) = self.core_w.slot[n.index()].take() {
                     b.give_back(from, to);
                 }
             }
@@ -10208,16 +10134,14 @@ impl<'p> Fn_<'_, 'p> {
         &mut self,
         m: &mut Module,
         b: &mut Frame,
-        body: &vyrn_frontend::core::Body,
-        w: &mut Walked,
         rhs: &Rhs,
         want: &Type,
         line: usize,
     ) -> Result<(), String> {
         match rhs {
-            Rhs::Val(v) => self.core_val(m, b, body, w, v, want, line),
+            Rhs::Val(v) => self.core_val(m, b, v, want, line),
             Rhs::Prim(op, vs, ret) => {
-                let got = self.core_prim(m, b, body, w, op, vs, line)?;
+                let got = self.core_prim(m, b, op, vs, line)?;
                 if let (true, Some(r)) = (crate::observe::on(), ret) {
                     crate::observe::note_typing("prim", &format!("{op:?}"), &got, r);
                 }
@@ -10236,8 +10160,6 @@ impl<'p> Fn_<'_, 'p> {
                 let got = self.core_call(
                     m,
                     b,
-                    body,
-                    w,
                     callee,
                     *kind,
                     solved,
@@ -10255,7 +10177,7 @@ impl<'p> Fn_<'_, 'p> {
             // A read and a take load the same address. The driver's release row walks around
             // the hole a take leaves.
             Rhs::Read(p) | Rhs::Take(p) => {
-                let got = self.core_read(m, b, body, w, p, line)?;
+                let got = self.core_read(m, b, p, line)?;
                 self.coerce(m, b, &got, want, line)
             }
             _ => unsupported("a core right-hand side this walk does not read", line),
@@ -10264,12 +10186,7 @@ impl<'p> Fn_<'_, 'p> {
 
     /// The type a right-hand side produces, without emitting it. A `St::Do` needs it; a
     /// `St::Let` has the checker's type on its name.
-    fn core_rhs_ty(
-        &self,
-        body: &vyrn_frontend::core::Body,
-        rhs: &Rhs,
-        line: usize,
-    ) -> Result<Type, String> {
+    fn core_rhs_ty(&self, rhs: &Rhs, line: usize) -> Result<Type, String> {
         match rhs {
             Rhs::Call {
                 callee,
@@ -10305,7 +10222,7 @@ impl<'p> Fn_<'_, 'p> {
                     .ok_or_else(|| gap("a host import the checker did not type", line)),
                 _ => match self.core_mem_ty(callee, args.len()) {
                     Some(t) => Ok(t),
-                    None => match self.core_sig(body, callee, *kind, solved, targets) {
+                    None => match self.core_sig(callee, *kind, solved, targets) {
                         Some(s) => Ok(s.ret_ty),
                         None if kind.direct() && self.is_extern(callee) => Ok(self
                             .cx
@@ -10317,7 +10234,7 @@ impl<'p> Fn_<'_, 'p> {
                 },
             },
             Rhs::Read(p) => self
-                .core_place_ty(body, p)
+                .core_place_ty(p)
                 .ok_or_else(|| gap("a discarded read the walk does not type", line)),
             _ => unsupported("a discarded value the row does not type", line),
         }
@@ -10329,8 +10246,6 @@ impl<'p> Fn_<'_, 'p> {
         &mut self,
         m: &mut Module,
         b: &mut Frame,
-        body: &vyrn_frontend::core::Body,
-        w: &mut Walked,
         callee: &str,
         kind: Callee,
         solved: &[(String, Type)],
@@ -10341,14 +10256,10 @@ impl<'p> Fn_<'_, 'p> {
         line: usize,
     ) -> Result<Type, String> {
         if let Some(vs) = arg_vals(args) {
-            return self.core_call_vals(
-                m, b, body, w, callee, kind, solved, targets, &vs, ret, hint, line,
-            );
+            return self.core_call_vals(m, b, callee, kind, solved, targets, &vs, ret, hint, line);
         }
         if self.core_user_callee(callee, kind) {
-            return self.core_user_call(
-                m, b, body, w, callee, kind, solved, targets, args, hint, line,
-            );
+            return self.core_user_call(m, b, callee, kind, solved, targets, args, hint, line);
         }
         // A place receiver shrinks where it lies ([`Fn_::core_removes`]).
         let ([(Arg::Place(p), _), rest @ ..], Some(Spec::Removes)) =
@@ -10359,11 +10270,11 @@ impl<'p> Fn_<'_, 'p> {
         let Some(rest) = arg_vals(rest) else {
             return unsupported("a removal with two places", line);
         };
-        let (aty, off) = self.core_addr(m, b, body, w, p, line)?;
+        let (aty, off) = self.core_addr(m, b, p, line)?;
         self.core_step(b, off);
         let slot = b.local(ValType::I32);
         b.ins(&Instruction::LocalSet(slot));
-        self.core_remove(m, b, body, w, callee, slot, &aty, &rest, line)
+        self.core_remove(m, b, callee, slot, &aty, &rest, line)
     }
 
     /// [`Fn_::core_call`] with every argument a value.
@@ -10371,8 +10282,6 @@ impl<'p> Fn_<'_, 'p> {
         &mut self,
         m: &mut Module,
         b: &mut Frame,
-        body: &vyrn_frontend::core::Body,
-        w: &mut Walked,
         callee: &str,
         kind: Callee,
         solved: &[(String, Type)],
@@ -10382,9 +10291,10 @@ impl<'p> Fn_<'_, 'p> {
         hint: Option<(Dest, Type)>,
         line: usize,
     ) -> Result<Type, String> {
+        let body = self.body();
         // A `std/mem` primitive is its instructions, never a call; [`mem_ins`] holds the table.
         if let Some(prim) = callee.strip_prefix(vyrn_frontend::loader::MEM_PREFIX) {
-            return self.core_mem(m, b, body, w, prim, args, ret, line);
+            return self.core_mem(m, b, prim, args, ret, line);
         }
         // Every [`Spec`] kind is answered here, so a kind added to it fails to compile
         // until this match handles it.
@@ -10396,7 +10306,7 @@ impl<'p> Fn_<'_, 'p> {
                     return unsupported("a specified builtin at another arity", line);
                 };
                 for ((v, _), p) in args.iter().zip(params) {
-                    self.core_val(m, b, body, w, v, p, line)?;
+                    self.core_val(m, b, v, p, line)?;
                 }
                 b.ins(&ins);
                 return Ok(ret.clone());
@@ -10407,8 +10317,8 @@ impl<'p> Fn_<'_, 'p> {
                 let [(v, _)] = args else {
                     return unsupported("`copy` of other than one value", line);
                 };
-                let ty = self.core_ty(body, v, &Type::Int);
-                self.core_val(m, b, body, w, v, &ty, line)?;
+                let ty = self.core_ty(v, &Type::Int);
+                self.core_val(m, b, v, &ty, line)?;
                 self.copy_stack(m, b, &ty, line)?;
                 return Ok(ty);
             }
@@ -10422,7 +10332,7 @@ impl<'p> Fn_<'_, 'p> {
                 let Some(ty) = ret else {
                     return unsupported("a `blackBox` the checker did not type", line);
                 };
-                self.core_val(m, b, body, w, v, ty, line)?;
+                self.core_val(m, b, v, ty, line)?;
                 let Some(t) = self.cx.repr(ty, line)?.val() else {
                     return Ok(ty.clone());
                 };
@@ -10448,8 +10358,8 @@ impl<'p> Fn_<'_, 'p> {
                 let [(v, _)] = args else {
                     return unsupported("a rendering of other than one value", line);
                 };
-                let ty = self.core_ty(body, v, &Type::Int);
-                self.core_val(m, b, body, w, v, &ty, line)?;
+                let ty = self.core_ty(v, &Type::Int);
+                self.core_val(m, b, v, &ty, line)?;
                 match ret {
                     Type::Unit => self.print_value(b, &ty, line)?,
                     _ => self.str_value(b, &ty, line)?,
@@ -10465,9 +10375,7 @@ impl<'p> Fn_<'_, 'p> {
                     [(Val::Lit(Lit::Str(at)), _)] => Some(at.as_str()),
                     _ => None,
                 };
-                self.panic_line(m, b, at, |s, m, b| {
-                    s.core_val(m, b, body, w, v, &Type::Str, line)
-                })?;
+                self.panic_line(m, b, at, |s, m, b| s.core_val(m, b, v, &Type::Str, line))?;
                 return Ok(Type::Never);
             }
             Some(Spec::Asserts) => {
@@ -10476,8 +10384,8 @@ impl<'p> Fn_<'_, 'p> {
                         let Some((v, _)) = args.get(i) else {
                             return unsupported(&format!("`{callee}` with too few operands"), line);
                         };
-                        let t = t.cloned().unwrap_or_else(|| s.core_ty(body, v, &Type::Int));
-                        s.core_val(m, b, body, w, v, &t, line)?;
+                        let t = t.cloned().unwrap_or_else(|| s.core_ty(v, &Type::Int));
+                        s.core_val(m, b, v, &t, line)?;
                         Ok(t)
                     };
                 return self.asserts(m, b, callee, &mut operand, line);
@@ -10489,13 +10397,13 @@ impl<'p> Fn_<'_, 'p> {
                     return unsupported("a rebuild of no named receiver", line);
                 };
                 let aty = body.names[x.index()].ty.clone();
-                self.core_addr_of(b, w, body, *x, line)?;
+                self.core_addr_of(b, *x, line)?;
                 if let ("@tally" | "@tallyBytes", [_, _]) = (callee, rest) {
                     let hdr = b.local(ValType::I32);
                     b.ins(&Instruction::LocalSet(hdr));
                     let mut operand =
                         |s: &mut Self, m: &mut Module, b: &mut Frame, i: usize, t: &Type| {
-                            s.core_val(m, b, body, w, &rest[i].0, t, line)
+                            s.core_val(m, b, &rest[i].0, t, line)
                         };
                     return match callee {
                         "@tally" => self.map_tally(m, b, hdr, &aty, &mut operand, line),
@@ -10504,7 +10412,7 @@ impl<'p> Fn_<'_, 'p> {
                 }
                 let mut operand = |s: &mut Self, m: &mut Module, b: &mut Frame, t: &Type| match rest
                 {
-                    [(v, _)] => s.core_val(m, b, body, w, v, t, line),
+                    [(v, _)] => s.core_val(m, b, v, t, line),
                     _ => unsupported(&format!("`{callee}` with no operand"), line),
                 };
                 return self.arr_rebuild(m, b, callee, &aty, &mut operand, line);
@@ -10513,7 +10421,7 @@ impl<'p> Fn_<'_, 'p> {
             Some(Spec::Lanes) => {
                 let span = match args {
                     [(Val::Name(x), _), (i, _), ..] => core_check(
-                        w,
+                        &mut self.core_w,
                         line,
                         |g| matches!(g, Guard::Span(vyrn_frontend::core::Place::Name(p), v, _) if p == x && v == i),
                     )
@@ -10527,9 +10435,9 @@ impl<'p> Fn_<'_, 'p> {
                         };
                         let t = match want {
                             Some(t) => t.clone(),
-                            None => s.core_ty(body, v, &Type::Int),
+                            None => s.core_ty(v, &Type::Int),
                         };
-                        s.core_val(m, b, body, w, v, &t, line)?;
+                        s.core_val(m, b, v, &t, line)?;
                         Ok(t)
                     };
                 let lane_at = |i: usize, lanes: i64| core_lane(args, i, lanes);
@@ -10539,14 +10447,14 @@ impl<'p> Fn_<'_, 'p> {
             // on its operand.
             Some(Spec::Host) => {
                 let mut ty = |s: &mut Self, i: usize| match args.get(i) {
-                    Some((v, _)) => Ok(s.cx.resolve(&s.core_ty(body, v, &Type::Int))),
+                    Some((v, _)) => Ok(s.cx.resolve(&s.core_ty(v, &Type::Int))),
                     None => unsupported(&format!("`{callee}` with too few operands"), line),
                 };
                 let mut operand =
                     |s: &mut Self, m: &mut Module, b: &mut Frame, i: usize, t: &Type| match args
                         .get(i)
                     {
-                        Some((v, _)) => s.core_val(m, b, body, w, v, t, line),
+                        Some((v, _)) => s.core_val(m, b, v, t, line),
                         None => unsupported(&format!("`{callee}` with too few operands"), line),
                     };
                 return self.host(m, b, callee, args.len(), &mut ty, &mut operand, line);
@@ -10559,20 +10467,20 @@ impl<'p> Fn_<'_, 'p> {
                 };
                 let aty = body.names[x.index()].ty.clone();
                 let slot = b.local(ValType::I32);
-                self.core_addr_of(b, w, body, *x, line)?;
+                self.core_addr_of(b, *x, line)?;
                 b.ins(&Instruction::LocalSet(slot));
-                return self.core_remove(m, b, body, w, callee, slot, &aty, rest, line);
+                return self.core_remove(m, b, callee, slot, &aty, rest, line);
             }
             Some(Spec::Finds) => {
                 let [(mv, _), (kv, _)] = args else {
                     return unsupported(&format!("`{callee}` at this arity"), line);
                 };
-                let mty = self.core_ty(body, mv, &Type::Int);
-                self.core_val(m, b, body, w, mv, &mty, line)?;
+                let mty = self.core_ty(mv, &Type::Int);
+                self.core_val(m, b, mv, &mty, line)?;
                 let hdr = b.local(ValType::I32);
                 b.ins(&Instruction::LocalSet(hdr));
                 let mut key = |s: &mut Self, m: &mut Module, b: &mut Frame, t: &Type| {
-                    s.core_val(m, b, body, w, kv, t, line)
+                    s.core_val(m, b, kv, t, line)
                 };
                 let (idx, ..) = self.map_find(m, b, hdr, &mty, &mut key, line)?;
                 b.ins(&Instruction::LocalGet(idx));
@@ -10586,7 +10494,7 @@ impl<'p> Fn_<'_, 'p> {
                 let range = match (callee, args) {
                     ("bytes", [(s, _), (from, _), (to, _)]) => {
                         let c = core_check(
-                            w,
+                            &mut self.core_w,
                             line,
                             |g| matches!(g, Guard::Range(x, y, z) if (x, y, z) == (s, from, to)),
                         )?;
@@ -10610,25 +10518,25 @@ impl<'p> Fn_<'_, 'p> {
                     |s: &mut Self, m: &mut Module, b: &mut Frame, i: usize, t: &Type| match args
                         .get(i)
                     {
-                        Some((v, _)) => s.core_val(m, b, body, w, v, t, line),
+                        Some((v, _)) => s.core_val(m, b, v, t, line),
                         None => unsupported(&format!("`{callee}` with too few operands"), line),
                     };
                 return match (callee, args) {
                     ("bytes", _) => self.bytes_of(m, b, range, &mut operand, line),
                     ("stringFromBytes", _) => self.string_from_bytes(m, b, &mut operand, line),
                     ("@toArray", [(v, _)]) => {
-                        let aty = self.core_ty(body, v, &Type::Int);
-                        self.core_val(m, b, body, w, v, &aty, line)?;
+                        let aty = self.core_ty(v, &Type::Int);
+                        self.core_val(m, b, v, &aty, line)?;
                         let hdr = b.local(ValType::I32);
                         b.ins(&Instruction::LocalSet(hdr));
                         self.sa_to_array(m, b, hdr, &aty, line)
                     }
                     ("fromArray", [(v, _)]) => {
-                        let aty = self.core_ty(body, v, &Type::Int);
+                        let aty = self.core_ty(v, &Type::Int);
                         let Type::Array(inner) = self.cx.resolve(&aty) else {
                             return unsupported(&format!("`fromArray` of `{aty}`"), line);
                         };
-                        self.core_val(m, b, body, w, v, &aty, line)?;
+                        self.core_val(m, b, v, &aty, line)?;
                         self.stream_from_array(b, &inner, line)
                     }
                     ("fromStep", [_, _, _]) => {
@@ -10636,9 +10544,9 @@ impl<'p> Fn_<'_, 'p> {
                             let v = &args[i].0;
                             let t = match i {
                                 0 | 1 => Type::Int,
-                                _ => s.core_ty(body, v, &Type::Int),
+                                _ => s.core_ty(v, &Type::Int),
                             };
-                            s.core_val(m, b, body, w, v, &t, line)?;
+                            s.core_val(m, b, v, &t, line)?;
                             Ok(t)
                         };
                         self.stream_from_step(m, b, &mut step, line)
@@ -10647,7 +10555,7 @@ impl<'p> Fn_<'_, 'p> {
                     // carries none.
                     ("unboxStream" | "pullAt", [(v, _)]) => {
                         let mut addr = |s: &mut Self, m: &mut Module, b: &mut Frame| {
-                            s.core_val(m, b, body, w, v, &Type::Int, line)
+                            s.core_val(m, b, v, &Type::Int, line)
                         };
                         let ret = ret.map(|t| self.cx.resolve(t));
                         match (callee, ret) {
@@ -10662,8 +10570,8 @@ impl<'p> Fn_<'_, 'p> {
                         }
                     }
                     ("@keys", [(v, _)]) => {
-                        let mty = self.core_ty(body, v, &Type::Int);
-                        self.core_val(m, b, body, w, v, &mty, line)?;
+                        let mty = self.core_ty(v, &Type::Int);
+                        self.core_val(m, b, v, &mty, line)?;
                         let hdr = b.local(ValType::I32);
                         b.ins(&Instruction::LocalSet(hdr));
                         self.map_keys(m, b, hdr, &mty, line)
@@ -10677,10 +10585,8 @@ impl<'p> Fn_<'_, 'p> {
                 };
                 let mut operand =
                     |s: &mut Self, m: &mut Module, b: &mut Frame, want: Option<&Type>| {
-                        let t = want
-                            .cloned()
-                            .unwrap_or_else(|| s.core_ty(body, v, &Type::Int));
-                        s.core_val(m, b, body, w, v, &t, line)?;
+                        let t = want.cloned().unwrap_or_else(|| s.core_ty(v, &Type::Int));
+                        s.core_val(m, b, v, &t, line)?;
                         Ok(t)
                     };
                 return self.effect(m, b, callee, &mut operand, line);
@@ -10690,7 +10596,7 @@ impl<'p> Fn_<'_, 'p> {
                     |s: &mut Self, m: &mut Module, b: &mut Frame, i: usize, t: &Type| match args
                         .get(i)
                     {
-                        Some((v, _)) => s.core_val(m, b, body, w, v, t, line),
+                        Some((v, _)) => s.core_val(m, b, v, t, line),
                         None => unsupported(&format!("`{callee}` with too few operands"), line),
                     };
                 return self.logs(m, b, callee, &mut operand, line);
@@ -10707,7 +10613,7 @@ impl<'p> Fn_<'_, 'p> {
             let [(v, _)] = args else {
                 return unsupported(&format!("`{callee}` at this arity"), line);
             };
-            self.core_val(m, b, body, w, v, &decl.base, line)?;
+            self.core_val(m, b, v, &decl.base, line)?;
             if kind == Callee::Named {
                 self.emit_validation(b, &decl, line)?;
             }
@@ -10715,7 +10621,7 @@ impl<'p> Fn_<'_, 'p> {
         }
         if kind.direct() && self.is_extern(callee) {
             let mut operand = |s: &mut Self, m: &mut Module, b: &mut Frame, i: usize, p: &Type| {
-                s.core_val(m, b, body, w, &args[i].0, p, line)
+                s.core_val(m, b, &args[i].0, p, line)
             };
             return self.extern_call(m, b, callee, args.len(), &mut operand, line);
         }
@@ -10723,9 +10629,7 @@ impl<'p> Fn_<'_, 'p> {
             .iter()
             .map(|(v, c)| (Arg::Val(v.clone()), *c))
             .collect();
-        self.core_user_call(
-            m, b, body, w, callee, kind, solved, targets, &args, hint, line,
-        )
+        self.core_user_call(m, b, callee, kind, solved, targets, &args, hint, line)
     }
 
     /// Calls a declared function. A place argument ([`Arg`]) crosses as its address, as a
@@ -10735,8 +10639,6 @@ impl<'p> Fn_<'_, 'p> {
         &mut self,
         m: &mut Module,
         b: &mut Frame,
-        body: &vyrn_frontend::core::Body,
-        w: &mut Walked,
         callee: &str,
         kind: Callee,
         solved: &[(String, Type)],
@@ -10749,7 +10651,7 @@ impl<'p> Fn_<'_, 'p> {
         // the leading argument.
         let through: Vec<(Arg, vyrn_frontend::ast::Capability)>;
         let mut spliced = Vec::new();
-        let (sig, args) = match self.core_through(body, kind) {
+        let (sig, args) = match self.core_through(kind) {
             Some((n, sig_ty)) => {
                 through =
                     std::iter::once((Arg::Val(Val::Name(n)), vyrn_frontend::ast::Capability::Read))
@@ -10780,7 +10682,7 @@ impl<'p> Fn_<'_, 'p> {
                         self.cx.specialize(m, f, targs, subst, bound)?
                     }
                     (None, Some((f, targs, subst))) => self.cx.instantiate(m, f, targs, subst)?,
-                    (None, None) => match self.core_sig(body, callee, kind, solved, targets) {
+                    (None, None) => match self.core_sig(callee, kind, solved, targets) {
                         Some(sig) => sig,
                         None if self.cx.skipped.contains(callee) => {
                             return unsupported(&format!("the call `{callee}`"), line);
@@ -10804,7 +10706,7 @@ impl<'p> Fn_<'_, 'p> {
             // `x = f(x)` passes `x`'s own storage as the destination ([`Fn_::core_back`]).
             let home = match (a, dest) {
                 (Arg::Val(Val::Name(x)), Some((d, _))) => {
-                    (self.core_place(w, body, *x)).is_some_and(|(pl, _)| d.holds(pl))
+                    (self.core_place(*x)).is_some_and(|(pl, _)| d.holds(pl))
                 }
                 _ => false,
             };
@@ -10813,14 +10715,14 @@ impl<'p> Fn_<'_, 'p> {
                     (Arg::Val(Val::Name(n)), vyrn_frontend::ast::Capability::Modify)
                         if !matches!(s.cx.repr(p, line)?, Repr::Agg(_)) =>
                     {
-                        let Some((Place::Local(l), ty)) = s.core_place(w, body, *n) else {
+                        let Some((Place::Local(l), ty)) = s.core_place(*n) else {
                             return unsupported("a `modify` argument with no local", line);
                         };
                         spilled.push(s.spill(b, l, &ty, line)?);
                     }
-                    (Arg::Val(v), _) => s.core_val(m, b, body, w, v, p, line)?,
+                    (Arg::Val(v), _) => s.core_val(m, b, v, p, line)?,
                     (Arg::Place(pl), _) => {
-                        let (_, off) = s.core_addr(m, b, body, w, pl, line)?;
+                        let (_, off) = s.core_addr(m, b, pl, line)?;
                         s.core_step(b, off);
                     }
                 }
@@ -10843,41 +10745,41 @@ impl<'p> Fn_<'_, 'p> {
         &mut self,
         m: &mut Module,
         b: &mut Frame,
-        body: &vyrn_frontend::core::Body,
-        w: &mut Walked,
         p: &vyrn_frontend::core::Place,
         line: usize,
     ) -> Result<Type, String> {
+        let body = self.body();
         // A scalar name lives in a wasm local and has no address, so the read is the local.
         if let vyrn_frontend::core::Place::Name(n) = p {
             let ty = body.names[n.index()].ty.clone();
-            self.core_val(m, b, body, w, &Val::Name(*n), &ty, line)?;
+            self.core_val(m, b, &Val::Name(*n), &ty, line)?;
             return Ok(ty);
         }
         // A length is a header read ([`Fn_::length_of`]) of the base's value: an address
         // for a layout, the pointer for a String.
         if let vyrn_frontend::core::Place::Field(base, f) = p {
-            if let Some(walk) = core_header(w, base).filter(|_| f == "length" || f == "byteLength")
+            if let Some(walk) =
+                core_header(&self.core_w, base).filter(|_| f == "length" || f == "byteLength")
             {
                 b.ins(&Instruction::LocalGet(walk.len));
                 return Ok(Type::Int);
             }
             if let Some(bty) = self
-                .core_place_ty(body, base)
+                .core_place_ty(base)
                 .filter(|t| length_ty(f, &self.cx.resolve(t)).is_some())
             {
                 if let Repr::Agg(_) = self.cx.repr(&bty, line)? {
-                    let (_, off) = self.core_addr(m, b, body, w, base, line)?;
+                    let (_, off) = self.core_addr(m, b, base, line)?;
                     self.core_step(b, off);
                 } else {
-                    self.core_read(m, b, body, w, base, line)?;
+                    self.core_read(m, b, base, line)?;
                 }
                 return self
                     .length_of(b, &bty, f, line)?
                     .ok_or_else(|| gap("a length of no container", line));
             }
         }
-        let (ty, off) = self.core_addr(m, b, body, w, p, line)?;
+        let (ty, off) = self.core_addr(m, b, p, line)?;
         let Repr::Scalar(_) = self.cx.repr(&ty, line)? else {
             return unsupported("a read of a place this walk does not load", line);
         };
@@ -10890,8 +10792,6 @@ impl<'p> Fn_<'_, 'p> {
         &mut self,
         m: &mut Module,
         b: &mut Frame,
-        body: &vyrn_frontend::core::Body,
-        w: &mut Walked,
         callee: &str,
         slot: u32,
         aty: &Type,
@@ -10901,16 +10801,20 @@ impl<'p> Fn_<'_, 'p> {
         match (callee, rest) {
             ("@pop", []) => self.pop_at(b, slot, aty, line),
             ("@swapRemove", [(i, _)]) => {
-                let row = core_check(w, line, |g| matches!(g, Guard::Index(_, v) if v == i))?;
+                let row = core_check(
+                    &mut self.core_w,
+                    line,
+                    |g| matches!(g, Guard::Index(_, v) if v == i),
+                )?;
                 let row = self.row(b, row);
                 let mut index = |s: &mut Self, m: &mut Module, b: &mut Frame| {
-                    s.core_val(m, b, body, w, i, &Type::Int, line)
+                    s.core_val(m, b, i, &Type::Int, line)
                 };
                 self.swap_remove_at(m, b, slot, aty, row, &mut index, line)
             }
             ("@remove", [(k, _)]) => {
                 let mut key = |s: &mut Self, m: &mut Module, b: &mut Frame, t: &Type| {
-                    s.core_val(m, b, body, w, k, t, line)
+                    s.core_val(m, b, k, t, line)
                 };
                 self.map_remove(m, b, slot, aty, &mut key, line)
             }
@@ -10925,15 +10829,13 @@ impl<'p> Fn_<'_, 'p> {
         &mut self,
         m: &mut Module,
         b: &mut Frame,
-        body: &vyrn_frontend::core::Body,
-        w: &mut Walked,
         p: &vyrn_frontend::core::Place,
         line: usize,
     ) -> Result<(Type, Option<u32>), String> {
         use vyrn_frontend::core::Place as At;
         match p {
             At::Name(n) => {
-                let Some((place, ty)) = self.core_place(w, body, *n) else {
+                let Some((place, ty)) = self.core_place(*n) else {
                     return unsupported("a core place with no storage", line);
                 };
                 match place {
@@ -10959,7 +10861,7 @@ impl<'p> Fn_<'_, 'p> {
                 Ok((ty, None))
             }
             At::Field(base, f) => {
-                let (bty, off) = self.core_addr(m, b, body, w, base, line)?;
+                let (bty, off) = self.core_addr(m, b, base, line)?;
                 self.core_step(b, off);
                 let (at, fty) = self.field_of(&bty, f, line)?;
                 Ok((thunk_of(fty), Some(at)))
@@ -10968,15 +10870,15 @@ impl<'p> Fn_<'_, 'p> {
             // from its pointer, which is its value. Its element is a `UInt8`, where the walk
             // hands a `for` the byte widened.
             At::Elem(base, i) => {
-                let walk = match core_header(w, base) {
+                let walk = match core_header(&self.core_w, base) {
                     Some(walk) => walk,
                     None => {
-                        let bty = match self.core_place_ty(body, base) {
+                        let bty = match self.core_place_ty(base) {
                             Some(t) if self.cx.resolve(&t) == Type::Str => {
-                                self.core_read(m, b, body, w, base, line)?
+                                self.core_read(m, b, base, line)?
                             }
                             _ => {
-                                let (bty, off) = self.core_addr(m, b, body, w, base, line)?;
+                                let (bty, off) = self.core_addr(m, b, base, line)?;
                                 self.core_step(b, off);
                                 bty
                             }
@@ -10985,12 +10887,12 @@ impl<'p> Fn_<'_, 'p> {
                     }
                 };
                 let row = core_check(
-                    w,
+                    &mut self.core_w,
                     line,
                     |g| matches!(g, Guard::Index(p, v) if p == &**base && v == i),
                 )?;
                 let row = self.row(b, row);
-                self.core_val(m, b, body, w, i, &Type::Int, line)?;
+                self.core_val(m, b, i, &Type::Int, line)?;
                 let ix = b.local(ValType::I64);
                 b.ins(&Instruction::LocalSet(ix));
                 if let Some(row) = row {
@@ -11019,11 +10921,8 @@ impl<'p> Fn_<'_, 'p> {
     }
 
     /// The type of a place, without emitting it; asks what [`Fn_::core_addr`] walks.
-    fn core_place_ty(
-        &self,
-        body: &vyrn_frontend::core::Body,
-        p: &vyrn_frontend::core::Place,
-    ) -> Option<Type> {
+    fn core_place_ty(&self, p: &vyrn_frontend::core::Place) -> Option<Type> {
+        let body = self.body();
         use vyrn_frontend::core::Place as At;
         match p {
             At::Name(n) => Some(body.names[n.index()].ty.clone()),
@@ -11032,13 +10931,13 @@ impl<'p> Fn_<'_, 'p> {
                 matches!(place, Place::Static(_)).then_some(ty)
             }
             At::Field(base, f) => {
-                let bty = self.core_place_ty(body, base)?;
+                let bty = self.core_place_ty(base)?;
                 if let Some(t) = length_ty(f, &self.cx.resolve(&bty)) {
                     return Some(t);
                 }
                 Some(thunk_of(self.field_of(&bty, f, 0).ok()?.1))
             }
-            At::Elem(base, _) => match self.cx.resolve(&self.core_place_ty(body, base)?) {
+            At::Elem(base, _) => match self.cx.resolve(&self.core_place_ty(base)?) {
                 Type::Array(e) | Type::ArrayN(e, _) | Type::SmallArray(e, _) => Some(*e),
                 Type::Str => Some(Type::IntN {
                     bits: 8,
@@ -11052,7 +10951,8 @@ impl<'p> Fn_<'_, 'p> {
 
     /// Whether `n` is a header a loop walks: a borrow of an array, a small array or a
     /// String that a `for` binds, or that a `while` indexes and never rebuilds.
-    fn core_walked(&self, body: &vyrn_frontend::core::Body, n: Name) -> bool {
+    fn core_walked(&self, n: Name) -> bool {
+        let body = self.body();
         let info = &body.names[n.index()];
         info.walked.is_some()
             && info.borrow
@@ -11079,11 +10979,8 @@ impl<'p> Fn_<'_, 'p> {
     /// into an Array element writes the buffer ([`core_written`]), or where a row of the
     /// extent hands a root on the chain to `consume` or `modify`
     /// ([`vyrn_lower::kernel::modifies`]) or rebuilds it as a receiver (`out.push(v)`).
-    fn core_alias<'b>(
-        &self,
-        body: &'b vyrn_frontend::core::Body,
-        n: Name,
-    ) -> Option<&'b vyrn_frontend::core::Place> {
+    fn core_alias(&self, n: Name) -> Option<&'a vyrn_frontend::core::Place> {
+        let body = self.body();
         let info = &body.names[n.index()];
         if !matches!(self.cx.repr(&info.ty, 0), Ok(Repr::Agg(_))) {
             return None;
@@ -11092,8 +10989,7 @@ impl<'p> Fn_<'_, 'p> {
         // field in place (`s.keys.push(k)`). So is a take the next row moves on
         // ([`core_moves_on`]).
         if let Some(p) = core_taken(body, n) {
-            return (self.core_hands_back(body, &body.stmts, n) || core_moves_on(body, n))
-                .then_some(p);
+            return (self.core_hands_back(&body.stmts, n) || core_moves_on(body, n)).then_some(p);
         }
         let minted = info.source.starts_with('@') && !info.heap && !self.owns_heap(&info.ty);
         let owned = info.releases && !info.borrow;
@@ -11147,7 +11043,7 @@ impl<'p> Fn_<'_, 'p> {
             || matches!(place, vyrn_frontend::core::Place::Key(..))
             || (owned && !matches!(place, vyrn_frontend::core::Place::Elem(..)))
             || self
-                .core_place_ty(body, place)
+                .core_place_ty(place)
                 .is_none_or(|t| !self.core_as_is(&t, &info.ty))
         {
             return None;
@@ -11179,11 +11075,8 @@ impl<'p> Fn_<'_, 'p> {
     /// The place the layout name `n` holds a copy of: a layout that owns no heap, a take,
     /// or a move that is no rename. A store may fill that place while the name lives
     /// ([`Fn_::core_alias`]), so the name takes a slot and the bytes.
-    fn core_copies(
-        &self,
-        body: &vyrn_frontend::core::Body,
-        n: Name,
-    ) -> Option<vyrn_frontend::core::Place> {
+    fn core_copies(&self, n: Name) -> Option<vyrn_frontend::core::Place> {
+        let body = self.body();
         let info = &body.names[n.index()];
         if !matches!(self.cx.repr(&info.ty, 0), Ok(Repr::Agg(_))) {
             return None;
@@ -11208,7 +11101,7 @@ impl<'p> Fn_<'_, 'p> {
         };
         (!matches!(p, vyrn_frontend::core::Place::Key(..))
             && self
-                .core_place_ty(body, &p)
+                .core_place_ty(&p)
                 .is_some_and(|t| self.core_as_is(&t, &info.ty)))
         .then_some(p)
     }
@@ -11219,7 +11112,8 @@ impl<'p> Fn_<'_, 'p> {
     /// read of `x` after it. So `y` is `x`'s place, with no slot or copy, and the driver's
     /// release for the value is `y`'s. `None` where the body stores into `x` after the
     /// move ([`core_after`]), because that store writes the storage `y` holds.
-    fn core_renames(&self, body: &vyrn_frontend::core::Body, n: Name) -> Option<Name> {
+    fn core_renames(&self, n: Name) -> Option<Name> {
+        let body = self.body();
         let info = &body.names[n.index()];
         if !matches!(self.cx.repr(&info.ty, 0), Ok(Repr::Agg(_))) {
             return None;
@@ -11247,7 +11141,7 @@ impl<'p> Fn_<'_, 'p> {
         // is that address while neither is written: a scrutinee's temporary (a declared
         // release's `match consume self`) or a reader's `let data = d`. A bound `fn`
         // parameter that [`vyrn_lower::core::specialize`] makes is still that parameter.
-        let joins = self.core_joins(body, *x);
+        let joins = self.core_joins(*x);
         let made = |r: &Rhs| matches!(r, Rhs::Make(Ctor::Closure(_), _));
         let param = from.borrow
             && (body.params.contains(x) || lets.iter().any(|(b, r)| b == x && made(r)))
@@ -11263,7 +11157,8 @@ impl<'p> Fn_<'_, 'p> {
     /// minted name that no `let` binds and each branch stores whole. The first store takes
     /// its slot ([`Fn_::core_slot`]); the renaming `let` holds it to the end of its own
     /// extent ([`Fn_::core_renames`]).
-    fn core_joins(&self, body: &vyrn_frontend::core::Body, n: Name) -> bool {
+    fn core_joins(&self, n: Name) -> bool {
+        let body = self.body();
         let info = &body.names[n.index()];
         if !info.source.starts_with('@')
             || body.params.contains(&n)
@@ -11307,8 +11202,6 @@ impl<'p> Fn_<'_, 'p> {
         &mut self,
         m: &mut Module,
         b: &mut Frame,
-        body: &vyrn_frontend::core::Body,
-        w: &mut Walked,
         dest: Dest,
         ty: &Type,
         rhs: &Rhs,
@@ -11316,10 +11209,10 @@ impl<'p> Fn_<'_, 'p> {
         line: usize,
     ) -> Result<(), String> {
         if let Rhs::Make(Ctor::Closure(t), vs) = rhs {
-            let Some((sig_ty, target)) = self.core_closure(body, ty, t, vs) else {
+            let Some((sig_ty, target)) = self.core_closure(ty, t, vs) else {
                 return unsupported("a function value this walk does not make", line);
             };
-            return self.fnval_into(m, b, dest, &sig_ty, target, &mut Parts(body, vs, w), line);
+            return self.fnval_into(m, b, dest, &sig_ty, target, vs, line);
         }
         // A lambda: lifted as the arm lifts it; the row lists its captures in the lifted
         // signature's order.
@@ -11329,7 +11222,7 @@ impl<'p> Fn_<'_, 'p> {
                 return unsupported("a lambda this walk does not find", line);
             };
             let target = self.lift_stored(m, at, &sig_ty)?;
-            return self.fnval_into(m, b, dest, &sig_ty, target, &mut Parts(body, vs, w), line);
+            return self.fnval_into(m, b, dest, &sig_ty, target, vs, line);
         }
         dest.addr(b, 0);
         match rhs {
@@ -11337,7 +11230,7 @@ impl<'p> Fn_<'_, 'p> {
             // walk's destination as its hint, because the slot holds the type being built.
             Rhs::Call { args, .. } => {
                 let Some((tag, payload)) = self
-                    .core_ctor_name(body, rhs)
+                    .core_ctor_name(rhs)
                     .and_then(|v| self.core_variant(ty, v))
                 else {
                     return unsupported("a variant the row states of no sum", line);
@@ -11346,9 +11239,9 @@ impl<'p> Fn_<'_, 'p> {
                     return unsupported("a variant built from a place", line);
                 };
                 let vs: Vec<Val> = vs.into_iter().map(|(v, _)| v).collect();
-                let mut parts = Parts(body, &vs, w);
+                let parts = &vs;
                 let hint = Some((dest, ty.clone()));
-                self.build_variant(m, b, ty, tag, &mut parts, &payload, line, hint)?;
+                self.build_variant(m, b, ty, tag, parts, &payload, line, hint)?;
             }
             Rhs::Make(Ctor::Record(_, names), vs) => {
                 let decl = self
@@ -11366,29 +11259,29 @@ impl<'p> Fn_<'_, 'p> {
                         .ok_or_else(|| gap(&format!("the missing field `{}`", f.name), line))?;
                     order.push(at);
                 }
-                let mut parts = Parts(body, vs, w);
-                self.record_into(m, b, dest, &decl, &l, &order, &mut parts, line)?;
+                let parts = vs;
+                self.record_into(m, b, dest, &decl, &l, &order, parts, line)?;
             }
             Rhs::Make(Ctor::Array, vs) => match self.cx.resolve(ty) {
                 Type::Array(inner) => {
-                    let mut parts = Parts(body, vs, w);
-                    self.array_lit_heap(m, b, dest, &inner, &mut parts, taken, line, true)?;
+                    let parts = vs;
+                    self.array_lit_heap(m, b, dest, &inner, parts, taken, line, true)?;
                 }
                 Type::ArrayN(inner, n) if n == vs.len() => {
-                    let mut parts = Parts(body, vs, w);
-                    self.fixed_elems(m, b, dest, &inner, &mut parts, line)?;
+                    let parts = vs;
+                    self.fixed_elems(m, b, dest, &inner, parts, line)?;
                     dest.addr(b, 0);
                 }
                 Type::SmallArray(inner, n) if vs.len() <= n => {
-                    let mut parts = Parts(body, vs, w);
-                    self.sa_into(m, b, dest, ty, &inner, n, &mut parts, line)?;
+                    let parts = vs;
+                    self.sa_into(m, b, dest, ty, &inner, n, parts, line)?;
                     dest.addr(b, 0);
                 }
                 _ => return unsupported("an array literal the row does not place", line),
             },
             Rhs::Make(Ctor::Map, vs) => {
-                let mut parts = Parts(body, vs, w);
-                self.map_into(m, b, dest, ty, &mut parts, line)?;
+                let parts = vs;
+                self.map_into(m, b, dest, ty, parts, line)?;
                 dest.addr(b, 0);
             }
             Rhs::Make(Ctor::Try(name), vs) => {
@@ -11396,7 +11289,7 @@ impl<'p> Fn_<'_, 'p> {
                     return unsupported(&format!("`{name}?` at this arity"), line);
                 };
                 let operand = |s: &mut Self, m: &mut Module, b: &mut Frame, base: &Type| {
-                    s.core_val(m, b, body, w, v, base, line)
+                    s.core_val(m, b, v, base, line)
                 };
                 self.try_construct(m, b, name, line, operand, |_, _| dest)?;
             }
@@ -11431,7 +11324,8 @@ impl<'p> Fn_<'_, 'p> {
     /// Whether `v` names a layout, which a read position takes as its address
     /// ([`Fn_::core_val`]); [`Fn_::pack_key`] packs a map key from there. A layout of a
     /// validated type was checked where it was made.
-    fn core_layout_name(&self, body: &vyrn_frontend::core::Body, v: &Val) -> bool {
+    fn core_layout_name(&self, v: &Val) -> bool {
+        let body = self.body();
         matches!(v, Val::Name(n) if {
             let t = &body.names[n.index()].ty;
             matches!(self.cx.repr(t, 0), Ok(Repr::Agg(_)))
@@ -11441,7 +11335,8 @@ impl<'p> Fn_<'_, 'p> {
     /// Whether this walk can push `v`: a name it frames or a literal it writes
     /// ([`Fn_::core_val`]). [`Fn_::core_operand`] answers what an arithmetic row computes
     /// with.
-    fn core_val_readable(&self, body: &vyrn_frontend::core::Body, v: &Val) -> bool {
+    fn core_val_readable(&self, v: &Val) -> bool {
+        let body = self.body();
         match v {
             Val::Name(n) => {
                 let ty = &body.names[n.index()].ty;
@@ -11452,17 +11347,13 @@ impl<'p> Fn_<'_, 'p> {
     }
 
     /// Whether a row calls a variant constructor, which is a made layout, not a `call`.
-    fn core_ctor(&self, body: &vyrn_frontend::core::Body, rhs: &Rhs) -> bool {
-        self.core_ctor_name(body, rhs).is_some()
+    fn core_ctor(&self, rhs: &Rhs) -> bool {
+        self.core_ctor_name(rhs).is_some()
     }
 
     /// The variant a constructor row builds: a [`Callee::Ctor`] row's callee, or for the
     /// `value(x)` box the `Value` variant its operand's type picks ([`value_scalar`]).
-    fn core_ctor_name<'r>(
-        &self,
-        body: &vyrn_frontend::core::Body,
-        rhs: &'r Rhs,
-    ) -> Option<&'r str> {
+    fn core_ctor_name<'r>(&self, rhs: &'r Rhs) -> Option<&'r str> {
         match rhs {
             Rhs::Call {
                 kind: Callee::Ctor,
@@ -11475,9 +11366,7 @@ impl<'p> Fn_<'_, 'p> {
                 args,
                 ..
             } if callee == "value" => match args.as_slice() {
-                [(Arg::Val(v), _)] => {
-                    value_scalar(&self.cx.resolve(&self.core_ty(body, v, &Type::Int)))
-                }
+                [(Arg::Val(v), _)] => value_scalar(&self.cx.resolve(&self.core_ty(v, &Type::Int))),
                 _ => None,
             },
             _ => None,
@@ -11487,7 +11376,8 @@ impl<'p> Fn_<'_, 'p> {
     /// Each fixed literal a `@list` row takes, with the name the row binds: `let l = [..]`
     /// at `[T; n]`, then `let a = @list(l)` at `Array<T>`. The literal is made at the
     /// growable type and `a` takes its place, so no fixed copy exists.
-    fn core_lists(&self, body: &vyrn_frontend::core::Body) -> Vec<(Name, Name)> {
+    fn core_lists(&self) -> Vec<(Name, Name)> {
+        let body = self.body();
         let mut lets = Vec::new();
         for s in &body.stmts {
             core_lets(s, &mut lets);
@@ -11520,8 +11410,9 @@ impl<'p> Fn_<'_, 'p> {
 
     /// The type a made name is built at: the growable array a `@list` row
     /// takes it into ([`Fn_::core_lists`]), and its own type otherwise.
-    fn core_made_ty(&self, body: &vyrn_frontend::core::Body, n: Name) -> Type {
-        match self.core_lists(body).iter().find(|(l, _)| *l == n) {
+    fn core_made_ty(&self, n: Name) -> Type {
+        let body = self.body();
+        match self.core_lists().iter().find(|(l, _)| *l == n) {
             Some((_, a)) => body.names[a.index()].ty.clone(),
             None => body.names[n.index()].ty.clone(),
         }
@@ -11539,12 +11430,12 @@ impl<'p> Fn_<'_, 'p> {
 
     /// Whether this walk builds the layout a row makes: a [`Rhs::Make`] literal, a lambda,
     /// or a [`Callee::Ctor`] call, which is the same build with a tag in front.
-    fn core_makes(&self, body: &vyrn_frontend::core::Body, ty: &Type, rhs: &Rhs) -> bool {
+    fn core_makes(&self, ty: &Type, rhs: &Rhs) -> bool {
         match rhs {
-            Rhs::Make(c, vs) => self.core_made(body, ty, c, vs),
-            Rhs::Prim(Op::Closure(key), vs, _) => self.core_lambda(body, key, ty, vs),
+            Rhs::Make(c, vs) => self.core_made(ty, c, vs),
+            Rhs::Prim(Op::Closure(key), vs, _) => self.core_lambda(key, ty, vs),
             Rhs::Call { args, .. } => {
-                let Some(callee) = self.core_ctor_name(body, rhs) else {
+                let Some(callee) = self.core_ctor_name(rhs) else {
                     return false;
                 };
                 matches!(self.cx.repr(ty, 0), Ok(Repr::Agg(_)))
@@ -11554,8 +11445,8 @@ impl<'p> Fn_<'_, 'p> {
                                 let Arg::Val(v) = a else {
                                     return false;
                                 };
-                                (self.core_val_readable(body, v) && self.core_part_ty(t))
-                                    || self.core_payload_layout(body, v, t)
+                                (self.core_val_readable(v) && self.core_part_ty(t))
+                                    || self.core_payload_layout(v, t)
                             })
                     })
             }
@@ -11564,7 +11455,8 @@ impl<'p> Fn_<'_, 'p> {
     }
 
     /// Whether `v` is a layout name that fills a payload or part of `t` from its address.
-    fn core_payload_layout(&self, body: &vyrn_frontend::core::Body, v: &Val, t: &Type) -> bool {
+    fn core_payload_layout(&self, v: &Val, t: &Type) -> bool {
+        let body = self.body();
         matches!(v, Val::Name(n) if {
             let nt = &body.names[n.index()].ty;
             matches!(self.cx.repr(nt, 0), Ok(Repr::Agg(_)))
@@ -11576,13 +11468,8 @@ impl<'p> Fn_<'_, 'p> {
     /// Whether this walk builds the layout a [`Rhs::Make`] row states: an offset for every
     /// part, parts this walk emits, and no construction check the row does not carry.
     /// [`Fn_::core_built`] decides where a layout part's bytes come from.
-    fn core_made(
-        &self,
-        body: &vyrn_frontend::core::Body,
-        ty: &Type,
-        ctor: &Ctor,
-        vs: &[Val],
-    ) -> bool {
+    fn core_made(&self, ty: &Type, ctor: &Ctor, vs: &[Val]) -> bool {
+        let body = self.body();
         let agg = |t: &Type| matches!(self.cx.repr(t, 0), Ok(Repr::Agg(_)));
         // A record of a validated type is its own: the constructor row after it checks its
         // cross-field `where`, or the checker proved it.
@@ -11592,11 +11479,11 @@ impl<'p> Fn_<'_, 'p> {
             return false;
         }
         if let Ctor::Closure(t) = ctor {
-            return self.core_closure(body, ty, t, vs).is_some();
+            return self.core_closure(ty, t, vs).is_some();
         }
         self.core_part_tys(ty, ctor, vs.len()).is_some_and(|tys| {
             vs.iter().zip(&tys).all(|(v, t)| {
-                (self.core_val_readable(body, v) && self.core_part_ty(t))
+                (self.core_val_readable(v) && self.core_part_ty(t))
                     || (agg(t)
                         && matches!(v, Val::Name(n)
                             if agg(&body.names[n.index()].ty)
@@ -11650,15 +11537,9 @@ impl<'p> Fn_<'_, 'p> {
     /// is written at its offset by its own row ([`Fn_::core_part_at`]), or copied from a
     /// name of its layout that a reader bound or that holds a place's address. Any other
     /// temporary's slot would stay live beside the parent's storage, so this walk refuses it.
-    fn core_built(
-        &self,
-        body: &vyrn_frontend::core::Body,
-        ss: &[St],
-        i: usize,
-        ty: &Type,
-        rhs: &Rhs,
-    ) -> bool {
-        if !matches!(ss[i], St::Let(..)) || !self.core_makes(body, ty, rhs) {
+    fn core_built(&self, ss: &[St], i: usize, ty: &Type, rhs: &Rhs) -> bool {
+        let body = self.body();
+        if !matches!(ss[i], St::Let(..)) || !self.core_makes(ty, rhs) {
             return false;
         }
         // A function value's captures are read into its capture box ([`Fn_::core_closure`]).
@@ -11673,27 +11554,27 @@ impl<'p> Fn_<'_, 'p> {
         };
         vs.iter().zip(&tys).all(|(v, t)| {
             self.core_framed(t)
-                || (self.core_payload_layout(body, v, t)
+                || (self.core_payload_layout(v, t)
                     && (matches!(ctor, Ctor::Map)
                         || matches!(v, Val::Name(n)
                             if body.names[n.index()].binding.is_some()
-                                || self.core_alias(body, *n).is_some())))
-                || self.core_part_of(body, ss, i, v)
+                                || self.core_alias(*n).is_some())))
+                || self.core_part_of(ss, i, v)
         })
     }
 
     /// Whether the part `v` of the layout made at `ss[i]` is written at its
     /// offset by its own row ([`Fn_::core_part_at`]).
-    fn core_part_of(&self, body: &vyrn_frontend::core::Body, ss: &[St], i: usize, v: &Val) -> bool {
+    fn core_part_of(&self, ss: &[St], i: usize, v: &Val) -> bool {
         let Val::Name(n) = v else {
             return false;
         };
-        let lists = self.core_lists(body);
+        let lists = self.core_lists();
         let n = &lists.iter().find(|(_, a)| a == n).map_or(*n, |(l, _)| *l);
         ss[..i]
             .iter()
             .rposition(|s| matches!(s, St::Let(l, _) if l == n))
-            .and_then(|k| self.core_part_at(body, ss, k, &self.core_w))
+            .and_then(|k| self.core_part_at(ss, k))
             .is_some_and(|at| at.row == i)
     }
 
@@ -11704,22 +11585,17 @@ impl<'p> Fn_<'_, 'p> {
     /// every row stays in place, so no effect moves. No row between leaves the list, so an
     /// early part never sits in storage no row owns. The temporary occurs twice, in its
     /// `let` and in the parent, so no release row reads it.
-    fn core_part_at(
-        &self,
-        body: &vyrn_frontend::core::Body,
-        ss: &[St],
-        i: usize,
-        w: &Walked,
-    ) -> Option<PartAt> {
+    fn core_part_at(&self, ss: &[St], i: usize) -> Option<PartAt> {
+        let body = self.body();
         let St::Let(t, rhs) = &ss[i] else {
             return None;
         };
-        let made = matches!(rhs, Rhs::Make(..) | Rhs::Prim(Op::Closure(_), ..))
-            || self.core_ctor(body, rhs);
-        let taken = self.core_take_part(body, rhs);
+        let made =
+            matches!(rhs, Rhs::Make(..) | Rhs::Prim(Op::Closure(_), ..)) || self.core_ctor(rhs);
+        let taken = self.core_take_part(rhs);
         if body.names[t.index()].binding.is_some()
-            || w.occurs.get(t.index()) != Some(&2)
-            || !(made || taken || self.core_agg_call(body, rhs))
+            || self.core_w.occurs.get(t.index()) != Some(&2)
+            || !(made || taken || self.core_agg_call(rhs))
         {
             return None;
         }
@@ -11727,21 +11603,21 @@ impl<'p> Fn_<'_, 'p> {
         // taken field must already have its layout.
         let fits = |part: &Type| {
             if made {
-                !self.checks(part) && self.core_makes(body, part, rhs)
+                !self.checks(part) && self.core_makes(part, rhs)
             } else {
-                self.core_payload_layout(body, &Val::Name(*t), part)
+                self.core_payload_layout(&Val::Name(*t), part)
             }
         };
         // A literal a `@list` row takes is a part under the name that row
         // binds ([`Fn_::core_lists`]).
         let named = self
-            .core_lists(body)
+            .core_lists()
             .iter()
             .find(|(l, _)| l == t)
             .map_or(*t, |(_, a)| *a);
         let j = (i + 1..ss.len()).find(|&j| match &ss[j] {
             St::Let(_, Rhs::Make(_, ps)) => ps.contains(&Val::Name(named)),
-            St::Let(_, r @ Rhs::Call { args, .. }) if self.core_ctor(body, r) => {
+            St::Let(_, r @ Rhs::Call { args, .. }) if self.core_ctor(r) => {
                 args.iter().any(|(v, _)| *v == Arg::Val(Val::Name(named)))
             }
             _ => false,
@@ -11752,8 +11628,8 @@ impl<'p> Fn_<'_, 'p> {
         let St::Let(parent, prhs) = &ss[j] else {
             return None;
         };
-        let made = self.core_made_ty(body, *parent);
-        let ty = if self.core_lands(body, ss, j, &w.reads) {
+        let made = self.core_made_ty(*parent);
+        let ty = if self.core_lands(ss, j, &self.core_w.reads) {
             &self.ret_ty
         } else {
             &made
@@ -11761,7 +11637,7 @@ impl<'p> Fn_<'_, 'p> {
         let (ctor, ps) = match prhs {
             Rhs::Make(c, ps) => (c, ps),
             Rhs::Call { args, .. } => {
-                let (_, payload) = self.core_variant(ty, self.core_ctor_name(body, prhs)?)?;
+                let (_, payload) = self.core_variant(ty, self.core_ctor_name(prhs)?)?;
                 let at = args
                     .iter()
                     .position(|(v, _)| *v == Arg::Val(Val::Name(named)))?;
@@ -11813,9 +11689,9 @@ impl<'p> Fn_<'_, 'p> {
     /// moves the header to the part's offset ([`Fn_::core_part_at`]). The
     /// field is a hole from the take on, and the release of its root carries
     /// the hole ([`vyrn_frontend::core::Body::drop_holes`]).
-    fn core_take_part(&self, body: &vyrn_frontend::core::Body, rhs: &Rhs) -> bool {
+    fn core_take_part(&self, rhs: &Rhs) -> bool {
         matches!(rhs, Rhs::Take(p @ vyrn_frontend::core::Place::Field(..))
-        if self.core_place_ty(body, p).is_some_and(|t| {
+        if self.core_place_ty( p).is_some_and(|t| {
             matches!(self.cx.repr(&t, 0), Ok(Repr::Agg(_)))
         }))
     }
@@ -11827,57 +11703,56 @@ impl<'p> Fn_<'_, 'p> {
     fn core_part_dest(
         &mut self,
         b: &mut Frame,
-        body: &vyrn_frontend::core::Body,
-        w: &mut Walked,
         ss: &[St],
         i: usize,
         line: usize,
     ) -> Result<Option<Dest>, String> {
+        let body = self.body();
         let Some(PartAt {
             row: j,
             parent: p,
             off,
             into,
             ..
-        }) = self.core_part_at(body, ss, i, w)
+        }) = self.core_part_at(ss, i)
         else {
             return Ok(None);
         };
         let St::Let(t, _) = &ss[i] else {
             return Ok(None);
         };
-        if let Some(d) = w.built[t.index()] {
+        if let Some(d) = self.core_w.built[t.index()] {
             return Ok(Some(d));
         }
         let d = match into {
             PartIn::Box(bytes) => Dest::Addr(self.heap_buf(b, bytes), 0),
             PartIn::Buffer(bytes) => {
-                let buf = match w.bufs[p.index()] {
+                let buf = match self.core_w.bufs[p.index()] {
                     Some(buf) => buf,
                     None => self.heap_buf(b, bytes),
                 };
-                w.bufs[p.index()] = Some(buf);
+                self.core_w.bufs[p.index()] = Some(buf);
                 Dest::Addr(buf, off)
             }
             PartIn::Parent => {
-                let base = match w.built[p.index()] {
+                let base = match self.core_w.built[p.index()] {
                     Some(d) => d,
-                    None if self.core_lands(body, ss, j, &w.reads) => {
+                    None if self.core_lands(ss, j, &self.core_w.reads) => {
                         Dest::Addr(self.core_out(line)?, 0)
                     }
-                    None => match self.core_part_dest(b, body, w, ss, j, line)? {
+                    None => match self.core_part_dest(b, ss, j, line)? {
                         Some(d) => d,
                         None => {
                             let r = self.cx.repr(&body.names[p.index()].ty, line)?;
-                            Dest::Slot(self.core_slot(b, w, p, &r, line)?)
+                            Dest::Slot(self.core_slot(b, p, &r, line)?)
                         }
                     },
                 };
-                w.built[p.index()] = Some(base);
+                self.core_w.built[p.index()] = Some(base);
                 base.at(off)
             }
         };
-        w.built[t.index()] = Some(d);
+        self.core_w.built[t.index()] = Some(d);
         Ok(Some(d))
     }
 
@@ -11892,12 +11767,11 @@ impl<'p> Fn_<'_, 'p> {
     /// reads that storage while the callee writes it: `x = step(x, x.p)` reads a copy of `x.p`.
     fn core_back(
         &self,
-        body: &vyrn_frontend::core::Body,
-        w: &Walked,
         ss: &[St],
         i: usize,
         ended: &[Name],
     ) -> Option<(Dest, Place, Option<Name>)> {
+        let body = self.body();
         let St::Let(
             t,
             Rhs::Call {
@@ -11915,9 +11789,7 @@ impl<'p> Fn_<'_, 'p> {
         if !targets.is_empty() {
             return None;
         }
-        let k = self
-            .core_sig(body, callee, *kind, solved, targets)?
-            .in_place?;
+        let k = self.core_sig(callee, *kind, solved, targets)?.in_place?;
         let (Arg::Val(Val::Name(x)), Capability::Consume) = args.get(k)? else {
             return None;
         };
@@ -11928,24 +11800,24 @@ impl<'p> Fn_<'_, 'p> {
                 ..
             }) if s == x && v == t
                 && body.names[t.index()].source.starts_with('@')
-                && w.reads[t.index()] == 1);
-        if !stored && !(ended.contains(x) && w.slot[x.index()].is_some()) {
+                && self.core_w.reads[t.index()] == 1);
+        if !stored && !(ended.contains(x) && self.core_w.slot[x.index()].is_some()) {
             return None;
         }
-        let (place, ty) = self.core_place(w, body, *x)?;
+        let (place, ty) = self.core_place(*x)?;
         // The frame bytes a slot name holds, which no other held slot overlaps.
         let span = |p: Place, t: &Type| match p {
             Place::Slot(off) => (self.cx.layout(t, 0).ok()).map(|l| off..off + l.size),
             _ => None,
         };
         let apart = |y: &Name| {
-            let (py, ty_y) = self.core_place(w, body, *y)?;
+            let (py, ty_y) = self.core_place(*y)?;
             let (sx, sy) = (span(place, &ty)?, span(py, &ty_y)?);
             Some(sx.end <= sy.start || sy.end <= sx.start)
         };
         let others = args.iter().enumerate().all(|(j, (arg, _))| match arg {
             _ if j == k => true,
-            Arg::Val(v) if !self.core_layout_name(body, v) => true,
+            Arg::Val(v) if !self.core_layout_name(v) => true,
             Arg::Val(Val::Name(y)) => apart(y) == Some(true),
             _ => false,
         });
@@ -11963,7 +11835,8 @@ impl<'p> Fn_<'_, 'p> {
             .ok_or_else(|| gap("an aggregate result with no out-pointer", line))
     }
 
-    fn core_stream_elem(&self, body: &vyrn_frontend::core::Body, n: Name) -> Option<Type> {
+    fn core_stream_elem(&self, n: Name) -> Option<Type> {
+        let body = self.body();
         match self.cx.resolve(&body.names[n.index()].ty) {
             Type::Stream(t) => Some(*t),
             _ => None,
@@ -11972,28 +11845,17 @@ impl<'p> Fn_<'_, 'p> {
 
     /// Whether an element read of `base` is the read a stream's pull answers:
     /// a stream is pulled and never indexed.
-    fn core_pulls(
-        &self,
-        body: &vyrn_frontend::core::Body,
-        base: &vyrn_frontend::core::Place,
-    ) -> bool {
-        matches!(base, vyrn_frontend::core::Place::Name(s) if self.core_stream_elem(body, *s).is_some())
+    fn core_pulls(&self, base: &vyrn_frontend::core::Place) -> bool {
+        matches!(base, vyrn_frontend::core::Place::Name(s) if self.core_stream_elem( *s).is_some())
     }
 
     /// A local holding the address of the layout `n`: its own, where its
     /// place is one, or a fresh one set from [`Fn_::core_addr_of`].
-    fn core_addr_local(
-        &self,
-        b: &mut Frame,
-        w: &Walked,
-        body: &vyrn_frontend::core::Body,
-        n: Name,
-        line: usize,
-    ) -> Result<u32, String> {
-        if let Some((Place::Local(l), _)) = self.core_place(w, body, n) {
+    fn core_addr_local(&self, b: &mut Frame, n: Name, line: usize) -> Result<u32, String> {
+        if let Some((Place::Local(l), _)) = self.core_place(n) {
             return Ok(l);
         }
-        self.core_addr_of(b, w, body, n, line)?;
+        self.core_addr_of(b, n, line)?;
         let l = b.local(ValType::I32);
         b.ins(&Instruction::LocalSet(l));
         Ok(l)
@@ -12001,15 +11863,8 @@ impl<'p> Fn_<'_, 'p> {
 
     /// Pushes the address of the aggregate `n` holds: a slot's, or the one a parameter's
     /// local holds.
-    fn core_addr_of(
-        &self,
-        b: &mut Frame,
-        w: &Walked,
-        body: &vyrn_frontend::core::Body,
-        n: Name,
-        line: usize,
-    ) -> Result<(), String> {
-        let Some((place, _)) = self.core_place(w, body, n) else {
+    fn core_addr_of(&self, b: &mut Frame, n: Name, line: usize) -> Result<(), String> {
+        let Some((place, _)) = self.core_place(n) else {
             return unsupported("a core name with no place", line);
         };
         match place {
@@ -12027,16 +11882,10 @@ impl<'p> Fn_<'_, 'p> {
     /// [`NameInfo::binding`] also goes on the scope with the release it
     /// owes, keyed by that binding and not by its spelling: a projection inlined at its
     /// access site renames its bindings to `@b<tag>.<name>`.
-    fn core_bind(
-        &mut self,
-        body: &vyrn_frontend::core::Body,
-        w: &mut Walked,
-        n: Name,
-        place: Place,
-        ty: Type,
-    ) -> Result<(), String> {
+    fn core_bind(&mut self, n: Name, place: Place, ty: Type) -> Result<(), String> {
+        let body = self.body();
         let info = &body.names[n.index()];
-        w.at[n.index()] = Some((place, ty.clone()));
+        self.core_w.at[n.index()] = Some((place, ty.clone()));
         let Some(key) = info.binding else {
             return Ok(());
         };
@@ -12064,11 +11913,8 @@ impl<'p> Fn_<'_, 'p> {
 
     /// The `where` check a validated record owes once made (`core::Builder`'s `bind`): the
     /// declaration, and the made layout `n` its constructor reads in place.
-    fn core_checks_made(
-        &self,
-        body: &vyrn_frontend::core::Body,
-        rhs: &Rhs,
-    ) -> Option<(TypeDecl, Name)> {
+    fn core_checks_made(&self, rhs: &Rhs) -> Option<(TypeDecl, Name)> {
+        let body = self.body();
         let n = rhs.checks_rule(&body.names)?;
         let Rhs::Call { callee, .. } = rhs else {
             return None;
@@ -12086,13 +11932,12 @@ impl<'p> Fn_<'_, 'p> {
     /// without generics, higher-order shells and `std/mem` declarations.
     fn core_sig(
         &self,
-        body: &vyrn_frontend::core::Body,
         callee: &str,
         kind: Callee,
         solved: &[(String, Type)],
         targets: &[Target],
     ) -> Option<Sig> {
-        if let Some((_, t)) = self.core_through(body, kind) {
+        if let Some((_, t)) = self.core_through(kind) {
             return self.value_sig(&t);
         }
         if !targets.is_empty() {
@@ -12215,7 +12060,8 @@ impl<'p> Fn_<'_, 'p> {
 
     /// The stored value a call row calls through, and its signature. `None`
     /// also for a parameter a specialization bound.
-    fn core_through(&self, body: &vyrn_frontend::core::Body, kind: Callee) -> Option<(Name, Type)> {
+    fn core_through(&self, kind: Callee) -> Option<(Name, Type)> {
+        let body = self.body();
         let n = kind.value()?;
         let info = &body.names[n.index()];
         // A call through a bound `fn` parameter goes to its binding, and a local
@@ -12245,13 +12091,8 @@ impl<'p> Fn_<'_, 'p> {
 
     /// The function type and the target of a function value a row makes from the captures
     /// `parts`. `None` where `ty` is no function type.
-    fn core_closure(
-        &self,
-        body: &vyrn_frontend::core::Body,
-        ty: &Type,
-        t: &Target,
-        parts: &[Val],
-    ) -> Option<(Type, FnTarget)> {
+    fn core_closure(&self, ty: &Type, t: &Target, parts: &[Val]) -> Option<(Type, FnTarget)> {
+        let body = self.body();
         let sig_ty = crate::normalize_fn_sig(&self.cx.sub(ty), &self.cx.types);
         if !matches!(sig_ty, Type::Fn(..)) {
             return None;
@@ -12259,8 +12100,8 @@ impl<'p> Fn_<'_, 'p> {
         let target = self.core_target(t)?;
         let readable = parts.iter().all(|v| {
             matches!(v, Val::Name(c)
-                if self.core_val_readable(body, v)
-                    || self.core_payload_layout(body, v, &body.names[c.index()].ty))
+                if self.core_val_readable( v)
+                    || self.core_payload_layout( v, &body.names[c.index()].ty))
         });
         (target.ncaps == parts.len() && readable).then_some((sig_ty, target))
     }
@@ -12268,13 +12109,8 @@ impl<'p> Fn_<'_, 'p> {
     /// Whether this walk makes the lambda `key` at `ty` ([`Fn_::core_make`]'s screen). The row
     /// lists the captures in the lifted signature's order
     /// ([`vyrn_lower::core::lambda_captures`]), and each is a name this walk reads.
-    fn core_lambda(
-        &self,
-        body: &vyrn_frontend::core::Body,
-        key: &str,
-        ty: &Type,
-        vs: &[Val],
-    ) -> bool {
+    fn core_lambda(&self, key: &str, ty: &Type, vs: &[Val]) -> bool {
+        let body = self.body();
         let sig_ty = crate::normalize_fn_sig(&self.cx.sub(ty), &self.cx.types);
         let (Type::Fn(ptys, _), Some(Expr::Lambda { params, .. })) = (&sig_ty, self.literal(key))
         else {
@@ -12284,8 +12120,8 @@ impl<'p> Fn_<'_, 'p> {
             && params.len() == ptys.len()
             && vs.iter().all(|v| {
                 matches!(v, Val::Name(c)
-                    if self.core_val_readable(body, v)
-                        || self.core_payload_layout(body, v, &body.names[c.index()].ty))
+                    if self.core_val_readable( v)
+                        || self.core_payload_layout( v, &body.names[c.index()].ty))
             })
     }
 
@@ -12295,40 +12131,38 @@ impl<'p> Fn_<'_, 'p> {
         &mut self,
         m: &mut Module,
         b: &mut Frame,
-        body: &vyrn_frontend::core::Body,
-        w: &mut Walked,
         op: &Op,
         vs: &[Val],
         line: usize,
     ) -> Result<Type, String> {
         match (op, vs) {
             (Op::Un(u), [v]) => {
-                let t = self.cx.resolve(&self.core_ty(body, v, &Type::Int));
-                self.core_val(m, b, body, w, v, &t, line)?;
+                let t = self.cx.resolve(&self.core_ty(v, &Type::Int));
+                self.core_val(m, b, v, &t, line)?;
                 self.un_ins(b, *u, &t, line)
             }
             // A conversion is the operand at its own type, then the coercion plan's rungs.
             (Op::Conv(to), [v]) => {
-                let from = self.core_ty(body, v, &Type::Int);
-                self.core_val(m, b, body, w, v, &from, line)?;
+                let from = self.core_ty(v, &Type::Int);
+                self.core_val(m, b, v, &from, line)?;
                 self.coerce(m, b, &from, to, line)?;
                 Ok(to.clone())
             }
             // A String operator is a call; the builder states its operand releases as rows.
-            (Op::Bin(o), [l, r]) if self.core_str_op(body, *o, l, r) => {
-                self.core_val(m, b, body, w, l, &Type::Str, line)?;
+            (Op::Bin(o), [l, r]) if self.core_str_op(*o, l, r) => {
+                self.core_val(m, b, l, &Type::Str, line)?;
                 if let (BinOp::Match, Val::Lit(Lit::Str(pat))) = (o, r) {
                     self.str_match(m, b, pat, line)?;
                     return Ok(Type::Bool);
                 }
-                self.core_val(m, b, body, w, r, &Type::Str, line)?;
+                self.core_val(m, b, r, &Type::Str, line)?;
                 self.str_bin(b, *o, line)
             }
-            (Op::Bin(o), [l, r]) if self.core_code_concat(body, *o, l, r) => {
+            (Op::Bin(o), [l, r]) if self.core_code_concat(*o, l, r) => {
                 let mut ty = |_: &mut Self, _: usize| unsupported("a concatenation's type", line);
                 let mut operand =
                     |s: &mut Self, m: &mut Module, b: &mut Frame, i: usize, t: &Type| {
-                        s.core_val(m, b, body, w, [l, r][i], t, line)
+                        s.core_val(m, b, [l, r][i], t, line)
                     };
                 self.host(m, b, "+", 2, &mut ty, &mut operand, line)
             }
@@ -12336,14 +12170,14 @@ impl<'p> Fn_<'_, 'p> {
                 // A float literal takes its sibling's type: `0.0 - o` with `o: Float32` runs
                 // at `Float32`. An integer literal widens by [`Fn_::op_width`] below.
                 let lt = match (l, r) {
-                    (Val::Lit(Lit::Float(_)), Val::Name(_)) => self.core_ty(body, r, &Type::Int),
-                    _ => self.core_ty(body, l, &Type::Int),
+                    (Val::Lit(Lit::Float(_)), Val::Name(_)) => self.core_ty(r, &Type::Int),
+                    _ => self.core_ty(l, &Type::Int),
                 };
                 let lt = self.cx.resolve(&lt);
-                self.core_val(m, b, body, w, l, &lt, line)?;
+                self.core_val(m, b, l, &lt, line)?;
                 let opty = match Num::of(&lt) {
                     Some(n) if n == Num::PLAIN && matches!(r, Val::Name(_)) => {
-                        let rt = self.core_ty(body, r, &lt);
+                        let rt = self.core_ty(r, &lt);
                         self.op_width(&lt, Some(&rt))
                     }
                     _ => lt.clone(),
@@ -12351,10 +12185,10 @@ impl<'p> Fn_<'_, 'p> {
                 if opty != lt {
                     self.coerce(m, b, &lt, &opty, line)?;
                 }
-                self.core_val(m, b, body, w, r, &opty, line)?;
+                self.core_val(m, b, r, &opty, line)?;
                 let mut rows = [None, None];
                 if !o.row().traps.is_empty() && Num::of(&opty).is_some() {
-                    let Some(k) = w.checks.iter().rposition(|(c, _)| {
+                    let Some(k) = self.core_w.checks.iter().rposition(|(c, _)| {
                         matches!(&c.guard, Guard::NonZero(d) | Guard::Shift(d, _) if d == r)
                     }) else {
                         return unsupported("a runtime check the core did not state", line);
@@ -12362,11 +12196,15 @@ impl<'p> Fn_<'_, 'p> {
                     // A signed quotient's row follows its divisor's.
                     let quotient = |c: &Check| matches!(&c.guard, Guard::NoOverflow(x, d, _) if x == l && d == r);
                     for (j, row) in [k, k + 1].into_iter().zip(&mut rows) {
-                        if let Some((c, ran)) =
-                            w.checks.get_mut(j).filter(|(c, _)| j == k || quotient(c))
+                        if let Some((c, ran)) = self
+                            .core_w
+                            .checks
+                            .get_mut(j)
+                            .filter(|(c, _)| j == k || quotient(c))
                         {
                             *ran = true;
-                            *row = self.row(b, c.clone());
+                            let check = c.clone();
+                            *row = self.row(b, check);
                         }
                     }
                 }
@@ -12381,24 +12219,23 @@ impl<'p> Fn_<'_, 'p> {
         &mut self,
         m: &mut Module,
         b: &mut Frame,
-        body: &vyrn_frontend::core::Body,
-        w: &mut Walked,
         v: &Val,
         want: &Type,
         line: usize,
     ) -> Result<(), String> {
+        let body = self.body();
         let got = match v {
             Val::Name(n) => {
                 // The operand stack already holds it.
-                if w.held == Some(*n) {
-                    w.held = None;
+                if self.core_w.held == Some(*n) {
+                    self.core_w.held = None;
                     let ty = body.names[n.index()].ty.clone();
                     return self.coerce(m, b, &ty, want, line);
                 }
                 if self.core_unit(&body.names[n.index()].ty) {
                     return Ok(());
                 }
-                let Some((place, ty)) = self.core_place(w, body, *n) else {
+                let Some((place, ty)) = self.core_place(*n) else {
                     return unsupported("a core name with no place", line);
                 };
                 match place {
@@ -12457,7 +12294,8 @@ impl<'p> Fn_<'_, 'p> {
     }
 
     /// The checker's type of `v`; `lit` for an integer or byte literal.
-    fn core_ty(&self, body: &vyrn_frontend::core::Body, v: &Val, lit: &Type) -> Type {
+    fn core_ty(&self, v: &Val, lit: &Type) -> Type {
+        let body = self.body();
         match v {
             Val::Name(n) => body.names[n.index()].ty.clone(),
             Val::Lit(Lit::Bool(_)) => Type::Bool,
@@ -12469,7 +12307,8 @@ impl<'p> Fn_<'_, 'p> {
 
     /// Whether the core's rows carry this whole body, so this walk may emit it. A screen, not a
     /// judgement: a refused body is emitted from the AST.
-    fn core_walkable(&self, body: &vyrn_frontend::core::Body, stmts: Option<&Block>) -> bool {
+    fn core_walkable(&self, stmts: Option<&Block>) -> bool {
+        let body = self.body();
         // An aggregate result crosses through the caller's out-pointer ([`Fn_::core_lands`]).
         // A result checked where it is returned is refused, because the row states no check;
         // a value of the result's own validated type was checked where it was made.
@@ -12514,34 +12353,34 @@ impl<'p> Fn_<'_, 'p> {
                 && !(!self.annotated_apart(&annotated, info)
                     && lets.iter().any(|(b, rhs)| {
                         b.index() == n
-                            && (self.core_makes(body, &self.core_made_ty(body, *b), rhs)
-                                || self.core_agg_call(body, rhs)
-                                || self.core_take_part(body, rhs)
-                                || self.core_rebuild(body, rhs)
+                            && (self.core_makes( &self.core_made_ty( *b), rhs)
+                                || self.core_agg_call( rhs)
+                                || self.core_take_part( rhs)
+                                || self.core_rebuild( rhs)
                                 || matches!(rhs, Rhs::Call { callee, kind, args, .. }
                                     if matches!(core_builtin(self.cx, callee, *kind), Some(Spec::Barrier))
                                         && matches!(args.as_slice(), [(Arg::Val(Val::Name(_)), _)]))
                                 || matches!(rhs, Rhs::Read(vyrn_frontend::core::Place::Elem(s, _))
-                                    if self.core_pulls(body, s)))
+                                    if self.core_pulls( s)))
                     }))
-                && self.core_alias(body, Name(n as u32)).is_none()
-                && self.core_copies(body, Name(n as u32)).is_none()
-                && self.core_renames(body, Name(n as u32)).is_none()
-                && !self.core_lists(body).iter().any(|(_, a)| a.index() == n)
+                && self.core_alias(Name(n as u32)).is_none()
+                && self.core_copies( Name(n as u32)).is_none()
+                && self.core_renames( Name(n as u32)).is_none()
+                && !self.core_lists().iter().any(|(_, a)| a.index() == n)
                 && !binders.contains(&Name(n as u32))
-                && !self.core_walked(body, Name(n as u32))
-                && !self.core_joins(body, Name(n as u32))
+                && !self.core_walked( Name(n as u32))
+                && !self.core_joins( Name(n as u32))
             {
                 return false;
             }
         }
         // The core types a `let` by its value except where it states the annotation's check,
         // so an annotated check on a binding of another type is one the rows do not state.
-        if stmts.is_some_and(|blk| self.annotates_a_check(body, blk)) {
+        if stmts.is_some_and(|blk| self.annotates_a_check(blk)) {
             return false;
         }
         let reads = body.reads();
-        self.core_readable(body, &body.stmts, &reads, &[])
+        self.core_readable(&body.stmts, &reads, &[])
     }
 
     /// The annotation of each annotated `let` `walk` reaches, keyed as the plan keys a binding.
@@ -12568,7 +12407,8 @@ impl<'p> Fn_<'_, 'p> {
 
     /// Whether a `let` of `blk` is annotated with a `where` type and binds a name of another
     /// type: a check the rows do not state.
-    fn annotates_a_check(&self, body: &vyrn_frontend::core::Body, blk: &Block) -> bool {
+    fn annotates_a_check(&self, blk: &Block) -> bool {
+        let body = self.body();
         let mut found = false;
         each_block(blk, &mut |_| {}, &mut |s| {
             if let Stmt::Let { ty: Some(t), .. } = s {
@@ -12600,19 +12440,14 @@ impl<'p> Fn_<'_, 'p> {
     /// `bound` holds the names with a place on the path to `ss`: the payload
     /// binders of the arms it is inside, and the names an enclosing list made
     /// before it, whose slots the walk holds to the end of their extent.
-    fn core_readable(
-        &self,
-        body: &vyrn_frontend::core::Body,
-        ss: &[St],
-        reads: &[u32],
-        bound: &[Name],
-    ) -> bool {
+    fn core_readable(&self, ss: &[St], reads: &[u32], bound: &[Name]) -> bool {
+        let body = self.body();
         let path = |i: usize| -> Vec<Name> {
             let made = ss[..i].iter().filter_map(|p| match p {
                 St::Let(l, rhs)
                     if matches!(rhs, Rhs::Make(..))
-                        || self.core_ctor(body, rhs)
-                        || self.core_agg_call(body, rhs) =>
+                        || self.core_ctor(rhs)
+                        || self.core_agg_call(rhs) =>
                 {
                     Some(*l)
                 }
@@ -12626,32 +12461,32 @@ impl<'p> Fn_<'_, 'p> {
             // ([`Fn_::core_lands`]).
             St::Let(n, rhs)
                 if matches!(rhs, Rhs::Make(..) | Rhs::Prim(Op::Closure(_), ..))
-                    || self.core_ctor(body, rhs) =>
+                    || self.core_ctor( rhs) =>
             {
-                let part = self.core_part_at(body, ss, i, &self.core_w);
-                let made = self.core_made_ty(body, *n);
+                let part = self.core_part_at( ss, i);
+                let made = self.core_made_ty( *n);
                 let ty = match &part {
                     Some(at) => &at.ty,
-                    None if self.core_lands(body, ss, i, reads) => &self.ret_ty,
+                    None if self.core_lands( ss, i, reads) => &self.ret_ty,
                     None => &made,
                 };
-                self.core_built(body, ss, i, ty, rhs)
+                self.core_built( ss, i, ty, rhs)
             }
             // An aggregate call result has its own slot: one the `let` takes before the call,
             // the storage the call wrote, or the caller's storage.
-            St::Let(_, rhs) if self.core_agg_call(body, rhs) => true,
-            St::Let(_, Rhs::Take(_)) if self.core_part_at(body, ss, i, &self.core_w).is_some() => {
+            St::Let(_, rhs) if self.core_agg_call( rhs) => true,
+            St::Let(_, Rhs::Take(_)) if self.core_part_at( ss, i).is_some() => {
                 true
             }
             // An accumulator's append is read with the store after it.
-            St::Let(_, rhs @ Rhs::Call { args, .. }) if self.core_rebuild(body, rhs) => {
+            St::Let(_, rhs @ Rhs::Call { args, .. }) if self.core_rebuild( rhs) => {
                 !matches!(args.first(), Some((Arg::Val(Val::Name(x)), _)) if body.names[x.index()].grows)
                     || self
-                        .core_rebuilt(body, ss, i + 1 + drops_ahead(ss[i + 1..].iter()))
+                        .core_rebuilt( ss, i + 1 + drops_ahead(ss[i + 1..].iter()))
                         .is_some()
             }
-            St::Let(n, Rhs::Read(p)) if self.core_walked(body, *n) => {
-                self.core_place_ty(body, p).is_some()
+            St::Let(n, Rhs::Read(p)) if self.core_walked( *n) => {
+                self.core_place_ty( p).is_some()
             }
             // The head of a `for` over a stream: the element goes into a
             // place of its own, a local or a slot ([`Spec::Pulls`]).
@@ -12662,23 +12497,23 @@ impl<'p> Fn_<'_, 'p> {
                 },
             ) if matches!(core_builtin(self.cx, callee, *kind), Some(Spec::Pulls)) => {
                 matches!(args.as_slice(), [(Arg::Val(Val::Name(s)), _)]
-                    if self.core_stream_elem(body, *s).is_some())
+                    if self.core_stream_elem( *s).is_some())
             }
             St::Let(_, Rhs::Read(vyrn_frontend::core::Place::Elem(s, _)))
-                if self.core_pulls(body, s) =>
+                if self.core_pulls( s) =>
             {
                 true
             }
             St::Let(n, _)
-                if self.core_alias(body, *n).is_some()
-                    || self.core_copies(body, *n).is_some()
-                    || self.core_renames(body, *n).is_some()
-                    || self.core_lists(body).iter().any(|(_, a)| a == n) =>
+                if self.core_alias(*n).is_some()
+                    || self.core_copies( *n).is_some()
+                    || self.core_renames( *n).is_some()
+                    || self.core_lists().iter().any(|(_, a)| a == n) =>
             {
                 true
             }
-            St::Let(_, rhs) => self.core_rhs_readable(body, rhs),
-            St::Store { .. } if self.core_rebuilt(body, ss, i).is_some() => true,
+            St::Let(_, rhs) => self.core_rhs_readable( rhs),
+            St::Store { .. } if self.core_rebuilt( ss, i).is_some() => true,
             // A store into a place with an address, a name's slot or module state's static one.
             // A layout's value is a name of its type, whose bytes are copied.
             St::Store { place, value, .. } => {
@@ -12686,24 +12521,24 @@ impl<'p> Fn_<'_, 'p> {
                 let ty = match place {
                     At::Name(n) => Some(body.names[n.index()].ty.clone()),
                     At::Key(_, k)
-                        if !self.core_val_readable(body, k) && !self.core_layout_name(body, k) =>
+                        if !self.core_val_readable( k) && !self.core_layout_name( k) =>
                     {
                         None
                     }
                     At::Key(m, _) => {
-                        match self.core_place_ty(body, m).map(|t| self.cx.resolve(&t)) {
+                        match self.core_place_ty( m).map(|t| self.cx.resolve(&t)) {
                             Some(Type::Map(_, v)) => Some(*v),
                             _ => None,
                         }
                     }
-                    p => self.core_place_ty(body, p),
+                    p => self.core_place_ty( p),
                 };
                 // A value of the place's own validated type crosses nothing;
                 // any other one is a check the row does not state.
                 ty.is_some_and(|t| {
                     let r = self.cx.resolve(&t);
                     let fits = match self.cx.repr(&t, 0) {
-                        Ok(Repr::Unit | Repr::Scalar(_)) => self.core_val_readable(body, value),
+                        Ok(Repr::Unit | Repr::Scalar(_)) => self.core_val_readable( value),
                         Ok(Repr::Agg(_)) => {
                             matches!(value, Val::Name(v)
                                     if self.cx.resolve(&body.names[v.index()].ty) == r)
@@ -12719,12 +12554,12 @@ impl<'p> Fn_<'_, 'p> {
             St::If {
                 cond, then, els, ..
             } => {
-                self.core_val_readable(body, cond)
-                    && self.core_readable(body, then, reads, &path(i))
-                    && self.core_readable(body, els, reads, &path(i))
+                self.core_val_readable( cond)
+                    && self.core_readable( then, reads, &path(i))
+                    && self.core_readable( els, reads, &path(i))
             }
-            St::Block { body: inner, .. } => self.core_readable(body, inner, reads, &path(i)),
-            St::Loop { body: inner, .. } => self.core_readable(body, inner, reads, &path(i)),
+            St::Block { body: inner, .. } => self.core_readable( inner, reads, &path(i)),
+            St::Loop { body: inner, .. } => self.core_readable( inner, reads, &path(i)),
             St::Break { .. } | St::Continue { .. } => true,
             // [`Fn_::core_switch`] needs a scrutinee this walk can take the address of, a tag
             // on every arm, and a place for every payload binder ([`Fn_::core_payload`]).
@@ -12736,10 +12571,10 @@ impl<'p> Fn_<'_, 'p> {
                 // payload binder) or the scope's.
                 let path = path(i);
                 let placed = path.contains(n)
-                    || self.core_place(&self.core_w, body, *n).is_some()
-                    || self.core_alias(body, *n).is_some()
-                    || self.core_copies(body, *n).is_some()
-                    || self.core_renames(body, *n).is_some();
+                    || self.core_place( *n).is_some()
+                    || self.core_alias(*n).is_some()
+                    || self.core_copies( *n).is_some()
+                    || self.core_renames( *n).is_some();
                 placed
                     && self.sum_of(&body.names[n.index()].ty).is_some()
                     // A construct the plan releases WHOLE is one the arm gives
@@ -12755,11 +12590,9 @@ impl<'p> Fn_<'_, 'p> {
                                 .iter()
                                 .all(|bn| self.core_payload(&body.names[bn.index()].ty))
                             && self.core_readable(
-                                body,
                                 &a.body[a.reads(on).len()..],
                                 reads,
-                                &[&path[..], &a.binds[..]].concat(),
-                            )
+                                &[&path[..], &a.binds[..]].concat(),)
                     })
             }
             // A release is the row's, at every exit, and the walk emits it
@@ -12773,19 +12606,19 @@ impl<'p> Fn_<'_, 'p> {
                 Some(Val::Name(n)) if matches!(self.ret, Repr::Agg(_)) => {
                     self.core_as_is(&body.names[n.index()].ty, &self.ret_ty)
                 }
-                Some(v) => self.core_val_readable(body, v),
+                Some(v) => self.core_val_readable( v),
             },
             // A discarded read drops its place's value, or a layout's address.
             St::Do {
                 rhs: Rhs::Read(p), ..
-            } => self.core_place_ty(body, core_discarded(p)).is_some(),
+            } => self.core_place_ty( core_discarded(p)).is_some(),
             // Any other discarded value drops at the type its call row states
             // ([`Fn_::core_rhs_ty`]). A discarded layout is a slot of the row's own, given
             // back at the row's end.
             St::Do { rhs, line, .. } => {
-                self.core_checks_made(body, rhs).is_some()
-                    || (self.core_rhs_readable(body, rhs) || self.core_agg_call(body, rhs))
-                        && self.core_rhs_ty(body, rhs, *line).is_ok()
+                self.core_checks_made( rhs).is_some()
+                    || (self.core_rhs_readable( rhs) || self.core_agg_call( rhs))
+                        && self.core_rhs_ty( rhs, *line).is_ok()
             }
             // A release ([`Fn_::core_drop`]) needs the name's place, which
             // [`Fn_::core_walkable`]'s name clause has already asked about.
@@ -12804,11 +12637,8 @@ impl<'p> Fn_<'_, 'p> {
     /// scalar `modify` argument an address for the call. A name holding another place's
     /// address ([`Fn_::core_alias`]) is not written through. A place argument is a removal's
     /// receiver ([`Fn_::core_removes`]) or a layout a declared function modifies.
-    fn core_args_readable(
-        &self,
-        body: &vyrn_frontend::core::Body,
-        args: &[(Arg, vyrn_frontend::ast::Capability)],
-    ) -> bool {
+    fn core_args_readable(&self, args: &[(Arg, vyrn_frontend::ast::Capability)]) -> bool {
+        let body = self.body();
         use vyrn_frontend::ast::Capability as Cap;
         args.iter().all(|(a, c)| {
             let v = match a {
@@ -12818,19 +12648,19 @@ impl<'p> Fn_<'_, 'p> {
                 Arg::Place(p) => {
                     return *c == Cap::Modify
                         && self
-                            .core_place_ty(body, p)
+                            .core_place_ty(p)
                             .is_some_and(|t| matches!(self.cx.repr(&t, 0), Ok(Repr::Agg(_))));
                 }
             };
-            let layout = self.core_layout_name(body, v);
+            let layout = self.core_layout_name(v);
             match c {
-                Cap::Read | Cap::Consume => self.core_val_readable(body, v) || layout,
+                Cap::Read | Cap::Consume => self.core_val_readable(v) || layout,
                 Cap::Modify => match v {
-                    Val::Name(n) if layout => self.core_alias(body, *n).is_none(),
+                    Val::Name(n) if layout => self.core_alias(*n).is_none(),
                     // A temporary may ride the operand stack, which has no
                     // local to reload into.
                     Val::Name(n) => {
-                        self.core_val_readable(body, v)
+                        self.core_val_readable(v)
                             && (body.names[n.index()].binding.is_some() || body.params.contains(n))
                     }
                     Val::Lit(_) => false,
@@ -12846,7 +12676,8 @@ impl<'p> Fn_<'_, 'p> {
     /// and the binding copies it. The row keeps the place because the kernel's alias of `m[..]`
     /// refuses a write to the map while the read is live. A boxed value stays in the arm: no
     /// row releases the box the lookup copies it into.
-    fn core_agg_call(&self, body: &vyrn_frontend::core::Body, rhs: &Rhs) -> bool {
+    fn core_agg_call(&self, rhs: &Rhs) -> bool {
+        let body = self.body();
         match rhs {
             Rhs::Call {
                 callee,
@@ -12857,8 +12688,8 @@ impl<'p> Fn_<'_, 'p> {
                 ret,
                 ..
             } => {
-                self.core_removes(body, callee, *kind, args) == Some(true)
-                    || self.core_args_readable(body, args)
+                self.core_removes(callee, *kind, args) == Some(true)
+                    || self.core_args_readable(args)
                         && (arg_vals(args).is_some() || self.core_user_callee(callee, *kind))
                         && (match core_builtin(self.cx, callee, *kind) {
                             // The result type is the row's, which a stream
@@ -12879,13 +12710,13 @@ impl<'p> Fn_<'_, 'p> {
                                     })
                             }
                         } || self
-                            .core_sig(body, callee, *kind, solved, targets)
+                            .core_sig(callee, *kind, solved, targets)
                             .is_some_and(|s| s.params.len() == args.len() && s.ret.agg().is_some()))
             }
             Rhs::Read(vyrn_frontend::core::Place::Key(base, k)) => {
-                (self.core_val_readable(body, k) || self.core_layout_name(body, k))
+                (self.core_val_readable(k) || self.core_layout_name(k))
                     && matches!(
-                        self.core_place_ty(body, base).map(|t| self.cx.resolve(&t)),
+                        self.core_place_ty(base).map(|t| self.cx.resolve(&t)),
                         Some(Type::Map(..))
                     )
             }
@@ -12896,7 +12727,8 @@ impl<'p> Fn_<'_, 'p> {
     /// Whether a row rebuilds a named `Array` or `Map` receiver, a
     /// `SmallArray` one it pushes to, or a String accumulator in place
     /// ([`Spec::Rebuilds`]), with operands this walk writes.
-    fn core_rebuild(&self, body: &vyrn_frontend::core::Body, rhs: &Rhs) -> bool {
+    fn core_rebuild(&self, rhs: &Rhs) -> bool {
+        let body = self.body();
         let Rhs::Call {
             callee, kind, args, ..
         } = rhs
@@ -12913,7 +12745,7 @@ impl<'p> Fn_<'_, 'p> {
                             | ("@tally" | "@tallyBytes", Type::Map(..))
                     ))
                     && core_global(body, *x).is_none_or(|g| self.cx.gappend.contains_key(g))
-                    && self.core_args_readable(body, rest))
+                    && self.core_args_readable( rest))
     }
 
     /// Whether `callee` is a declared function, whose arguments
@@ -12933,11 +12765,11 @@ impl<'p> Fn_<'_, 'p> {
     /// what it hands back is an aggregate, which lands through a slot.
     fn core_removes(
         &self,
-        body: &vyrn_frontend::core::Body,
         callee: &str,
         kind: Callee,
         args: &[(Arg, vyrn_frontend::ast::Capability)],
     ) -> Option<bool> {
+        let body = self.body();
         if !matches!(core_builtin(self.cx, callee, kind), Some(Spec::Removes)) {
             return None;
         }
@@ -12947,9 +12779,9 @@ impl<'p> Fn_<'_, 'p> {
         let (ty, readable) = match &recv.0 {
             Arg::Val(Val::Name(x)) => (
                 body.names[x.index()].ty.clone(),
-                self.core_args_readable(body, std::slice::from_ref(recv)),
+                self.core_args_readable(std::slice::from_ref(recv)),
             ),
-            Arg::Place(p) => (self.core_place_ty(body, p)?, true),
+            Arg::Place(p) => (self.core_place_ty(p)?, true),
             Arg::Val(Val::Lit(_)) => return None,
         };
         let agg = match (callee, self.cx.resolve(&ty)) {
@@ -12960,21 +12792,15 @@ impl<'p> Fn_<'_, 'p> {
             }
             _ => return None,
         };
-        (readable
-            && self.core_args_readable(body, rest)
-            && rest.len() == usize::from(callee != "@pop"))
-        .then_some(agg)
+        (readable && self.core_args_readable(rest) && rest.len() == usize::from(callee != "@pop"))
+            .then_some(agg)
     }
 
     /// The receiver and result of the rebuild before `ss[i]`, when `ss[i]` stores the result back
     /// into the receiver or the place it was taken from, which [`Fn_::arr_rebuild`] has already
     /// written. Only releases of the call's argument temporaries stand between the two.
-    fn core_rebuilt(
-        &self,
-        body: &vyrn_frontend::core::Body,
-        ss: &[St],
-        i: usize,
-    ) -> Option<(Name, Name)> {
+    fn core_rebuilt(&self, ss: &[St], i: usize) -> Option<(Name, Name)> {
+        let body = self.body();
         let k = drops_ahead(ss[..i].iter().rev());
         let (
             St::Let(t, rhs @ Rhs::Call { args, .. }),
@@ -12997,17 +12823,18 @@ impl<'p> Fn_<'_, 'p> {
             }
             p => core_taken(body, *r) == Some(p),
         };
-        (t == v && back && self.core_rebuild(body, rhs)).then_some((*r, *t))
+        (t == v && back && self.core_rebuild(rhs)).then_some((*r, *t))
     }
 
     /// Whether some store writes `x` whole other than the one that puts a
     /// rebuilt `x` back ([`Fn_::core_rebuilt`]).
-    fn core_restored(&self, body: &vyrn_frontend::core::Body, x: Name) -> bool {
+    fn core_restored(&self, x: Name) -> bool {
+        let body = self.body();
         let mut found = false;
         each_list(&body.stmts, &mut |ss| {
             found |= (0..ss.len()).any(|i| {
                 matches!(ss[i], St::Store { place: vyrn_frontend::core::Place::Name(m), .. } if m == x)
-                    && self.core_rebuilt(body, ss, i).is_none()
+                    && self.core_rebuilt( ss, i).is_none()
             });
         });
         found
@@ -13015,11 +12842,11 @@ impl<'p> Fn_<'_, 'p> {
 
     /// Whether a rebuild in `ss` hands `n` back to the place it was taken
     /// from ([`Fn_::core_rebuilt`]).
-    fn core_hands_back(&self, body: &vyrn_frontend::core::Body, ss: &[St], n: Name) -> bool {
+    fn core_hands_back(&self, ss: &[St], n: Name) -> bool {
         (1..ss.len()).any(|i| {
             matches!(ss[i], St::Store { .. })
-                && self.core_rebuilt(body, ss, i).is_some_and(|(r, _)| r == n)
-        }) || (ss.iter().flat_map(St::lists)).any(|l| self.core_hands_back(body, l, n))
+                && self.core_rebuilt(ss, i).is_some_and(|(r, _)| r == n)
+        }) || (ss.iter().flat_map(St::lists)).any(|l| self.core_hands_back(l, n))
     }
 
     /// Whether a value of `from` is one of `to` with no instruction ([`crate::coerce_plan`]):
@@ -13033,13 +12860,8 @@ impl<'p> Fn_<'_, 'p> {
 
     /// Whether the `let` at `ss[i]` binds a temporary the next `return` hands back, read once at
     /// the result's type with only other names' releases between, so it is built in `dest`.
-    fn core_lands(
-        &self,
-        body: &vyrn_frontend::core::Body,
-        ss: &[St],
-        i: usize,
-        reads: &[u32],
-    ) -> bool {
+    fn core_lands(&self, ss: &[St], i: usize, reads: &[u32]) -> bool {
+        let body = self.body();
         let St::Let(n, _) = &ss[i] else {
             return false;
         };
@@ -13061,19 +12883,20 @@ impl<'p> Fn_<'_, 'p> {
     /// before their parts, for `@codeSplice`, whose tag goes before its
     /// value, and for a call through a stored value, whose value goes there
     /// first.
-    fn core_first_read(&self, body: &vyrn_frontend::core::Body, s: Option<&St>) -> Option<Name> {
+    fn core_first_read(&self, s: Option<&St>) -> Option<Name> {
+        let body = self.body();
         match s? {
             St::Let(_, Rhs::Call { kind, .. })
             | St::Do {
                 rhs: Rhs::Call { kind, .. },
                 ..
-            } if self.core_through(body, *kind).is_some() => None,
+            } if self.core_through(*kind).is_some() => None,
             St::Let(_, rhs)
-                if self.core_ctor(body, rhs)
-                    || self.core_agg_call(body, rhs)
-                    || self.core_rebuild(body, rhs)
+                if self.core_ctor(rhs)
+                    || self.core_agg_call(rhs)
+                    || self.core_rebuild(rhs)
                     || matches!(rhs, Rhs::Call { callee, kind, args, .. }
-                        if self.core_removes(body, callee, *kind, args).is_some()
+                        if self.core_removes( callee, *kind, args).is_some()
                             || callee == "@codeSplice") =>
             {
                 None
@@ -13127,11 +12950,11 @@ impl<'p> Fn_<'_, 'p> {
     /// what it did not state.
     fn core_builtin_readable(
         &self,
-        body: &vyrn_frontend::core::Body,
         callee: &str,
         kind: Callee,
         args: &[(Arg, vyrn_frontend::ast::Capability)],
     ) -> bool {
+        let body = self.body();
         match core_builtin(self.cx, callee, kind) {
             Some(
                 Spec::Typed(..)
@@ -13151,7 +12974,7 @@ impl<'p> Fn_<'_, 'p> {
             Some(Spec::Host) => self.cx.gen.is_some(),
             // A removal that hands back a scalar leaves it on the stack; one
             // that hands back an aggregate is an aggregate call.
-            Some(Spec::Removes) => self.core_removes(body, callee, kind, args) == Some(false),
+            Some(Spec::Removes) => self.core_removes(callee, kind, args) == Some(false),
             Some(Spec::Finds) => matches!(args, [(Arg::Val(Val::Name(x)), _), _]
                 if matches!(self.cx.resolve(&body.names[x.index()].ty), Type::Map(..))),
             // A rebuild is read together with the store after it
@@ -13164,22 +12987,16 @@ impl<'p> Fn_<'_, 'p> {
 
     /// Whether `l o r` is `Code + Code`, the host's concatenation
     /// ([`Fn_::host`]), which exists only while a generator runs.
-    fn core_code_concat(
-        &self,
-        body: &vyrn_frontend::core::Body,
-        o: BinOp,
-        l: &Val,
-        r: &Val,
-    ) -> bool {
-        let is_code = |v: &Val| matches!(self.cx.resolve(&self.core_ty(body, v, &Type::Int)), Type::Named(n) if n == "Code");
+    fn core_code_concat(&self, o: BinOp, l: &Val, r: &Val) -> bool {
+        let is_code = |v: &Val| matches!(self.cx.resolve(&self.core_ty( v, &Type::Int)), Type::Named(n) if n == "Code");
         self.cx.gen.is_some() && o == BinOp::Add && is_code(l) && is_code(r)
     }
 
     /// Whether `l o r` is a String operator [`Fn_::str_bin`] or
     /// [`Fn_::str_match`] writes: a String on the left, and a String or, for
     /// `=~`, the pattern literal on the right.
-    fn core_str_op(&self, body: &vyrn_frontend::core::Body, o: BinOp, l: &Val, r: &Val) -> bool {
-        let is_str = |v: &Val| self.cx.resolve(&self.core_ty(body, v, &Type::Int)) == Type::Str;
+    fn core_str_op(&self, o: BinOp, l: &Val, r: &Val) -> bool {
+        let is_str = |v: &Val| self.cx.resolve(&self.core_ty(v, &Type::Int)) == Type::Str;
         is_str(l)
             && match o {
                 BinOp::Match => matches!(r, Val::Lit(Lit::Str(_))),
@@ -13194,17 +13011,17 @@ impl<'p> Fn_<'_, 'p> {
             }
     }
 
-    fn core_rhs_readable(&self, body: &vyrn_frontend::core::Body, rhs: &Rhs) -> bool {
+    fn core_rhs_readable(&self, rhs: &Rhs) -> bool {
         match rhs {
-            Rhs::Val(v) => self.core_val_readable(body, v),
+            Rhs::Val(v) => self.core_val_readable(v),
             Rhs::Prim(Op::Closure(_), ..) => false,
-            Rhs::Prim(Op::Bin(o), vs, _) if matches!(vs.as_slice(), [l, r] if self.core_str_op(body, *o, l, r)) => {
-                vs.iter().all(|v| self.core_val_readable(body, v))
+            Rhs::Prim(Op::Bin(o), vs, _) if matches!(vs.as_slice(), [l, r] if self.core_str_op( *o, l, r)) => {
+                vs.iter().all(|v| self.core_val_readable(v))
             }
-            Rhs::Prim(Op::Bin(o), vs, _) if matches!(vs.as_slice(), [l, r] if self.core_code_concat(body, *o, l, r)) => {
-                vs.iter().all(|v| self.core_val_readable(body, v))
+            Rhs::Prim(Op::Bin(o), vs, _) if matches!(vs.as_slice(), [l, r] if self.core_code_concat( *o, l, r)) => {
+                vs.iter().all(|v| self.core_val_readable(v))
             }
-            Rhs::Prim(_, vs, _) => vs.iter().all(|v| self.core_operand(body, v)),
+            Rhs::Prim(_, vs, _) => vs.iter().all(|v| self.core_operand(v)),
             // A handed-back receiver asks nothing extra: the builder states the call and the
             // store back as two rows, each read where it stands.
             Rhs::Call {
@@ -13215,16 +13032,16 @@ impl<'p> Fn_<'_, 'p> {
                 targets,
                 ..
             } => {
-                self.core_removes(body, callee, *kind, args) == Some(false)
-                    || self.core_args_readable(body, args)
+                self.core_removes(callee, *kind, args) == Some(false)
+                    || self.core_args_readable(args)
                         && (arg_vals(args).is_some() || self.core_user_callee(callee, *kind))
-                        && (self.core_builtin_readable(body, callee, *kind, args)
+                        && (self.core_builtin_readable(callee, *kind, args)
                             || (kind.direct() && self.is_extern(callee))
                             || (kind.direct() && self.cx.skipped.contains(callee))
                             || self.core_named(callee, *kind).is_some()
                             || self.core_mem_ty(callee, args.len()).is_some()
                             || self
-                                .core_sig(body, callee, *kind, solved, targets)
+                                .core_sig(callee, *kind, solved, targets)
                                 .is_some_and(|s| {
                                     // A plain `call` has no out-pointer for an aggregate
                                     // result; [`Fn_::core_agg_call`] admits those.
@@ -13238,9 +13055,9 @@ impl<'p> Fn_<'_, 'p> {
             // A place whose value fits one wasm local, a String pointer as much as an `Int64`
             // ([`Fn_::core_read`]). A take loads the same value and leaves a hole, which the
             // place's release rows carry.
-            Rhs::Read(p) | Rhs::Take(p) => self
-                .core_place_ty(body, p)
-                .is_some_and(|t| self.core_framed(&t)),
+            Rhs::Read(p) | Rhs::Take(p) => {
+                self.core_place_ty(p).is_some_and(|t| self.core_framed(&t))
+            }
             _ => false,
         }
     }
@@ -13248,7 +13065,8 @@ impl<'p> Fn_<'_, 'p> {
     /// Whether `v` is an operand this walk's arithmetic rows compute with, which is narrower
     /// than [`Fn_::core_val_readable`]. A `where` type computes as its base, and a vector as one
     /// `v128`. A String literal is refused here: `"a" < "b"` has no name for another screen.
-    fn core_operand(&self, body: &vyrn_frontend::core::Body, v: &Val) -> bool {
+    fn core_operand(&self, v: &Val) -> bool {
+        let body = self.body();
         match v {
             Val::Name(n) => {
                 let t = self.cx.resolve(&body.names[n.index()].ty);
