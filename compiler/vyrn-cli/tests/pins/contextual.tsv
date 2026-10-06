@@ -5,11 +5,11 @@ consume	0	2	0	0	2
 gen	0	3	0	0	3
 test	0	3	1	0	4
 bench	0	3	1	0	4
-panic	0	1	2	0	3
+panic	0	1	1	0	2
 from	0	2	0	0	2
 as	0	2	0	0	2
 extern	0	3	0	0	3
 lazy	0	1	0	0	1
 logging	0	2	0	0	2
 contract	0	1	0	0	1
-all	0	23	7	0	30
+all	0	23	6	0	29
