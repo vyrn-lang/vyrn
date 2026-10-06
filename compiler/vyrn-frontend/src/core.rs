@@ -996,7 +996,8 @@ pub struct Body {
     /// and the name: the line and the column just past its path. `None` where
     /// the statement takes the name twice, so a refusal cannot tell which take
     /// it is about. A name read out of a place is the temporary that read
-    /// made.
+    /// made. A `let` that binds a name to a place read keys that read by the
+    /// bound name.
     pub ends: std::collections::HashMap<(NodeId, Name), Option<(usize, usize)>>,
 }
 
