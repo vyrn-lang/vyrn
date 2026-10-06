@@ -9400,21 +9400,6 @@ fn disown(b: &mut Frame, own: Place) {
         .ins(&Instruction::I32Store(word()));
 }
 
-/// How many operands `assert` (one) and `assertEq` (two) take.
-fn assert_arity(name: &str) -> usize {
-    if name == "assert" {
-        1
-    } else {
-        2
-    }
-}
-
-/// How many operands a [`Spec::Logs`] builtin takes: `logger` its name, a
-/// level the logger and the message.
-fn logs_arity(name: &str) -> usize {
-    1 + usize::from(name != "logger")
-}
-
 /// The specification row of the builtin a call row names, or `None` where the row names a
 /// function this program declares or a callee with no row.
 fn core_builtin(cx: &Cx, callee: &str, kind: Callee) -> Option<&'static Spec> {
@@ -10658,34 +10643,31 @@ impl<'p> Fn_<'_, 'p> {
                 solved,
                 targets,
                 ..
-            } => match (
-                builtin_spec(callee, args.len(), self.cx.gen.is_some()),
-                core_builtin(self.cx, callee, *kind),
-            ) {
-                (Some((_, _, ret)), _) | (None, Some(Spec::Renders(ret) | Spec::Effect(ret))) => {
+            } => match core_builtin(self.cx, callee, *kind) {
+                Some(Spec::Typed(_, ret) | Spec::Renders(ret) | Spec::Effect(ret)) => {
                     Ok(ret.clone())
                 }
-                (None, Some(Spec::Traps)) => Ok(Type::Never),
-                (None, Some(Spec::Asserts)) => Ok(Type::Unit),
-                (None, Some(Spec::Logs)) if callee == "logger" => Ok(Type::Logger),
-                (None, Some(Spec::Logs)) => Ok(Type::Unit),
+                Some(Spec::Traps) => Ok(Type::Never),
+                Some(Spec::Asserts) => Ok(Type::Unit),
+                Some(Spec::Logs) if callee == "logger" => Ok(Type::Logger),
+                Some(Spec::Logs) => Ok(Type::Unit),
                 // [`Fn_::lanes`] types a lane builtin as it emits; the row carries the
                 // checker's type for the site.
-                (None, Some(Spec::Lanes)) => at
+                Some(Spec::Lanes) => at
                     .clone()
                     .ok_or_else(|| gap("a lane builtin the checker did not type", line)),
                 // A removal returns the element, or an `Option` of it.
-                (None, Some(Spec::Removes)) => at
+                Some(Spec::Removes) => at
                     .clone()
                     .ok_or_else(|| gap("a removal the checker did not type", line)),
-                (None, Some(Spec::Finds)) => Ok(Type::Bool),
-                (None, Some(Spec::Barrier)) => at
+                Some(Spec::Finds) => Ok(Type::Bool),
+                Some(Spec::Barrier) => at
                     .clone()
                     .ok_or_else(|| gap("a `blackBox` the checker did not type", line)),
-                (None, Some(Spec::Host)) => at
+                Some(Spec::Host) => at
                     .clone()
                     .ok_or_else(|| gap("a host import the checker did not type", line)),
-                (None, _) => match self.core_mem_ty(callee, args.len()) {
+                _ => match self.core_mem_ty(callee, args.len()) {
                     Some(t) => Ok(t),
                     None => match self.core_sig(body, callee, *kind, solved, targets) {
                         Some(s) => Ok(s.ret_ty),
@@ -13520,8 +13502,9 @@ impl<'p> Fn_<'_, 'p> {
         }
     }
 
-    /// Whether a call row's builtin is one [`Fn_::core_call`] emits: the
-    /// arity the row states.
+    /// Whether a call row's builtin is one [`Fn_::core_call`] emits. The checker counted the
+    /// operands against the row ([`vyrn_frontend::prelude::Arity`]); the arms below read only
+    /// what it did not state.
     fn core_builtin_readable(
         &self,
         body: &vyrn_frontend::core::Body,
@@ -13530,12 +13513,16 @@ impl<'p> Fn_<'_, 'p> {
         args: &[(Arg, vyrn_frontend::ast::Capability)],
     ) -> bool {
         match core_builtin(self.cx, callee, kind) {
-            Some(Spec::Typed(params, _)) => params.len() == args.len(),
-            Some(Spec::OwnType | Spec::Barrier) => matches!(args, [(Arg::Val(_), _)]),
-            Some(Spec::Renders(_) | Spec::Effect(_)) => matches!(args, [_]),
-            Some(Spec::Logs) => args.len() == logs_arity(callee),
-            Some(Spec::Traps) => matches!(args, [_] | [_, (Arg::Val(Val::Lit(Lit::Str(_))), _)]),
-            Some(Spec::Asserts) => args.len() == assert_arity(callee),
+            Some(
+                Spec::Typed(..)
+                | Spec::OwnType
+                | Spec::Barrier
+                | Spec::Renders(_)
+                | Spec::Effect(_)
+                | Spec::Logs
+                | Spec::Traps
+                | Spec::Asserts,
+            ) => true,
             // A lane index is an immediate, so the row carries it as a literal.
             Some(Spec::Lanes) => {
                 !matches!(callee, "@lane" | "@replaceLane")
