@@ -1,0 +1,16 @@
+// A module that declares a method-form name calls its own declaration when it
+// writes `recv.name(..)`, and the statement form does not assign the result
+// back. A namespace member of that name is the module's export.
+import * as r from "./lib/remover"
+
+fn push(xs: Array<Int64>, v: Int64) {
+    print(xs.length * 100 + v)
+}
+
+fn main() -> Int64 {
+    let mut xs: Array<Int64> = [1, 2]
+    xs.push(3)
+    print(xs.length)
+    print(r.remove(1))
+    return 0
+}

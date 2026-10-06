@@ -41,61 +41,32 @@ fn at_contract_decl(tokens: &[Token], pos: usize) -> bool {
         && matches!(at(pos + 2), Some(Tok::LBrace))
 }
 
-/// Gives a method-form builtin's name back to a declaration that answers to it.
-///
-/// `postfix` rewrites `people.remove(h)` to `@remove` before the module's
-/// declarations exist. This runs after them and undoes the rewrite wherever the
-/// module resolves the surface name itself: its top-level declarations, its
-/// imports (under the local spelling), and the methods of its protocols. A name
-/// in [`crate::checker::RESERVED`] is never given back.
+/// The method-form builtin spellings ([`crate::prelude::Builtin::method`]) that
+/// the module answers to itself: its top-level declarations, its imports (under
+/// the local spelling), and the methods of its protocols. A written
+/// `recv.m(..)` with `m` in this set calls the module's `m`, not the builtin.
 ///
 /// The test is scope, not type: the flat namespace is program-wide unique, so
 /// one lookup answers it. A module that declares `remove` and calls
 /// `.remove(k)` on a `Map` gets a type error at the call.
-fn unshadow_method_builtins(program: &mut Program) {
-    let mut scope: HashSet<String> = HashSet::new();
-    for f in &program.functions {
-        scope.insert(f.name.clone());
-    }
-    for t in &program.type_decls {
-        scope.insert(t.name.clone());
-    }
-    for g in &program.globals {
-        scope.insert(g.name.clone());
-    }
-    for p in &program.protocols {
-        scope.insert(p.name.clone());
-        for m in &p.methods {
-            scope.insert(m.name.clone());
-        }
-    }
-    for imp in &program.imports {
-        for n in &imp.names {
-            scope.insert(n.alias.clone().unwrap_or_else(|| n.original.clone()));
-        }
-    }
+fn answered_methods(program: &Program) -> HashSet<String> {
+    let protocols = program.protocols.iter();
+    let imports = program.imports.iter().flat_map(|i| &i.names);
     // Impl methods are absent: `impl Copy for T { fn copy(..) }` overrides `@copy`
     // for receivers of type `T` only. Counting it here would take the builtin from
     // every other receiver in the module.
-    let surfaces = || crate::prelude::builtins().iter().filter_map(|b| b.method);
-    if !surfaces().any(|surface| scope.contains(surface)) {
-        return;
-    }
-    let mut give_back = |e: &mut Expr| {
-        if let Expr::Call { name, .. } = e {
-            if let Some(surface) = crate::prelude::builtin(name)
-                .and_then(|b| b.method)
-                .filter(|surface| scope.contains(*surface))
-            {
-                *name = surface.to_string();
-            }
-        }
-    };
-    crate::project::walk_program(program, &mut give_back);
+    (program.functions.iter().map(|f| &f.name))
+        .chain(program.type_decls.iter().map(|t| &t.name))
+        .chain(program.globals.iter().map(|g| &g.name))
+        .chain(protocols.flat_map(|p| p.methods.iter().map(|m| &m.name).chain([&p.name])))
+        .chain(imports.map(|n| n.alias.as_ref().unwrap_or(&n.original)))
+        .filter(|n| crate::prelude::method_builtin(n).is_some())
+        .cloned()
+        .collect()
 }
 
-/// Parses the grammar alone: no prelude, no method-form unshadowing, no `impl`
-/// flattening. [`crate::prelude::type_decls`] parses `prelude.vyrn` through
+/// Parses the grammar alone: no prelude, no module-declared method names, no
+/// `impl` flattening. [`crate::prelude::type_decls`] parses `prelude.vyrn` through
 /// this, because the prelude is what [`parse_accum`] adds.
 pub(crate) fn parse_bare(tokens: Vec<Token>) -> (Program, Vec<Diagnostic>) {
     Parser::over(tokens).program_accum()
@@ -118,10 +89,19 @@ pub fn parse(tokens: Vec<Token>) -> Result<Program, Diagnostic> {
 /// top-level starter. The `Program` holds the declarations that parsed; a caller
 /// should not run later checks when the error list is non-empty.
 pub fn parse_accum(tokens: Vec<Token>) -> (Program, Vec<Diagnostic>) {
-    let (mut program, errors) = parse_bare(tokens);
-    // Before the prelude, so only what the module declares or imports can claim a
-    // method-form builtin's name.
-    unshadow_method_builtins(&mut program);
+    // A declaration can follow its use, so the names are known only after one
+    // parse. A module that answers to a method-form name parses again, and each
+    // `recv.m(..)` and the statement desugar around it are decided once. The
+    // copy is kept because [`Parser::eat`] splits `>>` and `>=` in place.
+    let (mut program, mut errors) = Parser::over(tokens.clone()).program_accum();
+    let answers = answered_methods(&program);
+    if !answers.is_empty() {
+        (program, errors) = Parser {
+            answers,
+            ..Parser::over(tokens)
+        }
+        .program_accum();
+    }
     // The prelude: the declarations every program gets, stated in `prelude.vyrn`.
     program
         .type_decls
@@ -199,6 +179,8 @@ struct Parser {
     /// Bumped on the three unbounded recursive edges: [`Parser::unary`] (every
     /// expression recursion enters it once), [`Parser::type_`] and [`Parser::block`].
     depth: u32,
+    /// See [`answered_methods`]; empty on the first parse.
+    answers: HashSet<String>,
 }
 
 /// Returns how a binary operator is written, for a diagnostic that quotes one.
@@ -548,6 +530,7 @@ impl Parser {
             extra_stmts: Vec::new(),
             errors: Vec::new(),
             depth: 0,
+            answers: HashSet::new(),
         }
     }
 
@@ -558,6 +541,7 @@ impl Parser {
         Parser {
             type_params: self.type_params.clone(),
             type_aliases: self.type_aliases.clone(),
+            answers: self.answers.clone(),
             in_hole: true,
             ..Parser::over(tokens)
         }
@@ -3377,16 +3361,17 @@ impl Parser {
                     }
                     self.no_struct = saved;
                     self.eat(&Tok::RParen)?;
-                    // Method-form builtins ([`crate::prelude::Builtin::method`]) map to their internal names. This
-                    // is a default: with no types here, [`unshadow_method_builtins`] later gives
-                    // the name back to any declaration that answers to it.
+                    // A method-form builtin ([`crate::prelude::Builtin::method`]) maps to its
+                    // internal name unless the module answers to the spelling. Only a call
+                    // written `recv.m(..)` asks: a node the sugar makes (`a[i]` is `@at`, a hole
+                    // is `@str`) is the builtin in every module.
                     //
                     // `wrote` keeps the written name for the type-name arm below, so
                     // `F32x4.anyTrue(m)` reports what the program wrote, not `@anyTrue`.
                     let wrote = name.clone();
                     let name = match crate::prelude::method_builtin(&name) {
-                        Some(internal) => internal.to_string(),
-                        None => name,
+                        Some(internal) if !self.answers.contains(&name) => internal.to_string(),
+                        _ => name,
                     };
                     // `F32x4.splat(x)`, `F32x4.load(xs, i)`, `F32x4.min(a, b)`: the receiver is a
                     // type name, dropped here, so no later pass sees a bare `F32x4` variable.
@@ -4461,8 +4446,7 @@ test \"t\" {{ assert(c(1) == 1) }}"
 
     /// A method spelling decides from a name, before any type is known. That is
     /// safe only while the name means the builtin alone: it is in
-    /// `checker::RESERVED`, or the rewrite is given back when a declaration takes
-    /// it. `movecheck::every_view_and_sink_name_is_reserved` checks the same
+    /// `checker::RESERVED`, or a declaration of the name keeps the written call. `movecheck::every_view_and_sink_name_is_reserved` checks the same
     /// hazard for its list.
     #[test]
     fn every_method_builtin_is_reserved_or_shadowable() {

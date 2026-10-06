@@ -1,0 +1,17 @@
+// A projection named `at` answers to the free call `at(w, i)` and to the method
+// form `w.at(i)` as it does to `w[i]`.
+type Window = { data: Array<Int64>, start: Int64 }
+
+impl Index for Window {
+    fn at(read self, i: Int64) -> read Int64 {
+        return self.data[self.start + i]
+    }
+}
+
+fn main() -> Int64 {
+    let w = Window { data: [1, 2, 3, 4], start: 1 }
+    print(w[0])
+    print(at(w, 0))
+    print(w.at(1))
+    return 0
+}

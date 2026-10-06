@@ -229,12 +229,6 @@ pub const RESERVED: &[&str] = &[
     "Ok",
     "Err",
     "match",
-    // The sugar writes `@at` for `a[i]` and `@str` (surface `toString`) for
-    // interpolation. `parser::unshadow_method_builtins` gives a sugar node back
-    // to a declaration of its surface, so a user `fn at` or `fn toString` would
-    // take over every index and every hole. Do not remove them.
-    "at",
-    "toString",
     "parse",
     "logger",
     "bytes",

@@ -374,7 +374,7 @@ fn table() -> Vec<Builtin> {
         // the impl method it dispatches to keeps the name `at`.
         b(crate::project::AT)
             .sig(row(
-                "at",
+                "@at",
                 &[],
                 &[("self", Read, Unit), ("i", Read, Int)],
                 Unit,
@@ -1073,14 +1073,8 @@ pub enum Spec {
     Pulls,
 }
 
-/// Returns the seeded row for the name a call site carries. The row's own
-/// name `at` reaches it too, under the key [`crate::project::AT`].
+/// Returns the seeded row for the name a call site carries.
 pub fn signature(name: &str) -> Option<&'static Function> {
-    let name = if name == "at" {
-        crate::project::AT
-    } else {
-        name
-    };
     builtin(name)?.sig.as_ref()
 }
 
@@ -1235,7 +1229,7 @@ mod tests {
             .map(|f| f.name.as_str())
             .filter(|n| lends(n))
             .collect();
-        assert_eq!(views, vec!["at", "atSet"]);
+        assert_eq!(views, vec!["@at", "atSet"]);
         assert!(
             lends(crate::project::AT),
             "the call site's name reaches `at`"
@@ -1257,7 +1251,7 @@ mod tests {
         assert_eq!(of("@push"), "Array<T>");
         assert_eq!(of("bytes"), "Array<UInt8>");
         // A lending row and a bare type-parameter result do not answer.
-        for held in ["at", "atSet", "blackBox", "@swapRemove"] {
+        for held in ["@at", "atSet", "blackBox", "@swapRemove"] {
             assert!(
                 !rets.iter().any(|(k, _)| *k == held),
                 "`{held}` declares an inert return type and may not answer for a call"
