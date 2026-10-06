@@ -82,7 +82,7 @@ fn lit_of(e: &Expr) -> Option<Lit> {
 
 /// Calls `f` on every row of `ss` and every row under it, in program order,
 /// each before the rows it holds.
-pub fn each_row_mut(ss: &mut [St], f: &mut dyn FnMut(&mut St)) {
+fn each_row_mut(ss: &mut [St], f: &mut dyn FnMut(&mut St)) {
     for s in ss {
         f(s);
         s.lists_mut().for_each(|l| each_row_mut(l, f));

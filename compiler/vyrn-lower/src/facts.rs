@@ -63,7 +63,7 @@ impl Lin {
         self.terms.is_empty()
     }
 
-    pub fn coef(&self, t: Term) -> i64 {
+    fn coef(&self, t: Term) -> i64 {
         self.terms
             .iter()
             .find(|(x, _)| *x == t)
@@ -171,7 +171,7 @@ impl Cert {
 }
 
 /// The largest length of any array or String (obligation O9).
-pub const LEN_MAX: i64 = vyrn_frontend::trap::LENGTH_LIMIT as i64 + 1;
+const LEN_MAX: i64 = vyrn_frontend::trap::LENGTH_LIMIT as i64 + 1;
 
 /// What is known at one point of a body.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
