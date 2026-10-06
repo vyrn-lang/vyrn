@@ -224,7 +224,7 @@ pub struct Builtin {
 }
 
 /// The refusal of an operand found at another type than its parameter's.
-pub type RefuseType = fn(&str, usize, &Type, &Type) -> Rule;
+type RefuseType = fn(&str, usize, &Type, &Type) -> Rule;
 
 /// The operand counts a row admits and the refusal of any other.
 pub struct Arity {

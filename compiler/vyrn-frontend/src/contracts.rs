@@ -59,7 +59,7 @@ pub struct Role {
 
 /// The stems a role excludes by default: `std/ui`'s chrome. See
 /// [`Role::except`].
-pub const DEFAULT_ROLE_EXCEPT: &[&str] = &["layout", "error"];
+const DEFAULT_ROLE_EXCEPT: &[&str] = &["layout", "error"];
 
 /// Splits `spec` as `module:Contract` (`"std/ui:Page"`). `None` without a
 /// `:`; the caller ignores a malformed entry, and the generator's own check

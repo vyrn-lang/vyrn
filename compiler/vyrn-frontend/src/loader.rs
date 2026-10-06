@@ -686,7 +686,7 @@ struct Work {
 pub const RT_PREFIX: &str = "json$";
 
 /// The module the `toJson` desugar links: `std/json`'s value tree and writer.
-pub const RT_JSON_SPEC: &str = "std/json";
+const RT_JSON_SPEC: &str = "std/json";
 
 /// The `std/json` generator that writes `toJson`'s encoders, under its reserved
 /// name. `toJson(x)` is `derive(jsonEncoders, x)`.

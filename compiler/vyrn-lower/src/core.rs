@@ -82,7 +82,7 @@ fn lit_of(e: &Expr) -> Option<Lit> {
 
 /// Calls `f` on every row of `ss` and every row under it, in program order,
 /// each before the rows it holds.
-pub fn each_row_mut(ss: &mut [St], f: &mut dyn FnMut(&mut St)) {
+fn each_row_mut(ss: &mut [St], f: &mut dyn FnMut(&mut St)) {
     for s in ss {
         f(s);
         s.lists_mut().for_each(|l| each_row_mut(l, f));
@@ -1216,6 +1216,8 @@ struct Frame {
     /// The names the body stores into whole ([`rebound`]).
     rebound: std::collections::HashSet<String>,
     scope: Vec<(String, Name)>,
+    /// The statement being built ([`NameInfo::stmt`]).
+    stmt: NodeId,
     /// The plan keys a release by the node that owns the value: a `Stmt::Let`,
     /// a parameter, or the construct that owns a temporary.
     by_binding: HashMap<NodeId, Name>,
@@ -1377,6 +1379,7 @@ impl<'a> Builder<'a> {
                 unbound_drops: Vec::new(),
                 refused,
                 mistyped,
+                ends: HashMap::new(),
             },
             frame: Frame::default(),
             temps: 0,
@@ -1399,6 +1402,7 @@ impl<'a> Builder<'a> {
             borrow: heap && !releases,
             borrow_kind: None,
             line,
+            stmt: self.frame.stmt,
             binding: None,
             receiver: None,
             producer: None,
@@ -1447,7 +1451,30 @@ impl<'a> Builder<'a> {
     fn borrow_name(&mut self, e: &'a Expr, ty: Type, line: usize) -> Name {
         let n = self.name("@borrow", ty, false, line);
         self.body.names[n.index()].path = self.reader_path(e);
+        self.spell_take(e, n);
         n
+    }
+
+    /// Records where `e`, taken as `n`, ends in the reader's text
+    /// ([`Body::ends`]): a name or a field, in the root module's own source.
+    fn spell_take(&mut self, e: &Expr, n: Name) {
+        let (end, root) = match e {
+            Expr::Var { name, id, .. } => (id.col() + name.chars().count(), id),
+            Expr::Field { field, id, .. } => (id.col() + field.chars().count(), id),
+            _ => return,
+        };
+        let spelled = root.col() > 0
+            && root.0.unit() < NodeId::EXPANDED
+            && self.body.file.is_none()
+            && self.frame.stmt != NodeId::NONE
+            && self.body.names[n.index()].heap;
+        if spelled {
+            let at = Some((e.line(), end));
+            let slot = self.body.ends.entry((self.frame.stmt, n)).or_insert(at);
+            if *slot != at {
+                *slot = None;
+            }
+        }
     }
 
     /// [`Builder::keyed`] for a `let` the reader wrote.
@@ -2570,7 +2597,9 @@ impl<'a> Builder<'a> {
 
     fn stmt(&mut self, s: &'a Stmt, out: &mut Vec<St>) -> Result<(), Gap> {
         let held = std::mem::take(&mut self.frame.held);
+        let outer = std::mem::replace(&mut self.frame.stmt, s.id());
         let r = self.stmt_rows(s, out);
+        self.frame.stmt = outer;
         self.frame.held = held;
         r?;
         match self.frame.owed.take() {
@@ -4768,7 +4797,10 @@ impl<'a> Builder<'a> {
         }
         match e {
             Expr::Var { name, line, id: _ } => match self.lookup(name) {
-                Some(n) => Ok(Val::Name(n)),
+                Some(n) => {
+                    self.spell_take(e, n);
+                    Ok(Val::Name(n))
+                }
                 // A nullary constructor (`None`, a fieldless variant) parses
                 // as a bare name. Like a literal, it owns and borrows nothing.
                 None if self.is_nullary(name) => {
@@ -4975,6 +5007,7 @@ impl<'a> Builder<'a> {
                 unbound_drops: Vec::new(),
                 refused: Vec::new(),
                 mistyped: Vec::new(),
+                ends: HashMap::new(),
             },
         );
         self.body.name = lambda_spelling(&outer.name, *line, *col);

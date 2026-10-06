@@ -50,6 +50,7 @@ use vyrn_frontend::core::{
     Walk,
 };
 use vyrn_frontend::diagnostics::Diagnostic;
+use vyrn_frontend::diagnostics::Fix;
 use vyrn_frontend::movecheck::Refusal;
 use vyrn_frontend::own::{Exit, Linear, StateCallees};
 use vyrn_frontend::rule;
@@ -135,9 +136,9 @@ struct State {
     holes: Vec<(Name, String)>,
     /// The path returned, broke, continued or trapped: it reaches no join.
     ended: bool,
-    /// What consumed each name, for a refusal's wording only: the line and
-    /// the taker.
-    taker: BTreeMap<Name, (usize, By, Taker)>,
+    /// What consumed each name, for a refusal's wording only: the line, the
+    /// taker, and the edit that copies the name there.
+    taker: BTreeMap<Name, (usize, By, Taker, Option<Fix>)>,
     /// Where each hole was taken: `(name, path, line)`. Append-only, wording
     /// only.
     taken_at: Vec<(Name, String, usize)>,
@@ -569,6 +570,8 @@ struct Kernel<'b> {
     /// The line of the statement being judged and its taker, recorded
     /// against every name it consumes.
     here: usize,
+    /// The statement being judged ([`NameInfo::stmt`]).
+    stmt: NodeId,
     by: By,
     /// Where each part of the record literal being judged goes
     /// ([`NameInfo::fields`]), and the part being judged: its
@@ -770,6 +773,7 @@ fn run(
         loops: Vec::new(),
         arms: Vec::new(),
         here: 0,
+        stmt: NodeId::NONE,
         by: By::Nothing,
         made: Vec::new(),
         part: std::cell::Cell::new(0),
@@ -882,7 +886,8 @@ impl<'b> Kernel<'b> {
             0 => self.takes.get(),
             _ => Taker::Stores,
         };
-        st.taker.insert(n, (self.here, by.clone(), takes));
+        st.taker
+            .insert(n, (self.here, by.clone(), takes, self.copy_at(n)));
         // The report's copy, one per binding across paths. A placed release
         // or scope end takes nothing, and a rebind clears the row, so the row
         // is the last take not followed by a rebind.
@@ -1304,7 +1309,12 @@ impl<'b> Kernel<'b> {
                     true => rule!(ModuleStatePassed, g, by),
                     false => rule!(ModuleStateConsumed, g, by),
                 };
-                return self.refuse(self.here, r);
+                let refusal = self.refuse(self.here, r);
+                return if ret {
+                    self.copying(n, refusal)
+                } else {
+                    refusal
+                };
             }
             // A projection of module state is module state; the only way out
             // is the copy.
@@ -1312,7 +1322,7 @@ impl<'b> Kernel<'b> {
                 true => rule!(ReturnedModuleState, s),
                 false => rule!(TakenModuleState, may_not = self.may_not(s), s),
             };
-            return self.refuse(self.here, r);
+            return self.copying(n, self.refuse(self.here, r));
         }
         // A loop variable is worded as the loop variable, not its element.
         if let Some(of) = &self.body.names[n.index()].loop_var {
@@ -1382,7 +1392,8 @@ impl<'b> Kernel<'b> {
         // [`Kernel::param_take`] says the same for a parameter.
         if ret && self.body.export {
             let more = vec![rule!(CopyForJs, s).render()];
-            return self.refuse_with(self.here, rule!(ReturnedToJs, s, what), more);
+            let r = self.refuse_with(self.here, rule!(ReturnedToJs, s, what), more);
+            return self.copying(n, r);
         }
         // The clause [`Kernel::param_take`] and the checker use for a
         // return: the exit is wrong, not the read.
@@ -1390,7 +1401,14 @@ impl<'b> Kernel<'b> {
             true => rule!(ReturnedBorrow, s, what),
             false => rule!(TakenBorrow, may_not = self.may_not(s), what),
         };
-        self.refuse_with(self.here, r, self.place_fixes(st, n))
+        let more = self.place_fixes(st, n);
+        let copy = !more.is_empty();
+        let refusal = self.refuse_with(self.here, r, more);
+        if copy {
+            self.copying(n, refusal)
+        } else {
+            refusal
+        }
     }
 
     /// The ways out of a take of a place read, in `movecheck::Borrow::fixes`'s
@@ -1499,6 +1517,28 @@ impl<'b> Kernel<'b> {
         }
     }
 
+    /// The edit that copies `n` where the current statement takes it, if the
+    /// reader's text places that take ([`Body::ends`]).
+    fn copy_at(&self, n: Name) -> Option<Fix> {
+        match self.body.ends.get(&(self.stmt, n)) {
+            Some(Some((line, col))) => Some(Fix::Copy {
+                line: *line,
+                col: *col,
+            }),
+            _ => None,
+        }
+    }
+
+    /// `r`, with the edit that copies `n` where it is taken.
+    fn copying(&self, n: Name, r: Refusal) -> Refusal {
+        Refusal {
+            diagnostic: r
+                .diagnostic
+                .with_fixes(self.copy_at(n).into_iter().collect()),
+            ..r
+        }
+    }
+
     /// A use at `path` after a consume, in the checker's wordings: "already
     /// consumed by" for a `consume` parameter, naming the path read; "was
     /// moved here", at the move, for any other taker, naming the storage that
@@ -1515,7 +1555,7 @@ impl<'b> Kernel<'b> {
             // menu; every other taker does, a builtin sink included. A linear
             // value is worded as `consume` even under a builtin (`close(s)`)
             // ([`NameInfo::linear`]).
-            Some((l, by, t))
+            Some((l, by, t, _))
                 if *t == Taker::Declared
                     || *by == By::Drop
                     || self.body.names[n.index()].linear.is_some() =>
@@ -1528,8 +1568,12 @@ impl<'b> Kernel<'b> {
                 };
                 self.refuse(here, r)
             }
-            Some((l, by, _)) if *by != By::Nothing => {
-                self.refuse(*l, rule!(Moved, s, by, here, what))
+            Some((l, by, _, fix)) if *by != By::Nothing => {
+                let r = self.refuse(*l, rule!(Moved, s, by, here, what));
+                Refusal {
+                    diagnostic: r.diagnostic.with_fixes(fix.iter().copied().collect()),
+                    ..r
+                }
             }
             _ => self.refuse(here, rule!(Released, s, what)),
         }
@@ -1808,7 +1852,13 @@ impl<'b> Kernel<'b> {
             _ if export => vec![rule!(CopyFromJs, s).render()],
             _ => b.fixes(s),
         };
-        self.refuse_with(self.here, r, more)
+        let refusal = self.refuse_with(self.here, r, more);
+        // Every menu above names the copy, except a capture's taken in place.
+        if ret || !capture {
+            self.copying(n, refusal)
+        } else {
+            refusal
+        }
     }
 
     /// The kind of borrow `n` is, where a take of it is refused by that kind
@@ -2193,18 +2243,22 @@ impl<'b> Kernel<'b> {
         match s {
             St::Let(n, rhs) => {
                 self.here = self.body.names[n.index()].line;
+                self.stmt = self.body.names[n.index()].stmt;
                 self.by = self.by_of(rhs, Some(*n));
                 self.takes.set(taker_of(rhs));
                 self.made = self.body.names[n.index()].fields.clone();
                 self.rebound(*n);
                 self.released.borrow_mut()[n.index()] = None;
             }
-            St::Store { place, line, .. } => {
+            St::Store {
+                place, line, site, ..
+            } => {
                 if let Place::Name(n) = place {
                     self.rebound(*n);
                     self.released.borrow_mut()[n.index()] = None;
                 }
                 self.here = *line;
+                self.stmt = site.node();
                 self.takes.set(Taker::Stores);
                 self.by = match place {
                     Place::Name(n) if !self.src(*n).starts_with('@') => {
@@ -2222,13 +2276,15 @@ impl<'b> Kernel<'b> {
                     },
                 };
             }
-            St::Return { line, .. } => {
+            St::Return { line, site, .. } => {
                 self.here = *line;
+                self.stmt = *site;
                 self.by = By::Return;
                 self.takes.set(Taker::Stores);
             }
-            St::Do { rhs, line, .. } => {
+            St::Do { rhs, line, site } => {
                 self.here = *line;
+                self.stmt = *site;
                 self.takes.set(taker_of(rhs));
                 self.by = self.by_of(rhs, None);
             }
@@ -2772,7 +2828,7 @@ impl<'b> Kernel<'b> {
         }
         if let Some(g) = took {
             return Err(match (g.taker.get(&n), point) {
-                (Some((l, by, _)), _) if *by != By::Nothing => {
+                (Some((l, by, ..)), _) if *by != By::Nothing => {
                     let r = match point {
                         Point::Join => rule!(JoinMoved, s, by),
                         Point::Back => rule!(LoopMoved, s, by),

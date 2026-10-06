@@ -306,9 +306,9 @@ pub fn show_dispatch(impls: &Impls, written: &Type, base: &Type) -> Option<Strin
 /// The protocol through which a user container is iterated by `for x in xs`:
 /// `fn size(read self) -> Int64` and the projection
 /// `fn nth(read self, i: Int64) -> read Item`.
-pub const ITERATE: &str = "Iterate";
+const ITERATE: &str = "Iterate";
 
-pub const ITERATE_SIZE: &str = "size";
+const ITERATE_SIZE: &str = "size";
 
 /// A projection, not a method: it is found in the impl's `places`.
 pub const ITERATE_NTH: &str = "nth";
@@ -398,7 +398,7 @@ fn value_cmp<T>(
 }
 
 /// The `multipleOf` a predicate implies: `value % K == 0` (in a conjunction).
-pub fn predicate_multiple_of(pred: &Expr) -> Option<i64> {
+fn predicate_multiple_of(pred: &Expr) -> Option<i64> {
     if let Expr::Binary { op, lhs, rhs, .. } = pred {
         match op {
             BinOp::And => return predicate_multiple_of(lhs).or_else(|| predicate_multiple_of(rhs)),
@@ -427,7 +427,7 @@ pub fn predicate_multiple_of(pred: &Expr) -> Option<i64> {
 
 /// The inclusive `(minLength, maxLength)` a predicate implies via
 /// `value.byteLength OP N` comparisons.
-pub fn predicate_length_bounds(pred: &Expr) -> (Option<i64>, Option<i64>) {
+fn predicate_length_bounds(pred: &Expr) -> (Option<i64>, Option<i64>) {
     if let Expr::Binary { op, lhs, rhs, .. } = pred {
         if *op == BinOp::And {
             let (l0, l1) = predicate_length_bounds(lhs);
@@ -468,7 +468,7 @@ pub fn predicate_equal_lengths(pred: &Expr) -> Vec<(String, String)> {
 }
 
 /// The first `value =~ "..."` pattern in a predicate conjunction, unanchored.
-pub fn predicate_pattern(pred: &Expr) -> Option<String> {
+fn predicate_pattern(pred: &Expr) -> Option<String> {
     if let Expr::Binary { op, lhs, rhs, .. } = pred {
         match op {
             BinOp::And => return predicate_pattern(lhs).or_else(|| predicate_pattern(rhs)),
@@ -1513,7 +1513,7 @@ pub fn is_sum_alias(base: &Type) -> bool {
 
 /// Whether a variant list is `Option` or `Result`. The names decide, not the
 /// arity: a declared two-variant sum goes through `Fallible` for `?`.
-pub fn is_builtin_sum(vs: &[EnumVariant]) -> bool {
+fn is_builtin_sum(vs: &[EnumVariant]) -> bool {
     matches!(
         vs,
         [zero, one]

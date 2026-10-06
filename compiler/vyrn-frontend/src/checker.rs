@@ -213,13 +213,6 @@ pub(crate) fn local_index(
     out
 }
 
-/// Returns the stored-function-value collection the `--workers`
-/// gate needs, from a check. Diagnostics are discarded: callers have already
-/// checked. A host holding the check's record reads [`Recorded::stored`].
-pub fn stored_fn_effects(program: &Program) -> StoredFnEffects {
-    check_accum_inner(program, false, 0, &[]).2
-}
-
 /// Names the compiler owns: builtin functions, builtin type names and the sum
 /// constructors. A top-level declaration may not take one. The loader reads it
 /// too, so a user `fn at` does not claim the builtin `at` in every `std/` module.
@@ -341,7 +334,7 @@ pub const MOVED_TO_STD: &[(&str, Gone)] = &[
 ];
 
 /// Returns where a name went, or `None` for one that was never a builtin.
-pub fn moved_to_std(name: &str) -> Option<&'static Gone> {
+fn moved_to_std(name: &str) -> Option<&'static Gone> {
     MOVED_TO_STD
         .iter()
         .find(|(n, _)| *n == name)
@@ -1523,7 +1516,7 @@ pub struct Recorded {
     /// A declared call whose arity, type-argument count or argument the typed
     /// judgment refuses, keyed by the [`Expr::Call`] node.
     pub calls: HashMap<NodeId, CallDecl>,
-    /// What a check that records nothing returns as [`stored_fn_effects`].
+    /// The stored-function-value collection the `--workers` gate reads.
     pub stored: StoredFnEffects,
     /// Each source body's name lookups, each key once per body, in the order
     /// read: a function, module state, a type declaration and an enum
@@ -7322,7 +7315,7 @@ mod tests {
              fn respond(x: Int64) -> Int64 { let m = make()  return m(x) }\n\
              fn handle(n: Int64) -> Int64 { return respond(n) }\n";
         let program = parse(lex(src).unwrap()).unwrap();
-        let stored = stored_fn_effects(&program);
+        let stored = record(&program).stored;
         let (chain, global) =
             module_state_use(&program, "handle", &stored).expect("stateful through storage");
         assert_eq!(global, "hits");
@@ -7351,11 +7344,11 @@ mod tests {
              fn handle(n: Int64) -> Int64 { let p = P { x: n }  return p.describe() }
 ";
         let program = parse(lex(src).unwrap()).unwrap();
-        let stored = stored_fn_effects(&program);
+        let stored = record(&program).stored;
         assert_eq!(module_state_use(&program, "handle", &stored), None);
         let reaches_q = src.replace("P { x: n }", "Q { y: n }");
         let program = parse(lex(&reaches_q).unwrap()).unwrap();
-        let stored = stored_fn_effects(&program);
+        let stored = record(&program).stored;
         let (chain, global) = module_state_use(&program, "handle", &stored).expect("stateful");
         assert_eq!(
             (chain, global.as_str()),
@@ -7374,7 +7367,7 @@ mod tests {
              fn respond(x: Int64) -> Int64 { let m = make()  return m(x) }\n\
              fn handle(n: Int64) -> Int64 { return respond(n) }\n";
         let program = parse(lex(src).unwrap()).unwrap();
-        let stored = stored_fn_effects(&program);
+        let stored = record(&program).stored;
         assert!(module_state_use(&program, "handle", &stored).is_none());
     }
 

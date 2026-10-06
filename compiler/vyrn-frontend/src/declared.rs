@@ -27,7 +27,7 @@ pub struct Owned {
 
 /// What a binding of a type needs from its release: whether it owns heap,
 /// the row that makes it linear, and its [`Owned::declared_releases`].
-pub type NameFacts = (bool, Option<crate::own::Linear>, Vec<String>);
+type NameFacts = (bool, Option<crate::own::Linear>, Vec<String>);
 
 /// [`Owned::name_facts`] of one program's tables by type, indexed by
 /// `params_own`. The caller owns it, so each thread that builds bodies keeps
@@ -447,18 +447,6 @@ pub fn holes_under(holes: &[String], name: &str) -> Vec<String> {
         .filter_map(|h| h.strip_prefix(name)?.strip_prefix('.'))
         .map(str::to_string)
         .collect()
-}
-
-/// Whether `e` allocates a fresh String no binding names (`@str`, `@concat`,
-/// `+`), so its consumer must release it. The caller must also check the type
-/// is `String`, because `+` also adds integers and joins `Code`. A call result
-/// is not covered here: [`crate::movecheck::ArgVerdict`] answers for it.
-pub fn str_temporary(e: &Expr) -> bool {
-    match e {
-        Expr::Call { name, .. } => name == "@str" || name == "@concat",
-        Expr::Binary { op: BinOp::Add, .. } => true,
-        _ => false,
-    }
 }
 
 /// Whose capability row answers a call: the callee as the core resolved it,

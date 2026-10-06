@@ -656,7 +656,7 @@ fn generated(graph: &loader::ModuleGraph) -> Vec<(&str, &str)> {
         .collect()
 }
 
-use vyrn_frontend::diagnostics::Diagnostic;
+use vyrn_frontend::diagnostics::{Diagnostic, Fix};
 use vyrn_frontend::loader;
 
 use vyrn_frontend::manifest::{
@@ -2574,13 +2574,13 @@ fn existing_md_files(dir: &str) -> Vec<String> {
         .collect()
 }
 
-/// `vyrn fix [file]`: applies the `.copy()` a move diagnostic names and
-/// refuses every other fix on the menu, because `consume` and
-/// `for x in consume xs` are decisions, not edits.
+/// `vyrn fix [file]`: applies the `.copy()` a diagnostic carries as a
+/// [`Fix`] and reports every other diagnostic in the file, because `consume`
+/// and `for x in consume xs` are decisions, not edits.
 ///
 /// It edits only the file given; a diagnostic in an import is reported. A round
-/// applies at most one edit per line and is kept only if the diagnostic count
-/// falls, so the file never compiles worse than it did.
+/// is kept only if the diagnostic count falls, so the file never compiles worse
+/// than it did.
 fn fix_cmd(call: &Call) -> Outcome {
     let (p, path) = call.root()?;
     let source = read_source(&path)?;
@@ -2589,77 +2589,55 @@ fn fix_cmd(call: &Call) -> Outcome {
     let mut rounds = 0usize;
     let mut applied: Vec<String> = Vec::new();
     let mut refused: Vec<String> = Vec::new();
+    let note = |refused: &mut Vec<String>, n: String| {
+        if !refused.contains(&n) {
+            refused.push(n);
+        }
+    };
 
     loop {
         let diags = fix_diagnostics(&p, &root_key, &text);
-        let mine: Vec<&vyrn_frontend::diagnostics::Diagnostic> = diags
-            .iter()
-            .filter(|d| d.stage == "movecheck" && d.file.is_none())
-            .collect();
-        // One edit per line: two fixes on one line are two searches over text
-        // that the first edit already moved.
-        let mut edits: Vec<(usize, String)> = Vec::new();
-        let mut seen_lines: Vec<usize> = Vec::new();
-        for d in &mine {
-            if seen_lines.contains(&d.line) {
-                continue;
-            }
-            match copy_path(&d.message) {
-                Some(p) => {
-                    seen_lines.push(d.line);
-                    edits.push((d.line, p));
-                }
-                None => {
-                    let first = d.message.lines().next().unwrap_or_default();
-                    let note = format!("{}:{}: {first}", root_key, d.line);
-                    if !refused.contains(&note) {
-                        refused.push(note);
-                    }
+        let mut edits: Vec<(usize, usize)> = Vec::new();
+        let mut elsewhere: Vec<String> = Vec::new();
+        for d in &diags {
+            let first = d.message.lines().next().unwrap_or_default();
+            match (&d.file, d.fixes.as_slice()) {
+                (Some(f), _) => elsewhere.push(format!("{f}:{}: {first} (another file)", d.line)),
+                (None, []) => note(&mut refused, format!("{root_key}:{}: {first}", d.line)),
+                (None, fixes) => {
+                    edits.extend(fixes.iter().map(|Fix::Copy { line, col }| (*line, *col)))
                 }
             }
         }
         if edits.is_empty() {
-            for d in &diags {
-                if d.file.is_some() {
-                    let first = d.message.lines().next().unwrap_or_default();
-                    let where_ = d.file.as_deref().unwrap_or(&root_key);
-                    let note = format!("{where_}:{}: {first} (another file)", d.line);
-                    if !refused.contains(&note) {
-                        refused.push(note);
-                    }
-                }
+            for n in elsewhere {
+                note(&mut refused, n);
             }
             break;
         }
-        let mut next = text.clone();
-        let mut this_round: Vec<String> = Vec::new();
-        for (line, p) in &edits {
-            match insert_copy(&next, *line, p) {
-                Ok(t) => {
-                    next = t;
-                    this_round.push(format!("{root_key}:{line}: `{p}` -> `{p}.copy()`"));
-                }
-                Err(why) => {
-                    let note = format!("{root_key}:{line}: {why}");
-                    if !refused.contains(&note) {
-                        refused.push(note);
-                    }
-                }
+        edits.sort_unstable();
+        edits.dedup();
+        let next = match insert_copies(&text, &edits) {
+            Ok(t) => t,
+            Err(why) => {
+                note(&mut refused, format!("{root_key}: {why}"));
+                break;
             }
-        }
-        if this_round.is_empty() {
-            break;
-        }
+        };
         // A round that does not reduce the count is discarded whole.
         if fix_diagnostics(&p, &root_key, &next).len() >= diags.len() {
             refused.push(format!(
                 "{root_key}: {} edit(s) rolled back — they did not reduce the diagnostics",
-                this_round.len()
+                edits.len()
             ));
             break;
         }
         text = next;
-        applied.extend(this_round);
+        applied.extend(
+            edits
+                .iter()
+                .map(|(line, col)| format!("{root_key}:{line}:{col}: `.copy()` inserted")),
+        );
         rounds += 1;
         // Every round reduces the count; the bound stops a file with hundreds
         // of sites, which can run again.
@@ -2695,78 +2673,29 @@ fn fix_diagnostics(p: &Project, root_key: &str, text: &str) -> Vec<Diagnostic> {
     }
 }
 
-/// The path a `.copy()` fix names, out of a diagnostic's menu.
-///
-/// A menu line is ``  fix: `PATH.copy()` <why>``, the text
-/// `vyrn_frontend::diagnostics::menu` writes.
-fn copy_path(message: &str) -> Option<String> {
-    use vyrn_frontend::diagnostics::FIX;
-    for line in message.lines() {
-        let fix = line.trim_start().strip_prefix(FIX);
-        let Some(rest) = fix.and_then(|f| f.strip_prefix('`')) else {
-            continue;
-        };
-        let Some((quoted, _)) = rest.split_once('`') else {
-            continue;
-        };
-        if let Some(p) = quoted.strip_suffix(".copy()") {
-            if !p.is_empty() {
-                return Some(p.to_string());
-            }
-        }
+/// Puts `.copy()` at each 1-based `(line, col)` of `at`, sorted ascending and
+/// distinct, a column counting characters. The insertions run from the end, so
+/// none moves another's position.
+fn insert_copies(text: &str, at: &[(usize, usize)]) -> Result<String, String> {
+    let starts: Vec<usize> = std::iter::once(0)
+        .chain(text.match_indices('\n').map(|(i, _)| i + 1))
+        .collect();
+    let mut out = text.to_string();
+    for &(line, col) in at.iter().rev() {
+        let start = *starts
+            .get(line.wrapping_sub(1))
+            .ok_or_else(|| format!("no line {line}"))?;
+        let end = starts.get(line).map_or(text.len(), |e| e - 1);
+        let l = &text[start..end];
+        let off = l
+            .char_indices()
+            .map(|(i, _)| i)
+            .chain([l.len()])
+            .nth(col.wrapping_sub(1))
+            .ok_or_else(|| format!("line {line} has no column {col}"))?;
+        out.insert_str(start + off, ".copy()");
     }
-    None
-}
-
-/// Puts `.copy()` after the single occurrence of `path` on 1-based `line`.
-///
-/// The occurrence must be whole (not the tail of a longer name, not a receiver
-/// or callee) and unique on the line; otherwise it refuses rather than guesses.
-fn insert_copy(text: &str, line: usize, path: &str) -> Result<String, String> {
-    let is_word = |c: char| c.is_alphanumeric() || c == '_';
-    let lines: Vec<&str> = text.split_inclusive('\n').collect();
-    let l = lines
-        .get(line.saturating_sub(1))
-        .ok_or_else(|| format!("no line {line}"))?;
-    let mut hits: Vec<usize> = Vec::new();
-    let mut from = 0usize;
-    while let Some(i) = l[from..].find(path) {
-        let at = from + i;
-        let end = at + path.len();
-        let before_ok = at == 0
-            || !l[..at]
-                .chars()
-                .next_back()
-                .is_some_and(|c| is_word(c) || c == '.');
-        let after_ok = !l[end..]
-            .chars()
-            .next()
-            .is_some_and(|c| is_word(c) || c == '.' || c == '(');
-        if before_ok && after_ok {
-            hits.push(at);
-        }
-        from = at + path.len();
-    }
-    match hits.len() {
-        1 => {
-            let at = hits[0] + path.len();
-            let mut out = String::with_capacity(text.len() + 7);
-            for (i, src) in lines.iter().enumerate() {
-                if i + 1 == line {
-                    out.push_str(&src[..at]);
-                    out.push_str(".copy()");
-                    out.push_str(&src[at..]);
-                } else {
-                    out.push_str(src);
-                }
-            }
-            Ok(out)
-        }
-        0 => Err(format!("`{path}` is not on the line as written")),
-        n => Err(format!(
-            "`{path}` appears {n} times on the line — which one is not said"
-        )),
-    }
+    Ok(out)
 }
 
 /// A function this driver synthesizes: no parameters, no type parameters, no
@@ -3694,7 +3623,7 @@ pub struct ServeRequest {
 }
 
 /// The fields a served `handle`'s `Response` returned, for the wire.
-pub struct ServeResponse {
+struct ServeResponse {
     pub status: i64,
     pub content_type: String,
     pub body: String,
@@ -3706,7 +3635,7 @@ pub struct ServeResponse {
 
 /// What the host asks the engine for. A stream is pulled after the call that
 /// opened it returned.
-pub enum ServeCall {
+enum ServeCall {
     Handle(ServeRequest),
     /// The next frame of the stream the last [`ServeAnswer::Live`] opened.
     Next,
@@ -3716,7 +3645,7 @@ pub enum ServeCall {
 }
 
 /// What the engine answers.
-pub enum ServeAnswer {
+enum ServeAnswer {
     /// A complete response, with the `Vary` and conditional-request handling
     /// only a complete response has.
     Buffered(ServeResponse),
@@ -5661,19 +5590,20 @@ another bench   # trailing reason
         }
     }
 
-    /// A search window advanced one byte per miss would reslice inside the
-    /// identifier's two-byte first character and panic.
     #[test]
-    fn insert_copy_survives_an_identifier_starting_with_a_multibyte_char() {
-        let text = "let δata = read()\nprint(δata)\n";
-        let fixed = insert_copy(text, 2, "δata").unwrap();
-        assert_eq!(fixed, "let δata = read()\nprint(δata.copy())\n");
+    fn insert_copies_counts_columns_in_characters_and_runs_from_the_end() {
+        let text = "let δata = read()\nprint(δata) print(δata)\n";
+        let fixed = insert_copies(text, &[(2, 11), (2, 23)]).unwrap();
+        assert_eq!(
+            fixed,
+            "let δata = read()\nprint(δata.copy()) print(δata.copy())\n"
+        );
     }
 
     #[test]
-    fn insert_copy_still_counts_whole_occurrences_only() {
-        let e = insert_copy("let a = f(a)\n", 1, "a").unwrap_err();
-        assert!(e.contains("2 times"), "{e}");
+    fn insert_copies_refuses_a_position_past_the_line() {
+        assert!(insert_copies("a\n", &[(1, 3)]).is_err());
+        assert!(insert_copies("a\n", &[(3, 1)]).is_err());
     }
 
     #[test]

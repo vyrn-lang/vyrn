@@ -225,7 +225,7 @@ pub fn simde_from(start: &Path) -> Option<(PathBuf, &'static str)> {
 /// The WASI host the wasm2c route links: the imports [`crate::WASI_IMPORTS`] lists, each
 /// doing what the embedded engine does in `vyrn-genwasm/src/wasi.rs`. The driver defines
 /// `VYRN_W2C_HEADER` to the header wasm2c wrote.
-pub const WASI_HOST_C: &str = include_str!("wasi_host.c");
+const WASI_HOST_C: &str = include_str!("wasi_host.c");
 
 /// The marker [`wasi_host_c`] fills with the `vyrn` namespace's stubs.
 const EXTERN_STUBS_MARKER: &str = "/*@VYRN_EXTERN_STUBS@*/";

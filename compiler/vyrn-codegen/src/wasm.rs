@@ -27,7 +27,7 @@ use wasm_encoder::{
 pub const STACK_BYTES: u32 =
     vyrn_frontend::trap::FRAME_LIMIT * vyrn_frontend::trap::CALL_DEPTH_LIMIT + 65_536;
 /// Top of the generated module's shadow stack; it grows down from here to 0.
-pub const STACK_TOP: u32 = STACK_BYTES;
+const STACK_TOP: u32 = STACK_BYTES;
 /// First byte of the generated module's data segments; statics grow up from
 /// here.
 pub const DATA_BASE: u32 = STACK_BYTES;
@@ -40,7 +40,7 @@ pub const STATICS_LIMIT: u32 = 16 * 1024 * 1024;
 /// buffer. The map is in `std/runtime.vyrn` above `drain`. The declared memory
 /// must cover it, or the first host call that uses the scratch writes past the
 /// end of memory.
-pub const HEAP_HEADER_BYTES: u32 = 8_768;
+const HEAP_HEADER_BYTES: u32 = 8_768;
 
 /// clang's frame alignment on wasm32.
 const FRAME_ALIGN: u32 = 16;
@@ -201,7 +201,7 @@ impl Module {
 
     /// Returns the first address past everything this module statically
     /// occupies.
-    pub fn data_end(&self) -> u32 {
+    fn data_end(&self) -> u32 {
         DATA_BASE + self.pool.len() as u32
     }
 
@@ -276,12 +276,12 @@ impl Module {
 
     /// Returns the number of imports, the index the first defined function
     /// gets.
-    pub fn n_imports(&self) -> u32 {
+    fn n_imports(&self) -> u32 {
         self.imports.len() as u32
     }
 
     /// Returns the index the next defined function gets.
-    pub fn next_func(&self) -> u32 {
+    fn next_func(&self) -> u32 {
         self.n_imports() + self.bodies.len() as u32
     }
 

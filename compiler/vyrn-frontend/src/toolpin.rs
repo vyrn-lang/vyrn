@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 
 /// The platforms a native tool artifact is published for, in `install.sh`'s
 /// vocabulary.
-pub const PLATFORMS: [&str; 4] = [
+const PLATFORMS: [&str; 4] = [
     "x86_64-linux",
     "aarch64-linux",
     "aarch64-macos",
@@ -57,7 +57,7 @@ pub fn tool_platforms(name: &str) -> &'static [&'static str] {
 
 /// Returns the environment variable that overrides a tool, so a refusal can
 /// name it. Empty for a tool no compiler code resolves; see [`escape_hatch`].
-pub fn tool_env_var(name: &str) -> &'static str {
+fn tool_env_var(name: &str) -> &'static str {
     match name {
         "wasmtime" => "VYRN_WASMTIME",
         "wabt" => "VYRN_WASM2C",
@@ -70,7 +70,7 @@ pub fn tool_env_var(name: &str) -> &'static str {
 /// tool without one. `cargo-nextest` is CI's test runner, put on PATH by the
 /// workflow; nothing here looks for it, so the refusal invents no variable
 /// that no reader honours.
-pub fn escape_hatch(name: &str) -> String {
+fn escape_hatch(name: &str) -> String {
     match tool_env_var(name) {
         "" => String::new(),
         v => format!(", or point ${v} at a binary you trust"),
@@ -180,7 +180,7 @@ fn verified(dir: &Path, sha: &str) -> bool {
 ///
 /// It runs `tar`, which every supported host ships (Windows 10 and later,
 /// Linux, macOS); `tar -xf` detects `.tar.gz`, `.tar.xz` and `.zip`.
-pub fn unpack_tool(sha: &str, bytes: &[u8]) -> Result<PathBuf, String> {
+fn unpack_tool(sha: &str, bytes: &[u8]) -> Result<PathBuf, String> {
     if !is_sha256(sha) {
         return Err(format!(
             "`{sha}` is not a sha256 digest — the tools directory is keyed by content hash"

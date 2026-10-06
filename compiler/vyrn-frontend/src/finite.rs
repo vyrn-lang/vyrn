@@ -30,7 +30,7 @@ use crate::types::Decls;
 /// Returns the DFA of a validated `String` type whose predicate is a pure
 /// conjunction of `value =~ "lit"` clauses: the intersection of the clause
 /// languages. `None` for any other type or predicate.
-pub fn regex_dfa_of_type(decl: &TypeDecl) -> Option<Dfa> {
+fn regex_dfa_of_type(decl: &TypeDecl) -> Option<Dfa> {
     let pats = patterns_of(decl)?;
     let mut dfa = regex::compile(&pats[0]).ok()?;
     for p in &pats[1..] {
@@ -87,7 +87,7 @@ fn collect_match_clauses(pred: &Expr, out: &mut Vec<String>) -> Option<()> {
 }
 
 /// Returns the declaration of `ty` when it is a named validated type.
-pub fn string_type_decl<'a>(ty: &Type, types: &'a dyn Decls) -> Option<&'a TypeDecl> {
+fn string_type_decl<'a>(ty: &Type, types: &'a dyn Decls) -> Option<&'a TypeDecl> {
     match ty {
         Type::Named(n) => types.decl(n).filter(|d| d.predicate.is_some()),
         _ => None,
@@ -96,7 +96,7 @@ pub fn string_type_decl<'a>(ty: &Type, types: &'a dyn Decls) -> Option<&'a TypeD
 
 /// One piece of a flattened interpolation: a literal part, or the expression of
 /// an `@str(e)` hole.
-pub enum Piece<'a> {
+enum Piece<'a> {
     Lit(String),
     Hole(&'a Expr),
 }
@@ -105,7 +105,7 @@ pub enum Piece<'a> {
 /// `Expr::Str` leaves, from `parser::template`) left to right into literal
 /// parts and holes. `None` when `expr` is not such a chain. A result with no
 /// hole is a plain literal, which ordinary coercion handles.
-pub fn flatten_template(expr: &Expr) -> Option<Vec<Piece<'_>>> {
+fn flatten_template(expr: &Expr) -> Option<Vec<Piece<'_>>> {
     fn walk<'a>(e: &'a Expr, out: &mut Vec<Piece<'a>>) -> Option<()> {
         match e {
             Expr::Str(s, _) => {
@@ -130,7 +130,7 @@ pub fn flatten_template(expr: &Expr) -> Option<Vec<Piece<'_>>> {
 }
 
 /// Returns whether `pieces` hold a hole, so the chain is an interpolation.
-pub fn has_hole(pieces: &[Piece]) -> bool {
+fn has_hole(pieces: &[Piece]) -> bool {
     pieces.iter().any(|p| matches!(p, Piece::Hole(_)))
 }
 
@@ -138,7 +138,7 @@ pub fn has_hole(pieces: &[Piece]) -> bool {
 /// a hole is neither a constant string nor a finite string type, and the
 /// runtime validation stands. `resolve` gives a hole's type: the checker's
 /// inferer, or a backend's scope types.
-pub fn template_language(
+fn template_language(
     pieces: &[Piece],
     types: &dyn Decls,
     resolve: &dyn Fn(&Expr) -> Option<Type>,

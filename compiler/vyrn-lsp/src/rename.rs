@@ -120,7 +120,7 @@ pub fn prepare(target: &Target, source: &str) -> PrepareRenameResponse {
 
 /// Whether `name` is a bare ASCII identifier, the only thing a rename may write:
 /// every edit replaces a token span as text.
-pub fn valid_identifier(name: &str) -> bool {
+fn valid_identifier(name: &str) -> bool {
     let mut chars = name.chars();
     match chars.next() {
         Some(c) if c.is_ascii_alphabetic() || c == '_' => {}
@@ -145,7 +145,7 @@ fn cap_first(s: &str) -> String {
 /// `rpcHandlePastesCreate`, `PathCreate`); the prefix is kept.
 ///
 /// `None` for any other shape, which refuses the rename.
-pub fn derive_generated(generated: &str, old: &str, new: &str) -> Option<String> {
+fn derive_generated(generated: &str, old: &str, new: &str) -> Option<String> {
     if generated == old {
         return Some(new.to_string());
     }

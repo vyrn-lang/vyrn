@@ -37,7 +37,7 @@ use vyrn_frontend::types::{
 
 /// The version line `vyrn emit-lowered` prints above the named core. It
 /// promises no stability.
-pub const VERSION: &str = "v2";
+const VERSION: &str = "v2";
 
 /// What the checker decided about the expressions of one body, under the
 /// substitution the body is lowered for. The core builder reads these and

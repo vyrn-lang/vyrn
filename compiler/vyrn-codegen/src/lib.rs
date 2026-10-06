@@ -52,55 +52,25 @@ pub(crate) fn extern_abi(ty: &Type) -> Option<wasm::ValType> {
     }
 }
 
-/// Records the types the emitter derives for expressions, the instances it
-/// emits and the coercion rungs it takes, so a gate can compare them with the
-/// checker's and `vyrn-lower`'s. Every hook records a decision already made.
-/// Off (the default) it costs one thread-local read per expression; on, it grows
-/// one row per typed expression per instantiation, so only gates turn it on.
+/// Records the instances the emitter emits, the coercion rungs it takes and the
+/// type it derives for each core right-hand side, so a gate can compare them with
+/// the checker's and `vyrn-lower`'s. Every hook records a decision already made.
+/// Off (the default) it costs one thread-local read per hook; on, it grows one row
+/// per decision, so only gates turn it on.
 pub mod observe {
     use vyrn_frontend::ast::Type;
 
-    /// Which engine, and which of its derivations, produced a row.
-    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-    pub enum Site {
-        /// The wasm emitter: the instances it emits and the rungs it takes.
-        Wasm,
-        /// `Fn_::peek`, the wasm emitter's second expression typer.
-        Peek,
-    }
-
-    /// One backend answer: this node, under this instantiation, has this type.
-    #[derive(Debug, Clone)]
-    pub struct Row {
-        pub site: Site,
-        pub kind: &'static str,
-        /// The cloned tree the answer was given inside, or `""` for a node the
-        /// program holds. `"lambda"`: `Fn_::lift_lambda` copies a lambda's body,
-        /// so its nodes, and projection expansions built while walking it, are
-        /// off-program. `"pred"`: a `where` predicate is cloned out of
-        /// `types::decl_map` and again at each validation site.
-        pub ctx: &'static str,
-        pub node: vyrn_frontend::ast::NodeId,
-        /// The instantiation the emitter was inside, sorted by parameter name.
-        pub subst: Vec<(String, Type)>,
-        pub ty: Type,
-    }
-
     /// One body the emitter emitted: a function and its type arguments, for the
     /// gate that compares them with `vyrn-lower`'s instances. A lifted lambda is
-    /// not recorded: it has no name, and its identity is the address of a cloned
-    /// node the lowering cannot key against.
+    /// not recorded: it has no name the lowering can key against.
     #[derive(Debug, Clone)]
     pub struct Inst {
-        pub site: Site,
         pub name: String,
         pub args: Vec<Type>,
     }
 
     thread_local! {
         static ON: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-        static CTX: std::cell::Cell<&'static str> = const { std::cell::Cell::new("") };
-        static ROWS: std::cell::RefCell<Vec<Row>> = const { std::cell::RefCell::new(Vec::new()) };
         static INSTS: std::cell::RefCell<Vec<Inst>> = const { std::cell::RefCell::new(Vec::new()) };
         static CROSSINGS: std::cell::RefCell<Vec<Crossing>> =
             const { std::cell::RefCell::new(Vec::new()) };
@@ -110,21 +80,18 @@ pub mod observe {
 
     /// Start recording on this thread, discarding anything already collected.
     pub fn start() {
-        ROWS.with(|r| r.borrow_mut().clear());
         INSTS.with(|r| r.borrow_mut().clear());
         CROSSINGS.with(|r| r.borrow_mut().clear());
         TYPINGS.with(|r| r.borrow_mut().clear());
         ON.with(|o| o.set(true));
     }
 
-    /// Stop recording and take what was collected.
-    pub fn take() -> Vec<Row> {
+    /// Stop recording. The `take_*` functions then hand over what was collected.
+    pub fn stop() {
         ON.with(|o| o.set(false));
-        ROWS.with(|r| std::mem::take(&mut *r.borrow_mut()))
     }
 
-    /// The instantiations recorded since [`start`]. Read after [`take`], which is
-    /// what stops the recording.
+    /// The instantiations recorded since [`start`]. Read after [`stop`].
     pub fn take_insts() -> Vec<Inst> {
         INSTS.with(|r| std::mem::take(&mut *r.borrow_mut()))
     }
@@ -133,7 +100,6 @@ pub mod observe {
     /// identity, and the rung it took.
     #[derive(Debug, Clone)]
     pub struct Crossing {
-        pub site: Site,
         pub from: Type,
         pub to: Type,
         pub rung: crate::Rung,
@@ -142,13 +108,12 @@ pub mod observe {
     /// Records the rung an engine took. Every `return` path of a `coerce` calls
     /// this once, so the corpus gate's floor sees a rung that stops being
     /// reachable.
-    pub(crate) fn note_rung(site: Site, from: &Type, to: &Type, rung: crate::Rung) {
+    pub(crate) fn note_rung(from: &Type, to: &Type, rung: crate::Rung) {
         if !on() {
             return;
         }
         CROSSINGS.with(|r| {
             r.borrow_mut().push(Crossing {
-                site,
                 from: from.clone(),
                 to: to.clone(),
                 rung,
@@ -156,8 +121,7 @@ pub mod observe {
         });
     }
 
-    /// The crossings recorded since [`start`]. Read after [`take`], like
-    /// [`take_insts`].
+    /// The crossings recorded since [`start`]. Read after [`stop`].
     pub fn take_crossings() -> Vec<Crossing> {
         CROSSINGS.with(|r| std::mem::take(&mut *r.borrow_mut()))
     }
@@ -188,19 +152,17 @@ pub mod observe {
         });
     }
 
-    /// The typings recorded since [`start`]. Read after [`take`], like
-    /// [`take_insts`].
+    /// The typings recorded since [`start`]. Read after [`stop`].
     pub fn take_typings() -> Vec<Typing> {
         TYPINGS.with(|r| std::mem::take(&mut *r.borrow_mut()))
     }
 
-    pub(crate) fn note_inst(site: Site, name: &str, args: &[Type]) {
+    pub(crate) fn note_inst(name: &str, args: &[Type]) {
         if !on() {
             return;
         }
         INSTS.with(|r| {
             r.borrow_mut().push(Inst {
-                site,
                 name: name.to_string(),
                 args: args.to_vec(),
             })
@@ -209,86 +171,6 @@ pub mod observe {
 
     pub(crate) fn on() -> bool {
         ON.with(|o| o.get())
-    }
-
-    /// Mark the rows recorded from here on as being inside a cloned tree, and
-    /// give back what the mark was so the caller can put it back.
-    pub(crate) fn set_ctx(v: &'static str) -> &'static str {
-        CTX.with(|f| f.replace(v))
-    }
-
-    /// The expression kind a row is reported under; a variable's kind carries
-    /// its name. Names are interned because [`Row`] holds a `&'static str`; the
-    /// pool is bounded by the distinct variable names in one corpus, and only a
-    /// recording gate calls this.
-    pub fn kind_of(e: &vyrn_frontend::ast::Expr) -> &'static str {
-        use vyrn_frontend::ast::Expr as E;
-        match e {
-            E::Int(_, _) => "int",
-            E::Byte(_, _) => "byte",
-            E::Float(_, _) => "float",
-            E::Bool(_, _) => "bool",
-            E::Str(_, _) => "str",
-            E::Var { name, .. } => intern(format!("var[{name}]")),
-            E::Unary { .. } => "unary",
-            E::Binary { .. } => "binary",
-            E::Call { name, .. } => {
-                if name.starts_with('@') {
-                    "call@"
-                } else {
-                    "call"
-                }
-            }
-            E::Match { .. } => "match",
-            E::IfExpr { .. } => "ifexpr",
-            E::Try { .. } => "try",
-            E::StructLit { .. } => "record",
-            E::Field { .. } => "field",
-            E::TryConstruct { .. } => "tryconstruct",
-            E::ArrayLit { .. } => "array",
-            E::MapLit { .. } => "map",
-            E::Lambda { .. } => "lambda",
-            E::Consume { .. } => "consume",
-        }
-    }
-
-    /// One leaked `&'static str` per distinct string.
-    fn intern(s: String) -> &'static str {
-        use std::collections::HashSet;
-        use std::sync::{Mutex, OnceLock};
-        static POOL: OnceLock<Mutex<HashSet<&'static str>>> = OnceLock::new();
-        let mut pool = POOL
-            .get_or_init(|| Mutex::new(HashSet::new()))
-            .lock()
-            .unwrap();
-        if let Some(hit) = pool.get(s.as_str()) {
-            return hit;
-        }
-        let leaked: &'static str = Box::leak(s.into_boxed_str());
-        pool.insert(leaked);
-        leaked
-    }
-
-    pub(crate) fn record(
-        site: Site,
-        kind: &'static str,
-        node: vyrn_frontend::ast::NodeId,
-        subst: &std::collections::HashMap<String, Type>,
-        ty: &Type,
-    ) {
-        let mut subst: Vec<(String, Type)> =
-            subst.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-        subst.sort_by(|a, b| a.0.cmp(&b.0));
-        ROWS.with(|r| {
-            r.borrow_mut().push(Row {
-                site,
-                kind,
-                ctx: CTX.with(|f| f.get()),
-                node,
-                subst,
-                ty: ty.clone(),
-            })
-        });
     }
 }
 
@@ -563,40 +445,6 @@ pub(crate) fn utf8d_table() -> Vec<u8> {
     t
 }
 
-/// The type arguments of a generic call, with any parameter the arguments leave
-/// open taken from the type the call site expects. `fn newSlots<T>() -> Slots<T>`
-/// has no argument to read `T` from; the checker answers from the expected type,
-/// so this must too, or the two disagree about which instance the program calls.
-pub(crate) fn solve_with_expected(
-    type_params: &[String],
-    params: &[Type],
-    arg_tys: &[Type],
-    ret: &Type,
-    expected: Option<&Type>,
-) -> (HashMap<String, Type>, Vec<Option<Type>>) {
-    let (mut subst, solved) = solve_type_args(type_params, params, arg_tys);
-    if !solved.iter().any(|t| t.is_none()) {
-        return (subst, solved);
-    }
-    let Some(want) = expected else {
-        return (subst, solved);
-    };
-    let (from_ret, ret_solved) = solve_type_args(
-        type_params,
-        std::slice::from_ref(ret),
-        std::slice::from_ref(want),
-    );
-    for (tp, t) in from_ret {
-        subst.entry(tp).or_insert(t);
-    }
-    let solved = solved
-        .into_iter()
-        .zip(ret_solved)
-        .map(|(a, b)| a.or(b))
-        .collect();
-    (subst, solved)
-}
-
 /// The type arguments a call or construction site instantiates a generic with:
 /// `declared` are the parametric types (parameters, variant payloads, record
 /// fields), `actual` the concrete types supplied. Each type parameter comes back
@@ -614,64 +462,6 @@ pub(crate) fn solve_type_args(
     }
     let args = type_params.iter().map(|p| subst.get(p).cloned()).collect();
     (subst, args)
-}
-
-/// The concrete type a construction site of `name` produces: the bare
-/// [`Type::Named`] when the declaration takes no parameters, and otherwise a
-/// [`Type::App`] with each parameter solved from what was supplied. An unsolved
-/// parameter becomes `Unit`.
-pub(crate) fn applied_type(
-    decl: Option<&TypeDecl>,
-    name: &str,
-    declared: &[Type],
-    actual: &[Type],
-) -> Type {
-    let named = || Type::Named(name.to_string());
-    let Some(decl) = decl.filter(|d| !d.type_params.is_empty()) else {
-        return named();
-    };
-    let (_, args) = solve_type_args(&decl.type_params, declared, actual);
-    Type::App(
-        name.to_string(),
-        args.into_iter().map(|a| a.unwrap_or(Type::Unit)).collect(),
-    )
-}
-
-/// Whether a field's value can settle a type parameter. An empty `[]` or `[:]`
-/// reports a placeholder element type, so it settles nothing: in
-/// `Deque { back: ["z"], front: [] }`, settling from `front` would bind
-/// `T = Int64` and store a `String` pointer into an `i64` element. The checker
-/// agrees by another road: there `[]` is `Array<T>`, and a parameter bound to
-/// itself is dropped.
-pub(crate) fn settles_type_args(e: &Expr) -> bool {
-    !matches!(e, Expr::ArrayLit { elems, .. } if elems.is_empty())
-        && !matches!(e, Expr::MapLit { entries, .. } if entries.is_empty())
-}
-
-/// The type arguments a construction site's expected type settles.
-///
-/// A stored `fn` field registers its dispatch variant against the
-/// type being built, so its arguments must be known before any field is read;
-/// solved from field values alone, the variant lands under a signature no
-/// dispatcher covers. A `Unit` placeholder or an open `Param` settles nothing,
-/// and the value-side solve keeps those.
-pub(crate) fn expected_type_args(
-    expected: Option<&Type>,
-    name: &str,
-    decl: Option<&TypeDecl>,
-) -> HashMap<String, Type> {
-    let Some(Type::App(en, args)) = expected else {
-        return HashMap::new();
-    };
-    let Some(decl) = decl.filter(|d| en == name && d.type_params.len() == args.len()) else {
-        return HashMap::new();
-    };
-    decl.type_params
-        .iter()
-        .zip(args)
-        .filter(|(_, a)| !matches!(a, Type::Unit | Type::Param(_)))
-        .map(|(p, a)| (p.clone(), a.clone()))
-        .collect()
 }
 
 /// The declaration whose `where` predicate a value flowing from `from` into `to`
