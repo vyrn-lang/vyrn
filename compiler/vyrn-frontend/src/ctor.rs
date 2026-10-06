@@ -47,12 +47,7 @@ pub fn pred_args(decl: &TypeDecl, value: Expr) -> Vec<Expr> {
     crate::types::predicate_binds(decl)
         .into_iter()
         .map(|(name, _, field)| match field {
-            Some(_) => Expr::Field {
-                id: Id::NEW,
-                expr: Box::new(value.clone()),
-                field: name,
-                line: 0,
-            },
+            Some(_) => Expr::field(value.clone(), name, 0),
             None => value.clone(),
         })
         .collect()
@@ -85,7 +80,7 @@ pub fn constructors(types: &HashMap<String, TypeDecl>) -> Vec<Function> {
 /// `fn where$p<Name>(binds..) -> Bool { return <the where clause> }`, whose
 /// body is the declaration's own predicate node.
 fn predicate_fn(decl: &TypeDecl) -> Function {
-    synth(
+    Function::synth(
         pred_name(&decl.name),
         crate::types::predicate_binds(decl)
             .into_iter()
@@ -99,41 +94,23 @@ fn predicate_fn(decl: &TypeDecl) -> Function {
             })
             .collect(),
         Type::Bool,
-        vec![Stmt::Return {
-            id: Id::NEW,
-            value: Some(decl.predicate.clone().expect("predicate present")),
-            line: 0,
-        }],
+        vec![Stmt::ret(
+            decl.predicate.clone().expect("predicate present"),
+            0,
+        )],
     )
 }
 
 /// `fn where$c<Name>(value: Base) { if !where$p<Name>(..) { panic("..") } }`.
 fn constructor_fn(decl: &TypeDecl) -> Function {
-    let value = Expr::Var {
-        id: Id::NEW,
-        name: "value".to_string(),
-        line: 0,
-    };
-    let holds = Expr::Call {
-        id: Id::NEW,
-        dot: false,
-        type_args: Vec::new(),
-        name: pred_name(&decl.name),
-        args: pred_args(decl, value),
-        line: 0,
-    };
-    let fail = Stmt::Expr(
-        Expr::Call {
-            id: Id::NEW,
-            dot: false,
-            type_args: Vec::new(),
-            name: "panic".to_string(),
-            args: vec![Expr::Str(crate::trap::validation_of(decl), Id::NEW)],
-            line: 0,
-        },
-        Id::NEW,
-    );
-    synth(
+    let value = Expr::var("value", 0);
+    let holds = Expr::call(pred_name(&decl.name), pred_args(decl, value), 0);
+    let fail = Stmt::expr(Expr::call(
+        "panic",
+        vec![Expr::str(crate::trap::validation_of(decl))],
+        0,
+    ));
+    Function::synth(
         ctor_name(&decl.name),
         vec![Param {
             id: Id::NEW,
@@ -160,25 +137,4 @@ fn constructor_fn(decl: &TypeDecl) -> Function {
             line: 0,
         }],
     )
-}
-
-/// One synthesized function, with no source position.
-fn synth(name: String, params: Vec<Param>, ret: Type, stmts: Vec<Stmt>) -> Function {
-    Function {
-        name,
-        exported: false,
-        module: None,
-        doc: None,
-        type_params: Vec::new(),
-        type_bounds: HashMap::new(),
-        params,
-        ret,
-        body: Block { id: Id::NEW, stmts },
-        line: 0,
-        col: 0,
-        is_extern: false,
-        is_export_extern: false,
-        is_gen: false,
-        is_mut: false,
-    }
 }

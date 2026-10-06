@@ -557,7 +557,7 @@ fn convert(
                         rhs: Box::new(k),
                         line: 1,
                     }),
-                    rhs: Box::new(Expr::Int(0, Id::NEW)),
+                    rhs: Box::new(Expr::int(0)),
                     line: 1,
                 });
             }
@@ -606,7 +606,7 @@ fn convert(
                     id: Id::NEW,
                     op: BinOp::Match,
                     lhs: Box::new(value_var()),
-                    rhs: Box::new(Expr::Str(inner.to_string(), Id::NEW)),
+                    rhs: Box::new(Expr::str(inner)),
                     line: 1,
                 });
                 Ok(())
@@ -887,11 +887,7 @@ fn convert_payload_type(
 }
 
 fn value_var() -> Expr {
-    Expr::Var {
-        id: Id::NEW,
-        name: "value".to_string(),
-        line: 1,
-    }
+    Expr::var("value", 1)
 }
 
 fn cmp(op: BinOp, rhs: Expr) -> Expr {
@@ -908,13 +904,8 @@ fn len_cmp(op: BinOp, n: i64) -> Expr {
     Expr::Binary {
         id: Id::NEW,
         op,
-        lhs: Box::new(Expr::Field {
-            id: Id::NEW,
-            expr: Box::new(value_var()),
-            field: "byteLength".to_string(),
-            line: 1,
-        }),
-        rhs: Box::new(Expr::Int(n, Id::NEW)),
+        lhs: Box::new(Expr::field(value_var(), "byteLength", 1)),
+        rhs: Box::new(Expr::int(n)),
         line: 1,
     }
 }
@@ -929,19 +920,16 @@ fn num_expr(n: f64, is_int: bool, module: &str, name: &str, key: &str) -> Result
         // Negate in Rust, not through the AST: `-n as i64` saturates at `i64::MAX`,
         // and a `Unary::Neg` hides the literal from `predicate_bounds`. `i64::MIN` is
         // the one value whose negation overflows.
-        Ok(Expr::Int(
-            if n < 0.0 {
-                let a = -n;
-                if a >= 9223372036854775808.0 {
-                    i64::MIN
-                } else {
-                    -(a as i64)
-                }
+        Ok(Expr::int(if n < 0.0 {
+            let a = -n;
+            if a >= 9223372036854775808.0 {
+                i64::MIN
             } else {
-                n as i64
-            },
-            Id::NEW,
-        ))
+                -(a as i64)
+            }
+        } else {
+            n as i64
+        }))
     } else if n < 0.0 {
         Ok(Expr::Unary {
             id: Id::NEW,

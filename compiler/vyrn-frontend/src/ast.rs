@@ -721,6 +721,29 @@ pub struct Function {
 }
 
 impl Function {
+    /// Returns a function no source spells: line 0, column 0, in the root
+    /// module, with no doc, type parameters or flags. A caller sets the rest
+    /// with struct update.
+    pub fn synth(name: impl Into<String>, params: Vec<Param>, ret: Type, stmts: Vec<Stmt>) -> Self {
+        Function {
+            name: name.into(),
+            exported: false,
+            module: None,
+            doc: None,
+            type_params: Vec::new(),
+            type_bounds: Default::default(),
+            params,
+            ret,
+            body: Block { id: Id::NEW, stmts },
+            line: 0,
+            col: 0,
+            is_extern: false,
+            is_export_extern: false,
+            is_gen: false,
+            is_mut: false,
+        }
+    }
+
     /// Returns the name's column span, or `(0, 0)` (the whole line) for a
     /// synthesized function.
     pub fn name_span(&self) -> (usize, usize) {
@@ -1734,6 +1757,48 @@ macro_rules! stmt_slot {
 }
 
 impl Expr {
+    /// Returns an integer literal with no id yet.
+    pub fn int(n: i64) -> Self {
+        Expr::Int(n, Id::NEW)
+    }
+
+    /// Returns a string literal with no id yet.
+    pub fn str(s: impl Into<String>) -> Self {
+        Expr::Str(s.into(), Id::NEW)
+    }
+
+    /// Returns a name read at `line`, with no id yet.
+    pub fn var(name: impl Into<String>, line: usize) -> Self {
+        Expr::Var {
+            name: name.into(),
+            line,
+            id: Id::NEW,
+        }
+    }
+
+    /// Returns a call written `name(args)`, with no type arguments and no id
+    /// yet.
+    pub fn call(name: impl Into<String>, args: Vec<Expr>, line: usize) -> Self {
+        Expr::Call {
+            name: name.into(),
+            args,
+            dot: false,
+            type_args: Vec::new(),
+            line,
+            id: Id::NEW,
+        }
+    }
+
+    /// Returns `expr.field`, with no id yet.
+    pub fn field(expr: Expr, field: impl Into<String>, line: usize) -> Self {
+        Expr::Field {
+            expr: Box::new(expr),
+            field: field.into(),
+            line,
+            id: Id::NEW,
+        }
+    }
+
     pub fn id(&self) -> NodeId {
         slot!(self, &).0
     }
@@ -1764,6 +1829,34 @@ impl Expr {
 }
 
 impl Stmt {
+    /// Returns an expression statement with no id yet.
+    pub fn expr(e: Expr) -> Self {
+        Stmt::Expr(e, Id::NEW)
+    }
+
+    /// Returns `let name = value` at `line`: immutable, untyped, no column, no
+    /// id yet.
+    pub fn let_(name: impl Into<String>, value: Expr, line: usize) -> Self {
+        Stmt::Let {
+            name: name.into(),
+            mutable: false,
+            ty: None,
+            value,
+            line,
+            col: 0,
+            id: Id::NEW,
+        }
+    }
+
+    /// Returns `return value` at `line`, with no id yet.
+    pub fn ret(value: Expr, line: usize) -> Self {
+        Stmt::Return {
+            value: Some(value),
+            line,
+            id: Id::NEW,
+        }
+    }
+
     pub fn id(&self) -> NodeId {
         stmt_slot!(self, &).0
     }

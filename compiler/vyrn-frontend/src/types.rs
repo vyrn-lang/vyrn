@@ -540,43 +540,21 @@ pub fn schema_struct_lit(decl: &TypeDecl) -> Expr {
     let multiple_of = pred.and_then(predicate_multiple_of);
     let pattern = pred.and_then(predicate_pattern);
     let opt = |n: Option<i64>| match n {
-        Some(v) => Expr::Call {
-            id: Id::NEW,
-            dot: false,
-            type_args: Vec::new(),
-            name: "Some".to_string(),
-            args: vec![Expr::Int(v, Id::NEW)],
-            line: 0,
-        },
-        None => Expr::Var {
-            id: Id::NEW,
-            name: "None".to_string(),
-            line: 0,
-        },
+        Some(v) => Expr::call("Some", vec![Expr::int(v)], 0),
+        None => Expr::var("None", 0),
     };
     let opt_str = |s: Option<String>| match s {
-        Some(v) => Expr::Call {
-            id: Id::NEW,
-            dot: false,
-            type_args: Vec::new(),
-            name: "Some".to_string(),
-            args: vec![Expr::Str(v, Id::NEW)],
-            line: 0,
-        },
-        None => Expr::Var {
-            id: Id::NEW,
-            name: "None".to_string(),
-            line: 0,
-        },
+        Some(v) => Expr::call("Some", vec![Expr::str(v)], 0),
+        None => Expr::var("None", 0),
     };
     Expr::StructLit {
         id: Id::NEW,
         name: "Schema".to_string(),
         fields: vec![
-            ("name".to_string(), Expr::Str(decl.name.clone(), Id::NEW)),
+            ("name".to_string(), Expr::str(decl.name.clone())),
             (
                 "base".to_string(),
-                Expr::Str(base_spelling(&decl.base).to_string(), Id::NEW),
+                Expr::str(base_spelling(&decl.base).to_string()),
             ),
             ("doc".to_string(), opt_str(decl.doc.clone())),
             ("min".to_string(), opt(min)),

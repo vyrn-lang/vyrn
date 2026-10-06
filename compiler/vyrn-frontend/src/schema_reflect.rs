@@ -82,10 +82,10 @@ impl Origins {
         struct_lit(
             "Origin",
             vec![
-                ("file", Expr::Str(file, Id::NEW)),
-                ("line", Expr::Int(line as i64, Id::NEW)),
-                ("col", Expr::Int(col as i64, Id::NEW)),
-                ("name", Expr::Str(name.to_string(), Id::NEW)),
+                ("file", Expr::str(file)),
+                ("line", Expr::int(line as i64)),
+                ("col", Expr::int(col as i64)),
+                ("name", Expr::str(name)),
             ],
         )
     }
@@ -201,14 +201,14 @@ pub fn contract_info_lit(c: &ContractDecl) -> Expr {
             struct_lit(
                 "MemberInfo",
                 vec![
-                    ("name", Expr::Str(m.name.clone(), Id::NEW)),
-                    ("kind", Expr::Str(kind.to_string(), Id::NEW)),
-                    ("spelling", Expr::Str(m.spelling(), Id::NEW)),
+                    ("name", Expr::str(m.name.clone())),
+                    ("kind", Expr::str(kind)),
+                    ("spelling", Expr::str(m.spelling())),
                     (
                         "params",
-                        array_lit(params.into_iter().map(|s| Expr::Str(s, Id::NEW)).collect()),
+                        array_lit(params.into_iter().map(Expr::str).collect()),
                     ),
-                    ("ret", Expr::Str(ret, Id::NEW)),
+                    ("ret", Expr::str(ret)),
                     ("optional", Expr::Bool(m.optional(), Id::NEW)),
                     ("variadic", Expr::Bool(variadic, Id::NEW)),
                     ("doc", opt_str(m.doc.as_deref())),
@@ -219,11 +219,8 @@ pub fn contract_info_lit(c: &ContractDecl) -> Expr {
     struct_lit(
         "ContractInfo",
         vec![
-            ("name", Expr::Str(c.name.clone(), Id::NEW)),
-            (
-                "module",
-                Expr::Str(c.module.clone().unwrap_or_default(), Id::NEW),
-            ),
+            ("name", Expr::str(c.name.clone())),
+            ("module", Expr::str(c.module.clone().unwrap_or_default())),
             ("doc", opt_str(c.doc.as_deref())),
             ("open", Expr::Bool(c.open_rule().is_some(), Id::NEW)),
             ("members", array_lit(members)),
@@ -239,13 +236,10 @@ fn fn_info_lit(f: &Function, types: &HashMap<String, TypeDecl>, origins: &Origin
             struct_lit(
                 "ParamInfo",
                 vec![
-                    ("name", Expr::Str(p.name.clone(), Id::NEW)),
-                    ("spelling", Expr::Str(p.ty.to_string(), Id::NEW)),
+                    ("name", Expr::str(p.name.clone())),
+                    ("spelling", Expr::str(p.ty.to_string())),
                     ("schema", schema_lit_for_type(&p.ty, types)),
-                    (
-                        "uncodable",
-                        Expr::Str(uncodable_of(&p.ty, types, true), Id::NEW),
-                    ),
+                    ("uncodable", Expr::str(uncodable_of(&p.ty, types, true))),
                 ],
             )
         })
@@ -259,13 +253,13 @@ fn fn_info_lit(f: &Function, types: &HashMap<String, TypeDecl>, origins: &Origin
     struct_lit(
         "FnInfo",
         vec![
-            ("name", Expr::Str(f.name.clone(), Id::NEW)),
+            ("name", Expr::str(f.name.clone())),
             ("params", array_lit(params)),
-            ("ret", Expr::Str(ret_spelling, Id::NEW)),
+            ("ret", Expr::str(ret_spelling)),
             ("retSchema", schema_lit_for_type(&f.ret, types)),
             (
                 "retUncodable",
-                Expr::Str(uncodable_of(&f.ret, types, false), Id::NEW),
+                Expr::str(uncodable_of(&f.ret, types, false)),
             ),
             ("mutates", Expr::Bool(f.is_mut, Id::NEW)),
             ("origin", origins.lit(&f.module, &f.name, f.line)),
@@ -297,9 +291,9 @@ fn type_info_lit(
     struct_lit(
         "TypeInfo",
         vec![
-            ("name", Expr::Str(t.name.clone(), Id::NEW)),
-            ("source", Expr::Str(render_type_decl(t, types), Id::NEW)),
-            ("module", Expr::Str(module_spec.to_string(), Id::NEW)),
+            ("name", Expr::str(t.name.clone())),
+            ("source", Expr::str(render_type_decl(t, types))),
+            ("module", Expr::str(module_spec)),
             ("schema", crate::types::schema_struct_lit(t)),
             ("origin", origins.lit(&t.module, &t.name, t.line)),
             ("shape", shape_lit(t, types)),
@@ -377,7 +371,7 @@ fn push_node(
             .iter()
             .map(|t| {
                 let (i, s) = push_node(t, None, types, nodes);
-                (Expr::Int(i, Id::NEW), s)
+                (Expr::int(i), s)
             })
             .unzip();
         (array_lit(ix), spelled)
@@ -389,7 +383,7 @@ fn push_node(
         let (margs, s) = kids(&ts);
         lits.push(struct_lit(
             "TypeMember",
-            vec![("name", Expr::Str(m.clone(), Id::NEW)), ("args", margs)],
+            vec![("name", Expr::str(m.clone())), ("args", margs)],
         ));
         spelled.push(match (kind, s.is_empty()) {
             ("record", _) => format!("{m}: {}", s.join("")),
@@ -411,20 +405,17 @@ fn push_node(
         vec![
             (
                 "kind",
-                Expr::Str(
-                    if kind.is_empty() {
-                        written
-                    } else {
-                        kind.to_string()
-                    },
-                    Id::NEW,
-                ),
+                Expr::str(if kind.is_empty() {
+                    written
+                } else {
+                    kind.to_string()
+                }),
             ),
-            ("name", Expr::Str(name.to_string(), Id::NEW)),
-            ("spelling", Expr::Str(spelling.clone(), Id::NEW)),
+            ("name", Expr::str(name)),
+            ("spelling", Expr::str(spelling.clone())),
             ("args", args),
             ("members", array_lit(lits)),
-            ("predicate", Expr::Str(pred.unwrap_or_default(), Id::NEW)),
+            ("predicate", Expr::str(pred.unwrap_or_default())),
         ],
     );
     (at as i64, spelling)
@@ -464,7 +455,7 @@ pub fn type_arg_lit(roots: &[Type], types: &HashMap<String, TypeDecl>) -> (Expr,
             rooted.push(*i);
         }
     }
-    let rooted = rooted.into_iter().map(|i| Expr::Int(i, Id::NEW)).collect();
+    let rooted = rooted.into_iter().map(|i| Expr::int(i)).collect();
     let lit = struct_lit(
         "TypeArg",
         vec![("roots", array_lit(rooted)), ("nodes", array_lit(w.nodes))],
@@ -604,17 +595,13 @@ impl ArgWalk<'_> {
 }
 
 fn ints(ix: Vec<usize>) -> Expr {
-    array_lit(
-        ix.into_iter()
-            .map(|i| Expr::Int(i as i64, Id::NEW))
-            .collect(),
-    )
+    array_lit(ix.into_iter().map(|i| Expr::int(i as i64)).collect())
 }
 
 fn member(name: String, args: Vec<usize>) -> Expr {
     struct_lit(
         "TypeMember",
-        vec![("name", Expr::Str(name, Id::NEW)), ("args", ints(args))],
+        vec![("name", Expr::str(name)), ("args", ints(args))],
     )
 }
 
@@ -629,12 +616,12 @@ fn type_node(
     struct_lit(
         "TypeNode",
         vec![
-            ("kind", Expr::Str(kind.to_string(), Id::NEW)),
-            ("name", Expr::Str(format!("t{key}"), Id::NEW)),
-            ("spelling", Expr::Str(spell(ty), Id::NEW)),
+            ("kind", Expr::str(kind)),
+            ("name", Expr::str(format!("t{key}"))),
+            ("spelling", Expr::str(spell(ty))),
             ("args", ints(args)),
             ("members", array_lit(members)),
-            ("predicate", Expr::Str(predicate, Id::NEW)),
+            ("predicate", Expr::str(predicate)),
         ],
     )
 }
@@ -651,8 +638,8 @@ fn schema_lit_for_type(ty: &Type, types: &HashMap<String, TypeDecl>) -> Expr {
     struct_lit(
         "Schema",
         vec![
-            ("name", Expr::Str(spelling.clone(), Id::NEW)),
-            ("base", Expr::Str(spelling, Id::NEW)),
+            ("name", Expr::str(spelling.clone())),
+            ("base", Expr::str(spelling)),
             ("doc", none()),
             ("min", none()),
             ("max", none()),
@@ -769,23 +756,12 @@ fn array_lit(elems: Vec<Expr>) -> Expr {
 }
 
 fn none() -> Expr {
-    Expr::Var {
-        id: Id::NEW,
-        name: "None".to_string(),
-        line: 0,
-    }
+    Expr::var("None", 0)
 }
 
 fn opt_str(s: Option<&str>) -> Expr {
     match s {
-        Some(v) => Expr::Call {
-            id: Id::NEW,
-            dot: false,
-            type_args: Vec::new(),
-            name: "Some".to_string(),
-            args: vec![Expr::Str(v.to_string(), Id::NEW)],
-            line: 0,
-        },
+        Some(v) => Expr::call("Some", vec![Expr::str(v)], 0),
         None => none(),
     }
 }

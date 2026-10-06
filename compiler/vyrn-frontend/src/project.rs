@@ -347,11 +347,7 @@ impl Expansions {
             return Ok(Some(b));
         }
         let line = index.line();
-        let recv = Expr::Var {
-            id: Id::NEW,
-            name: name.to_string(),
-            line,
-        };
+        let recv = Expr::var(name, line);
         let Some(p) = self.site_at(
             index.id(),
             impls,
@@ -507,23 +503,8 @@ fn substituted(
             map.insert(p.name.clone(), a.clone());
         } else {
             let tmp = format!("@p{tag}.{}", p.name);
-            prologue.push(Stmt::Let {
-                id: Id::NEW,
-                name: tmp.clone(),
-                mutable: false,
-                ty: None,
-                value: a.clone(),
-                line,
-                col: 0,
-            });
-            map.insert(
-                p.name.clone(),
-                Expr::Var {
-                    id: Id::NEW,
-                    name: tmp,
-                    line,
-                },
-            );
+            prologue.push(Stmt::let_(tmp.clone(), a.clone(), line));
+            map.insert(p.name.clone(), Expr::var(tmp, line));
         }
     }
     subst_block(&mut body, &map);
@@ -902,10 +883,7 @@ pub(crate) fn walk_program(program: &mut Program, f: &mut impl FnMut(&mut Expr))
 pub fn walk_bare(e: &mut Expr, f: &mut impl FnMut(&mut Expr)) {
     let mut b = Block {
         id: Id::NEW,
-        stmts: vec![Stmt::Expr(
-            std::mem::replace(e, Expr::Int(0, Id::NEW)),
-            Id::NEW,
-        )],
+        stmts: vec![Stmt::expr(std::mem::replace(e, Expr::int(0)))],
     };
     walk_block(&mut b, f);
     let Some(Stmt::Expr(back, _)) = b.stmts.pop() else {
@@ -1048,20 +1026,9 @@ mod tests {
              fn main() { print(1) }
 ",
         );
-        let recv = Expr::Var {
-            id: Id::NEW,
-            name: "r".into(),
-            line: 1,
-        };
+        let recv = Expr::var("r", 1);
         let ring = Type::Named("Ring".into());
-        ex.site(
-            &p.impls,
-            Some(&ring),
-            "at",
-            &recv,
-            &[Expr::Int(0, Id::NEW)],
-            1,
-        )
+        ex.site(&p.impls, Some(&ring), "at", &recv, &[Expr::int(0)], 1)
     }
 
     #[test]
@@ -1090,20 +1057,12 @@ mod tests {
              fn main() { print(1) }\n",
         );
         let (_, f) = p.impls.place(&Type::Named("Ring".into()), "at").unwrap();
-        let recv = Expr::Var {
-            id: Id::NEW,
-            name: "r".into(),
-            line: 1,
-        };
+        let recv = Expr::var("r", 1);
         let idx = Expr::Binary {
             id: Id::NEW,
             op: crate::ast::BinOp::Add,
-            lhs: Box::new(Expr::Var {
-                id: Id::NEW,
-                name: "k".into(),
-                line: 1,
-            }),
-            rhs: Box::new(Expr::Int(1, Id::NEW)),
+            lhs: Box::new(Expr::var("k", 1)),
+            rhs: Box::new(Expr::int(1)),
             line: 1,
         };
         let pr = inline(f, &recv, std::slice::from_ref(&idx), 1, "t").unwrap();
@@ -1129,22 +1088,7 @@ mod tests {
              fn main() { print(1) }\n",
         );
         let (_, f) = p.impls.place(&Type::Named("Ring".into()), "at").unwrap();
-        let pr = inline(
-            f,
-            &Expr::Var {
-                id: Id::NEW,
-                name: "r".into(),
-                line: 5,
-            },
-            &[Expr::Var {
-                id: Id::NEW,
-                name: "side".into(),
-                line: 5,
-            }],
-            5,
-            "t",
-        )
-        .unwrap();
+        let pr = inline(f, &Expr::var("r", 5), &[Expr::var("side", 5)], 5, "t").unwrap();
         assert!(
             pr.prologue
                 .iter()
@@ -1156,12 +1100,8 @@ mod tests {
 
     #[test]
     fn a_builtin_container_expands_to_nothing() {
-        let recv = Expr::Var {
-            id: Id::NEW,
-            name: "a".into(),
-            line: 3,
-        };
-        let args = [Expr::Int(2, Id::NEW)];
+        let recv = Expr::var("a", 3);
+        let args = [Expr::int(2)];
         let ex = Expansions::shared();
         for ty in [
             Type::Array(Box::new(Type::Int)),
@@ -1208,18 +1148,7 @@ mod tests {
              fn main() { print(1) }\n",
         );
         let (_, f) = p.impls.place(&Type::Named("Ring".into()), "at").unwrap();
-        let pr = inline(
-            f,
-            &Expr::Var {
-                id: Id::NEW,
-                name: "r".into(),
-                line: 1,
-            },
-            &[Expr::Int(3, Id::NEW)],
-            1,
-            "t",
-        )
-        .unwrap();
+        let pr = inline(f, &Expr::var("r", 1), &[Expr::int(3)], 1, "t").unwrap();
         assert_eq!(pr.prologue.len(), 1);
         assert!(
             matches!(&pr.prologue[0], Stmt::Let { name, .. } if name.starts_with("@b") && name.ends_with(".j"))
@@ -1239,18 +1168,7 @@ mod tests {
              fn main() { print(1) }\n",
         );
         let (_, f) = p.impls.place(&Type::Named("Ring".into()), "at").unwrap();
-        let mut pr = inline(
-            f,
-            &Expr::Var {
-                id: Id::NEW,
-                name: "r".into(),
-                line: 1,
-            },
-            &[Expr::Int(1, Id::NEW)],
-            1,
-            "t",
-        )
-        .unwrap();
+        let mut pr = inline(f, &Expr::var("r", 1), &[Expr::int(1)], 1, "t").unwrap();
         // After renaming, `i` has no use outside the lambda, so the argument
         // binds a temporary.
         assert!(

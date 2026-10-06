@@ -323,7 +323,7 @@ fn stamp_panic_sites(program: &mut Program, file: &str) {
         {
             if name == "panic" && args.len() == 1 {
                 *name = PANIC_AT.to_string();
-                args.push(Expr::Str(format!("{file}:{line}"), Id::NEW));
+                args.push(Expr::str(format!("{file}:{line}")));
             }
         }
     };
@@ -3116,11 +3116,7 @@ impl BodyVisitMut for NsResolver<'_> {
                     if self.is_ns(head, locals) {
                         let head = head.clone();
                         if let Some(sym) = self.resolve_member(&head, field, l) {
-                            *e = Expr::Var {
-                                id: Id::NEW,
-                                name: sym,
-                                line: l,
-                            };
+                            *e = Expr::var(sym, l);
                         }
                         return false;
                     }
@@ -3138,11 +3134,7 @@ impl BodyVisitMut for NsResolver<'_> {
                                 (head.clone(), enum_name.clone(), field.clone());
                             if self.declares_variant(&head, &enum_name, &variant) {
                                 let _ = self.resolve_member(&head, &enum_name, l);
-                                *e = Expr::Var {
-                                    id: Id::NEW,
-                                    name: variant,
-                                    line: l,
-                                };
+                                *e = Expr::var(variant, l);
                             } else {
                                 self.err(l, rule!(NamespacedVariant, head, enum_name, variant));
                             }
