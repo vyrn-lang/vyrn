@@ -620,11 +620,7 @@ fn handle_is_dev_entry(server: &Server, params: serde_json::Value) -> bool {
     if !is_vyrn_uri(&uri) {
         return false;
     }
-    let src = server
-        .docs
-        .get(&uri)
-        .cloned()
-        .or_else(|| uri_path(&uri).and_then(|p| std::fs::read_to_string(p).ok()));
+    let src = doc_text(server, &uri);
     match src {
         Some(text) => is_dev_entry(&text),
         None => false,
@@ -807,11 +803,7 @@ fn component_tag_definition(
     line: usize,
     col: usize,
 ) -> Option<GotoDefinitionResponse> {
-    let raw = server
-        .docs
-        .get(uri)
-        .cloned()
-        .or_else(|| uri_path(uri).and_then(|p| std::fs::read_to_string(p).ok()))?;
+    let raw = doc_text(server, uri)?;
     let text = raw.lines().nth(line.saturating_sub(1))?;
     let chars: Vec<char> = text.chars().collect();
     let cur = col.saturating_sub(1).min(chars.len());
@@ -871,11 +863,7 @@ fn import_path_definition(
     line: usize,
     col: usize,
 ) -> Option<GotoDefinitionResponse> {
-    let src = server
-        .docs
-        .get(uri)
-        .cloned()
-        .or_else(|| uri_path(uri).and_then(|p| std::fs::read_to_string(p).ok()))?;
+    let src = doc_text(server, uri)?;
     let spec = vyrn_frontend::import_spec_at(&src, line, col)?;
     if vyrn_frontend::loader::is_remote(&spec) {
         return None;
@@ -983,37 +971,74 @@ fn handle_document_highlight(
     )
 }
 
-/// Highlights in a `.vyx`: references in the generated module, mapped back
-/// through the verbatim origin regions. References outside a region are dropped.
-fn vyx_highlights(server: &Server, vyx_uri: &Url, line: usize, col: usize) -> Vec<RefRange> {
-    let Some(fwd) = vyx_forward(server, vyx_uri, line, col) else {
-        return Vec::new();
-    };
-    let refs = references(&fwd.synth.analysis, fwd.line, fwd.col);
-    let Some(vyx_path) = uri_path(vyx_uri) else {
-        return Vec::new();
-    };
-    let Some(owner) = server.vyx_owner.get(&vyx_path).cloned() else {
-        return Vec::new();
-    };
-    let Some(owner_analysis) = server.analyses.get(&owner) else {
-        return Vec::new();
-    };
-    let Some(vyx_text) = server
-        .docs
-        .get(vyx_uri)
-        .cloned()
-        .or_else(|| std::fs::read_to_string(&vyx_path).ok())
-    else {
-        return Vec::new();
-    };
+/// One verbatim origin region of a `.vyx`, aligned with its generated line.
+struct VyxSpan<'a> {
+    region: &'a vyrn_frontend::origin::Region,
+    synth: &'a Rc<AnalyzedSynth>,
+    vyx_line: &'a str,
+    /// 1-based column in the generated line where the verbatim span starts, and
+    /// its length in chars.
+    gcol: usize,
+    span_len: usize,
+}
+
+impl VyxSpan<'_> {
+    /// Whether a generated range lies on the region's first line, inside the
+    /// verbatim span. Only such a range maps back.
+    fn within(&self, line: usize, col: usize, end_col: usize) -> bool {
+        line == self.region.gen_start_line
+            && col >= self.gcol
+            && end_col <= self.gcol + self.span_len
+    }
+
+    /// The input column of a generated column inside the span.
+    fn back(&self, gen_col: usize) -> usize {
+        self.region.origin.col + (gen_col - self.gcol)
+    }
+}
+
+/// Maps a per-feature answer about a `.vyx`'s generated modules back into the
+/// `.vyx`: for each region of the file that `wants` (given the input line), the
+/// region's module, its aligned span and the input line go to `step`, which
+/// pushes mapped items. The result is sorted by `key` and deduplicated on it,
+/// because overlapping regions can emit a position twice. Empty when the file
+/// has no owner.
+fn vyx_back_map<T, K: Ord>(
+    server: &Server,
+    vyx_uri: &Url,
+    wants: impl Fn(&vyrn_frontend::origin::Region, &str) -> bool,
+    mut step: impl FnMut(&VyxSpan, &mut Vec<T>),
+    key: impl Fn(&T) -> K,
+) -> Vec<T> {
     let mut out = Vec::new();
+    let Some(vyx_path) = uri_path(vyx_uri) else {
+        return out;
+    };
+    let Some(owner) = server.vyx_owner.get(&vyx_path) else {
+        return out;
+    };
+    let Some(owner_analysis) = server.analyses.get(owner) else {
+        return out;
+    };
+    let Some(vyx_text) = doc_text(server, vyx_uri) else {
+        return out;
+    };
+    // `synth_for` re-hashes the owner on every call, so hold one per banner.
+    let mut synths: HashMap<String, Option<Rc<AnalyzedSynth>>> = HashMap::new();
     for region in owner_analysis.origins.regions_for(&vyx_path) {
         let Some(vyx_line) = vyx_text.lines().nth(region.origin.line.saturating_sub(1)) else {
             continue;
         };
-        let Some(gen_line) = fwd
-            .synth
+        if !wants(&region, vyx_line) {
+            continue;
+        }
+        let Some(synth) = synths
+            .entry(region.gen_module.clone())
+            .or_insert_with(|| synth_for(server, owner, &region.gen_module))
+        else {
+            continue;
+        };
+        let Some(gen_line) = synth
             .gen_source
             .lines()
             .nth(region.gen_start_line.saturating_sub(1))
@@ -1023,24 +1048,49 @@ fn vyx_highlights(server: &Server, vyx_uri: &Url, line: usize, col: usize) -> Ve
         let Some((gcol, span_len)) = align_expr_span(vyx_line, region.origin.col, gen_line) else {
             continue;
         };
-        for r in &refs {
-            if r.line != region.gen_start_line || r.col < gcol {
-                continue;
-            }
-            if r.end_col > gcol + span_len {
-                continue;
-            }
-            out.push(RefRange {
-                line: region.origin.line,
-                col: region.origin.col + (r.col - gcol),
-                end_col: region.origin.col + (r.end_col - gcol),
-                write: r.write,
-            });
-        }
+        let span = VyxSpan {
+            region: &region,
+            synth,
+            vyx_line,
+            gcol,
+            span_len,
+        };
+        step(&span, &mut out);
     }
-    out.sort_by_key(|r| (r.line, r.col));
-    out.dedup_by_key(|r| (r.line, r.col));
+    out.sort_by_key(&key);
+    out.dedup_by_key(|t| key(t));
     out
+}
+
+/// Highlights in a `.vyx`: references in the generated module, mapped back
+/// through the verbatim origin regions. References outside a region are dropped.
+fn vyx_highlights(server: &Server, vyx_uri: &Url, line: usize, col: usize) -> Vec<RefRange> {
+    let Some(fwd) = vyx_forward(server, vyx_uri, line, col) else {
+        return Vec::new();
+    };
+    let refs = references(&fwd.synth.analysis, fwd.line, fwd.col);
+    vyx_back_map(
+        server,
+        vyx_uri,
+        |_, _| true,
+        |sp, out| {
+            // `refs` index the cursor's module only.
+            if !Rc::ptr_eq(sp.synth, &fwd.synth) {
+                return;
+            }
+            for r in &refs {
+                if sp.within(r.line, r.col, r.end_col) {
+                    out.push(RefRange {
+                        line: sp.region.origin.line,
+                        col: sp.back(r.col),
+                        end_col: sp.back(r.end_col),
+                        write: r.write,
+                    });
+                }
+            }
+        },
+        |r| (r.line, r.col),
+    )
 }
 
 fn handle_completion(server: &Server, params: serde_json::Value) -> Option<CompletionResponse> {
@@ -1089,11 +1139,7 @@ fn vyx_completion(
     line: usize,
     col: usize,
 ) -> Option<CompletionResponse> {
-    let raw = server
-        .docs
-        .get(uri)
-        .cloned()
-        .or_else(|| uri_path(uri).and_then(|p| std::fs::read_to_string(p).ok()))?;
+    let raw = doc_text(server, uri)?;
     match templates::classify(&raw, line, col) {
         VyxCursor::TagName { prefix, start_col } => Some(tag_name_completion(
             uri, &raw, &prefix, line, start_col, col,
@@ -1432,11 +1478,7 @@ fn vyx_forward(server: &Server, vyx_uri: &Url, line: usize, col: usize) -> Optio
 
     let synth = synth_for(server, &owner, &region.gen_module)?;
 
-    let vyx_text = server
-        .docs
-        .get(vyx_uri)
-        .cloned()
-        .or_else(|| std::fs::read_to_string(&vyx_path).ok())?;
+    let vyx_text = doc_text(server, vyx_uri)?;
     let vyx_line = vyx_text.lines().nth(line.saturating_sub(1))?;
     let gen_line = synth
         .gen_source
@@ -1553,29 +1595,10 @@ fn map_into_region(
     gen_start_line: usize,
 ) -> (usize, usize) {
     let delta = col.saturating_sub(origin_col);
-    match align_expr(vyx_line, origin_col, gen_line) {
-        Some(gcol) => (gen_start_line, gcol + delta),
+    match align_expr_span(vyx_line, origin_col, gen_line) {
+        Some((gcol, _)) => (gen_start_line, gcol + delta),
         None => (gen_start_line, 1),
     }
-}
-
-/// The 1-based column in `gen_line` where the input expression at `origin_col`
-/// begins: the longest prefix of the input tail found there. The bytes after
-/// the expression (`}`, `>`) diverge from the generated wrapper.
-fn align_expr(vyx_line: &str, origin_col: usize, gen_line: &str) -> Option<usize> {
-    let tail: Vec<char> = vyx_line
-        .chars()
-        .skip(origin_col.saturating_sub(1))
-        .collect();
-    let mut len = tail.len();
-    while len >= 1 {
-        let cand: String = tail[..len].iter().collect();
-        if let Some(byte_idx) = gen_line.find(&cand) {
-            return Some(gen_line[..byte_idx].chars().count() + 1);
-        }
-        len -= 1;
-    }
-    None
 }
 
 /// A root path for a generated module in the owner's directory, so relative
@@ -1857,81 +1880,33 @@ fn type_hint_at(line_text: &str, line: usize, end_col: usize, label: String) -> 
 /// where the author's own name ends at the mapped column; a misplaced hint is
 /// worse than a missing one.
 fn vyx_type_hints(server: &Server, vyx_uri: &Url, from: usize, to: usize) -> Vec<InlayHint> {
-    let mut out = Vec::new();
-    let Some(vyx_path) = uri_path(vyx_uri) else {
-        return out;
-    };
-    let Some(owner) = server.vyx_owner.get(&vyx_path).cloned() else {
-        return out;
-    };
-    let Some(owner_analysis) = server.analyses.get(&owner) else {
-        return out;
-    };
-    let Some(vyx_text) = server
-        .docs
-        .get(vyx_uri)
-        .cloned()
-        .or_else(|| std::fs::read_to_string(&vyx_path).ok())
-    else {
-        return out;
-    };
-
-    // `synth_for` re-hashes the owner on every call, so hold one per banner.
-    let mut synths: HashMap<String, Rc<AnalyzedSynth>> = HashMap::new();
-    for region in owner_analysis.origins.regions_for(&vyx_path) {
-        if region.origin.line < from || region.origin.line > to {
-            continue;
-        }
-        let Some(vyx_line) = vyx_text.lines().nth(region.origin.line.saturating_sub(1)) else {
-            continue;
-        };
+    vyx_back_map(
+        server,
+        vyx_uri,
         // A line without a binding keyword carries no hint; most template lines.
-        if !vyx_line.contains("let") && !vyx_line.contains("for") {
-            continue;
-        }
-        let synth = match synths.get(&region.gen_module) {
-            Some(s) => s.clone(),
-            None => {
-                let Some(s) = synth_for(server, &owner, &region.gen_module) else {
+        |region, vyx_line| {
+            (from..=to).contains(&region.origin.line)
+                && (vyx_line.contains("let") || vyx_line.contains("for"))
+        },
+        |sp, out| {
+            for b in &sp.synth.analysis.locals {
+                if !sp.within(b.line, b.end_col, b.end_col) {
+                    continue;
+                }
+                let col = sp.back(b.end_col);
+                if !name_ends_at(sp.vyx_line, col, &b.name) {
+                    continue;
+                }
+                let Some(label) =
+                    type_hint_label(b, &sp.synth.analysis.spellings, sp.vyx_line, col)
+                else {
                     continue;
                 };
-                synths.insert(region.gen_module.clone(), s.clone());
-                s
+                out.push(type_hint_at(sp.vyx_line, sp.region.origin.line, col, label));
             }
-        };
-        let Some(gen_line) = synth
-            .gen_source
-            .lines()
-            .nth(region.gen_start_line.saturating_sub(1))
-        else {
-            continue;
-        };
-        let Some((gcol, span_len)) = align_expr_span(vyx_line, region.origin.col, gen_line) else {
-            continue;
-        };
-        for b in &synth.analysis.locals {
-            // Only a binding on the region's first generated line, inside the
-            // verbatim span, maps back.
-            if b.line != region.gen_start_line || b.end_col < gcol {
-                continue;
-            }
-            if b.end_col > gcol + span_len {
-                continue;
-            }
-            let col = region.origin.col + (b.end_col - gcol);
-            if !name_ends_at(vyx_line, col, &b.name) {
-                continue;
-            }
-            let Some(label) = type_hint_label(b, &synth.analysis.spellings, vyx_line, col) else {
-                continue;
-            };
-            out.push(type_hint_at(vyx_line, region.origin.line, col, label));
-        }
-    }
-    // Overlapping regions can emit a position twice.
-    out.sort_by_key(|h| (h.position.line, h.position.character));
-    out.dedup_by_key(|h| (h.position.line, h.position.character));
-    out
+        },
+        |h| (h.position.line, h.position.character),
+    )
 }
 
 /// Whether `name` ends just before 1-based char column `col` of `line`: the
@@ -2025,75 +2000,30 @@ fn encode_tokens(mut toks: Vec<vyrn_frontend::SemToken>, text: &str) -> Semantic
 /// verbatim origin region, re-anchored at the input columns. Derived regions
 /// contribute nothing and stay with the TextMate grammar.
 fn vyx_semantic_tokens(server: &Server, vyx_uri: &Url) -> Vec<vyrn_frontend::SemToken> {
-    let mut out = Vec::new();
-    let Some(vyx_path) = uri_path(vyx_uri) else {
-        return out;
-    };
-    let Some(owner) = server.vyx_owner.get(&vyx_path).cloned() else {
-        return out;
-    };
-    let Some(owner_analysis) = server.analyses.get(&owner) else {
-        return out;
-    };
-    let regions = owner_analysis.origins.regions_for(&vyx_path);
-    if regions.is_empty() {
-        return out;
-    }
-
-    let Some(vyx_text) = server
-        .docs
-        .get(vyx_uri)
-        .cloned()
-        .or_else(|| std::fs::read_to_string(&vyx_path).ok())
-    else {
-        return out;
-    };
-
-    for region in &regions {
-        let Some(synth) = synth_for(server, &owner, &region.gen_module) else {
-            continue;
-        };
-        let gen_source = &synth.gen_source;
-        let synth_toks = &synth.tokens;
-
-        let Some(vyx_line) = vyx_text.lines().nth(region.origin.line.saturating_sub(1)) else {
-            continue;
-        };
-        let Some(gen_line) = gen_source
-            .lines()
-            .nth(region.gen_start_line.saturating_sub(1))
-        else {
-            continue;
-        };
-        let Some((gcol, span_len)) = align_expr_span(vyx_line, region.origin.col, gen_line) else {
-            continue;
-        };
-        for st in synth_toks.iter() {
-            // Only tokens on the region's first generated line, inside the
-            // verbatim span, map back.
-            if st.line != region.gen_start_line || st.col < gcol {
-                continue;
+    vyx_back_map(
+        server,
+        vyx_uri,
+        |_, _| true,
+        |sp, out| {
+            for st in sp.synth.tokens.iter() {
+                if sp.within(st.line, st.col, st.col + st.len) {
+                    out.push(vyrn_frontend::SemToken {
+                        line: sp.region.origin.line,
+                        col: sp.back(st.col),
+                        len: st.len,
+                        kind: st.kind,
+                        mods: st.mods,
+                    });
+                }
             }
-            if st.col + st.len > gcol + span_len {
-                continue;
-            }
-            out.push(vyrn_frontend::SemToken {
-                line: region.origin.line,
-                col: region.origin.col + (st.col - gcol),
-                len: st.len,
-                kind: st.kind,
-                mods: st.mods,
-            });
-        }
-    }
-    // Overlapping regions can emit a position twice.
-    out.sort_by_key(|t| (t.line, t.col));
-    out.dedup_by_key(|t| (t.line, t.col));
-    out
+        },
+        |t| (t.line, t.col),
+    )
 }
 
-/// [`align_expr`] with the char length of the matched run:
-/// `(1-based gen col, length)`.
+/// The `(1-based gen col, char length)` of the longest prefix of the input tail
+/// at `origin_col` found in `gen_line`: the verbatim span of a region. The bytes
+/// after the expression (`}`, `>`) diverge from the generated wrapper.
 fn align_expr_span(vyx_line: &str, origin_col: usize, gen_line: &str) -> Option<(usize, usize)> {
     let tail: Vec<char> = vyx_line
         .chars()
@@ -2228,11 +2158,7 @@ impl ContractCtx {
 /// no role or an unreadable contract module.
 fn contract_ctx(server: &Server, uri: &Url) -> Option<ContractCtx> {
     let path = uri_path(uri)?;
-    let text = server
-        .docs
-        .get(uri)
-        .cloned()
-        .or_else(|| std::fs::read_to_string(&path).ok())?;
+    let text = doc_text(server, uri)?;
     // `raw` is the whole `.vyx`, whose `<template>` is outside the script body.
     // Empty for a `.vyrn`.
     let (source, line_offset, raw) = if is_vyrn_uri(uri) {
@@ -2664,12 +2590,7 @@ fn discover_vyx_owner(connection: &Connection, server: &mut Server, vyx_uri: &Ur
     }
     match probe_owner(server, &path) {
         Some((owner, analysis)) => {
-            let text = server
-                .docs
-                .get(&owner)
-                .cloned()
-                .or_else(|| uri_path(&owner).and_then(|p| std::fs::read_to_string(p).ok()))
-                .unwrap_or_default();
+            let text = doc_text(server, &owner).unwrap_or_default();
             install_root(Some(connection), server, &owner, &text, analysis);
             server.vyx_owner.contains_key(&path)
         }
@@ -2700,12 +2621,7 @@ fn probe_roots(
 ) -> Option<(Url, Analysis)> {
     let overlays = overlays_of(server);
     for cand in candidate_owners(path) {
-        let text = match server
-            .docs
-            .get(&cand)
-            .cloned()
-            .or_else(|| uri_path(&cand).and_then(|p| std::fs::read_to_string(p).ok()))
-        {
+        let text = match doc_text(server, &cand) {
             Some(t) => t,
             None => continue,
         };
@@ -2740,10 +2656,7 @@ fn route_facts_for_file(server: &Server, path: &str) -> Rc<Vec<MappedSymbol>> {
         mounting_roots(path, RPC_GENERATORS)
             .into_iter()
             .find_map(|cand| {
-                let text =
-                    server.docs.get(&cand).cloned().or_else(|| {
-                        uri_path(&cand).and_then(|p| std::fs::read_to_string(p).ok())
-                    })?;
+                let text = doc_text(server, &cand)?;
                 let a = analyze_doc(&server.session, &cand, &text, &overlays_of(server));
                 claims(&a).then_some(a)
             })
@@ -2823,12 +2736,7 @@ fn all_mapped_symbols(server: &Server, path: &str) -> Vec<MappedSymbol> {
     let mut out: Vec<MappedSymbol> = route_facts_for_file(server, path).as_ref().clone();
     let overlays = overlays_of(server);
     for cand in mounting_roots(path, MAP_GENERATORS) {
-        let Some(text) = server
-            .docs
-            .get(&cand)
-            .cloned()
-            .or_else(|| uri_path(&cand).and_then(|p| std::fs::read_to_string(p).ok()))
-        else {
+        let Some(text) = doc_text(server, &cand) else {
             continue;
         };
         let a = analyze_doc(&server.session, &cand, &text, &overlays);
@@ -3034,7 +2942,8 @@ fn collect_vyrn(dir: &std::path::Path, depth: usize, out: &mut Vec<std::path::Pa
 }
 
 /// Collect files with one of `exts` under `dir`, at most `cap`, skipping hidden,
-/// vendored, build and `public/` directories.
+/// vendored, build and `public/` directories. Subdirectories are visited in name
+/// order, so a capped walk is deterministic.
 fn collect_sources(
     dir: &std::path::Path,
     depth: usize,
@@ -3073,6 +2982,7 @@ fn collect_sources(
             out.push(p);
         }
     }
+    subdirs.sort();
     for sub in subdirs {
         collect_sources(&sub, depth + 1, cap, exts, out);
         if out.len() >= cap {
@@ -3391,7 +3301,7 @@ fn discover_stylesheets(root: &std::path::Path) -> Vec<std::path::PathBuf> {
         }
     }
     let mut vyx = Vec::new();
-    collect_vyx(root, 0, &mut vyx);
+    collect_sources(root, 0, MAX_VYX_SCAN, &["vyx"], &mut vyx);
     vyx.sort();
     for v in &vyx {
         let Ok(src) = std::fs::read_to_string(v) else {
@@ -3446,42 +3356,6 @@ fn stylesheet_urls(src: &str) -> Vec<String> {
         }
     }
     out
-}
-
-/// The `.vyx` files under `dir`, at most [`MAX_VYX_SCAN`], skipping the
-/// directories [`collect_sources`] skips.
-fn collect_vyx(dir: &std::path::Path, depth: usize, out: &mut Vec<std::path::PathBuf>) {
-    if depth > MAX_WALK_UP || out.len() >= MAX_VYX_SCAN {
-        return;
-    }
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    let mut subdirs = Vec::new();
-    for e in entries.flatten() {
-        let p = e.path();
-        if p.is_dir() {
-            let name = p
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_default();
-            if name.starts_with('.')
-                || name == "vyrn_vendor"
-                || name == "target"
-                || name == "node_modules"
-                || name == "public"
-            {
-                continue;
-            }
-            subdirs.push(p);
-        } else if p.extension().and_then(|x| x.to_str()) == Some("vyx") {
-            out.push(p);
-        }
-    }
-    subdirs.sort();
-    for d in subdirs {
-        collect_vyx(&d, depth + 1, out);
-    }
 }
 
 /// Every rule block in `css` whose selector names `class` as a whole token, as

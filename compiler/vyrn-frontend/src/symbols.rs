@@ -15,6 +15,7 @@ use crate::checker;
 use crate::diagnostics::Diagnostic;
 use crate::lexer::{self, Tok};
 use crate::parser;
+use crate::schema_reflect::{field_text, variant_arm};
 use crate::symbolmap::MappedSymbol;
 
 /// Kind of a top-level symbol or a local binding (returned by [`resolve`]).
@@ -535,11 +536,14 @@ fn analyze_inner(
                     Completion {
                         label: f.name.clone(),
                         kind: SymbolKind::Field,
-                        detail: field_detail(
-                            f,
-                            &member_src.type_decls,
-                            &signature_speech(&spellings, &[&f.ty], &[]),
-                        ),
+                        detail: {
+                            let say = signature_speech(&spellings, &[&f.ty], &[]);
+                            field_text(
+                                f,
+                                |n| member_src.type_decls.iter().find(|d| d.name == n),
+                                &|t| spell(&say, t),
+                            )
+                        },
                         doc: None,
                     },
                 ));
@@ -2313,26 +2317,6 @@ fn protocol_detail(p: &ProtocolDecl, sp: &Spellings) -> String {
     }
 }
 
-/// Renders one record field as the user wrote it: a synthetic inline-refinement
-/// field type (`User.age`) expands back to `age: Int64 where value >= 18`.
-fn field_detail(f: &ast::Field, all: &[TypeDecl], say: &Speech) -> String {
-    if let Type::Named(n) = &f.ty {
-        if n.contains('.') {
-            if let Some(d) = all.iter().find(|d| d.name == *n) {
-                if let Some(pred) = &d.predicate {
-                    return format!(
-                        "{}: {} where {}",
-                        f.name,
-                        spell(say, &d.base),
-                        crate::checker::pred_summary(pred)
-                    );
-                }
-            }
-        }
-    }
-    format!("{}: {}", f.name, spell(say, &f.ty))
-}
-
 fn type_decl_detail(t: &TypeDecl, all: &[TypeDecl], sp: &Spellings) -> String {
     let say = signature_speech(sp, &[&t.base], &[&t.name]);
     let name = say.name(&t.name);
@@ -2341,7 +2325,7 @@ fn type_decl_detail(t: &TypeDecl, all: &[TypeDecl], sp: &Spellings) -> String {
         // `Option<T>` or `Result<T, E>`, as the module wrote it.
         Type::Enum(vs) if !crate::types::is_sum_alias(&t.base) => {
             let arms = (vs.iter())
-                .map(|v| variant_arm(v, &say))
+                .map(|v| variant_arm(v, &|t| spell(&say, t)))
                 .collect::<Vec<_>>()
                 .join(" | ");
             format!("type {name} = {arms}")
@@ -2349,7 +2333,7 @@ fn type_decl_detail(t: &TypeDecl, all: &[TypeDecl], sp: &Spellings) -> String {
         Type::Record(fields) => {
             let fs = fields
                 .iter()
-                .map(|f| field_detail(f, all, &say))
+                .map(|f| field_text(f, |n| all.iter().find(|d| d.name == n), &|t| spell(&say, t)))
                 .collect::<Vec<_>>()
                 .join(", ");
             format!("type {name} = {{ {fs} }}")
@@ -2365,22 +2349,13 @@ fn type_decl_detail(t: &TypeDecl, all: &[TypeDecl], sp: &Spellings) -> String {
     }
 }
 
-fn variant_arm(v: &EnumVariant, say: &Speech) -> String {
-    if v.payload.is_empty() {
-        v.name.clone()
-    } else {
-        let payload: Vec<String> = v.payload.iter().map(|t| spell(say, t)).collect();
-        format!("{}({})", v.name, payload.join(", "))
-    }
-}
-
 fn variant_detail(enum_name: &str, v: &EnumVariant, sp: &Spellings) -> String {
     let types: Vec<&Type> = v.payload.iter().collect();
     let say = signature_speech(sp, &types, &[enum_name]);
     format!(
         "variant of {}: {}",
         say.name(enum_name),
-        variant_arm(v, &say)
+        variant_arm(v, &|t| spell(&say, t))
     )
 }
 
@@ -2389,7 +2364,10 @@ fn variant_detail(enum_name: &str, v: &EnumVariant, sp: &Spellings) -> String {
 fn spell(say: &Speech, ty: &Type) -> String {
     match ty {
         Type::Enum(vs) if !crate::types::is_sum_alias(ty) => {
-            let arms = vs.iter().map(|v| variant_arm(v, say)).collect::<Vec<_>>();
+            let arms = vs
+                .iter()
+                .map(|v| variant_arm(v, &|t| spell(say, t)))
+                .collect::<Vec<_>>();
             format!("{{ {} }}", arms.join(" | "))
         }
         other => say.ty(other).to_string(),
