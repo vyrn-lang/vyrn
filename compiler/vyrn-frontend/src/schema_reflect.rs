@@ -653,7 +653,7 @@ fn schema_lit_for_type(ty: &Type, types: &HashMap<String, TypeDecl>) -> Expr {
 
 /// Renders a type declaration as canonical Vyrn source, so a generator can
 /// re-emit it. Synthetic `Parent.field` refinements fold back into the record.
-pub fn render_type_decl(t: &TypeDecl, types: &HashMap<String, TypeDecl>) -> String {
+fn render_type_decl(t: &TypeDecl, types: &HashMap<String, TypeDecl>) -> String {
     let mut out = String::new();
     if t.exported {
         out.push_str("export ");

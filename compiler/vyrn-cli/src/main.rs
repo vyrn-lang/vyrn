@@ -3694,7 +3694,7 @@ pub struct ServeRequest {
 }
 
 /// The fields a served `handle`'s `Response` returned, for the wire.
-pub struct ServeResponse {
+struct ServeResponse {
     pub status: i64,
     pub content_type: String,
     pub body: String,
@@ -3706,7 +3706,7 @@ pub struct ServeResponse {
 
 /// What the host asks the engine for. A stream is pulled after the call that
 /// opened it returned.
-pub enum ServeCall {
+enum ServeCall {
     Handle(ServeRequest),
     /// The next frame of the stream the last [`ServeAnswer::Live`] opened.
     Next,
@@ -3716,7 +3716,7 @@ pub enum ServeCall {
 }
 
 /// What the engine answers.
-pub enum ServeAnswer {
+enum ServeAnswer {
     /// A complete response, with the `Vary` and conditional-request handling
     /// only a complete response has.
     Buffered(ServeResponse),

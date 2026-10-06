@@ -43,7 +43,7 @@ pub fn ctor_name(name: &str) -> String {
 /// Returns the arguments of a call to [`pred_name`], given the expression for
 /// the whole value: each field of a record base, or the value itself, as
 /// [`crate::types::predicate_binds`] lists them.
-pub fn pred_args(decl: &TypeDecl, value: Expr) -> Vec<Expr> {
+fn pred_args(decl: &TypeDecl, value: Expr) -> Vec<Expr> {
     crate::types::predicate_binds(decl)
         .into_iter()
         .map(|(name, _, field)| match field {

@@ -309,7 +309,7 @@ fn locate<'a>(
 /// `VYRN_NO_JUDGE=1` is a bisect knob that sets the judgments aside: the floor
 /// refuses every scanned carrier, reached or not, inside the load and before
 /// every type error. `tests/floor.rs` pins it.
-pub fn no_judge() -> bool {
+fn no_judge() -> bool {
     static OFF: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *OFF.get_or_init(|| std::env::var("VYRN_NO_JUDGE").is_ok_and(|v| v == "1"))
 }

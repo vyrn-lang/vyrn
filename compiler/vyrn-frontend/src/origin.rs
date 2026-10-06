@@ -254,7 +254,7 @@ impl OriginMaps {
 }
 
 /// The anchor a `//@diag` line writes when it has no position to give.
-pub const NO_POSITION: &str = "-";
+const NO_POSITION: &str = "-";
 
 /// Returns the `//@diag <error|warning> <anchor> <message>` lines of a
 /// synthesized module as diagnostics; `//@warning` is

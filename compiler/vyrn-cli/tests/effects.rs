@@ -477,7 +477,7 @@ fn run_corpus() {
         // defunctionalization sources and the functions handed to a
         // `fn`-typed parameter. A named source is its instances; a
         // lambda source is its frame.
-        let stored = vyrn_frontend::checker::stored_fn_effects(&program);
+        let stored = vyrn_frontend::checker::record(&program).stored;
         let mut module_state_of: std::collections::HashMap<String, bool> =
             std::collections::HashMap::new();
         let mut through = |ty: &Type| -> Callee {

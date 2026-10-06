@@ -204,13 +204,6 @@ fn from_doc(doc: Json, slash_dir: String) -> Result<Manifest, String> {
     })
 }
 
-/// Returns the parsed `vyrn.json` governing `dir`. `None` covers both no
-/// manifest and an unreadable one; [`find`] reports the unreadable one.
-pub fn doc_in(dir: &Path) -> Option<Json> {
-    let text = std::fs::read_to_string(dir.join("vyrn.json")).ok()?;
-    crate::schema::parse_json(&text).ok()
-}
-
 /// Returns the modules role discovery reads, as `(slash path,
 /// source)` pairs: the manifest's entry points and every `.vyrn` directly in
 /// the app directory.

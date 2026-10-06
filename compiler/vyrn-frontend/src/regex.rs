@@ -17,7 +17,7 @@
 
 /// A character class: one bit per byte value.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
-pub struct ByteClass([u64; 4]);
+struct ByteClass([u64; 4]);
 
 impl ByteClass {
     fn empty() -> Self {
@@ -492,7 +492,7 @@ pub struct Dfa {
 }
 
 impl Dfa {
-    pub fn num_states(&self) -> usize {
+    fn num_states(&self) -> usize {
         self.accepting.len()
     }
 
@@ -732,7 +732,7 @@ impl Dfa {
 
 /// Renders bytes for a diagnostic: the UTF-8 string if valid, otherwise
 /// printable ASCII verbatim and every other byte as `\xNN`.
-pub fn escape_bytes(bytes: &[u8]) -> String {
+fn escape_bytes(bytes: &[u8]) -> String {
     match std::str::from_utf8(bytes) {
         Ok(s) => s.to_string(),
         Err(_) => {
