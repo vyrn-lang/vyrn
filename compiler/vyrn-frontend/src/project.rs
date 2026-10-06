@@ -7,8 +7,7 @@
 //! ownership passes and the lowering key side tables by node.
 
 use crate::ast::{
-    Block, Expr, Function, Id, ImplBlock, LambdaBody, NodeId, Numbering, Program, Stmt, Type,
-    TypeDecl,
+    Block, Expr, Function, Id, ImplBlock, NodeId, Numbering, Program, Stmt, Type, TypeDecl,
 };
 use crate::types::Impls;
 use std::collections::{HashMap, HashSet};
@@ -499,11 +498,10 @@ fn substituted(
     // The receiver is a place: a `let` would copy the container.
     map.insert("self".to_string(), recv.clone());
     for (p, a) in f.params[1..].iter().zip(args) {
-        let uses = count_uses(&body, &p.name);
+        let uses = count_uses(&body, &p.name, true);
         // A use under a lambda or a loop runs once per call or turn, so only an
         // eager use outside both counts as exactly once.
-        if uses == 1 && uses_outside_lambdas(&body, &p.name) == 1 && !is_under_loop(&body, &p.name)
-        {
+        if uses == 1 && count_uses(&body, &p.name, false) == 1 && !is_under_loop(&body, &p.name) {
             map.insert(p.name.clone(), a.clone());
         } else {
             let tmp = format!("@p{tag}.{}", p.name);
@@ -732,60 +730,29 @@ fn rename_bindings(b: &mut Block, map: &HashMap<String, String>) {
     ren_block(b, &mut std::collections::HashSet::new(), &mut Rename(map));
 }
 
-fn count_uses(b: &Block, name: &str) -> usize {
+/// How many times `name` is read in `b`; a read in a lambda body counts only
+/// when `through_lambdas` is set.
+fn count_uses(b: &Block, name: &str, through_lambdas: bool) -> usize {
     let mut n = 0;
-    let mut probe = b.clone();
-    let map: HashMap<String, Expr> = HashMap::new();
-    count_block(&mut probe, name, &mut n, &map);
-    n
-}
-
-/// How many times `name` is read outside any lambda body in `b`.
-fn uses_outside_lambdas(b: &Block, name: &str) -> usize {
-    let mut probe = b.clone();
-    walk_block(&mut probe, &mut |e: &mut Expr| {
-        if let Expr::Lambda { body, .. } = e {
-            *body = LambdaBody::Block(Block {
-                id: Id::NEW,
-                stmts: Vec::new(),
-            });
+    crate::ast::each_expr(b, &mut |e| {
+        match e {
+            Expr::Var { name: v, .. } => n += usize::from(v == name),
+            Expr::Lambda { .. } => return through_lambdas,
+            _ => {}
         }
+        true
     });
-    count_uses(&probe, name)
-}
-
-fn count_block(b: &mut Block, name: &str, n: &mut usize, _m: &HashMap<String, Expr>) {
-    let mut counter = |e: &mut Expr| {
-        if matches!(e, Expr::Var { name: v, .. } if v == name) {
-            *n += 1;
-        }
-    };
-    walk_block(b, &mut counter);
+    n
 }
 
 /// Whether `name` is read inside a loop body.
 fn is_under_loop(b: &Block, name: &str) -> bool {
-    fn go(b: &Block, name: &str, in_loop: bool) -> bool {
-        for s in &b.stmts {
-            match s {
-                Stmt::While { body, .. } | Stmt::ForIn { body, .. } => {
-                    if count_uses(body, name) > 0 || go(body, name, true) {
-                        return true;
-                    }
-                }
-                _ => {
-                    if crate::ast::sub_blocks(s)
-                        .into_iter()
-                        .any(|b| go(b, name, in_loop))
-                    {
-                        return true;
-                    }
-                }
-            }
-        }
-        false
-    }
-    go(b, name, false)
+    b.stmts.iter().any(|s| match s {
+        Stmt::While { body, .. } | Stmt::ForIn { body, .. } => count_uses(body, name, true) > 0,
+        _ => crate::ast::sub_blocks(s)
+            .into_iter()
+            .any(|b| is_under_loop(b, name)),
+    })
 }
 
 fn subst_block(b: &mut Block, map: &HashMap<String, Expr>) {
@@ -888,11 +855,9 @@ pub fn place_root(e: &Expr) -> Option<String> {
 /// return from.
 pub fn has_try(b: &Block) -> bool {
     let mut found = false;
-    let mut probe = b.clone();
-    walk_block(&mut probe, &mut |e: &mut Expr| {
-        if matches!(e, Expr::Try { .. }) {
-            found = true;
-        }
+    crate::ast::each_expr(b, &mut |e| {
+        found |= matches!(e, Expr::Try { .. });
+        !found
     });
     found
 }
@@ -1220,7 +1185,7 @@ mod tests {
                     seen_lambda = true;
                     assert_eq!(params.len(), 1);
                     assert!(params[0].starts_with("@b"), "binder renamed: {}", params[0]);
-                    if let LambdaBody::Expr(inner) = body {
+                    if let crate::ast::LambdaBody::Expr(inner) = body {
                         assert!(
                             matches!(inner.as_ref(), Expr::Binary { .. }),
                             "the lambda body still computes from its own binder"

@@ -2487,6 +2487,22 @@ pub fn exprs_one(s: &Stmt, f: &mut dyn FnMut(&Expr, &std::collections::HashSet<S
     ast_stmt(s, &mut std::collections::HashSet::new(), &mut Exprs(f));
 }
 
+struct Each<'f>(&'f mut dyn FnMut(&Expr) -> bool);
+
+impl AstVisit<'_> for Each<'_> {
+    const SCOPED: bool = false;
+
+    fn expr(&mut self, e: &Expr, _: &std::collections::HashSet<String>) -> bool {
+        (self.0)(e)
+    }
+}
+
+/// Calls `f` on every expression of `b` before its children, in source order.
+/// `f` returns `false` to skip the expression's children.
+pub fn each_expr(b: &Block, f: &mut dyn FnMut(&Expr) -> bool) {
+    ast_block(b, &mut std::collections::HashSet::new(), &mut Each(f));
+}
+
 struct Binders<'f>(&'f mut dyn FnMut(&str));
 
 impl AstVisit<'_> for Binders<'_> {
