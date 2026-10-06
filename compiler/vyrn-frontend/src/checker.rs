@@ -4427,9 +4427,6 @@ impl<'a> Checker<'a> {
         };
         match name {
             "@lane" => {
-                if args.len() != 2 {
-                    return Err(cerr!(line, LaneArity, got = args.len()));
-                }
                 let v = self.base(&self.expr(&args[0], scope, None, fn_ret)?);
                 if matches!(v, Type::Err) {
                     return Ok(Type::Err);
@@ -4446,9 +4443,6 @@ impl<'a> Checker<'a> {
             // `v.replaceLane(k, x)`, on a vector only: masks come only from
             // comparison.
             "@replaceLane" => {
-                if args.len() != 3 {
-                    return Err(cerr!(line, ReplaceLaneArity, got = args.len() - 1));
-                }
                 let v = self.base(&self.expr(&args[0], scope, None, fn_ret)?);
                 if matches!(v, Type::Err) {
                     return Ok(Type::Err);
@@ -4470,14 +4464,7 @@ impl<'a> Checker<'a> {
             // A mask reduced to one `Bool`. Masks only: on a float vector it
             // would hide the NaN rule that `v != F32x4.splat(0.0)` states.
             "@anyTrue" | "@allTrue" => {
-                let what = if name == "@anyTrue" {
-                    "anyTrue"
-                } else {
-                    "allTrue"
-                };
-                if args.len() != 1 {
-                    return Err(cerr!(line, MaskArity, what, got = args.len() - 1));
-                }
+                let what = &name[1..];
                 let m = self.base(&self.expr(&args[0], scope, None, fn_ret)?);
                 if matches!(m, Type::Err) {
                     return Ok(Type::Err);

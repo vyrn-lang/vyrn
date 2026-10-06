@@ -723,18 +723,22 @@ fn table() -> Vec<Builtin> {
         // `allTrue` are the wasm instructions' names, which leave `any` and `all`
         // free.
         b("@lane")
+            .takes(&[2], |_, _, got| rule!(LaneArity, got))
             .method("lane", &[])
             .spec(Spec::Lanes)
             .hover("vector.lane(k) -> T — read lane `k` of an `F32x4`, `I32x4`, `F64x2` or mask; `k` is a compile-time constant inside the width"),
         b("@replaceLane")
+            .takes(&[3], |_, _, got| rule!(ReplaceLaneArity, got = got.saturating_sub(1)))
             .method("replaceLane", &[])
             .spec(Spec::Lanes)
             .hover("vector.replaceLane(k, x) -> Vector — the same vector with lane `k` set to `x`; `k` is a compile-time constant inside the width"),
         b("@anyTrue")
+            .takes(&[1], |n, _, got| rule!(MaskArity, what = &n[1..], got = got.saturating_sub(1)))
             .method("anyTrue", &[])
             .spec(Spec::Lanes)
             .hover("mask.anyTrue() -> Bool — whether any lane of a comparison mask is set"),
         b("@allTrue")
+            .takes(&[1], |n, _, got| rule!(MaskArity, what = &n[1..], got = got.saturating_sub(1)))
             .method("allTrue", &[])
             .spec(Spec::Lanes)
             .hover("mask.allTrue() -> Bool — whether every lane of a comparison mask is set"),
