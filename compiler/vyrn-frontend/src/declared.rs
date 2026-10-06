@@ -449,18 +449,6 @@ pub fn holes_under(holes: &[String], name: &str) -> Vec<String> {
         .collect()
 }
 
-/// Whether `e` allocates a fresh String no binding names (`@str`, `@concat`,
-/// `+`), so its consumer must release it. The caller must also check the type
-/// is `String`, because `+` also adds integers and joins `Code`. A call result
-/// is not covered here: [`crate::movecheck::ArgVerdict`] answers for it.
-pub fn str_temporary(e: &Expr) -> bool {
-    match e {
-        Expr::Call { name, .. } => name == "@str" || name == "@concat",
-        Expr::Binary { op: BinOp::Add, .. } => true,
-        _ => false,
-    }
-}
-
 /// Whose capability row answers a call: the callee as the core resolved it,
 /// before dispatch.
 #[derive(Clone, Copy, Debug)]

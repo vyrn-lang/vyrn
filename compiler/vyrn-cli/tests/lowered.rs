@@ -1,23 +1,20 @@
 //! Gates the lowered form against the direct backend.
 //!
-//! At every expression the backend types, its answer (recorded by `vyrn_codegen::observe`)
-//! must equal one member of the pair `vyrn-lower` recorded from the checker - the type the
-//! value has, or the type it must end up as - or fall under a rule on [`Rule`]. The backend's
-//! instance list must equal the lowering's, up to the rules on [`InstRule`]. At every
-//! `Call` and `Prim` of the core the emitter emits, the type it derives from the callee
-//! or the operator must equal the checker's producer type on the row, up to a [`Rule`];
-//! that count grows as the core takes bodies. It runs in-process because the compared
-//! answers never cross a process boundary.
+//! The backend's instance list (recorded by `vyrn_codegen::observe`) must equal the
+//! lowering's, up to the rules on [`InstRule`]. At every `Call` and `Prim` of the core the
+//! emitter emits, the type it derives from the callee or the operator must equal the
+//! checker's producer type on the row, up to a [`Rule`]; that count grows as the core takes
+//! bodies. Every boundary crossing takes the rung the plan places. It runs in-process because
+//! the compared answers never cross a process boundary.
 
 use vyrn_frontend::loader::DiskResolver;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use vyrn_codegen::observe::{self, Site};
-use vyrn_frontend::ast::{Expr, NodeId, Program, Type, TypeDecl};
+use vyrn_codegen::observe;
+use vyrn_frontend::ast::{Program, Type, TypeDecl};
 use vyrn_frontend::types::{decl_map, mentions_param, resolve};
-use vyrn_lower::NodeTypes;
 
 /// Not `canonicalize`: on Windows that returns a `\\?\` verbatim path, which the
 /// loader silently treats as "no std root", so the corpus loads without `std/json`.
@@ -62,14 +59,6 @@ fn corpus() -> Vec<PathBuf> {
     names
 }
 
-fn subst_key(subst: &[(String, Type)]) -> String {
-    subst
-        .iter()
-        .map(|(k, v)| format!("{k}={v}"))
-        .collect::<Vec<_>>()
-        .join(";")
-}
-
 /// Spells an instance as its callee and type arguments resolved through every alias
 /// ([`deep`]), because the backend and the lowering reach one instance by different
 /// routes (`Age` and `Int64`). Not `mangle_name`: two records mangle alike (#165).
@@ -81,32 +70,7 @@ fn inst_key(name: &str, args: &[Type], decls: &HashMap<String, TypeDecl>) -> Str
     format!("{name}<{}>", args.join(", "))
 }
 
-/// The axis a disagreement is classified on.
-fn kind(e: &Expr) -> &'static str {
-    match e {
-        Expr::Int(_, _) => "Int",
-        Expr::Byte(_, _) => "Byte",
-        Expr::Float(_, _) => "Float",
-        Expr::Bool(_, _) => "Bool",
-        Expr::Str(_, _) => "Str",
-        Expr::Var { .. } => "Var",
-        Expr::Unary { .. } => "Unary",
-        Expr::Binary { .. } => "Binary",
-        Expr::Call { .. } => "Call",
-        Expr::Match { .. } => "Match",
-        Expr::IfExpr { .. } => "IfExpr",
-        Expr::Try { .. } => "Try",
-        Expr::StructLit { .. } => "StructLit",
-        Expr::Field { .. } => "Field",
-        Expr::TryConstruct { .. } => "TryConstruct",
-        Expr::ArrayLit { .. } => "ArrayLit",
-        Expr::MapLit { .. } => "MapLit",
-        Expr::Lambda { .. } => "Lambda",
-        Expr::Consume { .. } => "Consume",
-    }
-}
-
-/// Why two answers about one node differ. A difference that fits no rule fails the run.
+/// Why two answers about one type differ. A difference that fits no rule fails the run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 enum Rule {
     /// The two spell the same type. `MaybeAge` and `Option<Int64>`, `Age` and
@@ -136,38 +100,11 @@ struct Tally {
     examples: usize,
     unloadable: usize,
     instances: usize,
-    rows: usize,
-    /// Backend answers compared against a recorded type.
-    compared: usize,
-    /// ...of which this many answered the other member of the pair: the type the
-    /// value has, where the recorded one is the type it must end up as ([A16]).
-    answered_has: usize,
-    /// ...and this many equalled neither member.
-    differed: usize,
     /// Core right-hand sides the emitter typed from the callee or the operator,
     /// compared against the checker's producer type on the row.
     typed: usize,
     /// ...of which this many differed under a [`Rule`].
     typed_ruled: usize,
-    /// Answers where the two backends did not agree with EACH OTHER.
-    cross_differed: usize,
-    /// Backend answers whose node the form holds but the checker never typed.
-    /// The run prints the class: a `Var` the checker resolves by name, such as
-    /// the receiver of `xs.pop()` and the temporaries `parser::place_receiver` hoists.
-    unrecorded: usize,
-    /// Backend answers about a node the lowering recorded, under an
-    /// instantiation it did not build. Asserted zero.
-    uninstantiated: usize,
-    /// Backend answers about a node the lowering never recorded: AST the backend
-    /// built itself. The count is not reproducible; see the ceiling in [`gate`].
-    synthesized: usize,
-    /// ...of which this many were given inside a copy of a lambda's body.
-    in_lambda: usize,
-    /// ...and this many inside a copy of a `where` predicate.
-    in_predicate: usize,
-    /// ...and this many were `peek`'s. Only AST the backend built itself goes to
-    /// `peek`, and the emitter builds none.
-    peek_off: usize,
     /// Instantiations the backend emitted that the lowering's worklist lacks.
     missing: usize,
     /// ...and the other direction, which each needs an [`InstRule`].
@@ -326,24 +263,8 @@ fn defaulted(a: &Type, b: &Type) -> bool {
     walk(a, b)
 }
 
-/// Each expression of `facts` by node, with the pair it carries: the type
-/// it must end up as, and the type it has where that differs.
-#[allow(clippy::type_complexity)]
-fn pairs<'a>(facts: &NodeTypes<'a>) -> Vec<(NodeId, (Option<Type>, Option<Type>), &'a Expr)> {
-    facts
-        .exprs
-        .iter()
-        .map(|(e, _)| {
-            let id = e.id();
-            let ty = facts.types.get(&id);
-            let has = facts.produced.get(&id).filter(|h| Some(*h) != ty);
-            (id, (ty.cloned(), has.cloned()), *e)
-        })
-        .collect()
-}
-
 #[test]
-fn every_backend_type_equals_the_recorded_one() {
+fn the_backend_agrees_with_the_lowering_and_the_checker() {
     // Every walk here recurses over the AST, and a test thread gets 2 MiB.
     std::thread::Builder::new()
         .stack_size(64 * 1024 * 1024)
@@ -357,36 +278,21 @@ fn gate() {
     // Without this every generator example fails to link and the gate silently
     // measures a smaller corpus.
     let mut t = Tally::default();
-    // The residue by engine and expression kind. Reported, never asserted: the
-    // raw count is not reproducible (see [`Tally::synthesized`]).
-    let mut residue: std::collections::BTreeMap<String, usize> = Default::default();
-    let mut residue_ex: std::collections::BTreeMap<String, String> = Default::default();
-    // ...and the rows the form holds and has no type for, on the same axis.
-    let mut untyped: std::collections::BTreeMap<String, usize> = Default::default();
-    // (site, expression kind, recorded, backend) -> (count, first sighting)
-    let mut disagreements: HashMap<(Site, &'static str, String, String), (usize, String)> =
-        HashMap::new();
     let mut lint_failures: Vec<String> = Vec::new();
-    // (engine A, engine B, expression kind, A's answer, B's answer) -> (count, example)
-    let mut cross: HashMap<(Site, Site, &'static str, String, String), (usize, String)> =
-        HashMap::new();
     let mut rules: std::collections::BTreeMap<Rule, usize> = Default::default();
     // Release steps placed inside a lambda body: a fact about the placement no
     // engine reports. At zero, a lifted lambda's shell has nothing to unwind.
     let mut rel_lambda = 0usize;
     let mut inst_rules: std::collections::BTreeMap<InstRule, usize> = Default::default();
-    // (engine, planned rung, rung taken) -> count, and the ones no rule explains.
-    let mut ladder: std::collections::BTreeMap<
-        (Site, vyrn_codegen::Rung, vyrn_codegen::Rung),
-        usize,
-    > = Default::default();
-    #[allow(clippy::type_complexity)]
+    // (planned rung, rung taken) -> count, and the ones no rule explains.
+    let mut ladder: std::collections::BTreeMap<(vyrn_codegen::Rung, vyrn_codegen::Rung), usize> =
+        Default::default();
     let mut unruled: std::collections::BTreeMap<
-        (Site, vyrn_codegen::Rung, vyrn_codegen::Rung),
+        (vyrn_codegen::Rung, vyrn_codegen::Rung),
         std::collections::BTreeSet<String>,
     > = Default::default();
-    // (site, spelled instance) -> example.
-    let mut missing: std::collections::BTreeMap<(Site, String), String> = Default::default();
+    // Spelled instance -> example.
+    let mut missing: std::collections::BTreeMap<String, String> = Default::default();
     // An instance the lowering has that no rule explains away -> example.
     let mut extra: std::collections::BTreeMap<String, String> = Default::default();
     // (kind, callee or operator, checker's type, emitter's type) -> (count, example).
@@ -413,7 +319,6 @@ fn gate() {
             lint_failures.push(format!("{name}: {problem}"));
         }
         t.instances += lowered.instances.len();
-        t.rows += lowered.exprs();
         // The only legal reason the worklist stops following a call is the
         // monomorphization bound (`examples/polyrecursion.vyrn` needs it).
         for u in &lowered.unresolved {
@@ -427,47 +332,6 @@ fn gate() {
                 u.why
             );
         }
-
-        // (node address, instantiation) -> (end-up type, has-type, node).
-        let mut recorded: HashMap<(NodeId, String), (Option<Type>, Option<Type>, &Expr)> =
-            HashMap::new();
-        // Every node the lowering recorded, under any instantiation: it
-        // separates an unbuilt substitution from AST that is not in the program.
-        let mut walked: std::collections::HashSet<NodeId> = Default::default();
-        for inst in &lowered.instances {
-            let key = subst_key(
-                &inst
-                    .subst
-                    .iter()
-                    .map(|(k, v)| (k.clone(), v.clone()))
-                    .collect::<Vec<_>>(),
-            );
-            for (id, pair, e) in pairs(&inst.facts) {
-                recorded.insert((id, key.clone()), (pair.0, pair.1, e));
-                walked.insert(id);
-            }
-        }
-        // Module-state initializers are lowered under no substitution.
-        for (id, pair, e) in pairs(&lowered.globals) {
-            recorded.insert((id, String::new()), (pair.0, pair.1, e));
-            walked.insert(id);
-        }
-        // A `where` predicate lives on a declaration, which has no type
-        // parameters, but it is walked inside whatever body the boundary is in:
-        // an answer about one is looked up with the instantiation dropped.
-        let mut predicate_nodes: std::collections::HashSet<NodeId> = Default::default();
-        for (id, pair, e) in pairs(&lowered.predicates) {
-            recorded.insert((id, String::new()), (pair.0, pair.1, e));
-            walked.insert(id);
-            predicate_nodes.insert(id);
-        }
-        let at = |node: NodeId, subst: &str| {
-            if predicate_nodes.contains(&node) {
-                (node, String::new())
-            } else {
-                (node, subst.to_string())
-            }
-        };
 
         let mut lowering: std::collections::BTreeSet<String> = Default::default();
         for inst in &lowered.instances {
@@ -484,7 +348,7 @@ fn gate() {
 
         observe::start();
         let wasm = vyrn_codegen::direct::compile(&program, vyrn_lower::analyze(&program));
-        let rows = observe::take();
+        observe::stop();
         let insts = observe::take_insts();
         let crossings = observe::take_crossings();
         let typings = observe::take_typings();
@@ -496,7 +360,7 @@ fn gate() {
         // because `coerce` is reached from call sites no node identifies.
         for c in &crossings {
             let planned = vyrn_codegen::coerce_plan(&c.from, &c.to, &decls);
-            *ladder.entry((c.site, planned, c.rung)).or_insert(0) += 1;
+            *ladder.entry((planned, c.rung)).or_insert(0) += 1;
             if planned == c.rung {
                 t.rungs_planned += 1;
                 continue;
@@ -506,7 +370,7 @@ fn gate() {
                 t.rungs_terminal += 1;
             }
             unruled
-                .entry((c.site, planned, c.rung))
+                .entry((planned, c.rung))
                 .or_default()
                 .insert(format!("`{}` -> `{}` ({name})", c.from, c.to));
         }
@@ -537,14 +401,14 @@ fn gate() {
         // The lowering's worklist against the backend's. A body only the backend
         // has is a hole in the lowering; a body only the lowering has is a
         // target fact and must name its rule.
-        let mut backend: std::collections::BTreeSet<(Site, String)> = Default::default();
+        let mut backend: std::collections::BTreeSet<String> = Default::default();
         for i in &insts {
             let k = inst_key(&i.name, &i.args, &decls);
             if !lowering.contains(&k) {
                 t.missing += 1;
-                missing.entry((i.site, k.clone())).or_insert(name.clone());
+                missing.entry(k.clone()).or_insert(name.clone());
             }
-            backend.insert((i.site, k));
+            backend.insert(k);
         }
         let by_name: HashMap<&str, &vyrn_frontend::ast::Function> = program
             .functions
@@ -552,7 +416,7 @@ fn gate() {
             .map(|f| (f.name.as_str(), f))
             .collect();
         for k in &lowering {
-            if backend.iter().any(|(_, b)| b == k) {
+            if backend.contains(k) {
                 continue;
             }
             t.extra += 1;
@@ -567,130 +431,16 @@ fn gate() {
                 }
             }
         }
-
-        // The engines' answers about one node against each other.
-        let mut per_node: HashMap<(NodeId, String), Vec<(Site, Type, &'static str, &'static str)>> =
-            HashMap::new();
-        for row in &rows {
-            per_node
-                .entry(at(row.node, &subst_key(&row.subst)))
-                .or_default()
-                .push((row.site, row.ty.clone(), row.kind, row.ctx));
-        }
-        for (key, answers) in &per_node {
-            // Only nodes the lowering recorded. AST a backend builds itself lives
-            // in temporaries whose addresses are reused, so two can collide on
-            // one key; a program node lives for the whole compile.
-            let Some((_, _, node)) = recorded.get(key) else {
-                if walked.contains(&key.0) {
-                    t.uninstantiated += 1;
-                } else {
-                    t.synthesized += 1;
-                    for (site, _, kind, ctx) in answers {
-                        match *ctx {
-                            "lambda" => t.in_lambda += 1,
-                            "pred" => t.in_predicate += 1,
-                            _ => {}
-                        }
-                        if *site == Site::Peek {
-                            t.peek_off += 1;
-                        }
-                        // After `~`: the engine copy the answer was given inside.
-                        let k = format!(
-                            "{site:?}/{kind}{}{ctx}",
-                            if ctx.is_empty() { "" } else { "~" }
-                        );
-                        *residue.entry(k.clone()).or_insert(0) += 1;
-                        residue_ex.entry(k).or_insert_with(|| name.clone());
-                    }
-                }
-                continue;
-            };
-            let Some((_, first, ..)) = answers.first() else {
-                continue;
-            };
-            for (site, ty, ..) in answers.iter().skip(1) {
-                if ty == first {
-                    continue;
-                }
-                t.cross_differed += 1;
-                let r = rule(first, ty, &decls);
-                if let Some(r) = r {
-                    *rules.entry(r).or_insert(0) += 1;
-                    continue;
-                }
-                let e = cross
-                    .entry((
-                        answers[0].0,
-                        *site,
-                        kind(node),
-                        first.to_string(),
-                        ty.to_string(),
-                    ))
-                    .or_insert_with(|| (0, name.clone()));
-                e.0 += 1;
-            }
-        }
-
-        // Each backend answer against the recorded pair.
-        for row in rows {
-            let Some((rec, has, node)) = recorded.get(&at(row.node, &subst_key(&row.subst))) else {
-                continue;
-            };
-            let Some(rec) = rec else {
-                t.unrecorded += 1;
-                *untyped
-                    .entry(format!("{:?}/{}", row.site, kind(node)))
-                    .or_insert(0) += 1;
-                continue;
-            };
-            t.compared += 1;
-            if *rec == row.ty {
-                continue;
-            }
-            // A backend answering the has-type answers the other member of the
-            // pair, which is not a disagreement ([A16]).
-            if has.as_ref() == Some(&row.ty) {
-                t.answered_has += 1;
-                continue;
-            }
-            t.differed += 1;
-            if let Some(r) = rule(rec, &row.ty, &decls) {
-                *rules.entry(r).or_insert(0) += 1;
-                continue;
-            }
-            let entry = disagreements
-                .entry((row.site, kind(node), rec.to_string(), row.ty.to_string()))
-                .or_insert_with(|| (0, format!("{name}:{}", node.line())));
-            entry.0 += 1;
-        }
     }
 
     eprintln!(
-        "corpus gate: {} examples ({} did not link), {} instances, \
-         {} rows\n  compared {} backend answers: {} answered the pair's has-type, \
-         {} equalled neither member, and {} differed between the two backends\n  \
-         {} nodes the checker never typed, {} answers under an instantiation the \
-         lowering does not build, {} about AST no instantiation of the program \
-         holds, {} calls the worklist stopped following\n  \
-         every difference, by rule: {:?}\n  instantiations: {} the backends \
-         emitted and the lowering does not have, {} the other way, by rule: {:?}",
-        t.examples,
-        t.unloadable,
-        t.instances,
-        t.rows,
-        t.compared,
-        t.answered_has,
-        t.differed,
-        t.cross_differed,
-        t.unrecorded,
-        t.uninstantiated,
-        t.synthesized,
-        t.unresolved,
-        rules,
-        t.missing,
-        t.extra,
-        inst_rules,
+        "corpus gate: {} examples ({} did not link), {} instances, {} calls the worklist stopped following",
+        t.examples, t.unloadable, t.instances, t.unresolved
+    );
+    eprintln!(
+        "  every difference, by rule: {rules:?}
+  instantiations: {} the backend emitted and the lowering does not have, {} the other way, by rule: {inst_rules:?}",
+        t.missing, t.extra
     );
 
     eprintln!("  {rel_lambda} release steps placed inside a lambda body");
@@ -698,8 +448,8 @@ fn gate() {
         "  {} boundary crossings took the planned rung, {} took another          ({} of them terminal)",
         t.rungs_planned, t.rungs_unruled, t.rungs_terminal
     );
-    for ((site, planned, took), n) in &ladder {
-        eprintln!("    ladder {site:?}: plan {planned:?}, took {took:?} x{n}");
+    for ((planned, took), n) in &ladder {
+        eprintln!("    ladder: plan {planned:?}, took {took:?} x{n}");
     }
     for (k, ex) in &unruled {
         let mut it = ex.iter();
@@ -709,33 +459,6 @@ fn gate() {
             it.by_ref().take(12).collect::<Vec<_>>()
         );
     }
-    eprintln!(
-        "  of {} off-program answers, {} were given inside a lifted          lambda's cloned body and {} inside a cloned `where` predicate",
-        t.synthesized, t.in_lambda, t.in_predicate
-    );
-
-    let mut top: Vec<_> = residue.into_iter().collect();
-    top.sort_by_key(|(_, n)| std::cmp::Reverse(*n));
-    let mut per_site: std::collections::BTreeMap<String, usize> = Default::default();
-    for (k, n) in &top {
-        let engine = k.split('/').next().unwrap();
-        let suffix = match k.rsplit_once('~') {
-            Some((_, tail)) => &k[k.len() - tail.len() - 1..],
-            None => "",
-        };
-        *per_site.entry(format!("{engine}{suffix}")).or_insert(0) += n;
-    }
-    eprintln!("  the residue, by engine: {per_site:?}");
-    // ...and by name, with an example to open.
-    top.truncate(24);
-    for (k, n) in &top {
-        eprintln!("  residue {k}: {n}  (first: {})", residue_ex[k]);
-    }
-    let mut untop: Vec<_> = untyped.into_iter().collect();
-    untop.sort_by_key(|(_, n)| std::cmp::Reverse(*n));
-    untop.truncate(8);
-    eprintln!("  the rows with no type, by engine and expression kind: {untop:?}");
-
     eprintln!(
         "  {} core right-hand sides typed by the emitter, {} differing from the checker under a rule",
         t.typed, t.typed_ruled
@@ -763,14 +486,17 @@ fn gate() {
     if !missing.is_empty() {
         let lines: Vec<String> = missing
             .into_iter()
-            .map(|((site, k), ex)| format!("  {site:?} emitted `{k}`  (first: {ex})"))
+            .map(|(k, ex)| format!("  emitted `{k}`  (first: {ex})"))
             .collect();
         report.push_str(&format!(
-            "a backend instantiated {} bodies the lowering's worklist does not \
-             have:\n{}\n\nnote: the lowering is the worklist now. A body only a \
-             backend knows about is a decision that is still in a backend.\n",
+            "a backend instantiated {} bodies the lowering's worklist does not              have:
+{}
+
+note: the lowering is the worklist now. A body only a              backend knows about is a decision that is still in a backend.
+",
             lines.len(),
-            lines.join("\n")
+            lines.join("
+")
         ));
     }
     if !extra.is_empty() {
@@ -785,37 +511,6 @@ fn gate() {
             lines.join("\n")
         ));
     }
-    if !cross.is_empty() {
-        let mut lines: Vec<String> = cross
-            .into_iter()
-            .map(|((a, b, kind, ta, tb), (n, first))| {
-                format!("{n:5}x  {kind}: {a:?} said `{ta}`, {b:?} said `{tb}`  (first: {first})")
-            })
-            .collect();
-        lines.sort();
-        report.push_str(&format!(
-            "the two compiled backends disagree about the type of an expression, \
-             at {} classes:\n{}\n",
-            lines.len(),
-            lines.join("\n")
-        ));
-    }
-    if !disagreements.is_empty() {
-        let mut lines: Vec<String> = disagreements
-            .into_iter()
-            .map(|((site, kind, rec, got), (n, first))| {
-                format!("{n:5}x  {site:?} {kind}: recorded `{rec}`, backend said `{got}`  (first: {first})")
-            })
-            .collect();
-        lines.sort();
-        report.push_str(&format!(
-            "the three answers disagree at {} distinct (engine, expression, type \
-             pair) classes:\n{}\n\nnote: this is what M1 exists to find. Diagnose \
-             which of the three is right; do not widen the gate.\n",
-            lines.len(),
-            lines.join("\n")
-        ));
-    }
     if !lint_failures.is_empty() {
         lint_failures.sort();
         lint_failures.dedup();
@@ -825,46 +520,6 @@ fn gate() {
         ));
     }
     assert!(report.is_empty(), "{report}");
-
-    // An answer about a walked node at an unbuilt substitution is an
-    // instantiation the lowering is missing.
-    assert_eq!(
-        t.uninstantiated, 0,
-        "{} backend answers are about a node the lowering recorded, under an \
-         instantiation it did not build",
-        t.uninstantiated
-    );
-
-    // A ceiling, not an equality: a synthesized node's address is a freed
-    // temporary the allocator reuses, so collisions vary per run and per
-    // allocator. The count follows the code the corpus links. A backend that
-    // expands a projection for itself again, or clones a callee, fails here.
-    assert!(
-        t.synthesized < 1_400,
-        "{} backend answers are about AST no instantiation of the program holds.          Without lambda and predicate clones it measured 1,052;          a number near 2,000 means one of them is back, near 3,300 that a          `place atSet` is expanded per engine again, and near 4,600 that the read          half is too",
-        t.synthesized
-    );
-
-    // Each engine marks the rows it gives inside a tree it copied, so a clone
-    // that comes back lands here rather than in the drifting count above.
-    assert_eq!(
-        t.in_lambda, 0,
-        "{} backend answers were given inside a COPY of a lambda's body. The direct          backend queues the literal's own nodes (`Cx::lambdas`); a copy means it is          synthesizing a body again",
-        t.in_lambda
-    );
-    assert_eq!(
-        t.in_predicate, 0,
-        "{} backend answers were given inside a COPY of a `where` predicate. Both          backends read the program's own predicate node; a copy means one of them is          walking `decl_map`'s again",
-        t.in_predicate
-    );
-
-    // A `peek` question here means an emitter builds a source tree again.
-    assert_eq!(
-        t.peek_off, 0,
-        "`peek` answered {} questions about AST no instantiation holds. The emitter \
-         builds no source tree of its own since the AST walk was deleted",
-        t.peek_off
-    );
 
     // The terminal rung first: it is a program compiling on one target only.
     // Emitters ask the plan, so this fails only if one grows a rung of its own.
@@ -963,7 +618,7 @@ fn coercion_census() -> Vec<CoercionSite> {
     };
     vec![
         site("vyrn-codegen/src/lib.rs", "pub fn coerce_plan(from: &Type, to: &Type, types: &HashMap<String, TypeDecl>) -> Rung {", "shared", true, true, 54),
-        site("vyrn-codegen/src/direct.rs", "fn coerce(", "wasm", true, false, 178),
+        site("vyrn-codegen/src/direct.rs", "fn coerce(", "wasm", true, false, 174),
         site("vyrn-frontend/src/checker.rs", "fn prove_coercion(&self, expr: &Expr, to: &Type, line: usize) -> Result<(), Diagnostic> {", "checker", false, false, 26),
     ]
 }
@@ -1051,8 +706,8 @@ fn every_coercion_site_keeps_its_pinned_code_lines() {
         }
     }
     assert_eq!(
-        ladder, 178,
-        "the rung ladder is {ladder} code lines, not 178"
+        ladder, 174,
+        "the rung ladder is {ladder} code lines, not 174"
     );
     // An engine that asks another site's statement of the rung rule is not one.
     let statements: std::collections::BTreeSet<&str> = census

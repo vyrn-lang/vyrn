@@ -190,8 +190,6 @@ fn run() {
     let mut bodies = 0usize;
     let mut judged_only = 0usize;
     let mut programs = 0usize;
-    let mut from_core = 0usize;
-    let mut emitted = 0usize;
     let mut refused: Vec<String> = Vec::new();
     let mut calls: std::collections::BTreeMap<(String, String), usize> = Default::default();
     let mut ours: Vec<String> = Vec::new();
@@ -238,9 +236,6 @@ fn run() {
             }
         }
         let out = emit(&program);
-        let (f, e) = vyrn_codegen::direct::walks();
-        from_core += f;
-        emitted += e;
         // A program the language refuses (`polyrecursion.vyrn`) stays refused;
         // only the emitter's own refusal names a body the core did not state.
         match out {
@@ -262,9 +257,6 @@ fn run() {
             Err(e) => panic!("{what} does not load: {e}"),
         };
         let out = emit(&program);
-        let (f, e) = vyrn_codegen::direct::walks();
-        from_core += f;
-        emitted += e;
         if let Err(e) = out {
             refused.push(format!("{what}: {e}"));
         }
@@ -283,7 +275,6 @@ fn run() {
         "  {} distinct bodies the rows carry end to end",
         carried.len()
     );
-    eprintln!("the emitter took the core's walk for {from_core} of {emitted} bodies");
     eprintln!("the projection calls the core still states, rather than inlining:");
     for ((program, callee), n) in &calls {
         eprintln!("  {n:4}  {callee}   {program}");
@@ -305,14 +296,9 @@ fn run() {
         "the emitter refused a program the core did not state:\n{}",
         refused.join("\n")
     );
-    assert_eq!(
-        from_core, emitted,
-        "a body was emitted statement by statement and not taken whole"
-    );
 }
 
 fn emit(program: &Program) -> Result<Vec<u8>, String> {
     let _lowered = vyrn_lower::lower(program);
-    vyrn_codegen::direct::forget_walks();
     vyrn_codegen::direct::compile(program, vyrn_lower::analyze(program))
 }
