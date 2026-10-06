@@ -1042,20 +1042,6 @@ fn build_seeded(
     names: &mut NameMemo,
     seed: &std::collections::HashSet<NodeId>,
 ) -> Result<Body, Gap> {
-    let (types, produced, solved) = (
-        inst.facts.types.clone(),
-        inst.facts.produced.clone(),
-        inst.facts.solved.clone(),
-    );
-    let sp = program.spellings.speech(&inst.func.module);
-    let mistyped = judged(&inst.facts, own, &sp);
-    let refused = unbound(
-        &inst.facts,
-        own,
-        &program.impls,
-        &inst.func.type_bounds,
-        &sp,
-    );
     // The plan's own rows, not the instance's copy: the copy predates the
     // rows [`augment`] places. The copy adds only the substituted type a
     // `Deep` walks, and nothing below reads a kind.
@@ -1064,37 +1050,20 @@ fn build_seeded(
     for r in own.releases.get(&inst.func_id).unwrap_or(&no_steps) {
         placed.entry((r.exit, r.site)).or_default().push(r);
     }
-    let mut b = Builder {
+    let mut b = Builder::new(
         program,
         own,
         fns,
-        proto: &own.proto,
         names,
-        types,
-        produced,
-        solved,
-        placed,
-        body: Body {
-            id: fns.instance_id(inst),
-            name: inst.spelling(),
-            file: inst.func.module.clone(),
-            spellings: program.spellings.clone(),
-            export: inst.func.is_export_extern,
-            names: Vec::new(),
-            params: Vec::new(),
-            stmts: Vec::new(),
-            lambdas: Vec::new(),
-            cands: Vec::new(),
-            loop_buffers: Vec::new(),
-            unbound_drops: Vec::new(),
-            refused,
-            mistyped,
-        },
-        frame: Frame::default(),
-        temps: 0,
+        &inst.facts,
         seed,
-        closed: false,
-    };
+        placed,
+        &inst.func.type_bounds,
+        fns.instance_id(inst),
+        inst.spelling(),
+        inst.func.module.clone(),
+        inst.func.is_export_extern,
+    );
     let f: &Function = inst.func;
     // A parameter's type is the instance's, not the declaration's:
     // `map<Int64, Int64>`'s `f` is `fn(Int64) -> Int64`, the shape stored
@@ -1149,16 +1118,19 @@ pub fn build_module_state<'a>(
 ) -> Result<Body, Gap> {
     let seed = std::collections::HashSet::new();
     let mut names = NameMemo::default();
-    let mut b = Builder::bare(
+    let mut b = Builder::new(
         program,
         own,
         fns,
         &mut names,
         facts,
         &seed,
+        HashMap::new(),
+        &HashMap::new(),
+        fns.id(""),
         String::new(),
         None,
-        HashMap::new(),
+        false,
     );
     let mut out = Vec::new();
     for g in &program.globals {
@@ -1219,16 +1191,19 @@ fn build_outside_seeded<'a>(
         placed.entry((r.exit, r.site)).or_default().push(r);
     }
     let (block, file) = (ob.block, ob.module.clone());
-    let mut b = Builder::bare(
+    let mut b = Builder::new(
         program,
         own,
         fns,
         names,
         &ob.facts,
         seed,
+        placed,
+        &HashMap::new(),
+        fns.id(&ob.name),
         ob.name.clone(),
         file,
-        placed,
+        false,
     );
     // The checker types a `test` or `bench` body as a function returning Unit.
     b.frame.ret = Some(Type::Unit);
@@ -1280,16 +1255,19 @@ pub fn build_root<'a>(
         ..facts.clone()
     };
     let seed = std::collections::HashSet::new();
-    let mut b = Builder::bare(
+    let mut b = Builder::new(
         program,
         own,
         fns,
         names,
         &facts,
         &seed,
+        HashMap::new(),
+        &HashMap::new(),
+        fns.id(""),
         String::new(),
         file,
-        HashMap::new(),
+        false,
     );
     b.closed = binds.is_some();
     for (name, ty) in binds.unwrap_or_default() {
@@ -1415,43 +1393,47 @@ struct Frame {
 }
 
 impl<'a> Builder<'a> {
-    /// A builder for a body that is no instance: no substitution.
+    /// A builder for the body `name`, row `id`. `bounds` are the type
+    /// parameters' bounds in scope: an instance's, empty for a body that is
+    /// no instance. `id` is the instance's own row
+    /// ([`Fns::instance_id`]), not the first row under its name: a projection
+    /// can share a function's name.
     #[allow(clippy::too_many_arguments)]
-    fn bare(
+    fn new(
         program: &'a Program,
         own: &'a Ownership,
         fns: &'a Fns,
         names: &'a mut NameMemo,
         facts: &NodeTypes<'a>,
         seed: &'a std::collections::HashSet<NodeId>,
+        placed: HashMap<(Exit, NodeId), Vec<&'a Release>>,
+        bounds: &HashMap<String, Vec<String>>,
+        id: Option<FnId>,
         name: String,
         file: Option<String>,
-        placed: HashMap<(Exit, NodeId), Vec<&'a Release>>,
+        export: bool,
     ) -> Self {
-        let (types, produced, solved) = (
-            facts.types.clone(),
-            facts.produced.clone(),
-            facts.solved.clone(),
-        );
         let sp = program.spellings.speech(&file);
-        let mistyped = judged(facts, own, &sp);
-        let refused = unbound(facts, own, &program.impls, &HashMap::new(), &sp);
+        let (refused, mistyped) = (
+            unbound(facts, own, &program.impls, bounds, &sp),
+            judged(facts, own, &sp),
+        );
         Builder {
             program,
             own,
             fns,
             proto: &own.proto,
             names,
-            types,
-            produced,
-            solved,
+            types: facts.types.clone(),
+            produced: facts.produced.clone(),
+            solved: facts.solved.clone(),
             placed,
             body: Body {
-                id: fns.id(&name),
+                id,
                 name,
                 spellings: program.spellings.clone(),
                 file,
-                export: false,
+                export,
                 names: Vec::new(),
                 params: Vec::new(),
                 stmts: Vec::new(),
