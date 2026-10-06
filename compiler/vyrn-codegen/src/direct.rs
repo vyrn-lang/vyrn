@@ -2382,12 +2382,7 @@ fn lower_dispatcher(
         }
         // Each value crosses at the target's parameter type, as an argument
         // does ([`Fn_::expr_as`]).
-        let mut operand = |s: &mut Fn_, m: &mut Module, b: &mut Frame, i: usize, p: &Type| {
-            let (place, ty) = &all[i];
-            s.push_place(b, *place, ty, 0)?;
-            s.coerce(m, b, ty, p, 0).map(|_| None)
-        };
-        let got = f.emit_call_with(m, &mut b, &v.target.sig, all.len(), &mut operand, None)?;
+        let got = f.emit_call_with(m, &mut b, &v.target.sig, &all, None)?;
         match (&dsig.ret, cx.repr(&got, 0)?) {
             // The target's declared result may differ from the signature's, so it coerces.
             (Repr::Scalar(_), _) => f.coerce(m, &mut b, &got, ret, 0)?,
@@ -3094,19 +3089,11 @@ impl<'p> Fn_<'_, 'p> {
 
     /// `stringFromBytes(b)`: the bytes checked by `std/text`'s `stringFault`, then copied into
     /// a fresh `String`, as a `Result<String, String>` written through a slot allocated here.
-    ///
-    /// `operand` writes argument `i` at the type asked for.
     fn string_from_bytes(
         &mut self,
         m: &mut Module,
         b: &mut Frame,
-        operand: &mut dyn FnMut(
-            &mut Self,
-            &mut Module,
-            &mut Frame,
-            usize,
-            &Type,
-        ) -> Result<(), String>,
+        args: &[(Val, Capability)],
         line: usize,
     ) -> Result<Type, String> {
         let ty = Type::result(Type::Str, Type::Str);
@@ -3118,7 +3105,7 @@ impl<'p> Fn_<'_, 'p> {
             bits: 8,
             signed: false,
         }));
-        operand(self, m, b, 0, &bytes)?;
+        self.core_arg(m, b, "stringFromBytes", args, 0, Some(&bytes), line)?;
         let src = self.scratch(b, ValType::I32, 0);
         let al = self.cx.layout(&bytes, line)?;
         b.ins(&Instruction::LocalSet(src));
@@ -3131,20 +3118,14 @@ impl<'p> Fn_<'_, 'p> {
     /// `bytes(s)` and `bytes(s, start, end)`: a call to `std/runtime`'s `bytesOf`, which checks
     /// the range and copies. The one-argument form is the range `0..s.byteLength`.
     ///
-    /// `operand` writes argument `i` at the type asked for. `rule` is the three-argument form's
-    /// check row's; `None` is the one-argument form, whose range cannot trap.
+    /// `rule` is the three-argument form's check row's; `None` is the one-argument form, whose
+    /// range cannot trap.
     fn bytes_of(
         &mut self,
         m: &mut Module,
         b: &mut Frame,
         rule: Option<vyrn_frontend::trap::Rule>,
-        operand: &mut dyn FnMut(
-            &mut Self,
-            &mut Module,
-            &mut Frame,
-            usize,
-            &Type,
-        ) -> Result<(), String>,
+        args: &[(Val, Capability)],
         line: usize,
     ) -> Result<Type, String> {
         let ty = Type::Array(Box::new(Type::IntN {
@@ -3154,10 +3135,10 @@ impl<'p> Fn_<'_, 'p> {
         let l = self.cx.layout(&ty, line)?;
         let off = b.alloc(l.size, l.align);
         b.slot(off);
-        operand(self, m, b, 0, &Type::Str)?;
+        self.core_arg(m, b, "bytes", args, 0, Some(&Type::Str), line)?;
         if rule.is_some() {
-            operand(self, m, b, 1, &Type::Int)?;
-            operand(self, m, b, 2, &Type::Int)?;
+            self.core_arg(m, b, "bytes", args, 1, Some(&Type::Int), line)?;
+            self.core_arg(m, b, "bytes", args, 2, Some(&Type::Int), line)?;
         } else {
             let s = self.scratch(b, ValType::I32, 0);
             b.ins(&Instruction::LocalTee(s));
@@ -3305,8 +3286,7 @@ impl<'p> Fn_<'_, 'p> {
     }
 
     /// Grows `s = s + a + b` in place: one runtime `strAppend` per part into `place`, whose
-    /// ownership word is at `own`. `operand` pushes part `i` and returns a String temporary to
-    /// free once the part is copied.
+    /// ownership word is at `own`. `parts` are the operands.
     ///
     /// If the word is 0, the first append copies out of the buffer and abandons it. A general
     /// store resets the word, so an owned buffer would leak. Where `owned_here`, the word and the
@@ -3323,8 +3303,7 @@ impl<'p> Fn_<'_, 'p> {
         place: Place,
         own: Place,
         owned_here: bool,
-        parts: usize,
-        operand: &mut dyn FnMut(&mut Self, &mut Module, &mut Frame, usize) -> Result<(), String>,
+        parts: &[(Val, Capability)],
         line: usize,
     ) -> Result<(), String> {
         let taken = if owned_here {
@@ -3349,13 +3328,13 @@ impl<'p> Fn_<'_, 'p> {
         } else {
             None
         };
-        for i in 0..parts {
+        for (v, _) in parts {
             match place {
                 Place::Local(l) => {
                     own.addr(b, 0)
                         .ok_or_else(|| gap("an append flag with no address", line))?;
                     b.ins(&Instruction::LocalGet(l));
-                    operand(self, m, b, i)?;
+                    self.core_val(m, b, v, &Type::Str, line)?;
                     b.ins(&Instruction::Call(self.cx.rt.str_append));
                     b.ins(&Instruction::LocalSet(l));
                 }
@@ -3365,7 +3344,7 @@ impl<'p> Fn_<'_, 'p> {
                         .ok_or_else(|| gap("an append flag with no address", line))?;
                     b.ins(&Instruction::I32Const(at as i32))
                         .ins(&Instruction::I32Load(word()));
-                    operand(self, m, b, i)?;
+                    self.core_val(m, b, v, &Type::Str, line)?;
                     b.ins(&Instruction::Call(self.cx.rt.str_append));
                     b.ins(&Instruction::I32Store(word()));
                 }
@@ -4007,46 +3986,37 @@ impl<'p> Fn_<'_, 'p> {
         Ok(lt)
     }
 
-    /// Calls a generator host import ([`Spec::Host`]). `ty` returns operand `i`'s type without
-    /// emitting it; `operand` emits operand `i` at the given type.
+    /// Calls a generator host import ([`Spec::Host`]). `args` are the call's operands.
     fn host(
         &mut self,
         m: &mut Module,
         b: &mut Frame,
         name: &str,
-        argc: usize,
-        ty: &mut dyn FnMut(&mut Self, usize) -> Result<Type, String>,
-        operand: &mut dyn FnMut(
-            &mut Self,
-            &mut Module,
-            &mut Frame,
-            usize,
-            &Type,
-        ) -> Result<(), String>,
+        args: &[(Val, Capability)],
         line: usize,
     ) -> Result<Type, String> {
         let Some(g) = self.cx.gen else {
             return unsupported(&format!("`{name}` outside a generator"), line);
         };
         let code = Type::Named("Code".to_string());
-        match (name, argc) {
+        match (name, args.len()) {
             // `raw(s)` is `@codeText(s)`: one verbatim piece, no origin.
             ("@codeText", 1) | ("raw", 1) => {
-                operand(self, m, b, 0, &Type::Str)?;
+                self.core_arg(m, b, name, args, 0, Some(&Type::Str), line)?;
                 b.ins(&Instruction::Call(g.text));
                 Ok(code)
             }
             ("rawAt", 4) => {
-                operand(self, m, b, 0, &Type::Str)?;
-                operand(self, m, b, 1, &Type::Str)?;
-                operand(self, m, b, 2, &Type::Int)?;
-                operand(self, m, b, 3, &Type::Int)?;
+                self.core_arg(m, b, name, args, 0, Some(&Type::Str), line)?;
+                self.core_arg(m, b, name, args, 1, Some(&Type::Str), line)?;
+                self.core_arg(m, b, name, args, 2, Some(&Type::Int), line)?;
+                self.core_arg(m, b, name, args, 3, Some(&Type::Int), line)?;
                 b.ins(&Instruction::Call(g.raw_at));
                 Ok(code)
             }
             // The host renders and stashes; the guest allocates and fetches ([`Fn_::fetch_str`]).
             ("render", 1) => {
-                operand(self, m, b, 0, &code)?;
+                self.core_arg(m, b, name, args, 0, Some(&code), line)?;
                 b.ins(&Instruction::Call(g.render));
                 self.fetch_str(b, g);
                 Ok(Type::Str)
@@ -4054,8 +4024,8 @@ impl<'p> Fn_<'_, 'p> {
             // `reflect` leaves the value host-side as atoms; the `next` calls pull them back.
             // The synthesized decoder and the host both walk the type.
             (crate::GEN_REFLECT, 2) => {
-                operand(self, m, b, 0, &Type::Int)?;
-                operand(self, m, b, 1, &Type::Str)?;
+                self.core_arg(m, b, name, args, 0, Some(&Type::Int), line)?;
+                self.core_arg(m, b, name, args, 1, Some(&Type::Str), line)?;
                 b.ins(&Instruction::Call(g.reflect));
                 Ok(Type::Unit)
             }
@@ -4068,17 +4038,13 @@ impl<'p> Fn_<'_, 'p> {
                 self.fetch_str(b, g);
                 Ok(Type::Str)
             }
-            // `Code + Code` keeps each fragment's origin, in the host's arena.
-            ("+", 2) => {
-                operand(self, m, b, 0, &code)?;
-                operand(self, m, b, 1, &code)?;
-                b.ins(&Instruction::Call(g.concat));
-                Ok(code)
-            }
             // The value crosses as a compile-time tag naming the `Val` the host rebuilds, a
             // 64-bit word and a String pointer. The tag goes first, so the type is asked first.
             ("@codeSplice", 2) => {
-                let vty = ty(self, 0)?;
+                let Some((v, _)) = args.first() else {
+                    return unsupported(&format!("`{name}` with too few operands"), line);
+                };
+                let vty = self.cx.resolve(&self.core_ty(v, &Type::Int));
                 let tag = match &vty {
                     Type::Str => crate::TAG_STR,
                     Type::Named(n) if n == "Code" => crate::TAG_CODE,
@@ -4101,9 +4067,9 @@ impl<'p> Fn_<'_, 'p> {
                 // the word and a null pointer.
                 if vty == Type::Str {
                     b.ins(&Instruction::I64Const(0));
-                    operand(self, m, b, 0, &Type::Str)?;
+                    self.core_arg(m, b, name, args, 0, Some(&Type::Str), line)?;
                 } else {
-                    operand(self, m, b, 0, &vty)?;
+                    self.core_arg(m, b, name, args, 0, Some(&vty), line)?;
                     match &vty {
                         // Lossless; the host formats.
                         Type::Float => {
@@ -4126,11 +4092,11 @@ impl<'p> Fn_<'_, 'p> {
                     }
                     b.ins(&Instruction::I32Const(0));
                 }
-                operand(self, m, b, 1, &Type::Int)?;
+                self.core_arg(m, b, name, args, 1, Some(&Type::Int), line)?;
                 b.ins(&Instruction::Call(g.splice));
                 Ok(code)
             }
-            _ => unsupported(&format!("`{name}` at {argc} operands"), line),
+            _ => unsupported(&format!("`{name}` at {} operands", args.len()), line),
         }
     }
 
@@ -4173,21 +4139,14 @@ impl<'p> Fn_<'_, 'p> {
         self.cx.externs.contains_key(name)
     }
 
-    /// Calls an `extern fn` or a host-boundary name; `operand` emits each operand at its
-    /// parameter's type.
+    /// Calls an `extern fn` or a host-boundary name; each operand crosses at its parameter's
+    /// type.
     fn extern_call(
         &mut self,
         m: &mut Module,
         b: &mut Frame,
         name: &str,
-        argc: usize,
-        operand: &mut dyn FnMut(
-            &mut Self,
-            &mut Module,
-            &mut Frame,
-            usize,
-            &Type,
-        ) -> Result<(), String>,
+        args: &[(Val, Capability)],
         line: usize,
     ) -> Result<Type, String> {
         // The host boundary is not a `vyrn` import: the emitted runtime reads WASI's
@@ -4199,7 +4158,7 @@ impl<'p> Fn_<'_, 'p> {
                 "__vyrn_monotonic_nanos" => (self.cx.rt.mono_nanos, self.cx.rt.fixed_time),
                 _ => (self.cx.rt.random_seed, self.cx.rt.fixed_seed),
             };
-            if argc != 0 {
+            if !args.is_empty() {
                 return unsupported(&format!("the call `{name}` at this arity"), line);
             }
             b.ins(&Instruction::I32Const(key as i32));
@@ -4223,11 +4182,11 @@ impl<'p> Fn_<'_, 'p> {
                 // A declaration with no import.
                 return unsupported(&format!("the call `{name}`"), line);
             };
-            if ext.params.len() != argc {
+            if ext.params.len() != args.len() {
                 return unsupported(&format!("the call `{name}` at this arity"), line);
             }
             for (i, p) in ext.params.iter().enumerate() {
-                operand(self, m, b, i, p)?;
+                self.core_arg(m, b, name, args, i, Some(p), line)?;
                 if matches!(self.cx.resolve(p), Type::Str) {
                     // (ptr, len): the host decodes UTF-8 and needs the length. One scratch per
                     // argument, or a later string's length would overwrite an earlier one's.
@@ -4501,33 +4460,25 @@ impl<'p> Fn_<'_, 'p> {
         self.cx.instantiate(m, f, type_args, subst)
     }
 
-    /// Emits a call to `sig`. `operand` emits argument `i` at its parameter's type and returns
-    /// the spill of a `modify` scalar, which is reloaded after the call.
+    /// Emits a call to `sig`. Each of `args` is pushed from its place and crosses at the
+    /// parameter's type.
     fn emit_call_with(
         &mut self,
         m: &mut Module,
         b: &mut Frame,
         sig: &Sig,
-        argc: usize,
-        operand: &mut dyn FnMut(
-            &mut Self,
-            &mut Module,
-            &mut Frame,
-            usize,
-            &Type,
-        ) -> Result<Option<Spill>, String>,
+        args: &[(Place, Type)],
         hint: Option<(Dest, Type)>,
     ) -> Result<Type, String> {
         // A `fn` type reads every argument, so no target takes a `consume` parameter
         // (`Checker::reads_every_param`) and no result is left in one.
         debug_assert!(sig.in_place.is_none(), "a stored `fn` value consumes");
         let dest = self.out_ptr(b, sig, hint);
-        let mut spilled = Vec::new();
-        for (i, p) in sig.params.iter().take(argc).enumerate() {
-            spilled.extend(operand(self, m, b, i, p)?);
+        for ((place, ty), p) in args.iter().zip(&sig.params) {
+            self.push_place(b, *place, ty, 0)?;
+            self.coerce(m, b, ty, p, 0)?;
         }
         b.ins(&Instruction::Call(sig.index));
-        reload(b, &spilled);
         self.out_ptr_back(b, dest);
         // The declared type, not resolved: a caller solves generics against it, and
         // `Pair<Int64, Int64>` as a bare record would not match `Pair<A, B>`.
@@ -4966,23 +4917,23 @@ impl<'p> Fn_<'_, 'p> {
     }
 
     /// Emits `fromStep(slot, gen, step)` into a header without allocating: `std/stream`
-    /// mints the cursor. `operand` emits the `i`th argument and returns its type.
+    /// mints the cursor.
     fn stream_from_step(
         &mut self,
         m: &mut Module,
         b: &mut Frame,
-        operand: &mut dyn FnMut(&mut Self, &mut Module, &mut Frame, usize) -> Result<Type, String>,
+        args: &[(Val, Capability)],
         line: usize,
     ) -> Result<Type, String> {
         // Arguments evaluate left to right, as in the interpreter, so effects and
         // traps keep their order; the cursor words wait in locals.
-        operand(self, m, b, 0)?;
+        self.core_arg(m, b, "fromStep", args, 0, Some(&Type::Int), line)?;
         let c0 = b.local(ValType::I64);
         b.ins(&Instruction::LocalSet(c0));
-        operand(self, m, b, 1)?;
+        self.core_arg(m, b, "fromStep", args, 1, Some(&Type::Int), line)?;
         let c1 = b.local(ValType::I64);
         b.ins(&Instruction::LocalSet(c1));
-        let fty = operand(self, m, b, 2)?;
+        let fty = self.core_arg(m, b, "fromStep", args, 2, None, line)?;
         let fv = b.local(ValType::I32);
         b.ins(&Instruction::LocalSet(fv));
         let sig = self.cx.resolve(&fty);
@@ -5032,16 +4983,17 @@ impl<'p> Fn_<'_, 'p> {
     /// a second `unboxStream` of one address traps.
     const BOX_MAGIC: i64 = 3735928559;
 
-    /// Checks the box whose `Int64` address `addr` emits, or traps; returns the local holding it.
+    /// Checks the box whose `Int64` address is `addr`, or traps; returns the local holding it.
     fn stream_box_at(
         &mut self,
         m: &mut Module,
         b: &mut Frame,
-        addr: &mut dyn FnMut(&mut Self, &mut Module, &mut Frame) -> Result<(), String>,
+        addr: &Val,
+        line: usize,
     ) -> Result<u32, String> {
         let w = b.local(ValType::I64);
         let a = b.local(ValType::I32);
-        addr(self, m, b)?;
+        self.core_val(m, b, addr, &Type::Int, line)?;
         // The address is checked as an `Int64` before it is wrapped: a nonzero
         // 32-bit address is `1..=u32::MAX`, so `w - 1 <u u32::MAX`.
         b.ins(&Instruction::LocalTee(w));
@@ -5085,12 +5037,7 @@ impl<'p> Fn_<'_, 'p> {
         &mut self,
         m: &mut Module,
         b: &mut Frame,
-        operand: &mut dyn FnMut(
-            &mut Self,
-            &mut Module,
-            &mut Frame,
-            Option<&Type>,
-        ) -> Result<Type, String>,
+        args: &[(Val, Capability)],
         line: usize,
     ) -> Result<Type, String> {
         let sl = self.stream_layout(line)?;
@@ -5103,7 +5050,7 @@ impl<'p> Fn_<'_, 'p> {
         b.ins(&Instruction::LocalGet(p));
         b.ins(&Instruction::I32Const(8));
         b.ins(&Instruction::I32Add);
-        let got = operand(self, m, b, None)?;
+        let got = self.core_arg(m, b, "boxStream", args, 0, None, line)?;
         if !matches!(self.cx.resolve(&got), Type::Stream(_)) {
             return unsupported(&format!("`boxStream` of `{got}`"), line);
         }
@@ -5119,11 +5066,11 @@ impl<'p> Fn_<'_, 'p> {
         m: &mut Module,
         b: &mut Frame,
         elem: &Type,
-        addr: &mut dyn FnMut(&mut Self, &mut Module, &mut Frame) -> Result<(), String>,
+        addr: &Val,
         line: usize,
     ) -> Result<Type, String> {
         let sl = self.stream_layout(line)?;
-        let a = self.stream_box_at(m, b, addr)?;
+        let a = self.stream_box_at(m, b, addr, line)?;
         let off = b.alloc(sl.size, sl.align);
         b.slot(off);
         b.ins(&Instruction::LocalGet(a));
@@ -5146,14 +5093,14 @@ impl<'p> Fn_<'_, 'p> {
         m: &mut Module,
         b: &mut Frame,
         elem: &Type,
-        addr: &mut dyn FnMut(&mut Self, &mut Module, &mut Frame) -> Result<(), String>,
+        addr: &Val,
         line: usize,
     ) -> Result<Type, String> {
         let opt = Type::option(elem.clone());
         let Repr::Agg(ol) = self.cx.repr(&opt, line)? else {
             return unsupported("an Option that is not an aggregate", line);
         };
-        let a = self.stream_box_at(m, b, addr)?;
+        let a = self.stream_box_at(m, b, addr, line)?;
         let src = b.local(ValType::I32);
         b.ins(&Instruction::LocalGet(a));
         b.ins(&Instruction::I32Const(8));
@@ -5991,8 +5938,8 @@ impl<'p> Fn_<'_, 'p> {
 
     /// Emits a `std/runtime` array operation on the receiver address on the stack, and
     /// leaves that address: the runtime writes the new triple in place ([`Fn_::arr_recv`]).
-    /// `operand` writes the second argument at the type asked for; `clear` has none. An
-    /// operand goes to a local first, so no call operand is on the stack while user code runs.
+    /// `rest` holds the second argument; `clear` has none. An operand goes to a local first, so
+    /// no call operand is on the stack while user code runs.
     ///
     /// `push` stores the element here, because the runtime knows the stride but not the type.
     /// The old buffer is freed only after the element is stored: the element expression may
@@ -6004,10 +5951,14 @@ impl<'p> Fn_<'_, 'p> {
         b: &mut Frame,
         name: &str,
         aty: &Type,
-        operand: &mut dyn FnMut(&mut Self, &mut Module, &mut Frame, &Type) -> Result<(), String>,
+        rest: &[(Val, Capability)],
         line: usize,
     ) -> Result<Type, String> {
         let verb = name.trim_start_matches('@');
+        let operand = || match rest {
+            [(v, _)] => Ok(v),
+            _ => unsupported(&format!("`{name}` with no operand"), line),
+        };
         if let (Type::SmallArray(inner, n), "push") = (self.cx.resolve(aty), verb) {
             let l = self.cx.layout(aty, line)?;
             let stride = self.stride(&inner, line)? as i32;
@@ -6024,7 +5975,7 @@ impl<'p> Fn_<'_, 'p> {
             b.ins(&Instruction::I64Const(1));
             b.ins(&Instruction::I64Sub);
             b.ins(&Instruction::LocalSet(last));
-            self.push_elem(m, b, data, last, stride, &inner, stale, operand, line)?;
+            self.push_elem(m, b, data, last, stride, &inner, stale, operand()?, line)?;
             b.ins(&Instruction::LocalGet(hdr));
             return Ok(aty.clone());
         }
@@ -6041,7 +5992,7 @@ impl<'p> Fn_<'_, 'p> {
         let arg = match arg {
             Some((vt, t)) => {
                 let x = b.local(vt);
-                operand(self, m, b, &t)?;
+                self.core_val(m, b, operand()?, &t, line)?;
                 b.ins(&Instruction::LocalSet(x));
                 Some(x)
             }
@@ -6068,7 +6019,7 @@ impl<'p> Fn_<'_, 'p> {
             b.ins(&Instruction::I64Const(1));
             b.ins(&Instruction::I64Sub);
             b.ins(&Instruction::LocalSet(last));
-            self.push_elem(m, b, data, last, stride, &elem, stale, operand, line)?;
+            self.push_elem(m, b, data, last, stride, &elem, stale, operand()?, line)?;
         }
         b.ins(&Instruction::LocalGet(src));
         Ok(Type::Array(Box::new(elem)))
@@ -6086,7 +6037,7 @@ impl<'p> Fn_<'_, 'p> {
         stride: i32,
         elem: &Type,
         stale: u32,
-        operand: &mut dyn FnMut(&mut Self, &mut Module, &mut Frame, &Type) -> Result<(), String>,
+        v: &Val,
         line: usize,
     ) -> Result<(), String> {
         let w = Walk {
@@ -6098,7 +6049,7 @@ impl<'p> Fn_<'_, 'p> {
         };
         self.elem_addr(b, &w, last);
         let r = self.cx.repr(elem, line)?;
-        operand(self, m, b, elem)?;
+        self.core_val(m, b, v, elem, line)?;
         match &r {
             Repr::Scalar(_) => {
                 b.ins(&self.cx.store(elem));
@@ -6170,7 +6121,7 @@ impl<'p> Fn_<'_, 'p> {
         Ok(opt)
     }
 
-    /// Emits `swapRemove` on the array whose address is in local `slot`; `index` pushes the index.
+    /// Emits `swapRemove` on the array whose address is in local `slot`, at the index `index` names.
     fn swap_remove_at(
         &mut self,
         m: &mut Module,
@@ -6178,7 +6129,7 @@ impl<'p> Fn_<'_, 'p> {
         slot: u32,
         aty: &Type,
         row: Option<Check>,
-        index: &mut dyn FnMut(&mut Self, &mut Module, &mut Frame) -> Result<(), String>,
+        index: &Val,
         line: usize,
     ) -> Result<Type, String> {
         // An `Array` keeps its pointer first, a `SmallArray` its length.
@@ -6190,7 +6141,7 @@ impl<'p> Fn_<'_, 'p> {
         let al = self.cx.layout(aty, line)?;
         b.ins(&Instruction::LocalGet(slot));
         let w = self.walk(b, aty, line)?;
-        index(self, m, b)?;
+        self.core_val(m, b, index, &Type::Int, line)?;
         let idx = b.local(ValType::I64);
         b.ins(&Instruction::LocalSet(idx));
         if let Some(row) = row {
@@ -7150,21 +7101,15 @@ impl<'p> Fn_<'_, 'p> {
     /// so a hit builds, validates and allocates nothing. A miss builds the key with
     /// `str_from_bytes`, whose `Err` traps, and stores it without a copy.
     ///
-    /// `hdr` holds the header address. `operand` pushes operand 0 (the bytes) or 1 (`n`) at
-    /// the type it is handed.
+    /// `hdr` holds the header address; `window` is the bytes and `count` is `n`.
     fn map_tally_bytes(
         &mut self,
         m: &mut Module,
         b: &mut Frame,
         hdr: u32,
         mty: &Type,
-        operand: &mut dyn FnMut(
-            &mut Self,
-            &mut Module,
-            &mut Frame,
-            usize,
-            &Type,
-        ) -> Result<(), String>,
+        window: &Val,
+        count: &Val,
         line: usize,
     ) -> Result<Type, String> {
         let Type::Map(..) = self.cx.resolve(mty) else {
@@ -7176,7 +7121,7 @@ impl<'p> Fn_<'_, 'p> {
             signed: false,
         }));
         let wsrc = b.local(ValType::I32);
-        operand(self, m, b, 0, &bytes)?;
+        self.core_val(m, b, window, &bytes, line)?;
         b.ins(&Instruction::LocalSet(wsrc));
         let al = self.cx.layout(&bytes, line)?;
         let (wdata, wlen) = (b.local(ValType::I32), b.local(ValType::I32));
@@ -7186,7 +7131,7 @@ impl<'p> Fn_<'_, 'p> {
         load_wrapped(b, wsrc, al.fields[1]);
         b.ins(&Instruction::LocalSet(wlen));
         let n = b.local(ValType::I64);
-        operand(self, m, b, 1, &Type::Int)?;
+        self.core_val(m, b, count, &Type::Int, line)?;
         b.ins(&Instruction::LocalSet(n));
         // One probe, before any key exists: kind 3, the window's length as
         // `klen`, the window's address as the key.
@@ -7272,31 +7217,23 @@ impl<'p> Fn_<'_, 'p> {
     /// `m.tally(k, n)`: insert-or-add with one probe. A hit adds in place; a miss
     /// stores a copy of the key, so the caller owns the key on both paths.
     ///
-    /// `hdr` holds the header address. `operand` pushes operand 0 (the key) or 1 (`n`) at
-    /// the type it is handed.
+    /// `hdr` holds the header address; `count` is `n`.
     fn map_tally(
         &mut self,
         m: &mut Module,
         b: &mut Frame,
         hdr: u32,
         mty: &Type,
-        operand: &mut dyn FnMut(
-            &mut Self,
-            &mut Module,
-            &mut Frame,
-            usize,
-            &Type,
-        ) -> Result<(), String>,
+        key: &Val,
+        count: &Val,
         line: usize,
     ) -> Result<Type, String> {
         if !matches!(self.cx.resolve(mty), Type::Map(..)) {
             return unsupported(&format!("`tally` on `{mty}`"), line);
         }
-        let mut key =
-            |s: &mut Self, m: &mut Module, b: &mut Frame, t: &Type| operand(s, m, b, 0, t);
-        let (k, l, mk) = self.map_key_local(m, b, mty, &mut key, line)?;
+        let (k, l, mk) = self.map_key_local(m, b, mty, key, line)?;
         let n = b.local(ValType::I64);
-        operand(self, m, b, 1, &Type::Int)?;
+        self.core_val(m, b, count, &Type::Int, line)?;
         b.ins(&Instruction::LocalSet(n));
         let idx = b.local(ValType::I32);
         self.map_scan(b, hdr, &l, k, idx, mk);
@@ -7612,7 +7549,7 @@ impl<'p> Fn_<'_, 'p> {
         b.ins(&Instruction::End);
     }
 
-    /// Returns the index of the key `key` pushes in the map at `hdr`, negative on a miss,
+    /// Returns the index of the key `key` names in the map at `hdr`, negative on a miss,
     /// with the map's layout and key family.
     fn map_find(
         &mut self,
@@ -7620,7 +7557,7 @@ impl<'p> Fn_<'_, 'p> {
         b: &mut Frame,
         hdr: u32,
         mty: &Type,
-        key: &mut dyn FnMut(&mut Self, &mut Module, &mut Frame, &Type) -> Result<(), String>,
+        key: &Val,
         line: usize,
     ) -> Result<(u32, Rc<Layout>, MapKey), String> {
         let (k, l, mk) = self.map_key_local(m, b, mty, key, line)?;
@@ -7629,14 +7566,14 @@ impl<'p> Fn_<'_, 'p> {
         Ok((idx, l, mk))
     }
 
-    /// The key `key` pushes, in a local at the form [`Fn_::map_scan`] probes
+    /// The key `key` names, in a local at the form [`Fn_::map_scan`] probes
     /// with, with the map's layout and key family.
     fn map_key_local(
         &mut self,
         m: &mut Module,
         b: &mut Frame,
         mty: &Type,
-        key: &mut dyn FnMut(&mut Self, &mut Module, &mut Frame, &Type) -> Result<(), String>,
+        key: &Val,
         line: usize,
     ) -> Result<(u32, Rc<Layout>, MapKey), String> {
         let key_t = match self.cx.resolve(mty) {
@@ -7648,19 +7585,19 @@ impl<'p> Fn_<'_, 'p> {
         let k = match mk {
             MapKey::I64 => {
                 let k = b.local(ValType::I64);
-                key(self, m, b, &Type::Int)?;
+                self.core_val(m, b, key, &Type::Int, line)?;
                 b.ins(&Instruction::LocalSet(k));
                 k
             }
             MapKey::Pack(_) => {
                 let raw = b.local(ValType::I32);
-                key(self, m, b, &key_t)?;
+                self.core_val(m, b, key, &key_t, line)?;
                 b.ins(&Instruction::LocalSet(raw));
                 self.pack_key(b, raw, &key_t, line)?
             }
             MapKey::Str => {
                 let k = b.local(ValType::I32);
-                key(self, m, b, &Type::Str)?;
+                self.core_val(m, b, key, &Type::Str, line)?;
                 b.ins(&Instruction::LocalSet(k));
                 k
             }
@@ -7668,15 +7605,14 @@ impl<'p> Fn_<'_, 'p> {
         Ok((k, l, mk))
     }
 
-    /// `m[k]`: an `Option<V>`, never a trap. The map's address is on the stack; `key` pushes
-    /// the key at the type it is handed.
+    /// `m[k]`: an `Option<V>`, never a trap. The map's address is on the stack.
     fn map_at(
         &mut self,
         m: &mut Module,
         b: &mut Frame,
         mty: &Type,
         val: &Type,
-        key: &mut dyn FnMut(&mut Self, &mut Module, &mut Frame, &Type) -> Result<(), String>,
+        key: &Val,
         line: usize,
     ) -> Result<Type, String> {
         let esz = self.stride(val, line)? as i32;
@@ -7735,26 +7671,18 @@ impl<'p> Fn_<'_, 'p> {
     }
 
     /// `assert(c)` and `assertEq(a, b)`, the builtins [`Spec::Asserts`] names.
-    /// `operand` writes argument `i` at the type asked for, or at its own
-    /// where none is, and answers the type it wrote.
     fn asserts(
         &mut self,
         m: &mut Module,
         b: &mut Frame,
         name: &str,
-        operand: &mut dyn FnMut(
-            &mut Self,
-            &mut Module,
-            &mut Frame,
-            usize,
-            Option<&Type>,
-        ) -> Result<Type, String>,
+        args: &[(Val, Capability)],
         line: usize,
     ) -> Result<Type, String> {
         match name {
             // `assert(c)`: traps with the interpreter's message.
             "assert" => {
-                operand(self, m, b, 0, Some(&Type::Bool))?;
+                self.core_arg(m, b, name, args, 0, Some(&Type::Bool), line)?;
                 let msg = self.cx.rt.intern(
                     m,
                     &vyrn_frontend::trap::line(&format!("assertion failed at line {line}")),
@@ -7769,14 +7697,14 @@ impl<'p> Fn_<'_, 'p> {
             // mismatch rendered as the interpreter's `scalar_to_string` renders it, around
             // ` != `. [`Fn_::call`] releases an allocated operand after this returns.
             _ => {
-                let t = operand(self, m, b, 0, None)?;
+                let t = self.core_arg(m, b, name, args, 0, None, line)?;
                 let t = self.cx.resolve(&t);
                 let Some(vt) = self.cx.repr(&t, line)?.val() else {
                     return unsupported("`assertEq` on a non-scalar", line);
                 };
                 let la = b.local(vt);
                 b.ins(&Instruction::LocalSet(la));
-                operand(self, m, b, 1, Some(&t))?;
+                self.core_arg(m, b, name, args, 1, Some(&t), line)?;
                 let lb = b.local(vt);
                 b.ins(&Instruction::LocalSet(lb));
                 b.ins(&Instruction::LocalGet(la))
@@ -7864,23 +7792,17 @@ impl<'p> Fn_<'_, 'p> {
     }
 
     /// `close(s)`, `boxStream(s)` and `serveStream(s)`, the builtins
-    /// [`Spec::Effect`] names. `operand` writes the argument at the type asked
-    /// for, or at its own where none is, and answers the type it wrote.
+    /// [`Spec::Effect`] names.
     fn effect(
         &mut self,
         m: &mut Module,
         b: &mut Frame,
         name: &str,
-        operand: &mut dyn FnMut(
-            &mut Self,
-            &mut Module,
-            &mut Frame,
-            Option<&Type>,
-        ) -> Result<Type, String>,
+        args: &[(Val, Capability)],
         line: usize,
     ) -> Result<Type, String> {
         match name {
-            "boxStream" => return self.stream_box(m, b, operand, line),
+            "boxStream" => return self.stream_box(m, b, args, line),
             "serveStream" => {
                 let msg = self.cx.rt.intern(m, vyrn_frontend::trap::SERVE_STREAM);
                 self.panic_line(m, b, None, |_, _, b| {
@@ -7892,7 +7814,7 @@ impl<'p> Fn_<'_, 'p> {
             // A stepped stream owns a cell from a fixed slab of 65536, which a leak would
             // exhaust; the tag tells a stepped stream from a buffer one.
             _ => {
-                let got = operand(self, m, b, None)?;
+                let got = self.core_arg(m, b, name, args, 0, None, line)?;
                 let elem = match self.cx.resolve(&got) {
                     Type::Stream(i) => *i,
                     other => return unsupported(&format!("`{name}` of `{other}`"), line),
@@ -7905,7 +7827,7 @@ impl<'p> Fn_<'_, 'p> {
         Ok(Type::Unit)
     }
 
-    /// The builtins [`Spec::Logs`] names. `operand` writes argument `i` at the type asked for.
+    /// The builtins [`Spec::Logs`] names.
     ///
     /// A `Logger` is its name string, so `logger(name)` is the identity. A level call
     /// evaluates both operands whatever the threshold, as the interpreter does.
@@ -7915,21 +7837,15 @@ impl<'p> Fn_<'_, 'p> {
         m: &mut Module,
         b: &mut Frame,
         name: &str,
-        operand: &mut dyn FnMut(
-            &mut Self,
-            &mut Module,
-            &mut Frame,
-            usize,
-            &Type,
-        ) -> Result<(), String>,
+        args: &[(Val, Capability)],
         line: usize,
     ) -> Result<Type, String> {
         if name == "logger" {
-            operand(self, m, b, 0, &Type::Str)?;
+            self.core_arg(m, b, name, args, 0, Some(&Type::Str), line)?;
             return Ok(Type::Logger);
         }
-        operand(self, m, b, 0, &Type::Logger)?;
-        operand(self, m, b, 1, &Type::Str)?;
+        self.core_arg(m, b, name, args, 0, Some(&Type::Logger), line)?;
+        self.core_arg(m, b, name, args, 1, Some(&Type::Str), line)?;
         if log_internal(name).unwrap_or(0) < self.cx.log_level {
             // Below the threshold: the two values are the only thing this
             // site leaves behind, and `Unit` means nobody consumes them.
@@ -7944,30 +7860,18 @@ impl<'p> Fn_<'_, 'p> {
     /// A SIMD builtin: a lane constructor, a lane read or write at
     /// a constant index, a mask reduction, or a load or store of consecutive
     /// array elements. The vector operand's own type chooses the opcode.
-    ///
-    /// `operand` writes argument `i`, at the type asked for or else at its own,
-    /// and answers the type it wrote. `lane_at` answers argument `i` as a lane
-    /// index below the count given, or `None` where it is no such constant.
     fn lanes(
         &mut self,
         m: &mut Module,
         b: &mut Frame,
         name: &str,
-        argc: usize,
-        operand: &mut dyn FnMut(
-            &mut Self,
-            &mut Module,
-            &mut Frame,
-            usize,
-            Option<&Type>,
-        ) -> Result<Type, String>,
-        lane_at: &dyn Fn(usize, i64) -> Option<u8>,
+        args: &[(Val, Capability)],
         span: Result<Option<Check>, String>,
         line: usize,
     ) -> Result<Type, String> {
         match name {
             // Construction starts from `v128.const 0` and replaces each lane in order.
-            "F32x4" | "I32x4" | "F64x2" if argc > 0 => {
+            "F32x4" | "I32x4" | "F64x2" if !args.is_empty() => {
                 let wide = name == "F64x2";
                 let int = name == "I32x4";
                 let (vec, lane) = if int {
@@ -7978,8 +7882,8 @@ impl<'p> Fn_<'_, 'p> {
                     (Type::F32x4, Type::Float32)
                 };
                 b.ins(&Instruction::V128Const(0));
-                for i in 0..argc {
-                    operand(self, m, b, i, Some(&lane))?;
+                for i in 0..args.len() {
+                    self.core_arg(m, b, name, args, i, Some(&lane), line)?;
                     b.ins(&if int {
                         Instruction::I32x4ReplaceLane(i as u8)
                     } else if wide {
@@ -7992,15 +7896,15 @@ impl<'p> Fn_<'_, 'p> {
             }
             // The lane index was proven constant and in range by the checker, so
             // this is a plain immediate and there is no bounds check to emit.
-            "@lane" if argc == 2 => {
-                let vt = operand(self, m, b, 0, None)?;
+            "@lane" if args.len() == 2 => {
+                let vt = self.core_arg(m, b, name, args, 0, None, line)?;
                 let vt = self.cx.resolve(&vt);
                 let lanes = if matches!(vt, Type::F64x2 | Type::Mask64x2) {
                     2
                 } else {
                     4
                 };
-                let Some(k) = lane_at(1, lanes) else {
+                let Some(k) = core_lane(args, 1, lanes) else {
                     return unsupported("a lane index that is not a constant", line);
                 };
                 // A mask lane is all-ones or all-zeros and `Bool` must be 0 or 1, so
@@ -8031,12 +7935,12 @@ impl<'p> Fn_<'_, 'p> {
                 return Ok(Type::Float32);
             }
             // `v.replaceLane(k, x)`: vectors only; the checker refuses a mask receiver.
-            "@replaceLane" if argc == 3 => {
-                let vt = operand(self, m, b, 0, None)?;
+            "@replaceLane" if args.len() == 3 => {
+                let vt = self.core_arg(m, b, name, args, 0, None, line)?;
                 let vt = self.cx.resolve(&vt);
                 let int = vt == Type::I32x4;
                 let wide = vt == Type::F64x2;
-                let Some(k) = lane_at(1, if wide { 2 } else { 4 }) else {
+                let Some(k) = core_lane(args, 1, if wide { 2 } else { 4 }) else {
                     return unsupported("a lane index that is not a constant", line);
                 };
                 let lane = if int {
@@ -8046,7 +7950,7 @@ impl<'p> Fn_<'_, 'p> {
                 } else {
                     &Type::Float32
                 };
-                operand(self, m, b, 2, Some(lane))?;
+                self.core_arg(m, b, name, args, 2, Some(lane), line)?;
                 b.ins(&if int {
                     Instruction::I32x4ReplaceLane(k)
                 } else if wide {
@@ -8060,8 +7964,8 @@ impl<'p> Fn_<'_, 'p> {
             // any bit, which equals per-lane any-true because a mask lane is all-ones or
             // all-zeros. `all_true` needs the lane width: `i32x4.all_true` on a
             // `Mask64x2` differs on a mixed mask.
-            "@anyTrue" | "@allTrue" if argc == 1 => {
-                let mt = operand(self, m, b, 0, None)?;
+            "@anyTrue" | "@allTrue" if args.len() == 1 => {
+                let mt = self.core_arg(m, b, name, args, 0, None, line)?;
                 let mt = self.cx.resolve(&mt);
                 let wide = mt == Type::Mask64x2;
                 b.ins(&if name == "@anyTrue" {
@@ -8078,7 +7982,7 @@ impl<'p> Fn_<'_, 'p> {
             // lane knowledge.
             "@f32x4Load" | "@f32x4Store" | "@i32x4Load" | "@i32x4Store" | "@f64x2Load"
             | "@f64x2Store"
-                if argc == 2 + usize::from(name.ends_with("Store")) =>
+                if args.len() == 2 + usize::from(name.ends_with("Store")) =>
             {
                 let span = span?;
                 let vec = if name.starts_with("@i32x4") {
@@ -8088,9 +7992,9 @@ impl<'p> Fn_<'_, 'p> {
                 } else {
                     Type::F32x4
                 };
-                let aty = operand(self, m, b, 0, None)?;
+                let aty = self.core_arg(m, b, name, args, 0, None, line)?;
                 let w = self.walk(b, &aty, line)?;
-                operand(self, m, b, 1, Some(&Type::Int))?;
+                self.core_arg(m, b, name, args, 1, Some(&Type::Int), line)?;
                 let idx = b.local(ValType::I64);
                 b.ins(&Instruction::LocalSet(idx));
                 if let Some(row) = span {
@@ -8104,7 +8008,7 @@ impl<'p> Fn_<'_, 'p> {
                     return Ok(vec);
                 }
                 self.elem_addr(b, &w, idx);
-                operand(self, m, b, 2, Some(&vec))?;
+                self.core_arg(m, b, name, args, 2, Some(&vec), line)?;
                 b.ins(&Instruction::V128Store(mem_arg(0, 0)));
                 return Ok(Type::Unit);
             }
@@ -8156,15 +8060,15 @@ impl<'p> Fn_<'_, 'p> {
         Ok(aty)
     }
 
-    /// `m.remove(k)` on the map at `hdr`: releases and drops the entry of the key `key`
-    /// pushes, and leaves whether it existed on the stack.
+    /// `m.remove(k)` on the map at `hdr`: releases and drops the entry of the key `key` names,
+    /// and leaves whether it existed on the stack.
     fn map_remove(
         &mut self,
         m: &mut Module,
         b: &mut Frame,
         hdr: u32,
         mty: &Type,
-        key: &mut dyn FnMut(&mut Self, &mut Module, &mut Frame, &Type) -> Result<(), String>,
+        key: &Val,
         line: usize,
     ) -> Result<Type, String> {
         let Type::Map(_, val) = self.cx.resolve(mty) else {
@@ -9426,21 +9330,7 @@ impl<'a, 'p> Fn_<'a, 'p> {
                                 (Place::Local(l), Place::Slot(at))
                             }
                         };
-                        let mut operand =
-                            |f: &mut Self, m: &mut Module, b: &mut Frame, k: usize| {
-                                f.core_val(m, b, &rest[k].0, &Type::Str, line)
-                            };
-                        let parts = rest.len();
-                        self.append_in_place(
-                            m,
-                            b,
-                            place,
-                            own,
-                            *releases,
-                            parts,
-                            &mut operand,
-                            line,
-                        )?;
+                        self.append_in_place(m, b, place, own, *releases, &rest, line)?;
                     } else {
                         self.core_call(m, b, callee, *kind, &[], &[], args, None, None, line)?;
                         b.ins(&Instruction::Drop);
@@ -9703,11 +9593,7 @@ impl<'a, 'p> Fn_<'a, 'p> {
                                 return unsupported("a key read of no map", line);
                             };
                             let val = (**val).clone();
-                            let mut key =
-                                |s: &mut Self, m: &mut Module, b: &mut Frame, t: &Type| {
-                                    s.core_val(m, b, k, t, line)
-                                };
-                            self.map_at(m, b, &mty, &val, &mut key, line)?;
+                            self.map_at(m, b, &mty, &val, k, line)?;
                         }
                         _ => return unsupported("an aggregate row that is no call", line),
                     }
@@ -10379,16 +10265,7 @@ impl<'a, 'p> Fn_<'a, 'p> {
                 return Ok(Type::Never);
             }
             Some(Spec::Asserts) => {
-                let mut operand =
-                    |s: &mut Self, m: &mut Module, b: &mut Frame, i: usize, t: Option<&Type>| {
-                        let Some((v, _)) = args.get(i) else {
-                            return unsupported(&format!("`{callee}` with too few operands"), line);
-                        };
-                        let t = t.cloned().unwrap_or_else(|| s.core_ty(v, &Type::Int));
-                        s.core_val(m, b, v, &t, line)?;
-                        Ok(t)
-                    };
-                return self.asserts(m, b, callee, &mut operand, line);
+                return self.asserts(m, b, callee, args, line);
             }
             // `xs.push(v)` and its siblings, and `m.tally(k, n)`: the call rebuilds the
             // receiver in place at its address.
@@ -10398,24 +10275,15 @@ impl<'a, 'p> Fn_<'a, 'p> {
                 };
                 let aty = body.names[x.index()].ty.clone();
                 self.core_addr_of(b, *x, line)?;
-                if let ("@tally" | "@tallyBytes", [_, _]) = (callee, rest) {
+                if let ("@tally" | "@tallyBytes", [(k, _), (n, _)]) = (callee, rest) {
                     let hdr = b.local(ValType::I32);
                     b.ins(&Instruction::LocalSet(hdr));
-                    let mut operand =
-                        |s: &mut Self, m: &mut Module, b: &mut Frame, i: usize, t: &Type| {
-                            s.core_val(m, b, &rest[i].0, t, line)
-                        };
                     return match callee {
-                        "@tally" => self.map_tally(m, b, hdr, &aty, &mut operand, line),
-                        _ => self.map_tally_bytes(m, b, hdr, &aty, &mut operand, line),
+                        "@tally" => self.map_tally(m, b, hdr, &aty, k, n, line),
+                        _ => self.map_tally_bytes(m, b, hdr, &aty, k, n, line),
                     };
                 }
-                let mut operand = |s: &mut Self, m: &mut Module, b: &mut Frame, t: &Type| match rest
-                {
-                    [(v, _)] => s.core_val(m, b, v, t, line),
-                    _ => unsupported(&format!("`{callee}` with no operand"), line),
-                };
-                return self.arr_rebuild(m, b, callee, &aty, &mut operand, line);
+                return self.arr_rebuild(m, b, callee, &aty, rest, line);
             }
             // A SIMD builtin's lane index is the literal the row carries.
             Some(Spec::Lanes) => {
@@ -10428,36 +10296,12 @@ impl<'a, 'p> Fn_<'a, 'p> {
                     .map(|c| self.row(b, c)),
                     _ => unsupported("a runtime check the core did not state", line),
                 };
-                let mut operand =
-                    |s: &mut Self, m: &mut Module, b: &mut Frame, i: usize, want: Option<&Type>| {
-                        let Some((v, _)) = args.get(i) else {
-                            return unsupported(&format!("`{callee}` with too few operands"), line);
-                        };
-                        let t = match want {
-                            Some(t) => t.clone(),
-                            None => s.core_ty(v, &Type::Int),
-                        };
-                        s.core_val(m, b, v, &t, line)?;
-                        Ok(t)
-                    };
-                let lane_at = |i: usize, lanes: i64| core_lane(args, i, lanes);
-                return self.lanes(m, b, callee, args.len(), &mut operand, &lane_at, span, line);
+                return self.lanes(m, b, callee, args, span, line);
             }
             // A generator host import: `@codeSplice` takes its tag from the type the row put
             // on its operand.
             Some(Spec::Host) => {
-                let mut ty = |s: &mut Self, i: usize| match args.get(i) {
-                    Some((v, _)) => Ok(s.cx.resolve(&s.core_ty(v, &Type::Int))),
-                    None => unsupported(&format!("`{callee}` with too few operands"), line),
-                };
-                let mut operand =
-                    |s: &mut Self, m: &mut Module, b: &mut Frame, i: usize, t: &Type| match args
-                        .get(i)
-                    {
-                        Some((v, _)) => s.core_val(m, b, v, t, line),
-                        None => unsupported(&format!("`{callee}` with too few operands"), line),
-                    };
-                return self.host(m, b, callee, args.len(), &mut ty, &mut operand, line);
+                return self.host(m, b, callee, args, line);
             }
             // `xs.pop()`, `xs.swapRemove(i)` and `m.remove(k)`: the call shrinks the
             // receiver in place at its address.
@@ -10479,10 +10323,7 @@ impl<'a, 'p> Fn_<'a, 'p> {
                 self.core_val(m, b, mv, &mty, line)?;
                 let hdr = b.local(ValType::I32);
                 b.ins(&Instruction::LocalSet(hdr));
-                let mut key = |s: &mut Self, m: &mut Module, b: &mut Frame, t: &Type| {
-                    s.core_val(m, b, kv, t, line)
-                };
-                let (idx, ..) = self.map_find(m, b, hdr, &mty, &mut key, line)?;
+                let (idx, ..) = self.map_find(m, b, hdr, &mty, kv, line)?;
                 b.ins(&Instruction::LocalGet(idx));
                 b.ins(&Instruction::I32Const(0));
                 b.ins(&Instruction::I32GeS);
@@ -10514,16 +10355,9 @@ impl<'a, 'p> Fn_<'a, 'p> {
                     }
                     _ => None,
                 };
-                let mut operand =
-                    |s: &mut Self, m: &mut Module, b: &mut Frame, i: usize, t: &Type| match args
-                        .get(i)
-                    {
-                        Some((v, _)) => s.core_val(m, b, v, t, line),
-                        None => unsupported(&format!("`{callee}` with too few operands"), line),
-                    };
                 return match (callee, args) {
-                    ("bytes", _) => self.bytes_of(m, b, range, &mut operand, line),
-                    ("stringFromBytes", _) => self.string_from_bytes(m, b, &mut operand, line),
+                    ("bytes", _) => self.bytes_of(m, b, range, args, line),
+                    ("stringFromBytes", _) => self.string_from_bytes(m, b, args, line),
                     ("@toArray", [(v, _)]) => {
                         let aty = self.core_ty(v, &Type::Int);
                         self.core_val(m, b, v, &aty, line)?;
@@ -10539,31 +10373,17 @@ impl<'a, 'p> Fn_<'a, 'p> {
                         self.core_val(m, b, v, &aty, line)?;
                         self.stream_from_array(b, &inner, line)
                     }
-                    ("fromStep", [_, _, _]) => {
-                        let mut step = |s: &mut Self, m: &mut Module, b: &mut Frame, i: usize| {
-                            let v = &args[i].0;
-                            let t = match i {
-                                0 | 1 => Type::Int,
-                                _ => s.core_ty(v, &Type::Int),
-                            };
-                            s.core_val(m, b, v, &t, line)?;
-                            Ok(t)
-                        };
-                        self.stream_from_step(m, b, &mut step, line)
-                    }
+                    ("fromStep", [_, _, _]) => self.stream_from_step(m, b, args, line),
                     // The element type is the row's result: an address is an `Int64` and
                     // carries none.
                     ("unboxStream" | "pullAt", [(v, _)]) => {
-                        let mut addr = |s: &mut Self, m: &mut Module, b: &mut Frame| {
-                            s.core_val(m, b, v, &Type::Int, line)
-                        };
                         let ret = ret.map(|t| self.cx.resolve(t));
                         match (callee, ret) {
                             ("unboxStream", Some(Type::Stream(elem))) => {
-                                self.stream_unbox(m, b, &elem, &mut addr, line)
+                                self.stream_unbox(m, b, &elem, v, line)
                             }
                             ("pullAt", Some(opt)) => match ftypes::option_payload(&opt) {
-                                Some(elem) => self.stream_pull_at(m, b, elem, &mut addr, line),
+                                Some(elem) => self.stream_pull_at(m, b, elem, v, line),
                                 None => unsupported("a `pullAt` of no Option", line),
                             },
                             _ => unsupported(&format!("`{callee}` with no result type"), line),
@@ -10580,26 +10400,13 @@ impl<'a, 'p> Fn_<'a, 'p> {
                 };
             }
             Some(Spec::Effect(_)) => {
-                let [(v, _)] = args else {
+                let [_] = args else {
                     return unsupported(&format!("`{callee}` of other than one value"), line);
                 };
-                let mut operand =
-                    |s: &mut Self, m: &mut Module, b: &mut Frame, want: Option<&Type>| {
-                        let t = want.cloned().unwrap_or_else(|| s.core_ty(v, &Type::Int));
-                        s.core_val(m, b, v, &t, line)?;
-                        Ok(t)
-                    };
-                return self.effect(m, b, callee, &mut operand, line);
+                return self.effect(m, b, callee, args, line);
             }
             Some(Spec::Logs) => {
-                let mut operand =
-                    |s: &mut Self, m: &mut Module, b: &mut Frame, i: usize, t: &Type| match args
-                        .get(i)
-                    {
-                        Some((v, _)) => s.core_val(m, b, v, t, line),
-                        None => unsupported(&format!("`{callee}` with too few operands"), line),
-                    };
-                return self.logs(m, b, callee, &mut operand, line);
+                return self.logs(m, b, callee, args, line);
             }
             // A pull binds two names, and [`Fn_::core_stmts`] emits it.
             Some(Spec::Pulls) => return unsupported("a pull apart from its loop head", line),
@@ -10620,10 +10427,7 @@ impl<'a, 'p> Fn_<'a, 'p> {
             return Ok(Type::Named(decl.name));
         }
         if kind.direct() && self.is_extern(callee) {
-            let mut operand = |s: &mut Self, m: &mut Module, b: &mut Frame, i: usize, p: &Type| {
-                s.core_val(m, b, &args[i].0, p, line)
-            };
-            return self.extern_call(m, b, callee, args.len(), &mut operand, line);
+            return self.extern_call(m, b, callee, args, line);
         }
         let args: Vec<_> = args
             .iter()
@@ -10807,17 +10611,9 @@ impl<'a, 'p> Fn_<'a, 'p> {
                     |g| matches!(g, Guard::Index(_, v) if v == i),
                 )?;
                 let row = self.row(b, row);
-                let mut index = |s: &mut Self, m: &mut Module, b: &mut Frame| {
-                    s.core_val(m, b, i, &Type::Int, line)
-                };
-                self.swap_remove_at(m, b, slot, aty, row, &mut index, line)
+                self.swap_remove_at(m, b, slot, aty, row, i, line)
             }
-            ("@remove", [(k, _)]) => {
-                let mut key = |s: &mut Self, m: &mut Module, b: &mut Frame, t: &Type| {
-                    s.core_val(m, b, k, t, line)
-                };
-                self.map_remove(m, b, slot, aty, &mut key, line)
-            }
+            ("@remove", [(k, _)]) => self.map_remove(m, b, slot, aty, k, line),
             _ => unsupported(&format!("`{callee}` at this arity"), line),
         }
     }
@@ -12159,12 +11955,14 @@ impl<'a, 'p> Fn_<'a, 'p> {
                 self.str_bin(b, *o, line)
             }
             (Op::Bin(o), [l, r]) if self.core_code_concat(*o, l, r) => {
-                let mut ty = |_: &mut Self, _: usize| unsupported("a concatenation's type", line);
-                let mut operand =
-                    |s: &mut Self, m: &mut Module, b: &mut Frame, i: usize, t: &Type| {
-                        s.core_val(m, b, [l, r][i], t, line)
-                    };
-                self.host(m, b, "+", 2, &mut ty, &mut operand, line)
+                let Some(g) = self.cx.gen else {
+                    return unsupported("`+` outside a generator", line);
+                };
+                let code = Type::Named("Code".to_string());
+                self.core_val(m, b, l, &code, line)?;
+                self.core_val(m, b, r, &code, line)?;
+                b.ins(&Instruction::Call(g.concat));
+                Ok(code)
             }
             (Op::Bin(o), [l, r]) => {
                 // A float literal takes its sibling's type: `0.0 - o` with `o: Float32` runs
@@ -12212,6 +12010,27 @@ impl<'a, 'p> Fn_<'a, 'p> {
             }
             _ => unsupported("an operator of this arity", line),
         }
+    }
+
+    /// Emits operand `i` of the call to `name` at `want`, or at the type it carries where `want` is
+    /// `None`, and returns that type. A call with no operand `i` is refused.
+    #[allow(clippy::too_many_arguments)]
+    fn core_arg(
+        &mut self,
+        m: &mut Module,
+        b: &mut Frame,
+        name: &str,
+        args: &[(Val, Capability)],
+        i: usize,
+        want: Option<&Type>,
+        line: usize,
+    ) -> Result<Type, String> {
+        let Some((v, _)) = args.get(i) else {
+            return unsupported(&format!("`{name}` with too few operands"), line);
+        };
+        let t = want.cloned().unwrap_or_else(|| self.core_ty(v, &Type::Int));
+        self.core_val(m, b, v, &t, line)?;
+        Ok(t)
     }
 
     /// One value: the name's own place, or the literal the row names.

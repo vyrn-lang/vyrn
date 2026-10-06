@@ -1,8 +1,8 @@
 kind	lines	wasm
-the mapping §2.3 names	7901	620
+the mapping §2.3 names	7785	621
 a decision §2.3 says it must not make	451	141
 the runtime it emits by hand	340	7
-one block per builtin name	2756	653
+one block per builtin name	2696	652
 the wasm format	240	0
-shared machinery	1812	72
+shared machinery	1807	72
 tests	299	0
