@@ -371,7 +371,7 @@ pub fn builtin_row(name: &str, gen_host: bool) -> Option<&'static Spec> {
 /// Tags: `Call:<who>:<name>` for a callee the emitter's function table does
 /// not answer, `Read:<kind>` and `Take:<kind>` for a place, `Opaque:<what>`
 /// for a row that names no value, and `Lambda`. `tests/coredrive.rs` ranks
-/// them, and `VYRN_GAP_TALLY` tables them.
+/// them.
 pub fn gaps(body: &Body) -> Vec<String> {
     let mut out = Vec::new();
     for (s, _) in rows(&body.stmts) {
@@ -474,82 +474,6 @@ fn gaps_rhs(body: &Body, r: &Rhs, out: &mut Vec<String>) {
     }
 }
 
-/// Where the gap tally is appended, or `None` when nothing asked for one.
-fn gap_tally_at() -> Option<&'static std::path::Path> {
-    static AT: std::sync::OnceLock<Option<std::path::PathBuf>> = std::sync::OnceLock::new();
-    AT.get_or_init(|| std::env::var_os("VYRN_GAP_TALLY").map(std::path::PathBuf::from))
-        .as_deref()
-}
-
-thread_local! {
-    /// The lines already appended. A body is built more than once (seeded,
-    /// and by every host), and the histogram counts bodies.
-    static SAID: std::cell::RefCell<std::collections::HashSet<String>> =
-        std::cell::RefCell::new(std::collections::HashSet::new());
-}
-
-/// Appends one line per body of `out`: the module, the function, the first gap,
-/// every gap, `judged` for a body no emitter reads ([`Instance::judged_only`])
-/// or `emitted`, and the command that ran. A body the rows carry whole reads
-/// `-` in both gap fields.
-fn tally_gaps(inst: &Instance<'_>, out: &Result<Body, Gap>) {
-    let file = inst.func.module.as_deref().unwrap_or("(the root)");
-    let reach = if inst.judged_only() {
-        "judged"
-    } else {
-        "emitted"
-    };
-    let mut lines: Vec<String> = Vec::new();
-    match out {
-        Err(g) => {
-            // The field is space-separated, so the gap's words are joined.
-            let what = format!(
-                "Gap:{}{}",
-                g.what.replace(' ', "-"),
-                if g.detail.is_empty() {
-                    String::new()
-                } else {
-                    format!(":{}", g.detail)
-                }
-            );
-            lines.push(format!("{file}\t{}\t{what}\t{what}", inst.spelling()));
-        }
-        Ok(body) => {
-            for f in body.frames() {
-                let g = gaps(f);
-                // A body with no gap is a line too: it is in every table's
-                // denominator.
-                lines.push(format!(
-                    "{file}\t{}\t{}\t{}",
-                    f.name,
-                    g.first().map_or("-", |t| t.as_str()),
-                    if g.is_empty() {
-                        "-".into()
-                    } else {
-                        g.join(" ")
-                    }
-                ));
-            }
-        }
-    }
-    static ARGV: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    let argv = ARGV.get_or_init(|| std::env::args().collect::<Vec<_>>().join(" "));
-    for line in lines {
-        let line = format!("{line}\t{reach}\t{argv}\n");
-        if !SAID.with(|s| s.borrow_mut().insert(line.clone())) {
-            continue;
-        }
-        if let Ok(mut f) = std::fs::OpenOptions::new()
-            .append(true)
-            .create(true)
-            .open(gap_tally_at().unwrap())
-        {
-            use std::io::Write;
-            let _ = f.write_all(line.as_bytes());
-        }
-    }
-}
-
 /// Builds the core of one instance. The first build records candidates and
 /// takes nothing; where [`last_owner`] names any, a second build takes them.
 /// Its frames have no row ([`Body::id`]).
@@ -559,20 +483,6 @@ pub fn build(program: &Program, inst: &Instance<'_>, own: &Ownership) -> Result<
 
 /// [`build`] with the caller's function table and memo of `own`'s name facts.
 pub(crate) fn build_in(
-    program: &Program,
-    inst: &Instance<'_>,
-    own: &Ownership,
-    fns: &Fns,
-    names: &mut NameMemo,
-) -> Result<Body, Gap> {
-    let out = build_twice(program, inst, own, fns, names);
-    if gap_tally_at().is_some() {
-        tally_gaps(inst, &out);
-    }
-    out
-}
-
-fn build_twice(
     program: &Program,
     inst: &Instance<'_>,
     own: &Ownership,
@@ -826,7 +736,7 @@ fn judged(facts: &NodeTypes<'_>, own: &Ownership, sp: &Speech) -> Vec<(usize, St
 fn unbound(
     facts: &NodeTypes<'_>,
     own: &Ownership,
-    impls: &[vyrn_frontend::ast::ImplBlock],
+    impls: &vyrn_frontend::types::Impls,
     outer: &HashMap<String, Vec<String>>,
     sp: &Speech,
 ) -> Vec<(usize, String)> {
@@ -1085,20 +995,6 @@ fn build_seeded(
     names: &mut NameMemo,
     seed: &std::collections::HashSet<NodeId>,
 ) -> Result<Body, Gap> {
-    let (types, produced, solved) = (
-        inst.facts.types.clone(),
-        inst.facts.produced.clone(),
-        inst.facts.solved.clone(),
-    );
-    let sp = program.spellings.speech(&inst.func.module);
-    let mistyped = judged(&inst.facts, own, &sp);
-    let refused = unbound(
-        &inst.facts,
-        own,
-        &program.impls,
-        &inst.func.type_bounds,
-        &sp,
-    );
     // The plan's own rows, not the instance's copy: the copy predates the
     // rows [`augment`] places. The copy adds only the substituted type a
     // `Deep` walks, and nothing below reads a kind.
@@ -1107,37 +1003,20 @@ fn build_seeded(
     for r in own.releases.get(&inst.func_id).unwrap_or(&no_steps) {
         placed.entry((r.exit, r.site)).or_default().push(r);
     }
-    let mut b = Builder {
+    let mut b = Builder::new(
         program,
         own,
         fns,
-        proto: &own.proto,
         names,
-        types,
-        produced,
-        solved,
-        placed,
-        body: Body {
-            id: fns.instance_id(inst),
-            name: inst.spelling(),
-            file: inst.func.module.clone(),
-            spellings: program.spellings.clone(),
-            export: inst.func.is_export_extern,
-            names: Vec::new(),
-            params: Vec::new(),
-            stmts: Vec::new(),
-            lambdas: Vec::new(),
-            cands: Vec::new(),
-            loop_buffers: Vec::new(),
-            unbound_drops: Vec::new(),
-            refused,
-            mistyped,
-        },
-        frame: Frame::default(),
-        temps: 0,
+        &inst.facts,
         seed,
-        closed: false,
-    };
+        placed,
+        Some(&inst.func.type_bounds),
+        fns.instance_id(inst),
+        inst.spelling(),
+        inst.func.module.clone(),
+        inst.func.is_export_extern,
+    );
     let f: &Function = inst.func;
     // A parameter's type is the instance's, not the declaration's:
     // `map<Int64, Int64>`'s `f` is `fn(Int64) -> Int64`, the shape stored
@@ -1194,16 +1073,19 @@ pub fn build_module_state<'a>(
 ) -> Result<Body, Gap> {
     let seed = std::collections::HashSet::new();
     let mut names = NameMemo::default();
-    let mut b = Builder::bare(
+    let mut b = Builder::new(
         program,
         own,
         fns,
         &mut names,
         facts,
         &seed,
+        HashMap::new(),
+        None,
+        fns.id(""),
         String::new(),
         None,
-        HashMap::new(),
+        false,
     );
     let mut out = Vec::new();
     for g in &program.globals {
@@ -1264,16 +1146,19 @@ fn build_outside_seeded<'a>(
         placed.entry((r.exit, r.site)).or_default().push(r);
     }
     let (block, file) = (ob.block, ob.module.clone());
-    let mut b = Builder::bare(
+    let mut b = Builder::new(
         program,
         own,
         fns,
         names,
         &ob.facts,
         seed,
+        placed,
+        None,
+        fns.id(&ob.name),
         ob.name.clone(),
         file,
-        placed,
+        false,
     );
     // The checker types a `test` or `bench` body as a function returning Unit.
     b.frame.ret = Some(Type::Unit);
@@ -1325,16 +1210,19 @@ pub fn build_root<'a>(
         ..facts.clone()
     };
     let seed = std::collections::HashSet::new();
-    let mut b = Builder::bare(
+    let mut b = Builder::new(
         program,
         own,
         fns,
         names,
         &facts,
         &seed,
+        HashMap::new(),
+        None,
+        fns.id(""),
         String::new(),
         file,
-        HashMap::new(),
+        false,
     );
     b.closed = binds.is_some();
     for (name, ty) in binds.unwrap_or_default() {
@@ -1362,6 +1250,9 @@ struct Builder<'a> {
     fns: &'a Fns,
     proto: &'a Owned,
     names: &'a mut NameMemo,
+    /// The bounds of the function's type parameters; `None` for a body that
+    /// is no function.
+    bounds: Option<&'a HashMap<String, Vec<String>>>,
     types: HashMap<NodeId, Type>,
     /// The producer type of every typed expression, before the destination's
     /// coercion (see [`Rhs`]); `types` holds what the value must end up as.
@@ -1460,43 +1351,49 @@ struct Frame {
 }
 
 impl<'a> Builder<'a> {
-    /// A builder for a body that is no instance: no substitution.
+    /// A builder for the body `name`, row `id`. `bounds` are the type
+    /// parameters' bounds in scope: an instance's, `None` for a body that is
+    /// no instance. `id` is the instance's own row
+    /// ([`Fns::instance_id`]), not the first row under its name: a projection
+    /// can share a function's name.
     #[allow(clippy::too_many_arguments)]
-    fn bare(
+    fn new(
         program: &'a Program,
         own: &'a Ownership,
         fns: &'a Fns,
         names: &'a mut NameMemo,
         facts: &NodeTypes<'a>,
         seed: &'a std::collections::HashSet<NodeId>,
+        placed: HashMap<(Exit, NodeId), Vec<&'a Release>>,
+        bounds: Option<&'a HashMap<String, Vec<String>>>,
+        id: Option<FnId>,
         name: String,
         file: Option<String>,
-        placed: HashMap<(Exit, NodeId), Vec<&'a Release>>,
+        export: bool,
     ) -> Self {
-        let (types, produced, solved) = (
-            facts.types.clone(),
-            facts.produced.clone(),
-            facts.solved.clone(),
-        );
         let sp = program.spellings.speech(&file);
-        let mistyped = judged(facts, own, &sp);
-        let refused = unbound(facts, own, &program.impls, &HashMap::new(), &sp);
+        let none = HashMap::new();
+        let (refused, mistyped) = (
+            unbound(facts, own, &program.impls, bounds.unwrap_or(&none), &sp),
+            judged(facts, own, &sp),
+        );
         Builder {
             program,
             own,
             fns,
             proto: &own.proto,
             names,
-            types,
-            produced,
-            solved,
+            bounds,
+            types: facts.types.clone(),
+            produced: facts.produced.clone(),
+            solved: facts.solved.clone(),
             placed,
             body: Body {
-                id: fns.id(&name),
+                id,
                 name,
                 spellings: program.spellings.clone(),
                 file,
-                export: false,
+                export,
                 names: Vec::new(),
                 params: Vec::new(),
                 stmts: Vec::new(),
@@ -1655,7 +1552,13 @@ impl<'a> Builder<'a> {
             && borrow
             && self.frame.rebound.contains(name)
             && self.owns(ty)
-            && vyrn_frontend::types::copy_impl(&self.program.impls, ty).is_none()
+            && (self.program.impls)
+                .method(
+                    vyrn_frontend::types::COPY,
+                    ty,
+                    vyrn_frontend::types::COPY_COPY,
+                )
+                .is_none()
     }
 
     /// Why a `let` binds a value this frame does not own. It asks
@@ -1730,10 +1633,18 @@ impl<'a> Builder<'a> {
             || self.own.place_names.contains(name)
     }
 
-    /// The first protocol member named `name`, in declaration order.
-    fn protocol_member(&self, name: &str) -> Option<(MethodId, &'a MethodSig)> {
+    /// The member `name` of the protocol that `recv`'s bound names, where
+    /// `recv` is a bounded type parameter of the body as written. The checker
+    /// dispatched the call through that bound, not through the first
+    /// protocol that declares `name`.
+    fn protocol_member(&self, name: &str, recv: &Expr) -> Option<(MethodId, &'a MethodSig)> {
+        let Type::Param(t) = node_ty(self.own, recv.id())? else {
+            return None;
+        };
+        let bound = self.bounds?.get(&t)?;
         (self.program.protocols.iter().enumerate()).find_map(|(i, p)| {
-            let j = p.methods.iter().position(|m| m.name == name)?;
+            let j = (bound.contains(&p.name))
+                .then(|| p.methods.iter().position(|m| m.name == name))??;
             let id = MethodId {
                 protocol: i as u32,
                 member: j as u32,
@@ -1835,7 +1746,7 @@ impl<'a> Builder<'a> {
         let Ok(rty) = self.ty_of(recv) else {
             return Ok(false);
         };
-        let Some(f) = vyrn_frontend::project::lookup_in(&self.program.impls, &rty, name) else {
+        let Some((_, f)) = self.program.impls.place(&rty, name) else {
             return Ok(false);
         };
         if !vyrn_frontend::project::is_optional(f) {
@@ -2082,7 +1993,10 @@ impl<'a> Builder<'a> {
                 };
                 let p = self.projection(name).unwrap();
                 let rty = self.ty_of(&args[0])?;
-                Ok(self.under_impl(&p.ret, &rty))
+                Ok(match self.program.impls.place(&rty, name) {
+                    Some((imp, f)) => vyrn_frontend::types::under_head(imp, &rty, &f.ret),
+                    None => p.ret.clone(),
+                })
             }
             None => gap_d(
                 "an expression the checker did not type",
@@ -3721,22 +3635,20 @@ impl<'a> Builder<'a> {
             shape => {
                 let (key, elem) = match shape {
                     Type::Array(e) | Type::ArrayN(e, _) | Type::SmallArray(e, _) => (Type::Int, *e),
-                    other => {
-                        match vyrn_frontend::project::lookup_in(&self.program.impls, bty, "atSet") {
-                            Some(f) => (
-                                f.params
-                                    .get(1)
-                                    .map_or(Type::Int, |p| self.under_impl(&p.ty, bty)),
-                                self.under_impl(&f.ret, bty),
-                            ),
-                            None => {
-                                let ([other], []) = sp.say([&other], []);
-                                let refusal = rule!(IndexStoreNoContainer, name, other).render();
-                                self.body.mistyped.push((line, refusal));
-                                return gap("a store into an element of what has none", line);
-                            }
+                    other => match self.program.impls.place(bty, "atSet") {
+                        Some((imp, f)) => (
+                            (f.params.get(1)).map_or(Type::Int, |p| {
+                                vyrn_frontend::types::under_head(imp, bty, &p.ty)
+                            }),
+                            vyrn_frontend::types::under_head(imp, bty, &f.ret),
+                        ),
+                        None => {
+                            let ([other], []) = sp.say([&other], []);
+                            let refusal = rule!(IndexStoreNoContainer, name, other).render();
+                            self.body.mistyped.push((line, refusal));
+                            return gap("a store into an element of what has none", line);
                         }
-                    }
+                    },
                 };
                 let i = ity.filter(|i| {
                     !coercible(i, &key) && vyrn_frontend::types::resolve(i, decls) != Type::Err
@@ -4075,8 +3987,8 @@ impl<'a> Builder<'a> {
                 field("length")
             }
             _ => match vyrn_frontend::types::iterate_impl(&self.program.impls, ity) {
-                Some((_, size, _)) => {
-                    let solved = self.impl_args(&size, ity);
+                Some((imp, size, _)) => {
+                    let solved = self.impl_args(imp, &size, ity);
                     Rhs::Call {
                         kind: (self.fn_id(&size).filter(|_| solved.is_some()))
                             .map_or(Callee::Method, Callee::Fn),
@@ -4117,51 +4029,29 @@ impl<'a> Builder<'a> {
     }
 
     fn projected_elem(&self, ity: &Type) -> Option<Type> {
-        let key = vyrn_frontend::types::type_key(ity)?;
-        let imp = self.program.impls.iter().find(|i| {
-            vyrn_frontend::types::type_key(&i.ty).as_deref() == Some(key.as_str())
-                && i.places.iter().any(|p| p.name == "nth")
-        })?;
-        let nth = imp.places.iter().find(|p| p.name == "nth")?;
-        Some(self.under_impl(&nth.ret, ity))
-    }
-
-    /// `ty` as an impl's member declares it, under the type arguments of the
-    /// receiver `recv`: `impl<T> .. for Slots<T>` against `Slots<Person>`
-    /// makes T Person.
-    fn under_impl(&self, ty: &Type, recv: &Type) -> Type {
-        let key = vyrn_frontend::types::type_key(recv);
-        let mut subst = HashMap::new();
-        if let Some(imp) =
-            (self.program.impls.iter()).find(|i| vyrn_frontend::types::type_key(&i.ty) == key)
-        {
-            vyrn_frontend::types::solve_param(&imp.ty, recv, &mut subst);
-        }
-        vyrn_frontend::types::substitute(ty, &subst)
+        let (imp, nth) = self.program.impls.place(ity, "nth")?;
+        Some(vyrn_frontend::types::under_head(imp, ity, &nth.ret))
     }
 
     /// Whether a projection answers for `ty`'s element place.
     fn projected(&self, ty: &Type) -> bool {
-        vyrn_frontend::project::lookup_in(&self.program.impls, ty, "atSet").is_some()
+        self.program.impls.place(ty, "atSet").is_some()
     }
 
-    /// The type arguments of a call to the impl function `f` on a receiver
-    /// of type `recv`, in `f`'s order: its impl head's parameters solved
-    /// against the receiver, as [`Builder::under_impl`] solves them. Empty
-    /// for a function with none; `None` where the program declares no `f`
-    /// or the receiver leaves a parameter unsolved.
-    fn impl_args(&self, f: &str, recv: &Type) -> Option<Vec<(String, Type)>> {
+    /// The type arguments of a call to `f`, a function `imp` flattened, on a
+    /// receiver of type `recv`, in `f`'s order: the impl head's parameters
+    /// solved against the receiver. Empty for a function with none; `None`
+    /// where the program declares no `f` or the receiver leaves a parameter
+    /// unsolved.
+    fn impl_args(
+        &self,
+        imp: &vyrn_frontend::ast::ImplBlock,
+        f: &str,
+        recv: &Type,
+    ) -> Option<Vec<(String, Type)>> {
         let g = self.program.functions.iter().find(|g| g.name == f)?;
-        let key = vyrn_frontend::types::type_key(recv)?;
         let mut subst = HashMap::new();
-        if let Some(imp) = self.program.impls.iter().find(|i| {
-            vyrn_frontend::types::type_key(&i.ty).as_deref() == Some(key.as_str())
-                && (i.methods.iter()).any(|m| {
-                    vyrn_frontend::types::impl_method_name(&i.protocol, &key, &m.name) == f
-                })
-        }) {
-            vyrn_frontend::types::solve_param(&imp.ty, recv, &mut subst);
-        }
+        vyrn_frontend::types::solve_param(&imp.ty, recv, &mut subst);
         (g.type_params.iter())
             .map(|p| Some((p.clone(), subst.get(p)?.clone())))
             .collect()
@@ -4798,15 +4688,13 @@ impl<'a> Builder<'a> {
     fn read_val_inner(&mut self, e: &'a Expr, out: &mut Vec<St>) -> Result<Val, Gap> {
         let ty = self.ty_of(e).ok();
         let owns = ty.as_ref().is_some_and(|t| self.owns(t));
+        let is_place = match e {
+            Expr::Field { .. } => self.deferred_of(e).is_none(),
+            Expr::Call { name, args, .. } => name == "@at" && args.len() == 2,
+            _ => false,
+        };
         match e {
-            Expr::Field { .. } if owns && self.deferred_of(e).is_none() => {
-                let place = self.place(e, out)?;
-                let t = self.borrow_name(e, ty.unwrap(), e.line());
-                out.push(St::Let(t, Rhs::Read(place)));
-                self.release_receiver(e, out, true);
-                Ok(Val::Name(t))
-            }
-            Expr::Call { name, args, .. } if owns && name == "@at" && args.len() == 2 => {
+            _ if owns && is_place => {
                 let place = self.place(e, out)?;
                 let t = self.borrow_name(e, ty.unwrap(), e.line());
                 out.push(St::Let(t, Rhs::Read(place)));
@@ -4843,7 +4731,6 @@ impl<'a> Builder<'a> {
         let Some((r, producer, malloc)) = self.frame.pending_receiver.take() else {
             return;
         };
-        let node = e.id();
         let took = self.ty_of(e).is_ok_and(|t| self.owns(&t));
         if borrowed && took {
             if self.own.placed.producers.contains(&producer) {
@@ -4856,7 +4743,6 @@ impl<'a> Builder<'a> {
             }
             return;
         }
-        let _ = node;
         // An element's receiver is `@at`'s argument, and its release is keyed
         // as an argument temporary's.
         if let (false, Expr::Call { name, args, .. }) = (took, e) {
@@ -5421,7 +5307,13 @@ impl<'a> Builder<'a> {
             if name == vyrn_frontend::project::AT && args.len() == 2 && !is_place_read(&args[0]))
             && self.ty_of(e).is_ok_and(|t| {
                 self.owns(&t)
-                    && (vyrn_frontend::types::copy_impl(&self.program.impls, &t).is_none()
+                    && ((self.program.impls)
+                        .method(
+                            vyrn_frontend::types::COPY,
+                            &t,
+                            vyrn_frontend::types::COPY_COPY,
+                        )
+                        .is_none()
                         || (std::ptr::eq(at, e) && self.frame.scrutinee != Some(e.id())))
             })
     }
@@ -6093,9 +5985,11 @@ impl<'a> Builder<'a> {
             vyrn_frontend::types::impl_method_name(vyrn_frontend::types::FALLIBLE, &key, m)
         };
         let success = method("success");
-        let (Some(is_success), Some(success_id)) =
-            (self.fn_id(&method("isSuccess")), self.fn_id(&success))
-        else {
+        let (Some(imp), Some(is_success), Some(success_id)) = (
+            self.program.impls.get(vyrn_frontend::types::FALLIBLE, &key),
+            self.fn_id(&method("isSuccess")),
+            self.fn_id(&success),
+        ) else {
             return gap("a `?` on a type with no `Fallible` impl", line);
         };
         // The impl's `isSuccess` chooses the arm. Both impl calls are declared
@@ -6105,7 +5999,7 @@ impl<'a> Builder<'a> {
             held,
             Rhs::Call {
                 solved: self
-                    .impl_args(&method("isSuccess"), &ity)
+                    .impl_args(imp, &method("isSuccess"), &ity)
                     .unwrap_or_default(),
                 callee: method("isSuccess"),
                 args: vec![(Arg::Val(sv.clone()), Capability::Read)],
@@ -6133,7 +6027,7 @@ impl<'a> Builder<'a> {
         ok.push(St::Let(
             t,
             Rhs::Call {
-                solved: self.impl_args(&success, &ity).unwrap_or_default(),
+                solved: self.impl_args(imp, &success, &ity).unwrap_or_default(),
                 callee: success,
                 args: vec![(Arg::Val(sv.clone()), Capability::Read)],
                 write_back: false,
@@ -6338,7 +6232,7 @@ impl<'a> Builder<'a> {
         } else if let Some(p) = self.projection(name) {
             kind = Callee::Projection;
             p.params.iter().map(|p| p.capability).collect()
-        } else if let Some((id, sig)) = self.protocol_member(name) {
+        } else if let Some((id, sig)) = (args.first()).and_then(|r| self.protocol_member(name, r)) {
             // A protocol member no impl answers, called on a bounded type
             // parameter in a generic read as written: its signature is what
             // a caller reads (`MethodSig::recv`).
@@ -6596,16 +6490,21 @@ impl<'a> Builder<'a> {
     /// The impl function the method `name` dispatches to on `recv`'s type,
     /// and its type arguments ([`Builder::impl_args`]): the one function the
     /// program declares under a name some protocol with that method mangles.
+    /// A receiver that is a bounded type parameter as written dispatches
+    /// through the protocol its bound names ([`Builder::protocol_member`]).
     fn dispatched(&self, name: &str, recv: &Expr) -> Option<(String, Vec<(String, Type)>)> {
         let rty = self.ty_of(recv).ok()?;
         let key = vyrn_frontend::types::type_key(&rty)?;
-        let fs: std::collections::BTreeMap<String, Vec<(String, Type)>> = self
-            .program
-            .impls
-            .iter()
+        let bound = (self.protocol_member(name, recv))
+            .map(|(id, _)| &self.program.protocols[id.protocol as usize].name);
+        let fs: std::collections::BTreeMap<String, Vec<(String, Type)>> = (self.program.impls)
+            .of_key(&key)
             .filter(|i| i.methods.iter().any(|m| m.name == name))
-            .map(|i| vyrn_frontend::types::impl_method_name(&i.protocol, &key, name))
-            .filter_map(|f| Some((f.clone(), self.impl_args(&f, &rty)?)))
+            .filter(|i| bound.is_none_or(|p| &i.protocol == p))
+            .filter_map(|i| {
+                let f = vyrn_frontend::types::impl_method_name(&i.protocol, &key, name);
+                Some((f.clone(), self.impl_args(i, &f, &rty)?))
+            })
             .collect();
         let mut fs = fs.into_iter();
         match (fs.next(), fs.next()) {
@@ -6618,8 +6517,17 @@ impl<'a> Builder<'a> {
     /// type arguments.
     fn copied(&self, recv: &Expr) -> Option<(String, Vec<(String, Type)>)> {
         let rty = self.ty_of(recv).ok()?;
-        let f = vyrn_frontend::types::copy_impl(&self.program.impls, &rty)?;
-        let solved = self.impl_args(&f, &rty)?;
+        let impls = &self.program.impls;
+        let f = impls.method(
+            vyrn_frontend::types::COPY,
+            &rty,
+            vyrn_frontend::types::COPY_COPY,
+        )?;
+        let imp = impls.get(
+            vyrn_frontend::types::COPY,
+            &vyrn_frontend::types::type_key(&rty)?,
+        )?;
+        let solved = self.impl_args(imp, &f, &rty)?;
         Some((f, solved))
     }
 
@@ -6814,11 +6722,22 @@ fn node_ty(own: &Ownership, node: NodeId) -> Option<Type> {
     own.record.node_types.get(&node).cloned()
 }
 
-/// The type arguments the checker solved at the call `node`, as it typed the
-/// body: before an instance's substitution.
+/// The type arguments the checker solved at the call `node`, as the body
+/// writes them: before an instance's substitution, each parameter by its
+/// written name.
 fn node_solved(own: &Ownership, node: NodeId) -> Option<Vec<(String, Type)>> {
+    use vyrn_frontend::{ast::written_param, types::written_params};
     let (_, s) = own.record.node_substs.get(&node)?;
-    Some(s.clone())
+    Some(
+        (s.iter())
+            .map(|(p, t)| {
+                (
+                    written_param(p).to_string(),
+                    written_params(t).unwrap_or_else(|| t.clone()),
+                )
+            })
+            .collect(),
+    )
 }
 
 /// The declaration the checker recorded at the call `node` it typed `Err`
@@ -7422,8 +7341,7 @@ fn typed(
 ) -> bool {
     let global_mutable = |g: &str| program.globals.iter().any(|d| d.name == g && d.mutable);
     let global_ty = |g: &str| global_ty(program, own, g);
-    let projected =
-        |t: &Type| vyrn_frontend::project::lookup_in(&program.impls, t, "atSet").is_some();
+    let projected = |t: &Type| program.impls.place(t, "atSet").is_some();
     let ruled_within = |t: &Type, path: &[&Place]| ruled_within(&own.proto, t, path);
     let grouped = |t: &Type, path: &[&Place]| grouped(&own.proto, t, path);
     let rules = crate::typed::StoreRules {
@@ -7667,8 +7585,8 @@ pub fn augment(program: &Program, w: &mut World, judging: bool) {
         |names, j| j.map(|j| j.build(program, shared, fns, names)),
     );
     drop(sealed);
-    // In job order, so the gap tally and every row a lambda frame takes come
-    // out as on one thread.
+    // In job order, so every row a lambda frame takes comes out as on one
+    // thread.
     let mut made: Vec<Made> = Vec::with_capacity(jobs.len());
     for (((j, key), served), first) in jobs.iter().zip(keys).zip(served).zip(firsts) {
         if let Some((key, judgment)) = served {
@@ -7677,7 +7595,6 @@ pub fn augment(program: &Program, w: &mut World, judging: bool) {
         }
         // `unserved` holds every job `served` does not, so `first` is `Some`.
         let mut top = first.unwrap_or_else(|| j.build(program, own, &w.fns, &mut names));
-        j.tally(&top);
         if let Ok(b) = &mut top {
             w.fns.number(b);
         }
@@ -7753,7 +7670,6 @@ pub fn augment(program: &Program, w: &mut World, judging: bool) {
         let (key, frames) = (key.clone(), s.frames.clone());
         let j = &jobs[i];
         let mut top = j.build(program, own, &w.fns, &mut names);
-        j.tally(&top);
         if let Ok(b) = &mut top {
             w.fns.number(b);
             crate::world::add_callees(b, &by_name, calls.entry(j.id()).or_default());
@@ -7781,7 +7697,6 @@ pub fn augment(program: &Program, w: &mut World, judging: bool) {
         });
         if unjudged {
             *top = j.build(program, own, &w.fns, &mut names);
-            j.tally(top);
         }
     }
     // The kernel's walk reads the body and the judgment alone, so it runs on
@@ -8155,19 +8070,12 @@ impl Job<'_, '_> {
             Job::Inst(inst) => {
                 let _p = vyrn_frontend::prof::phase("placer: core::build");
                 let inst = crate::walked(program, &own.record, inst);
-                build_twice(program, &inst, own, fns, names)
+                build_in(program, &inst, own, fns, names)
             }
             Job::Outside(ob) => {
                 let _p = vyrn_frontend::prof::phase("placer: build_outside");
                 build_outside(program, own, fns, names, ob)
             }
-        }
-    }
-
-    /// Appends an instance's build to the gap tally, as [`build_in`] does.
-    fn tally(&self, out: &Result<Body, Gap>) {
-        if let (Job::Inst(inst), Some(_)) = (self, gap_tally_at()) {
-            tally_gaps(inst, out);
         }
     }
 }

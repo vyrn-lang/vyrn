@@ -46,7 +46,7 @@ pull request.
 
 - Protocol conformance is explicit (`impl P for T`) and checked where it is written: a missing method or an extra method is refused.
 - No inherent methods. `x.m(a)` is `m(x, a)`, so a helper needs no `impl`.
-- Compatibility hints for removed spellings were dropped on 2026-10-01 by the user's decision: a use of `str`, `concat`, `len`, `list`, `push`, `alen`, `array`, `Int` or `Float` gets the sentence any unknown name gets, and those names are free to declare. `at` and `toString` stay reserved, because the sugar for `a[i]` and for interpolation would otherwise call a user's declaration.
+- Compatibility hints for removed spellings were dropped on 2026-10-01 by the user's decision: a use of `str`, `concat`, `len`, `list`, `push`, `alen`, `array`, `Int` or `Float` gets the sentence any unknown name gets, and those names are free to declare. `at` and `toString` are free too since 2026-10-06: the parser decides a written method-form name once, and the sugar for `a[i]` and for interpolation never reaches a user's declaration.
 - Dispatch is static everywhere; there are no vtables. Records are legal impl targets and validated scalars are not.
 - Generic impls are keyed on the type constructor: one impl per protocol and constructor.
 - A generic call or record literal solves its callee's type parameters renamed apart (`T'n`, fresh per instantiation), so a caller's `T` never meets the callee's. A sentence and the check's record carry the written name.
@@ -179,6 +179,7 @@ pull request.
 - The load returns the World its check judged (`vyrn_lower::load_warned`), and the host passes it to every pass over that program. A host that changes the program analyses it again (`vyrn_lower::analyze`); no memo hands a World or a record to the next pass.
 - A table is keyed by a resolved id (function, type, declaration, name), never by a spelling; two bindings that share a name merged their facts. A node id is a function id and a local index, so an edit to one function renumbers nothing else.
 - An id is a storage index, never an order. Diagnostics and emitted functions follow source order, so an incremental check and a fresh one print the same bytes.
+- A type's impls are found through one index by type key, `Program::impls` (`types::Impls`). No pass scans the impl list for a key, and its first impl for a protocol is the one the parser flattens.
 - Each relation has one writer, which sets both directions and deletes in a batch. No hooks and no second storage shape for one relation.
 - The call relation is between source functions, as an edit is: every instance of a generic and every lambda frame call under their function's row. A call through a value is no edge; the effect judgment keeps its own per-instance graph with the values' closed sets.
 - A recheck pulls: each result records what it read (a signature, a summary, a name lookup in a scope, misses included), and a cache that records no reads is off in incremental mode.
@@ -220,7 +221,8 @@ pull request.
 - Diagnostics speak intent: what you asked for, what blocks it, how to fix it. They say read, modify and consume, never "borrow" or "lifetime".
 - A refusal of the lexer, parser, loader, checker, kernel, typed judgment or core builder is a row in `vyrn-frontend/src/rules.rs`: a `Rule` names its holes, its sentence and its fixes, and the diagnostic carries the rule with its hole text. Sites that print the same sentence name the same rule. A way out a site picks by its own state is a row too, rendered under another (`Diagnostic::more`). Text written outside these passes (generator output, manifest and schema errors) stays a string in `Diagnostic::error`.
 - The runtime (allocator, strings, maps, arrays, I/O, traps, regions) is Vyrn in `std/runtime`. The raw memory and WASI primitives are declarations in `std/mem`, importable only by `std/runtime`.
-- The WASI calls a module imports are one table, `vyrn_codegen::WASI_IMPORTS`. The emitter declares from it, and a test holds each host (`wasmrun.rs`, `wasi_host.c`) to exactly its rows.
+- The WASI calls a module imports are one table, `vyrn_codegen::WASI_IMPORTS`. The emitter declares from it, and a test holds each host (`vyrn-genwasm/src/wasi.rs`, `wasi_host.c`) to exactly its rows.
+- The embedded WASI host is one file, `vyrn-genwasm/src/wasi.rs`, behind a `Policy`. A program run gets the process (environment, working directory as fd 3, stdin, clocks, random); a generator gets none of it, and a test fails if a call that reads the process reaches its link set.
 - A builtin exists only for what Vyrn source cannot express, such as a syscall. Everything expressible is std Vyrn.
 - Every fact about a builtin (contract, method spelling, core `Spec`, effect, route, length and element effect, editor text) is one `prelude::Builtin` row. A pass reads the row, never its own list of names.
 - Hot per-element paths stay inline in the emitter (indexing, the call-depth counter, the map value paths), because one wasmtime call level costs 14 to 270% there.

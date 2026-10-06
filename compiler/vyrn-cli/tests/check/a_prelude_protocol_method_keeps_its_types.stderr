@@ -1,0 +1,1 @@
+a_prelude_protocol_method_keeps_its_types.vyrn:3:8: `impl Hashable for R` does not match protocol `Hashable` — it declares `fn hash(self) -> UInt64`, this provides `fn hash(self) -> Int64`

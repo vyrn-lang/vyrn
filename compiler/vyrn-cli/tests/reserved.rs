@@ -2,9 +2,9 @@
 //! must not depend on what the program links.
 //!
 //! A reserved name in the loader's `owner` map made every use of the builtin in
-//! a linked `std/` module look like an unimported foreign reference: `fn at`
-//! plus one `print` gave 53 diagnostics in `std/num.vyrn`, none at the
-//! declaration.
+//! a linked `std/` module look like an unimported foreign reference: one
+//! declaration plus one `print` gave 53 diagnostics in `std/num.vyrn`, none at
+//! the declaration.
 
 use std::process::Command;
 
@@ -29,7 +29,7 @@ fn check_in(slot: &str, src: &str) -> String {
 #[test]
 fn a_reserved_top_level_name_is_reported_once_at_its_declaration() {
     // `lineAt` witnesses a routed builtin.
-    for name in ["at", "pop", "toString", "lineAt"] {
+    for name in ["pop", "lineAt"] {
         // The `print` links `std/num`, and linking a std module that uses the
         // builtin is what triggers the flood.
         let src = format!(
@@ -59,7 +59,7 @@ fn a_reserved_top_level_name_is_reported_once_at_its_declaration() {
 /// The `print` links a std module here too, so a flood would show.
 #[test]
 fn a_name_the_compiler_gave_back_may_be_declared() {
-    for name in ["slice", "contains", "chars", "hexEncode"] {
+    for name in ["slice", "contains", "chars", "hexEncode", "at", "toString"] {
         let src = format!(
             "fn {name}(v: Int64) -> Int64 {{ return v }}\n\
              fn main() -> Int64 {{ print({name}(1)) return 0 }}\n"

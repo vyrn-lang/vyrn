@@ -1,0 +1,1 @@
+a_prelude_protocol_impl_declares_no_other_method.vyrn:3:8: `impl MustUse for R` provides `fn drain(self) -> Int64`, which protocol `MustUse` does not declare — dispatch knows only a protocol's own method names, so this one is reachable from nowhere; Vyrn has no inherent methods, so a helper is a plain `fn drain(x: R, ..)` at the top level — `x.drain(..)` calls that

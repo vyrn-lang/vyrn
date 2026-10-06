@@ -1,0 +1,5 @@
+type P = { x: Int64 }
+impl Show for P {
+    fn show(self) -> Int64 { return 1 }
+}
+fn main() -> Int64 { return 0 }

@@ -1,0 +1,3 @@
+type R = { x: Int64 }
+impl Hashable for R {}
+fn main() -> Int64 { return 0 }

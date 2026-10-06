@@ -1,0 +1,15 @@
+// A callee's type parameter is apart from the caller's parameter of the same
+// name: `mapOne`'s `U` is `Int64` here, while `g`'s `U` is `Bool`.
+
+fn mapOne<T, U>(x: T, f: fn(T) -> U) -> U {
+    return f(x)
+}
+
+fn g<U>(y: U, h: fn(U) -> Int64) -> Int64 {
+    return mapOne(y, h)
+}
+
+fn main() -> Int64 {
+    print(g(true, b -> if b { 7 } else { 1 }))
+    return 0
+}

@@ -147,16 +147,13 @@ fn wasmrun_sections() -> Vec<Section> {
         sec("struct Outcome", Host),
         sec("struct Run", Host),
         sec("struct Meter", Host),
-        sec("const SUCCESS", Host),
-        sec("struct Exit", Host),
-        sec("struct Host", Host),
+        sec("struct Oracle", Host),
         sec("fn engine", Host),
         sec("fn run", Host),
         sec("fn open", Host),
         sec("struct Compiled", Host),
         sec("struct Resident", Host),
         sec("fn first_line", Host),
-        sec("fn link_wasi", Host),
         sec("mod tests", Tests),
     ]
 }

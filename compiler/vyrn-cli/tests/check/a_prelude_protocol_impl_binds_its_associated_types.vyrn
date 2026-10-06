@@ -1,0 +1,6 @@
+type R = | Good(Int64) | Bad
+impl Fallible for R {
+    fn isSuccess(self) -> Bool { return match self { Good(_) => true, Bad => false } }
+    fn success(self) -> Int64 { return match self { Good(v) => v, Bad => 0 } }
+}
+fn main() -> Int64 { return 0 }

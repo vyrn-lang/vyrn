@@ -414,7 +414,7 @@ fn label<T: Show>(x: T) -> String {
 - A protocol may declare an associated type, `type Output`, that each impl fixes: `type Output = Int64`. A method signature names it.
 - An impl for a validated scalar type is refused. Give the type a record shape instead.
 
-The compiler knows these protocol names, and a program implements them without declaring or importing them:
+The compiler knows these protocol names, and a program implements them without declaring or importing them. The prelude declares `Show`, `Owned`, `MustUse`, `Hashable` and `Fallible`, so an impl of one is checked as an impl of any declared protocol is; a program's own declaration of the name replaces the prelude's. An impl of `Copy`, `Index` or `Iterate` is checked for each member's receiver and parameter capabilities only, because its members' types are the impl's own and `Index`'s members are each optional.
 
 | Protocol | Members | Effect |
 |---|---|---|

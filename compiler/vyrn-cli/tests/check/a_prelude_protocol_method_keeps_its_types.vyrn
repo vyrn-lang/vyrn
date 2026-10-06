@@ -1,0 +1,5 @@
+type R = { x: Int64 }
+impl Hashable for R {
+    fn hash(self) -> Int64 { return self.x }
+}
+fn main() -> Int64 { return 0 }

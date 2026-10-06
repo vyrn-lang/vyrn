@@ -117,6 +117,120 @@ pub fn impl_method_key<'a>(name: &'a str, protocol: &str, method: &str) -> Optio
     rest.strip_suffix(method)?.strip_suffix('$')
 }
 
+/// A program's impl blocks in source order, with the one index that answers
+/// which impls a type key has. The index is built on the first lookup and
+/// dropped on every mutable access, so a lookup never reads another list's.
+#[derive(Clone, Default)]
+pub struct Impls {
+    blocks: Vec<ImplBlock>,
+    /// Type key to the positions of its impls in `blocks`, ascending.
+    by_key: std::sync::OnceLock<HashMap<String, Vec<usize>>>,
+}
+
+impl Impls {
+    /// Returns the impls declared for the type key `key`, in source order.
+    /// Every question about a type's impls asks this.
+    pub fn of_key(&self, key: &str) -> impl Iterator<Item = &ImplBlock> {
+        let by_key = self.by_key.get_or_init(|| {
+            let mut by_key: HashMap<String, Vec<usize>> = HashMap::new();
+            for (i, b) in self.blocks.iter().enumerate() {
+                if let Some(k) = type_key(&b.ty) {
+                    by_key.entry(k).or_default().push(i);
+                }
+            }
+            by_key
+        });
+        (by_key.get(key).into_iter().flatten()).map(|&i| &self.blocks[i])
+    }
+
+    /// Returns the first `impl protocol` for `key`, the one the parser
+    /// flattens.
+    pub fn get(&self, protocol: &str, key: &str) -> Option<&ImplBlock> {
+        self.of_key(key).find(|i| i.protocol == protocol)
+    }
+
+    /// Returns the flattened name of `method` in `impl protocol for ty`, or
+    /// `None` where `ty` has no such impl or the impl no such method.
+    pub fn method(&self, protocol: &str, ty: &Type, method: &str) -> Option<String> {
+        let key = type_key(ty)?;
+        let imp = self.get(protocol, &key)?;
+        (imp.methods.iter().any(|m| m.name == method))
+            .then(|| impl_method_name(protocol, &key, method))
+    }
+
+    /// Returns the first impl of `ty` that declares the projection `name`, and
+    /// the projection. A builtin container has none: it indexes through the
+    /// seeded row.
+    pub fn place(&self, ty: &Type, name: &str) -> Option<(&ImplBlock, &Function)> {
+        if crate::project::is_builtin_container(ty) {
+            return None;
+        }
+        (self.of_key(&type_key(ty)?))
+            .find_map(|i| Some((i, i.places.iter().find(|f| f.name == name)?)))
+    }
+}
+
+impl From<Vec<ImplBlock>> for Impls {
+    fn from(blocks: Vec<ImplBlock>) -> Self {
+        Impls {
+            blocks,
+            by_key: Default::default(),
+        }
+    }
+}
+
+impl std::ops::Deref for Impls {
+    type Target = Vec<ImplBlock>;
+    fn deref(&self) -> &Vec<ImplBlock> {
+        &self.blocks
+    }
+}
+
+impl std::ops::DerefMut for Impls {
+    fn deref_mut(&mut self) -> &mut Vec<ImplBlock> {
+        self.by_key.take();
+        &mut self.blocks
+    }
+}
+
+/// The blocks alone, so a program's `Debug` text, which keys the generator
+/// memo, does not depend on whether a lookup ran.
+impl std::fmt::Debug for Impls {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.blocks.fmt(f)
+    }
+}
+
+impl PartialEq for Impls {
+    fn eq(&self, other: &Self) -> bool {
+        self.blocks == other.blocks
+    }
+}
+
+impl IntoIterator for Impls {
+    type Item = ImplBlock;
+    type IntoIter = std::vec::IntoIter<ImplBlock>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.blocks.into_iter()
+    }
+}
+
+impl<'a> IntoIterator for &'a Impls {
+    type Item = &'a ImplBlock;
+    type IntoIter = std::slice::Iter<'a, ImplBlock>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.blocks.iter()
+    }
+}
+
+impl<'a> IntoIterator for &'a mut Impls {
+    type Item = &'a mut ImplBlock;
+    type IntoIter = std::slice::IterMut<'a, ImplBlock>;
+    fn into_iter(self) -> Self::IntoIter {
+        std::ops::DerefMut::deref_mut(self).iter_mut()
+    }
+}
+
 /// The protocol member an [`impl_method_name`] names, or `None` for a name
 /// with fewer than two `$`. A derived name (`derive$g$f`) reads as `f`.
 pub fn impl_method_member(name: &str) -> Option<&str> {
@@ -185,23 +299,11 @@ pub fn show_key(t: &Type) -> Option<String> {
 /// language renders it or nothing is declared. The impl is keyed by `written`;
 /// [`renders`] asks `base`, the resolved type, so `type Email = String`
 /// renders as a String.
-pub fn show_dispatch(impls: &[ImplBlock], written: &Type, base: &Type) -> Option<String> {
+pub fn show_dispatch(impls: &Impls, written: &Type, base: &Type) -> Option<String> {
     if renders(base) {
         return None;
     }
-    show_impl_by_key(impls, &type_key(written)?)
-}
-
-/// [`show_dispatch`]'s impl, by type key.
-pub fn show_impl_by_key(impls: &[ImplBlock], key: &str) -> Option<String> {
-    impls
-        .iter()
-        .any(|i| {
-            i.protocol == SHOW
-                && type_key(&i.ty).as_deref() == Some(key)
-                && i.methods.iter().any(|m| m.name == SHOW_SHOW)
-        })
-        .then(|| impl_method_name(SHOW, key, SHOW_SHOW))
+    impls.method(SHOW, written, SHOW_SHOW)
 }
 
 /// The protocol through which a user container is iterated by `for x in xs`:
@@ -214,14 +316,14 @@ pub const ITERATE_SIZE: &str = "size";
 /// A projection, not a method: it is found in the impl's `places`.
 pub const ITERATE_NTH: &str = "nth";
 
-/// The protocols a program implements without declaring them, each with its
-/// methods' receiver and parameter capabilities. An impl of one takes exactly
-/// these, as an impl of a declared protocol takes its declaration's.
+/// The protocols a program implements with no declaration, each with its
+/// members' receiver and parameter capabilities; an impl's members take
+/// these. No declaration states them: `Copy`'s result, `Index`'s key and
+/// element and `Iterate`'s element are each impl's own types, and `Index`'s
+/// members are each optional. The prelude declares the others
+/// (`prelude::protocols`).
 pub const KNOWN_PROTOCOLS: &[(&str, &[(&str, Capability, &[Capability])])] = &[
-    (OWNED, &[(OWNED_RELEASE, Capability::Consume, &[])]),
-    (MUST_USE, &[]),
     (COPY, &[(COPY_COPY, Capability::Read, &[])]),
-    (SHOW, &[(SHOW_SHOW, Capability::Read, &[])]),
     (
         "Index",
         &[
@@ -236,61 +338,31 @@ pub const KNOWN_PROTOCOLS: &[(&str, &[(&str, Capability, &[Capability])])] = &[
             (ITERATE_NTH, Capability::Read, &[Capability::Read]),
         ],
     ),
-    (HASHABLE, &[("hash", Capability::Read, &[])]),
-    (
-        FALLIBLE,
-        &[
-            ("isSuccess", Capability::Read, &[]),
-            ("success", Capability::Read, &[]),
-        ],
-    ),
 ];
 
 /// The protocol that admits a user type as a `Map` key.
 pub const HASHABLE: &str = "Hashable";
 
-/// Whether `ty` declares `impl Hashable`. The runtime never calls the impl:
-/// the map hashes the canonical key bytes itself.
-pub fn hashable_impl(impls: &[ImplBlock], ty: &Type) -> bool {
-    type_key(ty).is_some_and(|k| {
-        impls.iter().any(|i| {
-            i.protocol == HASHABLE
-                && type_key(&i.ty).as_deref() == Some(&k)
-                && i.methods.iter().any(|m| m.name == "hash")
-        })
-    })
-}
-
-/// The `impl Copy` method `ty` dispatches to, or `None` where the copy stays
-/// structural.
-pub fn copy_impl(impls: &[ImplBlock], ty: &Type) -> Option<String> {
-    copy_impl_by_key(impls, &type_key(ty)?)
-}
-
-pub fn copy_impl_by_key(impls: &[ImplBlock], key: &str) -> Option<String> {
-    impls
-        .iter()
-        .any(|i| {
-            i.protocol == COPY
-                && type_key(&i.ty).as_deref() == Some(key)
-                && i.methods.iter().any(|m| m.name == COPY_COPY)
-        })
-        .then(|| impl_method_name(COPY, key, COPY_COPY))
-}
-
 /// Returns the `impl Iterate` of `ty`, its flattened `size` name and its
 /// `place nth`, or `None` unless the impl has both.
 pub fn iterate_impl<'a>(
-    impls: &'a [ImplBlock],
+    impls: &'a Impls,
     ty: &Type,
 ) -> Option<(&'a ImplBlock, String, &'a Function)> {
     let key = type_key(ty)?;
-    let imp = impls
-        .iter()
-        .find(|i| i.protocol == ITERATE && type_key(&i.ty).as_deref() == Some(&key))?;
+    let imp = impls.get(ITERATE, &key)?;
     let nth = imp.places.iter().find(|f| f.name == ITERATE_NTH)?;
     imp.methods.iter().find(|m| m.name == ITERATE_SIZE)?;
     Some((imp, impl_method_name(ITERATE, &key, ITERATE_SIZE), nth))
+}
+
+/// Returns `ty`, a member type of `imp`, under the type arguments of the
+/// receiver `recv`: `impl<T> .. for Slots<T>` against `Slots<Person>` makes
+/// `T` `Person`. A parameter the receiver does not bind stays a parameter.
+pub fn under_head(imp: &ImplBlock, recv: &Type, ty: &Type) -> Type {
+    let mut subst = HashMap::new();
+    solve_param(&imp.ty, recv, &mut subst);
+    substitute(ty, &subst)
 }
 
 /// The inclusive `(min, max)` a `where` predicate implies, from `value OP N`

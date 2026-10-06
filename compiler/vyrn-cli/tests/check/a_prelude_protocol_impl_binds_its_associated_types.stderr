@@ -1,0 +1,1 @@
+a_prelude_protocol_impl_binds_its_associated_types.vyrn:2:1: `impl Fallible for R` does not bind the associated type `Output` — add `type Output = ..` (protocol `Fallible` declares it)

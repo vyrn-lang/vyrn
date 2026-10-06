@@ -1351,16 +1351,10 @@ fn mounted_routes_wasm(
         },
     )?;
     if out.code != 0 {
-        let text = String::from_utf8_lossy(&out.stderr).into_owned();
-        let line = text
-            .lines()
-            .next()
-            .unwrap_or("")
-            .trim_start_matches("error: ");
-        return Err(if line.is_empty() {
-            format!("the mounted router exited {}", out.code)
-        } else {
-            line.to_string()
+        let text = String::from_utf8_lossy(&out.stderr);
+        return Err(match vyrn_frontend::trap::split(&text).1 {
+            Some(msg) => msg.to_string(),
+            None => format!("the mounted router exited {}", out.code),
         });
     }
     let mut rows = Vec::new();
@@ -2307,9 +2301,9 @@ fn from_json_cmd(flags: GlobalFlags, path: &str, type_name: &str, module: &str) 
     // The trap names a position in the converter, which the user cannot open;
     // the input file's name replaces it.
     let text = String::from_utf8_lossy(&out.stderr).into_owned();
-    let msg = text
-        .trim_end_matches(['\n', '\r'])
-        .trim_start_matches("error: ");
+    let msg = vyrn_frontend::trap::split(&text)
+        .1
+        .unwrap_or(text.trim_end());
     let msg = msg
         .split_once(" (from-json.vyrn:")
         .map(|(m, _)| m)
@@ -5477,7 +5471,7 @@ fn build_wasm2c(
     }
     add_native_clang_flags(&mut cmd, native_target);
     if cfg!(windows) {
-        // `random_get` is `BCryptGenRandom`, as in `wasmrun.rs`.
+        // `random_get` is `BCryptGenRandom`, as in `vyrn-genwasm/src/wasi.rs`.
         cmd.arg("-lbcrypt");
     }
     match cmd.status() {
