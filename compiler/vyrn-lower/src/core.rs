@@ -487,16 +487,63 @@ pub(crate) fn build_in(
     fns: &Fns,
     names: &mut NameMemo,
 ) -> Result<Body, Gap> {
+    build_from(program, own, fns, names, &Source::Instance(inst))
+}
+
+/// What a body is built from. The setup of each kind is [`seeded`]'s match.
+enum Source<'s, 'a> {
+    /// A function instance.
+    Instance(&'s Instance<'a>),
+    /// The body of a `test` or a `bench`: a block with no parameters, typed
+    /// as a function returning Unit.
+    Block(&'s OutsideBody<'a>),
+    /// The module-state initializer: every module-scope `let` is a store into
+    /// its global, run once at `_start` into an empty place. Its name is
+    /// empty, the name the checker records a lambda written in it under
+    /// (`StoredLambda::defined_in`), so a call through that lambda's type is
+    /// judged over this frame.
+    Globals(&'s NodeTypes<'a>),
+    /// One module-state initializer or `where` predicate, for the typed
+    /// judgment alone: it places no row and is never emitted. A predicate has
+    /// `binds` (its `value` or its record's fields) and sees no module state.
+    /// `facts` holds every root's; a refusal belongs to the root it is in.
+    Expr {
+        facts: &'s NodeTypes<'a>,
+        file: Option<String>,
+        binds: Option<&'s [(String, Type)]>,
+        e: &'a Expr,
+    },
+}
+
+impl Source<'_, '_> {
+    /// Whether [`last_owner`] seeds a second build. A root takes nothing.
+    fn two_pass(&self) -> bool {
+        matches!(self, Source::Instance(_) | Source::Block(_))
+    }
+}
+
+/// Builds the body of `source`. The first build records candidates and takes
+/// nothing; where [`last_owner`] names any, a second build takes them.
+fn build_from<'a>(
+    program: &'a Program,
+    own: &'a Ownership,
+    fns: &'a Fns,
+    names: &mut NameMemo,
+    source: &Source<'_, 'a>,
+) -> Result<Body, Gap> {
     let none = std::collections::HashSet::new();
     let b1 = vyrn_frontend::prof::phase("placer: build: first");
-    let first = build_seeded(program, inst, own, fns, names, &none)?;
+    let first = seeded(program, own, fns, names, source, &none)?;
     drop(b1);
+    if !source.two_pass() {
+        return Ok(first);
+    }
     let seed = last_owner(&first);
     if seed.is_empty() {
         return Ok(first);
     }
     let _b2 = vyrn_frontend::prof::phase("placer: build: seeded");
-    build_seeded(program, inst, own, fns, names, &seed)
+    seeded(program, own, fns, names, source, &seed)
 }
 
 /// The refusals the typed judgment states over the checker's answers at the
@@ -1034,131 +1081,127 @@ fn stored_slot(
     Some((line, says))
 }
 
-fn build_seeded(
-    program: &Program,
-    inst: &Instance<'_>,
-    own: &Ownership,
-    fns: &Fns,
+fn seeded<'a>(
+    program: &'a Program,
+    own: &'a Ownership,
+    fns: &'a Fns,
     names: &mut NameMemo,
+    source: &Source<'_, 'a>,
     seed: &std::collections::HashSet<NodeId>,
 ) -> Result<Body, Gap> {
-    // The plan's own rows, not the instance's copy: the copy predates the
-    // rows [`augment`] places. The copy adds only the substituted type a
-    // `Deep` walks, and nothing below reads a kind.
-    let no_steps: Vec<Release> = Vec::new();
-    let mut placed: HashMap<(Exit, NodeId), Vec<&Release>> = HashMap::new();
-    for r in own.releases.get(&inst.func_id).unwrap_or(&no_steps) {
-        placed.entry((r.exit, r.site)).or_default().push(r);
-    }
-    let mut b = Builder::new(
-        program,
-        own,
-        fns,
-        names,
-        &inst.facts,
-        seed,
-        placed,
-        &inst.func.type_bounds,
-        fns.instance_id(inst),
-        inst.spelling(),
-        inst.func.module.clone(),
-        inst.func.is_export_extern,
-    );
-    let f: &Function = inst.func;
-    // A parameter's type is the instance's, not the declaration's:
-    // `map<Int64, Int64>`'s `f` is `fn(Int64) -> Int64`, the shape stored
-    // sources are keyed by. Every other type comes substituted in the rows.
-    let subst: HashMap<String, Type> = inst.subst.clone().into_iter().collect();
-    b.frame.ret = Some(vyrn_frontend::types::substitute(&f.ret, &subst));
-    // A declared release (`impl Owned for T { fn release(consume self) }`)
-    // frees `self`'s parts, and nothing releases `self` again: the kernel owns
-    // `self` there, so a part taken twice is refused, but owes no release of it.
-    let is_release = b.proto.is_release_fn(&f.name);
-    for p in &f.params {
-        let pty = vyrn_frontend::types::substitute(&p.ty, &subst);
-        let owned = p.capability == Capability::Consume && b.owns(&pty) && !is_release;
-        let n = b.name(&p.name, pty, owned, f.line);
-        if is_release {
-            b.frame.released = Some(n);
-            b.body.names[n.index()].borrow = false;
-        }
-        // A `read` or `modify` parameter is never taken; the
-        // kernel needs the capability to word the refusal. A must-use
-        // parameter is excepted from the take only: its capability
-        // still words a refusal about a second name for it.
-        b.body.names[n.index()].must_use_param =
-            b.proto.must_use(&b.body.names[n.index()].ty.clone());
-        b.body.names[n.index()].borrow_kind = param_borrow(p.capability, &p.name);
-        b.body.names[n.index()].mutable = p.capability == Capability::Modify;
-        b.frame.scope.push((p.name.clone(), n));
-        b.keyed(n, p.id());
-        b.body.params.push(n);
-    }
-    b.frame.appends = crate::append::append_candidates(&f.body);
-    rebound(&f.body, &mut b.frame.rebound);
+    let mut b = Builder::new(program, own, fns, names, source, seed);
     let mut out = Vec::new();
-    b.block(&f.body, &mut out)?;
-    cut(&mut out);
-    b.body.stmts = out;
-    let name = b.body.spelled(&f.name).to_string();
-    falls_through(&mut b.body, &f.ret, f.line, || format!("function `{name}`"));
+    match source {
+        Source::Instance(inst) => {
+            let f: &Function = inst.func;
+            // A parameter's type is the instance's, not the declaration's:
+            // `map<Int64, Int64>`'s `f` is `fn(Int64) -> Int64`, the shape
+            // stored sources are keyed by. Every other type comes substituted
+            // in the rows.
+            let subst: HashMap<String, Type> = inst.subst.clone().into_iter().collect();
+            b.frame.ret = Some(vyrn_frontend::types::substitute(&f.ret, &subst));
+            // A declared release (`impl Owned for T { fn release(consume self) }`)
+            // frees `self`'s parts, and nothing releases `self` again: the
+            // kernel owns `self` there, so a part taken twice is refused, but
+            // owes no release of it.
+            let is_release = b.proto.is_release_fn(&f.name);
+            for p in &f.params {
+                let pty = vyrn_frontend::types::substitute(&p.ty, &subst);
+                let owned = p.capability == Capability::Consume && b.owns(&pty) && !is_release;
+                let n = b.name(&p.name, pty, owned, f.line);
+                if is_release {
+                    b.frame.released = Some(n);
+                    b.body.names[n.index()].borrow = false;
+                }
+                // A `read` or `modify` parameter is never taken; the
+                // kernel needs the capability to word the refusal. A must-use
+                // parameter is excepted from the take only: its capability
+                // still words a refusal about a second name for it.
+                b.body.names[n.index()].must_use_param =
+                    b.proto.must_use(&b.body.names[n.index()].ty.clone());
+                b.body.names[n.index()].borrow_kind = param_borrow(p.capability, &p.name);
+                b.body.names[n.index()].mutable = p.capability == Capability::Modify;
+                b.frame.scope.push((p.name.clone(), n));
+                b.keyed(n, p.id());
+                b.body.params.push(n);
+            }
+            b.frame.appends = crate::append::append_candidates(&f.body);
+            rebound(&f.body, &mut b.frame.rebound);
+            b.block(&f.body, &mut out)?;
+            cut(&mut out);
+            b.body.stmts = out;
+            let name = b.body.spelled(&f.name).to_string();
+            falls_through(&mut b.body, &f.ret, f.line, || format!("function `{name}`"));
+        }
+        Source::Block(ob) => {
+            b.frame.ret = Some(Type::Unit);
+            b.frame.appends = crate::append::append_candidates(ob.block);
+            rebound(ob.block, &mut b.frame.rebound);
+            b.block(ob.block, &mut out)?;
+            cut(&mut out);
+            b.body.stmts = out;
+        }
+        Source::Globals(_) => {
+            for g in &program.globals {
+                // A crossing into a validated declared type is its constructor.
+                let check = match &g.ty {
+                    Some(to) => b.checked(&b.ty_of(&g.init)?, to, &g.init),
+                    None => None,
+                };
+                let v = match check {
+                    Some(to) => Val::Name(b.checked_temp(&to, &g.init, g.line, &mut out)?),
+                    None => b.val(&g.init, &mut out)?,
+                };
+                out.push(St::Store {
+                    place: Place::Global(g.name.clone()),
+                    value: v,
+                    old: Old::Nothing,
+                    line: g.line,
+                    site: Site::None,
+                    releases: false,
+                    holes: Vec::new(),
+                });
+            }
+            cut(&mut out);
+            b.body.stmts = out;
+        }
+        Source::Expr { binds, e, .. } => {
+            b.closed = binds.is_some();
+            for (name, ty) in binds.unwrap_or_default() {
+                let n = b.name(name, ty.clone(), false, e.line());
+                b.frame.scope.push((name.clone(), n));
+                b.body.params.push(n);
+            }
+            // A gap under a refusal the builder states is that refusal, as in
+            // [`Builder::stmt_list`].
+            if let Err(g) = b.val(e, &mut out) {
+                if b.body.refused.is_empty() && b.body.mistyped.is_empty() {
+                    return Err(g);
+                }
+            }
+            b.body.stmts = out;
+        }
+    }
     Ok(b.body)
 }
 
-/// The module-state initializer as a body: every module-scope
-/// `let` is a store into its global, run once at `_start` into an empty
-/// place. Its name is empty, the name the checker records a lambda written in
-/// it under (`StoredLambda::defined_in`), so a call through that lambda's type
-/// is judged over this frame.
+/// The module-state initializers as a body ([`Source::Globals`]).
 pub fn build_module_state<'a>(
     program: &'a Program,
     own: &'a Ownership,
     fns: &'a Fns,
     facts: &NodeTypes<'a>,
 ) -> Result<Body, Gap> {
-    let seed = std::collections::HashSet::new();
-    let mut names = NameMemo::default();
-    let mut b = Builder::new(
+    build_from(
         program,
         own,
         fns,
-        &mut names,
-        facts,
-        &seed,
-        HashMap::new(),
-        &HashMap::new(),
-        fns.id(""),
-        String::new(),
-        None,
-        false,
-    );
-    let mut out = Vec::new();
-    for g in &program.globals {
-        // A crossing into a validated declared type is its constructor.
-        let check = match &g.ty {
-            Some(to) => b.checked(&b.ty_of(&g.init)?, to, &g.init),
-            None => None,
-        };
-        let v = match check {
-            Some(to) => Val::Name(b.checked_temp(&to, &g.init, g.line, &mut out)?),
-            None => b.val(&g.init, &mut out)?,
-        };
-        out.push(St::Store {
-            place: Place::Global(g.name.clone()),
-            value: v,
-            old: Old::Nothing,
-            line: g.line,
-            site: Site::None,
-            releases: false,
-            holes: Vec::new(),
-        });
-    }
-    cut(&mut out);
-    b.body.stmts = out;
-    Ok(b.body)
+        &mut NameMemo::default(),
+        &Source::Globals(facts),
+    )
 }
 
-/// The body of a `test` or a `bench`: a block with no parameters.
+/// The body of a `test` or a `bench` ([`Source::Block`]).
 pub fn build_outside<'a>(
     program: &'a Program,
     own: &'a Ownership,
@@ -1166,54 +1209,7 @@ pub fn build_outside<'a>(
     names: &mut NameMemo,
     ob: &OutsideBody<'a>,
 ) -> Result<Body, Gap> {
-    let none = std::collections::HashSet::new();
-    let first = build_outside_seeded(program, own, fns, names, ob, &none)?;
-    let seed = last_owner(&first);
-    if seed.is_empty() {
-        return Ok(first);
-    }
-    build_outside_seeded(program, own, fns, names, ob, &seed)
-}
-
-fn build_outside_seeded<'a>(
-    program: &'a Program,
-    own: &'a Ownership,
-    fns: &'a Fns,
-    names: &mut NameMemo,
-    ob: &OutsideBody<'a>,
-    seed: &std::collections::HashSet<NodeId>,
-) -> Result<Body, Gap> {
-    // No substitution: the body has no type parameters.
-    let no_steps: Vec<Release> = Vec::new();
-    let steps = own.releases.get(&ob.id).unwrap_or(&no_steps);
-    let mut placed: HashMap<(Exit, NodeId), Vec<&Release>> = HashMap::new();
-    for r in steps {
-        placed.entry((r.exit, r.site)).or_default().push(r);
-    }
-    let (block, file) = (ob.block, ob.module.clone());
-    let mut b = Builder::new(
-        program,
-        own,
-        fns,
-        names,
-        &ob.facts,
-        seed,
-        placed,
-        &HashMap::new(),
-        fns.id(&ob.name),
-        ob.name.clone(),
-        file,
-        false,
-    );
-    // The checker types a `test` or `bench` body as a function returning Unit.
-    b.frame.ret = Some(Type::Unit);
-    b.frame.appends = crate::append::append_candidates(block);
-    rebound(block, &mut b.frame.rebound);
-    let mut out = Vec::new();
-    b.block(block, &mut out)?;
-    cut(&mut out);
-    b.body.stmts = out;
-    Ok(b.body)
+    build_from(program, own, fns, names, &Source::Block(ob))
 }
 
 /// A `for` whose every element leaves through the loop variable
@@ -1226,65 +1222,6 @@ struct Unreached {
     i: Name,
     elem: Type,
     line: usize,
-}
-
-/// A module-state initializer or a `where` predicate as a body, for the typed
-/// judgment alone: it places no row and is never emitted. A predicate has
-/// `binds` (its `value` or its record's fields) and sees no module state.
-pub fn build_root<'a>(
-    program: &'a Program,
-    own: &'a Ownership,
-    fns: &'a Fns,
-    names: &mut NameMemo,
-    facts: &NodeTypes<'a>,
-    file: Option<String>,
-    binds: Option<&[(String, Type)]>,
-    e: &'a Expr,
-) -> Result<Body, Gap> {
-    // `facts` holds every root's; a refusal belongs to the root it is in.
-    let mut mine = Vec::new();
-    vyrn_frontend::ast::node_ids(e, &mut mine);
-    let mine: std::collections::HashSet<NodeId> = mine.into_iter().collect();
-    let facts = NodeTypes {
-        exprs: facts
-            .exprs
-            .iter()
-            .filter(|(x, _)| mine.contains(&x.id()))
-            .copied()
-            .collect(),
-        ..facts.clone()
-    };
-    let seed = std::collections::HashSet::new();
-    let mut b = Builder::new(
-        program,
-        own,
-        fns,
-        names,
-        &facts,
-        &seed,
-        HashMap::new(),
-        &HashMap::new(),
-        fns.id(""),
-        String::new(),
-        file,
-        false,
-    );
-    b.closed = binds.is_some();
-    for (name, ty) in binds.unwrap_or_default() {
-        let n = b.name(name, ty.clone(), false, e.line());
-        b.frame.scope.push((name.clone(), n));
-        b.body.params.push(n);
-    }
-    let mut out = Vec::new();
-    // A gap under a refusal the builder states is that refusal, as in
-    // [`Builder::stmt_list`].
-    if let Err(g) = b.val(e, &mut out) {
-        if b.body.refused.is_empty() && b.body.mistyped.is_empty() {
-            return Err(g);
-        }
-    }
-    b.body.stmts = out;
-    Ok(b.body)
 }
 
 struct Builder<'a> {
@@ -1393,26 +1330,70 @@ struct Frame {
 }
 
 impl<'a> Builder<'a> {
-    /// A builder for the body `name`, row `id`. `bounds` are the type
-    /// parameters' bounds in scope: an instance's, empty for a body that is
-    /// no instance. `id` is the instance's own row
+    /// A builder for the body of `source`. The row is an instance's own
     /// ([`Fns::instance_id`]), not the first row under its name: a projection
-    /// can share a function's name.
-    #[allow(clippy::too_many_arguments)]
+    /// can share a function's name. The type parameters' bounds in scope are
+    /// an instance's and empty for a body that is no instance.
     fn new(
         program: &'a Program,
         own: &'a Ownership,
         fns: &'a Fns,
         names: &'a mut NameMemo,
-        facts: &NodeTypes<'a>,
+        source: &Source<'_, 'a>,
         seed: &'a std::collections::HashSet<NodeId>,
-        placed: HashMap<(Exit, NodeId), Vec<&'a Release>>,
-        bounds: &HashMap<String, Vec<String>>,
-        id: Option<FnId>,
-        name: String,
-        file: Option<String>,
-        export: bool,
     ) -> Self {
+        let filtered;
+        let (facts, file) = match source {
+            Source::Instance(inst) => (&inst.facts, inst.func.module.clone()),
+            Source::Block(ob) => (&ob.facts, ob.module.clone()),
+            Source::Globals(facts) => (*facts, None),
+            Source::Expr { facts, file, e, .. } => {
+                let mut mine = Vec::new();
+                vyrn_frontend::ast::node_ids(e, &mut mine);
+                let mine: std::collections::HashSet<NodeId> = mine.into_iter().collect();
+                filtered = NodeTypes {
+                    exprs: facts
+                        .exprs
+                        .iter()
+                        .filter(|(x, _)| mine.contains(&x.id()))
+                        .copied()
+                        .collect(),
+                    ..(*facts).clone()
+                };
+                (&filtered, file.clone())
+            }
+        };
+        let no_bounds = HashMap::new();
+        let (rows, bounds, id, name, export) = match source {
+            Source::Instance(inst) => (
+                Some(inst.func_id),
+                &inst.func.type_bounds,
+                fns.instance_id(inst),
+                inst.spelling(),
+                inst.func.is_export_extern,
+            ),
+            Source::Block(ob) => (
+                Some(ob.id),
+                &no_bounds,
+                fns.id(&ob.name),
+                ob.name.clone(),
+                false,
+            ),
+            Source::Globals(_) | Source::Expr { .. } => {
+                (None, &no_bounds, fns.id(""), String::new(), false)
+            }
+        };
+        // The plan's own rows, not the instance's copy: the copy predates the
+        // rows [`augment`] places. The copy adds only the substituted type a
+        // `Deep` walks, and nothing below reads a kind.
+        let mut placed: HashMap<(Exit, NodeId), Vec<&Release>> = HashMap::new();
+        for r in rows
+            .and_then(|id| own.releases.get(&id))
+            .into_iter()
+            .flatten()
+        {
+            placed.entry((r.exit, r.site)).or_default().push(r);
+        }
         let sp = program.spellings.speech(&file);
         let (refused, mistyped) = (
             unbound(facts, own, &program.impls, bounds, &sp),
@@ -7851,16 +7832,13 @@ pub fn augment(program: &Program, w: &mut World, judging: bool) {
         if node_ty(own, g.init.id()).is_none() {
             continue;
         }
-        match build_root(
-            program,
-            own,
-            &w.fns,
-            &mut names,
-            &lowered.globals,
-            g.module.clone(),
-            None,
-            &g.init,
-        ) {
+        let source = Source::Expr {
+            facts: &lowered.globals,
+            file: g.module.clone(),
+            binds: None,
+            e: &g.init,
+        };
+        match build_from(program, own, &w.fns, &mut names, &source) {
             Ok(top) => {
                 let at = program.source_id(SourceBody::Global(i));
                 crate::world::add_callees(&top, &by_name, calls.entry(at).or_default());
@@ -7880,16 +7858,13 @@ pub fn augment(program: &Program, w: &mut World, judging: bool) {
                 .collect(),
             base => vec![("value".to_string(), base.clone())],
         };
-        match build_root(
-            program,
-            own,
-            &w.fns,
-            &mut names,
-            &lowered.predicates,
-            d.module.clone(),
-            Some(&binds),
-            p,
-        ) {
+        let source = Source::Expr {
+            facts: &lowered.predicates,
+            file: d.module.clone(),
+            binds: Some(&binds),
+            e: p,
+        };
+        match build_from(program, own, &w.fns, &mut names, &source) {
             Ok(top) => {
                 let at = program.source_id(SourceBody::TypeDecl(i));
                 crate::world::add_callees(&top, &by_name, calls.entry(at).or_default());
