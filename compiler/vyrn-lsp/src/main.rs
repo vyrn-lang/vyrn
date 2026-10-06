@@ -1791,7 +1791,7 @@ fn handle_inlay_hint(server: &Server, params: serde_json::Value) -> Option<Vec<I
 }
 
 /// A `: Type` label after the name of every binding in lines `from..=to` whose
-/// line does not already say its type (`let p = o.copy()` -> `p: Outer`). The
+/// source does not already say its type (`let p = o.copy()` -> `p: Outer`). The
 /// type is the analysis's, as hover renders it.
 fn type_hints(analysis: &Analysis, src: &str, from: usize, to: usize) -> Vec<InlayHint> {
     let lines: Vec<&str> = src.lines().collect();
@@ -1812,7 +1812,8 @@ fn type_hints(analysis: &Analysis, src: &str, from: usize, to: usize) -> Vec<Inl
 }
 
 /// The `: Type` label a binding earns on the author's own `line`, or `None`
-/// when the analysis gives it no type or the line already says it.
+/// when the analysis gives it no type or the source already says it: an
+/// annotation, or an initializer on `line` that shows it.
 ///
 /// `end_col` is the 1-based column just past the name in `line`. The spelling is
 /// hover's renderer, [`vyrn_frontend::type_to_string`].
@@ -1827,7 +1828,7 @@ fn type_hint_label(
         return None;
     }
     let label = vyrn_frontend::type_to_string(b.ty.as_ref()?, spellings);
-    if spells_type(line, end_col, &label) {
+    if b.annotated || init_shows_type(line, end_col, &label) {
         return None;
     }
     Some(label)
@@ -1945,22 +1946,19 @@ fn name_ends_at(line: &str, col: usize, name: &str) -> bool {
     chars[end - len..end].iter().collect::<String>() == name
 }
 
-/// Whether the text after a binding's name already says its type. `end_col` is
-/// the 1-based char column just past the name, `ty` the rendered type. True for:
+/// Whether the initializer after a binding's name already says its type.
+/// `end_col` is the 1-based char column just past the name, `ty` the rendered
+/// type. True for:
 ///
-/// * a written annotation (`let x: Int64 = ..`);
 /// * a literal, which is its own evidence (`3`, `"s"`, `true`, `[1, 2]`);
 /// * an initializer that opens with the type's own name (`Outer { .. }`,
 ///   `Color.Red`).
 ///
 /// Anything else hides the type. In doubt the answer is false: a hint too many
 /// is noise, a hint too few is the feature not working.
-fn spells_type(line: &str, end_col: usize, ty: &str) -> bool {
+fn init_shows_type(line: &str, end_col: usize, ty: &str) -> bool {
     let rest: String = line.chars().skip(end_col.saturating_sub(1)).collect();
     let rest = rest.trim_start();
-    if rest.starts_with(':') {
-        return true;
-    }
     // The binding's `=` is the first one after its name, so a comparison inside
     // the initializer (`a == b`) cannot be mistaken for it.
     let Some((_, init)) = rest.split_once('=') else {
@@ -3608,6 +3606,7 @@ mod tests {
             name: "e".to_string(),
             kind: LocalKind::Let { mutable: false },
             ty: Some(ty.clone()),
+            annotated: false,
             line: 1,
             col: 5,
             end_col: 6,
@@ -3622,6 +3621,26 @@ mod tests {
             "one renderer"
         );
         assert_ne!(label, ty.to_string(), "`Display` drops the payloads");
+    }
+
+    /// The annotation is the parser's, not the line's: a binding the AST
+    /// marks annotated earns no hint, whatever its line spells.
+    #[test]
+    fn an_annotated_binding_earns_no_hint() {
+        let b = vyrn_frontend::LocalBinding {
+            name: "n".to_string(),
+            kind: LocalKind::Let { mutable: false },
+            ty: Some(Type::Int),
+            annotated: true,
+            line: 1,
+            col: 5,
+            end_col: 6,
+            fn_line: 1,
+        };
+        assert_eq!(
+            type_hint_label(&b, &Default::default(), "let n = pick()", 6),
+            None
+        );
     }
 
     /// The emoji is 1 char and 2 UTF-16 units, so every column past it differs

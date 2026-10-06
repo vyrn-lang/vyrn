@@ -93,6 +93,8 @@ pub struct LocalBinding {
     /// What the check decided, else what the source declares. `None` for an
     /// unannotated `let` in a body the check did not reach.
     pub ty: Option<Type>,
+    /// Whether the source writes the type: an annotated `let`, a parameter.
+    pub annotated: bool,
     /// 1-based line of the name.
     pub line: usize,
     /// 1-based name column.
@@ -153,6 +155,7 @@ impl LocalIndex<'_> {
                 .get(&(line, col))
                 .cloned()
                 .or_else(|| declared.cloned()),
+            annotated: declared.is_some(),
             line,
             col,
             end_col: col + name.chars().count(),
