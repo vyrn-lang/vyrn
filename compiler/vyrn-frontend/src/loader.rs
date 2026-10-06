@@ -1230,7 +1230,7 @@ fn load_modules(
                     functions: Vec::new(),
                     protocols: Vec::new(),
                     contracts: Vec::new(),
-                    impls: Vec::new(),
+                    impls: Default::default(),
                     globals: Vec::new(),
                     tests: Vec::new(),
                     benches: Vec::new(),

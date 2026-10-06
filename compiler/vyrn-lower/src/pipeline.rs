@@ -196,15 +196,14 @@ fn lower_typed(
     // parameter may dispatch to any key.
     let impls = &program.impls;
     let refused_method = |out: &HashSet<String>, name: &str, key: Option<&str>| {
-        impls.iter().any(|i| {
-            types::type_key(&i.ty).is_some_and(|k| {
-                key.is_none_or(|key| key == k)
-                    && i.methods.iter().any(|m| {
-                        m.name == name
-                            && out.contains(&types::impl_method_name(&i.protocol, &k, name))
-                    })
-            })
-        })
+        let refused = |i: &ast::ImplBlock, k: &str| {
+            i.methods.iter().any(|m| m.name == name)
+                && out.contains(&types::impl_method_name(&i.protocol, k, name))
+        };
+        match key {
+            Some(k) => impls.of_key(k).any(|i| refused(i, k)),
+            None => (impls.iter()).any(|i| types::type_key(&i.ty).is_some_and(|k| refused(i, &k))),
+        }
     };
     let dispatches = |b: &ast::Block, out: &HashSet<String>| {
         let mut hit = false;

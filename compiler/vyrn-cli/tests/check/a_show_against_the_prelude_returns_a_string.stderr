@@ -1,0 +1,1 @@
+a_show_against_the_prelude_returns_a_string.vyrn:3:8: `impl Show for P` does not match protocol `Show` — it declares `fn show(self) -> String`, this provides `fn show(self) -> Int64`

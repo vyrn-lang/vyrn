@@ -965,7 +965,7 @@ impl Parser {
                 functions,
                 protocols,
                 contracts,
-                impls,
+                impls: impls.into(),
                 globals,
                 tests,
                 benches,

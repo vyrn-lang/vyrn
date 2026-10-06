@@ -10,6 +10,7 @@ use crate::ast::{
     Block, Expr, Function, Id, ImplBlock, LambdaBody, NodeId, Numbering, Program, Stmt, Type,
     TypeDecl,
 };
+use crate::types::Impls;
 use std::collections::{HashMap, HashSet};
 
 /// The element-place primitive `@slot(container, index)`: the only indexing
@@ -55,56 +56,6 @@ pub fn is_builtin_container(ty: &Type) -> bool {
             | Type::Map(..)
             | Type::Err
     )
-}
-
-/// Returns the user `place` member named `method` for a receiver of type `ty`;
-/// a builtin container has none.
-pub fn lookup<'a>(program: &'a Program, ty: &Type, method: &str) -> Option<&'a Function> {
-    lookup_in(&program.impls, ty, method)
-}
-
-/// [`lookup`] over an impl list.
-pub fn lookup_in<'a>(impls: &'a [ImplBlock], ty: &Type, method: &str) -> Option<&'a Function> {
-    if is_builtin_container(ty) {
-        return None;
-    }
-    lookup_by_key(impls, &crate::types::type_key(ty)?, method)
-}
-
-/// [`lookup_in`] by type key.
-pub fn lookup_by_key<'a>(impls: &'a [ImplBlock], key: &str, method: &str) -> Option<&'a Function> {
-    lookup_impl_by_key(impls, key, method).map(|(_, f)| f)
-}
-
-/// [`lookup_impl_by_key`] by type; a builtin container skips the scan.
-pub fn lookup_impl<'a>(
-    impls: &'a [ImplBlock],
-    ty: &Type,
-    method: &str,
-) -> Option<(&'a ImplBlock, &'a Function)> {
-    if is_builtin_container(ty) {
-        return None;
-    }
-    lookup_impl_by_key(impls, &crate::types::type_key(ty)?, method)
-}
-
-pub fn lookup_impl_by_key<'a>(
-    impls: &'a [ImplBlock],
-    key: &str,
-    method: &str,
-) -> Option<(&'a ImplBlock, &'a Function)> {
-    for imp in impls {
-        if imp.places.is_empty() {
-            continue;
-        }
-        if crate::types::type_key(&imp.ty).as_deref() != Some(key) {
-            continue;
-        }
-        if let Some(f) = imp.places.iter().find(|f| f.name == method) {
-            return Some((imp, f));
-        }
-    }
-    None
 }
 
 /// The projection expansions of one compile: one tree per access site, which
@@ -275,7 +226,7 @@ impl Expansions {
     /// ([`Expansions::optional_site`] expands it), or the seeded expansion is the identity.
     pub fn site(
         &self,
-        impls: &[ImplBlock],
+        impls: &Impls,
         recv: Option<&Type>,
         method: &str,
         recv_expr: &Expr,
@@ -291,7 +242,7 @@ impl Expansions {
     fn site_at(
         &self,
         anchor: NodeId,
-        impls: &[ImplBlock],
+        impls: &Impls,
         recv: Option<&Type>,
         method: &str,
         recv_expr: &Expr,
@@ -320,7 +271,7 @@ impl Expansions {
     /// covers a plain member, which the caller's own paths handle.
     pub fn optional_site(
         &self,
-        impls: &[ImplBlock],
+        impls: &Impls,
         recv: Option<&Type>,
         method: &str,
         recv_expr: &Expr,
@@ -386,7 +337,7 @@ impl Expansions {
     /// writes.
     pub fn store_index(
         &self,
-        impls: &[ImplBlock],
+        impls: &Impls,
         name: &str,
         index: &Expr,
         value: &Expr,
@@ -452,7 +403,7 @@ impl Expansions {
     /// takes; only this read is the container's own.
     pub fn for_element(
         &self,
-        impls: &[ImplBlock],
+        impls: &Impls,
         ty: &Type,
         iter: &Expr,
         line: usize,
@@ -477,13 +428,12 @@ impl Expansions {
 /// The receiver's type key and its user projection named `method`; `None`
 /// for a builtin container, which indexes through the seeded row.
 fn member<'a>(
-    impls: &'a [ImplBlock],
+    impls: &'a Impls,
     recv: Option<&Type>,
     method: &str,
 ) -> Option<(String, &'a Function)> {
-    let key = crate::types::type_key(recv.filter(|t| !is_builtin_container(t))?)?;
-    let f = lookup_by_key(impls, &key, method)?;
-    Some((key, f))
+    let (_, f) = impls.place(recv?, method)?;
+    Some((crate::types::type_key(recv?)?, f))
 }
 
 /// Inlines `f` at an access site. An argument used exactly once is substituted
@@ -1139,7 +1089,7 @@ mod tests {
              }\n\
              fn main() { print(1) }\n",
         );
-        let f = lookup(&p, &Type::Named("Ring".into()), "at").unwrap();
+        let (_, f) = p.impls.place(&Type::Named("Ring".into()), "at").unwrap();
         let recv = Expr::Var {
             id: Id::NEW,
             name: "r".into(),
@@ -1178,7 +1128,7 @@ mod tests {
              }\n\
              fn main() { print(1) }\n",
         );
-        let f = lookup(&p, &Type::Named("Ring".into()), "at").unwrap();
+        let (_, f) = p.impls.place(&Type::Named("Ring".into()), "at").unwrap();
         let pr = inline(
             f,
             &Expr::Var {
@@ -1220,14 +1170,17 @@ mod tests {
         ] {
             for method in ["at", "atSet"] {
                 assert!(
-                    (ex.site(&[], Some(&ty), method, &recv, &args, 3))
+                    (ex.site(&Impls::default(), Some(&ty), method, &recv, &args, 3))
                         .unwrap()
                         .is_none(),
                     "{ty} took an expansion at `{method}`"
                 );
             }
         }
-        assert!(ex.site(&[], None, "at", &recv, &args, 3).unwrap().is_none());
+        assert!(ex
+            .site(&Impls::default(), None, "at", &recv, &args, 3)
+            .unwrap()
+            .is_none());
     }
 
     #[test]
@@ -1254,7 +1207,7 @@ mod tests {
              }\n\
              fn main() { print(1) }\n",
         );
-        let f = lookup(&p, &Type::Named("Ring".into()), "at").unwrap();
+        let (_, f) = p.impls.place(&Type::Named("Ring".into()), "at").unwrap();
         let pr = inline(
             f,
             &Expr::Var {
@@ -1285,7 +1238,7 @@ mod tests {
              }\n\
              fn main() { print(1) }\n",
         );
-        let f = lookup(&p, &Type::Named("Ring".into()), "at").unwrap();
+        let (_, f) = p.impls.place(&Type::Named("Ring".into()), "at").unwrap();
         let mut pr = inline(
             f,
             &Expr::Var {

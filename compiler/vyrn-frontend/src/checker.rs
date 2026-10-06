@@ -399,6 +399,22 @@ pub type Appended = (
     Option<HashSet<String>>,
 );
 
+/// Whether an impl for `ty` can dispatch: a value of `ty` carries the name
+/// the impl is keyed by. A validated scalar erases to its base, so it carries
+/// none.
+fn dispatches_on(ty: &Type, types: &HashMap<String, (DeclId, TypeDecl)>) -> bool {
+    match ty {
+        Type::Int | Type::Bool | Type::Str => true,
+        // The two built-in sums, under either spelling.
+        _ if crate::types::is_sum_alias(ty) => true,
+        Type::Named(n) | Type::App(n, _) => matches!(
+            types.get(n).map(|(_, d)| &d.base),
+            Some(Type::Enum(_) | Type::Record(_))
+        ),
+        _ => false,
+    }
+}
+
 /// An impl head as written (`impl<T> Show for Option<T>`), for the overlap
 /// diagnostic.
 fn render_impl_head(imp: &crate::ast::ImplBlock) -> Hole {
@@ -622,15 +638,12 @@ fn check_accum_inner(
             ));
         }
     }
-    let protocol_decls: HashMap<&str, &crate::ast::ProtocolDecl> = program
-        .protocols
+    // The program's own declaration of a prelude protocol's name replaces it.
+    let protocol_decls: HashMap<&str, &crate::ast::ProtocolDecl> = (crate::prelude::protocols())
         .iter()
+        .chain(&program.protocols)
         .map(|p| (p.name.as_str(), p))
         .collect();
-    let mut impls: std::collections::HashSet<(String, String)> = Default::default();
-    // The impl declared for each (protocol, type constructor) key, so a second
-    // one is refused at its declaration, naming both.
-    let mut impl_heads: HashMap<(String, String), (usize, Hole)> = HashMap::new();
     for imp in &program.impls {
         let mark = out.len();
         // The impl binds exactly the associated types the protocol declares.
@@ -834,9 +847,11 @@ fn check_accum_inner(
         // A named target must be an enum or a record. A validated scalar erases
         // to its base, so its value carries no name to dispatch on.
 
-        // A `Show` impl returns a String. `Show` is known by name, not
-        // declared, so the protocol comparison above does not reach it.
-        if imp.protocol == crate::types::SHOW {
+        // Rendering calls `show` whatever declares `Show`, so a program that
+        // replaces the prelude's declaration must still return a String.
+        if imp.protocol == crate::types::SHOW
+            && program.protocols.iter().any(|p| p.name == imp.protocol)
+        {
             for m in &imp.methods {
                 if m.name == crate::types::SHOW_SHOW && m.ret != Type::Str {
                     out.push(cerr_at!(
@@ -848,37 +863,24 @@ fn check_accum_inner(
                 }
             }
         }
-        let ok_target = match &imp.ty {
-            Type::Int | Type::Bool | Type::Str => true,
-            // The two built-in sums, under either spelling.
-            _ if crate::types::is_sum_alias(&imp.ty) => true,
-            Type::Named(n) | Type::App(n, _) => matches!(
-                types.get(n).map(|(_, d)| &d.base),
-                Some(Type::Enum(_) | Type::Record(_))
-            ),
-            _ => false,
-        };
         match crate::types::type_key(&imp.ty) {
-            Some(key) if ok_target => {
-                let head = render_impl_head(imp);
-                match impl_heads.get(&(imp.protocol.clone(), key.clone())) {
-                    // Not "overlaps": `Option<Int64>` and `Option<String>` are
-                    // disjoint, but dispatch keys on the constructor
-                    // (`types::type_key`).
-                    Some((prev_line, prev)) => out.push(cerr_at!(
+            Some(key) if dispatches_on(&imp.ty, &types) => {
+                // A second impl for one (protocol, type constructor) key is
+                // refused at its declaration, naming the first. Not "overlaps":
+                // `Option<Int64>` and `Option<String>` are disjoint, but
+                // dispatch keys on the constructor (`types::type_key`).
+                let first = program.impls.get(&imp.protocol, &key);
+                if let Some(first) = first.filter(|f| !std::ptr::eq(*f, imp)) {
+                    out.push(cerr_at!(
                         imp.line,
                         imp.head_span(),
                         ImplHeadCollides,
-                        head,
-                        prev,
-                        prev_line,
+                        head = render_impl_head(imp),
+                        prev = render_impl_head(first),
+                        prev_line = first.line,
                         key = DeclName(&key),
                         protocol = imp.protocol
-                    )),
-                    None => {
-                        impl_heads.insert((imp.protocol.clone(), key.clone()), (imp.line, head));
-                        impls.insert((imp.protocol.clone(), key));
-                    }
+                    ));
                 }
             }
             _ => {
@@ -959,8 +961,7 @@ fn check_accum_inner(
         all_bounds: &all_bounds,
         protocol_methods: &protocol_methods,
         protocol_places: &protocol_places,
-        impls: &impls,
-        impl_blocks: &program.impls,
+        impls: &program.impls,
         expansions: &program.expansions,
         shadows: &program.surface_shadows,
         extern_fns: &extern_fns,
@@ -1600,11 +1601,8 @@ struct Cx<'a> {
     protocol_methods: &'a HashMap<String, Vec<(String, MethodSig)>>,
     /// Projection names protocols declare.
     protocol_places: &'a std::collections::HashSet<String>,
-    /// Implemented (protocol, type key) pairs.
-    impls: &'a std::collections::HashSet<(String, String)>,
-    /// Every `impl` block, for resolving a projection, which has no mangled
-    /// name, by receiver type.
-    impl_blocks: &'a [crate::ast::ImplBlock],
+    /// Every `impl` block, by type key.
+    impls: &'a crate::types::Impls,
     /// The program's projection expansions, which the checker makes.
     expansions: &'a crate::project::Expansions,
     /// The program's [`Host`].
@@ -1923,7 +1921,7 @@ impl<'a> Checker<'a> {
         let projection_shaped = name == crate::project::AT
             || (self.sig(name).is_none()
                 && self
-                    .impl_blocks
+                    .impls
                     .iter()
                     .any(|i| i.places.iter().any(|p| p.name == *name)));
         if projection_shaped && self.chain_ty(recv, scope).is_none() {
@@ -1953,9 +1951,8 @@ impl<'a> Checker<'a> {
                         return Some(*t);
                     }
                 }
-                let f = crate::project::lookup_in(self.impl_blocks, &inner, m).or_else(|| {
-                    crate::project::lookup_in(self.impl_blocks, &self.base(&inner), m)
-                })?;
+                let (_, f) = (self.impls.place(&inner, m))
+                    .or_else(|| self.impls.place(&self.base(&inner), m))?;
                 crate::types::type_key(&f.ret)?;
                 Some(f.ret.clone())
             }
@@ -1981,15 +1978,15 @@ impl<'a> Checker<'a> {
         if args.is_empty()
             || self.sig(name).is_some()
             || !self
-                .impl_blocks
+                .impls
                 .iter()
                 .any(|i| i.places.iter().any(|p| p.name == *name))
         {
             return Ok(None);
         }
         let recv = self.expr(&args[0], scope, None, Some(fn_ret))?;
-        let found = crate::project::lookup_impl(self.impl_blocks, &recv, name)
-            .or_else(|| crate::project::lookup_impl(self.impl_blocks, &self.base(&recv), name));
+        let found =
+            (self.impls.place(&recv, name)).or_else(|| self.impls.place(&self.base(&recv), name));
         let Some((imp, f)) = found else {
             return Ok(None);
         };
@@ -2004,7 +2001,7 @@ impl<'a> Checker<'a> {
             self.solve_projection_call(imp, f, name, &recv, args, scope, Some(fn_ret), line)?;
         if self.recording() {
             if let Ok(Some(p)) = self.expansions.optional_site(
-                self.impl_blocks,
+                self.impls,
                 Some(&recv),
                 name,
                 &args[0],
@@ -2044,13 +2041,13 @@ impl<'a> Checker<'a> {
         line: usize,
     ) -> Result<Option<Type>, Diagnostic> {
         // Every `a[i]` reaches this; a builtin container leaves here.
-        if crate::project::is_builtin_container(recv) || self.impl_blocks.is_empty() {
+        if crate::project::is_builtin_container(recv) || self.impls.is_empty() {
             return Ok(None);
         }
         // The declared type first, because the impl is keyed by its name;
         // then the base, for a validated type.
-        let found = crate::project::lookup_impl(self.impl_blocks, recv, method)
-            .or_else(|| crate::project::lookup_impl(self.impl_blocks, &self.base(recv), method));
+        let found =
+            (self.impls.place(recv, method)).or_else(|| self.impls.place(&self.base(recv), method));
         let Some((imp, f)) = found else {
             return Ok(None);
         };
@@ -2100,15 +2097,10 @@ impl<'a> Checker<'a> {
         Ok(subst)
     }
 
-    /// Solves the impl head (`impl<T> .. for Slots<T>`) against the receiver
-    /// and substitutes into `ty`. For `c[k] = v` and `for x in c`, which do not
-    /// go through [`Self::place_result`].
-    fn solve_head(&self, imp: &crate::ast::ImplBlock, recv: &Type, ty: &Type, line: usize) -> Type {
-        let mut subst: HashMap<String, Type> = HashMap::new();
-        match self.unify(&imp.ty, recv, &mut subst, line) {
-            Ok(()) => crate::types::substitute(ty, &subst),
-            Err(_) => ty.clone(),
-        }
+    /// Whether the type key `key` implements `protocol`: it declares the impl,
+    /// and the impl's target dispatches ([`dispatches_on`]).
+    fn implements(&self, protocol: &str, key: &str) -> bool {
+        (self.impls.get(protocol, key)).is_some_and(|i| dispatches_on(&i.ty, self.types))
     }
 
     /// The first type in `ty`, itself or a part, that declares `impl Owned`.
@@ -2121,10 +2113,7 @@ impl<'a> Checker<'a> {
         seen: &mut std::collections::HashSet<String>,
     ) -> Option<String> {
         if let Some(k) = crate::types::type_key(ty) {
-            if self
-                .impls
-                .contains(&(crate::types::OWNED.to_string(), k.clone()))
-            {
+            if self.implements(crate::types::OWNED, &k) {
                 return Some(k);
             }
         }
@@ -2446,7 +2435,11 @@ impl<'a> Checker<'a> {
                     Type::Str | Type::Int => {}
                     shape @ (Type::Float | Type::Float32 | Type::Record(_) | Type::Enum(_)) => {
                         self.check_key_shape(key, &shape, line)?;
-                        if !crate::types::hashable_impl(self.impl_blocks, key) {
+                        if self
+                            .impls
+                            .method(crate::types::HASHABLE, key, "hash")
+                            .is_none()
+                        {
                             return Err(cerr!(line, MapKeyNeedsHashable, key));
                         }
                     }
@@ -2721,7 +2714,7 @@ impl<'a> Checker<'a> {
                 .protocol_methods
                 .values()
                 .any(|entries| entries.iter().any(|(p, _)| p == bound))
-                || self.impls.iter().any(|(p, _)| p == bound) =>
+                || self.impls.iter().any(|i| i.protocol == bound) =>
             {
                 self.declares_an_impl(ty, &base, bound)
             }
@@ -2736,7 +2729,7 @@ impl<'a> Checker<'a> {
         [crate::types::type_key(ty), crate::types::type_key(base)]
             .into_iter()
             .flatten()
-            .any(|k| self.impls.contains(&(bound.to_string(), k)))
+            .any(|k| self.implements(bound, &k))
     }
 
     /// Refuses an `extern` signature type outside the host ABI:
@@ -3279,12 +3272,12 @@ impl<'a> Checker<'a> {
                     _ => {
                         // The element type is what `atSet` yields, looked up
                         // by the declared type, which the impl head names.
-                        match crate::project::lookup_impl(self.impl_blocks, &b.ty, "atSet") {
+                        match self.impls.place(&b.ty, "atSet") {
                             Some((imp, f)) => {
                                 if let Some(p) = f.params.get(1) {
-                                    key = self.solve_head(imp, &b.ty, &p.ty, *line);
+                                    key = crate::types::under_head(imp, &b.ty, &p.ty);
                                 }
-                                self.solve_head(imp, &b.ty, &f.ret, *line)
+                                crate::types::under_head(imp, &b.ty, &f.ret)
                             }
                             None => return Ok(()),
                         }
@@ -3304,9 +3297,9 @@ impl<'a> Checker<'a> {
                 // Record the expansion the store lowers through: `atSet`
                 // inlined, with the move-out and move-back around it.
                 if self.recording() {
-                    if let Ok(Some(blk)) =
-                        self.expansions
-                            .store_index(self.impl_blocks, name, index, value, &b.ty)
+                    if let Ok(Some(blk)) = self
+                        .expansions
+                        .store_index(self.impls, name, index, value, &b.ty)
                     {
                         self.record_desugar(scope, |c, sc| {
                             c.block(blk, ret, sc);
@@ -3376,8 +3369,8 @@ impl<'a> Checker<'a> {
                     _ => {
                         // A user container's element is what its `nth` yields,
                         // looked up by the declared type.
-                        match crate::types::iterate_impl(self.impl_blocks, &ity) {
-                            Some((imp, _, nth)) => self.solve_head(imp, &ity, &nth.ret, *line),
+                        match crate::types::iterate_impl(self.impls, &ity) {
+                            Some((imp, _, nth)) => crate::types::under_head(imp, &ity, &nth.ret),
                             // The typed judgment refuses the loop.
                             None => Type::Err,
                         }
@@ -3397,9 +3390,7 @@ impl<'a> Checker<'a> {
                 // A `for` over a user container reads each element through its
                 // `nth`; record that read.
                 if self.recording() {
-                    if let Ok(Some(p)) =
-                        self.expansions
-                            .for_element(self.impl_blocks, &ity, iter, *line)
+                    if let Ok(Some(p)) = self.expansions.for_element(self.impls, &ity, iter, *line)
                     {
                         self.record_desugar(scope, |c, sc| {
                             let bind = |ty| Binding { ty, mutable: false };
@@ -4054,8 +4045,7 @@ impl<'a> Checker<'a> {
         }
         match &ety {
             other => {
-                let key = crate::types::type_key(other)
-                    .filter(|k| self.impls.contains(&(FALLIBLE.to_string(), k.clone())));
+                let key = crate::types::type_key(other).filter(|k| self.implements(FALLIBLE, k));
                 let Some(key) = key else {
                     return Err(cerr!(line, TryOperand, other));
                 };
@@ -4657,7 +4647,7 @@ impl<'a> Checker<'a> {
 
     /// The `impl Show for T` a value of the written type `t` renders through.
     fn show_dispatch(&self, t: &Type) -> Option<String> {
-        crate::types::show_dispatch(self.impl_blocks, t, &self.base(t))
+        crate::types::show_dispatch(self.impls, t, &self.base(t))
     }
 
     /// Whether an `impl Show` renders `args[0]`, of written type `t`. A
@@ -4988,7 +4978,7 @@ impl<'a> Checker<'a> {
                     // projection's body inlined here ([`record_desugar`]).
                     if self.recording() {
                         if let Ok(Some(p)) = self.expansions.site(
-                            self.impl_blocks,
+                            self.impls,
                             Some(&at),
                             "at",
                             &args[0],
@@ -5127,10 +5117,7 @@ impl<'a> Checker<'a> {
             // A declared `impl Copy` answers first and overrides every refusal
             // below.
             if let Some(key) = crate::types::type_key(&t) {
-                if self
-                    .impls
-                    .contains(&(crate::types::COPY.to_string(), key.clone()))
-                {
+                if self.implements(crate::types::COPY, &key) {
                     let mangled = crate::types::impl_method_name(crate::types::COPY, &key, "copy");
                     return self.call_declared(&mangled, args, &[], line, scope, expected, fn_ret);
                 }
@@ -5445,10 +5432,7 @@ impl<'a> Checker<'a> {
                 let key = crate::types::type_key(&recv);
                 let matching: Vec<_> = candidates
                     .iter()
-                    .filter(|(p, _)| {
-                        key.as_ref()
-                            .map_or(false, |k| self.impls.contains(&(p.clone(), k.clone())))
-                    })
+                    .filter(|(p, _)| key.as_ref().is_some_and(|k| self.implements(p, k)))
                     .collect();
                 match matching.len() {
                     1 => matching[0].clone(),
@@ -5517,7 +5501,7 @@ impl<'a> Checker<'a> {
                     params.extend(sig.params.iter().cloned());
                     let mut caps = vec![sig.recv];
                     caps.extend(sig.param_caps.iter().copied());
-                    let every = (self.impl_blocks.iter())
+                    let every = (self.impls.iter())
                         .filter(|i| i.protocol == proto)
                         .filter_map(|i| crate::types::type_key(&i.ty))
                         .map(|key| crate::types::impl_method_name(&proto, &key, name));
@@ -5543,7 +5527,7 @@ impl<'a> Checker<'a> {
                 }
             }
             match crate::types::type_key(&recv) {
-                Some(key) if self.impls.contains(&(proto.clone(), key.clone())) => {
+                Some(key) if self.implements(&proto, &key) => {
                     let mangled = crate::types::impl_method_name(&proto, &key, name);
                     self.dispatch([mangled.clone()]);
                     // Dispatch ends here; the impl method is read as any
@@ -5581,7 +5565,7 @@ impl<'a> Checker<'a> {
         if self.sig(name).is_none()
             && !args.is_empty()
             && self
-                .impl_blocks
+                .impls
                 .iter()
                 .any(|i| i.places.iter().any(|p| p.name == *name))
         {
@@ -5590,7 +5574,7 @@ impl<'a> Checker<'a> {
                 self.refuse_chained_projection(&args[0], scope, line)?;
                 if self.recording() {
                     if let Ok(Some(p)) = self.expansions.site(
-                        self.impl_blocks,
+                        self.impls,
                         Some(&recv),
                         name,
                         &args[0],
@@ -6349,10 +6333,7 @@ impl<'a> Checker<'a> {
                     _ => None,
                 };
                 (ck.protocol_methods.get(name).into_iter().flatten())
-                    .filter(|(p, _)| {
-                        key.as_ref()
-                            .is_none_or(|key| ck.impls.contains(&(p.clone(), key.clone())))
-                    })
+                    .filter(|(p, _)| key.as_ref().is_none_or(|key| ck.implements(p, key)))
                     .any(|(_, m)| {
                         let mut cs = std::iter::once(m.recv).chain(m.param_caps.iter().copied());
                         cs.nth(k) == Some(Capability::Consume)

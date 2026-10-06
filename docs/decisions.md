@@ -179,6 +179,7 @@ pull request.
 - The load returns the World its check judged (`vyrn_lower::load_warned`), and the host passes it to every pass over that program. A host that changes the program analyses it again (`vyrn_lower::analyze`); no memo hands a World or a record to the next pass.
 - A table is keyed by a resolved id (function, type, declaration, name), never by a spelling; two bindings that share a name merged their facts. A node id is a function id and a local index, so an edit to one function renumbers nothing else.
 - An id is a storage index, never an order. Diagnostics and emitted functions follow source order, so an incremental check and a fresh one print the same bytes.
+- A type's impls are found through one index by type key, `Program::impls` (`types::Impls`). No pass scans the impl list for a key, and its first impl for a protocol is the one the parser flattens.
 - Each relation has one writer, which sets both directions and deletes in a batch. No hooks and no second storage shape for one relation.
 - The call relation is between source functions, as an edit is: every instance of a generic and every lambda frame call under their function's row. A call through a value is no edge; the effect judgment keeps its own per-instance graph with the values' closed sets.
 - A recheck pulls: each result records what it read (a signature, a summary, a name lookup in a scope, misses included), and a cache that records no reads is off in incremental mode.

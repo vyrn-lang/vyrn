@@ -87,7 +87,7 @@ fn sections() -> Vec<Section> {
         sec("fn refuse_chained_projection", Desugar),
         sec("fn optional_scrutinee", Desugar),
         sec("fn place_result", Desugar),
-        sec("fn solve_head", Judgment),
+        sec("fn implements", Judgment),
         sec("fn declared_owned_in", Surface),
         sec("fn enum_type_params", Shared),
         sec("fn reaches", Shared),

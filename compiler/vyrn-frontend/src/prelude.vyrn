@@ -13,6 +13,10 @@
 // write. Every declaration here carries line 0, and that is how the loader
 // (`is_injected`) and the editor recognise one.
 //
+// The protocols at the end are the exception: they enter no program. The
+// checker reads one as the declaration an `impl` of that name conforms to
+// when the program declares none (`prelude::protocols`).
+//
 // A comment here is `//` and never `///`: a `///` is a declaration's doc, and
 // these declarations carry none — a doc would change what hover says.
 
@@ -231,3 +235,30 @@ type TypeMember = { name: String, args: Array<Int64> }
 // points back at its own node. `spelling` is the type as generated code
 // writes it.
 type TypeArg = { roots: Array<Int64>, nodes: Array<TypeNode> }
+
+// The protocols the compiler gives a meaning: how a type is released
+// (`Owned`), that a value must be disposed of by name (`MustUse`), how it
+// renders (`Show`), that it keys a `Map` (`Hashable`), and how `?` reads it
+// (`Fallible`). An impl of one is checked as any impl is, against the
+// declaration here or the program's own of that name. `std/hash` and
+// `std/fallible` declare `Hashable` and `Fallible` alike, for a program that
+// imports one by name.
+protocol Owned {
+    fn release(consume self)
+}
+
+protocol MustUse {}
+
+protocol Show {
+    fn show(self) -> String
+}
+
+protocol Hashable {
+    fn hash(self) -> UInt64
+}
+
+protocol Fallible {
+    type Output
+    fn isSuccess(self) -> Bool
+    fn success(self) -> Output
+}
