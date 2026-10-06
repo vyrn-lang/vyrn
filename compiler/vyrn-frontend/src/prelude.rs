@@ -1059,14 +1059,8 @@ pub enum Spec {
     Pulls,
 }
 
-/// Returns the seeded row for the name a call site carries. The row's own
-/// name `at` reaches it too, under the key [`crate::project::AT`].
+/// Returns the seeded row for the name a call site carries.
 pub fn signature(name: &str) -> Option<&'static Function> {
-    let name = if name == "at" {
-        crate::project::AT
-    } else {
-        name
-    };
     builtin(name)?.sig.as_ref()
 }
 
