@@ -2967,7 +2967,11 @@ impl<'a> Checker<'a> {
             Some(b) => Some(b.at),
             None => None,
         };
-        self.acc.borrow_mut().uses.entry((line, id.col())).or_insert(at);
+        self.acc
+            .borrow_mut()
+            .uses
+            .entry((line, id.col()))
+            .or_insert(at);
     }
 
     /// Binds `name` in the innermost frame at its binder's position `at`, and
