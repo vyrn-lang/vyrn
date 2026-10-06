@@ -3,5 +3,5 @@ the typing judgment	2070	39
 a rule the checker states	1194	53
 the checker's part in a rewrite stated elsewhere	360	14
 one arm per form, type constructor or builtin	1800	135
-shared machinery	2004	24
-tests	627	0
+shared machinery	1968	24
+tests	631	0

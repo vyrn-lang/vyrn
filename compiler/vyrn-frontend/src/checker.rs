@@ -195,28 +195,11 @@ pub(crate) fn local_index(
     out
 }
 
-/// Type-check the program, returning **all** problems found across functions
-/// and types as structured [`Diagnostic`]s, plus a table of the (inferred or
-/// declared) type of each `let` binding and `for`-in loop variable that
-/// checked cleanly — keyed by `(line, name)`. The symbol-query layer uses that
-/// table to show `let x: Int` on hover for an unannotated `let x = 5` (the
-/// checker computes the type either way; this just retains it).
-///
-/// Accumulation is bounded: the top-level loops over `program.functions` and
-/// `program.type_decls` push-and-continue, so an error in one function or type
-/// does not suppress errors in the others. Inside a single function body the
-/// check is still first-error (recovery there is the same class of work as
-/// parser recovery, and is deferred).
-pub fn check_accum_with_binders(program: &Program) -> (Vec<Diagnostic>, Vec<LocalBinding>) {
-    let (out, binders, _, _, _) = check_accum_full(program);
-    (out, binders)
-}
-
 /// Returns the stored-function-value collection the `--workers`
 /// gate needs, from a check. Diagnostics are discarded: callers have already
 /// checked. A host holding the check's record reads [`Recorded::stored`].
 pub fn stored_fn_effects(program: &Program) -> StoredFnEffects {
-    check_accum_full(program).2
+    check_accum_inner(program, false, 0, &[]).2
 }
 
 /// Names the compiler owns: builtin functions, builtin type names and the sum
@@ -358,19 +341,6 @@ pub fn check_accum_with_sites(program: &Program) -> (Appended, Vec<LocalBinding>
     ((out, derived, refused), binders, made.unwrap_or_default())
 }
 
-fn check_accum_full(
-    program: &Program,
-) -> (
-    Vec<Diagnostic>,
-    Vec<LocalBinding>,
-    StoredFnEffects,
-    Vec<crate::gen::Site>,
-    Option<HashSet<String>>,
-) {
-    let (out, binders, effects, derived, typed, _) = check_accum_inner(program, false, 0, &[]);
-    (out, binders, effects, derived, typed)
-}
-
 /// Checks `program`, whose functions before `at` passed a check alone, typing
 /// only the bodies from `at` on. Returns the diagnostics, the `derive` sites of
 /// those bodies, and the refused set, as a whole check would, and the record of
@@ -457,6 +427,14 @@ fn render_method_sig(
     Hole::Parts(parts)
 }
 
+/// Type-checks `program` and returns every diagnostic, the root's bindings
+/// by `(line, name)`, the stored-function facts, the `derive` sites, the
+/// refused set and, when `recording`, the record.
+///
+/// Accumulation is bounded: the top-level loops over `program.functions` and
+/// `program.type_decls` push-and-continue, so an error in one function or type
+/// does not suppress errors in the others. Inside a single function body the
+/// check is first-error per statement.
 #[allow(clippy::type_complexity)]
 fn check_accum_inner(
     program: &Program,
@@ -1472,20 +1450,6 @@ fn check_named_blocks(
         });
     }
     *host.borrow_mut() = false;
-}
-
-/// Checks the program and returns every diagnostic. An error in one function
-/// or type does not hide errors in the others.
-pub fn check_accum(program: &Program) -> Vec<Diagnostic> {
-    check_accum_with_binders(program).0
-}
-
-/// Checks the program and returns the first diagnostic, rendered.
-pub fn check(program: &Program) -> Result<(), String> {
-    match check_accum(program).into_iter().next() {
-        Some(d) => Err(d.render()),
-        None => Ok(()),
-    }
 }
 
 /// The declaration a call was checked against; the typed judgment states the
@@ -7446,7 +7410,11 @@ mod tests {
     use crate::{lexer::lex, parser::parse};
 
     fn check_src(s: &str) -> Result<(), String> {
-        check(&parse(lex(s).unwrap()).unwrap())
+        let program = parse(lex(s).unwrap()).unwrap();
+        match check_accum_inner(&program, false, 0, &[]).0.first() {
+            Some(d) => Err(d.render()),
+            None => Ok(()),
+        }
     }
 
     /// The sink is off until [`record`] turns it on.
