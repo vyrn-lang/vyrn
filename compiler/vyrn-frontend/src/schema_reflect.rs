@@ -330,11 +330,9 @@ fn push_node(
     types: &HashMap<String, TypeDecl>,
     nodes: &mut Vec<Expr>,
 ) -> (i64, String) {
-    if let Type::Named(n) = ty {
-        if let Some(d) = types.get(n).filter(|_| n.contains('.')) {
-            let pred = d.predicate.as_ref().map(crate::checker::pred_summary);
-            return push_node(&d.base, pred, types, nodes);
-        }
+    if let Some(d) = synthetic_decl(ty, |n| types.get(n)) {
+        let pred = d.predicate.as_ref().map(crate::checker::pred_summary);
+        return push_node(&d.base, pred, types, nodes);
     }
     let fields = |fs: Vec<Field>| fs.into_iter().map(|f| (f.name, vec![f.ty])).collect();
     let (kind, name, args, members): (&str, &str, Vec<Type>, Vec<(String, Vec<Type>)>) = match ty {
@@ -686,9 +684,7 @@ pub fn render_type_decl(t: &TypeDecl, types: &HashMap<String, TypeDecl>) -> Stri
                 if i > 0 {
                     out.push_str(", ");
                 }
-                out.push_str(&fld.name);
-                out.push_str(": ");
-                out.push_str(&render_field_type(&t.name, &fld.name, &fld.ty, types));
+                out.push_str(&field_text(fld, |n| types.get(n), &|t| t.to_string()));
             }
             out.push_str(" }");
             // A cross-field `where` stays on the record declaration; dropping it would
@@ -703,14 +699,7 @@ pub fn render_type_decl(t: &TypeDecl, types: &HashMap<String, TypeDecl>) -> Stri
         Type::Enum(variants) if !crate::types::is_sum_alias(&t.base) => {
             let rendered: Vec<String> = variants
                 .iter()
-                .map(|v| {
-                    if v.payload.is_empty() {
-                        v.name.clone()
-                    } else {
-                        let ps: Vec<String> = v.payload.iter().map(|p| p.to_string()).collect();
-                        format!("{}({})", v.name, ps.join(", "))
-                    }
-                })
+                .map(|v| variant_arm(v, &|t| t.to_string()))
                 .collect();
             out.push_str("| ");
             out.push_str(&rendered.join(" | "));
@@ -726,26 +715,50 @@ pub fn render_type_decl(t: &TypeDecl, types: &HashMap<String, TypeDecl>) -> Stri
     out
 }
 
-/// Renders a record field's type, folding a synthetic `Parent.field`
-/// refinement back into `Base where <pred>`.
-fn render_field_type(
-    parent: &str,
-    field: &str,
+/// The synthetic refinement declaration (`User.age`) that `ty` names, if it
+/// is one. The parser names it `Decl.field`, and the `.` cannot occur in a user
+/// type name. The loader renames only the parent (`User__from0`), so test the
+/// dot, not the parent's name. `decl` looks a declaration up by name.
+pub(crate) fn synthetic_decl<'a>(
     ty: &Type,
-    types: &HashMap<String, TypeDecl>,
-) -> String {
-    if let Type::Named(n) = ty {
-        if n == &format!("{parent}.{field}") {
-            if let Some(decl) = types.get(n) {
-                let base = decl.base.to_string();
-                return match &decl.predicate {
-                    Some(p) => format!("{base} where {}", crate::checker::pred_summary(p)),
-                    None => base,
-                };
-            }
-        }
+    decl: impl Fn(&str) -> Option<&'a TypeDecl>,
+) -> Option<&'a TypeDecl> {
+    match ty {
+        Type::Named(n) if n.contains('.') => decl(n),
+        _ => None,
     }
-    ty.to_string()
+}
+
+/// A record field as the author wrote it: `name: Type`, or `name: Base where
+/// pred` when its type is a synthetic refinement. `spell` renders a type.
+pub(crate) fn field_text<'a>(
+    f: &Field,
+    decl: impl Fn(&str) -> Option<&'a TypeDecl>,
+    spell: &dyn Fn(&Type) -> String,
+) -> String {
+    match synthetic_decl(&f.ty, decl) {
+        Some(TypeDecl {
+            base,
+            predicate: Some(p),
+            ..
+        }) => format!(
+            "{}: {} where {}",
+            f.name,
+            spell(base),
+            crate::checker::pred_summary(p)
+        ),
+        _ => format!("{}: {}", f.name, spell(&f.ty)),
+    }
+}
+
+/// An enum arm: `Name`, or `Name(T, U)` for a payload. `spell` renders a type.
+pub(crate) fn variant_arm(v: &EnumVariant, spell: &dyn Fn(&Type) -> String) -> String {
+    if v.payload.is_empty() {
+        v.name.clone()
+    } else {
+        let ps: Vec<String> = v.payload.iter().map(spell).collect();
+        format!("{}({})", v.name, ps.join(", "))
+    }
 }
 
 fn struct_lit(name: &str, fields: Vec<(&str, Expr)>) -> Expr {
@@ -824,6 +837,24 @@ mod tests {
         assert_eq!(
             render_type_decl(&d, &t),
             "export type User = { name: String where value.byteLength >= 3, age: Int64 }"
+        );
+    }
+
+    /// The loader renames a record's parent (`Foo__from0`) but not its
+    /// synthetic refinement (`Foo.x`), so the fold must not rebuild the name from
+    /// the parent.
+    #[test]
+    fn renders_a_renamed_record_folding_its_refinements() {
+        let (mut d, mut t) = decl(
+            "export type Foo = { x: Int64 where value > 0 }
+",
+            "Foo",
+        );
+        d.name = "Foo__from0".to_string();
+        t.insert(d.name.clone(), d.clone());
+        assert_eq!(
+            render_type_decl(&d, &t),
+            "export type Foo__from0 = { x: Int64 where value > 0 }"
         );
     }
 
