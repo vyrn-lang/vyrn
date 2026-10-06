@@ -2487,6 +2487,22 @@ pub fn exprs_one(s: &Stmt, f: &mut dyn FnMut(&Expr, &std::collections::HashSet<S
     ast_stmt(s, &mut std::collections::HashSet::new(), &mut Exprs(f));
 }
 
+struct Binders<'f>(&'f mut dyn FnMut(&str));
+
+impl AstVisit<'_> for Binders<'_> {
+    const SCOPED: bool = false;
+
+    fn bind(&mut self, name: &str, _: usize, _: usize, _: LocalKind, _: Option<&Type>) {
+        (self.0)(name)
+    }
+}
+
+/// Calls `f` with every name `b` binds: `let`s, loop variables, pattern binders
+/// and lambda parameters.
+pub fn each_binding(b: &Block, f: &mut dyn FnMut(&str)) {
+    ast_block(b, &mut std::collections::HashSet::new(), &mut Binders(f));
+}
+
 /// Appends the id of every statement and expression in `e`.
 pub fn node_ids(e: &Expr, out: &mut Vec<NodeId>) {
     ast_expr(e, &std::collections::HashSet::new(), &mut Ids(out));

@@ -488,7 +488,7 @@ fn substituted(
     // A `let n` inside a projection must not capture a caller's `n`, or be
     // captured by it.
     let mut rename: HashMap<String, String> = HashMap::new();
-    collect_bindings(&mut body, tag, &mut rename);
+    collect_bindings(&body, tag, &mut rename);
     if !rename.is_empty() {
         rename_uses(&mut body, &rename);
         rename_bindings(&mut body, &rename);
@@ -633,64 +633,10 @@ pub const FOR_INDEX: &str = "@i.i";
 /// Maps every binding a projection body introduces to an unspellable name.
 /// Lambda parameters and pattern binders count: [`subst_block`] walks through
 /// lambdas, so an unrenamed `|i| i + 1` would have its `i` substituted.
-fn collect_bindings(b: &mut Block, tag: &str, out: &mut HashMap<String, String>) {
-    for s in &mut b.stmts {
-        match s {
-            Stmt::Let { name, .. } => {
-                out.insert(name.clone(), format!("@b{tag}.{name}"));
-            }
-            Stmt::If {
-                then_block,
-                else_block,
-                ..
-            } => {
-                collect_bindings(then_block, tag, out);
-                if let Some(e) = else_block {
-                    collect_bindings(e, tag, out);
-                }
-            }
-            Stmt::Expr(Expr::Match { arms, .. }, _) => {
-                for arm in arms {
-                    if let crate::ast::ArmBody::Block(b) = &mut arm.body {
-                        collect_bindings(b, tag, out);
-                    }
-                }
-            }
-            Stmt::While { body, .. } | Stmt::Region { body, .. } => {
-                collect_bindings(body, tag, out)
-            }
-            Stmt::ForIn { var, body, .. } => {
-                out.insert(var.clone(), format!("@b{tag}.{var}"));
-                collect_bindings(body, tag, out);
-            }
-            _ => {}
-        }
-    }
-    // Lambdas and `match` arm binders live in expressions, which the walk
-    // above never enters. Revisiting a sub-block re-inserts the same entries.
-    walk_block(b, &mut |e: &mut Expr| {
-        collect_lambda(e, tag, out);
-        if let Expr::Match { arms, .. } = e {
-            for arm in arms {
-                for n in arm.pattern.binders() {
-                    out.insert(n.name.clone(), format!("@b{tag}.{n}"));
-                }
-            }
-        }
+fn collect_bindings(b: &Block, tag: &str, out: &mut HashMap<String, String>) {
+    crate::ast::each_binding(b, &mut |n| {
+        out.insert(n.to_string(), format!("@b{tag}.{n}"));
     });
-}
-
-fn collect_lambda(e: &mut Expr, tag: &str, out: &mut HashMap<String, String>) {
-    let Expr::Lambda { params, body, .. } = e else {
-        return;
-    };
-    for p in params.iter() {
-        out.insert(p.name.clone(), format!("@b{tag}.{p}"));
-    }
-    match body {
-        LambdaBody::Expr(inner) => collect_lambda(inner, tag, out),
-        LambdaBody::Block(b) => collect_bindings(b, tag, out),
-    }
 }
 
 /// Renames each read and store of a name through `map` where a binding of the
