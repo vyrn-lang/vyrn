@@ -189,6 +189,12 @@ pub struct Resolution {
     pub target_file: Option<String>,
     /// Detail text (for hover).
     pub hover: String,
+    /// The part of `hover` that is a declaration signature, which the editor
+    /// shows as code. `None` when `hover` is prose.
+    pub signature: Option<String>,
+    /// Everything in `hover` after the signature, without the blank line that
+    /// separates them. The whole of `hover` when there is no signature.
+    pub doc: String,
     /// Whether a source declaration exists to jump to. `false` for a built-in
     /// method such as `push`: it has hover text but no definition site.
     pub definition: bool,
@@ -854,30 +860,35 @@ pub fn resolve(analysis: &Analysis, line: usize, col: usize) -> Option<Resolutio
             .max_by_key(|s| (s.file.is_none(), s.line));
         Some((c, decl))
     };
-    let at = |s: &Symbol, hover: String| Resolution {
+    let at = |s: &Symbol, h: Hover| Resolution {
         name: s.name.clone(),
         kind: s.kind,
         target_line: s.line,
         target_col: s.col,
         target_end_col: s.end_col,
         target_file: s.file.clone(),
-        hover,
+        hover: h.text,
+        signature: h.signature,
+        doc: h.doc,
         definition: true,
     };
-    let nowhere = |name: &str, kind, hover| Resolution {
+    let nowhere = |name: &str, kind, h: Hover| Resolution {
         name: name.to_string(),
         kind,
         target_line: 0,
         target_col: 0,
         target_end_col: 0,
         target_file: None,
-        hover,
+        hover: h.text,
+        signature: h.signature,
+        doc: h.doc,
         definition: false,
     };
     match resolve_token(analysis, tok, member) {
         Some(Named::Local(b)) => Some(local_resolution(analysis, b)),
         Some(Named::NsMember(ns, m)) => {
-            let hover = format!("{}\n\n— via namespace `{ns}`", with_doc(&m.detail, &m.doc));
+            let via = format!("— via namespace `{ns}`");
+            let hover = hover_of(&m.detail, &[doc_piece(&m.doc), Some(&via)]);
             Some(Resolution {
                 definition: m.file.is_some(),
                 ..at(m, hover)
@@ -885,7 +896,7 @@ pub fn resolve(analysis: &Analysis, line: usize, col: usize) -> Option<Resolutio
         }
         Some(Named::Member((c, decl))) => {
             let doc = c.doc.clone().or_else(|| decl.and_then(|d| d.doc.clone()));
-            let hover = with_doc(&c.detail, &doc);
+            let hover = hover_of(&c.detail, &[doc_piece(&doc)]);
             Some(match decl {
                 Some(d) => Resolution {
                     name: c.label,
@@ -899,20 +910,22 @@ pub fn resolve(analysis: &Analysis, line: usize, col: usize) -> Option<Resolutio
         Some(Named::Namespace(ns)) => Some(nowhere(
             &ns.name,
             SymbolKind::Type,
-            format!(
-                "namespace `{}` — {} exported member(s) (a compile-time name, not a value)",
-                ns.name,
-                ns.members.len()
+            hover_of(
+                &format!(
+                    "namespace `{}` — {} exported member(s) (a compile-time name, not a value)",
+                    ns.name,
+                    ns.members.len()
+                ),
+                &[],
             ),
         )),
-        Some(Named::Symbol(s)) => Some(at(s, with_doc(&s.detail, &s.doc))),
+        Some(Named::Symbol(s)) => Some(at(s, hover_of(&s.detail, &[doc_piece(&s.doc)]))),
         // A built-in method or function name (`push`, `info`, `len`), then the
         // ambient `Result` and `Option` and their constructors, imported or not.
         None => match builtin_method(&tok.text) {
-            Some(b) => Some(nowhere(b.name, SymbolKind::Method, b.detail.to_string())),
-            None => {
-                builtin_type_or_ctor(&tok.text).map(|(kind, hover)| nowhere(&tok.text, kind, hover))
-            }
+            Some(b) => Some(nowhere(b.name, SymbolKind::Method, hover_of(b.detail, &[]))),
+            None => builtin_type_or_ctor(&tok.text)
+                .map(|(kind, hover)| nowhere(&tok.text, kind, hover_of(&hover, &[]))),
         },
     }
 }
@@ -2002,13 +2015,68 @@ pub(crate) fn short_path(file: &str) -> String {
     format!("…/{}", parts[parts.len() - 3..].join("/"))
 }
 
-/// The hover text: the signature, then the declaration's `///` doc (markdown,
-/// verbatim) when it has one.
-fn with_doc(detail: &str, doc: &Option<String>) -> String {
-    match doc {
-        Some(d) if !d.trim().is_empty() => format!("{detail}\n\n{}", d.trim_end()),
-        _ => detail.to_string(),
+/// A hover, and the part of it the editor shows as code.
+struct Hover {
+    text: String,
+    signature: Option<String>,
+    doc: String,
+}
+
+/// A declaration's `///` doc (markdown, verbatim) as a hover paragraph; `None`
+/// when it has none.
+fn doc_piece(doc: &Option<String>) -> Option<&str> {
+    doc.as_deref()
+        .filter(|d| !d.trim().is_empty())
+        .map(str::trim_end)
+}
+
+/// The hover text: `detail`, then each `tail` paragraph, blank-line separated.
+/// The signature is the first paragraph of `detail` when it opens with a
+/// declaration keyword, or, for a builtin's one-line detail, the part before
+/// the em dash. Anything else has no signature.
+fn hover_of(detail: &str, tail: &[Option<&str>]) -> Hover {
+    const DECL: &[&str] = &[
+        "fn ",
+        "gen fn ",
+        "mut fn ",
+        "type ",
+        "let ",
+        "protocol ",
+        "impl ",
+        "contract ",
+    ];
+    let tail = || tail.iter().flatten().copied();
+    let text = std::iter::once(detail)
+        .chain(tail())
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    let (head, more) = match detail.split_once("\n\n") {
+        Some((head, more)) => (head, Some(more)),
+        None => (detail, None),
+    };
+    let (signature, lead) = match head.split_once(" — ") {
+        _ if DECL.iter().any(|d| head.starts_with(d)) => (Some(head), None),
+        Some((sig, doc)) if !sig.contains('\n') && sig.contains('(') && sig.contains("->") => {
+            (Some(sig), Some(doc))
+        }
+        _ => (None, None),
+    };
+    let doc = match signature {
+        Some(_) => (lead.into_iter().chain(more).chain(tail()))
+            .collect::<Vec<_>>()
+            .join("\n\n"),
+        None => text.clone(),
+    };
+    Hover {
+        text,
+        signature: signature.map(str::to_string),
+        doc,
     }
+}
+
+/// The hover text: the signature, then the declaration's `///` doc.
+fn with_doc(detail: &str, doc: &Option<String>) -> String {
+    hover_of(detail, &[doc_piece(doc)]).text
 }
 
 /// The declaration of the user record or enum `name`, shown beneath a value's
@@ -2042,23 +2110,17 @@ fn structural_name(ty: &Type) -> Option<&str> {
 }
 
 fn local_resolution(analysis: &Analysis, b: &LocalBinding) -> Resolution {
-    let hover = match b.ty.as_ref().and_then(structural_name) {
-        Some(n) => match type_structure(analysis, n) {
-            Some(s) => format!("{}\n\n{}", local_detail(b, &analysis.spellings), s),
-            None => local_detail(b, &analysis.spellings),
-        },
-        None => local_detail(b, &analysis.spellings),
-    };
+    let structure =
+        (b.ty.as_ref().and_then(structural_name)).and_then(|n| type_structure(analysis, n));
     // Bindings of one shape can have opposite memory outcomes, and the source
     // does not say which. Matched on the declaration line, so it is this binding.
-    let hover = match analysis
-        .memory
-        .iter()
+    let memory = (analysis.memory.iter())
         .find(|m| m.name == b.name && m.line == b.line)
-    {
-        Some(m) => format!("{hover}\n\nmemory: {}", m.text),
-        None => hover,
-    };
+        .map(|m| format!("memory: {}", m.text));
+    let h = hover_of(
+        &local_detail(b, &analysis.spellings),
+        &[structure.as_deref(), memory.as_deref()],
+    );
     Resolution {
         name: b.name.clone(),
         kind: match b.kind {
@@ -2069,7 +2131,9 @@ fn local_resolution(analysis: &Analysis, b: &LocalBinding) -> Resolution {
         target_col: b.col,
         target_end_col: b.end_col,
         target_file: None,
-        hover,
+        hover: h.text,
+        signature: h.signature,
+        doc: h.doc,
         definition: true,
     }
 }

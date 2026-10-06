@@ -688,37 +688,16 @@ fn is_dev_entry(source: &str) -> bool {
     imports_rpc && calls_server
 }
 
-/// Fence a hover's signature as ` ```vyrn ` for highlighting. `symbols.rs`
-/// builds plain prose; the fence is presentation, so it lives in the adapter.
-///
-/// Two shapes carry a signature: a first paragraph starting with a declaration
-/// keyword, and a builtin method's one-liner whose prose follows an em dash.
-/// Anything else is left alone.
-fn fence_signature(hover: &str) -> String {
-    let (head, rest) = match hover.find("\n\n") {
-        Some(i) => (&hover[..i], &hover[i..]),
-        None => (hover, ""),
-    };
-    const DECL: &[&str] = &[
-        "fn ",
-        "gen fn ",
-        "mut fn ",
-        "type ",
-        "let ",
-        "protocol ",
-        "impl ",
-        "contract ",
-    ];
-    if DECL.iter().any(|d| head.starts_with(d)) {
-        return format!("```vyrn\n{head}\n```{rest}");
+/// The hover of a resolved name, its signature fenced as ` ```vyrn ` for
+/// highlighting. `symbols.rs` supplies the signature and the prose after it;
+/// the fence is presentation, so it lives in the adapter. A hover without a
+/// signature is sent as it is.
+fn fence_signature(r: &vyrn_frontend::Resolution) -> String {
+    match &r.signature {
+        Some(sig) if r.doc.is_empty() => format!("```vyrn\n{sig}\n```"),
+        Some(sig) => format!("```vyrn\n{sig}\n```\n\n{}", r.doc),
+        None => r.hover.clone(),
     }
-    // A builtin method detail: the fence takes the half before the em dash.
-    if let Some((sig, doc)) = head.split_once(" — ") {
-        if !sig.contains('\n') && sig.contains('(') && sig.contains("->") {
-            return format!("```vyrn\n{sig}\n```\n\n{doc}{rest}");
-        }
-    }
-    hover.to_string()
 }
 
 fn handle_hover(server: &Server, params: serde_json::Value) -> Option<Hover> {
@@ -738,7 +717,7 @@ fn handle_hover(server: &Server, params: serde_json::Value) -> Option<Hover> {
     // A resolved name, else a class token, whose hover is not fenced.
     let ordinary = if is_vyrn_uri(uri) {
         lookup(server, uri).and_then(|(analysis, _)| match resolve(analysis, line, col) {
-            Some(r) => Some(Ok(r.hover)),
+            Some(r) => Some(Ok(fence_signature(&r))),
             None => (server.docs.get(uri))
                 .and_then(|src| class_token_hover(analysis, src, line, col))
                 .map(Err),
@@ -747,13 +726,13 @@ fn handle_hover(server: &Server, params: serde_json::Value) -> Option<Hover> {
         vyx_forward(server, uri, line, col).and_then(|fwd| {
             let a = &fwd.synth.analysis;
             match resolve(a, fwd.line, fwd.col) {
-                Some(r) => Some(Ok(r.hover)),
+                Some(r) => Some(Ok(fence_signature(&r))),
                 None => class_token_hover(a, &fwd.synth.gen_source, fwd.line, fwd.col).map(Err),
             }
         })
     };
     let (ordinary, safelisted) = match ordinary {
-        Some(Ok(hover)) => (Some(fence_signature(&hover)), None),
+        Some(Ok(hover)) => (Some(hover), None),
         Some(Err(class)) => (Some(class.text), class.safelisted),
         None => (None, None),
     };
