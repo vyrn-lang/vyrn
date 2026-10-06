@@ -493,3 +493,39 @@ fn the_generation_fence_is_the_same_under_the_bisect_knob() {
         assert_eq!(judged, pass, "{name}: the knob changed the refusal");
     }
 }
+
+/// A lambda in a `test` body is not in the artifact. It joins the closed set of its function type,
+/// so an instance that calls through that type must not inherit its `args` effect.
+#[test]
+fn a_lambda_in_a_test_is_no_capability_of_the_artifact() {
+    const MANIFEST: &str = "{ \"name\": \"w\", \"artifacts\": {          \"app\": { \"entry\": \"client/boot.vyrn\", \"target\": \"browser\" } } }
+";
+    const BOOT: &str = "fn never<T>(x: T) -> Int64 {
+    return args().length
+}
+
+         fn twice(f: fn(Int64) -> Int64, x: Int64) -> Int64 {
+    return f(x)
+}
+
+         fn main() -> Int64 {
+    print(twice(y -> y + 1, 1).toString())
+    return 0
+}
+
+         test \"a lambda in a test reads the command line\" {
+             let g: fn(Int64) -> Int64 = y -> y + args().length
+    assertEq(twice(g, 1), 1)
+}
+";
+
+    let dir = scratch("testlambda");
+    write(&dir, "vyrn.json", MANIFEST);
+    write(&dir, "client/boot.vyrn", BOOT);
+    let (ok, err) = check(&dir.join("client/boot.vyrn"));
+    assert!(
+        ok,
+        "the test is not in the artifact:
+{err}"
+    );
+}

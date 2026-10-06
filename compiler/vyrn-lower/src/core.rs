@@ -7614,14 +7614,14 @@ pub fn augment(program: &Program, w: &mut World, judging: bool) {
     let tops: Vec<(&str, &Body)> = states.iter().filter_map(JobState::built).collect();
     // A body that did not build gives the judgment nothing, served or not.
     let late: Vec<(&str, &[Walked])> = states.iter().filter_map(JobState::answered).collect();
-    let (mut state, read, answers) = crate::effects::judge_built(
+    let (mut state, read, answers, reached) = crate::effects::judge_built(
         program,
         &lowered,
         own,
         &mut w.fns,
         &tops,
         &late,
-        |judged, refs, top, served_at| {
+        |judged, reach, refs, top, served_at| {
             let rows = |at: usize, n: usize| -> Vec<Vec<(String, Vec<String>)>> {
                 (at..at + n).map(|i| judged.state_callees(i)).collect()
             };
@@ -7640,10 +7640,21 @@ pub fn augment(program: &Program, w: &mut World, judging: bool) {
             let answers: Vec<_> = (served_at.iter().zip(&late))
                 .map(|(at, (_, frames))| rows(*at, frames.len()))
                 .collect();
-            (judged.state_table(refs), read, answers)
+            let built = (states.iter().filter(|s| s.built().is_some())).zip(top);
+            let served = (states.iter().filter(|s| s.answered().is_some())).zip(served_at);
+            let reached: Vec<_> = (built.chain(served))
+                .filter_map(|(s, at)| match s.job {
+                    Job::Inst(inst) if !inst.func.is_gen => {
+                        Some((inst.func.module.clone(), reach.effects[*at]))
+                    }
+                    _ => None,
+                })
+                .collect();
+            (judged.state_table(refs), read, answers, reached)
         },
     );
     drop((tops, late));
+    w.reached = reached;
     for (s, r) in (states.iter_mut().filter(|s| s.built().is_some())).zip(read) {
         s.kept = r;
     }
