@@ -2643,7 +2643,7 @@ pub fn sub_blocks(s: &Stmt) -> Vec<&Block> {
 }
 
 /// Returns whether the statement, nested blocks included, names the binding.
-pub fn stmt_mentions(s: &Stmt, name: &str) -> bool {
+fn stmt_mentions(s: &Stmt, name: &str) -> bool {
     let here = match s {
         Stmt::Let { value, .. }
         | Stmt::Assign { value, .. }

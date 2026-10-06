@@ -320,7 +320,7 @@ pub(crate) fn same_path(a: &str, b: &str, base: &str) -> bool {
 /// (`vyxPage("./app/routes/index.vyx")`), because audience belongs to the
 /// file. A generator pointed at a directory (`pages("./app/routes")`) makes
 /// router glue, which takes the calling module's file.
-pub fn source_file(key: &str) -> String {
+fn source_file(key: &str) -> String {
     let importer = crate::loader::generated_importer(key)
         .unwrap_or(key)
         .replace('\\', "/");

@@ -225,7 +225,7 @@ pub(crate) fn local_index(
 /// does not suppress errors in the others. Inside a single function body the
 /// check is still first-error (recovery there is the same class of work as
 /// parser recovery, and is deferred).
-pub fn check_accum_with_binders(program: &Program) -> (Vec<Diagnostic>, Binders) {
+fn check_accum_with_binders(program: &Program) -> (Vec<Diagnostic>, Binders) {
     let (out, binders, _, _, _) = check_accum_full(program);
     (out, binders)
 }
@@ -351,7 +351,7 @@ pub const MOVED_TO_STD: &[(&str, Gone)] = &[
 ];
 
 /// Returns where a name went, or `None` for one that was never a builtin.
-pub fn moved_to_std(name: &str) -> Option<&'static Gone> {
+fn moved_to_std(name: &str) -> Option<&'static Gone> {
     MOVED_TO_STD
         .iter()
         .find(|(n, _)| *n == name)

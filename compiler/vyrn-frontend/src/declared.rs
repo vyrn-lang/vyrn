@@ -27,7 +27,7 @@ pub struct Owned {
 
 /// What a binding of a type needs from its release: whether it owns heap,
 /// the row that makes it linear, and its [`Owned::declared_releases`].
-pub type NameFacts = (bool, Option<crate::own::Linear>, Vec<String>);
+type NameFacts = (bool, Option<crate::own::Linear>, Vec<String>);
 
 /// [`Owned::name_facts`] of one program's tables by type, indexed by
 /// `params_own`. The caller owns it, so each thread that builds bodies keeps

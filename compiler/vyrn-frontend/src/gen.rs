@@ -90,7 +90,7 @@ impl Spliced {
 /// Returns the refusal for a value the splice rule has no case for, in context
 /// `ctx`. Public because a value with no [`Spliced`] case (an array, a map) is
 /// refused by the engine before conversion, in the same words.
-pub fn no_splice_rule(kind: &str, ctx: i64) -> String {
+fn no_splice_rule(kind: &str, ctx: i64) -> String {
     if ctx == 0 {
         format!("cannot splice {kind} into a code quote (expected String, number, Bool, or Code)")
     } else {
