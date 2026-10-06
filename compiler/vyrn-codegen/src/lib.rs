@@ -74,12 +74,6 @@ pub mod observe {
     pub struct Row {
         pub site: Site,
         pub kind: &'static str,
-        /// The cloned tree the answer was given inside, or `""` for a node the
-        /// program holds. `"lambda"`: `Fn_::lift_lambda` copies a lambda's body,
-        /// so its nodes, and projection expansions built while walking it, are
-        /// off-program. `"pred"`: a `where` predicate is cloned out of
-        /// `types::decl_map` and again at each validation site.
-        pub ctx: &'static str,
         pub node: vyrn_frontend::ast::NodeId,
         /// The instantiation the emitter was inside, sorted by parameter name.
         pub subst: Vec<(String, Type)>,
@@ -99,7 +93,6 @@ pub mod observe {
 
     thread_local! {
         static ON: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-        static CTX: std::cell::Cell<&'static str> = const { std::cell::Cell::new("") };
         static ROWS: std::cell::RefCell<Vec<Row>> = const { std::cell::RefCell::new(Vec::new()) };
         static INSTS: std::cell::RefCell<Vec<Inst>> = const { std::cell::RefCell::new(Vec::new()) };
         static CROSSINGS: std::cell::RefCell<Vec<Crossing>> =
@@ -211,12 +204,6 @@ pub mod observe {
         ON.with(|o| o.get())
     }
 
-    /// Mark the rows recorded from here on as being inside a cloned tree, and
-    /// give back what the mark was so the caller can put it back.
-    pub(crate) fn set_ctx(v: &'static str) -> &'static str {
-        CTX.with(|f| f.replace(v))
-    }
-
     /// The expression kind a row is reported under; a variable's kind carries
     /// its name. Names are interned because [`Row`] holds a `&'static str`; the
     /// pool is bounded by the distinct variable names in one corpus, and only a
@@ -283,7 +270,6 @@ pub mod observe {
             r.borrow_mut().push(Row {
                 site,
                 kind,
-                ctx: CTX.with(|f| f.get()),
                 node,
                 subst,
                 ty: ty.clone(),
@@ -561,40 +547,6 @@ pub(crate) fn utf8d_table() -> Vec<u8> {
     ];
     t.extend_from_slice(&trans);
     t
-}
-
-/// The type arguments of a generic call, with any parameter the arguments leave
-/// open taken from the type the call site expects. `fn newSlots<T>() -> Slots<T>`
-/// has no argument to read `T` from; the checker answers from the expected type,
-/// so this must too, or the two disagree about which instance the program calls.
-pub(crate) fn solve_with_expected(
-    type_params: &[String],
-    params: &[Type],
-    arg_tys: &[Type],
-    ret: &Type,
-    expected: Option<&Type>,
-) -> (HashMap<String, Type>, Vec<Option<Type>>) {
-    let (mut subst, solved) = solve_type_args(type_params, params, arg_tys);
-    if !solved.iter().any(|t| t.is_none()) {
-        return (subst, solved);
-    }
-    let Some(want) = expected else {
-        return (subst, solved);
-    };
-    let (from_ret, ret_solved) = solve_type_args(
-        type_params,
-        std::slice::from_ref(ret),
-        std::slice::from_ref(want),
-    );
-    for (tp, t) in from_ret {
-        subst.entry(tp).or_insert(t);
-    }
-    let solved = solved
-        .into_iter()
-        .zip(ret_solved)
-        .map(|(a, b)| a.or(b))
-        .collect();
-    (subst, solved)
 }
 
 /// The type arguments a call or construction site instantiates a generic with:

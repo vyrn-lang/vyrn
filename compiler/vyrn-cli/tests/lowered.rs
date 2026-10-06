@@ -161,10 +161,6 @@ struct Tally {
     /// Backend answers about a node the lowering never recorded: AST the backend
     /// built itself. The count is not reproducible; see the ceiling in [`gate`].
     synthesized: usize,
-    /// ...of which this many were given inside a copy of a lambda's body.
-    in_lambda: usize,
-    /// ...and this many inside a copy of a `where` predicate.
-    in_predicate: usize,
     /// ...and this many were `peek`'s. Only AST the backend built itself goes to
     /// `peek`, and the emitter builds none.
     peek_off: usize,
@@ -569,13 +565,13 @@ fn gate() {
         }
 
         // The engines' answers about one node against each other.
-        let mut per_node: HashMap<(NodeId, String), Vec<(Site, Type, &'static str, &'static str)>> =
+        let mut per_node: HashMap<(NodeId, String), Vec<(Site, Type, &'static str)>> =
             HashMap::new();
         for row in &rows {
             per_node
                 .entry(at(row.node, &subst_key(&row.subst)))
                 .or_default()
-                .push((row.site, row.ty.clone(), row.kind, row.ctx));
+                .push((row.site, row.ty.clone(), row.kind));
         }
         for (key, answers) in &per_node {
             // Only nodes the lowering recorded. AST a backend builds itself lives
@@ -586,20 +582,11 @@ fn gate() {
                     t.uninstantiated += 1;
                 } else {
                     t.synthesized += 1;
-                    for (site, _, kind, ctx) in answers {
-                        match *ctx {
-                            "lambda" => t.in_lambda += 1,
-                            "pred" => t.in_predicate += 1,
-                            _ => {}
-                        }
+                    for (site, _, kind) in answers {
                         if *site == Site::Peek {
                             t.peek_off += 1;
                         }
-                        // After `~`: the engine copy the answer was given inside.
-                        let k = format!(
-                            "{site:?}/{kind}{}{ctx}",
-                            if ctx.is_empty() { "" } else { "~" }
-                        );
+                        let k = format!("{site:?}/{kind}");
                         *residue.entry(k.clone()).or_insert(0) += 1;
                         residue_ex.entry(k).or_insert_with(|| name.clone());
                     }
@@ -709,21 +696,12 @@ fn gate() {
             it.by_ref().take(12).collect::<Vec<_>>()
         );
     }
-    eprintln!(
-        "  of {} off-program answers, {} were given inside a lifted          lambda's cloned body and {} inside a cloned `where` predicate",
-        t.synthesized, t.in_lambda, t.in_predicate
-    );
-
     let mut top: Vec<_> = residue.into_iter().collect();
     top.sort_by_key(|(_, n)| std::cmp::Reverse(*n));
     let mut per_site: std::collections::BTreeMap<String, usize> = Default::default();
     for (k, n) in &top {
         let engine = k.split('/').next().unwrap();
-        let suffix = match k.rsplit_once('~') {
-            Some((_, tail)) => &k[k.len() - tail.len() - 1..],
-            None => "",
-        };
-        *per_site.entry(format!("{engine}{suffix}")).or_insert(0) += n;
+        *per_site.entry(engine.to_string()).or_insert(0) += n;
     }
     eprintln!("  the residue, by engine: {per_site:?}");
     // ...and by name, with an example to open.
@@ -845,19 +823,6 @@ fn gate() {
         t.synthesized
     );
 
-    // Each engine marks the rows it gives inside a tree it copied, so a clone
-    // that comes back lands here rather than in the drifting count above.
-    assert_eq!(
-        t.in_lambda, 0,
-        "{} backend answers were given inside a COPY of a lambda's body. The direct          backend queues the literal's own nodes (`Cx::lambdas`); a copy means it is          synthesizing a body again",
-        t.in_lambda
-    );
-    assert_eq!(
-        t.in_predicate, 0,
-        "{} backend answers were given inside a COPY of a `where` predicate. Both          backends read the program's own predicate node; a copy means one of them is          walking `decl_map`'s again",
-        t.in_predicate
-    );
-
     // A `peek` question here means an emitter builds a source tree again.
     assert_eq!(
         t.peek_off, 0,
@@ -963,7 +928,7 @@ fn coercion_census() -> Vec<CoercionSite> {
     };
     vec![
         site("vyrn-codegen/src/lib.rs", "pub fn coerce_plan(from: &Type, to: &Type, types: &HashMap<String, TypeDecl>) -> Rung {", "shared", true, true, 54),
-        site("vyrn-codegen/src/direct.rs", "fn coerce(", "wasm", true, false, 178),
+        site("vyrn-codegen/src/direct.rs", "fn coerce(", "wasm", true, false, 174),
         site("vyrn-frontend/src/checker.rs", "fn prove_coercion(&self, expr: &Expr, to: &Type, line: usize) -> Result<(), Diagnostic> {", "checker", false, false, 26),
     ]
 }
@@ -1051,8 +1016,8 @@ fn every_coercion_site_keeps_its_pinned_code_lines() {
         }
     }
     assert_eq!(
-        ladder, 178,
-        "the rung ladder is {ladder} code lines, not 178"
+        ladder, 174,
+        "the rung ladder is {ladder} code lines, not 174"
     );
     // An engine that asks another site's statement of the rung rule is not one.
     let statements: std::collections::BTreeSet<&str> = census

@@ -497,11 +497,6 @@ fn compile_inner(
                 Key::Lambda(..) => {}
             }
             cx.subst = p.subst.clone();
-            // Marks answers given while walking a shell: a lambda body the program does not hold.
-            let was = crate::observe::set_ctx(match p.body {
-                Body::Shell => "lambda",
-                _ => "",
-            });
             let body = lower_body(
                 &mut m,
                 &p.f,
@@ -511,15 +506,11 @@ fn compile_inner(
                 &cx,
                 p.binds.clone(),
             );
-            crate::observe::set_ctx(was);
             cx.subst = HashMap::new();
             cx.mono.borrow_mut().done += 1;
             match body {
                 Ok(body) => {
-                    m.fill(p.sig.index, body)?;
-                    if std::env::var_os("VYRN_WASM_NAMES").is_some() {
-                        m.name(p.sig.index, &p.f.name);
-                    }
+                    fill_named(&mut m, p.sig.index, body, &p.f.name)?;
                 }
                 Err(e) if e.contains(crate::FRAME_LIMIT_NEEDLE) => {
                     deferred.get_or_insert(e);
@@ -879,7 +870,7 @@ enum Key {
 }
 
 /// The statements a queued body walks. Each is the program's own AST, because a walk over a copy
-/// asks about nodes no recorded type can reach. No program reaches [`Body::Shell`].
+/// asks about nodes no recorded type can reach.
 #[derive(Clone, Copy)]
 enum Body<'a> {
     /// A block the program holds: a generic instance's or specialization's callee, or a
@@ -888,9 +879,6 @@ enum Body<'a> {
     /// A `|x| e` literal's expression. A block would need a copy of `e` for its `return`, so the
     /// core's rows state the body, and [`lower_body`] refuses one they do not carry.
     Value,
-    /// A lifted lambda whose literal is not a program node, so [`Cx::lambdas`] has no borrow of it
-    /// and the synthesized block is walked. Only a literal inside a leaked desugar gets here.
-    Shell,
 }
 
 /// One body discovered while another was being emitted, with its promised function index.
@@ -998,9 +986,8 @@ struct Oracle {
 
 struct Cx<'a> {
     types: HashMap<String, TypeDecl>,
-    /// Every lambda literal the program holds, by node address, so [`Fn_::lift_lambda`] can queue
-    /// the literal's own body instead of a clone. A hit is the program's node, since the program
-    /// outlives every walk. A miss is a literal in a leaked desugar, and the caller clones it.
+    /// Every lambda literal the program holds, by node address and the function that holds it,
+    /// so [`Fn_::lift_lambda`] queues the literal's own body instead of a clone.
     lambdas: HashMap<NodeId, (&'a str, &'a Expr)>,
     /// Every layout, computed once per substituted type.
     layouts: RefCell<HashMap<Type, Rc<Layout>>>,
@@ -1641,24 +1628,18 @@ impl Dest {
 
 /// Where the parts of a made layout come from. A record, array or map literal
 /// writes each part at an offset the layout decides, and the core's row names it as a [`Val`].
-enum Parts<'a, 'c> {
-    Core(&'a vyrn_frontend::core::Body, &'a [Val], &'c mut Walked),
-}
+struct Parts<'a, 'c>(&'a vyrn_frontend::core::Body, &'a [Val], &'c mut Walked);
 
 impl<'a> Parts<'a, '_> {
     fn len(&self) -> usize {
-        match self {
-            Parts::Core(_, vs, ..) => vs.len(),
-        }
+        self.1.len()
     }
 
     /// Where the `i`th part's own row wrote it ([`Fn_::core_part_at`]).
     fn built(&mut self, i: usize) -> Option<Dest> {
-        match self {
-            Parts::Core(_, vs, w) => match vs[i] {
-                Val::Name(n) => w.built[n.index()].take(),
-                Val::Lit(_) => None,
-            },
+        match self.1[i] {
+            Val::Name(n) => self.2.built[n.index()].take(),
+            Val::Lit(_) => None,
         }
     }
 }
@@ -1747,10 +1728,6 @@ struct Fn_<'a, 'p> {
     /// `std/runtime`. Parallel to `region_depth`, which is its length while a
     /// statement is being lowered.
     region_marks: Vec<u32>,
-    /// The locals holding the argument temporaries this frame releases, innermost
-    /// call last. Teed where the argument is EVALUATED and handed back where its
-    /// call ends.
-    arg_frees: Vec<(u32, Type)>,
     /// The holes the walk in progress must skip, relative to the place it looks at. Taken at the
     /// top of [`Fn_::rel_at`], so a walk into anything but a record starts empty.
     rel_holes: Vec<String>,
@@ -1801,7 +1778,6 @@ fn top_level<'a, 'p>(cx: &'a Cx<'p>) -> Fn_<'a, 'p> {
         placed: HashMap::new(),
         region_depth: 0,
         region_marks: Vec::new(),
-        arg_frees: Vec::new(),
         rel_holes: Vec::new(),
         expect: Vec::new(),
         fn_binds: HashMap::new(),
@@ -1876,9 +1852,15 @@ fn lower_fn(
     binds: HashMap<String, FnBinding>,
 ) -> Result<(), String> {
     let frame = lower_body(m, f, &f.name, Body::Block(&f.body), sig, cx, binds)?;
-    m.fill(sig.index, frame)?;
+    fill_named(m, sig.index, frame, &f.name)
+}
+
+/// Fills function `index` with `body` and, under `VYRN_WASM_NAMES`, names it for the `name`
+/// section.
+fn fill_named(m: &mut Module, index: u32, body: Frame, name: &str) -> Result<(), String> {
+    m.fill(index, body)?;
     if std::env::var_os("VYRN_WASM_NAMES").is_some() {
-        m.name(sig.index, &f.name);
+        m.name(index, name);
     }
     Ok(())
 }
@@ -1897,7 +1879,6 @@ fn lower_body(
     // A `|x| e` literal has no statements to walk at all; everything else does.
     let stmts = match body {
         Body::Block(b) => Some(b),
-        Body::Shell => Some(&f.body),
         Body::Value => None,
     };
     let sig = sig.clone();
@@ -1917,36 +1898,21 @@ fn lower_body(
     let mut b = Frame::new(&params, &results, &[], 0);
     let core = core_body(key, f, &binds, cx).map(std::rc::Rc::new);
     let mut cx_fn = Fn_ {
-        cx,
-        scope: Vec::new(),
-        depth: 0,
-        loops: Vec::new(),
-        trap_site: None,
         ret: sig.ret.clone(),
         // As declared, not resolved: a function returning `Age` validates at its `return`,
         // and `Age` resolved to `Int64` would not.
         ret_ty: sig.ret_ty.clone(),
         dest,
-        scratch: HashMap::new(),
-        rel_slots: HashMap::new(),
         // The release order, decided in `own::place_body`.
         placed: (cx.world.fn_id(&owner))
             .and_then(|id| cx.world.ownership.releases.get(&id))
             .map(|steps| vyrn_frontend::own::placed(steps))
             .unwrap_or_default(),
-        region_depth: 0,
-        region_marks: Vec::new(),
-        arg_frees: Vec::new(),
-        rel_holes: Vec::new(),
-        expect: Vec::new(),
         fn_binds: binds,
-        str_append: HashMap::new(),
-        dest_used: false,
         owner,
         core_key: key.to_string(),
         core,
-        core_rows: Vec::new(),
-        core_w: Walked::default(),
+        ..top_level(cx)
     };
     if let Some(core) = cx_fn.core.clone() {
         cx_fn.core_enter(&core);
@@ -2054,18 +2020,11 @@ fn lower_body(
         .core
         .clone()
         .filter(|core| cx_fn.core_walkable(core, stmts));
-    WALKS.with(|w| {
-        let (from, all) = w.get();
-        w.set((from + usize::from(from_core.is_some()), all + 1));
-    });
     let Some(core) = from_core else {
         let what = format!("the body of `{}` the core did not state", cx_fn.owner);
         return unsupported(&what, f.line);
     };
     cx_fn.core_body(m, &mut b, &core)?;
-    // An argument lowered outside [`Fn_::call`] would leave its local here. Dropping it leaks
-    // rather than frees a live value.
-    cx_fn.arg_frees.clear();
     // The checker proves a value-returning body never falls off its end; the validator needs
     // `unreachable`. Any other body leaves the trap block as a `return` does.
     if matches!(sig.ret, Repr::Scalar(_)) {
@@ -2449,14 +2408,14 @@ fn lower_dispatcher(
         let mut operand = |s: &mut Fn_, m: &mut Module, b: &mut Frame, i: usize, p: &Type| {
             let (place, ty) = &all[i];
             s.push_place(b, *place, ty, 0)?;
-            s.coerce(m, b, None, ty, p, 0).map(|_| None)
+            s.coerce(m, b, ty, p, 0).map(|_| None)
         };
         let got = f.emit_call_with(m, &mut b, &v.target.sig, all.len(), &mut operand, None)?;
         match (&dsig.ret, cx.repr(&got, 0)?) {
             // The target's declared result may differ from the signature's, so it coerces.
-            (Repr::Scalar(_), _) => f.coerce(m, &mut b, None, &got, ret, 0)?,
+            (Repr::Scalar(_), _) => f.coerce(m, &mut b, &got, ret, 0)?,
             (Repr::Agg(l), Repr::Agg(_)) => {
-                f.coerce(m, &mut b, None, &got, ret, 0)?;
+                f.coerce(m, &mut b, &got, ret, 0)?;
                 b.copy(l.size);
             }
             // A Unit-signature slot may hold a value-returning function; the result is dropped.
@@ -2488,27 +2447,6 @@ impl<'p> Fn_<'_, 'p> {
     /// reads, and a nested expression completes before the outer one touches scratch.
     fn scratch(&mut self, b: &mut Frame, t: ValType, n: u8) -> u32 {
         *self.scratch.entry((t, n)).or_insert_with(|| b.local(t))
-    }
-
-    /// Keep the `String` on top of the stack if its expression allocated it; `None` means
-    /// nothing to release. A fresh local, not [`Fn_::scratch`]: nested `@concat`s hold their
-    /// left half across the lowering of the right, which would clobber a scratch slot.
-    fn tee_str_temp(&mut self, b: &mut Frame, e: &Expr) -> Option<u32> {
-        if !vyrn_frontend::declared::str_temporary(e) {
-            return None;
-        }
-        let l = b.local(ValType::I32);
-        b.ins(&Instruction::LocalTee(l));
-        Some(l)
-    }
-
-    /// Free what [`Fn_::tee_str_temp`] kept, after the concatenation copied out of it.
-    /// Stack-neutral, so the concatenation's result stays on the stack.
-    fn free_str_temp(&mut self, b: &mut Frame, kept: Option<u32>) {
-        let Some(l) = kept else { return };
-        b.ins(&Instruction::LocalGet(l));
-        str_hdr(b);
-        b.ins(&Instruction::Call(self.cx.rt.free));
     }
 
     /// Record how one owned binding is released; the placement decides where and when.
@@ -2598,7 +2536,7 @@ impl<'p> Fn_<'_, 'p> {
     ) -> Result<(), String> {
         // Inside a monomorphized instance `ty` names the instance's parameters.
         let sig = match self.cx.generics.get(f).copied() {
-            Some(g) => self.generic_sig(m, g, &[self.cx.sub(ty)], None, line)?,
+            Some(g) => self.generic_sig(m, g, &[self.cx.sub(ty)], line)?,
             None => match self.cx.sigs.get(f) {
                 Some(sig) => sig.clone(),
                 None => return unsupported(&format!("the release `{f}`"), line),
@@ -2609,7 +2547,7 @@ impl<'p> Fn_<'_, 'p> {
         };
         let param = param.clone();
         self.push_place(b, p, ty, line)?;
-        self.coerce(m, b, None, ty, &param, line)?;
+        self.coerce(m, b, ty, &param, line)?;
         b.ins(&Instruction::Call(sig.index));
         Ok(())
     }
@@ -3409,12 +3347,7 @@ impl<'p> Fn_<'_, 'p> {
         own: Place,
         owned_here: bool,
         parts: usize,
-        operand: &mut dyn FnMut(
-            &mut Self,
-            &mut Module,
-            &mut Frame,
-            usize,
-        ) -> Result<Option<u32>, String>,
+        operand: &mut dyn FnMut(&mut Self, &mut Module, &mut Frame, usize) -> Result<(), String>,
         line: usize,
     ) -> Result<(), String> {
         let taken = if owned_here {
@@ -3439,19 +3372,15 @@ impl<'p> Fn_<'_, 'p> {
         } else {
             None
         };
-        // `expr` tees a call part's `Released` row into `arg_frees`; this path drains it.
-        let mark = self.arg_frees.len();
         for i in 0..parts {
-            // The append copies the operand, so an operand this statement allocated is freed after.
             match place {
                 Place::Local(l) => {
                     own.addr(b, 0)
                         .ok_or_else(|| gap("an append flag with no address", line))?;
                     b.ins(&Instruction::LocalGet(l));
-                    let k = operand(self, m, b, i)?;
+                    operand(self, m, b, i)?;
                     b.ins(&Instruction::Call(self.cx.rt.str_append));
                     b.ins(&Instruction::LocalSet(l));
-                    self.free_str_temp(b, k);
                 }
                 Place::Static(at) => {
                     b.ins(&Instruction::I32Const(at as i32));
@@ -3459,16 +3388,12 @@ impl<'p> Fn_<'_, 'p> {
                         .ok_or_else(|| gap("an append flag with no address", line))?;
                     b.ins(&Instruction::I32Const(at as i32))
                         .ins(&Instruction::I32Load(word()));
-                    let k = operand(self, m, b, i)?;
+                    operand(self, m, b, i)?;
                     b.ins(&Instruction::Call(self.cx.rt.str_append));
                     b.ins(&Instruction::I32Store(word()));
-                    self.free_str_temp(b, k);
                 }
                 Place::Slot(_) => return unsupported("an in-place append into a slot", line),
             }
-        }
-        for (l, t2) in self.arg_frees.split_off(mark) {
-            self.free_arg_temp(m, b, l, &t2, line)?;
         }
         if let Some((f0, op)) = taken {
             b.ins(&Instruction::LocalGet(f0))
@@ -3506,13 +3431,10 @@ impl<'p> Fn_<'_, 'p> {
     /// picks. Every flow site reaches here: a typed `let`, an assignment, a field or element
     /// store, a call argument, a return, a join arm, an enum payload. The plan owns the rung
     /// order; this is one arm per rung.
-    ///
-    /// `expr` produced the value, if known; only the validation proof reads it.
     fn coerce(
         &mut self,
         m: &mut Module,
         b: &mut Frame,
-        expr: Option<&Expr>,
         from: &Type,
         to: &Type,
         line: usize,
@@ -3533,11 +3455,8 @@ impl<'p> Fn_<'_, 'p> {
                 };
                 // The predicate reads the base's representation. The recursion ends because a
                 // base is one step nearer a builtin than the name it backs.
-                self.coerce(m, b, expr, from, &decl.base, line)?;
-                if !expr.is_some_and(|e| self.proven(e, to)) {
-                    self.emit_validation(b, &decl, line)?;
-                }
-                Ok(())
+                self.coerce(m, b, from, &decl.base, line)?;
+                self.emit_validation(b, &decl, line)
             }
             // Widening reads the source's signedness; narrowing renormalizes into the target's.
             crate::Rung::Resize => {
@@ -3707,15 +3626,6 @@ impl<'p> Fn_<'_, 'p> {
                 unsupported(&format!("a conversion from `{from}` to `{to}`"), line)
             }
         }
-    }
-
-    /// Whether the checker proved `e` a value of `to`, with this walk's scope resolving names.
-    fn proven(&self, e: &Expr, to: &Type) -> bool {
-        let resolve = |x: &Expr| match x {
-            Expr::Var { name, .. } => self.lookup(name, 0).ok().map(|(_, t)| t),
-            _ => None,
-        };
-        vyrn_frontend::validate::proven(e, to, &self.cx.types, &resolve)
     }
 
     /// Checks the value on the stack against `decl`'s `where` predicate by calling the type's
@@ -3969,24 +3879,6 @@ impl<'p> Fn_<'_, 'p> {
         }
         let accept: Vec<u8> = dfa.accepting.iter().map(|a| u8::from(*a)).collect();
         Ok((m.data(&table, 4), m.data(&accept, 1), dfa.start))
-    }
-
-    fn free_arg_temp(
-        &mut self,
-        m: &mut Module,
-        b: &mut Frame,
-        l: u32,
-        ty: &Type,
-        line: usize,
-    ) -> Result<(), String> {
-        match self.rel_for(ty, line)? {
-            Some(Rel::Str) => {
-                self.free_str_temp(b, Some(l));
-                Ok(())
-            }
-            Some(rel) => self.emit_rel(m, b, Place::Local(l), &rel, line),
-            None => Ok(()),
-        }
     }
 
     /// A String operator on two stacked operands: `+` concatenates into the `region`'s arena,
@@ -4568,24 +4460,12 @@ impl<'p> Fn_<'_, 'p> {
         Ok(())
     }
 
-    /// Renders the value on the stack by its type `t` into a String the caller owns. `arg` is
-    /// the operand's expression, if any: a String temporary is freed once copied
-    /// ([`vyrn_frontend::declared::str_temporary`]).
-    fn str_value(
-        &mut self,
-        b: &mut Frame,
-        t: &Type,
-        arg: Option<&Expr>,
-        line: usize,
-    ) -> Result<(), String> {
+    /// Renders the value on the stack by its type `t` into a String the caller owns.
+    fn str_value(&mut self, b: &mut Frame, t: &Type, line: usize) -> Result<(), String> {
         match self.cx.resolve(t) {
             // Copy, so the result owns its storage: `let t = "\{s}"` is `@str(s)` alone, and
             // passing the pointer through would free one buffer twice.
-            Type::Str => {
-                let k = arg.and_then(|a| self.tee_str_temp(b, a));
-                self.str_dup(b);
-                self.free_str_temp(b, k);
-            }
+            Type::Str => self.str_dup(b),
             ref it if Num::of(it).is_some() => {
                 let n = Num::of(it).unwrap();
                 widen(b, n);
@@ -4767,21 +4647,18 @@ impl<'p> Fn_<'_, 'p> {
         }
     }
 
-    /// The instance of generic `f` that `arg_tys` and the expected result `want` solve.
+    /// The instance of generic `f` that `arg_tys` solves.
     fn generic_sig(
         &mut self,
         m: &mut Module,
         f: &'p Function,
         arg_tys: &[Type],
-        want: Option<&Type>,
         line: usize,
     ) -> Result<Sig, String> {
-        let (subst, solved) = crate::solve_with_expected(
+        let (subst, solved) = crate::solve_type_args(
             &f.type_params,
             &f.params.iter().map(|p| p.ty.clone()).collect::<Vec<_>>(),
             arg_tys,
-            &f.ret,
-            want,
         );
         let mut type_args = Vec::new();
         for (tp, got) in f.type_params.iter().zip(solved) {
@@ -4850,15 +4727,6 @@ impl<'p> Fn_<'_, 'p> {
         Ok((off, l, self.cx.load(ty, 0)))
     }
 
-    /// The program's own body for the lambda literal at `at`, or `None` if the program does
-    /// not hold it ([`Cx::lambdas`]).
-    fn lambda(&self, at: &Expr) -> Option<&'p LambdaBody> {
-        match self.cx.lambdas.get(&at.id())?.1 {
-            Expr::Lambda { body, .. } => Some(body),
-            _ => None,
-        }
-    }
-
     /// This body's lambda literal under a closure row's key
     /// ([`vyrn_lower::core::lambda_spelling`]).
     fn literal(&self, key: &str) -> Option<&'p Expr> {
@@ -4880,12 +4748,12 @@ impl<'p> Fn_<'_, 'p> {
     fn lift_lambda(
         &mut self,
         m: &mut Module,
-        at: &Expr,
+        at: &'p Expr,
         ptys: &[Type],
         expected_ret: &Type,
         caps: Option<&[(String, Type)]>,
         line: usize,
-    ) -> Result<(FnTarget, Vec<Expr>, Vec<Type>), String> {
+    ) -> Result<FnTarget, String> {
         assert_ne!(
             at.id(),
             NodeId::NONE,
@@ -4941,11 +4809,9 @@ impl<'p> Fn_<'_, 'p> {
         }
         let ret = expected_ret.clone();
         // The queue walks the literal's own nodes, so every answer is about a program node.
-        // Only a literal the program does not hold is copied into the shell.
-        let queued = match self.lambda(at) {
-            Some(LambdaBody::Block(b)) => Body::Block(b),
-            Some(LambdaBody::Expr(_)) => Body::Value,
-            None => Body::Shell,
+        let queued = match body {
+            LambdaBody::Block(b) => Body::Block(b),
+            LambdaBody::Expr(_) => Body::Value,
         };
         let mut sf = f_shell(line);
         sf.name = format!("{LAMBDA} {}", self.owner);
@@ -4970,25 +4836,6 @@ impl<'p> Fn_<'_, 'p> {
             }))
             .collect();
         sf.ret = ret.clone();
-        if let Body::Shell = queued {
-            // An expression body is a `return` of it, or a statement for a Unit return, as in
-            // [`Fn_::lambda_value`].
-            sf.body = match body {
-                LambdaBody::Block(b) => b.clone(),
-                LambdaBody::Expr(e) if self.cx.repr(&ret, line)? == Repr::Unit => Block {
-                    id: Id::NEW,
-                    stmts: vec![Stmt::Expr((**e).clone(), Id::NEW)],
-                },
-                LambdaBody::Expr(e) => Block {
-                    id: Id::NEW,
-                    stmts: vec![Stmt::Return {
-                        id: Id::NEW,
-                        value: Some((**e).clone()),
-                        line,
-                    }],
-                },
-            };
-        }
         // Keyed by node, shape and substitution: a literal in a generic body lifts once per
         // instantiation, even when the type parameter appears only in a statement.
         let mut shape: Vec<Type> = cap_tys.clone();
@@ -5011,22 +4858,10 @@ impl<'p> Fn_<'_, 'p> {
             HashMap::new(),
             vyrn_lower::core::lambda_spelling(&self.core_key, *at_line, *at_col),
         )?;
-        let srcs = cap_names
-            .iter()
-            .map(|n| Expr::Var {
-                id: Id::NEW,
-                name: n.clone(),
-                line,
-            })
-            .collect();
-        Ok((
-            FnTarget {
-                sig,
-                ncaps: cap_names.len(),
-            },
-            srcs,
-            cap_tys,
-        ))
+        Ok(FnTarget {
+            sig,
+            ncaps: cap_names.len(),
+        })
     }
 
     /// Returns the tag of a stored function value, registering it once per signature and target.
@@ -5141,13 +4976,13 @@ impl<'p> Fn_<'_, 'p> {
         Ok(())
     }
 
-    /// Returns the target a stored lambda calls and its captures in the target's order.
+    /// Returns the target a stored lambda calls.
     fn lift_stored(
         &mut self,
         m: &mut Module,
-        e: &Expr,
+        e: &'p Expr,
         sig_ty: &Type,
-    ) -> Result<(FnTarget, Vec<Expr>), String> {
+    ) -> Result<FnTarget, String> {
         let Expr::Lambda { line, .. } = e else {
             return unsupported("a function value from a non-lambda", Expr::line(e));
         };
@@ -5159,7 +4994,7 @@ impl<'p> Fn_<'_, 'p> {
         let saved = std::mem::take(&mut self.expect);
         let r = self.lift_lambda(m, e, ptys, ret, None, *line);
         self.expect = saved;
-        r.map(|(target, srcs, _)| (target, srcs))
+        r
     }
 
     /// Returns the dispatcher for one signature, reserving its index on first use.
@@ -6202,12 +6037,8 @@ impl<'p> Fn_<'_, 'p> {
         want: &Type,
         line: usize,
     ) -> Result<(), String> {
-        match parts {
-            Parts::Core(body, vs, w) => {
-                let (body, v) = (*body, &vs[i]);
-                self.core_val(m, b, body, w, v, want, line)
-            }
-        }
+        let Parts(body, vs, w) = parts;
+        self.core_val(m, b, body, w, &vs[i], want, line)
     }
 
     /// Leaves aggregate part `i` at `dest`, the parent's storage at the part's offset.
@@ -6227,15 +6058,11 @@ impl<'p> Fn_<'_, 'p> {
         if parts.built(i).is_some() {
             return Ok(());
         }
-        match parts {
-            Parts::Core(body, vs, w) => {
-                let (body, v) = (*body, &vs[i]);
-                dest.addr(b, 0);
-                self.core_val(m, b, body, w, v, ty, line)?;
-                agg_landed(b, size, false);
-                Ok(())
-            }
-        }
+        let Parts(body, vs, w) = parts;
+        dest.addr(b, 0);
+        self.core_val(m, b, body, w, &vs[i], ty, line)?;
+        agg_landed(b, size, false);
+        Ok(())
     }
 
     /// Builds `[a, b, c]` in an `Array<T>` position straight on the heap and writes the
@@ -9408,23 +9235,6 @@ fn core_builtin(cx: &Cx, callee: &str, kind: Callee) -> Option<&'static Spec> {
         .flatten()
 }
 
-thread_local! {
-    /// How many bodies this thread emitted from the core's statements, and how many it
-    /// emitted at all.
-    static WALKS: std::cell::Cell<(usize, usize)> = const { std::cell::Cell::new((0, 0)) };
-}
-
-/// How many bodies came from the core, and how many were emitted, since
-/// [`forget_walks`].
-pub fn walks() -> (usize, usize) {
-    WALKS.with(std::cell::Cell::get)
-}
-
-/// Start the count again.
-pub fn forget_walks() {
-    WALKS.with(|w| w.set((0, 0)));
-}
-
 /// Where the core's names live while one body is walked, and what the wasm operand stack holds.
 ///
 /// The core names every value, but wasm has an operand stack: `held` is the one name the stack
@@ -9829,8 +9639,7 @@ impl<'p> Fn_<'_, 'p> {
                         };
                         let mut operand =
                             |f: &mut Self, m: &mut Module, b: &mut Frame, k: usize| {
-                                f.core_val(m, b, body, w, &rest[k].0, &Type::Str, line)?;
-                                Ok(None)
+                                f.core_val(m, b, body, w, &rest[k].0, &Type::Str, line)
                             };
                         let parts = rest.len();
                         self.append_in_place(
@@ -10265,7 +10074,7 @@ impl<'p> Fn_<'_, 'p> {
                     b.ins(&Instruction::LocalSet(hdr));
                     let l = self.cx.layout(&mty, *line)?;
                     let kv = [k.clone(), value.clone()];
-                    let mut parts = Parts::Core(body, &kv, w);
+                    let mut parts = Parts(body, &kv, w);
                     self.map_set(m, b, hdr, &l, &mut parts, 0, &key_t, &val, *releases, *line)?;
                 }
                 // `x = @t` after a call that ran in `x`'s storage ([`Fn_::core_back`]).
@@ -10586,7 +10395,7 @@ impl<'p> Fn_<'_, 'p> {
                     crate::observe::note_typing("prim", &format!("{op:?}"), &got, r);
                 }
                 let got = ret.clone().unwrap_or(got);
-                self.coerce(m, b, None, &got, want, line)
+                self.coerce(m, b, &got, want, line)
             }
             Rhs::Call {
                 callee,
@@ -10614,13 +10423,13 @@ impl<'p> Fn_<'_, 'p> {
                 if let (true, Some(r)) = (crate::observe::on(), ret) {
                     crate::observe::note_typing("call", callee, &got, r);
                 }
-                self.coerce(m, b, None, &got, want, line)
+                self.coerce(m, b, &got, want, line)
             }
             // A read and a take load the same address. The driver's release row walks around
             // the hole a take leaves.
             Rhs::Read(p) | Rhs::Take(p) => {
                 let got = self.core_read(m, b, body, w, p, line)?;
-                self.coerce(m, b, None, &got, want, line)
+                self.coerce(m, b, &got, want, line)
             }
             _ => unsupported("a core right-hand side this walk does not read", line),
         }
@@ -10816,7 +10625,7 @@ impl<'p> Fn_<'_, 'p> {
                 self.core_val(m, b, body, w, v, &ty, line)?;
                 match ret {
                     Type::Unit => self.print_value(b, &ty, line)?,
-                    _ => self.str_value(b, &ty, None, line)?,
+                    _ => self.str_value(b, &ty, line)?,
                 }
                 return Ok(ret.clone());
             }
@@ -11683,15 +11492,7 @@ impl<'p> Fn_<'_, 'p> {
             let Some((sig_ty, target)) = self.core_closure(body, ty, t, vs) else {
                 return unsupported("a function value this walk does not make", line);
             };
-            return self.fnval_into(
-                m,
-                b,
-                dest,
-                &sig_ty,
-                target,
-                &mut Parts::Core(body, vs, w),
-                line,
-            );
+            return self.fnval_into(m, b, dest, &sig_ty, target, &mut Parts(body, vs, w), line);
         }
         // A lambda: lifted as the arm lifts it; the row lists its captures in the lifted
         // signature's order.
@@ -11700,16 +11501,8 @@ impl<'p> Fn_<'_, 'p> {
             let Some(at) = self.literal(key) else {
                 return unsupported("a lambda this walk does not find", line);
             };
-            let (target, _) = self.lift_stored(m, at, &sig_ty)?;
-            return self.fnval_into(
-                m,
-                b,
-                dest,
-                &sig_ty,
-                target,
-                &mut Parts::Core(body, vs, w),
-                line,
-            );
+            let target = self.lift_stored(m, at, &sig_ty)?;
+            return self.fnval_into(m, b, dest, &sig_ty, target, &mut Parts(body, vs, w), line);
         }
         dest.addr(b, 0);
         match rhs {
@@ -11726,7 +11519,7 @@ impl<'p> Fn_<'_, 'p> {
                     return unsupported("a variant built from a place", line);
                 };
                 let vs: Vec<Val> = vs.into_iter().map(|(v, _)| v).collect();
-                let mut parts = Parts::Core(body, &vs, w);
+                let mut parts = Parts(body, &vs, w);
                 let hint = Some((dest, ty.clone()));
                 self.build_variant(m, b, ty, tag, &mut parts, &payload, line, hint)?;
             }
@@ -11746,28 +11539,28 @@ impl<'p> Fn_<'_, 'p> {
                         .ok_or_else(|| gap(&format!("the missing field `{}`", f.name), line))?;
                     order.push(at);
                 }
-                let mut parts = Parts::Core(body, vs, w);
+                let mut parts = Parts(body, vs, w);
                 self.record_into(m, b, dest, &decl, &l, &order, &mut parts, line)?;
             }
             Rhs::Make(Ctor::Array, vs) => match self.cx.resolve(ty) {
                 Type::Array(inner) => {
-                    let mut parts = Parts::Core(body, vs, w);
+                    let mut parts = Parts(body, vs, w);
                     self.array_lit_heap(m, b, dest, &inner, &mut parts, taken, line, true)?;
                 }
                 Type::ArrayN(inner, n) if n == vs.len() => {
-                    let mut parts = Parts::Core(body, vs, w);
+                    let mut parts = Parts(body, vs, w);
                     self.fixed_elems(m, b, dest, &inner, &mut parts, line)?;
                     dest.addr(b, 0);
                 }
                 Type::SmallArray(inner, n) if vs.len() <= n => {
-                    let mut parts = Parts::Core(body, vs, w);
+                    let mut parts = Parts(body, vs, w);
                     self.sa_into(m, b, dest, ty, &inner, n, &mut parts, line)?;
                     dest.addr(b, 0);
                 }
                 _ => return unsupported("an array literal the row does not place", line),
             },
             Rhs::Make(Ctor::Map, vs) => {
-                let mut parts = Parts::Core(body, vs, w);
+                let mut parts = Parts(body, vs, w);
                 self.map_into(m, b, dest, ty, &mut parts, line)?;
                 dest.addr(b, 0);
             }
@@ -12691,7 +12484,7 @@ impl<'p> Fn_<'_, 'p> {
             (Op::Conv(to), [v]) => {
                 let from = self.core_ty(body, v, &Type::Int);
                 self.core_val(m, b, body, w, v, &from, line)?;
-                self.coerce(m, b, None, &from, to, line)?;
+                self.coerce(m, b, &from, to, line)?;
                 Ok(to.clone())
             }
             // A String operator is a call; the builder states its operand releases as rows.
@@ -12729,7 +12522,7 @@ impl<'p> Fn_<'_, 'p> {
                     _ => lt.clone(),
                 };
                 if opty != lt {
-                    self.coerce(m, b, None, &lt, &opty, line)?;
+                    self.coerce(m, b, &lt, &opty, line)?;
                 }
                 self.core_val(m, b, body, w, r, &opty, line)?;
                 let mut rows = [None, None];
@@ -12773,7 +12566,7 @@ impl<'p> Fn_<'_, 'p> {
                 if w.held == Some(*n) {
                     w.held = None;
                     let ty = body.names[n.index()].ty.clone();
-                    return self.coerce(m, b, None, &ty, want, line);
+                    return self.coerce(m, b, &ty, want, line);
                 }
                 if self.core_unit(&body.names[n.index()].ty) {
                     return Ok(());
@@ -12819,7 +12612,7 @@ impl<'p> Fn_<'_, 'p> {
                 Lit::Opaque(_) => return unsupported("a value the row does not name", line),
             },
         };
-        self.coerce(m, b, None, &got, want, line)
+        self.coerce(m, b, &got, want, line)
     }
 
     /// The result of a `std/mem` primitive call; `None` for another callee or an arity the
