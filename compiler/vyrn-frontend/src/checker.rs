@@ -229,8 +229,6 @@ pub const RESERVED: &[&str] = &[
     "Ok",
     "Err",
     "match",
-    "at",
-    "toString",
     "parse",
     "logger",
     "bytes",

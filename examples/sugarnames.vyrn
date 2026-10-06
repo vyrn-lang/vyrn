@@ -1,0 +1,20 @@
+// `a[i]` and an interpolation hole are the builtin's in every module. A call
+// the program writes, free or in method form, reaches its own `at` and
+// `toString`.
+fn at(xs: Array<Int64>, i: Int64) -> Int64 {
+    return 9
+}
+
+fn toString(n: Int64) -> String {
+    return "T"
+}
+
+fn main() -> Int64 {
+    let xs: Array<Int64> = [4, 5, 6]
+    let n = 3
+    print(xs[1] + at(xs, 0))
+    print("n=\{n}")
+    print(toString(n))
+    print(xs.at(2))
+    return 0
+}
