@@ -1,17 +1,17 @@
 command	lines	sentences
-why	700	12
-bench	541	11
-serve, dev	468	6
+why	696	12
+bench	495	11
+serve, dev	464	6
 (dispatch)	332	4
 doc	283	9
-routes	279	1
+routes	262	1
 build	209	12
 fix	195	1
 update	194	5
 deps	192	3
 fmt	182	5
 dev	140	12
-test, bench	131	2
+test, bench	127	2
 build, bench	100	0
 (global)	91	2
 run	71	3
