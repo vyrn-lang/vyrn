@@ -1209,13 +1209,14 @@ fn check_places(checker: &Checker, program: &Program, out: &mut Vec<Diagnostic>)
             // argument's value at the site, with nowhere to write.
             let modifies =
                 f.params.first().map(|p| p.capability) == Some(crate::ast::Capability::Modify);
+            let root = crate::project::place_root(y);
             let read_root = modifies
-                && crate::project::place_root(y).is_some_and(|r| {
+                && root.as_ref().is_some_and(|r| {
                     f.params
                         .iter()
-                        .any(|p| p.name == r && p.capability != crate::ast::Capability::Modify)
+                        .any(|p| p.name == *r && p.capability != crate::ast::Capability::Modify)
                 });
-            if !crate::project::is_place(y) || read_root {
+            if root.is_none() || read_root {
                 push(cerr_at!(
                     f.line,
                     f.name_span(),
@@ -1311,7 +1312,7 @@ fn check_optional_place(checker: &Checker, f: &Function, push: &mut impl FnMut(D
         ));
         return;
     }
-    if !crate::project::is_place(y) {
+    if crate::project::place_root(y).is_none() {
         push(cerr_at!(
             f.line,
             f.name_span(),
@@ -1373,8 +1374,8 @@ fn rooted_where_the_site_owns<'s>(
 /// place rooted there, or the refutable-`let` desugar's `match` on a root
 /// whose every arm panics or yields a binder of its own pattern.
 fn let_borrows_from(e: &Expr, roots: &std::collections::HashSet<String>) -> bool {
-    if crate::project::is_place(e) {
-        return crate::project::place_root(e).is_some_and(|r| roots.contains(&r));
+    if let Some(r) = crate::project::place_root(e) {
+        return roots.contains(&r);
     }
     let Expr::Match {
         scrutinee, arms, ..
@@ -1398,8 +1399,7 @@ fn let_borrows_from(e: &Expr, roots: &std::collections::HashSet<String>) -> bool
             }
         }
         let binders = arm.pattern.bindings();
-        crate::project::is_place(body)
-            && crate::project::place_root(body).is_some_and(|r| binders.contains(&r.as_str()))
+        crate::project::place_root(body).is_some_and(|r| binders.contains(&r.as_str()))
     })
 }
 

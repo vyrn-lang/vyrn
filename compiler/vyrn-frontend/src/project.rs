@@ -827,19 +827,9 @@ pub fn walk_bare(e: &mut Expr, f: &mut impl FnMut(&mut Expr)) {
     *e = back;
 }
 
-/// Whether `e` has an address: a variable, or a field or element of a place.
-pub fn is_place(e: &Expr) -> bool {
-    match e {
-        Expr::Var { .. } => true,
-        Expr::Field { expr, .. } => is_place(expr),
-        Expr::Call { name, args, .. } if (name == AT || name == ELEM) && args.len() == 2 => {
-            is_place(&args[0])
-        }
-        _ => false,
-    }
-}
-
-/// The variable a place is rooted at, e.g. `self` for `self.data[i]`.
+/// The variable a place is rooted at, e.g. `self` for `self.data[i]`. `None`
+/// when `e` has no address: a variable, and a field or element of a place, have
+/// one.
 pub fn place_root(e: &Expr) -> Option<String> {
     match e {
         Expr::Var { name, .. } => Some(name.clone()),

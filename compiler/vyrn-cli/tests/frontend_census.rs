@@ -151,7 +151,7 @@ fn project_sections() -> Vec<Section> {
         sec("fn collect_bindings", Job),
         sec("fn count_uses", Job),
         sec("fn walk_block", Shared),
-        sec("fn is_place", Shared),
+        sec("fn place_root", Shared),
         sec("fn projection_call", Job),
         sec("mod tests", Tests),
     ]
