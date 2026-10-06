@@ -2249,7 +2249,11 @@ fn contract_ctx(server: &Server, uri: &Url) -> Option<ContractCtx> {
 
     let mut cache = server.contract_cache.borrow_mut();
     // The same two functions `vyrn why --contract` asks, so the two agree.
-    let doc = vyrn_frontend::manifest::doc_in(&app_dir);
+    // A missing or unreadable manifest is no manifest: the editor never refuses.
+    let doc = vyrn_frontend::manifest::find(&app_dir)
+        .ok()
+        .flatten()
+        .map(|m| m.doc);
     let roots = vyrn_frontend::manifest::role_roots(&app_dir, doc.as_ref());
     let sig = contracts::roles_sig(&app_dir, &roots);
     let entry = cache
