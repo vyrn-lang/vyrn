@@ -1,0 +1,67 @@
+// A method call on a bounded type parameter dispatches through the protocol
+// the bound names, not the first protocol that declares the method. `P`
+// implements all four protocols. The first of each pair passes the String
+// the other way.
+
+type P = { x: Int64 }
+
+protocol Qa {
+    fn eat(read self, s: String) -> Int64
+}
+
+protocol Pa {
+    fn eat(read self, s: consume String) -> Int64
+}
+
+protocol Qb {
+    fn keep(read self, s: consume String) -> Int64
+}
+
+protocol Pb {
+    fn keep(read self, s: String) -> Int64
+}
+
+impl Qa for P {
+    fn eat(read self, s: String) -> Int64 {
+        return s.byteLength + self.x
+    }
+}
+
+impl Pa for P {
+    fn eat(read self, s: consume String) -> Int64 {
+        let t = s
+        return t.byteLength + self.x + 10
+    }
+}
+
+impl Qb for P {
+    fn keep(read self, s: consume String) -> Int64 {
+        let t = s
+        return t.byteLength + self.x
+    }
+}
+
+impl Pb for P {
+    fn keep(read self, s: String) -> Int64 {
+        return s.byteLength + self.x + 20
+    }
+}
+
+fn mk(n: Int64) -> String {
+    return "ab" + "\{n}"
+}
+
+fn eats<T: Pa>(x: T, n: Int64) -> Int64 {
+    return x.eat(mk(n))
+}
+
+fn keeps<T: Pb>(x: T, s: String) -> Int64 {
+    return x.keep(s) + s.byteLength
+}
+
+fn main() -> Int64 {
+    let p = P { x: 1 }
+    print(eats(p, 1))
+    print(keeps(p, mk(2)))
+    return 0
+}

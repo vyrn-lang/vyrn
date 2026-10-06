@@ -1105,7 +1105,8 @@ fn check_accum_inner(
     }
 
     // The outputs name each type parameter as written, not as one solve
-    // renamed it ([`Checker::rename_apart`]).
+    // renamed it ([`Checker::rename_apart`]). The record keeps the renamed
+    // names ([`Recorded::node_substs`]).
     let written = |t: &mut Type| {
         if let Some(w) = crate::types::written_params(t) {
             *t = w;
@@ -1133,18 +1134,10 @@ fn check_accum_inner(
     let mut seen = HashSet::new();
     let mut reads = checker.reads.take();
     reads.retain(|r| seen.insert(r.clone()));
-    let record = checker.record.map(|r| {
-        let mut r = r.into_inner();
-        r.node_types.values_mut().for_each(written);
-        r.joins.values_mut().for_each(written);
-        for (_, args) in r.node_substs.values_mut() {
-            args.iter_mut().for_each(|(_, t)| written(t));
-        }
-        Recorded {
-            stored: effects.clone(),
-            reads,
-            ..r
-        }
+    let record = checker.record.map(|r| Recorded {
+        stored: effects.clone(),
+        reads,
+        ..r.into_inner()
     });
     (out, binders, effects, derived, typed, record)
 }
@@ -1526,7 +1519,10 @@ pub struct Recorded {
     /// Every solved type parameter of a generic call or record literal, keyed
     /// by the [`Expr::Call`] or [`Expr::StructLit`] node: the callee or record
     /// name, and the solved arguments in its type-parameter order. The checker
-    /// refines nothing later, so the solution governs its whole subtree.
+    /// refines nothing later, so the solution governs its whole subtree. A
+    /// parameter goes by its renamed-apart name (`T'n`,
+    /// [`crate::ast::written_param`]), as the subtree's types name it, so a
+    /// caller's `T` stays apart from the callee's.
     pub node_substs: HashMap<NodeId, (String, Vec<(String, Type)>)>,
     /// A declared call whose arity, type-argument count or argument the typed
     /// judgment refuses, keyed by the [`Expr::Call`] node.
@@ -1840,11 +1836,11 @@ impl<'a> Checker<'a> {
         self.record.is_some()
     }
 
-    /// Hands the solved type arguments to the [`Checker::expr`] wrapper.
-    fn note_subst(&self, name: &str, subst: &HashMap<String, Type>, type_params: &[String]) {
-        let args: Vec<(String, Type)> = type_params
-            .iter()
-            .filter_map(|p| subst.get(p).map(|t| (p.clone(), t.clone())))
+    /// Hands the solved type arguments to the [`Checker::expr`] wrapper,
+    /// keyed by the names [`Checker::rename_apart`] gave them in `pairs`.
+    fn note_subst(&self, name: &str, subst: &HashMap<String, Type>, pairs: &[(String, String)]) {
+        let args: Vec<(String, Type)> = (pairs.iter())
+            .filter_map(|(_, f)| subst.get(f).map(|t| (f.clone(), t.clone())))
             .collect();
         *self.pending_subst.borrow_mut() = Some((name.to_string(), args));
     }
@@ -1853,8 +1849,8 @@ impl<'a> Checker<'a> {
     /// the caller's own `T` and the callee's `T` are two parameters while a
     /// call or a record literal solves. Returns the renaming and, in order,
     /// each parameter with its fresh name. A sentence prints the written name
-    /// ([`crate::ast::written_param`]), and the check's outputs carry it
-    /// ([`crate::types::written_params`]).
+    /// ([`crate::ast::written_param`]), and the check's outputs other than the
+    /// record carry it ([`crate::types::written_params`]).
     fn rename_apart(
         &self,
         type_params: &[String],
@@ -3998,9 +3994,9 @@ impl<'a> Checker<'a> {
         let Some(decl) = decl.filter(|d| !d.type_params.is_empty()) else {
             return Ok(Type::Named(name.to_string()));
         };
-        let subst = Self::solved_as_written(&subst, &pairs);
+        let solved = Self::solved_as_written(&subst, &pairs);
         for tp in &decl.type_params {
-            if !subst.contains_key(tp) {
+            if !solved.contains_key(tp) {
                 let shape: Vec<String> = decl
                     .type_params
                     .iter()
@@ -4018,12 +4014,12 @@ impl<'a> Checker<'a> {
         let args = decl
             .type_params
             .iter()
-            .map(|tp| subst[tp].clone())
+            .map(|tp| solved[tp].clone())
             .collect();
         // A field typed before `T` was solved recorded `Array<T>`; the
         // substitution lets the record's reader replace it.
         if self.recording() {
-            self.note_subst(name, &subst, &decl.type_params);
+            self.note_subst(name, &subst, &pairs);
         }
         Ok(Type::App(name.to_string(), args))
     }
@@ -5795,8 +5791,7 @@ impl<'a> Checker<'a> {
                         line,
                     )? {
                         if self.recording() {
-                            let solved = Self::solved_as_written(&subst, &pairs);
-                            self.note_subst(d.key, &solved, type_params);
+                            self.note_subst(d.key, &subst, &pairs);
                         }
                         return self.judged();
                     }
@@ -5892,7 +5887,7 @@ impl<'a> Checker<'a> {
             // The one place a generic call's type arguments exist; recorded
             // for the backends.
             if self.recording() {
-                self.note_subst(d.key, &solved, type_params);
+                self.note_subst(d.key, &subst, &pairs);
             }
             return Ok(rty);
         }
@@ -7501,7 +7496,10 @@ mod tests {
         let calls: Vec<&(String, Vec<(String, Type)>)> = r.node_substs.values().collect();
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].0, "id");
-        assert_eq!(calls[0].1, vec![("T".to_string(), Type::Int)]);
+        let [(p, t)] = &calls[0].1[..] else {
+            panic!("one solved argument: {:?}", calls[0].1)
+        };
+        assert_eq!((crate::ast::written_param(p), t), ("T", &Type::Int));
     }
 
     /// A container with an optional projection.
