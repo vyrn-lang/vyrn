@@ -371,7 +371,7 @@ pub fn builtin_row(name: &str, gen_host: bool) -> Option<&'static Spec> {
 /// Tags: `Call:<who>:<name>` for a callee the emitter's function table does
 /// not answer, `Read:<kind>` and `Take:<kind>` for a place, `Opaque:<what>`
 /// for a row that names no value, and `Lambda`. `tests/coredrive.rs` ranks
-/// them, and `VYRN_GAP_TALLY` tables them.
+/// them.
 pub fn gaps(body: &Body) -> Vec<String> {
     let mut out = Vec::new();
     for (s, _) in rows(&body.stmts) {
@@ -474,82 +474,6 @@ fn gaps_rhs(body: &Body, r: &Rhs, out: &mut Vec<String>) {
     }
 }
 
-/// Where the gap tally is appended, or `None` when nothing asked for one.
-fn gap_tally_at() -> Option<&'static std::path::Path> {
-    static AT: std::sync::OnceLock<Option<std::path::PathBuf>> = std::sync::OnceLock::new();
-    AT.get_or_init(|| std::env::var_os("VYRN_GAP_TALLY").map(std::path::PathBuf::from))
-        .as_deref()
-}
-
-thread_local! {
-    /// The lines already appended. A body is built more than once (seeded,
-    /// and by every host), and the histogram counts bodies.
-    static SAID: std::cell::RefCell<std::collections::HashSet<String>> =
-        std::cell::RefCell::new(std::collections::HashSet::new());
-}
-
-/// Appends one line per body of `out`: the module, the function, the first gap,
-/// every gap, `judged` for a body no emitter reads ([`Instance::judged_only`])
-/// or `emitted`, and the command that ran. A body the rows carry whole reads
-/// `-` in both gap fields.
-fn tally_gaps(inst: &Instance<'_>, out: &Result<Body, Gap>) {
-    let file = inst.func.module.as_deref().unwrap_or("(the root)");
-    let reach = if inst.judged_only() {
-        "judged"
-    } else {
-        "emitted"
-    };
-    let mut lines: Vec<String> = Vec::new();
-    match out {
-        Err(g) => {
-            // The field is space-separated, so the gap's words are joined.
-            let what = format!(
-                "Gap:{}{}",
-                g.what.replace(' ', "-"),
-                if g.detail.is_empty() {
-                    String::new()
-                } else {
-                    format!(":{}", g.detail)
-                }
-            );
-            lines.push(format!("{file}\t{}\t{what}\t{what}", inst.spelling()));
-        }
-        Ok(body) => {
-            for f in body.frames() {
-                let g = gaps(f);
-                // A body with no gap is a line too: it is in every table's
-                // denominator.
-                lines.push(format!(
-                    "{file}\t{}\t{}\t{}",
-                    f.name,
-                    g.first().map_or("-", |t| t.as_str()),
-                    if g.is_empty() {
-                        "-".into()
-                    } else {
-                        g.join(" ")
-                    }
-                ));
-            }
-        }
-    }
-    static ARGV: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    let argv = ARGV.get_or_init(|| std::env::args().collect::<Vec<_>>().join(" "));
-    for line in lines {
-        let line = format!("{line}\t{reach}\t{argv}\n");
-        if !SAID.with(|s| s.borrow_mut().insert(line.clone())) {
-            continue;
-        }
-        if let Ok(mut f) = std::fs::OpenOptions::new()
-            .append(true)
-            .create(true)
-            .open(gap_tally_at().unwrap())
-        {
-            use std::io::Write;
-            let _ = f.write_all(line.as_bytes());
-        }
-    }
-}
-
 /// Builds the core of one instance. The first build records candidates and
 /// takes nothing; where [`last_owner`] names any, a second build takes them.
 /// Its frames have no row ([`Body::id`]).
@@ -559,20 +483,6 @@ pub fn build(program: &Program, inst: &Instance<'_>, own: &Ownership) -> Result<
 
 /// [`build`] with the caller's function table and memo of `own`'s name facts.
 pub(crate) fn build_in(
-    program: &Program,
-    inst: &Instance<'_>,
-    own: &Ownership,
-    fns: &Fns,
-    names: &mut NameMemo,
-) -> Result<Body, Gap> {
-    let out = build_twice(program, inst, own, fns, names);
-    if gap_tally_at().is_some() {
-        tally_gaps(inst, &out);
-    }
-    out
-}
-
-fn build_twice(
     program: &Program,
     inst: &Instance<'_>,
     own: &Ownership,
@@ -1085,20 +995,6 @@ fn build_seeded(
     names: &mut NameMemo,
     seed: &std::collections::HashSet<NodeId>,
 ) -> Result<Body, Gap> {
-    let (types, produced, solved) = (
-        inst.facts.types.clone(),
-        inst.facts.produced.clone(),
-        inst.facts.solved.clone(),
-    );
-    let sp = program.spellings.speech(&inst.func.module);
-    let mistyped = judged(&inst.facts, own, &sp);
-    let refused = unbound(
-        &inst.facts,
-        own,
-        &program.impls,
-        &inst.func.type_bounds,
-        &sp,
-    );
     // The plan's own rows, not the instance's copy: the copy predates the
     // rows [`augment`] places. The copy adds only the substituted type a
     // `Deep` walks, and nothing below reads a kind.
@@ -1107,38 +1003,20 @@ fn build_seeded(
     for r in own.releases.get(&inst.func_id).unwrap_or(&no_steps) {
         placed.entry((r.exit, r.site)).or_default().push(r);
     }
-    let mut b = Builder {
+    let mut b = Builder::new(
         program,
         own,
         fns,
-        proto: &own.proto,
         names,
-        bounds: Some(&inst.func.type_bounds),
-        types,
-        produced,
-        solved,
-        placed,
-        body: Body {
-            id: fns.instance_id(inst),
-            name: inst.spelling(),
-            file: inst.func.module.clone(),
-            spellings: program.spellings.clone(),
-            export: inst.func.is_export_extern,
-            names: Vec::new(),
-            params: Vec::new(),
-            stmts: Vec::new(),
-            lambdas: Vec::new(),
-            cands: Vec::new(),
-            loop_buffers: Vec::new(),
-            unbound_drops: Vec::new(),
-            refused,
-            mistyped,
-        },
-        frame: Frame::default(),
-        temps: 0,
+        &inst.facts,
         seed,
-        closed: false,
-    };
+        placed,
+        Some(&inst.func.type_bounds),
+        fns.instance_id(inst),
+        inst.spelling(),
+        inst.func.module.clone(),
+        inst.func.is_export_extern,
+    );
     let f: &Function = inst.func;
     // A parameter's type is the instance's, not the declaration's:
     // `map<Int64, Int64>`'s `f` is `fn(Int64) -> Int64`, the shape stored
@@ -1195,16 +1073,19 @@ pub fn build_module_state<'a>(
 ) -> Result<Body, Gap> {
     let seed = std::collections::HashSet::new();
     let mut names = NameMemo::default();
-    let mut b = Builder::bare(
+    let mut b = Builder::new(
         program,
         own,
         fns,
         &mut names,
         facts,
         &seed,
+        HashMap::new(),
+        None,
+        fns.id(""),
         String::new(),
         None,
-        HashMap::new(),
+        false,
     );
     let mut out = Vec::new();
     for g in &program.globals {
@@ -1265,16 +1146,19 @@ fn build_outside_seeded<'a>(
         placed.entry((r.exit, r.site)).or_default().push(r);
     }
     let (block, file) = (ob.block, ob.module.clone());
-    let mut b = Builder::bare(
+    let mut b = Builder::new(
         program,
         own,
         fns,
         names,
         &ob.facts,
         seed,
+        placed,
+        None,
+        fns.id(&ob.name),
         ob.name.clone(),
         file,
-        placed,
+        false,
     );
     // The checker types a `test` or `bench` body as a function returning Unit.
     b.frame.ret = Some(Type::Unit);
@@ -1326,16 +1210,19 @@ pub fn build_root<'a>(
         ..facts.clone()
     };
     let seed = std::collections::HashSet::new();
-    let mut b = Builder::bare(
+    let mut b = Builder::new(
         program,
         own,
         fns,
         names,
         &facts,
         &seed,
+        HashMap::new(),
+        None,
+        fns.id(""),
         String::new(),
         file,
-        HashMap::new(),
+        false,
     );
     b.closed = binds.is_some();
     for (name, ty) in binds.unwrap_or_default() {
@@ -1464,44 +1351,49 @@ struct Frame {
 }
 
 impl<'a> Builder<'a> {
-    /// A builder for a body that is no instance: no substitution.
+    /// A builder for the body `name`, row `id`. `bounds` are the type
+    /// parameters' bounds in scope: an instance's, `None` for a body that is
+    /// no instance. `id` is the instance's own row
+    /// ([`Fns::instance_id`]), not the first row under its name: a projection
+    /// can share a function's name.
     #[allow(clippy::too_many_arguments)]
-    fn bare(
+    fn new(
         program: &'a Program,
         own: &'a Ownership,
         fns: &'a Fns,
         names: &'a mut NameMemo,
         facts: &NodeTypes<'a>,
         seed: &'a std::collections::HashSet<NodeId>,
+        placed: HashMap<(Exit, NodeId), Vec<&'a Release>>,
+        bounds: Option<&'a HashMap<String, Vec<String>>>,
+        id: Option<FnId>,
         name: String,
         file: Option<String>,
-        placed: HashMap<(Exit, NodeId), Vec<&'a Release>>,
+        export: bool,
     ) -> Self {
-        let (types, produced, solved) = (
-            facts.types.clone(),
-            facts.produced.clone(),
-            facts.solved.clone(),
-        );
         let sp = program.spellings.speech(&file);
-        let mistyped = judged(facts, own, &sp);
-        let refused = unbound(facts, own, &program.impls, &HashMap::new(), &sp);
+        let none = HashMap::new();
+        let (refused, mistyped) = (
+            unbound(facts, own, &program.impls, bounds.unwrap_or(&none), &sp),
+            judged(facts, own, &sp),
+        );
         Builder {
             program,
             own,
             fns,
             proto: &own.proto,
             names,
-            bounds: None,
-            types,
-            produced,
-            solved,
+            bounds,
+            types: facts.types.clone(),
+            produced: facts.produced.clone(),
+            solved: facts.solved.clone(),
             placed,
             body: Body {
-                id: fns.id(&name),
+                id,
                 name,
                 spellings: program.spellings.clone(),
                 file,
-                export: false,
+                export,
                 names: Vec::new(),
                 params: Vec::new(),
                 stmts: Vec::new(),
@@ -4796,15 +4688,13 @@ impl<'a> Builder<'a> {
     fn read_val_inner(&mut self, e: &'a Expr, out: &mut Vec<St>) -> Result<Val, Gap> {
         let ty = self.ty_of(e).ok();
         let owns = ty.as_ref().is_some_and(|t| self.owns(t));
+        let is_place = match e {
+            Expr::Field { .. } => self.deferred_of(e).is_none(),
+            Expr::Call { name, args, .. } => name == "@at" && args.len() == 2,
+            _ => false,
+        };
         match e {
-            Expr::Field { .. } if owns && self.deferred_of(e).is_none() => {
-                let place = self.place(e, out)?;
-                let t = self.borrow_name(e, ty.unwrap(), e.line());
-                out.push(St::Let(t, Rhs::Read(place)));
-                self.release_receiver(e, out, true);
-                Ok(Val::Name(t))
-            }
-            Expr::Call { name, args, .. } if owns && name == "@at" && args.len() == 2 => {
+            _ if owns && is_place => {
                 let place = self.place(e, out)?;
                 let t = self.borrow_name(e, ty.unwrap(), e.line());
                 out.push(St::Let(t, Rhs::Read(place)));
@@ -4841,7 +4731,6 @@ impl<'a> Builder<'a> {
         let Some((r, producer, malloc)) = self.frame.pending_receiver.take() else {
             return;
         };
-        let node = e.id();
         let took = self.ty_of(e).is_ok_and(|t| self.owns(&t));
         if borrowed && took {
             if self.own.placed.producers.contains(&producer) {
@@ -4854,7 +4743,6 @@ impl<'a> Builder<'a> {
             }
             return;
         }
-        let _ = node;
         // An element's receiver is `@at`'s argument, and its release is keyed
         // as an argument temporary's.
         if let (false, Expr::Call { name, args, .. }) = (took, e) {
@@ -7697,8 +7585,8 @@ pub fn augment(program: &Program, w: &mut World, judging: bool) {
         |names, j| j.map(|j| j.build(program, shared, fns, names)),
     );
     drop(sealed);
-    // In job order, so the gap tally and every row a lambda frame takes come
-    // out as on one thread.
+    // In job order, so every row a lambda frame takes comes out as on one
+    // thread.
     let mut made: Vec<Made> = Vec::with_capacity(jobs.len());
     for (((j, key), served), first) in jobs.iter().zip(keys).zip(served).zip(firsts) {
         if let Some((key, judgment)) = served {
@@ -7707,7 +7595,6 @@ pub fn augment(program: &Program, w: &mut World, judging: bool) {
         }
         // `unserved` holds every job `served` does not, so `first` is `Some`.
         let mut top = first.unwrap_or_else(|| j.build(program, own, &w.fns, &mut names));
-        j.tally(&top);
         if let Ok(b) = &mut top {
             w.fns.number(b);
         }
@@ -7783,7 +7670,6 @@ pub fn augment(program: &Program, w: &mut World, judging: bool) {
         let (key, frames) = (key.clone(), s.frames.clone());
         let j = &jobs[i];
         let mut top = j.build(program, own, &w.fns, &mut names);
-        j.tally(&top);
         if let Ok(b) = &mut top {
             w.fns.number(b);
             crate::world::add_callees(b, &by_name, calls.entry(j.id()).or_default());
@@ -7811,7 +7697,6 @@ pub fn augment(program: &Program, w: &mut World, judging: bool) {
         });
         if unjudged {
             *top = j.build(program, own, &w.fns, &mut names);
-            j.tally(top);
         }
     }
     // The kernel's walk reads the body and the judgment alone, so it runs on
@@ -8185,19 +8070,12 @@ impl Job<'_, '_> {
             Job::Inst(inst) => {
                 let _p = vyrn_frontend::prof::phase("placer: core::build");
                 let inst = crate::walked(program, &own.record, inst);
-                build_twice(program, &inst, own, fns, names)
+                build_in(program, &inst, own, fns, names)
             }
             Job::Outside(ob) => {
                 let _p = vyrn_frontend::prof::phase("placer: build_outside");
                 build_outside(program, own, fns, names, ob)
             }
-        }
-    }
-
-    /// Appends an instance's build to the gap tally, as [`build_in`] does.
-    fn tally(&self, out: &Result<Body, Gap>) {
-        if let (Job::Inst(inst), Some(_)) = (self, gap_tally_at()) {
-            tally_gaps(inst, out);
         }
     }
 }
