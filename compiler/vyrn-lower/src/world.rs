@@ -42,6 +42,10 @@ pub struct World {
     /// `gen fn`'s, with the instance's module: what [`crate::effects::reaches`]
     /// reads.
     pub(crate) reached: Vec<(Option<String>, vyrn_frontend::effects::Effects)>,
+    /// Whether a placed release named an instance the first lowering lacked.
+    /// `reached` holds no such instance, so [`crate::effects::reaches`] judges
+    /// the program as placed instead.
+    pub(crate) late: bool,
 }
 
 /// One row of the World's function table.

@@ -7891,6 +7891,7 @@ pub fn augment(program: &Program, w: &mut World, judging: bool) {
         lowered.instances.iter().map(Instance::spelling).collect();
     let placed: Vec<Release> = added.values().flatten().cloned().collect();
     let mut dispatches = crate::dispatches_new(&placed, &by_name, &had);
+    w.late = dispatches;
     for (f, rows) in added {
         touched.insert(f);
         own.releases.entry(f).or_default().extend(rows);

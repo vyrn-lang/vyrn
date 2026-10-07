@@ -420,7 +420,14 @@ pub fn reaches(
         .filter_map(|e| floor::Capability::of(e).map(|cap| (e, cap)))
         .collect();
 
-    for (module, e) in &world.reached {
+    let placed;
+    let reached = if world.late {
+        placed = placed_reach(program, world);
+        &placed
+    } else {
+        &world.reached
+    };
+    for (module, e) in reached {
         for (effect, cap) in &rows {
             if e.has(*effect) {
                 add(module.as_ref(), *cap);
@@ -428,6 +435,45 @@ pub fn reaches(
         }
     }
     out
+}
+
+/// Judges `program` as the placer left it and returns each instance's set, as
+/// [`crate::World::reached`] does. The placer judged before it placed, so a
+/// release that only a placed row names (`World::late`) is in no judged set;
+/// this analyzes the program again, lowers it with every row, and judges every
+/// instance that builds.
+fn placed_reach(
+    program: &vyrn_frontend::ast::Program,
+    world: &crate::World,
+) -> Vec<(Option<String>, Effects)> {
+    let world = crate::world::analyzed(program, world.ownership.record.clone(), false);
+    let own = &world.ownership;
+    let lowered = crate::lower_with(program, own);
+    let mut bodies = Vec::new();
+    let mut insts = Vec::new();
+    for inst in lowered.instances.iter().filter(|i| !i.func.is_gen) {
+        if let Ok(b) = crate::core::build(program, inst, own) {
+            bodies.push(b);
+            insts.push(inst);
+        }
+    }
+    let tops: Vec<(&str, &Body)> = (insts.iter().zip(&bodies))
+        .map(|(i, b)| (i.func.name.as_str(), b))
+        .collect();
+    let mut fns = crate::Fns::lowered(&lowered);
+    judge_built(
+        program,
+        &lowered,
+        own,
+        &mut fns,
+        &tops,
+        &[],
+        |_, reach, _, top, _| {
+            (insts.iter().zip(top))
+                .map(|(i, at)| (i.func.module.clone(), reach.effects[*at]))
+                .collect()
+        },
+    )
 }
 
 /// The judgment over bodies the caller built: `tops` holds each body with

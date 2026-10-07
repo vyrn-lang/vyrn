@@ -529,3 +529,46 @@ fn a_lambda_in_a_test_is_no_capability_of_the_artifact() {
 {err}"
     );
 }
+
+/// An instance only a placed row names is in the artifact. `Pair<String>`'s release is named by
+/// the row the kernel places in `Outer<String>`'s release, so the first lowering has neither
+/// instance, and the one capability in the program is reached through `probe<String>` from that
+/// release. The floor must still refuse it.
+#[test]
+fn a_capability_reached_by_a_release_only_a_placed_row_names_is_refused() {
+    const MANIFEST: &str = "{ \"name\": \"w\", \"artifacts\": { \"app\": { \"entry\": \"client/boot.vyrn\", \"target\": \"browser\" } } }\n";
+    const BOOT: &str = "fn probe<T>(x: Array<T>) -> Int64 {
+    return args().length + x.length
+}
+
+type Pair<T> = { a: Array<T>, n: Int64 }
+
+impl<T> Owned for Pair<T> {
+    fn release(consume self) {
+        print(probe(self.a).toString())
+        let a = consume self.a
+        drop a
+    }
+}
+
+type Outer<T> = { p: Pair<T>, k: Int64 }
+
+impl<T> Owned for Outer<T> {
+    fn release(consume self) {
+        let p = consume self.p
+    }
+}
+
+fn main() -> Int64 {
+    let o = Outer { p: Pair { a: [\"x\"], n: 4 }, k: 2 }
+    print((o.k + o.p.n).toString())
+    return 0
+}
+";
+
+    let dir = scratch("lateinstance");
+    write(&dir, "vyrn.json", MANIFEST);
+    write(&dir, "client/boot.vyrn", BOOT);
+    let (ok, err) = check(&dir.join("client/boot.vyrn"));
+    assert!(!ok && err.contains("it reads the command line"), "{err}");
+}
