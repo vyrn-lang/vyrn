@@ -3718,10 +3718,20 @@ impl<'a> Builder<'a> {
         };
         // A crossing into a validated element is its constructor, proven or
         // not.
+        let mark = out.len();
         let v = match self.checked(&self.ty_of(value)?, &ety, value) {
             Some(to) => Val::Name(self.checked_temp(&to, value, line, out)?),
             None => self.val(value, out)?,
         };
+        // A key that owns heap is moved into the map by the store, so it is
+        // read after the value; no copy of it exists to read before. Refused
+        // where the value changes it, as a scalar index is read first.
+        if let (Place::Key(_, Val::Name(k)), Expr::Var { name: key, .. }) = (&place, index) {
+            if crate::kernel::modifies(&out[mark..], Root::N(*k), &self.body.names) {
+                let refusal = rule!(MapKeyChanged, name, key).render();
+                self.body.refused.push((line, refusal));
+            }
+        }
         let site = Site::Node(sid);
         // The same hand-back, and the index counts too: `xs[i] = xs[j]` and
         // `xs[xs.length - 1] = v` read the buffer the store writes into.

@@ -1219,6 +1219,9 @@ rules! {
     MapStoreKey { name, key, k } "`{name}` is keyed by {key}, but the key here is {k}";
     MapStoreValue { name, val, v }
         "`{name}` holds values of type {val} but the stored value is {v}";
+    MapKeyChanged { name, key }
+        "`{key}` is moved into `{name}` by this store, but the value changes `{key}` first"
+        fix "`{key}.copy()` as the key, so the store takes a value of its own";
     IndexStoreNoContainer { name, other }
         "`{name}[i] = ..` needs an Array, a Map, or a type whose impl declares the `atSet` \
         projection (`fn atSet(modify self, ..) -> modify T`), found {other}";
