@@ -3127,8 +3127,7 @@ impl<'a> Checker<'a> {
     fn stmt(&self, stmt: &Stmt, ret: &Type, scope: &mut Scope) -> Result<(), Diagnostic> {
         *self.stmt_line.borrow_mut() = stmt.line();
         if let Stmt::Assign { name, line, id, .. }
-        | Stmt::SetField { name, line, id, .. }
-        | Stmt::IndexSet { name, line, id, .. }
+        | Stmt::Store { name, line, id, .. }
         | Stmt::Drop { name, line, id } = stmt
         {
             self.note_use(scope, name, *line, *id);
@@ -3183,9 +3182,10 @@ impl<'a> Checker<'a> {
             }
             // The typed judgment refuses a field or element store; where one
             // of its rules fails, this stops unrefused.
-            Stmt::SetField {
+            Stmt::Store {
                 name,
-                field,
+                base,
+                leaf,
                 value,
                 line,
                 id: _,
@@ -3194,102 +3194,97 @@ impl<'a> Checker<'a> {
                     self.unknown.set(true);
                     return Ok(());
                 };
-                let ruled = matches!(&b.ty, Type::Named(n) if self.decl(n).is_some_and(|d| d.predicate.is_some()));
-                let Some(fty) = crate::types::record_fields(&b.ty, self)
-                    .and_then(|fs| fs.into_iter().find(|f| &f.name == field))
-                    .map(|f| f.ty)
-                else {
-                    return Ok(());
-                };
-                let vty = self.expr(value, scope, Some(&fty), Some(ret))?;
-                if ruled {
-                    return Ok(());
-                }
-                // A predicated field takes only a value of its own type.
-                let validated = matches!(&fty, Type::Named(n)
-                    if self.decl(n).is_some_and(|d| d.predicate.is_some()));
-                if !(if validated {
-                    self.assignable(&vty, &fty)
-                } else {
-                    self.coercible(&vty, &fty)
-                }) {
-                    return Ok(());
-                }
-                self.region_store_guard(name, &fty, scope, *line)?;
-                Ok(())
-            }
-            // `name[index] = value`, in place.
-            Stmt::IndexSet {
-                name,
-                index,
-                value,
-                line,
-                id: _,
-            } => {
-                let Some(b) = self.lookup(scope, name) else {
-                    self.unknown.set(true);
-                    return Ok(());
-                };
-                if let Type::Map(key, val) = self.base(&b.ty) {
-                    let k = self.base(&self.expr(index, scope, Some(&key), Some(ret))?);
-                    if !matches!(k, Type::Err) && !self.key_fits(&k, &key) {
+                // The type of the place before each step, then of the place the leaf writes into.
+                let mut tys = vec![b.ty.clone()];
+                for step in base {
+                    let Some(next) =
+                        self.store_step(&tys[tys.len() - 1], step, scope, ret, *line)?
+                    else {
                         return Ok(());
-                    }
-                    self.prove_coercion(index, &key, *line)?;
-                    let vty = self.expr(value, scope, Some(&val), Some(ret))?;
-                    if !self.coercible(&vty, &val) {
-                        return Ok(());
-                    }
-                    self.prove_coercion(value, &val, *line)?;
-                    self.prove_string_interpolation(value, &val, scope, Some(ret), *line)?;
-                    self.region_store_guard(name, &val, scope, *line)?;
-                    return Ok(());
+                    };
+                    tys.push(next);
                 }
-                // A builtin container is keyed by `Int64`, a user one by what
-                // its `atSet` takes.
-                let mut key = Type::Int;
-                let base = self.base(&b.ty);
-                let elem = match (base.elem(), &base) {
-                    (Some(e), _) => e.clone(),
-                    (None, Type::Err) => return Ok(()),
-                    (None, _) => {
-                        // The element type is what `atSet` yields, looked up
-                        // by the declared type, which the impl head names.
-                        match self.impls.place(&b.ty, "atSet") {
-                            Some((imp, f)) => {
-                                if let Some(p) = f.params.get(1) {
-                                    key = crate::types::under_head(imp, &b.ty, &p.ty);
-                                }
-                                crate::types::under_head(imp, &b.ty, &f.ret)
-                            }
-                            None => return Ok(()),
+                let bty = tys[tys.len() - 1].clone();
+                match leaf {
+                    Step::Field(field) => {
+                        let ruled = matches!(&bty, Type::Named(n) if self.decl(n).is_some_and(|d| d.predicate.is_some()));
+                        let Some(fty) = crate::types::record_fields(&bty, self)
+                            .and_then(|fs| fs.into_iter().find(|f| &f.name == field))
+                            .map(|f| f.ty)
+                        else {
+                            return Ok(());
+                        };
+                        let vty = self.expr(value, scope, Some(&fty), Some(ret))?;
+                        if ruled {
+                            return Ok(());
                         }
+                        // A predicated field takes only a value of its own type.
+                        let validated = matches!(&fty, Type::Named(n)
+                    if self.decl(n).is_some_and(|d| d.predicate.is_some()));
+                        if !(if validated {
+                            self.assignable(&vty, &fty)
+                        } else {
+                            self.coercible(&vty, &fty)
+                        }) {
+                            return Ok(());
+                        }
+                        self.region_store_guard(name, &fty, scope, *line)?;
+                        self.record_store(name, base, leaf, value, &tys, ret, scope);
+                        Ok(())
                     }
-                };
-                let i = self.expr(index, scope, Some(&key), Some(ret))?;
-                if !self.coercible(&i, &key) && !matches!(self.base(&i), Type::Err) {
-                    return Ok(());
-                }
-                let vty = self.expr(value, scope, Some(&elem), Some(ret))?;
-                if !self.coercible(&vty, &elem) {
-                    return Ok(());
-                }
-                self.prove_coercion(value, &elem, *line)?;
-                self.prove_string_interpolation(value, &elem, scope, Some(ret), *line)?;
-                self.region_store_guard(name, &elem, scope, *line)?;
-                // Record the expansion the store lowers through: `atSet`
-                // inlined, with the move-out and move-back around it.
-                if self.recording() {
-                    if let Ok(Some(blk)) = self
-                        .expansions
-                        .store_index(self.impls, name, index, value, &b.ty)
-                    {
-                        self.record_desugar(scope, |c, sc| {
-                            c.block(blk, ret, sc);
-                        });
+                    // `name[index] = value`, in place.
+                    Step::Index(index) => {
+                        if let Type::Map(key, val) = self.base(&bty) {
+                            let k = self.base(&self.expr(index, scope, Some(&key), Some(ret))?);
+                            if !matches!(k, Type::Err) && !self.key_fits(&k, &key) {
+                                return Ok(());
+                            }
+                            self.prove_coercion(index, &key, *line)?;
+                            let vty = self.expr(value, scope, Some(&val), Some(ret))?;
+                            if !self.coercible(&vty, &val) {
+                                return Ok(());
+                            }
+                            self.prove_coercion(value, &val, *line)?;
+                            self.prove_string_interpolation(value, &val, scope, Some(ret), *line)?;
+                            self.record_store(name, base, leaf, value, &tys, ret, scope);
+                            return self.region_store_guard(name, &val, scope, *line);
+                        }
+                        // A builtin container is keyed by `Int64`, a user one by what
+                        // its `atSet` takes.
+                        let mut key = Type::Int;
+                        let base_ty = self.base(&bty);
+                        let elem = match (base_ty.elem(), &base_ty) {
+                            (Some(e), _) => e.clone(),
+                            (None, Type::Err) => return Ok(()),
+                            (None, _) => {
+                                // The element type is what `atSet` yields, looked up
+                                // by the declared type, which the impl head names.
+                                match self.impls.place(&bty, "atSet") {
+                                    Some((imp, f)) => {
+                                        if let Some(p) = f.params.get(1) {
+                                            key = crate::types::under_head(imp, &bty, &p.ty);
+                                        }
+                                        crate::types::under_head(imp, &bty, &f.ret)
+                                    }
+                                    None => return Ok(()),
+                                }
+                            }
+                        };
+                        let i = self.expr(index, scope, Some(&key), Some(ret))?;
+                        if !self.coercible(&i, &key) && !matches!(self.base(&i), Type::Err) {
+                            return Ok(());
+                        }
+                        let vty = self.expr(value, scope, Some(&elem), Some(ret))?;
+                        if !self.coercible(&vty, &elem) {
+                            return Ok(());
+                        }
+                        self.prove_coercion(value, &elem, *line)?;
+                        self.prove_string_interpolation(value, &elem, scope, Some(ret), *line)?;
+                        self.region_store_guard(name, &elem, scope, *line)?;
+                        self.record_store(name, base, leaf, value, &tys, ret, scope);
+                        Ok(())
                     }
                 }
-                Ok(())
             }
             Stmt::Return { value, line, id: _ } => {
                 let vty = match value {
@@ -3395,6 +3390,134 @@ impl<'a> Checker<'a> {
                 self.block(body, ret, scope);
                 self.region_floor.borrow_mut().pop();
                 Ok(())
+            }
+        }
+    }
+
+    /// The type of `at[index]` on a builtin container: an Array's or a String's
+    /// element, and for a Map the `Option` of its value, because a missing key
+    /// is `None`, never a trap. `Type::Err` where the typed judgment states why.
+    fn builtin_at(
+        &self,
+        at: &Type,
+        index: &Expr,
+        scope: &Scope,
+        fn_ret: Option<&Type>,
+        line: usize,
+    ) -> Result<Type, Diagnostic> {
+        if let Type::Map(key, val) = self.base(at) {
+            let k = self.base(&self.expr(index, scope, Some(&key), fn_ret)?);
+            if matches!(k, Type::Err) {
+                return Ok(Type::Err);
+            }
+            if !self.key_fits(&k, &key) {
+                return Err(cerr!(line, MapKeyMismatch, key, k));
+            }
+            self.prove_coercion(index, &key, line)?;
+            return Ok(Type::option(*val));
+        }
+        let base = self.base(at);
+        let elem = match (base.elem(), &base) {
+            (Some(e), _) => e.clone(),
+            // `s[i]` is a byte, as in `bytes(s)`.
+            (None, Type::Str) => Type::IntN {
+                bits: 8,
+                signed: false,
+            },
+            (None, Type::Err) => return Ok(Type::Err),
+            (None, other) => return Err(cerr!(line, IndexReceiver, other)),
+        };
+        let i = self.base(&self.expr(index, scope, Some(&Type::Int), fn_ret)?);
+        if matches!(i, Type::Err) {
+            return Ok(Type::Err);
+        }
+        if i != Type::Int {
+            return Err(cerr!(line, IndexType, i));
+        }
+        Ok(elem)
+    }
+
+    /// The type of the place `step` names inside a place of type `ty`, on the
+    /// way to a store's leaf. `None` where the typed judgment states the
+    /// refusal (a field the type has not, a part of an unjudged type). A map
+    /// entry reads as the `Option` a lookup answers, which no store through it
+    /// takes.
+    fn store_step(
+        &self,
+        ty: &Type,
+        step: &Step,
+        scope: &Scope,
+        ret: &Type,
+        line: usize,
+    ) -> Result<Option<Type>, Diagnostic> {
+        let unjudged = |t: Type| Ok((t != Type::Err).then_some(t));
+        match step {
+            Step::Field(field) => match self.base(ty) {
+                Type::Record(fields) => match fields.iter().find(|f| &f.name == field) {
+                    Some(f) => Ok(Some(crate::types::forced(&f.ty))),
+                    None => self.judged().map(|_| None),
+                },
+                Type::Err => Ok(None),
+                _ => self.judged().map(|_| None),
+            },
+            Step::Index(index) => match self.impls.place(ty, "atSet") {
+                Some((imp, f)) => {
+                    let key = (f.params.get(1))
+                        .map_or(Type::Int, |p| crate::types::under_head(imp, ty, &p.ty));
+                    let i = self.expr(index, scope, Some(&key), Some(ret))?;
+                    if !self.coercible(&i, &key) && self.base(&i) != Type::Err {
+                        return Err(cerr!(
+                            line,
+                            ProjectionArgType,
+                            name = "atSet",
+                            got = i,
+                            want = key
+                        ));
+                    }
+                    unjudged(crate::types::under_head(imp, ty, &f.ret))
+                }
+                None => unjudged(self.builtin_at(ty, index, scope, Some(ret), line)?),
+            },
+        }
+    }
+
+    /// Records the `atSet` expansion a store through a user container lowers
+    /// by: the first projected step of the path, at any depth. `tys[k]` is the
+    /// type of the place before step `k`.
+    #[allow(clippy::too_many_arguments)]
+    fn record_store(
+        &self,
+        name: &str,
+        base: &[Step],
+        leaf: &Step,
+        value: &Expr,
+        tys: &[Type],
+        ret: &Type,
+        scope: &Scope,
+    ) {
+        if !self.recording() {
+            return;
+        }
+        let path: Vec<&Step> = base.iter().chain([leaf]).collect();
+        for (k, step) in path.iter().enumerate() {
+            let Step::Index(index) = step else {
+                continue;
+            };
+            let rest: Vec<Step> = path[k + 1..].iter().map(|s| (*s).clone()).collect();
+            let found = self.expansions.store_index(
+                self.impls,
+                name,
+                &base[..k],
+                index,
+                &rest,
+                value,
+                &tys[k],
+            );
+            if let Ok(Some(blk)) = found {
+                self.record_desugar(scope, |c, sc| {
+                    c.block(blk, ret, sc);
+                });
+                return;
             }
         }
     }
@@ -4780,37 +4903,7 @@ impl<'a> Checker<'a> {
                     return Ok(t);
                 }
             }
-            // `m[k]` on a Map: a missing key is `None`, never a trap.
-            if let Type::Map(key, val) = self.base(&at) {
-                let k = self.base(&self.expr(&args[1], scope, Some(&key), fn_ret)?);
-                if matches!(k, Type::Err) {
-                    return Ok(Type::Err);
-                }
-                if !self.key_fits(&k, &key) {
-                    return Err(cerr!(line, MapKeyMismatch, key, k));
-                }
-                self.prove_coercion(&args[1], &key, line)?;
-                return Ok(Type::option(*val));
-            }
-            let base = self.base(&at);
-            let elem = match (base.elem(), &base) {
-                (Some(e), _) => e.clone(),
-                // `s[i]` is a byte, as in `bytes(s)`.
-                (None, Type::Str) => Type::IntN {
-                    bits: 8,
-                    signed: false,
-                },
-                (None, Type::Err) => return Ok(Type::Err),
-                (None, other) => return Err(cerr!(line, IndexReceiver, other)),
-            };
-            let i = self.base(&self.expr(&args[1], scope, Some(&Type::Int), fn_ret)?);
-            if matches!(i, Type::Err) {
-                return Ok(Type::Err);
-            }
-            if i != Type::Int {
-                return Err(cerr!(line, IndexType, i));
-            }
-            return Ok(elem);
+            return self.builtin_at(&at, &args[1], scope, fn_ret, line);
         }
         // `boxStream(s)` moves a stream into a heap box and answers its address,
         // `unboxStream(a)` takes it back out, `pullAt(a)` pulls one element;
@@ -4843,7 +4936,7 @@ impl<'a> Checker<'a> {
             return Ok(exp.clone());
         }
         if name == "@pop" {
-            let elem = self.mut_array_receiver(&args[0], scope, line, "pop")?;
+            let elem = self.mut_array_receiver(&args[0], scope, line, "pop", fn_ret)?;
             return Ok(match elem {
                 Type::Err => Type::Err,
                 t => Type::option(t),
@@ -4851,7 +4944,7 @@ impl<'a> Checker<'a> {
         }
         // O(1) unordered remove: the last element moves into slot `i`.
         if name == "@swapRemove" {
-            let elem = self.mut_array_receiver(&args[0], scope, line, "swapRemove")?;
+            let elem = self.mut_array_receiver(&args[0], scope, line, "swapRemove", fn_ret)?;
             let i = self.base(&self.expr(&args[1], scope, Some(&Type::Int), fn_ret)?);
             if !matches!(i, Type::Int | Type::Err) {
                 return Err(cerr!(line, SwapRemoveIndex, i));
@@ -4913,12 +5006,11 @@ impl<'a> Checker<'a> {
             }
             if name == "@remove" {
                 // A receiver declared without `mut` is refused as for `pop`.
-                if let Expr::Var { name: recv, .. } = &args[0] {
-                    if self.lookup(scope, recv).is_some_and(|b| !b.mutable) {
-                        return self.judged();
-                    }
-                } else {
+                let Some((_, root, _)) = crate::parser::place_steps(&args[0]) else {
                     return Err(cerr!(line, MapRemoveReceiver));
+                };
+                if self.lookup(scope, root).is_some_and(|b| !b.mutable) {
+                    return self.judged();
                 }
             }
             let k = self.base(&self.expr(&args[1], scope, Some(&key_ty), fn_ret)?);
@@ -6089,11 +6181,17 @@ impl<'a> Checker<'a> {
                     Stmt::Assign { name, line, .. } if self.is_capture(name, locals) => {
                         self.fail(rule!(LambdaAssignsCapture, name, line));
                     }
-                    Stmt::SetField { name, line, .. } if self.is_capture(name, locals) => {
-                        self.fail(rule!(LambdaMutatesCapture, name, line));
-                    }
-                    Stmt::IndexSet { name, line, .. } if self.is_capture(name, locals) => {
-                        self.fail(rule!(LambdaStoresIntoCapture, name, line));
+                    Stmt::Store {
+                        name,
+                        base,
+                        leaf,
+                        line,
+                        ..
+                    } if self.is_capture(name, locals) => {
+                        self.fail(match base.first().unwrap_or(leaf) {
+                            Step::Field(_) => rule!(LambdaMutatesCapture, name, line),
+                            Step::Index(_) => rule!(LambdaStoresIntoCapture, name, line),
+                        });
                     }
                     Stmt::Drop { name, line, id: _ } if self.is_capture(name, locals) => {
                         self.fail(rule!(LambdaDropsCapture, name, line));
@@ -6423,10 +6521,11 @@ impl<'a> Checker<'a> {
         Some(&f.type_params).filter(|ps| !ps.is_empty())
     }
 
-    /// The element type of the plain array variable a `pop` or `swapRemove`
-    /// receiver names; `op` is the spelling a diagnostic quotes.
+    /// The element type of the array a `pop` or `swapRemove` receiver names;
+    /// `op` is the spelling a diagnostic quotes.
     ///
-    /// An unknown or non-`mut` receiver is the typed judgment's refusal
+    /// The receiver is a variable, or a field or element of one, in any
+    /// position. An unknown or non-`mut` root is the typed judgment's refusal
     /// (`typed::stores`), typed `Err` before its type is read because a
     /// literal bound without `mut` is a fixed-size array. A receiver that is
     /// no growable array is `Builder::shrinks`'s refusal.
@@ -6436,14 +6535,19 @@ impl<'a> Checker<'a> {
         scope: &Scope,
         line: usize,
         op: &str,
+        fn_ret: Option<&Type>,
     ) -> Result<Type, Diagnostic> {
-        let Expr::Var { name, .. } = recv else {
+        let Some((_, root, _)) = crate::parser::place_steps(recv) else {
             return Err(cerr!(line, ArrayOpReceiver, op));
         };
-        let Some(b) = self.lookup(scope, name).filter(|b| b.mutable) else {
+        let Some(b) = self.lookup(scope, root).filter(|b| b.mutable) else {
             return self.judged();
         };
-        match self.base(&b.ty) {
+        let ty = match recv {
+            Expr::Var { .. } => b.ty,
+            _ => self.expr(recv, scope, None, fn_ret)?,
+        };
+        match self.base(&ty) {
             Type::Array(inner) => Ok((*inner).clone()),
             Type::SmallArray(inner, _) => Ok((*inner).clone()),
             Type::Err => Ok(Type::Err),
@@ -6951,10 +7055,9 @@ impl GlobalRef<'_> {
 impl BodyVisit<'_> for GlobalRef<'_> {
     fn stmt(&mut self, s: &Stmt, locals: &HashSet<String>) {
         match s {
-            Stmt::Assign { name, .. }
-            | Stmt::SetField { name, .. }
-            | Stmt::IndexSet { name, .. }
-            | Stmt::Drop { name, .. } => self.hit(name, locals),
+            Stmt::Assign { name, .. } | Stmt::Store { name, .. } | Stmt::Drop { name, .. } => {
+                self.hit(name, locals)
+            }
             _ => {}
         }
     }
@@ -7138,10 +7241,7 @@ struct Refs<'a>(&'a mut HashSet<String>);
 
 impl BodyVisit<'_> for Refs<'_> {
     fn stmt(&mut self, s: &Stmt, locals: &HashSet<String>) {
-        if let Stmt::Assign { name, .. }
-        | Stmt::SetField { name, .. }
-        | Stmt::IndexSet { name, .. } = s
-        {
+        if let Stmt::Assign { name, .. } | Stmt::Store { name, .. } = s {
             if !locals.contains(name) {
                 self.0.insert(name.clone());
             }

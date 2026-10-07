@@ -378,6 +378,12 @@ fn census() -> Vec<Row> {
             "`s` may not be returned — it is a `read` parameter, and a return is owned",
             Kernel::Its,
         ),
+        row(
+            "r51_a_map_key_the_value_changes.vyrn",
+            "a store whose value changes the heap key it moves",
+            "`k` is moved into `m` by this store, but the value changes `k` first",
+            Kernel::Elsewhere,
+        ),
     ]
 }
 

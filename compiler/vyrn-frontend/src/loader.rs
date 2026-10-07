@@ -3949,10 +3949,7 @@ impl BodyVisitMut for Renamer<'_> {
             // is a top-level decl, so a rename reaches `g = v` as it reaches reads
             // of `g`. A local of that name is not the decl. `drop g` names a
             // binding the same way.
-            Stmt::Assign { name, .. }
-            | Stmt::SetField { name, .. }
-            | Stmt::IndexSet { name, .. }
-            | Stmt::Drop { name, .. } => {
+            Stmt::Assign { name, .. } | Stmt::Store { name, .. } | Stmt::Drop { name, .. } => {
                 if !locals.contains(name) {
                     *name = ren(self.map, name);
                 }

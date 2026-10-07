@@ -1,0 +1,9 @@
+type R = { rows: Array<Array<Int64>> }
+fn g() -> Int64 { return 3 }
+fn main() -> Int64 {
+    let mut r = R { rows: [[1]] }
+    r.rows[0] = [g()]
+    let mut x = r.rows[0].copy()
+    x.push(4)
+    return x.length
+}

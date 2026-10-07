@@ -2459,8 +2459,8 @@ fn main() -> Int64 { print(vyrnTestMain().toString()) return 0 }
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-// A removal from a map held in a record field is a move-out window, and the
-// core states the removal into the field's place (record `0125-m7-mapleak`).
+// A removal from a map held in a record field takes the field's place as its
+// receiver (record `0125-m7-mapleak`).
 #[test]
 fn a_removal_from_a_map_field_releases_the_entry() {
     let body = r#"type H = { n: Int64, m: Map<String, String> }

@@ -10,7 +10,7 @@ use vyrn_frontend::loader::DiskResolver;
 
 mod common;
 
-use vyrn_frontend::ast::{Block, NodeId, Stmt};
+use vyrn_frontend::ast::{Block, NodeId, Step, Stmt};
 use vyrn_frontend::core::Facts;
 
 fn analyze(src: &str) -> (vyrn_frontend::ast::Program, Facts) {
@@ -81,7 +81,15 @@ fn a_place_store_owns_what_it_displaces() {
                    return b.s.byteLength\n\
                }";
     let (p, facts) = analyze(src);
-    let sets = stores_in(&p.functions[0].body, |s| matches!(s, Stmt::SetField { .. }));
+    let sets = stores_in(&p.functions[0].body, |s| {
+        matches!(
+            s,
+            Stmt::Store {
+                leaf: Step::Field(_),
+                ..
+            }
+        )
+    });
     assert_eq!(sets.len(), 3);
     assert!(releases(&facts, sets[0]), "a droppable local owns");
     assert!(releases(&facts, sets[1]), "module state owns by rule");
@@ -171,7 +179,15 @@ fn an_early_exiting_take_does_not_block_a_later_field_store() {
                }\n\
                fn main() -> Int64 { return go(true).body.byteLength }";
     let (p, facts) = analyze(src);
-    let sets = stores_in(&p.functions[1].body, |s| matches!(s, Stmt::SetField { .. }));
+    let sets = stores_in(&p.functions[1].body, |s| {
+        matches!(
+            s,
+            Stmt::Store {
+                leaf: Step::Field(_),
+                ..
+            }
+        )
+    });
     assert_eq!(sets.len(), 1);
     assert!(
         releases(&facts, sets[0]),
@@ -249,3 +265,39 @@ fn a_struct_literal_store_with_scalar_mentions_releases_what_it_replaces() {
 // `movecheck`'s `a_lambda_at_a_consume_parameter_escapes`; `blackBox`, the
 // laundering shape, is refused outside a `bench` or `test` block. The lending
 // and retention shapes are refused by the kernel (`refusals.rs`).
+
+/// A store evaluates its place, a projection's prologue included, before its
+/// value, at the container's own element (`b[k()] = v()`) and below it
+/// (`b[k()].x = v()`).
+#[test]
+fn a_store_runs_its_place_before_its_value_at_every_depth() {
+    let dir = common::scratch("store-order");
+    let file = dir.join("m.vyrn");
+    std::fs::write(
+        &file,
+        "type P = { x: Int64 }\n\
+         type Bag = { items: Array<P>, n: Int64 }\n\
+         impl Index for Bag {\n\
+             fn at(read self, i: Int64) -> read P { return self.items[i] }\n\
+             fn atSet(modify self, i: Int64) -> modify P {\n\
+                 print(\"atSet\")\n\
+                 return self.items[i]\n\
+             }\n\
+         }\n\
+         fn k() -> Int64 { print(\"k\") return 0 }\n\
+         fn v() -> Int64 { print(\"v\") return 7 }\n\
+         fn main() -> Int64 {\n\
+             let mut b = Bag { items: [P { x: 1 }], n: 0 }\n\
+             b[k()] = P { x: v() }\n\
+             b[k()].x = v()\n\
+             return b[0].x\n\
+         }\n",
+    )
+    .unwrap();
+    let out = common::vyrn()
+        .arg("run")
+        .arg(&file)
+        .output()
+        .expect("vyrn run");
+    assert_eq!(common::norm(&out.stdout), "atSet\nk\nv\natSet\nk\nv\n");
+}

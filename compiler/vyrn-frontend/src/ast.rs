@@ -49,6 +49,11 @@ impl NodeId {
         self.unit
     }
 
+    /// The node's number within its unit.
+    pub fn local(self) -> u32 {
+        self.local
+    }
+
     /// The same node of its body numbered as unit `unit`. A body's local
     /// numbering depends on its text alone.
     pub fn in_unit(self, unit: u32) -> NodeId {
@@ -342,20 +347,6 @@ pub enum LogSink {
     Stdout,
     /// Truncated and opened for writing at program start.
     File(String),
-}
-
-/// Returns whether a binding is a place desugar's move-out temp.
-///
-/// `t.xs[k] = v` becomes `let mut t.xs[] = t.xs` / `t.xs[][k] = v` /
-/// `t.xs = t.xs[]`. `[` cannot appear in an identifier, and only the container
-/// moved out and written back ends in `[]`. Hoisted operand temps carry a
-/// further suffix (`[]idx`, `#idx`, `#val`, `[]arg1`); the `#` keeps a hoisted
-/// operand from reading as derived from the container under [`mentions_place`].
-///
-/// `parser::place_receiver` states the naming; this states the reading.
-/// `parser::tests::the_desugars_temps_answer_the_one_predicate` pins both.
-pub fn is_place_temp(name: &str) -> bool {
-    name.ends_with("[]")
 }
 
 /// `Info`: `trace` and `debug` are dropped unless a `logging` block lowers it.
@@ -1447,6 +1438,38 @@ pub struct Block {
     pub id: Id,
 }
 
+/// The step a [`Stmt::Store`] writes through: a field, or an element.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Step {
+    Field(String),
+    Index(Expr),
+}
+
+/// A [`Step`] borrowed from a place written as an expression (`a.f[i]`).
+#[derive(Debug, Clone, Copy)]
+pub enum At<'a> {
+    Field(&'a str),
+    Index(&'a Expr),
+}
+
+impl Step {
+    pub fn at(&self) -> At<'_> {
+        match self {
+            Step::Field(f) => At::Field(f),
+            Step::Index(e) => At::Index(e),
+        }
+    }
+}
+
+impl At<'_> {
+    pub fn to_step(self) -> Step {
+        match self {
+            At::Field(f) => Step::Field(f.to_string()),
+            At::Index(e) => Step::Index(e.clone()),
+        }
+    }
+}
+
 /// A statement. `if` also has an expression form, [`Expr::IfExpr`]; `match` is
 /// an [`Expr::Match`] whose position the checker reads.
 #[derive(Debug, Clone, PartialEq)]
@@ -1469,19 +1492,14 @@ pub enum Stmt {
         line: usize,
         id: Id,
     },
-    /// `name.field = value` on a `mut` record binding.
-    SetField {
+    /// `name base.. leaf = value` on a `mut` binding: the store into a field or
+    /// an element, whole from the parser to the core. `base` is the path from
+    /// the root to the place the leaf writes into, root first; `a[i].f = v` is
+    /// `base: [Index(i)]`, `leaf: Field(f)`. The read `a[i]` is `@at(a, i)`.
+    Store {
         name: String,
-        field: String,
-        value: Expr,
-        line: usize,
-        id: Id,
-    },
-    /// `name[index] = value` on a `mut` array binding; the read `a[i]` is
-    /// `@at(a, i)`.
-    IndexSet {
-        name: String,
-        index: Expr,
+        base: Vec<Step>,
+        leaf: Step,
         value: Expr,
         line: usize,
         id: Id,
@@ -1811,8 +1829,7 @@ macro_rules! stmt_slot {
         match $s {
             Stmt::Let { id, .. }
             | Stmt::Assign { id, .. }
-            | Stmt::SetField { id, .. }
-            | Stmt::IndexSet { id, .. }
+            | Stmt::Store { id, .. }
             | Stmt::Return { id, .. }
             | Stmt::Break { id, .. }
             | Stmt::Continue { id, .. }
@@ -1914,6 +1931,18 @@ impl Stmt {
             value,
             line,
             col: 0,
+            id: Id::NEW,
+        }
+    }
+
+    /// Returns the store `name <leaf> = value` at `line`, with no id yet.
+    pub fn store(name: impl Into<String>, leaf: Step, value: Expr, line: usize) -> Self {
+        Stmt::Store {
+            name: name.into(),
+            base: Vec::new(),
+            leaf,
+            value,
+            line,
             id: Id::NEW,
         }
     }
@@ -2101,11 +2130,15 @@ impl Numbering {
     pub fn stmt(&mut self, s: &mut Stmt) {
         self.next(stmt_slot!(s, &mut));
         match s {
-            Stmt::Let { value, .. } | Stmt::Assign { value, .. } | Stmt::SetField { value, .. } => {
-                self.expr(value)
-            }
-            Stmt::IndexSet { index, value, .. } => {
-                self.expr(index);
+            Stmt::Let { value, .. } | Stmt::Assign { value, .. } => self.expr(value),
+            Stmt::Store {
+                base, leaf, value, ..
+            } => {
+                for step in base.iter_mut().chain([leaf]) {
+                    if let Step::Index(index) = step {
+                        self.expr(index);
+                    }
+                }
                 self.expr(value);
             }
             Stmt::Return { value, .. } => {
@@ -2216,8 +2249,7 @@ impl Stmt {
         match self {
             Stmt::Let { line, .. }
             | Stmt::Assign { line, .. }
-            | Stmt::SetField { line, .. }
-            | Stmt::IndexSet { line, .. }
+            | Stmt::Store { line, .. }
             | Stmt::Return { line, .. }
             | Stmt::Break { line, id: _ }
             | Stmt::Continue { line, id: _ }
@@ -2392,9 +2424,15 @@ macro_rules! body_scope_descent {
                         locals.insert(name.clone());
                     }
                 }
-                Stmt::Assign { value, .. } | Stmt::SetField { value, .. } => $ex(value, locals, v),
-                Stmt::IndexSet { index, value, .. } => {
-                    $ex(index, locals, v);
+                Stmt::Assign { value, .. } => $ex(value, locals, v),
+                Stmt::Store {
+                    base, leaf, value, ..
+                } => {
+                    for step in base.into_iter().chain([leaf]) {
+                        if let $crate::ast::Step::Index(index) = step {
+                            $ex(index, locals, v);
+                        }
+                    }
                     $ex(value, locals, v);
                 }
                 Stmt::Return { value: Some(e), .. } => $ex(e, locals, v),
@@ -2631,11 +2669,7 @@ struct Names<'n>(&'n std::collections::HashSet<String>, bool);
 
 impl AstVisit<'_> for Names<'_> {
     fn stmt(&mut self, s: &Stmt, locals: &std::collections::HashSet<String>) {
-        if let Stmt::Assign { name, .. }
-        | Stmt::SetField { name, .. }
-        | Stmt::IndexSet { name, .. }
-        | Stmt::Drop { name, .. } = s
-        {
+        if let Stmt::Assign { name, .. } | Stmt::Store { name, .. } | Stmt::Drop { name, .. } = s {
             self.1 |= self.0.contains(name) && !locals.contains(name);
         }
     }
@@ -2785,6 +2819,27 @@ pub fn sub_blocks(s: &Stmt) -> Vec<&Block> {
             .collect(),
         _ => Vec::new(),
     }
+}
+
+/// Returns whether `e` calls a declared function with `args` satisfying `by`.
+/// A name that starts with `@` is a builtin, which changes no binding.
+pub fn calls_with(e: &Expr, by: &dyn Fn(&[Expr]) -> bool) -> bool {
+    struct Calls<'f>(&'f dyn Fn(&[Expr]) -> bool, bool);
+
+    impl AstVisit<'_> for Calls<'_> {
+        const SCOPED: bool = false;
+
+        fn expr(&mut self, e: &Expr, _: &std::collections::HashSet<String>) -> bool {
+            if let Expr::Call { name, args, .. } = e {
+                self.1 |= !name.starts_with('@') && (self.0)(args);
+            }
+            !self.1
+        }
+    }
+
+    let mut v = Calls(by, false);
+    ast_expr(e, &std::collections::HashSet::new(), &mut v);
+    v.1
 }
 
 /// Returns whether some path through `e` names the binding. A lambda body

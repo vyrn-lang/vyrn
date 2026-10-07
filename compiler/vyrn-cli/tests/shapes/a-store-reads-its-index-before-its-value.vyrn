@@ -1,0 +1,26 @@
+// a store reads its index before its value
+// `a[j] = bump(j)` writes where `j` pointed before the call changed it, at
+// the root and below it, through a map, and for module state the call reaches.
+type R = { xs: Array<Int64> }
+let mut g = 0
+fn bump(n: modify Int64) -> Int64 {
+    n = n + 1
+    return 5
+}
+fn bumpG() -> Int64 {
+    g = g + 1
+    return 7
+}
+fn vyrnTestMain() -> Int64 {
+    let mut a: Array<Int64> = [0, 0, 0]
+    let mut r = R { xs: [0, 0, 0] }
+    let mut m: Map<Int64, Int64> = [0: 0, 1: 0]
+    let mut j = 0
+    a[j] = bump(j)
+    let mut k = 0
+    r.xs[k] = bump(k)
+    let mut q = 0
+    m[q] = bump(q)
+    a[g] = bumpG()
+    return a[0] * 1000 + a[1] * 100 + r.xs[0] * 10 + r.xs[1] + (m[0] ?? 0) * 10000 + (m[1] ?? 0) * 100000
+}

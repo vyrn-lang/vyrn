@@ -1,0 +1,1 @@
+type P = { x: Int64 } fn main() -> Int64 { let mut m: Map<String, P> = [:] m["a"].x = 2 return 0 }
