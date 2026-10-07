@@ -251,6 +251,7 @@ pull request.
 - A generator symbol map is an exported function inside the generated module, so it cannot go stale against cached code.
 - A generator import's identity is its resolved path arguments, so two spellings of one path are one module.
 - A JSON Schema type import round-trips byte-exact with the schema emitter; an inexpressible keyword is an error, never a silent drop.
+- The placer rebuilds a body its placement touched; placement is not an edit of the core (95% of rebuilt bodies only gain `drop` statements, 5 in 938 renumber names, and the name numbers decide the order of wasm locals). The rebuild runs on every thread and merges in job order.
 
 ## Standard library and web
 

@@ -7631,14 +7631,14 @@ pub fn augment(program: &Program, w: &mut World, judging: bool) {
     let tops: Vec<(&str, &Body)> = states.iter().filter_map(JobState::built).collect();
     // A body that did not build gives the judgment nothing, served or not.
     let late: Vec<(&str, &[Walked])> = states.iter().filter_map(JobState::answered).collect();
-    let (mut state, read, answers) = crate::effects::judge_built(
+    let (mut state, read, answers, reached) = crate::effects::judge_built(
         program,
         &lowered,
         own,
         &mut w.fns,
         &tops,
         &late,
-        |judged, refs, top, served_at| {
+        |judged, reach, refs, top, served_at| {
             let rows = |at: usize, n: usize| -> Vec<Vec<(String, Vec<String>)>> {
                 (at..at + n).map(|i| judged.state_callees(i)).collect()
             };
@@ -7657,10 +7657,21 @@ pub fn augment(program: &Program, w: &mut World, judging: bool) {
             let answers: Vec<_> = (served_at.iter().zip(&late))
                 .map(|(at, (_, frames))| rows(*at, frames.len()))
                 .collect();
-            (judged.state_table(refs), read, answers)
+            let built = (states.iter().filter(|s| s.built().is_some())).zip(top);
+            let served = (states.iter().filter(|s| s.answered().is_some())).zip(served_at);
+            let reached: Vec<_> = (built.chain(served))
+                .filter_map(|(s, at)| match s.job {
+                    Job::Inst(inst) if !inst.func.is_gen => {
+                        Some((inst.func.module.clone(), reach.effects[*at]))
+                    }
+                    _ => None,
+                })
+                .collect();
+            (judged.state_table(refs), read, answers, reached)
         },
     );
     drop((tops, late));
+    w.reached = reached;
     for (s, r) in (states.iter_mut().filter(|s| s.built().is_some())).zip(read) {
         s.kept = r;
     }
@@ -7891,9 +7902,13 @@ pub fn augment(program: &Program, w: &mut World, judging: bool) {
     );
     // A placed release of a generic declared release is a call the lowering's
     // worklist follows ([`crate::dispatched`]) only once the row is in the
-    // plan, so such a program is lowered again below.
+    // plan, so a program whose rows name an instance it does not hold is
+    // lowered again below. The instances it holds had their callees followed.
+    let mut had: std::collections::HashSet<String> =
+        lowered.instances.iter().map(Instance::spelling).collect();
     let placed: Vec<Release> = added.values().flatten().cloned().collect();
-    let mut dispatches = !crate::dispatched(&placed, &by_name).is_empty();
+    let mut dispatches = crate::dispatches_new(&placed, &by_name, &had);
+    w.late = dispatches;
     for (f, rows) in added {
         touched.insert(f);
         own.releases.entry(f).or_default().extend(rows);
@@ -7918,26 +7933,42 @@ pub fn augment(program: &Program, w: &mut World, judging: bool) {
     if folds {
         let state = build_module_state(program, own, &w.fns, &lowered.globals);
         let mut tops: Vec<Body> = state.into_iter().collect();
-        for (i, inst) in lowered.instances.iter().enumerate() {
-            // Rebuilt only where the pass above wrote a row for this function; the
-            // rest fold the body that pass already built.
-            let fresh = if touched.contains(&inst.func_id) {
-                let _p = vyrn_frontend::prof::phase("placer: facts: rebuilt");
-                build_in(program, inst, own, &w.fns, &mut names).ok()
-            } else {
-                None
-            };
-            tops.extend(fresh.or(built[i].take()));
-        }
-        // The same for `test` and `bench` bodies, whose nodes an emitter looks up
-        // too.
-        for (i, ob) in lowered.bodies.iter().enumerate() {
-            let fresh = if touched.contains(&ob.id) {
-                build_outside(program, own, &w.fns, &mut names, ob).ok()
-            } else {
-                None
-            };
-            tops.extend(fresh.or(outside[i].take()));
+        // Rebuilt only where the pass above wrote a row for the function; the
+        // rest fold the body that pass already built. The rebuilds read `own`
+        // and `w.fns` and write nothing, so they run on every thread; the
+        // merge is in job order, as the first builds'.
+        let shared: &Ownership = own;
+        let fns = &w.fns;
+        let jobs: Vec<Job> = (lowered.instances.iter().map(Job::Inst))
+            .chain(lowered.bodies.iter().map(Job::Outside))
+            .collect();
+        let _p = vyrn_frontend::prof::phase("placer: facts: rebuilt");
+        let sealed = program.expansions.seal();
+        let fresh = vyrn_frontend::par::in_parallel(
+            &jobs,
+            |j| {
+                if touched.contains(&j.id()) {
+                    j.weight()
+                } else {
+                    0
+                }
+            },
+            NameMemo::default,
+            |names, j| {
+                if !touched.contains(&j.id()) {
+                    return None;
+                }
+                match j {
+                    Job::Inst(inst) => build_in(program, inst, shared, fns, names).ok(),
+                    Job::Outside(ob) => build_outside(program, shared, fns, names, ob).ok(),
+                }
+            },
+        );
+        drop((sealed, _p));
+        // `test` and `bench` bodies follow the instances, whose nodes an emitter looks up too.
+        let mut fresh = fresh.into_iter();
+        for b in built.iter_mut().chain(outside.iter_mut()) {
+            tops.extend(fresh.next().flatten().or(b.take()));
         }
         for mut top in tops {
             fold_frames(
@@ -7957,8 +7988,6 @@ pub fn augment(program: &Program, w: &mut World, judging: bool) {
     // releases times the types the program instantiates). A round turns only
     // after one that built at least one of them, since only a new body's
     // placement adds to `placed`.
-    let mut had: std::collections::HashSet<String> =
-        lowered.instances.iter().map(Instance::spelling).collect();
     while dispatches {
         let again = crate::lower_with(program, own);
         let mut placed: Vec<Release> = Vec::new();
@@ -8002,7 +8031,7 @@ pub fn augment(program: &Program, w: &mut World, judging: bool) {
                 &mut w.bodies,
             );
         }
-        dispatches = !crate::dispatched(&placed, &by_name).is_empty();
+        dispatches = crate::dispatches_new(&placed, &by_name, &had);
     }
     w.calls.replace(calls);
     w.facts = folds.then_some(facts);

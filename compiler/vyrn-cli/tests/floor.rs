@@ -493,3 +493,82 @@ fn the_generation_fence_is_the_same_under_the_bisect_knob() {
         assert_eq!(judged, pass, "{name}: the knob changed the refusal");
     }
 }
+
+/// A lambda in a `test` body is not in the artifact. It joins the closed set of its function type,
+/// so an instance that calls through that type must not inherit its `args` effect.
+#[test]
+fn a_lambda_in_a_test_is_no_capability_of_the_artifact() {
+    const MANIFEST: &str = "{ \"name\": \"w\", \"artifacts\": {          \"app\": { \"entry\": \"client/boot.vyrn\", \"target\": \"browser\" } } }
+";
+    const BOOT: &str = "fn never<T>(x: T) -> Int64 {
+    return args().length
+}
+
+         fn twice(f: fn(Int64) -> Int64, x: Int64) -> Int64 {
+    return f(x)
+}
+
+         fn main() -> Int64 {
+    print(twice(y -> y + 1, 1).toString())
+    return 0
+}
+
+         test \"a lambda in a test reads the command line\" {
+             let g: fn(Int64) -> Int64 = y -> y + args().length
+    assertEq(twice(g, 1), 1)
+}
+";
+
+    let dir = scratch("testlambda");
+    write(&dir, "vyrn.json", MANIFEST);
+    write(&dir, "client/boot.vyrn", BOOT);
+    let (ok, err) = check(&dir.join("client/boot.vyrn"));
+    assert!(
+        ok,
+        "the test is not in the artifact:
+{err}"
+    );
+}
+
+/// An instance only a placed row names is in the artifact. `Pair<String>`'s release is named by
+/// the row the kernel places in `Outer<String>`'s release, so the first lowering has neither
+/// instance, and the one capability in the program is reached through `probe<String>` from that
+/// release. The floor must still refuse it.
+#[test]
+fn a_capability_reached_by_a_release_only_a_placed_row_names_is_refused() {
+    const MANIFEST: &str = "{ \"name\": \"w\", \"artifacts\": { \"app\": { \"entry\": \"client/boot.vyrn\", \"target\": \"browser\" } } }\n";
+    const BOOT: &str = "fn probe<T>(x: Array<T>) -> Int64 {
+    return args().length + x.length
+}
+
+type Pair<T> = { a: Array<T>, n: Int64 }
+
+impl<T> Owned for Pair<T> {
+    fn release(consume self) {
+        print(probe(self.a).toString())
+        let a = consume self.a
+        drop a
+    }
+}
+
+type Outer<T> = { p: Pair<T>, k: Int64 }
+
+impl<T> Owned for Outer<T> {
+    fn release(consume self) {
+        let p = consume self.p
+    }
+}
+
+fn main() -> Int64 {
+    let o = Outer { p: Pair { a: [\"x\"], n: 4 }, k: 2 }
+    print((o.k + o.p.n).toString())
+    return 0
+}
+";
+
+    let dir = scratch("lateinstance");
+    write(&dir, "vyrn.json", MANIFEST);
+    write(&dir, "client/boot.vyrn", BOOT);
+    let (ok, err) = check(&dir.join("client/boot.vyrn"));
+    assert!(!ok && err.contains("it reads the command line"), "{err}");
+}

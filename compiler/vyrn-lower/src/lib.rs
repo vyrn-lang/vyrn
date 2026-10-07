@@ -1119,6 +1119,22 @@ pub(crate) fn dispatched<'f>(
     out
 }
 
+/// Whether `releases` dispatch to an instance of a generic declared release
+/// that `had` does not spell, by [`Instance::spelling`]. A type parameter
+/// [`dispatched`] leaves unsolved, or one solved to a type that still names a
+/// parameter, spells no instance, so it counts as new.
+pub(crate) fn dispatches_new(
+    releases: &[Release],
+    by_name: &HashMap<&str, (FnId, &Function)>,
+    had: &std::collections::HashSet<String>,
+) -> bool {
+    dispatched(releases, by_name).iter().any(|(name, solved)| {
+        let params = &by_name[name].1.type_params;
+        let args: Option<Vec<Type>> = params.iter().map(|p| solved.get(p).cloned()).collect();
+        args.is_none_or(|args| !had.contains(&spell(name, &args)))
+    })
+}
+
 /// Adds the `isSuccess` twin of every `Fallible$Key$success` call: `?` on a
 /// `Fallible` emits both, and the checker records only `success`. Both are the
 /// same impl at the same instantiation.

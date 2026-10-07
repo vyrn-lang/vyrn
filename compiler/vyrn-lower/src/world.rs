@@ -38,6 +38,14 @@ pub struct World {
     pub(crate) refusals: Vec<Refusal>,
     /// What the typed judgment refused, as `vyrn check` words it.
     pub(crate) typed: Vec<Diagnostic>,
+    /// The effect judgment's set for each instance the placer judged, but a
+    /// `gen fn`'s, with the instance's module: what [`crate::effects::reaches`]
+    /// reads.
+    pub(crate) reached: Vec<(Option<String>, vyrn_frontend::effects::Effects)>,
+    /// Whether a placed release named an instance the first lowering lacked.
+    /// `reached` holds no such instance, so [`crate::effects::reaches`] judges
+    /// the program as placed instead.
+    pub(crate) late: bool,
 }
 
 /// One row of the World's function table.

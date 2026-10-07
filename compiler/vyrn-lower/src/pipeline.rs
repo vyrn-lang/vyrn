@@ -116,7 +116,7 @@ fn check(
     // the check supplied the types. Last, so a type error is not answered twice.
     if let (true, Some(p), Some(world)) = (diags.is_empty(), pending, &judged) {
         let _p = prof::phase("floor");
-        let reached = crate::effects::reaches(program, &world.ownership.record);
+        let reached = crate::effects::reaches(program, world);
         diags.extend(floor::decide(p, Some(&reached)));
     }
     let linked = diags
