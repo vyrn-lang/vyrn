@@ -493,6 +493,38 @@ pub(crate) fn build_in(
     build_from(program, own, fns, names, &Source::Instance(inst))
 }
 
+/// A projection of [`Lowered::places`] with its body, built.
+pub(crate) type Projection<'l, 'a> = (&'l crate::PlaceBody<'a>, Result<Body, Gap>);
+
+/// Builds each `impl` projection's body once, numbered in `fns`. A projection
+/// is inlined at its site and no instance builds it, so the judgment reads
+/// these bodies and [`augment`] types them.
+pub(crate) fn build_places<'l, 'a>(
+    program: &Program,
+    lowered: &'l crate::Lowered<'a>,
+    own: &Ownership,
+    fns: &mut Fns,
+) -> Vec<Projection<'l, 'a>> {
+    let mut names = NameMemo::default();
+    (lowered.places.iter())
+        .map(|p| {
+            let inst = Instance {
+                func: p.func,
+                func_id: p.id,
+                type_args: Vec::new(),
+                subst: Default::default(),
+                facts: p.facts.clone(),
+                releases: Vec::new(),
+            };
+            let mut body = build_in(program, &inst, own, fns, &mut names);
+            if let Ok(b) = &mut body {
+                fns.number(b);
+            }
+            (p, body)
+        })
+        .collect()
+}
+
 /// What a body is built from. The setup of each kind is [`seeded`]'s match.
 enum Source<'s, 'a> {
     /// A function instance.
@@ -7669,11 +7701,13 @@ pub fn augment(program: &Program, w: &mut World, judging: bool) {
     let tops: Vec<(&str, &Body)> = states.iter().filter_map(JobState::built).collect();
     // A body that did not build gives the judgment nothing, served or not.
     let late: Vec<(&str, &[Walked])> = states.iter().filter_map(JobState::answered).collect();
+    let places = build_places(program, &lowered, own, &mut w.fns);
     let (mut state, read, answers, reached) = crate::effects::judge_built(
         program,
         &lowered,
         own,
         &mut w.fns,
+        &places,
         &tops,
         &late,
         |judged, reach, refs, top, served_at| {
@@ -7853,25 +7887,14 @@ pub fn augment(program: &Program, w: &mut World, judging: bool) {
             Err(g) => refuse_gap(g, &inst.func.module, &inst.func.name, &mut r),
         }
     }
-    // Each `impl` projection's body, for the judgment alone: a projection is
-    // inlined at its site, and no instance builds its body.
-    for p in &lowered.places {
-        let inst = crate::Instance {
-            func: p.func,
-            func_id: p.id,
-            type_args: Vec::new(),
-            subst: Default::default(),
-            facts: p.facts.clone(),
-            releases: Vec::new(),
-        };
-        match build_in(program, &inst, own, &w.fns, &mut names) {
+    // Each `impl` projection's body, built before the judgment.
+    for (p, top) in &places {
+        match top {
             Ok(top) => {
-                crate::world::add_callees(&top, &by_name, calls.entry(p.id).or_default());
-                typed(program, own, &mut r, &top, &p.func.module, true);
+                crate::world::add_callees(top, &by_name, calls.entry(p.id).or_default());
+                typed(program, own, &mut r, top, &p.func.module, true);
             }
-            Err(g) => {
-                refuse_gap(g, &p.func.module, &p.func.name, &mut r);
-            }
+            Err(g) => refuse_gap(g.clone(), &p.func.module, &p.func.name, &mut r),
         }
     }
     // Each module-state initializer and each `where` predicate, for the
