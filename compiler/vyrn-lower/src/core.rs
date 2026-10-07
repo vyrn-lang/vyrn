@@ -1460,12 +1460,11 @@ impl<'a> Builder<'a> {
     /// Records where `e`, taken as `n`, ends in the reader's text
     /// ([`Body::ends`]): a name or a field, in the root module's own source.
     fn spell_take(&mut self, e: &Expr, n: Name) {
-        let at = self.spelled_end(e);
-        if at.is_some() && self.frame.stmt != NodeId::NONE && self.body.names[n.index()].heap {
-            let slot = self.body.ends.entry((self.frame.stmt, n)).or_insert(at);
-            if *slot != at {
-                *slot = None;
-            }
+        if self.frame.stmt == NodeId::NONE || !self.body.names[n.index()].heap {
+            return;
+        }
+        if let Some(at) = self.spelled_end(e) {
+            self.body.ends.entry((self.frame.stmt, n)).or_insert(at);
         }
     }
 

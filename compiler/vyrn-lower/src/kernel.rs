@@ -1537,13 +1537,8 @@ impl<'b> Kernel<'b> {
     }
 
     fn copy_in(&self, stmt: NodeId, n: Name) -> Option<Fix> {
-        match self.body.ends.get(&(stmt, n)) {
-            Some(Some((line, col))) => Some(Fix::Copy {
-                line: *line,
-                col: *col,
-            }),
-            _ => None,
-        }
+        let &(line, col) = self.body.ends.get(&(stmt, n))?;
+        Some(Fix::Copy { line, col })
     }
 
     /// `r`, with the edit that copies `n` where it is taken.

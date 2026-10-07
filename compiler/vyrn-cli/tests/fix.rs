@@ -319,3 +319,31 @@ fn it_replaces_the_consume_a_loop_repeats() {
                 print(n)\n";
     replaces_consume("loop-hole", body, "take(p.name.copy())");
 }
+
+#[test]
+fn it_copies_the_first_of_two_takes_of_one_name_in_a_statement() {
+    let cases = [
+        (
+            "literal",
+            "let p = P { a: x, b: x }\nprint(p.a)\n",
+            "P { a: x.copy(), b: x }",
+        ),
+        ("array", "let p = [x, x]\nprint(p[0])\n", "[x.copy(), x]"),
+        ("call", "let n = g(x, x)\nprint(n)\n", "g(x.copy(), x)"),
+    ];
+    for (name, body, want) in cases {
+        let src = format!(
+            "type P = {{ a: String, b: String }}\n\
+             fn g(a: String, b: consume String) -> Int64 {{ return a.byteLength + b.byteLength }}\n\
+             fn main() -> Int64 {{\nlet x = \"ab\" + \"c\"\n{body}return 0\n}}\n"
+        );
+        assert!(!checks(&format!("twice-{name}-before"), &src));
+        let (log, after) = fix(&format!("twice-{name}"), &src);
+        assert!(after.contains(want), "{name}:\n{after}");
+        assert!(log.contains("1 fix(es) applied, 0 left"), "{name}:\n{log}");
+        assert!(
+            checks(&format!("twice-{name}-after"), &after),
+            "{name}:\n{after}"
+        );
+    }
+}
