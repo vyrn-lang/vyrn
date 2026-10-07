@@ -67,7 +67,6 @@ fn parser_sections() -> Vec<Section> {
         sec("struct Parser", Shared),
         sec("fn if_let(", Desugar),
         sec("fn as_fn_body", Desugar),
-        sec("fn reads_place", Desugar),
         sec("fn store_target", Grammar),
         sec("impl Parser", Shared),
         sec("fn peek", Shared),

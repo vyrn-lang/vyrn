@@ -1,0 +1,7 @@
+type P = { xs: Array<Int64> }
+fn g() -> Int64 { return 3 }
+fn main() -> Int64 {
+    let mut ps: Array<P> = [P { xs: [1] }]
+    ps[0].xs = [g()]
+    return ps[0].xs.length
+}

@@ -3203,10 +3203,6 @@ impl<'a> Checker<'a> {
                     self.unknown.set(true);
                     return Ok(());
                 };
-                // Below the root, a leaf index and a value that read a place type with
-                // no expectation: `r.rows[0] = [g()]` is refused where `rows[0] = [g()]`
-                // is not.
-                let loose = |e: &Expr| !base.is_empty() && crate::parser::reads_place(e);
                 let mut bty = b.ty.clone();
                 for step in base {
                     let Some(next) = self.store_step(&bty, step, scope, ret, *line)? else {
@@ -3223,8 +3219,7 @@ impl<'a> Checker<'a> {
                         else {
                             return Ok(());
                         };
-                        let expect = (!loose(value)).then_some(&fty);
-                        let vty = self.expr(value, scope, expect, Some(ret))?;
+                        let vty = self.expr(value, scope, Some(&fty), Some(ret))?;
                         if ruled {
                             return Ok(());
                         }
@@ -3244,37 +3239,18 @@ impl<'a> Checker<'a> {
                     }
                     // `name[index] = value`, in place.
                     Step::Index(index) => {
-                        let expect = |ty: &Type| (!loose(index)).then(|| ty.clone());
                         if let Type::Map(key, val) = self.base(&bty) {
-                            let k = self.base(&self.expr(
-                                index,
-                                scope,
-                                expect(&key).as_ref(),
-                                Some(ret),
-                            )?);
+                            let k = self.base(&self.expr(index, scope, Some(&key), Some(ret))?);
                             if !matches!(k, Type::Err) && !self.key_fits(&k, &key) {
                                 return Ok(());
                             }
                             self.prove_coercion(index, &key, *line)?;
-                            let vty = self.expr(
-                                value,
-                                scope,
-                                (!loose(value)).then_some(&val),
-                                Some(ret),
-                            )?;
+                            let vty = self.expr(value, scope, Some(&val), Some(ret))?;
                             if !self.coercible(&vty, &val) {
                                 return Ok(());
                             }
-                            if !loose(value) {
-                                self.prove_coercion(value, &val, *line)?;
-                                self.prove_string_interpolation(
-                                    value,
-                                    &val,
-                                    scope,
-                                    Some(ret),
-                                    *line,
-                                )?;
-                            }
+                            self.prove_coercion(value, &val, *line)?;
+                            self.prove_string_interpolation(value, &val, scope, Some(ret), *line)?;
                             return self.region_store_guard(name, &val, scope, *line);
                         }
                         // A builtin container is keyed by `Int64`, a user one by what
@@ -3298,19 +3274,16 @@ impl<'a> Checker<'a> {
                                 }
                             }
                         };
-                        let i = self.expr(index, scope, expect(&key).as_ref(), Some(ret))?;
+                        let i = self.expr(index, scope, Some(&key), Some(ret))?;
                         if !self.coercible(&i, &key) && !matches!(self.base(&i), Type::Err) {
                             return Ok(());
                         }
-                        let vty =
-                            self.expr(value, scope, (!loose(value)).then_some(&elem), Some(ret))?;
+                        let vty = self.expr(value, scope, Some(&elem), Some(ret))?;
                         if !self.coercible(&vty, &elem) {
                             return Ok(());
                         }
-                        if !loose(value) {
-                            self.prove_coercion(value, &elem, *line)?;
-                            self.prove_string_interpolation(value, &elem, scope, Some(ret), *line)?;
-                        }
+                        self.prove_coercion(value, &elem, *line)?;
+                        self.prove_string_interpolation(value, &elem, scope, Some(ret), *line)?;
                         self.region_store_guard(name, &elem, scope, *line)?;
                         self.record_store(name, base, leaf, value, &b.ty, ret, scope);
                         Ok(())

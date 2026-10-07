@@ -230,30 +230,6 @@ fn as_fn_body(src: &str) -> String {
     format!("fn __vyrn_probe__() {{\n{src}\n}}")
 }
 
-/// Whether evaluating `e` can reach a place: a record field or an array element.
-///
-/// Literals and variables cannot. A call is assumed to reach a place, since it
-/// can read a module-level record. The checker types a store's operand that
-/// reads a place with no expectation below the root: `r.rows[0] = [g()]` is
-/// refused where `rows[0] = [g()]` is not.
-pub fn reads_place(e: &Expr) -> bool {
-    match e {
-        Expr::Int(_, _)
-        | Expr::Byte(_, _)
-        | Expr::Float(_, _)
-        | Expr::Bool(_, _)
-        | Expr::Str(_, _)
-        | Expr::Var { .. } => false,
-        Expr::Unary { expr, .. } => reads_place(expr),
-        Expr::Binary { lhs, rhs, .. } => reads_place(lhs) || reads_place(rhs),
-        Expr::ArrayLit { elems, .. } => elems.iter().any(reads_place),
-        Expr::MapLit { entries, .. } => entries
-            .iter()
-            .any(|(k, v)| reads_place(k) || reads_place(v)),
-        _ => true,
-    }
-}
-
 /// Returns the root's id and name, the steps from the root to the place the
 /// leaf writes into, and the leaf, of the store target `e`: a field or an
 /// element of a place (`a`, `a.f`, `a[i]`, `@slot(a, i)`, to any depth). `None`

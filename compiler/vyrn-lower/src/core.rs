@@ -1918,24 +1918,6 @@ impl<'a> Builder<'a> {
         Ok(t)
     }
 
-    /// [`Builder::checked_temp`] over a value already bound: the temporary
-    /// the constructor of `to` makes of `v`.
-    fn checked_val(&mut self, to: String, v: Val, line: usize, out: &mut Vec<St>) -> Name {
-        let ty = Type::Named(to.clone());
-        let rhs = Rhs::Call {
-            ret: Some(ty.clone()),
-            callee: to,
-            args: vec![(Arg::Val(v), Capability::Consume)],
-            write_back: false,
-            kind: Callee::Named,
-            solved: Vec::new(),
-            targets: Vec::new(),
-        };
-        let t = self.temp(ty, line);
-        self.bind(t, rhs, out);
-        t
-    }
-
     /// The constructor of the validated type `to` over `value`.
     fn check(
         &mut self,
@@ -2431,36 +2413,13 @@ impl<'a> Builder<'a> {
             }
         };
         let nested = !base.is_empty();
-        let hoists = |e: &Expr| nested && vyrn_frontend::parser::reads_place(e);
-        let at_index = match leaf {
-            Step::Index(index) if hoists(index) => {
-                Some(self.bind_temp(&format!("{tmp}#idx"), index, line, out)?)
-            }
-            _ => None,
-        };
-        let stored = match hoists(value) {
-            true => Some(self.bind_temp(&format!("{tmp}#val"), value, line, out)?),
-            false => None,
-        };
         match leaf {
-            Step::Field(field) => self.set_field(
-                at, name, &quoted, field, value, stored, sid, nested, line, out,
-            ),
-            Step::Index(index) => {
-                let (key, whole) = (at_index, whole);
-                self.index_set(
-                    at,
-                    name,
-                    &quoted,
-                    (index, key),
-                    (value, stored),
-                    sid,
-                    nested,
-                    whole,
-                    line,
-                    out,
-                )
+            Step::Field(field) => {
+                self.set_field(at, name, &quoted, field, value, sid, nested, line, out)
             }
+            Step::Index(index) => self.index_set(
+                at, name, &quoted, index, value, sid, nested, whole, line, out,
+            ),
         }
     }
 
@@ -3519,7 +3478,6 @@ impl<'a> Builder<'a> {
         quoted: &str,
         field: &str,
         value: &'a Expr,
-        stored: Option<Val>,
         sid: NodeId,
         nested: bool,
         line: usize,
@@ -3528,10 +3486,7 @@ impl<'a> Builder<'a> {
         self.field_store(&base.1, quoted, field, value, line)?;
         let (base, bty) = base;
         let fty = self.field_ty(&bty, field, line)?;
-        let v = match stored {
-            Some(v) => v,
-            None => self.proven_val(value, Some(&fty), line, out)?,
-        };
+        let v = self.proven_val(value, Some(&fty), line, out)?;
         // A name store's hand-back rule, one dot down:
         // `s.dense = s.dense.push(i)` releases nothing.
         let handed_back = !nested
@@ -3697,8 +3652,8 @@ impl<'a> Builder<'a> {
         base: (Place, Type),
         name: &str,
         quoted: &str,
-        (index, key): (&'a Expr, Option<Val>),
-        (value, stored): (&'a Expr, Option<Val>),
+        index: &'a Expr,
+        value: &'a Expr,
         sid: NodeId,
         nested: bool,
         whole: Option<Place>,
@@ -3712,20 +3667,8 @@ impl<'a> Builder<'a> {
             None if nested && self.projected(&bty) => {
                 return gap("a user container below the root of a store", line);
             }
-            None if self.is_map(&bty) => {
-                let k = match key {
-                    Some(k) => k,
-                    None => self.val(index, out)?,
-                };
-                Place::Key(Box::new(base), k)
-            }
-            None => {
-                let i = match key {
-                    Some(i) => i,
-                    None => self.read_val(index, out)?,
-                };
-                Place::Elem(Box::new(base), i)
-            }
+            None if self.is_map(&bty) => Place::Key(Box::new(base), self.val(index, out)?),
+            None => Place::Elem(Box::new(base), self.read_val(index, out)?),
         };
         // A user container's element type is the value's.
         let ety = match self.elem_ty(&bty, line) {
@@ -3734,11 +3677,9 @@ impl<'a> Builder<'a> {
         };
         // A crossing into a validated element is its constructor, proven or
         // not.
-        let v = match (stored, self.checked(&self.ty_of(value)?, &ety, value)) {
-            (Some(v), Some(to)) => Val::Name(self.checked_val(to, v, line, out)),
-            (Some(v), None) => v,
-            (None, Some(to)) => Val::Name(self.checked_temp(&to, value, line, out)?),
-            (None, None) => self.val(value, out)?,
+        let v = match self.checked(&self.ty_of(value)?, &ety, value) {
+            Some(to) => Val::Name(self.checked_temp(&to, value, line, out)?),
+            None => self.val(value, out)?,
         };
         let site = Site::Node(sid);
         // The same hand-back, and the index counts too: `xs[i] = xs[j]` and
