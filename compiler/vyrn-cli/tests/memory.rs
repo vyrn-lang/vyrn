@@ -2425,6 +2425,13 @@ fn an_element_stored_from_a_copy_of_its_sibling_is_released() {
     shape_runs_clean("an-element-stored-from-a-copy-of-its-sibling", "11\n");
 }
 
+// A store releases the value it overwrites at every depth, including where the
+// index or the value names the container (witness: base leaked 3 blocks).
+#[test]
+fn an_overwritten_value_is_released_at_every_depth() {
+    shape_runs_clean("an-overwritten-value-is-released-at-every-depth", "30\n");
+}
+
 #[test]
 fn a_for_over_a_user_container_in_a_field_runs() {
     shape_runs_clean(

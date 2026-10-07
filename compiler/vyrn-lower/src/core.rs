@@ -2356,8 +2356,10 @@ impl<'a> Builder<'a> {
     /// the value are the source's.
     ///
     /// The path's own indices below the root are bound to temps, root to leaf.
-    /// Nothing below the root hands a value back: the buffer the leaf writes
-    /// into is not the buffer the value reads.
+    /// Only a store to a whole name hands the old value back. A value built
+    /// from the place's own value (`s.xs = s.xs.push(v)`) is moved out first,
+    /// which leaves a hole the store fills, so a field or an element needs no
+    /// hand-back at any depth.
     #[allow(clippy::too_many_arguments)]
     fn store(
         &mut self,
@@ -2432,9 +2434,7 @@ impl<'a> Builder<'a> {
         };
         let nested = !base.is_empty();
         match leaf {
-            Step::Field(field) => {
-                self.set_field(at, name, &quoted, field, value, sid, nested, line, out)
-            }
+            Step::Field(field) => self.set_field(at, &quoted, field, value, sid, line, out),
             Step::Index(index) => self.index_set(
                 at, name, &quoted, index, value, sid, nested, whole, line, out,
             ),
@@ -3506,19 +3506,15 @@ impl<'a> Builder<'a> {
         Ok(())
     }
 
-    /// A store into `field` of the place `base`, a part of the root `name`
-    /// that the reader wrote as `quoted`. `nested` is whether the place is
-    /// below the root.
-    #[allow(clippy::too_many_arguments)]
+    /// A store into `field` of the place `base`, a part of a root that the
+    /// reader wrote as `quoted`.
     fn set_field(
         &mut self,
         base: (Place, Type),
-        name: &str,
         quoted: &str,
         field: &str,
         value: &'a Expr,
         sid: NodeId,
-        nested: bool,
         line: usize,
         out: &mut Vec<St>,
     ) -> Result<(), Gap> {
@@ -3526,20 +3522,11 @@ impl<'a> Builder<'a> {
         let (base, bty) = base;
         let fty = self.field_ty(&bty, field, line)?;
         let v = self.proven_val(value, Some(&fty), line, out)?;
-        // A name store's hand-back rule, one dot down:
-        // `s.dense = s.dense.push(i)` releases nothing.
-        let handed_back = !nested
-            && vyrn_frontend::ast::mentions_place(value, name)
-            && !self.fresh_str(&fty, value);
-        let releases = !handed_back && self.own.placed.stores.contains_key(&sid);
+        let releases = self.own.placed.stores.contains_key(&sid);
         out.push(St::Store {
             place: Place::Field(Box::new(base), field.to_string()),
             value: v,
-            old: if handed_back {
-                Old::Transferred
-            } else {
-                self.old_for(&fty, releases)
-            },
+            old: self.old_for(&fty, releases),
             line,
             site: Site::Node(sid),
             releases,
@@ -3684,7 +3671,8 @@ impl<'a> Builder<'a> {
 
     /// A store into the element or the entry of the place `base` at `index`, a
     /// part of the root `name` that the reader wrote as `quoted`. `whole` is
-    /// the place `atSet` yields where `index` is a user container's own.
+    /// the place `atSet` yields where `index` is a user container's own;
+    /// without it, a user container below the root (`nested`) is a gap.
     #[allow(clippy::too_many_arguments)]
     fn index_set(
         &mut self,
@@ -3745,22 +3733,11 @@ impl<'a> Builder<'a> {
             }
         }
         let site = Site::Node(sid);
-        // The same hand-back, and the index counts too: `xs[i] = xs[j]` and
-        // `xs[xs.length - 1] = v` read the buffer the store writes into.
-        // `xs[i] = xs[j].copy()` hands nothing back.
-        let handed_back = !nested
-            && ((vyrn_frontend::ast::mentions_place(value, name)
-                && !self.store_is_fresh(value, name))
-                || vyrn_frontend::ast::mentions_place(index, name));
-        let releases = !handed_back && self.own.placed.stores.contains_key(&sid);
+        let releases = self.own.placed.stores.contains_key(&sid);
         out.push(St::Store {
             place,
             value: v,
-            old: if handed_back {
-                Old::Transferred
-            } else {
-                self.old_for(&ety, releases)
-            },
+            old: self.old_for(&ety, releases),
             line,
             site,
             releases,

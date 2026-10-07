@@ -1,0 +1,37 @@
+// a store releases the value it overwrites at depth 1, 2 and 3
+// An index that names the container (`xs[xs.length - 1] = v`), a call that
+// reads the place (`g(xs[0])`) and a field fed from its own value leave the
+// old value to the store, whatever sits above the place.
+type P = { name: String, d: Array<Int64> }
+type A = { ss: Array<String>, p: P }
+type R = { ss: Array<String>, a: A, p: P }
+fn g(s: String) -> String {
+    return s + "!"
+}
+fn mkP() -> P {
+    return P { name: "p" + "1", d: [1] }
+}
+fn mkSs() -> Array<String> {
+    return ["x" + "y", "z" + "w"]
+}
+fn vyrnTestMain() -> Int64 {
+    let mut xs: Array<String> = mkSs()
+    let mut p = mkP()
+    let mut r = R { ss: mkSs(), a: A { ss: mkSs(), p: mkP() }, p: mkP() }
+    xs[xs.length - 1] = "q" + "r"
+    xs[0] = g(xs[0])
+    p.name = g(p.name)
+    p.d = p.d.push(7)
+    r.ss[r.ss.length - 1] = "q" + "r"
+    r.ss[0] = g(r.ss[0])
+    r.p.name = g(r.p.name)
+    r.p.d = r.p.d.push(7)
+    r.a.ss[r.a.ss.length - 1] = "q" + "r"
+    r.a.ss[0] = g(r.a.ss[0])
+    r.a.p.name = g(r.a.p.name)
+    r.a.p.d = r.a.p.d.push(7)
+    let one = xs[0].byteLength + xs[1].byteLength + p.name.byteLength + p.d.length
+    let two = r.ss[0].byteLength + r.ss[1].byteLength + r.p.name.byteLength + r.p.d.length
+    let three = r.a.ss[0].byteLength + r.a.ss[1].byteLength + r.a.p.name.byteLength + r.a.p.d.length
+    return one + two + three
+}
