@@ -505,14 +505,7 @@ fn reflect_entries(p: &mut Program) -> Option<()> {
     let named = |n: &str| Type::Named(n.to_string());
     let mut dec = Decoders::new(p);
     let mut entries: Vec<Function> = Vec::new();
-    let str_param = |n: &str| Param {
-        id: Id::NEW,
-        name: n.to_string(),
-        capability: vyrn_frontend::ast::Capability::Read,
-        ty: Type::Str,
-        line: 0,
-        col: 0,
-    };
+    let str_param = |n: &str| Param::synth(n, Type::Str);
     // `fn <entry>(arg) -> T { @reflect(kind, arg); return <decode T>() }`.
     let mut entry =
         |name: String, params: Vec<Param>, ret: Type, kind: i64, arg: Expr, d: &mut Decoders| {

@@ -104,7 +104,8 @@ pull request.
 - Audience is a fence against accidental imports, not a secrecy guarantee. The compiler cannot know what a secret is; the capability floor sits under the fence.
 - A module contract (`contract`, a contextual word) is an ordinary library declaration, checked by `std/contract` over `moduleInterface`. The compiler hardcodes no convention.
 - Contracts are closed by default: an export the contract does not name is an error with a did-you-mean. An open rule serves only where names carry no meaning.
-- The contract matching rules have one home, `std/contract`. `vyrn why --contract` runs it compiled; Rust states no matching rule. The did-you-mean distance keeps one Rust twin (`contracts::edit_distance`), pinned to `std/strings:editDistance` by test, because the checker asks it and runs no compiled Vyrn.
+- The contract matching rules have one home, `std/contract`. `vyrn why --contract` runs it compiled; Rust states no matching rule. It reads a `.vyrn` module linked, as the generator does. The did-you-mean distance keeps one Rust twin (`contracts::edit_distance`), pinned to `std/strings:editDistance` by test, because the checker asks it and runs no compiled Vyrn.
+- The app root has one rule, `manifest::app_root`: the directory of the nearest `vyrn.json`, found by the same unbounded walk as `manifest::find`, else the start directory. The editor and `vyrn why --contract` both use it.
 - Mutation on a procedure is declared with `mut fn` and is transport-free. An unmarked procedure is a query; nothing is guessed from a name.
 
 ### Test, bench, logging
@@ -250,6 +251,7 @@ pull request.
 - A generator symbol map is an exported function inside the generated module, so it cannot go stale against cached code.
 - A generator import's identity is its resolved path arguments, so two spellings of one path are one module.
 - A JSON Schema type import round-trips byte-exact with the schema emitter; an inexpressible keyword is an error, never a silent drop.
+- The placer rebuilds a body its placement touched; placement is not an edit of the core (95% of rebuilt bodies only gain `drop` statements, 5 in 938 renumber names, and the name numbers decide the order of wasm locals). The rebuild runs on every thread and merges in job order.
 
 ## Standard library and web
 

@@ -458,6 +458,13 @@ pub enum ImportSource {
     },
 }
 
+/// Reports whether `name` is a synthetic inline-refinement type, `Decl.field`.
+/// The parser names it that way and the loader renames only the parent, so a `.`
+/// marks it and a user type never holds one.
+pub fn is_synthetic(name: &str) -> bool {
+    name.contains('.')
+}
+
 /// A named type: a refinement over a scalar (`base` with a `predicate`) or a
 /// structural type such as a record or an enum.
 #[derive(Debug, Clone, PartialEq)]
@@ -1932,6 +1939,19 @@ impl Block {
 }
 
 impl Param {
+    /// Returns a `read` parameter no source token spells: line 0, column 0, no
+    /// id yet. A caller sets another capability with struct update.
+    pub fn synth(name: impl Into<String>, ty: Type) -> Self {
+        Param {
+            id: Id::NEW,
+            name: name.into(),
+            capability: Capability::Read,
+            ty,
+            line: 0,
+            col: 0,
+        }
+    }
+
     pub fn id(&self) -> NodeId {
         self.id.0
     }

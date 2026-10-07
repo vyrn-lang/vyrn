@@ -367,10 +367,17 @@ pub fn gen_module_interface_lit(
     })?;
     reads.push((resolved.clone(), Some(source.clone().into_bytes())));
 
-    // Link the module so the closure walk sees types declared in its imports.
-    // A recording resolver adds every file the link reads to the cache inputs.
-    let rec = crate::loader::RecordingResolver::new(resolver);
-    let program = crate::loader::load(&source, &resolved, opts, &rec, engine).map_err(|diags| {
+    linked_module_interface(
+        engine,
+        resolver,
+        opts,
+        importer_dir,
+        path,
+        &resolved,
+        &source,
+        reads,
+    )
+    .map_err(|diags| {
         let d = diags.first();
         let where_ = d
             .and_then(|d| d.file.clone())
@@ -380,11 +387,32 @@ pub fn gen_module_interface_lit(
             .map(|d| d.message.clone())
             .unwrap_or_else(|| "load failed".to_string());
         format!("moduleInterface `{path}`{where_}: {msg}")
-    })?;
+    })
+}
+
+/// Links `source` (the module at `resolved`) to follow its type closure and
+/// builds its `ModuleInterface` literal, as `moduleInterface` does. `path` is
+/// the spelling the reflected module's own types keep. Every other module the
+/// link read is appended to `reads`. A module that does not link yields the
+/// loader's diagnostics.
+pub fn linked_module_interface(
+    engine: Option<&GenEngine>,
+    resolver: &dyn crate::loader::ModuleResolver,
+    opts: &crate::loader::LoadOptions,
+    importer_dir: &str,
+    path: &str,
+    resolved: &str,
+    source: &str,
+    reads: &mut Vec<GenRead>,
+) -> Result<Expr, Vec<Diagnostic>> {
+    // Link the module so the closure walk sees types declared in its imports.
+    // A recording resolver adds every file the link reads to the cache inputs.
+    let rec = crate::loader::RecordingResolver::new(resolver);
+    let program = crate::loader::load(source, resolved, opts, &rec, engine)?;
     // The link's reads, kept as text for the origin index: the AST has no name
     // columns, so the lexer supplies them (see `Origins`).
     let mut origin_src: Vec<(Option<String>, String, String)> =
-        vec![(None, resolved.clone(), source.clone())];
+        vec![(None, resolved.to_string(), source.to_string())];
     for (p, s) in rec.into_reads() {
         // The root module was recorded above.
         if p != resolved {

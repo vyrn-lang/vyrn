@@ -566,7 +566,7 @@ fn candidates(
     let Some(dir) = decl.parent() else {
         return Ok(Vec::new());
     };
-    let root = crate::app_root_for(dir);
+    let root = vyrn_frontend::manifest::app_root(dir);
     let mut paths = Vec::new();
     crate::collect_sources(&root, 0, usize::MAX, &["vyrn", "vyx"], &mut paths);
     let mut files = Vec::new();

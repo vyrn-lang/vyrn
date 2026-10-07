@@ -107,28 +107,39 @@ pub struct Manifest {
     pub native_target: Option<String>,
 }
 
+/// Returns the nearest directory at or above `start` that holds `vyrn.json`.
+/// The one walk of the project-root rule: one marker, a stat per level, up to
+/// the filesystem root, no depth limit.
+fn nearest_manifest_dir(start: &Path) -> Option<PathBuf> {
+    start
+        .ancestors()
+        .find(|d| d.join("vyrn.json").is_file())
+        .map(Path::to_path_buf)
+}
+
 /// Finds `vyrn.json` by walking up from the directory `start`.
 ///
 /// `Ok(None)`: the project declares nothing. `Ok(Some)`: what it declares.
 /// `Err`: it declares something unreadable. An unreadable policy is not the
 /// empty policy; a trailing comma must not switch the audience boundary off.
 pub fn find(start: &Path) -> Result<Option<Manifest>, String> {
-    let mut dir = start.to_path_buf();
-    loop {
-        let candidate = dir.join("vyrn.json");
-        if candidate.is_file() {
-            let text = std::fs::read_to_string(&candidate)
-                .map_err(|e| format!("cannot read {}: {e}", candidate.display()))?;
-            let doc = crate::schema::parse_json(&text)
-                .map_err(|e| format!("{} is not valid JSON: {e}", candidate.display()))?;
-            let slash_dir = dir.to_string_lossy().replace('\\', "/");
-            return from_doc(doc, slash_dir).map(Some);
-        }
-        match dir.parent() {
-            Some(p) => dir = p.to_path_buf(),
-            None => return Ok(None),
-        }
-    }
+    let Some(dir) = nearest_manifest_dir(start) else {
+        return Ok(None);
+    };
+    let candidate = dir.join("vyrn.json");
+    let text = std::fs::read_to_string(&candidate)
+        .map_err(|e| format!("cannot read {}: {e}", candidate.display()))?;
+    let doc = crate::schema::parse_json(&text)
+        .map_err(|e| format!("{} is not valid JSON: {e}", candidate.display()))?;
+    let slash_dir = dir.to_string_lossy().replace('\\', "/");
+    from_doc(doc, slash_dir).map(Some)
+}
+
+/// Returns the project root for the directory `start`: the directory of the
+/// nearest `vyrn.json`, else `start`. It walks as [`find`] does, so the editor,
+/// `vyrn why --contract` and the build name one root.
+pub fn app_root(start: &Path) -> PathBuf {
+    nearest_manifest_dir(start).unwrap_or_else(|| start.to_path_buf())
 }
 
 /// Builds a [`Manifest`] from a parsed document rooted at `slash_dir`: the
@@ -428,6 +439,23 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         d
+    }
+
+    /// The project root is the nearest `vyrn.json` however deep the start is,
+    /// else the start itself.
+    #[test]
+    fn the_project_root_is_the_nearest_manifest_at_any_depth() {
+        let d = tmp("approot");
+        let deep = (0..12).fold(d.clone(), |p, i| p.join(format!("d{i}")));
+        std::fs::create_dir_all(&deep).unwrap();
+        assert_eq!(app_root(&deep), deep, "no vyrn.json: the start directory");
+        std::fs::write(d.join("vyrn.json"), "{}").unwrap();
+        assert_eq!(app_root(&deep), d, "twelve levels up");
+        let found = find(&deep).unwrap().unwrap();
+        assert_eq!(found.dir, d.to_string_lossy().replace('\\', "/"));
+        let inner = d.join("d0");
+        std::fs::write(inner.join("vyrn.json"), "{}").unwrap();
+        assert_eq!(app_root(&deep), inner, "the nearest wins");
     }
 
     /// A reader racing a writer on one cache entry reads a whole version. A

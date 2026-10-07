@@ -373,13 +373,13 @@ impl Walk<'_> {
 /// Returns the floor's judged capabilities each module of a checked `program`
 /// reaches; the pipeline passes it to [`vyrn_frontend::floor::decide`].
 ///
-/// A module reaches a capability when an instance declared in it does. The
-/// floor keeps its own carrier and line and drops the rows this does not
-/// confirm. A module-scope `let` and a `where` predicate have no instance, so
+/// A module reaches a capability when an instance declared in it does, as
+/// the placer judged it ([`crate::World::reached`]). The floor keeps its own
+/// carrier and line and drops the rows this does not confirm. A module-scope `let` and a `where` predicate have no instance, so
 /// they are read from the AST with [`vyrn_frontend::floor::call_carrier`].
 pub fn reaches(
     program: &vyrn_frontend::ast::Program,
-    record: &std::sync::Arc<vyrn_frontend::checker::Recorded>,
+    world: &crate::World,
 ) -> Vec<(String, floor::Capability)> {
     let mut out: Vec<(String, floor::Capability)> = Vec::new();
     let mut add = |module: Option<&String>, cap: floor::Capability| {
@@ -420,48 +420,44 @@ pub fn reaches(
         .filter_map(|e| floor::Capability::of(e).map(|cap| (e, cap)))
         .collect();
 
-    with_judgment(program, record, |judged, _refs, insts, top| {
-        for (i, inst) in insts.iter().enumerate() {
-            // A `gen fn` runs at generation time and is never in the artifact,
-            // so it reaches no capability of the target; `floor::carried` skips
-            // it too. The fence judges generators.
-            if inst.func.is_gen {
-                continue;
-            }
-            let e = judged.effects[top[i]];
-            for (effect, cap) in &rows {
-                if e.has(*effect) {
-                    add(inst.func.module.as_ref(), *cap);
-                }
+    let placed;
+    let reached = if world.late {
+        placed = placed_reach(program, world);
+        &placed
+    } else {
+        &world.reached
+    };
+    for (module, e) in reached {
+        for (effect, cap) in &rows {
+            if e.has(*effect) {
+                add(module.as_ref(), *cap);
             }
         }
-    });
+    }
     out
 }
 
-/// Hands `then` the judgment over a whole checked program, every frame in the
-/// order judged, the instances that have a core, and `top[i]`, the frame index
-/// of instance `i`'s own body. `record` is the checker's record of `program`.
-/// A callback, because `refs` borrows `bodies`.
-fn with_judgment<R>(
+/// Judges `program` as the placer left it and returns each instance's set, as
+/// [`crate::World::reached`] does. The placer judged before it placed, so a
+/// release that only a placed row names (`World::late`) is in no judged set;
+/// this analyzes the program again, lowers it with every row, and judges every
+/// instance that builds.
+fn placed_reach(
     program: &vyrn_frontend::ast::Program,
-    record: &std::sync::Arc<vyrn_frontend::checker::Recorded>,
-    then: impl FnOnce(&Judged, &[&Body], &[&crate::Instance], &[usize]) -> R,
-) -> R {
-    let world = crate::world::analyzed(program, record.clone(), false);
+    world: &crate::World,
+) -> Vec<(Option<String>, Effects)> {
+    let world = crate::world::analyzed(program, world.ownership.record.clone(), false);
     let own = &world.ownership;
     let lowered = crate::lower_with(program, own);
     let mut bodies = Vec::new();
     let mut insts = Vec::new();
-    for inst in &lowered.instances {
+    for inst in lowered.instances.iter().filter(|i| !i.func.is_gen) {
         if let Ok(b) = crate::core::build(program, inst, own) {
             bodies.push(b);
             insts.push(inst);
         }
     }
-    let tops: Vec<(&str, &Body)> = insts
-        .iter()
-        .zip(&bodies)
+    let tops: Vec<(&str, &Body)> = (insts.iter().zip(&bodies))
         .map(|(i, b)| (i.func.name.as_str(), b))
         .collect();
     let mut fns = crate::Fns::lowered(&lowered);
@@ -472,7 +468,11 @@ fn with_judgment<R>(
         &mut fns,
         &tops,
         &[],
-        |judged, refs, top, _| then(judged, refs, &insts, top),
+        |_, reach, _, top, _| {
+            (insts.iter().zip(top))
+                .map(|(i, at)| (i.func.module.clone(), reach.effects[*at]))
+                .collect()
+        },
     )
 }
 
@@ -483,6 +483,11 @@ fn with_judgment<R>(
 /// every frame built in the order judged, `top[i]`, the frame index of
 /// `tops[i]`'s own body, and `served_at[i]`, that of `served[i]`'s. Every
 /// served frame comes after the last frame built.
+///
+/// `then` is also given a second judgment, `reach`, that no `test` or `bench`
+/// body or lambda of one answers a call through a function value. The floor
+/// reads it, because a lambda in a test is not in the artifact. It is the first
+/// judgment itself when no call through a value reached such a frame.
 pub(crate) fn judge_built<R>(
     program: &vyrn_frontend::ast::Program,
     lowered: &crate::Lowered<'_>,
@@ -490,7 +495,7 @@ pub(crate) fn judge_built<R>(
     fns: &mut crate::Fns,
     tops: &[(&str, &Body)],
     served: &[(&str, &[Walked])],
-    then: impl FnOnce(&Judged, &[&Body], &[usize], &[usize]) -> R,
+    then: impl FnOnce(&Judged, &Judged, &[&Body], &[usize], &[usize]) -> R,
 ) -> R {
     // An `impl` projection has no instance but is a call by its own name in
     // the core, so it is judged too.
@@ -629,6 +634,8 @@ pub(crate) fn judge_built<R>(
         Callee::Unknown
     };
     let stored = &own.record.stored;
+    let outside: HashSet<&str> = lowered.bodies.iter().map(|b| b.name.as_str()).collect();
+    let (skip, hit) = (std::cell::Cell::new(false), std::cell::Cell::new(false));
     let mut through = |ty: &Type| -> Callee {
         let ty = &vyrn_frontend::types::resolve(ty, decls);
         if !matches!(ty, Type::Fn(..)) {
@@ -645,6 +652,11 @@ pub(crate) fn judge_built<R>(
                 }
             }
             if let Some(l) = &src.lambda {
+                let out = outside.contains(l.defined_in.as_str());
+                hit.set(hit.get() || out);
+                if out && skip.get() {
+                    continue;
+                }
                 if let Some(i) = lambda_frames.get(&(l.defined_in.as_str(), (l.line, l.col))) {
                     idx.extend(i.iter().copied());
                 }
@@ -659,5 +671,15 @@ pub(crate) fn judge_built<R>(
         }
     };
     let judged = judge(&frames, &mut resolve, &mut through);
-    then(&judged, &refs, &top, &served_at)
+    let reach = hit.get().then(|| {
+        skip.set(true);
+        judge(&frames, &mut resolve, &mut through)
+    });
+    then(
+        &judged,
+        reach.as_ref().unwrap_or(&judged),
+        &refs,
+        &top,
+        &served_at,
+    )
 }

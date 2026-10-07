@@ -21,7 +21,7 @@
 
 use std::collections::HashMap;
 
-use crate::ast::{Block, Capability, Expr, Function, Id, Param, Stmt, Type, TypeDecl, UnOp};
+use crate::ast::{Block, Expr, Function, Id, Param, Stmt, Type, TypeDecl, UnOp};
 
 /// The reserved prefix of both generated names. `$` is no identifier
 /// character, so no program can spell or shadow one.
@@ -84,14 +84,7 @@ fn predicate_fn(decl: &TypeDecl) -> Function {
         pred_name(&decl.name),
         crate::types::predicate_binds(decl)
             .into_iter()
-            .map(|(name, ty, _)| Param {
-                id: Id::NEW,
-                name,
-                capability: Capability::Read,
-                ty,
-                line: 0,
-                col: 0,
-            })
+            .map(|(name, ty, _)| Param::synth(name, ty))
             .collect(),
         Type::Bool,
         vec![Stmt::ret(
@@ -112,14 +105,7 @@ fn constructor_fn(decl: &TypeDecl) -> Function {
     ));
     Function::synth(
         ctor_name(&decl.name),
-        vec![Param {
-            id: Id::NEW,
-            name: "value".to_string(),
-            capability: Capability::Read,
-            ty: decl.base.clone(),
-            line: 0,
-            col: 0,
-        }],
+        vec![Param::synth("value", decl.base.clone())],
         Type::Unit,
         vec![Stmt::If {
             id: Id::NEW,
