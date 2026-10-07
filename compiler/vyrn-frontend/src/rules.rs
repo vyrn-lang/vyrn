@@ -800,9 +800,6 @@ rules! {
     FieldAssignTarget {}
         "the left side of `[i].field = ..` must be an array \
         variable, a record field, or an array element";
-    FieldWriteDepth {}
-        "only a single field write-through is supported: \
-        `a[i].field = v` (not `a[i].field.field = v`)";
     PushNoPlace {}
         "this `push` has no place to write back to, so it \
         would silently do nothing. Its receiver must be an \

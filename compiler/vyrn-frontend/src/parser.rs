@@ -2727,12 +2727,8 @@ impl Parser {
                     }
                     let over_index = matches!(under, Expr::Call { name, args, .. }
                         if name == "@at" && args.len() == 2);
-                    // `a[i].f.g = v` and deeper are refused: one level of field write-through.
                     // `f().x = v` is no store here: it falls through to a parse error.
                     match store_target(&e) {
-                        _ if over_index && fields >= 2 => {
-                            return Err(refuse!("parse", line, self.col(), FieldWriteDepth));
-                        }
                         Some((id, name, base, leaf)) => {
                             self.advance();
                             let value = self.expr()?;
@@ -5074,10 +5070,6 @@ test \"t\" {{ assert(c(1) == 1) }}"
         assert_eq!(
             refused("f()[0].x"),
             crate::rules::Rule::FieldAssignTarget {}.render()
-        );
-        assert_eq!(
-            refused("a[0].x.y"),
-            crate::rules::Rule::FieldWriteDepth {}.render()
         );
     }
 
