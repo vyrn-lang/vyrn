@@ -49,6 +49,11 @@ impl NodeId {
         self.unit
     }
 
+    /// The node's number within its unit.
+    pub fn local(self) -> u32 {
+        self.local
+    }
+
     /// The same node of its body numbered as unit `unit`. A body's local
     /// numbering depends on its text alone.
     pub fn in_unit(self, unit: u32) -> NodeId {

@@ -352,11 +352,21 @@ impl Expansions {
             return Ok(Some(b));
         }
         let line = index.line();
+        // A projection can read `self` more than once, so each receiver index
+        // that is not a literal or a name runs once, in place order, before it.
+        let mut temps = Vec::new();
         let recv = prefix
             .iter()
             .fold(Expr::var(name, line), |e, step| match step {
                 Step::Field(f) => Expr::field(e, f.as_str(), line),
-                Step::Index(i) => Expr::call(AT, vec![e, i.clone()], line),
+                Step::Index(i @ (Expr::Int(..) | Expr::Var { .. })) => {
+                    Expr::call(AT, vec![e, i.clone()], line)
+                }
+                Step::Index(i) => {
+                    let tmp = format!("@r{}.{}", i.id().unit(), i.id().local());
+                    temps.push(Stmt::let_(tmp.clone(), i.clone(), line));
+                    Expr::call(AT, vec![e, Expr::var(tmp, line)], line)
+                }
             });
         let Some(p) = self.site_at(
             index.id(),
@@ -396,7 +406,8 @@ impl Expansions {
                 line,
             },
         };
-        let mut out = p.prologue.clone();
+        let mut out = temps;
+        out.extend(p.prologue.iter().cloned());
         out.push(store);
         let mut t = self.write();
         let blk = t.expand(
