@@ -1763,6 +1763,17 @@ struct Fn_<'a, 'p> {
     /// A name a parameter or a `let` bound is found through [`Fn_::scope`], and
     /// one this walk bound is pushed onto it.
     core_w: Walked,
+    /// Tables over [`Fn_::core`], built on first use. Empty again after [`Fn_::core_enter`].
+    facts: std::cell::OnceCell<BodyFacts<'a>>,
+    lists: std::cell::OnceCell<Vec<(Name, Name)>>,
+}
+
+/// What the per-name screens ask of the whole body, collected once.
+#[derive(Default)]
+struct BodyFacts<'a> {
+    lets: Vec<(Name, &'a Rhs)>,
+    written: Vec<(Name, Option<Capability>)>,
+    binders: Vec<Name>,
 }
 
 /// A lowering context with nothing in scope and nothing to return to, for code outside any
@@ -1791,6 +1802,8 @@ fn top_level<'a, 'p>(cx: &'a Cx<'p>) -> Fn_<'a, 'p> {
         core: None,
         core_rows: Vec::new(),
         core_w: Walked::default(),
+        facts: Default::default(),
+        lists: Default::default(),
     }
 }
 
@@ -9188,6 +9201,8 @@ impl<'a, 'p> Fn_<'a, 'p> {
 
     /// Reset the walk state for `core`, one entry per name; [`Fn_::core_body`] walks it.
     fn core_enter(&mut self, core: &vyrn_frontend::core::Body) {
+        self.facts = Default::default();
+        self.lists = Default::default();
         self.core_w = Walked {
             at: vec![None; core.names.len()],
             reads: core.reads(),
@@ -10799,20 +10814,16 @@ impl<'a, 'p> Fn_<'a, 'p> {
         // A take a rebuild hands back is the place it was taken from: the arm rebuilds the
         // field in place (`s.keys.push(k)`). So is a take the next row moves on
         // ([`core_moves_on`]).
-        if let Some(p) = core_taken(body, n) {
-            return (self.core_hands_back(&body.stmts, n) || core_moves_on(body, n)).then_some(p);
+        if let Some(p) = core_taken(self.lets(), n) {
+            let moves_on = || core_moves_on(body, self.lets(), &self.core_w.occurs, n);
+            return (self.core_hands_back(&body.stmts, n) || moves_on()).then_some(p);
         }
         let minted = info.source.starts_with('@') && !info.heap && !self.owns_heap(&info.ty);
         let owned = info.releases && !info.borrow;
         if !(info.borrow || minted || owned) {
             return None;
         }
-        let mut lets = Vec::new();
-        let mut written = Vec::new();
-        for s in &body.stmts {
-            core_lets(s, &mut lets);
-            core_written(&body.names, s, &mut written);
-        }
+        let (lets, written) = (self.lets(), self.written());
         let read = |m: Name| {
             let mut at = lets.iter().filter(|(b, _)| *b == m);
             match (at.next(), at.next()) {
@@ -10821,7 +10832,7 @@ impl<'a, 'p> Fn_<'a, 'p> {
             }
         };
         let place = read(n)?;
-        let extent = core_extent(&body.stmts, n, &body.occurrences())?;
+        let extent = core_extent(&body.stmts, n, &self.core_w.occurs)?;
         // The name is read through itself and through what still points into it. A scalar
         // copied out that owns no heap holds nothing of it, so the judged rows end at the
         // last row that reads a holder: `xs[0] + eat(b)` reads `xs[0]` before the call.
@@ -10893,11 +10904,7 @@ impl<'a, 'p> Fn_<'a, 'p> {
             return None;
         }
         let value = !info.heap && !self.owns_heap(&info.ty);
-        let mut lets = Vec::new();
-        for s in &body.stmts {
-            core_lets(s, &mut lets);
-        }
-        let mut at = lets.iter().filter(|(b, _)| *b == n);
+        let mut at = self.lets().iter().filter(|(b, _)| *b == n);
         let p = match (at.next(), at.next()) {
             (Some((_, Rhs::Take(p))), None) => p.clone(),
             (Some((_, Rhs::Read(p))), None) if value => p.clone(),
@@ -10929,11 +10936,8 @@ impl<'a, 'p> Fn_<'a, 'p> {
         if !matches!(self.cx.repr(&info.ty, 0), Ok(Repr::Agg(_))) {
             return None;
         }
-        let mut lets = Vec::new();
+        let lets = self.lets();
         let mut written = Vec::new();
-        for s in &body.stmts {
-            core_lets(s, &mut lets);
-        }
         match core_after(&body.stmts, n) {
             Some(after) => after
                 .into_iter()
@@ -10977,12 +10981,7 @@ impl<'a, 'p> Fn_<'a, 'p> {
         {
             return false;
         }
-        let (mut lets, mut binders, mut written) = (Vec::new(), Vec::new(), Vec::new());
-        for s in &body.stmts {
-            core_lets(s, &mut lets);
-            core_switched(s, true, &mut binders);
-            core_written(&body.names, s, &mut written);
-        }
+        let (lets, binders, written) = (self.lets(), self.binders(), self.written());
         let mut whole = 0;
         each_list(&body.stmts, &mut |ss| {
             whole += ss
@@ -11184,15 +11183,46 @@ impl<'a, 'p> Fn_<'a, 'p> {
         }
     }
 
+    /// Every `let` row of the body, in source order. Built once per body: the per-name
+    /// screens in [`Fn_::core_walkable`] read it, and a rebuild per name made the screen
+    /// quadratic in the body.
+    fn lets(&self) -> &[(Name, &'a Rhs)] {
+        &self.facts().lets
+    }
+
+    /// Every name a row writes, hands to `consume` or `modify`, with the capability.
+    fn written(&self) -> &[(Name, Option<Capability>)] {
+        &self.facts().written
+    }
+
+    /// The scrutinees and arm binders of every `switch` row ([`core_switched`]).
+    fn binders(&self) -> &[Name] {
+        &self.facts().binders
+    }
+
+    fn facts(&self) -> &BodyFacts<'a> {
+        self.facts.get_or_init(|| {
+            let body = self.body();
+            let mut f = BodyFacts::default();
+            for s in &body.stmts {
+                core_lets(s, &mut f.lets);
+                core_written(&body.names, s, &mut f.written);
+                core_switched(s, true, &mut f.binders);
+            }
+            f
+        })
+    }
+
     /// Each fixed literal a `@list` row takes, with the name the row binds: `let l = [..]`
     /// at `[T; n]`, then `let a = @list(l)` at `Array<T>`. The literal is made at the
     /// growable type and `a` takes its place, so no fixed copy exists.
-    fn core_lists(&self) -> Vec<(Name, Name)> {
+    fn core_lists(&self) -> &[(Name, Name)] {
+        self.lists.get_or_init(|| self.core_lists_of_body())
+    }
+
+    fn core_lists_of_body(&self) -> Vec<(Name, Name)> {
         let body = self.body();
-        let mut lets = Vec::new();
-        for s in &body.stmts {
-            core_lets(s, &mut lets);
-        }
+        let lets = self.lets();
         lets.iter()
             .filter_map(|(a, rhs)| match rhs {
                 Rhs::Call {
@@ -12276,18 +12306,27 @@ impl<'a, 'p> Fn_<'a, 'p> {
     /// before it, whose slots the walk holds to the end of their extent.
     fn core_readable(&self, ss: &[St], reads: &[u32], bound: &[Name]) -> bool {
         let body = self.body();
+        // The names rows made, with their row. Built on the first compound row, so a list of
+        // plain rows pays nothing; asking per row would scan `ss[..i]` each time.
+        let made = std::cell::OnceCell::new();
         let path = |i: usize| -> Vec<Name> {
-            let made = ss[..i].iter().filter_map(|p| match p {
-                St::Let(l, rhs)
-                    if matches!(rhs, Rhs::Make(..))
-                        || self.core_ctor(rhs)
-                        || self.core_agg_call(rhs) =>
-                {
-                    Some(*l)
-                }
-                _ => None,
+            let made = made.get_or_init(|| {
+                (ss.iter().enumerate())
+                    .filter_map(|(j, p)| match p {
+                        St::Let(l, rhs)
+                            if matches!(rhs, Rhs::Make(..))
+                                || self.core_ctor(rhs)
+                                || self.core_agg_call(rhs) =>
+                        {
+                            Some((j, *l))
+                        }
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
             });
-            bound.iter().copied().chain(made).collect()
+            let before = made.partition_point(|&(j, _)| j < i);
+            let names = made[..before].iter().map(|&(_, l)| l);
+            bound.iter().copied().chain(names).collect()
         };
         ss.iter().enumerate().all(|(i, s)| match s {
             // A made layout is built into the name's slot, held to the end of its extent, or
@@ -12655,7 +12694,7 @@ impl<'a, 'p> Fn_<'a, 'p> {
             vyrn_frontend::core::Place::Global(g) if core_global(body, *r) == Some(g.as_str()) => {
                 true
             }
-            p => core_taken(body, *r) == Some(p),
+            p => core_taken(self.lets(), *r) == Some(p),
         };
         (t == v && back && self.core_rebuild(rhs)).then_some((*r, *t))
     }
@@ -12968,11 +13007,7 @@ fn thunk_of(ty: Type) -> Type {
 }
 
 /// The place the name `n` was taken from, when its one `let` is a take.
-fn core_taken(body: &vyrn_frontend::core::Body, n: Name) -> Option<&vyrn_frontend::core::Place> {
-    let mut lets = Vec::new();
-    for s in &body.stmts {
-        core_lets(s, &mut lets);
-    }
+fn core_taken<'r>(lets: &[(Name, &'r Rhs)], n: Name) -> Option<&'r vyrn_frontend::core::Place> {
     let mut at = lets.iter().filter(|(b, _)| *b == n);
     match (at.next(), at.next()) {
         (Some((_, Rhs::Take(p))), None) => Some(p),
@@ -12984,8 +13019,13 @@ fn core_taken(body: &vyrn_frontend::core::Body, n: Name) -> Option<&vyrn_fronten
 /// or a `consume` argument no other argument's root shares. The part then moves straight to
 /// its destination and needs no slot. The store does not write the take's root, so no row
 /// between the take and the move writes the field.
-fn core_moves_on(body: &vyrn_frontend::core::Body, n: Name) -> bool {
-    let Some((root, _)) = core_taken(body, n).and_then(vyrn_lower::kernel::root_of) else {
+fn core_moves_on(
+    body: &vyrn_frontend::core::Body,
+    lets: &[(Name, &Rhs)],
+    occurs: &[u32],
+    n: Name,
+) -> bool {
+    let Some((root, _)) = core_taken(lets, n).and_then(vyrn_lower::kernel::root_of) else {
         return false;
     };
     let rooted = |p: &vyrn_frontend::core::Place| {
@@ -13018,7 +13058,7 @@ fn core_moves_on(body: &vyrn_frontend::core::Body, n: Name) -> bool {
             _ => false,
         };
     });
-    found && body.occurrences()[n.index()] == 2
+    found && occurs[n.index()] == 2
 }
 
 /// The `Value` variant `value(x)` boxes a resolved scalar type into.
