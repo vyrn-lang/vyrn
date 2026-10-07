@@ -230,96 +230,12 @@ fn as_fn_body(src: &str) -> String {
     format!("fn __vyrn_probe__() {{\n{src}\n}}")
 }
 
-/// Returns the plain-variable receiver a removal (`pop`, `swapRemove`) writes
-/// through, for a base that may be a record field or an array element.
-///
-/// The backends load and store a container's header only in a local binding. A
-/// base like `r.a` or `rows[0]` moves out into an unspellable temp, is mutated
-/// there, and moves back: O(1) per write, not a copy.
-///
-/// Returns the receiver and three statement lists. The group runs `hoists`,
-/// then `moves`, then the mutation, then `post`; `moves` and `post` nest
-/// outermost-first and outermost-last, so `r.inner.a.pop()` works. Nothing may
-/// read the place while it is out, so callers put their operand evaluations in
-/// `hoists`, left to right. A base that is neither (a call result, a temporary)
-/// yields `None`.
-pub fn place_receiver(
-    base: &Expr,
-    line: usize,
-) -> Option<(String, Vec<Stmt>, Vec<Stmt>, Vec<Stmt>)> {
-    match base {
-        // Already a slot: nothing to move.
-        Expr::Var { name, .. } => Some((name.clone(), Vec::new(), Vec::new(), Vec::new())),
-        Expr::Field { expr, field, .. } => {
-            let (parent, hoists, mut pre, mut post) = place_receiver(expr, line)?;
-            // Unspellable (contains `[`): it cannot collide with an identifier, the
-            // symbol index filters it out, and it reads naturally in a diagnostic.
-            let tmp = format!("{parent}.{field}[]");
-            pre.push(Stmt::Let {
-                id: Id::NEW,
-                name: tmp.clone(),
-                mutable: true,
-                ty: None,
-                value: Expr::field(Expr::var(parent.clone(), line), field.clone(), line),
-                line,
-                col: 0,
-            });
-            post.insert(
-                0,
-                Stmt::store(
-                    parent,
-                    Step::Field(field.clone()),
-                    Expr::var(tmp.clone(), line),
-                    line,
-                ),
-            );
-            Some((tmp, hoists, pre, post))
-        }
-        // `rows[i][j] = v`: an element that is itself a container. The index is
-        // hoisted because the load and the write-back both need it, evaluated once.
-        Expr::Call { name, args, .. } if name == "@at" && args.len() == 2 => {
-            let (parent, mut hoists, mut pre, mut post) = place_receiver(&args[0], line)?;
-            let tmp = format!("{parent}[]");
-            let idx = format!("{tmp}idx");
-            hoists.push(Stmt::let_(idx.clone(), args[1].clone(), line));
-            let index = Expr::var(idx, line);
-            let load = Expr::call(
-                "@at",
-                vec![Expr::var(parent.clone(), line), index.clone()],
-                line,
-            );
-            pre.push(Stmt::Let {
-                id: Id::NEW,
-                name: tmp.clone(),
-                mutable: true,
-                ty: None,
-                value: load,
-                line,
-                col: 0,
-            });
-            post.insert(
-                0,
-                Stmt::store(
-                    parent,
-                    Step::Index(index),
-                    Expr::var(tmp.clone(), line),
-                    line,
-                ),
-            );
-            Some((tmp, hoists, pre, post))
-        }
-        _ => None,
-    }
-}
-
 /// Whether evaluating `e` can reach a place: a record field or an array element.
 ///
-/// A removal's desugar takes its container out, so an operand that could read
-/// one runs before the move (`u.xs.swapRemove(u.xs.length - 1)`). Literals and
-/// variables stay in place. A call is assumed to reach a place, since it can
-/// read a module-level record. The checker types a store's operand that reads
-/// a place with no expectation below the root, as a hoisted operand: `r.rows[0] =
-/// [g()]` is refused where `rows[0] = [g()]` is not.
+/// Literals and variables cannot. A call is assumed to reach a place, since it
+/// can read a module-level record. The checker types a store's operand that
+/// reads a place with no expectation below the root: `r.rows[0] = [g()]` is
+/// refused where `rows[0] = [g()]` is not.
 pub fn reads_place(e: &Expr) -> bool {
     match e {
         Expr::Int(_, _)
@@ -338,48 +254,6 @@ pub fn reads_place(e: &Expr) -> bool {
     }
 }
 
-/// Binds `e` to a temp evaluated before the move-out and returns the expression
-/// the mutation uses. An operand that cannot reach a place is returned as is.
-pub fn hoist_operand(e: Expr, name: String, hoists: &mut Vec<Stmt>, line: usize) -> Expr {
-    if !reads_place(&e) {
-        return e;
-    }
-    hoists.push(Stmt::let_(name.clone(), e, line));
-    Expr::var(name, line)
-}
-
-/// Rewrites the receiver of a mutating method (`r.a.pop()`,
-/// `rows[i].swapRemove(j)`) to a moved-out temp, because the backends store the
-/// shrunk header only into a plain variable. Returns the statements that
-/// bracket it.
-///
-/// These are expressions, and the move-back is sound only where nothing
-/// observes the container before it. So callers apply this to a whole statement
-/// (`r.a.pop()` or `let x = r.a.pop()`) only: in `if r.a.pop() == None { .. r.a
-/// .. }` the body would read the field before the move-back.
-fn hoist_mutating_receiver(e: &mut Expr, line: usize) -> Option<(Vec<Stmt>, Vec<Stmt>)> {
-    let Expr::Call { name, args, .. } = e else {
-        return None;
-    };
-    if !crate::prelude::removes(name) {
-        return None;
-    }
-    let (recv, mut hoists, pre, post) = place_receiver(args.first()?, line)?;
-    if pre.is_empty() {
-        return None;
-    }
-    // `r.a.swapRemove(r.a.length - 1)` reads the field the move-out empties, so
-    // the other arguments run first.
-    for (n, arg) in args.iter_mut().enumerate().skip(1) {
-        let tmp = format!("{recv}[]arg{n}");
-        let taken = std::mem::replace(arg, Expr::int(0));
-        *arg = hoist_operand(taken, tmp, &mut hoists, line);
-    }
-    args[0] = Expr::var(recv, line);
-    hoists.extend(pre);
-    Some((hoists, post))
-}
-
 /// Returns the root's id and name, the steps from the root to the place the
 /// leaf writes into, and the leaf, of the store target `e`: a field or an
 /// element of a place (`a`, `a.f`, `a[i]`, `@slot(a, i)`, to any depth). `None`
@@ -390,25 +264,30 @@ fn hoist_mutating_receiver(e: &mut Expr, line: usize) -> Option<(Vec<Stmt>, Vec<
 /// `project.rs` for the place a projection's `atSet` yields.
 pub fn store_target(e: &Expr) -> Option<(Id, String, Vec<Step>, Step)> {
     let (id, name, mut base) = place_steps(e)?;
-    let leaf = base.pop()?;
-    Some((id, name, base, leaf))
+    let leaf = base.pop()?.to_step();
+    Some((
+        id,
+        name.to_string(),
+        base.into_iter().map(At::to_step).collect(),
+        leaf,
+    ))
 }
 
 /// Returns the root's id and name of the place `e`, and the steps from the
 /// root to `e`, root first. `None` where `e` is no place.
-pub fn place_steps(e: &Expr) -> Option<(Id, String, Vec<Step>)> {
+pub fn place_steps(e: &Expr) -> Option<(Id, &str, Vec<At<'_>>)> {
     match e {
-        Expr::Var { name, id, .. } => Some((Id::at(id.col()), name.clone(), Vec::new())),
+        Expr::Var { name, id, .. } => Some((Id::at(id.col()), name, Vec::new())),
         Expr::Field { expr, field, .. } => {
             let (id, name, mut path) = place_steps(expr)?;
-            path.push(Step::Field(field.clone()));
+            path.push(At::Field(field));
             Some((id, name, path))
         }
         Expr::Call { name, args, .. }
             if (name == crate::project::AT || name == crate::project::ELEM) && args.len() == 2 =>
         {
             let (id, name, mut path) = place_steps(&args[0])?;
-            path.push(Step::Index(args[1].clone()));
+            path.push(At::Index(&args[1]));
             Some((id, name, path))
         }
         _ => None,
@@ -2733,24 +2612,8 @@ impl Parser {
                     None
                 };
                 self.eat(&Tok::Eq)?;
-                let mut value = self.expr()?;
+                let value = self.expr()?;
                 self.eat_semi();
-                // `let x = r.a.pop()`: the receiver moves out and back around this statement,
-                // only when the call is the whole initializer, so nothing observes the
-                // container in between.
-                if let Some((mut pre, post)) = hoist_mutating_receiver(&mut value, line) {
-                    pre.push(Stmt::Let {
-                        id: Id::NEW,
-                        name,
-                        mutable,
-                        ty,
-                        value,
-                        line,
-                        col,
-                    });
-                    pre.extend(post);
-                    return Ok(self.spliced(pre));
-                }
                 Ok(Stmt::Let {
                     id: Id::NEW,
                     name,
@@ -2946,13 +2809,7 @@ impl Parser {
                 //   `a[i].push(v)` -> `a[i] = @push(a[i], v)`
                 // Any other receiver (a temporary, `r.a.b.push(v)`) is a parse error, not a
                 // silent no-op. `pop`/`swapRemove`/`remove` return a value and mutate, so
-                // they move the receiver out and back below.
-                let mut e = e;
-                if let Some((mut pre, post)) = hoist_mutating_receiver(&mut e, line) {
-                    pre.push(Stmt::expr(e));
-                    pre.extend(post);
-                    return Ok(self.spliced(pre));
-                }
+                // they stay calls over their place.
                 if let Expr::Call { name, args, .. } = &e {
                     if crate::prelude::rebuilds(name) {
                         match args.first() {
@@ -5269,64 +5126,18 @@ test \"t\" {{ assert(c(1) == 1) }}"
         );
     }
 
-    /// A removal's desugar names a temp and [`crate::ast::is_place_temp`] reads the
-    /// name back; every pass asks that one predicate, so a rename cannot leave a reader
-    /// on the old spelling.
     #[test]
-    fn the_desugars_temps_answer_the_one_predicate() {
-        let mut minted: Vec<(String, bool)> = Vec::new();
+    fn a_removal_over_a_place_stays_a_call_over_it() {
+        // The checker refuses a place receiver outside a whole statement or `let`
+        // initializer; the parser hoists nothing.
         for src in [
-            "fn main() -> Int64 { let mut s: S = S { xs: [1] }  s.xs.swapRemove(h())  return 0 }",
+            "fn main() -> Int64 { let mut s: S = S { xs: [1] }  if s.xs.pop() == None { return 1 }  return 0 }",
+            "fn main() -> Int64 { let mut s: S = S { xs: [1] }  let x = s.xs.pop()  return 0 }",
         ] {
-            for st in &parse_src(src).functions[0].body.stmts {
-                if let Stmt::Let { name, .. } = st {
-                    if name.contains('[') || name.contains('#') {
-                        minted.push((name.clone(), crate::ast::is_place_temp(name)));
-                    }
-                }
-            }
+            let p = parse_src(src);
+            assert!(format!("{:?}", p.functions[0].body.stmts)
+                .contains(r#"Call { name: "@pop", args: [Field"#));
         }
-        minted.sort();
-        minted.dedup();
-        assert_eq!(
-            minted,
-            [("s.xs[]", true), ("s.xs[][]arg1", false),].map(|(n, p)| (n.to_string(), p))
-        );
-    }
-
-    #[test]
-    fn pop_through_a_record_field_moves_out_and_back() {
-        // `pop` mutates and returns, so it is hoisted around the whole statement.
-        let p = parse_src(
-            "fn main() -> Int64 { let mut s: S = S { xs: [1, 2] }  let x = s.xs.pop()  return 0 }",
-        );
-        let stmts = &p.functions[0].body.stmts;
-        assert!(matches!(&stmts[1], Stmt::Let { name, .. } if name == "s.xs[]"));
-        match &stmts[2] {
-            Stmt::Let {
-                name,
-                value: Expr::Call { name: c, args, .. },
-                ..
-            } => {
-                assert_eq!((name.as_str(), c.as_str()), ("x", "@pop"));
-                assert!(matches!(&args[0], Expr::Var { name, .. } if name == "s.xs[]"));
-            }
-            other => panic!("expected `let x = s.xs[].pop()`, got {other:?}"),
-        }
-        assert!(
-            matches!(&stmts[3], Stmt::Store { name, leaf: Step::Field(field), .. } if name == "s" && field == "xs")
-        );
-    }
-
-    #[test]
-    fn pop_inside_a_branching_statement_is_still_rejected() {
-        // No place for the move-back keeps the branch body from reading a stale field,
-        // so the checker's error stays.
-        let src = "fn main() -> Int64 { let mut s: S = S { xs: [1] }  if s.xs.pop() == None { return 1 }  return 0 }";
-        let p = parse_src(src);
-        // The receiver is still the field.
-        assert!(format!("{:?}", p.functions[0].body.stmts)
-            .contains(r#"Call { name: "@pop", args: [Field"#));
     }
 
     // A statement `push` writes back through its receiver place.

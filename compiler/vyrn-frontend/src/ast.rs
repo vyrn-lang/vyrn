@@ -344,20 +344,6 @@ pub enum LogSink {
     File(String),
 }
 
-/// Returns whether a binding is a place desugar's move-out temp.
-///
-/// `t.xs.pop()` becomes `let mut t.xs[] = t.xs` / `t.xs[].pop()` /
-/// `t.xs = t.xs[]`. `[` cannot appear in an identifier, and only the container
-/// moved out and written back ends in `[]`. Hoisted operand temps carry a
-/// further suffix (`[]idx`, `#idx`, `#val`, `[]arg1`); the `#` keeps a hoisted
-/// operand from reading as derived from the container under [`mentions_place`].
-///
-/// `parser::place_receiver` states the naming; this states the reading.
-/// `parser::tests::the_desugars_temps_answer_the_one_predicate` pins both.
-pub fn is_place_temp(name: &str) -> bool {
-    name.ends_with("[]")
-}
-
 /// `Info`: `trace` and `debug` are dropped unless a `logging` block lowers it.
 pub const DEFAULT_LOG_LEVEL: usize = 2;
 
@@ -1445,6 +1431,31 @@ pub struct Block {
 pub enum Step {
     Field(String),
     Index(Expr),
+}
+
+/// A [`Step`] borrowed from a place written as an expression (`a.f[i]`).
+#[derive(Debug, Clone, Copy)]
+pub enum At<'a> {
+    Field(&'a str),
+    Index(&'a Expr),
+}
+
+impl Step {
+    pub fn at(&self) -> At<'_> {
+        match self {
+            Step::Field(f) => At::Field(f),
+            Step::Index(e) => At::Index(e),
+        }
+    }
+}
+
+impl At<'_> {
+    pub fn to_step(self) -> Step {
+        match self {
+            At::Field(f) => Step::Field(f.to_string()),
+            At::Index(e) => Step::Index(e.clone()),
+        }
+    }
 }
 
 /// A statement. `if` also has an expression form, [`Expr::IfExpr`]; `match` is

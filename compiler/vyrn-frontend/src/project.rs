@@ -7,7 +7,8 @@
 //! ownership passes and the lowering key side tables by node.
 
 use crate::ast::{
-    Block, Expr, Function, Id, ImplBlock, NodeId, Numbering, Program, Step, Stmt, Type, TypeDecl,
+    At, Block, Expr, Function, Id, ImplBlock, NodeId, Numbering, Program, Step, Stmt, Type,
+    TypeDecl,
 };
 use crate::types::Impls;
 use std::collections::{HashMap, HashSet};
@@ -361,15 +362,16 @@ impl Expansions {
         else {
             return Ok(None);
         };
-        let Some((_, root, mut path)) = crate::parser::place_steps(&p.place) else {
+        let Some((_, root, path)) = crate::parser::place_steps(&p.place) else {
             return Err(format!(
                 "line {line}: `{name}[..] = v` goes through an `atSet` projection whose \
                   result has no address — a call result or a temporary. A projection \
                   returns a place: a binding, a field of one, or an element of one"
             ));
         };
+        let mut path: Vec<Step> = path.into_iter().map(At::to_step).collect();
         path.extend(rest.iter().cloned());
-        let (value, id) = (value.clone(), Id::NEW);
+        let (value, id, root) = (value.clone(), Id::NEW, root.to_string());
         let store = match path.pop() {
             Some(leaf) => Stmt::Store {
                 id,

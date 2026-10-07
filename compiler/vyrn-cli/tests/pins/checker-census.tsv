@@ -1,7 +1,7 @@
 kind	lines	refusals
-the typing judgment	2209	43
+the typing judgment	2230	43
 a rule the checker states	1161	53
 the checker's part in a rewrite stated elsewhere	361	14
-one arm per form, type constructor or builtin	1538	107
-shared machinery	2035	24
+one arm per form, type constructor or builtin	1537	107
+shared machinery	2050	24
 tests	631	0

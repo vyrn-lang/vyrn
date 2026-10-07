@@ -309,8 +309,7 @@ pub enum Val {
 }
 
 /// One argument of a call: a value, or the place a `modify` parameter
-/// writes. A place argument is a move-out window, whose extent is
-/// the call (`vyrn_lower::core::Builder::nested_store`).
+/// writes.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Arg {
     Val(Val),
