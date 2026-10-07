@@ -139,9 +139,9 @@ struct State {
     /// What consumed each name, for a refusal's wording only: the line, the
     /// taker, and the edit that copies the name there.
     taker: BTreeMap<Name, (usize, By, Taker, Option<Fix>)>,
-    /// Where each hole was taken: `(name, path, line)`. Append-only, wording
-    /// only.
-    taken_at: Vec<(Name, String, usize)>,
+    /// Where each hole was taken: `(name, path, line, the edits that copy the
+    /// path in the take's place)`. Append-only, wording only.
+    taken_at: Vec<(Name, String, usize, Vec<Fix>)>,
     /// For an alias whose place was written: the line and the place. A later
     /// read is refused.
     dead: BTreeMap<Name, (usize, String)>,
@@ -974,7 +974,7 @@ impl<'b> Kernel<'b> {
         };
         let (r, hole) = (*r, format!("{path}{payload}"));
         if !st.holes.iter().any(|(h, p)| *h == r && *p == hole) {
-            st.taken_at.push((r, hole.clone(), self.here));
+            st.taken_at.push((r, hole.clone(), self.here, Vec::new()));
             st.holes.push((r, hole));
             st.holes.sort();
         }
@@ -1542,13 +1542,8 @@ impl<'b> Kernel<'b> {
     }
 
     fn copy_in(&self, stmt: NodeId, n: Name) -> Option<Fix> {
-        match self.body.ends.get(&(stmt, n)) {
-            Some(Some((line, col))) => Some(Fix::Copy {
-                line: *line,
-                col: *col,
-            }),
-            _ => None,
-        }
+        let &(line, col) = self.body.ends.get(&(stmt, n))?;
+        Some(Fix::Copy { line, col })
     }
 
     /// `r`, with the edit that copies `n` where it is taken.
@@ -1601,12 +1596,30 @@ impl<'b> Kernel<'b> {
     }
 
     fn hole_line(&self, st: &State, n: Name, path: &str) -> usize {
+        self.hole_take(st, n, path)
+            .map_or(self.body.names[n.index()].line, |t| t.2)
+    }
+
+    /// `r`, with the edits that replace the `consume` that made the hole `path`
+    /// of `n` by a copy.
+    fn copying_hole(&self, st: &State, n: Name, path: &str, r: Refusal) -> Refusal {
+        let fixes = self.hole_take(st, n, path).map(|t| t.3.clone());
+        Refusal {
+            diagnostic: r.diagnostic.with_fixes(fixes.unwrap_or_default()),
+            ..r
+        }
+    }
+
+    fn hole_take<'s>(
+        &self,
+        st: &'s State,
+        n: Name,
+        path: &str,
+    ) -> Option<&'s (Name, String, usize, Vec<Fix>)> {
         st.taken_at
             .iter()
             .rev()
-            .find(|(h, p, _)| *h == n && p == path)
-            .map(|(_, _, l)| *l)
-            .unwrap_or(self.body.names[n.index()].line)
+            .find(|(h, p, ..)| *h == n && p == path)
     }
 
     /// Every name in `names` still held is a leak where the scope ends:
@@ -1799,7 +1812,8 @@ impl<'b> Kernel<'b> {
         match st.holes.iter().find(|(h, _)| *h == n) {
             Some((_, path)) => {
                 let (l, here) = (self.hole_line(st, n, path), self.here);
-                Err(self.refuse(l, rule!(WholeWithHole, s = self.src(n), path, here, l)))
+                let r = self.refuse(l, rule!(WholeWithHole, s = self.src(n), path, here, l));
+                Err(self.copying_hole(st, n, path, r))
             }
             None => Ok(()),
         }
@@ -1970,7 +1984,8 @@ impl<'b> Kernel<'b> {
                 // Both lines name the storage that moved, not the longer path
                 // read, as in `used_after` and `movecheck::check_use`.
                 let (s, here) = (self.src(n), self.here);
-                return Err(self.refuse(self.hole_line(st, n, h), rule!(ReadInHole, s, h, here)));
+                let r = self.refuse(self.hole_line(st, n, h), rule!(ReadInHole, s, h, here));
+                return Err(self.copying_hole(st, n, h, r));
             }
         }
         Ok(())
@@ -1992,7 +2007,13 @@ impl<'b> Kernel<'b> {
         self.place(st, p)?;
         if let Some((n, path)) = root_of(p) {
             if self.owned(n) && !path.is_empty() {
-                st.taken_at.push((n, path.clone(), self.here));
+                let fixes = self.body.consumes.get(&(self.stmt, n, path.clone()));
+                st.taken_at.push((
+                    n,
+                    path.clone(),
+                    self.here,
+                    fixes.cloned().unwrap_or_default(),
+                ));
                 st.holes.push((n, path));
                 st.holes.sort();
             }
@@ -2882,7 +2903,8 @@ impl<'b> Kernel<'b> {
             (Point::Join, _) => self.refuse(self.here, rule!(JoinHole, info = info())),
             (Point::Back, Some(h)) => {
                 let r = rule!(LoopHole, s, h = h.replace(".[]", "[..]"));
-                self.refuse(self.hole_line(a, n, h), r)
+                let r = self.refuse(self.hole_line(a, n, h), r);
+                self.copying_hole(a, n, h, r)
             }
             (Point::Back, None) => self.refuse(self.here, rule!(LoopHoleAt, info = info())),
         })

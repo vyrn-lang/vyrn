@@ -992,12 +992,17 @@ pub struct Body {
     /// not per instance: a non-Bool condition, a `for` over what no loop walks.
     pub mistyped: Vec<(usize, String)>,
     /// Where the reader spelled a take of a heap name, keyed by the statement
-    /// and the name: the line and the column just past its path. `None` where
-    /// the statement takes the name twice, so a refusal cannot tell which take
-    /// it is about. A name read out of a place is the temporary that read
-    /// made. A `let` that binds a name to a place read keys that read by the
-    /// bound name.
-    pub ends: std::collections::HashMap<(NodeId, Name), Option<(usize, usize)>>,
+    /// and the name: the line and the column just past its path. Where the
+    /// statement takes the name twice, the first take is kept: the kernel walks
+    /// the rows in the order the builder wrote them, and the first take of a
+    /// name is the one it moves or refuses. A name read out of a place is the
+    /// temporary that read made. A `let` that binds a name to a place read
+    /// keys that read by the bound name.
+    pub ends: std::collections::HashMap<(NodeId, Name), (usize, usize)>,
+    /// The edits that turn a prefix `consume` of a place into a copy, keyed by
+    /// the statement, the root name and the hole path the take leaves: empty
+    /// where the reader's text does not place the take on one line.
+    pub consumes: std::collections::HashMap<(NodeId, Name, String), Vec<crate::diagnostics::Fix>>,
 }
 
 /// The shape of a candidate construct, which `vyrn_lower::core::last_owner` asks.

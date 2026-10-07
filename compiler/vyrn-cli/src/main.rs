@@ -2618,16 +2618,14 @@ fn fix_cmd(call: &Call) -> Outcome {
 
     loop {
         let diags = fix_diagnostics(&p, &root_key, &text);
-        let mut edits: Vec<(usize, usize)> = Vec::new();
+        let mut edits: Vec<Fix> = Vec::new();
         let mut elsewhere: Vec<String> = Vec::new();
         for d in &diags {
             let first = d.message.lines().next().unwrap_or_default();
             match (&d.file, d.fixes.as_slice()) {
                 (Some(f), _) => elsewhere.push(format!("{f}:{}: {first} (another file)", d.line)),
                 (None, []) => note(&mut refused, format!("{root_key}:{}: {first}", d.line)),
-                (None, fixes) => {
-                    edits.extend(fixes.iter().map(|Fix::Copy { line, col }| (*line, *col)))
-                }
+                (None, fixes) => edits.extend_from_slice(fixes),
             }
         }
         if edits.is_empty() {
@@ -2636,9 +2634,9 @@ fn fix_cmd(call: &Call) -> Outcome {
             }
             break;
         }
-        edits.sort_unstable();
+        edits.sort_unstable_by_key(|f| f.edit());
         edits.dedup();
-        let next = match insert_copies(&text, &edits) {
+        let next = match apply_edits(&text, &edits) {
             Ok(t) => t,
             Err(why) => {
                 note(&mut refused, format!("{root_key}: {why}"));
@@ -2654,11 +2652,15 @@ fn fix_cmd(call: &Call) -> Outcome {
             break;
         }
         text = next;
-        applied.extend(
-            edits
-                .iter()
-                .map(|(line, col)| format!("{root_key}:{line}:{col}: `.copy()` inserted")),
-        );
+        applied.extend(edits.iter().map(|f| {
+            let (line, col, del, _) = f.edit();
+            let what = if del == 0 {
+                "`.copy()` inserted"
+            } else {
+                "`consume` removed"
+            };
+            format!("{root_key}:{line}:{col}: {what}")
+        }));
         rounds += 1;
         // Every round reduces the count; the bound stops a file with hundreds
         // of sites, which can run again.
@@ -2694,27 +2696,30 @@ fn fix_diagnostics(p: &Project, root_key: &str, text: &str) -> Vec<Diagnostic> {
     }
 }
 
-/// Puts `.copy()` at each 1-based `(line, col)` of `at`, sorted ascending and
-/// distinct, a column counting characters. The insertions run from the end, so
-/// none moves another's position.
-fn insert_copies(text: &str, at: &[(usize, usize)]) -> Result<String, String> {
+/// Applies each of `at`, sorted ascending by position and distinct, a column
+/// counting characters. The edits run from the end, so none moves another's
+/// position.
+fn apply_edits(text: &str, at: &[Fix]) -> Result<String, String> {
     let starts: Vec<usize> = std::iter::once(0)
         .chain(text.match_indices('\n').map(|(i, _)| i + 1))
         .collect();
     let mut out = text.to_string();
-    for &(line, col) in at.iter().rev() {
+    for f in at.iter().rev() {
+        let (line, col, del, with) = f.edit();
         let start = *starts
             .get(line.wrapping_sub(1))
             .ok_or_else(|| format!("no line {line}"))?;
         let end = starts.get(line).map_or(text.len(), |e| e - 1);
         let l = &text[start..end];
-        let off = l
-            .char_indices()
-            .map(|(i, _)| i)
-            .chain([l.len()])
-            .nth(col.wrapping_sub(1))
-            .ok_or_else(|| format!("line {line} has no column {col}"))?;
-        out.insert_str(start + off, ".copy()");
+        // The byte offset of the character `n` places in, `l.len()` for one past the end.
+        let offset = |n: usize| {
+            let mut at = l.char_indices().map(|(i, _)| i).chain([l.len()]);
+            at.nth(n)
+                .ok_or_else(|| format!("line {line} has no column {}", n + 1))
+        };
+        let from = offset(col.wrapping_sub(1))?;
+        let to = offset(col.wrapping_sub(1) + del)?;
+        out.replace_range(start + from..start + to, with);
     }
     Ok(out)
 }
@@ -5612,9 +5617,10 @@ another bench   # trailing reason
     }
 
     #[test]
-    fn insert_copies_counts_columns_in_characters_and_runs_from_the_end() {
+    fn apply_edits_counts_columns_in_characters_and_runs_from_the_end() {
         let text = "let δata = read()\nprint(δata) print(δata)\n";
-        let fixed = insert_copies(text, &[(2, 11), (2, 23)]).unwrap();
+        let copy = |line, col| Fix::Copy { line, col };
+        let fixed = apply_edits(text, &[copy(2, 11), copy(2, 23)]).unwrap();
         assert_eq!(
             fixed,
             "let δata = read()\nprint(δata.copy()) print(δata.copy())\n"
@@ -5622,9 +5628,48 @@ another bench   # trailing reason
     }
 
     #[test]
-    fn insert_copies_refuses_a_position_past_the_line() {
-        assert!(insert_copies("a\n", &[(1, 3)]).is_err());
-        assert!(insert_copies("a\n", &[(3, 1)]).is_err());
+    fn apply_edits_refuses_a_position_past_the_line() {
+        let copy = |line, col| [Fix::Copy { line, col }];
+        assert!(apply_edits(
+            "a
+",
+            &copy(1, 3)
+        )
+        .is_err());
+        assert!(apply_edits(
+            "a
+",
+            &copy(3, 1)
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn apply_edits_deletes_the_keyword_and_inserts_the_call() {
+        let fixes = [
+            Fix::Unconsume {
+                line: 1,
+                col: 9,
+                len: 9,
+            },
+            Fix::Copy { line: 1, col: 21 },
+        ];
+        assert_eq!(
+            apply_edits(
+                "let a = consume  p.x
+",
+                &fixes
+            )
+            .unwrap(),
+            "let a = p.x.copy()
+"
+        );
+        assert!(apply_edits(
+            "a
+",
+            &fixes[..1]
+        )
+        .is_err());
     }
 
     #[test]

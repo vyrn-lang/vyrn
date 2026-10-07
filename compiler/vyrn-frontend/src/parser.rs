@@ -2984,9 +2984,10 @@ impl Parser {
                 if id == "consume"
                     && matches!(self.tokens[self.pos + 1].tok, Tok::Ident(_) | Tok::Vself) =>
             {
+                let id = self.spelled();
                 self.advance();
                 Ok(Expr::Consume {
-                    id: Id::NEW,
+                    id,
                     place: Box::new(self.postfix()?),
                     line,
                 })
