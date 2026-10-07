@@ -135,8 +135,9 @@ fn take_names_a_place(
     if vyrn_frontend::ast::place_path(e).is_some() {
         return Ok(());
     }
-    if let Some((root, path)) = vyrn_frontend::project::element_path(e, places) {
-        let more = vec![rule!(SwapRemove, root).render()];
+    if let Some((_, path)) = vyrn_frontend::project::element_path(e, places) {
+        let container = vyrn_frontend::project::element_container(&path);
+        let more = vec![rule!(SwapRemove, container).render()];
         return refuse(rule!(ElementTaken, path), more, line);
     }
     let rule = match by_loop {

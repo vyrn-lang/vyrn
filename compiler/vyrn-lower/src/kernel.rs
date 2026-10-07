@@ -1454,9 +1454,10 @@ impl<'b> Kernel<'b> {
             _ => path.as_str(),
         };
         if self.takes.get() == Taker::Declared && path.contains('[') {
+            let container = vyrn_frontend::project::element_container(path);
             return vec![
                 rule!(CopyForCallee, path).render(),
-                rule!(SwapRemove, root).render(),
+                rule!(SwapRemove, container).render(),
             ];
         }
         let takeable = root != path && !element && self.root_owns(st, n);
