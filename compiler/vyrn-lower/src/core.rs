@@ -135,8 +135,9 @@ fn take_names_a_place(
     if vyrn_frontend::ast::place_path(e).is_some() {
         return Ok(());
     }
-    if let Some((root, path)) = vyrn_frontend::project::element_path(e, places) {
-        let more = vec![rule!(SwapRemove, root).render()];
+    if let Some((_, path)) = vyrn_frontend::project::element_path(e, places) {
+        let container = vyrn_frontend::project::element_container(&path);
+        let more = vec![rule!(SwapRemove, container).render()];
         return refuse(rule!(ElementTaken, path), more, line);
     }
     let rule = match by_loop {
@@ -1457,7 +1458,7 @@ impl<'a> Builder<'a> {
     }
 
     /// Records where `e`, taken as `n`, ends in the reader's text
-    /// ([`Body::ends`]): a name or a field, in the root module's own source.
+    /// ([`Body::ends`]): a name, a field or an element, in the root module's own source.
     fn spell_take(&mut self, e: &Expr, n: Name) {
         let at = self.spelled_end(e);
         if at.is_some() && self.frame.stmt != NodeId::NONE && self.body.names[n.index()].heap {
@@ -1468,12 +1469,14 @@ impl<'a> Builder<'a> {
         }
     }
 
-    /// The line and column just past `e`, a name or a field, where the reader
-    /// spelled it in the root module's own source.
+    /// The line and column just past `e`, a name, a field or an element,
+    /// where the reader spelled it in the root module's own source.
     fn spelled_end(&self, e: &Expr) -> Option<(usize, usize)> {
         let (end, root) = match e {
             Expr::Var { name, id, .. } => (id.col() + name.chars().count(), id),
             Expr::Field { field, id, .. } => (id.col() + field.chars().count(), id),
+            // An element is spelled at its `]`.
+            Expr::Call { name, id, .. } if name == "@at" => (id.col() + 1, id),
             _ => return None,
         };
         let spelled =
@@ -2356,8 +2359,10 @@ impl<'a> Builder<'a> {
     /// the value are the source's.
     ///
     /// The path's own indices below the root are bound to temps, root to leaf.
-    /// Nothing below the root hands a value back: the buffer the leaf writes
-    /// into is not the buffer the value reads.
+    /// Only a store to a whole name hands the old value back. A value built
+    /// from the place's own value (`s.xs = s.xs.push(v)`) is moved out first,
+    /// which leaves a hole the store fills, so a field or an element needs no
+    /// hand-back at any depth.
     #[allow(clippy::too_many_arguments)]
     fn store(
         &mut self,
@@ -2432,9 +2437,7 @@ impl<'a> Builder<'a> {
         };
         let nested = !base.is_empty();
         match leaf {
-            Step::Field(field) => {
-                self.set_field(at, name, &quoted, field, value, sid, nested, line, out)
-            }
+            Step::Field(field) => self.set_field(at, &quoted, field, value, sid, line, out),
             Step::Index(index) => self.index_set(
                 at, name, &quoted, index, value, sid, nested, whole, line, out,
             ),
@@ -2796,11 +2799,22 @@ impl<'a> Builder<'a> {
                     _ => self.val(value, out),
                 };
                 self.frame.rebinding = false;
-                let v = v?;
+                let mut v = v?;
                 let ty = match n {
                     Some(n) => self.body.names[n.index()].ty.clone(),
                     None => self.ty_of(value)?,
                 };
+                // A slot that owns its value keeps owning: a borrow stored
+                // into it is copied, as `let mut` binds one (`copies`), and
+                // the store releases the old value.
+                if let (Some(n), Val::Name(m)) = (n, &v) {
+                    if self.body.names[n.index()].releases && self.body.names[m.index()].borrow {
+                        let rhs = self.copy_rhs(v.clone(), value)?;
+                        let t = self.temp(ty.clone(), *line);
+                        self.bind(t, rhs, out);
+                        v = Val::Name(t);
+                    }
+                }
                 // The rule for a store to a name or module state: the plan
                 // says whether it releases the old value. A value that
                 // mentions the place may hand the old buffer back
@@ -2820,17 +2834,7 @@ impl<'a> Builder<'a> {
                 // that owns heap.
                 let (place, owes) = match n {
                     None => (Place::Global(name.clone()), self.owns(&ty)),
-                    Some(n) => {
-                        // A rebind answers as a `let` does: `t = d.title` is a
-                        // projection of `d`. A `mut` slot is released by its
-                        // final value, so a slot ever assigned somebody
-                        // else's place is not this frame's to release.
-                        if self.borrows(&v) && self.body.names[n.index()].releases {
-                            self.body.names[n.index()].releases = false;
-                            self.body.names[n.index()].borrow = true;
-                        }
-                        (Place::Name(n), self.body.names[n.index()].releases)
-                    }
+                    Some(n) => (Place::Name(n), self.body.names[n.index()].releases),
                 };
                 // The hand-back comes before the place's obligation: a name
                 // that owes no release still hands its buffer back, and the
@@ -3506,19 +3510,15 @@ impl<'a> Builder<'a> {
         Ok(())
     }
 
-    /// A store into `field` of the place `base`, a part of the root `name`
-    /// that the reader wrote as `quoted`. `nested` is whether the place is
-    /// below the root.
-    #[allow(clippy::too_many_arguments)]
+    /// A store into `field` of the place `base`, a part of a root that the
+    /// reader wrote as `quoted`.
     fn set_field(
         &mut self,
         base: (Place, Type),
-        name: &str,
         quoted: &str,
         field: &str,
         value: &'a Expr,
         sid: NodeId,
-        nested: bool,
         line: usize,
         out: &mut Vec<St>,
     ) -> Result<(), Gap> {
@@ -3526,20 +3526,11 @@ impl<'a> Builder<'a> {
         let (base, bty) = base;
         let fty = self.field_ty(&bty, field, line)?;
         let v = self.proven_val(value, Some(&fty), line, out)?;
-        // A name store's hand-back rule, one dot down:
-        // `s.dense = s.dense.push(i)` releases nothing.
-        let handed_back = !nested
-            && vyrn_frontend::ast::mentions_place(value, name)
-            && !self.fresh_str(&fty, value);
-        let releases = !handed_back && self.own.placed.stores.contains_key(&sid);
+        let releases = self.own.placed.stores.contains_key(&sid);
         out.push(St::Store {
             place: Place::Field(Box::new(base), field.to_string()),
             value: v,
-            old: if handed_back {
-                Old::Transferred
-            } else {
-                self.old_for(&fty, releases)
-            },
+            old: self.old_for(&fty, releases),
             line,
             site: Site::Node(sid),
             releases,
@@ -3684,7 +3675,8 @@ impl<'a> Builder<'a> {
 
     /// A store into the element or the entry of the place `base` at `index`, a
     /// part of the root `name` that the reader wrote as `quoted`. `whole` is
-    /// the place `atSet` yields where `index` is a user container's own.
+    /// the place `atSet` yields where `index` is a user container's own;
+    /// without it, a user container below the root (`nested`) is a gap.
     #[allow(clippy::too_many_arguments)]
     fn index_set(
         &mut self,
@@ -3745,22 +3737,11 @@ impl<'a> Builder<'a> {
             }
         }
         let site = Site::Node(sid);
-        // The same hand-back, and the index counts too: `xs[i] = xs[j]` and
-        // `xs[xs.length - 1] = v` read the buffer the store writes into.
-        // `xs[i] = xs[j].copy()` hands nothing back.
-        let handed_back = !nested
-            && ((vyrn_frontend::ast::mentions_place(value, name)
-                && !self.store_is_fresh(value, name))
-                || vyrn_frontend::ast::mentions_place(index, name));
-        let releases = !handed_back && self.own.placed.stores.contains_key(&sid);
+        let releases = self.own.placed.stores.contains_key(&sid);
         out.push(St::Store {
             place,
             value: v,
-            old: if handed_back {
-                Old::Transferred
-            } else {
-                self.old_for(&ety, releases)
-            },
+            old: self.old_for(&ety, releases),
             line,
             site,
             releases,
@@ -5340,6 +5321,12 @@ impl<'a> Builder<'a> {
         self.frame.drain += 1;
         let v = self.read_at(e, out, None);
         self.frame.drain -= 1;
+        self.copy_rhs(v?, e)
+    }
+
+    /// The copy of `v`, the value of `e`: the type's `impl Copy` where it has
+    /// one, `@copy` otherwise.
+    fn copy_rhs(&self, v: Val, e: &Expr) -> Result<Rhs, Gap> {
         let copied = (self.copied(e)).and_then(|(f, s)| Some((self.fn_id(&f)?, f, s)));
         let (callee, kind, solved) = match copied {
             Some((id, f, solved)) => (f, Callee::Fn(id), solved),
@@ -5347,7 +5334,7 @@ impl<'a> Builder<'a> {
         };
         Ok(Rhs::Call {
             callee,
-            args: vec![(Arg::Val(v?), Capability::Read)],
+            args: vec![(Arg::Val(v), Capability::Read)],
             write_back: false,
             kind,
             ret: Some(self.ty_of(e)?),

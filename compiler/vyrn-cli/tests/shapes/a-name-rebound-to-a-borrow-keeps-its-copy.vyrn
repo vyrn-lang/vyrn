@@ -1,0 +1,32 @@
+// a `mut` name that owns its value stays an owner when it is rebound to a borrow
+// `s = xs[1]` stores a copy and releases the value `s` held, so nothing leaks
+// and `s` never shares a buffer with the place it read.
+type P = { name: String }
+type A = { p: P }
+type R = { a: A }
+fn mkSs() -> Array<String> {
+    return ["x" + "y", "z" + "w", "u" + "v"]
+}
+fn vyrnTestMain() -> Int64 {
+    let xs = mkSs()
+    let r = R { a: A { p: P { name: "n" + "mm" } } }
+    let mut m: Map<String, String> = [:]
+    m["k"] = "v" + "www"
+    let mut s = "a" + "b"
+    s = xs[1]
+    let mut total = s.byteLength
+    s = r.a.p.name
+    total = total + s.byteLength
+    if let Some(v) = m["k"] {
+        s = v
+    }
+    total = total + s.byteLength
+    let mut i = 0
+    while i < 1000 {
+        s = xs[i % 3]
+        total = total + s.byteLength
+        i = i + 1
+    }
+    s = s + "!!"
+    return total + s.byteLength + xs[0].byteLength
+}

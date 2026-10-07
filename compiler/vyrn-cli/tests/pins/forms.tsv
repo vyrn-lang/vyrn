@@ -19,7 +19,7 @@ Expr::Str	0	2	0	0	6	0	1	2	11
 Expr::Var	12	21	0	0	45	0	0	0	78
 Expr::Unary	3	3	0	0	7	0	0	1	14
 Expr::Binary	2	2	0	0	11	0	0	0	15
-Expr::Call	7	16	0	0	36	0	0	0	59
+Expr::Call	8	16	0	0	37	0	0	0	61
 Expr::Match	9	4	0	0	8	0	0	0	21
 Expr::IfExpr	1	3	0	0	5	0	0	0	9
 Expr::Try	1	2	0	0	4	0	0	0	7
@@ -34,4 +34,4 @@ Pattern::Variant	11	2	0	0	3	0	2	0	18
 Pattern::Success	1	3	0	0	4	0	1	0	9
 Pattern::Failure	1	2	0	0	2	0	0	0	5
 Pattern::Other	2	3	0	0	2	0	1	0	8
-all	86	128	0	0	269	0	12	9	504
+all	87	128	0	0	270	0	12	9	506

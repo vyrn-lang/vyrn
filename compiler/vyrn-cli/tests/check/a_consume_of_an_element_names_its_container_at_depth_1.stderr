@@ -1,0 +1,2 @@
+a_consume_of_an_element_names_its_container_at_depth_1.vyrn:1:0: `b.xs[0]` may not be taken — an element is not a place a take reaches
+  fix: `b.xs.swapRemove(..)` returns the element and leaves the container one shorter

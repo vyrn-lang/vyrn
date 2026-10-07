@@ -1082,8 +1082,8 @@ rules! {
     // Shape E: the builder's, at the construct.
 
     ElementTaken { path } "`{path}` may not be taken — an element is not a place a take reaches";
-    SwapRemove { root }
-        "`{root}.swapRemove(..)` returns the element and leaves the container one shorter";
+    SwapRemove { container }
+        "`{container}.swapRemove(..)` returns the element and leaves the container one shorter";
     LoopTakesNothing {}
         "`consume` here has nothing to take — the loop already owns a container that is not a \
         binding"

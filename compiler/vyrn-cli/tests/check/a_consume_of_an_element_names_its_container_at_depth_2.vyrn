@@ -1,0 +1,1 @@
+type B = { xs: Array<String> } type C = { c: B } fn go() { let mut b = C { c: B { xs: ["a" + "b"] } } let mut out: Array<String> = [] out.push(consume b.c.xs[0]) } fn main() -> Int64 { return 0 }

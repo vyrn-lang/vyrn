@@ -1440,7 +1440,11 @@ impl<'b> Kernel<'b> {
         let path = &path;
         // An element has no take (`check_take` refuses one), so for a declared
         // `consume` taker the menu names copy and `swapRemove` instead
-        // (`movecheck::refuse_projected_arg`). Only an element path has `[`.
+        // (`movecheck::refuse_projected_arg`), and for any other taker copy
+        // alone. Only an element path has `[`; an alias's path has `.[]`
+        // where the reader's text has none (`b.name` after `let b = ps[1]`).
+        let element =
+            path.contains('[') || st.alias.get(&n).is_some_and(|a| a.path.contains(".[]"));
         let root = match st.alias.get(&n) {
             Some(Alias {
                 root: Root::N(m), ..
@@ -1450,12 +1454,13 @@ impl<'b> Kernel<'b> {
             _ => path.as_str(),
         };
         if self.takes.get() == Taker::Declared && path.contains('[') {
+            let container = vyrn_frontend::project::element_container(path);
             return vec![
                 rule!(CopyForCallee, path).render(),
-                rule!(SwapRemove, root).render(),
+                rule!(SwapRemove, container).render(),
             ];
         }
-        let takeable = root != path && self.root_owns(st, n);
+        let takeable = root != path && !element && self.root_owns(st, n);
         let mut fixes = Vec::new();
         if takeable {
             fixes.push(format!(
@@ -2404,13 +2409,14 @@ impl<'b> Kernel<'b> {
                 }
                 // The write-back of the place desugar puts the alias
                 // back into the place it reads: no owner changes, and the
-                // alias ends.
+                // alias ends. A path through an element or a key erases the
+                // index, so it names no one place: `xs[0] = xs[1]` is a take
+                // of an alias, refused.
                 if let Val::Name(m) = value {
                     let into = self.src_of(st, place);
-                    let back = st
-                        .alias
-                        .get(m)
-                        .is_some_and(|a| a.root == into.root && a.path == into.path);
+                    let back = st.alias.get(m).is_some_and(|a| {
+                        a.root == into.root && a.path == into.path && !a.path.contains(".[]")
+                    });
                     if back {
                         self.read(st, value)?;
                         st.dead.insert(*m, (self.here, self.place_text(place)));

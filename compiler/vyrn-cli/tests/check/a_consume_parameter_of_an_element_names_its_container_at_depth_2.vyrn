@@ -1,0 +1,1 @@
+type B = { xs: Array<String> } type C = { c: B } fn take(s: consume String) -> Int64 { return s.byteLength } fn go() -> Int64 { let mut b = C { c: B { xs: ["a" + "b"] } } return take(b.c.xs[0]) } fn main() -> Int64 { return 0 }

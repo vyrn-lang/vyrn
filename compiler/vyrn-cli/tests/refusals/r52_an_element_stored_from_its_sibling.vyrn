@@ -1,0 +1,10 @@
+// An element is not a place a take reaches, so an element read stored into
+// another slot would leave two slots on one buffer. An index names no one
+// place: the store is refused when `i == j` too.
+fn main() -> Int64 {
+    let mut xs = ["a" + "b", "c" + "d"]
+    let i = 0
+    let j = 1
+    xs[i] = xs[j]
+    return xs[0].byteLength
+}

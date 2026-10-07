@@ -384,6 +384,12 @@ fn census() -> Vec<Row> {
             "`k` is moved into `m` by this store, but the value changes `k` first",
             Kernel::Elsewhere,
         ),
+        row(
+            "r52_an_element_stored_from_its_sibling.vyrn",
+            "rule 2: an element read may not be stored into an element",
+            "`xs[j]` may not be stored into `xs` — it is read out of a place that owns it",
+            Kernel::Its,
+        ),
     ]
 }
 
