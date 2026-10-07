@@ -3140,8 +3140,20 @@ impl Parser {
                 self.no_struct = false;
                 let idx = self.expr()?;
                 self.no_struct = saved;
+                // The `]`'s column: a `.copy()` fix lands after it.
+                let id = match self.line() == line {
+                    true => self.spelled(),
+                    false => Id::NEW,
+                };
                 self.eat(&Tok::RBracket)?;
-                return Ok(Expr::call("@at", vec![e, idx], line));
+                return Ok(Expr::Call {
+                    name: "@at".to_string(),
+                    args: vec![e, idx],
+                    dot: false,
+                    type_args: Vec::new(),
+                    line,
+                    id,
+                });
             }
             _ => Ok(e),
         }

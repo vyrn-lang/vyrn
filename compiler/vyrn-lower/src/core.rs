@@ -1457,7 +1457,7 @@ impl<'a> Builder<'a> {
     }
 
     /// Records where `e`, taken as `n`, ends in the reader's text
-    /// ([`Body::ends`]): a name or a field, in the root module's own source.
+    /// ([`Body::ends`]): a name, a field or an element, in the root module's own source.
     fn spell_take(&mut self, e: &Expr, n: Name) {
         let at = self.spelled_end(e);
         if at.is_some() && self.frame.stmt != NodeId::NONE && self.body.names[n.index()].heap {
@@ -1468,12 +1468,14 @@ impl<'a> Builder<'a> {
         }
     }
 
-    /// The line and column just past `e`, a name or a field, where the reader
-    /// spelled it in the root module's own source.
+    /// The line and column just past `e`, a name, a field or an element,
+    /// where the reader spelled it in the root module's own source.
     fn spelled_end(&self, e: &Expr) -> Option<(usize, usize)> {
         let (end, root) = match e {
             Expr::Var { name, id, .. } => (id.col() + name.chars().count(), id),
             Expr::Field { field, id, .. } => (id.col() + field.chars().count(), id),
+            // An element is spelled at its `]`.
+            Expr::Call { name, id, .. } if name == "@at" => (id.col() + 1, id),
             _ => return None,
         };
         let spelled =

@@ -2432,6 +2432,13 @@ fn an_overwritten_value_is_released_at_every_depth() {
     shape_runs_clean("an-overwritten-value-is-released-at-every-depth", "30\n");
 }
 
+// Every accepted form of an element stored from an element, and the
+// write-backs beside it, under the free audit (`r52` is the refused form).
+#[test]
+fn an_element_stored_from_an_element_is_a_copy() {
+    shape_runs_clean("an-element-stored-from-an-element-is-a-copy", "1132\n");
+}
+
 #[test]
 fn a_for_over_a_user_container_in_a_field_runs() {
     shape_runs_clean(

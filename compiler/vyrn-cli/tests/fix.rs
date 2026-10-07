@@ -194,6 +194,21 @@ fn it_copies_the_place_a_rebuilt_binding_reads_where_it_is_bound() {
 }
 
 #[test]
+fn it_copies_an_element_stored_from_its_sibling() {
+    // The edit lands after the `]`.
+    let src = "type R = { ss: Array<String> }\n\
+               fn main() -> Int64 {\n\
+                   let mut r = R { ss: [\"a\" + \"b\", \"c\"] }\n\
+                   r.ss[0] = r.ss[1]\n\
+                   return r.ss[0].byteLength\n\
+               }\n";
+    let (log, after) = fix("element-sibling", src);
+    assert!(after.contains("r.ss[0] = r.ss[1].copy()\n"), "{after}");
+    assert!(log.contains("1 fix(es) applied, 0 left"), "{log}");
+    assert!(checks("element-sibling-after", &after), "{after}");
+}
+
+#[test]
 fn it_copies_the_consumed_argument_that_a_place_of_it_overlaps() {
     let src = "type Cell = { name: String, v: Float64 }\n\
                fn g(a: consume Cell, b: String) -> Int64 {\n\
