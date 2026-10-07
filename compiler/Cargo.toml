@@ -6,9 +6,15 @@
 #   - vyrn-cli      : the `vyrn` driver
 #
 # THE PROPERTY WORTH DEFENDING: `cargo build` and `cargo test` work on a machine
-# with no LLVM, no clang and no wasi sysroot. A contributor can hack on the
-# frontend and the checker — and run the whole test suite —
-# without installing a C toolchain. Anything that would break THAT is excluded.
+# with no LLVM, no clang and no wasi sysroot, beyond the linker toolchain that
+# rustc itself needs on each platform (MSVC Build Tools, `cc`, Xcode command
+# line tools). A contributor can hack on the frontend and the checker, and run
+# the whole test suite, without installing anything else. Anything that would
+# break THAT is excluded.
+#
+# One crate compiles C with that toolchain (C++ under MSVC): `mimalloc`, the
+# `vyrn` binary's allocator. It takes 37% off a wasm build's wall time and 32%
+# to 37% off its CPU.
 #
 # What is NOT a rule, though an earlier version of this comment implied it was:
 # "no external crates". That was generalized out of the sentence above, where it

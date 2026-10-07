@@ -47,7 +47,7 @@ The Rust crates the compiler builds against are fetched by Cargo, not vendored,
 so their sources carry their own notices. Every one is permissive:
 `wasm-encoder` and `wasmtime` (Apache-2.0 WITH LLVM-exception, Bytecode
 Alliance), `lsp-server`, `serde` and `serde_json` (MIT OR Apache-2.0),
-`lsp-types` (MIT). The VS Code extension bundles `vscode-languageclient` and its
+`lsp-types` and `mimalloc` (MIT). The VS Code extension bundles `vscode-languageclient` and its
 transitive dependencies (MIT, Microsoft).
 
 A native binary `vyrn build` produces also links the C library and compiler
