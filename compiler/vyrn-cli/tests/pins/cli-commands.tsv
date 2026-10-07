@@ -12,7 +12,7 @@ fmt	182	5
 dev	140	12
 fix	129	1
 test, bench	127	2
-build, bench	100	0
+build, bench	104	0
 (global)	91	2
 run	71	3
 vendor	66	6
