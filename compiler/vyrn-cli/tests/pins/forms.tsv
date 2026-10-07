@@ -11,7 +11,7 @@ Stmt::ForIn	1	2	0	0	5	0	0	0	8
 Stmt::Drop	1	4	0	0	2	0	0	0	7
 Stmt::Expr	0	2	0	0	8	0	0	0	10
 Stmt::Region	1	1	0	0	3	0	0	0	5
-Expr::Int	0	5	0	0	8	0	0	1	14
+Expr::Int	0	5	0	0	9	0	0	1	15
 Expr::Byte	1	3	0	0	7	0	0	1	12
 Expr::Float	1	4	0	0	6	0	0	1	12
 Expr::Bool	3	2	0	0	5	0	0	1	11
@@ -34,4 +34,4 @@ Pattern::Variant	11	2	0	0	3	0	2	0	18
 Pattern::Success	1	3	0	0	4	0	1	0	9
 Pattern::Failure	1	2	0	0	2	0	0	0	5
 Pattern::Other	2	3	0	0	2	0	1	0	8
-all	87	132	0	0	265	0	12	9	505
+all	87	132	0	0	266	0	12	9	506

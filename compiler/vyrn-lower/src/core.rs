@@ -2438,10 +2438,10 @@ impl<'a> Builder<'a> {
         }
     }
 
-    /// The place `steps` name inside `place`, whose type is `ty`. Each index is
-    /// bound to a temp `{tmp}[]idx`, so a step's index runs once, before the
-    /// next step's; the last is read where it stands unless `bind_last`. `tmp`
-    /// names the path so far.
+    /// The place `steps` name inside `place`, whose type is `ty`. Each index but
+    /// a literal is bound to a temp `{tmp}[]idx`, so a step's index runs once,
+    /// before the next step's; the last is read where it stands unless
+    /// `bind_last`. `tmp` names the path so far.
     #[allow(clippy::too_many_arguments)]
     fn walk(
         &mut self,
@@ -2469,6 +2469,7 @@ impl<'a> Builder<'a> {
                 }
                 At::Index(index) => {
                     let bound = (bind_last || k + 1 < steps.len())
+                        && !matches!(index, Expr::Int(..))
                         && self.ty_of(index).is_ok_and(|t| !self.owns(&t));
                     let at = if bound {
                         self.bind_temp(&format!("{tmp}[]idx"), index, line, out)?
