@@ -342,3 +342,4 @@ pull request.
 - The benchmark harness runs by hand, not in CI; CI checks that each game program still prints its fixture.
 - CI times benches only on pushes to `main`, against a baseline taken on CI hardware, with a 2x threshold. `bench --check` is the blocking half.
 - No AI attribution in commits, pull requests, code or prose.
+- A store evaluates its place, a projection's prologue included, before its value; an element's bounds check runs at the store.

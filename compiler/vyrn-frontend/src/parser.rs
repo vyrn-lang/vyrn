@@ -230,19 +230,8 @@ fn as_fn_body(src: &str) -> String {
     format!("fn __vyrn_probe__() {{\n{src}\n}}")
 }
 
-/// Whether `e` is a field chain rooted at `a[i]` (`a[i].f`, `a[i].f.g`), to tell
-/// a too-deep element write (`a[i].f.g = v`, refused) from a nested record-field
-/// write (`a.b.c = v`).
-fn is_index_field_chain(e: &Expr) -> bool {
-    match e {
-        Expr::Call { name, args, .. } => name == "@at" && args.len() == 2,
-        Expr::Field { expr, .. } => is_index_field_chain(expr),
-        _ => false,
-    }
-}
-
-/// Returns the plain-variable receiver an in-place mutation writes through, for
-/// a base that may be a record field or an array element.
+/// Returns the plain-variable receiver a removal (`pop`, `swapRemove`) writes
+/// through, for a base that may be a record field or an array element.
 ///
 /// The backends load and store a container's header only in a local binding. A
 /// base like `r.a` or `rows[0]` moves out into an unspellable temp, is mutated
@@ -250,11 +239,10 @@ fn is_index_field_chain(e: &Expr) -> bool {
 ///
 /// Returns the receiver and three statement lists. The group runs `hoists`,
 /// then `moves`, then the mutation, then `post`; `moves` and `post` nest
-/// outermost-first and outermost-last, so `r.inner.a[i] = v` works. Nothing may
+/// outermost-first and outermost-last, so `r.inner.a.pop()` works. Nothing may
 /// read the place while it is out, so callers put their operand evaluations in
-/// `hoists`, left to right: in `rows[f()][g()] = h()` each call runs once, in
-/// source order. A base that is neither (a call result, a temporary) yields
-/// `None`.
+/// `hoists`, left to right. A base that is neither (a call result, a temporary)
+/// yields `None`.
 pub fn place_receiver(
     base: &Expr,
     line: usize,
@@ -326,11 +314,13 @@ pub fn place_receiver(
 
 /// Whether evaluating `e` can reach a place: a record field or an array element.
 ///
-/// A place desugar takes its container out, so an operand that could read one
-/// runs before the move (`u.xs[0] = u.xs[2] + 5`). Literals and variables stay
-/// in place: `t.rows[k] = []` hoisted would give an empty literal no type. A
-/// call is assumed to reach a place, since it can read a module-level record.
-fn reads_place(e: &Expr) -> bool {
+/// A removal's desugar takes its container out, so an operand that could read
+/// one runs before the move (`u.xs.swapRemove(u.xs.length - 1)`). Literals and
+/// variables stay in place. A call is assumed to reach a place, since it can
+/// read a module-level record. The checker types a store's operand that reads
+/// a place with no expectation below the root, as a hoisted operand: `r.rows[0] =
+/// [g()]` is refused where `rows[0] = [g()]` is not.
+pub fn reads_place(e: &Expr) -> bool {
     match e {
         Expr::Int(_, _)
         | Expr::Byte(_, _)
@@ -390,67 +380,36 @@ fn hoist_mutating_receiver(e: &mut Expr, line: usize) -> Option<(Vec<Stmt>, Vec<
     Some((hoists, post))
 }
 
-/// Returns the statements a store through a non-slot place becomes.
+/// Returns the root's id and name, the steps from the root to the place the
+/// leaf writes into, and the leaf, of the store target `e`: a field or an
+/// element of a place (`a`, `a.f`, `a[i]`, `@slot(a, i)`, to any depth). `None`
+/// for a target with no address (a call result, a literal) and for a bare name,
+/// which is no [`Stmt::Store`].
 ///
 /// Two callers: [`Parser::stmt`] for `a[i] = v` (parsed as `@at(a, i)`), and
-/// `project.rs` for a store through a projection (`@slot`). Both use
-/// [`place_receiver`]'s desugar: move the container into a temp, store, move it
-/// back. No backend needs an address-of. The move-out copies a growable
-/// container's header and a whole value held inline.
-///
-/// `None` means no store reaches the target (a call result, a literal, a
-/// temporary); the caller keeps its own refusal.
-pub fn store_stmts(place: &Expr, value: &Expr, line: usize) -> Option<Vec<Stmt>> {
-    match place {
-        Expr::Var { name, id, .. } => Some(vec![Stmt::Assign {
-            id: Id::at(id.col()),
-            name: name.clone(),
-            value: value.clone(),
-            line,
-        }]),
+/// `project.rs` for the place a projection's `atSet` yields.
+pub fn store_target(e: &Expr) -> Option<(Id, String, Vec<Step>, Step)> {
+    let (id, name, mut base) = place_steps(e)?;
+    let leaf = base.pop()?;
+    Some((id, name, base, leaf))
+}
+
+/// Returns the root's id and name of the place `e`, and the steps from the
+/// root to `e`, root first. `None` where `e` is no place.
+pub fn place_steps(e: &Expr) -> Option<(Id, String, Vec<Step>)> {
+    match e {
+        Expr::Var { name, id, .. } => Some((Id::at(id.col()), name.clone(), Vec::new())),
         Expr::Field { expr, field, .. } => {
-            let (recv, mut out, moves, post) = place_receiver(expr, line)?;
-            let value = if moves.is_empty() {
-                value.clone()
-            } else {
-                hoist_operand(value.clone(), format!("{recv}#val"), &mut out, line)
-            };
-            out.extend(moves);
-            out.push(Stmt::store(recv, Step::Field(field.clone()), value, line));
-            out.extend(post);
-            Some(out)
+            let (id, name, mut path) = place_steps(expr)?;
+            path.push(Step::Field(field.clone()));
+            Some((id, name, path))
         }
-        // An element of a place: `return self.data[j]`, or the seeded row's
-        // `yield @slot(self, i)`.
         Expr::Call { name, args, .. }
             if (name == crate::project::AT || name == crate::project::ELEM) && args.len() == 2 =>
         {
-            let (recv, mut out, moves, post) = place_receiver(&args[0], line)?;
-            // With a move-out, the index and the value run first, in source order.
-            let (index, value) = if moves.is_empty() {
-                (args[1].clone(), value.clone())
-            } else {
-                // `#`, not `[]`: a name spelled `{recv}[]idx` reads as derived from the
-                // `{recv}[]` temp under `mentions_place`, which vetoed the store's displaced-
-                // element row and left the overwritten element with no owner (std/slots).
-                let i = hoist_operand(args[1].clone(), format!("{recv}#idx"), &mut out, line);
-                let v = hoist_operand(value.clone(), format!("{recv}#val"), &mut out, line);
-                (i, v)
-            };
-            out.extend(moves);
-            let id = match &args[0] {
-                Expr::Var { id, .. } => Id::at(id.col()),
-                _ => Id::NEW,
-            };
-            out.push(Stmt::Store {
-                id,
-                name: recv,
-                leaf: Step::Index(index),
-                value,
-                line,
-            });
-            out.extend(post);
-            Some(out)
+            let (id, name, mut path) = place_steps(&args[0])?;
+            path.push(Step::Index(args[1].clone()));
+            Some((id, name, path))
         }
         _ => None,
     }
@@ -2931,6 +2890,7 @@ impl Parser {
                 Ok(Stmt::Store {
                     id,
                     name,
+                    base: Vec::new(),
                     leaf: Step::Field(field),
                     value,
                     line,
@@ -2938,48 +2898,44 @@ impl Parser {
             }
             _ => {
                 let e = self.expr()?;
-                // `a[i] = v`: `postfix` parsed `a[i]` as `@at(a, i)`; a trailing `=` makes it
-                // a store.
+                // `a[i] = v`, `a[i].f = v`, `a.b[i] = v`: `postfix` parsed `a[i]` as
+                // `@at(a, i)`; a trailing `=` makes it a store. The shape is checked
+                // before the value parses, so an unreachable target gets its own
+                // refusal, not an error from the right side.
                 if *self.peek() == Tok::Eq {
-                    if let Expr::Call { name, args, .. } = &e {
-                        if name == "@at" && args.len() == 2 {
-                            // [`store_stmts`] states the rewrite, shared with a
-                            // store through a projection. The shape is checked
-                            // before the value parses, so an unreachable target
-                            // gets this refusal, not an error from the right side.
-                            if place_receiver(&args[0], line).is_some() {
-                                self.advance();
-                                let value = self.expr()?;
-                                self.eat_semi();
-                                let Some(stmts) = store_stmts(&e, &value, line) else {
-                                    unreachable!("`place_receiver` answered for this place")
-                                };
-                                return Ok(self.spliced(stmts));
-                            }
-                            return Err(refuse!("parse", line, self.col(), IndexAssignTarget));
-                        }
+                    let (mut under, mut fields) = (&e, 0);
+                    while let Expr::Field { expr, .. } = under {
+                        (under, fields) = (expr, fields + 1);
                     }
-                    // `a[i].f = v`: [`store_stmts`] moves the container out, sets the field on the
-                    // temp, and moves it back. The shape is checked before the value parses.
-                    if let Expr::Field { expr, .. } = &e {
-                        if let Expr::Call { name, args, .. } = expr.as_ref() {
-                            if name == "@at" && args.len() == 2 {
-                                if place_receiver(&args[0], line).is_some() {
-                                    self.advance();
-                                    let value = self.expr()?;
-                                    self.eat_semi();
-                                    let Some(stmts) = store_stmts(&e, &value, line) else {
-                                        unreachable!("`place_receiver` answered for this place")
-                                    };
-                                    return Ok(self.spliced(stmts));
-                                }
-                                return Err(refuse!("parse", line, self.col(), FieldAssignTarget));
-                            }
-                        }
-                        // `a[i].f.g = v` and deeper are refused: one level of field write-through.
-                        if is_index_field_chain(expr) {
+                    let over_index = matches!(under, Expr::Call { name, args, .. }
+                        if name == "@at" && args.len() == 2);
+                    // `a[i].f.g = v` and deeper are refused: one level of field write-through.
+                    // `a.b.c = v` is no store here: it falls through to a parse error.
+                    match store_target(&e) {
+                        _ if over_index && fields >= 2 => {
                             return Err(refuse!("parse", line, self.col(), FieldWriteDepth));
                         }
+                        Some((id, name, base, leaf)) if over_index => {
+                            self.advance();
+                            let value = self.expr()?;
+                            self.eat_semi();
+                            let id = if base.is_empty() { id } else { Id::NEW };
+                            return Ok(Stmt::Store {
+                                id,
+                                name,
+                                base,
+                                leaf,
+                                value,
+                                line,
+                            });
+                        }
+                        None if over_index && fields == 0 => {
+                            return Err(refuse!("parse", line, self.col(), IndexAssignTarget));
+                        }
+                        None if over_index => {
+                            return Err(refuse!("parse", line, self.col(), FieldAssignTarget));
+                        }
+                        _ => {}
                     }
                 }
                 self.eat_semi();
@@ -5227,181 +5183,99 @@ test \"t\" {{ assert(c(1) == 1) }}"
         }
     }
 
-    // `a[i].field = v` write-through.
+    // A store is one statement: its root, the steps to the place, and the leaf.
 
-    #[test]
-    fn index_field_assign_desugars_to_load_setfield_store() {
-        // `a[i].f = v`: the index binds, the element moves out, the field is set on
-        // the temp, and the temp moves back.
-        let p =
-            parse_src("fn main() -> Int64 { let mut a: Array<Int64> = []  a[0].f = 9  return 0 }");
-        let stmts = &p.functions[0].body.stmts;
-        // let a | let a[]idx=0 | let mut a[]=a[a[]idx] | a[].f=9 | a[a[]idx]=a[] | return
-        assert_eq!(stmts.len(), 6);
-        assert!(
-            matches!(&stmts[1], Stmt::Let { name, .. } if name == "a[]idx"),
-            "the index binds once, so the load and the write-back name one \
-              value — and `direct::elem_field_store` can fold the three \
-              statements into one store through the element's address"
-        );
-        match &stmts[2] {
-            Stmt::Let {
-                name,
-                mutable,
-                value: Expr::Call { name: c, args, .. },
-                ..
-            } => {
-                assert_eq!(name, "a[]");
-                assert!(
-                    mutable,
-                    "the element copy must be mut so the field store applies"
-                );
-                assert_eq!(c, "@at");
-                assert!(matches!(args[0], Expr::Var { .. }));
-            }
-            other => panic!("expected `let mut a[] = a[0]`, got {other:?}"),
-        }
-        match &stmts[3] {
-            Stmt::Store {
-                name,
-                leaf: Step::Field(field),
-                ..
-            } => {
-                assert_eq!(name, "a[]");
-                assert_eq!(field, "f");
-            }
-            other => panic!("expected a field store on the temp, got {other:?}"),
-        }
-        match &stmts[4] {
-            Stmt::Store {
-                name,
-                leaf: Step::Index(_),
-                value: Expr::Var { name: v, .. },
-                ..
-            } => {
-                assert_eq!(name, "a", "stores back into the real array binding");
-                assert_eq!(v, "a[]");
-            }
-            other => panic!("expected `a[0] = a[]`, got {other:?}"),
-        }
-    }
-
-    // Index assignment through a place.
-
-    /// `s.xs[0] = 9` lowers to three statements (move the header out, store, move
-    /// it back) and nothing that reads the array elementwise. A copying lowering is
-    /// equally correct and quadratic, so only the statement count shows it.
-    #[test]
-    fn index_assign_through_a_record_field_is_a_move() {
-        let p = parse_src(
-            "fn main() -> Int64 { let mut s: S = S { xs: [1, 2] }  s.xs[0] = 9  return 0 }",
-        );
-        let stmts = &p.functions[0].body.stmts;
-        // [0] is the `let mut s = ..`; the desugar is [1..=3].
-        match &stmts[1] {
-            Stmt::Let {
-                name,
-                mutable: true,
-                value: Expr::Field { field, .. },
-                ..
-            } => {
-                assert_eq!(name, "s.xs[]");
-                assert_eq!(field, "xs");
-            }
-            other => panic!("expected `let mut s.xs[] = s.xs`, got {other:?}"),
-        }
-        match &stmts[2] {
-            Stmt::Store {
-                name,
-                leaf: Step::Index(_),
-                ..
-            } => assert_eq!(name, "s.xs[]"),
-            other => panic!("expected `s.xs[][0] = 9`, got {other:?}"),
-        }
-        match &stmts[3] {
-            Stmt::Store {
-                name,
-                leaf: Step::Field(field),
-                value: Expr::Var { name: v, .. },
-                ..
-            } => {
-                assert_eq!(
-                    (name.as_str(), field.as_str(), v.as_str()),
-                    ("s", "xs", "s.xs[]")
-                );
-            }
-            other => panic!("expected `s.xs = s.xs[]`, got {other:?}"),
-        }
-        assert_eq!(
-            stmts.len(),
-            5,
-            "three statements plus the let and the return"
-        );
-    }
-
-    #[test]
-    fn index_assign_through_a_nested_field_nests_the_move() {
-        // Two fields deep: the outermost moves out first and back last.
-        let p = parse_src(
-            "fn main() -> Int64 { let mut o: O = O { i: I { xs: [1] } }  o.i.xs[0] = 9  return 0 }",
-        );
-        let names: Vec<String> = p.functions[0]
+    fn store(src: &str) -> (String, Vec<String>, String) {
+        let body = parse_src(&format!("fn main() -> Int64 {{ {src} return 0 }}")).functions[0]
             .body
             .stmts
-            .iter()
-            .map(|s| format!("{s:?}"))
-            .collect();
-        let joined = names.join("\n");
-        for needle in [
-            r#"Let { name: "o.i[]""#,
-            r#"Let { name: "o.i[].xs[]""#,
-            r#"Store { name: "o.i[].xs[]", leaf: Index("#,
-            r#"Store { name: "o.i[]", leaf: Field("xs")"#,
-            r#"Store { name: "o", leaf: Field("i")"#,
-        ] {
-            assert!(joined.contains(needle), "missing {needle} in\n{joined}");
-        }
+            .clone();
+        let [Stmt::Store {
+            name, base, leaf, ..
+        }, _] = &body[..]
+        else {
+            panic!("expected one store and the return, got {body:?}");
+        };
+        let step = |s: &Step| match s {
+            Step::Field(f) => format!(".{f}"),
+            Step::Index(_) => "[]".to_string(),
+        };
+        (name.clone(), base.iter().map(step).collect(), step(leaf))
     }
 
-    /// Anything the mutation's operands could read runs before the move-out, which
-    /// is why `t.xs[t.xs.length - 1] = 99` answers `99`. Only the statement order
-    /// shows it.
+    /// A nested store carries its path whole, root first, with each operand once:
+    /// no temp, no move-out, no put-back.
     #[test]
-    fn an_index_assign_through_a_field_hoists_its_operands_before_the_move() {
-        let p = parse_src(
-            "fn main() -> Int64 { let mut s: S = S { xs: [1, 2] }  s.xs[f()] = g()  return 0 }",
+    fn a_nested_store_is_one_statement_with_its_path() {
+        assert_eq!(
+            store("a[0].f = 9"),
+            ("a".into(), vec!["[]".into()], ".f".into())
         );
-        let stmts = &p.functions[0].body.stmts;
-        let shape: Vec<String> = stmts[1..=4].iter().map(|s| format!("{s:?}")).collect();
-        assert!(
-            shape[0].starts_with(r#"Let { name: "s.xs[]#idx""#) && shape[0].contains(r#""f""#),
-            "the index runs first, into its own temp: {shape:#?}"
+        assert_eq!(
+            store("s.xs[0] = 9"),
+            ("s".into(), vec![".xs".into()], "[]".into())
         );
-        assert!(
-            shape[1].starts_with(r#"Let { name: "s.xs[]#val""#) && shape[1].contains(r#""g""#),
-            "then the value, left to right: {shape:#?}"
+        assert_eq!(
+            store("o.i.xs[0] = 9"),
+            ("o".into(), vec![".i".into(), ".xs".into()], "[]".into())
         );
-        assert!(
-            shape[2].starts_with(r#"Let { name: "s.xs[]""#),
-            "only then is the field moved out: {shape:#?}"
+        let (_, base, leaf) = store("rows[f()][0] = g()");
+        assert_eq!((base.len(), leaf.as_str()), (1, "[]"));
+        let dump = format!(
+            "{:?}",
+            parse_src("fn main() -> Int64 { rows[f()][0] = g()  return 0 }").functions[0].body
         );
-        assert!(
-            shape[3].starts_with(r#"Store { name: "s.xs[]", leaf: Index("#)
-                && !shape[3].contains(r#"name: "f""#)
-                && !shape[3].contains(r#"name: "g""#),
-            "the store names only temps, so it re-evaluates nothing: {shape:#?}"
+        assert_eq!(dump.matches(r#"Call { name: "f""#).count(), 1, "{dump}");
+    }
+
+    /// `store_target` reads `@at` and `@slot` as an element step, and answers no
+    /// target for a bare name or a call result.
+    #[test]
+    fn store_target_walks_a_place_from_its_root() {
+        let place = |src: &str| match &parse_src(&format!("fn main() -> Int64 {{ let _ = {src} }}"))
+            .functions[0]
+            .body
+            .stmts[0]
+        {
+            Stmt::Let { value, .. } => store_target(value),
+            other => panic!("{other:?}"),
+        };
+        let (_, name, base, leaf) = place("a.b[i].c").unwrap();
+        assert_eq!((name.as_str(), base.len()), ("a", 2));
+        assert!(matches!(leaf, Step::Field(f) if f == "c"));
+        assert!(place("a").is_none(), "a name is no store target");
+        assert!(place("f()[0]").is_none(), "a call result has no address");
+    }
+
+    /// A target no store reaches is refused by its shape, before the value parses.
+    #[test]
+    fn a_store_target_with_no_place_is_refused_by_shape() {
+        let refused = |target: &str| {
+            let src = format!("fn main() -> Int64 {{ {target} = 1  return 0 }}");
+            let err = parse(crate::lexer::lex(&src).unwrap()).unwrap_err();
+            err.message
+        };
+        assert_eq!(
+            refused("f()[0]"),
+            crate::rules::Rule::IndexAssignTarget {}.render()
+        );
+        assert_eq!(
+            refused("f()[0].x"),
+            crate::rules::Rule::FieldAssignTarget {}.render()
+        );
+        assert_eq!(
+            refused("a[0].x.y"),
+            crate::rules::Rule::FieldWriteDepth {}.render()
         );
     }
 
-    /// The desugar names a temp and [`crate::ast::is_place_temp`] reads the name
-    /// back; every pass asks that one predicate, so a rename cannot leave a reader
+    /// A removal's desugar names a temp and [`crate::ast::is_place_temp`] reads the
+    /// name back; every pass asks that one predicate, so a rename cannot leave a reader
     /// on the old spelling.
     #[test]
     fn the_desugars_temps_answer_the_one_predicate() {
         let mut minted: Vec<(String, bool)> = Vec::new();
         for src in [
-            "fn main() -> Int64 { let mut s: S = S { xs: [1, 2] }  s.xs[f()] = g()  return 0 }",
-            "fn main() -> Int64 { let mut ps: Array<S> = []  ps[1].xs = g()  return 0 }",
             "fn main() -> Int64 { let mut s: S = S { xs: [1] }  s.xs.swapRemove(h())  return 0 }",
         ] {
             for st in &parse_src(src).functions[0].body.stmts {
@@ -5416,33 +5290,8 @@ test \"t\" {{ assert(c(1) == 1) }}"
         minted.dedup();
         assert_eq!(
             minted,
-            [
-                ("ps[]", true),
-                ("ps[]#val", false),
-                ("ps[]idx", false),
-                ("s.xs[]", true),
-                ("s.xs[]#idx", false),
-                ("s.xs[]#val", false),
-                ("s.xs[][]arg1", false),
-            ]
-            .map(|(n, p)| (n.to_string(), p))
+            [("s.xs[]", true), ("s.xs[][]arg1", false),].map(|(n, p)| (n.to_string(), p))
         );
-    }
-
-    /// The index of a nested index assignment gets a temp, because the load and the
-    /// write-back both need it: `rows[f()][0] = 1` calls `f` once.
-    #[test]
-    fn a_nested_index_assign_evaluates_its_index_once() {
-        let p = parse_src(
-            "fn main() -> Int64 { let mut rows: Array<Array<Int64>> = []  rows[f()][0] = 1  return 0 }",
-        );
-        let dump = format!("{:?}", p.functions[0].body.stmts);
-        assert_eq!(
-            dump.matches(r#"Call { name: "f""#).count(),
-            1,
-            "`f()` must appear once in the desugar:\n{dump}"
-        );
-        assert!(dump.contains(r#"Let { name: "rows[]idx""#), "{dump}");
     }
 
     #[test]

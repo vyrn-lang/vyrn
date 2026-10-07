@@ -3184,6 +3184,7 @@ impl<'a> Checker<'a> {
             // of its rules fails, this stops unrefused.
             Stmt::Store {
                 name,
+                base,
                 leaf,
                 value,
                 line,
@@ -3193,16 +3194,31 @@ impl<'a> Checker<'a> {
                     self.unknown.set(true);
                     return Ok(());
                 };
+                // Below the root, a leaf index and a value that read a place type with
+                // no expectation: `r.rows[0] = [g()]` is refused where `rows[0] = [g()]`
+                // is not.
+                let loose = |e: &Expr| !base.is_empty() && crate::parser::reads_place(e);
+                let mut bty = b.ty.clone();
+                // The type of the first step, which the root's region guard reads.
+                let mut first = None;
+                for step in base {
+                    let Some(next) = self.store_step(&bty, step, scope, ret, *line)? else {
+                        return Ok(());
+                    };
+                    first.get_or_insert_with(|| next.clone());
+                    bty = next;
+                }
                 match leaf {
                     Step::Field(field) => {
-                        let ruled = matches!(&b.ty, Type::Named(n) if self.decl(n).is_some_and(|d| d.predicate.is_some()));
-                        let Some(fty) = crate::types::record_fields(&b.ty, self)
+                        let ruled = matches!(&bty, Type::Named(n) if self.decl(n).is_some_and(|d| d.predicate.is_some()));
+                        let Some(fty) = crate::types::record_fields(&bty, self)
                             .and_then(|fs| fs.into_iter().find(|f| &f.name == field))
                             .map(|f| f.ty)
                         else {
                             return Ok(());
                         };
-                        let vty = self.expr(value, scope, Some(&fty), Some(ret))?;
+                        let expect = (!loose(value)).then_some(&fty);
+                        let vty = self.expr(value, scope, expect, Some(ret))?;
                         if ruled {
                             return Ok(());
                         }
@@ -3216,70 +3232,96 @@ impl<'a> Checker<'a> {
                         }) {
                             return Ok(());
                         }
-                        self.region_store_guard(name, &fty, scope, *line)?;
+                        self.region_store_guard(
+                            name,
+                            first.as_ref().unwrap_or(&fty),
+                            scope,
+                            *line,
+                        )?;
+                        self.record_store(name, base, leaf, value, &b.ty, ret, scope);
                         Ok(())
                     }
                     // `name[index] = value`, in place.
                     Step::Index(index) => {
-                        if let Type::Map(key, val) = self.base(&b.ty) {
-                            let k = self.base(&self.expr(index, scope, Some(&key), Some(ret))?);
+                        let expect = |ty: &Type| (!loose(index)).then(|| ty.clone());
+                        if let Type::Map(key, val) = self.base(&bty) {
+                            let k = self.base(&self.expr(
+                                index,
+                                scope,
+                                expect(&key).as_ref(),
+                                Some(ret),
+                            )?);
                             if !matches!(k, Type::Err) && !self.key_fits(&k, &key) {
                                 return Ok(());
                             }
                             self.prove_coercion(index, &key, *line)?;
-                            let vty = self.expr(value, scope, Some(&val), Some(ret))?;
+                            let vty = self.expr(
+                                value,
+                                scope,
+                                (!loose(value)).then_some(&val),
+                                Some(ret),
+                            )?;
                             if !self.coercible(&vty, &val) {
                                 return Ok(());
                             }
-                            self.prove_coercion(value, &val, *line)?;
-                            self.prove_string_interpolation(value, &val, scope, Some(ret), *line)?;
-                            self.region_store_guard(name, &val, scope, *line)?;
-                            return Ok(());
+                            if !loose(value) {
+                                self.prove_coercion(value, &val, *line)?;
+                                self.prove_string_interpolation(
+                                    value,
+                                    &val,
+                                    scope,
+                                    Some(ret),
+                                    *line,
+                                )?;
+                            }
+                            return self.region_store_guard(
+                                name,
+                                first.as_ref().unwrap_or(&val),
+                                scope,
+                                *line,
+                            );
                         }
                         // A builtin container is keyed by `Int64`, a user one by what
                         // its `atSet` takes.
                         let mut key = Type::Int;
-                        let base = self.base(&b.ty);
-                        let elem = match (base.elem(), &base) {
+                        let base_ty = self.base(&bty);
+                        let elem = match (base_ty.elem(), &base_ty) {
                             (Some(e), _) => e.clone(),
                             (None, Type::Err) => return Ok(()),
                             (None, _) => {
                                 // The element type is what `atSet` yields, looked up
                                 // by the declared type, which the impl head names.
-                                match self.impls.place(&b.ty, "atSet") {
+                                match self.impls.place(&bty, "atSet") {
                                     Some((imp, f)) => {
                                         if let Some(p) = f.params.get(1) {
-                                            key = crate::types::under_head(imp, &b.ty, &p.ty);
+                                            key = crate::types::under_head(imp, &bty, &p.ty);
                                         }
-                                        crate::types::under_head(imp, &b.ty, &f.ret)
+                                        crate::types::under_head(imp, &bty, &f.ret)
                                     }
                                     None => return Ok(()),
                                 }
                             }
                         };
-                        let i = self.expr(index, scope, Some(&key), Some(ret))?;
+                        let i = self.expr(index, scope, expect(&key).as_ref(), Some(ret))?;
                         if !self.coercible(&i, &key) && !matches!(self.base(&i), Type::Err) {
                             return Ok(());
                         }
-                        let vty = self.expr(value, scope, Some(&elem), Some(ret))?;
+                        let vty =
+                            self.expr(value, scope, (!loose(value)).then_some(&elem), Some(ret))?;
                         if !self.coercible(&vty, &elem) {
                             return Ok(());
                         }
-                        self.prove_coercion(value, &elem, *line)?;
-                        self.prove_string_interpolation(value, &elem, scope, Some(ret), *line)?;
-                        self.region_store_guard(name, &elem, scope, *line)?;
-                        // Record the expansion the store lowers through: `atSet`
-                        // inlined, with the move-out and move-back around it.
-                        if self.recording() {
-                            if let Ok(Some(blk)) = self
-                                .expansions
-                                .store_index(self.impls, name, index, value, &b.ty)
-                            {
-                                self.record_desugar(scope, |c, sc| {
-                                    c.block(blk, ret, sc);
-                                });
-                            }
+                        if !loose(value) {
+                            self.prove_coercion(value, &elem, *line)?;
+                            self.prove_string_interpolation(value, &elem, scope, Some(ret), *line)?;
                         }
+                        self.region_store_guard(
+                            name,
+                            first.as_ref().unwrap_or(&elem),
+                            scope,
+                            *line,
+                        )?;
+                        self.record_store(name, base, leaf, value, &b.ty, ret, scope);
                         Ok(())
                     }
                 }
@@ -3389,6 +3431,124 @@ impl<'a> Checker<'a> {
                 self.region_floor.borrow_mut().pop();
                 Ok(())
             }
+        }
+    }
+
+    /// The type of `at[index]` on a builtin container: an Array's or a String's
+    /// element, and for a Map the `Option` of its value, because a missing key
+    /// is `None`, never a trap. `Type::Err` where the typed judgment states why.
+    fn builtin_at(
+        &self,
+        at: &Type,
+        index: &Expr,
+        scope: &Scope,
+        fn_ret: Option<&Type>,
+        line: usize,
+    ) -> Result<Type, Diagnostic> {
+        if let Type::Map(key, val) = self.base(at) {
+            let k = self.base(&self.expr(index, scope, Some(&key), fn_ret)?);
+            if matches!(k, Type::Err) {
+                return Ok(Type::Err);
+            }
+            if !self.key_fits(&k, &key) {
+                return Err(cerr!(line, MapKeyMismatch, key, k));
+            }
+            self.prove_coercion(index, &key, line)?;
+            return Ok(Type::option(*val));
+        }
+        let base = self.base(at);
+        let elem = match (base.elem(), &base) {
+            (Some(e), _) => e.clone(),
+            // `s[i]` is a byte, as in `bytes(s)`.
+            (None, Type::Str) => Type::IntN {
+                bits: 8,
+                signed: false,
+            },
+            (None, Type::Err) => return Ok(Type::Err),
+            (None, other) => return Err(cerr!(line, IndexReceiver, other)),
+        };
+        let i = self.base(&self.expr(index, scope, Some(&Type::Int), fn_ret)?);
+        if matches!(i, Type::Err) {
+            return Ok(Type::Err);
+        }
+        if i != Type::Int {
+            return Err(cerr!(line, IndexType, i));
+        }
+        Ok(elem)
+    }
+
+    /// The type of the place `step` names inside a place of type `ty`, on the
+    /// way to a store's leaf. `None` where the typed judgment states the
+    /// refusal (a field the type has not, a part of an unjudged type). A map
+    /// entry reads as the `Option` a lookup answers, which no store through it
+    /// takes.
+    fn store_step(
+        &self,
+        ty: &Type,
+        step: &Step,
+        scope: &Scope,
+        ret: &Type,
+        line: usize,
+    ) -> Result<Option<Type>, Diagnostic> {
+        let unjudged = |t: Type| Ok((t != Type::Err).then_some(t));
+        match step {
+            Step::Field(field) => match self.base(ty) {
+                Type::Record(fields) => match fields.iter().find(|f| &f.name == field) {
+                    Some(f) => Ok(Some(crate::types::forced(&f.ty))),
+                    None => self.judged().map(|_| None),
+                },
+                Type::Err => Ok(None),
+                _ => self.judged().map(|_| None),
+            },
+            Step::Index(index) => match self.impls.place(ty, "atSet") {
+                Some((imp, f)) => {
+                    let key = (f.params.get(1))
+                        .map_or(Type::Int, |p| crate::types::under_head(imp, ty, &p.ty));
+                    let i = self.expr(index, scope, Some(&key), Some(ret))?;
+                    if !self.coercible(&i, &key) && self.base(&i) != Type::Err {
+                        return Err(cerr!(
+                            line,
+                            ProjectionArgType,
+                            name = "atSet",
+                            got = i,
+                            want = key
+                        ));
+                    }
+                    unjudged(crate::types::under_head(imp, ty, &f.ret))
+                }
+                None => unjudged(self.builtin_at(ty, index, scope, Some(ret), line)?),
+            },
+        }
+    }
+
+    /// Records the `atSet` expansion a store through a user container lowers
+    /// by: the projected step is the store's first.
+    #[allow(clippy::too_many_arguments)]
+    fn record_store(
+        &self,
+        name: &str,
+        base: &[Step],
+        leaf: &Step,
+        value: &Expr,
+        root: &Type,
+        ret: &Type,
+        scope: &Scope,
+    ) {
+        if !self.recording() {
+            return;
+        }
+        let mut path = base.iter().chain([leaf]);
+        let Some(Step::Index(index)) = path.next() else {
+            return;
+        };
+        let rest: Vec<Step> = path.cloned().collect();
+        if let Ok(Some(blk)) = self
+            .expansions
+            .store_index(self.impls, name, index, &rest, value, root)
+        {
+            self.record_desugar(scope, |c, sc| {
+                c.block(blk, ret, sc);
+            });
         }
     }
 
@@ -4773,37 +4933,7 @@ impl<'a> Checker<'a> {
                     return Ok(t);
                 }
             }
-            // `m[k]` on a Map: a missing key is `None`, never a trap.
-            if let Type::Map(key, val) = self.base(&at) {
-                let k = self.base(&self.expr(&args[1], scope, Some(&key), fn_ret)?);
-                if matches!(k, Type::Err) {
-                    return Ok(Type::Err);
-                }
-                if !self.key_fits(&k, &key) {
-                    return Err(cerr!(line, MapKeyMismatch, key, k));
-                }
-                self.prove_coercion(&args[1], &key, line)?;
-                return Ok(Type::option(*val));
-            }
-            let base = self.base(&at);
-            let elem = match (base.elem(), &base) {
-                (Some(e), _) => e.clone(),
-                // `s[i]` is a byte, as in `bytes(s)`.
-                (None, Type::Str) => Type::IntN {
-                    bits: 8,
-                    signed: false,
-                },
-                (None, Type::Err) => return Ok(Type::Err),
-                (None, other) => return Err(cerr!(line, IndexReceiver, other)),
-            };
-            let i = self.base(&self.expr(&args[1], scope, Some(&Type::Int), fn_ret)?);
-            if matches!(i, Type::Err) {
-                return Ok(Type::Err);
-            }
-            if i != Type::Int {
-                return Err(cerr!(line, IndexType, i));
-            }
-            return Ok(elem);
+            return self.builtin_at(&at, &args[1], scope, fn_ret, line);
         }
         // `boxStream(s)` moves a stream into a heap box and answers its address,
         // `unboxStream(a)` takes it back out, `pullAt(a)` pulls one element;
@@ -6083,9 +6213,13 @@ impl<'a> Checker<'a> {
                         self.fail(rule!(LambdaAssignsCapture, name, line));
                     }
                     Stmt::Store {
-                        name, leaf, line, ..
+                        name,
+                        base,
+                        leaf,
+                        line,
+                        ..
                     } if self.is_capture(name, locals) => {
-                        self.fail(match leaf {
+                        self.fail(match base.first().unwrap_or(leaf) {
                             Step::Field(_) => rule!(LambdaMutatesCapture, name, line),
                             Step::Index(_) => rule!(LambdaStoresIntoCapture, name, line),
                         });

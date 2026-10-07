@@ -346,7 +346,7 @@ pub enum LogSink {
 
 /// Returns whether a binding is a place desugar's move-out temp.
 ///
-/// `t.xs[k] = v` becomes `let mut t.xs[] = t.xs` / `t.xs[][k] = v` /
+/// `t.xs.pop()` becomes `let mut t.xs[] = t.xs` / `t.xs[].pop()` /
 /// `t.xs = t.xs[]`. `[` cannot appear in an identifier, and only the container
 /// moved out and written back ends in `[]`. Hoisted operand temps carry a
 /// further suffix (`[]idx`, `#idx`, `#val`, `[]arg1`); the `#` keeps a hoisted
@@ -1469,10 +1469,13 @@ pub enum Stmt {
         line: usize,
         id: Id,
     },
-    /// `name.field = value` on a `mut` record binding, or `name[index] = value`
-    /// on a `mut` array binding; the read `a[i]` is `@at(a, i)`.
+    /// `name base.. leaf = value` on a `mut` binding: the store into a field or
+    /// an element, whole from the parser to the core. `base` is the path from
+    /// the root to the place the leaf writes into, root first; `a[i].f = v` is
+    /// `base: [Index(i)]`, `leaf: Field(f)`. The read `a[i]` is `@at(a, i)`.
     Store {
         name: String,
+        base: Vec<Step>,
         leaf: Step,
         value: Expr,
         line: usize,
@@ -1913,6 +1916,7 @@ impl Stmt {
     pub fn store(name: impl Into<String>, leaf: Step, value: Expr, line: usize) -> Self {
         Stmt::Store {
             name: name.into(),
+            base: Vec::new(),
             leaf,
             value,
             line,
@@ -2091,9 +2095,13 @@ impl Numbering {
         self.next(stmt_slot!(s, &mut));
         match s {
             Stmt::Let { value, .. } | Stmt::Assign { value, .. } => self.expr(value),
-            Stmt::Store { leaf, value, .. } => {
-                if let Step::Index(index) = leaf {
-                    self.expr(index);
+            Stmt::Store {
+                base, leaf, value, ..
+            } => {
+                for step in base.iter_mut().chain([leaf]) {
+                    if let Step::Index(index) = step {
+                        self.expr(index);
+                    }
                 }
                 self.expr(value);
             }
@@ -2381,9 +2389,13 @@ macro_rules! body_scope_descent {
                     }
                 }
                 Stmt::Assign { value, .. } => $ex(value, locals, v),
-                Stmt::Store { leaf, value, .. } => {
-                    if let $crate::ast::Step::Index(index) = leaf {
-                        $ex(index, locals, v);
+                Stmt::Store {
+                    base, leaf, value, ..
+                } => {
+                    for step in base.into_iter().chain([leaf]) {
+                        if let $crate::ast::Step::Index(index) = step {
+                            $ex(index, locals, v);
+                        }
                     }
                     $ex(value, locals, v);
                 }

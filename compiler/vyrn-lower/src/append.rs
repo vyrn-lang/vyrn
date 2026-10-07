@@ -72,9 +72,13 @@ fn scan_append_block(
                 },
                 _,
             ) => scan_arms(scrutinee, arms, targets, banned, strict),
-            Stmt::Store { leaf, value, .. } => {
-                if let Step::Index(index) = leaf {
-                    ban_append_expr(index, banned, strict);
+            Stmt::Store {
+                base, leaf, value, ..
+            } => {
+                for step in base.iter().chain([leaf]) {
+                    if let Step::Index(index) = step {
+                        ban_append_expr(index, banned, strict);
+                    }
                 }
                 ban_append_expr(value, banned, strict);
             }

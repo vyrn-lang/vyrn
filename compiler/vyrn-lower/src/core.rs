@@ -1918,6 +1918,24 @@ impl<'a> Builder<'a> {
         Ok(t)
     }
 
+    /// [`Builder::checked_temp`] over a value already bound: the temporary
+    /// the constructor of `to` makes of `v`.
+    fn checked_val(&mut self, to: String, v: Val, line: usize, out: &mut Vec<St>) -> Name {
+        let ty = Type::Named(to.clone());
+        let rhs = Rhs::Call {
+            ret: Some(ty.clone()),
+            callee: to,
+            args: vec![(Arg::Val(v), Capability::Consume)],
+            write_back: false,
+            kind: Callee::Named,
+            solved: Vec::new(),
+            targets: Vec::new(),
+        };
+        let t = self.temp(ty, line);
+        self.bind(t, rhs, out);
+        t
+    }
+
     /// The constructor of the validated type `to` over `value`.
     fn check(
         &mut self,
@@ -2236,13 +2254,13 @@ impl<'a> Builder<'a> {
         Ok(())
     }
 
-    /// The statements of a list, where a store into a nested place is one
-    /// store into the place's path.
+    /// The statements of a list, where a removal through a nested place is
+    /// one call over the place's path.
     ///
-    /// The parser writes `b[i].vx = v` as a move-out window: one temp
-    /// per level, the store, and one store back per temp
-    /// ([`vyrn_frontend::parser::store_stmts`]). The rows state the store
-    /// alone, into `b[i].vx`, and the part's old value is its to release.
+    /// The parser writes `b[i].xs.pop()` as a move-out window: one temp per
+    /// level, the call, and one store back per temp
+    /// ([`vyrn_frontend::parser::place_receiver`]). The rows state the call
+    /// alone, over `b[i].xs`.
     ///
     /// A run of statements that each store into a field of one record name
     /// with a `where` rule is a group ([`crate::typed::groups`]): the rule is
@@ -2355,7 +2373,7 @@ impl<'a> Builder<'a> {
         out
     }
 
-    /// The store or removal at the head of `ss` when it is a move-out window
+    /// The removal at the head of `ss` when it is a move-out window
     /// ([`Builder::stmt_list`]), stated into its path; how many statements it
     /// spans, or `None` when `ss` does not start with one.
     fn nested_store(&mut self, ss: &'a [Stmt], out: &mut Vec<St>) -> Result<Option<usize>, Gap> {
@@ -2363,22 +2381,7 @@ impl<'a> Builder<'a> {
             return Ok(None);
         };
         let store = &ss[lets];
-        let sid = store.id();
-        match store {
-            Stmt::Store {
-                leaf: Step::Field(field),
-                value,
-                line,
-                ..
-            } => self.set_field((place, ty), last, field, value, sid, *line, out)?,
-            Stmt::Store {
-                leaf: Step::Index(index),
-                value,
-                line,
-                ..
-            } => self.index_set((place, ty), last, index, value, sid, *line, out)?,
-            _ => self.removal_at(place, ty, last, store, store.line(), out)?,
-        }
+        self.removal_at(place, ty, last, store, store.line(), out)?;
         Ok(Some(2 * lets + 1))
     }
 
@@ -2448,7 +2451,6 @@ impl<'a> Builder<'a> {
             return Ok(None);
         };
         let into = match store {
-            Stmt::Store { name, .. } => Some(name),
             Stmt::Expr(e, _) | Stmt::Let { value: e, .. } => removal(e),
             _ => None,
         };
@@ -2457,22 +2459,15 @@ impl<'a> Builder<'a> {
         }
         let line = &store.line();
         // The path is a record's fields and an array's elements; a map entry
-        // is a key read, stated apart. A projected container yields its
-        // element's place from `atSet`, whose prologue runs once
-        // where the window opens, so only the root may be one
-        // ([`Builder::yielded`]).
+        // is a key read, stated apart. A projected container's element place
+        // is `atSet`'s, which a removal does not state.
         let (mut place, mut ty) = self.named_place(parts[0].0, *line)?;
         let mut t = ty.clone();
         let mut tys = Vec::new();
-        for (i, (_, part)) in parts.iter().enumerate() {
+        for (_, part) in &parts {
             let next = match part {
                 Ok(f) => self.field_ty(&t, f, *line),
-                Err(_) if self.is_map(&t) => return Ok(None),
-                Err(_) if self.projected(&t) && i > 0 => return Ok(None),
-                Err(_) if self.projected(&t) => match &ss[i] {
-                    Stmt::Let { value, .. } => self.ty_of(value),
-                    _ => return Ok(None),
-                },
+                Err(_) if self.is_map(&t) || self.projected(&t) => return Ok(None),
                 Err(_) => self.elem_ty(&t, *line),
             };
             let Ok(next) = next else {
@@ -2484,21 +2479,6 @@ impl<'a> Builder<'a> {
         for ((_, part), next) in parts.iter().zip(tys) {
             place = match part {
                 Ok(f) => Place::Field(Box::new(place), f.to_string()),
-                Err(_) if self.projected(&ty) => {
-                    let Stmt::Store {
-                        leaf: Step::Index(index),
-                        value,
-                        line,
-                        ..
-                    } = &ss[2 * lets]
-                    else {
-                        return Ok(None);
-                    };
-                    match self.yielded(index, value, *line, out)? {
-                        Some((p, _)) => p,
-                        None => return Ok(None),
-                    }
-                }
                 Err(args) => Place::Elem(Box::new(place), self.read_val(&args[1], out)?),
             };
             ty = next;
@@ -2506,49 +2486,215 @@ impl<'a> Builder<'a> {
         Ok(Some((lets, last, place, ty)))
     }
 
-    /// The place `atSet` yields for the store `name[index] = value` into a
-    /// projected container, with the prologue stated (`project::stored`).
-    /// Also answers the value the place receives: `value`, or the temp the
-    /// prologue binds for a value that reads the container
-    /// (`c[h] = c[h] + 1`). `None`, with nothing stated, where the checker
-    /// expanded no such store.
-    fn yielded(
+    /// A store into `name base.. leaf`, whole: the place is stated before the
+    /// value, so an index of the path runs first and an element's bounds check
+    /// runs at the store.
+    ///
+    /// A user container at the root yields the place of its first step from
+    /// `atSet`: the checker expanded the store
+    /// ([`vyrn_frontend::project::Expansions::store_index`]), whose prologue
+    /// runs here and whose store names the place. The rest of the path and
+    /// the value are the source's.
+    ///
+    /// The path's own indices below the root are bound to temps, root to leaf.
+    /// Nothing below the root hands a value back: the buffer the leaf writes
+    /// into is not the buffer the value reads.
+    #[allow(clippy::too_many_arguments)]
+    fn store(
         &mut self,
-        index: &'a Expr,
+        sid: NodeId,
+        name: &str,
+        base: &'a [Step],
+        leaf: &'a Step,
         value: &'a Expr,
         line: usize,
         out: &mut Vec<St>,
-    ) -> Result<Option<(Place, &'a Expr)>, Gap> {
-        let Some(blk) = self.program.expansions.stored(index) else {
-            return Ok(None);
+    ) -> Result<(), Gap> {
+        let (root, rty) = self.named_place(name, line)?;
+        let quoted = self.quoted(name, base);
+        let first = base.first().unwrap_or(leaf);
+        let expansion = match first {
+            Step::Index(index) if self.projected(&rty) => self.program.expansions.stored(index),
+            _ => None,
         };
-        let Some(k) = vyrn_frontend::project::store_node(blk)
-            .and_then(|s| blk.stmts.iter().position(|t| std::ptr::eq(t, s)))
-        else {
-            return gap("an `atSet` expansion with no store", line);
+        // The place the leaf writes into, and for `c[i] = v` on a user container
+        // the place `atSet` yields, which is the element itself.
+        let mut tmp = name.to_string();
+        let (at, whole) = match expansion {
+            Some(blk) => {
+                let Some((
+                    Stmt::Store {
+                        name: into,
+                        base: b,
+                        leaf: l,
+                        ..
+                    },
+                    prologue,
+                )) = blk.stmts.split_last()
+                else {
+                    return gap("an `atSet` expansion whose store is no place", line);
+                };
+                for s in prologue {
+                    self.stmt(s, out)?;
+                }
+                let steps: Vec<&Step> = b.iter().chain([l]).collect();
+                // The steps `atSet` yields: the expansion appends the source's own.
+                let Some(yielded) = steps.len().checked_sub(base.len()).map(|n| &steps[..n]) else {
+                    return gap("an `atSet` expansion shorter than the store", line);
+                };
+                let (eroot, ety) = self.named_place(into, line)?;
+                tmp = into.clone();
+                let (place, ty) = self.walk(eroot, ety, yielded, false, &mut tmp, line, out)?;
+                match base.split_first() {
+                    None => ((root, rty), Some(place)),
+                    Some((_, rest)) => {
+                        let rest: Vec<&Step> = rest.iter().collect();
+                        let at = self.walk(place, ty, &rest, true, &mut tmp, line, out)?;
+                        (at, None)
+                    }
+                }
+            }
+            None => {
+                let steps: Vec<&Step> = base.iter().collect();
+                (
+                    self.walk(root, rty, &steps, true, &mut tmp, line, out)?,
+                    None,
+                )
+            }
         };
-        let (into, part, stored) = match &blk.stmts[k] {
-            Stmt::Store {
-                name, leaf, value, ..
-            } => (name, leaf, value),
-            _ => return gap("an `atSet` expansion whose store is no place", line),
+        let nested = !base.is_empty();
+        let hoists = |e: &Expr| nested && vyrn_frontend::parser::reads_place(e);
+        let at_index = match leaf {
+            Step::Index(index) if hoists(index) => {
+                Some(self.bind_temp(&format!("{tmp}#idx"), index, line, out)?)
+            }
+            _ => None,
         };
-        let group = blk.stmts[..k]
-            .iter()
-            .rposition(|s| !moves_out(s))
-            .map_or(0, |j| j + 1);
-        for s in &blk.stmts[..group] {
-            self.stmt(s, out)?;
+        let stored = match hoists(value) {
+            true => Some(self.bind_temp(&format!("{tmp}#val"), value, line, out)?),
+            false => None,
+        };
+        match leaf {
+            Step::Field(field) => self.set_field(
+                at, name, &quoted, field, value, stored, sid, nested, line, out,
+            ),
+            Step::Index(index) => {
+                let (key, whole) = (at_index, whole);
+                self.index_set(
+                    at,
+                    name,
+                    &quoted,
+                    (index, key),
+                    (value, stored),
+                    sid,
+                    nested,
+                    whole,
+                    line,
+                    out,
+                )
+            }
         }
-        let base = match self.window(&blk.stmts[group..], out)? {
-            Some((_, _, p, _)) => p,
-            None => self.named_place(into, line)?.0,
+    }
+
+    /// Binds the operand `e` of a store to a temp `name` and answers it.
+    fn bind_temp(
+        &mut self,
+        name: &str,
+        e: &'a Expr,
+        line: usize,
+        out: &mut Vec<St>,
+    ) -> Result<Val, Gap> {
+        self.bind_let(None, name, e, None, false, line, out)?;
+        match self.lookup(name) {
+            Some(n) => Ok(Val::Name(n)),
+            None => gap_d("a store operand out of scope", name, line),
+        }
+    }
+
+    /// The place `steps` name inside `place`, whose type is `ty`. Each index is
+    /// bound to a temp `{tmp}[]idx`, so a step's index runs once, before the
+    /// next step's; the last is read where it stands unless `bind_last`. `tmp`
+    /// names the path so far.
+    #[allow(clippy::too_many_arguments)]
+    fn walk(
+        &mut self,
+        mut place: Place,
+        mut ty: Type,
+        steps: &[&'a Step],
+        bind_last: bool,
+        tmp: &mut String,
+        line: usize,
+        out: &mut Vec<St>,
+    ) -> Result<(Place, Type), Gap> {
+        for (k, step) in steps.iter().enumerate() {
+            match step {
+                Step::Field(field) => {
+                    let next = match self.field_ty(&ty, field, line) {
+                        Ok(t) => t,
+                        Err(g) => {
+                            self.refuse_field(&ty, field, line);
+                            return Err(g);
+                        }
+                    };
+                    place = Place::Field(Box::new(place), field.clone());
+                    *tmp = format!("{tmp}.{field}[]");
+                    ty = next;
+                }
+                Step::Index(index) => {
+                    let bound = (bind_last || k + 1 < steps.len())
+                        && self.ty_of(index).is_ok_and(|t| !self.owns(&t));
+                    let at = if bound {
+                        self.bind_temp(&format!("{tmp}[]idx"), index, line, out)?
+                    } else if self.is_map(&ty) {
+                        self.val(index, out)?
+                    } else {
+                        self.read_val(index, out)?
+                    };
+                    *tmp = format!("{tmp}[]");
+                    // A user container's element is the place its `atSet` yields,
+                    // which only a store expanded at the root states
+                    // ([`Builder::store`]); elsewhere it is judged as the element
+                    // place it names.
+                    let next = match self.program.impls.place(&ty, "atSet") {
+                        Some((imp, f)) => vyrn_frontend::types::under_head(imp, &ty, &f.ret),
+                        None => self.elem_ty(&ty, line)?,
+                    };
+                    // A map entry is no place: it reads as the `Option` a lookup
+                    // answers, which the leaf refuses.
+                    (place, ty) = match self.is_map(&ty) {
+                        true => (Place::Key(Box::new(place), at), Type::option(next)),
+                        false => (Place::Elem(Box::new(place), at), next),
+                    };
+                }
+            }
+        }
+        Ok((place, ty))
+    }
+
+    /// Records the refusal of a path through `field` where the type of the
+    /// place has none: the typed judgment's, which a field read has no node
+    /// to state.
+    fn refuse_field(&mut self, ty: &Type, field: &str, line: usize) {
+        let decls = self.proto.types();
+        let sp = self.body.speech();
+        let refusal = match vyrn_frontend::types::resolve(ty, decls) {
+            Type::Err => return,
+            Type::Record(_) => {
+                let ty = sp.ty(ty).to_string();
+                rule!(NoField, ty, field)
+            }
+            other => {
+                let ([other], []) = sp.say([&other], []);
+                rule!(FieldOnNonRecord, field, other)
+            }
         };
-        let place = match part {
-            Step::Index(index) => Place::Elem(Box::new(base), self.read_val(index, out)?),
-            Step::Field(field) => Place::Field(Box::new(base), field.clone()),
-        };
-        Ok(Some((place, if stored == value { value } else { stored })))
+        self.body.mistyped.push((line, refusal.render()));
+    }
+
+    /// The place `name base..` as the reader wrote it, as the checker quotes it
+    /// (`ps[0]`, `r.xs`): the root as [`Builder::written`] spells it.
+    fn quoted(&self, name: &str, base: &[Step]) -> String {
+        vyrn_frontend::project::path_text(self.written(name), base)
     }
 
     /// A removal whose receiver is a move-out window's temp
@@ -2615,6 +2761,140 @@ impl<'a> Builder<'a> {
         }
     }
 
+    /// The rows of `let name = value`, and the name in scope. `s` is the
+    /// statement, which keys the binding's plan; `None` for a temp the builder
+    /// binds itself ([`Builder::store_place`]).
+    #[allow(clippy::too_many_arguments)]
+    fn bind_let(
+        &mut self,
+        s: Option<&'a Stmt>,
+        name: &str,
+        value: &'a Expr,
+        annotation: Option<&Type>,
+        mutable: bool,
+        line: usize,
+        out: &mut Vec<St>,
+    ) -> Result<(), Gap> {
+        if let Some(vty) = node_ty(self.own, value.id()) {
+            let decls = self.proto.types();
+            let refusal = match annotation {
+                Some(t) if !vyrn_frontend::types::coercible(&vty, t, decls) => {
+                    let ([declared, vty], []) = self.body.speech().say([t, &vty], []);
+                    Some(rule!(InitMismatch, name, declared, vty).render())
+                }
+                _ if vyrn_frontend::types::resolve(&vty, decls) == Type::Unit => {
+                    Some(rule!(BindUnit, name).render())
+                }
+                _ => None,
+            };
+            self.body.mistyped.extend(refusal.map(|r| (line, r)));
+        }
+        let ty = self.ty_of(value)?;
+        let check = annotation.and_then(|t| self.checked(&ty, t, value));
+        let copied = check.is_none() && s.is_some_and(|s| self.copies(s, &ty));
+        // Nothing may take module state: `let t = g`, `let t = consume g`
+        // and `let t = consume g.f` bind a read of the place.
+        let read = match value {
+            Expr::Consume { place, .. } if self.in_module_state(place) => &**place,
+            _ => value,
+        };
+        let global = self.in_module_state(read);
+        if check.is_none()
+            && !copied
+            && (global || !matches!(read, Expr::Var { .. }))
+            && is_place_read(read)
+            && !self.forces(read)
+        {
+            let mark = self.frame.after.len();
+            let place = self.place(read, out)?;
+            let n = self.name(name, ty.clone(), false, line);
+            let rhs = Rhs::Read(place);
+            self.body.names[n.index()].not_owned =
+                self.report_reason(&rhs, &ty, false, false, self.lends(read));
+            out.push(St::Let(n, rhs));
+            self.release_receiver(read, out, true);
+            self.drop_since(mark, out);
+            self.grows(n, name);
+            self.frame.scope.push((name.to_string(), n));
+            self.keyed_binding(n, s, value);
+            return Ok(());
+        }
+        // A crossing into a validated type is its constructor:
+        // `let a: Age = n` is `let a = Age(n)`.
+        let (rhs, ty) = match check {
+            Some(to) => (self.check(&to, value, line, out)?, Type::Named(to)),
+            None if copied => {
+                let outer = std::mem::take(&mut self.frame.after);
+                let rhs = self.copy_of(value, out);
+                self.frame.after_of_rhs = std::mem::replace(&mut self.frame.after, outer);
+                (rhs?, ty)
+            }
+            None => (self.rhs(value, out)?, ty),
+        };
+        // A literal, or a nullary constructor: nothing allocated it.
+        let static_value = match &rhs {
+            Rhs::Val(Val::Lit(l)) => !matches!(l, Lit::Opaque(_)),
+            _ if over_a_literal(&rhs) => true,
+            Rhs::Call {
+                kind: Callee::Ctor,
+                args,
+                ..
+            } if args.is_empty() => true,
+            Rhs::Val(Val::Name(m)) => {
+                matches!(self.body.names[m.index()].not_owned, Some(NotOwned::Static))
+            }
+            _ => false,
+        };
+        // A lending call binds a borrow whatever its type says; the
+        // `Rhs` does not carry that. A copy lends nothing.
+        let lends = !copied && self.lends(value);
+        let owned = !lends && self.owned_binding(&rhs, &ty, static_value, mutable);
+        let reason = self.report_reason(&rhs, &ty, static_value, mutable, lends);
+        if owned {
+            self.loop_alias(&rhs, line)?;
+        }
+        // Not owned is not borrowed: static data and a heapless value
+        // are nobody's borrow.
+        let borrow = !owned && (lends || matches!(&rhs, Rhs::Val(v) if self.borrows(v)));
+        let n = self.name(name, ty, owned, line);
+        self.body.names[n.index()].borrow = borrow && self.body.names[n.index()].heap;
+        self.body.names[n.index()].not_owned = reason;
+        self.record_fields(n, value);
+        // `let t = s` on a `read` parameter makes `t` a second name
+        // for it, with its words and its must-use take exception.
+        if let Rhs::Val(Val::Name(m)) = &rhs {
+            if self.body.names[n.index()].borrow {
+                self.body.names[n.index()].borrow_kind =
+                    self.body.names[m.index()].borrow_kind.clone();
+                self.body.names[n.index()].must_use_param =
+                    self.body.names[m.index()].must_use_param;
+            }
+        }
+        self.bind(n, rhs, out);
+        // The unnamed receiver of the part read: released after the
+        // read where the plan says this frame owns it.
+        if reads_a_part(value) {
+            self.release_receiver(value, out, false);
+        }
+        self.grows(n, name);
+        self.frame.scope.push((name.to_string(), n));
+        self.keyed_binding(n, s, value);
+        Ok(())
+    }
+
+    /// Keys a name by the `let` that binds it. A temp with no statement is
+    /// keyed by its value's node: the emitter tells a binding from an operand
+    /// temporary by the key.
+    fn keyed_binding(&mut self, n: Name, s: Option<&Stmt>, value: &Expr) {
+        match s {
+            Some(s) => self.keyed_let(n, s),
+            None => {
+                self.keyed(n, value.id());
+                self.body.names[n.index()].bound_by_let = true;
+            }
+        }
+    }
+
     fn stmt_rows(&mut self, s: &'a Stmt, out: &mut Vec<St>) -> Result<(), Gap> {
         let sid = s.id();
         match s {
@@ -2623,116 +2903,17 @@ impl<'a> Builder<'a> {
                 value,
                 line,
                 ty: annotation,
+                mutable,
                 ..
-            } => {
-                if let Some(vty) = node_ty(self.own, value.id()) {
-                    let decls = self.proto.types();
-                    let refusal = match annotation {
-                        Some(t) if !vyrn_frontend::types::coercible(&vty, t, decls) => {
-                            let ([declared, vty], []) = self.body.speech().say([t, &vty], []);
-                            Some(rule!(InitMismatch, name, declared, vty).render())
-                        }
-                        _ if vyrn_frontend::types::resolve(&vty, decls) == Type::Unit => {
-                            Some(rule!(BindUnit, name).render())
-                        }
-                        _ => None,
-                    };
-                    self.body.mistyped.extend(refusal.map(|r| (*line, r)));
-                }
-                let ty = self.ty_of(value)?;
-                let check = annotation
-                    .as_ref()
-                    .and_then(|t| self.checked(&ty, t, value));
-                let copied = check.is_none() && self.copies(s, &ty);
-                // Nothing may take module state: `let t = g`, `let t = consume g`
-                // and `let t = consume g.f` bind a read of the place.
-                let read = match value {
-                    Expr::Consume { place, .. } if self.in_module_state(place) => &**place,
-                    _ => value,
-                };
-                let global = self.in_module_state(read);
-                if check.is_none()
-                    && !copied
-                    && (global || !matches!(read, Expr::Var { .. }))
-                    && is_place_read(read)
-                    && !self.forces(read)
-                {
-                    let mark = self.frame.after.len();
-                    let place = self.place(read, out)?;
-                    let n = self.name(name, ty.clone(), false, *line);
-                    let rhs = Rhs::Read(place);
-                    self.body.names[n.index()].not_owned =
-                        self.report_reason(&rhs, &ty, false, false, self.lends(read));
-                    out.push(St::Let(n, rhs));
-                    self.release_receiver(read, out, true);
-                    self.drop_since(mark, out);
-                    self.grows(n, name);
-                    self.frame.scope.push((name.clone(), n));
-                    self.keyed_let(n, s);
-                    return Ok(());
-                }
-                // A crossing into a validated type is its constructor:
-                // `let a: Age = n` is `let a = Age(n)`.
-                let (rhs, ty) = match check {
-                    Some(to) => (self.check(&to, value, *line, out)?, Type::Named(to)),
-                    None if copied => {
-                        let outer = std::mem::take(&mut self.frame.after);
-                        let rhs = self.copy_of(value, out);
-                        self.frame.after_of_rhs = std::mem::replace(&mut self.frame.after, outer);
-                        (rhs?, ty)
-                    }
-                    None => (self.rhs(value, out)?, ty),
-                };
-                // A literal, or a nullary constructor: nothing allocated it.
-                let static_value = match &rhs {
-                    Rhs::Val(Val::Lit(l)) => !matches!(l, Lit::Opaque(_)),
-                    _ if over_a_literal(&rhs) => true,
-                    Rhs::Call {
-                        kind: Callee::Ctor,
-                        args,
-                        ..
-                    } if args.is_empty() => true,
-                    Rhs::Val(Val::Name(m)) => {
-                        matches!(self.body.names[m.index()].not_owned, Some(NotOwned::Static))
-                    }
-                    _ => false,
-                };
-                // A lending call binds a borrow whatever its type says; the
-                // `Rhs` does not carry that. A copy lends nothing.
-                let mutable = matches!(s, Stmt::Let { mutable: true, .. });
-                let lends = !copied && self.lends(value);
-                let owned = !lends && self.owned_binding(&rhs, &ty, static_value, mutable);
-                let reason = self.report_reason(&rhs, &ty, static_value, mutable, lends);
-                if owned {
-                    self.loop_alias(&rhs, *line)?;
-                }
-                // Not owned is not borrowed: static data and a heapless value
-                // are nobody's borrow.
-                let borrow = !owned && (lends || matches!(&rhs, Rhs::Val(v) if self.borrows(v)));
-                let n = self.name(name, ty, owned, *line);
-                self.body.names[n.index()].borrow = borrow && self.body.names[n.index()].heap;
-                self.body.names[n.index()].not_owned = reason;
-                self.record_fields(n, value);
-                // `let t = s` on a `read` parameter makes `t` a second name
-                // for it, with its words and its must-use take exception.
-                if let Rhs::Val(Val::Name(m)) = &rhs {
-                    if self.body.names[n.index()].borrow {
-                        self.body.names[n.index()].borrow_kind =
-                            self.body.names[m.index()].borrow_kind.clone();
-                        self.body.names[n.index()].must_use_param =
-                            self.body.names[m.index()].must_use_param;
-                    }
-                }
-                self.bind(n, rhs, out);
-                // The unnamed receiver of the part read: released after the
-                // read where the plan says this frame owns it.
-                if reads_a_part(value) {
-                    self.release_receiver(value, out, false);
-                }
-                self.grows(n, name);
-                self.frame.scope.push((name.clone(), n));
-                self.keyed_let(n, s);
-            }
+            } => self.bind_let(
+                Some(s),
+                name,
+                value,
+                annotation.as_ref(),
+                *mutable,
+                *line,
+                out,
+            )?,
             Stmt::Assign {
                 name,
                 value,
@@ -2869,29 +3050,24 @@ impl<'a> Builder<'a> {
             }
             Stmt::Store {
                 name,
-                leaf: Step::Field(field),
+                base,
+                leaf,
                 value,
                 line,
                 id: _,
             } => {
-                if !self.known(name, *line, |name| rule!(FieldAssignUnknown, name)) {
+                let known = match base.first().unwrap_or(leaf) {
+                    Step::Field(_) => {
+                        self.known(name, *line, |name| rule!(FieldAssignUnknown, name))
+                    }
+                    Step::Index(_) => {
+                        self.known(name, *line, |name| rule!(IndexAssignUnknown, name))
+                    }
+                };
+                if !known {
                     return Ok(());
                 }
-                let base = self.named_place(name, *line)?;
-                self.set_field(base, name, field, value, sid, *line, out)?;
-            }
-            Stmt::Store {
-                name,
-                leaf: Step::Index(index),
-                value,
-                line,
-                id: _,
-            } => {
-                if !self.known(name, *line, |name| rule!(IndexAssignUnknown, name)) {
-                    return Ok(());
-                }
-                let base = self.named_place(name, *line)?;
-                self.index_set(base, name, index, value, sid, *line, out)?;
+                self.store(sid, name, base, leaf, value, *line, out)?;
             }
             Stmt::Return { value, line, id: _ } => {
                 let vty = match value {
@@ -3515,26 +3691,35 @@ impl<'a> Builder<'a> {
         Ok(())
     }
 
-    /// A store into `field` of the place `base`, which the source names `name`.
+    /// A store into `field` of the place `base`, a part of the root `name`
+    /// that the reader wrote as `quoted`. `nested` is whether the place is
+    /// below the root.
     #[allow(clippy::too_many_arguments)]
     fn set_field(
         &mut self,
         base: (Place, Type),
         name: &str,
+        quoted: &str,
         field: &str,
         value: &'a Expr,
+        stored: Option<Val>,
         sid: NodeId,
+        nested: bool,
         line: usize,
         out: &mut Vec<St>,
     ) -> Result<(), Gap> {
-        self.field_store(&base.1, name, field, value, line)?;
+        self.field_store(&base.1, quoted, field, value, line)?;
         let (base, bty) = base;
         let fty = self.field_ty(&bty, field, line)?;
-        let v = self.proven_val(value, Some(&fty), line, out)?;
+        let v = match stored {
+            Some(v) => v,
+            None => self.proven_val(value, Some(&fty), line, out)?,
+        };
         // A name store's hand-back rule, one dot down:
         // `s.dense = s.dense.push(i)` releases nothing.
-        let handed_back =
-            vyrn_frontend::ast::mentions_place(value, name) && !self.fresh_str(&fty, value);
+        let handed_back = !nested
+            && vyrn_frontend::ast::mentions_place(value, name)
+            && !self.fresh_str(&fty, value);
         let releases = !handed_back && self.own.placed.stores.contains_key(&sid);
         out.push(St::Store {
             place: Place::Field(Box::new(base), field.to_string()),
@@ -3556,8 +3741,9 @@ impl<'a> Builder<'a> {
         Ok(())
     }
 
-    /// The rules of a store into `name.field`, whose root has type `bty`: the
-    /// root has the field, and the field takes the value. A root without the
+    /// The rules of a store into `name.field`, as the reader wrote `name`, whose
+    /// place has type `bty`: the place has the field, and the field takes the
+    /// value. A root without the
     /// field is a refused gap. A validated record's field is `typed::stores`'s.
     fn field_store(
         &mut self,
@@ -3569,7 +3755,6 @@ impl<'a> Builder<'a> {
     ) -> Result<(), Gap> {
         let decls = self.proto.types();
         let fields = vyrn_frontend::types::record_fields(bty, decls);
-        let name = self.written(name);
         let refusal = match bty {
             Type::Err => return Ok(()),
             _ => match fields
@@ -3607,9 +3792,9 @@ impl<'a> Builder<'a> {
         gap("a store into a field its root has not", line)
     }
 
-    /// The rules of a store into `name[index]`, whose root has type `bty`: the
-    /// root is a container, the index is its key type, and the element takes
-    /// the value. A root that is no container is a refused gap.
+    /// The rules of a store into `name[index]`, as the reader wrote `name`,
+    /// whose place has type `bty`: the place is a container, the index is its
+    /// key type, and the element takes the value. A root that is no container is a refused gap.
     fn index_store(
         &mut self,
         bty: &Type,
@@ -3621,7 +3806,7 @@ impl<'a> Builder<'a> {
         let decls = self.proto.types();
         let coercible = |a: &Type, b: &Type| vyrn_frontend::types::coercible(a, b, decls);
         let (ity, vty) = (node_ty(self.own, index.id()), node_ty(self.own, value.id()));
-        let (sp, name) = (self.body.speech(), self.written(name));
+        let sp = self.body.speech();
         let refusal = match vyrn_frontend::types::resolve(bty, decls) {
             Type::Err => None,
             Type::Map(key, val) => {
@@ -3686,37 +3871,43 @@ impl<'a> Builder<'a> {
         Ok(())
     }
 
-    /// A store into the element or the entry of the place `base` at `index`,
-    /// which the source names `name`.
+    /// A store into the element or the entry of the place `base` at `index`, a
+    /// part of the root `name` that the reader wrote as `quoted`. `whole` is
+    /// the place `atSet` yields where `index` is a user container's own.
     #[allow(clippy::too_many_arguments)]
     fn index_set(
         &mut self,
         base: (Place, Type),
         name: &str,
-        index: &'a Expr,
-        value: &'a Expr,
+        quoted: &str,
+        (index, key): (&'a Expr, Option<Val>),
+        (value, stored): (&'a Expr, Option<Val>),
         sid: NodeId,
+        nested: bool,
+        whole: Option<Place>,
         line: usize,
         out: &mut Vec<St>,
     ) -> Result<(), Gap> {
-        self.index_store(&base.1, name, index, value, line)?;
+        self.index_store(&base.1, quoted, index, value, line)?;
         let (base, bty) = base;
-        // A user container's element is the place its `atSet` yields,
-        // after the projection's prologue.
-        let yielded = if self.projected(&bty) {
-            self.yielded(index, value, line, out)?
-        } else {
-            None
-        };
-        let (place, stored) = match yielded {
-            Some(y) => y,
+        let place = match whole {
+            Some(p) => p,
+            None if nested && self.projected(&bty) => {
+                return gap("a user container below the root of a store", line);
+            }
             None if self.is_map(&bty) => {
-                let k = self.val(index, out)?;
-                (Place::Key(Box::new(base), k), value)
+                let k = match key {
+                    Some(k) => k,
+                    None => self.val(index, out)?,
+                };
+                Place::Key(Box::new(base), k)
             }
             None => {
-                let i = self.read_val(index, out)?;
-                (Place::Elem(Box::new(base), i), value)
+                let i = match key {
+                    Some(i) => i,
+                    None => self.read_val(index, out)?,
+                };
+                Place::Elem(Box::new(base), i)
             }
         };
         // A user container's element type is the value's.
@@ -3726,17 +3917,20 @@ impl<'a> Builder<'a> {
         };
         // A crossing into a validated element is its constructor, proven or
         // not.
-        let v = match self.checked(&self.ty_of(stored)?, &ety, stored) {
-            Some(to) => Val::Name(self.checked_temp(&to, stored, line, out)?),
-            None => self.val(stored, out)?,
+        let v = match (stored, self.checked(&self.ty_of(value)?, &ety, value)) {
+            (Some(v), Some(to)) => Val::Name(self.checked_val(to, v, line, out)),
+            (Some(v), None) => v,
+            (None, Some(to)) => Val::Name(self.checked_temp(&to, value, line, out)?),
+            (None, None) => self.val(value, out)?,
         };
         let site = Site::Node(sid);
         // The same hand-back, and the index counts too: `xs[i] = xs[j]` and
         // `xs[xs.length - 1] = v` read the buffer the store writes into.
         // `xs[i] = xs[j].copy()` hands nothing back.
-        let handed_back = (vyrn_frontend::ast::mentions_place(value, name)
-            && !self.store_is_fresh(value, name))
-            || vyrn_frontend::ast::mentions_place(index, name);
+        let handed_back = !nested
+            && ((vyrn_frontend::ast::mentions_place(value, name)
+                && !self.store_is_fresh(value, name))
+                || vyrn_frontend::ast::mentions_place(index, name));
         let releases = !handed_back && self.own.placed.stores.contains_key(&sid);
         out.push(St::Store {
             place,
