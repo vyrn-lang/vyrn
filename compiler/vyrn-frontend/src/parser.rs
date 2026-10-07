@@ -5104,8 +5104,7 @@ test \"t\" {{ assert(c(1) == 1) }}"
 
     #[test]
     fn a_removal_over_a_place_stays_a_call_over_it() {
-        // The checker refuses a place receiver outside a whole statement or `let`
-        // initializer; the parser hoists nothing.
+        // The parser hoists nothing, in any position.
         for src in [
             "fn main() -> Int64 { let mut s: S = S { xs: [1] }  if s.xs.pop() == None { return 1 }  return 0 }",
             "fn main() -> Int64 { let mut s: S = S { xs: [1] }  let x = s.xs.pop()  return 0 }",

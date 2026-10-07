@@ -1641,10 +1641,6 @@ struct Checker<'a> {
     in_test: RefCell<bool>,
     /// Inside a `bench` body: `blackBox` is legal, as in a `test`.
     in_bench: RefCell<bool>,
-    /// The receiver of the removal that is a whole statement or `let`
-    /// initializer: the one place a removal may name a field or an element
-    /// ([`Checker::mut_array_receiver`]).
-    whole_removal: std::cell::Cell<Option<NodeId>>,
     /// Whether the unit [`Checker::unit`] runs typed a node [`Checker::judged`],
     /// or read a name typed [`Type::Err`].
     unknown: std::cell::Cell<bool>,
@@ -1819,7 +1815,6 @@ impl<'a> Checker<'a> {
             globals: Default::default(),
             in_test: Default::default(),
             in_bench: Default::default(),
-            whole_removal: Default::default(),
             unknown: Default::default(),
             stmt_line: Default::default(),
             reader: Default::default(),
@@ -3131,10 +3126,6 @@ impl<'a> Checker<'a> {
 
     fn stmt(&self, stmt: &Stmt, ret: &Type, scope: &mut Scope) -> Result<(), Diagnostic> {
         *self.stmt_line.borrow_mut() = stmt.line();
-        self.whole_removal.set(match stmt {
-            Stmt::Expr(e, _) | Stmt::Let { value: e, .. } => removal_receiver(e),
-            _ => None,
-        });
         if let Stmt::Assign { name, line, id, .. }
         | Stmt::Store { name, line, id, .. }
         | Stmt::Drop { name, line, id } = stmt
@@ -5000,7 +4991,7 @@ impl<'a> Checker<'a> {
             }
             if name == "@remove" {
                 // A receiver declared without `mut` is refused as for `pop`.
-                let Some(root) = self.removal_root(&args[0]) else {
+                let Some((_, root, _)) = crate::parser::place_steps(&args[0]) else {
                     return Err(cerr!(line, MapRemoveReceiver));
                 };
                 if self.lookup(scope, root).is_some_and(|b| !b.mutable) {
@@ -6515,22 +6506,11 @@ impl<'a> Checker<'a> {
         Some(&f.type_params).filter(|ps| !ps.is_empty())
     }
 
-    /// The root a removal's receiver names: a variable, or the root of a field
-    /// or element when the call is a whole statement or `let` initializer
-    /// ([`Checker::whole_removal`]). A removal elsewhere keeps no place: its
-    /// container would be read while it is out.
-    fn removal_root<'e>(&self, recv: &'e Expr) -> Option<&'e str> {
-        let (_, root, _) = crate::parser::place_steps(recv)?;
-        let whole = self.whole_removal.get() == Some(recv.id());
-        (whole || matches!(recv, Expr::Var { .. })).then_some(root)
-    }
-
     /// The element type of the array a `pop` or `swapRemove` receiver names;
     /// `op` is the spelling a diagnostic quotes.
     ///
-    /// The receiver is a variable, or a field or element of one when the call
-    /// is a whole statement or `let` initializer ([`removal_receiver`]).
-    /// An unknown or non-`mut` root is the typed judgment's refusal
+    /// The receiver is a variable, or a field or element of one, in any
+    /// position. An unknown or non-`mut` root is the typed judgment's refusal
     /// (`typed::stores`), typed `Err` before its type is read because a
     /// literal bound without `mut` is a fixed-size array. A receiver that is
     /// no growable array is `Builder::shrinks`'s refusal.
@@ -6542,7 +6522,7 @@ impl<'a> Checker<'a> {
         op: &str,
         fn_ret: Option<&Type>,
     ) -> Result<Type, Diagnostic> {
-        let Some(root) = self.removal_root(recv) else {
+        let Some((_, root, _)) = crate::parser::place_steps(recv) else {
             return Err(cerr!(line, ArrayOpReceiver, op));
         };
         let Some(b) = self.lookup(scope, root).filter(|b| b.mutable) else {
@@ -6558,16 +6538,6 @@ impl<'a> Checker<'a> {
             Type::Err => Ok(Type::Err),
             _ => self.judged(),
         }
-    }
-}
-
-/// The receiver of the removal `e`, if `e` is one.
-fn removal_receiver(e: &Expr) -> Option<NodeId> {
-    match e {
-        Expr::Call { name, args, .. } if crate::prelude::removes(name) => {
-            args.first().map(Expr::id)
-        }
-        _ => None,
     }
 }
 

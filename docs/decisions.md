@@ -344,3 +344,4 @@ pull request.
 - No AI attribution in commits, pull requests, code or prose.
 - A store evaluates its place, a projection's prologue included, before its value; an element's bounds check runs at the store.
 - A store into a binding that outlives a `region` is refused when the stored type holds heap, whatever the depth of the place: `b[0].x = 5` stores an `Int64` and is accepted, `b[0].name = s` is refused.
+- A removal (`pop`, `swapRemove`, a map `remove`) through a field or an element is legal in any position, as one through a variable is: `if let Some(v) = r.xs.pop()`, `r.xs.pop() ?? 0`, `f(rs[0].m.remove(k))`. The receiver must be a place.

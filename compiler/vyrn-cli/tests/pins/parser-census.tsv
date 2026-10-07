@@ -4,7 +4,7 @@ parser.rs	a desugar the parser states	617	7
 parser.rs	a table stated a second time	0	0
 parser.rs	recovery and the diagnostic sentences	148	2
 parser.rs	shared machinery	195	1
-parser.rs	tests	1544	0
+parser.rs	tests	1543	0
 lexer.rs	the grammar's own arm	557	11
 lexer.rs	a desugar the parser states	0	0
 lexer.rs	a table stated a second time	0	0
