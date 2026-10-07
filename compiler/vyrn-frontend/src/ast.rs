@@ -2796,6 +2796,27 @@ pub fn sub_blocks(s: &Stmt) -> Vec<&Block> {
     }
 }
 
+/// Returns whether `e` calls a declared function with `args` satisfying `by`.
+/// A name that starts with `@` is a builtin, which changes no binding.
+pub fn calls_with(e: &Expr, by: &dyn Fn(&[Expr]) -> bool) -> bool {
+    struct Calls<'f>(&'f dyn Fn(&[Expr]) -> bool, bool);
+
+    impl AstVisit<'_> for Calls<'_> {
+        const SCOPED: bool = false;
+
+        fn expr(&mut self, e: &Expr, _: &std::collections::HashSet<String>) -> bool {
+            if let Expr::Call { name, args, .. } = e {
+                self.1 |= !name.starts_with('@') && (self.0)(args);
+            }
+            !self.1
+        }
+    }
+
+    let mut v = Calls(by, false);
+    ast_expr(e, &std::collections::HashSet::new(), &mut v);
+    v.1
+}
+
 /// Returns whether some path through `e` names the binding. A lambda body
 /// counts though it may never run: narrowing it would widen what compiles.
 pub fn mentions(e: &Expr, name: &str) -> bool {

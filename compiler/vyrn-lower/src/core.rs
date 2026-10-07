@@ -3689,13 +3689,27 @@ impl<'a> Builder<'a> {
     ) -> Result<(), Gap> {
         self.index_store(&base.1, quoted, index, value, line)?;
         let (base, bty) = base;
+        // A name the value can change is read before the value runs.
+        let pinned = match self.changed_by(index, value) {
+            true => Some(self.bind_temp(&format!("{quoted}[]idx"), index, line, out)?),
+            false => None,
+        };
         let place = match whole {
             Some(p) => p,
             None if nested && self.projected(&bty) => {
                 return gap("a user container below the root of a store", line);
             }
-            None if self.is_map(&bty) => Place::Key(Box::new(base), self.val(index, out)?),
-            None => Place::Elem(Box::new(base), self.read_val(index, out)?),
+            None => {
+                let at = match pinned {
+                    Some(at) => at,
+                    None if self.is_map(&bty) => self.val(index, out)?,
+                    None => self.read_val(index, out)?,
+                };
+                match self.is_map(&bty) {
+                    true => Place::Key(Box::new(base), at),
+                    false => Place::Elem(Box::new(base), at),
+                }
+            }
         };
         // A user container's element type is the value's.
         let ety = match self.elem_ty(&bty, line) {
@@ -3735,6 +3749,33 @@ impl<'a> Builder<'a> {
             },
         });
         Ok(())
+    }
+
+    /// Whether the store's `value` can change `index`, a `mut` name of a scalar
+    /// type, before the store reads it: a call is passed the name, or a call
+    /// reaches module state.
+    fn changed_by(&self, index: &Expr, value: &Expr) -> bool {
+        let Expr::Var { name, .. } = index else {
+            return false;
+        };
+        let by: Box<dyn Fn(&[Expr]) -> bool> = match self.lookup(name) {
+            Some(n) if self.body.names[n.index()].mutable => Box::new(|args| {
+                args.iter()
+                    .any(|a| matches!(a, Expr::Var { name: n, .. } if n == name))
+            }),
+            Some(_) => return false,
+            None if self
+                .program
+                .globals
+                .iter()
+                .any(|g| g.name == *name && g.mutable) =>
+            {
+                Box::new(|_| true)
+            }
+            None => return false,
+        };
+        vyrn_frontend::ast::calls_with(value, &*by)
+            && self.ty_of(index).is_ok_and(|t| !self.owns(&t))
     }
 
     /// Whether a binding or module state answers `name`. Where none does,
