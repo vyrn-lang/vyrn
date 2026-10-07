@@ -210,6 +210,10 @@ fn add_native_clang_flags(cmd: &mut Command, target: NativeTarget) {
     }
 }
 
+/// The compiler is allocation-bound; see `mimalloc` in `Cargo.toml`.
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 fn main() -> ExitCode {
     // The compiler's passes recurse over the syntax; the ~1 MB Windows
     // main-thread stack overflows on a realistic program (std/i18n).

@@ -10,6 +10,10 @@ license = "MIT OR Apache-2.0"
 description = "The vyrn driver: check, run, build and test a .vyrn program."
 
 [dependencies]
+# The `vyrn` binary's allocator; the number is in docs/decisions.md. It builds
+# one source file through `cc` (C, or C++ under MSVC). `v2` is mimalloc 2.x: v3
+# ran as fast but held 1.6x the system allocator's peak memory on `test`.
+mimalloc = { version = "0.1", default-features = false, features = ["v2"] }
 vyrn-frontend = { path = "../vyrn-frontend" }
 vyrn-lower = { path = "../vyrn-lower" }
 vyrn-codegen = { path = "../vyrn-codegen" }
