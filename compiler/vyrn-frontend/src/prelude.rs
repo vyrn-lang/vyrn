@@ -360,9 +360,10 @@ impl Builtin {
     /// Types a call's operands and result from the row. `refuse` is the
     /// refusal of an operand at another type than its parameter's, from the
     /// row's name, the operand's index, the parameter and the type found;
-    /// `None` refuses none.
+    /// `None` refuses none. A row with no spec gets [`Spec::Typed`] of them.
     fn typed(self, params: Vec<Type>, ret: Type, wrong_type: Option<RefuseType>) -> Self {
         let stops = params.len();
+        let held = Spec::Typed(params.clone(), ret.clone());
         let typed = Typed {
             params,
             ret,
@@ -370,6 +371,7 @@ impl Builtin {
             stops,
         };
         Builtin {
+            spec: self.spec.or(Some(held)),
             typed: Some(typed),
             ..self
         }
@@ -445,18 +447,17 @@ fn table() -> Vec<Builtin> {
         )
     };
     let splat = |n, lane: &Type, vec: &Type| {
-        b(n).spec(Spec::Typed(vec![lane.clone()], vec.clone()))
-            .takes(&[1], |n, _, got| {
-                rule!(SplatArity, what = simd_words(n).0, got)
-            })
-            .typed(
-                vec![lane.clone()],
-                vec.clone(),
-                Some(|n, _, lane, t| {
-                    let what = format!("`{}.splat(..)`", simd_words(n).0);
-                    rule!(LaneType, what, lane, t)
-                }),
-            )
+        b(n).takes(&[1], |n, _, got| {
+            rule!(SplatArity, what = simd_words(n).0, got)
+        })
+        .typed(
+            vec![lane.clone()],
+            vec.clone(),
+            Some(|n, _, lane, t| {
+                let what = format!("`{}.splat(..)`", simd_words(n).0);
+                rule!(LaneType, what, lane, t)
+            }),
+        )
     };
     let vector_arity: fn(&str, usize, usize) -> Rule = |n, want, got| {
         let (what, op) = simd_words(n);
@@ -468,16 +469,14 @@ fn table() -> Vec<Builtin> {
         (b(n).spec(Spec::Lanes).takes(&[k], vector_arity)).indexes(Indexes::Lanes(lanes))
     };
     let op = |n, k: usize, vec: &Type| {
-        b(n).spec(Spec::Typed(vec![vec.clone(); k], vec.clone()))
-            .takes(&[k], vector_arity)
-            .typed(
-                vec![vec.clone(); k],
-                vec.clone(),
-                Some(|n, _, _, t| {
-                    let (ty, what) = simd_words(n);
-                    rule!(VectorOpType, ty, what, t)
-                }),
-            )
+        b(n).takes(&[k], vector_arity).typed(
+            vec![vec.clone(); k],
+            vec.clone(),
+            Some(|n, _, _, t| {
+                let (ty, what) = simd_words(n);
+                rule!(VectorOpType, ty, what, t)
+            }),
+        )
     };
     let code = || Type::Named("Code".to_string());
     let level = |name, method| {
@@ -1195,7 +1194,8 @@ pub fn all<'a>() -> impl Iterator<Item = &'a Function> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Spec {
     /// Each operand at the stated type, in order, and a result at the stated
-    /// type. The emitter writes one instruction between them.
+    /// type. The emitter writes one instruction between them. A row with
+    /// [`Builtin::typed`] gets them from it.
     Typed(Vec<Type>, Type),
     /// One operand, at whatever type the row put on the name it reads, and a
     /// result of that same type.
