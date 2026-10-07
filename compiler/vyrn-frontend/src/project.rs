@@ -332,14 +332,17 @@ impl Expansions {
     }
 
     /// Returns the statements a store through a user `place atSet` lowers as:
-    /// the prologue, then the store into the place `atSet` yields. `index` is
-    /// the projected step's key, `rest` the steps after it up to the store's
+    /// the prologue, then the store into the place `atSet` yields. The
+    /// receiver is the place `name prefix..`, of type `aty`; `index` is the
+    /// projected step's key, `rest` the steps after it up to the store's
     /// leaf, empty for `a[i] = v`. `None` is the seeded row, which the
     /// caller's element path writes.
+    #[allow(clippy::too_many_arguments)]
     pub fn store_index(
         &self,
         impls: &Impls,
         name: &str,
+        prefix: &[Step],
         index: &Expr,
         rest: &[Step],
         value: &Expr,
@@ -349,7 +352,12 @@ impl Expansions {
             return Ok(Some(b));
         }
         let line = index.line();
-        let recv = Expr::var(name, line);
+        let recv = prefix
+            .iter()
+            .fold(Expr::var(name, line), |e, step| match step {
+                Step::Field(f) => Expr::field(e, f.as_str(), line),
+                Step::Index(i) => Expr::call(AT, vec![e, i.clone()], line),
+            });
         let Some(p) = self.site_at(
             index.id(),
             impls,
@@ -408,10 +416,23 @@ impl Expansions {
         Ok(Some(blk))
     }
 
-    /// Returns the store expansion the checker built, for a reader that has
-    /// the statement but not the receiver's type (the lowering, `movecheck`).
+    /// Returns the store expansion the checker built for `index`, for a reader
+    /// that has the statement but not the receiver's type.
     pub fn stored(&self, index: &Expr) -> Option<&'static Block> {
         self.read().stores.get(&index.id()).copied()
+    }
+
+    /// Returns the position in the store's path (`base` then `leaf`) of its
+    /// projected step, and that step's expansion. The first element step with
+    /// an expansion is the one.
+    pub fn stored_step(&self, base: &[Step], leaf: &Step) -> Option<(usize, &'static Block)> {
+        base.iter()
+            .chain([leaf])
+            .enumerate()
+            .find_map(|(k, s)| match s {
+                Step::Index(i) => self.stored(i).map(|b| (k, b)),
+                Step::Field(_) => None,
+            })
     }
 
     /// Returns the element read of `for x in iter` over a user container: its

@@ -2362,16 +2362,12 @@ impl<'a> Builder<'a> {
     ) -> Result<(), Gap> {
         let (root, rty) = self.named_place(name, line)?;
         let quoted = self.quoted(name, base);
-        let first = base.first().unwrap_or(leaf);
-        let expansion = match first {
-            Step::Index(index) if self.projected(&rty) => self.program.expansions.stored(index),
-            _ => None,
-        };
+        let expansion = self.program.expansions.stored_step(base, leaf);
         // The place the leaf writes into, and for `c[i] = v` on a user container
         // the place `atSet` yields, which is the element itself.
         let mut tmp = name.to_string();
         let (at, whole) = match expansion {
-            Some(blk) => {
+            Some((k, blk)) => {
                 let Some((
                     Stmt::Store {
                         name: into,
@@ -2387,17 +2383,30 @@ impl<'a> Builder<'a> {
                 for s in prologue {
                     self.stmt(s, out)?;
                 }
+                // A second projected step is the expansion's own, which the
+                // checker typed and expanded in turn.
+                if self.program.expansions.stored_step(b, l).is_some() {
+                    return self.store(sid, into, b, l, value, line, out);
+                }
                 let steps: Vec<At> = b.iter().chain([l]).map(Step::at).collect();
-                // The steps `atSet` yields: the expansion appends the source's own.
-                let Some(yielded) = steps.len().checked_sub(base.len()).map(|n| &steps[..n]) else {
+                // The steps up to the element `atSet` yields: the receiver's own
+                // and the projection's. The expansion appends the source's steps
+                // after the projected one.
+                let Some(yielded) = steps.len().checked_sub(base.len() - k).map(|n| &steps[..n])
+                else {
                     return gap("an `atSet` expansion shorter than the store", line);
                 };
                 let (eroot, ety) = self.named_place(into, line)?;
                 tmp = into.clone();
                 let (place, ty) = self.walk(eroot, ety, yielded, false, &mut tmp, line, out)?;
-                match base.split_first() {
-                    None => ((root, rty), Some(place)),
-                    Some((_, rest)) => {
+                match base.get(k + 1..) {
+                    // The leaf is the projected step: the receiver's type is
+                    // the one the leaf's index is judged against.
+                    None => {
+                        let at = self.path_ty(rty, &base[..k], line)?;
+                        ((root, at), Some(place))
+                    }
+                    Some(rest) => {
                         let rest: Vec<At> = rest.iter().map(Step::at).collect();
                         let at = self.walk(place, ty, &rest, true, &mut tmp, line, out)?;
                         (at, None)
@@ -2454,18 +2463,11 @@ impl<'a> Builder<'a> {
         out: &mut Vec<St>,
     ) -> Result<(Place, Type), Gap> {
         for (k, step) in steps.iter().enumerate() {
+            let next = self.step_ty(&ty, step, line)?;
             match *step {
                 At::Field(field) => {
-                    let next = match self.field_ty(&ty, field, line) {
-                        Ok(t) => t,
-                        Err(g) => {
-                            self.refuse_field(&ty, field, line);
-                            return Err(g);
-                        }
-                    };
                     place = Place::Field(Box::new(place), field.to_string());
                     *tmp = format!("{tmp}.{field}[]");
-                    ty = next;
                 }
                 At::Index(index) => {
                     let bound = (bind_last || k + 1 < steps.len())
@@ -2479,24 +2481,48 @@ impl<'a> Builder<'a> {
                         self.read_val(index, out)?
                     };
                     *tmp = format!("{tmp}[]");
-                    // A user container's element is the place its `atSet` yields,
-                    // which only a store expanded at the root states
-                    // ([`Builder::store`]); elsewhere it is judged as the element
-                    // place it names.
-                    let next = match self.program.impls.place(&ty, "atSet") {
-                        Some((imp, f)) => vyrn_frontend::types::under_head(imp, &ty, &f.ret),
-                        None => self.elem_ty(&ty, line)?,
-                    };
-                    // A map entry is no place: it reads as the `Option` a lookup
-                    // answers, which the leaf refuses.
-                    (place, ty) = match self.is_map(&ty) {
-                        true => (Place::Key(Box::new(place), at), Type::option(next)),
-                        false => (Place::Elem(Box::new(place), at), next),
+                    place = match self.is_map(&ty) {
+                        true => Place::Key(Box::new(place), at),
+                        false => Place::Elem(Box::new(place), at),
                     };
                 }
             }
+            ty = next;
         }
         Ok((place, ty))
+    }
+
+    /// The type of the place `step` names inside a place of type `ty`.
+    fn step_ty(&mut self, ty: &Type, step: &At<'_>, line: usize) -> Result<Type, Gap> {
+        match *step {
+            At::Field(field) => self.field_ty(ty, field, line).inspect_err(|_| {
+                self.refuse_field(ty, field, line);
+            }),
+            At::Index(_) => {
+                // A user container's element is the place its `atSet` yields,
+                // which only a store expanded at its projected step states
+                // ([`Builder::store`]); elsewhere it is judged as the element
+                // place it names.
+                let next = match self.program.impls.place(ty, "atSet") {
+                    Some((imp, f)) => vyrn_frontend::types::under_head(imp, ty, &f.ret),
+                    None => self.elem_ty(ty, line)?,
+                };
+                // A map entry is no place: it reads as the `Option` a lookup
+                // answers, which the leaf refuses.
+                Ok(match self.is_map(ty) {
+                    true => Type::option(next),
+                    false => next,
+                })
+            }
+        }
+    }
+
+    /// The type of the place `steps` name inside a place of type `ty`.
+    fn path_ty(&mut self, mut ty: Type, steps: &[Step], line: usize) -> Result<Type, Gap> {
+        for step in steps {
+            ty = self.step_ty(&ty, &step.at(), line)?;
+        }
+        Ok(ty)
     }
 
     /// Records the refusal of a path through `field` where the type of the

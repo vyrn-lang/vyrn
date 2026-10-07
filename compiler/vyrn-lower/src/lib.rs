@@ -26,7 +26,7 @@ pub use world::{analyze, FnRow, Fns, World};
 use std::collections::{BTreeMap, HashMap, VecDeque};
 
 use vyrn_frontend::ast::{
-    Expr, FnId, Function, LambdaBody, NodeId, Program, SourceBody, Step, Stmt, Type,
+    Expr, FnId, Function, LambdaBody, NodeId, Program, SourceBody, Stmt, Type,
 };
 use vyrn_frontend::checker;
 use vyrn_frontend::own::DropKind;
@@ -488,10 +488,8 @@ impl<'a> FactsVisit<'a> for Walk<'a, '_> {
             // The writing half of a projection: `a[i] = v` on a receiver with
             // a user `place atSet`, as the checker built and shared it.
             Stmt::Store { base, leaf, .. } => {
-                if let Step::Index(index) = base.first().unwrap_or(leaf) {
-                    if let Some(blk) = self.expansions.stored(index) {
-                        facts_block(blk, &mut Default::default(), self);
-                    }
+                if let Some((_, blk)) = self.expansions.stored_step(base, leaf) {
+                    facts_block(blk, &mut Default::default(), self);
                 }
             }
             // A `for` over a user container calls its `size` and reads each

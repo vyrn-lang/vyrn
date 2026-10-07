@@ -133,7 +133,7 @@ A name before a string literal is a tagged template. `tag"a \{x} b"` calls `tag(
 - `for x in xs { .. }` visits each element. `for x in consume xs` takes each element as an owned value and leaves `xs` dead after the loop.
 - `push` on a fixed `Array<T, N>` is refused, because its length is part of its type.
 
-A nested store writes through a field or an element: `r.a.b = v`, `xs[i] = v`, `xs[i].f = v` and `t.xs[k] = v` are legal, to any depth: `xs[i].f.g = v` too.
+A nested store writes through a field or an element: `r.a.b = v`, `xs[i] = v`, `xs[i].f = v` and `t.xs[k] = v` are legal, to any depth: `xs[i].f.g = v` too. A user container's `atSet` answers its step wherever the step sits: `h.bag[0] = v`, `bs[0][0].f = v`.
 
 ### Map
 

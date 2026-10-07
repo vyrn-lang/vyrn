@@ -3194,13 +3194,17 @@ impl<'a> Checker<'a> {
                     self.unknown.set(true);
                     return Ok(());
                 };
-                let mut bty = b.ty.clone();
+                // The type of the place before each step, then of the place the leaf writes into.
+                let mut tys = vec![b.ty.clone()];
                 for step in base {
-                    let Some(next) = self.store_step(&bty, step, scope, ret, *line)? else {
+                    let Some(next) =
+                        self.store_step(&tys[tys.len() - 1], step, scope, ret, *line)?
+                    else {
                         return Ok(());
                     };
-                    bty = next;
+                    tys.push(next);
                 }
+                let bty = tys[tys.len() - 1].clone();
                 match leaf {
                     Step::Field(field) => {
                         let ruled = matches!(&bty, Type::Named(n) if self.decl(n).is_some_and(|d| d.predicate.is_some()));
@@ -3225,7 +3229,7 @@ impl<'a> Checker<'a> {
                             return Ok(());
                         }
                         self.region_store_guard(name, &fty, scope, *line)?;
-                        self.record_store(name, base, leaf, value, &b.ty, ret, scope);
+                        self.record_store(name, base, leaf, value, &tys, ret, scope);
                         Ok(())
                     }
                     // `name[index] = value`, in place.
@@ -3242,6 +3246,7 @@ impl<'a> Checker<'a> {
                             }
                             self.prove_coercion(value, &val, *line)?;
                             self.prove_string_interpolation(value, &val, scope, Some(ret), *line)?;
+                            self.record_store(name, base, leaf, value, &tys, ret, scope);
                             return self.region_store_guard(name, &val, scope, *line);
                         }
                         // A builtin container is keyed by `Int64`, a user one by what
@@ -3276,7 +3281,7 @@ impl<'a> Checker<'a> {
                         self.prove_coercion(value, &elem, *line)?;
                         self.prove_string_interpolation(value, &elem, scope, Some(ret), *line)?;
                         self.region_store_guard(name, &elem, scope, *line)?;
-                        self.record_store(name, base, leaf, value, &b.ty, ret, scope);
+                        self.record_store(name, base, leaf, value, &tys, ret, scope);
                         Ok(())
                     }
                 }
@@ -3477,7 +3482,8 @@ impl<'a> Checker<'a> {
     }
 
     /// Records the `atSet` expansion a store through a user container lowers
-    /// by: the projected step is the store's first.
+    /// by: the first projected step of the path, at any depth. `tys[k]` is the
+    /// type of the place before step `k`.
     #[allow(clippy::too_many_arguments)]
     fn record_store(
         &self,
@@ -3485,25 +3491,34 @@ impl<'a> Checker<'a> {
         base: &[Step],
         leaf: &Step,
         value: &Expr,
-        root: &Type,
+        tys: &[Type],
         ret: &Type,
         scope: &Scope,
     ) {
         if !self.recording() {
             return;
         }
-        let mut path = base.iter().chain([leaf]);
-        let Some(Step::Index(index)) = path.next() else {
-            return;
-        };
-        let rest: Vec<Step> = path.cloned().collect();
-        if let Ok(Some(blk)) = self
-            .expansions
-            .store_index(self.impls, name, index, &rest, value, root)
-        {
-            self.record_desugar(scope, |c, sc| {
-                c.block(blk, ret, sc);
-            });
+        let path: Vec<&Step> = base.iter().chain([leaf]).collect();
+        for (k, step) in path.iter().enumerate() {
+            let Step::Index(index) = step else {
+                continue;
+            };
+            let rest: Vec<Step> = path[k + 1..].iter().map(|s| (*s).clone()).collect();
+            let found = self.expansions.store_index(
+                self.impls,
+                name,
+                &base[..k],
+                index,
+                &rest,
+                value,
+                &tys[k],
+            );
+            if let Ok(Some(blk)) = found {
+                self.record_desugar(scope, |c, sc| {
+                    c.block(blk, ret, sc);
+                });
+                return;
+            }
         }
     }
 

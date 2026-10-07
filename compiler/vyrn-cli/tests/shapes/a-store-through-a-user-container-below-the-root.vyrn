@@ -1,0 +1,38 @@
+// a store through a user container below the root
+// `h.bag[0] = v`, `h.bag[1].x = v` and `bs[0][0].x = v` store into the place
+// `atSet` yields, with the container's place as its receiver; a container
+// inside a container expands twice, and a map entry below the element is the
+// leaf.
+type P = { x: Int64 }
+type Bag = { items: Array<P>, n: Int64 }
+impl Index for Bag {
+    fn at(read self, i: Int64) -> read P { return self.items[i] }
+    fn atSet(modify self, i: Int64) -> modify P { return self.items[i] }
+}
+type Q = { m: Map<String, Int64> }
+type QBag = { items: Array<Q> }
+impl Index for QBag {
+    fn at(read self, i: Int64) -> read Q { return self.items[i] }
+    fn atSet(modify self, i: Int64) -> modify Q { return self.items[i] }
+}
+type H = { bag: Bag, qs: QBag }
+type Outer = { bags: Array<Bag> }
+impl Index for Outer {
+    fn at(read self, i: Int64) -> read Bag { return self.bags[i] }
+    fn atSet(modify self, i: Int64) -> modify Bag { return self.bags[i] }
+}
+fn vyrnTestMain() -> Int64 {
+    let mut h = H {
+        bag: Bag { items: [P { x: 1 }, P { x: 2 }], n: 0 },
+        qs: QBag { items: [Q { m: ["a": 1] }] },
+    }
+    let mut bs: Array<Bag> = [Bag { items: [P { x: 1 }], n: 0 }]
+    let mut o = Outer { bags: [Bag { items: [P { x: 1 }, P { x: 2 }], n: 0 }] }
+    h.qs[0].m["a"] = 4
+    h.bag[0] = P { x: 5 }
+    h.bag[1].x = 6
+    bs[0][0].x = 9
+    o[0][1].x = 7
+    o[0][0] = P { x: 3 }
+    return h.bag[0].x + h.bag[1].x * 10 + bs[0][0].x * 20 + o[0][1].x * 100 + o[0][0].x * 1000 + (h.qs[0].m["a"] ?? 0) * 10000
+}
