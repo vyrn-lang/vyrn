@@ -4591,14 +4591,7 @@ impl<'p> Fn_<'_, 'p> {
         sf.params = cap_names
             .iter()
             .zip(&cap_tys)
-            .map(|(n, t)| Param {
-                id: Id::NEW,
-                name: n.clone(),
-                capability: Capability::Read,
-                ty: t.clone(),
-                line: 0,
-                col: 0,
-            })
+            .map(|(n, t)| Param::synth(n, t.clone()))
             .chain(params.iter().zip(ptys).map(|(n, t)| Param {
                 id: Id::NEW,
                 name: n.name.clone(),
@@ -13196,15 +13189,11 @@ fn ho_shell(
         for t in &target.sig.params[..target.ncaps] {
             let n = format!("@cap{}", sf.params.len());
             sf.params.push(Param {
-                id: Id::NEW,
-                name: n.clone(),
                 capability: match p.capability {
                     Capability::Consume if value => Capability::Consume,
                     _ => Capability::Read,
                 },
-                ty: t.clone(),
-                line: 0,
-                col: 0,
+                ..Param::synth(n.clone(), t.clone())
             });
             cap_srcs.push(n);
         }

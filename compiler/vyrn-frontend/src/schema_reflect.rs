@@ -148,7 +148,7 @@ pub fn module_interface_lit(
     let mut type_infos = Vec::new();
     for t in &program.type_decls {
         // Skip injected (line 0) and synthetic (`Name.field`) declarations.
-        if !t.exported || t.line == 0 || t.name.contains('.') {
+        if !t.exported || t.line == 0 || is_synthetic(&t.name) {
             continue;
         }
         // Own declarations always; foreign ones when the closure reaches them.
@@ -703,15 +703,13 @@ fn render_type_decl(t: &TypeDecl, types: &HashMap<String, TypeDecl>) -> String {
 }
 
 /// The synthetic refinement declaration (`User.age`) that `ty` names, if it
-/// is one. The parser names it `Decl.field`, and the `.` cannot occur in a user
-/// type name. The loader renames only the parent (`User__from0`), so test the
-/// dot, not the parent's name. `decl` looks a declaration up by name.
+/// is one (see `is_synthetic`). `decl` looks a declaration up by name.
 pub(crate) fn synthetic_decl<'a>(
     ty: &Type,
     decl: impl Fn(&str) -> Option<&'a TypeDecl>,
 ) -> Option<&'a TypeDecl> {
     match ty {
-        Type::Named(n) if n.contains('.') => decl(n),
+        Type::Named(n) if is_synthetic(n) => decl(n),
         _ => None,
     }
 }

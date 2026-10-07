@@ -526,7 +526,7 @@ fn analyze_inner(
     for t in &member_src.type_decls {
         // Skip synthetic inline-refinement decls (`User.age`); the parent record
         // holds the fields.
-        if t.name.contains('.') {
+        if ast::is_synthetic(&t.name) {
             continue;
         }
         if let Type::Record(fields) = &t.base {
@@ -557,7 +557,7 @@ fn analyze_inner(
     const STRING_COMPLETION_CAP: usize = 1000;
     let mut finite_string_types = Vec::new();
     for t in &member_src.type_decls {
-        if t.name.contains('.') {
+        if ast::is_synthetic(&t.name) {
             continue;
         }
         if let Some(domain) = crate::finite::enumerate_type(t, STRING_COMPLETION_CAP) {
@@ -581,7 +581,7 @@ fn analyze_inner(
     const CLASS_ALPHABET_CAP: usize = 8192;
     let mut sequence_string_types = Vec::new();
     for t in &member_src.type_decls {
-        if t.name.contains('.') {
+        if ast::is_synthetic(&t.name) {
             continue;
         }
         if let Some(alphabet) = crate::finite::enumerate_alphabet(t, CLASS_ALPHABET_CAP) {
@@ -1645,7 +1645,10 @@ fn decl_symbols(
         }
     }
     for t in &program.type_decls {
-        if t.line == 0 || t.name.contains('.') || !keep(Of::Type, &t.name, &t.module, t.exported) {
+        if t.line == 0
+            || ast::is_synthetic(&t.name)
+            || !keep(Of::Type, &t.name, &t.module, t.exported)
+        {
             continue;
         }
         let detail = type_decl_detail(t, &program.type_decls, sp);
@@ -2499,7 +2502,7 @@ pub fn module_doc(source: &str) -> ModuleDoc {
     }
     for t in &program.type_decls {
         // Skip synthetic decls: line-0 records and dotted inline-refinement types.
-        if t.line == 0 || t.name.contains('.') || !t.exported {
+        if t.line == 0 || ast::is_synthetic(&t.name) || !t.exported {
             continue;
         }
         exports.push(DocExport {

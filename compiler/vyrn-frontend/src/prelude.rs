@@ -10,9 +10,7 @@
 //! `value`, `@list` and `pullAt` allocate but have no contract, because their
 //! result type is one no signature spells.
 
-use crate::ast::{
-    Capability, Expr, Function, Id, Param, Program, ProtocolDecl, Stmt, Type, TypeDecl,
-};
+use crate::ast::{Capability, Expr, Function, Param, Program, ProtocolDecl, Stmt, Type, TypeDecl};
 use crate::effects::Effect;
 use crate::project::ELEM;
 use crate::rules::{rule, Rule};
@@ -72,12 +70,8 @@ fn row(
             params
                 .iter()
                 .map(|(n, c, t)| Param {
-                    id: Id::NEW,
-                    name: n.to_string(),
                     capability: *c,
-                    ty: t.clone(),
-                    line: 0,
-                    col: 0,
+                    ..Param::synth(*n, t.clone())
                 })
                 .collect(),
             ret,
