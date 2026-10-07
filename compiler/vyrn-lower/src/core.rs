@@ -2798,11 +2798,22 @@ impl<'a> Builder<'a> {
                     _ => self.val(value, out),
                 };
                 self.frame.rebinding = false;
-                let v = v?;
+                let mut v = v?;
                 let ty = match n {
                     Some(n) => self.body.names[n.index()].ty.clone(),
                     None => self.ty_of(value)?,
                 };
+                // A slot that owns its value keeps owning: a borrow stored
+                // into it is copied, as `let mut` binds one (`copies`), and
+                // the store releases the old value.
+                if let (Some(n), Val::Name(m)) = (n, &v) {
+                    if self.body.names[n.index()].releases && self.body.names[m.index()].borrow {
+                        let rhs = self.copy_rhs(v.clone(), value)?;
+                        let t = self.temp(ty.clone(), *line);
+                        self.bind(t, rhs, out);
+                        v = Val::Name(t);
+                    }
+                }
                 // The rule for a store to a name or module state: the plan
                 // says whether it releases the old value. A value that
                 // mentions the place may hand the old buffer back
@@ -2822,17 +2833,7 @@ impl<'a> Builder<'a> {
                 // that owns heap.
                 let (place, owes) = match n {
                     None => (Place::Global(name.clone()), self.owns(&ty)),
-                    Some(n) => {
-                        // A rebind answers as a `let` does: `t = d.title` is a
-                        // projection of `d`. A `mut` slot is released by its
-                        // final value, so a slot ever assigned somebody
-                        // else's place is not this frame's to release.
-                        if self.borrows(&v) && self.body.names[n.index()].releases {
-                            self.body.names[n.index()].releases = false;
-                            self.body.names[n.index()].borrow = true;
-                        }
-                        (Place::Name(n), self.body.names[n.index()].releases)
-                    }
+                    Some(n) => (Place::Name(n), self.body.names[n.index()].releases),
                 };
                 // The hand-back comes before the place's obligation: a name
                 // that owes no release still hands its buffer back, and the
@@ -5319,6 +5320,12 @@ impl<'a> Builder<'a> {
         self.frame.drain += 1;
         let v = self.read_at(e, out, None);
         self.frame.drain -= 1;
+        self.copy_rhs(v?, e)
+    }
+
+    /// The copy of `v`, the value of `e`: the type's `impl Copy` where it has
+    /// one, `@copy` otherwise.
+    fn copy_rhs(&self, v: Val, e: &Expr) -> Result<Rhs, Gap> {
         let copied = (self.copied(e)).and_then(|(f, s)| Some((self.fn_id(&f)?, f, s)));
         let (callee, kind, solved) = match copied {
             Some((id, f, solved)) => (f, Callee::Fn(id), solved),
@@ -5326,7 +5333,7 @@ impl<'a> Builder<'a> {
         };
         Ok(Rhs::Call {
             callee,
-            args: vec![(Arg::Val(v?), Capability::Read)],
+            args: vec![(Arg::Val(v), Capability::Read)],
             write_back: false,
             kind,
             ret: Some(self.ty_of(e)?),

@@ -2439,6 +2439,13 @@ fn an_element_stored_from_an_element_is_a_copy() {
     shape_runs_clean("an-element-stored-from-an-element-is-a-copy", "1132\n");
 }
 
+// A `mut` name that owns its value is rebound to a borrow by a copy, and the
+// store releases the old value (witness: base leaked 1 block per name).
+#[test]
+fn a_name_rebound_to_a_borrow_keeps_its_copy() {
+    shape_runs_clean("a-name-rebound-to-a-borrow-keeps-its-copy", "2015\n");
+}
+
 #[test]
 fn a_for_over_a_user_container_in_a_field_runs() {
     shape_runs_clean(
