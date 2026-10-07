@@ -998,6 +998,10 @@ pub struct Body {
     /// made. A `let` that binds a name to a place read keys that read by the
     /// bound name.
     pub ends: std::collections::HashMap<(NodeId, Name), Option<(usize, usize)>>,
+    /// The edits that turn a prefix `consume` of a place into a copy, keyed by
+    /// the statement, the root name and the hole path the take leaves: empty
+    /// where the reader's text does not place the take on one line.
+    pub consumes: std::collections::HashMap<(NodeId, Name, String), Vec<crate::diagnostics::Fix>>,
 }
 
 /// The shape of a candidate construct, which `vyrn_lower::core::last_owner` asks.

@@ -1381,6 +1381,7 @@ impl<'a> Builder<'a> {
                 refused,
                 mistyped,
                 ends: HashMap::new(),
+                consumes: HashMap::new(),
             },
             frame: Frame::default(),
             temps: 0,
@@ -1479,6 +1480,32 @@ impl<'a> Builder<'a> {
         let spelled =
             root.col() > 0 && root.0.unit() < NodeId::EXPANDED && self.body.file.is_none();
         spelled.then(|| (e.line(), end))
+    }
+
+    /// The edits that replace `consume PLACE` by `PLACE.copy()` where the
+    /// reader wrote it on one line of the root module's own source: delete the
+    /// keyword at column `kw` of `kw_line`, copy past the place. Empty where the text does
+    /// not place the take.
+    fn uncopy(&self, place: &Expr, (kw_line, kw): (usize, usize)) -> Vec<Fix> {
+        let mut root = place;
+        while let Expr::Field { expr, .. } = root {
+            root = expr;
+        }
+        match (self.spelled_end(place), root) {
+            (Some((line, end)), Expr::Var { line: l, id, .. })
+                if kw > 0 && *l == line && line == kw_line =>
+            {
+                vec![
+                    Fix::Unconsume {
+                        line,
+                        col: kw,
+                        len: id.col().saturating_sub(kw),
+                    },
+                    Fix::Copy { line, col: end },
+                ]
+            }
+            _ => Vec::new(),
+        }
     }
 
     /// [`Builder::keyed`] for a `let` the reader wrote.
@@ -4218,7 +4245,7 @@ impl<'a> Builder<'a> {
                 self.keyed(t, construct);
                 Ok((Val::Name(t), true))
             }
-            Expr::Consume { place, line, id: _ } => match &**place {
+            Expr::Consume { place, line, id } => match &**place {
                 Expr::Var { name, .. } => {
                     let Some(n) = self.lookup(name) else {
                         // `consume` of module state: the same read and refusal.
@@ -4234,7 +4261,7 @@ impl<'a> Builder<'a> {
                     Ok((Val::Name(t), self.taken_by(t, construct)))
                 }
                 _ => {
-                    let Val::Name(t) = self.take_prefix(place, *line, out)? else {
+                    let Val::Name(t) = self.take_prefix(place, id.col(), *line, out)? else {
                         return gap("a `consume` of a literal", *line);
                     };
                     self.keyed(t, construct);
@@ -4900,14 +4927,14 @@ impl<'a> Builder<'a> {
                 // is a borrow in any position.
                 None => self.global_read(e, name, *line, out),
             },
-            Expr::Consume { place, line, id: _ } => match &**place {
+            Expr::Consume { place, line, id } => match &**place {
                 Expr::Var { name, .. } => match self.lookup(name) {
                     Some(n) => Ok(Val::Name(n)),
                     // `consume <module state>`: a borrow whose take the
                     // kernel refuses.
                     None => self.global_read(place, name, *line, out),
                 },
-                _ => self.take_prefix(place, *line, out),
+                _ => self.take_prefix(place, id.col(), *line, out),
             },
             Expr::Lambda { .. } => self.lambda(e, out),
             _ => {
@@ -5062,6 +5089,7 @@ impl<'a> Builder<'a> {
                 refused: Vec::new(),
                 mistyped: Vec::new(),
                 ends: HashMap::new(),
+                consumes: HashMap::new(),
             },
         );
         self.body.name = lambda_spelling(&outer.name, *line, *col);
@@ -5185,13 +5213,19 @@ impl<'a> Builder<'a> {
 
     /// The `consume p` prefix. Its refusals are about the keyword,
     /// which the kernel does not see, so they are stated here.
-    fn take_prefix(&mut self, e: &'a Expr, line: usize, out: &mut Vec<St>) -> Result<Val, Gap> {
+    fn take_prefix(
+        &mut self,
+        e: &'a Expr,
+        kw: usize,
+        line: usize,
+        out: &mut Vec<St>,
+    ) -> Result<Val, Gap> {
         take_names_a_place(e, &self.own.place_names, line, false)?;
         self.consume_names_a_borrow(e, line)?;
         if self.in_module_state(e) {
             return self.read_val(e, out);
         }
-        self.take_place_at(e, out, true)
+        self.take_place_at(e, out, Some((line, kw)))
     }
 
     /// Whether `e` is module state or a place inside it. Nothing may take module
@@ -5258,23 +5292,27 @@ impl<'a> Builder<'a> {
     /// builtin hands back (`s.dense.push(i)` is `s.dense = @push(s.dense, i)`).
     /// The value leaves into an owned name and the base keeps a hole.
     fn take_place(&mut self, e: &'a Expr, out: &mut Vec<St>) -> Result<Val, Gap> {
-        self.take_place_at(e, out, false)
+        self.take_place_at(e, out, None)
     }
 
-    /// [`Builder::take_place`], saying whether the hole stays: a `consume x.f`
-    /// leaves one the base's release walks around; the write-back
-    /// form's store fills it. This is where a binding's holes are stated.
+    /// [`Builder::take_place`], given the line and column of the `consume`
+    /// keyword where there is one: a `consume x.f` leaves a hole the base's
+    /// release walks around; the write-back form's store fills it. This is
+    /// where a binding's holes are stated.
     fn take_place_at(
         &mut self,
         e: &'a Expr,
         out: &mut Vec<St>,
-        keeps_hole: bool,
+        keyword: Option<(usize, usize)>,
     ) -> Result<Val, Gap> {
         let ty = self.ty_of(e)?;
         let place = self.place(e, out)?;
         self.frame.pending_receiver = None;
-        if keeps_hole {
+        if let Some(kw) = keyword {
             if let Some((n, path)) = crate::kernel::root_of(&place) {
+                let fixes = self.uncopy(e, kw);
+                let key = (self.frame.stmt, n, path.clone());
+                self.body.consumes.entry(key).or_insert(fixes);
                 // A hole the walk cannot skip is not stated: a declared
                 // `release` cannot be told to leave a field alone, so it would
                 // free the field twice (`refusals/r22_drop_with_a_hole.vyrn`).

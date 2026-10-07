@@ -276,3 +276,46 @@ fn running_it_twice_changes_nothing_the_second_time() {
     assert_eq!(std::fs::read_to_string(&file).unwrap(), once);
     assert!(String::from_utf8_lossy(&out.stdout).contains("0 fix(es) applied"),);
 }
+
+const PERSON: &str = "type Person = { name: String, age: Int64 }\n\
+                      fn take(s: consume String) -> Int64 { return s.byteLength }\n\
+                      fn keep(p: consume Person) -> Int64 { return p.age }\n";
+
+/// Runs `vyrn fix` on `PERSON` and `main`'s `body`: the text must be refused
+/// before, hold `want` after (and no `consume` in its place), and check.
+fn replaces_consume(name: &str, body: &str, want: &str) {
+    let src = format!("{PERSON}fn main() -> Int64 {{\n{body}return 0\n}}\n");
+    assert!(!checks(&format!("{name}-before"), &src));
+    let (log, after) = fix(name, &src);
+    assert!(after.contains(want), "{after}");
+    assert!(log.contains("2 fix(es) applied, 0 left"), "{log}");
+    assert!(checks(&format!("{name}-after"), &after), "{after}");
+}
+
+#[test]
+fn it_replaces_the_consume_that_left_a_hole_a_whole_use_meets() {
+    let body = "let p = Person { name: \"n\", age: 1 }\n\
+                let a = take(consume p.name)\n\
+                let b = keep(p)\n\
+                print(a + b)\n";
+    replaces_consume("whole-with-hole", body, "take(p.name.copy())");
+}
+
+#[test]
+fn it_replaces_the_consume_whose_place_is_read_again() {
+    let body = "let p = Person { name: \"n\", age: 1 }\n\
+                let a = take(consume   p.name)\n\
+                print(a + p.name.byteLength)\n";
+    replaces_consume("read-in-hole", body, "take(p.name.copy())");
+}
+
+#[test]
+fn it_replaces_the_consume_a_loop_repeats() {
+    let body = "let p = Person { name: \"n\", age: 1 }\n\
+                let mut n = 0\n\
+                for i in [1, 2] {\n\
+                    n = n + take(consume p.name)\n\
+                }\n\
+                print(n)\n";
+    replaces_consume("loop-hole", body, "take(p.name.copy())");
+}
