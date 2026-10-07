@@ -2111,8 +2111,6 @@ fn open_only_page_vyx_is_fully_analyzed() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// No `vyrn.json`: discovery finds the app root as the `.vyrn` that imports a
-/// generator.
 const OPEN_ONLY_COMP_APP: &str = "import { componentsThemed } from \"std/vyx\"\n\
     import { widget } from componentsThemed(\"./widgets\", \"./theme.json\")\n\
     fn main() -> Int64 { return 0 }\n";
@@ -2135,6 +2133,7 @@ fn open_only_component_vyx_is_fully_analyzed() {
     std::fs::write(dir.join("widgets/Widget.vyx"), OPEN_ONLY_WIDGET).unwrap();
     std::fs::write(dir.join("app.vyrn"), OPEN_ONLY_COMP_APP).unwrap();
     std::fs::write(dir.join("theme.json"), THEMED_THEME).unwrap();
+    std::fs::write(dir.join("vyrn.json"), "{ \"name\": \"c\" }").unwrap();
 
     let mut client = spawn_client();
     let widget_uri = file_uri(&dir.join("widgets/Widget.vyx"));
@@ -2641,6 +2640,7 @@ fn styled_scratch() -> std::path::PathBuf {
     std::fs::write(dir.join("routes/layout.vyx"), STYLED_LAYOUT).unwrap();
     std::fs::write(dir.join("app.vyrn"), STYLED_APP).unwrap();
     std::fs::write(dir.join("theme.json"), STYLED_THEME).unwrap();
+    std::fs::write(dir.join("vyrn.json"), "{ \"name\": \"s\" }").unwrap();
     std::fs::write(dir.join("public/app.css"), STYLED_CSS).unwrap();
     std::fs::write(dir.join("public/decoy.css"), STYLED_DECOY_CSS).unwrap();
     dir

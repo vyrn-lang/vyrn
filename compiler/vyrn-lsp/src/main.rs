@@ -2864,7 +2864,7 @@ fn candidate_owners(vyx_path: &str) -> Vec<Url> {
         .into_iter()
         .map(|p| {
             let src = std::fs::read_to_string(&p).unwrap_or_default();
-            let generator = vyrn_frontend::manifest::has_generator_import(&src);
+            let generator = has_generator_import(&src);
             let names_dir = !dir_name.is_empty() && src.contains(&dir_name);
             let mut score = 0;
             if generator {
@@ -2883,6 +2883,18 @@ fn candidate_owners(vyx_path: &str) -> Vec<Url> {
         .take(MAX_OWNER_CANDIDATES)
         .filter_map(|(_, _, p)| Url::from_file_path(p).ok())
         .collect()
+}
+
+/// Whether a `.vyrn` source mentions a page or component generator, the roots
+/// that own `.vyx` files. A textual heuristic that only ranks owner candidates:
+/// a comment or a string that spells `pages(` counts.
+fn has_generator_import(src: &str) -> bool {
+    src.contains("pagesThemed")
+        || src.contains("componentsThemed")
+        || src.contains("pages(")
+        || src.contains("components(")
+        || src.contains("pages ")
+        || src.contains("components ")
 }
 
 /// The `.vyrn` files under `dir`, at most [`MAX_OWNER_CANDIDATES`].

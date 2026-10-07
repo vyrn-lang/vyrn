@@ -916,28 +916,41 @@ fn why_contract_prints_the_diagnostics_of_a_page_that_does_not_compile() {
     assert!(err.contains("home.vyrn:0:0: cannot load"), "{err}");
 }
 
-/// Without a `vyrn.json`, `why --contract` finds the app root the editor finds:
-/// the nearest directory holding a generator root, not the file's directory.
+/// Without a `vyrn.json` the app root is the file's own directory, however
+/// the neighbouring files look, so a page there is in no role.
 #[test]
-fn why_contract_finds_the_editors_app_root() {
+fn why_contract_without_a_manifest_roots_at_the_files_directory() {
     let dir = scratch("whyroot");
     std::fs::create_dir_all(dir.join("screens")).unwrap();
     std::fs::write(
         dir.join("gen.vyrn"),
-        "export contract Screen {\n    fn title() -> String\n}\n\n\
-         export gen fn pages(dir: String) -> String {\n    return \"\"\n}\n",
+        "export contract Screen {
+    fn title() -> String
+}
+
+         export gen fn pages(dir: String) -> String {
+    return \"\"
+}
+",
     )
     .unwrap();
     std::fs::write(
         dir.join("app.vyrn"),
-        "import { pages } from \"./gen\"\n\
-         import { mounted } from pages(\"./screens\")\n\n\
-         fn main() -> Int64 {\n    return 0\n}\n",
+        "import { pages } from \"./gen\"
+         import { mounted } from pages(\"./screens\")
+
+         fn main() -> Int64 {
+    return 0
+}
+",
     )
     .unwrap();
     std::fs::write(
         dir.join("screens/home.vyrn"),
-        "export fn title() -> String {\n    return \"home\"\n}\n",
+        "export fn title() -> String {
+    return \"home\"
+}
+",
     )
     .unwrap();
     let out = vyrn()
@@ -947,10 +960,9 @@ fn why_contract_finds_the_editors_app_root() {
         .output()
         .expect("why");
     let text = String::from_utf8_lossy(&out.stdout).to_string();
+    assert_eq!(out.status.code(), Some(1), "{text}");
     assert!(
-        out.status.success(),
-        "{text}{}",
-        String::from_utf8_lossy(&out.stderr)
+        text.contains("no contract: this file is in no role"),
+        "{text}"
     );
-    assert!(text.contains("contract: Screen"), "{text}");
 }
