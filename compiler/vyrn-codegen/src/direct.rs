@@ -384,6 +384,16 @@ fn compile_inner(
         audit: audited,
     };
 
+    // The first `body_of` of a function decides its checks, about a fifth of this compile. The
+    // answer is memoized and the same on any thread, so the signatures below find it ready.
+    vyrn_frontend::par::in_parallel(
+        &user,
+        |f| f.body.stmts.len(),
+        || (),
+        |(), f| {
+            cx.world.body_of(&f.name);
+        },
+    );
     // Every function is indexed before any body exists, so a call can name a callee not yet
     // emitted (recursion, forward references). The encoder hands out the index and the body is
     // filled whenever it exists, so emission order does not decide numbering.
