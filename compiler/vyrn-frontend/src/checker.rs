@@ -3208,13 +3208,10 @@ impl<'a> Checker<'a> {
                 // is not.
                 let loose = |e: &Expr| !base.is_empty() && crate::parser::reads_place(e);
                 let mut bty = b.ty.clone();
-                // The type of the first step, which the root's region guard reads.
-                let mut first = None;
                 for step in base {
                     let Some(next) = self.store_step(&bty, step, scope, ret, *line)? else {
                         return Ok(());
                     };
-                    first.get_or_insert_with(|| next.clone());
                     bty = next;
                 }
                 match leaf {
@@ -3241,12 +3238,7 @@ impl<'a> Checker<'a> {
                         }) {
                             return Ok(());
                         }
-                        self.region_store_guard(
-                            name,
-                            first.as_ref().unwrap_or(&fty),
-                            scope,
-                            *line,
-                        )?;
+                        self.region_store_guard(name, &fty, scope, *line)?;
                         self.record_store(name, base, leaf, value, &b.ty, ret, scope);
                         Ok(())
                     }
@@ -3283,12 +3275,7 @@ impl<'a> Checker<'a> {
                                     *line,
                                 )?;
                             }
-                            return self.region_store_guard(
-                                name,
-                                first.as_ref().unwrap_or(&val),
-                                scope,
-                                *line,
-                            );
+                            return self.region_store_guard(name, &val, scope, *line);
                         }
                         // A builtin container is keyed by `Int64`, a user one by what
                         // its `atSet` takes.
@@ -3324,12 +3311,7 @@ impl<'a> Checker<'a> {
                             self.prove_coercion(value, &elem, *line)?;
                             self.prove_string_interpolation(value, &elem, scope, Some(ret), *line)?;
                         }
-                        self.region_store_guard(
-                            name,
-                            first.as_ref().unwrap_or(&elem),
-                            scope,
-                            *line,
-                        )?;
+                        self.region_store_guard(name, &elem, scope, *line)?;
                         self.record_store(name, base, leaf, value, &b.ty, ret, scope);
                         Ok(())
                     }
