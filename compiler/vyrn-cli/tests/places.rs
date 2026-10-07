@@ -232,7 +232,7 @@ fn the_interpreter_does_not_copy_the_array_once_per_append() {
     );
 }
 
-/// `rows[i].push(v)` lands in `Stmt::IndexSet`, not `Stmt::SetField`, with the same
+/// `rows[i].push(v)` lands in a `Stmt::Store` with an element step, not a field step, with the same
 /// hazard: `at` clones the row's `Rc` and `push`'s `make_mut` copies it. One
 /// `append_snapshot` serves both. About 438x at this N with the copy, 1.1x without.
 #[test]

@@ -1440,6 +1440,13 @@ pub struct Block {
     pub id: Id,
 }
 
+/// The step a [`Stmt::Store`] writes through: a field, or an element.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Step {
+    Field(String),
+    Index(Expr),
+}
+
 /// A statement. `if` also has an expression form, [`Expr::IfExpr`]; `match` is
 /// an [`Expr::Match`] whose position the checker reads.
 #[derive(Debug, Clone, PartialEq)]
@@ -1462,19 +1469,11 @@ pub enum Stmt {
         line: usize,
         id: Id,
     },
-    /// `name.field = value` on a `mut` record binding.
-    SetField {
+    /// `name.field = value` on a `mut` record binding, or `name[index] = value`
+    /// on a `mut` array binding; the read `a[i]` is `@at(a, i)`.
+    Store {
         name: String,
-        field: String,
-        value: Expr,
-        line: usize,
-        id: Id,
-    },
-    /// `name[index] = value` on a `mut` array binding; the read `a[i]` is
-    /// `@at(a, i)`.
-    IndexSet {
-        name: String,
-        index: Expr,
+        leaf: Step,
         value: Expr,
         line: usize,
         id: Id,
@@ -1804,8 +1803,7 @@ macro_rules! stmt_slot {
         match $s {
             Stmt::Let { id, .. }
             | Stmt::Assign { id, .. }
-            | Stmt::SetField { id, .. }
-            | Stmt::IndexSet { id, .. }
+            | Stmt::Store { id, .. }
             | Stmt::Return { id, .. }
             | Stmt::Break { id, .. }
             | Stmt::Continue { id, .. }
@@ -1907,6 +1905,17 @@ impl Stmt {
             value,
             line,
             col: 0,
+            id: Id::NEW,
+        }
+    }
+
+    /// Returns the store `name <leaf> = value` at `line`, with no id yet.
+    pub fn store(name: impl Into<String>, leaf: Step, value: Expr, line: usize) -> Self {
+        Stmt::Store {
+            name: name.into(),
+            leaf,
+            value,
+            line,
             id: Id::NEW,
         }
     }
@@ -2081,11 +2090,11 @@ impl Numbering {
     pub fn stmt(&mut self, s: &mut Stmt) {
         self.next(stmt_slot!(s, &mut));
         match s {
-            Stmt::Let { value, .. } | Stmt::Assign { value, .. } | Stmt::SetField { value, .. } => {
-                self.expr(value)
-            }
-            Stmt::IndexSet { index, value, .. } => {
-                self.expr(index);
+            Stmt::Let { value, .. } | Stmt::Assign { value, .. } => self.expr(value),
+            Stmt::Store { leaf, value, .. } => {
+                if let Step::Index(index) = leaf {
+                    self.expr(index);
+                }
                 self.expr(value);
             }
             Stmt::Return { value, .. } => {
@@ -2196,8 +2205,7 @@ impl Stmt {
         match self {
             Stmt::Let { line, .. }
             | Stmt::Assign { line, .. }
-            | Stmt::SetField { line, .. }
-            | Stmt::IndexSet { line, .. }
+            | Stmt::Store { line, .. }
             | Stmt::Return { line, .. }
             | Stmt::Break { line, id: _ }
             | Stmt::Continue { line, id: _ }
@@ -2372,9 +2380,11 @@ macro_rules! body_scope_descent {
                         locals.insert(name.clone());
                     }
                 }
-                Stmt::Assign { value, .. } | Stmt::SetField { value, .. } => $ex(value, locals, v),
-                Stmt::IndexSet { index, value, .. } => {
-                    $ex(index, locals, v);
+                Stmt::Assign { value, .. } => $ex(value, locals, v),
+                Stmt::Store { leaf, value, .. } => {
+                    if let $crate::ast::Step::Index(index) = leaf {
+                        $ex(index, locals, v);
+                    }
                     $ex(value, locals, v);
                 }
                 Stmt::Return { value: Some(e), .. } => $ex(e, locals, v),
@@ -2611,11 +2621,7 @@ struct Names<'n>(&'n std::collections::HashSet<String>, bool);
 
 impl AstVisit<'_> for Names<'_> {
     fn stmt(&mut self, s: &Stmt, locals: &std::collections::HashSet<String>) {
-        if let Stmt::Assign { name, .. }
-        | Stmt::SetField { name, .. }
-        | Stmt::IndexSet { name, .. }
-        | Stmt::Drop { name, .. } = s
-        {
+        if let Stmt::Assign { name, .. } | Stmt::Store { name, .. } | Stmt::Drop { name, .. } = s {
             self.1 |= self.0.contains(name) && !locals.contains(name);
         }
     }

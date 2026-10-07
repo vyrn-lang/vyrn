@@ -278,13 +278,12 @@ pub fn place_receiver(
             });
             post.insert(
                 0,
-                Stmt::SetField {
-                    id: Id::NEW,
-                    name: parent,
-                    field: field.clone(),
-                    value: Expr::var(tmp.clone(), line),
+                Stmt::store(
+                    parent,
+                    Step::Field(field.clone()),
+                    Expr::var(tmp.clone(), line),
                     line,
-                },
+                ),
             );
             Some((tmp, hoists, pre, post))
         }
@@ -312,13 +311,12 @@ pub fn place_receiver(
             });
             post.insert(
                 0,
-                Stmt::IndexSet {
-                    id: Id::NEW,
-                    name: parent,
-                    index,
-                    value: Expr::var(tmp.clone(), line),
+                Stmt::store(
+                    parent,
+                    Step::Index(index),
+                    Expr::var(tmp.clone(), line),
                     line,
-                },
+                ),
             );
             Some((tmp, hoists, pre, post))
         }
@@ -418,13 +416,7 @@ pub fn store_stmts(place: &Expr, value: &Expr, line: usize) -> Option<Vec<Stmt>>
                 hoist_operand(value.clone(), format!("{recv}#val"), &mut out, line)
             };
             out.extend(moves);
-            out.push(Stmt::SetField {
-                id: Id::NEW,
-                name: recv,
-                field: field.clone(),
-                value,
-                line,
-            });
+            out.push(Stmt::store(recv, Step::Field(field.clone()), value, line));
             out.extend(post);
             Some(out)
         }
@@ -450,10 +442,10 @@ pub fn store_stmts(place: &Expr, value: &Expr, line: usize) -> Option<Vec<Stmt>>
                 Expr::Var { id, .. } => Id::at(id.col()),
                 _ => Id::NEW,
             };
-            out.push(Stmt::IndexSet {
+            out.push(Stmt::Store {
                 id,
                 name: recv,
-                index,
+                leaf: Step::Index(index),
                 value,
                 line,
             });
@@ -2936,10 +2928,10 @@ impl Parser {
                 self.eat(&Tok::Eq)?;
                 let value = self.expr()?;
                 self.eat_semi();
-                Ok(Stmt::SetField {
+                Ok(Stmt::Store {
                     id,
                     name,
-                    field,
+                    leaf: Step::Field(field),
                     value,
                     line,
                 })
@@ -3016,22 +3008,21 @@ impl Parser {
                                     line,
                                 });
                             }
-                            // Writes back via `SetField`, under the rules of `r.f = ..`.
+                            // Writes back as a field store, under the rules of `r.f = ..`.
                             Some(Expr::Field {
                                 expr: base, field, ..
                             }) if matches!(base.as_ref(), Expr::Var { .. }) => {
                                 let Expr::Var { name: recv, .. } = base.as_ref() else {
                                     unreachable!()
                                 };
-                                return Ok(Stmt::SetField {
-                                    id: Id::NEW,
-                                    name: recv.clone(),
-                                    field: field.clone(),
-                                    value: e,
+                                return Ok(Stmt::store(
+                                    recv.clone(),
+                                    Step::Field(field.clone()),
+                                    e,
                                     line,
-                                });
+                                ));
                             }
-                            // Writes back via `IndexSet`; the index is evaluated
+                            // Writes back as an element store; the index is evaluated
                             // on both the read and the store.
                             Some(Expr::Call {
                                 name: at,
@@ -3046,13 +3037,7 @@ impl Parser {
                                 };
                                 let recv = recv.clone();
                                 let index = iargs[1].clone();
-                                return Ok(Stmt::IndexSet {
-                                    id: Id::NEW,
-                                    name: recv,
-                                    index,
-                                    value: e,
-                                    line,
-                                });
+                                return Ok(Stmt::store(recv, Step::Index(index), e, line));
                             }
                             _ => {
                                 return Err(refuse!("parse", line, self.col(), PushNoPlace));
@@ -5267,22 +5252,30 @@ test \"t\" {{ assert(c(1) == 1) }}"
                 ..
             } => {
                 assert_eq!(name, "a[]");
-                assert!(mutable, "the element copy must be mut so SetField applies");
+                assert!(
+                    mutable,
+                    "the element copy must be mut so the field store applies"
+                );
                 assert_eq!(c, "@at");
                 assert!(matches!(args[0], Expr::Var { .. }));
             }
             other => panic!("expected `let mut a[] = a[0]`, got {other:?}"),
         }
         match &stmts[3] {
-            Stmt::SetField { name, field, .. } => {
+            Stmt::Store {
+                name,
+                leaf: Step::Field(field),
+                ..
+            } => {
                 assert_eq!(name, "a[]");
                 assert_eq!(field, "f");
             }
-            other => panic!("expected SetField on the temp, got {other:?}"),
+            other => panic!("expected a field store on the temp, got {other:?}"),
         }
         match &stmts[4] {
-            Stmt::IndexSet {
+            Stmt::Store {
                 name,
+                leaf: Step::Index(_),
                 value: Expr::Var { name: v, .. },
                 ..
             } => {
@@ -5318,13 +5311,17 @@ test \"t\" {{ assert(c(1) == 1) }}"
             other => panic!("expected `let mut s.xs[] = s.xs`, got {other:?}"),
         }
         match &stmts[2] {
-            Stmt::IndexSet { name, .. } => assert_eq!(name, "s.xs[]"),
+            Stmt::Store {
+                name,
+                leaf: Step::Index(_),
+                ..
+            } => assert_eq!(name, "s.xs[]"),
             other => panic!("expected `s.xs[][0] = 9`, got {other:?}"),
         }
         match &stmts[3] {
-            Stmt::SetField {
+            Stmt::Store {
                 name,
-                field,
+                leaf: Step::Field(field),
                 value: Expr::Var { name: v, .. },
                 ..
             } => {
@@ -5358,9 +5355,9 @@ test \"t\" {{ assert(c(1) == 1) }}"
         for needle in [
             r#"Let { name: "o.i[]""#,
             r#"Let { name: "o.i[].xs[]""#,
-            r#"IndexSet { name: "o.i[].xs[]""#,
-            r#"SetField { name: "o.i[]", field: "xs""#,
-            r#"SetField { name: "o", field: "i""#,
+            r#"Store { name: "o.i[].xs[]", leaf: Index("#,
+            r#"Store { name: "o.i[]", leaf: Field("xs")"#,
+            r#"Store { name: "o", leaf: Field("i")"#,
         ] {
             assert!(joined.contains(needle), "missing {needle} in\n{joined}");
         }
@@ -5389,7 +5386,7 @@ test \"t\" {{ assert(c(1) == 1) }}"
             "only then is the field moved out: {shape:#?}"
         );
         assert!(
-            shape[3].starts_with(r#"IndexSet { name: "s.xs[]""#)
+            shape[3].starts_with(r#"Store { name: "s.xs[]", leaf: Index("#)
                 && !shape[3].contains(r#"name: "f""#)
                 && !shape[3].contains(r#"name: "g""#),
             "the store names only temps, so it re-evaluates nothing: {shape:#?}"
@@ -5468,7 +5465,7 @@ test \"t\" {{ assert(c(1) == 1) }}"
             other => panic!("expected `let x = s.xs[].pop()`, got {other:?}"),
         }
         assert!(
-            matches!(&stmts[3], Stmt::SetField { name, field, .. } if name == "s" && field == "xs")
+            matches!(&stmts[3], Stmt::Store { name, leaf: Step::Field(field), .. } if name == "s" && field == "xs")
         );
     }
 
@@ -5505,15 +5502,15 @@ test \"t\" {{ assert(c(1) == 1) }}"
     }
 
     #[test]
-    fn push_on_record_field_desugars_to_setfield() {
+    fn push_on_record_field_desugars_to_a_field_store() {
         // `r.xs.push(x)` becomes `r.xs = @push(r.xs, x)`.
         let p =
             parse_src("fn main() -> Int64 { let mut r: R = R { xs: [] }  r.xs.push(1)  return 0 }");
         let stmts = &p.functions[0].body.stmts;
         match &stmts[1] {
-            Stmt::SetField {
+            Stmt::Store {
                 name,
-                field,
+                leaf: Step::Field(field),
                 value: Expr::Call { name: c, .. },
                 ..
             } => {
@@ -5526,15 +5523,16 @@ test \"t\" {{ assert(c(1) == 1) }}"
     }
 
     #[test]
-    fn push_on_array_element_desugars_to_indexset() {
+    fn push_on_array_element_desugars_to_an_element_store() {
         // `a[i].push(x)` becomes `a[i] = @push(a[i], x)`.
         let p = parse_src(
             "fn main() -> Int64 { let mut a: Array<Int64> = []  a[0].push(1)  return 0 }",
         );
         let stmts = &p.functions[0].body.stmts;
         match &stmts[1] {
-            Stmt::IndexSet {
+            Stmt::Store {
                 name,
+                leaf: Step::Index(_),
                 value: Expr::Call { name: c, .. },
                 ..
             } => {

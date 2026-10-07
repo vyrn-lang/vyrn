@@ -10,7 +10,7 @@ use vyrn_frontend::loader::DiskResolver;
 
 mod common;
 
-use vyrn_frontend::ast::{Block, NodeId, Stmt};
+use vyrn_frontend::ast::{Block, NodeId, Step, Stmt};
 use vyrn_frontend::core::Facts;
 
 fn analyze(src: &str) -> (vyrn_frontend::ast::Program, Facts) {
@@ -81,7 +81,15 @@ fn a_place_store_owns_what_it_displaces() {
                    return b.s.byteLength\n\
                }";
     let (p, facts) = analyze(src);
-    let sets = stores_in(&p.functions[0].body, |s| matches!(s, Stmt::SetField { .. }));
+    let sets = stores_in(&p.functions[0].body, |s| {
+        matches!(
+            s,
+            Stmt::Store {
+                leaf: Step::Field(_),
+                ..
+            }
+        )
+    });
     assert_eq!(sets.len(), 3);
     assert!(releases(&facts, sets[0]), "a droppable local owns");
     assert!(releases(&facts, sets[1]), "module state owns by rule");
@@ -171,7 +179,15 @@ fn an_early_exiting_take_does_not_block_a_later_field_store() {
                }\n\
                fn main() -> Int64 { return go(true).body.byteLength }";
     let (p, facts) = analyze(src);
-    let sets = stores_in(&p.functions[1].body, |s| matches!(s, Stmt::SetField { .. }));
+    let sets = stores_in(&p.functions[1].body, |s| {
+        matches!(
+            s,
+            Stmt::Store {
+                leaf: Step::Field(_),
+                ..
+            }
+        )
+    });
     assert_eq!(sets.len(), 1);
     assert!(
         releases(&facts, sets[0]),

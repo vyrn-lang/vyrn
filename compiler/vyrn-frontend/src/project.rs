@@ -596,12 +596,9 @@ pub fn is_miss_return(s: &Stmt) -> bool {
 /// writes a place (the prologue and move-outs before it are `let`s). The
 /// emitter maps this node to the source statement the core judged.
 pub fn store_node(blk: &Block) -> Option<&Stmt> {
-    blk.stmts.iter().find(|s| {
-        matches!(
-            s,
-            Stmt::Assign { .. } | Stmt::SetField { .. } | Stmt::IndexSet { .. }
-        )
-    })
+    blk.stmts
+        .iter()
+        .find(|s| matches!(s, Stmt::Assign { .. } | Stmt::Store { .. }))
 }
 
 /// The receiver and the counter a `for` over a user container binds for its
@@ -640,10 +637,9 @@ fn rename_uses(b: &mut Block, map: &HashMap<String, String>) {
     impl UseVisit for Uses<'_> {
         fn stmt(&mut self, s: &mut Stmt, locals: &std::collections::HashSet<String>) {
             match s {
-                Stmt::Assign { name, .. }
-                | Stmt::IndexSet { name, .. }
-                | Stmt::SetField { name, .. }
-                | Stmt::Drop { name, .. } => self.put(name, locals),
+                Stmt::Assign { name, .. } | Stmt::Store { name, .. } | Stmt::Drop { name, .. } => {
+                    self.put(name, locals)
+                }
                 _ => {}
             }
         }

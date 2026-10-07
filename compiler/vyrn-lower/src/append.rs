@@ -72,13 +72,13 @@ fn scan_append_block(
                 },
                 _,
             ) => scan_arms(scrutinee, arms, targets, banned, strict),
-            Stmt::SetField { value, .. } | Stmt::Expr(value, _) => {
-                ban_append_expr(value, banned, strict)
-            }
-            Stmt::IndexSet { index, value, .. } => {
-                ban_append_expr(index, banned, strict);
+            Stmt::Store { leaf, value, .. } => {
+                if let Step::Index(index) = leaf {
+                    ban_append_expr(index, banned, strict);
+                }
                 ban_append_expr(value, banned, strict);
             }
+            Stmt::Expr(value, _) => ban_append_expr(value, banned, strict),
             // Nothing can append after the frame returns the buffer.
             Stmt::Return { value: Some(e), .. } => ban_append_read(e, banned, strict),
             // `drop s` frees the buffer; leave that path on the general lowering.

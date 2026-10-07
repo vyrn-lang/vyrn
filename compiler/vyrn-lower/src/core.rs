@@ -15,7 +15,8 @@ use std::collections::{HashMap, HashSet};
 
 use vyrn_frontend::ast::{
     ArmBody, BinOp, Binder, Block, Capability, Expr, FnId, Function, Id, LambdaBody, MatchArm,
-    MethodId, MethodSig, NodeId, Pattern, Program, SourceBody, Speech, Stmt, Type, TypeDecl, UnOp,
+    MethodId, MethodSig, NodeId, Pattern, Program, SourceBody, Speech, Step, Stmt, Type, TypeDecl,
+    UnOp,
 };
 use vyrn_frontend::declared::{CapsOf, NameMemo, Owned};
 use vyrn_frontend::diagnostics::Diagnostic;
@@ -2364,11 +2365,17 @@ impl<'a> Builder<'a> {
         let store = &ss[lets];
         let sid = store.id();
         match store {
-            Stmt::SetField {
-                field, value, line, ..
+            Stmt::Store {
+                leaf: Step::Field(field),
+                value,
+                line,
+                ..
             } => self.set_field((place, ty), last, field, value, sid, *line, out)?,
-            Stmt::IndexSet {
-                index, value, line, ..
+            Stmt::Store {
+                leaf: Step::Index(index),
+                value,
+                line,
+                ..
             } => self.index_set((place, ty), last, index, value, sid, *line, out)?,
             _ => self.removal_at(place, ty, last, store, store.line(), out)?,
         }
@@ -2411,18 +2418,18 @@ impl<'a> Builder<'a> {
             let back = &ss[2 * lets - i];
             let put = match (back, &part) {
                 (
-                    Stmt::SetField {
+                    Stmt::Store {
                         name: p,
-                        field,
+                        leaf: Step::Field(field),
                         value: Expr::Var { name: v, .. },
                         ..
                     },
                     Ok(f),
                 ) => p == parent && field == *f && v == name,
                 (
-                    Stmt::IndexSet {
+                    Stmt::Store {
                         name: p,
-                        index: Expr::Var { name: j, .. },
+                        leaf: Step::Index(Expr::Var { name: j, .. }),
                         value: Expr::Var { name: v, .. },
                         ..
                     },
@@ -2441,7 +2448,7 @@ impl<'a> Builder<'a> {
             return Ok(None);
         };
         let into = match store {
-            Stmt::SetField { name, .. } | Stmt::IndexSet { name, .. } => Some(name),
+            Stmt::Store { name, .. } => Some(name),
             Stmt::Expr(e, _) | Stmt::Let { value: e, .. } => removal(e),
             _ => None,
         };
@@ -2478,8 +2485,11 @@ impl<'a> Builder<'a> {
             place = match part {
                 Ok(f) => Place::Field(Box::new(place), f.to_string()),
                 Err(_) if self.projected(&ty) => {
-                    let Stmt::IndexSet {
-                        index, value, line, ..
+                    let Stmt::Store {
+                        leaf: Step::Index(index),
+                        value,
+                        line,
+                        ..
                     } = &ss[2 * lets]
                     else {
                         return Ok(None);
@@ -2518,12 +2528,9 @@ impl<'a> Builder<'a> {
             return gap("an `atSet` expansion with no store", line);
         };
         let (into, part, stored) = match &blk.stmts[k] {
-            Stmt::IndexSet {
-                name, index, value, ..
-            } => (name, Ok(index), value),
-            Stmt::SetField {
-                name, field, value, ..
-            } => (name, Err(field), value),
+            Stmt::Store {
+                name, leaf, value, ..
+            } => (name, leaf, value),
             _ => return gap("an `atSet` expansion whose store is no place", line),
         };
         let group = blk.stmts[..k]
@@ -2538,8 +2545,8 @@ impl<'a> Builder<'a> {
             None => self.named_place(into, line)?.0,
         };
         let place = match part {
-            Ok(index) => Place::Elem(Box::new(base), self.read_val(index, out)?),
-            Err(field) => Place::Field(Box::new(base), field.clone()),
+            Step::Index(index) => Place::Elem(Box::new(base), self.read_val(index, out)?),
+            Step::Field(field) => Place::Field(Box::new(base), field.clone()),
         };
         Ok(Some((place, if stored == value { value } else { stored })))
     }
@@ -2860,9 +2867,9 @@ impl<'a> Builder<'a> {
                     out.push(St::Drop(t, Site::None, 0, None));
                 }
             }
-            Stmt::SetField {
+            Stmt::Store {
                 name,
-                field,
+                leaf: Step::Field(field),
                 value,
                 line,
                 id: _,
@@ -2873,9 +2880,9 @@ impl<'a> Builder<'a> {
                 let base = self.named_place(name, *line)?;
                 self.set_field(base, name, field, value, sid, *line, out)?;
             }
-            Stmt::IndexSet {
+            Stmt::Store {
                 name,
-                index,
+                leaf: Step::Index(index),
                 value,
                 line,
                 id: _,
