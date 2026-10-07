@@ -7885,9 +7885,12 @@ pub fn augment(program: &Program, w: &mut World, judging: bool) {
     );
     // A placed release of a generic declared release is a call the lowering's
     // worklist follows ([`crate::dispatched`]) only once the row is in the
-    // plan, so such a program is lowered again below.
+    // plan, so a program whose rows name an instance it does not hold is
+    // lowered again below. The instances it holds had their callees followed.
+    let mut had: std::collections::HashSet<String> =
+        lowered.instances.iter().map(Instance::spelling).collect();
     let placed: Vec<Release> = added.values().flatten().cloned().collect();
-    let mut dispatches = !crate::dispatched(&placed, &by_name).is_empty();
+    let mut dispatches = crate::dispatches_new(&placed, &by_name, &had);
     for (f, rows) in added {
         touched.insert(f);
         own.releases.entry(f).or_default().extend(rows);
@@ -7967,8 +7970,6 @@ pub fn augment(program: &Program, w: &mut World, judging: bool) {
     // releases times the types the program instantiates). A round turns only
     // after one that built at least one of them, since only a new body's
     // placement adds to `placed`.
-    let mut had: std::collections::HashSet<String> =
-        lowered.instances.iter().map(Instance::spelling).collect();
     while dispatches {
         let again = crate::lower_with(program, own);
         let mut placed: Vec<Release> = Vec::new();
@@ -8012,7 +8013,7 @@ pub fn augment(program: &Program, w: &mut World, judging: bool) {
                 &mut w.bodies,
             );
         }
-        dispatches = !crate::dispatched(&placed, &by_name).is_empty();
+        dispatches = crate::dispatches_new(&placed, &by_name, &had);
     }
     w.calls.replace(calls);
     w.facts = folds.then_some(facts);
