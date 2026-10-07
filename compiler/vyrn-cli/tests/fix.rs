@@ -158,6 +158,100 @@ fn it_copies_a_value_where_it_was_moved_rather_than_where_it_is_used_again() {
 }
 
 #[test]
+fn it_copies_the_place_a_binding_reads_where_it_is_bound() {
+    // The refusal is at the write, the edit at the `let` that made the alias.
+    let src = "type Tbl = { xs: Array<Int64> }\n\
+               fn main() -> Int64 {\n\
+                   let mut t = Tbl { xs: [1, 2] }\n\
+                   let before = t.xs\n\
+                   t.xs[0] = 99\n\
+                   print(before[0])\n\
+                   return 0\n\
+               }\n";
+    let (log, after) = fix("alias-read", src);
+    assert!(after.contains("let before = t.xs.copy()\n"), "{after}");
+    assert!(log.contains("1 fix(es) applied, 0 left"), "{log}");
+    assert!(checks("alias-read-after", &after), "{after}");
+}
+
+#[test]
+fn it_copies_the_place_a_rebuilt_binding_reads_where_it_is_bound() {
+    let src = "type Head = { meta: Array<String> }\n\
+               fn withOne(h: Head, s: String) -> Head {\n\
+                   let mut mt = h.meta\n\
+                   mt.push(s.copy())\n\
+                   return Head { meta: mt }\n\
+               }\n\
+               fn main() -> Int64 {\n\
+                   let h = Head { meta: [\"a\"] }\n\
+                   let g = withOne(h, \"b\".copy())\n\
+                   print(g.meta.length + h.meta.length)\n\
+                   return 0\n\
+               }\n";
+    let (_, after) = fix("rebuilt-borrow", src);
+    assert!(after.contains("let mut mt = h.meta.copy()\n"), "{after}");
+    assert!(checks("rebuilt-borrow-after", &after), "{after}");
+}
+
+#[test]
+fn it_copies_the_consumed_argument_that_a_place_of_it_overlaps() {
+    let src = "type Cell = { name: String, v: Float64 }\n\
+               fn g(a: consume Cell, b: String) -> Int64 {\n\
+                   let n = consume a.name\n\
+                   drop n\n\
+                   return b.byteLength\n\
+               }\n\
+               fn main() -> Int64 {\n\
+                   let x = Cell { name: 1234567.toString(), v: 1.0 }\n\
+                   let n = g(x, x.name)\n\
+                   print(n)\n\
+                   return 0\n\
+               }\n";
+    let (_, after) = fix("consumed-and-passed", src);
+    assert!(after.contains("g(x.copy(), x.name)"), "{after}");
+    assert!(checks("consumed-and-passed-after", &after), "{after}");
+}
+
+#[test]
+fn it_copies_the_name_an_arm_hands_out_of_a_loop() {
+    let head = "fn size(xs: Array<String>) -> Int64 { return xs.length }\n\
+                fn main() -> Int64 {\n\
+                    let names: Array<String> = [\"a\", \"b\"]\n\
+                    let opts: Array<Option<Int64>> = [None, Some(1)]\n\
+                    let mut n = 0\n\
+                    let mut i = 0\n\
+                    while i < 2 {\n";
+    let tail = "i = i + 1\n}\nreturn n\n}\n";
+    let cases = [
+        (
+            "then",
+            "let p: Array<String> = if i > 0 { names } else { [\"z\"] }\nn = n + p.length\n",
+        ),
+        (
+            "else",
+            "let p: Array<String> = if i > 0 { [\"z\"] } else { names }\nn = n + p.length\n",
+        ),
+        (
+            "match",
+            "let p: Array<String> = match opts[i] { None => [\"z\"], Some(_) => names }\n\
+             n = n + p.length\n",
+        ),
+        (
+            "argument",
+            "n = n + size(if i > 0 { names } else { [\"z\"] })\n",
+        ),
+    ];
+    for (name, body) in cases {
+        let src = format!("{head}{body}{tail}");
+        let (_, after) = fix(&format!("loop-arm-{name}"), &src);
+        assert!(after.contains("names.copy()"), "{name}:\n{after}");
+        assert!(!after.contains("names.copy().copy()"), "{name}:\n{after}");
+        let again = format!("loop-arm-{name}-after");
+        assert!(checks(&again, &after), "{name}:\n{after}");
+    }
+}
+
+#[test]
 fn a_clean_file_is_left_exactly_as_it_was() {
     let src = "fn main() -> Int64 {\n    let s = \"a\" + \"b\"\n    print(s)\n    return 0\n}\n";
     let (log, after) = fix("clean", src);

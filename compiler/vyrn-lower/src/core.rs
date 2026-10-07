@@ -18,7 +18,7 @@ use vyrn_frontend::ast::{
     MethodId, MethodSig, NodeId, Pattern, Program, SourceBody, Speech, Stmt, Type, TypeDecl, UnOp,
 };
 use vyrn_frontend::declared::{CapsOf, NameMemo, Owned};
-use vyrn_frontend::diagnostics::Diagnostic;
+use vyrn_frontend::diagnostics::{Diagnostic, Fix};
 use vyrn_frontend::effects::Walked;
 use vyrn_frontend::movecheck::{Judgment, JudgmentKey, Refusal};
 use vyrn_frontend::own::{Bucket, DropKind, Exit, Linear, MemoryRow, Ownership, Release};
@@ -1259,7 +1259,7 @@ struct Frame {
     /// A join's result, and the name an arm handed out of it from outside the
     /// enclosing loop. [`Builder::loop_alias`] refuses where something owns
     /// the result and releases it once per turn.
-    loop_aliased: HashMap<Name, String>,
+    loop_aliased: HashMap<Name, (String, Option<(usize, usize)>)>,
     /// Whether the value being lowered is a rebind's. The slot is released by
     /// its final value, so the temporary the value passes through owns
     /// nothing and the back edge repeats no release (`std/html.vyrn`'s
@@ -1458,23 +1458,26 @@ impl<'a> Builder<'a> {
     /// Records where `e`, taken as `n`, ends in the reader's text
     /// ([`Body::ends`]): a name or a field, in the root module's own source.
     fn spell_take(&mut self, e: &Expr, n: Name) {
-        let (end, root) = match e {
-            Expr::Var { name, id, .. } => (id.col() + name.chars().count(), id),
-            Expr::Field { field, id, .. } => (id.col() + field.chars().count(), id),
-            _ => return,
-        };
-        let spelled = root.col() > 0
-            && root.0.unit() < NodeId::EXPANDED
-            && self.body.file.is_none()
-            && self.frame.stmt != NodeId::NONE
-            && self.body.names[n.index()].heap;
-        if spelled {
-            let at = Some((e.line(), end));
+        let at = self.spelled_end(e);
+        if at.is_some() && self.frame.stmt != NodeId::NONE && self.body.names[n.index()].heap {
             let slot = self.body.ends.entry((self.frame.stmt, n)).or_insert(at);
             if *slot != at {
                 *slot = None;
             }
         }
+    }
+
+    /// The line and column just past `e`, a name or a field, where the reader
+    /// spelled it in the root module's own source.
+    fn spelled_end(&self, e: &Expr) -> Option<(usize, usize)> {
+        let (end, root) = match e {
+            Expr::Var { name, id, .. } => (id.col() + name.chars().count(), id),
+            Expr::Field { field, id, .. } => (id.col() + field.chars().count(), id),
+            _ => return None,
+        };
+        let spelled =
+            root.col() > 0 && root.0.unit() < NodeId::EXPANDED && self.body.file.is_none();
+        spelled.then(|| (e.line(), end))
     }
 
     /// [`Builder::keyed`] for a `let` the reader wrote.
@@ -1498,10 +1501,16 @@ impl<'a> Builder<'a> {
         let Rhs::Val(Val::Name(m)) = rhs else {
             return Ok(());
         };
-        let Some(a) = self.frame.loop_aliased.get(m) else {
+        let Some((a, end)) = self.frame.loop_aliased.get(m) else {
             return Ok(());
         };
-        refuse(rule!(HandedOutOfLoopArm, a), Vec::new(), line)
+        let fixes = (end.map(|(line, col)| Fix::Copy { line, col }))
+            .into_iter()
+            .collect();
+        refuse(rule!(HandedOutOfLoopArm, a), Vec::new(), line).map_err(|g| Gap {
+            rule: g.rule.map(|d| Box::new(d.with_fixes(fixes))),
+            ..g
+        })
     }
 
     /// Whether a `let` binds a value this frame owns, read off the lowered
@@ -2656,6 +2665,9 @@ impl<'a> Builder<'a> {
                     let rhs = Rhs::Read(place);
                     self.body.names[n.index()].not_owned =
                         self.report_reason(&rhs, &ty, false, false, self.lends(read));
+                    if std::ptr::eq(read, value) {
+                        self.spell_take(read, n);
+                    }
                     out.push(St::Let(n, rhs));
                     self.release_receiver(read, out, true);
                     self.drop_since(mark, out);
@@ -5184,7 +5196,12 @@ impl<'a> Builder<'a> {
     ///
     /// `mark` is the name count before the arms were lowered, which tells an
     /// outside name from a payload binder minted inside the arm.
-    fn alias_out(&self, v: &Val, mark: usize) -> Option<String> {
+    fn alias_out(
+        &self,
+        e: &Expr,
+        v: &Val,
+        mark: usize,
+    ) -> Option<(String, Option<(usize, usize)>)> {
         let Val::Name(m) = v else { return None };
         let m = m.index();
         // Only an owning name can be freed twice. A loop variable is minted
@@ -5192,7 +5209,7 @@ impl<'a> Builder<'a> {
         (m < mark
             && self.body.names[m].releases
             && self.frame.loop_marks.last().is_some_and(|lm| m < *lm))
-        .then(|| self.body.names[m].source.clone())
+        .then(|| (self.body.names[m].source.clone(), self.spelled_end(e)))
     }
 
     /// A move out of a sub-place: `consume x.f`, or the receiver a rebuilding
@@ -5720,7 +5737,7 @@ impl<'a> Builder<'a> {
                 let held = self.frame.held.len();
                 let mut t = Vec::new();
                 let tv = self.val(then_branch, &mut t)?;
-                let mut aliased = self.alias_out(&tv, mark);
+                let mut aliased = self.alias_out(then_branch, &tv, mark);
                 let then_v = tv.clone();
                 t.push(St::Store {
                     place: Place::Name(res),
@@ -5737,7 +5754,7 @@ impl<'a> Builder<'a> {
                 match else_branch {
                     Some(eb) => {
                         let ev = self.val(eb, &mut f)?;
-                        aliased = aliased.or(self.alias_out(&ev, mark));
+                        aliased = aliased.or(self.alias_out(eb, &ev, mark));
                         let else_v = ev.clone();
                         f.push(St::Store {
                             place: Place::Name(res),
@@ -5796,7 +5813,7 @@ impl<'a> Builder<'a> {
                     match &arm.body {
                         ArmBody::Expr(ae) => {
                             let v = self.val(ae, &mut body)?;
-                            if let Some(a) = self.alias_out(&v, outer) {
+                            if let Some(a) = self.alias_out(ae, &v, outer) {
                                 self.frame.loop_aliased.insert(res, a);
                             }
                             yields.push(v.clone());

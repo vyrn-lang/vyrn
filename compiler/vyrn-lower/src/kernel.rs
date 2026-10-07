@@ -1216,7 +1216,12 @@ impl<'b> Kernel<'b> {
                 if place(b).is_some_and(|(q, p)| q == r && overlaps(&p, &path)) {
                     let (s, o) = (self.arg_text(st, a), self.arg_text(st, b));
                     let by = &self.by;
-                    return Err(self.refuse(self.here, rule!(ConsumedAndPassed, s, by, o)));
+                    let r = self.refuse(self.here, rule!(ConsumedAndPassed, s, by, o));
+                    let fix = match a {
+                        Arg::Val(Val::Name(n)) if !st.alias.contains_key(n) => self.copy_at(*n),
+                        _ => None,
+                    };
+                    return Err(Self::fixed(r, fix));
                 }
             }
         }
@@ -1280,7 +1285,8 @@ impl<'b> Kernel<'b> {
         // The way out copies the place the alias reads, where it was bound.
         let (src, at) = (self.src_text(st, n), self.body.names[n.index()].line);
         let (s, here) = (self.src(n), self.here);
-        Err(self.refuse(*l, rule!(AliasRead, place, s, here, what, src, at)))
+        let r = self.refuse(*l, rule!(AliasRead, place, s, here, what, src, at));
+        Err(Self::fixed(r, self.copy_at_binding(n)))
     }
 
     /// Refuses a take of an alias, since the place it reads owns the buffer.
@@ -1368,7 +1374,8 @@ impl<'b> Kernel<'b> {
         if write_back && by_call && !minted {
             let here = self.here;
             let at = self.body.names[n.index()].line;
-            return self.refuse(at, rule!(RebuiltBorrow, s, src, here, by));
+            let r = self.refuse(at, rule!(RebuiltBorrow, s, src, here, by));
+            return Self::fixed(r, self.copy_at_binding(n));
         }
         // A `drop` names no place: both ways out are about the binding.
         if *by == By::Release {
@@ -1520,7 +1527,17 @@ impl<'b> Kernel<'b> {
     /// The edit that copies `n` where the current statement takes it, if the
     /// reader's text places that take ([`Body::ends`]).
     fn copy_at(&self, n: Name) -> Option<Fix> {
-        match self.body.ends.get(&(self.stmt, n)) {
+        self.copy_in(self.stmt, n)
+    }
+
+    /// The edit that copies `n` where the statement that made it reads it out
+    /// of a place, if the reader's text places that read.
+    fn copy_at_binding(&self, n: Name) -> Option<Fix> {
+        self.copy_in(self.body.names[n.index()].stmt, n)
+    }
+
+    fn copy_in(&self, stmt: NodeId, n: Name) -> Option<Fix> {
+        match self.body.ends.get(&(stmt, n)) {
             Some(Some((line, col))) => Some(Fix::Copy {
                 line: *line,
                 col: *col,
@@ -1531,10 +1548,13 @@ impl<'b> Kernel<'b> {
 
     /// `r`, with the edit that copies `n` where it is taken.
     fn copying(&self, n: Name, r: Refusal) -> Refusal {
+        Self::fixed(r, self.copy_at(n))
+    }
+
+    /// `r`, with the edit `fix`, if there is one.
+    fn fixed(r: Refusal, fix: Option<Fix>) -> Refusal {
         Refusal {
-            diagnostic: r
-                .diagnostic
-                .with_fixes(self.copy_at(n).into_iter().collect()),
+            diagnostic: r.diagnostic.with_fixes(fix.into_iter().collect()),
             ..r
         }
     }
@@ -1569,11 +1589,7 @@ impl<'b> Kernel<'b> {
                 self.refuse(here, r)
             }
             Some((l, by, _, fix)) if *by != By::Nothing => {
-                let r = self.refuse(*l, rule!(Moved, s, by, here, what));
-                Refusal {
-                    diagnostic: r.diagnostic.with_fixes(fix.iter().copied().collect()),
-                    ..r
-                }
+                Self::fixed(self.refuse(*l, rule!(Moved, s, by, here, what)), *fix)
             }
             _ => self.refuse(here, rule!(Released, s, what)),
         }
