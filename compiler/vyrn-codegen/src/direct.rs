@@ -357,6 +357,7 @@ fn compile_inner(
         types,
         lambdas: vyrn_frontend::ast::lambdas(program),
         layouts: RefCell::default(),
+        reprs: RefCell::default(),
         oracle,
         sigs: HashMap::new(),
         rt,
@@ -1006,6 +1007,8 @@ struct Cx<'a> {
     lambdas: HashMap<NodeId, (&'a str, &'a Expr)>,
     /// Every layout, computed once per substituted type.
     layouts: RefCell<HashMap<Type, Rc<Layout>>>,
+    /// [`Cx::repr`]'s answers, by substituted type.
+    reprs: RefCell<HashMap<Type, Repr>>,
     /// The check oracle's host imports and its row labels, under
     /// [`vyrn_lower::check::Mode::Count`]; `None` in every other build.
     oracle: Option<Oracle>,
@@ -1281,15 +1284,24 @@ impl<'a> Cx<'a> {
         )
     }
 
+    /// Returns how `ty` lives in wasm. The answer depends on the substituted type alone, so an
+    /// `Ok` is kept: the per-name screens ask the same few types thousands of times, and each ask
+    /// walks the type twice ([`Cx::ty_gap`], [`Cx::shape`]).
     fn repr(&self, ty: &Type, line: usize) -> Result<Repr, String> {
+        let key = self.sub(ty);
+        if let Some(r) = self.reprs.borrow().get(&key) {
+            return Ok(r.clone());
+        }
         if let Some(why) = self.ty_gap(ty, 0) {
             return unsupported(&why, line);
         }
-        Ok(match self.shape(ty) {
+        let r = match self.shape(ty) {
             Shape::Void => Repr::Unit,
             Shape::Leaf(l) => Repr::Scalar(l.val_type()),
             Shape::Struct(_) | Shape::Array(..) => Repr::Agg(self.layout(ty, line)?),
-        })
+        };
+        self.reprs.borrow_mut().insert(key, r.clone());
+        Ok(r)
     }
 
     /// Why `ty` cannot be lowered, if it cannot.
@@ -13410,6 +13422,7 @@ mod tests {
             types: HashMap::new(),
             lambdas: HashMap::new(),
             layouts: RefCell::default(),
+            reprs: RefCell::default(),
             oracle: None,
             sigs: HashMap::new(),
             gen: None,
