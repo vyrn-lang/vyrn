@@ -1,7 +1,7 @@
 form	parser	checker	movecheck	own	lower	shared	wasm	editor	all
 Stmt::Let	2	3	0	0	6	0	2	0	13
 Stmt::Assign	2	5	0	0	4	0	0	0	11
-Stmt::Store	2	5	0	0	4	0	0	0	11
+Stmt::Store	1	5	0	0	4	0	0	0	10
 Stmt::Return	1	5	0	0	3	0	0	1	10
 Stmt::Break	2	1	0	0	2	0	0	0	5
 Stmt::Continue	1	1	0	0	2	0	0	0	4
@@ -34,4 +34,4 @@ Pattern::Variant	11	2	0	0	3	0	2	0	18
 Pattern::Success	1	3	0	0	4	0	1	0	9
 Pattern::Failure	1	2	0	0	2	0	0	0	5
 Pattern::Other	2	3	0	0	2	0	1	0	8
-all	87	128	0	0	266	0	12	9	502
+all	86	128	0	0	266	0	12	9	501

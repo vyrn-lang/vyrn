@@ -2714,32 +2714,11 @@ impl Parser {
                     line,
                 })
             }
-            Tok::Ident(_) | Tok::Vself
-                if self.tokens[self.pos + 1].tok == Tok::Dot
-                    && matches!(self.tokens[self.pos + 2].tok, Tok::Ident(_))
-                    && self.tokens[self.pos + 3].tok == Tok::Eq =>
-            {
-                let id = self.spelled();
-                let name = self.place_root()?;
-                self.eat(&Tok::Dot)?;
-                let field = self.expect_ident()?;
-                self.eat(&Tok::Eq)?;
-                let value = self.expr()?;
-                self.eat_semi();
-                Ok(Stmt::Store {
-                    id,
-                    name,
-                    base: Vec::new(),
-                    leaf: Step::Field(field),
-                    value,
-                    line,
-                })
-            }
             _ => {
                 let e = self.expr()?;
-                // `a[i] = v`, `a[i].f = v`, `a.b[i] = v`: `postfix` parsed `a[i]` as
-                // `@at(a, i)`; a trailing `=` makes it a store. The shape is checked
-                // before the value parses, so an unreachable target gets its own
+                // `a.f = v`, `a[i] = v`, `a.b[i].f = v`: `postfix` parsed `a[i]` as
+                // `@at(a, i)`; a trailing `=` makes the place a store target. The shape is
+                // checked before the value parses, so an unreachable target gets its own
                 // refusal, not an error from the right side.
                 if *self.peek() == Tok::Eq {
                     let (mut under, mut fields) = (&e, 0);
@@ -2749,12 +2728,12 @@ impl Parser {
                     let over_index = matches!(under, Expr::Call { name, args, .. }
                         if name == "@at" && args.len() == 2);
                     // `a[i].f.g = v` and deeper are refused: one level of field write-through.
-                    // `a.b.c = v` is no store here: it falls through to a parse error.
+                    // `f().x = v` is no store here: it falls through to a parse error.
                     match store_target(&e) {
                         _ if over_index && fields >= 2 => {
                             return Err(refuse!("parse", line, self.col(), FieldWriteDepth));
                         }
-                        Some((id, name, base, leaf)) if over_index => {
+                        Some((id, name, base, leaf)) => {
                             self.advance();
                             let value = self.expr()?;
                             self.eat_semi();
@@ -2774,7 +2753,7 @@ impl Parser {
                         None if over_index => {
                             return Err(refuse!("parse", line, self.col(), FieldAssignTarget));
                         }
-                        _ => {}
+                        None => {}
                     }
                 }
                 self.eat_semi();
