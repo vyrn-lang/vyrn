@@ -7,7 +7,8 @@
 //! ownership passes and the lowering key side tables by node.
 
 use crate::ast::{
-    Block, Expr, Function, Id, ImplBlock, NodeId, Numbering, Program, Stmt, Type, TypeDecl,
+    At, Block, Expr, Function, Id, ImplBlock, NodeId, Numbering, Program, Step, Stmt, Type,
+    TypeDecl,
 };
 use crate::types::Impls;
 use std::collections::{HashMap, HashSet};
@@ -330,15 +331,20 @@ impl Expansions {
         self.read().schemas.get(&call.id()).copied()
     }
 
-    /// Returns the statements `a[i] = v` lowers as through a user `place
-    /// atSet`: the prologue, then the group [`crate::parser::store_stmts`]
-    /// builds. `None` is the seeded row, which the caller's element path
-    /// writes.
+    /// Returns the statements a store through a user `place atSet` lowers as:
+    /// the prologue, then the store into the place `atSet` yields. The
+    /// receiver is the place `name prefix..`, of type `aty`; `index` is the
+    /// projected step's key, `rest` the steps after it up to the store's
+    /// leaf, empty for `a[i] = v`. `None` is the seeded row, which the
+    /// caller's element path writes.
+    #[allow(clippy::too_many_arguments)]
     pub fn store_index(
         &self,
         impls: &Impls,
         name: &str,
+        prefix: &[Step],
         index: &Expr,
+        rest: &[Step],
         value: &Expr,
         aty: &Type,
     ) -> Result<Option<&'static Block>, String> {
@@ -346,7 +352,22 @@ impl Expansions {
             return Ok(Some(b));
         }
         let line = index.line();
-        let recv = Expr::var(name, line);
+        // A projection can read `self` more than once, so each receiver index
+        // that is not a literal or a name runs once, in place order, before it.
+        let mut temps = Vec::new();
+        let recv = prefix
+            .iter()
+            .fold(Expr::var(name, line), |e, step| match step {
+                Step::Field(f) => Expr::field(e, f.as_str(), line),
+                Step::Index(i @ (Expr::Int(..) | Expr::Var { .. })) => {
+                    Expr::call(AT, vec![e, i.clone()], line)
+                }
+                Step::Index(i) => {
+                    let tmp = format!("@r{}.{}", i.id().unit(), i.id().local());
+                    temps.push(Stmt::let_(tmp.clone(), i.clone(), line));
+                    Expr::call(AT, vec![e, Expr::var(tmp, line)], line)
+                }
+            });
         let Some(p) = self.site_at(
             index.id(),
             impls,
@@ -359,15 +380,35 @@ impl Expansions {
         else {
             return Ok(None);
         };
-        let Some(store) = crate::parser::store_stmts(&p.place, value, line) else {
+        let Some((_, root, path)) = crate::parser::place_steps(&p.place) else {
             return Err(format!(
                 "line {line}: `{name}[..] = v` goes through an `atSet` projection whose \
                   result has no address — a call result or a temporary. A projection \
                   returns a place: a binding, a field of one, or an element of one"
             ));
         };
-        let mut out = p.prologue.clone();
-        out.extend(store);
+        let mut path: Vec<Step> = path.into_iter().map(At::to_step).collect();
+        path.extend(rest.iter().cloned());
+        let (value, id, root) = (value.clone(), Id::NEW, root.to_string());
+        let store = match path.pop() {
+            Some(leaf) => Stmt::Store {
+                id,
+                name: root,
+                base: path,
+                leaf,
+                value,
+                line,
+            },
+            None => Stmt::Assign {
+                id,
+                name: root,
+                value,
+                line,
+            },
+        };
+        let mut out = temps;
+        out.extend(p.prologue.iter().cloned());
+        out.push(store);
         let mut t = self.write();
         let blk = t.expand(
             index.id(),
@@ -386,10 +427,23 @@ impl Expansions {
         Ok(Some(blk))
     }
 
-    /// Returns the store expansion the checker built, for a reader that has
-    /// the statement but not the receiver's type (the lowering, `movecheck`).
+    /// Returns the store expansion the checker built for `index`, for a reader
+    /// that has the statement but not the receiver's type.
     pub fn stored(&self, index: &Expr) -> Option<&'static Block> {
         self.read().stores.get(&index.id()).copied()
+    }
+
+    /// Returns the position in the store's path (`base` then `leaf`) of its
+    /// projected step, and that step's expansion. The first element step with
+    /// an expansion is the one.
+    pub fn stored_step(&self, base: &[Step], leaf: &Step) -> Option<(usize, &'static Block)> {
+        base.iter()
+            .chain([leaf])
+            .enumerate()
+            .find_map(|(k, s)| match s {
+                Step::Index(i) => self.stored(i).map(|b| (k, b)),
+                Step::Field(_) => None,
+            })
     }
 
     /// Returns the element read of `for x in iter` over a user container: its
@@ -592,18 +646,6 @@ pub fn is_miss_return(s: &Stmt) -> bool {
         )
 }
 
-/// Returns the store in a [`store_index`] expansion: its first statement that
-/// writes a place (the prologue and move-outs before it are `let`s). The
-/// emitter maps this node to the source statement the core judged.
-pub fn store_node(blk: &Block) -> Option<&Stmt> {
-    blk.stmts.iter().find(|s| {
-        matches!(
-            s,
-            Stmt::Assign { .. } | Stmt::SetField { .. } | Stmt::IndexSet { .. }
-        )
-    })
-}
-
 /// The receiver and the counter a `for` over a user container binds for its
 /// element read ([`for_element`]). Unspellable, so no source name collides.
 pub const FOR_RECV: &str = "@i.c";
@@ -640,10 +682,9 @@ fn rename_uses(b: &mut Block, map: &HashMap<String, String>) {
     impl UseVisit for Uses<'_> {
         fn stmt(&mut self, s: &mut Stmt, locals: &std::collections::HashSet<String>) {
             match s {
-                Stmt::Assign { name, .. }
-                | Stmt::IndexSet { name, .. }
-                | Stmt::SetField { name, .. }
-                | Stmt::Drop { name, .. } => self.put(name, locals),
+                Stmt::Assign { name, .. } | Stmt::Store { name, .. } | Stmt::Drop { name, .. } => {
+                    self.put(name, locals)
+                }
                 _ => {}
             }
         }
@@ -872,6 +913,19 @@ pub fn element_path(e: &Expr, places: &HashSet<String>) -> Option<(String, Strin
         }
         _ => None,
     }
+}
+
+/// The place `root` followed by `steps` as the reader wrote it (`ps[0]`,
+/// `r.xs`, `m[..]`), as a diagnostic quotes a place with no node of its own.
+pub fn path_text(root: &str, steps: &[Step]) -> String {
+    let mut text = root.to_string();
+    for step in steps {
+        match step {
+            Step::Field(f) => text.push_str(&format!(".{f}")),
+            Step::Index(i) => text.push_str(&format!("[{}]", index_text(Some(i)))),
+        }
+    }
+    text
 }
 
 /// An index as the reader wrote it: a name or an integer, else `..`, where

@@ -1,0 +1,1 @@
+type R = { xs: Array<Int64> } fn main() -> Int64 { let mut r = R { xs: [1] } r.nope[0] = 5 return 0 }

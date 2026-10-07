@@ -1,0 +1,1 @@
+a_field_through_a_map_entry_is_refused_once.vyrn:1:0: `m[..]` is not a record, so it has no field `x`

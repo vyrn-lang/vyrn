@@ -1,11 +1,11 @@
 /// What an index assignment through a place is allowed to observe.
 ///
-/// `t.xs[k] = v` desugars to move the array out of the field, store, and move
-/// it back. The container is absent between the move and the write-back, so the
-/// desugar evaluates every operand that could reach a place BEFORE the move.
-/// The first two lines below are the ones that would answer wrongly without it,
-/// and the rest pin the evaluation order the hoisting must not disturb: left to
-/// right, each subexpression exactly once.
+/// `t.xs[k] = v` is one store into the place `t.xs[k]`. It evaluates the path's
+/// indices, then `k`, then `v`, each exactly once and left to right, and only
+/// then writes. The first two lines below read the very place the store writes,
+/// and would answer wrongly if the write came first. The rest pin the
+/// evaluation order.
+///
 
 type T = { xs: Array<Int64> }
 
@@ -25,9 +25,9 @@ fn g() -> Int64 {
     return 20
 }
 
-/// Reads the very field the caller's statement has moved out. Only reachable
-/// through module state — a local cannot be seen from here — which is why a
-/// call counts as reaching a place and gets hoisted like a field read.
+/// Reads the very field the caller's statement writes. Only reachable through
+/// module state, which a local cannot see, so the store must run the
+/// call before it writes.
 fn peek() -> Int64 {
     return gt.xs[0]
 }
@@ -72,7 +72,7 @@ fn main() -> Int64 {
     // The value is a field of ANOTHER element, so it copies: `ps` releases its
     // elements and each element releases its field, and
     // storing the read would give one buffer two owners. The rule refuses it and
-    // names `ps[0].xs`, not the temp the desugar hoists it into.
+    // names `ps[0].xs`.
     let mut ps: Array<T> = [T { xs: [1] }, T { xs: [2] }]
     ps[f()].xs = ps[0].xs.copy()
     print(ps[1].xs[0]) // 1

@@ -1,0 +1,8 @@
+type Q = { n: Int64 }
+type S = { q: Q }
+fn main() -> Int64 {
+    let mut a: Array<S> = [S { q: Q { n: 1 } }, S { q: Q { n: 5 } }]
+    a[0].q.n = 2
+    a[1].q.n = a[1].q.n + a[0].q.n
+    return a[0].q.n * 10 + a[1].q.n
+}

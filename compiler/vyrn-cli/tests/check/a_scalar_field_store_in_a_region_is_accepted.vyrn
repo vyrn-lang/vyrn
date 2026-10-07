@@ -1,0 +1,8 @@
+type P = { x: Int64, name: String }
+fn main() -> Int64 {
+    let mut b: Array<P> = [P { x: 1, name: "a" }]
+    region {
+        b[0].x = 5
+    }
+    return b[0].x
+}

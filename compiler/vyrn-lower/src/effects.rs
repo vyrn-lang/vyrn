@@ -347,7 +347,7 @@ impl Walk<'_> {
         else {
             return;
         };
-        // A place argument is a move-out window's place; the call writes it.
+        // A place argument is the place the call writes.
         for (a, _) in args {
             if let Arg::Place(p) = a {
                 if let Some(g) = global_root(p) {

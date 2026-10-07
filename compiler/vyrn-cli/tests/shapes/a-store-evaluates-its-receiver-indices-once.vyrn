@@ -1,0 +1,36 @@
+// a store evaluates its receiver's indices once
+// `bs[idx()][0].x = v` and a container inside a container call `idx` once
+// per index even when `atSet` reads `self` more than once.
+type P = { x: Int64 }
+type Bag = { items: Array<P> }
+impl Index for Bag {
+    fn at(read self, i: Int64) -> read P { return self.items[i] }
+    fn atSet(modify self, i: Int64) -> modify P {
+        let n = self.items.length
+        return self.items[n - 1 - i]
+    }
+}
+type Outer = { bags: Array<Bag> }
+impl Index for Outer {
+    fn at(read self, i: Int64) -> read Bag { return self.bags[i] }
+    fn atSet(modify self, i: Int64) -> modify Bag {
+        let n = self.bags.length
+        return self.bags[n - 1 - i]
+    }
+}
+type H = { bag: Bag }
+let mut calls = 0
+fn idx() -> Int64 {
+    calls = calls + 1
+    return 0
+}
+fn vyrnTestMain() -> Int64 {
+    let mut h = H { bag: Bag { items: [P { x: 1 }, P { x: 2 }] } }
+    let mut bs: Array<Bag> = [Bag { items: [P { x: 1 }] }]
+    let mut o = Outer { bags: [Bag { items: [P { x: 1 }, P { x: 2 }] }] }
+    bs[idx()][0].x = 9
+    h.bag[idx()].x = 9
+    o[idx()][1].x = 7
+    o[idx()][idx()] = P { x: 3 }
+    return calls * 100 + bs[0][0].x + h.bag[0].x + o[0][1].x + o[0][0].x
+}

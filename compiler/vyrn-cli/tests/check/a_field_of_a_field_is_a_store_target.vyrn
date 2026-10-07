@@ -1,0 +1,8 @@
+type Q = { n: Int64 }
+type S = { q: Q, k: Int64 }
+fn main() -> Int64 {
+    let mut s = S { q: Q { n: 1 }, k: 10 }
+    s.q.n = 2
+    s.k = s.k + s.q.n
+    return s.k + s.q.n
+}

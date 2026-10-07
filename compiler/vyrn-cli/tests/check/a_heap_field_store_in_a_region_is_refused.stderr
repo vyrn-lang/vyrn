@@ -1,0 +1,1 @@
+a_heap_field_store_in_a_region_is_refused.vyrn:5:0: cannot store a heap value into `b`, which outlives the enclosing `region` (it would dangle when the region frees). Move `b` inside the region, or compute a non-heap result to carry out.

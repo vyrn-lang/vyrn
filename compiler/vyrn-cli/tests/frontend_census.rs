@@ -148,7 +148,6 @@ fn project_sections() -> Vec<Section> {
         sec("fn inline", Job),
         sec("fn substituted", Job),
         sec("struct OptionalProjection", Job),
-        sec("fn store_node", Job),
         sec("const FOR_RECV", Job),
         sec("fn collect_bindings", Job),
         sec("fn count_uses", Job),

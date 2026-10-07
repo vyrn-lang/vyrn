@@ -1,0 +1,13 @@
+// A key that owns heap is moved into the map by the store, after the value
+// runs, so a value that changes it would store under the changed key. A
+// scalar index is read before the value; a heap key has no copy to read.
+fn grow(s: modify String) -> Int64 {
+    s = s + "x"
+    return 5
+}
+fn main() -> Int64 {
+    let mut m: Map<String, Int64> = ["a": 0]
+    let mut k = "a"
+    m[k] = grow(k)
+    return 0
+}

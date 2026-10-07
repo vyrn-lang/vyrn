@@ -487,8 +487,8 @@ impl<'a> FactsVisit<'a> for Walk<'a, '_> {
         match s {
             // The writing half of a projection: `a[i] = v` on a receiver with
             // a user `place atSet`, as the checker built and shared it.
-            Stmt::IndexSet { index, .. } => {
-                if let Some(blk) = self.expansions.stored(index) {
+            Stmt::Store { base, leaf, .. } => {
+                if let Some((_, blk)) = self.expansions.stored_step(base, leaf) {
                     facts_block(blk, &mut Default::default(), self);
                 }
             }
