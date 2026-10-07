@@ -7912,26 +7912,42 @@ pub fn augment(program: &Program, w: &mut World, judging: bool) {
     if folds {
         let state = build_module_state(program, own, &w.fns, &lowered.globals);
         let mut tops: Vec<Body> = state.into_iter().collect();
-        for (i, inst) in lowered.instances.iter().enumerate() {
-            // Rebuilt only where the pass above wrote a row for this function; the
-            // rest fold the body that pass already built.
-            let fresh = if touched.contains(&inst.func_id) {
-                let _p = vyrn_frontend::prof::phase("placer: facts: rebuilt");
-                build_in(program, inst, own, &w.fns, &mut names).ok()
-            } else {
-                None
-            };
-            tops.extend(fresh.or(built[i].take()));
-        }
-        // The same for `test` and `bench` bodies, whose nodes an emitter looks up
-        // too.
-        for (i, ob) in lowered.bodies.iter().enumerate() {
-            let fresh = if touched.contains(&ob.id) {
-                build_outside(program, own, &w.fns, &mut names, ob).ok()
-            } else {
-                None
-            };
-            tops.extend(fresh.or(outside[i].take()));
+        // Rebuilt only where the pass above wrote a row for the function; the
+        // rest fold the body that pass already built. The rebuilds read `own`
+        // and `w.fns` and write nothing, so they run on every thread; the
+        // merge is in job order, as the first builds'.
+        let shared: &Ownership = own;
+        let fns = &w.fns;
+        let jobs: Vec<Job> = (lowered.instances.iter().map(Job::Inst))
+            .chain(lowered.bodies.iter().map(Job::Outside))
+            .collect();
+        let _p = vyrn_frontend::prof::phase("placer: facts: rebuilt");
+        let sealed = program.expansions.seal();
+        let fresh = vyrn_frontend::par::in_parallel(
+            &jobs,
+            |j| {
+                if touched.contains(&j.id()) {
+                    j.weight()
+                } else {
+                    0
+                }
+            },
+            NameMemo::default,
+            |names, j| {
+                if !touched.contains(&j.id()) {
+                    return None;
+                }
+                match j {
+                    Job::Inst(inst) => build_in(program, inst, shared, fns, names).ok(),
+                    Job::Outside(ob) => build_outside(program, shared, fns, names, ob).ok(),
+                }
+            },
+        );
+        drop((sealed, _p));
+        // `test` and `bench` bodies follow the instances, whose nodes an emitter looks up too.
+        let mut fresh = fresh.into_iter();
+        for b in built.iter_mut().chain(outside.iter_mut()) {
+            tops.extend(fresh.next().flatten().or(b.take()));
         }
         for mut top in tops {
             fold_frames(
