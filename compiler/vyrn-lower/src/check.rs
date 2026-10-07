@@ -17,6 +17,7 @@
 use std::collections::{BTreeMap, HashMap};
 
 use vyrn_frontend::ast::{BinOp, Type, TypeDecl};
+use vyrn_frontend::prelude::Indexes;
 use vyrn_frontend::trap::Rule;
 
 use vyrn_frontend::core::check::{Check, Guard, Raises, Site, Verdict};
@@ -166,25 +167,22 @@ fn call_guards(
         Arg::Val(Val::Lit(_)) => None,
     };
     let val = |a: &Arg| a.val().cloned();
-    let span = match callee {
-        "@f32x4Load" | "@f32x4Store" | "@i32x4Load" | "@i32x4Store" => Some(4),
-        "@f64x2Load" | "@f64x2Store" => Some(2),
-        _ => None,
+    let Some(indexes) = vyrn_frontend::prelude::builtin(callee).and_then(|b| b.indexes) else {
+        return;
     };
-    let stores = callee.ends_with("Store");
-    match (callee, args) {
-        ("@swapRemove", [(r, _), (i, _)]) => {
+    match (indexes, args) {
+        (Indexes::Element, [(r, _), (i, _)]) => {
             if let (Some(p), Some(i)) = (base(r), val(i)) {
                 out.push((Rule::ArrayIndex, Guard::Index(p, i)));
             }
         }
-        ("bytes", [(s, _), (a, _), (b, _)]) => {
+        (Indexes::Bytes, [(s, _), (a, _), (b, _)]) => {
             if let (Some(s), Some(a), Some(b)) = (val(s), val(a), val(b)) {
                 out.push((Rule::StringIndex, Guard::Range(s, a, b)));
             }
         }
-        (_, [(r, _), (i, _), rest @ ..]) if span.is_some() && rest.len() == usize::from(stores) => {
-            if let (Some(p), Some(i), Some(n)) = (base(r), val(i), span) {
+        (Indexes::Lanes(n), [(r, _), (i, _), ..]) => {
+            if let (Some(p), Some(i)) = (base(r), val(i)) {
                 out.push((Rule::ArrayIndex, Guard::Span(p, i, n)));
             }
         }

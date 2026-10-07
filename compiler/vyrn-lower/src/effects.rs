@@ -461,11 +461,13 @@ fn placed_reach(
         .map(|(i, b)| (i.func.name.as_str(), b))
         .collect();
     let mut fns = crate::Fns::lowered(&lowered);
+    let places = crate::core::build_places(program, &lowered, own, &mut fns);
     judge_built(
         program,
         &lowered,
         own,
         &mut fns,
+        &places,
         &tops,
         &[],
         |_, reach, _, top, _| {
@@ -478,8 +480,9 @@ fn placed_reach(
 
 /// The judgment over bodies the caller built: `tops` holds each body with
 /// the name a call spells it by, and `served` each body the judgment memo
-/// served, by its frames as last judged. The projection bodies are built here,
-/// each frame numbered in `fns` ([`crate::Fns::number`]), and `then` is given
+/// served, by its frames as last judged. `places` holds the projection bodies
+/// ([`crate::core::build_places`]). The generic releases are built here, each
+/// frame numbered in `fns` ([`crate::Fns::number`]), and `then` is given
 /// every frame built in the order judged, `top[i]`, the frame index of
 /// `tops[i]`'s own body, and `served_at[i]`, that of `served[i]`'s. Every
 /// served frame comes after the last frame built.
@@ -493,31 +496,12 @@ pub(crate) fn judge_built<R>(
     lowered: &crate::Lowered<'_>,
     own: &vyrn_frontend::own::Ownership,
     fns: &mut crate::Fns,
+    places: &[crate::core::Projection<'_, '_>],
     tops: &[(&str, &Body)],
     served: &[(&str, &[Walked])],
     then: impl FnOnce(&Judged, &Judged, &[&Body], &[usize], &[usize]) -> R,
 ) -> R {
-    // An `impl` projection has no instance but is a call by its own name in
-    // the core, so it is judged too.
-    let mut place_bodies: Vec<(&str, Body)> = Vec::new();
-    let mut build = |inst: &crate::Instance, own| {
-        let mut b = crate::core::build_in(program, inst, own, fns, &mut Default::default()).ok()?;
-        fns.number(&mut b);
-        Some(b)
-    };
-    for pr in &lowered.places {
-        let inst = crate::Instance {
-            func: pr.func,
-            func_id: pr.id,
-            type_args: Vec::new(),
-            subst: Default::default(),
-            facts: pr.facts.clone(),
-            releases: Vec::new(),
-        };
-        if let Some(b) = build(&inst, own) {
-            place_bodies.push((pr.func.name.as_str(), b));
-        }
-    }
+    let mut generic: Vec<(&str, Body)> = Vec::new();
     // Nor does a generic declared `release` until the placer writes the row
     // that calls it, so it is judged as written.
     let generic_release = |f: &vyrn_frontend::ast::Function| {
@@ -532,8 +516,11 @@ pub(crate) fn judge_built<R>(
             if !generic_release(inst.func) {
                 continue;
             }
-            if let Some(b) = build(&inst, &written) {
-                place_bodies.push((inst.func.name.as_str(), b));
+            let built =
+                crate::core::build_in(program, &inst, &written, fns, &mut Default::default());
+            if let Ok(mut b) = built {
+                fns.number(&mut b);
+                generic.push((inst.func.name.as_str(), b));
             }
         }
     }
@@ -568,7 +555,11 @@ pub(crate) fn judge_built<R>(
         refs.push(f);
     }
     let mut place_tops: HashMap<&str, Vec<usize>> = HashMap::new();
-    for (name, b) in &place_bodies {
+    // A projection has no instance but is a call by its own name in the core,
+    // so it is judged too.
+    let projected =
+        (places.iter()).filter_map(|(p, b)| Some((p.func.name.as_str(), b.as_ref().ok()?)));
+    for (name, b) in projected.chain(generic.iter().map(|(n, b)| (*n, b))) {
         place_tops.entry(name).or_default().push(refs.len());
         for f in b.frames() {
             refs.push(f);

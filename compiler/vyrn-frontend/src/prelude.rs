@@ -215,6 +215,21 @@ pub struct Builtin {
     /// Whether the result is built afresh: it shares no storage with an
     /// operand ([`crate::movecheck::call_may_forward`]).
     pub fresh: bool,
+    /// The index check a call makes of its operands, which a pass that proves
+    /// bounds in range may remove.
+    pub indexes: Option<Indexes>,
+}
+
+/// The operands a builtin indexes with, and the check it makes of them.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Indexes {
+    /// The element at operand 1 of the receiver.
+    Element,
+    /// The byte range from operand 1 to operand 2 of a `String`; the
+    /// one-operand form copies the whole string and checks nothing.
+    Bytes,
+    /// The span of this many lanes at operand 1 of the receiver.
+    Lanes(i64),
 }
 
 /// The refusal of an operand found at another type than its parameter's.
@@ -345,9 +360,10 @@ impl Builtin {
     /// Types a call's operands and result from the row. `refuse` is the
     /// refusal of an operand at another type than its parameter's, from the
     /// row's name, the operand's index, the parameter and the type found;
-    /// `None` refuses none.
+    /// `None` refuses none. A row with no spec gets [`Spec::Typed`] of them.
     fn typed(self, params: Vec<Type>, ret: Type, wrong_type: Option<RefuseType>) -> Self {
         let stops = params.len();
+        let held = Spec::Typed(params.clone(), ret.clone());
         let typed = Typed {
             params,
             ret,
@@ -355,6 +371,7 @@ impl Builtin {
             stops,
         };
         Builtin {
+            spec: self.spec.or(Some(held)),
             typed: Some(typed),
             ..self
         }
@@ -369,6 +386,12 @@ impl Builtin {
     fn fresh(self) -> Self {
         Builtin {
             fresh: true,
+            ..self
+        }
+    }
+    fn indexes(self, indexes: Indexes) -> Self {
+        Builtin {
+            indexes: Some(indexes),
             ..self
         }
     }
@@ -424,18 +447,17 @@ fn table() -> Vec<Builtin> {
         )
     };
     let splat = |n, lane: &Type, vec: &Type| {
-        b(n).spec(Spec::Typed(vec![lane.clone()], vec.clone()))
-            .takes(&[1], |n, _, got| {
-                rule!(SplatArity, what = simd_words(n).0, got)
-            })
-            .typed(
-                vec![lane.clone()],
-                vec.clone(),
-                Some(|n, _, lane, t| {
-                    let what = format!("`{}.splat(..)`", simd_words(n).0);
-                    rule!(LaneType, what, lane, t)
-                }),
-            )
+        b(n).takes(&[1], |n, _, got| {
+            rule!(SplatArity, what = simd_words(n).0, got)
+        })
+        .typed(
+            vec![lane.clone()],
+            vec.clone(),
+            Some(|n, _, lane, t| {
+                let what = format!("`{}.splat(..)`", simd_words(n).0);
+                rule!(LaneType, what, lane, t)
+            }),
+        )
     };
     let vector_arity: fn(&str, usize, usize) -> Rule = |n, want, got| {
         let (what, op) = simd_words(n);
@@ -443,18 +465,18 @@ fn table() -> Vec<Builtin> {
     };
     // `load` and `store` type their operands by hand: the receiver is an array
     // binding of the lane type.
-    let mem = |n, k: usize| b(n).spec(Spec::Lanes).takes(&[k], vector_arity);
+    let mem = |n, k: usize, lanes| {
+        (b(n).spec(Spec::Lanes).takes(&[k], vector_arity)).indexes(Indexes::Lanes(lanes))
+    };
     let op = |n, k: usize, vec: &Type| {
-        b(n).spec(Spec::Typed(vec![vec.clone(); k], vec.clone()))
-            .takes(&[k], vector_arity)
-            .typed(
-                vec![vec.clone(); k],
-                vec.clone(),
-                Some(|n, _, _, t| {
-                    let (ty, what) = simd_words(n);
-                    rule!(VectorOpType, ty, what, t)
-                }),
-            )
+        b(n).takes(&[k], vector_arity).typed(
+            vec![vec.clone(); k],
+            vec.clone(),
+            Some(|n, _, _, t| {
+                let (ty, what) = simd_words(n);
+                rule!(VectorOpType, ty, what, t)
+            }),
+        )
     };
     let code = || Type::Named("Code".to_string());
     let level = |name, method| {
@@ -528,7 +550,8 @@ fn table() -> Vec<Builtin> {
             .method("swapRemove", &[Array, SmallArray])
             .spec(Spec::Removes)
             .hover("array.swapRemove(index) -> T — O(1) unordered remove: move the last element into the slot")
-            .resizes(Length::ShrinksByOneIfNotEmpty, Elements::KeepsRange),
+            .resizes(Length::ShrinksByOneIfNotEmpty, Elements::KeepsRange)
+            .indexes(Indexes::Element),
         // Rebuilds like `push`: the result carries the possibly reallocated
         // buffer and the statement form writes it back. A named array type
         // (`type Buf = Array<Int64>`) survives through the ordinary coercion.
@@ -734,12 +757,12 @@ fn table() -> Vec<Builtin> {
         ctor("F32x4", Type::Float32, f4.clone(), 4),
         ctor("I32x4", i32_.clone(), Type::I32x4, 4),
         ctor("F64x2", Float, d2.clone(), 2),
-        mem("@f32x4Load", 2),
-        mem("@f32x4Store", 3),
-        mem("@i32x4Load", 2),
-        mem("@i32x4Store", 3),
-        mem("@f64x2Load", 2),
-        mem("@f64x2Store", 3),
+        mem("@f32x4Load", 2, 4),
+        mem("@f32x4Store", 3, 4),
+        mem("@i32x4Load", 2, 4),
+        mem("@i32x4Store", 3, 4),
+        mem("@f64x2Load", 2, 2),
+        mem("@f64x2Store", 3, 2),
         splat("@f32x4Splat", &Type::Float32, &f4),
         splat("@i32x4Splat", &i32_, &Type::I32x4),
         splat("@f64x2Splat", &Float, &d2),
@@ -788,7 +811,8 @@ fn table() -> Vec<Builtin> {
                     _ => rule!(BytesOffsets, n = t),
                 }),
             )
-            .stops(1),
+            .stops(1)
+            .indexes(Indexes::Bytes),
         // A `Result`, because the bytes may not be UTF-8. Spelling it `String`
         // released the aggregate as a String buffer and crashed native code.
         b("stringFromBytes")
@@ -1170,7 +1194,8 @@ pub fn all<'a>() -> impl Iterator<Item = &'a Function> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Spec {
     /// Each operand at the stated type, in order, and a result at the stated
-    /// type. The emitter writes one instruction between them.
+    /// type. The emitter writes one instruction between them. A row with
+    /// [`Builtin::typed`] gets them from it.
     Typed(Vec<Type>, Type),
     /// One operand, at whatever type the row put on the name it reads, and a
     /// result of that same type.
