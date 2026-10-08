@@ -2510,6 +2510,14 @@ impl<'b> Kernel<'b> {
                         // The new value is whole.
                         st.holes.retain(|(h, _)| h != n);
                     }
+                    // A `modify` parameter owes the release of the value it
+                    // held, like one of its fields.
+                    Place::Name(n) if self.body.names[n.index()].is_modify_param() => {
+                        if *old == Old::Pending {
+                            let holes = Self::holes_in(st, *n, "");
+                            self.owe_store(site, holes);
+                        }
+                    }
                     Place::Name(_) => {}
                     other => {
                         // Read before the store fills them: the displaced
@@ -2535,10 +2543,8 @@ impl<'b> Kernel<'b> {
                             let owes = match self.src_of(st, other).root {
                                 Root::G(_) => true,
                                 Root::N(n) => {
-                                    matches!(
-                                        self.body.names[n.index()].borrow_kind,
-                                        Some(BorrowKind::Param { cap: "modify", .. })
-                                    ) || (self.owned(n) && st.own(n) != Own::Gone)
+                                    self.body.names[n.index()].is_modify_param()
+                                        || (self.owned(n) && st.own(n) != Own::Gone)
                                 }
                             };
                             if owes {

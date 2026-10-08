@@ -1427,6 +1427,14 @@ impl<'a> Builder<'a> {
         self.proto.owns_heap(ty) || self.proto.must_use(ty) || self.proto.release_kind(ty).is_some()
     }
 
+    /// Whether the value a name holds is the name's to release at a store: a
+    /// name that releases it at the end of the frame, or a `modify` parameter,
+    /// whose slot the caller keeps but whose old value the store replaces.
+    fn slot_owns(&self, n: Name) -> bool {
+        let info = &self.body.names[n.index()];
+        info.releases || (info.is_modify_param() && self.owns(&info.ty))
+    }
+
     fn name(&mut self, source: &str, ty: Type, releases: bool, line: usize) -> Name {
         let (heap, linear, runs) = self.proto.name_facts(&ty, self.names);
         self.body.names.push(NameInfo {
@@ -2892,7 +2900,7 @@ impl<'a> Builder<'a> {
                 // that owns heap.
                 let (place, owes) = match n {
                     None => (Place::Global(name.clone()), self.owns(&ty)),
-                    Some(n) => (Place::Name(n), self.body.names[n.index()].releases),
+                    Some(n) => (Place::Name(n), self.slot_owns(n)),
                 };
                 // The hand-back comes before the place's obligation: a name
                 // that owes no release still hands its buffer back, and the

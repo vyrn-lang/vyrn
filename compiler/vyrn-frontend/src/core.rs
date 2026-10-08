@@ -142,6 +142,15 @@ pub struct NameInfo {
     pub runs: Vec<String>,
 }
 
+impl NameInfo {
+    /// Whether this name is a `modify` parameter itself: the caller keeps its
+    /// slot, and a store into it replaces the value the caller sees.
+    pub fn is_modify_param(&self) -> bool {
+        matches!(&self.borrow_kind,
+            Some(BorrowKind::Param { cap: "modify", of, .. }) if *of == self.source)
+    }
+}
+
 /// A loop that reads its container through a borrow ([`NameInfo::walked`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Walk {

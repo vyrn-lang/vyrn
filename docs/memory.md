@@ -153,6 +153,8 @@ So is `xs[0] = xs[1]`, even where the two indices are equal; the fix is
 `xs[1].copy()`.
 A `let mut` name that owns its value stays an owner: `s = xs[1]` stores a copy
 and releases the value `s` held.
+A store into a `modify` parameter name releases the value the slot held; the
+caller owns what the slot holds after the call.
 A write to the place ends every alias that reads out of it; a later read of
 the alias is refused.
 
