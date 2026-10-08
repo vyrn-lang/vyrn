@@ -5134,3 +5134,191 @@ fn a_disk_edit_is_read_after_its_event_or_always_without_events() {
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
+
+// What each line costs: inlay hints and `vyrn/costLenses`, over `vyrn why --cost`'s rows.
+
+/// The directory the server and this process save profiles in, set once so no test reads the
+/// profiles the machine's user has saved.
+fn profile_dir() -> &'static std::path::Path {
+    static DIR: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+    DIR.get_or_init(|| {
+        let dir = std::env::temp_dir().join(format!("vyrn-lsp-cost-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::env::set_var("VYRN_PROFILE_DIR", &dir);
+        // The test binary sits one directory deeper than the server, where `std` is not found.
+        let std = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../std");
+        std::env::set_var("VYRN_STD", plain(&std));
+        dir
+    })
+}
+
+/// Opens `path` with `text` in a fresh server and waits for its diagnostics, which must be empty.
+fn open_for_cost(path: &std::path::Path, text: &str) -> (LspClient, String) {
+    profile_dir();
+    let mut client = spawn_client();
+    let uri = file_uri(path);
+    did_open(&mut client, &uri, "vyrn", text);
+    let diags = read_diags_for(&mut client, "");
+    assert_eq!(diags["params"]["diagnostics"], serde_json::json!([]));
+    (client, uri)
+}
+
+/// The cost hints of `uri` as `line label` rows, 1-based: the hints that carry a tooltip.
+fn cost_hints(client: &mut LspClient, uri: &str) -> Vec<String> {
+    client.send(&serde_json::json!({
+        "jsonrpc": "2.0", "id": 90, "method": "textDocument/inlayHint",
+        "params": { "textDocument": { "uri": uri }, "range": {
+            "start": { "line": 0, "character": 0 }, "end": { "line": 100000, "character": 0 } } }
+    }));
+    let resp = client.read_response(&serde_json::json!(90));
+    let all = resp["result"].as_array().expect("hints");
+    (all.iter())
+        .filter(|h| h.get("tooltip").is_some())
+        .map(|h| {
+            let line = h["position"]["line"].as_u64().unwrap() + 1;
+            format!("{line} {}", h["label"].as_str().unwrap())
+        })
+        .collect()
+}
+
+/// The lenses of `uri` as `line title` rows, 1-based.
+fn cost_lenses(client: &mut LspClient, uri: &str) -> Vec<String> {
+    client.send(&serde_json::json!({
+        "jsonrpc": "2.0", "id": 91, "method": "vyrn/costLenses",
+        "params": { "textDocument": { "uri": uri } }
+    }));
+    let resp = client.read_response(&serde_json::json!(91));
+    (resp["result"].as_array().expect("lenses").iter())
+        .map(|l| {
+            format!(
+                "{} {}",
+                l["line"].as_u64().unwrap() + 1,
+                l["title"].as_str().unwrap()
+            )
+        })
+        .collect()
+}
+
+/// Holds `rows` equal to `tests/cost/<name>.txt`; `VYRN_PIN=write` rewrites it.
+fn holds_pin(name: &str, rows: &[String]) {
+    let pin =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("tests/cost/{name}.txt"));
+    let got = rows.join("\n") + "\n";
+    if std::env::var("VYRN_PIN").is_ok_and(|v| v == "write") {
+        std::fs::write(&pin, &got).expect("write the pin");
+        return;
+    }
+    let want = std::fs::read_to_string(&pin).unwrap_or_default();
+    assert_eq!(
+        got, want,
+        "tests/cost/{name}.txt has moved; rewrite it with VYRN_PIN=write"
+    );
+}
+
+/// `path` made absolute with its `..` resolved, without the `\\?\` prefix `canonicalize` gives on
+/// Windows, which no `file:` URI spells.
+fn plain(path: &std::path::Path) -> std::path::PathBuf {
+    let full = path.canonicalize().unwrap();
+    full.to_string_lossy().trim_start_matches(r"\\?\").into()
+}
+
+fn knucleotide() -> (std::path::PathBuf, String) {
+    let path =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/knucleotide.vyrn");
+    let text = std::fs::read_to_string(&path).expect("examples/knucleotide.vyrn");
+    (plain(&path), text)
+}
+
+/// A line that allocates, copies, grows or keeps a check ends in a hint; the rows are
+/// `tests/cost/knucleotide.txt`'s of the CLI.
+#[test]
+fn knucleotide_lines_carry_their_cost_as_hints() {
+    let (path, text) = knucleotide();
+    let (mut client, uri) = open_for_cost(&path, &text);
+    holds_pin("knucleotide-hints", &cost_hints(&mut client, &uri));
+}
+
+#[test]
+fn knucleotide_functions_carry_their_cost_as_lenses() {
+    let (path, text) = knucleotide();
+    let (mut client, uri) = open_for_cost(&path, &text);
+    holds_pin("knucleotide-lenses", &cost_lenses(&mut client, &uri));
+}
+
+/// `word` renders a number into a String and concatenates: 3 blocks, 40 bytes per call.
+const WORD: &str = r#"fn word(n: Int64) -> String {
+    return "w\{n}"
+}
+
+fn main() -> Int64 {
+    print(word(7))
+    return 0
+}
+"#;
+
+/// Saves a profile of `WORD` at `path`, as `vyrn run --profile` would, stamped with `text`.
+fn save_word_profile(path: &std::path::Path, text: &str) {
+    let opts = vyrn_frontend::loader::LoadOptions {
+        std_root: vyrn_frontend::manifest::std_root(),
+        ..Default::default()
+    };
+    let slash = path.to_string_lossy().replace('\\', "/");
+    let linker = Some((
+        &*slash,
+        &opts,
+        &vyrn_frontend::loader::DiskResolver as &dyn vyrn_frontend::loader::ModuleResolver,
+    ));
+    let hashes =
+        vyrn_frontend::analyze_judged(text, linker, None, &vyrn_lower::JUDGE).module_hashes;
+    let site = |verb: &str, blocks, bytes| vyrn_lower::lastrun::SiteCount {
+        function: "word".to_string(),
+        line: 2,
+        verb: verb.to_string(),
+        blocks,
+        bytes,
+        freed: blocks,
+        live: 0,
+    };
+    let stamp = vyrn_lower::lastrun::stamp(text, &hashes);
+    let sites = [site("allocates", 3, 40)];
+    vyrn_lower::lastrun::save(&path.to_string_lossy(), &stamp, &sites);
+}
+
+fn word_file(tag: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("vyrn-lsp-cost-word-{tag}-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("word.vyrn");
+    std::fs::write(&path, WORD).unwrap();
+    plain(&path)
+}
+
+/// When the source matches the saved profile, the line and the function show the run's blocks.
+#[test]
+fn a_fresh_profile_adds_the_runs_blocks() {
+    let path = word_file("fresh");
+    profile_dir();
+    save_word_profile(&path, WORD);
+    let (mut client, uri) = open_for_cost(&path, WORD);
+    assert_eq!(
+        cost_hints(&mut client, &uri),
+        ["2 allocates 2 \u{b7} 3 blocks"]
+    );
+    assert_eq!(
+        cost_lenses(&mut client, &uri),
+        ["1 allocates 2, last run: 3 blocks"]
+    );
+}
+
+/// When the buffer differs from the saved profile's source, no count shows and one lens says so.
+#[test]
+fn an_edited_buffer_makes_the_profile_stale() {
+    let path = word_file("stale");
+    profile_dir();
+    save_word_profile(&path, WORD);
+    let (mut client, uri) = open_for_cost(&path, &format!("{WORD}\n"));
+    let hints = cost_hints(&mut client, &uri);
+    assert!(hints.iter().all(|h| !h.contains("blocks")), "{hints:?}");
+    let lenses = cost_lenses(&mut client, &uri);
+    assert!(lenses[0].contains("profile stale"), "{lenses:?}");
+    assert!(lenses.iter().all(|l| !l.contains("last run")), "{lenses:?}");
+}

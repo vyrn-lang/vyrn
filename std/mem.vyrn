@@ -106,6 +106,13 @@ export fn heapBase() -> Int32 {
     return 0
 }
 
+/// The `SITE` global: the source row a profile build last entered, counted
+/// from 1. 0 in a build without the profile instrument, and before any row.
+export fn site() -> Int32 {
+    noBody()
+    return 0
+}
+
 /// No instruction: the address `x` is held at. A `String` is the address of
 /// its bytes; an aggregate is the address of its layout.
 export fn addr<T>(x: T) -> Int32 {

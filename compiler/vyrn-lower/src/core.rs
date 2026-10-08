@@ -12,6 +12,7 @@
 //! the instance counts as unlowered.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use vyrn_frontend::ast::{
     ArmBody, At, BinOp, Binder, Block, Capability, Expr, FnId, Function, Id, LambdaBody, MatchArm,
@@ -2010,7 +2011,7 @@ impl<'a> Builder<'a> {
         out: &mut Vec<St>,
     ) -> Result<Rhs, Gap> {
         let ty = Type::Named(to.to_string());
-        self.call(to, std::slice::from_ref(value), line, Some(ty), out)
+        self.call(to, std::slice::from_ref(value), line, Some(ty), None, out)
     }
 
     fn temp(&mut self, ty: Type, line: usize) -> Name {
@@ -2228,6 +2229,7 @@ impl<'a> Builder<'a> {
                 ..
             } if arms.iter().all(|a| matches!(a.body, ArmBody::Expr(_))) => {
                 let sty = self.ty_of(scrutinee)?;
+                let rt = vyrn_frontend::types::resolve(&sty, self.proto.types());
                 let mid = e.id();
                 let (sv, consuming) =
                     self.scrutinee(scrutinee, mid, Some(arms_span(*mline, arms)), out)?;
@@ -2241,6 +2243,7 @@ impl<'a> Builder<'a> {
                     let binds = self.bind_pattern(
                         &arm.pattern,
                         &sty,
+                        &rt,
                         consuming,
                         *mline,
                         borrow_root(&sv, owns),
@@ -2261,12 +2264,12 @@ impl<'a> Builder<'a> {
                         binds,
                         frees: Some(frees),
                         body,
-                        test: self.arm_test(&arm.pattern, &sty, *mline)?,
+                        test: self.arm_test(&arm.pattern, &rt, *mline)?,
                         site: mid,
                         index: i as u32,
                     });
                 }
-                self.covers(&core_arms, &sty, *mline, out)?;
+                self.covers(&core_arms, &rt, *mline, out)?;
                 out.push(St::Switch {
                     on: sv,
                     arms: core_arms,
@@ -4387,15 +4390,14 @@ impl<'a> Builder<'a> {
 
     /// Which tag a pattern tests for, in the scrutinee's variant list. `??`'s
     /// pair names a tag: 1 succeeds and 0 fails, for every sum.
-    fn arm_test(&self, p: &Pattern, sty: &Type, line: usize) -> Result<Test, Gap> {
+    fn arm_test(&self, p: &Pattern, rt: &Type, line: usize) -> Result<Test, Gap> {
         let Pattern::Variant(v, _) = p else {
             return Ok(match p {
                 Pattern::Other => Test::Else,
                 _ => Test::Tag(u64::from(matches!(p, Pattern::Success(_)))),
             });
         };
-        let decls = self.proto.types();
-        let Type::Enum(variants) = vyrn_frontend::types::resolve(sty, &decls) else {
+        let Type::Enum(variants) = rt else {
             return gap("a variant pattern on a non-enum", line);
         };
         match variants.iter().position(|x| x.name == *v) {
@@ -4411,12 +4413,11 @@ impl<'a> Builder<'a> {
     fn covers(
         &mut self,
         arms: &[Arm],
-        sty: &Type,
+        rt: &Type,
         line: usize,
         out: &mut Vec<St>,
     ) -> Result<(), Gap> {
-        let decls = self.proto.types();
-        let Type::Enum(variants) = vyrn_frontend::types::resolve(sty, &decls) else {
+        let Type::Enum(variants) = rt else {
             return gap("a variant pattern on a non-enum", line);
         };
         if arms.is_empty() {
@@ -4454,21 +4455,22 @@ impl<'a> Builder<'a> {
     /// where the construct did not consume it: a binder over a borrow carries
     /// the borrow's kind, so `match o { Some(v) => take(v) }` over a `read`
     /// parameter is refused.
+    #[allow(clippy::too_many_arguments)]
     fn bind_pattern(
         &mut self,
         p: &Pattern,
         sty: &Type,
+        rt: &Type,
         consuming: bool,
         line: usize,
         from: Option<Name>,
         out: &mut Vec<St>,
     ) -> Result<Vec<Name>, Gap> {
         let decls = self.proto.types();
-        let rt = vyrn_frontend::types::resolve(sty, &decls);
         let (payloads, variant): (Vec<(String, Type, NodeId)>, String) = match p {
             Pattern::Other => (Vec::new(), String::new()),
             // `??`'s pair names a tag: variant 1 succeeds, 0 fails.
-            Pattern::Success(n) | Pattern::Failure(n) => match &rt {
+            Pattern::Success(n) | Pattern::Failure(n) => match rt {
                 Type::Enum(vs) if vs.len() == 2 => {
                     let at = usize::from(matches!(p, Pattern::Success(_)));
                     let ps = vs[at]
@@ -4480,7 +4482,7 @@ impl<'a> Builder<'a> {
                 }
                 _ => return gap("a `??` pattern on a scrutinee with no two tags", line),
             },
-            Pattern::Variant(v, names) => match &rt {
+            Pattern::Variant(v, names) => match rt {
                 Type::Enum(variants) => {
                     let Some(var) = variants.iter().find(|x| x.name == *v) else {
                         return gap("a variant the enum does not have", line);
@@ -5053,7 +5055,7 @@ impl<'a> Builder<'a> {
         line: usize,
         out: &mut Vec<St>,
     ) -> Result<Val, Gap> {
-        let rhs = self.call(name, &[], line, Some(ty.clone()), out)?;
+        let rhs = self.call(name, &[], line, Some(ty.clone()), None, out)?;
         let t = self.name("@nullary", ty, false, line);
         self.body.names[t.index()].borrow = false;
         self.body.names[t.index()].not_owned = Some(NotOwned::Static);
@@ -5622,7 +5624,7 @@ impl<'a> Builder<'a> {
                 if self.lookup(name).is_none() && self.is_nullary(name) =>
             {
                 let ty = self.ty_of(e)?;
-                self.call(name, &[], *line, Some(ty), out)
+                self.call(name, &[], *line, Some(ty), None, out)
             }
             Expr::Var { .. } | Expr::Consume { .. } => Ok(Rhs::Val(self.val(e, out)?)),
             Expr::Unary { op, expr, .. } => Ok(Rhs::Prim(
@@ -5697,7 +5699,7 @@ impl<'a> Builder<'a> {
                 type_args: _,
                 id: _,
             } if prelude::builtin(name).is_some_and(|b| b.spec == Some(Spec::Traps)) => {
-                let r = self.call(name, args, *line, self.produced(e), out)?;
+                let r = self.call(name, args, *line, self.produced(e), None, out)?;
                 out.push(St::Do {
                     rhs: r,
                     line: *line,
@@ -5730,13 +5732,13 @@ impl<'a> Builder<'a> {
                     })
                     .filter(|(f, _)| self.program.functions.iter().any(|d| &d.name == f))
                 {
-                    return self.call(&f, fwd, *line, self.produced(e), out);
+                    return self.call(&f, fwd, *line, self.produced(e), None, out);
                 }
                 // A render of a type the language does not render calls its
                 // `impl Show`. `print` releases the String after; `value`
                 // takes it.
                 if let Some(f) = self.render_callee(name, args) {
-                    let r = self.call(&f, args, *line, Some(Type::Str), out)?;
+                    let r = self.call(&f, args, *line, Some(Type::Str), None, out)?;
                     if name == "@str" {
                         return Ok(r);
                     }
@@ -5786,7 +5788,7 @@ impl<'a> Builder<'a> {
                     &self.body.speech(),
                 );
                 self.body.mistyped.extend(at);
-                let mut r = self.call(name, args, *line, self.produced(e), out)?;
+                let mut r = self.call(name, args, *line, self.produced(e), Some(e), out)?;
                 if let Rhs::Call {
                     kind: Callee::Fn(_),
                     solved,
@@ -5943,6 +5945,7 @@ impl<'a> Builder<'a> {
             } => {
                 let ty = self.ty_of(e)?;
                 let sty = self.ty_of(scrutinee)?;
+                let rt = vyrn_frontend::types::resolve(&sty, self.proto.types());
                 let mid = e.id();
                 let res = self.temp(ty, *line);
                 let (sv, consuming) =
@@ -5959,6 +5962,7 @@ impl<'a> Builder<'a> {
                     let binds = self.bind_pattern(
                         &arm.pattern,
                         &sty,
+                        &rt,
                         consuming,
                         *line,
                         borrow_root(&sv, owns),
@@ -5990,12 +5994,12 @@ impl<'a> Builder<'a> {
                         binds,
                         frees: Some(frees),
                         body,
-                        test: self.arm_test(&arm.pattern, &sty, *line)?,
+                        test: self.arm_test(&arm.pattern, &rt, *line)?,
                         site: mid,
                         index: i as u32,
                     });
                 }
-                self.covers(&core_arms, &sty, *line, out)?;
+                self.covers(&core_arms, &rt, *line, out)?;
                 self.join_borrows(res, &yields);
                 out.push(St::Switch {
                     on: sv,
@@ -6038,6 +6042,7 @@ impl<'a> Builder<'a> {
                         ..Binder::synthetic("@err")
                     }),
                     &ity,
+                    &r,
                     consuming,
                     *line,
                     borrow_root(&sv, owns),
@@ -6082,6 +6087,7 @@ impl<'a> Builder<'a> {
                         ..Binder::synthetic("@ok")
                     }),
                     &ity,
+                    &r,
                     consuming,
                     *line,
                     borrow_root(&sv, owns),
@@ -6318,12 +6324,16 @@ impl<'a> Builder<'a> {
         }
     }
 
+    /// The call `name(args)` producing `ret`. `dest` is the call expression
+    /// where the caller has one: a constructor's payload slots take their types
+    /// from its checked type (`Some(lit)` into `Option<Key>`).
     fn call(
         &mut self,
         name: &str,
         args: &'a [Expr],
         line: usize,
         ret: Option<Type>,
+        dest: Option<&'a Expr>,
         out: &mut Vec<St>,
     ) -> Result<Rhs, Gap> {
         // `a[i]` asks the receiver's type for `at` before any builtin row, as
@@ -6341,7 +6351,7 @@ impl<'a> Builder<'a> {
                 .is_ok_and(|t| vyrn_frontend::types::resolve(&t, self.proto.types()) == Type::Str);
             if string {
                 let v = if prelude::boxes_a_copy(arg, string) {
-                    let copy = self.call("@copy", args, line, Some(Type::Str), out)?;
+                    let copy = self.call("@copy", args, line, Some(Type::Str), None, out)?;
                     let c = self.temp(Type::Str, line);
                     self.bind(c, copy, out);
                     Val::Name(c)
@@ -6535,10 +6545,24 @@ impl<'a> Builder<'a> {
             Callee::Fn(_) => self.targets_of(name, args),
             _ => Vec::new(),
         };
-        let param_tys: Vec<Type> = match kind {
-            Callee::Fn(id) => (self.program.functions[id.index()].params.iter())
+        let param_tys: Vec<Type> = match (kind, dest) {
+            (Callee::Fn(id), _) => (self.program.functions[id.index()].params.iter())
                 .map(|p| p.ty.clone())
                 .collect(),
+            (Callee::Ctor, Some(dest)) => {
+                let dest = self.ty_of(dest).ok();
+                let decls = self.proto.types();
+                let variants = dest
+                    .as_ref()
+                    .map(|d| vyrn_frontend::types::resolved(d, decls));
+                match variants.as_deref() {
+                    Some(Type::Enum(vs)) => {
+                        (vs.iter().find(|v| v.name == name)).map(|v| v.payload.clone())
+                    }
+                    _ => None,
+                }
+                .unwrap_or_default()
+            }
             _ => Vec::new(),
         };
         let mut targets = Vec::new();
@@ -7813,9 +7837,21 @@ pub fn augment(program: &Program, w: &mut World, judging: bool) {
                     _ => None,
                 })
                 .collect();
-            let allocating: HashSet<FnId> = (refs.iter().zip(&judged.effects))
-                .filter(|(_, e)| e.has(vyrn_frontend::effects::Effect::Alloc))
-                .filter_map(|(b, _)| b.id)
+            let allocs = |at: usize| judged.effects[at].has(vyrn_frontend::effects::Effect::Alloc);
+            // A served body is judged too, at the frame `served_at` names.
+            let served_files = (states.iter().filter(|s| s.answered().is_some()))
+                .zip(served_at)
+                .filter(|(_, at)| allocs(**at))
+                .filter_map(|(s, _)| Some((s.job.id(), s.job.module().as_deref()?)));
+            let mut files: HashMap<&str, Arc<str>> = HashMap::new();
+            let allocating: HashMap<FnId, Arc<str>> = (refs.iter().enumerate())
+                .filter(|(at, _)| allocs(*at))
+                .filter_map(|(_, b)| Some((b.id?, b.file.as_deref()?)))
+                .chain(served_files)
+                .map(|(id, file)| {
+                    let shared = files.entry(file).or_insert_with(|| Arc::from(file));
+                    (id, Arc::clone(shared))
+                })
                 .collect();
             (judged.state_table(refs), read, answers, reached, allocating)
         },
@@ -8058,6 +8094,15 @@ pub fn augment(program: &Program, w: &mut World, judging: bool) {
     // the memo runs no emitter, and served bodies would leave the facts
     // partial, so it stops here.
     if memo.is_some() {
+        // The editor reads what the document's own functions cost
+        // ([`crate::insight::fn_costs`]). The memo never serves the root file's bodies, so
+        // each is built, and these are the only bodies of this analysis that are kept.
+        let mut unused = Facts::default();
+        for (inst, top) in lowered.instances.iter().zip(&mut built) {
+            if let (None, Some(top)) = (&inst.func.module, top) {
+                fold_frames(program, top, own, &mut unused, &mut w.fns, &mut w.bodies);
+            }
+        }
         w.calls.replace(calls);
         own.state_callees.clear();
         own.accumulators.clear();

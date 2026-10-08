@@ -401,6 +401,16 @@ An unaudited build emits no audit call, and `Module::sweep` drops the audit
 functions, so a shipped module holds none of it. The generator host and the
 language server never reach it.
 
+`vyrn run --profile` (or `VYRN_PROFILE=1`) builds the audit with one more
+piece. Before each row of the root file that allocates, copies, grows a
+container or enters an allocating function of another file, the emitter sets
+the global `SITE` to the row's site: its function, line and verb. The block
+header's liveness word then holds `SITE + 1`, and the hooks add each birth and
+death to the site's counter row in a static table. A block that a function of
+another file makes counts at the last site that ran, which is the calling
+line. The host reads the table after `_start`. The profile build does not exit
+135 on residue; it reports the residue.
+
 The audit is a test instrument, not a language rule. `tests/residue.rs` runs
 every corpus program under it on both engines against a baseline of `clean`,
 `leak N` and `other` rows. A double free fails whatever the baseline says; a

@@ -15,12 +15,15 @@ pub mod facts;
 mod fixpoint;
 pub mod insight;
 pub mod kernel;
+pub mod lastrun;
 mod pipeline;
 pub mod rules;
 pub mod typed;
 mod world;
 
-pub use pipeline::{check_and_synthesize, gen_engine, load, load_warned, refusals, JUDGE};
+pub use pipeline::{
+    check_and_synthesize, gen_engine, load, load_warned, refusals, JUDGE, JUDGE_COST,
+};
 
 pub use world::{analyze, FnRow, Fns, World};
 
