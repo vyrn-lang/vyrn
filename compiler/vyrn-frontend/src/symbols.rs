@@ -144,6 +144,13 @@ pub struct Analysis {
     /// never re-derived, so it cannot disagree with the walk that decided. Empty when the checks did not run
     /// or no [`Judge`] was given.
     pub memory: Vec<MemoryNote>,
+    /// What each function of this document costs, line by line: the rows of
+    /// `vyrn why --cost`, read from [`Judged::cost`]. Empty when the checks did not run, found an
+    /// error or no [`Judge`] was given.
+    pub cost: Vec<FnCost>,
+    /// The hash of every module the document links ([`crate::ast::Program::module_hashes`]),
+    /// which stamps a saved profile with the source it ran. Empty when the checks did not run.
+    pub module_hashes: std::collections::BTreeMap<String, String>,
     /// How hover, completion and type hints spell a declaration the loader
     /// renamed apart. Empty for a document no load linked.
     pub spellings: std::sync::Arc<Spellings>,
@@ -163,6 +170,33 @@ pub struct MemoryNote {
     pub last_use: Option<usize>,
     /// What took it, for the inlay hint. `Some` exactly when `last_use` is a move.
     pub moved_into: Option<String>,
+}
+
+/// What one function of the document costs: its rows of `vyrn why --cost`, ordered by line and
+/// then by verb.
+#[derive(Debug, Clone)]
+pub struct FnCost {
+    pub name: String,
+    /// 1-based line of the declaration.
+    pub line: usize,
+    pub lines: Vec<CostLine>,
+}
+
+/// What one verb does on one line of a function, in the words `vyrn why --cost` prints.
+#[derive(Debug, Clone)]
+pub struct CostLine {
+    /// 1-based line.
+    pub line: usize,
+    /// `copies`, `allocates`, `enters`, `grows` or `check kept`.
+    pub verb: &'static str,
+    /// The deepest loop nest among the line's facts of this verb.
+    pub depth: u32,
+    /// How many facts the line states.
+    pub count: usize,
+    /// Whether a copy is one the reader did not write.
+    pub implicit: bool,
+    /// What it does, as `why --cost` prints it.
+    pub text: String,
 }
 
 /// One `import * as ns` binding and the exported declarations it exposes.
@@ -268,6 +302,8 @@ pub struct Judged {
     /// Per function, the placer's memory rows ([`crate::own::Ownership::memory`]);
     /// empty for a program the kernel did not judge.
     pub memory: HashMap<crate::ast::FnId, Vec<crate::own::MemoryRow>>,
+    /// The cost of each function of the root file; empty for a program the kernel did not judge.
+    pub cost: Vec<FnCost>,
 }
 
 /// Like [`analyze_linked`], but runs the pipeline `vyrn check` runs:
@@ -411,6 +447,7 @@ fn analyze_inner(
     // The check returns the diagnostics and every binding it made in the root
     // module, typed, so an unannotated `let x = 5` hovers as `let x: Int64`.
     let mut memory = HashMap::new();
+    let mut cost = Vec::new();
     let locals = match &mut checked {
         Some(prog) => {
             let cs = crate::prof::phase("check: the analysis's own");
@@ -418,6 +455,7 @@ fn analyze_inner(
                 Some(judge) => {
                     let judged = (judge.check)(prog, engine, pending);
                     memory = judged.memory;
+                    cost = judged.cost;
                     (judged.diagnostics, judged.binders)
                 }
                 None => checker::check_accum_recording(prog),
@@ -606,10 +644,18 @@ fn analyze_inner(
         Some(prog) if clean => memory_notes(prog, &memory),
         _ => Vec::new(),
     };
+    let module_hashes = (checked.as_ref())
+        .map(|p| p.module_hashes.clone())
+        .unwrap_or_default();
+    if !clean {
+        cost.clear();
+    }
 
     Analysis {
         diagnostics: diags,
         memory,
+        cost,
+        module_hashes,
         symbols,
         tokens: tok_info,
         locals,
@@ -707,6 +753,8 @@ fn empty_analysis(diagnostics: Vec<Diagnostic>) -> Analysis {
         remapped: Vec::new(),
         symbol_maps: Vec::new(),
         memory: Vec::new(),
+        cost: Vec::new(),
+        module_hashes: Default::default(),
         spellings: Default::default(),
     }
 }

@@ -1,0 +1,21 @@
+34 allocates
+63 allocates
+67 allocates, enters
+68 grows
+78 allocates
+86 check kept
+88 grows
+97 allocates
+99 grows
+102 grows, check kept
+105 allocates
+114 allocates
+124 allocates
+126 copies (implicit), allocates
+128 copies (implicit), allocates 3
+152 allocates
+157 grows
+169 copies 2 (implicit), allocates 2
+196 allocates
+202 grows, check kept
+223 copies (implicit), allocates 3

@@ -10,10 +10,9 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
-use vyrn_frontend::ast::FnId;
 use vyrn_frontend::project::Expansions;
 use vyrn_genwasm::engine;
-use vyrn_lower::insight::{self, Verb};
+use vyrn_lower::insight::{self, CostFn, CostTable, Verb};
 use vyrn_lower::lastrun;
 
 use vyrn_codegen::toolchain::find_clang;
@@ -1463,86 +1462,23 @@ fn json_str(s: &str) -> String {
     out
 }
 
-/// One printed row of `why --cost`: what one verb does on one line of a function.
-struct CostRow {
-    /// The deepest loop nest among the line's facts of this verb.
-    depth: u32,
-    /// What it does, each wording with how many times the line states it.
-    whats: Vec<(String, usize)>,
-}
-
-impl CostRow {
-    fn text(&self) -> String {
-        let whats: Vec<String> = (self.whats.iter())
-            .map(|(w, n)| {
-                if *n > 1 {
-                    format!("{w} x{n}")
-                } else {
-                    w.clone()
-                }
-            })
-            .collect();
-        whats.join(", ")
-    }
-}
-
-/// The rows of `why --cost` for each function of the root file, in function-table order and
-/// then by line and verb, and the summary counts. `(rows, rows in loops)` of allocating,
-/// growing, copying, kept and proved. It prints nothing and decides nothing:
-/// `insight::root` has the facts.
-type CostFn = (FnId, BTreeMap<(u32, Verb), CostRow>);
-type CostTable = (Vec<CostFn>, [(usize, usize); 5]);
-
+/// The rows of `why --cost` for each function of the root file ([`insight::table`]), with a
+/// call into another file named as an import spells it: `std/strings`, or the path from the
+/// root's directory.
 fn cost_table(
     program: &vyrn_frontend::ast::Program,
     world: &vyrn_lower::World,
     path: &str,
 ) -> CostTable {
-    use vyrn_frontend::core::Copied;
-    use vyrn_lower::insight::Kind;
     let (std, here) = (std_root(), path.rsplit_once('/').map_or("", |(d, _)| d));
-    // The file a call enters, as an import spells it: `std/strings`.
-    let named = |file: &str| match std.as_deref().and_then(|s| file.strip_prefix(s)) {
-        Some(m) => format!("std{}", m.trim_end_matches(".vyrn")),
-        None => rel_to(file, here),
-    };
-    let mut tally = [(0usize, 0usize); 5];
-    let mut table = Vec::new();
-    for (id, facts) in insight::root(program, world) {
-        let mut shown: BTreeMap<(u32, Verb), CostRow> = BTreeMap::new();
-        for f in &facts {
-            let (slot, what) = match &f.kind {
-                Kind::Copy { what, implicit } => {
-                    let what = match what {
-                        Copied::Value => "a value",
-                        Copied::Render => "a String render",
-                    };
-                    let how = if *implicit { " (implicit)" } else { "" };
-                    (2, format!("{what}{how}"))
-                }
-                Kind::Alloc(w) => (0, w.clone()),
-                Kind::Enters(c, from) => (0, format!("{c}(..) in {}", named(from))),
-                Kind::Grows(b) => (1, format!("{b}(..)")),
-                Kind::Check { raises, kept } => {
-                    (3 + usize::from(!kept), raises.census().to_string())
-                }
-            };
-            tally[slot].0 += 1;
-            tally[slot].1 += usize::from(f.depth > 0);
-            let Some(verb) = f.kind.verb() else { continue };
-            let row = shown.entry((f.line, verb)).or_insert(CostRow {
-                depth: 0,
-                whats: Vec::new(),
-            });
-            row.depth = row.depth.max(f.depth);
-            match row.whats.iter_mut().find(|w| w.0 == what) {
-                Some(w) => w.1 += 1,
-                None => row.whats.push((what, 1)),
-            }
-        }
-        table.push((id, shown));
-    }
-    (table, tally)
+    insight::table(
+        program,
+        world,
+        &|file| match std.as_deref().and_then(|s| file.strip_prefix(s)) {
+            Some(m) => format!("std{}", m.trim_end_matches(".vyrn")),
+            None => rel_to(file, here),
+        },
+    )
 }
 
 /// `vyrn why --cost <file>`: per function of the file, the lines that allocate,
@@ -1568,7 +1504,7 @@ fn why_cost(flags: GlobalFlags, file: &str) -> Outcome {
 
     println!("{}", dos_to_slash(file));
     // The last `vyrn run --profile` of this root, when its source and imports are the same.
-    let last = match lastrun::load(&path, &lastrun::stamp(&source, &program)) {
+    let last = match lastrun::load(&path, &lastrun::stamp(&source, &program.module_hashes)) {
         lastrun::Found::Stale => {
             println!("profile: stale; the source changed since the last `vyrn run --profile`");
             None
@@ -5041,7 +4977,7 @@ fn run_cmd(call: &Call) -> Outcome {
     let profile = call
         .flags
         .profile
-        .then(|| (load, lastrun::stamp(&source, &program)));
+        .then(|| (load, lastrun::stamp(&source, &program.module_hashes)));
     Ok(run_wasm(&path, &program, world, &call.pos, profile))
 }
 

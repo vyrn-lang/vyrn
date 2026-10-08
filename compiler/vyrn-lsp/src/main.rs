@@ -15,6 +15,7 @@ use vyrn_frontend::session::Session;
 use vyrn_genwasm::engine;
 
 mod contracts;
+mod cost;
 mod rename;
 mod templates;
 
@@ -53,6 +54,24 @@ use vyrn_frontend::{
 
 use templates::VyxCursor;
 
+/// Whether the client asked for what each line costs ([`cost`]): its `costHints`
+/// initialization option, on when it sends none.
+static COST_HINTS: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+
+fn cost_hints() -> bool {
+    COST_HINTS.get().copied().unwrap_or(true)
+}
+
+/// The pipeline every analysis runs. It computes the cost of each function only when a hint
+/// or a lens will show it.
+fn judge() -> &'static vyrn_frontend::Judge {
+    if cost_hints() {
+        &vyrn_lower::JUDGE_COST
+    } else {
+        &vyrn_lower::JUDGE
+    }
+}
+
 /// Analyze `text` through the pipeline `vyrn check` runs, with the project
 /// the document's path lies in, under the server's `session`; an untitled
 /// buffer loads as [`analyze_judged`] says. `overlays` maps every open
@@ -72,14 +91,14 @@ fn analyze_doc(
                 ..Default::default()
             };
             let linker = Some(("untitled.vyrn", &opts, &**session as &dyn ModuleResolver));
-            return analyze_judged(text, linker, Some(&*engine()), &vyrn_lower::JUDGE);
+            return analyze_judged(text, linker, Some(&*engine()), judge());
         }
     };
     let mut analysis = analyze_judged(
         text,
         Some((&path, &opts, &resolver)),
         Some(&*engine()),
-        &vyrn_lower::JUDGE,
+        judge(),
     );
     // A manifest that does not parse would drop the import map and audience
     // rules silently, so it is an error on the open document.
@@ -338,10 +357,12 @@ struct AnalyzedSynth {
 
 /// Answers `initialize`, and asks a client that can send file events for them
 /// under its workspace folders and the std root. Returns those directories, or
-/// none when the client cannot.
+/// none when the client cannot. Reads the `costHints` initialization option.
 fn handle_initialize(connection: &Connection) -> Result<Vec<String>, ()> {
     let (id, params) = connection.initialize_start().map_err(|_| ())?;
     let params: InitializeParams = serde_json::from_value(params).unwrap_or_default();
+    let off = (params.initialization_options.as_ref()).and_then(|o| o.get("costHints")?.as_bool());
+    let _ = COST_HINTS.set(off.unwrap_or(true));
 
     let capabilities = ServerCapabilities {
         text_document_sync: Some(TextDocumentSyncCapability::Kind(TextDocumentSyncKind::FULL)),
@@ -592,6 +613,7 @@ fn handle_request(server: &mut Server, req: Request) -> Response {
         "vyrn/isDevEntry" => {
             Response::new_ok(req.id, Some(handle_is_dev_entry(server, req.params)))
         }
+        "vyrn/costLenses" => Response::new_ok(req.id, Some(handle_cost_lenses(server, req.params))),
         // A custom request, not `code_lens_provider`: `extension.js` builds
         // every lens from answers like this one.
         "vyrn/routeLenses" => {
@@ -625,6 +647,22 @@ fn handle_is_dev_entry(server: &Server, params: serde_json::Value) -> bool {
         Some(text) => is_dev_entry(&text),
         None => false,
     }
+}
+
+/// `vyrn/costLenses`: one `{ line, title }` per function that allocates, copies, grows a
+/// container or keeps a check ([`cost::lenses`]), `line` 0-based. Empty when the client turned
+/// cost hints off, and for a document that does not check.
+fn handle_cost_lenses(server: &Server, params: serde_json::Value) -> Vec<serde_json::Value> {
+    let uri = (params.pointer("/textDocument/uri"))
+        .and_then(|v| v.as_str())
+        .and_then(|u| Url::parse(u).ok());
+    let Some(uri) = uri.filter(|u| cost_hints() && is_vyrn_uri(u)) else {
+        return Vec::new();
+    };
+    let (Some((analysis, _)), Some(src)) = (lookup(server, &uri), doc_text(server, &uri)) else {
+        return Vec::new();
+    };
+    cost::lenses(analysis, uri_path(&uri).as_deref(), &src)
 }
 
 /// `vyrn/routeLenses`: one `{ line, title, method, path, source }` per mounted
@@ -1551,7 +1589,7 @@ fn synth_for(server: &Server, owner: &Url, banner: &str) -> Option<Rc<AnalyzedSy
         &gen_source,
         Some((&synth_path, &opts, &resolver)),
         Some(&*engine()),
-        &vyrn_lower::JUDGE,
+        judge(),
     );
     let tokens = vyrn_frontend::semantic_tokens(&analysis);
     let a = Rc::new(AnalyzedSynth {
@@ -1770,8 +1808,8 @@ fn document_sem_tokens(server: &Server, uri: &Url) -> Option<Vec<vyrn_frontend::
     }
 }
 
-/// Inlay hints in the requested lines: a label at every move, and the type of
-/// every binding whose line does not say it. A `.vyx` gets type hints only,
+/// Inlay hints in the requested lines: a label at every move, the type of
+/// every binding whose line does not say it, and what the line costs ([`cost::hints`]). A `.vyx` gets type hints only,
 /// from [`vyx_type_hints`].
 fn handle_inlay_hint(server: &Server, params: serde_json::Value) -> Option<Vec<InlayHint>> {
     let p: InlayHintParams = serde_json::from_value(params).ok()?;
@@ -1809,6 +1847,10 @@ fn handle_inlay_hint(server: &Server, params: serde_json::Value) -> Option<Vec<I
         .collect();
     if let Some(src) = src.as_deref() {
         hints.extend(type_hints(analysis, src, from, to));
+        if cost_hints() {
+            let path = uri_path(&p.text_document.uri);
+            hints.extend(cost::hints(analysis, path.as_deref(), src, from, to));
+        }
     }
     Some(hints)
 }

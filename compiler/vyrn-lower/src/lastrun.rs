@@ -9,7 +9,6 @@
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
-use vyrn_frontend::ast::Program;
 use vyrn_frontend::hash::sha256_hex;
 
 /// What a run made at one site of the root file: blocks and bytes made, blocks freed, bytes
@@ -36,10 +35,11 @@ pub enum Found {
     Fresh(Sites),
 }
 
-/// What a saved profile must match to be fresh: `source` and the modules `program` linked.
-pub fn stamp(source: &str, program: &Program) -> String {
+/// What a saved profile must match to be fresh: `source` and the modules the program linked
+/// ([`vyrn_frontend::ast::Program::module_hashes`]).
+pub fn stamp(source: &str, module_hashes: &BTreeMap<String, String>) -> String {
     let mut text = source.to_string();
-    for (module, hash) in &program.module_hashes {
+    for (module, hash) in module_hashes {
         text.push_str(&format!("\n{module}={hash}"));
     }
     sha256_hex(text.as_bytes())

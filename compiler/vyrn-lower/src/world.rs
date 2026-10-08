@@ -42,10 +42,10 @@ pub struct World {
     /// `gen fn`'s, with the instance's module: what [`crate::effects::reaches`]
     /// reads.
     pub(crate) reached: Vec<(Option<String>, vyrn_frontend::effects::Effects)>,
-    /// The functions whose effect set holds `alloc`, as the placer judged
-    /// them: what [`World::allocates`] answers. A body the judgment memo
-    /// served is not among them.
-    pub(crate) allocating: HashSet<FnId>,
+    /// The functions declared outside the root file whose effect set holds `alloc`, as the
+    /// placer judged them, a body the judgment memo served included, with their file: what
+    /// [`World::allocating_file`] answers.
+    pub(crate) allocating: HashMap<FnId, String>,
     /// Whether a placed release named an instance the first lowering lacked.
     /// `reached` holds no such instance, so [`crate::effects::reaches`] judges
     /// the program as placed instead.
@@ -361,9 +361,10 @@ impl World {
         }))
     }
 
-    /// Whether a call to `f` may allocate: its effect set holds `alloc`.
-    pub fn allocates(&self, f: FnId) -> bool {
-        self.allocating.contains(&f)
+    /// The file `f` is declared in, when that is not the root file and a call to `f` may
+    /// allocate: its effect set holds `alloc`.
+    pub fn allocating_file(&self, f: FnId) -> Option<&str> {
+        self.allocating.get(&f).map(String::as_str)
     }
 
     /// The functions `f`'s bodies call ([`Calls`]), in source order.
@@ -493,8 +494,10 @@ impl World {
                 );
             }
         }
+        // An analysis that armed the judgment memo folds no facts, but builds the root file's own
+        // bodies for the editor ([`crate::insight::fn_costs`]).
         assert!(
-            self.facts.is_some() || self.bodies.is_empty(),
+            self.facts.is_some() || (self.bodies.values().flatten()).all(|s| s.body.file.is_none()),
             "the core's bodies outlived its facts"
         );
         let refusals = self.refusals.iter().map(|r| &r.diagnostic);
