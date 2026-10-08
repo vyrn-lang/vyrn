@@ -411,6 +411,14 @@ another file makes counts at the last site that ran, which is the calling
 line. The host reads the table after `_start`. The profile build does not exit
 135 on residue; it reports the residue.
 
+The profile build also counts each function's calls and operations (`wasm::count`).
+The audit hooks, their operands and the site writes are marked as the instrument's
+and left out, and the calls they make count against a scratch table, so the sum
+equals what the module executes without the instrument. The instrument's statics
+sit above the program's and the heap starts a whole number of pages higher, so the
+free space above the heap, and the allocation at which `memory.grow` runs, are the
+plain build's.
+
 The audit is a test instrument, not a language rule. `tests/residue.rs` runs
 every corpus program under it on both engines against a baseline of `clean`,
 `leak N` and `other` rows. A double free fails whatever the baseline says; a

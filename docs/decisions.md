@@ -308,6 +308,7 @@ pull request.
 - A function of another file counts its allocations at the line that calls it. The cost report is a report: it raises no warning.
 - The last `vyrn run --profile` is saved per root, stamped with a hash of the root's source and the content hashes of its imports. `vyrn why --cost` shows it only while the stamp matches, so it never shows a count against a line that moved.
 - `vyrn run --profile` counts blocks per source line with the free audit plus a `SITE` global. The instrument is off in every other build, so the wasm manifest does not move. A block made inside `std` counts at the last site that ran; a call path per site would need a shadow stack.
+- `vyrn run --profile` counts each function's calls and operations by rewriting the finished bodies (`wasm::count`), at the prices of wasmtime's fuel meter. The instrument's own instructions, and the calls they make, are marked on the `Frame` and run against a scratch table, so the counts equal a plain metered run's fuel. The instrument's statics sit above the program's, and the heap moves up by whole pages with the memory, so `memory.grow` runs at the same allocation with and without it.
 - `vyrn routes` and `vyrn why` read what generators and the source wrote; they recompute nothing.
 - `vyrn doc` writes Markdown only. `docs/api/` is committed and CI checks it with `--verify`.
 - `vyrn emit-lowered` is deterministic, promises no format and has no parser.

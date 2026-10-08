@@ -6,10 +6,10 @@ serve, dev	464	6
 doc	283	9
 routes	262	1
 build	209	12
+run	208	2
 update	194	5
 deps	192	3
 fmt	182	5
-run	178	2
 dev	140	12
 fix	129	1
 test, bench	127	2

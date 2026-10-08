@@ -269,7 +269,7 @@ export fn malloc(n: Int64) -> Int32 {
     }
     store32(base + 464, UInt32(end - Int64(base) - 8768))
     store32(p, UInt32(cls))
-    auditBirth(p + 8, size)
+    auditBirthNew(p, size)
     return p + 8
 }
 
@@ -325,6 +325,13 @@ fn auditInit(pre: Int32, mid: Int32, post: Int32, dbl: Int32, table: Int32) {
     store32(s + 20, UInt32(dbl))
     store32(s + 24, UInt32(table))
     store32(heapBase(), UInt32(s))
+}
+
+/// `auditBirth` for a block `malloc` carved from the bump region: `p` is its header, so the
+/// payload starts eight bytes on. The operand lives here, so the call site stays a bare call
+/// that the operation counter can leave out.
+fn auditBirthNew(p: Int32, size: Int32) {
+    auditBirth(p + 8, size)
 }
 
 fn auditBirth(p: Int32, size: Int32) {

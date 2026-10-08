@@ -372,6 +372,7 @@ fn compile_inner(
     };
     if cx.profile.is_some() {
         m.profile();
+        m.count_ops();
     }
 
     // The first `body_of` of a function decides its checks, about a fifth of this compile. The
@@ -601,6 +602,7 @@ fn compile_inner(
     // and passed to `auditInit`. Nothing else reaches the two functions, so an unaudited build
     // sweeps them.
     let audit = if cx.audit {
+        m.begin_instrument();
         let words = [
             cx.rt.intern(&mut m, "free audit: "),
             cx.rt.intern(&mut m, " block(s), "),
@@ -625,11 +627,13 @@ fn compile_inner(
         // First, so the instrument marks every block: `auditInit` allocates its own state and
         // then arms.
         if let Some((init, _, words)) = audit {
+            let at = b.here();
             for w in words {
                 b.ins(&Instruction::I32Const(w as i32));
             }
             b.ins(&Instruction::I32Const(table as i32));
             b.ins(&Instruction::Call(init));
+            b.instrument_since(at);
         }
         // Before the initializers, because a top-level `let` may log.
         if let Some((at, path, open_at)) = log_open {
@@ -661,9 +665,11 @@ fn compile_inner(
         // exit, because the report replaces the exit code with 135.
         if let Some(ti) = teardown_index {
             b.ins(&Instruction::Call(ti));
+            b.instrument_since(b.here() - 1);
         }
         if let Some((_, exit, _)) = audit {
             b.ins(&Instruction::Call(exit));
+            b.instrument_since(b.here() - 1);
         }
         b.ins(&Instruction::I64Const(255))
             .ins(&Instruction::I64And)
@@ -671,6 +677,9 @@ fn compile_inner(
             .ins(&Instruction::Call(wasi.at("proc_exit")));
     });
     m.export("_start", start);
+    if m.counts_ops() {
+        m.name(start, "_start");
+    }
     // An `export extern fn`, under its own name. An export is also a sweep root.
     for f in &user {
         if f.is_export_extern {
@@ -1897,11 +1906,11 @@ fn lower_fn(
     fill_named(m, sig.index, frame, &f.name)
 }
 
-/// Fills function `index` with `body` and, under `VYRN_WASM_NAMES`, names it for the `name`
-/// section.
+/// Fills function `index` with `body` and, under `VYRN_WASM_NAMES` or an operation count, names
+/// it for the `name` section.
 fn fill_named(m: &mut Module, index: u32, body: Frame, name: &str) -> Result<(), String> {
     m.fill(index, body)?;
-    if std::env::var_os("VYRN_WASM_NAMES").is_some() {
+    if m.counts_ops() || std::env::var_os("VYRN_WASM_NAMES").is_some() {
         m.name(index, name);
     }
     Ok(())
@@ -1938,6 +1947,9 @@ fn lower_body(
         .unwrap_or_else(|| f.name.clone());
 
     let mut b = Frame::new(&params, &results, &[], 0);
+    if vyrn_frontend::loader::audit_hook(&f.name) {
+        b.instrument_all();
+    }
     let core = core_body(key, f, &binds, cx);
     let mut cx_fn = Fn_ {
         ret: sig.ret.clone(),
@@ -9345,8 +9357,10 @@ impl<'a, 'p> Fn_<'a, 'p> {
             sites.push(key);
             sites.len() as u32
         });
+        let at = b.here();
         b.ins(&Instruction::I32Const(id as i32));
         b.ins(&Instruction::GlobalSet(SITE));
+        b.instrument_since(at);
     }
 
     fn core_stmts(&mut self, m: &mut Module, b: &mut Frame, ss: &[St]) -> Result<(), String> {
@@ -10597,6 +10611,8 @@ impl<'a, 'p> Fn_<'a, 'p> {
             }
         };
         let dest = self.out_ptr(b, &sig, hint);
+        // An audit hook and its operands are the instrument's, not the program's.
+        let hook = vyrn_frontend::loader::audit_hook(callee).then(|| b.here());
         let mut spilled = Vec::new();
         for (i, ((a, c), p)) in args.iter().zip(&sig.params).enumerate() {
             // `x = f(x)` passes `x`'s own storage as the destination ([`Fn_::core_back`]).
@@ -10626,6 +10642,9 @@ impl<'a, 'p> Fn_<'a, 'p> {
             })?;
         }
         b.ins(&Instruction::Call(sig.index));
+        if let Some(at) = hook {
+            b.instrument_since(at);
+        }
         reload(b, &spilled);
         self.out_ptr_back(b, dest);
         Ok(sig.ret_ty)

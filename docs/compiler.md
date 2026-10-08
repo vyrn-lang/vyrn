@@ -445,6 +445,7 @@ Rust style).
 | `VYRN_THREADS=<n>` | types, walks, builds and places bodies on `n` threads; `1` keeps a trace in body order |
 | `VYRN_SHUFFLE=<seed>` | permutes the order the checker's, the lowering's and the placer's threads take bodies in |
 | `VYRN_LEAK_CHECK=1` | builds with the free audit |
+| `VYRN_FUEL=<file>` | meters `vyrn run` and appends the fuel `_start` spent, tab-separated from the program's name |
 | `VYRN_WASM_NAMES=1` | writes function names into the module |
 | `VYRN_GENWASM_TRACE=1` | prints the generation engine's phase timings |
 | `VYRN_TYPED_DUMP=<file>:<fn>` | prints one body's judged stores (`typed.rs`) |
