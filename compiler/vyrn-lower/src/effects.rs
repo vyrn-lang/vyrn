@@ -92,6 +92,8 @@ pub struct Judged<'a> {
     resolved: Vec<Vec<usize>>,
     /// Every callee the calls resolved to, once.
     callees: Vec<Callee>,
+    /// Per callee, whether a call to it may store into any global.
+    stores: Vec<bool>,
     /// Per body, the globals it or a callee stores into, joined in the same
     /// fixpoint.
     writes: Vec<std::collections::BTreeSet<String>>,
@@ -106,6 +108,9 @@ impl Judged<'_> {
             let Callee::Bodies(idx) = &self.callees[*k] else {
                 continue;
             };
+            if !self.stores[*k] {
+                continue;
+            }
             let gs: std::collections::BTreeSet<&String> =
                 idx.iter().flat_map(|j| &self.writes[*j]).collect();
             if !gs.is_empty() && !out.iter().any(|(m, _)| *m == c.callee) {
@@ -199,6 +204,9 @@ pub fn judge<'a>(
     let mut callees: Vec<Callee> = Vec::new();
     let mut named: HashMap<&str, usize> = HashMap::new();
     let mut typed: HashMap<&Type, usize> = HashMap::new();
+    // The frame (plus one) whose edges last took a callee's bodies: many calls
+    // to one callee add them once.
+    let mut taken: Vec<usize> = Vec::new();
     for (i, f) in frames.iter().enumerate() {
         let mut e = f.own;
         let mut to: Vec<usize> = Vec::new();
@@ -225,7 +233,12 @@ pub fn judge<'a>(
             let callee = &callees[k];
             match callee {
                 Callee::Atom(a) => e = e.join(*a),
-                Callee::Bodies(idx) => to.extend(idx.iter().copied()),
+                Callee::Bodies(idx) => {
+                    taken.resize(taken.len().max(k + 1), 0);
+                    if std::mem::replace(&mut taken[k], i + 1) != i + 1 {
+                        to.extend(idx.iter().copied());
+                    }
+                }
                 Callee::Pure => {}
                 Callee::Empty => empty.push((i, c.callee.clone(), c.line)),
                 Callee::Unknown => unknown.push((i, c.callee.clone(), c.line)),
@@ -266,7 +279,14 @@ pub fn judge<'a>(
             (old.0, old.1.len()) != before
         },
     );
-    let (effects, writes) = solved.into_iter().unzip();
+    let (effects, writes): (Vec<Effects>, Vec<std::collections::BTreeSet<String>>) =
+        solved.into_iter().unzip();
+    let stores = (callees.iter())
+        .map(|c| match c {
+            Callee::Bodies(idx) => idx.iter().any(|j| !writes[*j].is_empty()),
+            _ => false,
+        })
+        .collect();
     Judged {
         effects,
         unknown,
@@ -275,6 +295,7 @@ pub fn judge<'a>(
         frames,
         resolved,
         callees,
+        stores,
         writes,
     }
 }

@@ -37,13 +37,7 @@ const TINY_BYTES: f64 = 65536.0;
 /// Phases that are superlinear today, as `(shape, phase)`, each with its
 /// cause. The test fails when one stops being superlinear, so a fix removes
 /// its row.
-const KNOWN: &[(&str, &str, &str)] = &[
-    (
-        "many generic instances",
-        "placer: effects",
-        "n instances of one generic function: bytes 18,861,813 to 271,300,981 (14.4 times), allocations 3.5 times",
-    ),
-];
+const KNOWN: &[(&str, &str, &str)] = &[];
 
 /// The programs of one size. Each reaches every item from `main`.
 fn shapes(n: usize) -> Vec<(&'static str, String)> {
