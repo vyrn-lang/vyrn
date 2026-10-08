@@ -743,7 +743,7 @@ impl Decoders {
             // read `record_fields`.
             Type::Record(_) => {
                 let Type::Named(rec) = ty else { return None };
-                let fields = vyrn_frontend::types::record_fields(ty, &self.types)?;
+                let fields = vyrn_frontend::types::record_fields(ty, &self.types)?.into_owned();
                 let mut lit = Vec::new();
                 for f in &fields {
                     lit.push((f.name.clone(), self.decode(&f.ty)?));
@@ -958,7 +958,7 @@ pub fn encode(
                 return Err(wrong());
             };
             let decl = vyrn_frontend::types::record_fields(ty, types).ok_or_else(wrong)?;
-            for f in &decl {
+            for f in decl.iter() {
                 let v = fields
                     .iter()
                     .find(|(k, _)| *k == f.name)

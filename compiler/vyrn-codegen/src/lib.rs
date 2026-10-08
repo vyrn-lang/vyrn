@@ -542,8 +542,8 @@ pub(crate) fn plan_disagrees(from: &Type, to: &Type, rung: Rung) -> String {
 /// the checker, not this plan, keeps an `F32x4` out of an `F64x2`.
 pub fn coerce_plan(from: &Type, to: &Type, types: &HashMap<String, TypeDecl>) -> Rung {
     let (rf, rt) = (
-        vyrn_frontend::types::resolve(from, types),
-        vyrn_frontend::types::resolve(to, types),
+        vyrn_frontend::types::resolved(from, types),
+        vyrn_frontend::types::resolved(to, types),
     );
     // Integers compare by resolved spelling: `Int` and `Int64` are one type,
     // and that pair needs no rung.
@@ -561,10 +561,10 @@ pub fn coerce_plan(from: &Type, to: &Type, types: &HashMap<String, TypeDecl>) ->
     if (flt(&rf) || flt(&rt)) && (num(&rf) || num(&rt) || flt(&rf) && flt(&rt)) && rf != rt {
         return Rung::FloatCross;
     }
-    if matches!(rf, Type::Fn(..)) && matches!(rt, Type::Fn(..)) {
+    if matches!(*rf, Type::Fn(..)) && matches!(*rt, Type::Fn(..)) {
         return Rung::FnRetag;
     }
-    match (&rf, &rt) {
+    match (&*rf, &*rt) {
         (Type::ArrayN(fi, fnn), Type::ArrayN(ti, tn)) if fi != ti && fnn == tn => {
             return Rung::Elementwise
         }
@@ -610,9 +610,9 @@ pub(crate) fn shape_of(ty: &Type, types: &HashMap<String, TypeDecl>) -> Shape {
     let leaf = Shape::Leaf;
     let words = |n: usize| vec![leaf(Leaf::I64); n];
     let st = Shape::Struct;
-    match vyrn_frontend::types::resolve(ty, types) {
+    match &*vyrn_frontend::types::resolved(ty, types) {
         Type::Int => leaf(Leaf::I64),
-        Type::IntN { bits, .. } => leaf(match bits {
+        Type::IntN { bits, .. } => leaf(match *bits {
             8 => Leaf::I8,
             16 => Leaf::I16,
             32 => Leaf::I32,
@@ -651,22 +651,22 @@ pub(crate) fn shape_of(ty: &Type, types: &HashMap<String, TypeDecl>) -> Shape {
             leaf(Leaf::I64),
             leaf(Leaf::Ptr),
         ]),
-        Type::ArrayN(inner, n) => Shape::Array(n, Box::new(shape_of(&inner, types))),
+        Type::ArrayN(inner, n) => Shape::Array(*n, Box::new(shape_of(inner, types))),
         // `{ i64 len, i64 cap, ptr data, [N x T] inline }`: `cap == N` means
         // inline, `cap > N` spilled onto `data`.
         Type::SmallArray(inner, n) => st(vec![
             leaf(Leaf::I64),
             leaf(Leaf::I64),
             leaf(Leaf::Ptr),
-            Shape::Array(n, Box::new(shape_of(&inner, types))),
+            Shape::Array(*n, Box::new(shape_of(inner, types))),
         ]),
         Type::Record(fields) => st(fields.iter().map(|f| shape_of(&f.ty, types)).collect()),
         // `{ i64 tag, i64 slot0, ... }`: one slot per payload word of the widest
         // variant, so a two-word payload rides inline, not in a heap box.
-        Type::Enum(ref vs) => st(words(1 + enum_slots_of(vs, types))),
+        Type::Enum(vs) => st(words(1 + enum_slots_of(vs, types))),
         // On a generator host, `Code` is an opaque `i64` handle into the host's
         // piece arena: the one `Named` that survives `resolve` undeclared.
-        Type::Named(ref n) if n == "Code" => leaf(Leaf::I64),
+        Type::Named(n) if n == "Code" => leaf(Leaf::I64),
         // Unreachable after `resolve` (Named/App/transformers/params reduced
         // away). A bare integer type argument never stands alone: `SmallArray`
         // consumes it. `Err` is the checker's recovery sentinel, and a program
