@@ -304,7 +304,8 @@ pull request.
 - The workspace builds and tests with no LLVM, clang or sysroot. `vyrn-lsp`, `vyrn-genwasm` and `vyrn-play` sit outside it.
 - `vyrn fmt` has one style and no options, never joins or splits lines, and refuses any output whose tokens differ from the input's.
 - `vyrn fix` applies only `.copy()`. `consume` and `for x in consume xs` change a contract, so they stay the author's decision.
-- `vyrn why --memory`, LSP hover and inlay hints read one ownership table with one wording.
+- `vyrn why --cost` reads the decided core and replaces `vyrn why --memory`. The LSP hover keeps the binding rows of the ownership table, with one wording.
+- A function of another file counts its allocations at the line that calls it. The cost report is a report: it raises no warning.
 - `vyrn routes` and `vyrn why` read what generators and the source wrote; they recompute nothing.
 - `vyrn doc` writes Markdown only. `docs/api/` is committed and CI checks it with `--verify`.
 - `vyrn emit-lowered` is deterministic, promises no format and has no parser.

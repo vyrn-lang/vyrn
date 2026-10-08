@@ -453,8 +453,14 @@ Rust style).
 | `VYRN_WASM_MANIFEST=check` or `write` | compares or rewrites the wasm manifest |
 | `VYRN_BLESS=1` | re-blesses the `emit-lowered` snapshots |
 
-`vyrn run --profile` and `vyrn check --profile` print where a run or a load
-spent its time, per phase (`prof.rs`).
+`vyrn check --profile` and `VYRN_BUILD_PROFILE=1` print where a load or a run
+spent its time, per phase (`prof.rs`). `vyrn run --profile` prints the guest's
+operation count.
+
+`vyrn why --cost` prints `insight::facts` (`insight.rs`): per line, the rows of
+the decided core that allocate, copy, grow a container or keep a check. A
+callee outside the root file counts at the calling line through
+`World::allocates`, the effect judgment's `alloc`.
 
 ## Where a change goes
 

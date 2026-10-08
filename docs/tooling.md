@@ -35,10 +35,10 @@ Compiles the file and runs it. Arguments after the file reach the program's
 `args()`. The process exits with `main`'s return value; a trap prints one
 `error: ...` line on stderr and exits 1.
 
-`vyrn run --profile [file] [args...]` prints a table of where the time went to
-stderr: the compile phases and the run, with the count of operations the guest
-executed. The flag counts only before the file, so a program can take its own
-`--profile`.
+`vyrn run --profile [file] [args...]` prints the count of operations the guest
+executed to stderr. `VYRN_BUILD_PROFILE=1` adds the compile phases and the
+`lines read` row. The flag counts only before the file, so a program can take
+its own `--profile`.
 
 ### `vyrn check [file]`
 
@@ -193,9 +193,13 @@ compile, except `--contract`.
   `.vyx` page is read from its `<script>`, as `vyxPageInterface` reads it. The
   app root is the editor's: the directory of the nearest `vyrn.json`, at any
   depth, else the file's directory. Exits 1 if the file has no role.
-- `vyrn why --memory <file>`: per binding, whether it is reclaimed, how, and the
-  reason when it is not. The LSP's hover and inlay hints use the same table and
-  wording.
+- `vyrn why --cost <file>`: per function of the file, the lines that allocate,
+  copy, grow a container, enter an allocating function of another file or keep
+  a check, with the loop depth of each, and a summary. A copy the compiler
+  makes where the program wrote none reads `(implicit)`. A call into a function of
+  another file counts that function's allocations at the calling line. A
+  function with nothing to report is left out. The LSP's hover keeps the
+  per-binding memory rows.
 - `vyrn why --capability <fs|stdin|args|extern> <entry-or-artifact>`: every
   import chain that pulls that capability into an artifact's closure.
 

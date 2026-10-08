@@ -31,9 +31,9 @@ use crate::kernel::{MissingKind, Root};
 use crate::world::{Fns, Stated};
 use crate::{Instance, NodeTypes, OutsideBody, World};
 use vyrn_frontend::core::{
-    count_reads, names_in, rows, Arg, Arm, Body, BorrowKind, Callee, Cand, Ctor, Facts, Lit, Name,
-    NameInfo, NotOwned, Old, Op, Opaque, Payload, Place, Rhs, Site, St, Target, Test, Use, Val,
-    Walk,
+    count_reads, names_in, rows, Arg, Arm, Body, BorrowKind, Callee, Cand, Copied, Ctor, Facts,
+    Lit, Name, NameInfo, NotOwned, Old, Op, Opaque, Payload, Place, Rhs, Site, St, Target, Test,
+    Use, Val, Walk,
 };
 use vyrn_frontend::rule;
 use vyrn_frontend::rules::Rule;
@@ -1307,6 +1307,10 @@ struct Frame {
     /// [`NameInfo::closure_reads`] for the lambda [`Builder::rhs`] has just
     /// built, waiting for the name [`Builder::bind`] gives it.
     pending_closure: Option<Vec<Name>>,
+    /// Whether the row [`Builder::rhs`] has just built is a copy the reader
+    /// did not write ([`Builder::copy_rhs`]), waiting for the name
+    /// [`Builder::bind`] gives it.
+    pending_copy: bool,
     /// The receivers of the projections being inlined, innermost last. A
     /// projection declares `read self`, so no construct of its body is its
     /// receiver's last owner ([`Builder::takes_scrutinee`]).
@@ -1462,6 +1466,7 @@ impl<'a> Builder<'a> {
             walked: None,
             linear,
             bound_by_let: false,
+            implicit_copy: false,
             mutable: false,
             closure_reads: None,
             not_owned: None,
@@ -2023,6 +2028,9 @@ impl<'a> Builder<'a> {
         if matches!(rhs, Rhs::Prim(Op::Closure(_), ..)) {
             self.body.names[n.index()].closure_reads = self.frame.pending_closure.take();
         }
+        let implicit = std::mem::take(&mut self.frame.pending_copy);
+        self.body.names[n.index()].implicit_copy =
+            implicit && rhs.copies(&self.body.names) == Some(Copied::Value);
         let owed = match (&rhs, self.frame.owed.take()) {
             (Rhs::Make(Ctor::Record(r, _), _), Some((to, line))) if *r == to => Some((to, line)),
             _ => None,
@@ -5442,7 +5450,8 @@ impl<'a> Builder<'a> {
 
     /// The copy of `v`, the value of `e`: the type's `impl Copy` where it has
     /// one, `@copy` otherwise.
-    fn copy_rhs(&self, v: Val, e: &Expr) -> Result<Rhs, Gap> {
+    fn copy_rhs(&mut self, v: Val, e: &Expr) -> Result<Rhs, Gap> {
+        self.frame.pending_copy = true;
         let copied = (self.copied(e)).and_then(|(f, s)| Some((self.fn_id(&f)?, f, s)));
         let (callee, kind, solved) = match copied {
             Some((id, f, solved)) => (f, Callee::Fn(id), solved),
@@ -7767,7 +7776,7 @@ pub fn augment(program: &Program, w: &mut World, judging: bool) {
     // A body that did not build gives the judgment nothing, served or not.
     let late: Vec<(&str, &[Walked])> = states.iter().filter_map(JobState::answered).collect();
     let places = build_places(program, &lowered, own, &mut w.fns);
-    let (mut state, read, answers, reached) = crate::effects::judge_built(
+    let (mut state, read, answers, reached, allocating) = crate::effects::judge_built(
         program,
         &lowered,
         own,
@@ -7804,11 +7813,16 @@ pub fn augment(program: &Program, w: &mut World, judging: bool) {
                     _ => None,
                 })
                 .collect();
-            (judged.state_table(refs), read, answers, reached)
+            let allocating: HashSet<FnId> = (refs.iter().zip(&judged.effects))
+                .filter(|(_, e)| e.has(vyrn_frontend::effects::Effect::Alloc))
+                .filter_map(|(b, _)| b.id)
+                .collect();
+            (judged.state_table(refs), read, answers, reached, allocating)
         },
     );
     drop((tops, late));
     w.reached = reached;
+    w.allocating = allocating;
     for (s, r) in (states.iter_mut().filter(|s| s.built().is_some())).zip(read) {
         s.kept = r;
     }
@@ -8325,8 +8339,7 @@ fn remember(
     );
 }
 
-/// The memory report for one frame, read by `vyrn why --memory` and the
-/// editor's memory hints: one row per source `let`, in line order. Every word
+/// The memory report for one frame, read by the editor's memory hints: one row per source `let`, in line order. Every word
 /// comes off the core: the type table says how the type is released, the
 /// `let` whose the value is ([`NameInfo::not_owned`]), and the kernel what
 /// took it and where the release stands.

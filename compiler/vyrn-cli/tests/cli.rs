@@ -62,9 +62,11 @@ fn profile_writes_the_table_to_stderr_and_not_to_stdout() {
         "the profile changed the program's own output"
     );
     let table = String::from_utf8_lossy(&profiled.stderr).replace("\r\n", "\n");
-    assert!(table.contains("phase"), "no table on stderr:\n{table}");
-    assert!(table.contains("compile"), "`compile` is missing:\n{table}");
-    assert!(table.contains("run"), "`run` is missing:\n{table}");
+    assert!(
+        table.contains("operation(s) executed"),
+        "no count on stderr:
+{table}"
+    );
     assert!(
         String::from_utf8_lossy(&plain.stderr).trim().is_empty(),
         "an unprofiled run printed a table"
@@ -84,11 +86,10 @@ fn profile_writes_the_table_to_stderr_and_not_to_stdout() {
     assert_ne!(plain.stdout, passed.stdout);
 }
 
-/// The compiled route has no per-call funnel to charge a span at, so it reports the
-/// phases the host owns and the operations the guest executed. The count is
-/// wasmtime's fuel, the one column that does not move with the machine.
+/// The count is wasmtime's fuel, the one column that does not move with the machine.
+/// The build phases and `lines read` print only under `VYRN_BUILD_PROFILE`.
 #[test]
-fn the_compiled_profile_reports_phases_and_a_repeatable_count() {
+fn the_compiled_profile_reports_a_repeatable_count_and_no_phases() {
     let dir = std::env::temp_dir().join("vyrn-cli-profile-wasm");
     std::fs::create_dir_all(&dir).unwrap();
     let file = dir.join("p.vyrn");
@@ -135,6 +136,21 @@ fn the_compiled_profile_reports_phases_and_a_repeatable_count() {
 ", "
 ",
     );
+    for row in ["phase", "lines read"] {
+        assert!(
+            !table.contains(row),
+            "`{row}` is a build profile row:
+{table}"
+        );
+    }
+    let build = Command::new(env!("CARGO_BIN_EXE_vyrn"))
+        .env("VYRN_BUILD_PROFILE", "1")
+        .arg("run")
+        .arg("--profile")
+        .arg(&file)
+        .output()
+        .expect("VYRN_BUILD_PROFILE=1 vyrn run --profile");
+    let build = String::from_utf8_lossy(&build.stderr);
     for row in [
         "phase",
         "load",
@@ -144,9 +160,9 @@ fn the_compiled_profile_reports_phases_and_a_repeatable_count() {
         "run",
     ] {
         assert!(
-            table.contains(row),
-            "`{row}` is missing:
-{table}"
+            build.contains(row),
+            "`{row}` is missing under VYRN_BUILD_PROFILE:
+{build}"
         );
     }
     let count = |text: &str| -> String {

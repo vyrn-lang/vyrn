@@ -1,0 +1,16 @@
+examples/nbody.vyrn
+fn fixed9(v: Float64) -> String
+   53           allocates  render
+   55  loop 1   copies     a String render (implicit)
+       loop 1   allocates  concatenation
+   57           copies     a String render (implicit) x2
+                allocates  render, concatenation x3
+fn system() -> Array<Body>
+   74           grows      push(..)
+   75           grows      push(..)
+   84           grows      push(..)
+   93           grows      push(..)
+  102           grows      push(..)
+fn offsetMomentum(bodies: Array<Body>) -> Array<Body>
+  129           check kept array-index
+summary: allocating rows 6 (1 in loops), growing rows 5 (0 in loops), copies 3 (1 in loops), checks kept 1 (0 in loops), checks proved 50 (45 in loops)

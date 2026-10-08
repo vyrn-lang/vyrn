@@ -1,8 +1,8 @@
 //! Holds every output of the checker and the placer independent of how many
 //! threads type, build and place bodies, and of the order they take them in
 //! (`VYRN_THREADS`, `VYRN_SHUFFLE`). Each root is checked, reported by `vyrn
-//! why --memory`, printed by `vyrn emit-lowered` and built to wasm, and every
-//! byte must equal the one-thread run's: the typing refusals, the memory rows,
+//! why --cost`, printed by `vyrn emit-lowered` and built to wasm, and every
+//! byte must equal the one-thread run's: the typing refusals, the cost rows,
 //! the placed releases and the facts the emitter reads.
 
 mod common;
@@ -33,7 +33,7 @@ fn outputs(file: &str, wasm: &Path, (threads, shuffle): (&str, Option<&str>)) ->
     let mut text = String::new();
     for args in [
         vec!["check", file],
-        vec!["why", "--memory", file],
+        vec!["why", "--cost", file],
         vec!["emit-lowered", file],
         vec!["build", file, "--target", "wasm", "-o", &wasm_arg],
     ] {

@@ -117,6 +117,9 @@ pub struct NameInfo {
     /// Whether a `let` the reader wrote bound this name, which makes it a
     /// binding the memory report is about.
     pub bound_by_let: bool,
+    /// Whether this name holds a copy the core made where the reader wrote
+    /// none (`vyrn_lower::core::Builder::copy_rhs`).
+    pub implicit_copy: bool,
     /// Whether the reader may store into the name: a `let mut` or a `modify`
     /// parameter (`vyrn_lower::typed::stores`).
     pub mutable: bool,
@@ -852,7 +855,65 @@ impl St {
     }
 }
 
+/// What a row makes fresh ([`Rhs::allocates`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Made<'a> {
+    /// A primitive's owned result: a String concatenation or a closure.
+    Prim(&'a Op),
+    Make(&'a Ctor),
+    /// A call's owned result. A callee that is a user body makes its own
+    /// blocks, which that body's rows state.
+    Call(&'a str),
+}
+
+/// What a row copies ([`Rhs::copies`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Copied {
+    /// `@copy` or a type's `impl Copy`.
+    Value,
+    /// The render of a String, which copies the String (`"\{s}"`).
+    Render,
+}
+
 impl Rhs {
+    /// Returns what this row makes when it binds `bound`, an owned name, or
+    /// `None` when it makes no block: the row binds nothing owned, it moves
+    /// or reads a value, or it is an empty array literal.
+    ///
+    /// The effect judgment's `alloc` and the cost report's allocating rows
+    /// both read it.
+    pub fn allocates(&self, names: &[NameInfo], bound: Option<Name>) -> Option<Made<'_>> {
+        if !bound.is_some_and(|n| names[n.index()].releases) {
+            return None;
+        }
+        match self {
+            Rhs::Prim(op, ..) => Some(Made::Prim(op)),
+            Rhs::Make(Ctor::Array, parts) if parts.is_empty() => None,
+            Rhs::Make(ctor, _) => Some(Made::Make(ctor)),
+            Rhs::Call { callee, .. } => Some(Made::Call(callee)),
+            Rhs::Val(_) | Rhs::Read(_) | Rhs::Take(_) => None,
+        }
+    }
+
+    /// Returns what this row copies, or `None`.
+    pub fn copies(&self, names: &[NameInfo]) -> Option<Copied> {
+        let Rhs::Call { callee, args, .. } = self else {
+            return None;
+        };
+        // `types::impl_method_name` spells an impl function `Protocol$Key$method`.
+        if callee == "@copy" || (callee.starts_with("Copy$") && callee.ends_with("$copy")) {
+            return Some(Copied::Value);
+        }
+        match args.as_slice() {
+            [(Arg::Val(Val::Name(n)), _)]
+                if callee == "@str" && names[n.index()].ty == Type::Str =>
+            {
+                Some(Copied::Render)
+            }
+            _ => None,
+        }
+    }
+
     /// The record name this call checks against its type's `where` rule:
     /// `T(read c)` for a name `c` of type `T`, the call the core writes after
     /// a record literal and after a group of stores into a record's fields.
