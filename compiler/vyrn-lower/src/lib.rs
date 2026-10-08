@@ -265,7 +265,9 @@ pub fn render(program: &Program, world: &World, source: &str) -> String {
     for inst in lowered.root() {
         out.push('\n');
         match core::build(program, inst, own) {
-            Ok(body) => out.push_str(&core::checked(program, own, &body).render()),
+            Ok(body) => {
+                out.push_str(&core::checked(program, own, &body, world.summaries()).render())
+            }
             Err(g) => out.push_str(&format!(
                 "; {}: not lowered at line {}: {} {}\n",
                 inst.spelling(),

@@ -10,6 +10,10 @@
 //! entry and after every turn (Houdini): each round drops at least one
 //! candidate or stops, so the candidate count bounds the rounds.
 //!
+//! A direct call's result has the facts its callee's [`Summary`] states,
+//! over the call's arguments ([`summaries`]). Any other call's result is a
+//! fresh value.
+//!
 //! The walk knows nothing about a global, a field or an element: each read of
 //! one is a fresh value with its type's range. An exact sum is an `Int64` sum
 //! that provably stays in `-2^62..=2^62`. A row is proved only with a
@@ -21,25 +25,26 @@
 
 use std::collections::{BTreeSet, HashMap};
 
-use vyrn_frontend::ast::{BinOp, Capability, Type, TypeDecl, UnOp};
+use vyrn_frontend::ast::{BinOp, Capability, FnId, Type, TypeDecl, UnOp};
 use vyrn_frontend::prelude::{self, Length};
 use vyrn_frontend::prim::Cmp;
 
 use crate::facts::{Lin, State, Term};
+use crate::fixpoint::Lattice;
 use vyrn_frontend::core::check::{Guard, Site, Verdict};
-use vyrn_frontend::core::{Arg, Body, Callee, Ctor, Lit, Name, Op, Place, Rhs, St, Val};
+use vyrn_frontend::core::{rows, Arg, Body, Callee, Ctor, Lit, Name, Op, Place, Rhs, St, Val};
 
 /// The bound an exact `Int64` sum must provably stay within: `2^62`, so no
 /// premise or goal of the prover itself leaves `i64`.
 const EXACT: i64 = 1 << 62;
 
 /// Marks every check row of `body`, and of each lambda body it holds, that
-/// cannot fail [`Verdict::Proved`].
-pub fn decide(body: &mut Body, decls: &HashMap<String, TypeDecl>) {
+/// cannot fail [`Verdict::Proved`], with the callees' facts `sums` states.
+pub fn decide(body: &mut Body, decls: &HashMap<String, TypeDecl>, sums: &Summaries) {
     for l in &mut body.lambdas {
-        decide(l, decls);
+        decide(l, decls, sums);
     }
-    refuted(body, decls);
+    walk(body, decls, sums);
 }
 
 /// A group's rule check that fails wherever it runs: its site, the field the
@@ -48,33 +53,261 @@ pub fn decide(body: &mut Body, decls: &HashMap<String, TypeDecl>) {
 pub type Refuted = (Site, String, String);
 
 /// Decides the check rows of the one frame `body` as [`decide`] does, without
-/// its lambdas. Answers each rule check that ends a group
-/// ([`crate::typed::groups`]) where the facts prove one field of an equal
-/// pair longer than the other, on every live path. A dead state proves every
-/// goal, so it refutes none.
+/// its lambdas and without the callees' facts: a refusal must not depend on
+/// another body's summary, so `vyrn check` and the emitters refuse alike.
+/// Answers each rule check that ends a group ([`crate::typed::groups`]) where
+/// the facts prove one field of an equal pair longer than the other, on every
+/// live path. A dead state proves every goal, so it refutes none.
 pub fn refuted(body: &mut Body, decls: &HashMap<String, TypeDecl>) -> Vec<Refuted> {
+    walk(body, decls, &Summaries::default())
+}
+
+fn walk(body: &mut Body, decls: &HashMap<String, TypeDecl>, sums: &Summaries) -> Vec<Refuted> {
     if !any_check(&body.stmts) {
         return Vec::new();
     }
     let mut stmts = std::mem::take(&mut body.stmts);
-    let mut w = Walk {
-        body,
-        decls,
-        loops: Vec::new(),
-        record: true,
-        memo: HashMap::new(),
-        relevant: relevant(body, &stmts),
-        open: BTreeSet::new(),
-        refuted: Vec::new(),
-    };
-    let mut st = State::default();
-    for p in &body.params {
-        w.fresh(&mut st, *p);
-    }
+    let mut w = Walk::new(body, decls, sums, &stmts, None);
+    let st = w.entry();
     w.block(st, &mut stmts);
     let refuted = w.refuted;
     body.stmts = stmts;
     refuted
+}
+
+/// What every return of a body states about its result, over its interface:
+/// in a fact, `Name(0)` is the result and `Name(k + 1)` is parameter `k`; a
+/// [`Term::Val`] is an integer's value and a [`Term::Len`] an array's or
+/// String's length. A fact names only parameters the body never writes, so it
+/// holds of the arguments as the caller passed them. No precondition is
+/// assumed: each fact holds whatever the arguments.
+///
+/// Ordered by reverse inclusion: [`Lattice::join`] keeps the facts both
+/// values hold.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Summary {
+    /// Per parameter, its kind; a call whose arguments differ states nothing.
+    params: Vec<Kind>,
+    facts: BTreeSet<Lin>,
+}
+
+impl Lattice for Summary {
+    fn join(&mut self, other: &Summary) -> bool {
+        let before = self.facts.len();
+        self.facts.retain(|f| other.facts.contains(f));
+        self.facts.len() != before
+    }
+}
+
+/// Each summarized body's [`Summary`], keyed by its row in the World's
+/// function table, never by a name.
+#[derive(Debug, Default)]
+pub struct Summaries {
+    at: HashMap<FnId, usize>,
+    values: Vec<Summary>,
+}
+
+/// [`Summaries`] borrowed: the solver's values while one body is walked.
+#[derive(Clone, Copy)]
+struct View<'a> {
+    at: &'a HashMap<FnId, usize>,
+    values: &'a [Summary],
+}
+
+impl View<'_> {
+    fn get(&self, f: FnId) -> Option<&Summary> {
+        self.values.get(*self.at.get(&f)?)
+    }
+}
+
+impl<'a> From<&'a Summaries> for View<'a> {
+    fn from(s: &'a Summaries) -> View<'a> {
+        View {
+            at: &s.at,
+            values: &s.values,
+        }
+    }
+}
+
+/// The facts every return of each body in `bodies` states: the greatest
+/// fixpoint ([`crate::fixpoint::descend`]) from every candidate of
+/// [`templates`], in which each body's returns prove its facts under its
+/// callees' facts. A body is summarized only where a direct call's result
+/// can reach a check ([`needed`]); any other body keeps no facts.
+///
+/// The result does not depend on the order of `bodies`. Soundness rests on
+/// one postulate: a [`Callee::Fn`] row runs the body `bodies` holds under its
+/// row, and `bodies` holds no body for a row two bodies share or for a generic
+/// function, whose instances run other bodies.
+pub fn summaries<'a>(
+    bodies: impl Iterator<Item = (FnId, &'a Body)>,
+    decls: &HashMap<String, TypeDecl>,
+) -> Summaries {
+    let mut bodies: Vec<(FnId, &Body)> = bodies.collect();
+    bodies.sort_by_key(|(f, _)| f.index());
+    let calls = |b: &'a Body| {
+        rows(&b.stmts).filter_map(|(s, _)| match s {
+            St::Let(_, rhs) => direct_call(rhs),
+            _ => None,
+        })
+    };
+    let called = needed(&bodies);
+    let mut at = HashMap::new();
+    let mut values = Vec::new();
+    let mut walked = Vec::new();
+    for (f, b) in bodies {
+        if let Some(s) = called
+            .contains(&f.index())
+            .then(|| templates(b, decls))
+            .flatten()
+        {
+            at.insert(f, values.len());
+            values.push(s);
+            walked.push(b);
+        }
+    }
+    let mut deps = vec![Vec::new(); walked.len()];
+    for (i, b) in walked.iter().enumerate() {
+        for g in calls(b) {
+            if let Some(&j) = at.get(&g) {
+                if !deps[j].contains(&i) {
+                    deps[j].push(i);
+                }
+            }
+        }
+    }
+    let values = crate::fixpoint::descend(values, &deps, |i, values| {
+        let view = View { at: &at, values };
+        let kept = Summary {
+            params: values[i].params.clone(),
+            facts: returns(walked[i], decls, view, &values[i]),
+        };
+        if values[i].join(&kept) {
+            vec![i]
+        } else {
+            Vec::new()
+        }
+    });
+    Summaries { at, values }
+}
+
+/// The bodies whose result a check can depend on: a direct call's result
+/// relevant to a check of its caller ([`relevant`], every direct call
+/// linked), or to the returns of a body this set holds. Each body is scanned
+/// at most twice, once for its checks and once for its returns.
+fn needed(bodies: &[(FnId, &Body)]) -> BTreeSet<usize> {
+    let by_id: HashMap<usize, &Body> = bodies.iter().map(|(f, b)| (f.index(), *b)).collect();
+    let mut out = BTreeSet::new();
+    let mut queue: Vec<(&Body, bool)> = bodies.iter().map(|(_, b)| (*b, false)).collect();
+    while let Some((b, returns)) = queue.pop() {
+        let rel = relevant(b, &b.stmts, returns, &|_| true);
+        for (s, _) in rows(&b.stmts) {
+            let St::Let(n, rhs) = s else { continue };
+            let Some(g) = direct_call(rhs).filter(|_| rel[n.index()]) else {
+                continue;
+            };
+            if out.insert(g.index()) {
+                queue.extend(by_id.get(&g.index()).map(|g| (*g, true)));
+            }
+        }
+    }
+    out
+}
+
+/// The callee of a direct call whose result a summary may state: no type
+/// arguments, so the row names the body that runs, and no `fn`-typed
+/// argument, so the arguments are the parameters in order.
+fn direct_call(rhs: &Rhs) -> Option<FnId> {
+    match rhs {
+        Rhs::Call {
+            kind: Callee::Fn(g),
+            solved,
+            targets,
+            ..
+        } if solved.is_empty() && targets.is_empty() => Some(*g),
+        _ => None,
+    }
+}
+
+/// Every candidate fact of `body`'s summary, or `None` when it has none. The
+/// result's kind is the returned values'; the parameters are those the body
+/// never writes. An `UInt64` is left out: the facts read its values above
+/// `i64::MAX` as negatives.
+fn templates(body: &Body, decls: &HashMap<String, TypeDecl>) -> Option<Summary> {
+    let mut written = BTreeSet::new();
+    writes(&body.stmts, &mut written);
+    let params: Vec<Kind> = (body.params.iter())
+        .map(|p| kind_of(&body.names[p.index()].ty, decls))
+        .collect();
+    let usable = |k: usize| !written.contains(&body.params[k]);
+    let val = |k: usize| Lin::of(Term::Val(Name(k as u32 + 1)));
+    let len = |k: usize| Lin::of(Term::Len(Name(k as u32 + 1)));
+    let ints: Vec<Lin> = (0..params.len())
+        .filter(|&k| usable(k) && params[k].is_int())
+        .map(val)
+        .collect();
+    let seqs: Vec<Lin> = (0..params.len())
+        .filter(|&k| usable(k) && params[k] == Kind::Seq)
+        .map(len)
+        .collect();
+    let result = rows(&body.stmts).find_map(|(s, _)| match s {
+        St::Return {
+            value: Some(Val::Name(n)),
+            ..
+        } => Some(kind_of(&body.names[n.index()].ty, decls)),
+        St::Return {
+            value: Some(Val::Lit(Lit::Int(_) | Lit::Byte(_))),
+            ..
+        } => Some(Kind::Int(64, true)),
+        St::Return {
+            value: Some(Val::Lit(Lit::Str(_))),
+            ..
+        } => Some(Kind::Seq),
+        _ => None,
+    })?;
+    let mut facts = BTreeSet::new();
+    if result.is_int() {
+        let r = Lin::of(Term::Val(Name(0)));
+        facts.extend(
+            [Some(r.clone()), r.plus(-1), r.plus(1)]
+                .into_iter()
+                .flatten(),
+        );
+        for a in &seqs {
+            facts.extend(a.sub(&r));
+            facts.extend(a.sub(&r).and_then(|l| l.plus(-1)));
+            for p in &ints {
+                facts.extend(a.sub(p).and_then(|l| l.sub(&r)));
+            }
+        }
+        for p in &ints {
+            facts.extend(r.sub(p));
+            facts.extend(p.sub(&r));
+        }
+    } else if result == Kind::Seq {
+        let r = Lin::of(Term::Len(Name(0)));
+        facts.extend(seqs.iter().filter_map(|a| r.sub(a)));
+    }
+    (!facts.is_empty()).then_some(Summary { params, facts })
+}
+
+/// The facts of `cands` every live return of `body` proves, walking it with
+/// the callees' facts `sums` states. A path that ends without a value proves
+/// none.
+fn returns(
+    body: &Body,
+    decls: &HashMap<String, TypeDecl>,
+    sums: View<'_>,
+    cands: &Summary,
+) -> BTreeSet<Lin> {
+    let mut stmts = body.stmts.clone();
+    let mut w = Walk::new(body, decls, sums, &stmts, Some(cands.facts.clone()));
+    let st = w.entry();
+    let end = w.block(st, &mut stmts);
+    match w.post {
+        Some(kept) if end.dead => kept,
+        _ => BTreeSet::new(),
+    }
 }
 
 fn any_check(ss: &[St]) -> bool {
@@ -90,6 +323,10 @@ fn any_check(ss: &[St]) -> bool {
 struct Walk<'a> {
     body: &'a Body,
     decls: &'a HashMap<String, TypeDecl>,
+    sums: View<'a>,
+    /// While summarizing the body: the facts of its [`Summary`] every return
+    /// met so far proves.
+    post: Option<BTreeSet<Lin>>,
     /// Per enclosing loop, innermost last: the states at its `break`s and at
     /// its `continue`s.
     loops: Vec<(Vec<State>, Vec<State>)>,
@@ -118,6 +355,7 @@ enum Out {
     Nothing,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Kind {
     /// An integer of this many bits, signed or not.
     Int(u8, bool),
@@ -126,15 +364,57 @@ enum Kind {
     Other,
 }
 
-impl Walk<'_> {
-    fn kind(&self, n: Name) -> Kind {
-        match &*vyrn_frontend::types::resolved(&self.body.names[n.index()].ty, self.decls) {
-            t if t.is_seq() || *t == Type::Str => Kind::Seq,
-            t => match vyrn_frontend::validate::width(t) {
-                Some((bits, signed)) => Kind::Int(bits, signed),
-                None => Kind::Other,
-            },
+impl Kind {
+    /// An integer whose every value is a linear term: not an `UInt64`.
+    fn is_int(self) -> bool {
+        matches!(self, Kind::Int(bits, signed) if bits < 64 || signed)
+    }
+}
+
+fn kind_of(ty: &Type, decls: &HashMap<String, TypeDecl>) -> Kind {
+    match &*vyrn_frontend::types::resolved(ty, decls) {
+        t if t.is_seq() || *t == Type::Str => Kind::Seq,
+        t => match vyrn_frontend::validate::width(t) {
+            Some((bits, signed)) => Kind::Int(bits, signed),
+            None => Kind::Other,
+        },
+    }
+}
+
+impl<'a> Walk<'a> {
+    fn new(
+        body: &'a Body,
+        decls: &'a HashMap<String, TypeDecl>,
+        sums: impl Into<View<'a>>,
+        stmts: &[St],
+        post: Option<BTreeSet<Lin>>,
+    ) -> Walk<'a> {
+        let sums = sums.into();
+        Walk {
+            body,
+            decls,
+            sums,
+            relevant: relevant(body, stmts, post.is_some(), &|g| sums.get(g).is_some()),
+            post,
+            loops: Vec::new(),
+            record: true,
+            memo: HashMap::new(),
+            open: BTreeSet::new(),
+            refuted: Vec::new(),
         }
+    }
+
+    /// The state at the body's entry: each parameter a fresh value.
+    fn entry(&self) -> State {
+        let mut st = State::default();
+        for p in &self.body.params {
+            self.fresh(&mut st, *p);
+        }
+        st
+    }
+
+    fn kind(&self, n: Name) -> Kind {
+        kind_of(&self.body.names[n.index()].ty, self.decls)
     }
 
     /// The length of `p`: an array or String name, or such a field of a record
@@ -283,6 +563,10 @@ impl Walk<'_> {
 
     fn block(&mut self, mut st: State, ss: &mut [St]) -> State {
         for s in ss {
+            // A summary every return so far refuted gains nothing from the rest.
+            if self.post.as_ref().is_some_and(BTreeSet::is_empty) {
+                return State::dead();
+            }
             if st.dead {
                 // A check in code the walk takes for dead is proved: a dead
                 // state proves every goal.
@@ -413,7 +697,13 @@ impl Walk<'_> {
                 }
                 State::dead()
             }
-            St::Return { .. } | St::Trap => State::dead(),
+            St::Return { value, .. } => {
+                if self.record {
+                    self.returned(&st, value.as_ref());
+                }
+                State::dead()
+            }
+            St::Trap => State::dead(),
             St::Check(c) => {
                 let goals = self.goals(&c.guard);
                 if self.record {
@@ -556,6 +846,91 @@ impl Walk<'_> {
         }
         self.range(st, n);
         self.effects(st, rhs);
+        self.called(st, n, rhs);
+    }
+
+    /// Assumes what the callee's summary states of `n = rhs`, a direct call,
+    /// read after the call's effects. A fact naming an argument the call may
+    /// write is left out, and so is one with a term no argument gives.
+    fn called(&self, st: &mut State, n: Name, rhs: &Rhs) {
+        let Some(s) = direct_call(rhs).and_then(|g| self.sums.get(g)) else {
+            return;
+        };
+        let Rhs::Call { args, .. } = rhs else { return };
+        if args.len() != s.params.len() {
+            return;
+        }
+        // A scalar argument is a copy, whatever its capability.
+        let copied = |k: usize| args[k].1 == Capability::Read || s.params[k].is_int();
+        let written: Vec<Name> = (0..args.len())
+            .filter(|&k| !copied(k))
+            .filter_map(|k| root(&args[k].0))
+            .collect();
+        let at = |t: Term| -> Option<Lin> {
+            let Some(k) = t.name().index().checked_sub(1) else {
+                return match t {
+                    Term::Val(_) if self.kind(n).is_int() => Some(Lin::of(Term::Val(n))),
+                    Term::Len(_) if self.kind(n) == Kind::Seq => Some(Lin::of(Term::Len(n))),
+                    _ => None,
+                };
+            };
+            let a = &args.get(k).filter(|_| copied(k))?.0;
+            match (t, a) {
+                (Term::Val(_), Arg::Val(Val::Lit(_))) => self.arg_lin(a),
+                (Term::Val(_), _) if self.arg_kind(a)? == s.params[k] => self.arg_lin(a),
+                (Term::Len(_), Arg::Val(Val::Lit(Lit::Str(x)))) => Some(Lin::k(x.len() as i64)),
+                (Term::Len(_), Arg::Val(Val::Name(m))) => {
+                    Some(Lin::of(self.length(&Place::Name(*m))?))
+                }
+                (Term::Len(_), Arg::Place(p)) => Some(Lin::of(self.length(p)?)),
+                _ => None,
+            }
+        };
+        for f in &s.facts {
+            let free = |l: &Lin| !l.terms.iter().any(|(t, _)| written.contains(&t.name()));
+            if let Some(l) = f.map(at).filter(free) {
+                st.assume(&l);
+            }
+        }
+    }
+
+    /// The linear value of a call argument that is an integer.
+    fn arg_lin(&self, a: &Arg) -> Option<Lin> {
+        match a {
+            Arg::Val(v) => self.lin(v),
+            Arg::Place(Place::Name(m)) => self.lin(&Val::Name(*m)),
+            Arg::Place(_) => None,
+        }
+    }
+
+    fn arg_kind(&self, a: &Arg) -> Option<Kind> {
+        match a {
+            Arg::Val(Val::Name(m)) | Arg::Place(Place::Name(m)) => Some(self.kind(*m)),
+            _ => None,
+        }
+    }
+
+    /// Keeps the summary candidates the state proves of the returned `value`.
+    fn returned(&mut self, st: &State, value: Option<&Val>) {
+        let Some(cands) = self.post.take() else {
+            return;
+        };
+        let params = &self.body.params;
+        let at = |t: Term| -> Option<Lin> {
+            match (t.name().index().checked_sub(1), t, value?) {
+                (None, Term::Val(_), v) => self.lin(v),
+                (None, Term::Len(_), Val::Lit(Lit::Str(x))) => Some(Lin::k(x.len() as i64)),
+                (None, Term::Len(_), Val::Name(m)) => Some(Lin::of(self.length(&Place::Name(*m))?)),
+                (Some(k), Term::Val(_), _) => Some(Lin::of(Term::Val(*params.get(k)?))),
+                (Some(k), Term::Len(_), _) => Some(Lin::of(Term::Len(*params.get(k)?))),
+                _ => None,
+            }
+        };
+        let holds = |g: &Lin| st.ge0(g).is_some_and(|cert| cert.verify(st, g));
+        let kept = (cands.into_iter())
+            .filter(|c| c.map(at).is_some_and(|g| holds(&g)))
+            .collect();
+        self.post = Some(kept);
     }
 
     /// Defines `n`, just killed, as the value `v`.
@@ -1143,21 +1518,36 @@ fn writes(ss: &[St], out: &mut BTreeSet<Name>) {
     }
 }
 
-/// Per name of `body`, whether a check's goal can depend on it: a name a
-/// check compares, and every name a definition or a comparison links to a
-/// relevant one, either way.
-fn relevant(body: &Body, ss: &[St]) -> Vec<bool> {
+/// Per name of `body`, whether a goal can depend on it: a name a check
+/// compares, or, when `returns`, a parameter or a returned name (a summary's
+/// goals), and every name a definition, a comparison, a check or a direct
+/// call to a `linked` callee links to a relevant one, either way.
+fn relevant(body: &Body, ss: &[St], returns: bool, linked: &dyn Fn(FnId) -> bool) -> Vec<bool> {
     let mut rel = vec![false; body.names.len()];
+    if returns {
+        for p in &body.params {
+            rel[p.index()] = true;
+        }
+        for (s, _) in rows(ss) {
+            if let St::Return {
+                value: Some(Val::Name(n)),
+                ..
+            } = s
+            {
+                rel[n.index()] = true;
+            }
+        }
+    }
     loop {
         let before = rel.iter().filter(|r| **r).count();
-        mark(body, ss, &mut rel);
+        mark(body, ss, &mut rel, !returns, linked);
         if rel.iter().filter(|r| **r).count() == before {
             return rel;
         }
     }
 }
 
-fn mark(body: &Body, ss: &[St], rel: &mut [bool]) {
+fn mark(body: &Body, ss: &[St], rel: &mut [bool], checks: bool, linked: &dyn Fn(FnId) -> bool) {
     let val = |v: &Val| match v {
         Val::Name(n) => Some(*n),
         Val::Lit(_) => None,
@@ -1172,8 +1562,12 @@ fn mark(body: &Body, ss: &[St], rel: &mut [bool]) {
                     Guard::Range(..) => (None, vec![]),
                     Guard::Rule(r) => (Some(*r), vec![]),
                 };
-                for n in p.into_iter().chain(vs.into_iter().filter_map(val)) {
-                    rel[n.index()] = true;
+                let names: Vec<Name> = p
+                    .into_iter()
+                    .chain(vs.into_iter().filter_map(val))
+                    .collect();
+                if checks || names.iter().any(|n| rel[n.index()]) {
+                    names.iter().for_each(|n| rel[n.index()] = true);
                 }
             }
             St::Let(n, rhs) => {
@@ -1198,6 +1592,9 @@ fn mark(body: &Body, ss: &[St], rel: &mut [bool]) {
                     } if prelude::builtin(callee).is_some_and(|b| b.length != Length::Unknown) => {
                         args.iter().filter_map(|(a, _)| root(a)).collect()
                     }
+                    Rhs::Call { args, .. } if direct_call(rhs).is_some_and(linked) => {
+                        args.iter().filter_map(|(a, _)| root(a)).collect()
+                    }
                     _ => vec![],
                 };
                 if rel[n.index()] || from.iter().any(|m| rel[m.index()]) {
@@ -1214,11 +1611,15 @@ fn mark(body: &Body, ss: &[St], rel: &mut [bool]) {
                 }
             }
             St::If { then, els, .. } => {
-                mark(body, then, rel);
-                mark(body, els, rel);
+                mark(body, then, rel, checks, linked);
+                mark(body, els, rel, checks, linked);
             }
-            St::Loop { body: l, .. } | St::Block { body: l, .. } => mark(body, l, rel),
-            St::Switch { arms, .. } => arms.iter().for_each(|a| mark(body, &a.body, rel)),
+            St::Loop { body: l, .. } | St::Block { body: l, .. } => {
+                mark(body, l, rel, checks, linked)
+            }
+            St::Switch { arms, .. } => {
+                (arms.iter()).for_each(|a| mark(body, &a.body, rel, checks, linked))
+            }
             _ => {}
         }
     }

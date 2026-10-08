@@ -134,6 +134,16 @@ impl Lin {
         self.add(&Lin::k(c))
     }
 
+    /// `self` with each term `t` replaced by `by(t)`; `None` when a term has
+    /// no replacement or the sum overflows.
+    pub fn map(&self, by: impl Fn(Term) -> Option<Lin>) -> Option<Lin> {
+        let mut out = Lin::k(self.c);
+        for (t, k) in &self.terms {
+            out = out.add(&by(*t)?.scale(*k)?)?;
+        }
+        Some(out)
+    }
+
     /// `self` with `t` replaced by `by`.
     fn subst(&self, t: Term, by: &Lin) -> Option<Lin> {
         let k = self.coef(t);
@@ -690,5 +700,51 @@ mod tests {
         let j = State::join(&[a, b]);
         assert!(j.ge0(&v(0).plus(-1).unwrap()).is_some());
         assert!(j.ge0(&v(0).plus(-2).unwrap()).is_none());
+    }
+
+    /// A callee's facts join the caller's state as premises, so the order in
+    /// which summaries settle must not decide a proof: a fact added to a
+    /// state never loses a goal it proved.
+    #[test]
+    fn more_facts_never_lose_a_proof() {
+        let len = |n: u32| Lin::of(Term::Len(Name(n)));
+        let facts = [
+            v(0),
+            v(1).plus(-1).unwrap(),
+            len(2).sub(&v(0)).unwrap().plus(-1).unwrap(),
+            v(0).sub(&v(1)).unwrap(),
+            len(2).sub(&v(1)).unwrap(),
+            Lin::k(5).sub(&v(1)).unwrap(),
+        ];
+        let goals = [
+            v(0),
+            v(1),
+            len(2).sub(&v(0)).unwrap(),
+            len(2).sub(&v(1)).unwrap().plus(-1).unwrap(),
+            Lin::k(LEN_MAX).sub(&v(0)).unwrap(),
+            Lin::k(4).sub(&v(1)).unwrap(),
+            v(0).sub(&v(1)).unwrap().plus(1).unwrap(),
+        ];
+        // Every subset of the facts, against every superset of it.
+        for small in 0u32..1 << facts.len() {
+            let mut st = State::default();
+            (0..facts.len())
+                .filter(|i| small & 1 << i != 0)
+                .for_each(|i| st.assume(&facts[i]));
+            for big in (0u32..1 << facts.len()).filter(|b| b & small == small) {
+                let mut more = st.clone();
+                (0..facts.len())
+                    .filter(|i| big & 1 << i != 0)
+                    .for_each(|i| more.assume(&facts[i]));
+                for g in &goals {
+                    if st.ge0(g).is_some() {
+                        let cert = more
+                            .ge0(g)
+                            .expect("a superset of the facts proves the goal");
+                        assert!(cert.verify(&more, g));
+                    }
+                }
+            }
+        }
     }
 }
