@@ -68,6 +68,7 @@ pub fn in_parallel<T: Sync, S, R: Send>(
         w if w < SERIAL_BELOW => 1,
         _ => threads().min(items.len()),
     };
+    let tag = crate::prof::tag();
     let mut done = if n <= 1 {
         worker()
     } else {
@@ -79,14 +80,19 @@ pub fn in_parallel<T: Sync, S, R: Send>(
                 .map(|_| {
                     std::thread::Builder::new()
                         .stack_size(crate::trap::DEEP_STACK_BYTES)
-                        .spawn_scoped(s, || (worker(), crate::prof::take_phases()))
+                        .spawn_scoped(s, || {
+                            crate::prof::set_tag(tag);
+                            let done = worker();
+                            (done, crate::prof::take_phases(), crate::prof::snapshot())
+                        })
                         .expect("spawn a worker")
                 })
                 .collect();
             let mut done = Vec::with_capacity(items.len());
             for w in workers {
-                let (d, phases) = w.join().unwrap_or_else(|e| std::panic::resume_unwind(e));
+                let (d, phases, counts) = w.join().unwrap_or_else(|e| std::panic::resume_unwind(e));
                 crate::prof::absorb(phases);
+                crate::prof::absorb_counts(&counts);
                 done.extend(d);
             }
             done

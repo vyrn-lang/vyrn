@@ -266,6 +266,7 @@ fn compile_inner(
     program: &Program,
     world: std::sync::Arc<vyrn_lower::World>,
 ) -> Result<Vec<u8>, String> {
+    let _cg = vyrn_frontend::prof::phase("codegen");
     let mut m = Module::new();
     // Imports first — they share the function index space with definitions, so
     // `wasm::Module` panics if one arrives late.
@@ -387,6 +388,7 @@ fn compile_inner(
 
     // The first `body_of` of a function decides its checks, about a fifth of this compile. The
     // answer is memoized and the same on any thread, so the signatures below find it ready.
+    let ck = vyrn_frontend::prof::phase("codegen: checks");
     vyrn_frontend::par::in_parallel(
         &user,
         |f| f.body.stmts.len(),
@@ -395,6 +397,8 @@ fn compile_inner(
             cx.world.body_of(&f.name);
         },
     );
+    drop(ck);
+    let sg = vyrn_frontend::prof::phase("codegen: signatures");
     // Every function is indexed before any body exists, so a call can name a callee not yet
     // emitted (recursion, forward references). The encoder hands out the index and the body is
     // filled whenever it exists, so emission order does not decide numbering.
@@ -408,6 +412,7 @@ fn compile_inner(
         cx.sigs.insert(f.name.clone(), Sig { index, ..s });
     }
     vyrn_rt.check()?;
+    drop(sg);
 
     // Module state: each top-level `let` gets one fixed zeroed address, and every
     // access resolves to it through `Fn_::lookup`'s fallback. Reserved before any body, which may
@@ -472,11 +477,14 @@ fn compile_inner(
     cx.fnval_copy = m.reserve_func(&[ValType::I64, ValType::I32], &[ValType::I32]);
     cx.fnval_free = m.reserve_func(&[ValType::I64, ValType::I32], &[]);
 
+    let bd = vyrn_frontend::prof::phase("codegen: bodies");
     for f in &user {
         let sig = cx.sigs[&f.name].clone();
         crate::observe::note_inst(&f.name, &[]);
         lower_fn(&mut m, f, &sig, &cx, HashMap::new())?;
     }
+    drop(bd);
+    let dr = vyrn_frontend::prof::phase("codegen: drain");
 
     // The initializers, in declaration order, which the loader has made dependencies-first. One
     // function, called once from `_start`. Filled even with no module state, because a
@@ -574,6 +582,8 @@ fn compile_inner(
         let fnfree = lower_fnval_free(&mut m, &cx)?;
         m.fill(cx.fnval_free, fnfree)?;
     }
+    drop(dr);
+    let _fin = vyrn_frontend::prof::phase("codegen: finish");
     if let Some(e) = deferred {
         return Err(e);
     }
