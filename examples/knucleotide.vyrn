@@ -14,8 +14,9 @@
 // `examples/knucleotide.stdin` is that same fasta at N = 1000, so the parity
 // corpus feeds it automatically.
 //
-// Packing bounds the width at 31 (4^k must fit an Int64); the game's largest is
-// 18. `sortWith` (a comparator) orders by count descending with ties by
+// Packing bounds the width at 30: `key * 4 + base` must fit an Int64, so
+// 4^(k+1) is at most 2^63. The game's largest is 18. `sortWith` (a comparator)
+// orders by count descending with ties by
 // fragment in one stable pass — and a tie compares the PACKED keys, because
 // A=0 < C=1 < G=2 < T=3 matches the bytes' own order ('A' < 'C' < 'G' < 'T'),
 // so numeric order on equal-width keys IS lexicographic order on fragments.
@@ -27,6 +28,10 @@ import { sortWith } from "std/arrays"
 /// The bench N — bases in the synthetic sequence the bench block builds. The
 /// census N comes from stdin instead, so there is no `order` beside it.
 let benchOrder = 200000
+
+/// The widest fragment the rolling key packs. 4^31 fits an Int64, but the step
+/// `key * 4 + base` then wraps, and 4^32 wraps to a modulus of 0.
+let maxWidth = 30
 
 /// The five fragments the game asks for by name, after the two frequency
 /// tables.
@@ -75,6 +80,9 @@ fn thirdSequence() -> Array<UInt8> {
 /// Every window of width `k`, counted. A window costs one multiply, one add,
 /// one modulo and one `tally` probe — nothing is allocated, hit or miss.
 fn countKmers(seq: Array<UInt8>, k: Int64) -> Map<Int64, Int64> {
+    if k > maxWidth {
+        panic("k-mer width above maxWidth")
+    }
     let mut m: Map<Int64, Int64> = [:]
     if seq.length < k {
         return m

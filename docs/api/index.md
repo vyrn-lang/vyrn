@@ -34,6 +34,7 @@
 - [std/stream](std/stream.md) — std/stream: the `Stream<T>` combinators, in Vyrn.
 - [std/strings](std/strings.md)
 - [std/strpred](std/strpred.md) — std/strpred: the string predicates and `slice`, written on the byte view
+- [std/sum](std/sum.md) — std/sum: the exact sum of an `Array<Float64>`, written in Vyrn.
 - [std/symbolmap](std/symbolmap.md) — std/symbolmap: the symbol map of a generated module. For each
 - [std/text](std/text.md) — std/text: UTF-8 decoding and byte-offset line and column, in Vyrn.
 - [std/time](std/time.md) — std/time: wall-clock time at the host boundary.

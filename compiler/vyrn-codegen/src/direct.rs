@@ -9717,7 +9717,10 @@ impl<'a, 'p> Fn_<'a, 'p> {
                 St::Let(n, rhs) => {
                     let info = &body.names[n.index()];
                     let line = info.line;
-                    self.core_rhs(m, b, rhs, &info.ty, line)?;
+                    match self.core_unmasked(ss, i, *n, rhs) {
+                        Some(e) => self.core_val(m, b, e, &info.ty, line)?,
+                        None => self.core_rhs(m, b, rhs, &info.ty, line)?,
+                    }
                     if self.core_unit(&info.ty) {
                         continue;
                     }
@@ -10165,6 +10168,38 @@ impl<'a, 'p> Fn_<'a, 'p> {
             }
             _ => unsupported("a core right-hand side this walk does not read", line),
         }
+    }
+
+    /// The operand `e` of `n = e & (bits - 1)` where `n` is read once, as the amount of a shift
+    /// whose range check a pass proved. wasm's `shl` and `shr` mask their amount by the carrier's
+    /// width, so the shift reads `e` as it reads `n`. Under the check oracle the proved check
+    /// still runs on `n`, so the mask stays.
+    fn core_unmasked<'r>(&self, ss: &[St], i: usize, n: Name, rhs: &'r Rhs) -> Option<&'r Val> {
+        let Rhs::Prim(Op::Bin(BinOp::BitAnd), vs, _) = rhs else {
+            return None;
+        };
+        let [e, Val::Lit(Lit::Int(c))] = vs.as_slice() else {
+            return None;
+        };
+        let proved = |s: &St| match s {
+            St::Check(k) => match k.guard {
+                Guard::Shift(Val::Name(d), bits) => {
+                    d == n
+                        && k.verdict == Verdict::Proved
+                        && matches!(bits, 32 | 64)
+                        && *c == i64::from(bits) - 1
+                }
+                _ => false,
+            },
+            _ => false,
+        };
+        (self.cx.oracle.is_none()
+            && self.core_w.reads[n.index()] == 1
+            && ss[i + 1..]
+                .iter()
+                .flat_map(St::rows)
+                .any(|(s, _)| proved(s)))
+        .then_some(e)
     }
 
     /// The type a right-hand side produces, without emitting it. A `St::Do` needs it; a

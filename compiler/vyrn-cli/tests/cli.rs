@@ -209,7 +209,7 @@ fn the_profile_counts_blocks_per_line() {
         "{table}"
     );
     for row in [
-        "  88  countKmers  ",
+        "  96  countKmers  ",
         "grows tally(..)",
         "enters toUpper(..) in std/strings",
     ] {

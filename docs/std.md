@@ -77,6 +77,7 @@ The compiler injects these declarations into every program, so a file names them
 | `std/num` | `parseInt64`, `parseUInt64`, `parseFloat64`, `parseFloat32` (each an `Option`), and `f64Str`. Parsing is correctly rounded, with no `strtod` underneath. |
 | `std/time` | `now() -> Instant` (UTC milliseconds), `monotonic()`, the calendar breakdown (`civil`, `year` to `second`) and `format`, `formatIso`. UTC only. `now` and `monotonic` are host effects, so a generator cannot call them. |
 | `std/random` | `Rng`, `seededRng`, `nextInt`, `nextInRange`: SplitMix64 as a value, so a seeded run reproduces everywhere. `randomSeed()` is the one host effect. Not for secrets. |
+| `std/sum` | `sum(xs)` adds an `Array<Float64>` exactly: the true sum rounded once to nearest-even, the same bits in any order. A separate module, so `std/math` importers do not compile it. |
 | `std/hash` | `fnv1a`, `fnv1aStr` (non-cryptographic), `sha1`, `sha1Hex`, and the `Hashable` protocol a `Map` key type implements. |
 
 ### Collections and protocols
