@@ -12,6 +12,7 @@
 //! the instance counts as unlowered.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use vyrn_frontend::ast::{
     ArmBody, At, BinOp, Binder, Block, Capability, Expr, FnId, Function, Id, LambdaBody, MatchArm,
@@ -7835,11 +7836,16 @@ pub fn augment(program: &Program, w: &mut World, judging: bool) {
             let served_files = (states.iter().filter(|s| s.answered().is_some()))
                 .zip(served_at)
                 .filter(|(_, at)| allocs(**at))
-                .filter_map(|(s, _)| Some((s.job.id(), s.job.module().clone()?)));
-            let allocating: HashMap<FnId, String> = (refs.iter().enumerate())
+                .filter_map(|(s, _)| Some((s.job.id(), s.job.module().as_deref()?)));
+            let mut files: HashMap<&str, Arc<str>> = HashMap::new();
+            let allocating: HashMap<FnId, Arc<str>> = (refs.iter().enumerate())
                 .filter(|(at, _)| allocs(*at))
-                .filter_map(|(_, b)| Some((b.id?, b.file.clone()?)))
+                .filter_map(|(_, b)| Some((b.id?, b.file.as_deref()?)))
                 .chain(served_files)
+                .map(|(id, file)| {
+                    let shared = files.entry(file).or_insert_with(|| Arc::from(file));
+                    (id, Arc::clone(shared))
+                })
                 .collect();
             (judged.state_table(refs), read, answers, reached, allocating)
         },

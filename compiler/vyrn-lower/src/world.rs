@@ -54,7 +54,7 @@ pub struct World {
     /// The functions declared outside the root file whose effect set holds `alloc`, as the
     /// placer judged them, a body the judgment memo served included, with their file: what
     /// [`World::allocating_file`] answers.
-    pub(crate) allocating: HashMap<FnId, String>,
+    pub(crate) allocating: HashMap<FnId, Arc<str>>,
     /// Whether a placed release named an instance the first lowering lacked.
     /// `reached` holds no such instance, so [`crate::effects::reaches`] judges
     /// the program as placed instead.
@@ -358,7 +358,7 @@ impl World {
     /// The file `f` is declared in, when that is not the root file and a call to `f` may
     /// allocate: its effect set holds `alloc`.
     pub fn allocating_file(&self, f: FnId) -> Option<&str> {
-        self.allocating.get(&f).map(String::as_str)
+        self.allocating.get(&f).map(|f| &**f)
     }
 
     /// The functions `f`'s bodies call, in source order.
