@@ -2010,7 +2010,7 @@ impl<'a> Builder<'a> {
         out: &mut Vec<St>,
     ) -> Result<Rhs, Gap> {
         let ty = Type::Named(to.to_string());
-        self.call(to, std::slice::from_ref(value), line, Some(ty), out)
+        self.call(to, std::slice::from_ref(value), line, Some(ty), None, out)
     }
 
     fn temp(&mut self, ty: Type, line: usize) -> Name {
@@ -5054,7 +5054,7 @@ impl<'a> Builder<'a> {
         line: usize,
         out: &mut Vec<St>,
     ) -> Result<Val, Gap> {
-        let rhs = self.call(name, &[], line, Some(ty.clone()), out)?;
+        let rhs = self.call(name, &[], line, Some(ty.clone()), None, out)?;
         let t = self.name("@nullary", ty, false, line);
         self.body.names[t.index()].borrow = false;
         self.body.names[t.index()].not_owned = Some(NotOwned::Static);
@@ -5623,7 +5623,7 @@ impl<'a> Builder<'a> {
                 if self.lookup(name).is_none() && self.is_nullary(name) =>
             {
                 let ty = self.ty_of(e)?;
-                self.call(name, &[], *line, Some(ty), out)
+                self.call(name, &[], *line, Some(ty), None, out)
             }
             Expr::Var { .. } | Expr::Consume { .. } => Ok(Rhs::Val(self.val(e, out)?)),
             Expr::Unary { op, expr, .. } => Ok(Rhs::Prim(
@@ -5698,7 +5698,7 @@ impl<'a> Builder<'a> {
                 type_args: _,
                 id: _,
             } if prelude::builtin(name).is_some_and(|b| b.spec == Some(Spec::Traps)) => {
-                let r = self.call(name, args, *line, self.produced(e), out)?;
+                let r = self.call(name, args, *line, self.produced(e), None, out)?;
                 out.push(St::Do {
                     rhs: r,
                     line: *line,
@@ -5731,13 +5731,13 @@ impl<'a> Builder<'a> {
                     })
                     .filter(|(f, _)| self.program.functions.iter().any(|d| &d.name == f))
                 {
-                    return self.call(&f, fwd, *line, self.produced(e), out);
+                    return self.call(&f, fwd, *line, self.produced(e), None, out);
                 }
                 // A render of a type the language does not render calls its
                 // `impl Show`. `print` releases the String after; `value`
                 // takes it.
                 if let Some(f) = self.render_callee(name, args) {
-                    let r = self.call(&f, args, *line, Some(Type::Str), out)?;
+                    let r = self.call(&f, args, *line, Some(Type::Str), None, out)?;
                     if name == "@str" {
                         return Ok(r);
                     }
@@ -5787,7 +5787,8 @@ impl<'a> Builder<'a> {
                     &self.body.speech(),
                 );
                 self.body.mistyped.extend(at);
-                let mut r = self.call(name, args, *line, self.produced(e), out)?;
+                let mut r =
+                    self.call(name, args, *line, self.produced(e), self.ty_of(e).ok(), out)?;
                 if let Rhs::Call {
                     kind: Callee::Fn(_),
                     solved,
@@ -6323,12 +6324,16 @@ impl<'a> Builder<'a> {
         }
     }
 
+    /// The call `name(args)` producing `ret`, flowing into `dest` where the
+    /// caller knows it: a constructor's payload slots take their types from
+    /// it (`Some(lit)` into `Option<Key>`).
     fn call(
         &mut self,
         name: &str,
         args: &'a [Expr],
         line: usize,
         ret: Option<Type>,
+        dest: Option<Type>,
         out: &mut Vec<St>,
     ) -> Result<Rhs, Gap> {
         // `a[i]` asks the receiver's type for `at` before any builtin row, as
@@ -6346,7 +6351,7 @@ impl<'a> Builder<'a> {
                 .is_ok_and(|t| vyrn_frontend::types::resolve(&t, self.proto.types()) == Type::Str);
             if string {
                 let v = if prelude::boxes_a_copy(arg, string) {
-                    let copy = self.call("@copy", args, line, Some(Type::Str), out)?;
+                    let copy = self.call("@copy", args, line, Some(Type::Str), None, out)?;
                     let c = self.temp(Type::Str, line);
                     self.bind(c, copy, out);
                     Val::Name(c)
@@ -6540,10 +6545,17 @@ impl<'a> Builder<'a> {
             Callee::Fn(_) => self.targets_of(name, args),
             _ => Vec::new(),
         };
-        let param_tys: Vec<Type> = match kind {
-            Callee::Fn(id) => (self.program.functions[id.index()].params.iter())
+        let param_tys: Vec<Type> = match (kind, dest) {
+            (Callee::Fn(id), _) => (self.program.functions[id.index()].params.iter())
                 .map(|p| p.ty.clone())
                 .collect(),
+            (Callee::Ctor, Some(dest)) => {
+                match vyrn_frontend::types::resolve(&dest, self.proto.types()) {
+                    Type::Enum(vs) => vs.into_iter().find(|v| v.name == name).map(|v| v.payload),
+                    _ => None,
+                }
+                .unwrap_or_default()
+            }
             _ => Vec::new(),
         };
         let mut targets = Vec::new();
