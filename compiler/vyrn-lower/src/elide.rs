@@ -375,20 +375,29 @@ impl Walk<'_> {
                     }
                     _ => (st.clone(), st.clone()),
                 };
-                let a = self.block(yes, then);
-                let b = self.block(no, els);
+                let mut a = self.block(yes, then);
+                let mut b = self.block(no, els);
+                if !a.dead && !b.dead {
+                    leave(&mut a, then, &[]);
+                    leave(&mut b, els, &[]);
+                }
                 State::join(&[a, b])
             }
             St::Block { body, .. } => self.block(st, body),
             St::Loop { body, .. } => self.looped(st, body),
             St::Switch { arms, .. } => {
                 let mut outs = vec![st.clone()];
-                for a in arms {
+                for a in arms.iter_mut() {
                     let mut s = st.clone();
                     for b in &a.binds {
                         self.fresh(&mut s, *b);
                     }
                     outs.push(self.block(s, &mut a.body));
+                }
+                if outs.iter().filter(|s| !s.dead).count() > 1 {
+                    for (s, a) in outs[1..].iter_mut().zip(arms.iter()) {
+                        leave(s, &a.body, &a.binds);
+                    }
                 }
                 State::join(&outs)
             }
@@ -970,6 +979,31 @@ impl Walk<'_> {
         self.block(head, body);
         let (breaks, _) = self.loops.pop().expect("pushed above");
         State::join(&breaks)
+    }
+}
+
+/// Eliminates from `st`, a branch's end state, the names `binds` and the
+/// names its rows `ss` bind with a `let` ([`State::eliminate`]), so a join
+/// keeps what the branch knows through them about the names it shares.
+fn leave(st: &mut State, ss: &[St], binds: &[Name]) {
+    fn lets(ss: &[St], out: &mut BTreeSet<Name>) {
+        for s in ss {
+            match s {
+                St::Let(n, _) => {
+                    out.insert(*n);
+                }
+                St::Block { body, .. } => lets(body, out),
+                _ => {}
+            }
+        }
+    }
+    if st.dead {
+        return;
+    }
+    let mut names: BTreeSet<Name> = binds.iter().copied().collect();
+    lets(ss, &mut names);
+    for n in names {
+        st.eliminate(n);
     }
 }
 

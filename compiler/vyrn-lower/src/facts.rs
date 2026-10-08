@@ -286,6 +286,41 @@ impl State {
             .retain(|_, (a, b)| !a.iter().chain(b.iter()).any(|l| l.mentions_name(n)));
     }
 
+    /// Forgets `n` as [`State::kill`] does, keeping what the facts state
+    /// without it. A definition through `n` with coefficient one or minus one
+    /// restates them; otherwise each pair of facts with opposite signs on `n`
+    /// sums to a fact without it (Fourier-Motzkin).
+    pub fn eliminate(&mut self, n: Name) {
+        let mut sums = BTreeSet::new();
+        for t in [Term::Val(n), Term::Len(n)] {
+            let alias = self.defs.values().any(|v| matches!(v.coef(t), 1 | -1));
+            if alias || self.defs.contains_key(&t) {
+                continue;
+            }
+            let through: Vec<Lin> = (self.facts.iter().filter(|f| f.mentions(t)).cloned())
+                .chain(
+                    (self.defs.iter())
+                        .filter(|(_, v)| v.mentions(t))
+                        .flat_map(|(d, v)| [Lin::of(*d).sub(v), v.sub(&Lin::of(*d))])
+                        .flatten(),
+                )
+                .collect();
+            for p in through.iter().filter(|p| p.coef(t) > 0) {
+                for q in through.iter().filter(|q| q.coef(t) < 0) {
+                    let (a, b) = (p.coef(t), q.coef(t).checked_neg());
+                    let sum = b.and_then(|b| p.scale(b)?.add(&q.scale(a)?));
+                    if let Some(s) = sum {
+                        sums.insert(s);
+                    }
+                }
+            }
+        }
+        self.kill(n);
+        for s in sums.iter().filter(|s| !s.mentions_name(n)) {
+            self.assume(s);
+        }
+    }
+
     /// Forgets everything about the one term `t`, restating what a definition
     /// through it knows as [`State::kill`] does.
     pub fn forget(&mut self, t: Term) {
@@ -634,6 +669,17 @@ mod tests {
         assert!(st.ge0(&v(0).sub(&len).unwrap()).is_some());
         assert!(st.ge0(&len.sub(&v(0)).unwrap().plus(1).unwrap()).is_some());
         assert!(st.ge0(&len.sub(&v(0)).unwrap()).is_none());
+    }
+
+    #[test]
+    fn an_elimination_keeps_the_sum_of_opposite_bounds() {
+        let mut st = State::default();
+        // j - w >= 0 and w >= 0 give j >= 0 once w is gone.
+        st.assume(&v(0).sub(&v(1)).unwrap());
+        st.assume(&v(1));
+        st.eliminate(Name(1));
+        assert!(st.facts.iter().all(|f| !f.mentions_name(Name(1))));
+        assert!(st.ge0(&v(0)).is_some());
     }
 
     #[test]

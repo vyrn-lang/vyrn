@@ -129,6 +129,35 @@ fn a_sum_of_two_bounded_operands_is_exact() {
 }
 
 #[test]
+fn a_join_restates_a_counter_through_each_branchs_temporaries() {
+    let src = "fn w(xs: Array<Int64>) -> Int64 {
+    let mut s: Int64 = 0
+    let mut i: Int64 = 0
+    while i < xs.length {
+        let x = xs[i]
+        s = s + x
+        if x < 0 {
+            i = i + 1
+        } else {
+            let k = (x & 3) + 1
+            if i + k > xs.length {
+                return s
+            }
+            i = i + k
+        }
+    }
+    return s
+}
+";
+    assert_eq!(verdicts(src, "w"), ["proved array-index"]);
+    let (err, rows) = oracle(src, "    print(w(xs).toString())", "w");
+    assert_eq!(
+        (err.as_str(), rows),
+        ("", vec!["5 0 array-index proved 1".to_string()])
+    );
+}
+
+#[test]
 fn a_length_guard_proves_the_last_element() {
     let src = "fn last(xs: Array<Int64>) -> Int64 {\n    if xs.length > 0 {\n        \
                return xs[xs.length - 1]\n    }\n    return 0\n}\n";
@@ -628,6 +657,68 @@ fn w(p: modify P) -> Int64 {
 ",
         "    print(w(xs, 9).toString())",
         "array index 9 out of bounds",
+    ),
+    // A branch-local step that may be negative keeps no lower bound.
+    (
+        "fn w(xs: Array<Int64>) -> Int64 {
+    let mut s: Int64 = 0
+    let mut i: Int64 = 0
+    while i < xs.length {
+        let x = xs[i]
+        s = s + x
+        if x > 15 {
+            i = i + 1
+        } else {
+            let k = (x & 3) - 3
+            if i + k > xs.length {
+                return s
+            }
+            i = i + k
+        }
+    }
+    return s
+}
+",
+        "    print(w(xs).toString())",
+        "array index -1 out of bounds",
+    ),
+    // A branch-local alias of a length a later pop shrinks.
+    (
+        "fn w(xs: modify Array<Int64>, c: Bool) -> Int64 {
+    if xs.length < 3 {
+        return 0
+    }
+    let mut j: Int64 = 0
+    if c {
+        let t = xs.length - 1
+        j = t
+    } else {
+        let t = xs.length - 1
+        let p = xs.pop() ?? 0
+        j = t
+    }
+    return xs[j]
+}
+",
+        "    print(w(xs, false).toString())",
+        "array index 2 out of bounds",
+    ),
+    // Branch-local aliases of different values.
+    (
+        "fn w(xs: Array<Int64>, c: Bool) -> Int64 {
+    let mut j: Int64 = 0
+    if c {
+        let t = xs.length - 1
+        j = t
+    } else {
+        let t = xs.length
+        j = t
+    }
+    return xs[j]
+}
+",
+        "    print(w(xs, false).toString())",
+        "array index 3 out of bounds",
     ),
     // A sum is exact only when it provably fits (research witness h21t).
     (
