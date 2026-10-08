@@ -99,6 +99,13 @@ pub struct Module {
     nesting: Option<u32>,
     /// Whether the module has the [`SITE`] global ([`Module::profile`]).
     site: bool,
+    /// Whether every body counts its calls and operations ([`Module::count_ops`]).
+    ops: bool,
+    /// Where the instrument's statics begin: the pool length and the reservation end at that
+    /// moment ([`Module::begin_instrument`]).
+    instrument_at: Option<(usize, u32)>,
+    /// The end of the live statics before `instrument_at`, set by the sweep.
+    plain_end: u32,
 }
 
 impl Default for Module {
@@ -123,6 +130,9 @@ impl Module {
             names: Vec::new(),
             nesting: None,
             site: false,
+            ops: false,
+            instrument_at: None,
+            plain_end: DATA_BASE,
         }
     }
 
@@ -130,6 +140,30 @@ impl Module {
     /// row it counts.
     pub fn profile(&mut self) {
         self.site = true;
+    }
+
+    /// Marks the pool's current end as where the profile instrument's statics begin, so that
+    /// everything after it is the instrument's. [`Module::finish`] puts the heap above those
+    /// statics, a whole number of pages higher than a module without the instrument would,
+    /// and adds those pages to the memory. The program then sees the heap at the same offset
+    /// in the same number of free bytes, so `memory.grow` runs at the same allocation with
+    /// and without the instrument. Nothing the program needs may be placed after this call.
+    pub fn begin_instrument(&mut self) {
+        self.instrument_at = Some((self.pool.len(), self.reserved));
+    }
+
+    /// Makes [`Module::finish`] count, for each function it keeps, its calls and the operations
+    /// its own body executes, as wasmtime's fuel meter counts them. The counters are 16 bytes
+    /// per function in a table whose address and function names the custom section `vyrn:fns`
+    /// holds. Instructions a [`Frame`] marked as the instrument's are left out, so the sum of
+    /// the counters is the operation count of the module without the instrument.
+    pub fn count_ops(&mut self) {
+        self.ops = true;
+    }
+
+    /// Whether [`Module::count_ops`] was asked for; its report needs function names.
+    pub fn counts_ops(&self) -> bool {
+        self.ops
     }
 
     /// Exports the stack pointer as [`SP_EXPORT`] and the address `nesting` of
@@ -431,9 +465,18 @@ impl Module {
             }
         }
         let mut end = self.reserved;
+        let first = self
+            .instrument_at
+            .map_or(u32::MAX, |(pool, _)| DATA_BASE + pool as u32);
+        self.plain_end = self
+            .instrument_at
+            .map_or(DATA_BASE, |(_, reserved)| reserved);
         for (i, &(at, len)) in self.spans.iter().enumerate() {
             if live[i] {
                 end = end.max(at + len);
+                if at < first {
+                    self.plain_end = self.plain_end.max(at + len);
+                }
             } else {
                 let lo = (at - DATA_BASE) as usize;
                 self.pool[lo..lo + len as usize].fill(0);
@@ -457,6 +500,10 @@ impl Module {
         if self.sweep {
             self.prune();
         }
+        let counting = self.ops.then(|| {
+            let total = self.n_imports() + self.bodies.len() as u32;
+            (self.reserve(32 * total, 8), total)
+        });
         if self.data_end() > STATICS_LIMIT {
             let room = STATICS_LIMIT - DATA_BASE;
             return Err(format!(
@@ -532,10 +579,31 @@ impl Module {
             exports.export(name, ExportKind::Func, *i);
         }
 
+        // The heap's first byte and the pages the memory starts with. With the instrument they
+        // are what the program's own statics alone give, moved up by whole pages past the
+        // instrument's statics ([`Module::begin_instrument`]).
+        let (heap, pages) = match self.instrument_at {
+            None => (
+                round_up(self.data_end(), 16),
+                round_up(self.data_end() + HEAP_HEADER_BYTES, 65_536) / 65_536,
+            ),
+            Some((pool, _)) => {
+                let plain = if self.sweep {
+                    self.plain_end
+                } else {
+                    DATA_BASE + pool as u32
+                };
+                let gap = round_up(round_up(self.data_end(), 16) - round_up(plain, 16), 65_536);
+                (
+                    round_up(plain, 16) + gap,
+                    round_up(plain + HEAP_HEADER_BYTES, 65_536) / 65_536 + gap / 65_536,
+                )
+            }
+        };
         let mem = MemoryType {
             // Covers the statics and the runtime header above them; `malloc`
             // grows memory from there.
-            minimum: (round_up(self.data_end() + HEAP_HEADER_BYTES, 65_536) / 65_536) as u64,
+            minimum: pages as u64,
             maximum: None,
             memory64: false,
             shared: false,
@@ -563,9 +631,9 @@ impl Module {
                 mutable: false,
                 shared: false,
             },
-            &ConstExpr::i32_const(round_up(self.data_end(), 16) as i32),
+            &ConstExpr::i32_const(heap as i32),
         );
-        if self.site {
+        for _ in 0..u32::from(self.site) + u32::from(self.ops) {
             globals.global(
                 GlobalType {
                     val_type: ValType::I32,
@@ -588,7 +656,7 @@ impl Module {
             exports.export(
                 NESTING_EXPORT,
                 ExportKind::Global,
-                SITE + u32::from(self.site),
+                SITE + u32::from(self.site) + u32::from(self.ops),
             );
         }
 
@@ -622,12 +690,33 @@ impl Module {
             i = end;
         }
 
+        let first = self.imports.len() as u32;
         let mut code = CodeSection::new();
         for (i, d) in self.bodies.into_iter().enumerate() {
             let body = d
                 .body
                 .unwrap_or_else(|| panic!("function {i} was reserved and never filled"));
-            code.function(&encode(body));
+            let counter = counting.map(|(table, total)| Counter {
+                global: SITE + u32::from(self.site),
+                row: table + 16 * (first + i as u32),
+                scratch: 16 * total,
+            });
+            code.function(&encode(body, counter));
+        }
+        if let Some((table, total)) = counting {
+            let mut rows = vec![table.to_string()];
+            rows.resize(1 + total as usize, String::new());
+            for (i, n) in &self.names {
+                rows[1 + *i as usize] = n.clone();
+            }
+            self.custom.push((
+                "vyrn:fns".to_string(),
+                rows.join(
+                    "
+",
+                )
+                .into_bytes(),
+            ));
         }
 
         let mut m = wasm_encoder::Module::new();
@@ -663,8 +752,186 @@ impl Module {
     }
 }
 
-/// One finished body, with the shadow-stack prologue and epilogue around it.
-fn encode(f: Frame) -> Function {
+/// Where one function's counters are, when the module counts operations ([`Module::count_ops`]).
+#[derive(Clone, Copy)]
+struct Counter {
+    /// The global that holds the offset of the table in use: 0, or `scratch`.
+    global: u32,
+    /// The address of the function's row: calls made, then operations executed, as `i64`s.
+    row: u32,
+    /// The distance from the table to the scratch table, where a call the instrument made
+    /// counts its callee's operations. Nothing reads that table.
+    scratch: u32,
+}
+
+/// The wasmtime fuel meter's charge for `i`: one operation, except these.
+fn fuel(i: &Instruction) -> u64 {
+    use Instruction as I;
+    u64::from(!matches!(
+        i,
+        I::Nop | I::Drop | I::Block(_) | I::Loop(_) | I::Unreachable | I::Return | I::Else | I::End
+    ))
+}
+
+/// Adds an `i64` that `amount` pushes to the `i64` at `offset` in the table in use.
+fn bump(
+    c: Counter,
+    offset: u32,
+    amount: &[Instruction<'static>],
+    out: &mut Vec<Instruction<'static>>,
+) {
+    let at = mem_arg(offset, 3);
+    out.extend([
+        Instruction::GlobalGet(c.global),
+        Instruction::GlobalGet(c.global),
+        Instruction::I64Load(at),
+    ]);
+    out.extend(amount.iter().cloned());
+    out.extend([Instruction::I64Add, Instruction::I64Store(at)]);
+}
+
+/// What the control stack of [`count`] keeps of an open block.
+struct Open {
+    /// Whether the code was reachable where the block began.
+    outer: bool,
+    /// Whether a live branch targets the block's end.
+    branched: bool,
+    /// For an `if`: whether the `then` arm reached its `else`, and whether there is one.
+    then: bool,
+    has_else: bool,
+    is_if: bool,
+    is_loop: bool,
+}
+
+/// Rewrites `f`'s body to count itself: one call on entry and, before each instruction that
+/// leaves a straight run, the run's operations at the fuel meter's prices, prologue and
+/// epilogue included. A `memory.copy` or `memory.fill` also costs one operation per byte, which
+/// the rewrite adds from the length on the stack. The rewrite flushes where wasmtime does, so a
+/// trap loses the same operations. Unreachable code costs nothing: a block's end is live only if its body falls
+/// through or a live branch targets it.
+fn count(f: &mut Frame, c: Counter) -> Vec<Instruction<'static>> {
+    use Instruction as I;
+    let (saved, len) = (f.local(ValType::I32), f.local(ValType::I32));
+    let body = std::mem::take(&mut f.body);
+    let mut out = Vec::with_capacity(body.len() * 2);
+    let quiet = |i: usize| f.instrument_all || f.instrument.iter().any(|r| r.0 <= i && i < r.1);
+    if !f.instrument_all {
+        bump(c, c.row, &[I::I64Const(1)], &mut out);
+    }
+    let framed = f.bytes() != 0;
+    let (mut pending, mut live) = (1 + 5 * u64::from(framed), true);
+    let mut open: Vec<Open> = Vec::new();
+    for (k, ins) in body.into_iter().enumerate() {
+        if quiet(k) {
+            // The callee counts against the scratch table, and the table in use comes back.
+            if let I::Call(_) = ins {
+                out.extend([
+                    I::GlobalGet(c.global),
+                    I::LocalSet(saved),
+                    I::I32Const(c.scratch as i32),
+                    I::GlobalSet(c.global),
+                    ins,
+                    I::LocalGet(saved),
+                    I::GlobalSet(c.global),
+                ]);
+            } else {
+                out.push(ins);
+            }
+            continue;
+        }
+        if live {
+            pending += fuel(&ins);
+            if matches!(
+                ins,
+                I::Call(_)
+                    | I::Return
+                    | I::Unreachable
+                    | I::Br(_)
+                    | I::BrIf(_)
+                    | I::BrTable(..)
+                    | I::If(_)
+                    | I::Loop(_)
+                    | I::Else
+                    | I::End
+            ) {
+                if pending > 0 {
+                    let n = std::mem::take(&mut pending);
+                    bump(c, c.row + 8, &[I::I64Const(n as i64)], &mut out);
+                }
+            }
+            if matches!(ins, I::MemoryCopy { .. } | I::MemoryFill(_)) {
+                out.push(I::LocalTee(len));
+                bump(
+                    c,
+                    c.row + 8,
+                    &[I::LocalGet(len), I::I64ExtendI32U],
+                    &mut out,
+                );
+            }
+        }
+        let branch = |n: u32, live: bool, open: &mut Vec<Open>| {
+            let at = open.len().checked_sub(1 + n as usize);
+            if let (true, Some(at)) = (live, at) {
+                open[at].branched = true;
+            }
+        };
+        match &ins {
+            I::Block(_) | I::Loop(_) | I::If(_) => open.push(Open {
+                outer: live,
+                branched: false,
+                then: false,
+                has_else: false,
+                is_if: matches!(ins, I::If(_)),
+                is_loop: matches!(ins, I::Loop(_)),
+            }),
+            I::Else => {
+                let o = open.last_mut().expect("an `else` closes an `if`");
+                (o.then, o.has_else) = (live, true);
+                live = o.outer;
+            }
+            I::End => {
+                let o = open.pop().expect("the body's own end is not in the body");
+                live = o.outer
+                    && match (o.is_if, o.is_loop) {
+                        (true, _) if !o.has_else => true,
+                        (true, _) => o.then || live || o.branched,
+                        (_, true) => live,
+                        _ => live || o.branched,
+                    };
+            }
+            I::Br(n) => {
+                branch(*n, live, &mut open);
+                live = false;
+            }
+            I::BrIf(n) => branch(*n, live, &mut open),
+            I::BrTable(targets, default) => {
+                for n in targets.iter().chain([default]) {
+                    branch(*n, live, &mut open);
+                }
+                live = false;
+            }
+            I::Return | I::Unreachable => live = false,
+            _ => {}
+        }
+        out.push(ins);
+    }
+    debug_assert!(open.is_empty(), "a block was left open");
+    if live && !f.instrument_all {
+        pending += 4 * u64::from(framed);
+        if pending > 0 {
+            bump(c, c.row + 8, &[I::I64Const(pending as i64)], &mut out);
+        }
+    }
+    out
+}
+
+/// One finished body, with the shadow-stack prologue and epilogue around it. `counter` rewrites
+/// the body to count itself.
+fn encode(mut f: Frame, counter: Option<Counter>) -> Function {
+    let body = match counter {
+        Some(c) => count(&mut f, c),
+        None => std::mem::take(&mut f.body),
+    };
     let mut decl = vec![ValType::I32]; // the frame base
     decl.extend(f.locals.iter().copied());
     let mut out = Function::new_with_locals_types(decl);
@@ -679,7 +946,7 @@ fn encode(f: Frame) -> Function {
             .instruction(&Instruction::LocalTee(f.base))
             .instruction(&Instruction::GlobalSet(SP));
     }
-    for i in &f.body {
+    for i in &body {
         out.instruction(i);
     }
     // Base plus frame is the value the prologue found.
@@ -736,6 +1003,10 @@ pub struct Frame {
     base: u32,
     params: Vec<ValType>,
     results: Vec<ValType>,
+    /// Ranges of `body` that belong to the profile instrument ([`Frame::instrument_since`]).
+    instrument: Vec<(usize, usize)>,
+    /// Whether the whole body does ([`Frame::instrument_all`]).
+    instrument_all: bool,
 }
 
 impl Frame {
@@ -753,6 +1024,8 @@ impl Frame {
             base,
             params: params.to_vec(),
             results: results.to_vec(),
+            instrument: Vec::new(),
+            instrument_all: false,
         }
     }
 
@@ -772,6 +1045,25 @@ impl Frame {
     pub fn rewind(&mut self, at: usize) {
         debug_assert!(at <= self.body.len());
         self.body.truncate(at);
+        while let Some(r) = self.instrument.last_mut() {
+            if r.0 < at {
+                r.1 = r.1.min(at);
+                break;
+            }
+            self.instrument.pop();
+        }
+    }
+
+    /// Marks the instructions appended since `at`, a [`Frame::here`], as the profile
+    /// instrument's: [`Module::count_ops`] does not count them, and the calls among them run
+    /// off the books. The range is straight-line code.
+    pub fn instrument_since(&mut self, at: usize) {
+        self.instrument.push((at, self.body.len()));
+    }
+
+    /// Marks the whole body as the profile instrument's; see [`Frame::instrument_since`].
+    pub fn instrument_all(&mut self) {
+        self.instrument_all = true;
     }
 
     /// Takes another local of type `t` and returns its index.
@@ -882,6 +1174,69 @@ mod tests {
         }
         assert_eq!(i, wasm.len(), "a section ran off the end");
         ids
+    }
+
+    /// The operations `count` flushes for `body`, an unframed function, with the length of
+    /// the rewritten body.
+    fn counted(body: &[Instruction<'static>]) -> (u64, usize) {
+        let mut f = Frame::new(&[], &[], &[], 0);
+        for i in body {
+            f.ins(i);
+        }
+        let c = Counter {
+            global: SITE,
+            row: 64,
+            scratch: 32,
+        };
+        let out = count(&mut f, c);
+        // Every flush ends `i64.const n; i64.add; i64.store`.
+        let flushed = out
+            .windows(3)
+            .filter_map(|w| match w {
+                [Instruction::I64Const(n), Instruction::I64Add, Instruction::I64Store(_)] => {
+                    Some(*n as u64)
+                }
+                _ => None,
+            })
+            .sum::<u64>();
+        (flushed, out.len())
+    }
+
+    #[test]
+    fn a_branch_ends_the_run_and_what_follows_it_in_the_block_costs_nothing() {
+        use Instruction as I;
+        let body = [
+            I::Block(BlockType::Empty),
+            I::Br(0),
+            I::I32Const(1),
+            I::Drop,
+            I::End,
+        ];
+        // One call, the entry's operation and the `br`; the dead constant is free.
+        assert_eq!(counted(&body).0, 1 + 1 + 1);
+        // The branch targets the block, so its end is live and the constant after it counts.
+        let after = [
+            I::Block(BlockType::Empty),
+            I::Br(0),
+            I::End,
+            I::Nop,
+            I::I32Const(7),
+        ];
+        assert_eq!(counted(&after).0, 1 + 1 + 1 + 1);
+    }
+
+    #[test]
+    fn a_block_nothing_branches_to_leaves_the_code_after_it_dead() {
+        use Instruction as I;
+        let body = [
+            I::Block(BlockType::Empty),
+            I::Unreachable,
+            I::End,
+            I::I32Const(7),
+            I::Drop,
+        ];
+        // The entry only: the `unreachable` is free and its block cannot be left.
+        assert_eq!(counted(&body).0, 1 + 1);
     }
 
     #[test]

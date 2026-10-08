@@ -36,22 +36,33 @@ Compiles the file and runs it. Arguments after the file reach the program's
 `error: ...` line on stderr and exits 1.
 
 `vyrn run --profile [file] [args...]` prints to stderr the operations the guest
-executed, the blocks it made, freed and held live at its peak, and the lines of
-the root file that made the most bytes, heaviest first. A call into a function
-of another file counts at the calling line. The operation count includes the
-instrument's own. `VYRN_BUILD_PROFILE=1` adds the compile phases and the
-`lines read` row. The flag counts only before the file, so a program can take
-its own `--profile`.
+executed, the blocks it made, freed and held live at its peak, the lines of the
+root file that made the most bytes, heaviest first, and the functions that
+executed the most operations, with their calls and operations per call. A call
+into a function of another file counts at the calling line. The operations are
+counted as wasmtime's fuel meter counts them, less the instrument's own: the
+sum of the function rows equals the fuel `_start` spends in a plain run
+(`VYRN_FUEL=<file>` appends that fuel to a file). `memory.copy` and `memory.fill`
+cost one operation per byte, as in the meter. `VYRN_BUILD_PROFILE=1` adds the
+compile phases and the `lines read` row. The flag counts only before the file,
+so a program can take its own `--profile`.
 
 ```
-run: 19,003,320 operations; 1,334 blocks, 1,395,504 bytes; 1,334 freed; peak live 335,896 bytes; live at exit 0
+run: 18,495,784 operations; 1,334 blocks, 1,395,504 bytes; 1,334 freed; peak live 335,896 bytes; live at exit 0
 
 line  function         blocks          bytes         live  what
   88  countKmers          153      1,331,584            0  grows tally(..)
   67  thirdSequence       587         22,696            0  enters toUpper(..) in std/strings
+
+function                  calls       operations       per call
+runtime$mapSlotI64       68,741        6,277,886             91
+countKmers                    7        3,380,670        482,952
+runtime$mapPut           33,762        1,688,100             50
 ```
 
-The run is an audited build with a counter per source line (`docs/memory.md`).
+The run is an audited build with a counter per source line and per function
+(`docs/memory.md`). It costs time: on `binarytrees` at order 16 the run took 2.6
+times as long as a plain one, on `nbody` at three million steps 1.1 times.
 It saves the counts for `vyrn why --cost` under `~/.vyrn/cache/profile`
 (`VYRN_PROFILE_DIR` overrides), one file per root.
 `VYRN_PROFILE=1` builds the same module for any command that emits wasm, such
