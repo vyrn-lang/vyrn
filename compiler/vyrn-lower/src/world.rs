@@ -3,6 +3,7 @@
 //! no `Rc` and no cell, so it is `Send + Sync`.
 
 use std::collections::{HashMap, HashSet};
+use std::hash::Hash;
 use std::sync::{Arc, OnceLock};
 
 use vyrn_frontend::ast::{FnId, Function, Key, Program, Type};
@@ -23,12 +24,20 @@ pub struct World {
     /// The function table: every function, instance and frame the analysis
     /// met, numbered as [`Fns`] says.
     pub(crate) fns: Fns,
-    /// The call relation over the function table, which [`Calls::replace`]
-    /// writes.
-    pub(crate) calls: Calls,
-    /// The read relation over the function table, which [`Reads::replace`]
-    /// writes.
-    pub(crate) reads: Reads,
+    /// The call relation between source bodies ([`Program::source_id`]),
+    /// which [`Rel::replace`] writes. A caller is the body a frame belongs
+    /// to: every instance of a generic and every lambda frame count under the
+    /// function's own row, a module-state initializer and a `where` predicate
+    /// under their own. A callee is a [`Callee::Fn`] row or a declared release
+    /// a name runs. A call through a value, an undispatched method and a
+    /// projection resolve to no function, so they are no edge. A body the
+    /// judgment memo serves is not built, so it has no edges.
+    pub(crate) calls: Rel<FnId>,
+    /// The read relation between source bodies and the name lookups their
+    /// text makes ([`vyrn_frontend::checker::Recorded::reads`]), which
+    /// [`Rel::replace`] writes: a declaration found, or a name missed in a
+    /// scope. A reader is a [`Program::source_id`] row.
+    pub(crate) reads: Rel<Key>,
     /// The core's bodies, which [`World::body_of`] serves. `None` under a
     /// name two bodies share. Empty when `facts` is `None`.
     pub(crate) bodies: HashMap<FnId, Option<Stated>>,
@@ -161,102 +170,87 @@ impl Fns {
     }
 }
 
-/// The call relation between source bodies ([`Program::source_id`]). A
-/// caller is the body a frame belongs to: every instance of a generic and
-/// every lambda frame count under the function's own row, a module-state
-/// initializer and a `where` predicate under their own. A callee is a
-/// [`Callee::Fn`] row or a declared release a name runs. A call through a
-/// value, an undispatched method and a projection resolve to no function, so
-/// they are no edge. A body the judgment memo serves is not built, so it has
-/// no edges.
-#[derive(Default)]
-pub(crate) struct Calls {
-    /// By caller: its callees in source order, each once.
-    callees: Vec<Vec<FnId>>,
-    /// By callee: its callers in id order, each once.
-    callers: Vec<Vec<FnId>>,
+/// A relation from function rows to keys of type `B`, indexed both ways.
+/// `fwd[f]` lists the keys of row `f` in the order its writer gave them, each
+/// once; `bwd` lists the rows holding a key in id order, each once.
+/// [`Rel::replace`] is the only writer, so the two directions agree by
+/// construction.
+pub(crate) struct Rel<B> {
+    fwd: Vec<Vec<B>>,
+    bwd: HashMap<B, Vec<FnId>>,
 }
 
-impl Calls {
-    /// Replaces the callees of every caller in `rows` and the reverse
-    /// entries with them, in one batch. A caller absent from `rows` keeps its
-    /// edges. Each list in `rows` holds a callee once.
-    pub(crate) fn replace(&mut self, rows: HashMap<FnId, Vec<FnId>>) {
-        let ids = rows.keys().chain(rows.values().flatten());
-        let n = (ids.map(|f| f.index() + 1).max().unwrap_or(0)).max(self.callees.len());
-        self.callees.resize_with(n, Vec::new);
-        self.callers.resize_with(n, Vec::new);
-        let mut replaced = vec![false; n];
-        let mut touched = vec![false; n];
-        for f in rows.keys() {
-            replaced[f.index()] = true;
-            for g in &self.callees[f.index()] {
-                touched[g.index()] = true;
-            }
-        }
-        for (g, _) in touched.iter().enumerate().filter(|(_, t)| **t) {
-            self.callers[g].retain(|c| !replaced[c.index()]);
-        }
-        for (f, cs) in rows {
-            for g in &cs {
-                touched[g.index()] = true;
-                self.callers[g.index()].push(f);
-            }
-            self.callees[f.index()] = cs;
-        }
-        for (g, _) in touched.iter().enumerate().filter(|(_, t)| **t) {
-            self.callers[g].sort_unstable_by_key(|c| c.index());
+impl<B> Default for Rel<B> {
+    fn default() -> Self {
+        Rel {
+            fwd: Vec::new(),
+            bwd: HashMap::new(),
         }
     }
 }
 
-/// The read relation between source bodies and the name lookups their text
-/// makes ([`vyrn_frontend::checker::Recorded::reads`]): a declaration found,
-/// or a name missed in a scope. A reader is a [`Program::source_id`] row.
-#[derive(Default)]
-pub(crate) struct Reads {
-    /// By reader: its keys in the order read, each once.
-    keys: Vec<Vec<Key>>,
-    /// By key: its readers in id order, each once. A key no function reads
-    /// has no entry.
-    readers: HashMap<Key, Vec<FnId>>,
-}
-
-impl Reads {
-    /// Replaces the keys of every reader in `rows` and the reverse entries
-    /// with them, in one batch. A reader absent from `rows` keeps its keys.
-    /// Each list in `rows` holds a key once.
-    pub(crate) fn replace(&mut self, rows: HashMap<FnId, Vec<Key>>) {
-        let n = (rows.keys().map(|f| f.index() + 1).max().unwrap_or(0)).max(self.keys.len());
-        self.keys.resize_with(n, Vec::new);
+impl<B: Clone + Eq + Hash> Rel<B> {
+    /// Replaces the keys of every row in `rows` and the reverse entries with
+    /// them, in one batch. A row absent from `rows` keeps its keys. Each list
+    /// in `rows` holds a key once.
+    pub(crate) fn replace(&mut self, rows: HashMap<FnId, Vec<B>>) {
+        let n = (rows.keys().map(|f| f.index() + 1).max().unwrap_or(0)).max(self.fwd.len());
+        self.fwd.resize_with(n, Vec::new);
         let mut replaced = vec![false; n];
-        let mut touched: HashSet<Key> = HashSet::new();
+        // Sized for a first batch, which allocates each table once.
+        let pairs = rows.values().map(Vec::len).sum();
+        let mut touched = HashSet::with_capacity(pairs);
+        self.bwd.reserve(pairs);
         for f in rows.keys() {
             replaced[f.index()] = true;
-            touched.extend(std::mem::take(&mut self.keys[f.index()]));
+            touched.extend(std::mem::take(&mut self.fwd[f.index()]));
         }
-        for k in &touched {
-            if let Some(rs) = self.readers.get_mut(k) {
+        for b in &touched {
+            if let Some(rs) = self.bwd.get_mut(b) {
                 rs.retain(|r| !replaced[r.index()]);
             }
         }
-        for (f, ks) in rows {
-            for k in &ks {
-                self.readers.entry(k.clone()).or_default().push(f);
+        for (f, bs) in rows {
+            for b in &bs {
+                self.bwd.entry(b.clone()).or_default().push(f);
             }
-            touched.extend(ks.iter().cloned());
-            self.keys[f.index()] = ks;
+            touched.extend(bs.iter().cloned());
+            self.fwd[f.index()] = bs;
         }
-        for k in touched {
-            let Some(rs) = self.readers.get_mut(&k) else {
+        for b in touched {
+            let Some(rs) = self.bwd.get_mut(&b) else {
                 continue;
             };
             if rs.is_empty() {
-                self.readers.remove(&k);
+                self.bwd.remove(&b);
             } else {
                 rs.sort_unstable_by_key(|r| r.index());
             }
         }
+        debug_assert!(self.inverts(), "a relation's directions disagree");
+    }
+
+    /// The keys of row `f`.
+    pub(crate) fn of(&self, f: FnId) -> &[B] {
+        self.fwd.get(f.index()).map_or(&[], Vec::as_slice)
+    }
+
+    /// The rows holding `key`.
+    pub(crate) fn rows_of(&self, key: &B) -> &[FnId] {
+        self.bwd.get(key).map_or(&[], Vec::as_slice)
+    }
+
+    /// Whether the directions list the same pairs and `bwd` is in id order.
+    fn inverts(&self) -> bool {
+        let pairs = self.fwd.iter().map(Vec::len).sum::<usize>();
+        pairs == self.bwd.values().map(Vec::len).sum::<usize>()
+            && (self.fwd.iter().enumerate()).all(|(f, bs)| {
+                (bs.iter()).all(|b| {
+                    self.rows_of(b)
+                        .binary_search_by_key(&f, |r| r.index())
+                        .is_ok()
+                })
+            })
     }
 }
 
@@ -366,19 +360,32 @@ impl World {
         self.allocating.contains(&f)
     }
 
-    /// The functions `f`'s bodies call ([`Calls`]), in source order.
+    /// The functions `f`'s bodies call, in source order.
     pub fn callees(&self, f: FnId) -> &[FnId] {
-        self.calls.callees.get(f.index()).map_or(&[], Vec::as_slice)
+        self.calls.of(f)
     }
 
-    /// The functions whose bodies call `f` ([`Calls`]).
+    /// The functions whose bodies call `f`.
     pub fn callers(&self, f: FnId) -> &[FnId] {
-        self.calls.callers.get(f.index()).map_or(&[], Vec::as_slice)
+        self.calls.rows_of(&f)
     }
 
-    /// The functions whose text read `key` ([`Reads`]).
+    /// Returns, per row, whether it is one of `seeds` or calls one,
+    /// transitively. Each row's callers are pushed once.
+    pub fn callers_closure(&self, seeds: impl IntoIterator<Item = FnId>) -> Vec<bool> {
+        let mut seen = vec![false; self.fns.rows.len()];
+        let mut stack: Vec<FnId> = seeds.into_iter().collect();
+        while let Some(f) = stack.pop() {
+            if !std::mem::replace(&mut seen[f.index()], true) {
+                stack.extend(self.callers(f));
+            }
+        }
+        seen
+    }
+
+    /// The functions whose text read `key`.
     pub fn readers(&self, key: &Key) -> &[FnId] {
-        self.reads.readers.get(key).map_or(&[], Vec::as_slice)
+        self.reads.rows_of(key)
     }
 
     /// The typed judgment's refusals.
@@ -438,39 +445,15 @@ impl World {
     /// # Panics
     ///
     /// If a name's id is not its row's, if a body is served under a name
-    /// other than its own, if bodies exist without facts, if a refusal is
-    /// not an error, or if the callers do not invert the callees or the
-    /// readers the reads.
+    /// other than its own, if bodies exist without facts, or if a refusal is
+    /// not an error.
     pub fn check(&self) {
         let rows = self.fns.rows.len();
-        for (f, ks) in self.reads.keys.iter().enumerate() {
-            for k in ks {
-                assert!(f < rows, "a read names no row");
-                let once = self.readers(k).iter().filter(|r| r.index() == f).count();
-                assert_eq!(once, 1, "a key lists its reader other than once");
-            }
-        }
-        let reads = self.reads.keys.iter().map(Vec::len).sum::<usize>();
-        let readers = self.reads.readers.values().map(Vec::len).sum::<usize>();
-        assert_eq!(reads, readers, "a reader entry has no read");
-        for (f, cs) in self.calls.callees.iter().enumerate() {
-            for g in cs {
-                assert!(f < rows && g.index() < rows, "a call edge names no row");
-                assert_eq!(
-                    self.calls.callers[g.index()]
-                        .iter()
-                        .filter(|c| c.index() == f)
-                        .count(),
-                    1,
-                    "a callee lists its caller other than once"
-                );
-            }
-        }
-        let edges = |cs: &Vec<Vec<FnId>>| cs.iter().map(Vec::len).sum::<usize>();
-        assert_eq!(
-            edges(&self.calls.callees),
-            edges(&self.calls.callers),
-            "a caller entry has no call edge"
+        assert!(self.reads.fwd.len() <= rows, "a read names no row");
+        assert!(
+            self.calls.fwd.len() <= rows
+                && self.calls.fwd.iter().flatten().all(|g| g.index() < rows),
+            "a call edge names no row"
         );
         for (name, id) in &self.fns.ids {
             assert_eq!(
@@ -528,4 +511,31 @@ pub(crate) fn analyzed(
     #[cfg(debug_assertions)]
     world.check();
     Arc::new(world)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{FnId, Rel};
+    use std::collections::HashMap;
+
+    fn id(i: usize) -> FnId {
+        FnId::nth(i)
+    }
+
+    #[test]
+    fn a_replaced_row_leaves_no_reverse_entry() {
+        let mut rel: Rel<FnId> = Rel::default();
+        rel.replace(HashMap::from([
+            (id(2), vec![id(0), id(1)]),
+            (id(0), vec![id(1)]),
+        ]));
+        assert_eq!(rel.of(id(2)), [id(0), id(1)]);
+        assert_eq!(rel.rows_of(&id(1)), [id(0), id(2)]);
+        rel.replace(HashMap::from([(id(0), vec![id(3)]), (id(2), vec![])]));
+        assert_eq!(rel.of(id(0)), [id(3)]);
+        assert!(rel.of(id(2)).is_empty());
+        assert!(rel.rows_of(&id(1)).is_empty());
+        assert_eq!(rel.rows_of(&id(3)), [id(0)]);
+        assert!(rel.rows_of(&id(9)).is_empty());
+    }
 }

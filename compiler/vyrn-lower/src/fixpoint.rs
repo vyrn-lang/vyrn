@@ -1,42 +1,45 @@
 //! The fixpoint driver every whole-program analysis over the call graph
 //! runs on: [`solve`].
 
-/// Solves every body's value to a fixpoint over the call graph. `values` and
-/// `callees` hold one entry per body; `callees[i]` lists by index the bodies
-/// body `i` calls.
+/// A join semilattice of finite height: the value an analysis keeps per body.
+pub(crate) trait Lattice {
+    /// Raises `self` to its join with `other` and returns whether `self`
+    /// grew. A value that never grows past a finite height ends every loop.
+    fn join(&mut self, other: &Self) -> bool;
+}
+
+/// Solves every body's value to the least fixpoint of
+/// `values[i] = values[i] join (join of values[j] for j in callees[i])`.
+/// `values` and `callees` hold one entry per body; `callees[i]` lists by
+/// index the bodies body `i` calls, and `values` starts at each body's own
+/// value.
 ///
 /// Bodies are visited by strongly connected component, callees first. Each
-/// round of a component visits its bodies in index order and runs
-/// `join(&mut values[i], transfer(i, &values), round)`, with `round` from 0.
-/// A component settles when every join of a round returns false; one with no
-/// cycle runs one round. The result is indexed as `values` is.
-///
-/// The caller guarantees that `transfer(i, ..)` reads only body `i` and its
-/// callees, so a callee's value is final before its caller reads it. It also
-/// guarantees termination: `transfer` is monotone, and `join` returns true
-/// only when it raised `values[i]`, in a lattice of finite height or by
-/// widening once `round` passes a bound.
+/// round of a component joins every callee into each body in index order. A
+/// component settles when a round grows nothing; one with no cycle runs one
+/// round. The result is indexed as `values` is.
 ///
 /// # Panics
 ///
 /// If `values` is shorter than `callees` or an index in `callees` is not a
 /// body.
-pub(crate) fn solve<V>(
-    mut values: Vec<V>,
-    callees: &[Vec<usize>],
-    mut transfer: impl FnMut(usize, &[V]) -> V,
-    mut join: impl FnMut(&mut V, V, usize) -> bool,
-) -> Vec<V> {
+pub(crate) fn solve<L: Lattice>(mut values: Vec<L>, callees: &[Vec<usize>]) -> Vec<L> {
     for comp in components(callees) {
         let cyclic = comp.len() > 1 || callees[comp[0]].contains(&comp[0]);
-        let mut round = 0;
         loop {
             let mut changed = false;
             for &i in &comp {
-                let v = transfer(i, &values);
-                changed |= join(&mut values[i], v, round);
+                for &j in callees[i].iter().filter(|&&j| j != i) {
+                    let (this, callee) = if i < j {
+                        let (lo, hi) = values.split_at_mut(j);
+                        (&mut lo[i], &hi[0])
+                    } else {
+                        let (lo, hi) = values.split_at_mut(i);
+                        (&mut hi[0], &lo[j])
+                    };
+                    changed |= this.join(callee);
+                }
             }
-            round += 1;
             if !(changed && cyclic) {
                 break;
             }
@@ -105,7 +108,18 @@ fn components(callees: &[Vec<usize>]) -> Vec<Vec<usize>> {
 
 #[cfg(test)]
 mod tests {
-    use super::{components, solve};
+    use super::{components, solve, Lattice};
+
+    /// A bit set, joined by union.
+    struct Bits(u32);
+
+    impl Lattice for Bits {
+        fn join(&mut self, other: &Bits) -> bool {
+            let before = self.0;
+            self.0 |= other.0;
+            self.0 != before
+        }
+    }
 
     #[test]
     fn a_component_follows_every_component_it_calls() {
@@ -121,35 +135,8 @@ mod tests {
     fn a_cycle_joins_to_the_least_fixpoint() {
         // Reachable bodies, as a bit set per body.
         let callees = vec![vec![1], vec![2], vec![1, 3], vec![]];
-        let own: Vec<u32> = (0..4).map(|i| 1 << i).collect();
-        let reach = solve(
-            own,
-            &callees,
-            |i, v| callees[i].iter().fold(0, |a, &j| a | v[j]),
-            |old, new, _| {
-                let before = *old;
-                *old |= new;
-                *old != before
-            },
-        );
+        let reach = solve((0..4).map(|i| Bits(1 << i)).collect(), &callees);
+        let reach: Vec<u32> = reach.into_iter().map(|b| b.0).collect();
         assert_eq!(reach, vec![0b1111, 0b1110, 0b1110, 0b1000]);
-    }
-
-    #[test]
-    fn a_widening_ends_an_infinite_ascent() {
-        // Each turn of the cycle adds one: the plain join never settles.
-        let callees = vec![vec![1], vec![0]];
-        let out = solve(
-            vec![0u64, 0],
-            &callees,
-            |i, v| v[callees[i][0]].saturating_add(1),
-            |old, new, round| {
-                let next = if round >= 3 { u64::MAX } else { new.max(*old) };
-                let changed = next != *old;
-                *old = next;
-                changed
-            },
-        );
-        assert_eq!(out, vec![u64::MAX, u64::MAX]);
     }
 }

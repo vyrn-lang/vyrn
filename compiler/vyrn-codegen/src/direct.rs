@@ -205,37 +205,19 @@ pub fn wat(program: &Program, world: std::sync::Arc<vyrn_lower::World>) -> Resul
 /// a function nothing calls is the wrong answer. A call to a skipped name refuses at its site.
 ///
 /// Public because the driver asks whether a `test` body must compile as generation, and the
-/// answer must be this one, not a second walk. `world` is [`compile`]'s: its checker record
-/// says which calls go through a binding.
+/// answer must be this one, not a second walk. `world` is [`compile`]'s: its call relation holds
+/// no edge for a call through a binding, so such a call reaches no generator.
 pub fn gen_reach(
     program: &Program,
     world: &vyrn_lower::World,
 ) -> std::collections::HashSet<String> {
-    let through = &world.ownership.record.stored.through;
-    let mut reach: std::collections::HashSet<String> = program
-        .functions
-        .iter()
-        .filter(|f| f.is_gen)
+    let id = |f: &vyrn_frontend::ast::Function| world.fn_id(&f.name);
+    let gens = program.functions.iter().filter(|f| f.is_gen);
+    let reach = world.callers_closure(gens.filter_map(|f| id(f)));
+    (program.functions.iter())
+        .filter(|f| id(f).is_some_and(|i| reach[i.index()]))
         .map(|f| f.name.clone())
-        .collect();
-    loop {
-        let before = reach.len();
-        for f in &program.functions {
-            if f.is_extern || reach.contains(&f.name) {
-                continue;
-            }
-            if vyrn_frontend::checker::fn_calls(&f.body, through)
-                .iter()
-                .any(|c| reach.contains(c))
-            {
-                reach.insert(f.name.clone());
-            }
-        }
-        if reach.len() == before {
-            break;
-        }
-    }
-    reach
+        .collect()
 }
 
 /// Compiles `program`, a generator host (`vyrn_genwasm::prepare` sets [`Host::gen`]), with the

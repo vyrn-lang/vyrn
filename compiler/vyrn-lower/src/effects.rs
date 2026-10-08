@@ -92,6 +92,8 @@ pub struct Judged<'a> {
     resolved: Vec<Vec<usize>>,
     /// Every callee the calls resolved to, once.
     callees: Vec<Callee>,
+    /// Per callee, whether a call to it may store into any global.
+    stores: Vec<bool>,
     /// Per body, the globals it or a callee stores into, joined in the same
     /// fixpoint.
     writes: Vec<std::collections::BTreeSet<String>>,
@@ -106,6 +108,9 @@ impl Judged<'_> {
             let Callee::Bodies(idx) = &self.callees[*k] else {
                 continue;
             };
+            if !self.stores[*k] {
+                continue;
+            }
             let gs: std::collections::BTreeSet<&String> =
                 idx.iter().flat_map(|j| &self.writes[*j]).collect();
             if !gs.is_empty() && !out.iter().any(|(m, _)| *m == c.callee) {
@@ -182,6 +187,18 @@ pub fn walk_frames(bodies: &[&Body]) -> Vec<Walked> {
     out
 }
 
+/// A frame's effect set and the globals it may store to.
+struct Fact(Effects, std::collections::BTreeSet<String>);
+
+impl crate::fixpoint::Lattice for Fact {
+    fn join(&mut self, o: &Fact) -> bool {
+        let before = (self.0, self.1.len());
+        self.0 = self.0.join(o.0);
+        self.1.extend(o.1.iter().cloned());
+        (self.0, self.1.len()) != before
+    }
+}
+
 /// Returns the effect set of every frame in `frames`, to a fixpoint.
 /// `resolve` says what a callee name is; `through` says what a function type
 /// may hold, for a call through a local.
@@ -190,7 +207,7 @@ pub fn judge<'a>(
     resolve: &mut dyn FnMut(&str) -> Callee,
     through: &mut dyn FnMut(&Type) -> Callee,
 ) -> Judged<'a> {
-    let mut own: Vec<Effects> = Vec::with_capacity(frames.len());
+    let mut own: Vec<Fact> = Vec::with_capacity(frames.len());
     let mut edges: Vec<Vec<usize>> = Vec::with_capacity(frames.len());
     let mut unknown = Vec::new();
     let mut empty = Vec::new();
@@ -199,6 +216,9 @@ pub fn judge<'a>(
     let mut callees: Vec<Callee> = Vec::new();
     let mut named: HashMap<&str, usize> = HashMap::new();
     let mut typed: HashMap<&Type, usize> = HashMap::new();
+    // The frame (plus one) whose edges last took a callee's bodies: many calls
+    // to one callee add them once.
+    let mut taken: Vec<usize> = Vec::new();
     for (i, f) in frames.iter().enumerate() {
         let mut e = f.own;
         let mut to: Vec<usize> = Vec::new();
@@ -225,7 +245,12 @@ pub fn judge<'a>(
             let callee = &callees[k];
             match callee {
                 Callee::Atom(a) => e = e.join(*a),
-                Callee::Bodies(idx) => to.extend(idx.iter().copied()),
+                Callee::Bodies(idx) => {
+                    taken.resize(taken.len().max(k + 1), 0);
+                    if std::mem::replace(&mut taken[k], i + 1) != i + 1 {
+                        to.extend(idx.iter().copied());
+                    }
+                }
                 Callee::Pure => {}
                 Callee::Empty => empty.push((i, c.callee.clone(), c.line)),
                 Callee::Unknown => unknown.push((i, c.callee.clone(), c.line)),
@@ -241,32 +266,22 @@ pub fn judge<'a>(
         to.extend(f.lambdas.iter().map(|d| i + d));
         to.sort_unstable();
         to.dedup();
-        own.push(e);
+        own.push(Fact(e, f.writes.clone()));
         edges.push(to);
         resolved.push(ids);
     }
-    let writes: Vec<std::collections::BTreeSet<String>> =
-        frames.iter().map(|f| f.writes.clone()).collect();
     // Effect sets and the program's globals are finite, so the joins end.
-    let solved = crate::fixpoint::solve(
-        own.into_iter().zip(writes).collect(),
-        &edges,
-        |i, v| {
-            let mut out = (Effects::PURE, std::collections::BTreeSet::new());
-            for &j in &edges[i] {
-                out.0 = out.0.join(v[j].0);
-                out.1.extend(v[j].1.iter().cloned());
-            }
-            out
-        },
-        |old, (e, w), _| {
-            let before = (old.0, old.1.len());
-            old.0 = old.0.join(e);
-            old.1.extend(w);
-            (old.0, old.1.len()) != before
-        },
-    );
-    let (effects, writes) = solved.into_iter().unzip();
+    let (effects, writes): (Vec<_>, Vec<std::collections::BTreeSet<String>>) =
+        crate::fixpoint::solve(own, &edges)
+            .into_iter()
+            .map(|Fact(e, w)| (e, w))
+            .unzip();
+    let stores = (callees.iter())
+        .map(|c| match c {
+            Callee::Bodies(idx) => idx.iter().any(|j| !writes[*j].is_empty()),
+            _ => false,
+        })
+        .collect();
     Judged {
         effects,
         unknown,
@@ -275,6 +290,7 @@ pub fn judge<'a>(
         frames,
         resolved,
         callees,
+        stores,
         writes,
     }
 }
