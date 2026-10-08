@@ -506,6 +506,20 @@ jobs:
         run: |
           & powershell -NoProfile -ExecutionPolicy Bypass -File install-test.ps1
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: The compiler's allocations per phase, and their growth
+        if: runner.os == 'Windows'
+        working-directory: compiler
+        # Last, because `--features allocs` rebuilds `vyrn-cli` and replaces
+        # the `target/release/vyrn` the steps above use. Windows only, on the
+        # release profile this job already builds. The pin holds Windows
+        # counts, which the maintainers re-pin locally with `VYRN_PIN=write`;
+        # the standard library allocates differently on each OS.
+        # `compiler_scaling` compares ratios and would run anywhere, but the
+        # feature rebuild is not free, so it runs here and not on the other
+        # three legs.
+        run: >-
+          cargo test --quiet --release -p vyrn-cli --features allocs
+          --test compiler_allocs --test compiler_scaling -- --ignored --nocapture
 
   judgments:
     name: the judgments over the corpus (kernel, effects, typed, core tables)

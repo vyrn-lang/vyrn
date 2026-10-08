@@ -210,7 +210,13 @@ fn add_native_clang_flags(cmd: &mut Command, target: NativeTarget) {
     }
 }
 
-/// The compiler is allocation-bound; see `mimalloc` in `Cargo.toml`.
+/// The compiler is allocation-bound; see `mimalloc` in `Cargo.toml`. The `allocs`
+/// feature adds the per-phase counter.
+#[cfg(feature = "allocs")]
+#[global_allocator]
+static GLOBAL: vyrn_frontend::prof::Counting<mimalloc::MiMalloc> =
+    vyrn_frontend::prof::Counting(mimalloc::MiMalloc);
+#[cfg(not(feature = "allocs"))]
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
@@ -220,6 +226,8 @@ fn main() -> ExitCode {
     std::thread::Builder::new()
         .stack_size(vyrn_frontend::trap::DEEP_STACK_BYTES)
         .spawn(|| {
+            #[cfg(feature = "allocs")]
+            vyrn_frontend::prof::start_allocs();
             let code = real_main();
             // The phases are thread-local, so the table prints on the thread
             // that did the build.

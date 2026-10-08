@@ -554,3 +554,37 @@ pub fn census_spans<'a>(
     }
     out
 }
+
+/// Runs `vyrn args` in `cwd` on one thread with the allocation counter armed and
+/// returns its table as `(phase, allocations, bytes requested)`, in the table's order. Needs a
+/// binary built with `--features allocs`. `cache` is the generator cache: a
+/// warm cache is the only state a run may start from, so callers run twice.
+pub fn alloc_phases(args: &[&str], cwd: &Path, cache: &Path) -> Vec<(String, u64, u64)> {
+    let out = vyrn()
+        .args(args)
+        .current_dir(cwd)
+        .env("VYRN_BUILD_PROFILE", "allocs")
+        .env("VYRN_THREADS", "1")
+        .env("VYRN_GEN_CACHE_DIR", cache)
+        .output()
+        .expect("run vyrn");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "vyrn {args:?} failed:\n{err}");
+    let (_, table) = err
+        .split_once("alloc phase")
+        .unwrap_or_else(|| panic!("vyrn {args:?} printed no allocation table:\n{err}"));
+    table
+        .lines()
+        .skip(1)
+        .filter_map(|line| {
+            // `reallocs` and `frees` sit between the count and the bytes. Phase names hold spaces.
+            let cells: Vec<&str> = line.split_whitespace().collect();
+            let n = cells.len().checked_sub(4).filter(|&n| n > 0)?;
+            Some((
+                cells[..n].join(" "),
+                cells[n].parse().ok()?,
+                cells[n + 3].parse().ok()?,
+            ))
+        })
+        .collect()
+}

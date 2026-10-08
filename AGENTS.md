@@ -131,6 +131,8 @@ cargo test --release --manifest-path vyrn-play/Cargo.toml
 VYRN_WASM_MANIFEST=check cargo nextest run --release -p vyrn-cli --no-fail-fast \
   --status-level fail --success-output final --run-ignored only \
   -E 'binary(kernel) | binary(effects) | binary(typed) | binary(coretables) | binary(coredrive) | binary(wasmhash) | binary(parallel) | binary(recheck) | binary(testsweep) | binary(shapesweep)'
+cargo nextest run --release -p vyrn-cli --features allocs --no-fail-fast \
+  --status-level fail --run-ignored only -E 'binary(compiler_allocs) | binary(compiler_scaling)'
 sh ../scripts/check-corpus.sh <main's tree> <out-base>
 sh ../scripts/check-corpus.sh .. <out-head>
 diff -r <out-base> <out-head>
@@ -138,6 +140,7 @@ diff -r <out-base> <out-head>
 The workspace line runs every crate's tests, not only the CLI's: CI does, and a slice that ran `-p vyrn-cli` alone missed 38 failures in `vyrn-frontend` and `vyrn-play` (#545). CI does not run `coredrive`; with one walk it runs unsharded in about 150 s.
 `shapesweep` generates every ownership shape of a store, a read and a removal and runs each accepted one under the free audit on both engines. Measured on 2026-10-08 with other tracks building: 135 s and 144 s on 12 threads, 231 s at the worst load. Its failures are held to `tests/pins/shapesweep-known.tsv`. A failure the list does not name fails the gate. `VYRN_PIN=write` deletes the rows that no longer fail and refuses to add one.
 `check-corpus.sh` refuses to run while a tree holds an untracked `.vyrn` file under a corpus root, and prints it. Delete or commit the file first; a stray root makes the two trees differ.
+The `allocs` line builds `vyrn` with the allocation counter (`VYRN_BUILD_PROFILE=allocs`), which the default build omits because it costs 2.5 to 3.7 percent of a build. Measured on 2026-10-08: 7 s for the two tests, plus 70 s for the first rebuild of `vyrn-cli`. `compiler_allocs` holds each phase's allocation count to `pins/compiler-allocs.tsv` within 1 percent; a count only shrinks, so re-pin with `VYRN_PIN=write` when one falls. The pin holds Windows counts: `compiler_allocs` skips on another OS, and CI runs both tests on the Windows leg of `checks` only. `compiler_scaling` fails when a phase grows more than 4.6 times for 4 times the input; a phase it names in `KNOWN` stays until it is fixed.
 Add what the change touches:
 - `std/`: `target/release/vyrn doc --std -o ../docs/api --verify`, and commit what it regenerates. Then, from the root, the step "The site's own tests" in `.github/workflows/site.yml`: `compiler/target/release/vyrn test` on `site/export.vyrn` and each `site/app/*.vyrn`, after `python3 scripts/site-history.py > site/data/history.json`. A std module doc is its reference page's description, and the site tests pin it.
 - The lexer's reserved words: `node --test "web/test/*.test.mjs" "editor/vscode/test/*.test.mjs"`; the editor grammar's keywords must equal the lexer's.
