@@ -1497,8 +1497,14 @@ fn why_cost(flags: GlobalFlags, file: &str) -> Outcome {
         let mut shown: BTreeMap<(u32, u8), (&str, u32, Vec<(String, usize)>)> = BTreeMap::new();
         for f in &facts {
             let (slot, order, verb, what) = match &f.kind {
-                Kind::Copy(Copied::Value) => (2, 0, "copies", "a value".to_string()),
-                Kind::Copy(Copied::Render) => (2, 0, "copies", "a String render".to_string()),
+                Kind::Copy { what, implicit } => {
+                    let what = match what {
+                        Copied::Value => "a value",
+                        Copied::Render => "a String render",
+                    };
+                    let how = if *implicit { " (implicit)" } else { "" };
+                    (2, 0, "copies", format!("{what}{how}"))
+                }
                 Kind::Alloc(w) => (0, 1, "allocates", w.clone()),
                 Kind::Enters(c, from) => (0, 2, "enters", format!("{c}(..) in {}", named(from))),
                 Kind::Grows(b) => (1, 3, "grows", format!("{b}(..)")),

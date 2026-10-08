@@ -30,7 +30,11 @@ pub enum Kind {
     /// A rebuilding builtin (`push`, `tally`, `reserve`): a block only when
     /// the capacity runs out. The payload is the builtin's name.
     Grows(String),
-    Copy(Copied),
+    /// A copy; `implicit` when the core made it where the reader wrote none.
+    Copy {
+        what: Copied,
+        implicit: bool,
+    },
     Check {
         raises: Raises,
         kept: bool,
@@ -132,8 +136,11 @@ fn row_kind(
     world: &World,
     frame: &Body,
 ) -> Option<Kind> {
-    if let Some(c) = rhs.copies(names) {
-        return Some(Kind::Copy(c));
+    if let Some(what) = rhs.copies(names) {
+        // A render of a String copies it by construction.
+        let implicit =
+            what == Copied::Render || bound.is_some_and(|n| names[n.index()].implicit_copy);
+        return Some(Kind::Copy { what, implicit });
     }
     if let Rhs::Call { callee, kind, .. } = rhs {
         if grows(callee) {

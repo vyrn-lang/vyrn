@@ -117,6 +117,9 @@ pub struct NameInfo {
     /// Whether a `let` the reader wrote bound this name, which makes it a
     /// binding the memory report is about.
     pub bound_by_let: bool,
+    /// Whether this name holds a copy the core made where the reader wrote
+    /// none (`vyrn_lower::core::Builder::copy_rhs`).
+    pub implicit_copy: bool,
     /// Whether the reader may store into the name: a `let mut` or a `modify`
     /// parameter (`vyrn_lower::typed::stores`).
     pub mutable: bool,

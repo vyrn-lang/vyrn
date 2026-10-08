@@ -20,21 +20,21 @@ fn pack(frag: String) -> Int64
   114           allocates  bytes(..)
 fn fixed3(x: Float64) -> String
   124           allocates  render
-  126  loop 1   copies     a String render
+  126  loop 1   copies     a String render (implicit)
        loop 1   allocates  concatenation
-  128           copies     a String render
+  128           copies     a String render (implicit)
                 allocates  render, concatenation x2
 fn ranked(m: Map<Int64, Int64>) -> Array<Entry>
   152           allocates  keys(..)
   157  loop 1   grows      push(..)
 fn report(seq: Array<UInt8>, k: Int64) -> Unit
-  169  loop 1   copies     a String render x2
+  169  loop 1   copies     a String render (implicit) x2
        loop 1   allocates  concatenation x2
 fn syntheticSequence(n: Int64) -> Array<UInt8>
   196           allocates  bytes(..)
   202  loop 1   grows      push(..)
        loop 1   check kept array-index
 fn main() -> Int64
-  223  loop 1   copies     a String render
+  223  loop 1   copies     a String render (implicit)
        loop 1   allocates  render, concatenation x2
 summary: allocating rows 20 (9 in loops), growing rows 6 (5 in loops), copies 5 (4 in loops), checks kept 3 (3 in loops), checks proved 19 (14 in loops)

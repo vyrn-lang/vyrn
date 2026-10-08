@@ -1,9 +1,9 @@
 examples/nbody.vyrn
 fn fixed9(v: Float64) -> String
    53           allocates  render
-   55  loop 1   copies     a String render
+   55  loop 1   copies     a String render (implicit)
        loop 1   allocates  concatenation
-   57           copies     a String render x2
+   57           copies     a String render (implicit) x2
                 allocates  render, concatenation x3
 fn system() -> Array<Body>
    74           grows      push(..)

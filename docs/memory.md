@@ -218,13 +218,14 @@ reason when it is not. A binding whose type owns no heap has no row.
 
 `vyrn why --cost <file>` prints, per function, the lines that allocate, copy,
 grow a container, enter an allocating function of another file or keep a
-check, and how many loops enclose them. A function with none prints nothing.
+check, and how many loops enclose them. A copy the compiler makes where the
+program wrote none reads `(implicit)`. A function with none prints nothing.
 An excerpt from `examples/nbody.vyrn`:
 
 ```
 fn fixed9(v: Float64) -> String
    53           allocates  render
-   55  loop 1   copies     a String render
+   55  loop 1   copies     a String render (implicit)
                 allocates  concatenation
 fn offsetMomentum(bodies: Array<Body>) -> Array<Body>
   129           check kept array-index

@@ -195,7 +195,8 @@ compile, except `--contract`.
   depth, else the file's directory. Exits 1 if the file has no role.
 - `vyrn why --cost <file>`: per function of the file, the lines that allocate,
   copy, grow a container, enter an allocating function of another file or keep
-  a check, with the loop depth of each, and a summary. A call into a function of
+  a check, with the loop depth of each, and a summary. A copy the compiler
+  makes where the program wrote none reads `(implicit)`. A call into a function of
   another file counts that function's allocations at the calling line. A
   function with nothing to report is left out. The LSP's hover keeps the
   per-binding memory rows.
