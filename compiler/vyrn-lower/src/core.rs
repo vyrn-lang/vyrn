@@ -720,8 +720,8 @@ fn judged(facts: &NodeTypes<'_>, own: &Ownership, sp: &Speech) -> Vec<(usize, St
                 if !decls.contains_key(name) {
                     return Some(rule!(UnknownType, n = name).render());
                 }
-                let declared =
-                    vyrn_frontend::types::record_fields(&Type::Named(name.clone()), decls);
+                let named = Type::Named(name.clone());
+                let declared = vyrn_frontend::types::record_fields(&named, decls);
                 let ([], [name]) = sp.say([], [name]);
                 let Some(declared) = declared else {
                     return Some(rule!(NotRecordType, name).render());
@@ -825,11 +825,11 @@ fn unbound(
     use vyrn_frontend::types::{self, SHOW};
     let decls = own.proto.types();
     let fails = |t: &Type, bound: &str| {
-        let base = types::resolve(t, decls);
+        let base = types::resolved(t, decls);
         match bound {
             HEAPLESS => vyrn_frontend::declared::owns_heap(&base, decls),
             DECODABLE => vyrn_frontend::codec::decodable(&base, decls).is_err(),
-            SHOW => match &base {
+            SHOW => match &*base {
                 Type::Param(p) => !outer.get(p).is_some_and(|bs| bs.iter().any(|b| b == SHOW)),
                 _ => !types::renders(&base) && types::show_dispatch(impls, t, &base).is_none(),
             },
@@ -4726,7 +4726,7 @@ impl<'a> Builder<'a> {
         };
         let decls = self.proto.types();
         let bt = self.ty_of(base).ok()?;
-        let Type::Record(fields) = vyrn_frontend::types::resolve(&bt, &decls) else {
+        let Type::Record(fields) = &*vyrn_frontend::types::resolved(&bt, &decls) else {
             return None;
         };
         let f = fields.iter().find(|f| &f.name == field)?;
@@ -7563,8 +7563,7 @@ fn ruled_steps(own: &Owned, ty: &Type, path: &[&Place]) -> Vec<(usize, String)> 
         }
         let next = match (step, vyrn_frontend::types::resolve(&at, decls)) {
             (Place::Field(_, f), _) => vyrn_frontend::types::record_fields(&at, decls)
-                .and_then(|fs| fs.into_iter().find(|x| &x.name == f))
-                .map(|x| x.ty),
+                .and_then(|fs| fs.iter().find(|x| &x.name == f).map(|x| x.ty.clone())),
             (Place::Elem(..), t) => t.elem().cloned(),
             (Place::Key(..), Type::Map(_, v)) => Some(*v),
             _ => None,

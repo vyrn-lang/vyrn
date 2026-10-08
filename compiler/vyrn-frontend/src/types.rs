@@ -1101,7 +1101,7 @@ fn size_go(
         }
         seen.push(k.clone());
     }
-    let resolved;
+    let r;
     let t = match ty {
         Type::Named(_)
         | Type::App(..)
@@ -1109,8 +1109,8 @@ fn size_go(
         | Type::Pick(..)
         | Type::Merge(..)
         | Type::Partial(_) => {
-            resolved = resolve(ty, types);
-            &resolved
+            r = resolved(ty, types);
+            &*r
         }
         other => other,
     };
@@ -1371,8 +1371,8 @@ pub fn resolved<'a>(ty: &'a Type, types: &'a dyn Decls) -> Cow<'a, Type> {
 /// one for anything else, boxed if wider. Structural rather than asking the
 /// LLVM shape, which would loop on `type R = { a: Int64, b: Option<R> }`.
 pub fn payload_words(ty: &Type, types: &dyn Decls) -> usize {
-    let word = |t: &Type| matches!(resolve(t, types), Type::Int | Type::IntN { bits: 64, .. });
-    match resolve(ty, types) {
+    let word = |t: &Type| matches!(*resolved(t, types), Type::Int | Type::IntN { bits: 64, .. });
+    match &*resolved(ty, types) {
         Type::Fn(..) | Type::Lazy(_) => 2,
         Type::Record(fs) if fs.len() == 2 && fs.iter().all(|f| word(&f.ty)) => 2,
         _ => 1,
@@ -1387,7 +1387,7 @@ pub fn payload_boxed(ty: &Type, types: &dyn Decls) -> bool {
         return false;
     }
     !matches!(
-        resolve(ty, types),
+        *resolved(ty, types),
         Type::Int
             | Type::IntN { bits: 64, .. }
             | Type::Bool
@@ -1399,9 +1399,10 @@ pub fn payload_boxed(ty: &Type, types: &dyn Decls) -> bool {
 }
 
 /// The fields of `ty` if it resolves to a record.
-pub fn record_fields(ty: &Type, types: &dyn Decls) -> Option<Vec<Field>> {
-    match resolve(ty, types) {
-        Type::Record(f) => Some(f),
+pub fn record_fields<'a>(ty: &'a Type, types: &'a dyn Decls) -> Option<Cow<'a, [Field]>> {
+    match resolved(ty, types) {
+        Cow::Borrowed(Type::Record(f)) => Some(Cow::Borrowed(f)),
+        Cow::Owned(Type::Record(f)) => Some(Cow::Owned(f)),
         _ => None,
     }
 }

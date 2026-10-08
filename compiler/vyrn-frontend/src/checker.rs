@@ -3208,10 +3208,9 @@ impl<'a> Checker<'a> {
                 match leaf {
                     Step::Field(field) => {
                         let ruled = matches!(&bty, Type::Named(n) if self.decl(n).is_some_and(|d| d.predicate.is_some()));
-                        let Some(fty) = crate::types::record_fields(&bty, self)
-                            .and_then(|fs| fs.into_iter().find(|f| &f.name == field))
-                            .map(|f| f.ty)
-                        else {
+                        let Some(fty) = crate::types::record_fields(&bty, self).and_then(|fs| {
+                            fs.iter().find(|f| &f.name == field).map(|f| f.ty.clone())
+                        }) else {
                             return Ok(());
                         };
                         let vty = self.expr(value, scope, Some(&fty), Some(ret))?;
@@ -4017,8 +4016,8 @@ impl<'a> Checker<'a> {
         if decl.is_none() && !(name == "Token" && self.frame.borrow().in_gen) {
             return self.judged();
         }
-        let Some(rfields) = crate::types::record_fields(&Type::Named(name.to_string()), self)
-        else {
+        let named = Type::Named(name.to_string());
+        let Some(rfields) = crate::types::record_fields(&named, self) else {
             return self.judged();
         };
         let mut provided = std::collections::HashSet::new();
@@ -4049,7 +4048,7 @@ impl<'a> Checker<'a> {
         }
         // Solve in declared field order, the order the backends emit and
         // solve in; the literal's order would answer differently.
-        for field in &rfields {
+        for field in rfields.iter() {
             let Some((_, value)) = fields.iter().find(|(fname, _)| fname == &field.name) else {
                 continue; // reported below as a missing field
             };

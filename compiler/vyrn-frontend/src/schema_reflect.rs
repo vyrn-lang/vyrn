@@ -328,7 +328,11 @@ fn push_node(
         let pred = d.predicate.as_ref().map(crate::checker::pred_summary);
         return push_node(&d.base, pred, types, nodes);
     }
-    let fields = |fs: Vec<Field>| fs.into_iter().map(|f| (f.name, vec![f.ty])).collect();
+    let fields = |fs: &[Field]| {
+        fs.iter()
+            .map(|f| (f.name.clone(), vec![f.ty.clone()]))
+            .collect()
+    };
     let (kind, name, args, members): (&str, &str, Vec<Type>, Vec<(String, Vec<Type>)>) = match ty {
         Type::Int
         | Type::IntN { .. }
@@ -344,10 +348,10 @@ fn push_node(
             ("array", "", vec![(**e).clone()], Vec::new())
         }
         Type::Map(k, v) => ("map", "", vec![(**k).clone(), (**v).clone()], Vec::new()),
-        Type::Record(fs) => ("record", "", Vec::new(), fields(fs.clone())),
+        Type::Record(fs) => ("record", "", Vec::new(), fields(fs)),
         Type::Omit(..) | Type::Pick(..) | Type::Merge(..) | Type::Partial(..) => {
             let fs = crate::types::record_fields(ty, types).unwrap_or_default();
-            ("record", "", Vec::new(), fields(fs))
+            ("record", "", Vec::new(), fields(&fs))
         }
         Type::Enum(vs) => match (
             crate::types::option_payload(ty),

@@ -187,7 +187,7 @@ impl Owned {
             if let Type::Named(n) | Type::App(n, _) = ty {
                 if !seen.contains(n) && o.types.contains_key(n) {
                     seen.push(n.clone());
-                    go(o, &crate::types::resolve(ty, &o.types), seen, out);
+                    go(o, &crate::types::resolved(ty, &o.types), seen, out);
                 }
                 return;
             }
@@ -342,7 +342,7 @@ fn self_referring_past(
                 return None;
             }
             seen.push(n.clone());
-            let r = go(&crate::types::resolve(ty, types), types, stops, seen);
+            let r = go(&crate::types::resolved(ty, types), types, stops, seen);
             seen.pop();
             return r;
         }

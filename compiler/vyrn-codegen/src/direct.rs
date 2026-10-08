@@ -1343,7 +1343,7 @@ impl<'a> Cx<'a> {
     }
 
     fn fields(&self, ty: &Type) -> Option<Vec<Field>> {
-        ftypes::record_fields(&self.sub(ty), &self.types)
+        ftypes::record_fields(&self.sub(ty), &self.types).map(std::borrow::Cow::into_owned)
     }
 
     /// The signature a call site sees. `index` is filled in by the caller, which
