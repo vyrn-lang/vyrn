@@ -393,5 +393,7 @@ The audit is a test instrument, not a language rule. `tests/residue.rs` runs
 every corpus program under it on both engines against a baseline of `clean`,
 `leak N` and `other` rows. A double free fails whatever the baseline says; a
 `clean` row that leaks fails; a `leak N` row may only shrink. `tests/memory.rs`
-runs selected shapes under it. The audit stays until the kernel has a second
-oracle that catches what the audit catches.
+runs selected shapes under it, and `tests/shapesweep.rs` generates the shapes of
+stores, reads and removals and runs each accepted one under it on both engines.
+The audit stays until the kernel has a second oracle that catches what the
+audit catches.

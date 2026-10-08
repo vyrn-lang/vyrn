@@ -652,6 +652,18 @@ jobs:
         # engine leg still measures the same module, so the ratchet is not
         # hostage to a platform nobody has pinned wabt for.
         run: cargo test --quiet --release -p vyrn-cli --test residue -- --ignored --nocapture
+      - name: The ownership shape sweep
+        working-directory: compiler
+        # Every ownership shape of a store, a read and a removal, filtered by
+        # `vyrn check` and run under `VYRN_LEAK_CHECK=1` on `vyrn run` and on
+        # the route's own executable, each against the digest the generator
+        # computed. Failures are held to `tests/pins/shapesweep-known.tsv`: a
+        # new one fails here, and a row that no longer fails is reported.
+        #
+        # It is here and not in the ignored-suites job for the residue
+        # ratchet's reason: the route leg needs clang, wabt and simde. The leg
+        # SKIPS where they are missing.
+        run: cargo test --quiet --release -p vyrn-cli --test shapesweep -- --ignored --nocapture
       - name: Keep fnvalarg's route build and any refused module when the job fails (#444)
         # fnvalarg flakes on Linux only; the residue scratch survives a failure.
         if: failure()
