@@ -12,6 +12,7 @@
 //! [`Cert::verify`] checks that sum again in `i128`, sharing no code with the
 //! search.
 
+use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use vyrn_frontend::core::Name;
@@ -79,13 +80,34 @@ impl Lin {
     }
 
     pub fn add(&self, o: &Lin) -> Option<Lin> {
-        let mut terms: BTreeMap<Term, i64> = self.terms.iter().copied().collect();
-        for (t, k) in &o.terms {
-            let e = terms.entry(*t).or_insert(0);
-            *e = e.checked_add(*k)?;
+        let (a, b) = (&self.terms, &o.terms);
+        let mut terms = Vec::with_capacity(a.len() + b.len());
+        let (mut i, mut j) = (0, 0);
+        while i < a.len() && j < b.len() {
+            let (x, y) = (a[i], b[j]);
+            let (t, k) = match x.0.cmp(&y.0) {
+                Ordering::Less => {
+                    i += 1;
+                    x
+                }
+                Ordering::Greater => {
+                    j += 1;
+                    y
+                }
+                Ordering::Equal => {
+                    i += 1;
+                    j += 1;
+                    (x.0, x.1.checked_add(y.1)?)
+                }
+            };
+            if k != 0 {
+                terms.push((t, k));
+            }
         }
+        terms.extend_from_slice(&a[i..]);
+        terms.extend_from_slice(&b[j..]);
         Some(Lin {
-            terms: terms.into_iter().filter(|(_, k)| *k != 0).collect(),
+            terms,
             c: self.c.checked_add(o.c)?,
         })
     }
