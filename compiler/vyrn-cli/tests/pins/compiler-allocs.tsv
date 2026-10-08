@@ -25,7 +25,7 @@ build site/export.vyrn	placer: core::build	4439
 build site/export.vyrn	placer: build: first	2582736
 build site/export.vyrn	placer: build: seeded	1277064
 build site/export.vyrn	placer: build_outside	848
-build site/export.vyrn	placer: effects	74193
+build site/export.vyrn	placer: effects	73393
 build site/export.vyrn	placer: kernel::placement	774261
 build site/export.vyrn	placer: report	30719
 build site/export.vyrn	placer: facts rebuild	277786
@@ -61,7 +61,7 @@ check site/export.vyrn	placer: core::build	4439
 check site/export.vyrn	placer: build: first	1491433
 check site/export.vyrn	placer: build: seeded	645017
 check site/export.vyrn	placer: build_outside	848
-check site/export.vyrn	placer: effects	74193
+check site/export.vyrn	placer: effects	73393
 check site/export.vyrn	placer: kernel::placement	774261
 check site/export.vyrn	placer: report	30719
 check site/export.vyrn	placer: facts rebuild	1950
@@ -118,7 +118,7 @@ check examples/vlog.vyrn	placer: core::build	634
 check examples/vlog.vyrn	placer: build: first	146987
 check examples/vlog.vyrn	placer: build: seeded	44068
 check examples/vlog.vyrn	placer: build_outside	169
-check examples/vlog.vyrn	placer: effects	6105
+check examples/vlog.vyrn	placer: effects	6098
 check examples/vlog.vyrn	placer: kernel::placement	48669
 check examples/vlog.vyrn	placer: report	3484
 check examples/vlog.vyrn	placer: facts rebuild	249

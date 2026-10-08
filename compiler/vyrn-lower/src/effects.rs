@@ -187,6 +187,18 @@ pub fn walk_frames(bodies: &[&Body]) -> Vec<Walked> {
     out
 }
 
+/// A frame's effect set and the globals it may store to.
+struct Fact(Effects, std::collections::BTreeSet<String>);
+
+impl crate::fixpoint::Lattice for Fact {
+    fn join(&mut self, o: &Fact) -> bool {
+        let before = (self.0, self.1.len());
+        self.0 = self.0.join(o.0);
+        self.1.extend(o.1.iter().cloned());
+        (self.0, self.1.len()) != before
+    }
+}
+
 /// Returns the effect set of every frame in `frames`, to a fixpoint.
 /// `resolve` says what a callee name is; `through` says what a function type
 /// may hold, for a call through a local.
@@ -195,7 +207,7 @@ pub fn judge<'a>(
     resolve: &mut dyn FnMut(&str) -> Callee,
     through: &mut dyn FnMut(&Type) -> Callee,
 ) -> Judged<'a> {
-    let mut own: Vec<Effects> = Vec::with_capacity(frames.len());
+    let mut own: Vec<Fact> = Vec::with_capacity(frames.len());
     let mut edges: Vec<Vec<usize>> = Vec::with_capacity(frames.len());
     let mut unknown = Vec::new();
     let mut empty = Vec::new();
@@ -254,33 +266,16 @@ pub fn judge<'a>(
         to.extend(f.lambdas.iter().map(|d| i + d));
         to.sort_unstable();
         to.dedup();
-        own.push(e);
+        own.push(Fact(e, f.writes.clone()));
         edges.push(to);
         resolved.push(ids);
     }
-    let writes: Vec<std::collections::BTreeSet<String>> =
-        frames.iter().map(|f| f.writes.clone()).collect();
     // Effect sets and the program's globals are finite, so the joins end.
-    let solved = crate::fixpoint::solve(
-        own.into_iter().zip(writes).collect(),
-        &edges,
-        |i, v| {
-            let mut out = (Effects::PURE, std::collections::BTreeSet::new());
-            for &j in &edges[i] {
-                out.0 = out.0.join(v[j].0);
-                out.1.extend(v[j].1.iter().cloned());
-            }
-            out
-        },
-        |old, (e, w), _| {
-            let before = (old.0, old.1.len());
-            old.0 = old.0.join(e);
-            old.1.extend(w);
-            (old.0, old.1.len()) != before
-        },
-    );
-    let (effects, writes): (Vec<Effects>, Vec<std::collections::BTreeSet<String>>) =
-        solved.into_iter().unzip();
+    let (effects, writes): (Vec<_>, Vec<std::collections::BTreeSet<String>>) =
+        crate::fixpoint::solve(own, &edges)
+            .into_iter()
+            .map(|Fact(e, w)| (e, w))
+            .unzip();
     let stores = (callees.iter())
         .map(|c| match c {
             Callee::Bodies(idx) => idx.iter().any(|j| !writes[*j].is_empty()),
