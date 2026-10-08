@@ -296,3 +296,64 @@ fn verdict(
     }
     v
 }
+
+/// `vyrn run --profile` counts the operations each function executes at wasmtime's prices, minus
+/// the instrument's own. Their sum must equal the fuel `_start` spends in a plain, metered run of
+/// the same program (`VYRN_FUEL`).
+#[test]
+#[ignore = "the whole corpus, run twice; run explicitly: cargo test -p vyrn-cli --release --test residue -- --ignored"]
+fn the_profile_counts_the_operations_a_metered_run_spends() {
+    let dir = examples_dir();
+    let out_dir = scratch("opcount");
+    let corpus = corpus();
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let failures = std::sync::Mutex::new(Vec::new());
+    let threads = std::thread::available_parallelism().map_or(1, |n| n.get());
+    std::thread::scope(|s| {
+        for _ in 0..threads {
+            s.spawn(|| loop {
+                let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let Some(path) = corpus.get(i) else { break };
+                let name = path.file_stem().unwrap().to_string_lossy().to_string();
+                let stdin = path.with_extension("stdin");
+                let args = read_args(&path.with_extension("args"));
+                let log = out_dir.join(format!("{name}.fuel"));
+                let mut cmd = vyrn();
+                cmd.env("VYRN_FUEL", &log).arg("run").arg(path).args(&args);
+                run_io(cmd, &dir, &stdin);
+                let metered = std::fs::read_to_string(&log)
+                    .ok()
+                    .and_then(|t| t.trim().rsplit('\t').next()?.parse::<u64>().ok());
+                let mut cmd = vyrn();
+                cmd.arg("run").arg("--profile").arg(path).args(&args);
+                let err = norm(&run_io(cmd, &dir, &stdin).stderr);
+                let counted = err.lines().find_map(|l| {
+                    let rest = l.strip_prefix("run: ")?;
+                    rest.split(" operations")
+                        .next()?
+                        .replace(',', "")
+                        .parse::<u64>()
+                        .ok()
+                });
+                if metered.is_none() || metered != counted {
+                    failures
+                        .lock()
+                        .unwrap()
+                        .push(format!("{name}: metered {metered:?}, counted {counted:?}"));
+                }
+            });
+        }
+    });
+    let mut failures = failures.into_inner().unwrap();
+    failures.sort();
+    eprintln!(
+        "\nopcount: {} programs, {} failed",
+        corpus.len(),
+        failures.len()
+    );
+    assert!(
+        failures.is_empty(),
+        "the counts moved:\n{}",
+        failures.join("\n")
+    );
+}

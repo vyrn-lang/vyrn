@@ -190,7 +190,10 @@ check of the row after it: its trap rule, what it compares, and its line and
 ordinal. `core::checked` adds them to the bodies the emitter reads, and the
 emitter runs a check only from its row. `check::mode` reads `VYRN_CHECKS`:
 `keep` keeps every row, and a file path is the oracle, which counts each row's
-runs into that file and fails a run where a proved row would have trapped.
+runs into that file and fails a run where a proved row would have trapped. The
+count is in the module: each row is a counter row of the site table
+(`vyrn:sites`), as the profile's sites are, so `vyrn_check.fail` is the oracle's
+only host import.
 `scripts/check-elision.sh` runs the examples, the benchmarks and the site
 export in all three modes. `elide::decide` marks a row proved when linear
 facts over one body's own names (`facts`) show it cannot fail, with a
@@ -445,6 +448,7 @@ Rust style).
 | `VYRN_THREADS=<n>` | types, walks, builds and places bodies on `n` threads; `1` keeps a trace in body order |
 | `VYRN_SHUFFLE=<seed>` | permutes the order the checker's, the lowering's and the placer's threads take bodies in |
 | `VYRN_LEAK_CHECK=1` | builds with the free audit |
+| `VYRN_FUEL=<file>` | meters `vyrn run` and appends the fuel `_start` spent, tab-separated from the program's name |
 | `VYRN_WASM_NAMES=1` | writes function names into the module |
 | `VYRN_GENWASM_TRACE=1` | prints the generation engine's phase timings |
 | `VYRN_TYPED_DUMP=<file>:<fn>` | prints one body's judged stores (`typed.rs`) |

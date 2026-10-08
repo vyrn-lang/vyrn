@@ -2,7 +2,7 @@
 //! by the embedded wasmtime. The WASI host is `vyrn_genwasm::wasi`'s, with the
 //! working directory as the ambient root: the setup of `wasmtime run --dir .
 //! --env ..`. This file adds the terminal's refusal of an `extern` import (see
-//! [`open`]), the check oracle's imports, and the resident instance `serve`
+//! [`open`]), the check oracle's import, and the resident instance `serve`
 //! answers on.
 
 use std::io::Write;
@@ -25,11 +25,22 @@ pub struct Outcome {
     pub counts: Option<Counts>,
 }
 
+/// What one function did: the calls it received and the operations its own body executed, as
+/// wasmtime's fuel meter counts them. `name` is empty for a function the emitter did not name.
+pub struct FnCount {
+    pub name: String,
+    pub calls: u64,
+    pub ops: u64,
+}
+
 /// The profile instrument's counters, read from the guest's memory after `_start`
 /// ([`vyrn_codegen::direct`]'s `Profile`). `sites[0]` holds the blocks made before any site
 /// ran, with no function, line or verb.
 pub struct Counts {
     pub sites: Vec<SiteCount>,
+    /// Every function that ran, in the module's order. The instrument's own are not here, and
+    /// the sum of `ops` is what the module executes without the instrument.
+    pub fns: Vec<FnCount>,
     /// The most bytes live at once.
     pub peak: u32,
     /// Blocks and bytes still live at exit, the arena's retained chunks excluded.
@@ -47,14 +58,11 @@ pub struct Run {
     /// Keeps the guest's standard error in [`Outcome::stderr`]; the test
     /// harness reads a trap's message out of it.
     pub capture_stderr: bool,
-    /// Times the phases and counts operations into [`Outcome::meter`], for
-    /// `vyrn run --profile`. Off by default: the fuel counter costs every block.
+    /// Times the phases into [`Outcome::meter`], for `vyrn run --profile`.
     pub meter: bool,
 }
 
-/// What a metered run measured: wall time per host phase and one count. No
-/// per-function row is possible without instrumenting the bytes, which would
-/// profile a program nobody ships.
+/// Wall time per host phase of a run.
 pub struct Meter {
     /// Cranelift compiling the module.
     pub translate: std::time::Duration,
@@ -62,21 +70,18 @@ pub struct Meter {
     pub instantiate: std::time::Duration,
     /// `_start`, from the call to the exit.
     pub run: std::time::Duration,
-    /// Operations the guest executed, as wasmtime counts fuel. The same number
-    /// on every machine and every run of the same program and input.
-    pub fuel: u64,
 }
 
-/// The check oracle's rows ([`check_rows`]) and each one's count of runs.
+/// The check oracle's rows: line `k` of the module's `vyrn:sites` section is site `k`'s, and
+/// line 0 the table's address.
 struct Oracle {
     checks: std::sync::Arc<Vec<String>>,
-    counts: Vec<u64>,
 }
 
 type Host = wasi::Guest<Oracle>;
 
 /// One engine per process, and a second, metered one: fuel is a counter the
-/// guest decrements in every block, so only `vyrn run --profile` pays for it.
+/// guest decrements in every block, so only a run under `VYRN_FUEL` pays for it.
 fn engine(metered: bool) -> &'static Engine {
     static PLAIN: std::sync::OnceLock<Engine> = std::sync::OnceLock::new();
     static METERED: std::sync::OnceLock<Engine> = std::sync::OnceLock::new();
@@ -112,8 +117,12 @@ fn host_trap(e: &wasmtime::Error) -> String {
 /// (`error: ..` on fd 2, then `proc_exit(1)`) is `Ok` with code 1.
 pub fn run(bytes: &[u8], run: Run) -> Result<Outcome, String> {
     let clock = std::time::Instant::now();
-    let module = compile(bytes, run.meter)?;
+    let fuel_log = std::env::var_os("VYRN_FUEL");
+    let module = compile(bytes, fuel_log.is_some())?;
     let (mut store, inst) = open(&module, &run, None)?;
+    // Instantiating charges the module's data span, so `_start`'s own fuel starts here.
+    let spent = |store: &Store<Host>| u64::MAX - store.get_fuel().unwrap_or(u64::MAX);
+    let instantiated = spent(&store);
     let translate = module.translate;
     let instantiate = clock.elapsed().saturating_sub(translate);
     let start = inst
@@ -130,19 +139,25 @@ pub fn run(bytes: &[u8], run: Run) -> Result<Outcome, String> {
             1
         }
     };
-    let counts = module
-        .sites
-        .as_ref()
-        .and_then(|sites| read_counts(sites, &inst, &mut store));
+    let counts = (module.sites.as_ref())
+        .and_then(|sites| read_counts(sites, module.fns.as_deref(), &inst, &mut store));
     let meter = run.meter.then(|| Meter {
         translate,
         instantiate,
         run: clock.elapsed(),
-        fuel: u64::MAX - store.get_fuel().unwrap_or(u64::MAX),
     });
+    if let Some(log) = fuel_log {
+        let fuel = spent(&store) - instantiated;
+        log_line(
+            Path::new(&log),
+            &format!("{}\t{fuel}\n", run.argv.first().map_or("", |a| a.as_str())),
+        )?;
+    }
     let host = store.into_data();
-    if let vyrn_lower::check::Mode::Count(log) = vyrn_lower::check::mode() {
-        log_checks(log, run.argv.first().map_or("", |a| a.as_str()), &host.x)?;
+    if let (vyrn_lower::check::Mode::Count(log), Some(counts)) =
+        (vyrn_lower::check::mode(), &counts)
+    {
+        log_checks(log, run.argv.first().map_or("", |a| a.as_str()), counts)?;
     }
     Ok(Outcome {
         code,
@@ -166,11 +181,10 @@ fn open(
         capture_stdout: run.capture_stdout,
         capture_stderr: run.capture_stderr,
         // A budget nothing exhausts: the counter is read, never a stop.
-        fuel: module.meter.then_some(u64::MAX),
+        fuel: module.metered.then_some(u64::MAX),
     };
     let oracle = Oracle {
         checks: module.checks.clone(),
-        counts: vec![0; module.checks.len()],
     };
     let gen = gen.unwrap_or_default();
     wasi::instantiate(&module.module, &policy, &run.argv, gen, oracle, |linker| {
@@ -192,12 +206,7 @@ fn open(
                 Err(wasi::Exit(1).into())
             })?;
         }
-        // The check oracle's imports ([`vyrn_lower::check::Mode::Count`]).
-        linker.func_wrap("vyrn_check", "hit", |mut c: Caller<'_, Host>, id: i32| {
-            if let Some(n) = c.data_mut().x.counts.get_mut(id as usize) {
-                *n += 1;
-            }
-        })?;
+        // The check oracle's import ([`vyrn_lower::check::Mode::Count`]).
         linker.func_wrap(
             "vyrn_check",
             "fail",
@@ -221,16 +230,20 @@ fn open(
 /// costs one Cranelift compile and N instantiations.
 pub struct Compiled {
     module: Module,
-    meter: bool,
+    metered: bool,
     translate: std::time::Duration,
     checks: std::sync::Arc<Vec<String>>,
     /// The `vyrn:sites` section: the counter table's address, then a row per site.
     sites: Option<String>,
+    /// The `vyrn:fns` section: the counter table's address, then a name per function.
+    fns: Option<String>,
 }
 
-pub fn compile(bytes: &[u8], meter: bool) -> Result<Compiled, String> {
+/// Translates `bytes`; `metered` makes the guest count fuel ([`run`]).
+pub fn compile(bytes: &[u8], metered: bool) -> Result<Compiled, String> {
     let clock = std::time::Instant::now();
-    let module = Module::new(engine(meter), bytes).map_err(|e| {
+    let sites = custom_section(bytes, "vyrn:sites");
+    let module = Module::new(engine(metered), bytes).map_err(|e| {
         // A module the engine refuses is a compiler defect, and the bytes are
         // its only evidence (#444).
         let kept = std::env::temp_dir().join(format!("vyrn-invalid-{}.wasm", std::process::id()));
@@ -244,13 +257,15 @@ pub fn compile(bytes: &[u8], meter: bool) -> Result<Compiled, String> {
     })?;
     Ok(Compiled {
         module,
-        meter,
+        metered,
         translate: clock.elapsed(),
         checks: std::sync::Arc::new(
-            custom_section(bytes, "vyrn:checks")
+            sites
+                .as_ref()
                 .map_or_else(Vec::new, |c| c.split('\n').map(str::to_string).collect()),
         ),
-        sites: custom_section(bytes, "vyrn:sites"),
+        sites,
+        fns: custom_section(bytes, "vyrn:fns"),
     })
 }
 
@@ -513,9 +528,15 @@ fn custom_section(bytes: &[u8], name: &str) -> Option<String> {
     None
 }
 
-/// Reads the profile table out of the guest's memory after `_start`: `sites` is the module's
-/// `vyrn:sites` text. `None` when the guest has no memory export or the table lies outside it.
-fn read_counts(sites: &str, inst: &wasmtime::Instance, store: &mut Store<Host>) -> Option<Counts> {
+/// Reads the counter tables out of the guest's memory after `_start`: `sites` and `fns` are the
+/// module's `vyrn:sites` and `vyrn:fns` text; an oracle build has no `fns`. `None` when the
+/// guest has no memory export or a table lies outside it.
+fn read_counts(
+    sites: &str,
+    fns: Option<&str>,
+    inst: &wasmtime::Instance,
+    store: &mut Store<Host>,
+) -> Option<Counts> {
     let mut lines = sites.split('\n');
     let table: usize = lines.next()?.parse().ok()?;
     let mem = inst.get_memory(&mut *store, "memory")?;
@@ -526,7 +547,7 @@ fn read_counts(sites: &str, inst: &wasmtime::Instance, store: &mut Store<Host>) 
     };
     let mut out = Vec::new();
     for (k, row) in std::iter::once("").chain(lines).enumerate() {
-        let mut f = row.split('\t');
+        let mut f = row.splitn(3, '\t');
         let at = table + 16 + 32 * k;
         out.push(SiteCount {
             function: f.next()?.to_string(),
@@ -538,8 +559,24 @@ fn read_counts(sites: &str, inst: &wasmtime::Instance, store: &mut Store<Host>) 
             live: word(at + 24, 8)?,
         });
     }
+    let mut ran = Vec::new();
+    if let Some(fns) = fns {
+        let mut names = fns.split('\n');
+        let rows: usize = names.next()?.parse().ok()?;
+        for (k, name) in names.enumerate() {
+            let (calls, ops) = (word(rows + 16 * k, 8)?, word(rows + 16 * k + 8, 8)?);
+            if calls > 0 || ops > 0 {
+                ran.push(FnCount {
+                    name: name.to_string(),
+                    calls,
+                    ops,
+                });
+            }
+        }
+    }
     Some(Counts {
         sites: out,
+        fns: ran,
         peak: word(table, 4)? as u32,
         live_blocks: word(table + 4, 4)? as u32,
         live_bytes: word(table + 8, 4)? as u32,
@@ -547,19 +584,25 @@ fn read_counts(sites: &str, inst: &wasmtime::Instance, store: &mut Store<Host>) 
 }
 
 /// Appends each check row's count to `log`: the program, then the row, tab-separated.
-fn log_checks(log: &Path, program: &str, host: &Oracle) -> Result<(), String> {
-    if host.checks.is_empty() {
+fn log_checks(log: &Path, program: &str, counts: &Counts) -> Result<(), String> {
+    let mut out = String::new();
+    for s in counts.sites.iter().skip(1) {
+        let (function, line, label, n) = (&s.function, s.line, &s.verb, s.blocks);
+        out.push_str(&format!("{program}\t{function}\t{line}\t{label}\t{n}\n"));
+    }
+    if out.is_empty() {
         return Ok(());
     }
-    let mut out = String::new();
-    for (row, n) in host.checks.iter().zip(&host.counts) {
-        out.push_str(&format!("{program}\t{row}\t{n}\n"));
-    }
+    log_line(log, &out)
+}
+
+/// Appends `text` to the file `log`.
+fn log_line(log: &Path, text: &str) -> Result<(), String> {
     std::fs::OpenOptions::new()
         .create(true)
         .append(true)
         .open(log)
-        .and_then(|mut f| f.write_all(out.as_bytes()))
+        .and_then(|mut f| f.write_all(text.as_bytes()))
         .map_err(|e| format!("{}: {e}", log.display()))
 }
 

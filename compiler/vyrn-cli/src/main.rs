@@ -5020,17 +5020,14 @@ fn run_wasm(
     };
     match wasmrun::run(&bytes, run) {
         Ok(out) => {
-            if let (Some((load, stamp)), Some(meter)) = (&profile, out.meter.as_ref()) {
-                if let Some(counts) = &out.counts {
-                    lastrun::save(path, stamp, &counts.sites);
-                }
-                let sites = out.counts.as_ref().zip(table.as_ref());
-                wasm_profile(
-                    *load,
-                    compile,
-                    meter,
-                    sites.map(|(c, t)| (c, program, t.as_slice())),
-                );
+            if let (Some((load, stamp)), Some(meter), Some(counts), Some(table)) = (
+                &profile,
+                out.meter.as_ref(),
+                out.counts.as_ref(),
+                table.as_ref(),
+            ) {
+                lastrun::save(path, stamp, &counts.sites);
+                wasm_profile(*load, compile, meter, (counts, program, table.as_slice()));
             }
             ExitCode::from((out.code & 0xff) as u8)
         }
@@ -5041,17 +5038,17 @@ fn run_wasm(
     }
 }
 
-/// Prints what the guest did to stderr: the operations it executed, then the blocks it made at
-/// each line of the root file ([`profile_report`]). Under `VYRN_BUILD_PROFILE`, the phase table
-/// follows when `main` exits.
+/// Prints what the guest did to stderr: the operations it executed, the blocks it made at each
+/// line of the root file and the operations of each function ([`profile_report`]). Under
+/// `VYRN_BUILD_PROFILE`, the phase table follows when `main` exits.
 ///
-/// The operation count is wasmtime's fuel, read from a budget nothing exhausts. Unlike the
-/// times, it is the same number on any machine. The instrument's own operations are in it.
+/// The operations are counted as wasmtime's fuel meter counts them, minus the instrument's own.
+/// Unlike the times, they are the same number on any machine.
 fn wasm_profile(
     load: std::time::Duration,
     compile: std::time::Duration,
     meter: &wasmrun::Meter,
-    sites: Option<(&wasmrun::Counts, &vyrn_frontend::ast::Program, &[CostFn])>,
+    sites: (&wasmrun::Counts, &vyrn_frontend::ast::Program, &[CostFn]),
 ) {
     if vyrn_frontend::prof::phases_on() {
         vyrn_frontend::prof::charge("load", load);
@@ -5060,7 +5057,7 @@ fn wasm_profile(
         vyrn_frontend::prof::charge("instantiate", meter.instantiate);
         vyrn_frontend::prof::charge("run", meter.run);
     }
-    eprint!("{}", profile_report(meter.fuel, sites));
+    eprint!("{}", profile_report(sites));
 }
 
 /// `n` with a comma between thousands.
@@ -5080,16 +5077,14 @@ fn group(n: u64) -> String {
 const PROFILE_ROWS: usize = 10;
 
 /// The text of `vyrn run --profile`: one line of totals, then the lines that made the most
-/// bytes, heaviest first. A block made by a function of another file counts at the line that
-/// called it ([`insight::Verb::Enters`]); a block made before any line ran has no line.
+/// bytes, heaviest first, then the functions that executed the most operations. A block made by
+/// a function of another file counts at the line that called it ([`insight::Verb::Enters`]); a
+/// block made before any line ran has no line.
 fn profile_report(
-    fuel: u64,
-    sites: Option<(&wasmrun::Counts, &vyrn_frontend::ast::Program, &[CostFn])>,
+    (counts, program, table): (&wasmrun::Counts, &vyrn_frontend::ast::Program, &[CostFn]),
 ) -> String {
-    let mut out = format!("run: {} operations", group(fuel));
-    let Some((counts, program, table)) = sites else {
-        return out + "\n";
-    };
+    let ops = counts.fns.iter().map(|f| f.ops).sum::<u64>();
+    let mut out = format!("run: {} operations", group(ops));
     let total = |f: fn(&lastrun::SiteCount) -> u64| counts.sites.iter().map(f).sum::<u64>();
     let (blocks, bytes) = (total(|s| s.blocks), total(|s| s.bytes));
     out += &format!(
@@ -5146,6 +5141,41 @@ fn profile_report(
             "...   {} more lines, {} blocks\n",
             rest.len(),
             group(rest.iter().map(|(_, v)| v[0]).sum::<u64>())
+        );
+    }
+    // A function's instances share a name; a function the emitter built unnamed is `?`.
+    let mut fns: BTreeMap<&str, [u64; 2]> = BTreeMap::new();
+    for f in &counts.fns {
+        let at = fns.entry(&f.name).or_default();
+        *at = [at[0] + f.calls, at[1] + f.ops];
+    }
+    let mut fns: Vec<_> = fns.into_iter().collect();
+    fns.sort_by_key(|(name, v)| (std::cmp::Reverse(v[1]), *name));
+    let width = fns
+        .iter()
+        .map(|(n, _)| n.len())
+        .max()
+        .unwrap_or(8)
+        .clamp(8, 40);
+    out += &format!(
+        "\n{:<width$}  {:>13}  {:>15}  {:>13}\n",
+        "function", "calls", "operations", "per call"
+    );
+    for (name, v) in fns.iter().take(PROFILE_ROWS) {
+        out += &format!(
+            "{:<width$}  {:>13}  {:>15}  {:>13}\n",
+            if name.is_empty() { "?" } else { name },
+            group(v[0]),
+            group(v[1]),
+            group(v[1] / v[0].max(1)),
+        );
+    }
+    let rest = fns.get(PROFILE_ROWS..).unwrap_or_default();
+    if !rest.is_empty() {
+        out += &format!(
+            "...   {} more functions, {} operations\n",
+            rest.len(),
+            group(rest.iter().map(|(_, v)| v[1]).sum::<u64>())
         );
     }
     out
