@@ -299,7 +299,7 @@ fn verdict(
 
 /// `vyrn run --profile` counts the operations each function executes at wasmtime's prices, minus
 /// the instrument's own. Their sum must equal the fuel `_start` spends in a plain, metered run of
-/// the same program (`VYRN_FUEL`).
+/// the same program (`VYRN_FUEL`). A program that ends in a stack overflow is left out.
 #[test]
 #[ignore = "the whole corpus, run twice; run explicitly: cargo test -p vyrn-cli --release --test residue -- --ignored"]
 fn the_profile_counts_the_operations_a_metered_run_spends() {
@@ -320,7 +320,12 @@ fn the_profile_counts_the_operations_a_metered_run_spends() {
                 let log = out_dir.join(format!("{name}.fuel"));
                 let mut cmd = vyrn();
                 cmd.env("VYRN_FUEL", &log).arg("run").arg(path).args(&args);
-                run_io(cmd, &dir, &stdin);
+                let plain = run_io(cmd, &dir, &stdin);
+                // The engine ends the run where its native stack runs out, and the instrument's
+                // frames are larger, so the two runs stop a frame apart: no count to compare.
+                if norm(&plain.stderr).contains(vyrn_frontend::trap::STACK_EXHAUSTED) {
+                    continue;
+                }
                 let metered = std::fs::read_to_string(&log)
                     .ok()
                     .and_then(|t| t.trim().rsplit('\t').next()?.parse::<u64>().ok());
