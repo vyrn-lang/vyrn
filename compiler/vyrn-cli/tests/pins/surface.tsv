@@ -11,7 +11,7 @@ Type::Mask64x2	4	1	7	1	0	0	13
 Type::Bool	20	1	29	7	0	1	58
 Type::Str	30	1	55	9	1	2	98
 Type::Unit	18	1	14	9	1	0	43
-Type::Named	30	2	10	15	5	5	67
+Type::Named	30	2	10	14	5	5	66
 Type::Record	9	3	5	17	1	4	39
 Type::Omit	2	1	0	6	0	0	9
 Type::Pick	2	1	0	6	0	0	9
@@ -31,4 +31,4 @@ Type::Fn	25	5	20	10	1	0	61
 Type::Lazy	5	1	2	9	0	0	17
 Type::Never	1	2	2	3	2	0	10
 Type::Err	78	1	0	3	0	0	82
-all	423	60	363	209	46	24	1125
+all	423	60	363	208	46	24	1124

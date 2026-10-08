@@ -4,6 +4,7 @@
 //! lookups, `where`-predicate reflection (`schemaOf`, `jsonSchema`), and the
 //! monomorphization bounds.
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 
 use crate::ast::*;
@@ -1358,6 +1359,11 @@ pub fn coercible(from: &Type, to: &Type, types: &dyn Decls) -> bool {
 /// application to its substituted base, a transformer to a `Record`, and
 /// `lazy T` to `fn() -> T`. An unknown name is `Unit`.
 pub fn resolve(ty: &Type, types: &dyn Decls) -> Type {
+    resolved(ty, types).into_owned()
+}
+
+/// [`resolve`], borrowing `ty` or a declaration's base where nothing is built.
+pub fn resolved<'a>(ty: &'a Type, types: &'a dyn Decls) -> Cow<'a, Type> {
     resolve_d(ty, types, 0)
 }
 
@@ -1400,37 +1406,38 @@ pub fn record_fields(ty: &Type, types: &dyn Decls) -> Option<Vec<Field>> {
     }
 }
 
-fn resolve_d(ty: &Type, types: &dyn Decls, depth: usize) -> Type {
+fn resolve_d<'a>(ty: &'a Type, types: &'a dyn Decls, depth: usize) -> Cow<'a, Type> {
+    use Cow::{Borrowed, Owned};
     if depth > MAX_DEPTH {
-        return Type::Unit;
+        return Owned(Type::Unit);
     }
     match ty {
         // The builtin opaque `Code` resolves to itself; a user `type Code` wins.
-        Type::Named(n) if n == "Code" && types.decl("Code").is_none() => {
-            Type::Named("Code".to_string())
-        }
+        Type::Named(n) if n == "Code" && types.decl("Code").is_none() => Borrowed(ty),
         // The builtin record `lex()` returns; a user `type Token` wins.
-        Type::Named(n) if n == "Token" && types.decl("Token").is_none() => Type::Record(vec![
-            Field {
-                name: "kind".to_string(),
-                ty: Type::Str,
-            },
-            Field {
-                name: "text".to_string(),
-                ty: Type::Str,
-            },
-            Field {
-                name: "line".to_string(),
-                ty: Type::Int,
-            },
-            Field {
-                name: "col".to_string(),
-                ty: Type::Int,
-            },
-        ]),
+        Type::Named(n) if n == "Token" && types.decl("Token").is_none() => {
+            Owned(Type::Record(vec![
+                Field {
+                    name: "kind".to_string(),
+                    ty: Type::Str,
+                },
+                Field {
+                    name: "text".to_string(),
+                    ty: Type::Str,
+                },
+                Field {
+                    name: "line".to_string(),
+                    ty: Type::Int,
+                },
+                Field {
+                    name: "col".to_string(),
+                    ty: Type::Int,
+                },
+            ]))
+        }
         Type::Named(n) => match types.decl(n) {
             Some(d) => resolve_d(&d.base, types, depth + 1),
-            None => Type::Unit,
+            None => Owned(Type::Unit),
         },
         Type::App(name, args) => match types.decl(name) {
             Some(d) if d.type_params.len() == args.len() => {
@@ -1441,23 +1448,25 @@ fn resolve_d(ty: &Type, types: &dyn Decls, depth: usize) -> Type {
                     .zip(args.iter().cloned())
                     .collect();
                 let based = substitute(&d.base, &s);
-                resolve_d(&based, types, depth + 1)
+                Owned(resolve_d(&based, types, depth + 1).into_owned())
             }
-            _ => Type::Unit,
+            _ => Owned(Type::Unit),
         },
-        Type::Omit(base, keys) => match fields_d(base, types, depth) {
+        Type::Omit(base, keys) => Owned(match fields_d(base, types, depth) {
             Some(fs) => Type::Record(fs.into_iter().filter(|f| !keys.contains(&f.name)).collect()),
             None => Type::Unit,
-        },
-        Type::Pick(base, keys) => match fields_d(base, types, depth) {
+        }),
+        Type::Pick(base, keys) => Owned(match fields_d(base, types, depth) {
             Some(fs) => Type::Record(fs.into_iter().filter(|f| keys.contains(&f.name)).collect()),
             None => Type::Unit,
-        },
-        Type::Merge(a, b) => match (fields_d(a, types, depth), fields_d(b, types, depth)) {
-            (Some(fa), Some(fb)) => Type::Record(merge_fields(fa, fb)),
-            _ => Type::Unit,
-        },
-        Type::Partial(base) => match fields_d(base, types, depth) {
+        }),
+        Type::Merge(a, b) => Owned(
+            match (fields_d(a, types, depth), fields_d(b, types, depth)) {
+                (Some(fa), Some(fb)) => Type::Record(merge_fields(fa, fb)),
+                _ => Type::Unit,
+            },
+        ),
+        Type::Partial(base) => Owned(match fields_d(base, types, depth) {
             Some(fs) => Type::Record(
                 fs.into_iter()
                     .map(|f| Field {
@@ -1467,13 +1476,13 @@ fn resolve_d(ty: &Type, types: &dyn Decls, depth: usize) -> Type {
                     .collect(),
             ),
             None => Type::Unit,
-        },
+        }),
         // `lazy T` is a stored nullary closure, `fn() -> T` with `T` as
         // written, as `resolve` leaves a `fn` type's parts. A record's fields
         // are not resolved, so `Field.ty` keeps the marker for the read, the
         // codec and reflection, which force it.
-        Type::Lazy(inner) => Type::Fn(Vec::new(), inner.clone()),
-        other => other.clone(),
+        Type::Lazy(inner) => Owned(Type::Fn(Vec::new(), inner.clone())),
+        other => Borrowed(other),
     }
 }
 
@@ -1546,7 +1555,7 @@ pub fn forced(ty: &Type) -> Type {
 }
 
 fn fields_d(ty: &Type, types: &dyn Decls, depth: usize) -> Option<Vec<Field>> {
-    match resolve_d(ty, types, depth + 1) {
+    match resolve_d(ty, types, depth + 1).into_owned() {
         Type::Record(f) => Some(f),
         _ => None,
     }
