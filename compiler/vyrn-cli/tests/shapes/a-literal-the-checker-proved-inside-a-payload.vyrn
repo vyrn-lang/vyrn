@@ -1,0 +1,4 @@
+// a literal the checker proved inside a payload
+// A constant stored in `Some`, `Err` or a variant is the checker's proof as it is at a let,
+// so the payload's constructor row checks nothing; `late`'s value still checks at run time.
+type Key = String where value =~ "home[.](title|body)"          type Tag = String where value.byteLength > 0          type Item = | Named(Tag) | Pair(Tag, Int64)          fn keyOpt() -> Option<Key> { return Some("home.title") }          fn tagErr() -> Result<Int64, Tag> { return Err("abc") }          fn item() -> Item { return Pair("abc", 2) }          fn late(s: String) -> Option<Key> { return Some(s.copy()) }          fn vyrnTestMain() -> Int64 { let mut n = 0 if let Some(k) = keyOpt() { n = n + k.byteLength } if let Err(t) = tagErr() { n = n + t.byteLength * 100 } if let Pair(t, i) = item() { n = n + (t.byteLength + i) * 10000 } if let Some(k) = late("home.body".copy()) { n = n + k.byteLength * 1000000 } return n }
