@@ -356,6 +356,19 @@ impl World {
         self.calls.rows_of(&f)
     }
 
+    /// Returns, per row, whether it is one of `seeds` or calls one,
+    /// transitively. Each row's callers are pushed once.
+    pub fn callers_closure(&self, seeds: impl IntoIterator<Item = FnId>) -> Vec<bool> {
+        let mut seen = vec![false; self.fns.rows.len()];
+        let mut stack: Vec<FnId> = seeds.into_iter().collect();
+        while let Some(f) = stack.pop() {
+            if !std::mem::replace(&mut seen[f.index()], true) {
+                stack.extend(self.callers(f));
+            }
+        }
+        seen
+    }
+
     /// The functions whose text read `key`.
     pub fn readers(&self, key: &Key) -> &[FnId] {
         self.reads.rows_of(key)
