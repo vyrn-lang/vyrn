@@ -93,6 +93,10 @@ function activate(context) {
       { scheme: "file", language: "vyrn" },
       { scheme: "file", language: "vyx" },
     ],
+    // A function, so a restart reads the setting as it is then.
+    initializationOptions: () => ({
+      costHints: vsc.workspace.getConfiguration("vyrn").get("costHints", true),
+    }),
   };
 
   const client = new LanguageClient(
@@ -107,6 +111,14 @@ function activate(context) {
   // rejection that would crash the Extension Development Host.
   const started = client.start();
   context.subscriptions.push(started);
+  // The server reads `vyrn.costHints` once, at `initialize`.
+  context.subscriptions.push(
+    vsc.workspace.onDidChangeConfiguration((e) => {
+      if (e.affectsConfiguration("vyrn.costHints") && lspState.client) {
+        lspState.client.restart();
+      }
+    })
+  );
   started
     .then(() => {
       // The server is up: expose it to the CodeLens provider and nudge VS Code
@@ -242,30 +254,34 @@ function registerRun(context, vsc, lspState) {
         if (benchRe.lastIndex === b.index) benchRe.lastIndex++;
       }
 
-      // The derived wire path above each procedure a generator mounts.
+      // The derived wire path above each procedure a generator mounts, and what each
+      // function costs (`vyrn.costHints`; the server sends none when it is off).
       // The path is derived from the file's own location and the
       // export's name, so nothing in the buffer states it — which is exactly
       // what makes it worth a lens. Semantic, and it comes from the symbol map
-      // the generator baked in, so the server answers it (`vyrn/routeLenses`).
+      // the generator baked in, so the server answers it (`vyrn/routeLenses`,
+      // `vyrn/costLenses`).
       //
       // No command: a POST endpoint is not something a click can usefully open,
       // and the lens exists to make a derived fact visible rather than to do
       // anything. `command: ""` is VS Code's own spelling for a lens that is
       // text.
       if (lspState.client) {
-        let routes = [];
-        try {
-          routes = await lspState.client.sendRequest("vyrn/routeLenses", {
-            textDocument: { uri: document.uri.toString() },
-          });
-        } catch (_e) {
-          routes = []; // server down / not ready: no route lenses, no error noise.
-        }
-        for (const r of routes || []) {
-          const pos = new vsc.Position(r.line, 0);
-          lenses.push(
-            new vsc.CodeLens(new vsc.Range(pos, pos), { title: r.title, command: "" })
-          );
+        for (const method of ["vyrn/routeLenses", "vyrn/costLenses"]) {
+          let answered = [];
+          try {
+            answered = await lspState.client.sendRequest(method, {
+              textDocument: { uri: document.uri.toString() },
+            });
+          } catch (_e) {
+            answered = []; // server down / not ready: no such lenses, no error noise.
+          }
+          for (const r of answered || []) {
+            const pos = new vsc.Position(r.line, 0);
+            lenses.push(
+              new vsc.CodeLens(new vsc.Range(pos, pos), { title: r.title, command: "" })
+            );
+          }
         }
       }
 

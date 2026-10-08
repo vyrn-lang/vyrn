@@ -7830,9 +7830,16 @@ pub fn augment(program: &Program, w: &mut World, judging: bool) {
                     _ => None,
                 })
                 .collect();
-            let allocating: HashSet<FnId> = (refs.iter().zip(&judged.effects))
-                .filter(|(_, e)| e.has(vyrn_frontend::effects::Effect::Alloc))
-                .filter_map(|(b, _)| b.id)
+            let allocs = |at: usize| judged.effects[at].has(vyrn_frontend::effects::Effect::Alloc);
+            // A served body is judged too, at the frame `served_at` names.
+            let served_files = (states.iter().filter(|s| s.answered().is_some()))
+                .zip(served_at)
+                .filter(|(_, at)| allocs(**at))
+                .filter_map(|(s, _)| Some((s.job.id(), s.job.module().clone()?)));
+            let allocating: HashMap<FnId, String> = (refs.iter().enumerate())
+                .filter(|(at, _)| allocs(*at))
+                .filter_map(|(_, b)| Some((b.id?, b.file.clone()?)))
+                .chain(served_files)
                 .collect();
             (judged.state_table(refs), read, answers, reached, allocating)
         },
@@ -8075,6 +8082,15 @@ pub fn augment(program: &Program, w: &mut World, judging: bool) {
     // the memo runs no emitter, and served bodies would leave the facts
     // partial, so it stops here.
     if memo.is_some() {
+        // The editor reads what the document's own functions cost
+        // ([`crate::insight::fn_costs`]). The memo never serves the root file's bodies, so
+        // each is built, and these are the only bodies of this analysis that are kept.
+        let mut unused = Facts::default();
+        for (inst, top) in lowered.instances.iter().zip(&mut built) {
+            if let (None, Some(top)) = (&inst.func.module, top) {
+                fold_frames(program, top, own, &mut unused, &mut w.fns, &mut w.bodies);
+            }
+        }
         w.calls.replace(calls);
         own.state_callees.clear();
         own.accumulators.clear();

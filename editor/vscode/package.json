@@ -136,6 +136,11 @@
           "default": "",
           "description": "Path to the vyrn-lsp server binary. When empty, resolves vyrn-lsp from PATH (or from beside the vyrn on PATH — the release archive ships both), then the repository's own debug build at compiler/vyrn-lsp/target/debug/vyrn-lsp(.exe)."
         },
+        "vyrn.costHints": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show what each line costs at its end (allocates, copies, grows, check kept) and a lens above each function that costs anything, with the blocks of the last `vyrn run --profile` when the source has not changed since. Turning it off restarts the language server."
+        },
         "vyrn.path": {
           "type": "string",
           "default": "",

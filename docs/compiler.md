@@ -455,7 +455,8 @@ Rust style).
 
 `vyrn check --profile` and `VYRN_BUILD_PROFILE=1` print where a load or a run
 spent its time, per phase (`prof.rs`). `vyrn run --profile` prints the guest's
-operation count.
+operation count and the blocks it made per source line (`direct.rs` `Profile`,
+`std/runtime` `auditBirth`, `wasmrun.rs` `Counts`).
 
 `vyrn why --cost` prints `insight::facts` (`insight.rs`): per line, the rows of
 the decided core that allocate, copy, grow a container or keep a check. A

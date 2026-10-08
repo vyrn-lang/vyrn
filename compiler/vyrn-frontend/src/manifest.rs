@@ -354,6 +354,15 @@ pub fn gen_cache_dir() -> PathBuf {
     Path::new(&home()).join(".vyrn/cache/gen")
 }
 
+/// Where `vyrn run --profile` saves the counts of its last run: `~/.vyrn/cache/profile`, or
+/// `VYRN_PROFILE_DIR`. One file per root.
+pub fn profile_dir() -> PathBuf {
+    if let Ok(d) = std::env::var("VYRN_PROFILE_DIR") {
+        return PathBuf::from(d);
+    }
+    Path::new(&home()).join(".vyrn/cache/profile")
+}
+
 /// Reads a cached generator output by its hex sha256 key.
 pub fn gen_cache_get(key: &str) -> Option<String> {
     std::fs::read_to_string(gen_cache_dir().join(key)).ok()

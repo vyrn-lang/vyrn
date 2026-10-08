@@ -63,7 +63,7 @@ fn profile_writes_the_table_to_stderr_and_not_to_stdout() {
     );
     let table = String::from_utf8_lossy(&profiled.stderr).replace("\r\n", "\n");
     assert!(
-        table.contains("operation(s) executed"),
+        table.contains(" operations"),
         "no count on stderr:
 {table}"
     );
@@ -167,7 +167,7 @@ fn the_compiled_profile_reports_a_repeatable_count_and_no_phases() {
     }
     let count = |text: &str| -> String {
         text.lines()
-            .find(|l| l.contains("operation(s) executed"))
+            .find(|l| l.starts_with("run: "))
             .unwrap_or_else(|| {
                 panic!(
                     "no count:
@@ -186,4 +186,33 @@ fn the_compiled_profile_reports_a_repeatable_count_and_no_phases() {
         )),
         "fuel is a count, so two runs of one program must report the same one"
     );
+}
+
+/// The profile counts every block at the line of the row that made it, and a call into `std`
+/// counts at the calling line. The totals are the fixture's own: the instrument is the audit
+/// plus a counter, so each block made is freed and none is live at exit.
+#[test]
+fn the_profile_counts_blocks_per_line() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let out = vyrn()
+        .current_dir(&root)
+        .args(["run", "--profile", "examples/knucleotide.vyrn"])
+        .stdin(std::fs::File::open(root.join("examples/knucleotide.stdin")).unwrap())
+        .output()
+        .expect("vyrn run --profile");
+    assert!(out.status.success());
+    let table = String::from_utf8_lossy(&out.stderr).replace("\r\n", "\n");
+    assert!(
+        table.contains(
+            "1,334 blocks, 1,395,504 bytes; 1,334 freed; peak live 335,896 bytes; live at exit 0"
+        ),
+        "{table}"
+    );
+    for row in [
+        "  88  countKmers  ",
+        "grows tally(..)",
+        "enters toUpper(..) in std/strings",
+    ] {
+        assert!(table.contains(row), "no `{row}`:\n{table}");
+    }
 }

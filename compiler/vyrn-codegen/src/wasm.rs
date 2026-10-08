@@ -97,6 +97,8 @@ pub struct Module {
     names: Vec<(u32, String)>,
     /// The nesting words' address, when [`Module::export_entry_state`] asked.
     nesting: Option<u32>,
+    /// Whether the module has the [`SITE`] global ([`Module::profile`]).
+    site: bool,
 }
 
 impl Default for Module {
@@ -120,7 +122,14 @@ impl Module {
             custom: Vec::new(),
             names: Vec::new(),
             nesting: None,
+            site: false,
         }
+    }
+
+    /// Adds the mutable global [`SITE`], zero at start, that a profile build sets before each
+    /// row it counts.
+    pub fn profile(&mut self) {
+        self.site = true;
     }
 
     /// Exports the stack pointer as [`SP_EXPORT`] and the address `nesting` of
@@ -556,6 +565,16 @@ impl Module {
             },
             &ConstExpr::i32_const(round_up(self.data_end(), 16) as i32),
         );
+        if self.site {
+            globals.global(
+                GlobalType {
+                    val_type: ValType::I32,
+                    mutable: true,
+                    shared: false,
+                },
+                &ConstExpr::i32_const(0),
+            );
+        }
         if let Some(at) = self.nesting {
             globals.global(
                 GlobalType {
@@ -566,7 +585,11 @@ impl Module {
                 &ConstExpr::i32_const(at as i32),
             );
             exports.export(SP_EXPORT, ExportKind::Global, SP);
-            exports.export(NESTING_EXPORT, ExportKind::Global, NESTING);
+            exports.export(
+                NESTING_EXPORT,
+                ExportKind::Global,
+                SITE + u32::from(self.site),
+            );
         }
 
         // Runs of zeros are not written, because wasm memory arrives zeroed. A
@@ -685,8 +708,9 @@ pub const NESTING_EXPORT: &str = "__vyrn_nesting";
 /// the data segment, is a no-op.
 pub const HEAP_BASE: u32 = 1;
 
-/// The global index of [`NESTING_EXPORT`], in a module that has it.
-const NESTING: u32 = 2;
+/// The global index of the allocating site a profile build last entered
+/// ([`Module::profile`]). [`NESTING_EXPORT`]'s global follows it when both exist.
+pub const SITE: u32 = 2;
 
 /// `memory.copy` within the one memory: pops the length, the source and the destination.
 pub const MEMORY_COPY: Instruction<'static> = Instruction::MemoryCopy {
