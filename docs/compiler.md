@@ -190,7 +190,10 @@ check of the row after it: its trap rule, what it compares, and its line and
 ordinal. `core::checked` adds them to the bodies the emitter reads, and the
 emitter runs a check only from its row. `check::mode` reads `VYRN_CHECKS`:
 `keep` keeps every row, and a file path is the oracle, which counts each row's
-runs into that file and fails a run where a proved row would have trapped.
+runs into that file and fails a run where a proved row would have trapped. The
+count is in the module: each row is a counter row of the site table
+(`vyrn:sites`), as the profile's sites are, so `vyrn_check.fail` is the oracle's
+only host import.
 `scripts/check-elision.sh` runs the examples, the benchmarks and the site
 export in all three modes. `elide::decide` marks a row proved when linear
 facts over one body's own names (`facts`) show it cannot fail, with a

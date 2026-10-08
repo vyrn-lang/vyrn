@@ -2,7 +2,7 @@
 //! by the embedded wasmtime. The WASI host is `vyrn_genwasm::wasi`'s, with the
 //! working directory as the ambient root: the setup of `wasmtime run --dir .
 //! --env ..`. This file adds the terminal's refusal of an `extern` import (see
-//! [`open`]), the check oracle's imports, and the resident instance `serve`
+//! [`open`]), the check oracle's import, and the resident instance `serve`
 //! answers on.
 
 use std::io::Write;
@@ -72,10 +72,10 @@ pub struct Meter {
     pub run: std::time::Duration,
 }
 
-/// The check oracle's rows ([`check_rows`]) and each one's count of runs.
+/// The check oracle's rows: line `k` of the module's `vyrn:sites` section is site `k`'s, and
+/// line 0 the table's address.
 struct Oracle {
     checks: std::sync::Arc<Vec<String>>,
-    counts: Vec<u64>,
 }
 
 type Host = wasi::Guest<Oracle>;
@@ -139,11 +139,8 @@ pub fn run(bytes: &[u8], run: Run) -> Result<Outcome, String> {
             1
         }
     };
-    let counts = module
-        .sites
-        .as_ref()
-        .zip(module.fns.as_ref())
-        .and_then(|(sites, fns)| read_counts(sites, fns, &inst, &mut store));
+    let counts = (module.sites.as_ref())
+        .and_then(|sites| read_counts(sites, module.fns.as_deref(), &inst, &mut store));
     let meter = run.meter.then(|| Meter {
         translate,
         instantiate,
@@ -157,8 +154,10 @@ pub fn run(bytes: &[u8], run: Run) -> Result<Outcome, String> {
         )?;
     }
     let host = store.into_data();
-    if let vyrn_lower::check::Mode::Count(log) = vyrn_lower::check::mode() {
-        log_checks(log, run.argv.first().map_or("", |a| a.as_str()), &host.x)?;
+    if let (vyrn_lower::check::Mode::Count(log), Some(counts)) =
+        (vyrn_lower::check::mode(), &counts)
+    {
+        log_checks(log, run.argv.first().map_or("", |a| a.as_str()), counts)?;
     }
     Ok(Outcome {
         code,
@@ -186,7 +185,6 @@ fn open(
     };
     let oracle = Oracle {
         checks: module.checks.clone(),
-        counts: vec![0; module.checks.len()],
     };
     let gen = gen.unwrap_or_default();
     wasi::instantiate(&module.module, &policy, &run.argv, gen, oracle, |linker| {
@@ -208,12 +206,7 @@ fn open(
                 Err(wasi::Exit(1).into())
             })?;
         }
-        // The check oracle's imports ([`vyrn_lower::check::Mode::Count`]).
-        linker.func_wrap("vyrn_check", "hit", |mut c: Caller<'_, Host>, id: i32| {
-            if let Some(n) = c.data_mut().x.counts.get_mut(id as usize) {
-                *n += 1;
-            }
-        })?;
+        // The check oracle's import ([`vyrn_lower::check::Mode::Count`]).
         linker.func_wrap(
             "vyrn_check",
             "fail",
@@ -249,6 +242,7 @@ pub struct Compiled {
 /// Translates `bytes`; `metered` makes the guest count fuel ([`run`]).
 pub fn compile(bytes: &[u8], metered: bool) -> Result<Compiled, String> {
     let clock = std::time::Instant::now();
+    let sites = custom_section(bytes, "vyrn:sites");
     let module = Module::new(engine(metered), bytes).map_err(|e| {
         // A module the engine refuses is a compiler defect, and the bytes are
         // its only evidence (#444).
@@ -266,10 +260,11 @@ pub fn compile(bytes: &[u8], metered: bool) -> Result<Compiled, String> {
         metered,
         translate: clock.elapsed(),
         checks: std::sync::Arc::new(
-            custom_section(bytes, "vyrn:checks")
+            sites
+                .as_ref()
                 .map_or_else(Vec::new, |c| c.split('\n').map(str::to_string).collect()),
         ),
-        sites: custom_section(bytes, "vyrn:sites"),
+        sites,
         fns: custom_section(bytes, "vyrn:fns"),
     })
 }
@@ -533,12 +528,12 @@ fn custom_section(bytes: &[u8], name: &str) -> Option<String> {
     None
 }
 
-/// Reads the profile tables out of the guest's memory after `_start`: `sites` and `fns` are the
-/// module's `vyrn:sites` and `vyrn:fns` text. `None` when the guest has no memory export or a
-/// table lies outside it.
+/// Reads the counter tables out of the guest's memory after `_start`: `sites` and `fns` are the
+/// module's `vyrn:sites` and `vyrn:fns` text; an oracle build has no `fns`. `None` when the
+/// guest has no memory export or a table lies outside it.
 fn read_counts(
     sites: &str,
-    fns: &str,
+    fns: Option<&str>,
     inst: &wasmtime::Instance,
     store: &mut Store<Host>,
 ) -> Option<Counts> {
@@ -552,7 +547,7 @@ fn read_counts(
     };
     let mut out = Vec::new();
     for (k, row) in std::iter::once("").chain(lines).enumerate() {
-        let mut f = row.split('\t');
+        let mut f = row.splitn(3, '\t');
         let at = table + 16 + 32 * k;
         out.push(SiteCount {
             function: f.next()?.to_string(),
@@ -564,17 +559,19 @@ fn read_counts(
             live: word(at + 24, 8)?,
         });
     }
-    let mut names = fns.split('\n');
-    let rows: usize = names.next()?.parse().ok()?;
     let mut ran = Vec::new();
-    for (k, name) in names.enumerate() {
-        let (calls, ops) = (word(rows + 16 * k, 8)?, word(rows + 16 * k + 8, 8)?);
-        if calls > 0 || ops > 0 {
-            ran.push(FnCount {
-                name: name.to_string(),
-                calls,
-                ops,
-            });
+    if let Some(fns) = fns {
+        let mut names = fns.split('\n');
+        let rows: usize = names.next()?.parse().ok()?;
+        for (k, name) in names.enumerate() {
+            let (calls, ops) = (word(rows + 16 * k, 8)?, word(rows + 16 * k + 8, 8)?);
+            if calls > 0 || ops > 0 {
+                ran.push(FnCount {
+                    name: name.to_string(),
+                    calls,
+                    ops,
+                });
+            }
         }
     }
     Some(Counts {
@@ -587,13 +584,14 @@ fn read_counts(
 }
 
 /// Appends each check row's count to `log`: the program, then the row, tab-separated.
-fn log_checks(log: &Path, program: &str, host: &Oracle) -> Result<(), String> {
-    if host.checks.is_empty() {
-        return Ok(());
-    }
+fn log_checks(log: &Path, program: &str, counts: &Counts) -> Result<(), String> {
     let mut out = String::new();
-    for (row, n) in host.checks.iter().zip(&host.counts) {
-        out.push_str(&format!("{program}\t{row}\t{n}\n"));
+    for s in counts.sites.iter().skip(1) {
+        let (function, line, label, n) = (&s.function, s.line, &s.verb, s.blocks);
+        out.push_str(&format!("{program}\t{function}\t{line}\t{label}\t{n}\n"));
+    }
+    if out.is_empty() {
+        return Ok(());
     }
     log_line(log, &out)
 }

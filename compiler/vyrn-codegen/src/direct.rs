@@ -256,14 +256,9 @@ fn compile_inner(
     // `wasm::Module` panics if one arrives late.
     let wasi = Wasi::declare(&mut m);
     let gen = program.host.gen.then(|| gen_imports(&mut m));
-    let oracle = (matches!(vyrn_lower::check::mode(), vyrn_lower::check::Mode::Count(_))
+    let check_fail = (matches!(vyrn_lower::check::mode(), vyrn_lower::check::Mode::Count(_))
         && gen.is_none())
-    .then(|| Oracle {
-        hit: m.import("vyrn_check", "hit", &[ValType::I32], &[]),
-        fail: m.import("vyrn_check", "fail", &[ValType::I32], &[]),
-        labels: RefCell::new(Vec::new()),
-        ids: RefCell::new(HashMap::new()),
-    });
+    .then(|| m.import("vyrn_check", "fail", &[ValType::I32], &[]));
     // Every `extern fn` is one import from the `vyrn` namespace, which `web/wasi-min.js` fills
     // from the page's hooks. This is not a pre-scan: an `extern fn` is its import, one for one,
     // and `Module::sweep` drops the ones a program never calls.
@@ -285,6 +280,13 @@ fn compile_inner(
             },
         );
     }
+
+    // The oracle's counter function is reserved with the other functions, after the last import;
+    // its body waits for the table's address.
+    let oracle = check_fail.map(|fail| Oracle {
+        fail,
+        hit: m.reserve_func(&[ValType::I32], &[]),
+    });
 
     // The runtime functions written in Vyrn are reserved before the hand-emitted runtime, which
     // calls them.
@@ -338,6 +340,8 @@ fn compile_inner(
 
     // The leak instrument; a generator host never carries it.
     let audited = vyrn_frontend::loader::audit_build(program.host.gen);
+    let profile = vyrn_frontend::loader::profile_build(program.host.gen);
+    let oracle_on = oracle.is_some();
     let mut cx = Cx {
         types,
         lambdas: vyrn_frontend::ast::lambdas(program),
@@ -368,9 +372,10 @@ fn compile_inner(
         // Reserved only for a file sink, so a console-sink module reserves nothing.
         log_fd: matches!(program.log_sink, LogSink::File(_)).then(|| m.reserve(4, 4)),
         audit: audited,
-        profile: vyrn_frontend::loader::profile_build(program.host.gen).then(Profile::default),
+        sites: (profile || oracle_on).then(Sites::default),
+        profile,
     };
-    if cx.profile.is_some() {
+    if cx.profile {
         m.profile();
         m.count_ops();
     }
@@ -620,9 +625,27 @@ fn compile_inner(
     };
     // The counter table: 16 bytes of totals, then a 32-byte row per site, site 0 first. Reserved
     // after every body, which is the first moment the sites are all known.
-    let table = cx.profile.as_ref().map_or(0, |p| {
-        m.reserve(16 + 32 * (p.sites.borrow().len() as u32 + 1), 8)
+    let table = cx.sites.as_ref().map_or(0, |s| {
+        m.reserve(16 + 32 * (s.rows.borrow().len() as u32 + 1), 8)
     });
+    if let Some(o) = &cx.oracle {
+        let mut b = Frame::new(&[ValType::I32], &[], &[], 0);
+        let row = b.local(ValType::I32);
+        // Row `id`'s first counter, one more.
+        b.ins(&Instruction::LocalGet(0))
+            .ins(&Instruction::I32Const(32))
+            .ins(&Instruction::I32Mul)
+            .ins(&Instruction::I32Const(table as i32 + 16))
+            .ins(&Instruction::I32Add)
+            .ins(&Instruction::LocalSet(row))
+            .ins(&Instruction::LocalGet(row))
+            .ins(&Instruction::LocalGet(row))
+            .ins(&Instruction::I64Load(mem_arg(0, 3)))
+            .ins(&Instruction::I64Const(1))
+            .ins(&Instruction::I64Add)
+            .ins(&Instruction::I64Store(mem_arg(0, 3)));
+        m.fill(o.hit, b)?;
+    }
     let start = m.func(&[], &[], &[], 0, |b| {
         // First, so the instrument marks every block: `auditInit` allocates its own state and
         // then arms.
@@ -708,14 +731,10 @@ fn compile_inner(
     // interned data.
     m.sweep();
     abi_section(&mut m, &user, program);
-    if let Some(o) = &cx.oracle {
-        m.custom("vyrn:checks", o.labels.borrow().join("\n").into_bytes());
-    }
-    if let Some(p) = &cx.profile {
+    if let Some(s) = &cx.sites {
         let mut rows = vec![table.to_string()];
         rows.extend(
-            (p.sites.borrow().iter())
-                .map(|(f, line, verb)| format!("{f}\t{line}\t{}", verb.word())),
+            (s.rows.borrow().iter()).map(|(f, line, label)| format!("{f}\t{line}\t{label}")),
         );
         m.custom("vyrn:sites", rows.join("\n").into_bytes());
     }
@@ -1011,24 +1030,43 @@ struct FnBinding {
     cap_srcs: Vec<String>,
 }
 
-/// The oracle's side of a module: `vyrn_check.hit(id)` counts a row, `vyrn_check.fail(id)`
-/// ends the run where a proved row would have trapped. Row `id` is line `id` of the custom
-/// section `vyrn:checks`: body, line, ordinal, rule and verdict, tab-separated.
+/// The oracle's side of a module: the function `hit(id)` counts a check row's run in site `id`,
+/// and `vyrn_check.fail(id)` ends the run where a proved row would have trapped.
 struct Oracle {
     hit: u32,
     fail: u32,
-    labels: RefCell<Vec<String>>,
-    ids: RefCell<HashMap<(String, usize, u32), i32>>,
 }
 
-/// The profile instrument's side of a module ([`vyrn_frontend::loader::profile_on`]): the sites
-/// the emitter met, one per source function, line and verb, in the order it met them. Site `k`
-/// is `sites[k - 1]`, line `k` of the custom section `vyrn:sites` after its first, and the
-/// counter row at `table + 16 + 32 * k`; site 0 is "before any site".
+/// The counted sites of a profile ([`vyrn_frontend::loader::profile_on`]) or an oracle build:
+/// function, line and a label, in the order the emitter met them. Site `k` is `rows[k - 1]`,
+/// line `k` of the custom section `vyrn:sites` after its first, and the counter row at
+/// `table + 16 + 32 * k`; site 0 is "before any site". An oracle row's label is its ordinal,
+/// rule and verdict, tab-separated.
 #[derive(Default)]
-struct Profile {
-    sites: RefCell<Vec<(String, u32, vyrn_lower::insight::Verb)>>,
-    ids: RefCell<HashMap<(String, u32, vyrn_lower::insight::Verb), u32>>,
+struct Sites {
+    rows: RefCell<Vec<(String, u32, String)>>,
+    ids: RefCell<HashMap<(String, u32, String), u32>>,
+}
+
+impl Sites {
+    /// The site `key` names, made when `key` is new.
+    fn id(&self, key: (String, u32, String)) -> u32 {
+        let mut ids = self.ids.borrow_mut();
+        *ids.entry(key.clone()).or_insert_with(|| {
+            let mut rows = self.rows.borrow_mut();
+            rows.push(key);
+            rows.len() as u32
+        })
+    }
+
+    /// A site of its own, though another has `key`; `key` names it from here on.
+    fn fresh(&self, key: (String, u32, String)) -> u32 {
+        let mut rows = self.rows.borrow_mut();
+        rows.push(key.clone());
+        let id = rows.len() as u32;
+        self.ids.borrow_mut().insert(key, id);
+        id
+    }
 }
 
 struct Cx<'a> {
@@ -1104,8 +1142,11 @@ struct Cx<'a> {
     /// The four bytes holding the file sink's descriptor. `None` for a console sink, which
     /// reserves nothing.
     log_fd: Option<u32>,
-    /// The profile instrument's sites; `None` in every other build.
-    profile: Option<Profile>,
+    /// The counted sites of a profile or an oracle build; `None` in every other build.
+    sites: Option<Sites>,
+    /// Whether this is a profile build: the `SITE` global, the audit's rows and the operation
+    /// counters.
+    profile: bool,
     /// An audited build emits `std/runtime`'s `audit` calls and `_start`
     /// arms the instrument. Otherwise the calls are dropped and [`wasm::Module::sweep`] takes the
     /// bodies.
@@ -1606,7 +1647,7 @@ fn mem_ins(
         "memorySize" => I::MemorySize(0),
         "grow" => I::MemoryGrow(0),
         "heapBase" => I::GlobalGet(HEAP_BASE),
-        "site" if cx.profile.is_some() => I::GlobalGet(SITE),
+        "site" if cx.profile => I::GlobalGet(SITE),
         "site" => I::I32Const(0),
         "ioTable" => I::I32Const(rt.io as i32),
         "utf8Table" => I::I32Const(rt.utf8d as i32),
@@ -5637,27 +5678,23 @@ impl<'p> Fn_<'_, 'p> {
     /// it. The oracle ([`vyrn_lower::check::Mode::Count`]) counts every row here and runs a
     /// proved one too, which [`Fn_::check_trap`] turns into a failed run.
     fn row(&mut self, b: &mut Frame, c: Check) -> Option<Check> {
-        let Some(o) = &self.cx.oracle else {
+        let (Some(o), Some(sites)) = (&self.cx.oracle, &self.cx.sites) else {
             return (c.verdict == Verdict::Kept).then_some(c);
         };
-        let key = (self.core_key.clone(), c.site.line, c.site.ordinal);
-        let mut labels = o.labels.borrow_mut();
-        let id = labels.len() as i32;
+        let id = sites.fresh(self.check_site(&c));
+        b.ins(&Instruction::I32Const(id as i32));
+        b.ins(&Instruction::Call(o.hit));
+        Some(c)
+    }
+
+    /// The oracle's key for `c`'s row: its body, line, and ordinal, rule and verdict.
+    fn check_site(&self, c: &Check) -> (String, u32, String) {
         let verdict = match c.verdict {
             Verdict::Kept => "kept",
             Verdict::Proved => "proved",
         };
-        labels.push(format!(
-            "{}\t{}\t{}\t{}\t{verdict}",
-            key.0,
-            key.1,
-            key.2,
-            c.rule.census()
-        ));
-        o.ids.borrow_mut().insert(key, id);
-        b.ins(&Instruction::I32Const(id));
-        b.ins(&Instruction::Call(o.hit));
-        Some(c)
+        let label = format!("{}\t{}\t{verdict}", c.site.ordinal, c.rule.census());
+        (self.core_key.clone(), c.site.line as u32, label)
     }
 
     /// The `where` check of record name `n` of type `decl`: its constructor
@@ -5716,10 +5753,10 @@ impl<'p> Fn_<'_, 'p> {
     /// The failing branch of `row`'s check: its trap, or under the oracle the failure of a
     /// proved row.
     fn check_trap(&mut self, b: &mut Frame, row: &Check, val: Option<u32>) {
-        match &self.cx.oracle {
-            Some(o) if row.verdict == Verdict::Proved => {
-                let key = (self.core_key.clone(), row.site.line, row.site.ordinal);
-                b.ins(&Instruction::I32Const(o.ids.borrow()[&key]));
+        match (&self.cx.oracle, &self.cx.sites) {
+            (Some(o), Some(sites)) if row.verdict == Verdict::Proved => {
+                let id = sites.id(self.check_site(row));
+                b.ins(&Instruction::I32Const(id as i32));
                 b.ins(&Instruction::Call(o.fail));
             }
             _ => match row.rule {
@@ -9335,7 +9372,7 @@ impl<'a, 'p> Fn_<'a, 'p> {
     /// so a block the row makes, or a callee outside the root file makes for it, counts at the
     /// row's line. A row that costs nothing leaves the last site as it was.
     fn core_site(&self, b: &mut Frame, s: &St) {
-        let (Some(p), body) = (&self.cx.profile, self.body()) else {
+        let (true, Some(sites), body) = (self.cx.profile, &self.cx.sites, self.body()) else {
             return;
         };
         let Some((line, kind)) = vyrn_lower::insight::row(s, body, &self.cx.world) else {
@@ -9351,12 +9388,7 @@ impl<'a, 'p> Fn_<'a, 'p> {
         else {
             return;
         };
-        let key = (self.owner.clone(), line, verb);
-        let id = *p.ids.borrow_mut().entry(key.clone()).or_insert_with(|| {
-            let mut sites = p.sites.borrow_mut();
-            sites.push(key);
-            sites.len() as u32
-        });
+        let id = sites.id((self.owner.clone(), line, verb.word().to_string()));
         let at = b.here();
         b.ins(&Instruction::I32Const(id as i32));
         b.ins(&Instruction::GlobalSet(SITE));
@@ -13567,7 +13599,8 @@ mod tests {
             log_sink: LogSink::Stderr,
             log_fd: None,
             audit: false,
-            profile: None,
+            sites: None,
+            profile: false,
             // Every index 0: a `Cx` for a type-level test never emits a call.
             rt: Rt::default(),
         }
