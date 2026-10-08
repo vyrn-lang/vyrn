@@ -383,16 +383,45 @@ impl State {
         }
     }
 
-    /// The facts every live state of `sts` proves, and the definitions they
-    /// all share.
+    /// The facts every live state of `sts` proves, the definitions they all
+    /// share, and per Bool name the facts each side gives on every path
+    /// ([`State::when`]).
     pub fn join(sts: &[State]) -> State {
         let live: Vec<&State> = sts.iter().filter(|s| !s.dead).collect();
+        if live.len() < 2 {
+            return live.first().map_or_else(State::dead, |s| (*s).clone());
+        }
+        let mut out = State::common(&live);
+        // A name some branch does not condition loses its conditions: that
+        // branch would prove a side's facts from its state alone.
+        let names: Vec<Name> = (live[0].conds.keys())
+            .filter(|n| live.iter().all(|s| s.conds.contains_key(n)))
+            .copied()
+            .collect();
+        if names.is_empty() {
+            return out;
+        }
+        let known = out.prover();
+        let conds: Vec<_> = (names.into_iter())
+            .map(|n| {
+                let t = State::when(&live, n, &known, |c| &c.0);
+                let f = State::when(&live, n, &known, |c| &c.1);
+                (n, (t, f))
+            })
+            .collect();
+        out.conds.extend(
+            conds
+                .into_iter()
+                .filter(|(_, (t, f))| !t.is_empty() || !f.is_empty()),
+        );
+        out
+    }
+
+    /// The facts and definitions of [`State::join`], without conditions.
+    fn common(live: &[&State]) -> State {
         let Some(first) = live.first() else {
             return State::dead();
         };
-        if live.len() == 1 {
-            return (*first).clone();
-        }
         let mut out = State::default();
         for (t, v) in &first.defs {
             if live.iter().all(|s| s.defs.get(t) == Some(v)) {
@@ -400,16 +429,9 @@ impl State {
             }
         }
         let mut cands: BTreeSet<Lin> = BTreeSet::new();
-        for s in &live {
+        for s in live {
             cands.extend(s.facts.iter().cloned());
-            for (t, v) in &s.defs {
-                if out.defs.get(t) != Some(v) {
-                    if let (Some(a), Some(b)) = (Lin::of(*t).sub(v), v.sub(&Lin::of(*t))) {
-                        cands.insert(a);
-                        cands.insert(b);
-                    }
-                }
-            }
+            cands.extend(s.unshared(&out));
         }
         let provers: Vec<Prover> = live.iter().map(|s| s.prover()).collect();
         for c in cands {
@@ -417,12 +439,54 @@ impl State {
                 out.assume(&c);
             }
         }
-        for (n, fs) in &first.conds {
-            if live.iter().all(|s| s.conds.get(n) == Some(fs)) {
-                out.conds.insert(*n, fs.clone());
-            }
-        }
         out
+    }
+
+    /// Each definition of `self` that `out` lacks, as its two facts.
+    fn unshared<'a>(&'a self, out: &'a State) -> impl Iterator<Item = Lin> + 'a {
+        (self.defs.iter())
+            .filter(|(t, v)| out.defs.get(t) != Some(v))
+            .flat_map(|(t, v)| [Lin::of(*t).sub(v), v.sub(&Lin::of(*t))])
+            .flatten()
+    }
+
+    /// One side of `n`'s conditions after a join of `live` into the state
+    /// `known` indexes: what every live state proves with that side assumed,
+    /// less what `known` proves alone. A state the side makes dead proves
+    /// every fact.
+    fn when(
+        live: &[&State],
+        n: Name,
+        known: &Prover,
+        side: impl Fn(&(Vec<Lin>, Vec<Lin>)) -> &Vec<Lin>,
+    ) -> Vec<Lin> {
+        let given: Vec<&Vec<Lin>> = live.iter().map(|s| side(&s.conds[&n])).collect();
+        if given.iter().all(|g| *g == given[0]) {
+            return given[0].clone();
+        }
+        let mut under: Vec<State> = (live.iter().zip(&given))
+            .map(|(s, g)| {
+                let mut s = State {
+                    facts: s.facts.clone(),
+                    defs: s.defs.clone(),
+                    ..State::default()
+                };
+                g.iter().for_each(|l| s.assume(l));
+                s
+            })
+            .filter(|s| !s.dead)
+            .collect();
+        let j = match under.len() {
+            1 => under.swap_remove(0),
+            _ => State::common(&under.iter().collect::<Vec<_>>()),
+        };
+        if j.dead {
+            return vec![Lin::k(-1)];
+        }
+        (j.facts.iter().cloned())
+            .chain(j.unshared(known.st))
+            .filter(|c| known.ge0(c).is_none())
+            .collect()
     }
 }
 

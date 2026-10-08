@@ -3,10 +3,10 @@
 //!
 //! [`decide`] walks a body's rows forward. A `let` or a store of an integer
 //! defines its name; a comparison remembers the facts its truth and falsehood
-//! give, and an `if` on it assumes them; a builtin's row states how it moves
-//! its receiver's length, and any other `modify` or `consume` argument that is
-//! not a scalar forgets its name. After a check row the path has its guard, since
-//! it traps otherwise. A loop's head keeps the candidate facts that hold at
+//! give, a Bool copy and a join carry them, and an `if` on it assumes them; a
+//! builtin's row states how it moves its receiver's length, and any other
+//! `modify` or `consume` argument that is not a scalar forgets its name. After
+//! a check row the path has its guard, since it traps otherwise. A loop's head keeps the candidate facts that hold at
 //! entry and after every turn (Houdini): each round drops at least one
 //! candidate or stops, so the candidate count bounds the rounds.
 //!
@@ -556,6 +556,22 @@ impl Walk<'_> {
                         st.define(Term::Val(n), &l);
                     }
                 }
+            }
+            // A Bool copy carries the facts its source's truth gives; a
+            // literal's other side is dead (`-1 >= 0`).
+            (Val::Name(m), _) => {
+                if let Some(c) = st.conds.get(m).cloned() {
+                    st.conds.insert(n, c);
+                }
+            }
+            (Val::Lit(Lit::Bool(b)), _) => {
+                let never = vec![Lin::k(-1)];
+                let c = if *b {
+                    (Vec::new(), never)
+                } else {
+                    (never, Vec::new())
+                };
+                st.conds.insert(n, c);
             }
             _ => {}
         }

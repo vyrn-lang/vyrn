@@ -86,6 +86,23 @@ fn a_counted_while_proves_its_index() {
 }
 
 #[test]
+fn a_condition_stored_in_a_bool_proves_its_index() {
+    let src = "fn w(xs: Array<Int64>, i: Int64) -> Int64 {
+    if i < 0 || i >= xs.length {
+                       return 0
+    }
+    return xs[i]
+}
+";
+    assert_eq!(verdicts(src, "w"), ["proved array-index"]);
+    let (err, rows) = oracle(src, "    print(w(xs, 2).toString())", "w");
+    assert_eq!(
+        (err.as_str(), rows),
+        ("", vec!["5 0 array-index proved 1".to_string()])
+    );
+}
+
+#[test]
 fn a_length_guard_proves_the_last_element() {
     let src = "fn last(xs: Array<Int64>) -> Int64 {\n    if xs.length > 0 {\n        \
                return xs[xs.length - 1]\n    }\n    return 0\n}\n";
@@ -521,6 +538,70 @@ fn w(p: modify P) -> Int64 {
          i = 5\n    }\n    return t[i]\n}\n",
         "    print(w(true).toString())",
         "array index 5 out of bounds",
+    ),
+    // A Bool that one branch overwrites keeps only what both branches give.
+    (
+        "fn w(xs: Array<Int64>, i: Int64, c: Bool) -> Int64 {
+    let mut ok = i >= 0 && i < xs.length
+    if c {
+        ok = true
+    }
+    if ok {
+        return xs[i]
+    }
+    return 0
+}
+",
+        "    print(w(xs, 5, true).toString())",
+        "array index 5 out of bounds",
+    ),
+    // A Bool's facts end where a name they mention is written.
+    (
+        "fn w(xs: Array<Int64>, k: Int64) -> Int64 {
+    let mut i = k
+    let ok = i >= 0 && i < xs.length
+    i = i + 1
+    if ok {
+        return xs[i]
+    }
+    return 0
+}
+",
+        "    print(w(xs, 2).toString())",
+        "array index 3 out of bounds",
+    ),
+    (
+        "fn w(xs: modify Array<Int64>, i: Int64) -> Int64 {
+    let ok = i >= 0 && i < xs.length
+    xs.clear()
+    if ok {
+        return xs[i]
+    }
+    return 0
+}
+",
+        "    print(w(xs, 0).toString())",
+        "array index 0 out of bounds",
+    ),
+    // A Bool a loop writes keeps nothing at the loop's exit.
+    (
+        "fn w(xs: Array<Int64>, i: Int64) -> Int64 {
+    let mut ok = i >= 0 && i < xs.length
+    let mut k: Int64 = 0
+    while k < 2 {
+        if k == 1 {
+            ok = true
+        }
+        k = k + 1
+    }
+    if ok {
+        return xs[i]
+    }
+    return 0
+}
+",
+        "    print(w(xs, 9).toString())",
+        "array index 9 out of bounds",
     ),
     // A sum is exact only when it provably fits (research witness h21t).
     (
