@@ -74,7 +74,7 @@ A deletion is licensed by evidence, not by reading. Write the licence into the c
 
 - A rule leaves a pass when the other pass states it: `vyrn check` over the whole corpus before and after, every byte of stderr and every exit code equal. No refusal lost, none gained. Witness each refusal the corpus never reaches with one program, under both binaries.
 - Lowering or emission: `VYRN_WASM_MANIFEST=check` is green, or you run `write` and explain every moved row from `wasm2wat`.
-- Ownership: the kernel corpus (accepted, refused, unlowered unchanged) and the residue ratchet on both engines. The baseline only shrinks; grow it by hand, with a reason, or not at all.
+- Ownership: the kernel corpus (accepted, refused, unlowered unchanged), the residue ratchet on both engines and the shape sweep. The baseline only shrinks; grow it by hand, with a reason, or not at all.
 - The loader, the symbols, the parser: the diagnostics pin, the lowering pin, the formatter's re-lex invariant, the LSP suite.
 - Speed: the benchmark table, interleaved runs, best of N, noise band stated.
 
@@ -130,12 +130,13 @@ cargo nextest run --release --workspace --no-fail-fast --status-level fail
 cargo test --release --manifest-path vyrn-play/Cargo.toml
 VYRN_WASM_MANIFEST=check cargo nextest run --release -p vyrn-cli --no-fail-fast \
   --status-level fail --success-output final --run-ignored only \
-  -E 'binary(kernel) | binary(effects) | binary(typed) | binary(coretables) | binary(coredrive) | binary(wasmhash) | binary(parallel) | binary(recheck) | binary(testsweep)'
+  -E 'binary(kernel) | binary(effects) | binary(typed) | binary(coretables) | binary(coredrive) | binary(wasmhash) | binary(parallel) | binary(recheck) | binary(testsweep) | binary(shapesweep)'
 sh ../scripts/check-corpus.sh <main's tree> <out-base>
 sh ../scripts/check-corpus.sh .. <out-head>
 diff -r <out-base> <out-head>
 ```
 The workspace line runs every crate's tests, not only the CLI's: CI does, and a slice that ran `-p vyrn-cli` alone missed 38 failures in `vyrn-frontend` and `vyrn-play` (#545). CI does not run `coredrive`; with one walk it runs unsharded in about 150 s.
+`shapesweep` generates every ownership shape of a store, a read and a removal and runs each accepted one under the free audit on both engines. Measured on 2026-10-08 with other tracks building: 135 s and 144 s on 12 threads, 231 s at the worst load. Its failures are held to `tests/pins/shapesweep-known.tsv`. A failure the list does not name fails the gate. `VYRN_PIN=write` deletes the rows that no longer fail and refuses to add one.
 `check-corpus.sh` refuses to run while a tree holds an untracked `.vyrn` file under a corpus root, and prints it. Delete or commit the file first; a stray root makes the two trees differ.
 Add what the change touches:
 - `std/`: `target/release/vyrn doc --std -o ../docs/api --verify`, and commit what it regenerates. Then, from the root, the step "The site's own tests" in `.github/workflows/site.yml`: `compiler/target/release/vyrn test` on `site/export.vyrn` and each `site/app/*.vyrn`, after `python3 scripts/site-history.py > site/data/history.json`. A std module doc is its reference page's description, and the site tests pin it.

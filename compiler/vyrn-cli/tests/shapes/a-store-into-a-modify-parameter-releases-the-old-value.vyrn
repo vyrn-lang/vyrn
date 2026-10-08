@@ -1,0 +1,44 @@
+// a store into a `modify` parameter name releases the value the slot held
+// the caller keeps the slot and owns what it holds after the call, so each store
+// frees the value it replaces and nothing leaks.
+type Box = { name: String }
+fn mk(n: Int64) -> String {
+    return "ab" + n.toString()
+}
+fn put(s: modify String, n: Int64) {
+    s = mk(n)
+}
+fn putTwice(s: modify String) {
+    s = mk(1)
+    s = mk(22)
+}
+fn grow(s: modify String) {
+    s = s + "!!"
+}
+fn putBox(b: modify Box, n: Int64) {
+    b = Box { name: mk(n) }
+}
+fn putAll(xs: modify Array<String>) {
+    xs = [mk(7), mk(8)]
+}
+fn vyrnTestMain() -> Int64 {
+    let mut s = mk(100)
+    put(s, 5)
+    let mut total = s.byteLength
+    putTwice(s)
+    total = total + s.byteLength
+    let mut i = 0
+    while i < 3 {
+        put(s, 10 + i)
+        total = total + s.byteLength
+        i = i + 1
+    }
+    grow(s)
+    total = total + s.byteLength
+    let mut b = Box { name: mk(100) }
+    putBox(b, 3)
+    total = total + b.name.byteLength
+    let mut xs: Array<String> = [mk(1)]
+    putAll(xs)
+    return total + xs.length + xs[1].byteLength
+}
