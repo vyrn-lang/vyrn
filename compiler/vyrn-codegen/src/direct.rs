@@ -6141,8 +6141,13 @@ impl<'p> Fn_<'_, 'p> {
         b.slot(out + ol.fields[1]);
         self.elem_addr(b, &w, last);
         self.load_elem(b, &w, line)?;
-        self.encode_word2(b, &elem, line)?;
-        b.ins(&Instruction::I64Store(at(0)));
+        // A two-word element is already two payload words: one copy, no encoding.
+        if self.word2(&elem)? == Word::Inline2 {
+            b.copy(16);
+        } else {
+            self.encode_word2(b, &elem, line)?;
+            b.ins(&Instruction::I64Store(at(0)));
+        }
         self.depth -= 1;
         b.ins(&Instruction::End);
         b.slot(out);

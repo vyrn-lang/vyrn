@@ -2446,6 +2446,14 @@ fn a_name_rebound_to_a_borrow_keeps_its_copy() {
     shape_runs_clean("a-name-rebound-to-a-borrow-keeps-its-copy", "2015\n");
 }
 
+// A `pop` of an array of two-word elements carries the element in the
+// `Option`'s two payload words (witness: base refused it, "no lowering for an
+// Option of a two-word payload").
+#[test]
+fn a_pop_of_a_two_word_element_runs() {
+    shape_runs_clean("an-option-of-a-two-word-payload-is-popped", "3270\n");
+}
+
 #[test]
 fn a_for_over_a_user_container_in_a_field_runs() {
     shape_runs_clean(

@@ -5,9 +5,6 @@
 #   store.name.*, root param: a store into a `modify` parameter name does not
 #     release the value it held (leak), and a read of a borrowed element or
 #     loop element stored there is not copied (double free).
-#   remove.w.ins.pop.*, element type Int: `check` accepts a pop of an array of
-#     records of two Int64 fields; the direct backend has no lowering for the
-#     Option of a two-word payload.
 #   remove-leaf.w.h.bag[i].*: `check` accepts a pop or swapRemove through a user
 #     container's `atSet` place; the core cannot state the body.
 Arr.remove-leaf.w.h.bag[i].pop.bind.lit-diff.if.global	build@route+exit@engine+output@engine
@@ -90,12 +87,6 @@ Enm.store.name.fresh.-.straight.param	leak@engine+leak@route
 Enm.store.name.loop-elem.-.straight.param	double-free@engine+double-free@route
 Enm.store.name.payload.-.loop.param	leak@engine+leak@route
 Enm.store.name.read-other.-.straight.param	double-free@engine+double-free@route
-Int.remove.w.ins.pop.bind.-.if.global	build@route+exit@engine+output@engine
-Int.remove.w.ins.pop.bind.-.loop.param	build@route+exit@engine+output@engine
-Int.remove.w.ins.pop.bind.-.straight.local	build@route+exit@engine+output@engine
-Int.remove.w.ins.pop.discard.-.if.local	build@route+exit@engine+output@engine
-Int.remove.w.ins.pop.discard.-.loop.global	build@route+exit@engine+output@engine
-Int.remove.w.ins.pop.discard.-.straight.param	build@route+exit@engine+output@engine
 Rec.store.name.adopt-other.-.straight.param	leak@engine+leak@route
 Rec.store.name.adopt-same.-.loop.param	leak@engine+leak@route
 Rec.store.name.adopt-sib.-.if.param	leak@engine+leak@route

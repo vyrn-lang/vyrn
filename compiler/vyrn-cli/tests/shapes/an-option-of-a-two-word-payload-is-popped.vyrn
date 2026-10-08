@@ -1,0 +1,26 @@
+// a `pop` of an array whose element is two words long
+// The element rides inline in the `Option`'s two payload words, so the pop copies it whole.
+// A record of two `Int64`, a record of two `String` and a record of three `Int64` pop alike.
+type In = { f: Int64, g: Int64 }
+type Nm = { a: String, b: String }
+type Tri = { x: Int64, y: Int64, z: Int64 }
+fn vyrnTestMain() -> Int64 {
+    let mut ins: Array<In> = [In { f: 3, g: 4 }, In { f: 5, g: 6 }]
+    let mut nms: Array<Nm> = [Nm { a: "ab" + "c", b: "d" + "e" }]
+    let mut tris: Array<Tri> = [Tri { x: 1, y: 2, z: 3 }]
+    let mut s = 0
+    if let Some(v) = ins.pop() {
+        s = s + v.f * 10 + v.g
+    }
+    ins.pop()
+    if let Some(v) = ins.pop() {
+        s = s + 100000
+    }
+    if let Some(v) = nms.pop() {
+        s = s + v.a.byteLength * 1000 + v.b.byteLength * 100
+    }
+    if let Some(v) = tris.pop() {
+        s = s + v.x + v.y * 2 + v.z * 3
+    }
+    return s + ins.length + nms.length + tris.length
+}
