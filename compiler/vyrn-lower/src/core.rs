@@ -135,8 +135,9 @@ fn take_names_a_place(
     if vyrn_frontend::ast::place_path(e).is_some() {
         return Ok(());
     }
-    if let Some((root, path)) = vyrn_frontend::project::element_path(e, places) {
-        let more = vec![rule!(SwapRemove, root).render()];
+    if let Some((_, path)) = vyrn_frontend::project::element_path(e, places) {
+        let container = vyrn_frontend::project::element_container(&path);
+        let more = vec![rule!(SwapRemove, container).render()];
         return refuse(rule!(ElementTaken, path), more, line);
     }
     let rule = match by_loop {
@@ -491,6 +492,38 @@ pub(crate) fn build_in(
     names: &mut NameMemo,
 ) -> Result<Body, Gap> {
     build_from(program, own, fns, names, &Source::Instance(inst))
+}
+
+/// A projection of [`Lowered::places`] with its body, built.
+pub(crate) type Projection<'l, 'a> = (&'l crate::PlaceBody<'a>, Result<Body, Gap>);
+
+/// Builds each `impl` projection's body once, numbered in `fns`. A projection
+/// is inlined at its site and no instance builds it, so the judgment reads
+/// these bodies and [`augment`] types them.
+pub(crate) fn build_places<'l, 'a>(
+    program: &Program,
+    lowered: &'l crate::Lowered<'a>,
+    own: &Ownership,
+    fns: &mut Fns,
+) -> Vec<Projection<'l, 'a>> {
+    let mut names = NameMemo::default();
+    (lowered.places.iter())
+        .map(|p| {
+            let inst = Instance {
+                func: p.func,
+                func_id: p.id,
+                type_args: Vec::new(),
+                subst: Default::default(),
+                facts: p.facts.clone(),
+                releases: Vec::new(),
+            };
+            let mut body = build_in(program, &inst, own, fns, &mut names);
+            if let Ok(b) = &mut body {
+                fns.number(b);
+            }
+            (p, body)
+        })
+        .collect()
 }
 
 /// What a body is built from. The setup of each kind is [`seeded`]'s match.
@@ -1381,6 +1414,7 @@ impl<'a> Builder<'a> {
                 refused,
                 mistyped,
                 ends: HashMap::new(),
+                consumes: HashMap::new(),
             },
             frame: Frame::default(),
             temps: 0,
@@ -1457,28 +1491,55 @@ impl<'a> Builder<'a> {
     }
 
     /// Records where `e`, taken as `n`, ends in the reader's text
-    /// ([`Body::ends`]): a name or a field, in the root module's own source.
+    /// ([`Body::ends`]): a name, a field or an element, in the root module's own source.
     fn spell_take(&mut self, e: &Expr, n: Name) {
-        let at = self.spelled_end(e);
-        if at.is_some() && self.frame.stmt != NodeId::NONE && self.body.names[n.index()].heap {
-            let slot = self.body.ends.entry((self.frame.stmt, n)).or_insert(at);
-            if *slot != at {
-                *slot = None;
-            }
+        if self.frame.stmt == NodeId::NONE || !self.body.names[n.index()].heap {
+            return;
+        }
+        if let Some(at) = self.spelled_end(e) {
+            self.body.ends.entry((self.frame.stmt, n)).or_insert(at);
         }
     }
 
-    /// The line and column just past `e`, a name or a field, where the reader
-    /// spelled it in the root module's own source.
+    /// The line and column just past `e`, a name, a field or an element,
+    /// where the reader spelled it in the root module's own source.
     fn spelled_end(&self, e: &Expr) -> Option<(usize, usize)> {
         let (end, root) = match e {
             Expr::Var { name, id, .. } => (id.col() + name.chars().count(), id),
             Expr::Field { field, id, .. } => (id.col() + field.chars().count(), id),
+            // An element is spelled at its `]`.
+            Expr::Call { name, id, .. } if name == "@at" => (id.col() + 1, id),
             _ => return None,
         };
         let spelled =
             root.col() > 0 && root.0.unit() < NodeId::EXPANDED && self.body.file.is_none();
         spelled.then(|| (e.line(), end))
+    }
+
+    /// The edits that replace `consume PLACE` by `PLACE.copy()` where the
+    /// reader wrote it on one line of the root module's own source: delete the
+    /// keyword at column `kw` of `kw_line`, copy past the place. Empty where the text does
+    /// not place the take.
+    fn uncopy(&self, place: &Expr, (kw_line, kw): (usize, usize)) -> Vec<Fix> {
+        let mut root = place;
+        while let Expr::Field { expr, .. } = root {
+            root = expr;
+        }
+        match (self.spelled_end(place), root) {
+            (Some((line, end)), Expr::Var { line: l, id, .. })
+                if kw > 0 && *l == line && line == kw_line =>
+            {
+                vec![
+                    Fix::Unconsume {
+                        line,
+                        col: kw,
+                        len: id.col().saturating_sub(kw),
+                    },
+                    Fix::Copy { line, col: end },
+                ]
+            }
+            _ => Vec::new(),
+        }
     }
 
     /// [`Builder::keyed`] for a `let` the reader wrote.
@@ -2356,8 +2417,10 @@ impl<'a> Builder<'a> {
     /// the value are the source's.
     ///
     /// The path's own indices below the root are bound to temps, root to leaf.
-    /// Nothing below the root hands a value back: the buffer the leaf writes
-    /// into is not the buffer the value reads.
+    /// Only a store to a whole name hands the old value back. A value built
+    /// from the place's own value (`s.xs = s.xs.push(v)`) is moved out first,
+    /// which leaves a hole the store fills, so a field or an element needs no
+    /// hand-back at any depth.
     #[allow(clippy::too_many_arguments)]
     fn store(
         &mut self,
@@ -2432,9 +2495,7 @@ impl<'a> Builder<'a> {
         };
         let nested = !base.is_empty();
         match leaf {
-            Step::Field(field) => {
-                self.set_field(at, name, &quoted, field, value, sid, nested, line, out)
-            }
+            Step::Field(field) => self.set_field(at, &quoted, field, value, sid, line, out),
             Step::Index(index) => self.index_set(
                 at, name, &quoted, index, value, sid, nested, whole, line, out,
             ),
@@ -2796,11 +2857,22 @@ impl<'a> Builder<'a> {
                     _ => self.val(value, out),
                 };
                 self.frame.rebinding = false;
-                let v = v?;
+                let mut v = v?;
                 let ty = match n {
                     Some(n) => self.body.names[n.index()].ty.clone(),
                     None => self.ty_of(value)?,
                 };
+                // A slot that owns its value keeps owning: a borrow stored
+                // into it is copied, as `let mut` binds one (`copies`), and
+                // the store releases the old value.
+                if let (Some(n), Val::Name(m)) = (n, &v) {
+                    if self.body.names[n.index()].releases && self.body.names[m.index()].borrow {
+                        let rhs = self.copy_rhs(v.clone(), value)?;
+                        let t = self.temp(ty.clone(), *line);
+                        self.bind(t, rhs, out);
+                        v = Val::Name(t);
+                    }
+                }
                 // The rule for a store to a name or module state: the plan
                 // says whether it releases the old value. A value that
                 // mentions the place may hand the old buffer back
@@ -2820,17 +2892,7 @@ impl<'a> Builder<'a> {
                 // that owns heap.
                 let (place, owes) = match n {
                     None => (Place::Global(name.clone()), self.owns(&ty)),
-                    Some(n) => {
-                        // A rebind answers as a `let` does: `t = d.title` is a
-                        // projection of `d`. A `mut` slot is released by its
-                        // final value, so a slot ever assigned somebody
-                        // else's place is not this frame's to release.
-                        if self.borrows(&v) && self.body.names[n.index()].releases {
-                            self.body.names[n.index()].releases = false;
-                            self.body.names[n.index()].borrow = true;
-                        }
-                        (Place::Name(n), self.body.names[n.index()].releases)
-                    }
+                    Some(n) => (Place::Name(n), self.body.names[n.index()].releases),
                 };
                 // The hand-back comes before the place's obligation: a name
                 // that owes no release still hands its buffer back, and the
@@ -3506,19 +3568,15 @@ impl<'a> Builder<'a> {
         Ok(())
     }
 
-    /// A store into `field` of the place `base`, a part of the root `name`
-    /// that the reader wrote as `quoted`. `nested` is whether the place is
-    /// below the root.
-    #[allow(clippy::too_many_arguments)]
+    /// A store into `field` of the place `base`, a part of a root that the
+    /// reader wrote as `quoted`.
     fn set_field(
         &mut self,
         base: (Place, Type),
-        name: &str,
         quoted: &str,
         field: &str,
         value: &'a Expr,
         sid: NodeId,
-        nested: bool,
         line: usize,
         out: &mut Vec<St>,
     ) -> Result<(), Gap> {
@@ -3526,20 +3584,11 @@ impl<'a> Builder<'a> {
         let (base, bty) = base;
         let fty = self.field_ty(&bty, field, line)?;
         let v = self.proven_val(value, Some(&fty), line, out)?;
-        // A name store's hand-back rule, one dot down:
-        // `s.dense = s.dense.push(i)` releases nothing.
-        let handed_back = !nested
-            && vyrn_frontend::ast::mentions_place(value, name)
-            && !self.fresh_str(&fty, value);
-        let releases = !handed_back && self.own.placed.stores.contains_key(&sid);
+        let releases = self.own.placed.stores.contains_key(&sid);
         out.push(St::Store {
             place: Place::Field(Box::new(base), field.to_string()),
             value: v,
-            old: if handed_back {
-                Old::Transferred
-            } else {
-                self.old_for(&fty, releases)
-            },
+            old: self.old_for(&fty, releases),
             line,
             site: Site::Node(sid),
             releases,
@@ -3684,7 +3733,8 @@ impl<'a> Builder<'a> {
 
     /// A store into the element or the entry of the place `base` at `index`, a
     /// part of the root `name` that the reader wrote as `quoted`. `whole` is
-    /// the place `atSet` yields where `index` is a user container's own.
+    /// the place `atSet` yields where `index` is a user container's own;
+    /// without it, a user container below the root (`nested`) is a gap.
     #[allow(clippy::too_many_arguments)]
     fn index_set(
         &mut self,
@@ -3745,22 +3795,11 @@ impl<'a> Builder<'a> {
             }
         }
         let site = Site::Node(sid);
-        // The same hand-back, and the index counts too: `xs[i] = xs[j]` and
-        // `xs[xs.length - 1] = v` read the buffer the store writes into.
-        // `xs[i] = xs[j].copy()` hands nothing back.
-        let handed_back = !nested
-            && ((vyrn_frontend::ast::mentions_place(value, name)
-                && !self.store_is_fresh(value, name))
-                || vyrn_frontend::ast::mentions_place(index, name));
-        let releases = !handed_back && self.own.placed.stores.contains_key(&sid);
+        let releases = self.own.placed.stores.contains_key(&sid);
         out.push(St::Store {
             place,
             value: v,
-            old: if handed_back {
-                Old::Transferred
-            } else {
-                self.old_for(&ety, releases)
-            },
+            old: self.old_for(&ety, releases),
             line,
             site,
             releases,
@@ -4218,7 +4257,7 @@ impl<'a> Builder<'a> {
                 self.keyed(t, construct);
                 Ok((Val::Name(t), true))
             }
-            Expr::Consume { place, line, id: _ } => match &**place {
+            Expr::Consume { place, line, id } => match &**place {
                 Expr::Var { name, .. } => {
                     let Some(n) = self.lookup(name) else {
                         // `consume` of module state: the same read and refusal.
@@ -4234,7 +4273,7 @@ impl<'a> Builder<'a> {
                     Ok((Val::Name(t), self.taken_by(t, construct)))
                 }
                 _ => {
-                    let Val::Name(t) = self.take_prefix(place, *line, out)? else {
+                    let Val::Name(t) = self.take_prefix(place, id.col(), *line, out)? else {
                         return gap("a `consume` of a literal", *line);
                     };
                     self.keyed(t, construct);
@@ -4900,14 +4939,14 @@ impl<'a> Builder<'a> {
                 // is a borrow in any position.
                 None => self.global_read(e, name, *line, out),
             },
-            Expr::Consume { place, line, id: _ } => match &**place {
+            Expr::Consume { place, line, id } => match &**place {
                 Expr::Var { name, .. } => match self.lookup(name) {
                     Some(n) => Ok(Val::Name(n)),
                     // `consume <module state>`: a borrow whose take the
                     // kernel refuses.
                     None => self.global_read(place, name, *line, out),
                 },
-                _ => self.take_prefix(place, *line, out),
+                _ => self.take_prefix(place, id.col(), *line, out),
             },
             Expr::Lambda { .. } => self.lambda(e, out),
             _ => {
@@ -5062,6 +5101,7 @@ impl<'a> Builder<'a> {
                 refused: Vec::new(),
                 mistyped: Vec::new(),
                 ends: HashMap::new(),
+                consumes: HashMap::new(),
             },
         );
         self.body.name = lambda_spelling(&outer.name, *line, *col);
@@ -5185,13 +5225,19 @@ impl<'a> Builder<'a> {
 
     /// The `consume p` prefix. Its refusals are about the keyword,
     /// which the kernel does not see, so they are stated here.
-    fn take_prefix(&mut self, e: &'a Expr, line: usize, out: &mut Vec<St>) -> Result<Val, Gap> {
+    fn take_prefix(
+        &mut self,
+        e: &'a Expr,
+        kw: usize,
+        line: usize,
+        out: &mut Vec<St>,
+    ) -> Result<Val, Gap> {
         take_names_a_place(e, &self.own.place_names, line, false)?;
         self.consume_names_a_borrow(e, line)?;
         if self.in_module_state(e) {
             return self.read_val(e, out);
         }
-        self.take_place_at(e, out, true)
+        self.take_place_at(e, out, Some((line, kw)))
     }
 
     /// Whether `e` is module state or a place inside it. Nothing may take module
@@ -5258,23 +5304,27 @@ impl<'a> Builder<'a> {
     /// builtin hands back (`s.dense.push(i)` is `s.dense = @push(s.dense, i)`).
     /// The value leaves into an owned name and the base keeps a hole.
     fn take_place(&mut self, e: &'a Expr, out: &mut Vec<St>) -> Result<Val, Gap> {
-        self.take_place_at(e, out, false)
+        self.take_place_at(e, out, None)
     }
 
-    /// [`Builder::take_place`], saying whether the hole stays: a `consume x.f`
-    /// leaves one the base's release walks around; the write-back
-    /// form's store fills it. This is where a binding's holes are stated.
+    /// [`Builder::take_place`], given the line and column of the `consume`
+    /// keyword where there is one: a `consume x.f` leaves a hole the base's
+    /// release walks around; the write-back form's store fills it. This is
+    /// where a binding's holes are stated.
     fn take_place_at(
         &mut self,
         e: &'a Expr,
         out: &mut Vec<St>,
-        keeps_hole: bool,
+        keyword: Option<(usize, usize)>,
     ) -> Result<Val, Gap> {
         let ty = self.ty_of(e)?;
         let place = self.place(e, out)?;
         self.frame.pending_receiver = None;
-        if keeps_hole {
+        if let Some(kw) = keyword {
             if let Some((n, path)) = crate::kernel::root_of(&place) {
+                let fixes = self.uncopy(e, kw);
+                let key = (self.frame.stmt, n, path.clone());
+                self.body.consumes.entry(key).or_insert(fixes);
                 // A hole the walk cannot skip is not stated: a declared
                 // `release` cannot be told to leave a field alone, so it would
                 // free the field twice (`refusals/r22_drop_with_a_hole.vyrn`).
@@ -5340,6 +5390,12 @@ impl<'a> Builder<'a> {
         self.frame.drain += 1;
         let v = self.read_at(e, out, None);
         self.frame.drain -= 1;
+        self.copy_rhs(v?, e)
+    }
+
+    /// The copy of `v`, the value of `e`: the type's `impl Copy` where it has
+    /// one, `@copy` otherwise.
+    fn copy_rhs(&self, v: Val, e: &Expr) -> Result<Rhs, Gap> {
         let copied = (self.copied(e)).and_then(|(f, s)| Some((self.fn_id(&f)?, f, s)));
         let (callee, kind, solved) = match copied {
             Some((id, f, solved)) => (f, Callee::Fn(id), solved),
@@ -5347,7 +5403,7 @@ impl<'a> Builder<'a> {
         };
         Ok(Rhs::Call {
             callee,
-            args: vec![(Arg::Val(v?), Capability::Read)],
+            args: vec![(Arg::Val(v), Capability::Read)],
             write_back: false,
             kind,
             ret: Some(self.ty_of(e)?),
@@ -7669,11 +7725,13 @@ pub fn augment(program: &Program, w: &mut World, judging: bool) {
     let tops: Vec<(&str, &Body)> = states.iter().filter_map(JobState::built).collect();
     // A body that did not build gives the judgment nothing, served or not.
     let late: Vec<(&str, &[Walked])> = states.iter().filter_map(JobState::answered).collect();
+    let places = build_places(program, &lowered, own, &mut w.fns);
     let (mut state, read, answers, reached) = crate::effects::judge_built(
         program,
         &lowered,
         own,
         &mut w.fns,
+        &places,
         &tops,
         &late,
         |judged, reach, refs, top, served_at| {
@@ -7853,25 +7911,14 @@ pub fn augment(program: &Program, w: &mut World, judging: bool) {
             Err(g) => refuse_gap(g, &inst.func.module, &inst.func.name, &mut r),
         }
     }
-    // Each `impl` projection's body, for the judgment alone: a projection is
-    // inlined at its site, and no instance builds its body.
-    for p in &lowered.places {
-        let inst = crate::Instance {
-            func: p.func,
-            func_id: p.id,
-            type_args: Vec::new(),
-            subst: Default::default(),
-            facts: p.facts.clone(),
-            releases: Vec::new(),
-        };
-        match build_in(program, &inst, own, &w.fns, &mut names) {
+    // Each `impl` projection's body, built before the judgment.
+    for (p, top) in &places {
+        match top {
             Ok(top) => {
-                crate::world::add_callees(&top, &by_name, calls.entry(p.id).or_default());
-                typed(program, own, &mut r, &top, &p.func.module, true);
+                crate::world::add_callees(top, &by_name, calls.entry(p.id).or_default());
+                typed(program, own, &mut r, top, &p.func.module, true);
             }
-            Err(g) => {
-                refuse_gap(g, &p.func.module, &p.func.name, &mut r);
-            }
+            Err(g) => refuse_gap(g.clone(), &p.func.module, &p.func.name, &mut r),
         }
     }
     // Each module-state initializer and each `where` predicate, for the

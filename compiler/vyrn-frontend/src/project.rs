@@ -928,6 +928,13 @@ pub fn path_text(root: &str, steps: &[Step]) -> String {
     text
 }
 
+/// The container the last element step of `path` reads from (`b.xs` for
+/// `b.xs[0]`), where `swapRemove` takes the element out. `path` itself where
+/// it has no element step.
+pub fn element_container(path: &str) -> &str {
+    path.rfind('[').map_or(path, |i| &path[..i])
+}
+
 /// An index as the reader wrote it: a name or an integer, else `..`, where
 /// `vyrn fix` refuses rather than guessing.
 fn index_text(e: Option<&Expr>) -> String {

@@ -1,0 +1,3 @@
+a_consume_parameter_of_an_element_names_its_container_at_depth_2.vyrn:1:0: `b.c.xs[0]` may not be passed to a `consume` parameter via `take(..)` — it is read out of a place that owns it
+  fix: `b.c.xs[0].copy()` — the callee owns its copy
+  fix: `b.c.xs.swapRemove(..)` returns the element and leaves the container one shorter

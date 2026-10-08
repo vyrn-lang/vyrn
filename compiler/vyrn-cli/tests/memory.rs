@@ -2425,6 +2425,27 @@ fn an_element_stored_from_a_copy_of_its_sibling_is_released() {
     shape_runs_clean("an-element-stored-from-a-copy-of-its-sibling", "11\n");
 }
 
+// A store releases the value it overwrites at every depth, including where the
+// index or the value names the container (witness: base leaked 3 blocks).
+#[test]
+fn an_overwritten_value_is_released_at_every_depth() {
+    shape_runs_clean("an-overwritten-value-is-released-at-every-depth", "30\n");
+}
+
+// Every accepted form of an element stored from an element, and the
+// write-backs beside it, under the free audit (`r52` is the refused form).
+#[test]
+fn an_element_stored_from_an_element_is_a_copy() {
+    shape_runs_clean("an-element-stored-from-an-element-is-a-copy", "1132\n");
+}
+
+// A `mut` name that owns its value is rebound to a borrow by a copy, and the
+// store releases the old value (witness: base leaked 1 block per name).
+#[test]
+fn a_name_rebound_to_a_borrow_keeps_its_copy() {
+    shape_runs_clean("a-name-rebound-to-a-borrow-keeps-its-copy", "2015\n");
+}
+
 #[test]
 fn a_for_over_a_user_container_in_a_field_runs() {
     shape_runs_clean(

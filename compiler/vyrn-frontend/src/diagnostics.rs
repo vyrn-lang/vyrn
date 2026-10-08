@@ -160,6 +160,20 @@ pub enum Fix {
     /// Insert `.copy()` at the 1-based `(line, col)`: the column just past the
     /// end of the path whose value is taken.
     Copy { line: usize, col: usize },
+    /// Delete `len` characters at the 1-based `(line, col)`: the `consume `
+    /// before a place that a [`Fix::Copy`] now copies, since `consume p.f.copy()`
+    /// is refused.
+    Unconsume { line: usize, col: usize, len: usize },
+}
+
+impl Fix {
+    /// The edit as `(line, col, characters deleted, text inserted)`.
+    pub fn edit(self) -> (usize, usize, usize, &'static str) {
+        match self {
+            Fix::Copy { line, col } => (line, col, 0, ".copy()"),
+            Fix::Unconsume { line, col, len } => (line, col, len, ""),
+        }
+    }
 }
 
 /// Opens a fix line under a refusal's sentence.
