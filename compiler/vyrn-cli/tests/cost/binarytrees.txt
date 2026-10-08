@@ -1,0 +1,8 @@
+examples/binarytrees.vyrn
+fn make(depth: Int64) -> Tree
+   51           allocates  Node(..)
+fn run(n: Int64) -> Unit
+  100           allocates  render x2, concatenation x3
+  106  loop 1   allocates  render x3, concatenation x4
+  109           allocates  render x2, concatenation x3
+summary: allocating rows 18 (7 in loops), growing rows 0 (0 in loops), copies 0 (0 in loops), checks kept 0 (0 in loops), checks proved 0 (0 in loops)

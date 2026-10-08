@@ -93,7 +93,7 @@ fn main_sections() -> Vec<Section> {
         sec("fn routes_cmd", Cmd("routes")),
         sec("fn routes_json", Cmd("routes")),
         sec("fn json_str", Shared),
-        sec("fn why_memory", Cmd("why")),
+        sec("fn why_cost", Cmd("why")),
         sec("fn why_audience", Cmd("why")),
         sec("fn why_capability", Cmd("why")),
         sec("const MAX_CHAINS", Shared),

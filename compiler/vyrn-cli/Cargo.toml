@@ -36,6 +36,12 @@ wasmtime = { version = "47", default-features = false, features = [
     "parallel-compilation",
 ] }
 
+# `allocs` wraps the allocator in a per-phase counter (`VYRN_BUILD_PROFILE=allocs`).
+# Off by default: the counter's load in every allocation cost 2.5% to 3.7% of a
+# build. `tests/compiler_allocs.rs` needs it: `cargo test --features allocs`.
+[features]
+allocs = []
+
 # The host the compiled route runs in, and nothing else (see src/lib.rs).
 # `vyrn-frontend` dev-depends on it so its tests run a program the way the
 # driver does.

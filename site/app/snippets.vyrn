@@ -97,7 +97,7 @@ export fn heroDiagnostic() -> String {
 }
 
 // ---------------------------------------------------------------------------
-// The ownership specimen, and what `vyrn why --memory` says about it
+// The ownership specimen, and what the editor's hover says about it
 // ---------------------------------------------------------------------------
 
 /// The first source line of `fullName` in `examples/ownership.vyrn`.
@@ -115,12 +115,10 @@ export fn ownershipRows() -> Array<CodeLine> {
 /// always has a report row to point at.
 export type ReportRow = { tag: String, from: Int64, to: Int64, html: String }
 
-/// `vyrn why --memory examples/ownership.vyrn`, the `fullName` section, quoted
-/// from the tool's own output.
+/// The hover rows of `examples/ownership.vyrn`, the `fullName` section.
 export fn ownershipReport() -> Array<ReportRow> {
     return [
         ReportRow { tag: "signature", from: 17, to: 17, html: terminalHtml("fn fullName(first: String, last: String) -> String") },
-        ReportRow { tag: "transfers", from: 17, to: 17, html: terminalHtml("  transfers: yes — the caller owns the result, and releases it by freeing the String buffer") },
         ReportRow { tag: "firstSpace", from: 18, to: 21, html: terminalHtml("  line 18    firstSpace       reclaimed at block exit — freeing the String buffer") },
         ReportRow { tag: "whole", from: 19, to: 20, html: terminalHtml("  line 19    whole            moved at line 20 into the return") },
     ]

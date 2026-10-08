@@ -187,7 +187,7 @@ impl Owned {
             if let Type::Named(n) | Type::App(n, _) = ty {
                 if !seen.contains(n) && o.types.contains_key(n) {
                     seen.push(n.clone());
-                    go(o, &crate::types::resolve(ty, &o.types), seen, out);
+                    go(o, &crate::types::resolved(ty, &o.types), seen, out);
                 }
                 return;
             }
@@ -342,7 +342,7 @@ fn self_referring_past(
                 return None;
             }
             seen.push(n.clone());
-            let r = go(&crate::types::resolve(ty, types), types, stops, seen);
+            let r = go(&crate::types::resolved(ty, types), types, stops, seen);
             seen.pop();
             return r;
         }
@@ -381,16 +381,17 @@ pub fn owns_heap(ty: &Type, types: &dyn Decls) -> bool {
                 return false;
             }
             seen.push(n.clone());
-            let r = go(&crate::types::resolve(ty, types), types, seen);
+            let r = go(&crate::types::resolved(ty, types), types, seen);
             seen.pop();
             return r;
         }
-        let deeper = |t: &Type| go(t, types, &mut seen.clone());
-        match crate::types::resolve(ty, types) {
+        // `go` pops what it pushes, so the children share one `seen`.
+        let mut deeper = |t: &Type| go(t, types, seen);
+        match &*crate::types::resolved(ty, types) {
             Type::Str | Type::Array(_) | Type::SmallArray(..) | Type::Map(..) | Type::Stream(_) => {
                 true
             }
-            Type::ArrayN(t, _) | Type::Lazy(t) => deeper(&t),
+            Type::ArrayN(t, _) | Type::Lazy(t) => deeper(t),
             Type::Record(fs) => fs.iter().any(|f| deeper(&f.ty)),
             // A boxed payload owns its box; `types::payload_boxed` is the
             // emitter's own rule.

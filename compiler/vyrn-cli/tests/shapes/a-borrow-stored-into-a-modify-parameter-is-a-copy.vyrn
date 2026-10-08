@@ -1,0 +1,41 @@
+// a borrow stored into a `modify` parameter name is stored as a copy
+// `s = ys[0]` and `s = x` in a loop read a place the caller still owns, so the
+// slot takes its own copy and releases the value it held.
+type P = { name: String }
+type A = { p: P }
+type R = { a: A }
+fn mkSs() -> Array<String> {
+    return ["x" + "y", "z" + "w", "u" + "vv"]
+}
+fn first(s: modify String, ys: Array<String>) {
+    s = ys[0]
+}
+fn lastOf(s: modify String, ys: Array<String>) {
+    for x in ys {
+        s = x
+    }
+}
+fn viaField(s: modify String, r: R) {
+    s = r.a.p.name
+}
+fn viaBinder(s: modify String, m: Map<String, String>) {
+    if let Some(v) = m["k"] {
+        s = v
+    }
+}
+fn vyrnTestMain() -> Int64 {
+    let ys = mkSs()
+    let r = R { a: A { p: P { name: "n" + "mmm" } } }
+    let mut m: Map<String, String> = [:]
+    m["k"] = "v" + "wwwww"
+    let mut s = "q" + "r"
+    first(s, ys)
+    let mut total = s.byteLength
+    lastOf(s, ys)
+    total = total + s.byteLength
+    viaField(s, r)
+    total = total + s.byteLength
+    viaBinder(s, m)
+    total = total + s.byteLength
+    return total + ys[0].byteLength + ys[2].byteLength
+}

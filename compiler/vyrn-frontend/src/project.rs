@@ -427,6 +427,40 @@ impl Expansions {
         Ok(Some(blk))
     }
 
+    /// Returns the `atSet` expansion a removal's receiver `recv` lowers through, and
+    /// the number of path steps after the projected one. The projected step is the
+    /// last one that indexes a user container; the expansion's place, with those
+    /// steps appended, is the place the removal shrinks. `ty` answers the type of a
+    /// sub-expression of `recv`. `None` means every step is a builtin container's.
+    pub fn modify_site(
+        &self,
+        impls: &Impls,
+        recv: &Expr,
+        ty: impl Fn(&Expr) -> Option<Type>,
+        line: usize,
+    ) -> Result<Option<(usize, &'static Projection)>, String> {
+        let (mut e, mut after) = (recv, 0);
+        loop {
+            match e {
+                Expr::Field { expr, .. } => e = expr,
+                Expr::Call { name, args, .. }
+                    if (name == AT || name == ELEM) && args.len() == 2 =>
+                {
+                    if let (AT, Some(t)) = (name.as_str(), ty(&args[0])) {
+                        let site =
+                            self.site(impls, Some(&t), "atSet", &args[0], &args[1..], line)?;
+                        if let Some(p) = site {
+                            return Ok(Some((after, p)));
+                        }
+                    }
+                    e = &args[0];
+                }
+                _ => return Ok(None),
+            }
+            after += 1;
+        }
+    }
+
     /// Returns the store expansion the checker built for `index`, for a reader
     /// that has the statement but not the receiver's type.
     pub fn stored(&self, index: &Expr) -> Option<&'static Block> {

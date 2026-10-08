@@ -12,6 +12,7 @@
 //! [`Cert::verify`] checks that sum again in `i128`, sharing no code with the
 //! search.
 
+use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use vyrn_frontend::core::Name;
@@ -79,13 +80,34 @@ impl Lin {
     }
 
     pub fn add(&self, o: &Lin) -> Option<Lin> {
-        let mut terms: BTreeMap<Term, i64> = self.terms.iter().copied().collect();
-        for (t, k) in &o.terms {
-            let e = terms.entry(*t).or_insert(0);
-            *e = e.checked_add(*k)?;
+        let (a, b) = (&self.terms, &o.terms);
+        let mut terms = Vec::with_capacity(a.len() + b.len());
+        let (mut i, mut j) = (0, 0);
+        while i < a.len() && j < b.len() {
+            let (x, y) = (a[i], b[j]);
+            let (t, k) = match x.0.cmp(&y.0) {
+                Ordering::Less => {
+                    i += 1;
+                    x
+                }
+                Ordering::Greater => {
+                    j += 1;
+                    y
+                }
+                Ordering::Equal => {
+                    i += 1;
+                    j += 1;
+                    (x.0, x.1.checked_add(y.1)?)
+                }
+            };
+            if k != 0 {
+                terms.push((t, k));
+            }
         }
+        terms.extend_from_slice(&a[i..]);
+        terms.extend_from_slice(&b[j..]);
         Some(Lin {
-            terms: terms.into_iter().filter(|(_, k)| *k != 0).collect(),
+            terms,
             c: self.c.checked_add(o.c)?,
         })
     }
@@ -347,22 +369,16 @@ impl State {
         for f in &self.facts {
             terms.extend(f.terms.iter().map(|(t, _)| *t));
         }
-        let premises: Vec<Lin> = self
-            .facts
-            .iter()
-            .cloned()
-            .chain(axioms(terms.into_iter()))
-            .collect();
-        let mut best: HashMap<Vec<(Term, i64)>, usize> = HashMap::new();
-        for (i, p) in premises.iter().enumerate() {
-            let e = best.entry(p.terms.clone()).or_insert(i);
-            if p.c < premises[*e].c {
-                *e = i;
+        let mut best: HashMap<&[(Term, i64)], &Lin> = HashMap::new();
+        for p in &self.facts {
+            let e = best.entry(p.terms.as_slice()).or_insert(p);
+            if p.c < e.c {
+                *e = p;
             }
         }
         Prover {
             st: self,
-            premises,
+            axioms: axioms(terms.into_iter()),
             best,
         }
     }
@@ -414,8 +430,10 @@ impl State {
 /// (the least constant).
 pub struct Prover<'a> {
     st: &'a State,
-    premises: Vec<Lin>,
-    best: HashMap<Vec<(Term, i64)>, usize>,
+    /// The length axioms of the facts' terms. The premises are `st.facts`, then these.
+    axioms: Vec<Lin>,
+    /// For each term list, the fact with the least constant.
+    best: HashMap<&'a [(Term, i64)], &'a Lin>,
 }
 
 impl Prover<'_> {
@@ -434,7 +452,13 @@ impl Prover<'_> {
         // The goal's own lengths may appear in no fact.
         let extra = axioms(g.terms.iter().map(|(t, _)| *t));
         let one = |d: &Lin| {
-            let indexed = self.best.get(&d.terms).map(|i| &self.premises[*i]);
+            let fact = self.best.get(d.terms.as_slice()).copied();
+            let axiom = self.axioms.iter().filter(|p| p.terms == d.terms);
+            // The premise with the least constant, the first on a tie.
+            let indexed = fact
+                .into_iter()
+                .chain(axiom)
+                .reduce(|m, p| if p.c < m.c { p } else { m });
             indexed
                 .into_iter()
                 .chain(extra.iter().filter(|p| p.terms == d.terms))
@@ -446,7 +470,7 @@ impl Prover<'_> {
                 uses: vec![p.clone()],
             });
         }
-        for p in self.premises.iter().chain(&extra) {
+        for p in self.st.facts.iter().chain(&self.axioms).chain(&extra) {
             let Some(d) = g.sub(p) else { continue };
             if let Some(q) = one(&d) {
                 return Some(Cert::Sum {

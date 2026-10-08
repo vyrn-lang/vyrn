@@ -210,7 +210,13 @@ fn add_native_clang_flags(cmd: &mut Command, target: NativeTarget) {
     }
 }
 
-/// The compiler is allocation-bound; see `mimalloc` in `Cargo.toml`.
+/// The compiler is allocation-bound; see `mimalloc` in `Cargo.toml`. The `allocs`
+/// feature adds the per-phase counter.
+#[cfg(feature = "allocs")]
+#[global_allocator]
+static GLOBAL: vyrn_frontend::prof::Counting<mimalloc::MiMalloc> =
+    vyrn_frontend::prof::Counting(mimalloc::MiMalloc);
+#[cfg(not(feature = "allocs"))]
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
@@ -220,6 +226,8 @@ fn main() -> ExitCode {
     std::thread::Builder::new()
         .stack_size(vyrn_frontend::trap::DEEP_STACK_BYTES)
         .spawn(|| {
+            #[cfg(feature = "allocs")]
+            vyrn_frontend::prof::start_allocs();
             let code = real_main();
             // The phases are thread-local, so the table prints on the thread
             // that did the build.
@@ -245,7 +253,7 @@ fn real_main() -> ExitCode {
 fn dispatch(args: &mut Vec<String>) -> Outcome {
     let flags = GlobalFlags::take(args)?;
     // Off `run`, `--profile` reports the build phases, and `main` prints the
-    // table. `run_wasm` prints its own, with the guest's operation count.
+    // table. On `run` it reports the guest's operation count (`wasm_profile`).
     if flags.profile && args.get(1).map(String::as_str) != Some("run") {
         vyrn_frontend::prof::arm();
     }
@@ -368,7 +376,7 @@ const COMMANDS: &[Cmd] = &[
     ]),
     cmd("why", Pos::One("file"), why_cmd, "a module's audience, the path segment that decided it, and every import chain that reaches it", &[
         Flag("--contract", None, "which module contract governs the file, and every export's status against it"),
-        Flag("--memory", None, "per binding: whether it is reclaimed, how, and the reason when it is not"),
+        Flag("--cost", None, "per line: what it allocates, copies and grows, and the checks it keeps"),
         Flag("--capability", Some("capability"), "every import chain that pulls the capability into the artifact the file argument names"),
     ]),
     cmd("routes", Pos::File, routes_cmd, "the resolved wire table: every derived, pinned, hand-written and page path the router mounts, with its source", &[
@@ -882,7 +890,7 @@ fn scaffold(call: &Call) -> Outcome {
     Ok(ExitCode::SUCCESS)
 }
 
-/// `vyrn why`: dispatches to the audience, `--contract`, `--memory` or
+/// `vyrn why`: dispatches to the audience, `--contract`, `--cost` or
 /// `--capability` report. `--contract` prints the contract that governs a
 /// module and the status of each of its members; it exits 1 when the file is
 /// in no role.
@@ -891,8 +899,8 @@ fn why_cmd(call: &Call) -> Outcome {
     if let Some(cap) = call.value("--capability") {
         return why_capability(flags, cap, file);
     }
-    if call.has("--memory") {
-        return why_memory(flags, file);
+    if call.has("--cost") {
+        return why_cost(flags, file);
     }
     if !call.has("--contract") {
         return why_audience(flags, file);
@@ -1457,10 +1465,14 @@ fn json_str(s: &str) -> String {
     out
 }
 
-/// `vyrn why --memory <file>`: what the ownership analysis decided about every
-/// binding in the file, and why. It prints `own::Ownership::memory` and
-/// re-derives nothing. Exit 0 whenever it could answer.
-fn why_memory(flags: GlobalFlags, file: &str) -> Outcome {
+/// `vyrn why --cost <file>`: per function of the file, the lines that allocate,
+/// copy, grow a container, enter an allocating function of another file or
+/// keep a check, and how many loops enclose each. It prints
+/// `insight::root` and decides nothing. Exit 0 whenever it could answer.
+fn why_cost(flags: GlobalFlags, file: &str) -> Outcome {
+    use std::collections::BTreeMap;
+    use vyrn_frontend::core::Copied;
+    use vyrn_lower::insight::{self, Kind};
     let path = match Path::new(file).canonicalize() {
         Ok(p) => dos_to_slash(&p.to_string_lossy()),
         Err(e) => {
@@ -1476,87 +1488,106 @@ fn why_memory(flags: GlobalFlags, file: &str) -> Outcome {
         raw
     };
     let p = Project::of(Some(&path), flags)?;
-    // Unshared, so the load's World keys other trees than this analysis.
-    let loaded = vyrn_lower::load_warned(&source, &path, &p.opts, &p.resolver, Some(&*engine()));
-    let (program, _) = p.report(&path, loaded)?;
-    let world = vyrn_lower::analyze(&program);
-    let own = &world.ownership;
+    let (program, world) = p.checked(&path, &source)?;
 
-    println!("{path}");
-    println!("  memory: every binding, whether it is reclaimed, and the reason when it is not");
-
-    let mut bindings = 0usize;
-    let mut reclaimed = 0usize;
-    let mut moved = 0usize;
-    let mut dropped = 0usize;
-    let mut statics = 0usize;
-    let mut discharged = 0usize;
-    // Reason -> count, kept in first-seen order so the report is stable.
-    let mut leaked: Vec<(&'static str, usize)> = Vec::new();
-
-    // Only the file asked about. A linked program carries every import's
-    // functions, and they are another file's answer.
-    for (i, f) in program.functions.iter().enumerate() {
-        if f.module.is_some() || f.is_extern {
+    println!("{}", dos_to_slash(file));
+    let (std, here) = (std_root(), path.rsplit_once('/').map_or("", |(d, _)| d));
+    // The file a call enters, as an import spells it: `std/strings`.
+    let named = |file: &str| match std.as_deref().and_then(|s| file.strip_prefix(s)) {
+        Some(m) => format!("std{}", m.trim_end_matches(".vyrn")),
+        None => rel_to(file, here),
+    };
+    // `(rows, rows in loops)` of allocating, growing, copying, kept and proved.
+    let mut tally = [(0usize, 0usize); 5];
+    for (id, facts) in insight::root(&program, &world) {
+        // Keyed by line, then verb in the order a reader asks: what is copied,
+        // what is allocated, what grows, what is checked.
+        let mut shown: BTreeMap<(u32, u8), (&str, u32, Vec<(String, usize)>)> = BTreeMap::new();
+        for f in &facts {
+            let (slot, order, verb, what) = match &f.kind {
+                Kind::Copy { what, implicit } => {
+                    let what = match what {
+                        Copied::Value => "a value",
+                        Copied::Render => "a String render",
+                    };
+                    let how = if *implicit { " (implicit)" } else { "" };
+                    (2, 0, "copies", format!("{what}{how}"))
+                }
+                Kind::Alloc(w) => (0, 1, "allocates", w.clone()),
+                Kind::Enters(c, from) => (0, 2, "enters", format!("{c}(..) in {}", named(from))),
+                Kind::Grows(b) => (1, 3, "grows", format!("{b}(..)")),
+                Kind::Check { raises, kept } => (
+                    3 + usize::from(!kept),
+                    4,
+                    "check kept",
+                    raises.census().to_string(),
+                ),
+            };
+            tally[slot].0 += 1;
+            tally[slot].1 += usize::from(f.depth > 0);
+            if slot == 4 {
+                continue;
+            }
+            let (_, depth, whats) = shown
+                .entry((f.line, order))
+                .or_insert((verb, 0, Vec::new()));
+            *depth = (*depth).max(f.depth);
+            match whats.iter_mut().find(|w| w.0 == what) {
+                Some(w) => w.1 += 1,
+                None => whats.push((what, 1)),
+            }
+        }
+        if shown.is_empty() {
             continue;
         }
+        let f = &program.functions[id.index()];
         let mut tys: Vec<&vyrn_frontend::ast::Type> = f.params.iter().map(|p| &p.ty).collect();
         tys.push(&f.ret);
         let sp = program.spellings.speech(&None).sentence(&tys, &[&f.name]);
-        let params: Vec<String> = f
-            .params
-            .iter()
+        let params: Vec<String> = (f.params.iter())
             .map(|p| format!("{}: {}", p.name, sp.ty(&p.ty)))
             .collect();
-        println!();
-        let (name, ret) = (sp.name(&f.name), sp.ty(&f.ret));
-        println!("  fn {name}({}) -> {ret}", params.join(", "));
-        // A return is owned, so the return type is the whole
-        // answer.
-        match own.proto.release_kind(&f.ret) {
-            Some(ref kind) => println!(
-                "    transfers: yes — the caller owns the result, and releases it by {}",
-                kind.words(&sp)
-            ),
-            None => println!("    transfers: no — the return type {ret} owns no heap"),
-        }
-        let notes = match own.memory.get(&vyrn_frontend::ast::FnId::nth(i)) {
-            Some(n) if !n.is_empty() => n,
-            _ => {
-                println!("    (no bindings)");
-                continue;
-            }
-        };
-        for n in notes {
-            use vyrn_frontend::own::Bucket;
-            bindings += 1;
-            match n.bucket {
-                Bucket::Reclaimed => reclaimed += 1,
-                Bucket::Moved => moved += 1,
-                Bucket::Dropped => dropped += 1,
-                Bucket::Static => statics += 1,
-                Bucket::Discharged => discharged += 1,
-                Bucket::Leaked { reason, .. } => {
-                    match leaked.iter_mut().find(|(k, _)| *k == reason) {
-                        Some((_, c)) => *c += 1,
-                        None => leaked.push((reason, 1)),
+        println!(
+            "fn {}({}) -> {}",
+            sp.name(&f.name),
+            params.join(", "),
+            sp.ty(&f.ret)
+        );
+        let mut last = 0;
+        for ((line, _), (verb, depth, whats)) in shown {
+            let num = if line == last {
+                String::new()
+            } else {
+                line.to_string()
+            };
+            let lp = if depth > 0 {
+                format!("loop {depth}")
+            } else {
+                String::new()
+            };
+            last = line;
+            let whats: Vec<String> = (whats.iter())
+                .map(|(w, n)| {
+                    if *n > 1 {
+                        format!("{w} x{n}")
+                    } else {
+                        w.clone()
                     }
-                }
-            }
-            println!("    line {:<5} {:<16} {}", n.line, n.name, n.text);
+                })
+                .collect();
+            println!("{num:>5}  {lp:<7}  {verb:<10} {}", whats.join(", "));
         }
     }
-
-    let leaks: usize = leaked.iter().map(|(_, c)| c).sum();
-    println!();
+    let [alloc, grow, copy, kept, proved] = tally;
+    let count = |(all, lp): (usize, usize), what: &str| format!("{what} {all} ({lp} in loops)");
     println!(
-        "  summary: {bindings} bindings — {reclaimed} reclaimed, {moved} moved out, \
-         {dropped} dropped, {discharged} discharged, {statics} static, {leaks} not reclaimed"
+        "summary: {}, {}, {}, {}, {}",
+        count(alloc, "allocating rows"),
+        count(grow, "growing rows"),
+        count(copy, "copies"),
+        count(kept, "checks kept"),
+        count(proved, "checks proved"),
     );
-    leaked.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
-    for (reason, count) in &leaked {
-        println!("    {count:>5}  {reason}");
-    }
     Ok(ExitCode::SUCCESS)
 }
 
@@ -5005,23 +5036,20 @@ fn run_wasm(
     }
 }
 
-/// Prints a compiled run's profile to stderr: the phase table and the
-/// operations the guest executed.
+/// Prints the operations the guest executed to stderr. Under
+/// `VYRN_BUILD_PROFILE`, the phase table follows when `main` exits.
 ///
 /// The count is wasmtime's fuel, read from a budget nothing exhausts. Unlike
 /// the times, it is the same number on any machine.
 fn wasm_profile(load: std::time::Duration, compile: std::time::Duration, meter: &wasmrun::Meter) {
-    vyrn_frontend::prof::charge("load", load);
-    vyrn_frontend::prof::charge("compile", compile);
-    vyrn_frontend::prof::charge("translate", meter.translate);
-    vyrn_frontend::prof::charge("instantiate", meter.instantiate);
-    vyrn_frontend::prof::charge("run", meter.run);
-    eprint!("{}", vyrn_frontend::prof::phase_table());
-    eprintln!(
-        "
-{} operation(s) executed",
-        meter.fuel
-    );
+    if vyrn_frontend::prof::phases_on() {
+        vyrn_frontend::prof::charge("load", load);
+        vyrn_frontend::prof::charge("compile", compile);
+        vyrn_frontend::prof::charge("translate", meter.translate);
+        vyrn_frontend::prof::charge("instantiate", meter.instantiate);
+        vyrn_frontend::prof::charge("run", meter.run);
+    }
+    eprintln!("{} operation(s) executed", meter.fuel);
 }
 
 /// One `test` or `bench` body, as [`bodies_wasm`] runs it.

@@ -91,7 +91,7 @@ vyrn run examples/fib.vyrn
 ## Features
 
 - **Validated types.** A `where` clause is part of the type. The compiler rejects an invalid constant, removes the check where it proves the value valid, and emits it where it cannot. ([validate](examples/validate.vyrn), [autovalidate](examples/autovalidate.vyrn))
-- **Ownership by declaration.** `read`, `modify`, `consume` and `share` on a parameter drive moves and aliasing. `vyrn why --memory <file>` says where each binding is freed and why. ([consume](examples/consume.vyrn), [ownership](examples/ownership.vyrn))
+- **Ownership by declaration.** `read`, `modify`, `consume` and `share` on a parameter drive moves and aliasing. `vyrn why --cost <file>` says which lines allocate, copy and keep a check. ([consume](examples/consume.vyrn), [ownership](examples/ownership.vyrn))
 - **One module, two ways to run it.** `vyrn build --target wasm` emits WebAssembly directly, with no LLVM and no clang. `vyrn build` turns the same module into a native executable, and CI checks that both print the same output.
 - **Generators, not compiler features.** A `gen fn` is ordinary Vyrn that runs at compile time and returns source. RPC, UI, i18n, OpenAPI and GraphQL are libraries in [`std/`](std/), not keywords. ([gendemo](examples/gendemo.vyrn))
 - **Failure is a value.** No null: `Option<T>`, `Result<T, E>`, exhaustive `match` and `?`. ([option](examples/option.vyrn), [fallible](examples/fallible.vyrn))
@@ -128,11 +128,11 @@ vyrn serve examples/server.vyrn
 cd examples/fullstack && vyrn dev
 ```
 
-Read what a generator wrote, or why memory is freed where it is:
+Read what a generator wrote, or what each line costs:
 
 ```bash
 vyrn emit-gen examples/gendemo.vyrn
-vyrn why --memory examples/ownership.vyrn
+vyrn why --cost examples/ownership.vyrn
 ```
 
 ### A tour by topic

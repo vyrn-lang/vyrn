@@ -321,7 +321,7 @@ export fn chapters() -> Array<Chapter> {
                     "Generics are monomorphised, protocols are how a type says what it can do, and a protocol bound is checked at the call rather than at run time. Records are structural, as in TypeScript: a record with the same fields, or more, fits where a record type is wanted.",
                 ], []),
                 section("absent", "What is not here", [
-                    "<strong>No garbage collector.</strong> Memory is released where the ownership words say it is, and <code>vyrn why --memory</code> prints that decision per binding.",
+                    "<strong>No garbage collector.</strong> Memory is released where the ownership words say it is, and the editor's hover shows that decision per binding.",
                     "<strong>No exceptions, no unwinding, no `async` colour.</strong> A program is a program; the runtime that serves HTTP is a library written in the language.",
                     "<strong>No macros.</strong> A generator is an ordinary Vyrn function that runs while you compile and emits Vyrn — <code>vyrn emit-gen</code> prints exactly what it wrote. <a href=\"/guide/generators.html\">gen fns and generators</a> is the chapter.",
                     "<strong>No inheritance and no null.</strong> Both are covered above, and neither has a workaround to learn.",
@@ -392,7 +392,7 @@ export fn chapters() -> Array<Chapter> {
                 section("regions", "Regions", [
                     "A <code>region</code> block frees a group of allocations at its closing brace. It suits a loop that builds temporary values: one release for the whole block instead of one per value.",
                     "A value that must outlive the block is returned from it, and the caller owns what comes out. Storing an arena value into a binding that outlives the region is a compile error.",
-                    "<code>vyrn why --memory &lt;file&gt;</code> reports, for every binding, whether it is reclaimed, how, and why not when it is not.",
+                    "The editor's hover reports, for every binding, whether it is reclaimed, how, and why not when it is not.",
                 ], ["regions"]),
             ],
         },
@@ -601,7 +601,7 @@ export fn chapters() -> Array<Chapter> {
                     "<code>vyrn fmt</code> writes the one canonical layout. It has no style options, and <code>--check</code> is the CI gate. <code>vyrn doc</code> writes Markdown API docs from the <code>///</code> comments, and <code>--verify</code> fails when they drift from the code. <code>vyrn test</code> and <code>vyrn bench</code> have <a href=\"/tooling/testing.html\">their own page</a>.",
                 ], []),
                 section("why", "Ask the compiler why", [
-                    "<code>vyrn why &lt;file&gt;</code> answers with a module's audience and every import chain that reaches it. <code>--memory</code> reports, per binding, whether it is reclaimed, how, and the reason when it is not. <code>--capability fs</code> lists every chain that pulls the file system into an artifact.",
+                    "<code>vyrn why &lt;file&gt;</code> answers with a module's audience and every import chain that reaches it. <code>--cost</code> reports, per function, the lines that allocate, copy, grow a container and keep a check. <code>--capability fs</code> lists every chain that pulls the file system into an artifact.",
                 ], []),
             ],
         },

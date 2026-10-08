@@ -128,9 +128,9 @@ enum Kind {
 
 impl Walk<'_> {
     fn kind(&self, n: Name) -> Kind {
-        match vyrn_frontend::types::resolve(&self.body.names[n.index()].ty, self.decls) {
-            t if t.is_seq() || t == Type::Str => Kind::Seq,
-            t => match vyrn_frontend::validate::width(&t) {
+        match &*vyrn_frontend::types::resolved(&self.body.names[n.index()].ty, self.decls) {
+            t if t.is_seq() || *t == Type::Str => Kind::Seq,
+            t => match vyrn_frontend::validate::width(t) {
                 Some((bits, signed)) => Kind::Int(bits, signed),
                 None => Kind::Other,
             },
@@ -206,7 +206,7 @@ impl Walk<'_> {
         }
         let ty = &self.body.names[r.index()].ty;
         let fields = vyrn_frontend::types::record_fields(ty, self.decls).unwrap_or_default();
-        for f in &fields {
+        for f in fields.iter() {
             if let Some((own, least)) = self.col(*r, &f.name).filter(|(o, l)| o != l) {
                 let t = Term::Col(*r, own);
                 st.forget(t);

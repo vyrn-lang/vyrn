@@ -1,0 +1,56 @@
+// a removal whose receiver passes through a user container's element
+// `h.bag[i].pop()` shrinks the array the container's `atSet` yields, where it lies,
+// below a record field, before a field, and when `atSet` yields through a second container.
+type Bag = { data: Array<Array<String>> }
+impl Index for Bag {
+    fn at(read self, i: Int64) -> read Array<String> { return self.data[i] }
+    fn atSet(modify self, i: Int64) -> modify Array<String> { return self.data[i] }
+}
+type Row = { xs: Array<String>, m: Map<String, Int64> }
+type Rows = { data: Array<Row> }
+impl Index for Rows {
+    fn at(read self, i: Int64) -> read Row { return self.data[i] }
+    fn atSet(modify self, i: Int64) -> modify Row { return self.data[i] }
+}
+type Outer = { inner: Bag }
+impl Index for Outer {
+    fn at(read self, i: Int64) -> read Array<String> { return self.inner[i] }
+    fn atSet(modify self, i: Int64) -> modify Array<String> { return self.inner[i] }
+}
+type H = { bag: Bag, rows: Rows, outer: Outer }
+let mut calls = 0
+fn idx(k: Int64) -> Int64 {
+    calls = calls + 1
+    return k
+}
+fn mk(k: Int64) -> Array<String> {
+    return ["a" + k.toString(), "bb" + k.toString(), "ccc" + k.toString()]
+}
+fn vyrnTestMain() -> Int64 {
+    let mut h = H {
+        bag: Bag { data: [mk(1), mk(2)] },
+        rows: Rows { data: [Row { xs: mk(3), m: ["k": 1, "j": 2] }] },
+        outer: Outer { inner: Bag { data: [mk(4), mk(5)] } },
+    }
+    let mut t = 0
+    if let Some(v) = h.bag[idx(1)].pop() {
+        t = t + v.byteLength
+    }
+    let w = h.bag[0].swapRemove(0)
+    t = t + w.byteLength * 10
+    if let Some(v) = h.rows[0].xs.pop() {
+        t = t + v.byteLength * 100
+    }
+    if h.rows[0].m.remove("k") {
+        t = t + 1000
+    }
+    if let Some(v) = h.outer[1].pop() {
+        t = t + v.byteLength * 10000
+    }
+    h.outer[0].swapRemove(2)
+    let mut n = 0
+    while let Some(v) = h.bag[1].pop() {
+        n = n + 1
+    }
+    return t + n * 100000 + calls * 1000000 + h.bag[0].length * 10000000 + h.outer[0].length * 100000000
+}

@@ -1,0 +1,3 @@
+# Known failures of tests/shapesweep.rs, one `id<TAB>kinds` row each.
+# The list only shrinks. A new failure fails the gate; a row that no longer fails
+# is reported, and VYRN_PIN=write deletes it. Grow it by hand, with a reason here.

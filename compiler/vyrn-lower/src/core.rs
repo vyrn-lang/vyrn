@@ -31,9 +31,9 @@ use crate::kernel::{MissingKind, Root};
 use crate::world::{Fns, Stated};
 use crate::{Instance, NodeTypes, OutsideBody, World};
 use vyrn_frontend::core::{
-    count_reads, names_in, rows, Arg, Arm, Body, BorrowKind, Callee, Cand, Ctor, Facts, Lit, Name,
-    NameInfo, NotOwned, Old, Op, Opaque, Payload, Place, Rhs, Site, St, Target, Test, Use, Val,
-    Walk,
+    count_reads, names_in, rows, Arg, Arm, Body, BorrowKind, Callee, Cand, Copied, Ctor, Facts,
+    Lit, Name, NameInfo, NotOwned, Old, Op, Opaque, Payload, Place, Rhs, Site, St, Target, Test,
+    Use, Val, Walk,
 };
 use vyrn_frontend::rule;
 use vyrn_frontend::rules::Rule;
@@ -720,8 +720,8 @@ fn judged(facts: &NodeTypes<'_>, own: &Ownership, sp: &Speech) -> Vec<(usize, St
                 if !decls.contains_key(name) {
                     return Some(rule!(UnknownType, n = name).render());
                 }
-                let declared =
-                    vyrn_frontend::types::record_fields(&Type::Named(name.clone()), decls);
+                let named = Type::Named(name.clone());
+                let declared = vyrn_frontend::types::record_fields(&named, decls);
                 let ([], [name]) = sp.say([], [name]);
                 let Some(declared) = declared else {
                     return Some(rule!(NotRecordType, name).render());
@@ -825,11 +825,11 @@ fn unbound(
     use vyrn_frontend::types::{self, SHOW};
     let decls = own.proto.types();
     let fails = |t: &Type, bound: &str| {
-        let base = types::resolve(t, decls);
+        let base = types::resolved(t, decls);
         match bound {
             HEAPLESS => vyrn_frontend::declared::owns_heap(&base, decls),
             DECODABLE => vyrn_frontend::codec::decodable(&base, decls).is_err(),
-            SHOW => match &base {
+            SHOW => match &*base {
                 Type::Param(p) => !outer.get(p).is_some_and(|bs| bs.iter().any(|b| b == SHOW)),
                 _ => !types::renders(&base) && types::show_dispatch(impls, t, &base).is_none(),
             },
@@ -1307,6 +1307,10 @@ struct Frame {
     /// [`NameInfo::closure_reads`] for the lambda [`Builder::rhs`] has just
     /// built, waiting for the name [`Builder::bind`] gives it.
     pending_closure: Option<Vec<Name>>,
+    /// Whether the row [`Builder::rhs`] has just built is a copy the reader
+    /// did not write ([`Builder::copy_rhs`]), waiting for the name
+    /// [`Builder::bind`] gives it.
+    pending_copy: bool,
     /// The receivers of the projections being inlined, innermost last. A
     /// projection declares `read self`, so no construct of its body is its
     /// receiver's last owner ([`Builder::takes_scrutinee`]).
@@ -1427,6 +1431,14 @@ impl<'a> Builder<'a> {
         self.proto.owns_heap(ty) || self.proto.must_use(ty) || self.proto.release_kind(ty).is_some()
     }
 
+    /// Whether the value a name holds is the name's to release at a store: a
+    /// name that releases it at the end of the frame, or a `modify` parameter,
+    /// whose slot the caller keeps but whose old value the store replaces.
+    fn slot_owns(&self, n: Name) -> bool {
+        let info = &self.body.names[n.index()];
+        info.releases || (info.is_modify_param() && self.owns(&info.ty))
+    }
+
     fn name(&mut self, source: &str, ty: Type, releases: bool, line: usize) -> Name {
         let (heap, linear, runs) = self.proto.name_facts(&ty, self.names);
         self.body.names.push(NameInfo {
@@ -1454,6 +1466,7 @@ impl<'a> Builder<'a> {
             walked: None,
             linear,
             bound_by_let: false,
+            implicit_copy: false,
             mutable: false,
             closure_reads: None,
             not_owned: None,
@@ -2015,6 +2028,9 @@ impl<'a> Builder<'a> {
         if matches!(rhs, Rhs::Prim(Op::Closure(_), ..)) {
             self.body.names[n.index()].closure_reads = self.frame.pending_closure.take();
         }
+        let implicit = std::mem::take(&mut self.frame.pending_copy);
+        self.body.names[n.index()].implicit_copy =
+            implicit && rhs.copies(&self.body.names) == Some(Copied::Value);
         let owed = match (&rhs, self.frame.owed.take()) {
             (Rhs::Make(Ctor::Record(r, _), _), Some((to, line))) if *r == to => Some((to, line)),
             _ => None,
@@ -2562,6 +2578,41 @@ impl<'a> Builder<'a> {
         Ok((place, ty))
     }
 
+    /// The place `recv` names, which a call shrinks where it lies. A step through
+    /// a user container is replaced by the place its `atSet` yields
+    /// ([`vyrn_frontend::project::Expansions::modify_site`]), whose prologue runs
+    /// first. The steps after it walk from the place it yields.
+    fn modify_place(
+        &mut self,
+        recv: &'a Expr,
+        line: usize,
+        out: &mut Vec<St>,
+    ) -> Result<(Place, Type), Gap> {
+        let Some((_, root, steps)) = vyrn_frontend::parser::place_steps(recv) else {
+            return gap("a removal whose receiver is no place", line);
+        };
+        let ty = |e: &Expr| self.ty_of(e).ok();
+        let site = self
+            .program
+            .expansions
+            .modify_site(&self.program.impls, recv, ty, line);
+        let (place, ty, steps) = match site {
+            Ok(Some((after, p))) => {
+                for s in &p.prologue {
+                    self.stmt(s, out)?;
+                }
+                let (place, ty) = self.modify_place(&p.place, line, out)?;
+                (place, ty, &steps[steps.len() - after..])
+            }
+            Ok(None) => {
+                let (place, ty) = self.named_place(root, line)?;
+                (place, ty, &steps[..])
+            }
+            Err(e) => return gap_d("a projection this site cannot inline", &e, line),
+        };
+        self.walk(place, ty, steps, true, &mut root.to_string(), line, out)
+    }
+
     /// The type of the place `step` names inside a place of type `ty`.
     fn step_ty(&mut self, ty: &Type, step: &At<'_>, line: usize) -> Result<Type, Gap> {
         match *step {
@@ -2864,9 +2915,13 @@ impl<'a> Builder<'a> {
                 };
                 // A slot that owns its value keeps owning: a borrow stored
                 // into it is copied, as `let mut` binds one (`copies`), and
-                // the store releases the old value.
+                // the store releases the old value. A `modify` parameter's
+                // slot is the caller's, and the borrow's place is not. A
+                // store of the slot's own name is not copied: the kernel
+                // refuses `s = s` on a `modify` parameter, and a copy would
+                // hide it.
                 if let (Some(n), Val::Name(m)) = (n, &v) {
-                    if self.body.names[n.index()].releases && self.body.names[m.index()].borrow {
+                    if self.slot_owns(n) && *m != n && self.body.names[m.index()].borrow {
                         let rhs = self.copy_rhs(v.clone(), value)?;
                         let t = self.temp(ty.clone(), *line);
                         self.bind(t, rhs, out);
@@ -2892,7 +2947,7 @@ impl<'a> Builder<'a> {
                 // that owns heap.
                 let (place, owes) = match n {
                     None => (Place::Global(name.clone()), self.owns(&ty)),
-                    Some(n) => (Place::Name(n), self.body.names[n.index()].releases),
+                    Some(n) => (Place::Name(n), self.slot_owns(n)),
                 };
                 // The hand-back comes before the place's obligation: a name
                 // that owes no release still hands its buffer back, and the
@@ -4726,7 +4781,7 @@ impl<'a> Builder<'a> {
         };
         let decls = self.proto.types();
         let bt = self.ty_of(base).ok()?;
-        let Type::Record(fields) = vyrn_frontend::types::resolve(&bt, &decls) else {
+        let Type::Record(fields) = &*vyrn_frontend::types::resolved(&bt, &decls) else {
             return None;
         };
         let f = fields.iter().find(|f| &f.name == field)?;
@@ -5395,7 +5450,8 @@ impl<'a> Builder<'a> {
 
     /// The copy of `v`, the value of `e`: the type's `impl Copy` where it has
     /// one, `@copy` otherwise.
-    fn copy_rhs(&self, v: Val, e: &Expr) -> Result<Rhs, Gap> {
+    fn copy_rhs(&mut self, v: Val, e: &Expr) -> Result<Rhs, Gap> {
+        self.frame.pending_copy = true;
         let copied = (self.copied(e)).and_then(|(f, s)| Some((self.fn_id(&f)?, f, s)));
         let (callee, kind, solved) = match copied {
             Some((id, f, solved)) => (f, Callee::Fn(id), solved),
@@ -6524,13 +6580,8 @@ impl<'a> Builder<'a> {
             // A removal's receiver that is a field or an element
             // (`r.xs.pop()`) is passed as the place: the call shrinks the
             // array where it lies.
-            if let (0, true, Some((_, root, steps))) = (
-                k,
-                prelude::removes(name) && !matches!(a, Expr::Var { .. }),
-                vyrn_frontend::parser::place_steps(a),
-            ) {
-                let (place, ty) = self.named_place(root, line)?;
-                let at = self.walk(place, ty, &steps, true, &mut root.to_string(), line, out)?;
+            if let (0, true) = (k, prelude::removes(name) && !matches!(a, Expr::Var { .. })) {
+                let at = self.modify_place(a, line, out)?;
                 vs.push((Arg::Place(at.0), *cap));
                 continue;
             }
@@ -7563,8 +7614,7 @@ fn ruled_steps(own: &Owned, ty: &Type, path: &[&Place]) -> Vec<(usize, String)> 
         }
         let next = match (step, vyrn_frontend::types::resolve(&at, decls)) {
             (Place::Field(_, f), _) => vyrn_frontend::types::record_fields(&at, decls)
-                .and_then(|fs| fs.into_iter().find(|x| &x.name == f))
-                .map(|x| x.ty),
+                .and_then(|fs| fs.iter().find(|x| &x.name == f).map(|x| x.ty.clone())),
             (Place::Elem(..), t) => t.elem().cloned(),
             (Place::Key(..), Type::Map(_, v)) => Some(*v),
             _ => None,
@@ -7726,7 +7776,7 @@ pub fn augment(program: &Program, w: &mut World, judging: bool) {
     // A body that did not build gives the judgment nothing, served or not.
     let late: Vec<(&str, &[Walked])> = states.iter().filter_map(JobState::answered).collect();
     let places = build_places(program, &lowered, own, &mut w.fns);
-    let (mut state, read, answers, reached) = crate::effects::judge_built(
+    let (mut state, read, answers, reached, allocating) = crate::effects::judge_built(
         program,
         &lowered,
         own,
@@ -7763,11 +7813,16 @@ pub fn augment(program: &Program, w: &mut World, judging: bool) {
                     _ => None,
                 })
                 .collect();
-            (judged.state_table(refs), read, answers, reached)
+            let allocating: HashSet<FnId> = (refs.iter().zip(&judged.effects))
+                .filter(|(_, e)| e.has(vyrn_frontend::effects::Effect::Alloc))
+                .filter_map(|(b, _)| b.id)
+                .collect();
+            (judged.state_table(refs), read, answers, reached, allocating)
         },
     );
     drop((tops, late));
     w.reached = reached;
+    w.allocating = allocating;
     for (s, r) in (states.iter_mut().filter(|s| s.built().is_some())).zip(read) {
         s.kept = r;
     }
@@ -8284,8 +8339,7 @@ fn remember(
     );
 }
 
-/// The memory report for one frame, read by `vyrn why --memory` and the
-/// editor's memory hints: one row per source `let`, in line order. Every word
+/// The memory report for one frame, read by the editor's memory hints: one row per source `let`, in line order. Every word
 /// comes off the core: the type table says how the type is released, the
 /// `let` whose the value is ([`NameInfo::not_owned`]), and the kernel what
 /// took it and where the release stands.

@@ -14,7 +14,7 @@
 //! 128 KiB. A closure scenario needs a stored closure: a lambda handed straight
 //! to a `fn` parameter is monomorphized and allocates nothing.
 //!
-//! The later tests read `vyrn why --memory` and run programs under the free
+//! The later tests read the memory rows the editor's hover shows and run programs under the free
 //! audit (`VYRN_LEAK_CHECK=1`). The Node tests skip without node, loudly under
 //! `VYRN_REQUIRE_TOOLS`.
 
@@ -141,8 +141,19 @@ fn the_wasm_heap_reaches_a_steady_state() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-// `vyrn why --memory`, through the real binary: an in-process API
-// could agree with itself while the command says something else.
+// The memory rows the editor's hover shows, as `symbols::analyze_judged` returns them.
+
+/// `source`'s memory rows, one per binding: `line`, name, and the placer's words.
+fn memory_rows(source: &str) -> String {
+    let engine = vyrn_genwasm::engine();
+    let a =
+        vyrn_frontend::symbols::analyze_judged(source, None, Some(&*engine), &vyrn_lower::JUDGE);
+    let mut out = String::new();
+    for m in &a.memory {
+        out.push_str(&format!("line {:<5} {:<16} {}\n", m.line, m.name, m.text));
+    }
+    out
+}
 
 /// A leaking scenario, plus one binding for every reason the printer names.
 const WHY_FIXTURE: &str = r#"type Sizer = fn(Int64) -> Int64
@@ -219,29 +230,9 @@ fn main() -> Int64 {
 }
 "#;
 
-fn why_memory_output() -> String {
-    // One directory per caller: these tests run in parallel, and a shared path
-    // would have one of them delete another's fixture mid-run.
-    static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-    let seq = N.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-    let dir = std::env::temp_dir().join(format!("vyrn-why-mem-{}-{seq}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    let file = dir.join("u1.vyrn");
-    std::fs::write(&file, WHY_FIXTURE).unwrap();
-    let out = Command::new(env!("CARGO_BIN_EXE_vyrn"))
-        .args(["why", "--memory"])
-        .arg(&file)
-        .output()
-        .expect("vyrn why --memory");
-    assert!(out.status.success(), "`why` reports; it does not gate");
-    let _ = std::fs::remove_dir_all(&dir);
-    String::from_utf8_lossy(&out.stdout).into_owned()
-}
-
 #[test]
-fn why_memory_names_the_reason_each_binding_is_not_reclaimed() {
-    let text = why_memory_output();
+fn a_memory_row_names_the_reason_a_binding_is_not_reclaimed() {
+    let text = memory_rows(WHY_FIXTURE);
     let has = |needle: &str| {
         assert!(text.contains(needle), "expected {needle:?} in:\n{text}");
     };
@@ -255,7 +246,8 @@ fn why_memory_names_the_reason_each_binding_is_not_reclaimed() {
     // A `region` is not a reason: `free` refuses an arena block by the class
     // word in its header, so the walk asks for a binding inside one like any other.
     has("arena            reclaimed at block exit — freeing the String buffer");
-    has("c                NOT reclaimed — the type Bool owns no heap");
+    // A binding that owns no heap has nothing to reclaim, so no row says so.
+    assert!(!text.contains("NOT reclaimed — the type"), "{text}");
     // A lambda's capture is a deep snapshot, so the captured binding reclaims.
     has("held             reclaimed at block exit — freeing the String buffer");
     has("sent             reclaimed at block exit — freeing the String buffer");
@@ -275,49 +267,12 @@ fn why_memory_names_the_reason_each_binding_is_not_reclaimed() {
 }
 
 #[test]
-fn why_memory_says_which_functions_transfer_ownership() {
-    let text = why_memory_output();
-    assert!(
-        text.contains(
-            "fn make(a: String, b: String) -> String\n    transfers: yes — the caller owns the \
-             result, and releases it by freeing the String buffer"
-        ),
-        "{text}"
-    );
-    // Rule 3 refuses returning a parameter, so the fixture returns `s.copy()`:
-    // no compiling program prints "transfers: no" for a heap-owning return type.
-    assert!(
-        text.contains(
-            "fn borrow(s: String) -> String\n    transfers: yes — the caller owns the result, \
-             and releases it by freeing the String buffer"
-        ),
-        "{text}"
-    );
-    assert!(
-        text.contains(
-            "fn takes(s: String) -> Int64\n    transfers: no — the return type Int64 \
-                       owns no heap"
-        ),
-        "{text}"
-    );
-}
-
-#[test]
-fn why_memory_counts_the_whole_file() {
-    let text = why_memory_output();
-    // The summary is the corpus instrument: one line of totals, then the leaks
-    // grouped by reason.
-    assert!(text.contains("  summary: "), "{text}");
-    assert!(text.contains(" reclaimed, "), "{text}");
-    assert!(text.contains("not reclaimed"), "{text}");
-    // A linear value is discharged where it is closed, so the report may not
-    // call it a leak. It has its own column.
-    assert!(text.contains(" discharged, "), "{text}");
+fn a_linear_value_is_discharged_and_not_called_a_leak() {
+    let text = memory_rows(WHY_FIXTURE);
     assert!(
         text.contains("discharged, not leaked — a stream is consumed, forwarded or closed"),
         "{text}"
     );
-    assert!(text.contains("it names somebody else's value"), "{text}");
 }
 
 /// What a shape does to the heap over four times the calls.
@@ -1641,13 +1596,8 @@ fn the_census_shapes_hold_their_measured_baseline() {
 /// `a ?? b` is a `match` the parser spells, so its result has no recorded type;
 /// the declared reading answers it as it answers `?`.
 #[test]
-fn why_memory_types_a_nullish_result_as_its_payload() {
-    let dir = std::env::temp_dir().join(format!("vyrn-why-nullish-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    let file = dir.join("n.vyrn");
-    std::fs::write(
-        &file,
+fn a_nullish_result_has_its_payload_type_in_the_memory_rows() {
+    let text = memory_rows(
         r#"fn pick(o: Option<Int64>) -> Int64 {
     let v = o ?? 0
     return v
@@ -1661,24 +1611,16 @@ fn main() -> Int64 {
     return pick(Some(3))
 }
 "#,
-    )
-    .unwrap();
-    let out = Command::new(env!("CARGO_BIN_EXE_vyrn"))
-        .args(["why", "--memory"])
-        .arg(&file)
-        .output()
-        .expect("vyrn why --memory");
-    let _ = std::fs::remove_dir_all(&dir);
-    let text = String::from_utf8_lossy(&out.stdout);
-    assert!(out.status.success(), "{text}");
+    );
     assert!(
         !text.contains("unknown"),
         "a `??` result has a type:
 {text}"
     );
     assert!(
-        text.contains("v                NOT reclaimed — the type Int64 owns no heap"),
-        "{text}"
+        !text.contains("  v  "),
+        "a heapless binding has no row:
+{text}"
     );
     assert!(
         text.contains("t                reclaimed at block exit — freeing the String buffer"),
@@ -1857,13 +1799,7 @@ fn a_name_held_at_a_returned_match_is_reported_reclaimed_and_is() {
     let file = dir.join("m.vyrn");
     std::fs::write(&file, RETURNED_MATCH).unwrap();
 
-    let out = Command::new(env!("CARGO_BIN_EXE_vyrn"))
-        .args(["why", "--memory"])
-        .arg(&file)
-        .output()
-        .expect("vyrn why --memory");
-    let text = String::from_utf8_lossy(&out.stdout).to_string();
-    assert!(out.status.success(), "{text}");
+    let text = memory_rows(RETURNED_MATCH);
     assert!(
         text.contains(
             "arg              reclaimed at block exit — releasing what the { j: String } holds"
@@ -1928,10 +1864,9 @@ fn a_call_named_like_a_projection_member_owns_the_function_result() {
             .output()
             .expect("vyrn")
     };
-    let why = vyrn(&["why", "--memory"]);
     let run = vyrn(&["run"]);
     let _ = std::fs::remove_dir_all(&dir);
-    let text = String::from_utf8_lossy(&why.stdout);
+    let text = memory_rows(SHADOWED_PROJECTION);
     assert!(
         text.contains("r                reclaimed at block exit — freeing the String buffer"),
         "{text}"
@@ -2444,6 +2379,39 @@ fn an_element_stored_from_an_element_is_a_copy() {
 #[test]
 fn a_name_rebound_to_a_borrow_keeps_its_copy() {
     shape_runs_clean("a-name-rebound-to-a-borrow-keeps-its-copy", "2015\n");
+}
+
+// A store into a `modify` parameter name releases the value the slot held
+// (witness: base leaked 1 block per store).
+#[test]
+fn a_store_into_a_modify_parameter_releases_the_old_value() {
+    shape_runs_clean(
+        "a-store-into-a-modify-parameter-releases-the-old-value",
+        "33\n",
+    );
+}
+
+// A borrow stored into a `modify` parameter name is stored as a copy (witness:
+// base double freed the element).
+#[test]
+fn a_borrow_stored_into_a_modify_parameter_is_a_copy() {
+    shape_runs_clean("a-borrow-stored-into-a-modify-parameter-is-a-copy", "20\n");
+}
+
+// A `pop` of an array of two-word elements carries the element in the
+// `Option`'s two payload words (witness: base refused it, "no lowering for an
+// Option of a two-word payload").
+#[test]
+fn a_pop_of_a_two_word_element_runs() {
+    shape_runs_clean("an-option-of-a-two-word-payload-is-popped", "3270\n");
+}
+
+// A removal through a user container's element shrinks the array its `atSet`
+// yields (witness: base passed `check` and failed to build, "no lowering for
+// the body ... the core did not state").
+#[test]
+fn a_removal_through_a_user_container_element_runs() {
+    shape_runs_clean("a-removal-through-a-user-container-element", "221241424\n");
 }
 
 #[test]

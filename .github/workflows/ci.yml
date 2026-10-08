@@ -506,6 +506,20 @@ jobs:
         run: |
           & powershell -NoProfile -ExecutionPolicy Bypass -File install-test.ps1
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: The compiler's allocations per phase, and their growth
+        if: runner.os == 'Windows'
+        working-directory: compiler
+        # Last, because `--features allocs` rebuilds `vyrn-cli` and replaces
+        # the `target/release/vyrn` the steps above use. Windows only, on the
+        # release profile this job already builds. The pin holds Windows
+        # counts, which the maintainers re-pin locally with `VYRN_PIN=write`;
+        # the standard library allocates differently on each OS.
+        # `compiler_scaling` compares ratios and would run anywhere, but the
+        # feature rebuild is not free, so it runs here and not on the other
+        # three legs.
+        run: >-
+          cargo test --quiet --release -p vyrn-cli --features allocs
+          --test compiler_allocs --test compiler_scaling -- --ignored --nocapture
 
   judgments:
     name: the judgments over the corpus (kernel, effects, typed, core tables)
@@ -652,6 +666,18 @@ jobs:
         # engine leg still measures the same module, so the ratchet is not
         # hostage to a platform nobody has pinned wabt for.
         run: cargo test --quiet --release -p vyrn-cli --test residue -- --ignored --nocapture
+      - name: The ownership shape sweep
+        working-directory: compiler
+        # Every ownership shape of a store, a read and a removal, filtered by
+        # `vyrn check` and run under `VYRN_LEAK_CHECK=1` on `vyrn run` and on
+        # the route's own executable, each against the digest the generator
+        # computed. Failures are held to `tests/pins/shapesweep-known.tsv`: a
+        # new one fails here, and a row that no longer fails is reported.
+        #
+        # It is here and not in the ignored-suites job for the residue
+        # ratchet's reason: the route leg needs clang, wabt and simde. The leg
+        # SKIPS where they are missing.
+        run: cargo test --quiet --release -p vyrn-cli --test shapesweep -- --ignored --nocapture
       - name: Keep fnvalarg's route build and any refused module when the job fails (#444)
         # fnvalarg flakes on Linux only; the residue scratch survives a failure.
         if: failure()

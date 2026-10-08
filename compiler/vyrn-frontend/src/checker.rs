@@ -3208,10 +3208,9 @@ impl<'a> Checker<'a> {
                 match leaf {
                     Step::Field(field) => {
                         let ruled = matches!(&bty, Type::Named(n) if self.decl(n).is_some_and(|d| d.predicate.is_some()));
-                        let Some(fty) = crate::types::record_fields(&bty, self)
-                            .and_then(|fs| fs.into_iter().find(|f| &f.name == field))
-                            .map(|f| f.ty)
-                        else {
+                        let Some(fty) = crate::types::record_fields(&bty, self).and_then(|fs| {
+                            fs.iter().find(|f| &f.name == field).map(|f| f.ty.clone())
+                        }) else {
                             return Ok(());
                         };
                         let vty = self.expr(value, scope, Some(&fty), Some(ret))?;
@@ -3478,6 +3477,40 @@ impl<'a> Checker<'a> {
                 }
                 None => unjudged(self.builtin_at(ty, index, scope, Some(ret), line)?),
             },
+        }
+    }
+
+    /// Types the nodes a projection site lowers through: its body inlined
+    /// at the site ([`Checker::record_desugar`]).
+    fn record_projection(
+        &self,
+        p: &crate::project::Projection,
+        scope: &Scope,
+        fn_ret: Option<&Type>,
+    ) {
+        let ret = fn_ret.cloned().unwrap_or(Type::Unit);
+        self.record_desugar(scope, |c, sc| {
+            sc.push(HashMap::new());
+            for s in &p.prologue {
+                if c.stmt(s, &ret, sc).is_err() {
+                    return;
+                }
+            }
+            let _ = c.expr(&p.place, sc, None, fn_ret);
+        });
+    }
+
+    /// Records the `atSet` expansion a removal's receiver lowers through, and
+    /// in turn the one the place it yields lowers through
+    /// ([`crate::project::Expansions::modify_site`]).
+    fn record_modify_place(&self, recv: &Expr, scope: &Scope, fn_ret: Option<&Type>, line: usize) {
+        if !self.recording() {
+            return;
+        }
+        let ty = |e: &Expr| self.expr(e, scope, None, fn_ret).ok();
+        if let Ok(Some((_, p))) = self.expansions.modify_site(self.impls, recv, ty, line) {
+            self.record_projection(p, scope, fn_ret);
+            self.record_modify_place(&p.place, scope, fn_ret, line);
         }
     }
 
@@ -4017,8 +4050,8 @@ impl<'a> Checker<'a> {
         if decl.is_none() && !(name == "Token" && self.frame.borrow().in_gen) {
             return self.judged();
         }
-        let Some(rfields) = crate::types::record_fields(&Type::Named(name.to_string()), self)
-        else {
+        let named = Type::Named(name.to_string());
+        let Some(rfields) = crate::types::record_fields(&named, self) else {
             return self.judged();
         };
         let mut provided = std::collections::HashSet::new();
@@ -4049,7 +4082,7 @@ impl<'a> Checker<'a> {
         }
         // Solve in declared field order, the order the backends emit and
         // solve in; the literal's order would answer differently.
-        for field in &rfields {
+        for field in rfields.iter() {
             let Some((_, value)) = fields.iter().find(|(fname, _)| fname == &field.name) else {
                 continue; // reported below as a missing field
             };
@@ -4888,16 +4921,7 @@ impl<'a> Checker<'a> {
                             &args[1..],
                             line,
                         ) {
-                            let ret = fn_ret.cloned().unwrap_or(Type::Unit);
-                            self.record_desugar(scope, |c, sc| {
-                                sc.push(HashMap::new());
-                                for s in &p.prologue {
-                                    if c.stmt(s, &ret, sc).is_err() {
-                                        return;
-                                    }
-                                }
-                                let _ = c.expr(&p.place, sc, None, fn_ret);
-                            });
+                            self.record_projection(p, scope, fn_ret);
                         }
                     }
                     return Ok(t);
@@ -4937,6 +4961,7 @@ impl<'a> Checker<'a> {
         }
         if name == "@pop" {
             let elem = self.mut_array_receiver(&args[0], scope, line, "pop", fn_ret)?;
+            self.record_modify_place(&args[0], scope, fn_ret, line);
             return Ok(match elem {
                 Type::Err => Type::Err,
                 t => Type::option(t),
@@ -4945,6 +4970,7 @@ impl<'a> Checker<'a> {
         // O(1) unordered remove: the last element moves into slot `i`.
         if name == "@swapRemove" {
             let elem = self.mut_array_receiver(&args[0], scope, line, "swapRemove", fn_ret)?;
+            self.record_modify_place(&args[0], scope, fn_ret, line);
             let i = self.base(&self.expr(&args[1], scope, Some(&Type::Int), fn_ret)?);
             if !matches!(i, Type::Int | Type::Err) {
                 return Err(cerr!(line, SwapRemoveIndex, i));
@@ -5012,6 +5038,7 @@ impl<'a> Checker<'a> {
                 if self.lookup(scope, root).is_some_and(|b| !b.mutable) {
                     return self.judged();
                 }
+                self.record_modify_place(&args[0], scope, fn_ret, line);
             }
             let k = self.base(&self.expr(&args[1], scope, Some(&key_ty), fn_ret)?);
             if !matches!(k, Type::Err) && !self.key_fits(&k, &key_ty) {
@@ -5429,16 +5456,7 @@ impl<'a> Checker<'a> {
                         &args[1..],
                         line,
                     ) {
-                        let ret = fn_ret.cloned().unwrap_or(Type::Unit);
-                        self.record_desugar(scope, |c, sc| {
-                            sc.push(HashMap::new());
-                            for s in &p.prologue {
-                                if c.stmt(s, &ret, sc).is_err() {
-                                    return;
-                                }
-                            }
-                            let _ = c.expr(&p.place, sc, None, fn_ret);
-                        });
+                        self.record_projection(p, scope, fn_ret);
                     }
                 }
                 return Ok(t);

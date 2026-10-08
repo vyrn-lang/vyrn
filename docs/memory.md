@@ -153,6 +153,9 @@ So is `xs[0] = xs[1]`, even where the two indices are equal; the fix is
 `xs[1].copy()`.
 A `let mut` name that owns its value stays an owner: `s = xs[1]` stores a copy
 and releases the value `s` held.
+A store into a `modify` parameter name releases the value the slot held and
+stores a copy of a borrow, as a `let mut` name does; the caller owns what the
+slot holds after the call.
 A write to the place ends every alias that reads out of it; a later read of
 the alias is refused.
 
@@ -179,7 +182,7 @@ Vyrn.
 `impl Owned for T { fn release(consume self) { .. } }` gives `T` its own
 release. A type that reaches itself needs one: the structural release walk has
 no bottom on a cycle, so without a declared release its values are never
-freed. `vyrn why --memory` names such a binding, "nothing releases the type
+freed. The editor's hover names such a binding, "nothing releases the type
 Tree yet". `examples/binarytrees.vyrn` shows the declaration.
 
 `impl MustUse for T` gives `T` an obligation: on every path a value is handed
@@ -213,16 +216,25 @@ A store releases the value its place held, unless the place owns no heap or
 the value hands the place back (`xs = xs.push(v)`). Releasing a record, enum
 or container releases its places; for an enum, only the live variant.
 
-`vyrn why --memory <file>` prints, per binding, whether it is reclaimed, how,
-and the reason when it is not. An excerpt, with its dashes shown as `-`:
+The editor's hover says, per binding, whether it is reclaimed, how, and the
+reason when it is not. A binding whose type owns no heap has no row.
+
+`vyrn why --cost <file>` prints, per function, the lines that allocate, copy,
+grow a container, enter an allocating function of another file or keep a
+check, and how many loops enclose them. A copy the compiler makes where the
+program wrote none reads `(implicit)`. A function with none prints nothing.
+An excerpt from `examples/nbody.vyrn`:
 
 ```
-  fn main() -> Int64
-    line 2     s                reclaimed at block exit - freeing the String buffer
-    line 6     n                NOT reclaimed - the type Int64 owns no heap
+fn fixed9(v: Float64) -> String
+   53           allocates  render
+   55  loop 1   copies     a String render (implicit)
+                allocates  concatenation
+fn offsetMomentum(bodies: Array<Body>) -> Array<Body>
+  129           check kept array-index
 ```
 
-The editor shows the same rows as memory hints. `vyrn emit-lowered <file>`
+`vyrn emit-lowered <file>`
 prints the named core, where each release is an explicit `drop` and `!` marks
 an owned name:
 
@@ -264,8 +276,8 @@ one owner is not enough:
 Each sentence is followed by `fix:` lines. `compiler/vyrn-cli/tests/refusals.rs`
 holds one minimal program per refusal and pins its whole sentence.
 
-One leak is not refused: a recursive type with no `impl Owned`. `vyrn why
---memory` reports it. Module state is not released at exit; it lives until
+One leak is not refused: a recursive type with no `impl Owned`. The hover
+reports it. Module state is not released at exit; it lives until
 the process ends.
 
 ## The run-time layout
@@ -297,7 +309,7 @@ Each rule has one home. The names below are the entry points.
   capability per parameter, so a builtin borrows, modifies or consumes by the
   same rule as user code.
 - `vyrn-frontend/src/own.rs`: the release vocabulary (`Release`, `Exit`,
-  `DropKind`), and the `vyrn why --memory` rows (`MemoryRow`). `own::analyze` makes one `Ownership` per program, hands it
+  `DropKind`), and the memory rows (`MemoryRow`). `own::analyze` makes one `Ownership` per program, hands it
   to the placer it is given, and memoizes it for the command.
 - `vyrn-lower/src/core.rs`: `core::build` lowers a body into the named core.
   Every value has a name, every access is a place, and every release is a
@@ -393,5 +405,7 @@ The audit is a test instrument, not a language rule. `tests/residue.rs` runs
 every corpus program under it on both engines against a baseline of `clean`,
 `leak N` and `other` rows. A double free fails whatever the baseline says; a
 `clean` row that leaks fails; a `leak N` row may only shrink. `tests/memory.rs`
-runs selected shapes under it. The audit stays until the kernel has a second
-oracle that catches what the audit catches.
+runs selected shapes under it, and `tests/shapesweep.rs` generates the shapes of
+stores, reads and removals and runs each accepted one under it on both engines.
+The audit stays until the kernel has a second oracle that catches what the
+audit catches.

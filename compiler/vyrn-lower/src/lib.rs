@@ -13,6 +13,7 @@ pub mod effects;
 pub mod elide;
 pub mod facts;
 mod fixpoint;
+pub mod insight;
 pub mod kernel;
 mod pipeline;
 pub mod rules;
@@ -252,7 +253,7 @@ impl<'a> Lowered<'a> {
 
 /// The named core of `program`'s root-module instances, as `vyrn emit-lowered`
 /// prints it: the version line, then each body's [`vyrn_frontend::core::Body::render`], or the
-/// gap that stopped it. Root-module only, `vyrn why --memory`'s rule: a linked
+/// gap that stopped it. Root-module only, as `vyrn why --cost`: a linked
 /// program's imports are another file's answer. `world` is `program`'s.
 pub fn render(program: &Program, world: &World, source: &str) -> String {
     let own = &world.ownership;
@@ -429,6 +430,15 @@ impl<'a, 'r> Walk<'a, 'r> {
         self.projection(p);
     }
 
+    /// The `atSet` expansions a removal's receiver lowers through, outermost first.
+    fn modify_place(&mut self, recv: &Expr, line: usize) {
+        let ty = |e: &Expr| self.recorded(e);
+        if let Ok(Some((_, p))) = self.expansions.modify_site(self.impls, recv, ty, line) {
+            self.projection(p);
+            self.modify_place(&p.place, line);
+        }
+    }
+
     fn projection(&mut self, p: &'static vyrn_frontend::project::Projection) {
         for s in &p.prologue {
             facts_stmt(s, &mut Default::default(), self);
@@ -582,6 +592,9 @@ impl<'a> FactsVisit<'a> for Walk<'a, '_> {
                 .any(|i| i.places.iter().any(|p| p.name == *name))
             {
                 self.site(e, name, args);
+            }
+            if vyrn_frontend::prelude::removes(name) && !args.is_empty() {
+                self.modify_place(&args[0], e.line());
             }
         }
         self.close(e);
