@@ -1090,6 +1090,16 @@ pub enum Cand {
 }
 
 impl Body {
+    /// `n` as a sentence says it: the source spelling, or `the value of line
+    /// N` for a temporary the naming pass minted.
+    pub fn spoken(&self, n: Name) -> std::borrow::Cow<'_, str> {
+        let i = &self.names[n.index()];
+        match i.source.starts_with('@') {
+            true => format!("the value of line {}", i.line).into(),
+            false => i.source.as_str().into(),
+        }
+    }
+
     /// The name the reader wrote for the declaration `linked`.
     pub fn spelled<'a>(&'a self, linked: &'a str) -> &'a str {
         self.spellings.written(linked)

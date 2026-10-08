@@ -1,4 +1,4 @@
-//! `vyrn why --cost` over four programs, each pinned in `tests/cost/`.
+//! `vyrn why --cost` over five programs, each pinned in `tests/cost/`.
 //!
 //! The pin is the command's whole standard output, run from the repository
 //! root so the header names a relative path. `VYRN_PIN=write` rewrites it.
@@ -75,6 +75,13 @@ fn a_name_rebound_to_a_borrow_copies() {
         "rebound",
         "compiler/vyrn-cli/tests/shapes/a-name-rebound-to-a-borrow-keeps-its-copy.vyrn",
     );
+}
+
+/// Each kept check says why it stays: one function per reason (input, callee fact, caller fact,
+/// moves 2, 3 and 5, unproved).
+#[test]
+fn a_kept_check_says_why_it_stays() {
+    holds("reasons", "compiler/vyrn-cli/tests/cost/reasons.vyrn");
 }
 
 /// `vyrn run --profile` saves its counts, and `why --cost` prints them beside the rows whose

@@ -305,6 +305,7 @@ pull request.
 - `vyrn fmt` has one style and no options, never joins or splits lines, and refuses any output whose tokens differ from the input's.
 - `vyrn fix` applies only `.copy()`. `consume` and `for x in consume xs` change a contract, so they stay the author's decision.
 - `vyrn why --cost` reads the decided core and replaces `vyrn why --memory`. The LSP hover keeps the binding rows of the ownership table, with one wording.
+- A kept check's reason is a field of `Check` (`Why`), written with the verdict, not a side table: one home for a check's facts. `input` and the `gap:` reasons name the change that removes the check.
 - A function of another file counts its allocations at the line that calls it. The cost report is a report: it raises no warning.
 - The last `vyrn run --profile` is saved per root, stamped with a hash of the root's source and the content hashes of its imports. `vyrn why --cost` shows it only while the stamp matches, so it never shows a count against a line that moved.
 - `vyrn run --profile` counts blocks per source line with the free audit plus a `SITE` global. The instrument is off in every other build, so the wasm manifest does not move. A block made inside `std` counts at the last site that ran; a call path per site would need a shadow stack.

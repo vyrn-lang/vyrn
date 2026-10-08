@@ -7,10 +7,10 @@ fn vyrnTestMain() -> Int64
    14           allocates  concatenation
    15           allocates  concatenation
    16           copies     a value (implicit)
-                check kept array-index
+                check kept array-index  gap: callee fact: xs from mkSs(..) at 11
    18           copies     a value (implicit)
    21           copies     a value (implicit)
    26  loop 1   copies     a value (implicit)
-       loop 1   check kept array-index
+       loop 1   check kept array-index  gap: callee fact: xs from mkSs(..) at 11
    30           grows      strAppend(..)
 summary: allocating rows 11 (0 in loops), growing rows 1 (0 in loops), copies 4 (1 in loops), checks kept 2 (1 in loops), checks proved 2 (1 in loops)

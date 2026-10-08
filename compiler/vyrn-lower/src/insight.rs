@@ -9,7 +9,7 @@
 use std::collections::BTreeMap;
 
 use vyrn_frontend::ast::{FnId, Program};
-use vyrn_frontend::core::check::{Raises, Verdict};
+use vyrn_frontend::core::check::{Raises, Verdict, Why};
 use vyrn_frontend::core::{rows, Body, Callee, Copied, Made, Name, NameInfo, Op, Rhs, St};
 
 use vyrn_frontend::symbols::{CostLine, FnCost};
@@ -35,13 +35,12 @@ pub enum Kind {
     /// the capacity runs out. The payload is the builtin's name.
     Grows(String),
     /// A copy; `implicit` when the core made it where the reader wrote none.
-    Copy {
-        what: Copied,
-        implicit: bool,
-    },
+    Copy { what: Copied, implicit: bool },
     Check {
         raises: Raises,
         kept: bool,
+        /// A kept check's reason: its short form and its sentence.
+        why: Option<(&'static str, String)>,
     },
     /// A call into a function outside the root file whose effect set holds
     /// `alloc`. Its blocks count at this line: the callee, and its file.
@@ -117,11 +116,50 @@ pub fn row(s: &St, body: &Body, world: &World) -> Option<(u32, Kind)> {
             Some(Kind::Check {
                 raises: c.rule,
                 kept: c.verdict == Verdict::Kept,
+                why: (c.why != Why::Unsaid).then(|| (c.why.short(), said(&c.why, body, world))),
             }),
         ),
         _ => return None,
     };
     kind.filter(|_| line > 0).map(|k| (line as u32, k))
+}
+
+/// A kept check's reason in a sentence, over the names the body's source spells.
+fn said(why: &Why, body: &Body, world: &World) -> String {
+    let spell = |n: Name| body.spoken(n);
+    let name = |n: Option<Name>| n.map_or("the indexed place".into(), spell);
+    match why {
+        Why::Unsaid => String::new(),
+        Why::Input(n) => format!("input: {} is read from outside", spell(*n)),
+        Why::Callee(n, f) => {
+            let from = (f.and_then(|f| world.fn_rows().get(f.index())))
+                .map_or("a call".to_string(), |r| {
+                    format!("{}(..)", body.spelled(&r.name))
+                });
+            let line = body.names[n.index()].line;
+            match body.names[n.index()].source.starts_with('@') {
+                true => format!("gap: callee fact: {from} at {line}"),
+                false => format!("gap: callee fact: {} from {from} at {line}", spell(*n)),
+            }
+        }
+        Why::Caller(n, goal) => {
+            let exported = if body.export { " (exported)" } else { "" };
+            format!(
+                "gap: caller fact{exported}: {} is a parameter; {goal}",
+                spell(*n)
+            )
+        }
+        Why::Move(2, n) => format!("gap: move 2: a call may have resized {}", name(*n)),
+        Why::Move(3, n) => format!(
+            "gap: move 3: {} is a field, element or global read",
+            name(*n)
+        ),
+        Why::Move(_, n) => format!(
+            "gap: move 5: {} is the only name of the goal the loop writes",
+            name(*n)
+        ),
+        Why::Unproved(goal) => format!("gap: unproved: {goal}"),
+    }
 }
 
 /// Orders `facts` by line and numbers each within its line.
@@ -180,6 +218,8 @@ pub struct CostRow {
     pub implicit: bool,
     /// What it does, each wording with how many times the line states it.
     whats: Vec<(String, usize)>,
+    /// The distinct short reasons of the kept checks among them.
+    shorts: Vec<&'static str>,
 }
 
 impl CostRow {
@@ -229,14 +269,27 @@ pub fn table(program: &Program, world: &World, named: &dyn Fn(&str) -> String) -
                 Kind::Alloc(w) => (0, w.clone()),
                 Kind::Enters(c, from) => (0, format!("{c}(..) in {}", named(from))),
                 Kind::Grows(b) => (1, format!("{b}(..)")),
-                Kind::Check { raises, kept } => {
-                    (3 + usize::from(!kept), raises.census().to_string())
+                Kind::Check { raises, kept, why } => {
+                    let what = match why {
+                        Some((_, said)) => format!("{}  {said}", raises.census()),
+                        None => raises.census().to_string(),
+                    };
+                    (3 + usize::from(!kept), what)
                 }
             };
             tally[slot].0 += 1;
             tally[slot].1 += usize::from(f.depth > 0);
             let Some(verb) = f.kind.verb() else { continue };
             let row = shown.entry((f.line, verb)).or_default();
+            if let Kind::Check {
+                why: Some((short, _)),
+                ..
+            } = &f.kind
+            {
+                if !row.shorts.contains(short) {
+                    row.shorts.push(short);
+                }
+            }
             row.depth = row.depth.max(f.depth);
             row.implicit |= matches!(f.kind, Kind::Copy { implicit: true, .. });
             match row.whats.iter_mut().find(|w| w.0 == what) {
@@ -269,6 +322,7 @@ pub fn fn_costs(program: &Program, world: &World) -> Vec<FnCost> {
                 count: row.count(),
                 implicit: row.implicit,
                 text: row.text(),
+                short: row.shorts.join(", "),
             })
             .collect()
     };

@@ -3,11 +3,11 @@
 67 allocates, enters
 68 grows
 78 allocates
-86 check kept
+86 check kept (callee fact)
 88 grows
 97 allocates
 99 grows
-102 grows, check kept
+102 grows, check kept (callee fact)
 105 allocates
 114 allocates
 124 allocates
@@ -17,5 +17,5 @@
 157 grows
 169 copies 2 (implicit), allocates 2
 196 allocates
-202 grows, check kept
+202 grows, check kept (unproved)
 223 copies (implicit), allocates 3
