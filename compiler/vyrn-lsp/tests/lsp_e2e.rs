@@ -5246,14 +5246,14 @@ fn a_kept_check_hint_says_why_it_stays() {
     client.send(&serde_json::json!({
         "jsonrpc": "2.0", "id": 92, "method": "textDocument/inlayHint",
         "params": { "textDocument": { "uri": uri }, "range": {
-            "start": { "line": 85, "character": 0 }, "end": { "line": 86, "character": 0 } } }
+            "start": { "line": 93, "character": 0 }, "end": { "line": 94, "character": 0 } } }
     }));
     let resp = client.read_response(&serde_json::json!(92));
     let hint = &resp["result"].as_array().expect("hints")[0];
     assert_eq!(hint["label"], "check kept (callee fact)");
     let tip = hint["tooltip"].as_str().unwrap();
     assert!(
-        tip.contains("gap: callee fact: modulus from modulusOf(..) at 82"),
+        tip.contains("gap: callee fact: modulus from modulusOf(..) at 90"),
         "{tip}"
     );
 }
