@@ -1,0 +1,130 @@
+# Known failures of tests/shapesweep.rs, one `id<TAB>kinds` row each.
+# The list only shrinks. A new failure fails the gate; a row that no longer fails
+# is reported, and VYRN_PIN=write deletes it. Grow it by hand, with a reason here.
+# Each family below is one defect, found on the tip of train24 (a14723207).
+#   store.name.*, root param: a store into a `modify` parameter name does not
+#     release the value it held (leak), and a read of a borrowed element or
+#     loop element stored there is not copied (double free).
+#   remove.w.ins.pop.*, element type Int: `check` accepts a pop of an array of
+#     records of two Int64 fields; the direct backend has no lowering for the
+#     Option of a two-word payload.
+#   remove-leaf.w.h.bag[i].*: `check` accepts a pop or swapRemove through a user
+#     container's `atSet` place; the core cannot state the body.
+Arr.remove-leaf.w.h.bag[i].pop.bind.lit-diff.if.global	build@route+exit@engine+output@engine
+Arr.remove-leaf.w.h.bag[i].pop.bind.lit-diff.loop.param	build@route+exit@engine+output@engine
+Arr.remove-leaf.w.h.bag[i].pop.bind.lit-diff.straight.local	build@route+exit@engine+output@engine
+Arr.remove-leaf.w.h.bag[i].pop.bind.lit-eq.if.local	build@route+exit@engine+output@engine
+Arr.remove-leaf.w.h.bag[i].pop.bind.lit-eq.loop.global	build@route+exit@engine+output@engine
+Arr.remove-leaf.w.h.bag[i].pop.bind.lit-eq.straight.param	build@route+exit@engine+output@engine
+Arr.remove-leaf.w.h.bag[i].pop.bind.var-diff.if.local	build@route+exit@engine+output@engine
+Arr.remove-leaf.w.h.bag[i].pop.bind.var-diff.loop.global	build@route+exit@engine+output@engine
+Arr.remove-leaf.w.h.bag[i].pop.bind.var-diff.straight.param	build@route+exit@engine+output@engine
+Arr.remove-leaf.w.h.bag[i].pop.bind.var-eq.if.param	build@route+exit@engine+output@engine
+Arr.remove-leaf.w.h.bag[i].pop.bind.var-eq.loop.local	build@route+exit@engine+output@engine
+Arr.remove-leaf.w.h.bag[i].pop.bind.var-eq.straight.global	build@route+exit@engine+output@engine
+Arr.remove-leaf.w.h.bag[i].pop.discard.lit-diff.if.local	build@route+exit@engine+output@engine
+Arr.remove-leaf.w.h.bag[i].pop.discard.lit-diff.loop.global	build@route+exit@engine+output@engine
+Arr.remove-leaf.w.h.bag[i].pop.discard.lit-diff.straight.param	build@route+exit@engine+output@engine
+Arr.remove-leaf.w.h.bag[i].pop.discard.lit-eq.if.param	build@route+exit@engine+output@engine
+Arr.remove-leaf.w.h.bag[i].pop.discard.lit-eq.loop.local	build@route+exit@engine+output@engine
+Arr.remove-leaf.w.h.bag[i].pop.discard.lit-eq.straight.global	build@route+exit@engine+output@engine
+Arr.remove-leaf.w.h.bag[i].pop.discard.var-diff.if.param	build@route+exit@engine+output@engine
+Arr.remove-leaf.w.h.bag[i].pop.discard.var-diff.loop.local	build@route+exit@engine+output@engine
+Arr.remove-leaf.w.h.bag[i].pop.discard.var-diff.straight.global	build@route+exit@engine+output@engine
+Arr.remove-leaf.w.h.bag[i].pop.discard.var-eq.if.global	build@route+exit@engine+output@engine
+Arr.remove-leaf.w.h.bag[i].pop.discard.var-eq.loop.param	build@route+exit@engine+output@engine
+Arr.remove-leaf.w.h.bag[i].pop.discard.var-eq.straight.local	build@route+exit@engine+output@engine
+Arr.remove-leaf.w.h.bag[i].swap-lit.discard.lit-diff.if.param	build@route+exit@engine+output@engine
+Arr.remove-leaf.w.h.bag[i].swap-lit.discard.lit-diff.loop.local	build@route+exit@engine+output@engine
+Arr.remove-leaf.w.h.bag[i].swap-lit.discard.lit-diff.straight.global	build@route+exit@engine+output@engine
+Arr.remove-leaf.w.h.bag[i].swap-lit.discard.lit-eq.if.global	build@route+exit@engine+output@engine
+Arr.remove-leaf.w.h.bag[i].swap-lit.discard.lit-eq.loop.param	build@route+exit@engine+output@engine
+Arr.remove-leaf.w.h.bag[i].swap-lit.discard.lit-eq.straight.local	build@route+exit@engine+output@engine
+Arr.remove-leaf.w.h.bag[i].swap-lit.discard.var-diff.if.global	build@route+exit@engine+output@engine
+Arr.remove-leaf.w.h.bag[i].swap-lit.discard.var-diff.loop.param	build@route+exit@engine+output@engine
+Arr.remove-leaf.w.h.bag[i].swap-lit.discard.var-diff.straight.local	build@route+exit@engine+output@engine
+Arr.remove-leaf.w.h.bag[i].swap-lit.discard.var-eq.if.local	build@route+exit@engine+output@engine
+Arr.remove-leaf.w.h.bag[i].swap-lit.discard.var-eq.loop.global	build@route+exit@engine+output@engine
+Arr.remove-leaf.w.h.bag[i].swap-lit.discard.var-eq.straight.param	build@route+exit@engine+output@engine
+Arr.remove-leaf.w.h.bag[i].swap-var.bind.lit-diff.if.local	build@route+exit@engine+output@engine
+Arr.remove-leaf.w.h.bag[i].swap-var.bind.lit-diff.loop.global	build@route+exit@engine+output@engine
+Arr.remove-leaf.w.h.bag[i].swap-var.bind.lit-diff.straight.param	build@route+exit@engine+output@engine
+Arr.remove-leaf.w.h.bag[i].swap-var.bind.lit-eq.if.param	build@route+exit@engine+output@engine
+Arr.remove-leaf.w.h.bag[i].swap-var.bind.lit-eq.loop.local	build@route+exit@engine+output@engine
+Arr.remove-leaf.w.h.bag[i].swap-var.bind.lit-eq.straight.global	build@route+exit@engine+output@engine
+Arr.remove-leaf.w.h.bag[i].swap-var.bind.var-diff.if.param	build@route+exit@engine+output@engine
+Arr.remove-leaf.w.h.bag[i].swap-var.bind.var-diff.loop.local	build@route+exit@engine+output@engine
+Arr.remove-leaf.w.h.bag[i].swap-var.bind.var-diff.straight.global	build@route+exit@engine+output@engine
+Arr.remove-leaf.w.h.bag[i].swap-var.bind.var-eq.if.global	build@route+exit@engine+output@engine
+Arr.remove-leaf.w.h.bag[i].swap-var.bind.var-eq.loop.param	build@route+exit@engine+output@engine
+Arr.remove-leaf.w.h.bag[i].swap-var.bind.var-eq.straight.local	build@route+exit@engine+output@engine
+Arr.store.name.adopt-other.-.straight.param	leak@engine+leak@route
+Arr.store.name.adopt-same.-.loop.param	leak@engine+leak@route
+Arr.store.name.adopt-sib.-.if.param	leak@engine+leak@route
+Arr.store.name.call-consume-copy-other.-.loop.param	leak@engine+leak@route
+Arr.store.name.call-consume-copy-same.-.if.param	leak@engine+leak@route
+Arr.store.name.call-consume-copy-sib.-.straight.param	leak@engine+leak@route
+Arr.store.name.call-read-other.-.loop.param	leak@engine+leak@route
+Arr.store.name.call-read-same.-.if.param	leak@engine+leak@route
+Arr.store.name.call-read-sib.-.straight.param	leak@engine+leak@route
+Arr.store.name.copy-other.-.loop.param	leak@engine+leak@route
+Arr.store.name.copy-same.-.if.param	leak@engine+leak@route
+Arr.store.name.copy-sib.-.straight.param	leak@engine+leak@route
+Arr.store.name.fresh.-.loop.param	leak@engine+leak@route
+Arr.store.name.loop-elem.-.loop.param	double-free@engine+double-free@route
+Arr.store.name.payload.-.if.param	leak@engine+leak@route
+Arr.store.name.read-other.-.loop.param	exit@engine+exit@route+output@engine+output@route
+Enm.store.name.adopt-other.-.if.param	leak@engine+leak@route
+Enm.store.name.adopt-same.-.straight.param	leak@engine+leak@route
+Enm.store.name.adopt-sib.-.loop.param	leak@engine+leak@route
+Enm.store.name.call-consume-copy-other.-.straight.param	leak@engine+leak@route
+Enm.store.name.call-consume-copy-same.-.loop.param	leak@engine+leak@route
+Enm.store.name.call-consume-copy-sib.-.if.param	leak@engine+leak@route
+Enm.store.name.call-read-other.-.straight.param	leak@engine+leak@route
+Enm.store.name.call-read-same.-.loop.param	leak@engine+leak@route
+Enm.store.name.call-read-sib.-.if.param	leak@engine+leak@route
+Enm.store.name.copy-other.-.straight.param	leak@engine+leak@route
+Enm.store.name.copy-same.-.loop.param	leak@engine+leak@route
+Enm.store.name.copy-sib.-.if.param	leak@engine+leak@route
+Enm.store.name.fresh.-.straight.param	leak@engine+leak@route
+Enm.store.name.loop-elem.-.straight.param	double-free@engine+double-free@route
+Enm.store.name.payload.-.loop.param	leak@engine+leak@route
+Enm.store.name.read-other.-.straight.param	double-free@engine+double-free@route
+Int.remove.w.ins.pop.bind.-.if.global	build@route+exit@engine+output@engine
+Int.remove.w.ins.pop.bind.-.loop.param	build@route+exit@engine+output@engine
+Int.remove.w.ins.pop.bind.-.straight.local	build@route+exit@engine+output@engine
+Int.remove.w.ins.pop.discard.-.if.local	build@route+exit@engine+output@engine
+Int.remove.w.ins.pop.discard.-.loop.global	build@route+exit@engine+output@engine
+Int.remove.w.ins.pop.discard.-.straight.param	build@route+exit@engine+output@engine
+Rec.store.name.adopt-other.-.straight.param	leak@engine+leak@route
+Rec.store.name.adopt-same.-.loop.param	leak@engine+leak@route
+Rec.store.name.adopt-sib.-.if.param	leak@engine+leak@route
+Rec.store.name.call-consume-copy-other.-.loop.param	leak@engine+leak@route
+Rec.store.name.call-consume-copy-same.-.if.param	leak@engine+leak@route
+Rec.store.name.call-consume-copy-sib.-.straight.param	leak@engine+leak@route
+Rec.store.name.call-read-other.-.loop.param	leak@engine+leak@route
+Rec.store.name.call-read-same.-.if.param	leak@engine+leak@route
+Rec.store.name.call-read-sib.-.straight.param	leak@engine+leak@route
+Rec.store.name.copy-other.-.loop.param	leak@engine+leak@route
+Rec.store.name.copy-same.-.if.param	leak@engine+leak@route
+Rec.store.name.copy-sib.-.straight.param	leak@engine+leak@route
+Rec.store.name.fresh.-.loop.param	leak@engine+leak@route
+Rec.store.name.loop-elem.-.loop.param	double-free@engine+double-free@route
+Rec.store.name.payload.-.if.param	leak@engine+leak@route
+Rec.store.name.read-other.-.loop.param	double-free@engine+double-free@route
+Str.store.name.adopt-other.-.straight.param	leak@engine+leak@route
+Str.store.name.adopt-same.-.loop.param	leak@engine+leak@route
+Str.store.name.adopt-sib.-.if.param	leak@engine+leak@route
+Str.store.name.call-consume-copy-other.-.loop.param	leak@engine+leak@route
+Str.store.name.call-consume-copy-same.-.if.param	leak@engine+leak@route
+Str.store.name.call-consume-copy-sib.-.straight.param	leak@engine+leak@route
+Str.store.name.call-read-other.-.loop.param	leak@engine+leak@route
+Str.store.name.call-read-same.-.if.param	leak@engine+leak@route
+Str.store.name.call-read-sib.-.straight.param	leak@engine+leak@route
+Str.store.name.copy-other.-.loop.param	leak@engine+leak@route
+Str.store.name.copy-same.-.if.param	leak@engine+leak@route
+Str.store.name.copy-sib.-.straight.param	leak@engine+leak@route
+Str.store.name.fresh.-.loop.param	leak@engine+leak@route
+Str.store.name.loop-elem.-.loop.param	double-free@engine+double-free@route
+Str.store.name.payload.-.if.param	leak@engine+leak@route
+Str.store.name.read-other.-.loop.param	double-free@engine+double-free@route
