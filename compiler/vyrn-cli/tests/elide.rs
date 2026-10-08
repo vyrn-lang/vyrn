@@ -109,6 +109,42 @@ fn literal_operands_and_masks_prove_their_checks() {
     );
 }
 
+/// The shift amount `k & (width - 1)` is dropped to `k` where nothing else reads it: wasm's
+/// `shl` and `shr` mask by the width. A second reader keeps the mask.
+#[test]
+fn a_shift_by_width_minus_one_masked_emits_no_and() {
+    let dir = scratch("shiftmask");
+    let wide = "fn f(x: Int64, k: Int64) -> Int64 {
+    return (x << (k & 63)) + 1234567
+}
+                fn main() -> Int64 {
+    return f(3, 70)
+}
+";
+    let narrow = "fn f(x: Int32, k: Int32) -> Int32 {
+    return (x >> (k & 31)) + 1234567
+}
+                  fn main() -> Int64 {
+    return Int64(f(1024, 33))
+}
+";
+    let shared = "fn f(x: Int64, k: Int64) -> Int64 {
+    let m = k & 63
+                      return (x << m) + m + 1234567
+}
+                  fn main() -> Int64 {
+    return f(3, 70)
+}
+";
+    let ands = |name: &str, src: &str| {
+        let body = wat_func_containing(&dir, name, src, "1234567");
+        body.lines().filter(|l| l.trim().ends_with(".and")).count()
+    };
+    assert_eq!(ands("wide", wide), 0);
+    assert_eq!(ands("narrow", narrow), 0);
+    assert_eq!(ands("shared", shared), 1);
+}
+
 #[test]
 fn a_push_in_a_loop_over_the_old_length_proves_its_index() {
     let src = "fn w(xs: modify Array<Int64>) -> Int64 {
