@@ -1,5 +1,5 @@
 command	lines	sentences
-why	717	12
+why	719	12
 bench	495	11
 serve, dev	464	6
 (dispatch)	332	4
@@ -14,7 +14,7 @@ fix	129	1
 test, bench	127	2
 build, bench	104	0
 (global)	91	2
-run	71	3
+run	68	3
 vendor	66	6
 add	58	3
 new	42	4

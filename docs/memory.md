@@ -214,12 +214,13 @@ the value hands the place back (`xs = xs.push(v)`). Releasing a record, enum
 or container releases its places; for an enum, only the live variant.
 
 `vyrn why --memory <file>` prints, per binding, whether it is reclaimed, how,
-and the reason when it is not. An excerpt, with its dashes shown as `-`:
+and the reason when it is not. A binding whose type owns no heap has no row.
+An excerpt, with its dashes shown as `-`:
 
 ```
   fn main() -> Int64
     line 2     s                reclaimed at block exit - freeing the String buffer
-    line 6     n                NOT reclaimed - the type Int64 owns no heap
+    line 6     t                moved at line 9 into the return
 ```
 
 The editor shows the same rows as memory hints. `vyrn emit-lowered <file>`

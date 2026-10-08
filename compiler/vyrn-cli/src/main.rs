@@ -245,7 +245,7 @@ fn real_main() -> ExitCode {
 fn dispatch(args: &mut Vec<String>) -> Outcome {
     let flags = GlobalFlags::take(args)?;
     // Off `run`, `--profile` reports the build phases, and `main` prints the
-    // table. `run_wasm` prints its own, with the guest's operation count.
+    // table. On `run` it reports the guest's operation count (`wasm_profile`).
     if flags.profile && args.get(1).map(String::as_str) != Some("run") {
         vyrn_frontend::prof::arm();
     }
@@ -1520,14 +1520,16 @@ fn why_memory(flags: GlobalFlags, file: &str) -> Outcome {
             ),
             None => println!("    transfers: no — the return type {ret} owns no heap"),
         }
-        let notes = match own.memory.get(&vyrn_frontend::ast::FnId::nth(i)) {
-            Some(n) if !n.is_empty() => n,
-            _ => {
-                println!("    (no bindings)");
-                continue;
-            }
+        // A binding whose type owns no heap has nothing to reclaim; the editor
+        // drops it too (`symbols::memory_notes`).
+        let notes = own.memory.get(&vyrn_frontend::ast::FnId::nth(i));
+        let heap = |n: &&vyrn_frontend::own::MemoryRow| {
+            !matches!(
+                n.bucket,
+                vyrn_frontend::own::Bucket::Leaked { heap: false, .. }
+            )
         };
-        for n in notes {
+        for n in notes.into_iter().flatten().filter(heap) {
             use vyrn_frontend::own::Bucket;
             bindings += 1;
             match n.bucket {
@@ -5005,23 +5007,20 @@ fn run_wasm(
     }
 }
 
-/// Prints a compiled run's profile to stderr: the phase table and the
-/// operations the guest executed.
+/// Prints the operations the guest executed to stderr. Under
+/// `VYRN_BUILD_PROFILE`, the phase table follows when `main` exits.
 ///
 /// The count is wasmtime's fuel, read from a budget nothing exhausts. Unlike
 /// the times, it is the same number on any machine.
 fn wasm_profile(load: std::time::Duration, compile: std::time::Duration, meter: &wasmrun::Meter) {
-    vyrn_frontend::prof::charge("load", load);
-    vyrn_frontend::prof::charge("compile", compile);
-    vyrn_frontend::prof::charge("translate", meter.translate);
-    vyrn_frontend::prof::charge("instantiate", meter.instantiate);
-    vyrn_frontend::prof::charge("run", meter.run);
-    eprint!("{}", vyrn_frontend::prof::phase_table());
-    eprintln!(
-        "
-{} operation(s) executed",
-        meter.fuel
-    );
+    if vyrn_frontend::prof::phases_on() {
+        vyrn_frontend::prof::charge("load", load);
+        vyrn_frontend::prof::charge("compile", compile);
+        vyrn_frontend::prof::charge("translate", meter.translate);
+        vyrn_frontend::prof::charge("instantiate", meter.instantiate);
+        vyrn_frontend::prof::charge("run", meter.run);
+    }
+    eprintln!("{} operation(s) executed", meter.fuel);
 }
 
 /// One `test` or `bench` body, as [`bodies_wasm`] runs it.

@@ -35,10 +35,10 @@ Compiles the file and runs it. Arguments after the file reach the program's
 `args()`. The process exits with `main`'s return value; a trap prints one
 `error: ...` line on stderr and exits 1.
 
-`vyrn run --profile [file] [args...]` prints a table of where the time went to
-stderr: the compile phases and the run, with the count of operations the guest
-executed. The flag counts only before the file, so a program can take its own
-`--profile`.
+`vyrn run --profile [file] [args...]` prints the count of operations the guest
+executed to stderr. `VYRN_BUILD_PROFILE=1` adds the compile phases and the
+`lines read` row. The flag counts only before the file, so a program can take
+its own `--profile`.
 
 ### `vyrn check [file]`
 
@@ -194,7 +194,7 @@ compile, except `--contract`.
   app root is the editor's: the directory of the nearest `vyrn.json`, at any
   depth, else the file's directory. Exits 1 if the file has no role.
 - `vyrn why --memory <file>`: per binding, whether it is reclaimed, how, and the
-  reason when it is not. The LSP's hover and inlay hints use the same table and
+  reason when it is not. A binding whose type owns no heap has no row. The LSP's hover and inlay hints use the same table and
   wording.
 - `vyrn why --capability <fs|stdin|args|extern> <entry-or-artifact>`: every
   import chain that pulls that capability into an artifact's closure.

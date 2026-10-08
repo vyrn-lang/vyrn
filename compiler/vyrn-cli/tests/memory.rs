@@ -255,7 +255,8 @@ fn why_memory_names_the_reason_each_binding_is_not_reclaimed() {
     // A `region` is not a reason: `free` refuses an arena block by the class
     // word in its header, so the walk asks for a binding inside one like any other.
     has("arena            reclaimed at block exit — freeing the String buffer");
-    has("c                NOT reclaimed — the type Bool owns no heap");
+    // A binding that owns no heap has nothing to reclaim, so no row says so.
+    assert!(!text.contains("NOT reclaimed — the type"), "{text}");
     // A lambda's capture is a deep snapshot, so the captured binding reclaims.
     has("held             reclaimed at block exit — freeing the String buffer");
     has("sent             reclaimed at block exit — freeing the String buffer");
@@ -1677,8 +1678,9 @@ fn main() -> Int64 {
 {text}"
     );
     assert!(
-        text.contains("v                NOT reclaimed — the type Int64 owns no heap"),
-        "{text}"
+        !text.contains("  v  "),
+        "a heapless binding has no row:
+{text}"
     );
     assert!(
         text.contains("t                reclaimed at block exit — freeing the String buffer"),
