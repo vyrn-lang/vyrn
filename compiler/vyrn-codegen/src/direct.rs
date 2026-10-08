@@ -17,6 +17,7 @@
 //! - An aggregate `if`-expression has no value to leave on the stack, so its slot is allocated
 //!   before the branch and each arm copies into it.
 
+use std::borrow::Cow;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -416,7 +417,7 @@ fn compile_inner(
         let ty = match &g.ty {
             Some(t) => t.clone(),
             None => match cx.world.ownership.record.node_types.get(&g.init.id()) {
-                Some(t) => cx.sub(t),
+                Some(t) => cx.sub(t).into_owned(),
                 None => {
                     return unsupported(
                         "a module-state initializer the checker did not type",
@@ -1094,11 +1095,11 @@ impl<'a> Cx<'a> {
     /// Every type query on this `Cx` goes through it, so a `Type::Param` never reaches `shape_of`,
     /// which lowers it to `Void` without an error. It substitutes into the type expression before
     /// any `App` expands, so `Box<T>` and `fn f<T>` both spelling `T` cannot be confused.
-    fn sub(&self, ty: &Type) -> Type {
+    fn sub<'t>(&self, ty: &'t Type) -> Cow<'t, Type> {
         if self.subst.is_empty() {
-            ty.clone()
+            Cow::Borrowed(ty)
         } else {
-            ftypes::substitute(ty, &self.subst)
+            Cow::Owned(ftypes::substitute(ty, &self.subst))
         }
     }
 
@@ -1110,14 +1111,14 @@ impl<'a> Cx<'a> {
     /// The layout of `ty`, or the refusal of a shape past 4 GB.
     fn layout(&self, ty: &Type, line: usize) -> Result<Rc<Layout>, String> {
         let ty = self.sub(ty);
-        if let Some(l) = self.layouts.borrow().get(&ty) {
+        if let Some(l) = self.layouts.borrow().get(&*ty) {
             return Ok(l.clone());
         }
         let l = crate::shape_of(&ty, &self.types)
             .layout()
             .map_err(|e| format!("direct backend: layout of `{ty}` at line {line}: {e}"))?;
         let l = Rc::new(l);
-        self.layouts.borrow_mut().insert(ty, l.clone());
+        self.layouts.borrow_mut().insert(ty.into_owned(), l.clone());
         Ok(l)
     }
 
@@ -1289,7 +1290,7 @@ impl<'a> Cx<'a> {
     /// walks the type twice ([`Cx::ty_gap`], [`Cx::shape`]).
     fn repr(&self, ty: &Type, line: usize) -> Result<Repr, String> {
         let key = self.sub(ty);
-        if let Some(r) = self.reprs.borrow().get(&key) {
+        if let Some(r) = self.reprs.borrow().get(&*key) {
             return Ok(r.clone());
         }
         if let Some(why) = self.ty_gap(ty, 0) {
@@ -1300,7 +1301,7 @@ impl<'a> Cx<'a> {
             Shape::Leaf(l) => Repr::Scalar(l.val_type()),
             Shape::Struct(_) | Shape::Array(..) => Repr::Agg(self.layout(ty, line)?),
         };
-        self.reprs.borrow_mut().insert(key, r.clone());
+        self.reprs.borrow_mut().insert(key.into_owned(), r.clone());
         Ok(r)
     }
 
@@ -1314,8 +1315,8 @@ impl<'a> Cx<'a> {
         if depth > 6 {
             return None;
         }
-        let ty = &self.sub(ty);
-        match ty {
+        let ty = self.sub(ty);
+        match &*ty {
             // Unreachable for a well-typed program, because [`Cx::sub`] runs first. Kept as a
             // refusal because `shape_of` gives `Void` for a parameter, and `Void` is no diagnostic.
             Type::Param(p) => return Some(format!("the unsolved type parameter `{p}`")),
@@ -1327,7 +1328,7 @@ impl<'a> Cx<'a> {
             },
             _ => {}
         }
-        match self.resolve(ty) {
+        match self.resolve(&ty) {
             Type::Record(fs) => fs.iter().find_map(|f| self.ty_gap(&f.ty, depth + 1)),
             Type::Array(i) | Type::ArrayN(i, _) => self.ty_gap(&i, depth + 1),
             Type::Map(a, b) => self
@@ -2543,7 +2544,7 @@ impl<'p> Fn_<'_, 'p> {
     ) -> Result<(), String> {
         // Inside a monomorphized instance `ty` names the instance's parameters.
         let sig = match self.cx.generics.get(f).copied() {
-            Some(g) => self.generic_sig(m, g, &[self.cx.sub(ty)], line)?,
+            Some(g) => self.generic_sig(m, g, &[self.cx.sub(ty).into_owned()], line)?,
             None => match self.cx.sigs.get(f) {
                 Some(sig) => sig.clone(),
                 None => return unsupported(&format!("the release `{f}`"), line),
@@ -2695,7 +2696,7 @@ impl<'p> Fn_<'_, 'p> {
     fn shape_fn(&self, m: &mut Module, rel: bool, ty: &Type, line: usize) -> u32 {
         let key: ShapeKey = (
             rel,
-            self.cx.sub(ty),
+            self.cx.sub(ty).into_owned(),
             if rel {
                 self.rel_holes.clone()
             } else {
@@ -4586,7 +4587,7 @@ impl<'p> Fn_<'_, 'p> {
         let (cap_names, mut cap_tys) = match caps {
             Some(c) => (
                 c.iter().map(|(n, _)| n.clone()).collect(),
-                c.iter().map(|(_, t)| self.cx.sub(t)).collect(),
+                c.iter().map(|(_, t)| self.cx.sub(t).into_owned()).collect(),
             ),
             None => (
                 vyrn_lower::core::lambda_captures(
@@ -4613,7 +4614,7 @@ impl<'p> Fn_<'_, 'p> {
                 continue;
             }
             let (_, t) = self.lookup(cn, line)?;
-            cap_tys.push(self.cx.sub(&t));
+            cap_tys.push(self.cx.sub(&t).into_owned());
         }
         let ret = expected_ret.clone();
         // The queue walks the literal's own nodes, so every answer is about a program node.
@@ -11315,7 +11316,7 @@ impl<'a, 'p> Fn_<'a, 'p> {
         // A record of a validated type is its own: the constructor row after it checks its
         // cross-field `where`, or the checker proved it.
         let own =
-            matches!(ctor, Ctor::Record(name, _) if self.cx.sub(ty) == Type::Named(name.clone()));
+            matches!(ctor, Ctor::Record(name, _) if *self.cx.sub(ty) == Type::Named(name.clone()));
         if !(agg(ty) && (own || !self.checks(ty))) {
             return false;
         }
@@ -12281,7 +12282,7 @@ impl<'a, 'p> Fn_<'a, 'p> {
                     && !body
                         .names
                         .iter()
-                        .any(|i| i.binding == Some(at) && i.ty == self.cx.sub(t));
+                        .any(|i| i.binding == Some(at) && i.ty == *self.cx.sub(t));
             }
         });
         found
@@ -12296,8 +12297,8 @@ impl<'a, 'p> Fn_<'a, 'p> {
     /// Whether `t`, under this instance's type arguments, names a declaration with a `where`
     /// clause, so a value of it is checked where it is made or stored.
     fn checks(&self, t: &Type) -> bool {
-        matches!(self.cx.sub(t), Type::Named(n)
-            if self.cx.types.get(&n).is_some_and(|d| d.predicate.is_some()))
+        matches!(&*self.cx.sub(t), Type::Named(n)
+            if self.cx.types.get(n).is_some_and(|d| d.predicate.is_some()))
     }
 
     /// Whether every statement of `ss` is one [`Fn_::core_stmts`] reads.
