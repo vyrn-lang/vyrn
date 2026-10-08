@@ -14,10 +14,10 @@ use vyrn_frontend::ast::FnId;
 use vyrn_frontend::project::Expansions;
 use vyrn_genwasm::engine;
 use vyrn_lower::insight::{self, Verb};
+use vyrn_lower::lastrun;
 
 use vyrn_codegen::toolchain::find_clang;
 
-mod lastrun;
 mod remote;
 // In the library target because `vyrn-frontend`'s tests run their programs
 // through it too.
@@ -5047,7 +5047,7 @@ fn run_cmd(call: &Call) -> Outcome {
 
 /// Compiles the program and runs it in the embedded wasmtime; the exit code is
 /// the guest's. `profile` is the load's time and the stamp of the source under
-/// `vyrn run --profile` (see [`wasm_profile`], [`lastrun`]).
+/// `vyrn run --profile` (see [`wasm_profile`], [`vyrn_lower::lastrun`]).
 fn run_wasm(
     path: &str,
     program: &vyrn_frontend::ast::Program,
@@ -5078,7 +5078,7 @@ fn run_wasm(
         Ok(out) => {
             if let (Some((load, stamp)), Some(meter)) = (&profile, out.meter.as_ref()) {
                 if let Some(counts) = &out.counts {
-                    lastrun::save(path, stamp, counts);
+                    lastrun::save(path, stamp, &counts.sites);
                 }
                 let sites = out.counts.as_ref().zip(table.as_ref());
                 wasm_profile(
@@ -5146,7 +5146,7 @@ fn profile_report(
     let Some((counts, program, table)) = sites else {
         return out + "\n";
     };
-    let total = |f: fn(&wasmrun::SiteCount) -> u64| counts.sites.iter().map(f).sum::<u64>();
+    let total = |f: fn(&lastrun::SiteCount) -> u64| counts.sites.iter().map(f).sum::<u64>();
     let (blocks, bytes) = (total(|s| s.blocks), total(|s| s.bytes));
     out += &format!(
         "; {} blocks, {} bytes; {} freed; peak live {} bytes; live at exit {}\n",

@@ -9,6 +9,7 @@ use std::io::Write;
 use std::path::Path;
 use vyrn_frontend::trap;
 use vyrn_genwasm::wasi;
+use vyrn_lower::lastrun::SiteCount;
 use wasmtime::{Caller, Engine, Global, Module, Store, WasmParams, WasmResults};
 
 /// What one run produced. The exit code is `proc_exit`'s argument, or 1 when
@@ -22,18 +23,6 @@ pub struct Outcome {
     pub meter: Option<Meter>,
     /// What the profile instrument counted, for a module built with it.
     pub counts: Option<Counts>,
-}
-
-/// What a run made at one site of the root file: blocks and bytes made, blocks freed, bytes
-/// still live at exit.
-pub struct SiteCount {
-    pub function: String,
-    pub line: u32,
-    pub verb: String,
-    pub blocks: u64,
-    pub bytes: u64,
-    pub freed: u64,
-    pub live: u64,
 }
 
 /// The profile instrument's counters, read from the guest's memory after `_start`

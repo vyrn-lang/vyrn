@@ -15,6 +15,7 @@ pub mod facts;
 mod fixpoint;
 pub mod insight;
 pub mod kernel;
+pub mod lastrun;
 mod pipeline;
 pub mod rules;
 pub mod typed;

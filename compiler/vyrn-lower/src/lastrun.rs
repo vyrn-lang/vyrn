@@ -9,9 +9,20 @@
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
-use vyrn_cli::wasmrun::Counts;
 use vyrn_frontend::ast::Program;
 use vyrn_frontend::hash::sha256_hex;
+
+/// What a run made at one site of the root file: blocks and bytes made, blocks freed, bytes
+/// still live at exit.
+pub struct SiteCount {
+    pub function: String,
+    pub line: u32,
+    pub verb: String,
+    pub blocks: u64,
+    pub bytes: u64,
+    pub freed: u64,
+    pub live: u64,
+}
 
 /// The blocks and bytes a run made at `(function, line, verb)`.
 pub type Sites = BTreeMap<(String, u32, String), [u64; 4]>;
@@ -42,10 +53,10 @@ fn file(root: &str) -> PathBuf {
     vyrn_frontend::manifest::profile_dir().join(sha256_hex(root.as_bytes()))
 }
 
-/// Saves `counts` as the last run of `root`. A failure is ignored: the profile is optional.
-pub fn save(root: &str, stamp: &str, counts: &Counts) {
+/// Saves `sites` as the last run of `root`. A failure is ignored: the profile is optional.
+pub fn save(root: &str, stamp: &str, sites: &[SiteCount]) {
     let mut text = format!("{stamp}\n");
-    for s in counts.sites.iter().filter(|s| s.blocks > 0 || s.freed > 0) {
+    for s in sites.iter().filter(|s| s.blocks > 0 || s.freed > 0) {
         text.push_str(&format!(
             "{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
             s.function, s.line, s.verb, s.blocks, s.bytes, s.freed, s.live
