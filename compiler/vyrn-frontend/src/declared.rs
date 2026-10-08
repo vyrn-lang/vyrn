@@ -217,13 +217,20 @@ impl Owned {
         out
     }
 
+    /// Returns the declared `release` row of `ty`, which [`Owned::release_kind`]
+    /// tries first. It resolves nothing, so its cost does not grow with `ty`.
+    fn declared_release(&self, ty: &Type) -> Option<DropKind> {
+        let f = crate::types::type_key(ty).and_then(|k| self.impls.get(&k))?;
+        Some(DropKind::Release(f.clone(), ty.clone()))
+    }
+
     /// Returns how a value of `ty` is reclaimed, or `None` when it owns no heap
     /// or cannot be walked. A declared row wins; otherwise the resolved type
     /// answers. The match has no `_` arm, so a new [`Type`] variant must decide.
     pub fn release_kind(&self, ty: &Type) -> Option<DropKind> {
         let ty = &*self.standing(ty);
-        if let Some(f) = crate::types::type_key(ty).and_then(|k| self.impls.get(&k)) {
-            return Some(DropKind::Release(f.clone(), ty.clone()));
+        if let Some(r) = self.declared_release(ty) {
+            return Some(r);
         }
         match crate::types::resolve(ty, &self.types) {
             Type::Str => Some(DropKind::FreeStr),
@@ -420,14 +427,14 @@ pub fn skippable(proto: &Owned, ty: &Type, paths: &[String]) -> bool {
         let mut cur = ty.clone();
         let mut segs = p.split('.');
         while let Some(seg) = segs.next() {
-            if matches!(proto.release_kind(&cur), Some(DropKind::Release(..))) {
+            if proto.declared_release(&proto.standing(&cur)).is_some() {
                 return false;
             }
-            let next = match crate::types::resolve(&cur, &proto.types) {
-                Type::Record(fields) => fields.into_iter().find(|f| f.name == seg).map(|f| f.ty),
+            let next = match &*crate::types::resolved(&cur, &proto.types) {
+                Type::Record(fields) => fields.iter().find(|f| f.name == seg).map(|f| f.ty.clone()),
                 Type::Enum(vs) => segs.next().and_then(|i| {
-                    let v = vs.into_iter().find(|v| v.name == seg)?;
-                    v.payload.into_iter().nth(i.parse().ok()?)
+                    let v = vs.iter().find(|v| v.name == seg)?;
+                    v.payload.get(i.parse::<usize>().ok()?).cloned()
                 }),
                 _ => None,
             };
