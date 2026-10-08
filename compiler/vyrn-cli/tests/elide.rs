@@ -103,6 +103,32 @@ fn a_condition_stored_in_a_bool_proves_its_index() {
 }
 
 #[test]
+fn a_sum_of_two_bounded_operands_is_exact() {
+    let src = "fn w(xs: Array<Int64>, i: Int64, k: Int64) -> Int64 {
+    if i >= 0 {
+        if i < xs.length {
+            if k >= 0 {
+                if k < 4 {
+                    let j = i + k
+                    if j < xs.length {
+                        return xs[j]
+                    }
+                }
+            }
+        }
+    }
+    return 0
+}
+";
+    assert_eq!(verdicts(src, "w"), ["proved array-index"]);
+    let (err, rows) = oracle(src, "    print(w(xs, 1, 1).toString())", "w");
+    assert_eq!(
+        (err.as_str(), rows),
+        ("", vec!["8 0 array-index proved 1".to_string()])
+    );
+}
+
+#[test]
 fn a_length_guard_proves_the_last_element() {
     let src = "fn last(xs: Array<Int64>) -> Int64 {\n    if xs.length > 0 {\n        \
                return xs[xs.length - 1]\n    }\n    return 0\n}\n";
@@ -609,6 +635,47 @@ fn w(p: modify P) -> Int64 {
          if i < xs.length {\n            return xs[i]\n        }\n    }\n    return 0\n}\n",
         "    print(w(xs, 4611686018427387904).toString())",
         "out of bounds",
+    ),
+    // Operands each below 2^62 sum past `Int64`: neither is in half the range.
+    (
+        "fn w(xs: Array<Int64>, i: Int64, k: Int64) -> Int64 {
+    if i >= 0 {
+        if k >= 0 {
+            if i <= 4611686018427387904 {
+                if k <= 4611686018427387904 {
+                    let j = i + k
+                    if j < xs.length {
+                        return xs[j]
+                    }
+                }
+            }
+        }
+    }
+    return 0
+}
+",
+        "    print(w(xs, 4611686018427387904, 4611686018427387904).toString())",
+        "array index -9223372036854775808 out of bounds",
+    ),
+    (
+        "fn w(xs: Array<Int64>, i: Int64, k: Int64) -> Int64 {
+    if i >= 0 {
+        if i <= 4611686018427387904 {
+            if k <= 0 {
+                if k >= 0 - 4611686018427387904 {
+                    let j = i - k
+                    if j < xs.length {
+                        return xs[j]
+                    }
+                }
+            }
+        }
+    }
+    return 0
+}
+",
+        "    print(w(xs, 4611686018427387904, 0 - 4611686018427387904).toString())",
+        "array index -9223372036854775808 out of bounds",
     ),
     // A conversion is exact only when its source provably fits (witness s3).
     (

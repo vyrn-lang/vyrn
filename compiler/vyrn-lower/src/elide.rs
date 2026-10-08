@@ -265,12 +265,20 @@ impl Walk<'_> {
         }
     }
 
-    /// `r`, when the state proves it stays in `-EXACT..=EXACT`.
-    fn fits(st: &State, r: Option<Lin>) -> Option<Lin> {
+    /// `r`, when the state proves it stays in `-EXACT..=EXACT`: as a whole,
+    /// or because `r` is `a + b` or `a - b` over `parts` `[a, b]`, each in
+    /// half that range. The search chains two premises, so one bound per
+    /// operand reaches a sum whose bound needs three.
+    fn fits(st: &State, r: Option<Lin>, parts: &[&Lin]) -> Option<Lin> {
+        let within = |l: &Lin, m: i64| {
+            let (Some(hi), Some(lo)) = (Lin::k(m).sub(l), l.plus(m)) else {
+                return false;
+            };
+            st.ge0(&hi).is_some() && st.ge0(&lo).is_some()
+        };
         let r = r?;
-        let hi = Lin::k(EXACT).sub(&r)?;
-        let lo = r.plus(EXACT)?;
-        (st.ge0(&hi).is_some() && st.ge0(&lo).is_some()).then_some(r)
+        let halves = || parts.len() == 2 && parts.iter().all(|p| within(p, EXACT / 2));
+        (within(&r, EXACT) || halves()).then_some(r)
     }
 
     fn block(&mut self, mut st: State, ss: &mut [St]) -> State {
@@ -595,9 +603,9 @@ impl Walk<'_> {
 
     /// What `n = op(vs)` states, read in `pre`.
     fn prim(&self, pre: &State, n: Name, op: &Op, vs: &[Val]) -> Out {
-        let exact = |r: Option<Lin>| {
+        let exact = |r: Option<Lin>, parts: &[&Lin]| {
             if self.is_int64(n) {
-                Self::fits(pre, r)
+                Self::fits(pre, r, parts)
             } else {
                 None
             }
@@ -605,16 +613,26 @@ impl Walk<'_> {
         match (op, vs) {
             (Op::Bin(o), [a, b]) => {
                 let (la, lb) = (self.lin(a), self.lin(b));
+                let parts: Vec<&Lin> = la.iter().chain(&lb).collect();
                 let r = match o {
-                    BinOp::Add => exact(la.clone().zip(lb.clone()).and_then(|(a, b)| a.add(&b))),
-                    BinOp::Sub => exact(la.clone().zip(lb.clone()).and_then(|(a, b)| a.sub(&b))),
-                    BinOp::Mul => exact(la.clone().zip(lb.clone()).and_then(|(a, b)| {
-                        match (a.is_const(), b.is_const()) {
-                            (true, _) => b.scale(a.c),
-                            (_, true) => a.scale(b.c),
-                            _ => None,
-                        }
-                    })),
+                    BinOp::Add => exact(
+                        la.as_ref().zip(lb.as_ref()).and_then(|(a, b)| a.add(b)),
+                        &parts,
+                    ),
+                    BinOp::Sub => exact(
+                        la.as_ref().zip(lb.as_ref()).and_then(|(a, b)| a.sub(b)),
+                        &parts,
+                    ),
+                    BinOp::Mul => exact(
+                        la.clone().zip(lb.clone()).and_then(|(a, b)| {
+                            match (a.is_const(), b.is_const()) {
+                                (true, _) => b.scale(a.c),
+                                (_, true) => a.scale(b.c),
+                                _ => None,
+                            }
+                        }),
+                        &[],
+                    ),
                     _ => None,
                 };
                 if let Some(r) = r {
@@ -654,7 +672,7 @@ impl Walk<'_> {
                 };
                 Out::Cond(norm(t), norm(f))
             }
-            (Op::Un(UnOp::Neg), [a]) => match exact(self.lin(a).and_then(|l| l.scale(-1))) {
+            (Op::Un(UnOp::Neg), [a]) => match exact(self.lin(a).and_then(|l| l.scale(-1)), &[]) {
                 Some(r) => Out::Def(r),
                 None => Out::Nothing,
             },
