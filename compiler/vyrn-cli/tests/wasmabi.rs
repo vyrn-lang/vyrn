@@ -320,3 +320,53 @@ fn the_shim_reads_the_declaration_instead_of_the_instruction_shape() {
         "a number for a String parameter is refused: {text}"
     );
 }
+
+const RUN: &str = r#"import { readFile } from "node:fs/promises";
+import { runVyrn } from "./wasi-min.mjs";
+
+const r = await runVyrn(await readFile(process.argv[2]), {});
+process.stdout.write(r.stdout);
+process.stderr.write(r.stderr);
+process.exitCode = r.exitCode;
+"#;
+
+/// A stack overflow ends in the shim as under `vyrn run`: the shim hands V8's
+/// `RangeError`, or the shadow stack's out-of-bounds trap, back to the module,
+/// which flushes stdout and traps with one sentence.
+#[test]
+fn the_shim_hands_a_stack_overflow_back_to_the_module() {
+    let Some(node) = find_node() else {
+        eprintln!("NOTE: no node, so the shim's stack trap is unverified on this machine");
+        return;
+    };
+    let dir = tmp("overflow");
+    let example = repo("examples/recdepth.vyrn");
+    let wasm = build_wasm(
+        &dir,
+        "recdepth",
+        &std::fs::read_to_string(&example).unwrap(),
+    );
+    std::fs::write(dir.join("run.mjs"), RUN).unwrap();
+    std::fs::copy(repo("web/wasi-min.js"), dir.join("wasi-min.mjs")).unwrap();
+
+    let shim = Command::new(&node)
+        .arg(dir.join("run.mjs"))
+        .arg(&wasm)
+        .output()
+        .expect("node");
+    let engine = Command::new(env!("CARGO_BIN_EXE_vyrn"))
+        .arg("run")
+        .arg(&example)
+        .output()
+        .expect("vyrn run");
+    let say = |o: &std::process::Output| {
+        format!(
+            "exit {:?}\n{}{}",
+            o.status.code(),
+            String::from_utf8_lossy(&o.stdout),
+            String::from_utf8_lossy(&o.stderr)
+        )
+    };
+    assert_eq!(say(&shim), say(&engine));
+    assert_eq!(shim.status.code(), Some(1), "{}", say(&shim));
+}

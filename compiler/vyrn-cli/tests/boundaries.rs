@@ -104,7 +104,7 @@ pub const ROWS: &[Row] = &[
         carriers: &[Carrier::Native, Carrier::Vyrn],
     },
     Row {
-        rule: "call-depth",
+        rule: "stack-exhausted",
         carriers: &[Carrier::Native, Carrier::Wasm],
     },
     Row {

@@ -21,8 +21,10 @@ Two flags apply to every command that loads a program:
 
 Every command that executes Vyrn code compiles it to one wasm module first.
 `run`, `test`, `bench --check`, `serve` and `dev` run that module in an embedded
-wasmtime (Cranelift). `build` without `--target wasm` hands the same module to
-wabt's `wasm2c` and compiles the C with clang. There is no interpreter.
+wasmtime (Cranelift) with a 32 MiB stack. `build` without `--target wasm` hands
+the same module to wabt's `wasm2c` and compiles the C with clang; the binary
+runs on the thread's own stack. There is no interpreter. Each host hands a
+stack overflow to the module, which traps `call stack exhausted`.
 
 A `gen fn` generator also runs as compiled wasm, in the same embedded engine,
 while the program loads.

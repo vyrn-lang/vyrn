@@ -1,0 +1,12 @@
+/// Row `stack-exhausted`. The engine detects the overflow; the module's
+/// overflow export words it. The remainder keeps an optimizer from turning
+/// the recursion into a loop.
+
+fn down(n: Int64) -> Int64 {
+    return (down(n + 1) * 31 + n) % 1000003
+}
+
+fn main() -> Int64 {
+    print(down(0))
+    return 0
+}

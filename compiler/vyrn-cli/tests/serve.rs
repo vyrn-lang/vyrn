@@ -171,10 +171,10 @@ fn handler_trap_yields_500_and_server_survives() {
 }
 
 /// A trap abandons the handler's frames and open regions. Each `/trap` holds
-/// about 300 of the 1,000 calls and one of the 64 regions when it traps, so a
-/// leak fails by the fourth request, or by the 65th.
+/// one of the 64 regions when it traps, so a leak fails by the 65th request.
+/// Each `/deep` overflows the stack, and the instance answers after it.
 #[test]
-fn trapped_requests_give_back_their_call_depth_and_regions() {
+fn trapped_requests_give_back_their_stack_and_regions() {
     let s = start_server_on(
         r#"
 fn down(n: Int64, boom: Bool) -> Int64 {
@@ -187,8 +187,13 @@ fn down(n: Int64, boom: Bool) -> Int64 {
     return down(n - 1, boom) + 1
 }
 
+fn deeper(n: Int64) -> Int64 {
+    return (deeper(n + 1) * 31 + n) % 1000003
+}
+
 fn handle(req: Request) -> Response {
-    let got = down(300, req.path == "/trap")
+    let n = if req.path == "/overflow" { deeper(0) } else { 300 }
+    let got = down(n, req.path == "/trap")
     return Response { status: 200, contentType: "text/plain", body: got.toString(), vary: "", headers: [:] }
 }
 "#,
@@ -198,10 +203,18 @@ fn handle(req: Request) -> Response {
         let (status, _) = get(s.server.port, "/trap");
         assert_eq!(status, "HTTP/1.1 500 Internal Server Error");
     }
+    for _ in 0..3 {
+        let (status, _) = get(s.server.port, "/overflow");
+        assert_eq!(status, "HTTP/1.1 500 Internal Server Error");
+    }
     let (status, body) = get(s.server.port, "/deep");
     let err = s.stderr.lock().unwrap().clone();
     assert_eq!(status, "HTTP/1.1 200 OK", "stderr:\n{err}");
     assert_eq!(body, "300");
+    assert!(
+        err.contains(vyrn_frontend::trap::STACK_EXHAUSTED),
+        "stderr:\n{err}"
+    );
 }
 
 #[test]

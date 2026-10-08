@@ -35,8 +35,8 @@ fn needles() -> Vec<Needle> {
         whole(trap::SERVE_STREAM),
         split(trap::ARRAY_INDEX),
         split(trap::STRING_INDEX),
+        whole(trap::STACK_EXHAUSTED),
         // The prefix, without the number the constant fills in.
-        whole(trap::call_depth().split(" exceeds").next().unwrap()),
         whole(trap::region_depth().split(" exceeds").next().unwrap()),
         // Up to the type name.
         whole(trap::validation("@", false).split('@').next().unwrap()),

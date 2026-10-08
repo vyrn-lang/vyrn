@@ -12,7 +12,7 @@ The compiler emits WebAssembly, and everything that module needs at run time is 
 
 A builtin routes to a runtime function with the same name plus `V`: `readFile` calls `readFileV`, because the builtin's own name is reserved. Other builtins route to ordinary std modules. `x.charCount()`, `lineAt` and `colAt` run `std/text`. A float rendered by `print` or `toString()` runs `std/num`'s `f64Str`. `toJson` links `std/json`, and `fromJson` links `std/jsondec`. So one Vyrn source serves every engine, and the engines agree byte for byte.
 
-Inside the runtime a `String` is an `Int32` address of NUL-terminated bytes with a length header. No module outside the runtime holds an address. A `panic` in the runtime prints its trap line with no source site, and its frames do not count against the call-depth limit.
+Inside the runtime a `String` is an `Int32` address of NUL-terminated bytes with a length header. No module outside the runtime holds an address. A `panic` in the runtime prints its trap line with no source site.
 
 ### Memory
 

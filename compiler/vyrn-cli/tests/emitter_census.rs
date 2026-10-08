@@ -119,7 +119,6 @@ fn sections() -> Vec<Section> {
         sec("fn lower_globals_init", Shared, Both),
         sec("fn lower_body", Mapping, Core),
         sec("fn frame_fits", Decision, Neither),
-        sec("fn call_depth_enter", Mapping, Neither),
         sec("fn lower_fnval_copy", Shared, Neither),
         sec("fn scratch", Shared, Neither),
         sec("fn register_rel", Mapping, Core),

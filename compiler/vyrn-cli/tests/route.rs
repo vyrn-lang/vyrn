@@ -52,12 +52,18 @@ fn every_example_agrees_between_the_wasm2c_route_and_the_wasm_engine() {
     for path in &names {
         let name = path.file_name().unwrap().to_string_lossy().to_string();
         // Each exclusion is a program that cannot be compared: two lists that
-        // never build, and one whose imports only a browser page supplies.
+        // never build, one whose imports only a browser page supplies, and one
+        // whose trap the `wasmtime` CLI words itself.
         let skip = KNOWN_DIVERGENT
             .iter()
             .map(|(n, why)| (*n, *why))
             .chain(EXPECTED_CHECK_FAILURE.iter().map(|(n, why, _)| (*n, *why)))
-            .chain(WASM_ONLY.iter().map(|(n, why)| (*n, *why)))
+            .chain(
+                WASM_ONLY
+                    .iter()
+                    .chain(ENGINE_TRAP)
+                    .map(|(n, why)| (*n, *why)),
+            )
             .find(|(n, _)| *n == name);
         if let Some((_, why)) = skip {
             eprintln!("SKIP  {name}  ({why})");
@@ -121,32 +127,26 @@ fn every_example_agrees_between_the_wasm2c_route_and_the_wasm_engine() {
     assert!(failures.is_empty(), "\n{}", failures.join("\n\n"));
 }
 
-/// `WASM_ONLY` examples call `extern fn`s whose `vyrn` import namespace only a
-/// browser page supplies, so the `wasmtime` CLI cannot instantiate them. On
-/// every engine that is not a page, a reached `extern` prints
-/// `extern \`name\` is not available on this target` on fd 2 and exits 1,
-/// so `vyrn run` is the reference here.
+/// The examples the `wasmtime` CLI cannot stand in for: a `WASM_ONLY` example
+/// calls an `extern fn` whose `vyrn` import namespace only a browser page
+/// supplies, and an `ENGINE_TRAP` example ends in a stack overflow the CLI words
+/// itself. `vyrn run` is the reference for both, and each ends in a trap.
 #[test]
 #[ignore = "needs clang, wasm2c and simde; run explicitly: cargo test -p vyrn-cli --release --test route -- --ignored"]
-fn the_extern_example_refuses_on_the_route_as_the_embedded_engine_does() {
+fn the_trapping_examples_agree_between_the_route_and_vyrn_run() {
     if route_tools().is_none() {
         eprintln!("SKIP: the wasm2c route's tools are not all present");
         return;
     }
     let dir = examples_dir();
-    let out_dir = scratch("route-extern");
-    for (name, _why) in WASM_ONLY {
+    let out_dir = scratch("route-trap");
+    for (name, _why) in WASM_ONLY.iter().chain(ENGINE_TRAP) {
         let path = dir.join(name);
         let engine = vyrn().arg("run").arg(&path).output().expect("vyrn run");
         assert_eq!(
             engine.status.code(),
             Some(1),
             "{name}: the engine must trap"
-        );
-        assert!(
-            norm(&engine.stderr).contains("is not available on this target"),
-            "{name}: the engine must print the canonical extern trap, got:\n{}",
-            norm(&engine.stderr)
         );
 
         let exe = out_dir.join(format!("{name}.exe"));
@@ -159,7 +159,7 @@ fn the_extern_example_refuses_on_the_route_as_the_embedded_engine_does() {
             .expect("build");
         assert!(
             build.status.success(),
-            "{name}: the route must build it — the `vyrn` namespace's stubs link:\n{}{}",
+            "{name}: the route must build it:\n{}{}",
             norm(&build.stdout),
             norm(&build.stderr)
         );
@@ -168,7 +168,7 @@ fn the_extern_example_refuses_on_the_route_as_the_embedded_engine_does() {
         assert_eq!(
             norm(&route.stderr),
             norm(&engine.stderr),
-            "{name}: the two refusals must be byte-identical"
+            "{name}: the two traps must be byte-identical"
         );
         assert_eq!(
             norm(&route.stdout),

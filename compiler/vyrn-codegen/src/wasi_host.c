@@ -569,12 +569,27 @@ int main(int argc, char** argv) {
     VYRN_INSTANTIATE(&g_inst, &wasi);
     /* `wasm_rt_impl_try` spelled out, without the exceptions runtime it pulls
        in: the same save and setjmp. */
+    u32* sp = w2c_prog_0x5F_stack_pointer(&g_inst);
+    u32 top = *sp;
     WASM_RT_SAVE_STACK_DEPTH();
     wasm_rt_trap_t trap = (wasm_rt_trap_t)WASM_RT_SETJMP(g_wasm_rt_jmp_buf);
     if (trap == WASM_RT_TRAP_NONE) {
         w2c_prog_0x5Fstart(&g_inst);
         /* `_start` ends in `proc_exit`; a plain return is exit 0 too. */
         return 0;
+    }
+    /* A stack overflow goes back to the module, whose overflow export flushes
+       stdout and traps with Vyrn's sentence, then exits. It is the C stack's,
+       or the shadow stack's: an out-of-bounds access with the stack pointer
+       past the end of memory, where a frame push that wrapped below 0 leaves
+       it. On macOS wasm-rt reports both kinds of trap as one code, so there an
+       out-of-bounds access, which only a compiler defect makes, reads as an
+       overflow too. */
+    if (trap == WASM_RT_TRAP_EXHAUSTION ||
+        (trap == WASM_RT_TRAP_OOB && *sp >= g_inst.w2c_memory.size)) {
+        *sp = top;
+        trap = (wasm_rt_trap_t)WASM_RT_SETJMP(g_wasm_rt_jmp_buf);
+        if (trap == WASM_RT_TRAP_NONE) w2c_prog_0x5F_vyrn_overflow(&g_inst);
     }
     /* A trap the program did not spell: a wasm `unreachable`, an out-of-bounds
        access. Not program output, so the wording is this host's, in the shape

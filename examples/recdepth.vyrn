@@ -1,37 +1,26 @@
-/// Recursion is bounded, and the bound belongs to the language.
+/// Recursion runs until a stack runs out, and then the run ends with the same
+/// words on every engine.
 ///
-/// A tree-walking interpreter recurses on the host's stack, a native binary on
-/// the machine's, a wasm module on the engine's. Three stacks, three sizes, so
-/// "how deep may a program go" used to have three answers: at depth 30,000 the
-/// native binary printed 30000 while the reference semantics died with a Rust
-/// runtime message, exit 127, no `file:line` and nothing a Vyrn program could
-/// have caught. That is the one thing this project promises never happens.
+/// No engine counts calls. `vyrn run` gives a program 32 MiB of wasmtime's
+/// stack, a native binary has the machine's, a browser has its engine's, and
+/// the shadow stack in linear memory holds the frames of aggregate locals.
+/// When any of them runs out, the host hands the overflow back to the module,
+/// which flushes what `print` buffered and traps `call stack exhausted`.
 ///
-/// So the depth is COUNTED, not left to whichever stack runs out first: 1,000
-/// calls may be in flight, and the 1,001st ends the run with the same words in
-/// every engine. An `extern` does not count (it is the host's frame) and neither
-/// does a lambda body (it has no name to call itself by, so it cannot recurse
-/// without passing through a named function like this one).
-///
-/// The number is 1,000 because a build profile is not allowed to change it. The
-/// interpreter costs ~8.5 KB of host stack per call optimized and ~190 KB
-/// unoptimized, so the first number tried — 10,000 — was reachable only in a
-/// release build and overflowed in a debug one.
-///
-/// The trap is last, because it ends the run — this example is a three-way
-/// parity citizen through its stdout, its stderr and its exit code, like the
-/// other trapping examples.
+/// The depth at which that happens differs per engine. Depth 5,000 runs on
+/// every one; depth 1,000,000,000 runs out on every one. The remainder keeps
+/// the combine step from being one an optimizer turns into a loop.
 fn down(n: Int64) -> Int64 {
     if n <= 0 {
         return 0
     }
-    return 1 + down(n - 1)
+    let r = down(n - 1)
+    return (r * 31 + n) % 1000003
 }
 
 fn main() -> Int64 {
-    // Exactly at the budget: `main` holds one frame and `down` takes 999 more.
-    print("\{down(998)}")
-    // One past it. The run ends here.
-    print("\{down(999)}")
+    print("\{down(5000)}")
+    // The run ends here.
+    print("\{down(1000000000)}")
     return 0
 }
