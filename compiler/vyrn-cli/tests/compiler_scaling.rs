@@ -37,7 +37,11 @@ const TINY_BYTES: f64 = 65536.0;
 /// Phases that are superlinear today, as `(shape, phase)`, each with its
 /// cause. The test fails when one stops being superlinear, so a fix removes
 /// its row.
-const KNOWN: &[(&str, &str, &str)] = &[];
+const KNOWN: &[(&str, &str, &str)] = &[(
+    "payload match",
+    "placer: build: first",
+    "an enum of n variants that each carry a String, matched by n arms that bind it: allocations 8,081,104 to 128,231,106 (15.9 times), bytes 412,234,160 to 6,478,263,016 (15.7 times)",
+)];
 
 /// The programs of one size. Each reaches every item from `main`.
 fn shapes(n: usize) -> Vec<(&'static str, String)> {
@@ -88,6 +92,31 @@ fn shapes(n: usize) -> Vec<(&'static str, String)> {
     s.push_str("    }\n}\nfn main() -> Int64 { return pick(V0) }\n");
     out.push(("long match", s));
 
+    // A match over payload variants: `n` variants that each carry a String,
+    // `n` arms that each bind it.
+    let mut s = String::from(
+        "type T =
+",
+    );
+    for i in 0..n {
+        writeln!(s, "    | V{i}(String)").unwrap();
+    }
+    s.push_str(
+        "fn pick(t: T) -> Int64 {
+    return match t {
+",
+    );
+    for i in 0..n {
+        writeln!(s, "        V{i}(s) => s.byteLength + {i},").unwrap();
+    }
+    s.push_str(
+        "    }
+}
+fn main() -> Int64 { return pick(V0(\"a\")) }
+",
+    );
+    out.push(("payload match", s));
+
     // Many generic instances: one generic function at `n` record types.
     let mut s = String::from("fn id<T>(x: T) -> T {\n    return x.copy()\n}\n");
     for i in 0..n {
@@ -103,7 +132,7 @@ fn shapes(n: usize) -> Vec<(&'static str, String)> {
 }
 
 #[test]
-#[ignore = "builds ten generated programs on one thread; named in the gate list"]
+#[ignore = "builds eleven generated programs on one thread; named in the gate list"]
 fn no_phase_allocates_faster_than_its_input() {
     let dir = scratch("scaling");
     let cache = scratch("scaling-gen");
