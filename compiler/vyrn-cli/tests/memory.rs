@@ -2456,6 +2456,13 @@ fn a_store_into_a_modify_parameter_releases_the_old_value() {
     );
 }
 
+// A borrow stored into a `modify` parameter name is stored as a copy (witness:
+// base double freed the element).
+#[test]
+fn a_borrow_stored_into_a_modify_parameter_is_a_copy() {
+    shape_runs_clean("a-borrow-stored-into-a-modify-parameter-is-a-copy", "20\n");
+}
+
 #[test]
 fn a_for_over_a_user_container_in_a_field_runs() {
     shape_runs_clean(

@@ -2872,9 +2872,13 @@ impl<'a> Builder<'a> {
                 };
                 // A slot that owns its value keeps owning: a borrow stored
                 // into it is copied, as `let mut` binds one (`copies`), and
-                // the store releases the old value.
+                // the store releases the old value. A `modify` parameter's
+                // slot is the caller's, and the borrow's place is not. A
+                // store of the slot's own name is not copied: the kernel
+                // refuses `s = s` on a `modify` parameter, and a copy would
+                // hide it.
                 if let (Some(n), Val::Name(m)) = (n, &v) {
-                    if self.body.names[n.index()].releases && self.body.names[m.index()].borrow {
+                    if self.slot_owns(n) && *m != n && self.body.names[m.index()].borrow {
                         let rhs = self.copy_rhs(v.clone(), value)?;
                         let t = self.temp(ty.clone(), *line);
                         self.bind(t, rhs, out);
