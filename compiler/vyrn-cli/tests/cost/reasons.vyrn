@@ -1,0 +1,67 @@
+// One function per reason `vyrn why --cost` gives a kept check.
+type Cursor = { at: Int64 }
+
+fn make() -> Array<Int64> {
+    return [1, 2, 3]
+}
+
+fn drain(a: modify Array<Int64>) -> Unit {
+    a.clear()
+}
+
+/// The index comes from outside the program.
+fn fromInput(a: Array<Int64>) -> Int64 {
+    return match readLine() {
+        Some(l) => a[l.byteLength],
+        None => 0,
+    }
+}
+
+/// The array is a call's result, so its length is the callee's to say.
+fn fromCall() -> Int64 {
+    let xs = make()
+    return xs[1]
+}
+
+/// The caller must pass an array of at least one element.
+fn fromCaller(a: Array<Int64>) -> Int64 {
+    return a[0]
+}
+
+/// A call took `ys` by `modify` inside the loop, so its length is forgotten.
+fn resized(n: Int64) -> Int64 {
+    let mut ys: Array<Int64> = [1, 2, 3]
+    let mut i = 0
+    let mut s = 0
+    while i < n {
+        s = s + ys[0]
+        drain(ys)
+        i = i + 1
+    }
+    return s
+}
+
+/// The index is a field read.
+fn fromField(a: Array<Int64>, c: Cursor) -> Int64 {
+    return a[c.at]
+}
+
+/// Only the counter `i` moves; the bound `n` is the caller's.
+fn counted(a: Array<Int64>, n: Int64) -> Int64 {
+    let mut i = 0
+    let mut s = 0
+    while i < n {
+        s = s + a[i]
+        i = i + 1
+    }
+    return s
+}
+
+/// A local array that holds one element on only one path.
+fn unproved(n: Int64) -> Int64 {
+    let mut xs: Array<Int64> = []
+    if n > 0 {
+        xs.push(1)
+    }
+    return xs[0]
+}

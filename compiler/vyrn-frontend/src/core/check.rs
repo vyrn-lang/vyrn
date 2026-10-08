@@ -1,6 +1,7 @@
 //! The runtime checks a row can carry ([`super::St::Check`]).
 
 use super::{Name, Place, Val};
+use crate::ast::FnId;
 use crate::trap::Rule;
 
 /// One runtime check: the trap it raises, what it compares, where, and
@@ -11,6 +12,48 @@ pub struct Check {
     pub guard: Guard,
     pub site: Site,
     pub verdict: Verdict,
+    /// Why a [`Verdict::Kept`] row stays, written with the verdict
+    /// (`vyrn_lower::elide`); [`Why::Unsaid`] for a proved row.
+    pub why: Why,
+}
+
+/// The reason a pass could not prove a check, for `vyrn why --cost` and the
+/// editor. Each variant names the name whose origin decided it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum Why {
+    /// No pass gave a reason: the row is proved, or no pass ran.
+    #[default]
+    Unsaid,
+    /// The name's value comes from outside the program.
+    Input(Name),
+    /// The goal needs a fact about a call's result: the name it binds and
+    /// the function, when the call is to a declared one.
+    Callee(Name, Option<FnId>),
+    /// The goal needs a fact about a parameter: the parameter, and the goal
+    /// over source names.
+    Caller(Name, std::sync::Arc<str>),
+    /// A kind of gap the research names by its move number: 2 a length a
+    /// call may have changed, 3 a field, element or global read, 5 a goal
+    /// over one counter and names the loop leaves alone.
+    Move(u8, Option<Name>),
+    /// No rule applies; the text is the goal the prover could not show.
+    Unproved(std::sync::Arc<str>),
+}
+
+impl Why {
+    /// The reason in two words, for the editor's end-of-line hint.
+    pub fn short(&self) -> &'static str {
+        match self {
+            Why::Unsaid => "",
+            Why::Input(_) => "input",
+            Why::Callee(..) => "callee fact",
+            Why::Caller(..) => "caller fact",
+            Why::Move(2, _) => "move 2",
+            Why::Move(3, _) => "move 3",
+            Why::Move(..) => "move 5",
+            Why::Unproved(_) => "unproved",
+        }
+    }
 }
 
 /// What a failed check raises.

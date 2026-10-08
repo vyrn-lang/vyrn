@@ -465,7 +465,10 @@ operation count and the blocks it made per source line (`direct.rs` `Profile`,
 `vyrn why --cost` prints `insight::facts` (`insight.rs`): per line, the rows of
 the decided core that allocate, copy, grow a container or keep a check. A
 callee outside the root file counts at the calling line through
-`World::allocates`, the effect judgment's `alloc`.
+`World::allocates`, the effect judgment's `alloc`. A kept check carries its
+reason in `Check::why`, written beside the verdict by `elide::Walk::why` from
+the first goal that failed and the origin of its names (`elide::Origin`); it
+calls the prover no more often.
 
 ## Where a change goes
 

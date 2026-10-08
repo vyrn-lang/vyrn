@@ -197,6 +197,9 @@ pub struct CostLine {
     pub implicit: bool,
     /// What it does, as `why --cost` prints it.
     pub text: String,
+    /// For a kept check, the distinct reasons in two words each, comma-joined
+    /// (`callee fact, caller fact`); empty for any other verb.
+    pub short: String,
 }
 
 /// One `import * as ns` binding and the exported declarations it exposes.

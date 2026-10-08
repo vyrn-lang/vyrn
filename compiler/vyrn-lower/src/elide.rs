@@ -20,13 +20,15 @@
 //! the borrow itself written.
 
 use std::collections::{BTreeSet, HashMap};
+use std::fmt::Write;
 
-use vyrn_frontend::ast::{BinOp, Capability, Type, TypeDecl, UnOp};
+use vyrn_frontend::ast::{BinOp, Capability, FnId, Type, TypeDecl, UnOp};
+use vyrn_frontend::effects::Effect;
 use vyrn_frontend::prelude::{self, Length};
 use vyrn_frontend::prim::Cmp;
 
 use crate::facts::{Lin, State, Term};
-use vyrn_frontend::core::check::{Guard, Site, Verdict};
+use vyrn_frontend::core::check::{Check, Guard, Site, Verdict, Why};
 use vyrn_frontend::core::{Arg, Body, Callee, Ctor, Lit, Name, Op, Place, Rhs, St, Val};
 
 /// The bound an exact `Int64` sum must provably stay within: `2^62`, so no
@@ -63,12 +65,13 @@ pub fn refuted(body: &mut Body, decls: &HashMap<String, TypeDecl>) -> Vec<Refute
         loops: Vec::new(),
         record: true,
         memo: HashMap::new(),
-        relevant: relevant(body, &stmts),
+        slot: relevant(body, &stmts),
         open: BTreeSet::new(),
         refuted: Vec::new(),
     };
     let mut st = State::default();
     for p in &body.params {
+        w.slot[p.index()].origin = Origin::Param(*p);
         w.fresh(&mut st, *p);
     }
     w.block(st, &mut stmts);
@@ -92,21 +95,86 @@ struct Walk<'a> {
     decls: &'a HashMap<String, TypeDecl>,
     /// Per enclosing loop, innermost last: the states at its `break`s and at
     /// its `continue`s.
-    loops: Vec<(Vec<State>, Vec<State>)>,
+    loops: Vec<Loop>,
     /// Whether a check row's verdict is written: false in Houdini's rounds,
     /// true in the replay from the settled head.
     record: bool,
     /// A loop's exit state by its rows' address and its entry state, for the
     /// walks that write no verdict.
     memo: HashMap<(usize, State), State>,
-    /// Per name, whether a check's goal can depend on it ([`relevant`]); the
-    /// walk states nothing about any other name.
-    relevant: Vec<bool>,
+    /// Per name, what the walk keeps about it ([`relevant`]).
+    slot: Vec<Slot>,
     /// The records a store into a field has left unchecked: from the store to
     /// the record's rule check ([`Guard::Rule`]), each field's length is a
     /// term of its own ([`Walk::col`]).
     open: BTreeSet<Name>,
     refuted: Vec<Refuted>,
+}
+
+/// What the walk keeps about one name.
+#[derive(Clone, Copy)]
+struct Slot {
+    /// Whether a check's goal can depend on the name; the walk states nothing
+    /// about any other name.
+    relevant: bool,
+    /// Where it got its value, for a kept check's [`Why`].
+    origin: Origin,
+}
+
+/// Where a name got its value, weakest first. A name holds the strongest
+/// origin of its bindings, the first of equal strength; each variant names
+/// the binding that decided.
+#[derive(Clone, Copy)]
+enum Origin {
+    /// A literal, or an operator over such.
+    Local,
+    Param(Name),
+    /// A field, element, map or global read, or a payload.
+    Place(Name),
+    /// A call's result: the name it binds, and the function when it is a
+    /// declared one.
+    Call(Name, Option<FnId>),
+    /// A builtin that reads the outside world.
+    Input(Name),
+}
+
+impl Origin {
+    fn rank(self) -> u8 {
+        match self {
+            Origin::Local => 0,
+            Origin::Param(_) => 1,
+            Origin::Place(_) => 2,
+            Origin::Call(..) => 3,
+            Origin::Input(_) => 4,
+        }
+    }
+
+    fn join(self, o: Origin) -> Origin {
+        if o.rank() > self.rank() {
+            o
+        } else {
+            self
+        }
+    }
+}
+
+/// One enclosing loop of the walk.
+struct Loop {
+    /// The states at its `break`s and at its `continue`s, in the round
+    /// being walked.
+    breaks: Vec<State>,
+    conts: Vec<State>,
+    seen: Seen,
+}
+
+/// What the rows of one loop did to its names, over every round of the walk.
+struct Seen {
+    /// Every name the loop writes ([`writes`]).
+    written: BTreeSet<Name>,
+    /// The names it stores to: its counters ([`stores`]).
+    stored: BTreeSet<Name>,
+    /// Names a call took by `modify` or `consume`, which forgot their length.
+    resized: BTreeSet<Name>,
 }
 
 /// What a primitive row states about its result.
@@ -227,7 +295,7 @@ impl Walk<'_> {
 
     /// What `n`'s type says about it, unless a definition says more.
     fn range(&self, st: &mut State, n: Name) {
-        if !self.relevant[n.index()]
+        if !self.slot[n.index()].relevant
             || st.defs.contains_key(&Term::Val(n))
             || st.defs.contains_key(&Term::Len(n))
         {
@@ -320,6 +388,10 @@ impl Walk<'_> {
                 st
             }
             St::Store { place, value, .. } => {
+                if let Place::Name(n) = place {
+                    let o = self.slot[n.index()].origin.join(self.origin_of_val(value));
+                    self.slot[n.index()].origin = o;
+                }
                 self.open(&mut st, place);
                 match (&*place, self.length(place)) {
                     // The field takes the stored array's length.
@@ -340,7 +412,7 @@ impl Walk<'_> {
                     }
                 }
                 if let Place::Name(n) = place {
-                    if self.relevant[n.index()] {
+                    if self.slot[n.index()].relevant {
                         self.assign(&mut st, *n, value);
                         self.range(&mut st, *n);
                     }
@@ -373,11 +445,12 @@ impl Walk<'_> {
             }
             St::Block { body, .. } => self.block(st, body),
             St::Loop { body, .. } => self.looped(st, body),
-            St::Switch { arms, .. } => {
+            St::Switch { on, arms, .. } => {
                 let mut outs = vec![st.clone()];
                 for a in arms {
                     let mut s = st.clone();
                     for b in &a.binds {
+                        self.slot[b.index()].origin = self.origin_of_val(on);
                         self.fresh(&mut s, *b);
                     }
                     outs.push(self.block(s, &mut a.body));
@@ -385,14 +458,14 @@ impl Walk<'_> {
                 State::join(&outs)
             }
             St::Break { .. } => {
-                if let Some((b, _)) = self.loops.last_mut() {
-                    b.push(st);
+                if let Some(l) = self.loops.last_mut() {
+                    l.breaks.push(st);
                 }
                 State::dead()
             }
             St::Continue { .. } => {
-                if let Some((_, c)) = self.loops.last_mut() {
-                    c.push(st);
+                if let Some(l) = self.loops.last_mut() {
+                    l.conts.push(st);
                 }
                 State::dead()
             }
@@ -401,9 +474,11 @@ impl Walk<'_> {
                 let goals = self.goals(&c.guard);
                 if self.record {
                     let holds = |g: &Lin| st.ge0(g).is_some_and(|cert| cert.verify(&st, g));
-                    let proved = goals.as_ref().is_some_and(|gs| gs.iter().all(holds));
-                    if proved && provable(&c.guard) {
+                    let failing = goals.iter().flatten().find(|g| !holds(g));
+                    if goals.is_some() && failing.is_none() && provable(&c.guard) {
                         c.verdict = Verdict::Proved;
+                    } else {
+                        c.why = self.why(&st, c, failing);
                     }
                     if let (Guard::Rule(r), Some(gs), false) = (&c.guard, &goals, st.dead) {
                         // Goals come in pairs, `a - b` then `b - a`, per pair
@@ -487,8 +562,10 @@ impl Walk<'_> {
     }
 
     fn bind(&mut self, st: &mut State, n: Name, rhs: &Rhs) {
+        let o = self.origin_of(n, rhs);
+        self.slot[n.index()].origin = self.slot[n.index()].origin.join(o);
         st.kill(n);
-        if !self.relevant[n.index()] {
+        if !self.slot[n.index()].relevant {
             return self.effects(st, rhs);
         }
         match rhs {
@@ -748,10 +825,10 @@ impl Walk<'_> {
                         (Some(a), Some(b)) if a.is_const() && b.is_const() => {
                             st.shift(*t, a.c, b.c)
                         }
-                        _ => st.kill(n),
+                        _ => self.resize(st, n),
                     }
                 }
-                _ => st.kill(n),
+                _ => self.resize(st, n),
             }
         }
     }
@@ -915,13 +992,23 @@ impl Walk<'_> {
         }
         let at_entry = entry.prover();
         cands.retain(|c| at_entry.ge0(c).is_some());
+        self.loops.push(Loop {
+            breaks: Vec::new(),
+            conts: Vec::new(),
+            seen: Seen {
+                written,
+                stored,
+                resized: BTreeSet::new(),
+            },
+        });
         let record = std::mem::replace(&mut self.record, false);
         loop {
             let mut h = head.clone();
             cands.iter().for_each(|c| h.assume(c));
-            self.loops.push((Vec::new(), Vec::new()));
             let end = self.block(h, body);
-            let (_, conts) = self.loops.pop().expect("pushed above");
+            let l = self.loops.last_mut().expect("pushed above");
+            l.breaks.clear();
+            let conts = std::mem::take(&mut l.conts);
             let ends: Vec<State> = conts.into_iter().chain([end]).collect();
             let before = cands.len();
             let provers: Vec<_> = ends.iter().map(|s| s.prover()).collect();
@@ -932,10 +1019,176 @@ impl Walk<'_> {
         }
         self.record = record;
         cands.iter().for_each(|c| head.assume(c));
-        self.loops.push((Vec::new(), Vec::new()));
         self.block(head, body);
-        let (breaks, _) = self.loops.pop().expect("pushed above");
-        State::join(&breaks)
+        let l = self.loops.pop().expect("pushed above");
+        if let Some(outer) = self.loops.last_mut() {
+            outer.seen.resized.extend(l.seen.resized);
+        }
+        State::join(&l.breaks)
+    }
+
+    /// A call took `n` by `modify` or `consume` and may have changed its length.
+    fn resize(&mut self, st: &mut State, n: Name) {
+        st.kill(n);
+        if let Some(l) = self.loops.last_mut() {
+            l.seen.resized.insert(n);
+        }
+    }
+
+    fn origin_of_val(&self, v: &Val) -> Origin {
+        match v {
+            Val::Name(m) => self.slot[m.index()].origin,
+            Val::Lit(_) => Origin::Local,
+        }
+    }
+
+    /// Where the result `n` of `rhs` comes from. An operator and a builtin
+    /// that reads nothing outside take the strongest origin of their
+    /// operands; the length of a name is the name's.
+    fn origin_of(&self, n: Name, rhs: &Rhs) -> Origin {
+        let join = |vs: &mut dyn Iterator<Item = Origin>| vs.fold(Origin::Local, Origin::join);
+        match rhs {
+            Rhs::Val(v) => self.origin_of_val(v),
+            Rhs::Read(Place::Name(m)) | Rhs::Take(Place::Name(m)) => self.slot[m.index()].origin,
+            Rhs::Read(Place::Field(b, f)) | Rhs::Take(Place::Field(b, f))
+                if f == "length" || f == "byteLength" =>
+            {
+                place_root(b).map_or(Origin::Place(n), |m| self.slot[m.index()].origin)
+            }
+            Rhs::Read(_) | Rhs::Take(_) => Origin::Place(n),
+            Rhs::Prim(_, vs, _) => join(&mut vs.iter().map(|v| self.origin_of_val(v))),
+            Rhs::Call {
+                callee, args, kind, ..
+            } => match kind {
+                Callee::Fn(id) => Origin::Call(n, Some(*id)),
+                Callee::Method | Callee::Projection | Callee::Bound | Callee::Value(_) => {
+                    Origin::Call(n, None)
+                }
+                Callee::Builtin
+                    if matches!(
+                        prelude::builtin(callee).and_then(|b| b.effect),
+                        Some(
+                            Effect::ReadInput
+                                | Effect::FsRead
+                                | Effect::FsList
+                                | Effect::Args
+                                | Effect::Clock
+                                | Effect::Random
+                        )
+                    ) =>
+                {
+                    Origin::Input(n)
+                }
+                _ => join(
+                    &mut args
+                        .iter()
+                        .filter_map(|(a, _)| root(a))
+                        .map(|m| self.slot[m.index()].origin),
+                ),
+            },
+            _ => Origin::Local,
+        }
+    }
+
+    /// Why the kept check `c` stays, without another call to the prover. The
+    /// names are those of the first goal that fails, or the guard's operands
+    /// when it states no goal. The strongest origin among them decides, then
+    /// a length a call resized, then a loop that writes one of them.
+    fn why(&self, st: &State, c: &Check, failing: Option<&Lin>) -> Why {
+        let operands = match (failing, &c.guard) {
+            (Some(_), _) => [None, None],
+            (None, Guard::Range(..)) => {
+                return Why::Unproved("the range is checked in std/runtime bytesOf".into())
+            }
+            (None, Guard::Index(p, i) | Guard::Span(p, i, _)) => {
+                if self.length(p).is_none() {
+                    return Why::Move(3, place_root(p));
+                }
+                [place_root(p), val_name(i)]
+            }
+            (None, Guard::NonZero(k) | Guard::Shift(k, _)) => [val_name(k), None],
+            (None, Guard::NoOverflow(a, d, _)) => [val_name(a), val_name(d)],
+            (None, Guard::Rule(r)) => [Some(*r), None],
+        };
+        let terms = || failing.into_iter().flat_map(|g| g.terms.iter());
+        let names = || {
+            terms()
+                .map(|(t, _)| t.name())
+                .chain(operands.into_iter().flatten())
+        };
+        let origin = names().fold(Origin::Local, |o, n| o.join(self.slot[n.index()].origin));
+        match origin {
+            Origin::Input(n) => return Why::Input(n),
+            Origin::Call(n, f) => return Why::Callee(n, f),
+            Origin::Place(n) => return Why::Move(3, Some(n)),
+            _ => {}
+        }
+        let resized = |n: Name| self.loops.iter().any(|l| l.seen.resized.contains(&n));
+        if let Some((t, _)) = terms().find(|(t, _)| !matches!(t, Term::Val(_)) && resized(t.name()))
+        {
+            return Why::Move(2, Some(t.name()));
+        }
+        if let Some(seen) = self.loops.last().map(|l| &l.seen) {
+            // Exactly one name of the goal is written, and it is a counter.
+            let (mut moving, mut one) = (None, true);
+            for n in names().filter(|n| seen.written.contains(n)) {
+                match moving {
+                    None => moving = Some(n),
+                    Some(m) => one &= m == n,
+                }
+            }
+            if let Some(n) = moving.filter(|n| one && seen.stored.contains(n)) {
+                return Why::Move(5, Some(n));
+            }
+        }
+        match (origin, failing) {
+            (Origin::Param(n), Some(g)) => Why::Caller(n, self.needs(st, g)),
+            (_, Some(g)) => Why::Unproved(self.needs(st, g)),
+            (_, None) if matches!(c.guard, Guard::Rule(_)) => {
+                Why::Unproved("the prover states only equal-length `where` rules".into())
+            }
+            (_, None) => Why::Unproved("a guard with no linear form".into()),
+        }
+    }
+
+    /// The goal `g >= 0`, over the names the state leaves free, as a sentence.
+    fn needs(&self, st: &State, g: &Lin) -> std::sync::Arc<str> {
+        let l = &st.norm(g).unwrap_or_else(|| g.clone());
+        let mut out = String::with_capacity(64);
+        out.push_str("needs ");
+        for (i, (t, k)) in l.terms.iter().enumerate() {
+            let n = t.name();
+            let name = self.body.spoken(n);
+            let temp = self.body.names[n.index()].source.starts_with('@');
+            out.push_str(match (i, *k < 0) {
+                (0, false) => "",
+                (0, true) => "-",
+                (_, false) => " + ",
+                (_, true) => " - ",
+            });
+            if k.abs() != 1 {
+                let _ = write!(out, "{} * ", k.abs());
+            }
+            let _ = match t {
+                Term::Val(_) => write!(out, "{name}"),
+                _ if temp => write!(out, "len({name})"),
+                _ => write!(out, "{name}.length"),
+            };
+        }
+        let _ = match (l.terms.is_empty(), l.c) {
+            (true, c) => write!(out, "{c}"),
+            (false, 0) => Ok(()),
+            (false, c) => write!(out, " {} {}", if c < 0 { '-' } else { '+' }, c.abs()),
+        };
+        out.push_str(" >= 0");
+        out.into()
+    }
+}
+
+fn val_name(v: &Val) -> Option<Name> {
+    match v {
+        Val::Name(n) => Some(*n),
+        Val::Lit(_) => None,
     }
 }
 
@@ -1075,21 +1328,25 @@ fn writes(ss: &[St], out: &mut BTreeSet<Name>) {
     }
 }
 
-/// Per name of `body`, whether a check's goal can depend on it: a name a
-/// check compares, and every name a definition or a comparison links to a
+/// A slot per name of `body`, marked relevant when a check's goal can depend
+/// on the name: a name a check compares, and every name a definition or a comparison links to a
 /// relevant one, either way.
-fn relevant(body: &Body, ss: &[St]) -> Vec<bool> {
-    let mut rel = vec![false; body.names.len()];
+fn relevant(body: &Body, ss: &[St]) -> Vec<Slot> {
+    let blank = Slot {
+        relevant: false,
+        origin: Origin::Local,
+    };
+    let mut rel = vec![blank; body.names.len()];
     loop {
-        let before = rel.iter().filter(|r| **r).count();
+        let before = rel.iter().filter(|r| r.relevant).count();
         mark(body, ss, &mut rel);
-        if rel.iter().filter(|r| **r).count() == before {
+        if rel.iter().filter(|r| r.relevant).count() == before {
             return rel;
         }
     }
 }
 
-fn mark(body: &Body, ss: &[St], rel: &mut [bool]) {
+fn mark(body: &Body, ss: &[St], rel: &mut [Slot]) {
     let val = |v: &Val| match v {
         Val::Name(n) => Some(*n),
         Val::Lit(_) => None,
@@ -1105,7 +1362,7 @@ fn mark(body: &Body, ss: &[St], rel: &mut [bool]) {
                     Guard::Rule(r) => (Some(*r), vec![]),
                 };
                 for n in p.into_iter().chain(vs.into_iter().filter_map(val)) {
-                    rel[n.index()] = true;
+                    rel[n.index()].relevant = true;
                 }
             }
             St::Let(n, rhs) => {
@@ -1132,16 +1389,16 @@ fn mark(body: &Body, ss: &[St], rel: &mut [bool]) {
                     }
                     _ => vec![],
                 };
-                if rel[n.index()] || from.iter().any(|m| rel[m.index()]) {
-                    rel[n.index()] = true;
-                    from.iter().for_each(|m| rel[m.index()] = true);
+                if rel[n.index()].relevant || from.iter().any(|m| rel[m.index()].relevant) {
+                    rel[n.index()].relevant = true;
+                    from.iter().for_each(|m| rel[m.index()].relevant = true);
                 }
             }
             St::Store { place, value, .. } => {
                 if let (Some(n), Some(m)) = (resized_by_store(place), val(value)) {
-                    if rel[n.index()] || rel[m.index()] {
-                        rel[n.index()] = true;
-                        rel[m.index()] = true;
+                    if rel[n.index()].relevant || rel[m.index()].relevant {
+                        rel[n.index()].relevant = true;
+                        rel[m.index()].relevant = true;
                     }
                 }
             }
