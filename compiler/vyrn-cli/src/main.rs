@@ -5486,18 +5486,13 @@ fn build_wasm2c(
         .arg(format!("-I{}", show_path(&w2c.runtime)))
         .arg(format!("-I{}", show_path(&simde)))
         .arg(format!("-DVYRN_W2C_HEADER=\"{h_name}\""));
-    // On Windows wasm-rt's guard-page handler maps a stack overflow to a trap,
-    // so its per-prologue depth counter goes (2.5x on `benching.vyrn`'s
-    // "push 1000"). The POSIX handler needs an alternate stack wasm-rt
-    // allocates only when it picks the handler, so the counter stays there.
-    // The emitter's own depth limit (`call_depth_enter`) applies either way.
+    // wasm-rt's guard-page handler maps a stack overflow to a trap: a vectored
+    // exception handler on Windows, a signal handler on an alternate stack on
+    // Linux and macOS. On Windows wasm-rt also counts calls in every prologue
+    // unless told not to (2.5x on `benching.vyrn`'s "push 1000"); the handler
+    // still catches the overflow without the counter.
     if cfg!(windows) {
         cmd.arg("-DWASM_RT_NONCONFORMING_UNCHECKED_STACK_EXHAUSTION=1");
-    } else {
-        cmd.arg(format!(
-            "-DWASM_RT_MAX_CALL_STACK_DEPTH={}",
-            4 * vyrn_frontend::trap::CALL_DEPTH_LIMIT
-        ));
     }
     add_native_clang_flags(&mut cmd, native_target);
     if cfg!(windows) {

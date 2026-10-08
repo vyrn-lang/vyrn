@@ -155,7 +155,7 @@ pull request.
 - A `String` is one word pointing at NUL-terminated UTF-8, with length and capacity behind the pointer; capacity 0 marks a static literal. Three words would box every enum payload.
 - `m.keys()` copies its keys; `Array<T>` owns its elements.
 - A map store takes its key.
-- At most 1,000 calls may be in flight, counted at the callee on every engine; a frame may claim 8,192 bytes. One limit belongs to the language, not to whichever stack runs out first.
+- No engine counts calls (decided 2026-10-08 by the user, reversing a limit of 1,000 counted in every prologue): a recursion runs until the engine's stack or the shadow stack runs out, and the host hands the overflow to the module's `__vyrn_overflow`, which traps `call stack exhausted`. The depth differs per engine; the counter was the largest single check in the static census, on 3,741 function bodies. A frame may claim 8,192 bytes.
 - An array literal holds at most 512 elements, refused by the checker so `check` predicts `build`.
 - A `region` nests at most 64 deep.
 - Allocation failure prints `error: out of memory` and exits 1 on every engine. The bound may differ by engine.
@@ -205,7 +205,7 @@ pull request.
 - Native code is the same wasm through `wasm2c` and clang `-O2`. No Cranelift route for `build`: against an LLVM baseline it measured 2 to 3x, and `wasm2c` 1.5 to 1.9x.
 - The native route passes no alignment flag. On `nbodycols`, moving the hot loop within a 64-byte line changed native time by under 0.6%. Clang's register allocation of the inlined `advance` changed it by 1.0% when `inplace-copies` changed only its caller, so an emitter change is not judged on a native drift near 1%.
 - `run`, `test`, `bench --check`, `serve` and `dev` run the module in embedded wasmtime.
-- A trapped call into a resident instance (`serve`, `dev`, `test`) keeps the instance. The host restores the stack pointer, call depth and region nesting it read before the call; module state and heap blocks stay as the call left them. Re-instantiating would drop the state every earlier request built.
+- A trapped call into a resident instance (`serve`, `dev`, `test`) keeps the instance. The host restores the stack pointer and region nesting it read before the call; module state and heap blocks stay as the call left them. Re-instantiating would drop the state every earlier request built.
 - Control flow stays structured in every intermediate form, because wasm accepts only structured control flow.
 - Monomorphization happens once, above the emitter, and an instance is identified by its type arguments, never a mangled string. A mangle collision once miscompiled silently.
 - Monomorphization has two bounds: 64 levels of nesting and 65,536 parts. `vyrn check` runs them, so a passing `check` means `build` terminates.
@@ -227,7 +227,7 @@ pull request.
 - The embedded WASI host is one file, `vyrn-genwasm/src/wasi.rs`, behind a `Policy`. A program run gets the process (environment, working directory as fd 3, stdin, clocks, random); a generator gets none of it, and a test fails if a call that reads the process reaches its link set.
 - A builtin exists only for what Vyrn source cannot express, such as a syscall. Everything expressible is std Vyrn.
 - Every fact about a builtin (contract, method spelling, core `Spec`, effect, route, length and element effect, editor text) is one `prelude::Builtin` row. A pass reads the row, never its own list of names. The checker counts a builtin call's operands from the row's `arity`, and types a row marked `typed` from the row alone.
-- Hot per-element paths stay inline in the emitter (indexing, the call-depth counter, the map value paths), because one wasmtime call level costs 14 to 270% there.
+- Hot per-element paths stay inline in the emitter (indexing, the map value paths), because one wasmtime call level costs 14 to 270% there.
 - A `for` over any indexed container is one index walk in the core. A user container supplies its `size` call and its `nth` element read; it gets no loop of its own.
 - A `read` or `modify` aggregate parameter is the caller's storage, used in place, while no module state can name that storage; the checker's exclusive-`modify` rule covers the parameters. A per-callee effect gate waits until the effect judgment attributes every call.
 - A `consume` record parameter that every `return` yields, never stored into whole (`vyrn_lower::core::returned_param`), is the result: the function works in the caller's storage and writes no separate result. `x = f(x, ..)` passes `x`'s storage, and so does a call whose argument's extent ends at it and holds a frame slot, whose result takes that slot; any other call moves the argument into its destination first. No shared result slot instead: a write to it could clobber a field the body still reads. An `export extern fn` keeps its out-pointer, and a call through a stored `fn` value keeps its dispatcher's, which moves the argument in.

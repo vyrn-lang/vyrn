@@ -6,7 +6,9 @@
 //! The memory map: a [`STACK_BYTES`] shadow stack growing down from
 //! [`STACK_TOP`], then data from [`DATA_BASE`] up, ending below
 //! [`STATICS_LIMIT`]. A frame push past address 0 wraps and the first access
-//! traps, instead of walking into the data.
+//! traps, instead of walking into the data. The wrap leaves [`SP`] past the end
+//! of memory, which is how a host tells this overflow from another
+//! out-of-bounds trap.
 
 use std::collections::HashMap;
 pub use wasm_encoder::{BlockType, Instruction, MemArg, ValType};
@@ -16,16 +18,11 @@ use wasm_encoder::{
     NameMap, NameSection, TypeSection,
 };
 
-/// Shadow stack bytes: [`vyrn_frontend::trap::CALL_DEPTH_LIMIT`] frames of
-/// [`vyrn_frontend::trap::FRAME_LIMIT`] bytes, plus one page.
-///
-/// No accepted frame exceeds `FRAME_LIMIT`, so the call counter always trips
-/// before the stack runs out, and a deep recursion stops with the same words
-/// on every engine. The extra page holds runtime helpers' frames, which the
-/// counter does not count. The total is 126 wasm pages of address space;
-/// only the pages a recursion touches cost memory.
-pub const STACK_BYTES: u32 =
-    vyrn_frontend::trap::FRAME_LIMIT * vyrn_frontend::trap::CALL_DEPTH_LIMIT + 65_536;
+/// Shadow stack bytes: 126 wasm pages of address space, of which only the
+/// pages a recursion touches cost memory. A recursion that outgrows them traps
+/// [`vyrn_frontend::trap::STACK_EXHAUSTED`], as one that outgrows the engine's
+/// stack does.
+pub const STACK_BYTES: u32 = 126 * 65_536;
 /// Top of the generated module's shadow stack; it grows down from here to 0.
 const STACK_TOP: u32 = STACK_BYTES;
 /// First byte of the generated module's data segments; statics grow up from
@@ -77,7 +74,7 @@ pub struct Module {
     /// In index order. [`Module::reserve_func`] hands out an index whose body
     /// arrives later.
     bodies: Vec<Defined>,
-    /// Function exports only; [`Module::finish`] adds the memory export and
+    /// Function exports only; [`Module::finish`] adds the memory export, [`SP_EXPORT`] and
     /// [`Module::export_entry_state`]'s.
     exports: Vec<(String, u32)>,
     sweep: bool,
@@ -95,7 +92,7 @@ pub struct Module {
     /// Function names for a `name` section, by index as handed out. Empty
     /// unless the lowering asked for them (`VYRN_WASM_NAMES`).
     names: Vec<(u32, String)>,
-    /// The nesting words' address, when [`Module::export_entry_state`] asked.
+    /// The nesting word's address, when [`Module::export_entry_state`] asked.
     nesting: Option<u32>,
     /// Whether the module has the [`SITE`] global ([`Module::profile`]).
     site: bool,
@@ -166,11 +163,10 @@ impl Module {
         self.ops
     }
 
-    /// Exports the stack pointer as [`SP_EXPORT`] and the address `nesting` of
-    /// the region nesting and call-depth words as [`NESTING_EXPORT`]. A trap
-    /// abandons the guest's frames and regions without giving them back, so a
-    /// host that calls this module again after a trap restores all three to
-    /// what it read before the call.
+    /// Exports the address `nesting` of the region nesting word as
+    /// [`NESTING_EXPORT`]. A trap abandons the guest's frames and regions
+    /// without giving them back, so a host that calls this module again after a
+    /// trap restores [`SP_EXPORT`] and the word to what it read before the call.
     pub fn export_entry_state(&mut self, nesting: u32) {
         self.nesting = Some(nesting);
     }
@@ -550,7 +546,7 @@ impl Module {
         let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
         let state = match self.nesting {
             Some(_) => &[SP_EXPORT, NESTING_EXPORT][..],
-            None => &[],
+            None => &[SP_EXPORT],
         };
         for name in self
             .exports
@@ -561,8 +557,9 @@ impl Module {
             if !seen.insert(name) {
                 return Err(format!(
                     "duplicate export `{name}`\n  \
-                     note: `_start`, `__vyrn_malloc`, `__vyrn_free`, `{SP_EXPORT}` and \
-                     `{NESTING_EXPORT}` are taken by the runtime; rename the function"
+                     note: `_start`, `__vyrn_malloc`, `__vyrn_free`, `{OVERFLOW_EXPORT}`, \
+                     `{SP_EXPORT}` and `{NESTING_EXPORT}` are taken by the runtime; rename the \
+                     function"
                 ));
             }
         }
@@ -613,6 +610,7 @@ impl Module {
         memories.memory(mem);
         // A WASI host reads every iovec out of this export.
         exports.export("memory", ExportKind::Memory, 0);
+        exports.export(SP_EXPORT, ExportKind::Global, SP);
 
         let mut globals = GlobalSection::new();
         globals.global(
@@ -652,7 +650,6 @@ impl Module {
                 },
                 &ConstExpr::i32_const(at as i32),
             );
-            exports.export(SP_EXPORT, ExportKind::Global, SP);
             exports.export(
                 NESTING_EXPORT,
                 ExportKind::Global,
@@ -963,11 +960,18 @@ fn encode(mut f: Frame, counter: Option<Counter>) -> Function {
 /// The global index of the module's `__stack_pointer`.
 pub const SP: u32 = 0;
 
-/// The export name of [`SP`]; see [`Module::export_entry_state`].
+/// The export name of [`SP`], which every module exports: a host reads it to
+/// tell a shadow-stack overflow, and restores it after a trap.
 pub const SP_EXPORT: &str = "__stack_pointer";
 
-/// The export name of an immutable global holding the address of two `i32`
-/// words: the open regions, then the calls in flight.
+/// The export name of the function a host calls after the engine raised a
+/// stack overflow, with [`SP`] restored: it flushes standard output and traps
+/// [`vyrn_frontend::trap::STACK_EXHAUSTED`] as a check does. Every module the
+/// direct backend writes exports it.
+pub const OVERFLOW_EXPORT: &str = "__vyrn_overflow";
+
+/// The export name of an immutable global holding the address of the `i32`
+/// word that counts the open regions.
 pub const NESTING_EXPORT: &str = "__vyrn_nesting";
 
 /// The global index of the first heap byte, 16-aligned past the statics.

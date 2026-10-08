@@ -221,6 +221,11 @@ pub const WASM_ONLY: &[(&str, &str)] = &[(
     "calls `extern` fns; only the browser provides the `vyrn` namespace",
 )];
 
+/// Examples that end in a stack overflow. The engine raises it and Vyrn's hosts
+/// hand it back to the module, but the `wasmtime` CLI words it itself, so
+/// `tests/route.rs` compares these with `vyrn run` instead.
+pub const ENGINE_TRAP: &[(&str, &str)] = &[("recdepth.vyrn", "recurses until the stack runs out")];
+
 /// Project entries under `examples/*/` that their artifact's floor refuses,
 /// with text the refusal must contain. `tests/floor.rs` asserts each; the corpus
 /// harnesses that walk project entries skip them.

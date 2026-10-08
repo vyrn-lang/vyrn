@@ -83,8 +83,7 @@ fn a_field_write_into_a_heapless_element_is_one_store_and_no_copy() {
 }
 
 /// How many header reads `body` holds: an `i32.load` of the header's pointer
-/// from an address in a local. The call-depth counter's `i32.load` comes from a
-/// constant address and is not counted.
+/// from an address in a local.
 fn word_loads(body: &str) -> usize {
     let lines: Vec<&str> = body.lines().map(str::trim).collect();
     lines
@@ -119,10 +118,10 @@ fn a_loop_that_only_reads_an_array_loads_its_header_once() {
     );
     // The two bounds checks share one trap call after the body, with the index
     // parked in a local; a call per check cost nbody's loop 3.56 s against
-    // 1.71 s under Cranelift. The other call is the call-depth trap.
+    // 1.71 s under Cranelift.
     assert_eq!(
         body.matches("call ").count(),
-        2,
+        1,
         "a bounds check carries its own trap call:\n{body}"
     );
 }
