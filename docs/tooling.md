@@ -35,10 +35,25 @@ Compiles the file and runs it. Arguments after the file reach the program's
 `args()`. The process exits with `main`'s return value; a trap prints one
 `error: ...` line on stderr and exits 1.
 
-`vyrn run --profile [file] [args...]` prints the count of operations the guest
-executed to stderr. `VYRN_BUILD_PROFILE=1` adds the compile phases and the
+`vyrn run --profile [file] [args...]` prints to stderr the operations the guest
+executed, the blocks it made, freed and held live at its peak, and the lines of
+the root file that made the most bytes, heaviest first. A call into a function
+of another file counts at the calling line. The operation count includes the
+instrument's own. `VYRN_BUILD_PROFILE=1` adds the compile phases and the
 `lines read` row. The flag counts only before the file, so a program can take
 its own `--profile`.
+
+```
+run: 19,003,320 operations; 1,334 blocks, 1,395,504 bytes; 1,334 freed; peak live 335,896 bytes; live at exit 0
+
+line  function         blocks          bytes         live  what
+  88  countKmers          153      1,331,584            0  grows tally(..)
+  67  thirdSequence       587         22,696            0  enters toUpper(..) in std/strings
+```
+
+The run is an audited build with a counter per source line (`docs/memory.md`).
+`VYRN_PROFILE=1` builds the same module for any command that emits wasm, such
+as `vyrn build --target wasm`.
 
 ### `vyrn check [file]`
 

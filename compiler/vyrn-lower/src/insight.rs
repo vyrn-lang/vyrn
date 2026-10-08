@@ -44,30 +44,51 @@ pub enum Kind {
     Enters(String, String),
 }
 
+/// What a fact does, in the order a reader asks: what is copied, what is
+/// allocated, what is entered, what grows, what is checked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Verb {
+    Copies,
+    Allocates,
+    Enters,
+    Grows,
+    Keeps,
+}
+
+impl Verb {
+    pub fn word(self) -> &'static str {
+        match self {
+            Verb::Copies => "copies",
+            Verb::Allocates => "allocates",
+            Verb::Enters => "enters",
+            Verb::Grows => "grows",
+            Verb::Keeps => "check kept",
+        }
+    }
+}
+
+impl Kind {
+    /// The verb a fact prints under, `None` for a proved check.
+    pub fn verb(&self) -> Option<Verb> {
+        match self {
+            Kind::Copy { .. } => Some(Verb::Copies),
+            Kind::Alloc(_) => Some(Verb::Allocates),
+            Kind::Enters(..) => Some(Verb::Enters),
+            Kind::Grows(_) => Some(Verb::Grows),
+            Kind::Check { kept, .. } => kept.then_some(Verb::Keeps),
+        }
+    }
+}
+
 /// Every fact of the frame `body`, ordered by line and then by the row's
 /// position. A row with no source line (line 0) carries none. A lifted
 /// lambda is a frame of its own ([`root`] joins it to its function).
 pub fn facts(body: &Body, world: &World) -> Vec<Fact> {
     let mut out: Vec<Fact> = Vec::new();
     for (s, depth) in rows(&body.stmts) {
-        let (line, kind) = match s {
-            St::Let(n, rhs) => (
-                body.names[n.index()].line,
-                row_kind(rhs, &body.names, Some(*n), world, body),
-            ),
-            St::Do { rhs, line, .. } => (*line, row_kind(rhs, &body.names, None, world, body)),
-            St::Check(c) => (
-                c.site.line,
-                Some(Kind::Check {
-                    raises: c.rule,
-                    kept: c.verdict == Verdict::Kept,
-                }),
-            ),
-            _ => continue,
-        };
-        if let (Some(kind), true) = (kind, line > 0) {
+        if let Some((line, kind)) = row(s, body, world) {
             out.push(Fact {
-                line: line as u32,
+                line,
                 ordinal: 0,
                 depth,
                 kind,
@@ -76,6 +97,27 @@ pub fn facts(body: &Body, world: &World) -> Vec<Fact> {
     }
     number(&mut out);
     out
+}
+
+/// What the row `s` of `body` costs, and the source line it costs at. A row
+/// with no source line (line 0) costs nothing.
+pub fn row(s: &St, body: &Body, world: &World) -> Option<(u32, Kind)> {
+    let (line, kind) = match s {
+        St::Let(n, rhs) => (
+            body.names[n.index()].line,
+            row_kind(rhs, &body.names, Some(*n), world, body),
+        ),
+        St::Do { rhs, line, .. } => (*line, row_kind(rhs, &body.names, None, world, body)),
+        St::Check(c) => (
+            c.site.line,
+            Some(Kind::Check {
+                raises: c.rule,
+                kept: c.verdict == Verdict::Kept,
+            }),
+        ),
+        _ => return None,
+    };
+    kind.filter(|_| line > 0).map(|k| (line as u32, k))
 }
 
 /// Orders `facts` by line and numbers each within its line.

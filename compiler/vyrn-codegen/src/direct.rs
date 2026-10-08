@@ -39,6 +39,7 @@ use vyrn_lower::core::Spec;
 use crate::layout::{self, Layout, Shape};
 use crate::wasm::{
     self, mem_arg, BlockType, Frame, Instruction, MemArg, Module, ValType, HEAP_BASE, MEMORY_COPY,
+    SITE,
 };
 
 /// Refuses a construct this backend cannot lower, naming it and its line. One message shape for
@@ -383,7 +384,11 @@ fn compile_inner(
         // Reserved only for a file sink, so a console-sink module reserves nothing.
         log_fd: matches!(program.log_sink, LogSink::File(_)).then(|| m.reserve(4, 4)),
         audit: audited,
+        profile: vyrn_frontend::loader::profile_build(program.host.gen).then(Profile::default),
     };
+    if cx.profile.is_some() {
+        m.profile();
+    }
 
     // The first `body_of` of a function decides its checks, about a fifth of this compile. The
     // answer is memoized and the same on any thread, so the signatures below find it ready.
@@ -618,6 +623,11 @@ fn compile_inner(
     } else {
         None
     };
+    // The counter table: 16 bytes of totals, then a 32-byte row per site, site 0 first. Reserved
+    // after every body, which is the first moment the sites are all known.
+    let table = cx.profile.as_ref().map_or(0, |p| {
+        m.reserve(16 + 32 * (p.sites.borrow().len() as u32 + 1), 8)
+    });
     let start = m.func(&[], &[], &[], 0, |b| {
         // First, so the instrument marks every block: `auditInit` allocates its own state and
         // then arms.
@@ -625,6 +635,7 @@ fn compile_inner(
             for w in words {
                 b.ins(&Instruction::I32Const(w as i32));
             }
+            b.ins(&Instruction::I32Const(table as i32));
             b.ins(&Instruction::Call(init));
         }
         // Before the initializers, because a top-level `let` may log.
@@ -697,6 +708,14 @@ fn compile_inner(
     abi_section(&mut m, &user, program);
     if let Some(o) = &cx.oracle {
         m.custom("vyrn:checks", o.labels.borrow().join("\n").into_bytes());
+    }
+    if let Some(p) = &cx.profile {
+        let mut rows = vec![table.to_string()];
+        rows.extend(
+            (p.sites.borrow().iter())
+                .map(|(f, line, verb)| format!("{f}\t{line}\t{}", verb.word())),
+        );
+        m.custom("vyrn:sites", rows.join("\n").into_bytes());
     }
     m.finish()
 }
@@ -1000,6 +1019,16 @@ struct Oracle {
     ids: RefCell<HashMap<(String, usize, u32), i32>>,
 }
 
+/// The profile instrument's side of a module ([`vyrn_frontend::loader::profile_on`]): the sites
+/// the emitter met, one per source function, line and verb, in the order it met them. Site `k`
+/// is `sites[k - 1]`, line `k` of the custom section `vyrn:sites` after its first, and the
+/// counter row at `table + 16 + 32 * k`; site 0 is "before any site".
+#[derive(Default)]
+struct Profile {
+    sites: RefCell<Vec<(String, u32, vyrn_lower::insight::Verb)>>,
+    ids: RefCell<HashMap<(String, u32, vyrn_lower::insight::Verb), u32>>,
+}
+
 struct Cx<'a> {
     types: HashMap<String, TypeDecl>,
     /// Every lambda literal the program holds, by node address and the function that holds it,
@@ -1073,6 +1102,8 @@ struct Cx<'a> {
     /// The four bytes holding the file sink's descriptor. `None` for a console sink, which
     /// reserves nothing.
     log_fd: Option<u32>,
+    /// The profile instrument's sites; `None` in every other build.
+    profile: Option<Profile>,
     /// An audited build emits `std/runtime`'s `audit` calls and `_start`
     /// arms the instrument. Otherwise the calls are dropped and [`wasm::Module::sweep`] takes the
     /// bodies.
@@ -1573,6 +1604,8 @@ fn mem_ins(
         "memorySize" => I::MemorySize(0),
         "grow" => I::MemoryGrow(0),
         "heapBase" => I::GlobalGet(HEAP_BASE),
+        "site" if cx.profile.is_some() => I::GlobalGet(SITE),
+        "site" => I::I32Const(0),
         "ioTable" => I::I32Const(rt.io as i32),
         "utf8Table" => I::I32Const(rt.utf8d as i32),
         // The descriptor under the message is stderr; `write_all` first, so stdout is flushed
@@ -9288,6 +9321,36 @@ impl<'a, 'p> Fn_<'a, 'p> {
         self.lookup(&info.source, info.line).ok()
     }
 
+    /// Under the profile instrument, makes row `s`'s site the current one before the row runs,
+    /// so a block the row makes, or a callee outside the root file makes for it, counts at the
+    /// row's line. A row that costs nothing leaves the last site as it was.
+    fn core_site(&self, b: &mut Frame, s: &St) {
+        let (Some(p), body) = (&self.cx.profile, self.body()) else {
+            return;
+        };
+        let Some((line, kind)) = vyrn_lower::insight::row(s, body, &self.cx.world) else {
+            return;
+        };
+        if body.file.is_some() {
+            return;
+        }
+        // A kept check makes no block; counting its runs is not part of this instrument.
+        let Some(verb) = kind
+            .verb()
+            .filter(|v| *v != vyrn_lower::insight::Verb::Keeps)
+        else {
+            return;
+        };
+        let key = (self.owner.clone(), line, verb);
+        let id = *p.ids.borrow_mut().entry(key.clone()).or_insert_with(|| {
+            let mut sites = p.sites.borrow_mut();
+            sites.push(key);
+            sites.len() as u32
+        });
+        b.ins(&Instruction::I32Const(id as i32));
+        b.ins(&Instruction::GlobalSet(SITE));
+    }
+
     fn core_stmts(&mut self, m: &mut Module, b: &mut Frame, ss: &[St]) -> Result<(), String> {
         let body = self.body();
         let ends = vyrn_lower::core::extent_ends(ss, &self.core_w.occurs);
@@ -9303,6 +9366,7 @@ impl<'a, 'p> Fn_<'a, 'p> {
                 self.core_give_back(b, &mut due, &ends[j]);
             }
             (last, mark) = (Some(i), b.mark());
+            self.core_site(b, s);
             if let St::Store {
                 place: vyrn_frontend::core::Place::Name(n),
                 line,
@@ -13486,6 +13550,7 @@ mod tests {
             log_sink: LogSink::Stderr,
             log_fd: None,
             audit: false,
+            profile: None,
             // Every index 0: a `Cx` for a type-level test never emits a call.
             rt: Rt::default(),
         }

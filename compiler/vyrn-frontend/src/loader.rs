@@ -746,7 +746,8 @@ pub const MEM_PREFIX: &str = "mem$";
 pub const RUNTIME_PREFIX: &str = "runtime$";
 
 /// Whether this build is audited: `VYRN_LEAK_CHECK` set to anything but `0` in
-/// the compiler's environment.
+/// the compiler's environment, or the profile instrument ([`profile_build`]),
+/// which is the audit plus per-line counters.
 ///
 /// It selects `std/runtime`'s accounting allocator, the `audit` calls, the
 /// module-state teardown and the lowering's `<teardown>` root. It is a build
@@ -755,7 +756,28 @@ pub const RUNTIME_PREFIX: &str = "runtime$";
 /// here. A generator host is never audited: its exit code is a protocol with
 /// the compiler, and a residue report would fail the build.
 pub fn audit_build(gen_host: bool) -> bool {
-    std::env::var_os("VYRN_LEAK_CHECK").is_some_and(|v| !v.is_empty() && v != "0") && !gen_host
+    (flag("VYRN_LEAK_CHECK") || profile_build(gen_host)) && !gen_host
+}
+
+/// Whether the environment variable `name` is set to anything but `0`.
+fn flag(name: &str) -> bool {
+    std::env::var_os(name).is_some_and(|v| !v.is_empty() && v != "0")
+}
+
+static PROFILE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Asks for the profile instrument: an audited build whose allocator also
+/// counts blocks per source line. `vyrn run --profile` calls it before the
+/// first load; `VYRN_PROFILE` set in the compiler's environment does the same
+/// for any command that emits wasm.
+pub fn profile_on() {
+    PROFILE.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Whether this build carries the profile instrument ([`profile_on`]). A
+/// generator host never does, for the reason [`audit_build`] gives.
+pub fn profile_build(gen_host: bool) -> bool {
+    (PROFILE.load(std::sync::atomic::Ordering::Relaxed) || flag("VYRN_PROFILE")) && !gen_host
 }
 
 /// Whether `name` is one of `std/runtime`'s audit hooks, which a build emits

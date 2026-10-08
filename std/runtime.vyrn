@@ -11,7 +11,7 @@
 
 import {
     load8, load32, load64, store8, store32, store64, copy, fill, memorySize, grow, heapBase, trap,
-    addr, adopt, ioTable, utf8Table,
+    addr, adopt, ioTable, utf8Table, site,
     procExit,
     fdWrite, fdRead, fdClose, pathOpen, pathRename, fdSync, fdPrestatGet, argsSizesGet, argsGet,
     environSizesGet, environGet, clockTimeGet, randomGet, fdReaddir, genRead, genFetch,
@@ -206,7 +206,8 @@ export fn regexRun(s: Int32, table: Int32, start: Int32, accept: Int32) -> Bool 
 // `t`'s leading one, the class is `shift * 4 + sub` and its size
 // `(sub + 5) << shift`: classes 3 to 115, 8 bytes to 2 GiB, round-up at most
 // 25 percent. Every block has an eight-byte header: the class word, then a
-// word only the audit instrument writes.
+// word only the audit instrument writes: 1 plus the allocating site, 1 when
+// no site is counted.
 //
 // The heap's first bytes are the allocator's: one head per class (116 words),
 // the bump offset at 464, the arena's words at 468-476, the I/O cells from 480,
@@ -295,10 +296,17 @@ export fn free(p: Int32) {
 //
 // Classes 0-2 cannot occur, so their heads at `heapBase() + 0..8` are free
 // memory. The instrument keeps its block's address in the first; zero means
-// not armed. The block holds the live count, the live bytes and four interned
-// wordings. A block's second header word is its liveness mark (1 live, 0
-// free), so a double or foreign free is caught at the site, before the push
-// corrupts the list.
+// not armed. The block holds the live count, the live bytes, four interned
+// wordings and the address of the profile table (0 when no site is counted).
+// A block's second header word is its liveness mark (0 free, else 1 plus the
+// site that made it), so a double or foreign free is caught at the site,
+// before the push corrupts the list.
+//
+// The profile table is static memory the emitter reserves. Its first 16 bytes
+// hold the peak of live bytes, then the live blocks and bytes at exit. A row
+// of 32 bytes per site follows, site 0 first (blocks made before any site):
+// blocks made, bytes made, blocks freed, bytes live. `vyrn run --profile`
+// reads it after the run.
 
 /// A class's payload size, the inverse of `malloc`'s `cls`.
 fn classSize(cls: Int32) -> Int32 {
@@ -307,7 +315,7 @@ fn classSize(cls: Int32) -> Int32 {
 
 /// Arms the instrument; the emitter calls it first in `_start`. The block is
 /// allocated before its address is stored, so it never counts itself.
-fn auditInit(pre: Int32, mid: Int32, post: Int32, dbl: Int32) {
+fn auditInit(pre: Int32, mid: Int32, post: Int32, dbl: Int32, table: Int32) {
     let s = malloc(32)
     store32(s, 0)
     store32(s + 4, 0)
@@ -315,6 +323,7 @@ fn auditInit(pre: Int32, mid: Int32, post: Int32, dbl: Int32) {
     store32(s + 12, UInt32(mid))
     store32(s + 16, UInt32(post))
     store32(s + 20, UInt32(dbl))
+    store32(s + 24, UInt32(table))
     store32(heapBase(), UInt32(s))
 }
 
@@ -323,9 +332,21 @@ fn auditBirth(p: Int32, size: Int32) {
     if s == 0 {
         return
     }
-    store32(p - 4, 1)
+    let at = site()
+    let live = load32(s + 4) + UInt32(size)
+    store32(p - 4, UInt32(at + 1))
     store32(s, load32(s) + 1)
-    store32(s + 4, load32(s + 4) + UInt32(size))
+    store32(s + 4, live)
+    let table = Int32(load32(s + 24))
+    if table != 0 {
+        let row = table + 16 + (at << 5)
+        store64(row, load64(row) + 1)
+        store64(row + 8, load64(row + 8) + UInt64(size))
+        store64(row + 24, load64(row + 24) + UInt64(size))
+        if live > load32(table) {
+            store32(table, live)
+        }
+    }
 }
 
 /// A block goes back, after `free`'s refusals and before its push. A block
@@ -335,12 +356,19 @@ fn auditDeath(p: Int32, cls: Int32) {
     if s == 0 {
         return
     }
-    if load32(p - 4) != 1 {
+    let mark = Int32(load32(p - 4))
+    if mark == 0 {
         auditFail(s)
     }
     store32(p - 4, 0)
     store32(s, load32(s) - 1)
     store32(s + 4, load32(s + 4) - UInt32(classSize(cls)))
+    let table = Int32(load32(s + 24))
+    if table != 0 {
+        let row = table + 16 + ((mark - 1) << 5)
+        store64(row + 16, load64(row + 16) + 1)
+        store64(row + 24, load64(row + 24) - UInt64(classSize(cls)))
+    }
 }
 
 /// Uncounts a block the runtime holds for the process's life (`envGet`'s
@@ -350,9 +378,18 @@ fn auditForget(p: Int32) {
     if s == 0 {
         return
     }
+    let mark = Int32(load32(p - 4))
+    let size = classSize(Int32(load32(p - 8)))
     store32(p - 4, 0)
     store32(s, load32(s) - 1)
-    store32(s + 4, load32(s + 4) - UInt32(classSize(Int32(load32(p - 8)))))
+    store32(s + 4, load32(s + 4) - UInt32(size))
+    let table = Int32(load32(s + 24))
+    if table != 0 {
+        let row = table + 16 + ((mark - 1) << 5)
+        store64(row, load64(row) - 1)
+        store64(row + 8, load64(row + 8) - UInt64(size))
+        store64(row + 24, load64(row + 24) - UInt64(size))
+    }
 }
 
 /// The double-free report: one line on fd 2 and exit 134, at the site, while
@@ -365,7 +402,8 @@ fn auditFail(s: Int32) {
 
 /// The completeness check, called at the end of `_start` after stdout is
 /// flushed. Live blocks exit 135 with the line the ratchet reads. The arena's
-/// retained chunks are the allocator's, so they are subtracted.
+/// retained chunks are the allocator's, so they are subtracted. A profile
+/// build writes the residue into its table and exits as the program did.
 export fn auditExit() {
     let base = heapBase()
     let s = Int32(load32(base))
@@ -379,6 +417,12 @@ export fn auditExit() {
         live = live - 1
         bytes = bytes - classSize(Int32(load32(c - 8)))
         c = Int32(load32(c))
+    }
+    let table = Int32(load32(s + 24))
+    if table != 0 {
+        store32(table + 4, UInt32(live))
+        store32(table + 8, UInt32(bytes))
+        return
     }
     if live == 0 {
         return

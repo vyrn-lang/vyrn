@@ -306,6 +306,7 @@ pull request.
 - `vyrn fix` applies only `.copy()`. `consume` and `for x in consume xs` change a contract, so they stay the author's decision.
 - `vyrn why --cost` reads the decided core and replaces `vyrn why --memory`. The LSP hover keeps the binding rows of the ownership table, with one wording.
 - A function of another file counts its allocations at the line that calls it. The cost report is a report: it raises no warning.
+- `vyrn run --profile` counts blocks per source line with the free audit plus a `SITE` global. The instrument is off in every other build, so the wasm manifest does not move. A block made inside `std` counts at the last site that ran; a call path per site would need a shadow stack.
 - `vyrn routes` and `vyrn why` read what generators and the source wrote; they recompute nothing.
 - `vyrn doc` writes Markdown only. `docs/api/` is committed and CI checks it with `--verify`.
 - `vyrn emit-lowered` is deterministic, promises no format and has no parser.

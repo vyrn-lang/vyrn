@@ -7,10 +7,13 @@
 //! The file argument is optional when a `vyrn.json` found by walking up from
 //! the current directory declares a `"main"`.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
+use vyrn_frontend::ast::FnId;
 use vyrn_frontend::project::Expansions;
 use vyrn_genwasm::engine;
+use vyrn_lower::insight::{self, Verb};
 
 use vyrn_codegen::toolchain::find_clang;
 
@@ -248,6 +251,8 @@ fn dispatch(args: &mut Vec<String>) -> Outcome {
     // table. On `run` it reports the guest's operation count (`wasm_profile`).
     if flags.profile && args.get(1).map(String::as_str) != Some("run") {
         vyrn_frontend::prof::arm();
+    } else if flags.profile {
+        vyrn_frontend::loader::profile_on();
     }
     // Before the usage screen, which exits 2: a package manager reads that as
     // a broken install. The release workflow checks the tag against this line.
@@ -1457,14 +1462,92 @@ fn json_str(s: &str) -> String {
     out
 }
 
+/// One printed row of `why --cost`: what one verb does on one line of a function.
+struct CostRow {
+    /// The deepest loop nest among the line's facts of this verb.
+    depth: u32,
+    /// What it does, each wording with how many times the line states it.
+    whats: Vec<(String, usize)>,
+}
+
+impl CostRow {
+    fn text(&self) -> String {
+        let whats: Vec<String> = (self.whats.iter())
+            .map(|(w, n)| {
+                if *n > 1 {
+                    format!("{w} x{n}")
+                } else {
+                    w.clone()
+                }
+            })
+            .collect();
+        whats.join(", ")
+    }
+}
+
+/// The rows of `why --cost` for each function of the root file, in function-table order and
+/// then by line and verb, and the summary counts. `(rows, rows in loops)` of allocating,
+/// growing, copying, kept and proved. It prints nothing and decides nothing:
+/// `insight::root` has the facts.
+type CostFn = (FnId, BTreeMap<(u32, Verb), CostRow>);
+type CostTable = (Vec<CostFn>, [(usize, usize); 5]);
+
+fn cost_table(
+    program: &vyrn_frontend::ast::Program,
+    world: &vyrn_lower::World,
+    path: &str,
+) -> CostTable {
+    use vyrn_frontend::core::Copied;
+    use vyrn_lower::insight::Kind;
+    let (std, here) = (std_root(), path.rsplit_once('/').map_or("", |(d, _)| d));
+    // The file a call enters, as an import spells it: `std/strings`.
+    let named = |file: &str| match std.as_deref().and_then(|s| file.strip_prefix(s)) {
+        Some(m) => format!("std{}", m.trim_end_matches(".vyrn")),
+        None => rel_to(file, here),
+    };
+    let mut tally = [(0usize, 0usize); 5];
+    let mut table = Vec::new();
+    for (id, facts) in insight::root(program, world) {
+        let mut shown: BTreeMap<(u32, Verb), CostRow> = BTreeMap::new();
+        for f in &facts {
+            let (slot, what) = match &f.kind {
+                Kind::Copy { what, implicit } => {
+                    let what = match what {
+                        Copied::Value => "a value",
+                        Copied::Render => "a String render",
+                    };
+                    let how = if *implicit { " (implicit)" } else { "" };
+                    (2, format!("{what}{how}"))
+                }
+                Kind::Alloc(w) => (0, w.clone()),
+                Kind::Enters(c, from) => (0, format!("{c}(..) in {}", named(from))),
+                Kind::Grows(b) => (1, format!("{b}(..)")),
+                Kind::Check { raises, kept } => {
+                    (3 + usize::from(!kept), raises.census().to_string())
+                }
+            };
+            tally[slot].0 += 1;
+            tally[slot].1 += usize::from(f.depth > 0);
+            let Some(verb) = f.kind.verb() else { continue };
+            let row = shown.entry((f.line, verb)).or_insert(CostRow {
+                depth: 0,
+                whats: Vec::new(),
+            });
+            row.depth = row.depth.max(f.depth);
+            match row.whats.iter_mut().find(|w| w.0 == what) {
+                Some(w) => w.1 += 1,
+                None => row.whats.push((what, 1)),
+            }
+        }
+        table.push((id, shown));
+    }
+    (table, tally)
+}
+
 /// `vyrn why --cost <file>`: per function of the file, the lines that allocate,
 /// copy, grow a container, enter an allocating function of another file or
-/// keep a check, and how many loops enclose each. It prints
-/// `insight::root` and decides nothing. Exit 0 whenever it could answer.
+/// keep a check, and how many loops enclose each. Exit 0 whenever it could answer.
 fn why_cost(flags: GlobalFlags, file: &str) -> Outcome {
-    use std::collections::BTreeMap;
-    use vyrn_frontend::core::Copied;
-    use vyrn_lower::insight::{self, Kind};
     let path = match Path::new(file).canonicalize() {
         Ok(p) => dos_to_slash(&p.to_string_lossy()),
         Err(e) => {
@@ -1483,52 +1566,8 @@ fn why_cost(flags: GlobalFlags, file: &str) -> Outcome {
     let (program, world) = p.checked(&path, &source)?;
 
     println!("{}", dos_to_slash(file));
-    let (std, here) = (std_root(), path.rsplit_once('/').map_or("", |(d, _)| d));
-    // The file a call enters, as an import spells it: `std/strings`.
-    let named = |file: &str| match std.as_deref().and_then(|s| file.strip_prefix(s)) {
-        Some(m) => format!("std{}", m.trim_end_matches(".vyrn")),
-        None => rel_to(file, here),
-    };
-    // `(rows, rows in loops)` of allocating, growing, copying, kept and proved.
-    let mut tally = [(0usize, 0usize); 5];
-    for (id, facts) in insight::root(&program, &world) {
-        // Keyed by line, then verb in the order a reader asks: what is copied,
-        // what is allocated, what grows, what is checked.
-        let mut shown: BTreeMap<(u32, u8), (&str, u32, Vec<(String, usize)>)> = BTreeMap::new();
-        for f in &facts {
-            let (slot, order, verb, what) = match &f.kind {
-                Kind::Copy { what, implicit } => {
-                    let what = match what {
-                        Copied::Value => "a value",
-                        Copied::Render => "a String render",
-                    };
-                    let how = if *implicit { " (implicit)" } else { "" };
-                    (2, 0, "copies", format!("{what}{how}"))
-                }
-                Kind::Alloc(w) => (0, 1, "allocates", w.clone()),
-                Kind::Enters(c, from) => (0, 2, "enters", format!("{c}(..) in {}", named(from))),
-                Kind::Grows(b) => (1, 3, "grows", format!("{b}(..)")),
-                Kind::Check { raises, kept } => (
-                    3 + usize::from(!kept),
-                    4,
-                    "check kept",
-                    raises.census().to_string(),
-                ),
-            };
-            tally[slot].0 += 1;
-            tally[slot].1 += usize::from(f.depth > 0);
-            if slot == 4 {
-                continue;
-            }
-            let (_, depth, whats) = shown
-                .entry((f.line, order))
-                .or_insert((verb, 0, Vec::new()));
-            *depth = (*depth).max(f.depth);
-            match whats.iter_mut().find(|w| w.0 == what) {
-                Some(w) => w.1 += 1,
-                None => whats.push((what, 1)),
-            }
-        }
+    let (table, [alloc, grow, copy, kept, proved]) = cost_table(&program, &world, &path);
+    for (id, shown) in table {
         if shown.is_empty() {
             continue;
         }
@@ -1546,31 +1585,21 @@ fn why_cost(flags: GlobalFlags, file: &str) -> Outcome {
             sp.ty(&f.ret)
         );
         let mut last = 0;
-        for ((line, _), (verb, depth, whats)) in shown {
-            let num = if line == last {
+        for ((line, verb), row) in &shown {
+            let num = if *line == last {
                 String::new()
             } else {
                 line.to_string()
             };
-            let lp = if depth > 0 {
-                format!("loop {depth}")
+            let lp = if row.depth > 0 {
+                format!("loop {}", row.depth)
             } else {
                 String::new()
             };
-            last = line;
-            let whats: Vec<String> = (whats.iter())
-                .map(|(w, n)| {
-                    if *n > 1 {
-                        format!("{w} x{n}")
-                    } else {
-                        w.clone()
-                    }
-                })
-                .collect();
-            println!("{num:>5}  {lp:<7}  {verb:<10} {}", whats.join(", "));
+            last = *line;
+            println!("{num:>5}  {lp:<7}  {:<10} {}", verb.word(), row.text());
         }
     }
-    let [alloc, grow, copy, kept, proved] = tally;
     let count = |(all, lp): (usize, usize), what: &str| format!("{what} {all} ({lp} in loops)");
     println!(
         "summary: {}, {}, {}, {}, {}",
@@ -4999,6 +5028,7 @@ fn run_wasm(
     profile: Option<std::time::Duration>,
 ) -> ExitCode {
     let clock = std::time::Instant::now();
+    let table = profile.map(|_| cost_table(program, &world, path).0);
     let bytes = match vyrn_codegen::direct::compile(program, world) {
         Ok(b) => b,
         Err(e) => {
@@ -5017,7 +5047,13 @@ fn run_wasm(
     match wasmrun::run(&bytes, run) {
         Ok(out) => {
             if let (Some(load), Some(meter)) = (profile, out.meter.as_ref()) {
-                wasm_profile(load, compile, meter);
+                let sites = out.counts.as_ref().zip(table.as_ref());
+                wasm_profile(
+                    load,
+                    compile,
+                    meter,
+                    sites.map(|(c, t)| (c, program, t.as_slice())),
+                );
             }
             ExitCode::from((out.code & 0xff) as u8)
         }
@@ -5028,12 +5064,18 @@ fn run_wasm(
     }
 }
 
-/// Prints the operations the guest executed to stderr. Under
-/// `VYRN_BUILD_PROFILE`, the phase table follows when `main` exits.
+/// Prints what the guest did to stderr: the operations it executed, then the blocks it made at
+/// each line of the root file ([`profile_report`]). Under `VYRN_BUILD_PROFILE`, the phase table
+/// follows when `main` exits.
 ///
-/// The count is wasmtime's fuel, read from a budget nothing exhausts. Unlike
-/// the times, it is the same number on any machine.
-fn wasm_profile(load: std::time::Duration, compile: std::time::Duration, meter: &wasmrun::Meter) {
+/// The operation count is wasmtime's fuel, read from a budget nothing exhausts. Unlike the
+/// times, it is the same number on any machine. The instrument's own operations are in it.
+fn wasm_profile(
+    load: std::time::Duration,
+    compile: std::time::Duration,
+    meter: &wasmrun::Meter,
+    sites: Option<(&wasmrun::Counts, &vyrn_frontend::ast::Program, &[CostFn])>,
+) {
     if vyrn_frontend::prof::phases_on() {
         vyrn_frontend::prof::charge("load", load);
         vyrn_frontend::prof::charge("compile", compile);
@@ -5041,7 +5083,95 @@ fn wasm_profile(load: std::time::Duration, compile: std::time::Duration, meter: 
         vyrn_frontend::prof::charge("instantiate", meter.instantiate);
         vyrn_frontend::prof::charge("run", meter.run);
     }
-    eprintln!("{} operation(s) executed", meter.fuel);
+    eprint!("{}", profile_report(meter.fuel, sites));
+}
+
+/// `n` with a comma between thousands.
+fn group(n: u64) -> String {
+    let digits = n.to_string();
+    let mut out = String::new();
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// How many lines of the profile table `vyrn run --profile` prints.
+const PROFILE_ROWS: usize = 10;
+
+/// The text of `vyrn run --profile`: one line of totals, then the lines that made the most
+/// bytes, heaviest first. A block made by a function of another file counts at the line that
+/// called it ([`insight::Verb::Enters`]); a block made before any line ran has no line.
+fn profile_report(
+    fuel: u64,
+    sites: Option<(&wasmrun::Counts, &vyrn_frontend::ast::Program, &[CostFn])>,
+) -> String {
+    let mut out = format!("run: {} operations", group(fuel));
+    let Some((counts, program, table)) = sites else {
+        return out + "\n";
+    };
+    let total = |f: fn(&wasmrun::SiteCount) -> u64| counts.sites.iter().map(f).sum::<u64>();
+    let (blocks, bytes) = (total(|s| s.blocks), total(|s| s.bytes));
+    out += &format!(
+        "; {} blocks, {} bytes; {} freed; peak live {} bytes; live at exit {}\n",
+        group(blocks),
+        group(bytes),
+        group(total(|s| s.freed)),
+        group(counts.peak.into()),
+        counts.live_blocks,
+    );
+    // The counters of one line and verb, summed over the sites that share them.
+    let mut lines: BTreeMap<(&str, u32, &str), [u64; 3]> = BTreeMap::new();
+    for s in counts.sites.iter().filter(|s| s.blocks > 0) {
+        let at = lines.entry((&s.function, s.line, &s.verb)).or_default();
+        *at = [at[0] + s.blocks, at[1] + s.bytes, at[2] + s.live];
+    }
+    let mut rows: Vec<_> = lines.into_iter().collect();
+    rows.sort_by_key(|(k, v)| (std::cmp::Reverse((v[1], v[0])), *k));
+    let what = |function: &str, line: u32, verb: &str| {
+        let shown = table
+            .iter()
+            .find(|(id, _)| program.functions[id.index()].name == function);
+        let row = shown.and_then(|(_, rows)| {
+            rows.iter()
+                .find(|((l, v), _)| *l == line && v.word() == verb)
+        });
+        match row {
+            Some((_, r)) => format!("{verb} {}", r.text()),
+            None => verb.to_string(),
+        }
+    };
+    let width = rows
+        .iter()
+        .map(|((f, ..), _)| f.len())
+        .max()
+        .unwrap_or(8)
+        .max(8);
+    out += &format!(
+        "\nline  {:<width$}  {:>11}  {:>13}  {:>11}  what\n",
+        "function", "blocks", "bytes", "live"
+    );
+    for ((function, line, verb), v) in rows.iter().take(PROFILE_ROWS) {
+        out += &format!(
+            "{line:>4}  {function:<width$}  {:>11}  {:>13}  {:>11}  {}\n",
+            group(v[0]),
+            group(v[1]),
+            group(v[2]),
+            what(function, *line, verb),
+        );
+    }
+    let rest = rows.get(PROFILE_ROWS..).unwrap_or_default();
+    if !rest.is_empty() {
+        out += &format!(
+            "...   {} more lines, {} blocks\n",
+            rest.len(),
+            group(rest.iter().map(|(_, v)| v[0]).sum::<u64>())
+        );
+    }
+    out
 }
 
 /// One `test` or `bench` body, as [`bodies_wasm`] runs it.

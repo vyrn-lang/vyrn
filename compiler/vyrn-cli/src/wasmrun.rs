@@ -20,6 +20,32 @@ pub struct Outcome {
     /// Standard error if captured; otherwise empty and already written through.
     pub stderr: Vec<u8>,
     pub meter: Option<Meter>,
+    /// What the profile instrument counted, for a module built with it.
+    pub counts: Option<Counts>,
+}
+
+/// What a run made at one site of the root file: blocks and bytes made, blocks freed, bytes
+/// still live at exit.
+pub struct SiteCount {
+    pub function: String,
+    pub line: u32,
+    pub verb: String,
+    pub blocks: u64,
+    pub bytes: u64,
+    pub freed: u64,
+    pub live: u64,
+}
+
+/// The profile instrument's counters, read from the guest's memory after `_start`
+/// ([`vyrn_codegen::direct`]'s `Profile`). `sites[0]` holds the blocks made before any site
+/// ran, with no function, line or verb.
+pub struct Counts {
+    pub sites: Vec<SiteCount>,
+    /// The most bytes live at once.
+    pub peak: u32,
+    /// Blocks and bytes still live at exit, the arena's retained chunks excluded.
+    pub live_blocks: u32,
+    pub live_bytes: u32,
 }
 
 #[derive(Default)]
@@ -115,6 +141,10 @@ pub fn run(bytes: &[u8], run: Run) -> Result<Outcome, String> {
             1
         }
     };
+    let counts = module
+        .sites
+        .as_ref()
+        .and_then(|sites| read_counts(sites, &inst, &mut store));
     let meter = run.meter.then(|| Meter {
         translate,
         instantiate,
@@ -130,6 +160,7 @@ pub fn run(bytes: &[u8], run: Run) -> Result<Outcome, String> {
         stdout: host.wasi.stdout.unwrap_or_default(),
         stderr: host.wasi.stderr.unwrap_or_default(),
         meter,
+        counts,
     })
 }
 
@@ -204,6 +235,8 @@ pub struct Compiled {
     meter: bool,
     translate: std::time::Duration,
     checks: std::sync::Arc<Vec<String>>,
+    /// The `vyrn:sites` section: the counter table's address, then a row per site.
+    sites: Option<String>,
 }
 
 pub fn compile(bytes: &[u8], meter: bool) -> Result<Compiled, String> {
@@ -224,7 +257,11 @@ pub fn compile(bytes: &[u8], meter: bool) -> Result<Compiled, String> {
         module,
         meter,
         translate: clock.elapsed(),
-        checks: std::sync::Arc::new(check_rows(bytes)),
+        checks: std::sync::Arc::new(
+            custom_section(bytes, "vyrn:checks")
+                .map_or_else(Vec::new, |c| c.split('\n').map(str::to_string).collect()),
+        ),
+        sites: custom_section(bytes, "vyrn:sites"),
     })
 }
 
@@ -454,9 +491,9 @@ fn first_line(s: &str) -> &str {
     s.lines().next().unwrap_or(s)
 }
 
-/// The rows of a module's `vyrn:checks` section, one per check the oracle counts; empty for a
-/// module without one. The walk trusts the bytes, which the engine has already validated.
-fn check_rows(bytes: &[u8]) -> Vec<String> {
+/// The text of the custom section `name`, `None` for a module without one. The walk trusts the
+/// bytes, which the engine has already validated.
+fn custom_section(bytes: &[u8], name: &str) -> Option<String> {
     fn leb(b: &[u8], at: &mut usize) -> usize {
         let (mut v, mut shift) = (0usize, 0);
         while let Some(&x) = b.get(*at) {
@@ -478,14 +515,46 @@ fn check_rows(bytes: &[u8]) -> Vec<String> {
         if id == 0 {
             let mut p = at;
             let n = leb(bytes, &mut p);
-            if bytes.get(p..p + n) == Some(b"vyrn:checks".as_slice()) {
-                let payload = String::from_utf8_lossy(&bytes[p + n..end]);
-                return payload.split('\n').map(str::to_string).collect();
+            if bytes.get(p..p + n) == Some(name.as_bytes()) {
+                return Some(String::from_utf8_lossy(&bytes[p + n..end]).into_owned());
             }
         }
         at = end;
     }
-    Vec::new()
+    None
+}
+
+/// Reads the profile table out of the guest's memory after `_start`: `sites` is the module's
+/// `vyrn:sites` text. `None` when the guest has no memory export or the table lies outside it.
+fn read_counts(sites: &str, inst: &wasmtime::Instance, store: &mut Store<Host>) -> Option<Counts> {
+    let mut lines = sites.split('\n');
+    let table: usize = lines.next()?.parse().ok()?;
+    let mem = inst.get_memory(&mut *store, "memory")?;
+    let data = mem.data(&*store);
+    let word = |at: usize, n: usize| -> Option<u64> {
+        let b = data.get(at..at + n)?;
+        Some(b.iter().rev().fold(0, |v, &x| v << 8 | u64::from(x)))
+    };
+    let mut out = Vec::new();
+    for (k, row) in std::iter::once("").chain(lines).enumerate() {
+        let mut f = row.split('\t');
+        let at = table + 16 + 32 * k;
+        out.push(SiteCount {
+            function: f.next()?.to_string(),
+            line: f.next().and_then(|l| l.parse().ok()).unwrap_or(0),
+            verb: f.next().unwrap_or_default().to_string(),
+            blocks: word(at, 8)?,
+            bytes: word(at + 8, 8)?,
+            freed: word(at + 16, 8)?,
+            live: word(at + 24, 8)?,
+        });
+    }
+    Some(Counts {
+        sites: out,
+        peak: word(table, 4)? as u32,
+        live_blocks: word(table + 4, 4)? as u32,
+        live_bytes: word(table + 8, 4)? as u32,
+    })
 }
 
 /// Appends each check row's count to `log`: the program, then the row, tab-separated.
