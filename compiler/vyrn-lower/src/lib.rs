@@ -429,6 +429,15 @@ impl<'a, 'r> Walk<'a, 'r> {
         self.projection(p);
     }
 
+    /// The `atSet` expansions a removal's receiver lowers through, outermost first.
+    fn modify_place(&mut self, recv: &Expr, line: usize) {
+        let ty = |e: &Expr| self.recorded(e);
+        if let Ok(Some((_, p))) = self.expansions.modify_site(self.impls, recv, ty, line) {
+            self.projection(p);
+            self.modify_place(&p.place, line);
+        }
+    }
+
     fn projection(&mut self, p: &'static vyrn_frontend::project::Projection) {
         for s in &p.prologue {
             facts_stmt(s, &mut Default::default(), self);
@@ -582,6 +591,9 @@ impl<'a> FactsVisit<'a> for Walk<'a, '_> {
                 .any(|i| i.places.iter().any(|p| p.name == *name))
             {
                 self.site(e, name, args);
+            }
+            if vyrn_frontend::prelude::removes(name) && !args.is_empty() {
+                self.modify_place(&args[0], e.line());
             }
         }
         self.close(e);

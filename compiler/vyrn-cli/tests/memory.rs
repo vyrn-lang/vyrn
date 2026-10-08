@@ -2463,6 +2463,22 @@ fn a_borrow_stored_into_a_modify_parameter_is_a_copy() {
     shape_runs_clean("a-borrow-stored-into-a-modify-parameter-is-a-copy", "20\n");
 }
 
+// A `pop` of an array of two-word elements carries the element in the
+// `Option`'s two payload words (witness: base refused it, "no lowering for an
+// Option of a two-word payload").
+#[test]
+fn a_pop_of_a_two_word_element_runs() {
+    shape_runs_clean("an-option-of-a-two-word-payload-is-popped", "3270\n");
+}
+
+// A removal through a user container's element shrinks the array its `atSet`
+// yields (witness: base passed `check` and failed to build, "no lowering for
+// the body ... the core did not state").
+#[test]
+fn a_removal_through_a_user_container_element_runs() {
+    shape_runs_clean("a-removal-through-a-user-container-element", "221241424\n");
+}
+
 #[test]
 fn a_for_over_a_user_container_in_a_field_runs() {
     shape_runs_clean(

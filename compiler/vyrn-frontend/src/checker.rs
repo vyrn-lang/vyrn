@@ -3480,6 +3480,40 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// Types the nodes a projection site lowers through: its body inlined
+    /// at the site ([`Checker::record_desugar`]).
+    fn record_projection(
+        &self,
+        p: &crate::project::Projection,
+        scope: &Scope,
+        fn_ret: Option<&Type>,
+    ) {
+        let ret = fn_ret.cloned().unwrap_or(Type::Unit);
+        self.record_desugar(scope, |c, sc| {
+            sc.push(HashMap::new());
+            for s in &p.prologue {
+                if c.stmt(s, &ret, sc).is_err() {
+                    return;
+                }
+            }
+            let _ = c.expr(&p.place, sc, None, fn_ret);
+        });
+    }
+
+    /// Records the `atSet` expansion a removal's receiver lowers through, and
+    /// in turn the one the place it yields lowers through
+    /// ([`crate::project::Expansions::modify_site`]).
+    fn record_modify_place(&self, recv: &Expr, scope: &Scope, fn_ret: Option<&Type>, line: usize) {
+        if !self.recording() {
+            return;
+        }
+        let ty = |e: &Expr| self.expr(e, scope, None, fn_ret).ok();
+        if let Ok(Some((_, p))) = self.expansions.modify_site(self.impls, recv, ty, line) {
+            self.record_projection(p, scope, fn_ret);
+            self.record_modify_place(&p.place, scope, fn_ret, line);
+        }
+    }
+
     /// Records the `atSet` expansion a store through a user container lowers
     /// by: the first projected step of the path, at any depth. `tys[k]` is the
     /// type of the place before step `k`.
@@ -4887,16 +4921,7 @@ impl<'a> Checker<'a> {
                             &args[1..],
                             line,
                         ) {
-                            let ret = fn_ret.cloned().unwrap_or(Type::Unit);
-                            self.record_desugar(scope, |c, sc| {
-                                sc.push(HashMap::new());
-                                for s in &p.prologue {
-                                    if c.stmt(s, &ret, sc).is_err() {
-                                        return;
-                                    }
-                                }
-                                let _ = c.expr(&p.place, sc, None, fn_ret);
-                            });
+                            self.record_projection(p, scope, fn_ret);
                         }
                     }
                     return Ok(t);
@@ -4936,6 +4961,7 @@ impl<'a> Checker<'a> {
         }
         if name == "@pop" {
             let elem = self.mut_array_receiver(&args[0], scope, line, "pop", fn_ret)?;
+            self.record_modify_place(&args[0], scope, fn_ret, line);
             return Ok(match elem {
                 Type::Err => Type::Err,
                 t => Type::option(t),
@@ -4944,6 +4970,7 @@ impl<'a> Checker<'a> {
         // O(1) unordered remove: the last element moves into slot `i`.
         if name == "@swapRemove" {
             let elem = self.mut_array_receiver(&args[0], scope, line, "swapRemove", fn_ret)?;
+            self.record_modify_place(&args[0], scope, fn_ret, line);
             let i = self.base(&self.expr(&args[1], scope, Some(&Type::Int), fn_ret)?);
             if !matches!(i, Type::Int | Type::Err) {
                 return Err(cerr!(line, SwapRemoveIndex, i));
@@ -5011,6 +5038,7 @@ impl<'a> Checker<'a> {
                 if self.lookup(scope, root).is_some_and(|b| !b.mutable) {
                     return self.judged();
                 }
+                self.record_modify_place(&args[0], scope, fn_ret, line);
             }
             let k = self.base(&self.expr(&args[1], scope, Some(&key_ty), fn_ret)?);
             if !matches!(k, Type::Err) && !self.key_fits(&k, &key_ty) {
@@ -5428,16 +5456,7 @@ impl<'a> Checker<'a> {
                         &args[1..],
                         line,
                     ) {
-                        let ret = fn_ret.cloned().unwrap_or(Type::Unit);
-                        self.record_desugar(scope, |c, sc| {
-                            sc.push(HashMap::new());
-                            for s in &p.prologue {
-                                if c.stmt(s, &ret, sc).is_err() {
-                                    return;
-                                }
-                            }
-                            let _ = c.expr(&p.place, sc, None, fn_ret);
-                        });
+                        self.record_projection(p, scope, fn_ret);
                     }
                 }
                 return Ok(t);

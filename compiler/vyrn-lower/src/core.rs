@@ -2570,6 +2570,41 @@ impl<'a> Builder<'a> {
         Ok((place, ty))
     }
 
+    /// The place `recv` names, which a call shrinks where it lies. A step through
+    /// a user container is replaced by the place its `atSet` yields
+    /// ([`vyrn_frontend::project::Expansions::modify_site`]), whose prologue runs
+    /// first. The steps after it walk from the place it yields.
+    fn modify_place(
+        &mut self,
+        recv: &'a Expr,
+        line: usize,
+        out: &mut Vec<St>,
+    ) -> Result<(Place, Type), Gap> {
+        let Some((_, root, steps)) = vyrn_frontend::parser::place_steps(recv) else {
+            return gap("a removal whose receiver is no place", line);
+        };
+        let ty = |e: &Expr| self.ty_of(e).ok();
+        let site = self
+            .program
+            .expansions
+            .modify_site(&self.program.impls, recv, ty, line);
+        let (place, ty, steps) = match site {
+            Ok(Some((after, p))) => {
+                for s in &p.prologue {
+                    self.stmt(s, out)?;
+                }
+                let (place, ty) = self.modify_place(&p.place, line, out)?;
+                (place, ty, &steps[steps.len() - after..])
+            }
+            Ok(None) => {
+                let (place, ty) = self.named_place(root, line)?;
+                (place, ty, &steps[..])
+            }
+            Err(e) => return gap_d("a projection this site cannot inline", &e, line),
+        };
+        self.walk(place, ty, steps, true, &mut root.to_string(), line, out)
+    }
+
     /// The type of the place `step` names inside a place of type `ty`.
     fn step_ty(&mut self, ty: &Type, step: &At<'_>, line: usize) -> Result<Type, Gap> {
         match *step {
@@ -6536,13 +6571,8 @@ impl<'a> Builder<'a> {
             // A removal's receiver that is a field or an element
             // (`r.xs.pop()`) is passed as the place: the call shrinks the
             // array where it lies.
-            if let (0, true, Some((_, root, steps))) = (
-                k,
-                prelude::removes(name) && !matches!(a, Expr::Var { .. }),
-                vyrn_frontend::parser::place_steps(a),
-            ) {
-                let (place, ty) = self.named_place(root, line)?;
-                let at = self.walk(place, ty, &steps, true, &mut root.to_string(), line, out)?;
+            if let (0, true) = (k, prelude::removes(name) && !matches!(a, Expr::Var { .. })) {
+                let at = self.modify_place(a, line, out)?;
                 vs.push((Arg::Place(at.0), *cap));
                 continue;
             }
