@@ -8,13 +8,13 @@ fn thirdSequence() -> Array<UInt8>
    73  loop 2   grows      push(..)
 fn countKmers(seq: Array<UInt8>, k: Int64) -> Map<Int64, Int64>
    86           allocates  map literal
-   94  loop 1   check kept int-rem-zero
+   94  loop 1   check kept int-rem-zero  gap: callee fact: modulus from modulusOf(..) at 90
    96  loop 1   grows      tally(..)
 fn unpack(key: Int64, k: Int64) -> String
   105           allocates  bytes(..)
   107           grows      reserve(..)
   110  loop 1   grows      push(..)
-       loop 1   check kept array-index
+       loop 1   check kept array-index  gap: callee fact: modulusOf(..) at 108
   113           allocates  stringFromBytes(..)
 fn pack(frag: String) -> Int64
   122           allocates  bytes(..)
@@ -33,7 +33,7 @@ fn report(seq: Array<UInt8>, k: Int64) -> Unit
 fn syntheticSequence(n: Int64) -> Array<UInt8>
   204           allocates  bytes(..)
   210  loop 1   grows      push(..)
-       loop 1   check kept array-index
+       loop 1   check kept array-index  gap: unproved: needs the value of line 210 >= 0
 fn main() -> Int64
   231  loop 1   copies     a String render (implicit)
        loop 1   allocates  render, concatenation x2
