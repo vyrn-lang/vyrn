@@ -22,8 +22,8 @@ build site/export.vyrn	placer	192663
 build site/export.vyrn	placer: lower_with	50102
 build site/export.vyrn	lower: build	189600
 build site/export.vyrn	placer: core::build	4439
-build site/export.vyrn	placer: build: first	2607190
-build site/export.vyrn	placer: build: seeded	1289794
+build site/export.vyrn	placer: build: first	2582736
+build site/export.vyrn	placer: build: seeded	1277064
 build site/export.vyrn	placer: build_outside	848
 build site/export.vyrn	placer: effects	74193
 build site/export.vyrn	placer: kernel::placement	774261
@@ -58,8 +58,8 @@ check site/export.vyrn	placer	192663
 check site/export.vyrn	placer: lower_with	50102
 check site/export.vyrn	lower: build	387039
 check site/export.vyrn	placer: core::build	4439
-check site/export.vyrn	placer: build: first	1509315
-check site/export.vyrn	placer: build: seeded	652288
+check site/export.vyrn	placer: build: first	1491433
+check site/export.vyrn	placer: build: seeded	645017
 check site/export.vyrn	placer: build_outside	848
 check site/export.vyrn	placer: effects	74193
 check site/export.vyrn	placer: kernel::placement	774261
@@ -86,9 +86,9 @@ check examples/simdbench.vyrn	placer	11026
 check examples/simdbench.vyrn	placer: lower_with	2519
 check examples/simdbench.vyrn	lower: build	16955
 check examples/simdbench.vyrn	placer: core::build	188
-check examples/simdbench.vyrn	placer: build: first	56425
+check examples/simdbench.vyrn	placer: build: first	55353
 check examples/simdbench.vyrn	placer: build_outside	81
-check examples/simdbench.vyrn	placer: build: seeded	5846
+check examples/simdbench.vyrn	placer: build: seeded	4998
 check examples/simdbench.vyrn	placer: effects	3337
 check examples/simdbench.vyrn	placer: kernel::placement	21030
 check examples/simdbench.vyrn	placer: report	2015
@@ -115,8 +115,8 @@ check examples/vlog.vyrn	placer	22485
 check examples/vlog.vyrn	placer: lower_with	5089
 check examples/vlog.vyrn	lower: build	41218
 check examples/vlog.vyrn	placer: core::build	634
-check examples/vlog.vyrn	placer: build: first	152289
-check examples/vlog.vyrn	placer: build: seeded	46258
+check examples/vlog.vyrn	placer: build: first	146987
+check examples/vlog.vyrn	placer: build: seeded	44068
 check examples/vlog.vyrn	placer: build_outside	169
 check examples/vlog.vyrn	placer: effects	6105
 check examples/vlog.vyrn	placer: kernel::placement	48669

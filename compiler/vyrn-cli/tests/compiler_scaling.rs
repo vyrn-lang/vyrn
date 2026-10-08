@@ -39,11 +39,6 @@ const TINY_BYTES: f64 = 65536.0;
 /// its row.
 const KNOWN: &[(&str, &str, &str)] = &[
     (
-        "long match",
-        "placer: build: first",
-        "an enum of n variants matched by n arms: allocations 2,051,782 to 32,108,782 (15.6 times)",
-    ),
-    (
         "many generic instances",
         "placer: effects",
         "n instances of one generic function: bytes 18,861,813 to 271,300,981 (14.4 times), allocations 3.5 times",

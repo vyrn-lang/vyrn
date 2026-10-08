@@ -2212,6 +2212,7 @@ impl<'a> Builder<'a> {
                 ..
             } if arms.iter().all(|a| matches!(a.body, ArmBody::Expr(_))) => {
                 let sty = self.ty_of(scrutinee)?;
+                let rt = vyrn_frontend::types::resolve(&sty, self.proto.types());
                 let mid = e.id();
                 let (sv, consuming) =
                     self.scrutinee(scrutinee, mid, Some(arms_span(*mline, arms)), out)?;
@@ -2225,6 +2226,7 @@ impl<'a> Builder<'a> {
                     let binds = self.bind_pattern(
                         &arm.pattern,
                         &sty,
+                        &rt,
                         consuming,
                         *mline,
                         borrow_root(&sv, owns),
@@ -2245,12 +2247,12 @@ impl<'a> Builder<'a> {
                         binds,
                         frees: Some(frees),
                         body,
-                        test: self.arm_test(&arm.pattern, &sty, *mline)?,
+                        test: self.arm_test(&arm.pattern, &rt, *mline)?,
                         site: mid,
                         index: i as u32,
                     });
                 }
-                self.covers(&core_arms, &sty, *mline, out)?;
+                self.covers(&core_arms, &rt, *mline, out)?;
                 out.push(St::Switch {
                     on: sv,
                     arms: core_arms,
@@ -4332,15 +4334,14 @@ impl<'a> Builder<'a> {
 
     /// Which tag a pattern tests for, in the scrutinee's variant list. `??`'s
     /// pair names a tag: 1 succeeds and 0 fails, for every sum.
-    fn arm_test(&self, p: &Pattern, sty: &Type, line: usize) -> Result<Test, Gap> {
+    fn arm_test(&self, p: &Pattern, rt: &Type, line: usize) -> Result<Test, Gap> {
         let Pattern::Variant(v, _) = p else {
             return Ok(match p {
                 Pattern::Other => Test::Else,
                 _ => Test::Tag(u64::from(matches!(p, Pattern::Success(_)))),
             });
         };
-        let decls = self.proto.types();
-        let Type::Enum(variants) = vyrn_frontend::types::resolve(sty, &decls) else {
+        let Type::Enum(variants) = rt else {
             return gap("a variant pattern on a non-enum", line);
         };
         match variants.iter().position(|x| x.name == *v) {
@@ -4356,12 +4357,11 @@ impl<'a> Builder<'a> {
     fn covers(
         &mut self,
         arms: &[Arm],
-        sty: &Type,
+        rt: &Type,
         line: usize,
         out: &mut Vec<St>,
     ) -> Result<(), Gap> {
-        let decls = self.proto.types();
-        let Type::Enum(variants) = vyrn_frontend::types::resolve(sty, &decls) else {
+        let Type::Enum(variants) = rt else {
             return gap("a variant pattern on a non-enum", line);
         };
         if arms.is_empty() {
@@ -4399,21 +4399,22 @@ impl<'a> Builder<'a> {
     /// where the construct did not consume it: a binder over a borrow carries
     /// the borrow's kind, so `match o { Some(v) => take(v) }` over a `read`
     /// parameter is refused.
+    #[allow(clippy::too_many_arguments)]
     fn bind_pattern(
         &mut self,
         p: &Pattern,
         sty: &Type,
+        rt: &Type,
         consuming: bool,
         line: usize,
         from: Option<Name>,
         out: &mut Vec<St>,
     ) -> Result<Vec<Name>, Gap> {
         let decls = self.proto.types();
-        let rt = vyrn_frontend::types::resolve(sty, &decls);
         let (payloads, variant): (Vec<(String, Type, NodeId)>, String) = match p {
             Pattern::Other => (Vec::new(), String::new()),
             // `??`'s pair names a tag: variant 1 succeeds, 0 fails.
-            Pattern::Success(n) | Pattern::Failure(n) => match &rt {
+            Pattern::Success(n) | Pattern::Failure(n) => match rt {
                 Type::Enum(vs) if vs.len() == 2 => {
                     let at = usize::from(matches!(p, Pattern::Success(_)));
                     let ps = vs[at]
@@ -4425,7 +4426,7 @@ impl<'a> Builder<'a> {
                 }
                 _ => return gap("a `??` pattern on a scrutinee with no two tags", line),
             },
-            Pattern::Variant(v, names) => match &rt {
+            Pattern::Variant(v, names) => match rt {
                 Type::Enum(variants) => {
                     let Some(var) = variants.iter().find(|x| x.name == *v) else {
                         return gap("a variant the enum does not have", line);
@@ -5887,6 +5888,7 @@ impl<'a> Builder<'a> {
             } => {
                 let ty = self.ty_of(e)?;
                 let sty = self.ty_of(scrutinee)?;
+                let rt = vyrn_frontend::types::resolve(&sty, self.proto.types());
                 let mid = e.id();
                 let res = self.temp(ty, *line);
                 let (sv, consuming) =
@@ -5903,6 +5905,7 @@ impl<'a> Builder<'a> {
                     let binds = self.bind_pattern(
                         &arm.pattern,
                         &sty,
+                        &rt,
                         consuming,
                         *line,
                         borrow_root(&sv, owns),
@@ -5934,12 +5937,12 @@ impl<'a> Builder<'a> {
                         binds,
                         frees: Some(frees),
                         body,
-                        test: self.arm_test(&arm.pattern, &sty, *line)?,
+                        test: self.arm_test(&arm.pattern, &rt, *line)?,
                         site: mid,
                         index: i as u32,
                     });
                 }
-                self.covers(&core_arms, &sty, *line, out)?;
+                self.covers(&core_arms, &rt, *line, out)?;
                 self.join_borrows(res, &yields);
                 out.push(St::Switch {
                     on: sv,
@@ -5982,6 +5985,7 @@ impl<'a> Builder<'a> {
                         ..Binder::synthetic("@err")
                     }),
                     &ity,
+                    &r,
                     consuming,
                     *line,
                     borrow_root(&sv, owns),
@@ -6026,6 +6030,7 @@ impl<'a> Builder<'a> {
                         ..Binder::synthetic("@ok")
                     }),
                     &ity,
+                    &r,
                     consuming,
                     *line,
                     borrow_root(&sv, owns),
