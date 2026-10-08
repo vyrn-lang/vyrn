@@ -52,6 +52,8 @@ line  function         blocks          bytes         live  what
 ```
 
 The run is an audited build with a counter per source line (`docs/memory.md`).
+It saves the counts for `vyrn why --cost` under `~/.vyrn/cache/profile`
+(`VYRN_PROFILE_DIR` overrides), one file per root.
 `VYRN_PROFILE=1` builds the same module for any command that emits wasm, such
 as `vyrn build --target wasm`.
 
@@ -214,7 +216,10 @@ compile, except `--contract`.
   makes where the program wrote none reads `(implicit)`. A call into a function of
   another file counts that function's allocations at the calling line. A
   function with nothing to report is left out. The LSP's hover keeps the
-  per-binding memory rows.
+  per-binding memory rows. After a `vyrn run --profile` of the same source and
+  imports, each allocating, copying, growing or entering row also reads
+  `last run: N blocks, B bytes`. If the source or an import changed since that
+  run, the report prints one line, `profile: stale; ...`, and no counts.
 - `vyrn why --capability <fs|stdin|args|extern> <entry-or-artifact>`: every
   import chain that pulls that capability into an artifact's closure.
 

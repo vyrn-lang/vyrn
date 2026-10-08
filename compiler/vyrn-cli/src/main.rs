@@ -17,6 +17,7 @@ use vyrn_lower::insight::{self, Verb};
 
 use vyrn_codegen::toolchain::find_clang;
 
+mod lastrun;
 mod remote;
 // In the library target because `vyrn-frontend`'s tests run their programs
 // through it too.
@@ -1566,6 +1567,15 @@ fn why_cost(flags: GlobalFlags, file: &str) -> Outcome {
     let (program, world) = p.checked(&path, &source)?;
 
     println!("{}", dos_to_slash(file));
+    // The last `vyrn run --profile` of this root, when its source and imports are the same.
+    let last = match lastrun::load(&path, &lastrun::stamp(&source, &program)) {
+        lastrun::Found::Stale => {
+            println!("profile: stale; the source changed since the last `vyrn run --profile`");
+            None
+        }
+        lastrun::Found::Never => None,
+        lastrun::Found::Fresh(sites) => Some(sites),
+    };
     let (table, [alloc, grow, copy, kept, proved]) = cost_table(&program, &world, &path);
     for (id, shown) in table {
         if shown.is_empty() {
@@ -1584,9 +1594,9 @@ fn why_cost(flags: GlobalFlags, file: &str) -> Outcome {
             params.join(", "),
             sp.ty(&f.ret)
         );
-        let mut last = 0;
+        let mut last_line = 0;
         for ((line, verb), row) in &shown {
-            let num = if *line == last {
+            let num = if *line == last_line {
                 String::new()
             } else {
                 line.to_string()
@@ -1596,8 +1606,22 @@ fn why_cost(flags: GlobalFlags, file: &str) -> Outcome {
             } else {
                 String::new()
             };
-            last = *line;
-            println!("{num:>5}  {lp:<7}  {:<10} {}", verb.word(), row.text());
+            last_line = *line;
+            let ran = match (&last, verb) {
+                (Some(_), Verb::Keeps) | (None, _) => String::new(),
+                (Some(sites), _) => {
+                    let [blocks, bytes, ..] = sites
+                        .get(&(f.name.clone(), *line, verb.word().to_string()))
+                        .copied()
+                        .unwrap_or_default();
+                    format!(
+                        "  last run: {} blocks, {} bytes",
+                        group(blocks),
+                        group(bytes)
+                    )
+                }
+            };
+            println!("{num:>5}  {lp:<7}  {:<10} {}{ran}", verb.word(), row.text());
         }
     }
     let count = |(all, lp): (usize, usize), what: &str| format!("{what} {all} ({lp} in loops)");
@@ -5010,25 +5034,31 @@ fn write_response_vary(
 fn run_cmd(call: &Call) -> Outcome {
     let (p, path) = call.root()?;
     let clock = std::time::Instant::now();
-    let (program, world) = p.checked(&path, &read_source(&path)?)?;
+    let source = read_source(&path)?;
+    let (program, world) = p.checked(&path, &source)?;
     let load = clock.elapsed();
     instantiable(&program, &world)?;
-    let profile = call.flags.profile.then_some(load);
+    let profile = call
+        .flags
+        .profile
+        .then(|| (load, lastrun::stamp(&source, &program)));
     Ok(run_wasm(&path, &program, world, &call.pos, profile))
 }
 
 /// Compiles the program and runs it in the embedded wasmtime; the exit code is
-/// the guest's. `profile` is the load's time under `vyrn run --profile` (see
-/// [`wasm_profile`]).
+/// the guest's. `profile` is the load's time and the stamp of the source under
+/// `vyrn run --profile` (see [`wasm_profile`], [`lastrun`]).
 fn run_wasm(
     path: &str,
     program: &vyrn_frontend::ast::Program,
     world: std::sync::Arc<vyrn_lower::World>,
     prog_args: &[String],
-    profile: Option<std::time::Duration>,
+    profile: Option<(std::time::Duration, String)>,
 ) -> ExitCode {
     let clock = std::time::Instant::now();
-    let table = profile.map(|_| cost_table(program, &world, path).0);
+    let table = profile
+        .as_ref()
+        .map(|_| cost_table(program, &world, path).0);
     let bytes = match vyrn_codegen::direct::compile(program, world) {
         Ok(b) => b,
         Err(e) => {
@@ -5046,10 +5076,13 @@ fn run_wasm(
     };
     match wasmrun::run(&bytes, run) {
         Ok(out) => {
-            if let (Some(load), Some(meter)) = (profile, out.meter.as_ref()) {
+            if let (Some((load, stamp)), Some(meter)) = (&profile, out.meter.as_ref()) {
+                if let Some(counts) = &out.counts {
+                    lastrun::save(path, stamp, counts);
+                }
                 let sites = out.counts.as_ref().zip(table.as_ref());
                 wasm_profile(
-                    load,
+                    *load,
                     compile,
                     meter,
                     sites.map(|(c, t)| (c, program, t.as_slice())),
