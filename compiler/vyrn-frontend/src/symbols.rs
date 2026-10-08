@@ -140,9 +140,8 @@ pub struct Analysis {
     /// them: its file reaches no generator, so only a root that does knows them.
     pub symbol_maps: Vec<crate::symbolmap::MappedSymbol>,
     /// What the ownership analysis decided about every `let` in this document:
-    /// reclaimed, or why not. The answer `vyrn why --memory` prints, at the
-    /// cursor. Read from [`Judged::memory`], never re-derived, so it cannot
-    /// disagree with the walk that decided. Empty when the checks did not run
+    /// reclaimed, or why not, at the cursor. Read from [`Judged::memory`],
+    /// never re-derived, so it cannot disagree with the walk that decided. Empty when the checks did not run
     /// or no [`Judge`] was given.
     pub memory: Vec<MemoryNote>,
     /// How hover, completion and type hints spell a declaration the loader
@@ -654,7 +653,7 @@ fn name_index(
 
 /// Every `let` in the root module, with what the ownership analysis decided.
 /// A function with no `module` tag belongs to this document, the filter
-/// `vyrn why --memory` uses.
+/// the hover reads.
 fn memory_notes(
     program: &crate::ast::Program,
     memory: &HashMap<crate::ast::FnId, Vec<crate::own::MemoryRow>>,
@@ -3625,7 +3624,7 @@ fn main() -> Int64 {
 
     /// `MEM_SRC`'s memory answers, as the core states them. This crate installs
     /// no placer, so the tests here check only the adapter: given these answers,
-    /// what the editor shows. `vyrn-lsp`'s suite and `vyrn why --memory` check
+    /// what the editor shows. `vyrn-lsp`'s suite and `tests/memory.rs` check
     /// the answers end to end.
     fn mem_notes() -> Vec<MemoryNote> {
         vec![

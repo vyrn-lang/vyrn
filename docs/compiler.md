@@ -457,6 +457,11 @@ Rust style).
 spent its time, per phase (`prof.rs`). `vyrn run --profile` prints the guest's
 operation count.
 
+`vyrn why --cost` prints `insight::facts` (`insight.rs`): per line, the rows of
+the decided core that allocate, copy, grow a container or keep a check. A
+callee outside the root file counts at the calling line through
+`World::allocates`, the effect judgment's `alloc`.
+
 ## Where a change goes
 
 - A new surface form: a desugar in the parser, or a lowering in `core::build`.

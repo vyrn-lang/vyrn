@@ -14,7 +14,7 @@ use vyrn_frontend::ast::{FnId, Type, TypeDecl};
 use vyrn_frontend::floor;
 use vyrn_frontend::own::StateCallees;
 
-use vyrn_frontend::core::{rows, Arg, Body, Name, Place, Rhs, St};
+use vyrn_frontend::core::{rows, Arg, Body, Made, Name, Place, Rhs, St};
 
 /// The lattice's table lives in `vyrn_frontend::effects` because the
 /// generation fence reads it mid-check and cannot see this crate.
@@ -297,15 +297,15 @@ impl Walk<'_> {
     fn stmt(&mut self, s: &St) {
         match s {
             St::Let(n, rhs) => {
-                let info = &self.body.names[n.index()];
-                let (line, releases) = (info.line, info.releases);
-                self.rhs(rhs, line, releases);
+                let line = self.body.names[n.index()].line;
+                let made = rhs.allocates(&self.body.names, Some(*n));
+                self.rhs(rhs, line, made.is_some());
                 if let Rhs::Read(p) | Rhs::Take(p) = rhs {
                     self.place(p);
                 }
                 // An owned name born of a primitive or a literal is an
                 // allocation; one born of a call is judged at the call.
-                if matches!(rhs, Rhs::Prim(..) | Rhs::Make(..)) && releases {
+                if matches!(made, Some(Made::Prim(_) | Made::Make(_))) {
                     self.out.own = self.out.own.with(Effect::Alloc);
                 }
             }

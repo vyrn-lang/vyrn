@@ -42,6 +42,10 @@ pub struct World {
     /// `gen fn`'s, with the instance's module: what [`crate::effects::reaches`]
     /// reads.
     pub(crate) reached: Vec<(Option<String>, vyrn_frontend::effects::Effects)>,
+    /// The functions whose effect set holds `alloc`, as the placer judged
+    /// them: what [`World::allocates`] answers. A body the judgment memo
+    /// served is not among them.
+    pub(crate) allocating: HashSet<FnId>,
     /// Whether a placed release named an instance the first lowering lacked.
     /// `reached` holds no such instance, so [`crate::effects::reaches`] judges
     /// the program as placed instead.
@@ -341,7 +345,12 @@ impl World {
     /// `None` for a gap and for a name two bodies share; a reader then walks
     /// the source.
     pub fn body_of(&self, name: &str) -> Option<&Body> {
-        let s = self.bodies.get(&self.fn_id(name)?)?.as_ref()?;
+        self.body_at(self.fn_id(name)?)
+    }
+
+    /// [`World::body_of`] for the function table's row `id`.
+    pub fn body_at(&self, id: FnId) -> Option<&Body> {
+        let s = self.bodies.get(&id)?.as_ref()?;
         if !crate::core::decides() {
             return Some(&s.body);
         }
@@ -350,6 +359,11 @@ impl World {
             crate::elide::decide(&mut body, self.ownership.proto.types());
             body
         }))
+    }
+
+    /// Whether a call to `f` may allocate: its effect set holds `alloc`.
+    pub fn allocates(&self, f: FnId) -> bool {
+        self.allocating.contains(&f)
     }
 
     /// The functions `f`'s bodies call ([`Calls`]), in source order.

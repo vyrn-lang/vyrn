@@ -13,6 +13,7 @@ pub mod effects;
 pub mod elide;
 pub mod facts;
 mod fixpoint;
+pub mod insight;
 pub mod kernel;
 mod pipeline;
 pub mod rules;
@@ -252,7 +253,7 @@ impl<'a> Lowered<'a> {
 
 /// The named core of `program`'s root-module instances, as `vyrn emit-lowered`
 /// prints it: the version line, then each body's [`vyrn_frontend::core::Body::render`], or the
-/// gap that stopped it. Root-module only, `vyrn why --memory`'s rule: a linked
+/// gap that stopped it. Root-module only, as `vyrn why --cost`: a linked
 /// program's imports are another file's answer. `world` is `program`'s.
 pub fn render(program: &Program, world: &World, source: &str) -> String {
     let own = &world.ownership;

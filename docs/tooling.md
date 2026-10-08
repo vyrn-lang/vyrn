@@ -193,9 +193,12 @@ compile, except `--contract`.
   `.vyx` page is read from its `<script>`, as `vyxPageInterface` reads it. The
   app root is the editor's: the directory of the nearest `vyrn.json`, at any
   depth, else the file's directory. Exits 1 if the file has no role.
-- `vyrn why --memory <file>`: per binding, whether it is reclaimed, how, and the
-  reason when it is not. A binding whose type owns no heap has no row. The LSP's hover and inlay hints use the same table and
-  wording.
+- `vyrn why --cost <file>`: per function of the file, the lines that allocate,
+  copy, grow a container, enter an allocating function of another file or keep
+  a check, with the loop depth of each, and a summary. A call into a function of
+  another file counts that function's allocations at the calling line. A
+  function with nothing to report is left out. The LSP's hover keeps the
+  per-binding memory rows.
 - `vyrn why --capability <fs|stdin|args|extern> <entry-or-artifact>`: every
   import chain that pulls that capability into an artifact's closure.
 

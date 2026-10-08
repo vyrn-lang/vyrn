@@ -30,7 +30,7 @@ export fn head() -> Head {
 /// An angle bracket written in a template is escaped twice, so the command that
 /// contains one is built here instead.
 fn whyCommand() -> String {
-    return "vyrn why --memory <file>"
+    return "vyrn why --cost <file>"
 }
 
 fn nonGoals() -> Array<NonGoal> {
@@ -118,7 +118,7 @@ fn capabilities() -> Array<Capability> {
                     </div>
                 </div>
             </div>
-            <p><code>{{ whyCommand() }}</code> names the site each binding is reclaimed at, and the reason when it is not. <a href="/guide/ownership.html">The chapter on ownership walks one.</a></p>
+            <p><code>{{ whyCommand() }}</code> names the lines that allocate, copy and keep a check. <a href="/guide/ownership.html">The chapter on ownership walks one.</a></p>
         </section>
 
         <section class="band" id="refuses">

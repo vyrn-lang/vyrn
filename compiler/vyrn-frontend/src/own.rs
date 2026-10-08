@@ -1,5 +1,5 @@
 //! Whole-program ownership facts the emitters read: the release vocabulary
-//! ([`Release`], [`Exit`], [`DropKind`]) and the `vyrn why --memory` rows.
+//! ([`Release`], [`Exit`], [`DropKind`]) and the editor's memory rows.
 //! [`Owned`] answers what owns; the core's placer decides what is released
 //! where. Nodes are keyed by [`NodeId`], which a clone keeps.
 
@@ -70,8 +70,8 @@ pub enum DropKind {
 }
 
 impl DropKind {
-    /// Returns how this kind reclaims, in the words `vyrn why --memory` and the
-    /// LSP hover both print, as `sp` spells a type.
+    /// Returns how this kind reclaims, in the words the LSP hover
+    /// prints, as `sp` spells a type.
     pub fn words(&self, sp: &crate::ast::Speech) -> String {
         match self {
             DropKind::FreeStr => "freeing the String buffer".into(),
@@ -98,8 +98,8 @@ pub enum Linear {
     Declared(String),
 }
 
-/// One `let` binding and what happens to its value, for `vyrn why --memory`
-/// and the editor's memory hints. The core's placer writes it.
+/// One `let` binding and what happens to its value, for the editor's memory
+/// hints. The core's placer writes it.
 #[derive(Clone, Debug)]
 pub struct MemoryRow {
     pub name: String,
@@ -115,8 +115,7 @@ pub struct MemoryRow {
     pub bucket: Bucket,
 }
 
-/// The counters `vyrn why --memory` sums, and the grouping its leak table
-/// prints.
+/// How a binding's value ends.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Bucket {
     Reclaimed,

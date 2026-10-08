@@ -7726,7 +7726,7 @@ pub fn augment(program: &Program, w: &mut World, judging: bool) {
     // A body that did not build gives the judgment nothing, served or not.
     let late: Vec<(&str, &[Walked])> = states.iter().filter_map(JobState::answered).collect();
     let places = build_places(program, &lowered, own, &mut w.fns);
-    let (mut state, read, answers, reached) = crate::effects::judge_built(
+    let (mut state, read, answers, reached, allocating) = crate::effects::judge_built(
         program,
         &lowered,
         own,
@@ -7763,11 +7763,16 @@ pub fn augment(program: &Program, w: &mut World, judging: bool) {
                     _ => None,
                 })
                 .collect();
-            (judged.state_table(refs), read, answers, reached)
+            let allocating: HashSet<FnId> = (refs.iter().zip(&judged.effects))
+                .filter(|(_, e)| e.has(vyrn_frontend::effects::Effect::Alloc))
+                .filter_map(|(b, _)| b.id)
+                .collect();
+            (judged.state_table(refs), read, answers, reached, allocating)
         },
     );
     drop((tops, late));
     w.reached = reached;
+    w.allocating = allocating;
     for (s, r) in (states.iter_mut().filter(|s| s.built().is_some())).zip(read) {
         s.kept = r;
     }
@@ -8284,8 +8289,7 @@ fn remember(
     );
 }
 
-/// The memory report for one frame, read by `vyrn why --memory` and the
-/// editor's memory hints: one row per source `let`, in line order. Every word
+/// The memory report for one frame, read by the editor's memory hints: one row per source `let`, in line order. Every word
 /// comes off the core: the type table says how the type is released, the
 /// `let` whose the value is ([`NameInfo::not_owned`]), and the kernel what
 /// took it and where the release stands.

@@ -265,13 +265,12 @@ fn a_declared_impl_in_an_injected_module_is_reached_in_both_link_modes() {
             String::from_utf8_lossy(&run.stdout),
             String::from_utf8_lossy(&run.stderr)
         );
-        let why = vyrn()
-            .arg("why")
-            .arg("--memory")
-            .arg(&file)
-            .output()
-            .expect("vyrn why");
-        let report = String::from_utf8_lossy(&why.stdout).to_string();
+        let engine = vyrn_genwasm::engine();
+        let rows =
+            vyrn_frontend::symbols::analyze_judged(src, None, Some(&*engine), &vyrn_lower::JUDGE);
+        let report: String = (rows.memory.iter())
+            .map(|m| format!("{} {}\n", m.name, m.text))
+            .collect();
         assert!(
             report.contains(&format!("calling `{release}`")),
             "{name}: expected the declared release `{release}`:\n{report}"

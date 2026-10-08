@@ -1,0 +1,40 @@
+examples/knucleotide.vyrn
+fn namedFragments() -> Array<String>
+   34           allocates  array literal
+fn thirdSequence() -> Array<UInt8>
+   63  loop 1   allocates  readLine(..)
+   67  loop 1   allocates  bytes(..)
+       loop 1   enters     toUpper(..) in std/strings
+   68  loop 2   grows      push(..)
+fn countKmers(seq: Array<UInt8>, k: Int64) -> Map<Int64, Int64>
+   78           allocates  map literal
+   86  loop 1   check kept int-rem-zero
+   88  loop 1   grows      tally(..)
+fn unpack(key: Int64, k: Int64) -> String
+   97           allocates  bytes(..)
+   99           grows      reserve(..)
+  102  loop 1   grows      push(..)
+       loop 1   check kept array-index
+  105           allocates  stringFromBytes(..)
+fn pack(frag: String) -> Int64
+  114           allocates  bytes(..)
+fn fixed3(x: Float64) -> String
+  124           allocates  render
+  126  loop 1   copies     a String render
+       loop 1   allocates  concatenation
+  128           copies     a String render
+                allocates  render, concatenation x2
+fn ranked(m: Map<Int64, Int64>) -> Array<Entry>
+  152           allocates  keys(..)
+  157  loop 1   grows      push(..)
+fn report(seq: Array<UInt8>, k: Int64) -> Unit
+  169  loop 1   copies     a String render x2
+       loop 1   allocates  concatenation x2
+fn syntheticSequence(n: Int64) -> Array<UInt8>
+  196           allocates  bytes(..)
+  202  loop 1   grows      push(..)
+       loop 1   check kept array-index
+fn main() -> Int64
+  223  loop 1   copies     a String render
+       loop 1   allocates  render, concatenation x2
+summary: allocating rows 20 (9 in loops), growing rows 6 (5 in loops), copies 5 (4 in loops), checks kept 3 (3 in loops), checks proved 19 (14 in loops)

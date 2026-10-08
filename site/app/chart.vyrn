@@ -566,7 +566,7 @@ export fn compiledGrid() -> Array<Grid> {
 // number, the bars and the report cannot disagree, because they are one value.
 // ---------------------------------------------------------------------------
 
-/// One binding, as `vyrn why --memory` reports it: where it is declared, the
+/// One binding, as the editor's hover reports it: where it is declared, the
 /// last line it is alive on, and the tool's own words for how it ends.
 export type Life = { name: String, from: Int64, to: Int64, fate: String }
 
