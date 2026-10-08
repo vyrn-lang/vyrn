@@ -5788,8 +5788,7 @@ impl<'a> Builder<'a> {
                     &self.body.speech(),
                 );
                 self.body.mistyped.extend(at);
-                let mut r =
-                    self.call(name, args, *line, self.produced(e), self.ty_of(e).ok(), out)?;
+                let mut r = self.call(name, args, *line, self.produced(e), Some(e), out)?;
                 if let Rhs::Call {
                     kind: Callee::Fn(_),
                     solved,
@@ -6325,16 +6324,16 @@ impl<'a> Builder<'a> {
         }
     }
 
-    /// The call `name(args)` producing `ret`, flowing into `dest` where the
-    /// caller knows it: a constructor's payload slots take their types from
-    /// it (`Some(lit)` into `Option<Key>`).
+    /// The call `name(args)` producing `ret`. `dest` is the call expression
+    /// where the caller has one: a constructor's payload slots take their types
+    /// from its checked type (`Some(lit)` into `Option<Key>`).
     fn call(
         &mut self,
         name: &str,
         args: &'a [Expr],
         line: usize,
         ret: Option<Type>,
-        dest: Option<Type>,
+        dest: Option<&'a Expr>,
         out: &mut Vec<St>,
     ) -> Result<Rhs, Gap> {
         // `a[i]` asks the receiver's type for `at` before any builtin row, as
@@ -6551,8 +6550,15 @@ impl<'a> Builder<'a> {
                 .map(|p| p.ty.clone())
                 .collect(),
             (Callee::Ctor, Some(dest)) => {
-                match vyrn_frontend::types::resolve(&dest, self.proto.types()) {
-                    Type::Enum(vs) => vs.into_iter().find(|v| v.name == name).map(|v| v.payload),
+                let dest = self.ty_of(dest).ok();
+                let decls = self.proto.types();
+                let variants = dest
+                    .as_ref()
+                    .map(|d| vyrn_frontend::types::resolved(d, decls));
+                match variants.as_deref() {
+                    Some(Type::Enum(vs)) => {
+                        (vs.iter().find(|v| v.name == name)).map(|v| v.payload.clone())
+                    }
                     _ => None,
                 }
                 .unwrap_or_default()
