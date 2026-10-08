@@ -1312,7 +1312,10 @@ fn judge(
 
 struct Rig {
     dir: PathBuf,
-    route: bool,
+    /// wasm2c and simde as the repo resolves them, or `None` to skip the
+    /// route's leg. A program is built from the scratch directory, where the
+    /// pin walk finds no `vyrn.lock`, so the build is handed the paths.
+    route: Option<(PathBuf, PathBuf)>,
     engine_us: AtomicUsize,
     route_us: AtomicUsize,
 }
@@ -1357,13 +1360,15 @@ impl Rig {
         let file = self.dir.join(format!("{tag}.vyrn"));
         std::fs::write(&file, src).unwrap();
         let (mut kinds, mut detail) = (Vec::new(), String::new());
-        if !self.route {
+        let Some((wasm2c, simde)) = &self.route else {
             return (kinds, detail);
-        }
+        };
         let t0 = std::time::Instant::now();
         let exe = self.dir.join(format!("{tag}.exe"));
         let build = vyrn()
             .env("VYRN_LEAK_CHECK", "1")
+            .env("VYRN_WASM2C", wasm2c)
+            .env("VYRN_SIMDE", simde)
             .arg("build")
             .arg(&file)
             .arg("-o")
@@ -1448,13 +1453,13 @@ fn every_ownership_shape_is_refused_or_runs_clean() {
     let only = std::env::var("VYRN_SHAPESWEEP_ONLY").ok();
     let dir = scratch("shapesweep");
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let route = vyrn_codegen::toolchain::wasm2c_from(&root)
-        .ok()
-        .flatten()
-        .is_some()
-        && vyrn_codegen::toolchain::simde_from(&root).is_some()
-        && vyrn_codegen::toolchain::find_clang().is_some();
-    if !route {
+    let wasm2c = vyrn_codegen::toolchain::wasm2c_from(&root).ok().flatten();
+    let simde = vyrn_codegen::toolchain::simde_from(&root);
+    let route = match (wasm2c, simde, vyrn_codegen::toolchain::find_clang()) {
+        (Some(w), Some((s, _)), Some(_)) => Some((w.exe, s)),
+        _ => None,
+    };
+    if route.is_none() {
         eprintln!("SKIP the route's leg: clang, wabt or simde is missing");
     }
     let rig = Rig {
