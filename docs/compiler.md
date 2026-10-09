@@ -194,7 +194,8 @@ runs into that file and fails a run where a proved row would have trapped.
 `scripts/check-elision.sh` runs the examples, the benchmarks and the site
 export in all three modes. `elide::decide` marks a row proved when linear
 facts over one body's own names (`facts`) show it cannot fail, with a
-certificate `facts::Cert::verify` checks again. A fact may name the length of
+certificate `facts::Cert::verify` checks again, or, for a divisor, a
+disequality `d != 0` the state holds. A fact may name the length of
 a record name's array field, and a `where` rule's `a.length == b.length` makes
 one term of both (`facts::Term::Col`), except inside a group of stores into
 the record's fields, where each field has its own term until the row that

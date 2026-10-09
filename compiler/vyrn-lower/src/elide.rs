@@ -17,7 +17,8 @@
 //! The walk knows nothing about a global, a field or an element: each read of
 //! one is a fresh value with its type's range. An exact sum is an `Int64` sum
 //! that provably stays in `-2^62..=2^62`. A row is proved only with a
-//! certificate that [`crate::facts::Cert::verify`] accepts.
+//! certificate that [`crate::facts::Cert::verify`] accepts, or a divisor the
+//! state holds unequal to zero.
 //!
 //! One postulate: a live read borrow's source is not written, by the kernel's
 //! exclusivity judgment, so a borrow's length changes only where the walk sees
@@ -29,7 +30,7 @@ use vyrn_frontend::ast::{BinOp, Capability, FnId, Type, TypeDecl, UnOp};
 use vyrn_frontend::prelude::{self, Length};
 use vyrn_frontend::prim::Cmp;
 
-use crate::facts::{Lin, State, Term};
+use crate::facts::{Fact, Lin, State, Term};
 use vyrn_frontend::core::check::{Guard, Site, Verdict};
 use vyrn_frontend::core::{rows, Arg, Body, Callee, Ctor, Lit, Name, Op, Place, Rhs, St, Val};
 use vyrn_frontend::par::in_parallel;
@@ -352,7 +353,7 @@ struct Walk<'a> {
 enum Out {
     Def(Lin),
     /// The facts the result's truth gives, and those its falsehood gives.
-    Cond(Vec<Lin>, Vec<Lin>),
+    Cond(Vec<Fact>, Vec<Fact>),
     Facts(Vec<Lin>),
     Nothing,
 }
@@ -656,8 +657,8 @@ impl<'a> Walk<'a> {
                     Val::Name(c) => {
                         let (t, f) = st.conds.get(c).cloned().unwrap_or_default();
                         let (mut yes, mut no) = (st.clone(), st.clone());
-                        t.iter().for_each(|l| yes.assume(l));
-                        f.iter().for_each(|l| no.assume(l));
+                        t.iter().for_each(|l| yes.add(l));
+                        f.iter().for_each(|l| no.add(l));
                         (yes, no)
                     }
                     _ => (st.clone(), st.clone()),
@@ -708,7 +709,7 @@ impl<'a> Walk<'a> {
             }
             St::Trap => State::dead(),
             St::Check(c) => {
-                let goals = self.goals(&c.guard);
+                let goals = self.goals(&st, &c.guard);
                 // A summary's walk writes no verdict: its copy of the rows is dropped.
                 if self.record && self.post.is_none() {
                     let holds = |g: &Lin| st.ge0(g).is_some_and(|cert| cert.verify(&st, g));
@@ -744,6 +745,11 @@ impl<'a> Walk<'a> {
                         st.assume(&g);
                     }
                 }
+                if let Guard::NonZero(d) = &c.guard {
+                    if let Some(d) = self.lin(d) {
+                        st.differ(&d);
+                    }
+                }
                 st
             }
         }
@@ -751,7 +757,7 @@ impl<'a> Walk<'a> {
 
     /// What must be `>= 0` for the check to pass, as far as linear facts can
     /// say; `None` when they cannot say it all.
-    fn goals(&self, g: &Guard) -> Option<Vec<Lin>> {
+    fn goals(&self, st: &State, g: &Guard) -> Option<Vec<Lin>> {
         let len = |p: &Place| self.length(p).map(Lin::of);
         Some(match g {
             Guard::Index(p, i) => {
@@ -771,7 +777,8 @@ impl<'a> Walk<'a> {
                 match d.is_const() {
                     true if d.c != 0 => vec![],
                     true => return None,
-                    // Only a divisor of one sign proves nonzero linearly.
+                    false if st.differs(&d) => vec![],
+                    // Otherwise only a divisor of one sign proves nonzero.
                     false => vec![d.plus(-1)?],
                 }
             }
@@ -963,7 +970,7 @@ impl<'a> Walk<'a> {
                 }
             }
             (Val::Lit(Lit::Bool(b)), _) => {
-                let never = vec![Lin::k(-1)];
+                let never = vec![Fact::Ge(Lin::k(-1))];
                 let c = if *b {
                     (Vec::new(), never)
                 } else {
@@ -1036,28 +1043,33 @@ impl<'a> Walk<'a> {
                 if wide(a) || wide(b) {
                     return Out::Nothing;
                 }
+                let ge = |l: Option<Lin>| l.map(Fact::Ge);
                 let (t, f) = match o.compare() {
                     // `x > y` is `x - y - 1 >= 0`, and `x >= y` is `x - y >= 0`.
                     Some(Cmp::Order { strict, flipped }) => {
                         let (x, y) = if flipped { (&lb, &la) } else { (&la, &lb) };
                         let s = i64::from(strict);
                         let holds = x.sub(y).and_then(|d| d.plus(-s));
-                        (vec![holds], vec![y.sub(x).and_then(|d| d.plus(s - 1))])
+                        (
+                            vec![ge(holds)],
+                            vec![ge(y.sub(x).and_then(|d| d.plus(s - 1)))],
+                        )
                     }
                     Some(Cmp::Equal { negated }) => {
-                        let both = vec![la.sub(&lb), lb.sub(&la)];
+                        let both = vec![ge(la.sub(&lb)), ge(lb.sub(&la))];
+                        let differ = vec![la.sub(&lb).map(Fact::Ne)];
                         if negated {
-                            (vec![], both)
+                            (differ, both)
                         } else {
-                            (both, vec![])
+                            (both, differ)
                         }
                     }
                     None => return self.bound(pre, n, *o, &la, &lb),
                 };
-                let norm = |ls: Vec<Option<Lin>>| {
-                    ls.into_iter()
+                let norm = |fs: Vec<Option<Fact>>| {
+                    fs.into_iter()
                         .flatten()
-                        .filter_map(|l| pre.norm(&l))
+                        .filter_map(|f| f.map(|l| pre.norm(l)))
                         .collect()
                 };
                 Out::Cond(norm(t), norm(f))
@@ -1099,7 +1111,7 @@ impl<'a> Walk<'a> {
         let (Some((at, af)), Some((bt, bf))) = (pre.conds.get(a), pre.conds.get(b)) else {
             return Out::Nothing;
         };
-        let both = |x: &Vec<Lin>, y: &Vec<Lin>| x.iter().chain(y).cloned().collect::<Vec<_>>();
+        let both = |x: &Vec<Fact>, y: &Vec<Fact>| x.iter().chain(y).cloned().collect::<Vec<_>>();
         match o {
             BinOp::And => Out::Cond(both(at, bt), Vec::new()),
             BinOp::Or => Out::Cond(Vec::new(), both(af, bf)),

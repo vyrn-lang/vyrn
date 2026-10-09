@@ -2,10 +2,11 @@
 //! pass ([`crate::elide`]) proves checks in.
 //!
 //! A [`Lin`] is an exact integer sum `c + k1*t1 + k2*t2 ..` over [`Term`]s. A
-//! fact is a `Lin` known to be `>= 0`. A [`State`] holds facts and definitions
-//! `term = Lin`; a defined term appears in no fact and no other definition, so
-//! [`State::norm`] substitutes once. Every operation on a `Lin` is checked: an
-//! overflow answers `None` and proves nothing.
+//! fact is a `Lin` known to be `>= 0`; a disequality, a `Lin` known to be
+//! `!= 0`. A [`State`] holds both and definitions `term = Lin`; a defined term
+//! appears in no fact, disequality or other definition, so [`State::norm`]
+//! substitutes once. Every operation on a `Lin` is checked: an overflow
+//! answers `None` and proves nothing.
 //!
 //! [`State::ge0`] answers with a [`Cert`]: the premises it used, each a fact of
 //! the state or a length axiom, whose sum the goal exceeds by a constant.
@@ -163,6 +164,29 @@ impl Lin {
     }
 }
 
+/// What a condition states: `l >= 0`, or `l != 0`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum Fact {
+    Ge(Lin),
+    Ne(Lin),
+}
+
+impl Fact {
+    fn lin(&self) -> &Lin {
+        match self {
+            Fact::Ge(l) | Fact::Ne(l) => l,
+        }
+    }
+
+    /// The same statement of `by(l)`.
+    pub fn map(&self, by: impl FnOnce(&Lin) -> Option<Lin>) -> Option<Fact> {
+        Some(match self {
+            Fact::Ge(l) => Fact::Ge(by(l)?),
+            Fact::Ne(l) => Fact::Ne(by(l)?),
+        })
+    }
+}
+
 /// Why a goal holds: `goal = sum(uses) + slack`, `slack >= 0`, each use a fact
 /// of the state or a length axiom. A dead state proves every goal.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -210,10 +234,12 @@ const LEN_MAX: i64 = vyrn_frontend::trap::LENGTH_LIMIT as i64 + 1;
 pub struct State {
     /// Each `>= 0`, normalized.
     pub facts: BTreeSet<Lin>,
+    /// Each `!= 0`, normalized, in the form [`canon`] gives.
+    pub ne: BTreeSet<Lin>,
     /// `term = Lin`; see the module doc for the invariant.
     pub defs: BTreeMap<Term, Lin>,
     /// Per Bool name, the facts its truth gives and those its falsehood gives.
-    pub conds: BTreeMap<Name, (Vec<Lin>, Vec<Lin>)>,
+    pub conds: BTreeMap<Name, (Vec<Fact>, Vec<Fact>)>,
     pub dead: bool,
 }
 
@@ -256,6 +282,62 @@ impl State {
         }
     }
 
+    /// Adds `f`.
+    pub fn add(&mut self, f: &Fact) {
+        match f {
+            Fact::Ge(l) => self.assume(l),
+            Fact::Ne(l) => self.differ(l),
+        }
+    }
+
+    /// Adds `l != 0`, then raises the bounds it touches ([`State::tighten`]).
+    pub fn differ(&mut self, l: &Lin) {
+        match self.norm(l).and_then(canon) {
+            Some(n) if n.is_const() => {
+                if n.c == 0 {
+                    *self = State::dead();
+                }
+            }
+            Some(n) => {
+                self.ne.insert(n);
+                self.tighten();
+            }
+            None => {}
+        }
+    }
+
+    /// Whether the state holds `l != 0` without a bound: `l` is a nonzero
+    /// constant or a disequality.
+    pub fn differs(&self, l: &Lin) -> bool {
+        match self.norm(l).and_then(canon) {
+            Some(n) if n.is_const() => n.c != 0,
+            Some(n) => self.ne.contains(&n),
+            None => false,
+        }
+    }
+
+    /// For each disequality `d != 0` and each sign `e` of `d`, raises
+    /// `e >= 0` to `e - 1 >= 0`. A round adds such a bound or stops, and a
+    /// pair of disequality and sign adds at most one, since `e - 1 >= 0` then
+    /// holds. So two rounds per disequality bound the loop.
+    fn tighten(&mut self) {
+        for _ in 0..=2 * self.ne.len() {
+            let p = self.prover();
+            let raised: Vec<Lin> = (self.ne.iter())
+                .flat_map(|d| [Some(d.clone()), d.scale(-1)])
+                .flatten()
+                .filter_map(|e| {
+                    let up = e.plus(-1)?;
+                    (p.ge0(&e).is_some() && p.ge0(&up).is_none()).then_some(up)
+                })
+                .collect();
+            if raised.is_empty() {
+                return;
+            }
+            raised.iter().for_each(|l| self.assume(l));
+        }
+    }
+
     /// Adds `a = b` as two facts.
     pub fn assume_eq(&mut self, a: &Lin, b: &Lin) {
         if let (Some(x), Some(y)) = (a.sub(b), b.sub(a)) {
@@ -291,9 +373,10 @@ impl State {
         }
         self.conds.remove(&n);
         self.facts.retain(|f| !f.mentions_name(n));
+        self.ne.retain(|d| !d.mentions_name(n));
         self.defs.retain(|_, v| !v.mentions_name(n));
         self.conds
-            .retain(|_, (a, b)| !a.iter().chain(b.iter()).any(|l| l.mentions_name(n)));
+            .retain(|_, (a, b)| !a.iter().chain(b.iter()).any(|f| f.lin().mentions_name(n)));
     }
 
     /// Forgets `n` as [`State::kill`] does, keeping what the facts state
@@ -337,9 +420,10 @@ impl State {
         self.defs.remove(&t);
         self.restate(t);
         self.facts.retain(|f| !f.mentions(t));
+        self.ne.retain(|d| !d.mentions(t));
         self.defs.retain(|_, v| !v.mentions(t));
         self.conds
-            .retain(|_, (a, b)| !a.iter().chain(b.iter()).any(|l| l.mentions(t)));
+            .retain(|_, (a, b)| !a.iter().chain(b.iter()).any(|f| f.lin().mentions(t)));
     }
 
     /// Moves the length `t` by an unknown amount in `lo..=hi`. A fact with
@@ -355,8 +439,9 @@ impl State {
             facts.extend(Lin::of(d).sub(&v));
             facts.extend(v.sub(&Lin::of(d)));
         }
+        self.ne.retain(|d| !d.mentions(t));
         self.conds
-            .retain(|_, (a, b)| !a.iter().chain(b.iter()).any(|l| l.coef(t) != 0));
+            .retain(|_, (a, b)| !a.iter().chain(b.iter()).any(|f| f.lin().mentions(t)));
         for f in facts {
             let k = f.coef(t);
             let moved = k
@@ -389,15 +474,20 @@ impl State {
             .chain(axioms([x].into_iter()))
             .filter_map(|f| sub(&f))
             .collect();
+        self.ne = std::mem::take(&mut self.ne)
+            .into_iter()
+            .filter_map(|d| sub(&d).and_then(canon))
+            .filter(|d| !d.is_const())
+            .collect();
         for v in self.defs.values_mut() {
             if let Some(n) = sub(v) {
                 *v = n;
             }
         }
         for (a, b) in self.conds.values_mut() {
-            for l in a.iter_mut().chain(b.iter_mut()) {
-                if let Some(n) = sub(l) {
-                    *l = n;
+            for f in a.iter_mut().chain(b.iter_mut()) {
+                if let Some(n) = f.map(sub) {
+                    *f = n;
                 }
             }
         }
@@ -428,9 +518,9 @@ impl State {
         }
     }
 
-    /// The facts every live state of `sts` proves, the definitions they all
-    /// share, and per Bool name the facts each side gives on every path
-    /// ([`State::when`]).
+    /// The facts and disequalities every live state of `sts` proves, the
+    /// definitions they all share, and per Bool name the facts each side gives
+    /// on every path ([`State::when`]).
     pub fn join(sts: &[State]) -> State {
         let live: Vec<&State> = sts.iter().filter(|s| !s.dead).collect();
         if live.len() < 2 {
@@ -462,7 +552,8 @@ impl State {
         out
     }
 
-    /// The facts and definitions of [`State::join`], without conditions.
+    /// The facts, disequalities and definitions of [`State::join`], without
+    /// conditions.
     fn common(live: &[&State]) -> State {
         let Some(first) = live.first() else {
             return State::dead();
@@ -484,6 +575,12 @@ impl State {
                 out.assume(&c);
             }
         }
+        let ne: BTreeSet<&Lin> = live.iter().flat_map(|s| &s.ne).collect();
+        for d in ne {
+            if provers.iter().all(|p| p.differs(d)) {
+                out.ne.extend(out.norm(d).and_then(canon));
+            }
+        }
         out
     }
 
@@ -503,9 +600,9 @@ impl State {
         live: &[&State],
         n: Name,
         known: &Prover,
-        side: impl Fn(&(Vec<Lin>, Vec<Lin>)) -> &Vec<Lin>,
-    ) -> Vec<Lin> {
-        let given: Vec<&Vec<Lin>> = live.iter().map(|s| side(&s.conds[&n])).collect();
+        side: impl Fn(&(Vec<Fact>, Vec<Fact>)) -> &Vec<Fact>,
+    ) -> Vec<Fact> {
+        let given: Vec<&Vec<Fact>> = live.iter().map(|s| side(&s.conds[&n])).collect();
         if given.iter().all(|g| *g == given[0]) {
             return given[0].clone();
         }
@@ -513,10 +610,11 @@ impl State {
             .map(|(s, g)| {
                 let mut s = State {
                     facts: s.facts.clone(),
+                    ne: s.ne.clone(),
                     defs: s.defs.clone(),
                     ..State::default()
                 };
-                g.iter().for_each(|l| s.assume(l));
+                g.iter().for_each(|f| s.add(f));
                 s
             })
             .filter(|s| !s.dead)
@@ -526,11 +624,13 @@ impl State {
             _ => State::common(&under.iter().collect::<Vec<_>>()),
         };
         if j.dead {
-            return vec![Lin::k(-1)];
+            return vec![Fact::Ge(Lin::k(-1))];
         }
         (j.facts.iter().cloned())
             .chain(j.unshared(known.st))
             .filter(|c| known.ge0(c).is_none())
+            .map(Fact::Ge)
+            .chain((j.ne.iter().filter(|d| !known.differs(d))).map(|d| Fact::Ne(d.clone())))
             .collect()
     }
 }
@@ -546,6 +646,14 @@ pub struct Prover<'a> {
 }
 
 impl Prover<'_> {
+    /// Whether the state proves `l != 0`: it holds it ([`State::differs`]),
+    /// or a bound keeps `l` above or below zero.
+    pub fn differs(&self, l: &Lin) -> bool {
+        let off =
+            |e: Option<Lin>| (e.and_then(|e| e.plus(-1))).is_some_and(|e| self.ge0(&e).is_some());
+        self.st.differs(l) || off(Some(l.clone())) || off(l.scale(-1))
+    }
+
     /// [`State::ge0`], over the index.
     pub fn ge0(&self, goal: &Lin) -> Option<Cert> {
         if self.st.dead {
@@ -589,6 +697,15 @@ impl Prover<'_> {
             }
         }
         None
+    }
+}
+
+/// `l` or `-l`, whichever has a positive first coefficient: the one form a
+/// state stores `l != 0` in.
+fn canon(l: Lin) -> Option<Lin> {
+    match l.terms.first() {
+        Some((_, k)) if *k < 0 => l.scale(-1),
+        _ => Some(l),
     }
 }
 

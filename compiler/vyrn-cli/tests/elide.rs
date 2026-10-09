@@ -139,6 +139,45 @@ fn a_sum_of_two_bounded_operands_is_exact() {
 }
 
 #[test]
+fn a_disequality_proves_its_divisor() {
+    let src = "fn w(a: Int64, b: Int64) -> Int64 {
+    if b == 0 {
+        return 0
+    }
+    return a / b
+}
+";
+    assert_eq!(
+        verdicts(src, "w"),
+        ["proved int-div-zero", "check int-div-overflow"]
+    );
+    let (err, rows) = oracle(src, "    print(w(7, -2).toString())", "w");
+    assert_eq!(
+        (err.as_str(), rows),
+        (
+            "",
+            vec![
+                "5 0 int-div-zero proved 1".to_string(),
+                "5 1 int-div-overflow kept 1".to_string()
+            ]
+        )
+    );
+}
+
+#[test]
+fn a_passed_divisor_check_proves_the_next() {
+    let src = "fn w(a: Int64, b: Int64) -> Int64 {\n    return a / b + a % b\n}\n";
+    assert_eq!(
+        verdicts(src, "w"),
+        [
+            "check int-div-zero",
+            "check int-div-overflow",
+            "proved int-rem-zero"
+        ]
+    );
+}
+
+#[test]
 fn a_join_restates_a_counter_through_each_branchs_temporaries() {
     let src = "fn w(xs: Array<Int64>) -> Int64 {
     let mut s: Int64 = 0
@@ -790,6 +829,13 @@ fn w(p: modify P) -> Int64 {
         "    print(w(1, 0).toString())",
         "division by zero",
     ),
+    // A store to the divisor drops its disequality.
+    (
+        "fn w(a: Int64, b: Int64) -> Int64 {\n    let mut c = b\n    if c == 0 {\n        return 0\n    }\n    \
+         c = c - b\n    return a / c\n}\n",
+        "    print(w(7, 3).toString())",
+        "division by zero",
+    ),
     // `-1` is a computed divisor: the quotient's check stays.
     (
         "fn w(x: Int64, y: Int64) -> Int64 {\n    return x / -y\n}\n",
@@ -1372,7 +1418,8 @@ fn main() -> Int64 {
         &[],
         "array index 3 out of bounds",
     ),
-    // A `swapRemove` after the call shrinks the array the result indexes.
+    // A `swapRemove` after the call shrinks the array the result indexes. Its
+    // own index is a parameter: `lastIndex` proves `ys` is not empty.
     (
         r#"fn lastIndex(a: Array<Int64>) -> Int64 {
     if a.length == 0 {
@@ -1380,15 +1427,15 @@ fn main() -> Int64 {
     }
     return a.length - 1
 }
-fn w(xs: Array<Int64>) -> Int64 {
+fn w(xs: Array<Int64>, k: Int64) -> Int64 {
     let mut ys = xs.copy()
     let j = lastIndex(ys)
-    let gone = ys.swapRemove(0)
+    let gone = ys.swapRemove(k)
     return ys[j]
 }
 fn main() -> Int64 {
     let xs: Array<Int64> = [10, 20, 30]
-    print(w(xs).toString())
+    print(w(xs, 0).toString())
     return 0
 }
 "#,
