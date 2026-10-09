@@ -381,8 +381,16 @@ impl State {
         self.facts.retain(|f| !f.mentions_name(n));
         self.ne.retain(|d| !d.mentions_name(n));
         self.defs.retain(|_, v| !v.mentions_name(n));
-        self.conds
-            .retain(|_, (a, b)| !a.iter().chain(b.iter()).any(|f| f.lin().mentions_name(n)));
+        self.unsay(|l| l.mentions_name(n));
+    }
+
+    /// Drops each condition's facts that `stale` holds of: a side states the
+    /// rest of what it stated, which still follows from its truth.
+    fn unsay(&mut self, stale: impl Fn(&Lin) -> bool) {
+        for (a, b) in self.conds.values_mut() {
+            a.retain(|f| !stale(f.lin()));
+            b.retain(|f| !stale(f.lin()));
+        }
     }
 
     /// Forgets `n` as [`State::kill`] does, keeping what the facts state
@@ -428,8 +436,7 @@ impl State {
         self.facts.retain(|f| !f.mentions(t));
         self.ne.retain(|d| !d.mentions(t));
         self.defs.retain(|_, v| !v.mentions(t));
-        self.conds
-            .retain(|_, (a, b)| !a.iter().chain(b.iter()).any(|f| f.lin().mentions(t)));
+        self.unsay(|l| l.mentions(t));
     }
 
     /// Moves the length `t` by an unknown amount in `lo..=hi`. A fact with
@@ -446,8 +453,7 @@ impl State {
             facts.extend(v.sub(&Lin::of(d)));
         }
         self.ne.retain(|d| !d.mentions(t));
-        self.conds
-            .retain(|_, (a, b)| !a.iter().chain(b.iter()).any(|f| f.lin().mentions(t)));
+        self.unsay(|l| l.mentions(t));
         for f in facts {
             let k = f.coef(t);
             let moved = k
