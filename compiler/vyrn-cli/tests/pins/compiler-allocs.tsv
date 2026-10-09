@@ -9,13 +9,13 @@ build site/export.vyrn	parse (clone)	192730
 build site/export.vyrn	load: link	1058
 build site/export.vyrn	link: resolve_aliases	223225
 build site/export.vyrn	link: index	6128
-build site/export.vyrn	link: visibility	79982
+build site/export.vyrn	link: visibility	79981
 build site/export.vyrn	link: merge	995
-build site/export.vyrn	check	280012
+build site/export.vyrn	check	280014
 build site/export.vyrn	check: bodies	508325
 build site/export.vyrn	types::decl_map	9200
-build site/export.vyrn	synthesize	7462
-build site/export.vyrn	movecheck	13046
+build site/export.vyrn	synthesize	7461
+build site/export.vyrn	movecheck	13047
 build site/export.vyrn	own: analyze_now	3764
 build site/export.vyrn	own: Owned::new	7
 build site/export.vyrn	placer	169800
@@ -31,10 +31,10 @@ build site/export.vyrn	placer: report	22367
 build site/export.vyrn	placer: facts rebuild	277614
 build site/export.vyrn	placer: facts: rebuilt	3211
 build site/export.vyrn	codegen	37393
-build site/export.vyrn	codegen: checks	2646624
-build site/export.vyrn	elide: summaries	470998
+build site/export.vyrn	codegen: checks	2215233
+build site/export.vyrn	elide: summaries	1302222
 build site/export.vyrn	codegen: signatures	25174
-build site/export.vyrn	codegen: bodies	1746706
+build site/export.vyrn	codegen: bodies	1746502
 build site/export.vyrn	codegen: drain	34830
 build site/export.vyrn	codegen: finish	6337
 check site/export.vyrn	(outside)	50266
@@ -46,13 +46,13 @@ check site/export.vyrn	parse (clone)	192730
 check site/export.vyrn	load: link	1058
 check site/export.vyrn	link: resolve_aliases	223224
 check site/export.vyrn	link: index	6128
-check site/export.vyrn	link: visibility	79975
+check site/export.vyrn	link: visibility	79979
 check site/export.vyrn	link: merge	995
-check site/export.vyrn	check	280009
+check site/export.vyrn	check	280010
 check site/export.vyrn	check: bodies	508325
 check site/export.vyrn	types::decl_map	11040
 check site/export.vyrn	synthesize	7461
-check site/export.vyrn	movecheck	13046
+check site/export.vyrn	movecheck	13047
 check site/export.vyrn	own: analyze_now	3764
 check site/export.vyrn	own: Owned::new	7
 check site/export.vyrn	placer	169800
@@ -81,7 +81,7 @@ check examples/simdbench.vyrn	check	6960
 check examples/simdbench.vyrn	check: bodies	13049
 check examples/simdbench.vyrn	synthesize	2
 check examples/simdbench.vyrn	types::decl_map	705
-check examples/simdbench.vyrn	movecheck	1351
+check examples/simdbench.vyrn	movecheck	1352
 check examples/simdbench.vyrn	own: analyze_now	412
 check examples/simdbench.vyrn	placer	11024
 check examples/simdbench.vyrn	placer: lower_with	2487
@@ -108,8 +108,8 @@ check examples/vlog.vyrn	link: merge	293
 check examples/vlog.vyrn	check	67775
 check examples/vlog.vyrn	check: bodies	65494
 check examples/vlog.vyrn	types::decl_map	2154
-check examples/vlog.vyrn	synthesize	3344
-check examples/vlog.vyrn	movecheck	1934
+check examples/vlog.vyrn	synthesize	3343
+check examples/vlog.vyrn	movecheck	1935
 check examples/vlog.vyrn	own: analyze_now	657
 check examples/vlog.vyrn	own: Owned::new	3
 check examples/vlog.vyrn	placer	21332

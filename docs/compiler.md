@@ -197,15 +197,22 @@ only host import.
 `scripts/check-elision.sh` runs the examples, the benchmarks and the site
 export in all three modes. `elide::decide` marks a row proved when linear
 facts over one body's own names (`facts`) show it cannot fail, with a
-certificate `facts::Cert::verify` checks again. A fact may name the length of
+certificate `facts::Cert::verify` checks again, or, for a divisor, a
+disequality `d != 0` the state holds. A fact may name the length of
 a record name's array field, and a `where` rule's `a.length == b.length` makes
 one term of both (`facts::Term::Col`), except inside a group of stores into
 the record's fields, where each field has its own term until the row that
-checks the rule (`check::Guard::Rule`); `World::body_of` decides a body
+checks the rule (`check::Guard::Rule`). A fact may name the value of a
+`read` parameter's integer field (`facts::Term::Field`): the kernel's
+exclusivity judgment keeps the parameter unwritten, so each read of the
+field is one value. `World::body_of` decides a body
 when an emitter first reads it. A direct call's result takes the facts every
 return of its callee proves (`elide::summaries`, keyed by `FnId`, solved once
 per World by `fixpoint::descend`); a call through a value, a method, a
-projection or a generic instance takes none. The same walk answers a group's rule check
+projection or a generic instance takes none. A private function that only
+direct call rows enter starts with the facts every such row proves of its
+arguments (`World::summaries` lists the candidates, `elide::entered` drops a
+function any row spells by name). The same walk answers a group's rule check
 that the facts prove false (`elide::refuted`); `vyrn check` states and walks
 its own copy of a body with a group for it, and `typed::groups` refuses each
 such group at its first store. A right-hand side (`core::Rhs`) is a value, a `Read` or `Take` of a

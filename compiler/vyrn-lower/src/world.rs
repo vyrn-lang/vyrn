@@ -55,9 +55,15 @@ pub struct World {
     /// placer judged them, a body the judgment memo served included, with their file: what
     /// [`World::allocating_file`] answers.
     pub(crate) allocating: HashMap<FnId, Arc<str>>,
-    /// What every return of each directly called body states, made once from
-    /// `bodies` when an emitter first decides one ([`World::summaries`]).
+    /// What every entry and every return of each directly called body
+    /// states, made once from `bodies` when an emitter first decides one
+    /// ([`World::summaries`]).
     summaries: OnceLock<crate::elide::Summaries>,
+    /// The declared functions only a call can enter: none is `export`,
+    /// `extern`, `gen`, `main`, synthesized, an `impl` method or a runtime
+    /// module's (a `$` spelling), or has a type parameter or a `fn`-typed
+    /// parameter. [`World::summaries`] keeps those whose every caller it walks.
+    private: Vec<FnId>,
     /// Whether a placed release named an instance the first lowering lacked.
     /// `reached` holds no such instance, so [`crate::effects::reaches`] judges
     /// the program as placed instead.
@@ -317,8 +323,28 @@ impl World {
                 ks.push(k.clone());
             }
         }
+        let decls = ownership.proto.types();
+        let fn_param = |p: &vyrn_frontend::ast::Param| {
+            matches!(&*vyrn_frontend::types::resolved(&p.ty, decls), Type::Fn(..))
+        };
+        let private = (0..program.functions.len())
+            .filter(|&i| {
+                let f = &program.functions[i];
+                !(f.exported
+                    || f.is_extern
+                    || f.is_export_extern
+                    || f.is_gen
+                    || !f.type_params.is_empty()
+                    || f.line == 0
+                    || f.name == "main"
+                    || f.name.contains('$')
+                    || f.params.iter().any(fn_param))
+            })
+            .map(FnId::nth)
+            .collect();
         let mut world = World {
             ownership,
+            private,
             ..World::default()
         };
         world.reads.replace(rows);
@@ -352,24 +378,43 @@ impl World {
             return Some(&s.body);
         }
         Some(s.decided.get_or_init(|| {
-            let mut body = s.body.clone();
-            crate::elide::decide(&mut body, self.ownership.proto.types(), self.summaries());
-            body
+            let sums = self.summaries();
+            sums.decided(id).unwrap_or_else(|| {
+                let mut body = s.body.clone();
+                crate::elide::decide(&mut body, self.ownership.proto.types(), sums);
+                body
+            })
         }))
     }
 
     /// The callee summaries every decided body reads, over every body
     /// [`World::body_at`] serves but a generic function's.
+    ///
+    /// A body may assume facts at its entry only when it is `private` and
+    /// every caller [`World::callers`] names is such a body: a module-state
+    /// initializer, a `where` predicate, a projection and a generic
+    /// function's instances count under a row with no body here. No body may
+    /// when the judgment memo served a body, whose rows are unknown, or when
+    /// two frames share a row, whose caller cannot be told.
     pub fn summaries(&self) -> &crate::elide::Summaries {
         self.summaries.get_or_init(|| {
             let _p = vyrn_frontend::prof::phase("elide: summaries");
             let generic: HashSet<FnId> = (self.fns.rows.iter())
                 .filter_map(|r| Some(r.generic.as_ref()?.0))
                 .collect();
+            let walked =
+                |f: &FnId| !generic.contains(f) && matches!(self.bodies.get(f), Some(Some(_)));
+            let shared = (self.bodies.iter())
+                .any(|(f, s)| s.is_none() && self.fns.rows[f.index()].generic.is_none());
+            let known = self.facts.is_some() && !shared;
+            let closed: HashSet<FnId> = (self.private.iter())
+                .filter(|f| known && walked(f) && self.callers(**f).iter().all(walked))
+                .copied()
+                .collect();
             let bodies = (self.bodies.iter())
                 .filter(|(f, _)| !generic.contains(f))
                 .filter_map(|(f, s)| Some((*f, &s.as_ref()?.body)));
-            crate::elide::summaries(bodies, self.ownership.proto.types())
+            crate::elide::summaries(bodies, self.ownership.proto.types(), &closed)
         })
     }
 
