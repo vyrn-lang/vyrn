@@ -55,6 +55,9 @@ pub struct World {
     /// placer judged them, a body the judgment memo served included, with their file: what
     /// [`World::allocating_file`] answers.
     pub(crate) allocating: HashMap<FnId, Arc<str>>,
+    /// What every return of each directly called body states, made once from
+    /// `bodies` when an emitter first decides one ([`World::summaries`]).
+    summaries: OnceLock<crate::elide::Summaries>,
     /// Whether a placed release named an instance the first lowering lacked.
     /// `reached` holds no such instance, so [`crate::effects::reaches`] judges
     /// the program as placed instead.
@@ -350,9 +353,24 @@ impl World {
         }
         Some(s.decided.get_or_init(|| {
             let mut body = s.body.clone();
-            crate::elide::decide(&mut body, self.ownership.proto.types());
+            crate::elide::decide(&mut body, self.ownership.proto.types(), self.summaries());
             body
         }))
+    }
+
+    /// The callee summaries every decided body reads, over every body
+    /// [`World::body_at`] serves but a generic function's.
+    pub fn summaries(&self) -> &crate::elide::Summaries {
+        self.summaries.get_or_init(|| {
+            let _p = vyrn_frontend::prof::phase("elide: summaries");
+            let generic: HashSet<FnId> = (self.fns.rows.iter())
+                .filter_map(|r| Some(r.generic.as_ref()?.0))
+                .collect();
+            let bodies = (self.bodies.iter())
+                .filter(|(f, _)| !generic.contains(f))
+                .filter_map(|(f, s)| Some((*f, &s.as_ref()?.body)));
+            crate::elide::summaries(bodies, self.ownership.proto.types())
+        })
     }
 
     /// The file `f` is declared in, when that is not the root file and a call to `f` may
