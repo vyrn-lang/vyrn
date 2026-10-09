@@ -20,4 +20,6 @@ fn counted(a: Array<Int64>, n: Int64) -> Int64
 fn unproved(n: Int64) -> Int64
    64           grows      push(..)
    66           check kept array-index  gap: unproved: needs xs.length - 1 >= 0
-summary: allocating rows 4 (0 in loops), growing rows 1 (0 in loops), copies 0 (0 in loops), checks kept 7 (2 in loops), checks proved 0 (0 in loops)
+fn fromOutside(a: Array<Int64>) -> Int64
+   71           check kept array-index  gap: caller fact (exported): a is a parameter; needs a.length - 1 >= 0
+summary: allocating rows 4 (0 in loops), growing rows 1 (0 in loops), copies 0 (0 in loops), checks kept 8 (2 in loops), checks proved 0 (0 in loops)

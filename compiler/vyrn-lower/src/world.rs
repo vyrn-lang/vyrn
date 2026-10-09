@@ -63,7 +63,7 @@ pub struct World {
     /// `extern`, `gen`, `main`, synthesized, an `impl` method or a runtime
     /// module's (a `$` spelling), or has a type parameter or a `fn`-typed
     /// parameter. [`World::summaries`] keeps those whose every caller it walks.
-    private: Vec<FnId>,
+    private: HashSet<FnId>,
     /// Whether a placed release named an instance the first lowering lacked.
     /// `reached` holds no such instance, so [`crate::effects::reaches`] judges
     /// the program as placed instead.
@@ -357,6 +357,12 @@ impl World {
     /// the World looks a name up once, here.
     pub fn fn_id(&self, name: &str) -> Option<FnId> {
         self.fns.id(name)
+    }
+
+    /// Whether `f` may be entered other than by a call row the pass walks, so
+    /// no body assumes its parameters' facts: every function not `private`.
+    pub fn is_open(&self, f: FnId) -> bool {
+        !self.private.contains(&f)
     }
 
     /// The function table's rows, the row of `id` at [`FnId::index`].

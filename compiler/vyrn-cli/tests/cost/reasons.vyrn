@@ -65,3 +65,8 @@ fn unproved(n: Int64) -> Int64 {
     }
     return xs[0]
 }
+
+/// Any caller may pass an empty array to an exported function, so the reason says so.
+export fn fromOutside(a: Array<Int64>) -> Int64 {
+    return a[0]
+}

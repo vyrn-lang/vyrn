@@ -143,7 +143,8 @@ fn said(why: &Why, body: &Body, world: &World) -> String {
             }
         }
         Why::Caller(n, goal) => {
-            let exported = if body.export { " (exported)" } else { "" };
+            let open = body.id.is_some_and(|f| world.is_open(f));
+            let exported = if open { " (exported)" } else { "" };
             format!(
                 "gap: caller fact{exported}: {} is a parameter; {goal}",
                 spell(*n)
