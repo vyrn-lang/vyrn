@@ -75,12 +75,12 @@ fn a_vector_load_is_bounds_checked_once_and_not_per_lane() {
 }
 
 /// A scalar index promises nothing about the next one, so four reads cost four
-/// checks.
+/// checks. `read` is exported, so no caller's fact proves the first.
 #[test]
 fn the_same_four_elements_read_scalarly_cost_four_checks() {
     let body = wat_func_containing(
         &format!(
-            "fn read(xs: Array<Float32>, i: Int64) -> Float32 {{\n\
+            "export fn read(xs: Array<Float32>, i: Int64) -> Float32 {{\n\
              return xs[i] + xs[i + 1] + xs[i + 2] + xs[i + 3]\n\
              }}\n{PROLOGUE}"
         ),
