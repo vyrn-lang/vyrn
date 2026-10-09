@@ -987,8 +987,11 @@ impl<'a> Walk<'a> {
                 st.define(Term::Len(n), &Lin::of(Term::Len(*m)));
             }
             (_, Kind::Int(..)) => {
+                // A copy of a name of the same width and sign holds its value,
+                // which the type already bounds.
+                let copy = matches!(v, Val::Name(m) if self.kind(*m) == self.kind(n));
                 if let Some(l) = self.lin(v).and_then(|l| st.norm(&l)) {
-                    if self.in_range(n, &l, st) {
+                    if copy || self.in_range(n, &l, st) {
                         st.define(Term::Val(n), &l);
                     }
                 }

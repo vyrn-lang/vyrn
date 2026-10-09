@@ -223,6 +223,28 @@ fn a_join_of_constants_keeps_the_values_between_out() {
 }
 
 #[test]
+fn a_copy_of_a_same_typed_name_needs_no_range_proof() {
+    let src = "fn w(xs: Array<Int64>) -> Int64 {
+    let mut s: Int64 = 0
+    let mut i: Int64 = 0
+    while i < xs.length {
+        let x = xs[i]
+        s = s + x
+        let k = (x & 3) + 1
+        i = i + k
+    }
+    return s
+}
+";
+    assert_eq!(verdicts(src, "w"), ["proved array-index"]);
+    let (err, rows) = oracle(src, "    print(w(xs).toString())", "w");
+    assert_eq!(
+        (err.as_str(), rows),
+        ("", vec!["5 0 array-index proved 1".to_string()])
+    );
+}
+
+#[test]
 fn a_join_restates_a_counter_through_each_branchs_temporaries() {
     let src = "fn w(xs: Array<Int64>) -> Int64 {
     let mut s: Int64 = 0
@@ -925,11 +947,26 @@ fn w(xs: Array<Int64>, h: H) -> Int64 {
         "    print(w(xs, 2).toString())",
         "array index -1 out of bounds",
     ),
+    // A narrowing is a conversion, never a copy: the checker refuses a store
+    // between integer types, so `j` takes `Int32(..)`'s wrapped value.
+    (
+        "fn w(xs: Array<Int64>, x: Int64) -> Int64 {
+    if x >= 0 && x < 3 {
+        let mut j: Int32 = 0
+        j = Int32(x + 2147483648)
+        return xs[Int64(j)]
+    }
+    return 0
+}
+",
+        "    print(w(xs, 1).toString())",
+        "array index -2147483647 out of bounds",
+    ),
     // A store to the divisor drops its disequality.
     (
         "fn w(a: Int64, b: Int64) -> Int64 {\n    let mut c = b\n    if c == 0 {\n        return 0\n    }\n    \
-         c = c - b\n    return a / c\n}\n",
-        "    print(w(7, 3).toString())",
+         c = a\n    return a / c\n}\n",
+        "    print(w(0, 3).toString())",
         "division by zero",
     ),
     // `-1` is a computed divisor: the quotient's check stays.
