@@ -197,6 +197,32 @@ fn w(h: H, xs: Array<Int64>) -> Int64 {
 }
 
 #[test]
+fn a_join_of_constants_keeps_the_values_between_out() {
+    let src = "fn w(x: Int64) -> Int64 {
+    let t = [10, 20, 30]
+    let mut k: Int64 = 0
+    if x > 5 {
+        k = 2
+    } else if x > 2 {
+        k = 3
+    } else if x > 0 {
+        k = 4
+    }
+    if k == 0 {
+        return 0
+    }
+    return t[k - 2]
+}
+";
+    assert_eq!(verdicts(src, "w"), ["proved array-index"]);
+    let (err, rows) = oracle(src, "    print(w(1).toString())", "w");
+    assert_eq!(
+        (err.as_str(), rows),
+        ("", vec!["14 0 array-index proved 1".to_string()])
+    );
+}
+
+#[test]
 fn a_join_restates_a_counter_through_each_branchs_temporaries() {
     let src = "fn w(xs: Array<Int64>) -> Int64 {
     let mut s: Int64 = 0
@@ -879,6 +905,25 @@ fn w(xs: Array<Int64>, h: H) -> Int64 {
 ",
         "    print(w(xs, H { slot: 1, gen: 0 }).toString())",
         "array index 6 out of bounds",
+    ),
+    // A branch that stores a computed value leaves no gap among the values.
+    (
+        "fn w(xs: Array<Int64>, x: Int64) -> Int64 {
+    let t = [10, 20, 30]
+    let mut k: Int64 = 0
+    if x > 5 {
+        k = 2
+    } else if x > 0 {
+        k = x - 1
+    }
+    if k == 0 {
+        return 0
+    }
+    return t[k - 2]
+}
+",
+        "    print(w(xs, 2).toString())",
+        "array index -1 out of bounds",
     ),
     // A store to the divisor drops its disequality.
     (

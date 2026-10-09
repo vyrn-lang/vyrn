@@ -232,6 +232,9 @@ impl Cert {
 /// The largest length of any array or String (obligation O9).
 const LEN_MAX: i64 = vyrn_frontend::trap::LENGTH_LIMIT as i64 + 1;
 
+/// The most values a join enumerates for one term ([`State::values`]).
+const VALUES: i64 = 16;
+
 /// What is known at one point of a body.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
 pub struct State {
@@ -584,7 +587,49 @@ impl State {
                 out.ne.extend(out.norm(d).and_then(canon));
             }
         }
+        // A term some state defines as a constant takes one of the values
+        // the states allow; a value between them no state allows is a
+        // disequality: `w = 0` joined with `w = 2` keeps `w != 1`.
+        let consts: BTreeSet<Term> = (live.iter().flat_map(|s| &s.defs))
+            .filter(|(t, v)| v.is_const() && !out.defs.contains_key(t))
+            .map(|(t, _)| *t)
+            .collect();
+        for t in consts {
+            let mut all = BTreeSet::new();
+            if !live.iter().all(|s| s.values(t, &mut all).is_some()) {
+                continue;
+            }
+            let (Some(&lo), Some(&hi)) = (all.first(), all.last()) else {
+                continue;
+            };
+            for v in (lo..hi).filter(|v| !all.contains(v)) {
+                out.ne.extend(Lin::of(t).plus(-v).and_then(canon));
+            }
+        }
         out
+    }
+
+    /// Adds to `into` the values `t` may take: its constant, or the integers
+    /// its bounds `t - lo >= 0` and `hi - t >= 0` leave less its
+    /// disequalities. `None` when they are not known or more than [`VALUES`].
+    fn values(&self, t: Term, into: &mut BTreeSet<i64>) -> Option<()> {
+        if let Some(d) = self.defs.get(&t) {
+            return d.is_const().then(|| {
+                into.insert(d.c);
+            });
+        }
+        let bound = |k: i64| self.facts.iter().filter(move |f| f.terms == [(t, k)]);
+        let lo = bound(1).filter_map(|f| f.c.checked_neg()).max()?;
+        let hi = bound(-1).map(|f| f.c).min()?;
+        if hi.checked_sub(lo)? >= VALUES {
+            return None;
+        }
+        let gone = |v: i64| {
+            !self.ne.is_empty()
+                && (Lin::of(t).plus(-v).and_then(canon)).is_some_and(|d| self.ne.contains(&d))
+        };
+        into.extend((lo..=hi).filter(|v| !gone(*v)));
+        Some(())
     }
 
     /// Each definition of `self` that `out` lacks, as its two facts.
@@ -820,6 +865,21 @@ mod tests {
         let j = State::join(&[a, b]);
         assert!(j.ge0(&v(0).plus(-1).unwrap()).is_some());
         assert!(j.ge0(&v(0).plus(-2).unwrap()).is_none());
+    }
+
+    #[test]
+    fn a_join_of_constants_keeps_the_values_between_out() {
+        let at = |c: i64| {
+            let mut s = State::default();
+            s.define(Term::Val(Name(0)), &Lin::k(c));
+            s
+        };
+        let inner = State::join(&[at(0), at(4)]);
+        let mut j = State::join(&[at(2), at(3), inner]);
+        assert!(j.ge0(&Lin::k(4).sub(&v(0)).unwrap()).is_some());
+        j.differ(&v(0));
+        assert!(j.ge0(&v(0).plus(-2).unwrap()).is_some());
+        assert!(j.ge0(&v(0).plus(-3).unwrap()).is_none());
     }
 
     /// A callee's facts join the caller's state as premises, so the order in
