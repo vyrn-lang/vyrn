@@ -1,0 +1,30 @@
+// A parameter's `where` clause moves an exported function's entry check to
+// its calls: the body assumes it, and each call proves it or keeps it.
+
+/// The element at `i`, which the caller shows is in range.
+export fn at(b: Array<Int64>, i: Int64 where value >= 0 && value < b.length) -> Int64 {
+    return b[i]
+}
+
+/// A counted loop proves each call.
+fn sum(b: Array<Int64>) -> Int64 {
+    let mut s = 0
+    let mut i = 0
+    while i < b.length {
+        s = s + at(b, i)
+        i = i + 1
+    }
+    return s
+}
+
+/// The index comes from outside, so the call keeps its check.
+fn fromInput(b: Array<Int64>) -> Int64 {
+    let n = (readLine() ?? "").byteLength
+    return at(b, n)
+}
+
+fn main() -> Int64 {
+    let b: Array<Int64> = [1, 2, 3]
+    print((sum(b) + fromInput(b)).toString())
+    return 0
+}

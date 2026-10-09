@@ -84,6 +84,13 @@ fn a_kept_check_says_why_it_stays() {
     holds("reasons", "compiler/vyrn-cli/tests/cost/reasons.vyrn");
 }
 
+/// A parameter clause's check stands at each call: proved where the caller shows it, kept with
+/// the caller's reason where it does not. The exported body proves its index from the clause.
+#[test]
+fn a_parameter_clause_checks_at_the_call() {
+    holds("clauses", "compiler/vyrn-cli/tests/cost/clauses.vyrn");
+}
+
 /// `vyrn run --profile` saves its counts, and `why --cost` prints them beside the rows whose
 /// source and imports it ran.
 #[test]
