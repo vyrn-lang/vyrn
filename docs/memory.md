@@ -231,8 +231,13 @@ fn fixed9(v: Float64) -> String
    55  loop 1   copies     a String render (implicit)
                 allocates  concatenation
 fn offsetMomentum(bodies: Array<Body>) -> Array<Body>
-  129           check kept array-index
+  129           check kept array-index  gap: caller fact: bodies is a parameter; needs bodies.length - 1 >= 0
 ```
+
+A kept check ends with its reason: `input`, or `gap:` and one of `callee fact`,
+`caller fact`, `move 2`, `move 3`, `move 5` or `unproved`. The reason names the
+change that would remove the check, and `unproved` prints the goal the prover
+could not show.
 
 `vyrn emit-lowered <file>`
 prints the named core, where each release is an explicit `drop` and `!` marks

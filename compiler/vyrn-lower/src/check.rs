@@ -20,7 +20,7 @@ use vyrn_frontend::ast::{BinOp, Type, TypeDecl};
 use vyrn_frontend::prelude::Indexes;
 use vyrn_frontend::trap::Rule;
 
-use vyrn_frontend::core::check::{Check, Guard, Raises, Site, Verdict};
+use vyrn_frontend::core::check::{Check, Guard, Raises, Site, Verdict, Why};
 use vyrn_frontend::core::{Arg, Body, Op, Place, Rhs, St, Val};
 
 /// What a build does with its check rows, from the environment variable
@@ -109,6 +109,7 @@ fn list(body: &Body, tys: &Types<'_>, ss: &mut Vec<St>, lines: &mut BTreeMap<usi
                 guard,
                 site,
                 verdict: Verdict::Kept,
+                why: Why::Unsaid,
             }));
         }
         match &mut s {

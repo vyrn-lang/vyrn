@@ -1,0 +1,23 @@
+compiler/vyrn-cli/tests/cost/reasons.vyrn
+fn make() -> Array<Int64>
+    5           allocates  array literal
+fn drain(a: Array<Int64>) -> Unit
+    9           allocates  clear(..)
+fn fromInput(a: Array<Int64>) -> Int64
+   14           allocates  readLine(..)
+   15           check kept array-index  input: the value of line 14 is read from outside
+fn fromCall() -> Int64
+   23           check kept array-index  gap: callee fact: xs from make(..) at 22
+fn fromCaller(a: Array<Int64>) -> Int64
+   28           check kept array-index  gap: caller fact: a is a parameter; needs a.length - 1 >= 0
+fn resized(n: Int64) -> Int64
+   33           allocates  array literal
+   37  loop 1   check kept array-index  gap: move 2: a call may have resized ys
+fn fromField(a: Array<Int64>, c: Cursor) -> Int64
+   46           check kept array-index  gap: move 3: the value of line 46 is a field, element or global read
+fn counted(a: Array<Int64>, n: Int64) -> Int64
+   54  loop 1   check kept array-index  gap: move 5: i is the only name of the goal the loop writes
+fn unproved(n: Int64) -> Int64
+   64           grows      push(..)
+   66           check kept array-index  gap: unproved: needs xs.length - 1 >= 0
+summary: allocating rows 4 (0 in loops), growing rows 1 (0 in loops), copies 0 (0 in loops), checks kept 7 (2 in loops), checks proved 0 (0 in loops)

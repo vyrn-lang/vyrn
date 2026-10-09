@@ -6,8 +6,8 @@
 //!
 //! A wording is fixed ([`DIV_ZERO`]), split around a runtime value
 //! ([`ARRAY_INDEX`] and the [`IO`] entries, whose `%s` is a path, so the pair
-//! is the primitive), or filled by a compile-time constant ([`call_depth`],
-//! [`region_depth`]). [`line`] frames a trap: a runtime chooses how to write
+//! is the primitive), or filled by a compile-time constant
+//! ([`region_depth`]). [`line`] frames a trap: a runtime chooses how to write
 //! the line, never what it says. `vyrn-cli/tests/traps.rs` fails if running
 //! code outside this file spells a trap wording; a comment may quote one.
 
@@ -16,29 +16,18 @@ use std::fmt::Display;
 use crate::ast::TypeDecl;
 use crate::effects::Effect;
 
-/// The most Vyrn calls in flight at once, on every engine.
-///
-/// Each backend's function prologue counts calls, so a deep recursion stops
-/// with the same Vyrn diagnostic everywhere instead of a host crash. 1,000 is
-/// past what recursive descent over real data reaches (`.vyx` markup, GraphQL
-/// selections and JSON nest in the tens), and matches CPython. An `extern` is
-/// the host's frame and is not counted; a lambda cannot call itself.
-pub const CALL_DEPTH_LIMIT: u32 = 1_000;
-
 /// The most bytes one call frame may claim on the wasm backend's shadow stack.
 ///
-/// `vyrn_codegen::wasm::STACK_BYTES` holds [`CALL_DEPTH_LIMIT`] frames of this
-/// size, so the depth counter, not the stack, stops a program. The backend
-/// refuses a larger frame when it lays it out, naming the function and line.
-/// 8 KB is 1.5x the largest frame the corpus builds (5,552 bytes); the stack
-/// costs 126 wasm pages, touched only as deep as a program recurses.
+/// The backend refuses a larger frame when it lays it out, naming the function
+/// and line. 8 KB is 1.5x the largest frame the corpus builds (5,552 bytes), and
+/// `vyrn_codegen::wasm::STACK_BYTES` holds a thousand such frames.
 pub const FRAME_LIMIT: u32 = 8 * 1024;
 
 /// The native stack a program's frames may use: wasmtime's wasm stack limit.
 ///
-/// It holds [`CALL_DEPTH_LIMIT`] frames of 32 KiB of spilled values each, so the
-/// depth counter stops a program before the host stack does. At wasmtime's
-/// default of 512 KiB a frame with 500 live values stopped at depth 128.
+/// No engine counts calls: a recursion runs until a stack runs out, and then
+/// traps [`STACK_EXHAUSTED`]. At wasmtime's default of 512 KiB a frame with 500
+/// live values stopped at depth 128; 32 MiB holds 1,000 frames of 32 KiB.
 pub const WASM_STACK_BYTES: usize = 32 * 1024 * 1024;
 
 /// The stack of a thread that runs a program: [`WASM_STACK_BYTES`] and room for
@@ -47,10 +36,12 @@ pub const WASM_STACK_BYTES: usize = 32 * 1024 * 1024;
 /// macOS a native binary runs on the process stack, which `ulimit -s` sets.
 pub const RUN_STACK_BYTES: usize = WASM_STACK_BYTES + 16 * 1024 * 1024;
 
-/// The trap for a program whose frames outgrow the host stack. It is wasm-rt's
-/// `wasm_rt_strerror` wording, which the native host prints, so both routes
-/// print one sentence.
-pub const STACK_EXHAUSTED: &str = "Call stack exhausted";
+/// The trap for a program whose frames outgrow a stack: the engine's own, or
+/// the shadow stack in linear memory. The engine raises it, and the host calls
+/// the module's overflow export, which prints [`Rule::StackExhausted`] as a
+/// check prints its row. A host words it itself only for a module without
+/// that export.
+pub const STACK_EXHAUSTED: &str = "call stack exhausted";
 
 /// The most elements one array literal may have.
 ///
@@ -154,19 +145,15 @@ pub fn around(parts: (&str, &str), v: impl Display) -> String {
     format!("{}{v}{}", parts.0, parts.1)
 }
 
-/// `call depth exceeds {CALL_DEPTH_LIMIT}`, built from the constant
-/// the prologue compares against.
-pub fn call_depth() -> String {
-    format!("call depth exceeds {}", CALL_DEPTH_LIMIT)
-}
-
 /// `region nesting exceeds {REGION_MAX}`.
 pub fn region_depth() -> String {
     format!("region nesting exceeds {}", REGION_MAX)
 }
 
-/// The eight checks the emitter inserts because the core told it to,
-/// as rows of the trap table.
+/// The rows of the trap table: the seven checks the emitter inserts because
+/// the core told it to, and the stack overflow the engine raises, which the
+/// host hands back to the module's overflow export
+/// (`vyrn_codegen::wasm::OVERFLOW_EXPORT`).
 ///
 /// A row is an index: the wasm route lays out the halves of each row as one
 /// data table, and every trap site becomes `trapAt(rule, value)`. The order is
@@ -179,7 +166,7 @@ pub enum Rule {
     RemZero,
     DivOverflow,
     ShiftRange,
-    CallDepth,
+    StackExhausted,
     RegionDepth,
 }
 
@@ -192,7 +179,7 @@ impl Rule {
         Rule::RemZero,
         Rule::DivOverflow,
         Rule::ShiftRange,
-        Rule::CallDepth,
+        Rule::StackExhausted,
         Rule::RegionDepth,
     ];
 
@@ -211,7 +198,7 @@ impl Rule {
             Rule::RemZero => "int-rem-zero",
             Rule::DivOverflow => "int-div-overflow",
             Rule::ShiftRange => "shift-range",
-            Rule::CallDepth => "call-depth",
+            Rule::StackExhausted => "stack-exhausted",
             Rule::RegionDepth => "region-depth",
         }
     }
@@ -229,7 +216,7 @@ impl Rule {
             Rule::RemZero => (line(REM_ZERO), None),
             Rule::DivOverflow => (line(DIV_OVERFLOW), None),
             Rule::ShiftRange => (line(SHIFT_RANGE), None),
-            Rule::CallDepth => (line(&call_depth()), None),
+            Rule::StackExhausted => (line(STACK_EXHAUSTED), None),
             Rule::RegionDepth => (line(&region_depth()), None),
         }
     }
@@ -361,7 +348,6 @@ mod tests {
     #[test]
     fn the_framing_is_the_prefix_and_a_newline() {
         assert_eq!(line(DIV_ZERO), "error: division by zero\n");
-        assert_eq!(call_depth(), "call depth exceeds 1000");
         assert_eq!(region_depth(), "region nesting exceeds 64");
         assert_eq!(validation("Age", false), "validation failed for `Age`");
         assert_eq!(

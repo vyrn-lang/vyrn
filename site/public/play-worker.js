@@ -48,13 +48,11 @@ self.onmessage = async (e) => {
     // saying which one happened is the difference between a rule of Vyrn and a
     // ceiling of this tab.
     //
-    // A compiled Vyrn call is one wasm frame, and the module counts its own to
-    // `CALL_DEPTH_LIMIT` — 1,000, the same number in every backend, reported as
-    // an ordinary trap on stderr. MEASURED against this worker: the language's
-    // limit arrives first, so a program that recurses too deep gets Vyrn's own
-    // wording and not this one. What is left here is the compiler's own
-    // recursion — a program nested deeply enough to overflow the parser — and
-    // that is the engine's ceiling, so it says so.
+    // A program that recurses too deep never reaches this: `runVyrn` hands its
+    // `RangeError` back to the module, which prints Vyrn's own trap on stderr.
+    // What is left here is the compiler's own recursion, a program nested
+    // deeply enough to overflow the parser, and that is the engine's ceiling,
+    // so it says so.
     const stack = err instanceof RangeError;
     self.postMessage({
       ok: false,

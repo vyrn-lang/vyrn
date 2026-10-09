@@ -12,5 +12,5 @@ fn system() -> Array<Body>
    93           grows      push(..)
   102           grows      push(..)
 fn offsetMomentum(bodies: Array<Body>) -> Array<Body>
-  129           check kept array-index
+  129           check kept array-index  gap: caller fact: bodies is a parameter; needs bodies.length - 1 >= 0
 summary: allocating rows 6 (1 in loops), growing rows 5 (0 in loops), copies 3 (1 in loops), checks kept 1 (0 in loops), checks proved 50 (45 in loops)

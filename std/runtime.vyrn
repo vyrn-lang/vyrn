@@ -3,8 +3,7 @@
 /// the loader puts it alone in `std/mem`'s audience.
 ///
 /// A `String` arrives here as an `Int32` address of its NUL-terminated bytes;
-/// nothing outside this module holds an address. The emitter does not count
-/// these frames against the call-depth budget, and a `panic` here prints the
+/// nothing outside this module holds an address. A `panic` here prints the
 /// trap table's line with no site, the same on every engine. A builtin's twin
 /// carries a `V` (`readFileV` for `readFile`), because the builtin's name is
 /// reserved.

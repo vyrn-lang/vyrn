@@ -110,6 +110,50 @@ fn host_trap(e: &wasmtime::Error) -> String {
     }
 }
 
+/// Hands a stack overflow back to the module: restores the stack pointer to
+/// `top`, its value before the call, and calls the module's
+/// [`vyrn_codegen::wasm::OVERFLOW_EXPORT`], which flushes standard output and
+/// traps [`trap::STACK_EXHAUSTED`] as a check does. Returns that call's exit, or
+/// `e` for any other trap.
+///
+/// An overflow is the engine's own, or the shadow stack's: an out-of-bounds
+/// access with the stack pointer past the end of memory, where a frame push
+/// that wrapped below 0 leaves it (`vyrn_codegen::wasm`). Call this before
+/// anything else restores the stack pointer.
+fn settle(
+    e: wasmtime::Error,
+    store: &mut Store<Host>,
+    inst: &wasmtime::Instance,
+    top: Option<i32>,
+) -> wasmtime::Error {
+    let sp = inst.get_global(&mut *store, vyrn_codegen::wasm::SP_EXPORT);
+    let overflow = match e.downcast_ref::<wasmtime::Trap>() {
+        Some(wasmtime::Trap::StackOverflow) => true,
+        Some(wasmtime::Trap::MemoryOutOfBounds) => {
+            let at = sp.and_then(|g| g.get(&mut *store).i32());
+            let end = store.data().wasi.mem.map(|m| m.data_size(&*store));
+            matches!((at, end), (Some(at), Some(end)) if at as u32 as usize >= end)
+        }
+        _ => false,
+    };
+    if !overflow {
+        return e;
+    }
+    let export = inst.get_typed_func::<(), ()>(&mut *store, vyrn_codegen::wasm::OVERFLOW_EXPORT);
+    match (sp, top, export) {
+        (Some(sp), Some(top), Ok(f)) if sp.set(&mut *store, top.into()).is_ok() => {
+            f.call(&mut *store, ()).err().unwrap_or(e)
+        }
+        _ => wasmtime::Trap::StackOverflow.into(),
+    }
+}
+
+/// The stack pointer's value, read before a call [`settle`] may need it for.
+fn stack_top(store: &mut Store<Host>, inst: &wasmtime::Instance) -> Option<i32> {
+    inst.get_global(&mut *store, vyrn_codegen::wasm::SP_EXPORT)
+        .and_then(|g| g.get(&mut *store).i32())
+}
+
 /// Compiles and runs `bytes` as a WASI command.
 ///
 /// `Err` is a failure of this host or of the module's shape: no `_start`, or a
@@ -129,7 +173,9 @@ pub fn run(bytes: &[u8], run: Run) -> Result<Outcome, String> {
         .get_typed_func::<(), ()>(&mut store, "_start")
         .map_err(|e| format!("_start: {e}"))?;
     let clock = std::time::Instant::now();
-    let code = match wasi::exit_code(start.call(&mut store, ())) {
+    let top = stack_top(&mut store, &inst);
+    let ran = start.call(&mut store, ());
+    let code = match wasi::exit_code(ran.map_err(|e| settle(e, &mut store, &inst, top))) {
         Ok(code) => code,
         // A trap the program did not spell (`unreachable`, an out-of-bounds
         // access): the wording is this host's.
@@ -280,7 +326,7 @@ pub fn compile(bytes: &[u8], metered: bool) -> Result<Compiled, String> {
 pub struct Resident {
     store: Store<Host>,
     inst: wasmtime::Instance,
-    /// The stack pointer and the nesting words' address, which a module with
+    /// The stack pointer and the nesting word's address, which a module with
     /// a door exports (`vyrn_codegen::wasm::Module::export_entry_state`).
     entry: Option<(Global, usize)>,
 }
@@ -308,7 +354,10 @@ pub fn start_on(
     let entry = inst
         .get_typed_func::<(), ()>(&mut store, "_start")
         .map_err(|e| format!("_start: {e}"))?;
-    let code = wasi::exit_code(entry.call(&mut store, ())).map_err(|e| host_trap(&e))?;
+    let top = stack_top(&mut store, &inst);
+    let ran = entry.call(&mut store, ());
+    let ran = ran.map_err(|e| settle(e, &mut store, &inst, top));
+    let code = wasi::exit_code(ran).map_err(|e| host_trap(&e))?;
     let sp = inst.get_global(&mut store, vyrn_codegen::wasm::SP_EXPORT);
     let nesting = inst
         .get_global(&mut store, vyrn_codegen::wasm::NESTING_EXPORT)
@@ -320,7 +369,7 @@ pub fn start_on(
 impl Resident {
     /// Calls export `name`. The outer error is a missing or mistyped export,
     /// the inner one a trap. A trap abandons the frames and regions the call
-    /// took, so after one this restores the stack pointer and the nesting words
+    /// took, so after one this restores the stack pointer and the nesting word
     /// it read before. A trapped call's heap blocks stay allocated.
     fn call<P: WasmParams, R: WasmResults>(
         &mut self,
@@ -332,10 +381,12 @@ impl Resident {
             .get_typed_func::<P, R>(&mut self.store, name)
             .map_err(|e| format!("{name}: {e}"))?;
         let Some((sp, at)) = self.entry else {
-            return Ok(f.call(&mut self.store, args));
+            let top = stack_top(&mut self.store, &self.inst);
+            let out = f.call(&mut self.store, args);
+            return Ok(out.map_err(|e| settle(e, &mut self.store, &self.inst, top)));
         };
-        // The words lie in the statics, which memory always covers.
-        let words = at..at + 8;
+        // The word lies in the statics, which memory always covers.
+        let words = at..at + 4;
         let mem = self
             .store
             .data()
@@ -343,9 +394,10 @@ impl Resident {
             .mem
             .expect("memory is set before _start");
         let top = sp.get(&mut self.store);
-        let mut nesting = [0u8; 8];
+        let mut nesting = [0u8; 4];
         nesting.copy_from_slice(&mem.data(&self.store)[words.clone()]);
         let out = f.call(&mut self.store, args);
+        let out = out.map_err(|e| settle(e, &mut self.store, &self.inst, top.i32()));
         if out.is_err() {
             sp.set(&mut self.store, top)
                 .map_err(|e| format!("{name}: {e}"))?;

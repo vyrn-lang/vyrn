@@ -21,8 +21,10 @@ Two flags apply to every command that loads a program:
 
 Every command that executes Vyrn code compiles it to one wasm module first.
 `run`, `test`, `bench --check`, `serve` and `dev` run that module in an embedded
-wasmtime (Cranelift). `build` without `--target wasm` hands the same module to
-wabt's `wasm2c` and compiles the C with clang. There is no interpreter.
+wasmtime (Cranelift) with a 32 MiB stack. `build` without `--target wasm` hands
+the same module to wabt's `wasm2c` and compiles the C with clang; the binary
+runs on the thread's own stack. There is no interpreter. Each host hands a
+stack overflow to the module, which traps `call stack exhausted`.
 
 A `gen fn` generator also runs as compiled wasm, in the same embedded engine,
 while the program loads.
@@ -223,7 +225,8 @@ compile, except `--contract`.
   depth, else the file's directory. Exits 1 if the file has no role.
 - `vyrn why --cost <file>`: per function of the file, the lines that allocate,
   copy, grow a container, enter an allocating function of another file or keep
-  a check, with the loop depth of each, and a summary. A copy the compiler
+  a check, with the loop depth of each, and a summary. A kept check also reads
+  its reason (`gap: callee fact: ...`). A copy the compiler
   makes where the program wrote none reads `(implicit)`. A call into a function of
   another file counts that function's allocations at the calling line. A
   function with nothing to report is left out. The LSP's hover keeps the
@@ -362,7 +365,9 @@ they agree. A `.vyx` file is analysed through the `.vyrn` module that owns it.
 Each line that allocates, copies, grows a container, enters an allocating
 function of another file or keeps a check ends in an inlay hint with the
 verbs and counts of `vyrn why --cost`, such as `copies (implicit), allocates 3`.
-The tooltip holds the report's row and the loop depth. A line with none of
+The hint of a kept check adds its reason in two words, such as
+`check kept (callee fact)`. The tooltip holds the report's row, with the full
+reason, and the loop depth. A line with none of
 these has no hint. The request `vyrn/costLenses` answers one lens per function
 that costs anything, such as `allocates 3, grows 1, checks kept 1`.
 

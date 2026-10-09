@@ -124,57 +124,37 @@ fn source_just_under_the_nesting_limit_still_runs() {
     assert_eq!(out.status.code(), Some(0));
 }
 
-/// The call depth is the language's, counted by every engine;
-/// `examples/recdepth.vyrn` pins it in the fixture corpus.
+/// No engine counts calls: a recursion runs until a stack runs out, then traps
+/// with one sentence. `examples/recdepth.vyrn` pins it in the fixture corpus,
+/// and `tests/route.rs` holds the native route to the same bytes.
 #[test]
-fn recursion_past_the_call_depth_limit_is_a_diagnostic() {
-    let limit = vyrn_frontend::trap::CALL_DEPTH_LIMIT;
+fn recursion_runs_until_the_stack_runs_out() {
     let src = |n: u32| {
         format!(
             "fn down(n: Int64) -> Int64 {{\n    if n <= 0 {{\n        return 0\n    }}\n    \
-             return 1 + down(n - 1)\n}}\n\nfn main() -> Int64 {{\n    \
-             print(\"\\{{down({n})}}\")\n    return 0\n}}\n"
+             let r = down(n - 1)\n    return (r * 31 + n) % 1000003\n}}\n\n\
+             fn main() -> Int64 {{\n    print(\"\\{{down({n})}}\")\n    return 0\n}}\n"
         )
     };
-    // `main` holds one frame, so `down(limit - 2)` is the deepest run that fits.
-    // A debug frame is far larger than a release one and CI runs debug, so the
-    // failure names the profile.
-    let profile = if cfg!(debug_assertions) {
-        "debug"
-    } else {
-        "release"
-    };
-    let ok = run("run", &src(limit - 2), "depthok");
-    let got_ok = text(&ok);
-    assert_eq!(
-        got_ok.trim(),
-        (limit - 2).to_string(),
-        "the limit is the LANGUAGE's, so EVERY build profile must reach it. This is a \
-         {profile} build: if the run above died on the host stack, {limit} is the wrong \
-         number, not this test — got:\n{got_ok}"
-    );
-    assert_eq!(ok.status.code(), Some(0));
-
-    let over = run("run", &src(limit - 1), "depthover");
+    let ok = run("run", &src(5_000), "depthok");
+    assert_eq!(ok.status.code(), Some(0), "{}", text(&ok));
+    let over = run("run", &src(1_000_000_000), "depthover");
     let got = text(&over);
     assert!(
-        got.contains(&format!("error: call depth exceeds {limit}")),
-        "expected the call-depth trap, got:\n{got}"
+        got.contains(&vyrn_frontend::trap::line(
+            vyrn_frontend::trap::STACK_EXHAUSTED
+        )),
+        "expected the stack trap, got:\n{got}"
     );
-    assert_eq!(
-        over.status.code(),
-        Some(1),
-        "a trap exits 1, as every other runtime trap does — got:\n{got}"
-    );
+    assert_eq!(over.status.code(), Some(1), "a trap exits 1:\n{got}");
 }
 
-/// The call depth is the language's even when each frame is wide: 400 values
-/// live across the recursive call spill into the host's stack, and at
-/// wasmtime's default of 512 KiB the run stopped near depth 128 with the
-/// engine's backtrace. `trap::WASM_STACK_BYTES` holds the limit.
+/// Wide frames run as deep as narrow ones need: 400 values live across the
+/// recursive call spill into the engine's stack, and at wasmtime's default of
+/// 512 KiB the run stopped near depth 128. `trap::WASM_STACK_BYTES` holds the
+/// stack.
 #[test]
-fn wide_frames_reach_the_call_depth_limit() {
-    let limit = vyrn_frontend::trap::CALL_DEPTH_LIMIT;
+fn wide_frames_run_a_thousand_deep() {
     let k = 400;
     let values: Vec<String> = (0..k).map(|i| i.to_string()).collect();
     let lets: String = (0..k).map(|i| format!("    let v{i} = g[{i}]\n")).collect();
@@ -182,10 +162,9 @@ fn wide_frames_reach_the_call_depth_limit() {
     let src = format!(
         "let mut g: Array<Int64> = [{}]\nfn wide(d: Int64) -> Int64 {{\n    g[0] = g[0] + 1\n    \
          if d <= 0 {{\n        return 0\n    }}\n{lets}    let r = wide(d - 1)\n    return r + {}\n}}\n\
-         fn main() -> Int64 {{\n    print(wide({}).toString())\n    return 0\n}}\n",
+         fn main() -> Int64 {{\n    print(wide(1000).toString())\n    return 0\n}}\n",
         values.join(", "),
         sum.join(" + "),
-        limit - 2
     );
     let out = run("run", &src, "wideframes");
     let got = text(&out);
@@ -495,16 +474,7 @@ fn statics_past_what_the_module_holds_are_a_diagnostic_not_a_panic() {
 /// a stack sized by hand fails here.
 #[test]
 fn every_limit_has_one_source() {
-    use vyrn_frontend::trap::{
-        ARRAY_LIT_LIMIT, CALL_DEPTH_LIMIT, FRAME_LIMIT, LENGTH_LIMIT, REGION_MAX,
-    };
-    assert_eq!(
-        vyrn_codegen::wasm::STACK_BYTES,
-        FRAME_LIMIT * CALL_DEPTH_LIMIT + 65_536,
-        "the shadow stack is the product plus one page for the uncounted runtime \
-         frames; a stack chosen independently is a depth limit that means a \
-         different number on wasm"
-    );
+    use vyrn_frontend::trap::{ARRAY_LIT_LIMIT, FRAME_LIMIT, LENGTH_LIMIT, REGION_MAX};
     assert_eq!(
         vyrn_codegen::wasm::DATA_BASE,
         vyrn_codegen::wasm::STACK_BYTES,

@@ -1,40 +1,40 @@
 examples/knucleotide.vyrn
 fn namedFragments() -> Array<String>
-   34           allocates  array literal  last run: 1 blocks, 24 bytes
+   39           allocates  array literal  last run: 1 blocks, 24 bytes
 fn thirdSequence() -> Array<UInt8>
-   63  loop 1   allocates  readLine(..)  last run: 171 blocks, 13,680 bytes
-   67  loop 1   allocates  bytes(..)  last run: 84 blocks, 5,336 bytes
+   68  loop 1   allocates  readLine(..)  last run: 171 blocks, 13,680 bytes
+   72  loop 1   allocates  bytes(..)  last run: 84 blocks, 5,336 bytes
        loop 1   enters     toUpper(..) in std/strings  last run: 587 blocks, 22,696 bytes
-   68  loop 2   grows      push(..)  last run: 12 blocks, 16,384 bytes
+   73  loop 2   grows      push(..)  last run: 12 blocks, 16,384 bytes
 fn countKmers(seq: Array<UInt8>, k: Int64) -> Map<Int64, Int64>
-   78           allocates  map literal  last run: 0 blocks, 0 bytes
-   86  loop 1   check kept int-rem-zero
-   88  loop 1   grows      tally(..)  last run: 153 blocks, 1,331,584 bytes
+   86           allocates  map literal  last run: 0 blocks, 0 bytes
+   94  loop 1   check kept int-rem-zero  gap: callee fact: modulus from modulusOf(..) at 90
+   96  loop 1   grows      tally(..)  last run: 153 blocks, 1,331,584 bytes
 fn unpack(key: Int64, k: Int64) -> String
-   97           allocates  bytes(..)  last run: 20 blocks, 160 bytes
-   99           grows      reserve(..)  last run: 20 blocks, 160 bytes
-  102  loop 1   grows      push(..)  last run: 0 blocks, 0 bytes
-       loop 1   check kept array-index
-  105           allocates  stringFromBytes(..)  last run: 20 blocks, 320 bytes
+  105           allocates  bytes(..)  last run: 20 blocks, 160 bytes
+  107           grows      reserve(..)  last run: 20 blocks, 160 bytes
+  110  loop 1   grows      push(..)  last run: 0 blocks, 0 bytes
+       loop 1   check kept array-index  gap: callee fact: modulusOf(..) at 108
+  113           allocates  stringFromBytes(..)  last run: 20 blocks, 320 bytes
 fn pack(frag: String) -> Int64
-  114           allocates  bytes(..)  last run: 5 blocks, 64 bytes
+  122           allocates  bytes(..)  last run: 5 blocks, 64 bytes
 fn fixed3(x: Float64) -> String
-  124           allocates  render  last run: 40 blocks, 480 bytes
-  126  loop 1   copies     a String render (implicit)  last run: 3 blocks, 48 bytes
+  132           allocates  render  last run: 40 blocks, 480 bytes
+  134  loop 1   copies     a String render (implicit)  last run: 3 blocks, 48 bytes
        loop 1   allocates  concatenation  last run: 3 blocks, 48 bytes
-  128           copies     a String render (implicit)  last run: 20 blocks, 320 bytes
+  136           copies     a String render (implicit)  last run: 20 blocks, 320 bytes
                 allocates  render, concatenation x2  last run: 80 blocks, 1,120 bytes
 fn ranked(m: Map<Int64, Int64>) -> Array<Entry>
-  152           allocates  keys(..)  last run: 2 blocks, 200 bytes
-  157  loop 1   grows      push(..)  last run: 8 blocks, 1,024 bytes
+  160           allocates  keys(..)  last run: 2 blocks, 200 bytes
+  165  loop 1   grows      push(..)  last run: 8 blocks, 1,024 bytes
 fn report(seq: Array<UInt8>, k: Int64) -> Unit
-  169  loop 1   copies     a String render (implicit) x2  last run: 40 blocks, 640 bytes
+  177  loop 1   copies     a String render (implicit) x2  last run: 40 blocks, 640 bytes
        loop 1   allocates  concatenation x2  last run: 40 blocks, 800 bytes
 fn syntheticSequence(n: Int64) -> Array<UInt8>
-  196           allocates  bytes(..)  last run: 0 blocks, 0 bytes
-  202  loop 1   grows      push(..)  last run: 0 blocks, 0 bytes
-       loop 1   check kept array-index
+  204           allocates  bytes(..)  last run: 0 blocks, 0 bytes
+  210  loop 1   grows      push(..)  last run: 0 blocks, 0 bytes
+       loop 1   check kept array-index  gap: unproved: needs the value of line 210 >= 0
 fn main() -> Int64
-  223  loop 1   copies     a String render (implicit)  last run: 5 blocks, 104 bytes
+  231  loop 1   copies     a String render (implicit)  last run: 5 blocks, 104 bytes
        loop 1   allocates  render, concatenation x2  last run: 20 blocks, 312 bytes
 summary: allocating rows 20 (9 in loops), growing rows 6 (5 in loops), copies 5 (4 in loops), checks kept 3 (3 in loops), checks proved 19 (14 in loops)

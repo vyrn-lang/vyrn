@@ -553,9 +553,27 @@ export async function runVyrn(wasmBytes, hooks = {}) {
     };
   }
 
+  // A stack overflow goes back to the module: `__vyrn_overflow` flushes stdout
+  // and traps with Vyrn's sentence, as `vyrn run` does. It is the engine's
+  // `RangeError`, or the shadow stack's: an out-of-bounds access with the
+  // stack pointer past the end of memory, where a frame push that wrapped
+  // below 0 leaves it.
+  const { __stack_pointer: sp, __vyrn_overflow: overflow } = instance.exports;
+  const top = sp && sp.value;
+  const overflowed = (e) =>
+    sp &&
+    overflow &&
+    (e instanceof RangeError ||
+      (e instanceof WebAssembly.RuntimeError && sp.value >>> 0 >= memory.buffer.byteLength));
   let exitCode = 0;
   try {
-    instance.exports._start();
+    try {
+      instance.exports._start();
+    } catch (e) {
+      if (!overflowed(e)) throw e;
+      sp.value = top;
+      overflow();
+    }
   } catch (e) {
     if (e instanceof VyrnExit) {
       exitCode = e.code;

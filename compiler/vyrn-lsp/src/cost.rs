@@ -28,8 +28,8 @@ fn ran(run: &Sites, f: &FnCost, row: &CostLine) -> [u64; 2] {
     run.get(&at).map_or([0, 0], |c| [c[0], c[1]])
 }
 
-/// One row as an end-of-line label: the verb, its count, `(implicit)` for a copy, and after a
-/// middle dot the blocks of the last run.
+/// One row as an end-of-line label: the verb, its count, `(implicit)` for a copy, a kept check's
+/// reasons in brackets, and after a middle dot the blocks of the last run.
 fn label(f: &FnCost, row: &CostLine, run: Option<&Sites>) -> String {
     let mut out = row.verb.to_string();
     if row.count > 1 {
@@ -37,6 +37,9 @@ fn label(f: &FnCost, row: &CostLine, run: Option<&Sites>) -> String {
     }
     if row.implicit {
         out += " (implicit)";
+    }
+    if !row.short.is_empty() {
+        out += &format!(" ({})", row.short);
     }
     match run {
         Some(run) if row.verb != KEPT => out + &format!(" \u{b7} {} blocks", ran(run, f, row)[0]),

@@ -12,7 +12,7 @@ The compiler emits WebAssembly, and everything that module needs at run time is 
 
 A builtin routes to a runtime function with the same name plus `V`: `readFile` calls `readFileV`, because the builtin's own name is reserved. Other builtins route to ordinary std modules. `x.charCount()`, `lineAt` and `colAt` run `std/text`. A float rendered by `print` or `toString()` runs `std/num`'s `f64Str`. `toJson` links `std/json`, and `fromJson` links `std/jsondec`. So one Vyrn source serves every engine, and the engines agree byte for byte.
 
-Inside the runtime a `String` is an `Int32` address of NUL-terminated bytes with a length header. No module outside the runtime holds an address. A `panic` in the runtime prints its trap line with no source site, and its frames do not count against the call-depth limit.
+Inside the runtime a `String` is an `Int32` address of NUL-terminated bytes with a length header. No module outside the runtime holds an address. A `panic` in the runtime prints its trap line with no source site.
 
 ### Memory
 
@@ -77,6 +77,7 @@ The compiler injects these declarations into every program, so a file names them
 | `std/num` | `parseInt64`, `parseUInt64`, `parseFloat64`, `parseFloat32` (each an `Option`), and `f64Str`. Parsing is correctly rounded, with no `strtod` underneath. |
 | `std/time` | `now() -> Instant` (UTC milliseconds), `monotonic()`, the calendar breakdown (`civil`, `year` to `second`) and `format`, `formatIso`. UTC only. `now` and `monotonic` are host effects, so a generator cannot call them. |
 | `std/random` | `Rng`, `seededRng`, `nextInt`, `nextInRange`: SplitMix64 as a value, so a seeded run reproduces everywhere. `randomSeed()` is the one host effect. Not for secrets. |
+| `std/sum` | `sum(xs)` adds an `Array<Float64>` exactly: the true sum rounded once to nearest-even, the same bits in any order. A separate module, so `std/math` importers do not compile it. |
 | `std/hash` | `fnv1a`, `fnv1aStr` (non-cryptographic), `sha1`, `sha1Hex`, and the `Hashable` protocol a `Map` key type implements. |
 
 ### Collections and protocols

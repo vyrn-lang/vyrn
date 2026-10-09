@@ -5238,6 +5238,26 @@ fn knucleotide_lines_carry_their_cost_as_hints() {
     holds_pin("knucleotide-hints", &cost_hints(&mut client, &uri));
 }
 
+/// A kept check's hint names its reason in two words, and the tooltip says it in full.
+#[test]
+fn a_kept_check_hint_says_why_it_stays() {
+    let (path, text) = knucleotide();
+    let (mut client, uri) = open_for_cost(&path, &text);
+    client.send(&serde_json::json!({
+        "jsonrpc": "2.0", "id": 92, "method": "textDocument/inlayHint",
+        "params": { "textDocument": { "uri": uri }, "range": {
+            "start": { "line": 93, "character": 0 }, "end": { "line": 94, "character": 0 } } }
+    }));
+    let resp = client.read_response(&serde_json::json!(92));
+    let hint = &resp["result"].as_array().expect("hints")[0];
+    assert_eq!(hint["label"], "check kept (callee fact)");
+    let tip = hint["tooltip"].as_str().unwrap();
+    assert!(
+        tip.contains("gap: callee fact: modulus from modulusOf(..) at 90"),
+        "{tip}"
+    );
+}
+
 #[test]
 fn knucleotide_functions_carry_their_cost_as_lenses() {
     let (path, text) = knucleotide();

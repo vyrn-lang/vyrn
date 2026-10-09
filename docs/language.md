@@ -368,6 +368,7 @@ A refutable `let` binds a variant's payloads in the enclosing scope, and traps w
 - `a ?? b` yields `a`'s success payload, or `b`. It works on `Option` and `Result`, and `b` may be `panic(..)`.
 - `panic(msg)` ends the program with `error: msg (file:line)` on standard error and exit code 1. It is for a case that cannot happen. Nothing unwinds and nothing catches a panic.
 - A trap (an index out of range, a division by zero, a failed validation) ends the program with `error: <reason>` on standard error and exit code 1. Every engine prints the same bytes.
+- Recursion has no fixed limit. A recursion that outgrows the stack traps `call stack exhausted`; the depth at which that happens depends on the engine and on the frames.
 - `Validation<T> = Valid(T) | Invalid(Array<Issue>)` reports every problem at once. An `Issue` is `{ key, path, message }`, where `key` is a translation key. `fromJson` and `std/cli` answer in this form.
 
 ```vyrn

@@ -1,10 +1,10 @@
-33 allocates 1
-60 allocates 3, grows 1
-77 allocates 1, grows 1, checks kept 1
-96 allocates 2, grows 2, checks kept 1
-112 allocates 1
-121 allocates 5, copies 2
-150 allocates 1, grows 1
-165 allocates 2, copies 2
-195 allocates 1, grows 1, checks kept 1
-218 allocates 3, copies 1
+38 allocates 1
+65 allocates 3, grows 1
+82 allocates 1, grows 1, checks kept 1
+104 allocates 2, grows 2, checks kept 1
+120 allocates 1
+129 allocates 5, copies 2
+158 allocates 1, grows 1
+173 allocates 2, copies 2
+203 allocates 1, grows 1, checks kept 1
+226 allocates 3, copies 1

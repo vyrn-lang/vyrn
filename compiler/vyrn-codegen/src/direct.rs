@@ -703,6 +703,21 @@ fn compile_inner(
     if m.counts_ops() {
         m.name(start, "_start");
     }
+    // A stack overflow is the engine's trap and unwinds past `trapAt`, so the host calls this
+    // after one: the stack row's trap flushes what `print` buffered, as any check's does.
+    let overflow = m.func(&[], &[], &[], 0, |b| {
+        b.ins(&Instruction::I32Const(
+            vyrn_frontend::trap::Rule::StackExhausted.index() as i32,
+        ))
+        .ins(&Instruction::I64Const(0))
+        .ins(&Instruction::I32Const(cx.rt.trap_table as i32))
+        .ins(&Instruction::Call(cx.rt.trap_at))
+        .ins(&Instruction::Unreachable);
+    });
+    m.export(crate::wasm::OVERFLOW_EXPORT, overflow);
+    if m.counts_ops() {
+        m.name(overflow, crate::wasm::OVERFLOW_EXPORT);
+    }
     // An `export extern fn`, under its own name. An export is also a sweep root.
     for f in &user {
         if f.is_export_extern {
@@ -2083,18 +2098,9 @@ fn lower_body(
         }
     }
 
-    // One frame of the call-depth budget. A lifted lambda cannot recurse without a named
-    // function, so it is not counted; nor is a `std/runtime` function. Every engine must trap
-    // at the same call.
-    let counted =
-        !f.name.starts_with(LAMBDA) && !f.name.starts_with(vyrn_frontend::loader::RUNTIME_PREFIX);
-    if counted {
-        call_depth_enter(&mut b, cx);
-    }
     // The trap site: a failed check stores its trap-table row and value in these two locals
-    // and branches out of the trap block to the one `trapAt` call. The call-depth check stands
-    // before the block and calls `trapAt` itself. One call site per function, not per check,
-    // halved nbody's time under Cranelift.
+    // and branches out of the trap block to the one `trapAt` call. One call site per function,
+    // not per check, halved nbody's time under Cranelift.
     cx_fn.trap_site = Some((b.local(ValType::I32), b.local(ValType::I64)));
     // The block every `return` targets. It carries a scalar result; an aggregate travels
     // through `dest`.
@@ -2151,11 +2157,6 @@ fn lower_body(
             }
             _ => return unsupported("a `modify` parameter of this shape", f.line),
         }
-    }
-
-    // Stack-neutral, like the copy-out.
-    if counted {
-        call_depth_bump(&mut b, cx, -1);
     }
 
     frame_fits(&b, &f.name, f.line)?;
@@ -2234,8 +2235,7 @@ fn core_body(
         .then_some(body)
 }
 
-/// Refuses a frame larger than [`vyrn_frontend::trap::FRAME_LIMIT`], the shadow stack divided
-/// by the call-depth limit, so a deep call cannot overrun the stack. The wording follows
+/// Refuses a frame larger than [`vyrn_frontend::trap::FRAME_LIMIT`]. The wording follows
 /// [`crate::check_inst_depth`].
 fn frame_fits(b: &Frame, name: &str, line: usize) -> Result<(), String> {
     let limit = vyrn_frontend::trap::FRAME_LIMIT;
@@ -2244,46 +2244,12 @@ fn frame_fits(b: &Frame, name: &str, line: usize) -> Result<(), String> {
     }
     Err(format!(
         "`{name}` needs {} bytes of stack for one call, {} of {limit}\n  \
-         note: `{name}` is declared on line {line}, and the shadow stack holds {limit} bytes \
-         for each of the {} calls a program may have in flight\n  \
+         note: `{name}` is declared on line {line}\n  \
          note: the size is the sum of this function's aggregate locals; a big one belongs on \
          the heap — an `Array<T>` rather than a fixed `Array<T, N>` or a record of records",
         b.bytes(),
         crate::FRAME_LIMIT_NEEDLE,
-        vyrn_frontend::trap::CALL_DEPTH_LIMIT,
     ))
-}
-
-/// Take one call frame, or trap. Inline rather than a `std/runtime` call: a call pair per
-/// user call cost nbody 7 percent and fannkuch 12 percent.
-fn call_depth_enter(b: &mut Frame, cx: &Cx<'_>) {
-    let at = cx.rt.call_depth;
-    // The prologue stands before the trap block, so it calls `trapAt` itself.
-    b.ins(&Instruction::I32Const(at as i32))
-        .ins(&Instruction::I32Load(word()))
-        .ins(&Instruction::I32Const(
-            vyrn_frontend::trap::CALL_DEPTH_LIMIT as i32,
-        ))
-        .ins(&Instruction::I32GeU)
-        .ins(&Instruction::If(BlockType::Empty))
-        .ins(&Instruction::I32Const(
-            vyrn_frontend::trap::Rule::CallDepth.index() as i32,
-        ))
-        .ins(&Instruction::I64Const(0))
-        .ins(&Instruction::I32Const(cx.rt.trap_table as i32))
-        .ins(&Instruction::Call(cx.rt.trap_at))
-        .ins(&Instruction::End);
-    call_depth_bump(b, cx, 1);
-}
-
-fn call_depth_bump(b: &mut Frame, cx: &Cx<'_>, by: i32) {
-    let at = cx.rt.call_depth;
-    b.ins(&Instruction::I32Const(at as i32))
-        .ins(&Instruction::I32Const(at as i32))
-        .ins(&Instruction::I32Load(word()))
-        .ins(&Instruction::I32Const(by))
-        .ins(&Instruction::I32Add)
-        .ins(&Instruction::I32Store(word()));
 }
 
 /// The derived deep copy of a stored `fn` value's capture block: `(tag, block) -> block`.
@@ -8791,8 +8757,8 @@ struct Rt {
     /// `boolStr`'s last two arguments, so the module holds no wording of its own.
     str_true: u32,
     str_false: u32,
-    /// `trapAt`'s table: eight rows of two interned addresses, laid out by `runtime` from
-    /// `trap::Rule`.
+    /// `trapAt`'s table: a row of two interned addresses per `trap::Rule`, laid out by
+    /// `runtime`.
     trap_table: u32,
     /// `strFromBytes`'s two failure messages.
     bnul: u32,
@@ -8807,10 +8773,6 @@ struct Rt {
     /// The region nesting counter: four reserved bytes, because the depth is dynamic (a callee's
     /// `region` nests inside its caller's). Entering one past [`REGION_MAX`] traps.
     region_sp: u32,
-    /// The call-depth counter: four reserved bytes holding how many Vyrn calls are in flight.
-    /// Every named function's prologue bumps it and its one exit gives it back; past
-    /// [`vyrn_frontend::trap::CALL_DEPTH_LIMIT`] it traps.
-    call_depth: u32,
 }
 
 impl std::ops::Deref for Rt {
@@ -8908,7 +8870,7 @@ fn runtime(m: &mut Module, wasi: &Wasi, v: &VyrnRt) -> Rt {
     rt.str_false = rt.intern(m, "false");
     // The trap table: for each `trap::Rule` row, the interned text before the value and after
     // it (zero where the row has no value). Trap sites push a row number; `trapAt` reads it.
-    let mut table = Vec::with_capacity(8 * 8);
+    let mut table = Vec::with_capacity(vyrn_frontend::trap::Rule::ALL.len() * 8);
     for r in vyrn_frontend::trap::Rule::ALL {
         let (pre, post) = r.parts();
         let pre = rt.intern(m, &pre);
@@ -8917,13 +8879,10 @@ fn runtime(m: &mut Module, wasi: &Wasi, v: &VyrnRt) -> Rt {
         table.extend_from_slice(&post.to_le_bytes());
     }
     rt.trap_table = m.data(&table, 4);
-    // The region nesting word, then the call-depth word: one reservation, because a host
-    // restores both after a trap ([`Module::export_entry_state`]). The region limit and its
-    // wording match the other engines; the region counter stays inline (see
-    // [`Fn_::region_enter`]). The call-depth trap row uses the constant the prologue compares
-    // against, so the limit in the message and the one enforced agree.
-    rt.region_sp = m.reserve(8, 4);
-    rt.call_depth = rt.region_sp + 4;
+    // The region nesting word, which a host restores after a trap
+    // ([`Module::export_entry_state`]). The region limit and its wording match the other
+    // engines; the region counter stays inline (see [`Fn_::region_enter`]).
+    rt.region_sp = m.reserve(4, 4);
     // After the reserves, so the trap table and the fixed cells keep their
     // addresses.
     rt.io = m.data(&io, 4);
@@ -9758,7 +9717,10 @@ impl<'a, 'p> Fn_<'a, 'p> {
                 St::Let(n, rhs) => {
                     let info = &body.names[n.index()];
                     let line = info.line;
-                    self.core_rhs(m, b, rhs, &info.ty, line)?;
+                    match self.core_unmasked(ss, i, *n, rhs) {
+                        Some(e) => self.core_val(m, b, e, &info.ty, line)?,
+                        None => self.core_rhs(m, b, rhs, &info.ty, line)?,
+                    }
                     if self.core_unit(&info.ty) {
                         continue;
                     }
@@ -10206,6 +10168,38 @@ impl<'a, 'p> Fn_<'a, 'p> {
             }
             _ => unsupported("a core right-hand side this walk does not read", line),
         }
+    }
+
+    /// The operand `e` of `n = e & (bits - 1)` where `n` is read once, as the amount of a shift
+    /// whose range check a pass proved. wasm's `shl` and `shr` mask their amount by the carrier's
+    /// width, so the shift reads `e` as it reads `n`. Under the check oracle the proved check
+    /// still runs on `n`, so the mask stays.
+    fn core_unmasked<'r>(&self, ss: &[St], i: usize, n: Name, rhs: &'r Rhs) -> Option<&'r Val> {
+        let Rhs::Prim(Op::Bin(BinOp::BitAnd), vs, _) = rhs else {
+            return None;
+        };
+        let [e, Val::Lit(Lit::Int(c))] = vs.as_slice() else {
+            return None;
+        };
+        let proved = |s: &St| match s {
+            St::Check(k) => match k.guard {
+                Guard::Shift(Val::Name(d), bits) => {
+                    d == n
+                        && k.verdict == Verdict::Proved
+                        && matches!(bits, 32 | 64)
+                        && *c == i64::from(bits) - 1
+                }
+                _ => false,
+            },
+            _ => false,
+        };
+        (self.cx.oracle.is_none()
+            && self.core_w.reads[n.index()] == 1
+            && ss[i + 1..]
+                .iter()
+                .flat_map(St::rows)
+                .any(|(s, _)| proved(s)))
+        .then_some(e)
     }
 
     /// The type a right-hand side produces, without emitting it. A `St::Do` needs it; a
