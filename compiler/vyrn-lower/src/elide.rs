@@ -1877,8 +1877,11 @@ impl<'a> Walk<'a> {
                 cands.extend(len.sub(&v).and_then(|l| l.plus(-1)));
             }
         }
-        let at_entry = entry.prover();
-        cands.retain(|c| at_entry.ge0(c).is_some());
+        cands.extend(self.in_step(body, &stored));
+        if !cands.is_empty() {
+            let at_entry = entry.prover();
+            cands.retain(|c| at_entry.ge0(c).is_some());
+        }
         self.loops.push(Loop {
             breaks: Vec::new(),
             conts: Vec::new(),
@@ -1897,6 +1900,9 @@ impl<'a> Walk<'a> {
             l.breaks.clear();
             let conts = std::mem::take(&mut l.conts);
             let ends: Vec<State> = conts.into_iter().chain([end]).collect();
+            if cands.is_empty() {
+                break;
+            }
             let before = cands.len();
             let provers: Vec<_> = ends.iter().map(|s| s.prover()).collect();
             cands.retain(|c| provers.iter().all(|p| p.ge0(c).is_some()));
@@ -1912,6 +1918,32 @@ impl<'a> Walk<'a> {
             outer.seen.resized.extend(l.seen.resized);
         }
         State::join(&l.breaks)
+    }
+
+    /// `a - b` and its negation, where `a` and `b` are the lengths of two
+    /// arrays or Strings the loop `body` stores to on the same paths, both of
+    /// which a check can depend on: a loop that grows them in step keeps them
+    /// as equal as it entered. [`Walk::settle`] keeps a candidate only where
+    /// the entry and every turn prove it.
+    fn in_step(&self, body: &[St], stored: &BTreeSet<Name>) -> Vec<Lin> {
+        let seq = |n: &Name| self.slot[n.index()].relevant && self.kind(*n) == Kind::Seq;
+        if stored.iter().filter(|n| seq(n)).count() < 2 {
+            return Vec::new();
+        }
+        let mut paths = BTreeMap::new();
+        store_paths(body, &mut Vec::new(), &mut paths);
+        let seqs: Vec<(&Name, &Vec<Vec<u32>>)> = paths.iter().filter(|(n, _)| seq(n)).collect();
+        let mut out = Vec::new();
+        for (i, (a, pa)) in seqs.iter().enumerate() {
+            for (b, pb) in &seqs[i + 1..] {
+                if pa == pb {
+                    let d = Lin::of(Term::Len(**a)).sub(&Lin::of(Term::Len(**b)));
+                    out.extend(d.as_ref().and_then(|d| d.scale(-1)));
+                    out.extend(d);
+                }
+            }
+        }
+        out
     }
 
     /// A call took `n` by `modify` or `consume` and may have changed its length.
@@ -2396,6 +2428,40 @@ fn guard_names(g: &Guard, f: &mut dyn FnMut(Name)) {
 fn link(rel: &mut [bool], names: impl Iterator<Item = Name> + Clone) {
     if names.clone().any(|n| rel[n.index()]) {
         names.for_each(|n| rel[n.index()] = true);
+    }
+}
+
+/// Per name the rows of `ss` store to, the path to each such store: the
+/// index of each enclosing row, and of the branch or arm taken.
+fn store_paths(ss: &[St], path: &mut Vec<u32>, out: &mut BTreeMap<Name, Vec<Vec<u32>>>) {
+    for (i, s) in (0u32..).zip(ss) {
+        path.push(i);
+        match s {
+            St::Store {
+                place: Place::Name(n),
+                ..
+            } => out
+                .entry(*n)
+                .or_default()
+                .push(path[..path.len() - 1].to_vec()),
+            St::If { then, els, .. } => {
+                for (k, b) in (0u32..).zip([then, els]) {
+                    path.push(k);
+                    store_paths(b, path, out);
+                    path.pop();
+                }
+            }
+            St::Loop { body, .. } | St::Block { body, .. } => store_paths(body, path, out),
+            St::Switch { arms, .. } => {
+                for (k, a) in (0u32..).zip(arms) {
+                    path.push(k);
+                    store_paths(&a.body, path, out);
+                    path.pop();
+                }
+            }
+            _ => {}
+        }
+        path.pop();
     }
 }
 

@@ -148,6 +148,34 @@ fn a_condition_stored_in_a_bool_proves_its_index() {
 }
 
 #[test]
+fn two_arrays_a_loop_grows_in_step_keep_equal_lengths() {
+    let src = "fn w(n: Int64) -> Int64 {
+    let mut a: Array<Int64> = []
+    let mut b: Array<Int64> = []
+    let mut i: Int64 = 0
+    while i < n {
+        a.push(i)
+        b.push(i * 2)
+        i = i + 1
+    }
+    let mut s: Int64 = 0
+    let mut k: Int64 = 0
+    while k < a.length {
+        s = s + b[k]
+        k = k + 1
+    }
+    return s
+}
+";
+    assert_eq!(verdicts(src, "w"), ["proved array-index"]);
+    let (err, rows) = oracle(src, "    print(w(3).toString())", "w");
+    assert_eq!(
+        (err.as_str(), rows),
+        ("", vec!["13 0 array-index proved 3".to_string()])
+    );
+}
+
+#[test]
 fn a_loop_condition_under_and_proves_its_index() {
     let src = "fn w(xs: Array<Int64>) -> Int64 {
     let mut s: Int64 = 0
@@ -1188,6 +1216,78 @@ fn w(xs: Array<Int64>, h: H) -> Int64 {
         "fn w(xs: Array<Int64>, b: UInt8) -> Int64 {\n    return xs[Int64(b)]\n}\n",
         "    print(w(xs, 255).toString())",
         "array index 255 out of bounds",
+    ),
+    // A loop that grows one array on some turns only: the lengths part.
+    (
+        "fn w(n: Int64) -> Int64 {
+    let mut a: Array<Int64> = []
+    let mut b: Array<Int64> = []
+    let mut i: Int64 = 0
+    while i < n {
+        a.push(i)
+        if i > 0 {
+            b.push(i)
+        }
+        i = i + 1
+    }
+    let mut s: Int64 = 0
+    let mut k: Int64 = 0
+    while k < a.length {
+        s = s + b[k]
+        k = k + 1
+    }
+    return s
+}
+",
+        "    print(w(3).toString())",
+        "array index 2 out of bounds",
+    ),
+    // Two arrays grown in step from unequal lengths stay unequal.
+    (
+        "fn w(n: Int64) -> Int64 {
+    let mut a: Array<Int64> = [7]
+    let mut b: Array<Int64> = []
+    let mut i: Int64 = 0
+    while i < n {
+        a.push(i)
+        b.push(i)
+        i = i + 1
+    }
+    let mut s: Int64 = 0
+    let mut k: Int64 = 0
+    while k < a.length {
+        s = s + b[k]
+        k = k + 1
+    }
+    return s
+}
+",
+        "    print(w(3).toString())",
+        "array index 3 out of bounds",
+    ),
+    // One array grows twice a turn.
+    (
+        "fn w(n: Int64) -> Int64 {
+    let mut a: Array<Int64> = []
+    let mut b: Array<Int64> = []
+    let mut i: Int64 = 0
+    while i < n {
+        a.push(i)
+        a.push(i)
+        b.push(i)
+        i = i + 1
+    }
+    let mut s: Int64 = 0
+    let mut k: Int64 = 0
+    while k < a.length {
+        s = s + b[k]
+        k = k + 1
+    }
+    return s
+}
+",
+        "    print(w(2).toString())",
+        "array index 2 out of bounds",
     ),
 ];
 
