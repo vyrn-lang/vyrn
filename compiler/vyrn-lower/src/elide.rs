@@ -209,10 +209,30 @@ fn direct_call(rhs: &Rhs) -> Option<FnId> {
 }
 
 /// Every candidate fact of `body`'s summary, or `None` when it has none. The
-/// result's kind is the returned values'; the parameters are those the body
-/// never writes. An `UInt64` is left out: the facts read its values above
-/// `i64::MAX` as negatives.
+/// first return of a name or an integer decides the result: an integer's
+/// value or an array's length; any other result, a String's included,
+/// states nothing.
+/// The parameters are those the body never writes. An `UInt64` is left out:
+/// the facts read its values above `i64::MAX` as negatives.
 fn templates(body: &Body, decls: &HashMap<String, TypeDecl>) -> Option<Summary> {
+    let r = rows(&body.stmts).find_map(|(s, _)| match s {
+        St::Return {
+            value: Some(Val::Name(n)),
+            ..
+        } => {
+            let ty = &body.names[n.index()].ty;
+            Some(match kind_of(ty, decls) {
+                k if k.is_int() => Some(Term::Val(Name(0))),
+                _ if vyrn_frontend::types::resolved(ty, decls).is_seq() => Some(Term::Len(Name(0))),
+                _ => None,
+            })
+        }
+        St::Return {
+            value: Some(Val::Lit(Lit::Int(_) | Lit::Byte(_))),
+            ..
+        } => Some(Some(Term::Val(Name(0)))),
+        _ => None,
+    })??;
     let mut written = BTreeSet::new();
     writes(&body.stmts, &mut written);
     let params: Vec<Kind> = (body.params.iter())
@@ -229,24 +249,9 @@ fn templates(body: &Body, decls: &HashMap<String, TypeDecl>) -> Option<Summary> 
         .filter(|&k| usable(k) && params[k] == Kind::Seq)
         .map(len)
         .collect();
-    let result = rows(&body.stmts).find_map(|(s, _)| match s {
-        St::Return {
-            value: Some(Val::Name(n)),
-            ..
-        } => Some(kind_of(&body.names[n.index()].ty, decls)),
-        St::Return {
-            value: Some(Val::Lit(Lit::Int(_) | Lit::Byte(_))),
-            ..
-        } => Some(Kind::Int(64, true)),
-        St::Return {
-            value: Some(Val::Lit(Lit::Str(_))),
-            ..
-        } => Some(Kind::Seq),
-        _ => None,
-    })?;
     let mut facts = BTreeSet::new();
-    if result.is_int() {
-        let r = Lin::of(Term::Val(Name(0)));
+    if let Term::Val(_) = r {
+        let r = Lin::of(r);
         facts.extend(
             [Some(r.clone()), r.plus(-1), r.plus(1)]
                 .into_iter()
@@ -263,8 +268,8 @@ fn templates(body: &Body, decls: &HashMap<String, TypeDecl>) -> Option<Summary> 
             facts.extend(r.sub(p));
             facts.extend(p.sub(&r));
         }
-    } else if result == Kind::Seq {
-        let r = Lin::of(Term::Len(Name(0)));
+    } else {
+        let r = Lin::of(r);
         facts.extend(seqs.iter().filter_map(|a| r.sub(a)));
     }
     (!facts.is_empty()).then_some(Summary { params, facts })
@@ -905,7 +910,6 @@ impl<'a> Walk<'a> {
         let at = |t: Term| -> Option<Lin> {
             match (t.name().index().checked_sub(1), t, value?) {
                 (None, Term::Val(_), v) => self.lin(v),
-                (None, Term::Len(_), Val::Lit(Lit::Str(x))) => Some(Lin::k(x.len() as i64)),
                 (None, Term::Len(_), Val::Name(m)) => Some(Lin::of(self.length(&Place::Name(*m))?)),
                 (Some(k), Term::Val(_), _) => Some(Lin::of(Term::Val(*params.get(k)?))),
                 (Some(k), Term::Len(_), _) => Some(Lin::of(Term::Len(*params.get(k)?))),
