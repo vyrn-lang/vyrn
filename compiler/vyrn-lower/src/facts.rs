@@ -23,18 +23,21 @@ use vyrn_frontend::core::Name;
 /// String field. A `Col` names its field by the least index among the fields
 /// the record's `where` rule states of equal length, so one term is the
 /// length of each of them; inside a group of stores into the record's
-/// fields, by the field's own index (`elide::Walk::open`).
+/// fields, by the field's own index (`elide::Walk::open`). A `Field` is the
+/// value of a `read` parameter's integer field, by the field's index
+/// (`elide::Walk::field`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Term {
     Val(Name),
     Len(Name),
     Col(Name, u32),
+    Field(Name, u32),
 }
 
 impl Term {
     pub fn name(self) -> Name {
         match self {
-            Term::Val(n) | Term::Len(n) | Term::Col(n, _) => n,
+            Term::Val(n) | Term::Len(n) | Term::Col(n, _) | Term::Field(n, _) => n,
         }
     }
 }
@@ -359,13 +362,13 @@ impl State {
         self.facts.contains(u) || axioms(u.terms.iter().map(|(t, _)| *t)).contains(u)
     }
 
-    /// Forgets everything about `n` and its lengths. A definition `d = s*x +
-    /// rest` with `s` one or minus one first restates every fact about `x`
-    /// through `d`, so nothing known is lost to an exact rename.
+    /// Forgets everything about `n`, its lengths and its fields. A definition
+    /// `d = s*x + rest` with `s` one or minus one first restates every fact
+    /// about `x` through `d`, so nothing known is lost to an exact rename.
     pub fn kill(&mut self, n: Name) {
         let cols: BTreeSet<Term> = (self.defs.iter())
             .flat_map(|(d, v)| std::iter::once(*d).chain(v.terms.iter().map(|(t, _)| *t)))
-            .filter(|t| matches!(t, Term::Col(m, _) if *m == n))
+            .filter(|t| matches!(t, Term::Col(m, _) | Term::Field(m, _) if *m == n))
             .collect();
         for t in [Term::Val(n), Term::Len(n)].into_iter().chain(cols) {
             self.defs.remove(&t);

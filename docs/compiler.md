@@ -199,7 +199,10 @@ disequality `d != 0` the state holds. A fact may name the length of
 a record name's array field, and a `where` rule's `a.length == b.length` makes
 one term of both (`facts::Term::Col`), except inside a group of stores into
 the record's fields, where each field has its own term until the row that
-checks the rule (`check::Guard::Rule`); `World::body_of` decides a body
+checks the rule (`check::Guard::Rule`). A fact may name the value of a
+`read` parameter's integer field (`facts::Term::Field`): the kernel's
+exclusivity judgment keeps the parameter unwritten, so each read of the
+field is one value. `World::body_of` decides a body
 when an emitter first reads it. A direct call's result takes the facts every
 return of its callee proves (`elide::summaries`, keyed by `FnId`, solved once
 per World by `fixpoint::descend`); a call through a value, a method, a

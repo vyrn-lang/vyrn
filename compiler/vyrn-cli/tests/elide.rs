@@ -178,6 +178,25 @@ fn a_passed_divisor_check_proves_the_next() {
 }
 
 #[test]
+fn a_read_parameters_field_is_one_value() {
+    let src = "type H = { slot: Int64, gen: Int64 }
+fn w(h: H, xs: Array<Int64>) -> Int64 {
+    if h.slot < 0 || h.slot >= xs.length {
+        return 0
+    }
+    return xs[h.slot]
+}
+";
+    assert_eq!(verdicts(src, "w"), ["proved array-index"]);
+    let calls = "    print(w(H { slot: 2, gen: 0 }, xs).toString())";
+    let (err, rows) = oracle(src, calls, "w");
+    assert_eq!(
+        (err.as_str(), rows),
+        ("", vec!["6 0 array-index proved 1".to_string()])
+    );
+}
+
+#[test]
 fn a_join_restates_a_counter_through_each_branchs_temporaries() {
     let src = "fn w(xs: Array<Int64>) -> Int64 {
     let mut s: Int64 = 0
@@ -828,6 +847,38 @@ fn w(p: modify P) -> Int64 {
         "fn w(x: Int64, y: Int64) -> Int64 {\n    return x / y\n}\n",
         "    print(w(1, 0).toString())",
         "division by zero",
+    ),
+    // A field of a `modify` parameter is a fresh value at each read.
+    (
+        "type H = { slot: Int64, gen: Int64 }
+fn bump(h: modify H) {
+    h.slot = h.slot + 5
+}
+fn w(xs: Array<Int64>, h: modify H) -> Int64 {
+    if h.slot < 0 || h.slot >= xs.length {
+        return 0
+    }
+    bump(h)
+    return xs[h.slot]
+}
+",
+        "    let mut h = H { slot: 1, gen: 0 }\n    print(w(xs, h).toString())",
+        "array index 6 out of bounds",
+    ),
+    // A field of a record the body stores to is a fresh value at each read.
+    (
+        "type H = { slot: Int64, gen: Int64 }
+fn w(xs: Array<Int64>, h: H) -> Int64 {
+    let mut r = h
+    if r.slot < 0 || r.slot >= xs.length {
+        return 0
+    }
+    r.slot = r.slot + 5
+    return xs[r.slot]
+}
+",
+        "    print(w(xs, H { slot: 1, gen: 0 }).toString())",
+        "array index 6 out of bounds",
     ),
     // A store to the divisor drops its disequality.
     (

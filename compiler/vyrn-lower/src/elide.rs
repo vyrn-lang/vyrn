@@ -14,15 +14,16 @@
 //! over the call's arguments ([`summaries`]). Any other call's result is a
 //! fresh value.
 //!
-//! The walk knows nothing about a global, a field or an element: each read of
-//! one is a fresh value with its type's range. An exact sum is an `Int64` sum
-//! that provably stays in `-2^62..=2^62`. A row is proved only with a
-//! certificate that [`crate::facts::Cert::verify`] accepts, or a divisor the
-//! state holds unequal to zero.
+//! The walk knows nothing about a global, an element, or a field other than an
+//! integer field of a `read` parameter: each read of one is a fresh value with
+//! its type's range. An exact sum is an `Int64` sum that provably stays in
+//! `-2^62..=2^62`. A row is proved only with a certificate that
+//! [`crate::facts::Cert::verify`] accepts, or a divisor the state holds
+//! unequal to zero.
 //!
 //! One postulate: a live read borrow's source is not written, by the kernel's
-//! exclusivity judgment, so a borrow's length changes only where the walk sees
-//! the borrow itself written.
+//! exclusivity judgment, so a borrow's length, and a field of a `read`
+//! parameter, changes only where the walk sees the borrow itself written.
 
 use std::collections::{BTreeSet, HashMap};
 
@@ -32,7 +33,9 @@ use vyrn_frontend::prim::Cmp;
 
 use crate::facts::{Fact, Lin, State, Term};
 use vyrn_frontend::core::check::{Guard, Site, Verdict};
-use vyrn_frontend::core::{rows, Arg, Body, Callee, Ctor, Lit, Name, Op, Place, Rhs, St, Val};
+use vyrn_frontend::core::{
+    rows, Arg, Body, BorrowKind, Callee, Ctor, Lit, Name, Op, Place, Rhs, St, Val,
+};
 use vyrn_frontend::par::in_parallel;
 
 /// The bound an exact `Int64` sum must provably stay within: `2^62`, so no
@@ -472,6 +475,24 @@ impl<'a> Walk<'a> {
         Some((u32::try_from(own).ok()?, u32::try_from(least).ok()?))
     }
 
+    /// The integer field `f` of `r` as one term, when `r` is a `read`
+    /// parameter: by the module's postulate its value changes only where the
+    /// walk sees `r` written, and then [`State::kill`] forgets it.
+    fn field(&self, r: &Place, f: &str) -> Option<Term> {
+        let Place::Name(r) = r else { return None };
+        let info = &self.body.names[r.index()];
+        let read = matches!(
+            &info.borrow_kind,
+            Some(BorrowKind::Param { cap: "read", .. })
+        );
+        if !read || !self.body.params.contains(r) {
+            return None;
+        }
+        let fields = vyrn_frontend::types::record_fields(&info.ty, self.decls)?;
+        let at = fields.iter().position(|x| x.name == f)?;
+        Some(Term::Field(*r, u32::try_from(at).ok()?))
+    }
+
     fn rule(&self, r: Name) -> Option<&vyrn_frontend::ast::Expr> {
         match &self.body.names[r.index()].ty {
             Type::Named(n) => self.decls.get(n)?.predicate.as_ref(),
@@ -511,12 +532,16 @@ impl<'a> Walk<'a> {
 
     /// What `n`'s type says about it, unless a definition says more.
     fn range(&self, st: &mut State, n: Name) {
-        if !self.relevant[n.index()]
-            || st.defs.contains_key(&Term::Val(n))
-            || st.defs.contains_key(&Term::Len(n))
+        if self.relevant[n.index()]
+            && !st.defs.contains_key(&Term::Val(n))
+            && !st.defs.contains_key(&Term::Len(n))
         {
-            return;
+            self.span(st, n);
         }
+    }
+
+    /// What `n`'s type says about its value or its length.
+    fn span(&self, st: &mut State, n: Name) {
         match self.kind(n) {
             Kind::Int(bits, signed) if bits < 64 => {
                 let (lo, hi) = if signed {
@@ -819,6 +844,12 @@ impl<'a> Walk<'a> {
             {
                 if let Some(t) = self.length(b) {
                     st.define(Term::Val(n), &Lin::of(t));
+                }
+            }
+            Rhs::Read(Place::Field(r, f)) if matches!(self.kind(n), Kind::Int(..)) => {
+                if let Some(t) = self.field(r, f) {
+                    st.define(Term::Val(n), &Lin::of(t));
+                    self.span(st, n);
                 }
             }
             // A field's array or String, read or taken, has the field's length.
