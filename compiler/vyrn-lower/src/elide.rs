@@ -1422,12 +1422,11 @@ impl<'a> Walk<'a> {
                     }
                 }
             }
-            // A Bool copy carries the facts its source's truth gives; a
-            // literal's other side is dead (`-1 >= 0`).
-            (Val::Name(m), _) => {
-                if let Some(c) = st.conds.get(m).cloned() {
-                    st.conds.insert(n, c);
-                }
+            // A Bool copy carries the facts its source's truth gives, none
+            // when it has none; a literal's other side is dead (`-1 >= 0`).
+            (Val::Name(m), _) if self.body.names[n.index()].ty == Type::Bool => {
+                let c = st.conds.get(m).cloned().unwrap_or_default();
+                st.conds.insert(n, c);
             }
             (Val::Lit(Lit::Bool(b)), _) => {
                 let never = vec![Fact::Ge(Lin::k(-1))];
@@ -2284,7 +2283,16 @@ fn mark(body: &Body, ss: &[St], rel: &mut [bool], checks: bool, linked: &dyn Fn(
                     }
                 }
             }
-            St::If { then, els, .. } => {
+            St::If {
+                cond, then, els, ..
+            } => {
+                // A loop's exit condition carries the facts of its operands
+                // when it is a Bool copy (`a && b`), for a check in the loop.
+                if let (true, Some(c), [], [St::Break { .. }]) =
+                    (checks, val(cond), &then[..], &els[..])
+                {
+                    rel[c.index()] = true;
+                }
                 mark(body, then, rel, checks, linked);
                 mark(body, els, rel, checks, linked);
             }

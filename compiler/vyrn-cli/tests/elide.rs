@@ -113,6 +113,35 @@ fn a_condition_stored_in_a_bool_proves_its_index() {
 }
 
 #[test]
+fn a_loop_condition_under_and_proves_its_index() {
+    let src = "fn w(xs: Array<Int64>) -> Int64 {
+    let mut s: Int64 = 0
+    let mut j: Int64 = 0
+    while j < xs.length && xs[j] > 0 {
+        s = s + xs[j]
+        j = j + 1
+    }
+    return s
+}
+";
+    assert_eq!(
+        verdicts(src, "w"),
+        ["proved array-index", "proved array-index"]
+    );
+    let (err, rows) = oracle(src, "    print(w(xs).toString())", "w");
+    assert_eq!(
+        (err.as_str(), rows),
+        (
+            "",
+            vec![
+                "4 0 array-index proved 3".to_string(),
+                "5 0 array-index proved 3".to_string()
+            ]
+        )
+    );
+}
+
+#[test]
 fn a_sum_of_two_bounded_operands_is_exact() {
     let src = "fn w(xs: Array<Int64>, i: Int64, k: Int64) -> Int64 {
     if i >= 0 {
@@ -809,6 +838,110 @@ fn w(p: modify P) -> Int64 {
 ",
         "    print(w(xs, 9).toString())",
         "array index 9 out of bounds",
+    ),
+    // The right operand of `&&` shrinks the array the left one bounded.
+    (
+        "fn w(xs: modify Array<Int64>) -> Int64 {
+    let mut s: Int64 = 0
+    let mut j: Int64 = 0
+    while j < xs.length && (xs.pop() ?? 0) > 0 {
+        s = s + xs[j]
+        j = j + 1
+    }
+    return s
+}
+",
+        "    print(w(xs).toString())",
+        "array index 1 out of bounds",
+    ),
+    (
+        "fn shrink(xs: modify Array<Int64>) -> Bool {
+    xs.clear()
+    return true
+}
+fn w(xs: modify Array<Int64>) -> Int64 {
+    let mut s: Int64 = 0
+    let mut j: Int64 = 0
+    while j < xs.length && shrink(xs) {
+        s = s + xs[j]
+        j = j + 1
+    }
+    return s
+}
+",
+        "    print(w(xs).toString())",
+        "array index 0 out of bounds",
+    ),
+    // `||`: its truth bounds nothing, and its right operand may shrink the array.
+    (
+        "fn w(xs: Array<Int64>) -> Int64 {
+    let mut s: Int64 = 0
+    let mut j: Int64 = 0
+    while j < xs.length || j < 5 {
+        s = s + xs[j]
+        j = j + 1
+    }
+    return s
+}
+",
+        "    print(w(xs).toString())",
+        "array index 3 out of bounds",
+    ),
+    (
+        "fn shrink(xs: modify Array<Int64>) -> Bool {
+    xs.clear()
+    return false
+}
+fn w(xs: modify Array<Int64>, j: Int64) -> Int64 {
+    if j < 0 || j >= xs.length || shrink(xs) {
+        return 0
+    }
+    return xs[j]
+}
+",
+        "    print(w(xs, 0).toString())",
+        "array index 0 out of bounds",
+    ),
+    // A negated `&&` is true where the bound may fail.
+    (
+        "fn w(xs: Array<Int64>, j: Int64, c: Bool) -> Int64 {
+    if !(j >= 0 && j < xs.length && c) {
+        return xs[j]
+    }
+    return 0
+}
+",
+        "    print(w(xs, 5, true).toString())",
+        "array index 5 out of bounds",
+    ),
+    // A Bool temp stored again between its condition and its use.
+    (
+        "fn w(xs: Array<Int64>, j: Int64, c: Bool) -> Int64 {
+    let mut ok = j >= 0 && j < xs.length && c
+    ok = c
+    if ok {
+        return xs[j]
+    }
+    return 0
+}
+",
+        "    print(w(xs, 7, true).toString())",
+        "array index 7 out of bounds",
+    ),
+    // A loop condition under `&&` that lets the counter reach the length.
+    (
+        "fn w(xs: Array<Int64>) -> Int64 {
+    let mut s: Int64 = 0
+    let mut j: Int64 = 0
+    while j <= xs.length && j < 9 {
+        s = s + xs[j]
+        j = j + 1
+    }
+    return s
+}
+",
+        "    print(w(xs).toString())",
+        "array index 3 out of bounds",
     ),
     // A branch-local step that may be negative keeps no lower bound.
     (
