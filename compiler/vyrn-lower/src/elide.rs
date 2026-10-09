@@ -169,7 +169,9 @@ pub fn summaries<'a>(
     let mut seen = vec![false; walked.len()];
     start.iter().for_each(|&i| seen[i] = true);
     // Per body, the bodies whose facts its facts went into: visited again
-    // when it loses one.
+    // when it loses one. Every reader of a lowered callee is revisited: a
+    // reader that registers after its callee's first visit may have read a
+    // value that an earlier update of the same round has since lowered.
     let mut readers = vec![BTreeSet::new(); walked.len()];
     let walk = |i: usize, values: &[Summary]| {
         returns(walked[i], decls, View { at: &at, values }, &values[i])
@@ -185,9 +187,11 @@ pub fn summaries<'a>(
             // A body with no facts left reads no callee's.
             if !values[i].facts.is_empty() {
                 for j in read {
-                    readers[j].insert(i);
+                    let new = readers[j].insert(i);
                     if !std::mem::replace(&mut seen[j], true) {
                         next.push(j);
+                    } else if new {
+                        next.push(i);
                     }
                 }
             }
