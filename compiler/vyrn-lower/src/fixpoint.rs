@@ -63,9 +63,11 @@ pub(crate) fn solve<L: Lattice>(mut values: Vec<L>, callees: &[Vec<usize>]) -> V
 /// another of its round, so the result does not depend on the thread count.
 ///
 /// The caller bounds the rounds: an update returns bodies only when it
-/// lowered a value, or bodies no update returned before. Then the count of
-/// live candidates, then the count of bodies never returned, then the
-/// pending count, decrease: no round cap is needed.
+/// lowered a value, bodies no update returned before, or a body on a
+/// dependency it states for the first time. Then the count of live
+/// candidates, then the count of bodies never returned, then the count of
+/// dependencies not yet stated, then the pending count, decrease: no round
+/// cap is needed.
 ///
 /// # Panics
 ///

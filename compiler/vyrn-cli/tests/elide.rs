@@ -1474,6 +1474,32 @@ fn main() -> Int64 {
         &[],
         "array index 2 out of bounds",
     ),
+    // A reader and its callee first visited in one round, the callee first:
+    // the callee lowers before the reader states it reads it.
+    (
+        r#"fn bump(i: Int64) -> Int64 {
+    return i + 1
+}
+fn pick(i: Int64) -> Int64 {
+    return bump(i)
+}
+fn w(xs: Array<Int64>, i: Int64) -> Int64 {
+    if i >= 0 {
+        if i < xs.length {
+            return xs[pick(i)] + xs[bump(i) - 1]
+        }
+    }
+    return 0
+}
+fn main() -> Int64 {
+    let xs: Array<Int64> = [10, 20, 30]
+    print(w(xs, 2).toString())
+    return 0
+}
+"#,
+        &[],
+        "array index 3 out of bounds",
+    ),
 ];
 
 /// `c{depth}` calls `c{depth - 1}` and so on down to `c0`, which returns
