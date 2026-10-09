@@ -1545,51 +1545,50 @@ fn mark(body: &Body, ss: &[St], rel: &mut [bool], checks: bool, linked: &dyn Fn(
     for s in ss {
         match s {
             St::Check(c) => {
-                let (p, vs): (Option<Name>, Vec<&Val>) = match &c.guard {
-                    Guard::Index(p, i) | Guard::Span(p, i, _) => (place_root(p), vec![i]),
-                    Guard::Shift(k, _) | Guard::NonZero(k) => (None, vec![k]),
-                    Guard::NoOverflow(_, d, _) => (None, vec![d]),
-                    Guard::Range(..) => (None, vec![]),
-                    Guard::Rule(r) => (Some(*r), vec![]),
+                let (p, v) = match &c.guard {
+                    Guard::Index(p, i) | Guard::Span(p, i, _) => (place_root(p), Some(i)),
+                    Guard::Shift(k, _) | Guard::NonZero(k) => (None, Some(k)),
+                    Guard::NoOverflow(_, d, _) => (None, Some(d)),
+                    Guard::Range(..) => (None, None),
+                    Guard::Rule(r) => (Some(*r), None),
                 };
-                let names: Vec<Name> = p
-                    .into_iter()
-                    .chain(vs.into_iter().filter_map(val))
-                    .collect();
-                if checks || names.iter().any(|n| rel[n.index()]) {
-                    names.iter().for_each(|n| rel[n.index()] = true);
+                let v = v.and_then(val);
+                if checks {
+                    p.into_iter().chain(v).for_each(|n| rel[n.index()] = true);
+                } else {
+                    link(rel, p.into_iter().chain(v));
                 }
             }
             St::Let(n, rhs) => {
-                let from: Vec<Name> = match rhs {
-                    Rhs::Val(v) => val(v).into_iter().collect(),
-                    Rhs::Read(p) | Rhs::Take(p) => match p {
-                        Place::Name(m) => vec![*m],
-                        Place::Field(b, f) if f == "length" || f == "byteLength" => {
-                            place_root(b).into_iter().collect()
-                        }
-                        Place::Field(b, _) if matches!(**b, Place::Name(_)) => {
-                            place_root(p).into_iter().collect()
-                        }
-                        _ => vec![],
-                    },
-                    Rhs::Prim(_, vs, _) => vs.iter().filter_map(val).collect(),
+                let n = Some(*n);
+                match rhs {
+                    Rhs::Val(v) => link(rel, n.into_iter().chain(val(v))),
+                    Rhs::Read(p) | Rhs::Take(p) => {
+                        let from = match p {
+                            Place::Name(m) => Some(*m),
+                            Place::Field(b, f) if f == "length" || f == "byteLength" => {
+                                place_root(b)
+                            }
+                            Place::Field(b, _) if matches!(**b, Place::Name(_)) => place_root(p),
+                            _ => None,
+                        };
+                        link(rel, n.into_iter().chain(from))
+                    }
+                    Rhs::Prim(_, vs, _) => {
+                        link(rel, n.into_iter().chain(vs.iter().filter_map(val)))
+                    }
                     Rhs::Call {
-                        callee,
-                        args,
-                        kind: Callee::Builtin,
-                        ..
-                    } if prelude::builtin(callee).is_some_and(|b| b.length != Length::Unknown) => {
-                        args.iter().filter_map(|(a, _)| root(a)).collect()
+                        callee, args, kind, ..
+                    } => {
+                        let lengths = matches!(kind, Callee::Builtin)
+                            && prelude::builtin(callee)
+                                .is_some_and(|b| b.length != Length::Unknown);
+                        if lengths || direct_call(rhs).is_some_and(linked) {
+                            let from = args.iter().filter_map(|(a, _)| root(a));
+                            link(rel, n.into_iter().chain(from));
+                        }
                     }
-                    Rhs::Call { args, .. } if direct_call(rhs).is_some_and(linked) => {
-                        args.iter().filter_map(|(a, _)| root(a)).collect()
-                    }
-                    _ => vec![],
-                };
-                if rel[n.index()] || from.iter().any(|m| rel[m.index()]) {
-                    rel[n.index()] = true;
-                    from.iter().for_each(|m| rel[m.index()] = true);
+                    _ => {}
                 }
             }
             St::Store { place, value, .. } => {
@@ -1612,6 +1611,13 @@ fn mark(body: &Body, ss: &[St], rel: &mut [bool], checks: bool, linked: &dyn Fn(
             }
             _ => {}
         }
+    }
+}
+
+/// Marks every name of `names` relevant when one of them is.
+fn link(rel: &mut [bool], names: impl Iterator<Item = Name> + Clone) {
+    if names.clone().any(|n| rel[n.index()]) {
+        names.for_each(|n| rel[n.index()] = true);
     }
 }
 
