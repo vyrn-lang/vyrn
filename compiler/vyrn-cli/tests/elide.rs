@@ -22,7 +22,12 @@ fn program(src: &str, calls: &str) -> (Scratch, std::path::PathBuf) {
 /// `check`, then the rule.
 fn verdicts(src: &str, body: &str) -> Vec<String> {
     let (_dir, file) = program(src, "");
-    let out = vyrn().arg("emit-lowered").arg(&file).output().unwrap();
+    rows_of(&file, body)
+}
+
+/// [`verdicts`] of the program rooted at `file`.
+fn rows_of(file: &std::path::Path, body: &str) -> Vec<String> {
+    let out = vyrn().arg("emit-lowered").arg(file).output().unwrap();
     assert!(out.status.success(), "{}", norm(&out.stderr));
     let mut rows = Vec::new();
     let mut inside = false;
@@ -43,10 +48,15 @@ fn verdicts(src: &str, body: &str) -> Vec<String> {
 /// rows for `body`, each as `line ordinal rule verdict count`.
 fn oracle(src: &str, calls: &str, body: &str) -> (String, Vec<String>) {
     let (dir, file) = program(src, calls);
+    run_oracle(&dir, &file, body)
+}
+
+/// [`oracle`] of the program rooted at `file`, its log in `dir`.
+fn run_oracle(dir: &std::path::Path, file: &std::path::Path, body: &str) -> (String, Vec<String>) {
     let log = dir.join("counts.tsv");
     let out = vyrn()
         .arg("run")
-        .arg(&file)
+        .arg(file)
         .env("VYRN_CHECKS", &log)
         .output()
         .unwrap();
@@ -83,6 +93,78 @@ fn a_counted_while_proves_its_index() {
                let mut i: Int64 = 0\n    while i < xs.length {\n        s = s + xs[i]\n        \
                i = i + 1\n    }\n    return s\n}\n";
     assert_eq!(verdicts(src, "sum"), ["proved array-index"]);
+}
+
+#[test]
+fn a_condition_stored_in_a_bool_proves_its_index() {
+    let src = "fn w(xs: Array<Int64>, i: Int64) -> Int64 {
+    if i < 0 || i >= xs.length {
+                       return 0
+    }
+    return xs[i]
+}
+";
+    assert_eq!(verdicts(src, "w"), ["proved array-index"]);
+    let (err, rows) = oracle(src, "    print(w(xs, 2).toString())", "w");
+    assert_eq!(
+        (err.as_str(), rows),
+        ("", vec!["5 0 array-index proved 1".to_string()])
+    );
+}
+
+#[test]
+fn a_sum_of_two_bounded_operands_is_exact() {
+    let src = "fn w(xs: Array<Int64>, i: Int64, k: Int64) -> Int64 {
+    if i >= 0 {
+        if i < xs.length {
+            if k >= 0 {
+                if k < 4 {
+                    let j = i + k
+                    if j < xs.length {
+                        return xs[j]
+                    }
+                }
+            }
+        }
+    }
+    return 0
+}
+";
+    assert_eq!(verdicts(src, "w"), ["proved array-index"]);
+    let (err, rows) = oracle(src, "    print(w(xs, 1, 1).toString())", "w");
+    assert_eq!(
+        (err.as_str(), rows),
+        ("", vec!["8 0 array-index proved 1".to_string()])
+    );
+}
+
+#[test]
+fn a_join_restates_a_counter_through_each_branchs_temporaries() {
+    let src = "fn w(xs: Array<Int64>) -> Int64 {
+    let mut s: Int64 = 0
+    let mut i: Int64 = 0
+    while i < xs.length {
+        let x = xs[i]
+        s = s + x
+        if x < 0 {
+            i = i + 1
+        } else {
+            let k = (x & 3) + 1
+            if i + k > xs.length {
+                return s
+            }
+            i = i + k
+        }
+    }
+    return s
+}
+";
+    assert_eq!(verdicts(src, "w"), ["proved array-index"]);
+    let (err, rows) = oracle(src, "    print(w(xs).toString())", "w");
+    assert_eq!(
+        (err.as_str(), rows),
+        ("", vec!["5 0 array-index proved 1".to_string()])
+    );
 }
 
 #[test]
@@ -558,12 +640,179 @@ fn w(p: modify P) -> Int64 {
         "    print(w(true).toString())",
         "array index 5 out of bounds",
     ),
+    // A Bool that one branch overwrites keeps only what both branches give.
+    (
+        "fn w(xs: Array<Int64>, i: Int64, c: Bool) -> Int64 {
+    let mut ok = i >= 0 && i < xs.length
+    if c {
+        ok = true
+    }
+    if ok {
+        return xs[i]
+    }
+    return 0
+}
+",
+        "    print(w(xs, 5, true).toString())",
+        "array index 5 out of bounds",
+    ),
+    // A Bool's facts end where a name they mention is written.
+    (
+        "fn w(xs: Array<Int64>, k: Int64) -> Int64 {
+    let mut i = k
+    let ok = i >= 0 && i < xs.length
+    i = i + 1
+    if ok {
+        return xs[i]
+    }
+    return 0
+}
+",
+        "    print(w(xs, 2).toString())",
+        "array index 3 out of bounds",
+    ),
+    (
+        "fn w(xs: modify Array<Int64>, i: Int64) -> Int64 {
+    let ok = i >= 0 && i < xs.length
+    xs.clear()
+    if ok {
+        return xs[i]
+    }
+    return 0
+}
+",
+        "    print(w(xs, 0).toString())",
+        "array index 0 out of bounds",
+    ),
+    // A Bool a loop writes keeps nothing at the loop's exit.
+    (
+        "fn w(xs: Array<Int64>, i: Int64) -> Int64 {
+    let mut ok = i >= 0 && i < xs.length
+    let mut k: Int64 = 0
+    while k < 2 {
+        if k == 1 {
+            ok = true
+        }
+        k = k + 1
+    }
+    if ok {
+        return xs[i]
+    }
+    return 0
+}
+",
+        "    print(w(xs, 9).toString())",
+        "array index 9 out of bounds",
+    ),
+    // A branch-local step that may be negative keeps no lower bound.
+    (
+        "fn w(xs: Array<Int64>) -> Int64 {
+    let mut s: Int64 = 0
+    let mut i: Int64 = 0
+    while i < xs.length {
+        let x = xs[i]
+        s = s + x
+        if x > 15 {
+            i = i + 1
+        } else {
+            let k = (x & 3) - 3
+            if i + k > xs.length {
+                return s
+            }
+            i = i + k
+        }
+    }
+    return s
+}
+",
+        "    print(w(xs).toString())",
+        "array index -1 out of bounds",
+    ),
+    // A branch-local alias of a length a later pop shrinks.
+    (
+        "fn w(xs: modify Array<Int64>, c: Bool) -> Int64 {
+    if xs.length < 3 {
+        return 0
+    }
+    let mut j: Int64 = 0
+    if c {
+        let t = xs.length - 1
+        j = t
+    } else {
+        let t = xs.length - 1
+        let p = xs.pop() ?? 0
+        j = t
+    }
+    return xs[j]
+}
+",
+        "    print(w(xs, false).toString())",
+        "array index 2 out of bounds",
+    ),
+    // Branch-local aliases of different values.
+    (
+        "fn w(xs: Array<Int64>, c: Bool) -> Int64 {
+    let mut j: Int64 = 0
+    if c {
+        let t = xs.length - 1
+        j = t
+    } else {
+        let t = xs.length
+        j = t
+    }
+    return xs[j]
+}
+",
+        "    print(w(xs, false).toString())",
+        "array index 3 out of bounds",
+    ),
     // A sum is exact only when it provably fits (research witness h21t).
     (
         "fn w(xs: Array<Int64>, n: Int64) -> Int64 {\n    if n >= 0 {\n        let i = n + n\n        \
          if i < xs.length {\n            return xs[i]\n        }\n    }\n    return 0\n}\n",
         "    print(w(xs, 4611686018427387904).toString())",
         "out of bounds",
+    ),
+    // Operands each below 2^62 sum past `Int64`: neither is in half the range.
+    (
+        "fn w(xs: Array<Int64>, i: Int64, k: Int64) -> Int64 {
+    if i >= 0 {
+        if k >= 0 {
+            if i <= 4611686018427387904 {
+                if k <= 4611686018427387904 {
+                    let j = i + k
+                    if j < xs.length {
+                        return xs[j]
+                    }
+                }
+            }
+        }
+    }
+    return 0
+}
+",
+        "    print(w(xs, 4611686018427387904, 4611686018427387904).toString())",
+        "array index -9223372036854775808 out of bounds",
+    ),
+    (
+        "fn w(xs: Array<Int64>, i: Int64, k: Int64) -> Int64 {
+    if i >= 0 {
+        if i <= 4611686018427387904 {
+            if k <= 0 {
+                if k >= 0 - 4611686018427387904 {
+                    let j = i - k
+                    if j < xs.length {
+                        return xs[j]
+                    }
+                }
+            }
+        }
+    }
+    return 0
+}
+",
+        "    print(w(xs, 4611686018427387904, 0 - 4611686018427387904).toString())",
+        "array index -9223372036854775808 out of bounds",
     ),
     // A conversion is exact only when its source provably fits (witness s3).
     (
@@ -706,4 +955,726 @@ ran: {err}"
 "
         )
     );
+}
+
+/// Witnesses of callee summaries (`vyrn_lower::elide::summaries`): each a
+/// program whose `w` holds one index a wrong summary would prove, the files
+/// beside `p.vyrn`, and the trap its `main` reaches there.
+const CALLEE_WITNESSES: &[(&str, &[(&str, &str)], &str)] = &[
+    // A private function shares its name with one in another module.
+    (
+        r#"import { viaB } from "./b"
+fn pick(i: Int64) -> Int64 {
+    return i + 1
+}
+fn w(xs: Array<Int64>, i: Int64) -> Int64 {
+    if i >= 0 {
+        if i < xs.length {
+            return xs[pick(i)]
+        }
+    }
+    return 0
+}
+fn main() -> Int64 {
+    let xs: Array<Int64> = [10, 20, 30]
+    print((viaB(xs, 0) + w(xs, 2)).toString())
+    return 0
+}
+"#,
+        &[(
+            "b.vyrn",
+            r#"fn pick(i: Int64) -> Int64 {
+    return i
+}
+export fn viaB(xs: Array<Int64>, i: Int64) -> Int64 {
+    if i >= 0 && i < xs.length {
+        return xs[pick(i)]
+    }
+    return 0
+}
+"#,
+        )],
+        "array index 3 out of bounds",
+    ),
+    // A function named as a value is called through the value.
+    (
+        r#"fn ok(i: Int64) -> Int64 {
+    return i
+}
+fn bad(i: Int64) -> Int64 {
+    return i + 1
+}
+fn w(xs: Array<Int64>, i: Int64, c: Bool) -> Int64 {
+    let f = if c { ok } else { bad }
+    if i >= 0 {
+        if i < xs.length {
+            return xs[f(i)]
+        }
+    }
+    return 0
+}
+fn main() -> Int64 {
+    let xs: Array<Int64> = [10, 20, 30]
+    print((ok(0) + w(xs, 2, false)).toString())
+    return 0
+}
+"#,
+        &[],
+        "array index 3 out of bounds",
+    ),
+    // A `fn`-typed parameter is bound at the call.
+    (
+        r#"fn ok(i: Int64) -> Int64 {
+    return i
+}
+fn bad(i: Int64) -> Int64 {
+    return i + 1
+}
+fn apply(f: fn(Int64) -> Int64, i: Int64) -> Int64 {
+    return f(i)
+}
+fn w(xs: Array<Int64>, i: Int64) -> Int64 {
+    if i >= 0 {
+        if i < xs.length {
+            return xs[apply(bad, i)]
+        }
+    }
+    return 0
+}
+fn main() -> Int64 {
+    let xs: Array<Int64> = [10, 20, 30]
+    print((apply(ok, 0) + w(xs, 2)).toString())
+    return 0
+}
+"#,
+        &[],
+        "array index 3 out of bounds",
+    ),
+    // Every arm of a `return match` is a return.
+    (
+        r#"type K = | Zero | More
+fn pick(i: Int64, k: K) -> Int64 {
+    return match k {
+        Zero => i,
+        More => i + 1,
+    }
+}
+fn w(xs: Array<Int64>, i: Int64) -> Int64 {
+    if i >= 0 {
+        if i < xs.length {
+            return xs[pick(i, More)]
+        }
+    }
+    return 0
+}
+fn main() -> Int64 {
+    let xs: Array<Int64> = [10, 20, 30]
+    print((pick(0, Zero) + w(xs, 2)).toString())
+    return 0
+}
+"#,
+        &[],
+        "array index 3 out of bounds",
+    ),
+    // A record name rebound to a longer record.
+    (
+        r#"type P = { a: Array<Int64> }
+fn last(p: P) -> Int64 {
+    let mut q = P { a: p.a.copy() }
+    if q.a.length == 0 {
+        return 0
+    }
+    let n = q.a.length - 1
+    q = P { a: [1, 2, 3, 4, 5, 6] }
+    return q.a.length - 1
+}
+fn w(xs: Array<Int64>) -> Int64 {
+    let j = last(P { a: xs.copy() })
+    if j >= 0 {
+        return xs[j]
+    }
+    return 0
+}
+fn main() -> Int64 {
+    let xs: Array<Int64> = [10, 20, 30]
+    print(w(xs).toString())
+    return 0
+}
+"#,
+        &[],
+        "array index 5 out of bounds",
+    ),
+    // An import alias names another module's function.
+    (
+        r#"import { pick as choose } from "./b"
+fn pick(i: Int64) -> Int64 {
+    return i
+}
+fn w(xs: Array<Int64>, i: Int64) -> Int64 {
+    if i >= 0 {
+        if i < xs.length {
+            return xs[choose(i)]
+        }
+    }
+    return 0
+}
+fn main() -> Int64 {
+    let xs: Array<Int64> = [10, 20, 30]
+    print((pick(0) + w(xs, 2)).toString())
+    return 0
+}
+"#,
+        &[(
+            "b.vyrn",
+            r#"export fn pick(i: Int64) -> Int64 {
+    return i + 1
+}
+"#,
+        )],
+        "array index 3 out of bounds",
+    ),
+    // A namespace call names another module's function.
+    (
+        r#"import * as ns from "./b"
+fn pick(i: Int64) -> Int64 {
+    return i
+}
+fn w(xs: Array<Int64>, i: Int64) -> Int64 {
+    if i >= 0 {
+        if i < xs.length {
+            return xs[ns.pick(i)]
+        }
+    }
+    return 0
+}
+fn main() -> Int64 {
+    let xs: Array<Int64> = [10, 20, 30]
+    print((pick(0) + w(xs, 2)).toString())
+    return 0
+}
+"#,
+        &[(
+            "b.vyrn",
+            r#"export fn pick(i: Int64) -> Int64 {
+    return i + 1
+}
+"#,
+        )],
+        "array index 3 out of bounds",
+    ),
+    // A protocol method dispatches on the receiver's type.
+    (
+        r#"protocol Pick {
+    fn pick(self, i: Int64) -> Int64
+}
+type A = { tag: Int64 }
+type B = { tag: Int64 }
+impl Pick for A {
+    fn pick(self, i: Int64) -> Int64 {
+        return i
+    }
+}
+impl Pick for B {
+    fn pick(self, i: Int64) -> Int64 {
+        return i + 1
+    }
+}
+fn w(xs: Array<Int64>, i: Int64) -> Int64 {
+    let b = B { tag: 0 }
+    if i >= 0 {
+        if i < xs.length {
+            return xs[b.pick(i)]
+        }
+    }
+    return 0
+}
+fn main() -> Int64 {
+    let xs: Array<Int64> = [10, 20, 30]
+    let a = A { tag: 0 }
+    print((a.pick(0) + w(xs, 2)).toString())
+    return 0
+}
+"#,
+        &[],
+        "array index 3 out of bounds",
+    ),
+    // A generic body dispatches on its type argument.
+    (
+        r#"protocol Off {
+    fn off(self) -> Int64
+}
+type A = { tag: Int64 }
+type B = { tag: Int64 }
+impl Off for A {
+    fn off(self) -> Int64 {
+        return 0
+    }
+}
+impl Off for B {
+    fn off(self) -> Int64 {
+        return 1
+    }
+}
+fn pick<T: Off>(x: T, i: Int64) -> Int64 {
+    let o = x.off()
+    if o == 0 {
+        return i
+    }
+    return i + 1
+}
+fn w(xs: Array<Int64>, i: Int64) -> Int64 {
+    let b = B { tag: 0 }
+    if i >= 0 {
+        if i < xs.length {
+            return xs[pick(b, i)]
+        }
+    }
+    return 0
+}
+fn main() -> Int64 {
+    let xs: Array<Int64> = [10, 20, 30]
+    let a = A { tag: 0 }
+    print((pick(a, 0) + w(xs, 2)).toString())
+    return 0
+}
+"#,
+        &[],
+        "array index 3 out of bounds",
+    ),
+    // A callee reads a mutable global another call wrote.
+    (
+        r#"let mut off: Int64 = 0
+fn pick(i: Int64) -> Int64 {
+    return i + off
+}
+fn bump() {
+    off = 1
+}
+fn w(xs: Array<Int64>, i: Int64) -> Int64 {
+    bump()
+    if i >= 0 {
+        if i < xs.length {
+            return xs[pick(i)]
+        }
+    }
+    return 0
+}
+fn main() -> Int64 {
+    let xs: Array<Int64> = [10, 20, 30]
+    print(w(xs, 2).toString())
+    return 0
+}
+"#,
+        &[],
+        "array index 3 out of bounds",
+    ),
+    // A module-state initializer calls a function.
+    (
+        r#"import { start } from "./b"
+let mut off: Int64 = start()
+fn pick(i: Int64) -> Int64 {
+    if off == 0 {
+        return i
+    }
+    return i + off
+}
+fn w(xs: Array<Int64>, i: Int64) -> Int64 {
+    if i >= 0 {
+        if i < xs.length {
+            return xs[pick(i)]
+        }
+    }
+    return 0
+}
+fn main() -> Int64 {
+    let xs: Array<Int64> = [10, 20, 30]
+    print(w(xs, 2).toString())
+    return 0
+}
+"#,
+        &[(
+            "b.vyrn",
+            r#"export fn start() -> Int64 {
+    return 1
+}
+"#,
+        )],
+        "array index 3 out of bounds",
+    ),
+    // The callee shrinks its `modify` array argument.
+    (
+        r#"fn pick(xs: modify Array<Int64>, i: Int64) -> Int64 {
+    let p = xs.pop() ?? 0
+    return i
+}
+fn w(xs: Array<Int64>, i: Int64) -> Int64 {
+    let mut ys = xs.copy()
+    if i >= 0 {
+        if i < ys.length {
+            let j = pick(ys, i)
+            return ys[j]
+        }
+    }
+    return 0
+}
+fn main() -> Int64 {
+    let xs: Array<Int64> = [10, 20, 30]
+    print(w(xs, 2).toString())
+    return 0
+}
+"#,
+        &[],
+        "array index 2 out of bounds",
+    ),
+    // The callee empties a field of its `modify` record argument.
+    (
+        r#"type P = { a: Array<Int64> }
+fn pick(p: modify P, i: Int64) -> Int64 {
+    p.a = []
+    return i
+}
+fn w(xs: Array<Int64>, i: Int64) -> Int64 {
+    let mut p = P { a: xs.copy() }
+    if i >= 0 {
+        if i < p.a.length {
+            let j = pick(p, i)
+            return p.a[j]
+        }
+    }
+    return 0
+}
+fn main() -> Int64 {
+    let xs: Array<Int64> = [10, 20, 30]
+    print(w(xs, 0).toString())
+    return 0
+}
+"#,
+        &[],
+        "array index 0 out of bounds",
+    ),
+    // The result is the entry length of a `modify` argument the callee shrank.
+    (
+        r#"fn popLast(xs: modify Array<Int64>) -> Int64 {
+    let n = xs.length
+    if n == 0 {
+        panic("empty")
+    }
+    let p = xs.pop() ?? 0
+    return n - 1
+}
+fn w(xs: Array<Int64>) -> Int64 {
+    let mut ys = xs.copy()
+    let j = popLast(ys)
+    return ys[j]
+}
+fn main() -> Int64 {
+    let xs: Array<Int64> = [10, 20, 30]
+    print(w(xs).toString())
+    return 0
+}
+"#,
+        &[],
+        "array index 2 out of bounds",
+    ),
+    // `k = rest(xs, k)`: the argument is the old `k`, the result the new.
+    (
+        r#"fn rest(a: Array<Int64>, i: Int64) -> Int64 {
+    if i < 0 {
+        panic("bad")
+    }
+    if i > a.length {
+        panic("bad")
+    }
+    return a.length - i
+}
+fn w(xs: Array<Int64>, k0: Int64) -> Int64 {
+    let mut k = k0
+    if k >= 0 {
+        if k <= xs.length {
+            k = rest(xs, k)
+            if k >= 1 {
+                return xs[k]
+            }
+        }
+    }
+    return 0
+}
+fn main() -> Int64 {
+    let xs: Array<Int64> = [10, 20, 30]
+    print(w(xs, 0).toString())
+    return 0
+}
+"#,
+        &[],
+        "array index 3 out of bounds",
+    ),
+    // A `swapRemove` after the call shrinks the array the result indexes.
+    (
+        r#"fn lastIndex(a: Array<Int64>) -> Int64 {
+    if a.length == 0 {
+        panic("empty")
+    }
+    return a.length - 1
+}
+fn w(xs: Array<Int64>) -> Int64 {
+    let mut ys = xs.copy()
+    let j = lastIndex(ys)
+    let gone = ys.swapRemove(0)
+    return ys[j]
+}
+fn main() -> Int64 {
+    let xs: Array<Int64> = [10, 20, 30]
+    print(w(xs).toString())
+    return 0
+}
+"#,
+        &[],
+        "array index 2 out of bounds",
+    ),
+    // A result narrowed to `Int32` wraps.
+    (
+        r#"fn low(i: Int64) -> Int32 {
+    return Int32(i)
+}
+fn w(xs: Array<Int64>, i: Int64) -> Int64 {
+    let k = Int64(low(i))
+    if k >= 0 {
+        if k < xs.length {
+            return xs[i]
+        }
+    }
+    return 0
+}
+fn main() -> Int64 {
+    let xs: Array<Int64> = [10, 20, 30]
+    print(w(xs, 4294967297).toString())
+    return 0
+}
+"#,
+        &[],
+        "array index 4294967297 out of bounds",
+    ),
+    // Mutually recursive bodies assume each other's facts.
+    (
+        r#"fn down(i: Int64, n: Int64) -> Int64 {
+    if n <= 0 {
+        return i + 1
+    }
+    return up(i, n - 1)
+}
+fn up(i: Int64, n: Int64) -> Int64 {
+    if n <= 0 {
+        return i
+    }
+    return down(i, n - 1)
+}
+fn w(xs: Array<Int64>, i: Int64) -> Int64 {
+    if i >= 0 {
+        if i < xs.length {
+            return xs[up(i, 3)]
+        }
+    }
+    return 0
+}
+fn main() -> Int64 {
+    let xs: Array<Int64> = [10, 20, 30]
+    print(w(xs, 2).toString())
+    return 0
+}
+"#,
+        &[],
+        "array index 3 out of bounds",
+    ),
+    // An array result shorter than the argument.
+    (
+        r#"fn shorter(a: Array<Int64>) -> Array<Int64> {
+    let mut b = a.copy()
+    let p = b.pop() ?? 0
+    return b
+}
+fn w(xs: Array<Int64>, i: Int64) -> Int64 {
+    let ys = shorter(xs)
+    if i >= 0 {
+        if i < xs.length {
+            return ys[i]
+        }
+    }
+    return 0
+}
+fn main() -> Int64 {
+    let xs: Array<Int64> = [10, 20, 30]
+    print(w(xs, 2).toString())
+    return 0
+}
+"#,
+        &[],
+        "array index 2 out of bounds",
+    ),
+];
+
+/// `c{depth}` calls `c{depth - 1}` and so on down to `c0`, which returns
+/// `last`, each declared before its callee: the summary of `c0` reaches `w`
+/// only after `depth` bodies lower theirs (research witnesses `spec3_3` and
+/// `spec3_4`, where a round cap kept the first value).
+fn chain(depth: usize, last: &str) -> String {
+    let mut src: String = (1..=depth)
+        .rev()
+        .map(|k| {
+            format!(
+                "fn c{k}(i: Int64) -> Int64 {{\n    return c{}(i)\n}}\n",
+                k - 1
+            )
+        })
+        .collect();
+    src.push_str(&format!(
+        "fn c0(i: Int64) -> Int64 {{\n    return {last}\n}}\n"
+    ));
+    src.push_str(&format!(
+        "fn w(xs: Array<Int64>, i: Int64) -> Int64 {{\n    if i >= 0 {{\n        \
+         if i < xs.length {{\n            return xs[c{depth}(i)]\n        }}\n    }}\n    \
+         return 0\n}}\nfn main() -> Int64 {{\n    let xs: Array<Int64> = [10, 20, 30]\n    \
+         print(w(xs, 2).toString())\n    return 0\n}}\n"
+    ));
+    src
+}
+
+/// Writes `root` as `p.vyrn` and each of `files` beside it, in a fresh
+/// directory.
+fn modules(root: &str, files: &[(&str, &str)]) -> (Scratch, std::path::PathBuf) {
+    let dir = scratch("elide");
+    for (name, src) in files {
+        std::fs::write(dir.join(name), src).unwrap();
+    }
+    let file = dir.join("p.vyrn");
+    std::fs::write(&file, root).unwrap();
+    (dir, file)
+}
+
+#[test]
+fn every_callee_witness_keeps_its_index_and_traps_there() {
+    let deep = chain(70, "i + 1");
+    let all = CALLEE_WITNESSES.iter().copied().chain([(
+        deep.as_str(),
+        &[][..],
+        "array index 3 out of bounds",
+    )]);
+    let mut failures = Vec::new();
+    for (root, files, trap) in all {
+        let (dir, file) = modules(root, files);
+        let rows = rows_of(&file, "w");
+        if rows.is_empty() || rows.iter().any(|v| v.starts_with("proved")) {
+            failures.push(format!("{root}\nrows: {rows:?}"));
+        }
+        let (err, _) = run_oracle(&dir, &file, "w");
+        if !err.contains(trap) || err.contains(vyrn_frontend::trap::PROVED_CHECK_FAILED) {
+            failures.push(format!("{root}\nran: {err}"));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n\n"));
+}
+
+/// Programs whose `w` indexes by what a callee returns: the callee's summary
+/// proves the index, and the run passes the oracle.
+const CALLEE_PROOFS: &[&str] = &[
+    r#"fn pick(i: Int64) -> Int64 {
+    return i
+}
+fn w(xs: Array<Int64>, i: Int64) -> Int64 {
+    if i >= 0 {
+        if i < xs.length {
+            return xs[pick(i)]
+        }
+    }
+    return 0
+}
+fn main() -> Int64 {
+    let xs: Array<Int64> = [10, 20, 30]
+    print(w(xs, 2).toString())
+    return 0
+}
+"#,
+    r#"fn lastIndex(a: Array<Int64>) -> Int64 {
+    if a.length < 1 {
+        panic("empty")
+    }
+    return a.length - 1
+}
+fn w(xs: Array<Int64>) -> Int64 {
+    let j = lastIndex(xs)
+    return xs[j]
+}
+fn main() -> Int64 {
+    let xs: Array<Int64> = [10, 20, 30]
+    print(w(xs).toString())
+    return 0
+}
+"#,
+    r#"fn width(b: Array<Int64>, i: Int64) -> Int64 {
+    if b[i] < 15 {
+        return 1
+    }
+    if i + 2 > b.length {
+        return 0
+    }
+    return 2
+}
+fn w(xs: Array<Int64>) -> Int64 {
+    let n = xs.length
+    let mut s: Int64 = 0
+    let mut i: Int64 = 0
+    while i < n {
+        s = s + xs[i]
+        let k = width(xs, i)
+        if k == 0 {
+            return s
+        }
+        i = i + k
+    }
+    return s
+}
+fn main() -> Int64 {
+    let xs: Array<Int64> = [10, 20, 30]
+    print(w(xs).toString())
+    return 0
+}
+"#,
+    r#"fn longer(a: Array<Int64>) -> Array<Int64> {
+    let mut b: Array<Int64> = []
+    b.append(a)
+    b.push(0)
+    return b
+}
+fn w(xs: Array<Int64>, i: Int64) -> Int64 {
+    let ys = longer(xs)
+    if i >= 0 {
+        if i < xs.length {
+            return ys[i]
+        }
+    }
+    return 0
+}
+fn main() -> Int64 {
+    let xs: Array<Int64> = [10, 20, 30]
+    print(w(xs, 2).toString())
+    return 0
+}
+"#,
+];
+
+#[test]
+fn a_callee_summary_proves_an_index() {
+    let deep = chain(70, "i");
+    let mut failures = Vec::new();
+    for root in CALLEE_PROOFS.iter().copied().chain([deep.as_str()]) {
+        let (dir, file) = modules(root, &[]);
+        let rows = rows_of(&file, "w");
+        if rows != ["proved array-index"] {
+            failures.push(format!("{root}\nrows: {rows:?}"));
+        }
+        let (err, _) = run_oracle(&dir, &file, "w");
+        if !err.is_empty() {
+            failures.push(format!("{root}\nran: {err}"));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n\n"));
 }

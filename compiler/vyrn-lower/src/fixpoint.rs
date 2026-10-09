@@ -1,5 +1,10 @@
-//! The fixpoint driver every whole-program analysis over the call graph
-//! runs on: [`solve`].
+//! The fixpoint drivers every whole-program analysis over the call graph
+//! runs on: [`solve`] raises values to the least fixpoint, [`descend`] lowers
+//! them to the greatest.
+
+use std::collections::BTreeSet;
+
+use vyrn_frontend::par::in_parallel;
 
 /// A join semilattice of finite height: the value an analysis keeps per body.
 pub(crate) trait Lattice {
@@ -43,6 +48,41 @@ pub(crate) fn solve<L: Lattice>(mut values: Vec<L>, callees: &[Vec<usize>]) -> V
             if !(changed && cyclic) {
                 break;
             }
+        }
+    }
+    values
+}
+
+/// Lowers values until no update lowers one: the greatest fixpoint over a
+/// finite set of candidates. Visits each body of `start`, then each body an
+/// update returns, in rounds. A round runs `visit(i, values)` for every
+/// pending body on every thread, heaviest by `weight` first
+/// ([`vyrn_frontend::par::in_parallel`]), each against the values the round
+/// started from. Then `update(i, out, values)` stores each visit's `out`, in
+/// index order, and returns the bodies to visit because of it. No visit sees
+/// another of its round, so the result does not depend on the thread count.
+///
+/// The caller bounds the rounds: an update returns bodies only when it
+/// lowered a value, or bodies no update returned before. Then the count of
+/// live candidates, then the count of bodies never returned, then the
+/// pending count, decrease: no round cap is needed.
+///
+/// # Panics
+///
+/// If `start` or an update returns an index that is not a body.
+pub(crate) fn descend<L: Sync, T: Send>(
+    mut values: Vec<L>,
+    start: impl IntoIterator<Item = usize>,
+    weight: impl Fn(usize) -> usize,
+    visit: impl Fn(usize, &[L]) -> T + Sync,
+    mut update: impl FnMut(usize, T, &mut [L]) -> Vec<usize>,
+) -> Vec<L> {
+    let mut pending: BTreeSet<usize> = start.into_iter().collect();
+    while !pending.is_empty() {
+        let round: Vec<usize> = std::mem::take(&mut pending).into_iter().collect();
+        let outs = in_parallel(&round, |&i| weight(i), || (), |(), &i| visit(i, &values));
+        for (i, out) in round.into_iter().zip(outs) {
+            pending.extend(update(i, out, &mut values));
         }
     }
     values
@@ -108,7 +148,7 @@ fn components(callees: &[Vec<usize>]) -> Vec<Vec<usize>> {
 
 #[cfg(test)]
 mod tests {
-    use super::{components, solve, Lattice};
+    use super::{components, descend, solve, Lattice};
 
     /// A bit set, joined by union.
     struct Bits(u32);
@@ -138,5 +178,28 @@ mod tests {
         let reach = solve((0..4).map(|i| Bits(1 << i)).collect(), &callees);
         let reach: Vec<u32> = reach.into_iter().map(|b| b.0).collect();
         assert_eq!(reach, vec![0b1111, 0b1110, 0b1110, 0b1000]);
+    }
+
+    #[test]
+    fn a_lowered_value_revisits_what_its_update_returns() {
+        // Body i keeps the bits of its callee (i + 1) and its own mask; 3
+        // has no callee. A round reads the values it started from, so each
+        // lowered body sends its caller to the next round.
+        let masks = [0b111, 0b111, 0b111, 0b001];
+        let out = descend(
+            vec![0b111u32; 4],
+            0..4,
+            |_| 1,
+            |i, v| v[i] & masks[i] & v.get(i + 1).copied().unwrap_or(u32::MAX),
+            |i, new, v| {
+                let lowered = new != v[i];
+                v[i] = new;
+                match lowered {
+                    true => i.checked_sub(1).into_iter().collect(),
+                    false => vec![],
+                }
+            },
+        );
+        assert_eq!(out, vec![0b001; 4]);
     }
 }

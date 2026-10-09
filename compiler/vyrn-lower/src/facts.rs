@@ -134,6 +134,16 @@ impl Lin {
         self.add(&Lin::k(c))
     }
 
+    /// `self` with each term `t` replaced by `by(t)`; `None` when a term has
+    /// no replacement or the sum overflows.
+    pub fn map(&self, by: impl Fn(Term) -> Option<Lin>) -> Option<Lin> {
+        let mut out = Lin::k(self.c);
+        for (t, k) in &self.terms {
+            out = out.add(&by(*t)?.scale(*k)?)?;
+        }
+        Some(out)
+    }
+
     /// `self` with `t` replaced by `by`.
     fn subst(&self, t: Term, by: &Lin) -> Option<Lin> {
         let k = self.coef(t);
@@ -286,6 +296,41 @@ impl State {
             .retain(|_, (a, b)| !a.iter().chain(b.iter()).any(|l| l.mentions_name(n)));
     }
 
+    /// Forgets `n` as [`State::kill`] does, keeping what the facts state
+    /// without it. A definition through `n` with coefficient one or minus one
+    /// restates them; otherwise each pair of facts with opposite signs on `n`
+    /// sums to a fact without it (Fourier-Motzkin).
+    pub fn eliminate(&mut self, n: Name) {
+        let mut sums = BTreeSet::new();
+        for t in [Term::Val(n), Term::Len(n)] {
+            let alias = self.defs.values().any(|v| matches!(v.coef(t), 1 | -1));
+            if alias || self.defs.contains_key(&t) {
+                continue;
+            }
+            let through: Vec<Lin> = (self.facts.iter().filter(|f| f.mentions(t)).cloned())
+                .chain(
+                    (self.defs.iter())
+                        .filter(|(_, v)| v.mentions(t))
+                        .flat_map(|(d, v)| [Lin::of(*d).sub(v), v.sub(&Lin::of(*d))])
+                        .flatten(),
+                )
+                .collect();
+            for p in through.iter().filter(|p| p.coef(t) > 0) {
+                for q in through.iter().filter(|q| q.coef(t) < 0) {
+                    let (a, b) = (p.coef(t), q.coef(t).checked_neg());
+                    let sum = b.and_then(|b| p.scale(b)?.add(&q.scale(a)?));
+                    if let Some(s) = sum {
+                        sums.insert(s);
+                    }
+                }
+            }
+        }
+        self.kill(n);
+        for s in sums.iter().filter(|s| !s.mentions_name(n)) {
+            self.assume(s);
+        }
+    }
+
     /// Forgets everything about the one term `t`, restating what a definition
     /// through it knows as [`State::kill`] does.
     pub fn forget(&mut self, t: Term) {
@@ -383,16 +428,45 @@ impl State {
         }
     }
 
-    /// The facts every live state of `sts` proves, and the definitions they
-    /// all share.
+    /// The facts every live state of `sts` proves, the definitions they all
+    /// share, and per Bool name the facts each side gives on every path
+    /// ([`State::when`]).
     pub fn join(sts: &[State]) -> State {
         let live: Vec<&State> = sts.iter().filter(|s| !s.dead).collect();
+        if live.len() < 2 {
+            return live.first().map_or_else(State::dead, |s| (*s).clone());
+        }
+        let mut out = State::common(&live);
+        // A name some branch does not condition loses its conditions: that
+        // branch would prove a side's facts from its state alone.
+        let names: Vec<Name> = (live[0].conds.keys())
+            .filter(|n| live.iter().all(|s| s.conds.contains_key(n)))
+            .copied()
+            .collect();
+        if names.is_empty() {
+            return out;
+        }
+        let known = out.prover();
+        let conds: Vec<_> = (names.into_iter())
+            .map(|n| {
+                let t = State::when(&live, n, &known, |c| &c.0);
+                let f = State::when(&live, n, &known, |c| &c.1);
+                (n, (t, f))
+            })
+            .collect();
+        out.conds.extend(
+            conds
+                .into_iter()
+                .filter(|(_, (t, f))| !t.is_empty() || !f.is_empty()),
+        );
+        out
+    }
+
+    /// The facts and definitions of [`State::join`], without conditions.
+    fn common(live: &[&State]) -> State {
         let Some(first) = live.first() else {
             return State::dead();
         };
-        if live.len() == 1 {
-            return (*first).clone();
-        }
         let mut out = State::default();
         for (t, v) in &first.defs {
             if live.iter().all(|s| s.defs.get(t) == Some(v)) {
@@ -400,16 +474,9 @@ impl State {
             }
         }
         let mut cands: BTreeSet<Lin> = BTreeSet::new();
-        for s in &live {
+        for s in live {
             cands.extend(s.facts.iter().cloned());
-            for (t, v) in &s.defs {
-                if out.defs.get(t) != Some(v) {
-                    if let (Some(a), Some(b)) = (Lin::of(*t).sub(v), v.sub(&Lin::of(*t))) {
-                        cands.insert(a);
-                        cands.insert(b);
-                    }
-                }
-            }
+            cands.extend(s.unshared(&out));
         }
         let provers: Vec<Prover> = live.iter().map(|s| s.prover()).collect();
         for c in cands {
@@ -417,12 +484,54 @@ impl State {
                 out.assume(&c);
             }
         }
-        for (n, fs) in &first.conds {
-            if live.iter().all(|s| s.conds.get(n) == Some(fs)) {
-                out.conds.insert(*n, fs.clone());
-            }
-        }
         out
+    }
+
+    /// Each definition of `self` that `out` lacks, as its two facts.
+    fn unshared<'a>(&'a self, out: &'a State) -> impl Iterator<Item = Lin> + 'a {
+        (self.defs.iter())
+            .filter(|(t, v)| out.defs.get(t) != Some(v))
+            .flat_map(|(t, v)| [Lin::of(*t).sub(v), v.sub(&Lin::of(*t))])
+            .flatten()
+    }
+
+    /// One side of `n`'s conditions after a join of `live` into the state
+    /// `known` indexes: what every live state proves with that side assumed,
+    /// less what `known` proves alone. A state the side makes dead proves
+    /// every fact.
+    fn when(
+        live: &[&State],
+        n: Name,
+        known: &Prover,
+        side: impl Fn(&(Vec<Lin>, Vec<Lin>)) -> &Vec<Lin>,
+    ) -> Vec<Lin> {
+        let given: Vec<&Vec<Lin>> = live.iter().map(|s| side(&s.conds[&n])).collect();
+        if given.iter().all(|g| *g == given[0]) {
+            return given[0].clone();
+        }
+        let mut under: Vec<State> = (live.iter().zip(&given))
+            .map(|(s, g)| {
+                let mut s = State {
+                    facts: s.facts.clone(),
+                    defs: s.defs.clone(),
+                    ..State::default()
+                };
+                g.iter().for_each(|l| s.assume(l));
+                s
+            })
+            .filter(|s| !s.dead)
+            .collect();
+        let j = match under.len() {
+            1 => under.swap_remove(0),
+            _ => State::common(&under.iter().collect::<Vec<_>>()),
+        };
+        if j.dead {
+            return vec![Lin::k(-1)];
+        }
+        (j.facts.iter().cloned())
+            .chain(j.unshared(known.st))
+            .filter(|c| known.ge0(c).is_none())
+            .collect()
     }
 }
 
@@ -573,6 +682,17 @@ mod tests {
     }
 
     #[test]
+    fn an_elimination_keeps_the_sum_of_opposite_bounds() {
+        let mut st = State::default();
+        // j - w >= 0 and w >= 0 give j >= 0 once w is gone.
+        st.assume(&v(0).sub(&v(1)).unwrap());
+        st.assume(&v(1));
+        st.eliminate(Name(1));
+        assert!(st.facts.iter().all(|f| !f.mentions_name(Name(1))));
+        assert!(st.ge0(&v(0)).is_some());
+    }
+
+    #[test]
     fn a_join_keeps_only_what_every_branch_proves() {
         let (mut a, mut b) = (State::default(), State::default());
         a.assume(&v(0).plus(-2).unwrap());
@@ -580,5 +700,51 @@ mod tests {
         let j = State::join(&[a, b]);
         assert!(j.ge0(&v(0).plus(-1).unwrap()).is_some());
         assert!(j.ge0(&v(0).plus(-2).unwrap()).is_none());
+    }
+
+    /// A callee's facts join the caller's state as premises, so the order in
+    /// which summaries settle must not decide a proof: a fact added to a
+    /// state never loses a goal it proved.
+    #[test]
+    fn more_facts_never_lose_a_proof() {
+        let len = |n: u32| Lin::of(Term::Len(Name(n)));
+        let facts = [
+            v(0),
+            v(1).plus(-1).unwrap(),
+            len(2).sub(&v(0)).unwrap().plus(-1).unwrap(),
+            v(0).sub(&v(1)).unwrap(),
+            len(2).sub(&v(1)).unwrap(),
+            Lin::k(5).sub(&v(1)).unwrap(),
+        ];
+        let goals = [
+            v(0),
+            v(1),
+            len(2).sub(&v(0)).unwrap(),
+            len(2).sub(&v(1)).unwrap().plus(-1).unwrap(),
+            Lin::k(LEN_MAX).sub(&v(0)).unwrap(),
+            Lin::k(4).sub(&v(1)).unwrap(),
+            v(0).sub(&v(1)).unwrap().plus(1).unwrap(),
+        ];
+        // Every subset of the facts, against every superset of it.
+        for small in 0u32..1 << facts.len() {
+            let mut st = State::default();
+            (0..facts.len())
+                .filter(|i| small & 1 << i != 0)
+                .for_each(|i| st.assume(&facts[i]));
+            for big in (0u32..1 << facts.len()).filter(|b| b & small == small) {
+                let mut more = st.clone();
+                (0..facts.len())
+                    .filter(|i| big & 1 << i != 0)
+                    .for_each(|i| more.assume(&facts[i]));
+                for g in &goals {
+                    if st.ge0(g).is_some() {
+                        let cert = more
+                            .ge0(g)
+                            .expect("a superset of the facts proves the goal");
+                        assert!(cert.verify(&more, g));
+                    }
+                }
+            }
+        }
     }
 }
