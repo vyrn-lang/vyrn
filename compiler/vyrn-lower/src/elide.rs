@@ -32,6 +32,7 @@ use vyrn_frontend::prim::Cmp;
 use crate::facts::{Lin, State, Term};
 use vyrn_frontend::core::check::{Guard, Site, Verdict};
 use vyrn_frontend::core::{rows, Arg, Body, Callee, Ctor, Lit, Name, Op, Place, Rhs, St, Val};
+use vyrn_frontend::par::in_parallel;
 
 /// The bound an exact `Int64` sum must provably stay within: `2^62`, so no
 /// premise or goal of the prover itself leaves `i64`.
@@ -137,60 +138,75 @@ pub fn summaries<'a>(
 ) -> Summaries {
     let mut bodies: Vec<(FnId, &Body)> = bodies.collect();
     bodies.sort_by_key(|(f, _)| f.index());
+    // A body's name count weighs its work.
+    let all = in_parallel(
+        &bodies,
+        |(_, b)| b.names.len(),
+        || (),
+        |(), (_, b)| templates(b, decls),
+    );
     let mut at = HashMap::new();
     let mut values = Vec::new();
     let mut walked = Vec::new();
-    for (f, b) in &bodies {
-        if let Some(s) = templates(b, decls) {
+    for ((f, b), s) in bodies.iter().zip(all) {
+        if let Some(s) = s {
             at.insert(*f, values.len());
             values.push(s);
             walked.push(*b);
         }
     }
-    let start = seeds(&bodies, &at);
+    let start: BTreeSet<usize> = in_parallel(
+        &bodies,
+        |(_, b)| b.names.len(),
+        || (),
+        |(), (_, b)| seeds(b, &at),
+    )
+    .into_iter()
+    .flatten()
+    .collect();
     let mut seen = vec![false; walked.len()];
     start.iter().for_each(|&i| seen[i] = true);
     // Per body, the bodies whose facts its facts went into: visited again
     // when it loses one.
     let mut readers = vec![BTreeSet::new(); walked.len()];
-    let values = crate::fixpoint::descend(values, start, |i, values| {
-        let (kept, read) = returns(walked[i], decls, View { at: &at, values }, &values[i]);
-        let mut next = Vec::new();
-        if kept.len() < values[i].facts.len() {
-            next.extend(readers[i].iter().copied());
-        }
-        values[i].facts = kept;
-        // A body with no facts left reads no callee's.
-        if !values[i].facts.is_empty() {
-            for j in read {
-                readers[j].insert(i);
-                if !std::mem::replace(&mut seen[j], true) {
-                    next.push(j);
+    let walk = |i: usize, values: &[Summary]| {
+        returns(walked[i], decls, View { at: &at, values }, &values[i])
+    };
+    let weight = |i: usize| walked[i].names.len();
+    let values =
+        crate::fixpoint::descend(values, start, weight, walk, |i, (kept, read), values| {
+            let mut next = Vec::new();
+            if kept.len() < values[i].facts.len() {
+                next.extend(readers[i].iter().copied());
+            }
+            values[i].facts = kept;
+            // A body with no facts left reads no callee's.
+            if !values[i].facts.is_empty() {
+                for j in read {
+                    readers[j].insert(i);
+                    if !std::mem::replace(&mut seen[j], true) {
+                        next.push(j);
+                    }
                 }
             }
-        }
-        next
-    });
+            next
+        });
     // A body no visit reached was never held to its returns; one with no
     // facts left would only make its callers track names for nothing.
     at.retain(|_, i| seen[*i] && !values[*i].facts.is_empty());
     Summaries { at, values }
 }
 
-/// The summarized bodies whose result a check can depend on: each callee of
-/// a direct call relevant to a check of its caller ([`relevant`]).
-fn seeds(bodies: &[(FnId, &Body)], at: &HashMap<FnId, usize>) -> BTreeSet<usize> {
-    let mut out = BTreeSet::new();
-    for (_, b) in bodies {
-        let rel = relevant(b, &b.stmts, false, &|g| at.contains_key(&g));
-        for (s, _) in rows(&b.stmts) {
-            if let St::Let(n, rhs) = s {
-                let g = direct_call(rhs).filter(|_| rel[n.index()]);
-                out.extend(g.and_then(|g| at.get(&g)));
-            }
-        }
-    }
-    out
+/// The summarized bodies whose result a check of `b` can depend on: each
+/// callee of a direct call relevant to a check ([`relevant`]).
+fn seeds(b: &Body, at: &HashMap<FnId, usize>) -> Vec<usize> {
+    let rel = relevant(b, &b.stmts, false, &|g| at.contains_key(&g));
+    (rows(&b.stmts))
+        .filter_map(|(s, _)| match s {
+            St::Let(n, rhs) if rel[n.index()] => at.get(&direct_call(rhs)?).copied(),
+            _ => None,
+        })
+        .collect()
 }
 
 /// The callee of a direct call whose result a summary may state: no type

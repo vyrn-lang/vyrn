@@ -4,6 +4,8 @@
 
 use std::collections::BTreeSet;
 
+use vyrn_frontend::par::in_parallel;
+
 /// A join semilattice of finite height: the value an analysis keeps per body.
 pub(crate) trait Lattice {
     /// Raises `self` to its join with `other` and returns whether `self`
@@ -51,28 +53,37 @@ pub(crate) fn solve<L: Lattice>(mut values: Vec<L>, callees: &[Vec<usize>]) -> V
     values
 }
 
-/// Lowers values until no visit lowers one: the greatest fixpoint over a
-/// finite set of candidates. Visits each body of `start`, then each body a
-/// visit returns, least pending index first, so the order is the source's.
-/// `visit(i, values)` recomputes body `i`'s value from the others' and
-/// returns the bodies to visit because of it.
+/// Lowers values until no update lowers one: the greatest fixpoint over a
+/// finite set of candidates. Visits each body of `start`, then each body an
+/// update returns, in rounds. A round runs `visit(i, values)` for every
+/// pending body on every thread, heaviest by `weight` first
+/// ([`vyrn_frontend::par::in_parallel`]), each against the values the round
+/// started from. Then `update(i, out, values)` stores each visit's `out`, in
+/// index order, and returns the bodies to visit because of it. No visit sees
+/// another of its round, so the result does not depend on the thread count.
 ///
-/// The caller bounds the visits: a visit returns bodies only when it lowered
-/// a value, or bodies no visit returned before. Then the count of live
-/// candidates, then the count of bodies never returned, then the pending
-/// count, decrease: no round cap is needed.
+/// The caller bounds the rounds: an update returns bodies only when it
+/// lowered a value, or bodies no update returned before. Then the count of
+/// live candidates, then the count of bodies never returned, then the
+/// pending count, decrease: no round cap is needed.
 ///
 /// # Panics
 ///
-/// If `start` or a visit returns an index that is not a body.
-pub(crate) fn descend<L>(
+/// If `start` or an update returns an index that is not a body.
+pub(crate) fn descend<L: Sync, T: Send>(
     mut values: Vec<L>,
     start: impl IntoIterator<Item = usize>,
-    mut visit: impl FnMut(usize, &mut [L]) -> Vec<usize>,
+    weight: impl Fn(usize) -> usize,
+    visit: impl Fn(usize, &[L]) -> T + Sync,
+    mut update: impl FnMut(usize, T, &mut [L]) -> Vec<usize>,
 ) -> Vec<L> {
     let mut pending: BTreeSet<usize> = start.into_iter().collect();
-    while let Some(i) = pending.pop_first() {
-        pending.extend(visit(i, &mut values));
+    while !pending.is_empty() {
+        let round: Vec<usize> = std::mem::take(&mut pending).into_iter().collect();
+        let outs = in_parallel(&round, |&i| weight(i), || (), |(), &i| visit(i, &values));
+        for (i, out) in round.into_iter().zip(outs) {
+            pending.extend(update(i, out, &mut values));
+        }
     }
     values
 }
@@ -170,21 +181,25 @@ mod tests {
     }
 
     #[test]
-    fn a_lowered_value_revisits_what_its_visit_returns() {
+    fn a_lowered_value_revisits_what_its_update_returns() {
         // Body i keeps the bits of its callee (i + 1) and its own mask; 3
-        // has no callee. Callers come first, so 0 and 1 settle only after 3
-        // lowers and each lowered body returns its caller.
+        // has no callee. A round reads the values it started from, so each
+        // lowered body sends its caller to the next round.
         let masks = [0b111, 0b111, 0b111, 0b001];
-        let out = descend(vec![0b111u32; 4], 0..4, |i, v| {
-            let below = v.get(i + 1).copied().unwrap_or(u32::MAX);
-            let new = v[i] & masks[i] & below;
-            let lowered = new != v[i];
-            v[i] = new;
-            match lowered {
-                true => i.checked_sub(1).into_iter().collect(),
-                false => vec![],
-            }
-        });
+        let out = descend(
+            vec![0b111u32; 4],
+            0..4,
+            |_| 1,
+            |i, v| v[i] & masks[i] & v.get(i + 1).copied().unwrap_or(u32::MAX),
+            |i, new, v| {
+                let lowered = new != v[i];
+                v[i] = new;
+                match lowered {
+                    true => i.checked_sub(1).into_iter().collect(),
+                    false => vec![],
+                }
+            },
+        );
         assert_eq!(out, vec![0b001; 4]);
     }
 }
