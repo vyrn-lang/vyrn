@@ -87,3 +87,18 @@ test("from and logging are matched in position, not as keywords", async () => {
   assert.ok(fires(logging, "logging { level: warn, sink: stderr }"), "a logging block");
   assert.ok(!fires(logging, "let logging = 2"), "`logging` as a binding must stay plain");
 });
+
+// A byte literal is scoped `constant.character`, which VS Code reads as code, so
+// the `{` in `'{'` counted as a bracket and shifted every bracket colour after
+// it. Each grammar entry maps the byte literal's scope to the string token type,
+// which bracket matching skips.
+test("every grammar entry treats a byte literal as a string", async () => {
+  const g = JSON.parse(
+    await readFile(path.join(here, "..", "vyrn.tmLanguage.json"), "utf8"),
+  );
+  const scope = g.repository["byte-literal"].name;
+  const pkg = JSON.parse(await readFile(path.join(here, "..", "package.json"), "utf8"));
+  for (const entry of pkg.contributes.grammars) {
+    assert.equal(entry.tokenTypes?.[scope], "string", `${entry.language} does not map ${scope}`);
+  }
+});
