@@ -376,6 +376,15 @@ mod tests {
     }
 
     #[test]
+    fn formats_a_parameter_clause() {
+        assert_eq!(
+            f("fn at(b:Array<Int64>,i:Int64 where value>=0&&value < b.length)->Int64{return b[i]}"),
+            "fn at(b: Array<Int64>, i: Int64 where value >= 0 && value < b.length) -> Int64 { return b[i] }
+"
+        );
+    }
+
+    #[test]
     fn formats_gen_fn_and_generator_imports() {
         assert_eq!(
             f("gen  fn   make(dir:String)->String{return \"x\"}\n"),

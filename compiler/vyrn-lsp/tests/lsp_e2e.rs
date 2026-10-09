@@ -709,6 +709,40 @@ fn main() -> Int64 {
     );
 }
 
+/// A parameter's `where` clause is part of the call's contract, so hover
+/// shows it.
+#[test]
+fn hover_shows_a_parameter_clause() {
+    let mut client = LspClient::spawn().expect("spawn vyrn-lsp");
+    let init_id = serde_json::json!(1);
+    client.send(&serde_json::json!({
+        "jsonrpc": "2.0", "id": init_id, "method": "initialize",
+        "params": { "capabilities": {}, "processId": null }
+    }));
+    let _ = client.read_response(&init_id);
+    client.send(&serde_json::json!({ "jsonrpc": "2.0", "method": "initialized", "params": {} }));
+
+    let uri = "file:///clause/at.vyrn";
+    let src = "\
+fn at(b: Array<Int64>, i: Int64 where value >= 0 && value < b.length) -> Int64 {
+    return b[i]
+}
+fn main() -> Int64 {
+    let b: Array<Int64> = [1, 2]
+    return at(b, 1)
+}
+";
+    did_open(&mut client, uri, "vyrn", src);
+    let _ = client.read_notification("textDocument/publishDiagnostics");
+
+    let (line, ch) = pos_after(src, "    return a");
+    let hover = hover_value(&mut client, uri, line, ch).expect("hover on the call");
+    assert!(
+        hover.contains("i: Int64 where value >= 0 && value < b.length"),
+        "hover hides the clause: {hover}"
+    );
+}
+
 /// Inside a string literal whose expected type is a finite string type, the
 /// type's whole language is offered, not the top-level symbols.
 #[test]

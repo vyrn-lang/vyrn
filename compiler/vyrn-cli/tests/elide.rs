@@ -71,6 +71,41 @@ fn run_oracle(dir: &std::path::Path, file: &std::path::Path, body: &str) -> (Str
     (norm(&out.stderr), rows)
 }
 
+/// A parameter's `where` clause is the body's premise and a check at each call
+/// row: proved where the caller's facts show it, kept and trapping where they
+/// do not. The body is exported, so no inferred entry fact proves it.
+#[test]
+fn a_parameter_clause_moves_the_check_to_the_call() {
+    let src =
+        "export fn at(b: Array<Int64>, i: Int64 where value >= 0 && value < b.length) -> Int64 {
+    return b[i]
+}
+fn sum(b: Array<Int64>) -> Int64 {
+    let mut s: Int64 = 0
+    let mut i: Int64 = 0
+    while i < b.length {
+        s = s + at(b, i)
+        i = i + 1
+    }
+    return s
+}
+fn past(b: Array<Int64>) -> Int64 {
+    return at(b, b.length)
+}
+";
+    assert_eq!(verdicts(src, "at"), ["proved array-index"]);
+    assert_eq!(verdicts(src, "sum"), ["proved where-arg"]);
+    let calls = "    print(sum(xs).toString())\n    print(past(xs).toString())";
+    let (err, rows) = oracle(src, calls, "past");
+    assert_eq!(
+        (err.as_str(), rows),
+        (
+            "error: validation failed for parameter `i` of `at`\n",
+            vec!["14 0 where-arg kept 1".to_string()]
+        )
+    );
+}
+
 #[test]
 fn the_oracle_counts_each_run_of_a_check_row() {
     let src = "fn get(xs: Array<Int64>, i: Int64) -> Int64 {\n    return xs[i]\n}\n";

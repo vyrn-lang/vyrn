@@ -232,6 +232,12 @@ pub fn validation(name: &str, record_base: bool) -> String {
     }
 }
 
+/// Returns what a failed parameter `where` clause says, naming the parameter
+/// and its function as [`validation`] names a type.
+pub fn clause(func: &str, param: &str) -> String {
+    format!("validation failed for parameter `{param}` of `{func}`")
+}
+
 /// [`validation`] for a declaration.
 pub fn validation_of(decl: &TypeDecl) -> String {
     validation(&decl.name, crate::validate::is_cross_field(decl))

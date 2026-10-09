@@ -1267,6 +1267,7 @@ impl Parser {
             ty: self_ty.clone(),
             line: self_line,
             col: self_col,
+            clause: None,
         }];
         while *self.peek() == Tok::Comma {
             self.advance();
@@ -1282,6 +1283,7 @@ impl Parser {
                 ty,
                 line,
                 col,
+                clause: None,
             });
         }
         self.eat(&Tok::RParen)?;
@@ -1791,6 +1793,43 @@ impl Parser {
         Ok((type_params, type_bounds))
     }
 
+    /// `(name: [capability] Type [where clause], ..)`: a function's
+    /// parameter list, parentheses included.
+    fn params(&mut self) -> Result<Vec<Param>, Diagnostic> {
+        self.eat(&Tok::LParen)?;
+        let mut params = Vec::new();
+        while *self.peek() != Tok::RParen {
+            let (line, col) = self.binder_pos();
+            let name = self.expect_ident()?;
+            self.eat(&Tok::Colon)?;
+            let capability = self.parse_capability();
+            let ty = self.type_()?;
+            let clause = match self.peek() {
+                Tok::Where => {
+                    self.advance();
+                    Some(self.expr()?)
+                }
+                _ => None,
+            };
+            params.push(Param {
+                id: Id::NEW,
+                name,
+                capability,
+                ty,
+                line,
+                col,
+                clause,
+            });
+            if *self.peek() == Tok::Comma {
+                self.advance();
+            } else {
+                break;
+            }
+        }
+        self.eat(&Tok::RParen)?;
+        Ok(params)
+    }
+
     /// `[gen] fn name<...>(params) -> Ret { body }`. `is_gen` says a contextual
     /// `gen` preceded `fn`.
     fn function(&mut self, is_gen: bool) -> Result<Function, Diagnostic> {
@@ -1802,30 +1841,7 @@ impl Parser {
         let (type_params, type_bounds) = self.type_param_binder()?;
         self.type_params = type_params.clone();
 
-        self.eat(&Tok::LParen)?;
-
-        let mut params = Vec::new();
-        while *self.peek() != Tok::RParen {
-            let (line, col) = self.binder_pos();
-            let pname = self.expect_ident()?;
-            self.eat(&Tok::Colon)?;
-            let capability = self.parse_capability();
-            let ty = self.type_()?;
-            params.push(Param {
-                id: Id::NEW,
-                name: pname,
-                capability,
-                ty,
-                line,
-                col,
-            });
-            if *self.peek() == Tok::Comma {
-                self.advance();
-            } else {
-                break;
-            }
-        }
-        self.eat(&Tok::RParen)?;
+        let params = self.params()?;
 
         // No `-> Type` means Unit.
         let ret = if *self.peek() == Tok::Arrow {
@@ -1908,29 +1924,7 @@ impl Parser {
         let col = self.col();
         let name = self.expect_ident()?;
         // An extern has no generic parameters: the ABI is monomorphic.
-        self.eat(&Tok::LParen)?;
-        let mut params = Vec::new();
-        while *self.peek() != Tok::RParen {
-            let (line, col) = self.binder_pos();
-            let pname = self.expect_ident()?;
-            self.eat(&Tok::Colon)?;
-            let capability = self.parse_capability();
-            let ty = self.type_()?;
-            params.push(Param {
-                id: Id::NEW,
-                name: pname,
-                capability,
-                ty,
-                line,
-                col,
-            });
-            if *self.peek() == Tok::Comma {
-                self.advance();
-            } else {
-                break;
-            }
-        }
-        self.eat(&Tok::RParen)?;
+        let params = self.params()?;
         let ret = if *self.peek() == Tok::Arrow {
             self.advance();
             self.type_()?

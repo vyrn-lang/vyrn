@@ -4,11 +4,13 @@
 //! [`state`] inserts a [`St::Check`] before each row whose operation can trap:
 //! an element place on an array or a String, an integer `/`, `%`, `<<` or
 //! `>>`, `@swapRemove`, a SIMD span load or store, `bytes(s, a, b)`, and a
-//! record type's constructor run on a name to check its `where` rule. The
-//! emitter emits each check from its row and from nowhere else. A check row
-//! emits nothing where it stands: the emitter runs it inside the row it
-//! guards, where the operands are on hand, so it reads no name and no walker
-//! counts it.
+//! record type's constructor run on a name to check its `where` rule, and a
+//! call to a function whose parameters carry `where` clauses. The emitter
+//! emits each check from its row and from nowhere else. A check row emits
+//! nothing where it stands: the emitter runs it inside the row it guards,
+//! where the operands are on hand, so it reads no name and no walker counts
+//! it. A clause check is the exception: it runs where it stands, over names
+//! the call reads after it ([`Guard::Clause`]).
 //!
 //! One runtime check is one row. A store that puts a taken element back into
 //! the place it was taken from (`a[i].push(v)`: `take a[i]`, the call, the
@@ -16,12 +18,12 @@
 
 use std::collections::{BTreeMap, HashMap};
 
-use vyrn_frontend::ast::{BinOp, Type, TypeDecl};
+use vyrn_frontend::ast::{BinOp, Capability, Function, Type, TypeDecl};
 use vyrn_frontend::prelude::Indexes;
 use vyrn_frontend::trap::Rule;
 
 use vyrn_frontend::core::check::{Check, Guard, Raises, Site, Verdict, Why};
-use vyrn_frontend::core::{Arg, Body, Op, Place, Rhs, St, Val};
+use vyrn_frontend::core::{Arg, Body, Callee, Op, Place, Rhs, St, Val};
 
 /// What a build does with its check rows, from the environment variable
 /// `VYRN_CHECKS`, which this function alone reads.
@@ -49,11 +51,13 @@ pub enum Mode {
     Count(std::path::PathBuf),
 }
 
-/// What [`state`] reads besides the body: the program's type declarations and
-/// the declared type of each module-state name.
+/// What [`state`] reads besides the body: the program's type declarations,
+/// the declared type of each module-state name, and the declared functions by
+/// their `FnId`.
 pub struct Types<'a> {
     pub decls: &'a HashMap<String, TypeDecl>,
     pub global: &'a dyn Fn(&str) -> Option<Type>,
+    pub fns: &'a [Function],
 }
 
 /// Inserts the check rows of `body` and of every lambda body it holds.
@@ -72,10 +76,12 @@ fn list(body: &Body, tys: &Types<'_>, ss: &mut Vec<St>, lines: &mut BTreeMap<usi
     let mut taken: Vec<Place> = Vec::new();
     for mut s in std::mem::take(ss) {
         let mut guards = Vec::new();
+        let mut clauses = Vec::new();
         let mut ruled = None;
         let line = match &s {
             St::Let(n, rhs) => {
                 rhs_guards(body, tys, rhs, &mut guards);
+                clauses.extend(clause_guards(body, tys, rhs));
                 if let Rhs::Take(p) = rhs {
                     taken.push(p.clone());
                 }
@@ -83,6 +89,7 @@ fn list(body: &Body, tys: &Types<'_>, ss: &mut Vec<St>, lines: &mut BTreeMap<usi
             }
             St::Do { rhs, line, .. } => {
                 rhs_guards(body, tys, rhs, &mut guards);
+                clauses.extend(clause_guards(body, tys, rhs));
                 ruled = rhs.checks_rule(&body.names);
                 *line
             }
@@ -96,7 +103,8 @@ fn list(body: &Body, tys: &Types<'_>, ss: &mut Vec<St>, lines: &mut BTreeMap<usi
         };
         let guards = (guards.into_iter())
             .map(|(r, g)| (Raises::Row(r), g))
-            .chain(ruled.map(|n| (Raises::Where, Guard::Rule(n))));
+            .chain(ruled.map(|n| (Raises::Where, Guard::Rule(n))))
+            .chain(clauses.into_iter().map(|g| (Raises::Clause, g)));
         for (rule, guard) in guards {
             let ordinal = lines.entry(line).or_insert(0);
             let site = Site {
@@ -156,12 +164,40 @@ fn rhs_guards(body: &Body, tys: &Types<'_>, rhs: &Rhs, out: &mut Vec<(Rule, Guar
     }
 }
 
+/// The checks of the `where` clauses of the parameters of `rhs`'s callee,
+/// a declared function, over the call's arguments: one per parameter with a
+/// clause. A clause the checker refused states none.
+fn clause_guards(body: &Body, tys: &Types<'_>, rhs: &Rhs) -> Vec<Guard> {
+    let Rhs::Call {
+        kind: Callee::Fn(g),
+        args,
+        ..
+    } = rhs
+    else {
+        return Vec::new();
+    };
+    let Some(f) = tys.fns.get(g.index()) else {
+        return Vec::new();
+    };
+    if f.params.iter().all(|p| p.clause.is_none()) {
+        return Vec::new();
+    }
+    let clauses = vyrn_frontend::core::check::clauses(f, tys.decls).unwrap_or_default();
+    let arg = |k: usize| args.get(k)?.0.val().cloned();
+    (clauses.into_iter())
+        .map(|(k, atoms)| Guard::Clause {
+            atoms: (atoms.iter())
+                // `clauses` names only `read` parameters and refuses a `fn`
+                // one, so argument `k` is parameter `k`'s value.
+                .map(|a| a.with(&arg).expect("a `read` argument is a value"))
+                .collect(),
+            says: vyrn_frontend::trap::clause(body.spelled(&f.name), &f.params[k].name).into(),
+        })
+        .collect()
+}
+
 /// The checks of a builtin that indexes its receiver.
-fn call_guards(
-    callee: &str,
-    args: &[(Arg, vyrn_frontend::ast::Capability)],
-    out: &mut Vec<(Rule, Guard)>,
-) {
+fn call_guards(callee: &str, args: &[(Arg, Capability)], out: &mut Vec<(Rule, Guard)>) {
     let base = |a: &Arg| match a {
         Arg::Place(p) => Some(p.clone()),
         Arg::Val(Val::Name(n)) => Some(Place::Name(*n)),

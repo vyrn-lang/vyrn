@@ -1,0 +1,8 @@
+// A side of a clause comparison is one operand: `value + 1` can wrap, and a
+// comparison over a wrapped sum is no linear fact.
+fn next(b: Array<Int64>, i: Int64 where value + 1 < b.length) -> Int64 {
+    return b[i + 1]
+}
+fn main() -> Int64 {
+    return next([1, 2], 0)
+}

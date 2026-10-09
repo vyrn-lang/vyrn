@@ -1,0 +1,8 @@
+// The generator host enters a `gen fn` with no call row, so no check would
+// stand before its body.
+gen fn pick(names: Array<String>, i: Int64 where value < names.length) -> String {
+    return names[i]
+}
+fn main() -> Int64 {
+    return 0
+}

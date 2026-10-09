@@ -1,0 +1,8 @@
+compiler/vyrn-cli/tests/cost/clauses.vyrn
+fn fromInput(b: Array<Int64>) -> Int64
+   22           allocates  readLine(..)
+   23           check kept where-arg  input: the value of line 22 is read from outside
+fn main() -> Int64
+   27           allocates  array literal
+   28           allocates  render
+summary: allocating rows 3 (0 in loops), growing rows 0 (0 in loops), copies 0 (0 in loops), checks kept 1 (0 in loops), checks proved 2 (1 in loops)

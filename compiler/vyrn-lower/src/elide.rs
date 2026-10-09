@@ -13,7 +13,9 @@
 //! A direct call's result has the facts its callee's [`Summary`] states,
 //! over the call's arguments ([`summaries`]). Any other call's result is a
 //! fresh value. A body that only direct call rows enter starts with the facts
-//! every such row proves of its arguments.
+//! every such row proves of its arguments. Every body starts with its
+//! parameters' `where` clauses ([`Body::assumes`]), which every call row
+//! checks; a call's clause check is a row like any other.
 //!
 //! The walk knows nothing about a global, an element, or a field other than an
 //! integer field of a `read` parameter: each read of one is a fresh value with
@@ -36,7 +38,7 @@ use vyrn_frontend::prelude::{self, Length};
 use vyrn_frontend::prim::Cmp;
 
 use crate::facts::{Fact, Lin, State, Term};
-use vyrn_frontend::core::check::{Check, Guard, Site, Verdict, Why};
+use vyrn_frontend::core::check::{Atom, Check, Guard, Operand, Site, Verdict, Why};
 use vyrn_frontend::core::{
     rows, Arg, Body, BorrowKind, Callee, Ctor, Lit, Name, Op, Place, Rhs, St, Target, Val,
 };
@@ -781,7 +783,8 @@ impl<'a> Walk<'a> {
     }
 
     /// The state at the body's entry: each parameter a fresh value, with
-    /// the facts `pre` states over the interface ([`Summary`]).
+    /// the facts `pre` states over the interface ([`Summary`]) and the
+    /// parameters' clauses.
     fn entry(&mut self, pre: &BTreeSet<Lin>) -> State {
         let mut st = State::default();
         let params = &self.body.params;
@@ -802,7 +805,52 @@ impl<'a> Walk<'a> {
                 st.assume(&l);
             }
         }
+        for a in &self.body.assumes {
+            self.holds(&mut st, a);
+        }
         st
+    }
+
+    /// Assumes the facts the comparison `a` states, those over terms.
+    fn holds(&self, st: &mut State, a: &Atom) {
+        for f in self.atom(a).into_iter().flatten() {
+            match f {
+                Fact::Ge(l) => st.assume(&l),
+                Fact::Ne(l) => st.differ(&l),
+            }
+        }
+    }
+
+    /// What the comparison `a` states over the walk's terms; `None` when a
+    /// side is no term, or its type is an `UInt64`, whose values above
+    /// `i64::MAX` a term reads as negatives.
+    fn atom(&self, a: &Atom) -> Option<Vec<Fact>> {
+        if !kind_of(&a.ty, self.decls).is_int() {
+            return None;
+        }
+        let d = self.operand(&a.l)?.sub(&self.operand(&a.r)?)?;
+        Some(match a.op.compare()? {
+            Cmp::Order { strict, flipped } => {
+                let d = if flipped { d.scale(-1)? } else { d };
+                vec![Fact::Ge(if strict { d.plus(-1)? } else { d })]
+            }
+            Cmp::Equal { negated: false } => vec![Fact::Ge(d.scale(-1)?), Fact::Ge(d)],
+            Cmp::Equal { negated: true } => vec![Fact::Ne(d)],
+        })
+    }
+
+    /// An operand of a clause as a term: a value, a length, or an integer
+    /// field of a `read` parameter ([`Walk::field`]).
+    fn operand(&self, o: &Operand) -> Option<Lin> {
+        match (&o.of, o.part.as_deref()) {
+            (v, None) => self.lin(v),
+            (Val::Lit(Lit::Str(s)), Some("byteLength")) => Some(Lin::k(s.len() as i64)),
+            (Val::Name(n), Some("length" | "byteLength")) => {
+                self.length(&Place::Name(*n)).map(Lin::of)
+            }
+            (Val::Name(n), Some(f)) => self.field(&Place::Name(*n), f).map(Lin::of),
+            _ => None,
+        }
     }
 
     fn kind(&self, n: Name) -> Kind {
@@ -1169,6 +1217,9 @@ impl<'a> Walk<'a> {
                         st.differ(&d);
                     }
                 }
+                if let Guard::Clause { atoms, .. } = &c.guard {
+                    atoms.iter().for_each(|a| self.holds(&mut st, a));
+                }
                 st
             }
         }
@@ -1220,6 +1271,24 @@ impl<'a> Walk<'a> {
                 out
             }
             Guard::Rule(_) => return None,
+            // A disequality is shown by the state, not by a goal.
+            Guard::Clause { atoms, .. } => {
+                let mut out = Vec::new();
+                for f in atoms
+                    .iter()
+                    .map(|a| self.atom(a))
+                    .collect::<Option<Vec<_>>>()?
+                {
+                    for f in f {
+                        match f {
+                            Fact::Ge(l) => out.push(l),
+                            Fact::Ne(l) if st.differs(&l) => {}
+                            Fact::Ne(_) => return None,
+                        }
+                    }
+                }
+                out
+            }
         })
     }
 
@@ -1927,6 +1996,7 @@ impl<'a> Walk<'a> {
             (None, Guard::NonZero(k) | Guard::Shift(k, _)) => [val_name(k), None],
             (None, Guard::NoOverflow(a, d, _)) => [val_name(a), val_name(d)],
             (None, Guard::Rule(r)) => [Some(*r), None],
+            (None, Guard::Clause { .. }) => [None, None],
         };
         let terms = || failing.into_iter().flat_map(|g| g.terms.iter());
         let names = || {
@@ -2229,18 +2299,11 @@ fn mark(body: &Body, ss: &[St], rel: &mut [bool], checks: bool, linked: &dyn Fn(
     for s in ss {
         match s {
             St::Check(c) => {
-                let (p, v) = match &c.guard {
-                    Guard::Index(p, i) | Guard::Span(p, i, _) => (place_root(p), Some(i)),
-                    Guard::Shift(k, _) | Guard::NonZero(k) => (None, Some(k)),
-                    Guard::NoOverflow(_, d, _) => (None, Some(d)),
-                    Guard::Range(..) => (None, None),
-                    Guard::Rule(r) => (Some(*r), None),
-                };
-                let v = v.and_then(val);
-                if checks && c.verdict == Verdict::Kept {
-                    p.into_iter().chain(v).for_each(|n| rel[n.index()] = true);
-                } else {
-                    link(rel, p.into_iter().chain(v));
+                // A kept check's names are relevant; any other check links them.
+                let mut any = checks && c.verdict == Verdict::Kept;
+                guard_names(&c.guard, &mut |n| any |= rel[n.index()]);
+                if any {
+                    guard_names(&c.guard, &mut |n| rel[n.index()] = true);
                 }
             }
             St::Let(n, rhs) => {
@@ -2304,6 +2367,28 @@ fn mark(body: &Body, ss: &[St], rel: &mut [bool], checks: bool, linked: &dyn Fn(
             }
             _ => {}
         }
+    }
+}
+
+/// Hands `f` each name the check `g` compares.
+fn guard_names(g: &Guard, f: &mut dyn FnMut(Name)) {
+    let mut val = |v: &Val| {
+        if let Val::Name(n) = v {
+            f(*n)
+        }
+    };
+    match g {
+        Guard::Index(p, i) | Guard::Span(p, i, _) => {
+            place_root(p).map(Val::Name).iter().for_each(&mut val);
+            val(i);
+        }
+        Guard::Shift(k, _) | Guard::NonZero(k) | Guard::NoOverflow(_, k, _) => val(k),
+        Guard::Range(..) => {}
+        Guard::Rule(r) => val(&Val::Name(*r)),
+        Guard::Clause { atoms, .. } => atoms.iter().for_each(|a| {
+            val(&a.l.of);
+            val(&a.r.of);
+        }),
     }
 }
 

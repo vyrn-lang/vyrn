@@ -1,0 +1,8 @@
+// A parameter's `where` clause reads what the call has evaluated before it:
+// `value` and the parameters declared earlier.
+fn at(i: Int64 where value < b.length, b: Array<Int64>) -> Int64 {
+    return b[i]
+}
+fn main() -> Int64 {
+    return at(0, [1, 2])
+}

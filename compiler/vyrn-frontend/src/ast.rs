@@ -861,6 +861,10 @@ pub struct Param {
     /// See [`Binder::col`].
     pub col: usize,
     pub id: Id,
+    /// `where ..` after the type: a rule over `value` and the parameters
+    /// before it, which every call checks and the body assumes
+    /// ([`crate::core::check::clauses`]).
+    pub clause: Option<Expr>,
 }
 
 /// A type. A validated type is a [`Type::Named`] whose [`TypeDecl`] carries the
@@ -1978,6 +1982,7 @@ impl Param {
             ty,
             line: 0,
             col: 0,
+            clause: None,
         }
     }
 

@@ -1,0 +1,10 @@
+// A `modify` parameter can change in the body, so a clause over it would
+// not hold for the whole call.
+fn bump(b: modify Array<Int64>, i: Int64 where value < b.length) -> Int64 {
+    b.push(1)
+    return b[i]
+}
+fn main() -> Int64 {
+    let mut b = [1, 2]
+    return bump(b, 0)
+}

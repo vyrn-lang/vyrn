@@ -46,7 +46,7 @@ export fn decodeUtf8(b: Array<UInt8>) -> Option<Array<Int64>> {
 /// `lo`/`hi` bound the first continuation byte, and they carry every overlong and
 /// out-of-range rule: 0xE0 needs 0xA0+, 0xED stops at 0x9F (surrogates), 0xF0
 /// needs 0x90+ and 0xF4 stops at 0x8F (past U+10FFFF).
-export fn utf8Width(b: Array<UInt8>, i: Int64) -> Int64 {
+export fn utf8Width(b: Array<UInt8>, i: Int64 where value >= 0 && value < b.length) -> Int64 {
     let b0 = Int64(b[i])
     if b0 < 128 {
         return 1

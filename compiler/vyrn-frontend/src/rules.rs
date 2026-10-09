@@ -603,6 +603,21 @@ rules! {
     FnValueCapability { name, param, cap }
         "`{name}` cannot be used as a function value: it takes \
         `{param}` by `{cap}`, and a `fn` type reads every argument";
+    FnValueClause { name, param }
+        "`{name}` cannot be used as a function value: its parameter \
+        `{param}` has a `where` clause, and a call through a `fn` value checks none";
+    ClauseForm { param }
+        "the `where` clause of parameter `{param}` may compare only `value`, an \
+        earlier `read` parameter, the `.length`, `.byteLength` or integer field of \
+        one, and integer literals, of one integer type, joined by `&&`";
+    ClauseLater { param, name }
+        "the `where` clause of parameter `{param}` names `{name}`, which is no \
+        parameter declared before it";
+    ClauseChanges { param, name, cap }
+        "the `where` clause of parameter `{param}` reads `{name}`, a `{cap}` \
+        parameter the body may change";
+    ClauseEntry { name, why }
+        "`{name}` may not carry a `where` clause on a parameter: {why}";
     ModifyNotMut { fname, arg, vn }
         "`{fname}` argument {arg} is `modify`, so `{vn}` must be \
         declared `mut`";

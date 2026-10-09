@@ -4679,6 +4679,7 @@ impl<'p> Fn_<'_, 'p> {
                 ty: t.clone(),
                 line: n.line,
                 col: n.col,
+                clause: None,
             }))
             .collect();
         sf.ret = ret.clone();
@@ -5716,6 +5717,59 @@ impl<'p> Fn_<'_, 'p> {
         Ok(())
     }
 
+    /// The clause check `c` of the call row after it, where it stands: each comparison of
+    /// `atoms`, and `says` where one fails. Its operands are names and literals; no name rides
+    /// the operand stack across it ([`Fn_::core_stmts`]).
+    fn clause_check(
+        &mut self,
+        m: &mut Module,
+        b: &mut Frame,
+        c: &Check,
+        atoms: &[vyrn_frontend::core::check::Atom],
+        says: &str,
+    ) -> Result<(), String> {
+        let line = c.site.line;
+        let Some(row) = self.row(b, c.clone()) else {
+            return Ok(());
+        };
+        for a in atoms {
+            let n = Num::of(&self.cx.resolve(&a.ty))
+                .ok_or_else(|| gap("a clause over no integer", line))?;
+            for o in [&a.l, &a.r] {
+                match (&o.of, o.part.as_deref()) {
+                    (v, None) => self.core_val(m, b, v, &a.ty, line)?,
+                    (Val::Lit(Lit::Str(s)), Some("byteLength")) => {
+                        b.ins(&Instruction::I64Const(s.len() as i64));
+                    }
+                    (Val::Name(x), Some(f)) => {
+                        let at = vyrn_frontend::core::Place::Field(
+                            Box::new(vyrn_frontend::core::Place::Name(*x)),
+                            f.to_string(),
+                        );
+                        self.core_read(m, b, &at, line)?;
+                    }
+                    _ => return unsupported("a clause operand of a literal", line),
+                }
+            }
+            b.ins(&int_op(a.op, n).ok_or_else(|| gap("a clause with no comparison", line))?);
+            b.ins(&Instruction::I32Eqz);
+            b.ins(&Instruction::If(BlockType::Empty));
+            self.depth += 1;
+            if row.verdict == Verdict::Kept {
+                let says = Val::Lit(Lit::Str(says.to_string()));
+                self.panic_line(m, b, None, |s, m, b| {
+                    s.core_val(m, b, &says, &Type::Str, line)
+                })?;
+                b.ins(&Instruction::Unreachable);
+            } else {
+                self.check_trap(b, &row, None);
+            }
+            self.depth -= 1;
+            b.ins(&Instruction::End);
+        }
+        Ok(())
+    }
+
     /// The failing branch of `row`'s check: its trap, or under the oracle the failure of a
     /// proved row.
     fn check_trap(&mut self, b: &mut Frame, row: &Check, val: Option<u32>) {
@@ -5728,8 +5782,9 @@ impl<'p> Fn_<'_, 'p> {
             _ => match row.rule {
                 Raises::Row(rule) => self.trap_row(b, rule, val),
                 // A kept `where` check traps inside its type's constructor
-                // ([`Fn_::core_rule_check`]).
-                Raises::Where => {
+                // ([`Fn_::core_rule_check`]), and a kept clause check prints
+                // its sentence ([`Fn_::clause_check`]).
+                Raises::Where | Raises::Clause => {
                     b.ins(&Instruction::Unreachable);
                 }
             },
@@ -9361,7 +9416,10 @@ impl<'a, 'p> Fn_<'a, 'p> {
         let (mut last, mut mark): (Option<usize>, u32) = (None, b.mark());
         for (i, s) in ss.iter().enumerate() {
             if let St::Check(c) = s {
-                self.core_w.checks.push((c.clone(), false));
+                match &c.guard {
+                    Guard::Clause { atoms, says } => self.clause_check(m, b, c, atoms, says)?,
+                    _ => self.core_w.checks.push((c.clone(), false)),
+                }
                 continue;
             }
             if let Some(j) = last {
@@ -9743,8 +9801,17 @@ impl<'a, 'p> Fn_<'a, 'p> {
                     }
                     // A temporary the next statement reads once, first, and nothing else reads
                     // stays on the operand stack. Every other name takes a local, in row order.
+                    // A clause check between them reads the call's arguments where it stands.
+                    let clause = ss[i + 1..]
+                        .iter()
+                        .map_while(|s| match s {
+                            St::Check(c) => Some(&c.guard),
+                            _ => None,
+                        })
+                        .any(|g| matches!(g, Guard::Clause { .. }));
                     if info.binding.is_none()
                         && self.core_w.reads[n.index()] == 1
+                        && !clause
                         && self.core_first_read(next_row(ss, i)) == Some(*n)
                     {
                         self.core_w.held = Some(*n);
@@ -10479,7 +10546,7 @@ impl<'a, 'p> Fn_<'a, 'p> {
                         }
                         match self.row(b, c).map(|c| c.rule) {
                             Some(Raises::Row(rule)) => Some(rule),
-                            Some(Raises::Where) => {
+                            Some(Raises::Where | Raises::Clause) => {
                                 return Err(gap("a `bytes` range check with no trap row", line))
                             }
                             None => None,
@@ -13304,6 +13371,7 @@ fn instance_shell(f: &Function, subst: &HashMap<String, Type>) -> Function {
             ty: ftypes::substitute(&p.ty, subst),
             line: p.line,
             col: p.col,
+            clause: p.clause.clone(),
         });
     }
     sf.ret = ftypes::substitute(&f.ret, subst);
@@ -13347,6 +13415,7 @@ fn ho_shell(
                 ty: ftypes::substitute(&p.ty, subst),
                 line: p.line,
                 col: p.col,
+                clause: p.clause.clone(),
             });
             continue;
         }

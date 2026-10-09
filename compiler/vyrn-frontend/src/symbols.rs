@@ -2240,10 +2240,14 @@ fn function_detail(f: &Function, sp: &Spellings) -> String {
                 Capability::Consume => "consume ",
             };
             let ty = spell(&say, &p.ty);
+            // A clause is part of the contract: the call checks it.
+            let rule = (p.clause.as_ref())
+                .map(|e| format!(" where {}", crate::checker::pred_summary(e)))
+                .unwrap_or_default();
             if i == 0 && p.name == "self" {
                 format!("{word}self: {ty}")
             } else {
-                format!("{}: {word}{ty}", p.name)
+                format!("{}: {word}{ty}{rule}", p.name)
             }
         })
         .collect::<Vec<_>>()

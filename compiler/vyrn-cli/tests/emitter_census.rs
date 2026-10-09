@@ -142,6 +142,7 @@ fn sections() -> Vec<Section> {
         sec("struct Walk", Builtin, Source),
         sec("fn walk", Mapping, Neither),
         sec("fn trap_row", Mapping, Neither),
+        sec("fn clause_check", Mapping, Core),
         sec("fn bounds_check", Mapping, Neither),
         sec("fn load_elem", Mapping, Neither),
         sec("fn fixed_elems", Builtin, Neither),

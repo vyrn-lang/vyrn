@@ -1,0 +1,8 @@
+// A call binds a `fn` parameter apart from its arguments, so the clause
+// could not name the arguments a call row passes.
+fn apply(b: Array<Int64>, i: Int64 where value < b.length, f: fn(Int64) -> Int64) -> Int64 {
+    return f(b[i])
+}
+fn main() -> Int64 {
+    return apply([1, 2], 0, x -> x + 1)
+}
