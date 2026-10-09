@@ -1113,6 +1113,15 @@ fn seeded<'a>(
                 b.keyed(n, p.id());
                 b.body.params.push(n);
             }
+            // Every call row checks the clauses, so every entry has them. A
+            // clause the checker refused states nothing.
+            let params = &b.body.params;
+            let param = |k: usize| params.get(k).map(|n| Val::Name(*n));
+            let atoms = vyrn_frontend::core::check::clauses(f, b.proto.types()).unwrap_or_default();
+            b.body.assumes = (atoms.iter())
+                .flat_map(|(_, atoms)| atoms)
+                .filter_map(|a| a.with(&param))
+                .collect();
             b.frame.appends = crate::append::append_candidates(&f.body);
             rebound(&f.body, &mut b.frame.rebound);
             b.block(&f.body, &mut out)?;
@@ -1411,6 +1420,7 @@ impl<'a> Builder<'a> {
                 export,
                 names: Vec::new(),
                 params: Vec::new(),
+                assumes: Vec::new(),
                 stmts: Vec::new(),
                 lambdas: Vec::new(),
                 cands: Vec::new(),
@@ -5150,6 +5160,7 @@ impl<'a> Builder<'a> {
                 export,
                 names: Vec::new(),
                 params: Vec::new(),
+                assumes: Vec::new(),
                 stmts: Vec::new(),
                 lambdas: Vec::new(),
                 cands: Vec::new(),
@@ -7447,6 +7458,7 @@ fn stated(program: &Program, own: &Ownership, body: &Body) -> Body {
         &crate::check::Types {
             decls: own.proto.types(),
             global: &global,
+            fns: &program.functions,
         },
     );
     out

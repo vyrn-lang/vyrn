@@ -2,7 +2,6 @@
 
 use super::{Lit, Name, Place, Val};
 use crate::ast::{BinOp, Capability, Expr, FnId, Function, Type, UnOp};
-use crate::prim::Cmp;
 use crate::rules::rule;
 use crate::trap::Rule;
 use crate::types::Decls;
@@ -67,6 +66,9 @@ pub enum Raises {
     /// The `where` failure of the checked record's type, which its
     /// constructor raises ([`crate::trap::validation`]).
     Where,
+    /// The failure of a callee's parameter `where` clause
+    /// ([`crate::trap::clause`]), which [`Guard::Clause`] carries.
+    Clause,
 }
 
 impl Raises {
@@ -75,6 +77,7 @@ impl Raises {
         match self {
             Raises::Row(r) => r.census(),
             Raises::Where => "where",
+            Raises::Clause => "where-arg",
         }
     }
 }
@@ -112,6 +115,14 @@ pub enum Guard {
     /// The record name satisfies its type's `where` rule: the row after the
     /// check calls the type's constructor on it.
     Rule(Name),
+    /// The arguments of the call row after the check satisfy one parameter's
+    /// `where` clause: each comparison holds. `says` is the sentence a
+    /// failure prints. Unlike every other check, it runs where it stands:
+    /// its operands are names and literals the call reads after it.
+    Clause {
+        atoms: Vec<Atom>,
+        says: std::sync::Arc<str>,
+    },
 }
 
 /// Where a check stands in the source: the line of the row it guards and the
@@ -127,12 +138,12 @@ pub struct Site {
     pub ordinal: u32,
 }
 
-/// One comparison a parameter's `where` clause states, `l cmp r`, both
-/// operands of the integer type `ty`.
+/// One comparison a parameter's `where` clause states, `l op r`: `op` is a
+/// comparison operator, and both operands are of the integer type `ty`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Atom {
     pub l: Operand,
-    pub cmp: Cmp,
+    pub op: BinOp,
     pub r: Operand,
     pub ty: Type,
 }
@@ -147,12 +158,12 @@ pub struct Operand {
 
 impl Atom {
     /// The atom with each `Val::Name(Name(k))` of [`clauses`] replaced by
-    /// `by[k]`: a call's argument or a body's parameter. `None` when `by`
-    /// has no entry `k`.
-    pub fn with(&self, by: &[Val]) -> Option<Atom> {
+    /// `by(k)`: a call's argument or a body's parameter. `None` when `by`
+    /// has none.
+    pub fn with(&self, by: &dyn Fn(usize) -> Option<Val>) -> Option<Atom> {
         let put = |o: &Operand| {
             let of = match &o.of {
-                Val::Name(k) => by.get(k.index())?.clone(),
+                Val::Name(k) => by(k.index())?,
                 lit => lit.clone(),
             };
             Some(Operand {
@@ -162,7 +173,7 @@ impl Atom {
         };
         Some(Atom {
             l: put(&self.l)?,
-            cmp: self.cmp,
+            op: self.op,
             r: put(&self.r)?,
             ty: self.ty.clone(),
         })
@@ -222,7 +233,7 @@ fn conjuncts(
         conjuncts(f, k, lhs, decls, out)?;
         return conjuncts(f, k, rhs, decls, out);
     }
-    let cmp = op.compare().ok_or_else(form)?;
+    op.compare().ok_or_else(form)?;
     let (l, lt) = operand(f, k, lhs, decls)?;
     let (r, rt) = operand(f, k, rhs, decls)?;
     let ty = match (lt, rt) {
@@ -231,7 +242,7 @@ fn conjuncts(
         (None, None) => Type::Int,
         _ => return Err(form()),
     };
-    out.push(Atom { l, cmp, r, ty });
+    out.push(Atom { l, op: *op, r, ty });
     Ok(())
 }
 

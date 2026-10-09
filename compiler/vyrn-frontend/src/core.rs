@@ -1036,6 +1036,9 @@ pub struct Body {
     pub export: bool,
     pub names: Vec<NameInfo>,
     pub params: Vec<Name>,
+    /// What every entry guarantees: the parameters' `where` clauses over
+    /// their names. Each call row checks them ([`check::Guard::Clause`]).
+    pub assumes: Vec<check::Atom>,
     pub stmts: Vec<St>,
     /// The bodies of the lambdas this body holds, each its own frame: its
     /// parameters and captures are borrowed inputs, and the plan keys its
@@ -1226,6 +1229,17 @@ impl Body {
             }
             G::Shift(k, bits) => format!("{} in 0..{bits}", self.val(k)),
             G::Rule(n) => format!("{} holds its rule", self.spell(*n)),
+            G::Clause { atoms, .. } => {
+                let side = |o: &check::Operand| match &o.part {
+                    Some(f) => format!("{}.{f}", self.val(&o.of)),
+                    None => self.val(&o.of),
+                };
+                let one = |a: &check::Atom| {
+                    let op = crate::parser::binop_text(a.op);
+                    format!("{} {op} {}", side(&a.l), side(&a.r))
+                };
+                atoms.iter().map(one).collect::<Vec<_>>().join(" && ")
+            }
         };
         let at = c.site;
         let word = match c.verdict {

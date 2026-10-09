@@ -208,6 +208,8 @@ type User = {
 - `Port(n)` constructs. A constant that satisfies the rule is proven at compile time and costs nothing; a constant that breaks it is refused; a runtime value that breaks it traps.
 - `Port?(n)` answers `Option<Port>`: `None` when the rule fails. Use it for input the program does not control.
 - Every boundary checks the rule without a call: a `let` annotation, an assignment, an argument, a return, a record field, an array element and a map insert.
+- A parameter may state a rule over its argument and the arguments before it: `fn at(b: Array<Int64>, i: Int64 where value >= 0 && value < b.length)`. A comparison's side is `value`, an earlier `read` integer parameter, the `.length`, `.byteLength` or integer field of one, or an integer literal, and `&&` joins the comparisons. Every call checks the clause and the body assumes it. The compiler drops the check where the caller's facts prove it; otherwise a failure traps at the call with ``validation failed for parameter `i` of `at` ``.
+- A parameter clause needs a call to check it, so a function with one is not a function value, takes no `fn` parameter, and is not a `gen fn` or an `export extern fn`, which the host enters by name.
 - A run of consecutive statements that store into (assign, push onto, or otherwise modify) the fields of one record with a trailing `where` is a group. The rule is checked once, after the group's last statement, with the trap of any boundary; the prover drops the check where it proves the rule, as when each column grows by one from equal lengths. Any other statement ends the group, so `c.a.push(1)` then `print(c.a.length)` checks `c` before the `print`. A group whose check fails on every run that reaches it is refused: after that push, `c.a` is longer than `c.b`.
 - Between a group's first store and its check, nothing reads the record whole. When the record is a `modify` parameter, the group also calls no function the program declares and no function value, and has no `?`, because the caller would see the record with the rule unchecked. A `?` or a trap inside the group leaves a record the function owns unobserved, so both are allowed there. A `return` statement ends the group, so the check runs before it.
 - An element of an array field the rule reads only as `.length` is assigned in place with no check: `c.xs[i] = v` keeps every length. A store into a field of module state, or into a field of a nested record with its own rule, is refused; rebuild the record.
@@ -604,6 +606,7 @@ Each line is a program the compiler refuses, and the reason.
 - Arithmetic on two different number types: nothing widens by itself.
 - A value used after it moved or was consumed: it has one owner.
 - A constant that breaks a `where` clause: the type cannot hold it.
+- A parameter's `where` clause that names a later or a `modify` parameter: it would not hold for the whole call.
 - Assignment to a binding without `mut`.
 - `?` in a function whose return kind differs from the operand's.
 - A `Stream` or `MustUse` value that is not disposed on every path.
