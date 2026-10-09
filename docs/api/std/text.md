@@ -24,7 +24,7 @@ The Unicode scalar values of `b`, or `None` if `b` is not valid UTF-8 as Rust's
 ## utf8Width
 
 ```vyrn
-fn utf8Width(b: Array<UInt8>, i: Int64) -> Int64
+fn utf8Width(b: Array<UInt8>, i: Int64 where value >= 0 && value < b.length) -> Int64
 ```
 
 The width of the UTF-8 sequence that starts at `i` in `b`, or 0 when the
