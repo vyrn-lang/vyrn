@@ -2901,6 +2901,7 @@ impl<'a> Checker<'a> {
                 return Err(cerr_at!(f.line, f.name_span(), GenReturnsFn));
             }
             self.ensure_type_exists(&f.ret, f.line)?;
+            crate::core::check::clauses(f, self).map_err(|(line, rule)| cerr!(line; rule))?;
             // An `extern` import has no body; an `export extern` has one. Both
             // signatures must fit the host ABI.
             if f.is_extern {
@@ -6124,7 +6125,12 @@ impl<'a> Checker<'a> {
         let Some(d) = self.resolve_fn(name) else {
             return Ok(());
         };
-        match (self.functions[d.index()].params.iter()).find(|p| p.capability != Capability::Read) {
+        let params = &self.functions[d.index()].params;
+        if let Some(p) = params.iter().find(|p| p.clause.is_some()) {
+            let (name, param) = (DeclName(name), p.name.as_str());
+            return Err(cerr!(line, FnValueClause, name, param));
+        }
+        match params.iter().find(|p| p.capability != Capability::Read) {
             Some(p) => Err(cerr!(
                 line,
                 FnValueCapability,

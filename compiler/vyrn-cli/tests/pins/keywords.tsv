@@ -17,9 +17,9 @@ return	Tok::Return	1	2	0	3
 true	Tok::True	1	1	1	3
 false	Tok::False	1	1	1	3
 type	Tok::Type	1	7	0	8
-where	Tok::Where	1	2	0	3
+where	Tok::Where	1	3	0	4
 match	Tok::Match	1	1	0	2
 region	Tok::Region	1	2	0	3
 break	Tok::Break	1	2	0	3
 continue	Tok::Continue	1	2	0	3
-all		23	92	6	121
+all		23	93	6	122

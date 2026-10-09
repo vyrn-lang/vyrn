@@ -1,0 +1,8 @@
+// The host calls an `export extern fn` by name and checks nothing, so its
+// parameter list takes no clause.
+export extern fn at(s: String, i: Int64 where value < s.byteLength) -> Int64 {
+    return i
+}
+fn main() -> Int64 {
+    return 0
+}

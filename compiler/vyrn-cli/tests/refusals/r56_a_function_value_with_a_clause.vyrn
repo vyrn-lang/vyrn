@@ -1,0 +1,11 @@
+// A call through a `fn` value is no direct call, so nothing would check the
+// clause before the body assumes it.
+fn at(b: Array<Int64>, i: Int64 where value < b.length) -> Int64 {
+    return b[i]
+}
+fn apply(f: fn(Array<Int64>, Int64) -> Int64) -> Int64 {
+    return f([1, 2], 5)
+}
+fn main() -> Int64 {
+    return apply(at)
+}

@@ -390,6 +390,54 @@ fn census() -> Vec<Row> {
             "`xs[j]` may not be stored into `xs` — it is read out of a place that owns it",
             Kernel::Its,
         ),
+        row(
+            "r53_a_clause_names_a_later_parameter.vyrn",
+            "a parameter's clause reads only earlier parameters",
+            "the `where` clause of parameter `i` names `b`, which is no parameter declared before it",
+            Kernel::Elsewhere,
+        ),
+        row(
+            "r54_a_clause_names_a_modify_parameter.vyrn",
+            "a parameter's clause reads only `read` parameters",
+            "the `where` clause of parameter `i` reads `b`, a `modify` parameter the body may change",
+            Kernel::Elsewhere,
+        ),
+        row(
+            "r55_a_clause_with_arithmetic.vyrn",
+            "a parameter's clause compares single operands",
+            "the `where` clause of parameter `i` may compare only `value`, an earlier `read` parameter, \
+             the `.length`, `.byteLength` or integer field of one, and integer literals, of one \
+             integer type, joined by `&&`",
+            Kernel::Elsewhere,
+        ),
+        row(
+            "r56_a_function_value_with_a_clause.vyrn",
+            "a function with a parameter clause is no function value",
+            "`at` cannot be used as a function value: its parameter `i` has a `where` clause, and a \
+             call through a `fn` value checks none",
+            Kernel::Elsewhere,
+        ),
+        row(
+            "r57_a_clause_on_a_gen_fn.vyrn",
+            "the host enters a `gen fn` with no call row",
+            "`pick` may not carry a `where` clause on a parameter: the host calls it by name and \
+             checks no clause",
+            Kernel::Elsewhere,
+        ),
+        row(
+            "r58_a_clause_on_an_export_extern_fn.vyrn",
+            "the host enters an `export extern fn` with no call row",
+            "`at` may not carry a `where` clause on a parameter: the host calls it by name and checks \
+             no clause",
+            Kernel::Elsewhere,
+        ),
+        row(
+            "r59_a_clause_beside_a_fn_parameter.vyrn",
+            "a call binds a `fn` parameter apart from its arguments",
+            "`apply` may not carry a `where` clause on a parameter: it takes a `fn` parameter, which a \
+             call binds apart from its arguments",
+            Kernel::Elsewhere,
+        ),
     ]
 }
 

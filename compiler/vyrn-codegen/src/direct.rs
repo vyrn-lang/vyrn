@@ -4679,6 +4679,7 @@ impl<'p> Fn_<'_, 'p> {
                 ty: t.clone(),
                 line: n.line,
                 col: n.col,
+                clause: None,
             }))
             .collect();
         sf.ret = ret.clone();
@@ -13304,6 +13305,7 @@ fn instance_shell(f: &Function, subst: &HashMap<String, Type>) -> Function {
             ty: ftypes::substitute(&p.ty, subst),
             line: p.line,
             col: p.col,
+            clause: p.clause.clone(),
         });
     }
     sf.ret = ftypes::substitute(&f.ret, subst);
@@ -13347,6 +13349,7 @@ fn ho_shell(
                 ty: ftypes::substitute(&p.ty, subst),
                 line: p.line,
                 col: p.col,
+                clause: p.clause.clone(),
             });
             continue;
         }
