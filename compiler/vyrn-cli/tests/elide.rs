@@ -139,6 +139,112 @@ fn a_sum_of_two_bounded_operands_is_exact() {
 }
 
 #[test]
+fn a_disequality_proves_its_divisor() {
+    let src = "fn w(a: Int64, b: Int64) -> Int64 {
+    if b == 0 {
+        return 0
+    }
+    return a / b
+}
+";
+    assert_eq!(
+        verdicts(src, "w"),
+        ["proved int-div-zero", "check int-div-overflow"]
+    );
+    let (err, rows) = oracle(src, "    print(w(7, -2).toString())", "w");
+    assert_eq!(
+        (err.as_str(), rows),
+        (
+            "",
+            vec![
+                "5 0 int-div-zero proved 1".to_string(),
+                "5 1 int-div-overflow kept 1".to_string()
+            ]
+        )
+    );
+}
+
+#[test]
+fn a_passed_divisor_check_proves_the_next() {
+    let src = "fn w(a: Int64, b: Int64) -> Int64 {\n    return a / b + a % b\n}\n";
+    assert_eq!(
+        verdicts(src, "w"),
+        [
+            "check int-div-zero",
+            "check int-div-overflow",
+            "proved int-rem-zero"
+        ]
+    );
+}
+
+#[test]
+fn a_read_parameters_field_is_one_value() {
+    let src = "type H = { slot: Int64, gen: Int64 }
+fn w(h: H, xs: Array<Int64>) -> Int64 {
+    if h.slot < 0 || h.slot >= xs.length {
+        return 0
+    }
+    return xs[h.slot]
+}
+";
+    assert_eq!(verdicts(src, "w"), ["proved array-index"]);
+    let calls = "    print(w(H { slot: 2, gen: 0 }, xs).toString())";
+    let (err, rows) = oracle(src, calls, "w");
+    assert_eq!(
+        (err.as_str(), rows),
+        ("", vec!["6 0 array-index proved 1".to_string()])
+    );
+}
+
+#[test]
+fn a_join_of_constants_keeps_the_values_between_out() {
+    let src = "fn w(x: Int64) -> Int64 {
+    let t = [10, 20, 30]
+    let mut k: Int64 = 0
+    if x > 5 {
+        k = 2
+    } else if x > 2 {
+        k = 3
+    } else if x > 0 {
+        k = 4
+    }
+    if k == 0 {
+        return 0
+    }
+    return t[k - 2]
+}
+";
+    assert_eq!(verdicts(src, "w"), ["proved array-index"]);
+    let (err, rows) = oracle(src, "    print(w(1).toString())", "w");
+    assert_eq!(
+        (err.as_str(), rows),
+        ("", vec!["14 0 array-index proved 1".to_string()])
+    );
+}
+
+#[test]
+fn a_copy_of_a_same_typed_name_needs_no_range_proof() {
+    let src = "fn w(xs: Array<Int64>) -> Int64 {
+    let mut s: Int64 = 0
+    let mut i: Int64 = 0
+    while i < xs.length {
+        let x = xs[i]
+        s = s + x
+        let k = (x & 3) + 1
+        i = i + k
+    }
+    return s
+}
+";
+    assert_eq!(verdicts(src, "w"), ["proved array-index"]);
+    let (err, rows) = oracle(src, "    print(w(xs).toString())", "w");
+    assert_eq!(
+        (err.as_str(), rows),
+        ("", vec!["5 0 array-index proved 1".to_string()])
+    );
+}
+
+#[test]
 fn a_join_restates_a_counter_through_each_branchs_temporaries() {
     let src = "fn w(xs: Array<Int64>) -> Int64 {
     let mut s: Int64 = 0
@@ -826,6 +932,79 @@ fn w(p: modify P) -> Int64 {
         "    print(w(1, 0).toString())",
         "division by zero",
     ),
+    // A field of a `modify` parameter is a fresh value at each read.
+    (
+        "type H = { slot: Int64, gen: Int64 }
+fn bump(h: modify H) {
+    h.slot = h.slot + 5
+}
+fn w(xs: Array<Int64>, h: modify H) -> Int64 {
+    if h.slot < 0 || h.slot >= xs.length {
+        return 0
+    }
+    bump(h)
+    return xs[h.slot]
+}
+",
+        "    let mut h = H { slot: 1, gen: 0 }\n    print(w(xs, h).toString())",
+        "array index 6 out of bounds",
+    ),
+    // A field of a record the body stores to is a fresh value at each read.
+    (
+        "type H = { slot: Int64, gen: Int64 }
+fn w(xs: Array<Int64>, h: H) -> Int64 {
+    let mut r = h
+    if r.slot < 0 || r.slot >= xs.length {
+        return 0
+    }
+    r.slot = r.slot + 5
+    return xs[r.slot]
+}
+",
+        "    print(w(xs, H { slot: 1, gen: 0 }).toString())",
+        "array index 6 out of bounds",
+    ),
+    // A branch that stores a computed value leaves no gap among the values.
+    (
+        "fn w(xs: Array<Int64>, x: Int64) -> Int64 {
+    let t = [10, 20, 30]
+    let mut k: Int64 = 0
+    if x > 5 {
+        k = 2
+    } else if x > 0 {
+        k = x - 1
+    }
+    if k == 0 {
+        return 0
+    }
+    return t[k - 2]
+}
+",
+        "    print(w(xs, 2).toString())",
+        "array index -1 out of bounds",
+    ),
+    // A narrowing is a conversion, never a copy: the checker refuses a store
+    // between integer types, so `j` takes `Int32(..)`'s wrapped value.
+    (
+        "fn w(xs: Array<Int64>, x: Int64) -> Int64 {
+    if x >= 0 && x < 3 {
+        let mut j: Int32 = 0
+        j = Int32(x + 2147483648)
+        return xs[Int64(j)]
+    }
+    return 0
+}
+",
+        "    print(w(xs, 1).toString())",
+        "array index -2147483647 out of bounds",
+    ),
+    // A store to the divisor drops its disequality.
+    (
+        "fn w(a: Int64, b: Int64) -> Int64 {\n    let mut c = b\n    if c == 0 {\n        return 0\n    }\n    \
+         c = a\n    return a / c\n}\n",
+        "    print(w(0, 3).toString())",
+        "division by zero",
+    ),
     // `-1` is a computed divisor: the quotient's check stays.
     (
         "fn w(x: Int64, y: Int64) -> Int64 {\n    return x / -y\n}\n",
@@ -1408,7 +1587,8 @@ fn main() -> Int64 {
         &[],
         "array index 3 out of bounds",
     ),
-    // A `swapRemove` after the call shrinks the array the result indexes.
+    // A `swapRemove` after the call shrinks the array the result indexes. Its
+    // own index is a parameter: `lastIndex` proves `ys` is not empty.
     (
         r#"fn lastIndex(a: Array<Int64>) -> Int64 {
     if a.length == 0 {
@@ -1416,15 +1596,15 @@ fn main() -> Int64 {
     }
     return a.length - 1
 }
-fn w(xs: Array<Int64>) -> Int64 {
+fn w(xs: Array<Int64>, k: Int64) -> Int64 {
     let mut ys = xs.copy()
     let j = lastIndex(ys)
-    let gone = ys.swapRemove(0)
+    let gone = ys.swapRemove(k)
     return ys[j]
 }
 fn main() -> Int64 {
     let xs: Array<Int64> = [10, 20, 30]
-    print(w(xs).toString())
+    print(w(xs, 0).toString())
     return 0
 }
 "#,
