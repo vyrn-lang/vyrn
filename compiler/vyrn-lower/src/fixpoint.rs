@@ -51,31 +51,28 @@ pub(crate) fn solve<L: Lattice>(mut values: Vec<L>, callees: &[Vec<usize>]) -> V
     values
 }
 
-/// Lowers every body's value until no step lowers one: the greatest fixpoint
-/// over a finite set of candidates. `step(i, values)` recomputes body `i`'s
-/// value from the others' and returns every body whose value it lowered;
-/// `deps[i]` lists the bodies to visit again when body `i`'s value lowers.
-/// Every body is visited at least once, and each visit takes the least
-/// pending index, so the order is the source's.
+/// Lowers values until no visit lowers one: the greatest fixpoint over a
+/// finite set of candidates. Visits each body of `start`, then each body a
+/// visit returns, least pending index first, so the order is the source's.
+/// `visit(i, values)` recomputes body `i`'s value from the others' and
+/// returns the bodies to visit because of it.
 ///
-/// Each visit removes a body from the pending set and adds bodies only when a
-/// value lowered. A value lowers by dropping a candidate, so the count of
-/// live candidates, then the pending count, decrease: no round cap is needed.
+/// The caller bounds the visits: a visit returns bodies only when it lowered
+/// a value, or bodies no visit returned before. Then the count of live
+/// candidates, then the count of bodies never returned, then the pending
+/// count, decrease: no round cap is needed.
 ///
 /// # Panics
 ///
-/// If `deps` is shorter than `values` or a step returns an index that is not
-/// a body.
+/// If `start` or a visit returns an index that is not a body.
 pub(crate) fn descend<L>(
     mut values: Vec<L>,
-    deps: &[Vec<usize>],
-    mut step: impl FnMut(usize, &mut [L]) -> Vec<usize>,
+    start: impl IntoIterator<Item = usize>,
+    mut visit: impl FnMut(usize, &mut [L]) -> Vec<usize>,
 ) -> Vec<L> {
-    let mut pending: BTreeSet<usize> = (0..values.len()).collect();
+    let mut pending: BTreeSet<usize> = start.into_iter().collect();
     while let Some(i) = pending.pop_first() {
-        for j in step(i, &mut values) {
-            pending.extend(deps[j].iter().copied());
-        }
+        pending.extend(visit(i, &mut values));
     }
     values
 }
@@ -173,21 +170,19 @@ mod tests {
     }
 
     #[test]
-    fn a_lowered_value_revisits_its_dependents() {
+    fn a_lowered_value_revisits_what_its_visit_returns() {
         // Body i keeps the bits of its callee (i + 1) and its own mask; 3
-        // has no callee. Callers are listed first, so 0 and 1 settle only
-        // after 3 lowers and its drop reaches them through `deps`.
+        // has no callee. Callers come first, so 0 and 1 settle only after 3
+        // lowers and each lowered body returns its caller.
         let masks = [0b111, 0b111, 0b111, 0b001];
-        let deps = vec![vec![], vec![0], vec![1], vec![2]];
-        let out = descend(vec![0b111u32; 4], &deps, |i, v| {
+        let out = descend(vec![0b111u32; 4], 0..4, |i, v| {
             let below = v.get(i + 1).copied().unwrap_or(u32::MAX);
             let new = v[i] & masks[i] & below;
             let lowered = new != v[i];
             v[i] = new;
-            if lowered {
-                vec![i]
-            } else {
-                vec![]
+            match lowered {
+                true => i.checked_sub(1).into_iter().collect(),
+                false => vec![],
             }
         });
         assert_eq!(out, vec![0b001; 4]);

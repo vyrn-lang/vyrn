@@ -30,7 +30,6 @@ use vyrn_frontend::prelude::{self, Length};
 use vyrn_frontend::prim::Cmp;
 
 use crate::facts::{Lin, State, Term};
-use crate::fixpoint::Lattice;
 use vyrn_frontend::core::check::{Guard, Site, Verdict};
 use vyrn_frontend::core::{rows, Arg, Body, Callee, Ctor, Lit, Name, Op, Place, Rhs, St, Val};
 
@@ -81,22 +80,11 @@ fn walk(body: &mut Body, decls: &HashMap<String, TypeDecl>, sums: &Summaries) ->
 /// String's length. A fact names only parameters the body never writes, so it
 /// holds of the arguments as the caller passed them. No precondition is
 /// assumed: each fact holds whatever the arguments.
-///
-/// Ordered by reverse inclusion: [`Lattice::join`] keeps the facts both
-/// values hold.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Summary {
     /// Per parameter, its kind; a call whose arguments differ states nothing.
     params: Vec<Kind>,
     facts: BTreeSet<Lin>,
-}
-
-impl Lattice for Summary {
-    fn join(&mut self, other: &Summary) -> bool {
-        let before = self.facts.len();
-        self.facts.retain(|f| other.facts.contains(f));
-        self.facts.len() != before
-    }
 }
 
 /// Each summarized body's [`Summary`], keyed by its row in the World's
@@ -115,8 +103,10 @@ struct View<'a> {
 }
 
 impl View<'_> {
-    fn get(&self, f: FnId) -> Option<&Summary> {
-        self.values.get(*self.at.get(&f)?)
+    /// The summary of `f`, with its index.
+    fn get(&self, f: FnId) -> Option<(usize, &Summary)> {
+        let i = *self.at.get(&f)?;
+        Some((i, self.values.get(i)?))
     }
 }
 
@@ -132,8 +122,10 @@ impl<'a> From<&'a Summaries> for View<'a> {
 /// The facts every return of each body in `bodies` states: the greatest
 /// fixpoint ([`crate::fixpoint::descend`]) from every candidate of
 /// [`templates`], in which each body's returns prove its facts under its
-/// callees' facts. A body is summarized only where a direct call's result
-/// can reach a check ([`needed`]); any other body keeps no facts.
+/// callees' facts. Only the bodies a check can read are solved: each callee
+/// of a direct call whose result can reach a check ([`seeds`]), and each
+/// callee a solved body with facts left took facts from. Any other body
+/// keeps no facts.
 ///
 /// The result does not depend on the order of `bodies`. Soundness rests on
 /// one postulate: a [`Callee::Fn`] row runs the body `bodies` holds under its
@@ -145,69 +137,56 @@ pub fn summaries<'a>(
 ) -> Summaries {
     let mut bodies: Vec<(FnId, &Body)> = bodies.collect();
     bodies.sort_by_key(|(f, _)| f.index());
-    let calls = |b: &'a Body| {
-        rows(&b.stmts).filter_map(|(s, _)| match s {
-            St::Let(_, rhs) => direct_call(rhs),
-            _ => None,
-        })
-    };
-    let called = needed(&bodies);
     let mut at = HashMap::new();
     let mut values = Vec::new();
     let mut walked = Vec::new();
-    for (f, b) in bodies {
-        if let Some(s) = called
-            .contains(&f.index())
-            .then(|| templates(b, decls))
-            .flatten()
-        {
-            at.insert(f, values.len());
+    for (f, b) in &bodies {
+        if let Some(s) = templates(b, decls) {
+            at.insert(*f, values.len());
             values.push(s);
-            walked.push(b);
+            walked.push(*b);
         }
     }
-    let mut deps = vec![Vec::new(); walked.len()];
-    for (i, b) in walked.iter().enumerate() {
-        for g in calls(b) {
-            if let Some(&j) = at.get(&g) {
-                if !deps[j].contains(&i) {
-                    deps[j].push(i);
+    let start = seeds(&bodies, &at);
+    let mut seen = vec![false; walked.len()];
+    start.iter().for_each(|&i| seen[i] = true);
+    // Per body, the bodies whose facts its facts went into: visited again
+    // when it loses one.
+    let mut readers = vec![BTreeSet::new(); walked.len()];
+    let values = crate::fixpoint::descend(values, start, |i, values| {
+        let (kept, read) = returns(walked[i], decls, View { at: &at, values }, &values[i]);
+        let mut next = Vec::new();
+        if kept.len() < values[i].facts.len() {
+            next.extend(readers[i].iter().copied());
+        }
+        values[i].facts = kept;
+        // A body with no facts left reads no callee's.
+        if !values[i].facts.is_empty() {
+            for j in read {
+                readers[j].insert(i);
+                if !std::mem::replace(&mut seen[j], true) {
+                    next.push(j);
                 }
             }
         }
-    }
-    let values = crate::fixpoint::descend(values, &deps, |i, values| {
-        let view = View { at: &at, values };
-        let kept = Summary {
-            params: values[i].params.clone(),
-            facts: returns(walked[i], decls, view, &values[i]),
-        };
-        if values[i].join(&kept) {
-            vec![i]
-        } else {
-            Vec::new()
-        }
+        next
     });
+    // A body no visit reached was never held to its returns; one with no
+    // facts left would only make its callers track names for nothing.
+    at.retain(|_, i| seen[*i] && !values[*i].facts.is_empty());
     Summaries { at, values }
 }
 
-/// The bodies whose result a check can depend on: a direct call's result
-/// relevant to a check of its caller ([`relevant`], every direct call
-/// linked), or to the returns of a body this set holds. Each body is scanned
-/// at most twice, once for its checks and once for its returns.
-fn needed(bodies: &[(FnId, &Body)]) -> BTreeSet<usize> {
-    let by_id: HashMap<usize, &Body> = bodies.iter().map(|(f, b)| (f.index(), *b)).collect();
+/// The summarized bodies whose result a check can depend on: each callee of
+/// a direct call relevant to a check of its caller ([`relevant`]).
+fn seeds(bodies: &[(FnId, &Body)], at: &HashMap<FnId, usize>) -> BTreeSet<usize> {
     let mut out = BTreeSet::new();
-    let mut queue: Vec<(&Body, bool)> = bodies.iter().map(|(_, b)| (*b, false)).collect();
-    while let Some((b, returns)) = queue.pop() {
-        let rel = relevant(b, &b.stmts, returns, &|_| true);
+    for (_, b) in bodies {
+        let rel = relevant(b, &b.stmts, false, &|g| at.contains_key(&g));
         for (s, _) in rows(&b.stmts) {
-            let St::Let(n, rhs) = s else { continue };
-            let Some(g) = direct_call(rhs).filter(|_| rel[n.index()]) else {
-                continue;
-            };
-            if out.insert(g.index()) {
-                queue.extend(by_id.get(&g.index()).map(|g| (*g, true)));
+            if let St::Let(n, rhs) = s {
+                let g = direct_call(rhs).filter(|_| rel[n.index()]);
+                out.extend(g.and_then(|g| at.get(&g)));
             }
         }
     }
@@ -292,21 +271,21 @@ fn templates(body: &Body, decls: &HashMap<String, TypeDecl>) -> Option<Summary> 
 }
 
 /// The facts of `cands` every live return of `body` proves, walking it with
-/// the callees' facts `sums` states. A path that ends without a value proves
-/// none.
+/// the callees' facts `sums` states, and the summaries it took facts from, by
+/// index. A path that ends without a value proves none.
 fn returns(
     body: &Body,
     decls: &HashMap<String, TypeDecl>,
     sums: View<'_>,
     cands: &Summary,
-) -> BTreeSet<Lin> {
+) -> (BTreeSet<Lin>, BTreeSet<usize>) {
     let mut stmts = body.stmts.clone();
     let mut w = Walk::new(body, decls, sums, &stmts, Some(cands.facts.clone()));
     let st = w.entry();
     let end = w.block(st, &mut stmts);
     match w.post {
-        Some(kept) if end.dead => kept,
-        _ => BTreeSet::new(),
+        Some(kept) if end.dead => (kept, w.read),
+        _ => (BTreeSet::new(), w.read),
     }
 }
 
@@ -327,6 +306,8 @@ struct Walk<'a> {
     /// While summarizing the body: the facts of its [`Summary`] every return
     /// met so far proves.
     post: Option<BTreeSet<Lin>>,
+    /// While summarizing the body: the summaries a call took facts from.
+    read: BTreeSet<usize>,
     /// Per enclosing loop, innermost last: the states at its `break`s and at
     /// its `continue`s.
     loops: Vec<(Vec<State>, Vec<State>)>,
@@ -396,6 +377,7 @@ impl<'a> Walk<'a> {
             sums,
             relevant: relevant(body, stmts, post.is_some(), &|g| sums.get(g).is_some()),
             post,
+            read: BTreeSet::new(),
             loops: Vec::new(),
             record: true,
             memo: HashMap::new(),
@@ -706,7 +688,8 @@ impl<'a> Walk<'a> {
             St::Trap => State::dead(),
             St::Check(c) => {
                 let goals = self.goals(&c.guard);
-                if self.record {
+                // A summary's walk writes no verdict: its copy of the rows is dropped.
+                if self.record && self.post.is_none() {
                     let holds = |g: &Lin| st.ge0(g).is_some_and(|cert| cert.verify(&st, g));
                     let proved = goals.as_ref().is_some_and(|gs| gs.iter().all(holds));
                     if proved && provable(&c.guard) {
@@ -852,13 +835,16 @@ impl<'a> Walk<'a> {
     /// Assumes what the callee's summary states of `n = rhs`, a direct call,
     /// read after the call's effects. A fact naming an argument the call may
     /// write is left out, and so is one with a term no argument gives.
-    fn called(&self, st: &mut State, n: Name, rhs: &Rhs) {
-        let Some(s) = direct_call(rhs).and_then(|g| self.sums.get(g)) else {
+    fn called(&mut self, st: &mut State, n: Name, rhs: &Rhs) {
+        let Some((i, s)) = direct_call(rhs).and_then(|g| self.sums.get(g)) else {
             return;
         };
         let Rhs::Call { args, .. } = rhs else { return };
         if args.len() != s.params.len() {
             return;
+        }
+        if self.post.is_some() {
+            self.read.insert(i);
         }
         // A scalar argument is a copy, whatever its capability.
         let copied = |k: usize| args[k].1 == Capability::Read || s.params[k].is_int();
