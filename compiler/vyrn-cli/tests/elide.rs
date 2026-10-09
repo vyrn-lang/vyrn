@@ -77,7 +77,7 @@ fn the_oracle_counts_each_run_of_a_check_row() {
     let calls = "    print((get(xs, 0) + get(xs, 1) + get(xs, 2)).toString())";
     let (err, rows) = oracle(src, calls, "get");
     assert_eq!(err, "");
-    assert_eq!(rows, ["2 0 array-index kept 3"]);
+    assert_eq!(rows, ["2 0 array-index proved 3"]);
 }
 
 #[test]
@@ -1659,6 +1659,462 @@ fn a_callee_summary_proves_an_index() {
         let (dir, file) = modules(root, &[]);
         let rows = rows_of(&file, "w");
         if rows != ["proved array-index"] {
+            failures.push(format!("{root}\nrows: {rows:?}"));
+        }
+        let (err, _) = run_oracle(&dir, &file, "w");
+        if !err.is_empty() {
+            failures.push(format!("{root}\nran: {err}"));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n\n"));
+}
+
+/// Programs where a wrong `pre` of `w` would prove its check: each keeps it
+/// and traps there. The check is in the root file unless a file is named
+/// `b.vyrn` and holds `w`; a witness with no trap reaches no failing call
+/// in a run, because only a host would make it.
+const CALLER_WITNESSES: &[(&str, &[(&str, &str)], &str)] = &[
+    // A caller passes an index it does not prove.
+    (
+        r#"fn w(xs: Array<Int64>, i: Int64) -> Int64 {
+    return xs[i]
+}
+fn main() -> Int64 {
+    let xs: Array<Int64> = [10, 20, 30]
+    let mut s = 0
+    let mut i = 0
+    while i < xs.length {
+        s = s + w(xs, i)
+        i = i + 1
+    }
+    print((s + w(xs, 3)).toString())
+    return 0
+}
+"#,
+        &[],
+        "array index 3 out of bounds",
+    ),
+    // A lambda's call row passes an index it does not prove.
+    (
+        r#"fn w(xs: Array<Int64>, i: Int64) -> Int64 {
+    return xs[i]
+}
+fn apply(f: fn(Int64) -> Int64, k: Int64) -> Int64 {
+    return f(k)
+}
+fn main() -> Int64 {
+    let xs: Array<Int64> = [10, 20, 30]
+    let mut s = 0
+    let mut i = 0
+    while i < xs.length {
+        s = s + w(xs, i)
+        i = i + 1
+    }
+    print((s + apply(k -> w(xs, k), 3)).toString())
+    return 0
+}
+"#,
+        &[],
+        "array index 3 out of bounds",
+    ),
+    // An export passes its own parameter on; the export's caller does not
+    // prove it.
+    (
+        r#"fn w(xs: Array<Int64>, i: Int64) -> Int64 {
+    return xs[i]
+}
+export fn viaE(xs: Array<Int64>, i: Int64) -> Int64 {
+    return w(xs, i)
+}
+fn main() -> Int64 {
+    let xs: Array<Int64> = [10, 20, 30]
+    let mut s = 0
+    let mut i = 0
+    while i < xs.length {
+        s = s + w(xs, i)
+        i = i + 1
+    }
+    print((s + viaE(xs, 3)).toString())
+    return 0
+}
+"#,
+        &[],
+        "array index 3 out of bounds",
+    ),
+    // `w` is an export only a proving caller reaches here. The host may call
+    // it with anything, so it stays kept; no run makes that call.
+    (
+        r#"export fn w(xs: Array<Int64>, i: Int64) -> Int64 {
+    return xs[i]
+}
+fn main() -> Int64 {
+    let xs: Array<Int64> = [10, 20, 30]
+    print(w(xs, 0).toString())
+    return 0
+}
+"#,
+        &[],
+        "",
+    ),
+    // The function is passed as a `fn`-typed argument and called through it.
+    (
+        r#"fn w(xs: Array<Int64>, i: Int64) -> Int64 {
+    return xs[i]
+}
+fn apply(f: fn(Array<Int64>, Int64) -> Int64, xs: Array<Int64>, i: Int64) -> Int64 {
+    return f(xs, i)
+}
+fn main() -> Int64 {
+    let xs: Array<Int64> = [10, 20, 30]
+    let mut s = 0
+    let mut i = 0
+    while i < xs.length {
+        s = s + w(xs, i)
+        i = i + 1
+    }
+    print((s + apply(w, xs, 3)).toString())
+    return 0
+}
+"#,
+        &[],
+        "array index 3 out of bounds",
+    ),
+    // The function is a value bound by `let` and called through it.
+    (
+        r#"fn w(xs: Array<Int64>, i: Int64) -> Int64 {
+    return xs[i]
+}
+fn other(xs: Array<Int64>, i: Int64) -> Int64 {
+    return i
+}
+fn main() -> Int64 {
+    let xs: Array<Int64> = [10, 20, 30]
+    let mut s = 0
+    let mut i = 0
+    while i < xs.length {
+        s = s + w(xs, i)
+        i = i + 1
+    }
+    let f = if s > 0 { w } else { other }
+    print((s + f(xs, 3)).toString())
+    return 0
+}
+"#,
+        &[],
+        "array index 3 out of bounds",
+    ),
+    // A `fn`-typed parameter leaves the argument list, so argument `k` is
+    // not parameter `k`.
+    (
+        r#"fn id(x: Int64) -> Int64 {
+    return x
+}
+fn w(f: fn(Int64) -> Int64, i: Int64, j: Int64, xs: Array<Int64>, zs: Array<Int64>) -> Int64 {
+    return f(j) + xs[i] + zs.length
+}
+fn main() -> Int64 {
+    let xs: Array<Int64> = [10, 20, 30]
+    let zs: Array<Int64> = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+    print(w(id, 5, 0, xs, zs).toString())
+    return 0
+}
+"#,
+        &[],
+        "array index 5 out of bounds",
+    ),
+    // The recursive call steps the index past the end.
+    (
+        r#"fn w(xs: Array<Int64>, i: Int64) -> Int64 {
+    let v = xs[i]
+    if v > 100 {
+        return v
+    }
+    return w(xs, i + 1)
+}
+fn main() -> Int64 {
+    let xs: Array<Int64> = [10, 20, 30]
+    if xs.length > 0 {
+        print(w(xs, 0).toString())
+    }
+    return 0
+}
+"#,
+        &[],
+        "array index 3 out of bounds",
+    ),
+    // Mutual recursion steps the index past the end.
+    (
+        r#"fn w(xs: Array<Int64>, i: Int64) -> Int64 {
+    let v = xs[i]
+    if v > 100 {
+        return v
+    }
+    return u(xs, i)
+}
+fn u(xs: Array<Int64>, i: Int64) -> Int64 {
+    return w(xs, i + 1)
+}
+fn main() -> Int64 {
+    let xs: Array<Int64> = [10, 20, 30]
+    if xs.length > 0 {
+        print(w(xs, 0).toString())
+    }
+    return 0
+}
+"#,
+        &[],
+        "array index 3 out of bounds",
+    ),
+    // A private caller passes its own unproved parameter on.
+    (
+        r#"fn w(xs: Array<Int64>, i: Int64) -> String {
+    return xs[i].toString()
+}
+fn a(xs: Array<Int64>, i: Int64) {
+    print(w(xs, i))
+}
+fn main() -> Int64 {
+    let xs: Array<Int64> = [10, 20, 30]
+    let mut i = 0
+    while i < xs.length {
+        a(xs, i)
+        i = i + 1
+    }
+    a(xs, 3)
+    return 0
+}
+"#,
+        &[],
+        "array index 3 out of bounds",
+    ),
+    // A caller's own entry candidates would prove the callee's; the caller's
+    // caller does not prove them.
+    (
+        r#"fn w(xs: Array<Int64>, i: Int64) -> Int64 {
+    return xs[i]
+}
+fn a(xs: Array<Int64>, i: Int64) -> Int64 {
+    let v = xs[i - 1]
+    return v + w(xs, i)
+}
+fn main() -> Int64 {
+    let xs: Array<Int64> = [10, 20, 30]
+    let ys: Array<Int64> = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
+    let mut s = 0
+    let mut i = 0
+    while i < ys.length {
+        s = s + ys[i] * 2 + i
+        i = i + 1
+    }
+    let mut j = 0
+    while j < xs.length {
+        s = s + w(xs, j)
+        j = j + 1
+    }
+    print((s + a(xs, 3)).toString())
+    return 0
+}
+"#,
+        &[],
+        "array index 3 out of bounds",
+    ),
+    // The caller proves the fact, then a store breaks it before the call.
+    (
+        r#"fn w(xs: Array<Int64>, i: Int64) -> Int64 {
+    return xs[i]
+}
+fn g(xs: Array<Int64>, k: Int64) -> Int64 {
+    if k >= 0 && k < xs.length {
+        let mut j = k
+        let s = w(xs, j)
+        j = j + 2
+        return s + w(xs, j)
+    }
+    return 0
+}
+fn main() -> Int64 {
+    let xs: Array<Int64> = [10, 20, 30]
+    print(g(xs, 1).toString())
+    return 0
+}
+"#,
+        &[],
+        "array index 3 out of bounds",
+    ),
+    // The caller proves the fact, then a pop breaks it before the call.
+    (
+        r#"fn w(xs: Array<Int64>, i: Int64) -> Int64 {
+    return xs[i]
+}
+fn g(xs: modify Array<Int64>, k: Int64) -> Int64 {
+    if k >= 0 && k < xs.length {
+        let s = w(xs, k)
+        let _ = xs.pop()
+        return s + w(xs, k)
+    }
+    return 0
+}
+fn main() -> Int64 {
+    let mut xs: Array<Int64> = [10, 20, 30]
+    print(g(xs, 2).toString())
+    return 0
+}
+"#,
+        &[],
+        "array index 2 out of bounds",
+    ),
+    // A caller whose summary every return refutes before the call row.
+    (
+        r#"fn w(xs: Array<Int64>, i: Int64) -> Int64 {
+    return xs[i]
+}
+fn g(xs: Array<Int64>, k: Int64, m: Int64) -> Int64 {
+    if m > 0 {
+        return m * m
+    }
+    return w(xs, k + 1)
+}
+fn main() -> Int64 {
+    let xs: Array<Int64> = [10, 20, 30]
+    let mut s = 0
+    let mut i = 0
+    while i < xs.length {
+        s = s + w(xs, i)
+        i = i + 1
+    }
+    print((s + g(xs, 2, 0)).toString())
+    return 0
+}
+"#,
+        &[],
+        "array index 3 out of bounds",
+    ),
+    // A caller with no summary of its own proves the fact from a callee's
+    // summary that the callee's walk lowers later.
+    (
+        r#"fn w(xs: Array<Int64>, i: Int64) -> Int64 {
+    return xs[i]
+}
+fn pick(i: Int64) -> Int64 {
+    return i + 1
+}
+fn c(xs: Array<Int64>, i: Int64) {
+    if i >= 0 && i < xs.length {
+        print(w(xs, pick(i)).toString())
+    }
+}
+fn main() -> Int64 {
+    let xs: Array<Int64> = [10, 20, 30]
+    let mut s = 0
+    let mut i = 0
+    while i < xs.length {
+        s = s + w(xs, i)
+        i = i + 1
+    }
+    c(xs, 2)
+    print(s.toString())
+    return 0
+}
+"#,
+        &[],
+        "array index 3 out of bounds",
+    ),
+    // A generator body passes an unproved index; the trap is at load.
+    (
+        r#"import { g } from "./b"
+fn main() -> Int64 {
+    print(derive(g, 1).toString())
+    return 0
+}
+"#,
+        &[(
+            "b.vyrn",
+            r#"fn w(xs: Array<Int64>, i: Int64) -> Int64 {
+    return xs[i]
+}
+export gen fn g(t: TypeArg) -> String {
+    let xs: Array<Int64> = [10, 20, 30]
+    let mut s = 0
+    let mut i = 0
+    while i < xs.length {
+        s = s + w(xs, i)
+        i = i + 1
+    }
+    let k = t.roots.length + 2
+    return "fn shown(v: Int64) -> Int64 {\n    return " + (s + w(xs, k)).toString() + "\n}\n"
+}
+"#,
+        )],
+        "array index 3 out of bounds",
+    ),
+];
+
+#[test]
+fn every_caller_witness_keeps_its_check_and_traps_there() {
+    let mut failures = Vec::new();
+    for (root, files, trap) in CALLER_WITNESSES.iter().copied() {
+        let (dir, file) = modules(root, files);
+        let site = match files.iter().any(|(_, src)| src.contains("fn w(")) {
+            true => dir.join("b.vyrn"),
+            false => file.clone(),
+        };
+        let rows = rows_of(&site, "w");
+        if rows.is_empty() || rows.iter().any(|v| v.starts_with("proved")) {
+            failures.push(format!("{root}\nrows: {rows:?}"));
+        }
+        let (err, _) = run_oracle(&dir, &file, "w");
+        if !err.contains(trap) || err.contains(vyrn_frontend::trap::PROVED_CHECK_FAILED) {
+            failures.push(format!("{root}\nran: {err}"));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n\n"));
+}
+
+/// Programs whose `w` every caller calls with what its checks need: the
+/// facts every call row proves prove them, and the run passes the oracle.
+const CALLER_PROOFS: &[&str] = &[
+    r#"fn w(xs: Array<Int64>, i: Int64) -> Int64 {
+    return xs[i]
+}
+fn main() -> Int64 {
+    let xs: Array<Int64> = [10, 20, 30]
+    let mut s = 0
+    let mut i = 0
+    while i < xs.length {
+        s = s + w(xs, i)
+        i = i + 1
+    }
+    print(s.toString())
+    return 0
+}
+"#,
+    r#"fn w(xs: Array<Int64>) -> Int64 {
+    return xs[0]
+}
+fn main() -> Int64 {
+    let xs: Array<Int64> = [10, 20, 30]
+    let ys: Array<Int64> = [7]
+    print((w(xs) + w(ys)).toString())
+    return 0
+}
+"#,
+    r#"fn w(a: Int64, b: Int64) -> Int64 {
+    return a / b
+}
+fn main() -> Int64 {
+    print((w(10, 2) + w(9, 3)).toString())
+    return 0
+}
+"#,
+];
+
+#[test]
+fn every_call_row_proving_a_fact_proves_the_check() {
+    let mut failures = Vec::new();
+    for root in CALLER_PROOFS {
+        let (dir, file) = modules(root, &[]);
+        let rows = rows_of(&file, "w");
+        if rows.is_empty() || rows.iter().any(|v| !v.starts_with("proved")) {
             failures.push(format!("{root}\nrows: {rows:?}"));
         }
         let (err, _) = run_oracle(&dir, &file, "w");
