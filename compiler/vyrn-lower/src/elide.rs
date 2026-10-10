@@ -11,11 +11,12 @@
 //! candidate or stops, so the candidate count bounds the rounds.
 //!
 //! A direct call's result has the facts its callee's [`Summary`] states,
-//! over the call's arguments ([`summaries`]). Any other call's result is a
-//! fresh value. A body that only direct call rows enter starts with the facts
-//! every such row proves of its arguments. Every body starts with its
-//! parameters' `where` clauses ([`Body::assumes`]), which every call row
-//! checks; a call's clause check is a row like any other.
+//! over the call's arguments ([`summaries`]); a call to a generic function
+//! reads its instance's. Any other call's result is a fresh value. A body
+//! that only direct call rows enter starts with the facts every such row
+//! proves of its arguments. Every body starts with its parameters' `where`
+//! clauses ([`Body::assumes`]), which every call row checks; a call's clause
+//! check is a row like any other.
 //!
 //! The walk knows nothing about a global, an element, or a field of a field:
 //! each read of one is a fresh value with its type's range. An exact sum is an
@@ -115,6 +116,7 @@ pub struct Summary {
 #[derive(Debug, Default)]
 pub struct Summaries {
     at: HashMap<FnId, usize>,
+    instances: Instances,
     values: Vec<Summary>,
     /// Bodies [`summaries`] decided as [`decide`] decides them, each served
     /// once ([`Summaries::decided`]).
@@ -287,10 +289,16 @@ impl Summaries {
     }
 }
 
+/// Per generic function's row, each instance's row under the type arguments
+/// that spell it, by parameter name in the function's order: the body the
+/// emitter runs for a call row whose `solved` they equal.
+pub type Instances = HashMap<FnId, Vec<(Vec<(String, Type)>, FnId)>>;
+
 /// [`Summaries`] borrowed: the solver's values while one body is walked.
 #[derive(Clone, Copy)]
 struct View<'a> {
     at: &'a HashMap<FnId, usize>,
+    instances: &'a Instances,
     values: &'a [Summary],
     facts: &'a RecordFacts,
 }
@@ -302,9 +310,29 @@ impl View<'_> {
         Some((i, self.values.get(i)?))
     }
 
+    /// The row whose body a direct call row runs ([`direct_call`]): an
+    /// instance's row for a call to a generic function. `None` for a call
+    /// whose `solved` no instance's type arguments equal.
+    fn call(&self, rhs: &Rhs) -> Option<FnId> {
+        let g = direct_call(rhs)?;
+        let Rhs::Call { solved, .. } = rhs else {
+            return None;
+        };
+        if solved.is_empty() {
+            return Some(g);
+        }
+        let mut of = self.instances.get(&g)?.iter();
+        of.find(|(args, _)| args == solved).map(|(_, f)| *f)
+    }
+
     /// Whether `f` states a fact of its result.
     fn post(&self, f: FnId) -> bool {
         self.get(f).is_some_and(|(_, s)| !s.post.is_empty())
+    }
+
+    /// Whether `rhs` is a direct call whose callee states a fact of its result.
+    fn linked(&self, rhs: &Rhs) -> bool {
+        self.call(rhs).is_some_and(|f| self.post(f))
     }
 
     /// The callee of `s`, a direct call to a body with entry facts, with the
@@ -316,7 +344,7 @@ impl View<'_> {
         let Rhs::Call { args, .. } = rhs else {
             return None;
         };
-        let (i, sum) = self.get(direct_call(rhs)?)?;
+        let (i, sum) = self.get(self.call(rhs)?)?;
         (!sum.pre.is_empty()).then_some((i, sum, args.as_slice()))
     }
 }
@@ -325,6 +353,7 @@ impl<'a> From<&'a Summaries> for View<'a> {
     fn from(s: &'a Summaries) -> View<'a> {
         View {
             at: &s.at,
+            instances: &s.instances,
             values: &s.values,
             facts: &s.facts,
         }
@@ -347,10 +376,10 @@ impl<'a> From<&'a Summaries> for View<'a> {
 ///
 /// The result does not depend on the order of `bodies`. Soundness rests on
 /// two postulates: a [`Callee::Fn`] row runs the body `bodies` holds under
-/// its row, and `bodies` holds no body for a row two bodies share or for a
-/// generic function, whose instances run other bodies; and only a
-/// [`Callee::Fn`] row of a body in `bodies`, or a row that spells its name,
-/// enters a body of `closed`.
+/// its row, or for a generic function the body of the row `instances` names
+/// for its `solved`, and `bodies` holds no body for a row two bodies share or
+/// for a generic function; and only a [`Callee::Fn`] row of a body in
+/// `bodies`, or a row that spells its name, enters a body of `closed`.
 ///
 /// Every walk assumes the [`RecordFacts`] that [`invariants`] keeps from
 /// `records`; `None` when a body that runs may be missing from `bodies`, and
@@ -360,6 +389,7 @@ pub fn summaries<'a>(
     decls: &HashMap<String, TypeDecl>,
     closed: &HashSet<FnId>,
     records: Option<&Records>,
+    instances: Instances,
 ) -> Summaries {
     let mut bodies: Vec<(FnId, &Body)> = bodies.collect();
     bodies.sort_by_key(|(f, _)| f.index());
@@ -412,11 +442,20 @@ pub fn summaries<'a>(
                                 .collect(),
                         })
                         .collect();
-                    solve(&bodies, decls, &at, only, start, &RecordFacts::default())
+                    solve(
+                        &bodies,
+                        decls,
+                        &at,
+                        &instances,
+                        only,
+                        start,
+                        &RecordFacts::default(),
+                    )
                 }
             };
             let view = View {
                 at: &at,
+                instances: &instances,
                 values: &lengths,
                 facts: &RecordFacts::default(),
             };
@@ -426,6 +465,7 @@ pub fn summaries<'a>(
     };
     let view = View {
         at: &at,
+        instances: &instances,
         values: &values,
         facts: &facts,
     };
@@ -434,10 +474,11 @@ pub fn summaries<'a>(
             .into_iter()
             .flatten()
             .collect();
-    let mut values = solve(&bodies, decls, &at, values, start, &facts);
+    let mut values = solve(&bodies, decls, &at, &instances, values, start, &facts);
     let (closed, callees) = entered(&bodies, closed);
     let view = View {
         at: &at,
+        instances: &instances,
         values: &values,
         facts: &facts,
     };
@@ -468,6 +509,7 @@ pub fn summaries<'a>(
     while !callers.is_empty() {
         let view = View {
             at: &at,
+            instances: &instances,
             values: &values,
             facts: &facts,
         };
@@ -492,6 +534,7 @@ pub fn summaries<'a>(
     at.retain(|_, i| !values[*i].pre.is_empty() || !values[*i].post.is_empty());
     Summaries {
         at,
+        instances,
         values,
         decided,
         facts,
@@ -512,6 +555,7 @@ fn solve(
     bodies: &[(FnId, &Body)],
     decls: &HashMap<String, TypeDecl>,
     at: &HashMap<FnId, usize>,
+    instances: &Instances,
     values: Vec<Summary>,
     start: BTreeSet<usize>,
     facts: &RecordFacts,
@@ -524,7 +568,12 @@ fn solve(
     // value that an earlier update of the same round has since lowered.
     let mut readers = vec![BTreeSet::new(); bodies.len()];
     let walk = |i: usize, values: &[Summary]| {
-        let view = View { at, values, facts };
+        let view = View {
+            at,
+            instances,
+            values,
+            facts,
+        };
         returns(bodies[i].1, decls, view, &values[i])
     };
     let weight = |i: usize| bodies[i].1.names.len();
@@ -1095,13 +1144,13 @@ fn seeds(b: &Body, decls: &HashMap<String, TypeDecl>, sums: View<'_>) -> Vec<usi
         &b.stmts,
         false,
         true,
-        &|g| sums.post(g),
+        &|r| sums.linked(r),
         &|_, _| false,
     );
     (rows(&b.stmts))
         .filter_map(|(s, _)| match s {
             St::Let(n, rhs) if rel[n.index()] => {
-                let (i, sum) = sums.get(direct_call(rhs)?)?;
+                let (i, sum) = sums.get(sums.call(rhs)?)?;
                 (!sum.post.is_empty()).then_some(i)
             }
             _ => None,
@@ -1109,17 +1158,16 @@ fn seeds(b: &Body, decls: &HashMap<String, TypeDecl>, sums: View<'_>) -> Vec<usi
         .collect()
 }
 
-/// The callee of a direct call whose result a summary may state: no type
-/// arguments, so the row names the body that runs, and no `fn`-typed
-/// argument, so the arguments are the parameters in order.
+/// The callee's row of a direct call whose result a summary may state: no
+/// `fn`-typed argument, so the arguments are the parameters in order. For a
+/// generic callee the row names no body; [`View::call`] finds the instance.
 fn direct_call(rhs: &Rhs) -> Option<FnId> {
     match rhs {
         Rhs::Call {
             kind: Callee::Fn(g),
-            solved,
             targets,
             ..
-        } if solved.is_empty() && targets.is_empty() => Some(*g),
+        } if targets.is_empty() => Some(*g),
         _ => None,
     }
 }
@@ -1256,9 +1304,15 @@ fn entry_templates(
         .map(|p| kind_of(&body.names[p.index()].ty, decls))
         .collect();
     let candidates = |ss: &[St]| {
-        let rel = relevant(body, decls, ss, false, true, &|g| sums.post(g), &|_, _| {
-            false
-        });
+        let rel = relevant(
+            body,
+            decls,
+            ss,
+            false,
+            true,
+            &|r| sums.linked(r),
+            &|_, _| false,
+        );
         let used = |k: usize| rel[body.params[k].index()];
         let ints = interface(&params, |k, kind| used(k) && kind.is_int(), Term::Val);
         let seqs = interface(&params, |k, kind| used(k) && kind == Kind::Seq, Term::Len);
@@ -1494,7 +1548,7 @@ impl<'a> Walk<'a> {
             let named = |f: &Lin| f.terms.iter().any(|(t, _)| t.name().index() == k + 1);
             solving && sums.get(g).is_some_and(|(_, s)| s.pre.iter().any(named))
         };
-        let linked = |g: FnId| sums.post(g);
+        let linked = |r: &Rhs| sums.linked(r);
         Walk {
             body,
             decls,
@@ -1741,8 +1795,8 @@ impl<'a> Walk<'a> {
         let sums = self.sums;
         loop {
             let before = rel.iter().filter(|r| **r).count();
-            mark(self.body, self.decls, ss, &mut rel, false, &|g| {
-                sums.post(g)
+            mark(self.body, self.decls, ss, &mut rel, false, &|r| {
+                sums.linked(r)
             });
             if rel.iter().filter(|r| **r).count() == before {
                 break;
@@ -2284,7 +2338,7 @@ impl<'a> Walk<'a> {
     /// read after the call's effects. A fact naming an argument the call may
     /// write is left out, and so is one with a term no argument gives.
     fn called(&mut self, st: &mut State, n: Name, rhs: &Rhs) {
-        let Some((i, s)) = direct_call(rhs).and_then(|g| self.sums.get(g)) else {
+        let Some((i, s)) = self.sums.call(rhs).and_then(|g| self.sums.get(g)) else {
             return;
         };
         let Rhs::Call { args, .. } = rhs else { return };
@@ -2339,7 +2393,7 @@ impl<'a> Walk<'a> {
         if !self.solving || !self.record {
             return;
         }
-        let Some((i, s)) = direct_call(rhs).and_then(|g| self.sums.get(g)) else {
+        let Some((i, s)) = self.sums.call(rhs).and_then(|g| self.sums.get(g)) else {
             return;
         };
         let Rhs::Call { args, .. } = rhs else { return };
@@ -3348,15 +3402,15 @@ fn writes(ss: &[St], out: &mut BTreeSet<Name>) {
 /// compares when `checks`, a parameter or a returned name when `returns` (a
 /// summary's goals), argument `k` of a direct call to `g` where
 /// `entering(g, k)` (a `pre`'s goals), and every name a definition, a
-/// comparison, a check or a direct call to a `linked` callee links to a
-/// relevant one, either way.
+/// comparison, a check or a `linked` call row links to a relevant one,
+/// either way.
 fn relevant(
     body: &Body,
     decls: &HashMap<String, TypeDecl>,
     ss: &[St],
     returns: bool,
     checks: bool,
-    linked: &dyn Fn(FnId) -> bool,
+    linked: &dyn Fn(&Rhs) -> bool,
     entering: &dyn Fn(FnId, usize) -> bool,
 ) -> Vec<bool> {
     let mut rel = vec![false; body.names.len()];
@@ -3401,7 +3455,7 @@ fn mark(
     ss: &[St],
     rel: &mut [bool],
     checks: bool,
-    linked: &dyn Fn(FnId) -> bool,
+    linked: &dyn Fn(&Rhs) -> bool,
 ) {
     let val = |v: &Val| match v {
         Val::Name(n) => Some(*n),
@@ -3448,7 +3502,7 @@ fn mark(
                     } => {
                         let lengths = matches!(kind, Callee::Builtin | Callee::Reserved)
                             && length_rule(callee, args) != Length::Unknown;
-                        if lengths || direct_call(rhs).is_some_and(linked) {
+                        if lengths || linked(rhs) {
                             let from = args.iter().filter_map(|(a, _)| root(a));
                             link(rel, n.into_iter().chain(from));
                         }

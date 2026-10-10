@@ -78,8 +78,9 @@ pub struct World {
 pub struct FnRow {
     /// The name the function is emitted and looked up under ([`crate::spell`]).
     pub name: String,
-    /// An instance of a generic: the generic's row and the type arguments.
-    pub generic: Option<(FnId, Vec<Type>)>,
+    /// An instance of a generic: the generic's row and the type arguments,
+    /// by parameter name in its order, as a call row's `solved` names them.
+    pub generic: Option<(FnId, Vec<(String, Type)>)>,
 }
 
 /// The function rows in [`FnId`] order: [`crate::Lowered::source`], then
@@ -137,10 +138,11 @@ impl Fns {
     pub(crate) fn instance(&mut self, inst: &crate::Instance) -> FnId {
         match self.instance_id(inst) {
             Some(id) => id,
-            None => self.push(
-                inst.spelling(),
-                Some((inst.func_id, inst.type_args.clone())),
-            ),
+            None => {
+                let args = inst.func.type_params.iter().cloned();
+                let named = args.zip(inst.type_args.iter().cloned()).collect();
+                self.push(inst.spelling(), Some((inst.func_id, named)))
+            }
         }
     }
 
@@ -174,7 +176,7 @@ impl Fns {
         ids
     }
 
-    fn push(&mut self, name: String, generic: Option<(FnId, Vec<Type>)>) -> FnId {
+    fn push(&mut self, name: String, generic: Option<(FnId, Vec<(String, Type)>)>) -> FnId {
         let id = FnId::nth(self.rows.len());
         self.ids.entry(name.clone()).or_insert(id);
         self.rows.push(FnRow { name, generic });
@@ -409,7 +411,9 @@ impl World {
     }
 
     /// The callee summaries every decided body reads, over every body
-    /// [`World::body_at`] serves but a generic function's.
+    /// [`World::body_at`] serves but a generic function's. A call to a generic
+    /// function reads the summary of the instance row its solved type
+    /// arguments spell, the body the emitter runs.
     ///
     /// A body may assume facts at its entry only when it is `private` and
     /// every caller [`World::callers`] names is such a body: a module-state
@@ -436,7 +440,17 @@ impl World {
                 .filter(|(f, _)| !generic.contains(f))
                 .filter_map(|(f, s)| Some((*f, &s.as_ref()?.body)));
             let records = known.then_some(&self.records);
-            crate::elide::summaries(bodies, self.ownership.proto.types(), &closed, records)
+            let mut instances: HashMap<FnId, Vec<(Vec<(String, Type)>, FnId)>> = HashMap::new();
+            for (i, r) in self.fns.rows.iter().enumerate() {
+                if let Some((g, args)) = &r.generic {
+                    instances
+                        .entry(*g)
+                        .or_default()
+                        .push((args.clone(), FnId::nth(i)));
+                }
+            }
+            let types = self.ownership.proto.types();
+            crate::elide::summaries(bodies, types, &closed, records, instances)
         })
     }
 

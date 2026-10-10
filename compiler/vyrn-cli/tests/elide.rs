@@ -564,6 +564,35 @@ fn a_constant_result_proves_its_callers_index() {
     assert!(failures.is_empty(), "{}", failures.join("\n\n"));
 }
 
+/// A call to a generic function reads the summary of the instance its type
+/// arguments name, which every return of that instance proves.
+#[test]
+fn a_generic_instances_result_proves_its_callers_index() {
+    let read = "fn w(x: Int64) -> Int64 {
+    let t: Array<Int64> = [1, 2, 3]
+    return t[two(x, x)]
+}
+";
+    let proof = format!("fn two<T>(v: T, x: Int64) -> Int64 {{\n    return 2\n}}\n{read}");
+    assert_eq!(verdicts(&proof, "w"), ["proved array-index"]);
+    let witness = format!(
+        "fn two<T>(v: T, x: Int64) -> Int64 {{
+    if x > 10 {{
+        return 3
+    }}
+    return 2
+}}
+{read}"
+    );
+    assert_eq!(verdicts(&witness, "w"), ["check array-index"]);
+    let (err, _) = oracle(&witness, "    print(w(15).toString())", "w");
+    assert!(
+        err.contains("array index 3 out of bounds")
+            && !err.contains(vyrn_frontend::trap::PROVED_CHECK_FAILED),
+        "{err}"
+    );
+}
+
 #[test]
 fn a_loop_condition_under_and_proves_its_index() {
     let src = "fn w(xs: Array<Int64>) -> Int64 {
