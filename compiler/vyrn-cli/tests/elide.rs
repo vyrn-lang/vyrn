@@ -2885,6 +2885,54 @@ fn main() -> Int64 {
     return 0
 }
 "#,
+    // A cursor that stays between zero and `n`, and `n` at most the length.
+    r#"type R = { src: Array<Int64>, n: Int64, pos: Int64 }
+fn make(xs: Array<Int64>) -> R {
+    let n = xs.length
+    return R { src: xs.copy(), n: n, pos: 0 }
+}
+fn step(r: modify R) {
+    if r.pos >= r.n {
+        return
+    }
+    r.pos = r.pos + 1
+}
+fn w(r: R) -> Int64 {
+    if r.pos >= r.n {
+        return 0
+    }
+    return r.src[r.pos]
+}
+fn main() -> Int64 {
+    let xs: Array<Int64> = [10, 20, 30]
+    let mut r = make(xs)
+    step(r)
+    print(w(r).toString())
+    return 0
+}
+"#,
+    // A cursor at most the length reads the byte before it.
+    r#"type R = { src: Array<Int64>, pos: Int64 }
+fn step(r: modify R) {
+    if r.pos >= r.src.length {
+        return
+    }
+    r.pos = r.pos + 1
+}
+fn w(r: R) -> Int64 {
+    if r.pos == 0 {
+        return 0
+    }
+    return r.src[r.pos - 1]
+}
+fn main() -> Int64 {
+    let mut r = R { src: [10, 20, 30], pos: 0 }
+    step(r)
+    step(r)
+    print(w(r).toString())
+    return 0
+}
+"#,
 ];
 
 #[test]
@@ -3243,6 +3291,148 @@ fn main() -> Int64 {
 }
 "#,
         "array index 10 out of bounds",
+    ), // A store in the constructor moves the cursor past the end.
+    (
+        r#"type R = { src: Array<Int64>, pos: Int64 }
+fn make(xs: Array<Int64>) -> R {
+    let mut r = R { src: xs.copy(), pos: 0 }
+    r.pos = 7
+    return r
+}
+fn w(r: R) -> Int64 {
+    if r.pos == 0 {
+        return 0
+    }
+    return r.src[r.pos - 1]
+}
+fn main() -> Int64 {
+    let xs: Array<Int64> = [10, 20, 30]
+    print(w(make(xs)).toString())
+    return 0
+}
+"#,
+        "array index 6 out of bounds",
+    ),
+    // One path of the only constructor starts the cursor below zero.
+    (
+        r#"type R = { src: Array<Int64>, pos: Int64 }
+fn make(xs: Array<Int64>, odd: Bool) -> R {
+    if odd {
+        return R { src: xs.copy(), pos: -1 }
+    }
+    return R { src: xs.copy(), pos: 0 }
+}
+fn w(r: R) -> Int64 {
+    if r.pos >= r.src.length {
+        return 0
+    }
+    return r.src[r.pos]
+}
+fn main() -> Int64 {
+    let xs: Array<Int64> = [10, 20, 30]
+    print(w(make(xs, true)).toString())
+    return 0
+}
+"#,
+        "array index -1 out of bounds",
+    ),
+    // A `modify` call shortens `src` below `n`.
+    (
+        r#"type R = { src: Array<Int64>, n: Int64, pos: Int64 }
+fn make(xs: Array<Int64>) -> R {
+    let n = xs.length
+    return R { src: xs.copy(), n: n, pos: 0 }
+}
+fn step(r: modify R) {
+    if r.pos >= r.n {
+        return
+    }
+    r.pos = r.pos + 1
+}
+fn chop(r: modify R) {
+    let _ = r.src.pop()
+}
+fn w(r: R) -> Int64 {
+    if r.pos >= r.n {
+        return 0
+    }
+    return r.src[r.pos]
+}
+fn main() -> Int64 {
+    let xs: Array<Int64> = [10, 20, 30]
+    let mut r = make(xs)
+    step(r)
+    step(r)
+    chop(r)
+    print(w(r).toString())
+    return 0
+}
+"#,
+        "array index 2 out of bounds",
+    ),
+    // A record decoded by `fromJson` holds any cursor.
+    (
+        r#"type R = { src: Array<Int64>, pos: Int64 }
+fn w(r: R) -> Int64 {
+    if r.pos >= r.src.length {
+        return 0
+    }
+    return r.src[r.pos]
+}
+fn main() -> Int64 {
+    let r = R { src: [1, 2], pos: 0 }
+    let v = match fromJson<R>("{\"src\": [1, 2, 3], \"pos\": -1}") {
+        Valid(d) => w(d),
+        Invalid(_) => 0,
+    }
+    print((w(r) + v).toString())
+    return 0
+}
+"#,
+        "array index -1 out of bounds",
+    ),
+    // Module state moves its cursor below zero; the walk tracks no global's fields.
+    (
+        r#"type R = { src: Array<Int64>, pos: Int64 }
+let mut g = R { src: [1, 2, 3], pos: 0 }
+fn back() {
+    g.pos = g.pos - 1
+}
+fn w(r: R) -> Int64 {
+    if r.pos >= r.src.length {
+        return 0
+    }
+    return r.src[r.pos]
+}
+fn main() -> Int64 {
+    let r = R { src: [1, 2], pos: 0 }
+    back()
+    print((w(r) + w(g)).toString())
+    return 0
+}
+"#,
+        "array index -1 out of bounds",
+    ),
+    // A callee moves the cursor of the record it takes `modify` below zero.
+    (
+        r#"type R = { src: Array<Int64>, pos: Int64 }
+fn back(r: modify R) {
+    r.pos = r.pos - 1
+}
+fn w(r: R) -> Int64 {
+    if r.pos >= r.src.length {
+        return 0
+    }
+    return r.src[r.pos]
+}
+fn main() -> Int64 {
+    let mut r = R { src: [1, 2, 3], pos: 0 }
+    back(r)
+    print(w(r).toString())
+    return 0
+}
+"#,
+        "array index -1 out of bounds",
     ),
 ];
 

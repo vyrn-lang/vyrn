@@ -31,7 +31,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt::Write;
 use std::sync::{Arc, Mutex};
 
-use vyrn_frontend::ast::{BinOp, Capability, FnId, Type, TypeDecl, UnOp};
+use vyrn_frontend::ast::{BinOp, Capability, Field, FnId, Type, TypeDecl, UnOp};
 use vyrn_frontend::effects::Effect;
 use vyrn_frontend::prelude::{self, Length};
 use vyrn_frontend::prim::Cmp;
@@ -119,7 +119,7 @@ pub struct Summaries {
     /// Bodies [`summaries`] decided as [`decide`] decides them, each served
     /// once ([`Summaries::decided`]).
     decided: HashMap<FnId, Mutex<Option<Body>>>,
-    pairs: Pairs,
+    facts: RecordFacts,
 }
 
 /// What [`invariants`] reads besides the bodies, made once per program.
@@ -173,88 +173,107 @@ impl Records {
     }
 }
 
-/// Pairs of array fields, by name, whose lengths are equal in every record
-/// value that has both ([`invariants`]).
+/// A field of a [`RecordFact`], by name: an integer field's value or an
+/// array or String field's length.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+enum Part {
+    Val(String),
+    Len(String),
+}
+
+/// `sum(k * part) >= 0` over the fields of one record value, parts sorted.
+type RecordFact = Vec<(Part, i64)>;
+
+/// The sorted fact of `parts`.
+fn record_fact(mut parts: RecordFact) -> RecordFact {
+    parts.sort();
+    parts
+}
+
+/// Whether a record with `fields` has every part of `fact`, each of its
+/// part's kind.
+fn binds(fact: &RecordFact, fields: &[Field], decls: &HashMap<String, TypeDecl>) -> bool {
+    fact.iter().all(|(p, _)| {
+        let (name, kind): (&str, fn(Kind) -> bool) = match p {
+            Part::Val(f) => (f, Kind::is_int),
+            Part::Len(f) => (f, |k| k == Kind::Seq),
+        };
+        (fields.iter()).any(|x| x.name == name && kind(kind_of(&x.ty, decls)))
+    })
+}
+
+/// The [`RecordFact`]s every record value with their fields keeps
+/// ([`invariants`]): two array fields of equal length, an integer field at
+/// least zero, an array or String field at least as long as an integer
+/// field's value.
 #[derive(Debug, Default)]
-pub struct Pairs {
-    /// Each pair's first field name, to the names after it it pairs with.
-    of: BTreeMap<String, BTreeSet<String>>,
-    /// Per record declaration that has both fields of a pair, those pairs.
-    by_decl: HashMap<String, Vec<(String, String)>>,
+pub struct RecordFacts {
+    /// Every fact no round has dropped.
+    of: BTreeSet<RecordFact>,
+    /// Per record declaration, the facts it [`binds`].
+    by_decl: HashMap<String, Vec<RecordFact>>,
     /// [`Records::params`].
     params: Arc<BTreeMap<(usize, usize), String>>,
 }
 
-impl Pairs {
+impl RecordFacts {
     fn new(
-        of: BTreeMap<String, BTreeSet<String>>,
+        of: BTreeSet<RecordFact>,
         decls: &HashMap<String, TypeDecl>,
         params: &Arc<BTreeMap<(usize, usize), String>>,
-    ) -> Pairs {
-        let mut pairs = Pairs {
+    ) -> RecordFacts {
+        let mut facts = RecordFacts {
             of,
             by_decl: HashMap::new(),
             params: params.clone(),
         };
-        if pairs.of.is_empty() {
-            return pairs;
+        if facts.of.is_empty() {
+            return facts;
         }
         for name in decls.keys() {
             let ty = Type::Named(name.clone());
             let Some(fields) = vyrn_frontend::types::record_fields(&ty, decls) else {
                 continue;
             };
-            let names: Vec<&str> = fields.iter().map(|f| f.name.as_str()).collect();
-            let within: Vec<(String, String)> = (pairs.within(&names).into_iter())
-                .map(|(a, b)| (a.to_string(), b.to_string()))
+            let within: Vec<RecordFact> = (facts.within(&fields, decls).into_iter())
+                .cloned()
                 .collect();
             if !within.is_empty() {
-                pairs.by_decl.insert(name.clone(), within);
+                facts.by_decl.insert(name.clone(), within);
             }
         }
-        pairs
+        facts
     }
 
     fn is_empty(&self) -> bool {
         self.of.is_empty()
     }
 
-    /// The pairs of the declared type of `modify` parameter `k` of `g`.
-    fn param(&self, g: FnId, k: usize) -> Option<&[(String, String)]> {
+    /// The facts of the declared type of `modify` parameter `k` of `g`.
+    fn param(&self, g: FnId, k: usize) -> Option<&[RecordFact]> {
         let d = self.params.get(&(g.index(), k))?;
         Some(self.by_decl.get(d).map_or(&[], Vec::as_slice))
     }
 
-    /// The pairs a record of type `ty` has both fields of.
-    fn of_type(&self, ty: &Type, decls: &HashMap<String, TypeDecl>) -> Vec<(&str, &str)> {
+    /// The facts a record of type `ty` [`binds`].
+    fn of_type(&self, ty: &Type, decls: &HashMap<String, TypeDecl>) -> Vec<&RecordFact> {
         if self.is_empty() {
             return Vec::new();
         }
         match ty {
-            Type::Named(d) | Type::App(d, _) => (self.by_decl.get(d).into_iter().flatten())
-                .map(|(a, b)| (a.as_str(), b.as_str()))
-                .collect(),
+            Type::Named(d) | Type::App(d, _) => self.by_decl.get(d).into_iter().flatten().collect(),
             _ => match vyrn_frontend::types::record_fields(ty, decls) {
-                Some(fs) => self.within(&fs.iter().map(|f| f.name.as_str()).collect::<Vec<_>>()),
+                Some(fs) => self.within(&fs, decls),
                 None => Vec::new(),
             },
         }
     }
 
-    /// The pairs with both fields among `fields`.
-    fn within(&self, fields: &[impl AsRef<str>]) -> Vec<(&str, &str)> {
-        let mut out = Vec::new();
-        for f in fields {
-            let Some((a, bs)) = self.of.get_key_value(f.as_ref()) else {
-                continue;
-            };
-            for g in fields {
-                if let Some(b) = bs.get(g.as_ref()) {
-                    out.push((a.as_str(), b.as_str()));
-                }
-            }
-        }
-        out
+    /// The facts a record with `fields` [`binds`].
+    fn within(&self, fields: &[Field], decls: &HashMap<String, TypeDecl>) -> Vec<&RecordFact> {
+        (self.of.iter())
+            .filter(|f| binds(f, fields, decls))
+            .collect()
     }
 }
 
@@ -271,7 +290,7 @@ impl Summaries {
 struct View<'a> {
     at: &'a HashMap<FnId, usize>,
     values: &'a [Summary],
-    pairs: &'a Pairs,
+    facts: &'a RecordFacts,
 }
 
 impl View<'_> {
@@ -305,7 +324,7 @@ impl<'a> From<&'a Summaries> for View<'a> {
         View {
             at: &s.at,
             values: &s.values,
-            pairs: &s.pairs,
+            facts: &s.facts,
         }
     }
 }
@@ -331,9 +350,9 @@ impl<'a> From<&'a Summaries> for View<'a> {
 /// [`Callee::Fn`] row of a body in `bodies`, or a row that spells its name,
 /// enters a body of `closed`.
 ///
-/// Every walk assumes the record [`Pairs`] that [`invariants`] keeps from
+/// Every walk assumes the [`RecordFacts`] that [`invariants`] keeps from
 /// `records`; `None` when a body that runs may be missing from `bodies`, and
-/// then no pair holds.
+/// then no fact holds.
 pub fn summaries<'a>(
     bodies: impl Iterator<Item = (FnId, &'a Body)>,
     decls: &HashMap<String, TypeDecl>,
@@ -353,15 +372,15 @@ pub fn summaries<'a>(
     .into_iter()
     .unzip();
     let scans: Option<Vec<Scan>> = scans.into_iter().collect();
-    let pairs = match (records, scans) {
+    let facts = match (records, scans) {
         (Some(r), Some(scans)) => invariants(&bodies, &scans, decls, r),
-        _ => Pairs::default(),
+        _ => RecordFacts::default(),
     };
     let mut at: HashMap<FnId, usize> = (0..).zip(&bodies).map(|(i, (f, _))| (*f, i)).collect();
     let view = View {
         at: &at,
         values: &values,
-        pairs: &pairs,
+        facts: &facts,
     };
     let start: BTreeSet<usize> =
         in_parallel(&bodies, weigh, || (), |(), (_, b)| seeds(b, decls, view))
@@ -379,7 +398,7 @@ pub fn summaries<'a>(
         let view = View {
             at: &at,
             values,
-            pairs: &pairs,
+            facts: &facts,
         };
         returns(bodies[i].1, decls, view, &values[i])
     };
@@ -414,7 +433,7 @@ pub fn summaries<'a>(
     let view = View {
         at: &at,
         values: &values,
-        pairs: &pairs,
+        facts: &facts,
     };
     let pres = in_parallel(
         &bodies,
@@ -444,7 +463,7 @@ pub fn summaries<'a>(
         let view = View {
             at: &at,
             values: &values,
-            pairs: &pairs,
+            facts: &facts,
         };
         callers.retain(|b| rows(&b.stmts).any(|(s, _)| view.pre(s).is_some()));
         let batch: Vec<&Body> = callers.drain(..(callers.len() * 2).div_ceil(3)).collect();
@@ -469,80 +488,90 @@ pub fn summaries<'a>(
         at,
         values,
         decided,
-        pairs,
+        facts,
     }
 }
 
-/// The [`Pairs`] every record value of the program keeps, by Houdini from
-/// each pair of array fields of a declared record type, one of which a check
-/// indexes.
+/// The [`RecordFacts`] every record value of the program keeps, by Houdini.
+/// The candidates come from each declared record type: each two array fields
+/// of equal length when a check indexes one; each integer field a body reads
+/// of a record name whose array or String field a check indexes, at least
+/// zero and at most that field's length.
 ///
-/// Record types are compatible by shape, so a pair is keyed by its field
-/// names and binds every record value with both fields, whatever its type. A
-/// walk assumes a record name's pairs where the name takes a value it did
-/// not build ([`Walk::restate`]). It tracks the lengths of a record that a
-/// literal builds or a row resizes a field of ([`Walk::dirty`]), and that
-/// record proves its pairs wherever its value leaves the name
-/// ([`Walk::keeps`]). The bodies that build or resize a record with a pair
+/// Record types are compatible by shape, so a fact is keyed by its field
+/// names and binds every record value with those fields, whatever its type.
+/// A walk assumes a record name's facts where the name takes a value it did
+/// not build ([`Walk::restate`]). It tracks the fields of a record that a
+/// literal builds or a row writes a field of ([`Walk::dirty`]), and that
+/// record proves its facts wherever its value leaves the name
+/// ([`Walk::keeps`]). The bodies that build or write a record with a fact
 /// are queued. Each batch walks the lightest two thirds of the queue and drops
-/// each pair a body does not prove, so a pair a light body drops spares the
-/// heavier bodies' walks. A body whose last walk assumed a dropped pair is
-/// queued again, and one that builds or resizes no record with a pair left
-/// leaves the queue. A batch drops a pair or shortens the queue, so the two
-/// bound the batches; the pairs kept do not depend on the order.
+/// each fact a body does not prove, so a fact a light body drops spares the
+/// heavier bodies' walks. A body whose last walk assumed a dropped fact is
+/// queued again, and one that builds or writes no record with a fact left
+/// leaves the queue. A batch drops a fact or shortens the queue, so the two
+/// bound the batches; the facts kept do not depend on the order.
 ///
-/// Before the rounds, a pair goes when a host-made type has both fields as
-/// arrays or Strings, or when a row resizes a field of that name through a
-/// place the walk does not track: a global, an element, a nested field, or
-/// a name whose type is not a record.
+/// Before the first batch, a fact goes when a host-made type binds it, or
+/// when a row writes one of its fields through a place the walk does not
+/// track: a global, an element, a nested field, or a name whose type is not a
+/// record.
 fn invariants(
     bodies: &[(FnId, &Body)],
     scans: &[Scan<'_>],
     decls: &HashMap<String, TypeDecl>,
     records: &Records,
-) -> Pairs {
+) -> RecordFacts {
     let host = &records.host;
     let resolve = |t: &Type| vyrn_frontend::types::resolve(t, decls);
-    let seq = |t: &Type| {
-        let t = resolve(t);
-        t.is_seq() || t == Type::Str
-    };
-    let array = |t: &Type| matches!(resolve(t), Type::Array(_) | Type::SmallArray(..));
     let indexed: BTreeSet<&str> = scans
         .iter()
         .flat_map(|s| s.indexed.iter().copied())
         .collect();
     let lost: BTreeSet<&str> = scans.iter().flat_map(|s| s.lost.iter().copied()).collect();
-    fn fields_of<'d>(d: &'d TypeDecl, keep: &dyn Fn(&Type) -> bool) -> Vec<&'d str> {
-        match &d.base {
-            Type::Record(fs) => (fs.iter())
-                .filter(|f| keep(&f.ty))
-                .map(|f| f.name.as_str())
-                .collect(),
-            _ => Vec::new(),
-        }
-    }
-    let mut cands: BTreeSet<(&str, &str)> = BTreeSet::new();
-    let mut gone: BTreeSet<(&str, &str)> = BTreeSet::new();
+    let beside: BTreeSet<(&str, &str)> = (scans.iter())
+        .flat_map(|s| s.beside.iter().copied())
+        .collect();
+    let fields_of = |fs: &[Field], keep: &dyn Fn(&Type) -> bool| -> Vec<String> {
+        (fs.iter())
+            .filter(|f| keep(&f.ty) && !lost.contains(f.name.as_str()))
+            .map(|f| f.name.clone())
+            .collect()
+    };
+    let array = |t: &Type| matches!(resolve(t), Type::Array(_) | Type::SmallArray(..));
+    let mut of: BTreeSet<RecordFact> = BTreeSet::new();
     for (name, d) in decls {
-        let (fields, into) = match host.contains(name) {
-            true => (fields_of(d, &seq), &mut gone),
-            false => (fields_of(d, &array), &mut cands),
-        };
-        for (i, a) in fields.iter().enumerate() {
-            for b in &fields[i + 1..] {
-                into.insert(if a < b { (a, b) } else { (b, a) });
+        let Type::Record(fs) = &d.base else { continue };
+        if host.contains(name) {
+            continue;
+        }
+        let arrays = fields_of(fs, &array);
+        for (i, a) in arrays.iter().enumerate() {
+            for b in &arrays[i + 1..] {
+                if indexed.contains(a.as_str()) || indexed.contains(b.as_str()) {
+                    let (la, lb) = (Part::Len(a.clone()), Part::Len(b.clone()));
+                    of.insert(record_fact(vec![(la.clone(), 1), (lb.clone(), -1)]));
+                    of.insert(record_fact(vec![(la, -1), (lb, 1)]));
+                }
+            }
+        }
+        let seqs = fields_of(fs, &|t| kind_of(t, decls) == Kind::Seq);
+        for f in fields_of(fs, &|t| kind_of(t, decls).is_int()) {
+            let near = (seqs.iter()).filter(|a| beside.contains(&(f.as_str(), a.as_str())));
+            for a in near {
+                of.insert(vec![(Part::Val(f.clone()), 1)]);
+                let parts = vec![(Part::Val(f.clone()), -1), (Part::Len(a.clone()), 1)];
+                of.insert(record_fact(parts));
             }
         }
     }
-    let wanted = |(a, b): &&(&str, &str)| {
-        (indexed.contains(a) || indexed.contains(b)) && !lost.contains(a) && !lost.contains(b)
-    };
-    let mut of: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
-    for (a, b) in cands.difference(&gone).filter(wanted) {
-        of.entry(a.to_string()).or_default().insert(b.to_string());
+    for name in host {
+        let ty = Type::Named(name.clone());
+        if let Some(fs) = vyrn_frontend::types::record_fields(&ty, decls) {
+            of.retain(|f| !binds(f, &fs, decls));
+        }
     }
-    let mut pairs = Pairs::new(of, decls, &records.params);
+    let mut facts = RecordFacts::new(of, decls, &records.params);
     let maybe: Vec<&Body> = (bodies.iter().zip(scans))
         .filter(|(_, s)| s.builds)
         .map(|((_, b), _)| *b)
@@ -551,22 +580,22 @@ fn invariants(
         &maybe,
         |b| b.names.len(),
         || (),
-        |(), b| built(b, decls, &pairs).contains(&true),
+        |(), b| built(b, decls, &facts).contains(&true),
     );
     let touching: Vec<&Body> = (maybe.iter().zip(touches))
         .filter_map(|(b, t)| t.then_some(*b))
         .collect();
     let weight = |i: &usize| touching[*i].names.len();
-    let mut used: Vec<BTreeSet<(String, String)>> = vec![BTreeSet::new(); touching.len()];
+    let mut used: Vec<BTreeSet<RecordFact>> = vec![BTreeSet::new(); touching.len()];
     let mut queue: Vec<usize> = (0..touching.len()).collect();
-    while !pairs.is_empty() && !queue.is_empty() {
+    while !facts.is_empty() && !queue.is_empty() {
         queue.sort_by_key(weight);
         let batch: Vec<usize> = queue.drain(..(queue.len() * 2).div_ceil(3)).collect();
         let outs = in_parallel(
             &batch,
             weight,
             || (),
-            |(), &i| obliged(touching[i], decls, &pairs),
+            |(), &i| obliged(touching[i], decls, &facts),
         );
         let mut dropped = BTreeSet::new();
         for (&i, (broken, u)) in batch.iter().zip(outs) {
@@ -576,31 +605,29 @@ fn invariants(
         if dropped.is_empty() {
             continue;
         }
-        let mut of = std::mem::take(&mut pairs.of);
-        for (a, b) in &dropped {
-            if let Some(bs) = of.get_mut(a) {
-                bs.remove(b);
-            }
-        }
-        of.retain(|_, bs| !bs.is_empty());
-        pairs = Pairs::new(of, decls, &records.params);
+        let mut of = std::mem::take(&mut facts.of);
+        of.retain(|f| !dropped.contains(f));
+        facts = RecordFacts::new(of, decls, &records.params);
         for i in 0..touching.len() {
-            if !queue.contains(&i) && used[i].iter().any(|p| dropped.contains(p)) {
+            if !queue.contains(&i) && used[i].iter().any(|f| dropped.contains(f)) {
                 queue.push(i);
             }
         }
-        queue.retain(|&i| built(touching[i], decls, &pairs).contains(&true));
+        queue.retain(|&i| built(touching[i], decls, &facts).contains(&true));
     }
-    pairs
+    facts
 }
 
 /// What [`invariants`] reads of one body.
 struct Scan<'b> {
     /// The fields a check indexes, directly or through a name read from one.
     indexed: Vec<&'b str>,
-    /// The fields a row resizes through a place the walk does not track.
+    /// Each field read of a record name, with each field of the same name a
+    /// check indexes.
+    beside: Vec<(&'b str, &'b str)>,
+    /// The fields a row writes through a place the walk does not track.
     lost: Vec<&'b str>,
-    /// Whether a row builds a record or resizes a field.
+    /// Whether a row builds a record or writes a field.
     builds: bool,
 }
 
@@ -608,20 +635,27 @@ fn scan<'b>(b: &'b Body, decls: &HashMap<String, TypeDecl>) -> Scan<'b> {
     let mut checked: BTreeSet<Name> = BTreeSet::new();
     let mut indexed: Vec<&str> = Vec::new();
     let mut lost: Vec<&str> = Vec::new();
-    let mut reads: Vec<(Name, &str)> = Vec::new();
+    let mut reads: Vec<(Name, Option<Name>, &str)> = Vec::new();
+    // Per record name, the fields a check indexes.
+    let mut on: Vec<(Name, &str)> = Vec::new();
+    let record = |p: &Place| match p {
+        Place::Name(r) => Some(*r),
+        _ => None,
+    };
     let mut builds = false;
     for (s, _) in rows(&b.stmts) {
         match s {
             St::Check(c) => match &c.guard {
-                Guard::Index(Place::Field(_, f), _) | Guard::Span(Place::Field(_, f), ..) => {
-                    indexed.push(f)
+                Guard::Index(Place::Field(r, f), _) | Guard::Span(Place::Field(r, f), ..) => {
+                    indexed.push(f);
+                    on.extend(record(r).map(|r| (r, f.as_str())));
                 }
                 Guard::Index(Place::Name(n), _) | Guard::Span(Place::Name(n), ..) => {
                     checked.insert(*n);
                 }
                 _ => {}
             },
-            St::Let(n, Rhs::Read(Place::Field(_, f))) => reads.push((*n, f)),
+            St::Let(n, Rhs::Read(Place::Field(r, f))) => reads.push((*n, record(r), f)),
             St::Let(_, Rhs::Make(Ctor::Record(..), _)) => builds = true,
             _ => {}
         }
@@ -640,35 +674,43 @@ fn scan<'b>(b: &'b Body, decls: &HashMap<String, TypeDecl>) -> Scan<'b> {
             }
         }
     }
-    indexed.extend(
-        reads
-            .into_iter()
-            .filter(|(n, _)| checked.contains(n))
-            .map(|(_, f)| f),
-    );
+    for (n, r, f) in &reads {
+        if checked.contains(n) {
+            indexed.push(f);
+            on.extend(r.map(|r| (r, *f)));
+        }
+    }
+    let beside = (reads.iter())
+        .flat_map(|(_, r, f)| {
+            (on.iter())
+                .filter(|(q, _)| Some(*q) == *r)
+                .map(|(_, a)| (*f, *a))
+        })
+        .collect();
     Scan {
         indexed,
+        beside,
         lost,
         builds,
     }
 }
 
-/// Per name of `body`, whether it is a record a literal builds with both
-/// fields of a pair, or a record whose field of a pair a row resizes.
-fn built(body: &Body, decls: &HashMap<String, TypeDecl>, pairs: &Pairs) -> Vec<bool> {
+/// Per name of `body`, whether it is a record a literal builds with a fact,
+/// or a record whose field a fact names a row writes.
+fn built(body: &Body, decls: &HashMap<String, TypeDecl>, facts: &RecordFacts) -> Vec<bool> {
     let mut out = vec![false; body.names.len()];
     for (s, _) in rows(&body.stmts) {
         match s {
-            St::Let(n, Rhs::Make(Ctor::Record(_, fs), _)) => {
-                out[n.index()] |= !pairs.within(fs).is_empty();
+            St::Let(n, Rhs::Make(Ctor::Record(..), _)) => {
+                let ty = &body.names[n.index()].ty;
+                out[n.index()] |= !facts.of_type(ty, decls).is_empty();
             }
             _ => {
                 for p in resized_places(s) {
                     let Place::Field(r, f) = p else { continue };
                     let Place::Name(r) = &**r else { continue };
                     let ty = &body.names[r.index()].ty;
-                    let paired = |(a, b): &(&str, &str)| a == f || b == f;
-                    out[r.index()] |= pairs.of_type(ty, decls).iter().any(paired);
+                    out[r.index()] |= facts.of_type(ty, decls).iter().any(|x| mentions(x, f));
                 }
             }
         }
@@ -676,8 +718,13 @@ fn built(body: &Body, decls: &HashMap<String, TypeDecl>, pairs: &Pairs) -> Vec<b
     out
 }
 
-/// The places row `s` may change the length of: a store's, a take's, and each
-/// `modify` or `consume` argument's.
+/// Whether a part of `fact` is field `f`.
+fn mentions(fact: &RecordFact, f: &str) -> bool {
+    (fact.iter()).any(|(p, _)| matches!(p, Part::Val(x) | Part::Len(x) if x == f))
+}
+
+/// The places row `s` may write a field of or change the length of: a
+/// store's, a take's, and each `modify` or `consume` argument's.
 fn resized_places(s: &St) -> impl Iterator<Item = &Place> {
     let (one, args): (Option<&Place>, &[(Arg, Capability)]) = match s {
         St::Store { place, .. } => (Some(place), &[]),
@@ -696,24 +743,24 @@ fn resized_places(s: &St) -> impl Iterator<Item = &Place> {
     one.into_iter().chain(args)
 }
 
-/// The pairs of `pairs` that `body` does not prove of a record it builds or
-/// resizes, where the record's value leaves the name ([`Walk::keeps`]), and
-/// the pairs the walk assumed ([`Walk::restate`]).
+/// The facts of `facts` that `body` does not prove of a record it builds or
+/// writes, where the record's value leaves the name ([`Walk::keeps`]), and
+/// the facts the walk assumed ([`Walk::restate`]).
 fn obliged(
     body: &Body,
     decls: &HashMap<String, TypeDecl>,
-    pairs: &Pairs,
-) -> (BTreeSet<(String, String)>, BTreeSet<(String, String)>) {
+    facts: &RecordFacts,
+) -> (BTreeSet<RecordFact>, BTreeSet<RecordFact>) {
     let at = HashMap::new();
     let view = View {
         at: &at,
         values: &[],
-        pairs,
+        facts,
     };
     let mut stmts = body.stmts.clone();
     let mut w = Walk::new(body, decls, view, &stmts, Some(None));
     w.obliging = true;
-    w.seed(&stmts, built(body, decls, pairs));
+    w.seed(&stmts, built(body, decls, facts));
     let st = w.entry(&BTreeSet::new());
     let end = w.block(st, &mut stmts);
     w.exits(&end);
@@ -1061,14 +1108,14 @@ struct Walk<'a> {
     refuted: Vec<Refuted>,
     /// Whether the walk serves [`invariants`]: it gathers `broken`.
     obliging: bool,
-    /// The record names whose field lengths the walk tracks from a literal or
-    /// a row that resized a field, rather than assuming their [`Pairs`].
+    /// The record names whose fields the walk tracks from a literal or a row
+    /// that wrote a field, rather than assuming their [`RecordFacts`].
     dirty: BTreeSet<Name>,
-    /// While obliging: the pairs a record of `dirty` did not prove where its
+    /// While obliging: the facts a record of `dirty` did not prove where its
     /// value left the name.
-    broken: BTreeSet<(String, String)>,
-    /// While obliging: the pairs [`Walk::restate`] assumed.
-    assumed: BTreeSet<(String, String)>,
+    broken: BTreeSet<RecordFact>,
+    /// While obliging: the facts [`Walk::restate`] assumed.
+    assumed: BTreeSet<RecordFact>,
 }
 
 /// What the walk keeps about one name.
@@ -1321,43 +1368,48 @@ impl<'a> Walk<'a> {
         Some(Term::Col(r, at))
     }
 
-    /// The [`Pairs`] record name `n`'s type has, each as its two fields'
-    /// length terms and its field names.
-    fn pairs_of(&self, n: Name) -> Vec<(Term, Term, &'a str, &'a str)> {
-        let pairs = self.sums.pairs;
-        if pairs.is_empty() || self.kind(n) != Kind::Other {
+    /// The [`RecordFacts`] record name `n`'s type has, each over the walk's
+    /// terms of `n`'s fields.
+    fn facts_of(&self, n: Name) -> Vec<(Lin, &'a RecordFact)> {
+        let facts = self.sums.facts;
+        if facts.is_empty() || self.kind(n) != Kind::Other {
             return Vec::new();
         }
         let ty = &self.body.names[n.index()].ty;
-        (pairs.of_type(ty, self.decls).into_iter())
-            .filter_map(|(a, b)| Some((self.col_term(n, a)?, self.col_term(n, b)?, a, b)))
+        let term = |p: &Part| match p {
+            Part::Val(f) => self.field(&Place::Name(n), f),
+            Part::Len(f) => self.col_term(n, f),
+        };
+        let lin = |fact: &RecordFact| {
+            (fact.iter()).try_fold(Lin::k(0), |l, (p, k)| l.add(&Lin::of(term(p)?).scale(*k)?))
+        };
+        (facts.of_type(ty, self.decls).into_iter())
+            .filter_map(|f| Some((lin(f)?, f)))
             .collect()
     }
 
-    /// Assumes the [`Pairs`] of record name `n`, whose value a walk of another
-    /// row or body proved them of ([`invariants`]).
+    /// Assumes the [`RecordFacts`] of record name `n`, whose value a walk of
+    /// another row or body proved them of ([`invariants`]).
     fn restate(&mut self, st: &mut State, n: Name) {
-        for (a, b, fa, fb) in self.pairs_of(n) {
-            st.assume_eq(&Lin::of(a), &Lin::of(b));
+        for (l, f) in self.facts_of(n) {
+            st.assume(&l);
             if self.obliging {
-                self.assumed.insert((fa.to_string(), fb.to_string()));
+                self.assumed.insert(f.clone());
             }
         }
     }
 
-    /// While obliging, drops each pair record name `n` of [`Walk::dirty`] does
+    /// While obliging, drops each fact record name `n` of [`Walk::dirty`] does
     /// not prove in `st`, where its value leaves the name for a reader that
-    /// assumes the pairs: a call, a store, a literal, a return or a release.
+    /// assumes the facts: a call, a store, a literal, a return or a release.
     fn keeps(&mut self, st: &State, n: Name) {
         if !self.obliging || !self.record || st.dead || !self.dirty.contains(&n) {
             return;
         }
         let holds = |g: &Lin| st.ge0(g).is_some_and(|cert| cert.verify(st, g));
-        for (a, b, fa, fb) in self.pairs_of(n) {
-            let d = Lin::of(a).sub(&Lin::of(b));
-            let both = |d: &Lin| holds(d) && d.scale(-1).is_some_and(|e| holds(&e));
-            if !d.as_ref().is_some_and(both) {
-                self.broken.insert((fa.to_string(), fb.to_string()));
+        for (l, f) in self.facts_of(n) {
+            if !holds(&l) {
+                self.broken.insert(f.clone());
             }
         }
     }
@@ -1391,7 +1443,7 @@ impl<'a> Walk<'a> {
     }
 
     /// [`Walk::keeps`] of each `modify` parameter, at an exit: the caller
-    /// assumes its pairs after the call.
+    /// assumes its facts after the call.
     fn exits(&mut self, st: &State) {
         if !self.obliging {
             return;
@@ -1408,12 +1460,12 @@ impl<'a> Walk<'a> {
         }
     }
 
-    /// Notes that a row resized field `f` of record name `r`, when a pair of
-    /// `r`'s type names `f`. A borrow that is no parameter proves its pairs
+    /// Notes that a row wrote field `f` of record name `r`, when a fact of
+    /// `r`'s type names `f`. A borrow that is no parameter proves its facts
     /// after the row: its source is read through another name, which assumes
     /// them.
-    fn resized_field(&mut self, st: &State, r: Name, f: &str) {
-        if !self.pairs_of(r).iter().any(|(.., a, b)| *a == f || *b == f) {
+    fn wrote_field(&mut self, st: &State, r: Name, f: &str) {
+        if !self.facts_of(r).iter().any(|(_, x)| mentions(x, f)) {
             return;
         }
         self.dirty.insert(r);
@@ -1665,7 +1717,7 @@ impl<'a> Walk<'a> {
                             st.define(t, &Lin::of(l));
                         }
                         if let Place::Name(r) = &**r {
-                            self.resized_field(&st, *r, f);
+                            self.wrote_field(&st, *r, f);
                         }
                     }
                     // An integer field takes the stored value. A store into
@@ -1677,6 +1729,7 @@ impl<'a> Walk<'a> {
                             if let Some(v) = v {
                                 st.define(t, &v);
                             }
+                            self.wrote_field(&st, *n, f);
                         }
                     }
                     _ => {
@@ -1890,7 +1943,7 @@ impl<'a> Walk<'a> {
         let o = self.origin_of(n, rhs);
         self.slot[n.index()].origin = self.slot[n.index()].origin.join(o);
         st.kill(n);
-        // A literal's lengths are its parts', not the pairs'.
+        // A literal's fields are its parts', not the facts'.
         if let Rhs::Make(Ctor::Record(..), _) = rhs {
             self.dirty.insert(n);
         }
@@ -2335,21 +2388,19 @@ impl<'a> Walk<'a> {
             match (a, cap) {
                 (Arg::Place(Place::Field(r, f)), Capability::Modify | Capability::Consume) => {
                     if let Place::Name(r) = &**r {
-                        self.resized_field(st, *r, f);
+                        self.wrote_field(st, *r, f);
                     }
                 }
-                // A declared function proves the pairs of its `modify`
+                // A declared function proves the facts of its `modify`
                 // parameter's type at every exit. The argument's type may
-                // have more pairs; then the walk tracks its lengths.
+                // have more facts; then the walk tracks its fields.
                 (Arg::Val(Val::Name(r)) | Arg::Place(Place::Name(r)), Capability::Modify) => {
                     let theirs = match kind {
-                        Callee::Fn(g) => self.sums.pairs.param(*g, k),
+                        Callee::Fn(g) => self.sums.facts.param(*g, k),
                         _ => None,
                     };
-                    let kept = |a: &str, b: &str| {
-                        theirs.is_some_and(|t| t.iter().any(|(x, y)| x == a && y == b))
-                    };
-                    match self.pairs_of(*r).iter().all(|(.., a, b)| kept(a, b)) {
+                    let kept = |f: &RecordFact| theirs.is_some_and(|t| t.contains(f));
+                    match self.facts_of(*r).iter().all(|(_, f)| kept(f)) {
                         true => self.restate(st, *r),
                         false => {
                             self.dirty.insert(*r);
