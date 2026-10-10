@@ -175,6 +175,87 @@ fn two_arrays_a_loop_grows_in_step_keep_equal_lengths() {
     );
 }
 
+/// A loop bound by a literal that pushes once a turn leaves at least the
+/// bound's elements; a turn that skips or undoes its push keeps the check.
+#[test]
+fn a_loop_bound_by_a_literal_counts_its_pushes() {
+    let proof = "fn w(n: Int64) -> Int64 {
+    let mut t: Array<Int64> = [0]
+    let mut k = 1
+    while k < 256 {
+        t.push(t[k - 1] + n)
+        k = k + 1
+    }
+    let mut j = 0
+    while j < n {
+        t[Int64(UInt8(j))] = j
+        j = j + 1
+    }
+    return t[255]
+}
+";
+    assert_eq!(verdicts(proof, "w"), ["proved array-index"; 3]);
+    let (err, _) = oracle(proof, "    print(w(3).toString())", "w");
+    assert_eq!(err, "");
+    let witnesses = [
+        "fn w(n: Int64) -> Int64 {
+    let mut t: Array<Int64> = []
+    let mut k = 0
+    while k < 256 {
+        if k < n {
+            t.push(k)
+        }
+        k = k + 1
+    }
+    return t[255]
+}
+",
+        "fn empty(t: modify Array<Int64>) {
+    t.clear()
+}
+fn w(n: Int64) -> Int64 {
+    let mut t: Array<Int64> = []
+    let mut k = 0
+    while k <= 255 {
+        t.push(k)
+        if k == n {
+            empty(t)
+        }
+        k = k + 1
+    }
+    return t[255]
+}
+",
+        "fn w(n: Int64) -> Int64 {
+    let mut t: Array<Int64> = []
+    let mut k = 0
+    while k < 256 {
+        t.push(k)
+        k = k + 1
+        if k == n {
+            k = k + 1
+        }
+    }
+    return t[255]
+}
+",
+    ];
+    let mut failures = Vec::new();
+    for src in witnesses {
+        let rows = verdicts(src, "w");
+        if rows != ["check array-index"] {
+            failures.push(format!("{src}\nrows: {rows:?}"));
+        }
+        let (err, _) = oracle(src, "    print(w(10).toString())", "w");
+        if !err.contains("array index 255 out of bounds")
+            || err.contains(vyrn_frontend::trap::PROVED_CHECK_FAILED)
+        {
+            failures.push(format!("{src}\nran: {err}"));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n\n"));
+}
+
 #[test]
 fn a_loop_condition_under_and_proves_its_index() {
     let src = "fn w(xs: Array<Int64>) -> Int64 {

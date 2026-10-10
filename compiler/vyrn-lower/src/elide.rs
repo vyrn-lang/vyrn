@@ -2637,27 +2637,53 @@ impl<'a> Walk<'a> {
         if let Some(outer) = self.loops.last_mut() {
             outer.seen.resized.extend(l.seen.resized);
         }
-        State::join(&l.breaks)
+        let mut exit = State::join(&l.breaks);
+        // The counter of a loop bound by a literal is at least the bound at
+        // the exit. A length the counter bounds then has the literal as its
+        // own bound, which a goal would otherwise need a third premise for.
+        if let Some((_, k)) = literal_test(body).filter(|(_, k)| self.slot[k.index()].relevant) {
+            let k = Term::Val(k);
+            let low = (exit.facts.iter()).find(|f| f.terms == [(k, 1)]).cloned();
+            let length = |f: &Lin| (f.terms.iter()).any(|(t, _)| matches!(t, Term::Len(_)));
+            // A bound the state already holds as one fact adds nothing.
+            let held = |f: &Lin| (exit.facts.iter()).any(|g| g.terms == f.terms && g.c <= f.c);
+            let bounded: Vec<Lin> = (exit.facts.iter())
+                .filter(|f| f.terms.len() == 2 && f.coef(k) < 0 && length(f))
+                .filter_map(|f| f.add(&low.as_ref()?.scale(-f.coef(k))?))
+                .filter(|f| !held(f))
+                .collect();
+            bounded.iter().for_each(|f| exit.assume(f));
+        }
+        exit
     }
 
     /// `a - b` and its negation, where `a` and `b` are the lengths of two
     /// arrays or Strings the loop `body` stores to on the same paths, both of
     /// which a check can depend on: a loop that grows them in step keeps them
-    /// as equal as it entered. [`Walk::settle`] keeps a candidate only where
-    /// the entry and every turn prove it.
+    /// as equal as it entered. The counter of a loop bound by a literal
+    /// ([`literal_test`]) takes part as its value. [`Walk::settle`] keeps a
+    /// candidate only where the entry and every turn prove it.
     fn in_step(&self, body: &[St], stored: &BTreeSet<Name>) -> Vec<Lin> {
-        let seq = |n: &Name| self.slot[n.index()].relevant && self.kind(*n) == Kind::Seq;
-        if stored.iter().filter(|n| seq(n)).count() < 2 {
+        let relevant = |n: &Name| self.slot[n.index()].relevant;
+        let counter = literal_test(body).map(|(_, k)| k).filter(relevant);
+        let term = |n: &Name| match Some(*n) == counter {
+            true => Some(Term::Val(*n)),
+            false => (relevant(n) && self.kind(*n) == Kind::Seq).then_some(Term::Len(*n)),
+        };
+        if stored.iter().filter_map(term).count() < 2 {
             return Vec::new();
         }
         let mut paths = BTreeMap::new();
         store_paths(body, &mut Vec::new(), &mut paths);
-        let seqs: Vec<(&Name, &Vec<Vec<u32>>)> = paths.iter().filter(|(n, _)| seq(n)).collect();
+        let seqs: Vec<(Term, &Vec<Vec<u32>>)> = paths
+            .iter()
+            .filter_map(|(n, p)| Some((term(n)?, p)))
+            .collect();
         let mut out = Vec::new();
         for (i, (a, pa)) in seqs.iter().enumerate() {
             for (b, pb) in &seqs[i + 1..] {
                 if pa == pb {
-                    let d = Lin::of(Term::Len(**a)).sub(&Lin::of(Term::Len(**b)));
+                    let d = Lin::of(*a).sub(&Lin::of(*b));
                     out.extend(d.as_ref().and_then(|d| d.scale(-1)));
                     out.extend(d);
                 }
@@ -2894,6 +2920,24 @@ fn writes_of(ss: &[St], n: Name) -> usize {
         .sum()
 }
 
+/// The test name and the counter `k` of a loop `body` that opens with
+/// `if k < c else break` or `if k <= c else break`, `c` an integer literal.
+fn literal_test(body: &[St]) -> Option<(Name, Name)> {
+    let [St::Let(t, Rhs::Prim(Op::Bin(BinOp::Lt | BinOp::LtEq), vs, _)), St::If {
+        cond: Val::Name(c),
+        then,
+        els,
+        ..
+    }, ..] = body
+    else {
+        return None;
+    };
+    match (vs.as_slice(), &then[..], &els[..]) {
+        ([Val::Name(k), Val::Lit(Lit::Int(_))], [], [St::Break { .. }]) if c == t => Some((*t, *k)),
+        _ => None,
+    }
+}
+
 fn any_continue(ss: &[St]) -> bool {
     ss.iter().any(|s| match s {
         St::Continue { .. } => true,
@@ -3128,6 +3172,16 @@ fn mark(
                 mark(body, decls, els, rel, checks, linked);
             }
             St::Loop { body: l, .. } | St::Block { body: l, .. } => {
+                // A loop bound by a literal counts what it stores
+                // ([`Walk::in_step`]).
+                if let Some((t, _)) = literal_test(l) {
+                    let mut stored = BTreeSet::new();
+                    stores(l, &mut stored);
+                    let seq = |n: &Name| kind_of(&body.names[n.index()].ty, decls) == Kind::Seq;
+                    if stored.iter().any(|n| rel[n.index()] && seq(n)) {
+                        rel[t.index()] = true;
+                    }
+                }
                 mark(body, decls, l, rel, checks, linked)
             }
             St::Switch { arms, .. } => {

@@ -68,7 +68,7 @@ impl Lin {
         self.terms.is_empty()
     }
 
-    fn coef(&self, t: Term) -> i64 {
+    pub fn coef(&self, t: Term) -> i64 {
         self.terms
             .iter()
             .find(|(x, _)| *x == t)
