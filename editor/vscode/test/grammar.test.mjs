@@ -102,3 +102,27 @@ test("every grammar entry treats a byte literal as a string", async () => {
     assert.equal(entry.tokenTypes?.[scope], "string", `${entry.language} does not map ${scope}`);
   }
 });
+
+// #function-calls needs `(` right after a name, so a generic declaration
+// (`fn callWith<P, T>(`) lost its function colour. #fn-declaration names the
+// declared function whatever follows it, and runs before #keywords so `fn`
+// keeps its keyword scope as capture 1.
+test("a generic function's declared name is coloured as a function", async () => {
+  const g = JSON.parse(
+    await readFile(path.join(here, "..", "vyrn.tmLanguage.json"), "utf8"),
+  );
+  const includes = g.patterns.map((p) => p.include);
+  assert.ok(
+    includes.indexOf("#fn-declaration") < includes.indexOf("#keywords"),
+    "#fn-declaration must run before #keywords",
+  );
+  const rule = new RegExp(g.repository["fn-declaration"].match);
+  for (const [line, name] of [
+    ["fn callWith<P, T>(run: fn(P) -> T, p: P) -> T {", "callWith"],
+    ["fn defer<P, T>(run: consume fn(P) -> T) -> Deferred<P, T> {", "defer"],
+    ["fn apply(g: fn(Int64) -> Int64, v: Int64) -> Int64 {", "apply"],
+  ]) {
+    assert.equal(rule.exec(line)?.[2], name, line);
+  }
+  assert.equal(rule.exec("let g: fn(Int64) -> Int64 = h"), null, "a function type names nothing");
+});
