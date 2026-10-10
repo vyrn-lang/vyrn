@@ -864,9 +864,10 @@ fn needed_lengths(b: &Body, decls: &HashMap<String, TypeDecl>) -> Vec<(Place, i6
 }
 
 /// The lengths `b` can give an array it returns: the count of the array
-/// literal it returns, and the bound of a loop ([`bound_test`]) that stores
-/// to the returned array, which may push once a turn, or indexes it by the
-/// loop's counter.
+/// literal it returns, the byte length of a String literal a builtin that
+/// keeps its operand's length takes (`bytes("..")`), and the bound of a loop
+/// ([`bound_test`]) that stores to the returned array, which may push once a
+/// turn, or indexes it by the loop's counter.
 fn made_lengths(b: &Body) -> BTreeSet<Lin> {
     let returned: BTreeSet<Name> = (rows(&b.stmts))
         .filter_map(|(s, _)| match s {
@@ -882,6 +883,21 @@ fn made_lengths(b: &Body) -> BTreeSet<Lin> {
         match s {
             St::Let(n, Rhs::Make(Ctor::Array, parts)) if returned.contains(n) => {
                 out.insert(Lin::k(parts.len() as i64));
+            }
+            St::Let(
+                n,
+                Rhs::Call {
+                    callee,
+                    args,
+                    kind: Callee::Builtin | Callee::Reserved,
+                    ..
+                },
+            ) if returned.contains(n) => {
+                let keeps = prelude::builtin(callee)
+                    .is_some_and(|b| b.length_at(args.len()) == Length::Keeps);
+                if let (true, Some((Arg::Val(Val::Lit(Lit::Str(x))), _))) = (keeps, args.first()) {
+                    out.insert(Lin::k(x.len() as i64));
+                }
             }
             St::Loop { body, .. } => {
                 let Some((_, k, bound)) = bound_test(body) else {
@@ -2564,9 +2580,10 @@ impl<'a> Walk<'a> {
         }
     }
 
-    /// The receiver of a builtin call in `rhs` whose row states its length
-    /// effect, and the bounds of its new length as sums over the old.
-    fn resized(&self, rhs: &Rhs) -> Option<(Term, Lin, Lin)> {
+    /// The length term of the receiver of a builtin call in `rhs` whose row
+    /// states its length effect, `None` for a String literal, and the bounds
+    /// of its new length as sums over the old.
+    fn resized(&self, rhs: &Rhs) -> Option<(Option<Term>, Lin, Lin)> {
         let Rhs::Call {
             callee,
             args,
@@ -2576,31 +2593,32 @@ impl<'a> Walk<'a> {
         else {
             return None;
         };
-        let len = |i: usize| {
-            let t = match args.get(i)? {
-                (Arg::Val(Val::Name(n)), _) => self.length(&Place::Name(*n))?,
-                (Arg::Place(p), _) => self.length(p)?,
-                _ => return None,
-            };
-            Some((t, Lin::of(t)))
+        let term = |i: usize| match args.get(i)? {
+            (Arg::Val(Val::Name(n)), _) => self.length(&Place::Name(*n)),
+            (Arg::Place(p), _) => self.length(p),
+            _ => None,
         };
-        let (r, old) = len(0)?;
-        let (lo, hi) = match prelude::builtin(callee)?.length {
+        let len = |i: usize| match args.get(i)? {
+            (Arg::Val(Val::Lit(Lit::Str(x))), _) => Some(Lin::k(x.len() as i64)),
+            _ => term(i).map(Lin::of),
+        };
+        let old = len(0)?;
+        let (lo, hi) = match length_rule(callee, args) {
             Length::Unknown => return None,
             Length::Keeps => (old.clone(), old),
             Length::GrowsByOne => (old.plus(1)?, old.plus(1)?),
             Length::ShrinksByOneIfNotEmpty => (old.plus(-1)?, old),
             Length::SetToZero => (Lin::k(0), Lin::k(0)),
             Length::GrowsByLenOf(i) => {
-                let sum = old.add(&len(i)?.1)?;
+                let sum = old.add(&len(i)?)?;
                 (sum.clone(), sum)
             }
             Length::SetToLenOf(i) => {
-                let l = len(i)?.1;
+                let l = len(i)?;
                 (l.clone(), l)
             }
         };
-        Some((r, lo, hi))
+        Some((term(0), lo, hi))
     }
 
     /// Applies what a call in `rhs` does to the names it may write. A
@@ -2623,7 +2641,7 @@ impl<'a> Walk<'a> {
                 (Capability::Read, _) => {}
                 // A scalar argument is a copy.
                 (Capability::Consume, _) if matches!(self.kind(n), Kind::Int(..)) => {}
-                (Capability::Modify, Some((t, lo, hi))) if i == 0 => {
+                (Capability::Modify, Some((Some(t), lo, hi))) if i == 0 => {
                     let old = Lin::of(*t);
                     match (lo.sub(&old), hi.sub(&old)) {
                         (Some(a), Some(b)) if a.is_const() && b.is_const() => {
@@ -3202,6 +3220,24 @@ fn conjuncts(e: &vyrn_frontend::ast::Expr) -> usize {
 
 /// Whether a builtin's length effect lands on its result: its receiver is not
 /// passed `modify`, so the call hands the resized array back (`@push`).
+/// The length a walk reads for a call to the builtin `callee` with `args`:
+/// the row's ([`prelude::Builtin::length_at`]), except that a row that
+/// builds its result from a name (`bytes(s)`) states nothing. Read from a
+/// name, `bytes` proved 9 more static rows, run 342 times in all, for 1.6%
+/// more `elide: summaries` allocations on the site export; from a String
+/// literal (`bytes("..")`) it costs none.
+fn length_rule(callee: &str, args: &[(Arg, Capability)]) -> Length {
+    let Some(row) = prelude::builtin(callee) else {
+        return Length::Unknown;
+    };
+    match (&row.spec, args.first()) {
+        (Some(prelude::Spec::Builds(_)), Some((Arg::Val(Val::Name(_)) | Arg::Place(_), _))) => {
+            Length::Unknown
+        }
+        _ => row.length_at(args.len()),
+    }
+}
+
 fn lands_on_result(args: &[(Arg, Capability)]) -> bool {
     args.first().is_some_and(|(_, c)| *c != Capability::Modify)
 }
@@ -3379,8 +3415,7 @@ fn mark(
                         callee, args, kind, ..
                     } => {
                         let lengths = matches!(kind, Callee::Builtin | Callee::Reserved)
-                            && prelude::builtin(callee)
-                                .is_some_and(|b| b.length != Length::Unknown);
+                            && length_rule(callee, args) != Length::Unknown;
                         if lengths || direct_call(rhs).is_some_and(linked) {
                             let from = args.iter().filter_map(|(a, _)| root(a));
                             link(rel, n.into_iter().chain(from));

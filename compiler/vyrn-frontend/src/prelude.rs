@@ -203,7 +203,10 @@ pub struct Builtin {
     /// Hover and completion text, under the method's spelling.
     pub hover: Option<String>,
     /// [`Length::Unknown`] for a row that neither takes its receiver
-    /// ([`Spec::Rebuilds`]) nor shrinks it ([`Spec::Removes`]).
+    /// ([`Spec::Rebuilds`]) nor shrinks it ([`Spec::Removes`]), except a row
+    /// that builds its result from its first operand (`bytes`), which states
+    /// the result's length against the operand's. Read it through
+    /// [`Builtin::length_at`].
     pub length: Length,
     pub elements: Elements,
     /// The operand counts a call admits, checked before anything types it.
@@ -303,6 +306,16 @@ fn b(name: &'static str) -> Builtin {
 }
 
 impl Builtin {
+    /// [`Builtin::length`] for a call with `args` operands. It states the
+    /// call at its signature's arity; any other arity (`bytes(s, from, to)`)
+    /// states nothing.
+    pub fn length_at(&self, args: usize) -> Length {
+        match &self.sig {
+            Some(f) if f.params.len() != args => Length::Unknown,
+            _ => self.length,
+        }
+    }
+
     fn sig(self, f: Function) -> Self {
         Builtin {
             sig: Some(f),
@@ -813,7 +826,8 @@ fn table() -> Vec<Builtin> {
                 }),
             )
             .stops(1)
-            .indexes(Indexes::Bytes),
+            .indexes(Indexes::Bytes)
+            .resizes(Length::Keeps, Elements::Unknown),
         // A `Result`, because the bytes may not be UTF-8. Spelling it `String`
         // released the aggregate as a String buffer and crashed native code.
         b("stringFromBytes")
@@ -1413,8 +1427,9 @@ mod tests {
                     .as_ref()
                     .and_then(|f| f.params.first())
                     .is_some_and(|p| matches!(p.ty, Type::Array(_)));
+            // `bytes` states its result's length against its operand's.
             assert_eq!(
-                resizes || b.spec == Some(Spec::OwnType),
+                resizes || b.spec == Some(Spec::OwnType) || b.name == "bytes",
                 b.length != Length::Unknown,
                 "`{}` resizes an array: {resizes}",
                 b.name
