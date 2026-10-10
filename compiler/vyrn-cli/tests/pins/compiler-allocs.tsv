@@ -7,14 +7,14 @@ build site/export.vyrn	read	258
 build site/export.vyrn	parse	857235
 build site/export.vyrn	parse (clone)	192849
 build site/export.vyrn	load: link	1058
-build site/export.vyrn	link: resolve_aliases	223348
+build site/export.vyrn	link: resolve_aliases	223346
 build site/export.vyrn	link: index	6128
-build site/export.vyrn	link: visibility	80099
+build site/export.vyrn	link: visibility	80105
 build site/export.vyrn	link: merge	1009
-build site/export.vyrn	check	281248
+build site/export.vyrn	check	281245
 build site/export.vyrn	check: bodies	508800
 build site/export.vyrn	types::decl_map	9200
-build site/export.vyrn	synthesize	7460
+build site/export.vyrn	synthesize	7462
 build site/export.vyrn	movecheck	13104
 build site/export.vyrn	own: analyze_now	3764
 build site/export.vyrn	own: Owned::new	7
@@ -31,10 +31,10 @@ build site/export.vyrn	placer: report	22351
 build site/export.vyrn	placer: facts rebuild	278018
 build site/export.vyrn	placer: facts: rebuilt	3210
 build site/export.vyrn	codegen	37565
-build site/export.vyrn	codegen: checks	2640858
-build site/export.vyrn	elide: summaries	2136870
+build site/export.vyrn	codegen: checks	2642994
+build site/export.vyrn	elide: summaries	2192708
 build site/export.vyrn	codegen: signatures	25643
-build site/export.vyrn	codegen: bodies	1753192
+build site/export.vyrn	codegen: bodies	1753170
 build site/export.vyrn	codegen: drain	27564
 build site/export.vyrn	codegen: finish	6346
 check site/export.vyrn	(outside)	268
@@ -44,11 +44,11 @@ check site/export.vyrn	read	258
 check site/export.vyrn	parse	857235
 check site/export.vyrn	parse (clone)	192849
 check site/export.vyrn	load: link	1058
-check site/export.vyrn	link: resolve_aliases	223348
+check site/export.vyrn	link: resolve_aliases	223347
 check site/export.vyrn	link: index	6128
-check site/export.vyrn	link: visibility	80100
+check site/export.vyrn	link: visibility	80099
 check site/export.vyrn	link: merge	1009
-check site/export.vyrn	check	281245
+check site/export.vyrn	check	281248
 check site/export.vyrn	check: bodies	508800
 check site/export.vyrn	types::decl_map	11040
 check site/export.vyrn	synthesize	7461
@@ -105,10 +105,10 @@ check examples/vlog.vyrn	link: resolve_aliases	21657
 check examples/vlog.vyrn	link: index	887
 check examples/vlog.vyrn	link: visibility	11945
 check examples/vlog.vyrn	link: merge	308
-check examples/vlog.vyrn	check	67950
+check examples/vlog.vyrn	check	67952
 check examples/vlog.vyrn	check: bodies	66007
 check examples/vlog.vyrn	types::decl_map	2154
-check examples/vlog.vyrn	synthesize	3344
+check examples/vlog.vyrn	synthesize	3343
 check examples/vlog.vyrn	movecheck	1986
 check examples/vlog.vyrn	own: analyze_now	657
 check examples/vlog.vyrn	own: Owned::new	3

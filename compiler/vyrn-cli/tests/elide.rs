@@ -328,6 +328,66 @@ fn w(x: Int64) -> Int64 {{
     assert!(failures.is_empty(), "{}", failures.join("\n\n"));
 }
 
+/// A function whose every `Some` return wraps an index below a parameter's
+/// length states that of the payload, and the caller's `if let` binder takes
+/// it. A path that wraps the length itself, or a `None` name a later store
+/// fills with it, keeps the caller's check.
+#[test]
+fn a_some_payload_proves_its_callers_index() {
+    let find = "fn find(xs: Array<Int64>, v: Int64) -> Option<Int64> {
+    let mut k = 0
+    while k < xs.length {
+        if xs[k] == v {
+            return Some(k)
+        }
+        k = k + 1
+    }
+    return None
+}
+";
+    let w = "fn w(xs: Array<Int64>, v: Int64) -> Int64 {
+    if let Some(i) = find(xs, v) {
+        return xs[i]
+    }
+    return 0
+}
+";
+    let proof = format!("{find}{w}");
+    assert_eq!(verdicts(&proof, "w"), ["proved array-index"]);
+    let (err, _) = oracle(&proof, "    print(w(xs, 20).toString())", "w");
+    assert_eq!(err, "");
+    let witnesses = [
+        find.replace(
+            "    let mut k = 0\n",
+            "    if v < 0 {\n        return Some(xs.length)\n    }\n    let mut k = 0\n",
+        ),
+        "fn find(xs: Array<Int64>, v: Int64) -> Option<Int64> {
+    let mut r: Option<Int64> = None
+    if v < 0 {
+        r = Some(xs.length)
+    }
+    return r
+}
+"
+        .to_string(),
+    ];
+    let mut failures = Vec::new();
+    for f in &witnesses {
+        let src = format!("{f}{w}");
+        let rows = verdicts(&src, "w");
+        if rows != ["check array-index"] {
+            failures.push(format!("{src}\nrows: {rows:?}"));
+        }
+        let (err, _) = oracle(&src, "    print(w(xs, 0 - 1).toString())", "w");
+        if !err.contains("array index 3 out of bounds")
+            || err.contains(vyrn_frontend::trap::PROVED_CHECK_FAILED)
+        {
+            failures.push(format!("{src}\nran: {err}"));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n\n"));
+}
+
 /// A function whose loop, bound by an integer parameter, pushes to or
 /// stores into every index of the array it returns states that its result is
 /// at least that long; a path that makes one entry fewer, a store the loop

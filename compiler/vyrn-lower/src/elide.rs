@@ -40,7 +40,8 @@ use vyrn_frontend::prim::Cmp;
 use crate::facts::{Cert, Fact, Lin, State, Term};
 use vyrn_frontend::core::check::{Atom, Check, Guard, Operand, Site, Verdict, Why};
 use vyrn_frontend::core::{
-    rows, Arg, Body, BorrowKind, Callee, Ctor, Lit, Name, Op, Place, Rhs, St, Target, Val,
+    rows, Arg, Arm, Body, BorrowKind, Callee, Ctor, Lit, Name, Op, Place, Rhs, St, Target, Test,
+    Val,
 };
 use vyrn_frontend::par::in_parallel;
 
@@ -95,7 +96,8 @@ fn walk(body: &mut Body, decls: &HashMap<String, TypeDecl>, sums: View<'_>) -> V
 }
 
 /// What every entry and every return of a body state, over its interface:
-/// in a fact, `Name(0)` is the result and `Name(k + 1)` is parameter `k`; a
+/// in a fact, `Name(0)` is the result, or the payload of an `Option` of an
+/// integer ([`Walk::payload`]), and `Name(k + 1)` is parameter `k`; a
 /// [`Term::Val`] is an integer's value and a [`Term::Len`] an array's or
 /// String's length, and a [`Term::Field`] or [`Term::Col`] the same of a
 /// record parameter's field, by its index in the record's fields.
@@ -1498,12 +1500,12 @@ fn direct_call(rhs: &Rhs) -> Option<FnId> {
 
 /// `body`'s summary with every candidate of its `post` and no `pre`. The
 /// first return of a name or an integer decides the result: an integer's
-/// value or an array's length; any other result, a String's included,
-/// states nothing. The parameters are those the body never writes. An
-/// `UInt64` is left out: the facts read its values above `i64::MAX` as
-/// negatives. An integer result equals `c` when every return returns the
-/// literal `c` ([`constant_result`]). An array result is at least `c` long
-/// for each `c` of
+/// value, an `Option` of an integer's payload, or an array's length; any
+/// other result, a String's included, states nothing. The parameters are
+/// those the body never writes. An `UInt64` is left out: the facts read its
+/// values above `i64::MAX` as negatives. An integer result equals `c` when
+/// every return returns the literal `c` ([`constant_result`]). An array
+/// result is at least `c` long for each `c` of
 /// `needed` ([`needed_lengths`]) the body can make ([`made_lengths`]), and
 /// at least `p` long for each integer parameter `p` it can make. A Bool
 /// result takes the candidates of [`truth_templates`].
@@ -1520,6 +1522,7 @@ fn templates(body: &Body, decls: &HashMap<String, TypeDecl>, needed: &BTreeSet<i
             Some(match kind_of(ty, decls) {
                 _ if *ty == Type::Bool => None,
                 k if k.is_int() => Some(Term::Val(Name(0))),
+                _ if int_payload(ty, decls) => Some(Term::Val(Name(0))),
                 _ if vyrn_frontend::types::resolved(ty, decls).is_seq() => Some(Term::Len(Name(0))),
                 _ => None,
             })
@@ -1919,6 +1922,43 @@ fn kind_of(ty: &Type, decls: &HashMap<String, TypeDecl>) -> Kind {
             Some((bits, signed)) => Kind::Int(bits, signed),
             None => Kind::Other,
         },
+    }
+}
+
+/// Whether `ty` is an `Option` of an integer whose values are linear terms.
+fn int_payload(ty: &Type, decls: &HashMap<String, TypeDecl>) -> bool {
+    let ty = vyrn_frontend::types::resolved(ty, decls);
+    vyrn_frontend::types::option_payload(&ty).is_some_and(|p| kind_of(p, decls).is_int())
+}
+
+/// The name a `Some(v)` row wraps.
+fn some_part(rhs: &Rhs) -> Option<Name> {
+    match rhs {
+        Rhs::Call {
+            callee,
+            args,
+            kind: Callee::Ctor,
+            ..
+        } if callee == "Some" => match args.as_slice() {
+            [(Arg::Val(Val::Name(v)), _)] => Some(*v),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// Whether `rhs` makes a `None`.
+fn none_row(rhs: &Rhs) -> bool {
+    matches!(rhs, Rhs::Call { callee, args, kind: Callee::Ctor, .. } if callee == "None" && args.is_empty())
+}
+
+/// The binder of `a` when it is the `Some` arm of a switch on an `Option` of
+/// an integer, `on`.
+fn some_binder(body: &Body, decls: &HashMap<String, TypeDecl>, on: &Val, a: &Arm) -> Option<Name> {
+    let Val::Name(o) = on else { return None };
+    match (&a.test, a.binds.as_slice()) {
+        (Test::Tag(1), [b]) if int_payload(&body.names[o.index()].ty, decls) => Some(*b),
+        _ => None,
     }
 }
 
@@ -2468,6 +2508,44 @@ impl<'a> Walk<'a> {
         self.range(st, n);
     }
 
+    /// Whether `n` is an `Option` of an integer. Its [`Term::Val`] is the
+    /// payload's value: a fact over it holds whenever `n` is `Some`, so a
+    /// `None` satisfies every one.
+    fn payload(&self, n: Name) -> bool {
+        int_payload(&self.body.names[n.index()].ty, self.decls)
+    }
+
+    /// Defines the payload of `n = Some(v)` as `v`.
+    fn wrapped(&self, st: &mut State, n: Name, rhs: &Rhs) {
+        let v = some_part(rhs).map(Val::Name);
+        if let Some(l) = v.and_then(|v| self.lin(&v)).filter(|_| self.payload(n)) {
+            st.define(Term::Val(n), &l);
+        }
+    }
+
+    /// Defines the binder of the `Some` arm `a` of a switch on `on` as the
+    /// payload, so it takes every fact the state holds of it.
+    fn unwrapped(&self, st: &mut State, on: &Val, a: &Arm) {
+        let (Some(b), Val::Name(o)) = (some_binder(self.body, self.decls, on, a), on) else {
+            return;
+        };
+        if self.slot[b.index()].relevant {
+            st.define(Term::Val(b), &Lin::of(Term::Val(*o)));
+        }
+    }
+
+    /// Whether every write of `m` binds it to `None`: a return of it states
+    /// every payload fact.
+    fn only_none(&self, m: Name) -> bool {
+        if !self.payload(m) {
+            return false;
+        }
+        let nones = (rows(&self.body.stmts))
+            .filter(|(s, _)| matches!(s, St::Let(n, rhs) if *n == m && none_row(rhs)))
+            .count();
+        nones > 0 && nones == writes_of(&self.body.stmts, m)
+    }
+
     /// What `n`'s type says about it, unless a definition says more.
     fn range(&mut self, st: &mut State, n: Name) {
         if self.slot[n.index()].relevant
@@ -2685,6 +2763,7 @@ impl<'a> Walk<'a> {
                         self.slot[b.index()].origin = self.origin_of_val(on);
                         self.fresh(&mut s, *b);
                     }
+                    self.unwrapped(&mut s, on, a);
                     outs.push(self.block(s, &mut a.body));
                 }
                 if outs.iter().filter(|s| !s.dead).count() > 1 {
@@ -2908,6 +2987,7 @@ impl<'a> Walk<'a> {
                     }
                 }
             }
+            Rhs::Call { .. } if some_part(rhs).is_some() => self.wrapped(st, n, rhs),
             Rhs::Prim(op, vs, _) => match self.prim(st, n, op, vs) {
                 Out::Def(r) => st.define(Term::Val(n), &r),
                 Out::Cond(t, f) => {
@@ -2946,7 +3026,9 @@ impl<'a> Walk<'a> {
         let at = |t: Term| -> Option<Lin> {
             let Some(k) = t.name().index().checked_sub(1) else {
                 return match t {
-                    Term::Val(_) if self.kind(n).is_int() => Some(Lin::of(Term::Val(n))),
+                    Term::Val(_) if self.kind(n).is_int() || self.payload(n) => {
+                        Some(Lin::of(Term::Val(n)))
+                    }
                     Term::Len(_) if self.kind(n) == Kind::Seq => Some(Lin::of(Term::Len(n))),
                     _ => None,
                 };
@@ -3064,13 +3146,18 @@ impl<'a> Walk<'a> {
         };
         let truth = self.truth(st, value);
         let st = truth.as_ref().unwrap_or(st);
-        if st.dead {
+        // A `None` proves every payload fact, as a dead state does.
+        let none = matches!(value, Some(Val::Name(m)) if !cands.is_empty() && self.only_none(*m));
+        if st.dead || none {
             self.post = Some(cands);
             return;
         }
         let params = &self.body.params;
         let at = |t: Term| -> Option<Lin> {
             match (t.name().index().checked_sub(1), t, value?) {
+                (None, Term::Val(_), Val::Name(m)) if self.payload(*m) => {
+                    Some(Lin::of(Term::Val(*m)))
+                }
                 (None, Term::Val(_), v) => self.lin(v),
                 (None, Term::Len(_), Val::Name(m)) => Some(Lin::of(self.length(&Place::Name(*m))?)),
                 (Some(k), Term::Val(_), _) => Some(Lin::of(Term::Val(*params.get(k)?))),
@@ -3120,6 +3207,9 @@ impl<'a> Walk<'a> {
                         st.define(Term::Val(n), &l);
                     }
                 }
+            }
+            (Val::Name(m), Kind::Other) if self.payload(n) && self.payload(*m) => {
+                st.define(Term::Val(n), &Lin::of(Term::Val(*m)));
             }
             // A Bool copy carries the facts its source's truth gives, none
             // when it has none; a literal's other side is dead (`-1 >= 0`).
@@ -4145,6 +4235,7 @@ fn mark(
                             let from = args.iter().filter_map(|(a, _)| root(a));
                             link(rel, n.into_iter().chain(from));
                         }
+                        link(rel, n.into_iter().chain(some_part(rhs)));
                     }
                     _ => {}
                 }
@@ -4183,8 +4274,13 @@ fn mark(
                 }
                 mark(body, decls, l, rel, checks, linked)
             }
-            St::Switch { arms, .. } => {
-                (arms.iter()).for_each(|a| mark(body, decls, &a.body, rel, checks, linked))
+            St::Switch { on, arms, .. } => {
+                for a in arms {
+                    if let Some(b) = some_binder(body, decls, on, a) {
+                        link(rel, [b].into_iter().chain(val(on)));
+                    }
+                    mark(body, decls, &a.body, rel, checks, linked)
+                }
             }
             _ => {}
         }
