@@ -40,6 +40,12 @@ A program crosses to its host in three places.
 
 `vyrn run` executes the module under an embedded wasmtime. `vyrn build` translates the same module to C with `wasm2c` and compiles it with `clang`, so a native binary is the same program. In a browser, `web/wasi-min.js` supplies the WASI imports and `web/vyrn-dom.js` applies view patches.
 
+## Unsigned integers hold bits; Int64 counts
+
+A std value is unsigned when four things hold. It is never negative by construction. No subtraction or decrement on it can cross zero: integer arithmetic and conversions wrap ([language.md](language.md)), so a crossing gives a silent wrong value, and an index check traps further on. It is a bit pattern or a table datum, not a quantity: a byte, a hash or checksum word, a bit set, a code point, a random state. Its width is the smallest that holds every value the code produces, so a SHA-1 word is a `UInt32` and wraps where the algorithm does.
+
+A value stays `Int64` in every other case. A length, an index, an offset and a position stay `Int64`, because `.length` and indices are `Int64` and `i - 1` at zero must be `-1`. So do a quantity a caller does arithmetic on, a value with a `-1` sentinel, and a parameter that callers fill with `Int64` values. A value that becomes an index or a shift amount is never a `UInt64`: `vyrn_lower::elide` keeps no range for a `UInt64`, so the check stays in the binary. A narrower unsigned type keeps its range, and an unsigned division carries no overflow check.
+
 ## The prelude
 
 The compiler injects these declarations into every program, so a file names them without an import:

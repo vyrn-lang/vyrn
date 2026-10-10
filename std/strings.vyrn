@@ -299,16 +299,10 @@ export fn toHex(n: UInt64) -> String {
     // per call; an ETag is computed per HTTP response.
     let db = "0123456789abcdef"
     let mut out: Array<UInt8> = []
-    let mut sh: UInt64 = 60
-    let mut going = true
-    while going {
-        let nib = (n >> sh) & 15
-        out.push(db[Int64(nib)])
-        if sh == 0 {
-            going = false
-        } else {
-            sh = sh - 4
-        }
+    let mut sh = 60
+    while sh >= 0 {
+        out.push(db[Int64(n >> UInt64(sh)) & 15])
+        sh = sh - 4
     }
     return fromBytesOr(out, "")
 }
@@ -383,4 +377,6 @@ test "toHex writes sixteen zero-padded nibbles, low byte last" {
     assertEq(toHex(1), "0000000000000001")
     assertEq(toHex(255), "00000000000000ff")
     assertEq(toHex(4886718345), "0000000123456789")
+    // The top bit set: the last nibble is read from a negative Int64.
+    assertEq(toHex(9223372036854775809), "8000000000000001")
 }

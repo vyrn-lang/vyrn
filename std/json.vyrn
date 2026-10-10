@@ -183,13 +183,13 @@ fn sortKeysFields(fs: Array<JsonField>) -> Array<JsonField> {
     return out
 }
 
-/// The lowercase 2-digit hex of a byte value 0..255.
-fn hex2(b: Int64) -> String {
+/// The lowercase 2-digit hex of a byte.
+fn hex2(b: UInt8) -> String {
     // Index the literal: `bytes()` would build a 16-element array per call.
     let db = "0123456789abcdef"
     let mut out: Array<UInt8> = []
-    out.push(db[(b / 16) % 16])
-    out.push(db[b % 16])
+    out.push(db[Int64(b >> 4)])
+    out.push(db[Int64(b & 15)])
     return match stringFromBytes(out) {
         Ok(v) => v,
         Err(e) => "",
@@ -230,7 +230,7 @@ fn emitString(s: String) -> String {
             out.push('u')
             out.push('0')
             out.push('0')
-            let h = hex2(Int64(b))
+            let h = hex2(b)
             let hb = bytes(h)
             out.push(hb[0])
             out.push(hb[1])

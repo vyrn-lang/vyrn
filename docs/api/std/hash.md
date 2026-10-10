@@ -51,8 +51,8 @@ secret. SHA-1 is collision-broken: never use it to sign, hash a password,
 authenticate a message or content-address attacker-influenced data.
 
 The digest is twenty bytes, big-endian, pinned against RFC 3174 section 7.3
-in `examples/sha1.vyrn`. The mixing runs in `UInt64` masked to 32 bits, so
-no engine depends on a narrower type's overflow rule.
+in `examples/sha1.vyrn`. A word is a `UInt32`, so every addition wraps
+modulo 2^32 as the RFC requires.
 
 ## sha1Hex
 

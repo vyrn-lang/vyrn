@@ -70,15 +70,14 @@ test "equal values hash equal, and the mix spreads" {
 /// authenticate a message or content-address attacker-influenced data.
 ///
 /// The digest is twenty bytes, big-endian, pinned against RFC 3174 section 7.3
-/// in `examples/sha1.vyrn`. The mixing runs in `UInt64` masked to 32 bits, so
-/// no engine depends on a narrower type's overflow rule.
+/// in `examples/sha1.vyrn`. A word is a `UInt32`, so every addition wraps
+/// modulo 2^32 as the RFC requires.
 export fn sha1(data: Array<UInt8>) -> Array<UInt8> {
-    let m: UInt64 = 4294967295
-    let mut h0: UInt64 = 1732584193 // 0x67452301
-    let mut h1: UInt64 = 4023233417 // 0xEFCDAB89
-    let mut h2: UInt64 = 2562383102 // 0x98BADCFE
-    let mut h3: UInt64 = 271733878 // 0x10325476
-    let mut h4: UInt64 = 3285377520 // 0xC3D2E1F0
+    let mut h0: UInt32 = 1732584193 // 0x67452301
+    let mut h1: UInt32 = 4023233417 // 0xEFCDAB89
+    let mut h2: UInt32 = 2562383102 // 0x98BADCFE
+    let mut h3: UInt32 = 271733878 // 0x10325476
+    let mut h4: UInt32 = 3285377520 // 0xC3D2E1F0
 
     // The padding of section 4: one `1` bit, zeros up to 56 mod 64, then the
     // message length in bits as a 64-bit big-endian integer.
@@ -102,7 +101,7 @@ export fn sha1(data: Array<UInt8>) -> Array<UInt8> {
 
     // One schedule buffer for every block: each word is written before it is
     // read.
-    let mut w: Array<UInt64> = []
+    let mut w: Array<UInt32> = []
     w.reserve(80)
     let mut z = 0
     while z < 80 {
@@ -115,7 +114,7 @@ export fn sha1(data: Array<UInt8>) -> Array<UInt8> {
         let mut t = 0
         while t < 16 {
             let p = off + t * 4
-            w[t] = (UInt64(msg[p]) << 24) | (UInt64(msg[p + 1]) << 16) | (UInt64(msg[p + 2]) << 8) | UInt64(msg[p + 3])
+            w[t] = (UInt32(msg[p]) << 24) | (UInt32(msg[p + 1]) << 16) | (UInt32(msg[p + 2]) << 8) | UInt32(msg[p + 3])
             t = t + 1
         }
         while t < 80 {
@@ -130,11 +129,10 @@ export fn sha1(data: Array<UInt8>) -> Array<UInt8> {
         let mut e = h4
         t = 0
         while t < 80 {
-            // `b ^ m` is the 32-bit complement of a masked word.
-            let mut f: UInt64 = b ^ c ^ d
-            let mut k: UInt64 = 1859775393 // 0x6ED9EBA1
+            let mut f: UInt32 = b ^ c ^ d
+            let mut k: UInt32 = 1859775393 // 0x6ED9EBA1
             if t < 20 {
-                f = (b & c) | ((b ^ m) & d)
+                f = (b & c) | (~b & d)
                 k = 1518500249 // 0x5A827999
             } else if t >= 40 && t < 60 {
                 f = (b & c) | (b & d) | (c & d)
@@ -142,7 +140,7 @@ export fn sha1(data: Array<UInt8>) -> Array<UInt8> {
             } else if t >= 60 {
                 k = 3395469782 // 0xCA62C1D6
             }
-            let tmp = (sha1Rotl5(a) + f + e + k + w[t]) & m
+            let tmp = sha1Rotl5(a) + f + e + k + w[t]
             e = d
             d = c
             c = sha1Rotl30(b)
@@ -150,15 +148,15 @@ export fn sha1(data: Array<UInt8>) -> Array<UInt8> {
             a = tmp
             t = t + 1
         }
-        h0 = (h0 + a) & m
-        h1 = (h1 + b) & m
-        h2 = (h2 + c) & m
-        h3 = (h3 + d) & m
-        h4 = (h4 + e) & m
+        h0 = h0 + a
+        h1 = h1 + b
+        h2 = h2 + c
+        h3 = h3 + d
+        h4 = h4 + e
         off = off + 64
     }
 
-    let words: Array<UInt64> = [h0, h1, h2, h3, h4]
+    let words: Array<UInt32> = [h0, h1, h2, h3, h4]
     let mut out: Array<UInt8> = []
     for w in words {
         out.push(UInt8((w >> 24) & 255))
@@ -184,18 +182,17 @@ export fn sha1Hex(s: String) -> String {
     }
 }
 
-// The three SHA-1 rotations. Every argument is masked to 32 bits, so only the
-// result needs the mask.
-fn sha1Rotl1(x: UInt64) -> UInt64 {
-    return ((x << 1) | (x >> 31)) & 4294967295
+// The three SHA-1 rotations.
+fn sha1Rotl1(x: UInt32) -> UInt32 {
+    return (x << 1) | (x >> 31)
 }
 
-fn sha1Rotl5(x: UInt64) -> UInt64 {
-    return ((x << 5) | (x >> 27)) & 4294967295
+fn sha1Rotl5(x: UInt32) -> UInt32 {
+    return (x << 5) | (x >> 27)
 }
 
-fn sha1Rotl30(x: UInt64) -> UInt64 {
-    return ((x << 30) | (x >> 2)) & 4294967295
+fn sha1Rotl30(x: UInt32) -> UInt32 {
+    return (x << 30) | (x >> 2)
 }
 
 test "sha1Hex matches the published vectors" {

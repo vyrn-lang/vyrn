@@ -12,27 +12,27 @@
 
 /// The Unicode scalar values of `b`, or `None` if `b` is not valid UTF-8 as Rust's
 /// `String::from_utf8` defines it.
-export fn decodeUtf8(b: Array<UInt8>) -> Option<Array<Int64>> {
+export fn decodeUtf8(b: Array<UInt8>) -> Option<Array<UInt32>> {
     let n = b.length
-    let mut out: Array<Int64> = []
+    let mut out: Array<UInt32> = []
     let mut i = 0
     while i < n {
-        let b0 = Int64(b[i])
+        let b0 = UInt32(b[i])
         let w = utf8Width(b, i)
         if w == 0 {
             return None
         }
+        // A lead byte carries 7, 5, 4 or 3 payload bits, a continuation byte 6.
         if w == 1 {
             out.push(b0)
         } else if w == 2 {
-            out.push((b0 - 192) * 64 + (Int64(b[i + 1]) - 128))
+            out.push(((b0 & 31) << 6) | (UInt32(b[i + 1]) & 63))
         } else if w == 3 {
-            out.push((b0 - 224) * 4096 + (Int64(b[i + 1]) - 128) * 64 + (Int64(b[i + 2]) - 128))
+            out.push(((b0 & 15) << 12) | ((UInt32(b[i + 1]) & 63) << 6) | (UInt32(b[i + 2]) & 63))
         } else {
             out.push(
-                (b0 - 240) * 262144 + (Int64(b[i + 1]) - 128) * 4096
-                + (Int64(b[i + 2]) - 128) * 64
-                + (Int64(b[i + 3]) - 128),
+                ((b0 & 7) << 18) | ((UInt32(b[i + 1]) & 63) << 12) | ((UInt32(b[i + 2]) & 63) << 6)
+                    | (UInt32(b[i + 3]) & 63),
             )
         }
         i = i + w
@@ -126,7 +126,7 @@ export fn stringFault(b: Array<UInt8>) -> Int64 {
 ///
 /// The `None` arm is unreachable: every boundary that builds a `String` validates
 /// its UTF-8.
-export fn chars(s: String) -> Array<Int64> {
+export fn chars(s: String) -> Array<UInt32> {
     return match decodeUtf8(bytes(s)) {
         Some(cs) => cs,
         None => [],
@@ -183,7 +183,7 @@ export fn colAtV(b: Array<UInt8>, off: Int64) -> Int64 {
 
 /// The codepoints as comma-separated decimals, so a test compares exact scalar
 /// values.
-export fn showCps(a: Array<Int64>) -> String {
+export fn showCps(a: Array<UInt32>) -> String {
     let mut out = ""
     let mut first = true
     for c in a {
