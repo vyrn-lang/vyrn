@@ -501,7 +501,11 @@ fn intern(re: Regex, sc: modify Scan) -> Int64 {
     let id = sc.sets.length
     sc.ids[key] = id
     sc.sets.push(set)
-    sc.accepts.push(accepts)
+    if id < sc.accepts.length {
+        sc.accepts[id] = accepts
+    } else {
+        sc.accepts.push(accepts)
+    }
     let mut k = 0
     while k < re.classCount {
         sc.next.push(0 - 1)
@@ -518,7 +522,9 @@ fn newScan(re: Regex, cap: Int64) -> Scan {
         mark.push(0)
         i = i + 1
     }
-    let mut sc = Scan { sets: [], ids: [:], accepts: [], next: [], cap: 2 * re.classCount + cap, mark: mark, gen: 1 }
+    // `accepts` holds the slots of states 0 and 1 before `intern` fills
+    // them, so a search reads the start state's with no check.
+    let mut sc = Scan { sets: [], ids: [:], accepts: [false, false], next: [], cap: 2 * re.classCount + cap, mark: mark, gen: 1 }
     intern(re, sc)
     let mut scratch: Array<Int64> = []
     sc.gen = 2
