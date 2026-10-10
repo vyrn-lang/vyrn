@@ -471,6 +471,90 @@ fn literal_operands_and_masks_prove_their_checks() {
     );
 }
 
+/// A right shift or a quotient of a value in `[0, h]` lies below `h >> a` or
+/// `h / d`: by a literal, and by an amount the state bounds below by `a`.
+#[test]
+fn a_right_shift_of_a_non_negative_value_is_bounded() {
+    let src = "fn w(b: UInt8, x: Int64, k: Int64) -> Int64 {
+    let db = \"0123456789abcdef\"
+    let mut s = Int64(db[Int64(b >> 4)]) + Int64(db[Int64(b) / 16])
+    if x >= 0 && x < 256 && k >= 4 {
+        s = s + Int64(db[x >> k])
+    }
+    return s
+}
+";
+    assert_eq!(
+        verdicts(src, "w"),
+        [
+            "proved shift-range",
+            "proved string-index",
+            "proved int-div-zero",
+            "proved int-div-overflow",
+            "proved string-index",
+            "check shift-range",
+            "proved string-index",
+        ]
+    );
+}
+
+/// Each keeps the index of `w`'s shift and traps there: an arithmetic shift
+/// of a negative value, and a bound one past the String by a literal and by
+/// a ranged amount.
+#[test]
+fn every_shift_witness_keeps_its_index_and_traps_there() {
+    let witnesses = [
+        (
+            "fn w(x: Int64) -> Int64 {
+    let t = [1, 2, 3, 4]
+    if x < 64 {
+        return t[x >> 4]
+    }
+    return 0
+}
+",
+            "    print(w(-1).toString())",
+            "check array-index",
+            "array index -1 out of bounds",
+        ),
+        (
+            "fn w(b: UInt8) -> Int64 {
+    let db = \"0123456789abcde\"
+    return Int64(db[Int64(b >> 4)])
+}
+",
+            "    print(w(255).toString())",
+            "check string-index",
+            "string index 15 out of bounds",
+        ),
+        (
+            "fn w(b: UInt8, k: UInt8) -> Int64 {
+    let db = \"0123456789abcde\"
+    if k >= 4 {
+        return Int64(db[Int64(b >> k)])
+    }
+    return 0
+}
+",
+            "    print(w(255, 4).toString())",
+            "check string-index",
+            "string index 15 out of bounds",
+        ),
+    ];
+    let mut failures = Vec::new();
+    for (src, calls, row, trap) in witnesses {
+        let rows = verdicts(src, "w");
+        if !rows.iter().any(|r| r == row) {
+            failures.push(format!("{src}\nrows: {rows:?}"));
+        }
+        let (err, _) = oracle(src, calls, "w");
+        if !err.contains(trap) || err.contains(vyrn_frontend::trap::PROVED_CHECK_FAILED) {
+            failures.push(format!("{src}\nran: {err}"));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n\n"));
+}
+
 /// The shift amount `k & (width - 1)` is dropped to `k` where nothing else reads it: wasm's
 /// `shl` and `shr` mask by the width. A second reader keeps the mask.
 #[test]
