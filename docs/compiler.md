@@ -207,9 +207,9 @@ checks the rule (`check::Guard::Rule`). Two array fields form a pair
 `elide::invariants` keeps a pair only when each body that builds such a
 record or resizes one of its fields proves it wherever the value leaves the
 name, and a walk assumes it of every record name it did not build. A fact may name the value of a
-`read` parameter's integer field (`facts::Term::Field`): the kernel's
-exclusivity judgment keeps the parameter unwritten, so each read of the
-field is one value. `World::body_of` decides a body
+record name's integer field (`facts::Term::Field`): by the kernel's
+exclusivity judgment only a row that names the record writes the field, so
+each read between two such rows is one value, and a store defines it. `World::body_of` decides a body
 when an emitter first reads it. A direct call's result takes the facts every
 return of its callee proves (`elide::summaries`, keyed by `FnId`, solved once
 per World by `fixpoint::descend`); a call through a value, a method, a

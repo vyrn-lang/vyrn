@@ -17,16 +17,15 @@
 //! parameters' `where` clauses ([`Body::assumes`]), which every call row
 //! checks; a call's clause check is a row like any other.
 //!
-//! The walk knows nothing about a global, an element, or a field other than an
-//! integer field of a `read` parameter: each read of one is a fresh value with
-//! its type's range. An exact sum is an `Int64` sum that provably stays in
-//! `-2^62..=2^62`. A row is proved only with a certificate that
-//! [`crate::facts::Cert::verify`] accepts, or a divisor the state holds
-//! unequal to zero.
+//! The walk knows nothing about a global, an element, or a field of a field:
+//! each read of one is a fresh value with its type's range. An exact sum is an
+//! `Int64` sum that provably stays in `-2^62..=2^62`. A row is proved only with
+//! a certificate that [`crate::facts::Cert::verify`] accepts, or a divisor the
+//! state holds unequal to zero.
 //!
-//! One postulate: a live read borrow's source is not written, by the kernel's
-//! exclusivity judgment, so a borrow's length, and a field of a `read`
-//! parameter, changes only where the walk sees the borrow itself written.
+//! One postulate: by the kernel's exclusivity judgment no other name writes a
+//! live name's source, so a name's length, and a record name's fields, change
+//! only where the walk sees the name itself written.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt::Write;
@@ -1273,7 +1272,7 @@ impl<'a> Walk<'a> {
     }
 
     /// An operand of a clause as a term: a value, a length, or an integer
-    /// field of a `read` parameter ([`Walk::field`]).
+    /// field of a record name ([`Walk::field`]).
     fn operand(&self, o: &Operand) -> Option<Lin> {
         match (&o.of, o.part.as_deref()) {
             (v, None) => self.lin(v),
@@ -1468,21 +1467,14 @@ impl<'a> Walk<'a> {
         Some((u32::try_from(own).ok()?, u32::try_from(least).ok()?))
     }
 
-    /// The integer field `f` of `r` as one term, when `r` is a `read`
-    /// parameter: by the module's postulate its value changes only where the
-    /// walk sees `r` written, and then [`State::kill`] forgets it.
+    /// The integer field `f` of record name `r` as one term: by the module's
+    /// postulate its value changes only where the walk sees `r` written.
     fn field(&self, r: &Place, f: &str) -> Option<Term> {
         let Place::Name(r) = r else { return None };
-        let info = &self.body.names[r.index()];
-        let read = matches!(
-            &info.borrow_kind,
-            Some(BorrowKind::Param { cap: "read", .. })
-        );
-        if !read || !self.body.params.contains(r) {
-            return None;
-        }
-        let fields = vyrn_frontend::types::record_fields(&info.ty, self.decls)?;
-        let at = fields.iter().position(|x| x.name == f)?;
+        let ty = &self.body.names[r.index()].ty;
+        let fields = vyrn_frontend::types::record_fields(ty, self.decls)?;
+        let at = (fields.iter())
+            .position(|x| x.name == f && matches!(kind_of(&x.ty, self.decls), Kind::Int(..)))?;
         Some(Term::Field(*r, u32::try_from(at).ok()?))
     }
 
@@ -1664,9 +1656,17 @@ impl<'a> Walk<'a> {
                             self.resized_field(&st, *r, f);
                         }
                     }
-                    // A store into a field that is no array or String keeps
-                    // every length.
-                    (Place::Field(..), None) => {}
+                    // An integer field takes the stored value. A store into
+                    // any other field keeps every length.
+                    (Place::Field(r, f), None) => {
+                        if let (Place::Name(n), Some(t)) = (&**r, self.field(r, f)) {
+                            st.forget(t);
+                            let v = self.lin(value).filter(|_| self.slot[n.index()].relevant);
+                            if let Some(v) = v {
+                                st.define(t, &v);
+                            }
+                        }
+                    }
                     _ => {
                         if let Some(n) = resized_by_store(place) {
                             st.kill(n);
@@ -1923,6 +1923,9 @@ impl<'a> Walk<'a> {
                     };
                     if let (Some(t), Some(len)) = (self.col_term(n, f), len) {
                         st.define(t, &len);
+                    }
+                    if let (Some(t), Some(x)) = (self.field(&Place::Name(n), f), self.lin(v)) {
+                        st.define(t, &x);
                     }
                 }
             }

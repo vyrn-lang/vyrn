@@ -24,7 +24,7 @@ use vyrn_frontend::core::Name;
 /// the record's `where` rule states of equal length, so one term is the
 /// length of each of them; inside a group of stores into the record's
 /// fields, by the field's own index (`elide::Walk::open`). A `Field` is the
-/// value of a `read` parameter's integer field, by the field's index
+/// value of a record name's integer field, by the field's index
 /// (`elide::Walk::field`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Term {

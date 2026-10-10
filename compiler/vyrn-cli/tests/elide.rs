@@ -2781,10 +2781,11 @@ fn every_call_row_proving_a_fact_proves_the_check() {
     assert!(failures.is_empty(), "{}", failures.join("\n\n"));
 }
 
-/// Programs where every value of `P` the program builds keeps `a` and `b`
-/// equally long: `b[i]` under `i < a.length` is proved in `w`, and the run
-/// passes the oracle.
-const PAIR_PROOFS: &[&str] = &[
+/// Programs where `w` proves its one index from what it knows of a record's
+/// fields, and the run passes the oracle. In the pair programs every value of
+/// `P` the program builds keeps `a` and `b` equally long, so `b[i]` under
+/// `i < a.length` is proved.
+const RECORD_PROOFS: &[&str] = &[
     // Both fields grow in step through a `modify` parameter.
     r#"type P = { a: Array<Int64>, b: Array<Int64> }
 fn add(p: modify P, x: Int64) {
@@ -2853,12 +2854,43 @@ fn main() -> Int64 {
     return 0
 }
 "#,
+    // A literal's integer field is one value across its reads.
+    r#"type C = { xs: Array<Int64>, i: Int64 }
+fn w(xs: Array<Int64>) -> Int64 {
+    let c = C { xs: xs.copy(), i: 1 }
+    if c.i >= c.xs.length {
+        return 0
+    }
+    return c.xs[c.i]
+}
+fn main() -> Int64 {
+    let xs: Array<Int64> = [1, 2, 3]
+    print(w(xs).toString())
+    return 0
+}
+"#,
+    // So is a `modify` parameter's, until the body stores into it.
+    r#"type C = { xs: Array<Int64>, i: Int64 }
+fn w(c: modify C) -> Int64 {
+    if c.i < 0 || c.i >= c.xs.length {
+        return 0
+    }
+    let v = c.xs[c.i]
+    c.i = c.i + 1
+    return v
+}
+fn main() -> Int64 {
+    let mut c = C { xs: [1, 2, 3], i: 2 }
+    print(w(c).toString())
+    return 0
+}
+"#,
 ];
 
 #[test]
-fn every_kept_pair_proves_the_index() {
+fn every_record_proof_proves_the_index() {
     let mut failures = Vec::new();
-    for root in PAIR_PROOFS {
+    for root in RECORD_PROOFS {
         let (dir, file) = modules(root, &[]);
         let rows = rows_of(&file, "w");
         if rows != ["proved array-index"] {
@@ -2872,10 +2904,11 @@ fn every_kept_pair_proves_the_index() {
     assert!(failures.is_empty(), "{}", failures.join("\n\n"));
 }
 
-/// Programs where `w` indexes `b` under `i < a.length` and a value of a
-/// record with fields `a` and `b` does not keep them equal where `w` reads
-/// it: `w` keeps its index and traps there.
-const PAIR_WITNESSES: &[(&str, &str)] = &[
+/// Programs where `w` indexes a record's field under a bound that a write or a
+/// value it did not build breaks: `w` keeps its index and traps there. In the
+/// pair programs `w` indexes `b` under `i < a.length` and a value of a record
+/// with fields `a` and `b` does not keep them equal where `w` reads it.
+const RECORD_WITNESSES: &[(&str, &str)] = &[
     // A store into the field after the guard; the body restores the pair
     // before it returns.
     (
@@ -3153,12 +3186,70 @@ fn main() -> Int64 {
 "#,
         "array index 2 out of bounds",
     ),
+    // A store into an integer field after the guard.
+    (
+        r#"type C = { xs: Array<Int64>, i: Int64 }
+fn w(c: modify C) -> Int64 {
+    if c.i < 0 || c.i >= c.xs.length {
+        return 0
+    }
+    c.i = c.i + 1
+    return c.xs[c.i]
+}
+fn main() -> Int64 {
+    let mut c = C { xs: [1, 2, 3], i: 2 }
+    print(w(c).toString())
+    return 0
+}
+"#,
+        "array index 3 out of bounds",
+    ),
+    // The same store into a literal's field.
+    (
+        r#"type C = { xs: Array<Int64>, i: Int64 }
+fn w(xs: Array<Int64>) -> Int64 {
+    let mut c = C { xs: xs.copy(), i: 0 }
+    if c.i >= c.xs.length {
+        return 0
+    }
+    c.i = 5
+    return c.xs[c.i]
+}
+fn main() -> Int64 {
+    let xs: Array<Int64> = [1, 2, 3]
+    print(w(xs).toString())
+    return 0
+}
+"#,
+        "array index 5 out of bounds",
+    ),
+    // A callee writes the field of the record it takes `modify`.
+    (
+        r#"type C = { xs: Array<Int64>, i: Int64 }
+fn bump(c: modify C) {
+    c.i = c.i + 10
+}
+fn w(c: modify C) -> Int64 {
+    if c.i < 0 || c.i >= c.xs.length {
+        return 0
+    }
+    bump(c)
+    return c.xs[c.i]
+}
+fn main() -> Int64 {
+    let mut c = C { xs: [1, 2, 3], i: 0 }
+    print(w(c).toString())
+    return 0
+}
+"#,
+        "array index 10 out of bounds",
+    ),
 ];
 
 #[test]
-fn every_pair_witness_keeps_its_index_and_traps_there() {
+fn every_record_witness_keeps_its_index_and_traps_there() {
     let mut failures = Vec::new();
-    for (root, trap) in PAIR_WITNESSES {
+    for (root, trap) in RECORD_WITNESSES {
         let (dir, file) = modules(root, &[]);
         let rows = rows_of(&file, "w");
         if rows.is_empty() || rows.iter().any(|v| v.starts_with("proved")) {
