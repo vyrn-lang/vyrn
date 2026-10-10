@@ -321,9 +321,14 @@ fn lowered<'a>(
     let build_span = vyrn_frontend::prof::phase("lower: build");
     let mut lowered = build(program, &recorded, ownership, reuse);
     drop(build_span);
-    lowered.instances.sort_by(|a, b| {
-        (a.module(), &a.func.name, a.spelling()).cmp(&(b.module(), &b.func.name, b.spelling()))
-    });
+    // A spelling allocates, so only the instances of one generic, which tie on
+    // the name, spell their type arguments, each once.
+    let named =
+        |a: &Instance, b: &Instance| (a.module(), &a.func.name).cmp(&(b.module(), &b.func.name));
+    lowered.instances.sort_by(named);
+    for run in lowered.instances.chunk_by_mut(|a, b| named(a, b).is_eq()) {
+        run.sort_by_cached_key(Instance::spelling);
+    }
     lowered
 }
 
