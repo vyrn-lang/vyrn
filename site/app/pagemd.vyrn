@@ -266,13 +266,18 @@ export fn asMarkdown(html: String) -> String {
     return collapse(trimEnd(out + unescape(substring(html, text, html.byteLength))))
 }
 
-/// Where the `>` that closes the tag opening at `at` is, or -1.
+/// Where the `>` that closes the tag opening at `at` is, or -1. Every result is
+/// below `html.byteLength`, which proves the caller's `html[i]` after
+/// `i = close + 1`; an offset into a substring would not.
 fn closeFrom(html: String, at: Int64) -> Int64 {
-    let rest = substring(html, at, html.byteLength)
-    return match indexOf(rest, ">") {
-        Some(end) => at + end,
-        None => 0 - 1,
+    let mut j = at
+    while j < html.byteLength {
+        if html[j] == '>' {
+            return j
+        }
+        j = j + 1
     }
+    return 0 - 1
 }
 
 /// A tag's name, with the slash of a closing tag kept on the front: `p`, `/p`,
