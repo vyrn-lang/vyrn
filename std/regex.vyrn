@@ -48,8 +48,9 @@ export type Regex = {
     cls: Array<ByteSet>,
     start: Int64,
     // `classOf[c]` is byte `c`'s class, 0 to `classCount - 1`: two bytes in one
-    // class take the same step from every set of pcs.
-    classOf: Array<Int64>,
+    // class take the same step from every set of pcs. The class of `c` is at
+    // most `c`, so a `UInt8` holds it.
+    classOf: Array<UInt8>,
     classCount: Int64,
 }
 
@@ -331,8 +332,8 @@ fn parseAlt(bd: modify Builder) -> Frag {
 ///
 /// A lead-byte edge needs no cut of its own at 192: its class holds only bytes
 /// below 0x80 and 194 to 244, so every run it holds lies on one side of 192.
-fn byteClasses(bd: Builder) -> Array<Int64> {
-    let mut of: Array<Int64> = [0]
+fn byteClasses(bd: Builder) -> Array<UInt8> {
+    let mut of: Array<UInt8> = [0]
     let mut c = 1
     while c < 256 {
         let mut cut = false
@@ -381,7 +382,7 @@ export fn compile(pattern: String) -> Result<Regex, String> {
         b: consume bd.b,
         cls: consume bd.cls,
         start: f.start,
-        classCount: classOf[255] + 1,
+        classCount: Int64(classOf[255]) + 1,
         classOf: classOf,
     })
 }
@@ -535,7 +536,7 @@ fn nextMatch(re: Regex, hay: Array<UInt8>, from: Int64, sc: modify Scan) -> Opti
         let mut i = at
         while i < hay.length {
             let c = Int64(hay[i])
-            let edge = s * re.classCount + re.classOf[c]
+            let edge = s * re.classCount + Int64(re.classOf[c])
             let mut t = sc.next[edge]
             if t < 0 {
                 sc.gen = sc.gen + 1
