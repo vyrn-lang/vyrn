@@ -211,7 +211,13 @@ proves a record's facts takes a callee's constant result length from a solve
 that assumes no record fact. `elide::invariants` keeps a fact only when each body that
 builds such a record or writes one of its fields proves it wherever the
 value leaves the name, and a walk assumes it of every record name it did not
-build. A fact may name the value of a
+build. An element fact bounds every element of an integer array field: at
+least zero and below the length of another field of the record. It holds
+when each store into an element and each push onto the field proves the
+bound where it runs, a record literal's field is empty or a copy of another
+record's with a bounding field at least as long, no row shortens the
+bounding field, and no row changes the elements where no walk sees it
+(`elide::element_scan`); a read of an element assumes it. A fact may name the value of a
 record name's integer field (`facts::Term::Field`): by the kernel's
 exclusivity judgment only a row that names the record writes the field, so
 each read between two such rows is one value, and a store defines it. `World::body_of` decides a body

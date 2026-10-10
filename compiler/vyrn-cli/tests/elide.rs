@@ -4279,3 +4279,431 @@ fn every_record_witness_keeps_its_index_and_traps_there() {
     }
     assert!(failures.is_empty(), "{}", failures.join("\n\n"));
 }
+
+/// The record type, the one writer that keeps its element fact, and the
+/// reader the fact proves: `t.data[t.idx[k]]`.
+const ELEMENT_HEAD: &str = r#"type T = { idx: Array<Int64>, data: Array<Int64> }
+fn add(t: modify T, x: Int64) {
+    t.data.push(x)
+    t.idx.push(t.data.length - 1)
+}
+fn w(t: T, k: Int64) -> Int64 {
+    return t.data[t.idx[k]]
+}
+"#;
+
+/// A `main` that builds the record only through `add`.
+const GOOD_MAIN: &str = r#"fn main() -> Int64 {
+    let mut t = T { idx: [], data: [] }
+    add(t, 5)
+    add(t, 6)
+    print(w(t, 1).toString())
+    return 0
+}
+"#;
+
+/// A `main` that copies the record field by field.
+const COPY_MAIN: &str = r#"fn main() -> Int64 {
+    let mut t = T { idx: [], data: [] }
+    add(t, 5)
+    add(t, 6)
+    let v = T { idx: t.idx.copy(), data: t.data.copy() }
+    print((w(t, 1) + w(v, 1)).toString())
+    return 0
+}
+"#;
+
+/// Programs whose `main` breaks the element fact of [`ELEMENT_HEAD`], each
+/// with the trap its `w` raises.
+const ELEMENT_WITNESSES: &[(&str, &str)] = &[
+    // A store into an element that no fact bounds.
+    (
+        r#"fn main() -> Int64 {
+    let mut t = T { idx: [], data: [] }
+    add(t, 5)
+    t.idx[0] = 99
+    print(w(t, 0).toString())
+    return 0
+}
+"#,
+        "array index 99 out of bounds",
+    ),
+    // A push of an element that no fact bounds.
+    (
+        r#"fn main() -> Int64 {
+    let mut t = T { idx: [], data: [] }
+    add(t, 5)
+    t.idx.push(99)
+    print(w(t, 1).toString())
+    return 0
+}
+"#,
+        "array index 99 out of bounds",
+    ),
+    // The bounding field shrinks.
+    (
+        r#"fn main() -> Int64 {
+    let mut t = T { idx: [], data: [] }
+    add(t, 5)
+    add(t, 6)
+    t.data.pop()
+    print(w(t, 1).toString())
+    return 0
+}
+"#,
+        "array index 1 out of bounds",
+    ),
+    // A record decoded by `fromJson` holds any element.
+    (
+        r#"fn main() -> Int64 {
+    let mut t = T { idx: [], data: [] }
+    add(t, 5)
+    let v = match fromJson<T>("{\"idx\": [99], \"data\": [1]}") {
+        Valid(d) => w(d, 0),
+        Invalid(_) => 0,
+    }
+    print((w(t, 0) + v).toString())
+    return 0
+}
+"#,
+        "array index 99 out of bounds",
+    ),
+    // A callee stores a bad element into the record it takes `modify`.
+    (
+        r#"fn bad(t: modify T) {
+    t.idx[0] = 99
+}
+fn main() -> Int64 {
+    let mut t = T { idx: [], data: [] }
+    add(t, 5)
+    bad(t)
+    print(w(t, 0).toString())
+    return 0
+}
+"#,
+        "array index 99 out of bounds",
+    ),
+    // A callee pushes a bad element onto the record it takes `modify`.
+    (
+        r#"fn bad(t: modify T) {
+    t.idx.push(99)
+}
+fn main() -> Int64 {
+    let mut t = T { idx: [], data: [] }
+    add(t, 5)
+    bad(t)
+    print(w(t, 1).toString())
+    return 0
+}
+"#,
+        "array index 99 out of bounds",
+    ),
+    // A generic function pushes onto a copy of the field, which then replaces it.
+    (
+        r#"fn put<E>(xs: modify Array<E>, v: consume E) {
+    xs.push(v)
+}
+fn main() -> Int64 {
+    let mut t = T { idx: [], data: [] }
+    add(t, 5)
+    let mut a = t.idx.copy()
+    put(a, 99)
+    t.idx = a
+    print(w(t, 1).toString())
+    return 0
+}
+"#,
+        "array index 99 out of bounds",
+    ),
+    // A lambda pushes a bad element onto a record it builds.
+    (
+        r#"fn main() -> Int64 {
+    let mut t = T { idx: [], data: [] }
+    add(t, 5)
+    let f: fn(Int64) -> Int64 = (k) -> {
+        let mut u = T { idx: [], data: [1] }
+        u.idx.push(k)
+        return w(u, 0)
+    }
+    print((w(t, 0) + f(99)).toString())
+    return 0
+}
+"#,
+        "array index 99 out of bounds",
+    ),
+    // The field is replaced whole.
+    (
+        r#"fn main() -> Int64 {
+    let mut t = T { idx: [], data: [] }
+    add(t, 5)
+    t.idx = [99]
+    print(w(t, 0).toString())
+    return 0
+}
+"#,
+        "array index 99 out of bounds",
+    ),
+    // An `append` adds elements no walk checks.
+    (
+        r#"fn main() -> Int64 {
+    let mut t = T { idx: [], data: [] }
+    add(t, 5)
+    t.idx.append([99])
+    print(w(t, 1).toString())
+    return 0
+}
+"#,
+        "array index 99 out of bounds",
+    ),
+    // A record literal holds a bad element.
+    (
+        r#"fn main() -> Int64 {
+    let mut t = T { idx: [], data: [] }
+    add(t, 5)
+    let u = T { idx: [99], data: [1] }
+    print((w(t, 0) + w(u, 0)).toString())
+    return 0
+}
+"#,
+        "array index 99 out of bounds",
+    ),
+    // A `copyFrom` replaces the elements.
+    (
+        r#"fn main() -> Int64 {
+    let mut t = T { idx: [], data: [] }
+    add(t, 5)
+    t.idx.copyFrom([99])
+    print(w(t, 0).toString())
+    return 0
+}
+"#,
+        "array index 99 out of bounds",
+    ),
+    // Module state takes a bad element.
+    (
+        r#"let mut g = T { idx: [], data: [] }
+fn bump() {
+    g.idx.push(99)
+}
+fn main() -> Int64 {
+    let mut t = T { idx: [], data: [] }
+    add(t, 5)
+    bump()
+    print((w(t, 0) + w(g, 0)).toString())
+    return 0
+}
+"#,
+        "array index 99 out of bounds",
+    ),
+    // A record in an array takes a bad element.
+    (
+        r#"fn main() -> Int64 {
+    let mut t = T { idx: [], data: [] }
+    add(t, 5)
+    let mut ts: Array<T> = [t.copy()]
+    ts[0].idx[0] = 99
+    print((w(t, 0) + w(ts[0], 0)).toString())
+    return 0
+}
+"#,
+        "array index 99 out of bounds",
+    ),
+    // The field takes another record's elements.
+    (
+        r#"fn main() -> Int64 {
+    let mut t = T { idx: [], data: [] }
+    add(t, 5)
+    let mut u = T { idx: [], data: [] }
+    add(u, 1)
+    add(u, 2)
+    add(u, 3)
+    t.idx = u.idx.copy()
+    print(w(t, 2).toString())
+    return 0
+}
+"#,
+        "array index 2 out of bounds",
+    ),
+    // A pushed element is below another record's bounding field.
+    (
+        r#"fn main() -> Int64 {
+    let mut t = T { idx: [], data: [] }
+    add(t, 5)
+    let mut u = T { idx: [], data: [] }
+    add(u, 1)
+    add(u, 2)
+    t.idx.push(u.data.length - 1)
+    print(w(t, 1).toString())
+    return 0
+}
+"#,
+        "array index 1 out of bounds",
+    ),
+    // A store through a user projection.
+    (
+        r#"impl Index for T {
+    fn tryAt(read self, i: Int64) -> read Option<Int64> {
+        if i < 0 || i >= self.idx.length {
+            return None
+        }
+        return Some(self.idx[i])
+    }
+    fn at(read self, i: Int64) -> read Int64 {
+        return self.idx[i]
+    }
+    fn atSet(modify self, i: Int64) -> modify Int64 {
+        return self.idx[i]
+    }
+}
+fn main() -> Int64 {
+    let mut t = T { idx: [], data: [] }
+    add(t, 5)
+    t[0] = 99
+    print(w(t, 0).toString())
+    return 0
+}
+"#,
+        "array index 99 out of bounds",
+    ),
+    // A literal copies the elements from one record and the bound from another.
+    (
+        r#"fn main() -> Int64 {
+    let mut t = T { idx: [], data: [] }
+    add(t, 5)
+    add(t, 6)
+    let mut u = T { idx: [], data: [] }
+    add(u, 7)
+    let v = T { idx: t.idx.copy(), data: u.data.copy() }
+    print((w(t, 1) + w(v, 1)).toString())
+    return 0
+}
+"#,
+        "array index 1 out of bounds",
+    ),
+    // A literal copies the bound before the record grows.
+    (
+        r#"fn main() -> Int64 {
+    let mut t = T { idx: [], data: [] }
+    add(t, 5)
+    let d = t.data.copy()
+    add(t, 6)
+    let v = T { idx: t.idx.copy(), data: d }
+    print((w(t, 1) + w(v, 1)).toString())
+    return 0
+}
+"#,
+        "array index 1 out of bounds",
+    ),
+    // A taken field is stored into the record that replaced its own.
+    (
+        r#"fn main() -> Int64 {
+    let mut t = T { idx: [], data: [] }
+    add(t, 5)
+    add(t, 6)
+    let a = consume t.idx
+    t = T { idx: [], data: [] }
+    t.idx = a
+    print(w(t, 1).toString())
+    return 0
+}
+"#,
+        "array index 1 out of bounds",
+    ),
+    // A copy of the field is reassigned before a literal holds it.
+    (
+        r#"fn main() -> Int64 {
+    let mut t = T { idx: [], data: [] }
+    add(t, 5)
+    let mut a = t.idx.copy()
+    a = [99]
+    let v = T { idx: a, data: t.data.copy() }
+    print((w(t, 0) + w(v, 0)).toString())
+    return 0
+}
+"#,
+        "array index 99 out of bounds",
+    ),
+    // A copy of the field is written by a callee before a literal holds it.
+    (
+        r#"fn put(xs: modify Array<Int64>, v: Int64) {
+    xs.push(v)
+}
+fn main() -> Int64 {
+    let mut t = T { idx: [], data: [] }
+    add(t, 5)
+    let mut a = t.idx.copy()
+    put(a, 99)
+    let v = T { idx: a, data: t.data.copy() }
+    print((w(t, 0) + w(v, 1)).toString())
+    return 0
+}
+"#,
+        "array index 99 out of bounds",
+    ),
+    // The record is replaced after its field was copied.
+    (
+        r#"fn main() -> Int64 {
+    let mut t = T { idx: [], data: [] }
+    add(t, 5)
+    add(t, 6)
+    add(t, 7)
+    let a = t.idx.copy()
+    t = T { idx: [], data: [] }
+    add(t, 8)
+    let v = T { idx: a, data: t.data.copy() }
+    print((w(t, 0) + w(v, 2)).toString())
+    return 0
+}
+"#,
+        "array index 2 out of bounds",
+    ),
+    // A callee replaces the record after its field was copied.
+    (
+        r#"fn renew(t: modify T) {
+    t = T { idx: [], data: [] }
+    add(t, 8)
+}
+fn main() -> Int64 {
+    let mut t = T { idx: [], data: [] }
+    add(t, 5)
+    add(t, 6)
+    add(t, 7)
+    let a = t.idx.copy()
+    renew(t)
+    let v = T { idx: a, data: t.data.copy() }
+    print((w(t, 0) + w(v, 2)).toString())
+    return 0
+}
+"#,
+        "array index 2 out of bounds",
+    ),
+];
+
+#[test]
+fn an_element_fact_proves_the_index_it_bounds() {
+    for main in [GOOD_MAIN, COPY_MAIN] {
+        let (_dir, file) = modules(&format!("{ELEMENT_HEAD}{main}"), &[]);
+        assert_eq!(
+            rows_of(&file, "w"),
+            ["check array-index", "proved array-index"]
+        );
+    }
+}
+
+#[test]
+fn every_element_witness_keeps_its_index_and_traps_there() {
+    let mut failures = Vec::new();
+    for (main, trap) in ELEMENT_WITNESSES {
+        let root = format!("{ELEMENT_HEAD}{main}");
+        let (dir, file) = modules(&root, &[]);
+        let rows = rows_of(&file, "w");
+        if rows.iter().any(|v| v.starts_with("proved")) {
+            failures.push(format!("{root}\nrows: {rows:?}"));
+        }
+        let (err, _) = run_oracle(&dir, &file, "w");
+        if !err.contains(trap) || err.contains(vyrn_frontend::trap::PROVED_CHECK_FAILED) {
+            failures.push(format!("{root}\nran: {err}"));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n\n"));
+}

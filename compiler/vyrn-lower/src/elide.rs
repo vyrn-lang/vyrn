@@ -34,7 +34,7 @@ use std::sync::{Arc, Mutex};
 
 use vyrn_frontend::ast::{BinOp, Capability, Field, FnId, Type, TypeDecl, UnOp};
 use vyrn_frontend::effects::Effect;
-use vyrn_frontend::prelude::{self, Length};
+use vyrn_frontend::prelude::{self, Elements, Length};
 use vyrn_frontend::prim::Cmp;
 
 use crate::facts::{Cert, Fact, Lin, State, Term};
@@ -180,12 +180,15 @@ impl Records {
     }
 }
 
-/// A part of a [`RecordFact`]: a field, by name, as an integer field's value
-/// or an array or String field's length; or the constant one.
+/// A part of a [`RecordFact`]: a field, by name, as an integer field's value,
+/// an array or String field's length, or each element of an integer array
+/// field; or the constant one. A fact with an `Elem` part holds of every
+/// element ([`element_facts`]).
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 enum Part {
     Val(String),
     Len(String),
+    Elem(String),
     One,
 }
 
@@ -205,6 +208,9 @@ fn binds(fact: &RecordFact, fields: &[Field], decls: &HashMap<String, TypeDecl>)
         let (name, kind): (&str, fn(Kind) -> bool) = match p {
             Part::Val(f) => (f, Kind::is_int),
             Part::Len(f) => (f, |k| k == Kind::Seq),
+            Part::Elem(f) => {
+                return (fields.iter()).any(|x| x.name == *f && int_elements(&x.ty, decls));
+            }
             Part::One => return true,
         };
         (fields.iter()).any(|x| x.name == name && kind(kind_of(&x.ty, decls)))
@@ -666,6 +672,11 @@ fn invariants(
             .map(|f| f.name.clone())
             .collect()
     };
+    let elements = || scans.iter().map(|s| &s.elements);
+    let through: BTreeSet<(&str, &str)> =
+        (elements().flat_map(|e| e.through.iter().copied())).collect();
+    let loose: BTreeSet<&str> = elements().flat_map(|e| e.loose.iter().copied()).collect();
+    let shrunk: BTreeSet<&str> = elements().flat_map(|e| e.shrunk.iter().copied()).collect();
     let array = |t: &Type| matches!(resolve(t), Type::Array(_) | Type::SmallArray(..));
     let mut of: BTreeSet<RecordFact> = BTreeSet::new();
     for (name, d) in decls {
@@ -697,6 +708,7 @@ fn invariants(
                 of.insert(record_fact(parts));
             }
         }
+        of.extend(element_facts(fs, decls, &through, &loose, &shrunk));
     }
     for name in host {
         let ty = Type::Named(name.clone());
@@ -767,6 +779,8 @@ struct Scan<'b> {
     fills: Vec<FnId>,
     /// Whether a row builds a record or writes a field.
     builds: bool,
+    /// What the body does to elements and lengths ([`element_scan`]).
+    elements: ElementScan<'b>,
 }
 
 fn scan<'b>(b: &'b Body, decls: &HashMap<String, TypeDecl>, needs: &[(Place, i64)]) -> Scan<'b> {
@@ -843,14 +857,263 @@ fn scan<'b>(b: &'b Body, decls: &HashMap<String, TypeDecl>, needs: &[(Place, i64
         .filter(|(n, _)| parts.contains(n))
         .map(|(_, g)| g)
         .collect();
+    let elements = element_scan(b, decls);
     Scan {
         indexed,
         beside,
         lost,
         lengths,
         fills,
-        builds,
+        builds: builds || elements.stores,
+        elements,
     }
+}
+
+/// What one body does to the elements of record fields and to the lengths
+/// of fields, for [`element_facts`].
+#[derive(Default)]
+struct ElementScan<'b> {
+    /// Each `(f, g)` where a check indexes field `g` of a record name by an
+    /// element read from field `f` of the same name.
+    through: Vec<(&'b str, &'b str)>,
+    /// The fields whose elements a row may change other than by a store into
+    /// an element or a push the walk holds to the facts
+    /// ([`Walk::stored_element`]).
+    loose: Vec<&'b str>,
+    /// The fields a row may shorten.
+    shrunk: Vec<&'b str>,
+    /// Whether a row stores into an element of a record name's field.
+    stores: bool,
+}
+
+/// What `b` does to elements and lengths ([`ElementScan`]). A record
+/// literal is the walk's to check ([`Walk::built_elements`]), and so is a
+/// lambda, which is a body of its own.
+fn element_scan<'b>(b: &'b Body, decls: &HashMap<String, TypeDecl>) -> ElementScan<'b> {
+    let mut out = ElementScan::default();
+    let mut defs: Vec<Option<&Rhs>> = vec![None; b.names.len()];
+    let mut uses: Vec<u32> = vec![0; b.names.len()];
+    for (s, _) in rows(&b.stmts) {
+        if let St::Let(n, rhs) = s {
+            defs[n.index()] = Some(rhs);
+        }
+        for n in row_writes(s) {
+            uses[n.index()] += 1;
+        }
+    }
+    let tracked = |p: &Place| match p {
+        Place::Name(r) => {
+            vyrn_frontend::types::record_fields(&b.names[r.index()].ty, decls).is_some()
+        }
+        _ => false,
+    };
+    for (s, _) in rows(&b.stmts) {
+        match s {
+            St::Check(c) => {
+                let Guard::Index(Place::Field(r, g), Val::Name(i)) = &c.guard else {
+                    continue;
+                };
+                if let Some(Rhs::Read(Place::Elem(base, _))) = defs[i.index()] {
+                    if let Place::Field(r2, f) = &**base {
+                        if r2 == r && matches!(**r, Place::Name(_)) {
+                            out.through.push((f, g));
+                        }
+                    }
+                }
+            }
+            St::Store {
+                place: Place::Elem(base, _),
+                ..
+            } => {
+                if let Place::Field(r, f) = &**base {
+                    match tracked(r) {
+                        true => out.stores = true,
+                        false => out.loose.push(f),
+                    }
+                }
+            }
+            St::Store {
+                place: place @ Place::Field(r, x),
+                value,
+                ..
+            } => {
+                let (elements, length) = refill(&defs, &uses, place, value, tracked(r));
+                if !elements {
+                    out.loose.push(x);
+                }
+                if !length {
+                    out.shrunk.push(x);
+                }
+            }
+            _ => {}
+        }
+        let (St::Let(_, rhs) | St::Do { rhs, .. }) = s else {
+            continue;
+        };
+        let Rhs::Call {
+            callee, args, kind, ..
+        } = rhs
+        else {
+            continue;
+        };
+        // The checker passes a field or an element `modify` only to a
+        // builtin (`@pop`, `@swapRemove`); a row it may admit later that
+        // moves elements in place loses the field's facts.
+        let builtin = matches!(kind, Callee::Builtin | Callee::Reserved);
+        let len = match builtin {
+            true => length_rule(callee, args),
+            false => Length::Unknown,
+        };
+        for (a, _) in args.iter().filter(|(_, c)| *c != Capability::Read) {
+            match a {
+                Arg::Place(Place::Field(_, x)) => {
+                    if !grows(len) {
+                        out.shrunk.push(x);
+                    }
+                    if !(builtin && keeps_elements(callee, len)) {
+                        out.loose.push(x);
+                    }
+                }
+                Arg::Place(Place::Elem(base, _)) => {
+                    if let Place::Field(_, f) = &**base {
+                        out.loose.push(f);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    out
+}
+
+/// Whether a store of `value` into the field `place` keeps the field's
+/// elements to the facts, and whether it keeps the field's length from
+/// falling: `value` is the field's own array, taken or read, rebuilt only by
+/// builtins. The elements stay when each builtin is a `@push` into a tracked
+/// record, which the walk holds to the facts ([`Walk::stored_element`]), or
+/// keeps the elements it has; an empty array keeps the elements but may
+/// shorten the field. Every name of the chain is defined once and written by
+/// no other row.
+fn refill(
+    defs: &[Option<&Rhs>],
+    uses: &[u32],
+    place: &Place,
+    value: &Val,
+    tracked: bool,
+) -> (bool, bool) {
+    let Val::Name(mut cur) = value else {
+        return (false, false);
+    };
+    let (mut elements, mut length) = (true, true);
+    // Each step follows a definition, so a chain has at most `defs.len()`.
+    for _ in 0..=defs.len() {
+        if uses[cur.index()] > 1 {
+            return (false, false);
+        }
+        match defs[cur.index()] {
+            Some(Rhs::Take(p) | Rhs::Read(p)) if p == place => return (elements, length),
+            Some(Rhs::Make(Ctor::Array, parts)) if parts.is_empty() => return (elements, false),
+            Some(Rhs::Call {
+                callee,
+                args,
+                kind: Callee::Builtin | Callee::Reserved,
+                ..
+            }) => {
+                let Some((
+                    Arg::Val(Val::Name(t)) | Arg::Place(Place::Name(t)),
+                    Capability::Consume,
+                )) = args.first()
+                else {
+                    return (false, false);
+                };
+                let len = length_rule(callee, args);
+                length &= grows(len);
+                elements &= (callee == "@push" && tracked) || keeps_elements(callee, len);
+                cur = *t;
+            }
+            _ => return (false, false),
+        }
+    }
+    (false, false)
+}
+
+/// The names row `s` writes: the root of each place it stores into or takes
+/// from, and of each argument a call takes `modify` or `consume`.
+fn row_writes(s: &St) -> impl Iterator<Item = Name> + '_ {
+    let args = match s {
+        St::Let(_, Rhs::Call { args, .. })
+        | St::Do {
+            rhs: Rhs::Call { args, .. },
+            ..
+        } => &args[..],
+        _ => &[],
+    };
+    // `resized_places` holds each such argument that is a place.
+    let written = args.iter().filter_map(|(a, c)| match (a, c) {
+        (_, Capability::Read) => None,
+        (Arg::Val(Val::Name(n)), _) => Some(*n),
+        _ => None,
+    });
+    resized_places(s).filter_map(place_root).chain(written)
+}
+
+/// Whether a length effect never shortens.
+fn grows(len: Length) -> bool {
+    matches!(
+        len,
+        Length::Keeps | Length::GrowsByOne | Length::GrowsByLenOf(_)
+    )
+}
+
+/// Whether builtin `callee` with length effect `len` leaves its receiver
+/// only elements it held.
+fn keeps_elements(callee: &str, len: Length) -> bool {
+    let kept = prelude::builtin(callee).is_some_and(|r| {
+        matches!(
+            r.elements,
+            Elements::KeepsEachPosition | Elements::KeepsRange
+        )
+    });
+    kept && matches!(
+        len,
+        Length::Keeps | Length::ShrinksByOneIfNotEmpty | Length::SetToZero
+    )
+}
+
+/// Whether `ty` is an array of integers a term can stand for: no `UInt64`.
+fn int_elements(ty: &Type, decls: &HashMap<String, TypeDecl>) -> bool {
+    let t = vyrn_frontend::types::resolved(ty, decls);
+    t.elem().is_some_and(|e| kind_of(e, decls).is_int())
+}
+
+/// The element facts of a record type with fields `fs`, Houdini's first
+/// guess: for each `(f, g)` of `through`, every element of the integer array
+/// field `f` is at least zero and below the length of field `g`. A field of
+/// `loose` has no element fact and one of `shrunk` bounds none: a row may
+/// change the one's elements or shorten the other where no walk sees it.
+fn element_facts(
+    fs: &[Field],
+    decls: &HashMap<String, TypeDecl>,
+    through: &BTreeSet<(&str, &str)>,
+    loose: &BTreeSet<&str>,
+    shrunk: &BTreeSet<&str>,
+) -> Vec<RecordFact> {
+    let has = |x: &str, k: &dyn Fn(&Type) -> bool| fs.iter().any(|f| f.name == x && k(&f.ty));
+    let mut out = Vec::new();
+    for &(f, g) in through {
+        if f == g
+            || loose.contains(f)
+            || shrunk.contains(g)
+            || !has(f, &|t| int_elements(t, decls))
+            || !has(g, &|t| kind_of(t, decls) == Kind::Seq)
+        {
+            continue;
+        }
+        let (e, len) = (Part::Elem(f.to_string()), Part::Len(g.to_string()));
+        out.push(vec![(e.clone(), 1)]);
+        out.push(record_fact(vec![(e, -1), (len, 1), (Part::One, -1)]));
+    }
+    out
 }
 
 /// The lengths the checks of `b` need a constant lower bound on, each with
@@ -994,7 +1257,62 @@ fn built(body: &Body, decls: &HashMap<String, TypeDecl>, facts: &RecordFacts) ->
             }
         }
     }
+    element_writers(body, decls, facts, &mut out);
     out
+}
+
+/// Marks in `out` each record name whose field a row stores into, an
+/// element or the whole array, when a fact of its type bounds the field's
+/// elements, and then each value stored into an element or pushed: the walk
+/// holds them to the facts ([`Walk::stored_element`]).
+fn element_writers(
+    body: &Body,
+    decls: &HashMap<String, TypeDecl>,
+    facts: &RecordFacts,
+    out: &mut [bool],
+) {
+    let bounds = |r: Name, f: &str| {
+        let ty = &body.names[r.index()].ty;
+        let e = Part::Elem(f.to_string());
+        (facts.of_type(ty, decls).iter()).any(|x| x.iter().any(|(p, _)| *p == e))
+    };
+    let mut any = false;
+    for (s, _) in rows(&body.stmts) {
+        let St::Store { place, value, .. } = s else {
+            continue;
+        };
+        let (field, element) = match place {
+            Place::Elem(b, _) => (&**b, true),
+            p => (p, false),
+        };
+        let Place::Field(r, f) = field else { continue };
+        let Place::Name(r) = **r else { continue };
+        if bounds(r, f) {
+            any = true;
+            out[r.index()] = true;
+            if let (true, Val::Name(v)) = (element, value) {
+                out[v.index()] = true;
+            }
+        }
+    }
+    if !any {
+        return;
+    }
+    for (s, _) in rows(&body.stmts) {
+        let (St::Let(_, Rhs::Call { callee, args, .. })
+        | St::Do {
+            rhs: Rhs::Call { callee, args, .. },
+            ..
+        }) = s
+        else {
+            continue;
+        };
+        if callee == "@push" {
+            if let Some(v) = args.get(1).and_then(|(a, _)| root(a)) {
+                out[v.index()] = true;
+            }
+        }
+    }
 }
 
 /// Whether a part of `fact` is field `f`.
@@ -1497,6 +1815,10 @@ struct Walk<'a> {
     broken: BTreeSet<RecordFact>,
     /// While obliging: the facts [`Walk::restate`] assumed.
     assumed: BTreeSet<RecordFact>,
+    /// While obliging: per array name taken or read from a record name's
+    /// field, or rebuilt from one, that record name and field
+    /// ([`Walk::element_write`]).
+    pushed: BTreeMap<Name, (Name, String)>,
 }
 
 /// What the walk keeps about one name.
@@ -1651,6 +1973,7 @@ impl<'a> Walk<'a> {
             dirty: BTreeSet::new(),
             broken: BTreeSet::new(),
             assumed: BTreeSet::new(),
+            pushed: BTreeMap::new(),
         }
     }
 
@@ -1760,6 +2083,7 @@ impl<'a> Walk<'a> {
         let term = |p: &Part| match p {
             Part::Val(f) => self.field(&Place::Name(n), f).map(Lin::of),
             Part::Len(f) => self.col_term(n, f).map(Lin::of),
+            Part::Elem(_) => None,
             Part::One => Some(Lin::k(1)),
         };
         let lin = |fact: &RecordFact| {
@@ -1768,6 +2092,189 @@ impl<'a> Walk<'a> {
         (facts.of_type(ty, self.decls).into_iter())
             .filter_map(|f| Some((lin(f)?, f)))
             .collect()
+    }
+
+    /// The facts of record name `r`'s type that bound the elements of field
+    /// `f`, or of any field when `f` is `None`.
+    fn element_facts_of(&self, r: Name, f: Option<&str>) -> Vec<&'a RecordFact> {
+        let facts = self.sums.facts;
+        let bounds = |p: &Part| matches!(p, Part::Elem(x) if f.is_none_or(|f| x == f));
+        let none = !facts.of.iter().any(|x| x.iter().any(|(p, _)| bounds(p)));
+        if none || self.kind(r) != Kind::Other {
+            return Vec::new();
+        }
+        let ty = &self.body.names[r.index()].ty;
+        (facts.of_type(ty, self.decls).into_iter())
+            .filter(|x| x.iter().any(|(p, _)| bounds(p)))
+            .collect()
+    }
+
+    /// `fact` over the walk's terms of record name `r`, with `e` for the
+    /// element.
+    fn element_lin(&self, r: Name, fact: &RecordFact, e: &Lin) -> Option<Lin> {
+        fact.iter().try_fold(Lin::k(0), |l, (p, k)| {
+            let t = match p {
+                Part::Elem(_) => e.clone(),
+                Part::Len(g) => Lin::of(self.col_term(r, g)?),
+                Part::Val(x) => Lin::of(self.field(&Place::Name(r), x)?),
+                Part::One => Lin::k(1),
+            };
+            l.add(&t.scale(*k)?)
+        })
+    }
+
+    /// Assumes of `n`, an element read from the field `base`, the field's
+    /// element facts, which every write into it proved ([`invariants`]).
+    fn element_read(&mut self, st: &mut State, n: Name, base: &Place) {
+        let Place::Field(r, f) = base else { return };
+        let Place::Name(r) = **r else { return };
+        let e = Lin::of(Term::Val(n));
+        for fact in self.element_facts_of(r, Some(f)) {
+            if let Some(l) = self.element_lin(r, fact, &e) {
+                st.assume(&l);
+                if self.obliging {
+                    self.assumed.insert(fact.clone());
+                }
+            }
+        }
+    }
+
+    /// While obliging, drops each element fact of field `f` of record name
+    /// `r` that `v`, stored into the field, does not prove in `st`.
+    fn stored_element(&mut self, st: &State, r: Name, f: &str, v: Option<Val>) {
+        if !self.obliging || !self.record || st.dead {
+            return;
+        }
+        let e = v.and_then(|v| self.lin(&v));
+        let holds = |g: &Lin| st.ge0(g).is_some_and(|cert| cert.verify(st, g));
+        for fact in self.element_facts_of(r, Some(f)) {
+            let proved = (e.as_ref())
+                .and_then(|e| self.element_lin(r, fact, e))
+                .is_some_and(|g| holds(&g));
+            if !proved {
+                self.broken.insert(fact.clone());
+            }
+        }
+    }
+
+    /// While obliging, drops each element fact the record literal `n` of
+    /// `fields` from `parts` does not keep: the field's part is empty, or it
+    /// is a copy of the same field of a record name `src`, and each field the
+    /// fact bounds it by is at least as long as `src`'s.
+    fn built_elements(&mut self, st: &State, n: Name, fields: &[String], parts: &[Val]) {
+        if !self.record || st.dead {
+            return;
+        }
+        let part = |x: &str| match fields.iter().position(|y| y == x).map(|i| &parts[i]) {
+            Some(Val::Name(m)) => Some(*m),
+            _ => None,
+        };
+        let holds = |g: &Lin| st.ge0(g).is_some_and(|cert| cert.verify(st, g));
+        for fact in self.element_facts_of(n, None) {
+            let Some(Part::Elem(f)) = fact
+                .iter()
+                .map(|(p, _)| p)
+                .find(|p| matches!(p, Part::Elem(_)))
+            else {
+                continue;
+            };
+            let m = part(f);
+            let empty =
+                m.is_some_and(|m| holds(&Lin::of(Term::Len(m)).scale(-1).expect("one term")));
+            let from = m.and_then(|m| self.pushed.get(&m)).filter(|(_, x)| x == f);
+            let longer = |(src, _): &(Name, String)| {
+                fact.iter().all(|(p, _)| match p {
+                    Part::Len(g) => {
+                        let mine = part(g).map(|m| Lin::of(Term::Len(m)));
+                        let theirs = self.col_term(*src, g).map(Lin::of);
+                        mine.zip(theirs)
+                            .and_then(|(a, b)| a.sub(&b))
+                            .is_some_and(|d| holds(&d))
+                    }
+                    _ => true,
+                })
+            };
+            if !empty && !from.is_some_and(longer) {
+                self.broken.insert(fact.clone());
+            }
+        }
+    }
+
+    /// While obliging, follows the arrays taken or read from a record name's
+    /// field through the builtins that rebuild them ([`refill`]), and holds
+    /// each `@push` onto one to the field's element facts.
+    fn element_write(&mut self, st: &State, n: Name, rhs: &Rhs) {
+        if !self.obliging {
+            return;
+        }
+        match rhs {
+            Rhs::Take(Place::Field(r, f)) | Rhs::Read(Place::Field(r, f)) => {
+                if let Place::Name(r) = **r {
+                    self.pushed.insert(n, (r, f.clone()));
+                }
+            }
+            Rhs::Make(Ctor::Record(_, fields), parts) => self.built_elements(st, n, fields, parts),
+            Rhs::Call {
+                callee,
+                args,
+                kind: Callee::Builtin | Callee::Reserved,
+                ..
+            } => {
+                let from = match args.first() {
+                    // `x.f.copy()`: the copy holds the field's elements.
+                    Some((Arg::Place(Place::Field(r, f)), _)) if callee == "@copy" => match **r {
+                        Place::Name(r) => Some((r, f.clone())),
+                        _ => None,
+                    },
+                    a => (a.and_then(|(a, _)| root(a)))
+                        .and_then(|t| self.pushed.get(&t))
+                        .cloned(),
+                };
+                let Some((r, f)) = from else { return };
+                if callee == "@push" {
+                    let v = args.get(1).and_then(|(a, _)| match a {
+                        Arg::Val(v) => Some(v.clone()),
+                        Arg::Place(Place::Name(m)) => Some(Val::Name(*m)),
+                        Arg::Place(_) => None,
+                    });
+                    self.stored_element(st, r, &f, v);
+                }
+                self.pushed.insert(n, (r, f));
+            }
+            _ => {}
+        }
+    }
+
+    /// Forgets which field each name `s` writes held the elements of
+    /// ([`Walk::element_write`]), and every such field of a record name `s`
+    /// replaces or hands a call to write whole: the record's bounding field
+    /// may then be another array.
+    fn unpush(&mut self, s: &St) {
+        if !self.obliging {
+            return;
+        }
+        for n in row_writes(s) {
+            self.pushed.remove(&n);
+        }
+        let whole: Vec<Name> = match s {
+            St::Store {
+                place: Place::Name(r),
+                ..
+            } => vec![*r],
+            St::Let(_, Rhs::Call { args, .. })
+            | St::Do {
+                rhs: Rhs::Call { args, .. },
+                ..
+            } => (args.iter())
+                .filter(|(_, c)| *c != Capability::Read)
+                .filter_map(|(a, _)| match a {
+                    Arg::Place(Place::Name(r)) | Arg::Val(Val::Name(r)) => Some(*r),
+                    _ => None,
+                })
+                .collect(),
+            _ => Vec::new(),
+        };
+        self.pushed.retain(|_, (r, _)| !whole.contains(r));
     }
 
     /// Assumes the [`RecordFacts`] of record name `n`, whose value a walk of
@@ -2035,6 +2542,7 @@ impl<'a> Walk<'a> {
                 continue;
             }
             st = self.stmt(st, s);
+            self.unpush(s);
         }
         st
     }
@@ -2079,6 +2587,13 @@ impl<'a> Walk<'a> {
             St::Store { place, value, .. } => {
                 if let Val::Name(m) = value {
                     self.keeps(&st, *m);
+                }
+                if let Place::Elem(base, _) = &*place {
+                    if let Place::Field(r, f) = &**base {
+                        if let Place::Name(r) = **r {
+                            self.stored_element(&st, r, f, Some(value.clone()));
+                        }
+                    }
                 }
                 if let Place::Name(n) = place {
                     // The value the store displaces is released.
@@ -2324,6 +2839,7 @@ impl<'a> Walk<'a> {
     fn bind(&mut self, st: &mut State, n: Name, rhs: &Rhs) {
         let o = self.origin_of(n, rhs);
         self.slot[n.index()].origin = self.slot[n.index()].origin.join(o);
+        self.element_write(st, n, rhs);
         st.kill(n);
         // A literal's fields are its parts', not the facts'.
         if let Rhs::Make(Ctor::Record(..), _) = rhs {
@@ -2360,6 +2876,9 @@ impl<'a> Walk<'a> {
             }
             Rhs::Make(Ctor::Array, parts) => {
                 st.define(Term::Len(n), &Lin::k(parts.len() as i64));
+            }
+            Rhs::Read(Place::Elem(base, _)) if self.kind(n).is_int() => {
+                self.element_read(st, n, base);
             }
             Rhs::Make(Ctor::Record(_, fields), parts) if self.rule(n).is_none() => {
                 for (f, v) in fields.iter().zip(parts) {
