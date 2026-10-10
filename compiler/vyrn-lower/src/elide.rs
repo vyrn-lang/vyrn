@@ -363,11 +363,20 @@ pub fn summaries<'a>(
     bodies.sort_by_key(|(f, _)| f.index());
     // A body's name count weighs its work.
     let weigh = |(_, b): &(FnId, &Body)| b.names.len();
+    let needed: BTreeSet<i64> =
+        in_parallel(&bodies, weigh, || (), |(), (_, b)| needed_lengths(b, decls))
+            .into_iter()
+            .flatten()
+            .map(|(_, c)| c)
+            .collect();
     let (values, scans): (Vec<Summary>, Vec<Option<Scan>>) = in_parallel(
         &bodies,
         weigh,
         || (),
-        |(), (_, b)| (templates(b, decls), records.map(|_| scan(b, decls))),
+        |(), (_, b)| {
+            let scan = records.map(|_| scan(b, decls));
+            (templates(b, decls, &needed), scan)
+        },
     )
     .into_iter()
     .unzip();
@@ -695,6 +704,104 @@ fn scan<'b>(b: &'b Body, decls: &HashMap<String, TypeDecl>) -> Scan<'b> {
     }
 }
 
+/// The lengths the checks of `b` need a constant lower bound on, each with
+/// the place or name whose length it bounds: one past an index that is an
+/// integer literal, a mask `x & m` by a literal, or an unsigned integer
+/// narrower than 64 bits converted; and the literal a clause bounds a
+/// length below by. None is above `LENGTH_LIMIT`, which no length passes.
+fn needed_lengths(b: &Body, decls: &HashMap<String, TypeDecl>) -> Vec<(Place, i64)> {
+    let lit = |v: &Val| match v {
+        Val::Lit(Lit::Int(i)) => Some(*i),
+        Val::Lit(Lit::Byte(i)) => Some(i64::from(*i)),
+        _ => None,
+    };
+    let mut out = Vec::new();
+    // The checks that index by a name, read against the name's `let` below.
+    let mut by_name: Vec<(&Place, Name)> = Vec::new();
+    for (s, _) in rows(&b.stmts) {
+        let St::Check(c) = s else { continue };
+        match &c.guard {
+            Guard::Index(p, Val::Name(i)) => by_name.push((p, *i)),
+            Guard::Index(p, i) => out.extend(lit(i).map(|t| (p.clone(), t.saturating_add(1)))),
+            Guard::Clause { atoms, .. } => {
+                for a in atoms {
+                    // `n.length >= c` or `n.length > c`, either way round.
+                    let (len, k, strict) = match (&a.l.part, &a.r.part, a.op) {
+                        (Some(_), None, BinOp::GtEq) => (&a.l, &a.r, false),
+                        (Some(_), None, BinOp::Gt) => (&a.l, &a.r, true),
+                        (None, Some(_), BinOp::LtEq) => (&a.r, &a.l, false),
+                        (None, Some(_), BinOp::Lt) => (&a.r, &a.l, true),
+                        _ => continue,
+                    };
+                    let (Val::Name(n), Some("length" | "byteLength")) =
+                        (&len.of, len.part.as_deref())
+                    else {
+                        continue;
+                    };
+                    let c = lit(&k.of).map(|c| c.saturating_add(i64::from(strict)));
+                    out.extend(c.map(|c| (Place::Name(*n), c)));
+                }
+            }
+            _ => {}
+        }
+    }
+    if !by_name.is_empty() {
+        let top = |rhs: &Rhs| match rhs {
+            Rhs::Prim(Op::Bin(BinOp::BitAnd), vs, _) => vs.iter().find_map(lit),
+            Rhs::Prim(Op::Conv(_), vs, _) => match vs.as_slice() {
+                [Val::Name(x)] => match kind_of(&b.names[x.index()].ty, decls) {
+                    Kind::Int(bits, false) if bits < 64 => Some((1i64 << bits) - 1),
+                    _ => None,
+                },
+                _ => None,
+            },
+            _ => None,
+        };
+        for (s, _) in rows(&b.stmts) {
+            let St::Let(n, rhs) = s else { continue };
+            for (p, _) in by_name.iter().filter(|(_, i)| i == n) {
+                out.extend(top(rhs).map(|t| ((*p).clone(), t.saturating_add(1))));
+            }
+        }
+    }
+    let limit = vyrn_frontend::trap::LENGTH_LIMIT as i64;
+    out.retain(|(_, c)| (2..=limit).contains(c));
+    out
+}
+
+/// The lengths `b` can give an array it returns as a constant: the count
+/// of the array literal it returns, and the bound of a loop bound by a
+/// literal ([`literal_test`]) that stores to the returned array, which may
+/// push once a turn.
+fn made_lengths(b: &Body) -> BTreeSet<i64> {
+    let returned: BTreeSet<Name> = (rows(&b.stmts))
+        .filter_map(|(s, _)| match s {
+            St::Return {
+                value: Some(Val::Name(n)),
+                ..
+            } => Some(*n),
+            _ => None,
+        })
+        .collect();
+    let mut out = BTreeSet::new();
+    for (s, _) in rows(&b.stmts) {
+        match s {
+            St::Let(n, Rhs::Make(Ctor::Array, parts)) if returned.contains(n) => {
+                out.insert(parts.len() as i64);
+            }
+            St::Loop { body, .. } => {
+                let mut stored = BTreeSet::new();
+                stores(body, &mut stored);
+                if !stored.is_disjoint(&returned) {
+                    out.extend(literal_test(body).map(|(.., c)| c));
+                }
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
 /// Per name of `body`, whether it is a record a literal builds with a fact,
 /// or a record whose field a fact names a row writes.
 fn built(body: &Body, decls: &HashMap<String, TypeDecl>, facts: &RecordFacts) -> Vec<bool> {
@@ -909,8 +1016,9 @@ fn direct_call(rhs: &Rhs) -> Option<FnId> {
 /// value or an array's length; any other result, a String's included,
 /// states nothing. The parameters are those the body never writes. An
 /// `UInt64` is left out: the facts read its values above `i64::MAX` as
-/// negatives.
-fn templates(body: &Body, decls: &HashMap<String, TypeDecl>) -> Summary {
+/// negatives. An array result is at least `c` long for each `c` of
+/// `needed` ([`needed_lengths`]) the body can make ([`made_lengths`]).
+fn templates(body: &Body, decls: &HashMap<String, TypeDecl>, needed: &BTreeSet<i64>) -> Summary {
     let params: Vec<Kind> = (body.params.iter())
         .map(|p| kind_of(&body.names[p.index()].ty, decls))
         .collect();
@@ -960,6 +1068,8 @@ fn templates(body: &Body, decls: &HashMap<String, TypeDecl>) -> Summary {
         } else {
             let r = Lin::of(r);
             post.extend(seqs.iter().filter_map(|a| r.sub(a)));
+            let made = made_lengths(body);
+            post.extend(needed.intersection(&made).filter_map(|c| r.plus(-c)));
         }
     }
     Summary {
@@ -2641,7 +2751,9 @@ impl<'a> Walk<'a> {
         // The counter of a loop bound by a literal is at least the bound at
         // the exit. A length the counter bounds then has the literal as its
         // own bound, which a goal would otherwise need a third premise for.
-        if let Some((_, k)) = literal_test(body).filter(|(_, k)| self.slot[k.index()].relevant) {
+        if let Some((_, k, _)) =
+            literal_test(body).filter(|(_, k, _)| self.slot[k.index()].relevant)
+        {
             let k = Term::Val(k);
             let low = (exit.facts.iter()).find(|f| f.terms == [(k, 1)]).cloned();
             let length = |f: &Lin| (f.terms.iter()).any(|(t, _)| matches!(t, Term::Len(_)));
@@ -2665,7 +2777,7 @@ impl<'a> Walk<'a> {
     /// candidate only where the entry and every turn prove it.
     fn in_step(&self, body: &[St], stored: &BTreeSet<Name>) -> Vec<Lin> {
         let relevant = |n: &Name| self.slot[n.index()].relevant;
-        let counter = literal_test(body).map(|(_, k)| k).filter(relevant);
+        let counter = literal_test(body).map(|(_, k, _)| k).filter(relevant);
         let term = |n: &Name| match Some(*n) == counter {
             true => Some(Term::Val(*n)),
             false => (relevant(n) && self.kind(*n) == Kind::Seq).then_some(Term::Len(*n)),
@@ -2920,10 +3032,11 @@ fn writes_of(ss: &[St], n: Name) -> usize {
         .sum()
 }
 
-/// The test name and the counter `k` of a loop `body` that opens with
-/// `if k < c else break` or `if k <= c else break`, `c` an integer literal.
-fn literal_test(body: &[St]) -> Option<(Name, Name)> {
-    let [St::Let(t, Rhs::Prim(Op::Bin(BinOp::Lt | BinOp::LtEq), vs, _)), St::If {
+/// The test name, the counter `k` and its bound `c` of a loop `body` that
+/// opens with `if k < c else break`, or `if k <= c - 1 else break`, from an
+/// integer literal: `k` is below `c` on every turn.
+fn literal_test(body: &[St]) -> Option<(Name, Name, i64)> {
+    let [St::Let(t, Rhs::Prim(Op::Bin(op @ (BinOp::Lt | BinOp::LtEq)), vs, _)), St::If {
         cond: Val::Name(c),
         then,
         els,
@@ -2933,7 +3046,14 @@ fn literal_test(body: &[St]) -> Option<(Name, Name)> {
         return None;
     };
     match (vs.as_slice(), &then[..], &els[..]) {
-        ([Val::Name(k), Val::Lit(Lit::Int(_))], [], [St::Break { .. }]) if c == t => Some((*t, *k)),
+        ([Val::Name(k), Val::Lit(Lit::Int(n))], [], [St::Break { .. }]) if c == t => {
+            let bound = if *op == BinOp::Lt {
+                Some(*n)
+            } else {
+                n.checked_add(1)
+            };
+            Some((*t, *k, bound?))
+        }
         _ => None,
     }
 }
@@ -3174,7 +3294,7 @@ fn mark(
             St::Loop { body: l, .. } | St::Block { body: l, .. } => {
                 // A loop bound by a literal counts what it stores
                 // ([`Walk::in_step`]).
-                if let Some((t, _)) = literal_test(l) {
+                if let Some((t, ..)) = literal_test(l) {
                     let mut stored = BTreeSet::new();
                     stores(l, &mut stored);
                     let seq = |n: &Name| kind_of(&body.names[n.index()].ty, decls) == Kind::Seq;

@@ -256,6 +256,78 @@ fn w(n: Int64) -> Int64 {
     assert!(failures.is_empty(), "{}", failures.join("\n\n"));
 }
 
+/// A function that returns a table of a literal size states that length
+/// of its result; a path that returns a shorter one, or a `modify` call that
+/// shortens it, keeps the caller's check.
+#[test]
+fn a_result_of_a_literal_size_proves_its_callers_index() {
+    let table = "fn table(n: Int64) -> Array<Int64> {
+    let mut t: Array<Int64> = []
+    let mut k = 0
+    while k < 8 {
+        t.push(k + n)
+        k = k + 1
+    }
+    return t
+}
+";
+    let proof = format!(
+        "{table}fn w(x: Int64) -> Int64 {{
+    let t = table(x)
+    return t[x & 7]
+}}
+"
+    );
+    assert_eq!(verdicts(&proof, "w"), ["proved array-index"]);
+    let (err, _) = oracle(&proof, "    print(w(15).toString())", "w");
+    assert_eq!(err, "");
+    let witnesses = [
+        "fn table(n: Int64) -> Array<Int64> {
+    if n > 10 {
+        return [1, 2, 3]
+    }
+    let mut t: Array<Int64> = []
+    let mut k = 0
+    while k < 8 {
+        t.push(k)
+        k = k + 1
+    }
+    return t
+}
+fn w(x: Int64) -> Int64 {
+    let t = table(x)
+    return t[x & 7]
+}
+"
+        .to_string(),
+        format!(
+            "{table}fn empty(t: modify Array<Int64>) {{
+    t.clear()
+}}
+fn w(x: Int64) -> Int64 {{
+    let mut t = table(x)
+    empty(t)
+    return t[x & 7]
+}}
+"
+        ),
+    ];
+    let mut failures = Vec::new();
+    for src in &witnesses {
+        let rows = verdicts(src, "w");
+        if rows != ["check array-index"] {
+            failures.push(format!("{src}\nrows: {rows:?}"));
+        }
+        let (err, _) = oracle(src, "    print(w(15).toString())", "w");
+        if !err.contains("array index 7 out of bounds")
+            || err.contains(vyrn_frontend::trap::PROVED_CHECK_FAILED)
+        {
+            failures.push(format!("{src}\nran: {err}"));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n\n"));
+}
+
 #[test]
 fn a_loop_condition_under_and_proves_its_index() {
     let src = "fn w(xs: Array<Int64>) -> Int64 {
