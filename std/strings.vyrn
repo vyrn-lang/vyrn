@@ -120,11 +120,11 @@ export fn split(s: String, sep: String) -> Array<String> {
     }
     // One skip table for every match.
     let prepared = worthPreparing(sep, s.byteLength)
-    let skip = if prepared { skipTable(sep, s.byteLength) } else { [] }
+    let skip: Array<UInt32> = if prepared { skipTable(sep, s.byteLength) } else { [] }
     let mut start = 0
     let mut i = 0
     while i + sl <= s.byteLength {
-        let at = if prepared { findSkipping(s, sep, i, skip.copy()) } else { findPlain(s, sep, i) }
+        let at = if prepared { findSkipping(s, sep, i, skip) } else { findPlain(s, sep, i) }
         if at < 0 {
             i = s.byteLength + 1
         } else {
@@ -248,11 +248,11 @@ export fn replace(s: String, from: String, to: String) -> String {
     }
     let mut out = ""
     let prepared = worthPreparing(from, s.byteLength)
-    let skip = if prepared { skipTable(from, s.byteLength) } else { [] }
+    let skip: Array<UInt32> = if prepared { skipTable(from, s.byteLength) } else { [] }
     let mut start = 0
     let mut i = 0
     while i + fl <= s.byteLength {
-        let at = if prepared { findSkipping(s, from, i, skip.copy()) } else { findPlain(s, from, i) }
+        let at = if prepared { findSkipping(s, from, i, skip) } else { findPlain(s, from, i) }
         if at < 0 {
             i = s.byteLength + 1
         } else {
