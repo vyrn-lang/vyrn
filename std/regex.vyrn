@@ -39,7 +39,7 @@ let opMatch = 2
 /// Four words and not an array, so a membership test reads no array and has no
 /// bounds to check; and one per instruction, so the class of instruction `pc`
 /// is `cls[pc]`, in bounds wherever `op[pc]` is.
-type ByteSet = { w0: Int64, w1: Int64, w2: Int64, w3: Int64 }
+type ByteSet = { w0: UInt64, w1: UInt64, w2: UInt64, w3: UInt64 }
 
 export type Regex = {
     op: Array<Int64>,
@@ -62,7 +62,7 @@ fn noBytes() -> ByteSet {
 
 /// `c` is a byte, 0 to 255.
 fn addByte(s: modify ByteSet, c: Int64) {
-    let bit = 1 << (c & 63)
+    let bit = UInt64(1) << UInt64(c & 63)
     if c < 64 {
         s.w0 = s.w0 | bit
     } else if c < 128 {
@@ -77,7 +77,7 @@ fn addByte(s: modify ByteSet, c: Int64) {
 /// `c` is a byte, 0 to 255.
 fn hasByte(s: ByteSet, c: Int64) -> Bool {
     let w = if c < 64 { s.w0 } else if c < 128 { s.w1 } else if c < 192 { s.w2 } else { s.w3 }
-    return ((w >> (c & 63)) & 1) != 0
+    return ((w >> UInt64(c & 63)) & 1) != 0
 }
 
 // Recursive descent that emits as it goes. Each level answers a fragment: its
@@ -218,12 +218,13 @@ fn parseAtom(bd: modify Builder) -> Frag {
         return Frag { start: 0, holes: [] }
     }
     bd.at = bd.at + 1
+    let all: UInt64 = 18446744073709551615
     let mut k = noBytes()
     if c == '[' {
         k = bracketClass(bd)
     } else if c == '.' {
         // Every byte but `\n`.
-        k = ByteSet { w0: ~(1 << 10), w1: -1, w2: -1, w3: -1 }
+        k = ByteSet { w0: ~(UInt64(1) << 10), w1: all, w2: all, w3: all }
     } else if c == 92 {
         if bd.at >= bd.pat.length {
             bd.err = "a backslash at the end of the pattern"
@@ -240,7 +241,7 @@ fn parseAtom(bd: modify Builder) -> Frag {
     // every continuation byte after it. A `String` is valid UTF-8, so the
     // longest match takes exactly the character's bytes. A byte alone would
     // let a match end inside a character, and cutting there traps.
-    if k.w2 != -1 || k.w3 != -1 {
+    if k.w2 != all || k.w3 != all {
         return Frag { start: pc, holes: [pc * 2 + 1] }
     }
     let mut lead = ByteSet { w0: k.w0, w1: k.w1, w2: 0, w3: 0 }
@@ -250,7 +251,7 @@ fn parseAtom(bd: modify Builder) -> Frag {
         x = x + 1
     }
     bd.cls[pc] = lead
-    let cont = emit(bd, opClass, 0 - 1, 0, ByteSet { w0: 0, w1: 0, w2: -1, w3: 0 })
+    let cont = emit(bd, opClass, 0 - 1, 0, ByteSet { w0: 0, w1: 0, w2: all, w3: 0 })
     let sp = emit(bd, opSplit, cont, 0, noBytes())
     bd.a[pc] = cont
     bd.b[cont] = sp
