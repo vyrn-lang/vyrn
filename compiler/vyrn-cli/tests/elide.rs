@@ -268,6 +268,50 @@ fn a_bound_by_a_difference_of_lengths_keeps_the_counter_exact() {
     );
 }
 
+/// `std/strpred`'s `findSkipping` states `from >= 0` and a table of at least
+/// 256 entries, so its reads are proved: an entry is a `UInt32`, so the step
+/// `i + entry` is exact and keeps `i >= 0`. A call the caller's facts do not
+/// show keeps its clause check and traps there: a short table, a negative
+/// start, and a table a callee shortened through `modify`.
+#[test]
+fn a_skip_table_clause_proves_find_skippings_reads() {
+    let src = "import { findSkipping, skipTable } from \"std/strpred\"
+fn shorten(t: modify Array<UInt32>) {
+    t.clear()
+}
+fn found(s: String) -> Int64 {
+    return findSkipping(s, \"ab\", 0, skipTable(\"ab\", 1000))
+}
+fn short(s: String) -> Int64 {
+    let t: Array<UInt32> = [UInt32(1)]
+    return findSkipping(s, \"ab\", 0, t)
+}
+fn below(s: String, from: Int64) -> Int64 {
+    return findSkipping(s, \"ab\", from, skipTable(\"ab\", 1000))
+}
+fn shortened(s: String) -> Int64 {
+    let mut t = skipTable(\"ab\", 1000)
+    shorten(t)
+    return findSkipping(s, \"ab\", 0, t)
+}
+";
+    let print = |call: &str| format!("    print({call}.toString())");
+    let (err, rows) = oracle(src, &print("found(\"xxaxab\")"), "findSkipping");
+    let verdicts: Vec<&str> = rows.iter().map(|r| r.split(' ').nth(3).unwrap()).collect();
+    assert_eq!((err.as_str(), verdicts), ("", vec!["proved"; 4]));
+    for (call, param, row) in [
+        ("short(\"ab\")", "skip", "10 1 where-arg kept 1"),
+        ("below(\"ab\", 0 - 1)", "from", "13 0 where-arg kept 1"),
+        ("shortened(\"ab\")", "skip", "18 1 where-arg kept 1"),
+    ] {
+        let body = call.split('(').next().unwrap();
+        let (err, rows) = oracle(src, &print(call), body);
+        let says = format!("validation failed for parameter `{param}` of `findSkipping`");
+        assert_eq!(err, format!("error: {says}\n"), "{call}");
+        assert!(rows.iter().any(|r| r == row), "{call}: {rows:?}");
+    }
+}
+
 #[test]
 fn a_disequality_proves_its_divisor() {
     let src = "fn w(a: Int64, b: Int64) -> Int64 {
