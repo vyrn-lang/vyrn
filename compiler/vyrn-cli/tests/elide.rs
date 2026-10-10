@@ -701,6 +701,32 @@ fn shortened(s: String) -> Int64 {
     }
 }
 
+/// `std/regex`'s `nextMatch` states `from >= 0`, so a search from a negative
+/// start traps at the call, not at the first read of the haystack.
+#[test]
+fn a_negative_match_start_traps_at_the_call() {
+    let src = "import { compile, find } from \"std/regex\"
+fn at(from: Int64) -> Int64 {
+    let re = match compile(\"ab\") {
+        Ok(r) => r,
+        Err(w) => panic(\"compile: \\{w}\"),
+    }
+    return match find(re, \"xxab\", from) { Some(m) => m.at, None => 0 - 1 }
+}
+";
+    let (err, _) = oracle(src, "    print(at(0).toString())", "at");
+    assert_eq!(err, "");
+    let (err, rows) = oracle(src, "    print(at(0 - 1).toString())", "find");
+    assert_eq!(
+        err,
+        "error: validation failed for parameter `from` of `nextMatch`\n"
+    );
+    assert!(
+        rows.iter().any(|r| r.ends_with("where-arg kept 1")),
+        "{rows:?}"
+    );
+}
+
 #[test]
 fn a_disequality_proves_its_divisor() {
     let src = "fn w(a: Int64, b: Int64) -> Int64 {
