@@ -328,6 +328,116 @@ fn w(x: Int64) -> Int64 {{
     assert!(failures.is_empty(), "{}", failures.join("\n\n"));
 }
 
+/// A function whose loop, bound by an integer parameter, pushes to or
+/// stores into every index of the array it returns states that its result is
+/// at least that long; a path that makes one entry fewer, a store the loop
+/// guards by the length, or a `modify` call that shortens the result keeps
+/// the caller's check.
+#[test]
+fn a_result_as_long_as_a_parameter_proves_its_callers_index() {
+    let filled = "fn filled(n: Int64) -> Array<Int64> {
+    let mut t: Array<Int64> = []
+    let mut i = 0
+    while i < n {
+        t.push(i)
+        i = i + 1
+    }
+    return t
+}
+";
+    let sum = "fn w(x: Int64) -> Int64 {
+    let t = make(x)
+    let mut s = 0
+    let mut i = 0
+    while i < x {
+        s = s + t[i]
+        i = i + 1
+    }
+    return s
+}
+";
+    let stored = "fn make(n: Int64) -> Array<Int64> {
+    let mut t = filled(n)
+    let mut i = 0
+    while i < n {
+        t[i] = i * 2
+        i = i + 1
+    }
+    return t
+}
+";
+    for proof in [
+        format!("{}{sum}", filled.replace("filled", "make")),
+        format!("{filled}{stored}{sum}"),
+    ] {
+        assert_eq!(verdicts(&proof, "w"), ["proved array-index"], "{proof}");
+        let (err, _) = oracle(&proof, "    print(w(5).toString())", "w");
+        assert_eq!(err, "");
+    }
+    let witnesses = [
+        format!(
+            "fn make(n: Int64) -> Array<Int64> {{
+    let mut t: Array<Int64> = []
+    let mut i = 0
+    if n > 3 {{
+        i = 1
+    }}
+    while i < n {{
+        t.push(i)
+        i = i + 1
+    }}
+    return t
+}}
+{sum}"
+        ),
+        format!(
+            "{filled}fn make(n: Int64) -> Array<Int64> {{
+    let mut t = filled(n - 1)
+    let mut i = 0
+    while i < n {{
+        if i < t.length {{
+            t[i] = i
+        }}
+        i = i + 1
+    }}
+    return t
+}}
+{sum}"
+        ),
+        format!(
+            "{filled}fn empty(t: modify Array<Int64>) {{
+    t.pop()
+}}
+fn w(x: Int64) -> Int64 {{
+    let mut t = filled(x)
+    empty(t)
+    let mut s = 0
+    let mut i = 0
+    while i < x {{
+        s = s + t[i]
+        i = i + 1
+    }}
+    return s
+}}
+"
+        ),
+    ];
+    let mut failures = Vec::new();
+    for src in &witnesses {
+        let rows = verdicts(src, "w");
+        if rows != ["check array-index"] {
+            failures.push(format!("{src}\nrows: {rows:?}"));
+        }
+        let (err, _) = oracle(src, "    print(w(5).toString())", "w");
+        if !err.contains("array index 4 out of bounds")
+            || err.contains(vyrn_frontend::trap::PROVED_CHECK_FAILED)
+        {
+            failures.push(format!("{src}\nran: {err}"));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n\n"));
+}
+
 #[test]
 fn a_loop_condition_under_and_proves_its_index() {
     let src = "fn w(xs: Array<Int64>) -> Int64 {
