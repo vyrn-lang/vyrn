@@ -19,7 +19,7 @@ pull request.
 ### Types
 
 - Records are structural with width subtyping: a record with more fields is usable where fewer are expected. Types describe shape, not identity.
-- No casts and no `as` on values. A conversion is structural widening, a compile-time proof, or a checked narrowing that returns `Option` or `Result`, so memory is never reinterpreted.
+- No casts and no `as` on values. A conversion is a call named after the target type, and integer arithmetic wraps at the type's width (`language.md`), so memory is never reinterpreted.
 - The type transformers `Omit`, `Pick`, `Merge`, `Partial` and `A & B` are erased before lowering. `Readonly<T>` is `T`, because records are immutable.
 - Every numeric type names its size (`Int8` to `Int64`, `UInt8` to `UInt64`, `Float32`, `Float64`). There is no unsized `Int` or `Float` and no implicit widening.
 - Validation lives in the type (`type Age = Int64 where value >= 18`). A constant is proven at compile time at no cost, anything else is checked at every value boundary, and a raw value never becomes the refined type without construction.
