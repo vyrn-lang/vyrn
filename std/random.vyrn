@@ -7,7 +7,7 @@
 /// tests, not for secrets.
 
 /// PRNG state. Copy it to fork a reproducible stream.
-export type Rng = { state: Int64 }
+export type Rng = { state: UInt64 }
 
 /// One draw: the value and the advanced generator.
 export type Draw = { value: Int64, rng: Rng }
@@ -21,10 +21,10 @@ export fn randomSeed() -> Int64 {
     return hostRandomSeed()
 }
 
-/// A generator seeded by any `Int64`. SplitMix64 has no bad states, so the seed
-/// is the initial state.
+/// A generator seeded by any `Int64`. SplitMix64 has no bad states, so the
+/// seed's bit pattern is the initial state.
 export fn seededRng(seed: Int64) -> Rng {
-    return Rng { state: seed }
+    return Rng { state: UInt64(seed) }
 }
 
 /// Advances the generator once: `value` covers the full `Int64` range. Pure, so
@@ -35,12 +35,12 @@ export fn nextInt(rng: Rng) -> Draw {
     let gamma: UInt64 = 11400714819323198485 // 0x9E3779B97F4A7C15
     let c1: UInt64 = 13787848793156543929 // 0xBF58476D1CE4E5B9
     let c2: UInt64 = 10723151780598845931 // 0x94D049BB133111EB
-    let s: UInt64 = UInt64(rng.state) + gamma
+    let s = rng.state + gamma
     let mut z: UInt64 = s
     z = (z ^ (z >> 30)) * c1
     z = (z ^ (z >> 27)) * c2
     z = z ^ (z >> 31)
-    return Draw { value: Int64(z), rng: Rng { state: Int64(s) } }
+    return Draw { value: Int64(z), rng: Rng { state: s } }
 }
 
 /// A draw in the inclusive range `[lo, hi]`, or `lo` if the range is empty.
@@ -72,7 +72,7 @@ test "nextInRange covers the full Int64 range without trapping" {
     // span = 2^64, which neither Int64 nor UInt64 can hold.
     let d = nextInRange(seededRng(42), int64Min(), 9223372036854775807)
     assertEq(d.value, 4456085495900499605)
-    assertEq(d.rng.state, 0 - 7046029254386353089)
+    assertEq(d.rng.state, 11400714819323198527)
 }
 
 test "nextInRange stays deterministic and in range on wide spans" {
