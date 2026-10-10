@@ -695,6 +695,7 @@ fn table() -> Vec<Builtin> {
             .method("copy", &[Shape::Str, Array, ArrayN, SmallArray, Map, Record, Enum])
             .spec(Spec::OwnType)
             .fresh()
+            .resizes(Length::Keeps, Elements::KeepsEachPosition)
             .hover("x.copy() -> T — a value of the receiver's type that shares no heap with it; deep and structural. A handle copies as the value it is, so the copy names the same thing"),
         // Insert-or-add in one probe. The key is read: a miss copies it in.
         b("@tally")
@@ -1402,7 +1403,8 @@ mod tests {
     }
 
     /// A pass that removes a bounds check reads the length effect; an array
-    /// row that resizes and states none makes it forget every length.
+    /// row that resizes and states none makes it forget every length. A copy
+    /// states that it keeps its receiver's length.
     #[test]
     fn every_array_resizing_row_states_its_length_effect() {
         for b in builtins() {
@@ -1412,7 +1414,7 @@ mod tests {
                     .and_then(|f| f.params.first())
                     .is_some_and(|p| matches!(p.ty, Type::Array(_)));
             assert_eq!(
-                resizes,
+                resizes || b.spec == Some(Spec::OwnType),
                 b.length != Length::Unknown,
                 "`{}` resizes an array: {resizes}",
                 b.name

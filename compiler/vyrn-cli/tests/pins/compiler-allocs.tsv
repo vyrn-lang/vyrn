@@ -31,8 +31,8 @@ build site/export.vyrn	placer: report	22367
 build site/export.vyrn	placer: facts rebuild	277614
 build site/export.vyrn	placer: facts: rebuilt	3211
 build site/export.vyrn	codegen	37393
-build site/export.vyrn	codegen: checks	2496352
-build site/export.vyrn	elide: summaries	1546636
+build site/export.vyrn	codegen: checks	2522064
+build site/export.vyrn	elide: summaries	2035645
 build site/export.vyrn	codegen: signatures	25174
 build site/export.vyrn	codegen: bodies	1746502
 build site/export.vyrn	codegen: drain	34830
@@ -81,7 +81,7 @@ check examples/simdbench.vyrn	check	6960
 check examples/simdbench.vyrn	check: bodies	13049
 check examples/simdbench.vyrn	synthesize	2
 check examples/simdbench.vyrn	types::decl_map	705
-check examples/simdbench.vyrn	movecheck	1352
+check examples/simdbench.vyrn	movecheck	1395
 check examples/simdbench.vyrn	own: analyze_now	412
 check examples/simdbench.vyrn	placer	11024
 check examples/simdbench.vyrn	placer: lower_with	2487
@@ -109,7 +109,7 @@ check examples/vlog.vyrn	check	67775
 check examples/vlog.vyrn	check: bodies	65494
 check examples/vlog.vyrn	types::decl_map	2154
 check examples/vlog.vyrn	synthesize	3343
-check examples/vlog.vyrn	movecheck	1935
+check examples/vlog.vyrn	movecheck	1990
 check examples/vlog.vyrn	own: analyze_now	657
 check examples/vlog.vyrn	own: Owned::new	3
 check examples/vlog.vyrn	placer	21332
