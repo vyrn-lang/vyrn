@@ -19,7 +19,7 @@ build site/export.vyrn	movecheck	13112
 build site/export.vyrn	own: analyze_now	3764
 build site/export.vyrn	own: Owned::new	7
 build site/export.vyrn	placer	169800
-build site/export.vyrn	placer: lower_with	50090
+build site/export.vyrn	placer: lower_with	92
 build site/export.vyrn	lower: build	189439
 build site/export.vyrn	placer: core::build	4440
 build site/export.vyrn	placer: build: first	1715146
@@ -37,7 +37,7 @@ build site/export.vyrn	codegen: signatures	25174
 build site/export.vyrn	codegen: bodies	1746535
 build site/export.vyrn	codegen: drain	34830
 build site/export.vyrn	codegen: finish	6337
-check site/export.vyrn	(outside)	50266
+check site/export.vyrn	(outside)	268
 check site/export.vyrn	load (total)	0
 check site/export.vyrn	load: read+parse+resolve	200040
 check site/export.vyrn	read	258
@@ -56,7 +56,7 @@ check site/export.vyrn	movecheck	13112
 check site/export.vyrn	own: analyze_now	3764
 check site/export.vyrn	own: Owned::new	7
 check site/export.vyrn	placer	169800
-check site/export.vyrn	placer: lower_with	50090
+check site/export.vyrn	placer: lower_with	92
 check site/export.vyrn	lower: build	386717
 check site/export.vyrn	placer: core::build	4440
 check site/export.vyrn	placer: build: first	998863
@@ -66,7 +66,7 @@ check site/export.vyrn	placer: effects	73621
 check site/export.vyrn	placer: kernel::placement	774876
 check site/export.vyrn	placer: report	22367
 check site/export.vyrn	placer: facts rebuild	1951
-check examples/simdbench.vyrn	(outside)	2663
+check examples/simdbench.vyrn	(outside)	177
 check examples/simdbench.vyrn	load (total)	0
 check examples/simdbench.vyrn	load: read+parse+resolve	444
 check examples/simdbench.vyrn	read	9
@@ -84,7 +84,7 @@ check examples/simdbench.vyrn	types::decl_map	705
 check examples/simdbench.vyrn	movecheck	1399
 check examples/simdbench.vyrn	own: analyze_now	412
 check examples/simdbench.vyrn	placer	11024
-check examples/simdbench.vyrn	placer: lower_with	2487
+check examples/simdbench.vyrn	placer: lower_with	1
 check examples/simdbench.vyrn	lower: build	16999
 check examples/simdbench.vyrn	placer: core::build	189
 check examples/simdbench.vyrn	placer: build: first	52625
@@ -94,7 +94,7 @@ check examples/simdbench.vyrn	placer: effects	3382
 check examples/simdbench.vyrn	placer: kernel::placement	21200
 check examples/simdbench.vyrn	placer: report	1999
 check examples/simdbench.vyrn	placer: facts rebuild	156
-check examples/vlog.vyrn	(outside)	5309
+check examples/vlog.vyrn	(outside)	177
 check examples/vlog.vyrn	load (total)	0
 check examples/vlog.vyrn	load: read+parse+resolve	1504
 check examples/vlog.vyrn	read	25
@@ -113,7 +113,7 @@ check examples/vlog.vyrn	movecheck	1994
 check examples/vlog.vyrn	own: analyze_now	657
 check examples/vlog.vyrn	own: Owned::new	3
 check examples/vlog.vyrn	placer	21332
-check examples/vlog.vyrn	placer: lower_with	5133
+check examples/vlog.vyrn	placer: lower_with	1
 check examples/vlog.vyrn	lower: build	41262
 check examples/vlog.vyrn	placer: core::build	635
 check examples/vlog.vyrn	placer: build: first	116358
