@@ -534,7 +534,7 @@ fn newScan(re: Regex, cap: Int64) -> Scan {
 }
 
 /// The leftmost-longest match that starts at or after `from`, or `None`.
-fn nextMatch(re: Regex, hay: Array<UInt8>, from: Int64, sc: modify Scan) -> Option<Match> {
+fn nextMatch(re: Regex, hay: Array<UInt8>, from: Int64 where value >= 0, sc: modify Scan) -> Option<Match> {
     let mut at = from
     while at <= hay.length {
         let mut s = 1
