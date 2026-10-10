@@ -64,7 +64,7 @@ pub struct World {
     /// module's (a `$` spelling), or has a type parameter or a `fn`-typed
     /// parameter. [`World::summaries`] keeps those whose every caller it walks.
     private: HashSet<FnId>,
-    /// What [`World::summaries`] infers record pairs from besides the bodies
+    /// What [`World::summaries`] infers record facts from besides the bodies
     /// ([`crate::elide::Records`]).
     records: crate::elide::Records,
     /// Whether a placed release named an instance the first lowering lacked.

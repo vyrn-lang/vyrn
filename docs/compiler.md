@@ -202,14 +202,17 @@ disequality `d != 0` the state holds. A fact may name the length of
 a record name's array field, and a `where` rule's `a.length == b.length` makes
 one term of both (`facts::Term::Col`), except inside a group of stores into
 the record's fields, where each field has its own term until the row that
-checks the rule (`check::Guard::Rule`). Two array fields form a pair
-(`elide::Pairs`) when every record value with both has them equally long:
-`elide::invariants` keeps a pair only when each body that builds such a
-record or resizes one of its fields proves it wherever the value leaves the
-name, and a walk assumes it of every record name it did not build. A fact may name the value of a
-`read` parameter's integer field (`facts::Term::Field`): the kernel's
-exclusivity judgment keeps the parameter unwritten, so each read of the
-field is one value. `World::body_of` decides a body
+checks the rule (`check::Guard::Rule`). A record fact
+(`elide::RecordFacts`) is a linear fact over the fields of every record
+value with those fields: two array fields equally long, an integer field at
+least zero, an indexed array or String field at least as long as an integer
+field's value. `elide::invariants` keeps a fact only when each body that
+builds such a record or writes one of its fields proves it wherever the
+value leaves the name, and a walk assumes it of every record name it did not
+build. A fact may name the value of a
+record name's integer field (`facts::Term::Field`): by the kernel's
+exclusivity judgment only a row that names the record writes the field, so
+each read between two such rows is one value, and a store defines it. `World::body_of` decides a body
 when an emitter first reads it. A direct call's result takes the facts every
 return of its callee proves (`elide::summaries`, keyed by `FnId`, solved once
 per World by `fixpoint::descend`); a call through a value, a method, a
