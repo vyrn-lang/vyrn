@@ -41,17 +41,20 @@
       {
         "language": "vyrn",
         "scopeName": "source.vyrn",
-        "path": "./vyrn.tmLanguage.json"
+        "path": "./vyrn.tmLanguage.json",
+        "tokenTypes": { "constant.character.vyrn": "string" }
       },
       {
         "language": "von",
         "scopeName": "source.vyrn",
-        "path": "./vyrn.tmLanguage.json"
+        "path": "./vyrn.tmLanguage.json",
+        "tokenTypes": { "constant.character.vyrn": "string" }
       },
       {
         "language": "vyx",
         "scopeName": "source.vyx",
-        "path": "./vyx.tmLanguage.json"
+        "path": "./vyx.tmLanguage.json",
+        "tokenTypes": { "constant.character.vyrn": "string" }
       }
     ],
     "semanticTokenScopes": [

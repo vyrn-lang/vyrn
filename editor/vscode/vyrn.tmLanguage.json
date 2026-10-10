@@ -12,6 +12,7 @@
     { "include": "#take" },
     { "include": "#test-bench-keyword" },
     { "include": "#contextual-keywords" },
+    { "include": "#fn-declaration" },
     { "include": "#keywords" },
     { "include": "#types" },
     { "include": "#function-calls" },
@@ -130,6 +131,14 @@
         { "match": "\\bfrom\\b(?=\\s*(\\\"|[A-Za-z_][A-Za-z0-9_]*\\s*\\())", "name": "keyword.control.vyrn" },
         { "match": "\\blogging\\b(?=\\s*\\{)", "name": "keyword.control.vyrn" }
       ]
+    },
+    "fn-declaration": {
+      "comment": "The name a `fn` declares, generic or not. #function-calls needs `(` right after the name, so without this rule `fn callWith<P, T>(` coloured the name as a plain identifier while `fn apply(` coloured it as a function.",
+      "match": "\\b(fn)\\s+([a-z_][A-Za-z0-9_]*)",
+      "captures": {
+        "1": { "name": "keyword.control.vyrn" },
+        "2": { "name": "entity.name.function.vyrn" }
+      }
     },
     "keywords": {
       "name": "keyword.control.vyrn",
