@@ -32,7 +32,7 @@ build site/export.vyrn	placer: facts rebuild	277663
 build site/export.vyrn	placer: facts: rebuilt	3211
 build site/export.vyrn	codegen	37393
 build site/export.vyrn	codegen: checks	2534127
-build site/export.vyrn	elide: summaries	2037432
+build site/export.vyrn	elide: summaries	1954576
 build site/export.vyrn	codegen: signatures	25174
 build site/export.vyrn	codegen: bodies	1746535
 build site/export.vyrn	codegen: drain	34830

@@ -483,10 +483,13 @@ pub fn summaries<'a>(
 /// not build ([`Walk::restate`]). It tracks the lengths of a record that a
 /// literal builds or a row resizes a field of ([`Walk::dirty`]), and that
 /// record proves its pairs wherever its value leaves the name
-/// ([`Walk::keeps`]). Each round walks the bodies that build or resize a
-/// record with a pair and drops each pair a body does not prove; the next
-/// round walks again each such body whose last walk assumed a dropped pair.
-/// It stops when a round drops none; the live pair count bounds the rounds.
+/// ([`Walk::keeps`]). The bodies that build or resize a record with a pair
+/// are queued. Each batch walks the lightest two thirds of the queue and drops
+/// each pair a body does not prove, so a pair a light body drops spares the
+/// heavier bodies' walks. A body whose last walk assumed a dropped pair is
+/// queued again, and one that builds or resizes no record with a pair left
+/// leaves the queue. A batch drops a pair or shortens the queue, so the two
+/// bound the batches; the pairs kept do not depend on the order.
 ///
 /// Before the rounds, a pair goes when a host-made type has both fields as
 /// arrays or Strings, or when a row resizes a field of that name through a
@@ -553,19 +556,25 @@ fn invariants(
     let touching: Vec<&Body> = (maybe.iter().zip(touches))
         .filter_map(|(b, t)| t.then_some(*b))
         .collect();
+    let weight = |i: &usize| touching[*i].names.len();
     let mut used: Vec<BTreeSet<(String, String)>> = vec![BTreeSet::new(); touching.len()];
-    let mut walk: Vec<usize> = (0..touching.len()).collect();
-    while !pairs.is_empty() && !walk.is_empty() {
+    let mut queue: Vec<usize> = (0..touching.len()).collect();
+    while !pairs.is_empty() && !queue.is_empty() {
+        queue.sort_by_key(weight);
+        let batch: Vec<usize> = queue.drain(..(queue.len() * 2).div_ceil(3)).collect();
         let outs = in_parallel(
-            &walk,
-            |&i| touching[i].names.len(),
+            &batch,
+            weight,
             || (),
             |(), &i| obliged(touching[i], decls, &pairs),
         );
         let mut dropped = BTreeSet::new();
-        for (&i, (broken, u)) in walk.iter().zip(outs) {
+        for (&i, (broken, u)) in batch.iter().zip(outs) {
             dropped.extend(broken);
             used[i] = u;
+        }
+        if dropped.is_empty() {
+            continue;
         }
         let mut of = std::mem::take(&mut pairs.of);
         for (a, b) in &dropped {
@@ -575,9 +584,12 @@ fn invariants(
         }
         of.retain(|_, bs| !bs.is_empty());
         pairs = Pairs::new(of, decls, &records.params);
-        walk = (0..touching.len())
-            .filter(|&i| used[i].iter().any(|p| dropped.contains(p)))
-            .collect();
+        for i in 0..touching.len() {
+            if !queue.contains(&i) && used[i].iter().any(|p| dropped.contains(p)) {
+                queue.push(i);
+            }
+        }
+        queue.retain(|&i| built(touching[i], decls, &pairs).contains(&true));
     }
     pairs
 }
