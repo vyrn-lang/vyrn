@@ -235,7 +235,9 @@ fn offsetMomentum(bodies: Array<Body>) -> Array<Body>
 ```
 
 A kept check ends with its reason: `input`, or `gap:` and one of `callee fact`,
-`caller fact`, `move 2`, `move 3`, `move 5` or `unproved`. The reason names the
+`caller fact`, `move 2`, `move 3`, `move 5` or `unproved`. `caller fact` reads
+`caller fact (exported)` in a function that anything outside the walked calls
+may enter, such as an `export fn` or `main`. The reason names the
 change that would remove the check, and `unproved` prints the goal the prover
 could not show.
 

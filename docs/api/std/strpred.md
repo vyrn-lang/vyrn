@@ -47,7 +47,7 @@ array argument is shared copy-on-write.
 ## findPlain
 
 ```vyrn
-fn findPlain(s: String, needle: String, from: Int64) -> Int64
+fn findPlain(s: String, needle: String, from: Int64 where value >= 0) -> Int64
 ```
 
 The first occurrence of `needle` at or after `from`, or -1. O(n*m).

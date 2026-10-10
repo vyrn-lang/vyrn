@@ -6415,6 +6415,20 @@ impl<'a> Builder<'a> {
             f.params.iter().map(|p| p.capability).collect()
         } else if prelude::signature(name).is_some() {
             kind = Callee::Builtin;
+            // The emitter turns a routed builtin into a call to its target, so
+            // no `Callee::Fn` row stands for `check::clause_guards` to write a
+            // clause check at. `core::check::clauses` assumes the target has no
+            // parameter clause; only the prelude's route table names a target,
+            // so a program cannot break the assumption.
+            debug_assert!(
+                prelude::builtin(name).is_none_or(|b| {
+                    (b.route.iter().chain(&b.gen_route)).all(|r| {
+                        let target = self.program.functions.iter().filter(|f| f.name == *r);
+                        target.flat_map(|f| &f.params).all(|p| p.clause.is_none())
+                    })
+                }),
+                "a route to a function with a parameter clause skips its call-site check"
+            );
             let mut caps: Vec<Capability> = (0..args.len())
                 .map(|i| prelude::capability(name, i).unwrap_or(Capability::Read))
                 .collect();

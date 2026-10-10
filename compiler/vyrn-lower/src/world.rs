@@ -63,7 +63,10 @@ pub struct World {
     /// `extern`, `gen`, `main`, synthesized, an `impl` method or a runtime
     /// module's (a `$` spelling), or has a type parameter or a `fn`-typed
     /// parameter. [`World::summaries`] keeps those whose every caller it walks.
-    private: Vec<FnId>,
+    private: HashSet<FnId>,
+    /// What [`World::summaries`] infers record pairs from besides the bodies
+    /// ([`crate::elide::Records`]).
+    records: crate::elide::Records,
     /// Whether a placed release named an instance the first lowering lacked.
     /// `reached` holds no such instance, so [`crate::effects::reaches`] judges
     /// the program as placed instead.
@@ -342,9 +345,21 @@ impl World {
             })
             .map(FnId::nth)
             .collect();
+        fn sig(f: &Function) -> impl Iterator<Item = &Type> + '_ {
+            (f.params.iter().map(|p| &p.ty)).chain(std::iter::once(&f.ret))
+        }
+        let prelude_types: Vec<Type> = (vyrn_frontend::prelude::type_decls().iter())
+            .map(|d| Type::Named(d.name.clone()))
+            .collect();
+        let externs = (program.functions.iter()).filter(|f| f.is_extern || f.is_export_extern);
+        let roots = (vyrn_frontend::prelude::all().flat_map(sig))
+            .chain(externs.flat_map(sig))
+            .chain(&prelude_types);
+        let records = crate::elide::Records::new(program, roots, decls);
         let mut world = World {
             ownership,
             private,
+            records,
             ..World::default()
         };
         world.reads.replace(rows);
@@ -357,6 +372,12 @@ impl World {
     /// the World looks a name up once, here.
     pub fn fn_id(&self, name: &str) -> Option<FnId> {
         self.fns.id(name)
+    }
+
+    /// Whether `f` may be entered other than by a call row the pass walks, so
+    /// no body assumes its parameters' facts: every function not `private`.
+    pub fn is_open(&self, f: FnId) -> bool {
+        !self.private.contains(&f)
     }
 
     /// The function table's rows, the row of `id` at [`FnId::index`].
@@ -414,7 +435,8 @@ impl World {
             let bodies = (self.bodies.iter())
                 .filter(|(f, _)| !generic.contains(f))
                 .filter_map(|(f, s)| Some((*f, &s.as_ref()?.body)));
-            crate::elide::summaries(bodies, self.ownership.proto.types(), &closed)
+            let records = known.then_some(&self.records);
+            crate::elide::summaries(bodies, self.ownership.proto.types(), &closed, records)
         })
     }
 

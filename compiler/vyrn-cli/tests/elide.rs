@@ -148,6 +148,34 @@ fn a_condition_stored_in_a_bool_proves_its_index() {
 }
 
 #[test]
+fn two_arrays_a_loop_grows_in_step_keep_equal_lengths() {
+    let src = "fn w(n: Int64) -> Int64 {
+    let mut a: Array<Int64> = []
+    let mut b: Array<Int64> = []
+    let mut i: Int64 = 0
+    while i < n {
+        a.push(i)
+        b.push(i * 2)
+        i = i + 1
+    }
+    let mut s: Int64 = 0
+    let mut k: Int64 = 0
+    while k < a.length {
+        s = s + b[k]
+        k = k + 1
+    }
+    return s
+}
+";
+    assert_eq!(verdicts(src, "w"), ["proved array-index"]);
+    let (err, rows) = oracle(src, "    print(w(3).toString())", "w");
+    assert_eq!(
+        (err.as_str(), rows),
+        ("", vec!["13 0 array-index proved 3".to_string()])
+    );
+}
+
+#[test]
 fn a_loop_condition_under_and_proves_its_index() {
     let src = "fn w(xs: Array<Int64>) -> Int64 {
     let mut s: Int64 = 0
@@ -199,6 +227,44 @@ fn a_sum_of_two_bounded_operands_is_exact() {
     assert_eq!(
         (err.as_str(), rows),
         ("", vec!["8 0 array-index proved 1".to_string()])
+    );
+}
+
+/// `i <= n - nl` bounds `i` by `LEN_MAX` through the two lengths' axioms, so
+/// `i + 1` and `i + j` are exact and `i >= 0` survives the loop's head.
+#[test]
+fn a_bound_by_a_difference_of_lengths_keeps_the_counter_exact() {
+    let src = "export fn w(s: String, t: String, from: Int64 where value >= 0) -> Int64 {
+    let n = s.byteLength
+    let nl = t.byteLength
+    let mut i = from
+    while i <= n - nl {
+        let mut j = 0
+        while j < nl && s[i + j] == t[j] {
+            j = j + 1
+        }
+        if j == nl {
+            return i
+        }
+        i = i + 1
+    }
+    return 0 - 1
+}
+";
+    assert_eq!(
+        verdicts(src, "w"),
+        ["proved string-index", "proved string-index"]
+    );
+    let (err, rows) = oracle(src, "    print(w(\"abcab\", \"ab\", 1).toString())", "w");
+    assert_eq!(
+        (err.as_str(), rows),
+        (
+            "",
+            vec![
+                "7 0 string-index proved 4".to_string(),
+                "7 1 string-index proved 4".to_string()
+            ]
+        )
     );
 }
 
@@ -578,8 +644,11 @@ fn w(p: P) -> Int64 {
     }
     return s
 }
+fn make(xs: Array<Int64>) -> P {
+    return P { a: xs.copy(), b: [1] }
+}
 ",
-        "    print(w(P { a: xs, b: [1] }).toString())",
+        "    print(w(make(xs)).toString())",
         "array index 1 out of bounds",
     ),
     // A rule that equates `a` and `b` says nothing of `c`.
@@ -594,8 +663,11 @@ fn w(p: P) -> Int64 {
     }
     return s
 }
+fn make(xs: Array<Int64>) -> P {
+    return P { a: xs.copy(), b: [1, 2, 3], c: [1] }
+}
 ",
-        "    print(w(P { a: xs, b: [1, 2, 3], c: [1] }).toString())",
+        "    print(w(make(xs)).toString())",
         "array index 1 out of bounds",
     ),
     // An equality under `||` is no rule.
@@ -610,8 +682,11 @@ fn w(p: P) -> Int64 {
     }
     return s
 }
+fn make(xs: Array<Int64>) -> P {
+    return P { a: xs.copy(), b: [1] }
+}
 ",
-        "    print(w(P { a: xs, b: [1] }).toString())",
+        "    print(w(make(xs)).toString())",
         "array index 1 out of bounds",
     ),
     // A store into the field forgets its length.
@@ -1189,6 +1264,201 @@ fn w(xs: Array<Int64>, h: H) -> Int64 {
         "    print(w(xs, 255).toString())",
         "array index 255 out of bounds",
     ),
+    // A loop that grows one array on some turns only: the lengths part.
+    (
+        "fn w(n: Int64) -> Int64 {
+    let mut a: Array<Int64> = []
+    let mut b: Array<Int64> = []
+    let mut i: Int64 = 0
+    while i < n {
+        a.push(i)
+        if i > 0 {
+            b.push(i)
+        }
+        i = i + 1
+    }
+    let mut s: Int64 = 0
+    let mut k: Int64 = 0
+    while k < a.length {
+        s = s + b[k]
+        k = k + 1
+    }
+    return s
+}
+",
+        "    print(w(3).toString())",
+        "array index 2 out of bounds",
+    ),
+    // Two arrays grown in step from unequal lengths stay unequal.
+    (
+        "fn w(n: Int64) -> Int64 {
+    let mut a: Array<Int64> = [7]
+    let mut b: Array<Int64> = []
+    let mut i: Int64 = 0
+    while i < n {
+        a.push(i)
+        b.push(i)
+        i = i + 1
+    }
+    let mut s: Int64 = 0
+    let mut k: Int64 = 0
+    while k < a.length {
+        s = s + b[k]
+        k = k + 1
+    }
+    return s
+}
+",
+        "    print(w(3).toString())",
+        "array index 3 out of bounds",
+    ),
+    // One array grows twice a turn.
+    (
+        "fn w(n: Int64) -> Int64 {
+    let mut a: Array<Int64> = []
+    let mut b: Array<Int64> = []
+    let mut i: Int64 = 0
+    while i < n {
+        a.push(i)
+        a.push(i)
+        b.push(i)
+        i = i + 1
+    }
+    let mut s: Int64 = 0
+    let mut k: Int64 = 0
+    while k < a.length {
+        s = s + b[k]
+        k = k + 1
+    }
+    return s
+}
+",
+        "    print(w(2).toString())",
+        "array index 2 out of bounds",
+    ),
+    // A step no fact bounds leaves `i + d` inexact: it wraps below zero.
+    (
+        "export fn w(s: String, t: String, d: Int64) -> Int64 {
+    let n = s.byteLength
+    let nl = t.byteLength
+    let mut c: Int64 = 0
+    let mut i: Int64 = 1
+    while i <= n - nl {
+        c = c + Int64(s[i])
+        i = i + d
+    }
+    return c
+}
+",
+        "    print(w(\"abc\", \"x\", 9223372036854775807).toString())",
+        "string index -9223372036854775808 out of bounds",
+    ),
+    // The body raises the exit's bound before the read: `i + k - 1` reaches `n`.
+    (
+        "export fn w(s: String) -> Int64 {
+    let n = s.byteLength
+    let mut c: Int64 = 0
+    let mut k: Int64 = 1
+    let mut i: Int64 = 0
+    while i <= n - k {
+        k = k + 1
+        c = c + Int64(s[i + k - 1])
+        i = i + 1
+    }
+    return c
+}
+",
+        "    print(w(\"abc\").toString())",
+        "string index 3 out of bounds",
+    ),
+    // Nothing states `nl <= n`: a needle longer than the text reads past it.
+    (
+        "export fn w(s: String, t: String) -> Int64 {
+    let nl = t.byteLength
+    let mut c: Int64 = 0
+    let mut j: Int64 = 0
+    while j < nl {
+        c = c + Int64(s[j])
+        j = j + 1
+    }
+    return c
+}
+",
+        "    print(w(\"ab\", \"xyz\").toString())",
+        "string index 2 out of bounds",
+    ),
+    // A start below zero: no clause states `from >= 0`.
+    (
+        "export fn w(s: String, t: String, from: Int64) -> Int64 {
+    let n = s.byteLength
+    let nl = t.byteLength
+    let mut c: Int64 = 0
+    let mut i = from
+    while i <= n - nl {
+        c = c + Int64(s[i])
+        i = i + 1
+    }
+    return c
+}
+",
+        "    print(w(\"abc\", \"x\", -1).toString())",
+        "string index -1 out of bounds",
+    ),
+    // A start past `n`: `i + nl` wraps, so `i + nl <= n` holds at `i64` max.
+    (
+        "export fn w(s: String, t: String, from: Int64 where value >= 0) -> Int64 {
+    let n = s.byteLength
+    let nl = t.byteLength
+    let mut c: Int64 = 0
+    let mut i = from
+    while i + nl <= n {
+        c = c + Int64(s[i])
+        i = i + 1
+    }
+    return c
+}
+",
+        "    print(w(\"abc\", \"x\", 9223372036854775807).toString())",
+        "string index 9223372036854775807 out of bounds",
+    ),
+    // A skip table with a negative entry steps below zero. A zero entry
+    // loops forever and reads in range, so it witnesses nothing here.
+    (
+        "export fn w(s: String, skip: Array<Int64>) -> Int64 {
+    let n = s.byteLength
+    let mut c: Int64 = 0
+    let mut i: Int64 = 0
+    while i < n {
+        let b = Int64(s[i])
+        c = c + b
+        i = i + skip[b - 97]
+    }
+    return c
+}
+",
+        "    print(w(\"ab\", [1, -2]).toString())",
+        "string index -1 out of bounds",
+    ),
+    // The loop writes its skip table: the entry it read last turn changes.
+    (
+        "fn lower(skip: modify Array<Int64>) {
+    skip[0] = -5
+}
+export fn w(s: String, skip: modify Array<Int64>) -> Int64 {
+    let n = s.byteLength
+    let mut c: Int64 = 0
+    let mut i: Int64 = 0
+    while i < n {
+        c = c + Int64(s[i])
+        i = i + skip[0]
+        lower(skip)
+    }
+    return c
+}
+",
+        "    let mut t: Array<Int64> = [1]\n    print(w(\"abc\", t).toString())",
+        "string index -4 out of bounds",
+    ),
 ];
 
 #[test]
@@ -1756,7 +2026,8 @@ fn main() -> Int64 {
         "array index 3 out of bounds",
     ),
     // A `swapRemove` after the call shrinks the array the result indexes. Its
-    // own index is a parameter: `lastIndex` proves `ys` is not empty.
+    // own index is a parameter the callers do not bound: `lastIndex` proves
+    // `ys` is not empty.
     (
         r#"fn lastIndex(a: Array<Int64>) -> Int64 {
     if a.length == 0 {
@@ -1773,6 +2044,7 @@ fn w(xs: Array<Int64>, k: Int64) -> Int64 {
 fn main() -> Int64 {
     let xs: Array<Int64> = [10, 20, 30]
     print(w(xs, 0).toString())
+    print(w(xs, 9).toString())
     return 0
 }
 "#,
@@ -2503,6 +2775,397 @@ fn every_call_row_proving_a_fact_proves_the_check() {
         }
         let (err, _) = run_oracle(&dir, &file, "w");
         if !err.is_empty() {
+            failures.push(format!("{root}\nran: {err}"));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n\n"));
+}
+
+/// Programs where every value of `P` the program builds keeps `a` and `b`
+/// equally long: `b[i]` under `i < a.length` is proved in `w`, and the run
+/// passes the oracle.
+const PAIR_PROOFS: &[&str] = &[
+    // Both fields grow in step through a `modify` parameter.
+    r#"type P = { a: Array<Int64>, b: Array<Int64> }
+fn add(p: modify P, x: Int64) {
+    p.a.push(x)
+    p.b.push(x * 2)
+}
+fn w(p: P, i: Int64) -> Int64 {
+    if i < 0 || i >= p.a.length {
+        return 0
+    }
+    return p.b[i]
+}
+fn main() -> Int64 {
+    let mut p = P { a: [], b: [] }
+    add(p, 1)
+    add(p, 2)
+    print(w(p, 1).toString())
+    return 0
+}
+"#,
+    // A literal from two arrays a loop grew in step.
+    r#"type P = { a: Array<Int64>, b: Array<Int64> }
+fn make(n: Int64) -> P {
+    let mut a: Array<Int64> = []
+    let mut b: Array<Int64> = []
+    let mut i: Int64 = 0
+    while i < n {
+        a.push(i)
+        b.push(i)
+        i = i + 1
+    }
+    return P { a: a, b: b }
+}
+fn w(p: P, i: Int64) -> Int64 {
+    if i < 0 || i >= p.a.length {
+        return 0
+    }
+    return p.b[i]
+}
+fn main() -> Int64 {
+    print(w(make(3), 2).toString())
+    return 0
+}
+"#,
+    // A row that resizes a field no pair names keeps the pairs.
+    r#"type P = { a: Array<Int64>, b: Array<Int64>, c: Array<Int64> }
+fn add(p: modify P, x: Int64) {
+    p.a.push(x)
+    p.b.push(x)
+}
+fn log(p: modify P, x: Int64) {
+    p.c.push(x)
+    p.c.push(x)
+}
+fn w(p: P, i: Int64) -> Int64 {
+    if i < 0 || i >= p.a.length {
+        return 0
+    }
+    return p.b[i]
+}
+fn main() -> Int64 {
+    let mut p = P { a: [], b: [], c: [] }
+    add(p, 1)
+    log(p, 2)
+    print(w(p, 0).toString())
+    return 0
+}
+"#,
+];
+
+#[test]
+fn every_kept_pair_proves_the_index() {
+    let mut failures = Vec::new();
+    for root in PAIR_PROOFS {
+        let (dir, file) = modules(root, &[]);
+        let rows = rows_of(&file, "w");
+        if rows != ["proved array-index"] {
+            failures.push(format!("{root}\nrows: {rows:?}"));
+        }
+        let (err, _) = run_oracle(&dir, &file, "w");
+        if !err.is_empty() {
+            failures.push(format!("{root}\nran: {err}"));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n\n"));
+}
+
+/// Programs where `w` indexes `b` under `i < a.length` and a value of a
+/// record with fields `a` and `b` does not keep them equal where `w` reads
+/// it: `w` keeps its index and traps there.
+const PAIR_WITNESSES: &[(&str, &str)] = &[
+    // A store into the field after the guard; the body restores the pair
+    // before it returns.
+    (
+        r#"type P = { a: Array<Int64>, b: Array<Int64> }
+fn add(p: modify P, x: Int64) {
+    p.a.push(x)
+    p.b.push(x)
+}
+fn w(p: modify P, i: Int64) -> Int64 {
+    if i < 0 || i >= p.a.length {
+        return 0
+    }
+    let saved = p.b.copy()
+    p.b = []
+    let r = p.b[i]
+    p.b = saved
+    return r
+}
+fn main() -> Int64 {
+    let mut p = P { a: [], b: [] }
+    add(p, 1)
+    add(p, 2)
+    print(w(p, 1).toString())
+    return 0
+}
+"#,
+        "array index 1 out of bounds",
+    ),
+    // A call that takes the record `modify` and changes both fields: the
+    // pair holds after it, the guard's bound does not.
+    (
+        r#"type P = { a: Array<Int64>, b: Array<Int64> }
+fn empty(p: modify P) {
+    p.a.clear()
+    p.b.clear()
+}
+fn w(p: modify P, i: Int64) -> Int64 {
+    if i < 0 || i >= p.a.length {
+        return 0
+    }
+    empty(p)
+    return p.b[i]
+}
+fn main() -> Int64 {
+    let mut p = P { a: [1, 2], b: [3, 4] }
+    print(w(p, 1).toString())
+    return 0
+}
+"#,
+        "array index 1 out of bounds",
+    ),
+    // A callee grows one field of the record it takes `modify`.
+    (
+        r#"type P = { a: Array<Int64>, b: Array<Int64> }
+fn grow(p: modify P) {
+    p.a.push(9)
+}
+fn w(p: P, i: Int64) -> Int64 {
+    if i < 0 || i >= p.a.length {
+        return 0
+    }
+    return p.b[i]
+}
+fn main() -> Int64 {
+    let mut p = P { a: [1], b: [2] }
+    grow(p)
+    print(w(p, 1).toString())
+    return 0
+}
+"#,
+        "array index 1 out of bounds",
+    ),
+    // A store displaces a record whose field a row shrank; its release
+    // reads it.
+    (
+        r#"type P = { a: Array<Int64>, b: Array<Int64> }
+impl Owned for P {
+    fn release(consume self) {
+        print(w(self, 1).toString())
+        let a = consume self.a
+        drop a
+        let b = consume self.b
+        drop b
+    }
+}
+fn w(p: P, i: Int64) -> Int64 {
+    if i < 0 || i >= p.a.length {
+        return 0
+    }
+    return p.b[i]
+}
+fn main() -> Int64 {
+    let mut p = P { a: [1, 2], b: [3, 4] }
+    p.b.pop()
+    p = P { a: [], b: [] }
+    print(p.a.length.toString())
+    return 0
+}
+"#,
+        "array index 1 out of bounds",
+    ),
+    // The same record released where its scope ends.
+    (
+        r#"type P = { a: Array<Int64>, b: Array<Int64> }
+impl Owned for P {
+    fn release(consume self) {
+        print(w(self, 1).toString())
+        let a = consume self.a
+        drop a
+        let b = consume self.b
+        drop b
+    }
+}
+fn w(p: P, i: Int64) -> Int64 {
+    if i < 0 || i >= p.a.length {
+        return 0
+    }
+    return p.b[i]
+}
+fn main() -> Int64 {
+    let mut p = P { a: [1, 2], b: [3, 4] }
+    p.b.pop()
+    print(p.a.length.toString())
+    return 0
+}
+"#,
+        "array index 1 out of bounds",
+    ),
+    // A store puts a record whose field a row replaced into an array.
+    (
+        r#"type P = { a: Array<Int64>, b: Array<Int64> }
+fn w(p: P, i: Int64) -> Int64 {
+    if i < 0 || i >= p.a.length {
+        return 0
+    }
+    return p.b[i]
+}
+fn main() -> Int64 {
+    let mut p = P { a: [1, 2], b: [3, 4] }
+    p.b = [3]
+    let mut ps: Array<P> = [P { a: [], b: [] }]
+    ps[0] = p
+    print(w(ps[0], 1).toString())
+    return 0
+}
+"#,
+        "array index 1 out of bounds",
+    ),
+    // One path of the only constructor breaks the pair.
+    (
+        r#"type P = { a: Array<Int64>, b: Array<Int64> }
+fn make(xs: Array<Int64>, odd: Bool) -> P {
+    if odd {
+        return P { a: xs.copy(), b: [1] }
+    }
+    return P { a: xs.copy(), b: xs.copy() }
+}
+fn w(p: P, i: Int64) -> Int64 {
+    if i < 0 || i >= p.a.length {
+        return 0
+    }
+    return p.b[i]
+}
+fn main() -> Int64 {
+    let xs: Array<Int64> = [10, 20, 30]
+    print(w(make(xs, true), 2).toString())
+    return 0
+}
+"#,
+        "array index 2 out of bounds",
+    ),
+    // A record the decoder builds from JSON, whose arrays have any length.
+    (
+        r#"type P = { a: Array<Int64>, b: Array<Int64> }
+fn w(p: P, i: Int64) -> Int64 {
+    if i < 0 || i >= p.a.length {
+        return 0
+    }
+    return p.b[i]
+}
+fn main() -> Int64 {
+    let r = match fromJson<P>("{\"a\": [1, 2, 3], \"b\": [1]}") {
+        Valid(p) => w(p, 2),
+        Invalid(_) => 0,
+    }
+    print(r.toString())
+    return 0
+}
+"#,
+        "array index 2 out of bounds",
+    ),
+    // A callee pushes onto the array it takes `modify`, which then
+    // replaces a field.
+    (
+        r#"type P = { a: Array<Int64>, b: Array<Int64> }
+fn grow(xs: modify Array<Int64>) {
+    xs.push(9)
+}
+fn w(p: modify P, i: Int64) -> Int64 {
+    let mut a = p.a.copy()
+    grow(a)
+    p.a = a
+    if i < 0 || i >= p.a.length {
+        return 0
+    }
+    return p.b[i]
+}
+fn main() -> Int64 {
+    let mut p = P { a: [1, 2], b: [3, 4] }
+    print(w(p, 2).toString())
+    return 0
+}
+"#,
+        "array index 2 out of bounds",
+    ),
+    // Module state grows one field; the walk tracks no global's fields.
+    (
+        r#"type P = { a: Array<Int64>, b: Array<Int64> }
+let mut g = P { a: [], b: [] }
+fn put(x: Int64) {
+    g.a.push(x)
+}
+fn w(p: P, i: Int64) -> Int64 {
+    if i < 0 || i >= p.a.length {
+        return 0
+    }
+    return p.b[i]
+}
+fn main() -> Int64 {
+    put(1)
+    put(2)
+    print(w(g, 1).toString())
+    return 0
+}
+"#,
+        "array index 1 out of bounds",
+    ),
+    // A module-state initializer builds the record.
+    (
+        r#"type P = { a: Array<Int64>, b: Array<Int64> }
+let g = P { a: [1, 2], b: [3] }
+fn make(xs: Array<Int64>) -> P {
+    return P { a: xs.copy(), b: xs.copy() }
+}
+fn w(p: P, i: Int64) -> Int64 {
+    if i < 0 || i >= p.a.length {
+        return 0
+    }
+    return p.b[i]
+}
+fn main() -> Int64 {
+    let xs: Array<Int64> = [1, 2]
+    print((w(make(xs), 1) + w(g, 1)).toString())
+    return 0
+}
+"#,
+        "array index 1 out of bounds",
+    ),
+    // A wider record type with the same two fields passes for `P`.
+    (
+        r#"type P = { a: Array<Int64>, b: Array<Int64> }
+type Wide = { a: Array<Int64>, b: Array<Int64>, c: Int64 }
+fn w(p: P, i: Int64) -> Int64 {
+    if i < 0 || i >= p.a.length {
+        return 0
+    }
+    return p.b[i]
+}
+fn main() -> Int64 {
+    let p = P { a: [1], b: [2] }
+    let wide = Wide { a: [1, 2, 3], b: [1], c: 0 }
+    print((w(p, 0) + w(wide, 2)).toString())
+    return 0
+}
+"#,
+        "array index 2 out of bounds",
+    ),
+];
+
+#[test]
+fn every_pair_witness_keeps_its_index_and_traps_there() {
+    let mut failures = Vec::new();
+    for (root, trap) in PAIR_WITNESSES {
+        let (dir, file) = modules(root, &[]);
+        let rows = rows_of(&file, "w");
+        if rows.is_empty() || rows.iter().any(|v| v.starts_with("proved")) {
+            failures.push(format!("{root}\nrows: {rows:?}"));
+        }
+        let (err, _) = run_oracle(&dir, &file, "w");
+        if !err.contains(trap) || err.contains(vyrn_frontend::trap::PROVED_CHECK_FAILED) {
             failures.push(format!("{root}\nran: {err}"));
         }
     }
