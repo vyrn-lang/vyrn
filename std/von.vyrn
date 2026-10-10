@@ -727,13 +727,13 @@ fn indent(n: Int64) -> String {
     return repeat("    ", n)
 }
 
-/// The lowercase 2-digit hex of a byte value 0..255.
-fn hex2(b: Int64) -> String {
+/// The lowercase 2-digit hex of a byte.
+fn hex2(b: UInt8) -> String {
     // Index the literal: `bytes()` would build a 16-element array per call.
     let db = "0123456789abcdef"
     let mut out: Array<UInt8> = []
-    out.push(db[(b / 16) % 16])
-    out.push(db[b % 16])
+    out.push(db[Int64(b >> 4)])
+    out.push(db[Int64(b & 15)])
     return match stringFromBytes(out) {
         Ok(v) => v,
         Err(e) => "",
@@ -763,7 +763,7 @@ fn emitString(s: String) -> String {
             out.push('\\')
             out.push('r')
         } else if b < 32 {
-            pushUnicodeEscape(out, Int64(b))
+            pushUnicodeEscape(out, b)
         } else {
             out.push(b)
         }
@@ -776,7 +776,7 @@ fn emitString(s: String) -> String {
 }
 
 /// Appends `\u{XX}` for a control byte without a short escape.
-fn pushUnicodeEscape(out: modify Array<UInt8>, b: Int64) -> Unit {
+fn pushUnicodeEscape(out: modify Array<UInt8>, b: UInt8) -> Unit {
     out.push('\\')
     out.push('u')
     out.push('{')
@@ -1329,6 +1329,11 @@ C {
 test "a string escape survives the round trip" {
     let src = "import type { S } from \"./s\"\n\nS {\n    quoted: \"say \\\"hi\\\"\",\n    lines: \"a\\nb\",\n    backslash: \"C:\\\\tmp\",\n}\n"
     assertEq(roundTrip(src), src)
+}
+
+test "a control byte without a short escape writes two hex digits" {
+    let bs = "\\"
+    assertEq(emitString("a\u{1}b\u{1f}"), "\"a" + bs + "u{01}b" + bs + "u{1f}\"")
 }
 
 /// The VON text a JSON tree converts to, or its error.

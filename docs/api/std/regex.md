@@ -23,7 +23,7 @@ a non-ASCII character is a set of its bytes.
 ## Regex
 
 ```vyrn
-type Regex = { op: Array<Int64>, a: Array<Int64>, b: Array<Int64>, cls: Array<ByteSet>, start: Int64, classOf: Array<Int64>, classCount: Int64 }
+type Regex = { op: Array<Int64>, a: Array<Int64>, b: Array<Int64>, cls: Array<ByteSet>, start: Int64, classOf: Array<UInt8>, classCount: Int64 }
 ```
 
 ## Match

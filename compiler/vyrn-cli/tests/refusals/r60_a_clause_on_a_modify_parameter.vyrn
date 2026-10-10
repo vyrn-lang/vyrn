@@ -1,0 +1,10 @@
+// A `modify` parameter can change in the body, so a clause on it, even over
+// its own length, would not hold for the whole call.
+fn shorten(t: modify Array<UInt32> where value.length >= 256) -> UInt32 {
+    t.clear()
+    return t[200]
+}
+fn main() -> Int64 {
+    let mut t: Array<UInt32> = []
+    return Int64(shorten(t))
+}

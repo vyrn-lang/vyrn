@@ -268,6 +268,50 @@ fn a_bound_by_a_difference_of_lengths_keeps_the_counter_exact() {
     );
 }
 
+/// `std/strpred`'s `findSkipping` states `from >= 0` and a table of at least
+/// 256 entries, so its reads are proved: an entry is a `UInt32`, so the step
+/// `i + entry` is exact and keeps `i >= 0`. A call the caller's facts do not
+/// show keeps its clause check and traps there: a short table, a negative
+/// start, and a table a callee shortened through `modify`.
+#[test]
+fn a_skip_table_clause_proves_find_skippings_reads() {
+    let src = "import { findSkipping, skipTable } from \"std/strpred\"
+fn shorten(t: modify Array<UInt32>) {
+    t.clear()
+}
+fn found(s: String) -> Int64 {
+    return findSkipping(s, \"ab\", 0, skipTable(\"ab\", 1000))
+}
+fn short(s: String) -> Int64 {
+    let t: Array<UInt32> = [UInt32(1)]
+    return findSkipping(s, \"ab\", 0, t)
+}
+fn below(s: String, from: Int64) -> Int64 {
+    return findSkipping(s, \"ab\", from, skipTable(\"ab\", 1000))
+}
+fn shortened(s: String) -> Int64 {
+    let mut t = skipTable(\"ab\", 1000)
+    shorten(t)
+    return findSkipping(s, \"ab\", 0, t)
+}
+";
+    let print = |call: &str| format!("    print({call}.toString())");
+    let (err, rows) = oracle(src, &print("found(\"xxaxab\")"), "findSkipping");
+    let verdicts: Vec<&str> = rows.iter().map(|r| r.split(' ').nth(3).unwrap()).collect();
+    assert_eq!((err.as_str(), verdicts), ("", vec!["proved"; 4]));
+    for (call, param, row) in [
+        ("short(\"ab\")", "skip", "10 1 where-arg kept 1"),
+        ("below(\"ab\", 0 - 1)", "from", "13 0 where-arg kept 1"),
+        ("shortened(\"ab\")", "skip", "18 1 where-arg kept 1"),
+    ] {
+        let body = call.split('(').next().unwrap();
+        let (err, rows) = oracle(src, &print(call), body);
+        let says = format!("validation failed for parameter `{param}` of `findSkipping`");
+        assert_eq!(err, format!("error: {says}\n"), "{call}");
+        assert!(rows.iter().any(|r| r == row), "{call}: {rows:?}");
+    }
+}
+
 #[test]
 fn a_disequality_proves_its_divisor() {
     let src = "fn w(a: Int64, b: Int64) -> Int64 {
@@ -2781,10 +2825,11 @@ fn every_call_row_proving_a_fact_proves_the_check() {
     assert!(failures.is_empty(), "{}", failures.join("\n\n"));
 }
 
-/// Programs where every value of `P` the program builds keeps `a` and `b`
-/// equally long: `b[i]` under `i < a.length` is proved in `w`, and the run
-/// passes the oracle.
-const PAIR_PROOFS: &[&str] = &[
+/// Programs where `w` proves its one index from what it knows of a record's
+/// fields, and the run passes the oracle. In the pair programs every value of
+/// `P` the program builds keeps `a` and `b` equally long, so `b[i]` under
+/// `i < a.length` is proved.
+const RECORD_PROOFS: &[&str] = &[
     // Both fields grow in step through a `modify` parameter.
     r#"type P = { a: Array<Int64>, b: Array<Int64> }
 fn add(p: modify P, x: Int64) {
@@ -2853,12 +2898,91 @@ fn main() -> Int64 {
     return 0
 }
 "#,
+    // A literal's integer field is one value across its reads.
+    r#"type C = { xs: Array<Int64>, i: Int64 }
+fn w(xs: Array<Int64>) -> Int64 {
+    let c = C { xs: xs.copy(), i: 1 }
+    if c.i >= c.xs.length {
+        return 0
+    }
+    return c.xs[c.i]
+}
+fn main() -> Int64 {
+    let xs: Array<Int64> = [1, 2, 3]
+    print(w(xs).toString())
+    return 0
+}
+"#,
+    // So is a `modify` parameter's, until the body stores into it.
+    r#"type C = { xs: Array<Int64>, i: Int64 }
+fn w(c: modify C) -> Int64 {
+    if c.i < 0 || c.i >= c.xs.length {
+        return 0
+    }
+    let v = c.xs[c.i]
+    c.i = c.i + 1
+    return v
+}
+fn main() -> Int64 {
+    let mut c = C { xs: [1, 2, 3], i: 2 }
+    print(w(c).toString())
+    return 0
+}
+"#,
+    // A cursor that stays between zero and `n`, and `n` at most the length.
+    r#"type R = { src: Array<Int64>, n: Int64, pos: Int64 }
+fn make(xs: Array<Int64>) -> R {
+    let n = xs.length
+    return R { src: xs.copy(), n: n, pos: 0 }
+}
+fn step(r: modify R) {
+    if r.pos >= r.n {
+        return
+    }
+    r.pos = r.pos + 1
+}
+fn w(r: R) -> Int64 {
+    if r.pos >= r.n {
+        return 0
+    }
+    return r.src[r.pos]
+}
+fn main() -> Int64 {
+    let xs: Array<Int64> = [10, 20, 30]
+    let mut r = make(xs)
+    step(r)
+    print(w(r).toString())
+    return 0
+}
+"#,
+    // A cursor at most the length reads the byte before it.
+    r#"type R = { src: Array<Int64>, pos: Int64 }
+fn step(r: modify R) {
+    if r.pos >= r.src.length {
+        return
+    }
+    r.pos = r.pos + 1
+}
+fn w(r: R) -> Int64 {
+    if r.pos == 0 {
+        return 0
+    }
+    return r.src[r.pos - 1]
+}
+fn main() -> Int64 {
+    let mut r = R { src: [10, 20, 30], pos: 0 }
+    step(r)
+    step(r)
+    print(w(r).toString())
+    return 0
+}
+"#,
 ];
 
 #[test]
-fn every_kept_pair_proves_the_index() {
+fn every_record_proof_proves_the_index() {
     let mut failures = Vec::new();
-    for root in PAIR_PROOFS {
+    for root in RECORD_PROOFS {
         let (dir, file) = modules(root, &[]);
         let rows = rows_of(&file, "w");
         if rows != ["proved array-index"] {
@@ -2872,10 +2996,11 @@ fn every_kept_pair_proves_the_index() {
     assert!(failures.is_empty(), "{}", failures.join("\n\n"));
 }
 
-/// Programs where `w` indexes `b` under `i < a.length` and a value of a
-/// record with fields `a` and `b` does not keep them equal where `w` reads
-/// it: `w` keeps its index and traps there.
-const PAIR_WITNESSES: &[(&str, &str)] = &[
+/// Programs where `w` indexes a record's field under a bound that a write or a
+/// value it did not build breaks: `w` keeps its index and traps there. In the
+/// pair programs `w` indexes `b` under `i < a.length` and a value of a record
+/// with fields `a` and `b` does not keep them equal where `w` reads it.
+const RECORD_WITNESSES: &[(&str, &str)] = &[
     // A store into the field after the guard; the body restores the pair
     // before it returns.
     (
@@ -3153,12 +3278,212 @@ fn main() -> Int64 {
 "#,
         "array index 2 out of bounds",
     ),
+    // A store into an integer field after the guard.
+    (
+        r#"type C = { xs: Array<Int64>, i: Int64 }
+fn w(c: modify C) -> Int64 {
+    if c.i < 0 || c.i >= c.xs.length {
+        return 0
+    }
+    c.i = c.i + 1
+    return c.xs[c.i]
+}
+fn main() -> Int64 {
+    let mut c = C { xs: [1, 2, 3], i: 2 }
+    print(w(c).toString())
+    return 0
+}
+"#,
+        "array index 3 out of bounds",
+    ),
+    // The same store into a literal's field.
+    (
+        r#"type C = { xs: Array<Int64>, i: Int64 }
+fn w(xs: Array<Int64>) -> Int64 {
+    let mut c = C { xs: xs.copy(), i: 0 }
+    if c.i >= c.xs.length {
+        return 0
+    }
+    c.i = 5
+    return c.xs[c.i]
+}
+fn main() -> Int64 {
+    let xs: Array<Int64> = [1, 2, 3]
+    print(w(xs).toString())
+    return 0
+}
+"#,
+        "array index 5 out of bounds",
+    ),
+    // A callee writes the field of the record it takes `modify`.
+    (
+        r#"type C = { xs: Array<Int64>, i: Int64 }
+fn bump(c: modify C) {
+    c.i = c.i + 10
+}
+fn w(c: modify C) -> Int64 {
+    if c.i < 0 || c.i >= c.xs.length {
+        return 0
+    }
+    bump(c)
+    return c.xs[c.i]
+}
+fn main() -> Int64 {
+    let mut c = C { xs: [1, 2, 3], i: 0 }
+    print(w(c).toString())
+    return 0
+}
+"#,
+        "array index 10 out of bounds",
+    ), // A store in the constructor moves the cursor past the end.
+    (
+        r#"type R = { src: Array<Int64>, pos: Int64 }
+fn make(xs: Array<Int64>) -> R {
+    let mut r = R { src: xs.copy(), pos: 0 }
+    r.pos = 7
+    return r
+}
+fn w(r: R) -> Int64 {
+    if r.pos == 0 {
+        return 0
+    }
+    return r.src[r.pos - 1]
+}
+fn main() -> Int64 {
+    let xs: Array<Int64> = [10, 20, 30]
+    print(w(make(xs)).toString())
+    return 0
+}
+"#,
+        "array index 6 out of bounds",
+    ),
+    // One path of the only constructor starts the cursor below zero.
+    (
+        r#"type R = { src: Array<Int64>, pos: Int64 }
+fn make(xs: Array<Int64>, odd: Bool) -> R {
+    if odd {
+        return R { src: xs.copy(), pos: -1 }
+    }
+    return R { src: xs.copy(), pos: 0 }
+}
+fn w(r: R) -> Int64 {
+    if r.pos >= r.src.length {
+        return 0
+    }
+    return r.src[r.pos]
+}
+fn main() -> Int64 {
+    let xs: Array<Int64> = [10, 20, 30]
+    print(w(make(xs, true)).toString())
+    return 0
+}
+"#,
+        "array index -1 out of bounds",
+    ),
+    // A `modify` call shortens `src` below `n`.
+    (
+        r#"type R = { src: Array<Int64>, n: Int64, pos: Int64 }
+fn make(xs: Array<Int64>) -> R {
+    let n = xs.length
+    return R { src: xs.copy(), n: n, pos: 0 }
+}
+fn step(r: modify R) {
+    if r.pos >= r.n {
+        return
+    }
+    r.pos = r.pos + 1
+}
+fn chop(r: modify R) {
+    let _ = r.src.pop()
+}
+fn w(r: R) -> Int64 {
+    if r.pos >= r.n {
+        return 0
+    }
+    return r.src[r.pos]
+}
+fn main() -> Int64 {
+    let xs: Array<Int64> = [10, 20, 30]
+    let mut r = make(xs)
+    step(r)
+    step(r)
+    chop(r)
+    print(w(r).toString())
+    return 0
+}
+"#,
+        "array index 2 out of bounds",
+    ),
+    // A record decoded by `fromJson` holds any cursor.
+    (
+        r#"type R = { src: Array<Int64>, pos: Int64 }
+fn w(r: R) -> Int64 {
+    if r.pos >= r.src.length {
+        return 0
+    }
+    return r.src[r.pos]
+}
+fn main() -> Int64 {
+    let r = R { src: [1, 2], pos: 0 }
+    let v = match fromJson<R>("{\"src\": [1, 2, 3], \"pos\": -1}") {
+        Valid(d) => w(d),
+        Invalid(_) => 0,
+    }
+    print((w(r) + v).toString())
+    return 0
+}
+"#,
+        "array index -1 out of bounds",
+    ),
+    // Module state moves its cursor below zero; the walk tracks no global's fields.
+    (
+        r#"type R = { src: Array<Int64>, pos: Int64 }
+let mut g = R { src: [1, 2, 3], pos: 0 }
+fn back() {
+    g.pos = g.pos - 1
+}
+fn w(r: R) -> Int64 {
+    if r.pos >= r.src.length {
+        return 0
+    }
+    return r.src[r.pos]
+}
+fn main() -> Int64 {
+    let r = R { src: [1, 2], pos: 0 }
+    back()
+    print((w(r) + w(g)).toString())
+    return 0
+}
+"#,
+        "array index -1 out of bounds",
+    ),
+    // A callee moves the cursor of the record it takes `modify` below zero.
+    (
+        r#"type R = { src: Array<Int64>, pos: Int64 }
+fn back(r: modify R) {
+    r.pos = r.pos - 1
+}
+fn w(r: R) -> Int64 {
+    if r.pos >= r.src.length {
+        return 0
+    }
+    return r.src[r.pos]
+}
+fn main() -> Int64 {
+    let mut r = R { src: [1, 2, 3], pos: 0 }
+    back(r)
+    print(w(r).toString())
+    return 0
+}
+"#,
+        "array index -1 out of bounds",
+    ),
 ];
 
 #[test]
-fn every_pair_witness_keeps_its_index_and_traps_there() {
+fn every_record_witness_keeps_its_index_and_traps_there() {
     let mut failures = Vec::new();
-    for (root, trap) in PAIR_WITNESSES {
+    for (root, trap) in RECORD_WITNESSES {
         let (dir, file) = modules(root, &[]);
         let rows = rows_of(&file, "w");
         if rows.is_empty() || rows.iter().any(|v| v.starts_with("proved")) {

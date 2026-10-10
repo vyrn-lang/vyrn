@@ -11,7 +11,7 @@ tests, not for secrets.
 ## Rng
 
 ```vyrn
-type Rng = { state: Int64 }
+type Rng = { state: UInt64 }
 ```
 
 PRNG state. Copy it to fork a reproducible stream.
@@ -39,8 +39,8 @@ comptime code cannot call it.
 fn seededRng(seed: Int64) -> Rng
 ```
 
-A generator seeded by any `Int64`. SplitMix64 has no bad states, so the seed
-is the initial state.
+A generator seeded by any `Int64`. SplitMix64 has no bad states, so the
+seed's bit pattern is the initial state.
 
 ## nextInt
 

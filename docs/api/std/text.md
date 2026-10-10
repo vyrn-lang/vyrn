@@ -15,7 +15,7 @@ what UTF-8 means.
 ## decodeUtf8
 
 ```vyrn
-fn decodeUtf8(b: Array<UInt8>) -> Option<Array<Int64>>
+fn decodeUtf8(b: Array<UInt8>) -> Option<Array<UInt32>>
 ```
 
 The Unicode scalar values of `b`, or `None` if `b` is not valid UTF-8 as Rust's
@@ -51,7 +51,7 @@ in cost no call.
 ## chars
 
 ```vyrn
-fn chars(s: String) -> Array<Int64>
+fn chars(s: String) -> Array<UInt32>
 ```
 
 The codepoints of `s`.
@@ -89,7 +89,7 @@ byte after a two-byte codepoint on an otherwise empty line is column 3.
 ## showCps
 
 ```vyrn
-fn showCps(a: Array<Int64>) -> String
+fn showCps(a: Array<UInt32>) -> String
 ```
 
 The codepoints as comma-separated decimals, so a test compares exact scalar
