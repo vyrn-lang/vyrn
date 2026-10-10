@@ -505,7 +505,8 @@ impl State {
         }
     }
 
-    /// Answers whether `goal >= 0` holds with at most two premises.
+    /// Answers whether `goal >= 0` holds with at most two premises, or with
+    /// one premise and a length axiom for each length the rest names.
     pub fn ge0(&self, goal: &Lin) -> Option<Cert> {
         self.prover().ge0(goal)
     }
@@ -741,12 +742,33 @@ impl Prover<'_> {
                 uses: vec![p.clone()],
             });
         }
+        let length =
+            |(t, k): &(Term, i64)| matches!(t, Term::Len(_) | Term::Col(..)) && matches!(k, 1 | -1);
+        // The constant of `len >= 0` or `LEN_MAX - len >= 0`, as `axioms` states them.
+        let axiom_c = |k: i64| if k < 0 { LEN_MAX } else { 0 };
         for p in self.st.facts.iter().chain(&self.axioms).chain(&extra) {
             let Some(d) = g.sub(p) else { continue };
             if let Some(q) = one(&d) {
                 return Some(Cert::Sum {
                     slack: d.c - q.c,
                     uses: vec![p.clone(), q.clone()],
+                });
+            }
+            // A rest over lengths alone, each with coefficient one or minus
+            // one, takes one axiom per length: `i <= a - b` gives
+            // `i <= LEN_MAX`.
+            if !d.terms.iter().all(length) {
+                continue;
+            }
+            let slack = (d.terms.iter()).try_fold(d.c, |c, (_, k)| c.checked_sub(axiom_c(*k)));
+            if let Some(slack) = slack.filter(|s| *s >= 0) {
+                let rest = d.terms.iter().map(|&(t, k)| Lin {
+                    terms: vec![(t, k)],
+                    c: axiom_c(k),
+                });
+                return Some(Cert::Sum {
+                    uses: std::iter::once(p.clone()).chain(rest).collect(),
+                    slack,
                 });
             }
         }
@@ -803,6 +825,18 @@ mod tests {
         let cert = st.ge0(&goal).expect("i < len <= LEN_MAX");
         assert!(cert.verify(&st, &goal));
         assert!(st.ge0(&v(0).plus(-1).unwrap()).is_none());
+    }
+
+    #[test]
+    fn a_fact_over_two_lengths_bounds_its_value_by_their_axioms() {
+        let mut st = State::default();
+        // len(a) - len(b) - i >= 0
+        let (a, b) = (Lin::of(Term::Len(Name(1))), Lin::of(Term::Len(Name(2))));
+        st.assume(&a.sub(&b).and_then(|d| d.sub(&v(0))).unwrap());
+        let goal = Lin::k(LEN_MAX).sub(&v(0)).unwrap();
+        let cert = st.ge0(&goal).expect("i <= len(a) <= LEN_MAX");
+        assert!(cert.verify(&st, &goal));
+        assert!(st.ge0(&goal.plus(-1).unwrap()).is_none());
     }
 
     #[test]

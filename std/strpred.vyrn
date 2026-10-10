@@ -69,14 +69,14 @@ export fn skipTable(needle: String, haystackBytes: Int64) -> Array<Int64> {
 }
 
 /// The first occurrence of `needle` at or after `from`, or -1. O(n*m).
-export fn findPlain(s: String, needle: String, from: Int64) -> Int64 {
+export fn findPlain(s: String, needle: String, from: Int64 where value >= 0) -> Int64 {
     let n = s.byteLength
     let nl = needle.byteLength
     if nl == 0 {
         return from
     }
     let mut i = from
-    while i + nl <= n {
+    while i <= n - nl {
         let mut j = 0
         while j < nl && s[i + j] == needle[j] {
             j = j + 1
@@ -132,7 +132,7 @@ export fn contains(s: String, needle: String) -> Bool {
     // and one more frame cost 2.7% of the generator phase.
     let nl = needle.byteLength
     let mut i = 0
-    while i + nl <= n {
+    while i <= n - nl {
         let mut j = 0
         while j < nl && s[i + j] == needle[j] {
             j = j + 1

@@ -230,6 +230,44 @@ fn a_sum_of_two_bounded_operands_is_exact() {
     );
 }
 
+/// `i <= n - nl` bounds `i` by `LEN_MAX` through the two lengths' axioms, so
+/// `i + 1` and `i + j` are exact and `i >= 0` survives the loop's head.
+#[test]
+fn a_bound_by_a_difference_of_lengths_keeps_the_counter_exact() {
+    let src = "export fn w(s: String, t: String, from: Int64 where value >= 0) -> Int64 {
+    let n = s.byteLength
+    let nl = t.byteLength
+    let mut i = from
+    while i <= n - nl {
+        let mut j = 0
+        while j < nl && s[i + j] == t[j] {
+            j = j + 1
+        }
+        if j == nl {
+            return i
+        }
+        i = i + 1
+    }
+    return 0 - 1
+}
+";
+    assert_eq!(
+        verdicts(src, "w"),
+        ["proved string-index", "proved string-index"]
+    );
+    let (err, rows) = oracle(src, "    print(w(\"abcab\", \"ab\", 1).toString())", "w");
+    assert_eq!(
+        (err.as_str(), rows),
+        (
+            "",
+            vec![
+                "7 0 string-index proved 4".to_string(),
+                "7 1 string-index proved 4".to_string()
+            ]
+        )
+    );
+}
+
 #[test]
 fn a_disequality_proves_its_divisor() {
     let src = "fn w(a: Int64, b: Int64) -> Int64 {
@@ -1297,6 +1335,129 @@ fn w(xs: Array<Int64>, h: H) -> Int64 {
 ",
         "    print(w(2).toString())",
         "array index 2 out of bounds",
+    ),
+    // A step no fact bounds leaves `i + d` inexact: it wraps below zero.
+    (
+        "export fn w(s: String, t: String, d: Int64) -> Int64 {
+    let n = s.byteLength
+    let nl = t.byteLength
+    let mut c: Int64 = 0
+    let mut i: Int64 = 1
+    while i <= n - nl {
+        c = c + Int64(s[i])
+        i = i + d
+    }
+    return c
+}
+",
+        "    print(w(\"abc\", \"x\", 9223372036854775807).toString())",
+        "string index -9223372036854775808 out of bounds",
+    ),
+    // The body raises the exit's bound before the read: `i + k - 1` reaches `n`.
+    (
+        "export fn w(s: String) -> Int64 {
+    let n = s.byteLength
+    let mut c: Int64 = 0
+    let mut k: Int64 = 1
+    let mut i: Int64 = 0
+    while i <= n - k {
+        k = k + 1
+        c = c + Int64(s[i + k - 1])
+        i = i + 1
+    }
+    return c
+}
+",
+        "    print(w(\"abc\").toString())",
+        "string index 3 out of bounds",
+    ),
+    // Nothing states `nl <= n`: a needle longer than the text reads past it.
+    (
+        "export fn w(s: String, t: String) -> Int64 {
+    let nl = t.byteLength
+    let mut c: Int64 = 0
+    let mut j: Int64 = 0
+    while j < nl {
+        c = c + Int64(s[j])
+        j = j + 1
+    }
+    return c
+}
+",
+        "    print(w(\"ab\", \"xyz\").toString())",
+        "string index 2 out of bounds",
+    ),
+    // A start below zero: no clause states `from >= 0`.
+    (
+        "export fn w(s: String, t: String, from: Int64) -> Int64 {
+    let n = s.byteLength
+    let nl = t.byteLength
+    let mut c: Int64 = 0
+    let mut i = from
+    while i <= n - nl {
+        c = c + Int64(s[i])
+        i = i + 1
+    }
+    return c
+}
+",
+        "    print(w(\"abc\", \"x\", -1).toString())",
+        "string index -1 out of bounds",
+    ),
+    // A start past `n`: `i + nl` wraps, so `i + nl <= n` holds at `i64` max.
+    (
+        "export fn w(s: String, t: String, from: Int64 where value >= 0) -> Int64 {
+    let n = s.byteLength
+    let nl = t.byteLength
+    let mut c: Int64 = 0
+    let mut i = from
+    while i + nl <= n {
+        c = c + Int64(s[i])
+        i = i + 1
+    }
+    return c
+}
+",
+        "    print(w(\"abc\", \"x\", 9223372036854775807).toString())",
+        "string index 9223372036854775807 out of bounds",
+    ),
+    // A skip table with a negative entry steps below zero. A zero entry
+    // loops forever and reads in range, so it witnesses nothing here.
+    (
+        "export fn w(s: String, skip: Array<Int64>) -> Int64 {
+    let n = s.byteLength
+    let mut c: Int64 = 0
+    let mut i: Int64 = 0
+    while i < n {
+        let b = Int64(s[i])
+        c = c + b
+        i = i + skip[b - 97]
+    }
+    return c
+}
+",
+        "    print(w(\"ab\", [1, -2]).toString())",
+        "string index -1 out of bounds",
+    ),
+    // The loop writes its skip table: the entry it read last turn changes.
+    (
+        "fn lower(skip: modify Array<Int64>) {
+    skip[0] = -5
+}
+export fn w(s: String, skip: modify Array<Int64>) -> Int64 {
+    let n = s.byteLength
+    let mut c: Int64 = 0
+    let mut i: Int64 = 0
+    while i < n {
+        c = c + Int64(s[i])
+        i = i + skip[0]
+        lower(skip)
+    }
+    return c
+}
+",
+        "    let mut t: Array<Int64> = [1]\n    print(w(\"abc\", t).toString())",
+        "string index -4 out of bounds",
     ),
 ];
 
