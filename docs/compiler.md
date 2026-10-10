@@ -206,7 +206,9 @@ checks the rule (`check::Guard::Rule`). A record fact
 (`elide::RecordFacts`) is a linear fact over the fields of every record
 value with those fields: two array fields equally long, an integer field at
 least zero, an indexed array or String field at least as long as an integer
-field's value. `elide::invariants` keeps a fact only when each body that
+field's value, or at least a constant long where a check needs it. A walk that
+proves a record's facts takes a callee's constant result length from a solve
+that assumes no record fact. `elide::invariants` keeps a fact only when each body that
 builds such a record or writes one of its fields proves it wherever the
 value leaves the name, and a walk assumes it of every record name it did not
 build. A fact may name the value of a

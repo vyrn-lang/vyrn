@@ -3067,6 +3067,28 @@ fn every_call_row_proving_a_fact_proves_the_check() {
 /// `P` the program builds keeps `a` and `b` equally long, so `b[i]` under
 /// `i < a.length` is proved.
 const RECORD_PROOFS: &[&str] = &[
+    // A table field that every constructor fills to a literal size.
+    r#"type T = { tbl: Array<Int64>, n: Int64 }
+fn fill() -> Array<Int64> {
+    let mut t: Array<Int64> = []
+    let mut k = 0
+    while k < 8 {
+        t.push(k)
+        k = k + 1
+    }
+    return t
+}
+fn make(n: Int64) -> T {
+    return T { tbl: fill(), n: n }
+}
+fn w(t: T) -> Int64 {
+    return t.tbl[t.n & 7]
+}
+fn main() -> Int64 {
+    print(w(make(15)).toString())
+    return 0
+}
+"#,
     // Both fields grow in step through a `modify` parameter.
     r#"type P = { a: Array<Int64>, b: Array<Int64> }
 fn add(p: modify P, x: Int64) {
@@ -3238,6 +3260,121 @@ fn every_record_proof_proves_the_index() {
 /// pair programs `w` indexes `b` under `i < a.length` and a value of a record
 /// with fields `a` and `b` does not keep them equal where `w` reads it.
 const RECORD_WITNESSES: &[(&str, &str)] = &[
+    // A `modify` call empties a table field every constructor fills.
+    (
+        r#"type T = { tbl: Array<Int64>, n: Int64 }
+fn fill() -> Array<Int64> {
+    let mut t: Array<Int64> = []
+    let mut k = 0
+    while k < 8 {
+        t.push(k)
+        k = k + 1
+    }
+    return t
+}
+fn make(n: Int64) -> T {
+    return T { tbl: fill(), n: n }
+}
+fn cut(t: modify T) {
+    t.tbl.clear()
+}
+fn w(t: T) -> Int64 {
+    return t.tbl[t.n & 7]
+}
+fn main() -> Int64 {
+    let mut t = make(3)
+    cut(t)
+    print(w(t).toString())
+    return 0
+}
+"#,
+        "array index 3 out of bounds",
+    ),
+    // One path of the constructor builds a short table.
+    (
+        r#"type T = { tbl: Array<Int64>, n: Int64 }
+fn fill() -> Array<Int64> {
+    let mut t: Array<Int64> = []
+    let mut k = 0
+    while k < 8 {
+        t.push(k)
+        k = k + 1
+    }
+    return t
+}
+fn make(n: Int64) -> T {
+    if n > 10 {
+        return T { tbl: [1, 2, 3], n: n }
+    }
+    return T { tbl: fill(), n: n }
+}
+fn w(t: T) -> Int64 {
+    return t.tbl[t.n & 7]
+}
+fn main() -> Int64 {
+    print(w(make(15)).toString())
+    return 0
+}
+"#,
+        "array index 7 out of bounds",
+    ),
+    // The table's callee returns a short one on one path.
+    (
+        r#"type T = { tbl: Array<Int64>, n: Int64 }
+fn fill(n: Int64) -> Array<Int64> {
+    if n > 10 {
+        return [1]
+    }
+    let mut t: Array<Int64> = []
+    let mut k = 0
+    while k < 8 {
+        t.push(k)
+        k = k + 1
+    }
+    return t
+}
+fn make(n: Int64) -> T {
+    return T { tbl: fill(n), n: n }
+}
+fn w(t: T) -> Int64 {
+    return t.tbl[t.n & 7]
+}
+fn main() -> Int64 {
+    print(w(make(13)).toString())
+    return 0
+}
+"#,
+        "array index 5 out of bounds",
+    ),
+    // A record decoded by `fromJson` holds any table.
+    (
+        r#"type T = { tbl: Array<Int64>, n: Int64 }
+fn fill() -> Array<Int64> {
+    let mut t: Array<Int64> = []
+    let mut k = 0
+    while k < 8 {
+        t.push(k)
+        k = k + 1
+    }
+    return t
+}
+fn make(n: Int64) -> T {
+    return T { tbl: fill(), n: n }
+}
+fn w(t: T) -> Int64 {
+    return t.tbl[t.n & 7]
+}
+fn main() -> Int64 {
+    let v = match fromJson<T>("{\"tbl\": [1], \"n\": 3}") {
+        Valid(d) => w(d),
+        Invalid(_) => 0,
+    }
+    print((w(make(1)) + v).toString())
+    return 0
+}
+"#,
+        "array index 3 out of bounds",
+    ),
     // A store into the field after the guard; the body restores the pair
     // before it returns.
     (
