@@ -36,7 +36,7 @@ use vyrn_frontend::effects::Effect;
 use vyrn_frontend::prelude::{self, Length};
 use vyrn_frontend::prim::Cmp;
 
-use crate::facts::{Fact, Lin, State, Term};
+use crate::facts::{Cert, Fact, Lin, State, Term};
 use vyrn_frontend::core::check::{Atom, Check, Guard, Operand, Site, Verdict, Why};
 use vyrn_frontend::core::{
     rows, Arg, Body, BorrowKind, Callee, Ctor, Lit, Name, Op, Place, Rhs, St, Target, Val,
@@ -2284,17 +2284,45 @@ impl<'a> Walk<'a> {
         }
     }
 
-    /// The range of `n = a op b` where `b` is a literal that bounds it.
+    /// The range of `n = a op b` where `b` is a literal that bounds it, or
+    /// the shift amount of a non-negative `a`.
     fn bound(&self, pre: &State, n: Name, o: BinOp, la: &Lin, lb: &Lin) -> Out {
-        let nonneg = pre.ge0(la).is_some();
-        let (lo, hi) = match (o, lb.is_const().then_some(lb.c)) {
-            (BinOp::BitAnd, Some(c)) if c >= 0 => (Lin::k(0), Lin::k(c)),
-            (BinOp::Rem, Some(k)) if k >= 1 && nonneg => (Lin::k(0), Lin::k(k - 1)),
-            (BinOp::Div | BinOp::Shr, Some(k)) if k >= 1 && nonneg => (Lin::k(0), la.clone()),
+        let p = pre.prover();
+        let holds = |g: &Lin| p.ge0(g).is_some_and(|c| c.verify(pre, g));
+        // The least value of `l` the state proves: the slack of
+        // `l + EXACT >= 0`, checked again as a goal of its own.
+        let least = |l: &Lin| {
+            let Cert::Sum { slack, .. } = p.ge0(&l.plus(EXACT)?)? else {
+                return None;
+            };
+            let m = slack - EXACT;
+            holds(&l.plus(-m)?).then_some(m)
+        };
+        let nonneg = holds(la);
+        let v = Lin::of(Term::Val(n));
+        // For `a` in `[0, h]`, `a / d` and `a >> k` with `k >= s` lie in
+        // `[0, a]` and below `h / d` and `h >> s`. A `k` past the width traps.
+        let quotient = |cut: &dyn Fn(i64) -> i64| {
+            let h = la.scale(-1).and_then(|l| least(&l)).map(|m| cut(-m));
+            [
+                Some(v.clone()),
+                la.sub(&v),
+                h.and_then(|h| Lin::k(h).sub(&v)),
+            ]
+        };
+        let facts = match (o, lb.is_const().then_some(lb.c)) {
+            (BinOp::BitAnd, Some(c)) if c >= 0 => [Some(v.clone()), Lin::k(c).sub(&v), None],
+            (BinOp::Rem, Some(k)) if k >= 1 && nonneg => {
+                [Some(v.clone()), Lin::k(k - 1).sub(&v), None]
+            }
+            (BinOp::Div, Some(k)) if k >= 1 && nonneg => quotient(&|h| h / k),
+            (BinOp::Shr, _) if nonneg => match least(lb) {
+                Some(s) if s >= 0 => quotient(&|h| h >> s.min(63)),
+                _ => return Out::Nothing,
+            },
             _ => return Out::Nothing,
         };
-        let v = Lin::of(Term::Val(n));
-        Out::Facts([v.sub(&lo), hi.sub(&v)].into_iter().flatten().collect())
+        Out::Facts(facts.into_iter().flatten().collect())
     }
 
     /// `a && b` or `a || b`: the side that gives both operands' facts.
