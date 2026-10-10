@@ -30,7 +30,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt::Write;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use vyrn_frontend::ast::{BinOp, Capability, FnId, Type, TypeDecl, UnOp};
 use vyrn_frontend::effects::Effect;
@@ -120,6 +120,143 @@ pub struct Summaries {
     /// Bodies [`summaries`] decided as [`decide`] decides them, each served
     /// once ([`Summaries::decided`]).
     decided: HashMap<FnId, Mutex<Option<Body>>>,
+    pairs: Pairs,
+}
+
+/// What [`invariants`] reads besides the bodies, made once per program.
+#[derive(Debug, Default)]
+pub struct Records {
+    /// The declared types whose values the host or a builtin makes: those a
+    /// builtin's or an `extern` function's signature names, the prelude's,
+    /// and every declared type they hold.
+    host: BTreeSet<String>,
+    /// The declaration a `modify` parameter's type names, by the function's
+    /// [`FnId`] index and the parameter's.
+    params: Arc<BTreeMap<(usize, usize), String>>,
+}
+
+impl Records {
+    /// The records of `program`, whose host-made types are those `roots`
+    /// name and every declared type they hold.
+    pub fn new<'t>(
+        program: &vyrn_frontend::ast::Program,
+        roots: impl IntoIterator<Item = &'t Type>,
+        decls: &'t HashMap<String, TypeDecl>,
+    ) -> Records {
+        let mut host = BTreeSet::new();
+        let mut stack: Vec<&Type> = roots.into_iter().collect();
+        while let Some(t) = stack.pop() {
+            vyrn_frontend::types::walk_type(t, &mut |x| {
+                if let Type::Named(n) | Type::App(n, _) = x {
+                    if let Some(d) = decls.get(n).filter(|_| !host.contains(n)) {
+                        host.insert(n.clone());
+                        stack.push(&d.base);
+                    }
+                }
+            });
+        }
+        let params = (program.functions.iter().enumerate())
+            .flat_map(|(g, f)| {
+                (f.params.iter().enumerate()).filter_map(move |(k, p)| {
+                    match (&p.capability, &p.ty) {
+                        (Capability::Modify, Type::Named(d) | Type::App(d, _)) => {
+                            Some(((g, k), d.clone()))
+                        }
+                        _ => None,
+                    }
+                })
+            })
+            .collect();
+        Records {
+            host,
+            params: Arc::new(params),
+        }
+    }
+}
+
+/// Pairs of array fields, by name, whose lengths are equal in every record
+/// value that has both ([`invariants`]).
+#[derive(Debug, Default)]
+pub struct Pairs {
+    /// Each pair's first field name, to the names after it it pairs with.
+    of: BTreeMap<String, BTreeSet<String>>,
+    /// Per record declaration that has both fields of a pair, those pairs.
+    by_decl: HashMap<String, Vec<(String, String)>>,
+    /// [`Records::params`].
+    params: Arc<BTreeMap<(usize, usize), String>>,
+}
+
+impl Pairs {
+    fn new(
+        of: BTreeMap<String, BTreeSet<String>>,
+        decls: &HashMap<String, TypeDecl>,
+        params: &Arc<BTreeMap<(usize, usize), String>>,
+    ) -> Pairs {
+        let mut pairs = Pairs {
+            of,
+            by_decl: HashMap::new(),
+            params: params.clone(),
+        };
+        if pairs.of.is_empty() {
+            return pairs;
+        }
+        for name in decls.keys() {
+            let ty = Type::Named(name.clone());
+            let Some(fields) = vyrn_frontend::types::record_fields(&ty, decls) else {
+                continue;
+            };
+            let names: Vec<&str> = fields.iter().map(|f| f.name.as_str()).collect();
+            let within: Vec<(String, String)> = (pairs.within(&names).into_iter())
+                .map(|(a, b)| (a.to_string(), b.to_string()))
+                .collect();
+            if !within.is_empty() {
+                pairs.by_decl.insert(name.clone(), within);
+            }
+        }
+        pairs
+    }
+
+    fn is_empty(&self) -> bool {
+        self.of.is_empty()
+    }
+
+    /// The pairs of the declared type of `modify` parameter `k` of `g`.
+    fn param(&self, g: FnId, k: usize) -> Option<&[(String, String)]> {
+        let d = self.params.get(&(g.index(), k))?;
+        Some(self.by_decl.get(d).map_or(&[], Vec::as_slice))
+    }
+
+    /// The pairs a record of type `ty` has both fields of.
+    fn of_type(&self, ty: &Type, decls: &HashMap<String, TypeDecl>) -> Vec<(&str, &str)> {
+        if self.is_empty() {
+            return Vec::new();
+        }
+        match ty {
+            Type::Named(d) | Type::App(d, _) => (self.by_decl.get(d).into_iter().flatten())
+                .map(|(a, b)| (a.as_str(), b.as_str()))
+                .collect(),
+            _ => match vyrn_frontend::types::record_fields(ty, decls) {
+                Some(fs) => self.within(&fs.iter().map(|f| f.name.as_str()).collect::<Vec<_>>()),
+                None => Vec::new(),
+            },
+        }
+    }
+
+    /// The pairs with both fields among `fields`.
+    fn within(&self, fields: &[impl AsRef<str>]) -> Vec<(&str, &str)> {
+        let mut out = Vec::new();
+        for f in fields {
+            let Some((a, bs)) = self.of.get_key_value(f.as_ref()) else {
+                continue;
+            };
+            for g in fields {
+                if let Some(b) = bs.get(g.as_ref()) {
+                    out.push((a.as_str(), b.as_str()));
+                }
+            }
+        }
+        out
+    }
 }
 
 impl Summaries {
@@ -135,6 +272,7 @@ impl Summaries {
 struct View<'a> {
     at: &'a HashMap<FnId, usize>,
     values: &'a [Summary],
+    pairs: &'a Pairs,
 }
 
 impl View<'_> {
@@ -168,6 +306,7 @@ impl<'a> From<&'a Summaries> for View<'a> {
         View {
             at: &s.at,
             values: &s.values,
+            pairs: &s.pairs,
         }
     }
 }
@@ -192,25 +331,44 @@ impl<'a> From<&'a Summaries> for View<'a> {
 /// generic function, whose instances run other bodies; and only a
 /// [`Callee::Fn`] row of a body in `bodies`, or a row that spells its name,
 /// enters a body of `closed`.
+///
+/// Every walk assumes the record [`Pairs`] that [`invariants`] keeps from
+/// `records`; `None` when a body that runs may be missing from `bodies`, and
+/// then no pair holds.
 pub fn summaries<'a>(
     bodies: impl Iterator<Item = (FnId, &'a Body)>,
     decls: &HashMap<String, TypeDecl>,
     closed: &HashSet<FnId>,
+    records: Option<&Records>,
 ) -> Summaries {
     let mut bodies: Vec<(FnId, &Body)> = bodies.collect();
     bodies.sort_by_key(|(f, _)| f.index());
     // A body's name count weighs its work.
     let weigh = |(_, b): &(FnId, &Body)| b.names.len();
-    let values = in_parallel(&bodies, weigh, || (), |(), (_, b)| templates(b, decls));
+    let (values, scans): (Vec<Summary>, Vec<Option<Scan>>) = in_parallel(
+        &bodies,
+        weigh,
+        || (),
+        |(), (_, b)| (templates(b, decls), records.map(|_| scan(b, decls))),
+    )
+    .into_iter()
+    .unzip();
+    let scans: Option<Vec<Scan>> = scans.into_iter().collect();
+    let pairs = match (records, scans) {
+        (Some(r), Some(scans)) => invariants(&bodies, &scans, decls, r),
+        _ => Pairs::default(),
+    };
     let mut at: HashMap<FnId, usize> = (0..).zip(&bodies).map(|(i, (f, _))| (*f, i)).collect();
     let view = View {
         at: &at,
         values: &values,
+        pairs: &pairs,
     };
-    let start: BTreeSet<usize> = in_parallel(&bodies, weigh, || (), |(), (_, b)| seeds(b, view))
-        .into_iter()
-        .flatten()
-        .collect();
+    let start: BTreeSet<usize> =
+        in_parallel(&bodies, weigh, || (), |(), (_, b)| seeds(b, decls, view))
+            .into_iter()
+            .flatten()
+            .collect();
     let mut seen = vec![false; bodies.len()];
     start.iter().for_each(|&i| seen[i] = true);
     // Per body, the bodies whose facts its facts went into: visited again
@@ -219,7 +377,12 @@ pub fn summaries<'a>(
     // value that an earlier update of the same round has since lowered.
     let mut readers = vec![BTreeSet::new(); bodies.len()];
     let walk = |i: usize, values: &[Summary]| {
-        returns(bodies[i].1, decls, View { at: &at, values }, &values[i])
+        let view = View {
+            at: &at,
+            values,
+            pairs: &pairs,
+        };
+        returns(bodies[i].1, decls, view, &values[i])
     };
     let weight = |i: usize| bodies[i].1.names.len();
     let mut values =
@@ -252,6 +415,7 @@ pub fn summaries<'a>(
     let view = View {
         at: &at,
         values: &values,
+        pairs: &pairs,
     };
     let pres = in_parallel(
         &bodies,
@@ -281,6 +445,7 @@ pub fn summaries<'a>(
         let view = View {
             at: &at,
             values: &values,
+            pairs: &pairs,
         };
         callers.retain(|b| rows(&b.stmts).any(|(s, _)| view.pre(s).is_some()));
         let batch: Vec<&Body> = callers.drain(..(callers.len() * 2).div_ceil(3)).collect();
@@ -305,7 +470,243 @@ pub fn summaries<'a>(
         at,
         values,
         decided,
+        pairs,
     }
+}
+
+/// The [`Pairs`] every record value of the program keeps, by Houdini from
+/// each pair of array fields of a declared record type, one of which a check
+/// indexes.
+///
+/// Record types are compatible by shape, so a pair is keyed by its field
+/// names and binds every record value with both fields, whatever its type. A
+/// walk assumes a record name's pairs where the name takes a value it did
+/// not build ([`Walk::restate`]). It tracks the lengths of a record that a
+/// literal builds or a row resizes a field of ([`Walk::dirty`]), and that
+/// record proves its pairs wherever its value leaves the name
+/// ([`Walk::keeps`]). Each round walks the bodies that build or resize a
+/// record with a pair and drops each pair a body does not prove; the next
+/// round walks again each such body whose last walk assumed a dropped pair.
+/// It stops when a round drops none; the live pair count bounds the rounds.
+///
+/// Before the rounds, a pair goes when a host-made type has both fields as
+/// arrays or Strings, or when a row resizes a field of that name through a
+/// place the walk does not track: a global, an element, a nested field, or
+/// a name whose type is not a record.
+fn invariants(
+    bodies: &[(FnId, &Body)],
+    scans: &[Scan<'_>],
+    decls: &HashMap<String, TypeDecl>,
+    records: &Records,
+) -> Pairs {
+    let host = &records.host;
+    let resolve = |t: &Type| vyrn_frontend::types::resolve(t, decls);
+    let seq = |t: &Type| {
+        let t = resolve(t);
+        t.is_seq() || t == Type::Str
+    };
+    let array = |t: &Type| matches!(resolve(t), Type::Array(_) | Type::SmallArray(..));
+    let indexed: BTreeSet<&str> = scans
+        .iter()
+        .flat_map(|s| s.indexed.iter().copied())
+        .collect();
+    let lost: BTreeSet<&str> = scans.iter().flat_map(|s| s.lost.iter().copied()).collect();
+    fn fields_of<'d>(d: &'d TypeDecl, keep: &dyn Fn(&Type) -> bool) -> Vec<&'d str> {
+        match &d.base {
+            Type::Record(fs) => (fs.iter())
+                .filter(|f| keep(&f.ty))
+                .map(|f| f.name.as_str())
+                .collect(),
+            _ => Vec::new(),
+        }
+    }
+    let mut cands: BTreeSet<(&str, &str)> = BTreeSet::new();
+    let mut gone: BTreeSet<(&str, &str)> = BTreeSet::new();
+    for (name, d) in decls {
+        let (fields, into) = match host.contains(name) {
+            true => (fields_of(d, &seq), &mut gone),
+            false => (fields_of(d, &array), &mut cands),
+        };
+        for (i, a) in fields.iter().enumerate() {
+            for b in &fields[i + 1..] {
+                into.insert(if a < b { (a, b) } else { (b, a) });
+            }
+        }
+    }
+    let wanted = |(a, b): &&(&str, &str)| {
+        (indexed.contains(a) || indexed.contains(b)) && !lost.contains(a) && !lost.contains(b)
+    };
+    let mut of: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for (a, b) in cands.difference(&gone).filter(wanted) {
+        of.entry(a.to_string()).or_default().insert(b.to_string());
+    }
+    let mut pairs = Pairs::new(of, decls, &records.params);
+    let maybe: Vec<&Body> = (bodies.iter().zip(scans))
+        .filter(|(_, s)| s.builds)
+        .map(|((_, b), _)| *b)
+        .collect();
+    let touches = in_parallel(
+        &maybe,
+        |b| b.names.len(),
+        || (),
+        |(), b| built(b, decls, &pairs).contains(&true),
+    );
+    let touching: Vec<&Body> = (maybe.iter().zip(touches))
+        .filter_map(|(b, t)| t.then_some(*b))
+        .collect();
+    let mut used: Vec<BTreeSet<(String, String)>> = vec![BTreeSet::new(); touching.len()];
+    let mut walk: Vec<usize> = (0..touching.len()).collect();
+    while !pairs.is_empty() && !walk.is_empty() {
+        let outs = in_parallel(
+            &walk,
+            |&i| touching[i].names.len(),
+            || (),
+            |(), &i| obliged(touching[i], decls, &pairs),
+        );
+        let mut dropped = BTreeSet::new();
+        for (&i, (broken, u)) in walk.iter().zip(outs) {
+            dropped.extend(broken);
+            used[i] = u;
+        }
+        let mut of = std::mem::take(&mut pairs.of);
+        for (a, b) in &dropped {
+            if let Some(bs) = of.get_mut(a) {
+                bs.remove(b);
+            }
+        }
+        of.retain(|_, bs| !bs.is_empty());
+        pairs = Pairs::new(of, decls, &records.params);
+        walk = (0..touching.len())
+            .filter(|&i| used[i].iter().any(|p| dropped.contains(p)))
+            .collect();
+    }
+    pairs
+}
+
+/// What [`invariants`] reads of one body.
+struct Scan<'b> {
+    /// The fields a check indexes, directly or through a name read from one.
+    indexed: Vec<&'b str>,
+    /// The fields a row resizes through a place the walk does not track.
+    lost: Vec<&'b str>,
+    /// Whether a row builds a record or resizes a field.
+    builds: bool,
+}
+
+fn scan<'b>(b: &'b Body, decls: &HashMap<String, TypeDecl>) -> Scan<'b> {
+    let mut checked: BTreeSet<Name> = BTreeSet::new();
+    let mut indexed: Vec<&str> = Vec::new();
+    let mut lost: Vec<&str> = Vec::new();
+    let mut reads: Vec<(Name, &str)> = Vec::new();
+    let mut builds = false;
+    for (s, _) in rows(&b.stmts) {
+        match s {
+            St::Check(c) => match &c.guard {
+                Guard::Index(Place::Field(_, f), _) | Guard::Span(Place::Field(_, f), ..) => {
+                    indexed.push(f)
+                }
+                Guard::Index(Place::Name(n), _) | Guard::Span(Place::Name(n), ..) => {
+                    checked.insert(*n);
+                }
+                _ => {}
+            },
+            St::Let(n, Rhs::Read(Place::Field(_, f))) => reads.push((*n, f)),
+            St::Let(_, Rhs::Make(Ctor::Record(..), _)) => builds = true,
+            _ => {}
+        }
+        for p in resized_places(s) {
+            let Place::Field(base, f) = p else { continue };
+            builds = true;
+            let tracked = match &**base {
+                Place::Name(r) => {
+                    let ty = &b.names[r.index()].ty;
+                    vyrn_frontend::types::record_fields(ty, decls).is_some()
+                }
+                _ => false,
+            };
+            if !tracked {
+                lost.push(f);
+            }
+        }
+    }
+    indexed.extend(
+        reads
+            .into_iter()
+            .filter(|(n, _)| checked.contains(n))
+            .map(|(_, f)| f),
+    );
+    Scan {
+        indexed,
+        lost,
+        builds,
+    }
+}
+
+/// Per name of `body`, whether it is a record a literal builds with both
+/// fields of a pair, or a record whose field of a pair a row resizes.
+fn built(body: &Body, decls: &HashMap<String, TypeDecl>, pairs: &Pairs) -> Vec<bool> {
+    let mut out = vec![false; body.names.len()];
+    for (s, _) in rows(&body.stmts) {
+        match s {
+            St::Let(n, Rhs::Make(Ctor::Record(_, fs), _)) => {
+                out[n.index()] |= !pairs.within(fs).is_empty();
+            }
+            _ => {
+                for p in resized_places(s) {
+                    let Place::Field(r, f) = p else { continue };
+                    let Place::Name(r) = &**r else { continue };
+                    let ty = &body.names[r.index()].ty;
+                    let paired = |(a, b): &(&str, &str)| a == f || b == f;
+                    out[r.index()] |= pairs.of_type(ty, decls).iter().any(paired);
+                }
+            }
+        }
+    }
+    out
+}
+
+/// The places row `s` may change the length of: a store's, a take's, and each
+/// `modify` or `consume` argument's.
+fn resized_places(s: &St) -> impl Iterator<Item = &Place> {
+    let (one, args): (Option<&Place>, &[(Arg, Capability)]) = match s {
+        St::Store { place, .. } => (Some(place), &[]),
+        St::Let(_, Rhs::Take(p)) => (Some(p), &[]),
+        St::Let(_, Rhs::Call { args, .. })
+        | St::Do {
+            rhs: Rhs::Call { args, .. },
+            ..
+        } => (None, args),
+        _ => (None, &[]),
+    };
+    let args = args.iter().filter_map(|(a, cap)| match a {
+        Arg::Place(p) if *cap != Capability::Read => Some(p),
+        _ => None,
+    });
+    one.into_iter().chain(args)
+}
+
+/// The pairs of `pairs` that `body` does not prove of a record it builds or
+/// resizes, where the record's value leaves the name ([`Walk::keeps`]), and
+/// the pairs the walk assumed ([`Walk::restate`]).
+fn obliged(
+    body: &Body,
+    decls: &HashMap<String, TypeDecl>,
+    pairs: &Pairs,
+) -> (BTreeSet<(String, String)>, BTreeSet<(String, String)>) {
+    let at = HashMap::new();
+    let view = View {
+        at: &at,
+        values: &[],
+        pairs,
+    };
+    let mut stmts = body.stmts.clone();
+    let mut w = Walk::new(body, decls, view, &stmts, Some(None));
+    w.obliging = true;
+    w.seed(&stmts, built(body, decls, pairs));
+    let st = w.entry(&BTreeSet::new());
+    let end = w.block(st, &mut stmts);
+    w.exits(&end);
+    (w.broken, w.assumed)
 }
 
 /// The bodies of `closed` that a direct call row of `bodies` enters, and no
@@ -409,8 +810,16 @@ fn spelling(t: &Target) -> Option<&str> {
 
 /// The summarized bodies whose result a check of `b` can depend on: each
 /// callee of a direct call relevant to a check ([`relevant`]).
-fn seeds(b: &Body, sums: View<'_>) -> Vec<usize> {
-    let rel = relevant(b, &b.stmts, false, true, &|g| sums.post(g), &|_, _| false);
+fn seeds(b: &Body, decls: &HashMap<String, TypeDecl>, sums: View<'_>) -> Vec<usize> {
+    let rel = relevant(
+        b,
+        decls,
+        &b.stmts,
+        false,
+        true,
+        &|g| sums.post(g),
+        &|_, _| false,
+    );
     (rows(&b.stmts))
         .filter_map(|(s, _)| match s {
             St::Let(n, rhs) if rel[n.index()] => {
@@ -532,7 +941,9 @@ fn entry_templates(
         .map(|p| kind_of(&body.names[p.index()].ty, decls))
         .collect();
     let candidates = |ss: &[St]| {
-        let rel = relevant(body, ss, false, true, &|g| sums.post(g), &|_, _| false);
+        let rel = relevant(body, decls, ss, false, true, &|g| sums.post(g), &|_, _| {
+            false
+        });
         let used = |k: usize| rel[body.params[k].index()];
         let ints = interface(&params, |k, kind| used(k) && kind.is_int(), Term::Val);
         let seqs = interface(&params, |k, kind| used(k) && kind == Kind::Seq, Term::Len);
@@ -637,6 +1048,16 @@ struct Walk<'a> {
     /// term of its own ([`Walk::col`]).
     open: BTreeSet<Name>,
     refuted: Vec<Refuted>,
+    /// Whether the walk serves [`invariants`]: it gathers `broken`.
+    obliging: bool,
+    /// The record names whose field lengths the walk tracks from a literal or
+    /// a row that resized a field, rather than assuming their [`Pairs`].
+    dirty: BTreeSet<Name>,
+    /// While obliging: the pairs a record of `dirty` did not prove where its
+    /// value left the name.
+    broken: BTreeSet<(String, String)>,
+    /// While obliging: the pairs [`Walk::restate`] assumed.
+    assumed: BTreeSet<(String, String)>,
 }
 
 /// What the walk keeps about one name.
@@ -763,13 +1184,21 @@ impl<'a> Walk<'a> {
             body,
             decls,
             sums,
-            slot: relevant(body, stmts, post.is_some(), !solving, &linked, &enters)
-                .into_iter()
-                .map(|relevant| Slot {
-                    relevant,
-                    origin: Origin::Local,
-                })
-                .collect(),
+            slot: relevant(
+                body,
+                decls,
+                stmts,
+                post.is_some(),
+                !solving,
+                &linked,
+                &enters,
+            )
+            .into_iter()
+            .map(|relevant| Slot {
+                relevant,
+                origin: Origin::Local,
+            })
+            .collect(),
             solving,
             post,
             entered: BTreeMap::new(),
@@ -779,6 +1208,10 @@ impl<'a> Walk<'a> {
             memo: HashMap::new(),
             open: BTreeSet::new(),
             refuted: Vec::new(),
+            obliging: false,
+            dirty: BTreeSet::new(),
+            broken: BTreeSet::new(),
+            assumed: BTreeSet::new(),
         }
     }
 
@@ -864,11 +1297,138 @@ impl<'a> Walk<'a> {
             Place::Name(b) if matches!(self.kind(*b), Kind::Seq) => Some(Term::Len(*b)),
             Place::Field(r, f) => {
                 let Place::Name(r) = &**r else { return None };
-                let (own, least) = self.col(*r, f)?;
-                let at = if self.open.contains(r) { own } else { least };
-                Some(Term::Col(*r, at))
+                self.col_term(*r, f)
             }
             _ => None,
+        }
+    }
+
+    /// The length of the array or String field `f` of record name `r`.
+    fn col_term(&self, r: Name, f: &str) -> Option<Term> {
+        let (own, least) = self.col(r, f)?;
+        let at = if self.open.contains(&r) { own } else { least };
+        Some(Term::Col(r, at))
+    }
+
+    /// The [`Pairs`] record name `n`'s type has, each as its two fields'
+    /// length terms and its field names.
+    fn pairs_of(&self, n: Name) -> Vec<(Term, Term, &'a str, &'a str)> {
+        let pairs = self.sums.pairs;
+        if pairs.is_empty() || self.kind(n) != Kind::Other {
+            return Vec::new();
+        }
+        let ty = &self.body.names[n.index()].ty;
+        (pairs.of_type(ty, self.decls).into_iter())
+            .filter_map(|(a, b)| Some((self.col_term(n, a)?, self.col_term(n, b)?, a, b)))
+            .collect()
+    }
+
+    /// Assumes the [`Pairs`] of record name `n`, whose value a walk of another
+    /// row or body proved them of ([`invariants`]).
+    fn restate(&mut self, st: &mut State, n: Name) {
+        for (a, b, fa, fb) in self.pairs_of(n) {
+            st.assume_eq(&Lin::of(a), &Lin::of(b));
+            if self.obliging {
+                self.assumed.insert((fa.to_string(), fb.to_string()));
+            }
+        }
+    }
+
+    /// While obliging, drops each pair record name `n` of [`Walk::dirty`] does
+    /// not prove in `st`, where its value leaves the name for a reader that
+    /// assumes the pairs: a call, a store, a literal, a return or a release.
+    fn keeps(&mut self, st: &State, n: Name) {
+        if !self.obliging || !self.record || st.dead || !self.dirty.contains(&n) {
+            return;
+        }
+        let holds = |g: &Lin| st.ge0(g).is_some_and(|cert| cert.verify(st, g));
+        for (a, b, fa, fb) in self.pairs_of(n) {
+            let d = Lin::of(a).sub(&Lin::of(b));
+            let both = |d: &Lin| holds(d) && d.scale(-1).is_some_and(|e| holds(&e));
+            if !d.as_ref().is_some_and(both) {
+                self.broken.insert((fa.to_string(), fb.to_string()));
+            }
+        }
+    }
+
+    /// [`Walk::keeps`] of each name `rhs` reads whole: not through a field
+    /// or an element.
+    fn observe(&mut self, st: &State, rhs: &Rhs) {
+        if !self.obliging {
+            return;
+        }
+        let val = |v: &Val| match v {
+            Val::Name(n) => Some(*n),
+            Val::Lit(_) => None,
+        };
+        let names: Vec<Name> = match rhs {
+            Rhs::Val(v) => val(v).into_iter().collect(),
+            Rhs::Read(Place::Name(n)) | Rhs::Take(Place::Name(n)) => vec![*n],
+            Rhs::Call { args, .. } => (args.iter())
+                .filter_map(|(a, _)| match a {
+                    Arg::Val(v) => val(v),
+                    Arg::Place(Place::Name(n)) => Some(*n),
+                    Arg::Place(_) => None,
+                })
+                .collect(),
+            Rhs::Prim(_, vs, _) | Rhs::Make(_, vs) => vs.iter().filter_map(val).collect(),
+            Rhs::Read(_) | Rhs::Take(_) => Vec::new(),
+        };
+        for n in names {
+            self.keeps(st, n);
+        }
+    }
+
+    /// [`Walk::keeps`] of each `modify` parameter, at an exit: the caller
+    /// assumes its pairs after the call.
+    fn exits(&mut self, st: &State) {
+        if !self.obliging {
+            return;
+        }
+        for k in 0..self.body.params.len() {
+            let p = self.body.params[k];
+            let modify = matches!(
+                &self.body.names[p.index()].borrow_kind,
+                Some(BorrowKind::Param { cap: "modify", .. })
+            );
+            if modify {
+                self.keeps(st, p);
+            }
+        }
+    }
+
+    /// Notes that a row resized field `f` of record name `r`, when a pair of
+    /// `r`'s type names `f`. A borrow that is no parameter proves its pairs
+    /// after the row: its source is read through another name, which assumes
+    /// them.
+    fn resized_field(&mut self, st: &State, r: Name, f: &str) {
+        if !self.pairs_of(r).iter().any(|(.., a, b)| *a == f || *b == f) {
+            return;
+        }
+        self.dirty.insert(r);
+        let info = &self.body.names[r.index()];
+        if info.borrow_kind.is_some() && !self.body.params.contains(&r) {
+            self.keeps(st, r);
+        }
+    }
+
+    /// Makes each name `rel` marks relevant, and every name linked to one.
+    fn seed(&mut self, ss: &[St], mut rel: Vec<bool>) {
+        for (r, s) in rel.iter_mut().zip(&self.slot) {
+            *r |= s.relevant;
+        }
+        let sums = self.sums;
+        loop {
+            let before = rel.iter().filter(|r| **r).count();
+            mark(self.body, self.decls, ss, &mut rel, false, &|g| {
+                sums.post(g)
+            });
+            if rel.iter().filter(|r| **r).count() == before {
+                break;
+            }
+        }
+        for (s, r) in self.slot.iter_mut().zip(rel) {
+            s.relevant = r;
         }
     }
 
@@ -958,13 +1518,13 @@ impl<'a> Walk<'a> {
     }
 
     /// `n` as a fresh value: its type's range, and a fixed-size array's length.
-    fn fresh(&self, st: &mut State, n: Name) {
+    fn fresh(&mut self, st: &mut State, n: Name) {
         st.kill(n);
         self.range(st, n);
     }
 
     /// What `n`'s type says about it, unless a definition says more.
-    fn range(&self, st: &mut State, n: Name) {
+    fn range(&mut self, st: &mut State, n: Name) {
         if self.slot[n.index()].relevant
             && !st.defs.contains_key(&Term::Val(n))
             && !st.defs.contains_key(&Term::Len(n))
@@ -974,7 +1534,7 @@ impl<'a> Walk<'a> {
     }
 
     /// What `n`'s type says about its value or its length.
-    fn span(&self, st: &mut State, n: Name) {
+    fn span(&mut self, st: &mut State, n: Name) {
         match self.kind(n) {
             Kind::Int(bits, signed) if bits < 64 => {
                 let (lo, hi) = if signed {
@@ -993,6 +1553,7 @@ impl<'a> Walk<'a> {
                     st.assume_eq(&Lin::of(Term::Len(n)), &Lin::k(len as i64));
                 }
             }
+            Kind::Other if !self.dirty.contains(&n) => self.restate(st, n),
             _ => {}
         }
     }
@@ -1062,11 +1623,13 @@ impl<'a> Walk<'a> {
     fn stmt(&mut self, mut st: State, s: &mut St) -> State {
         match s {
             St::Let(n, rhs) => {
+                self.observe(&st, rhs);
                 self.enter(&st, rhs);
                 self.bind(&mut st, *n, rhs);
                 st
             }
             St::Do { rhs, .. } => {
+                self.observe(&st, rhs);
                 self.enter(&st, rhs);
                 self.effects(&mut st, rhs);
                 // The rule holds again after its check.
@@ -1076,14 +1639,19 @@ impl<'a> Walk<'a> {
                 st
             }
             St::Store { place, value, .. } => {
+                if let Val::Name(m) = value {
+                    self.keeps(&st, *m);
+                }
                 if let Place::Name(n) = place {
+                    // The value the store displaces is released.
+                    self.keeps(&st, *n);
                     let o = self.slot[n.index()].origin.join(self.origin_of_val(value));
                     self.slot[n.index()].origin = o;
                 }
                 self.open(&mut st, place);
                 match (&*place, self.length(place)) {
                     // The field takes the stored array's length.
-                    (Place::Field(..), Some(t)) => {
+                    (Place::Field(r, f), Some(t)) => {
                         st.forget(t);
                         let stored = match value {
                             Val::Name(v) => self.length(&Place::Name(*v)),
@@ -1092,7 +1660,13 @@ impl<'a> Walk<'a> {
                         if let Some(l) = stored {
                             st.define(t, &Lin::of(l));
                         }
+                        if let Place::Name(r) = &**r {
+                            self.resized_field(&st, *r, f);
+                        }
                     }
+                    // A store into a field that is no array or String keeps
+                    // every length.
+                    (Place::Field(..), None) => {}
                     _ => {
                         if let Some(n) = resized_by_store(place) {
                             st.kill(n);
@@ -1108,10 +1682,14 @@ impl<'a> Walk<'a> {
                 st
             }
             St::Drop(n, ..) => {
+                self.keeps(&st, *n);
                 st.kill(*n);
                 st
             }
-            St::Row { .. } => st,
+            St::Row { name, .. } => {
+                self.keeps(&st, *name);
+                st
+            }
             St::If {
                 cond, then, els, ..
             } => {
@@ -1170,6 +1748,10 @@ impl<'a> Walk<'a> {
                 if self.record {
                     self.returned(&st, value.as_ref());
                 }
+                if let Some(Val::Name(m)) = value {
+                    self.keeps(&st, *m);
+                }
+                self.exits(&st);
                 State::dead()
             }
             St::Trap => State::dead(),
@@ -1296,6 +1878,10 @@ impl<'a> Walk<'a> {
         let o = self.origin_of(n, rhs);
         self.slot[n.index()].origin = self.slot[n.index()].origin.join(o);
         st.kill(n);
+        // A literal's lengths are its parts', not the pairs'.
+        if let Rhs::Make(Ctor::Record(..), _) = rhs {
+            self.dirty.insert(n);
+        }
         if !self.slot[n.index()].relevant {
             return self.effects(st, rhs);
         }
@@ -1327,6 +1913,18 @@ impl<'a> Walk<'a> {
             }
             Rhs::Make(Ctor::Array, parts) => {
                 st.define(Term::Len(n), &Lin::k(parts.len() as i64));
+            }
+            Rhs::Make(Ctor::Record(_, fields), parts) if self.rule(n).is_none() => {
+                for (f, v) in fields.iter().zip(parts) {
+                    let len = match v {
+                        Val::Name(m) => self.length(&Place::Name(*m)).map(Lin::of),
+                        Val::Lit(Lit::Str(x)) => Some(Lin::k(x.len() as i64)),
+                        Val::Lit(_) => None,
+                    };
+                    if let (Some(t), Some(len)) = (self.col_term(n, f), len) {
+                        st.define(t, &len);
+                    }
+                }
             }
             Rhs::Call { args, .. } if matches!(self.kind(n), Kind::Seq) => {
                 if let Some((_, lo, hi)) = self.resized(rhs).filter(|_| lands_on_result(args)) {
@@ -1653,7 +2251,7 @@ impl<'a> Walk<'a> {
         let Rhs::Call {
             callee,
             args,
-            kind: Callee::Builtin,
+            kind: Callee::Builtin | Callee::Reserved,
             ..
         } = rhs
         else {
@@ -1691,7 +2289,7 @@ impl<'a> Walk<'a> {
     /// `modify` or `consume` argument rooted at a name that is not a scalar
     /// forgets it.
     fn effects(&mut self, st: &mut State, rhs: &Rhs) {
-        let Rhs::Call { args, .. } = rhs else {
+        let Rhs::Call { args, kind, .. } = rhs else {
             return;
         };
         for (a, cap) in args {
@@ -1716,6 +2314,34 @@ impl<'a> Walk<'a> {
                     }
                 }
                 _ => self.resize(st, n),
+            }
+        }
+        for (k, (a, cap)) in args.iter().enumerate() {
+            match (a, cap) {
+                (Arg::Place(Place::Field(r, f)), Capability::Modify | Capability::Consume) => {
+                    if let Place::Name(r) = &**r {
+                        self.resized_field(st, *r, f);
+                    }
+                }
+                // A declared function proves the pairs of its `modify`
+                // parameter's type at every exit. The argument's type may
+                // have more pairs; then the walk tracks its lengths.
+                (Arg::Val(Val::Name(r)) | Arg::Place(Place::Name(r)), Capability::Modify) => {
+                    let theirs = match kind {
+                        Callee::Fn(g) => self.sums.pairs.param(*g, k),
+                        _ => None,
+                    };
+                    let kept = |a: &str, b: &str| {
+                        theirs.is_some_and(|t| t.iter().any(|(x, y)| x == a && y == b))
+                    };
+                    match self.pairs_of(*r).iter().all(|(.., a, b)| kept(a, b)) {
+                        true => self.restate(st, *r),
+                        false => {
+                            self.dirty.insert(*r);
+                        }
+                    }
+                }
+                _ => {}
             }
         }
     }
@@ -2281,6 +2907,7 @@ fn writes(ss: &[St], out: &mut BTreeSet<Name>) {
 /// relevant one, either way.
 fn relevant(
     body: &Body,
+    decls: &HashMap<String, TypeDecl>,
     ss: &[St],
     returns: bool,
     checks: bool,
@@ -2316,14 +2943,21 @@ fn relevant(
     }
     loop {
         let before = rel.iter().filter(|r| **r).count();
-        mark(body, ss, &mut rel, checks, linked);
+        mark(body, decls, ss, &mut rel, checks, linked);
         if rel.iter().filter(|r| **r).count() == before {
             return rel;
         }
     }
 }
 
-fn mark(body: &Body, ss: &[St], rel: &mut [bool], checks: bool, linked: &dyn Fn(FnId) -> bool) {
+fn mark(
+    body: &Body,
+    decls: &HashMap<String, TypeDecl>,
+    ss: &[St],
+    rel: &mut [bool],
+    checks: bool,
+    linked: &dyn Fn(FnId) -> bool,
+) {
     let val = |v: &Val| match v {
         Val::Name(n) => Some(*n),
         Val::Lit(_) => None,
@@ -2356,10 +2990,18 @@ fn mark(body: &Body, ss: &[St], rel: &mut [bool], checks: bool, linked: &dyn Fn(
                     Rhs::Prim(_, vs, _) => {
                         link(rel, n.into_iter().chain(vs.iter().filter_map(val)))
                     }
+                    // A literal defines its array and String fields' lengths.
+                    Rhs::Make(Ctor::Record(..), vs) => {
+                        let seq = |m: &Name| kind_of(&body.names[m.index()].ty, decls) == Kind::Seq;
+                        link(
+                            rel,
+                            n.into_iter().chain(vs.iter().filter_map(val).filter(seq)),
+                        )
+                    }
                     Rhs::Call {
                         callee, args, kind, ..
                     } => {
-                        let lengths = matches!(kind, Callee::Builtin)
+                        let lengths = matches!(kind, Callee::Builtin | Callee::Reserved)
                             && prelude::builtin(callee)
                                 .is_some_and(|b| b.length != Length::Unknown);
                         if lengths || direct_call(rhs).is_some_and(linked) {
@@ -2388,14 +3030,14 @@ fn mark(body: &Body, ss: &[St], rel: &mut [bool], checks: bool, linked: &dyn Fn(
                 {
                     rel[c.index()] = true;
                 }
-                mark(body, then, rel, checks, linked);
-                mark(body, els, rel, checks, linked);
+                mark(body, decls, then, rel, checks, linked);
+                mark(body, decls, els, rel, checks, linked);
             }
             St::Loop { body: l, .. } | St::Block { body: l, .. } => {
-                mark(body, l, rel, checks, linked)
+                mark(body, decls, l, rel, checks, linked)
             }
             St::Switch { arms, .. } => {
-                (arms.iter()).for_each(|a| mark(body, &a.body, rel, checks, linked))
+                (arms.iter()).for_each(|a| mark(body, decls, &a.body, rel, checks, linked))
             }
             _ => {}
         }

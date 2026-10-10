@@ -64,6 +64,9 @@ pub struct World {
     /// module's (a `$` spelling), or has a type parameter or a `fn`-typed
     /// parameter. [`World::summaries`] keeps those whose every caller it walks.
     private: Vec<FnId>,
+    /// What [`World::summaries`] infers record pairs from besides the bodies
+    /// ([`crate::elide::Records`]).
+    records: crate::elide::Records,
     /// Whether a placed release named an instance the first lowering lacked.
     /// `reached` holds no such instance, so [`crate::effects::reaches`] judges
     /// the program as placed instead.
@@ -342,9 +345,21 @@ impl World {
             })
             .map(FnId::nth)
             .collect();
+        fn sig(f: &Function) -> impl Iterator<Item = &Type> + '_ {
+            (f.params.iter().map(|p| &p.ty)).chain(std::iter::once(&f.ret))
+        }
+        let prelude_types: Vec<Type> = (vyrn_frontend::prelude::type_decls().iter())
+            .map(|d| Type::Named(d.name.clone()))
+            .collect();
+        let externs = (program.functions.iter()).filter(|f| f.is_extern || f.is_export_extern);
+        let roots = (vyrn_frontend::prelude::all().flat_map(sig))
+            .chain(externs.flat_map(sig))
+            .chain(&prelude_types);
+        let records = crate::elide::Records::new(program, roots, decls);
         let mut world = World {
             ownership,
             private,
+            records,
             ..World::default()
         };
         world.reads.replace(rows);
@@ -414,7 +429,8 @@ impl World {
             let bodies = (self.bodies.iter())
                 .filter(|(f, _)| !generic.contains(f))
                 .filter_map(|(f, s)| Some((*f, &s.as_ref()?.body)));
-            crate::elide::summaries(bodies, self.ownership.proto.types(), &closed)
+            let records = known.then_some(&self.records);
+            crate::elide::summaries(bodies, self.ownership.proto.types(), &closed, records)
         })
     }
 

@@ -202,7 +202,11 @@ disequality `d != 0` the state holds. A fact may name the length of
 a record name's array field, and a `where` rule's `a.length == b.length` makes
 one term of both (`facts::Term::Col`), except inside a group of stores into
 the record's fields, where each field has its own term until the row that
-checks the rule (`check::Guard::Rule`). A fact may name the value of a
+checks the rule (`check::Guard::Rule`). Two array fields form a pair
+(`elide::Pairs`) when every record value with both has them equally long:
+`elide::invariants` keeps a pair only when each body that builds such a
+record or resizes one of its fields proves it wherever the value leaves the
+name, and a walk assumes it of every record name it did not build. A fact may name the value of a
 `read` parameter's integer field (`facts::Term::Field`): the kernel's
 exclusivity judgment keeps the parameter unwritten, so each read of the
 field is one value. `World::body_of` decides a body
