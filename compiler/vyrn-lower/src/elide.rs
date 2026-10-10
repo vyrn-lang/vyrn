@@ -97,17 +97,22 @@ fn walk(body: &mut Body, decls: &HashMap<String, TypeDecl>, sums: View<'_>) -> V
 /// What every entry and every return of a body state, over its interface:
 /// in a fact, `Name(0)` is the result and `Name(k + 1)` is parameter `k`; a
 /// [`Term::Val`] is an integer's value and a [`Term::Len`] an array's or
-/// String's length.
+/// String's length, and a [`Term::Field`] or [`Term::Col`] the same of a
+/// record parameter's field, by its index in the record's fields.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Summary {
     /// Per parameter, its kind; a call whose arguments differ states nothing.
     params: Vec<Kind>,
+    /// For a Bool result, per parameter, its type: a field's index means the
+    /// same field only in an argument of the same type. Empty otherwise.
+    types: Vec<Type>,
     /// Facts over the parameters that every call row proves of its
     /// arguments before the call. Empty for a body anything else may enter.
     pre: BTreeSet<Lin>,
-    /// Facts every return proves, whatever the arguments. A fact names only
-    /// parameters the body never writes, so it holds of the arguments as the
-    /// caller passed them.
+    /// Facts every return proves, whatever the arguments; for a Bool result,
+    /// every return of `true`, which the caller assumes where the result is
+    /// true. A fact names only parameters the body never writes, so it holds
+    /// of the arguments as the caller passed them.
     post: BTreeSet<Lin>,
 }
 
@@ -433,6 +438,7 @@ pub fn summaries<'a>(
                     let only = (values.iter())
                         .map(|v| Summary {
                             params: v.params.clone(),
+                            types: v.types.clone(),
                             pre: BTreeSet::new(),
                             post: v
                                 .post
@@ -1181,7 +1187,8 @@ fn direct_call(rhs: &Rhs) -> Option<FnId> {
 /// literal `c` ([`constant_result`]). An array result is at least `c` long
 /// for each `c` of
 /// `needed` ([`needed_lengths`]) the body can make ([`made_lengths`]), and
-/// at least `p` long for each integer parameter `p` it can make.
+/// at least `p` long for each integer parameter `p` it can make. A Bool
+/// result takes the candidates of [`truth_templates`].
 fn templates(body: &Body, decls: &HashMap<String, TypeDecl>, needed: &BTreeSet<i64>) -> Summary {
     let params: Vec<Kind> = (body.params.iter())
         .map(|p| kind_of(&body.names[p.index()].ty, decls))
@@ -1193,6 +1200,7 @@ fn templates(body: &Body, decls: &HashMap<String, TypeDecl>, needed: &BTreeSet<i
         } => {
             let ty = &body.names[n.index()].ty;
             Some(match kind_of(ty, decls) {
+                _ if *ty == Type::Bool => None,
                 k if k.is_int() => Some(Term::Val(Name(0))),
                 _ if vyrn_frontend::types::resolved(ty, decls).is_seq() => Some(Term::Len(Name(0))),
                 _ => None,
@@ -1204,11 +1212,19 @@ fn templates(body: &Body, decls: &HashMap<String, TypeDecl>, needed: &BTreeSet<i
         } => Some(Some(Term::Val(Name(0)))),
         _ => None,
     });
-    let mut post = BTreeSet::new();
-    if let Some(Some(r)) = r {
-        let mut written = BTreeSet::new();
+    let truth = truth_result(body);
+    let (mut post, mut types, mut written) = (BTreeSet::new(), Vec::new(), BTreeSet::new());
+    if truth || matches!(r, Some(Some(_))) {
         writes(&body.stmts, &mut written);
-        let usable = |k: usize| !written.contains(&body.params[k]);
+    }
+    let usable = |k: usize| !written.contains(&body.params[k]);
+    if truth {
+        post = truth_templates(body, decls, &params, usable);
+        types = (body.params.iter())
+            .map(|p| body.names[p.index()].ty.clone())
+            .collect();
+    }
+    if let Some(Some(r)) = r {
         let ints = interface(&params, |k, kind| usable(k) && kind.is_int(), Term::Val);
         let seqs = interface(&params, |k, kind| usable(k) && kind == Kind::Seq, Term::Len);
         if let Term::Val(_) = r {
@@ -1256,9 +1272,63 @@ fn templates(body: &Body, decls: &HashMap<String, TypeDecl>, needed: &BTreeSet<i
     }
     Summary {
         params,
+        types,
         pre: BTreeSet::new(),
         post,
     }
+}
+
+/// Whether the first return of `body` returns a Bool.
+fn truth_result(body: &Body) -> bool {
+    rows(&body.stmts)
+        .find_map(|(s, _)| match s {
+            St::Return { value: Some(v), .. } => Some(match v {
+                Val::Lit(l) => matches!(l, Lit::Bool(_)),
+                Val::Name(n) => body.names[n.index()].ty == Type::Bool,
+            }),
+            _ => None,
+        })
+        .unwrap_or(false)
+}
+
+/// The candidates of a Bool result's `post`: an index in range, `p >= 0` and
+/// `len(a) - p - 1 >= 0`, over the integers `p` and lengths `a` of the
+/// parameters `usable` keeps and of their records' fields, one deep. None
+/// without a length: a predicate over integers alone would link every
+/// caller's arguments for facts their types mostly state already.
+fn truth_templates(
+    body: &Body,
+    decls: &HashMap<String, TypeDecl>,
+    params: &[Kind],
+    usable: impl Fn(usize) -> bool,
+) -> BTreeSet<Lin> {
+    let (mut ints, mut seqs) = (Vec::new(), Vec::new());
+    for (k, kind) in params.iter().enumerate().filter(|(k, _)| usable(*k)) {
+        let p = Name(k as u32 + 1);
+        match kind {
+            k if k.is_int() => ints.push(Lin::of(Term::Val(p))),
+            Kind::Seq => seqs.push(Lin::of(Term::Len(p))),
+            _ => {
+                let ty = &body.names[body.params[k].index()].ty;
+                let fields = vyrn_frontend::types::record_fields(ty, decls).unwrap_or_default();
+                for (i, f) in (0..).zip(fields.iter()) {
+                    match kind_of(&f.ty, decls) {
+                        k if k.is_int() => ints.push(Lin::of(Term::Field(p, i))),
+                        Kind::Seq => seqs.push(Lin::of(Term::Col(p, i))),
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
+    if seqs.is_empty() {
+        return BTreeSet::new();
+    }
+    let mut out: BTreeSet<Lin> = ints.iter().cloned().collect();
+    for a in &seqs {
+        out.extend(ints.iter().filter_map(|p| a.sub(p)?.plus(-1)));
+    }
+    out
 }
 
 /// The integer literal every return of `body` returns, if there is one.
@@ -2362,7 +2432,11 @@ impl<'a> Walk<'a> {
                     _ => None,
                 };
             };
-            self.arg(t, &args.get(k).filter(|_| copied(k))?.0, s.params[k])
+            let a = &args.get(k).filter(|_| copied(k))?.0;
+            match t {
+                Term::Field(_, i) | Term::Col(_, i) => self.field_arg(t, i, a, s.types.get(k)?),
+                _ => self.arg(t, a, s.params[k]),
+            }
         };
         let free = |l: &Lin| !l.terms.iter().any(|(t, _)| written.contains(&t.name()));
         let facts: Vec<Lin> = s
@@ -2370,6 +2444,12 @@ impl<'a> Walk<'a> {
             .iter()
             .filter_map(|f| f.map(at).filter(free))
             .collect();
+        // A Bool result's facts hold where it is true.
+        if self.body.names[n.index()].ty == Type::Bool {
+            st.conds
+                .insert(n, (facts.into_iter().map(Fact::Ge).collect(), Vec::new()));
+            return;
+        }
         // A result the summary pins to one value is defined as that value, so
         // a goal spends no premise on it.
         let r = Term::Val(n);
@@ -2425,6 +2505,22 @@ impl<'a> Walk<'a> {
         }
     }
 
+    /// The field term `t`, field `i` of a record parameter of type `ty`, as the
+    /// call's argument `a` gives it: a name of the same type.
+    fn field_arg(&self, t: Term, i: u32, a: &Arg, ty: &Type) -> Option<Lin> {
+        let (Arg::Val(Val::Name(m)) | Arg::Place(Place::Name(m))) = a else {
+            return None;
+        };
+        let resolved = |x| vyrn_frontend::types::resolved(x, self.decls);
+        if resolved(&self.body.names[m.index()].ty) != resolved(ty) {
+            return None;
+        }
+        Some(Lin::of(match t {
+            Term::Field(..) => Term::Field(*m, i),
+            _ => Term::Col(*m, i),
+        }))
+    }
+
     /// The linear value of a call argument that is an integer.
     fn arg_lin(&self, a: &Arg) -> Option<Lin> {
         match a {
@@ -2441,11 +2537,18 @@ impl<'a> Walk<'a> {
         }
     }
 
-    /// Keeps the summary candidates the state proves of the returned `value`.
+    /// Keeps the summary candidates the state proves of the returned `value`;
+    /// for a Bool, where it is true ([`Walk::truth`]).
     fn returned(&mut self, st: &State, value: Option<&Val>) {
         let Some(cands) = self.post.take() else {
             return;
         };
+        let truth = self.truth(st, value);
+        let st = truth.as_ref().unwrap_or(st);
+        if st.dead {
+            self.post = Some(cands);
+            return;
+        }
         let params = &self.body.params;
         let at = |t: Term| -> Option<Lin> {
             match (t.name().index().checked_sub(1), t, value?) {
@@ -2453,6 +2556,8 @@ impl<'a> Walk<'a> {
                 (None, Term::Len(_), Val::Name(m)) => Some(Lin::of(self.length(&Place::Name(*m))?)),
                 (Some(k), Term::Val(_), _) => Some(Lin::of(Term::Val(*params.get(k)?))),
                 (Some(k), Term::Len(_), _) => Some(Lin::of(Term::Len(*params.get(k)?))),
+                (Some(k), Term::Field(_, i), _) => Some(Lin::of(Term::Field(*params.get(k)?, i))),
+                (Some(k), Term::Col(_, i), _) => Some(Lin::of(Term::Col(*params.get(k)?, i))),
                 _ => None,
             }
         };
@@ -2461,6 +2566,21 @@ impl<'a> Walk<'a> {
             .filter(|c| c.map(at).is_some_and(|g| holds(&g)))
             .collect();
         self.post = Some(kept);
+    }
+
+    /// The state where the returned Bool `value` is true: none where it is
+    /// `false`, `st` with the facts its truth gives for a name. `None` for
+    /// any other value, whose facts are the state's.
+    fn truth(&self, st: &State, value: Option<&Val>) -> Option<State> {
+        match value? {
+            Val::Lit(Lit::Bool(false)) => Some(State::dead()),
+            Val::Name(m) if self.body.names[m.index()].ty == Type::Bool => {
+                let mut yes = st.clone();
+                (st.conds.get(m).into_iter().flat_map(|c| &c.0)).for_each(|f| yes.add(f));
+                Some(yes)
+            }
+            _ => None,
+        }
     }
 
     /// Defines `n`, just killed, as the value `v`.

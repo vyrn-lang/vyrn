@@ -814,6 +814,124 @@ fn w(h: H, xs: Array<Int64>) -> Int64 {
     );
 }
 
+/// A Bool result states the facts every `true` return proves, over the
+/// parameters and their records' fields; the caller assumes them where the
+/// call is true. A `true` return that does not prove the index, a use where
+/// the call is false, and a write or a `modify` call between the call and
+/// the use each keep the check, which traps.
+#[test]
+fn a_true_result_proves_its_callers_index() {
+    let live = "type H = { slot: Int64 }
+type S = { gens: Array<Int64> }
+fn live(s: S, h: H) -> Bool {
+    if h.slot < 0 || h.slot >= s.gens.length {
+        return false
+    }
+    return s.gens[h.slot] != 0
+}
+fn shrink(s: modify S) {
+    s.gens.clear()
+}
+";
+    let proof = format!(
+        "{live}fn w(s: modify S, h: H) -> Int64 {{
+    if live(s, h) {{
+        return s.gens[h.slot]
+    }}
+    return 0
+}}
+"
+    );
+    let calls = |slot: i64| {
+        format!(
+            "    let mut s = S {{ gens: xs }}
+    print(w(s, H {{ slot: {slot} }}).toString())"
+        )
+    };
+    assert_eq!(verdicts(&proof, "w"), ["proved array-index"]);
+    let (err, _) = oracle(&proof, &calls(2), "w");
+    assert_eq!(err, "");
+    let used = |between: &str, test: &str| {
+        format!(
+            "{live}fn w(s: modify S, h: H) -> Int64 {{
+    let ok = live(s, h)
+{between}    if {test} {{
+        return s.gens[h.slot]
+    }}
+    return 0
+}}
+"
+        )
+    };
+    let witnesses = [
+        (
+            format!(
+                "type H = {{ slot: Int64 }}
+type S = {{ gens: Array<Int64> }}
+fn live(s: S, h: H) -> Bool {{
+    if h.slot == 7 {{
+        return true
+    }}
+    return h.slot >= 0 && h.slot < s.gens.length
+}}
+fn w(s: modify S, h: H) -> Int64 {{
+    if live(s, h) {{
+        return s.gens[h.slot]
+    }}
+    return 0
+}}
+"
+            ),
+            7,
+        ),
+        (used("", "!ok"), 5),
+        (
+            used(
+                "    s.gens.pop()
+",
+                "ok",
+            ),
+            2,
+        ),
+        (
+            used(
+                "    shrink(s)
+",
+                "ok",
+            ),
+            0,
+        ),
+    ];
+    let mut failures = Vec::new();
+    for (src, slot) in &witnesses {
+        let rows = verdicts(src, "w");
+        if rows != ["check array-index"] {
+            failures.push(format!(
+                "{src}
+rows: {rows:?}"
+            ));
+        }
+        let (err, _) = oracle(src, &calls(*slot), "w");
+        if !err.contains(&format!("array index {slot} out of bounds"))
+            || err.contains(vyrn_frontend::trap::PROVED_CHECK_FAILED)
+        {
+            failures.push(format!(
+                "{src}
+ran: {err}"
+            ));
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "{}",
+        failures.join(
+            "
+
+"
+        )
+    );
+}
+
 #[test]
 fn a_join_of_constants_keeps_the_values_between_out() {
     let src = "fn w(x: Int64) -> Int64 {
