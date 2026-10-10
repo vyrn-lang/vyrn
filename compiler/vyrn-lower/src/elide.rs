@@ -863,11 +863,12 @@ fn needed_lengths(b: &Body, decls: &HashMap<String, TypeDecl>) -> Vec<(Place, i6
     out
 }
 
-/// The lengths `b` can give an array it returns as a constant: the count
-/// of the array literal it returns, and the bound of a loop bound by a
-/// literal ([`literal_test`]) that stores to the returned array, which may
-/// push once a turn.
-fn made_lengths(b: &Body) -> BTreeSet<i64> {
+/// The lengths `b` can give an array it returns: the count of the array
+/// literal it returns, the byte length of a String literal a builtin that
+/// keeps its operand's length takes (`bytes("..")`), and the bound of a loop
+/// ([`bound_test`]) that stores to the returned array, which may push once a
+/// turn, or indexes it by the loop's counter.
+fn made_lengths(b: &Body) -> BTreeSet<Lin> {
     let returned: BTreeSet<Name> = (rows(&b.stmts))
         .filter_map(|(s, _)| match s {
             St::Return {
@@ -881,13 +882,35 @@ fn made_lengths(b: &Body) -> BTreeSet<i64> {
     for (s, _) in rows(&b.stmts) {
         match s {
             St::Let(n, Rhs::Make(Ctor::Array, parts)) if returned.contains(n) => {
-                out.insert(parts.len() as i64);
+                out.insert(Lin::k(parts.len() as i64));
+            }
+            St::Let(
+                n,
+                Rhs::Call {
+                    callee,
+                    args,
+                    kind: Callee::Builtin | Callee::Reserved,
+                    ..
+                },
+            ) if returned.contains(n) => {
+                let keeps = prelude::builtin(callee)
+                    .is_some_and(|b| b.length_at(args.len()) == Length::Keeps);
+                if let (true, Some((Arg::Val(Val::Lit(Lit::Str(x))), _))) = (keeps, args.first()) {
+                    out.insert(Lin::k(x.len() as i64));
+                }
             }
             St::Loop { body, .. } => {
+                let Some((_, k, bound)) = bound_test(body) else {
+                    continue;
+                };
                 let mut stored = BTreeSet::new();
                 stores(body, &mut stored);
+                let mut indexed = Vec::new();
+                seqs(body, &mut indexed);
+                let by_k = (indexed.iter()).filter_map(|(p, i)| (*i == k).then(|| place_root(p)));
+                stored.extend(by_k.flatten());
                 if !stored.is_disjoint(&returned) {
-                    out.extend(literal_test(body).map(|(.., c)| c));
+                    out.insert(bound);
                 }
             }
             _ => {}
@@ -1106,8 +1129,11 @@ fn direct_call(rhs: &Rhs) -> Option<FnId> {
 /// value or an array's length; any other result, a String's included,
 /// states nothing. The parameters are those the body never writes. An
 /// `UInt64` is left out: the facts read its values above `i64::MAX` as
-/// negatives. An array result is at least `c` long for each `c` of
-/// `needed` ([`needed_lengths`]) the body can make ([`made_lengths`]).
+/// negatives. An integer result equals `c` when every return returns the
+/// literal `c` ([`constant_result`]). An array result is at least `c` long
+/// for each `c` of
+/// `needed` ([`needed_lengths`]) the body can make ([`made_lengths`]), and
+/// at least `p` long for each integer parameter `p` it can make.
 fn templates(body: &Body, decls: &HashMap<String, TypeDecl>, needed: &BTreeSet<i64>) -> Summary {
     let params: Vec<Kind> = (body.params.iter())
         .map(|p| kind_of(&body.names[p.index()].ty, decls))
@@ -1155,11 +1181,29 @@ fn templates(body: &Body, decls: &HashMap<String, TypeDecl>, needed: &BTreeSet<i
                 post.extend(r.sub(p));
                 post.extend(p.sub(&r));
             }
+            if let Some(c) = constant_result(body) {
+                post.extend(r.plus(-c));
+                post.extend(Lin::k(c).sub(&r));
+            }
         } else {
             let r = Lin::of(r);
             post.extend(seqs.iter().filter_map(|a| r.sub(a)));
-            let made = made_lengths(body);
-            post.extend(needed.intersection(&made).filter_map(|c| r.plus(-c)));
+            // A bound the body makes: a needed constant, or an integer
+            // parameter in `ints`.
+            let param = |n: Name| {
+                (body.params.iter().position(|p| *p == n))
+                    .map(|k| Lin::of(Term::Val(Name(k as u32 + 1))))
+            };
+            for m in made_lengths(body) {
+                let c = match m.terms[..] {
+                    [] if needed.contains(&m.c) => Some(Lin::k(m.c)),
+                    [(Term::Val(p), 1)] => param(p)
+                        .filter(|p| ints.contains(p))
+                        .and_then(|p| p.plus(m.c)),
+                    _ => None,
+                };
+                post.extend(c.and_then(|c| r.sub(&c)));
+            }
         }
     }
     Summary {
@@ -1167,6 +1211,19 @@ fn templates(body: &Body, decls: &HashMap<String, TypeDecl>, needed: &BTreeSet<i
         pre: BTreeSet::new(),
         post,
     }
+}
+
+/// The integer literal every return of `body` returns, if there is one.
+fn constant_result(body: &Body) -> Option<i64> {
+    let mut values = rows(&body.stmts).filter_map(|(s, _)| match s {
+        St::Return { value, .. } => Some(match value {
+            Some(Val::Lit(Lit::Int(c))) => Some(*c),
+            _ => None,
+        }),
+        _ => None,
+    });
+    let first = values.next()??;
+    values.all(|v| v == Some(first)).then_some(first)
 }
 
 /// Parameter `k`'s term `term(Name(k + 1))`, for each `k` whose kind `keep`
@@ -2253,11 +2310,24 @@ impl<'a> Walk<'a> {
             };
             self.arg(t, &args.get(k).filter(|_| copied(k))?.0, s.params[k])
         };
-        for f in &s.post {
-            let free = |l: &Lin| !l.terms.iter().any(|(t, _)| written.contains(&t.name()));
-            if let Some(l) = f.map(at).filter(free) {
-                st.assume(&l);
+        let free = |l: &Lin| !l.terms.iter().any(|(t, _)| written.contains(&t.name()));
+        let facts: Vec<Lin> = s
+            .post
+            .iter()
+            .filter_map(|f| f.map(at).filter(free))
+            .collect();
+        // A result the summary pins to one value is defined as that value, so
+        // a goal spends no premise on it.
+        let r = Term::Val(n);
+        let pinned = (facts.iter())
+            .find(|f| f.terms == [(r, 1)] && f.scale(-1).is_some_and(|g| facts.contains(&g)));
+        match pinned {
+            Some(f) => {
+                let c = Lin::k(-f.c);
+                st.kill(n);
+                st.define(r, &c);
             }
+            None => facts.iter().for_each(|l| st.assume(l)),
         }
     }
 
@@ -2542,9 +2612,10 @@ impl<'a> Walk<'a> {
         }
     }
 
-    /// The receiver of a builtin call in `rhs` whose row states its length
-    /// effect, and the bounds of its new length as sums over the old.
-    fn resized(&self, rhs: &Rhs) -> Option<(Term, Lin, Lin)> {
+    /// The length term of the receiver of a builtin call in `rhs` whose row
+    /// states its length effect, `None` for a String literal, and the bounds
+    /// of its new length as sums over the old.
+    fn resized(&self, rhs: &Rhs) -> Option<(Option<Term>, Lin, Lin)> {
         let Rhs::Call {
             callee,
             args,
@@ -2554,31 +2625,32 @@ impl<'a> Walk<'a> {
         else {
             return None;
         };
-        let len = |i: usize| {
-            let t = match args.get(i)? {
-                (Arg::Val(Val::Name(n)), _) => self.length(&Place::Name(*n))?,
-                (Arg::Place(p), _) => self.length(p)?,
-                _ => return None,
-            };
-            Some((t, Lin::of(t)))
+        let term = |i: usize| match args.get(i)? {
+            (Arg::Val(Val::Name(n)), _) => self.length(&Place::Name(*n)),
+            (Arg::Place(p), _) => self.length(p),
+            _ => None,
         };
-        let (r, old) = len(0)?;
-        let (lo, hi) = match prelude::builtin(callee)?.length {
+        let len = |i: usize| match args.get(i)? {
+            (Arg::Val(Val::Lit(Lit::Str(x))), _) => Some(Lin::k(x.len() as i64)),
+            _ => term(i).map(Lin::of),
+        };
+        let old = len(0)?;
+        let (lo, hi) = match length_rule(callee, args) {
             Length::Unknown => return None,
             Length::Keeps => (old.clone(), old),
             Length::GrowsByOne => (old.plus(1)?, old.plus(1)?),
             Length::ShrinksByOneIfNotEmpty => (old.plus(-1)?, old),
             Length::SetToZero => (Lin::k(0), Lin::k(0)),
             Length::GrowsByLenOf(i) => {
-                let sum = old.add(&len(i)?.1)?;
+                let sum = old.add(&len(i)?)?;
                 (sum.clone(), sum)
             }
             Length::SetToLenOf(i) => {
-                let l = len(i)?.1;
+                let l = len(i)?;
                 (l.clone(), l)
             }
         };
-        Some((r, lo, hi))
+        Some((term(0), lo, hi))
     }
 
     /// Applies what a call in `rhs` does to the names it may write. A
@@ -2601,7 +2673,7 @@ impl<'a> Walk<'a> {
                 (Capability::Read, _) => {}
                 // A scalar argument is a copy.
                 (Capability::Consume, _) if matches!(self.kind(n), Kind::Int(..)) => {}
-                (Capability::Modify, Some((t, lo, hi))) if i == 0 => {
+                (Capability::Modify, Some((Some(t), lo, hi))) if i == 0 => {
                     let old = Lin::of(*t);
                     match (lo.sub(&old), hi.sub(&old)) {
                         (Some(a), Some(b)) if a.is_const() && b.is_const() => {
@@ -2843,7 +2915,7 @@ impl<'a> Walk<'a> {
         // the exit. A length the counter bounds then has the literal as its
         // own bound, which a goal would otherwise need a third premise for.
         if let Some((_, k, _)) =
-            literal_test(body).filter(|(_, k, _)| self.slot[k.index()].relevant)
+            bound_test(body).filter(|(_, k, b)| b.is_const() && self.slot[k.index()].relevant)
         {
             let k = Term::Val(k);
             let low = (exit.facts.iter()).find(|f| f.terms == [(k, 1)]).cloned();
@@ -2864,11 +2936,20 @@ impl<'a> Walk<'a> {
     /// arrays or Strings the loop `body` stores to on the same paths, both of
     /// which a check can depend on: a loop that grows them in step keeps them
     /// as equal as it entered. The counter of a loop bound by a literal
-    /// ([`literal_test`]) takes part as its value. [`Walk::settle`] keeps a
-    /// candidate only where the entry and every turn prove it.
+    /// ([`bound_test`]) takes part as its value, and in a walk that proves a
+    /// result, the counter of a loop bound by a parameter: in every walk that
+    /// one cost 11.9% more `elide: summaries` allocations on the site export.
+    /// [`Walk::settle`] keeps a candidate only where the entry and every turn
+    /// prove it.
     fn in_step(&self, body: &[St], stored: &BTreeSet<Name>) -> Vec<Lin> {
         let relevant = |n: &Name| self.slot[n.index()].relevant;
-        let counter = literal_test(body).map(|(_, k, _)| k).filter(relevant);
+        let param = |b: &Lin| match b.terms[..] {
+            [(Term::Val(p), 1)] => self.post.is_some() && self.body.params.contains(&p),
+            _ => false,
+        };
+        let counter = (bound_test(body).filter(|(.., b)| b.is_const() || param(b)))
+            .map(|(_, k, _)| k)
+            .filter(relevant);
         let term = |n: &Name| match Some(*n) == counter {
             true => Some(Term::Val(*n)),
             false => (relevant(n) && self.kind(*n) == Kind::Seq).then_some(Term::Len(*n)),
@@ -3124,9 +3205,10 @@ fn writes_of(ss: &[St], n: Name) -> usize {
 }
 
 /// The test name, the counter `k` and its bound `c` of a loop `body` that
-/// opens with `if k < c else break`, or `if k <= c - 1 else break`, from an
-/// integer literal: `k` is below `c` on every turn.
-fn literal_test(body: &[St]) -> Option<(Name, Name, i64)> {
+/// opens with `if k < c else break`, or `if k <= c - 1 else break`, where
+/// `c` is an integer literal or a name's value: `k` is below `c` on every
+/// turn.
+fn bound_test(body: &[St]) -> Option<(Name, Name, Lin)> {
     let [St::Let(t, Rhs::Prim(Op::Bin(op @ (BinOp::Lt | BinOp::LtEq)), vs, _)), St::If {
         cond: Val::Name(c),
         then,
@@ -3136,17 +3218,13 @@ fn literal_test(body: &[St]) -> Option<(Name, Name, i64)> {
     else {
         return None;
     };
-    match (vs.as_slice(), &then[..], &els[..]) {
-        ([Val::Name(k), Val::Lit(Lit::Int(n))], [], [St::Break { .. }]) if c == t => {
-            let bound = if *op == BinOp::Lt {
-                Some(*n)
-            } else {
-                n.checked_add(1)
-            };
-            Some((*t, *k, bound?))
-        }
-        _ => None,
-    }
+    let (k, bound) = match (vs.as_slice(), &then[..], &els[..]) {
+        ([Val::Name(k), Val::Lit(Lit::Int(n))], [], [St::Break { .. }]) => (k, Lin::k(*n)),
+        ([Val::Name(k), Val::Name(n)], [], [St::Break { .. }]) => (k, Lin::of(Term::Val(*n))),
+        _ => return None,
+    };
+    let bound = bound.plus(i64::from(*op == BinOp::LtEq))?;
+    (c == t).then_some((*t, *k, bound))
 }
 
 fn any_continue(ss: &[St]) -> bool {
@@ -3174,6 +3252,24 @@ fn conjuncts(e: &vyrn_frontend::ast::Expr) -> usize {
 
 /// Whether a builtin's length effect lands on its result: its receiver is not
 /// passed `modify`, so the call hands the resized array back (`@push`).
+/// The length a walk reads for a call to the builtin `callee` with `args`:
+/// the row's ([`prelude::Builtin::length_at`]), except that a row that
+/// builds its result from a name (`bytes(s)`) states nothing. Read from a
+/// name, `bytes` proved 9 more static rows, run 342 times in all, for 1.6%
+/// more `elide: summaries` allocations on the site export; from a String
+/// literal (`bytes("..")`) it costs none.
+fn length_rule(callee: &str, args: &[(Arg, Capability)]) -> Length {
+    let Some(row) = prelude::builtin(callee) else {
+        return Length::Unknown;
+    };
+    match (&row.spec, args.first()) {
+        (Some(prelude::Spec::Builds(_)), Some((Arg::Val(Val::Name(_)) | Arg::Place(_), _))) => {
+            Length::Unknown
+        }
+        _ => row.length_at(args.len()),
+    }
+}
+
 fn lands_on_result(args: &[(Arg, Capability)]) -> bool {
     args.first().is_some_and(|(_, c)| *c != Capability::Modify)
 }
@@ -3351,8 +3447,7 @@ fn mark(
                         callee, args, kind, ..
                     } => {
                         let lengths = matches!(kind, Callee::Builtin | Callee::Reserved)
-                            && prelude::builtin(callee)
-                                .is_some_and(|b| b.length != Length::Unknown);
+                            && length_rule(callee, args) != Length::Unknown;
                         if lengths || direct_call(rhs).is_some_and(linked) {
                             let from = args.iter().filter_map(|(a, _)| root(a));
                             link(rel, n.into_iter().chain(from));
@@ -3385,7 +3480,7 @@ fn mark(
             St::Loop { body: l, .. } | St::Block { body: l, .. } => {
                 // A loop bound by a literal counts what it stores
                 // ([`Walk::in_step`]).
-                if let Some((t, ..)) = literal_test(l) {
+                if let Some((t, ..)) = bound_test(l).filter(|(.., b)| b.is_const()) {
                     let mut stored = BTreeSet::new();
                     stores(l, &mut stored);
                     let seq = |n: &Name| kind_of(&body.names[n.index()].ty, decls) == Kind::Seq;

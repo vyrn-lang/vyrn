@@ -328,6 +328,242 @@ fn w(x: Int64) -> Int64 {{
     assert!(failures.is_empty(), "{}", failures.join("\n\n"));
 }
 
+/// A function whose loop, bound by an integer parameter, pushes to or
+/// stores into every index of the array it returns states that its result is
+/// at least that long; a path that makes one entry fewer, a store the loop
+/// guards by the length, or a `modify` call that shortens the result keeps
+/// the caller's check.
+#[test]
+fn a_result_as_long_as_a_parameter_proves_its_callers_index() {
+    let filled = "fn filled(n: Int64) -> Array<Int64> {
+    let mut t: Array<Int64> = []
+    let mut i = 0
+    while i < n {
+        t.push(i)
+        i = i + 1
+    }
+    return t
+}
+";
+    let sum = "fn w(x: Int64) -> Int64 {
+    let t = make(x)
+    let mut s = 0
+    let mut i = 0
+    while i < x {
+        s = s + t[i]
+        i = i + 1
+    }
+    return s
+}
+";
+    let stored = "fn make(n: Int64) -> Array<Int64> {
+    let mut t = filled(n)
+    let mut i = 0
+    while i < n {
+        t[i] = i * 2
+        i = i + 1
+    }
+    return t
+}
+";
+    for proof in [
+        format!("{}{sum}", filled.replace("filled", "make")),
+        format!("{filled}{stored}{sum}"),
+    ] {
+        assert_eq!(verdicts(&proof, "w"), ["proved array-index"], "{proof}");
+        let (err, _) = oracle(&proof, "    print(w(5).toString())", "w");
+        assert_eq!(err, "");
+    }
+    let witnesses = [
+        format!(
+            "fn make(n: Int64) -> Array<Int64> {{
+    let mut t: Array<Int64> = []
+    let mut i = 0
+    if n > 3 {{
+        i = 1
+    }}
+    while i < n {{
+        t.push(i)
+        i = i + 1
+    }}
+    return t
+}}
+{sum}"
+        ),
+        format!(
+            "{filled}fn make(n: Int64) -> Array<Int64> {{
+    let mut t = filled(n - 1)
+    let mut i = 0
+    while i < n {{
+        if i < t.length {{
+            t[i] = i
+        }}
+        i = i + 1
+    }}
+    return t
+}}
+{sum}"
+        ),
+        format!(
+            "{filled}fn empty(t: modify Array<Int64>) {{
+    t.pop()
+}}
+fn w(x: Int64) -> Int64 {{
+    let mut t = filled(x)
+    empty(t)
+    let mut s = 0
+    let mut i = 0
+    while i < x {{
+        s = s + t[i]
+        i = i + 1
+    }}
+    return s
+}}
+"
+        ),
+    ];
+    let mut failures = Vec::new();
+    for src in &witnesses {
+        let rows = verdicts(src, "w");
+        if rows != ["check array-index"] {
+            failures.push(format!("{src}\nrows: {rows:?}"));
+        }
+        let (err, _) = oracle(src, "    print(w(5).toString())", "w");
+        if !err.contains("array index 4 out of bounds")
+            || err.contains(vyrn_frontend::trap::PROVED_CHECK_FAILED)
+        {
+            failures.push(format!("{src}\nran: {err}"));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n\n"));
+}
+
+/// The bytes of a String literal are as long as the literal, and a function
+/// that returns them states that length of its result. The three-operand
+/// `bytes` states nothing, and a path that returns a shorter literal keeps
+/// the caller's check.
+#[test]
+fn a_bytes_result_keeps_its_strings_length() {
+    let proof = "fn table() -> Array<UInt8> {
+    return bytes(\"ABCDEFGH\")
+}
+fn w(x: Int64) -> Int64 {
+    let t = table()
+    let u = bytes(\"ABCDEFGH\")
+    let mut n = Int64(t[x & 7])
+    let mut i = 0
+    while i < 8 {
+        n = n + Int64(u[i])
+        i = i + 1
+    }
+    return n
+}
+";
+    assert_eq!(verdicts(proof, "w"), ["proved array-index"; 2]);
+    let (err, _) = oracle(proof, "    print(w(15).toString())", "w");
+    assert_eq!(err, "");
+    // The slice's own range check comes first.
+    let witnesses = [
+        (
+            "fn w(x: Int64) -> Int64 {
+    let t = bytes(\"ABCDEFGH\", 1, 8)
+    let mut n = x
+    let mut i = 0
+    while i < 8 {
+        n = n + Int64(t[i])
+        i = i + 1
+    }
+    return n
+}
+",
+            &["check string-index", "check array-index"][..],
+        ),
+        (
+            "fn table(x: Int64) -> Array<UInt8> {
+    if x > 10 {
+        return bytes(\"ABC\")
+    }
+    return bytes(\"ABCDEFGH\")
+}
+fn w(x: Int64) -> Int64 {
+    let t = table(x)
+    return Int64(t[x & 7])
+}
+",
+            &["check array-index"][..],
+        ),
+    ];
+    let mut failures = Vec::new();
+    for (src, want) in witnesses {
+        let rows = verdicts(src, "w");
+        if rows != want {
+            failures.push(format!("{src}\nrows: {rows:?}"));
+        }
+        let (err, _) = oracle(src, "    print(w(15).toString())", "w");
+        if !err.contains("array index 7 out of bounds")
+            || err.contains(vyrn_frontend::trap::PROVED_CHECK_FAILED)
+        {
+            failures.push(format!("{src}\nran: {err}"));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n\n"));
+}
+
+/// A function whose every return returns one integer literal states its
+/// result equal to it; a path that returns another literal, or a name,
+/// keeps the caller's check.
+#[test]
+fn a_constant_result_proves_its_callers_index() {
+    let read = "fn w(x: Int64) -> Int64 {
+    let t: Array<Int64> = [1, 2, 3, 4, 5, 6, 7, 8]
+    let mut keep = t.length
+    if keep > eight(x) - x {
+        keep = eight(x)
+    }
+    return t[keep - 1]
+}
+";
+    let proof = format!("fn eight(x: Int64) -> Int64 {{\n    return 8\n}}\n{read}");
+    assert_eq!(verdicts(&proof, "w"), ["proved array-index"]);
+    let (err, _) = oracle(&proof, "    print(w(15).toString())", "w");
+    assert_eq!(err, "");
+    let witnesses = [
+        format!(
+            "fn eight(x: Int64) -> Int64 {{
+    if x > 10 {{
+        return 9
+    }}
+    return 8
+}}
+{read}"
+        ),
+        format!(
+            "fn eight(x: Int64) -> Int64 {{
+    let mut r = 8
+    if x > 10 {{
+        r = 9
+    }}
+    return r
+}}
+{read}"
+        ),
+    ];
+    let mut failures = Vec::new();
+    for src in &witnesses {
+        let rows = verdicts(src, "w");
+        if rows != ["check array-index"] {
+            failures.push(format!("{src}\nrows: {rows:?}"));
+        }
+        let (err, _) = oracle(src, "    print(w(15).toString())", "w");
+        if !err.contains("array index 8 out of bounds")
+            || err.contains(vyrn_frontend::trap::PROVED_CHECK_FAILED)
+        {
+            failures.push(format!("{src}\nran: {err}"));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n\n"));
+}
+
 #[test]
 fn a_loop_condition_under_and_proves_its_index() {
     let src = "fn w(xs: Array<Int64>) -> Int64 {
