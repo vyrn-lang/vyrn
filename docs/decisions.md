@@ -265,6 +265,7 @@ pull request.
 - One `String` type, with several algorithms behind one function; the cheap path allocates nothing.
 - Failure in std is a value: `Result` over small per-operation error enums.
 - Floats format through `std/num`'s `f64Str`; text to number is `std/num` over the bit views `floatBits` and `floatFromBits`. No `parseFloat` builtin.
+- A std integer is unsigned only when it holds bits that never go negative (a byte, a hash word, a bit set, a code point, a random state), in the smallest width that holds them. Lengths, indices, offsets, positions and quantities stay `Int64`, because unsigned arithmetic wraps silently and the check prover keeps no range for a `UInt64`.
 - `std/strings` is ASCII for case and whitespace; `split` on an empty separator returns `[s]`, and `indexOf` returns `Option`.
 - `reserve`, `append`, `copyFrom` and `clear` exist on growable `Array` only, and are refused for elements that own heap.
 - `m.tally(k, n)` is one probe and never takes the key.
