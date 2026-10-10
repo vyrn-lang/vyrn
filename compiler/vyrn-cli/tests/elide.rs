@@ -509,6 +509,61 @@ fn w(x: Int64) -> Int64 {
     assert!(failures.is_empty(), "{}", failures.join("\n\n"));
 }
 
+/// A function whose every return returns one integer literal states its
+/// result equal to it; a path that returns another literal, or a name,
+/// keeps the caller's check.
+#[test]
+fn a_constant_result_proves_its_callers_index() {
+    let read = "fn w(x: Int64) -> Int64 {
+    let t: Array<Int64> = [1, 2, 3, 4, 5, 6, 7, 8]
+    let mut keep = t.length
+    if keep > eight(x) - x {
+        keep = eight(x)
+    }
+    return t[keep - 1]
+}
+";
+    let proof = format!("fn eight(x: Int64) -> Int64 {{\n    return 8\n}}\n{read}");
+    assert_eq!(verdicts(&proof, "w"), ["proved array-index"]);
+    let (err, _) = oracle(&proof, "    print(w(15).toString())", "w");
+    assert_eq!(err, "");
+    let witnesses = [
+        format!(
+            "fn eight(x: Int64) -> Int64 {{
+    if x > 10 {{
+        return 9
+    }}
+    return 8
+}}
+{read}"
+        ),
+        format!(
+            "fn eight(x: Int64) -> Int64 {{
+    let mut r = 8
+    if x > 10 {{
+        r = 9
+    }}
+    return r
+}}
+{read}"
+        ),
+    ];
+    let mut failures = Vec::new();
+    for src in &witnesses {
+        let rows = verdicts(src, "w");
+        if rows != ["check array-index"] {
+            failures.push(format!("{src}\nrows: {rows:?}"));
+        }
+        let (err, _) = oracle(src, "    print(w(15).toString())", "w");
+        if !err.contains("array index 8 out of bounds")
+            || err.contains(vyrn_frontend::trap::PROVED_CHECK_FAILED)
+        {
+            failures.push(format!("{src}\nran: {err}"));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n\n"));
+}
+
 #[test]
 fn a_loop_condition_under_and_proves_its_index() {
     let src = "fn w(xs: Array<Int64>) -> Int64 {

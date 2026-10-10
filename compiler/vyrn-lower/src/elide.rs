@@ -1129,7 +1129,9 @@ fn direct_call(rhs: &Rhs) -> Option<FnId> {
 /// value or an array's length; any other result, a String's included,
 /// states nothing. The parameters are those the body never writes. An
 /// `UInt64` is left out: the facts read its values above `i64::MAX` as
-/// negatives. An array result is at least `c` long for each `c` of
+/// negatives. An integer result equals `c` when every return returns the
+/// literal `c` ([`constant_result`]). An array result is at least `c` long
+/// for each `c` of
 /// `needed` ([`needed_lengths`]) the body can make ([`made_lengths`]), and
 /// at least `p` long for each integer parameter `p` it can make.
 fn templates(body: &Body, decls: &HashMap<String, TypeDecl>, needed: &BTreeSet<i64>) -> Summary {
@@ -1179,6 +1181,10 @@ fn templates(body: &Body, decls: &HashMap<String, TypeDecl>, needed: &BTreeSet<i
                 post.extend(r.sub(p));
                 post.extend(p.sub(&r));
             }
+            if let Some(c) = constant_result(body) {
+                post.extend(r.plus(-c));
+                post.extend(Lin::k(c).sub(&r));
+            }
         } else {
             let r = Lin::of(r);
             post.extend(seqs.iter().filter_map(|a| r.sub(a)));
@@ -1205,6 +1211,19 @@ fn templates(body: &Body, decls: &HashMap<String, TypeDecl>, needed: &BTreeSet<i
         pre: BTreeSet::new(),
         post,
     }
+}
+
+/// The integer literal every return of `body` returns, if there is one.
+fn constant_result(body: &Body) -> Option<i64> {
+    let mut values = rows(&body.stmts).filter_map(|(s, _)| match s {
+        St::Return { value, .. } => Some(match value {
+            Some(Val::Lit(Lit::Int(c))) => Some(*c),
+            _ => None,
+        }),
+        _ => None,
+    });
+    let first = values.next()??;
+    values.all(|v| v == Some(first)).then_some(first)
 }
 
 /// Parameter `k`'s term `term(Name(k + 1))`, for each `k` whose kind `keep`
@@ -2291,11 +2310,24 @@ impl<'a> Walk<'a> {
             };
             self.arg(t, &args.get(k).filter(|_| copied(k))?.0, s.params[k])
         };
-        for f in &s.post {
-            let free = |l: &Lin| !l.terms.iter().any(|(t, _)| written.contains(&t.name()));
-            if let Some(l) = f.map(at).filter(free) {
-                st.assume(&l);
+        let free = |l: &Lin| !l.terms.iter().any(|(t, _)| written.contains(&t.name()));
+        let facts: Vec<Lin> = s
+            .post
+            .iter()
+            .filter_map(|f| f.map(at).filter(free))
+            .collect();
+        // A result the summary pins to one value is defined as that value, so
+        // a goal spends no premise on it.
+        let r = Term::Val(n);
+        let pinned = (facts.iter())
+            .find(|f| f.terms == [(r, 1)] && f.scale(-1).is_some_and(|g| facts.contains(&g)));
+        match pinned {
+            Some(f) => {
+                let c = Lin::k(-f.c);
+                st.kill(n);
+                st.define(r, &c);
             }
+            None => facts.iter().for_each(|l| st.assume(l)),
         }
     }
 
