@@ -36,7 +36,7 @@ Does `s` end with `needle`? An empty needle is a suffix of everything.
 ## skipTable
 
 ```vyrn
-fn skipTable(needle: String, haystackBytes: Int64) -> Array<Int64>
+fn skipTable(needle: String, haystackBytes: Int64) -> Array<UInt32>
 ```
 
 Boyer-Moore-Horspool's bad-character table for `needle`: for each byte, how
@@ -65,7 +65,7 @@ millions of times, and an allocation per call cost it about 10%.
 ## findSkipping
 
 ```vyrn
-fn findSkipping(s: String, needle: String, from: Int64, skip: Array<Int64>) -> Int64
+fn findSkipping(s: String, needle: String, from: Int64 where value >= 0, skip: Array<UInt32> where value.length >= 256) -> Int64
 ```
 
 [`findPlain`] with a table from [`skipTable`]: it compares from the end of
