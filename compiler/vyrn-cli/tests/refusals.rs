@@ -438,6 +438,12 @@ fn census() -> Vec<Row> {
              call binds apart from its arguments",
             Kernel::Elsewhere,
         ),
+        row(
+            "r60_a_clause_on_a_modify_parameter.vyrn",
+            "a parameter's clause sits only on a `read` parameter",
+            "the `where` clause of parameter `t` reads `t`, a `modify` parameter the body may change",
+            Kernel::Elsewhere,
+        ),
     ]
 }
 
