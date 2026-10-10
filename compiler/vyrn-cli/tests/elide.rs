@@ -698,25 +698,25 @@ fn shorten(t: modify Array<UInt32>) {
     t.clear()
 }
 fn found(s: String) -> Int64 {
-    return findSkipping(s, \"ab\", 0, skipTable(\"ab\", 1000))
+    return findSkipping(s, \"ab\", 0, skipTable(\"ab\", 1000)) ?? 0 - 1
 }
 fn short(s: String) -> Int64 {
     let t: Array<UInt32> = [UInt32(1)]
-    return findSkipping(s, \"ab\", 0, t)
+    return findSkipping(s, \"ab\", 0, t) ?? 0 - 1
 }
 fn below(s: String, from: Int64) -> Int64 {
-    return findSkipping(s, \"ab\", from, skipTable(\"ab\", 1000))
+    return findSkipping(s, \"ab\", from, skipTable(\"ab\", 1000)) ?? 0 - 1
 }
 fn shortened(s: String) -> Int64 {
     let mut t = skipTable(\"ab\", 1000)
     shorten(t)
-    return findSkipping(s, \"ab\", 0, t)
+    return findSkipping(s, \"ab\", 0, t) ?? 0 - 1
 }
 ";
     let print = |call: &str| format!("    print({call}.toString())");
     let (err, rows) = oracle(src, &print("found(\"xxaxab\")"), "findSkipping");
     let verdicts: Vec<&str> = rows.iter().map(|r| r.split(' ').nth(3).unwrap()).collect();
-    assert_eq!((err.as_str(), verdicts), ("", vec!["proved"; 4]));
+    assert_eq!((err.as_str(), verdicts), ("", vec!["proved"; 5]));
     for (call, param, row) in [
         ("short(\"ab\")", "skip", "10 1 where-arg kept 1"),
         ("below(\"ab\", 0 - 1)", "from", "13 0 where-arg kept 1"),

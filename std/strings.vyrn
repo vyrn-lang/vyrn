@@ -73,15 +73,10 @@ export fn indexOf(s: String, needle: String) -> Option<Int64> {
     if needle.byteLength > n {
         return None
     }
-    let at = if worthPreparing(needle, n) {
-        findSkipping(s, needle, 0, skipTable(needle, n))
-    } else {
-        findPlain(s, needle, 0)
+    if worthPreparing(needle, n) {
+        return findSkipping(s, needle, 0, skipTable(needle, n))
     }
-    if at < 0 {
-        return None
-    }
-    return Some(at)
+    return findPlain(s, needle, 0)
 }
 
 /// The byte offset of the last occurrence of `needle` in `s`, or `None`. An
@@ -124,14 +119,23 @@ export fn split(s: String, sep: String) -> Array<String> {
     let mut start = 0
     let mut i = 0
     while i + sl <= s.byteLength {
-        let at = if prepared { findSkipping(s, sep, i, skip) } else { findPlain(s, sep, i) }
-        if at < 0 {
-            i = s.byteLength + 1
-        } else {
+        // Each search is its own `if let`'s subject. One `if` expression over
+        // both joined them through a temporary, which copied the `Option` per
+        // match: 27% of a native `split` on a one-byte separator.
+        if prepared {
+            if let Some(at) = findSkipping(s, sep, i, skip) {
+                out.push(slice(s, start, at) ?? panic("split: a cut at a separator match"))
+                start = at + sl
+                i = at + sl
+                continue
+            }
+        } else if let Some(at) = findPlain(s, sep, i) {
             out.push(slice(s, start, at) ?? panic("split: a cut at a separator match"))
             start = at + sl
             i = at + sl
+            continue
         }
+        break
     }
     out.push(slice(s, start, s.byteLength) ?? panic("split: the tail after the last separator"))
     return out
@@ -252,14 +256,21 @@ export fn replace(s: String, from: String, to: String) -> String {
     let mut start = 0
     let mut i = 0
     while i + fl <= s.byteLength {
-        let at = if prepared { findSkipping(s, from, i, skip) } else { findPlain(s, from, i) }
-        if at < 0 {
-            i = s.byteLength + 1
-        } else {
+        // Each search is its own `if let`'s subject, as in `split`.
+        if prepared {
+            if let Some(at) = findSkipping(s, from, i, skip) {
+                out = out + (slice(s, start, at) ?? panic("replace: a cut at a needle match")) + to
+                start = at + fl
+                i = at + fl
+                continue
+            }
+        } else if let Some(at) = findPlain(s, from, i) {
             out = out + (slice(s, start, at) ?? panic("replace: a cut at a needle match")) + to
             start = at + fl
             i = at + fl
+            continue
         }
+        break
     }
     out = out + (slice(s, start, s.byteLength) ?? panic("replace: the tail after the last match"))
     return out

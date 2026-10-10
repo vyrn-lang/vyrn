@@ -47,10 +47,12 @@ array argument is shared copy-on-write.
 ## findPlain
 
 ```vyrn
-fn findPlain(s: String, needle: String, from: Int64 where value >= 0) -> Int64
+fn findPlain(s: String, needle: String, from: Int64 where value >= 0) -> Option<Int64>
 ```
 
-The first occurrence of `needle` at or after `from`, or -1. O(n*m).
+The first occurrence of `needle` at or after `from`, or `None`. A found
+offset is at most `s.byteLength - needle.byteLength`, so an empty needle
+occurs at `from` only when `from <= s.byteLength`. O(n*m).
 
 ## worthPreparing
 
@@ -65,7 +67,7 @@ millions of times, and an allocation per call cost it about 10%.
 ## findSkipping
 
 ```vyrn
-fn findSkipping(s: String, needle: String, from: Int64 where value >= 0, skip: Array<UInt32> where value.length >= 256) -> Int64
+fn findSkipping(s: String, needle: String, from: Int64 where value >= 0, skip: Array<UInt32> where value.length >= 256) -> Option<Int64>
 ```
 
 [`findPlain`] with a table from [`skipTable`]: it compares from the end of

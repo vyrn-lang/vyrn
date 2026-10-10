@@ -72,13 +72,12 @@ export fn skipTable(needle: String, haystackBytes: Int64) -> Array<UInt32> {
     return skip
 }
 
-/// The first occurrence of `needle` at or after `from`, or -1. O(n*m).
-export fn findPlain(s: String, needle: String, from: Int64 where value >= 0) -> Int64 {
+/// The first occurrence of `needle` at or after `from`, or `None`. A found
+/// offset is at most `s.byteLength - needle.byteLength`, so an empty needle
+/// occurs at `from` only when `from <= s.byteLength`. O(n*m).
+export fn findPlain(s: String, needle: String, from: Int64 where value >= 0) -> Option<Int64> {
     let n = s.byteLength
     let nl = needle.byteLength
-    if nl == 0 {
-        return from
-    }
     let mut i = from
     while i <= n - nl {
         let mut j = 0
@@ -86,11 +85,11 @@ export fn findPlain(s: String, needle: String, from: Int64 where value >= 0) -> 
             j = j + 1
         }
         if j == nl {
-            return i
+            return Some(i)
         }
         i = i + 1
     }
-    return 0 - 1
+    return None
 }
 
 /// Whether a table for `needle` pays over a haystack of that size. Callers ask
@@ -103,11 +102,12 @@ export fn worthPreparing(needle: String, haystackBytes: Int64) -> Bool {
 /// [`findPlain`] with a table from [`skipTable`]: it compares from the end of
 /// the window and, on a mismatch, skips by the table entry for the window's
 /// last byte, so it visits about `n / m` positions.
-export fn findSkipping(s: String, needle: String, from: Int64 where value >= 0, skip: Array<UInt32> where value.length >= 256) -> Int64 {
+export fn findSkipping(s: String, needle: String, from: Int64 where value >= 0, skip: Array<UInt32> where value.length >= 256) -> Option<Int64> {
     let n = s.byteLength
     let nl = needle.byteLength
+    // The window's last byte is `s[i + nl - 1]`, so an empty needle has none.
     if nl == 0 {
-        return from
+        return findPlain(s, needle, from)
     }
     let mut i = from
     while i <= n - nl {
@@ -116,11 +116,11 @@ export fn findSkipping(s: String, needle: String, from: Int64 where value >= 0, 
             q = q - 1
         }
         if q < 0 {
-            return i
+            return Some(i)
         }
         i = i + Int64(skip[Int64(s[i + nl - 1])])
     }
-    return 0 - 1
+    return None
 }
 
 /// Whether `needle` occurs in `s`; an empty needle occurs everywhere.
@@ -130,7 +130,10 @@ export fn contains(s: String, needle: String) -> Bool {
         return false
     }
     if worthPreparing(needle, n) {
-        return findSkipping(s, needle, 0, skipTable(needle, n)) >= 0
+        if let Some(_) = findSkipping(s, needle, 0, skipTable(needle, n)) {
+            return true
+        }
+        return false
     }
     // Inline, not a call to `findPlain`: this is the hottest scan in the library,
     // and one more frame cost 2.7% of the generator phase.
@@ -217,4 +220,10 @@ test "contains finds an overlapping repeat and a match at the very end" {
     assertEq(contains("aaaaaaaaab", "aaab"), true)
     assertEq(contains("the lazy dog", "dog"), true)
     assertEq(contains("abcabc", "cab"), true)
+}
+
+test "an empty needle occurs at an offset up to the length and nowhere past it" {
+    assertEq(findPlain("ab", "", 2) ?? 0 - 1, 2)
+    assertEq(findPlain("ab", "", 3) ?? 0 - 1, 0 - 1)
+    assertEq(findSkipping("ab", "", 3, skipTable("", 2)) ?? 0 - 1, 0 - 1)
 }
