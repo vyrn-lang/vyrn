@@ -5450,6 +5450,21 @@ fn build_wasm2c(
             return Err(());
         }
     }
+    if cfg!(all(windows, target_arch = "x86_64")) {
+        let c = match std::fs::read_to_string(&c_path) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("error: cannot read {}: {e}", c_path.display());
+                return Err(());
+            }
+        };
+        if !write(
+            &c_path,
+            vyrn_codegen::toolchain::sysv_multi_returns(&c).as_bytes(),
+        ) {
+            return Err(());
+        }
+    }
     // The host is written from wasm2c's header: the `vyrn` import namespace is
     // per program. See `toolchain::wasi_host_c`.
     let h_path = out.with_extension("w2c.h");

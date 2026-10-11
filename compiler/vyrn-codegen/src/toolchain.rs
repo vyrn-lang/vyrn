@@ -300,6 +300,32 @@ pub fn wasi_host_c(w2c_header: &str) -> String {
     WASI_HOST_C.replace(EXTERN_STUBS_MARKER, &block)
 }
 
+/// Returns `w2c_c`, the C wasm2c wrote, with every function that returns
+/// several values declared `sysv_abi`, so its two words come back in RAX:RDX.
+///
+/// The Windows x64 convention returns a 16-byte struct through a hidden
+/// pointer, and clang fills it with one 16-byte load of the two words. When
+/// the words were just stored one at a time, the store buffer cannot forward
+/// that load (1.25x on membench's "stream open and close"). The module takes
+/// no function's address (`Module::sweep`), so the declarations and the
+/// definitions are every place the convention appears. wasm2c starts each of
+/// them at column 0 with `struct wasm_multi_`, after `static ` on a
+/// declaration.
+pub fn sysv_multi_returns(w2c_c: &str) -> String {
+    let mut out = String::with_capacity(w2c_c.len());
+    for line in w2c_c.split_inclusive('\n') {
+        let sig = line.strip_prefix("static ").unwrap_or(line);
+        if sig.starts_with("struct wasm_multi_") && sig.contains('(') {
+            out.push_str(&line[..line.len() - sig.len()]);
+            out.push_str("__attribute__((sysv_abi)) ");
+            out.push_str(sig);
+        } else {
+            out.push_str(line);
+        }
+    }
+    out
+}
+
 /// Turns a wasm2c C symbol back into the imported name. wasm2c writes any byte
 /// outside `[A-Za-z0-9_]` as `0x` and two hex digits (`_start` is `0x5Fstart`),
 /// and a Vyrn identifier may hold any `is_alphabetic` char.
@@ -442,6 +468,25 @@ mod tests {
         assert!(some.contains("    exit(1);\n}"), "void does not");
         // A forward declaration is not a prototype and must not become a stub.
         assert!(!some.contains("struct w2c_vyrn; {"));
+    }
+
+    /// The declaration and the definition change; the struct's own definition,
+    /// a local of its type and a one-value function do not.
+    #[test]
+    fn only_multi_value_signatures_take_sysv_abi() {
+        let c = "struct wasm_multi_jj {\n\
+                 static struct wasm_multi_jj w2c_prog_f19(w2c_prog*, u64, u64);\n\
+                 static u64 w2c_prog_f20(w2c_prog*, u32);\n\
+                 struct wasm_multi_jj w2c_prog_f19(w2c_prog* instance, u64 var_p0, u64 var_p1) {\n\
+                 \x20 struct wasm_multi_jj tmp = w2c_prog_f19(instance, 0, 0);\n";
+        assert_eq!(
+            sysv_multi_returns(c),
+            "struct wasm_multi_jj {\n\
+             static __attribute__((sysv_abi)) struct wasm_multi_jj w2c_prog_f19(w2c_prog*, u64, u64);\n\
+             static u64 w2c_prog_f20(w2c_prog*, u32);\n\
+             __attribute__((sysv_abi)) struct wasm_multi_jj w2c_prog_f19(w2c_prog* instance, u64 var_p0, u64 var_p1) {\n\
+             \x20 struct wasm_multi_jj tmp = w2c_prog_f19(instance, 0, 0);\n"
+        );
     }
 
     /// The C host defines each `crate::WASI_IMPORTS` call once, with its signature, and no other.

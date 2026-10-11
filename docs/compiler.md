@@ -395,6 +395,9 @@ pins wabt, simde and wasmtime by sha256 under `tool:` rows, unpacked under
 `~/.vyrn/tools/`. clang is recorded, not pinned. `--native-target` picks the
 x86-64 level (the default is `v2`). clang always runs with
 `-ffp-contract=off`, so a native float result equals the wasm result.
+On Windows x64 the driver declares each multi-value function `sysv_abi`
+before clang runs (`toolchain::sysv_multi_returns`), so a two-word result
+returns in registers, as it does on Linux.
 
 `vyrn test` and `vyrn bench --check` compile the selected bodies into one
 module, each an exported `__vyrn_body_<k>`, and run them in one instance, so
