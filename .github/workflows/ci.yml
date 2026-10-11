@@ -506,20 +506,6 @@ jobs:
         run: |
           & powershell -NoProfile -ExecutionPolicy Bypass -File install-test.ps1
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      - name: The compiler's allocations per phase, and their growth
-        if: runner.os == 'Windows'
-        working-directory: compiler
-        # Last, because `--features allocs` rebuilds `vyrn-cli` and replaces
-        # the `target/release/vyrn` the steps above use. Windows only, on the
-        # release profile this job already builds. The pin holds Windows
-        # counts, which the maintainers re-pin locally with `VYRN_PIN=write`;
-        # the standard library allocates differently on each OS.
-        # `compiler_scaling` compares ratios and would run anywhere, but the
-        # feature rebuild is not free, so it runs here and not on the other
-        # three legs.
-        run: >-
-          cargo test --quiet --release -p vyrn-cli --features allocs
-          --test compiler_allocs --test compiler_scaling -- --ignored --nocapture
 
   judgments:
     name: the judgments over the corpus (kernel, effects, typed, core tables)
@@ -1058,3 +1044,46 @@ jobs:
         with:
           name: check-speed
           path: check-speed.txt
+
+  check-allocs:
+    name: compiler allocations (regression tripwire)
+    # Compares this commit's `vyrn` with the commit it builds on: the pull
+    # request's base, or the commit a push to main replaced. Both are built
+    # here with `--features allocs`, so the toolchain and the OS cancel. An
+    # allocation count is not timing, so a shared PR runner is exact. Both
+    # binaries read this tree's `std/`, so a library edit moves them alike.
+    # `compiler_scaling` runs here because it needs the same feature build.
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      # actions/checkout@v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      # actions/checkout@v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.event.pull_request.base.sha || github.event.before }}
+          path: base
+      - name: Rust cache
+        # Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
+        with:
+          workspaces: |
+            compiler
+            base/compiler
+          prefix-key: check-allocs
+      - name: Build head and base, release, with the allocation counter
+        run: |
+          set -eu
+          cargo build --quiet --release --manifest-path compiler/Cargo.toml -p vyrn-cli --features allocs
+          cargo build --quiet --release --manifest-path base/compiler/Cargo.toml -p vyrn-cli --features allocs
+      - name: Compare the allocations of both binaries
+        run: sh scripts/check-allocs.sh base/compiler/target/release/vyrn compiler/target/release/vyrn | tee check-allocs.txt
+      - name: Show the comparison in the job summary
+        if: always()
+        run: |
+          { echo '```'; cat check-allocs.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+      - name: No phase allocates faster than its input
+        working-directory: compiler
+        run: cargo test --quiet --release -p vyrn-cli --features allocs --test compiler_scaling -- --ignored --nocapture
