@@ -9435,10 +9435,7 @@ impl<'a, 'p> Fn_<'a, 'p> {
             } = s
             {
                 if self.core_w.at[n.index()].is_none() && self.core_joins(*n) {
-                    let ty = body.names[n.index()].ty.clone();
-                    let r = self.cx.repr(&ty, *line)?;
-                    let off = self.core_slot(b, *n, &r, *line)?;
-                    self.core_bind(*n, Place::Slot(off), ty)?;
+                    self.core_join_slot(b, *n, *line)?;
                 }
             }
             match s {
@@ -9675,8 +9672,9 @@ impl<'a, 'p> Fn_<'a, 'p> {
                     self.core_bind(*n, Place::Slot(slot), ty)?;
                 }
                 // An aggregate call result, written through the out-pointer ([`Fn_::out_ptr`])
-                // into the binding's slot, or into the caller's storage when the next `return`
-                // hands it back. Any other temporary keeps the storage the call wrote, handed on
+                // into the binding's slot, into the caller's storage when the next `return`
+                // hands it back, or into the slot of the join the next row stores it to
+                // ([`Fn_::core_join_dest`]). Any other temporary keeps the storage the call wrote, handed on
                 // to the reader or to the `match` or `for` the plan keys it by.
                 St::Let(
                     n,
@@ -9694,12 +9692,18 @@ impl<'a, 'p> Fn_<'a, 'p> {
                         return unsupported("an aggregate call with no layout", line);
                     };
                     let part = self.core_part_dest(b, ss, i, line)?;
+                    let join = match part {
+                        None if !lands => self.core_join_dest(b, ss, i, line)?,
+                        _ => None,
+                    };
                     mark = b.mark();
                     let back = self.core_back(ss, i, &ends[i]);
                     let (dest, place) = if lands {
                         (Some(Dest::Addr(self.core_out(line)?, 0)), None)
                     } else if part.is_some() {
                         (part, None)
+                    } else if let Some((d, p)) = join {
+                        (Some(d), Some(p))
                     } else if let Some((d, p, from)) = back {
                         if let Some(a) = from {
                             self.core_w.slot[n.index()] = self.core_w.slot[a.index()].take();
@@ -11819,7 +11823,22 @@ impl<'a, 'p> Fn_<'a, 'p> {
         if !stored && !(ended.contains(x) && self.core_w.slot[x.index()].is_some()) {
             return None;
         }
-        let (place, ty) = self.core_place(*x)?;
+        let (place, _) = self.core_place(*x)?;
+        let d = match place {
+            Place::Slot(off) => Dest::Slot(off),
+            Place::Local(l) => Dest::Addr(l, 0),
+            Place::Static(_) => return None,
+        };
+        self.core_args_apart(*x, args, Some(k))
+            .then_some((d, place, (!stored).then_some(*x)))
+    }
+
+    /// Whether every layout argument in `args` but the `skip`th sits in frame bytes apart from
+    /// `x`'s slot, so none reads the storage a callee writes when its result goes to `x`.
+    fn core_args_apart(&self, x: Name, args: &[(Arg, Capability)], skip: Option<usize>) -> bool {
+        let Some((place, ty)) = self.core_place(x) else {
+            return false;
+        };
         // The frame bytes a slot name holds, which no other held slot overlaps.
         let span = |p: Place, t: &Type| match p {
             Place::Slot(off) => (self.cx.layout(t, 0).ok()).map(|l| off..off + l.size),
@@ -11830,18 +11849,65 @@ impl<'a, 'p> Fn_<'a, 'p> {
             let (sx, sy) = (span(place, &ty)?, span(py, &ty_y)?);
             Some(sx.end <= sy.start || sy.end <= sx.start)
         };
-        let others = args.iter().enumerate().all(|(j, (arg, _))| match arg {
-            _ if j == k => true,
+        args.iter().enumerate().all(|(j, (arg, _))| match arg {
+            _ if Some(j) == skip => true,
             Arg::Val(v) if !self.core_layout_name(v) => true,
             Arg::Val(Val::Name(y)) => apart(y) == Some(true),
             _ => false,
-        });
-        let d = match place {
-            Place::Slot(off) => Dest::Slot(off),
-            Place::Local(l) => Dest::Addr(l, 0),
-            Place::Static(_) => return None,
+        })
+    }
+
+    /// The slot of the join `j` where row `i` is `@t = f(..)` of a layout and the next row is
+    /// `j = @t` ([`Fn_::core_joins`]): the call writes the join's slot, and the store moves
+    /// nothing. Takes the join's slot if no branch before took it; a later branch's arguments
+    /// must lie apart from it.
+    fn core_join_dest(
+        &mut self,
+        b: &mut Frame,
+        ss: &[St],
+        i: usize,
+        line: usize,
+    ) -> Result<Option<(Dest, Place)>, String> {
+        let body = self.body();
+        let (
+            St::Let(t, Rhs::Call { args, .. }),
+            Some(St::Store {
+                place: vyrn_frontend::core::Place::Name(j),
+                value: Val::Name(v),
+                releases: false,
+                ..
+            }),
+        ) = (&ss[i], ss.get(i + 1))
+        else {
+            return Ok(None);
         };
-        others.then_some((d, place, (!stored).then_some(*x)))
+        let (ti, ji) = (&body.names[t.index()], &body.names[j.index()]);
+        if v != t
+            || !ti.source.starts_with('@')
+            || self.core_w.reads[t.index()] != 1
+            || !self.core_as_is(&ti.ty, &ji.ty)
+            || !self.core_joins(*j)
+        {
+            return Ok(None);
+        }
+        match self.core_place(*j) {
+            // A fresh slot, which no argument's storage overlaps.
+            None => self.core_join_slot(b, *j, line)?,
+            Some(_) if !self.core_args_apart(*j, args, None) => return Ok(None),
+            Some(_) => {}
+        }
+        Ok(match self.core_place(*j) {
+            Some((p @ Place::Slot(off), _)) => Some((Dest::Slot(off), p)),
+            _ => None,
+        })
+    }
+
+    /// Gives the join `n` ([`Fn_::core_joins`]) its slot, at the first row that writes it.
+    fn core_join_slot(&mut self, b: &mut Frame, n: Name, line: usize) -> Result<(), String> {
+        let ty = self.body().names[n.index()].ty.clone();
+        let r = self.cx.repr(&ty, line)?;
+        let off = self.core_slot(b, n, &r, line)?;
+        self.core_bind(n, Place::Slot(off), ty)
     }
 
     /// The local holding the caller's out-pointer.
