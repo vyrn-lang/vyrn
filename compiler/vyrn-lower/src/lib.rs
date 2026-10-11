@@ -255,8 +255,9 @@ impl<'a> Lowered<'a> {
 }
 
 /// The named core of `program`'s root-module instances, as `vyrn emit-lowered`
-/// prints it: the version line, then each body's [`vyrn_frontend::core::Body::render`], or the
-/// gap that stopped it. Root-module only, as `vyrn why --cost`: a linked
+/// prints it: the version line, then each body the emitter reads
+/// ([`World::body_of`]) as [`vyrn_frontend::core::Body::render`] spells it, or
+/// the gap that stopped it. Root-module only, as `vyrn why --cost`: a linked
 /// program's imports are another file's answer. `world` is `program`'s.
 pub fn render(program: &Program, world: &World, source: &str) -> String {
     let own = &world.ownership;
@@ -264,10 +265,13 @@ pub fn render(program: &Program, world: &World, source: &str) -> String {
     let mut out = format!("; vyrn lowered {VERSION} -- {source}\n");
     for inst in lowered.root() {
         out.push('\n');
+        if let Some(body) = world.body_of(&inst.spelling()) {
+            out.push_str(&body.render());
+            continue;
+        }
+        // The World holds no body for a gap. The gap's words need the build.
         match core::build(program, inst, own) {
-            Ok(body) => {
-                out.push_str(&core::checked(program, own, &body, world.summaries()).render())
-            }
+            Ok(_) => out.push_str(&format!("; {}: no body is emitted\n", inst.spelling())),
             Err(g) => out.push_str(&format!(
                 "; {}: not lowered at line {}: {} {}\n",
                 inst.spelling(),

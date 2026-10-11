@@ -559,6 +559,9 @@ jobs:
       - name: The placer's output on one thread, many and a shuffled order
         working-directory: compiler
         run: cargo test --quiet -p vyrn-cli --test parallel -- --ignored --nocapture
+      - name: The printed check verdicts are the emitted ones
+        working-directory: compiler
+        run: cargo test --quiet -p vyrn-cli --test verdicts -- --ignored --nocapture
 
   route:
     name: the native route (wasm2c == wasm)

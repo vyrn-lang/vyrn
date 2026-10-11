@@ -548,8 +548,8 @@ fn first_line(s: &str) -> &str {
 }
 
 /// The text of the custom section `name`, `None` for a module without one. The walk trusts the
-/// bytes, which the engine has already validated.
-fn custom_section(bytes: &[u8], name: &str) -> Option<String> {
+/// bytes: the caller passes a module the engine validated or the compiler wrote.
+pub fn custom_section(bytes: &[u8], name: &str) -> Option<String> {
     fn leb(b: &[u8], at: &mut usize) -> usize {
         let (mut v, mut shift) = (0usize, 0);
         while let Some(&x) = b.get(*at) {
