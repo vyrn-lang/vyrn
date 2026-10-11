@@ -1,17 +1,11 @@
 // State that outlives the run it belongs to, and a press the page owes a reader.
 //
-// The playground's kill timer was held per-mount and cleared only by the path
-// that finished a run, so a second `Run`, a Ctrl-Enter or a `Reset` left the
-// first run's timeout armed; five seconds later it terminated whatever was
-// running by then and wrote "Stopped after 5 seconds." over a run that had
-// already succeeded.
+// The kill timer belongs to the worker it kills: a timer held per mount
+// survived a second Run, Ctrl-Enter or Reset and terminated the next run. The
+// hero editor keeps two flags: arming, and a Run press owed a replay.
 //
-// The hero editor used one latch for two facts: arming and the replayed press.
-// A reader who hovered or tabbed into the plate armed it with no press owed,
-// and the Run press that followed returned at the latch.
-//
-// Neither is reachable from node: both need a DOM, a Worker and a clock. What
-// this file checks is the rule each fix states, in the one place it is stated.
+// Both need a DOM, a Worker and a clock, which node does not have, so this
+// checks the code that states each rule.
 //
 // Run: node --test site/test/playlifecycle.test.mjs
 import { test } from "node:test";
@@ -23,9 +17,8 @@ const read = (p) => readFile(fileURLToPath(new URL(p, root)), "utf8");
 
 const [playJs, widgetsJs] = await Promise.all([read("site/public/play.js"), read("site/public/widgets.js")]);
 
-// The text of a function, from its `function <name>(` to the `\n}` that closes
-// it. Every function in these two files is written at the column its body is
-// closed at, so the first line-initial `}` ends it.
+// The text of a function, from `function <name>(` to the first `\n}`. Every
+// function in these files closes at column 0.
 function body(src, name) {
   const at = src.indexOf(`function ${name}(`);
   if (at < 0) throw new Error(`${name} is gone from the file this test checks`);

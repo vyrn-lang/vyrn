@@ -1,11 +1,7 @@
-// The copy affordances, and the script that wires them.
+// The copy affordances and the script that wires them, over the exported tree.
 //
-// The defect this exists for: `/tooling/editors.html` shipped with the command
-// plates' Copy buttons but without the page-level Copy page button every
-// sibling page had, and without the `.md` twin that button links to. A button
-// whose target is a 404 is worse than no button, so both halves are checked
-// here, over the exported tree and not over the sources — the export is what
-// publishes.
+// A Copy button whose script is not loaded, or whose target is a 404, is worse
+// than no button.
 //
 // Run: node --test site/test/copywiring.test.mjs   (after `vyrn run site/export.vyrn out`)
 import { test } from "node:test";
@@ -34,9 +30,8 @@ test("the export is there to check", () => {
 
 const source = new Map(await Promise.all(pages.map(async (p) => [p, await readFile(path.join(OUT, p), "utf8")])));
 
-// Every page that emits a copy affordance loads the script that wires it.
-// `widgets.js` carries `copyButtons` and `copyPageButtons`; without it the
-// buttons are dead markup that promises a clipboard write nothing performs.
+// Every page that emits a copy affordance loads `widgets.js`, which wires
+// `copyButtons` and `copyPageButtons`.
 test("every page with a copy affordance loads widgets.js", () => {
   for (const [p, html] of source) {
     const emits = html.includes("data-copy");

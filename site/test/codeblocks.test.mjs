@@ -1,16 +1,9 @@
-// How much room a code block takes, read off the sheet rather than off a
-// screenshot.
+// How much room a code block takes, read off the sheet.
 //
-// The owner reported the blocks as too big and too clumsy. They were: a 1.7 line
-// on a 13.5px face inside 16px of padding, in a box that carried a border AND a
-// wash, so a six-line example stood 172px tall where six lines of body text
-// stand 163px. The numbers below are the ones that fix followed, and this file
-// is what stops them drifting back.
-//
-// It reads the SOURCE sheet, for the reason `contrast.test.mjs` gives: the
-// export is this file with its comments removed, so every declaration here is in
-// the published sheet, and a checker that needs an export cannot run while the
-// sheet is being edited.
+// A code block is at most a 1.5 line, carries one edge, pads no more than one
+// line, and is set at 13px or more. It reads the source sheet: the export only
+// strips comments, so every declaration here ships, and the check runs while
+// the sheet is edited.
 //
 // Run: node --test site/test/codeblocks.test.mjs
 import { test } from "node:test";
@@ -27,8 +20,8 @@ function rule(selector) {
   return m[2];
 }
 
-// The four block types a reader meets: a fenced program, a fenced block inside
-// doc prose, the highlight layer under the editor, and a command.
+// The block types a reader meets: a fenced program, a fenced block in doc
+// prose, and a command.
 const BLOCKS = ["pre.code", "pre.doccode", ".cmd"];
 
 test("no code block sets a line taller than 1.5", () => {
@@ -43,9 +36,8 @@ test("no code block sets a line taller than 1.5", () => {
 });
 
 test("a code block carries one edge, not three", () => {
-  // A border, a background fill and a shadow are three ways to say where a box
-  // ends. One is an edge; two is a frame around a frame, which is what made the
-  // blocks read as heavy.
+  // A border, a background fill and a shadow each say where a box ends; two of
+  // them make a frame around a frame.
   for (const selector of BLOCKS) {
     const body = rule(selector);
     const edges = [
@@ -58,8 +50,7 @@ test("a code block carries one edge, not three", () => {
 });
 
 test("a code block's vertical padding is no taller than one of its lines", () => {
-  // The padding was 16px on a 22.95px line, which is close enough to a line to
-  // read as a blank row at the top and another at the bottom of every block.
+  // A padding near a full line reads as a blank row above and below.
   const size = { "pre.code": 13.5, "pre.doccode": 13, ".cmd": 14 };
   for (const selector of BLOCKS) {
     const body = selector === ".cmd" ? rule(".cmd code") : rule(selector);
@@ -73,8 +64,7 @@ test("a code block's vertical padding is no taller than one of its lines", () =>
 });
 
 test("no code block is set below 13px at the default root size", () => {
-  // The floor is a reading floor, not a taste one. `--t-code-s` sizes the
-  // guide's plate, the specimen plate and the editor, and it was 12.5px.
+  // A reading floor. `--t-code-s` sizes the guide's plate and the editor.
   const px = (token) => Number(new RegExp(`${token}:\\s*([0-9.]+)px`).exec(CSS)[1]);
   for (const token of ["--t-code", "--t-code-s", "--t-mono", "--t-cmd"]) {
     assert.ok(px(token) >= 13, `${token} is ${px(token)}px, below the 13px floor`);
@@ -93,10 +83,8 @@ test("the highlight layer and the textarea over it are declared together", () =>
     if (!/font-size|line-height|(?:^|;|\s)padding:|(?:^|;|\s)font:/.test(body)) continue;
     const both = /pre\.hl/.test(selector) && /textarea/.test(selector);
     const one = selector.split(",").length === 1;
-    // A rule that names only one of the pair may still be right — it sets a
-    // value the other already has from a shared rule — so the assertion is on
-    // the pair, checked in the browser and recorded in the report. What fails
-    // here is a rule that names one of them and no shared rule beside it.
+      // A rule naming one half may be right when a shared rule sizes the
+      // other; the four known singles below are paired that way.
     if (!both && one) lonely.push(selector.trim() + " -> " + body.trim().replace(/\s+/g, " ").slice(0, 90));
   }
   // The four known singles, each one paired by a rule beside it in the sheet.

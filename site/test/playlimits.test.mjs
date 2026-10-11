@@ -1,21 +1,9 @@
-// The playground's run limit, and the place that states it in prose.
+// The playground's run limit, and the tooltip that states it in prose.
 //
-// The defect this exists for: the number a reader sees is English, and the
-// number that enforces it is code. The tooltip on `/play.html` says "five
-// seconds". `play.js` holds `RUN_LIMIT_MS`.
-//
-// Nothing tied them together. Lowering `RUN_LIMIT_MS` to three seconds would
-// leave a tooltip promising five, and a reader whose program was killed at three
-// has no way to tell a limit from a bug.
-//
-// A census proposed emitting a limits
-// file from the wasm build and reading it at generation time. This does not,
-// deliberately: a sentence says "five seconds", not "5000", so the prose would
-// still be written by hand and would still be the thing that drifts. Comparing
-// the prose to the source catches the drift the file would not.
-//
-// Recursion has no number to check: no engine counts calls, and a recursion
-// that outgrows the tab's stack ends with the trap `vyrn run` prints.
+// `play.js` holds `RUN_LIMIT_MS`; the tooltip on `/play.html` says "five
+// seconds". This ties the two, so a changed limit cannot leave the tooltip
+// promising another. Recursion has no number to check: no engine counts calls,
+// and a recursion that outgrows the tab's stack ends with `vyrn run`'s trap.
 //
 // Run: node --test site/test/playlimits.test.mjs   (after `vyrn run site/export.vyrn out`)
 import { test } from "node:test";
@@ -43,9 +31,8 @@ function only(src, re, what) {
 
 const runLimitMs = Number(only(playJs, /const RUN_LIMIT_MS = (\d+);/g, "RUN_LIMIT_MS"));
 
-// Whole seconds spelled the way the tooltip spells them. The limit has been
-// 5000 for as long as the page has existed; if it ever stops being a whole
-// small number, this map is the thing to change, and the failure says so.
+// Whole seconds as the tooltip spells them; a limit this cannot spell fails
+// and says to extend the list.
 const WORDS = ["zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten"];
 
 test("the tooltip's run limit is the limit play.js enforces", () => {

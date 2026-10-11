@@ -1,18 +1,10 @@
-// The site, served from somewhere that is not the root.
+// The site served from a path prefix, as GitHub Pages serves it under `/vyrn/`.
 //
-// The defect this exists for shipped green: the export asserted that every
-// internal link resolved, and asserted it at a root, where `/style.css` is
-// correct. GitHub Pages serves this site from `/vyrn/`, where `/style.css` is a
-// 404 — and so were both scripts, both wasm modules, the icon and every
-// navigation link. A gate that only holds at the root would leave that one edit
-// away from coming back.
-//
-// So this one does not read the HTML and reason about it. It starts a file
-// server with a PREFIX in front of the tree, and fetches: every page, then every
-// URL every page names, resolved the way a browser resolves it. Three prefixes,
-// one of them nested, and the same artifact each time — nothing is rebuilt
-// between them, because a build that has to know where it will be served is the
-// thing being ruled out.
+// A root-relative URL works at a domain root and 404s under a prefix. This
+// starts a file server with a prefix in front of `out/` and fetches every page
+// and every URL each page names, resolved as a browser resolves it. Three
+// prefixes, one nested, over one artifact: a build that has to know where it
+// is served is what this rules out.
 //
 // Run: node --test site/test/*.test.mjs   (after `vyrn run site/export.vyrn out`)
 import { test } from "node:test";
@@ -25,9 +17,8 @@ import path from "node:path";
 const OUT = fileURLToPath(new URL("../../out/", import.meta.url));
 const PUBLIC = fileURLToPath(new URL("../public/", import.meta.url));
 
-// The three mount points. The root is where the site used to work, `/vyrn/` is
-// where it is actually published, and `/a/b/` is deeper than any page in the
-// tree — so a prefix that is accidentally treated as one segment fails here.
+// The mount points: the root, `/vyrn/` where the site is published, and
+// `/a/b/`, deeper than any page, so a prefix treated as one segment fails.
 const PREFIXES = ["", "/vyrn", "/a/b"];
 
 const TYPES = { ".html": "text/html", ".css": "text/css", ".js": "text/javascript", ".json": "application/json", ".wasm": "application/wasm", ".svg": "image/svg+xml", ".md": "text/markdown", ".xml": "application/rss+xml", ".txt": "text/plain", ".sh": "application/x-sh", ".ps1": "application/octet-stream" };
@@ -45,16 +36,12 @@ async function tree(dir, base = "") {
 const files = await tree(OUT).catch(() => []);
 const pages = files.filter((f) => f.endsWith(".html"));
 
-// The export must have run. A gate that quietly passes on an empty directory is
-// the gate that let this defect out in the first place.
+// The export must have run: a gate that passes on an empty directory checks
+// nothing.
 test("the export is there to check", () => {
-  // The consumer site's own pages.
-  // A floor rather than a count: both halves grow by a file.
-  // 79 and not 160: the design record's hundred pages left the published site
-  // with the backstage. The floor is what the consumer site
-  // itself carries.
+  // A floor, because the consumer site grows by pages.
   assert.ok(pages.length >= 70, `expected the exported tree in out/, found ${pages.length} page(s) — run: vyrn run site/export.vyrn out`);
-  // The design record left the published site with the backstage.
+  // The backstage is not part of the published site.
   assert.ok(!pages.includes("backstage.html"), "the backstage was removed and should not be exported");
   for (const f of ["style.css", "widgets.js", "vyrn-nav.js", "favicon.svg", "play.wasm", "play-worker.js"])
     assert.ok(files.includes(f), `out/${f} is missing`);
@@ -70,7 +57,7 @@ const idsOf = new Map([...source].map(([p, html]) => [p, new Set(attr(html, "id"
 function serve(prefix) {
   const server = createServer(async (req, res) => {
     const url = new URL(req.url, "http://x");
-    // Outside the mount point there is nothing at all — which is exactly what
+    // Outside the mount point there is nothing at all, which is exactly what
     // GitHub Pages answers for `/style.css` when the site lives at `/vyrn/`.
     if (!url.pathname.startsWith(prefix + "/")) return res.writeHead(404).end();
     const rel = decodeURIComponent(url.pathname.slice(prefix.length + 1)) || "index.html";
@@ -98,11 +85,10 @@ for (const prefix of PREFIXES) {
         assert.equal(res.status, 200, `${page} itself did not load at ${at}`);
         const html = await res.text();
 
-        // The soft-navigation payload beside it. `vyrn-nav.js` builds this URL
-        // from the one in the address bar, so it lands in the mount by
-        // construction; what it CARRIES is prose HTML, and that has to be
-        // relative to the same page or a soft navigation renders dead links
-        // where a full load renders live ones.
+        // The soft-navigation payload beside it. `vyrn-nav.js` builds its URL
+        // from the address bar, so it lands in the mount; the prose HTML it
+        // carries must be relative to the same page, or a soft navigation
+        // renders dead links.
         const payload = await fetch(`${base}/${page.slice(0, -5)}.data.json`);
         assert.equal(payload.status, 200, `${page}: no payload beside it`);
         assert.doesNotMatch(await payload.text(), / (?:href|src)=\\"\//, `${page}: its payload names a root`);
@@ -113,8 +99,7 @@ for (const prefix of PREFIXES) {
             if (url.protocol !== "http:" && url.protocol !== "https:") continue;
             if (url.origin !== new URL(base).origin) continue; // github.com and friends
             links++;
-            // The whole defect, in one assertion: a URL that leaves the mount
-            // point is a URL that named a root only one host has.
+            // A URL that leaves the mount point names a root only one host has.
             assert.ok(url.pathname.startsWith(prefix + "/"), `${page}: ${name}="${value}" escapes the mount point (${url.pathname})`);
             const target = url.pathname.slice(prefix.length + 1);
             wanted.set(url.origin + url.pathname, page);
@@ -123,8 +108,8 @@ for (const prefix of PREFIXES) {
               const frag = decodeURIComponent(url.hash.slice(1));
               const ids = idsOf.get(target || "index.html");
               assert.ok(ids, `${page}: ${name}="${value}" names a page this export did not write`);
-              // The one fragment that is not an anchor: the playground's
-              // contract is `play.html#c=` and base64url of the program.
+              // The playground's link contract is `play.html#c=<base64url>`, not
+              // an anchor.
               if (target === "play.html" && frag.startsWith("c=")) assert.match(frag, /^c=[A-Za-z0-9_-]+$/, `${page}: a playground link that is not base64url`);
               else assert.ok(ids.has(frag), `${page}: ${name}="${value}" points at an element that is not there`);
             }
@@ -132,8 +117,8 @@ for (const prefix of PREFIXES) {
         }
       }
 
-      // The scripts fetch three things no page mentions, each one relative to
-      // the script's own URL. They are checked where the scripts would ask.
+      // The scripts fetch two files no page names, each relative to the
+      // script's own URL.
       for (const asset of ["play.wasm", "play-worker.js"]) wanted.set(`${base}/${asset}`, "the site's scripts");
 
       for (const [url, named] of wanted) {
@@ -141,9 +126,8 @@ for (const prefix of PREFIXES) {
         assert.equal(res.status, 200, `${url} is a 404, named by ${named}`);
       }
 
-      // Floors, so a scan that quietly stopped scanning fails instead of
-      // passing. The tree holds 2170 internal links and 907 fragments today,
-      // and grows by a page every time `std/` or the book does.
+      // Floors, so a scan that stopped scanning fails. The tree held 2170
+      // internal links and 907 fragments when these were set.
       assert.ok(links > 2000, `only ${links} internal links checked`);
       assert.ok(fragments > 800, `only ${fragments} fragments checked`);
       assert.ok(wanted.size > 60, `only ${wanted.size} distinct URLs fetched`);
@@ -154,8 +138,8 @@ for (const prefix of PREFIXES) {
 }
 
 test("a page opened from disk finds everything it names", async () => {
-  // The fourth mount point, and the one no server can fake: `file://`, where
-  // there is no origin and no root to be absolute about. Same artifact.
+  // The fourth mount point, which no server can fake: `file://`, with no
+  // origin and no root.
   let checked = 0;
   for (const page of pages) {
     const at = pathToFileURL(path.join(OUT, page));
@@ -168,16 +152,14 @@ test("a page opened from disk finds everything it names", async () => {
       }
     }
   }
-  // 1369 today: every internal link except the ones that name no document at
-  // all, which are the same-page fragments the HTTP runs above check.
+  // Every internal link except same-page fragments, which the HTTP runs check.
   assert.ok(checked > 1300, `only ${checked} links checked on disk`);
 });
 
 test("no browser module names a root", async () => {
-  // The other half, and the one the fetches above cannot see: a script that
-  // hard-codes `/play.wasm` still loads at the root and 404s under a prefix. A
-  // module specifier or a fetch target here is relative to the module that
-  // wrote it, always.
+  // A script that hard-codes `/play.wasm` loads at the root and 404s under a
+  // prefix, which the fetches above cannot see. A module specifier or a fetch
+  // target here is relative to the module that wrote it.
   for (const name of await readdir(PUBLIC)) {
     if (!name.endsWith(".js")) continue;
     const src = await readFile(path.join(PUBLIC, name), "utf8");
