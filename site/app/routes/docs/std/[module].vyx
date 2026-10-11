@@ -24,7 +24,7 @@ import { ApiEntry, apiBlurb, apiEntries, apiIntro, apiKnown, apiSource, apiSourc
 import { Demo, demoFor, guideUseCount, chapterHref } from "../../../guide"
 import { examplesUsing, usesOfModule, usedByModule } from "../../../stdgraph"
 import { blob } from "../../../repo"
-import { Head, PageError, ParamQuery, noHead, notFound, paramQuery } from "std/ui"
+import { Head, PageError, ParamQuery, notFound, paramQuery } from "std/ui"
 import { pageHeadWith } from "../../../nav"
 import { mdUrl, askClaudeUrl } from "../../../pagemd"
 // THE DOCS SHELL. The left column is the whole reference, in the

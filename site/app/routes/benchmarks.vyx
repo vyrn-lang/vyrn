@@ -13,8 +13,7 @@
 // with and the reason this page can be a claim at all.
 import { Head } from "std/ui"
 import { pageHeadOf } from "../nav"
-import { contestants, radarBox, radarCx, radarCy, radarRings, radarSpokes, radarLines, ratioWay, axisPanels, srcHref, nativeVsRust, benchMachine, benchRuns, envRows, run1File, run1Href, Series, Ring, Spoke, Line, Mark, Reading, Panel } from "../bench"
-import { TreeGroup, docSubnav } from "../docshell"
+import { contestants, radarBox, radarCx, radarCy, radarRings, radarSpokes, radarLines, ratioWay, axisPanels, srcHref, nativeVsRust, benchMachine, benchRuns, envRows, run1File, run1Href } from "../bench"
 
 export fn head() -> Head {
     return pageHeadOf("/benchmarks")

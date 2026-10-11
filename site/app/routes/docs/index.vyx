@@ -32,9 +32,9 @@
 // page's own graph section.
 import { Head } from "std/ui"
 import { pageHeadOf } from "../../nav"
-import { exampleCount, blob } from "../../repo"
-import { ApiModule, apiModules, apiHref } from "../../docs"
-import { SearchRow, SearchGroup, searchRows, searchGroups, edgeCount, leafCount } from "../../stdgraph"
+import { blob } from "../../repo"
+import { apiModules } from "../../docs"
+import { searchRows, searchGroups, edgeCount, leafCount } from "../../stdgraph"
 import { chapters } from "../../guide"
 import { Icon } from "../../icons"
 import { TreeGroup, docsTree } from "../../docshell"

@@ -31,14 +31,13 @@ import { hasRelease, releaseTag, releaseDate, releasePre, InstallTarget, install
 // load-bearing: the generator's cache is keyed on its argument string, so a
 // second call site naming the directory with a different `../` prefix would
 // generate a second module whose exports collide with the first program-wide.
-import { Block, blockOf, chapterOfBlock, sectionOfBlock, chapterHref } from "../guide"
+import { blockOf, chapterOfBlock, sectionOfBlock, chapterHref } from "../guide"
 // The reference's own module list, from the same generator the reference page
 // reads. Nine names on this page and thirty-eight on that one, and neither list
 // is typed by hand.
 import { ApiGroup, ApiModule, apiGroups, apiHref } from "../docs"
 import { joinWith } from "std/strings"
-import { heroBars, heroBarsBox, heroBarsGrid, heroBarsPlot, heroBench, barLeft, barRight, barRow, barText, Bar, Grid } from "../chart"
-import { envRows, frontPanels, panelBars, panelNote, panelSpeed, panelMemLine, benchMachine, benchRuns, Panel, BarRow } from "../bench"
+import { frontPanels, panelBars, panelNote, panelSpeed, panelMemLine, benchMachine, benchRuns } from "../bench"
 import { demoSteps, demoVersion, demoRecorded, DemoStep } from "../demo"
 import { shellOutHtml } from "../code"
 // The two steps whose output is a FILE arrive already coloured by the

@@ -18,10 +18,10 @@
 // module's wires on hover exactly as it did on the landing.
 import { Head } from "std/ui"
 import { pageHeadOf } from "../../nav"
-import { GraphNode, GraphEdge, searchRows, graphNodes, graphEdges, graphViewBox, graphWidth, edgeCount, leafCount, graphLede, graphIntro, graphCaption } from "../../stdgraph"
+import { searchRows, graphNodes, graphEdges, graphViewBox, graphWidth, edgeCount, graphLede, graphIntro, graphCaption } from "../../stdgraph"
 import { mdUrl, askClaudeUrl } from "../../pagemd"
 import { Icon } from "../../icons"
-import { TreeGroup, Pager, docsTree, pagerFor , docSubnav} from "../../docshell"
+import { TreeGroup, Pager, docsTree, pagerFor } from "../../docshell"
 
 export fn head() -> Head {
     return pageHeadOf("/docs/graph")

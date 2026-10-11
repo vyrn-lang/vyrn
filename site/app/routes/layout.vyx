@@ -6,7 +6,7 @@
 // two reserved sockets were filled that way: `/guide` and `/explore` arrived as
 // a directory of routes plus one row each in `navRows`, and nothing else here
 // changed.
-import { navRows, NavRow, themeControl, installCta } from "../nav"
+import { navRows, themeControl, installCta } from "../nav"
 // The glyph provider. `<Icon>` is a tag here because this `<script>`
 // imports a `gen fn` of that name and for no other reason — `std/vyx` names no
 // component. Each tag becomes its own generation, reading a hash-locked Iconify

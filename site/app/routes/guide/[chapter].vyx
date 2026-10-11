@@ -14,7 +14,7 @@ import { Chapter, Section, chapterArea, chapterBlurb, chapterCount, chapterOf, c
 import { mdUrl, askClaudeUrl } from "../../pagemd"
 // The one chapter that compares languages draws its plates from here; every
 // other section's illustration is a program this site ran.
-import { Snippet, specSet } from "../../snippets"
+import { specSet } from "../../snippets"
 import { inlineCode } from "../../code"
 // THE DOCS SHELL. The same three panes the reference wears: the
 // book's contents on the left, this chapter's sections on the right, the chapter
