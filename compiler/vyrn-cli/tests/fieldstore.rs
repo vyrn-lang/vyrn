@@ -617,3 +617,138 @@ fn a_handed_over_slot_keeps_what_the_call_reads_and_the_result() {
         String::from_utf8_lossy(&out.stderr)
     );
 }
+
+/// Module state that may hold an argument, and a callee for each way it can change under the
+/// argument: a store, a store two calls down, one through a function value, one in one generic
+/// instance, and a read of the module state a `modify` argument is.
+const ALIASED: &str = r#"type P = { a: Int64, b: Int64 }
+
+let mut g: P = P { a: 1, b: 2 }
+let mut xs: Array<Int64> = [1, 2, 3]
+
+protocol Note {
+    fn note(read self)
+}
+
+impl Note for Int64 {
+    fn note(read self) {
+        g.a = g.a + self
+    }
+}
+
+impl Note for Bool {
+    fn note(read self) {
+    }
+}
+
+fn bump() {
+    g.a = g.a + 100
+}
+
+fn calm() {
+}
+
+fn mid() {
+    bump()
+}
+
+fn peek() -> Int64 {
+    return g.a
+}
+
+fn direct(x: P) -> Int64 {
+    bump()
+    return x.a
+}
+
+fn twoDown(x: P) -> Int64 {
+    mid()
+    return x.a
+}
+
+fn through(x: P, k: fn()) -> Int64 {
+    k()
+    return x.a
+}
+
+fn noted<T: Note>(x: P, t: T) -> Int64 {
+    t.note()
+    return x.a
+}
+
+fn modified(x: modify P) -> Int64 {
+    x.a = x.a + 1000
+    return peek()
+}
+
+fn grown(x: modify Array<Int64>) -> Int64 {
+    x.push(9)
+    return xs.length
+}
+
+fn main() -> Int64 {
+    print("\{direct(g)} \{twoDown(g)} \{through(g, calm)} \{through(g, bump)}")
+    print("\{noted(g, true)} \{noted(g, 100)} \{modified(g)} \{g.a}")
+    print("\{grown(xs)} \{xs.length}")
+    return 0
+}
+"#;
+
+/// An argument module state may hold is copied in when the callee may store into that state, or,
+/// for `modify`, read it: each callee prints what the copy prints, under the free audit.
+#[test]
+fn an_argument_module_state_may_hold_keeps_its_entry_copy() {
+    let dir = scratch("aliased");
+    let file = dir.join("aliased.vyrn");
+    std::fs::write(&file, ALIASED).unwrap();
+    let out = vyrn()
+        .arg("run")
+        .arg(&file)
+        .env("VYRN_LEAK_CHECK", "1")
+        .output()
+        .expect("vyrn run");
+    assert_eq!(
+        (
+            out.status.code(),
+            String::from_utf8_lossy(&out.stdout).replace("\r\n", "\n")
+        ),
+        (
+            Some(0),
+            "1 101 201 201\n301 301 401 1401\n3 4\n".to_string()
+        ),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// `calm` stores no module state, so it reads its 40-byte record at the caller's address in a
+/// module whose state is a record; `writer` stores into that state and copies the record in.
+#[test]
+fn a_callee_that_stores_no_module_state_reads_its_argument_in_place() {
+    let src = r#"type Q = { a: Int64, b: Int64, c: Int64, d: Int64, e: Int64 }
+
+let mut g: Q = Q { a: 1, b: 2, c: 3, d: 4, e: 5 }
+
+fn calm(x: Q) -> Int64 {
+    return x.a + 1234567
+}
+
+fn writer(x: Q) -> Int64 {
+    g.b = 7654321
+    return x.a
+}
+
+fn main() -> Int64 {
+    let q = Q { a: 1, b: 2, c: 3, d: 4, e: 5 }
+    print("\{calm(q)} \{writer(q)} \{calm(g)}")
+    return 0
+}
+"#;
+    let calm = wat_func_containing(src, "1234567");
+    let writer = wat_func_containing(src, "7654321");
+    assert_eq!(
+        (copies_of(&calm, 40), copies_of(&writer, 40)),
+        (0, 1),
+        "{calm}\n{writer}"
+    );
+}

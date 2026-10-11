@@ -129,6 +129,31 @@ impl Judged<'_> {
             .filter(|(_, cs)| !cs.is_empty())
             .collect()
     }
+
+    /// [`StateUse`] of every frame of `refs` with a row, by frame id. It takes the
+    /// judgment so the write sets move rather than copy.
+    fn into_state_uses(self, refs: &[&Body]) -> HashMap<FnId, StateUse> {
+        let mut out: HashMap<FnId, StateUse> = HashMap::with_capacity(refs.len());
+        for ((b, e), mut writes) in refs.iter().zip(&self.effects).zip(self.writes) {
+            let Some(id) = b.id else { continue };
+            let u = out.entry(id).or_default();
+            u.host |= e.has(Effect::Extern);
+            u.touches |= e.has(Effect::ModuleState);
+            u.writes.append(&mut writes);
+        }
+        out
+    }
+}
+
+/// What a call into one frame may do to module state, by the effect judgment.
+#[derive(Debug, Clone, Default)]
+pub struct StateUse {
+    /// It may call a host import, which may call an export back.
+    pub host: bool,
+    /// It may read or store module state.
+    pub touches: bool,
+    /// The globals it may store into.
+    pub writes: std::collections::BTreeSet<String>,
 }
 
 /// The globals a call to `callee` in the frame `frame` may store into, by
@@ -492,6 +517,7 @@ fn placed_reach(
                 .collect()
         },
     )
+    .0
 }
 
 /// The judgment over bodies the caller built: `tops` holds each body with
@@ -507,6 +533,9 @@ fn placed_reach(
 /// body or lambda of one answers a call through a function value. The floor
 /// reads it, because a lambda in a test is not in the artifact. It is the first
 /// judgment itself when no call through a value reached such a frame.
+///
+/// Returns what `then` returns, and the first judgment's [`StateUse`] of each
+/// frame built.
 pub(crate) fn judge_built<R>(
     program: &vyrn_frontend::ast::Program,
     lowered: &crate::Lowered<'_>,
@@ -516,7 +545,7 @@ pub(crate) fn judge_built<R>(
     tops: &[(&str, &Body)],
     served: &[(&str, &[Walked])],
     then: impl FnOnce(&Judged, &Judged, &[&Body], &[usize], &[usize]) -> R,
-) -> R {
+) -> (R, HashMap<FnId, StateUse>) {
     let mut generic: Vec<(&str, Body)> = Vec::new();
     // Nor does a generic declared `release` until the placer writes the row
     // that calls it, so it is judged as written.
@@ -682,11 +711,12 @@ pub(crate) fn judge_built<R>(
         skip.set(true);
         judge(&frames, &mut resolve, &mut through)
     });
-    then(
+    let r = then(
         &judged,
         reach.as_ref().unwrap_or(&judged),
         &refs,
         &top,
         &served_at,
-    )
+    );
+    (r, judged.into_state_uses(&refs))
 }

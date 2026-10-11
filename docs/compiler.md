@@ -312,10 +312,12 @@ The module's shape:
   access instead of overwriting data.
 - Values: a scalar lives in a wasm local; an aggregate lives in a frame slot
   and travels as its `i32` address; an aggregate result goes through a hidden
-  leading address. A `read` or `modify` parameter is used at the caller's
-  address when no module state is an aggregate or owns heap other than a
-  `String`'s (`Cx::args_in_place`). Otherwise the callee copies it in at
-  entry, and a `modify` one back out at the one exit. A `consume` parameter
+  leading address. A `read` parameter is used at the caller's address unless
+  the callee may store into module state that is an aggregate or owns heap
+  other than a `String`'s (`Cx::aliasing`), and a `modify` one unless the
+  callee may also read any module state, as the effect judgment answers per
+  frame (`World::state_use`). Otherwise the callee copies it in at entry,
+  and a `modify` one back out at the one exit. A `consume` parameter
   is copied in, unless every `return` yields it (`Sig::in_place`): then it
   is the result, the call has no out-pointer, and the caller moves the
   argument into the destination. It passes `x`'s storage instead for

@@ -363,7 +363,7 @@ fn compile_inner(
         dispatch: RefCell::new(Dispatch::default()),
         shapes: RefCell::new(Shapes::default()),
         globals: HashMap::new(),
-        args_in_place: false,
+        aliasing: std::collections::HashSet::new(),
         gappend: HashMap::new(),
         externs,
         world,
@@ -433,11 +433,14 @@ fn compile_inner(
             (Place::Static(m.reserve(l.size, l.align)), ty),
         );
     }
-    cx.args_in_place = cx.globals.values().all(|(_, ty)| {
-        cx.resolve(ty) == Type::Str
-            || !vyrn_frontend::declared::owns_heap(&cx.sub(ty), &cx.types)
-                && matches!(cx.repr(ty, 0), Ok(Repr::Scalar(_)))
-    });
+    cx.aliasing = (cx.globals.iter())
+        .filter(|(_, (_, ty))| {
+            cx.resolve(ty) != Type::Str
+                && (vyrn_frontend::declared::owns_heap(&cx.sub(ty), &cx.types)
+                    || !matches!(cx.repr(ty, 0), Ok(Repr::Scalar(_))))
+        })
+        .map(|(g, _)| g.clone())
+        .collect();
 
     // One ownership word per module-state accumulator, in static memory because the helper writes
     // it back and wasm has no pass-by-reference. Reserved zeroed; the initializer sets it.
@@ -1127,11 +1130,11 @@ struct Cx<'a> {
     /// Module state: name -> its fixed address and declared type. Every body sees all
     /// of them; the checker forbids an initializer reading a later global.
     globals: HashMap<String, (Place, Type)>,
-    /// Whether a `read` or `modify` aggregate parameter is the caller's storage, used in place.
-    /// It is when no module state is an aggregate or owns heap other than a `String`'s bytes:
-    /// then only the callee's own parameters name that storage during the call, and the
-    /// checker refuses a `modify` argument that overlaps another.
-    args_in_place: bool,
+    /// The module state that may hold a `read` or `modify` aggregate argument: each binding that
+    /// is an aggregate or owns heap other than a `String`'s bytes. No other storage can: the
+    /// checker refuses a `modify` argument that overlaps another, and nothing else names the
+    /// caller's storage during the call. [`lower_body`] reads it.
+    aliasing: std::collections::HashSet<String>,
     /// Module-state `String` accumulators: name -> the address of its ownership word. Present only
     /// for a global [`vyrn_lower::append::global_append_candidates`] cleared, so `g = g + ...`
     /// grows in place. The local twin is [`Fn_::str_append`]; a global has no local, so its word
@@ -2029,18 +2032,34 @@ fn lower_body(
     }
 
     // An aggregate parameter arrives as the caller's address. The one [`Sig::in_place`] names is
-    // used there, and under [`Cx::args_in_place`] so is a `read` or `modify` one. Otherwise the
-    // prologue copies it into a slot of its own, and a `modify` parameter is copy-in/copy-out:
-    // copied in here and back out at the epilogue, so the caller sees no write before the call
-    // returns.
+    // used there. A `read` one is used there unless the callee may store into [`Cx::aliasing`]
+    // state, which could hold the argument and change under it. A `modify` one is used there
+    // unless the callee may read or store module state at all, which would then see the write
+    // before the return. A host import may call an export back, so it counts as both. Otherwise
+    // the prologue copies the parameter into a slot of its own, and a `modify` parameter is
+    // copy-in/copy-out: copied in here and back out at the epilogue.
+    let (stores, touches) = match core.as_ref().and_then(|c| cx.world.state_use(c.id?)) {
+        _ if cx.aliasing.is_empty() => (false, false),
+        // A frame the effect judgment did not answer for may do anything.
+        None => (true, true),
+        Some(u) => {
+            let stores = u.writes.iter().any(|g| cx.aliasing.contains(g));
+            (u.host || stores, u.host || u.touches)
+        }
+    };
     let mut copy_out: Vec<(u32, Place, Repr, Type)> = Vec::new();
     for (i, p) in f.params.iter().enumerate() {
         let local = shift + i as u32;
         // The declared type, for the same reason as `ret_ty`.
         let ty = p.ty.clone();
         let r = cx.repr(&p.ty, f.line)?;
-        let in_place = matches!(r, Repr::Agg(_)) && p.capability != Capability::Consume;
-        let place = if sig.in_place == Some(i) || in_place && cx.args_in_place {
+        let in_place = matches!(r, Repr::Agg(_))
+            && match p.capability {
+                Capability::Read => !stores,
+                Capability::Modify => !touches,
+                Capability::Consume => false,
+            };
+        let place = if sig.in_place == Some(i) || in_place {
             Place::Local(local)
         } else if p.capability == Capability::Modify {
             let place = match &r {
@@ -13720,7 +13739,7 @@ mod tests {
             dispatch: RefCell::new(Dispatch::default()),
             shapes: RefCell::new(Shapes::default()),
             globals: HashMap::new(),
-            args_in_place: false,
+            aliasing: std::collections::HashSet::new(),
             gappend: HashMap::new(),
             externs: HashMap::new(),
             // `Program`'s defaults: nothing here logs.

@@ -296,6 +296,11 @@ The target is wasm32. A pointer is 4 bytes.
   32-bit. A literal lives in the data segment with `cap` all ones, and
   `free` ignores any address below `heapBase()`, so a literal is never freed.
 - An `Array<T>` is `{ ptr, len: i64, cap: i64 }`, 24 bytes with a hole.
+- A `read` or `modify` aggregate argument is passed as its address. Only
+  module state that is an aggregate or owns heap can hold it during the call,
+  so the callee uses that address unless it may store into such state (`read`)
+  or read or store any module state (`modify`); then it copies the argument
+  in, and a `modify` one back out at return.
 - A `Map` header is `{ keys, vals, len, cap, idx }`.
 - A boxed enum payload lives in its own block.
 
