@@ -1,14 +1,8 @@
-// Runs every markup rule in `std/vyx-hints` over every `.vyx` file under `app/`.
-//
-// The rules are errors, so a template that breaks one fails to compile this
-// program. It is separate from `site/export.vyrn`, so a broken template fails
-// its own build step and not the export's.
 import { vyxHints } from "std/vyx-hints"
 import * as siteMarkup from vyxHints("./app")
 
 fn main() -> Int64 {
-    // The number of `.vyx` files checked. Reading it keeps the import from being
-    // dropped as unused, and a file that stops being discovered lowers it.
+    // Reading the count keeps the import from being dropped as unused.
     print(siteMarkup.vyxHintsChecked())
     return 0
 }
