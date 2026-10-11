@@ -1,9 +1,3 @@
-// The copy affordances and the script that wires them, over the exported tree.
-//
-// A Copy button whose script is not loaded, or whose target is a 404, is worse
-// than no button.
-//
-// Run: node --test site/test/copywiring.test.mjs   (after `vyrn run site/export.vyrn out`)
 import { test } from "node:test";
 import { readFile, readdir, stat } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
@@ -30,8 +24,6 @@ test("the export is there to check", () => {
 
 const source = new Map(await Promise.all(pages.map(async (p) => [p, await readFile(path.join(OUT, p), "utf8")])));
 
-// Every page that emits a copy affordance loads `widgets.js`, which wires
-// `copyButtons` and `copyPageButtons`.
 test("every page with a copy affordance loads widgets.js", () => {
   for (const [p, html] of source) {
     const emits = html.includes("data-copy");
@@ -41,8 +33,6 @@ test("every page with a copy affordance loads widgets.js", () => {
   }
 });
 
-// Every Copy page link names a twin that exists. The href is relative to the
-// page, so it resolves the way a browser resolves it.
 test("every Copy page link names an existing markdown twin", async () => {
   for (const [p, html] of source) {
     const tags = html.match(/<a [^>]*data-copy-md[^>]*>/g) || [];
@@ -56,8 +46,6 @@ test("every Copy page link names an existing markdown twin", async () => {
   }
 });
 
-// Every page of the documentation shell carries the page-level copy button.
-// The command plates' Copy buttons are a different affordance and do not count.
 test("every docs page carries the Copy page button", () => {
   for (const [p, html] of source) {
     const docs = html.includes('class="page docs"');

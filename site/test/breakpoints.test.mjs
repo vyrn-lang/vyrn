@@ -1,18 +1,9 @@
-// The stylesheet's width breakpoints.
-//
-// Custom properties cannot parameterise `@media`, so the breakpoints are
-// literals. This checks the two things an unmanaged set of them grows: a value
-// off the sanctioned scale, and a max-width rule that can never fire because a
-// later, wider rule sets the same property on the same selector.
-//
-// Run: node --test site/test/breakpoints.test.mjs
 import { test } from "node:test";
 import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 
 const css = await readFile(fileURLToPath(new URL("../public/style.css", import.meta.url)), "utf8");
 
-// Every width-conditioned block, with the rules it holds, in source order.
 function widthBlocks(src) {
   const out = [];
   const re = /@media \((max|min)-width: (\d+)px\)\s*\{/g;
@@ -41,12 +32,7 @@ test("the stylesheet has width breakpoints to check", () => {
   if (blocks.length < 10) throw new Error(`only ${blocks.length} width queries found — the parse shape changed`);
 });
 
-// The sanctioned scale. Each value is a component's own decision about where
-// its columns stop fitting: 640 is the phone rule for the page grid, 1024 is
-// where the rail leaves the margin, and 720, 860, 900 and 960 are single
-// components. 860 (`.showgrid`, a fixed 16rem sidebar) and 900 (`.demo`, a
-// fluid split) are 40px apart on purpose. Adding a value is allowed; adding one
-// by accident is not.
+// 860 (`.showgrid`) and 900 (`.demo`) are 40px apart on purpose.
 const SANCTIONED = new Set([640, 720, 860, 900, 960, 1024]);
 
 test("no unsanctioned breakpoint has appeared", () => {
@@ -59,10 +45,6 @@ test("no unsanctioned breakpoint has appeared", () => {
   }
 });
 
-// A max-width rule is dead when a later rule sets the same property on the same
-// selector at the same or a wider max-width: the later rule covers every width
-// and wins the cascade. Progressive narrowing (`.rail` at 1024 and again at
-// 640) is not that: the narrower rule comes second.
 test("no max-width rule is shadowed by a later, wider one", () => {
   const dead = [];
   const maxes = blocks.filter((b) => b.kind === "max");
