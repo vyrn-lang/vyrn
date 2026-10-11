@@ -1,39 +1,24 @@
-// The widget harness, and every widget's logic.
+// The widget harness and every widget's logic.
 //
-// The rule the whole site is built on: **Vyrn computes the geometry at build
-// time, JavaScript animates one scalar.** Every bar position, every cell fill,
-// every label below is already in the markup when this file loads. Nothing here
-// computes a chart; it fades, sweeps, counts, or moves a playhead.
+// Vyrn computes the geometry at build time. Every position, fill and label is
+// in the markup when this file loads; nothing here computes a layout.
 //
-// No framework, no bundler, no dependency. One file.
-// NOTHING ELSE IS IMPORTED HERE, and that is the page-weight rule. `play.js`,
-// `play-wasm.js` and `wasi-min.js` were static imports once, and a static
-// import is a download: twelve of the thirteen consumer pages fetched the
-// playground's 14,587 gzipped bytes to run none of it. They are `import()` at
-// the point of use now — inside the loop over the elements only `/play` has,
-// and inside the hero editor's first interaction on `/`. `vyrn-nav.js` and
-// `vyrn-dom.js` (20,275 gzipped between them) left the same way at the foot of
-// this file: a soft navigator is fetched when a reader reaches for a link, not
-// before they have read anything.
+// No framework, no bundler, no dependency, and no static import, because a
+// static import is a download on every page. The playground (14,587 gzipped
+// bytes) loads through `import()` where it is used, and the soft navigator
+// (`vyrn-nav.js` and `vyrn-dom.js`, 20,275 gzipped) loads on the first reach
+// for a link, at the foot of this file.
 
-// Where the site is. Every file this page loads is a sibling of this script, and
-// this script knows its own URL, so that is the whole derivation — no flag baked
-// in at build time, no root assumed. It is correct at a domain root, under
-// `/vyrn/` on GitHub Pages, behind a preview URL, and on `file://`. The imports
-// above are relative for the same reason: a module specifier resolves against
-// the module that wrote it.
+// The site's base. Every file this page loads is a sibling of this script, so
+// it resolves at a domain root, under a path prefix and on `file://`.
 const SITE = new URL(".", import.meta.url);
 
-// Soft navigation across a static host: the payload for /why-vyrn.html lives
-// beside it in /philosophy.data.json, because a file host cannot vary on
-// `Accept`. Set before the runtime module loads.
+// Soft navigation on a static host: a page's payload is the `.data.json` file
+// beside it, because a file host cannot vary on `Accept`. Set before the
+// navigator loads.
 window.__vyrnNavConfig = { staticData: true };
 
 const REDUCED = matchMedia("(prefers-reduced-motion: reduce)").matches;
-
-// ---------------------------------------------------------------------------
-// The harness (design brief 4.1)
-// ---------------------------------------------------------------------------
 
 /// Fire `cb` once, the first time `root` is properly on screen, then disconnect.
 /// Under reduced motion it fires immediately with `false`, and every widget
@@ -46,8 +31,8 @@ function onView(root, cb) {
   const io = new IntersectionObserver(
     (entries) => {
       for (const e of entries) {
-        // Half of it visible, OR half a screen of it visible — so a widget
-        // taller than the viewport still fires.
+        // Half of it visible, or half a screen of it, so a widget taller than
+        // the viewport still fires.
         if (e.intersectionRatio >= 0.5 || e.intersectionRect.height >= innerHeight / 2) {
           io.disconnect();
           cb(true);
@@ -60,29 +45,6 @@ function onView(root, cb) {
   io.observe(root);
 }
 
-const ease = (t) => 1 - Math.pow(1 - t, 3);
-
-/// Run `render(p)` from 0 to 1 over `ms`. `render` must be a pure function of
-/// `p`, so a replay and a scrubber are the same code.
-function play(ms, render) {
-  const start = performance.now();
-  function step(now) {
-    const p = Math.min(1, (now - start) / ms);
-    render(ease(p));
-    if (p < 1) requestAnimationFrame(step);
-  }
-  requestAnimationFrame(step);
-}
-
-/// Count `el` up to `to` over `ms`, keeping the digits from jittering.
-function countUp(el, to, ms, suffix = "") {
-  if (REDUCED) {
-    el.textContent = to + suffix;
-    return;
-  }
-  play(ms, (p) => (el.textContent = Math.round(to * p) + suffix));
-}
-
 /// Pin a button's width before its label changes, so nothing reflows.
 function pinWidth(btn) {
   btn.style.minWidth = Math.ceil(btn.getBoundingClientRect().width) + "px";
@@ -91,24 +53,17 @@ function pinWidth(btn) {
 const $ = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => Array.from(root.querySelectorAll(sel));
 
-// ---------------------------------------------------------------------------
-// W3 — the install command. The most important widget on the site.
-// ---------------------------------------------------------------------------
-
-/// Put `text` on the clipboard, and say whether it worked.
+/// Puts `text` on the clipboard and returns whether it worked.
 ///
-/// `navigator.clipboard` is missing on an insecure origin and can be refused by
-/// permission, so failure is a real answer here rather than an exception nobody
-/// catches. Both callers — the COPY button and an inline span — show what
-/// happened instead of pretending.
+/// `navigator.clipboard` is missing on an insecure origin and can be refused
+/// by permission, so a failure is an answer the callers show.
 async function writeClipboard(text) {
   try {
     await navigator.clipboard.writeText(text);
     return true;
   } catch (err) {
-    // The async API refuses in more situations than a reader can see — the
-    // document briefly unfocused, an embedding policy — while the selection
-    // path still works there. The fallback is the old way, tried second.
+    // The async API refuses in cases a reader cannot see (an unfocused
+    // document, an embedding policy) where the selection path still works.
     try {
       const box = document.createElement("textarea");
       box.value = text;
@@ -144,21 +99,12 @@ function copyButtons() {
   }
 }
 
-/// COPY THIS PAGE AS MARKDOWN.
-///
-/// The element is a LINK to the `.md` file the export writes beside the page, so
-/// with no script — or with no clipboard, which is every insecure origin — a
-/// press does the thing the element says it does. With both, the file is fetched
-/// and put on the clipboard and the page does not move.
-///
-/// A failure is REPORTED and then falls through to the navigation: the link is
-/// still the answer, and a reader who pressed a button and got nothing has been
-/// lied to.
+/// Wires "Copy page as Markdown". The element is a link to the `.md` file the
+/// export writes beside the page, so with no script or no clipboard a press
+/// follows the link. With both, the file is fetched onto the clipboard.
 function copyPageButtons() {
   for (const link of $$("a[data-copy-md]")) {
-    // Set once the fetch has failed. The second press is then an ordinary press
-    // on an ordinary link, which is where a reader should end up when the copy
-    // cannot happen — not at a button that reports the same failure forever.
+    // Set when the fetch fails: the next press follows the link.
     let broken = false;
     link.addEventListener("click", async (e) => {
       if (broken || !navigator.clipboard) return;
@@ -174,52 +120,31 @@ function copyPageButtons() {
   }
 }
 
-// ---------------------------------------------------------------------------
-// Inline code copies itself.
-//
-// `Run it yourself: cargo test -p vyrn-cli --test parity -- --ignored` is
-// written INLINE on purpose — it belongs in the sentence, not in a plate — and a
-// reader who wants that command should not have to drag across it. So every
-// code span in prose copies itself when clicked, and the same for a short
-// reference like `$PATH` or `~/.vyrn`.
-//
-// The one real cost is text selection, and the rules that protect it are
-// `isPlainCopyClick` below.
-// ---------------------------------------------------------------------------
+// Inline code copies itself on click: a command written inline in a sentence
+// should not need a drag to copy. `isPlainCopyClick` keeps text selection
+// working.
 
-/// The code span `node` is inside, if that span is one in a SENTENCE.
+/// The code span `node` is inside, if that span is in running text.
 ///
-/// A `<pre>`, a command plate and a numbered source row are blocks: the plate
-/// already has its own COPY button, and a second handler inside one would fire
-/// twice on a single click. One predicate, used by both the marking pass and the
-/// delegated listener, so the two can never disagree about what is in scope.
+/// A `<pre>`, a command plate and a numbered source row are blocks, and a
+/// plate has its own Copy button. The marking pass and the listener share this
+/// predicate, so they agree on what is in scope.
 function inlineCode(node) {
   const el = node && node.closest ? node.closest("code") : null;
   if (!el || el.closest("pre, .cmd, .lines")) return null;
   return el;
 }
 
-/// What an inline code span puts on the clipboard: what the reader sees.
-///
-/// Markup indentation reaches `textContent` as newlines and runs of spaces, and
-/// an inline box renders every one of those as a single space. The copy does the
-/// same, and trims the ends.
+/// What an inline span copies: its text as rendered, each run of whitespace
+/// collapsed to one space and the ends trimmed.
 function codeText(el) {
   return el.textContent.replace(/\s+/g, " ").trim();
 }
 
-/// Whether a click on a code span is a COPY or part of a SELECTION.
-///
-/// Copy-on-click eats text selection unless it is careful, so a click has to
-/// pass all three rules:
-///
-///  - the pointer did not travel — a drag is a selection, not a click,
-///  - it is not the second click of a double-click, which selects a word,
-///  - nothing is selected when the button comes up.
-///
-/// A keyboard-driven activation arrives with no pointer position at all, and
-/// passes. `down` is null then, and null is the answer to "where did the pointer
-/// press", not a missing value to guess at.
+/// Whether a click on a code span is a copy rather than part of a selection:
+/// the pointer moved at most 3px, it is not the second click of a
+/// double-click, and nothing is selected. A keyboard activation has no
+/// pointer-down position (`down` is null) and counts as a copy.
 function isPlainCopyClick(down, up, selected) {
   if (up.detail >= 2) return false;
   if (selected) return false;
@@ -227,8 +152,8 @@ function isPlainCopyClick(down, up, selected) {
   return Math.abs(up.x - down.x) <= 3 && Math.abs(up.y - down.y) <= 3;
 }
 
-/// The polite live region every copy reports into. One per document, and a soft
-/// navigation replaces `<main>` rather than `<body>`, so it survives.
+/// The polite live region every copy reports into. A soft navigation replaces
+/// `<main>`, not `<body>`, so one region serves the document.
 function announce(msg) {
   let region = document.getElementById("copy-status");
   if (!region) {
@@ -241,12 +166,9 @@ function announce(msg) {
   region.textContent = msg;
 }
 
-/// Copy one span, and say so twice: a colour flash for the eye and the live
-/// region for a screen reader.
-///
-/// The flash is a class, not a label. A label would change the span's box and
-/// reflow the sentence around it, and a tooltip above a table cell is clipped by
-/// the `.scroller` it sits in. Colour cannot do either.
+/// Copies one span and reports it twice: a colour flash for the eye and the
+/// live region for a screen reader. The flash is a class, because a label
+/// would reflow the sentence and a tooltip is clipped inside a `.scroller`.
 async function copySpan(el) {
   const text = codeText(el);
   const ok = await writeClipboard(text);
@@ -255,26 +177,18 @@ async function copySpan(el) {
   if (ok) {
     announce("Copied " + text);
   } else {
-    // The clipboard refused. Select the text so the reader can take it, and say
-    // that is what happened.
+    // The clipboard refused: select the text so the reader can copy it.
     getSelection().selectAllChildren(el);
     announce("Copy failed. " + text + " is selected — press Control C.");
   }
 }
 
-/// Give every inline code span the affordance, once the script that backs it is
-/// running. Without JavaScript the spans stay plain text and advertise nothing,
-/// which is the honest state.
+/// Marks every inline code span copyable once this script runs; without it the
+/// spans stay plain text.
 ///
-/// WHAT THIS DELIBERATELY DOES NOT DO IS PUT THEM IN THE TAB ORDER. Each span
-/// used to take `tabIndex = 0` and `role="button"`, and `std/http` — the longest
-/// reference page — turned into 143 copy buttons out of 222 tab stops, every one
-/// of them between a keyboard reader and the next paragraph. The copy is a
-/// POINTER convenience over text that is already selectable: a keyboard reader
-/// selects the span and presses Ctrl+C, which needs no widget, and every command
-/// worth copying whole sits in a `.cmd` plate that has its own Copy button in
-/// the tab order. An affordance that costs 143 stops to save one drag is not
-/// worth what it charges.
+/// The spans stay out of the tab order. On `std/http` they were 143 of 222 tab
+/// stops. A keyboard reader selects the text and presses Ctrl+C, and every
+/// command worth copying whole sits in a `.cmd` plate with its own Copy button.
 function markCopyable() {
   for (const el of $$("code")) {
     if (!inlineCode(el)) continue;
@@ -282,13 +196,11 @@ function markCopyable() {
   }
 }
 
-// Where the pointer went down, when it went down on a code span. Read once, by
-// the click that follows.
+// Where the pointer went down on a code span, read by the click that follows.
 let copyDownAt = null;
 
-// One listener per document for the life of the page. `boot` runs again after
-// every soft navigation and re-marks the spans; registering here would stack a
-// listener per page.
+// Bound once per document: `boot` reruns after every soft navigation, and a
+// listener added there would stack.
 document.addEventListener("pointerdown", (e) => {
   copyDownAt = inlineCode(e.target) ? { x: e.clientX, y: e.clientY } : null;
 });
@@ -301,136 +213,27 @@ document.addEventListener("click", (e) => {
   if (isPlainCopyClick(copyDownAt, e, selected)) copySpan(el);
 });
 
-
-/// Check the OS radio that matches the visitor.
+/// Checks the OS radio that matches the visitor.
 ///
-/// The picker itself is CSS and markup — two radio buttons, a `:checked ~`
-/// selector, no script. This is the whole of what a script adds:
-/// a guess about which one to open on. With no script the first is checked and
-/// the control works exactly the same, which is why this can be three lines and
-/// has no keyboard contract of its own — a native radio group already has one.
-///
-/// TWO THINGS WERE WRONG WITH THE FIRST VERSION, and both are the kind that pass
-/// review and fail in a browser:
-///
-///   1. It looked for `input[data-os]` and only the INDEX carried that attribute.
-///      On `/install` — the page a reader actually installs from — there was
-///      nothing to match, so the guess silently did nothing.
-///   2. `navigator.platform` is deprecated and frozen. It still answers `Win32`
-///      in Chrome, but a Windows browser reporting the frozen `Linux x86_64`
-///      answers wrong, and there is no reason to prefer it to
-///      `userAgentData.platform`, which is the replacement, or to the user-agent
-///      string, which every browser still has.
-///
-/// The question is now the one the picker actually asks: PowerShell or a POSIX
-/// shell. Anything that is not Windows takes the first tab, which is also the
-/// no-script default, so a wrong guess costs one press and never a wrong command.
+/// The picker works without script: two radios and a `:checked ~` selector,
+/// the first checked by default. This only guesses which one to open on. The
+/// choice is PowerShell or a POSIX shell, so anything that is not Windows takes
+/// the first tab and a wrong guess costs one press. `navigator.platform` is
+/// deprecated and frozen, so `userAgentData.platform` is asked first.
 function guessOs(root) {
   const ua = navigator.userAgentData?.platform || navigator.platform || navigator.userAgent || "";
   const radio = $(`input[data-os="${/win/i.test(ua) ? "windows" : "unix"}"]`, root);
   if (radio) radio.checked = true;
 }
 
-// ---------------------------------------------------------------------------
-// W8 — the leak shape. Two measured series, one keyword between them.
-// ---------------------------------------------------------------------------
-
-function leakWidget(root) {
-  const btn = $("[data-leak-toggle]", root);
-  const svg = $("[data-leak-svg]", root);
-  const peak = $("[data-leak-peak]", root);
-  const word = $("[data-leak-word]", root);
-  if (!btn || !svg || !peak || !word) return;
-  const peaks = [peak.firstChild.textContent, peak.dataset.alt];
-  const words = [word.textContent, word.dataset.alt];
-  let on = false;
-  btn.addEventListener("click", () => {
-    pinWidth(btn);
-    on = !on;
-    svg.classList.toggle("declared", on);
-    peak.firstChild.textContent = peaks[on ? 1 : 0];
-    word.textContent = words[on ? 1 : 0];
-    btn.setAttribute("aria-pressed", String(on));
-    btn.textContent = on ? "Take the keyword back" : "Declare consume";
-    growBars(root);
-  });
-}
-
-// ---------------------------------------------------------------------------
-// W4 — the bar charts. Vyrn set every width; this only grows them.
-// ---------------------------------------------------------------------------
-
-/// A value label as a number and whatever follows it: "37.9 KB" -> 37.9, " KB",
-/// one decimal. The export wrote the final string, so the count-up cannot
-/// disagree with it — at p = 1 it prints the same characters back.
-function counter(el) {
-  const m = /^\s*([\d.]+)(.*)$/.exec(el.dataset.to || el.textContent);
-  if (!m) return null;
-  const dot = m[1].indexOf(".");
-  return { el, to: Number(m[1]), places: dot < 0 ? 0 : m[1].length - dot - 1, rest: m[2] };
-}
-
-/// Grow every bar in `root` from nothing to the width the export gave it, and
-/// count its value label up beside it.
-///
-/// The bar's `x` never changes and the label is anchored at the sheet's right
-/// edge, so no frame of this moves anything: only a width and a string of
-/// digits change, and both are in their own column.
-function growBars(root) {
-  const bars = $$("rect.bar", root).map((b) => {
-    if (!b.dataset.w) b.dataset.w = b.getAttribute("width");
-    return b;
-  });
-  const vals = $$("text.val", root).map(counter).filter(Boolean);
-  const render = (p) => {
-    for (const b of bars) b.setAttribute("width", String(Number(b.dataset.w) * p));
-    for (const v of vals) v.el.textContent = (v.to * p).toFixed(v.places) + v.rest;
-  };
-  if (REDUCED) return render(1);
-  render(0);
-  play(900, render);
-}
-
-function barsWidget(root) {
-  onView(root, (animate) => animate && growBars(root));
-  const btn = $("[data-bars-replay]", root);
-  if (btn) btn.addEventListener("click", () => growBars(root));
-}
-
-// ---------------------------------------------------------------------------
-// W7 — the RFC strip. One sweep left to right, and a counter that follows it.
-// No requestAnimationFrame at all: one transition per cell, staggered.
-// ---------------------------------------------------------------------------
-
-function stripWidget(root) {
-  const cells = $$("rect.cell", root);
-  const counter = $("[data-strip-count]", root);
-  onView(root, (animate) => {
-    if (!animate) return; // the markup already holds every cell at its tone
-    for (const c of cells) c.setAttribute("fill-opacity", "0");
-    cells.forEach((c, i) => {
-      setTimeout(() => c.setAttribute("fill-opacity", c.dataset.tone), (i / cells.length) * 2400);
-    });
-    if (counter) countUp(counter, cells.length, 2400);
-  });
-}
-
-// ---------------------------------------------------------------------------
-// W5 — the comparison tabs, and the install picker, which is the same widget.
+// The tab groups (`[data-tabs]`).
 //
-// The markup ships plain buttons and every pane visible, stacked, because that
-// is what the page IS with no script: four specimens one after another, and
-// nothing to press. It used to ship `role="tab"` as well — a promise of a
-// keyboard contract that nothing kept: no tablist, no tabpanel, no
-// `aria-controls`, and arrow keys that moved nothing.
-//
-// So the roles are installed HERE, by the code that makes them true, and all of
-// them: a tablist, ids pairing each tab with its panel in both directions,
-// `aria-selected`, ONE tab in the page's tab order at a time (roving tabindex),
-// and Left/Right/Home/End to move between them.
-// ---------------------------------------------------------------------------
+// The markup ships plain buttons with every pane shown, which is the page
+// without script. The ARIA roles are installed here, by the code that makes
+// them true: a tablist, ids pairing each tab with its panel, `aria-selected`,
+// a roving tabindex, and Left/Right/Home/End between the tabs.
 
-/// Ids have to be unique in a document, and a page carries up to four groups.
+/// Numbers tab groups, so the ids stay unique in a document.
 let tabGroups = 0;
 
 /// Whether `el` already contains something a keyboard can reach.
@@ -438,9 +241,9 @@ function hasFocusable(el) {
   return Boolean($("a[href], button, input, select, textarea, [tabindex]", el));
 }
 
-function tabsWidget(root, opts = {}) {
-  const tabAttr = "data-" + (opts.tab || "tab");
-  const paneAttr = "data-" + (opts.pane || "pane");
+function tabsWidget(root) {
+  const tabAttr = "data-tab";
+  const paneAttr = "data-pane";
   const tabs = $$("[" + tabAttr + "]", root);
   const panes = $$("[" + paneAttr + "]", root);
   if (!tabs.length || !panes.length) return;
@@ -459,9 +262,8 @@ function tabsWidget(root, opts = {}) {
     pane.setAttribute("role", "tabpanel");
     pane.setAttribute("aria-labelledby", tab.id);
     tab.setAttribute("aria-controls", pane.id);
-    // A panel whose whole content is a code block has nothing to focus, and
-    // that block scrolls sideways — so the panel itself takes the stop. One
-    // that already holds a button does not need a second.
+    // A panel whose whole content is a sideways-scrolling code block has
+    // nothing to focus, so the panel takes the tab stop.
     if (!hasFocusable(pane)) pane.tabIndex = 0;
   });
 
@@ -491,37 +293,15 @@ function tabsWidget(root, opts = {}) {
     });
   });
 
-  const wanted = opts.initial && paneFor(opts.initial) ? opts.initial : keyOf(tabs[0], tabAttr);
-  select(wanted, false);
-  // Handed back so another widget can drive the same group without owning a
-  // second copy of the contract. Nothing takes it up today — the radar's axis
-  // wedges did, and are plain anchors now — and it stays because the contract
-  // is the useful half: one selector, and `aria-selected` as the only truth.
-  return select;
+  select(keyOf(tabs[0], tabAttr), false);
 }
 
-// ---------------------------------------------------------------------------
-// W9 — the benchmark radar.
+// The benchmark radar. Vyrn computed every coordinate; this toggles a series
+// and opens a program's block.
 //
-// Vyrn computed every coordinate and every off-scale mark. This does two
-// things and neither is arithmetic: the legend hides a series by putting one
-// class on one group, and an axis opens that program's block above.
-//
-// THE AXIS IS AN ANCHOR FIRST. Every name and every hit wedge is an `<a>` to
-// `#<program>`, so with no script at all it jumps to that block — which is on
-// the page, because with no script every block is. The click below is what
-// makes it work once the blocks ARE a tab group: it presses the matching tab,
-// and the browser's own jump then lands on a pane that is showing. Wiring it
-// the other way round — this widget owning the selection — is what rotted
-// last time: the wedges called a group that had left the plate, and no wedge
-// had a listener at all for as long as that lasted.
-//
-// The C/Rust switch went with the second baseline: every bar and every
-// polygon on the page is measured against C, so there is nothing to swap.
-//
-// Nothing animates. There is no motion to reduce, which is how this widget
-// respects `prefers-reduced-motion` — by not having any.
-// ---------------------------------------------------------------------------
+// Every axis name and wedge is an `<a>` to `#<program>`, so with no script it
+// jumps to that block. With the blocks as a tab group, the click presses the
+// matching tab and the browser's jump lands on a shown pane. Nothing animates.
 
 function radarWidget(root) {
   const svg = $("svg.radar", root);
@@ -547,20 +327,11 @@ function radarWidget(root) {
   }
 }
 
-// ---------------------------------------------------------------------------
-// The reference's search (it was the explorer's, and moved with the module list
-// to /docs).
-//
-// The rows ARE the index. Each one carries its own lowercased haystack in
-// `data-q` and its export names in `data-e`, both written by the export, so
-// there is no fetch, no index file, and nothing to go stale. Filtering is
-// `hidden` on a row.
-//
-// Every node this builds is built with `createElement` and `textContent`. What
-// the reader typed reaches the DOM as TEXT and never as markup — the same rule
-// the rest of the site keeps, and the reason a fragment cannot become an
-// element here.
-// ---------------------------------------------------------------------------
+// The search on the reference and the registry. Each row carries its own
+// lowercased haystack in `data-q` and its export names in `data-e`, written by
+// the export, so there is no index to fetch; filtering sets `hidden` on a row.
+// Nodes are built with `createElement` and `textContent`, so typed text never
+// becomes markup.
 
 /// The export names of `row` that contain `q`, at most `limit` of them.
 function matchingExports(row, q, limit) {
@@ -569,10 +340,9 @@ function matchingExports(row, q, limit) {
   return hits.slice(0, limit);
 }
 
-/// A row's list of matched exports — each a link to the export's anchor on the
-/// module's own page where the row names one (`data-m`, the reference), and a
-/// plain chip where it does not (the registry: a package page has no per-export
-/// anchors to land on, and a link that scrolls nowhere is worse than a chip).
+/// A row's matched exports: links to each export's anchor where the row names a
+/// module (`data-m`, the reference), plain chips where it does not (a registry
+/// package page has no per-export anchors).
 function exportHits(row, names) {
   const box = document.createElement("span");
   box.className = "hits";
@@ -597,15 +367,14 @@ function moduleSearch() {
   if (!input || !list) return;
   const rows = $$("li", list);
   const total = rows.length;
-  // What one row is called — "module" on the reference, "package" on the
-  // registry — and whether any row carries export names to count.
+  // What one row is called ("module" or "package"), and whether any row
+  // carries export names to count.
   const noun = count?.dataset.searchNoun || "module";
   const hasExports = rows.some((r) => r.dataset.e);
 
   const apply = () => {
-    // `kind:project` narrows by a row's own kind; what is left matches the
-    // haystack OR an export name, so a search for a NAME finds the thing that
-    // offers it even when nothing else on the row says so.
+    // `kind:<k>` narrows by a row's kind. The rest matches the haystack or an
+    // export name, so a search for a name finds the row that offers it.
     const terms = input.value.trim().toLowerCase().split(/\s+/).filter(Boolean);
     const kinds = terms.filter((t) => t.startsWith("kind:")).map((t) => t.slice(5)).filter(Boolean);
     const q = terms.filter((t) => !t.startsWith("kind:")).join(" ");
@@ -631,25 +400,21 @@ function moduleSearch() {
     } else if (shown === 0) {
       count.textContent = "no " + noun + " matches " + input.value.trim();
     } else {
-      // Export hits only exist where rows carry them — the registry's rows
-      // are packages and say nothing about exports.
+      // Only the reference's rows carry export names.
       const tail = hasExports && hits > 0 ? ", " + hits + (hits === 1 ? " export" : " exports") : "";
       count.textContent = shown + (shown === 1 ? " " + noun : " " + noun + "s") + tail;
     }
   };
 
   input.addEventListener("input", apply);
-  // A reader who arrives with a value already in the field (a restored form
-  // state, a back navigation) sees it applied rather than ignored.
+  // A value already in the field (restored form state, a back navigation) is
+  // applied.
   if (input.value) apply();
 }
 
-// ---------------------------------------------------------------------------
-// The reference's import graph. Vyrn laid every node and every wire out at build
-// time;
-// this lights up one module's own imports and importers, on hover AND on focus,
-// because the nodes are links and a keyboard reaches them.
-// ---------------------------------------------------------------------------
+// The reference's import graph. Vyrn laid out every node and wire; this lights
+// one module's imports and importers on hover and on focus, because the nodes
+// are links a keyboard reaches.
 
 function graphWidget(svg) {
   const nodes = $$("g.node", svg);
@@ -677,31 +442,22 @@ function graphWidget(svg) {
   }
 }
 
-// ---------------------------------------------------------------------------
-// One orchestrated page entrance, rather than scattered micro-interactions.
-// ---------------------------------------------------------------------------
+// The rail marks the section in view. Smooth scrolling is the stylesheet's
+// `scroll-behavior`.
 
-// ---------------------------------------------------------------------------
-// The rail. Its links look clickable and are, so they also have to say where
-// the reader is. Smooth scrolling is `html { scroll-behavior: smooth }` — the
-// stylesheet's job, not this file's.
-// ---------------------------------------------------------------------------
-
-/// The rail's in-page links, paired with the section each one points at. A soft
-/// navigation replaces the rail, so this is refilled per page rather than
-/// captured once.
+/// The rail's in-page links, each paired with its section. A soft navigation
+/// replaces the rail, so this is refilled per page.
 let railLinks = [];
 
 function markRail() {
-  // The active section is the LAST one whose top has passed a quarter of the
-  // viewport. One rule, no thresholds to tune, and it is right at both ends of
-  // the page: nothing has passed yet, so the first link wins.
+  // The active section is the last one whose top has passed a quarter of the
+  // viewport; before any has, the first link is.
   let current = railLinks.length ? railLinks[0] : null;
   for (const pair of railLinks) {
     if (pair.section.getBoundingClientRect().top <= innerHeight * 0.25) current = pair;
   }
-  // The last section is usually too short to reach a quarter of the viewport,
-  // because the page runs out of scroll first. At the bottom, it is the one.
+  // The last section is usually too short to reach that line before the page
+  // runs out of scroll, so at the bottom it is the active one.
   if (railLinks.length && innerHeight + scrollY >= document.documentElement.scrollHeight - 2) {
     current = railLinks[railLinks.length - 1];
   }
@@ -709,13 +465,10 @@ function markRail() {
   if (current) keepInRail(current.link);
 }
 
-/// Keep the marked link visible when the rail is long enough to scroll — a
-/// reference module has up to 44 exports, and a marker below the fold marks
-/// nothing.
-///
-/// The rail's own `scrollTop` is set directly rather than through
-/// `scrollIntoView`, which can scroll the PAGE as well and would fight the
-/// scroll event that called this.
+/// Keeps the marked link visible in a rail long enough to scroll (a reference
+/// module has up to 44 exports). Sets the rail's `scrollTop` directly, because
+/// `scrollIntoView` can scroll the page and fight the scroll event that called
+/// this.
 function keepInRail(link) {
   const rail = link.parentElement;
   if (!rail || rail.scrollHeight <= rail.clientHeight + 1) return;
@@ -727,9 +480,7 @@ function keepInRail(link) {
 
 function railSpy() {
   railLinks = [];
-  // The docs shell's right pane is the same device as the margin rail, and
-  // gets the same moving marker (user: "On this page should highlight the
-  // current section").
+  // The docs shell's right pane gets the same marker as the margin rail.
   const rail = $(".rail") || $(".onpage");
   if (!rail) return;
   for (const link of $$('a[href^="#"]', rail)) {
@@ -739,14 +490,11 @@ function railSpy() {
   markRail();
 }
 
-// One listener for the life of the document. `boot` runs again after every soft
-// navigation, and re-registering here would stack a listener per page.
+// Bound once per document, like the copy listeners above.
 addEventListener("scroll", markRail, { passive: true });
 
-// A `<details>` menu holds itself open until its summary is pressed again —
-// the platform's rule, and the wrong one for a dropdown: a click anywhere
-// else, or Escape, closes it (user). Document-level and bound once, like the
-// listeners above.
+// A `<details>` menu stays open until its summary is pressed again; a click
+// elsewhere or Escape closes it here. Bound once.
 addEventListener("click", (e) => {
   for (const m of $$(".pagemenu[open]")) {
     if (!m.contains(e.target)) m.open = false;
@@ -758,23 +506,15 @@ addEventListener("keydown", (e) => {
 });
 addEventListener("resize", markRail, { passive: true });
 
-// ---------------------------------------------------------------------------
-// The masthead. `site/export.vyrn` stamps `aria-current="page"` on the row this
-// document belongs to, so a reader with no JavaScript still sees where they are.
-// A soft navigation replaces `<main>` and never touches the masthead, so the
-// marker has to be moved here — otherwise it keeps pointing at the page the
-// visitor arrived on.
-// ---------------------------------------------------------------------------
+// The masthead marker. The export stamps `aria-current="page"` on the row this
+// document belongs to; a soft navigation replaces `<main>` and not the
+// masthead, so the marker is moved here.
 
 /// Whether the navigation row `href` is the row for `path`.
 ///
-/// A row owns the subtree named after it — and the Docs row owns MORE than its
-/// subtree: it points at `/guide.html` and speaks for the whole documentation,
-/// so the reference, the Web shelf and the Tooling shelf mark it too. That is
-/// the export's `currentNav` rule; the first cut here assumed name-owns-subtree
-/// was the whole rule, and the Docs row went dark on every documentation page
-/// whose path was not under `/guide` (user). The prefixes are joined to the
-/// row's own stem, so any mount point works.
+/// A row owns the subtree named after it. The Docs row (`/guide.html`) also
+/// owns `/docs`, `/web` and `/tooling`, as the export's `currentNav` rule says.
+/// The areas join the row's own stem, so any mount point works.
 function navOwns(href, path) {
   const stem = href.replace(/\.html$/, "");
   if (path === href || path.startsWith(stem + "/")) return true;
@@ -787,21 +527,14 @@ function navOwns(href, path) {
   return false;
 }
 
-/// Freeze the shell's links to the URLs they resolve to on the document that
+/// Resolves the masthead's and footer's links against the document that
 /// shipped them.
 ///
-/// A soft navigation replaces `<main>` and nothing else, so the masthead and
-/// the footer OUTLIVE the address bar they were written against. Every URL this
-/// site writes is relative to its own document, which is what makes one export
-/// work at any mount point — but a relative URL is read at the moment it is
-/// clicked. Navigate from `/docs.html` to `/docs/std/json.html` and the
-/// masthead's `docs.html` means `/docs/std/docs.html`, which is nowhere.
-///
-/// Resolving each one here, once, on the document it arrived with, makes the
-/// shell immune to the depth changing under it. The result is same-origin, so a
-/// click on it is still soft-navigated.
-///
-/// Fragment links are left alone: `#main` has to keep meaning THIS page.
+/// A soft navigation replaces `<main>` only, so the shell outlives the URL its
+/// relative links were written against: after a move from `/docs.html` to
+/// `/docs/std/json.html`, `docs.html` would mean `/docs/std/docs.html`. The
+/// resolved URL is same-origin, so a click is still soft-navigated. Fragment
+/// links stay relative: `#main` means this page.
 function anchorShell() {
   for (const a of $$(".masthead a[href], .foot a[href]")) {
     if (!a.getAttribute("href").startsWith("#")) a.setAttribute("href", a.href);
@@ -811,10 +544,8 @@ function anchorShell() {
 function markNav() {
   const path = location.pathname;
   for (const link of $$(".masthead .nav a")) {
-    // RESOLVED, not the attribute. The export writes every URL relative to the
-    // document that carries it, so the attribute on a chapter page reads
-    // `../docs.html` and would never equal a pathname. The URL constructor
-    // answers what the browser itself would navigate to, at any mount point.
+    // Resolved, because the attribute is relative to its document
+    // (`../docs.html` on a chapter page) and never equals a pathname.
     const href = new URL(link.getAttribute("href"), location.href).pathname;
     const here = navOwns(href, path);
     if (here) link.setAttribute("aria-current", "page");
@@ -835,24 +566,14 @@ function entrance() {
   }
 }
 
-// ---------------------------------------------------------------------------
-// THE HERO EDITOR, ARMED AND NOT MOUNTED
+// The hero editor, armed on first interaction.
 //
-// The index's editor is the playground on a smaller root: same `data-play-*`
-// hooks, same keyboard contract, same highlighter, `mountPlay` and not a second
-// editor. What is different is WHEN. Mounting it on load would fetch `play.js`,
-// `play-wasm.js`, `wasi-min.js` and the compiler module itself on a page a
-// reader has not decided to use yet — the whole page-weight finding, applied to
-// the one page the finding was computed for.
-//
-// So the document ships a coloured code block over a read-only textarea, and
-// three interactions arm it: pointing at the plate, tabbing into it, and
-// pressing Run. The first two are enough time for the module to land before the
-// reader reaches the button; the third does not lose the press, because the
-// mount reports readiness and the click is replayed. Without script the same
-// markup is a code block with a link to `/play`, which is what the `<noscript>`
-// in the template says.
-// ---------------------------------------------------------------------------
+// The index's editor is the playground on a smaller root (`mountPlay`, the
+// same hooks and keys). Mounting on load would fetch the compiler on a page
+// whose reader has not asked for it, so the document ships a coloured code
+// block over a read-only textarea. Pointing at it, focusing it or pressing Run
+// loads the playground, and a Run press is replayed once the mount is ready.
+// Without script the template's `<noscript>` links to `/play`.
 
 function armHeroEditor(root) {
   const runBtn = $("[data-play-run]", root);
@@ -862,20 +583,16 @@ function armHeroEditor(root) {
   const outPane = $("[data-play-out]", root);
   if (!runBtn || !src) return;
   let armed = false;
-  // Two facts, not one. `armed` says the module is loading or loaded;
-  // `runOnReady` says a reader has pressed Run and is owed a run. One latch for
-  // both lost the press of anyone who hovered or tabbed into the plate first:
-  // that armed with `thenRun` false, and the Run press that followed returned
-  // at the latch, so readiness replayed nothing.
+  // `armed`: the module is loading or loaded. `runOnReady`: a Run press is
+  // owed a run. Hover and focus arm without a press, so these are two flags.
   let runOnReady = false;
 
   const arm = (thenRun) => {
     runOnReady = runOnReady || thenRun;
     if (armed) return;
     armed = true;
-    // Editable from the moment the reader has asked for it, and not before: a
-    // textarea a reader can type into while nothing can check or run it is a
-    // control that lies about what it does.
+    // Editable once the reader asks for it, and not before: nothing could
+    // check or run what they type.
     src.removeAttribute("readonly");
     if (status) status.textContent = "Loading the compiler…";
     import("./play.js").then(
@@ -884,12 +601,8 @@ function armHeroEditor(root) {
         mountPlay(root, { onReady: () => runOnReady && runBtn.click() });
       },
       (err) => {
-        // HONEST WHEN IT CANNOT RUN. This used to
-        // set the status line and stop: the output pane still said `Not run
-        // yet.`, the textarea stayed editable, and the Run button stayed live
-        // over an editor with no compiler behind it. Now the pane says what
-        // happened and where to go, the box goes back to read-only, and the two
-        // controls are disabled — the same shape as `mountPlay`'s own failure.
+        // Fail the way `mountPlay` does: say so in the output pane, make the
+        // textarea read-only and disable both controls.
         if (status) status.textContent = "The compiler did not load";
         if (outPane) {
           outPane.textContent = "";
@@ -906,32 +619,22 @@ function armHeroEditor(root) {
     );
   };
 
-  // `pointerenter` covers a mouse and a touch; `focusin` covers a keyboard,
-  // and it is the row the a11y checklist asks for. Both are `once`.
+  // `pointerenter` covers a mouse and touch, `focusin` a keyboard; both fire
+  // once.
   root.addEventListener("pointerenter", () => arm(false), { once: true });
   root.addEventListener("focusin", () => arm(false), { once: true });
-  // `Reset` before the editor is mounted arms it, so the button is never a
-  // control that does nothing. `mountPlay` binds the real handler after.
+  // `Reset` before the mount arms it; `mountPlay` binds the real handler.
   if (resetBtn) resetBtn.addEventListener("click", () => arm(false));
-  // Bound BEFORE `mountPlay` adds its own, so the first press arms and the
-  // replayed press runs. A press while the module is in flight is a no-op in
-  // `mountPlay`'s own handler, which is why readiness has to drive the replay.
+  // Bound before `mountPlay` adds its own handler, so the first press arms and
+  // the replayed press runs. `mountPlay` ignores a press while the module
+  // loads, which is why readiness drives the replay.
   runBtn.addEventListener("click", () => arm(true));
 }
 
-// ---------------------------------------------------------------------------
-// THE RECORDED DEMO
-//
-// Seven steps, all seven in the document, all seven real output from a real
-// binary — `scripts/site-demo.py` ran it before the page was rendered. Without
-// script they are a numbered list and the page is complete. With script they
-// become one step at a time with a counter, which is the only thing this adds:
-// no content is script-only, and nothing is fetched.
-//
-// The controls are BUILT here rather than shipped in the markup, because a
-// `Next` button on a page that shows every step at once is a control that does
-// nothing (a `Menu` summary once showed what happens when this is broken).
-// ---------------------------------------------------------------------------
+// The recorded demo: seven steps of real output from `scripts/site-demo.py`,
+// all in the document. Without script they are a numbered list; with script
+// they show one step at a time. The controls are built here, because a Next
+// button on a page that shows every step does nothing.
 
 function demoWidget(root) {
   const steps = $$("[data-step]", root);
@@ -955,22 +658,16 @@ function demoWidget(root) {
   bar.append(back, replay, next);
   // The controls belong to the terminal they page, under its own window.
   ($(".term", root) || root).append(bar);
-  // The step's number rides on the window bar, where a terminal puts what it
-  // is showing; polite, because a press is what changes it.
+  // The step counter sits on the window bar; polite, because a press changes
+  // it.
   const count = $("[data-demo-count]", root) || document.createElement("span");
   count.setAttribute("aria-live", "polite");
 
-  // The list of titles STAYS. It used to set `hidden` on six of
-  // seven, which threw the outline away with the detail; every row is on the
-  // page and `.stepped` is what tells the sheet a script is driving — with no
-  // script no step is `.on`, every pane is open, and the sheet's `.stepped`
-  // rules match nothing.
-  //
-  // TWO LISTS, ONE INDEX (fourth round): the nth row and the nth pane are
-  // marked together, and the guard above refuses to drive them at all unless
-  // there is exactly one pane per step. `aria-current` is on the row rather than
-  // announced from the counter, so the marked step is the marked step for a
-  // screen reader too.
+  // Every row stays on the page; `.stepped` tells the sheet a script drives
+  // it. Without script no step is `.on` and every pane is open. The nth row
+  // and the nth pane are marked together (the guard above requires one pane
+  // per step), and `aria-current` on the row tells a screen reader which step
+  // is shown.
   root.classList.add("stepped");
   let at = 0;
   const show = (i) => {
@@ -982,40 +679,26 @@ function demoWidget(root) {
     });
     panes.forEach((p, k) => p.classList.toggle("on", k === at));
     count.textContent = pad(at + 1) + " / " + pad(steps.length);
-    // The bar under the marked step is the timer, drawn: it restarts with
-    // every step and is what says the walk is still walking.
+    // The bar under the marked step is its timer, restarted per step.
     const tick = $(".tick", steps[at]);
     if (tick) {
       tick.style.animation = "none";
       void tick.offsetWidth;
       tick.style.animation = "";
     }
-    arm();
     back.disabled = at === 0;
   };
 
-  /// `1` reads as `01` beside `07`: a counter whose width changes is a
-  /// counter that moves the bar it sits on.
+  /// Pads to two digits, so the counter keeps its width.
   function pad(n) {
     return n < 10 ? "0" + n : String(n);
   }
 
-  // IT WALKS ITSELF (user, against the reference site's own): the point of
-  // the section is the whole minute, and a reader who does nothing should see
-  // it. The pointer over the card pauses it, and any press hands the walk to
-  // the reader for good.
-  //
-  // THE BAR IS THE CLOCK. A `setTimeout` beside a CSS animation is two
-  // clocks: pausing stopped the animation where it stood and cleared the
-  // timeout, and leaving restarted the timeout from zero while the bar
-  // resumed from nine tenths — so the bar sat full for four more seconds and
-  // the step never turned (user). The step turns when its own bar finishes,
-  // which is one clock, and `animation-play-state` pauses it exactly.
+  // It walks itself. The pointer over the card pauses it, and any press hands
+  // the walk to the reader. A step turns when its own bar's animation ends, so
+  // the bar is the only clock and `animation-play-state` pauses it exactly.
   let walking = !matchMedia("(prefers-reduced-motion: reduce)").matches;
   let paused = false;
-  function arm() {
-    // Kept as the name the show path calls; the bar restarts itself there.
-  }
   for (const step of steps) {
     const tick = $(".tick", step);
     if (!tick) continue;
@@ -1038,8 +721,7 @@ function demoWidget(root) {
     walking = false;
     root.classList.add("held");
   }
-  // Pointer-only, and deliberately: every step is already reachable with Back,
-  // Next and the arrow keys, so this adds no function a keyboard cannot do.
+  // Pointer only: Back, Next and the arrow keys reach every step already.
   steps.forEach((s, k) => s.addEventListener("click", () => {
     stopWalking();
     show(k);
@@ -1064,29 +746,23 @@ function demoWidget(root) {
   show(0);
 }
 
-// ---------------------------------------------------------------------------
-
-/// The playground's title-bar masthead, applied AFTER the first paint so the
-/// row animates into it rather than arriving already small (user). A page
-/// that is not the editor takes the class off, which is what makes a soft
-/// navigation back out animate too.
+/// Applies the playground's title-bar masthead one frame after the first
+/// paint, so the row animates into it. Any other page removes the class, so a
+/// soft navigation away animates too.
 function markEditorChrome() {
   const editor = Boolean($(".page.play.ide"));
   const root = document.documentElement;
-  // What the NEXT page starts as, so the change has something to animate
-  // from. `theme.js` reads this before the first paint.
+  // What the next page starts as: the inline boot script in every page's head
+  // (`withThemeBoot` in `site/export.vyrn`) reads it before the first paint.
   try {
     sessionStorage.setItem("vyrn.mast", editor ? "compact" : "full");
   } catch (err) {
     /* a blocked store only costs the handoff */
   }
-  // The suite's document has no root element; the class it would carry has
-  // no meaning without one either.
+  // The test suite's document has no root element.
   const settle = () => root && root.classList.toggle("idecompact", editor);
-  // A hidden tab runs no animation frames at all, and the class would wait
-  // for a paint that never comes — there is nothing to animate there anyway.
-  // The browser suite runs this file in a VM with a minimal document, which
-  // has no frames either.
+  // A hidden tab runs no animation frames, and neither does the test suite's
+  // minimal document, so there the class is set at once.
   if (document.visibilityState === "hidden" || typeof requestAnimationFrame !== "function") settle();
   else requestAnimationFrame(() => requestAnimationFrame(settle));
 }
@@ -1101,21 +777,12 @@ function boot() {
   markNav();
   railSpy();
   for (const el of $$('[data-widget="demo"]')) demoWidget(el);
-  for (const el of $$('[data-widget="bars"]')) barsWidget(el);
-  for (const el of $$('[data-widget="leak"]')) {
-    barsWidget(el);
-    leakWidget(el);
-  }
-  for (const el of $$('[data-widget="strip"]')) stripWidget(el);
   for (const el of $$("[data-tabs]")) tabsWidget(el);
   for (const el of $$('[data-widget="radar"]')) radarWidget(el);
   for (const el of $$(".picker")) guessOs(el);
   moduleSearch();
-  // The playground, on the one page that has one. `boot()` is not awaited and
-  // the mount does not have to finish before the rest of the page works, so the
-  // import is fired and left to land — a rejection is reported rather than
-  // swallowed, because a playground that silently never mounts is worse than an
-  // error in the console.
+  // The playground, on the page that has one. The import is not awaited; a
+  // rejection is logged, because a playground that never mounts must say so.
   const playgrounds = $$('[data-widget="play"]');
   if (playgrounds.length) {
     import("./play.js").then(({ mountPlay }) => {
@@ -1128,19 +795,12 @@ function boot() {
 
 boot();
 
-// ---------------------------------------------------------------------------
-// THE SEARCH OVERLAY
+// The search overlay. `/` opens it on every page, Esc closes it, the arrows
+// walk the results and Enter follows one. The index (`site/app/search.vyrn`)
+// is one file, fetched on the first open and never inlined in a document.
 //
-// `/` opens it on every page, Esc closes it, the arrows walk the results and
-// Enter follows one. The index is ONE file, fetched on the first open and never
-// again, and never inlined in a document: 448 rows and 42 KB that a page which
-// never searches does not pay for. `site/app/search.vyrn` builds it.
-//
-// Bound ONCE, outside `boot()`. `boot()` runs again after every soft navigation,
-// and a key listener added per navigation is a key listener per navigation — the
-// overlay lives in the shell, which a soft navigation never swaps, so its
-// listeners belong out here with it.
-// ---------------------------------------------------------------------------
+// Bound once, outside `boot()`: the overlay lives in the shell, which a soft
+// navigation never replaces.
 {
   const box = $("[data-find]");
   const field = $("[data-find-input]");
@@ -1151,22 +811,18 @@ boot();
     let index = null;
     let loading = null;
     let cursor = -1;
-    // The section filter — "" is All. The row of chips under the field sets
-    // it, and Tab cycles it, which is the whole reason Tab is caught: a
-    // dialog with one field has nothing else for Tab to do.
+    // The section filter; "" is All. The chips under the field set it and Tab
+    // cycles it, since a dialog with one field has no other use for Tab.
     let sect = "";
     const tabs = $$("[data-find-tabs] [data-sect]", box);
-    // What the note says at rest, kept as markup because the suggestions in
-    // it are pressable. `render` swaps the note's content wholesale, so the
-    // presses are delegated to the note itself and survive every swap.
+    // The note's resting markup. Its suggestions are pressable, and `render`
+    // replaces the note's content, so presses are delegated to the note.
     const idle = note.innerHTML;
-    // Where focus was when the overlay opened, so it can be given back. A
-    // reader who presses `/` in the middle of a reference page and then Esc has
-    // to end up where they were and not at the top of the document.
+    // Where focus was when the overlay opened, so Esc gives it back.
     let cameFrom = null;
 
-    /// Fetch the index once. A failure says so in the panel rather than leaving
-    /// an empty list, which would read as "nothing matches".
+    /// Fetches the index once. A failure says so in the panel, where an empty
+    /// list would read as "nothing matches".
     function load() {
       if (index) return Promise.resolve();
       if (loading) return loading;
@@ -1184,26 +840,16 @@ boot();
       return loading;
     }
 
-    // The four sections, in the order the overlay shows them, which is the order
-    // `site/app/search.vyrn` writes them in.
+    // The sections in display order, which is the order `search.vyrn` writes.
     const SECTIONS = ["Docs", "Reference", "Packages", "Releases"];
 
-    /// The rows that match `q`: the best 40, in section order.
+    /// The best 40 rows matching `q`, grouped by section.
     ///
-    /// A substring match over the title and the description, ranked by where the
-    /// hit lands: a title that STARTS with the query, then any title hit, then a
-    /// description hit. No fuzzy matching and no scoring model — 448 rows, and a
-    /// reader who is typing a name they already know.
-    ///
-    /// RANKED FIRST, THEN GROUPED, and the two are separate passes because they
-    /// answer different questions. The rank decides WHICH forty rows a reader
-    /// sees, so it must run over all of them; the section decides what ORDER
-    /// those forty appear in, so it runs over the forty. Sorting by rank alone
-    /// and drawing a heading whenever the section changed gave
-    /// `Reference · Docs · Reference · Docs · Reference` for `text` — five
-    /// headings for two sections, which is a list that is not sectioned at all.
-    /// Both sorts are stable, so a section's rows stay in their ranked order
-    /// inside it.
+    /// A substring match over the title and the description, ranked: a title
+    /// that starts with the query, then any title hit, then a description hit.
+    /// The rank picks which 40 rows show, so it runs over every row; the section
+    /// order then groups those 40. Both sorts are stable, so rows keep their
+    /// rank inside a section.
     function search(q) {
       const needle = q.toLowerCase();
       const hits = [];
@@ -1222,14 +868,9 @@ boot();
       return best;
     }
 
-    /// The fragment `r` leads to: an export's own id on its module's page, and
-    /// nothing for every other row.
-    ///
-    /// A reference row's title is `emit — std/json` and the id the page carries
-    /// is `e-emit`, which is why the index does not spend 354 names on saying it
-    /// twice. A module's own row is `std/json` and has no dash in it, so the two
-    /// kinds of reference row stay apart on the one thing that distinguishes
-    /// them.
+    /// The fragment `r` leads to: `#e-<name>` for an export row, whose title is
+    /// the name, an em dash and `std/<module>`, and nothing for every other row.
+    /// A module's own row (`std/json`) has no dash, which keeps the two apart.
     function anchorOf(r) {
       if (r.s !== "Reference") return "";
       const cut = r.t.indexOf(" — std/");
@@ -1261,17 +902,11 @@ boot();
         }
         const a = document.createElement("a");
         a.className = "hit";
-        // The index carries the route's identity — `/docs.html` — and every
-        // document is served from an unknown mount point, so the URL is resolved
-        // against this script's own directory, exactly as the export resolves the
-        // ones it writes.
-        //
-        // AN EXPORT'S ANCHOR IS DERIVED AND NOT CARRIED. `#e-emit` is the row's
-        // own title with three bytes in front of it, and 354 of the 448 rows
-        // are exports, so the index would have written every one of those names
-        // twice: 7,763 gzipped against the 8,000 ceiling, or 6,564 with this
-        // line here. The reference landing's own filter builds the same
-        // fragment the same way, further up this file.
+        // The index carries the route (`/docs.html`) and the mount point is
+        // unknown, so the URL resolves against this script's directory, as the
+        // export resolves its own. The export anchor is derived rather than
+        // stored, which keeps the index inside its gzip ceiling
+        // (`site/test/search.test.mjs`).
         a.href = new URL(r.u.slice(1) + anchorOf(r), SITE).href;
         a.setAttribute("role", "option");
         a.setAttribute("aria-selected", "false");
@@ -1286,11 +921,9 @@ boot();
       }
     }
 
-    /// Move the selection by `step`, wrapping, and keep it on screen.
-    ///
-    /// FOCUS STAYS IN THE FIELD and the row is marked `aria-selected`. That is
-    /// the listbox pattern: a reader who has typed three letters and pressed
-    /// Down must be able to type a fourth without moving focus back.
+    /// Moves the selection by `step`, wrapping, and keeps it on screen. Focus
+    /// stays in the field and the row is marked `aria-selected` (the listbox
+    /// pattern), so the reader can keep typing.
     function move(step) {
       const hits = $$(".hit", list);
       if (!hits.length) return;
@@ -1300,8 +933,8 @@ boot();
       hits[cursor].scrollIntoView({ block: "nearest" });
     }
 
-    /// Point the filter at `v` and redraw. Focus goes back to the field: a
-    /// chip is a way of narrowing what the field finds, not a place to be.
+    /// Points the filter at `v` and redraws. Focus returns to the field: a
+    /// chip narrows the search and is not a place to stay.
     function setSect(v) {
       sect = v;
       for (const t of tabs) t.classList.toggle("on", t.dataset.sect === v);
@@ -1315,8 +948,8 @@ boot();
       const b = e.target.closest("[data-try]");
       if (!b) return;
       field.value = b.textContent;
-      // Back to All: the suggestions name things from every section, and a
-      // filter left over from an earlier search would empty them.
+      // Back to All: a filter left from an earlier search could hide every
+      // suggestion.
       setSect("");
     });
 
@@ -1334,16 +967,14 @@ boot();
       if (box.hidden) return;
       box.hidden = true;
       list.textContent = "";
-      // Back where the reader was. A soft navigation may have replaced that
-      // element, so its presence is checked rather than assumed.
+      // A soft navigation may have replaced that element.
       if (cameFrom && cameFrom.isConnected) cameFrom.focus();
       cameFrom = null;
     }
 
     for (const btn of $$("[data-find-open]")) btn.addEventListener("click", open);
 
-    // `/` from anywhere, unless the reader is already typing. A page with a
-    // module filter or a playground editor on it must not swallow a slash.
+    // `/` from anywhere, unless the reader is typing in a field.
     addEventListener("keydown", (e) => {
       const el = document.activeElement;
       const typing = /^(input|textarea|select)$/i.test(el.tagName) || el.isContentEditable;
@@ -1356,7 +987,7 @@ boot();
       }
     });
 
-    // Pressing the ground closes it; pressing the panel does not.
+    // A press on the backdrop closes it; a press on the panel does not.
     box.addEventListener("mousedown", (e) => {
       if (e.target === box) close();
     });
@@ -1364,8 +995,7 @@ boot();
     field.addEventListener("input", () => render(field.value));
     field.addEventListener("keydown", (e) => {
       if (e.key === "Tab") {
-        // Tab walks the section chips, Shift+Tab walks them backwards —
-        // the pattern the reader's other search dialogs taught them.
+        // Tab and Shift+Tab walk the section chips.
         e.preventDefault();
         const order = tabs.map((t) => t.dataset.sect);
         const at = order.indexOf(sect);
@@ -1382,9 +1012,8 @@ boot();
         const pick = cursor >= 0 ? hits[cursor] : hits[0];
         if (pick) {
           e.preventDefault();
-          // Closed BEFORE the navigation, and without restoring focus: the
-          // element focus came from is about to be replaced, and a reader must
-          // not land on a new page with a dialog over it.
+          // Closed before the navigation, without restoring focus: that
+          // element is about to be replaced.
           box.hidden = true;
           list.textContent = "";
           cameFrom = null;
@@ -1393,10 +1022,8 @@ boot();
       }
     });
 
-    // THE FOCUS TRAP, and it is one rule because the panel is one field and a
-    // list walked with the arrows: while the overlay is open, Tab returns to the
-    // field. Nothing behind the dialog can be reached, which is what
-    // `aria-modal` claims and what a claim has to be true of.
+    // The focus trap: while the overlay is open, Tab returns to the field, so
+    // nothing behind the `aria-modal` dialog is reachable.
     box.addEventListener("keydown", (e) => {
       if (e.key === "Tab") {
         e.preventDefault();
@@ -1406,43 +1033,28 @@ boot();
   }
 }
 
-/// Where the reader is after a soft navigation.
+/// Restores the reader's place after a soft navigation.
 ///
-/// The defect, measured: `vyrn-nav.js` swaps `<main>` and scrolls to the top,
-/// and the link that was clicked went with the old `<main>`. Focus fell to
-/// `<body>`, so the next Tab started at the masthead again — a keyboard reader
-/// who followed a link from the middle of a reference page landed nowhere and
-/// had to walk the whole shell back, and a screen reader was told nothing at all
-/// because no document load happened.
-///
-/// Both halves are fixed here rather than in `vyrn-nav.js`: the shell this site
-/// wears is this site's business, and the navigator is shared with two other
-/// applications. `#main` is the anchor the skip link already lands on — a box
-/// with no size, `tabindex="-1"`, sitting immediately before the content — so
-/// the next Tab is the first link of the page that just arrived, which is what
-/// a real navigation does.
+/// `vyrn-nav.js` swaps `<main>` and scrolls to the top, and the clicked link
+/// leaves with the old `<main>`, so focus falls to `<body>` and a screen reader
+/// hears nothing. Focus moves to `#main`, the skip link's target just before
+/// the content, so the next Tab reaches the new page's first link. This lives
+/// here and not in `vyrn-nav.js`, which other applications share.
 function landed() {
   boot();
   const main = document.getElementById("main");
   if (main) main.focus({ preventScroll: true });
-  // The title is what a browser reads out on a real navigation, and this is the
-  // navigation that never had one.
+  // A real navigation reads the title out; a soft one does not.
   announce(document.title);
 }
 
-// Soft navigation replaces the page body, so every widget on the new page needs
-// booting again. `vyrn-nav.js` announces that it has swapped the DOM.
+// `vyrn-nav.js` fires this after it swaps the DOM; every widget on the new
+// page needs booting.
 document.addEventListener("vyrn:nav-end", landed);
 
-// AND THE NAVIGATOR ITSELF, ON THE FIRST REACH FOR A LINK.
-//
-// This was a bare `import()` on load, so every page fetched `vyrn-nav.js` and
-// `vyrn-dom.js` — 20,275 gzipped between them, the single largest item left in
-// the page-weight census and the one recorded as out of reach. It is not a
-// module a page NEEDS: a hard navigation is the declared fallback and it is
-// what happens before this lands. So it is fetched the first time a reader
-// points at, touches, or tabs to a link, which is earlier than the click that
-// would use it and later than the paint that would pay for it.
+// The navigator loads the first time a reader points at, touches or tabs to a
+// link: before the click that uses it, after the paint. A hard navigation
+// works until it lands.
 {
   let asked = false;
   const fetchNavigator = () => {
