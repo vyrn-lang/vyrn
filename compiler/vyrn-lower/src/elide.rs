@@ -3884,12 +3884,26 @@ impl<'a> Walk<'a> {
         {
             let v = Lin::of(Term::Val(*m));
             cands.insert(v.clone());
-            for (b, _) in indexed.iter().filter(|(_, i)| i == m) {
+            // An index `m - c` by a literal `c` needs `m - c >= 0`, so a
+            // counter that steps down to `c` keeps it.
+            let below = |i: &Name| match let_of(body, *i) {
+                Some(Rhs::Prim(Op::Bin(BinOp::Sub), vs, _)) => match vs.as_slice() {
+                    [Val::Name(x), Val::Lit(Lit::Int(c))] if x == m && *c > 0 => Some(*c),
+                    _ => None,
+                },
+                _ => (i == m).then_some(0),
+            };
+            for (b, c) in indexed.iter().filter_map(|(b, i)| Some((b, below(i)?))) {
                 let Some(len) = self.length(b).map(Lin::of) else {
                     continue;
                 };
-                cands.extend(len.sub(&v));
-                cands.extend(len.sub(&v).and_then(|l| l.plus(-1)));
+                let Some(at) = v.plus(-c) else { continue };
+                if c == 0 {
+                    cands.extend(len.sub(&at));
+                } else {
+                    cands.insert(at.clone());
+                }
+                cands.extend(len.sub(&at).and_then(|l| l.plus(-1)));
             }
         }
         cands.extend(self.reaches(body, &stored, &indexed));

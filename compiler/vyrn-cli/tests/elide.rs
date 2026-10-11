@@ -1248,6 +1248,42 @@ export fn w(r: R, x: Int64) -> Int64 {{
     );
 }
 
+/// A counter that steps down to one while it is not one keeps `r - 1 >= 0`,
+/// which its index `r - 1` needs. A counter that starts at zero drops the
+/// candidate at the loop's entry, and the read stays a check and traps.
+#[test]
+fn a_counter_down_to_one_proves_its_index_below_it() {
+    let src = |start: &str| {
+        format!(
+            "export fn w(xs: Array<Int64>) -> Int64 {{
+    if xs.length < 1 {{
+        return 0
+    }}
+    let mut s = 0
+    let mut r = {start}
+    while r != 1 {{
+        s = s + xs[r - 1]
+        r = r - 1
+    }}
+    return s
+}}
+"
+        )
+    };
+    let calls = "    print(w(xs).toString())";
+    let proof = src("xs.length");
+    assert_eq!(verdicts(&proof, "w"), ["proved array-index"]);
+    assert_eq!(oracle(&proof, calls, "w").0, "");
+    let witness = src("0");
+    assert_eq!(verdicts(&witness, "w"), ["check array-index"]);
+    let (err, _) = oracle(&witness, calls, "w");
+    assert!(err.contains("array index -1 out of bounds"), "{err}");
+    assert!(
+        !err.contains(vyrn_frontend::trap::PROVED_CHECK_FAILED),
+        "{err}"
+    );
+}
+
 #[test]
 fn a_join_of_constants_keeps_the_values_between_out() {
     let src = "fn w(x: Int64) -> Int64 {
