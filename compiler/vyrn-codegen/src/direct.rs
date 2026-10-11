@@ -1607,6 +1607,19 @@ enum Dest {
     Addr(u32, u32),
 }
 
+/// Where a call's destination or a `consume` argument lives, as [`Fn_::dest_apart`] proves
+/// two apart.
+enum Held {
+    /// Frame bytes at these offsets.
+    Frame(std::ops::Range<u32>),
+    /// The storage a parameter local's address names, older than the frame.
+    Param(u32),
+    /// The storage this function's out-pointer local names.
+    Out(u32),
+    /// A heap block this frame allocated for a part being built.
+    Block,
+}
+
 /// The storage a call in part position writes into ([`Fn_::core_part_at`]).
 #[derive(Clone, Copy, PartialEq)]
 enum PartIn {
@@ -1810,6 +1823,12 @@ struct Fn_<'a, 'p> {
     ret_ty: Type,
     /// The wasm local holding the hidden aggregate-return pointer, if any.
     dest: Option<u32>,
+    /// How many wasm locals are parameters. An address one holds names storage older than
+    /// this frame ([`Fn_::dest_apart`]).
+    entry: u32,
+    /// The locals holding a block [`Fn_::heap_buf`] allocated for a part being built. No name
+    /// holds an address into one while its parts are built ([`Fn_::dest_apart`]).
+    blocks: Vec<u32>,
     /// Reusable scratch, taken on first use. Every use is a set immediately
     /// followed by the reads that consume it, so one pair suffices however
     /// deeply expressions nest.
@@ -1882,6 +1901,8 @@ fn top_level<'a, 'p>(cx: &'a Cx<'p>) -> Fn_<'a, 'p> {
         ret: Repr::Unit,
         ret_ty: Type::Unit,
         dest: None,
+        entry: 0,
+        blocks: Vec::new(),
         scratch: HashMap::new(),
         rel_slots: HashMap::new(),
         placed: HashMap::new(),
@@ -2016,6 +2037,7 @@ fn lower_body(
         // and `Age` resolved to `Int64` would not.
         ret_ty: sig.ret_ty.clone(),
         dest,
+        entry: params.len() as u32,
         // The release order, decided in `own::place_body`.
         placed: (cx.world.fn_id(&owner))
             .and_then(|id| cx.world.ownership.releases.get(&id))
@@ -2036,13 +2058,14 @@ fn lower_body(
     // state, which could hold the argument and change under it. A `modify` one is used there
     // unless the callee may read or store module state at all, which would then see the write
     // before the return. A host import may call an export back, so it counts as both. A
-    // `consume` one is used there when the callee has no aggregate out-pointer: then nothing
-    // writes that storage during the call (no module state holds it, no other argument overlaps
-    // it, a parameter is never assigned), and the caller never reads it after. With an
-    // out-pointer the copy stays, so the callee is right even where the caller passed the
-    // argument's storage as the out-pointer. Otherwise the prologue copies the parameter into a
-    // slot of its own, and a `modify` parameter is copy-in/copy-out: copied in here and back
-    // out at the epilogue.
+    // `consume` one is used there: during the call only the callee reads or writes that storage
+    // (no module state holds it, no other argument overlaps it, and every call this module
+    // emits passes an out-pointer apart from it, [`Fn_::dest_apart`]), and the caller never
+    // reads it after. The callee may write it: `let mut a = p` can take `p`'s storage over. The
+    // host and a generator's driver pass their own out-pointer, so an `export` or `gen` function
+    // with an aggregate result copies it. Otherwise
+    // the prologue copies the parameter into a slot of its own, and a `modify` parameter is
+    // copy-in/copy-out: copied in here and back out at the epilogue.
     let (stores, touches) = match core.as_ref().and_then(|c| cx.world.state_use(c.id?)) {
         _ if cx.aliasing.is_empty() => (false, false),
         // A frame the effect judgment did not answer for may do anything.
@@ -2062,7 +2085,7 @@ fn lower_body(
             && match p.capability {
                 Capability::Read => !stores,
                 Capability::Modify => !touches,
-                Capability::Consume => sig.ret.agg().is_none(),
+                Capability::Consume => sig.ret.agg().is_none() || !f.is_export_extern && !f.is_gen,
             };
         let place = if sig.in_place == Some(i) || in_place {
             Place::Local(local)
@@ -6026,6 +6049,7 @@ impl<'p> Fn_<'_, 'p> {
         b.ins(&Instruction::I64Const(bytes.max(1) as i64));
         b.ins(&Instruction::Call(self.cx.rt.malloc));
         b.ins(&Instruction::LocalSet(buf));
+        self.blocks.push(buf);
         buf
     }
 
@@ -10731,6 +10755,8 @@ impl<'a, 'p> Fn_<'a, 'p> {
                 )
             }
         };
+        // The callee reads a `consume` argument at its address until it returns.
+        let hint = hint.filter(|(d, _)| self.dest_apart(*d, &sig, args));
         let dest = self.out_ptr(b, &sig, hint);
         // An audit hook and its operands are the instrument's, not the program's.
         let hook = vyrn_frontend::loader::audit_hook(callee).then(|| b.here());
@@ -11855,6 +11881,55 @@ impl<'a, 'p> Fn_<'a, 'p> {
         };
         self.core_args_apart(*x, args, Some(k))
             .then_some((d, place, (!stored).then_some(*x)))
+    }
+
+    /// Whether the destination `d` of a call to `sig` lies apart from the storage of every
+    /// `consume` layout argument in `args` but the one the result is left in
+    /// ([`Sig::in_place`]). The callee reads such an argument at its address while it writes
+    /// `d`, so [`Fn_::core_user_call`] passes a fresh slot instead of a destination this cannot
+    /// prove apart. Frame bytes are apart from frame bytes they do not meet. A parameter's
+    /// address names storage older than this frame, so it is apart from frame bytes and from a
+    /// block this frame allocated for a part ([`Fn_::blocks`]); such a block is apart from frame
+    /// bytes too. This function's own out-pointer is apart from frame bytes, and from a
+    /// `consume` parameter's address because every caller proved it so by this rule.
+    fn dest_apart(&self, d: Dest, sig: &Sig, args: &[(Arg, Capability)]) -> bool {
+        let Some(l) = sig.ret.agg() else {
+            return true;
+        };
+        let at = match d {
+            Dest::Slot(o) => Some(Held::Frame(o..o + l.size)),
+            Dest::Addr(o, _) if self.dest == Some(o) => Some(Held::Out(o)),
+            Dest::Addr(o, _) if self.blocks.contains(&o) => Some(Held::Block),
+            Dest::Addr(..) => None,
+        };
+        args.iter().enumerate().all(|(j, (arg, cap))| {
+            let Arg::Val(v @ Val::Name(y)) = arg else {
+                return true;
+            };
+            if *cap != Capability::Consume || Some(j) == sig.in_place || !self.core_layout_name(v) {
+                return true;
+            }
+            let held = match self.core_place(*y) {
+                Some((Place::Slot(s), ty)) => match self.cx.layout(&ty, 0) {
+                    Ok(ly) => Held::Frame(s..s + ly.size),
+                    Err(_) => return false,
+                },
+                Some((Place::Local(p), _)) if p < self.entry => Held::Param(p),
+                // A name that holds a call's own slot by address ([`Fn_::core_slot`]'s span).
+                Some((Place::Local(_), _)) => match self.core_w.slot[y.index()] {
+                    Some((from, to)) => Held::Frame(from..to),
+                    None => return false,
+                },
+                _ => return false,
+            };
+            match (at.as_ref(), held) {
+                (Some(Held::Frame(a)), Held::Frame(b)) => a.end <= b.start || b.end <= a.start,
+                (Some(Held::Frame(_) | Held::Block), Held::Param(_)) => true,
+                (Some(Held::Block | Held::Out(_)), Held::Frame(_)) => true,
+                (Some(Held::Out(o)), Held::Param(p)) => *o != p,
+                _ => false,
+            }
+        })
     }
 
     /// Whether every layout argument in `args` but the `skip`th sits in frame bytes apart from
