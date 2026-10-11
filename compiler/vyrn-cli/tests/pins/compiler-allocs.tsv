@@ -2,68 +2,68 @@
 # root, phase, allocations. Written by VYRN_PIN=write; see tests/compiler_allocs.rs.
 build site/export.vyrn	(outside)	185
 build site/export.vyrn	load (total)	0
-build site/export.vyrn	load: read+parse+resolve	200065
+build site/export.vyrn	load: read+parse+resolve	200043
 build site/export.vyrn	read	258
-build site/export.vyrn	parse	857235
-build site/export.vyrn	parse (clone)	192849
+build site/export.vyrn	parse	857213
+build site/export.vyrn	parse (clone)	192843
 build site/export.vyrn	load: link	1058
 build site/export.vyrn	link: resolve_aliases	223346
 build site/export.vyrn	link: index	6128
-build site/export.vyrn	link: visibility	80105
+build site/export.vyrn	link: visibility	80101
 build site/export.vyrn	link: merge	1009
-build site/export.vyrn	check	281245
-build site/export.vyrn	check: bodies	508800
+build site/export.vyrn	check	281248
+build site/export.vyrn	check: bodies	508798
 build site/export.vyrn	types::decl_map	9200
-build site/export.vyrn	synthesize	7462
-build site/export.vyrn	movecheck	13104
+build site/export.vyrn	synthesize	7460
+build site/export.vyrn	movecheck	13105
 build site/export.vyrn	own: analyze_now	3764
 build site/export.vyrn	own: Owned::new	7
 build site/export.vyrn	placer	169937
 build site/export.vyrn	placer: lower_with	92
-build site/export.vyrn	lower: build	189662
+build site/export.vyrn	lower: build	189660
 build site/export.vyrn	placer: core::build	4440
-build site/export.vyrn	placer: build: first	1715930
+build site/export.vyrn	placer: build: first	1715915
 build site/export.vyrn	placer: build: seeded	782353
 build site/export.vyrn	placer: build_outside	849
-build site/export.vyrn	placer: effects	73652
-build site/export.vyrn	placer: kernel::placement	775234
+build site/export.vyrn	placer: effects	73653
+build site/export.vyrn	placer: kernel::placement	775221
 build site/export.vyrn	placer: report	22351
-build site/export.vyrn	placer: facts rebuild	278018
+build site/export.vyrn	placer: facts rebuild	278010
 build site/export.vyrn	placer: facts: rebuilt	3210
 build site/export.vyrn	codegen	37565
-build site/export.vyrn	codegen: checks	2642994
-build site/export.vyrn	elide: summaries	2192708
+build site/export.vyrn	codegen: checks	2644852
+build site/export.vyrn	elide: summaries	2197619
 build site/export.vyrn	codegen: signatures	25643
-build site/export.vyrn	codegen: bodies	1753170
+build site/export.vyrn	codegen: bodies	1753143
 build site/export.vyrn	codegen: drain	27564
 build site/export.vyrn	codegen: finish	6346
 check site/export.vyrn	(outside)	268
 check site/export.vyrn	load (total)	0
-check site/export.vyrn	load: read+parse+resolve	200065
+check site/export.vyrn	load: read+parse+resolve	200043
 check site/export.vyrn	read	258
-check site/export.vyrn	parse	857235
-check site/export.vyrn	parse (clone)	192849
+check site/export.vyrn	parse	857213
+check site/export.vyrn	parse (clone)	192843
 check site/export.vyrn	load: link	1058
-check site/export.vyrn	link: resolve_aliases	223347
+check site/export.vyrn	link: resolve_aliases	223348
 check site/export.vyrn	link: index	6128
-check site/export.vyrn	link: visibility	80099
+check site/export.vyrn	link: visibility	80096
 check site/export.vyrn	link: merge	1009
-check site/export.vyrn	check	281248
-check site/export.vyrn	check: bodies	508800
+check site/export.vyrn	check	281249
+check site/export.vyrn	check: bodies	508798
 check site/export.vyrn	types::decl_map	11040
-check site/export.vyrn	synthesize	7461
-check site/export.vyrn	movecheck	13104
+check site/export.vyrn	synthesize	7462
+check site/export.vyrn	movecheck	13105
 check site/export.vyrn	own: analyze_now	3764
 check site/export.vyrn	own: Owned::new	7
 check site/export.vyrn	placer	169937
 check site/export.vyrn	placer: lower_with	92
-check site/export.vyrn	lower: build	387163
+check site/export.vyrn	lower: build	387159
 check site/export.vyrn	placer: core::build	4440
-check site/export.vyrn	placer: build: first	999663
+check site/export.vyrn	placer: build: first	999648
 check site/export.vyrn	placer: build: seeded	396180
 check site/export.vyrn	placer: build_outside	849
-check site/export.vyrn	placer: effects	73652
-check site/export.vyrn	placer: kernel::placement	775234
+check site/export.vyrn	placer: effects	73653
+check site/export.vyrn	placer: kernel::placement	775221
 check site/export.vyrn	placer: report	22351
 check site/export.vyrn	placer: facts rebuild	1951
 check examples/simdbench.vyrn	(outside)	177
@@ -81,7 +81,7 @@ check examples/simdbench.vyrn	check	6960
 check examples/simdbench.vyrn	check: bodies	13054
 check examples/simdbench.vyrn	synthesize	2
 check examples/simdbench.vyrn	types::decl_map	705
-check examples/simdbench.vyrn	movecheck	1399
+check examples/simdbench.vyrn	movecheck	1400
 check examples/simdbench.vyrn	own: analyze_now	412
 check examples/simdbench.vyrn	placer	11015
 check examples/simdbench.vyrn	placer: lower_with	1
@@ -90,7 +90,7 @@ check examples/simdbench.vyrn	placer: core::build	189
 check examples/simdbench.vyrn	placer: build: first	52445
 check examples/simdbench.vyrn	placer: build_outside	81
 check examples/simdbench.vyrn	placer: build: seeded	4483
-check examples/simdbench.vyrn	placer: effects	3383
+check examples/simdbench.vyrn	placer: effects	3384
 check examples/simdbench.vyrn	placer: kernel::placement	21200
 check examples/simdbench.vyrn	placer: report	1999
 check examples/simdbench.vyrn	placer: facts rebuild	156
@@ -105,11 +105,11 @@ check examples/vlog.vyrn	link: resolve_aliases	21657
 check examples/vlog.vyrn	link: index	887
 check examples/vlog.vyrn	link: visibility	11945
 check examples/vlog.vyrn	link: merge	308
-check examples/vlog.vyrn	check	67952
+check examples/vlog.vyrn	check	67950
 check examples/vlog.vyrn	check: bodies	66007
 check examples/vlog.vyrn	types::decl_map	2154
-check examples/vlog.vyrn	synthesize	3343
-check examples/vlog.vyrn	movecheck	1986
+check examples/vlog.vyrn	synthesize	3344
+check examples/vlog.vyrn	movecheck	1987
 check examples/vlog.vyrn	own: analyze_now	657
 check examples/vlog.vyrn	own: Owned::new	3
 check examples/vlog.vyrn	placer	21453
@@ -119,7 +119,7 @@ check examples/vlog.vyrn	placer: core::build	635
 check examples/vlog.vyrn	placer: build: first	117163
 check examples/vlog.vyrn	placer: build: seeded	32987
 check examples/vlog.vyrn	placer: build_outside	170
-check examples/vlog.vyrn	placer: effects	6187
+check examples/vlog.vyrn	placer: effects	6188
 check examples/vlog.vyrn	placer: kernel::placement	49164
 check examples/vlog.vyrn	placer: report	3222
 check examples/vlog.vyrn	placer: facts rebuild	250

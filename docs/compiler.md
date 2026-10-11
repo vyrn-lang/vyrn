@@ -212,7 +212,9 @@ that assumes no record fact. `elide::invariants` keeps a fact only when each bod
 builds such a record or writes one of its fields proves it wherever the
 value leaves the name, and a walk assumes it of every record name it did not
 build. An element fact bounds every element of an integer array field: at
-least zero and below the length of another field of the record. It holds
+least zero, and below the length of a field of the record by one, or by the
+reach of a column a check adds to the element (`elide::reach`: `s + x`, `x`
+a narrow unsigned value or a mask). It holds
 when each store into an element and each push onto the field proves the
 bound where it runs, a record literal's field is empty or a copy of another
 record's with a bounding field at least as long, no row shortens the
@@ -220,11 +222,17 @@ bounding field, and no row changes the elements where no walk sees it
 (`elide::element_scan`); a read of an element assumes it. A fact may name the value of a
 record name's integer field (`facts::Term::Field`): by the kernel's
 exclusivity judgment only a row that names the record writes the field, so
-each read between two such rows is one value, and a store defines it. `World::body_of` decides a body
+each read between two such rows is one value, and a store defines it. A
+check on a global's array field reads the length of a borrow of the global
+while the state holds the borrow fresh (`facts::State::fresh`); a row the
+effect judgment says may write the global ends that (`elide::Walk::stale`).
+`World::body_of` decides a body
 when an emitter first reads it. A direct call's result takes the facts every
 return of its callee proves (`elide::summaries`, keyed by `FnId`, solved once
 per World by `fixpoint::descend`); a call through a value, a method, a
-projection or a generic instance takes none. For an `Option` of an integer
+projection or a generic instance takes none. A result exactly as long as a
+`consume` parameter takes the argument's length as it was before the call
+(`elide::Walk::same_length`). For an `Option` of an integer
 the facts are its payload's, over every `Some` return (a `None` proves them
 all), and the binder of a `Some` arm takes them (`elide::some_binder`). A private function that only
 direct call rows enter starts with the facts every such row proves of its

@@ -19,7 +19,10 @@
 //! check is a row like any other.
 //!
 //! The walk knows nothing about a global, an element, or a field of a field:
-//! each read of one is a fresh value with its type's range. An exact sum is an
+//! each read of one is a fresh value with its type's range. A check on a
+//! global's array field is the exception: it reads the length of a borrow of
+//! the global while the borrow is [`State::fresh`], up to a row the effect
+//! judgment says may write the global ([`Walk::stale`]). An exact sum is an
 //! `Int64` sum that provably stays in `-2^62..=2^62`. A row is proved only with
 //! a certificate that [`crate::facts::Cert::verify`] accepts, or a divisor the
 //! state holds unequal to zero.
@@ -36,6 +39,7 @@ use vyrn_frontend::effects::Effect;
 use vyrn_frontend::prelude::{self, Elements, Length};
 use vyrn_frontend::prim::Cmp;
 
+use crate::effects::StateUse;
 use crate::facts::{Cert, Fact, Lin, State, Term};
 use vyrn_frontend::core::check::{Atom, Check, Guard, Operand, Site, Verdict, Why};
 use vyrn_frontend::core::{
@@ -128,6 +132,9 @@ pub struct Summaries {
     /// once ([`Summaries::decided`]).
     decided: HashMap<FnId, Mutex<Option<Body>>>,
     facts: RecordFacts,
+    /// What a call into each frame may do to module state, by the effect
+    /// judgment ([`Walk::stale`]).
+    state: Arc<HashMap<FnId, StateUse>>,
 }
 
 /// What [`invariants`] reads besides the bodies, made once per program.
@@ -313,6 +320,7 @@ struct View<'a> {
     instances: &'a Instances,
     values: &'a [Summary],
     facts: &'a RecordFacts,
+    state: &'a HashMap<FnId, StateUse>,
 }
 
 impl View<'_> {
@@ -368,6 +376,7 @@ impl<'a> From<&'a Summaries> for View<'a> {
             instances: &s.instances,
             values: &s.values,
             facts: &s.facts,
+            state: &s.state,
         }
     }
 }
@@ -402,6 +411,7 @@ pub fn summaries<'a>(
     closed: &HashSet<FnId>,
     records: Option<&Records>,
     instances: Instances,
+    state: Arc<HashMap<FnId, StateUse>>,
 ) -> Summaries {
     let mut bodies: Vec<(FnId, &Body)> = bodies.collect();
     bodies.sort_by_key(|(f, _)| f.index());
@@ -463,6 +473,7 @@ pub fn summaries<'a>(
                         only,
                         start,
                         &RecordFacts::default(),
+                        &state,
                     )
                 }
             };
@@ -471,6 +482,7 @@ pub fn summaries<'a>(
                 instances: &instances,
                 values: &lengths,
                 facts: &RecordFacts::default(),
+                state: &state,
             };
             invariants(&bodies, &scans, decls, r, view)
         }
@@ -481,19 +493,23 @@ pub fn summaries<'a>(
         instances: &instances,
         values: &values,
         facts: &facts,
+        state: &state,
     };
     let start: BTreeSet<usize> =
         in_parallel(&bodies, weigh, || (), |(), (_, b)| seeds(b, decls, view))
             .into_iter()
             .flatten()
             .collect();
-    let mut values = solve(&bodies, decls, &at, &instances, values, start, &facts);
+    let mut values = solve(
+        &bodies, decls, &at, &instances, values, start, &facts, &state,
+    );
     let (closed, callees) = entered(&bodies, closed);
     let view = View {
         at: &at,
         instances: &instances,
         values: &values,
         facts: &facts,
+        state: &state,
     };
     let pres = in_parallel(
         &bodies,
@@ -525,6 +541,7 @@ pub fn summaries<'a>(
             instances: &instances,
             values: &values,
             facts: &facts,
+            state: &state,
         };
         callers.retain(|b| rows(&b.stmts).any(|(s, _)| view.pre(s).is_some()));
         let batch: Vec<&Body> = callers.drain(..(callers.len() * 2).div_ceil(3)).collect();
@@ -551,6 +568,7 @@ pub fn summaries<'a>(
         values,
         decided,
         facts,
+        state,
     }
 }
 
@@ -572,6 +590,7 @@ fn solve(
     values: Vec<Summary>,
     start: BTreeSet<usize>,
     facts: &RecordFacts,
+    state: &HashMap<FnId, StateUse>,
 ) -> Vec<Summary> {
     let mut seen = vec![false; bodies.len()];
     start.iter().for_each(|&i| seen[i] = true);
@@ -586,6 +605,7 @@ fn solve(
             instances,
             values,
             facts,
+            state,
         };
         returns(bodies[i].1, decls, view, &values[i])
     };
@@ -674,7 +694,7 @@ fn invariants(
             .collect()
     };
     let elements = || scans.iter().map(|s| &s.elements);
-    let through: BTreeSet<(&str, &str)> =
+    let through: BTreeSet<(&str, &str, i64)> =
         (elements().flat_map(|e| e.through.iter().copied())).collect();
     let loose: BTreeSet<&str> = elements().flat_map(|e| e.loose.iter().copied()).collect();
     let shrunk: BTreeSet<&str> = elements().flat_map(|e| e.shrunk.iter().copied()).collect();
@@ -874,9 +894,10 @@ fn scan<'b>(b: &'b Body, decls: &HashMap<String, TypeDecl>, needs: &[(Place, i64
 /// of fields, for [`element_facts`].
 #[derive(Default)]
 struct ElementScan<'b> {
-    /// Each `(f, g)` where a check indexes field `g` of a record name by an
-    /// element read from field `f` of the same name.
-    through: Vec<(&'b str, &'b str)>,
+    /// Each `(f, g, c)` where a check indexes field `g` of a record name by an
+    /// element read from field `f` of the same name, or by such an element
+    /// plus a value below `c` ([`reach`]); `c` is 1 for the element alone.
+    through: Vec<(&'b str, &'b str, i64)>,
     /// The fields whose elements a row may change other than by a store into
     /// an element or a push the walk holds to the facts
     /// ([`Walk::stored_element`]).
@@ -910,18 +931,7 @@ fn element_scan<'b>(b: &'b Body, decls: &HashMap<String, TypeDecl>) -> ElementSc
     };
     for (s, _) in rows(&b.stmts) {
         match s {
-            St::Check(c) => {
-                let Guard::Index(Place::Field(r, g), Val::Name(i)) = &c.guard else {
-                    continue;
-                };
-                if let Some(Rhs::Read(Place::Elem(base, _))) = defs[i.index()] {
-                    if let Place::Field(r2, f) = &**base {
-                        if r2 == r && matches!(**r, Place::Name(_)) {
-                            out.through.push((f, g));
-                        }
-                    }
-                }
-            }
+            St::Check(c) => through(b, decls, &defs, &c.guard, &mut out.through),
             St::Store {
                 place: Place::Elem(base, _),
                 ..
@@ -985,6 +995,50 @@ fn element_scan<'b>(b: &'b Body, decls: &HashMap<String, TypeDecl>) -> ElementSc
         }
     }
     out
+}
+
+/// Adds to `out` each `(f, g, c)` of [`ElementScan::through`] the check `guard`
+/// gives: it indexes field `g` of a record name by an index whose base
+/// takes an element of field `f` of the same name, in its `let` or in a row
+/// that stores the element's name into it (a loop's state), plus a value
+/// below `c` ([`reach`]).
+fn through<'b>(
+    b: &'b Body,
+    decls: &HashMap<String, TypeDecl>,
+    defs: &[Option<&'b Rhs>],
+    guard: &'b Guard,
+    out: &mut Vec<(&'b str, &'b str, i64)>,
+) {
+    let Guard::Index(Place::Field(r, g), Val::Name(i)) = guard else {
+        return;
+    };
+    if !matches!(**r, Place::Name(_)) {
+        return;
+    }
+    let (v, c) = (defs[i.index()])
+        .and_then(|d| reach(b, decls, d, &|x| defs[x.index()]))
+        .unwrap_or((*i, 1));
+    // The field of `r` whose element the `let` of `n` reads.
+    let element = |n: Name| match defs[n.index()] {
+        Some(Rhs::Read(Place::Elem(base, _))) => match &**base {
+            Place::Field(r2, f) if r2 == r => Some(f.as_str()),
+            _ => None,
+        },
+        _ => None,
+    };
+    out.extend(element(v).map(|f| (f, g.as_str(), c)));
+    for (s, _) in rows(&b.stmts) {
+        if let St::Store {
+            place: Place::Name(n),
+            value: Val::Name(m),
+            ..
+        } = s
+        {
+            if *n == v {
+                out.extend(element(*m).map(|f| (f, g.as_str(), c)));
+            }
+        }
+    }
 }
 
 /// Whether a store of `value` into the field `place` keeps the field's
@@ -1088,22 +1142,22 @@ fn int_elements(ty: &Type, decls: &HashMap<String, TypeDecl>) -> bool {
 }
 
 /// The element facts of a record type with fields `fs`, Houdini's first
-/// guess: for each `(f, g)` of `through`, every element of the integer array
-/// field `f` is at least zero and below the length of field `g`. A field of
-/// `loose` has no element fact and one of `shrunk` bounds none: a row may
-/// change the one's elements or shorten the other where no walk sees it.
+/// guess: for each `(f, g, c)` of `through`, every element of the integer
+/// array field `f` is at least zero and at least `c` below the length of
+/// field `g`. A field of `loose` has no element fact and one of `shrunk`
+/// bounds none: a row may change the one's elements or shorten the other
+/// where no walk sees it.
 fn element_facts(
     fs: &[Field],
     decls: &HashMap<String, TypeDecl>,
-    through: &BTreeSet<(&str, &str)>,
+    through: &BTreeSet<(&str, &str, i64)>,
     loose: &BTreeSet<&str>,
     shrunk: &BTreeSet<&str>,
 ) -> Vec<RecordFact> {
     let has = |x: &str, k: &dyn Fn(&Type) -> bool| fs.iter().any(|f| f.name == x && k(&f.ty));
     let mut out = Vec::new();
-    for &(f, g) in through {
-        if f == g
-            || loose.contains(f)
+    for &(f, g, c) in through {
+        if loose.contains(f)
             || shrunk.contains(g)
             || !has(f, &|t| int_elements(t, decls))
             || !has(g, &|t| kind_of(t, decls) == Kind::Seq)
@@ -1112,7 +1166,7 @@ fn element_facts(
         }
         let (e, len) = (Part::Elem(f.to_string()), Part::Len(g.to_string()));
         out.push(vec![(e.clone(), 1)]);
-        out.push(record_fact(vec![(e, -1), (len, 1), (Part::One, -1)]));
+        out.push(record_fact(vec![(e, -1), (len, 1), (Part::One, -c)]));
     }
     out
 }
@@ -1159,27 +1213,63 @@ fn needed_lengths(b: &Body, decls: &HashMap<String, TypeDecl>) -> Vec<(Place, i6
         }
     }
     if !by_name.is_empty() {
-        let top = |rhs: &Rhs| match rhs {
-            Rhs::Prim(Op::Bin(BinOp::BitAnd), vs, _) => vs.iter().find_map(lit),
-            Rhs::Prim(Op::Conv(_), vs, _) => match vs.as_slice() {
-                [Val::Name(x)] => match kind_of(&b.names[x.index()].ty, decls) {
-                    Kind::Int(bits, false) if bits < 64 => Some((1i64 << bits) - 1),
-                    _ => None,
-                },
-                _ => None,
-            },
-            _ => None,
-        };
+        let mut defs: Vec<Option<&Rhs>> = vec![None; b.names.len()];
         for (s, _) in rows(&b.stmts) {
-            let St::Let(n, rhs) = s else { continue };
-            for (p, _) in by_name.iter().filter(|(_, i)| i == n) {
-                out.extend(top(rhs).map(|t| ((*p).clone(), t.saturating_add(1))));
+            if let St::Let(n, rhs) = s {
+                defs[n.index()] = Some(rhs);
             }
+        }
+        for (p, i) in by_name {
+            let Some(rhs) = defs[i.index()] else { continue };
+            // An index `v + x` needs the reach of `x` where `v` is zero.
+            let c = (top(b, decls, rhs).map(|t| t.saturating_add(1)))
+                .or_else(|| reach(b, decls, rhs, &|x| defs[x.index()]).map(|(_, c)| c));
+            out.extend(c.map(|c| (p.clone(), c)));
         }
     }
     let limit = vyrn_frontend::trap::LENGTH_LIMIT as i64;
     out.retain(|(_, c)| (2..=limit).contains(c));
     out
+}
+
+/// The largest value of a name `rhs` defines, read from `rhs` alone: a mask
+/// `x & m` by a literal `m`, or an unsigned integer narrower than 64 bits
+/// converted.
+fn top(b: &Body, decls: &HashMap<String, TypeDecl>, rhs: &Rhs) -> Option<i64> {
+    match rhs {
+        Rhs::Prim(Op::Bin(BinOp::BitAnd), vs, _) => vs.iter().find_map(|v| match v {
+            Val::Lit(Lit::Int(i)) => Some(*i),
+            Val::Lit(Lit::Byte(i)) => Some(i64::from(*i)),
+            _ => None,
+        }),
+        Rhs::Prim(Op::Conv(_), vs, _) => match vs.as_slice() {
+            [Val::Name(x)] => match kind_of(&b.names[x.index()].ty, decls) {
+                Kind::Int(bits, false) if bits < 64 => Some((1i64 << bits) - 1),
+                _ => None,
+            },
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// The base `v` and the reach `c` of an index `rhs` defines as `v + x`, where
+/// the `let` of name `x` (`def`) has a [`top`] below `c`: a check of the
+/// index needs `v + c` at most the length.
+fn reach<'r>(
+    b: &Body,
+    decls: &HashMap<String, TypeDecl>,
+    rhs: &Rhs,
+    def: &dyn Fn(Name) -> Option<&'r Rhs>,
+) -> Option<(Name, i64)> {
+    let Rhs::Prim(Op::Bin(BinOp::Add), vs, _) = rhs else {
+        return None;
+    };
+    let [Val::Name(p), Val::Name(q)] = vs.as_slice() else {
+        return None;
+    };
+    let reach = |x: &Name| def(*x).and_then(|d| top(b, decls, d)?.checked_add(1));
+    (reach(q).map(|c| (*p, c))).or_else(|| reach(p).map(|c| (*q, c)))
 }
 
 /// The lengths `b` can give an array it returns: the count of the array
@@ -1504,10 +1594,11 @@ fn direct_call(rhs: &Rhs) -> Option<FnId> {
 /// those the body never writes. An `UInt64` is left out: the facts read its
 /// values above `i64::MAX` as negatives. An integer result equals `c` when
 /// every return returns the literal `c` ([`constant_result`]). An array
-/// result is at least `c` long for each `c` of
-/// `needed` ([`needed_lengths`]) the body can make ([`made_lengths`]), and
-/// at least `p` long for each integer parameter `p` it can make. A Bool
-/// result takes the candidates of [`truth_templates`].
+/// result is at least as long as each array or String parameter, at most as
+/// long as each `consume` one, at least `c` long for each `c` of `needed`
+/// ([`needed_lengths`]) the body can make ([`made_lengths`]), and at least
+/// `p` long for each integer parameter `p` it can make. A Bool result takes
+/// the candidates of [`truth_templates`].
 fn templates(body: &Body, decls: &HashMap<String, TypeDecl>, needed: &BTreeSet<i64>) -> Summary {
     let params: Vec<Kind> = (body.params.iter())
         .map(|p| kind_of(&body.names[p.index()].ty, decls))
@@ -1572,6 +1663,15 @@ fn templates(body: &Body, decls: &HashMap<String, TypeDecl>, needed: &BTreeSet<i
         } else {
             let r = Lin::of(r);
             post.extend(seqs.iter().filter_map(|a| r.sub(a)));
+            // At most as long as a `consume` parameter: the only kind
+            // `Walk::same_length` reads.
+            let owned = |k: usize| !body.names[body.params[k].index()].borrow;
+            let consumed = interface(
+                &params,
+                |k, kind| usable(k) && kind == Kind::Seq && owned(k),
+                Term::Len,
+            );
+            post.extend(consumed.iter().filter_map(|a| a.sub(&r)));
             // A bound the body makes: a needed constant, or an integer
             // parameter in `ints`.
             let param = |n: Name| {
@@ -1821,6 +1921,9 @@ struct Walk<'a> {
     /// field, or rebuilt from one, that record name and field
     /// ([`Walk::element_write`]).
     pushed: BTreeMap<Name, (Name, String)>,
+    /// Per global, the names a `let` binds to its whole value and no other
+    /// row writes ([`global_borrows`]).
+    borrows: BTreeMap<String, Vec<Name>>,
 }
 
 /// What the walk keeps about one name.
@@ -2013,6 +2116,7 @@ impl<'a> Walk<'a> {
             broken: BTreeSet::new(),
             assumed: BTreeSet::new(),
             pushed: BTreeMap::new(),
+            borrows: global_borrows(stmts),
         }
     }
 
@@ -2618,7 +2722,9 @@ impl<'a> Walk<'a> {
                 self.dead(s);
                 continue;
             }
+            let stale = self.stale(s);
             st = self.stmt(st, s);
+            self.track(&mut st, s, stale);
             self.unpush(s);
         }
         st
@@ -2850,7 +2956,7 @@ impl<'a> Walk<'a> {
     /// What must be `>= 0` for the check to pass, as far as linear facts can
     /// say; `None` when they cannot say it all.
     fn goals(&self, st: &State, g: &Guard) -> Option<Vec<Lin>> {
-        let len = |p: &Place| self.length(p).map(Lin::of);
+        let len = |p: &Place| (self.length(p).or_else(|| self.borrowed(st, p))).map(Lin::of);
         Some(match g {
             Guard::Index(p, i) => {
                 let i = self.lin(i)?;
@@ -2912,6 +3018,73 @@ impl<'a> Walk<'a> {
                 out
             }
         })
+    }
+
+    /// The length of `p`, a field `g.f` of a global, as the same field of a
+    /// borrow of `g` the state holds [`State::fresh`]: equal to `g`, so its
+    /// facts are `g`'s.
+    fn borrowed(&self, st: &State, p: &Place) -> Option<Term> {
+        let Place::Field(g, f) = p else { return None };
+        let Place::Global(g) = &**g else { return None };
+        let b = self.borrows.get(g)?.iter().find(|b| st.fresh.contains(b))?;
+        self.col_term(*b, f)
+    }
+
+    /// Marks after row `s` the borrows `stale` ([`Walk::stale`]) no longer
+    /// fresh, and the borrow `s` binds fresh. A stale borrow keeps its own
+    /// facts: by the kernel's exclusivity judgment a row that writes its
+    /// global ends it.
+    fn track(&self, st: &mut State, s: &St, stale: Vec<Name>) {
+        for b in &stale {
+            st.fresh.remove(b);
+        }
+        if let St::Let(n, Rhs::Read(Place::Global(g))) = s {
+            if !st.dead && self.borrows.get(g).is_some_and(|bs| bs.contains(n)) {
+                st.fresh.insert(*n);
+            }
+        }
+    }
+
+    /// The borrows ([`Walk::borrows`]) row `s` may make unequal to their
+    /// global: those of each global it stores into, takes from or hands a
+    /// call to write, and of each global a direct call may store into by the
+    /// effect judgment ([`crate::effects::StateUse`]). A call the judgment
+    /// has no frame for or whose frame may call the host, any call but a
+    /// direct one or a constructor, and a release may write any global.
+    fn stale(&self, s: &St) -> Vec<Name> {
+        if self.borrows.is_empty() {
+            return Vec::new();
+        }
+        let every = || self.borrows.values().flatten().copied().collect();
+        let mut gs: Vec<&str> = Vec::new();
+        match s {
+            St::Store { place, .. } | St::Let(_, Rhs::Take(place)) => gs.extend(global_root(place)),
+            St::Let(_, rhs @ Rhs::Call { args, kind, .. })
+            | St::Do {
+                rhs: rhs @ Rhs::Call { args, kind, .. },
+                ..
+            } => {
+                let written = args.iter().filter(|(_, c)| *c != Capability::Read);
+                gs.extend(written.filter_map(|(a, _)| match a {
+                    Arg::Place(p) => global_root(p),
+                    Arg::Val(_) => None,
+                }));
+                let frame = self.sums.call(rhs).and_then(|f| self.sums.state.get(&f));
+                match (kind, frame) {
+                    (Callee::Ctor, _) => {}
+                    (Callee::Fn(_), Some(u)) if !u.host => {
+                        gs.extend(u.writes.iter().map(String::as_str))
+                    }
+                    _ => return every(),
+                }
+            }
+            St::Drop(..) | St::Row { .. } => return every(),
+            _ => {}
+        }
+        (gs.iter().filter_map(|g| self.borrows.get(*g)))
+            .flatten()
+            .copied()
+            .collect()
     }
 
     fn bind(&mut self, st: &mut State, n: Name, rhs: &Rhs) {
@@ -2997,9 +3170,41 @@ impl<'a> Walk<'a> {
             },
             _ => {}
         }
+        self.same_length(st, n, rhs);
         self.range(st, n);
         self.effects(st, rhs);
         self.called(st, n, rhs);
+    }
+
+    /// Defines the length of `n = rhs`, a direct call, as a `consume`
+    /// argument's, where the callee's summary states its result exactly as
+    /// long as that parameter. It reads the argument before the call's
+    /// effects forget it, so what the state knows of the argument's length
+    /// carries over to the result ([`State::kill`]).
+    fn same_length(&self, st: &mut State, n: Name, rhs: &Rhs) {
+        let Some((_, s)) = self.sums.call(rhs).and_then(|g| self.sums.get(g)) else {
+            return;
+        };
+        let Rhs::Call { args, .. } = rhs else { return };
+        if self.kind(n) != Kind::Seq || args.len() != s.params.len() {
+            return;
+        }
+        let r = Lin::of(Term::Len(Name(0)));
+        let exact = |p: &Lin| {
+            [r.sub(p), p.sub(&r)]
+                .iter()
+                .flatten()
+                .all(|f| s.post.contains(f))
+        };
+        let len = (0..args.len())
+            .filter(|&k| args[k].1 == Capability::Consume && s.params[k] == Kind::Seq)
+            .find_map(|k| {
+                let p = Term::Len(Name(k as u32 + 1));
+                exact(&Lin::of(p)).then(|| self.arg(p, &args[k].0, Kind::Seq))?
+            });
+        if let Some(l) = len {
+            st.define(Term::Len(n), &l);
+        }
     }
 
     /// Assumes what the callee's summary states of `n = rhs`, a direct call,
@@ -3615,10 +3820,16 @@ impl<'a> Walk<'a> {
         for n in &written {
             head.kill(*n);
         }
+        if !self.borrows.is_empty() {
+            for (s, _) in rows(body) {
+                self.stale(s).iter().for_each(|b| _ = head.fresh.remove(b));
+            }
+        }
         for l in self.halving(entry, body, &written) {
             head.assume(&l);
         }
-        // Candidates: what entry knows about the written names, and the
+        // Candidates: what entry knows about the written names, two fields
+        // of a record it grows that entry defines equally long, and the
         // counter shapes an index needs.
         let mut cands: BTreeSet<Lin> = BTreeSet::new();
         for f in &entry.facts {
@@ -3634,6 +3845,7 @@ impl<'a> Walk<'a> {
                 cands.extend(v.sub(&Lin::of(*t)));
             }
         }
+        cands.extend(equal_fields(entry, &written));
         // A name a `let` in the loop binds is fresh each turn; a counter is a
         // name the loop stores to.
         let mut stored = BTreeSet::new();
@@ -3652,6 +3864,7 @@ impl<'a> Walk<'a> {
                 cands.extend(len.sub(&v).and_then(|l| l.plus(-1)));
             }
         }
+        cands.extend(self.reaches(body, &stored, &indexed));
         cands.extend(self.in_step(body, &stored));
         if !cands.is_empty() {
             let at_entry = entry.prover();
@@ -3753,6 +3966,24 @@ impl<'a> Walk<'a> {
                     out.extend(d.as_ref().and_then(|d| d.scale(-1)));
                     out.extend(d);
                 }
+            }
+        }
+        out
+    }
+
+    /// `len(b) - m - c`, for each index of `b` in `body` that a `let`
+    /// defines as `m + x` ([`reach`]), `m` a counter the loop stores to: the
+    /// counter shape of a row offset `m` and a column `x` below `c`.
+    fn reaches(&self, body: &[St], stored: &BTreeSet<Name>, indexed: &[(Place, Name)]) -> Vec<Lin> {
+        let def = |n: Name| let_of(body, n);
+        let mut out = Vec::new();
+        for (b, i) in indexed {
+            let Some((m, c)) = def(*i).and_then(|d| reach(self.body, self.decls, d, &def)) else {
+                continue;
+            };
+            if stored.contains(&m) && matches!(self.kind(m), Kind::Int(..)) {
+                let len = self.length(b).map(Lin::of);
+                out.extend(len.and_then(|l| l.sub(&Lin::of(Term::Val(m)))?.plus(-c)));
             }
         }
         out
@@ -4158,6 +4389,30 @@ fn root(a: &Arg) -> Option<Name> {
     }
 }
 
+/// The global `p` is a part of.
+fn global_root(p: &Place) -> Option<&str> {
+    match p {
+        Place::Global(g) => Some(g),
+        Place::Field(b, _) | Place::Elem(b, _) | Place::Key(b, _) => global_root(b),
+        Place::Name(_) => None,
+    }
+}
+
+/// Per global, the names a `let` of `ss` binds to the global's whole value
+/// and no other row writes: each a borrow, equal to the global where it is
+/// bound.
+fn global_borrows(ss: &[St]) -> BTreeMap<String, Vec<Name>> {
+    let mut out: BTreeMap<String, Vec<Name>> = BTreeMap::new();
+    for (s, _) in rows(ss) {
+        if let St::Let(n, Rhs::Read(Place::Global(g))) = s {
+            if writes_of(ss, *n) == 1 {
+                out.entry(g.clone()).or_default().push(*n);
+            }
+        }
+    }
+    out
+}
+
 fn place_root(p: &Place) -> Option<Name> {
     match p {
         Place::Name(n) => Some(*n),
@@ -4441,6 +4696,38 @@ fn stores(ss: &[St], out: &mut BTreeSet<Name>) {
             _ => {}
         }
     }
+}
+
+/// `a - b` and its negation for each two fields of one record that `entry`
+/// defines equally long, when the loop writes the record: a loop that grows
+/// both in step keeps them equal. [`Walk::settle`] keeps a candidate only
+/// where the entry and every turn prove it.
+fn equal_fields(entry: &State, written: &BTreeSet<Name>) -> Vec<Lin> {
+    let cols = || {
+        (entry.defs.iter())
+            .filter(|(t, _)| matches!(t, Term::Col(..)) && written.contains(&t.name()))
+    };
+    let mut out = Vec::new();
+    for (i, (a, va)) in cols().enumerate() {
+        let same = |(b, vb): &(&Term, &Lin)| b.name() == a.name() && *vb == va;
+        for (b, _) in cols().skip(i + 1).filter(same) {
+            let d = Lin::of(*a).sub(&Lin::of(*b));
+            out.extend(d.as_ref().and_then(|d| d.scale(-1)));
+            out.extend(d);
+        }
+    }
+    out
+}
+
+/// The value the `let` of `n` in `ss` binds.
+fn let_of(ss: &[St], n: Name) -> Option<&Rhs> {
+    ss.iter().find_map(|s| match s {
+        St::Let(m, rhs) if *m == n => Some(rhs),
+        St::If { then, els, .. } => let_of(then, n).or_else(|| let_of(els, n)),
+        St::Loop { body, .. } | St::Block { body, .. } => let_of(body, n),
+        St::Switch { arms, .. } => arms.iter().find_map(|a| let_of(&a.body, n)),
+        _ => None,
+    })
 }
 
 /// Every place a check row indexes by a name, with that name.

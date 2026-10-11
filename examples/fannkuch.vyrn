@@ -85,7 +85,7 @@ fn foldCount(p: consume Array<Int64>) -> Folded {
 
 /// The whole walk: the alternating-sign checksum and the deepest fold, over
 /// every permutation of `n` elements in the game's prescribed order.
-fn fannkuch(n: Int64) -> Fold {
+fn fannkuch(n: Int64 where value >= 1) -> Fold {
     let mut perm1 = iota(n)
     let mut work = zeroes(n)
     let mut count = zeroes(n)

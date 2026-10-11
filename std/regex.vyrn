@@ -463,15 +463,24 @@ fn nfaMatchAt(re: Regex, hay: Array<UInt8>, at: Int64, sc: modify Scan) -> Int64
 let dfaCap = 262144
 
 /// One search's lazy DFA, and the marks both engines build pc sets with.
+///
+/// A state is the offset of its row in `next`: the start state's row is at 0.
+/// A row holds `classCount` entries, and the table holds 256 entries past
+/// every row's offset, so a byte's class reads its row with no check.
 type Scan = {
-    // `sets[s]` holds state `s`'s class and match pcs, ascending. State 0 is
-    // the empty set, where every match has ended; state 1 is the start.
+    // `sets[off / classCount]` holds the class and match pcs of the state at
+    // `off`, ascending.
     sets: Array<Array<Int64>>,
     ids: Map<String, Int64>,
-    accepts: Array<Bool>,
-    // `next[s * classCount + k]` is the state after a byte of class `k`, or -1
-    // until a search first takes that edge.
+    // `next[off + k]` is the state after a byte of class `k`, or -256 until a
+    // search first takes that edge. Every entry, -256 too, is at most the
+    // length less 256.
     next: Array<Int64>,
+    // `accepts[off]` says whether the state at `off` accepts; as long as
+    // `next`.
+    accepts: Array<Bool>,
+    // The state of the empty set, where every match has ended.
+    dead: Int64,
     cap: Int64,
     mark: Array<Int64>,
     gen: Int64,
@@ -492,26 +501,24 @@ fn intern(re: Regex, sc: modify Scan) -> Int64 {
         }
         pc = pc + 1
     }
-    if let Some(id) = sc.ids[key] {
-        return id
+    if let Some(off) = sc.ids[key] {
+        return off
     }
     if sc.next.length + re.classCount > sc.cap {
         return 0 - 1
     }
-    let id = sc.sets.length
-    sc.ids[key] = id
+    // The new row starts where the last 256 entries do.
+    let off = sc.next.length - 256
+    sc.ids[key] = off
     sc.sets.push(set)
-    if id < sc.accepts.length {
-        sc.accepts[id] = accepts
-    } else {
-        sc.accepts.push(accepts)
-    }
     let mut k = 0
     while k < re.classCount {
-        sc.next.push(0 - 1)
+        sc.next.push(0 - 256)
+        sc.accepts.push(false)
         k = k + 1
     }
-    return id
+    sc.accepts[off] = accepts
+    return off
 }
 
 /// A search with no edges built, which may add `cap` table entries.
@@ -522,45 +529,52 @@ fn newScan(re: Regex, cap: Int64) -> Scan {
         mark.push(0)
         i = i + 1
     }
-    // `accepts` holds the slots of states 0 and 1 before `intern` fills
-    // them, so a search reads the start state's with no check.
-    let mut sc = Scan { sets: [], ids: [:], accepts: [false, false], next: [], cap: 2 * re.classCount + cap, mark: mark, gen: 1 }
-    intern(re, sc)
+    let mut sc = Scan { sets: [], ids: [:], next: [], accepts: [], dead: 0, cap: 256 + 2 * re.classCount + cap, mark: mark, gen: 1 }
+    // The 256 entries past the start state's row, which `intern` makes first.
+    while sc.next.length < 256 {
+        sc.next.push(0 - 256)
+        sc.accepts.push(false)
+    }
     let mut scratch: Array<Int64> = []
-    sc.gen = 2
     addThread(re, scratch, sc, re.start)
     intern(re, sc)
+    sc.gen = 2
+    sc.dead = intern(re, sc)
     return sc
 }
 
 /// The leftmost-longest match that starts at or after `from`, or `None`.
 fn nextMatch(re: Regex, hay: Array<UInt8>, from: Int64 where value >= 0, sc: modify Scan) -> Option<Match> {
+    let dead = sc.dead
     let mut at = from
     while at <= hay.length {
-        let mut s = 1
-        let mut best = if sc.accepts[1] { at } else { 0 - 1 }
+        let mut s = 0
+        let mut best = if sc.accepts[0] { at } else { 0 - 1 }
         let mut i = at
         while i < hay.length {
             let c = Int64(hay[i])
-            let edge = s * re.classCount + Int64(re.classOf[c])
+            let edge = s + Int64(re.classOf[c])
             let mut t = sc.next[edge]
             if t < 0 {
                 sc.gen = sc.gen + 1
                 let mut scratch: Array<Int64> = []
+                let set = s / re.classCount
                 let mut j = 0
-                while j < sc.sets[s].length {
-                    let next = follow(re, sc.sets[s][j], c)
+                while j < sc.sets[set].length {
+                    let next = follow(re, sc.sets[set][j], c)
                     addThread(re, scratch, sc, next)
                     j = j + 1
                 }
                 t = intern(re, sc)
-                if t < 0 {
+                // A state is 256 entries before the table's end; the walk
+                // cannot see that through `ids`, so the test states it.
+                if t < 0 || t > sc.next.length - 256 {
                     best = nfaMatchAt(re, hay, at, sc)
                     break
                 }
                 sc.next[edge] = t
             }
-            if t == 0 {
+            if t == dead {
                 break
             }
             s = t

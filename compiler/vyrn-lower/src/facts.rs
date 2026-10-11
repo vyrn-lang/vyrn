@@ -246,6 +246,9 @@ pub struct State {
     pub defs: BTreeMap<Term, Lin>,
     /// Per Bool name, the facts its truth gives and those its falsehood gives.
     pub conds: BTreeMap<Name, (Vec<Fact>, Vec<Fact>)>,
+    /// The borrows of a global still equal to it: their lengths are the
+    /// global's (`elide::Walk::borrowed`).
+    pub fresh: BTreeSet<Name>,
     pub dead: bool,
 }
 
@@ -378,6 +381,7 @@ impl State {
             self.restate(t);
         }
         self.conds.remove(&n);
+        self.fresh.remove(&n);
         self.facts.retain(|f| !f.mentions_name(n));
         self.ne.retain(|d| !d.mentions_name(n));
         self.defs.retain(|_, v| !v.mentions_name(n));
@@ -572,6 +576,10 @@ impl State {
             return State::dead();
         };
         let mut out = State::default();
+        out.fresh = (first.fresh.iter())
+            .filter(|n| live.iter().all(|s| s.fresh.contains(n)))
+            .copied()
+            .collect();
         for (t, v) in &first.defs {
             if live.iter().all(|s| s.defs.get(t) == Some(v)) {
                 out.defs.insert(*t, v.clone());

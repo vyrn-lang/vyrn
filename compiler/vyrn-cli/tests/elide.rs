@@ -653,6 +653,76 @@ fn a_generic_instances_result_proves_its_callers_index() {
     );
 }
 
+/// A function that hands back the array it takes by `consume`, exactly as
+/// long, gives its result the argument's length in the caller. A callee that
+/// pops on one path, pushes on one path, or returns its other parameter
+/// keeps the caller's check.
+#[test]
+fn a_result_as_long_as_its_consume_argument_proves_its_callers_index() {
+    let keep = |body: &str| {
+        format!(
+            "fn keep(p: consume Array<Int64>, q: consume Array<Int64>, k: Int64) -> Array<Int64> {{
+{body}
+}}
+fn w(x: Int64) -> Int64 {{
+    let u = [1, 2, 3, 4, 5]
+    let t = keep([1, 2, 3, 4, 5], [1, 2, 3, 4], x)
+    return u[t.length - 1] + t[4]
+}}
+"
+        )
+    };
+    let path = |row: &str| {
+        format!(
+            "    let mut a = p
+    if k > 3 {{
+        {row}
+    }}
+    return a"
+        )
+    };
+    let proof = keep(&path("a[0] = k"));
+    assert_eq!(
+        verdicts(&proof, "w"),
+        ["proved array-index", "proved array-index"],
+        "{proof}"
+    );
+    let (err, _) = oracle(&proof, "    print(w(5).toString())", "w");
+    assert_eq!(err, "");
+    let witnesses = [
+        (path("a.pop()"), "array index 4 out of bounds"),
+        (path("a.push(0)"), "array index 5 out of bounds"),
+        ("    return q".to_string(), "array index 4 out of bounds"),
+    ];
+    let mut failures = Vec::new();
+    for (body, trap) in witnesses {
+        let src = keep(&body);
+        let rows = verdicts(&src, "w");
+        if !rows.contains(&"check array-index".to_string()) {
+            failures.push(format!(
+                "{src}
+rows: {rows:?}"
+            ));
+        }
+        let (err, _) = oracle(&src, "    print(w(5).toString())", "w");
+        if !err.contains(trap) || err.contains(vyrn_frontend::trap::PROVED_CHECK_FAILED) {
+            failures.push(format!(
+                "{src}
+ran: {err}"
+            ));
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "{}",
+        failures.join(
+            "
+
+"
+        )
+    );
+}
+
 #[test]
 fn a_loop_condition_under_and_proves_its_index() {
     let src = "fn w(xs: Array<Int64>) -> Int64 {
@@ -987,6 +1057,85 @@ ran: {err}"
         failures.join(
             "
 
+"
+        )
+    );
+}
+
+/// A check on a global's array field reads the facts of a borrow of the
+/// global until a row may write it. A call that writes the global, a store
+/// to it, a call through a function value, a generic instance that writes it,
+/// and a loop that writes it after the read each keep the check, which traps.
+#[test]
+fn a_borrow_of_a_global_proves_its_index_until_a_write() {
+    let lib = "type Box = { xs: Array<Int64> }
+let mut g: Box = Box { xs: [1, 2, 3] }
+fn inRange(b: Box, i: Int64) -> Bool {
+    return i >= 0 && i < b.xs.length
+}
+fn shrink(b: modify Box) {
+    b.xs.clear()
+}
+fn clearG() {
+    shrink(g)
+}
+fn clearT<T>(x: T) {
+    shrink(g)
+}
+";
+    let w = |param: &str, body: &str| {
+        format!(
+            "{lib}fn w(i: Int64{param}) -> Int64 {{
+    let mut s = 0
+    if inRange(g, i) {{
+{body}
+    }}
+    return s
+}}
+"
+        )
+    };
+    let read = |between: &str| {
+        format!(
+            "        {between}
+        s = g.xs[i]"
+        )
+    };
+    let proof = w("", "        s = g.xs[i]");
+    assert_eq!(verdicts(&proof, "w"), ["proved array-index"]);
+    let (err, _) = oracle(&proof, "    print(w(2).toString())", "w");
+    assert_eq!(err, "");
+    let looped = "        let mut k = 0
+        while k < 2 {
+            s = s + g.xs[i]
+            clearG()
+            k = k + 1
+        }";
+    let witnesses = [
+        (w("", &read("clearG()")), "w(2)"),
+        (w("", &read("g = Box { xs: [] }")), "w(2)"),
+        (w(", f: fn()", &read("f()")), "w(2, clearG)"),
+        (w("", &read("clearT(i)")), "w(2)"),
+        (w("", looped), "w(2)"),
+    ];
+    let mut failures = Vec::new();
+    for (src, call) in &witnesses {
+        let rows = verdicts(src, "w");
+        if rows != ["check array-index"] {
+            failures.push(format!("{src}rows: {rows:?}"));
+        }
+        let (err, _) = oracle(src, &format!("    print({call}.toString())"), "w");
+        if !err.contains("array index 2 out of bounds")
+            || err.contains(vyrn_frontend::trap::PROVED_CHECK_FAILED)
+        {
+            failures.push(format!("{src}ran: {err}"));
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "{}",
+        failures.join(
+            "
 "
         )
     );
@@ -4766,4 +4915,206 @@ fn every_element_witness_keeps_its_index_and_traps_there() {
         }
     }
     assert!(failures.is_empty(), "{}", failures.join("\n\n"));
+}
+
+/// A table of row offsets and the reader its facts prove: `w` steps a state
+/// `s` through `d.next[s + byte]`. Each entry is a row offset at least 256
+/// before the table's end, or -256, and the table is at least 256 long.
+const REACH_HEAD: &str = r#"type D = { next: Array<Int64> }
+fn pad(d: modify D) {
+    d.next.push(0 - 256)
+}
+fn make() -> D {
+    let mut d = D { next: [] }
+    while d.next.length < 512 {
+        d.next.push(0 - 256)
+    }
+    d.next[3] = 256
+    return d
+}
+fn w(d: modify D, bytes: Array<UInt8>) -> Int64 {
+    let mut s = 0
+    let mut i = 0
+    while i < bytes.length {
+        let t = d.next[s + Int64(bytes[i])]
+        if t < 0 {
+            pad(d)
+            return s
+        }
+        s = t
+        i = i + 1
+    }
+    return s
+}
+"#;
+
+/// Programs that break a fact the read of [`REACH_HEAD`] needs, each a
+/// `main` with the trap its `w` raises.
+const REACH_WITNESSES: &[(&str, &str)] = &[
+    // A store of an entry with no reach past it.
+    (
+        r#"fn main() -> Int64 {
+    let mut d = make()
+    d.next[0] = 600
+    print(w(d, [0, 5]).toString())
+    return 0
+}
+"#,
+        "array index 605 out of bounds",
+    ),
+    // A push of an entry with no reach past it.
+    (
+        r#"fn main() -> Int64 {
+    let mut d = D { next: [] }
+    d.next.push(600)
+    while d.next.length < 512 {
+        d.next.push(0 - 256)
+    }
+    print(w(d, [0, 5]).toString())
+    return 0
+}
+"#,
+        "array index 605 out of bounds",
+    ),
+    // The table shrinks below an entry's reach.
+    (
+        r#"fn main() -> Int64 {
+    let mut d = D { next: [] }
+    while d.next.length < 600 {
+        d.next.push(0 - 256)
+    }
+    d.next[3] = 344
+    d.next.pop()
+    print(w(d, [3, 255]).toString())
+    return 0
+}
+"#,
+        "array index 599 out of bounds",
+    ),
+    // A table shorter than the first state's reach.
+    (
+        r#"fn main() -> Int64 {
+    let mut d = D { next: [] }
+    while d.next.length < 100 {
+        d.next.push(0 - 256)
+    }
+    print(w(d, [200]).toString())
+    return 0
+}
+"#,
+        "array index 200 out of bounds",
+    ),
+    // A record decoded by `fromJson` holds any entry.
+    (
+        r#"fn main() -> Int64 {
+    let mut d = make()
+    match fromJson<D>("{\"next\": [600]}") {
+        Valid(x) => {
+            d = x
+        }
+        Invalid(_) => {}
+    }
+    print(w(d, [0, 5]).toString())
+    return 0
+}
+"#,
+        "array index 605 out of bounds",
+    ),
+];
+
+/// A `main` for [`REACH_HEAD`] with `w`'s state stepping past its reach on
+/// each turn (`s = s + 300`), and the trap it raises.
+const REACH_COUNTER: (&str, &str) = (
+    r#"fn main() -> Int64 {
+    let mut d = make()
+    print(w(d, [3, 255]).toString())
+    return 0
+}
+"#,
+    "array index 555 out of bounds",
+);
+
+#[test]
+fn a_row_offset_and_a_byte_prove_the_tables_read() {
+    let root = format!(
+        "{REACH_HEAD}fn main() -> Int64 {{\n    let mut d = make()\n    \
+         print(w(d, [3, 7]).toString())\n    return 0\n}}\n"
+    );
+    let (_dir, file) = modules(&root, &[]);
+    assert_eq!(
+        rows_of(&file, "w"),
+        ["proved array-index", "proved array-index"]
+    );
+}
+
+#[test]
+fn every_reach_witness_keeps_its_index_and_traps_there() {
+    let counter = REACH_HEAD.replace(
+        "        s = t
+",
+        "        s = s + 300
+",
+    );
+    let (main, trap) = REACH_COUNTER;
+    let roots = (REACH_WITNESSES.iter())
+        .map(|(main, trap)| (format!("{REACH_HEAD}{main}"), *trap))
+        .chain([(format!("{counter}{main}"), trap)]);
+    let mut failures = Vec::new();
+    for (root, trap) in roots {
+        let (dir, file) = modules(&root, &[]);
+        let rows = rows_of(&file, "w");
+        if rows != ["proved array-index", "check array-index"] {
+            failures.push(format!("{root}\nrows: {rows:?}"));
+        }
+        let (err, _) = run_oracle(&dir, &file, "w");
+        if !err.contains(trap) || err.contains(vyrn_frontend::trap::PROVED_CHECK_FAILED) {
+            failures.push(format!("{root}\nran: {err}"));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n\n"));
+}
+
+/// Two fields one literal builds empty and a loop grows, read as equally
+/// long by `w`; `{push}` is the loop's pushes.
+const EQUAL_FIELDS: &str = r#"type E = { a: Array<Int64>, b: Array<Int64> }
+fn w(e: E, i: Int64) -> Int64 {
+    if i < e.a.length {
+        return e.b[i]
+    }
+    return 0
+}
+fn make(n: Int64) -> E {
+    let mut e = E { a: [], b: [] }
+    let mut k = 0
+    while k < n {
+{push}        k = k + 1
+    }
+    return e
+}
+fn main() -> Int64 {
+    print(w(make(3), {at}).toString())
+    return 0
+}
+"#;
+
+#[test]
+fn two_fields_a_loop_grows_in_step_stay_equally_long() {
+    let push = "        e.a.push(k)\n        e.b.push(k)\n";
+    let root = EQUAL_FIELDS.replace("{push}", push).replace("{at}", "2");
+    let (_dir, file) = modules(&root, &[]);
+    assert_eq!(rows_of(&file, "w"), ["proved array-index"]);
+}
+
+#[test]
+fn two_fields_grown_out_of_step_keep_the_index_and_trap_there() {
+    let push = "        e.a.push(k)\n        e.a.push(k)\n        e.b.push(k)\n";
+    let root = EQUAL_FIELDS.replace("{push}", push).replace("{at}", "4");
+    let (dir, file) = modules(&root, &[]);
+    assert_eq!(rows_of(&file, "w"), ["check array-index"]);
+    let (err, _) = run_oracle(&dir, &file, "w");
+    assert!(err.contains("array index 4 out of bounds"), "{err}");
+    assert!(
+        !err.contains(vyrn_frontend::trap::PROVED_CHECK_FAILED),
+        "{err}"
+    );
 }
