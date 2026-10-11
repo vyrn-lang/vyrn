@@ -212,7 +212,9 @@ that assumes no record fact. `elide::invariants` keeps a fact only when each bod
 builds such a record or writes one of its fields proves it wherever the
 value leaves the name, and a walk assumes it of every record name it did not
 build. An element fact bounds every element of an integer array field: at
-least zero and below the length of another field of the record. It holds
+least zero, and below the length of a field of the record by one, or by the
+reach of a column a check adds to the element (`elide::reach`: `s + x`, `x`
+a narrow unsigned value or a mask). It holds
 when each store into an element and each push onto the field proves the
 bound where it runs, a record literal's field is empty or a copy of another
 record's with a bounding field at least as long, no row shortens the
