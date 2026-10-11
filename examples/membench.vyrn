@@ -291,7 +291,7 @@ fn slotsChurn(n: Int64) -> Int64 {
 /// `slotsChurn` builds one slab and works it a thousand times, so the declared
 /// release runs once and disappears into the row. This one builds and abandons a
 /// slab per turn, so every turn pays the whole release: a walk of the table plus
-/// five `free`s. Sixteen elements, which is a small container — the cost per
+/// four `free`s. Sixteen elements, which is a small container — the cost per
 /// container is what a program that makes many short-lived ones pays, and it
 /// never had a Path B counterpart to compare against: a global slab has no
 /// per-container lifetime at all.

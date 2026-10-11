@@ -26,16 +26,16 @@ export type Handle<T> = { slot: Int64, gen: Int64, owner: Int64 }
 
 /// A generational slab.
 ///
-/// `vals` and `gens` are parallel and indexed by slot; `free` holds the unused
-/// slots. `dense` holds the live slots in iteration order and `denseAt` maps a
-/// slot back to its position in `dense` (-1 when free), so `remove` is O(1) and
-/// iteration skips free slots.
+/// `vals` and `gens` are parallel and indexed by slot. `dense` orders every
+/// slot, the live ones in iteration order and then the last `free`, the most
+/// recently freed first. `denseAt` maps a slot back to its position, so
+/// `remove` is O(1) and iteration skips free slots.
 export type Slots<T> = {
     vals: Array<T>,
     gens: Array<Int64>,
-    free: Array<Int64>,
     dense: Array<Int64>,
     denseAt: Array<Int64>,
+    free: Int64,
     owner: Int64,
 }
 
@@ -53,9 +53,9 @@ export fn newSlots<T>() -> Slots<T> {
     return Slots {
         vals: [],
         gens: [],
-        free: [],
         dense: [],
         denseAt: [],
+        free: 0,
         owner: takeIdentity(),
     }
 }
@@ -63,19 +63,17 @@ export fn newSlots<T>() -> Slots<T> {
 /// Puts `v` in the slab and returns a handle to it. Reuses a free slot when there
 /// is one, and the store releases the dead payload it held.
 export fn insert<T>(s: modify Slots<T>, v: consume T) -> Handle<T> {
-    if s.free.length > 0 {
-        let i = s.free[s.free.length - 1]
-        s.free.pop()
+    if s.free > 0 {
+        let i = s.dense[s.dense.length - s.free]
         s.vals[i] = v
-        s.denseAt[i] = s.dense.length
-        s.dense.push(i)
+        s.free = s.free - 1
         return Handle { slot: i, gen: s.gens[i], owner: s.owner }
     }
     let i = s.vals.length
     s.vals.push(v)
     s.gens.push(1)
-    s.denseAt.push(s.dense.length)
     s.dense.push(i)
+    s.denseAt.push(i)
     return Handle { slot: i, gen: 1, owner: s.owner }
 }
 
@@ -84,10 +82,10 @@ export fn insert<T>(s: modify Slots<T>, v: consume T) -> Handle<T> {
 /// on, and a free slot: `remove` sets the generation the next `insert` will
 /// issue, so a handle built by hand can match a free slot's generation.
 export fn alive<T>(s: Slots<T>, h: Handle<T>) -> Bool {
-    if h.owner != s.owner || h.slot < 0 || h.slot >= s.gens.length {
+    if h.owner != s.owner || h.slot < 0 || h.slot >= s.gens.length || s.gens[h.slot] != h.gen {
         return false
     }
-    return s.gens[h.slot] == h.gen && s.denseAt[h.slot] >= 0
+    return s.denseAt[h.slot] < s.dense.length - s.free
 }
 
 /// The element `h` names, copied out, or `None` when `h` is not alive.
@@ -108,22 +106,21 @@ export fn remove<T>(s: modify Slots<T>, h: Handle<T>) -> Bool {
     if !alive(s, h) {
         return false
     }
-    // Move the last live element into this one's place in `dense`, so the walk
-    // stays contiguous.
     let d = s.denseAt[h.slot]
-    let last = s.dense[s.dense.length - 1]
+    let end = s.dense.length - s.free - 1
+    let last = s.dense[end]
     s.dense[d] = last
     s.denseAt[last] = d
-    s.dense.pop()
+    s.dense[end] = h.slot
+    s.denseAt[h.slot] = end
+    s.free = s.free + 1
     s.gens[h.slot] = h.gen + 1
-    s.denseAt[h.slot] = 0 - 1
-    s.free.push(h.slot)
     return true
 }
 
 /// How many elements are live.
 export fn count<T>(s: Slots<T>) -> Int64 {
-    return s.dense.length
+    return s.dense.length - s.free
 }
 
 /// How many slots the table holds, live and free together.
@@ -134,8 +131,11 @@ export fn capacity<T>(s: Slots<T>) -> Int64 {
 /// A handle to every live element, in iteration order.
 export fn handles<T>(s: Slots<T>) -> Array<Handle<T>> {
     let mut out: Array<Handle<T>> = []
-    for slot in s.dense {
+    let mut k = 0
+    while k < s.dense.length - s.free {
+        let slot = s.dense[k]
         out.push(Handle { slot: slot, gen: s.gens[slot], owner: s.owner })
+        k = k + 1
     }
     return out
 }
@@ -169,14 +169,14 @@ impl<T> Index for Slots<T> {
 /// `for x in s` walks the live elements in `dense` order.
 impl<T> Iterate for Slots<T> {
     fn size(self) -> Int64 {
-        return self.dense.length
+        return self.dense.length - self.free
     }
     fn nth(read self, i: Int64) -> read T {
         return self.vals[self.dense[i]]
     }
 }
 
-/// Releases the five buffers. `drop vals` also releases every payload in `vals`,
+/// Releases the four buffers. `drop vals` also releases every payload in `vals`,
 /// removed ones included: every slot below `vals.length` holds exactly one
 /// payload this slab owns, because `insert` consumes and a store releases what it
 /// replaces. Do not add a loop over `vals` as well: it frees each payload twice.
@@ -186,8 +186,6 @@ impl<T> Owned for Slots<T> {
         drop vals
         let gens = consume self.gens
         drop gens
-        let free = consume self.free
-        drop free
         let dense = consume self.dense
         drop dense
         let denseAt = consume self.denseAt
@@ -202,9 +200,9 @@ impl<T> Copy for Slots<T> {
         return Slots {
             vals: self.vals.copy(),
             gens: self.gens.copy(),
-            free: self.free.copy(),
             dense: self.dense.copy(),
             denseAt: self.denseAt.copy(),
+            free: self.free,
             owner: takeIdentity(),
         }
     }
