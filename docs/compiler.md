@@ -224,7 +224,9 @@ each read between two such rows is one value, and a store defines it. `World::bo
 when an emitter first reads it. A direct call's result takes the facts every
 return of its callee proves (`elide::summaries`, keyed by `FnId`, solved once
 per World by `fixpoint::descend`); a call through a value, a method, a
-projection or a generic instance takes none. For an `Option` of an integer
+projection or a generic instance takes none. A result exactly as long as a
+`consume` parameter takes the argument's length as it was before the call
+(`elide::Walk::same_length`). For an `Option` of an integer
 the facts are its payload's, over every `Some` return (a `None` proves them
 all), and the binder of a `Some` arm takes them (`elide::some_binder`). A private function that only
 direct call rows enter starts with the facts every such row proves of its

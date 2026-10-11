@@ -1505,10 +1505,11 @@ fn direct_call(rhs: &Rhs) -> Option<FnId> {
 /// those the body never writes. An `UInt64` is left out: the facts read its
 /// values above `i64::MAX` as negatives. An integer result equals `c` when
 /// every return returns the literal `c` ([`constant_result`]). An array
-/// result is at least `c` long for each `c` of
-/// `needed` ([`needed_lengths`]) the body can make ([`made_lengths`]), and
-/// at least `p` long for each integer parameter `p` it can make. A Bool
-/// result takes the candidates of [`truth_templates`].
+/// result is at least as long as each array or String parameter, at most as
+/// long as each `consume` one, at least `c` long for each `c` of `needed`
+/// ([`needed_lengths`]) the body can make ([`made_lengths`]), and at least
+/// `p` long for each integer parameter `p` it can make. A Bool result takes
+/// the candidates of [`truth_templates`].
 fn templates(body: &Body, decls: &HashMap<String, TypeDecl>, needed: &BTreeSet<i64>) -> Summary {
     let params: Vec<Kind> = (body.params.iter())
         .map(|p| kind_of(&body.names[p.index()].ty, decls))
@@ -1573,6 +1574,15 @@ fn templates(body: &Body, decls: &HashMap<String, TypeDecl>, needed: &BTreeSet<i
         } else {
             let r = Lin::of(r);
             post.extend(seqs.iter().filter_map(|a| r.sub(a)));
+            // At most as long as a `consume` parameter: the only kind
+            // `Walk::same_length` reads.
+            let owned = |k: usize| !body.names[body.params[k].index()].borrow;
+            let consumed = interface(
+                &params,
+                |k, kind| usable(k) && kind == Kind::Seq && owned(k),
+                Term::Len,
+            );
+            post.extend(consumed.iter().filter_map(|a| a.sub(&r)));
             // A bound the body makes: a needed constant, or an integer
             // parameter in `ints`.
             let param = |n: Name| {
@@ -2998,9 +3008,41 @@ impl<'a> Walk<'a> {
             },
             _ => {}
         }
+        self.same_length(st, n, rhs);
         self.range(st, n);
         self.effects(st, rhs);
         self.called(st, n, rhs);
+    }
+
+    /// Defines the length of `n = rhs`, a direct call, as a `consume`
+    /// argument's, where the callee's summary states its result exactly as
+    /// long as that parameter. It reads the argument before the call's
+    /// effects forget it, so what the state knows of the argument's length
+    /// carries over to the result ([`State::kill`]).
+    fn same_length(&self, st: &mut State, n: Name, rhs: &Rhs) {
+        let Some((_, s)) = self.sums.call(rhs).and_then(|g| self.sums.get(g)) else {
+            return;
+        };
+        let Rhs::Call { args, .. } = rhs else { return };
+        if self.kind(n) != Kind::Seq || args.len() != s.params.len() {
+            return;
+        }
+        let r = Lin::of(Term::Len(Name(0)));
+        let exact = |p: &Lin| {
+            [r.sub(p), p.sub(&r)]
+                .iter()
+                .flatten()
+                .all(|f| s.post.contains(f))
+        };
+        let len = (0..args.len())
+            .filter(|&k| args[k].1 == Capability::Consume && s.params[k] == Kind::Seq)
+            .find_map(|k| {
+                let p = Term::Len(Name(k as u32 + 1));
+                exact(&Lin::of(p)).then(|| self.arg(p, &args[k].0, Kind::Seq))?
+            });
+        if let Some(l) = len {
+            st.define(Term::Len(n), &l);
+        }
     }
 
     /// Assumes what the callee's summary states of `n = rhs`, a direct call,

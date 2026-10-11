@@ -653,6 +653,76 @@ fn a_generic_instances_result_proves_its_callers_index() {
     );
 }
 
+/// A function that hands back the array it takes by `consume`, exactly as
+/// long, gives its result the argument's length in the caller. A callee that
+/// pops on one path, pushes on one path, or returns its other parameter
+/// keeps the caller's check.
+#[test]
+fn a_result_as_long_as_its_consume_argument_proves_its_callers_index() {
+    let keep = |body: &str| {
+        format!(
+            "fn keep(p: consume Array<Int64>, q: consume Array<Int64>, k: Int64) -> Array<Int64> {{
+{body}
+}}
+fn w(x: Int64) -> Int64 {{
+    let u = [1, 2, 3, 4, 5]
+    let t = keep([1, 2, 3, 4, 5], [1, 2, 3, 4], x)
+    return u[t.length - 1] + t[4]
+}}
+"
+        )
+    };
+    let path = |row: &str| {
+        format!(
+            "    let mut a = p
+    if k > 3 {{
+        {row}
+    }}
+    return a"
+        )
+    };
+    let proof = keep(&path("a[0] = k"));
+    assert_eq!(
+        verdicts(&proof, "w"),
+        ["proved array-index", "proved array-index"],
+        "{proof}"
+    );
+    let (err, _) = oracle(&proof, "    print(w(5).toString())", "w");
+    assert_eq!(err, "");
+    let witnesses = [
+        (path("a.pop()"), "array index 4 out of bounds"),
+        (path("a.push(0)"), "array index 5 out of bounds"),
+        ("    return q".to_string(), "array index 4 out of bounds"),
+    ];
+    let mut failures = Vec::new();
+    for (body, trap) in witnesses {
+        let src = keep(&body);
+        let rows = verdicts(&src, "w");
+        if !rows.contains(&"check array-index".to_string()) {
+            failures.push(format!(
+                "{src}
+rows: {rows:?}"
+            ));
+        }
+        let (err, _) = oracle(&src, "    print(w(5).toString())", "w");
+        if !err.contains(trap) || err.contains(vyrn_frontend::trap::PROVED_CHECK_FAILED) {
+            failures.push(format!(
+                "{src}
+ran: {err}"
+            ));
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "{}",
+        failures.join(
+            "
+
+"
+        )
+    );
+}
+
 #[test]
 fn a_loop_condition_under_and_proves_its_index() {
     let src = "fn w(xs: Array<Int64>) -> Int64 {
