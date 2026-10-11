@@ -7891,7 +7891,7 @@ pub fn augment(program: &Program, w: &mut World, judging: bool) {
     drop((tops, late));
     w.reached = reached;
     w.allocating = allocating;
-    w.state_uses = uses;
+    w.state_uses = Arc::new(uses);
     for (s, r) in (states.iter_mut().filter(|s| s.built().is_some())).zip(read) {
         s.kept = r;
     }

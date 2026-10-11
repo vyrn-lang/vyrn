@@ -57,7 +57,7 @@ pub struct World {
     pub(crate) allocating: HashMap<FnId, Arc<str>>,
     /// What a call into each frame the placer built may do to module state, as
     /// the effect judgment found it: what [`World::state_use`] answers.
-    pub(crate) state_uses: HashMap<FnId, crate::effects::StateUse>,
+    pub(crate) state_uses: Arc<HashMap<FnId, crate::effects::StateUse>>,
     /// What every entry and every return of each directly called body
     /// states, made once from `bodies` when an emitter first decides one
     /// ([`World::summaries`]).
@@ -447,7 +447,8 @@ impl World {
                 }
             }
             let types = self.ownership.proto.types();
-            crate::elide::summaries(bodies, types, &closed, records, instances)
+            let state = Arc::clone(&self.state_uses);
+            crate::elide::summaries(bodies, types, &closed, records, instances, state)
         })
     }
 

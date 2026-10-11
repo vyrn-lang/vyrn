@@ -220,7 +220,11 @@ bounding field, and no row changes the elements where no walk sees it
 (`elide::element_scan`); a read of an element assumes it. A fact may name the value of a
 record name's integer field (`facts::Term::Field`): by the kernel's
 exclusivity judgment only a row that names the record writes the field, so
-each read between two such rows is one value, and a store defines it. `World::body_of` decides a body
+each read between two such rows is one value, and a store defines it. A
+check on a global's array field reads the length of a borrow of the global
+while the state holds the borrow fresh (`facts::State::fresh`); a row the
+effect judgment says may write the global ends that (`elide::Walk::stale`).
+`World::body_of` decides a body
 when an emitter first reads it. A direct call's result takes the facts every
 return of its callee proves (`elide::summaries`, keyed by `FnId`, solved once
 per World by `fixpoint::descend`); a call through a value, a method, a
