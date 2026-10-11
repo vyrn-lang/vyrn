@@ -3,18 +3,10 @@
 ///     import { demoCode } from "./demohl"
 ///     import { demoHl } from demoCode("../data/demo.json")
 ///
-/// Two of the seven steps in `A minute with Vyrn` print a FILE — the project
-/// the first step wrote, and the same file after a rule is added — so their
-/// "output" is Vyrn source, and on the page it was one grey wall (user: "no
-/// colors in window"). Source is coloured by `lex()`, and `lex()` is callable
-/// only from a generator's own body, which is why this file exists at all:
-/// the demo's data is read here, at compile time, and each step's output
-/// arrives on the page already marked up.
-///
-/// A step whose output is a TRANSCRIPT is left to `shellOutHtml` in
-/// `code.vyrn`, which speaks the shell's three voices. The two are told apart
-/// by asking the lexer: source that lexes into something with a declaration
-/// keyword in it is source, and everything else is what a command printed.
+/// Two steps of the index's demo print a file, so their output is Vyrn source.
+/// `lex()` runs only inside a generator, so this generator reads the recording
+/// at compile time and emits each source step already coloured. A step whose
+/// output is a transcript is left to `shellOutHtml` in `code.vyrn`.
 import { highlightSrc } from "./hl"
 import { quoted, branch, lookup } from "./gensrc"
 import { substring, split, joinWith, indexOf } from "std/strings"
@@ -38,12 +30,11 @@ export gen fn demoCode(path: String) -> String {
     return out + lookup("demoHl", "id", "String", hits, "\"\"")
 }
 
-/// Every `{ "id": …, "out": … }` in the recorder's file, as `[id, out]`.
+/// Every `{ "id": ..., "out": ... }` in the recorder's file, as `[id, out]`.
 ///
-/// A hand walk rather than the JSON reader: this runs inside a generator,
-/// where the whole standard library is not reachable, and the file is written
-/// by `scripts/site-demo.py` in one shape — two string fields, escaped the way
-/// JSON escapes them.
+/// A hand walk rather than the JSON reader, because this runs inside a
+/// generator. `scripts/site-demo.py` writes one shape: string fields, escaped
+/// as JSON escapes them.
 fn stepsOf(raw: String) -> Array<Array<String>> {
     let mut out: Array<Array<String>> = []
     let mut rest = raw.copy()
@@ -71,8 +62,6 @@ fn fieldAfter(s: String, key: String) -> Array<String> {
     let mut none: Array<String> = []
     none.push("")
     none.push("")
-    // `return` is a statement, so the two lookups are if-lets rather than
-    // match arms.
     let mut at = 0
     if let Some(i) = indexOf(s, key) {
         at = i
@@ -110,8 +99,8 @@ fn unescapeJson(s: String) -> String {
     return joinWith(split(joinWith(split(s, "\\n"), "\n"), "\\\""), "\"")
 }
 
-/// Whether an output is a program rather than a transcript. A recorded
-/// listing of files or a test report has no declaration in it; a file does.
+/// Whether an output is a program rather than a transcript: a file listing or
+/// a test report holds no declaration, and a source file does.
 fn looksLikeSource(text: String) -> Bool {
     return contains(text, "fn ") || startsWith(text, "type ") || contains(text, "\ntype ")
 }
