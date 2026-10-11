@@ -7,10 +7,7 @@
 //
 // Run: node --test site/test/breakpoints.test.mjs
 import { test } from "node:test";
-import { readFile } from "node:fs/promises";
-import { fileURLToPath } from "node:url";
-
-const css = await readFile(fileURLToPath(new URL("../public/style.css", import.meta.url)), "utf8");
+import { sheet as css } from "./sheet.mjs";
 
 // Every width-conditioned block, with the rules it holds, in source order.
 function widthBlocks(src) {

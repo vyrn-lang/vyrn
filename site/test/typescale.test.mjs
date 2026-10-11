@@ -10,12 +10,8 @@
 // The stylesheet is a committed file, so this runs before any build.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
 import { gzipSync } from "node:zlib";
-import path from "node:path";
-
-const SHEET = path.resolve(import.meta.dirname, "../public/style.css");
-const css = await readFile(SHEET, "utf8");
+import { sheet as css } from "./sheet.mjs";
 
 // Comments carry example sizes, so they are removed
 // before anything below counts a declaration.

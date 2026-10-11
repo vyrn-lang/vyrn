@@ -8,10 +8,9 @@
 // Run: node --test site/test/codeblocks.test.mjs
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
+import { sheet } from "./sheet.mjs";
 
-const CSS = readFileSync(fileURLToPath(new URL("../public/style.css", import.meta.url)), "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
+const CSS = sheet.replace(/\/\*[\s\S]*?\*\//g, "");
 
 /// The declarations of the first rule whose selector is exactly `selector`.
 function rule(selector) {

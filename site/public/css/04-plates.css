@@ -1,0 +1,86 @@
+.eyebrow {
+  font: var(--t-eyebrow)/1.4 var(--mono);
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--muted);
+  margin: 0 0 var(--s1);
+}
+
+.display {
+  font-family: var(--sans-d);
+  font-size: var(--t-display);
+  line-height: 0.95;
+  letter-spacing: -0.042em;
+  font-weight: 720;
+}
+
+h2, .cards h3 { font-family: var(--sans-d); letter-spacing: -0.02em; font-weight: 700; }
+
+.lede { font-size: var(--t-lede); line-height: 1.5; color: var(--muted); max-width: var(--measure); }
+
+.prose { max-width: var(--measure); }
+.prose > p, .prose > ul, .prose > dl { margin-top: var(--s3); line-height: 1.65; }
+.prose h2 { margin-top: var(--s6); font-size: var(--t-h3); }
+.prose h3 { margin-top: var(--s4); font-size: var(--t-h4); }
+
+.pill {
+  display: inline-flex;
+  align-items: center;
+  min-height: 28px;
+  font: var(--t-key)/1 var(--mono);
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  padding: 0 10px;
+  border: 1px solid var(--rule);
+  color: var(--muted);
+}
+.plate-head [data-play-status]::before {
+  content: ""; width: 7px; height: 7px; border-radius: 50%; flex: none;
+  background: var(--accent);
+  animation: breathe 2.4s var(--expo) infinite;
+}
+.plate-head [data-play-status] { display: inline-flex; align-items: center; gap: 7px; }
+@keyframes breathe { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
+@media (prefers-reduced-motion: reduce) { .plate-head [data-play-status]::before { animation: none; } }
+
+.plate {
+  border: 1px solid var(--rule);
+  margin-top: var(--s4);
+  background: color-mix(in oklab, var(--plate) 45%, transparent);
+}
+
+.plate-head {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  flex-wrap: wrap;
+  padding: var(--s2);
+  border-bottom: 1px solid var(--hair);
+}
+.plate-head .eyebrow { margin: 0; }
+.plate-head .spacer { flex: 1; }
+
+.stage { padding: var(--s2); }
+
+.cap {
+  border-top: 1px solid var(--hair);
+  padding: var(--s1) var(--s2);
+  font: var(--t-eyebrow)/1.6 var(--mono);
+  color: var(--muted);
+  margin: 0;
+}
+
+button, .btn {
+  font: 500 var(--t-mono)/1 var(--sans);
+  padding: 8px 12px;
+  border: 1px solid var(--hair);
+  background: color-mix(in oklab, var(--ink) 4%, transparent);
+  color: var(--ink);
+  cursor: pointer;
+  transition: border-color 160ms var(--expo), color 160ms var(--expo), background 160ms var(--expo), transform 160ms var(--overshoot);
+}
+button:hover, .btn:hover { border-color: color-mix(in oklab, var(--accent) 55%, transparent); color: var(--accent); }
+button:active { transform: translateY(1px); }
+button[aria-pressed="true"], button.on { border-color: var(--accent); color: var(--accent); }
+
+.controls { display: flex; gap: var(--s1); flex-wrap: wrap; }

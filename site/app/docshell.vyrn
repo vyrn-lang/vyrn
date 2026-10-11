@@ -1,5 +1,5 @@
 /// The documentation shell's data: the sidebar trees, the pager and the docs
-/// subnav. `.page.docs` in `site/public/style.css` lays it out.
+/// subnav. `.page.docs` in `site/public/css/03-docs-shell.css` lays it out.
 ///
 /// Every row is generated: the reference tree from `apiGroups()`, an area's
 /// tree from its chapters. The pager walks the tree the sidebar prints, so the

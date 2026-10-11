@@ -1,0 +1,62 @@
+.scroller { overflow-x: auto; scrollbar-width: none; }
+.scroller::-webkit-scrollbar { display: none; }
+.scroller td code { white-space: nowrap; }
+table { width: 100%; min-width: 30rem; border-collapse: collapse; margin-top: var(--s3); font-size: var(--t-note); }
+th, td { text-align: left; padding: 10px var(--s2) 10px 0; border-bottom: 1px solid var(--hair); vertical-align: top; }
+th { font: var(--t-key)/1.4 var(--mono); letter-spacing: 0.1em; text-transform: uppercase; color: var(--muted); }
+
+table.matrix { font-size: var(--t-matrix); min-width: 46rem; }
+table.matrix th[scope="row"] { font: var(--t-key)/1.4 var(--mono); letter-spacing: 0.02em; color: var(--muted); width: 8rem; }
+table.matrix td { padding-right: var(--s2); }
+table.matrix tbody tr:hover td, table.matrix tbody tr:hover th { background: color-mix(in oklab, var(--accent) 7%, transparent); }
+
+table.matrix caption { caption-side: bottom; text-align: left; padding-top: var(--s2); font-size: var(--t-cap); color: var(--muted); }
+
+ol.plain { list-style: decimal; padding-left: var(--s3); margin: var(--s3) 0 0; }
+ol.plain li { padding: var(--s1) 0; }
+ol.plain .note { display: block; color: var(--muted); font-size: var(--t-meta); }
+
+.tabs { display: flex; gap: 0; margin-top: var(--s3); border-bottom: 1px solid var(--rule); overflow-x: auto; scrollbar-width: none; }
+.tabs::-webkit-scrollbar { display: none; }
+.tabs button { border: 0; border-bottom: 2px solid transparent; margin-bottom: -1px; white-space: nowrap; }
+.tabs button[aria-selected="true"] { border-bottom-color: var(--accent); color: var(--accent); }
+
+.panes { display: grid; grid-template-columns: minmax(0, 1fr); }
+.panes > div { grid-area: 1 / 1; }
+.panes > div[hidden] { display: block; visibility: hidden; }
+.panes .refuses { margin-top: var(--s2); color: var(--muted); font-size: var(--t-meta); }
+.panes .lede.pane-lede { font-size: var(--t-body); }
+
+dl.nongoals { margin: var(--s3) 0 0; }
+dl.nongoals dt { font-weight: 620; margin-top: var(--s3); }
+dl.nongoals dd { margin: 6px 0 0; color: var(--muted); }
+
+ul.plain { list-style: none; padding: 0; margin: var(--s3) 0 0; }
+ul.plain li { padding: var(--s2) 0; border-bottom: 1px solid var(--hair); }
+ul.plain li > span, ul.plain .note { display: block; color: var(--muted); font-size: var(--t-meta); margin-top: 4px; }
+
+.notice {
+  margin-top: var(--s3);
+  padding: var(--s2);
+  border: 1px solid var(--rule);
+  background: color-mix(in oklab, var(--plate) 45%, transparent);
+  color: var(--muted);
+  font-size: var(--t-note);
+  max-width: var(--wide);
+}
+
+.staged > * { opacity: 0; transform: translateY(10px); }
+.entered > * { opacity: 1; transform: none; transition: opacity 420ms var(--expo), transform 420ms var(--expo); }
+.entered > *:nth-child(2) { transition-delay: 30ms; }
+.entered > *:nth-child(3) { transition-delay: 60ms; }
+.entered > *:nth-child(4) { transition-delay: 90ms; }
+
+@media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior: auto; }
+  *, *::before, *::after { animation-duration: 1ms !important; transition-duration: 1ms !important; }
+  .staged > * { opacity: 1; transform: none; }
+}
+
+@media (forced-colors: active) {
+  .pill { border: 1px solid; }
+}
