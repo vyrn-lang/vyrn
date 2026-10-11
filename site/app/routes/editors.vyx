@@ -16,9 +16,8 @@ fn target() -> String {
 <template>
 <main class="page">
     <section class="hero">
-        <p class="eyebrow">Moved</p>
-        <h1 class="display">Editors is now under Docs</h1>
-        <p class="lede">Nothing was deleted. <a :href="target()">Read the editors page</a>.</p>
+        <h1 class="display">Page moved</h1>
+        <p class="lede">This page moved to <a :href="target()">Editors</a>.</p>
     </section>
 </main>
 </template>

@@ -18,9 +18,8 @@ fn target() -> String {
 <template>
 <main class="page">
     <section class="hero">
-        <p class="eyebrow">Moved</p>
-        <h1 class="display">This page has its own shelf now</h1>
-        <p class="lede">Nothing was deleted. <a :href="target()">Read it there</a>.</p>
+        <h1 class="display">Page moved</h1>
+        <p class="lede">This page moved to <a :href="target()">Views and HTML</a>.</p>
     </section>
 </main>
 </template>

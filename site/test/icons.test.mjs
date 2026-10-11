@@ -41,7 +41,6 @@ const SHELL_MARK = "Source on GitHub";
 /// keyed by the path under `routes/`, because each directory of routes has its
 /// own `index.vyx`.
 const PAGE_TAGS = {
-  "install.vyx": "install.html",
   "docs/index.vyx": "docs.html",
   // The two hand-written leaves, each with its own page-actions menu glyphs.
   "docs/graph.vyx": "docs/graph.html",

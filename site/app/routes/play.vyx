@@ -60,9 +60,8 @@ fn examples() -> Array<Example> {
             <!-- The Welcome view: the examples, as templates a file is created
                  from. Shown when no file is open. -->
             <div class="welcome" data-play-welcome hidden="hidden">
-                <p class="eyebrow">Start</p>
-                <h2>Type Vyrn. Run it here.</h2>
-                <p class="wnote">The compiler front end runs in this tab as WebAssembly. Files live in this browser and are here when you come back.</p>
+                <h2>Start</h2>
+                <p class="wnote">The compiler front end runs in this tab as WebAssembly. Files are stored in this browser.</p>
                 <button type="button" class="tpl new" data-play-newfile><span class="tn">New file</span><span class="d">An empty .vyrn, named by you</span></button>
                 <p class="eyebrow">Templates</p>
                 <div class="tplgrid">

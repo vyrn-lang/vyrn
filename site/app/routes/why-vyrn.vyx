@@ -69,25 +69,22 @@ fn capabilities() -> Array<Capability> {
         <a href="#intent"><span class="n">01</span>intent</a>
         <a href="#rules"><span class="n">02</span>rules</a>
         <a href="#ownership"><span class="n">03</span>ownership</a>
-        <a href="#refuses"><span class="n">04</span>refusals</a>
+        <a href="#refuses"><span class="n">04</span>non-goals</a>
         <a href="#predictable"><span class="n">05</span>predictability</a>
     </aside>
         <section class="hero" id="intent">
-            <p class="eyebrow">Philosophy</p>
-            <h1 class="display">Intent over mechanism</h1>
+            <h1 class="display">Why Vyrn</h1>
             <p class="lede">State what must be true of a value, and let the compiler decide how to keep it true. State what a function does with its argument, and let the compiler decide when the memory goes back.</p>
         </section>
 
         <section class="band" id="rules">
-            <p class="eyebrow">a rule is part of a type</p>
-            <h2>The check you cannot forget</h2>
+            <h2>Validated types</h2>
             <p>A validated type carries its <code>where</code> clause everywhere it goes. The compiler refuses what it can prove invalid and erases the check where it can prove valid. Everywhere else it emits the check, which means every boundary a value arrives at. <a href="/play.html">The playground runs one</a>.</p>
         </section>
 
         <section class="band" id="ownership">
-            <p class="eyebrow">ownership is declared</p>
-            <h2>Three words, and no lifetime syntax</h2>
-            <p>A parameter says what the function intends. Nothing is inferred, so there is nothing to fight.</p>
+            <h2>Ownership</h2>
+            <p>A parameter states what the function does with its argument. Nothing is inferred, and there is no lifetime syntax.</p>
             <div class="plate" data-tabs>
                 <div class="plate-head">
                     <span class="pill">The three words</span>
@@ -110,8 +107,7 @@ fn capabilities() -> Array<Capability> {
         </section>
 
         <section class="band" id="refuses">
-            <p class="eyebrow">non-goals</p>
-            <h2>What Vyrn refuses</h2>
+            <h2>Non-goals</h2>
             <dl class="nongoals">
                 <div v-for="g in nonGoals()" :key="g.what">
                     <dt>{{ g.what }}</dt>
@@ -121,9 +117,8 @@ fn capabilities() -> Array<Capability> {
         </section>
 
         <section class="band" id="predictable">
-            <p class="eyebrow">predictability</p>
-            <h2>The same program means the same thing</h2>
-            <p>The native binary and the WebAssembly module it is built from must agree byte for byte, floating point included. A language whose backends disagree has no meaning, only implementations. <a href="/benchmarks.html#programs">Every reading is published</a>, and the route harness fails CI when the bytes disagree.</p>
+            <h2>Predictability</h2>
+            <p>The native binary and the WebAssembly module it is built from must agree byte for byte, floating point included. <a href="/benchmarks.html#programs">Every reading is published</a>, and the route harness fails CI when the bytes disagree.</p>
         </section>
 </main>
 </template>

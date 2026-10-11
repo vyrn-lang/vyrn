@@ -12,7 +12,6 @@ import { Head } from "std/ui"
 import { pageHeadOf } from "../nav"
 import { shellHtml } from "../code"
 import { hasRelease, releaseTag, InstallTarget, installTargets, installScript } from "../repo"
-import { Icon } from "../icons"
 
 export fn head() -> Head {
     return pageHeadOf("/install")
@@ -87,7 +86,7 @@ fn scriptDownload(p: InstallTarget) -> String {
         <section class="hero mid">
             <p class="eyebrow">{{ kicker() }}</p>
             <h1 class="display">Install Vyrn</h1>
-            <p class="lede">One command, one self-contained binary, nothing else to install. Uninstalling is deleting a directory.</p>
+            <p class="lede">One command installs one self-contained binary. To uninstall, delete its directory.</p>
 
             <!-- Two radio buttons and no script. The inputs come first so
                  `:checked ~ .ospanes` reaches the panes, which the stylesheet
@@ -120,8 +119,7 @@ fn scriptDownload(p: InstallTarget) -> String {
 
         <section class="band split" id="verify">
             <div class="say">
-                <p class="eyebrow"><Icon name="bytesize:lock"/> Verified</p>
-                <h2>It refuses what it cannot check</h2>
+                <h2>Checksum verification</h2>
                 <p>Read the script before you run it: <a href="https://github.com/vyrn-lang/vyrn/blob/main/install.sh">install.sh</a>, <a href="https://github.com/vyrn-lang/vyrn/blob/main/install.ps1">install.ps1</a>.</p>
             </div>
             <ul class="plain">
@@ -132,7 +130,7 @@ fn scriptDownload(p: InstallTarget) -> String {
         </section>
 
         <section class="band" id="advanced">
-            <p class="eyebrow">Advanced</p>
+            <h2>Advanced</h2>
             <details class="disc">
                 <summary>Pin a version, check by hand, uninstall, build from source</summary>
                 <p>It installs one archive into <code>~/.vyrn/bin</code> — <code>%USERPROFILE%\.vyrn\bin</code> on Windows — and writes nothing outside it.</p>
@@ -160,8 +158,7 @@ fn scriptDownload(p: InstallTarget) -> String {
         </section>
 
         <section class="band" id="after">
-            <p class="eyebrow">Then</p>
-            <h2>Build something</h2>
+            <h2>Next steps</h2>
             <div class="cmd" data-copy>
                 <code v-html="shellHtml(firstRun())"></code>
                 <button type="button" data-copy-btn aria-label="Copy the run command">Copy</button>

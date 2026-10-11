@@ -113,7 +113,7 @@ fn kindOf(tag: String) -> String {
         </section>
 
         <section class="band" id="all">
-            <p class="eyebrow">Every release</p>
+            <h2>All releases</h2>
             <p v-if="releaseRows().length == 0">No version has been tagged. The table lists each tag, with its archives, once one is.</p>
             <div class="scroller" v-else>
                 <table>
@@ -132,8 +132,7 @@ fn kindOf(tag: String) -> String {
 
         <section class="band split" id="how">
             <div class="say">
-                <p class="eyebrow">How</p>
-                <h2>One tag, one archive per platform</h2>
+                <h2>Release process</h2>
                 <p>A <code>v*</code> tag builds <code>vyrn</code> for Linux, macOS and Windows, checks it against the crate version, and publishes one <code>SHA256SUMS</code> beside the archives. A suffix makes it a pre-release.</p>
             </div>
             <ul class="plain">
