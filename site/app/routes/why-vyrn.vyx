@@ -1,17 +1,9 @@
 <script>
-// GET /why-vyrn — the one page allowed to be quiet, and the page that carries
-// the non-goals.
+// GET /why-vyrn: the language's reasons and its non-goals. The stub at
+// `/philosophy` points here.
 //
-// It was `/philosophy`. `/philosophy.html` is still published, as a stub that
-// points here. One content link named this route and nothing outside the site
-// did, which is what made it the one page safe to move.
-//
-// It was a run of static prose. The claim a reader can actually test is now a
-// plate with a control: the capability words, one tab each with the code that
-// word produces. The prose around it says the one thing a plate cannot.
-//
-// The non-goals are the list in README.md's "Not in v1", with the reason each
-// one is refused.
+// One plate shows each capability word with the code it produces. The
+// non-goals are README.md's "Not in v1" list, each with its reason.
 import { Head } from "std/ui"
 import { pageHeadOf } from "../nav"
 import { vyrnHtml } from "../snippets"
@@ -108,12 +100,8 @@ fn capabilities() -> Array<Capability> {
                     <div v-for="c in capabilities()" :key="c.id" :data-pane="c.id">
                         <p class="lede pane-lede">{{ c.means }}</p>
                         <pre class="code" v-html="c.html"></pre>
-                        <!-- `.refuses` AND NOT `.cap`. What the
-                             compiler stops you doing is the pane's own claim —
-                             the whole reason the tab exists — and `.cap` is what
-                             the census counts against THE RULE's ceiling of one
-                             disclosure per plate. Three panes are three. The
-                             plate's real caption is the one under them. -->
+                        <!-- `.refuses`, not `.cap`: a plate carries one
+                             caption, and it is the one under the panes. -->
                         <p class="refuses">{{ c.refuses }}</p>
                     </div>
                 </div>

@@ -1,9 +1,5 @@
 <script>
-// GET /editors — a stub, for a bookmark and a search result.
-//
-// The page itself is `/docs/editors` now, folded into Docs as a leaf. See
-// `philosophy.vyx` beside this file for why a stub is the only mechanism a
-// static host has, and why the visible link below has to be there.
+// GET /editors: a redirect stub to `/tooling/editors` (see `philosophy.vyx`).
 import { Head } from "std/ui"
 import { pageHead, hrefOf } from "../nav"
 
@@ -11,8 +7,7 @@ export fn head() -> Head {
     return pageHead("Moved to Editors — Vyrn")
 }
 
-/// Where this stub sends a reader, written once. `export.vyrn` reads the same
-/// function to stamp the canonical and the refresh.
+/// Where this stub sends a reader.
 fn target() -> String {
     return hrefOf("/tooling/editors")
 }

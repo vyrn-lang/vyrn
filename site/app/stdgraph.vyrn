@@ -1,33 +1,17 @@
-/// The reference's search index and its import graph — what the standard
-/// library holds, and what depends on what.
+/// The reference's module index and its import graph, both from `deps.vyrn`'s
+/// reading of the `import` lines.
 ///
-/// Both belong to `/docs`. They were the whole of `/explore`, and
-/// `/explore` answered no question the reference could not; the reference now
-/// carries them and `/explore` is the registry (`packages.vyrn`), which lists no
-/// standard library module at all. This
-/// module kept its contents and lost its old name with the page.
-///
-/// Two views over one set of facts, both read off the source while the site
-/// compiles:
-///
-///  - **A searchable index.** Every module, its first line, and the name of
-///    every export. The rows ARE the index: each one carries its own searchable
-///    text in a `data-q` attribute and its export names in `data-e`, so the page
-///    needs no fetch, works with no script (the modules are links), and the
-///    filter is a class on a row.
-///  - **The import graph.** One node per module, one wire per `import`, laid out
-///    in columns by depth. Every coordinate is computed HERE, at build time, and
-///    the script only lights up the wires of the module under the pointer.
-///
-/// The graph's data comes from `deps.vyrn`, which reads the `import` lines with
-/// the compiler's own lexer. Nothing about the graph is written by hand, so a
-/// module added to `std/` is in it on the next build.
+/// Each index row carries its own search text in `data-q` and its export names
+/// in `data-e`, so the page filters with no fetch and works with no script.
+/// The graph has one node per module and one wire per import, laid out in
+/// columns by depth; every coordinate is computed here, and the script only
+/// lights the wires of the module under the pointer.
 import { moduleDeps } from "./deps"
 import { depUses, depUsedBy, depDepth, depExamples } from moduleDeps("../../std", "../../examples")
-import { ApiModule, ApiEntry, ApiGroup, apiModules, apiGroups, apiEntries, apiHref } from "./docs"
-import { joinWith, toLower, substring } from "std/strings"
-import { startsWith, contains } from "std/strpred"
-import { escapeHtml } from "./code"
+import { apiModules, apiGroups, apiEntries, apiHref } from "./docs"
+import { joinWith, toLower } from "std/strings"
+import { contains } from "std/strpred"
+import { stripTags, decodeEntities } from "./meta"
 
 /// One row of the index: a module, what it is, and every name it exports.
 export type SearchRow = { name: String, href: String, summary: String, count: Int64, exports: Array<String>, q: String, e: String }
@@ -38,76 +22,6 @@ export type GraphNode = { name: String, href: String, x: String, y: String, tx: 
 
 /// One wire: the path, and the two modules it joins.
 export type GraphEdge = { id: String, d: String, from: String, to: String }
-
-// ---------------------------------------------------------------------------
-// The index
-// ---------------------------------------------------------------------------
-
-/// `markup` as the text a reader sees — tags dropped, the entities the escaper
-/// wrote decoded — so a search over a summary matches the words and not the
-/// markup around them.
-fn plainText(markup: String) -> String {
-    let raw = bytes(markup)
-    let mut out = ""
-    let mut plain = 0
-    let mut i = 0
-    let mut inTag = false
-    while i < raw.length {
-        if !inTag && raw[i] == '<' {
-            out = out + substring(markup, plain, i)
-            inTag = true
-        }
-        if inTag && raw[i] == '>' {
-            inTag = false
-            plain = i + 1
-        }
-        i = i + 1
-    }
-    return decodeEntities(out + substring(markup, plain, raw.length))
-}
-
-/// The five entities the apidoc escaper writes, decoded. A haystack that kept
-/// them would hold `Option&lt;T&gt;` where the reader sees `Option<T>`, and a
-/// query typed off the page would never match.
-fn decodeEntities(text: String) -> String {
-    let mut out = ""
-    let mut i = 0
-    while i < text.byteLength {
-        let rest = substring(text, i, text.byteLength)
-        // Summaries carry prose: a non-entity byte may begin a multi-byte
-        // character, and the copy-out must take its whole width.
-        let b = bytes(rest)[0]
-        let w = if b < 128 {
-            1
-        } else if b < 224 {
-            2
-        } else if b < 240 {
-            3
-        } else {
-            4
-        }
-        if startsWith(rest, "&lt;") {
-            out = out + "<"
-            i = i + 4
-        } else if startsWith(rest, "&gt;") {
-            out = out + ">"
-            i = i + 4
-        } else if startsWith(rest, "&amp;") {
-            out = out + "&"
-            i = i + 5
-        } else if startsWith(rest, "&quot;") {
-            out = out + "\""
-            i = i + 6
-        } else if startsWith(rest, "&#39;") {
-            out = out + "'"
-            i = i + 5
-        } else {
-            out = out + substring(text, i, i + w)
-            i = i + w
-        }
-    }
-    return out
-}
 
 /// Every module, with everything a search over it can match.
 export fn searchRows() -> Array<SearchRow> {
@@ -124,18 +38,17 @@ export fn searchRows() -> Array<SearchRow> {
             summary: m.summary.copy(),
             count: m.count,
             exports: names.copy(),
-            // One lowercased haystack per row: the module name, every export
-            // name, and the words of the summary.
-            q: toLower(m.name + " " + joined + " " + plainText(m.summary)),
+            // The module name, every export name and the summary's words,
+            // lowercased.
+            q: toLower(m.name + " " + joined + " " + decodeEntities(stripTags(m.summary))),
             e: joined,
         })
     }
     return out
 }
 
-/// One named group of index rows. The reference landing prints
-/// the groups; the search filters the rows inside them, and a group whose rows
-/// are all hidden hides itself in the sheet with `:has`.
+/// One named group of index rows. A group whose rows the search hides all of
+/// hides itself in the stylesheet with `:has`.
 export type SearchGroup = { name: String, rows: Array<SearchRow> }
 
 /// The index, in `docs.vyrn`'s groups and in its order.
@@ -164,26 +77,9 @@ export fn searchGroups() -> Array<SearchGroup> {
     return out
 }
 
-/// How many exports the whole index covers.
-export fn exportTotal() -> Int64 {
-    let mut n = 0
-    for m in apiModules() {
-        n = n + m.count
-    }
-    return n
-}
-
-// ---------------------------------------------------------------------------
-// The graph
-// ---------------------------------------------------------------------------
-
-/// The deepest layer any module sits in.
-/// THE DRAWING ASKED THE SAME QUESTIONS ONCE PER WIRE. `rowOf` walked a whole
-/// layer, `layer` walked every module, and `tallest` called `deepest()` in its
-/// loop CONDITION — so the graph recomputed the entire layout for each of its
-/// forty-odd nodes and each of its wires. `/docs/graph` was 6.7 s of the
-/// export's 95 s, more than any reference page. The layout is a pure function
-/// of the module set, so it is computed once.
+// The layout is a pure function of the module set, so every step of it is
+// memoised: computed per node and per wire, `/docs/graph` measured 6.7 s of
+// a 95 s export.
 let mut depthCache: Map<String, Int64> = [:]
 
 fn depthOf(name: String) -> Int64 {
@@ -243,8 +139,8 @@ fn tallest() -> Int64 {
     return n
 }
 
-/// The horizontal step between two layers. A layer's labels are at most ten
-/// characters of 11px mono, so the step clears the widest of them.
+/// The horizontal step between two layers, clear of a ten-character label in
+/// 11px mono.
 fn columnStep() -> Int64 {
     return 150
 }
@@ -264,14 +160,13 @@ fn rowY(i: Int64) -> Int64 {
     return 40 + i * rowStep()
 }
 
-/// How wide a label is, in px. 11px mono is 6.6px per character; the estimate is
-/// rounded up, because a wire that starts a pixel clear of a name is right and
-/// one that starts a pixel inside it is not.
+/// How wide a label is, in px: 11px mono is 6.6px per character, rounded up so
+/// a wire never starts inside a name.
 fn labelWidth(name: String) -> Int64 {
     return 7 * name.byteLength
 }
 
-/// The layer a module sits in, and its row inside that layer.
+/// A module's row inside its layer.
 let mut rowIndex: Map<String, Int64> = [:]
 
 fn rowOf(name: String) -> Int64 {
@@ -305,7 +200,7 @@ export fn graphWidth() -> Int64 {
     return columnX(deepest()) + 110
 }
 
-export fn graphHeight() -> Int64 {
+fn graphHeight() -> Int64 {
     return rowY(tallest()) + 8
 }
 
@@ -323,8 +218,7 @@ export fn graphNodes() -> Array<GraphNode> {
             href: apiHref(m.name),
             x: nodeX(m.name).toString(),
             y: nodeY(m.name).toString(),
-            // The label sits to the right of the dot, and the hit area
-            // covers both, so a name is as clickable as it looks.
+            // The label sits right of the dot; the hit area covers both.
             tx: (nodeX(m.name) + 10).toString(),
             ty: (nodeY(m.name) + 4).toString(),
             hx: (nodeX(m.name) - 6).toString(),
@@ -338,21 +232,15 @@ export fn graphNodes() -> Array<GraphNode> {
     return out
 }
 
-/// What a keyboard reader hears on one node.
-///
-/// Every node is a link, so every node is a tab stop, and a tab stop whose only
-/// name is a two-word module name says nothing about the picture it is in. The
-/// name carries what the highlight SHOWS when the same node is pointed at: how
-/// many modules it imports and how many import it. The two counts are the reason
-/// the graph exists, and they are the part a reader who cannot see the wires
-/// otherwise loses.
+/// A node's accessible name: the module, how many modules it imports and how
+/// many import it, which is what the highlight shows a pointer.
 fn nodeLabel(name: String) -> String {
     let uses = depUses(name).length
     let usedBy = depUsedBy(name).length
     return "std/" + name + ", imports " + countWord(uses) + ", imported by " + countWord(usedBy)
 }
 
-/// `1 module` / `4 modules` / `no modules` — the plural, in a sentence.
+/// `no modules`, `1 module`, `4 modules`.
 fn countWord(n: Int64) -> String {
     if n == 0 {
         return "no modules"
@@ -365,8 +253,8 @@ fn countWord(n: Int64) -> String {
 
 /// The wire from `from` to the module it imports.
 ///
-/// It leaves the dependent on its left and arrives at the dependency past the
-/// right end of that module's name, so no wire crosses the word it points at.
+/// It leaves the dependent on its left and arrives past the right end of the
+/// dependency's name, so no wire crosses a name.
 fn wire(from: String, to: String) -> String {
     let x1 = nodeX(from) - 6
     let y1 = nodeY(from)
@@ -398,10 +286,6 @@ export fn leafCount() -> Int64 {
     return layer(0).length
 }
 
-// ---------------------------------------------------------------------------
-// What a module page adds
-// ---------------------------------------------------------------------------
-
 /// The example programs that import `m`, by path under the repository.
 export fn examplesUsing(m: String) -> Array<String> {
     let mut out: Array<String> = []
@@ -428,23 +312,15 @@ test "every module is a row, and every row carries its own search text" {
         assert(r.name.byteLength > 0)
         assert(r.count > 0)
         assertEq(r.exports.length, r.count)
-        // The row's haystack is lowercase, and holds the module's own name.
         assertEq(r.q, toLower(r.q))
         assert(r.q.byteLength > r.name.byteLength)
     }
-    assert(exportTotal() > 300)
 }
 
 test "a summary's tags are not part of what a search matches" {
-    assertEq(plainText("the <code>value</code> tree"), "the value tree")
-    assertEq(plainText("plain"), "plain")
-    // Nor are the entities the escaper wrote: the haystack is the text the
-    // reader sees, so a query typed off the page (`option<t`) matches.
-    assertEq(plainText("an Option&lt;T&gt; &amp; &quot;q&quot;&#39;s"), "an Option<T> & \"q\"'s")
-    // std/vyx's summary wraps `.vyx` in a code tag; the TEXT, not the tag, is
-    // what its row is matched on. No row keeps an entity at all. (The audit's
-    // witness was `<script>`, which the summary has never contained — the
-    // assertion below had never run when it landed.)
+    // The haystack is the text a reader sees, so `option<t` matches.
+    assertEq(decodeEntities(stripTags("an <code>Option&lt;T&gt;</code> &amp; &quot;q&quot;&#39;s")), "an Option<T> & \"q\"'s")
+    // std/vyx's summary wraps `.vyx` in a code tag; its row matches the text.
     let mut sawVyx = false
     for r in searchRows() {
         if r.name == "vyx" {
@@ -489,16 +365,13 @@ test "every wire joins two modules the graph draws" {
         }
         assert(fromFound)
         assert(toFound)
-        // A module never imports itself, and a wire is a real path.
         assert(e.from != e.to)
         assert(e.d.byteLength > 10)
     }
 }
 
 test "a module sits deeper than everything it imports" {
-    // The layer is what the drawing is FOR: dependencies to the left, and the
-    // modules that need them to the right. A wire that ran backwards would say
-    // the opposite of what the graph claims.
+    // Dependencies sit to the left of the modules that need them.
     for m in apiModules() {
         for u in depUses(m.name) {
             assert(depDepth(u) < depDepth(m.name))
@@ -507,8 +380,7 @@ test "a module sits deeper than everything it imports" {
 }
 
 test "the graph and the reference agree about what imports what" {
-    // `std/json` is imported by several modules and imports none of them, so it
-    // is a leaf with dependents — the shape the highlight is built to show.
+    // `std/json` is a leaf with dependents.
     assertEq(depUses("json").length, 0)
     assert(depUsedBy("json").length > 3)
     assert(depUses("jsonread").length > 0)
@@ -516,12 +388,8 @@ test "the graph and the reference agree about what imports what" {
     assertEq(examplesUsing("nope").length, 0)
 }
 
-/// The graph page's own words, beside the geometry they describe.
-///
-/// The template in `routes/docs/graph.vyx` renders these and the markdown twin
-/// (`app/pagemd.vyrn`) renders the same ones, so a page and its twin cannot
-/// disagree. Each string is the markup the template wants, which `asMarkdown`
-/// turns back into markdown on the way out.
+// The graph page's prose, as markup. `routes/docs/graph.vyx` and the markdown
+// twin in `pagemd.vyrn` render the same strings.
 
 export fn graphLede() -> String {
     return "Every wire is an <code>import</code> line in <code>std/</code>. " + leafCount().toString() + " modules import nothing else in the library."

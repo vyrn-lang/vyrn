@@ -1,47 +1,30 @@
-/// The releases feed, as RSS 2.0.
+/// The releases feed, as RSS 2.0: one item per tag in the repository's
+/// history, newest first.
 ///
-/// WHAT IT IS FOR. `/releases` is a page a reader has to come back to. A feed is
-/// the same information arriving instead, and it is the one thing on this site
-/// that is read with no document around it — which is why it is the only file
-/// here besides a markdown twin that writes an absolute URL (see `siteOrigin`).
-///
-/// EVERY RELEASE, FROM THE TAGS. The items are the repository's own tags, out of
-/// `site/data/history.json`, which `scripts/site-history.py` writes before the
-/// export runs. The page beside it names ONE release — the newest, baked into
-/// `site/release.txt` — because that is the version a reader installs; a feed is
-/// a history by definition, so it is the list.
-///
-/// NO RELEASE NOTES, AND THE DESCRIPTION SAYS SO RATHER THAN INVENTING THEM.
-/// The notes are written on GitHub and are not in this repository, so an item
-/// carries what this repository knows — the tag, the day it was published,
-/// whether it is a pre-release — and links to where the notes and the archives
-/// are. A `<description>` holding a summary nobody wrote is the kind of thing
-/// this site does not ship.
-///
-/// AND NO `lastBuildDate`. This program has `readFile`, `writeFile`
-/// and `listDir`, and no clock; a build date it guessed would be a wrong fact in
-/// a field aggregators read. The newest item's own date is the answer to the same
-/// question.
-import { Release, releaseRows, fixtureReleaseRows } from "./history"
-import { siteOrigin, releaseUrlOf } from "./repo"
+/// An aggregator reads the feed with no page around it, so every URL in it is
+/// absolute (`siteOrigin`). An item carries what the repository knows (the tag,
+/// its day, whether it is a pre-release) and links to the GitHub release for
+/// the notes and archives. There is no `lastBuildDate`: the export has no
+/// clock, and the newest item's date answers the same question.
+import { Release, releaseRows, fixtureReleaseRows, wholeOf } from "./history"
+import { siteOrigin, releaseUrlOf, isPrerelease } from "./repo"
 import { hrefOf } from "./nav"
 import { escapeHtml } from "./code"
-import { substring, indexOf, split } from "std/strings"
+import { substring, split } from "std/strings"
+import { startsWith, contains } from "std/strpred"
 
 /// The file the feed publishes as, beside the pages.
 export fn feedName() -> String {
     return "releases.xml"
 }
 
-/// The feed's own URL, which it has to state: an aggregator that has been handed
-/// the file has no way back to where it came from otherwise (`atom:link`, the one
-/// element of the Atom namespace RSS 2.0 borrows for exactly this).
+/// The feed's own URL, which the `atom:link` element states, because an
+/// aggregator handed the file has no other way back to it.
 export fn feedUrl() -> String {
     return siteOrigin() + feedName()
 }
 
-/// How many releases the feed carries. The export prints it, so a build that
-/// published an empty channel says so in the log.
+/// How many releases the feed carries. The export prints it.
 export fn feedItemCount() -> Int64 {
     return releaseRows().length
 }
@@ -80,15 +63,12 @@ fn channelWords(count: Int64) -> String {
     return "Every published Vyrn release: the tag, the day it was published, and whether it is a pre-release."
 }
 
-/// One release, as an item.
-///
-/// The link and the `guid` are the same URL, and `isPermaLink="true"` says that
-/// on purpose: a release's page on GitHub is its identity, so an aggregator that
-/// has seen the tag once will not show it again when the feed is rebuilt — which
-/// it is, on every push to the main line.
+/// One release, as an item. The `guid` is the release page's URL with
+/// `isPermaLink="true"`, so an aggregator shows a tag once however often the
+/// feed is rebuilt.
 fn item(tag: String, date: String) -> String {
     let url = releaseUrlOf(tag)
-    let kind = if isPre(tag) { "A pre-release" } else { "A stable release" }
+    let kind = if isPrerelease(tag) { "A pre-release" } else { "A stable release" }
     let words = "\{kind}, tagged \{date}. The release page lists one archive per platform and the SHA256SUMS that both installers check them against."
     let mut out = "<item>\n"
     out = out + "<title>\{escapeHtml(tag)}</title>\n"
@@ -99,39 +79,24 @@ fn item(tag: String, date: String) -> String {
     return out + "</item>\n"
 }
 
-/// Whether a tag is a pre-release: it carries a suffix. The same rule
-/// `.github/workflows/release.yml` applies when it decides whether to pass
-/// `--prerelease`, and `app/repo.vyrn` applies to the baked tag.
-fn isPre(tag: String) -> Bool {
-    return has(tag, "-")
-}
-
-/// `2026-08-19` as `Wed, 19 Aug 2026 00:00:00 GMT`, which is the date format RSS
-/// takes (RFC 822, as RFC 1123 narrowed it).
-///
-/// MIDNIGHT UTC, because a tag's date is all the history has: the script records
-/// the day, not the minute. An aggregator sorts on this field, and every item
-/// being at midnight sorts the days correctly, which is the resolution the data
-/// actually has.
+/// `2026-08-19` as `Wed, 19 Aug 2026 00:00:00 GMT`, the RFC 822 date RSS
+/// takes. Midnight UTC, because the history records the day only.
 fn rfc822(date: String) -> String {
     let parts = split(date, "-")
     if parts.length != 3 {
         return date.copy()
     }
-    let y = number(parts[0])
-    let m = number(parts[1])
-    let d = number(parts[2])
+    let y = wholeOf(parts[0])
+    let m = wholeOf(parts[1])
+    let d = wholeOf(parts[2])
     return "\{dayName(y, m, d)}, \{parts[2]} \{monthName(m)} \{parts[0]} 00:00:00 GMT"
 }
 
 /// The three-letter day of the week, by Zeller's congruence.
-///
-/// It is arithmetic and not a lookup because a wrong day name in a `pubDate` is
-/// a wrong fact in a field a machine reads, and `site/test/feed.test.mjs` checks
-/// every one of them against the platform's own calendar.
+/// `site/test/feed.test.mjs` checks every one against the platform's calendar.
 fn dayName(y: Int64, m: Int64, d: Int64) -> String {
-    // January and February are the 13th and 14th months of the year before, which
-    // is what makes one formula cover a leap day.
+    // January and February are months 13 and 14 of the year before, so one
+    // formula covers a leap day.
     let year = if m < 3 { y - 1 } else { y }
     let month = if m < 3 { m + 12 } else { m }
     let c = year / 100
@@ -142,9 +107,7 @@ fn dayName(y: Int64, m: Int64, d: Int64) -> String {
     return names[h].copy()
 }
 
-/// The three-letter month name. A number outside 1..12 cannot reach here — the
-/// caller split a date this repository's own script wrote — and answers with the
-/// empty string rather than trapping if it ever does.
+/// The three-letter month name, or "" for a number outside 1..12.
 fn monthName(m: Int64) -> String {
     let names = ["", "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
     if m < 1 || m > 12 {
@@ -153,51 +116,29 @@ fn monthName(m: Int64) -> String {
     return names[m].copy()
 }
 
-/// `text` as a number, over its digits. The input is a field of a date out of
-/// `history.json`, so a non-digit is a malformed file and reads as a zero, which
-/// the tests below and the feed test on the exported file both catch.
-fn number(text: String) -> Int64 {
-    let mut n = 0
-    let mut i = 0
-    while i < text.byteLength {
-        let b = text[i]
-        if b >= '0' && b <= '9' {
-            n = n * 10 + Int64(b - '0')
-        }
-        i = i + 1
-    }
-    return n
-}
-
 test "a date becomes the RFC 822 date RSS reads" {
-    // Two dates, and their real days of the week.
     assertEq(rfc822("2026-08-12"), "Wed, 12 Aug 2026 00:00:00 GMT")
     assertEq(rfc822("2026-08-19"), "Wed, 19 Aug 2026 00:00:00 GMT")
-    // January and February are the previous year's 13th and 14th months, which is
-    // the case a formula gets wrong if it does not shift them.
     assertEq(rfc822("2026-01-01"), "Thu, 01 Jan 2026 00:00:00 GMT")
     assertEq(rfc822("2026-02-28"), "Sat, 28 Feb 2026 00:00:00 GMT")
     // A leap day, and the century rule under it.
     assertEq(rfc822("2024-02-29"), "Thu, 29 Feb 2024 00:00:00 GMT")
     assertEq(rfc822("2000-03-01"), "Wed, 01 Mar 2000 00:00:00 GMT")
-    // A date that is not a date is itself, rather than a wrong day name.
+    // A date that is not a date stays as it is.
     assertEq(rfc822("nonsense"), "nonsense")
 }
 
 test "the feed is one channel with one item per release" {
-    // The published feed, with however many releases the repository has.
     assertEq(feedFault(releaseRows()), "")
-    // No release: a channel with no items, which says so.
     let empty: Array<Release> = []
     assertEq(feedFault(empty), "")
-    assert(has(feedOf(empty), "None has been published"))
-    // The fixture's release, which is a pre-release. It is named as one rather
-    // than hidden, the rule the releases page follows.
+    assert(contains(feedOf(empty), "None has been published"))
+    // The fixture's one release is a pre-release.
     let rows = fixtureReleaseRows()
     assert(rows.length > 0)
     assertEq(feedFault(rows), "")
-    assert(has(feedOf(rows), "A pre-release, tagged"))
-    assert(!has(feedOf(rows), "None has been published"))
+    assert(contains(feedOf(rows), "A pre-release, tagged"))
+    assert(!contains(feedOf(rows), "None has been published"))
 }
 
 test "the feed carries no unescaped markup and no relative link" {
@@ -208,31 +149,30 @@ test "the feed carries no unescaped markup and no relative link" {
 }
 
 /// The first fact the feed of `rows` breaks, or "": one channel, each release
-/// exactly once, newest first. A test states it for each list of releases.
+/// exactly once, newest first.
 fn feedFault(rows: Array<Release>) -> String {
     let xml = feedOf(rows)
-    if firstIndex(xml, "<?xml version=\"1.0\" encoding=\"utf-8\"?>") != 0 {
+    if !startsWith(xml, "<?xml version=\"1.0\" encoding=\"utf-8\"?>") {
         return "no XML declaration first"
     }
-    if countIn(xml, "<rss version=\"2.0\"") != 1 || countIn(xml, "<channel>") != 1 {
+    if timesIn(xml, "<rss version=\"2.0\"") != 1 || timesIn(xml, "<channel>") != 1 {
         return "not one RSS 2.0 channel"
     }
-    if !has(xml, "<atom:link href=\"\{feedUrl()}\" rel=\"self\"") {
+    if !contains(xml, "<atom:link href=\"\{feedUrl()}\" rel=\"self\"") {
         return "no self link"
     }
     for r in rows {
-        if countIn(xml, "<title>\{r.tag}</title>") != 1 {
+        if timesIn(xml, "<title>\{r.tag}</title>") != 1 {
             return "\{r.tag} is not one title"
         }
-        if countIn(xml, "https://github.com/vyrn-lang/vyrn/releases/tag/\{r.tag}") != 2 {
+        if timesIn(xml, "https://github.com/vyrn-lang/vyrn/releases/tag/\{r.tag}") != 2 {
             return "\{r.tag} is not one link and one guid"
         }
     }
-    if countIn(xml, "<item>") != rows.length || countIn(xml, "</item>") != rows.length {
+    if timesIn(xml, "<item>") != rows.length || timesIn(xml, "</item>") != rows.length {
         return "not one item per release"
     }
-    // Newest first: the last release the history recorded is the first item.
-    if rows.length > 0 && !has(xml, "<item>\n<title>\{rows[rows.length - 1].tag}</title>") {
+    if rows.length > 0 && !contains(xml, "<item>\n<title>\{rows[rows.length - 1].tag}</title>") {
         return "the newest release is not the first item"
     }
     return ""
@@ -241,56 +181,30 @@ fn feedFault(rows: Array<Release>) -> String {
 /// The first URL in `xml` that is not absolute, or a tag in `rows` that could
 /// end an element, or "". An aggregator has no document to resolve against.
 fn linkFault(xml: String, rows: Array<Release>) -> String {
-    // Every URL, rather than the absence of a leading slash: `"/>` closes the
-    // `atom:link` element and is not a URL.
-    if countIn(xml, "<link>\{siteOrigin()}") != 1 || countIn(xml, "href=\"\{siteOrigin()}") != 1 {
+    if timesIn(xml, "<link>\{siteOrigin()}") != 1 || timesIn(xml, "href=\"\{siteOrigin()}") != 1 {
         return "the channel does not link the site's origin once"
     }
-    if countIn(xml, "<link>https://") != 1 + rows.length {
+    if timesIn(xml, "<link>https://") != 1 + rows.length {
         return "a link is not absolute"
     }
-    if countIn(xml, "<link>/") != 0 || countIn(xml, "href=\"/") != 0 {
+    if timesIn(xml, "<link>/") != 0 || timesIn(xml, "href=\"/") != 0 {
         return "a link is relative"
     }
-    if countIn(xml, "<guid isPermaLink=\"true\">https://") != rows.length {
+    if timesIn(xml, "<guid isPermaLink=\"true\">https://") != rows.length {
         return "a guid is not an absolute permalink"
     }
     for r in rows {
-        if has(r.tag, "<") {
+        if contains(r.tag, "<") {
             return "\{r.tag} holds markup"
         }
     }
-    if !has(xml, "<description>Every published Vyrn release") {
+    if !contains(xml, "<description>Every published Vyrn release") {
         return "the channel has no description"
     }
     return ""
 }
 
-/// How many times `needle` is in `hay`.
-fn countIn(hay: String, needle: String) -> Int64 {
-    let mut n = 0
-    let mut rest = hay.copy()
-    while true {
-        let at = firstIndex(rest, needle)
-        if at < 0 {
-            return n
-        }
-        n = n + 1
-        rest = substring(rest, at + needle.byteLength, rest.byteLength)
-    }
-    return n
-}
-
-/// Where `needle` first occurs in `hay`, or -1. A `match` arm is an expression,
-/// so a loop that has to branch on an `Option` reads better with the index.
-fn firstIndex(hay: String, needle: String) -> Int64 {
-    return match indexOf(hay, needle) {
-        Some(at) => at,
-        None => 0 - 1,
-    }
-}
-
-/// Whether `needle` occurs in `hay`.
-fn has(hay: String, needle: String) -> Bool {
-    return firstIndex(hay, needle) >= 0
+/// How many times `needle` occurs in `hay`, without overlap.
+fn timesIn(hay: String, needle: String) -> Int64 {
+    return split(hay, needle).length - 1
 }

@@ -1,17 +1,16 @@
-/// The repository's own numbers, for the rest of the site.
+/// The repository's counts, the newest release, the site's origin and the
+/// install commands.
 ///
-/// This is the ONLY place `repoFacts` is called. The generator cache is keyed on
-/// the argument strings, so two call sites naming `std/` with different `../`
-/// prefixes would generate two modules whose exports collide program-wide. One
-/// call, one set of names, and every page imports from here.
+/// This is the one call site of `repoFacts`: the generator cache keys on the
+/// argument strings, so a second call spelling a path differently would emit a
+/// second module whose exports collide.
 import { repoFacts } from "./facts"
 import { exampleCount as genExamples, stdCount as genStd, stdModules as genModules, releaseTag as genTag, releaseDate as genDate } from repoFacts("../../examples", "../../std", "../release.txt")
-import { indexOf } from "std/strings"
-import { ghBlob, ghSpec, ghRelease, ghRaw } from "./github"
+import { contains } from "std/strpred"
+import { ghBlob, ghRelease } from "./github"
 import { Release, releaseRows } from "./history"
 
-/// Single-file programs in `examples/`. The parity harness runs every one of
-/// them on all three backends.
+/// Single-file programs in `examples/`.
 export fn exampleCount() -> Int64 {
     return genExamples()
 }
@@ -26,29 +25,9 @@ export fn stdModules() -> Array<String> {
     return genModules()
 }
 
-/// A file in this repository, on GitHub. The four URL builders live in
-/// `app/github.vyrn` — a leaf that imports nothing, so that this module can read
-/// the repository's own tags without closing an import cycle — and are
-/// re-exported here so every caller on the site keeps one name for them.
+/// A file in this repository, on GitHub.
 export fn blob(path: String) -> String {
     return ghBlob(path)
-}
-
-/// A file in this repository, as a remote import specifier.
-export fn remoteSpec(path: String) -> String {
-    return ghSpec(path)
-}
-
-/// A file in this repository, served raw at `gitRef`.
-///
-/// NOT `rawAt`, and no longer for a compiler reason. Naming it that once broke
-/// `std/vyx`, because a declaration in any module shadowed the `rawAt` builtin
-/// for every module; that is fixed and `examples/shadowbuiltin.vyrn` pins it.
-/// The name stays `rawFile` because it is the better one: this answers a FILE
-/// at a ref, and the builtin it would have collided with splices code at a
-/// source position.
-export fn rawFile(gitRef: String, path: String) -> String {
-    return ghRaw(gitRef, path)
 }
 
 /// How many ways a program runs: the WebAssembly module, and the native binary
@@ -57,38 +36,14 @@ export fn backendCount() -> Int64 {
     return 2
 }
 
-// ---------------------------------------------------------------------------
-// The release, baked while the site built.
-//
-// `site/release.txt` holds the newest published tag and the day it was
-// published. The site workflow refreshes that file from the GitHub release
-// listing before every build and keeps the committed copy when the call is
-// unavailable, so a page is right without a network and the export makes no
-// request of its own.
-//
-// TWO SOURCES, AND THE NEWER ONE WINS. That
-// committed copy is refreshed by hand, and on 2026-08-21 it still said
-// `v0.1.0-alpha.1` three days after `v0.1.0-alpha.2` was published — so the
-// index, the install page and the releases page all featured a version that was
-// not the one the install command would fetch. A page apologizing for that in a
-// notice was the old answer; this is the new one.
-//
-// The tree already knows. `scripts/site-history.py` writes every git tag and
-// its day into `site/data/history.json`, from a checkout with `fetch-depth: 0`,
-// and this site refuses to build without that file. So the baked tag is
-// reconciled against the newest tag in it and the newer one wins. A stale
-// `release.txt` cannot reach a page, and `site/export.vyrn` asserts the two
-// agree so that nobody has to notice.
-// ---------------------------------------------------------------------------
-
-/// Whether anything has been published at all. Every release-shaped sentence on
-/// the site is behind this, because "nothing yet" is a state the pages have to
-/// render correctly and used to be the only one they could.
+/// Whether anything has been published. Every sentence about a release is
+/// behind this, and the pages render the "nothing yet" state too.
 export fn hasRelease() -> Bool {
     return releaseTag().byteLength > 0
 }
 
-/// The newest published tag — `v0.1.0-alpha.2` — or "" when there is none.
+/// The newest published tag, such as `v0.1.0-alpha.2`, or "" when there is
+/// none.
 export fn releaseTag() -> String {
     return newest().tag
 }
@@ -98,8 +53,9 @@ export fn releaseDate() -> String {
     return newest().date
 }
 
-/// The tag that has actually been published, out of the two things that claim to
-/// know: the baked file, and the repository's own tags.
+/// The newer of two sources: `site/release.txt`, which the workflow refreshes
+/// from the GitHub API and which can go stale, and the newest tag in the
+/// history. `site/export.vyrn` asserts the two agree.
 fn newest() -> Release {
     let baked = Release { tag: genTag(), date: genDate() }
     let rows = releaseRows()
@@ -113,64 +69,35 @@ fn newest() -> Release {
     return baked
 }
 
-/// Whether the newest release is a pre-release. A tag carrying a suffix is one:
-/// the same rule `.github/workflows/release.yml` applies when it decides whether
-/// to pass `--prerelease` to `gh release create`.
+/// Whether the newest release is a pre-release.
 export fn releasePre() -> Bool {
-    return match indexOf(releaseTag(), "-") {
-        Some(at) => true,
-        None => false,
-    }
+    return isPrerelease(releaseTag())
+}
+
+/// Whether `tag` is a pre-release: it carries a suffix. `release.yml` applies
+/// the same rule when it decides whether to pass `--prerelease`.
+export fn isPrerelease(tag: String) -> Bool {
+    return contains(tag, "-")
 }
 
 /// Where this site is published, with the trailing slash.
 ///
-/// THE ONE ABSOLUTE URL THE SITE SPELLS, and it is here rather than in the
-/// modules that use it because one origin with three readers is a constant and
-/// three are a contradiction waiting to happen. Every LINK on the site is
-/// relative on purpose: `relativize` in `site/export.vyrn` rewrites every `href`
-/// and every `src` against the document that carries it, so ONE exported tree
-/// serves from a domain root, from `/vyrn/` on GitHub Pages, from a nested
-/// preview path and from `file://` — and `site/test/basepath.test.mjs` fetches
-/// all four to prove it.
-///
-/// Three things cannot be relative, because none of them is read inside a
-/// document: the releases feed, which a reader's aggregator fetches with no page
-/// around it; the markdown twin of a page, which exists to be pasted somewhere
-/// else; and the install command, which is typed into a terminal that has no
-/// idea which page it was copied from. All three name this origin, and a copy
-/// served from anywhere but here points back to here, which is the honest
-/// failure of the three.
+/// Every link in a page is relative (`relativize` in `site/export.vyrn`). This
+/// origin is for the three things read outside a page: the releases feed, the
+/// markdown twins and the install commands.
 export fn siteOrigin() -> String {
     return "https://vyrn-lang.github.io/vyrn/"
 }
 
-/// One installer, as a URL on this site.
-///
-/// THE SITE SERVES ITS OWN INSTALL SCRIPTS, and the
-/// export copies `install.sh` and `install.ps1` out of the repository root into
-/// the published tree beside the stylesheet. The command a reader pastes names
-/// this origin — 43 characters against the 62 of
-/// `raw.githubusercontent.com/vyrn-lang/vyrn/main/install.sh`, and it is the
-/// site's own name rather than a hosting detail of where the source is kept.
-///
-/// It is the REAL target and not a prettier alias: what is served is the same
-/// file, byte for byte, published by the same job that publishes the pages, and
-/// both installers resolve the newest release themselves at run time — so a
-/// deploy that lags `main` by an hour installs exactly what `main` would.
+/// One installer, as a URL on this site. The export copies `install.sh` and
+/// `install.ps1` from the repository root into the published tree, and both
+/// resolve the newest release when they run.
 export fn installScript(name: String) -> String {
     return siteOrigin() + name
 }
 
-/// One install target, and the one line that installs it.
-///
-/// TWO ROWS, NOT THREE. macOS and Linux run the same `install.sh` through the
-/// same pipe, so a picker that separated them asked a reader to choose between
-/// two identical commands. What the reader is really
-/// choosing is a SHELL: a POSIX one, or PowerShell.
-///
-/// It lives here, beside the origin the commands name, because both the index
-/// hero and `/install` show them and two copies of a command are two commands.
+/// One install target, and the line that installs it. The targets are shells,
+/// POSIX and PowerShell, because macOS and Linux run the same command.
 export type InstallTarget = { id: String, name: String, cmd: String }
 
 export fn installTargets() -> Array<InstallTarget> {
@@ -188,15 +115,13 @@ export fn installTargets() -> Array<InstallTarget> {
     ]
 }
 
-/// The release's page on GitHub — the whole feed when there is no release to
-/// name, so the link is never a URL with nothing on the end of it.
+/// The newest release's page on GitHub, or the release listing when there is
+/// none.
 export fn releaseUrl() -> String {
     return ghRelease(releaseTag())
 }
 
-/// Any tag's release page, which is where its archives and its `SHA256SUMS`
-/// are. The site does not host a binary, so this is the only link a row in the
-/// release table can carry.
+/// A tag's release page, which holds its archives and `SHA256SUMS`.
 export fn releaseUrlOf(tag: String) -> String {
     return ghRelease(tag)
 }
@@ -208,16 +133,13 @@ test "the repository counts are all positive" {
 
 test "two install commands, and both of them name this site" {
     let rows = installTargets()
-    // The bytes a reader pastes into a shell, spelled out: this is the one
-    // string on the site that a typo makes into a 404 nobody sees until someone
-    // tries to install the language.
+    // Spelled out: a typo here is a 404 nobody sees until an install fails.
     assertEq(rows.length, 2)
     assertEq(rows[0].id, "unix")
     assertEq(rows[0].cmd, "curl -fsSL https://vyrn-lang.github.io/vyrn/install.sh | sh")
     assertEq(rows[1].id, "windows")
     assertEq(rows[1].cmd, "powershell -c \"irm https://vyrn-lang.github.io/vyrn/install.ps1|iex\"")
-    // And the file each one fetches is one the export publishes — see
-    // `assets()` in `site/export.vyrn`, which is the other half of this claim.
+    // `assets()` in `site/export.vyrn` publishes the file.
     assertEq(installScript("install.sh"), siteOrigin() + "install.sh")
 }
 
@@ -226,19 +148,13 @@ test "the module list is as long as the module count" {
 }
 
 test "the baked release is a tag, a date, and a rule about the suffix" {
-    // Not "the tag is v0.1.0-alpha.1": that is a fact about today, and this file
-    // is meant to keep being right after the next release. What is checked is
-    // the SHAPE, and that the derived answers follow from it.
+    // The shape, not today's tag.
     if hasRelease() {
         assertEq(releaseUrl(), "https://github.com/vyrn-lang/vyrn/releases/tag/" + releaseTag())
         assert(releaseUrl().byteLength > "https://github.com/vyrn-lang/vyrn/releases/tag/".byteLength)
         assert(releaseDate().byteLength == 10)
-        assertEq(releasePre(), match indexOf(releaseTag(), "-") {
-            Some(at) => true,
-            None => false,
-        })
+        assertEq(releasePre(), contains(releaseTag(), "-"))
     } else {
-        // The other state, which the pages also render.
         assertEq(releaseTag(), "")
         assertEq(releasePre(), false)
         assertEq(releaseUrl(), "https://github.com/vyrn-lang/vyrn/releases")

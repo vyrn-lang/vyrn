@@ -1,25 +1,13 @@
-/// The guide book: the chapters, their prose, and the programs they show.
+/// The documentation's chapters, their prose, and the programs they show.
 ///
-/// THE RULE THIS FILE EXISTS TO KEEP. Every code block in the book is a file in
-/// `site/guide/`, and every block on a page was RUN while the page was built.
-/// This module imports each program as a namespace and calls its `demo()`, so
-/// the output printed under a block is the output the program produced. A
-/// program that does not compile fails the site build. A program that traps
-/// fails the export. There is no pseudo-code in the book, because nothing here
-/// can render a block that did not run.
-///
-/// The other half — the source, coloured, and what each block imports — comes
-/// from `guidecode.vyrn`, which reads the same files with the compiler's own
-/// lexer. Both halves read one file, so the block a reader sees and the program
-/// that ran cannot drift.
-///
-/// ONE NAMESPACE PER PROGRAM. An exported name is program-wide, and the 24
-/// programs are linked into one program here, so a plain `import { demo }` would
-/// collide 24 times over. `import * as g<Block>` keeps every one of them out of
-/// the flat namespace. A private name stays in its own module, so two blocks may
-/// each declare their own `fn describe`.
+/// Every code block is a file in `site/guide/`, and every block on a page ran
+/// while the page was built: this module imports each program as a namespace
+/// and calls its `demo()`. A program that does not compile fails the build, and
+/// one that traps fails the export. `guidecode.vyrn` reads the same files for
+/// the coloured source. Each program is a namespace import because exported
+/// names are program-wide, and 24 `demo` exports would collide.
 import { guideCode } from "./guidecode"
-import { guideBlocks, guideSrc, guideLines, guideUses, guideImports, guidePlayable } from guideCode("../guide")
+import { guideBlocks, guideSrc, guideLines, guideImports, guidePlayable } from guideCode("../guide")
 import * as gArrays from "../guide/arrays"
 import * as gBenches from "../guide/benches"
 import * as gCapabilities from "../guide/capabilities"
@@ -47,43 +35,29 @@ import * as gValidated from "../guide/validated"
 import { base64Encode } from "std/codecs"
 import { replace, joinWith, substring, trimEnd, toLower } from "std/strings"
 import { startsWith } from "std/strpred"
+import { includes } from "std/arrays"
 import { escapeHtml, terminalHtml, inlineCode } from "./code"
 import { blob } from "./repo"
-import { blurbFrom } from "./meta"
+import { blurbFrom, stripTags } from "./meta"
 
-/// One program on a page: its id, its coloured lines, what it printed, and the
-/// playground link — empty for a block the playground cannot run on its own.
+/// One program on a page: its id, its coloured lines, what it printed, the
+/// playground link (empty for a block that is not a whole program), and its
+/// source URL.
 export type Block = { id: String, lines: Array<String>, output: String, play: String, source: String }
 
 /// One section of a chapter: an anchor, a heading, paragraphs of HTML, the ids
-/// of the programs that follow them, and — for the one chapter that compares
-/// languages — the name of a snippet set to draw beside them.
-///
-/// `specs` is "" everywhere else. The book teaches Vyrn by running Vyrn, and a
-/// section that shows four languages is a different instrument: it is prose
-/// about a difference, and the other three languages are quoted, not run.
+/// of the programs after them, and `specs`, the comparison set to draw beside
+/// them ("" for none).
 export type Section = { anchor: String, heading: String, prose: Array<String>, blocks: Array<String>, specs: String }
 
-/// One chapter: the area it belongs to, the group it sits under in that area's
-/// sidebar, its URL slug, its title, its opening paragraph, and its sections.
-/// The area is the subnav row the page sits under — `"guide"`, `"web"` or
-/// `"tooling"` — and it decides the page's path, its number, and which pages
-/// are its neighbours. The group is the named run of rows the sidebar prints it
-/// in; a shelf reads better as a few named runs than as one numbered column
-/// (user).
+/// One chapter: its area (`"guide"`, `"web"` or `"tooling"`), which decides
+/// its path, its number and its neighbours; the sidebar group it sits in; its
+/// slug, title and opening paragraph; and its sections.
 export type Chapter = { area: String, group: String, slug: String, title: String, lede: String, sections: Array<Section> }
 
-// ---------------------------------------------------------------------------
-// Running the programs
-// ---------------------------------------------------------------------------
-
-/// What one block printed, produced by calling it.
-///
-/// The branch list is written out rather than looked up, because a function
-/// value cannot be reached by name at run time and should not be: the compiler
-/// checks every one of these calls, so a renamed or deleted program is a build
-/// failure and never a page with a hole in it.
-export fn blockOutput(id: String) -> String {
+/// What one block printed. The calls are written out, so the compiler checks
+/// each one and a renamed program fails the build.
+fn blockOutput(id: String) -> String {
     if id == "arrays" { return gArrays.demo() }
     if id == "benches" { return gBenches.demo() }
     if id == "capabilities" { return gCapabilities.demo() }
@@ -108,29 +82,20 @@ export fn blockOutput(id: String) -> String {
     if id == "tests" { return gTests.demo() }
     if id == "text" { return gText.demo() }
     if id == "validated" { return gValidated.demo() }
-    // `gentiny` is a generator, not a program: it has no `demo` to call, and the
-    // chapter says so under the block.
+    // `gentiny` is a generator and has no `demo`.
     return ""
 }
 
 /// The playground URL for `src`: base64url of its UTF-8 bytes, in the fragment.
 ///
-/// base64url rather than base64 (RFC 4648 §5): `+` and `/` are not safe in a URL
-/// fragment, and the padding is dropped because a fragment carries no length
-/// prefix that needs it. The fragment never reaches a server, so a whole program
-/// travels in a link and nothing is stored anywhere.
-export fn playHref(src: String) -> String {
+/// base64url (RFC 4648, section 5), because `+` and `/` are not safe in a
+/// fragment; the padding is dropped. The fragment never reaches a server.
+fn playHref(src: String) -> String {
     let raw = base64Encode(src)
     return "/play.html#c=" + replace(replace(replace(raw, "+", "-"), "/", "_"), "=", "")
 }
 
-/// The program itself, as it is written in `site/guide/`.
-///
-/// `Block.source` is the URL of the file in the repository and `Block.lines` is
-/// the same program coloured for the page, so neither is the text. The markdown
-/// twin of a chapter needs the text, and the playground link is
-/// built from it a few lines below — one file read by the generator, three
-/// readers.
+/// A block's program as text, as shown and as the playground link carries it.
 export fn blockSource(id: String) -> String {
     return guideSrc(id)
 }
@@ -147,26 +112,13 @@ export fn blockOf(id: String) -> Block {
     }
 }
 
-// ---------------------------------------------------------------------------
-// One block, as it appears on the page
-// ---------------------------------------------------------------------------
-
-/// One program, its output and its links, as HTML.
-///
-/// The pill says BUILT and not "live". The program ran once, while this page was
-/// built, and the output below it is what it wrote then. A control that claimed
-/// to run it now would be a picture of a run, and this site does not ship those.
-/// `s` with the three HTML metacharacters escaped — the textarea's payload.
+/// `s` with `&`, `<` and `>` escaped, for the textarea.
 fn escapeSrc(s: String) -> String {
     return replace(replace(replace(s, "&", "&amp;"), "<", "&lt;"), ">", "&gt;")
 }
 
-/// How many lines `s` holds — the textarea's own height, so a block is as
-/// tall as its program and not a viewport fraction.
-///
-/// A file ends with a newline, and that last one opens no line a reader
-/// sees: counting it gave every runnable block one blank row under its
-/// closing brace.
+/// How many lines `s` holds, not counting the final newline: the textarea's
+/// height, so a block is as tall as its program.
 fn lineCount(s: String) -> Int64 {
     let body = trimEnd(s)
     let mut n = 1
@@ -178,18 +130,15 @@ fn lineCount(s: String) -> Int64 {
     return n
 }
 
-/// A RUNNABLE block wears the hero editor's own anatomy (user: "runnable in
-/// place instead of a playground link"): the highlighted layer, the read-only
-/// textarea `mountPlay` unlocks on the first press, and the built output
-/// standing in the run pane until a live run replaces it. A block the
-/// playground cannot take (a generator needing its importer) stays a plain
-/// plate.
+/// One program and its output, as HTML.
+///
+/// A runnable block is an editor like the index's hero: the highlighted layer,
+/// the read-only textarea `mountPlay` unlocks on the first press, and the
+/// output printed at build time until a run replaces it. Its status reads
+/// "Built" for that reason. Any other block is a plain plate whose file name
+/// links to the source.
 fn blockHtml(b: Block) -> String {
     if b.play.byteLength == 0 {
-        // THE NAME IS THE LINK. Every block carried a caption row under it
-        // reading "The file in the repository" — a bordered row, 36px of
-        // chrome, to say what the filename in the head already names. The
-        // head's filename is the link now and the row goes.
         let mut plain = "<div class=\"plate block\">"
         plain = plain + "<div class=\"plate-head\"><a class=\"eyebrow src\" href=\"" + b.source + "\">site/guide/" + b.id + ".vyrn</a></div>"
         plain = plain + "<pre class=\"code\">" + joinWith(b.lines, "\n") + "</pre>"
@@ -229,9 +178,8 @@ export fn sectionEyebrow(c: Chapter, s: Section) -> String {
     return toLower(c.title)
 }
 
-/// The links out of a chapter: the one before it and the one after it. Built
-/// here rather than in the template, because a chapter at either end of the book
-/// has one link and not two.
+/// The links to the chapters before and after this one; a chapter at either
+/// end of its area has one.
 export fn chapterNavHtml(slug: String) -> String {
     let mut out = ""
     let back = prevSlug(slug)
@@ -257,16 +205,12 @@ export fn sectionBody(s: Section) -> String {
     return out
 }
 
-// ---------------------------------------------------------------------------
-// The book
-// ---------------------------------------------------------------------------
-
 fn section(anchor: String, heading: String, prose: Array<String>, blocks: Array<String>) -> Section {
     return Section { anchor: anchor.copy(), heading: heading.copy(), prose: prose.copy(), blocks: blocks.copy(), specs: "" }
 }
 
-/// A section whose illustration is the same task in four languages rather than
-/// a program this site ran. `set` names one of `snippets.vyrn`'s three.
+/// A section illustrated by a comparison set from `snippets.vyrn` rather than a
+/// program.
 fn compared(anchor: String, heading: String, prose: Array<String>, set: String) -> Section {
     let none: Array<String> = []
     return Section { anchor: anchor.copy(), heading: heading.copy(), prose: prose.copy(), blocks: none.copy(), specs: set.copy() }
@@ -662,19 +606,9 @@ export fn chapterOf(slug: String) -> Chapter {
     return Chapter { area: "", group: "", slug: "", title: "", lede: "", sections: [] }
 }
 
-/// What a chapter's card and its search result say: the chapter's own lede,
-/// cut to a card.
-///
-/// The lede is the sentence under the chapter's title, so a reader who follows
-/// the shared link reads it again at the top of the page and finds the page they
-/// were promised. Nothing is written twice: the chapter states its lede once,
-/// here, and the description is that string with nothing added.
-///
-/// It goes through `inlineCode` and back out again, which is not the round trip
-/// it looks like: a lede writes `vyrn run` in backticks and the page renders
-/// that as a code span, so running the same step the page runs and then dropping
-/// the tags leaves the words a reader SEES. The backticks would otherwise be in
-/// the card.
+/// What a chapter's card says: its lede, cut to a card. The lede goes through
+/// `inlineCode` first, so its backticks become code spans whose tags `blurbFrom`
+/// drops, and the card shows the words the page shows.
 export fn chapterBlurb(slug: String) -> String {
     return blurbFrom(inlineCode(chapterOf(slug).lede), "")
 }
@@ -684,8 +618,7 @@ export fn chapterKnown(slug: String) -> Bool {
     return chapterOf(slug).slug.byteLength > 0
 }
 
-/// The chapters of one area, in reading order — the book is `areaChapters("guide")`,
-/// and the Web and Tooling pages are the other two runs of the same list.
+/// The chapters of one area, in reading order.
 export fn areaChapters(area: String) -> Array<Chapter> {
     let mut out: Array<Chapter> = []
     for c in chapters() {
@@ -696,19 +629,12 @@ export fn areaChapters(area: String) -> Array<Chapter> {
     return out
 }
 
-/// The distinct groups of one area's shelf, in the order the chapters walk
-/// them. Grouping is contiguous by construction — the test below refuses a
-/// group that stops and starts again.
+/// The groups of one area, in chapter order. Each group is one contiguous run
+/// of chapters; a test holds that.
 export fn areaGroups(area: String) -> Array<String> {
     let mut out: Array<String> = []
     for c in areaChapters(area) {
-        let mut known = false
-        for g in out {
-            if g == c.group {
-                known = true
-            }
-        }
-        if !known {
+        if !includes(out, c.group) {
             out.push(c.group.copy())
         }
     }
@@ -731,14 +657,12 @@ export fn chapterArea(slug: String) -> String {
     return chapterOf(slug).area
 }
 
-/// How many pages a chapter's area holds — the `of 11` in the breadcrumb.
+/// How many chapters an area holds: the `of 11` in the breadcrumb.
 export fn chapterCount(area: String) -> Int64 {
     return areaChapters(area).length
 }
 
-/// The 1-based number of a chapter WITHIN ITS AREA, or 0. The guide's eleventh
-/// page and the tooling area's first are both numbered against their own shelf,
-/// because that is the only count a reader standing in one area can see.
+/// The 1-based number of a chapter within its area, or 0.
 export fn chapterNumber(slug: String) -> Int64 {
     let mut n = 1
     for c in areaChapters(chapterArea(slug)) {
@@ -750,27 +674,19 @@ export fn chapterNumber(slug: String) -> Int64 {
     return 0
 }
 
-/// `01`, `02`, ... — the rail prints a chapter's number in two digits.
-export fn chapterTag(n: Int64) -> String {
+/// A chapter number in two digits: `01`, `02`.
+fn chapterTag(n: Int64) -> String {
     return if n < 10 { "0" + n.toString() } else { n.toString() }
 }
 
-/// The page a chapter is published at: its area is its directory, so the book
-/// is `/guide/…`, the web pages are `/web/…` and the tooling pages `/tooling/…`.
+/// The page a chapter is published at, under its area's directory.
 export fn chapterHref(slug: String) -> String {
     return "/" + chapterArea(slug) + "/" + slug + ".html"
 }
 
-/// The landing of a chapter's area — where its breadcrumb points.
-export fn areaHref(area: String) -> String {
-    return "/" + area + ".html"
-}
-
-/// The two chapters that left the book: the path each page
-/// used to have, and the path that carries it now. `site/export.vyrn` reads
-/// this to publish a redirect stub at each old path, and the guide's own
-/// `[chapter]` route reads it to render the stub's body — one table, so the
-/// stub and its refresh cannot point different ways.
+/// The chapters that moved out of the guide: each old path and its new one.
+/// `site/export.vyrn` publishes a redirect stub at each old path, and the
+/// guide's `[chapter]` route renders the stub's body from the same table.
 export fn movedChapters() -> Array<Array<String>> {
     return [["/guide/testing", "/tooling/testing"], ["/guide/web", "/web/views"]]
 }
@@ -785,21 +701,20 @@ export fn movedTarget(path: String) -> String {
     return ""
 }
 
-/// The chapter before this one IN ITS AREA, or "" at the start of the shelf.
-export fn prevSlug(slug: String) -> String {
+/// The chapter before this one in its area, or "" for the first.
+fn prevSlug(slug: String) -> String {
     let n = chapterNumber(slug)
     return if n > 1 { areaChapters(chapterArea(slug))[n - 2].slug.copy() } else { "" }
 }
 
-/// The chapter after this one IN ITS AREA, or "" at the end of the shelf.
-export fn nextSlug(slug: String) -> String {
+/// The chapter after this one in its area, or "" for the last.
+fn nextSlug(slug: String) -> String {
     let n = chapterNumber(slug)
     let all = areaChapters(chapterArea(slug))
     return if n > 0 && n < all.length { all[n].slug.copy() } else { "" }
 }
 
-/// The chapter that shows block `id`, or "" — the reference pages link back into
-/// the book with this.
+/// The chapter that shows block `id`, or "".
 export fn chapterOfBlock(id: String) -> String {
     for c in chapters() {
         for s in c.sections {
@@ -827,23 +742,6 @@ export fn sectionOfBlock(id: String) -> String {
     return ""
 }
 
-/// The blocks that import `std/<module>`, in book order.
-export fn blocksUsing(module: String) -> Array<String> {
-    let mut out: Array<String> = []
-    for c in chapters() {
-        for s in c.sections {
-            for b in s.blocks {
-                for u in guideUses(b) {
-                    if u == module {
-                        out.push(b.copy())
-                    }
-                }
-            }
-        }
-    }
-    return out
-}
-
 /// How many programs the book runs.
 export fn blockCount() -> Int64 {
     return guideBlocks().length
@@ -858,14 +756,9 @@ fn noDemo() -> Demo {
     return Demo { block: "", chapter: "", section: "", title: "", play: "" }
 }
 
-/// The program in the book that imports `name` from `std/<module>`, or nothing.
-///
-/// This is what a reference page's "open in playground" link is derived FROM,
-/// and it is why there is no link on most exports. A snippet invented for an
-/// export nobody wrote a program for would be a snippet nobody ran, and the
-/// playground would be the first thing to find that out. Where a block imports
-/// the export by name, the link carries that block — a program this site
-/// compiled and ran while the page was built.
+/// The first program in the book that imports `name` from `std/<module>`, or
+/// nothing. A reference page links an export to the playground only through
+/// a program the site ran.
 export fn demoFor(module: String, name: String) -> Demo {
     for d in demosFor(module, name) {
         return d
@@ -873,23 +766,15 @@ export fn demoFor(module: String, name: String) -> Demo {
     return noDemo()
 }
 
-/// How many programs in the book import `name` from `std/<module>`.
-///
-/// `std/strings`' `joinWith` is imported by nineteen of them, which is the
-/// case this count exists for: a page that links ONE of nineteen should say
-/// so rather than presenting an arbitrary chapter as the place.
+/// How many programs in the book import `name` from `std/<module>`, so a page
+/// that links one of several can say so.
 export fn guideUseCount(module: String, name: String) -> Int64 {
     return demosFor(module, name).length
 }
 
-/// Every program that imports `name`, IN THE BOOK'S OWN ORDER.
-///
-/// `guideBlocks()` is the directory, so it is alphabetical: `arrays` before
-/// `getting-started` before `text`. Reading the first of those and calling it
-/// "used in the guide" pointed a reader at whichever chapter happened to sort
-/// first, which for `joinWith` is not the chapter where anyone meets it. The
-/// order here is `chapters()` — the order the book is read in — so the first
-/// element is the first place a reader encounters the export.
+/// Every playable program that imports `name`, in reading order rather than
+/// the alphabetical order of `guideBlocks()`, so the first is where a reader
+/// meets the export.
 fn demosFor(module: String, name: String) -> Array<Demo> {
     let wanted = module + ":" + name
     let mut out: Array<Demo> = []
@@ -913,34 +798,8 @@ fn demosFor(module: String, name: String) -> Array<Demo> {
     return out
 }
 
-// ---------------------------------------------------------------------------
-// The gates
-// ---------------------------------------------------------------------------
-
-/// `markup` with every tag removed — what a reader actually reads.
-fn stripTags(markup: String) -> String {
-    let raw = bytes(markup)
-    let mut out = ""
-    let mut plain = 0
-    let mut i = 0
-    let mut inTag = false
-    while i < raw.length {
-        if !inTag && raw[i] == '<' {
-            out = out + substring(markup, plain, i)
-            inTag = true
-        }
-        if inTag && raw[i] == '>' {
-            inTag = false
-            plain = i + 1
-        }
-        i = i + 1
-    }
-    return out + substring(markup, plain, raw.length)
-}
-
 test "every chapter names an area, a slug, a title and at least one section" {
     let all = chapters()
-    // Eleven guide chapters, four web pages, three tooling pages.
     assertEq(all.length, 19)
     assertEq(areaChapters("guide").length, 12)
     assertEq(areaChapters("web").length, 4)
@@ -949,8 +808,7 @@ test "every chapter names an area, a slug, a title and at least one section" {
         assert(c.area == "guide" || c.area == "web" || c.area == "tooling")
         assert(c.group.byteLength > 0)
     }
-    // A group is one run of the shelf: once the walk leaves it, it never
-    // returns — the sidebar builds its named runs on that.
+    // A group is one contiguous run: the sidebar builds on that.
     for area in ["guide", "web", "tooling"] {
         let mut seen: Array<String> = []
         let mut last = ""
@@ -996,11 +854,9 @@ test "a slug appears once, and prev and next chain each area end to end" {
             here = ahead
             walked = walked + 1
         }
-        // The chain never leaves the shelf and never skips a page.
         assertEq(walked, shelf.length)
     }
     assert(!chapterKnown("nope"))
-    // A page's path is under its area, and a moved path names a page that exists.
     assertEq(chapterHref("testing"), "/tooling/testing.html")
     assertEq(chapterHref("values"), "/guide/values.html")
     for pair in movedChapters() {
@@ -1015,21 +871,14 @@ test "every block the book names is a file the generator read" {
     for c in chapters() {
         for s in c.sections {
             for b in s.blocks {
-                let mut found = false
-                for k in known {
-                    if k == b {
-                        found = true
-                    }
-                }
-                assert(found)
+                assert(includes(known, b))
                 assert(guideSrc(b).byteLength > 0)
                 assert(guideLines(b).length > 0)
                 shown = shown + 1
             }
         }
     }
-    // Every program in the directory is shown somewhere: a file nobody reads is
-    // a program nobody checks.
+    // Every program in the directory is shown somewhere.
     assertEq(shown, known.length)
 }
 
@@ -1056,24 +905,20 @@ test "a playground link is base64url of the source, with no padding" {
             }
         }
     }
-    // The three substitutions, on a source that needs all of them.
     assertEq(playHref("~~~?"), "/play.html#c=fn5-Pw")
 }
 
 test "a block that needs a second file carries no run link" {
-    // The generator chapter's two blocks: one is a `gen fn` with no `demo`, and
-    // one imports it. Neither is a whole program on its own, and a run link that
-    // opened a source the playground cannot compile would be a broken promise.
+    // The generator chapter's two blocks: a `gen fn` with no `demo`, and the
+    // program that imports it.
     assertEq(blockOf("gentiny").play, "")
     assertEq(blockOf("genuse").play, "")
     assert(blockOf("hello").play.byteLength > 0)
 }
 
 test "the block on the page is the program that ran" {
-    // The colouring pass and the source it coloured must agree character for
-    // character. A `\{ }` interpolation holding a string literal used to end the
-    // highlighter's scan early and mangle the rest of the line; this is the gate
-    // that catches that, on every block, rather than by eye.
+    // The coloured lines without their tags are the source, character for
+    // character, on every block.
     for id in guideBlocks() {
         assertEq(stripTags(joinWith(guideLines(id), "\n")), escapeHtml(trimEnd(guideSrc(id))))
     }
@@ -1094,14 +939,7 @@ test "an export a program in the book imports carries that program" {
     assert(d.chapter.byteLength > 0)
     assert(d.section.byteLength > 0)
     assert(startsWith(d.play, "/play.html#c="))
-    // A name nobody imports, and a module nobody imports, carry nothing — no
-    // invented snippet, and no link to one.
+    // A name or a module no program imports carries nothing.
     assertEq(demoFor("strings", "editDistance").block, "")
     assertEq(demoFor("graphql", "graphqlSdl").block, "")
-}
-
-test "a std module the book uses lists the block that uses it" {
-    let users = blocksUsing("arrays")
-    assert(users.length > 0)
-    assertEq(blocksUsing("nope").length, 0)
 }

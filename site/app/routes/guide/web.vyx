@@ -1,10 +1,6 @@
 <script>
-// GET /guide/web — a stub, for a bookmark and a search result.
-//
-// The page moved to its own area when the book split; `site/export.vyrn` stamps
-// the refresh and the canonical off the same `movedChapters()` table this file
-// reads, so the stub and its refresh cannot point different ways. The visible
-// link is for a reader whose browser declines the refresh.
+// GET /guide/web: a redirect stub (see `philosophy.vyx`). The target comes from
+// `movedChapters()`, the table `site/export.vyrn` stamps the refresh from.
 import { Head } from "std/ui"
 import { pageHead } from "../../nav"
 import { movedTarget } from "../../guide"

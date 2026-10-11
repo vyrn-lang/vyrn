@@ -1,40 +1,21 @@
 <script>
-// GET /releases — the changelog: what is published, and what has landed since.
+// GET /releases: the changelog. The latest version heads the page with the
+// stat tiles and the highlights, then every release ever tagged. Installing is
+// one link to `/install`.
 //
-// IT DOES NOT INSTALL ANYTHING. This page used to carry a `curl … | sh` block of
-// its own, which was one platform's command on a page that is not about
-// platforms, and a second copy of the thing `/install` exists to be. One link
-// takes its place. The page is now what its name says:
-// the latest version at the top with the stat tiles and the highlights, then
-// every release ever tagged.
+// The newest tag is baked: `site/release.txt` is refreshed from GitHub before
+// each build and reconciled in `../repo` against the repository's tags.
+// Whether it is a pre-release is the tag's own suffix.
 //
-// It is also NOT IN THE MASTHEAD any more. Four nav names beat five, and nobody
-// navigates to a changelog before they have installed anything — so it is reached
-// from the index's own `Latest release` section, from `/install`, and from the
-// footer of every page.
-//
-// The newest tag is BAKED: `site/release.txt` is refreshed from the GitHub
-// listing before every build of this site, and read here through `../repo`,
-// which reconciles it against the repository's own tags and takes the newer.
-// Nothing on this page is written by hand — not the tag, not the date, not
-// whether it is a pre-release, which is the tag's own suffix.
-//
-// FOUR STAT TILES, AND NOT ONE OF THEM IS TYPED. Each is arithmetic over a file
-// something else wrote: the pull requests are summed out of
-// `site/data/history.json` over the days AFTER the baked tag, the test blocks
-// and their files are counted in that same file by `scripts/site-history.py`,
-// and the examples and the standard library are counted off the working tree by
-// the generator in `app/facts.vyrn`. The tiles this page does NOT carry are the
-// ones this repository cannot compute: the
-// number of ARCHIVES a release published, and the platforms they were built
-// for, live in the release on GitHub and nowhere in this tree. A tile is a
-// number a reader trusts, so a number nobody can recompute does not get one.
+// Each stat tile is arithmetic over a file something else wrote:
+// `site/data/history.json` for the pull requests and the tests, and
+// `app/facts.vyrn` for the examples and the standard library. The archives
+// and platforms of a release live only on GitHub, so no tile counts them.
 import { Head } from "std/ui"
 import { pageHeadOf } from "../nav"
-import { hasRelease, releaseTag, releaseDate, releasePre, releaseUrl, releaseUrlOf, exampleCount, stdCount, backendCount } from "../repo"
+import { hasRelease, releaseTag, releaseDate, releasePre, releaseUrl, releaseUrlOf, isPrerelease, exampleCount, stdCount, backendCount } from "../repo"
 import { Release, releaseRows, days, testBlockCount, testFileCount } from "../history"
 import { feedName } from "../feed"
-import { indexOf } from "std/strings"
 
 /// The feed, as a site-root path the export can rewrite like any other link.
 fn feedHref() -> String {
@@ -62,9 +43,8 @@ fn standing() -> String {
     return "Published " + releaseDate() + " as " + kind + "."
 }
 
-/// What the first tile measures. With a tag it is the pull requests that
-/// landed after it; with none, the same sum over all of history is exactly
-/// what it claims — an empty date compares `>` against every day.
+/// What the first tile measures: the pull requests after the tag, or all of
+/// them when there is no tag, because an empty date is `<` every day.
 fn sinceLabel() -> String {
     if hasRelease() {
         return "Since the tag"
@@ -84,9 +64,8 @@ fn prsSince() -> Int64 {
     return n
 }
 
-/// The eyebrow above the heading. In the nothing-released state there is no
-/// kind to name — an empty tag carries no suffix, so `kindOf` answered
-/// "stable" over a headline saying nothing was released.
+/// The eyebrow above the heading. With no release it names no kind: an empty
+/// tag has no suffix, so `kindOf` would answer "stable".
 fn eyebrow() -> String {
     if !hasRelease() {
         return "Releases"
@@ -94,8 +73,7 @@ fn eyebrow() -> String {
     return "Releases · " + kindOf(releaseTag())
 }
 
-/// Every release, newest first — the table's own order, which is the order a
-/// reader looks for the current one in.
+/// Every release, newest first.
 fn releasesNewestFirst() -> Array<Release> {
     let rows = releaseRows()
     let mut out: Array<Release> = []
@@ -107,20 +85,14 @@ fn releasesNewestFirst() -> Array<Release> {
     return out
 }
 
-/// Whether a tag is a pre-release: it carries a suffix. The same rule
-/// `release.yml` applies when it decides whether to pass `--prerelease`.
 fn kindOf(tag: String) -> String {
-    return match indexOf(tag, "-") {
-        Some(at) => "pre-release",
-        None => "stable",
-    }
+    return if isPrerelease(tag) { "pre-release" } else { "stable" }
 }
 </script>
 
 <template>
 <main class="page wide">
-        <!-- SPLIT: what is published on the left with the command
-             that gets it, what it took to get there on the right. -->
+        <!-- What is published, on the left; what landed since, on the right. -->
         <section class="hero split" id="status">
             <div class="say">
                 <p class="eyebrow">{{ eyebrow() }}</p>

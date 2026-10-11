@@ -1,9 +1,5 @@
 <script>
-// GET /tooling — the Tooling area's contents.
-//
-// The page list is `areaChapters("tooling")` — the same run of the one
-// chapter table the sidebar, the subnav, the export and the search index read —
-// so a page added there appears here with nothing written twice.
+// GET /tooling: the Tooling area's contents, from `areaChapters("tooling")`.
 import { Head } from "std/ui"
 import { pageHeadOf } from "../../nav"
 import { Chapter, areaGroups, groupChapters, chapterHref } from "../../guide"
@@ -14,7 +10,7 @@ export fn head() -> Head {
     return pageHeadOf("/tooling")
 }
 
-/// This shelf's groups — the same named runs the sidebar prints.
+/// This shelf's groups, as the sidebar prints them.
 fn groups() -> Array<String> {
     return areaGroups("tooling")
 }
@@ -24,9 +20,8 @@ fn of(g: String) -> Array<Chapter> {
     return groupChapters("tooling", g)
 }
 
-/// Whether `g` is the group that also lists Editors — a template attribute is
-/// delimited by the same quote a String literal is, so the comparison lives
-/// here.
+/// Whether `g` is the group that also lists Editors. Built here because a
+/// template attribute cannot hold a string literal.
 fn holdsEditors(g: String) -> Bool {
     return g == "Workspace"
 }

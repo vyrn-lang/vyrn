@@ -1,45 +1,23 @@
 <script>
-// GET /docs — the reference entry: every standard library module, on this site.
+// GET /docs: the reference landing, with every standard library module.
 //
-// The reference used to be six links to the repository. It is now generated from
-// the source while the site compiles — `site/app/apidoc.vyrn` lexes every
-// `std/*.vyrn` and emits each export's signature, prose and line — so a module
-// name here opens a page rather than a Markdown file on GitHub.
-//
-// The links that remain point at things this site does not host: the README, the
-// roadmap, the examples. Those are the only ones worth leaving for — the design
-// record and the compiler notes were two of them, and both were development
-// reading on a consumer page. The record is a section of its own
-// now, reached from the footer.
-//
-// THE SEARCH AND THE GRAPH ARE HERE. They were `/explore`, which
-// was a second view of this same list and answered no question this page could
-// not. The module list below IS the search index: each row carries its own
-// lowercased haystack in `data-q` and its export names in `data-e`, so there is
-// no fetch, no index file, and a reader with no script still gets every module,
-// its first line and a link. `widgets.js` filters the rows and builds a link per
-// matching export with `createElement` — never by assembling markup out of what
-// was typed.
-//
-// There is one module list on this site and it is this one. `/explore` renders
-// packages — a different set, a different shape, and every card goes to that
-// package's own page.
-//
-// THE GRAPH IS NOT ON THIS PAGE. It was 25,347 of 52,815 bytes against the
-// 40,000-byte ceiling — one inline drawing, on the page every reader of the
-// reference lands on, downloaded whether or not they scrolled to it. It is
-// `/docs/graph` now, linked from the area cards below and from every module
-// page's own graph section.
+// The module list is the search index: each row carries its lowercased search
+// text in `data-q` and its export names in `data-e`, so filtering needs no
+// fetch and a reader with no script still gets every module. `widgets.js`
+// filters the rows and builds a link per matching export with
+// `createElement`, never from typed markup. The import graph is on
+// `/docs/graph`. The only links that leave the site are to the README, the
+// roadmap and the examples.
 import { Head } from "std/ui"
 import { pageHeadOf } from "../../nav"
-import { exampleCount, blob } from "../../repo"
-import { ApiModule, apiModules, apiHref } from "../../docs"
-import { SearchRow, SearchGroup, searchRows, searchGroups, edgeCount, leafCount } from "../../stdgraph"
+import { blob } from "../../repo"
+import { apiModules } from "../../docs"
+import { searchRows, searchGroups, edgeCount, leafCount } from "../../stdgraph"
 import { chapters } from "../../guide"
 import { Icon } from "../../icons"
 import { TreeGroup, docsTree } from "../../docshell"
 
-/// The sidebar: the whole reference, with the Overview marked.
+/// The sidebar: the whole reference, nothing marked.
 fn tree() -> Array<TreeGroup> {
     return docsTree("index")
 }
@@ -69,14 +47,9 @@ fn links() -> Array<Link> {
     ]
 }
 
-/// One row of the command table: what you type, and what it does.
-///
-/// The name is CODE, not a link. An earlier round wrapped each command in an
-/// anchor so the row would do something when clicked; that was wrong twice over.
-/// A command is something you copy — every inline code span on this site copies
-/// itself when you click it — and the anchors it grew pointed at GitHub, which
-/// is exactly the redirect this site exists to remove. Where a row has more to
-/// say, the sentence carries an ON-SITE link, in the sentence, as a link looks.
+/// One row of the command table: what you type, and what it does. The name is
+/// code a reader copies, not a link; a row that has more to say links from its
+/// sentence.
 type Command = { name: String, what: String }
 
 fn commands() -> Array<Command> {
@@ -116,11 +89,8 @@ fn commands() -> Array<Command> {
             </div>
         </section>
 
-        <!-- THE FOUR AREAS. The page opened on its own module list,
-             which answered "which module does X" and nothing else; a reader who
-             arrived here from a search result could not see that the site also
-             holds the book, the driver and the graph. Each card's line is a count
-             from the generator that builds the page it points at. -->
+        <!-- The documentation's areas. Each card's count comes from the
+             generator that builds the page it links. -->
         <section class="band" id="areas">
             <h2>Four places to start</h2>
             <ul class="cards areas">
@@ -147,11 +117,8 @@ fn commands() -> Array<Command> {
             </ul>
         </section>
 
-        <!-- THE WHOLE LIBRARY, IN FOUR GROUPS AND THREE COLUMNS.
-             Every row is generated — `apiGroups()` reads `std/` — so a module
-             added tomorrow is on this page on the next build. The rows still
-             carry `data-q` and `data-e`, so the search above filters them where
-             they sit; a group whose rows are all filtered out hides itself. -->
+        <!-- Every module, in its group. The search filters these rows in
+             place; a group with every row filtered out hides itself. -->
         <section class="band" id="std">
             <div data-search-list>
                 <div class="modgroup" v-for="g in searchGroups()" :key="g.name">

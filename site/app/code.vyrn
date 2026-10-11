@@ -1,19 +1,15 @@
-/// Colour for the code that is NOT Vyrn, and shape for the text that is not code.
+/// Colour for code that is not Vyrn, and markup for text that is not code.
 ///
-/// Vyrn snippets are coloured by the compiler's own lexer, in `hl.vyrn`. This
-/// module covers the two things that lexer cannot answer for:
+/// Vyrn is coloured by the compiler's lexer in `hl.vyrn`. This module colours
+/// the Rust, TypeScript and Go comparison snippets with a word list, colours
+/// shell commands by token class, and marks tool output line by line so the
+/// stylesheet can dim it. `escapeHtml` is the site's one HTML escaper.
 ///
-///  - **Rust, TypeScript and Go.** A word-list colourer over a byte scan, which
-///    the design brief permits explicitly (G3): "do not write three more lexers".
-///    It is approximate, and the comparison page says so.
-///  - **Tool output.** A compiler diagnostic or a `vyrn why` report is not code
-///    and must not be dressed as code. `terminalHtml` marks each line so the
-///    stylesheet can give output its own, dimmer treatment. Nothing on this site
-///    ships as bare unstyled text.
-///
-/// ponytail: word-list colouring for the other three languages, no parser. If a
-/// snippet ever highlights wrongly, shorten the snippet.
-import { substring, split, fromBytesOr } from "std/strings"
+/// ponytail: word lists, no parser. If a snippet highlights wrongly, shorten
+/// the snippet.
+import { substring, split, joinWith, fromBytesOr } from "std/strings"
+import { contains } from "std/strpred"
+import { includes } from "std/arrays"
 
 /// The Rust words the comparison snippets use.
 export fn rustWords() -> Array<String> {
@@ -30,9 +26,8 @@ export fn goWords() -> Array<String> {
     return ["func", "var", "const", "if", "else", "for", "range", "return", "true", "false", "type", "struct", "interface", "package", "import", "go", "defer", "chan", "select", "switch", "case", "map", "nil", "make", "new"]
 }
 
-/// One HTML-safe byte. A byte that is not valid UTF-8 on its own is a
-/// continuation byte of a character the caller split, which cannot happen here —
-/// every caller passes whole runs — so the fallback is unreachable.
+/// One HTML-safe byte. Callers pass ASCII bytes only, so the fallback for a
+/// byte that is not UTF-8 on its own is unreachable.
 fn escapeByte(b: UInt8) -> String {
     if b == '&' {
         return "&amp;"
@@ -52,19 +47,9 @@ fn escapeByte(b: UInt8) -> String {
     return fromBytesOr([b], "")
 }
 
-/// `s` with every markup-significant byte replaced. Multi-byte characters pass
-/// through whole: only ASCII bytes are replaced, and no byte of a longer
-/// character can equal one of them.
-///
-/// THE QUOTES ARE ESCAPED TOO, and they used to not be. The argument for leaving
-/// them was that a quote inside a `<pre>` is text — true, and it made the
-/// function safe only because of where its callers happened to put the result.
-/// A name like `escapeHtml` is a promise about the OUTPUT, not about the six
-/// call sites it has today: the day a signature or a title is routed into an
-/// attribute, an unescaped `"` closes the attribute and the rest of the
-/// signature becomes markup. The safety is now a property of this function.
-/// In element content the two forms render identically, so nothing on the page
-/// changes.
+/// `s` with `&`, `<`, `>`, `"` and `'` escaped, so the result is safe in
+/// element content and in a quoted attribute. Multi-byte characters pass
+/// through whole: no byte of one equals an ASCII byte.
 export fn escapeHtml(s: String) -> String {
     let raw = bytes(s)
     let mut out = ""
@@ -93,15 +78,6 @@ fn isWordByte(b: UInt8) -> Bool {
     return isLetter(b) || isDigit(b)
 }
 
-fn isWord(word: String, words: Array<String>) -> Bool {
-    for w in words {
-        if w == word {
-            return true
-        }
-    }
-    return false
-}
-
 /// `text` inside a span of class `cls`, escaped.
 fn span(cls: String, text: String) -> String {
     return "<span class=\"" + cls + "\">" + escapeHtml(text) + "</span>"
@@ -109,9 +85,9 @@ fn span(cls: String, text: String) -> String {
 
 /// Highlight `src` against `words`, returning the inner HTML of a `<pre>`.
 ///
-/// One left-to-right pass. A comment runs to the newline, a string runs to the
-/// closing quote (a backslash covers the next byte), a word run is one span or
-/// none, and everything else is escaped through.
+/// A comment runs to the newline, a string to the closing quote (a backslash
+/// covers the next byte), a word run is one span or none, and anything else is
+/// escaped.
 export fn highlightWith(src: String, words: Array<String>) -> String {
     let raw = bytes(src)
     let mut out = ""
@@ -143,7 +119,7 @@ export fn highlightWith(src: String, words: Array<String>) -> String {
                 i = i + 1
             }
             let word = substring(src, start, i)
-            if isWord(word, words) {
+            if includes(words, word) {
                 out = out + span("k", word)
             } else if b >= 'A' && b <= 'Z' {
                 out = out + span("t", word)
@@ -164,30 +140,19 @@ export fn highlightWith(src: String, words: Array<String>) -> String {
     return out
 }
 
-/// A shell block, coloured by token class.
+/// A shell block, coloured by token class: the program is the first word of a
+/// line, a flag opens with `-`, a comment runs from `#`, and an argument is
+/// plain text.
 ///
-/// Four classes, and they are the four things a reader picks out of a command:
-/// the program being run, its flags, a comment, and everything else. The program
-/// is the first word of a line, a flag is a word opening with `-`, a comment runs
-/// from `#` to the newline, and an argument is left as text — which is right,
-/// because the argument is usually the only part the reader has to change.
-///
-/// ponytail: this is a token class treatment, NOT a shell parser. It does not
-/// know a pipe from a subshell, so `cat x | wc -l` colours `cat` and leaves `wc`
-/// as an argument, and a `#` inside a quoted string would read as a comment. No
-/// command on this site has either. The upgrade is a real tokenizer, and nothing
-/// here has asked for one.
+/// ponytail: not a shell parser. A `#` inside quotes reads as a comment, and
+/// only `&&`, `||`, `|` and `;` start another program. No command on the site
+/// needs more.
 export fn shellHtml(src: String) -> String {
-    let mut out = ""
-    let mut first = true
+    let mut out: Array<String> = []
     for line in split(src, "\n") {
-        if !first {
-            out = out + "\n"
-        }
-        first = false
-        out = out + shellLine(line)
+        out.push(shellLine(line))
     }
-    return out
+    return joinWith(out, "\n")
 }
 
 /// One command line. `head` is true until the first word is spent.
@@ -210,7 +175,6 @@ fn shellLine(line: String) -> String {
             }
             let word = substring(line, start, i)
             if word == "&&" || word == "||" || word == "|" || word == ";" {
-                // What follows a connector is another program, not an argument.
                 out = out + escapeHtml(word)
                 head = true
             } else if head {
@@ -226,35 +190,18 @@ fn shellLine(line: String) -> String {
     return out
 }
 
-/// One line of tool output, marked so the stylesheet can prefix and dim it.
-///
-/// The text is escaped and otherwise untouched: a compiler diagnostic means what
-/// it says, and colouring parts of it would be this site editing the compiler.
+/// Tool output, one marked span per line, so the stylesheet can prefix and dim
+/// it. The text is escaped and otherwise untouched.
 export fn terminalHtml(text: String) -> String {
-    let mut out = ""
-    let mut first = true
+    let mut out: Array<String> = []
     for line in split(text, "\n") {
-        if !first {
-            out = out + "\n"
-        }
-        first = false
-        out = out + "<span class=\"ol\">" + escapeHtml(line) + "</span>"
+        out.push("<span class=\"ol\">" + escapeHtml(line) + "</span>")
     }
-    return out
+    return joinWith(out, "\n")
 }
 
-/// One line of prose with its backtick spans as `<code>`.
-///
-/// The book's chapter ledes are markdown and were printed as text: `/guide` and
-/// every chapter page rendered "A record is a shape. An enum is a choice.
-/// `match` covers every case" with the backticks visible, because the lede is
-/// interpolated and the module summaries beside it are not — those come out of
-/// `apidoc.vyrn` already rendered. This is the one markdown construct a lede
-/// uses, and rendering it is cheaper than routing thirteen short strings through
-/// the block-level renderer.
-///
-/// Everything else is escaped, and the escaping happens on both sides of the
-/// backtick, so a lede that ever holds a `<` is still text.
+/// One line of prose, escaped, with its backtick spans as `<code>`. Chapter
+/// ledes use this one markdown construct and no other.
 export fn inlineCode(text: String) -> String {
     let mut out = ""
     let mut plain = 0
@@ -273,8 +220,7 @@ export fn inlineCode(text: String) -> String {
         }
         i = i + 1
     }
-    // An unpaired backtick is a backtick. Nothing here rewrites text it could
-    // not close.
+    // An unpaired backtick stays a backtick.
     return out + escapeHtml(substring(text, plain, text.byteLength))
 }
 
@@ -303,16 +249,10 @@ test "markup in a snippet cannot escape the pre" {
 }
 
 test "an escaped quote does not end the string" {
-    // The quotes reach the page as `&quot;`, which is what makes a highlighted
-    // signature safe in an attribute as well as in a `<pre>`. A browser renders
-    // the two identically.
     assertEq(highlightWith("\"a\\\"b\" c", goWords()), "<span class=\"s\">&quot;a\\&quot;b&quot;</span> c")
 }
 
 test "a signature cannot break out of an attribute" {
-    // The invariant `escapeHtml` used to keep only by circumstance: it was safe
-    // because every call site landed in element content. Now it is safe because
-    // of what it returns.
     assertEq(escapeHtml("\" onerror=\"alert(1)"), "&quot; onerror=&quot;alert(1)")
     assertEq(escapeHtml("it's"), "it&#39;s")
 }
@@ -341,30 +281,16 @@ test "tool output is marked line by line and never coloured as code" {
     assertEq(terminalHtml("<x>"), "<span class=\"ol\">&lt;x&gt;</span>")
 }
 
-/// One recorded step as a terminal body: the command after a prompt, then the
-/// output it produced.
-///
-/// The colouring is the shell's own vocabulary and nothing more — a prompt is
-/// a prompt, the command is what was typed, and a line naming a path reads as
-/// data. Three classes rather than a lexer, because this is a transcript and
-/// not source: the compiler's own colours belong to code blocks.
+/// One recorded step as a terminal body: a prompt and the command, then the
+/// output. A transcript is not source, so it gets three classes and no lexer;
+/// a line naming a path is dimmed.
 export fn shellOutHtml(cmd: String, out: String) -> String {
-    let mut html = ""
-    if cmd.byteLength > 0 {
-        html = html + "<span class=\"pr\">$</span> <span class=\"cx\">" + escapeHtml(cmd) + "</span>
-"
+    let mut lines: Array<String> = []
+    for line in split(out, "\n") {
+        lines.push(demoLineHtml(line))
     }
-    let mut first = true
-    for line in split(out, "
-") {
-        if !first {
-            html = html + "
-"
-        }
-        first = false
-        html = html + demoLineHtml(line)
-    }
-    return html
+    let prompt = if cmd.byteLength > 0 { "<span class=\"pr\">$</span> <span class=\"cx\">" + escapeHtml(cmd) + "</span>\n" } else { "" }
+    return prompt + joinWith(lines, "\n")
 }
 
 /// One line of a recorded transcript.
@@ -373,16 +299,6 @@ fn demoLineHtml(line: String) -> String {
         return ""
     }
     let text = escapeHtml(line)
-    let cls = if hasSlash(line) { "pa" } else { "pl" }
+    let cls = if contains(line, "/") { "pa" } else { "pl" }
     return "<span class=\"" + cls + "\">" + text + "</span>"
-}
-
-/// Whether a line names a path — the one thing this transcript dims.
-fn hasSlash(line: String) -> Bool {
-    for b in bytes(line) {
-        if b == '/' {
-            return true
-        }
-    }
-    return false
 }

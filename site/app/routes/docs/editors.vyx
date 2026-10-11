@@ -1,9 +1,6 @@
 <script>
-// GET /docs/editors — a stub, for a bookmark and a search result.
-//
-// An editor is a tool, so the page lives on the Tooling shelf.
-// `site/export.vyrn` stamps the refresh and the canonical off `redirects()`,
-// which names this pair beside the two moved chapters.
+// GET /docs/editors: a redirect stub to `/tooling/editors` (see
+// `philosophy.vyx`).
 import { Head } from "std/ui"
 import { pageHead, hrefOf } from "../../nav"
 

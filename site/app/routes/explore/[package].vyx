@@ -1,18 +1,12 @@
 <script>
-// GET /explore/[package] — one package, compact: a long band was "overloaded
-// and hardly readable" (user).
+// GET /explore/[package]: one package. The identity heads the page, the
+// install command and the source sit in a side card, and the two files
+// `vyrn add` writes are behind one `<details>`.
 //
-// The shape is a package index's page: the identity at the top, the install
-// command and the source in a side card, and the substance — the import line,
-// the exports, the artifacts, the dependencies — as short blocks. The two file
-// SHAPES `vyrn add` writes are behind one `<details>`: they are reference
-// material, and open-by-default they were most of the page.
-//
-// Everything here is still read off the package's own files while the site
-// compiles, and THE SPECIFIER IS STILL THE POINT: it is carried in `data-spec`
-// and `site/test/importline.test.mjs` re-parses every one with the grammar
+// The specifier is also carried in `data-spec`, and
+// `site/test/installspec.test.mjs` re-parses each with the grammar
 // `compiler/vyrn-cli/src/remote.rs` applies.
-import { Package, Artifact, PkgLink, Offer, packageBlurb, packageKnown, packageOf, packageDeps, packageSource, offerOf, addCommand, manifestShape, lockShape, importFrom, artifactsOf } from "../../packages"
+import { Package, Artifact, packageBlurb, packageKnown, packageOf, packageDeps, packageSource, offerOf, addCommand, manifestShape, lockShape, importFrom, artifactsOf } from "../../packages"
 import { Head, PageError, ParamQuery, notFound, paramQuery } from "std/ui"
 import { pageHeadWith } from "../../nav"
 params { package: String }
@@ -32,8 +26,7 @@ fn fetchPackage(p: Params) -> Result<Package, PageError> {
     return Ok(packageOf(p.package))
 }
 
-/// `1 export`, `14 exports`. A count and its noun disagreeing is the sort of
-/// thing a reader takes as a sign that nothing here was read.
+/// `1 export`, `14 exports`.
 fn unitLabel(d: Package) -> String {
     return if d.exports == 1 { "1 export" } else { d.exports.toString() + " exports" }
 }
@@ -46,8 +39,7 @@ fn depLabel(d: Package) -> String {
     return if d.deps == 1 { "1 dependency" } else { d.deps.toString() + " dependencies" }
 }
 
-/// `1 artifact`, `2 artifacts` — what the project builds, which is a different
-/// question from what it offers.
+/// `1 artifact`, `2 artifacts`: what the project builds.
 fn buildLabel(d: Package) -> String {
     let n = artifactsOf(d.slug).length
     return if n == 1 { "1 artifact" } else { n.toString() + " artifacts" }
@@ -56,9 +48,7 @@ fn buildLabel(d: Package) -> String {
 
 <template>
 <main class="page pkg">
-    <!-- The header a package index gives a package (user, off jsr.io): the
-         name at reading size with its badge beside it, the sentence, and the
-         numbers - not a poster. -->
+    <!-- The name with its badge, the sentence, and the numbers. -->
     <section class="pkghead">
         <p class="eyebrow"><a href="/explore.html">Registry</a></p>
         <div class="pkgtitle">

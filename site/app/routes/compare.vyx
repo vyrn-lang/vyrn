@@ -1,11 +1,5 @@
 <script>
-// GET /compare — a stub, for a bookmark and a search result.
-//
-// The page was a cross-language matrix, three code plates and three charts,
-// and it had two problems: the numbers a
-// reader came for now live on `/benchmarks`, in the documentation where they
-// belong, and the prose comparing languages belongs in the book, where a
-// reader who is learning one is standing. Both moved; this is the old name.
+// GET /compare: a redirect stub to `/benchmarks` (see `philosophy.vyx`).
 import { Head } from "std/ui"
 import { pageHead, hrefOf } from "../nav"
 

@@ -1,17 +1,9 @@
 <script>
-// GET /explore — the registry: what you can install into a project you did not
-// write.
+// GET /explore: the registry, one compact row per package with a search
+// field. The install command and the manifest are on each package's page.
 //
-// The shape is a package index's (user: "like npm or crates", and the first
-// registry cut drowned it in prose): a search field, a count, and one compact
-// row per package — name, kind, one sentence, two numbers. The install
-// command, the manifest and the mechanism live on the package's own page,
-// which is where a reader who has chosen a package goes next. One line under
-// the list points at the mechanism's page and that is all the prose there is.
-//
-// The search is the reference landing's own scriptless-degrading mechanism:
-// every row carries its lowercased haystack in `data-q`, `widgets.js` filters
-// rows where they stand, and with no script the full index is simply visible.
+// Each row carries its lowercased search text in `data-q`, as the reference's
+// rows do; `widgets.js` filters them, and with no script every row shows.
 import { Head } from "std/ui"
 import { pageHeadOf } from "../../nav"
 import { Package, packages, offerOf } from "../../packages"
@@ -21,23 +13,20 @@ export fn head() -> Head {
     return pageHeadOf("/explore")
 }
 
-/// `1 export · 2 deps` — what a dependency is weighed by, in a row's worth of
-/// space.
+/// The row's two counts: exports and dependencies.
 fn numsOf(p: Package) -> String {
     let ex = if p.exports == 1 { "1 export" } else { p.exports.toString() + " exports" }
     let deps = if p.deps == 0 { "no deps" } else if p.deps == 1 { "1 dep" } else { p.deps.toString() + " deps" }
     return ex + " · " + deps
 }
 
-/// The row's search haystack: name, kind, and the summary's words, lowercased —
-/// the same contract the reference's rows carry.
+/// The row's search text: name, kind and summary, lowercased.
 fn haystack(p: Package) -> String {
     return toLower(p.name + " " + p.kind + " " + p.summary)
 }
 
-/// The offered module's export names, space-joined — `data-e`, so a search
-/// for a NAME finds the package that offers it, the way the reference's
-/// search finds a module by its exports.
+/// The offered module's export names, space-joined, for `data-e`: a search for
+/// a name finds the package that exports it.
 fn exportsOf(p: Package) -> String {
     let mut out = ""
     for e in offerOf(p.slug).exports {
