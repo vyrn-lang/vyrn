@@ -42,7 +42,6 @@ const SHELL_MARK = "Source on GitHub";
 /// own `index.vyx`.
 const PAGE_TAGS = {
   "install.vyx": "install.html",
-  "index.vyx": "index.html",
   "docs/index.vyx": "docs.html",
   // The two hand-written leaves, each with its own page-actions menu glyphs.
   "docs/graph.vyx": "docs/graph.html",
