@@ -4298,17 +4298,24 @@ fn main() -> Int64 {
         .get("result")
         .and_then(|r| r.as_array())
         .expect("hints: {hints}");
-    // Type hints share the request; a move hint's label starts with an arrow.
+    // Type hints share the request; a move hint's label starts with `moved into`.
     let moves: Vec<&serde_json::Value> = list
         .iter()
-        .filter(|h| h["label"].as_str().is_some_and(|l| l.starts_with('→')))
+        .filter(|h| {
+            h["label"]
+                .as_str()
+                .is_some_and(|l| l.starts_with("moved into"))
+        })
         .collect();
     assert_eq!(moves.len(), 1, "one move, one hint: {list:?}");
     assert_eq!(
         moves[0].pointer("/position/line").unwrap().as_i64(),
         Some(3)
     );
-    assert_eq!(moves[0].get("label").unwrap().as_str(), Some("→ take(..)"));
+    assert_eq!(
+        moves[0].get("label").unwrap().as_str(),
+        Some("moved into take(..)")
+    );
 
     // The last use carries the `modification` modifier, bit 3. Tokens are
     // delta-encoded `[dline, dstart, len, type, mods]`.

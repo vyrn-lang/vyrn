@@ -2691,8 +2691,9 @@ pub struct InlayHint {
 }
 
 /// Move hints for a document: at the occurrence that moves a value, a label
-/// `-> f(..)` says where it went. A move is the one memory event with its own
-/// source position. Pure over the cached [`Analysis`].
+/// `moved into f(..)` says where it went. A move is the one memory event with
+/// its own source position. A move the source writes as `consume x` has no
+/// hint: the line says it. Pure over the cached [`Analysis`].
 pub fn inlay_hints(analysis: &Analysis) -> Vec<InlayHint> {
     let mut out = Vec::new();
     for m in &analysis.memory {
@@ -2710,13 +2711,19 @@ pub fn inlay_hints(analysis: &Analysis) -> Vec<InlayHint> {
         else {
             continue;
         };
+        let written = (analysis.tokens.iter())
+            .filter(|t| t.line == at && t.end_col <= tok.col)
+            .last()
+            .is_some_and(|t| t.text == "consume");
+        if written {
+            continue;
+        }
         // `into` is worded for a diagnostic, with backticks; a hint drawn in the
         // code has none.
-        let into = into.trim_matches('`');
         out.push(InlayHint {
             line: at,
             col: tok.end_col,
-            label: format!("→ {into}"),
+            label: format!("moved into {}", into.replace('`', "")),
         });
     }
     out.sort_by_key(|h| (h.line, h.col));
@@ -3728,7 +3735,7 @@ fn main() -> Int64 {
         let hints = inlay_hints(&a);
         assert_eq!(hints.len(), 1, "{hints:?}");
         assert_eq!(hints[0].line, 4);
-        assert_eq!(hints[0].label, "→ take(..)");
+        assert_eq!(hints[0].label, "moved into take(..)");
     }
 
     #[test]
@@ -3917,5 +3924,24 @@ fn main() -> Int64 {
         // end_col of the last `a` on the line.
         let expected_col = l4.rfind('a').unwrap() + 2;
         assert_eq!(hints[0].col, expected_col, "{hints:?}");
+    }
+
+    #[test]
+    fn a_move_the_source_writes_as_consume_has_no_hint() {
+        let src = "fn take(s: consume String) -> Int64 { return 1 }\n\
+                   fn main() -> Int64 {\n\
+                   \x20   let a = \"x\" + \"y\"\n\
+                   \x20   return take(consume a)\n\
+                   }";
+        let mut a = analyze(src);
+        assert!(a.diagnostics.is_empty(), "{:?}", a.diagnostics);
+        a.memory = vec![MemoryNote {
+            name: "a".into(),
+            line: 3,
+            text: "moved at line 4 into `take(..)`".into(),
+            last_use: Some(4),
+            moved_into: Some("`take(..)`".into()),
+        }];
+        assert_eq!(inlay_hints(&a), Vec::new());
     }
 }

@@ -382,6 +382,9 @@ document has no error. They cost about 9 ms of a 230 ms keystroke on
 `site/export.vyrn`. The client's `costHints` initialization option turns them
 off, and the server then skips the work.
 
+A move of a `let` name ends in a hint naming what took the value, such as
+`moved into take(..)`. A move the source writes as `consume x` has none.
+
 The server is outside the Cargo workspace. Build and test it explicitly:
 
 ```
