@@ -34,15 +34,15 @@ A handle into a `Slots<T>`. `T` only brands it, so the compiler refuses a
 ## Slots
 
 ```vyrn
-type Slots = { vals: Array<T>, gens: Array<Int64>, free: Array<Int64>, dense: Array<Int64>, denseAt: Array<Int64>, owner: Int64 }
+type Slots = { vals: Array<T>, gens: Array<Int64>, dense: Array<Int64>, denseAt: Array<Int64>, free: Int64, owner: Int64 }
 ```
 
 A generational slab.
 
-`vals` and `gens` are parallel and indexed by slot; `free` holds the unused
-slots. `dense` holds the live slots in iteration order and `denseAt` maps a
-slot back to its position in `dense` (-1 when free), so `remove` is O(1) and
-iteration skips free slots.
+`vals` and `gens` are parallel and indexed by slot. `dense` orders every
+slot, the live ones in iteration order and then the last `free`, the most
+recently freed first. `denseAt` maps a slot back to its position, so
+`remove` is O(1) and iteration skips free slots.
 
 ## newSlots
 
