@@ -1,56 +1,17 @@
-/// Repository facts, counted at compile time.
+/// Repository counts and the baked release, read while the site compiles.
 ///
-/// The design brief's data rule is absolute: no widget renders a number the
-/// project cannot produce on demand. So the site never writes a count by hand.
-/// This generator reads the repository's own directories with `listDir`
-/// while the site compiles, and emits the answers as Vyrn source.
-/// Add an example, and the landing page says so on the next build. Write the
-/// number by hand, and it starts drifting the same day.
-///
-///     import { repoFacts } from "./facts"
-///     import { exampleCount, stdModules } from repoFacts("../examples", "../std", "../release.txt")
-///
-/// Import it through `site/app/repo.vyrn` rather than calling it twice. The
-/// generator cache is keyed on the argument STRINGS, so two call sites spelling
-/// the same directory with different `../` prefixes would generate two modules,
-/// and their exported names would collide program-wide.
-///
-/// `listDir` and `readFile` are the two file effects a generator is allowed,
-/// and the sandbox scopes them to the CONSTANT PATH ARGUMENTS at the call site.
-/// That is why the two directories are two separate parameters rather than one
-/// repository root: the call site states exactly what the generator may read,
-/// and the release file is a third argument for the same reason. Read the
-/// emitted module with `vyrn emit-gen`.
-import { substring, lines, trim, fromBytesOr } from "std/strings"
-import { startsWith, endsWith } from "std/strpred"
-import { quotedList, entriesOf } from "./gensrc"
+/// No count on the site is written by hand: this generator lists `examples/`
+/// and `std/` and reads `site/release.txt`, and emits the answers as a module.
+/// Call it only through `repo.vyrn`. The generator cache keys on the argument
+/// strings, so a second call site spelling a path differently would emit a
+/// second module whose exports collide. Each path is its own argument because
+/// the sandbox lets a generator read only the paths its call site names.
+import { lines, trim, fromBytesOr } from "std/strings"
+import { startsWith } from "std/strpred"
+import { quotedList, vyrnStems } from "./gensrc"
 
-/// How many entries of `dir` end in `suffix`. A directory entry cannot, so this
-/// counts files and nothing else.
-fn countIn(dir: String, suffix: String) -> Int64 {
-    let mut n = 0
-    for entry in entriesOf(dir) {
-        if endsWith(entry, suffix) {
-            n = n + 1
-        }
-    }
-    return n
-}
-
-/// The `std/` module names, without the extension, in sorted order.
-fn stdNames(stdDir: String) -> Array<String> {
-    let mut out: Array<String> = []
-    for entry in entriesOf(stdDir) {
-        if endsWith(entry, ".vyrn") {
-            out.push(substring(entry, 0, entry.byteLength - 5))
-        }
-    }
-    return out
-}
-
-/// The lines of `file` that say something: comments and blank lines dropped,
-/// each one trimmed. An unreadable file yields nothing, which is the "nothing is
-/// released yet" state and renders as such rather than as a broken page.
+/// The trimmed lines of `file`, without blank lines and `#` comments. An
+/// unreadable file yields none, which reads as "nothing released".
 fn contentLines(file: String) -> Array<String> {
     let body = match readFile(file) {
         Ok(text) => text.copy(),
@@ -66,12 +27,8 @@ fn contentLines(file: String) -> Array<String> {
     return out
 }
 
-/// The release tag in `file`, or "" when it does not carry one.
-///
-/// A tag must start with `v`: it is the only shape `release.yml` publishes, and
-/// requiring it means a file that has lost its shape — a stray byte in front of
-/// a comment marker, a half-written refresh — reads as "nothing released" rather
-/// than as a release named after the accident.
+/// The release tag in `file`, or "". A tag starts with `v`, the only shape
+/// `release.yml` publishes, so a damaged file reads as "nothing released".
 fn releaseTagOf(file: String) -> String {
     let tag = releaseField(file, 0)
     if !startsWith(tag, "v") {
@@ -80,14 +37,8 @@ fn releaseTagOf(file: String) -> String {
     return tag
 }
 
-/// Field `i` of the release file, or "" when the file does not carry it.
-///
-/// The bytes are filtered to what a version tag and a date are made of. Every
-/// other value this generator emits comes from a file NAME in this repository;
-/// this one comes from a file a workflow writes out of a GitHub API response, so
-/// it is the one string here that is not already trusted. A byte outside the set
-/// is dropped rather than escaped: a tag is not a place for a quote, and a
-/// generator that emitted one would be emitting Vyrn source with a hole in it.
+/// Field `i` of the release file, or "", filtered by `safeTag`. The file comes
+/// from a GitHub API response, so it is the one untrusted input here.
 fn releaseField(file: String, i: Int64) -> String {
     let rows = contentLines(file)
     if i >= rows.length {
@@ -96,7 +47,8 @@ fn releaseField(file: String, i: Int64) -> String {
     return safeTag(rows[i])
 }
 
-/// `s` with every byte a version tag or a date is not made of removed.
+/// `s` with every byte a version tag or a date is not made of removed. Dropped
+/// rather than escaped, so the emitted literal can never be broken open.
 fn safeTag(s: String) -> String {
     let mut out = ""
     for b in bytes(s) {
@@ -107,10 +59,10 @@ fn safeTag(s: String) -> String {
     return out
 }
 
-/// Count the repository, and emit the answers as a module.
+/// Counts the repository, and emits the answers as a module.
 export gen fn repoFacts(examplesDir: String, stdDir: String, releaseFile: String) -> String {
-    let examples = countIn(examplesDir, ".vyrn")
-    let mods = stdNames(stdDir)
+    let examples = vyrnStems(examplesDir).length
+    let mods = vyrnStems(stdDir)
     let mut out = "/// Counted from the repository while the site compiled. Do not edit.\n"
     out = out + "/// Single-file programs in `examples/`. Every one runs on all three backends.\n"
     out = out + "export fn exampleCount() -> Int64 { return " + examples.toString() + " }\n"
@@ -129,12 +81,10 @@ export gen fn repoFacts(examplesDir: String, stdDir: String, releaseFile: String
 test "a release field keeps what a tag is made of and drops the rest" {
     assertEq(safeTag("v0.1.0-alpha.1"), "v0.1.0-alpha.1")
     assertEq(safeTag("2026-08-11"), "2026-08-11")
-    // The one string here that comes off the network. A quote or a backslash
-    // would end the string literal this generator writes it into.
+    // A quote or a backslash would end the literal this is written into.
     assertEq(safeTag("v1\" }\nfn evil() -> Int64 { return 0"), "v1fnevil-Int64return0")
     assertEq(safeTag(""), "")
-    // Read through a file that is not there: the missing-file path is the
-    // "nothing is released yet" state, and it must be empty rather than a trap.
+    // A missing file is "nothing released", not a trap.
     assertEq(releaseField("no/such/release.txt", 0), "")
     assertEq(releaseTagOf("no/such/release.txt"), "")
     assertEq(contentLines("no/such/release.txt").length, 0)

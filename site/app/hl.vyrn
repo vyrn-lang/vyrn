@@ -1,29 +1,15 @@
-/// Vyrn syntax highlighting, done by the compiler's own lexer (design brief G3).
-///
-/// `lex()` is the compiler's real lexer, reachable from Vyrn, and
-/// it is generation-only. So this module is a GENERATOR: it holds every Vyrn
-/// snippet the site shows, lexes each one while the site compiles, and emits the
-/// coloured markup as ordinary Vyrn source. A visitor downloads coloured HTML
-/// and no highlighter, and there is no JavaScript on this path at all.
+/// Vyrn syntax highlighting by the compiler's own lexer, and the Vyrn snippets
+/// the site shows.
 ///
 ///     import { vyrnCode } from "./hl"
 ///     import { hlLines } from vyrnCode()
 ///
-/// WHAT THE LEXER DECIDES AND WHAT THIS FILE DECIDES. Every token's kind comes
-/// from `lex()` — there is no keyword list to drift from the language. Two things
-/// the token list cannot answer are answered here:
-///
-///  1. **Extent.** A token carries `line` and `col` but its `text` is DECODED:
-///     a string token's text has no quotes, a byte literal's text is its number.
-///     So the source extent of a string, a doc comment and a number is measured
-///     by scanning from the token's own start. Every other kind — keyword, ident,
-///     punctuation — spells itself, and its text length is exact.
-///  2. **Trivia.** Comments are trivia and never reach the token list, so the gap
-///     between two tokens is scanned for `//` and coloured as a comment.
-///
-/// The one list left is `contextual()`: ten words the grammar treats as keywords
-/// in position but the lexer hands back as identifiers. Four of them are the
-/// capability words this whole site is about, so they are tinted deliberately.
+/// `lex()` runs only inside a generator, so this module lexes every snippet
+/// while the site compiles and emits the coloured markup as Vyrn source; a
+/// visitor downloads HTML and no highlighter. Token kinds come from `lex()`.
+/// This file adds two things the token list lacks: the source extent of a
+/// string, doc comment or number, whose token text is decoded, and the
+/// comments between tokens, which the lexer drops.
 import { substring, split } from "std/strings"
 import { includes } from "std/arrays"
 import { escapeHtml } from "./code"
@@ -32,15 +18,9 @@ import { quoted, quotedList, branch, lookup } from "./gensrc"
 /// One snippet, under the id the pages ask for.
 type Piece = { id: String, src: String }
 
-// ---------------------------------------------------------------------------
-// The Vyrn code the site shows, and the one place it is written.
-//
-// Every snippet is copied from a file in this repository — `README.md`,
-// `examples/ownership.vyrn` — so a reader who follows the link finds the same
-// lines. Snippets are literals rather than files read at generation time
-// because a page must render identically wherever it is built.
-// ---------------------------------------------------------------------------
-
+/// Every Vyrn snippet the site shows. Each is copied from a file in this
+/// repository (`README.md`, `examples/ownership.vyrn`), so a reader who follows
+/// the link finds the same lines.
 fn pieces() -> Array<Piece> {
     return [
         Piece {
@@ -52,12 +32,8 @@ fn pieces() -> Array<Piece> {
 }
 ",
         },
-        // The index's hero editor. It RUNS: the reader presses
-        // Run, the compiler front end arrives as WebAssembly, and this program
-        // prints its two lines in the page. So it needs a `main`, and it is
-        // the one snippet on the site whose source a reader edits — which is
-        // why `hlSource` exists beside `hlLines`, to put the same bytes in the
-        // textarea that the colour above it was measured from.
+        // The index's hero editor runs this, so it has a `main`. The editor
+        // also needs the raw text, which `hlSource` gives.
         Piece {
             id: "runme",
             src: "type Age = Int64 where value >= 18
@@ -128,21 +104,15 @@ match seat(t) {
     ]
 }
 
-// ---------------------------------------------------------------------------
-// The highlighter
-// ---------------------------------------------------------------------------
-
 /// The words the grammar reads as keywords in position and the lexer hands back
-/// as identifiers. `read`, `modify` and `consume` are the reason this list
-/// exists: they are the language's whole ownership surface, and a site that
-/// argues for them cannot render them as ordinary names.
+/// as identifiers. They are coloured as keywords, so `read`, `modify` and
+/// `consume` do not render as ordinary names.
 fn contextual() -> Array<String> {
     return ["read", "modify", "consume", "gen", "test", "bench", "panic", "from", "as"]
 }
 
-/// `text` under class `cls`, escaped, and never spanning a newline: a run that
-/// crosses one is closed and reopened, so the caller can split the finished
-/// markup into lines and every line is balanced HTML.
+/// `text` under class `cls`, escaped. A run is closed and reopened at every
+/// newline, so each line of the result is balanced HTML.
 fn emit(cls: String, text: String) -> String {
     if cls == "" {
         return escapeHtml(text)
@@ -188,8 +158,7 @@ export fn lineStarts(src: String) -> Array<Int64> {
 /// covers the next byte.
 ///
 /// ponytail: a `\{...}` interpolation holding its own string literal would end
-/// the scan early. No snippet on this site has one; the upgrade is the lexer's
-/// own brace depth, not a second scanner.
+/// the scan early. No snippet has one; the upgrade is the lexer's brace depth.
 fn scanString(raw: Array<UInt8>, start: Int64) -> Int64 {
     let mut i = start + 1
     while i < raw.length && raw[i] != '"' {
@@ -305,9 +274,8 @@ fn trivia(src: String, raw: Array<UInt8>, from: Int64, to: Int64) -> String {
 
 /// `src` as coloured markup, one left-to-right pass over the compiler's tokens.
 ///
-/// The tokens arrive as an argument rather than being lexed here, because `lex()`
-/// is only callable from a generator's own body — so the one `lex(p.src)` call
-/// site is `vyrnCode` below, and everything else is an ordinary function.
+/// The caller passes `lex(src)`, because `lex()` is callable only from a
+/// generator's own body.
 export gen fn highlightSrc(src: String, toks: Array<Token>) -> String {
     let raw = bytes(src)
     let starts = lineStarts(src)
@@ -340,7 +308,7 @@ export gen fn highlightRows(src: String, toks: Array<Token>) -> Array<String> {
     return out
 }
 
-/// Colour every snippet, and emit the answers as a module.
+/// Colours every snippet, and emits the answers as a module.
 export gen fn vyrnCode() -> String {
     let mut lines: Array<String> = []
     let mut sources: Array<String> = []
@@ -356,9 +324,8 @@ export gen fn vyrnCode() -> String {
     return out
 }
 
-// The pipeline's own tests are in `snippets.vyrn`, against the module this
-// generator emits: `lex()` is generation-only, so a `test` block cannot call it,
-// and the emitted markup is the thing worth asserting on anyway.
+// `lex()` cannot run in a test block, so the tests of the emitted markup are in
+// `snippets.vyrn`.
 
 test "a coloured run never crosses a newline, so every line is balanced markup" {
     assertEq(emit("s", "a\nb"), "<span class=\"s\">a</span>\n<span class=\"s\">b</span>")

@@ -1,41 +1,20 @@
-/// The module graph, read off the source while the site compiles.
+/// The `std/` import graph and the example programs that use each module,
+/// read from `import` lines while the site compiles.
 ///
 ///     import { moduleDeps } from "./deps"
 ///     import { depUses, depUsedBy, depDepth, depExamples } from moduleDeps("../../std", "../../examples")
 ///
-/// Two questions, both answered from `import` lines and nothing else:
-///
-///  1. **What does a standard library module import?** That is the dependency
-///     graph the explorer draws. It is read from `std/*.vyrn` on every build, so
-///     it cannot be a picture of the graph as it was.
-///  2. **Which example programs import a module?** That is what the reference
-///     page lists under an export, and it is the honest answer to "show me this
-///     module in use in a whole program".
-///
-/// The import lines come from the compiler's own lexer through
-/// `importsOf` in `guidecode.vyrn`, so an `import` written inside a code quote —
-/// `std/tw` and `std/graphql` both emit one, and `std/cli` writes a whole module
-/// in a string — is a string token and is never read as a real import. A line
-/// scan gets that wrong and invents a `std/manifest` that does not exist.
-import { substring } from "std/strings"
+/// The lines come from the compiler's lexer through `importsOf` in
+/// `guidecode.vyrn`, so an `import` inside a code quote is a string token and
+/// is never read as an import. `std/tw`, `std/graphql` and `std/cli` hold such
+/// quotes, and a line scan would invent modules from them.
 import { endsWith } from "std/strpred"
 import { includes } from "std/arrays"
 import { importsOf } from "./guidecode"
-import { quotedList, branch, lookup, entriesOf } from "./gensrc"
+import { quotedList, branch, lookup, entriesOf, vyrnStems } from "./gensrc"
 
 /// One file and the `std/` modules it imports.
 type Uses = { path: String, uses: Array<String> }
-
-/// The `std/` module names, from the directory listing.
-fn moduleNames(stdDir: String) -> Array<String> {
-    let mut out: Array<String> = []
-    for entry in entriesOf(stdDir) {
-        if endsWith(entry, ".vyrn") {
-            out.push(substring(entry, 0, entry.byteLength - 5))
-        }
-    }
-    return out
-}
 
 /// What one file imports, by path.
 gen fn usesOf(dir: String, name: String, shown: String) -> Uses {
@@ -46,12 +25,9 @@ gen fn usesOf(dir: String, name: String, shown: String) -> Uses {
     return Uses { path: shown.copy(), uses: importsOf(lex(src)).uses.copy() }
 }
 
-/// Every `.vyrn` file under `dir`, to two levels of subdirectory — which is as
-/// deep as `examples/` goes (`examples/shelf/server/store.vyrn`).
-///
-/// A directory entry has no extension, so the two are told apart by the name. A
-/// subdirectory that cannot be read yields nothing, and the listing is short by
-/// exactly that directory rather than wrong.
+/// Every `.vyrn` file under `root/sub`, `depth` levels of subdirectory deep.
+/// `examples/` needs two (`examples/shelf/server/store.vyrn`). An entry without
+/// the extension is taken for a directory; an unreadable one yields nothing.
 gen fn walk(root: String, sub: String, depth: Int64) -> Array<Uses> {
     let dir = if sub.byteLength == 0 { root.copy() } else { root + "/" + sub }
     let mut out: Array<Uses> = []
@@ -72,8 +48,7 @@ gen fn walk(root: String, sub: String, depth: Int64) -> Array<Uses> {
 /// other `std/` module, otherwise one more than the deepest module it imports.
 ///
 /// `walking` holds the path being measured, so a cycle answers 0 rather than
-/// recurring forever. `std/` has none today; a graph that grows one should not
-/// take the build down with it.
+/// recursing forever.
 gen fn depthOf(m: String, all: Array<String>, edges: Array<Uses>, walking: Array<String>) -> Int64 {
     if includes(walking, m) {
         return 0
@@ -96,9 +71,9 @@ gen fn depthOf(m: String, all: Array<String>, edges: Array<Uses>, walking: Array
     return deepest + 1
 }
 
-/// Read `stdDir` and `examplesDir`, and emit the graph as one module.
+/// Reads `stdDir` and `examplesDir`, and emits the graph as one module.
 export gen fn moduleDeps(stdDir: String, examplesDir: String) -> String {
-    let all = moduleNames(stdDir)
+    let all = vyrnStems(stdDir)
     let mut edges: Array<Uses> = []
     for m in all {
         edges.push(usesOf(stdDir, m + ".vyrn", m))
@@ -114,8 +89,7 @@ export gen fn moduleDeps(stdDir: String, examplesDir: String) -> String {
         for e in edges {
             if e.path == m {
                 for u in e.uses {
-                    // A target that is not a module in this directory is dropped:
-                    // the graph draws what `std/` holds, not what a name suggests.
+                    // An import of a name `std/` does not hold is dropped.
                     if includes(all, u) && !includes(mine, u) {
                         mine.push(u.copy())
                     }

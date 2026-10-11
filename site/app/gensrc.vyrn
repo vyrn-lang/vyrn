@@ -1,9 +1,10 @@
-/// What the site's generators share: the Vyrn literals they emit, and a
-/// directory listing that reads as empty when it fails.
+/// What the site's generators share: the Vyrn literals they emit, and
+/// directory listings that read as empty when they fail.
 ///
 /// A generated module answers through `lookup`: one exported function per fact,
 /// one `branch` per key, and a fallback for any other key.
 import { substring, joinWith } from "std/strings"
+import { endsWith } from "std/strpred"
 
 /// `s` as a Vyrn string literal, with a quote, a backslash, a newline and a tab
 /// escaped.
@@ -62,6 +63,18 @@ export fn entriesOf(dir: String) -> Array<String> {
         Ok(names) => names.copy(),
         Err(why) => [],
     }
+}
+
+/// The stems of the `.vyrn` files in `dir`, in listing order. A directory
+/// entry has no extension, so subdirectories are skipped.
+export fn vyrnStems(dir: String) -> Array<String> {
+    let mut out: Array<String> = []
+    for entry in entriesOf(dir) {
+        if endsWith(entry, ".vyrn") {
+            out.push(substring(entry, 0, entry.byteLength - 5))
+        }
+    }
+    return out
 }
 
 test "a string with a quote, a backslash, a newline and a tab survives the literal" {
