@@ -1,9 +1,8 @@
 /// The programs the playground starts from, and the one place they are written.
 ///
-/// Every one is a WHOLE program — it declares `main`, it prints, and it returns
-/// an exit code — because the playground runs it rather than showing it. That is
-/// the difference between this list and `hl.vyrn`'s `pieces()`, which are
-/// fragments cut from real files to be READ. `hello` is the same program in both.
+/// Every one is a whole program: it declares `main`, prints, and returns an exit
+/// code, because the playground runs it. `hl.vyrn`'s `pieces()` are fragments
+/// to be read.
 ///
 /// One file each, and no `import`. The playground's module resolver is empty:
 /// `std/` lives on a filesystem and a browser tab does not have one. The page

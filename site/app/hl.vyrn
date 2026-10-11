@@ -43,51 +43,11 @@ type Piece = { id: String, src: String }
 fn pieces() -> Array<Piece> {
     return [
         Piece {
-            id: "hero",
-            src: "type Age = Int64 where value >= 18
-
-fn admit(n: Int64) -> Int64 {
-    // `Age?(n)` is None when the rule fails, so untrusted input never traps.
-    return match Age?(n) {
-        Some(a) => a,
-        None => 0 - 1,
-    }
-}
-
-let a = Age(30)     // proven valid while it compiles - no runtime check
-// let bad = Age(5) // the compiler refuses this
-",
-        },
-        Piece {
-            id: "heroBad",
-            src: "type Age = Int64 where value >= 18
-
-fn admit(n: Int64) -> Int64 {
-    // `Age?(n)` is None when the rule fails, so untrusted input never traps.
-    return match Age?(n) {
-        Some(a) => a,
-        None => 0 - 1,
-    }
-}
-
-let a = Age(30)     // proven valid while it compiles - no runtime check
-let bad = Age(5)    // the compiler refuses this
-",
-        },
-        Piece {
             id: "ownership",
             src: "fn fullName(first: String, last: String) -> String {
     let firstSpace = first + \" \" // inner temp - freed inside fullName
     let whole = firstSpace + last // built by reading firstSpace
     return whole                  // moved out to the caller
-}
-",
-        },
-        Piece {
-            id: "hello",
-            src: "fn main() -> Int64 {
-    print(\"hello\")
-    return 0
 }
 ",
         },
@@ -431,23 +391,4 @@ test "a capability word is a keyword here and an ordinary name is not" {
     assertEq(classOf("ident", "Ticket"), "t")
     assertEq(classOf("ident", "seats"), "")
     assertEq(classOf("keyword", "where"), "k")
-}
-
-test "the two halves of the types specimen differ on exactly one line" {
-    let a = pieces()[0]
-    let b = pieces()[1]
-    assertEq(a.id, "hero")
-    assertEq(b.id, "heroBad")
-    assertEq(split(a.src, "\n").length, split(b.src, "\n").length)
-    let mut differ = 0
-    let left = split(a.src, "\n")
-    let right = split(b.src, "\n")
-    let mut i = 0
-    while i < left.length {
-        if left[i] != right[i] {
-            differ = differ + 1
-        }
-        i = i + 1
-    }
-    assertEq(differ, 1)
 }

@@ -9,18 +9,13 @@
 /// Every Vyrn snippet is copied from a file in this repository. Every quoted
 /// tool output was produced by running the tool, and is reproduced to the byte,
 /// em dashes included.
-import { highlightWith, terminalHtml, rustWords, tsWords, goWords } from "./code"
+import { highlightWith, rustWords, tsWords, goWords } from "./code"
 import { joinWith } from "std/strings"
 import { vyrnCode } from "./hl"
 import { hlLines, hlSource } from vyrnCode()
 
 /// A snippet in one language, ready for `v-html`.
 export type Snippet = { id: String, lang: String, label: String, html: String }
-
-/// One rendered source line: the number to print in the gutter, the markup, and
-/// the markup this line becomes when a control changes it (empty when nothing
-/// does).
-export type CodeLine = { n: Int64, html: String, alt: String }
 
 // ---------------------------------------------------------------------------
 // Vyrn, through the compiler's lexer
@@ -41,87 +36,6 @@ export fn vyrnHtml(id: String) -> String {
 /// and puts this in the textarea under them.
 export fn vyrnSource(id: String) -> String {
     return hlSource(id)
-}
-
-/// A Vyrn snippet as numbered rows, starting at line `from`.
-export fn vyrnRows(id: String, from: Int64) -> Array<CodeLine> {
-    let lines = hlLines(id)
-    let mut out: Array<CodeLine> = []
-    let mut i = 0
-    while i < lines.length {
-        out.push(CodeLine { n: from + i, html: lines[i].copy(), alt: "" })
-        i = i + 1
-    }
-    return out
-}
-
-// ---------------------------------------------------------------------------
-// The validated-types specimen, and the compiler's answer to it
-// ---------------------------------------------------------------------------
-
-/// Which row of the specimen the `Age(5)` line is. Found rather than written
-/// down, so editing the snippet cannot silently point the control at the wrong
-/// line.
-export fn badRow() -> Int64 {
-    let a = hlLines("hero")
-    let b = hlLines("heroBad")
-    let mut i = 0
-    while i < a.length && i < b.length {
-        if a[i] != b[i] {
-            return i
-        }
-        i = i + 1
-    }
-    return 0
-}
-
-/// The specimen, with the commented line carrying the markup it becomes when
-/// the control uncomments it.
-export fn heroRows() -> Array<CodeLine> {
-    let alt = hlLines("heroBad")
-    let mut out = vyrnRows("hero", 1)
-    let mut i = 0
-    while i < out.length {
-        if i == badRow() {
-            out[i].alt = alt[i].copy()
-        }
-        i = i + 1
-    }
-    return out
-}
-
-/// What `vyrn check` prints for that line, word for word. Reproduced from a run
-/// against a file holding exactly it.
-export fn heroDiagnostic() -> String {
-    return terminalHtml("bad.vyrn:3:0: 5 does not satisfy `Age` (predicate `where value >= 18` is false)")
-}
-
-// ---------------------------------------------------------------------------
-// The ownership specimen, and what the editor's hover says about it
-// ---------------------------------------------------------------------------
-
-/// The first source line of `fullName` in `examples/ownership.vyrn`.
-export fn ownershipFirstLine() -> Int64 {
-    return 17
-}
-
-/// `fn fullName`, at the line numbers the file gives it.
-export fn ownershipRows() -> Array<CodeLine> {
-    return vyrnRows("ownership", ownershipFirstLine())
-}
-
-/// One line of the tool's report, and the range of source lines it is about — a
-/// binding's row stays lit for as long as that binding is alive, so the playhead
-/// always has a report row to point at.
-export type ReportRow = { tag: String, from: Int64, to: Int64, html: String }
-
-/// The hover rows of `examples/ownership.vyrn`, the `fullName` section.
-export fn ownershipReport() -> Array<ReportRow> {
-    return [
-        ReportRow { tag: "signature", from: 17, to: 17, html: terminalHtml("fn fullName(first: String, last: String) -> String") },
-        ReportRow { tag: "firstSpace", from: 18, to: 21, html: terminalHtml("  line 18    firstSpace       reclaimed at block exit — freeing the String buffer") },
-        ReportRow { tag: "whole", from: 19, to: 20, html: terminalHtml("  line 19    whole            moved at line 20 into the return") },
-    ]
 }
 
 // ---------------------------------------------------------------------------
@@ -154,7 +68,7 @@ export fn specSet(name: String) -> Array<Snippet> {
 }
 
 /// A rule about a value, and a total way to check an untrusted one.
-export fn typeSpecs() -> Array<Snippet> {
+fn typeSpecs() -> Array<Snippet> {
     return [
         snippet("vyrn", "Vyrn", vyrnHtml("cmpTypes")),
         snippet("rust", "Rust", highlightWith("pub struct Age(i64);
@@ -191,7 +105,7 @@ func NewAge(v int64) (Age, error) {
 }
 
 /// What a function intends to do with its argument.
-export fn memorySpecs() -> Array<Snippet> {
+fn memorySpecs() -> Array<Snippet> {
     return [
         snippet("vyrn", "Vyrn", vyrnHtml("cmpMemory")),
         snippet("rust", "Rust", highlightWith("fn seat_count(t: &Ticket) -> i64 { t.seats }
@@ -219,7 +133,7 @@ func redeem(t Ticket) int64 { return t.id }
 }
 
 /// What happens when the value is not there.
-export fn failureSpecs() -> Array<Snippet> {
+fn failureSpecs() -> Array<Snippet> {
     return [
         snippet("vyrn", "Vyrn", vyrnHtml("cmpFailure")),
         snippet("rust", "Rust", highlightWith("match seat(&t) {
@@ -250,7 +164,7 @@ return n
 }
 
 test "a Vyrn snippet comes back coloured by the compiler's own lexer" {
-    let lines = vyrnLines("hero")
+    let lines = vyrnLines("runme")
     assert(lines.length > 5)
     assertEq(lines[0], "<span class=\"k\">type</span> <span class=\"t\">Age</span> = <span class=\"t\">Int64</span> <span class=\"k\">where</span> value &gt;= <span class=\"n\">18</span>")
 }
@@ -258,60 +172,6 @@ test "a Vyrn snippet comes back coloured by the compiler's own lexer" {
 test "the capability words are tinted, because they are the argument" {
     let lines = vyrnLines("cmpMemory")
     assertEq(lines[0], "<span class=\"k\">fn</span> seatCount(t: <span class=\"k\">read</span> <span class=\"t\">Ticket</span>) -&gt; <span class=\"t\">Int64</span> { <span class=\"k\">return</span> t.seats }")
-}
-
-test "the control's row is the one row the two specimens disagree about" {
-    let a = vyrnLines("hero")
-    let b = vyrnLines("heroBad")
-    assertEq(a.length, b.length)
-    let row = badRow()
-    assert(a[row] != b[row])
-    let rows = heroRows()
-    assertEq(rows[row].alt, b[row])
-    // Every other row offers the control nothing to change.
-    let mut others = 0
-    for r in rows {
-        if r.alt.byteLength > 0 {
-            others = others + 1
-        }
-    }
-    assertEq(others, 1)
-}
-
-test "the specimen's rows are numbered from one" {
-    let rows = vyrnRows("hello", 1)
-    assertEq(rows[0].n, 1)
-    assertEq(rows.length, 4)
-}
-
-test "the ownership rows carry the file's own line numbers" {
-    let rows = ownershipRows()
-    assertEq(rows.length, 5)
-    assertEq(rows[0].n, 17)
-    assertEq(rows[4].n, 21)
-}
-
-test "every report row covers lines the specimen shows, and every line is covered" {
-    let rows = ownershipRows()
-    let first = rows[0].n
-    let last = rows[rows.length - 1].n
-    for r in ownershipReport() {
-        assert(r.from >= first && r.to <= last && r.from <= r.to)
-        assert(r.tag.byteLength > 0)
-        assert(r.html.byteLength > 0)
-    }
-    // No position of the playhead leaves the report with nothing to say.
-    let mut line = first
-    while line <= last {
-        let mut lit = 0
-        for r in ownershipReport() {
-            if r.from <= line && line <= r.to {
-                lit = lit + 1
-            }
-        }
-        assert(lit > 0)
-        line = line + 1
-    }
 }
 
 test "every specimen set covers the same four languages" {
@@ -322,13 +182,5 @@ test "every specimen set covers the same four languages" {
             assert(s.label.byteLength > 0)
             assert(s.html.byteLength > 60)
         }
-    }
-}
-
-test "tool output is marked as output and never coloured as code" {
-    assert(heroDiagnostic().byteLength > 0)
-    // No code class anywhere in it: a diagnostic is not a snippet.
-    for row in ownershipReport() {
-        assert(row.html.byteLength > 0)
     }
 }

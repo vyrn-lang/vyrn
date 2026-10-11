@@ -19,7 +19,7 @@
 /// the flat namespace. A private name stays in its own module, so two blocks may
 /// each declare their own `fn describe`.
 import { guideCode } from "./guidecode"
-import { guideBlocks, guideSrc, guideLines, guideUses, guideImports, guidePlayable } from guideCode("../guide")
+import { guideBlocks, guideSrc, guideLines, guideImports, guidePlayable } from guideCode("../guide")
 import * as gArrays from "../guide/arrays"
 import * as gBenches from "../guide/benches"
 import * as gCapabilities from "../guide/capabilities"
@@ -83,7 +83,7 @@ export type Chapter = { area: String, group: String, slug: String, title: String
 /// value cannot be reached by name at run time and should not be: the compiler
 /// checks every one of these calls, so a renamed or deleted program is a build
 /// failure and never a page with a hole in it.
-export fn blockOutput(id: String) -> String {
+fn blockOutput(id: String) -> String {
     if id == "arrays" { return gArrays.demo() }
     if id == "benches" { return gBenches.demo() }
     if id == "capabilities" { return gCapabilities.demo() }
@@ -119,7 +119,7 @@ export fn blockOutput(id: String) -> String {
 /// fragment, and the padding is dropped because a fragment carries no length
 /// prefix that needs it. The fragment never reaches a server, so a whole program
 /// travels in a link and nothing is stored anywhere.
-export fn playHref(src: String) -> String {
+fn playHref(src: String) -> String {
     let raw = base64Encode(src)
     return "/play.html#c=" + replace(replace(replace(raw, "+", "-"), "/", "_"), "=", "")
 }
@@ -751,7 +751,7 @@ export fn chapterNumber(slug: String) -> Int64 {
 }
 
 /// `01`, `02`, ... — the rail prints a chapter's number in two digits.
-export fn chapterTag(n: Int64) -> String {
+fn chapterTag(n: Int64) -> String {
     return if n < 10 { "0" + n.toString() } else { n.toString() }
 }
 
@@ -759,11 +759,6 @@ export fn chapterTag(n: Int64) -> String {
 /// is `/guide/…`, the web pages are `/web/…` and the tooling pages `/tooling/…`.
 export fn chapterHref(slug: String) -> String {
     return "/" + chapterArea(slug) + "/" + slug + ".html"
-}
-
-/// The landing of a chapter's area — where its breadcrumb points.
-export fn areaHref(area: String) -> String {
-    return "/" + area + ".html"
 }
 
 /// The two chapters that left the book: the path each page
@@ -786,13 +781,13 @@ export fn movedTarget(path: String) -> String {
 }
 
 /// The chapter before this one IN ITS AREA, or "" at the start of the shelf.
-export fn prevSlug(slug: String) -> String {
+fn prevSlug(slug: String) -> String {
     let n = chapterNumber(slug)
     return if n > 1 { areaChapters(chapterArea(slug))[n - 2].slug.copy() } else { "" }
 }
 
 /// The chapter after this one IN ITS AREA, or "" at the end of the shelf.
-export fn nextSlug(slug: String) -> String {
+fn nextSlug(slug: String) -> String {
     let n = chapterNumber(slug)
     let all = areaChapters(chapterArea(slug))
     return if n > 0 && n < all.length { all[n].slug.copy() } else { "" }
@@ -825,23 +820,6 @@ export fn sectionOfBlock(id: String) -> String {
         }
     }
     return ""
-}
-
-/// The blocks that import `std/<module>`, in book order.
-export fn blocksUsing(module: String) -> Array<String> {
-    let mut out: Array<String> = []
-    for c in chapters() {
-        for s in c.sections {
-            for b in s.blocks {
-                for u in guideUses(b) {
-                    if u == module {
-                        out.push(b.copy())
-                    }
-                }
-            }
-        }
-    }
-    return out
 }
 
 /// How many programs the book runs.
@@ -1077,10 +1055,4 @@ test "an export a program in the book imports carries that program" {
     // invented snippet, and no link to one.
     assertEq(demoFor("strings", "editDistance").block, "")
     assertEq(demoFor("graphql", "graphqlSdl").block, "")
-}
-
-test "a std module the book uses lists the block that uses it" {
-    let users = blocksUsing("arrays")
-    assert(users.length > 0)
-    assertEq(blocksUsing("nope").length, 0)
 }

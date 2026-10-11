@@ -38,7 +38,8 @@ import { parseJson } from "std/jsonread"
 import { fieldsOf, fieldAt, tagOf } from "std/jsondec"
 import { apiHref, apiKnown, apiModules } from "./docs"
 import { examplesUsing } from "./stdgraph"
-import { blob, remoteSpec, rawFile } from "./repo"
+import { blob } from "./repo"
+import { ghSpec, ghRaw } from "./github"
 import { hrefOf } from "./nav"
 import { escapeHtml } from "./code"
 import { blurbFrom } from "./meta"
@@ -79,7 +80,7 @@ fn examplesDir() -> String {
 /// and is not a project, and no rule about names had to know that.
 let mut slugs: Array<String> = []
 
-export fn projectSlugs() -> Array<String> {
+fn projectSlugs() -> Array<String> {
     if slugs.length > 0 {
         return slugs.copy()
     }
@@ -122,7 +123,7 @@ fn fileText(path: String) -> String {
 }
 
 /// A project's manifest, verbatim, or `""` when the directory holds none.
-export fn manifestText(slug: String) -> String {
+fn manifestText(slug: String) -> String {
     return fileText(examplesDir() + "/" + slug + "/vyrn.json")
 }
 
@@ -333,7 +334,7 @@ fn hasDot(entry: String) -> Bool {
 /// The rule is only safe because a `vyrn"…"` code quote can put the
 /// word `export` in column 1 of a string, and no file under `examples/` writes
 /// one. The test below is what says so.
-export fn exportNames(path: String) -> Array<String> {
+fn exportNames(path: String) -> Array<String> {
     let src = fileText(path)
     let mut out: Array<String> = []
     for line in lines(src) {
@@ -409,7 +410,7 @@ export fn offerOf(slug: String) -> Offer {
     }
     return Offer {
         path: best.copy(),
-        spec: if best.byteLength == 0 { "" } else { remoteSpec(examplesDir() + "/" + slug + "/" + best) },
+        spec: if best.byteLength == 0 { "" } else { ghSpec(examplesDir() + "/" + slug + "/" + best) },
         alias: aliasOf(best),
         exports: bestNames.copy(),
     }
@@ -471,7 +472,7 @@ export fn lockShape(slug: String) -> String {
 
 /// The URL a specifier resolves to, with the commit `git ls-remote` fills in.
 fn rawUrl(slug: String) -> String {
-    return rawFile("<commit>", examplesDir() + "/" + slug + "/" + offerOf(slug).path)
+    return ghRaw("<commit>", examplesDir() + "/" + slug + "/" + offerOf(slug).path)
 }
 
 /// The `import` line a reader writes once the package is added: the alias

@@ -34,12 +34,12 @@ export type Step = { title: String, command: String, what: String }
 
 /// Where the extension lives. Written once because four rows and two sentences
 /// name it.
-export fn extensionDir() -> String {
+fn extensionDir() -> String {
     return "editor/vscode"
 }
 
 /// The server's crate directory.
-export fn serverDir() -> String {
+fn serverDir() -> String {
     return "compiler/vyrn-lsp"
 }
 

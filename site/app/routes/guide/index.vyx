@@ -14,7 +14,7 @@ import { Head } from "std/ui"
 import { pageHeadOf } from "../../nav"
 import { Chapter, areaGroups, groupChapters, chapterHref, chapterCount, blockCount } from "../../guide"
 import { inlineCode } from "../../code"
-import { TreeGroup, guideTree } from "../../docshell"
+import { TreeGroup, areaTree } from "../../docshell"
 
 export fn head() -> Head {
     return pageHeadOf("/guide")
@@ -32,7 +32,7 @@ fn of(g: String) -> Array<Chapter> {
 
 /// The sidebar: the book's contents, with the Overview marked.
 fn tree() -> Array<TreeGroup> {
-    return guideTree("index")
+    return areaTree("guide", "index")
 }
 </script>
 

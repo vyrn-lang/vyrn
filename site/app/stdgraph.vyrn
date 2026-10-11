@@ -24,10 +24,9 @@
 /// module added to `std/` is in it on the next build.
 import { moduleDeps } from "./deps"
 import { depUses, depUsedBy, depDepth, depExamples } from moduleDeps("../../std", "../../examples")
-import { ApiModule, ApiEntry, ApiGroup, apiModules, apiGroups, apiEntries, apiHref } from "./docs"
+import { apiModules, apiGroups, apiEntries, apiHref } from "./docs"
 import { joinWith, toLower } from "std/strings"
 import { contains } from "std/strpred"
-import { escapeHtml } from "./code"
 import { stripTags, decodeEntities } from "./meta"
 
 /// One row of the index: a module, what it is, and every name it exports.
@@ -97,15 +96,6 @@ export fn searchGroups() -> Array<SearchGroup> {
         out.push(SearchGroup { name: g.name.copy(), rows: got.copy() })
     }
     return out
-}
-
-/// How many exports the whole index covers.
-export fn exportTotal() -> Int64 {
-    let mut n = 0
-    for m in apiModules() {
-        n = n + m.count
-    }
-    return n
 }
 
 // ---------------------------------------------------------------------------
@@ -240,7 +230,7 @@ export fn graphWidth() -> Int64 {
     return columnX(deepest()) + 110
 }
 
-export fn graphHeight() -> Int64 {
+fn graphHeight() -> Int64 {
     return rowY(tallest()) + 8
 }
 
@@ -367,7 +357,6 @@ test "every module is a row, and every row carries its own search text" {
         assertEq(r.q, toLower(r.q))
         assert(r.q.byteLength > r.name.byteLength)
     }
-    assert(exportTotal() > 300)
 }
 
 test "a summary's tags are not part of what a search matches" {

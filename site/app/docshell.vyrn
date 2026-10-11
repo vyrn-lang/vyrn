@@ -21,8 +21,8 @@
 /// the point of `pagerFor`: it takes the groups the sidebar was BUILT from and
 /// finds the marked row's neighbours in reading order. A prev/next that came from
 /// its own table could point somewhere the sidebar does not.
-import { ApiModule, apiGroups, apiHref, groupIcon } from "./docs"
-import { Chapter, areaChapters, areaGroups, groupChapters, chapterHref } from "./guide"
+import { apiGroups, apiHref } from "./docs"
+import { areaChapters, areaGroups, groupChapters, chapterHref } from "./guide"
 import { indexOf, substring } from "std/strings"
 // The glyphs beside group names and subnav rows — the same pinned collection
 // the `<Icon>` tag reads, through the same generator, so the sidebar cannot
@@ -44,11 +44,6 @@ export type TreeGroup = { name: String, rows: Array<TreeRow>, icon: String }
 /// the page after it. An empty `href` means there is none, which is true at both
 /// ends of every section.
 export type Pager = { prevHref: String, prevLabel: String, nextHref: String, nextLabel: String }
-
-/// One step of the breadcrumb above the h1. The last one is the page itself and
-/// carries no href, because a link to the page you are on is a link that does
-/// nothing.
-export type Crumb = { href: String, label: String }
 
 /// One glyph, drawn to the string a template splices with `v-html`. The glyph
 /// is decoration beside a printed name, so it ships as the collection drew it.
@@ -170,12 +165,6 @@ export fn areaTree(area: String, current: String) -> Array<TreeGroup> {
     return out
 }
 
-/// The book's sidebar — the guide area's tree, by its old name, for the pages
-/// that predate the areas.
-export fn guideTree(current: String) -> Array<TreeGroup> {
-    return areaTree("guide", current)
-}
-
 /// The pager for whichever tree it is handed: the marked row's neighbours, read
 /// across the groups in the order the sidebar prints them.
 ///
@@ -211,7 +200,7 @@ export fn pagerFor(groups: Array<TreeGroup>) -> Pager {
 
 /// How many pages a tree holds. The templates print it under the sidebar, and
 /// the tests below check the two trees cover their sections.
-export fn treeSize(groups: Array<TreeGroup>) -> Int64 {
+fn treeSize(groups: Array<TreeGroup>) -> Int64 {
     let mut n = 0
     for g in groups {
         n = n + g.rows.length
@@ -238,7 +227,7 @@ test "the reference tree carries every module the library documents, once" {
 
 test "exactly one row is marked, and it is the page that asked" {
     // "editors" left this list with its tree row: it is a subnav area now.
-    for tree in [docsTree("json"), guideTree("ownership")] {
+    for tree in [docsTree("json"), areaTree("guide", "ownership")] {
         let mut marked = 0
         for g in tree {
             for r in g.rows {
@@ -251,7 +240,7 @@ test "exactly one row is marked, and it is the page that asked" {
     }
     // A landing marks NOTHING in the tree: the subnav's own row is its
     // marker, and the area rows left the tree when the subnav took them.
-    for tree in [docsTree("index"), guideTree("index")] {
+    for tree in [docsTree("index"), areaTree("guide", "index")] {
         for g in tree {
             for r in g.rows {
                 assertEq(r.here, "")
@@ -284,10 +273,10 @@ test "the pager walks the tree the sidebar prints" {
     // The book's first chapter is the start of the book now — the overview
     // row moved to the subnav.
     let shelf = areaChapters("guide")
-    let start = pagerFor(guideTree(shelf[0].slug))
+    let start = pagerFor(areaTree("guide", shelf[0].slug))
     assertEq(start.prevHref, "")
     // The book ends at its last chapter: Setup left for the tooling area.
-    let end2 = pagerFor(guideTree(shelf[shelf.length - 1].slug))
+    let end2 = pagerFor(areaTree("guide", shelf[shelf.length - 1].slug))
     assertEq(end2.nextHref, "")
     // Editors is the tooling shelf's very end.
     let end = pagerFor(areaTree("tooling", "editors"))

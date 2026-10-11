@@ -19,7 +19,7 @@ import { inlineCode } from "../../code"
 // THE DOCS SHELL. The same three panes the reference wears: the
 // book's contents on the left, this chapter's sections on the right, the chapter
 // before and after at the foot.
-import { TreeGroup, guideTree } from "../../docshell"
+import { TreeGroup, areaTree } from "../../docshell"
 import { Icon } from "../../icons"
 params { chapter: String }
 
@@ -45,7 +45,7 @@ fn fetchChapter(p: Params) -> Result<ChapterPage, PageError> {
 
 /// The sidebar for this page: the book's contents, with this chapter marked.
 fn tree(here: String) -> Array<TreeGroup> {
-    return guideTree(here)
+    return areaTree("guide", here)
 }
 
 /// The link to one section of this chapter. A function rather than `"#" + …` in

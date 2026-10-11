@@ -139,15 +139,6 @@ fn firstIndex(hay: String, needle: String) -> Int64 {
     }
 }
 
-/// The index as the file the overlay fetches: a JSON array of four-field
-/// objects, no whitespace.
-///
-/// `std/json`'s emitter does the escaping, because a `"` in a signature or a
-/// backslash in a doc line is a broken file and not a broken row.
-export fn indexJson() -> String {
-    return indexJsonOf(rows())
-}
-
 /// The same index, from rows the caller already has.
 ///
 /// `writeIndex` needs the row COUNT for its log line and the JSON for the file.
@@ -237,7 +228,7 @@ test "no row is empty, and no row points at nothing" {
 }
 
 test "the index is one JSON array the overlay can read" {
-    let json = indexJson()
+    let json = indexJsonOf(rows())
     assertEq(json[0], '[')
     assertEq(json[json.byteLength - 1], ']')
     // No whitespace between the values: 448 rows of pretty printing is a third

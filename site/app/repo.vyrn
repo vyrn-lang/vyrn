@@ -7,7 +7,7 @@
 import { repoFacts } from "./facts"
 import { exampleCount as genExamples, stdCount as genStd, stdModules as genModules, releaseTag as genTag, releaseDate as genDate } from repoFacts("../../examples", "../../std", "../release.txt")
 import { indexOf } from "std/strings"
-import { ghBlob, ghSpec, ghRelease, ghRaw } from "./github"
+import { ghBlob, ghRelease } from "./github"
 import { Release, releaseRows } from "./history"
 
 /// Single-file programs in `examples/`. The parity harness runs every one of
@@ -32,23 +32,6 @@ export fn stdModules() -> Array<String> {
 /// re-exported here so every caller on the site keeps one name for them.
 export fn blob(path: String) -> String {
     return ghBlob(path)
-}
-
-/// A file in this repository, as a remote import specifier.
-export fn remoteSpec(path: String) -> String {
-    return ghSpec(path)
-}
-
-/// A file in this repository, served raw at `gitRef`.
-///
-/// NOT `rawAt`, and no longer for a compiler reason. Naming it that once broke
-/// `std/vyx`, because a declaration in any module shadowed the `rawAt` builtin
-/// for every module; that is fixed and `examples/shadowbuiltin.vyrn` pins it.
-/// The name stays `rawFile` because it is the better one: this answers a FILE
-/// at a ref, and the builtin it would have collided with splices code at a
-/// source position.
-export fn rawFile(gitRef: String, path: String) -> String {
-    return ghRaw(gitRef, path)
 }
 
 /// How many ways a program runs: the WebAssembly module, and the native binary

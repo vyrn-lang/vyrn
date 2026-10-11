@@ -121,11 +121,6 @@ export fn demoSteps() -> Array<DemoStep> {
     return out
 }
 
-/// How many steps there are, for the widget's counter.
-export fn demoCount() -> Int64 {
-    return demoSteps().length
-}
-
 /// The build that produced the output above, as `vyrn --version` printed it.
 export fn demoVersion() -> String {
     loadDemo()
@@ -136,11 +131,6 @@ export fn demoVersion() -> String {
 export fn demoRecorded() -> String {
     loadDemo()
     return recordedOn.copy()
-}
-
-/// The line under the widget: which binary printed this, and when.
-export fn demoStamp() -> String {
-    return "Recorded by running " + demoVersion() + " on " + demoRecorded() + "."
 }
 
 test "the fixture parses into steps a page could draw" {
@@ -155,14 +145,11 @@ test "the fixture parses into steps a page could draw" {
         assert(s.note.byteLength > 0)
     }
     assertEq(steps[0].cmd, "vyrn new demo")
-    assertEq(demoCount(), steps.length)
 }
 
 test "the steps are version-stamped, and the fixture says it is one" {
     assert(demoVersion().byteLength > 0)
     assert(demoRecorded().byteLength > 0)
-    // Nine bytes of `vyrn X.Y.Z` at the shortest, and the stamp names both.
-    assert(demoStamp().byteLength > demoVersion().byteLength + demoRecorded().byteLength)
 }
 
 test "a recording that does not parse is refused, never drawn empty" {

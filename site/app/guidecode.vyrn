@@ -20,8 +20,6 @@
 ///    added here rather than written 24 times; it is also exactly what the
 ///    playground link carries, so what a reader runs is what a reader read.
 ///  - `guideLines` — the same text, coloured, one string per line.
-///  - `guideUses` — the `std/` modules the block imports. The reference pages
-///    read this to link a module to the block that demonstrates it.
 ///  - `guidePlayable` — whether the block is a WHOLE program. A block that
 ///    imports a sibling file (the generator chapter has two that do) needs more
 ///    than one source, and the playground takes one, so it gets no run link
@@ -33,7 +31,7 @@ import { quoted, quotedList, branch, lookup, entriesOf } from "./gensrc"
 
 /// One block: its id (the file stem), the program as shown, what it imports, and
 /// whether it stands alone.
-type Block = { id: String, src: String, uses: Array<String>, names: Array<String>, playable: Bool }
+type Block = { id: String, src: String, names: Array<String>, playable: Bool }
 
 /// What one file's import lines say: the `std/` modules it takes, and whether
 /// every one of them resolves without a second file.
@@ -160,7 +158,6 @@ export gen fn guideCode(dir: String) -> String {
             blocks.push(Block {
                 id: substring(entry, 0, entry.byteLength - 5),
                 src: shown,
-                uses: found.uses.copy(),
                 names: found.names.copy(),
                 playable: found.standalone && hasDemo(toks),
             })
@@ -170,14 +167,12 @@ export gen fn guideCode(dir: String) -> String {
     let mut ids: Array<String> = []
     let mut srcs: Array<String> = []
     let mut lines: Array<String> = []
-    let mut uses: Array<String> = []
     let mut names: Array<String> = []
     let mut playable: Array<String> = []
     for b in blocks {
         ids.push(b.id.copy())
         srcs.push(branch("id", b.id, quoted(b.src)))
         lines.push(branch("id", b.id, quotedList(highlightRows(b.src, lex(b.src)))))
-        uses.push(branch("id", b.id, quotedList(b.uses)))
         names.push(branch("id", b.id, quotedList(b.names)))
         playable.push(branch("id", b.id, if b.playable { "true" } else { "false" }))
     }
@@ -189,8 +184,6 @@ export gen fn guideCode(dir: String) -> String {
     out = out + lookup("guideSrc", "id", "String", srcs, "\"\"")
     out = out + "/// A block's program, coloured, one string per line.\n"
     out = out + lookup("guideLines", "id", "Array<String>", lines, "[]")
-    out = out + "/// The `std/` modules a block imports.\n"
-    out = out + lookup("guideUses", "id", "Array<String>", uses, "[]")
     out = out + "/// The names a block imports, each as `<module>:<name>`.\n"
     out = out + lookup("guideImports", "id", "Array<String>", names, "[]")
     out = out + "/// Whether a block is a whole program, so the playground can run it.\n"
