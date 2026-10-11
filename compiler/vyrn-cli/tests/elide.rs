@@ -1212,6 +1212,42 @@ export fn w(xs: Array<Int64>, i: Int64, pad: Array<UInt8>) -> Int64 {{
     );
 }
 
+/// An integer field a check divides by is at least one in every record value
+/// when every literal proves it. A literal that stores 0 on one path drops the
+/// fact, and the division stays a check and traps.
+#[test]
+fn a_record_field_divisor_at_least_one_proves_the_division() {
+    let src = |zero: &str| {
+        format!(
+            "type R = {{ n: Int64 }}
+fn make(b: UInt8) -> R {{
+{zero}    return R {{ n: Int64(b) + 1 }}
+}}
+export fn w(r: R, x: Int64) -> Int64 {{
+    return x / r.n
+}}
+"
+        )
+    };
+    let calls = |b: i64| format!("    print(w(make(UInt8({b})), 10).toString())");
+    let proof = src("");
+    let proved = ["proved int-div-zero", "proved int-div-overflow"];
+    assert_eq!(verdicts(&proof, "w"), proved);
+    assert_eq!(oracle(&proof, &calls(3), "w").0, "");
+    let witness = src("    if b == UInt8(7) {
+        return R { n: 0 }
+    }
+");
+    let kept = ["check int-div-zero", "check int-div-overflow"];
+    assert_eq!(verdicts(&witness, "w"), kept);
+    let (err, _) = oracle(&witness, &calls(7), "w");
+    assert!(err.contains("division by zero"), "{err}");
+    assert!(
+        !err.contains(vyrn_frontend::trap::PROVED_CHECK_FAILED),
+        "{err}"
+    );
+}
+
 #[test]
 fn a_join_of_constants_keeps_the_values_between_out() {
     let src = "fn w(x: Int64) -> Int64 {

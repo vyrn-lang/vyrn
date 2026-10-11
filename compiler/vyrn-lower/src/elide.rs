@@ -227,8 +227,8 @@ fn binds(fact: &RecordFact, fields: &[Field], decls: &HashMap<String, TypeDecl>)
 
 /// The [`RecordFact`]s every record value with their fields keeps
 /// ([`invariants`]): two array fields of equal length, an integer field at
-/// least zero, an array or String field at least as long as an integer
-/// field's value.
+/// least zero or one, an array or String field at least as long as an
+/// integer field's value.
 #[derive(Debug, Default)]
 pub struct RecordFacts {
     /// Every fact no round has dropped.
@@ -644,7 +644,8 @@ fn solve(
 /// of equal length when a check indexes one; each integer field a body reads
 /// of a record name whose array or String field a check indexes, at least
 /// zero and at most that field's length; each array or String field a check
-/// indexes by a constant bound ([`needed_lengths`]), at least that long.
+/// indexes by a constant bound ([`needed_lengths`]), at least that long; each
+/// integer field a body reads into a divisor, at least one.
 ///
 /// Record types are compatible by shape, so a fact is keyed by its field
 /// names and binds every record value with those fields, whatever its type.
@@ -681,6 +682,9 @@ fn invariants(
         .flat_map(|s| s.indexed.iter().copied())
         .collect();
     let lost: BTreeSet<&str> = scans.iter().flat_map(|s| s.lost.iter().copied()).collect();
+    let divisors: BTreeSet<&str> = (scans.iter())
+        .flat_map(|s| s.divisors.iter().copied())
+        .collect();
     let beside: BTreeSet<(&str, &str)> = (scans.iter())
         .flat_map(|s| s.beside.iter().copied())
         .collect();
@@ -722,6 +726,9 @@ fn invariants(
             }
         }
         for f in fields_of(fs, &|t| kind_of(t, decls).is_int()) {
+            if divisors.contains(f.as_str()) {
+                of.insert(vec![(Part::Val(f.clone()), 1), (Part::One, -1)]);
+            }
             let near = (seqs.iter()).filter(|a| beside.contains(&(f.as_str(), a.as_str())));
             for a in near {
                 of.insert(vec![(Part::Val(f.clone()), 1)]);
@@ -793,6 +800,8 @@ struct Scan<'b> {
     beside: Vec<(&'b str, &'b str)>,
     /// The fields a row writes through a place the walk does not track.
     lost: Vec<&'b str>,
+    /// The integer fields read into a name a check divides by.
+    divisors: Vec<&'b str>,
     /// Each field a check indexes with a constant bound, with the length the
     /// check needs ([`needed_lengths`]).
     lengths: Vec<(String, i64)>,
@@ -806,6 +815,7 @@ struct Scan<'b> {
 
 fn scan<'b>(b: &'b Body, decls: &HashMap<String, TypeDecl>, needs: &[(Place, i64)]) -> Scan<'b> {
     let mut checked: BTreeSet<Name> = BTreeSet::new();
+    let mut divided: BTreeSet<Name> = BTreeSet::new();
     let mut indexed: Vec<&str> = Vec::new();
     let mut lost: Vec<&str> = Vec::new();
     let mut reads: Vec<(Name, Option<Name>, &str)> = Vec::new();
@@ -826,6 +836,9 @@ fn scan<'b>(b: &'b Body, decls: &HashMap<String, TypeDecl>, needs: &[(Place, i64
                 }
                 Guard::Index(Place::Name(n), _) | Guard::Span(Place::Name(n), ..) => {
                     checked.insert(*n);
+                }
+                Guard::NonZero(Val::Name(d)) => {
+                    divided.insert(*d);
                 }
                 _ => {}
             },
@@ -858,6 +871,10 @@ fn scan<'b>(b: &'b Body, decls: &HashMap<String, TypeDecl>, needs: &[(Place, i64
             on.extend(r.map(|r| (r, *f)));
         }
     }
+    let divisors = (reads.iter())
+        .filter(|(n, ..)| divided.contains(n))
+        .map(|(.., f)| *f)
+        .collect();
     let lengths = (needs.iter())
         .filter_map(|(p, c)| match p {
             Place::Field(r, f) if matches!(**r, Place::Name(_)) => Some((f.clone(), *c)),
@@ -883,6 +900,7 @@ fn scan<'b>(b: &'b Body, decls: &HashMap<String, TypeDecl>, needs: &[(Place, i64
         indexed,
         beside,
         lost,
+        divisors,
         lengths,
         fills,
         builds: builds || elements.stores,
@@ -1329,14 +1347,24 @@ fn made_lengths(b: &Body) -> BTreeSet<Lin> {
 }
 
 /// Per name of `body`, whether it is a record a literal builds with a fact,
-/// or a record whose field a fact names a row writes.
+/// a literal's integer part a field's constant bound names, or a record
+/// whose field a fact names a row writes.
 fn built(body: &Body, decls: &HashMap<String, TypeDecl>, facts: &RecordFacts) -> Vec<bool> {
     let mut out = vec![false; body.names.len()];
     for (s, _) in rows(&body.stmts) {
         match s {
-            St::Let(n, Rhs::Make(Ctor::Record(..), _)) => {
+            St::Let(n, Rhs::Make(Ctor::Record(_, fields), parts)) => {
                 let ty = &body.names[n.index()].ty;
-                out[n.index()] |= !facts.of_type(ty, decls).is_empty();
+                let of = facts.of_type(ty, decls);
+                out[n.index()] |= !of.is_empty();
+                for (f, v) in fields.iter().zip(parts) {
+                    let named = of
+                        .iter()
+                        .any(|x| matches!(&x[..], [(Part::Val(g), 1), (Part::One, _)] if g == f));
+                    if let (true, Val::Name(m)) = (named, v) {
+                        out[m.index()] = true;
+                    }
+                }
             }
             _ => {
                 for p in resized_places(s) {
