@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 const root = new URL("../../", import.meta.url);
 const read = (p) => readFile(fileURLToPath(new URL(p, root)), "utf8");
 
-const [playJs, widgetsJs] = await Promise.all([read("site/public/play.js"), read("site/public/widgets.js")]);
+const [runJs, heroJs] = await Promise.all([read("site/public/play-run.js"), read("site/public/hero.js")]);
 
 function body(src, name) {
   const at = src.indexOf(`function ${name}(`);
@@ -17,7 +17,7 @@ function body(src, name) {
 }
 
 test("the kill timer dies with the worker it would kill", () => {
-  const stop = body(playJs, "stopWorker");
+  const stop = body(runJs, "stopWorker");
   if (!stop.includes("clearTimeout(runTimer)")) {
     throw new Error(
       "stopWorker does not clear runTimer, so every path that abandons a live run " +
@@ -27,20 +27,20 @@ test("the kill timer dies with the worker it would kill", () => {
 });
 
 test("the kill timer is module state, so one mount cannot hide another's", () => {
-  const decls = [...playJs.matchAll(/^\s*let runTimer = null;$/gm)];
+  const decls = [...runJs.matchAll(/^\s*let runTimer = null;$/gm)];
   if (decls.length !== 1) {
     throw new Error(`expected one runTimer declaration, found ${decls.length}`);
   }
   if (decls[0][0] !== "let runTimer = null;") {
-    throw new Error("runTimer is declared indented, which means inside mountPlay — stopWorker cannot reach it");
+    throw new Error("runTimer is declared indented, which means inside a function, where stopWorker cannot reach it");
   }
-  if (playJs.indexOf("let runTimer") > playJs.indexOf("function stopWorker(")) {
+  if (runJs.indexOf("let runTimer") > runJs.indexOf("function stopWorker(")) {
     throw new Error("runTimer is declared after stopWorker rather than beside the worker it belongs to");
   }
 });
 
 test("the hero editor replays a Run press that arrived after hover or focus armed it", () => {
-  const arm = body(widgetsJs, "armHeroEditor");
+  const arm = body(heroJs, "armHeroEditor");
   const owed = arm.indexOf("runOnReady = runOnReady || thenRun");
   const latch = arm.indexOf("if (armed) return;");
   if (owed < 0) {
