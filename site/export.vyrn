@@ -33,7 +33,7 @@ import { feedName, feedUrl, feedXml, feedItemCount } from "./app/feed"
 // that says what it writes.
 import { emit as jsonText, Json, JsonField } from "std/json"
 import { substring, indexOf, lastIndexOf, split, replace, lines, trim } from "std/strings"
-import { startsWith, contains } from "std/strpred"
+import { startsWith, endsWith, contains } from "std/strpred"
 import { includes } from "std/arrays"
 
 /// Every path the site publishes, built from the router's typed URL helpers, so
@@ -539,14 +539,11 @@ fn exportPath(outDir: String, path: String) -> Int64 {
     return bad
 }
 
-/// A binary file, such as `play.wasm`, is written by `.github/workflows/site.yml`.
+/// Every script in `site/public`, and the files from elsewhere in the
+/// repository. A binary file, such as `play.wasm`, is written by
+/// `.github/workflows/site.yml`.
 fn assets() -> Array<Array<String>> {
-    return [
-        ["site/public/theme.js", "theme.js"],
-        ["site/public/widgets.js", "widgets.js"],
-        ["site/public/play.js", "play.js"],
-        ["site/public/play-wasm.js", "play-wasm.js"],
-        ["site/public/play-worker.js", "play-worker.js"],
+    let mut out: Array<Array<String>> = [
         ["web/wasi-min.js", "wasi-min.js"],
         ["web/vyrn-nav.js", "vyrn-nav.js"],
         ["web/vyrn-dom.js", "vyrn-dom.js"],
@@ -557,6 +554,16 @@ fn assets() -> Array<Array<String>> {
         ["install.sh", "install.sh.txt"],
         ["install.ps1", "install.ps1.txt"],
     ]
+    let public = match listDir("site/public") {
+        Ok(names) => names.copy(),
+        Err(why) => [],
+    }
+    for name in consume public {
+        if endsWith(name, ".js") {
+            out.push(["site/public/\{name}", name])
+        }
+    }
+    return out
 }
 
 fn copyAsset(outDir: String, source: String, name: String) -> Int64 {
@@ -1113,6 +1120,23 @@ test "the published stylesheet keeps every rule and none of the prose" {
     }
     assert(contains(shipped, ".band { padding: var(--sect) 0;"))
     assert(!contains(shipped, "/*"))
+}
+
+test "every script in site/public is published" {
+    let mut published: Array<String> = []
+    for asset in assets() {
+        published.push(asset[1].copy())
+    }
+    let listing = match listDir("site/public") {
+        Ok(names) => names.copy(),
+        Err(why) => [],
+    }
+    assert(includes(listing, "theme.js"))
+    for name in listing {
+        if endsWith(name, ".js") {
+            assert(includes(published, name))
+        }
+    }
 }
 
 test "every published document points at an icon this export writes" {
