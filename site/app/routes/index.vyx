@@ -27,7 +27,6 @@ import { shellOutHtml } from "../code"
 // compile time.
 import { demoCode } from "../demohl"
 import { demoHl } from demoCode("../../data/demo.json")
-import { Icon } from "../icons"
 
 /// The id of the snippet the hero runs. One name, two halves: the coloured
 /// lines the page paints and the raw source the textarea holds.
@@ -55,7 +54,7 @@ fn headline() -> String {
 /// What is published, in one line.
 fn standing() -> String {
     if !hasRelease() {
-        return "Nothing published yet — build from source."
+        return "Nothing is published. Build from source."
     }
     let kind = if releasePre() { " as a pre-release." } else { "." }
     return "Published " + releaseDate() + kind
@@ -71,12 +70,12 @@ type Tab = { id: String, label: String, block: String, caption: String }
 
 fn tabs() -> Array<Tab> {
     return [
-        Tab { id: "types", label: "Types carry rules", block: "validated", caption: "The rule is part of the type, and the compiler proves what it can." },
-        Tab { id: "own", label: "Ownership is a word", block: "regions", caption: "read, modify, consume — written on the parameter, and no lifetimes." },
-        Tab { id: "records", label: "Records and enums", block: "records", caption: "A shape, a choice, and no inheritance." },
-        Tab { id: "html", label: "A view is a function", block: "html", caption: "The server renders the tree; the browser gets the same one." },
-        Tab { id: "gen", label: "Generators are libraries", block: "genuse", caption: "It runs while you compile, and emits Vyrn." },
-        Tab { id: "bench", label: "The timer is in the language", block: "benches", caption: "A bench block is a body the timer runs, beside the code it is about." },
+        Tab { id: "types", label: "Validated types", block: "validated", caption: "The rule is part of the type, and the compiler proves what it can." },
+        Tab { id: "own", label: "Ownership", block: "regions", caption: "read, modify and consume are written on the parameter. There are no lifetimes." },
+        Tab { id: "records", label: "Records and enums", block: "records", caption: "A record is a shape and an enum is a choice. There is no inheritance." },
+        Tab { id: "html", label: "Views", block: "html", caption: "The server renders the tree; the browser gets the same one." },
+        Tab { id: "gen", label: "Generators", block: "genuse", caption: "A generator runs at compile time and returns Vyrn source." },
+        Tab { id: "bench", label: "bench blocks", block: "benches", caption: "A bench block is a body the timer runs, beside the code it is about." },
     ]
 }
 
@@ -163,9 +162,8 @@ fn barStyle(pct: String) -> String {
 <main class="page wide">
         <section class="hero split">
             <div>
-                <p class="eyebrow">A systems language</p>
-                <h1 class="display">Types carry the <em>rules</em>.<br/>Native speed.<br/>No collector.</h1>
-                <p class="lede">Write the rule into the type. The compiler proves it, or refuses the value.</p>
+                <h1 class="display">Vyrn</h1>
+                <p class="lede">A systems language that compiles to native code and WebAssembly, with no garbage collector. A type carries its rules: the compiler proves a value valid, refuses it, or checks it where it arrives.</p>
 
                 <!-- The same scriptless OS picker as `/install`: the command
                      first, the version above it, the radio labels under it. -->
@@ -219,9 +217,8 @@ fn barStyle(pct: String) -> String {
              400ms program and a 3s one are both readable. -->
         <section class="band" id="speed">
             <div class="benchhead">
-                <p class="eyebrow"><Icon name="bytesize:activity"/> Measured</p>
-                <h2 class="display">Eight programs, five engines,<br/>one afternoon on one machine.</h2>
-                <p class="lede">The Benchmarks Game programs, run against C, Rust and node, with the WebAssembly build beside them. Every number below came out of that run — the ones where Vyrn is behind carry the reason.</p>
+                <h2 class="display">Benchmarks</h2>
+                <p class="lede">Benchmarks Game programs in Vyrn, C, Rust and JavaScript on node, with Vyrn's WebAssembly build beside them. A card where Vyrn is slower names the cause.</p>
                 <p class="ctarow"><a class="cta" href="/benchmarks.html">The benchmarks page</a></p>
             </div>
 
@@ -244,7 +241,7 @@ fn barStyle(pct: String) -> String {
                 </article>
             </div>
 
-            <p class="cap benchcap">{{ benchMachine() }} · medians of {{ benchRuns() }} · every engine at its own defaults · <a href="/benchmarks.html">all eight programs, the table and the radar →</a></p>
+            <p class="cap benchcap">{{ benchMachine() }} · medians of {{ benchRuns() }} · every engine at its own defaults · <a href="/benchmarks.html">every program, the table and the radar</a></p>
         </section>
 
         <!-- The showcase: a reader picks an idea and its program answers.
@@ -253,9 +250,8 @@ fn barStyle(pct: String) -> String {
              and `v-for` cannot put an attribute on one iteration. -->
         <section class="band" id="ideas">
             <div class="showhead">
-                <p class="eyebrow"><Icon name="bytesize:lightning"/> The ideas, in code</p>
-                <h2 class="display">Six ideas. Six programs<br/>this build compiled.</h2>
-                <p class="lede">Every panel is a file in this repository, with the chapter that teaches it one press away.</p>
+                <h2 class="display">Examples</h2>
+                <p class="lede">Each panel is a program from the guide, with a link to the chapter that teaches it.</p>
             </div>
             <fieldset class="picker showcase">
                 <legend class="sr-only">Language feature</legend>
@@ -287,9 +283,8 @@ fn barStyle(pct: String) -> String {
              generator the reference landing reads. -->
         <section class="band split" id="std">
             <div class="say">
-                <p class="eyebrow">Standard library</p>
-                <h2>Written in Vyrn, all of it</h2>
-                <p>Every module below compiles under the same rules your program does.</p>
+                <h2>Standard library</h2>
+                <p>Every module is written in Vyrn and compiles under the same rules as any other program.</p>
                 <p class="ctarow"><a class="cta" href="/docs.html">{{ allModules() }}</a></p>
             </div>
             <ul class="modteaser">
@@ -301,10 +296,9 @@ fn barStyle(pct: String) -> String {
         </section>
 
         <section class="band" id="minute">
-            <p class="eyebrow"><Icon name="bytesize:play"/> A minute with Vyrn</p>
             <div class="minutehead">
-                <h2 class="display">One binary,<br/>from new to shipped.</h2>
-                <p class="lede">Write, check, test and build with the same tool. Every step below is a real command with its real output. Press one, or let it run through.</p>
+                <h2 class="display">Workflow</h2>
+                <p class="lede">The steps create, run, edit, test and build a project with one binary. Each step shows its command and the output it printed.</p>
             </div>
             <!-- Every line of output was recorded from the real binary by
                  `scripts/site-demo.py`. The steps and their outputs are two

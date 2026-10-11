@@ -39,14 +39,13 @@ fn exportsOf(p: Package) -> String {
 <template>
 <main class="page registry">
     <section class="hero reghead">
-        <p class="eyebrow">The registry</p>
-        <h1 class="display">{{ packages().length }} packages</h1>
-        <p class="lede">What you can pull into a project from outside it — fetched by URL, pinned by hash.</p>
+        <h1 class="display">Registry</h1>
+        <p class="lede">{{ packages().length }} packages a project can import from outside itself, fetched by URL and pinned by hash.</p>
         <div class="regsearch">
             <input type="search" data-search-input placeholder="Search — a name, an export, kind:project" autocomplete="off" spellcheck="false" aria-label="Search packages"/>
             <span class="count" data-search-count data-search-noun="package">{{ packages().length }}</span>
         </div>
-        <p class="reghint">Hint: <code>kind:project</code> narrows by kind, and an export's name — <code>addBook</code> — finds the package that offers it.</p>
+        <p class="reghint">Hint: <code>kind:project</code> narrows by kind, and an export's name, such as <code>addBook</code>, finds the package that offers it.</p>
     </section>
 
     <section class="band">

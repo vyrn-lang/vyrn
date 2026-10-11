@@ -31,7 +31,7 @@ fn serverDir() -> String {
 // markdown twin in `pagemd.vyrn` render the same strings.
 
 export fn pageTitle() -> String {
-    return "One extension, one server"
+    return "Editors"
 }
 
 export fn lede() -> String {
@@ -43,11 +43,11 @@ export fn notice() -> String {
 }
 
 export fn featuresHeading() -> String {
-    return "things it does, and where each one lives"
+    return "features"
 }
 
 export fn featuresIntro() -> String {
-    return "Every row names the file that implements it, and the build opens every one of those files. A row for something nobody wrote fails the build."
+    return "Each row names the file that implements it."
 }
 
 export fn featuresCap() -> String {
@@ -59,7 +59,7 @@ export fn featuresNotice() -> String {
 }
 
 export fn installHeading() -> String {
-    return "Install the toolchain, then the .vsix"
+    return "Install"
 }
 
 export fn installIntro() -> String {
@@ -75,11 +75,11 @@ export fn installCap() -> String {
 }
 
 export fn otherHeading() -> String {
-    return "Nothing else is written, and nothing else has to be"
+    return "Other editors"
 }
 
 export fn otherIntro() -> String {
-    return "There is one extension and it is the one above. <code>vyrn-lsp</code> is an ordinary language server: it speaks JSON-RPC over stdin and stdout and knows nothing about VS Code. Any editor with a generic LSP client gets the whole table above except the lenses, which the client draws. There is no socket mode, so a client that cannot spawn a process cannot use it."
+    return "<code>vyrn-lsp</code> is an ordinary language server: it speaks JSON-RPC over stdin and stdout and knows nothing about VS Code. Any editor with a generic LSP client gets the whole table above except the lenses, which the client draws. There is no socket mode, so a client that cannot spawn a process cannot use it."
 }
 
 export fn otherClose() -> String {

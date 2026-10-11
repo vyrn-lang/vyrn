@@ -33,7 +33,7 @@ import * as gTests from "../guide/tests"
 import * as gText from "../guide/text"
 import * as gValidated from "../guide/validated"
 import { base64Encode } from "std/codecs"
-import { replace, joinWith, substring, trimEnd, toLower } from "std/strings"
+import { replace, joinWith, substring, trimEnd } from "std/strings"
 import { startsWith } from "std/strpred"
 import { includes } from "std/arrays"
 import { escapeHtml, terminalHtml, inlineCode } from "./code"
@@ -165,19 +165,6 @@ fn blockHtml(b: Block) -> String {
     return out + "</div>"
 }
 
-/// The eyebrow above a section: its number in the chapter, and what the chapter
-/// is about.
-export fn sectionEyebrow(c: Chapter, s: Section) -> String {
-    let mut n = 1
-    for other in c.sections {
-        if other.anchor == s.anchor {
-            return chapterTag(n) + " — " + toLower(c.title)
-        }
-        n = n + 1
-    }
-    return toLower(c.title)
-}
-
 /// The links to the chapters before and after this one; a chapter at either
 /// end of its area has one.
 export fn chapterNavHtml(slug: String) -> String {
@@ -248,29 +235,29 @@ export fn chapters() -> Array<Chapter> {
             title: "Coming from another language",
             lede: "What carries over from Rust, TypeScript or Go, what is deliberately different, and what Vyrn does not have at all.",
             sections: [
-                compared("rules", "A rule about a value", [
+                compared("rules", "Validation", [
                     "The thing that is most likely to be new is where a RULE lives. In the languages beside it a rule is code somebody has to call: a constructor, a schema object, a validating function. The type says nothing about whether it ever ran. In Vyrn the rule is part of the type, so `Age` is a number that has passed it.",
                     "The compiler proves what it can while the program compiles. So `Age(30)` costs nothing at run time, and `Age(5)` is a compile error rather than a failed check. Input from outside the program is not a constant, so it takes the total form. `Age?(n)` answers <code>Option&lt;Age&gt;</code>, and no path produces an unchecked `Age`.",
                 ], "types"),
-                compared("intent", "What a function does with its argument", [
+                compared("intent", "Ownership", [
                     "Rust says this with borrows and lifetimes, TypeScript cannot say it at all, and Go says it with a pointer and a comment. Vyrn writes the intent on the parameter as a word: `read`, `modify`, `consume`.",
                     "There is no lifetime grammar to learn, because the word is the whole declaration — the compiler decides where the value is released from what the words say. <a href=\"/guide/ownership.html\">Ownership, consume, regions</a> is the chapter that teaches it.",
                 ], "memory"),
-                compared("failure", "When something fails", [
+                compared("failure", "Errors", [
                     "There is no null and no exception. An absent value is `Option`, a failure is `Result`, and `?` hands a failure to the caller unchanged — the same three shapes Rust uses, without the conversion traits.",
                     "A `panic` is for a case that cannot happen. Nothing unwinds: there is no `catch` anywhere in the language, so a panic ends the program.",
                 ], "failure"),
-                section("shapes", "The shapes you already know", [
+                section("shapes", "Records and enums", [
                     "A `record` is a struct with named fields and no inheritance. An `enum` is a closed choice with payloads, and `match` covers every case. The compiler counts the arms, so a new variant is a compile error at every site that reads it.",
                     "Generics are monomorphised, protocols are how a type says what it can do, and a protocol bound is checked at the call rather than at run time. Records are structural, as in TypeScript: a record with the same fields, or more, fits where a record type is wanted.",
                 ], []),
-                section("absent", "What is not here", [
+                section("absent", "What Vyrn does not have", [
                     "<strong>No garbage collector.</strong> Memory is released where the ownership words say it is, and the editor's hover shows that decision per binding.",
                     "<strong>No exceptions, no unwinding, no `async` colour.</strong> A program is a program; the runtime that serves HTTP is a library written in the language.",
                     "<strong>No macros.</strong> A generator is an ordinary Vyrn function that runs while you compile and emits Vyrn — <code>vyrn emit-gen</code> prints exactly what it wrote. <a href=\"/guide/generators.html\">gen fns and generators</a> is the chapter.",
                     "<strong>No inheritance and no null.</strong> Both are covered above, and neither has a workaround to learn.",
                 ], []),
-                section("next", "Where to go next", [
+                section("next", "Next steps", [
                     "If you write Rust: read <a href=\"/guide/ownership.html\">Ownership</a> first — it is the chapter where this language differs from yours the most, and it is shorter than you expect.",
                     "If you write TypeScript: read <a href=\"/guide/values.html\">Values and types</a> and then <a href=\"/guide/errors.html\">Errors</a>. Numbers state their width here, and validation is a type rather than a library.",
                     "If you write Go: read <a href=\"/guide/records.html\">Records, enums, match</a> — the closed enum and exhaustive `match` are what replace the interface-and-type-switch pattern.",
@@ -293,7 +280,7 @@ export fn chapters() -> Array<Chapter> {
                     "A <code>String</code> is UTF-8 bytes. <code>byteLength</code> is a field and counts bytes; <code>charCount()</code> walks the string and counts characters. The two agree on ASCII and disagree everywhere else, and the names say which one you asked for.",
                     "<a href=\"/docs/std/strings.html\">std/strings</a> has the rest: split, join, trim, case, search, pad.",
                 ], ["text"]),
-                section("validated", "Types that carry rules", [
+                section("validated", "Validated types", [
                     "A <code>where</code> clause is part of the type. <code>Age(30)</code> is proven while the file compiles, so no check is emitted. <code>Age(5)</code> is refused by the compiler, in the same way a type error is refused.",
                     "Input from outside the program is not a constant, so it gets the total form. <code>Age?(n)</code> answers <code>Option&lt;Age&gt;</code>: <code>Some</code> when the rule holds, <code>None</code> when it does not. Nothing traps, and you cannot forget a check you never wrote.",
                     "The rule is readable by the compiler as well as by you. <a href=\"/guide/generators.html#reflection\">Chapter 9</a> turns the same declaration into a JSON Schema document.",
@@ -307,15 +294,15 @@ export fn chapters() -> Array<Chapter> {
             title: "Records, enums, match",
             lede: "A record is a shape. An enum is a choice. `match` covers every case, and the compiler counts them.",
             sections: [
-                section("records", "Records are shapes", [
+                section("records", "Records", [
                     "A record type lists fields. Compatibility is by shape: a value with more fields fits where fewer are wanted, with no cast and no base class. This is width subtyping, and it is the whole inheritance story.",
                     "Fields of a <code>mut</code> binding are assigned in place. A record that owns heap data — a <code>String</code> field, for example — is moved by an assignment, so <code>copy()</code> is how both sides keep a value.",
                 ], ["records"]),
-                section("enums", "Enums are choices", [
+                section("enums", "Enums", [
                     "An enum value is exactly one variant, and a variant can carry a payload. There is no tag field to keep in step with a union, because the tag is the type.",
                     "<code>match</code> must cover every variant. Leave one out and the file does not compile. That is what makes an enum safe to extend: add a variant, and the compiler lists every place that has to answer for it.",
                 ], ["enums"]),
-                section("match", "match is an expression", [
+                section("match", "match expressions", [
                     "<code>match</code> answers with a value, so a binding takes it directly and there is no mutable slot to fill in each arm.",
                     "<code>if let</code> reads one variant when the others need no arm. <code>while let</code> does the same in a loop, and stops when the pattern stops matching.",
                 ], ["matching"]),
@@ -326,9 +313,9 @@ export fn chapters() -> Array<Chapter> {
             group: "The memory model",
             slug: "ownership",
             title: "Ownership, consume, regions",
-            lede: "You write what a function does with a value. The compiler enforces it and frees the memory. There is no collector, no lifetime syntax, and no borrow annotation.",
+            lede: "A parameter states what a function does with the value. The compiler enforces it and frees the memory. There is no collector, no lifetime syntax, and no borrow annotation.",
             sections: [
-                section("capabilities", "The three words", [
+                section("capabilities", "Capabilities", [
                     "A parameter carries a capability. <code>read</code> observes the value and the caller keeps it. <code>modify</code> changes it in place. <code>consume</code> takes ownership, and the caller may not name the value again.",
                     "The words are erased before the program runs. They cost nothing, and they are the only ownership syntax there is.",
                     "Use a consumed value again and the compiler names the line that took it: <code>`t` is used here but was already consumed by `redeem(..)` on line 7</code>.",
@@ -364,7 +351,7 @@ export fn chapters() -> Array<Chapter> {
             title: "Protocols and generics",
             lede: "A protocol names methods a type can implement. A generic bounded by it is compiled once per concrete type, so dispatch costs nothing at run time.",
             sections: [
-                section("protocols", "A protocol and a bound", [
+                section("protocols", "Protocols and bounds", [
                     "<code>protocol</code> declares the methods. <code>impl P for T</code> supplies them for one type, including a built-in type such as <code>Int64</code>.",
                     "A generic function takes a bound: <code>fn label&lt;T: Show&gt;(x: T)</code>. The compiler generates one <code>label</code> per concrete type and calls the implementation directly. There is no table and no dynamic lookup: the choice is made once, while compiling.",
                     "A protocol can also declare an associated type. <a href=\"/guide/errors.html#fallible\">Chapter 11</a> uses one: <code>Fallible</code> owes an <code>Output</code>, which is what <code>?</code> hands back.",
@@ -409,17 +396,17 @@ export fn chapters() -> Array<Chapter> {
             title: "gen fns and generators",
             lede: "A `gen fn` is ordinary Vyrn that runs while the program compiles and returns Vyrn source. RPC, UI, i18n, OpenAPI and GraphQL are libraries built this way. None of them is a compiler feature.",
             sections: [
-                section("genfn", "A generator writes a module", [
+                section("genfn", "gen fns", [
                     "A generator is a function marked <code>gen</code>. It returns a <code>String</code> of Vyrn source. It may read files through <code>readFile</code> and <code>listDir</code>, scoped to the paths its caller passed in, and it may not write, use module state, or reach an <code>extern</code>.",
                     "This one writes a lookup table. It takes no input, so its answer is the same on every machine — which is the property a build has to have.",
                     "There is no run link on this block. A generator is not a program: it needs the file that imports it, and the playground takes one source.",
                 ], ["gentiny"]),
-                section("genimport", "An import can be a call", [
+                section("genimport", "Generator imports", [
                     "The target of an import can be a call to a generator. The compiler runs the call at load time, caches it, and links the source it returned as an ordinary module. Everything after that is normal Vyrn.",
                     "<code>vyrn emit-gen &lt;file&gt;</code> prints the source a generator produced.",
                     "This page is built the same way. A generator reads <code>std/</code> and writes the <a href=\"/docs.html\">reference pages</a>.",
                 ], ["genuse"]),
-                section("reflection", "Reading a type at compile time", [
+                section("reflection", "Reflection", [
                     "<code>schemaOf<T>()</code> reads a validated type's own declaration. It answers with the name, the base type, the documentation line and every bound the <code>where</code> clause implies. <code>jsonSchema<T>()</code> writes the JSON Schema document from the same facts.",
                     "This is not runtime reflection. Vyrn erases types before the program runs; the compiler computes the answer from the declaration.",
                 ], ["schema"]),
@@ -436,7 +423,7 @@ export fn chapters() -> Array<Chapter> {
                     "<code>Option&lt;T&gt;</code> is <code>Some</code> or <code>None</code>. <code>Result&lt;T, E&gt;</code> is <code>Ok</code> or <code>Err</code>. Both are ordinary enums, so <code>match</code> covers them and the compiler counts the arms.",
                     "<code>?</code> after an expression unwraps the success and returns the failure to the caller. It changes no types on the way out: the whole value is copied into a function that returns the same type, so there is no residual type to convert.",
                 ], ["options"]),
-                section("fallible", "Your own type, and ?", [
+                section("fallible", "Fallible", [
                     "<code>?</code> also works on a type you declare. Implement <a href=\"/docs/std/fallible.html\">Fallible</a>: say whether a value is a success, and how to read the success payload. The operator resolves through the protocol.",
                     "The failing value reaches the caller with its payload intact, because nothing looked inside it.",
                     "<code>panic(msg)</code> ends the program with a message. It is for a case that cannot happen — an arm the operator never calls — and not for a failure a caller could handle. There is no unwinding anywhere in the language, so a panic does not become a catch somewhere up the stack.",
@@ -454,7 +441,7 @@ export fn chapters() -> Array<Chapter> {
                     "<a href=\"/docs/std/args.html\">std/args</a> takes a token list. <code>cli()</code> takes the real arguments; <code>cliOf(list)</code> takes a list you supply, which is how a test checks the parsing without a process.",
                     "<code>flag</code> asks whether a token is present. <code>opt</code> reads <code>--name=value</code> and <code>--name value</code>, and answers <code>Option&lt;String&gt;</code>. <code>positionals</code> returns what is left, and <code>rest</code> returns what follows <code>--</code>.",
                 ], ["cliargs"]),
-                section("cli", "The command line as a type", [
+                section("cli", "std/cli", [
                     "<a href=\"/docs/std/cli.html\">std/cli</a> goes further. Declare a record whose fields are the options, and give each field a validated type with its own documentation line. <code>cli(\"./module\")</code> reflects it into a parser and a help text, so no flag name is written twice.",
                     "A parse answers <code>Valid</code> or <code>Invalid</code> with the issues attached to their fields, so a program reports every problem at once instead of the first one.",
                 ], []),
@@ -471,7 +458,7 @@ export fn chapters() -> Array<Chapter> {
                     "<a href=\"/docs/std/html.html\">std/html</a> builds the tree. <code>toHtmlString</code> renders it for the server. Text is escaped. A tag or attribute name lands outside the quotes, so it is checked rather than escaped, and a bad one is refused.",
                     "The same tree crosses to the browser as JSON, and <code>web/vyrn-dom.js</code> applies the difference between the old tree and the new one. Keys carry list identity.",
                 ], ["html"]),
-                section("twice", "The same tree, twice", [
+                section("twice", "Server and browser", [
                     "One view function serves both sides. The server calls it and writes a document, so the page exists before any script runs and works with none. The browser calls the same function after an event and hands the new tree to the differ, which touches only the nodes that changed.",
                     "A link between pages does the same in miniature: the next page arrives as a payload, the differ swaps the content, and form drafts and scroll survive. When anything about that goes wrong, the browser navigates for real — the failure mode is a normal page load.",
                 ], []),
@@ -484,15 +471,15 @@ export fn chapters() -> Array<Chapter> {
             title: "Components: .vyx",
             lede: "A `.vyx` file is one component: a script block of ordinary Vyrn and a template block of markup. A generator compiles it while the program builds, so it is a library, not a compiler feature.",
             sections: [
-                section("file", "One file, two blocks", [
+                section("file", "Script and template", [
                     "The <code>&lt;script&gt;</code> block is ordinary Vyrn: imports, types, the functions the template calls. The <code>&lt;template&gt;</code> block is the view. <a href=\"/docs/std/vyx.html\">std/vyx</a> compiles the pair to a Vyrn module while the importing program builds, and <code>vyrn emit-gen</code> prints exactly what it wrote.",
                     "A route component can also export <code>head()</code> for the document's title and <code>data()</code> for what the page needs; the server runs <code>data()</code> and the template renders its answer.",
                 ], []),
-                section("template", "What a template can say", [
+                section("template", "Template syntax", [
                     "<code>{{ x }}</code> puts a value into the page, escaped. <code>:href=\"f(x)\"</code> binds an attribute to an expression. <code>v-for</code> repeats an element over an array, and <code>:key</code> tells the differ which repeated element is which. <code>v-html</code> splices markup you built yourself — the escape hatch, for HTML a function already produced.",
                     "A tag with a capital letter is a component you imported, and its attributes are the props: <code>&lt;Icon name=\"bytesize:search\"/&gt;</code> is a function call written as markup.",
                 ], []),
-                section("proof", "This site is the test", [
+                section("proof", "This site's routes", [
                     "Every page of this site is a <code>.vyx</code> route compiled by the same generator, including this one. The <a href=\"/docs/std/vyx.html\">reference page</a> lists the whole template surface.",
                 ], []),
             ],
@@ -504,10 +491,10 @@ export fn chapters() -> Array<Chapter> {
             title: "Styling and icons",
             lede: "`std/tw` writes the theme's utility stylesheet at build time. `std/icons` turns a pinned icon collection into an import, so a glyph is checked like a name.",
             sections: [
-                section("tw", "Utility classes, compiled", [
+                section("tw", "Utility classes", [
                     "<a href=\"/docs/std/tw.html\">std/tw</a> is a generator: it compiles the theme — spacing, color, breakpoints — into one stylesheet at build time. Nothing is fetched at runtime. The whole vocabulary ships, used or not; per-template pruning is a recorded gap, not a feature this page may claim.",
                 ], []),
-                section("icons", "Icons are imports", [
+                section("icons", "Icons", [
                     "<a href=\"/docs/std/icons.html\">std/icons</a> makes a glyph a name: <code>import { book } from icons(\"bytesize\", \"book\")</code> generates one function per glyph from a collection pinned in the lock file. A name the collection does not have fails the build. The <code>&lt;Icon&gt;</code> tag draws them.",
                 ], []),
             ],
@@ -519,14 +506,14 @@ export fn chapters() -> Array<Chapter> {
             title: "Routes, RPC and the dev server",
             lede: "`std/ui` turns a routes directory into one function from request to response. `std/rpc` makes a typed call between the two halves. `vyrn dev` serves both while you work.",
             sections: [
-                section("routes", "A directory of pages", [
+                section("routes", "Routes", [
                     "<a href=\"/docs/std/ui.html\">std/ui</a> reads a <code>routes/</code> directory and generates one <code>route(req) -&gt; Response</code>. Each route gets a typed URL helper, so a link cannot name a page that is not there. A <code>[param].vyx</code> file binds a path segment, and the component decides whether the value is a page or a 404.",
                     "This site is built with it: <code>site/export.vyrn</code> calls that function once per path and writes what comes back. The same table can be served live with <code>vyrn serve</code> instead.",
                 ], []),
-                section("rpc", "Typed calls", [
+                section("rpc", "RPC", [
                     "<a href=\"/docs/std/rpc.html\">std/rpc</a> generates the client and server halves of a call from one declaration. The client half runs in the page as wasm; the server half is a route. An answer is typed too: a rejection carries its validation issues attached to the fields they are about, so a form can show each problem where it belongs.",
                 ], []),
-                section("dev", "The dev loop", [
+                section("dev", "vyrn dev", [
                     "<code>vyrn dev</code> builds the client to wasm and serves the server, the static files and the runtimes in one process. <code>vyrn routes</code> prints the resolved table: every path the router mounts, each with its source. Read it first when a URL does not do what you expected.",
                 ], []),
             ],
@@ -536,7 +523,7 @@ export fn chapters() -> Array<Chapter> {
             group: "Commands",
             slug: "commands",
             title: "The CLI",
-            lede: "One binary. `vyrn run` needs nothing else on your machine; `vyrn build` writes a native binary; every other task — tests, benchmarks, formatting, docs — is a subcommand.",
+            lede: "`vyrn` is one binary. `vyrn run` needs no other tool, `vyrn build` writes a native binary, and tests, benchmarks, formatting and docs are subcommands.",
             sections: [
                 section("build", "Run, check, build", [
                     "<code>vyrn run</code> compiles to WebAssembly and runs it, and needs nothing installed. <code>vyrn check</code> diagnoses without running. <code>vyrn build --target wasm</code> writes the module; <code>vyrn build</code> puts the same bytes through <code>wasm2c</code> and <code>clang</code> into a native binary. Both are the same program — the route harness runs every example both ways and compares the bytes.",
@@ -544,7 +531,7 @@ export fn chapters() -> Array<Chapter> {
                 section("daily", "Format, document, test", [
                     "<code>vyrn fmt</code> writes the one canonical layout. It has no style options, and <code>--check</code> is the CI gate. <code>vyrn doc</code> writes Markdown API docs from the <code>///</code> comments, and <code>--verify</code> fails when they drift from the code. <code>vyrn test</code> and <code>vyrn bench</code> have <a href=\"/tooling/testing.html\">their own page</a>.",
                 ], []),
-                section("why", "Ask the compiler why", [
+                section("why", "vyrn why", [
                     "<code>vyrn why &lt;file&gt;</code> answers with a module's audience and every import chain that reaches it. <code>--cost</code> reports, per function, the lines that allocate, copy, grow a container and keep a check. <code>--capability fs</code> lists every chain that pulls the file system into an artifact.",
                 ], []),
             ],
@@ -576,10 +563,10 @@ export fn chapters() -> Array<Chapter> {
                 section("manifest", "vyrn.json", [
                     "<code>vyrn new &lt;name&gt;</code> writes a project: a manifest with a <code>main</code>, and a first file. A program that is one file needs none of this — <code>vyrn run file.vyrn</code> is complete — and a manifest earns its place when imports need names.",
                 ], []),
-                section("deps", "Dependencies that cannot drift", [
+                section("deps", "Dependencies", [
                     "<code>vyrn add</code> takes a <code>github:</code> or <code>https:</code> specifier and writes it to the manifest. The lock file records the content hash, and every later fetch is verified against it. <code>vyrn vendor</code> copies the sources into the repository, <code>--offline</code> refuses the network, and <code>vyrn update</code> is the only command that moves a pin. A dependency that vanishes upstream still builds.",
                 ], []),
-                section("toolchain", "The toolchain is pinned too", [
+                section("toolchain", "Toolchain pinning", [
                     "The manifest's <code>toolchain</code> key and the lock's <code>tool:</code> lines pin the compiler's own tools into <code>~/.vyrn/tools</code>. <code>vyrn update --locked</code> fetches exactly what the lock names. CI runs that, so a build on a new machine is the build you tested.",
                 ], []),
             ],
@@ -672,11 +659,6 @@ export fn chapterNumber(slug: String) -> Int64 {
         n = n + 1
     }
     return 0
-}
-
-/// A chapter number in two digits: `01`, `02`.
-fn chapterTag(n: Int64) -> String {
-    return if n < 10 { "0" + n.toString() } else { n.toString() }
 }
 
 /// The page a chapter is published at, under its area's directory.
@@ -928,8 +910,6 @@ test "every block a chapter shows sits under a section of that chapter" {
     assertEq(chapterOfBlock("hello"), "getting-started")
     assertEq(sectionOfBlock("hello"), "first")
     assertEq(chapterOfBlock("nope"), "")
-    assertEq(chapterTag(1), "01")
-    assertEq(chapterTag(13), "13")
     assertEq(chapterHref("values"), "/guide/values.html")
 }
 

@@ -40,9 +40,8 @@ fn tree() -> Array<TreeGroup> {
     </aside>
 
     <section class="hero">
-        <p class="eyebrow">The web</p>
-        <h1 class="display">Build for the browser</h1>
-        <p class="lede">Four pages: the view tree, single-file components, routes and RPC, styling and icons. The whole stack is libraries and generators — the compiler has no web feature in it.</p>
+        <h1 class="display">Web</h1>
+        <p class="lede">The view tree, single-file components, routes and RPC, styling and icons. The whole stack is libraries and generators; the compiler has no web feature.</p>
     </section>
 
     <section class="band" id="pages">

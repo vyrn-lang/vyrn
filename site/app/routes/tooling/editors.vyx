@@ -73,7 +73,6 @@ fn pager() -> Pager {
     </section>
 
     <section class="band" id="features">
-        <p class="eyebrow">every feature</p>
         <h2>{{ features().length }} {{ featuresHeading() }}</h2>
         <p v-html="featuresIntro()"></p>
         <div class="scroller">
@@ -95,7 +94,6 @@ fn pager() -> Pager {
     </section>
 
     <section class="band" id="get">
-        <p class="eyebrow">how to get it</p>
         <h2>{{ installHeading() }}</h2>
         <p v-html="installIntro()"></p>
         <ul class="plain">
@@ -113,7 +111,6 @@ fn pager() -> Pager {
     </section>
 
     <section class="band" id="other">
-        <p class="eyebrow">other editors</p>
         <h2>{{ otherHeading() }}</h2>
         <p v-html="otherIntro()"></p>
         <p v-html="otherClose()"></p>
@@ -126,9 +123,9 @@ fn pager() -> Pager {
 
     <aside class="onpage">
         <p class="eyebrow">On this page</p>
-        <a href="#what">What you get</a>
-        <a href="#features">Every feature</a>
-        <a href="#get">How to get it</a>
+        <a href="#what">Overview</a>
+        <a href="#features">Features</a>
+        <a href="#get">Install</a>
         <a href="#other">Other editors</a>
     </aside>
 </main>
