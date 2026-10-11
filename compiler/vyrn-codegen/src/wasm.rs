@@ -983,6 +983,10 @@ pub const HEAP_BASE: u32 = 1;
 /// ([`Module::profile`]). [`NESTING_EXPORT`]'s global follows it when both exist.
 pub const SITE: u32 = 2;
 
+/// The most bytes [`Frame::copy`] moves as words instead of `memory.copy`: two `i64`s, a
+/// two-word sum such as `Option<Int64>`.
+const WORD_COPY_LIMIT: u32 = 16;
+
 /// `memory.copy` within the one memory: pops the length, the source and the destination.
 pub const MEMORY_COPY: Instruction<'static> = Instruction::MemoryCopy {
     src_mem: 0,
@@ -1011,6 +1015,8 @@ pub struct Frame {
     instrument: Vec<(usize, usize)>,
     /// Whether the whole body does ([`Frame::instrument_all`]).
     instrument_all: bool,
+    /// The source and destination locals of a word copy ([`Frame::copy`]), taken at the first.
+    copy_tmp: Option<(u32, u32)>,
 }
 
 impl Frame {
@@ -1030,6 +1036,7 @@ impl Frame {
             results: results.to_vec(),
             instrument: Vec::new(),
             instrument_all: false,
+            copy_tmp: None,
         }
     }
 
@@ -1130,9 +1137,43 @@ impl Frame {
     }
 
     /// Copies `n` bytes from the address on top of the stack to the address under it.
+    ///
+    /// Up to [`WORD_COPY_LIMIT`] bytes move as loads and stores of the widest words, because
+    /// wasm2c makes a `memory.copy` a call to `memmove`. The alignment hints say 1 byte: the
+    /// caller does not pass the alignment, and an overstated hint is a lie.
     pub fn copy(&mut self, n: u32) -> &mut Self {
-        self.body.push(Instruction::I32Const(n as i32));
-        self.body.push(MEMORY_COPY);
+        if n > WORD_COPY_LIMIT {
+            self.body.push(Instruction::I32Const(n as i32));
+            self.body.push(MEMORY_COPY);
+            return self;
+        }
+        let (src, dst) = match self.copy_tmp {
+            Some(t) => t,
+            None => {
+                let t = (self.local(ValType::I32), self.local(ValType::I32));
+                self.copy_tmp = Some(t);
+                t
+            }
+        };
+        use Instruction as I;
+        self.body.extend([I::LocalSet(src), I::LocalSet(dst)]);
+        // As with `memory.copy`: every load comes before the first store, so an overlapping
+        // source is read whole, and the highest store comes first, so a destination past the
+        // memory's end traps before any byte moves.
+        let (mut stores, mut off) = (Vec::new(), 0);
+        while off < n {
+            let (log, m) = ((n - off).min(8).ilog2(), mem_arg(off, 0));
+            let (load, store) = match log {
+                3 => (I::I64Load(m), I::I64Store(m)),
+                2 => (I::I32Load(m), I::I32Store(m)),
+                1 => (I::I32Load16U(m), I::I32Store16(m)),
+                _ => (I::I32Load8U(m), I::I32Store8(m)),
+            };
+            self.body.extend([I::LocalGet(dst), I::LocalGet(src), load]);
+            stores.push(store);
+            off += 1 << log;
+        }
+        self.body.extend(stores.into_iter().rev());
         self
     }
 
