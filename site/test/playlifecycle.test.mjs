@@ -15,7 +15,7 @@ import { fileURLToPath } from "node:url";
 const root = new URL("../../", import.meta.url);
 const read = (p) => readFile(fileURLToPath(new URL(p, root)), "utf8");
 
-const [playJs, widgetsJs] = await Promise.all([read("site/public/play.js"), read("site/public/widgets.js")]);
+const [playJs, heroJs] = await Promise.all([read("site/public/play.js"), read("site/public/hero.js")]);
 
 // The text of a function, from `function <name>(` to the first `\n}`. Every
 // function in these files closes at column 0.
@@ -51,7 +51,7 @@ test("the kill timer is module state, so one mount cannot hide another's", () =>
 });
 
 test("the hero editor replays a Run press that arrived after hover or focus armed it", () => {
-  const arm = body(widgetsJs, "armHeroEditor");
+  const arm = body(heroJs, "armHeroEditor");
   const owed = arm.indexOf("runOnReady = runOnReady || thenRun");
   const latch = arm.indexOf("if (armed) return;");
   if (owed < 0) {
