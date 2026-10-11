@@ -56,7 +56,7 @@ fn capabilities() -> Array<Capability> {
             id: "consume",
             word: "consume",
             means: "The function takes ownership.",
-            refuses: "Naming the value again after the call is a compile error — that is the whole meaning of the word.",
+            refuses: "Naming the value again after the call is a compile error.",
             html: vyrnHtml("capConsume"),
         },
     ]

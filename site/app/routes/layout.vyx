@@ -85,7 +85,7 @@ fn standing() -> String {
                 <span class="keys"><kbd class="key">tab</kbd> section <kbd class="key">↑</kbd><kbd class="key">↓</kbd> move <kbd class="key">↵</kbd> open</span>
             </div>
             <div id="find-results" data-find-results role="listbox" aria-label="Results"></div>
-            <p class="cap" data-find-note>Type to search — try <button type="button" data-try>Map</button>, <button type="button" data-try>readLine</button> or <button type="button" data-try>panic</button>.</p>
+            <p class="cap" data-find-note>Type to search, or try <button type="button" data-try>Map</button>, <button type="button" data-try>readLine</button> or <button type="button" data-try>panic</button>.</p>
         </div>
     </div>
     <noscript>

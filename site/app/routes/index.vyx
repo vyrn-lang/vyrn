@@ -54,7 +54,7 @@ fn headline() -> String {
 /// What is published, in one line.
 fn standing() -> String {
     if !hasRelease() {
-        return "Nothing published yet — build from source."
+        return "Nothing is published. Build from source."
     }
     let kind = if releasePre() { " as a pre-release." } else { "." }
     return "Published " + releaseDate() + kind

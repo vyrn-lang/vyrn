@@ -82,7 +82,7 @@ fn buildLabel(d: Package) -> String {
                     </tbody>
                 </table>
                 </div>
-                <p class="cap">From <code>{{ data.name }}/vyrn.json</code> — what you get if you clone it rather than depend on it.</p>
+                <p class="cap">From <code>{{ data.name }}/vyrn.json</code>. A clone builds these; a dependency does not.</p>
             </div>
 
             <div class="pkgblock" id="deps">
@@ -111,7 +111,7 @@ fn buildLabel(d: Package) -> String {
                     <summary>What the command writes</summary>
                     <p><code>vyrn.json</code> gains the alias your <code>import</code> lines use:</p>
                     <pre class="code">{{ manifestShape(data.slug) }}</pre>
-                    <p><code>vyrn.lock</code> gains the pin — the specifier, the immutable URL it resolved to, and the sha256 of the bytes:</p>
+                    <p><code>vyrn.lock</code> gains the pin: the specifier, the immutable URL it resolved to, and the sha256 of the bytes:</p>
                     <div class="scroller">
                     <pre class="code">{{ lockShape(data.slug) }}</pre>
                     </div>

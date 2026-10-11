@@ -133,7 +133,7 @@ fn scriptDownload(p: InstallTarget) -> String {
             <h2>Advanced</h2>
             <details class="disc">
                 <summary>Pin a version, check by hand, uninstall, build from source</summary>
-                <p>It installs one archive into <code>~/.vyrn/bin</code> — <code>%USERPROFILE%\.vyrn\bin</code> on Windows — and writes nothing outside it.</p>
+                <p>It installs one archive into <code>~/.vyrn/bin</code>, or <code>%USERPROFILE%\.vyrn\bin</code> on Windows, and writes nothing outside it.</p>
                 <p>Pin a tag instead of taking the newest release:</p>
                 <div class="cmd" data-copy>
                     <code v-html="shellHtml(pinnedInstall())"></code>

@@ -94,7 +94,7 @@ fn usedInLabel(m: String, e: ApiEntry) -> String {
     let n = guideUseCount(m, e.name)
     let title = demoOf(m, e).title
     if n > 1 {
-        return "Used in " + n.toString() + " guide programs — first in: " + title
+        return "Used in " + n.toString() + " guide programs, first in: " + title
     }
     return "Used in the guide: " + title
 }
