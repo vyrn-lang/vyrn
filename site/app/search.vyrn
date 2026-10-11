@@ -20,7 +20,8 @@ import { packages, packageHref } from "./packages"
 import { pageMetas, stripTags } from "./meta"
 import { hasRelease, releaseTag, releaseDate, releasePre } from "./repo"
 import { hrefOf } from "./nav"
-import { substring, indexOf, replace } from "std/strings"
+import { substring, replace } from "std/strings"
+import { startsWith, contains } from "std/strpred"
 
 /// One row of the index: the section it appears under, its title, where it goes,
 /// and one line about it.
@@ -130,15 +131,6 @@ fn boundaryAt(text: String, max: Int64) -> Int64 {
     return at
 }
 
-/// Where `needle` first occurs in `hay`, or -1. A `match` arm is an expression,
-/// so a loop that has to branch on an `Option` reads better with the index.
-fn firstIndex(hay: String, needle: String) -> Int64 {
-    return match indexOf(hay, needle) {
-        Some(at) => at,
-        None => 0 - 1,
-    }
-}
-
 /// The same index, from rows the caller already has.
 ///
 /// `writeIndex` needs the row COUNT for its log line and the JSON for the file.
@@ -214,15 +206,15 @@ test "no row is empty, and no row points at nothing" {
         assertEq(r.u[0], '/')
         // A description is allowed to be empty — a `///`-less export has none —
         // and it is never allowed to carry markup into the overlay.
-        assert(firstIndex(r.d, "<") < 0)
-        assert(firstIndex(r.d, "\n") < 0)
+        assert(!contains(r.d, "<"))
+        assert(!contains(r.d, "\n"))
         // A generated line is cut to 60 bytes plus an ellipsis; a consumer
         // page's blurb comes from `meta.vyrn`, which caps itself at 160.
         assert(r.d.byteLength <= 160)
         // A reference row carries no fragment — the overlay derives `#e-name`
         // from the title — and a chapter section row is the only kind that does.
         if r.s == "Reference" {
-            assert(firstIndex(r.u, "#") < 0)
+            assert(!contains(r.u, "#"))
         }
     }
 }
@@ -233,11 +225,11 @@ test "the index is one JSON array the overlay can read" {
     assertEq(json[json.byteLength - 1], ']')
     // No whitespace between the values: 448 rows of pretty printing is a third
     // of the file again.
-    assert(firstIndex(json, "\n") < 0)
+    assert(!contains(json, "\n"))
     // A `": "` would prove it, except that a description is allowed to hold
     // one, so the shape of the first object is the check instead.
-    assertEq(firstIndex(json, "[{\"s\":\"Docs\",\"t\":\""), 0)
+    assert(startsWith(json, "[{\"s\":\"Docs\",\"t\":\""))
     // The four one-byte keys, and no backstage path in it.
     assert(json.byteLength > 20000)
-    assert(firstIndex(json, "/backstage") < 0)
+    assert(!contains(json, "/backstage"))
 }

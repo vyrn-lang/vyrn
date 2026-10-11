@@ -14,6 +14,8 @@
 /// ponytail: word-list colouring for the other three languages, no parser. If a
 /// snippet ever highlights wrongly, shorten the snippet.
 import { substring, split, fromBytesOr } from "std/strings"
+import { contains } from "std/strpred"
+import { includes } from "std/arrays"
 
 /// The Rust words the comparison snippets use.
 export fn rustWords() -> Array<String> {
@@ -93,15 +95,6 @@ fn isWordByte(b: UInt8) -> Bool {
     return isLetter(b) || isDigit(b)
 }
 
-fn isWord(word: String, words: Array<String>) -> Bool {
-    for w in words {
-        if w == word {
-            return true
-        }
-    }
-    return false
-}
-
 /// `text` inside a span of class `cls`, escaped.
 fn span(cls: String, text: String) -> String {
     return "<span class=\"" + cls + "\">" + escapeHtml(text) + "</span>"
@@ -143,7 +136,7 @@ export fn highlightWith(src: String, words: Array<String>) -> String {
                 i = i + 1
             }
             let word = substring(src, start, i)
-            if isWord(word, words) {
+            if includes(words, word) {
                 out = out + span("k", word)
             } else if b >= 'A' && b <= 'Z' {
                 out = out + span("t", word)
@@ -373,16 +366,6 @@ fn demoLineHtml(line: String) -> String {
         return ""
     }
     let text = escapeHtml(line)
-    let cls = if hasSlash(line) { "pa" } else { "pl" }
+    let cls = if contains(line, "/") { "pa" } else { "pl" }
     return "<span class=\"" + cls + "\">" + text + "</span>"
-}
-
-/// Whether a line names a path — the one thing this transcript dims.
-fn hasSlash(line: String) -> Bool {
-    for b in bytes(line) {
-        if b == '/' {
-            return true
-        }
-    }
-    return false
 }

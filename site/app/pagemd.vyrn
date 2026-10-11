@@ -25,7 +25,7 @@ import { published } from "./nav"
 import { siteOrigin } from "./repo"
 import { decodeEntities } from "./meta"
 import { substring, indexOf, replace, trimEnd } from "std/strings"
-import { startsWith } from "std/strpred"
+import { startsWith, endsWith, contains } from "std/strpred"
 import { urlEncode } from "std/codecs"
 import { pageTitle, lede, notice, features, featuresHeading, featuresIntro, featuresCap, featuresNotice, installHeading, installIntro, installNotice, installCap, otherHeading, otherIntro, otherClose, steps } from "./editors"
 import { edgeCount, searchRows, graphLede, graphIntro, graphCaption } from "./stdgraph"
@@ -48,10 +48,7 @@ export fn mdName(path: String) -> String {
 
 /// `name` with its `.html` replaced by `ext`, and unchanged when it has none.
 fn swapExtension(name: String, ext: String) -> String {
-    if name.byteLength < 5 {
-        return name.copy()
-    }
-    if substring(name, name.byteLength - 5, name.byteLength) != ".html" {
+    if !endsWith(name, ".html") {
         return name.copy()
     }
     return substring(name, 0, name.byteLength - 5) + ext
@@ -309,15 +306,6 @@ fn upTo(text: String, close: String) -> String {
     }
 }
 
-/// Whether `needle` occurs in `hay`. A `match` arm is an expression, so a caller
-/// that only wants the answer reads better with a predicate than with two arms.
-fn has(hay: String, needle: String) -> Bool {
-    return match indexOf(hay, needle) {
-        Some(at) => true,
-        None => false,
-    }
-}
-
 /// `s` with no run of more than two newlines in it.
 ///
 /// A `</p></div>` is two breaks written by two rules that are each right on
@@ -325,7 +313,7 @@ fn has(hay: String, needle: String) -> Bool {
 /// where that arithmetic stops mattering.
 fn collapse(s: String) -> String {
     let mut out = s.copy()
-    while has(out, "\n\n\n") {
+    while contains(out, "\n\n\n") {
         out = replace(out, "\n\n\n", "\n\n")
     }
     return out
@@ -384,33 +372,33 @@ test "a chapter's markdown carries its programs and its prose" {
     let md = markdownOf("/guide/getting-started")
     assert(startsWith(md, "# Getting started\n"))
     // Its sections, as headings.
-    assert(has(md, "\n## Install and check\n"))
+    assert(contains(md, "\n## Install and check\n"))
     // Its first program, and the output that program printed. `hello` prints
     // one line, and this is the whole point of the book's own rule.
-    assert(has(md, "```vyrn\n"))
-    assert(has(md, "fn main() -> Int64"))
+    assert(contains(md, "```vyrn\n"))
+    assert(contains(md, "fn main() -> Int64"))
     // What a program PRINTED is not Vyrn, and its fence does not claim it is.
-    assert(has(md, "Built output:\n\n```\nhello, world\n```"))
+    assert(contains(md, "Built output:\n\n```\nhello, world\n```"))
     // No run of blank lines: two rules that are each right can write three.
-    assert(!has(md, "\n\n\n"))
+    assert(!contains(md, "\n\n\n"))
     // No markup survives into it, and no root-relative link.
-    assert(!has(md, "<code>"))
-    assert(!has(md, "<a href"))
-    assert(!has(md, "](/"))
-    assert(!has(md, "&lt;"))
-    assert(has(md, siteOrigin()))
+    assert(!contains(md, "<code>"))
+    assert(!contains(md, "<a href"))
+    assert(!contains(md, "](/"))
+    assert(!contains(md, "&lt;"))
+    assert(contains(md, siteOrigin()))
 }
 
 test "a module's markdown carries every export it documents" {
     let md = markdownOf("/docs/std/json")
     assert(startsWith(md, "# std/json\n"))
     for e in apiEntries("json") {
-        assert(has(md, "\n## \{e.name}\n"))
+        assert(contains(md, "\n## \{e.name}\n"))
     }
     // The import line comes from the module's own header prose, as a fence.
-    assert(has(md, "import {"))
-    assert(!has(md, "<span"))
-    assert(!has(md, "&quot;"))
+    assert(contains(md, "import {"))
+    assert(!contains(md, "<span"))
+    assert(!contains(md, "&quot;"))
 }
 
 /// The hand-off link: claude.ai/new with a prompt naming this page's markdown

@@ -23,7 +23,8 @@
 /// its own table could point somewhere the sidebar does not.
 import { apiGroups, apiHref } from "./docs"
 import { areaChapters, areaGroups, groupChapters, chapterHref } from "./guide"
-import { indexOf, substring } from "std/strings"
+import { split } from "std/strings"
+import { contains } from "std/strpred"
 // The glyphs beside group names and subnav rows — the same pinned collection
 // the `<Icon>` tag reads, through the same generator, so the sidebar cannot
 // carry a glyph the provider does not know.
@@ -318,39 +319,16 @@ export fn docSubnav(current: String) -> String {
     return out
 }
 
-/// How many times `needle` occurs in `s` — the test's own counter.
-fn timesIn(s: String, needle: String) -> Int64 {
-    let mut n = 0
-    let mut at = 0
-    while at + needle.byteLength <= s.byteLength {
-        if let Some(i) = indexOf(substring(s, at, s.byteLength), needle) {
-            n = n + 1
-            at = at + i + needle.byteLength
-        } else {
-            return n
-        }
-    }
-    return n
-}
-
 test "the subnav names every area and marks exactly one" {
     let html = docSubnav("reference")
-    assert(has(html, "/guide.html"))
-    assert(has(html, "/web.html"))
-    assert(has(html, "/tooling.html"))
-    assert(has(html, "/docs.html"))
-    assert(has(html, "/benchmarks.html"))
+    assert(contains(html, "/guide.html"))
+    assert(contains(html, "/web.html"))
+    assert(contains(html, "/tooling.html"))
+    assert(contains(html, "/docs.html"))
+    assert(contains(html, "/benchmarks.html"))
     // One marked row, and it is the one asked for.
-    assertEq(timesIn(html, "aria-current"), 1)
-    assert(has(html, "/docs.html\" aria-current"))
+    assertEq((split(html, "aria-current").length - 1), 1)
+    assert(contains(html, "/docs.html\" aria-current"))
     // An unknown key marks nothing rather than trapping.
-    assertEq(timesIn(docSubnav("nope"), "aria-current"), 0)
-}
-
-/// Whether `needle` occurs in `s`.
-fn has(s: String, needle: String) -> Bool {
-    if let Some(i) = indexOf(s, needle) {
-        return i >= 0
-    }
-    return false
+    assertEq((split(docSubnav("nope"), "aria-current").length - 1), 0)
 }

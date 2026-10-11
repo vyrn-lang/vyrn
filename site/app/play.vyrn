@@ -11,6 +11,7 @@
 /// Each source is copied into the page inside a hidden `<pre>`, escaped by the
 /// template. `play.js` reads it back with `textContent`, so nothing here is
 /// parsed by JavaScript and a `<` in a program is a `<`.
+import { contains } from "std/strpred"
 
 /// One example: the id the dropdown uses, the label a reader sees, the source it
 /// loads, and the standard input that source expects.
@@ -135,7 +136,7 @@ test "every example is a whole program with a unique id" {
         assert(e.id.byteLength > 0)
         assert(e.title.byteLength > 0)
         // A program the playground can RUN, not a fragment to read.
-        assert(hasText(e.src, "fn main() -> Int64"))
+        assert(contains(e.src, "fn main() -> Int64"))
         let mut seen = 0
         for other in playExamples() {
             if other.id == e.id {
@@ -144,29 +145,4 @@ test "every example is a whole program with a unique id" {
         }
         assertEq(seen, 1)
     }
-}
-
-/// Whether `needle` occurs in `haystack`. Only the tests above use it.
-fn hasText(haystack: String, needle: String) -> Bool {
-    let h = bytes(haystack)
-    let n = bytes(needle)
-    if n.length > h.length {
-        return false
-    }
-    let mut i = 0
-    while i + n.length <= h.length {
-        let mut k = 0
-        let mut same = true
-        while k < n.length {
-            if h[i + k] != n[k] {
-                same = false
-            }
-            k = k + 1
-        }
-        if same {
-            return true
-        }
-        i = i + 1
-    }
-    return false
 }

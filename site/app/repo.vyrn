@@ -6,7 +6,7 @@
 /// call, one set of names, and every page imports from here.
 import { repoFacts } from "./facts"
 import { exampleCount as genExamples, stdCount as genStd, stdModules as genModules, releaseTag as genTag, releaseDate as genDate } from repoFacts("../../examples", "../../std", "../release.txt")
-import { indexOf } from "std/strings"
+import { contains } from "std/strpred"
 import { ghBlob, ghRelease } from "./github"
 import { Release, releaseRows } from "./history"
 
@@ -100,10 +100,13 @@ fn newest() -> Release {
 /// the same rule `.github/workflows/release.yml` applies when it decides whether
 /// to pass `--prerelease` to `gh release create`.
 export fn releasePre() -> Bool {
-    return match indexOf(releaseTag(), "-") {
-        Some(at) => true,
-        None => false,
-    }
+    return isPrerelease(releaseTag())
+}
+
+/// Whether `tag` is a pre-release: it carries a suffix. `release.yml` applies
+/// the same rule when it decides whether to pass `--prerelease`.
+export fn isPrerelease(tag: String) -> Bool {
+    return contains(tag, "-")
 }
 
 /// Where this site is published, with the trailing slash.
@@ -216,10 +219,7 @@ test "the baked release is a tag, a date, and a rule about the suffix" {
         assertEq(releaseUrl(), "https://github.com/vyrn-lang/vyrn/releases/tag/" + releaseTag())
         assert(releaseUrl().byteLength > "https://github.com/vyrn-lang/vyrn/releases/tag/".byteLength)
         assert(releaseDate().byteLength == 10)
-        assertEq(releasePre(), match indexOf(releaseTag(), "-") {
-            Some(at) => true,
-            None => false,
-        })
+        assertEq(releasePre(), contains(releaseTag(), "-"))
     } else {
         // The other state, which the pages also render.
         assertEq(releaseTag(), "")

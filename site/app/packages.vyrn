@@ -43,8 +43,9 @@ import { ghSpec, ghRaw } from "./github"
 import { hrefOf } from "./nav"
 import { escapeHtml } from "./code"
 import { blurbFrom } from "./meta"
-import { joinWith, substring, indexOf, trim, replace, lines, split } from "std/strings"
-import { startsWith, endsWith } from "std/strpred"
+import { joinWith, substring, indexOf, lastIndexOf, trim, replace, lines, split } from "std/strings"
+import { startsWith, endsWith, contains } from "std/strpred"
+import { entriesOf } from "./gensrc"
 
 /// One package, as a card states it: what it is called, what kind it is, one
 /// line about it, and the two numbers a reader weighs a dependency by.
@@ -85,21 +86,13 @@ fn projectSlugs() -> Array<String> {
         return slugs.copy()
     }
     let mut out: Array<String> = []
-    for entry in listing(examplesDir()) {
+    for entry in entriesOf(examplesDir()) {
         if manifestText(entry).byteLength > 0 {
             out.push(entry.copy())
         }
     }
     slugs = out.copy()
     return out
-}
-
-/// The entries of `dir`, or nothing when it cannot be read.
-fn listing(dir: String) -> Array<String> {
-    return match listDir(dir) {
-        Ok(names) => names.copy(),
-        Err(why) => [],
-    }
 }
 
 /// EVERY FILE THIS MODULE READS, READ ONCE. The registry pages ask the same
@@ -301,26 +294,17 @@ fn moduleFiles(slug: String, sub: String, depth: Int64) -> Array<String> {
     let root = examplesDir() + "/" + slug
     let dir = if sub.byteLength == 0 { root.copy() } else { root + "/" + sub }
     let mut out: Array<String> = []
-    for entry in listing(dir) {
+    for entry in entriesOf(dir) {
         let shown = if sub.byteLength == 0 { entry.copy() } else { sub + "/" + entry }
         if endsWith(entry, ".vyrn") {
             out.push(shown.copy())
-        } else if depth > 0 && !hasDot(entry) {
+        } else if depth > 0 && !contains(entry, ".") {
             for deeper in moduleFiles(slug, shown, depth - 1) {
                 out.push(deeper.copy())
             }
         }
     }
     return out
-}
-
-/// Whether a listing entry carries a `.` — the test for "this is a file of some
-/// other kind", since every directory in these projects is named without one.
-fn hasDot(entry: String) -> Bool {
-    return match indexOf(entry, ".") {
-        Some(at) => true,
-        None => false,
-    }
 }
 
 /// The names one module exports.
@@ -423,17 +407,11 @@ fn aliasOf(path: String) -> String {
     if path.byteLength == 0 {
         return ""
     }
-    let mut stem = substring(path, 0, path.byteLength - 5)
-    while match indexOf(stem, "/") {
-        Some(at) => true,
-        None => false,
-    } {
-        stem = match indexOf(stem, "/") {
-            Some(at) => substring(stem, at + 1, stem.byteLength),
-            None => stem.copy(),
-        }
+    let stem = substring(path, 0, path.byteLength - 5)
+    return match lastIndexOf(stem, "/") {
+        Some(at) => substring(stem, at + 1, stem.byteLength),
+        None => stem,
     }
-    return stem
 }
 
 // ---------------------------------------------------------------------------
@@ -619,10 +597,7 @@ test "every install line is a specifier the compiler's grammar accepts" {
         assert(startsWith(importFrom(slug), "import { "))
         assert(endsWith(importFrom(slug), " } from \"" + o.alias + "\""))
         // The two files the command writes, both naming the same specifier.
-        assert(match indexOf(manifestShape(slug), "\"" + o.alias + "\": \"" + o.spec + "\"") {
-            Some(at) => true,
-            None => false,
-        })
+        assert(contains(manifestShape(slug), "\"" + o.alias + "\": \"" + o.spec + "\""))
         assert(startsWith(lockShape(slug), o.spec + "\thttps://raw.githubusercontent.com/vyrn-lang/vyrn/"))
     }
 }

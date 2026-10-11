@@ -11,7 +11,8 @@
 import { apiDocs } from "./apidoc"
 import { docModules, docSummary, docIntro, docNames, docKinds, docSigs, docProse, docLines, docTests, docCount } from apiDocs("../../std")
 import { startsWith } from "std/strpred"
-import { substring, trimStart } from "std/strings"
+import { substring, trimStart, split } from "std/strings"
+import { includes } from "std/arrays"
 import { hrefOf } from "./nav"
 import { blob } from "./repo"
 import { blurbFrom } from "./meta"
@@ -132,12 +133,7 @@ export fn apiGroups() -> Array<ApiGroup> {
 
 /// Whether `m` names a module the reference covers.
 export fn apiKnown(m: String) -> Bool {
-    for name in docModules() {
-        if name == m {
-            return true
-        }
-    }
-    return false
+    return includes(docModules(), m)
 }
 
 /// The exports of `m`, in declaration order.
@@ -216,21 +212,6 @@ export fn apiSourceLine(m: String, line: Int64) -> String {
     return apiSource(m) + "#L" + line.toString()
 }
 
-/// How many times the byte `b` occurs in `s`. Only the balance gate below uses
-/// it, and it lives here because this is where the real signatures are.
-fn countByte(s: String, b: UInt8) -> Int64 {
-    let raw = bytes(s)
-    let mut n = 0
-    let mut i = 0
-    while i < raw.length {
-        if raw[i] == b {
-            n = n + 1
-        }
-        i = i + 1
-    }
-    return n
-}
-
 test "every signature the reference renders is a whole declaration" {
     // The gate this test exists for: a record type's closing `}` sits in column
     // 1, which is also where the NEXT declaration starts. Reading the column
@@ -249,9 +230,9 @@ test "every signature the reference renders is a whole declaration" {
     for m in apiModules() {
         for e in apiEntries(m.name) {
             assert(e.sig.byteLength > 0)
-            assertEq(countByte(e.sig, '{'), countByte(e.sig, '}'))
-            assertEq(countByte(e.sig, '('), countByte(e.sig, ')'))
-            assertEq(countByte(e.sig, '['), countByte(e.sig, ']'))
+            assertEq(split(e.sig, "{").length, split(e.sig, "}").length)
+            assertEq(split(e.sig, "(").length, split(e.sig, ")").length)
+            assertEq(split(e.sig, "[").length, split(e.sig, "]").length)
             total = total + 1
         }
     }

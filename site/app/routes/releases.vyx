@@ -31,10 +31,9 @@
 // number a reader trusts, so a number nobody can recompute does not get one.
 import { Head } from "std/ui"
 import { pageHeadOf } from "../nav"
-import { hasRelease, releaseTag, releaseDate, releasePre, releaseUrl, releaseUrlOf, exampleCount, stdCount, backendCount } from "../repo"
+import { hasRelease, releaseTag, releaseDate, releasePre, releaseUrl, releaseUrlOf, isPrerelease, exampleCount, stdCount, backendCount } from "../repo"
 import { Release, releaseRows, days, testBlockCount, testFileCount } from "../history"
 import { feedName } from "../feed"
-import { indexOf } from "std/strings"
 
 /// The feed, as a site-root path the export can rewrite like any other link.
 fn feedHref() -> String {
@@ -107,13 +106,8 @@ fn releasesNewestFirst() -> Array<Release> {
     return out
 }
 
-/// Whether a tag is a pre-release: it carries a suffix. The same rule
-/// `release.yml` applies when it decides whether to pass `--prerelease`.
 fn kindOf(tag: String) -> String {
-    return match indexOf(tag, "-") {
-        Some(at) => "pre-release",
-        None => "stable",
-    }
+    return if isPrerelease(tag) { "pre-release" } else { "stable" }
 }
 </script>
 

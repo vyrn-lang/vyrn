@@ -22,23 +22,15 @@
 /// and the release file is a third argument for the same reason. Read the
 /// emitted module with `vyrn emit-gen`.
 import { substring, lines, trim, fromBytesOr } from "std/strings"
-import { startsWith } from "std/strpred"
+import { startsWith, endsWith } from "std/strpred"
 import { quotedList, entriesOf } from "./gensrc"
-
-/// `true` when `name` ends with `suffix`.
-fn endsWithStr(name: String, suffix: String) -> Bool {
-    if name.byteLength < suffix.byteLength {
-        return false
-    }
-    return substring(name, name.byteLength - suffix.byteLength, name.byteLength) == suffix
-}
 
 /// How many entries of `dir` end in `suffix`. A directory entry cannot, so this
 /// counts files and nothing else.
 fn countIn(dir: String, suffix: String) -> Int64 {
     let mut n = 0
     for entry in entriesOf(dir) {
-        if endsWithStr(entry, suffix) {
+        if endsWith(entry, suffix) {
             n = n + 1
         }
     }
@@ -49,7 +41,7 @@ fn countIn(dir: String, suffix: String) -> Int64 {
 fn stdNames(stdDir: String) -> Array<String> {
     let mut out: Array<String> = []
     for entry in entriesOf(stdDir) {
-        if endsWithStr(entry, ".vyrn") {
+        if endsWith(entry, ".vyrn") {
             out.push(substring(entry, 0, entry.byteLength - 5))
         }
     }

@@ -25,6 +25,7 @@
 /// in position but the lexer hands back as identifiers. Four of them are the
 /// capability words this whole site is about, so they are tinted deliberately.
 import { substring, split } from "std/strings"
+import { includes } from "std/arrays"
 import { escapeHtml } from "./code"
 import { quoted, quotedList, branch, lookup } from "./gensrc"
 
@@ -137,15 +138,6 @@ match seat(t) {
 /// argues for them cannot render them as ordinary names.
 fn contextual() -> Array<String> {
     return ["read", "modify", "consume", "gen", "test", "bench", "panic", "from", "as"]
-}
-
-fn isContextual(word: String) -> Bool {
-    for w in contextual() {
-        if w == word {
-            return true
-        }
-    }
-    return false
 }
 
 /// `text` under class `cls`, escaped, and never spanning a newline: a run that
@@ -280,7 +272,7 @@ fn classOf(kind: String, text: String) -> String {
         return "c"
     }
     if kind == "ident" {
-        if isContextual(text) {
+        if includes(contextual(), text) {
             return "k"
         }
         let b = bytes(text)
@@ -385,8 +377,8 @@ test "a string's extent is its quotes, not its decoded text" {
 }
 
 test "a capability word is a keyword here and an ordinary name is not" {
-    assert(isContextual("consume"))
-    assert(!isContextual("consumer"))
+    assert(includes(contextual(), "consume"))
+    assert(!includes(contextual(), "consumer"))
     assertEq(classOf("ident", "read"), "k")
     assertEq(classOf("ident", "Ticket"), "t")
     assertEq(classOf("ident", "seats"), "")

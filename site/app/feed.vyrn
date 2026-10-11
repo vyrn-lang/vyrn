@@ -23,10 +23,11 @@
 /// a field aggregators read. The newest item's own date is the answer to the same
 /// question.
 import { Release, releaseRows, fixtureReleaseRows } from "./history"
-import { siteOrigin, releaseUrlOf } from "./repo"
+import { siteOrigin, releaseUrlOf, isPrerelease } from "./repo"
 import { hrefOf } from "./nav"
 import { escapeHtml } from "./code"
-import { substring, indexOf, split } from "std/strings"
+import { substring, split } from "std/strings"
+import { startsWith, contains } from "std/strpred"
 
 /// The file the feed publishes as, beside the pages.
 export fn feedName() -> String {
@@ -88,7 +89,7 @@ fn channelWords(count: Int64) -> String {
 /// it is, on every push to the main line.
 fn item(tag: String, date: String) -> String {
     let url = releaseUrlOf(tag)
-    let kind = if isPre(tag) { "A pre-release" } else { "A stable release" }
+    let kind = if isPrerelease(tag) { "A pre-release" } else { "A stable release" }
     let words = "\{kind}, tagged \{date}. The release page lists one archive per platform and the SHA256SUMS that both installers check them against."
     let mut out = "<item>\n"
     out = out + "<title>\{escapeHtml(tag)}</title>\n"
@@ -97,13 +98,6 @@ fn item(tag: String, date: String) -> String {
     out = out + "<pubDate>\{rfc822(date)}</pubDate>\n"
     out = out + "<description>\{escapeHtml(words)}</description>\n"
     return out + "</item>\n"
-}
-
-/// Whether a tag is a pre-release: it carries a suffix. The same rule
-/// `.github/workflows/release.yml` applies when it decides whether to pass
-/// `--prerelease`, and `app/repo.vyrn` applies to the baked tag.
-fn isPre(tag: String) -> Bool {
-    return has(tag, "-")
 }
 
 /// `2026-08-19` as `Wed, 19 Aug 2026 00:00:00 GMT`, which is the date format RSS
@@ -190,14 +184,14 @@ test "the feed is one channel with one item per release" {
     // No release: a channel with no items, which says so.
     let empty: Array<Release> = []
     assertEq(feedFault(empty), "")
-    assert(has(feedOf(empty), "None has been published"))
+    assert(contains(feedOf(empty), "None has been published"))
     // The fixture's release, which is a pre-release. It is named as one rather
     // than hidden, the rule the releases page follows.
     let rows = fixtureReleaseRows()
     assert(rows.length > 0)
     assertEq(feedFault(rows), "")
-    assert(has(feedOf(rows), "A pre-release, tagged"))
-    assert(!has(feedOf(rows), "None has been published"))
+    assert(contains(feedOf(rows), "A pre-release, tagged"))
+    assert(!contains(feedOf(rows), "None has been published"))
 }
 
 test "the feed carries no unescaped markup and no relative link" {
@@ -211,28 +205,28 @@ test "the feed carries no unescaped markup and no relative link" {
 /// exactly once, newest first. A test states it for each list of releases.
 fn feedFault(rows: Array<Release>) -> String {
     let xml = feedOf(rows)
-    if firstIndex(xml, "<?xml version=\"1.0\" encoding=\"utf-8\"?>") != 0 {
+    if !startsWith(xml, "<?xml version=\"1.0\" encoding=\"utf-8\"?>") {
         return "no XML declaration first"
     }
-    if countIn(xml, "<rss version=\"2.0\"") != 1 || countIn(xml, "<channel>") != 1 {
+    if timesIn(xml, "<rss version=\"2.0\"") != 1 || timesIn(xml, "<channel>") != 1 {
         return "not one RSS 2.0 channel"
     }
-    if !has(xml, "<atom:link href=\"\{feedUrl()}\" rel=\"self\"") {
+    if !contains(xml, "<atom:link href=\"\{feedUrl()}\" rel=\"self\"") {
         return "no self link"
     }
     for r in rows {
-        if countIn(xml, "<title>\{r.tag}</title>") != 1 {
+        if timesIn(xml, "<title>\{r.tag}</title>") != 1 {
             return "\{r.tag} is not one title"
         }
-        if countIn(xml, "https://github.com/vyrn-lang/vyrn/releases/tag/\{r.tag}") != 2 {
+        if timesIn(xml, "https://github.com/vyrn-lang/vyrn/releases/tag/\{r.tag}") != 2 {
             return "\{r.tag} is not one link and one guid"
         }
     }
-    if countIn(xml, "<item>") != rows.length || countIn(xml, "</item>") != rows.length {
+    if timesIn(xml, "<item>") != rows.length || timesIn(xml, "</item>") != rows.length {
         return "not one item per release"
     }
     // Newest first: the last release the history recorded is the first item.
-    if rows.length > 0 && !has(xml, "<item>\n<title>\{rows[rows.length - 1].tag}</title>") {
+    if rows.length > 0 && !contains(xml, "<item>\n<title>\{rows[rows.length - 1].tag}</title>") {
         return "the newest release is not the first item"
     }
     return ""
@@ -243,54 +237,30 @@ fn feedFault(rows: Array<Release>) -> String {
 fn linkFault(xml: String, rows: Array<Release>) -> String {
     // Every URL, rather than the absence of a leading slash: `"/>` closes the
     // `atom:link` element and is not a URL.
-    if countIn(xml, "<link>\{siteOrigin()}") != 1 || countIn(xml, "href=\"\{siteOrigin()}") != 1 {
+    if timesIn(xml, "<link>\{siteOrigin()}") != 1 || timesIn(xml, "href=\"\{siteOrigin()}") != 1 {
         return "the channel does not link the site's origin once"
     }
-    if countIn(xml, "<link>https://") != 1 + rows.length {
+    if timesIn(xml, "<link>https://") != 1 + rows.length {
         return "a link is not absolute"
     }
-    if countIn(xml, "<link>/") != 0 || countIn(xml, "href=\"/") != 0 {
+    if timesIn(xml, "<link>/") != 0 || timesIn(xml, "href=\"/") != 0 {
         return "a link is relative"
     }
-    if countIn(xml, "<guid isPermaLink=\"true\">https://") != rows.length {
+    if timesIn(xml, "<guid isPermaLink=\"true\">https://") != rows.length {
         return "a guid is not an absolute permalink"
     }
     for r in rows {
-        if has(r.tag, "<") {
+        if contains(r.tag, "<") {
             return "\{r.tag} holds markup"
         }
     }
-    if !has(xml, "<description>Every published Vyrn release") {
+    if !contains(xml, "<description>Every published Vyrn release") {
         return "the channel has no description"
     }
     return ""
 }
 
-/// How many times `needle` is in `hay`.
-fn countIn(hay: String, needle: String) -> Int64 {
-    let mut n = 0
-    let mut rest = hay.copy()
-    while true {
-        let at = firstIndex(rest, needle)
-        if at < 0 {
-            return n
-        }
-        n = n + 1
-        rest = substring(rest, at + needle.byteLength, rest.byteLength)
-    }
-    return n
-}
-
-/// Where `needle` first occurs in `hay`, or -1. A `match` arm is an expression,
-/// so a loop that has to branch on an `Option` reads better with the index.
-fn firstIndex(hay: String, needle: String) -> Int64 {
-    return match indexOf(hay, needle) {
-        Some(at) => at,
-        None => 0 - 1,
-    }
-}
-
-/// Whether `needle` occurs in `hay`.
-fn has(hay: String, needle: String) -> Bool {
-    return firstIndex(hay, needle) >= 0
+/// How many times `needle` occurs in `hay`, without overlap.
+fn timesIn(hay: String, needle: String) -> Int64 {
+    return split(hay, needle).length - 1
 }

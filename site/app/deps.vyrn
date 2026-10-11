@@ -19,21 +19,12 @@
 /// scan gets that wrong and invents a `std/manifest` that does not exist.
 import { substring } from "std/strings"
 import { endsWith } from "std/strpred"
+import { includes } from "std/arrays"
 import { importsOf } from "./guidecode"
 import { quotedList, branch, lookup, entriesOf } from "./gensrc"
 
 /// One file and the `std/` modules it imports.
 type Uses = { path: String, uses: Array<String> }
-
-/// Whether `name` is one of `all`.
-fn known(name: String, all: Array<String>) -> Bool {
-    for m in all {
-        if m == name {
-            return true
-        }
-    }
-    return false
-}
 
 /// The `std/` module names, from the directory listing.
 fn moduleNames(stdDir: String) -> Array<String> {
@@ -84,7 +75,7 @@ gen fn walk(root: String, sub: String, depth: Int64) -> Array<Uses> {
 /// recurring forever. `std/` has none today; a graph that grows one should not
 /// take the build down with it.
 gen fn depthOf(m: String, all: Array<String>, edges: Array<Uses>, walking: Array<String>) -> Int64 {
-    if known(m, walking) {
+    if includes(walking, m) {
         return 0
     }
     let mut here = walking.copy()
@@ -93,7 +84,7 @@ gen fn depthOf(m: String, all: Array<String>, edges: Array<Uses>, walking: Array
     for e in edges {
         if e.path == m {
             for u in e.uses {
-                if known(u, all) {
+                if includes(all, u) {
                     let d = depthOf(u, all, edges, here)
                     if d > deepest {
                         deepest = d
@@ -125,7 +116,7 @@ export gen fn moduleDeps(stdDir: String, examplesDir: String) -> String {
                 for u in e.uses {
                     // A target that is not a module in this directory is dropped:
                     // the graph draws what `std/` holds, not what a name suggests.
-                    if known(u, all) && !known(u, mine) {
+                    if includes(all, u) && !includes(mine, u) {
                         mine.push(u.copy())
                     }
                 }
@@ -135,7 +126,7 @@ export gen fn moduleDeps(stdDir: String, examplesDir: String) -> String {
 
         let mut back: Array<String> = []
         for e in edges {
-            if e.path != m && known(m, e.uses) {
+            if e.path != m && includes(e.uses, m) {
                 back.push(e.path.copy())
             }
         }
@@ -143,7 +134,7 @@ export gen fn moduleDeps(stdDir: String, examplesDir: String) -> String {
 
         let mut users: Array<String> = []
         for s in samples {
-            if known(m, s.uses) {
+            if includes(s.uses, m) {
                 users.push(s.path.copy())
             }
         }
@@ -162,10 +153,4 @@ export gen fn moduleDeps(stdDir: String, examplesDir: String) -> String {
     out = out + "/// The example programs that import a module, by path under `examples/`.\n"
     out = out + lookup("depExamples", "m", "Array<String>", examples, "[]")
     return out
-}
-
-test "a name is looked up in a list, and a missing one is not there" {
-    assert(known("json", ["json", "html"]))
-    assert(!known("nope", ["json", "html"]))
-    assert(!known("json", []))
 }
