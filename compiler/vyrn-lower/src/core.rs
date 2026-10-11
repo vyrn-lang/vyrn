@@ -7832,7 +7832,7 @@ pub fn augment(program: &Program, w: &mut World, judging: bool) {
     // A body that did not build gives the judgment nothing, served or not.
     let late: Vec<(&str, &[Walked])> = states.iter().filter_map(JobState::answered).collect();
     let places = build_places(program, &lowered, own, &mut w.fns);
-    let (mut state, read, answers, reached, allocating) = crate::effects::judge_built(
+    let ((mut state, read, answers, reached, allocating), uses) = crate::effects::judge_built(
         program,
         &lowered,
         own,
@@ -7891,6 +7891,7 @@ pub fn augment(program: &Program, w: &mut World, judging: bool) {
     drop((tops, late));
     w.reached = reached;
     w.allocating = allocating;
+    w.state_uses = uses;
     for (s, r) in (states.iter_mut().filter(|s| s.built().is_some())).zip(read) {
         s.kept = r;
     }

@@ -55,6 +55,9 @@ pub struct World {
     /// placer judged them, a body the judgment memo served included, with their file: what
     /// [`World::allocating_file`] answers.
     pub(crate) allocating: HashMap<FnId, Arc<str>>,
+    /// What a call into each frame the placer built may do to module state, as
+    /// the effect judgment found it: what [`World::state_use`] answers.
+    pub(crate) state_uses: HashMap<FnId, crate::effects::StateUse>,
     /// What every entry and every return of each directly called body
     /// states, made once from `bodies` when an emitter first decides one
     /// ([`World::summaries`]).
@@ -452,6 +455,12 @@ impl World {
             let types = self.ownership.proto.types();
             crate::elide::summaries(bodies, types, &closed, records, instances)
         })
+    }
+
+    /// What a call into the frame `f` may do to module state. `None` for a frame
+    /// the placer did not build, which no judgment answers for.
+    pub fn state_use(&self, f: FnId) -> Option<&crate::effects::StateUse> {
+        self.state_uses.get(&f)
     }
 
     /// The file `f` is declared in, when that is not the root file and a call to `f` may
