@@ -19,7 +19,10 @@
 //! check is a row like any other.
 //!
 //! The walk knows nothing about a global, an element, or a field of a field:
-//! each read of one is a fresh value with its type's range. An exact sum is an
+//! each read of one is a fresh value with its type's range. A check on a
+//! global's array field is the exception: it reads the length of a borrow of
+//! the global while the borrow is [`State::fresh`], up to a row the effect
+//! judgment says may write the global ([`Walk::stale`]). An exact sum is an
 //! `Int64` sum that provably stays in `-2^62..=2^62`. A row is proved only with
 //! a certificate that [`crate::facts::Cert::verify`] accepts, or a divisor the
 //! state holds unequal to zero.
@@ -37,6 +40,7 @@ use vyrn_frontend::effects::Effect;
 use vyrn_frontend::prelude::{self, Elements, Length};
 use vyrn_frontend::prim::Cmp;
 
+use crate::effects::StateUse;
 use crate::facts::{Cert, Fact, Lin, State, Term};
 use vyrn_frontend::core::check::{Atom, Check, Guard, Operand, Site, Verdict, Why};
 use vyrn_frontend::core::{
@@ -129,6 +133,9 @@ pub struct Summaries {
     /// once ([`Summaries::decided`]).
     decided: HashMap<FnId, Mutex<Option<Body>>>,
     facts: RecordFacts,
+    /// What a call into each frame may do to module state, by the effect
+    /// judgment ([`Walk::stale`]).
+    state: Arc<HashMap<FnId, StateUse>>,
 }
 
 /// What [`invariants`] reads besides the bodies, made once per program.
@@ -314,6 +321,7 @@ struct View<'a> {
     instances: &'a Instances,
     values: &'a [Summary],
     facts: &'a RecordFacts,
+    state: &'a HashMap<FnId, StateUse>,
 }
 
 impl View<'_> {
@@ -369,6 +377,7 @@ impl<'a> From<&'a Summaries> for View<'a> {
             instances: &s.instances,
             values: &s.values,
             facts: &s.facts,
+            state: &s.state,
         }
     }
 }
@@ -403,6 +412,7 @@ pub fn summaries<'a>(
     closed: &HashSet<FnId>,
     records: Option<&Records>,
     instances: Instances,
+    state: Arc<HashMap<FnId, StateUse>>,
 ) -> Summaries {
     let mut bodies: Vec<(FnId, &Body)> = bodies.collect();
     bodies.sort_by_key(|(f, _)| f.index());
@@ -464,6 +474,7 @@ pub fn summaries<'a>(
                         only,
                         start,
                         &RecordFacts::default(),
+                        &state,
                     )
                 }
             };
@@ -472,6 +483,7 @@ pub fn summaries<'a>(
                 instances: &instances,
                 values: &lengths,
                 facts: &RecordFacts::default(),
+                state: &state,
             };
             invariants(&bodies, &scans, decls, r, view)
         }
@@ -482,19 +494,23 @@ pub fn summaries<'a>(
         instances: &instances,
         values: &values,
         facts: &facts,
+        state: &state,
     };
     let start: BTreeSet<usize> =
         in_parallel(&bodies, weigh, || (), |(), (_, b)| seeds(b, decls, view))
             .into_iter()
             .flatten()
             .collect();
-    let mut values = solve(&bodies, decls, &at, &instances, values, start, &facts);
+    let mut values = solve(
+        &bodies, decls, &at, &instances, values, start, &facts, &state,
+    );
     let (closed, callees) = entered(&bodies, closed);
     let view = View {
         at: &at,
         instances: &instances,
         values: &values,
         facts: &facts,
+        state: &state,
     };
     let pres = in_parallel(
         &bodies,
@@ -526,6 +542,7 @@ pub fn summaries<'a>(
             instances: &instances,
             values: &values,
             facts: &facts,
+            state: &state,
         };
         callers.retain(|b| rows(&b.stmts).any(|(s, _)| view.pre(s).is_some()));
         let batch: Vec<&Body> = callers.drain(..(callers.len() * 2).div_ceil(3)).collect();
@@ -552,6 +569,7 @@ pub fn summaries<'a>(
         values,
         decided,
         facts,
+        state,
     }
 }
 
@@ -573,6 +591,7 @@ fn solve(
     values: Vec<Summary>,
     start: BTreeSet<usize>,
     facts: &RecordFacts,
+    state: &HashMap<FnId, StateUse>,
 ) -> Vec<Summary> {
     let mut seen = vec![false; bodies.len()];
     start.iter().for_each(|&i| seen[i] = true);
@@ -587,6 +606,7 @@ fn solve(
             instances,
             values,
             facts,
+            state,
         };
         returns(bodies[i].1, decls, view, &values[i])
     };
@@ -1822,6 +1842,9 @@ struct Walk<'a> {
     /// field, or rebuilt from one, that record name and field
     /// ([`Walk::element_write`]).
     pushed: BTreeMap<Name, (Name, String)>,
+    /// Per global, the names a `let` binds to its whole value and no other
+    /// row writes ([`global_borrows`]).
+    borrows: BTreeMap<String, Vec<Name>>,
 }
 
 /// What the walk keeps about one name.
@@ -2014,6 +2037,7 @@ impl<'a> Walk<'a> {
             broken: BTreeSet::new(),
             assumed: BTreeSet::new(),
             pushed: BTreeMap::new(),
+            borrows: global_borrows(stmts),
         }
     }
 
@@ -2619,7 +2643,9 @@ impl<'a> Walk<'a> {
                 self.dead(s);
                 continue;
             }
+            let stale = self.stale(s);
             st = self.stmt(st, s);
+            self.track(&mut st, s, stale);
             self.unpush(s);
         }
         st
@@ -2851,7 +2877,7 @@ impl<'a> Walk<'a> {
     /// What must be `>= 0` for the check to pass, as far as linear facts can
     /// say; `None` when they cannot say it all.
     fn goals(&self, st: &State, g: &Guard) -> Option<Vec<Lin>> {
-        let len = |p: &Place| self.length(p).map(Lin::of);
+        let len = |p: &Place| (self.length(p).or_else(|| self.borrowed(st, p))).map(Lin::of);
         Some(match g {
             Guard::Index(p, i) => {
                 let i = self.lin(i)?;
@@ -2913,6 +2939,73 @@ impl<'a> Walk<'a> {
                 out
             }
         })
+    }
+
+    /// The length of `p`, a field `g.f` of a global, as the same field of a
+    /// borrow of `g` the state holds [`State::fresh`]: equal to `g`, so its
+    /// facts are `g`'s.
+    fn borrowed(&self, st: &State, p: &Place) -> Option<Term> {
+        let Place::Field(g, f) = p else { return None };
+        let Place::Global(g) = &**g else { return None };
+        let b = self.borrows.get(g)?.iter().find(|b| st.fresh.contains(b))?;
+        self.col_term(*b, f)
+    }
+
+    /// Marks after row `s` the borrows `stale` ([`Walk::stale`]) no longer
+    /// fresh, and the borrow `s` binds fresh. A stale borrow keeps its own
+    /// facts: by the kernel's exclusivity judgment a row that writes its
+    /// global ends it.
+    fn track(&self, st: &mut State, s: &St, stale: Vec<Name>) {
+        for b in &stale {
+            st.fresh.remove(b);
+        }
+        if let St::Let(n, Rhs::Read(Place::Global(g))) = s {
+            if !st.dead && self.borrows.get(g).is_some_and(|bs| bs.contains(n)) {
+                st.fresh.insert(*n);
+            }
+        }
+    }
+
+    /// The borrows ([`Walk::borrows`]) row `s` may make unequal to their
+    /// global: those of each global it stores into, takes from or hands a
+    /// call to write, and of each global a direct call may store into by the
+    /// effect judgment ([`crate::effects::StateUse`]). A call the judgment
+    /// has no frame for or whose frame may call the host, any call but a
+    /// direct one or a constructor, and a release may write any global.
+    fn stale(&self, s: &St) -> Vec<Name> {
+        if self.borrows.is_empty() {
+            return Vec::new();
+        }
+        let every = || self.borrows.values().flatten().copied().collect();
+        let mut gs: Vec<&str> = Vec::new();
+        match s {
+            St::Store { place, .. } | St::Let(_, Rhs::Take(place)) => gs.extend(global_root(place)),
+            St::Let(_, rhs @ Rhs::Call { args, kind, .. })
+            | St::Do {
+                rhs: rhs @ Rhs::Call { args, kind, .. },
+                ..
+            } => {
+                let written = args.iter().filter(|(_, c)| *c != Capability::Read);
+                gs.extend(written.filter_map(|(a, _)| match a {
+                    Arg::Place(p) => global_root(p),
+                    Arg::Val(_) => None,
+                }));
+                let frame = self.sums.call(rhs).and_then(|f| self.sums.state.get(&f));
+                match (kind, frame) {
+                    (Callee::Ctor, _) => {}
+                    (Callee::Fn(_), Some(u)) if !u.host => {
+                        gs.extend(u.writes.iter().map(String::as_str))
+                    }
+                    _ => return every(),
+                }
+            }
+            St::Drop(..) | St::Row { .. } => return every(),
+            _ => {}
+        }
+        (gs.iter().filter_map(|g| self.borrows.get(*g)))
+            .flatten()
+            .copied()
+            .collect()
     }
 
     fn bind(&mut self, st: &mut State, n: Name, rhs: &Rhs) {
@@ -3616,6 +3709,11 @@ impl<'a> Walk<'a> {
         for n in &written {
             head.kill(*n);
         }
+        if !self.borrows.is_empty() {
+            for (s, _) in rows(body) {
+                self.stale(s).iter().for_each(|b| _ = head.fresh.remove(b));
+            }
+        }
         for l in self.halving(entry, body, &written) {
             head.assume(&l);
         }
@@ -4084,6 +4182,30 @@ fn root(a: &Arg) -> Option<Name> {
         Arg::Place(p) => place_root(p),
         Arg::Val(Val::Lit(_)) => None,
     }
+}
+
+/// The global `p` is a part of.
+fn global_root(p: &Place) -> Option<&str> {
+    match p {
+        Place::Global(g) => Some(g),
+        Place::Field(b, _) | Place::Elem(b, _) | Place::Key(b, _) => global_root(b),
+        Place::Name(_) => None,
+    }
+}
+
+/// Per global, the names a `let` of `ss` binds to the global's whole value
+/// and no other row writes: each a borrow, equal to the global where it is
+/// bound.
+fn global_borrows(ss: &[St]) -> BTreeMap<String, Vec<Name>> {
+    let mut out: BTreeMap<String, Vec<Name>> = BTreeMap::new();
+    for (s, _) in rows(ss) {
+        if let St::Let(n, Rhs::Read(Place::Global(g))) = s {
+            if writes_of(ss, *n) == 1 {
+                out.entry(g.clone()).or_default().push(*n);
+            }
+        }
+    }
+    out
 }
 
 fn place_root(p: &Place) -> Option<Name> {

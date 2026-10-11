@@ -992,6 +992,85 @@ ran: {err}"
     );
 }
 
+/// A check on a global's array field reads the facts of a borrow of the
+/// global until a row may write it. A call that writes the global, a store
+/// to it, a call through a function value, a generic instance that writes it,
+/// and a loop that writes it after the read each keep the check, which traps.
+#[test]
+fn a_borrow_of_a_global_proves_its_index_until_a_write() {
+    let lib = "type Box = { xs: Array<Int64> }
+let mut g: Box = Box { xs: [1, 2, 3] }
+fn inRange(b: Box, i: Int64) -> Bool {
+    return i >= 0 && i < b.xs.length
+}
+fn shrink(b: modify Box) {
+    b.xs.clear()
+}
+fn clearG() {
+    shrink(g)
+}
+fn clearT<T>(x: T) {
+    shrink(g)
+}
+";
+    let w = |param: &str, body: &str| {
+        format!(
+            "{lib}fn w(i: Int64{param}) -> Int64 {{
+    let mut s = 0
+    if inRange(g, i) {{
+{body}
+    }}
+    return s
+}}
+"
+        )
+    };
+    let read = |between: &str| {
+        format!(
+            "        {between}
+        s = g.xs[i]"
+        )
+    };
+    let proof = w("", "        s = g.xs[i]");
+    assert_eq!(verdicts(&proof, "w"), ["proved array-index"]);
+    let (err, _) = oracle(&proof, "    print(w(2).toString())", "w");
+    assert_eq!(err, "");
+    let looped = "        let mut k = 0
+        while k < 2 {
+            s = s + g.xs[i]
+            clearG()
+            k = k + 1
+        }";
+    let witnesses = [
+        (w("", &read("clearG()")), "w(2)"),
+        (w("", &read("g = Box { xs: [] }")), "w(2)"),
+        (w(", f: fn()", &read("f()")), "w(2, clearG)"),
+        (w("", &read("clearT(i)")), "w(2)"),
+        (w("", looped), "w(2)"),
+    ];
+    let mut failures = Vec::new();
+    for (src, call) in &witnesses {
+        let rows = verdicts(src, "w");
+        if rows != ["check array-index"] {
+            failures.push(format!("{src}rows: {rows:?}"));
+        }
+        let (err, _) = oracle(src, &format!("    print({call}.toString())"), "w");
+        if !err.contains("array index 2 out of bounds")
+            || err.contains(vyrn_frontend::trap::PROVED_CHECK_FAILED)
+        {
+            failures.push(format!("{src}ran: {err}"));
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "{}",
+        failures.join(
+            "
+"
+        )
+    );
+}
+
 #[test]
 fn a_join_of_constants_keeps_the_values_between_out() {
     let src = "fn w(x: Int64) -> Int64 {
