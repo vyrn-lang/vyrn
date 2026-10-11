@@ -382,14 +382,14 @@ fn a_call_that_hands_back_its_argument_runs_in_the_arguments_storage() {
     assert_eq!(copies_of(&body, 40), 0, "the loop copied `c`:\n{body}");
 }
 
-/// `pick` returns a fresh record on one path, so it keeps the out-pointer: it copies
-/// its argument in at entry and writes it out at `return c`.
+/// `pick` returns a fresh record on one path, so it keeps the out-pointer: it reads
+/// its argument in place and writes it out at `return c`.
 #[test]
 fn a_second_result_keeps_the_out_pointer() {
     let body = wat_func_containing(HANDED, "2345678");
     assert_eq!(
         copies_of(&body, 40),
-        2,
+        1,
         "`pick` changed convention:\n{body}"
     );
 }
@@ -838,10 +838,10 @@ fn a_consumed_argument_read_in_place_prints_what_a_copy_prints() {
     );
 }
 
-/// `eat` returns a scalar, so it reads its 40-byte record at the caller's address; `grow` returns
-/// a record through an out-pointer and copies its argument in.
+/// `eat` returns a scalar and `grow` a record through an out-pointer; each reads its 40-byte
+/// record at the caller's address.
 #[test]
-fn a_consume_parameter_is_copied_only_by_a_callee_with_an_out_pointer() {
+fn a_consume_parameter_is_read_in_place_with_or_without_an_out_pointer() {
     let src = r#"type R = { a: Int64, b: Int64, c: Int64, d: Int64, e: Int64 }
 
 fn eat(p: consume R) -> Int64 {
@@ -863,7 +863,95 @@ fn main() -> Int64 {
     let grow = wat_func_containing(src, "7654321");
     assert_eq!(
         (copies_of(&eat, 40), copies_of(&grow, 40)),
-        (0, 1),
+        (0, 0),
         "{eat}\n{grow}"
+    );
+}
+
+/// `consume` arguments of callees with an aggregate result: a name renewed in place
+/// (`x = renew(x)`), a callee that hands its argument back on every path or on one, a field and
+/// an element renewed, two `if` joins, and a generic instance at a record that owns heap and at
+/// one that does not.
+const OUTPTR: &str = r#"type Q = { s: String, n: Int64 }
+type O = { q: Q, k: Int64 }
+type P = { a: Int64, b: Int64, c: Int64 }
+
+fn renew(p: consume Q) -> Q {
+    return Q { s: "n" + "\{p.n}" + p.s, n: p.n + 1 }
+}
+
+fn same(p: consume Q) -> Q {
+    return p
+}
+
+fn maybe(p: consume Q, fresh: Bool) -> Q {
+    if fresh {
+        return Q { s: "m" + p.s, n: p.n * 2 }
+    }
+    return p
+}
+
+fn swap(p: consume P) -> P {
+    return P { a: p.b, b: p.a, c: p.c + 1 }
+}
+
+fn pair<T>(a: consume T, b: consume T) -> Array<T> {
+    return [b, a]
+}
+
+fn main() -> Int64 {
+    let mut x = Q { s: "a" + "b", n: 1 }
+    let mut i = 0
+    while i < 3 {
+        x = renew(x)
+        x = same(x)
+        x = maybe(x, i % 2 == 0)
+        i = i + 1
+    }
+    print("\{x.s} \{x.n}")
+    let mut o = O { q: Q { s: "f" + "!", n: 5 }, k: 7 }
+    o.q = renew(consume o.q)
+    o.q = maybe(consume o.q, true)
+    print("\{o.q.s} \{o.q.n} \{o.k}")
+    let mut ps: Array<P> = [P { a: 1, b: 2, c: 3 }, P { a: 4, b: 5, c: 6 }]
+    ps[1] = swap(ps[1])
+    ps[0] = swap(ps[0])
+    print("\{ps[0].a} \{ps[0].b} \{ps[0].c} \{ps[1].a} \{ps[1].b} \{ps[1].c}")
+    let y = Q { s: "y" + "y", n: 3 }
+    let z = Q { s: "z" + "z", n: 4 }
+    let mut j = if x.n > 100 { renew(y) } else { renew(z) }
+    j = if j.n > 2 { renew(j) } else { same(j) }
+    print("\{j.s} \{j.n}")
+    let qs = pair(Q { s: "p" + "1", n: 1 }, Q { s: "p" + "2", n: 2 })
+    let rs = pair(P { a: 7, b: 8, c: 9 }, swap(P { a: 1, b: 2, c: 3 }))
+    print("\{qs[0].s} \{qs[1].s} \{rs[0].a} \{rs[1].a}")
+    return 0
+}
+"#;
+
+/// A call's out-pointer lies apart from every `consume` argument the callee reads in place
+/// ([`Fn_::dest_apart`]): each prints what a copy prints, under the free audit.
+#[test]
+fn an_out_pointer_apart_from_a_consumed_argument_prints_what_a_copy_prints() {
+    let dir = scratch("outptr");
+    let file = dir.join("outptr.vyrn");
+    std::fs::write(&file, OUTPTR).unwrap();
+    let out = vyrn()
+        .arg("run")
+        .arg(&file)
+        .env("VYRN_LEAK_CHECK", "1")
+        .output()
+        .expect("vyrn run");
+    assert_eq!(
+        (
+            out.status.code(),
+            String::from_utf8_lossy(&out.stdout).replace("\r\n", "\n")
+        ),
+        (
+            Some(0),
+            "mn5n4mn1ab 12\nmn5f! 12 7\n2 1 4 5 4 7\nn5n4zz 6\np2 p1 2 7\n".to_string()
+        ),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
     );
 }
