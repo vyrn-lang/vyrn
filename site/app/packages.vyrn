@@ -33,8 +33,9 @@
 /// the compiler's lexer, because `lex` is only available during generation and
 /// these files are read at render time; the rule it applies is written out in
 /// `exportNames` and pinned by a test.
-import { Json, JsonField, copyJson, copyJsonFields } from "std/json"
+import { JsonField } from "std/json"
 import { parseJson } from "std/jsonread"
+import { fieldsOf, fieldAt, tagOf } from "std/jsondec"
 import { apiHref, apiKnown, apiModules } from "./docs"
 import { examplesUsing } from "./stdgraph"
 import { blob, remoteSpec, rawFile } from "./repo"
@@ -502,17 +503,17 @@ export fn artifactsOf(slug: String) -> Array<Artifact> {
     let mut out: Array<Artifact> = []
     for f in top {
         if f.key == "main" || f.key == "server" {
-            out = withArtifact(out, Artifact { name: f.key.copy(), entry: stringOf(f.value), target: "native" })
+            out = withArtifact(out, Artifact { name: f.key.copy(), entry: tagOf(f.value), target: "native" })
         }
         if f.key == "client" {
-            out = withArtifact(out, Artifact { name: f.key.copy(), entry: stringOf(f.value), target: "browser" })
+            out = withArtifact(out, Artifact { name: f.key.copy(), entry: tagOf(f.value), target: "browser" })
         }
     }
     for f in top {
         if f.key == "artifacts" {
-            for a in fieldsOf(copyJson(f.value)) {
-                let inner = fieldsOf(copyJson(a.value))
-                out = withArtifact(out, Artifact { name: a.key.copy(), entry: member(inner, "entry"), target: member(inner, "target") })
+            for a in fieldsOf(f.value) {
+                let inner = fieldsOf(a.value)
+                out = withArtifact(out, Artifact { name: a.key.copy(), entry: tagOf(fieldAt(inner, "entry")), target: tagOf(fieldAt(inner, "target")) })
             }
         }
     }
@@ -537,41 +538,6 @@ fn manifestFields(slug: String) -> Array<JsonField> {
         Ok(j) => fieldsOf(j),
         Err(why) => [],
     }
-}
-
-/// The fields of a JSON object, or `[]` for any other value. Copied, because a
-/// payload read out of a borrowed value is a read, not a move.
-fn fieldsOf(j: Json) -> Array<JsonField> {
-    return match j {
-        JObj(fs) => copyJsonFields(fs),
-        JArr(xs) => [],
-        JStr(s) => [],
-        JNum(s) => [],
-        JBool(b) => [],
-        JNull => [],
-    }
-}
-
-/// The text of a JSON string, or `""` for any other value.
-fn stringOf(j: Json) -> String {
-    return match j {
-        JStr(s) => s.copy(),
-        JObj(fs) => "",
-        JArr(xs) => "",
-        JNum(s) => "",
-        JBool(b) => "",
-        JNull => "",
-    }
-}
-
-/// The string value of one member of an object's fields, or `""`.
-fn member(fields: Array<JsonField>, key: String) -> String {
-    for f in fields {
-        if f.key == key {
-            return stringOf(copyJson(f.value))
-        }
-    }
-    return ""
 }
 
 test "the registry lists projects, and no standard library module is one" {

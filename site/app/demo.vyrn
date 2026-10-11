@@ -16,8 +16,8 @@
 /// committed fixture beside it is three obviously-fake steps stamped
 /// `vyrn 0.0.0-fixture`, and it exists so `vyrn test` runs on a clone that has
 /// never recorded anything.
-import { Json, JsonField } from "std/json"
 import { parseJson } from "std/jsonread"
+import { fieldsOf, itemsOf, fieldAt, tagOf } from "std/jsondec"
 
 /// One recorded step: what was typed, what came back, and the one line of prose
 /// that says what it proves. `cmd` is empty for the two steps that are not a
@@ -89,16 +89,16 @@ fn loadDemo() {
         Ok(j) => fieldsOf(j),
         Err(why) => [],
     }
-    version = stringAt(fields, "vyrn")
-    recordedOn = stringAt(fields, "recorded")
-    for s in arrayAt(fields, "steps") {
-        let f = fieldsOf(s.copy())
+    version = tagOf(fieldAt(fields, "vyrn"))
+    recordedOn = tagOf(fieldAt(fields, "recorded"))
+    for s in itemsOf(fieldAt(fields, "steps")) {
+        let f = fieldsOf(s)
         stepRows.push(DemoStep {
-            id: stringAt(f, "id"),
-            title: stringAt(f, "title"),
-            cmd: stringAt(f, "cmd"),
-            out: stringAt(f, "out"),
-            note: stringAt(f, "note"),
+            id: tagOf(fieldAt(f, "id")),
+            title: tagOf(fieldAt(f, "title")),
+            cmd: tagOf(fieldAt(f, "cmd")),
+            out: tagOf(fieldAt(f, "out")),
+            note: tagOf(fieldAt(f, "note")),
         })
     }
 }
@@ -109,68 +109,6 @@ fn fixtureText() -> String {
         Ok(text) => text.copy(),
         Err(why) => "",
     }
-}
-
-/// The fields of a JSON object, or `[]` for any other value.
-fn fieldsOf(j: Json) -> Array<JsonField> {
-    return match j {
-        JObj(fs) => copyFields(fs),
-        JArr(xs) => [],
-        JStr(s) => [],
-        JNum(s) => [],
-        JBool(b) => [],
-        JNull => [],
-    }
-}
-
-fn copyFields(fs: Array<JsonField>) -> Array<JsonField> {
-    let mut out: Array<JsonField> = []
-    for f in fs {
-        out.push(JsonField { key: f.key.copy(), value: f.value.copy() })
-    }
-    return out
-}
-
-/// The array member `key` holds, or `[]`.
-fn arrayAt(fields: Array<JsonField>, key: String) -> Array<Json> {
-    for f in fields {
-        if f.key == key {
-            return match f.value.copy() {
-                JArr(xs) => copyList(xs),
-                JObj(fs) => [],
-                JStr(s) => [],
-                JNum(s) => [],
-                JBool(b) => [],
-                JNull => [],
-            }
-        }
-    }
-    return []
-}
-
-fn copyList(xs: Array<Json>) -> Array<Json> {
-    let mut out: Array<Json> = []
-    for x in xs {
-        out.push(x.copy())
-    }
-    return out
-}
-
-/// The string member `key` holds, or `""`.
-fn stringAt(fields: Array<JsonField>, key: String) -> String {
-    for f in fields {
-        if f.key == key {
-            return match f.value.copy() {
-                JStr(s) => s.copy(),
-                JObj(fs) => "",
-                JArr(xs) => "",
-                JNum(s) => "",
-                JBool(b) => "",
-                JNull => "",
-            }
-        }
-    }
-    return ""
 }
 
 /// The recorded steps, in order.

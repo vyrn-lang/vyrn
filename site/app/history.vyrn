@@ -24,9 +24,9 @@
 /// committed, so `vyrn test site/export.vyrn` runs on a clone that has never
 /// run the script — and the export's own preflight is what stops that fixture
 /// from ever reaching a published page.
-import { Json, JsonField } from "std/json"
+import { JsonField } from "std/json"
 import { parseJson } from "std/jsonread"
-import { joinWith, substring } from "std/strings"
+import { fieldsOf, itemsOf, fieldAt, tagOf, numText } from "std/jsondec"
 
 /// One day of work: the commits made, and how many of them were merged pull
 /// requests.
@@ -97,12 +97,12 @@ fn loadHistory() {
         Ok(j) => fieldsOf(j),
         Err(why) => [],
     }
-    for d in arrayAt(fields, "days") {
-        let f = fieldsOf(copyJson(d))
-        dayRows.push(Day { date: stringAt(f, "d"), commits: numberAt(f, "c"), prs: numberAt(f, "p") })
+    for d in itemsOf(fieldAt(fields, "days")) {
+        let f = fieldsOf(d)
+        dayRows.push(Day { date: tagOf(fieldAt(f, "d")), commits: numberAt(f, "c"), prs: numberAt(f, "p") })
     }
     releases = releasesIn(fields)
-    let tests = objectAt(fields, "tests")
+    let tests = fieldsOf(fieldAt(fields, "tests"))
     testBlocks = numberAt(tests, "blocks")
     testFiles = numberAt(tests, "files")
 }
@@ -119,9 +119,9 @@ export fn historyError() -> String {
 /// lists none.
 fn releasesIn(fields: Array<JsonField>) -> Array<Release> {
     let mut out: Array<Release> = []
-    for r in arrayAt(fields, "releases") {
-        let f = fieldsOf(copyJson(r))
-        out.push(Release { tag: stringAt(f, "t"), date: stringAt(f, "d") })
+    for r in itemsOf(fieldAt(fields, "releases")) {
+        let f = fieldsOf(r)
+        out.push(Release { tag: tagOf(fieldAt(f, "t")), date: tagOf(fieldAt(f, "d")) })
     }
     return out
 }
@@ -144,101 +144,10 @@ fn fixtureText() -> String {
     }
 }
 
-/// The fields of a JSON object, or `[]` for any other value.
-fn fieldsOf(j: Json) -> Array<JsonField> {
-    return match j {
-        JObj(fs) => copyFields(fs),
-        JArr(xs) => [],
-        JStr(s) => [],
-        JNum(s) => [],
-        JBool(b) => [],
-        JNull => [],
-    }
-}
-
-/// One field list, copied out of the value that owns it.
-fn copyFields(fs: Array<JsonField>) -> Array<JsonField> {
-    let mut out: Array<JsonField> = []
-    for f in fs {
-        out.push(JsonField { key: f.key.copy(), value: copyJson(f.value) })
-    }
-    return out
-}
-
-/// One value, copied out of the value that owns it.
-fn copyJson(j: Json) -> Json {
-    return j.copy()
-}
-
-/// The array member `key` holds, or `[]`.
-fn arrayAt(fields: Array<JsonField>, key: String) -> Array<Json> {
-    for f in fields {
-        if f.key == key {
-            return match copyJson(f.value) {
-                JArr(xs) => copyList(xs),
-                JObj(fs) => [],
-                JStr(s) => [],
-                JNum(s) => [],
-                JBool(b) => [],
-                JNull => [],
-            }
-        }
-    }
-    return []
-}
-
-/// One value list, copied out of the value that owns it.
-fn copyList(xs: Array<Json>) -> Array<Json> {
-    let mut out: Array<Json> = []
-    for x in xs {
-        out.push(copyJson(x))
-    }
-    return out
-}
-
-/// The object member `key` holds, as its fields.
-fn objectAt(fields: Array<JsonField>, key: String) -> Array<JsonField> {
-    for f in fields {
-        if f.key == key {
-            return fieldsOf(copyJson(f.value))
-        }
-    }
-    return []
-}
-
-/// The string member `key` holds, or `""`.
-fn stringAt(fields: Array<JsonField>, key: String) -> String {
-    for f in fields {
-        if f.key == key {
-            return match copyJson(f.value) {
-                JStr(s) => s.copy(),
-                JObj(fs) => "",
-                JArr(xs) => "",
-                JNum(s) => "",
-                JBool(b) => "",
-                JNull => "",
-            }
-        }
-    }
-    return ""
-}
-
 /// The whole number `key` holds, or 0. `JNum` carries the raw text, which for
 /// this file is always a count.
 fn numberAt(fields: Array<JsonField>, key: String) -> Int64 {
-    for f in fields {
-        if f.key == key {
-            return wholeOf(match copyJson(f.value) {
-                JNum(s) => s.copy(),
-                JObj(fs) => "",
-                JArr(xs) => "",
-                JStr(s) => "",
-                JBool(b) => "",
-                JNull => "",
-            })
-        }
-    }
-    return 0
+    return wholeOf(numText(fieldAt(fields, key)))
 }
 
 /// A whole number written out, back as a number.
