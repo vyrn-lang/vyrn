@@ -1565,7 +1565,7 @@ fn why_cost(flags: GlobalFlags, file: &str) -> Outcome {
                     )
                 }
             };
-            println!("{num:>5}  {lp:<7}  {:<10} {}{ran}", verb.word(), row.text());
+            println!("{num:>5}  {lp:<7}  {}{ran}", row.text(*verb));
         }
     }
     let count = |(all, lp): (usize, usize), what: &str| format!("{what} {all} ({lp} in loops)");
@@ -5112,7 +5112,7 @@ fn profile_report(
                 .find(|((l, v), _)| *l == line && v.word() == verb)
         });
         match row {
-            Some((_, r)) => format!("{verb} {}", r.text()),
+            Some(((_, v), r)) => r.text(*v),
             None => verb.to_string(),
         }
     };

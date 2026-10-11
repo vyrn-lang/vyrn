@@ -77,8 +77,8 @@ fn a_name_rebound_to_a_borrow_copies() {
     );
 }
 
-/// Each kept check says why it stays: one function per reason (input, callee fact, caller fact,
-/// moves 2, 3 and 5, unproved).
+/// Each kept check says why it stays: one function per reason (input, a call's result, a
+/// parameter, a resize, a field read, a counter, unproved).
 #[test]
 fn a_kept_check_says_why_it_stays() {
     holds("reasons", "compiler/vyrn-cli/tests/cost/reasons.vyrn");

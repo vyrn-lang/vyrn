@@ -379,12 +379,6 @@ impl World {
         self.fns.id(name)
     }
 
-    /// Whether `f` may be entered other than by a call row the pass walks, so
-    /// no body assumes its parameters' facts: every function not `private`.
-    pub fn is_open(&self, f: FnId) -> bool {
-        !self.private.contains(&f)
-    }
-
     /// The function table's rows, the row of `id` at [`FnId::index`].
     pub fn fn_rows(&self) -> &[FnRow] {
         &self.fns.rows

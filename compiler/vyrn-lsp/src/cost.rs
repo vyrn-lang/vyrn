@@ -1,10 +1,12 @@
-//! What each line of the open document costs, as inlay hints and code lenses.
+//! What each line of the open document costs, as inlay hints, and what the last profile counted,
+//! as code lenses.
 //!
 //! The rows are `vyrn why --cost`'s, read from [`Analysis::cost`], so the words are its
-//! words. When the document's last `vyrn run --profile` matches its source
-//! ([`vyrn_lower::lastrun`]), each allocating row also shows the blocks that run made there.
+//! words: the label is the row's few plain words, the tooltip its full text in Markdown. When the
+//! document's last `vyrn run --profile` matches its source ([`vyrn_lower::lastrun`]), each
+//! allocating row also shows the blocks that run made there, and each function the blocks it made.
 
-use lsp_types::{InlayHint, InlayHintLabel, InlayHintTooltip, Position};
+use lsp_types::{InlayHint, InlayHintLabel, InlayHintTooltip, MarkupContent, MarkupKind, Position};
 use vyrn_frontend::{Analysis, CostLine, FnCost};
 use vyrn_lower::lastrun::{self, Found, Sites};
 
@@ -28,35 +30,29 @@ fn ran(run: &Sites, f: &FnCost, row: &CostLine) -> [u64; 2] {
     run.get(&at).map_or([0, 0], |c| [c[0], c[1]])
 }
 
-/// One row as an end-of-line label: the verb, its count, `(implicit)` for a copy, a kept check's
-/// reasons in brackets, and after a middle dot the blocks of the last run.
+/// One row as an end-of-line label: its few plain words, and after a middle dot the blocks of
+/// the last run.
 fn label(f: &FnCost, row: &CostLine, run: Option<&Sites>) -> String {
-    let mut out = row.verb.to_string();
-    if row.count > 1 {
-        out += &format!(" {}", row.count);
-    }
-    if row.implicit {
-        out += " (implicit)";
-    }
-    if !row.short.is_empty() {
-        out += &format!(" ({})", row.short);
-    }
     match run {
-        Some(run) if row.verb != KEPT => out + &format!(" \u{b7} {} blocks", ran(run, f, row)[0]),
-        _ => out,
+        Some(run) if row.verb != KEPT => {
+            format!("{} \u{b7} {} blocks", row.label, ran(run, f, row)[0])
+        }
+        _ => row.label.clone(),
     }
 }
 
-/// One row as tooltip text: `why --cost`'s row, with the loop it sits in and the run's counts.
+/// One row as tooltip Markdown: `why --cost`'s text, the loops it sits in and the run's counts.
 fn tooltip(f: &FnCost, row: &CostLine, run: Option<&Sites>) -> String {
-    let mut out = format!("{} {}", row.verb, row.text);
-    if row.depth > 0 {
-        out += &format!(" (loop {})", row.depth);
+    let mut out = row.text.clone();
+    match row.depth {
+        0 => {}
+        1 => out += " (in a loop)",
+        d => out += &format!(" (in {d} nested loops)"),
     }
     match run {
         Some(run) if row.verb != KEPT => {
             let [blocks, bytes] = ran(run, f, row);
-            out + &format!("\nlast run: {blocks} blocks, {bytes} bytes")
+            out + &format!("\n\nLast run: {blocks} blocks, {bytes} bytes.")
         }
         _ => out,
     }
@@ -101,7 +97,10 @@ pub fn hints(
                 label: InlayHintLabel::String(labels.join(", ")),
                 kind: None,
                 text_edits: None,
-                tooltip: Some(InlayHintTooltip::String(tips.join("\n"))),
+                tooltip: Some(InlayHintTooltip::MarkupContent(MarkupContent {
+                    kind: MarkupKind::Markdown,
+                    value: tips.join("\n\n"),
+                })),
                 padding_left: Some(true),
                 padding_right: None,
                 data: None,
@@ -111,48 +110,32 @@ pub fn hints(
     out
 }
 
-/// One lens per function that costs anything: `allocates 3, grows 1, copies 2, checks kept 1`,
-/// and the blocks of the last run when it is fresh. A stale profile adds one lens saying so, above
-/// the first such function. Each lens is `{ line, title }`, `line` 0-based.
+/// The lenses of the last profile. A fresh one puts `last run: N blocks` above each function
+/// with a row that makes blocks; a stale one puts one lens saying so above the first function with a
+/// row. With no profile, no lens: the line hints say what each line costs. Each lens is
+/// `{ line, title }`, `line` 0-based.
 pub fn lenses(analysis: &Analysis, path: Option<&str>, src: &str) -> Vec<serde_json::Value> {
-    let run = last_run(path, src, analysis);
-    let mut out = Vec::new();
-    for f in &analysis.cost {
-        let total = |verbs: &[&str]| -> usize {
-            (f.lines.iter())
-                .filter(|r| verbs.contains(&r.verb))
-                .map(|r| r.count)
-                .sum()
-        };
-        let mut parts: Vec<String> = [
-            ("allocates", total(&["allocates", "enters"])),
-            ("grows", total(&["grows"])),
-            ("copies", total(&["copies"])),
-            ("checks kept", total(&[KEPT])),
-        ]
-        .into_iter()
-        .filter(|(_, n)| *n > 0)
-        .map(|(what, n)| format!("{what} {n}"))
-        .collect();
-        if let Found::Fresh(sites) = &run {
-            let blocks: u64 = (f.lines.iter())
-                .filter(|r| r.verb != KEPT)
-                .map(|r| ran(sites, f, r)[0])
-                .sum();
-            parts.push(format!("last run: {blocks} blocks"));
-        }
-        out.push(
-            serde_json::json!({ "line": f.line.saturating_sub(1), "title": parts.join(", ") }),
-        );
+    let lens = |f: &FnCost, title: String| serde_json::json!({ "line": f.line.saturating_sub(1), "title": title });
+    match last_run(path, src, analysis) {
+        Found::Fresh(sites) => (analysis.cost.iter())
+            .filter_map(|f| {
+                let blocks: u64 = (f.lines.iter())
+                    .filter(|r| r.verb != KEPT)
+                    .map(|r| ran(&sites, f, r)[0])
+                    .sum();
+                let allocates = f.lines.iter().any(|r| r.verb != KEPT);
+                allocates.then(|| lens(f, format!("last run: {blocks} blocks")))
+            })
+            .collect(),
+        Found::Stale => (analysis.cost.first())
+            .map(|f| {
+                lens(
+                    f,
+                    "profile stale: the source changed since the last `vyrn run --profile`".into(),
+                )
+            })
+            .into_iter()
+            .collect(),
+        Found::Never => Vec::new(),
     }
-    if let (Found::Stale, Some(first)) = (&run, analysis.cost.first()) {
-        out.insert(
-            0,
-            serde_json::json!({
-                "line": first.line.saturating_sub(1),
-                "title": "profile stale: the source changed since the last `vyrn run --profile`",
-            }),
-        );
-    }
-    out
 }

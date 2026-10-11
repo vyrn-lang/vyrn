@@ -1,5 +1,7 @@
 //! The runtime checks a row can carry ([`super::St::Check`]).
 
+use std::sync::Arc;
+
 use super::{Lit, Name, Place, Val};
 use crate::ast::{BinOp, Capability, Expr, FnId, Function, Type, UnOp};
 use crate::rules::rule;
@@ -20,7 +22,8 @@ pub struct Check {
 }
 
 /// The reason a pass could not prove a check, for `vyrn why --cost` and the
-/// editor. Each variant names the name whose origin decided it.
+/// editor. A goal is what the check needs, in source form (`` `xs` non-empty ``,
+/// `` `i < xs.length` ``), as `vyrn_lower::elide` writes it.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum Why {
     /// No pass gave a reason: the row is proved, or no pass ran.
@@ -28,34 +31,29 @@ pub enum Why {
     Unsaid,
     /// The name's value comes from outside the program.
     Input(Name),
-    /// The goal needs a fact about a call's result: the name it binds and
-    /// the function, when the call is to a declared one.
-    Callee(Name, Option<FnId>),
-    /// The goal needs a fact about a parameter: the parameter, and the goal
-    /// over source names.
-    Caller(Name, std::sync::Arc<str>),
-    /// A kind of gap the research names by its move number: 2 a length a
-    /// call may have changed, 3 a field, element or global read, 5 a goal
-    /// over one counter and names the loop leaves alone.
-    Move(u8, Option<Name>),
-    /// No rule applies; the text is the goal the prover could not show.
-    Unproved(std::sync::Arc<str>),
-}
-
-impl Why {
-    /// The reason in two words, for the editor's end-of-line hint.
-    pub fn short(&self) -> &'static str {
-        match self {
-            Why::Unsaid => "",
-            Why::Input(_) => "input",
-            Why::Callee(..) => "callee fact",
-            Why::Caller(..) => "caller fact",
-            Why::Move(2, _) => "move 2",
-            Why::Move(3, _) => "move 3",
-            Why::Move(..) => "move 5",
-            Why::Unproved(_) => "unproved",
-        }
-    }
+    /// The check needs a fact about a call's result: the name it binds, the
+    /// function when the call is to a declared one, and the goal.
+    Callee(Name, Option<FnId>, Option<Arc<str>>),
+    /// The check needs a fact about a parameter: the parameter, the goal, and
+    /// the goal as the parameter's `where` clause when the clause grammar can
+    /// state it.
+    Caller(Name, Arc<str>, Option<Arc<str>>),
+    /// A call in the loop may change the name's length.
+    Resized(Name),
+    /// The name, or the array the check reads, is read from a field, an
+    /// element or module state, which the prover keeps no facts about.
+    Place(Option<Name>),
+    /// The loop moves only this counter, and the goal is over it and names the
+    /// loop leaves alone.
+    Counter(Name, Option<Arc<str>>),
+    /// No rule applies: the goal the prover could not show.
+    Unproved(Arc<str>),
+    /// A slice of `bytes(s, from, to)`: `std/runtime`'s `bytesOf` checks it.
+    Range,
+    /// A record `where` rule other than equal lengths.
+    Rule,
+    /// A guard with no linear form.
+    Nonlinear,
 }
 
 /// What a failed check raises.

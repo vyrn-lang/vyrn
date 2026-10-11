@@ -5272,7 +5272,8 @@ fn knucleotide_lines_carry_their_cost_as_hints() {
     holds_pin("knucleotide-hints", &cost_hints(&mut client, &uri));
 }
 
-/// A kept check's hint names its reason in two words, and the tooltip says it in full.
+/// A kept check's hint names the check in plain words, and the tooltip says in Markdown why it
+/// stays.
 #[test]
 fn a_kept_check_hint_says_why_it_stays() {
     let (path, text) = knucleotide();
@@ -5284,19 +5285,21 @@ fn a_kept_check_hint_says_why_it_stays() {
     }));
     let resp = client.read_response(&serde_json::json!(92));
     let hint = &resp["result"].as_array().expect("hints")[0];
-    assert_eq!(hint["label"], "check kept (callee fact)");
-    let tip = hint["tooltip"].as_str().unwrap();
+    assert_eq!(hint["label"], "division checked");
+    assert_eq!(hint["tooltip"]["kind"], "markdown");
+    let tip = hint["tooltip"]["value"].as_str().unwrap();
     assert!(
-        tip.contains("gap: callee fact: modulus from modulusOf(..) at 90"),
+        tip.contains("`modulus` is the result of `modulusOf(..)` at line 90"),
         "{tip}"
     );
 }
 
+/// Without a profile, no function has a lens: the line hints say what each line costs.
 #[test]
-fn knucleotide_functions_carry_their_cost_as_lenses() {
+fn without_a_profile_no_function_has_a_lens() {
     let (path, text) = knucleotide();
     let (mut client, uri) = open_for_cost(&path, &text);
-    holds_pin("knucleotide-lenses", &cost_lenses(&mut client, &uri));
+    assert_eq!(cost_lenses(&mut client, &uri), Vec::<String>::new());
 }
 
 /// `word` renders a number into a String and concatenates: 3 blocks, 40 bytes per call.
@@ -5355,12 +5358,9 @@ fn a_fresh_profile_adds_the_runs_blocks() {
     let (mut client, uri) = open_for_cost(&path, WORD);
     assert_eq!(
         cost_hints(&mut client, &uri),
-        ["2 allocates 2 \u{b7} 3 blocks"]
+        ["2 allocates String x2 \u{b7} 3 blocks"]
     );
-    assert_eq!(
-        cost_lenses(&mut client, &uri),
-        ["1 allocates 2, last run: 3 blocks"]
-    );
+    assert_eq!(cost_lenses(&mut client, &uri), ["1 last run: 3 blocks"]);
 }
 
 /// When the buffer differs from the saved profile's source, no count shows and one lens says so.

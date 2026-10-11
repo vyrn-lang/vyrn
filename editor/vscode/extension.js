@@ -254,8 +254,8 @@ function registerRun(context, vsc, lspState) {
         if (benchRe.lastIndex === b.index) benchRe.lastIndex++;
       }
 
-      // The derived wire path above each procedure a generator mounts, and what each
-      // function costs (`vyrn.costHints`; the server sends none when it is off).
+      // The derived wire path above each procedure a generator mounts, and what the
+      // last profile counted in each function (`vyrn.costHints`; none when it is off).
       // The path is derived from the file's own location and the
       // export's name, so nothing in the buffer states it — which is exactly
       // what makes it worth a lens. Semantic, and it comes from the symbol map

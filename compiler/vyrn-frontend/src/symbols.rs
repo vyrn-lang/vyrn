@@ -187,19 +187,14 @@ pub struct FnCost {
 pub struct CostLine {
     /// 1-based line.
     pub line: usize,
-    /// `copies`, `allocates`, `enters`, `grows` or `check kept`.
+    /// The verb's key in a profile's sites (`vyrn_lower::insight::Verb::word`).
     pub verb: &'static str,
     /// The deepest loop nest among the line's facts of this verb.
     pub depth: u32,
-    /// How many facts the line states.
-    pub count: usize,
-    /// Whether a copy is one the reader did not write.
-    pub implicit: bool,
-    /// What it does, as `why --cost` prints it.
+    /// The row in a few plain words, for an inlay label.
+    pub label: String,
+    /// The row in full, code in backticks, as `why --cost` prints it.
     pub text: String,
-    /// For a kept check, the distinct reasons in two words each, comma-joined
-    /// (`callee fact, caller fact`); empty for any other verb.
-    pub short: String,
 }
 
 /// One `import * as ns` binding and the exported declarations it exposes.

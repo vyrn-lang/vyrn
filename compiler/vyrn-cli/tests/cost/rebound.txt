@@ -1,16 +1,16 @@
 compiler/vyrn-cli/tests/shapes/a-name-rebound-to-a-borrow-keeps-its-copy.vyrn
 fn mkSs() -> Array<String>
-    8           allocates  concatenation x3, array literal
+    8           allocates `String` x3, `Array<String>`
 fn vyrnTestMain() -> Int64
-   12           allocates  concatenation, record P, record A, record R
-   13           allocates  map literal
-   14           allocates  concatenation
-   15           allocates  concatenation
-   16           copies     a value (implicit)
-                check kept array-index  gap: callee fact: xs from mkSs(..) at 11
-   18           copies     a value (implicit)
-   21           copies     a value (implicit)
-   26  loop 1   copies     a value (implicit)
-       loop 1   check kept array-index  gap: callee fact: xs from mkSs(..) at 11
-   30           grows      strAppend(..)
+   12           allocates `String`, `P`, `A`, `R`
+   13           allocates `Map<String, String>`
+   14           allocates `String`
+   15           allocates `String`
+   16           copies `String`: the value is borrowed, and its new holder must own it
+                index check: it needs `xs.length >= 2`, and `xs` is the result of `mkSs(..)` at line 11, whose signature does not state it
+   18           copies `String`: the value is borrowed, and its new holder must own it
+   21           copies `String`: the value is borrowed, and its new holder must own it
+   26  loop 1   copies `String`: the value is borrowed, and its new holder must own it
+       loop 1   index check: it needs the value of line 26 < xs.length, and `xs` is the result of `mkSs(..)` at line 11, whose signature does not state it
+   30           `strAppend(..)` may allocate when it outgrows its capacity
 summary: allocating rows 11 (0 in loops), growing rows 1 (0 in loops), copies 4 (1 in loops), checks kept 2 (1 in loops), checks proved 2 (1 in loops)
