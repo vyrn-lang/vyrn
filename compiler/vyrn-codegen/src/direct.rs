@@ -2035,9 +2035,14 @@ fn lower_body(
     // used there. A `read` one is used there unless the callee may store into [`Cx::aliasing`]
     // state, which could hold the argument and change under it. A `modify` one is used there
     // unless the callee may read or store module state at all, which would then see the write
-    // before the return. A host import may call an export back, so it counts as both. Otherwise
-    // the prologue copies the parameter into a slot of its own, and a `modify` parameter is
-    // copy-in/copy-out: copied in here and back out at the epilogue.
+    // before the return. A host import may call an export back, so it counts as both. A
+    // `consume` one is used there when the callee has no aggregate out-pointer: then nothing
+    // writes that storage during the call (no module state holds it, no other argument overlaps
+    // it, a parameter is never assigned), and the caller never reads it after. With an
+    // out-pointer the copy stays, so the callee is right even where the caller passed the
+    // argument's storage as the out-pointer. Otherwise the prologue copies the parameter into a
+    // slot of its own, and a `modify` parameter is copy-in/copy-out: copied in here and back
+    // out at the epilogue.
     let (stores, touches) = match core.as_ref().and_then(|c| cx.world.state_use(c.id?)) {
         _ if cx.aliasing.is_empty() => (false, false),
         // A frame the effect judgment did not answer for may do anything.
@@ -2057,7 +2062,7 @@ fn lower_body(
             && match p.capability {
                 Capability::Read => !stores,
                 Capability::Modify => !touches,
-                Capability::Consume => false,
+                Capability::Consume => sig.ret.agg().is_none(),
             };
         let place = if sig.in_place == Some(i) || in_place {
             Place::Local(local)
