@@ -15,9 +15,9 @@
 //! siblings) leaves the count of `codegen: bodies` at 1.6 times for the shape
 //! `many locals`, and the bytes at 13.8 times.
 //!
-//! This test sees what `compiler_allocs.rs` cannot: the pin is a snapshot of
-//! three programs, and a pass that is quadratic in a shape none of them has
-//! stays inside it.
+//! This test sees what `scripts/check-allocs.sh` cannot: that script compares
+//! the examples, and a pass that is quadratic in a shape none of them has
+//! stays inside its threshold.
 //!
 //!   cargo test --release -p vyrn-cli --features allocs --test compiler_scaling -- --ignored
 
