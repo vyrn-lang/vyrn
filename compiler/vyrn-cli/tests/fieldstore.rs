@@ -250,14 +250,14 @@ fn a_nested_literal_costs_the_frame_of_its_outermost_value_only() {
     );
 }
 
-/// Three calls each need a 16-byte result slot; none is live past its
+/// Three calls each need a 24-byte result slot; none is live past its
 /// statement, so the frame is one slot, not three.
 #[test]
 fn a_statements_temporaries_are_given_back_at_its_end() {
     let body = wat_func_containing(
-        "type Inner = { a: Float64, b: Float64 }\n\
+        "type Inner = { a: Float64, b: Float64, c: Float64 }\n\
          fn make(x: Float64) -> Inner {\n\
-         return Inner { a: x, b: x }\n\
+         return Inner { a: x, b: x, c: x }\n\
          }\n\
          fn work() -> Float64 {\n\
          let mut s = 1234567.0\n\
@@ -272,9 +272,10 @@ fn a_statements_temporaries_are_given_back_at_its_end() {
          }\n",
         MARK,
     );
+    // One 24-byte slot, in a frame aligned to 16 bytes.
     assert_eq!(
         frame_of(&body),
-        16,
+        32,
         "a call's result slot outlived its statement:\n{body}"
     );
 }
@@ -309,6 +310,67 @@ fn a_let_of_a_nullary_constructor_is_built_in_its_slot() {
         copies_of(&body, 16),
         0,
         "a nullary constructor was copied into its binding:\n{body}"
+    );
+}
+
+/// A flat value its rows only build, match and read a field of lives in wasm locals
+/// (`Fn_::core_flats`): the function claims no frame and stores nothing.
+#[test]
+fn a_flat_value_built_and_matched_takes_no_frame() {
+    let body = wat_func_containing(
+        "type P = { x: Int64, y: Float64 }\n\
+         fn work(k: Int64) -> Int64 {\n\
+         let p = P { x: k, y: 2.0 }\n\
+         let o = Some(p.x + 1234567)\n\
+         match o {\n\
+         Some(v) => {\n\
+         return v\n\
+         }\n\
+         None => {\n\
+         return 0\n\
+         }\n\
+         }\n\
+         }\n\
+         fn main() -> Int64 {\n\
+         print(work(1))\n\
+         return 0\n\
+         }\n",
+        MARK,
+    );
+    assert_eq!(frame_of(&body), 0, "a flat value took a slot:\n{body}");
+    assert!(
+        !body.contains(".store"),
+        "a flat value went through memory:\n{body}"
+    );
+}
+
+/// A flat result crosses as wasm results, one per part, and the caller matches it in
+/// locals: no out-pointer, no frame, no load or store.
+#[test]
+fn a_flat_result_crosses_as_values() {
+    let body = wat_func_containing(
+        "fn find(k: Int64) -> Option<Int64> {\n\
+         if k > 3 {\n\
+         return Some(k)\n\
+         }\n\
+         return None\n\
+         }\n\
+         fn work(k: Int64) -> Int64 {\n\
+         if let Some(v) = find(k) {\n\
+         return v + 1234567\n\
+         }\n\
+         return 0\n\
+         }\n\
+         fn main() -> Int64 {\n\
+         print(work(5))\n\
+         return 0\n\
+         }\n",
+        MARK,
+    );
+    assert_eq!(frame_of(&body), 0, "a flat result took a slot:\n{body}");
+    assert!(
+        !body.contains(".store") && !body.contains(".load"),
+        "a flat result went through memory:\n{body}"
     );
 }
 
