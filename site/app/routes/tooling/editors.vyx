@@ -1,31 +1,16 @@
 <script>
-// GET /docs/editors — the editor story.
+// GET /tooling/editors: what the editor extension and the language server
+// do. The stubs at `/editors` and `/docs/editors` point here.
 //
-// It was `/editors`. `/editors.html` is still published, as a stub that points
-// here. One content link named this route — `/install` — and nothing outside the
-// site did.
-//
-// The site said one paragraph about the language server, in section 06 of
-// `/install`, and it said it as a build command. Meanwhile the extension and the
-// server between them answer most of what an editor is asked, and a reader
-// deciding whether to write in this language had no way to know.
-//
-// EVERY ROW ON THE TABLE NAMES ITS IMPLEMENTATION. The `data-impl` attribute is
-// not decoration: `site/export.vyrn` reads it off this rendered page and opens
-// each path, so a row for something nobody wrote fails the build.
-//
-// The rows come from `../editors`, which was written by reading the code. Where
-// the extension's README and the code disagree — and they do — the code wins,
-// and the README is what is wrong.
+// Every row names its implementation in `data-impl`; `site/export.vyrn` opens
+// each path, so a row for something nobody wrote fails the build. The rows in
+// `../editors` follow the code where the extension's README disagrees.
 import { Head } from "std/ui"
 import { pageHeadOf } from "../../nav"
 import { shellHtml } from "../../code"
 import { features, steps, implHref, pageTitle, lede, notice, featuresHeading, featuresIntro, featuresCap, featuresNotice, installHeading, installIntro, installNotice, installCap, otherHeading, otherIntro, otherClose } from "../../editors"
 import { mdUrl, askClaudeUrl } from "../../pagemd"
 import { Icon } from "../../icons"
-// THE DOCS SHELL. An editor is a tool, so
-// the page lives at the end of the Tooling shelf — path and sidebar agreeing,
-// because a sidebar that moved without its path confused readers (user).
 import { TreeGroup, Pager, areaTree, pagerFor } from "../../docshell"
 
 export fn head() -> Head {

@@ -1,15 +1,5 @@
 <script>
-// GET /guide — the book's contents.
-//
-// The chapter list is the book's own `chapters()`, so a chapter added there
-// appears here, in the tree of every chapter page, and in the export's route
-// table, with nothing written twice.
-//
-// THE LANDING WEARS THE SHELL. It kept the old
-// numbered rail and three landing-scale bands around five sentences — a page
-// that was mostly its own margins. It is a docs page now: the book's tree on
-// the left with Overview marked, and one flowing column — the claim, the
-// grid, one note about the programs.
+// GET /guide: the book's contents, from the book's own `chapters()`.
 import { Head } from "std/ui"
 import { pageHeadOf } from "../../nav"
 import { Chapter, areaGroups, groupChapters, chapterHref, chapterCount, blockCount } from "../../guide"
@@ -20,7 +10,7 @@ export fn head() -> Head {
     return pageHeadOf("/guide")
 }
 
-/// The book's groups — the same named runs the sidebar prints.
+/// The book's groups, as the sidebar prints them.
 fn groups() -> Array<String> {
     return areaGroups("guide")
 }

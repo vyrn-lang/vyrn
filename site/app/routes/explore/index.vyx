@@ -13,7 +13,7 @@ export fn head() -> Head {
     return pageHeadOf("/explore")
 }
 
-/// `1 export · 2 deps`.
+/// The row's two counts: exports and dependencies.
 fn numsOf(p: Package) -> String {
     let ex = if p.exports == 1 { "1 export" } else { p.exports.toString() + " exports" }
     let deps = if p.deps == 0 { "no deps" } else if p.deps == 1 { "1 dep" } else { p.deps.toString() + " deps" }

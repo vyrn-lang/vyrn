@@ -1,9 +1,5 @@
 <script>
-// GET /web — the Web area's contents.
-//
-// The page list is `areaChapters("web")` — the same run of the one
-// chapter table the sidebar, the subnav, the export and the search index read —
-// so a page added there appears here with nothing written twice.
+// GET /web: the Web area's contents, from `areaChapters("web")`.
 import { Head } from "std/ui"
 import { pageHeadOf } from "../../nav"
 import { Chapter, areaGroups, groupChapters, chapterHref } from "../../guide"
@@ -14,7 +10,7 @@ export fn head() -> Head {
     return pageHeadOf("/web")
 }
 
-/// This shelf's groups — the same named runs the sidebar prints.
+/// This shelf's groups, as the sidebar prints them.
 fn groups() -> Array<String> {
     return areaGroups("web")
 }
