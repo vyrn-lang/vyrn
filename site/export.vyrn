@@ -16,7 +16,7 @@ import { mdPaths, mdName, mdUrl, markdownOf } from "./app/pagemd"
 import { feedName, feedUrl, feedXml, feedItemCount } from "./app/feed"
 import { emit as jsonText, Json, JsonField } from "std/json"
 import { substring, indexOf, lastIndexOf, split, replace, lines, trim } from "std/strings"
-import { startsWith, contains } from "std/strpred"
+import { startsWith, endsWith, contains } from "std/strpred"
 import { includes } from "std/arrays"
 
 fn sitePaths() -> Array<String> {
@@ -186,23 +186,24 @@ fn withIcon(html: String) -> String {
     return insertInHead(html, "<link rel=\"icon\" href=\"/favicon.svg\" type=\"image/svg+xml\">")
 }
 
-/// `html` with the head elements that decide the page's colour before the
-/// first paint.
-///
-/// `<meta name="color-scheme">` lets a dark system paint a dark canvas before
-/// the stylesheet arrives, and `theme-color` colours the browser's own bar. The
-/// inline script reads the reader's choice from storage, which needs no
-/// request, and sets three attributes on the root before the first paint:
-/// `data-theme` (the reader's choice), `idecompact` (the masthead height handed
-/// over by `theme.js`) and `data-js` (shows the theme control without moving its
-/// row). `theme.js` is a deferred module that holds the toggle.
 fn withThemeBoot(html: String) -> String {
-    let boot = "<script>try{var r=document.documentElement,t=localStorage.getItem(\"vyrn.theme\");if(t===\"light\"||t===\"dark\")r.setAttribute(\"data-theme\",t);if(sessionStorage.getItem(\"vyrn.mast\")===\"compact\")r.classList.add(\"idecompact\");r.setAttribute(\"data-js\",\"on\")}catch(e){document.documentElement.setAttribute(\"data-js\",\"on\")}</script>"
-    return insertAfterCharset(html, "<meta name=\"color-scheme\" content=\"light dark\">" + themeColours() + boot)
+    return insertAfterCharset(html, "<meta name=\"color-scheme\" content=\"light dark\">" + themeColours() + "<script>" + bootScript() + "</script>")
 }
 
-/// The two `theme-color` metas, light and dark, read from the stylesheet so
-/// they follow the palette. Empty when the sheet does not give two values.
+/// `site/boot.js` on one line, each line trimmed. Inlined, not linked: it must
+/// run before the first paint, or the theme flashes.
+fn bootScript() -> String {
+    let js = match readFile("site/boot.js") {
+        Ok(body) => body,
+        Err(why) => "",
+    }
+    let mut out = ""
+    for line in lines(js) {
+        out = out + trim(line)
+    }
+    return out
+}
+
 fn themeColours() -> String {
     let paper = paperColours()
     if paper.length < 2 {
@@ -211,17 +212,15 @@ fn themeColours() -> String {
     return "<meta name=\"theme-color\" media=\"(prefers-color-scheme: light)\" content=\"\{paper[0]}\"><meta name=\"theme-color\" media=\"(prefers-color-scheme: dark)\" content=\"\{paper[1]}\">"
 }
 
-/// The stylesheet's `--n4` values, read once for every page.
 let mut papers: Array<String> = []
 
-/// The first two values the stylesheet gives `--n4`, which `--paper` reads: the
-/// `:root` one, then the `prefers-color-scheme: dark` one. A third, under
-/// `[data-theme="dark"]`, is the reader's explicit choice and is not read.
+/// The first two `--n4` values in the sheet: the light palette's, then the
+/// system-dark one's.
 fn paperColours() -> Array<String> {
     if papers.length > 0 {
         return papers.copy()
     }
-    let sheet = match readFile("site/public/style.css") {
+    let sheet = match stylesheet() {
         Ok(body) => body,
         Err(why) => "",
     }
@@ -252,12 +251,7 @@ fn paperColours() -> Array<String> {
     return out.copy()
 }
 
-/// `html` with `extra` spliced in after its `<meta charset>`.
-///
-/// Not after `<head>`: a browser looks for the encoding in the first 1024
-/// bytes, `std/ui` writes the charset after the title, and the boot script in
-/// front of it would leave too little margin. The theme script needs to run
-/// before layout, not before the charset.
+/// After the charset, not after `<head>`: the charset must stay in the first 1024 bytes.
 fn insertAfterCharset(html: String, extra: String) -> String {
     let mark = "<meta charset=\"utf-8\">"
     return match indexOf(html, mark) {
@@ -421,57 +415,57 @@ fn exportPath(outDir: String, path: String) -> Int64 {
     return bad
 }
 
-/// Every text file the site serves beside its pages: the source in the
-/// repository, and the name in the output. A binary file, such as `play.wasm`,
-/// is written by `.github/workflows/site.yml`, because `writeFile` takes a
-/// `String`.
+/// Every script in `site/public`, and the files from elsewhere in the
+/// repository. A binary file, such as `play.wasm`, is written by
+/// `.github/workflows/site.yml`.
 fn assets() -> Array<Array<String>> {
-    return [
-        ["site/public/style.css", "style.css"],
-        ["site/public/theme.js", "theme.js"],
-        ["site/public/widgets.js", "widgets.js"],
-        ["site/public/play.js", "play.js"],
-        ["site/public/play-wasm.js", "play-wasm.js"],
-        ["site/public/play-worker.js", "play-worker.js"],
+    let mut out: Array<Array<String>> = [
         ["web/wasi-min.js", "wasi-min.js"],
         ["web/vyrn-nav.js", "vyrn-nav.js"],
         ["web/vyrn-dom.js", "vyrn-dom.js"],
         ["editor/vscode/icons/vyrn.svg", "favicon.svg"],
-        // The install command is `curl -fsSL <origin>/install.sh | sh`, so the
-        // site serves the repository's installers byte for byte.
         ["install.sh", "install.sh"],
         ["install.ps1", "install.ps1"],
-        // The same two files as `.txt`, which GitHub Pages serves as
-        // `text/plain`, so the "View the install script" link shows the script
-        // instead of downloading it.
+        // GitHub Pages serves `.txt` as `text/plain`, so the link shows the script.
         ["install.sh", "install.sh.txt"],
         ["install.ps1", "install.ps1.txt"],
     ]
+    let public = match listDir("site/public") {
+        Ok(names) => names.copy(),
+        Err(why) => [],
+    }
+    for name in consume public {
+        if endsWith(name, ".js") {
+            out.push(["site/public/\{name}", name])
+        }
+    }
+    return out
 }
 
-/// Copy one asset. A missing source is a failure: a page that links a file the
-/// export did not write is broken.
 fn copyAsset(outDir: String, source: String, name: String) -> Int64 {
     return match readFile(source) {
-        Ok(body) => written(outDir, source, name, assetBody(name, body)),
+        Ok(body) => written(outDir, source, name, body),
         Err(why) => failed(source, why),
     }
 }
 
-/// What an asset ships as. The published stylesheet has its comments removed:
-/// the source keeps its prose, and readers do not download it. Nothing else is
-/// rewritten, and no rule or name in the sheet changes;
-/// `site/test/typescale.test.mjs` measures its ceilings against this form.
-fn assetBody(name: String, body: String) -> String {
-    if name == "style.css" {
-        return stripCssComments(body)
+/// The files in `site/public/css` in name order, which is the cascade order.
+fn stylesheet() -> Result<String, String> {
+    let mut sheet = ""
+    for name in listDir("site/public/css")? {
+        sheet = sheet + readFile("site/public/css/\{name}")?
     }
-    return body.copy()
+    return Ok(stripCssComments(sheet))
 }
 
-/// A stylesheet without its comments, and without the blank lines they leave.
-/// It skips quoted strings, because `content: "/*"` is legal CSS. CSS comments
-/// do not nest.
+fn writeStylesheet(outDir: String) -> Int64 {
+    return match stylesheet() {
+        Ok(sheet) => written(outDir, "site/public/css", "style.css", sheet),
+        Err(why) => failed("site/public/css", why),
+    }
+}
+
+/// It skips quoted strings, because `content: "/*"` is legal CSS.
 fn stripCssComments(css: String) -> String {
     let mut out = ""
     let mut keep = 0
@@ -501,9 +495,6 @@ fn stripCssComments(css: String) -> String {
             while i + 1 < css.byteLength && !(css[i] == '*' && css[i + 1] == '/') {
                 i = i + 1
             }
-            // An unterminated comment runs to the end of the sheet. The scan
-            // stopped on the last byte, so stepping past `*/` would put `keep`
-            // past the end; the rest is dropped instead.
             if i + 1 >= css.byteLength {
                 return withoutBlankLines(out)
             }
@@ -517,7 +508,6 @@ fn stripCssComments(css: String) -> String {
     return withoutBlankLines(out)
 }
 
-/// `text` without its blank and whitespace-only lines.
 fn withoutBlankLines(text: String) -> String {
     let mut out = ""
     for line in lines(text) {
@@ -528,7 +518,6 @@ fn withoutBlankLines(text: String) -> String {
     return out
 }
 
-/// Write an asset that was read. An empty one is a failure: the site links it.
 fn written(outDir: String, source: String, name: String, body: String) -> Int64 {
     if body.byteLength == 0 {
         print("FAIL \{source}: read, but empty \u{2014} the site links it, so it cannot be nothing")
@@ -594,6 +583,7 @@ fn main() -> Int64 {
     for asset in assets() {
         failures = failures + copyAsset(outDir, asset[0], asset[1])
     }
+    failures = failures + writeStylesheet(outDir)
     for path in mdPaths() {
         failures = failures + writeMarkdown(outDir, path)
     }
@@ -735,9 +725,6 @@ test "each renamed route publishes a stub that carries the reader to the new one
 }
 
 test "every page carries the theme control, and carries it without a flash" {
-    // Pages at the root and one two directories deep. The theme is decided by an
-    // inline script right after the charset, before the stylesheet and with no
-    // request; `theme.js` is a module that holds the one toggle button.
     for path in ["/", "/docs/std/json", "/benchmarks"] {
         let doc = publishedDocument(path)
         let up = upTo(path)
@@ -933,19 +920,29 @@ test "the published stylesheet keeps every rule and none of the prose" {
     assertEq(stripCssComments(".a::before { content: '*/' }\n/* g */\n.b { top: 0 }\n"), ".a::before { content: '*/' }\n.b { top: 0 }\n")
     // An unterminated comment drops the rest of the sheet and does not trap.
     assertEq(stripCssComments(".a { color: red }\n/* merge artifact"), ".a { color: red }\n")
-    // Only the stylesheet is stripped.
-    assertEq(assetBody("theme.js", "// keep\n"), "// keep\n")
 
-    let sheet = match readFile("site/public/style.css") {
+    let shipped = match stylesheet() {
         Ok(text) => text,
-        Err(why) => "",
+        Err(why) => why,
     }
-    if sheet.byteLength > 0 {
-        let shipped = assetBody("style.css", sheet)
-        assert(shipped.byteLength < sheet.byteLength)
-        assert(contains(shipped, ".band { padding: var(--sect) 0;"))
-        assert(!contains(shipped, "/*"))
-        assert(!contains(shipped, "*/"))
+    assert(contains(shipped, ".band { padding: var(--sect) 0;"))
+    assert(!contains(shipped, "/*"))
+}
+
+test "every script in site/public is published" {
+    let mut published: Array<String> = []
+    for asset in assets() {
+        published.push(asset[1].copy())
+    }
+    let listing = match listDir("site/public") {
+        Ok(names) => names.copy(),
+        Err(why) => [],
+    }
+    assert(includes(listing, "theme.js"))
+    for name in listing {
+        if endsWith(name, ".js") {
+            assert(includes(published, name))
+        }
     }
 }
 

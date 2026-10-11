@@ -1,0 +1,39 @@
+svg.chart { display: block; width: 100%; height: auto; max-width: 904px; }
+svg.graph { max-width: 726px; }
+
+.stage { overflow-x: auto; scrollbar-width: none; }
+.stage::-webkit-scrollbar { display: none; }
+svg.chart { min-width: 640px; }
+svg.chart.radar { min-width: 500px; }
+svg.graph { min-width: 520px; }
+
+svg.chart a text { text-decoration: underline; text-decoration-color: transparent; transition: text-decoration-color 160ms var(--expo); }
+svg.chart text { font-family: var(--mono); font-size: var(--t-svg); fill: var(--muted); }
+
+svg.chart.radar { max-width: 34rem; margin: 0 auto; }
+svg.chart.radar .ring { fill: none; stroke: currentColor; stroke-opacity: 0.13; stroke-width: 1; }
+svg.chart.radar .ring.base { stroke-opacity: 0.45; stroke-dasharray: 3 3; }
+svg.chart.radar .axis line { stroke: currentColor; stroke-opacity: 0.1; stroke-width: 1; }
+svg.chart.radar .axis text { font-size: var(--t-svg-s); fill: var(--n2); }
+svg.chart.radar .names text { font-family: var(--mono); font-size: var(--t-svg-s); fill: var(--n2); }
+svg.chart.radar .names a:hover text, svg.chart.radar .names a:focus-visible text { fill: var(--accent); font-weight: 600; }
+/* Names text: the link underline lands on the SVG text node. */
+svg.chart.radar .names a, svg.chart.radar .names a text { text-decoration: none; }
+svg.chart.radar .names a:hover text, svg.chart.radar .names a:focus-visible text { text-decoration: underline; text-underline-offset: 3px; }
+svg.chart.radar .wedge { fill: transparent; }
+svg.chart.radar g.series polygon { fill: currentColor; fill-opacity: 0.07; stroke: currentColor; stroke-width: 2; stroke-linejoin: round; }
+svg.chart.radar g.series polygon.dashed { fill-opacity: 0; stroke-dasharray: 5 4; }
+svg.chart.radar g.series .offscale { fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; }
+svg.chart.radar g.series.off { display: none; }
+
+.sr-c { color: var(--sr-c); --k: var(--sr-c); }
+.sr-rust { color: var(--sr-rust); --k: var(--sr-rust); }
+.sr-node { color: var(--sr-node); --k: var(--sr-node); }
+.sr-vyrn { color: var(--sr-vyrn); --k: var(--sr-vyrn); }
+
+.serieskeys { display: flex; flex-wrap: wrap; gap: var(--s1); margin: 0; padding: var(--s2); border-top: 1px solid var(--hair); }
+.serieskeys button { font-size: var(--t-key); padding: 7px 12px; }
+.serieskeys button::before { content: ""; display: inline-block; vertical-align: middle; width: 12px; height: 3px; margin-right: 8px; background: var(--k, currentColor); }
+.serieskeys button.dashed::before { background: repeating-linear-gradient(90deg, var(--k) 0 4px, transparent 4px 7px); }
+.serieskeys button[aria-pressed="true"] { color: var(--k); border-color: var(--k); }
+.serieskeys button[aria-pressed="false"] { opacity: 0.5; text-decoration: line-through; }

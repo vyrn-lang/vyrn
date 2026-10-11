@@ -1,9 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
-
-const CSS = readFileSync(fileURLToPath(new URL("../public/style.css", import.meta.url)), "utf8");
+import { sheet as CSS } from "./sheet.mjs";
 
 function block(from) {
   const open = CSS.indexOf("{", from);

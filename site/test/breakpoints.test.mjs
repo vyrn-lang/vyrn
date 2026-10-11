@@ -1,8 +1,5 @@
 import { test } from "node:test";
-import { readFile } from "node:fs/promises";
-import { fileURLToPath } from "node:url";
-
-const css = await readFile(fileURLToPath(new URL("../public/style.css", import.meta.url)), "utf8");
+import { sheet as css } from "./sheet.mjs";
 
 function widthBlocks(src) {
   const out = [];

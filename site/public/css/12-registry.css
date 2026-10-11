@@ -1,0 +1,39 @@
+.chapgroup { margin-top: var(--s4); }
+.chapgroup:first-child { margin-top: 0; }
+.chapgroup > .eyebrow { margin-bottom: var(--s2); }
+
+.page.registry > * { grid-column: 1 / 13; width: 100%; max-width: 54rem; margin-inline: auto; }
+.regsearch { display: flex; align-items: center; gap: var(--s1); margin-top: var(--s3); padding: 0 var(--s2); border: 1px solid var(--rule); background: color-mix(in oklab, var(--plate) 45%, transparent); }
+.regsearch input { flex: 1 1 auto; min-width: 0; border: 0; background: none; color: var(--ink); font: var(--t-lede)/1.4 var(--sans); padding: 10px 0; }
+.regsearch input:focus-visible { outline: 0; }
+.regsearch .count { font: var(--t-meta)/1 var(--mono); color: var(--muted); white-space: nowrap; }
+.reglist { list-style: none; margin: 0; padding: 0; border: 1px solid var(--rule); }
+.reglist > li { display: block; padding: var(--s2); border-top: 1px solid var(--hair); }
+.reglist > li:first-child { border-top: 0; }
+/* display: block above outranks the [hidden] default; the search relies on it. */
+.reglist > li[hidden] { display: none; }
+.regrow { display: flex; align-items: baseline; gap: var(--s2); }
+.regrow .name { font: 600 var(--t-h5)/1.4 var(--sans); text-decoration: none; }
+.regrow .kind { font: var(--t-meta)/1 var(--mono); color: var(--muted); }
+.regrow .nums { margin-left: auto; font: var(--t-meta)/1 var(--mono); color: var(--muted); white-space: nowrap; }
+.reglist .d { display: block; color: var(--muted); margin-top: 4px; max-width: 60ch; }
+
+.page.pkg > * { grid-column: 1 / 13; width: 100%; max-width: 64rem; margin-inline: auto; }
+.pkghead { padding: var(--s4) 0 var(--s3); }
+.pkgtitle { display: flex; align-items: baseline; gap: var(--s2); margin-top: var(--s1); }
+.pkgtitle h1 { margin: 0; font: 700 var(--t-h2)/1.15 var(--sans); letter-spacing: -0.01em; }
+.pkghead .lede { margin: var(--s1) 0 0; }
+.pkgmeta { margin: var(--s2) 0 0; font: var(--t-meta)/1 var(--mono); color: var(--muted); }
+.pkgblock h2 { font: 600 var(--t-h4)/1.3 var(--sans); margin: var(--s1) 0 var(--s2); }
+.pkgside .syms { display: flex; flex-wrap: wrap; gap: 6px; margin: var(--s1) 0 0; }
+.reghint { margin: var(--s1) 0 0; font: var(--t-meta)/1.5 var(--sans); color: var(--muted); }
+.pkgbody { display: grid; grid-template-columns: minmax(0, 1fr) 21rem; gap: var(--s4); align-items: start; }
+@media (max-width: 960px) { .pkgbody { grid-template-columns: 1fr; } }
+.pkgmain { display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--s4); }
+.pkgside { display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--s2); position: sticky; top: var(--s3); }
+.pkgside .cmd { margin-top: var(--s1); }
+.writes { margin-top: var(--s2); }
+.writes summary { cursor: pointer; color: var(--muted); font: var(--t-meta)/1.4 var(--sans); }
+.writes[open] summary { margin-bottom: var(--s1); }
+.writes p { margin: var(--s1) 0 0; color: var(--muted); font: var(--t-meta)/1.5 var(--sans); }
+.writes pre.code { margin-top: var(--s1); font-size: var(--t-code-s); }

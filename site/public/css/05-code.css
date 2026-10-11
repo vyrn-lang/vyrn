@@ -1,0 +1,52 @@
+pre.code {
+  margin: var(--s2) 0 0;
+  padding: 12px var(--s2);
+  overflow-x: auto;
+  scrollbar-width: none;
+  font-size: var(--t-code);
+  line-height: 1.5;
+  background: color-mix(in oklab, var(--plate) 45%, transparent);
+  tab-size: 4;
+}
+pre.code::-webkit-scrollbar { display: none; }
+.plate pre.code { margin: 0; border: 0; background: transparent; }
+
+.k { color: var(--syn-kw); }
+.s { color: var(--syn-str); }
+.c { color: var(--syn-com); font-style: italic; }
+.t { color: var(--syn-type); font-weight: 600; }
+.n { color: var(--syn-num); }
+
+.out {
+  margin: var(--s2) 0 0;
+  padding: var(--s2);
+  border-left: 2px solid color-mix(in oklab, var(--accent) 45%, transparent);
+  font: var(--t-code-s)/1.5 var(--mono);
+  color: var(--muted);
+  white-space: pre-wrap;
+  overflow-x: auto;
+}
+.out .ol::before { content: "\203A"; color: var(--n2); margin-right: var(--s1); }
+.out > div { transition: color 220ms var(--expo); }
+.out > div.on { color: var(--ink); }
+.out > div.on .ol::before { color: var(--accent); }
+
+.cmd {
+  display: flex;
+  align-items: stretch;
+  background: color-mix(in oklab, var(--plate) 55%, transparent);
+  margin-top: var(--s2);
+}
+.cmd code {
+  flex: 1;
+  min-width: 0;
+  padding: 12px var(--s2);
+  font-size: var(--t-cmd);
+  line-height: 1.5;
+  overflow-x: auto;
+  white-space: pre;
+  scrollbar-width: none;
+  mask-image: linear-gradient(90deg, #000 calc(100% - 24px), transparent);
+}
+.cmd code::-webkit-scrollbar { display: none; }
+.cmd button { border: 0; align-self: stretch; background: none; font-size: var(--t-key); color: var(--n2); }
