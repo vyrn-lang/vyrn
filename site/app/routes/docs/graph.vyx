@@ -1,10 +1,4 @@
 <script>
-// GET /docs/graph: the standard library's import graph.
-//
-// It has its own page because the inline drawing was 25,347 of the reference
-// landing's 52,815 bytes, against a 40,000-byte ceiling. `app/stdgraph.vyrn`
-// computes every coordinate, and `widgets.js` lights a module's wires on
-// hover.
 import { Head } from "std/ui"
 import { pageHeadOf } from "../../nav"
 import { searchRows, graphNodes, graphEdges, graphViewBox, graphWidth, edgeCount, graphLede, graphIntro, graphCaption } from "../../stdgraph"
@@ -16,12 +10,10 @@ export fn head() -> Head {
     return pageHeadOf("/docs/graph")
 }
 
-/// This page's own URL, in the form the markdown twin's helpers take.
 fn pageHref() -> String {
     return "/docs/graph.html"
 }
 
-/// The Open-in-Claude link for this page.
 fn claudeHref() -> String {
     return askClaudeUrl(pageHref(), "The import graph")
 }
@@ -34,8 +26,6 @@ fn pager() -> Pager {
     return pagerFor(tree())
 }
 
-/// The width the graph needs, as a style. Below it the drawing scrolls inside
-/// its own box; the page never scrolls sideways.
 fn graphStyle() -> String {
     return "min-width:" + graphWidth().toString() + "px"
 }
@@ -85,9 +75,7 @@ fn graphStyle() -> String {
                 <span class="eyebrow">point at a module to light its wires</span>
             </div>
             <div class="stage scroller">
-                <!-- `role="group"`, not `role="img"`: every node is a link, and
-                     under `role="img"` its tab stop would be missing from the
-                     accessibility tree. -->
+                <!-- `group`, not `img`: under `img` every node's tab stop leaves the accessibility tree. -->
                 <svg class="graph" :viewBox="graphViewBox()" :style="graphStyle()" role="group" aria-label="The import graph of the standard library. Every module is a link, named with what it imports and what imports it.">
                     <path class="wire" v-for="e in graphEdges()" :key="e.id" :d="e.d" :data-from="e.from" :data-to="e.to"/>
                     <g class="node" v-for="n in graphNodes()" :key="n.name" :data-m="n.name" :data-uses="n.uses" :data-usedby="n.usedBy">

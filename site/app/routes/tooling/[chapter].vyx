@@ -1,7 +1,4 @@
 <script>
-// GET /tooling/[chapter]: one page of the Tooling area, built like a guide
-// chapter from `site/app/guide.vyrn`. It answers only for chapters whose
-// `area` is "tooling", so one slug has one page.
 import { Head, PageError, ParamQuery, notFound, paramQuery } from "std/ui"
 import { pageHeadWith } from "../../nav"
 import { Chapter, Section, chapterArea, chapterBlurb, chapterCount, chapterOf, chapterKnown, chapterNumber, chapterHref, sectionBody } from "../../guide"
@@ -11,7 +8,6 @@ import { TreeGroup, Pager, areaTree, pagerFor } from "../../docshell"
 import { Icon } from "../../icons"
 params { chapter: String }
 
-/// One page, with its number on this shelf.
 type ChapterPage = { n: Int64, chapter: Chapter }
 
 export fn head(d: ChapterPage) -> Head {
@@ -29,29 +25,23 @@ fn fetchChapter(p: Params) -> Result<ChapterPage, PageError> {
     return Ok(ChapterPage { n: chapterNumber(p.chapter), chapter: chapterOf(p.chapter) })
 }
 
-/// The sidebar for this page: this shelf, with this page marked.
 fn tree(here: String) -> Array<TreeGroup> {
     return areaTree("tooling", here)
 }
 
-/// The link to one section of this page. Built here because a template
-/// attribute cannot hold a string literal.
 fn sectionHref(s: Section) -> String {
     return "#" + s.anchor
 }
 
-/// How many pages this shelf holds.
 fn shelfSize() -> Int64 {
     return chapterCount("tooling")
 }
 
-/// The pages beside this one, from the tree and not the chapter chain, so a
-/// hand-listed row (Tooling ends with Editors) is a neighbour too.
+/// From the tree, not the chapter chain, so the hand-listed Editors row is a neighbour.
 fn pager(here: String) -> Pager {
     return pagerFor(tree(here))
 }
 
-/// The Open-in-Claude link for this page.
 fn claudeHref(slug: String, title: String) -> String {
     return askClaudeUrl(chapterHref(slug), title)
 }

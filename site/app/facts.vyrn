@@ -1,17 +1,7 @@
-/// Repository counts and the baked release, read while the site compiles.
-///
-/// No count on the site is written by hand: this generator lists `examples/`
-/// and `std/` and reads `site/release.txt`, and emits the answers as a module.
-/// Call it only through `repo.vyrn`. The generator cache keys on the argument
-/// strings, so a second call site spelling a path differently would emit a
-/// second module whose exports collide. Each path is its own argument because
-/// the sandbox lets a generator read only the paths its call site names.
 import { lines, trim, fromBytesOr } from "std/strings"
 import { startsWith } from "std/strpred"
 import { quotedList, vyrnStems } from "./gensrc"
 
-/// The trimmed lines of `file`, without blank lines and `#` comments. An
-/// unreadable file yields none, which reads as "nothing released".
 fn contentLines(file: String) -> Array<String> {
     let body = match readFile(file) {
         Ok(text) => text.copy(),
@@ -27,8 +17,6 @@ fn contentLines(file: String) -> Array<String> {
     return out
 }
 
-/// The release tag in `file`, or "". A tag starts with `v`, the only shape
-/// `release.yml` publishes, so a damaged file reads as "nothing released".
 fn releaseTagOf(file: String) -> String {
     let tag = releaseField(file, 0)
     if !startsWith(tag, "v") {
@@ -37,8 +25,6 @@ fn releaseTagOf(file: String) -> String {
     return tag
 }
 
-/// Field `i` of the release file, or "", filtered by `safeTag`. The file comes
-/// from a GitHub API response, so it is the one untrusted input here.
 fn releaseField(file: String, i: Int64) -> String {
     let rows = contentLines(file)
     if i >= rows.length {
@@ -47,8 +33,7 @@ fn releaseField(file: String, i: Int64) -> String {
     return safeTag(rows[i])
 }
 
-/// `s` with every byte a version tag or a date is not made of removed. Dropped
-/// rather than escaped, so the emitted literal can never be broken open.
+/// `site/release.txt` comes from the GitHub API: drop, not escape, so the emitted literal cannot break open.
 fn safeTag(s: String) -> String {
     let mut out = ""
     for b in bytes(s) {
@@ -59,7 +44,7 @@ fn safeTag(s: String) -> String {
     return out
 }
 
-/// Counts the repository, and emits the answers as a module.
+/// One argument per path: a generator may read only the paths its call site names.
 export gen fn repoFacts(examplesDir: String, stdDir: String, releaseFile: String) -> String {
     let examples = vyrnStems(examplesDir).length
     let mods = vyrnStems(stdDir)
@@ -81,10 +66,8 @@ export gen fn repoFacts(examplesDir: String, stdDir: String, releaseFile: String
 test "a release field keeps what a tag is made of and drops the rest" {
     assertEq(safeTag("v0.1.0-alpha.1"), "v0.1.0-alpha.1")
     assertEq(safeTag("2026-08-11"), "2026-08-11")
-    // A quote or a backslash would end the literal this is written into.
     assertEq(safeTag("v1\" }\nfn evil() -> Int64 { return 0"), "v1fnevil-Int64return0")
     assertEq(safeTag(""), "")
-    // A missing file is "nothing released", not a trap.
     assertEq(releaseField("no/such/release.txt", 0), "")
     assertEq(releaseTagOf("no/such/release.txt"), "")
     assertEq(contentLines("no/such/release.txt").length, 0)

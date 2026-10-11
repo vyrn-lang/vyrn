@@ -1,11 +1,5 @@
 name: Site
 
-# Builds the website and publishes it to GitHub Pages.
-#
-# The site's data is read off the repository while the pages render
-# (`site/app/facts.vyrn` counts examples and std modules), or written by a step
-# below: the git history, the recorded demo and the baked release. The export
-# itself never touches the network.
 on:
   release:
     types: [published, prereleased, edited]
@@ -14,23 +8,15 @@ on:
     types: [completed]
     branches: [main]
   workflow_dispatch:
-  # A pull request that breaks a site module fails here, before merge. No path
-  # filter, because `main` requires `build`. `deploy` and the artifact upload
-  # skip pull requests: a fork's token cannot write Pages.
   pull_request:
   schedule:
-    # A daily run, as a safety net for a missed trigger.
     - cron: '17 6 * * *'
 
-# Least privilege. The build job compiles and runs PR-supplied code, and a
-# pull_request run takes this file from the merge ref, so the workflow-wide
-# grant is read-only. `pages` and `id-token` are on the deploy job alone, which
-# never runs on a pull request.
+# The build job runs pull-request code, so the grant is read-only; `pages` and `id-token` are on `deploy` alone.
 permissions:
   contents: read
 
-# One deployment at a time. Keyed by ref, so a pull-request build cannot cancel
-# the main-line deploy.
+# Keyed by ref, so a pull-request build cannot cancel the main-line deploy.
 concurrency:
   group: pages-${{ github.ref }}
   cancel-in-progress: true
@@ -41,29 +27,18 @@ env:
 
 jobs:
   build:
-    # A failed CI run is not published.
     if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-latest
     steps:
       # actions/checkout@v7.0.1
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          # On workflow_run, github.sha is the default branch's current head,
-          # which can be newer than the commit CI passed; check out the sha CI
-          # validated. On every other event this is empty and checkout uses
-          # github.sha.
+          # On workflow_run, github.sha can be newer than the commit CI passed.
           ref: ${{ github.event.workflow_run.head_sha }}
-          # The whole history and its tags: the site draws commits, merged pull
-          # requests and releases per day.
+          # The whole history: the site draws commits and releases per day.
           fetch-depth: 0
 
       - name: Rust cache
-        # rust-cache, as in `ci.yml`: it refreshes the saved target dir per run
-        # and prunes stale artifacts, where `actions/cache` on a lockfile key
-        # never re-uploads after the first hit. A slot of its own, because this
-        # job also builds `vyrn-play`, which is outside the workspace.
-        # Measured on run 32440081819: 132 s of cargo, which a warm cache
-        # saves. The test step below dominates the job.
         # Swatinem/rust-cache@v2
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
         with:
@@ -77,25 +52,14 @@ jobs:
         run: cargo build --release -p vyrn-cli
 
       - name: The repository's own history
-        # Before the export, which refuses to publish without this file
-        # (`missingHistory` in `site/export.vyrn`). A Vyrn program has no git,
-        # so the history is written here by a script anyone can run locally.
+        # Before the export, which refuses to publish without this file.
         run: |
           mkdir -p site/data
           python3 scripts/site-history.py > site/data/history.json
           wc -c site/data/history.json
 
       - name: Refresh the baked release
-        # `site/release.txt` holds the newest published tag and its date, which
-        # every page that names a version reads. One call to the listing
-        # endpoint (not `/releases/latest`, which hides pre-releases), with the
-        # workflow's token to avoid the anonymous rate limit.
-        #
-        # It cannot fail the build: on a rate limit, an outage or a fork token
-        # that cannot read the API, the committed file stays as it is. An empty
-        # listing clears the tag and date, and the pages render the
-        # nothing-released state. The file's comment header is kept and its two
-        # data lines replaced.
+        # The listing endpoint, because `/releases/latest` hides pre-releases.
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -116,14 +80,9 @@ jobs:
           esac
 
       - name: The output directories
-        # A Vyrn program cannot create a directory, and the export writes one
-        # page per std module, guide chapter and registry package.
         run: mkdir -p out/docs/std out/guide out/web out/tooling out/explore
 
       - name: The native route's two tools, for programs outside this checkout
-        # A test that builds natively does it in a scratch project, which pins
-        # nothing, so this checkout's `vyrn.lock` cannot answer there. The paths
-        # are exported once, read off the compiler's own resolution of the pin.
         run: |
           set -eu
           compiler/target/release/vyrn update --locked wabt >/dev/null
@@ -134,29 +93,13 @@ jobs:
           echo "VYRN_WASM2C=$wasm2c" >> "$GITHUB_ENV"
           echo "VYRN_SIMDE=$simde" >> "$GITHUB_ENV"
       - name: A minute with Vyrn, recorded
-        # After the CLI build, because it runs that binary, and before the
-        # export, which refuses to publish without this file (`missingDemo` in
-        # `site/export.vyrn`). Before the long test step too, so a broken input
-        # fails early. Seven steps in a scratch directory: `vyrn new`, the files
-        # it wrote, `vyrn run`, one edit, `vyrn test`, `vyrn build`, and the
-        # binary. Every line of output on the index comes from this run.
+        # After the CLI build, which it runs, and before the export, which refuses to publish without it.
         run: |
           python3 scripts/site-demo.py --vyrn compiler/target/release/vyrn > site/data/demo.json
           wc -c site/data/demo.json
 
       - name: The site's own tests
-        # The export checks that every navigation row points at a route that
-        # exists and that every route answers as a document and as data; the
-        # modules check the highlighter, the chart geometry and the counts.
-        #
-        # A glob, so a new module is tested without editing this list. A file
-        # with no test blocks prints "no tests" and exits 0, so the floor is the
-        # number of blocks declared in the source, per file (the rule
-        # `compiler/vyrn-cli/tests/std_suite.rs` applies to `std/`): a block
-        # that stops being discovered fails with both numbers.
-        #
-        # The export runs first because it warms the generator cache under
-        # `~/.vyrn`, which every module after it shares.
+        # The export runs first: it warms the generator cache under `~/.vyrn`.
         run: |
           set -euo pipefail
           bin=compiler/target/release/vyrn
@@ -176,9 +119,6 @@ jobs:
           done
           echo "site: $total test blocks ran"
       - name: The guide's programs
-        # Every code block in the guide is a file here, and the export imports
-        # and calls each one, so a program that does not compile fails the
-        # build. This runs their own `test` blocks, which the export does not.
         run: |
           bin=compiler/target/release/vyrn
           for f in site/guide/*.vyrn; do
@@ -186,31 +126,13 @@ jobs:
           done
 
       - name: The markup rules
-        # `std/vyx-hints` checks every `.vyx` file for the markup defects
-        # html-validate names (a `th` with no `scope`, a `tr` directly in a
-        # `table`, an inline `style`, an `input` with no `type`, and others).
-        # The rules are errors. A program of its own, so a broken template fails
-        # this step and not the export. It prints the number of files it
-        # checked, so a file that stops being discovered shows as a smaller
-        # number.
         run: compiler/target/release/vyrn run site/markup.vyrn
 
       - name: Formatting
         run: compiler/target/release/vyrn fmt --check site/app/*.vyrn site/guide/*.vyrn site/export.vyrn site/markup.vyrn
 
       - name: The playground module
-        # The compiler's front end as WebAssembly (`compiler/vyrn-play`). It is
-        # outside the workspace and is built from its own directory: its
-        # `.cargo/config.toml` sets the linker's stack size, and cargo reads that
-        # file from the working directory upward. A `--manifest-path` build from
-        # elsewhere gets wasm-ld's 1 MB default, which the compiler's recursion
-        # overflows on a deeply nested program.
-        #
-        # The module compiles and does not run: it answers with the program's
-        # own wasm module, which the page runs with `web/wasi-min.js`.
-        #
-        # `writeFile` takes a String, so the export cannot copy a wasm module;
-        # this step puts it in the output.
+        # Built from its own directory: its `.cargo/config.toml` sets the stack size the compiler's recursion needs.
         working-directory: compiler/vyrn-play
         run: |
           rustup target add wasm32-unknown-unknown
@@ -220,40 +142,24 @@ jobs:
           ls -l ../../out/play.wasm
 
       - name: The playground's own checks
-        # Span offsets, the diagnostics shape, and which answer `play_compile`
-        # gives, on the host where a failure is readable. What the emitted
-        # module does is the parity suite's concern in `vyrn-cli`.
         working-directory: compiler/vyrn-play
         run: cargo test --release
 
       - name: Render every page
-        # One `route()` call per path, twice: the document and the
-        # soft-navigation payload beside it. The same program copies the
-        # stylesheet, the site scripts and the browser runtimes, and a generator
-        # reads the reference pages off `std/`.
         run: compiler/target/release/vyrn run site/export.vyrn out
 
       - name: The site's node tests
-        # They check the tree the step above wrote, which is why they run here
-        # and not beside the other node tests in `ci.yml`. Among them:
-        # `basepath.test.mjs` serves `out/` under three mount points (one
-        # nested) and fetches every page, every URL each page names, both wasm
-        # modules and every fragment, and also checks `file://`, all from one
-        # unchanged artifact. `installspec.test.mjs` checks that every
-        # registry install specifier resolves under the compiler's grammar. A
-        # glob, so a new test file runs without editing this step.
+        # After the export: they check the tree it wrote.
         run: node --test "site/test/*.test.mjs"
 
-        # actions/upload-pages-artifact@v5.0.0
+      # actions/upload-pages-artifact@v5.0.0
       - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9
-        # A pull request builds and tests; it uploads nothing.
         if: github.event_name != 'pull_request'
         with:
           path: out
 
   deploy:
     needs: build
-    # A pull request builds the site and runs its tests; it does not publish.
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     permissions:

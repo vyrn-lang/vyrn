@@ -1,20 +1,14 @@
 <script>
-// GET /guide/[chapter]: one chapter of the book. The prose is in
-// `site/app/guide.vyrn`; a code block is a program in `site/guide/` that ran
-// while the page rendered, and its output is what it printed. A slug that is
-// not a chapter renders the 404 page.
 import { Head, PageError, ParamQuery, notFound, paramQuery } from "std/ui"
 import { pageHeadWith } from "../../nav"
 import { Chapter, Section, chapterArea, chapterBlurb, chapterCount, chapterOf, chapterKnown, chapterNumber, chapterHref, chapterNavHtml, sectionBody } from "../../guide"
 import { mdUrl, askClaudeUrl } from "../../pagemd"
-// The plates of the chapter that compares languages.
 import { specSet } from "../../snippets"
 import { inlineCode } from "../../code"
 import { TreeGroup, areaTree } from "../../docshell"
 import { Icon } from "../../icons"
 params { chapter: String }
 
-/// One chapter, with the number the rail prints beside it.
 type ChapterPage = { n: Int64, chapter: Chapter }
 
 export fn head(d: ChapterPage) -> Head {
@@ -26,26 +20,20 @@ export fn data() -> ParamQuery<Params, Result<ChapterPage, PageError>> {
 }
 
 fn fetchChapter(p: Params) -> Result<ChapterPage, PageError> {
-    // A slug from another shelf is not this route's page: `/guide/testing` is
-    // a static stub beside this file, and `/tooling/testing` is the page.
     if !chapterKnown(p.chapter) || chapterArea(p.chapter) != "guide" {
         return Err(notFound(p.chapter + " is not a chapter of the guide"))
     }
     return Ok(ChapterPage { n: chapterNumber(p.chapter), chapter: chapterOf(p.chapter) })
 }
 
-/// The sidebar for this page: the book's contents, with this chapter marked.
 fn tree(here: String) -> Array<TreeGroup> {
     return areaTree("guide", here)
 }
 
-/// The link to one section of this chapter. Built here because a template
-/// attribute cannot hold a string literal.
 fn sectionHref(s: Section) -> String {
     return "#" + s.anchor
 }
 
-/// The Open-in-Claude link for this chapter.
 fn claudeHref(slug: String, title: String) -> String {
     return askClaudeUrl(chapterHref(slug), title)
 }
@@ -69,9 +57,6 @@ fn claudeHref(slug: String, title: String) -> String {
             <span>Chapter {{ data.n }} of {{ chapterCount("guide") }}</span>
         </nav>
         <div class="docutils">
-            <!-- A LINK to the file the export writes beside this page;
-                 `widgets.js` turns a press into a clipboard write when the
-                 browser has a clipboard. Without script it is the file. -->
             <a class="btn" :href="mdUrl(chapterHref(data.chapter.slug))" data-copy-md>Copy page</a>
             <details class="pagemenu">
                 <summary aria-label="More page actions"><span class="gl">▾</span></summary>
@@ -92,9 +77,7 @@ fn claudeHref(slug: String, title: String) -> String {
     <section class="band" v-for="s in data.chapter.sections" :key="s.anchor" :id="s.anchor">
         <h2>{{ s.heading }}</h2>
         <div v-html="sectionBody(s)"></div>
-        <!-- The same task in four languages; the three others are quoted,
-             not run. Tabs, not a grid: in a two-column grid at 1440px a
-             461px line gets 375px and clips. Without script the panes stack. -->
+        <!-- Tabs, not a grid: a two-column grid clips the longest line at 1440px. -->
         <div class="plate specplate" data-tabs v-if="s.specs.byteLength > 0">
             <div class="tabs">
                 <button type="button" v-for="n in specSet(s.specs)" :key="n.id" :data-tab="n.id">{{ n.label }}</button>
@@ -109,7 +92,6 @@ fn claudeHref(slug: String, title: String) -> String {
 
     <nav class="pager" aria-label="Chapters" v-html="chapterNavHtml(data.chapter.slug)"></nav>
 
-    <!-- This chapter's sections, from the array the `<h2>`s render from. -->
     <aside class="onpage" v-if="data.chapter.sections.length >= 3">
         <p class="eyebrow">On this page</p>
         <a v-for="s in data.chapter.sections" :key="s.anchor" :href="sectionHref(s)">{{ s.heading }}</a>

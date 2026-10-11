@@ -1,5 +1,4 @@
 <script>
-// GET /tooling: the Tooling area's contents, from `areaChapters("tooling")`.
 import { Head } from "std/ui"
 import { pageHeadOf } from "../../nav"
 import { Chapter, areaGroups, groupChapters, chapterHref } from "../../guide"
@@ -10,24 +9,18 @@ export fn head() -> Head {
     return pageHeadOf("/tooling")
 }
 
-/// This shelf's groups, as the sidebar prints them.
 fn groups() -> Array<String> {
     return areaGroups("tooling")
 }
 
-/// One group's pages.
 fn of(g: String) -> Array<Chapter> {
     return groupChapters("tooling", g)
 }
 
-/// Whether `g` is the group that also lists Editors. Built here because a
-/// template attribute cannot hold a string literal.
 fn holdsEditors(g: String) -> Bool {
     return g == "Workspace"
 }
 
-/// The sidebar, with nothing marked: the subnav's own row is this landing's
-/// marker.
 fn tree() -> Array<TreeGroup> {
     return areaTree("tooling", "index")
 }
@@ -58,8 +51,6 @@ fn tree() -> Array<TreeGroup> {
                     <a :href="chapterHref(c.slug)">{{ c.title }}</a>
                     <span class="d" v-html="inlineCode(c.lede)"></span>
                 </li>
-                <!-- The one page of this shelf that is not a chapter: the same
-                     hand-listed row the sidebar's Workspace group carries. -->
                 <li v-if="holdsEditors(g)">
                     <a href="/tooling/editors.html">Editors</a>
                     <span class="d">One VS Code extension and one language server, both answering from the compiler front end itself.</span>

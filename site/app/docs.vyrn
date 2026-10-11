@@ -1,8 +1,3 @@
-/// The standard library reference, as the pages read it.
-///
-/// This is the one call site of `apiDocs` (see `repo.vyrn` for why there is
-/// one). The generated module answers in parallel arrays, because it cannot
-/// name a record type declared here, so this module zips them into records.
 import { apiDocs } from "./apidoc"
 import { docModules, docSummary, docIntro, docNames, docKinds, docSigs, docProse, docLines, docTests, docCount } from apiDocs("../../std")
 import { startsWith } from "std/strpred"
@@ -12,16 +7,10 @@ import { hrefOf } from "./nav"
 import { blob } from "./repo"
 import { blurbFrom } from "./meta"
 
-/// One exported declaration: what it is called, what it is, its signature as
-/// written (already coloured), its `///` prose as HTML, and where it is declared.
 export type ApiEntry = { name: String, kind: String, sig: String, prose: String, line: Int64 }
 
-/// One module in the list: its name, its first sentence as HTML, and how many
-/// exports it has.
 export type ApiModule = { name: String, summary: String, count: Int64 }
 
-/// A module's summary without the module's name in front of it, because the
-/// list prints the name in its own column.
 fn shorten(name: String, summary: String) -> String {
     let full = "std/" + name
     if !startsWith(summary, full) {
@@ -34,7 +23,6 @@ fn shorten(name: String, summary: String) -> String {
     return rest
 }
 
-/// Every documented module, sorted.
 export fn apiModules() -> Array<ApiModule> {
     let mut out: Array<ApiModule> = []
     for m in docModules() {
@@ -43,11 +31,8 @@ export fn apiModules() -> Array<ApiModule> {
     return out
 }
 
-/// One named group of the reference index, and the modules in it.
 export type ApiGroup = { name: String, modules: Array<ApiModule>, icon: String }
 
-/// The group a module belongs to: the reference's one hand-written table. A
-/// module it does not name lands in the last group, where a reader sees it.
 fn groupOf(m: String) -> String {
     let text = ["strings", "strpred", "text", "scan", "codecs", "hash", "num"]
     let data = ["json", "jsonread", "jsondec", "von", "arrays", "math", "slots", "stream", "storage", "random", "symbolmap"]
@@ -70,8 +55,6 @@ fn groupOf(m: String) -> String {
     return "Programs and tools"
 }
 
-/// The groups in the order the page prints them, each with the glyph the
-/// sidebar draws beside its name.
 fn groupDefs() -> Array<Array<String>> {
     return [
         ["Text and bytes", "file"],
@@ -89,7 +72,6 @@ fn groupNames() -> Array<String> {
     return out
 }
 
-/// The glyph name `groupDefs` records for `name`, or "" for a name it does not.
 fn groupIcon(name: String) -> String {
     for d in groupDefs() {
         if d[0] == name {
@@ -99,7 +81,6 @@ fn groupIcon(name: String) -> String {
     return ""
 }
 
-/// Every documented module, in named groups. An empty group is left out.
 export fn apiGroups() -> Array<ApiGroup> {
     let mut out: Array<ApiGroup> = []
     for g in groupNames() {
@@ -116,12 +97,10 @@ export fn apiGroups() -> Array<ApiGroup> {
     return out
 }
 
-/// Whether `m` names a module the reference covers.
 export fn apiKnown(m: String) -> Bool {
     return includes(docModules(), m)
 }
 
-/// The exports of `m`, in declaration order.
 export fn apiEntries(m: String) -> Array<ApiEntry> {
     let names = docNames(m)
     let kinds = docKinds(m)
@@ -137,14 +116,10 @@ export fn apiEntries(m: String) -> Array<ApiEntry> {
     return out
 }
 
-/// `1 export`, `44 exports`.
 export fn exportPhrase(n: Int64) -> String {
     return if n == 1 { "1 export" } else { n.toString() + " exports" }
 }
 
-/// What a module page's card says: the module's first documentation line with
-/// its export count after it. It uses the full `docSummary`, because a card has
-/// no name column for the shortened one to lean on.
 export fn apiBlurb(m: String) -> String {
     if !apiKnown(m) {
         return ""
@@ -152,41 +127,27 @@ export fn apiBlurb(m: String) -> String {
     return blurbFrom(docSummary(m), " " + exportPhrase(docCount(m)) + ".")
 }
 
-/// The module's header block, as HTML.
 export fn apiIntro(m: String) -> String {
     return docIntro(m)
 }
 
-/// The names of the module's `test` blocks: in this repository each is a
-/// sentence about what the module guarantees.
 export fn apiTests(m: String) -> Array<String> {
     return docTests(m)
 }
 
-/// The page that documents `m`.
-///
-/// Built from the path rather than the router's typed helper, which would be an
-/// import cycle; `export.vyrn` checks it against the helper.
 export fn apiHref(m: String) -> String {
     return hrefOf("/docs/std/" + m)
 }
 
-/// The module's source file on GitHub.
 export fn apiSource(m: String) -> String {
     return blob("std/" + m + ".vyrn")
 }
 
-/// The declaration itself, at its line.
 export fn apiSourceLine(m: String, line: Int64) -> String {
     return apiSource(m) + "#L" + line.toString()
 }
 
 test "every signature the reference renders is a whole declaration" {
-    // A truncated signature renders silently; balanced brackets catch it. It
-    // runs here, where the real `std/` reference is generated.
-    //
-    // ponytail: brackets are counted, not parsed, so a bracket inside a string
-    // literal in a signature would be a false alarm. None in `std/` has one.
     let mut total = 0
     for m in apiModules() {
         for e in apiEntries(m.name) {
@@ -242,8 +203,6 @@ test "the groups hold every module, once" {
         assert(g.modules.length > 0)
         seen = seen + g.modules.length
     }
-    // Every module is in exactly one group: this fails only when a group lists
-    // a name twice.
     assertEq(seen, apiModules().length)
 }
 

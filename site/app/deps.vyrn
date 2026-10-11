@@ -1,22 +1,10 @@
-/// The `std/` import graph and the example programs that use each module,
-/// read from `import` lines while the site compiles.
-///
-///     import { moduleDeps } from "./deps"
-///     import { depUses, depUsedBy, depDepth, depExamples } from moduleDeps("../../std", "../../examples")
-///
-/// The lines come from the compiler's lexer through `importsOf` in
-/// `guidecode.vyrn`, so an `import` inside a code quote is a string token and
-/// is never read as an import. `std/tw`, `std/graphql` and `std/cli` hold such
-/// quotes, and a line scan would invent modules from them.
 import { endsWith } from "std/strpred"
 import { includes } from "std/arrays"
 import { importsOf } from "./guidecode"
 import { quotedList, branch, lookup, entriesOf, vyrnStems } from "./gensrc"
 
-/// One file and the `std/` modules it imports.
 type Uses = { path: String, uses: Array<String> }
 
-/// What one file imports, by path.
 gen fn usesOf(dir: String, name: String, shown: String) -> Uses {
     let src = match readFile(dir + "/" + name) {
         Ok(text) => text,
@@ -25,9 +13,6 @@ gen fn usesOf(dir: String, name: String, shown: String) -> Uses {
     return Uses { path: shown.copy(), uses: importsOf(lex(src)).uses.copy() }
 }
 
-/// Every `.vyrn` file under `root/sub`, `depth` levels of subdirectory deep.
-/// `examples/` needs two (`examples/shelf/server/store.vyrn`). An entry without
-/// the extension is taken for a directory; an unreadable one yields nothing.
 gen fn walk(root: String, sub: String, depth: Int64) -> Array<Uses> {
     let dir = if sub.byteLength == 0 { root.copy() } else { root + "/" + sub }
     let mut out: Array<Uses> = []
@@ -44,11 +29,6 @@ gen fn walk(root: String, sub: String, depth: Int64) -> Array<Uses> {
     return out
 }
 
-/// How far a module is from the bottom of the graph: 0 for one that imports no
-/// other `std/` module, otherwise one more than the deepest module it imports.
-///
-/// `walking` holds the path being measured, so a cycle answers 0 rather than
-/// recursing forever.
 gen fn depthOf(m: String, all: Array<String>, edges: Array<Uses>, walking: Array<String>) -> Int64 {
     if includes(walking, m) {
         return 0
@@ -71,7 +51,6 @@ gen fn depthOf(m: String, all: Array<String>, edges: Array<Uses>, walking: Array
     return deepest + 1
 }
 
-/// Reads `stdDir` and `examplesDir`, and emits the graph as one module.
 export gen fn moduleDeps(stdDir: String, examplesDir: String) -> String {
     let all = vyrnStems(stdDir)
     let mut edges: Array<Uses> = []
@@ -89,7 +68,6 @@ export gen fn moduleDeps(stdDir: String, examplesDir: String) -> String {
         for e in edges {
             if e.path == m {
                 for u in e.uses {
-                    // An import of a name `std/` does not hold is dropped.
                     if includes(all, u) && !includes(mine, u) {
                         mine.push(u.copy())
                     }

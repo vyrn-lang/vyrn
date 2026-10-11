@@ -1,61 +1,41 @@
-/// The repository's counts, the newest release, the site's origin and the
-/// install commands.
-///
-/// This is the one call site of `repoFacts`: the generator cache keys on the
-/// argument strings, so a second call spelling a path differently would emit a
-/// second module whose exports collide.
 import { repoFacts } from "./facts"
 import { exampleCount as genExamples, stdCount as genStd, stdModules as genModules, releaseTag as genTag, releaseDate as genDate } from repoFacts("../../examples", "../../std", "../release.txt")
 import { contains } from "std/strpred"
 import { ghBlob, ghRelease } from "./github"
 import { Release, releaseRows } from "./history"
 
-/// Single-file programs in `examples/`.
 export fn exampleCount() -> Int64 {
     return genExamples()
 }
 
-/// Modules in `std/`, all of them written in Vyrn.
 export fn stdCount() -> Int64 {
     return genStd()
 }
 
-/// The `std/` module names, sorted.
 export fn stdModules() -> Array<String> {
     return genModules()
 }
 
-/// A file in this repository, on GitHub.
 export fn blob(path: String) -> String {
     return ghBlob(path)
 }
 
-/// How many ways a program runs: the WebAssembly module, and the native binary
-/// `wasm2c` and `clang` build from the same bytes.
 export fn backendCount() -> Int64 {
     return 2
 }
 
-/// Whether anything has been published. Every sentence about a release is
-/// behind this, and the pages render the "nothing yet" state too.
 export fn hasRelease() -> Bool {
     return releaseTag().byteLength > 0
 }
 
-/// The newest published tag, such as `v0.1.0-alpha.2`, or "" when there is
-/// none.
 export fn releaseTag() -> String {
     return newest().tag
 }
 
-/// The day it was published, as `2026-08-18`.
 export fn releaseDate() -> String {
     return newest().date
 }
 
-/// The newer of two sources: `site/release.txt`, which the workflow refreshes
-/// from the GitHub API and which can go stale, and the newest tag in the
-/// history. `site/export.vyrn` asserts the two agree.
 fn newest() -> Release {
     let baked = Release { tag: genTag(), date: genDate() }
     let rows = releaseRows()
@@ -69,35 +49,23 @@ fn newest() -> Release {
     return baked
 }
 
-/// Whether the newest release is a pre-release.
 export fn releasePre() -> Bool {
     return isPrerelease(releaseTag())
 }
 
-/// Whether `tag` is a pre-release: it carries a suffix. `release.yml` applies
-/// the same rule when it decides whether to pass `--prerelease`.
+/// `release.yml` applies the same rule to `--prerelease`.
 export fn isPrerelease(tag: String) -> Bool {
     return contains(tag, "-")
 }
 
-/// Where this site is published, with the trailing slash.
-///
-/// Every link in a page is relative (`relativize` in `site/export.vyrn`). This
-/// origin is for the three things read outside a page: the releases feed, the
-/// markdown twins and the install commands.
 export fn siteOrigin() -> String {
     return "https://vyrn-lang.github.io/vyrn/"
 }
 
-/// One installer, as a URL on this site. The export copies `install.sh` and
-/// `install.ps1` from the repository root into the published tree, and both
-/// resolve the newest release when they run.
 export fn installScript(name: String) -> String {
     return siteOrigin() + name
 }
 
-/// One install target, and the line that installs it. The targets are shells,
-/// POSIX and PowerShell, because macOS and Linux run the same command.
 export type InstallTarget = { id: String, name: String, cmd: String }
 
 export fn installTargets() -> Array<InstallTarget> {
@@ -115,13 +83,10 @@ export fn installTargets() -> Array<InstallTarget> {
     ]
 }
 
-/// The newest release's page on GitHub, or the release listing when there is
-/// none.
 export fn releaseUrl() -> String {
     return ghRelease(releaseTag())
 }
 
-/// A tag's release page, which holds its archives and `SHA256SUMS`.
 export fn releaseUrlOf(tag: String) -> String {
     return ghRelease(tag)
 }
@@ -133,13 +98,11 @@ test "the repository counts are all positive" {
 
 test "two install commands, and both of them name this site" {
     let rows = installTargets()
-    // Spelled out: a typo here is a 404 nobody sees until an install fails.
     assertEq(rows.length, 2)
     assertEq(rows[0].id, "unix")
     assertEq(rows[0].cmd, "curl -fsSL https://vyrn-lang.github.io/vyrn/install.sh | sh")
     assertEq(rows[1].id, "windows")
     assertEq(rows[1].cmd, "powershell -c \"irm https://vyrn-lang.github.io/vyrn/install.ps1|iex\"")
-    // `assets()` in `site/export.vyrn` publishes the file.
     assertEq(installScript("install.sh"), siteOrigin() + "install.sh")
 }
 
@@ -148,7 +111,6 @@ test "the module list is as long as the module count" {
 }
 
 test "the baked release is a tag, a date, and a rule about the suffix" {
-    // The shape, not today's tag.
     if hasRelease() {
         assertEq(releaseUrl(), "https://github.com/vyrn-lang/vyrn/releases/tag/" + releaseTag())
         assert(releaseUrl().byteLength > "https://github.com/vyrn-lang/vyrn/releases/tag/".byteLength)

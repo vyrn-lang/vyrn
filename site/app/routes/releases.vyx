@@ -1,23 +1,10 @@
 <script>
-// GET /releases: the changelog. The latest version heads the page with the
-// stat tiles and the highlights, then every release ever tagged. Installing is
-// one link to `/install`.
-//
-// The newest tag is baked: `site/release.txt` is refreshed from GitHub before
-// each build and reconciled in `../repo` against the repository's tags.
-// Whether it is a pre-release is the tag's own suffix.
-//
-// Each stat tile is arithmetic over a file something else wrote:
-// `site/data/history.json` for the pull requests and the tests, and
-// `app/facts.vyrn` for the examples and the standard library. The archives
-// and platforms of a release live only on GitHub, so no tile counts them.
 import { Head } from "std/ui"
 import { pageHeadOf } from "../nav"
 import { hasRelease, releaseTag, releaseDate, releasePre, releaseUrl, releaseUrlOf, isPrerelease, exampleCount, stdCount, backendCount } from "../repo"
 import { Release, releaseRows, days, testBlockCount, testFileCount } from "../history"
 import { feedName } from "../feed"
 
-/// The feed, as a site-root path the export can rewrite like any other link.
 fn feedHref() -> String {
     return "/" + feedName()
 }
@@ -26,7 +13,6 @@ export fn head() -> Head {
     return pageHeadOf("/releases")
 }
 
-/// The heading, which is a different sentence in each of the two states.
 fn headline() -> String {
     if !hasRelease() {
         return "Nothing is released yet"
@@ -34,7 +20,6 @@ fn headline() -> String {
     return releaseTag()
 }
 
-/// What that release is, in one line.
 fn standing() -> String {
     if !hasRelease() {
         return "There is no versioned release and no published binary."
@@ -43,8 +28,6 @@ fn standing() -> String {
     return "Published " + releaseDate() + " as " + kind + "."
 }
 
-/// What the first tile measures: the pull requests after the tag, or all of
-/// them when there is no tag, because an empty date is `<` every day.
 fn sinceLabel() -> String {
     if hasRelease() {
         return "Since the tag"
@@ -52,8 +35,6 @@ fn sinceLabel() -> String {
     return "All time"
 }
 
-/// Merged pull requests since the baked tag, summed out of the history the
-/// script wrote. Dates are ISO, so `>` on the strings is `>` on the days.
 fn prsSince() -> Int64 {
     let mut n = 0
     for d in days() {
@@ -64,8 +45,7 @@ fn prsSince() -> Int64 {
     return n
 }
 
-/// The eyebrow above the heading. With no release it names no kind: an empty
-/// tag has no suffix, so `kindOf` would answer "stable".
+/// With no release, no kind: an empty tag has no suffix, so `kindOf` would answer "stable".
 fn eyebrow() -> String {
     if !hasRelease() {
         return "Releases"
@@ -73,7 +53,6 @@ fn eyebrow() -> String {
     return "Releases · " + kindOf(releaseTag())
 }
 
-/// Every release, newest first.
 fn releasesNewestFirst() -> Array<Release> {
     let rows = releaseRows()
     let mut out: Array<Release> = []
@@ -92,7 +71,6 @@ fn kindOf(tag: String) -> String {
 
 <template>
 <main class="page wide">
-        <!-- What is published, on the left; what landed since, on the right. -->
         <section class="hero split" id="status">
             <div class="say">
                 <p class="eyebrow">{{ eyebrow() }}</p>

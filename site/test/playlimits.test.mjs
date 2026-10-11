@@ -1,11 +1,3 @@
-// The playground's run limit, and the tooltip that states it in prose.
-//
-// `play.js` holds `RUN_LIMIT_MS`; the tooltip on `/play.html` says "five
-// seconds". This ties the two, so a changed limit cannot leave the tooltip
-// promising another. Recursion has no number to check: no engine counts calls,
-// and a recursion that outgrows the tab's stack ends with `vyrn run`'s trap.
-//
-// Run: node --test site/test/playlimits.test.mjs   (after `vyrn run site/export.vyrn out`)
 import { test } from "node:test";
 import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
@@ -22,7 +14,6 @@ test("the export is there to check", () => {
   if (!page) throw new Error("out/play.html is missing — run `vyrn run site/export.vyrn out` first");
 });
 
-// The one place each number is decided.
 function only(src, re, what) {
   const hits = [...src.matchAll(re)];
   if (hits.length !== 1) throw new Error(`${what}: expected one definition, found ${hits.length}`);
@@ -31,8 +22,6 @@ function only(src, re, what) {
 
 const runLimitMs = Number(only(playJs, /const RUN_LIMIT_MS = (\d+);/g, "RUN_LIMIT_MS"));
 
-// Whole seconds as the tooltip spells them; a limit this cannot spell fails
-// and says to extend the list.
 const WORDS = ["zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten"];
 
 test("the tooltip's run limit is the limit play.js enforces", () => {

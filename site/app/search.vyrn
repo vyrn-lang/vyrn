@@ -1,10 +1,3 @@
-/// The search index: one JSON file for the whole site, which `widgets.js`
-/// fetches on the first `/` press.
-///
-/// One file, because the overlay shows every section on the first keystroke.
-/// Its four sections are the overlay's headings: Docs (consumer pages, chapters
-/// and their sections), Reference (modules and their exports), Packages and
-/// Releases. The ceiling is 8,000 bytes gzipped.
 import { emit, Json, JsonField } from "std/json"
 import { apiModules, apiEntries, apiHref } from "./docs"
 import { chapterSlugs, chapterOf, chapterHref } from "./guide"
@@ -15,42 +8,31 @@ import { hrefOf } from "./nav"
 import { substring, replace } from "std/strings"
 import { startsWith, contains } from "std/strpred"
 
-/// One row of the index: the section it appears under, its title, where it goes,
-/// and one line about it.
-/// The keys are one byte each to keep the file small; `widgets.js` is the only
-/// reader.
+/// One-byte keys keep the index small; `widgets.js` is the only reader.
 export type FindRow = { s: String, t: String, u: String, d: String }
 
-/// The whole index, in the order the overlay shows it.
 export fn rows() -> Array<FindRow> {
     let mut out: Array<FindRow> = []
-    // Docs: the consumer pages, then every shelf of the documentation.
     for m in pageMetas() {
         out.push(FindRow { s: "Docs", t: m.title.copy(), u: hrefOf(m.path), d: m.blurb.copy() })
     }
     for slug in chapterSlugs() {
         let ch = chapterOf(slug)
         out.push(FindRow { s: "Docs", t: ch.title.copy(), u: chapterHref(slug), d: oneLine(ch.lede) })
-        // Each section's `<section>` element carries its anchor.
         for sec in ch.sections {
             out.push(FindRow { s: "Docs", t: "\{ch.title} — \{sec.heading}", u: "\{chapterHref(slug)}#\{sec.anchor}", d: oneLine(firstOf(sec.prose)) })
         }
     }
-    // Reference: a module, then each name it exports.
     for mod in apiModules() {
         out.push(FindRow { s: "Reference", t: "std/\{mod.name}", u: apiHref(mod.name), d: oneLine(mod.summary) })
         for e in apiEntries(mod.name) {
-            // The kind, not the signature: with signatures the index measured
-            // 13,483 bytes gzipped. No `#e-<name>` fragment either: `widgets.js`
-            // derives it from the title, which saved 1,199 gzipped bytes, and
-            // `site/test/search.test.mjs` checks the id exists on the page.
+            // No signature and no `#e-` fragment, to stay under the ceiling; `widgets.js` derives the fragment from the title.
             out.push(FindRow { s: "Reference", t: "\{e.name} — std/\{mod.name}", u: apiHref(mod.name), d: e.kind.copy() })
         }
     }
     for p in packages() {
         out.push(FindRow { s: "Packages", t: p.name.copy(), u: packageHref(p.slug), d: oneLine(p.summary) })
     }
-    // Releases: the page, and the newest release.
     out.push(FindRow { s: "Releases", t: "Releases", u: hrefOf("/releases"), d: "Every published release, and how a release is made." })
     if hasRelease() {
         let kind = if releasePre() { "pre-release" } else { "release" }
@@ -59,7 +41,6 @@ export fn rows() -> Array<FindRow> {
     return out
 }
 
-/// The first element of `xs`, or "".
 fn firstOf(xs: Array<String>) -> String {
     if xs.length == 0 {
         return ""
@@ -67,20 +48,14 @@ fn firstOf(xs: Array<String>) -> String {
     return xs[0].copy()
 }
 
-/// `text`, which is HTML the site generated, as one line of plain words cut to
-/// 60 bytes.
 fn oneLine(text: String) -> String {
     let flat = replace(replace(stripTags(text), "\n", " "), "  ", " ")
-    // A result row on a phone shows 60 bytes.
     if flat.byteLength <= 60 {
         return flat.copy()
     }
     return substring(flat, 0, boundaryAt(flat, 59)) + "…"
 }
 
-/// The largest offset at or below `max` that is a character boundary, because
-/// `substring` traps inside a multi-byte character. A continuation byte is
-/// `10xxxxxx`.
 fn boundaryAt(text: String, max: Int64) -> Int64 {
     let mut at = max
     while at > 0 && text[at] >= 128 && text[at] < 192 {
@@ -89,9 +64,6 @@ fn boundaryAt(text: String, max: Int64) -> Int64 {
     return at
 }
 
-/// The index as JSON, with no whitespace. It takes the rows rather than calling
-/// `rows()`, because the export also needs their count and `rows()` measured
-/// 740 ms.
 export fn indexJsonOf(all: Array<FindRow>) -> String {
     let mut items: Array<Json> = []
     for r in all {
@@ -100,7 +72,6 @@ export fn indexJsonOf(all: Array<FindRow>) -> String {
     return emit(JArr(items))
 }
 
-/// The file the index publishes as, beside the pages.
 export fn indexName() -> String {
     return "search.json"
 }
@@ -130,11 +101,9 @@ test "the index covers every section, and the counts are the census's" {
     assertEq(pkg, packages().length)
     assertEq(rel, if hasRelease() { 2 } else { 1 })
     assertEq(all.length, docs + ref + pkg + rel)
-    // A floor, because `std/` grows.
     assert(all.length >= 440)
 }
 
-/// How many sections the book has, over every chapter.
 fn sectionCount() -> Int64 {
     let mut n = 0
     for slug in chapterSlugs() {
@@ -143,7 +112,6 @@ fn sectionCount() -> Int64 {
     return n
 }
 
-/// How many names the reference documents, over every module.
 fn exportCount() -> Int64 {
     let mut n = 0
     for m in apiModules() {
@@ -157,13 +125,9 @@ test "no row is empty, and no row points at nothing" {
         assert(r.t.byteLength > 0)
         assert(r.u.byteLength > 0)
         assertEq(r.u[0], '/')
-        // A description may be empty, and never carries markup.
         assert(!contains(r.d, "<"))
         assert(!contains(r.d, "\n"))
-        // A generated line is cut to 60 bytes plus an ellipsis; a page blurb
-        // is capped by `meta.blurbLimit`.
         assert(r.d.byteLength <= 160)
-        // Only a chapter section row carries a fragment.
         if r.s == "Reference" {
             assert(!contains(r.u, "#"))
         }

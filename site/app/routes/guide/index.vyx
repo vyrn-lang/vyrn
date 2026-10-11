@@ -1,5 +1,4 @@
 <script>
-// GET /guide: the book's contents, from the book's own `chapters()`.
 import { Head } from "std/ui"
 import { pageHeadOf } from "../../nav"
 import { Chapter, areaGroups, groupChapters, chapterHref, chapterCount, blockCount } from "../../guide"
@@ -10,17 +9,14 @@ export fn head() -> Head {
     return pageHeadOf("/guide")
 }
 
-/// The book's groups, as the sidebar prints them.
 fn groups() -> Array<String> {
     return areaGroups("guide")
 }
 
-/// One group's chapters.
 fn of(g: String) -> Array<Chapter> {
     return groupChapters("guide", g)
 }
 
-/// The sidebar: the book's contents, with the Overview marked.
 fn tree() -> Array<TreeGroup> {
     return areaTree("guide", "index")
 }

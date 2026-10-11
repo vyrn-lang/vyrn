@@ -1,37 +1,21 @@
-/// The recorded terminal demo the index shows: `vyrn new`, the files it wrote,
-/// `vyrn run`, one edit, `vyrn test`, `vyrn build` and the binary.
-///
-/// The export cannot start a process, so `scripts/site-demo.py` runs the real
-/// binary before the export and writes `site/data/demo.json`. `site/export.vyrn`
-/// refuses to publish when the file is missing or does not parse
-/// (`demoError`). `site/data/demo.fixture.json` is three fake steps stamped
-/// `vyrn 0.0.0-fixture`, committed so the tests run on a clone that never
-/// recorded anything.
 import { fieldsOf, itemsOf, fieldAt, tagOf } from "std/jsondec"
 import { readData } from "./history"
 
-/// One recorded step: what was typed, what came back, and one line of prose
-/// about it. `cmd` is empty for the two steps that are not a command: the file
-/// listing and the edit.
 export type DemoStep = { id: String, title: String, cmd: String, out: String, note: String }
 
-/// Where the workflow writes the recording, relative to the repository root.
 export fn demoPath() -> String {
     return "site/data/demo.json"
 }
 
-/// The command that writes it.
 export fn demoCommand() -> String {
     return "python scripts/site-demo.py --vyrn compiler/target/release/vyrn > " + demoPath()
 }
 
-/// Whether the steps are the fixture's rather than a real run's.
 export fn demoIsFixture() -> Bool {
     loadDemo()
     return fromFixture
 }
 
-/// Why the demo cannot be drawn, or "" when it can.
 export fn demoError() -> String {
     loadDemo()
     return corrupt.copy()
@@ -44,7 +28,6 @@ let mut version = ""
 let mut recordedOn = ""
 let mut corrupt = ""
 
-/// Reads the file, once.
 fn loadDemo() {
     if loaded {
         return
@@ -67,27 +50,22 @@ fn loadDemo() {
     }
 }
 
-/// The recorded steps, in order.
 export fn demoSteps() -> Array<DemoStep> {
     loadDemo()
     return stepRows.copy()
 }
 
-/// The build that printed the output, as `vyrn --version` printed it.
 export fn demoVersion() -> String {
     loadDemo()
     return version.copy()
 }
 
-/// The day it was recorded.
 export fn demoRecorded() -> String {
     loadDemo()
     return recordedOn.copy()
 }
 
 test "the recording parses into steps a page could draw" {
-    // The fixture on a clone that never ran the recorder, the real file
-    // otherwise.
     let steps = demoSteps()
     assert(steps.length >= 3)
     for s in steps {

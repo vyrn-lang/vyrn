@@ -1,5 +1,4 @@
 <script>
-// GET /compare: a redirect stub to `/benchmarks` (see `philosophy.vyx`).
 import { Head } from "std/ui"
 import { pageHead, hrefOf } from "../nav"
 
@@ -7,7 +6,6 @@ export fn head() -> Head {
     return pageHead("Moved to Benchmarks — Vyrn")
 }
 
-/// Where this stub sends a reader.
 fn target() -> String {
     return hrefOf("/benchmarks")
 }

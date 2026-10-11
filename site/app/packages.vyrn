@@ -1,13 +1,3 @@
-/// The registry: the example projects someone outside this repository can
-/// install with `vyrn add`.
-///
-/// A package is a project under `examples/` with a module to offer: the module
-/// with the most exports that is not one of its own entry points. Its path is
-/// what the `github:` specifier names, and its exports are what the `import`
-/// line names. The standard library ships with the compiler, so it is not here.
-/// Files are read at render time, relative to the repository root, and the
-/// export names come from a line scan (`exportNames`), because `lex()` runs
-/// only inside a generator.
 import { JsonField } from "std/json"
 import { parseJson } from "std/jsonread"
 import { fieldsOf, fieldAt, tagOf } from "std/jsondec"
@@ -22,28 +12,18 @@ import { joinWith, substring, indexOf, lastIndexOf, trim, replace, lines, split 
 import { startsWith, endsWith, contains } from "std/strpred"
 import { entriesOf } from "./gensrc"
 
-/// One package, as a card states it: what it is called, what kind it is, one
-/// line about it, and the two numbers a reader weighs a dependency by.
 export type Package = { slug: String, name: String, kind: String, summary: String, exports: Int64, deps: Int64, href: String }
 
-/// One artifact a project declares: the name it is built under, the entry
-/// module, and where it runs.
 export type Artifact = { name: String, entry: String, target: String }
 
-/// One link from a package page to the reference page of a module it needs.
 export type PkgLink = { name: String, href: String }
 
-/// What a package offers: the module a reader installs, the specifier that
-/// fetches it, the alias `vyrn add` records for it, and the names that module
-/// exports.
 export type Offer = { path: String, spec: String, alias: String, exports: Array<String> }
 
-/// Where the example projects live, relative to the repository root.
 fn examplesDir() -> String {
     return "examples"
 }
 
-/// The example directories that hold a `vyrn.json`, in listing order.
 let mut slugs: Array<String> = []
 
 fn projectSlugs() -> Array<String> {
@@ -60,8 +40,6 @@ fn projectSlugs() -> Array<String> {
     return out
 }
 
-/// Every file this module reads, read once: rereading them made the `/explore`
-/// pages 12 s of a 95 s export.
 let mut files: Map<String, String> = [:]
 
 fn fileText(path: String) -> String {
@@ -76,12 +54,10 @@ fn fileText(path: String) -> String {
     return body
 }
 
-/// A project's manifest, verbatim, or `""` when the directory holds none.
 fn manifestText(slug: String) -> String {
     return fileText(examplesDir() + "/" + slug + "/vyrn.json")
 }
 
-/// Whether `slug` names a package this site publishes a page for.
 export fn packageKnown(slug: String) -> Bool {
     for p in packages() {
         if p.slug == slug {
@@ -91,7 +67,6 @@ export fn packageKnown(slug: String) -> Bool {
     return false
 }
 
-/// Every package in the registry, in listing order.
 let mut registry: Array<Package> = []
 
 export fn packages() -> Array<Package> {
@@ -100,7 +75,6 @@ export fn packages() -> Array<Package> {
     }
     let mut out: Array<Package> = []
     for slug in projectSlugs() {
-        // A project with only entry points has nothing to offer.
         if offerOf(slug).spec.byteLength > 0 {
             out.push(packageOf(slug))
         }
@@ -109,7 +83,6 @@ export fn packages() -> Array<Package> {
     return out
 }
 
-/// One package, read from its own sources.
 export fn packageOf(slug: String) -> Package {
     return Package {
         slug: slug.copy(),
@@ -122,26 +95,18 @@ export fn packageOf(slug: String) -> Package {
     }
 }
 
-/// What a package page's card says: the package name, then its summary. The
-/// name goes first because three of the four summaries begin alike.
 export fn packageBlurb(p: Package) -> String {
     return blurbFrom(p.name + " — " + p.summary, "")
 }
 
-/// The page one package is published at.
-///
-/// Built from the path, as `docs.apiHref` is, and checked by `export.vyrn`.
 export fn packageHref(slug: String) -> String {
     return hrefOf("/explore/" + slug)
 }
 
-/// The package's source on GitHub.
 export fn packageSource(slug: String) -> String {
     return blob(examplesDir() + "/" + slug)
 }
 
-/// One line about a package, as escaped HTML: the first sentence of the header
-/// of the module it offers, or of its first entry module when it offers none.
 fn summaryOf(slug: String) -> String {
     let offered = offerOf(slug).path
     if offered.byteLength > 0 {
@@ -154,7 +119,6 @@ fn summaryOf(slug: String) -> String {
     return escapeHtml(firstSentence(headerOf(examplesDir() + "/" + slug + "/" + entries[0].entry)))
 }
 
-/// The `///` header at the top of a module, joined into one line.
 fn headerOf(path: String) -> String {
     let src = fileText(path)
     let mut out = ""
@@ -169,8 +133,6 @@ fn headerOf(path: String) -> String {
     return out
 }
 
-/// The first sentence of `prose`, with its backticks dropped, because a card
-/// shows it as text.
 fn firstSentence(prose: String) -> String {
     let plain = replace(prose, "`", "")
     return match indexOf(plain, ". ") {
@@ -179,8 +141,6 @@ fn firstSentence(prose: String) -> String {
     }
 }
 
-/// The `std/` modules any file of a package imports, each linking to its
-/// reference page.
 export fn packageDeps(slug: String) -> Array<PkgLink> {
     let prefix = examplesDir() + "/" + slug + "/"
     let mut out: Array<PkgLink> = []
@@ -194,7 +154,6 @@ export fn packageDeps(slug: String) -> Array<PkgLink> {
     return out
 }
 
-/// Whether `name` is already one of `links`.
 fn named(name: String, links: Array<PkgLink>) -> Bool {
     for l in links {
         if l.name == name {
@@ -204,9 +163,6 @@ fn named(name: String, links: Array<PkgLink>) -> Bool {
     return false
 }
 
-/// Every `.vyrn` module under a project, by path relative to the project, to
-/// `depth` levels of subdirectory. An entry with a dot is a file, not a
-/// directory.
 fn moduleFiles(slug: String, sub: String, depth: Int64) -> Array<String> {
     let root = examplesDir() + "/" + slug
     let dir = if sub.byteLength == 0 { root.copy() } else { root + "/" + sub }
@@ -224,14 +180,6 @@ fn moduleFiles(slug: String, sub: String, depth: Int64) -> Array<String> {
     return out
 }
 
-/// The names one module exports, by a line scan: a line that starts with
-/// `export `, then any of `mut`, `extern` and `gen`, the declaration keyword
-/// and the name, cut at the first `(`, `<`, `:`, `=` or `{`. `export impl`
-/// yields nothing.
-///
-/// ponytail: a `vyrn"..."` code quote can put `export` in column 1, and the
-/// scan would read it. No file under `examples/` has one; the test pins the
-/// counts. The upgrade is reading the names in a generator with `lex()`.
 fn exportNames(path: String) -> Array<String> {
     let src = fileText(path)
     let mut out: Array<String> = []
@@ -246,7 +194,6 @@ fn exportNames(path: String) -> Array<String> {
     return out
 }
 
-/// The name one `export` line declares, or `""` for a line that declares none.
 fn exportName(line: String) -> String {
     let words = split(trim(substring(line, 6, line.byteLength)), " ")
     let mut i = 0
@@ -264,7 +211,6 @@ fn exportName(line: String) -> String {
     return ""
 }
 
-/// A declared name, up to whatever ends it on that line.
 fn cutAt(word: String) -> String {
     let mut out = word.copy()
     for stop in ["(", "<", ":", "=", "{"] {
@@ -276,7 +222,6 @@ fn cutAt(word: String) -> String {
     return trim(out)
 }
 
-/// Whether `path` is one of the project's own artifact entry points.
 fn isEntry(slug: String, path: String) -> Bool {
     for a in artifactsOf(slug) {
         if a.entry == path {
@@ -286,9 +231,6 @@ fn isEntry(slug: String, path: String) -> Bool {
     return false
 }
 
-/// What a package offers: the module with the most exports that is not one of
-/// its entry points. In all four projects that is the wire contract both halves
-/// read. A tie goes to the first in listing order.
 export fn offerOf(slug: String) -> Offer {
     let mut best = ""
     let mut bestNames: Array<String> = []
@@ -309,8 +251,6 @@ export fn offerOf(slug: String) -> Offer {
     }
 }
 
-/// The alias `vyrn add` records with no `--name`: the file stem, so
-/// `shared/wire.vyrn` becomes `wire`.
 fn aliasOf(path: String) -> String {
     if path.byteLength == 0 {
         return ""
@@ -322,35 +262,24 @@ fn aliasOf(path: String) -> String {
     }
 }
 
-/// The command that installs a package; it writes `vyrn.json` and `vyrn.lock`.
 export fn addCommand(slug: String) -> String {
     return "vyrn add " + offerOf(slug).spec
 }
 
-/// What `vyrn add` leaves in `vyrn.json`: the alias, and the specifier it stands
-/// for.
-///
-/// Indented four spaces, as the command's printer writes it.
 export fn manifestShape(slug: String) -> String {
     let o = offerOf(slug)
     return "{\n    \"dependencies\": {\n        \"" + o.alias + "\": \"" + o.spec + "\"\n    }\n}"
 }
 
-/// What `vyrn add` leaves in `vyrn.lock`: the specifier, the immutable URL it
-/// resolved to, and the sha256 of the bytes, tab-separated. The commit and the
-/// hash are placeholders: the page cannot know either.
 export fn lockShape(slug: String) -> String {
     let o = offerOf(slug)
     return o.spec + "\t" + rawUrl(slug) + "\t<sha256>"
 }
 
-/// The URL a specifier resolves to, with the commit `git ls-remote` fills in.
 fn rawUrl(slug: String) -> String {
     return ghRaw("<commit>", examplesDir() + "/" + slug + "/" + offerOf(slug).path)
 }
 
-/// The `import` line a reader writes once the package is added: the alias
-/// `vyrn add` recorded, and every name the module exports.
 export fn importFrom(slug: String) -> String {
     let o = offerOf(slug)
     if o.alias.byteLength == 0 {
@@ -359,11 +288,6 @@ export fn importFrom(slug: String) -> String {
     return "import { " + joinWith(o.exports, ", ") + " } from \"" + o.alias + "\""
 }
 
-/// The artifacts a project declares, by the rule in
-/// `compiler/vyrn-frontend/src/artifacts.rs`: `main` and `server` name native
-/// artifacts, `client` a browser one, and the `artifacts` map spells them out.
-/// An entry named by both is listed once. A manifest that does not parse
-/// yields none.
 export fn artifactsOf(slug: String) -> Array<Artifact> {
     let top = manifestFields(slug)
     let mut out: Array<Artifact> = []
@@ -386,7 +310,6 @@ export fn artifactsOf(slug: String) -> Array<Artifact> {
     return out
 }
 
-/// `list` with `one` on the end, unless something already builds that entry.
 fn withArtifact(list: Array<Artifact>, one: Artifact) -> Array<Artifact> {
     let mut out = list.copy()
     for a in out {
@@ -398,7 +321,6 @@ fn withArtifact(list: Array<Artifact>, one: Artifact) -> Array<Artifact> {
     return out
 }
 
-/// The top-level fields of a project's manifest.
 fn manifestFields(slug: String) -> Array<JsonField> {
     return match parseJson(manifestText(slug)) {
         Ok(j) => fieldsOf(j),
@@ -414,12 +336,10 @@ test "the registry lists projects, and no standard library module is one" {
         assertEq(p.name, "examples/" + p.slug)
         assert(p.summary.byteLength > 0)
         assert(p.exports > 0)
-        // `examples/leak` imports no std module.
         assert(p.deps >= 0)
         assertEq(p.href, "/explore/" + p.slug + ".html")
         assert(!apiKnown(p.slug))
     }
-    // `examples/listing` is an entry point alone, so it is not a package.
     for slug in projectSlugs() {
         assertEq(packageKnown(slug), offerOf(slug).spec.byteLength > 0)
     }
@@ -459,8 +379,6 @@ test "the export scan reads the names the source declares" {
 }
 
 test "every install line is a specifier the compiler's grammar accepts" {
-    // `github:owner/repo@ref/path`, the shape `resolve_to_url` in
-    // `compiler/vyrn-cli/src/remote.rs` parses.
     for p in packages() {
         let slug = p.slug
         let o = offerOf(slug)
@@ -484,15 +402,12 @@ test "every project declares what it builds, and each artifact has a target" {
             assert(a.target == "native" || a.target == "browser" || a.target == "wasi")
         }
     }
-    // `examples/shelf` writes both spellings of its two entry points.
     let shelf = artifactsOf("shelf")
     assertEq(shelf.length, 2)
     assertEq(shelf[0].name, "server")
     assertEq(shelf[0].entry, "server.vyrn")
     assertEq(shelf[0].target, "native")
     assertEq(shelf[1].target, "browser")
-    // `examples/fullstack` writes only the sugar keys, `examples/leak` only the
-    // map.
     assertEq(artifactsOf("fullstack").length, 2)
     assertEq(artifactsOf("leak").length, 2)
     assertEq(artifactsOf("leak")[0].name, "api")

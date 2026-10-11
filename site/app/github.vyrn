@@ -1,35 +1,19 @@
-/// The repository's GitHub name and the URLs the site builds from it.
-///
-/// A leaf that imports nothing, so any module can build a link without an
-/// import cycle; `repo.vyrn` re-exports `ghBlob` as `blob`. Every URL built here
-/// leaves the site, because the site does not host the source.
-
-/// This repository, as GitHub names it.
 fn repoName() -> String {
     return "vyrn-lang/vyrn"
 }
 
-/// A file in this repository, on GitHub.
 export fn ghBlob(path: String) -> String {
     return "https://github.com/" + repoName() + "/blob/main/" + path
 }
 
-/// A file in this repository, as a remote import specifier.
-///
-/// The ref is `main`, because the site is built from `main` and describes the
-/// files there. `vyrn add` resolves it to a commit and records the commit and
-/// the sha256 in `vyrn.lock`; only `vyrn update` moves them.
 export fn ghSpec(path: String) -> String {
     return "github:" + repoName() + "@main/" + path
 }
 
-/// A file in this repository, served raw at `gitRef`: a commit for a lock
-/// line, `main` for a floating one.
 export fn ghRaw(gitRef: String, path: String) -> String {
     return "https://raw.githubusercontent.com/" + repoName() + "/" + gitRef + "/" + path
 }
 
-/// A tag's release page, which is where its archives and its `SHA256SUMS` are.
 export fn ghRelease(tag: String) -> String {
     if tag.byteLength == 0 {
         return "https://github.com/" + repoName() + "/releases"
@@ -42,6 +26,5 @@ test "one repository name, four URL shapes" {
     assertEq(ghSpec("std/json.vyrn"), "github:vyrn-lang/vyrn@main/std/json.vyrn")
     assertEq(ghRaw("main", "install.sh"), "https://raw.githubusercontent.com/vyrn-lang/vyrn/main/install.sh")
     assertEq(ghRelease("v0.1.0"), "https://github.com/vyrn-lang/vyrn/releases/tag/v0.1.0")
-    // No tag links the release listing.
     assertEq(ghRelease(""), "https://github.com/vyrn-lang/vyrn/releases")
 }

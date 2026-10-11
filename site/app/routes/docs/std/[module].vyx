@@ -1,11 +1,4 @@
 <script>
-// GET /docs/std/[module]: one standard library module, generated from its
-// source by `app/apidoc.vyrn`, with its import neighbours and example programs
-// from `app/deps.vyrn`.
-//
-// An export links to the playground only when a guide program imports it,
-// because the link carries a program the site ran. A name that is not a module
-// renders the 404 page.
 import { ApiEntry, apiBlurb, apiEntries, apiIntro, apiKnown, apiSource, apiSourceLine, apiTests, apiHref, exportPhrase } from "../../../docs"
 import { Demo, demoFor, guideUseCount, chapterHref } from "../../../guide"
 import { examplesUsing, usesOfModule, usedByModule } from "../../../stdgraph"
@@ -17,10 +10,8 @@ import { TreeGroup, Pager, docsTree, pagerFor } from "../../../docshell"
 import { Icon } from "../../../icons"
 params { module: String }
 
-/// One module's whole page: its name, its header prose, and its exports.
 type ModuleDoc = { name: String, intro: String, entries: Array<ApiEntry> }
 
-/// The document title names the module.
 export fn head(d: ModuleDoc) -> Head {
     return pageHeadWith("std/" + d.name + " — Vyrn", apiBlurb(d.name))
 }
@@ -36,23 +27,18 @@ fn fetchModule(p: Params) -> Result<ModuleDoc, PageError> {
     return Ok(ModuleDoc { name: p.module.copy(), intro: apiIntro(p.module), entries: apiEntries(p.module) })
 }
 
-/// A count with its noun: `1 test`, `3 tests`.
 fn plural(n: Int64, one: String, many: String) -> String {
     return if n == 1 { "1 " + one } else { n.toString() + " " + many }
 }
 
-/// The anchor an export is linked by; export names are unique in a module.
 fn anchorOf(name: String) -> String {
     return "e-" + name
 }
 
-/// The link to an export, within this page.
 fn hrefFor(name: String) -> String {
     return "#" + anchorOf(name)
 }
 
-/// One neighbour in the module graph: a module this one imports, or one that
-/// imports it.
 type Neighbour = { name: String, href: String }
 
 fn neighbours(names: Array<String>) -> Array<Neighbour> {
@@ -71,7 +57,6 @@ fn importersOfThis(m: String) -> Array<Neighbour> {
     return neighbours(usedByModule(m))
 }
 
-/// One example program that imports this module, linked on GitHub.
 type Sample = { path: String, href: String }
 
 fn samples(m: String) -> Array<Sample> {
@@ -82,14 +67,10 @@ fn samples(m: String) -> Array<Sample> {
     return out
 }
 
-/// The guide program that imports `e` from this module, if the book has one.
 fn demoOf(m: String, e: ApiEntry) -> Demo {
     return demoFor(m, e.name)
 }
 
-/// The tooltip on the guide icon: the chapter, and how many programs use the
-/// export when more than one does. Built here because a template attribute
-/// cannot hold a string literal.
 fn usedInLabel(m: String, e: ApiEntry) -> String {
     let n = guideUseCount(m, e.name)
     let title = demoOf(m, e).title
@@ -99,7 +80,6 @@ fn usedInLabel(m: String, e: ApiEntry) -> String {
     return "Used in the guide: " + title
 }
 
-/// Whether a guide program imports the export; no program, no link.
 fn hasDemo(m: String, e: ApiEntry) -> Bool {
     return demoFor(m, e.name).block.byteLength > 0
 }
@@ -109,17 +89,14 @@ fn demoChapterHref(m: String, e: ApiEntry) -> String {
     return chapterHref(d.chapter) + "#" + d.section
 }
 
-/// The sidebar for this page: the whole reference, with this module marked.
 fn tree(m: String) -> Array<TreeGroup> {
     return docsTree(m)
 }
 
-/// The module before and after this one, taken from that same tree.
 fn pager(m: String) -> Pager {
     return pagerFor(docsTree(m))
 }
 
-/// The Open-in-Claude link for this module's page.
 fn claudeHref(m: String) -> String {
     return askClaudeUrl(apiHref(m), "std/" + m)
 }
@@ -127,9 +104,6 @@ fn claudeHref(m: String) -> String {
 
 <template>
 <main class="page docs docpage">
-    <!-- The whole reference, this module marked. A `<details>`: above 1024px
-         the stylesheet strips the disclosure, and below it the tree is a menu,
-         with no script at either width. -->
     <aside class="docstree">
         <details class="treebox">
             <summary>Reference</summary>
@@ -140,7 +114,6 @@ fn claudeHref(m: String) -> String {
         </details>
     </aside>
 
-    <!-- The crumbs, and the page's two tools. -->
     <div class="crumbrow">
         <nav class="crumbs" aria-label="Breadcrumb">
             <a href="/docs.html">Reference</a>
@@ -196,9 +169,6 @@ fn claudeHref(m: String) -> String {
             <h2><a :href="hrefFor(e.name)">{{ e.name }}</a> <span class="kindpill">{{ e.kind }}</span></h2>
             <pre class="code" v-html="e.sig"></pre>
             <div class="prose" v-html="e.prose"></div>
-            <!-- One row per entry: the source link, and the guide and
-                 playground links as icons whose words are in the tooltip
-                 and the accessible name. -->
             <p class="cap entrycap">
                 <a :href="apiSourceLine(data.name, e.line)">std/{{ data.name }}.vyrn, line {{ e.line }}</a>
                 <span class="entryacts" v-if="hasDemo(data.name, e)">
@@ -235,8 +205,6 @@ fn claudeHref(m: String) -> String {
         <a class="next" v-if="pager(data.name).nextHref.byteLength > 0" :href="pager(data.name).nextHref"><span class="eyebrow">Next</span>{{ pager(data.name).nextLabel }}</a>
     </nav>
 
-    <!-- This page's headings, in document order, as plain links.
-         `widgets.js` marks the one in view. -->
     <aside class="onpage">
         <p class="eyebrow">On this page</p>
         <a href="#about">About</a>

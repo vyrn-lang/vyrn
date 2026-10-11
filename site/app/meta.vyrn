@@ -1,19 +1,8 @@
-/// Each page's title and one-sentence description.
-///
-/// `pageMetas` lists the pages nothing else describes: the landings and the
-/// hand-written leaves. A chapter, a module and a package already carry a
-/// sentence, and `blurbFrom` turns it into a description. `site/export.vyrn`
-/// writes the card meta from these strings, and the search overlay lists the
-/// same rows, so a page says one thing everywhere. A blurb is one sentence of
-/// at most `blurbLimit` bytes.
 import { startsWith, endsWith, contains } from "std/strpred"
 import { substring, indexOf, replace, trimEnd } from "std/strings"
 
-/// A page, its title, and what it is.
 export type PageMeta = { path: String, title: String, blurb: String }
 
-/// The described pages: navigation order, then the pages the masthead does not
-/// name.
 export fn pageMetas() -> Array<PageMeta> {
     return [
         PageMeta { path: "/", title: "Vyrn — a systems language with the expressiveness of TypeScript", blurb: "Types carry the rules that make a value valid. Ownership is a word you write on a parameter. No garbage collector, three backends, one result." },
@@ -32,7 +21,6 @@ export fn pageMetas() -> Array<PageMeta> {
     ]
 }
 
-/// The row for `path`, or a row with an empty title when there is none.
 export fn metaOf(path: String) -> PageMeta {
     for m in pageMetas() {
         if m.path == path {
@@ -42,29 +30,18 @@ export fn metaOf(path: String) -> PageMeta {
     return PageMeta { path: path.copy(), title: "", blurb: "" }
 }
 
-/// Whether `path` has a row here.
 export fn hasMeta(path: String) -> Bool {
     return metaOf(path).title.byteLength > 0
 }
 
-/// The most bytes a description may carry: a card and a search result cut
-/// near here.
 export fn blurbLimit() -> Int64 {
     return 155
 }
 
-/// The fewest bytes a description may carry and still describe the page. The
-/// export asserts every published description clears it.
 export fn blurbFloor() -> Int64 {
     return 50
 }
 
-/// `markup` as plain text with `tail` after it, at most `blurbLimit` bytes.
-///
-/// Tags are dropped and entities decoded, because the result is an attribute.
-/// The cut prefers the last full stop that fits; when that leaves fewer than
-/// `blurbFloor` bytes, it cuts at a word boundary and ends with an ellipsis.
-/// `tail` survives either cut.
 export fn blurbFrom(markup: String, tail: String) -> String {
     let flat = collapse(decodeEntities(stripTags(markup)))
     let room = blurbLimit() - tail.byteLength
@@ -75,12 +52,9 @@ export fn blurbFrom(markup: String, tail: String) -> String {
     if stop >= blurbFloor() {
         return substring(flat, 0, stop) + tail
     }
-    // The ellipsis is three bytes.
     return withoutDanglingJoiner(substring(flat, 0, wordEnd(flat, room - 3))) + "…" + tail
 }
 
-/// `text` without a trailing dash, comma, semicolon or colon left by a cut. A
-/// full stop stays.
 fn withoutDanglingJoiner(text: String) -> String {
     let mut out = trimEnd(text)
     while out.byteLength > 0 {
@@ -95,8 +69,6 @@ fn withoutDanglingJoiner(text: String) -> String {
     return out.copy()
 }
 
-/// `markup` with every tag dropped. A bare `>` in text stays, because the scan
-/// for a tag's `>` starts at its `<`.
 export fn stripTags(markup: String) -> String {
     let mut out = ""
     let mut rest = markup.copy()
@@ -112,16 +84,13 @@ export fn stripTags(markup: String) -> String {
         let tag = substring(rest, at, rest.byteLength)
         rest = match indexOf(tag, ">") {
             Some(close) => substring(tag, close + 1, tag.byteLength),
-            // An unclosed tag takes the rest: the input is the site's own
-            // markup, so this is truncated output.
             None => "",
         }
     }
     return out.copy()
 }
 
-/// `text` with the five entities the site's escapers write decoded. `&amp;`
-/// goes last, so `&amp;lt;` decodes to the text `&lt;`.
+/// `&amp;` goes last, so `&amp;lt;` decodes to `&lt;`.
 export fn decodeEntities(text: String) -> String {
     let lt = replace(text, "&lt;", "<")
     let gt = replace(lt, "&gt;", ">")
@@ -130,16 +99,10 @@ export fn decodeEntities(text: String) -> String {
     return replace(apos, "&amp;", "&")
 }
 
-/// `text` as one line: no newline, and no run of spaces where one was.
 fn collapse(text: String) -> String {
     return replace(replace(text, "\n", " "), "  ", " ")
 }
 
-/// The offset after the last sentence-ending full stop at or below `max`,
-/// or 0 when there is none.
-///
-/// A full stop counts only before a space or the end, so `.vyx` and
-/// `vyrn.json` hold none.
 fn lastSentenceEnd(text: String, max: Int64) -> Int64 {
     let mut best = 0
     let mut i = 0
@@ -152,9 +115,6 @@ fn lastSentenceEnd(text: String, max: Int64) -> Int64 {
     return best
 }
 
-/// The offset to cut `text` at so it is at most `max` bytes and ends on a whole
-/// word. With no space it falls back to a character boundary, because
-/// `substring` traps inside a multi-byte character (`10xxxxxx` bytes).
 fn wordEnd(text: String, max: Int64) -> Int64 {
     if max >= text.byteLength {
         return text.byteLength
@@ -212,18 +172,15 @@ test "no two rows share a title or a blurb" {
 test "a derived blurb is plain text, and short enough to be read whole" {
     assertEq(blurbFrom("the <code>Stream&lt;T&gt;</code> combinators, written in Vyrn.", ""), "the Stream<T> combinators, written in Vyrn.")
     assertEq(decodeEntities("a &amp;lt; b"), "a &lt; b")
-    // A bare `>` before the first tag is text and stays text.
     assertEq(blurbFrom("a > b <em>c</em>", ""), "a > b c")
 }
 
 test "a long sentence is cut where a reader would stop, not where the byte count runs out" {
-    // Two sentences fit and the third does not, so no ellipsis is needed.
     let three = "A gen fn is ordinary Vyrn that runs while the program compiles and returns Vyrn source. RPC, UI, i18n and GraphQL are libraries built this way. None of them is a compiler feature."
     let cut = blurbFrom(three, "")
     assert(cut.byteLength <= blurbLimit())
     assertEq(cut[cut.byteLength - 1], '.')
     assert(!contains(cut, "None of them"))
-    // A first sentence under `blurbFloor` falls back to a word boundary.
     let short = "One binary. vyrn run needs nothing else on your machine, vyrn build writes a native binary, and every other task — tests, benchmarks, formatting, documents — is a subcommand"
     let fallback = blurbFrom(short, "")
     assert(fallback.byteLength > blurbLimit() - 20)
@@ -249,6 +206,5 @@ test "a tag is removed and not escaped" {
     assertEq(stripTags("a <code>b</code> c"), "a b c")
     assertEq(stripTags("plain"), "plain")
     assertEq(stripTags("<b>only</b>"), "only")
-    // An unclosed tag takes the rest of the line rather than leaking a `<`.
     assertEq(stripTags("half <b"), "half ")
 }

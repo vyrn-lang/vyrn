@@ -1,11 +1,4 @@
 <script>
-// GET /explore/[package]: one package. The identity heads the page, the
-// install command and the source sit in a side card, and the two files
-// `vyrn add` writes are behind one `<details>`.
-//
-// The specifier is also carried in `data-spec`, and
-// `site/test/installspec.test.mjs` re-parses each with the grammar
-// `compiler/vyrn-cli/src/remote.rs` applies.
 import { Package, Artifact, packageBlurb, packageKnown, packageOf, packageDeps, packageSource, offerOf, addCommand, manifestShape, lockShape, importFrom, artifactsOf } from "../../packages"
 import { Head, PageError, ParamQuery, notFound, paramQuery } from "std/ui"
 import { pageHeadWith } from "../../nav"
@@ -26,12 +19,10 @@ fn fetchPackage(p: Params) -> Result<Package, PageError> {
     return Ok(packageOf(p.package))
 }
 
-/// `1 export`, `14 exports`.
 fn unitLabel(d: Package) -> String {
     return if d.exports == 1 { "1 export" } else { d.exports.toString() + " exports" }
 }
 
-/// `no dependencies`, `1 dependency`, `6 dependencies`.
 fn depLabel(d: Package) -> String {
     if d.deps == 0 {
         return "no dependencies"
@@ -39,7 +30,6 @@ fn depLabel(d: Package) -> String {
     return if d.deps == 1 { "1 dependency" } else { d.deps.toString() + " dependencies" }
 }
 
-/// `1 artifact`, `2 artifacts`: what the project builds.
 fn buildLabel(d: Package) -> String {
     let n = artifactsOf(d.slug).length
     return if n == 1 { "1 artifact" } else { n.toString() + " artifacts" }
@@ -48,7 +38,6 @@ fn buildLabel(d: Package) -> String {
 
 <template>
 <main class="page pkg">
-    <!-- The name with its badge, the sentence, and the numbers. -->
     <section class="pkghead">
         <p class="eyebrow"><a href="/explore.html">Registry</a></p>
         <div class="pkgtitle">

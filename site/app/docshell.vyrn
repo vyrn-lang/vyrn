@@ -1,9 +1,3 @@
-/// The documentation shell's data: the sidebar trees, the pager and the docs
-/// subnav. `.page.docs` in `site/public/style.css` lays it out.
-///
-/// Every row is generated: the reference tree from `apiGroups()`, an area's
-/// tree from its chapters. The pager walks the tree the sidebar prints, so the
-/// two cannot disagree.
 import { apiGroups, apiHref } from "./docs"
 import { areaChapters, areaGroups, groupChapters, chapterHref } from "./guide"
 import { split } from "std/strings"
@@ -12,24 +6,16 @@ import { book, bookmark, file, archive, link, settings, activity, code } from ic
 import { Html, toHtmlString } from "std/html"
 import { icons, iconAttrs } from "std/icons"
 
-/// One row of the sidebar: where it goes, its label, and `here`, the value of
-/// `aria-current`: `"page"` on the page being read, "" elsewhere.
 export type TreeRow = { href: String, label: String, here: String }
 
-/// A named run of rows, with its glyph drawn.
 export type TreeGroup = { name: String, rows: Array<TreeRow>, icon: String }
 
-/// The links at the foot of the content: the pages before and after this one in
-/// the tree. An empty `href` means there is none.
 export type Pager = { prevHref: String, prevLabel: String, nextHref: String, nextLabel: String }
 
-/// One glyph as markup for `v-html`: decoration beside a printed name.
 fn draw(g: consume Html) -> String {
     return toHtmlString(iconAttrs(g, "", "", ""))
 }
 
-/// The glyph a data table names ("file", "archive"), drawn, or "" for a name
-/// no generated glyph function has.
 fn drawNamed(glyph: String) -> String {
     if glyph == "book" { return draw(book()) }
     if glyph == "bookmark" { return draw(bookmark()) }
@@ -42,13 +28,10 @@ fn drawNamed(glyph: String) -> String {
     return ""
 }
 
-/// `"page"` when `a` and `b` name the same page, and "" when they do not.
 fn mark(a: String, b: String) -> String {
     return if a == b { "page" } else { "" }
 }
 
-/// The reference's sidebar: the import graph page, then every module in its
-/// group. `current` is a module name or a page key such as `"graph"`.
 export fn docsTree(current: String) -> Array<TreeGroup> {
     let mut top: Array<TreeRow> = []
     top.push(TreeRow { href: "/docs/graph.html", label: "The import graph", here: mark(current, "graph") })
@@ -63,8 +46,6 @@ export fn docsTree(current: String) -> Array<TreeGroup> {
     return out
 }
 
-/// Every area of the documentation, in subnav order: key, landing, label and
-/// glyph.
 fn areas() -> Array<Array<String>> {
     return [
         ["guide", "/guide.html", "Guide", "book"],
@@ -75,7 +56,6 @@ fn areas() -> Array<Array<String>> {
     ]
 }
 
-/// The glyph beside a shelf group's name. Group names are unique across areas.
 fn shelfGroupIcon(group: String) -> String {
     let table = [
         ["First steps", "book"],
@@ -95,9 +75,6 @@ fn shelfGroupIcon(group: String) -> String {
     return "file"
 }
 
-/// One area's sidebar: its named groups, each with its chapters in reading
-/// order. Tooling's Workspace group also lists Editors, the one hand-written
-/// row.
 export fn areaTree(area: String, current: String) -> Array<TreeGroup> {
     let mut out: Array<TreeGroup> = []
     for g in areaGroups(area) {
@@ -113,9 +90,6 @@ export fn areaTree(area: String, current: String) -> Array<TreeGroup> {
     return out
 }
 
-/// The marked row's neighbours across the tree's groups, in the order the
-/// sidebar prints them. A tree with nothing marked, as on a landing, gets two
-/// empty hrefs.
 export fn pagerFor(groups: Array<TreeGroup>) -> Pager {
     let mut flat: Array<TreeRow> = []
     for g in groups {
@@ -144,7 +118,6 @@ export fn pagerFor(groups: Array<TreeGroup>) -> Pager {
     }
 }
 
-/// How many rows a tree holds.
 fn treeSize(groups: Array<TreeGroup>) -> Int64 {
     let mut n = 0
     for g in groups {
@@ -166,7 +139,6 @@ test "the reference tree carries every module the library documents, once" {
         all = all + g.modules.length
     }
     assertEq(modules, all)
-    // Plus the graph row.
     assertEq(treeSize(tree), all + 1)
 }
 
@@ -182,7 +154,6 @@ test "exactly one row is marked, and it is the page that asked" {
         }
         assertEq(marked, 1)
     }
-    // A landing marks nothing: the subnav marks it.
     for tree in [docsTree("index"), areaTree("guide", "index")] {
         for g in tree {
             for r in g.rows {
@@ -199,8 +170,7 @@ test "the pager walks the tree the sidebar prints" {
     let landing = pagerFor(docsTree("index"))
     assertEq(landing.prevHref, "")
     assertEq(landing.nextHref, "")
-    // Keep the tree in a binding: a label read out of an unnamed temporary
-    // leaves a hole the release walk cannot skip.
+    // Keep the tree in a binding: a label read out of an unnamed temporary leaves a hole the release walk cannot skip.
     let tree = docsTree("x")
     let first = tree[0].rows[0].label
     assertEq(first, "The import graph")
@@ -232,8 +202,6 @@ test "each area's tree covers its shelf, in its named groups" {
     assertEq(last.rows[last.rows.length - 1].label, "Editors")
 }
 
-/// The docs subnav under the masthead: one link per area, the current one
-/// marked.
 export fn docSubnav(current: String) -> String {
     let mut out = ""
     for it in areas() {

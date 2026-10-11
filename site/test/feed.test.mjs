@@ -1,10 +1,3 @@
-// The releases feed, parsed rather than grepped: a string search cannot see an
-// element left open, a bare `&` or a `<` in a description. The site takes no
-// dependency and node ships no XML parser, so the reader below is small and
-// strict: anything it does not understand throws.
-//
-// What the feed says is checked against `site/data/history.json`, so a feed
-// that drops or invents a release fails.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
@@ -14,12 +7,7 @@ const OUT = path.resolve(import.meta.dirname, "../../out");
 const xml = await readFile(path.join(OUT, "releases.xml"), "utf8");
 const history = JSON.parse(await readFile(path.resolve(import.meta.dirname, "../data/history.json"), "utf8"));
 
-/// Parse `src` into `{ name, attrs, children, text }`, or throw.
-///
-/// It knows the declaration, elements, self-closing elements, double-quoted
-/// attributes, text, and the five named entities the site writes. It does not
-/// know comments, CDATA, processing instructions or namespaces: the input is
-/// one generated file.
+// Node ships no XML parser and the site takes no dependency, so this reader is small and strict.
 function parseXml(src) {
   let i = 0;
   const fail = (why) => {
@@ -29,7 +17,6 @@ function parseXml(src) {
   if (!decl) fail("no XML declaration");
   i = decl[0].length;
   const text = (s) => {
-    // Every `&` is one of the five entities the site writes.
     for (const m of s.matchAll(/&[^;]*;?/g)) {
       if (!["&amp;", "&lt;", "&gt;", "&quot;", "&#39;"].includes(m[0])) {
         i += m.index;
@@ -80,8 +67,6 @@ const channel = child(rss, "channel");
 const items = channel.children.filter((c) => c.name === "item");
 
 test("the reader is strict enough to be worth running", () => {
-  // A parser that accepted anything would make every assertion below vacuous,
-  // so it is shown rejecting each of the four things it exists to catch.
   const bad = [
     ['<?xml version="1.0" encoding="utf-8"?><a><b></a>', "wrong tag"],
     ['<?xml version="1.0" encoding="utf-8"?><a>', "never closed"],
@@ -89,7 +74,6 @@ test("the reader is strict enough to be worth running", () => {
     ["<a></a>", "no declaration"],
   ];
   for (const [src] of bad) assert.throws(() => parseXml(src), `${src} parsed`);
-  // And accepting what the feed is made of.
   assert.equal(parseXml('<?xml version="1.0" encoding="utf-8"?><a x="1"><b/>t &amp; u</a>').text, "t & u");
 });
 
@@ -99,8 +83,6 @@ test("the feed is one RSS 2.0 channel with the elements a reader needs", () => {
   assert.equal(rss.attrs["xmlns:atom"], "http://www.w3.org/2005/Atom");
   assert.equal(child(channel, "title").text, "Vyrn releases");
   assert.ok(child(channel, "description").text.length > 20);
-  // The channel points at the page, and the feed at itself through Atom's
-  // `self` link, so an aggregator handed the file can find its source.
   assert.equal(child(channel, "link").text, "https://vyrn-lang.github.io/vyrn/releases.html");
   const self = child(channel, "atom:link");
   assert.equal(self.attrs.rel, "self");
@@ -109,8 +91,6 @@ test("the feed is one RSS 2.0 channel with the elements a reader needs", () => {
 });
 
 test("every release the history knows is an item, newest first", () => {
-  // Any number of releases, none included: `feed.vyrn`'s own tests cover the
-  // non-empty path.
   const tags = history.releases.map((r) => r.t);
   if (tags.length === 0) {
     assert.match(child(channel, "description").text, /None has been published/);
@@ -123,19 +103,15 @@ test("every release the history knows is an item, newest first", () => {
     const tag = child(it, "title").text;
     const url = `https://github.com/vyrn-lang/vyrn/releases/tag/${tag}`;
     assert.equal(child(it, "link").text, url);
-    // The guid is the link, so an aggregator shows a release once.
     assert.equal(child(it, "guid").text, url);
     assert.equal(child(it, "guid").attrs.isPermaLink, "true");
     assert.ok(child(it, "description").text.length > 20);
-    // A pre-release is named as one.
     const pre = tag.includes("-");
     assert.equal(child(it, "description").text.startsWith("A pre-release"), pre);
   }
 });
 
 test("every pubDate is a date, and it is the day the tag was published", () => {
-  // The day name is arithmetic in `feed.vyrn` (Zeller's congruence), so it is
-  // checked against the platform's calendar.
   for (const it of items) {
     const tag = child(it, "title").text;
     const stamp = child(it, "pubDate").text;
@@ -143,7 +119,6 @@ test("every pubDate is a date, and it is the day the tag was published", () => {
     const parsed = new Date(stamp);
     assert.ok(!Number.isNaN(parsed.getTime()), `${stamp} is not a date any reader can parse`);
     assert.equal(parsed.toISOString(), `${day}T00:00:00.000Z`);
-    // The day name the feed wrote is the day name the calendar gives.
     assert.equal(stamp, parsed.toUTCString());
   }
 });
@@ -153,7 +128,6 @@ test("every page tells a browser where the feed is", async () => {
   for (const page of ["index.html", "releases.html", "docs/std/json.html", "guide/values.html"]) {
     const html = await readFile(path.join(OUT, page), "utf8");
     assert.ok(html.includes(link), `${page} does not declare the feed`);
-    // Relative to the document, like every URL the export writes.
     const up = "../".repeat(page.split("/").length - 1);
     assert.ok(html.includes(`${link}"${up}releases.xml">`), `${page} names the feed at the wrong depth`);
   }
