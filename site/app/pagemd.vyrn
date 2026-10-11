@@ -23,6 +23,7 @@ import { chapterOf, chapterSlugs, chapterHref, chapterArea, blockOf, blockSource
 import { apiModules, apiEntries, apiIntro, apiHref } from "./docs"
 import { published } from "./nav"
 import { siteOrigin } from "./repo"
+import { decodeEntities } from "./meta"
 import { substring, indexOf, replace, trimEnd } from "std/strings"
 import { startsWith } from "std/strpred"
 import { urlEncode } from "std/codecs"
@@ -233,7 +234,7 @@ export fn asMarkdown(html: String) -> String {
             // rest of the string is text with it.
             break
         }
-        out = out + unescape(substring(html, text, i))
+        out = out + decodeEntities(substring(html, text, i))
         let tag = substring(html, i + 1, close)
         let name = tagName(tag)
         if name == "a" {
@@ -263,7 +264,7 @@ export fn asMarkdown(html: String) -> String {
         i = close + 1
         text = i
     }
-    return collapse(trimEnd(out + unescape(substring(html, text, html.byteLength))))
+    return collapse(trimEnd(out + decodeEntities(substring(html, text, html.byteLength))))
 }
 
 /// Where the `>` that closes the tag opening at `at` is, or -1. Every result is
@@ -306,15 +307,6 @@ fn upTo(text: String, close: String) -> String {
         Some(end) => substring(text, 0, end),
         None => text.copy(),
     }
-}
-
-/// `s` with the five entities `escapeHtml` writes turned back into the bytes
-/// they stand for. `&amp;` is LAST, so that an escaped entity — `&amp;lt;` —
-/// becomes the text `&lt;` and not a `<`.
-fn unescape(s: String) -> String {
-    let angles = replace(replace(s, "&lt;", "<"), "&gt;", ">")
-    let quotes = replace(replace(angles, "&quot;", "\""), "&#39;", "'")
-    return replace(quotes, "&amp;", "&")
 }
 
 /// Whether `needle` occurs in `hay`. A `match` arm is an expression, so a caller

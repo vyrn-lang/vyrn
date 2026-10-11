@@ -49,7 +49,7 @@ import { replace, joinWith, substring, trimEnd, toLower } from "std/strings"
 import { startsWith } from "std/strpred"
 import { escapeHtml, terminalHtml, inlineCode } from "./code"
 import { blob } from "./repo"
-import { blurbFrom } from "./meta"
+import { blurbFrom, stripTags } from "./meta"
 
 /// One program on a page: its id, its coloured lines, what it printed, and the
 /// playground link — empty for a block the playground cannot run on its own.
@@ -916,27 +916,6 @@ fn demosFor(module: String, name: String) -> Array<Demo> {
 // ---------------------------------------------------------------------------
 // The gates
 // ---------------------------------------------------------------------------
-
-/// `markup` with every tag removed — what a reader actually reads.
-fn stripTags(markup: String) -> String {
-    let raw = bytes(markup)
-    let mut out = ""
-    let mut plain = 0
-    let mut i = 0
-    let mut inTag = false
-    while i < raw.length {
-        if !inTag && raw[i] == '<' {
-            out = out + substring(markup, plain, i)
-            inTag = true
-        }
-        if inTag && raw[i] == '>' {
-            inTag = false
-            plain = i + 1
-        }
-        i = i + 1
-    }
-    return out + substring(markup, plain, raw.length)
-}
 
 test "every chapter names an area, a slug, a title and at least one section" {
     let all = chapters()

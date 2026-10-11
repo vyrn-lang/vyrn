@@ -156,7 +156,7 @@ fn withoutDanglingJoiner(text: String) -> String {
 /// The scan for the closing `>` starts AT the `<` it found, not at the front of
 /// what is left: `a > b <code>c</code>` has a bare `>` before the first tag, and
 /// a scan from the front would take the text with it.
-fn stripTags(markup: String) -> String {
+export fn stripTags(markup: String) -> String {
     let mut out = ""
     let mut rest = markup.copy()
     while rest.byteLength > 0 {
@@ -324,4 +324,12 @@ test "the tail survives the cut, because it is the fact the prose does not carry
     assert(endsWith(out, " 5 exports."))
     // Decoded, not carried through as an entity a reader would see.
     assert(contains(out, "module's symbol map"))
+}
+
+test "a tag is removed and not escaped" {
+    assertEq(stripTags("a <code>b</code> c"), "a b c")
+    assertEq(stripTags("plain"), "plain")
+    assertEq(stripTags("<b>only</b>"), "only")
+    // An unclosed tag takes the rest of the line rather than leaking a `<`.
+    assertEq(stripTags("half <b"), "half ")
 }

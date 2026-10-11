@@ -17,7 +17,7 @@ import { emit, Json, JsonField } from "std/json"
 import { apiModules, apiEntries, apiHref } from "./docs"
 import { chapterSlugs, chapterOf, chapterHref } from "./guide"
 import { packages, packageHref } from "./packages"
-import { pageMetas } from "./meta"
+import { pageMetas, stripTags } from "./meta"
 import { hasRelease, releaseTag, releaseDate, releasePre } from "./repo"
 import { hrefOf } from "./nav"
 import { substring, indexOf, replace } from "std/strings"
@@ -130,28 +130,6 @@ fn boundaryAt(text: String, max: Int64) -> Int64 {
     return at
 }
 
-/// `text` with every `<…>` removed.
-fn stripTags(text: String) -> String {
-    let mut out = ""
-    let mut rest = text.copy()
-    while rest.byteLength > 0 {
-        let at = firstIndex(rest, "<")
-        if at < 0 {
-            return out + rest
-        }
-        out = out + substring(rest, 0, at)
-        let close = firstIndex(rest, ">")
-        if close < 0 {
-            // An unclosed tag takes the rest of the line with it. The input is
-            // this site's own generated markup, so this is a truncated source
-            // line and not a `<` a reader wrote.
-            return out.copy()
-        }
-        rest = substring(rest, close + 1, rest.byteLength)
-    }
-    return out.copy()
-}
-
 /// Where `needle` first occurs in `hay`, or -1. A `match` arm is an expression,
 /// so a loop that has to branch on an `Option` reads better with the index.
 fn firstIndex(hay: String, needle: String) -> Int64 {
@@ -256,14 +234,6 @@ test "no row is empty, and no row points at nothing" {
             assert(firstIndex(r.u, "#") < 0)
         }
     }
-}
-
-test "a tag is removed and not escaped" {
-    assertEq(stripTags("a <code>b</code> c"), "a b c")
-    assertEq(stripTags("plain"), "plain")
-    assertEq(stripTags("<b>only</b>"), "only")
-    // An unclosed tag takes the rest of the line rather than leaking a `<`.
-    assertEq(stripTags("half <b"), "half ")
 }
 
 test "the index is one JSON array the overlay can read" {
