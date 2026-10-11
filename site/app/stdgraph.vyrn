@@ -396,7 +396,7 @@ export fn graphLede() -> String {
 }
 
 export fn graphIntro() -> String {
-    return "A module sits in the column after the deepest thing it imports, so the drawing reads left to right: nothing on the left needs anything on the right. Point at a module to light its wires."
+    return "A module sits in the column after the deepest thing it imports, so nothing on the left imports anything on the right."
 }
 
 export fn graphCaption() -> String {

@@ -78,9 +78,8 @@ fn commands() -> Array<Command> {
     </aside>
         <section class="hero split">
             <div class="say">
-                <p class="eyebrow">Reference</p>
-                <h1 class="display">Generated from the source</h1>
-                <p class="lede">{{ apiModules().length }} modules and {{ exportCount() }} exports, read off <code>std/</code> itself.</p>
+                <h1 class="display">Reference</h1>
+                <p class="lede">{{ apiModules().length }} modules and {{ exportCount() }} exports, generated from the source in <code>std/</code>.</p>
             </div>
             <div class="finder" data-search>
                 <label class="eyebrow" for="std-q">Search modules and exports</label>
@@ -92,12 +91,12 @@ fn commands() -> Array<Command> {
         <!-- The documentation's areas. Each card's count comes from the
              generator that builds the page it links. -->
         <section class="band" id="areas">
-            <h2>Four places to start</h2>
+            <h2>Contents</h2>
             <ul class="cards areas">
                 <li>
                     <h3><Icon name="bytesize:book"/> The language</h3>
                     <p>{{ chapters().length }} chapters in reading order. Every code block is a program this site compiled and ran while it built.</p>
-                    <p class="ctarow"><a class="cta" href="/guide.html">Start the book</a></p>
+                    <p class="ctarow"><a class="cta" href="/guide.html">Read the guide</a></p>
                 </li>
                 <li>
                     <h3><Icon name="bytesize:code"/> The standard library</h3>
@@ -106,11 +105,11 @@ fn commands() -> Array<Command> {
                 </li>
                 <li>
                     <h3><Icon name="bytesize:settings"/> The tools</h3>
-                    <p>The driver, the formatter, the language server and the VS Code extension — all in one repository.</p>
+                    <p>The driver, the formatter, the language server and the VS Code extension, in one repository.</p>
                     <p class="ctarow"><a class="cta" href="/tooling/editors.html">Set up your editor</a></p>
                 </li>
                 <li>
-                    <h3><Icon name="bytesize:activity"/> How it fits together</h3>
+                    <h3><Icon name="bytesize:activity"/> Import graph</h3>
                     <p>{{ edgeCount() }} imports between the modules, drawn from the <code>import</code> lines themselves. {{ leafCount() }} import nothing else.</p>
                     <p class="ctarow"><a class="cta" href="/docs/graph.html">See the graph</a></p>
                 </li>
@@ -135,8 +134,7 @@ fn commands() -> Array<Command> {
         </section>
 
         <section class="band" id="cli">
-            <p class="eyebrow">The driver</p>
-            <h2>What <code>vyrn</code> does</h2>
+            <h2>Commands</h2>
             <div class="scroller">
             <table>
                 <thead>
@@ -154,8 +152,7 @@ fn commands() -> Array<Command> {
 
         <section class="band split" id="read">
             <div class="say">
-                <p class="eyebrow">Elsewhere</p>
-                <h2>Where to go next</h2>
+                <h2>Further reading</h2>
                 <p><a href="/guide.html">The guide</a> teaches the language in order. <a href="/explore.html">The registry</a> lists what a project pulls in from outside <code>std/</code>.</p>
             </div>
             <ul class="plain">

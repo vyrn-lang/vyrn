@@ -101,8 +101,8 @@ fn editorsMd() -> String {
 fn graphMd() -> String {
     let mut out = "# \{edgeCount().toString()} imports between \{searchRows().length} modules\n\n"
     out = out + asMarkdown(graphLede()) + "\n"
-    out = out + "\n## The library, as it depends on itself\n\n" + asMarkdown(graphIntro()) + "\n\n"
-    out = out + "The drawing is on the page — one node per module, one wire per `import`, and pointing at a module lights its wires.\n"
+    out = out + "\n## Import graph\n\n" + asMarkdown(graphIntro()) + "\n\n"
+    out = out + "The drawing is on the page: one node per module, one wire per `import`. Pointing at a module lights its wires.\n"
     out = out + "\n" + asMarkdown(graphCaption()) + "\n"
     return collapse(out + "\n") + trailer(absolute("/docs/graph.html"))
 }

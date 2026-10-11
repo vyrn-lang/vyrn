@@ -77,8 +77,7 @@ fn graphStyle() -> String {
     </section>
 
     <section class="band" id="graph">
-        <p class="eyebrow">The graph</p>
-        <h2>The library, as it depends on itself</h2>
+        <h2>Import graph</h2>
         <p v-html="graphIntro()"></p>
         <div class="plate">
             <div class="plate-head">
@@ -106,7 +105,7 @@ fn graphStyle() -> String {
 
     <nav class="pager" aria-label="Reference">
         <a class="prev" v-if="pager().prevHref.byteLength > 0" :href="pager().prevHref"><span class="eyebrow">Previous</span>{{ pager().prevLabel }}</a>
-        <a href="#graph">The library, as it depends on itself</a>
+        <a href="#graph">Import graph</a>
     </nav>
 </main>
 </template>
