@@ -1169,6 +1169,157 @@ fn w() -> Int64 {
     assert_eq!(verdicts(src, "w"), ["check array-index"]);
 }
 
+/// A returned `a && b` states what both operands' truth states, through a
+/// name `b` binds: the byte read is gone at the join, and its bounds carry
+/// the fact. Where `b` adds the byte instead, the true return proves only
+/// `a`'s half, and the check stays and traps.
+#[test]
+fn an_and_result_keeps_its_second_operands_facts() {
+    let src = |test: &str| {
+        format!(
+            "fn fits(xs: Array<Int64>, i: Int64, pad: Array<UInt8>) -> Bool {{
+    if pad.length < 1 {{
+        return false
+    }}
+    return i >= 0 && {test}
+}}
+export fn w(xs: Array<Int64>, i: Int64, pad: Array<UInt8>) -> Int64 {{
+    if fits(xs, i, pad) {{
+        return xs[i]
+    }}
+    return 0
+}}
+"
+        )
+    };
+    let calls = |i: i64, pad: i64| {
+        format!(
+            "    let mut pad: Array<UInt8> = []
+    pad.push({pad})
+    print(w(xs, {i}, pad).toString())"
+        )
+    };
+    let proof = src("i < xs.length - Int64(pad[0])");
+    assert_eq!(verdicts(&proof, "w"), ["proved array-index"]);
+    assert_eq!(oracle(&proof, &calls(1, 1), "w").0, "");
+    let witness = src("i < xs.length + Int64(pad[0])");
+    assert_eq!(verdicts(&witness, "w"), ["check array-index"]);
+    let (err, _) = oracle(&witness, &calls(4, 5), "w");
+    assert!(err.contains("array index 4 out of bounds"), "{err}");
+    assert!(
+        !err.contains(vyrn_frontend::trap::PROVED_CHECK_FAILED),
+        "{err}"
+    );
+}
+
+/// An integer field a check divides by is at least one in every record value
+/// when every literal proves it. A literal that stores 0 on one path drops the
+/// fact, and the division stays a check and traps.
+#[test]
+fn a_record_field_divisor_at_least_one_proves_the_division() {
+    let src = |zero: &str| {
+        format!(
+            "type R = {{ n: Int64 }}
+fn make(b: UInt8) -> R {{
+{zero}    return R {{ n: Int64(b) + 1 }}
+}}
+export fn w(r: R, x: Int64) -> Int64 {{
+    return x / r.n
+}}
+"
+        )
+    };
+    let calls = |b: i64| format!("    print(w(make(UInt8({b})), 10).toString())");
+    let proof = src("");
+    let proved = ["proved int-div-zero", "proved int-div-overflow"];
+    assert_eq!(verdicts(&proof, "w"), proved);
+    assert_eq!(oracle(&proof, &calls(3), "w").0, "");
+    let witness = src("    if b == UInt8(7) {
+        return R { n: 0 }
+    }
+");
+    let kept = ["check int-div-zero", "check int-div-overflow"];
+    assert_eq!(verdicts(&witness, "w"), kept);
+    let (err, _) = oracle(&witness, &calls(7), "w");
+    assert!(err.contains("division by zero"), "{err}");
+    assert!(
+        !err.contains(vyrn_frontend::trap::PROVED_CHECK_FAILED),
+        "{err}"
+    );
+}
+
+/// A counter that steps down to one while it is not one keeps `r - 1 >= 0`,
+/// which its index `r - 1` needs. A counter that starts at zero drops the
+/// candidate at the loop's entry, and the read stays a check and traps.
+#[test]
+fn a_counter_down_to_one_proves_its_index_below_it() {
+    let src = |start: &str| {
+        format!(
+            "export fn w(xs: Array<Int64>) -> Int64 {{
+    if xs.length < 1 {{
+        return 0
+    }}
+    let mut s = 0
+    let mut r = {start}
+    while r != 1 {{
+        s = s + xs[r - 1]
+        r = r - 1
+    }}
+    return s
+}}
+"
+        )
+    };
+    let calls = "    print(w(xs).toString())";
+    let proof = src("xs.length");
+    assert_eq!(verdicts(&proof, "w"), ["proved array-index"]);
+    assert_eq!(oracle(&proof, calls, "w").0, "");
+    let witness = src("0");
+    assert_eq!(verdicts(&witness, "w"), ["check array-index"]);
+    let (err, _) = oracle(&witness, calls, "w");
+    assert!(err.contains("array index -1 out of bounds"), "{err}");
+    assert!(
+        !err.contains(vyrn_frontend::trap::PROVED_CHECK_FAILED),
+        "{err}"
+    );
+}
+
+/// A check's goal takes a chain of three premises: `m < r`, `r < n` and
+/// `n <= xs.length` bound `xs[m]`. With one link weakened to `r <= n + 1`
+/// the chain does not hold, and the read stays a check and traps.
+#[test]
+fn a_chain_of_three_premises_proves_an_index() {
+    let src = |link: &str| {
+        format!(
+            "export fn w(xs: Array<Int64>, r: Int64, n: Int64) -> Int64 {{
+    if n > xs.length || {link} || r < 0 {{
+        return 0
+    }}
+    let mut s = 0
+    let mut m = 0
+    while m < r {{
+        s = s + xs[m]
+        m = m + 1
+    }}
+    return s
+}}
+"
+        )
+    };
+    let calls = |r: i64, n: i64| format!("    print(w(xs, {r}, {n}).toString())");
+    let proof = src("r >= n");
+    assert_eq!(verdicts(&proof, "w"), ["proved array-index"]);
+    assert_eq!(oracle(&proof, &calls(2, 3), "w").0, "");
+    let witness = src("r > n + 1");
+    assert_eq!(verdicts(&witness, "w"), ["check array-index"]);
+    let (err, _) = oracle(&witness, &calls(4, 3), "w");
+    assert!(err.contains("array index 3 out of bounds"), "{err}");
+    assert!(
+        !err.contains(vyrn_frontend::trap::PROVED_CHECK_FAILED),
+        "{err}"
+    );
+}
+
 #[test]
 fn a_join_of_constants_keeps_the_values_between_out() {
     let src = "fn w(x: Int64) -> Int64 {
