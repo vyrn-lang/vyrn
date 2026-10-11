@@ -18,20 +18,9 @@ import { quoted, quotedList, branch, lookup } from "./gensrc"
 /// One snippet, under the id the pages ask for.
 type Piece = { id: String, src: String }
 
-/// Every Vyrn snippet the site shows. Each is copied from a file in this
-/// repository (`README.md`, `examples/ownership.vyrn`), so a reader who follows
-/// the link finds the same lines.
+/// Every Vyrn snippet the site shows.
 fn pieces() -> Array<Piece> {
     return [
-        Piece {
-            id: "ownership",
-            src: "fn fullName(first: String, last: String) -> String {
-    let firstSpace = first + \" \" // inner temp - freed inside fullName
-    let whole = firstSpace + last // built by reading firstSpace
-    return whole                  // moved out to the caller
-}
-",
-        },
         // The index's hero editor runs this, so it has a `main`. The editor
         // also needs the raw text, which `hlSource` gives.
         Piece {

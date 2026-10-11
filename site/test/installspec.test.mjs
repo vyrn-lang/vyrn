@@ -41,11 +41,9 @@ async function attribute(dir, name) {
 }
 
 /// `resolve_to_url` in `compiler/vyrn-cli/src/remote.rs`, in JavaScript. The
-/// rules are four lines each and have not moved, bar the
-/// explicit `@ref=<ref>/<path>` form the compiler grew for refs whose own
-/// name carries a `/`; what they cannot do without the network is turn a
-/// floating ref into a commit, and `<sha>` stands where `git ls-remote` would
-/// answer.
+/// explicit `@ref=<ref>/<path>` form names a ref whose own name carries a `/`.
+/// Without the network a floating ref cannot become a commit, so `<sha>` stands
+/// where `git ls-remote` would answer.
 ///
 /// Throws with the compiler's own words for anything that is not a specifier,
 /// so a malformed one fails this gate with the message a user would get.
