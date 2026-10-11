@@ -312,7 +312,14 @@ The module's shape:
   access instead of overwriting data.
 - Values: a scalar lives in a wasm local; an aggregate lives in a frame slot
   and travels as its `i32` address; an aggregate result goes through a hidden
-  leading address. A `read` parameter is used at the caller's address unless
+  leading address. A flat aggregate (`Cx::flat`: a record of one or two scalar
+  fields or a sum of one or two words, with no heap, no declared release and
+  no `where` rule) lives in wasm locals instead, one per part, when every row
+  that names it is one `Fn_::core_flats` admits: the variant or record row
+  that builds it, a switch on its tag, a scalar field read, a store of it into
+  a place with an address, a `return` of it, and its release, which writes
+  nothing. Any other flat name keeps its slot, until each row kind has a form
+  over the parts. A `read` parameter is used at the caller's address unless
   the callee may store into module state that is an aggregate or owns heap
   other than a `String`'s (`Cx::aliasing`), and a `modify` one unless the
   callee may also read any module state, as the effect judgment answers per

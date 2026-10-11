@@ -312,6 +312,37 @@ fn a_let_of_a_nullary_constructor_is_built_in_its_slot() {
     );
 }
 
+/// A flat value its rows only build, match and read a field of lives in wasm locals
+/// (`Fn_::core_flats`): the function claims no frame and stores nothing.
+#[test]
+fn a_flat_value_built_and_matched_takes_no_frame() {
+    let body = wat_func_containing(
+        "type P = { x: Int64, y: Float64 }\n\
+         fn work(k: Int64) -> Int64 {\n\
+         let p = P { x: k, y: 2.0 }\n\
+         let o = Some(p.x + 1234567)\n\
+         match o {\n\
+         Some(v) => {\n\
+         return v\n\
+         }\n\
+         None => {\n\
+         return 0\n\
+         }\n\
+         }\n\
+         }\n\
+         fn main() -> Int64 {\n\
+         print(work(1))\n\
+         return 0\n\
+         }\n",
+        MARK,
+    );
+    assert_eq!(frame_of(&body), 0, "a flat value took a slot:\n{body}");
+    assert!(
+        !body.contains(".store"),
+        "a flat value went through memory:\n{body}"
+    );
+}
+
 /// The witnesses of a result left in a `consume` parameter
 /// (`vyrn_lower::core::returned_param`). `Cell` is 40 bytes and owns heap, `P` owns none.
 const HANDED: &str =

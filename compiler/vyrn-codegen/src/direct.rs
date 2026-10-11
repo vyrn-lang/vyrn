@@ -11,9 +11,11 @@
 //!   wasm block pushes one onto [`Fn_::depth`], because a `return` is a `br` past all of them.
 //! - A body never emits `return`: it would skip the shadow-stack epilogue `wasm::Module::add`
 //!   emits and leak the frame. A body is wrapped in one `block`, and `return` is a `br` to it.
-//! - Scalars live in wasm locals, aggregates in frame slots. On the operand stack an aggregate is
-//!   always the `i32` address of a slot: a parameter is an address the callee copies out of, a
-//!   return is a hidden leading address the callee writes through, a field access is an offset.
+//! - Scalars live in wasm locals, aggregates in frame slots, and a [`Flat`] one the rows only
+//!   build, match, read a field of, store and return in wasm locals ([`Fn_::core_flats`]). On
+//!   the operand stack an aggregate is always the `i32` address of a slot: a parameter is an
+//!   address the callee copies out of, a return is a hidden leading address the callee writes
+//!   through, a field access is an offset.
 //! - An aggregate `if`-expression has no value to leave on the stack, so its slot is allocated
 //!   before the branch and each arm copies into it.
 
@@ -347,6 +349,7 @@ fn compile_inner(
         lambdas: vyrn_frontend::ast::lambdas(program),
         layouts: RefCell::default(),
         reprs: RefCell::default(),
+        flats: RefCell::default(),
         oracle,
         sigs: HashMap::new(),
         rt,
@@ -909,6 +912,40 @@ impl Repr {
     }
 }
 
+/// A small aggregate that owns no heap: a record of one or two scalar fields, or a sum of one
+/// or two words ([`Cx::flat`]). A name of it may live in wasm locals, one per part
+/// ([`Place::Words`]); in memory it has its [`Layout`].
+#[derive(Debug, PartialEq, Eq)]
+struct Flat {
+    layout: Rc<Layout>,
+    /// Each part's offset in the layout and type: a record's fields, or a sum's `Int64` words.
+    parts: Vec<(u32, Type, ValType)>,
+}
+
+impl Flat {
+    /// Stores the parts held in the locals from `first` at the address in local `a`.
+    fn store(&self, cx: &Cx<'_>, b: &mut Frame, a: u32, first: u32) {
+        for (i, (off, ty, _)) in self.parts.iter().enumerate() {
+            b.ins(&Instruction::LocalGet(a));
+            if *off != 0 {
+                b.ins(&Instruction::I32Const(*off as i32));
+                b.ins(&Instruction::I32Add);
+            }
+            b.ins(&Instruction::LocalGet(first + i as u32));
+            b.ins(&cx.store(ty));
+        }
+    }
+
+    /// Takes one fresh local per part, in order, and returns the first.
+    fn locals(&self, b: &mut Frame) -> u32 {
+        let first = b.local(self.parts[0].2);
+        for (_, _, v) in &self.parts[1..] {
+            b.local(*v);
+        }
+        first
+    }
+}
+
 /// What a call to a function needs to know about it.
 #[derive(Clone, PartialEq)]
 struct Sig {
@@ -1096,6 +1133,8 @@ struct Cx<'a> {
     layouts: RefCell<HashMap<Type, Rc<Layout>>>,
     /// [`Cx::repr`]'s answers, by substituted type.
     reprs: RefCell<HashMap<Type, Repr>>,
+    /// [`Cx::flat`]'s answers, by substituted type.
+    flats: RefCell<HashMap<Type, Option<Rc<Flat>>>>,
     /// The check oracle's host imports and its row labels, under
     /// [`vyrn_lower::check::Mode::Count`]; `None` in every other build.
     oracle: Option<Oracle>,
@@ -1396,6 +1435,50 @@ impl<'a> Cx<'a> {
         Ok(r)
     }
 
+    /// The parts of `ty` when it is [`Flat`]: an aggregate of one or two parts, each a scalar
+    /// other than a vector, with no heap, no declared release and no `where` rule.
+    fn flat(&self, ty: &Type) -> Option<Rc<Flat>> {
+        let key = self.sub(ty).into_owned();
+        if let Some(f) = self.flats.borrow().get(&key) {
+            return f.clone();
+        }
+        let f = self.flat_of(&key).map(Rc::new);
+        self.flats.borrow_mut().insert(key, f.clone());
+        f
+    }
+
+    fn flat_of(&self, ty: &Type) -> Option<Flat> {
+        let Ok(Repr::Agg(layout)) = self.repr(ty, 0) else {
+            return None;
+        };
+        let proto = &self.world.ownership.proto;
+        let ruled = matches!(ty, Type::Named(n)
+            if self.types.get(n).is_some_and(|d| d.predicate.is_some()));
+        if ruled
+            || vyrn_frontend::declared::owns_heap(ty, &self.types)
+            || proto.release_kind(ty).is_some()
+            || proto.release_kind(&self.resolve(ty)).is_some()
+        {
+            return None;
+        }
+        let tys: Vec<Type> = match self.resolve(ty) {
+            Type::Record(_) => self.fields(ty)?.into_iter().map(|f| f.ty).collect(),
+            Type::Enum(_) => vec![Type::Int; layout.fields.len()],
+            _ => return None,
+        };
+        if tys.is_empty() || tys.len() > 2 || tys.len() != layout.fields.len() {
+            return None;
+        }
+        let mut parts = Vec::new();
+        for (t, off) in tys.into_iter().zip(&layout.fields) {
+            match self.repr(&t, 0) {
+                Ok(Repr::Scalar(v)) if v != ValType::V128 => parts.push((*off, t, v)),
+                _ => return None,
+            }
+        }
+        Some(Flat { layout, parts })
+    }
+
     /// Why `ty` cannot be lowered, if it cannot.
     ///
     /// Without this, an unresolvable name lowers to `void`, to nothing at all. A validated type
@@ -1505,8 +1588,8 @@ impl<'a> Cx<'a> {
     }
 }
 
-/// Where a binding lives: a wasm local for a scalar, a frame slot for an aggregate, or a fixed
-/// address for module state.
+/// Where a binding lives: a wasm local for a scalar, a frame slot for an aggregate, wasm locals
+/// for a [`Flat`] one, or a fixed address for module state.
 ///
 /// `Static` is its own variant because a frame offset is relative to a per-call base and a
 /// global's address is not. It covers scalar globals too: a wasm global holds one value type and
@@ -1516,6 +1599,9 @@ enum Place {
     Local(u32),
     Slot(u32),
     Static(u32),
+    /// A [`Flat`] value, one part per local from this one ([`Fn_::core_flats`]). It has no
+    /// address, so only the rows that screen admits reach it.
+    Words(u32),
 }
 
 /// The chain a switch is being written as — see [`Fn_::chain_open`].
@@ -1574,11 +1660,11 @@ enum Rel {
 }
 
 impl Place {
-    /// Pushes the address `off` bytes into this place, or `None` for a wasm local, which has no
+    /// Pushes the address `off` bytes into this place, or `None` for wasm locals, which have no
     /// address. So a scalar `modify` argument must be spilled.
     fn addr(self, b: &mut Frame, off: u32) -> Option<()> {
         match self {
-            Place::Local(_) => None,
+            Place::Local(_) | Place::Words(_) => None,
             Place::Slot(base) => {
                 b.slot(base + off);
                 Some(())
@@ -1752,7 +1838,7 @@ impl Dest {
     fn of(p: Place) -> Option<Dest> {
         match p {
             Place::Slot(off) => Some(Dest::Slot(off)),
-            Place::Local(_) | Place::Static(_) => None,
+            Place::Local(_) | Place::Static(_) | Place::Words(_) => None,
         }
     }
 }
@@ -2667,6 +2753,7 @@ impl<'p> Fn_<'_, 'p> {
                     b.ins(&self.cx.load(t, 0));
                 }
             }
+            Place::Words(_) => return unsupported("the address of a value in locals", line),
         }
         Ok(())
     }
@@ -3448,7 +3535,9 @@ impl<'p> Fn_<'_, 'p> {
                     b.ins(&Instruction::I32Const(at as i32))
                         .ins(&Instruction::I32Load(word()));
                 }
-                Place::Slot(_) => return unsupported("an in-place append into a slot", line),
+                Place::Slot(_) | Place::Words(_) => {
+                    return unsupported("an in-place append into a slot", line)
+                }
             }
             b.ins(&Instruction::LocalSet(op));
             Some((f0, op))
@@ -3475,7 +3564,9 @@ impl<'p> Fn_<'_, 'p> {
                     b.ins(&Instruction::Call(self.cx.rt.str_append));
                     b.ins(&Instruction::I32Store(word()));
                 }
-                Place::Slot(_) => return unsupported("an in-place append into a slot", line),
+                Place::Slot(_) | Place::Words(_) => {
+                    return unsupported("an in-place append into a slot", line)
+                }
             }
         }
         if let Some((f0, op)) = taken {
@@ -6418,6 +6509,26 @@ enum Word {
     Boxed,
 }
 
+/// Turns the `i64` word on the stack back into the payload `k` encoded: the inverse of
+/// [`Fn_::encode_word2`] for a payload that is the word.
+fn word_into(b: &mut Frame, k: &Word) {
+    match k {
+        Word::Ext(_) | Word::Float(ValType::F32) => {
+            b.ins(&Instruction::I32WrapI64);
+        }
+        _ => {}
+    }
+    match k {
+        Word::Float(ValType::F32) => {
+            b.ins(&Instruction::F32ReinterpretI32);
+        }
+        Word::Float(_) => {
+            b.ins(&Instruction::F64ReinterpretI64);
+        }
+        _ => {}
+    }
+}
+
 /// Turns the float on the stack into a sum payload's `i64` word by its bits, not its value.
 fn float_into_word(b: &mut Frame, v: ValType) {
     if v == ValType::F32 {
@@ -9157,6 +9268,8 @@ struct Walked {
     /// The check rows walked so far, in row order, and whether a construct ran each
     /// ([`core_check`]).
     checks: Vec<(Check, bool)>,
+    /// Whether each name lives in wasm locals ([`Fn_::core_flats`]).
+    flat: Vec<bool>,
 }
 
 impl<'a, 'p> Fn_<'a, 'p> {
@@ -9248,15 +9361,23 @@ impl<'a, 'p> Fn_<'a, 'p> {
         let Repr::Agg(sl) = self.cx.repr(&sty, line)? else {
             return unsupported("a switch on a non-aggregate", line);
         };
-        // The scrutinee's address, in the scratch local the arm takes for it.
-        if place.addr(b, 0).is_none() {
-            let Place::Local(l) = place else {
-                unreachable!("a place is a slot, a static or a local")
-            };
-            b.ins(&Instruction::LocalGet(l));
-        }
+        // The scrutinee's address, in the scratch local the arm takes for it. A value in
+        // locals has none: the tag is its first word and a payload its slot's word.
+        let words = match place {
+            Place::Words(first) => Some(first),
+            Place::Local(l) => {
+                b.ins(&Instruction::LocalGet(l));
+                None
+            }
+            _ => {
+                place.addr(b, 0);
+                None
+            }
+        };
         let addr = self.scratch(b, ValType::I32, 3);
-        b.ins(&Instruction::LocalSet(addr));
+        if words.is_none() {
+            b.ins(&Instruction::LocalSet(addr));
+        }
         // The arm frees the boxes the binders come out of when the construct owns the value
         // ([`Fn_::frees_boxes`]); no row releases it whole afterwards.
         let free_box = owns;
@@ -9280,11 +9401,19 @@ impl<'a, 'p> Fn_<'a, 'p> {
             .enumerate()
         {
             let arm = &arms[ix];
-            self.chain_enter(b, &mut chain, slot, |b| match probes[ix] {
-                (_, Some(l)) => {
+            self.chain_enter(b, &mut chain, slot, |b| match (probes[ix], words) {
+                ((_, Some(l)), _) => {
                     b.ins(&Instruction::LocalGet(l));
                 }
-                (tag, None) => Self::tag_is(b, addr, tag.map(|t| t as u64)),
+                ((Some(tag), None), Some(first)) => {
+                    b.ins(&Instruction::LocalGet(first));
+                    b.ins(&Instruction::I64Const(tag as i64));
+                    b.ins(&Instruction::I64Eq);
+                }
+                ((None, None), Some(_)) => {
+                    b.ins(&Instruction::I32Const(1));
+                }
+                ((tag, None), None) => Self::tag_is(b, addr, tag.map(|t| t as u64)),
             });
             // A payload's slot depends on the widths before it, so the
             // binder needs the variant's whole payload list. The row binds in payload order.
@@ -9302,6 +9431,17 @@ impl<'a, 'p> Fn_<'a, 'p> {
                     .iter()
                     .any(|r| matches!(r, St::Let(x, _) if x == bn));
                 let at = match self.word2(&ty)? {
+                    k @ (Word::Direct | Word::Ext(_) | Word::Float(_)) if words.is_some() => {
+                        let w = words.unwrap_or(0) + self.cx.payload_slot(&ptys, i) as u32;
+                        b.ins(&Instruction::LocalGet(w));
+                        word_into(b, &k);
+                        let l = b.local(self.cx.repr(&ty, line)?.val().unwrap_or(ValType::I64));
+                        b.ins(&Instruction::LocalSet(l));
+                        Place::Local(l)
+                    }
+                    _ if words.is_some() => {
+                        return unsupported("a payload in locals that is no word", line)
+                    }
                     // A layout the row reads out of the scrutinee is read
                     // where it lies ([`Arm::reads`]).
                     k @ (Word::Inline2 | Word::Boxed) if layout && read => {
@@ -9358,7 +9498,9 @@ impl<'a, 'p> Fn_<'a, 'p> {
             over: Vec::new(),
             pulled: vec![None; core.names.len()],
             checks: Vec::new(),
+            flat: Vec::new(),
         };
+        self.core_w.flat = self.core_flats();
     }
 
     /// Emit one function body from the core's statements; call [`Fn_::core_enter`] first. The
@@ -9591,6 +9733,9 @@ impl<'a, 'p> Fn_<'a, 'p> {
                 St::Let(n, _) if core_global(body, *n).is_some() => {}
                 // A layout made, built into the binding's own slot. The slot must exist before
                 // the parts are written, and a record or array is never on the operand stack.
+                St::Let(n, rhs) if self.core_w.flat[n.index()] && self.core_ctor_or_record(rhs) => {
+                    self.core_make_words(m, b, *n, rhs)?;
+                }
                 St::Let(n, rhs) if self.core_makes(&self.core_made_ty(*n), rhs) => {
                     let info = &body.names[n.index()];
                     let line = info.line;
@@ -9986,11 +10131,20 @@ impl<'a, 'p> Fn_<'a, 'p> {
                     } else {
                         None
                     };
-                    self.core_val(m, b, value, &ty, *line)?;
-                    match self.cx.repr(&ty, *line)? {
-                        Repr::Agg(l) => agg_landed(b, l.size, false),
+                    match value {
+                        Val::Name(v) if self.core_w.flat[v.index()] => {
+                            let a = self.scratch(b, ValType::I32, 1);
+                            b.ins(&Instruction::LocalSet(a));
+                            self.core_words_into(b, *v, a, *line)?;
+                        }
                         _ => {
-                            b.ins(&self.cx.store(&ty));
+                            self.core_val(m, b, value, &ty, *line)?;
+                            match self.cx.repr(&ty, *line)? {
+                                Repr::Agg(l) => agg_landed(b, l.size, false),
+                                _ => {
+                                    b.ins(&self.cx.store(&ty));
+                                }
+                            }
                         }
                     }
                     self.free_snap(m, b, snap, *line)?;
@@ -10118,6 +10272,10 @@ impl<'a, 'p> Fn_<'a, 'p> {
                         // row built into or which the value is copied into:
                         // [`Fn_::ret_value`]'s two cases. A value in the
                         // parameter it is left in ([`Sig::in_place`]) is there.
+                        (Some(Val::Name(n)), Some(_)) if self.core_w.flat[n.index()] => {
+                            let out = self.core_out(*line)?;
+                            self.core_words_into(b, *n, out, *line)?;
+                        }
                         (Some(Val::Name(n)), Some(size)) => {
                             let out = self.core_out(*line)?;
                             let home =
@@ -10820,6 +10978,11 @@ impl<'a, 'p> Fn_<'a, 'p> {
         // A length is a header read ([`Fn_::length_of`]) of the base's value: an address
         // for a layout, the pointer for a String.
         if let vyrn_frontend::core::Place::Field(base, f) = p {
+            if let vyrn_frontend::core::Place::Name(n) = &**base {
+                if let Some((Place::Words(first), ty)) = self.core_place(*n) {
+                    return self.core_word_field(b, first, &ty, f, line);
+                }
+            }
             if let Some(walk) =
                 core_header(&self.core_w, base).filter(|_| f == "length" || f == "byteLength")
             {
@@ -11223,6 +11386,239 @@ impl<'a, 'p> Fn_<'a, 'p> {
             && !lets.iter().any(|(b, _)| *b == n)
             && !binders.contains(&n)
             && written.iter().filter(|(m, _)| *m == n).count() == whole
+    }
+
+    /// Which names live in wasm locals ([`Place::Words`]), by [`Name`]. Such a name is
+    /// [`Flat`], no parameter, bound by one `let` that builds it there
+    /// ([`Fn_::core_flat_let`]), and every other row names it as one of:
+    /// - the scrutinee of a switch on tags, whose arms read its payloads;
+    /// - the value a `return` hands back;
+    /// - the record a scalar field is read from;
+    /// - the value a store puts into a place with an address;
+    /// - a release, which a heapless name makes no code for.
+    ///
+    /// Any other row needs the value's address, and the name keeps its frame slot.
+    fn core_flats(&self) -> Vec<bool> {
+        let body = self.body();
+        let mut ok: Vec<bool> = (body.names.iter().enumerate())
+            .map(|(n, info)| {
+                !body.params.contains(&Name(n as u32)) && self.cx.flat(&info.ty).is_some()
+            })
+            .collect();
+        if !ok.contains(&true) {
+            return ok;
+        }
+        // The rows at an arm's head that bind a payload of a candidate scrutinee, which
+        // [`Fn_::core_switch`] reads off the words and does not emit.
+        let mut heads: Vec<*const St> = Vec::new();
+        let mut lets = vec![0u32; body.names.len()];
+        each_list(&body.stmts, &mut |ss| {
+            for s in ss {
+                if let St::Switch {
+                    on: on @ Val::Name(n),
+                    arms,
+                    ..
+                } = s
+                {
+                    if ok[n.index()] {
+                        heads.extend(
+                            arms.iter()
+                                .flat_map(|a| a.reads(on))
+                                .map(|r| r as *const St),
+                        );
+                    }
+                }
+                if let St::Let(n, _) = s {
+                    lets[n.index()] += 1;
+                }
+            }
+        });
+        each_list(&body.stmts, &mut |ss| {
+            for (i, s) in ss.iter().enumerate() {
+                if heads.contains(&(s as *const St)) {
+                    continue;
+                }
+                let mut admitted = self.core_flat_uses(ss, i);
+                s.operands(&mut |v, u| {
+                    let Val::Name(n) = v else { return };
+                    if !ok[n.index()] {
+                        return;
+                    }
+                    match admitted.iter().position(|a| *a == (*n, u)) {
+                        Some(k) => {
+                            admitted.swap_remove(k);
+                        }
+                        None => ok[n.index()] = false,
+                    }
+                });
+            }
+        });
+        for (n, k) in lets.iter().enumerate() {
+            ok[n] &= *k == 1;
+        }
+        ok
+    }
+
+    /// The uses of a [`Flat`] name that row `ss[i]` makes and [`Fn_::core_stmts`] emits on its
+    /// words ([`Fn_::core_flats`]).
+    fn core_flat_uses(&self, ss: &[St], i: usize) -> Vec<(Name, vyrn_frontend::core::Use)> {
+        use vyrn_frontend::core::{Place as At, Use};
+        let body = self.body();
+        let flat = |n: &Name| self.cx.flat(&body.names[n.index()].ty);
+        match &ss[i] {
+            St::Let(n, _) if flat(n).is_some() && self.core_flat_let(ss, i) => {
+                vec![(*n, Use::Bind)]
+            }
+            St::Let(_, Rhs::Read(At::Field(base, f))) => match &**base {
+                At::Name(n)
+                    if flat(n).is_some_and(|fl| {
+                        (self.field_of(&body.names[n.index()].ty, f, 0))
+                            .is_ok_and(|(off, _)| fl.parts.iter().any(|p| p.0 == off))
+                    }) =>
+                {
+                    vec![(*n, Use::Root)]
+                }
+                _ => Vec::new(),
+            },
+            St::Switch {
+                on: Val::Name(n),
+                arms,
+                ..
+            } if arms.iter().all(|a| !matches!(a.test, Test::Holds(_))) => {
+                vec![(*n, Use::Read)]
+            }
+            St::Return {
+                value: Some(Val::Name(n)),
+                ..
+            } if self.ret.agg().is_some() => {
+                vec![(*n, Use::Hand)]
+            }
+            St::Store {
+                place,
+                value: Val::Name(n),
+                ..
+            } if !matches!(place, At::Key(..) | At::Name(_))
+                && self.core_rebuilt(ss, i).is_none() =>
+            {
+                vec![(*n, Use::Hand)]
+            }
+            St::Drop(n, ..) | St::Row { name: n, .. } => vec![(*n, Use::Release)],
+            _ => Vec::new(),
+        }
+    }
+
+    /// Whether the `let` at `ss[i]` is one [`Fn_::core_stmts`] builds in locals: a variant or
+    /// a record literal its make arm takes, that no parent holds as a part and no `return`
+    /// builds in the caller's storage.
+    fn core_flat_let(&self, ss: &[St], i: usize) -> bool {
+        let body = self.body();
+        let St::Let(n, rhs) = &ss[i] else {
+            return false;
+        };
+        (self.core_ctor(rhs) || matches!(rhs, Rhs::Make(Ctor::Record(..), _)))
+            && core_global(body, *n).is_none()
+            && !self.core_lists().iter().any(|(l, a)| l == n || a == n)
+            && self.core_makes(&self.core_made_ty(*n), rhs)
+            && self.core_part_at(ss, i).is_none()
+            && !self.core_lands(ss, i, &self.core_w.reads)
+    }
+
+    /// Whether a row makes a variant or a record literal.
+    fn core_ctor_or_record(&self, rhs: &Rhs) -> bool {
+        self.core_ctor(rhs) || matches!(rhs, Rhs::Make(Ctor::Record(..), _))
+    }
+
+    /// Builds the variant or record row `rhs` states into fresh locals, one per part of `n`'s
+    /// [`Flat`] type, and binds `n` there. A variant's tag is its first word, and a word its
+    /// payload does not fill is 0, as [`Fn_::build_variant`] writes them.
+    fn core_make_words(
+        &mut self,
+        m: &mut Module,
+        b: &mut Frame,
+        n: Name,
+        rhs: &Rhs,
+    ) -> Result<(), String> {
+        let info = &self.body().names[n.index()];
+        let (ty, line) = (info.ty.clone(), info.line);
+        let Some(flat) = self.cx.flat(&ty) else {
+            return unsupported("a value in locals of no flat type", line);
+        };
+        let first = flat.locals(b);
+        match rhs {
+            Rhs::Make(Ctor::Record(_, names), vs) => {
+                let Some(decl) = self.cx.fields(&ty) else {
+                    return unsupported("a record literal the row states", line);
+                };
+                for (i, f) in decl.iter().enumerate() {
+                    let Some(at) = names.iter().position(|x| *x == f.name) else {
+                        return unsupported(&format!("the missing field `{}`", f.name), line);
+                    };
+                    self.core_val(m, b, &vs[at], &f.ty, line)?;
+                    b.ins(&Instruction::LocalSet(first + i as u32));
+                }
+            }
+            Rhs::Call { args, .. } => {
+                let Some((tag, payload)) = self
+                    .core_ctor_name(rhs)
+                    .and_then(|v| self.core_variant(&ty, v))
+                else {
+                    return unsupported("a variant the row states of no sum", line);
+                };
+                let Some(vs) = arg_vals(args) else {
+                    return unsupported("a variant built from a place", line);
+                };
+                let mut filled = vec![false; flat.parts.len()];
+                filled[0] = true;
+                b.ins(&Instruction::I64Const(tag as i64));
+                b.ins(&Instruction::LocalSet(first));
+                for (i, ((v, _), t)) in vs.iter().zip(&payload).enumerate() {
+                    self.core_val(m, b, v, t, line)?;
+                    if self.cx.words(t) == 0 {
+                        continue;
+                    }
+                    let slot = self.cx.payload_slot(&payload, i);
+                    self.encode_word2(b, t, line)?;
+                    b.ins(&Instruction::LocalSet(first + slot as u32));
+                    filled[slot] = true;
+                }
+                for (slot, _) in filled.iter().enumerate().filter(|(_, f)| !**f) {
+                    b.ins(&Instruction::I64Const(0));
+                    b.ins(&Instruction::LocalSet(first + slot as u32));
+                }
+            }
+            _ => return unsupported("a value in locals this walk does not make", line),
+        }
+        self.core_bind(n, Place::Words(first), ty)
+    }
+
+    /// Stores the [`Flat`] value `n` holds in locals at the address in local `a`.
+    fn core_words_into(&self, b: &mut Frame, n: Name, a: u32, line: usize) -> Result<(), String> {
+        let Some((Place::Words(first), ty)) = self.core_place(n) else {
+            return unsupported("a value in locals with no locals", line);
+        };
+        let Some(flat) = self.cx.flat(&ty) else {
+            return unsupported("a value in locals of no flat type", line);
+        };
+        flat.store(self.cx, b, a, first);
+        Ok(())
+    }
+
+    /// Pushes field `f` of the [`Flat`] record of type `ty` held in the locals from `first`.
+    fn core_word_field(
+        &self,
+        b: &mut Frame,
+        first: u32,
+        ty: &Type,
+        f: &str,
+        line: usize,
+    ) -> Result<Type, String> {
+        let (off, fty) = self.field_of(ty, f, line)?;
+        let part = (self.cx.flat(ty)).and_then(|fl| fl.parts.iter().position(|p| p.0 == off));
+        let Some(i) = part else {
+            return unsupported("a field of a value in locals that is no part", line);
+        };
+        b.ins(&Instruction::LocalGet(first + i as u32));
+        Ok(thunk_of(fty))
     }
 
     /// Whether [`Fn_::core_switch`] gives a payload binder of `ty` a place. A scalar loads
@@ -11877,7 +12273,7 @@ impl<'a, 'p> Fn_<'a, 'p> {
         let d = match place {
             Place::Slot(off) => Dest::Slot(off),
             Place::Local(l) => Dest::Addr(l, 0),
-            Place::Static(_) => return None,
+            Place::Static(_) | Place::Words(_) => return None,
         };
         self.core_args_apart(*x, args, Some(k))
             .then_some((d, place, (!stored).then_some(*x)))
@@ -12054,6 +12450,7 @@ impl<'a, 'p> Fn_<'a, 'p> {
             Place::Slot(_) | Place::Static(_) => {
                 place.addr(b, 0);
             }
+            Place::Words(_) => return unsupported("the address of a value in locals", line),
         }
         Ok(())
     }
@@ -13804,6 +14201,7 @@ mod tests {
             lambdas: HashMap::new(),
             layouts: RefCell::default(),
             reprs: RefCell::default(),
+            flats: RefCell::default(),
             oracle: None,
             sigs: HashMap::new(),
             gen: None,
