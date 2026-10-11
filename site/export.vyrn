@@ -249,19 +249,22 @@ fn withIcon(html: String) -> String {
     return insertInHead(html, "<link rel=\"icon\" href=\"/favicon.svg\" type=\"image/svg+xml\">")
 }
 
-/// `html` with the head elements that decide the page's colour before the
-/// first paint.
-///
-/// `<meta name="color-scheme">` lets a dark system paint a dark canvas before
-/// the stylesheet arrives, and `theme-color` colours the browser's own bar. The
-/// inline script reads the reader's choice from storage, which needs no
-/// request, and sets three attributes on the root before the first paint:
-/// `data-theme` (the reader's choice), `idecompact` (the masthead height handed
-/// over by `theme.js`) and `data-js` (shows the theme control without moving its
-/// row). `theme.js` is a deferred module that holds the toggle.
 fn withThemeBoot(html: String) -> String {
-    let boot = "<script>try{var r=document.documentElement,t=localStorage.getItem(\"vyrn.theme\");if(t===\"light\"||t===\"dark\")r.setAttribute(\"data-theme\",t);if(sessionStorage.getItem(\"vyrn.mast\")===\"compact\")r.classList.add(\"idecompact\");r.setAttribute(\"data-js\",\"on\")}catch(e){document.documentElement.setAttribute(\"data-js\",\"on\")}</script>"
-    return insertAfterCharset(html, "<meta name=\"color-scheme\" content=\"light dark\">" + themeColours() + boot)
+    return insertAfterCharset(html, "<meta name=\"color-scheme\" content=\"light dark\">" + themeColours() + "<script>" + bootScript() + "</script>")
+}
+
+/// `site/boot.js` on one line, each line trimmed. Inlined, not linked: it must
+/// run before the first paint, or the theme flashes.
+fn bootScript() -> String {
+    let js = match readFile("site/boot.js") {
+        Ok(body) => body,
+        Err(why) => "",
+    }
+    let mut out = ""
+    for line in lines(js) {
+        out = out + trim(line)
+    }
+    return out
 }
 
 fn themeColours() -> String {
@@ -889,9 +892,6 @@ test "each renamed route publishes a stub that carries the reader to the new one
 }
 
 test "every page carries the theme control, and carries it without a flash" {
-    // Pages at the root and one two directories deep. The theme is decided by an
-    // inline script right after the charset, before the stylesheet and with no
-    // request; `theme.js` is a module that holds the one toggle button.
     for path in ["/", "/docs/std/json", "/benchmarks"] {
         let doc = publishedDocument(path)
         let up = upTo(path)
