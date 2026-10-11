@@ -32,7 +32,7 @@ import { historyIsFixture, historyPath, historyCommand, releaseRows, historyErro
 import { releaseTag, siteOrigin } from "./app/repo"
 import { demoIsFixture, demoPath, demoCommand, demoError } from "./app/demo"
 import { docSubnav } from "./app/docshell"
-import { apiModules, apiEntries, apiHref, importLine } from "./app/docs"
+import { apiModules, apiEntries, apiHref } from "./app/docs"
 import { chapterSlugs, chapterHref, chapterArea, movedChapters } from "./app/guide"
 import { searchRows } from "./app/stdgraph"
 import { packages, packageHref, offerOf, addCommand } from "./app/packages"
@@ -1895,23 +1895,13 @@ test "the registry publishes one page per package, and an unknown name is a 404"
     assertEq(currentNav("/explore"), "/explore.html")
 }
 
-test "every reference page carries the import line, and every package page the specifier" {
-    // The two lines a reader copies are also attributes, because a gate cannot
-    // read a highlighted code box and a reader cannot copy an attribute. Each
-    // comes from the one function the box is rendered from, so the two cannot
-    // disagree.
+test "every package page carries the specifier" {
+    // The line a reader copies is also an attribute, because a gate cannot read
+    // a highlighted code box and a reader cannot copy an attribute. Both come
+    // from `offerOf`, so the two cannot disagree.
     //
-    // What is done WITH those attributes is `site/test/importline.test.mjs`: it
-    // takes them out of the exported html, compiles every import line as a
-    // program of its own, and re-parses every specifier with the grammar
-    // `compiler/vyrn-cli/src/remote.rs` applies. It lives there because this
-    // program cannot start another one.
-    for m in apiModules() {
-        let html = renderedBody(hrefDocsStd(m.name))
-        let line = importLine(m.name)
-        assert(startsWith(line, "import { "))
-        assert(has(html, "data-import=\"" + escapedQuotes(line) + "\""))
-    }
+    // `site/test/installspec.test.mjs` re-parses every specifier with the
+    // grammar `compiler/vyrn-cli/src/remote.rs` applies.
     let mut specs = 0
     for p in packages() {
         let html = renderedBody(hrefExplore(p.slug))
@@ -1919,9 +1909,6 @@ test "every reference page carries the import line, and every package page the s
         assert(startsWith(spec, "github:"))
         assert(has(html, "data-spec=\"" + escapedQuotes(spec) + "\""))
         assert(has(html, addCommand(p.slug)))
-        // A package page is not a reference page: it carries no import line and
-        // no empty attribute where one would be.
-        assert(!has(html, "data-import="))
         specs = specs + 1
     }
     assertEq(specs, packages().length)

@@ -10,7 +10,7 @@
 //
 // Everything here is still read off the package's own files while the site
 // compiles, and THE SPECIFIER IS STILL THE POINT: it is carried in `data-spec`
-// and `site/test/importline.test.mjs` re-parses every one with the grammar
+// and `site/test/installspec.test.mjs` re-parses every one with the grammar
 // `compiler/vyrn-cli/src/remote.rs` applies.
 import { Package, Artifact, PkgLink, Offer, packageBlurb, packageKnown, packageOf, packageDeps, packageSource, offerOf, addCommand, manifestShape, lockShape, importFrom, artifactsOf } from "../../packages"
 import { Head, PageError, ParamQuery, notFound, paramQuery } from "std/ui"
