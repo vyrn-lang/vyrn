@@ -131,6 +131,33 @@ fn a_body_reads_its_own_analysis_after_another_program_is_placed() {
     assert_eq!(main_of(&a, &own_a), before);
 }
 
+/// A build against an analysis reads the placer's effect judgment: a `while` header on a global
+/// that a called function writes is not hoisted, as in the body the emitter reads.
+#[test]
+fn a_build_after_the_placer_hoists_what_the_placer_hoisted() {
+    let src = "type Box = { xs: Array<Int64> }
+let mut g: Box = Box { xs: [1, 2, 3] }
+fn clearG() {
+    g.xs.clear()
+}
+fn main() -> Int64 {
+    let mut s = 0
+    let mut k = 0
+    while k < g.xs.length {
+        clearG()
+        s = s + g.xs[k]
+        k = k + 1
+    }
+    return s
+}";
+    let body = core_body(src, "main");
+    assert!(
+        body.names.iter().all(|n| n.walked.is_none()),
+        "{}",
+        body.render()
+    );
+}
+
 /// `x.copy()` of a type with `impl Copy` is a call row to the impl, at the capability the impl
 /// declares, so a pass over the rows sees the call the language makes.
 #[test]

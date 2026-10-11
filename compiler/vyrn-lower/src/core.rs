@@ -8121,8 +8121,6 @@ pub fn augment(program: &Program, w: &mut World, judging: bool) {
             }
         }
         w.calls.replace(calls);
-        own.state_callees.clear();
-        own.accumulators.clear();
         (w.refusals, w.typed) = (r.kernel, r.typed);
         return;
     }
@@ -8238,8 +8236,6 @@ pub fn augment(program: &Program, w: &mut World, judging: bool) {
     w.calls.replace(calls);
     w.facts = folds.then_some(facts);
     (w.refusals, w.typed) = (r.kernel, r.typed);
-    own.state_callees.clear();
-    own.accumulators.clear();
 }
 
 /// One body `augment` builds: an instance, or a `test` or `bench` body.
