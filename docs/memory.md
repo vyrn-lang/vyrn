@@ -300,7 +300,9 @@ The target is wasm32. A pointer is 4 bytes.
   module state that is an aggregate or owns heap can hold it during the call,
   so the callee uses that address unless it may store into such state (`read`)
   or read or store any module state (`modify`); then it copies the argument
-  in, and a `modify` one back out at return.
+  in, and a `modify` one back out at return. A `consume` aggregate argument is
+  used at its address by a callee with no aggregate result: nothing writes it
+  during the call, and the caller never reads it after.
 - A `Map` header is `{ keys, vals, len, cap, idx }`.
 - A boxed enum payload lives in its own block.
 

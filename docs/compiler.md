@@ -317,8 +317,10 @@ The module's shape:
   other than a `String`'s (`Cx::aliasing`), and a `modify` one unless the
   callee may also read any module state, as the effect judgment answers per
   frame (`World::state_use`). Otherwise the callee copies it in at entry,
-  and a `modify` one back out at the one exit. A `consume` parameter
-  is copied in, unless every `return` yields it (`Sig::in_place`): then it
+  and a `modify` one back out at the one exit. A `consume` parameter is
+  used at the caller's address when the callee has no aggregate result. One
+  with an aggregate result is copied in, unless every `return` yields it
+  (`Sig::in_place`): then it
   is the result, the call has no out-pointer, and the caller moves the
   argument into the destination. It passes `x`'s storage instead for
   `x = f(x, ..)`, and for an argument whose extent ends at the call and that

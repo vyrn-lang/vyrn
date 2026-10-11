@@ -752,3 +752,118 @@ fn main() -> Int64 {
         "{calm}\n{writer}"
     );
 }
+
+/// `consume` arguments the callee reads at the caller's address: a name renewed in a loop
+/// (`x = renew(x)`), a name reassigned after it is consumed, a temporary built each turn, a field
+/// taken out of a record, the elements of a consuming loop, and two instances of a generic.
+const CONSUMED: &str = r#"type Q = { s: String, n: Int64 }
+type O = { q: Q, k: Int64 }
+
+fn renew(p: consume Q) -> Q {
+    return Q { s: "n" + "\{p.n}" + p.s, n: p.n + 1 }
+}
+
+fn show(p: consume Q) {
+    print("\{p.s} \{p.n}")
+}
+
+fn eat(p: consume Q) -> Int64 {
+    return p.s.byteLength + p.n
+}
+
+fn eatAny<T>(x: consume T) -> Int64 {
+    let kept: Array<T> = [x]
+    return kept.length
+}
+
+fn main() -> Int64 {
+    let mut x = Q { s: "a" + "b", n: 1 }
+    let mut i = 0
+    while i < 3 {
+        x = renew(x)
+        i = i + 1
+    }
+    show(x)
+    let mut total = 0
+    let mut y = Q { s: "y" + "0", n: 0 }
+    i = 0
+    while i < 3 {
+        show(y)
+        y = Q { s: "y" + "\{i + 1}", n: i + 1 }
+        total = total + eat(Q { s: "t" + "\{i}", n: i })
+        let t = Q { s: "u" + "\{i}", n: 10 * i }
+        total = total + eat(t)
+        i = i + 1
+    }
+    show(y)
+    let mut o = O { q: Q { s: "f" + "!", n: 5 }, k: 7 }
+    total = total + eat(consume o.q)
+    o.q = Q { s: "g" + "!", n: 6 }
+    show(consume o.q)
+    o.q = Q { s: "h" + "!", n: 8 }
+    let qs: Array<Q> = [Q { s: "e" + "1", n: 100 }, Q { s: "e" + "22", n: 200 }]
+    for q in consume qs {
+        total = total + eat(q)
+    }
+    total = total + eatAny(Q { s: "z" + "z", n: 1 }) + eatAny(O { q: Q { s: "w" + "w", n: 2 }, k: 3 })
+    print("\{total} \{o.q.s} \{o.k}")
+    return 0
+}
+"#;
+
+/// A `consume` parameter of a callee with no aggregate result is the caller's storage: each
+/// argument prints what a copy prints, under the free audit.
+#[test]
+fn a_consumed_argument_read_in_place_prints_what_a_copy_prints() {
+    let dir = scratch("consumed");
+    let file = dir.join("consumed.vyrn");
+    std::fs::write(&file, CONSUMED).unwrap();
+    let out = vyrn()
+        .arg("run")
+        .arg(&file)
+        .env("VYRN_LEAK_CHECK", "1")
+        .output()
+        .expect("vyrn run");
+    assert_eq!(
+        (
+            out.status.code(),
+            String::from_utf8_lossy(&out.stdout).replace("\r\n", "\n")
+        ),
+        (
+            Some(0),
+            "n3n2n1ab 4\ny0 0\ny1 1\ny2 2\ny3 3\ng! 6\n359 h! 7\n".to_string()
+        ),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// `eat` returns a scalar, so it reads its 40-byte record at the caller's address; `grow` returns
+/// a record through an out-pointer and copies its argument in.
+#[test]
+fn a_consume_parameter_is_copied_only_by_a_callee_with_an_out_pointer() {
+    let src = r#"type R = { a: Int64, b: Int64, c: Int64, d: Int64, e: Int64 }
+
+fn eat(p: consume R) -> Int64 {
+    return p.a + 1234567
+}
+
+fn grow(p: consume R) -> R {
+    return R { a: p.b + 7654321, b: p.a, c: p.c, d: p.d, e: p.e }
+}
+
+fn main() -> Int64 {
+    let r = R { a: 1, b: 2, c: 3, d: 4, e: 5 }
+    let s = grow(r)
+    print("\{eat(s)}")
+    return 0
+}
+"#;
+    let eat = wat_func_containing(src, "1234567");
+    let grow = wat_func_containing(src, "7654321");
+    assert_eq!(
+        (copies_of(&eat, 40), copies_of(&grow, 40)),
+        (0, 1),
+        "{eat}\n{grow}"
+    );
+}
