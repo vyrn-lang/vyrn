@@ -29,7 +29,6 @@
 //! only where the walk sees the name itself written.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
-use std::fmt::Write;
 use std::sync::{Arc, Mutex};
 
 use vyrn_frontend::ast::{BinOp, Capability, Field, FnId, Type, TypeDecl, UnOp};
@@ -3829,12 +3828,10 @@ impl<'a> Walk<'a> {
     fn why(&self, st: &State, c: &Check, failing: Option<&Lin>) -> Why {
         let operands = match (failing, &c.guard) {
             (Some(_), _) => [None, None],
-            (None, Guard::Range(..)) => {
-                return Why::Unproved("the range is checked in std/runtime bytesOf".into())
-            }
+            (None, Guard::Range(..)) => return Why::Range,
             (None, Guard::Index(p, i) | Guard::Span(p, i, _)) => {
                 if self.length(p).is_none() {
-                    return Why::Move(3, place_root(p));
+                    return Why::Place(place_root(p));
                 }
                 [place_root(p), val_name(i)]
             }
@@ -3849,17 +3846,18 @@ impl<'a> Walk<'a> {
                 .map(|(t, _)| t.name())
                 .chain(operands.into_iter().flatten())
         };
+        let goal = || failing.map(|g| self.goal(st, g, None).0);
         let origin = names().fold(Origin::Local, |o, n| o.join(self.slot[n.index()].origin));
         match origin {
             Origin::Input(n) => return Why::Input(n),
-            Origin::Call(n, f) => return Why::Callee(n, f),
-            Origin::Place(n) => return Why::Move(3, Some(n)),
+            Origin::Call(n, f) => return Why::Callee(n, f, goal()),
+            Origin::Place(n) => return Why::Place(Some(n)),
             _ => {}
         }
         let resized = |n: Name| self.loops.iter().any(|l| l.seen.resized.contains(&n));
         if let Some((t, _)) = terms().find(|(t, _)| !matches!(t, Term::Val(_)) && resized(t.name()))
         {
-            return Why::Move(2, Some(t.name()));
+            return Why::Resized(t.name());
         }
         if let Some(seen) = self.loops.last().map(|l| &l.seen) {
             // Exactly one name of the goal is written, and it is a counter.
@@ -3871,50 +3869,124 @@ impl<'a> Walk<'a> {
                 }
             }
             if let Some(n) = moving.filter(|n| one && seen.stored.contains(n)) {
-                return Why::Move(5, Some(n));
+                return Why::Counter(n, goal());
             }
         }
         match (origin, failing) {
-            (Origin::Param(n), Some(g)) => Why::Caller(n, self.needs(st, g)),
-            (_, Some(g)) => Why::Unproved(self.needs(st, g)),
-            (_, None) if matches!(c.guard, Guard::Rule(_)) => {
-                Why::Unproved("the prover states only equal-length `where` rules".into())
+            (Origin::Param(n), Some(g)) => {
+                let (says, clause) = self.goal(st, g, Some(n));
+                Why::Caller(n, says, clause)
             }
-            (_, None) => Why::Unproved("a guard with no linear form".into()),
+            (_, Some(g)) => Why::Unproved(self.goal(st, g, None).0),
+            (_, None) if matches!(c.guard, Guard::Rule(_)) => Why::Rule,
+            (_, None) => Why::Nonlinear,
         }
     }
 
-    /// The goal `g >= 0`, over the names the state leaves free, as a sentence.
-    fn needs(&self, st: &State, g: &Lin) -> std::sync::Arc<str> {
+    /// The goal `g >= 0`, over the names the state leaves free, as the source
+    /// would test it: `` `xs` non-empty ``, `` `i < xs.length` ``. A goal over a
+    /// temporary reads `the value of line N` and is no code. With `param`, also
+    /// the goal as that parameter's `where` clause, where [`Walk::states`]
+    /// allows one.
+    fn goal(&self, st: &State, g: &Lin, param: Option<Name>) -> (Arc<str>, Option<Arc<str>>) {
         let l = &st.norm(g).unwrap_or_else(|| g.clone());
-        let mut out = String::with_capacity(64);
-        out.push_str("needs ");
-        for (i, (t, k)) in l.terms.iter().enumerate() {
-            let n = t.name();
-            let name = self.body.spoken(n);
-            let temp = self.body.names[n.index()].source.starts_with('@');
-            out.push_str(match (i, *k < 0) {
-                (0, false) => "",
-                (0, true) => "-",
-                (_, false) => " + ",
-                (_, true) => " - ",
-            });
-            if k.abs() != 1 {
-                let _ = write!(out, "{} * ", k.abs());
-            }
-            let _ = match t {
-                Term::Val(_) => write!(out, "{name}"),
-                _ if temp => write!(out, "len({name})"),
-                _ => write!(out, "{name}.length"),
-            };
-        }
-        let _ = match (l.terms.is_empty(), l.c) {
-            (true, c) => write!(out, "{c}"),
-            (false, 0) => Ok(()),
-            (false, c) => write!(out, " {} {}", if c < 0 { '-' } else { '+' }, c.abs()),
+        let temp = (l.terms.iter())
+            .any(|(t, _)| self.body.names[t.name().index()].source.starts_with('@'));
+        let says = match (l.terms.as_slice(), l.c, temp) {
+            ([(Term::Len(n), 1)], -1, true) => format!("{} non-empty", self.body.spoken(*n)),
+            ([(Term::Len(n), 1)], -1, false) => format!("`{}` non-empty", self.body.spoken(*n)),
+            (_, _, true) => self.lin_text(l, None),
+            (_, _, false) => format!("`{}`", self.lin_text(l, None)),
         };
-        out.push_str(" >= 0");
-        out.into()
+        let clause = param.filter(|p| self.states(l, *p));
+        (
+            says.into(),
+            clause.map(|p| self.lin_text(l, Some(p)).into()),
+        )
+    }
+
+    /// Whether a `where` clause on the parameter `p` states `l >= 0`. The
+    /// clause grammar (`docs/language.md`) wants a `read` parameter, sides of
+    /// one atom or a literal, and atoms over `p` and the `read` parameters
+    /// before it.
+    fn states(&self, l: &Lin, p: Name) -> bool {
+        let at = |n: Name| self.body.params.iter().position(|q| *q == n);
+        let read = |n: Name| {
+            matches!(
+                &self.body.names[n.index()].borrow_kind,
+                Some(BorrowKind::Param { cap: "read", .. })
+            )
+        };
+        let Some(own) = at(p).filter(|_| read(p)) else {
+            return false;
+        };
+        let (pos, neg) = (l.terms.iter()).partition::<Vec<&(Term, i64)>, _>(|(_, k)| *k > 0);
+        let atoms = pos.len() <= 1
+            && neg.len() <= 1
+            && (pos.is_empty() || neg.is_empty() || l.c == 0 || l.c == -1);
+        atoms
+            && l.terms.iter().any(|(t, _)| t.name() == p)
+            && (l.terms.iter()).all(|(t, k)| {
+                k.unsigned_abs() == 1
+                    && !matches!(t, Term::Col(..))
+                    && (t.name() == p || (read(t.name()) && at(t.name()).is_some_and(|i| i < own)))
+            })
+    }
+
+    /// `l >= 0` as a comparison with the smaller side first: `i < xs.length`,
+    /// `n >= 1`. `value` stands for `param`.
+    fn lin_text(&self, l: &Lin, param: Option<Name>) -> String {
+        let atom = |t: Term| -> String {
+            let n = t.name();
+            let name = match Some(n) == param {
+                true => "value".into(),
+                false => self.body.spoken(n),
+            };
+            let ty = &self.body.names[n.index()].ty;
+            let len = |ty: &Type| {
+                if *ty == Type::Str {
+                    "byteLength"
+                } else {
+                    "length"
+                }
+            };
+            let field = |i: u32| {
+                vyrn_frontend::types::record_fields(ty, self.decls)
+                    .and_then(|f| f.get(i as usize).map(|f| (f.name.clone(), f.ty.clone())))
+            };
+            match t {
+                Term::Val(_) => name.into_owned(),
+                Term::Len(_) => format!("{name}.{}", len(ty)),
+                Term::Field(_, i) => match field(i) {
+                    Some((f, _)) => format!("{name}.{f}"),
+                    None => format!("a field of {name}"),
+                },
+                Term::Col(_, i) => match field(i) {
+                    Some((f, fty)) => format!("{name}.{f}.{}", len(&fty)),
+                    None => format!("the length of a field of {name}"),
+                },
+            }
+        };
+        // The constant in `i128`, so negating `i64::MIN` cannot overflow.
+        let sum = |ts: &[&(Term, i64)], c: i128| -> String {
+            let mut out: Vec<String> = (ts.iter())
+                .map(|(t, k)| match k.unsigned_abs() {
+                    1 => atom(*t),
+                    k => format!("{k} * {}", atom(*t)),
+                })
+                .collect();
+            if c != 0 || out.is_empty() {
+                out.push(c.to_string());
+            }
+            out.join(" + ")
+        };
+        let (pos, neg) = (l.terms.iter()).partition::<Vec<&(Term, i64)>, _>(|(_, k)| *k > 0);
+        match (pos.is_empty(), neg.is_empty(), i128::from(l.c)) {
+            (_, true, c) => format!("{} >= {}", sum(&pos, 0), -c),
+            (true, false, c) => format!("{} <= {c}", sum(&neg, 0)),
+            (false, false, c) if c < 0 => format!("{} < {}", sum(&neg, -c - 1), sum(&pos, 0)),
+            (false, false, c) => format!("{} <= {}", sum(&neg, 0), sum(&pos, c)),
+        }
     }
 }
 

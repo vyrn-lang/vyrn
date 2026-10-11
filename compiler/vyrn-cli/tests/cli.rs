@@ -210,8 +210,8 @@ fn the_profile_counts_blocks_per_line() {
     );
     for row in [
         "  96  countKmers  ",
-        "grows tally(..)",
-        "enters toUpper(..) in std/strings",
+        "`tally(..)` may allocate",
+        "allocates in `toUpper(..)` from std/strings",
     ] {
         assert!(table.contains(row), "no `{row}`:\n{table}");
     }

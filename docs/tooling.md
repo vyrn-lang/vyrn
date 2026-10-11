@@ -225,9 +225,11 @@ compile, except `--contract`.
   depth, else the file's directory. Exits 1 if the file has no role.
 - `vyrn why --cost <file>`: per function of the file, the lines that allocate,
   copy, grow a container, enter an allocating function of another file or keep
-  a check, with the loop depth of each, and a summary. A kept check also reads
-  its reason (`gap: callee fact: ...`). A copy the compiler
-  makes where the program wrote none reads `(implicit)`. A call into a function of
+  a check, with the loop depth of each, and a summary. A row names what it
+  allocates or copies by type, such as allocates `Folded`. A copy the compiler makes
+  where the program wrote none says why. A kept check says what it needs, why
+  the compiler cannot show it, and what would drop it, where something would.
+  A call into a function of
   another file counts that function's allocations at the calling line. A
   function with nothing to report is left out. The LSP's hover keeps the
   per-binding memory rows. After a `vyrn run --profile` of the same source and
@@ -363,22 +365,25 @@ inlay hints and semantic tokens. Colour and hover use one resolution order, so
 they agree. A `.vyx` file is analysed through the `.vyrn` module that owns it.
 
 Each line that allocates, copies, grows a container, enters an allocating
-function of another file or keeps a check ends in an inlay hint with the
-verbs and counts of `vyrn why --cost`, such as `copies (implicit), allocates 3`.
-The hint of a kept check adds its reason in two words, such as
-`check kept (callee fact)`. The tooltip holds the report's row, with the full
-reason, and the loop depth. A line with none of
-these has no hint. The request `vyrn/costLenses` answers one lens per function
-that costs anything, such as `allocates 3, grows 1, checks kept 1`.
+function of another file or keeps a check ends in an inlay hint of a few plain
+words per row, such as `copies String, allocates String x3` or `index checked`.
+The tooltip holds each row of `vyrn why --cost` in Markdown, with the full
+reason and the loops around it. A line with none of these has no hint. The
+hints show every row, in a loop or not.
 
 If the document's last `vyrn run --profile` ran the same source and imports as
-the buffer, each hint and lens also reads the blocks that run made there
-(`allocates 2`, a middle dot, `171 blocks`). If the buffer differs, the hints show no counts
-and one lens reads `profile stale`. The facts come from the analysis that makes
-the diagnostics, and exist only while the document has no error. They cost
-about 9 ms of a 230 ms keystroke on `site/export.vyrn`. The client's
-`costHints` initialization option turns them off, and the server then skips the
-work.
+the buffer, each hint also reads the blocks that run made there
+(`allocates String`, a middle dot, `171 blocks`), and the request
+`vyrn/costLenses` answers one lens per function with an allocating row, such
+as `last run: 171 blocks`. If the buffer differs, the hints show no counts and
+one lens reads `profile stale`. With no profile there is no lens. The facts
+come from the analysis that makes the diagnostics, and exist only while the
+document has no error. They cost about 9 ms of a 230 ms keystroke on
+`site/export.vyrn`. The client's `costHints` initialization option turns them
+off, and the server then skips the work.
+
+A move of a `let` name ends in a hint naming what took the value, such as
+`moved into take(..)`. A move the source writes as `consume x` has none.
 
 The server is outside the Cargo workspace. Build and test it explicitly:
 
@@ -400,8 +405,8 @@ grammar's keywords must equal the lexer's; `editor/vscode/test/` checks it.
 CodeLenses: Run and Profile over `fn main`; Run test over each `test` block
 and Run all tests over the first; the same pair for `bench` blocks; Run dev
 server over a root module that imports `rpcServer`. Each runs `vyrn` in a shared
-terminal named `vyrn`. The server adds a lens above each function that costs
-anything (see above).
+terminal named `vyrn`. The server adds a lens above each function that the
+last profile counted (see above).
 
 Settings:
 

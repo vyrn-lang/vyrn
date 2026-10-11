@@ -9,8 +9,10 @@
 use std::collections::BTreeMap;
 
 use vyrn_frontend::ast::{FnId, Program};
-use vyrn_frontend::core::check::{Raises, Verdict, Why};
-use vyrn_frontend::core::{rows, Body, Callee, Copied, Made, Name, NameInfo, Op, Rhs, St};
+use vyrn_frontend::core::check::{Guard, Verdict, Why};
+use vyrn_frontend::core::{
+    rows, Body, BorrowKind, Callee, Copied, Ctor, Made, Name, NameInfo, Op, Rhs, St,
+};
 
 use vyrn_frontend::symbols::{CostLine, FnCost};
 
@@ -29,18 +31,22 @@ pub struct Fact {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Kind {
-    /// The row makes a fresh block every time it runs: what, in words.
+    /// The row makes a fresh block every time it runs: the type it makes,
+    /// spelled.
     Alloc(String),
     /// A rebuilding builtin (`push`, `tally`, `reserve`): a block only when
     /// the capacity runs out. The payload is the builtin's name.
     Grows(String),
-    /// A copy; `implicit` when the core made it where the reader wrote none.
-    Copy { what: Copied, implicit: bool },
+    /// A copy: the type it copies, spelled, and why the core made it where
+    /// the reader wrote none (empty when the reader wrote it).
+    Copy { ty: String, why: &'static str },
     Check {
-        raises: Raises,
+        /// What the check guards: `index`, `slice`, `division`, `shift`,
+        /// `where rule` or `where clause`.
+        what: &'static str,
         kept: bool,
-        /// A kept check's reason: its short form and its sentence.
-        why: Option<(&'static str, String)>,
+        /// A kept check's reason in source terms; empty when no pass gave one.
+        why: String,
     },
     /// A call into a function outside the root file whose effect set holds
     /// `alloc`. Its blocks count at this line: the callee, and its file.
@@ -59,6 +65,7 @@ pub enum Verb {
 }
 
 impl Verb {
+    /// The verb's key: a profile's sites ([`crate::lastrun`]) name a row by it.
     pub fn word(self) -> &'static str {
         match self {
             Verb::Copies => "copies",
@@ -114,9 +121,9 @@ pub fn row(s: &St, body: &Body, world: &World) -> Option<(u32, Kind)> {
         St::Check(c) => (
             c.site.line,
             Some(Kind::Check {
-                raises: c.rule,
+                what: guarded(&c.guard),
                 kept: c.verdict == Verdict::Kept,
-                why: (c.why != Why::Unsaid).then(|| (c.why.short(), said(&c.why, body, world))),
+                why: said(&c.why, body, world),
             }),
         ),
         _ => return None,
@@ -124,42 +131,96 @@ pub fn row(s: &St, body: &Body, world: &World) -> Option<(u32, Kind)> {
     kind.filter(|_| line > 0).map(|k| (line as u32, k))
 }
 
-/// A kept check's reason in a sentence, over the names the body's source spells.
+/// What `guard` protects, in the words the hints use.
+fn guarded(guard: &Guard) -> &'static str {
+    match guard {
+        Guard::Index(..) | Guard::Span(..) => "index",
+        Guard::Range(..) => "slice",
+        Guard::NonZero(_) | Guard::NoOverflow(..) => "division",
+        Guard::Shift(..) => "shift",
+        Guard::Rule(_) => "where rule",
+        Guard::Clause { .. } => "where clause",
+    }
+}
+
+/// A kept check's reason, over the names the body's source spells: what the
+/// check needs, why the compiler cannot show it, and what would let it drop
+/// the check, where something would. Empty for [`Why::Unsaid`].
 fn said(why: &Why, body: &Body, world: &World) -> String {
-    let spell = |n: Name| body.spoken(n);
-    let name = |n: Option<Name>| n.map_or("the indexed place".into(), spell);
+    let temp = |n: Name| body.names[n.index()].source.starts_with('@');
+    // A temporary reads `the value of line N`, which is no code.
+    let code = |n: Name| match temp(n) {
+        true => body.spoken(n).into_owned(),
+        false => format!("`{}`", body.spoken(n)),
+    };
+    let needs = |goal: &Option<std::sync::Arc<str>>| match goal {
+        Some(g) => format!("it needs {g}, and "),
+        None => String::new(),
+    };
     match why {
         Why::Unsaid => String::new(),
-        Why::Input(n) => format!("input: {} is read from outside", spell(*n)),
-        Why::Callee(n, f) => {
+        Why::Input(n) => format!("{} is read from input", code(*n)),
+        Why::Callee(n, f, goal) => {
             let from = (f.and_then(|f| world.fn_rows().get(f.index())))
                 .map_or("a call".to_string(), |r| {
-                    format!("{}(..)", body.spelled(&r.name))
+                    format!("`{}(..)`", body.spelled(&r.name))
                 });
             let line = body.names[n.index()].line;
-            match body.names[n.index()].source.starts_with('@') {
-                true => format!("gap: callee fact: {from} at {line}"),
-                false => format!("gap: callee fact: {} from {from} at {line}", spell(*n)),
-            }
-        }
-        Why::Caller(n, goal) => {
-            let open = body.id.is_some_and(|f| world.is_open(f));
-            let exported = if open { " (exported)" } else { "" };
+            let who = match temp(*n) && goal.is_some() {
+                true => "that value".to_string(),
+                false => code(*n),
+            };
+            let states = match goal {
+                Some(_) => "does not state it",
+                None => "states nothing about it",
+            };
             format!(
-                "gap: caller fact{exported}: {} is a parameter; {goal}",
-                spell(*n)
+                "{}{who} is the result of {from} at line {line}, whose signature {states}",
+                needs(goal)
             )
         }
-        Why::Move(2, n) => format!("gap: move 2: a call may have resized {}", name(*n)),
-        Why::Move(3, n) => format!(
-            "gap: move 3: {} is a field, element or global read",
-            name(*n)
+        Why::Caller(n, goal, clause) => {
+            let read = matches!(
+                &body.names[n.index()].borrow_kind,
+                Some(BorrowKind::Param { cap: "read", .. })
+            );
+            let fix = match clause {
+                Some(c) => format!(
+                    "; add `where {c}` to `{0}`, and each call checks it where the caller cannot \
+                     show it",
+                    body.spoken(*n)
+                ),
+                None if !read => {
+                    "; only a `read` parameter takes a `where` clause that could state it".into()
+                }
+                None => String::new(),
+            };
+            format!(
+                "it needs {goal}, and `{}` is a parameter, so the function cannot know what its \
+                 callers pass{fix}",
+                body.spoken(*n)
+            )
+        }
+        Why::Resized(n) => format!("a call in the loop may resize {}", code(*n)),
+        Why::Place(n) => format!(
+            "{} is read from a field, an element or module state, and the compiler keeps no \
+             facts about such reads",
+            n.map_or("the array".into(), code)
         ),
-        Why::Move(_, n) => format!(
-            "gap: move 5: {} is the only name of the goal the loop writes",
-            name(*n)
+        Why::Counter(n, goal) => format!(
+            "{}the loop moves {} without a test of that; a loop condition that implies it drops \
+             the check",
+            needs(goal),
+            code(*n)
         ),
-        Why::Unproved(goal) => format!("gap: unproved: {goal}"),
+        Why::Unproved(goal) => format!("it needs {goal}, and the compiler cannot show that here"),
+        Why::Range => "`bytes` checks its range itself".into(),
+        Why::Rule => "the compiler proves only `where` rules that state equal lengths".into(),
+        Why::Nonlinear => {
+            "the compiler proves only sums of names and lengths times constants, and this check \
+             is no such sum"
+                .into()
+        }
     }
 }
 
@@ -215,31 +276,61 @@ pub fn root(program: &Program, world: &World) -> Vec<(FnId, Vec<Fact>)> {
 pub struct CostRow {
     /// The deepest loop nest among the line's facts of this verb.
     pub depth: u32,
-    /// Whether a copy among them is one the reader did not write.
-    pub implicit: bool,
-    /// What it does, each wording with how many times the line states it.
-    whats: Vec<(String, usize)>,
-    /// The distinct short reasons of the kept checks among them.
-    shorts: Vec<&'static str>,
+    /// What it does: the noun (a type, a callee, a check's kind), the reason, and how many
+    /// times the line states the pair.
+    whats: Vec<(String, String, usize)>,
 }
 
 impl CostRow {
-    /// How many facts the row states.
-    pub fn count(&self) -> usize {
-        self.whats.iter().map(|w| w.1).sum()
+    /// Each noun as `say` spells it, with its count: `String x3`.
+    fn nouns(&self, say: impl Fn(&str) -> String) -> Vec<String> {
+        (self.whats.iter())
+            .map(|(noun, _, n)| match n {
+                1 => say(noun),
+                n => format!("{} x{n}", say(noun)),
+            })
+            .collect()
     }
 
-    pub fn text(&self) -> String {
-        let whats: Vec<String> = (self.whats.iter())
-            .map(|(w, n)| {
-                if *n > 1 {
-                    format!("{w} x{n}")
-                } else {
-                    w.clone()
-                }
-            })
-            .collect();
-        whats.join(", ")
+    /// The row in a few plain words, for an inlay label: `allocates Folded`,
+    /// `index checked`, `push may allocate`.
+    pub fn label(&self, verb: Verb) -> String {
+        let nouns = self.nouns(str::to_string).join(", ");
+        match verb {
+            Verb::Copies => format!("copies {nouns}"),
+            Verb::Allocates => format!("allocates {nouns}"),
+            Verb::Enters => format!("{nouns} allocates"),
+            Verb::Grows => format!("{nouns} may allocate"),
+            Verb::Keeps => format!("{nouns} checked"),
+        }
+    }
+
+    /// The row in full, with code in backticks: what it does and why, for `why --cost`
+    /// and a hover.
+    pub fn text(&self, verb: Verb) -> String {
+        let code = |n: &str| format!("`{n}`");
+        let call = |n: &str| format!("`{n}(..)`");
+        let reasoned = |nouns: Vec<String>, sep: &str| {
+            (nouns.into_iter().zip(&self.whats))
+                .map(|(noun, (_, why, _))| match why.is_empty() {
+                    true => noun,
+                    false => format!("{noun}{sep}{why}"),
+                })
+                .collect::<Vec<_>>()
+        };
+        match verb {
+            Verb::Copies => format!("copies {}", reasoned(self.nouns(code), ": ").join("; ")),
+            Verb::Allocates => format!("allocates {}", self.nouns(code).join(", ")),
+            Verb::Enters => format!(
+                "allocates in {}",
+                reasoned(self.nouns(call), " from ").join(", ")
+            ),
+            Verb::Grows => format!(
+                "{} may allocate when it outgrows its capacity",
+                self.nouns(call).join(", ")
+            ),
+            Verb::Keeps => reasoned(self.nouns(|n| format!("{n} check")), ": ").join("; "),
+        }
     }
 }
 
@@ -259,43 +350,26 @@ pub fn table(program: &Program, world: &World, named: &dyn Fn(&str) -> String) -
         let mut shown: BTreeMap<(u32, Verb), CostRow> = BTreeMap::new();
         for f in &facts {
             let (slot, what) = match &f.kind {
-                Kind::Copy { what, implicit } => {
-                    let what = match what {
-                        Copied::Value => "a value",
-                        Copied::Render => "a String render",
-                    };
-                    let how = if *implicit { " (implicit)" } else { "" };
-                    (2, format!("{what}{how}"))
-                }
-                Kind::Alloc(w) => (0, w.clone()),
-                Kind::Enters(c, from) => (0, format!("{c}(..) in {}", named(from))),
-                Kind::Grows(b) => (1, format!("{b}(..)")),
-                Kind::Check { raises, kept, why } => {
-                    let what = match why {
-                        Some((_, said)) => format!("{}  {said}", raises.census()),
-                        None => raises.census().to_string(),
-                    };
-                    (3 + usize::from(!kept), what)
+                Kind::Copy { ty, why } => (2, (ty.clone(), why.to_string())),
+                Kind::Alloc(w) => (0, (w.clone(), String::new())),
+                Kind::Enters(c, from) => (0, (c.clone(), named(from))),
+                Kind::Grows(b) => (1, (b.clone(), String::new())),
+                Kind::Check { what, kept, why } => {
+                    (3 + usize::from(!kept), (what.to_string(), why.clone()))
                 }
             };
             tally[slot].0 += 1;
             tally[slot].1 += usize::from(f.depth > 0);
             let Some(verb) = f.kind.verb() else { continue };
             let row = shown.entry((f.line, verb)).or_default();
-            if let Kind::Check {
-                why: Some((short, _)),
-                ..
-            } = &f.kind
-            {
-                if !row.shorts.contains(short) {
-                    row.shorts.push(short);
-                }
-            }
             row.depth = row.depth.max(f.depth);
-            row.implicit |= matches!(f.kind, Kind::Copy { implicit: true, .. });
-            match row.whats.iter_mut().find(|w| w.0 == what) {
-                Some(w) => w.1 += 1,
-                None => row.whats.push((what, 1)),
+            match row
+                .whats
+                .iter_mut()
+                .find(|w| (&w.0, &w.1) == (&what.0, &what.1))
+            {
+                Some(w) => w.2 += 1,
+                None => row.whats.push((what.0, what.1, 1)),
             }
         }
         out.push((id, shown));
@@ -320,10 +394,8 @@ pub fn fn_costs(program: &Program, world: &World) -> Vec<FnCost> {
                 line: line as usize,
                 verb: verb.word(),
                 depth: row.depth,
-                count: row.count(),
-                implicit: row.implicit,
-                text: row.text(),
-                short: row.shorts.join(", "),
+                label: row.label(verb),
+                text: row.text(verb),
             })
             .collect()
     };
@@ -350,11 +422,32 @@ fn row_kind(
     world: &World,
     frame: &Body,
 ) -> Option<Kind> {
+    let sp = frame.speech();
+    let ty = |made: Made<'_>| match bound {
+        Some(n)
+            if !matches!(
+                made,
+                Made::Prim(Op::Closure(_)) | Made::Make(Ctor::Closure(_))
+            ) =>
+        {
+            sp.ty(&names[n.index()].ty).to_string()
+        }
+        _ => words(made),
+    };
     if let Some(what) = rhs.copies(names) {
-        // A render of a String copies it by construction.
-        let implicit =
-            what == Copied::Render || bound.is_some_and(|n| names[n.index()].implicit_copy);
-        return Some(Kind::Copy { what, implicit });
+        let why = match what {
+            Copied::Render => "interpolating a `String` copies it",
+            Copied::Value if bound.is_some_and(|n| names[n.index()].implicit_copy) => {
+                "the value is borrowed, and its new holder must own it"
+            }
+            Copied::Value => "",
+        };
+        let copied = match (what, bound) {
+            (Copied::Render, _) => "String".to_string(),
+            (Copied::Value, Some(n)) => sp.ty(&names[n.index()].ty).to_string(),
+            (Copied::Value, None) => "value".to_string(),
+        };
+        return Some(Kind::Copy { ty: copied, why });
     }
     if let Rhs::Call { callee, kind, .. } = rhs {
         if grows(callee) {
@@ -372,7 +465,7 @@ fn row_kind(
             return None;
         }
     }
-    rhs.allocates(names, bound).map(|m| Kind::Alloc(words(m)))
+    rhs.allocates(names, bound).map(|m| Kind::Alloc(ty(m)))
 }
 
 /// Whether `callee` rebuilds its receiver and may reallocate it: `push`,
@@ -382,20 +475,16 @@ fn grows(callee: &str) -> bool {
     builtin(callee).is_some_and(|b| b.spec == Some(Spec::Rebuilds) && b.length != Length::SetToZero)
 }
 
-/// What a row makes, in the words the report uses.
+/// What a row makes when no name binds it, in the words the report uses.
 fn words(made: Made<'_>) -> String {
     use vyrn_frontend::ast::BinOp;
-    use vyrn_frontend::core::Ctor;
     match made {
-        Made::Prim(Op::Bin(BinOp::Add)) => "concatenation".to_string(),
+        Made::Prim(Op::Bin(BinOp::Add)) | Made::Call("@str" | "@concat") => "String".to_string(),
         Made::Prim(Op::Closure(_)) | Made::Make(Ctor::Closure(_)) => "closure".to_string(),
         Made::Prim(_) => "value".to_string(),
-        Made::Make(Ctor::Record(t, _)) => format!("record {t}"),
-        Made::Make(Ctor::Array) => "array literal".to_string(),
-        Made::Make(Ctor::Map) => "map literal".to_string(),
-        Made::Make(Ctor::Try(t)) => format!("checked {t}"),
-        Made::Call("@str") => "render".to_string(),
-        Made::Call("@concat") => "concatenation".to_string(),
+        Made::Make(Ctor::Record(t, _) | Ctor::Try(t)) => t.to_string(),
+        Made::Make(Ctor::Array) => "Array".to_string(),
+        Made::Make(Ctor::Map) => "Map".to_string(),
         Made::Call(c) => format!("{}(..)", c.trim_start_matches('@')),
     }
 }

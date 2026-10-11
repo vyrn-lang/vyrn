@@ -222,24 +222,26 @@ reason when it is not. A binding whose type owns no heap has no row.
 `vyrn why --cost <file>` prints, per function, the lines that allocate, copy,
 grow a container, enter an allocating function of another file or keep a
 check, and how many loops enclose them. A copy the compiler makes where the
-program wrote none reads `(implicit)`. A function with none prints nothing.
+program wrote none says why. A function with none prints nothing.
 An excerpt from `examples/nbody.vyrn`:
 
 ```
 fn fixed9(v: Float64) -> String
-   53           allocates  render
-   55  loop 1   copies     a String render (implicit)
-                allocates  concatenation
+   53           allocates `String`
+   55  loop 1   copies `String`: interpolating a `String` copies it
+       loop 1   allocates `String`
 fn offsetMomentum(bodies: Array<Body>) -> Array<Body>
-  129           check kept array-index  gap: caller fact: bodies is a parameter; needs bodies.length - 1 >= 0
+  129           index check: it needs `bodies` non-empty, and `bodies` is a parameter, so the function cannot know what its callers pass; only a `read` parameter takes a `where` clause that could state it
 ```
 
-A kept check ends with its reason: `input`, or `gap:` and one of `callee fact`,
-`caller fact`, `move 2`, `move 3`, `move 5` or `unproved`. `caller fact` reads
-`caller fact (exported)` in a function that anything outside the walked calls
-may enter, such as an `export fn` or `main`. The reason names the
-change that would remove the check, and `unproved` prints the goal the prover
-could not show.
+A kept check names what it guards (index, slice, division, shift, `where`
+rule or clause) and says what it needs, in the form the source would test.
+The reason is one of these: the value is read from input; it is the result of
+a call, whose signature does not state the fact; it is a parameter, and the
+fix is a `where` clause on it where one can state the fact; a call in the loop
+may resize the array; it is read from a field, an element or module state; the
+loop moves a counter its condition does not tie to the check; or the compiler
+cannot show it.
 
 `vyrn emit-lowered <file>`
 prints the named core, where each release is an explicit `drop` and `!` marks

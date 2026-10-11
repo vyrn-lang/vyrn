@@ -1,21 +1,21 @@
-39 allocates
-68 allocates
-72 allocates, enters
-73 grows
-86 allocates
-94 check kept (callee fact)
-96 grows
-105 allocates
-107 grows
-110 grows, check kept (callee fact)
-113 allocates
-122 allocates
-132 allocates
-134 copies (implicit), allocates
-136 copies (implicit), allocates 3
-160 allocates
-165 grows
-177 copies 2 (implicit), allocates 2
-204 allocates
-210 grows, check kept (unproved)
-231 copies (implicit), allocates 3
+39 allocates Array<String>
+68 allocates Option<String>
+72 allocates Array<UInt8>, toUpper allocates
+73 push may allocate
+86 allocates Map<Int64, Int64>
+94 division checked
+96 tally may allocate
+105 allocates Array<UInt8>
+107 reserve may allocate
+110 push may allocate, index checked
+113 allocates Result<String, String>
+122 allocates Array<UInt8>
+132 allocates String
+134 copies String, allocates String
+136 copies String, allocates String x3
+160 allocates Array<Int64>
+165 push may allocate
+177 copies String x2, allocates String x2
+204 allocates Array<UInt8>
+210 push may allocate, index checked
+231 copies String, allocates String x3

@@ -142,7 +142,7 @@
         "vyrn.costHints": {
           "type": "boolean",
           "default": true,
-          "description": "Show what each line costs at its end (allocates, copies, grows, check kept) and a lens above each function that costs anything, with the blocks of the last `vyrn run --profile` when the source has not changed since. Turning it off restarts the language server."
+          "description": "Show what each line costs at its end (allocates Folded, copies String, index checked), with the reason in the tooltip, and the blocks of the last `vyrn run --profile` beside each line and above each function when the source has not changed since. Turning it off restarts the language server."
         },
         "vyrn.path": {
           "type": "string",
