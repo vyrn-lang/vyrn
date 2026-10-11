@@ -26,9 +26,10 @@
 ///    imports a sibling file (the generator chapter has two that do) needs more
 ///    than one source, and the playground takes one, so it gets no run link
 ///    rather than a broken one.
-import { substring, split, joinWith } from "std/strings"
+import { substring } from "std/strings"
 import { endsWith, startsWith } from "std/strpred"
-import { highlightSrc } from "./hl"
+import { highlightRows } from "./hl"
+import { quoted, quotedList, branch, lookup, entriesOf } from "./gensrc"
 
 /// One block: its id (the file stem), the program as shown, what it imports, and
 /// whether it stands alone.
@@ -45,14 +46,6 @@ export type Imports = { uses: Array<String>, names: Array<String>, standalone: B
 /// `main` is the same four lines for every program in the book.
 fn mainTail() -> String {
     return "\nfn main() -> Int64 {\n    print(demo())\n    return 0\n}\n"
-}
-
-/// The entries of `dir`, or nothing when it cannot be read.
-fn entriesOf(dir: String) -> Array<String> {
-    return match listDir(dir) {
-        Ok(names) => names.copy(),
-        Err(why) => [],
-    }
 }
 
 /// Whether the module exports a `demo` function — the one name the site calls.
@@ -150,71 +143,6 @@ export gen fn importsOf(toks: Array<Token>) -> Imports {
     return Imports { uses: uses, names: names, standalone: standalone }
 }
 
-/// `s` as a Vyrn string literal. Only a quote and a backslash can end one, and a
-/// newline has to be written rather than embedded.
-fn quoted(s: String) -> String {
-    let raw = bytes(s)
-    let mut out = "\""
-    let mut plain = 0
-    let mut i = 0
-    while i < raw.length {
-        let b = raw[i]
-        if b == 92 || b == '"' || b == 10 || b == 9 {
-            out = out + substring(s, plain, i)
-            if b == 10 {
-                out = out + "\\n"
-            } else if b == 9 {
-                out = out + "\\t"
-            } else if b == 92 {
-                out = out + "\\\\"
-            } else {
-                out = out + "\\\""
-            }
-            plain = i + 1
-        }
-        i = i + 1
-    }
-    return out + substring(s, plain, raw.length) + "\""
-}
-
-/// The coloured lines of `markup`, without the empty row the closing newline of
-/// every program would otherwise add.
-fn rowsOf(markup: String) -> Array<String> {
-    let all = split(markup, "\n")
-    let mut out: Array<String> = []
-    let mut i = 0
-    while i < all.length {
-        if i + 1 < all.length || all[i].byteLength > 0 {
-            out.push(all[i].copy())
-        }
-        i = i + 1
-    }
-    return out
-}
-
-/// A Vyrn array literal of quoted strings.
-fn quotedList(items: Array<String>) -> String {
-    let mut parts: Array<String> = []
-    for it in items {
-        parts.push(quoted(it))
-    }
-    return "[" + joinWith(parts, ", ") + "]"
-}
-
-/// One `if` branch of a lookup.
-fn branch(id: String, value: String) -> String {
-    return "    if id == " + quoted(id) + " { return " + value + " }\n"
-}
-
-/// A lookup over the blocks, with an empty answer for an id that is not one.
-fn lookup(name: String, ret: String, branches: Array<String>, fallback: String) -> String {
-    let mut out = "export fn " + name + "(id: String) -> " + ret + " {\n"
-    for b in branches {
-        out = out + b
-    }
-    return out + "    return " + fallback + "\n}\n"
-}
-
 /// Read `dir`, and emit every block as one module.
 export gen fn guideCode(dir: String) -> String {
     let mut blocks: Array<Block> = []
@@ -247,36 +175,29 @@ export gen fn guideCode(dir: String) -> String {
     let mut playable: Array<String> = []
     for b in blocks {
         ids.push(b.id.copy())
-        srcs.push(branch(b.id, quoted(b.src)))
-        lines.push(branch(b.id, quotedList(rowsOf(highlightSrc(b.src, lex(b.src))))))
-        uses.push(branch(b.id, quotedList(b.uses)))
-        names.push(branch(b.id, quotedList(b.names)))
-        playable.push(branch(b.id, if b.playable { "true" } else { "false" }))
+        srcs.push(branch("id", b.id, quoted(b.src)))
+        lines.push(branch("id", b.id, quotedList(highlightRows(b.src, lex(b.src)))))
+        uses.push(branch("id", b.id, quotedList(b.uses)))
+        names.push(branch("id", b.id, quotedList(b.names)))
+        playable.push(branch("id", b.id, if b.playable { "true" } else { "false" }))
     }
 
     let mut out = "/// The guide's programs, read off `site/guide/` by `site/app/guidecode.vyrn`\n/// while the site compiled. Do not edit.\n"
     out = out + "/// Every block id, sorted.\n"
     out = out + "export fn guideBlocks() -> Array<String> { return " + quotedList(ids) + " }\n"
     out = out + "/// A block's program, as it is shown and as the playground link carries it.\n"
-    out = out + lookup("guideSrc", "String", srcs, "\"\"")
+    out = out + lookup("guideSrc", "id", "String", srcs, "\"\"")
     out = out + "/// A block's program, coloured, one string per line.\n"
-    out = out + lookup("guideLines", "Array<String>", lines, "[]")
+    out = out + lookup("guideLines", "id", "Array<String>", lines, "[]")
     out = out + "/// The `std/` modules a block imports.\n"
-    out = out + lookup("guideUses", "Array<String>", uses, "[]")
+    out = out + lookup("guideUses", "id", "Array<String>", uses, "[]")
     out = out + "/// The names a block imports, each as `<module>:<name>`.\n"
-    out = out + lookup("guideImports", "Array<String>", names, "[]")
+    out = out + lookup("guideImports", "id", "Array<String>", names, "[]")
     out = out + "/// Whether a block is a whole program, so the playground can run it.\n"
-    out = out + lookup("guidePlayable", "Bool", playable, "false")
+    out = out + lookup("guidePlayable", "id", "Bool", playable, "false")
     return out
 }
 
 test "the main every block is shown with prints what demo answered" {
     assertEq(mainTail(), "\nfn main() -> Int64 {\n    print(demo())\n    return 0\n}\n")
-}
-
-test "a source with a quote, a backslash and a newline survives the literal" {
-    assertEq(quoted("a\"b"), "\"a\\\"b\"")
-    assertEq(quoted("a\\b"), "\"a\\\\b\"")
-    assertEq(quoted("a\nb"), "\"a\\nb\"")
-    assertEq(quotedList(["a", "b"]), "[\"a\", \"b\"]")
 }

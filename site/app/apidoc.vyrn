@@ -24,6 +24,7 @@ import { substring, split, joinWith, trim, trimEnd } from "std/strings"
 import { startsWith, endsWith } from "std/strpred"
 import { escapeHtml } from "./code"
 import { highlightSrc, lineStarts } from "./hl"
+import { quoted, quotedList, branch, lookup, entriesOf } from "./gensrc"
 
 /// One exported declaration.
 type Entry = { name: String, kind: String, sig: String, doc: String, line: Int64 }
@@ -463,46 +464,6 @@ fn summaryOf(doc: String) -> String {
 // Emission.
 // ---------------------------------------------------------------------------
 
-/// `s` as a Vyrn string literal. Only a quote and a backslash can end one.
-fn quoted(s: String) -> String {
-    let raw = bytes(s)
-    let mut out = "\""
-    let mut plain = 0
-    let mut i = 0
-    while i < raw.length {
-        if raw[i] == 92 || raw[i] == '"' {
-            out = out + substring(s, plain, i) + "\\"
-            plain = i
-        }
-        i = i + 1
-    }
-    return out + substring(s, plain, raw.length) + "\""
-}
-
-/// A Vyrn array literal of quoted strings.
-fn quotedList(items: Array<String>) -> String {
-    let mut parts: Array<String> = []
-    for it in items {
-        parts.push(quoted(it))
-    }
-    return "[" + joinWith(parts, ", ") + "]"
-}
-
-/// A lookup function over the modules: one branch per module name, and an empty
-/// answer for a name that is not one.
-fn lookup(name: String, ret: String, branches: Array<String>, fallback: String) -> String {
-    let mut out = "export fn " + name + "(m: String) -> " + ret + " {\n"
-    for b in branches {
-        out = out + b
-    }
-    return out + "    return " + fallback + "\n}\n"
-}
-
-/// One `if` branch of a lookup.
-fn branch(module: String, value: String) -> String {
-    return "    if m == " + quoted(module) + " { return " + value + " }\n"
-}
-
 /// The modules behind the compiler's fence: no program can
 /// import them, so the reference does not list them. The compiler's own
 /// predicate is `is_fenced` in `loader.rs`; `vyrn doc --std` uses it, and a
@@ -513,12 +474,8 @@ fn fenced(name: String) -> Bool {
 
 /// Read `stdDir`, and emit the whole reference as one module.
 export gen fn apiDocs(stdDir: String) -> String {
-    let entries = match listDir(stdDir) {
-        Ok(names) => names.copy(),
-        Err(why) => [],
-    }
     let mut mods: Array<Mod> = []
-    for entry in entries {
+    for entry in entriesOf(stdDir) {
         if endsWith(entry, ".vyrn") && !fenced(substring(entry, 0, entry.byteLength - 5)) {
             let src = match readFile(stdDir + "/" + entry) {
                 Ok(text) => text,
@@ -546,8 +503,8 @@ export gen fn apiDocs(stdDir: String) -> String {
     let mut counts: Array<String> = []
     for m in mods {
         names.push(m.name.copy())
-        summaries.push(branch(m.name, quoted(summaryOf(m.doc))))
-        intros.push(branch(m.name, quoted(proseHtml(m.doc))))
+        summaries.push(branch("m", m.name, quoted(summaryOf(m.doc))))
+        intros.push(branch("m", m.name, quoted(proseHtml(m.doc))))
         let mut en: Array<String> = []
         let mut ek: Array<String> = []
         let mut es: Array<String> = []
@@ -560,36 +517,36 @@ export gen fn apiDocs(stdDir: String) -> String {
             ep.push(proseHtml(e.doc))
             el.push(e.line.toString())
         }
-        nameLists.push(branch(m.name, quotedList(en)))
-        kindLists.push(branch(m.name, quotedList(ek)))
-        sigLists.push(branch(m.name, quotedList(es)))
-        proseLists.push(branch(m.name, quotedList(ep)))
-        lineLists.push(branch(m.name, "[" + joinWith(el, ", ") + "]"))
-        testLists.push(branch(m.name, quotedList(m.tests)))
-        counts.push(branch(m.name, m.entries.length.toString()))
+        nameLists.push(branch("m", m.name, quotedList(en)))
+        kindLists.push(branch("m", m.name, quotedList(ek)))
+        sigLists.push(branch("m", m.name, quotedList(es)))
+        proseLists.push(branch("m", m.name, quotedList(ep)))
+        lineLists.push(branch("m", m.name, "[" + joinWith(el, ", ") + "]"))
+        testLists.push(branch("m", m.name, quotedList(m.tests)))
+        counts.push(branch("m", m.name, m.entries.length.toString()))
     }
 
     let mut out = "/// The standard library reference, read off `std/` by `site/app/apidoc.vyrn`\n/// while the site compiled. Do not edit.\n"
     out = out + "/// Every documented module, sorted.\n"
     out = out + "export fn docModules() -> Array<String> { return " + quotedList(names) + " }\n"
     out = out + "/// The first sentence of a module's header block.\n"
-    out = out + lookup("docSummary", "String", summaries, "\"\"")
+    out = out + lookup("docSummary", "m", "String", summaries, "\"\"")
     out = out + "/// A module's header block, as HTML.\n"
-    out = out + lookup("docIntro", "String", intros, "\"\"")
+    out = out + lookup("docIntro", "m", "String", intros, "\"\"")
     out = out + "/// The names of a module's exports, in declaration order.\n"
-    out = out + lookup("docNames", "Array<String>", nameLists, "[]")
+    out = out + lookup("docNames", "m", "Array<String>", nameLists, "[]")
     out = out + "/// What each export is: `fn`, `type` or `protocol`.\n"
-    out = out + lookup("docKinds", "Array<String>", kindLists, "[]")
+    out = out + lookup("docKinds", "m", "Array<String>", kindLists, "[]")
     out = out + "/// Each export's signature, coloured by the compiler's own lexer.\n"
-    out = out + lookup("docSigs", "Array<String>", sigLists, "[]")
+    out = out + lookup("docSigs", "m", "Array<String>", sigLists, "[]")
     out = out + "/// Each export's `///` prose, as HTML.\n"
-    out = out + lookup("docProse", "Array<String>", proseLists, "[]")
+    out = out + lookup("docProse", "m", "Array<String>", proseLists, "[]")
     out = out + "/// The source line each export is declared on.\n"
-    out = out + lookup("docLines", "Array<Int64>", lineLists, "[]")
+    out = out + lookup("docLines", "m", "Array<Int64>", lineLists, "[]")
     out = out + "/// The name of every `test` block the module keeps, in source order.\n"
-    out = out + lookup("docTests", "Array<String>", testLists, "[]")
+    out = out + lookup("docTests", "m", "Array<String>", testLists, "[]")
     out = out + "/// How many exports a module has.\n"
-    out = out + lookup("docCount", "Int64", counts, "0")
+    out = out + lookup("docCount", "m", "Int64", counts, "0")
     return out
 }
 
@@ -632,9 +589,4 @@ test "the summary is the first sentence of the first paragraph" {
 test "the trailing comment between two declarations is not part of a signature" {
     assertEq(trimTail("type A = Int64\n\n// a note\n"), "type A = Int64")
     assertEq(trimTail("fn f() -> Int64 "), "fn f() -> Int64")
-}
-
-test "a string literal is a literal, so the emitted module parses" {
-    assertEq(quoted("a\"b"), "\"a\\\"b\"")
-    assertEq(quotedList(["a", "b"]), "[\"a\", \"b\"]")
 }

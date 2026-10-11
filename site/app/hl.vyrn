@@ -24,8 +24,9 @@
 /// The one list left is `contextual()`: ten words the grammar treats as keywords
 /// in position but the lexer hands back as identifiers. Four of them are the
 /// capability words this whole site is about, so they are tinted deliberately.
-import { substring, split, joinWith } from "std/strings"
+import { substring, split } from "std/strings"
 import { escapeHtml } from "./code"
+import { quoted, quotedList, branch, lookup } from "./gensrc"
 
 /// One snippet, under the id the pages ask for.
 type Piece = { id: String, src: String }
@@ -372,81 +373,34 @@ export gen fn highlightSrc(src: String, toks: Array<Token>) -> String {
     return out + trivia(src, raw, cursor, raw.length)
 }
 
-/// `s` as a Vyrn string literal.
-fn quoted(s: String) -> String {
-    let raw = bytes(s)
-    let mut out = "\""
-    let mut plain = 0
-    let mut i = 0
-    while i < raw.length {
-        if raw[i] == 92 || raw[i] == '"' {
-            out = out + substring(s, plain, i) + "\\"
-            plain = i
-        }
-        i = i + 1
-    }
-    return out + substring(s, plain, raw.length) + "\""
-}
-
-/// A whole snippet as ONE Vyrn string literal, newlines escaped.
-///
-/// `quoted` is for a single coloured line and never meets a newline, because
-/// `linesLit` splits on them first. This one does meet them — a snippet is
-/// twelve lines and the textarea wants all twelve — so it is a separate
-/// function rather than a flag on that one.
-fn srcLit(s: String) -> String {
-    let raw = bytes(s)
-    let mut out = "\""
-    let mut plain = 0
-    let mut i = 0
-    while i < raw.length {
-        if raw[i] == 92 || raw[i] == '"' {
-            out = out + substring(s, plain, i) + "\\"
-            plain = i
-        }
-        if raw[i] == 10 {
-            out = out + substring(s, plain, i) + "\\n"
-            plain = i + 1
-        }
-        i = i + 1
-    }
-    return out + substring(s, plain, raw.length) + "\""
-}
-
-/// A Vyrn array literal of the coloured lines of `src`. The trailing newline
-/// every snippet ends with would otherwise become an empty final row.
-gen fn linesLit(src: String, toks: Array<Token>) -> String {
+/// The coloured lines of `src`, one string per source line. The trailing
+/// newline every source ends with would otherwise become an empty final row.
+export gen fn highlightRows(src: String, toks: Array<Token>) -> Array<String> {
     let all = split(highlightSrc(src, toks), "\n")
     let mut out: Array<String> = []
     let mut i = 0
     while i < all.length {
         if i + 1 < all.length || all[i].byteLength > 0 {
-            out.push(quoted(all[i]))
+            out.push(all[i].copy())
         }
         i = i + 1
     }
-    return "[" + joinWith(out, ", ") + "]"
+    return out
 }
 
 /// Colour every snippet, and emit the answers as a module.
 export gen fn vyrnCode() -> String {
+    let mut lines: Array<String> = []
+    let mut sources: Array<String> = []
+    for p in pieces() {
+        lines.push(branch("id", p.id, quotedList(highlightRows(p.src, lex(p.src)))))
+        sources.push(branch("id", p.id, quoted(p.src)))
+    }
     let mut out = "/// Coloured by the compiler's own lexer while the site compiled. Do not edit.\n"
     out = out + "/// The lines of one snippet, already coloured, one string per source line.\n"
-    out = out + "export fn hlLines(id: String) -> Array<String> {\n"
-    for p in pieces() {
-        out = out + "    if id == " + quoted(p.id) + " { return " + linesLit(p.src, lex(p.src)) + " }\n"
-    }
-    out = out + "    return []\n}\n"
-    // And the same snippets UNCOLOURED. One page needs both halves of the same
-    // bytes: the index's hero editor paints the coloured lines and puts the raw
-    // source in the textarea under them, and a second copy of the program
-    // written out by hand is a copy that drifts.
+    out = out + lookup("hlLines", "id", "Array<String>", lines, "[]")
     out = out + "/// The raw source of one snippet, exactly as `hlLines` was measured from.\n"
-    out = out + "export fn hlSource(id: String) -> String {\n"
-    for p in pieces() {
-        out = out + "    if id == " + quoted(p.id) + " { return " + srcLit(p.src) + " }\n"
-    }
-    out = out + "    return \"\"\n}\n"
+    out = out + lookup("hlSource", "id", "String", sources, "\"\"")
     return out
 }
 
@@ -477,10 +431,6 @@ test "a capability word is a keyword here and an ordinary name is not" {
     assertEq(classOf("ident", "Ticket"), "t")
     assertEq(classOf("ident", "seats"), "")
     assertEq(classOf("keyword", "where"), "k")
-}
-
-test "a snippet's lines survive the round trip through a literal" {
-    assertEq(quoted("a\"b"), "\"a\\\"b\"")
 }
 
 test "the two halves of the types specimen differ on exactly one line" {

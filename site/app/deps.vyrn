@@ -17,20 +17,13 @@
 /// `std/tw` and `std/graphql` both emit one, and `std/cli` writes a whole module
 /// in a string — is a string token and is never read as a real import. A line
 /// scan gets that wrong and invents a `std/manifest` that does not exist.
-import { substring, joinWith } from "std/strings"
+import { substring } from "std/strings"
 import { endsWith } from "std/strpred"
 import { importsOf } from "./guidecode"
+import { quotedList, branch, lookup, entriesOf } from "./gensrc"
 
 /// One file and the `std/` modules it imports.
 type Uses = { path: String, uses: Array<String> }
-
-/// The entries of `dir`, or nothing when it cannot be read.
-fn entriesOf(dir: String) -> Array<String> {
-    return match listDir(dir) {
-        Ok(names) => names.copy(),
-        Err(why) => [],
-    }
-}
 
 /// Whether `name` is one of `all`.
 fn known(name: String, all: Array<String>) -> Bool {
@@ -112,35 +105,6 @@ gen fn depthOf(m: String, all: Array<String>, edges: Array<Uses>, walking: Array
     return deepest + 1
 }
 
-/// `s` as a Vyrn string literal. These are file names and module names from this
-/// repository, which carry no quote and no backslash.
-fn quoted(s: String) -> String {
-    return "\"" + s + "\""
-}
-
-/// A Vyrn array literal of quoted strings.
-fn quotedList(items: Array<String>) -> String {
-    let mut parts: Array<String> = []
-    for it in items {
-        parts.push(quoted(it))
-    }
-    return "[" + joinWith(parts, ", ") + "]"
-}
-
-/// One `if` branch of a lookup.
-fn branch(m: String, value: String) -> String {
-    return "    if m == " + quoted(m) + " { return " + value + " }\n"
-}
-
-/// A lookup over the modules, with an empty answer for a name that is not one.
-fn lookup(name: String, ret: String, branches: Array<String>, fallback: String) -> String {
-    let mut out = "export fn " + name + "(m: String) -> " + ret + " {\n"
-    for b in branches {
-        out = out + b
-    }
-    return out + "    return " + fallback + "\n}\n"
-}
-
 /// Read `stdDir` and `examplesDir`, and emit the graph as one module.
 export gen fn moduleDeps(stdDir: String, examplesDir: String) -> String {
     let all = moduleNames(stdDir)
@@ -167,7 +131,7 @@ export gen fn moduleDeps(stdDir: String, examplesDir: String) -> String {
                 }
             }
         }
-        uses.push(branch(m, quotedList(mine)))
+        uses.push(branch("m", m, quotedList(mine)))
 
         let mut back: Array<String> = []
         for e in edges {
@@ -175,7 +139,7 @@ export gen fn moduleDeps(stdDir: String, examplesDir: String) -> String {
                 back.push(e.path.copy())
             }
         }
-        usedBy.push(branch(m, quotedList(back)))
+        usedBy.push(branch("m", m, quotedList(back)))
 
         let mut users: Array<String> = []
         for s in samples {
@@ -183,20 +147,20 @@ export gen fn moduleDeps(stdDir: String, examplesDir: String) -> String {
                 users.push(s.path.copy())
             }
         }
-        examples.push(branch(m, quotedList(users)))
+        examples.push(branch("m", m, quotedList(users)))
 
-        depth.push(branch(m, depthOf(m, all, edges, []).toString()))
+        depth.push(branch("m", m, depthOf(m, all, edges, []).toString()))
     }
 
     let mut out = "/// The module graph, read off `std/` and `examples/` by `site/app/deps.vyrn`\n/// while the site compiled. Do not edit.\n"
     out = out + "/// The `std/` modules a module imports.\n"
-    out = out + lookup("depUses", "Array<String>", uses, "[]")
+    out = out + lookup("depUses", "m", "Array<String>", uses, "[]")
     out = out + "/// The `std/` modules that import a module.\n"
-    out = out + lookup("depUsedBy", "Array<String>", usedBy, "[]")
+    out = out + lookup("depUsedBy", "m", "Array<String>", usedBy, "[]")
     out = out + "/// How far a module sits from the bottom of the graph.\n"
-    out = out + lookup("depDepth", "Int64", depth, "0")
+    out = out + lookup("depDepth", "m", "Int64", depth, "0")
     out = out + "/// The example programs that import a module, by path under `examples/`.\n"
-    out = out + lookup("depExamples", "Array<String>", examples, "[]")
+    out = out + lookup("depExamples", "m", "Array<String>", examples, "[]")
     return out
 }
 
@@ -204,11 +168,4 @@ test "a name is looked up in a list, and a missing one is not there" {
     assert(known("json", ["json", "html"]))
     assert(!known("nope", ["json", "html"]))
     assert(!known("json", []))
-}
-
-test "a lookup is a Vyrn function with one branch per module" {
-    assertEq(quotedList([]), "[]")
-    assertEq(quotedList(["a", "b"]), "[\"a\", \"b\"]")
-    assertEq(branch("json", "[]"), "    if m == \"json\" { return [] }\n")
-    assertEq(lookup("f", "Int64", [], "0"), "export fn f(m: String) -> Int64 {\n    return 0\n}\n")
 }
