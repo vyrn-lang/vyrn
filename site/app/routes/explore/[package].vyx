@@ -1,18 +1,5 @@
 <script>
-// GET /explore/[package] — one package, compact: a long band was "overloaded
-// and hardly readable" (user).
-//
-// The shape is a package index's page: the identity at the top, the install
-// command and the source in a side card, and the substance — the import line,
-// the exports, the artifacts, the dependencies — as short blocks. The two file
-// SHAPES `vyrn add` writes are behind one `<details>`: they are reference
-// material, and open-by-default they were most of the page.
-//
-// Everything here is still read off the package's own files while the site
-// compiles, and THE SPECIFIER IS STILL THE POINT: it is carried in `data-spec`
-// and `site/test/importline.test.mjs` re-parses every one with the grammar
-// `compiler/vyrn-cli/src/remote.rs` applies.
-import { Package, Artifact, PkgLink, Offer, packageBlurb, packageKnown, packageOf, packageDeps, packageSource, offerOf, addCommand, manifestShape, lockShape, importFrom, artifactsOf } from "../../packages"
+import { Package, Artifact, packageBlurb, packageKnown, packageOf, packageDeps, packageSource, offerOf, addCommand, manifestShape, lockShape, importFrom, artifactsOf } from "../../packages"
 import { Head, PageError, ParamQuery, notFound, paramQuery } from "std/ui"
 import { pageHeadWith } from "../../nav"
 params { package: String }
@@ -32,13 +19,10 @@ fn fetchPackage(p: Params) -> Result<Package, PageError> {
     return Ok(packageOf(p.package))
 }
 
-/// `1 export`, `14 exports`. A count and its noun disagreeing is the sort of
-/// thing a reader takes as a sign that nothing here was read.
 fn unitLabel(d: Package) -> String {
     return if d.exports == 1 { "1 export" } else { d.exports.toString() + " exports" }
 }
 
-/// `no dependencies`, `1 dependency`, `6 dependencies`.
 fn depLabel(d: Package) -> String {
     if d.deps == 0 {
         return "no dependencies"
@@ -46,8 +30,6 @@ fn depLabel(d: Package) -> String {
     return if d.deps == 1 { "1 dependency" } else { d.deps.toString() + " dependencies" }
 }
 
-/// `1 artifact`, `2 artifacts` — what the project builds, which is a different
-/// question from what it offers.
 fn buildLabel(d: Package) -> String {
     let n = artifactsOf(d.slug).length
     return if n == 1 { "1 artifact" } else { n.toString() + " artifacts" }
@@ -56,9 +38,6 @@ fn buildLabel(d: Package) -> String {
 
 <template>
 <main class="page pkg">
-    <!-- The header a package index gives a package (user, off jsr.io): the
-         name at reading size with its badge beside it, the sentence, and the
-         numbers - not a poster. -->
     <section class="pkghead">
         <p class="eyebrow"><a href="/explore.html">Registry</a></p>
         <div class="pkgtitle">
@@ -72,12 +51,11 @@ fn buildLabel(d: Package) -> String {
     <section class="band pkgbody">
         <div class="pkgmain">
             <div class="pkgblock" id="api">
-                <p class="eyebrow">overview</p>
+                <h2>Specifier</h2>
                 <p>The specifier names <code>{{ offerOf(data.slug).path }}</code>. Any other module in the tree takes the same specifier with its own path in it.</p>
             </div>
 
             <div class="pkgblock" id="builds">
-                <p class="eyebrow">what it builds</p>
                 <h2>{{ buildLabel(data) }}</h2>
                 <div class="scroller">
                 <table>
@@ -93,11 +71,10 @@ fn buildLabel(d: Package) -> String {
                     </tbody>
                 </table>
                 </div>
-                <p class="cap">From <code>{{ data.name }}/vyrn.json</code> — what you get if you clone it rather than depend on it.</p>
+                <p class="cap">From <code>{{ data.name }}/vyrn.json</code>. A clone builds these; a dependency does not.</p>
             </div>
 
             <div class="pkgblock" id="deps">
-                <p class="eyebrow">what it needs</p>
                 <h2>{{ depLabel(data) }}</h2>
                 <dl class="specs">
                     <div>
@@ -123,7 +100,7 @@ fn buildLabel(d: Package) -> String {
                     <summary>What the command writes</summary>
                     <p><code>vyrn.json</code> gains the alias your <code>import</code> lines use:</p>
                     <pre class="code">{{ manifestShape(data.slug) }}</pre>
-                    <p><code>vyrn.lock</code> gains the pin — the specifier, the immutable URL it resolved to, and the sha256 of the bytes:</p>
+                    <p><code>vyrn.lock</code> gains the pin: the specifier, the immutable URL it resolved to, and the sha256 of the bytes:</p>
                     <div class="scroller">
                     <pre class="code">{{ lockShape(data.slug) }}</pre>
                     </div>

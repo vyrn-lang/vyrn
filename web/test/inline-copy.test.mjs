@@ -3,54 +3,10 @@
 // and a copy that eats text selection still copies — so they are the two things
 // worth a test.
 //
-// `site/public/widgets.js` is a browser module: it imports its siblings and
-// derives the site's base from `import.meta.url`, neither of which a plain
-// script can do. So the file is evaluated here as a script in a stubbed context,
-// with the imports dropped and `import.meta.url` — a syntax error outside a
-// module — standing in as a literal. Nothing is copied into this file: rename
-// either rule, or change what it answers, and these tests fail.
-//
 // Run: node --test web/test/
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
-import vm from "node:vm";
-
-const src = await readFile(new URL("../../site/public/widgets.js", import.meta.url), "utf8");
-const script = src
-  .replace(/^import .*$/gm, "")
-  .replace(/^import\(.*$/gm, "")
-  .replace(/import\.meta\.url/g, JSON.stringify("https://host.test/base/widgets.js"));
-
-const nothing = () => null;
-const element = () => ({
-  setAttribute: nothing,
-  appendChild: nothing,
-  addEventListener: nothing,
-  classList: { add: nothing, remove: nothing },
-  style: {},
-});
-const ctx = {
-  window: {},
-  URL,
-  location: { pathname: "/install.html", href: "https://host.test/base/install.html" },
-  matchMedia: () => ({ matches: false }),
-  addEventListener: nothing,
-  document: {
-    addEventListener: nothing,
-    querySelector: nothing,
-    querySelectorAll: () => [],
-    getElementById: nothing,
-    createElement: element,
-    body: element(),
-  },
-  // The two imports the strip above removed. `boot()` calls the second one.
-  mountHero: nothing,
-  refreshRelease: nothing,
-};
-vm.createContext(ctx);
-vm.runInContext(script, ctx);
-const { codeText, isPlainCopyClick } = ctx;
+import { codeText, isPlainCopyClick } from "../../site/public/copy.js";
 
 const span = (text) => ({ textContent: text });
 

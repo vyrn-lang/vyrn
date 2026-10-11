@@ -1,58 +1,20 @@
-/// What the editor support IS, one row per thing it does, and the file that
-/// does it.
-///
-/// Every row carries a `path` into this repository and the `symbol` inside that
-/// file which implements the row. That is not decoration. The gate in
-/// `site/export.vyrn` — "every feature the editors page claims names a file that
-/// is in this repository" — reads the `data-impl` attribute off the RENDERED
-/// page and opens each path, so a row describing something nobody wrote fails
-/// the export, which fails the build.
-///
-/// The rows were written by reading the code, not the extension's README. Three
-/// things the README says are not what the code does, and the three rows below
-/// follow the code:
-///
-///  - it points at `editor/vscode/ROADMAP.md`, which does not exist;
-///  - it lists user `protocol`/`impl` method resolution as deferred, while
-///    `compiler/vyrn-frontend/src/symbols.rs` builds the impl and protocol
-///    member tables `.`-completion answers from;
-///  - it does not mention the bench, route or dev-server lenses, which all work.
-///
-/// And one thing the code does NOT do, so no row claims it: `.von` files get the
-/// Vyrn grammar and nothing else. The client's document selector names `vyrn`
-/// and `vyx` only, so a `.von` buffer is coloured and never analyzed.
 import { blob, installTargets } from "./repo"
 import { startsWith, contains } from "std/strpred"
 
-/// One thing the editor does: what it is called, what a reader gets from it,
-/// the repository file that implements it, and the declaration inside that file.
 export type Feature = { name: String, what: String, path: String, symbol: String }
 
-/// One step of getting the extension: the heading, the command, and what the
-/// command leaves you with.
 export type Step = { title: String, command: String, what: String }
 
-/// Where the extension lives. Written once because four rows and two sentences
-/// name it.
-export fn extensionDir() -> String {
+fn extensionDir() -> String {
     return "editor/vscode"
 }
 
-/// The server's crate directory.
-export fn serverDir() -> String {
+fn serverDir() -> String {
     return "compiler/vyrn-lsp"
 }
 
-/// The page's own words, one fn per block, beside the data they describe.
-///
-/// The template in `routes/tooling/editors.vyx` renders these and the markdown
-/// twin (`app/pagemd.vyrn`) renders the same ones, so a page and its twin cannot
-/// disagree — the same rule a chapter's prose lives in `app/guide.vyrn` for.
-/// Each string is the markup the template wants: `<code>` and `<strong>`, which
-/// `asMarkdown` turns back into backticks and stars on the way out.
-
 export fn pageTitle() -> String {
-    return "One extension, one server"
+    return "Editors"
 }
 
 export fn lede() -> String {
@@ -64,11 +26,11 @@ export fn notice() -> String {
 }
 
 export fn featuresHeading() -> String {
-    return "things it does, and where each one lives"
+    return "features"
 }
 
 export fn featuresIntro() -> String {
-    return "Every row names the file that implements it, and the build opens every one of those files. A row for something nobody wrote fails the build."
+    return "Each row names the file that implements it."
 }
 
 export fn featuresCap() -> String {
@@ -80,7 +42,7 @@ export fn featuresNotice() -> String {
 }
 
 export fn installHeading() -> String {
-    return "Install the toolchain, then the .vsix"
+    return "Install"
 }
 
 export fn installIntro() -> String {
@@ -96,25 +58,17 @@ export fn installCap() -> String {
 }
 
 export fn otherHeading() -> String {
-    return "Nothing else is written, and nothing else has to be"
+    return "Other editors"
 }
 
 export fn otherIntro() -> String {
-    return "There is one extension and it is the one above. <code>vyrn-lsp</code> is an ordinary language server: it speaks JSON-RPC over stdin and stdout and knows nothing about VS Code. Any editor with a generic LSP client gets the whole table above except the lenses, which the client draws. There is no socket mode, so a client that cannot spawn a process cannot use it."
+    return "<code>vyrn-lsp</code> is an ordinary language server: it speaks JSON-RPC over stdin and stdout and knows nothing about VS Code. Any editor with a generic LSP client gets the whole table above except the lenses, which the client draws. There is no socket mode, so a client that cannot spawn a process cannot use it."
 }
 
 export fn otherClose() -> String {
     return "The rest is data any editor can read: the grammar is TextMate JSON, and the snippets are one flat file."
 }
 
-/// Every feature, in the order a reader meets them: the ones that answer while
-/// you type first, then the ones you ask for, then the ones the extension draws
-/// itself.
-///
-/// A row is here because the code is there. The pair of files is the whole
-/// story: `editor/vscode/extension.js` is a client that spawns a process and
-/// forwards JSON-RPC, and `compiler/vyrn-lsp` answers every question about the
-/// language by calling the same compiler front end `vyrn check` calls.
 export fn features() -> Array<Feature> {
     return [
         Feature {
@@ -228,20 +182,6 @@ export fn features() -> Array<Feature> {
     ]
 }
 
-/// The way to get it, in order. There is no marketplace listing; what a release
-/// publishes is a `.vsix` file, and the two halves of the editor story arrive
-/// from two different assets of the same release.
-///
-/// THE COMMANDS ARE NOT WRITTEN HERE. `installTargets()` in `./repo` is the one
-/// place they exist: this page, the index hero and `/install` all teach the
-/// same two lines. A second copy would be a second place for them to disagree.
-///
-/// The split is the point. The extension is JavaScript and has no architecture,
-/// so ONE `.vsix` serves every platform. The half that does have an architecture
-/// is `vyrn-lsp`, and it ships in the per-platform archive beside `vyrn` — which
-/// is where the extension looks for it, so installing the toolchain is what
-/// gives the editor its server. Building from source is the third step because
-/// it is now the contributor's path, not the reader's.
 export fn steps() -> Array<Step> {
     return [
         Step {
@@ -262,9 +202,6 @@ export fn steps() -> Array<Step> {
     ]
 }
 
-/// The file a feature row points at, on GitHub. The site does not host the
-/// source, so this leaves — the same rule every other source link on the site
-/// follows.
 export fn implHref(f: Feature) -> String {
     return blob(f.path)
 }
@@ -276,17 +213,12 @@ test "every feature names a file and the declaration inside it" {
         assert(f.name.byteLength > 0)
         assert(f.what.byteLength > 0)
         assert(f.symbol.byteLength > 0)
-        // A path into this repository, never a URL and never absolute: the gate
-        // in `site/export.vyrn` opens it relative to the directory the export
-        // runs in.
         assert(f.path.byteLength > 0)
         assert(implHref(f) == "https://github.com/vyrn-lang/vyrn/blob/main/" + f.path)
     }
 }
 
 test "every feature is implemented by the extension or by the server" {
-    // The claim the page makes in its first sentence — two pieces of software
-    // and no third — checked against the rows rather than left as prose.
     for f in features() {
         assert(startsWith(f.path, extensionDir() + "/") || startsWith(f.path, serverDir() + "/"))
     }
@@ -303,10 +235,6 @@ test "each step says what it leaves you with" {
 }
 
 test "the install step teaches the one command repo.vyrn owns" {
-    // The install commands live on the site's own origin, in
-    // `installTargets()`; a copy that stood here kept naming
-    // `raw.githubusercontent.com` and taught `/docs/editors` a different line
-    // than `/install` pastes. Both come from the one place now.
     let targets = installTargets()
     assertEq(steps()[0].command, targets[0].cmd)
     assert(contains(steps()[0].what, targets[1].cmd))

@@ -1,0 +1,72 @@
+.play .editor {
+  position: relative;
+  margin: var(--s3) var(--s2) 0;
+}
+
+/* Transparent, not removed: the textarea must keep the highlight layer's metrics. */
+.play .editor pre.hl,
+.play .editor textarea {
+  margin: 0;
+  padding: var(--s2);
+  border: 1px solid transparent;
+  font: var(--t-code)/1.5 var(--mono);
+  tab-size: 2;
+  white-space: pre;
+  word-break: normal;
+  overflow: auto;
+}
+
+.play .editor pre.hl {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: color-mix(in oklab, var(--plate) 45%, transparent);
+}
+
+.play .editor textarea {
+  position: relative;
+  display: block;
+  width: 100%;
+  height: 52vh;
+  min-height: 300px;
+  background: transparent;
+  color: transparent;
+  caret-color: var(--ink);
+  resize: vertical;
+}
+.play .editor textarea:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+.play .editor textarea::selection { background: color-mix(in oklab, var(--accent) 28%, transparent); }
+
+.play .btn.primary { border-color: color-mix(in oklab, var(--accent) 55%, transparent); color: var(--accent); }
+.play .btn[disabled] { opacity: 0.45; cursor: default; }
+
+.play .diags { margin: var(--s2) var(--s2) 0; display: grid; }
+.play .diag {
+  text-align: left;
+  text-transform: none;
+  letter-spacing: 0;
+  font: var(--t-code-s)/1.6 var(--mono);
+  border: 0;
+  border-left: 2px solid var(--danger);
+  padding: 6px var(--s2);
+  background: color-mix(in oklab, var(--danger) 7%, transparent);
+  color: var(--ink);
+}
+.play .diag.warning { border-left-color: var(--amber); background: color-mix(in oklab, var(--amber) 8%, transparent); }
+.play .diag .at { color: var(--muted); margin-right: var(--s2); }
+.play .diag .note { display: block; color: var(--muted); }
+
+.play .out { margin: var(--s2); white-space: pre-wrap; min-height: 6em; }
+.play .out .stdout { color: var(--ink); }
+.play .out .stderr { color: var(--danger); }
+.play .out .exit { margin-top: var(--s1); color: var(--muted); }
+.play .out .exit.bad { color: var(--danger); }
+.play .out .dim { color: var(--n2); }
+
+kbd {
+  font: var(--t-key)/1 var(--mono);
+  border: 1px solid var(--rule);
+  border-bottom-width: 2px;
+  padding: 3px 5px;
+  color: var(--ink);
+}

@@ -1,21 +1,13 @@
 <script>
-// GET /tooling/[chapter] — one page of the Tooling area.
-//
-// The same shell and the same machinery as a guide chapter: the prose lives in
-// `site/app/guide.vyrn` with the rest of the documentation's pages, and a code
-// block on this page is a program that ran while the page was built. Only the
-// shelf differs — this route answers for the chapters whose `area` is
-// "tooling", and 404s every other slug, so one slug has one page.
 import { Head, PageError, ParamQuery, notFound, paramQuery } from "std/ui"
 import { pageHeadWith } from "../../nav"
-import { Chapter, Section, chapterArea, chapterBlurb, chapterCount, chapterOf, chapterKnown, chapterNumber, chapterHref, sectionBody, sectionEyebrow } from "../../guide"
+import { Chapter, Section, chapterArea, chapterBlurb, chapterCount, chapterOf, chapterKnown, chapterNumber, chapterHref, sectionBody } from "../../guide"
 import { mdUrl, askClaudeUrl } from "../../pagemd"
 import { inlineCode } from "../../code"
 import { TreeGroup, Pager, areaTree, pagerFor } from "../../docshell"
 import { Icon } from "../../icons"
 params { chapter: String }
 
-/// One page, with its number on this shelf.
 type ChapterPage = { n: Int64, chapter: Chapter }
 
 export fn head(d: ChapterPage) -> Head {
@@ -33,29 +25,23 @@ fn fetchChapter(p: Params) -> Result<ChapterPage, PageError> {
     return Ok(ChapterPage { n: chapterNumber(p.chapter), chapter: chapterOf(p.chapter) })
 }
 
-/// The sidebar for this page: this shelf, with this page marked.
 fn tree(here: String) -> Array<TreeGroup> {
     return areaTree("tooling", here)
 }
 
-/// The link to one section of this page — a function for the reason the guide's
-/// twin gives: `'#'` in Vyrn is a byte.
 fn sectionHref(s: Section) -> String {
     return "#" + s.anchor
 }
 
-/// How many pages this shelf holds.
 fn shelfSize() -> Int64 {
     return chapterCount("tooling")
 }
 
-/// The pages beside this one — FROM THE TREE, not from the chapter chain, so
-/// a shelf's hand-listed rows (Tooling ends with Editors) are neighbours too.
+/// From the tree, not the chapter chain, so the hand-listed Editors row is a neighbour.
 fn pager(here: String) -> Pager {
     return pagerFor(tree(here))
 }
 
-/// The Open-in-Claude link for this page.
 fn claudeHref(slug: String, title: String) -> String {
     return askClaudeUrl(chapterHref(slug), title)
 }
@@ -97,7 +83,6 @@ fn claudeHref(slug: String, title: String) -> String {
     </section>
 
     <section class="band" v-for="s in data.chapter.sections" :key="s.anchor" :id="s.anchor">
-        <p class="eyebrow">{{ sectionEyebrow(data.chapter, s) }}</p>
         <h2>{{ s.heading }}</h2>
         <div v-html="sectionBody(s)"></div>
     </section>

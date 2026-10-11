@@ -1,9 +1,4 @@
 <script>
-// GET /web — the Web area's contents.
-//
-// The page list is `areaChapters("web")` — the same run of the one
-// chapter table the sidebar, the subnav, the export and the search index read —
-// so a page added there appears here with nothing written twice.
 import { Head } from "std/ui"
 import { pageHeadOf } from "../../nav"
 import { Chapter, areaGroups, groupChapters, chapterHref } from "../../guide"
@@ -14,18 +9,14 @@ export fn head() -> Head {
     return pageHeadOf("/web")
 }
 
-/// This shelf's groups — the same named runs the sidebar prints.
 fn groups() -> Array<String> {
     return areaGroups("web")
 }
 
-/// One group's pages.
 fn of(g: String) -> Array<Chapter> {
     return groupChapters("web", g)
 }
 
-/// The sidebar, with nothing marked: the subnav's own row is this landing's
-/// marker.
 fn tree() -> Array<TreeGroup> {
     return areaTree("web", "index")
 }
@@ -44,9 +35,8 @@ fn tree() -> Array<TreeGroup> {
     </aside>
 
     <section class="hero">
-        <p class="eyebrow">The web</p>
-        <h1 class="display">Build for the browser</h1>
-        <p class="lede">Four pages: the view tree, single-file components, routes and RPC, styling and icons. The whole stack is libraries and generators — the compiler has no web feature in it.</p>
+        <h1 class="display">Web</h1>
+        <p class="lede">The view tree, single-file components, routes and RPC, styling and icons. The whole stack is libraries and generators; the compiler has no web feature.</p>
     </section>
 
     <section class="band" id="pages">

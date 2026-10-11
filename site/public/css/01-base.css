@@ -1,0 +1,231 @@
+:root {
+  --navy: oklch(0.3153 0.0778 254.59);
+  --cyan: oklch(0.7221 0.1214 214.54);
+  --bright: oklch(0.8442 0.1241 204.81);
+  --danger: oklch(0.515 0.2078 25.33);
+  --amber: oklch(0.487 0.1447 70.08);
+
+  --n0: oklch(0.2 0.006 60);
+  --n1: oklch(0.4 0.006 60);
+  --n2: oklch(0.475 0.006 60);
+  --n3: oklch(0.88 0.03 60);
+  --n4: oklch(0.93 0.024 60);
+
+  --ink: var(--n0);
+  --muted: var(--n1);
+  --paper: var(--n4);
+  --plate: var(--n3);
+  --rule: color-mix(in oklab, var(--n0) 16%, transparent);
+  --hair: color-mix(in oklab, var(--n0) 10%, transparent);
+  --accent: var(--navy);
+
+  --scrim: oklch(0.18 0.004 60 / 0.45);
+
+  --syn-kw: oklch(0.46 0.0959 223.03);
+  --syn-str: oklch(0.44 0.11 150);
+  --syn-com: var(--n1);
+  --syn-type: var(--navy);
+  --syn-num: var(--amber);
+  --sr-c: var(--n1);
+  --sr-rust: var(--amber);
+  --sr-node: var(--syn-str);
+  --sr-vyrn: var(--accent);
+  --code-wash: 5%;
+
+  /* Base system faces only: a fingerprint-hardened Firefox logs a notice for every other name. */
+  --mono: ui-monospace, SFMono-Regular, Consolas, Menlo, monospace;
+  --sans: ui-sans-serif, "Segoe UI", Roboto, Helvetica, sans-serif;
+  --sans-d: ui-sans-serif, system-ui, "Segoe UI", Roboto, Helvetica, sans-serif;
+
+  --t-display: clamp(2.1rem, 0.9rem + 4.6vw, 5.1rem);
+  --t-h1: clamp(1.7rem, 1.1rem + 1.8vw, 2.4rem);
+  --t-h2: clamp(1.6rem, 1rem + 2vw, 2.75rem);
+  --t-h3: 1.5rem; --t-h4: 1.1rem; --t-h5: 1rem; --t-lede: 1.2rem;
+  --t-body: 17px; --t-body-s: 16px;
+  --t-note: 0.95rem; --t-meta: 0.92rem; --t-matrix: 0.9rem; --t-cap: 0.85rem;
+  --t-mark: 15px; --t-cmd: 14px; --t-code: 13.5px; --t-code-s: 13px;
+  --t-mono: 13px; --t-eyebrow: 12px; --t-key: 11px; --t-tick: 10px;
+  --t-minimap: 2px;
+
+  --t-svg: 18px; --t-svg-s: 17px;
+
+  --s1: 8px;
+  --s2: 16px;
+  --s3: 24px;
+  --s4: 32px;
+  --s5: 48px;
+  --s6: 64px;
+
+  --sect: clamp(40px, 6vw, 76px);
+
+  --gut: var(--s4);
+  --sheet: 1232px;
+
+  --measure: 65ch;
+  --wide: 88ch;
+
+  --expo: cubic-bezier(0.16, 1, 0.3, 1);
+  --overshoot: cubic-bezier(0.34, 1.56, 0.64, 1);
+
+  color-scheme: light dark;
+  scrollbar-width: thin;
+  scrollbar-color: var(--n2) transparent;
+}
+
+/* Written twice: a selector list cannot hold a media query. */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --n0: oklch(0.97 0.002 60);
+    --n1: oklch(0.72 0.004 60);
+    --n2: oklch(0.62 0.004 60);
+    --n3: oklch(0.24 0.005 60);
+    --n4: oklch(0.155 0.005 60);
+    --rule: color-mix(in oklab, var(--n0) 22%, transparent);
+    --hair: color-mix(in oklab, var(--n0) 12%, transparent);
+    --accent: var(--bright);
+    --code-wash: 12%;
+    --danger: oklch(0.72 0.17 25.33);
+    --amber: oklch(0.8 0.15 70.08);
+    --scrim: oklch(0.08 0.004 60 / 0.72);
+    --syn-kw: var(--cyan);
+    --syn-str: oklch(0.78 0.1 150);
+    --syn-com: var(--n1);
+    --syn-type: var(--bright);
+    --syn-num: var(--amber);
+    color-scheme: dark;
+  }
+}
+
+:root[data-theme="dark"] {
+  --n0: oklch(0.97 0.002 60);
+  --n1: oklch(0.72 0.004 60);
+  --n2: oklch(0.62 0.004 60);
+  --n3: oklch(0.24 0.005 60);
+  --n4: oklch(0.155 0.005 60);
+  --rule: color-mix(in oklab, var(--n0) 22%, transparent);
+  --hair: color-mix(in oklab, var(--n0) 12%, transparent);
+  --accent: var(--bright);
+  --code-wash: 12%;
+  --danger: oklch(0.72 0.17 25.33);
+  --amber: oklch(0.8 0.15 70.08);
+  --scrim: oklch(0.08 0.004 60 / 0.72);
+  --syn-kw: var(--cyan);
+  --syn-str: oklch(0.78 0.1 150);
+  --syn-com: var(--n1);
+  --syn-type: var(--bright);
+  --syn-num: var(--amber);
+  color-scheme: dark;
+}
+
+:root[data-theme="light"] { color-scheme: light; }
+
+:root[data-landing] { --t-display: clamp(2.6rem, 0.9rem + 4.6vw, 5.1rem); }
+
+* { box-sizing: border-box; }
+
+html { scroll-behavior: smooth; }
+
+body {
+  margin: 0;
+  background: var(--paper);
+  color: var(--ink);
+  font: var(--t-body)/1.6 var(--sans);
+  font-synthesis: none;
+  -webkit-font-smoothing: antialiased;
+  overflow-anchor: none;
+}
+
+h1, h2, h3, h4 { text-wrap: balance; margin: 0; line-height: 1.15; font-weight: 620; letter-spacing: -0.015em; }
+p { text-wrap: pretty; margin: 0; }
+p + p { margin-top: var(--s2); }
+a { color: inherit; text-decoration-color: var(--n2); text-underline-offset: 3px; }
+a:hover { text-decoration-color: var(--accent); }
+
+p a, li a, dd a, dt a, caption a, figcaption a, .note a, .notice a, .cap a, td a, .foot a {
+  padding-block: 2px;
+}
+code, pre, kbd { font-family: var(--mono); }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+code {
+  font-size: 0.92em;
+  padding: 0.08em 0.34em;
+  overflow-wrap: break-word;
+  border: 1px solid color-mix(in oklab, var(--accent) 22%, transparent);
+  background: color-mix(in oklab, var(--accent) var(--code-wash), transparent);
+  color: color-mix(in oklab, var(--ink) 75%, var(--accent));
+}
+
+/* Before the block rules, so each block still sets its own size. */
+pre code, .cmd code {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font-size: inherit;
+}
+
+code.copyable {
+  cursor: copy;
+  transition: background-color 160ms var(--expo), border-color 160ms var(--expo);
+}
+code.copyable:hover {
+  border-color: color-mix(in oklab, var(--accent) 55%, transparent);
+  background: color-mix(in oklab, var(--accent) calc(var(--code-wash) * 2), transparent);
+}
+code.copyable.copied {
+  border-color: var(--accent);
+  background: color-mix(in oklab, var(--accent) 32%, transparent);
+}
+code.copyable.copyfail {
+  border-color: var(--danger);
+  background: color-mix(in oklab, var(--danger) 28%, transparent);
+}
+h1 code.copyable:hover, h2 code.copyable:hover, h3 code.copyable:hover, h4 code.copyable:hover {
+  background: none;
+  text-decoration: underline;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 4px;
+}
+h1 code.copyable.copied, h2 code.copyable.copied, h3 code.copyable.copied, h4 code.copyable.copied { background: none; color: var(--bright); }
+h1 code.copyable.copyfail, h2 code.copyable.copyfail, h3 code.copyable.copyfail, h4 code.copyable.copyfail { background: none; color: var(--danger); }
+
+.skip {
+  position: absolute;
+  left: -9999px;
+  top: 0;
+  z-index: 100;
+  padding: var(--s1) var(--s2);
+  background: var(--paper);
+  border: 1px solid var(--accent);
+  color: var(--ink);
+  font: 600 var(--t-cmd)/1 var(--mono);
+  text-decoration: none;
+}
+.skip:focus {
+  left: var(--s2);
+  top: var(--s2);
+}
+.skip-target { position: absolute; width: 0; height: 0; overflow: hidden; }
+.skip-target:focus { outline: none; }
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+h1 code, h2 code, h3 code, h4 code {
+  border: 0;
+  background: none;
+  padding: 0;
+  font-size: 0.9em;
+  color: var(--accent);
+}
+
+table {
+  font-variant-numeric: tabular-nums slashed-zero;
+}

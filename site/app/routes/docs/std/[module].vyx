@@ -1,44 +1,17 @@
 <script>
-// GET /docs/std/[module] — one standard library module, generated from its source.
-//
-// Nothing on this page is written by hand. `site/app/apidoc.vyrn` lexes every
-// `std/*.vyrn` while the site compiles and emits the reference as Vyrn source:
-// each export's signature exactly as it is written, its `///` prose, the line it
-// sits on, and the name of every `test` block the module keeps. The signature is
-// coloured by the compiler's own lexer, which is the same highlighter every
-// other snippet on the site uses.
-//
-// Three more things arrive from two other generators, and all three are read off
-// the source rather than written here: the modules this one imports and the ones
-// that import it (`site/app/deps.vyrn`), the example programs that import it
-// (the same generator, over `examples/`), and the program in the guide that
-// imports a particular export (`site/app/guide.vyrn`). That last one is why an
-// "open in playground" link appears on some exports and not on others: the link
-// carries a program this site compiled and RAN while the page was built, and
-// there is no such program for most exports.
-//
-// A String segment binds the module name, and the query returns
-// `Result<ModuleDoc, PageError>`, so a name that is not a module renders the
-// themed error page at 404 instead of an empty page.
-import { ApiEntry, apiBlurb, apiEntries, apiIntro, apiKnown, apiSource, apiSourceLine, apiTests, apiHref, importLine, exportPhrase } from "../../../docs"
+import { ApiEntry, apiBlurb, apiEntries, apiIntro, apiKnown, apiSource, apiSourceLine, apiTests, apiHref, exportPhrase } from "../../../docs"
 import { Demo, demoFor, guideUseCount, chapterHref } from "../../../guide"
 import { examplesUsing, usesOfModule, usedByModule } from "../../../stdgraph"
 import { blob } from "../../../repo"
-import { Head, PageError, ParamQuery, noHead, notFound, paramQuery } from "std/ui"
+import { Head, PageError, ParamQuery, notFound, paramQuery } from "std/ui"
 import { pageHeadWith } from "../../../nav"
 import { mdUrl, askClaudeUrl } from "../../../pagemd"
-// THE DOCS SHELL. The left column is the whole reference, in the
-// library's own groups; the right is this page's own headings; the foot is the
-// module before and the module after, in the order the sidebar prints them.
 import { TreeGroup, Pager, docsTree, pagerFor } from "../../../docshell"
 import { Icon } from "../../../icons"
 params { module: String }
 
-/// One module's whole page: its name, its header prose, and its exports.
 type ModuleDoc = { name: String, intro: String, entries: Array<ApiEntry> }
 
-/// The document title names the module, because a reader with twelve tabs open
-/// is reading the title, not the page.
 export fn head(d: ModuleDoc) -> Head {
     return pageHeadWith("std/" + d.name + " — Vyrn", apiBlurb(d.name))
 }
@@ -54,24 +27,18 @@ fn fetchModule(p: Params) -> Result<ModuleDoc, PageError> {
     return Ok(ModuleDoc { name: p.module.copy(), intro: apiIntro(p.module), entries: apiEntries(p.module) })
 }
 
-/// The same rule for the other three counts on this page.
 fn plural(n: Int64, one: String, many: String) -> String {
     return if n == 1 { "1 " + one } else { n.toString() + " " + many }
 }
 
-/// The anchor an export is linked by. Two exports of one module never share a
-/// name, so the name is the identifier.
 fn anchorOf(name: String) -> String {
     return "e-" + name
 }
 
-/// The link to an export, within this page.
 fn hrefFor(name: String) -> String {
     return "#" + anchorOf(name)
 }
 
-/// One neighbour in the module graph: a module this one imports, or one that
-/// imports it.
 type Neighbour = { name: String, href: String }
 
 fn neighbours(names: Array<String>) -> Array<Neighbour> {
@@ -90,8 +57,6 @@ fn importersOfThis(m: String) -> Array<Neighbour> {
     return neighbours(usedByModule(m))
 }
 
-/// One example program that imports this module. The site does not host the
-/// examples, so the link leaves.
 type Sample = { path: String, href: String }
 
 fn samples(m: String) -> Array<Sample> {
@@ -102,25 +67,15 @@ fn samples(m: String) -> Array<Sample> {
     return out
 }
 
-/// The guide program that imports `e` from this module, if the book has one.
 fn demoOf(m: String, e: ApiEntry) -> Demo {
     return demoFor(m, e.name)
 }
 
-/// Whether that program exists. A `v-if` here is the whole "skip where it is not
-/// derivable" rule: no program, no link, and nothing invented to fill the gap.
-/// The tooltip on the guide icon. A helper because a `.vyx` binding is Vyrn
-/// and a single quote there is a byte literal, not a string.
-///
-/// An export used by ONE program names its chapter. One used by several —
-/// `joinWith` is imported by nineteen of them — says how many and names where
-/// a reader meets it FIRST, because linking one of nineteen without saying so
-/// presents an arbitrary chapter as the place.
 fn usedInLabel(m: String, e: ApiEntry) -> String {
     let n = guideUseCount(m, e.name)
     let title = demoOf(m, e).title
     if n > 1 {
-        return "Used in " + n.toString() + " guide programs — first in: " + title
+        return "Used in " + n.toString() + " guide programs, first in: " + title
     }
     return "Used in the guide: " + title
 }
@@ -134,17 +89,14 @@ fn demoChapterHref(m: String, e: ApiEntry) -> String {
     return chapterHref(d.chapter) + "#" + d.section
 }
 
-/// The sidebar for this page: the whole reference, with this module marked.
 fn tree(m: String) -> Array<TreeGroup> {
     return docsTree(m)
 }
 
-/// The module before and after this one, taken from that same tree.
 fn pager(m: String) -> Pager {
     return pagerFor(docsTree(m))
 }
 
-/// The Open-in-Claude link for this module's page.
 fn claudeHref(m: String) -> String {
     return askClaudeUrl(apiHref(m), "std/" + m)
 }
@@ -152,16 +104,6 @@ fn claudeHref(m: String) -> String {
 
 <template>
 <main class="page docs docpage">
-    <!-- THE LEFT PANE: the whole reference, in the library's own four groups,
-         with this module marked. It replaced a rail that listed only this
-         module's exports — furniture that told a reader where they were IN the
-         page and nothing about where the page sat in the reference. The export
-         index moved to the right pane, where it belongs beside the prose it
-         indexes.
-         `<details open>` and not a `<div>`: the sheet strips the marker and the
-         disclosure behaviour above 1024px, and below it the same markup is the
-         Menu pattern the masthead already uses. One tree, rendered once, and it
-         works with no script at either width. -->
     <aside class="docstree">
         <details class="treebox">
             <summary>Reference</summary>
@@ -172,10 +114,6 @@ fn claudeHref(m: String) -> String {
         </details>
     </aside>
 
-    <!-- One utility row, the reference site's own header anatomy: the crumbs
-         on the left, the page's two tools as quiet controls on the right. The
-         notice box and the button paragraph this replaces were 90px of chrome
-         between the title and the prose. -->
     <div class="crumbrow">
         <nav class="crumbs" aria-label="Breadcrumb">
             <a href="/docs.html">Reference</a>
@@ -205,26 +143,9 @@ fn claudeHref(m: String) -> String {
         <div class="prose" v-html="data.intro"></div>
     </section>
 
-    <!-- The line a reader copies. It was on the package explorer, which no
-         longer lists standard library modules: the library ships with the
-         compiler, so it is documented here and installed nowhere. The line is
-         also an attribute, because a gate cannot read a highlighted code box and
-         a reader cannot copy an attribute — both come from one `importLine`, and
-         `site/test/importline.test.mjs` compiles the attribute. -->
-    <section class="band" id="use">
-        <p class="eyebrow">Take it</p>
-        <h2>The line you copy</h2>
-        <p>Every name this module exports, in one <code>import</code>. Keep the ones you want. Nothing is installed: <code>std/</code> arrives with the compiler.</p>
-        <div class="cmd" data-copy>
-            <code :data-import="importLine(data.name)">{{ importLine(data.name) }}</code>
-            <button type="button" data-copy-btn aria-label="Copy it">Copy</button>
-        </div>
-    </section>
-
     <section class="band" id="graph">
-        <p class="eyebrow">In the graph</p>
-        <h2>What it needs, and who needs it</h2>
-        <p>Read from this module's own <code>import</code> lines. <a href="/docs/graph.html">The import graph</a> draws the whole library.</p>
+        <h2>Dependencies</h2>
+        <p><a href="/docs/graph.html">The import graph</a> shows the whole library.</p>
         <dl class="specs">
             <div>
                 <dt>Imports</dt>
@@ -248,12 +169,6 @@ fn claudeHref(m: String) -> String {
             <h2><a :href="hrefFor(e.name)">{{ e.name }}</a> <span class="kindpill">{{ e.kind }}</span></h2>
             <pre class="code" v-html="e.sig"></pre>
             <div class="prose" v-html="e.prose"></div>
-            <!-- ONE FOOTER ROW PER ENTRY. The guide link and the playground
-                 link were a sentence of their own under every function — a
-                 second full-width paragraph, on a page that carries dozens of
-                 entries, to say two things a reader either wants or scrolls
-                 past. They are icon links on the source row now, and they
-                 keep their words in the tooltip and for a screen reader. -->
             <p class="cap entrycap">
                 <a :href="apiSourceLine(data.name, e.line)">std/{{ data.name }}.vyrn, line {{ e.line }}</a>
                 <span class="entryacts" v-if="hasDemo(data.name, e)">
@@ -265,11 +180,10 @@ fn claudeHref(m: String) -> String {
     </section>
 
     <section class="band" id="tests">
-        <p class="eyebrow">What the tests promise</p>
-        <h2>{{ plural(apiTests(data.name).length, "test block", "test blocks") }}</h2>
-        <p>Every one of these is a <code>test</code> block in <code>std/{{ data.name }}.vyrn</code>. CI runs all of them.</p>
+        <h2>Tests</h2>
+        <p v-if="apiTests(data.name).length > 0">{{ plural(apiTests(data.name).length, "test block", "test blocks") }} in <code>std/{{ data.name }}.vyrn</code>. CI runs all of them.</p>
         <details class="promises">
-            <summary>Read the promises</summary>
+            <summary>Test names</summary>
             <ul class="plain">
                 <li v-for="t in apiTests(data.name)" :key="t">{{ t }}</li>
             </ul>
@@ -278,13 +192,12 @@ fn claudeHref(m: String) -> String {
     </section>
 
     <section class="band" id="examples">
-        <p class="eyebrow">In use</p>
-        <h2>{{ plural(samples(data.name).length, "example program", "example programs") }}</h2>
-        <p>Whole programs in <code>examples/</code> that import this module. Every one runs on all three backends.</p>
+        <h2>Examples</h2>
+        <p v-if="samples(data.name).length > 0">{{ plural(samples(data.name).length, "program", "programs") }} in <code>examples/</code> import this module. Each runs on all three backends.</p>
         <ul class="plain paths">
             <li v-for="s in samples(data.name)" :key="s.path"><a :href="s.href">{{ s.path }}</a></li>
         </ul>
-        <p class="cap" v-if="samples(data.name).length == 0">No example program imports this module yet.</p>
+        <p class="cap" v-if="samples(data.name).length == 0">No example program imports this module.</p>
     </section>
 
     <nav class="pager" aria-label="Reference">
@@ -292,19 +205,13 @@ fn claudeHref(m: String) -> String {
         <a class="next" v-if="pager(data.name).nextHref.byteLength > 0" :href="pager(data.name).nextHref"><span class="eyebrow">Next</span>{{ pager(data.name).nextLabel }}</a>
     </nav>
 
-    <!-- THE RIGHT PANE: this page's own headings, in document order. It is the
-         export index the left rail used to hold, with the four sections that
-         frame it, and it is a plain list of links in the document — no script is
-         needed for it to exist or to work. `widgets.js` marks the entry a reader
-         is looking at, which is the enhancement and not the feature. -->
     <aside class="onpage">
         <p class="eyebrow">On this page</p>
         <a href="#about">About</a>
-        <a href="#use">The line you copy</a>
-        <a href="#graph">In the graph</a>
+        <a href="#graph">Dependencies</a>
         <a class="sub" v-for="e in data.entries" :key="e.name" :href="hrefFor(e.name)">{{ e.name }}</a>
-        <a href="#tests">What the tests promise</a>
-        <a href="#examples">In use</a>
+        <a href="#tests">Tests</a>
+        <a href="#examples">Examples</a>
     </aside>
 </main>
 </template>

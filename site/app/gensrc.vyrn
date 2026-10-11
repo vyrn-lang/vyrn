@@ -1,0 +1,79 @@
+/// Call each generator from one site: the cache keys on argument strings, so a second spelling emits colliding exports.
+import { substring, joinWith } from "std/strings"
+import { endsWith } from "std/strpred"
+
+export fn quoted(s: String) -> String {
+    let raw = bytes(s)
+    let mut out = "\""
+    let mut plain = 0
+    let mut i = 0
+    while i < raw.length {
+        let b = raw[i]
+        if b == 92 || b == '"' || b == 10 || b == 9 {
+            out = out + substring(s, plain, i)
+            if b == 10 {
+                out = out + "\\n"
+            } else if b == 9 {
+                out = out + "\\t"
+            } else if b == 92 {
+                out = out + "\\\\"
+            } else {
+                out = out + "\\\""
+            }
+            plain = i + 1
+        }
+        i = i + 1
+    }
+    return out + substring(s, plain, raw.length) + "\""
+}
+
+export fn quotedList(items: Array<String>) -> String {
+    let mut parts: Array<String> = []
+    for it in items {
+        parts.push(quoted(it))
+    }
+    return "[" + joinWith(parts, ", ") + "]"
+}
+
+export fn branch(param: String, key: String, value: String) -> String {
+    return "    if " + param + " == " + quoted(key) + " { return " + value + " }\n"
+}
+
+export fn lookup(name: String, param: String, ret: String, branches: Array<String>, fallback: String) -> String {
+    let mut out = "export fn " + name + "(" + param + ": String) -> " + ret + " {\n"
+    for b in branches {
+        out = out + b
+    }
+    return out + "    return " + fallback + "\n}\n"
+}
+
+export fn entriesOf(dir: String) -> Array<String> {
+    return match listDir(dir) {
+        Ok(names) => names.copy(),
+        Err(why) => [],
+    }
+}
+
+export fn vyrnStems(dir: String) -> Array<String> {
+    let mut out: Array<String> = []
+    for entry in entriesOf(dir) {
+        if endsWith(entry, ".vyrn") {
+            out.push(substring(entry, 0, entry.byteLength - 5))
+        }
+    }
+    return out
+}
+
+test "a string with a quote, a backslash, a newline and a tab survives the literal" {
+    assertEq(quoted("a\"b"), "\"a\\\"b\"")
+    assertEq(quoted("a\\b"), "\"a\\\\b\"")
+    assertEq(quoted("a\nb"), "\"a\\nb\"")
+    assertEq(quoted("a\tb"), "\"a\\tb\"")
+    assertEq(quotedList([]), "[]")
+    assertEq(quotedList(["a", "b"]), "[\"a\", \"b\"]")
+}
+
+test "a lookup is a Vyrn function with one branch per key" {
+    assertEq(branch("m", "json", "[]"), "    if m == \"json\" { return [] }\n")
+    assertEq(lookup("f", "m", "Int64", [], "0"), "export fn f(m: String) -> Int64 {\n    return 0\n}\n")
+}

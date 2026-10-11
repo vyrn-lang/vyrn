@@ -1,0 +1,131 @@
+.modgroup + .modgroup { margin-top: var(--s5); }
+.modgroup > .eyebrow { padding-bottom: var(--s1); border-bottom: 1px solid var(--rule); font-size: var(--t-eyebrow); }
+.modgroup:not(:has(li:not([hidden]))) { display: none; }
+.modgrid { list-style: none; padding: 0; margin: 0 calc(-1 * var(--s2)); display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 0; }
+.modgrid > li { padding: var(--s2); border-bottom: 1px solid var(--hair); display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 0 var(--s1); align-items: baseline; align-content: start; }
+.modgrid a { font: var(--t-mono)/1.4 var(--mono); color: var(--accent); text-decoration: none; }
+.modgrid a:hover { text-decoration: underline; }
+.modgrid .count { font: var(--t-key)/1.4 var(--mono); color: var(--n2); text-align: right; }
+.modgrid .d {
+  grid-column: 1 / -1; color: var(--muted); font-size: var(--t-meta);
+  line-height: 1.45; margin-top: 3px;
+  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden;
+}
+.modgrid li[hidden] { display: none; }
+.modgrid.chapters a { font: 560 var(--t-note)/1.4 var(--sans); letter-spacing: 0; }
+.modgrid .hits { grid-column: 1 / -1; }
+
+.entry { padding: var(--s5) 0 0; }
+.entry + .entry { border-top: 1px solid var(--hair); margin-top: var(--s5); }
+.entry h2 { font: 600 1.25rem/1.2 var(--mono); letter-spacing: -0.01em; }
+.entry h2 a { color: inherit; text-decoration: none; }
+.entry h2 a:hover { color: var(--accent); }
+.entry > .cap { border: 0; padding: var(--s2) 0 0; }
+.docpage .prose { max-width: var(--wide); }
+.entry .prose { margin-top: var(--s2); }
+
+.kindpill {
+  font: var(--t-key)/1 var(--mono);
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--muted);
+  border: 1px solid var(--hair);
+  border-radius: 4px;
+  padding: 4px 6px;
+  margin-left: var(--s1);
+  vertical-align: middle;
+}
+
+.prose ul.docprose { padding-left: var(--s3); }
+.prose ul.docprose li { margin-top: var(--s1); line-height: 1.65; }
+pre.doccode {
+  margin: var(--s2) 0 0;
+  padding: 12px var(--s2);
+  border-left: 1px solid var(--rule);
+  overflow-x: auto;
+  scrollbar-width: none;
+  font: var(--t-mono)/1.5 var(--mono);
+  tab-size: 4;
+}
+pre.doccode::-webkit-scrollbar { display: none; }
+
+.plate.block { margin-top: var(--s4); }
+.plate.block .plate-head { min-height: 32px; padding: 6px var(--s2); }
+.plate.block .plate-head .btn { min-height: 26px; padding: 3px 10px; }
+.plate.block .plate-head .src { color: var(--muted); text-decoration: none; }
+.plate.block .plate-head .src:hover { color: var(--accent); text-decoration: underline; text-underline-offset: 2px; }
+.plate.block pre.code { padding: 12px var(--s2); font-size: var(--t-code-s); line-height: 1.5; }
+.plate.block .out { margin: 0; padding: 8px var(--s2); border-left: 0; border-top: 1px solid var(--hair); min-height: 2.4em; max-height: 16em; overflow: auto; scrollbar-width: none; }
+.plate.block .out::-webkit-scrollbar { display: none; }
+.plate.block .cap a { color: inherit; }
+/* Three classes: .play .editor textarea in 10-play.css comes later. */
+.plate.block.play .editor { margin: 0; }
+.plate.block.play .editor pre.hl { background: none; padding: 12px var(--s2); font-size: var(--t-code-s); line-height: 1.5; }
+.play.plate.block .editor textarea { height: auto; min-height: 0; resize: none; padding: 12px var(--s2); font-size: var(--t-code-s); line-height: 1.5; }
+.plate.block.play .editor pre, .plate.block.play .editor textarea { scrollbar-width: none; border: 1px solid transparent; }
+.plate.block.play .editor pre::-webkit-scrollbar, .plate.block.play .editor textarea::-webkit-scrollbar { display: none; }
+.plate-head .btn { text-decoration: none; }
+
+.pager {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: var(--s2);
+  margin-top: var(--s6);
+  padding-top: var(--s3);
+  border-top: 1px solid var(--rule);
+}
+.pager a {
+  display: block;
+  padding: var(--s2);
+  border: 1px solid var(--rule);
+  text-decoration: none;
+  font-weight: 560;
+}
+.pager a:hover { border-color: var(--accent); color: var(--accent); }
+.pager a .eyebrow { display: block; margin-bottom: 4px; }
+.pager a.next { text-align: right; grid-column: -2; }
+
+.finder { margin-top: var(--s4); }
+.finder label { display: block; margin-bottom: var(--s1); }
+.finder input {
+  width: 100%;
+  max-width: var(--wide);
+  padding: 12px var(--s2);
+  border: 1px solid var(--rule);
+  background: color-mix(in oklab, var(--plate) 45%, transparent);
+  color: var(--ink);
+  font: var(--t-mark)/1.4 var(--mono);
+}
+.finder input:focus-visible { border-color: var(--accent); }
+.finder .cap { border: 0; padding: var(--s1) 0 0; }
+.finder [data-search-count] { margin: var(--s1) 0 0; }
+
+svg.graph { display: block; height: auto; }
+svg.graph .wire { fill: none; stroke: currentColor; stroke-opacity: 0.16; stroke-width: 1; }
+svg.graph circle { fill: var(--accent); fill-opacity: 0.55; }
+svg.graph text { font-family: var(--mono); font-size: var(--t-svg); fill: var(--muted); }
+svg.graph .hit { fill: transparent; }
+svg.graph a { text-decoration: none; }
+/* The focus ring does not draw on an SVG <a> in every engine; the hit rectangle does. */
+svg.graph a:focus { outline: none; }
+svg.graph a:focus-visible .hit { stroke: var(--accent); stroke-width: 2; }
+
+svg.graph.lit .wire { stroke-opacity: 0.06; }
+svg.graph .wire.on { stroke: var(--accent); stroke-opacity: 0.85; stroke-width: 1.5; }
+svg.graph.lit text { fill: var(--n2); }
+svg.graph .node.near text { fill: var(--ink); }
+svg.graph .node.on text { fill: var(--accent); font-weight: 600; }
+svg.graph .node.on circle { fill-opacity: 1; }
+
+.promises { margin-top: var(--s3); }
+.promises summary { cursor: pointer; font: var(--t-eyebrow)/1.6 var(--mono); letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); }
+.promises summary:hover { color: var(--accent); }
+.promises ul.plain { margin-top: var(--s2); }
+.promises ul.plain li { padding: var(--s1) 0; }
+
+.plain.paths a { font: var(--t-mono)/1.7 var(--mono); overflow-wrap: anywhere; }
+
+.specs dd.links { display: flex; flex-wrap: wrap; gap: var(--s1) var(--s2); font: var(--t-mono)/1.6 var(--mono); font-weight: 400; }
+.specs dd.links a { color: var(--accent); text-decoration: none; }
+.specs dd.links a:hover { text-decoration: underline; }
+.specs dd.links .none { color: var(--muted); font-size: var(--t-cap); }

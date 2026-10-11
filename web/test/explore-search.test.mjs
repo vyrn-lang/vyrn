@@ -3,59 +3,14 @@
 // list, a link built from what was typed still looks like a link, and a marker
 // on the wrong row still marks something — so they are the three worth a test.
 //
-// `site/public/widgets.js` is a browser module: it imports its siblings and
-// derives the site's base from `import.meta.url`, neither of which a plain
-// script can do. So the file is evaluated here as a script in a stubbed context,
-// with the imports dropped and `import.meta.url` — a syntax error outside a
-// module — standing in as a literal. Nothing is copied into this file: rename
-// either rule, or change what it answers, and these tests fail.
-//
 // Run: node --test web/test/
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
-import vm from "node:vm";
-
-const src = await readFile(new URL("../../site/public/widgets.js", import.meta.url), "utf8");
-const script = src
-  .replace(/^import .*$/gm, "")
-  .replace(/^import\(.*$/gm, "")
-  .replace(/import\.meta\.url/g, JSON.stringify("https://host.test/base/widgets.js"));
-
-const nothing = () => null;
-const element = () => ({
-  setAttribute: nothing,
-  appendChild: nothing,
-  addEventListener: nothing,
-  classList: { add: nothing, remove: nothing },
-  style: {},
-});
-const ctx = {
-  window: {},
-  URL,
-  location: { pathname: "/guide/values.html", href: "https://host.test/base/guide/values.html" },
-  matchMedia: () => ({ matches: false }),
-  addEventListener: nothing,
-  document: {
-    addEventListener: nothing,
-    querySelector: nothing,
-    querySelectorAll: () => [],
-    getElementById: nothing,
-    createElement: element,
-    body: element(),
-  },
-  mountHero: nothing,
-  refreshRelease: nothing,
-};
-vm.createContext(ctx);
-vm.runInContext(script, ctx);
-const { matchingExports, navOwns } = ctx;
+import { matchingExports } from "../../site/public/search.js";
+import { navOwns } from "../../site/public/masthead.js";
 
 const row = (names) => ({ dataset: { e: names } });
 
-// The script runs in its own realm, so its arrays are not this realm's arrays
-// and `deepStrictEqual` refuses them on identity alone. What the rule answers is
-// a list of names, so the names are what is compared.
 const hits = (r, q, limit) => matchingExports(r, q, limit).join(" ");
 
 test("a search over a row's exports matches on any part of a name", () => {

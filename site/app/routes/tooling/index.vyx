@@ -1,9 +1,4 @@
 <script>
-// GET /tooling — the Tooling area's contents.
-//
-// The page list is `areaChapters("tooling")` — the same run of the one
-// chapter table the sidebar, the subnav, the export and the search index read —
-// so a page added there appears here with nothing written twice.
 import { Head } from "std/ui"
 import { pageHeadOf } from "../../nav"
 import { Chapter, areaGroups, groupChapters, chapterHref } from "../../guide"
@@ -14,25 +9,18 @@ export fn head() -> Head {
     return pageHeadOf("/tooling")
 }
 
-/// This shelf's groups — the same named runs the sidebar prints.
 fn groups() -> Array<String> {
     return areaGroups("tooling")
 }
 
-/// One group's pages.
 fn of(g: String) -> Array<Chapter> {
     return groupChapters("tooling", g)
 }
 
-/// Whether `g` is the group that also lists Editors — a template attribute is
-/// delimited by the same quote a String literal is, so the comparison lives
-/// here.
 fn holdsEditors(g: String) -> Bool {
     return g == "Workspace"
 }
 
-/// The sidebar, with nothing marked: the subnav's own row is this landing's
-/// marker.
 fn tree() -> Array<TreeGroup> {
     return areaTree("tooling", "index")
 }
@@ -51,9 +39,8 @@ fn tree() -> Array<TreeGroup> {
     </aside>
 
     <section class="hero">
-        <p class="eyebrow">Tooling</p>
-        <h1 class="display">One binary, every task</h1>
-        <p class="lede">The CLI, the test and bench runner, projects and dependency pinning — and the editors. Everything <code>vyrn</code> does, in the order you will meet it.</p>
+        <h1 class="display">Tooling</h1>
+        <p class="lede">The CLI, the test and bench runner, projects and dependency pinning, and the editors.</p>
     </section>
 
     <section class="band" id="pages">
@@ -64,8 +51,6 @@ fn tree() -> Array<TreeGroup> {
                     <a :href="chapterHref(c.slug)">{{ c.title }}</a>
                     <span class="d" v-html="inlineCode(c.lede)"></span>
                 </li>
-                <!-- The one page of this shelf that is not a chapter: the same
-                     hand-listed row the sidebar's Workspace group carries. -->
                 <li v-if="holdsEditors(g)">
                     <a href="/tooling/editors.html">Editors</a>
                     <span class="d">One VS Code extension and one language server, both answering from the compiler front end itself.</span>

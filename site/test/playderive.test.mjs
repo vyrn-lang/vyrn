@@ -1,8 +1,3 @@
-// `derive(g, x)` in the playground: the compiler is a wasm module, so the page
-// runs the generator's module for it (`run_generator` in `play-wasm.js`).
-//
-// Run: node --test site/test/playderive.test.mjs   (after the playground module
-// is built to `out/play.wasm`)
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
