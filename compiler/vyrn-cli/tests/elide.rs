@@ -1141,6 +1141,34 @@ fn clearT<T>(x: T) {
     );
 }
 
+/// A loop header on a global is not hoisted when a call in the loop writes the
+/// global, so the index check stays. `emit-lowered` prints the emitter's body;
+/// a body built again without the effect judgment hoists the header and
+/// proves the check.
+#[test]
+fn a_header_a_called_function_writes_keeps_its_check() {
+    let src = "type Box = { xs: Array<Int64> }
+let mut g: Box = Box { xs: [1, 2, 3] }
+fn shrink(b: modify Box) {
+    b.xs.clear()
+}
+fn clearG() {
+    shrink(g)
+}
+fn w() -> Int64 {
+    let mut s = 0
+    let mut k = 0
+    while k < g.xs.length {
+        clearG()
+        s = s + g.xs[k]
+        k = k + 1
+    }
+    return s
+}
+";
+    assert_eq!(verdicts(src, "w"), ["check array-index"]);
+}
+
 #[test]
 fn a_join_of_constants_keeps_the_values_between_out() {
     let src = "fn w(x: Int64) -> Int64 {

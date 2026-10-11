@@ -7443,22 +7443,6 @@ fn global_ty(program: &Program, own: &Ownership, g: &str) -> Option<Type> {
     d.ty.clone().or_else(|| node_ty(own, d.init.id()))
 }
 
-/// `body` with its check rows, each decided with the callees' facts `sums`
-/// states unless the build keeps them all ([`crate::check::mode`]): the form
-/// an emitter reads.
-pub fn checked(
-    program: &Program,
-    own: &Ownership,
-    body: &Body,
-    sums: &crate::elide::Summaries,
-) -> Body {
-    let mut out = stated(program, own, body);
-    if decides() {
-        crate::elide::decide(&mut out, own.proto.types(), sums);
-    }
-    out
-}
-
 pub(crate) fn decides() -> bool {
     *crate::check::mode() != crate::check::Mode::Keep
 }
@@ -8137,8 +8121,6 @@ pub fn augment(program: &Program, w: &mut World, judging: bool) {
             }
         }
         w.calls.replace(calls);
-        own.state_callees.clear();
-        own.accumulators.clear();
         (w.refusals, w.typed) = (r.kernel, r.typed);
         return;
     }
@@ -8254,8 +8236,6 @@ pub fn augment(program: &Program, w: &mut World, judging: bool) {
     w.calls.replace(calls);
     w.facts = folds.then_some(facts);
     (w.refusals, w.typed) = (r.kernel, r.typed);
-    own.state_callees.clear();
-    own.accumulators.clear();
 }
 
 /// One body `augment` builds: an instance, or a `test` or `bench` body.

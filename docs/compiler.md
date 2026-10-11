@@ -255,9 +255,11 @@ A construct `core::build` cannot state returns a `Gap`. The instance is then
 unlowered: the kernel reports "internal error: the core cannot state ..." and
 the emitter refuses the body. A gap is a compiler defect.
 
-`vyrn emit-lowered <file>` prints the core of the root module. Its format
-carries a version line (`vyrn_lower::VERSION`) and promises no stability;
-`tests/lowered_dump.rs` pins a few snapshots.
+`vyrn emit-lowered <file>` prints the core of the root module: the bodies the
+emitter reads (`World::body_of`), never a second build. Its format carries a
+version line (`vyrn_lower::VERSION`) and promises no stability;
+`tests/lowered_dump.rs` pins a few snapshots. `tests/verdicts.rs` holds its
+check verdicts equal to those of every example's oracle build.
 
 ## The kernel: three judgments over the core
 

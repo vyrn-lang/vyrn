@@ -155,12 +155,13 @@ pub struct Ownership {
     /// core's builds and the emitters read a node's type off.
     pub record: std::sync::Arc<crate::checker::Recorded>,
     /// What the placer's effect judgment found each body's callees store
-    /// into. Empty outside `vyrn_lower::core::augment` and before its
-    /// judgment.
+    /// into. Empty before `vyrn_lower::core::augment` holds its judgment.
+    /// Kept after it, so a later `core::build` against this plan hoists what
+    /// the placer's build hoisted.
     pub state_callees: StateCallees,
     /// The module-state `String` accumulators of the program the placer
-    /// places (`vyrn_lower::append::global_append_candidates`). Empty outside
-    /// `augment`.
+    /// places (`vyrn_lower::append::global_append_candidates`). Empty before
+    /// `augment`, and kept after it for the same reason.
     pub accumulators: std::collections::BTreeSet<String>,
 }
 
