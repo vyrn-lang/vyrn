@@ -1,25 +1,14 @@
-// The contrast checklist, computed rather than eyeballed.
+// The contrast checklist, computed from the stylesheet.
 //
-// The site has two palettes and one stylesheet. Both palettes are token blocks:
-// `:root` carries the light one, and the dark one is written once and applied by
-// two selectors (the explicit `[data-theme="dark"]` and the system default). So
-// the ratios can be read off the source instead of a screenshot — this file
-// parses the token blocks, resolves `var()`, `oklch()` and `color-mix()` the way
-// a browser does, and measures every pair a reader actually looks at.
+// Both palettes are token blocks: `:root` holds the light one, and the dark one
+// is written once per selector that applies it. This parses the token blocks,
+// resolves `var()`, `oklch()` and `color-mix()` as a browser does, and measures
+// every pair a reader looks at. It reads the source sheet: the export only
+// strips comments, and the check runs while the palette is edited.
 //
-// WHY THE SOURCE AND NOT THE EXPORT. `out/style.css` is this file with its
-// comments removed and nothing else changed, so every declaration
-// this test reads is in the published sheet, and `export.vyrn` asserts it. A
-// checker that needs an export cannot run while the palette is being edited,
-// which is the moment it is worth having.
-//
-// WHAT THIS ASKS FOR, WHICH IS MORE THAN AA. Body text reaches 7:1, which is
-// AAA and not AA: it is the one thing on the page a reader looks at for minutes
-// at a time, and the light palette went pastel (B3 defect 5), so the pair that
-// carries the most reading is the pair held furthest from the floor. Every other
-// text pair reaches 4.5:1, and a focus ring or a graphic that carries meaning
-// reaches 3:1 — against the element as well as against the page, because a ring
-// a reader cannot find is not a ring. Each pair below names which it is and why.
+// Body text reaches 7:1 (AAA), because it is read for minutes at a time on a
+// cream ground. Other text reaches 4.5:1. A focus ring or a graphic that
+// carries meaning reaches 3:1, against the control as well as the page.
 //
 // Run: node --test site/test/contrast.test.mjs
 import { test } from "node:test";
@@ -29,9 +18,7 @@ import { fileURLToPath } from "node:url";
 
 const CSS = readFileSync(fileURLToPath(new URL("../public/style.css", import.meta.url)), "utf8");
 
-// ---------------------------------------------------------------------------
-// Reading the two token blocks out of the sheet
-// ---------------------------------------------------------------------------
+// Reading the two token blocks out of the sheet.
 
 /// The text of the brace-balanced block that starts at or after `from`.
 function block(from) {
@@ -62,20 +49,14 @@ function tokensOf(needle) {
 }
 
 const LIGHT = tokensOf(":root {");
-// The dark block is the one the explicit choice selects. The system-default copy
-// below it holds the same declarations, and the last test in this file is what
-// says so — so measuring one measures both.
+// The explicit dark block. The system-dark copy holds the same declarations,
+// which the last test checks, so measuring one measures both.
 const DARK_ONLY = tokensOf(':root[data-theme="dark"]');
 const DARK = new Map([...LIGHT, ...DARK_ONLY]);
 
-// ---------------------------------------------------------------------------
-// Colour, far enough to answer the question
-// ---------------------------------------------------------------------------
-//
-// Everything in this sheet is `oklch()`, `var()`, `color-mix(in oklab, …)` or
-// `transparent`, so those four are what this understands. Anything else throws
-// rather than guessing — a palette that grows an `rgb()` should fail here and be
-// taught, not be measured wrong.
+// Colour, far enough to answer the question. The sheet uses `oklch()`,
+// `var()`, `color-mix(in oklab, ...)` and `transparent`; anything else throws,
+// so a new notation is taught here rather than measured wrong.
 
 /// Split `s` on top-level commas (a `color-mix` argument list, where an argument
 /// can itself be a function call).
@@ -158,7 +139,7 @@ function mix(x, y, share) {
   return { L: chan("L"), a: chan("a"), b: chan("b"), alpha };
 }
 
-/// OKLab to linear sRGB (Björn Ottosson's matrices).
+/// OKLab to linear sRGB (Bjorn Ottosson's matrices).
 function linear(c) {
   const l = (c.L + 0.3963377774 * c.a + 0.2158037573 * c.b) ** 3;
   const m = (c.L - 0.1055613458 * c.a - 0.0638541728 * c.b) ** 3;
@@ -170,9 +151,9 @@ function linear(c) {
   ];
 }
 
-/// `over` composited under `c`, both as linear sRGB. A token that is a wash
-/// (`color-mix(… , transparent)`) is only a colour once you say what is behind
-/// it, which is why every pair below names its backdrop.
+/// `c` composited over `backdrop`, as linear sRGB. A wash token
+/// (`color-mix(..., transparent)`) is a colour only over a backdrop, which is
+/// why every pair below names one.
 function flatten(c, backdrop) {
   const fg = linear(c);
   if (c.alpha >= 1) return fg;
@@ -202,32 +183,26 @@ function contrast(fg, bg, theme) {
   return ratio(flatten(color(fg, theme), back), linear(back));
 }
 
-// ---------------------------------------------------------------------------
-// The pairs. Every one names the rule in the sheet it stands for.
-// ---------------------------------------------------------------------------
+// The pairs; each names the rule in the sheet it stands for.
 
-// The two surfaces a reader looks at text on. `--plate` is never used at full
-// strength: a plate is `color-mix(in oklab, var(--plate) 45%, transparent)` over
-// the paper, so that is what is written here.
+// The two surfaces text sits on. A plate is `--plate` at 45% over the paper.
 const PAPER = "var(--paper)";
 const PLATE = "color-mix(in oklab, var(--plate) 45%, var(--paper))";
-// A command block's wash is 55%, and on a phone the copy button paints that
-// wash flattened onto the paper so the command does not show through it
-// (B3 defect 4). It is a surface a reader reads a word on, so it is measured.
+// A command block's wash is 55%; on a phone the copy button paints it flattened
+// onto the paper, and a reader reads a word on it.
 const CMD = "color-mix(in oklab, var(--plate) 55%, var(--paper))";
-// What a control paints behind itself. The focus ring is offset 2px, so it lands
-// on the page — but a control at the edge of a plate, or a ring a browser draws
-// tight, has to be findable against the control's own fill as well.
+// A control's own fill: a focus ring drawn tight, or a control at a plate's
+// edge, must be findable against it.
 const CONTROL = "color-mix(in oklab, var(--ink) 4%, var(--paper))";
 
 const PAIRS = [
-  // body text — 7:1, the AAA bar. See the note at the top of this file.
+  // body text: 7:1, the AAA bar
   ["body text", "var(--ink)", PAPER, 7],
   ["body text on a plate", "var(--ink)", PLATE, 7],
-  // every other text — 4.5:1
+  // every other text: 4.5:1
   ["secondary prose (.lede, .note, .notice)", "var(--muted)", PAPER, 4.5],
   ["secondary prose on a plate", "var(--muted)", PLATE, 4.5],
-  ["meta text (.modlist .count, .rail .n, chart axis)", "var(--n2)", PAPER, 4.5],
+  ["meta text (.modgrid .count, .rail .n, chart axis)", "var(--n2)", PAPER, 4.5],
   ["meta text on a plate (line numbers, .lines .cl.head)", "var(--n2)", PLATE, 4.5],
   ["the copy button's word, over the command it copies", "var(--n2)", CMD, 4.5],
   ["a link, and every accented heading", "var(--accent)", PAPER, 4.5],
@@ -235,23 +210,20 @@ const PAIRS = [
   ["failure (.diag.error, .pill, a trap)", "var(--danger)", PAPER, 4.5],
   ["a pre-release (.pill.warn, .diag.warning)", "var(--amber)", PAPER, 4.5],
   ["inline code, in its own wash", "color-mix(in oklab, var(--ink) 75%, var(--accent))", "color-mix(in oklab, var(--accent) var(--code-wash), var(--paper))", 4.5],
-  // syntax — 4.5:1, on the plate every code block sits on
+  // syntax: 4.5:1, on the plate every code block sits on
   ["a keyword", "var(--syn-kw)", PLATE, 4.5],
   ["a string", "var(--syn-str)", PLATE, 4.5],
   ["a comment", "var(--syn-com)", PLATE, 4.5],
   ["a type", "var(--syn-type)", PLATE, 4.5],
   ["a number", "var(--syn-num)", PLATE, 4.5],
-  // non-text — 3:1
+  // non-text: 3:1
   ["the focus ring", "var(--accent)", PAPER, 3],
   ["the focus ring on a plate", "var(--accent)", PLATE, 3],
   ["the focus ring against the control it rings", "var(--accent)", CONTROL, 3],
   ["the filled call to action's own label", PAPER, "var(--accent)", 4.5],
-  // The benchmark radar's five strokes. A chart line is a graphic
-  // that carries meaning, so 3:1 — and each of these doubles as the legend
-  // button's own text, which is why they are also read at 4.5:1 below. They are
-  // aliases of tokens already measured above; the pairs are here so a future
-  // edit that gives one of them a colour of its own is caught by this file
-  // rather than by a reader.
+  // The radar's strokes: graphics that carry meaning, so 3:1. Each also colours
+  // a legend button's text, so it is read at 4.5:1 below. They alias tokens
+  // measured above; the pairs catch one that gets a colour of its own.
   ["the C line on the radar", "var(--sr-c)", PLATE, 3],
   ["the Rust line", "var(--sr-rust)", PLATE, 3],
   ["the node line", "var(--sr-node)", PLATE, 3],
@@ -279,9 +251,7 @@ for (const [theme, tokens] of [["light", LIGHT], ["dark", DARK]]) {
 
 test("the explicit dark choice and the system dark default carry the same tokens", () => {
   // The dark palette is written twice, because a selector list cannot hold a
-  // media query. This is the test that keeps the second copy honest — without
-  // it, `[data-theme="dark"]` and a system-dark reader could drift apart and
-  // only one of them would be measured above.
+  // media query; this keeps the copies equal, so measuring one measures both.
   const at = CSS.indexOf("@media (prefers-color-scheme: dark)");
   assert.ok(at >= 0, "the sheet has no system-dark block");
   const guarded = block(at);
@@ -297,24 +267,12 @@ test("the explicit dark choice and the system dark default carry the same tokens
   }
 });
 
-// ---------------------------------------------------------------------------
-// The hairline grids, and the cell nobody filled
-// ---------------------------------------------------------------------------
+// The hairline grids.
 
 test("a grid whose column count the viewport decides never paints its own background", () => {
-  // The registry's card grid was a painted container with hairline gutters: the
-  // `<ul>` carried `background: var(--hair)` and each `<li>` carried the paper
-  // colour on top, so the 1px gaps between cells showed through as lines. That
-  // works only while the author writes both the columns and the children.
-  // `.pkgs` is `repeat(auto-fill, …)` — the track count comes from the viewport
-  // and the card count comes from `examples/` — so any short last row showed
-  // the container straight through as a filled box with nothing in it. A reader
-  // reported it as a hole, which is what it was.
-  //
-  // The fix is where all such rules route through: paint the CELLS, never the
-  // container. This is the rule, so the defect cannot come back under another
-  // selector — and it is not a rule about `.pkgs`, which is why it does not
-  // name it.
+  // Paint the cells, never the container. An `auto-fill` or `auto-fit` grid's
+  // track count comes from the viewport and its cell count from the data, so a
+  // short last row shows a painted container as a filled empty cell.
   const painted = [];
   for (const m of CSS.matchAll(/(^|\n)([^\n{}]+)\{([^}]*)\}/g)) {
     const [, , selector, body] = m;

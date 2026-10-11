@@ -1,33 +1,13 @@
-// THE TYPE SCALE, MEASURED.
+// The type scale, measured.
 //
-// A census found that `site/public/style.css` had tokenized colour (25
-// tokens, zero literals left on a property) and tokenized spacing (6 tokens),
-// and left type as 34 distinct literal font sizes spread over 1,729 lines — a
-// scale nobody could measure. Every step is named now. This file is what keeps
-// them named, and what makes the constraint on the leaf pages checkable.
+// Every `font-size` and every size in a `font:` shorthand names a `--t-*`
+// token or is a listed one-off, and the tokens resolve to the recorded values.
+// One selector, `:root[data-landing]`, raises the display step, and
+// `site/export.vyrn` asserts that only the landing pages carry `data-landing`.
+// Between them, no leaf page's computed font size can move, and neither half
+// needs a browser.
 //
-// WHY IT READS THE STYLESHEET AND NOT A RENDERED PAGE. The constraint is "the
-// computed `font-size` of every element on the 160 leaf pages is
-// unchanged, at 375px, 768px and 1280px". A computed value needs a layout
-// engine, and this repository has no headless browser in CI and is not adding
-// one for a stylesheet assertion. The constraint is therefore held in two
-// halves, and between them they are exact rather than approximate:
-//
-//   1. HERE: every `font-size` and every size in a `font:` shorthand names a
-//      token or is on the one-off list, the tokens resolve to the values the
-//      census recorded, and the display step is raised on ONE selector —
-//      `:root[data-landing]`. Nothing else in the file redefines a type token,
-//      so no rule that a leaf page matches can compute differently.
-//   2. In `site/export.vyrn`, "the display type step reaches nine pages and no
-//      leaf page": `data-landing` is stamped on the nine landing documents and
-//      on none of the 160 leaves, asserted per published document.
-//
-// A leaf page can only reach the raised step through that attribute, and it does
-// not carry it. That is the whole proof, and each half fails on its own.
-//
-// It also runs without the export, unlike its two siblings in this directory:
-// the stylesheet is a committed file, so this is the one gate here that a
-// contributor can run before building anything.
+// The stylesheet is a committed file, so this runs before any build.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
@@ -37,13 +17,12 @@ import path from "node:path";
 const SHEET = path.resolve(import.meta.dirname, "../public/style.css");
 const css = await readFile(SHEET, "utf8");
 
-// Comments carry example sizes and the census's own numbers, so they are removed
+// Comments carry example sizes, so they are removed
 // before anything below counts a declaration.
 const bare = css.replace(/\/\*[\s\S]*?\*\//g, "");
 
-/// The scale, as the census recorded it: the token, and what it resolves to.
-/// This table is the assertion — a token whose value moves fails here with both
-/// numbers, which is what "measurable" means for a type scale.
+/// The scale: each token and what it resolves to. A token whose value moves
+/// fails here with both numbers.
 const SCALE = {
   "--t-display": "clamp(2.1rem, 0.9rem + 4.6vw, 5.1rem)",
   "--t-h1": "clamp(1.7rem, 1.1rem + 1.8vw, 2.4rem)",
@@ -70,20 +49,16 @@ const SCALE = {
   "--t-tick": "10px",
   // The playground's minimap: the program as texture, deliberately unreadable.
   "--t-minimap": "2px",
-  // The two chart steps are USER UNITS inside a `viewBox`, not pixels on a
-  // screen: what a reader gets is the number times the chart's own scale, which
-  // `svg.chart`'s `max-width` and the phone scroller bound to [0.73, 1.0].
-  // They replaced `--t-axis: 9px`, which painted
-  // 3px text on a phone.
+  // The chart steps are user units inside a `viewBox`; `svg.chart`'s width
+  // bounds keep them at 12px or more.
   "--t-svg": "18px",
   "--t-svg-s": "17px",
 };
 
-/// The sizes that are deliberately not steps on a scale. Four mono numerals each
-/// sized to one widget's box, the one numeral ramp, one normalized figure in one
-/// table cell, and three that are a SHARE of their context by intent — a code
-/// span in prose, a code span in a heading, and the unit beside a big number.
-const ONE_OFFS = new Set(["2rem", "1.6rem", "1.3rem", "1.25rem", "clamp(1.8rem, 1rem + 2.4vw, 3rem)", "0.78rem", "0.92em", "0.9em", "0.42em", "inherit"]);
+/// The sizes that are deliberately not steps: one figure in a stat tile
+/// (`.specs dd`), an entry heading, and shares of their context (a code span in
+/// prose and in a heading).
+const ONE_OFFS = new Set(["1.6rem", "1.25rem", "0.92em", "0.9em", "inherit"]);
 
 /// Every `--t-*` declaration in the file, as [selector, token, value]. The
 /// selector is the text between the previous `}` (or the file's start) and the
@@ -106,13 +81,13 @@ test("every step of the type scale has a name, and the name resolves to the numb
   for (const [token, value] of Object.entries(SCALE)) {
     assert.equal(seen.get(token), value, `${token} on :root`);
   }
-  // No extra token on `:root` — a step added without a row in the table above is
-  // a step nothing measures, which is the state this file exists to end.
+  // No extra token on `:root`: a step without a row above is a step nothing
+  // measures.
   assert.deepEqual([...seen.keys()].sort(), Object.keys(SCALE).sort());
 });
 
 test("no font-size and no font shorthand in the sheet is an unnamed literal", () => {
-  // A declaration passes if, once every `var(--t-…)` and every listed one-off is
+  // A declaration passes if, once every `var(--t-...)` and every listed one-off is
   // struck out of it, no length is left. That is the check for both forms: a
   // `font:` shorthand carries the size inside it rather than as its whole value,
   // and a shorthand holding `clamp(1.8rem, 1rem + 2.4vw, 3rem)` has three
@@ -131,23 +106,21 @@ test("no font-size and no font shorthand in the sheet is an unnamed literal", ()
     }
   }
   assert.deepEqual(unnamed, [], `type sizes that name no token:\n${unnamed.join("\n")}`);
-  // And the scan reached the file: 80-odd declarations, not zero.
+  // The scan reached the file: many declarations, not zero.
   const seen = [...bare.matchAll(/font-size:|[\s{;]font:/g)].length;
   assert.ok(seen > 70, `only ${seen} type declarations found — the scan missed the file`);
 });
 
 test("only one selector raises the display step, and a leaf page cannot match it", () => {
-  // Every place in the file that redefines a type token outside `:root`. The
-  // display raise is meant to be the only one, and it is meant to be reachable
-  // only through an attribute the export stamps per route.
+  // Every place that redefines a type token outside `:root`. The display raise
+  // is the only one, reachable only through an attribute the export stamps.
   const overrides = tokenDecls(bare).filter((d) => d.selector !== ":root");
   assert.deepEqual(
     overrides.map((d) => `${d.selector} { ${d.token}: ${d.value} }`),
     ['[data-landing] { --t-display: clamp(2.6rem, 0.9rem + 4.6vw, 5.1rem) }'.replace("[data-landing]", ":root[data-landing]")],
   );
-  // The raise is the FLOOR and nothing else: the middle term and the cap are the
-  // same in both curves, so every width from 641px up computes what it computed
-  // before, on a landing page and on a leaf alike.
+  // The raise is the floor only: the middle term and the cap match, so every
+  // width from 641px up computes the same on a landing page and on a leaf.
   const base = /clamp\(([^,]+),([^,]+),([^)]+)\)/.exec(SCALE["--t-display"]);
   const raised = /clamp\(([^,]+),([^,]+),([^)]+)\)/.exec(overrides[0].value);
   assert.equal(raised[2].trim(), base[2].trim(), "the vw coefficient moved");
@@ -158,26 +131,10 @@ test("only one selector raises the display step, and a leaf page cannot match it
 });
 
 test("the sheet stays inside its byte ceiling, both halves", () => {
-  // TWO numbers on this file: `<= 90,000 bytes raw, <= 27,000 gzipped`. Both
-  // are about what a READER DOWNLOADS, and that is not this file:
-  // `site/export.vyrn` strips the comments on the way to `out/style.css`,
-  // because 48% of this sheet is a design record and a design record is not a
-  // page's payload. The ceilings are therefore measured on the shipped form —
-  // which is what `bare` already is, modulo the blank lines the export also
-  // drops, so this is the conservative side of the real number.
-  //
-  // The source keeps no byte ceiling of its own on purpose: a comment budget is
-  // a budget on explaining yourself, and the reason the numbers existed was
-  // never that.
+  // Both ceilings are on what a reader downloads: `site/export.vyrn` strips
+  // the comments, so they are measured on `bare` with blank lines dropped.
+  // The gzipped size is the binding one.
   const shipped = bare.replace(/\n[ \t]*(?=\n)/g, "").replace(/\n{2,}/g, "\n");
-  // RAISED, AND THE REASON CORRECTED. The editor's window, the
-  // registry, the benchmark cards and the showcase all landed together. I
-  // expected removing `/compare` and the backstage to bring this
-  // back down and said so here; it did not, and the measurement is why: those
-  // pages wore the sheet's SHARED rules — the plates, the matrices, the prose
-  // — and owned about eight selectors between them. What binds is the
-  // transfer size below, which is 17.6 KB against a 27 KB ceiling; this
-  // number is a proxy for how much sheet there is to read.
   assert.ok(shipped.length <= 100000, `the published style.css is ${shipped.length} bytes, ceiling 100,000`);
   const gz = gzipSync(Buffer.from(shipped, "utf8"), { level: 9 }).length;
   assert.ok(gz <= 27000, `the published style.css is ${gz} bytes gzipped (${shipped.length} raw), ceiling 27,000`);

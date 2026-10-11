@@ -1,58 +1,40 @@
 // The playground's engine, off the main thread.
 //
-// A worker exists here for one reason: `while true { }` is a legal Vyrn program
-// and a reader is going to type it. On the main thread that freezes the tab and
-// the only cure is closing it. In a worker the page stays alive, watches the
-// clock, and calls `terminate()` — which is the only way to stop running
-// WebAssembly, and the reason the kill switch lives in `play.js` and not here.
+// `while true { }` is a legal program, and on the main thread it would freeze
+// the tab. In a worker the page stays alive and calls `terminate()`, the only
+// way to stop running WebAssembly; the kill switch is in `play.js`.
 //
-// TWO MODULES, AND THE SECOND ONE IS THE PROGRAM. `play.wasm` is the compiler
-// (`compiler/vyrn-play`); it answers the reader's program as a wasm module — the
-// same bytes `vyrn build --target wasm` writes — and `wasi-min.js` instantiates
-// and runs THOSE. So the page runs the compiled route, the one `vyrn run` runs,
+// Two modules: `play.wasm` is the compiler (`compiler/vyrn-play`), and it
+// answers with the program as a wasm module, the bytes `vyrn build --target
+// wasm` writes, which `wasi-min.js` runs. So the page runs the compiled route
 // and nothing here re-implements a semantics.
 //
-// A FRESH COMPILER INSTANCE PER RUN. Not for isolation between programs — the
-// module is stateless between calls — but because a compile can die in ways that
-// leave the instance unusable: a stack overflow throws a JavaScript `RangeError`
-// out of the middle of it, unwinding no Rust and releasing no borrow. The next
-// call into that instance would panic on one. `play.js` makes a new worker per
-// run in any case, so each run gets its own.
+// Each run gets a fresh compiler instance (`play.js` makes a worker per run). A
+// stack overflow throws a `RangeError` out of the middle of a compile and
+// releases no Rust borrow, so the next call into that instance would panic.
 import { loadPlay } from "./play-wasm.js";
 import { runVyrn } from "./wasi-min.js";
-
-// Compiled once. `loadPlay` fetches and instantiates together, so the module is
-// re-fetched per run from the HTTP cache; that is a cache hit, measured at a few
-// milliseconds.
-let ready = null;
 
 self.onmessage = async (e) => {
   const { src, stdin } = e.data;
   try {
-    ready = loadPlay(new URL("play.wasm", import.meta.url));
-    const play = await ready;
+    // Fetched per run; the second fetch is an HTTP cache hit.
+    const play = await loadPlay(new URL("play.wasm", import.meta.url));
     const answer = play.compile(src);
-    // It did not compile: the diagnostics are the answer, and there is nothing
-    // to run.
+    // It did not compile: the diagnostics are the answer.
     if (!answer.module) {
       self.postMessage({ ok: true, result: answer });
       return;
     }
-    // The program's own module, with the page's stdin and the page's clock —
-    // `wasi-min.js` backs `clock_time_get` with `Date.now()`, so a browser tab
-    // needs nothing injected for it.
+    // The program's own module, with the page's stdin. `wasi-min.js` backs
+    // `clock_time_get` with `Date.now()`.
     const { exitCode, stdout, stderr } = await runVyrn(answer.module, { stdin });
     self.postMessage({ ok: true, result: { exitCode, stdout, stderr } });
   } catch (err) {
-    // A `RangeError` here is the ENGINE's stack, not the language's limit, and
-    // saying which one happened is the difference between a rule of Vyrn and a
-    // ceiling of this tab.
-    //
+    // A `RangeError` here is the engine's stack, not a limit of the language.
     // A program that recurses too deep never reaches this: `runVyrn` hands its
-    // `RangeError` back to the module, which prints Vyrn's own trap on stderr.
-    // What is left here is the compiler's own recursion, a program nested
-    // deeply enough to overflow the parser, and that is the engine's ceiling,
-    // so it says so.
+    // `RangeError` back to the module, which prints Vyrn's own trap. What is
+    // left is the compiler overflowing on a deeply nested program.
     const stack = err instanceof RangeError;
     self.postMessage({
       ok: false,

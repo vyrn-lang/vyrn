@@ -1,19 +1,9 @@
 // The stylesheet's width breakpoints.
 //
-// A census counted six px values
-// across thirteen media queries and proposed stamping a breakpoints table into
-// the sheet from the export generator, "since custom properties cannot
-// parameterise `@media`". That last part is true, and it is why this does not do
-// it: the fix would make style.css a build artifact — no longer editable in
-// place, no longer previewable without a build — to name seven numbers that
-// nothing compares against anything. The numbers are not the defect.
-//
-// The defect the count was pointing at is what an unmanaged set of breakpoints
-// grows: `.demo` was collapsed to one column at BOTH 860px and 900px, and the
-// 860px rule could never fire, because every width it covers is also covered by
-// the later 900px rule. One component, two breakpoints, one of them dead.
-//
-// So this checks the two things a table would not have caught.
+// Custom properties cannot parameterise `@media`, so the breakpoints are
+// literals. This checks the two things an unmanaged set of them grows: a value
+// off the sanctioned scale, and a max-width rule that can never fire because a
+// later, wider rule sets the same property on the same selector.
 //
 // Run: node --test site/test/breakpoints.test.mjs
 import { test } from "node:test";
@@ -51,17 +41,12 @@ test("the stylesheet has width breakpoints to check", () => {
   if (blocks.length < 10) throw new Error(`only ${blocks.length} width queries found — the parse shape changed`);
 });
 
-// THE SANCTIONED SCALE. Not tokens — CSS cannot take a custom property in a
-// media condition — but a list, so that adding an eighth value is a deliberate
-// act with a failing test in front of it rather than a number typed once.
-//
-// Each is a component's own decision about where its columns stop fitting, and
-// they are not interchangeable: 640 is the phone rule for the whole page grid,
-// 1024 is where the rail leaves the margin. The four in between are single
-// components, and 860 and 900 sitting 40px apart is not an oversight —
-// `.showgrid` carries a FIXED 16rem sidebar and stops fitting sooner than
-// `.demo`, which is a fluid 5fr/7fr split with no minimum. Widening this list is
-// allowed; doing it by accident is not.
+// The sanctioned scale. Each value is a component's own decision about where
+// its columns stop fitting: 640 is the phone rule for the page grid, 1024 is
+// where the rail leaves the margin, and 720, 860, 900 and 960 are single
+// components. 860 (`.showgrid`, a fixed 16rem sidebar) and 900 (`.demo`, a
+// fluid split) are 40px apart on purpose. Adding a value is allowed; adding one
+// by accident is not.
 const SANCTIONED = new Set([640, 720, 860, 900, 960, 1024]);
 
 test("no unsanctioned breakpoint has appeared", () => {
@@ -74,13 +59,10 @@ test("no unsanctioned breakpoint has appeared", () => {
   }
 });
 
-// A max-width rule is DEAD when a later rule sets the same property on the same
-// selector at a max-width that is the same or wider: every width the narrow rule
-// covers, the wide one covers too, and the later one wins the cascade.
-//
-// This is not the same as "set at two breakpoints", which is ordinary
-// progressive narrowing — `.rail` tightens its padding at 1024 and again at 640,
-// and both fire, because the second is narrower and comes second.
+// A max-width rule is dead when a later rule sets the same property on the same
+// selector at the same or a wider max-width: the later rule covers every width
+// and wins the cascade. Progressive narrowing (`.rail` at 1024 and again at
+// 640) is not that: the narrower rule comes second.
 test("no max-width rule is shadowed by a later, wider one", () => {
   const dead = [];
   const maxes = blocks.filter((b) => b.kind === "max");

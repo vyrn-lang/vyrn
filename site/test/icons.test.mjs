@@ -1,20 +1,14 @@
-// THE GLYPHS THE TEMPLATES NAME, AND NO OTHERS.
+// The glyphs the templates name, and no others.
 //
-// `<Icon name="bytesize:github"/>` is a generation-time component: the tag is
-// resolved while the page is compiled, one inline `<svg>` is spliced where it
-// stood, and nothing is fetched at run time. The claim that buys — the artifact
-// carries exactly the glyphs the templates ask for, out of collections holding a
-// hundred each — is only a claim until something counts.
+// `<Icon name="..."/>` is resolved while the page compiles: one inline `<svg>`
+// replaces the tag and nothing is fetched at run time. This counts glyphs over
+// the exported tree and takes every expected number from the templates, so a
+// new tag moves the expectation with it, and a template this file does not map
+// to pages fails by name.
 //
-// So this counts, over the exported tree, and it takes every number from the
-// TEMPLATES rather than from a list somebody has to remember to update: add a
-// tag and the expectation moves with it; add a tag to a template this file does
-// not map to pages and the first assertion says so by name.
-//
-// It also checks the one a11y rule an icon has: an icon beside a text label is
-// decoration and renders `aria-hidden`, an icon that IS the label carries a
-// `label` attribute and renders as `role="img"` with that accessible name.
-// Both rows are on the site, and both are asserted here.
+// It also checks the icon a11y rule: an icon beside a text label is decoration
+// (`aria-hidden`), and an icon that is the label carries a `label` and renders
+// as `role="img"` with that name.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFile, readdir } from "node:fs/promises";
@@ -26,10 +20,8 @@ const routes = path.join(here, "..", "app", "routes");
 const app = path.join(here, "..", "app");
 const out = path.join(here, "..", "..", "out");
 
-/// The SECOND lawful source: a module may import
-/// glyphs through the `icons("<collection>", "<names>")` generator — the docs
-/// shell does, for its tree-group headers and the subnav. Same pinned
-/// collection, same generator, counted here so the audit still closes.
+/// The second source: a module may import glyphs with the
+/// `icons("<collection>", "<names>")` generator (the docs shell does).
 async function generatorNames() {
   const names = new Set();
   for (const e of await readdir(app, { withFileTypes: true })) {
@@ -45,24 +37,19 @@ async function generatorNames() {
 /// The shell every consumer page wears. Its footer link is the marker.
 const SHELL = "layout.vyx";
 const SHELL_MARK = "Source on GitHub";
-/// The route templates that carry tags of their own, and the pages they make.
-///
-/// KEYED BY THE PATH UNDER `routes/`, NOT BY THE FILE NAME. The
-/// reference landing gained four glyphs, and it is `docs/index.vyx` — a second
-/// `index.vyx`, which is what a directory of routes has one of per directory.
-/// The old basename key put two different templates under one name.
+/// The route templates that carry tags of their own, and the pages they make,
+/// keyed by the path under `routes/`, because each directory of routes has its
+/// own `index.vyx`.
 const PAGE_TAGS = {
   "install.vyx": "install.html",
   "index.vyx": "index.html",
   "docs/index.vyx": "docs.html",
-  // The two hand-written leaves. They gained the page-actions menu, and the
-  // menu's glyphs are theirs alone — one page each, so a page key, not a shelf.
+  // The two hand-written leaves, each with its own page-actions menu glyphs.
   "docs/graph.vyx": "docs/graph.html",
   "tooling/editors.vyx": "tooling/editors.html",
 };
-/// Templates that make MANY pages, all of them docs-shell pages the per-page
-/// assertion already treats as a floor: their tags join the named set, and no
-/// single page can be their key.
+/// Templates that make many docs-shell pages: their tags join the named set,
+/// and no single page is their key.
 const DOCS_TAGS = ["docs/std/[module].vyx", "guide/[chapter].vyx", "web/[chapter].vyx", "tooling/[chapter].vyx"];
 
 /// Every `<Icon .../>` in a template, as `{ name, label }`.
@@ -73,9 +60,8 @@ function tagsOf(src) {
   }));
 }
 
-/// Every glyph `std/icons` drew, as `{ open, body }`. The signature is that
-/// module's own: a `viewBox` from the collection and `1em` in both dimensions,
-/// which no other `<svg>` on this site carries.
+/// Every glyph `std/icons` drew, as `{ open, body }`. Its signature is a
+/// `viewBox` and `1em` in both dimensions, which no other `<svg>` here has.
 function glyphsIn(html) {
   return [...html.matchAll(/<svg (viewBox="[^"]*" width="1em" height="1em"[^>]*)>(.*?)<\/svg>/gs)]
     .map((m) => ({ open: m[1], body: m[2] }));
@@ -91,7 +77,7 @@ async function htmlFiles(dir) {
   return found;
 }
 
-/// A template's path under `routes/`, with forward slashes on every platform —
+/// A template's path under `routes/`, with forward slashes on every platform:
 /// the key `PAGE_TAGS` uses.
 function rel(p) {
   return path.relative(routes, p).split(path.sep).join("/");
@@ -129,8 +115,7 @@ test("each page carries exactly the glyphs its templates name", async () => {
   }
 
   const pages = await htmlFiles(out);
-  // The consumer site's own pages: the design record's hundred left with the
-  // backstage.
+  // A floor on the consumer site's pages.
   assert.ok(pages.length > 60, `the export looks empty: ${pages.length} pages`);
   let shellPages = 0;
   for (const p of pages) {
@@ -138,14 +123,11 @@ test("each page carries exactly the glyphs its templates name", async () => {
     const wearsShell = html.includes(SHELL_MARK);
     const expected = (wearsShell ? shell : []).concat(own[path.basename(p)] || []);
     if (wearsShell) shellPages += 1;
-    // THE SUBNAV IS WHAT ADDS GLYPHS, not the three-pane shell: the band
-    // carries one per documentation area, and `/benchmarks` wears the band
-    // without wearing the panes.
+    // The subnav adds glyphs, one per documentation area, and `/benchmarks`
+    // wears it without the three-pane shell.
     if (html.includes('class="page docs') || html.includes('<nav class="subnav"')) {
-      // A docs-shell page also draws the generator-imported glyphs — subnav
-      // rows and tree-group headers, a count the tree's own shape decides.
-      // The floor is the templates' own count; the global test below still
-      // refuses any body no source named.
+      // A docs-shell page also draws generator-imported glyphs, so its count
+      // is a floor; the next test still refuses any glyph no source named.
       assert.ok(
         glyphsIn(html).length >= expected.length,
         `${path.relative(out, p)} carries ${glyphsIn(html).length} glyphs, fewer than the ${expected.length} its templates name`,
@@ -162,9 +144,8 @@ test("each page carries exactly the glyphs its templates name", async () => {
 });
 
 test("the export carries no glyph the templates did not name", async () => {
-  // One collection holds a hundred glyphs; six of them are named on this site.
-  // Distinct BODIES, so the same glyph on two hundred pages counts once and a
-  // seventh drawing anywhere in the tree fails this.
+  // Distinct bodies, so a glyph on many pages counts once and any glyph no
+  // source named fails.
   const named = new Set();
   for (const t of await templates(routes)) {
     for (const tag of tagsOf(await readFile(t, "utf8"))) named.add(tag.name);

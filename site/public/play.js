@@ -1,32 +1,28 @@
-// The playground page: an editor the compiler colours, and a run button with a
-// kill switch behind it.
+// The playground: an editor the compiler colours, and a Run button with a kill
+// switch behind it.
 //
-// The division of labour is the whole design. `tokens` and `check` run on THIS
-// thread, synchronously, because a colour layer that arrives one message after
-// the keystroke shows a reader an editor that lags — and neither can loop
-// forever, because neither runs the program. `run` goes to a worker, because it
-// can, and the page terminates it when it does.
-//
-// Nothing here decides anything about the language. Every colour and every
-// diagnostic comes back from `play.wasm`, which is the compiler; every byte of
-// output comes from the program's OWN module, which the compiler emitted and the
-// worker ran (`play-worker.js`).
+// `tokens` and `check` run on this thread, synchronously, because a colour
+// layer that arrives a message after the keystroke lags, and neither runs the
+// program. `run` goes to a worker, because a program can loop forever and only
+// `terminate()` stops it. Every colour and diagnostic comes from `play.wasm`
+// (the compiler), and every byte of output from the program's own module,
+// which the worker runs (`play-worker.js`).
 import { loadPlay } from "./play-wasm.js";
 
-/// How long a program may run before the page stops it.
-///
-/// Terminating the worker is the only way to stop running WebAssembly, so this
-/// is a real kill and not a request. Five seconds is far past every example and
-/// far short of a reader's patience with a page that has stopped answering.
+/// How long a program may run before the page terminates its worker, the only
+/// way to stop running WebAssembly. Far past every example, far short of a
+/// reader's patience.
 const RUN_LIMIT_MS = 5000;
 
 /// How long the editor waits after the last keystroke before type-checking.
-/// Colouring is not debounced — that one is a lex and it is instant.
+/// Colouring is a lex and is not debounced.
 const CHECK_DELAY_MS = 350;
 
 const $ = (sel, root) => root.querySelector(sel);
-/// A button's label and state. An icon button (`data-ico`) keeps its glyph
-/// and carries the words on its title and accessible name; a text button
+const $$ = (sel, root) => Array.from(root.querySelectorAll(sel));
+
+/// Sets a button's label and state. An icon button (`data-ico`) keeps its
+/// glyph and carries the words as its title and accessible name; a text button
 /// shows them.
 function setLabel(btn, text, state) {
   if (btn.dataset.ico !== undefined) {
@@ -37,24 +33,21 @@ function setLabel(btn, text, state) {
     btn.textContent = text;
   }
 }
-const $$ = (sel, root) => Array.from(root.querySelectorAll(sel));
 
-// ---------------------------------------------------------------------------
-// The URL contract, which the guide book writes links against.
+// The URL contract the guide writes links against:
 //
 //   play.html#c=<base64url(utf8 source)>
 //
-// base64url per RFC 4648 §5: `+` becomes `-`, `/` becomes `_`, and the padding
-// is dropped. `site/app/guide.vyrn` builds these and `site/export.vyrn` asserts
-// every one of them; this is the other half of that agreement. A fragment never
-// reaches a server, so a whole program travels in a link and nothing is stored.
-// ---------------------------------------------------------------------------
+// base64url per RFC 4648 section 5: `+` becomes `-`, `/` becomes `_`, no
+// padding. `site/app/guide.vyrn` builds these links and `site/export.vyrn`
+// checks them. A fragment never reaches a server, so the program travels in
+// the link and nothing is stored.
 
 function encodeSource(src) {
   const bytes = new TextEncoder().encode(src);
   let binary = "";
-  // In chunks: `String.fromCharCode(...arr)` is one argument per byte and
-  // overflows the argument limit on a program of any size.
+  // In chunks: `String.fromCharCode(...arr)` takes one argument per byte and
+  // overflows the argument limit on a long program.
   for (let i = 0; i < bytes.length; i += 0x8000) {
     binary += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
   }
@@ -63,8 +56,8 @@ function encodeSource(src) {
 
 function decodeSource(code) {
   let b64 = code.replace(/-/g, "+").replace(/_/g, "/");
-  // `atob` throws on a length that leaves a remainder of 1, and accepts 2 and 3;
-  // padding it back makes every one of the three the same case.
+  // `atob` throws on a length with remainder 1 and accepts 2 and 3; padding
+  // makes the three cases one.
   b64 += "=".repeat((4 - (b64.length % 4)) % 4);
   const binary = atob(b64);
   return new TextDecoder().decode(Uint8Array.from(binary, (c) => c.charCodeAt(0)));
@@ -81,9 +74,7 @@ function sourceFromHash() {
   }
 }
 
-// ---------------------------------------------------------------------------
-// The colour layer
-// ---------------------------------------------------------------------------
+// The colour layer.
 
 function escapeHtml(s) {
   return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
@@ -91,10 +82,10 @@ function escapeHtml(s) {
 
 /// `src` as coloured markup, from the spans the compiler's lexer returned.
 ///
-/// The classes are the stylesheet's own — `k`, `s`, `n`, `c`, `t` — so a program
-/// typed here is coloured exactly like the same program printed in the guide.
-/// The trailing newline is deliberate: a `<pre>` swallows one, and without it the
-/// last line of the overlay sits a line above the last line of the textarea.
+/// The classes are the stylesheet's (`k`, `s`, `n`, `c`, `t`), so a program
+/// here is coloured like the same program in the guide. The trailing newline
+/// is needed: a `<pre>` swallows one, and without it the layer's last line sits
+/// a line above the textarea's.
 function highlight(src, spans) {
   let out = "";
   let at = 0;
@@ -107,11 +98,16 @@ function highlight(src, spans) {
   return out + escapeHtml(src.slice(at)) + "\n";
 }
 
-// ---------------------------------------------------------------------------
+/// Scrolls the colour layer `code` to match `textarea`.
+function scrollLayer(textarea, code) {
+  const pre = code.parentElement;
+  pre.scrollTop = textarea.scrollTop;
+  pre.scrollLeft = textarea.scrollLeft;
+}
 
-/// Put `text` on the clipboard, and say whether it worked. A refusal is a real
-/// answer — the clipboard is missing on an insecure origin and can be denied by
-/// permission — so the caller shows what happened rather than pretending.
+/// Puts `text` on the clipboard and returns whether it worked. The clipboard
+/// is missing on an insecure origin and can be refused, so the caller shows
+/// the answer.
 async function writeClipboard(text) {
   try {
     await navigator.clipboard.writeText(text);
@@ -121,16 +117,13 @@ async function writeClipboard(text) {
   }
 }
 
-/// The worker, and the state that has to outlive one mount: a soft navigation
-/// away and back builds a new page, and a worker left behind would keep a 16 MB
-/// instance and a message handler alive over a DOM that is gone.
+/// The worker, at module level: a soft navigation away and back mounts again,
+/// and a worker left behind would keep a 16 MB instance and a handler alive
+/// over a DOM that is gone.
 let worker = null;
-/// The kill timer belongs to the worker it would kill, so it lives beside it
-/// and dies with it. Held per-mount, a second `Run`, a `Reset` or a
-/// Ctrl-Enter left the first run's timeout armed over a worker that was
-/// already gone: it fired five seconds later, terminated whatever was running
-/// by then, and overwrote a finished run's output with "Stopped after 5
-/// seconds."
+/// The kill timer dies with the worker it would kill (`stopWorker`), so no path
+/// that abandons a run (a second Run, Reset, Ctrl-Enter) leaves it armed over
+/// the next one.
 let runTimer = null;
 
 function stopWorker() {
@@ -156,8 +149,7 @@ export function mountPlay(root, opts = {}) {
   const resetBtn = $("[data-play-reset]", root);
   const picker = $("[data-play-pick]", root);
   if (!input || !layer || !runBtn) return;
-  // The idle line this pane started with, so `Reset` puts back what the page
-  // said rather than a sentence written twice — once here and once in a template.
+  // The pane's idle line, so Reset restores what the page said.
   const idleText = outPane.textContent.trim() || "Not run yet.";
 
   stopWorker();
@@ -174,47 +166,40 @@ export function mountPlay(root, opts = {}) {
   let play = null;
   let checkTimer = null;
 
-  // -----------------------------------------------------------------------
-
-  /// Recolour the editor. A source that cannot be lexed at all — half a string
-  /// literal, on the way to typing the closing quote — has no spans, and the
-  /// overlay falls back to plain text so the reader never sees the editor go
-  /// blank under the caret.
-  // Which editor group the compiler reads: the frame (a second, split group
-  // exists on /play) points this at the focused one; alone, it is the one
-  // textarea this mount owns.
+  // The textarea the compiler reads. The editor shell on /play points this at
+  // the focused group; otherwise it is this mount's textarea.
   let srcHost = () => input;
-  // The shell sets this; the core calls it the moment the compiler lands, so
-  // every editor group repaints with real spans and the Run buttons settle.
+  // Set by the shell, and called when the compiler lands so every editor group
+  // repaints with real spans.
   let onPlayReady = null;
-  // What the share button copies. The shell replaces it with the WHOLE
-  // project (user); a hero editor has no project, so the core's one-file
-  // link stands.
+  // What the share button copies. The shell sets it to the whole project; a
+  // hero editor shares its one file.
   let shareHash = null;
+
+  /// The compiler's colour spans for `src`: none before it loads, and none for
+  /// a source that cannot be lexed (half a string literal), which the layer
+  /// then shows as plain text rather than going blank under the caret.
+  function spansOf(src) {
+    if (!play) return [];
+    try {
+      return play.tokens(src).spans || [];
+    } catch (err) {
+      return [];
+    }
+  }
 
   function paint() {
     const src = input.value;
-    let spans = [];
-    if (play) {
-      try {
-        const t = play.tokens(src);
-        if (t.spans) spans = t.spans;
-      } catch (err) {
-        spans = [];
-      }
-    }
-    layer.innerHTML = highlight(src, spans);
+    layer.innerHTML = highlight(src, spansOf(src));
     syncScroll();
   }
 
   function syncScroll() {
-    const pre = layer.parentElement;
-    pre.scrollTop = input.scrollTop;
-    pre.scrollLeft = input.scrollLeft;
+    scrollLayer(input, layer);
   }
 
-  /// Show the compiler's diagnostics under the editor. Clicking one puts the
-  /// caret on the line it is about.
+  /// Shows the compiler's diagnostics under the editor. Pressing one puts the
+  /// caret on its line.
   function showDiagnostics(diags) {
     diagPane.textContent = "";
     if (!diags || !diags.length) {
@@ -252,10 +237,8 @@ export function mountPlay(root, opts = {}) {
 
   function recheck() {
     if (!play) return;
-    // NOTHING TYPED IS NOT A PROBLEM. The Welcome view has an empty buffer
-    // and a new file starts as one; asking the checker about either got the
-    // honest answer "no `main` function found", which is a complaint about a
-    // program nobody has written yet (user).
+    // An empty buffer (the Welcome view, a new file) is not checked: "no
+    // `main` function found" is a complaint about a program nobody wrote yet.
     if (!srcHost().value.trim()) {
       showDiagnostics(null);
       return;
@@ -263,9 +246,9 @@ export function mountPlay(root, opts = {}) {
     try {
       showDiagnostics(play.check(srcHost().value).diagnostics);
     } catch (err) {
-      // The checker recurses over the syntax tree, and a program nested deep
-      // enough can exhaust the engine's stack here too. Say so instead of
-      // showing the last answer as though it were about this program.
+      // The checker recurses over the syntax tree, and a deep enough program
+      // exhausts the engine's stack here too. Say so rather than keep the last
+      // answer.
       showDiagnostics([
         {
           line: 0,
@@ -277,15 +260,17 @@ export function mountPlay(root, opts = {}) {
     }
   }
 
-  function edited() {
-    paint();
+  function scheduleCheck() {
     clearTimeout(checkTimer);
     checkTimer = setTimeout(recheck, CHECK_DELAY_MS);
   }
 
-  // -----------------------------------------------------------------------
-  // Output
-  // -----------------------------------------------------------------------
+  function edited() {
+    paint();
+    scheduleCheck();
+  }
+
+  // Output.
 
   function say(text, cls) {
     outPane.textContent = "";
@@ -295,8 +280,8 @@ export function mountPlay(root, opts = {}) {
     outPane.append(el);
   }
 
-  /// What the program wrote, with the two channels kept apart, and the exit code
-  /// under them — the three things a terminal shows.
+  /// What the program wrote, the two channels apart, and the exit code under
+  /// them: what a terminal shows.
   function showRun(r) {
     outPane.textContent = "";
     if (r.stdout) {
@@ -356,9 +341,8 @@ export function mountPlay(root, opts = {}) {
         return;
       }
       showRun(r);
-      // A run does not decide what the checker says. The worker answers what the
-      // program WROTE; any warning about it is the checker's, and asking it here
-      // is the same call the editor makes after every edit.
+      // The checker owns warnings, so it is asked after a run as after an
+      // edit.
       recheck();
       finish("Ran");
     };
@@ -367,9 +351,8 @@ export function mountPlay(root, opts = {}) {
       say("The playground worker failed to start.", "stderr");
       finish("Failed");
     };
-    // The kill switch. `terminate` is the only thing that stops running
-    // WebAssembly, and a program that loops forever is a program a reader will
-    // write on purpose within about a minute of finding this page.
+    // The kill switch: `terminate` is the only way to stop running
+    // WebAssembly, and `while true { }` is a program readers write on purpose.
     runTimer = setTimeout(() => {
       stopWorker();
       say(`Stopped after ${RUN_LIMIT_MS / 1000} seconds. The program was still running.`, "stderr");
@@ -379,14 +362,10 @@ export function mountPlay(root, opts = {}) {
     worker.postMessage({ src: srcHost().value, stdin: stdin ? stdin.value : "" });
   }
 
-  // -----------------------------------------------------------------------
-  // Controls
-  // -----------------------------------------------------------------------
+  // Controls.
 
-  // WHAT `Reset` PUTS BACK. The program this editor
-  // started from: the example the picker holds, the program a shared link
-  // carried, or — on the index's hero — the snippet the page was built with. An
-  // editor a reader can type into with no way back is one they stop typing into.
+  // What Reset puts back: the program this editor started from (the picker's
+  // example, a shared link's program, or the hero's snippet).
   let original = input.value;
 
   function load(id) {
@@ -410,9 +389,9 @@ export function mountPlay(root, opts = {}) {
     }
     if (e.key === "Tab" && !e.shiftKey) {
       e.preventDefault();
-      // Through the editing command, so the browser's own undo stack keeps the
-      // insertion. The fallback splices the value, which loses undo but never
-      // loses the character.
+      // Through the editing command, so the browser's undo stack keeps the
+      // insertion. The fallback splices the value: undo is lost, the
+      // character is not.
       if (!document.execCommand || !document.execCommand("insertText", false, "  ")) {
         const at = input.selectionStart;
         input.value = input.value.slice(0, at) + "  " + input.value.slice(input.selectionEnd);
@@ -445,15 +424,12 @@ export function mountPlay(root, opts = {}) {
     });
   }
 
-  // =========================================================================
-  // The editor shell. Everything below exists only
-  // on /play — every hook is queried and silently absent on the hero editors —
-  // and everything is REAL: files and folders persist in this browser and the
-  // session (open tabs, the split, the pane sizes) comes back on the next
-  // visit; the examples are templates a file is created FROM; tabs and
-  // explorer rows drag into either editor group; the panes resize on sashes;
-  // the keys are IntelliJ's; the project downloads as a zip.
-  // =========================================================================
+  // The editor shell. Everything below exists only on /play; every hook is
+  // absent on the hero editors. Files and folders persist in this browser, and
+  // the session (open tabs, the split, pane sizes) comes back on the next
+  // visit. Examples are templates a file is created from; tabs and explorer
+  // rows drag into either editor group; panes resize on sashes; the keys are
+  // IntelliJ's; the project downloads as a zip.
   const gutter = $("[data-play-gutter]", root);
   const lncol = $("[data-play-lncol]", root);
   const crumbs = $("[data-play-crumbs]", root);
@@ -472,7 +448,7 @@ export function mountPlay(root, opts = {}) {
   const wrapEl = $(".idewrap", root);
   const uploadInput = $("[data-play-uploadinput]", root);
 
-  // ---- the panel's own tabs ----------------------------------------------
+  // The panel's own tabs.
   function showPane(k) {
     for (const t of ptabs) t.classList.toggle("on", t.dataset.playPtab === k);
     for (const p of panes) p.hidden = p.dataset.playPane !== k;
@@ -496,7 +472,7 @@ export function mountPlay(root, opts = {}) {
   }
 
   if (tabsBox && filesBox && wrapEl) {
-    // ---- persistence: files, folders, layout, session -----------------------
+    // Persistence: files, folders, layout, session.
     const KEY_FILES = "vyrn.play.files.v1";
     const KEY_FOLDERS = "vyrn.play.folders.v1";
     const KEY_LAYOUT = "vyrn.play.layout.v1";
@@ -516,10 +492,9 @@ export function mountPlay(root, opts = {}) {
         /* a full or absent store loses persistence, never the session */
       }
     };
-    // TWO PROJECTS, ONE ACTIVE. `myFiles` is the reader's own, in this
-    // browser; a shared link opens the sender's in a scope of its own, which
-    // is never written to storage — so a link cannot litter the reader's
-    // files, and the reader decides whether to keep it (user).
+    // Two projects, one active. `myFiles` is the reader's own, in this browser.
+    // A shared link opens the sender's project in its own scope, which is never
+    // written to storage, so a link cannot litter the reader's files.
     const myFiles = new Map(read(KEY_FILES, []).map((f) => [f.name, f.text]));
     let userFiles = myFiles;
     const isShared = () => userFiles !== myFiles;
@@ -570,7 +545,7 @@ export function mountPlay(root, opts = {}) {
       }
     }
 
-    // ---- editor groups ----------------------------------------------------
+    // Editor groups.
     const WELCOME = "__welcome";
     function makeGroup(els) {
       return Object.assign({ tabs: [], active: null }, els);
@@ -581,16 +556,15 @@ export function mountPlay(root, opts = {}) {
     srcHost = () => focusedG.input;
 
     const labelOf = (name) => (name === WELCOME ? "Welcome" : name.slice(name.lastIndexOf("/") + 1));
-    /// Which Run buttons are pressable: the compiler has to be there, and the
-    /// group has to hold a file — the Welcome view runs nothing (user).
+    /// Which Run buttons are pressable: the compiler is loaded and the group
+    /// holds a file (the Welcome view runs nothing).
     function updateRunState() {
       const busy = runBtn.dataset.state === "busy";
       for (const g of groups()) {
         if (!g.runBtn) continue;
         const want = !play || busy || !g.active || g.active === WELCOME;
-        // WRITTEN ONLY WHEN IT CHANGES. The observer below watches the core's
-        // own Run button, and an unconditional write to it is a mutation that
-        // re-enters this function for ever — the loop that froze the tab.
+        // Written only on change: the observer below watches the core's Run
+        // button, and an unconditional write re-enters this function forever.
         if (g.runBtn.disabled !== want) g.runBtn.disabled = want;
       }
     }
@@ -604,19 +578,8 @@ export function mountPlay(root, opts = {}) {
         paint();
         return;
       }
-      let spans = [];
-      if (play) {
-        try {
-          const t = play.tokens(g.input.value);
-          if (t.spans) spans = t.spans;
-        } catch (err) {
-          spans = [];
-        }
-      }
-      g.layer.innerHTML = highlight(g.input.value, spans);
-      const pre = g.layer.parentElement;
-      pre.scrollTop = g.input.scrollTop;
-      pre.scrollLeft = g.input.scrollLeft;
+      g.layer.innerHTML = highlight(g.input.value, spansOf(g.input.value));
+      scrollLayer(g.input, g.layer);
     }
 
     function syncG(g) {
@@ -685,8 +648,7 @@ export function mountPlay(root, opts = {}) {
       if (name !== WELCOME) {
         g.input.value = contentOf(name);
         paintG(g);
-        clearTimeout(checkTimer);
-        checkTimer = setTimeout(recheck, CHECK_DELAY_MS);
+        scheduleCheck();
       }
       if (g === gA) applyWelcome();
       for (const grp of groups()) renderTabsG(grp);
@@ -711,7 +673,7 @@ export function mountPlay(root, opts = {}) {
       if (g === gB && gB && !gB.tabs.length) unsplit();
     }
 
-    // ---- the second group: a real editor, built when a tab is sent right --
+    // The second group: a real editor, built when a tab is sent right.
     function ensureSplit() {
       if (gB) return gB;
       const sash = document.createElement("div");
@@ -766,7 +728,7 @@ export function mountPlay(root, opts = {}) {
       else syncChrome();
     }
 
-    // ---- one binding for any group's editor -------------------------------
+    // One binding for any group's editor.
     function bindGroup(g) {
       g.input.addEventListener("focus", () => {
         focusedG = g;
@@ -780,23 +742,20 @@ export function mountPlay(root, opts = {}) {
         }
         if (g !== gA) {
           paintG(g);
-          clearTimeout(checkTimer);
-          checkTimer = setTimeout(recheck, CHECK_DELAY_MS);
+          scheduleCheck();
         }
         syncG(g);
       });
       ["keyup", "click"].forEach((ev) => g.input.addEventListener(ev, () => syncG(g)));
       g.input.addEventListener("scroll", () => {
         if (g.gutter) g.gutter.scrollTop = g.input.scrollTop;
-        const pre = g.layer.parentElement;
-        pre.scrollTop = g.input.scrollTop;
-        pre.scrollLeft = g.input.scrollLeft;
+        scrollLayer(g.input, g.layer);
         syncG(g);
       });
       g.input.addEventListener("keydown", (e) => editorKeys(g, e));
     }
 
-    // ---- the keys: IntelliJ's, on whichever editor has focus --------------
+    // The keys: IntelliJ's, on whichever editor has focus.
     function lineBounds(t, at) {
       const s0 = t.value.lastIndexOf("\n", at - 1) + 1;
       let e0 = t.value.indexOf("\n", at);
@@ -835,8 +794,8 @@ export function mountPlay(root, opts = {}) {
       }
       const [s0, e0] = lineBounds(t, t.selectionStart);
       const line = t.value.slice(s0, e0);
-      // Ctrl+D duplicates the line; Ctrl+Y deletes it; Ctrl+/ toggles `//`;
-      // Ctrl+Shift+Up/Down moves it — IntelliJ's bindings.
+      // IntelliJ's bindings: Ctrl+D duplicates the line, Ctrl+Y deletes it,
+      // Ctrl+/ toggles `//`, Ctrl+Shift+Up/Down moves it.
       if (ctrl && !e.shiftKey && e.key.toLowerCase() === "d") {
         e.preventDefault();
         replaceAll(t, t.value.slice(0, e0) + "\n" + line + t.value.slice(e0), t.selectionStart + line.length + 1);
@@ -887,7 +846,7 @@ export function mountPlay(root, opts = {}) {
     });
     bindGroup(gA);
 
-    // ---- context menus ----------------------------------------------------
+    // Context menus.
     let menuEl = null;
     function closeMenu() {
       if (menuEl) {
@@ -937,7 +896,7 @@ export function mountPlay(root, opts = {}) {
     });
     const openElsewhere = (name) => window.open(location.pathname + "#c=" + encodeSource(contentOf(name)), "_blank");
 
-    // ---- dragging: a tab or an explorer row, into any group ---------------
+    // Dragging: a tab or an explorer row, into any group.
     let drag = null;
     function groupAt(x, y) {
       for (const g of groups()) {
@@ -963,9 +922,8 @@ export function mountPlay(root, opts = {}) {
         }
         drag.ghost.style.left = ev.clientX + 8 + "px";
         drag.ghost.style.top = ev.clientY + 8 + "px";
-        // A folder row under the pointer takes the file (user: explorer
-        // drag and drop) — checked before the editor groups, because the
-        // explorer is not one.
+        // A folder row under the pointer takes the file; checked before the
+        // editor groups, because the explorer is not one.
         const over = document.elementFromPoint(ev.clientX, ev.clientY);
         const dirRow = over && over.closest ? over.closest(".idefile.dir") : null;
         const rootDrop = !dirRow && over && over.closest && over.closest(".ideside");
@@ -1005,10 +963,8 @@ export function mountPlay(root, opts = {}) {
               renderTabsG(g);
             }
           }
-          // The group's MAIN box, not its editor: the editor is hidden while
-          // the Welcome view is up, so its rectangle is empty and the drop
-          // that creates a split could never be inside it (user: dragging a
-          // tab to a new pane stopped working).
+          // The group's main box, not its editor: the editor is hidden under
+          // the Welcome view, so its rectangle is empty.
           const er = g.main.getBoundingClientRect();
           drag.split = !gB && g === gA && name !== WELCOME && ev.clientX > er.left + er.width * 0.6 && ev.clientY > er.top && ev.clientY < er.bottom;
         }
@@ -1033,7 +989,7 @@ export function mountPlay(root, opts = {}) {
       addEventListener("pointermove", move);
       addEventListener("pointerup", up);
     }
-    // Put `name` in group `to` (at `index` if given), removing it from `from`.
+    // Puts `name` in group `to` (at `index` if given) and removes it from `from`.
     function sendTo(name, to, from, index) {
       if (name === WELCOME && to !== gA) return;
       if (from && from !== to) {
@@ -1065,7 +1021,7 @@ export function mountPlay(root, opts = {}) {
     }
     const sendRight = (name) => sendTo(name, ensureSplit(), groups().find((g) => g.tabs.includes(name)) || null);
 
-    // ---- tabs -------------------------------------------------------------
+    // Tabs.
     function renderTabsG(g) {
       g.strip.textContent = "";
       for (const name of g.tabs) {
@@ -1110,7 +1066,7 @@ export function mountPlay(root, opts = {}) {
       if (g.crumbs) g.crumbs.textContent = g.active ? g.active.split("/").join(" \u203a ") : "";
     }
 
-    // ---- the explorer: a tree of your files ------------------------------
+    // The explorer: a tree of the reader's files.
     function treeOf() {
       // Every folder implied by a path, plus the explicit (possibly empty) ones.
       const dirs = new Set(folders);
@@ -1318,7 +1274,7 @@ export function mountPlay(root, opts = {}) {
       });
     }
 
-    // ---- the project as a zip: stored entries, CRC-32, written by hand ----
+    // The project as a zip: stored entries and CRC-32, written by hand.
     const CRC = (() => {
       const t = new Uint32Array(256);
       for (let n = 0; n < 256; n++) {
@@ -1373,7 +1329,7 @@ export function mountPlay(root, opts = {}) {
       setTimeout(() => URL.revokeObjectURL(url), 2000);
     }
 
-    // ---- templates on the Welcome view -----------------------------------
+    // Templates on the Welcome view.
     for (const b of $$("[data-play-tpl]", root)) {
       b.addEventListener("click", () => {
         const id = b.dataset.playTpl;
@@ -1387,7 +1343,7 @@ export function mountPlay(root, opts = {}) {
       });
     }
 
-    // ---- the sashes: the panes resize, and the sizes persist ---------------
+    // The sashes: the panes resize, and the sizes persist.
     function bindSash(el) {
       el.addEventListener("pointerdown", (e) => {
         e.preventDefault();
@@ -1417,10 +1373,9 @@ export function mountPlay(root, opts = {}) {
     for (const el of $$("[data-play-sash]", root)) bindSash(el);
     applyLayout();
 
-    // ---- a link that carries the whole project ---------------------------
-    // `#p=` is base64url of the project's own JSON: every file, and which
-    // one was open. `#c=` (one program) still opens, because links written
-    // before this exist and a link that stops working is a broken promise.
+    // A link that carries the whole project. `#p=` is base64url of the
+    // project's JSON: every file and which one was open. `#c=` (one program)
+    // still opens, because links in that form exist.
     shareHash = () => {
       const payload = { v: 1, files: [...userFiles], open: focusedG.active === WELCOME ? null : focusedG.active };
       return "p=" + encodeSource(JSON.stringify(payload));
@@ -1436,7 +1391,7 @@ export function mountPlay(root, opts = {}) {
       }
     }
 
-    /// Open `files` as a shared project: its own scope, its own tabs, and a
+    /// Opens `files` as a shared project: its own scope, its own tabs, and a
     /// bar saying what it is. Nothing here reaches the reader's storage.
     function openShared(files, open) {
       sharedFiles = new Map(files);
@@ -1450,12 +1405,11 @@ export function mountPlay(root, opts = {}) {
       const first = open && sharedFiles.has(open) ? open : sharedFiles.keys().next().value;
       activateIn(gA, first || WELCOME);
     }
-    /// Leave the shared scope, with or without keeping what it held.
+    /// Leaves the shared scope, keeping what it held or not.
     function leaveShared(keep) {
       if (!isShared()) {
-        // Nothing borrowed: the only thing to do is make sure no chrome
-        // says otherwise. The first cut returned here, which is how a
-        // stale bar kept a Close button that did nothing (user).
+        // Nothing borrowed: still clear the shared chrome, so a stale bar
+        // cannot keep a Close button that does nothing.
         wrapEl.classList.remove("shared");
         syncChrome();
         return;
@@ -1484,7 +1438,7 @@ export function mountPlay(root, opts = {}) {
     for (const b of $$("[data-play-keep]", root)) b.addEventListener("click", () => leaveShared(true));
     for (const b of $$("[data-play-discard]", root)) b.addEventListener("click", () => leaveShared(false));
 
-    // ---- the explorer's drops: a file into a folder, an OS file in -------
+    // The explorer's drops: a file into a folder, an OS file in.
     function moveInto(name, dir) {
       const base = labelOf(name);
       const to = freshName((dir ? dir + "/" : "") + base);
@@ -1528,8 +1482,8 @@ export function mountPlay(root, opts = {}) {
       });
     }
 
-    // A file opened before the compiler landed was drawn with no spans; the
-    // core calls this the moment it lands, and every group is redrawn.
+    // A file opened before the compiler landed was drawn with no spans, so
+    // every group repaints when it lands.
     onPlayReady = () => {
       for (const g of groups()) {
         paintG(g);
@@ -1538,7 +1492,7 @@ export function mountPlay(root, opts = {}) {
       updateRunState();
     };
 
-    // ---- the minimap scrolls the window it draws --------------------------
+    // The minimap scrolls the window it draws.
     function bindMinimap(g) {
       if (!g.minimap) return;
       const jump = (e) => {
@@ -1558,7 +1512,7 @@ export function mountPlay(root, opts = {}) {
     }
     bindMinimap(gA);
 
-    // ---- first light: the session comes back ------------------------------
+    // First light: the session comes back.
     function firstLight() {
       const session = read(KEY_SESSION, null);
       const project = projectFromHash();
@@ -1567,8 +1521,8 @@ export function mountPlay(root, opts = {}) {
         return;
       }
       if (location.hash.startsWith("#c=") && input.value) {
-        // One program, from a link written before projects existed: the same
-        // borrowed scope, so it cannot land in the reader's files either.
+        // One program, from a `#c=` link: the same borrowed scope, so it
+        // cannot land in the reader's files either.
         openShared([["shared.vyrn", input.value]], "shared.vyrn");
         return;
       }
@@ -1595,9 +1549,8 @@ export function mountPlay(root, opts = {}) {
     }
     queueMicrotask(firstLight);
 
-    // A page restored from the back/forward cache runs no script of its own:
-    // whatever it was in the middle of stays half-done. If it came back
-    // without a view, or without a compiler, it is finished here.
+    // A page restored from the back/forward cache resumes where it froze. If
+    // it came back without a view or without a compiler, finish here.
     addEventListener("pageshow", (e) => {
       if (!e.persisted) return;
       if (!focusedG.active) firstLight();
@@ -1614,13 +1567,10 @@ export function mountPlay(root, opts = {}) {
     });
   }
 
-  // -----------------------------------------------------------------------
-
   const fromLink = sourceFromHash();
   if (fromLink !== null) {
     input.value = fromLink;
-    // A shared link IS the original here: `Reset` goes back to the program the
-    // link carried, not to whatever the picker happened to hold.
+    // A shared link is the original: Reset returns to the program it carried.
     original = fromLink;
     if (picker) picker.value = "";
   } else if (picker && picker.value) {
@@ -1628,10 +1578,9 @@ export function mountPlay(root, opts = {}) {
   }
   paint();
 
-  // RESTARTABLE. A page frozen mid-load and restored from the back/forward
-  // cache keeps this promise's corpse: nothing resolves, and the window sits
-  // at "Loading the compiler…" for ever (user, returning to the editor with
-  // no reload). `pageshow` calls this again.
+  // Restartable: a page frozen mid-load and restored from the back/forward
+  // cache holds a promise that never resolves, and `pageshow` calls this
+  // again.
   let starting = false;
   function startCompiler() {
     if (play || starting) return;
@@ -1644,9 +1593,8 @@ export function mountPlay(root, opts = {}) {
       status.textContent = "Ready";
       edited();
       if (onPlayReady) onPlayReady();
-      // The index's hero editor is armed on first interaction and mounted then,
-      // so the press that armed it arrives before anything can
-      // run. `onReady` is how that press is honoured rather than swallowed.
+      // The hero editor mounts on the first interaction, after the press that
+      // armed it; `onReady` replays that press.
       if (opts.onReady) opts.onReady();
     },
     (err) => {

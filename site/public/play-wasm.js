@@ -1,34 +1,29 @@
-// The calling convention for `play.wasm` — the Vyrn front end, compiled from the
-// same Rust the `vyrn` binary is built from (`compiler/vyrn-play`).
+// The calling convention for `play.wasm`, the Vyrn front end compiled from the
+// same Rust as the `vyrn` binary (`compiler/vyrn-play`).
 //
-// Two callers, because the two halves of the playground have opposite needs:
+// Two callers. `play.js` asks for `tokens` on every keystroke and `check`
+// shortly after; both are synchronous, because a colour layer a message late
+// lags, and neither runs the program. `play-worker.js` asks for `compile` and
+// runs the module it gets back with `wasi-min.js`, in a worker the page can
+// terminate.
 //
-//   - `play.js`, on the main thread, asks for `tokens` on every keystroke and
-//     `check` shortly after. Both must be synchronous: a colour layer that
-//     arrives a message later than the character shows the reader an editor that
-//     lags. Neither can loop forever, because neither runs the program.
-//   - `play-worker.js` asks for `compile`, and then runs the module it gets back
-//     with `wasi-min.js`. THAT can loop forever, which is the whole reason a
-//     worker exists: the page stays alive and can terminate it.
-//
-// No bindgen and no dependencies. The module owns one input buffer and one output
-// buffer; `memory.buffer` is detached by a growth, so every access below re-reads
-// it rather than caching a view.
+// No bindgen and no dependencies. The module owns one input buffer and one
+// output buffer. A memory growth detaches `memory.buffer`, so every access
+// re-reads it rather than caching a view.
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 
-/// Fetch and instantiate the module.
+/// Fetches and instantiates the module.
 export async function loadPlay(url) {
   const source = await fetch(url);
   if (!source.ok) throw new Error(`play.wasm: ${source.status} ${source.statusText}`);
-  // `instantiateStreaming` needs the right content type, which a static host may
-  // not send. The buffer path works either way and the module is not big enough
-  // for streaming to matter.
+  // `instantiateStreaming` needs the right content type, which a static host
+  // may not send; the module is small enough that streaming does not matter.
   return instantiatePlay(await source.arrayBuffer());
 }
 
-/// Instantiate the module from its bytes. Its one import runs a generator the
+/// Instantiates the module from its bytes. Its one import runs a generator the
 /// compiler built (`derive(g, x)`): the compiler is itself a wasm module, so
 /// the page instantiates the generator's module for it.
 export async function instantiatePlay(bytes) {
@@ -201,16 +196,16 @@ function api(instance) {
     return JSON.parse(decoder.decode(new Uint8Array(wasm.memory.buffer, wasm.result_ptr(), len)));
   }
 
-  /// The last call's result as BYTES, copied out. A copy because
-  /// `memory.buffer` is detached by the next call's growth.
+  /// The last call's result as bytes, copied, because the next call's growth
+  /// detaches `memory.buffer`.
   function takeBytes(len) {
     return new Uint8Array(wasm.memory.buffer, wasm.result_ptr(), len).slice();
   }
 
   return {
-    /// `{ spans: [[start, length, class], …] }` in UTF-16 code units, or
-    /// `{ error }` when the source cannot be lexed at all — which happens on the
-    /// way to typing a string literal, so the caller falls back to plain text.
+    /// `{ spans: [[start, length, class], ...] }` in UTF-16 code units, or
+    /// `{ error }` when the source cannot be lexed at all (half a string
+    /// literal), and the caller falls back to plain text.
     tokens(src) {
       const [n] = put([src]);
       return take(wasm.play_tokens(n));
@@ -220,10 +215,9 @@ function api(instance) {
       const [n] = put([src]);
       return take(wasm.play_check(n));
     },
-    /// `{ module }` — the program as a wasm module, the same bytes
-    /// `vyrn build --target wasm` writes — or `{ diagnostics }` when it did not
-    /// compile. The two are told apart by the first byte, because a module
-    /// begins with the wasm magic and JSON begins with `{`.
+    /// `{ module }`, the bytes `vyrn build --target wasm` writes, or
+    /// `{ diagnostics }` when it did not compile. The first byte tells them
+    /// apart: a module begins with the wasm magic and JSON with `{`.
     compile(src) {
       const [n] = put([src]);
       const len = wasm.play_compile(n);
