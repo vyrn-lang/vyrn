@@ -1284,6 +1284,42 @@ fn a_counter_down_to_one_proves_its_index_below_it() {
     );
 }
 
+/// A check's goal takes a chain of three premises: `m < r`, `r < n` and
+/// `n <= xs.length` bound `xs[m]`. With one link weakened to `r <= n + 1`
+/// the chain does not hold, and the read stays a check and traps.
+#[test]
+fn a_chain_of_three_premises_proves_an_index() {
+    let src = |link: &str| {
+        format!(
+            "export fn w(xs: Array<Int64>, r: Int64, n: Int64) -> Int64 {{
+    if n > xs.length || {link} || r < 0 {{
+        return 0
+    }}
+    let mut s = 0
+    let mut m = 0
+    while m < r {{
+        s = s + xs[m]
+        m = m + 1
+    }}
+    return s
+}}
+"
+        )
+    };
+    let calls = |r: i64, n: i64| format!("    print(w(xs, {r}, {n}).toString())");
+    let proof = src("r >= n");
+    assert_eq!(verdicts(&proof, "w"), ["proved array-index"]);
+    assert_eq!(oracle(&proof, &calls(2, 3), "w").0, "");
+    let witness = src("r > n + 1");
+    assert_eq!(verdicts(&witness, "w"), ["check array-index"]);
+    let (err, _) = oracle(&witness, &calls(4, 3), "w");
+    assert!(err.contains("array index 3 out of bounds"), "{err}");
+    assert!(
+        !err.contains(vyrn_frontend::trap::PROVED_CHECK_FAILED),
+        "{err}"
+    );
+}
+
 #[test]
 fn a_join_of_constants_keeps_the_values_between_out() {
     let src = "fn w(x: Int64) -> Int64 {

@@ -2933,7 +2933,10 @@ impl<'a> Walk<'a> {
                 let goals = self.goals(&st, &c.guard);
                 // A solve's walk writes no verdict: its copy of the rows is dropped.
                 if self.record && !self.solving {
-                    let holds = |g: &Lin| st.ge0(g).is_some_and(|cert| cert.verify(&st, g));
+                    // A check's goal takes a chain of three premises; a join's
+                    // and a loop's facts take two.
+                    let holds =
+                        |g: &Lin| (st.prover().ge0_deep(g)).is_some_and(|cert| cert.verify(&st, g));
                     let failing = goals.iter().flatten().find(|g| !holds(g));
                     if goals.is_some() && failing.is_none() && provable(&c.guard) {
                         c.verdict = Verdict::Proved;

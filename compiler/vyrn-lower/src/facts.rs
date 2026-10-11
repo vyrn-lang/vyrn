@@ -754,6 +754,31 @@ impl Prover<'_> {
         self.st.differs(l) || off(Some(l.clone())) || off(l.scale(-1))
     }
 
+    /// [`Prover::ge0`] with one premise more: a premise that names the
+    /// goal's first term, then the rest by `ge0`. Some premise of a sum names
+    /// each of the goal's terms, so no chain of three is missed for that
+    /// choice. The walk asks it only of a check's goal: asked at every join
+    /// and loop head too, it cost `elide: summaries` 7.6 times its
+    /// allocations.
+    pub fn ge0_deep(&self, goal: &Lin) -> Option<Cert> {
+        if let Some(c) = self.ge0(goal) {
+            return Some(c);
+        }
+        let g = self.st.norm(goal)?;
+        let (first, _) = *g.terms.first()?;
+        let extra = axioms(g.terms.iter().map(|(t, _)| *t));
+        let named =
+            (self.st.facts.iter().chain(&self.axioms).chain(&extra)).filter(|p| p.mentions(first));
+        for p in named {
+            let Some(d) = g.sub(p) else { continue };
+            if let Some(Cert::Sum { uses, slack }) = self.ge0(&d) {
+                let uses = std::iter::once(p.clone()).chain(uses).collect();
+                return Some(Cert::Sum { uses, slack });
+            }
+        }
+        None
+    }
+
     /// [`State::ge0`], over the index.
     pub fn ge0(&self, goal: &Lin) -> Option<Cert> {
         if self.st.dead {
