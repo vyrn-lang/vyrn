@@ -1,6 +1,4 @@
 <script>
-// GET /docs/editors: a redirect stub to `/tooling/editors` (see
-// `philosophy.vyx`).
 import { Head } from "std/ui"
 import { pageHead, hrefOf } from "../../nav"
 
@@ -8,7 +6,6 @@ export fn head() -> Head {
     return pageHead("Moved to Tooling — Vyrn")
 }
 
-/// Where this stub sends a reader.
 fn target() -> String {
     return hrefOf("/tooling/editors")
 }

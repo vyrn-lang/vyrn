@@ -1,10 +1,4 @@
 <script>
-// GET /tooling/editors: what the editor extension and the language server
-// do. The stubs at `/editors` and `/docs/editors` point here.
-//
-// Every row names its implementation in `data-impl`; `site/export.vyrn` opens
-// each path, so a row for something nobody wrote fails the build. The rows in
-// `../editors` follow the code where the extension's README disagrees.
 import { Head } from "std/ui"
 import { pageHeadOf } from "../../nav"
 import { shellHtml } from "../../code"
@@ -17,12 +11,10 @@ export fn head() -> Head {
     return pageHeadOf("/tooling/editors")
 }
 
-/// This page's own URL, in the form the markdown twin's helpers take.
 fn pageHref() -> String {
     return "/tooling/editors.html"
 }
 
-/// The Open-in-Claude link for this page.
 fn claudeHref() -> String {
     return askClaudeUrl(pageHref(), pageTitle())
 }

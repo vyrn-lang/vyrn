@@ -1,9 +1,4 @@
 <script>
-// GET /explore: the registry, one compact row per package with a search
-// field. The install command and the manifest are on each package's page.
-//
-// Each row carries its lowercased search text in `data-q`, as the reference's
-// rows do; `widgets.js` filters them, and with no script every row shows.
 import { Head } from "std/ui"
 import { pageHeadOf } from "../../nav"
 import { Package, packages, offerOf } from "../../packages"
@@ -13,20 +8,16 @@ export fn head() -> Head {
     return pageHeadOf("/explore")
 }
 
-/// The row's two counts: exports and dependencies.
 fn numsOf(p: Package) -> String {
     let ex = if p.exports == 1 { "1 export" } else { p.exports.toString() + " exports" }
     let deps = if p.deps == 0 { "no deps" } else if p.deps == 1 { "1 dep" } else { p.deps.toString() + " deps" }
     return ex + " · " + deps
 }
 
-/// The row's search text: name, kind and summary, lowercased.
 fn haystack(p: Package) -> String {
     return toLower(p.name + " " + p.kind + " " + p.summary)
 }
 
-/// The offered module's export names, space-joined, for `data-e`: a search for
-/// a name finds the package that exports it.
 fn exportsOf(p: Package) -> String {
     let mut out = ""
     for e in offerOf(p.slug).exports {

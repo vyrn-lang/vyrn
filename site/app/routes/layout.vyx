@@ -1,25 +1,13 @@
 <script>
-// The site shell: every page body renders into the <slot/>. The navigation
-// is built from the router's typed URL helpers, so a link to a route that does
-// not exist fails to compile.
 import { navRows, themeControl, installCta } from "../nav"
-// `<Icon>` is a tag because this script imports a `gen fn` of that name. Each
-// tag is one generation, which splices an inline `<svg>` from a hash-locked
-// Iconify collection.
 import { Icon } from "../icons"
 import { exampleCount, backendCount, hasRelease, releaseTag, releasePre } from "../repo"
-// The `head { }` block has no entry for a `<meta>`, so each page's `head()`
-// carries its own viewport and description through `pageHead`. `theme.js` is a
-// module, not a blocking script: `withThemeBoot` in `site/export.vyrn` inlines
-// the lines that set the theme before the first paint, with no request.
 head {
     stylesheet "/style.css"
     module "/theme.js"
     module "/widgets.js"
 }
 
-/// The footer's standing line: the newest release, baked while the site built,
-/// or a sentence saying there is none.
 fn standing() -> String {
     if !hasRelease() {
         return "Early. No versioned release yet."
@@ -32,43 +20,24 @@ fn standing() -> String {
 </script>
 
 <template>
-<!-- One root, no box: the layout language wants a single root element, and
-     `display: contents` keeps the masthead a viewport-level bar. -->
+<!-- The layout needs one root; `display: contents` keeps it boxless. -->
 <div class="shell">
-<!-- The masthead spans the window; the framed plate begins under it. -->
 <a class="skip" href="#main">Skip to content</a>
 <header class="masthead">
         <a href="/index.html" class="wordmark">vyrn</a>
-        <!-- A `<details>`, and a disclosure only on a phone: at 375px the
-             wordmark, the Install button and the theme control leave 165px,
-             and five links do not fit. Above 640px the stylesheet hides the
-             summary and forces the panel open. No script either way. -->
         <details class="menu">
             <summary>Menu</summary>
             <nav class="nav" aria-label="Site">
                 <a v-for="r in navRows()" :key="r.href" :href="r.href">{{ r.label }}</a>
             </nav>
         </details>
-        <!-- Both are strings from `../nav`: a page that builds its masthead
-             as one string has no host for the theme control, and the export's
-             `aria-current` marker needs `href` and `data-key` as the first two
-             attributes, which a template cannot promise. `.slot` is
-             `display: contents`, so `v-html` adds no box. -->
         <div class="tools">
-            <!-- The search opener, for a reader with no `/` key. It is
-                 `[data-js]`-gated: without script it would take focus and do
-                 nothing. -->
-            <!-- `.word` shows at phone widths; `.hint`, the rest of the
-                 placeholder and the `/` chip, shows above 1024px. The
-                 accessible name is the `aria-label`. -->
+            <!-- `[data-js]`-gated: without script it would take focus and do nothing. -->
             <button type="button" class="find" data-find-open aria-label="Search this site. Press slash."><Icon name="bytesize:search"/> <span class="word">Search<span class="hint"> docs, reference…</span></span> <kbd class="key">/</kbd></button>
             <span class="slot" v-html="installCta()"></span>
             <span class="slot" v-html="themeControl()"></span>
         </div>
     </header>
-    <!-- The search overlay, empty and `hidden` in the document: the 42 KB
-         index is fetched on the first open. Without script the `<noscript>`
-         points at the reference landing's own filter. -->
     <div class="findbox" data-find hidden>
         <div class="findpanel" role="dialog" aria-modal="true" aria-label="Search">
             <div class="findrow">
@@ -91,19 +60,13 @@ fn standing() -> String {
     <noscript>
         <p class="notice">Search needs JavaScript. <a href="/docs.html">The reference landing</a> filters its own module list without it.</p>
     </noscript>
-    <!-- The skip link's target. Not the `<main>`: it is `display: contents`,
-         and an element with no box cannot take focus. This anchor has a box,
-         no size, and sits out of the grid flow. -->
 <div id="root">
+    <!-- Not the `<main>`: it is `display: contents`, and an element with no box cannot take focus. -->
     <div id="main" class="skip-target" tabindex="-1"></div>
     <slot/>
     <footer class="foot">
         <span>{{ exampleCount() }} examples, {{ backendCount() }} backends</span>
-        <!-- The changelog, linked here and not from the masthead. -->
         <a href="/releases.html"><Icon name="bytesize:tag"/> Releases</a>
-        <!-- The mark is decoration and renders `aria-hidden`. The arrow says
-             the link leaves the site, which no word says, so it carries a
-             `label` and renders as `role="img"`. -->
         <a href="https://github.com/vyrn-lang/vyrn"><Icon name="bytesize:github"/> Source on GitHub <Icon name="bytesize:external" label="opens on github.com"/></a>
         <span>{{ standing() }}</span>
     </footer>

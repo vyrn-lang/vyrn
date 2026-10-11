@@ -1,13 +1,4 @@
 <script>
-// GET /docs: the reference landing, with every standard library module.
-//
-// The module list is the search index: each row carries its lowercased search
-// text in `data-q` and its export names in `data-e`, so filtering needs no
-// fetch and a reader with no script still gets every module. `widgets.js`
-// filters the rows and builds a link per matching export with
-// `createElement`, never from typed markup. The import graph is on
-// `/docs/graph`. The only links that leave the site are to the README, the
-// roadmap and the examples.
 import { Head } from "std/ui"
 import { pageHeadOf } from "../../nav"
 import { blob } from "../../repo"
@@ -17,20 +8,16 @@ import { chapters } from "../../guide"
 import { Icon } from "../../icons"
 import { TreeGroup, docsTree } from "../../docshell"
 
-/// The sidebar: the whole reference, nothing marked.
 fn tree() -> Array<TreeGroup> {
     return docsTree("index")
 }
 
-/// One place to read next, outside this site.
 type Link = { href: String, name: String, what: String }
-
 
 export fn head() -> Head {
     return pageHeadOf("/docs")
 }
 
-/// How many exports the whole reference covers.
 fn exportCount() -> Int64 {
     let mut n = 0
     for m in apiModules() {
@@ -47,9 +34,6 @@ fn links() -> Array<Link> {
     ]
 }
 
-/// One row of the command table: what you type, and what it does. The name is
-/// code a reader copies, not a link; a row that has more to say links from its
-/// sentence.
 type Command = { name: String, what: String }
 
 fn commands() -> Array<Command> {
@@ -89,8 +73,6 @@ fn commands() -> Array<Command> {
             </div>
         </section>
 
-        <!-- The documentation's areas. Each card's count comes from the
-             generator that builds the page it links. -->
         <section class="band" id="areas">
             <h2>Four places to start</h2>
             <ul class="cards areas">
@@ -117,8 +99,6 @@ fn commands() -> Array<Command> {
             </ul>
         </section>
 
-        <!-- Every module, in its group. The search filters these rows in
-             place; a group with every row filtered out hides itself. -->
         <section class="band" id="std">
             <div data-search-list>
                 <div class="modgroup" v-for="g in searchGroups()" :key="g.name">

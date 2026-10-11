@@ -1,26 +1,17 @@
 <script>
-// GET /why-vyrn: the language's reasons and its non-goals. The stub at
-// `/philosophy` points here.
-//
-// One plate shows each capability word with the code it produces. The
-// non-goals are README.md's "Not in v1" list, each with its reason.
 import { Head } from "std/ui"
 import { pageHeadOf } from "../nav"
 import { vyrnHtml } from "../snippets"
 
-/// Something the language refuses, and why.
 type NonGoal = { what: String, why: String }
 
-/// One capability word: what it means, the code it produces, and what the
-/// compiler stops you doing once you have written it.
 type Capability = { id: String, word: String, means: String, refuses: String, html: String }
 
 export fn head() -> Head {
     return pageHeadOf("/why-vyrn")
 }
 
-/// An angle bracket written in a template is escaped twice, so the command that
-/// contains one is built here instead.
+/// A template escapes an angle bracket twice, so a command that holds one is built here.
 fn whyCommand() -> String {
     return "vyrn why --cost <file>"
 }
@@ -100,8 +91,6 @@ fn capabilities() -> Array<Capability> {
                     <div v-for="c in capabilities()" :key="c.id" :data-pane="c.id">
                         <p class="lede pane-lede">{{ c.means }}</p>
                         <pre class="code" v-html="c.html"></pre>
-                        <!-- `.refuses`, not `.cap`: a plate carries one
-                             caption, and it is the one under the panes. -->
                         <p class="refuses">{{ c.refuses }}</p>
                     </div>
                 </div>

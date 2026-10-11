@@ -1,14 +1,4 @@
 <script>
-// GET /play: the compiler in the reader's browser. The front end is compiled
-// to WebAssembly (`compiler/vyrn-play`) and gives this page its tokens, its
-// diagnostics and the program's output, from the same Rust as the `vyrn`
-// binary.
-//
-// Files are the reader's: created from the Welcome view's examples, persisted
-// in the browser, and reopened on the next visit. The examples are Vyrn data
-// in hidden `<pre>` blocks that `play.js` reads with `textContent`. Every
-// `data-play-*` element is `play.js`'s contract; the shell's own hooks are
-// absent on the hero editors, and `play.js` skips them there.
 import { Head } from "std/ui"
 import { pageHeadOf } from "../nav"
 import { playExamples, Example } from "../play"
@@ -26,12 +16,9 @@ fn examples() -> Array<Example> {
 <main class="page play ide" data-widget="play">
     <h1 class="sr-only">Playground</h1>
 
-    <!-- One box, because `main.page` is `display: contents` and the shell grid
-         owns its children: the editor's window is a grid of its own. -->
+    <!-- One box: `main.page` is `display: contents`, and the shell grid owns its children. -->
     <div class="idewrap">
         <aside class="ideside" aria-label="Files">
-            <!-- The open project's name. A shared link opens as its own
-                 project, written to the reader's files only when kept. -->
             <p class="sidehead"><span data-play-scope>Explorer</span>
                 <span class="sideacts">
                     <button type="button" class="sideact sharedonly" data-play-keep aria-label="Save this project to my files" title="Save this project to my files" data-ico="download"></button>
@@ -40,7 +27,6 @@ fn examples() -> Array<Example> {
                     <button type="button" class="sideact" data-play-newfolder aria-label="New folder" title="New folder" data-ico="folder-plus"></button>
                     <button type="button" class="sideact" data-play-upload aria-label="Upload files" title="Upload files" data-ico="upload"></button>
                     <button type="button" class="sideact" data-play-download aria-label="Download project (zip)" title="Download project (zip)" data-ico="download"></button>
-                    <!-- A link to the whole project, not to one editor group. -->
                     <button type="button" class="sideact" data-play-share aria-label="Copy a link to this project" title="Copy a link to this project" data-ico="link"></button>
                 </span>
             </p>
@@ -57,8 +43,6 @@ fn examples() -> Array<Example> {
             </div>
             <div class="idecrumbs" data-play-crumbs aria-hidden="true">files</div>
 
-            <!-- The Welcome view: the examples, as templates a file is created
-                 from. Shown when no file is open. -->
             <div class="welcome" data-play-welcome hidden="hidden">
                 <p class="eyebrow">Start</p>
                 <h2>Type Vyrn. Run it here.</h2>
@@ -95,8 +79,6 @@ fn examples() -> Array<Example> {
                 <p class="cap dim" data-play-noprob>No problems. The compiler will list what it refuses here.</p>
             </div>
             <div class="pane" data-play-pane="output">
-                <!-- A live region: a run loads no page, so a screen reader is
-                     told nothing otherwise. -->
                 <div class="out" data-play-out aria-live="polite"><span class="dim">Nothing has run yet.</span></div>
             </div>
             <div class="pane" data-play-pane="input" hidden="hidden">
@@ -106,8 +88,7 @@ fn examples() -> Array<Example> {
         </div>
 
         <div class="idestatus">
-            <!-- Shown on hover or focus as markup; a native `title` clips and
-                 cannot wrap. -->
+            <!-- Markup, not `title`: a native `title` clips and cannot wrap. -->
             <span class="idehelp" tabindex="0" aria-describedby="playtip">?<span class="tipbox" id="playtip" role="tooltip">The compiler runs in this tab as WebAssembly, and so does the program it compiles. Nothing is uploaded. A program is stopped after five seconds, and a recursion that outgrows the tab's stack stops with the error <code>vyrn run</code> gives. The tab has no filesystem and no arguments. One file runs, plus <code>std/</code>, which is built in.</span></span>
             <span class="stat" data-play-status>Loading the compiler…</span>
             <span class="errs"><span aria-hidden="true">⊗</span> <span data-play-errs>0</span></span>

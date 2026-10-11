@@ -1,13 +1,4 @@
 <script>
-// GET /install: the quickstart. Two installers exist, `install.sh` and
-// `install.ps1`, so the page shows two commands; macOS and Linux share the
-// first. The commands live in `installTargets()` in `../repo`, which the
-// landing's hero reads too.
-//
-// A tile names its OS in words: the two bound icon collections (`bytesize`,
-// `codex`) hold no OS glyph, and a provider tag takes static attributes only.
-// Neither installer takes a version; both resolve the newest release, and the
-// version shown comes from `../repo`.
 import { Head } from "std/ui"
 import { pageHeadOf } from "../nav"
 import { shellHtml } from "../code"
@@ -18,13 +9,10 @@ export fn head() -> Head {
     return pageHeadOf("/install")
 }
 
-/// The source build, which is the same three lines everywhere.
 fn sourceBuild() -> String {
     return "git clone https://github.com/vyrn-lang/vyrn.git\ncd vyrn/compiler\ncargo build --release -p vyrn-cli"
 }
 
-/// Deleting the directory the installer wrote. That IS the uninstall: nothing
-/// is registered, nothing is written outside it, and no service is installed.
 fn uninstall() -> String {
     return "rm -rf ~/.vyrn"
 }
@@ -33,20 +21,16 @@ fn firstRun() -> String {
     return "vyrn run examples/fib.vyrn"
 }
 
-/// Pinning a tag instead of taking the newest release. The variable goes on the
-/// `sh` at the end of the pipe, which is where the script actually runs.
-/// With no release there is no tag to name, so the command shows where one goes.
+/// The variable goes on `sh`, where the script runs, not on `curl`.
 fn pinnedInstall() -> String {
     let tag = if hasRelease() { releaseTag() } else { "TAG" }
     return "curl -fsSL " + installScript("install.sh") + " | VYRN_VERSION=" + tag + " sh"
 }
 
-/// Checking a manual download by hand, which is what the installer does for you.
 fn manualCheck() -> String {
     return "sha256sum -c SHA256SUMS"
 }
 
-/// The kicker over the heading: the word, then the version it installs today.
 fn kicker() -> String {
     if !hasRelease() {
         return "Install"
@@ -54,16 +38,11 @@ fn kicker() -> String {
     return "Install · " + releaseTag()
 }
 
-/// The radio that selects one target's pane. The first is checked, and the
-/// stylesheet selects the pane with `:checked ~`, so the picker needs no script.
 fn osId(p: InstallTarget) -> String {
     return "os-" + p.id
 }
 
-/// The script the selected command pipes into a shell, as a page a reader can
-/// read first. The link names the `.txt` twin: GitHub Pages types a file by
-/// its extension, so `/install.sh` and `/install.ps1` download instead of
-/// showing, and a `.txt` is served as `text/plain`. The bytes are the same.
+/// The `.txt` twin: GitHub Pages serves `.sh` and `.ps1` as downloads.
 fn scriptHref(p: InstallTarget) -> String {
     if p.id == "windows" {
         return "/install.ps1.txt"
@@ -71,8 +50,6 @@ fn scriptHref(p: InstallTarget) -> String {
     return "/install.sh.txt"
 }
 
-/// The same file under its own name, for the reader who wants the file and not
-/// a page of it. The command pipes this one.
 fn scriptDownload(p: InstallTarget) -> String {
     if p.id == "windows" {
         return "/install.ps1"
@@ -89,12 +66,7 @@ fn scriptDownload(p: InstallTarget) -> String {
             <h1 class="display">Install Vyrn</h1>
             <p class="lede">One command, one self-contained binary, nothing else to install. Uninstalling is deleting a directory.</p>
 
-            <!-- Two radio buttons and no script. The inputs come first so
-                 `:checked ~ .ospanes` reaches the panes, which the stylesheet
-                 selects by position. They are written out because only the
-                 first carries `checked`: `v-for` cannot put an attribute on one
-                 iteration, and an empty `checked=""` still checks. `widgets.js`
-                 reads `data-os` to open on the visitor's own system. -->
+            <!-- Inputs first, so `:checked ~ .ospanes` reaches the panes. Written out because only the first carries `checked`, and `checked=""` still checks. -->
             <fieldset class="picker">
                 <legend class="sr-only">Operating system</legend>
                 <input class="sr-only" type="radio" name="os" id="os-unix" checked="checked" data-os="unix"/>

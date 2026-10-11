@@ -1,6 +1,4 @@
 <script>
-// GET /guide/web: a redirect stub (see `philosophy.vyx`). The target comes from
-// `movedChapters()`, the table `site/export.vyrn` stamps the refresh from.
 import { Head } from "std/ui"
 import { pageHead } from "../../nav"
 import { movedTarget } from "../../guide"
@@ -9,7 +7,6 @@ export fn head() -> Head {
     return pageHead("Moved — Vyrn")
 }
 
-/// Where this stub sends a reader.
 fn target() -> String {
     return movedTarget("/guide/web") + ".html"
 }

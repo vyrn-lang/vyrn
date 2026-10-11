@@ -1,36 +1,19 @@
 <script>
-// GET /: the landing page. The first viewport holds the claim, a program
-// that runs, and the install command; every section under it backs one of
-// those three.
-//
-// The hero editor loads on interaction: `widgets.js` imports the playground's
-// scripts and `play.wasm` when a reader points at the editor or presses Run.
-// Without script the same markup is a coloured code block with a link to
-// `/play`.
 import { Head } from "std/ui"
 import { pageHeadOf, hrefOf } from "../nav"
 import { vyrnHtml, vyrnSource } from "../snippets"
 import { shellHtml } from "../code"
 import { hasRelease, releaseTag, releaseDate, releasePre, InstallTarget, installTargets, stdCount } from "../repo"
-// The showcase's programs are files in `site/guide/`, compiled and run by the
-// guide and tested in CI. Import them through `../guide`, never by calling
-// `guideCode` here: the generator's cache keys on its argument string, so a
-// second spelling of the directory generates a second module, and its exports
-// collide with the first.
 import { blockOf, chapterOfBlock, sectionOfBlock, chapterHref } from "../guide"
 import { ApiGroup, ApiModule, apiGroups, apiHref } from "../docs"
 import { joinWith } from "std/strings"
 import { frontPanels, panelBars, panelNote, panelSpeed, panelMemLine, benchMachine, benchRuns } from "../bench"
 import { demoSteps, demoVersion, demoRecorded, DemoStep } from "../demo"
 import { shellOutHtml } from "../code"
-// The demo steps whose output is a file, coloured by the compiler's lexer at
-// compile time.
 import { demoCode } from "../demohl"
 import { demoHl } from demoCode("../../data/demo.json")
 import { Icon } from "../icons"
 
-/// The id of the snippet the hero runs. One name, two halves: the coloured
-/// lines the page paints and the raw source the textarea holds.
 fn heroSnippet() -> String {
     return "runme"
 }
@@ -39,12 +22,10 @@ export fn head() -> Head {
     return pageHeadOf("/")
 }
 
-/// The radio that selects one target's pane, as on `/install`.
 fn osId(p: InstallTarget) -> String {
     return "os-" + p.id
 }
 
-/// The newest tag, or a sentence saying there is none.
 fn headline() -> String {
     if !hasRelease() {
         return "Not released yet"
@@ -52,7 +33,6 @@ fn headline() -> String {
     return releaseTag()
 }
 
-/// What is published, in one line.
 fn standing() -> String {
     if !hasRelease() {
         return "Nothing published yet — build from source."
@@ -61,12 +41,7 @@ fn standing() -> String {
     return "Published " + releaseDate() + kind
 }
 
-/// One tab of the showcase: the program in `site/guide/` it shows, the word on
-/// the tab, and the line that says what to look at.
-///
-/// The programs are picked to be close in length, so switching a tab does not
-/// resize the section under the cursor. `protocols` is left out at 31 lines,
-/// and `std/stream` has no chapter program.
+/// Programs of similar length, so switching tabs does not resize the section.
 type Tab = { id: String, label: String, block: String, caption: String }
 
 fn tabs() -> Array<Tab> {
@@ -80,7 +55,6 @@ fn tabs() -> Array<Tab> {
     ]
 }
 
-/// The chapter section that holds this panel's program.
 fn tabDocs(t: Tab) -> String {
     let slug = chapterOfBlock(t.block)
     if slug.byteLength == 0 {
@@ -89,24 +63,18 @@ fn tabDocs(t: Tab) -> String {
     return chapterHref(slug) + "#" + sectionOfBlock(t.block)
 }
 
-/// The radio that selects one tab's pane, matching the install page's picker.
 fn tabId(t: Tab) -> String {
     return "tab-" + t.id
 }
 
-/// One tab's program, coloured by the compiler's lexer at generation time.
 fn tabCode(t: Tab) -> String {
     return joinWith(blockOf(t.block).lines, "\n")
 }
 
-/// Where that program opens in the playground, or empty when it is not a whole
-/// program (`genuse` imports a sibling file). The template writes no link for
-/// empty: `site/export.vyrn` fails the build on an `href=""`.
 fn tabPlay(t: Tab) -> String {
     return blockOf(t.block).play
 }
 
-/// The program's file in the repository.
 fn tabFile(t: Tab) -> String {
     return blockOf(t.block).source
 }
@@ -115,13 +83,9 @@ fn tabPath(t: Tab) -> String {
     return "site/guide/" + t.block + ".vyrn"
 }
 
-/// The standard library teaser: the two modules with the most exports in each
-/// group, in the reference's order, so no one maintains the list.
 fn teaserGroups() -> Array<ApiGroup> {
     let mut out: Array<ApiGroup> = []
     for g in apiGroups() {
-        // The two biggest of the group: seed with the first two, then let any
-        // bigger module displace the smaller of the pair.
         let mut top: Array<ApiModule> = []
         for m in g.modules {
             if top.length < 2 {
@@ -138,13 +102,10 @@ fn teaserGroups() -> Array<ApiGroup> {
     return out
 }
 
-/// The reference page, and how many modules are on it.
 fn allModules() -> String {
     return "All " + stdCount().toString() + " modules"
 }
 
-/// One step's terminal body: the compiler's own colours when the step printed
-/// a file, the shell's three voices when it printed a transcript.
 fn stepHtml(s: DemoStep) -> String {
     let source = demoHl(s.id)
     if source.byteLength > 0 {
@@ -153,7 +114,6 @@ fn stepHtml(s: DemoStep) -> String {
     return shellOutHtml(s.cmd, s.out)
 }
 
-/// The width of one engine's bar, as the percentage the record measured.
 fn barStyle(pct: String) -> String {
     return "width: " + pct + "%"
 }
@@ -167,8 +127,6 @@ fn barStyle(pct: String) -> String {
                 <h1 class="display">Types carry the <em>rules</em>.<br/>Native speed.<br/>No collector.</h1>
                 <p class="lede">Write the rule into the type. The compiler proves it, or refuses the value.</p>
 
-                <!-- The same scriptless OS picker as `/install`: the command
-                     first, the version above it, the radio labels under it. -->
                 <p class="cmdlabel" v-if="hasRelease()">Install Vyrn <a href="/releases.html">{{ releaseTag() }}</a></p>
                 <p class="cmdlabel" v-else>Install Vyrn</p>
                 <fieldset class="picker">
@@ -192,13 +150,8 @@ fn barStyle(pct: String) -> String {
                 </fieldset>
             </div>
 
-            <!-- The playground's own `data-play-*` hooks on a smaller root.
-                 `data-widget="playhero"`, not `"play"`, keeps it lazy: `boot()`
-                 mounts `play` on sight and only arms `playhero`. -->
+            <!-- `playhero`, not `play`, keeps it lazy: `boot()` mounts `play` on sight and only arms `playhero`. -->
             <div class="plate play heroplay" data-widget="playhero">
-                <!-- `data-play-status` shows the run state. `Reset` is
-                     `[data-js]`-gated: with no script the textarea is
-                     read-only. -->
                 <div class="plate-head">
                     <span class="eyebrow" data-play-status>Ready</span>
                     <span class="spacer"></span>
@@ -215,8 +168,6 @@ fn barStyle(pct: String) -> String {
             </div>
         </section>
 
-        <!-- One card per benchmark program, each on its own scale, so a
-             400ms program and a 3s one are both readable. -->
         <section class="band" id="speed">
             <div class="benchhead">
                 <p class="eyebrow"><Icon name="bytesize:activity"/> Measured</p>
@@ -247,10 +198,7 @@ fn barStyle(pct: String) -> String {
             <p class="cap benchcap">{{ benchMachine() }} · medians of {{ benchRuns() }} · every engine at its own defaults · <a href="/benchmarks.html">all eight programs, the table and the radar →</a></p>
         </section>
 
-        <!-- The showcase: a reader picks an idea and its program answers.
-             Scriptless, like the install picker: radios and `:checked ~`. The
-             inputs are written out because only the first carries `checked`,
-             and `v-for` cannot put an attribute on one iteration. -->
+        <!-- The inputs are written out, not `v-for`: see `install.vyx`. -->
         <section class="band" id="ideas">
             <div class="showhead">
                 <p class="eyebrow"><Icon name="bytesize:lightning"/> The ideas, in code</p>
@@ -283,8 +231,6 @@ fn barStyle(pct: String) -> String {
                 </div>
             </fieldset>
         </section>
-        <!-- The reference, teased: module names and export counts from the
-             generator the reference landing reads. -->
         <section class="band split" id="std">
             <div class="say">
                 <p class="eyebrow">Standard library</p>
@@ -306,10 +252,6 @@ fn barStyle(pct: String) -> String {
                 <h2 class="display">One binary,<br/>from new to shipped.</h2>
                 <p class="lede">Write, check, test and build with the same tool. Every step below is a real command with its real output. Press one, or let it run through.</p>
             </div>
-            <!-- Every line of output was recorded from the real binary by
-                 `scripts/site-demo.py`. The steps and their outputs are two
-                 sibling lists with one index; `widgets.js` marks the nth row
-                 and the nth pane, and with no script every pane shows. -->
             <div class="demo" data-widget="demo">
                 <ol class="steps">
                     <li v-for="s in demoSteps()" :key="s.id" :data-step="s.id">
@@ -319,7 +261,6 @@ fn barStyle(pct: String) -> String {
                         <span class="tick" aria-hidden="true"></span>
                     </li>
                 </ol>
-                <!-- A terminal: a title bar with the path and the step number. -->
                 <div class="term">
                     <div class="termbar" aria-hidden="true">
                         <span class="lights"><i></i><i></i><i></i></span>
@@ -333,13 +274,10 @@ fn barStyle(pct: String) -> String {
                     </div>
                 </div>
             </div>
-            <!-- Below the card, not inside it: inside the plate it overlaps the
-                 last step's row. -->
+            <!-- Below the card: inside the plate it overlaps the last step's row. -->
             <p class="cap minutecap">Recorded by running <code>{{ demoVersion() }}</code> on <code>{{ demoRecorded() }}</code>. Hover to pause.</p>
         </section>
 
-        <!-- The latest release. The masthead has no `Releases` link, so the
-             changelog is reached from here. The tag and the date are baked. -->
         <section class="band" id="release">
             <div class="say">
                 <p class="eyebrow">Latest release</p>

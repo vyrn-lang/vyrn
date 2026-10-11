@@ -1,6 +1,4 @@
 <script>
-// GET /benchmarks: every measured claim the site makes, on one page. Every
-// figure is computed in `app/bench.vyrn` from the committed JSON records.
 import { Head } from "std/ui"
 import { pageHeadOf } from "../nav"
 import { contestants, radarBox, radarCx, radarCy, radarRings, radarSpokes, radarLines, ratioWay, axisPanels, srcHref, nativeVsRust, benchMachine, benchRuns, envRows, run1File, run1Href } from "../bench"
@@ -9,8 +7,6 @@ export fn head() -> Head {
     return pageHeadOf("/benchmarks")
 }
 
-/// Which way a cell's ratio points, against each baseline. A template
-/// attribute cannot hold a string literal, so the baseline is named here.
 fn wayC(program: String, engine: String) -> String {
     return ratioWay(program, engine, "c")
 }
@@ -19,14 +15,10 @@ fn wayRust(program: String, engine: String) -> String {
     return ratioWay(program, engine, "rust")
 }
 
-/// The width of one engine's bar, as a share of the track; built here for the
-/// same reason.
 fn barStyle(pct: String) -> String {
     return "width: " + pct + "%"
 }
 
-/// Whether a bar ran past the end of the track, as the attribute value the
-/// stylesheet serrates on.
 fn overFlag(over: Bool) -> String {
     if over {
         return "true"
@@ -34,7 +26,6 @@ fn overFlag(over: Bool) -> String {
     return "false"
 }
 
-/// A program's block on this page; each radar axis links to one.
 fn progHref(key: String) -> String {
     return "#" + key
 }
