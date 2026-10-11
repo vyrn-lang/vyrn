@@ -328,9 +328,8 @@ fn cellOf(program: String, contestant: String) -> Measure {
     }
 }
 
-/// The median of `program` on `contestant`, in microseconds. `chart.vyrn`
-/// reads it for bar widths.
-export fn medianUs(program: String, contestant: String) -> Int64 {
+/// The median of `program` on `contestant`, in microseconds.
+fn medianUs(program: String, contestant: String) -> Int64 {
     return cellOf(program, contestant).us
 }
 
@@ -346,7 +345,7 @@ fn hundredthsText(h: Int64) -> String {
 
 /// Microseconds as milliseconds: whole from 100 ms up, one decimal below, where
 /// a reading is close enough to the process floor for the decimal to matter.
-export fn msOf(us: Int64) -> String {
+fn msOf(us: Int64) -> String {
     if us < 0 {
         return "\u{2014}"
     }

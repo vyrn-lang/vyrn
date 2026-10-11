@@ -784,12 +784,6 @@ fn writeIndex(outDir: String) -> Int64 {
     return emit("\{outDir}/\{indexName()}", json)
 }
 
-/// Whether `needle` occurs in `haystack`; `contains` under the name the import
-/// line test uses.
-fn has(haystack: String, needle: String) -> Bool {
-    return contains(haystack, needle)
-}
-
 // The link gate: every `href` with a fragment, generated or hand-written, must
 // land on an `id` of the page it names.
 
@@ -1400,8 +1394,8 @@ test "every package page carries the specifier" {
         let html = renderedBody(hrefExplore(p.slug))
         let spec = offerOf(p.slug).spec
         assert(startsWith(spec, "github:"))
-        assert(has(html, "data-spec=\"" + escapedQuotes(spec) + "\""))
-        assert(has(html, addCommand(p.slug)))
+        assert(contains(html, "data-spec=\"" + escapedQuotes(spec) + "\""))
+        assert(contains(html, addCommand(p.slug)))
         specs = specs + 1
     }
     assertEq(specs, packages().length)
