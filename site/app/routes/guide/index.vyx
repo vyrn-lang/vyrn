@@ -39,9 +39,8 @@ fn tree() -> Array<TreeGroup> {
     </aside>
 
     <section class="hero">
-        <p class="eyebrow">The guide</p>
-        <h1 class="display">Learn the language in order</h1>
-        <p class="lede">{{ chapterCount("guide") }} chapters, from the first program to a command-line tool, for a developer who knows one other language. They build on each other, so read them in order. The web stack and the toolchain have shelves of their own: <a href="/web.html">Web</a> and <a href="/tooling.html">Tooling</a>.</p>
+        <h1 class="display">Guide</h1>
+        <p class="lede">{{ chapterCount("guide") }} chapters, from the first program to a command-line tool, for a developer who knows one other language. Each chapter builds on the ones before it. The web stack and the toolchain have their own sections: <a href="/web.html">Web</a> and <a href="/tooling.html">Tooling</a>.</p>
     </section>
 
     <section class="band" id="chapters">
@@ -57,8 +56,8 @@ fn tree() -> Array<TreeGroup> {
     </section>
 
     <section class="band" id="run">
-        <p class="eyebrow">Running the code</p>
-        <p>Every code block in this documentation is a file in <code>site/guide/</code>: {{ blockCount() }} programs, each run while the pages were built. The output under a block is what that program printed. The run link carries the whole source to the playground, so what you run is what you read.</p>
+        <h2>Code blocks</h2>
+        <p>Every code block in this documentation is a file in <code>site/guide/</code>: {{ blockCount() }} programs, each run while the pages were built. The output under a block is what that program printed. The run link opens the whole source in the playground.</p>
     </section>
 </main>
 </template>

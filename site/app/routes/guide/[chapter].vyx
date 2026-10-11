@@ -5,7 +5,7 @@
 // not a chapter renders the 404 page.
 import { Head, PageError, ParamQuery, notFound, paramQuery } from "std/ui"
 import { pageHeadWith } from "../../nav"
-import { Chapter, Section, chapterArea, chapterBlurb, chapterCount, chapterOf, chapterKnown, chapterNumber, chapterHref, chapterNavHtml, sectionBody, sectionEyebrow } from "../../guide"
+import { Chapter, Section, chapterArea, chapterBlurb, chapterCount, chapterOf, chapterKnown, chapterNumber, chapterHref, chapterNavHtml, sectionBody } from "../../guide"
 import { mdUrl, askClaudeUrl } from "../../pagemd"
 // The plates of the chapter that compares languages.
 import { specSet } from "../../snippets"
@@ -90,7 +90,6 @@ fn claudeHref(slug: String, title: String) -> String {
     </section>
 
     <section class="band" v-for="s in data.chapter.sections" :key="s.anchor" :id="s.anchor">
-        <p class="eyebrow">{{ sectionEyebrow(data.chapter, s) }}</p>
         <h2>{{ s.heading }}</h2>
         <div v-html="sectionBody(s)"></div>
         <!-- The same task in four languages; the three others are quoted,

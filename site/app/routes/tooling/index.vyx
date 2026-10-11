@@ -46,9 +46,8 @@ fn tree() -> Array<TreeGroup> {
     </aside>
 
     <section class="hero">
-        <p class="eyebrow">Tooling</p>
-        <h1 class="display">One binary, every task</h1>
-        <p class="lede">The CLI, the test and bench runner, projects and dependency pinning — and the editors. Everything <code>vyrn</code> does, in the order you will meet it.</p>
+        <h1 class="display">Tooling</h1>
+        <p class="lede">The CLI, the test and bench runner, projects and dependency pinning, and the editors.</p>
     </section>
 
     <section class="band" id="pages">
