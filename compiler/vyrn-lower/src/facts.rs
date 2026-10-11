@@ -400,9 +400,14 @@ impl State {
     /// Forgets `n` as [`State::kill`] does, keeping what the facts state
     /// without it. A definition through `n` with coefficient one or minus one
     /// restates them; otherwise each pair of facts with opposite signs on `n`
-    /// sums to a fact without it (Fourier-Motzkin).
+    /// sums to a fact without it (Fourier-Motzkin). A fact of a condition's
+    /// true side sums the same way with each fact of the state, keeping a sum
+    /// over a length, so `a && b` keeps the index bound `b`'s truth states
+    /// through a name `b` bound. The false side keeps no sum; no check needed
+    /// one.
     pub fn eliminate(&mut self, n: Name) {
         let mut sums = BTreeSet::new();
+        let mut said: Vec<(Name, Lin)> = Vec::new();
         for t in [Term::Val(n), Term::Len(n)] {
             let alias = self.defs.values().any(|v| matches!(v.coef(t), 1 | -1));
             if alias || self.defs.contains_key(&t) {
@@ -425,10 +430,42 @@ impl State {
                     }
                 }
             }
+            // A fact over a length, or a side that cannot hold.
+            let kept = |l: &Lin| {
+                (l.terms.iter()).any(|(t, _)| matches!(t, Term::Len(_) | Term::Col(..)))
+                    || (l.is_const() && l.c < 0)
+            };
+            let mentioned = |(_, (yes, _)): (&Name, &(Vec<Fact>, Vec<Fact>))| {
+                yes.iter().any(|f| f.lin().mentions(t))
+            };
+            if !self.conds.iter().any(mentioned) {
+                continue;
+            }
+            for (c, (yes, _)) in &self.conds {
+                for f in yes {
+                    let Fact::Ge(l) = f else { continue };
+                    let k = l.coef(t);
+                    if k == 0 {
+                        continue;
+                    }
+                    for p in through.iter().filter(|p| p.coef(t).signum() == -k.signum()) {
+                        let (a, b) = (k.checked_abs(), p.coef(t).checked_abs());
+                        let sum = a.zip(b).and_then(|(a, b)| l.scale(b)?.add(&p.scale(a)?));
+                        if let Some(l) = sum.filter(kept) {
+                            said.push((*c, l));
+                        }
+                    }
+                }
+            }
         }
         self.kill(n);
         for s in sums.iter().filter(|s| !s.mentions_name(n)) {
             self.assume(s);
+        }
+        for (c, l) in said.into_iter().filter(|(_, l)| !l.mentions_name(n)) {
+            if let Some((yes, _)) = self.conds.get_mut(&c) {
+                yes.push(Fact::Ge(l));
+            }
         }
     }
 
@@ -903,6 +940,19 @@ mod tests {
         st.eliminate(Name(1));
         assert!(st.facts.iter().all(|f| !f.mentions_name(Name(1))));
         assert!(st.ge0(&v(0)).is_some());
+    }
+
+    #[test]
+    fn an_elimination_keeps_a_conditions_sum_with_the_state() {
+        let mut st = State::default();
+        // Where c is true, len(a) - w - 1 >= 0; with w >= 0, len(a) - 1 >= 0
+        // once w is gone.
+        let len = Lin::of(Term::Len(Name(0)));
+        st.assume(&v(1));
+        let side = vec![Fact::Ge(len.sub(&v(1)).unwrap().plus(-1).unwrap())];
+        st.conds.insert(Name(2), (side, Vec::new()));
+        st.eliminate(Name(1));
+        assert_eq!(st.conds[&Name(2)].0, [Fact::Ge(len.plus(-1).unwrap())]);
     }
 
     #[test]

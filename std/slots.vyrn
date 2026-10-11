@@ -82,10 +82,10 @@ export fn insert<T>(s: modify Slots<T>, v: consume T) -> Handle<T> {
 /// on, and a free slot: `remove` sets the generation the next `insert` will
 /// issue, so a handle built by hand can match a free slot's generation.
 export fn alive<T>(s: Slots<T>, h: Handle<T>) -> Bool {
-    if h.owner != s.owner || h.slot < 0 || h.slot >= s.gens.length || s.gens[h.slot] != h.gen {
+    if h.owner != s.owner || h.slot < 0 || h.slot >= s.gens.length {
         return false
     }
-    return s.denseAt[h.slot] < s.dense.length - s.free
+    return s.gens[h.slot] == h.gen && s.denseAt[h.slot] < s.dense.length - s.free
 }
 
 /// The element `h` names, copied out, or `None` when `h` is not alive.

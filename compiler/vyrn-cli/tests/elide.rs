@@ -1169,6 +1169,49 @@ fn w() -> Int64 {
     assert_eq!(verdicts(src, "w"), ["check array-index"]);
 }
 
+/// A returned `a && b` states what both operands' truth states, through a
+/// name `b` binds: the byte read is gone at the join, and its bounds carry
+/// the fact. Where `b` adds the byte instead, the true return proves only
+/// `a`'s half, and the check stays and traps.
+#[test]
+fn an_and_result_keeps_its_second_operands_facts() {
+    let src = |test: &str| {
+        format!(
+            "fn fits(xs: Array<Int64>, i: Int64, pad: Array<UInt8>) -> Bool {{
+    if pad.length < 1 {{
+        return false
+    }}
+    return i >= 0 && {test}
+}}
+export fn w(xs: Array<Int64>, i: Int64, pad: Array<UInt8>) -> Int64 {{
+    if fits(xs, i, pad) {{
+        return xs[i]
+    }}
+    return 0
+}}
+"
+        )
+    };
+    let calls = |i: i64, pad: i64| {
+        format!(
+            "    let mut pad: Array<UInt8> = []
+    pad.push({pad})
+    print(w(xs, {i}, pad).toString())"
+        )
+    };
+    let proof = src("i < xs.length - Int64(pad[0])");
+    assert_eq!(verdicts(&proof, "w"), ["proved array-index"]);
+    assert_eq!(oracle(&proof, &calls(1, 1), "w").0, "");
+    let witness = src("i < xs.length + Int64(pad[0])");
+    assert_eq!(verdicts(&witness, "w"), ["check array-index"]);
+    let (err, _) = oracle(&witness, &calls(4, 5), "w");
+    assert!(err.contains("array index 4 out of bounds"), "{err}");
+    assert!(
+        !err.contains(vyrn_frontend::trap::PROVED_CHECK_FAILED),
+        "{err}"
+    );
+}
+
 #[test]
 fn a_join_of_constants_keeps_the_values_between_out() {
     let src = "fn w(x: Int64) -> Int64 {
