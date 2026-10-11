@@ -1,35 +1,16 @@
-/// The guide's programs, read off `site/guide/` while the site compiles.
-///
-///     import { guideCode } from "./guidecode"
-///     import { guideBlocks, guideSrc, guideLines } from guideCode("../guide")
-///
-/// Every code block in the book is a file there. This generator colours each
-/// one with the compiler's lexer and emits, per block: `guideSrc`, the file plus
-/// the `main` that prints `demo()`, which is also what the playground link
-/// carries; `guideLines`, the same text coloured; `guideImports`, the `std/`
-/// names it imports; and `guidePlayable`, whether it is a whole program. A block
-/// that imports a sibling file or a generator needs a second source, so it gets
-/// no run link. `guide.vyrn` runs the programs.
 import { substring } from "std/strings"
 import { startsWith } from "std/strpred"
 import { highlightRows } from "./hl"
 import { quoted, quotedList, branch, lookup, vyrnStems } from "./gensrc"
 
-/// One block: its id (the file stem), the program as shown, the names it
-/// imports, and whether it stands alone.
 type Block = { id: String, src: String, names: Array<String>, playable: Bool }
 
-/// What one file's import lines say: the `std/` modules it takes, the names it
-/// takes from them, and whether every import resolves without a second file.
-/// `deps.vyrn` reads it too.
 export type Imports = { uses: Array<String>, names: Array<String>, standalone: Bool }
 
-/// The `main` every block is shown and run with: `demo()` returns the output.
 fn mainTail() -> String {
     return "\nfn main() -> Int64 {\n    print(demo())\n    return 0\n}\n"
 }
 
-/// Whether the module exports `demo`, the one name the site calls.
 gen fn hasDemo(toks: Array<Token>) -> Bool {
     let mut i = 0
     while i + 2 < toks.length {
@@ -41,10 +22,6 @@ gen fn hasDemo(toks: Array<Token>) -> Bool {
     return false
 }
 
-/// The index of the `from` that belongs to the import starting at `i`, or -1.
-///
-/// The scan stops at the next column-1 token other than `import`, so an import
-/// with no `from` cannot run on to the end of the file.
 gen fn fromAfter(toks: Array<Token>, i: Int64) -> Int64 {
     let mut j = i + 1
     while j < toks.length {
@@ -59,9 +36,6 @@ gen fn fromAfter(toks: Array<Token>, i: Int64) -> Int64 {
     return 0 - 1
 }
 
-/// The names an import list takes, between the `{` at `open` and its `}`.
-///
-/// `a, b as c` yields `a` and `b`: the exported name, not the local alias.
 gen fn namesBetween(toks: Array<Token>, open: Int64) -> Array<String> {
     let mut out: Array<String> = []
     let mut i = open + 1
@@ -80,9 +54,6 @@ gen fn namesBetween(toks: Array<Token>, open: Int64) -> Array<String> {
     return out
 }
 
-/// What one module source imports: every `std/` module by name, every name it
-/// takes as `<module>:<name>`, and whether any import needs a second file: a
-/// relative path or a generator call.
 export gen fn importsOf(toks: Array<Token>) -> Imports {
     let mut uses: Array<String> = []
     let mut names: Array<String> = []
@@ -97,8 +68,6 @@ export gen fn importsOf(toks: Array<Token>) -> Imports {
                     if startsWith(target.text, "std/") {
                         let module = substring(target.text, 4, target.text.byteLength)
                         uses.push(module.copy())
-                        // `import * as ns` has no list. The scan starts at this
-                        // import's `{`, so the first `}` closes its own list.
                         if toks[i + 1].text == "{" {
                             for name in namesBetween(toks, i + 1) {
                                 names.push(module + ":" + name)
@@ -108,7 +77,6 @@ export gen fn importsOf(toks: Array<Token>) -> Imports {
                         standalone = false
                     }
                 } else {
-                    // `from someGenerator(..)`.
                     standalone = false
                 }
             }
@@ -118,7 +86,6 @@ export gen fn importsOf(toks: Array<Token>) -> Imports {
     return Imports { uses: uses, names: names, standalone: standalone }
 }
 
-/// Reads `dir`, and emits every block as one module.
 export gen fn guideCode(dir: String) -> String {
     let mut blocks: Array<Block> = []
     for id in vyrnStems(dir) {
@@ -128,8 +95,6 @@ export gen fn guideCode(dir: String) -> String {
         }
         let toks = lex(file)
         let found = importsOf(toks)
-        // A block with no `demo`, the generator chapter's `gen fn`, is shown
-        // as written.
         let shown = if hasDemo(toks) { file + mainTail() } else { file.copy() }
         blocks.push(Block {
             id: id.copy(),

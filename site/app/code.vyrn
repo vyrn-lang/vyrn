@@ -1,33 +1,19 @@
-/// Colour for code that is not Vyrn, and markup for text that is not code.
-///
-/// Vyrn is coloured by the compiler's lexer in `hl.vyrn`. This module colours
-/// the Rust, TypeScript and Go comparison snippets with a word list, colours
-/// shell commands by token class, and marks tool output line by line so the
-/// stylesheet can dim it. `escapeHtml` is the site's one HTML escaper.
-///
-/// ponytail: word lists, no parser. If a snippet highlights wrongly, shorten
-/// the snippet.
 import { substring, split, joinWith, fromBytesOr } from "std/strings"
 import { contains } from "std/strpred"
 import { includes } from "std/arrays"
 
-/// The Rust words the comparison snippets use.
 export fn rustWords() -> Array<String> {
     return ["fn", "let", "mut", "if", "else", "while", "for", "in", "impl", "self", "return", "true", "false", "struct", "enum", "match", "pub", "use", "mod", "trait", "where", "const", "static", "unsafe", "move", "ref", "dyn", "async", "await", "crate"]
 }
 
-/// The TypeScript words the comparison snippets use.
 export fn tsWords() -> Array<String> {
     return ["function", "let", "const", "var", "if", "else", "while", "for", "of", "in", "return", "true", "false", "class", "interface", "type", "enum", "import", "export", "from", "as", "new", "async", "await", "throw", "try", "catch", "extends", "implements", "readonly"]
 }
 
-/// The Go words the comparison snippets use.
 export fn goWords() -> Array<String> {
     return ["func", "var", "const", "if", "else", "for", "range", "return", "true", "false", "type", "struct", "interface", "package", "import", "go", "defer", "chan", "select", "switch", "case", "map", "nil", "make", "new"]
 }
 
-/// One HTML-safe byte. Callers pass ASCII bytes only, so the fallback for a
-/// byte that is not UTF-8 on its own is unreachable.
 fn escapeByte(b: UInt8) -> String {
     if b == '&' {
         return "&amp;"
@@ -47,9 +33,6 @@ fn escapeByte(b: UInt8) -> String {
     return fromBytesOr([b], "")
 }
 
-/// `s` with `&`, `<`, `>`, `"` and `'` escaped, so the result is safe in
-/// element content and in a quoted attribute. Multi-byte characters pass
-/// through whole: no byte of one equals an ASCII byte.
 export fn escapeHtml(s: String) -> String {
     let raw = bytes(s)
     let mut out = ""
@@ -78,16 +61,10 @@ fn isWordByte(b: UInt8) -> Bool {
     return isLetter(b) || isDigit(b)
 }
 
-/// `text` inside a span of class `cls`, escaped.
 fn span(cls: String, text: String) -> String {
     return "<span class=\"" + cls + "\">" + escapeHtml(text) + "</span>"
 }
 
-/// Highlight `src` against `words`, returning the inner HTML of a `<pre>`.
-///
-/// A comment runs to the newline, a string to the closing quote (a backslash
-/// covers the next byte), a word run is one span or none, and anything else is
-/// escaped.
 export fn highlightWith(src: String, words: Array<String>) -> String {
     let raw = bytes(src)
     let mut out = ""
@@ -140,13 +117,6 @@ export fn highlightWith(src: String, words: Array<String>) -> String {
     return out
 }
 
-/// A shell block, coloured by token class: the program is the first word of a
-/// line, a flag opens with `-`, a comment runs from `#`, and an argument is
-/// plain text.
-///
-/// ponytail: not a shell parser. A `#` inside quotes reads as a comment, and
-/// only `&&`, `||`, `|` and `;` start another program. No command on the site
-/// needs more.
 export fn shellHtml(src: String) -> String {
     let mut out: Array<String> = []
     for line in split(src, "\n") {
@@ -155,7 +125,6 @@ export fn shellHtml(src: String) -> String {
     return joinWith(out, "\n")
 }
 
-/// One command line. `head` is true until the first word is spent.
 fn shellLine(line: String) -> String {
     let raw = bytes(line)
     let mut out = ""
@@ -190,8 +159,6 @@ fn shellLine(line: String) -> String {
     return out
 }
 
-/// Tool output, one marked span per line, so the stylesheet can prefix and dim
-/// it. The text is escaped and otherwise untouched.
 export fn terminalHtml(text: String) -> String {
     let mut out: Array<String> = []
     for line in split(text, "\n") {
@@ -200,8 +167,6 @@ export fn terminalHtml(text: String) -> String {
     return joinWith(out, "\n")
 }
 
-/// One line of prose, escaped, with its backtick spans as `<code>`. Chapter
-/// ledes use this one markdown construct and no other.
 export fn inlineCode(text: String) -> String {
     let mut out = ""
     let mut plain = 0
@@ -220,7 +185,6 @@ export fn inlineCode(text: String) -> String {
         }
         i = i + 1
     }
-    // An unpaired backtick stays a backtick.
     return out + escapeHtml(substring(text, plain, text.byteLength))
 }
 
@@ -229,7 +193,6 @@ test "a backtick span becomes code and everything else is escaped" {
     assertEq(inlineCode("a `match` b"), "a <code>match</code> b")
     assertEq(inlineCode("`Option<T>`"), "<code>Option&lt;T&gt;</code>")
     assertEq(inlineCode("a < b"), "a &lt; b")
-    // Two spans on one line, and a lone backtick that closes nothing.
     assertEq(inlineCode("`a` and `b`"), "<code>a</code> and <code>b</code>")
     assertEq(inlineCode("a ` b"), "a ` b")
 }
@@ -281,9 +244,6 @@ test "tool output is marked line by line and never coloured as code" {
     assertEq(terminalHtml("<x>"), "<span class=\"ol\">&lt;x&gt;</span>")
 }
 
-/// One recorded step as a terminal body: a prompt and the command, then the
-/// output. A transcript is not source, so it gets three classes and no lexer;
-/// a line naming a path is dimmed.
 export fn shellOutHtml(cmd: String, out: String) -> String {
     let mut lines: Array<String> = []
     for line in split(out, "\n") {
@@ -293,7 +253,6 @@ export fn shellOutHtml(cmd: String, out: String) -> String {
     return prompt + joinWith(lines, "\n")
 }
 
-/// One line of a recorded transcript.
 fn demoLineHtml(line: String) -> String {
     if line.byteLength == 0 {
         return ""

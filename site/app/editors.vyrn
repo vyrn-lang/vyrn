@@ -1,34 +1,17 @@
-/// The editors page's data and prose: one row per thing the editor support
-/// does, the file and symbol that implement it, and the install steps.
-///
-/// `site/export.vyrn` reads each row's `data-impl` off the rendered page and
-/// opens the path, so a row naming a file that does not exist fails the build.
-/// The rows follow the code, not the extension's README. A `.von` file is
-/// coloured and never analyzed (the client's selector names `vyrn` and `vyx`),
-/// so no row claims more.
 import { blob, installTargets } from "./repo"
 import { startsWith, contains } from "std/strpred"
 
-/// One thing the editor does: what it is called, what a reader gets from it,
-/// the repository file that implements it, and the declaration inside that file.
 export type Feature = { name: String, what: String, path: String, symbol: String }
 
-/// One step of getting the extension: the heading, the command, and what the
-/// command leaves you with.
 export type Step = { title: String, command: String, what: String }
 
-/// Where the extension lives.
 fn extensionDir() -> String {
     return "editor/vscode"
 }
 
-/// The server's crate directory.
 fn serverDir() -> String {
     return "compiler/vyrn-lsp"
 }
-
-// The page's prose, one function per block, as markup. The template and the
-// markdown twin in `pagemd.vyrn` render the same strings.
 
 export fn pageTitle() -> String {
     return "One extension, one server"
@@ -86,8 +69,6 @@ export fn otherClose() -> String {
     return "The rest is data any editor can read: the grammar is TextMate JSON, and the snippets are one flat file."
 }
 
-/// Every feature: the ones that answer while you type, then the ones you ask
-/// for, then the ones the extension draws itself.
 export fn features() -> Array<Feature> {
     return [
         Feature {
@@ -201,9 +182,6 @@ export fn features() -> Array<Feature> {
     ]
 }
 
-/// The install steps, in order. The server ships in the per-platform archive
-/// beside `vyrn`, and one `.vsix` serves every platform. The install commands
-/// come from `installTargets()` in `repo.vyrn`.
 export fn steps() -> Array<Step> {
     return [
         Step {
@@ -224,7 +202,6 @@ export fn steps() -> Array<Step> {
     ]
 }
 
-/// The file a feature row points at, on GitHub.
 export fn implHref(f: Feature) -> String {
     return blob(f.path)
 }
@@ -236,7 +213,6 @@ test "every feature names a file and the declaration inside it" {
         assert(f.name.byteLength > 0)
         assert(f.what.byteLength > 0)
         assert(f.symbol.byteLength > 0)
-        // A path relative to the repository root, which the export opens.
         assert(f.path.byteLength > 0)
         assert(implHref(f) == "https://github.com/vyrn-lang/vyrn/blob/main/" + f.path)
     }

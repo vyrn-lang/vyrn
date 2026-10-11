@@ -1,16 +1,4 @@
-/// The Benchmarks Game data behind `/benchmarks` and the index's benchmark
-/// cards, read at export time from the record `bench/harness/run.py` writes.
-/// No figure on either page is typed in.
-///
-/// The record is cut with `indexOf` and `substring`, not parsed: `run.py`
-/// writes `json.dump(indent=2)`, so every key sits at a known indentation.
-/// `std/jsonread` took 72 s on one record under the interpreter; this reader
-/// takes 0.3 s. The test "the record still has the shape this reader cuts"
-/// fails when `run.py` changes the shape.
-///
-/// The radar's radial axis is log2 around the baseline: the centre is 1/8x,
-/// each ring out is a doubling, and the rim is 16x. A value past the rim is
-/// drawn at the rim with an off-scale mark on its spoke.
+/// Cuts the record with `indexOf` instead of parsing it: `std/jsonread` is too slow under the interpreter.
 import { indexOf, substring, trim, split, joinWith, padStart } from "std/strings"
 import { contains } from "std/strpred"
 import { sortBy } from "std/arrays"
@@ -18,11 +6,7 @@ import { parseFloat64 } from "std/num"
 import { sin, cos } from "std/math"
 import { ghBlob } from "./github"
 
-/// One measured cell: one program on one engine.
-///
-/// Times are integer microseconds. The record holds float seconds, and integer
-/// microseconds carry every figure the pages print with no float arithmetic
-/// between the record and the reader. A field the reader could not cut is -1.
+/// Times in integer microseconds; -1 marks a field the reader could not cut.
 export type Measure = {
     program: String,
     contestant: String,
@@ -33,44 +17,30 @@ export type Measure = {
     gzBytes: Int64,
 }
 
-/// One program: the record's key, the game's name for it, its N, the harness's
-/// note, and the game's own page for it.
 export type Prog = { key: String, name: String, n: String, note: String, game: String }
 
-/// One contestant: the key in the record, the name a reader sees, and the class
-/// the stylesheet colours it with.
 export type Series = { key: String, name: String, tone: String }
 
-/// One ring of the radar: its polygon, its label and where the label sits.
 export type Ring = { id: String, points: String, label: String, y: String, tone: String }
 
-/// One axis: the spoke, where its name goes, and the hit wedge behind it.
 export type Spoke = { key: String, name: String, x: String, y: String, lx: String, ly: String, anchor: String, wedge: String }
 
-/// One contestant's polygon against C, with its off-scale marks.
 export type Line = { key: String, name: String, tone: String, points: String, marks: Array<Mark> }
 
-/// A point past the rim: drawn at the rim, and named here.
 export type Mark = { id: String, d: String, title: String }
 
-/// One row of a program's table. `cpu`, `mem`, `gz` and `make` are the
-/// Benchmarks Game's own columns, in its order.
 export type Reading = { key: String, name: String, tone: String, cpu: String, mem: String, gz: String, make: String, ms: String, vsC: String, vsRust: String, pct: String, over: Bool }
 
-/// Everything known about one program.
 export type Panel = { key: String, name: String, n: String, cause: String, label: String, verdict: String, game: String, cells: Array<Reading> }
 
-/// The published record.
 export fn run1File() -> String {
     return "bench/results/2026-09-01.json"
 }
 
-/// The published record on GitHub, for the page's provenance line.
 export fn run1Href() -> String {
     return ghBlob(run1File())
 }
 
-/// The text after the first `needle`, or nothing.
 fn after(src: String, needle: String) -> String {
     return match indexOf(src, needle) {
         Some(at) => substring(src, at + needle.byteLength, src.byteLength),
@@ -78,7 +48,6 @@ fn after(src: String, needle: String) -> String {
     }
 }
 
-/// The text before the first `needle`, or all of it.
 fn upTo(src: String, needle: String) -> String {
     return match indexOf(src, needle) {
         Some(at) => substring(src, 0, at),
@@ -86,15 +55,10 @@ fn upTo(src: String, needle: String) -> String {
     }
 }
 
-/// The object written for `key` at `indent` spaces of depth, cut at the next key
-/// of the same depth. Under `json.dump(indent=2)` only a key at depth d can
-/// start a line at that indentation.
 fn objectAt(src: String, indent: String, key: String) -> String {
     return upTo(after(src, "\n" + indent + "\"" + key + "\": {"), "\n" + indent + "\"")
 }
 
-/// The scalar written for `key` at `indent` spaces of depth: the text between the
-/// colon and the end of its line, without a trailing comma.
 fn scalarAt(src: String, indent: String, key: String) -> String {
     let raw = upTo(after(src, "\n" + indent + "\"" + key + "\": "), "\n")
     let cut = if raw.byteLength > 0 && substring(raw, raw.byteLength - 1, raw.byteLength) == "," {
@@ -105,7 +69,6 @@ fn scalarAt(src: String, indent: String, key: String) -> String {
     return trim(cut)
 }
 
-/// A string scalar without its quotes, its escapes undone.
 fn textAt(src: String, indent: String, key: String) -> String {
     let raw = scalarAt(src, indent, key)
     if raw.byteLength >= 2 && substring(raw, 0, 1) == "\"" {
@@ -114,12 +77,6 @@ fn textAt(src: String, indent: String, key: String) -> String {
     return unescaped(raw)
 }
 
-/// A JSON string body as the characters it stands for.
-///
-/// `json.dump` writes every non-ASCII character as `\uXXXX` and doubles every
-/// backslash. This decodes `\u` escapes in the BMP and the short escapes, which
-/// cover everything `run.py` writes; a surrogate pair is not decoded, and the
-/// test "no escape survives into the page" catches one.
 fn unescaped(text: String) -> String {
     if !contains(text, "\\") {
         return text.copy()
@@ -146,8 +103,6 @@ fn unescaped(text: String) -> String {
         } else if c == 'r' {
             out = out + "\r"
         } else {
-            // `\\`, `\"`, `\/` and any unknown escape stand for the character
-            // after the backslash.
             out = out + substring(text, i + 1, i + 2)
         }
         i = i + 2
@@ -155,7 +110,6 @@ fn unescaped(text: String) -> String {
     return out
 }
 
-/// The four hex digits at `at`, as a number.
 fn hexAt(text: String, at: Int64) -> Int64 {
     let raw = bytes(text)
     let mut n = 0
@@ -175,8 +129,6 @@ fn hexAt(text: String, at: Int64) -> Int64 {
     return n
 }
 
-/// One code point below U+10000, as UTF-8. The boundaries are numbers because
-/// a byte literal is a `UInt8` and the code point is an `Int64`.
 fn charOf(cp: Int64) -> String {
     let mut raw: Array<UInt8> = []
     if cp < 128 {
@@ -191,14 +143,10 @@ fn charOf(cp: Int64) -> String {
     }
     return match stringFromBytes(raw) {
         Ok(text) => text,
-        // Only a lone surrogate reaches here; it decodes to nothing rather than
-        // to invalid UTF-8.
         Err(_) => "",
     }
 }
 
-/// Seconds, as the record writes them, in whole microseconds. A reading the
-/// reader could not cut is -1, because a zero would plot as a real point.
 fn microsOf(text: String) -> Int64 {
     return match parseFloat64(text) {
         Some(s) => Int64(s * 1000000.0 + 0.5),
@@ -206,8 +154,6 @@ fn microsOf(text: String) -> Int64 {
     }
 }
 
-/// Each record file's text, read once. The templates call the accessors below
-/// inside every loop they draw.
 let mut records: Map<String, String> = [:]
 
 fn recordText(file: String) -> String {
@@ -222,11 +168,7 @@ fn recordText(file: String) -> String {
     return body
 }
 
-// The ten programs and the five contestants are written out here, not
-// discovered in the record, so a program missing from a re-run fails "the
-// record still has the shape this reader cuts" instead of shrinking the chart.
-
-/// The ten programs, in the record's order, filled on first use.
+// Written out, not discovered, so a program missing from a re-run fails a test instead of shrinking the chart.
 let mut progs: Array<Prog> = []
 
 export fn programs() -> Array<Prog> {
@@ -250,9 +192,6 @@ export fn programs() -> Array<Prog> {
     return out
 }
 
-/// Each program's record key, the game's name for it, and the slug of its page
-/// on the game's site. The three spellings do not derive from one another:
-/// `fannkuch`, `fannkuch-redux`, `fannkuchredux`.
 fn progNames() -> Array<Array<String>> {
     return [
         ["nbody", "nbody", "nbody"],
@@ -268,12 +207,10 @@ fn progNames() -> Array<Array<String>> {
     ]
 }
 
-/// The game's own page for one program.
 fn gameHref(slug: String) -> String {
     return "https://benchmarksgame-team.pages.debian.net/benchmarksgame/performance/" + slug + ".html"
 }
 
-/// The five contestants. `c` is the baseline.
 export fn contestants() -> Array<Series> {
     return [
         Series { key: "c", name: "C", tone: "sr-c" },
@@ -284,7 +221,6 @@ export fn contestants() -> Array<Series> {
     ]
 }
 
-/// The fifty cells, ten programs by five contestants, filled on first use.
 let mut cells: Array<Measure> = []
 
 fn loadCells() {
@@ -309,7 +245,6 @@ fn loadCells() {
     }
 }
 
-/// One cell, or a cell of -1 when the record does not hold it.
 fn cellOf(program: String, contestant: String) -> Measure {
     loadCells()
     for c in cells {
@@ -328,23 +263,18 @@ fn cellOf(program: String, contestant: String) -> Measure {
     }
 }
 
-/// The median of `program` on `contestant`, in microseconds.
 fn medianUs(program: String, contestant: String) -> Int64 {
     return cellOf(program, contestant).us
 }
 
-/// A count of tenths as text with one decimal: 123 is `12.3`.
 fn tenthsText(t: Int64) -> String {
     return (t / 10).toString() + "." + (t % 10).toString()
 }
 
-/// A count of hundredths as text with two decimals: 1452 is `14.52`.
 fn hundredthsText(h: Int64) -> String {
     return (h / 100).toString() + "." + padStart((h % 100).toString(), 2, "0")
 }
 
-/// Microseconds as milliseconds: whole from 100 ms up, one decimal below, where
-/// a reading is close enough to the process floor for the decimal to matter.
 fn msOf(us: Int64) -> String {
     if us < 0 {
         return "\u{2014}"
@@ -355,7 +285,6 @@ fn msOf(us: Int64) -> String {
     return tenthsText((us + 50) / 100) + " ms"
 }
 
-/// A whole number the record wrote, or -1 where it wrote nothing.
 fn wholeOf(text: String) -> Int64 {
     return match parseFloat64(text) {
         Some(v) => Int64(v),
@@ -363,9 +292,6 @@ fn wholeOf(text: String) -> Int64 {
     }
 }
 
-/// Seconds to two decimals, as the game's own tables print them. A reading that
-/// would round to `0.00` prints `<0.01`, because the column cannot resolve it
-/// and the program did take time.
 fn secsOf(us: Int64) -> String {
     if us < 0 {
         return "\u{2014}"
@@ -377,7 +303,6 @@ fn secsOf(us: Int64) -> String {
     return hundredthsText(cs)
 }
 
-/// Build time. Zero is node, which has no build step, so it prints a dash.
 fn makeOf(us: Int64) -> String {
     if us == 0 {
         return "\u{2014}"
@@ -385,7 +310,6 @@ fn makeOf(us: Int64) -> String {
     return secsOf(us)
 }
 
-/// Peak resident memory: kilobytes below 10 MB, megabytes to one decimal above.
 fn memOf(bytes: Int64) -> String {
     if bytes <= 0 {
         return "\u{2014}"
@@ -398,7 +322,6 @@ fn memOf(bytes: Int64) -> String {
     return grouped((tenths / 10).toString()) + "." + (tenths % 10).toString() + " MB"
 }
 
-/// A byte count, grouped: the game's `gz` column, the gzipped source size.
 fn bytesOf(n: Int64) -> String {
     if n <= 0 {
         return "\u{2014}"
@@ -406,7 +329,6 @@ fn bytesOf(n: Int64) -> String {
     return grouped(n.toString())
 }
 
-/// `a / b` in hundredths, rounded.
 fn hundredths(a: Int64, b: Int64) -> Int64 {
     if b <= 0 {
         return 0
@@ -414,7 +336,6 @@ fn hundredths(a: Int64, b: Int64) -> Int64 {
     return (a * 100 + b / 2) / b
 }
 
-/// A ratio in hundredths as text: two decimals below 100x, whole from 100x up.
 fn ratioText(h: Int64) -> String {
     if h <= 0 {
         return "\u{2014}"
@@ -425,7 +346,6 @@ fn ratioText(h: Int64) -> String {
     return hundredthsText(h) + "x"
 }
 
-/// An integer's digits with a comma every three.
 fn grouped(digits: String) -> String {
     let raw = trim(digits)
     let mut out = ""
@@ -441,9 +361,6 @@ fn grouped(digits: String) -> String {
     return out
 }
 
-/// The radar's centre. The box is 700 wide so the horizontal axis names,
-/// `k-nucleotide` and `fannkuch-redux`, stay on the sheet; the test "no axis
-/// name runs off the sheet" holds that.
 fn cx() -> Int64 {
     return 350
 }
@@ -452,17 +369,14 @@ fn cy() -> Int64 {
     return 272
 }
 
-/// The rim's radius.
 fn radius() -> Int64 {
     return 200
 }
 
-/// How many doublings lie between the centre and the rim.
 fn decades() -> Int64 {
     return 7
 }
 
-/// How many of those doublings lie below the baseline.
 fn belowBase() -> Int64 {
     return 3
 }
@@ -479,9 +393,6 @@ export fn radarCy() -> String {
     return cy().toString()
 }
 
-/// The base-2 logarithm of `x` for x > 0; `std/math` has none. `x` is folded
-/// into [1/sqrt(2), sqrt(2)), where the atanh series argument is at most 0.172
-/// and twenty terms exceed any precision printed here.
 fn log2(x: Float64) -> Float64 {
     if x <= 0.0 {
         return 0.0 - 1000.0
@@ -506,12 +417,9 @@ fn log2(x: Float64) -> Float64 {
         sum = sum + term / Float64(2 * k + 1)
         k = k + 1
     }
-    // ln(m) = 2 * sum, and log2(m) = ln(m) / ln(2).
     return Float64(e) + 2.0 * sum / 0.6931471805599453
 }
 
-/// How far out a ratio in hundredths plots. Past the rim it is the rim, and
-/// `marksFor` marks it.
 fn radiusOf(h: Int64) -> Int64 {
     if h <= 0 {
         return 0
@@ -527,12 +435,10 @@ fn radiusOf(h: Int64) -> Int64 {
     return Int64(r + 0.5)
 }
 
-/// Whether a ratio in hundredths is past the rim.
 fn offScale(h: Int64) -> Bool {
     return h > 100 * pow2(decades() - belowBase())
 }
 
-/// Two to the power of `n`, for `n >= 0`.
 fn pow2(n: Int64) -> Int64 {
     let mut v = 1
     let mut i = 0
@@ -543,12 +449,10 @@ fn pow2(n: Int64) -> Int64 {
     return v
 }
 
-/// The angle of axis `i`, in radians, clockwise from straight up.
 fn angleOf(i: Int64) -> Float64 {
     return Float64(i) * 6.283185307179586 / Float64(progNames().length)
 }
 
-/// The point `r` out along axis `i`, as `x,y`.
 fn pointAt(i: Int64, r: Int64) -> String {
     let a = angleOf(i)
     let x = Float64(cx()) + Float64(r) * sin(a)
@@ -556,7 +460,6 @@ fn pointAt(i: Int64, r: Int64) -> String {
     return Int64(x + 0.5).toString() + "," + Int64(y + 0.5).toString()
 }
 
-/// A closed ring at radius `r`, as a polygon's points.
 fn ringPoints(r: Int64) -> String {
     let mut out: Array<String> = []
     let mut i = 0
@@ -567,7 +470,6 @@ fn ringPoints(r: Int64) -> String {
     return joinWith(out, " ")
 }
 
-/// The rings, one per doubling. The baseline ring has the tone `ring base`.
 export fn radarRings() -> Array<Ring> {
     let mut out: Array<Ring> = []
     let mut step = 1
@@ -586,13 +488,10 @@ export fn radarRings() -> Array<Ring> {
     return out
 }
 
-/// How far out ring `step` sits, rounded as `radiusOf` rounds, so a point worth
-/// a ring's value sits on that ring.
 fn ringRadius(step: Int64) -> Int64 {
     return (radius() * step + decades() / 2) / decades()
 }
 
-/// What a ring is worth, as a multiple of the baseline.
 fn ringLabel(power: Int64) -> String {
     if power < 0 {
         return "1/" + pow2(0 - power).toString() + "x"
@@ -600,8 +499,6 @@ fn ringLabel(power: Int64) -> String {
     return pow2(power).toString() + "x"
 }
 
-/// The ten spokes: the line, the name at its end, and the wedge a pointer
-/// hovers to select the axis.
 export fn radarSpokes() -> Array<Spoke> {
     let progs = programs()
     let mut out: Array<Spoke> = []
@@ -624,8 +521,6 @@ export fn radarSpokes() -> Array<Spoke> {
     return out
 }
 
-/// Which side of its spoke's end a name sits on: centred straight up and
-/// straight down, otherwise on the side the spoke points to.
 fn anchorOf(i: Int64) -> String {
     let half = progNames().length / 2
     if i == 0 || i == half {
@@ -637,8 +532,6 @@ fn anchorOf(i: Int64) -> String {
     return "end"
 }
 
-/// A name's baseline, nudged so the top name clears the rim and the bottom one
-/// hangs below it.
 fn labelBaseline(i: Int64, y: String) -> String {
     let base = match parseFloat64(y) {
         Some(v) => Int64(v),
@@ -654,8 +547,6 @@ fn labelBaseline(i: Int64, y: String) -> String {
     return (base + 4).toString()
 }
 
-/// The hit wedge behind axis `i`: a quadrilateral from the centre out to the
-/// midpoints with the neighbouring axes, so a pointer near a spoke selects it.
 fn wedgeOf(i: Int64) -> String {
     let n = progNames().length
     let leftIdx = (i + n - 1) % n
@@ -663,7 +554,6 @@ fn wedgeOf(i: Int64) -> String {
     return midPoint(i, leftIdx) + " " + cx().toString() + "," + cy().toString() + " " + midPoint(i, rightIdx) + " " + pointAt(i, radius() + 20)
 }
 
-/// Halfway between two axes, just outside the rim.
 fn midPoint(a: Int64, b: Int64) -> String {
     let one = split(pointAt(a, radius() + 20), ",")
     let two = split(pointAt(b, radius() + 20), ",")
@@ -679,7 +569,6 @@ fn numOf(s: String) -> Int64 {
     }
 }
 
-/// One polygon per contestant, against C, with its off-scale marks.
 export fn radarLines() -> Array<Line> {
     let mut out: Array<Line> = []
     for s in contestants() {
@@ -694,7 +583,6 @@ export fn radarLines() -> Array<Line> {
     return out
 }
 
-/// One contestant's ten vertices against `base`.
 fn polygonFor(contestant: String, base: String) -> String {
     let progs = programs()
     let mut out: Array<String> = []
@@ -706,8 +594,6 @@ fn polygonFor(contestant: String, base: String) -> String {
     return joinWith(out, " ")
 }
 
-/// Whether `contestant` is `ahead` of, `level` with or `behind` `base` on
-/// `program`. Level is the +/-2% band, inside the record's noise.
 export fn ratioWay(program: String, contestant: String, base: String) -> String {
     let h = ratioOf(program, contestant, base)
     if h <= 0 {
@@ -722,13 +608,10 @@ export fn ratioWay(program: String, contestant: String, base: String) -> String 
     return "level"
 }
 
-/// The ratio of `contestant` to `base` on `program`, in hundredths.
 fn ratioOf(program: String, contestant: String, base: String) -> Int64 {
     return hundredths(medianUs(program, contestant), medianUs(program, base))
 }
 
-/// Every point of one contestant past the rim, as a mark on its own spoke that
-/// names the real figure.
 fn marksFor(contestant: String, base: String) -> Array<Mark> {
     let progs = programs()
     let baseName = if base == "c" { "C" } else { "Rust" }
@@ -748,14 +631,12 @@ fn marksFor(contestant: String, base: String) -> Array<Mark> {
     return out
 }
 
-/// The off-scale mark on axis `i`: a stroke continuing outward past the rim.
 fn chevronAt(i: Int64) -> String {
     let a = split(pointAt(i, radius() + 6), ",")
     let b = split(pointAt(i, radius() + 20), ",")
     return "M " + a[0] + " " + a[1] + " L " + b[0] + " " + b[1]
 }
 
-/// One program's five readings.
 fn readingsFor(program: String) -> Array<Reading> {
     let base = medianUs(program, "c")
     let mut out: Array<Reading> = []
@@ -779,14 +660,10 @@ fn readingsFor(program: String) -> Array<Reading> {
     return out
 }
 
-/// How far a table's bar track runs, as a multiple of C. C lands a quarter of
-/// the way along on every row, so the column reads down as well as across.
 fn trackTimes() -> Int64 {
     return 4
 }
 
-/// A reading's share of the track, to one decimal. A reading past the end is
-/// drawn at the end, and its row carries `over`.
 fn trackPct(us: Int64, base: Int64) -> String {
     if us <= 0 || base <= 0 {
         return "0.0"
@@ -795,8 +672,6 @@ fn trackPct(us: Int64, base: Int64) -> String {
     return tenthsText(if us >= full { 1000 } else { us * 1000 / full })
 }
 
-/// Where one engine's program for one benchmark lives. Both Vyrn legs build
-/// from one source, so they point at the same file.
 export fn srcHref(program: String, engine: String) -> String {
     if engine == "c" {
         return ghBlob("bench/harness/c/" + program + ".c")
@@ -810,11 +685,8 @@ export fn srcHref(program: String, engine: String) -> String {
     return ghBlob("examples/" + program + ".vyrn")
 }
 
-/// One engine's bar on a card: its name, its time, and its width.
 export type BarRow = { key: String, name: String, tone: String, ms: String, pct: String }
 
-/// One program's bars, fastest first, each as a share of the slowest: a card is
-/// its own scale.
 export fn panelBars(program: String) -> Array<BarRow> {
     let order = sortBy(readingsFor(program), c -> medianUs(program, c.key))
     let mut top = 1
@@ -837,7 +709,6 @@ export fn panelBars(program: String) -> Array<BarRow> {
     return out
 }
 
-/// The six panels the index shows.
 export fn frontPanels() -> Array<Panel> {
     let all = axisPanels()
     let mut out: Array<Panel> = []
@@ -849,8 +720,6 @@ export fn frontPanels() -> Array<Panel> {
     return out
 }
 
-/// A card's line about the program: the harness's note up to its first `. `,
-/// with the stop kept.
 export fn panelNote(program: String) -> String {
     for p in programs() {
         if p.key == program {
@@ -863,9 +732,6 @@ export fn panelNote(program: String) -> String {
     return ""
 }
 
-/// A card's speed line for Vyrn native: `fastest of the five`, or its ratio to
-/// the fastest engine and that engine's name, as in `1.36x Rust`. The wasm leg
-/// is a different target and takes no part.
 export fn panelSpeed(program: String) -> String {
     let mut ours = 0
     let mut best = 0
@@ -895,8 +761,6 @@ export fn panelSpeed(program: String) -> String {
     return ratioText(ours * 100 / best) + " " + bestName
 }
 
-/// How much less memory Vyrn native needed than the hungriest engine, as
-/// `9x less`, or "" when it needed no less.
 fn panelMemRatio(program: String) -> String {
     let mut ours = 0
     let mut worst = 0
@@ -919,8 +783,6 @@ fn panelMemRatio(program: String) -> String {
     return tenthsText(tenths) + "x less"
 }
 
-/// Vyrn native's peak memory against the hungriest engine's. When Vyrn native
-/// is the hungriest, the line says so and names the runner-up.
 fn panelMemPair(program: String) -> String {
     let mut ours = ""
     let mut worstName = ""
@@ -959,7 +821,6 @@ fn panelMemPair(program: String) -> String {
     return ours + " vs " + worstName + " " + worstText
 }
 
-/// A card's memory line: the pair, and the ratio when Vyrn native needed less.
 export fn panelMemLine(program: String) -> String {
     let pair = panelMemPair(program)
     if pair.byteLength == 0 {
@@ -972,13 +833,10 @@ export fn panelMemLine(program: String) -> String {
     return pair + " \u{B7} " + ratio
 }
 
-/// Vyrn native against Rust on one program. A program's verdict reads this
-/// ratio, so the page prints it beside the verdict.
 export fn nativeVsRust(program: String) -> String {
     return ratioText(ratioOf(program, "vyrn-native", "rust"))
 }
 
-/// The ten program panels.
 export fn axisPanels() -> Array<Panel> {
     let mut out: Array<Panel> = []
     for p in programs() {
@@ -997,10 +855,6 @@ export fn axisPanels() -> Array<Panel> {
     return out
 }
 
-// The causes are prose written here, not read from the record: the record
-// holds measurements, and a cause is a conclusion drawn from one.
-
-/// The cause row for `program`, or four empty strings.
 fn causeRow(program: String) -> Array<String> {
     for row in causeRows() {
         if row[0] == program {
@@ -1010,8 +864,6 @@ fn causeRow(program: String) -> Array<String> {
     return ["", "", "", ""]
 }
 
-/// Program, verdict, cause, label. The verdict places Vyrn native's ratio to
-/// Rust against the +/-10% noise band; the label is the cause in a few words.
 fn causeRows() -> Array<Array<String>> {
     return [
         ["nbody", "a deviation", "Rust's compiler folds the inner loop into instructions that do four sums at once; ours emits them one at a time. What that transformation needs to be safe \u{2014} that two arrays in the loop are never the same array \u{2014} the language already proves, because it uses the same fact to free memory. It does not yet reach the part of the compiler that would act on it.", "no vector instructions"],
@@ -1027,12 +879,10 @@ fn causeRows() -> Array<Array<String>> {
     ]
 }
 
-/// The record's environment block.
 fn envText() -> String {
     return objectAt(recordText(run1File()), "  ", "environment")
 }
 
-/// The machine, the toolchain and the date, in one line for a caption.
 export fn benchMachine() -> String {
     let env = envText()
     let hw = objectAt(env, "    ", "hardware")
@@ -1041,25 +891,21 @@ export fn benchMachine() -> String {
     return textAt(hw, "      ", "cpu") + ", " + textAt(env, "    ", "os") + ", " + textAt(vyrn, "      ", "version") + ", wasmtime " + textAt(wasmtime, "      ", "version") + ", " + benchDate()
 }
 
-/// When the record was measured.
 fn benchDate() -> String {
     return textAt(recordText(run1File()), "  ", "date")
 }
 
-/// How many timed runs each median is of.
 export fn benchRuns() -> String {
     return scalarAt(recordText(run1File()), "  ", "runs")
 }
 
-/// The environment, row by row: a name and the record's own text.
 export fn envRows() -> Array<Array<String>> {
     let env = envText()
     let hw = objectAt(env, "    ", "hardware")
     let vyrn = objectAt(env, "    ", "vyrn")
     let wasmtime = objectAt(env, "    ", "wasmtime")
     let flags = objectAt(env, "    ", "flags")
-    // No host row: a machine's name is private and says nothing about a
-    // number. `bench/harness/run.py` does not record it.
+    // No host row: a machine's name is private.
     return [
         ["Operating system", textAt(env, "    ", "os")],
         ["CPU", textAt(hw, "      ", "cpu") + " (" + scalarAt(hw, "      ", "cores") + " logical cores)"],
@@ -1079,9 +925,6 @@ export fn envRows() -> Array<Array<String>> {
 }
 
 test "the record still has the shape this reader cuts" {
-    // The reader's contract with `run.py` is the indentation of
-    // `json.dump(indent=2)`. If it changes, every number on two pages becomes
-    // a dash, and this test fails instead.
     loadCells()
     assertEq(cells.length, 50)
     for c in cells {
@@ -1094,8 +937,6 @@ test "the record still has the shape this reader cuts" {
 }
 
 test "the medians are the ones the published record holds" {
-    // Pins read off `2026-09-01.json` by hand. They fail when the record is
-    // replaced, so a repointed reader is visible.
     assertEq(msOf(medianUs("nbody", "c")), "897 ms")
     assertEq(msOf(medianUs("nbody", "rust")), "659 ms")
     assertEq(msOf(medianUs("nbody", "js")), "1125 ms")
@@ -1126,10 +967,8 @@ test "the log scale puts a doubling on every ring" {
     assertEq(radiusOf(200), ringRadius(belowBase() + 1))
     assertEq(radiusOf(400), ringRadius(belowBase() + 2))
     assertEq(radiusOf(50), ringRadius(belowBase() - 1))
-    // 200 units over seven doublings: the baseline ring is 86 out.
     assertEq(radiusOf(100), 86)
     assertEq(radiusOf(200), 114)
-    // The centre is 1/8x, the rim 16x, and past the rim the scale stops.
     assertEq(radiusOf(12), 0)
     assertEq(radiusOf(1600), radius())
     assertEq(radiusOf(30200), radius())
@@ -1139,7 +978,6 @@ test "the log scale puts a doubling on every ring" {
 }
 
 test "no cell is ever silently truncated" {
-    // Every point drawn at the rim carries a mark naming its figure.
     let mut clamped = 0
     let mut marked = 0
     for line in radarLines() {
@@ -1151,9 +989,7 @@ test "no cell is ever silently truncated" {
         }
     }
     assertEq(clamped, marked)
-    // No cell in this record passes the rim against C.
     assertEq(clamped, 0)
-    // And none falls inside the centre: the fastest cell is 0.22x.
     for line in radarLines() {
         for p in programs() {
             assert(radiusOf(ratioOf(p.key, line.key, "c")) > 0)
@@ -1166,7 +1002,6 @@ test "every polygon has one vertex per program" {
         assertEq(split(line.points, " ").length, programs().length)
     }
     assertEq(radarLines().length, 5)
-    // C against C is the baseline ring, vertex for vertex.
     let base = radarRings()[belowBase() - 1]
     assertEq(radarLines()[0].points, base.points)
     assertEq(base.label, "1x")
@@ -1174,7 +1009,6 @@ test "every polygon has one vertex per program" {
 }
 
 test "no axis name runs off the sheet" {
-    // Ten-pixel mono is about six units a character.
     let spokes = radarSpokes()
     let mut i = 0
     while i < spokes.length {
@@ -1218,8 +1052,6 @@ test "a panel is the whole of what is known about one program" {
     assertEq(nativeVsRust("nbody"), "1.34x")
     assertEq(nativeVsRust("pidigits"), "1.00x")
     assertEq(nativeVsRust("knucleotide"), "0.57x")
-    // A row inside the band says so, a row on its edge says that, and a row
-    // outside it on the fast side is not called a deviation.
     assertEq(panels[1].verdict, "inside the noise band")
     assertEq(panels[2].verdict, "inside the noise band")
     assertEq(panels[3].verdict, "at the edge of the band")
@@ -1248,7 +1080,6 @@ test "every program links to the game's own page for it" {
         assert(contains(p.game, "https://benchmarksgame-team.pages.debian.net/benchmarksgame/performance/"))
         assert(contains(p.game, ".html"))
     }
-    // The record's key, the reader's name and the game's slug differ.
     assertEq(progs[2].key, "fannkuch")
     assertEq(progs[2].name, "fannkuch-redux")
     assert(contains(progs[2].game, "/fannkuchredux.html"))
@@ -1266,7 +1097,6 @@ test "every cell carries the columns the game prints" {
             assert(c.mem.byteLength > 2)
             assert(c.gz.byteLength > 2)
         }
-        // node has no build step, and its column prints a dash, not a zero.
         assertEq(cells[2].make, "\u{2014}")
         assert(cells[0].make != "\u{2014}")
         assert(cells[3].make != "\u{2014}")
@@ -1289,9 +1119,6 @@ test "every bar is measured against the same track, and none is clipped in silen
             }
         }
     }
-    // Three cells pass the end of the track: nbody's wasm leg, from the backend
-    // that runs no optimizer, and both regex-redux Vyrn legs, whose cause row
-    // explains them.
     let mut past: Array<String> = []
     for p in programs() {
         for c in readingsFor(p.key) {
@@ -1314,8 +1141,6 @@ test "every row points at the program behind it" {
 }
 
 test "a row with nothing to explain explains nothing" {
-    // A cause has a short label and a sentence the table cannot say, or the row
-    // prints nothing. Two rows are level with Rust and print nothing.
     let mut silent = 0
     for p in axisPanels() {
         if p.cause.byteLength == 0 {
@@ -1327,7 +1152,6 @@ test "a row with nothing to explain explains nothing" {
         assert(p.label.byteLength > 0)
         assert(p.label.byteLength < 40)
         assert(p.cause.byteLength > 40)
-        // A cause does not restate the verdict the header already prints.
         assert(!contains(p.cause, "Not a deviation"))
         assert(!contains(p.cause, "noise band"))
     }
@@ -1343,8 +1167,6 @@ test "a row with nothing to explain explains nothing" {
 }
 
 test "the page names no design record and no internal symbol" {
-    // The causes are for readers outside the project. The site publishes no
-    // design records, so an RFC number, a symbol or a mnemonic points at nothing.
     let banned = ["RFC-", "std/", "noalias", "malloc", "sqrt", "()", "Int64", "wasm ", "UTF-8", "V8"]
     for row in causeRows() {
         for word in banned {
@@ -1371,8 +1193,6 @@ test "a second, a memory size and a byte count read the way the game prints them
 }
 
 test "no escape survives into the page" {
-    // `json.dump` writes a non-ASCII character as `\uXXXX` and doubles every
-    // backslash; the page shows the characters they stand for.
     assertEq(unescaped("100,000 \\u2014 a hundred"), "100,000 \u{2014} a hundred")
     assertEq(unescaped("\\\\w+"), "\\w+")
     assertEq(unescaped("line\\nbreak"), "line\nbreak")

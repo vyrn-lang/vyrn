@@ -1,19 +1,8 @@
-/// The recorded demo's output, coloured by the compiler's own lexer.
-///
-///     import { demoCode } from "./demohl"
-///     import { demoHl } from demoCode("../data/demo.json")
-///
-/// Two steps of the index's demo print a file, so their output is Vyrn source.
-/// `lex()` runs only inside a generator, so this generator reads the recording
-/// at compile time and emits each source step already coloured. A step whose
-/// output is a transcript is left to `shellOutHtml` in `code.vyrn`.
 import { highlightSrc } from "./hl"
 import { quoted, branch, lookup } from "./gensrc"
 import { substring, split, joinWith, indexOf } from "std/strings"
 import { startsWith, contains } from "std/strpred"
 
-/// The generated module: `demoHl(id)` answers with one step's coloured
-/// output, or "" for a step whose output is not source.
 export gen fn demoCode(path: String) -> String {
     let raw = match readFile(path) {
         Ok(text) => text,
@@ -30,11 +19,7 @@ export gen fn demoCode(path: String) -> String {
     return out + lookup("demoHl", "id", "String", hits, "\"\"")
 }
 
-/// Every `{ "id": ..., "out": ... }` in the recorder's file, as `[id, out]`.
-///
-/// A hand walk rather than the JSON reader, because this runs inside a
-/// generator. `scripts/site-demo.py` writes one shape: string fields, escaped
-/// as JSON escapes them.
+/// A hand walk, not the JSON reader, because this runs inside a generator.
 fn stepsOf(raw: String) -> Array<Array<String>> {
     let mut out: Array<Array<String>> = []
     let mut rest = raw.copy()
@@ -57,7 +42,6 @@ fn stepsOf(raw: String) -> Array<Array<String>> {
     return out
 }
 
-/// The string value of the next `key` in `s`, and what is left after it.
 fn fieldAfter(s: String, key: String) -> Array<String> {
     let mut none: Array<String> = []
     none.push("")
@@ -76,7 +60,6 @@ fn fieldAfter(s: String, key: String) -> Array<String> {
         return none
     }
     let body = substring(after, open + 1, after.byteLength)
-    // The closing quote is the first one no backslash escapes.
     let raw = bytes(body)
     let mut i = 0
     while i < raw.length {
@@ -94,13 +77,10 @@ fn fieldAfter(s: String, key: String) -> Array<String> {
     return none
 }
 
-/// The two escapes this file's strings hold, undone.
 fn unescapeJson(s: String) -> String {
     return joinWith(split(joinWith(split(s, "\\n"), "\n"), "\\\""), "\"")
 }
 
-/// Whether an output is a program rather than a transcript: a file listing or
-/// a test report holds no declaration, and a source file does.
 fn looksLikeSource(text: String) -> Bool {
     return contains(text, "fn ") || startsWith(text, "type ") || contains(text, "\ntype ")
 }

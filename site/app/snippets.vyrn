@@ -1,35 +1,22 @@
-/// The Vyrn snippets the pages show, and the same tasks in Rust, TypeScript and
-/// Go for the comparison chapter.
-///
-/// This module is the one call site of `vyrnCode` in `hl.vyrn`: a second would
-/// generate a second module whose exports collide with the first.
 import { highlightWith, rustWords, tsWords, goWords } from "./code"
 import { joinWith } from "std/strings"
 import { vyrnCode } from "./hl"
 import { hlLines, hlSource } from vyrnCode()
 
-/// A snippet in one language, ready for `v-html`.
 export type Snippet = { id: String, lang: String, label: String, html: String }
 
-/// A Vyrn snippet as one coloured block.
 export fn vyrnHtml(id: String) -> String {
     return joinWith(hlLines(id), "\n")
 }
 
-/// A Vyrn snippet's raw source, the bytes its colouring was measured from. The
-/// index's hero editor shows both.
 export fn vyrnSource(id: String) -> String {
     return hlSource(id)
 }
-
-// The comparison sets: one task in four languages. The other three are written
-// as each language's documentation writes them, and are illustrative.
 
 fn snippet(id: String, label: String, html: String) -> Snippet {
     return Snippet { id: id.copy(), lang: id.copy(), label: label.copy(), html: html.copy() }
 }
 
-/// The comparison set a chapter section names, or none for any other name.
 export fn specSet(name: String) -> Array<Snippet> {
     if name == "types" {
         return typeSpecs()
@@ -43,7 +30,6 @@ export fn specSet(name: String) -> Array<Snippet> {
     return []
 }
 
-/// A rule about a value, and a total way to check an untrusted one.
 fn typeSpecs() -> Array<Snippet> {
     return [
         snippet("vyrn", "Vyrn", vyrnHtml("cmpTypes")),
@@ -80,7 +66,6 @@ func NewAge(v int64) (Age, error) {
     ]
 }
 
-/// What a function intends to do with its argument.
 fn memorySpecs() -> Array<Snippet> {
     return [
         snippet("vyrn", "Vyrn", vyrnHtml("cmpMemory")),
@@ -108,7 +93,6 @@ func redeem(t Ticket) int64 { return t.id }
     ]
 }
 
-/// What happens when the value is not there.
 fn failureSpecs() -> Array<Snippet> {
     return [
         snippet("vyrn", "Vyrn", vyrnHtml("cmpFailure")),

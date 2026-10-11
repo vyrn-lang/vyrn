@@ -1,13 +1,7 @@
-/// What the site's generators share: the Vyrn literals they emit, and
-/// directory listings that read as empty when they fail.
-///
-/// A generated module answers through `lookup`: one exported function per fact,
-/// one `branch` per key, and a fallback for any other key.
+/// Call each generator from one site: the cache keys on argument strings, so a second spelling emits colliding exports.
 import { substring, joinWith } from "std/strings"
 import { endsWith } from "std/strpred"
 
-/// `s` as a Vyrn string literal, with a quote, a backslash, a newline and a tab
-/// escaped.
 export fn quoted(s: String) -> String {
     let raw = bytes(s)
     let mut out = "\""
@@ -33,7 +27,6 @@ export fn quoted(s: String) -> String {
     return out + substring(s, plain, raw.length) + "\""
 }
 
-/// A Vyrn array literal of quoted strings.
 export fn quotedList(items: Array<String>) -> String {
     let mut parts: Array<String> = []
     for it in items {
@@ -42,13 +35,10 @@ export fn quotedList(items: Array<String>) -> String {
     return "[" + joinWith(parts, ", ") + "]"
 }
 
-/// One `if` branch of a lookup over the parameter `param`.
 export fn branch(param: String, key: String, value: String) -> String {
     return "    if " + param + " == " + quoted(key) + " { return " + value + " }\n"
 }
 
-/// `export fn name(param: String) -> ret`, answering `fallback` for a key no
-/// branch names.
 export fn lookup(name: String, param: String, ret: String, branches: Array<String>, fallback: String) -> String {
     let mut out = "export fn " + name + "(" + param + ": String) -> " + ret + " {\n"
     for b in branches {
@@ -57,7 +47,6 @@ export fn lookup(name: String, param: String, ret: String, branches: Array<Strin
     return out + "    return " + fallback + "\n}\n"
 }
 
-/// The entries of `dir`, or none when it cannot be read.
 export fn entriesOf(dir: String) -> Array<String> {
     return match listDir(dir) {
         Ok(names) => names.copy(),
@@ -65,8 +54,6 @@ export fn entriesOf(dir: String) -> Array<String> {
     }
 }
 
-/// The stems of the `.vyrn` files in `dir`, in listing order. A directory
-/// entry has no extension, so subdirectories are skipped.
 export fn vyrnStems(dir: String) -> Array<String> {
     let mut out: Array<String> = []
     for entry in entriesOf(dir) {

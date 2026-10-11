@@ -1,39 +1,18 @@
-/// The standard library reference, read off `std/` while the site compiles.
-///
-///     import { apiDocs } from "./apidoc"
-///     import { docModules, docSigs } from apiDocs("../../std")
-///
-/// Per module it reads the header `///` block, and for every exported function,
-/// type and protocol its name, its signature as written and coloured, its `///`
-/// prose as HTML, and its line. It reads what `vyrn doc` reads rather than that
-/// command's Markdown, because doc prose can hold a line that looks like a
-/// Markdown heading. The tokens come from `lex()`, so an `export fn` inside a
-/// code quote is a string token, never a declaration.
 import { substring, split, joinWith, trim, trimEnd } from "std/strings"
 import { startsWith, endsWith } from "std/strpred"
 import { escapeHtml } from "./code"
 import { highlightSrc, lineStarts } from "./hl"
 import { quoted, quotedList, branch, lookup, vyrnStems } from "./gensrc"
 
-/// One exported declaration.
 type Entry = { name: String, kind: String, sig: String, doc: String, line: Int64 }
 
-/// One documented module: its name, its header prose, its exports, and the
-/// names of the `test` blocks it keeps beside them.
 type Mod = { name: String, doc: String, entries: Array<Entry>, tests: Array<String> }
 
-/// The byte offset of a token, from its line and column.
 gen fn offsetOf(starts: Array<Int64>, t: Token) -> Int64 {
     return starts[t.line - 1] + t.col - 1
 }
 
-/// The index of the first token past the declaration's signature.
-///
-/// A function's signature ends at the first `{` no bracket holds open. A
-/// protocol's or a record type's signature is its body, so it ends one token
-/// past the closing `}`. Any other type ends at the next token in column 1:
-/// the formatter indents every continuation line. The brace rule is checked
-/// first, because a record's closing `}` is itself in column 1.
+/// The brace rule goes first: a record's closing `}` is itself in column 1.
 gen fn sigEnd(toks: Array<Token>, from: Int64, head: String) -> Int64 {
     let mut depth = 0
     let mut i = from
@@ -59,8 +38,6 @@ gen fn sigEnd(toks: Array<Token>, from: Int64, head: String) -> Int64 {
     return toks.length
 }
 
-/// The signature text, without the trailing blank and comment lines the extent
-/// picks up between one declaration and the next.
 fn trimTail(s: String) -> String {
     let all = split(s, "\n")
     let mut keep = all.length
@@ -82,9 +59,6 @@ fn trimTail(s: String) -> String {
     return joinWith(out, "\n")
 }
 
-/// The declaration that starts at token `i` (an `export` in column 1), carrying
-/// the `///` block directly above it. Any other kind (module state, an import)
-/// comes back with an empty kind.
 gen fn declAt(src: String, toks: Array<Token>, starts: Array<Int64>, i: Int64, doc: String) -> Entry {
     let none = Entry { name: "", kind: "", sig: "", doc: "", line: 0 }
     if i + 2 >= toks.length {
@@ -114,10 +88,6 @@ gen fn declAt(src: String, toks: Array<Token>, starts: Array<Int64>, i: Int64, d
     }
 }
 
-/// Every exported declaration of one module source, in declaration order.
-///
-/// A `///` block belongs to the declaration on the line directly below it; a
-/// block with a gap under it documents nothing, as in the parser.
 gen fn exportsOf(src: String, toks: Array<Token>) -> Array<Entry> {
     let starts = lineStarts(src)
     let mut out: Array<Entry> = []
@@ -148,8 +118,6 @@ gen fn exportsOf(src: String, toks: Array<Token>) -> Array<Entry> {
     return out
 }
 
-/// The name of every `test` block in the module, in source order. `test` is a
-/// contextual keyword: an identifier in column 1 followed by a string.
 gen fn testNames(toks: Array<Token>) -> Array<String> {
     let mut out: Array<String> = []
     let mut i = 0
@@ -162,8 +130,6 @@ gen fn testNames(toks: Array<Token>) -> Array<String> {
     return out
 }
 
-/// The module's own header block: the `///` lines that open the file, above the
-/// first declaration or import.
 gen fn headerDoc(toks: Array<Token>) -> String {
     let mut out: Array<String> = []
     let mut i = 0
@@ -174,15 +140,6 @@ gen fn headerDoc(toks: Array<Token>) -> String {
     return joinWith(out, "\n")
 }
 
-// Doc prose is rendered in four shapes: paragraphs, `- ` lists, indented or
-// fenced code, and inline code and strong spans. Anything else is text.
-
-/// `escaped` with every `` `span` `` turned into a `<code>` and every `**pair**`
-/// emphasised. A marker inside a code span is text.
-///
-/// The `**` markers pair across the whole line, because a strong span can wrap
-/// a code span (``**`chars` are retired**``). They pair in order, and with an
-/// odd count the last one stays text.
 fn tickHtml(escaped: String) -> String {
     let parts = split(escaped, "`")
     let mut markers = 0
@@ -222,10 +179,6 @@ fn tickHtml(escaped: String) -> String {
     return out
 }
 
-/// `s` as inline HTML, markup escaped.
-///
-/// A doubled backtick is read first, because that is how a code span holds a
-/// backtick: ``` ``missing field `name` `` ``` is one span.
 fn inlineHtml(s: String) -> String {
     let parts = split(escapeHtml(s), "``")
     let mut out = ""
@@ -243,20 +196,12 @@ fn inlineHtml(s: String) -> String {
     return out
 }
 
-/// A paragraph, a list or a code block, closed.
-///
-/// A code block is coloured as Vyrn.
-///
-/// ponytail: a block that is not Vyrn (JSON, a shell line) is lexed anyway;
-/// what the lexer cannot read gets no colour. A per-block language tag is the
-/// upgrade, and no block in `std/` needs one.
 gen fn blockHtml(kind: String, rows: Array<String>) -> String {
     if rows.length == 0 {
         return ""
     }
     if kind == "code" {
-        // A code line also wrapped in backticks loses them: a backtick is
-        // not Vyrn, and `lex` would give up on the whole block.
+        // A backtick is not Vyrn, and `lex` would give up on the whole block.
         let mut body = ""
         for row in rows {
             let mut inner = trimEnd(row)
@@ -280,7 +225,6 @@ gen fn blockHtml(kind: String, rows: Array<String>) -> String {
     return "<p>" + inlineHtml(joinWith(rows, " ")) + "</p>"
 }
 
-/// How many spaces `line` opens with.
 fn indentOf(line: String) -> Int64 {
     let raw = bytes(line)
     let mut i = 0
@@ -290,12 +234,6 @@ fn indentOf(line: String) -> Int64 {
     return i
 }
 
-/// `doc` as HTML.
-///
-/// A run indented by two or more spaces is a code block. A line indented under
-/// a paragraph continues it, so a block opens only after a blank line or a
-/// line ending in a colon. The first line's indent is the margin; deeper
-/// indents keep their shape.
 gen fn proseHtml(doc: String) -> String {
     if doc.byteLength == 0 {
         return ""
@@ -310,8 +248,6 @@ gen fn proseHtml(doc: String) -> String {
     while i < ls.length {
         let line = ls[i]
         let flat = trim(line)
-        // A banner (`===`, a title, `===`) names a section: the title becomes
-        // a heading and the rules are dropped.
         if !fenced && isBanner(flat) && i + 2 < ls.length && trim(ls[i + 1]).byteLength > 0 && isBanner(trim(ls[i + 2])) {
             out = out + blockHtml(kind, rows)
             rows = []
@@ -368,7 +304,6 @@ gen fn proseHtml(doc: String) -> String {
     return out + blockHtml(kind, rows)
 }
 
-/// Whether `t` is a banner rule: three or more `=` and nothing else.
 fn isBanner(t: String) -> Bool {
     if t.byteLength < 3 {
         return false
@@ -381,8 +316,6 @@ fn isBanner(t: String) -> Bool {
     return true
 }
 
-/// The one-line summary for the module list: the first sentence of the header
-/// block, with its code spans intact.
 fn summaryOf(doc: String) -> String {
     let mut flat = ""
     for line in split(doc, "\n") {
@@ -408,14 +341,11 @@ fn summaryOf(doc: String) -> String {
     return inlineHtml(substring(flat, 0, cut))
 }
 
-/// The modules behind the compiler's fence, which no program can import. The
-/// compiler's predicate is `is_fenced` in `loader.rs`; a generator cannot call
-/// it, so the names are spelled here too.
+/// Mirrors `is_fenced` in `compiler/vyrn-frontend/src/loader.rs`, which a generator cannot call.
 fn fenced(name: String) -> Bool {
     return name == "mem" || name == "runtime"
 }
 
-/// Reads `stdDir`, and emits the whole reference as one module.
 export gen fn apiDocs(stdDir: String) -> String {
     let mut mods: Array<Mod> = []
     for name in vyrnStems(stdDir) {
@@ -515,9 +445,7 @@ test "a list item wraps onto the next line, however far it is indented" {
 
 test "an emphasised pair is emphasis and a lone marker is text" {
     assertEq(inlineHtml("**loud** and `**quiet**`"), "<strong>loud</strong> and <code>**quiet**</code>")
-    // A strong span that wraps code spans still pairs.
     assertEq(inlineHtml("a **`chars` and `colAt` are retired** now"), "a <strong><code>chars</code> and <code>colAt</code> are retired</strong> now")
-    // An odd marker count leaves the last marker as text, wherever it falls.
     assertEq(inlineHtml("**a `b`"), "**a <code>b</code>")
     assertEq(inlineHtml("**one** and ** alone"), "<strong>one</strong> and ** alone")
     assertEq(inlineHtml("2 ** 3"), "2 ** 3")

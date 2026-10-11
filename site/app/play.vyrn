@@ -1,14 +1,5 @@
-/// The programs the playground starts from.
-///
-/// Each is a whole program: it declares `main`, prints, and returns an exit
-/// code, because the playground runs it. None imports anything: the
-/// playground's module resolver is empty, since `std/` lives on a filesystem.
-/// The template copies each source into a hidden `<pre>`, escaped, and
-/// `play.js` reads it back with `textContent`.
 import { contains } from "std/strpred"
 
-/// One example: the id the dropdown uses, the label a reader sees, the source it
-/// loads, and the standard input that source expects.
 export type Example = { id: String, title: String, src: String, stdin: String }
 
 export fn playExamples() -> Array<Example> {

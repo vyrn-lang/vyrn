@@ -1,31 +1,13 @@
-/// The repository's history: commits and merged pull requests per day, the
-/// tagged releases, and the test counts.
-///
-/// A commit is not in the working tree, so `scripts/site-history.py` walks the
-/// git history before the export and writes `site/data/history.json`; the site
-/// workflow runs it from a full clone. The file is derived and not committed.
-/// `site/export.vyrn` refuses to publish when the file is missing or does not
-/// parse (`historyError`). `site/data/history.fixture.json` is five made-up
-/// days, committed so the tests run on a clone that never ran the script.
 import { JsonField } from "std/json"
 import { parseJson } from "std/jsonread"
 import { fieldsOf, itemsOf, fieldAt, tagOf, numText } from "std/jsondec"
 
-/// One day of work: the commits made, and how many of them were merged pull
-/// requests.
 export type Day = { date: String, commits: Int64, prs: Int64 }
 
-/// One published release, and the day it was tagged.
 export type Release = { tag: String, date: String }
 
-/// A data file the site is handed: its top-level fields, whether they came
-/// from the committed fixture, and why the source does not parse ("" when it
-/// does).
 export type DataFile = { fields: Array<JsonField>, fixture: Bool, error: String }
 
-/// `path`, or `fixture` when `path` is missing or empty, read and parsed. A
-/// source with no bytes at all, which only a test that deleted the fixture
-/// reaches, has no fields and no error.
 export fn readData(path: String, fixture: String) -> DataFile {
     let real = textOf(path)
     let src = if real.byteLength > 0 { real.copy() } else { textOf(fixture) }
@@ -35,7 +17,6 @@ export fn readData(path: String, fixture: String) -> DataFile {
     }
 }
 
-/// The text of `path`, or "" when it cannot be read.
 fn textOf(path: String) -> String {
     return match readFile(path) {
         Ok(text) => text.copy(),
@@ -43,12 +24,10 @@ fn textOf(path: String) -> String {
     }
 }
 
-/// Where the workflow writes the history, relative to the repository root.
 export fn historyPath() -> String {
     return "site/data/history.json"
 }
 
-/// The command that writes it.
 export fn historyCommand() -> String {
     return "python scripts/site-history.py > " + historyPath()
 }
@@ -57,7 +36,6 @@ fn fixturePath() -> String {
     return "site/data/history.fixture.json"
 }
 
-/// Whether the numbers are the fixture's rather than the repository's.
 export fn historyIsFixture() -> Bool {
     loadHistory()
     return fromFixture
@@ -71,7 +49,6 @@ let mut releases: Array<Release> = []
 let mut testBlocks = 0
 let mut testFiles = 0
 
-/// Reads the file, once.
 fn loadHistory() {
     if loaded {
         return
@@ -90,13 +67,11 @@ fn loadHistory() {
     testFiles = numberAt(tests, "files")
 }
 
-/// Why the history cannot be drawn, or "" when it can.
 export fn historyError() -> String {
     loadHistory()
     return corrupt.copy()
 }
 
-/// The releases a history file lists, oldest first.
 fn releasesIn(fields: Array<JsonField>) -> Array<Release> {
     let mut out: Array<Release> = []
     for r in itemsOf(fieldAt(fields, "releases")) {
@@ -106,18 +81,14 @@ fn releasesIn(fields: Array<JsonField>) -> Array<Release> {
     return out
 }
 
-/// The fixture's releases. A test of the non-empty path reads these, because
-/// the repository may have no tags.
 export fn fixtureReleaseRows() -> Array<Release> {
     return releasesIn(readData(fixturePath(), fixturePath()).fields)
 }
 
-/// The count `key` holds, or 0.
 fn numberAt(fields: Array<JsonField>, key: String) -> Int64 {
     return wholeOf(numText(fieldAt(fields, key)))
 }
 
-/// The leading digits of `s` as a number.
 export fn wholeOf(s: String) -> Int64 {
     let mut n = 0
     for b in bytes(s) {
@@ -129,19 +100,16 @@ export fn wholeOf(s: String) -> Int64 {
     return n
 }
 
-/// Every day from the first commit to the last, quiet days included.
 export fn days() -> Array<Day> {
     loadHistory()
     return dayRows.copy()
 }
 
-/// Every release, oldest first.
 export fn releaseRows() -> Array<Release> {
     loadHistory()
     return releases.copy()
 }
 
-/// How many `test` blocks the repository holds, and in how many files.
 export fn testBlockCount() -> Int64 {
     loadHistory()
     return testBlocks
@@ -158,12 +126,10 @@ test "the history is read, and it is a run of days with work in it" {
         assert(d.date.byteLength == 10)
         assert(d.commits >= 0)
         assert(d.prs >= 0)
-        // A merged pull request is a commit.
         assert(d.prs <= d.commits)
     }
     assert(testBlockCount() > 0)
     assert(testFileCount() > 0)
-    // Releases are dated, oldest first, and there may be none.
     let rows = releaseRows()
     let mut i = 1
     while i < rows.length {
@@ -183,12 +149,9 @@ test "the fixture has a release, so the non-empty path has data to run on" {
 }
 
 test "a source that does not parse is named, and an absent one is empty" {
-    // A real file draws the repository and a missing one draws the fixture. A
-    // file that does not parse names its error, and the export refuses on it.
     let broken = readData("site/app/history.vyrn", "")
     assert(broken.error.byteLength > 0)
     assertEq(broken.fields.length, 0)
-    // No file and no fixture: no fields and no error.
     let none = readData("no/such.json", "no/such.json")
     assertEq(none.error, "")
     assert(none.fixture)
