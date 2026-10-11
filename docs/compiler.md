@@ -312,14 +312,7 @@ The module's shape:
   access instead of overwriting data.
 - Values: a scalar lives in a wasm local; an aggregate lives in a frame slot
   and travels as its `i32` address; an aggregate result goes through a hidden
-  leading address. A flat aggregate (`Cx::flat`: a record of one or two scalar
-  fields or a sum of one or two words, with no heap, no declared release and
-  no `where` rule) lives in wasm locals instead, one per part, when every row
-  that names it is one `Fn_::core_flats` admits: the variant or record row
-  that builds it, a switch on its tag, a scalar field read, a store of it into
-  a place with an address, a `return` of it, and its release, which writes
-  nothing. Any other flat name keeps its slot, until each row kind has a form
-  over the parts. A `read` parameter is used at the caller's address unless
+  leading address (`Ret::Out`), except a flat one. A `read` parameter is used at the caller's address unless
   the callee may store into module state that is an aggregate or owns heap
   other than a `String`'s (`Cx::aliasing`), and a `modify` one unless the
   callee may also read any module state, as the effect judgment answers per
@@ -334,6 +327,23 @@ The module's shape:
   argument into the destination. It passes `x`'s storage instead for
   `x = f(x, ..)`, and for an argument whose extent ends at the call and that
   holds a frame slot, which the result then takes.
+- Flat aggregates (`Cx::flat`): a record of one or two scalar fields, or a
+  sum of one or two words (`Option<Int64>`, `Option<Bool>`: no payload boxed
+  by `types::payload_boxed`), that owns no heap and has no declared release and no `where` rule.
+  A flat result crosses as wasm results, one per part (`Ret::Words`), except
+  from an `export extern` or `gen` function, whose host or driver passes an
+  out-pointer. A flat name lives in wasm locals, one per part
+  (`Place::Words`), when every row that names it is one `Fn_::core_flats`
+  admits. It is written by the variant or record row that builds it, or by a
+  call whose result is `Ret::Words`. It is read by a switch on its tag (the
+  first word; a payload binder decodes its word into a local of its own), a
+  scalar field read, a store into a place with an address (part by part) and a
+  `return`. It is released by nothing, because it owns no heap. Any other row
+  keeps the name in its frame slot, and a call lands its parts there. No row
+  takes the address of a name in locals, so nothing spills: a row that needs
+  an address (an argument, a part of a larger value, a join, a copy) decides
+  the slot up front. The slot home goes when each such row has a form over
+  the parts; arguments by value come first.
 - Layout (`layout.rs`): `shape_of` maps a type to a `Shape` of `Leaf`s, and
   sizes, alignments, offsets, loads, stores and the call ABI are all read off
   it. Equal shapes are one representation. Every size is a checked `u32`.
