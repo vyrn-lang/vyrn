@@ -118,7 +118,7 @@ fn numberAt(fields: Array<JsonField>, key: String) -> Int64 {
 }
 
 /// The leading digits of `s` as a number.
-fn wholeOf(s: String) -> Int64 {
+export fn wholeOf(s: String) -> Int64 {
     let mut n = 0
     for b in bytes(s) {
         if b < '0' || b > '9' {

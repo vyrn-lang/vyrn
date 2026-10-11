@@ -1,14 +1,8 @@
-/// The code the site shows, and the text the tools print.
+/// The Vyrn snippets the pages show, and the same tasks in Rust, TypeScript and
+/// Go for the comparison chapter.
 ///
-/// Vyrn snippets live in `hl.vyrn` and are coloured by the compiler's own lexer
-/// while the site compiles. This module is the ONE call site of that generator —
-/// a second one would generate a second module and collide with the first — and
-/// it adds the two things the lexer has no business with: the same task written
-/// in Rust, TypeScript and Go, and the output the tools actually print.
-///
-/// Every Vyrn snippet is copied from a file in this repository. Every quoted
-/// tool output was produced by running the tool, and is reproduced to the byte,
-/// em dashes included.
+/// This module is the one call site of `vyrnCode` in `hl.vyrn`: a second would
+/// generate a second module whose exports collide with the first.
 import { highlightWith, rustWords, tsWords, goWords } from "./code"
 import { joinWith } from "std/strings"
 import { vyrnCode } from "./hl"
@@ -16,10 +10,6 @@ import { hlLines, hlSource } from vyrnCode()
 
 /// A snippet in one language, ready for `v-html`.
 export type Snippet = { id: String, lang: String, label: String, html: String }
-
-// ---------------------------------------------------------------------------
-// Vyrn, through the compiler's lexer
-// ---------------------------------------------------------------------------
 
 /// A Vyrn snippet's coloured lines.
 export fn vyrnLines(id: String) -> Array<String> {
@@ -31,28 +21,20 @@ export fn vyrnHtml(id: String) -> String {
     return joinWith(hlLines(id), "\n")
 }
 
-/// A Vyrn snippet's RAW source — the same bytes the colour above was measured
-/// from. One page needs both: the index's hero editor paints the coloured lines
-/// and puts this in the textarea under them.
+/// A Vyrn snippet's raw source, the bytes its colouring was measured from. The
+/// index's hero editor shows both.
 export fn vyrnSource(id: String) -> String {
     return hlSource(id)
 }
 
-// ---------------------------------------------------------------------------
-// The same task, four ways, on three axes
-//
-// The Vyrn snippet is the language's own. The other three are written the way
-// each language's documentation writes them, and are illustrative rather than
-// measured — the comparison page says so under every plate.
-// ---------------------------------------------------------------------------
+// The comparison sets: one task in four languages. The other three are written
+// as each language's documentation writes them, and are illustrative.
 
 fn snippet(id: String, label: String, html: String) -> Snippet {
     return Snippet { id: id.copy(), lang: id.copy(), label: label.copy(), html: html.copy() }
 }
 
-/// The set a chapter section names — the book's one cross-language
-/// instrument. An unknown name answers with nothing, so a
-/// section that names no set draws none.
+/// The comparison set a chapter section names, or none for any other name.
 export fn specSet(name: String) -> Array<Snippet> {
     if name == "types" {
         return typeSpecs()
@@ -63,8 +45,7 @@ export fn specSet(name: String) -> Array<Snippet> {
     if name == "failure" {
         return failureSpecs()
     }
-    let none: Array<Snippet> = []
-    return none
+    return []
 }
 
 /// A rule about a value, and a total way to check an untrusted one.
