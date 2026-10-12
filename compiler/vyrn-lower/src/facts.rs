@@ -26,20 +26,39 @@ use vyrn_frontend::core::Name;
 /// length of each of them; inside a group of stores into the record's
 /// fields, by the field's own index (`elide::Walk::open`). A `Field` is the
 /// value of a record name's integer field, by the field's index
-/// (`elide::Walk::field`).
+/// (`elide::Walk::field`). An `Inner` is the length of the element an index
+/// name picks from an array name, or from a record name's array field by the
+/// field's own index: `Inner(r, Some(f), i)` is `r.f[i].length`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Term {
     Val(Name),
     Len(Name),
     Col(Name, u32),
     Field(Name, u32),
+    Inner(Name, Option<u32>, Name),
 }
 
 impl Term {
+    /// The name the term is a part of: an `Inner`'s array root.
     pub fn name(self) -> Name {
         match self {
-            Term::Val(n) | Term::Len(n) | Term::Col(n, _) | Term::Field(n, _) => n,
+            Term::Val(n)
+            | Term::Len(n)
+            | Term::Col(n, _)
+            | Term::Field(n, _)
+            | Term::Inner(n, _, _) => n,
         }
+    }
+
+    /// Whether the term changes where `n` does: its name, or an `Inner`'s
+    /// index.
+    pub fn reads(self, n: Name) -> bool {
+        self.name() == n || matches!(self, Term::Inner(_, _, i) if i == n)
+    }
+
+    /// Whether the term is a length: at least zero, at most `LEN_MAX`.
+    pub fn is_length(self) -> bool {
+        matches!(self, Term::Len(_) | Term::Col(..) | Term::Inner(..))
     }
 }
 
@@ -77,7 +96,7 @@ impl Lin {
     }
 
     fn mentions_name(&self, n: Name) -> bool {
-        self.terms.iter().any(|(t, _)| t.name() == n)
+        self.terms.iter().any(|(t, _)| t.reads(n))
     }
 
     fn mentions(&self, t: Term) -> bool {
@@ -393,26 +412,47 @@ impl State {
         self.facts.contains(u) || axioms(u.terms.iter().map(|(t, _)| *t)).contains(u)
     }
 
+    /// Whether a fact or a definition names `t`.
+    pub fn names(&self, t: Term) -> bool {
+        self.facts.iter().any(|f| f.mentions(t))
+            || (self.defs.iter()).any(|(d, v)| *d == t || v.mentions(t))
+    }
+
     /// The terms of `n` the state names: in a fact, a disequality, a
     /// definition or a condition's side.
     pub fn terms_of(&self, n: Name) -> Vec<Term> {
+        self.terms(|t| t.name() == n)
+    }
+
+    /// The terms the state names that satisfy `keep`.
+    fn terms(&self, keep: impl Fn(Term) -> bool) -> Vec<Term> {
         let mut out: Vec<Term> = Vec::new();
-        let mut note = |l: &Lin| {
-            for (t, _) in &l.terms {
-                if t.name() == n && !out.contains(t) {
-                    out.push(*t);
-                }
+        let mut note = |t: Term| {
+            if keep(t) && !out.contains(&t) {
+                out.push(t);
             }
         };
-        self.facts.iter().chain(&self.ne).for_each(&mut note);
-        for (d, v) in &self.defs {
-            note(&Lin::of(*d));
-            note(v);
+        let lins = (self.facts.iter().chain(&self.ne))
+            .chain(self.defs.values())
+            .chain(
+                self.conds
+                    .values()
+                    .flat_map(|(yes, no)| yes.iter().chain(no).map(Fact::lin)),
+            );
+        for l in lins {
+            l.terms.iter().for_each(|(t, _)| note(*t));
         }
-        for (yes, no) in self.conds.values() {
-            yes.iter().chain(no).for_each(|f| note(f.lin()));
-        }
+        self.defs.keys().for_each(|d| note(*d));
         out
+    }
+
+    /// Forgets the length of every element array ([`Term::Inner`]). A row
+    /// that may write an element may replace or resize one, and a borrow of
+    /// the array it writes through reads the same elements.
+    pub fn forget_inner(&mut self) {
+        for t in self.terms(|t| matches!(t, Term::Inner(..))) {
+            self.forget(t);
+        }
     }
 
     /// Forgets everything about `n`, its lengths and its fields. A definition
@@ -421,7 +461,9 @@ impl State {
     pub fn kill(&mut self, n: Name) {
         let cols: BTreeSet<Term> = (self.defs.iter())
             .flat_map(|(d, v)| std::iter::once(*d).chain(v.terms.iter().map(|(t, _)| *t)))
-            .filter(|t| matches!(t, Term::Col(m, _) | Term::Field(m, _) if *m == n))
+            .filter(|t| {
+                matches!(t, Term::Col(..) | Term::Field(..) | Term::Inner(..)) && t.reads(n)
+            })
             .collect();
         for t in [Term::Val(n), Term::Len(n)].into_iter().chain(cols) {
             self.defs.remove(&t);
@@ -478,10 +520,8 @@ impl State {
                 }
             }
             // A fact over a length, or a side that cannot hold.
-            let kept = |l: &Lin| {
-                (l.terms.iter()).any(|(t, _)| matches!(t, Term::Len(_) | Term::Col(..)))
-                    || (l.is_const() && l.c < 0)
-            };
+            let kept =
+                |l: &Lin| (l.terms.iter()).any(|(t, _)| t.is_length()) || (l.is_const() && l.c < 0);
             let mentioned = |(_, (yes, _)): (&Name, &(Vec<Fact>, Vec<Fact>))| {
                 yes.iter().any(|f| f.lin().mentions(t))
             };
@@ -881,8 +921,7 @@ impl Prover<'_> {
                 uses: vec![(1, p.clone())],
             });
         }
-        let length =
-            |(t, k): &(Term, i64)| matches!(t, Term::Len(_) | Term::Col(..)) && matches!(k, 1 | -1);
+        let length = |(t, k): &(Term, i64)| t.is_length() && matches!(k, 1 | -1);
         // The constant of `len >= 0` or `LEN_MAX - len >= 0`, as `axioms` states them.
         let axiom_c = |k: i64| if k < 0 { LEN_MAX } else { 0 };
         for p in self.st.facts.iter().chain(&self.axioms).chain(&extra) {
@@ -954,7 +993,7 @@ fn canon(l: Lin) -> Option<Lin> {
 fn axioms(terms: impl Iterator<Item = Term>) -> Vec<Lin> {
     let mut out = Vec::new();
     for t in terms {
-        if let Term::Len(_) | Term::Col(..) = t {
+        if t.is_length() {
             out.push(Lin::of(t));
             out.push(Lin {
                 terms: vec![(t, -1)],

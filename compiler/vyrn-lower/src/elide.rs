@@ -21,7 +21,9 @@
 //! check is a row like any other.
 //!
 //! The walk knows nothing about a global, an element, or a field of a field:
-//! each read of one is a fresh value with its type's range. A check on a
+//! each read of one is a fresh value with its type's range. The length of
+//! an element array an index name picks is one term until a row may write an
+//! element ([`State::forget_inner`]). A check on a
 //! global's array field is the exception: it reads the length of a borrow of
 //! the global while the borrow is [`State::fresh`], up to a row the effect
 //! judgment says may write the global ([`Walk::stale`]). An exact sum is an
@@ -2461,7 +2463,7 @@ impl<'a> Walk<'a> {
             match t {
                 Term::Val(_) => Some(Lin::of(Term::Val(p))),
                 Term::Len(_) => Some(Lin::of(Term::Len(p))),
-                Term::Col(..) | Term::Field(..) => None,
+                Term::Col(..) | Term::Field(..) | Term::Inner(..) => None,
             }
         };
         for f in pre {
@@ -2529,6 +2531,34 @@ impl<'a> Walk<'a> {
             Place::Field(r, f) => {
                 let Place::Name(r) = &**r else { return None };
                 self.col_term(*r, f)
+            }
+            _ => None,
+        }
+    }
+
+    /// The length of `p`, an element of an array name or of a record name's
+    /// array field that an index name picks, when the element is an array
+    /// ([`Term::Inner`]).
+    fn inner(&self, p: &Place) -> Option<Term> {
+        let Place::Elem(base, Val::Name(i)) = p else {
+            return None;
+        };
+        let seq = |ty: &Type| {
+            let ty = vyrn_frontend::types::resolved(ty, self.decls);
+            ty.elem()
+                .is_some_and(|e| kind_of(e, self.decls) == Kind::Seq)
+        };
+        match &**base {
+            Place::Name(r) if seq(&self.body.names[r.index()].ty) => {
+                Some(Term::Inner(*r, None, *i))
+            }
+            Place::Field(r, f) => {
+                let Place::Name(r) = **r else { return None };
+                let ty = &self.body.names[r.index()].ty;
+                let fields = vyrn_frontend::types::record_fields(ty, self.decls)?;
+                let at = fields.iter().position(|x| x.name == *f)?;
+                let at = u32::try_from(at).ok().filter(|_| seq(&fields[at].ty))?;
+                Some(Term::Inner(r, Some(at), *i))
             }
             _ => None,
         }
@@ -3094,6 +3124,9 @@ impl<'a> Walk<'a> {
                 st
             }
             St::Store { place, value, .. } => {
+                if !matches!(place, Place::Name(_)) {
+                    st.forget_inner();
+                }
                 if let Val::Name(m) = value {
                     self.keeps(&st, *m);
                 }
@@ -3289,7 +3322,12 @@ impl<'a> Walk<'a> {
     /// What must be `>= 0` for the check to pass, as far as linear facts can
     /// say; `None` when they cannot say it all.
     fn goals(&self, st: &State, g: &Guard) -> Option<Vec<Lin>> {
-        let len = |p: &Place| (self.length(p).or_else(|| self.borrowed(st, p))).map(Lin::of);
+        // An element's length bounds nothing the state does not name.
+        let len = |p: &Place| {
+            (self.length(p).or_else(|| self.borrowed(st, p)))
+                .or_else(|| self.inner(p).filter(|t| st.names(*t)))
+                .map(Lin::of)
+        };
         Some(match g {
             Guard::Index(p, i) => {
                 let i = self.lin(i)?;
@@ -3429,6 +3467,10 @@ impl<'a> Walk<'a> {
         self.slot[n.index()].origin = self.slot[n.index()].origin.join(o);
         self.element_write(st, n, rhs);
         st.kill(n);
+        // A take leaves a hole the store that fills it may resize.
+        if let Rhs::Take(_) = rhs {
+            st.forget_inner();
+        }
         // A literal's fields are its parts', not the facts'.
         if let Rhs::Make(Ctor::Record(..), _) = rhs {
             self.dirty.insert(n);
@@ -3444,7 +3486,7 @@ impl<'a> Walk<'a> {
             Rhs::Read(Place::Field(b, f)) | Rhs::Take(Place::Field(b, f))
                 if f == "length" || f == "byteLength" =>
             {
-                if let Some(t) = self.length(b) {
+                if let Some(t) = self.length(b).or_else(|| self.inner(b)) {
                     st.define(Term::Val(n), &Lin::of(t));
                 }
             }
@@ -3989,6 +4031,13 @@ impl<'a> Walk<'a> {
         let Rhs::Call { args, kind, .. } = rhs else {
             return;
         };
+        // Only a builtin that writes no argument writes no element: any
+        // other call may write one through an argument or module state.
+        let pure = matches!(kind, Callee::Builtin | Callee::Reserved)
+            && args.iter().all(|(_, c)| *c == Capability::Read);
+        if !pure {
+            st.forget_inner();
+        }
         for (a, cap) in args {
             if let (Arg::Place(p), Capability::Modify) = (a, cap) {
                 self.open(st, p);
@@ -4381,7 +4430,7 @@ impl<'a> Walk<'a> {
                 Term::Len(_) if fields.is_none() => moves.first().copied().unwrap_or(Moves::Any),
                 Term::Field(_, i) => moves.get(i as usize).copied().unwrap_or(Moves::Any),
                 Term::Col(_, i) => class(i),
-                Term::Val(_) | Term::Len(_) => Moves::Any,
+                Term::Val(_) | Term::Len(_) | Term::Inner(..) => Moves::Any,
             };
             match m {
                 Moves::Keeps => {}
@@ -4573,7 +4622,7 @@ impl<'a> Walk<'a> {
             && l.terms.iter().any(|(t, _)| t.name() == p)
             && (l.terms.iter()).all(|(t, k)| {
                 k.unsigned_abs() == 1
-                    && !matches!(t, Term::Col(..))
+                    && !matches!(t, Term::Col(..) | Term::Inner(..))
                     && (t.name() == p || (read(t.name()) && at(t.name()).is_some_and(|i| i < own)))
             })
     }
@@ -4610,6 +4659,13 @@ impl<'a> Walk<'a> {
                     Some((f, fty)) => format!("{name}.{f}.{}", len(&fty)),
                     None => format!("the length of a field of {name}"),
                 },
+                Term::Inner(_, f, i) => {
+                    let at = self.body.spoken(i);
+                    match f.and_then(field) {
+                        Some((f, _)) => format!("{name}.{f}[{at}].length"),
+                        None => format!("{name}[{at}].length"),
+                    }
+                }
             }
         };
         // The constant in `i128`, so negating `i64::MIN` cannot overflow.

@@ -5797,3 +5797,66 @@ fn w(log: modify Log, t: Array<Int64>) -> Int64 {
         "{err}"
     );
 }
+
+/// The length of an element an index name picks bounds a read of that
+/// element: `j < g.rows[k].length` proves `g.rows[k][j]`, across a call that
+/// takes another record. When `k` moves, or a store replaces the row, between
+/// the bound and the read, the read stays a check and traps.
+#[test]
+fn an_element_length_bounds_a_read_of_the_same_element() {
+    let src = |turn: &str| {
+        format!(
+            "type Grid = {{ rows: Array<Array<Int64>> }}
+type Tally = {{ w: Int64 }}
+
+fn sumRow(t: Tally, g: modify Grid, r: Int64) -> Int64 {{
+    if r < 0 || r >= g.rows.length || t.w < 0 || t.w >= g.rows.length {{
+        return 0
+    }}
+    let mut k = r
+    let mut s = 0
+    let mut j = 0
+    while j < g.rows[k].length {{
+        {turn}
+        s = s + g.rows[k][j]
+        j = j + 1
+    }}
+    return s
+}}
+"
+        )
+    };
+    let calls = "    let mut g = Grid { rows: [[1, 2, 3], [4]] }\n    \
+                 print(sumRow(Tally { w: 1 }, g, 0).toString())";
+    let rows = |a: &str, b: &str, c: &str| [a, b, c].map(String::from).to_vec();
+    let proof = src("s = s + t.w");
+    let proved = rows(
+        "proved array-index",
+        "proved array-index",
+        "proved array-index",
+    );
+    assert_eq!(verdicts(&proof, "sumRow"), proved);
+    assert_eq!(oracle(&proof, calls, "sumRow").0, "");
+    for turn in [
+        "if j == 1 {
+            k = t.w
+        }",
+        "if j == 1 {
+            g.rows[k] = [t.w]
+        }",
+    ] {
+        let witness = src(turn);
+        let read = verdicts(&witness, "sumRow");
+        assert_eq!(
+            read.last().map(String::as_str),
+            Some("check array-index"),
+            "{turn}"
+        );
+        let (err, _) = oracle(&witness, calls, "sumRow");
+        assert!(err.contains("array index 1 out of bounds"), "{turn}: {err}");
+        assert!(
+            !err.contains(vyrn_frontend::trap::PROVED_CHECK_FAILED),
+            "{err}"
+        );
+    }
+}
