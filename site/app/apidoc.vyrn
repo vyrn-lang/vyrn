@@ -346,6 +346,11 @@ fn fenced(name: String) -> Bool {
     return name == "mem" || name == "runtime"
 }
 
+/// The source of a `Markup` holding `html`, which this file rendered.
+fn trusted(html: String) -> String {
+    return "TrustedMarkup(" + quoted(html) + ")"
+}
+
 export gen fn apiDocs(stdDir: String) -> String {
     let mut mods: Array<Mod> = []
     for name in vyrnStems(stdDir) {
@@ -373,11 +378,11 @@ export gen fn apiDocs(stdDir: String) -> String {
     for m in mods {
         names.push(m.name.copy())
         summaries.push(branch("m", m.name, quoted(summaryOf(m.doc))))
-        intros.push(branch("m", m.name, quoted(proseHtml(m.doc))))
+        intros.push(branch("m", m.name, trusted(proseHtml(m.doc))))
         let mut es: Array<String> = []
         for e in m.entries {
-            let sig = quoted(highlightSrc(e.sig, lex(e.sig)))
-            es.push("DocEntry { name: " + quoted(e.name) + ", kind: " + quoted(e.kind) + ", sig: " + sig + ", prose: " + quoted(proseHtml(e.doc)) + ", line: " + e.line.toString() + " }")
+            let sig = trusted(highlightSrc(e.sig, lex(e.sig)))
+            es.push("DocEntry { name: " + quoted(e.name) + ", kind: " + quoted(e.kind) + ", sig: " + sig + ", prose: " + trusted(proseHtml(e.doc)) + ", line: " + e.line.toString() + " }")
         }
         entryLists.push(branch("m", m.name, "[" + joinWith(es, ", ") + "]"))
         testLists.push(branch("m", m.name, quotedList(m.tests)))
@@ -385,13 +390,14 @@ export gen fn apiDocs(stdDir: String) -> String {
     }
 
     let mut out = "/// The standard library reference, read off `std/` by `site/app/apidoc.vyrn`\n/// while the site compiled. Do not edit.\n"
+    out = out + "import { Markup } from \"std/html\"\n"
     out = out + "/// Every documented module, sorted.\n"
     out = out + "export fn docModules() -> Array<String> { return " + quotedList(names) + " }\n"
     out = out + "/// The first sentence of a module's header block.\n"
     out = out + lookup("docSummary", "m", "String", summaries, "\"\"")
     out = out + "/// A module's header block, as HTML.\n"
-    out = out + lookup("docIntro", "m", "String", intros, "\"\"")
-    out = out + "export type DocEntry = { name: String, kind: String, sig: String, prose: String, line: Int64 }\n"
+    out = out + lookup("docIntro", "m", "Markup", intros, trusted(""))
+    out = out + "export type DocEntry = { name: String, kind: String, sig: Markup, prose: Markup, line: Int64 }\n"
     out = out + "/// A module's exports in declaration order, each signature coloured by the compiler's lexer and its prose as HTML.\n"
     out = out + lookup("docEntries", "m", "Array<DocEntry>", entryLists, "[]")
     out = out + "/// The name of every `test` block the module keeps, in source order.\n"

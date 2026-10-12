@@ -6,6 +6,7 @@ import { decodeEntities } from "./meta"
 import { substring, indexOf, replace, trimEnd } from "std/strings"
 import { startsWith, endsWith, contains } from "std/strpred"
 import { urlEncode } from "std/codecs"
+import { markupString } from "std/html"
 import { pageTitle, lede, notice, features, featuresHeading, featuresIntro, featuresCap, featuresNotice, installHeading, installIntro, installNotice, installCap, otherHeading, otherIntro, otherClose, steps } from "./editors"
 import { edgeCount, searchRows, graphLede, graphIntro, graphCaption } from "./stdgraph"
 
@@ -60,30 +61,30 @@ export fn markdownOf(path: String) -> String {
 }
 
 fn editorsMd() -> String {
-    let mut out = "# \{pageTitle()}\n\n\{asMarkdown(lede())}\n\n\{asMarkdown(notice())}\n"
+    let mut out = "# \{pageTitle()}\n\n\{asMarkdown(markupString(lede()))}\n\n\{asMarkdown(markupString(notice()))}\n"
     out = out + "\n## \{features().length} \{featuresHeading()}\n\n"
     out = out + asMarkdown(featuresIntro()) + "\n\n"
     for f in features() {
-        out = out + "- **\{f.name}** — \{asMarkdown(f.what)} Implemented by `\{f.path}` (`\{f.symbol}`).\n"
+        out = out + "- **\{f.name}** — \{asMarkdown(markupString(f.what))} Implemented by `\{f.path}` (`\{f.symbol}`).\n"
     }
-    out = out + "\n" + asMarkdown(featuresCap()) + "\n\n" + asMarkdown(featuresNotice()) + "\n"
-    out = out + "\n## \{installHeading()}\n\n" + asMarkdown(installIntro()) + "\n"
+    out = out + "\n" + asMarkdown(featuresCap()) + "\n\n" + asMarkdown(markupString(featuresNotice())) + "\n"
+    out = out + "\n## \{installHeading()}\n\n" + asMarkdown(markupString(installIntro())) + "\n"
     for s in steps() {
         out = out + "\n### \{s.title}\n\n"
         out = out + fenced("sh", s.command)
-        out = out + asMarkdown(s.what) + "\n\n"
+        out = out + asMarkdown(markupString(s.what)) + "\n\n"
     }
-    out = out + asMarkdown(installNotice()) + "\n\n" + asMarkdown(installCap()) + "\n"
-    out = out + "\n## \{otherHeading()}\n\n" + asMarkdown(otherIntro()) + "\n\n" + asMarkdown(otherClose()) + "\n"
+    out = out + asMarkdown(markupString(installNotice())) + "\n\n" + asMarkdown(markupString(installCap())) + "\n"
+    out = out + "\n## \{otherHeading()}\n\n" + asMarkdown(markupString(otherIntro())) + "\n\n" + asMarkdown(otherClose()) + "\n"
     return collapse(out + "\n") + trailer(absolute("/tooling/editors.html"))
 }
 
 fn graphMd() -> String {
     let mut out = "# \{edgeCount().toString()} imports between \{searchRows().length} modules\n\n"
-    out = out + asMarkdown(graphLede()) + "\n"
+    out = out + asMarkdown(markupString(graphLede())) + "\n"
     out = out + "\n## Import graph\n\n" + asMarkdown(graphIntro()) + "\n\n"
     out = out + "The drawing is on the page: one node per module, one wire per `import`. Pointing at a module lights its wires.\n"
-    out = out + "\n" + asMarkdown(graphCaption()) + "\n"
+    out = out + "\n" + asMarkdown(markupString(graphCaption())) + "\n"
     return collapse(out + "\n") + trailer(absolute("/docs/graph.html"))
 }
 
@@ -107,11 +108,11 @@ fn chapterMd(slug: String) -> String {
 }
 
 fn moduleMd(name: String) -> String {
-    let mut out = "# std/\{name}\n\n" + asMarkdown(apiIntro(name)) + "\n"
+    let mut out = "# std/\{name}\n\n" + asMarkdown(markupString(apiIntro(name))) + "\n"
     for e in apiEntries(name) {
         out = out + "\n## \{e.name}\n\n`\{e.kind}`, at line \{e.line}.\n\n"
-        out = out + fenced("vyrn", asMarkdown(e.sig))
-        let prose = asMarkdown(e.prose)
+        out = out + fenced("vyrn", asMarkdown(markupString(e.sig)))
+        let prose = asMarkdown(markupString(e.prose))
         if prose.byteLength > 0 {
             out = out + prose + "\n\n"
         }

@@ -3,20 +3,20 @@ import { areaChapters, areaGroups, groupChapters, chapterHref } from "./guide"
 import { split } from "std/strings"
 import { contains } from "std/strpred"
 import { book, bookmark, file, archive, link, settings, activity, code } from icons("bytesize", "book bookmark file archive link settings activity code")
-import { Html, toHtmlString } from "std/html"
+import { Html, Markup, markupString, toMarkup } from "std/html"
 import { icons, iconAttrs } from "std/icons"
 
 export type TreeRow = { href: String, label: String, here: String }
 
-export type TreeGroup = { name: String, rows: Array<TreeRow>, icon: String }
+export type TreeGroup = { name: String, rows: Array<TreeRow>, icon: Markup }
 
 export type Pager = { prevHref: String, prevLabel: String, nextHref: String, nextLabel: String }
 
-fn draw(g: consume Html) -> String {
-    return toHtmlString(iconAttrs(g, "", "", ""))
+fn draw(g: consume Html) -> Markup {
+    return toMarkup(iconAttrs(g, "", "", ""))
 }
 
-fn drawNamed(glyph: String) -> String {
+fn drawNamed(glyph: String) -> Markup {
     if glyph == "book" { return draw(book()) }
     if glyph == "bookmark" { return draw(bookmark()) }
     if glyph == "file" { return draw(file()) }
@@ -25,7 +25,7 @@ fn drawNamed(glyph: String) -> String {
     if glyph == "settings" { return draw(settings()) }
     if glyph == "code" { return draw(code()) }
     if glyph == "activity" { return draw(activity()) }
-    return ""
+    return draw(Empty)
 }
 
 fn mark(a: String, b: String) -> String {
@@ -206,7 +206,7 @@ export fn docSubnav(current: String) -> String {
     let mut out = ""
     for it in areas() {
         let markAttr = if it[0] == current { " aria-current=\"true\"" } else { "" }
-        out = out + "<a href=\"" + it[1] + "\"" + markAttr + ">" + drawNamed(it[3]) + it[2] + "</a>"
+        out = out + "<a href=\"" + it[1] + "\"" + markAttr + ">" + markupString(drawNamed(it[3])) + it[2] + "</a>"
     }
     return out
 }

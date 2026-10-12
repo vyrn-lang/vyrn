@@ -308,6 +308,7 @@ pull request.
 - A failing producer yields `Stream<Result<T, E>>`; there is no second error channel.
 - The UI layer (`std/html`, `std/ui`, `std/vyx`, `web/`) needs no compiler change, so anyone can build a competing framework from the same parts.
 - `std/html` escapes values and checks tag, attribute and event names.
+- Unescaped markup is a type: `Raw` and `v-html` take `Markup`, built by `toMarkup` or by `TrustedMarkup` for markup the program owns. Vyrn cannot seal a constructor (a variant is program-wide, a record is structural), so the hatch is one named variant a grep finds.
 - The DOM diff runs in wasm and crosses as a list of patch operations in a fixed order, so a naive applier is correct.
 - `.vyx` templates use one Vue-flavoured grammar: `{{ }}`, `v-if`, `v-for` with a required `:key`, `:attr`, `@event`, `<slot/>`. No `v-model`.
 - `std/vyx` names no component. Every capitalized tag is a sibling `.vyx` file or an imported provider, so it is not a framework.

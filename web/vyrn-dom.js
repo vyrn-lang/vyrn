@@ -56,7 +56,7 @@ function createEl(tag, ns) {
 // into normalized vnodes. Encoding recap:
 //   Empty                 -> "Empty"
 //   Text(s)               -> {"Text": s}
-//   Raw(s)                -> {"Raw": s}
+//   Raw(TrustedMarkup(s)) -> {"Raw": {"TrustedMarkup": s}}
 //   El(tag, attrs, kids)  -> {"El": [tag, [attr…], [html…]]}
 //   Cls/Id/Key(v)         -> {"Cls": v} …            A(n,v) -> {"A": [n, v]}
 //   On(event,handler,pay) -> {"On": [event, handler, payload]}
@@ -65,7 +65,7 @@ function parseHtml(j, ns) {
   if (j === "Empty") return { kind: "empty", key: null };
   if (j && typeof j === "object") {
     if ("Text" in j) return { kind: "text", text: String(j.Text), key: null };
-    if ("Raw" in j) return { kind: "raw", html: String(j.Raw), key: null };
+    if ("Raw" in j) return { kind: "raw", html: String(j.Raw.TrustedMarkup), key: null };
     if ("El" in j) {
       const [tag, attrsJson, kidsJson] = j.El;
       const a = parseAttrs(attrsJson || []);

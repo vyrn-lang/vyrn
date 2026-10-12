@@ -1,9 +1,10 @@
 import { blob, installTargets } from "./repo"
 import { startsWith, contains } from "std/strpred"
+import { Markup, markupString } from "std/html"
 
-export type Feature = { name: String, what: String, path: String, symbol: String }
+export type Feature = { name: String, what: Markup, path: String, symbol: String }
 
-export type Step = { title: String, command: String, what: String }
+export type Step = { title: String, command: String, what: Markup }
 
 fn extensionDir() -> String {
     return "editor/vscode"
@@ -17,12 +18,12 @@ export fn pageTitle() -> String {
     return "Editors"
 }
 
-export fn lede() -> String {
-    return "VS Code support ships in this repository. It is a client of about five hundred lines of plain JavaScript, plus <code>vyrn-lsp</code>. The server answers every question by calling the compiler front end <code>vyrn check</code> calls, so an error in your editor is the error your build prints."
+export fn lede() -> Markup {
+    return TrustedMarkup("VS Code support ships in this repository. It is a client of about five hundred lines of plain JavaScript, plus <code>vyrn-lsp</code>. The server answers every question by calling the compiler front end <code>vyrn check</code> calls, so an error in your editor is the error your build prints.")
 }
 
-export fn notice() -> String {
-    return "It is not on a marketplace yet. Every release publishes the extension as a single <code>.vsix</code>, one file for every platform. The server ships in the platform archive beside <code>vyrn</code>."
+export fn notice() -> Markup {
+    return TrustedMarkup("It is not on a marketplace yet. Every release publishes the extension as a single <code>.vsix</code>, one file for every platform. The server ships in the platform archive beside <code>vyrn</code>.")
 }
 
 export fn featuresHeading() -> String {
@@ -37,32 +38,32 @@ export fn featuresCap() -> String {
     return "The link opens the file on GitHub."
 }
 
-export fn featuresNotice() -> String {
-    return "What it does not do. A <code>.von</code> file is coloured and not analyzed, and the run lenses are on <code>.vyrn</code> files only. The server has no plugin API and no setting beyond where to find the two binaries."
+export fn featuresNotice() -> Markup {
+    return TrustedMarkup("What it does not do. A <code>.von</code> file is coloured and not analyzed, and the run lenses are on <code>.vyrn</code> files only. The server has no plugin API and no setting beyond where to find the two binaries.")
 }
 
 export fn installHeading() -> String {
     return "Install"
 }
 
-export fn installIntro() -> String {
-    return "The extension lives in <code>" + extensionDir() + "</code> and the server in <code>" + serverDir() + "</code>. Both are published: the server inside every platform archive, the extension as one <code>.vsix</code> asset. Build from source only to work on the extension."
+export fn installIntro() -> Markup {
+    return TrustedMarkup("The extension lives in <code>" + extensionDir() + "</code> and the server in <code>" + serverDir() + "</code>. Both are published: the server inside every platform archive, the extension as one <code>.vsix</code> asset. Build from source only to work on the extension.")
 }
 
-export fn installNotice() -> String {
-    return "Two settings, both optional. <code>vyrn.serverPath</code> points at a server binary somewhere else. <code>vyrn.path</code> points at the compiler the run lenses invoke. Left empty, each one searches <code>PATH</code> first and your checkout after."
+export fn installNotice() -> Markup {
+    return TrustedMarkup("Two settings, both optional. <code>vyrn.serverPath</code> points at a server binary somewhere else. <code>vyrn.path</code> points at the compiler the run lenses invoke. Left empty, each one searches <code>PATH</code> first and your checkout after.")
 }
 
-export fn installCap() -> String {
-    return "Modules resolve from <code>vyrn.json</code>. The editor reads the cache of pinned imports and never writes to it, so nothing in your editor fetches code. <a href=\"/tooling/projects.html\">Projects and dependencies</a> explains the pins."
+export fn installCap() -> Markup {
+    return TrustedMarkup("Modules resolve from <code>vyrn.json</code>. The editor reads the cache of pinned imports and never writes to it, so nothing in your editor fetches code. <a href=\"/tooling/projects.html\">Projects and dependencies</a> explains the pins.")
 }
 
 export fn otherHeading() -> String {
     return "Other editors"
 }
 
-export fn otherIntro() -> String {
-    return "<code>vyrn-lsp</code> is an ordinary language server: it speaks JSON-RPC over stdin and stdout and knows nothing about VS Code. Any editor with a generic LSP client gets the whole table above except the lenses, which the client draws. There is no socket mode, so a client that cannot spawn a process cannot use it."
+export fn otherIntro() -> Markup {
+    return TrustedMarkup("<code>vyrn-lsp</code> is an ordinary language server: it speaks JSON-RPC over stdin and stdout and knows nothing about VS Code. Any editor with a generic LSP client gets the whole table above except the lenses, which the client draws. There is no socket mode, so a client that cannot spawn a process cannot use it.")
 }
 
 export fn otherClose() -> String {
@@ -73,109 +74,109 @@ export fn features() -> Array<Feature> {
     return [
         Feature {
             name: "Errors while you type",
-            what: "The compiler's own diagnostics, on the line and the token they name. The squiggle and <code>vyrn check</code> come from the same front end, so they never disagree.",
+            what: TrustedMarkup("The compiler's own diagnostics, on the line and the token they name. The squiggle and <code>vyrn check</code> come from the same front end, so they never disagree."),
             path: "compiler/vyrn-lsp/src/main.rs",
             symbol: "analyze_doc / publish",
         },
         Feature {
             name: "Across the files you import",
-            what: "Imports are resolved and analyzed. A name from another module is not an unknown one, and an error inside an imported file is reported against the file you have open. The editor reads a remote module from the vendor directory or the cache, and never fetches.",
+            what: TrustedMarkup("Imports are resolved and analyzed. A name from another module is not an unknown one, and an error inside an imported file is reported against the file you have open. The editor reads a remote module from the vendor directory or the cache, and never fetches."),
             path: "compiler/vyrn-lsp/src/main.rs",
             symbol: "load_context",
         },
         Feature {
             name: "Hover",
-            what: "The type of a binding, the signature of a function, the arms of an enum, and the doc comment above any of them. For a CSS class, the rule out of your own stylesheet.",
+            what: TrustedMarkup("The type of a binding, the signature of a function, the arms of an enum, and the doc comment above any of them. For a CSS class, the rule out of your own stylesheet."),
             path: "compiler/vyrn-lsp/src/main.rs",
             symbol: "handle_hover",
         },
         Feature {
             name: "Go to definition",
-            what: "F12 on a name opens where it is declared, including across a module boundary; on a component tag in a template it opens that component's own file.",
+            what: TrustedMarkup("F12 on a name opens where it is declared, including across a module boundary; on a component tag in a template it opens that component's own file."),
             path: "compiler/vyrn-lsp/src/main.rs",
             symbol: "handle_definition",
         },
         Feature {
             name: "Completion",
-            what: "Top-level names, locals and parameters, and <code>.</code> members off the receiver's type. That covers built-in methods, record fields, and the methods a <code>protocol</code> gives a type.",
+            what: TrustedMarkup("Top-level names, locals and parameters, and <code>.</code> members off the receiver's type. That covers built-in methods, record fields, and the methods a <code>protocol</code> gives a type."),
             path: "compiler/vyrn-lsp/src/main.rs",
             symbol: "handle_completion",
         },
         Feature {
             name: "Outline and breadcrumbs",
-            what: "Ctrl-Shift-O and the breadcrumb bar list this document's own functions, methods, types, variants and <code>test</code> blocks. An imported name is not in the list.",
+            what: TrustedMarkup("Ctrl-Shift-O and the breadcrumb bar list this document's own functions, methods, types, variants and <code>test</code> blocks. An imported name is not in the list."),
             path: "compiler/vyrn-lsp/src/main.rs",
             symbol: "handle_document_symbol",
         },
         Feature {
             name: "Highlight the binding, not the word",
-            what: "The cursor on a name marks its real references, with reads and writes told apart. A same-named binding in another scope stays unmarked, and so does the word inside a comment.",
+            what: TrustedMarkup("The cursor on a name marks its real references, with reads and writes told apart. A same-named binding in another scope stays unmarked, and so does the word inside a comment."),
             path: "compiler/vyrn-lsp/src/main.rs",
             symbol: "handle_document_highlight",
         },
         Feature {
             name: "Rename, including what a generator derived",
-            what: "Renaming a procedure rewrites the call sites your source never names: the client stub a page calls, the dispatch name, the re-export a projection made. A spelling it cannot derive refuses the whole rename rather than doing half of it.",
+            what: TrustedMarkup("Renaming a procedure rewrites the call sites your source never names: the client stub a page calls, the dispatch name, the re-export a projection made. A spelling it cannot derive refuses the whole rename rather than doing half of it."),
             path: "compiler/vyrn-lsp/src/rename.rs",
             symbol: "rename_at",
         },
         Feature {
             name: "Quick fix on a contract",
-            what: "A page declaring an export its contract does not name gets the did-you-mean as an edit you can apply: <code>laod</code> to <code>data</code>.",
+            what: TrustedMarkup("A page declaring an export its contract does not name gets the did-you-mean as an edit you can apply: <code>laod</code> to <code>data</code>."),
             path: "compiler/vyrn-lsp/src/main.rs",
             symbol: "handle_code_action",
         },
         Feature {
             name: "Format, and format on save",
-            what: "Shift+Alt+F, or VS Code's own format-on-save with no extra setting, runs the canonical formatter over the whole document. A buffer that does not lex is returned unchanged rather than corrupted mid-edit.",
+            what: TrustedMarkup("Shift+Alt+F, or VS Code's own format-on-save with no extra setting, runs the canonical formatter over the whole document. A buffer that does not lex is returned unchanged rather than corrupted mid-edit."),
             path: "compiler/vyrn-lsp/src/main.rs",
             symbol: "handle_formatting",
         },
         Feature {
             name: "Inlay hints",
-            what: "The type of a binding whose line does not say it, and a label at each point a value is moved. <code>editor.inlayHints.enabled</code> turns them off.",
+            what: TrustedMarkup("The type of a binding whose line does not say it, and a label at each point a value is moved. <code>editor.inlayHints.enabled</code> turns them off."),
             path: "compiler/vyrn-lsp/src/main.rs",
             symbol: "handle_inlay_hint",
         },
         Feature {
             name: "Semantic colour",
-            what: "Every identifier is classified from the analysis: namespace, type, variant, parameter, property, function, method. A grammar cannot do that, because a grammar sees only text.",
+            what: TrustedMarkup("Every identifier is classified from the analysis: namespace, type, variant, parameter, property, function, method. A grammar cannot do that, because a grammar sees only text."),
             path: "compiler/vyrn-lsp/src/main.rs",
             symbol: "handle_semantic_tokens_full",
         },
         Feature {
             name: "Templates are the same language",
-            what: "A <code>.vyx</code> file gets the same diagnostics, hover, definition, highlight, hints and completion, mapped back into the coordinates you wrote. Templates add their own completions: tag names, sibling components, props, <code>@events</code> and class tokens.",
+            what: TrustedMarkup("A <code>.vyx</code> file gets the same diagnostics, hover, definition, highlight, hints and completion, mapped back into the coordinates you wrote. Templates add their own completions: tag names, sibling components, props, <code>@events</code> and class tokens."),
             path: "compiler/vyrn-lsp/src/templates.rs",
             symbol: "classify",
         },
         Feature {
             name: "Syntax highlighting",
-            what: "A TextMate grammar derived from the lexer's own token set. It colours <code>.vyrn</code>, <code>.von</code> and <code>.vyx</code> with no server running.",
+            what: TrustedMarkup("A TextMate grammar derived from the lexer's own token set. It colours <code>.vyrn</code>, <code>.von</code> and <code>.vyx</code> with no server running."),
             path: "editor/vscode/vyrn.tmLanguage.json",
             symbol: "source.vyrn",
         },
         Feature {
             name: "Snippets",
-            what: "Eleven, for the shapes with a body to fill in: <code>fn</code>, <code>main</code>, record and enum <code>type</code>, <code>protocol</code>, <code>impl</code>, <code>match</code>, <code>import</code>, the <code>logging</code> block, <code>test</code> and <code>bench</code>.",
+            what: TrustedMarkup("Eleven, for the shapes with a body to fill in: <code>fn</code>, <code>main</code>, record and enum <code>type</code>, <code>protocol</code>, <code>impl</code>, <code>match</code>, <code>import</code>, the <code>logging</code> block, <code>test</code> and <code>bench</code>."),
             path: "editor/vscode/snippets/vyrn.json",
             symbol: "vyrn.json",
         },
         Feature {
             name: "Run it from the file",
-            what: "A <strong>▶ Run</strong> above <code>fn main</code>, a <strong>▶ Run test</strong> above each <code>test</code> block and the same pair for <code>bench</code>. Each one runs the real command in the integrated terminal.",
+            what: TrustedMarkup("A <strong>▶ Run</strong> above <code>fn main</code>, a <strong>▶ Run test</strong> above each <code>test</code> block and the same pair for <code>bench</code>. Each one runs the real command in the integrated terminal."),
             path: "editor/vscode/extension.js",
             symbol: "provideCodeLenses",
         },
         Feature {
             name: "▶ Run dev server, where it means something",
-            what: "The lens appears only on a file that is a dev root: one importing <code>std/rpc</code> with an <code>rpcServer</code> call site. A second press restarts the server rather than stacking another on the port.",
+            what: TrustedMarkup("The lens appears only on a file that is a dev root: one importing <code>std/rpc</code> with an <code>rpcServer</code> call site. A second press restarts the server rather than stacking another on the port."),
             path: "compiler/vyrn-lsp/src/main.rs",
             symbol: "handle_is_dev_entry",
         },
         Feature {
             name: "The wire path above the procedure",
-            what: "Over each procedure a generator mounts, the method and path it is reachable at. Nothing in the file states it: the path comes from the file's location and the export's name.",
+            what: TrustedMarkup("Over each procedure a generator mounts, the method and path it is reachable at. Nothing in the file states it: the path comes from the file's location and the export's name."),
             path: "compiler/vyrn-lsp/src/main.rs",
             symbol: "handle_route_lenses",
         },
@@ -187,17 +188,17 @@ export fn steps() -> Array<Step> {
         Step {
             title: "Install the toolchain, which carries the server",
             command: installTargets()[0].cmd.copy(),
-            what: "The archive holds <code>vyrn-lsp</code> beside <code>vyrn</code>, and the installer puts both in <code>~/.vyrn/bin</code>. On Windows the line is <code>" + installTargets()[1].cmd + "</code>. If you have run either, you have the server.",
+            what: TrustedMarkup("The archive holds <code>vyrn-lsp</code> beside <code>vyrn</code>, and the installer puts both in <code>~/.vyrn/bin</code>. On Windows the line is <code>" + installTargets()[1].cmd + "</code>. If you have run either, you have the server."),
         },
         Step {
             title: "Download the .vsix from the newest release and install it",
             command: "code --install-extension vyrn-vscode-<version>.vsix",
-            what: "One file for every platform. The extension finds the server on <code>PATH</code>, or beside the <code>vyrn</code> that is on <code>PATH</code>. <code>vyrn.serverPath</code> overrides both.",
+            what: TrustedMarkup("One file for every platform. The extension finds the server on <code>PATH</code>, or beside the <code>vyrn</code> that is on <code>PATH</code>. <code>vyrn.serverPath</code> overrides both."),
         },
         Step {
             title: "Or work on the extension itself",
             command: "cargo build --manifest-path compiler/vyrn-lsp/Cargo.toml",
-            what: "A <strong>debug</strong> build, which is the one the F5 development host looks for. Then open the repository in VS Code and press F5. The launch does not rebuild the server, so re-run this line whenever you change it. <code>npm run package</code> in <code>editor/vscode</code> builds the same <code>.vsix</code> the release does.",
+            what: TrustedMarkup("A <strong>debug</strong> build, which is the one the F5 development host looks for. Then open the repository in VS Code and press F5. The launch does not rebuild the server, so re-run this line whenever you change it. <code>npm run package</code> in <code>editor/vscode</code> builds the same <code>.vsix</code> the release does."),
         },
     ]
 }
@@ -211,7 +212,7 @@ test "every feature names a file and the declaration inside it" {
     assert(rows.length > 15)
     for f in rows {
         assert(f.name.byteLength > 0)
-        assert(f.what.byteLength > 0)
+        assert(markupString(f.what).byteLength > 0)
         assert(f.symbol.byteLength > 0)
         assert(f.path.byteLength > 0)
         assert(implHref(f) == "https://github.com/vyrn-lang/vyrn/blob/main/" + f.path)
@@ -230,12 +231,12 @@ test "each step says what it leaves you with" {
     for s in all {
         assert(s.title.byteLength > 0)
         assert(s.command.byteLength > 0)
-        assert(s.what.byteLength > 0)
+        assert(markupString(s.what).byteLength > 0)
     }
 }
 
 test "the install step teaches the one command repo.vyrn owns" {
     let targets = installTargets()
     assertEq(steps()[0].command, targets[0].cmd)
-    assert(contains(steps()[0].what, targets[1].cmd))
+    assert(contains(markupString(steps()[0].what), targets[1].cmd))
 }

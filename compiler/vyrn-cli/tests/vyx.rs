@@ -291,6 +291,22 @@ fn type_error_in_template_expression_remaps_to_the_vyx() {
     );
 }
 
+#[test]
+fn a_string_given_to_v_html_is_refused_at_the_attribute() {
+    let dir = scratch("vhtml");
+    write(
+        &dir.join("comp/Widget.vyx"),
+        "<script>\nprops { body: String }\n</script>\n\n<template>\n<div v-html=\"body\"></div>\n</template>\n",
+    );
+    write(&dir.join("app.vyrn"), APP);
+    let (ok, err) = run_app(&dir);
+    assert!(!ok, "a String is not markup:\n{err}");
+    assert!(
+        err.contains("Widget.vyx:6:14: argument expects Markup, found String"),
+        "{err}"
+    );
+}
+
 /// The diagnostic stays at the generated location with the malformed directive noted.
 /// A hand-written generator delivers the directive as any third-party
 /// generator would.

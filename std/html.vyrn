@@ -20,12 +20,20 @@ export type Attr =
     | On(String, String, String)
     | Key(String)
 
-/// A node in the view tree. `Text` is always escaped; `Raw` is never escaped
-/// and is the only way to emit markup from a string. `Empty` renders as nothing.
+/// Markup the program vouches for. `Raw` and `v-html` take only this, so no
+/// `String` reaches the page unescaped. `toMarkup` renders a tree, and
+/// `toMarkup(text(s))` escapes a string. `TrustedMarkup(s)` is the escape
+/// hatch: write it only for markup the program owns, never for text from input.
+/// `fromJson` also builds one, so decode a `Markup` only from the program's own
+/// output.
+export type Markup = | TrustedMarkup(String)
+
+/// A node in the view tree. `Text` is always escaped; `Raw` is never escaped.
+/// `Empty` renders as nothing.
 export type Html =
     | Empty
     | Text(String)
-    | Raw(String)
+    | Raw(Markup)
     | El(String, Array<Attr>, Array<Html>)
 
 /// A host subscription. An app may export `vyrnSubs() -> String` returning
@@ -59,8 +67,12 @@ impl Owned for Html {
             Text(s) => {
                 drop s
             }
-            Raw(s) => {
-                drop s
+            Raw(m) => {
+                match consume m {
+                    TrustedMarkup(s) => {
+                        drop s
+                    }
+                }
             }
             El(tag, attrs, kids) => {
                 drop tag
@@ -263,8 +275,21 @@ export fn toHtmlString(h: Html) -> String {
     return match h {
         Empty => "",
         Text(s) => escapeText(s),
-        Raw(s) => s.copy(),
+        Raw(m) => markupString(m),
         El(tag, attrs, kids) => renderEl(tag, attrs, kids),
+    }
+}
+
+/// Renders a view tree as `Markup`. Its `Text` is escaped here, once, and a
+/// `Raw` holding the result is never escaped again.
+export fn toMarkup(h: Html) -> Markup {
+    return TrustedMarkup(toHtmlString(h))
+}
+
+/// The markup as written, for a reader such as a search index.
+export fn markupString(m: Markup) -> String {
+    return match m {
+        TrustedMarkup(s) => s.copy(),
     }
 }
 
@@ -362,14 +387,14 @@ fn htmlText(h: Html) -> String {
     return match h {
         Text(s) => s.copy(),
         Empty => "",
-        Raw(s) => s.copy(),
+        Raw(m) => markupString(m),
         El(t, a, k) => "",
     }
 }
 
 fn htmlRaw(h: Html) -> String {
     return match h {
-        Raw(s) => s.copy(),
+        Raw(m) => markupString(m),
         Empty => "",
         Text(s) => s.copy(),
         El(t, a, k) => "",
@@ -416,7 +441,7 @@ fn diffNode(path: Array<Int64>, old: Html, new: Html) -> Array<PatchOp> {
     return match old {
         Empty => noOps(),
         Text(s) => diffText(path, s, new),
-        Raw(s) => diffRaw(path, s, new),
+        Raw(m) => diffRaw(path, markupString(m), new),
         El(tag, attrs, kids) => diffEl(path, attrs, kids, new),
     }
 }

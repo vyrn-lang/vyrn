@@ -4,9 +4,9 @@ import { pageHeadOf, hrefOf } from "../nav"
 import { vyrnHtml, vyrnSource } from "../snippets"
 import { shellHtml } from "../code"
 import { hasRelease, releaseTag, releaseDate, releasePre, InstallTarget, installTargets, stdCount } from "../repo"
-import { blockOf, chapterOfBlock, sectionOfBlock, chapterHref } from "../guide"
+import { blockCode, blockOf, chapterOfBlock, sectionOfBlock, chapterHref } from "../guide"
 import { ApiGroup, ApiModule, apiGroups, apiHref } from "../docs"
-import { joinWith } from "std/strings"
+import { Markup } from "std/html"
 import { frontPanels, panelBars, panelNote, panelSpeed, panelMemLine, benchMachine, benchRuns } from "../bench"
 import { demoSteps, demoVersion, demoRecorded, DemoStep } from "../demo"
 import { shellOutHtml } from "../code"
@@ -66,10 +66,6 @@ fn tabId(t: Tab) -> String {
     return "tab-" + t.id
 }
 
-fn tabCode(t: Tab) -> String {
-    return joinWith(blockOf(t.block).lines, "\n")
-}
-
 fn tabPlay(t: Tab) -> String {
     return blockOf(t.block).play
 }
@@ -105,10 +101,10 @@ fn allModules() -> String {
     return "All " + stdCount().toString() + " modules"
 }
 
-fn stepHtml(s: DemoStep) -> String {
+fn stepHtml(s: DemoStep) -> Markup {
     let source = demoHl(s.id)
     if source.byteLength > 0 {
-        return source
+        return TrustedMarkup(source)
     }
     return shellOutHtml(s.cmd, s.out)
 }
@@ -220,7 +216,7 @@ fn barStyle(pct: String) -> String {
                                 <a class="docs" :href="tabDocs(t)">Docs →</a>
                             </div>
                             <p class="file">{{ tabPath(t) }}</p>
-                            <pre class="code"><code v-html="tabCode(t)"></code></pre>
+                            <pre class="code"><code v-html="blockCode(t.block)"></code></pre>
                             <p class="cap"><a :href="tabFile(t)">The file in the repository</a><span v-if="tabPlay(t).byteLength > 0"> · <a :href="tabPlay(t)">Run it in the playground</a></span></p>
                         </div>
                     </div>

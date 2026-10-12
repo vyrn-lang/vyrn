@@ -4,8 +4,9 @@ import { apiModules, apiGroups, apiEntries, apiHref } from "./docs"
 import { joinWith, toLower } from "std/strings"
 import { contains } from "std/strpred"
 import { stripTags, decodeEntities } from "./meta"
+import { Markup } from "std/html"
 
-export type SearchRow = { name: String, href: String, summary: String, count: Int64, exports: Array<String>, q: String, e: String }
+export type SearchRow = { name: String, href: String, summary: Markup, count: Int64, exports: Array<String>, q: String, e: String }
 
 export type GraphNode = { name: String, href: String, x: String, y: String, tx: String, ty: String, hx: String, hy: String, w: String, uses: String, usedBy: String, label: String }
 
@@ -22,7 +23,7 @@ export fn searchRows() -> Array<SearchRow> {
         out.push(SearchRow {
             name: m.name.copy(),
             href: apiHref(m.name),
-            summary: m.summary.copy(),
+            summary: TrustedMarkup(m.summary.copy()),
             count: m.count,
             exports: names.copy(),
             q: toLower(m.name + " " + joined + " " + decodeEntities(stripTags(m.summary))),
@@ -334,14 +335,14 @@ test "the graph and the reference agree about what imports what" {
     assertEq(examplesUsing("nope").length, 0)
 }
 
-export fn graphLede() -> String {
-    return "Every wire is an <code>import</code> line in <code>std/</code>. " + leafCount().toString() + " modules import nothing else in the library."
+export fn graphLede() -> Markup {
+    return TrustedMarkup("Every wire is an <code>import</code> line in <code>std/</code>. " + leafCount().toString() + " modules import nothing else in the library.")
 }
 
 export fn graphIntro() -> String {
     return "A module sits in the column after the deepest thing it imports, so nothing on the left imports anything on the right."
 }
 
-export fn graphCaption() -> String {
-    return "Read from the <code>import</code> lines of <code>std/*.vyrn</code>."
+export fn graphCaption() -> Markup {
+    return TrustedMarkup("Read from the <code>import</code> lines of <code>std/*.vyrn</code>.")
 }

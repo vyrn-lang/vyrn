@@ -1,19 +1,20 @@
 import { highlightWith, rustWords, tsWords, goWords } from "./code"
 import { joinWith } from "std/strings"
+import { Markup, markupString } from "std/html"
 import { vyrnCode } from "./hl"
 import { hlLines, hlSource } from vyrnCode()
 
-export type Snippet = { id: String, lang: String, label: String, html: String }
+export type Snippet = { id: String, lang: String, label: String, html: Markup }
 
-export fn vyrnHtml(id: String) -> String {
-    return joinWith(hlLines(id), "\n")
+export fn vyrnHtml(id: String) -> Markup {
+    return TrustedMarkup(joinWith(hlLines(id), "\n"))
 }
 
 export fn vyrnSource(id: String) -> String {
     return hlSource(id)
 }
 
-fn snippet(id: String, label: String, html: String) -> Snippet {
+fn snippet(id: String, label: String, html: Markup) -> Snippet {
     return Snippet { id: id.copy(), lang: id.copy(), label: label.copy(), html: html.copy() }
 }
 
@@ -140,7 +141,7 @@ test "every specimen set covers the same four languages" {
         assertEq(set[0].id, "vyrn")
         for s in set {
             assert(s.label.byteLength > 0)
-            assert(s.html.byteLength > 60)
+            assert(markupString(s.html).byteLength > 60)
         }
     }
 }

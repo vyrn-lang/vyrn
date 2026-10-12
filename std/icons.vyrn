@@ -336,7 +336,7 @@ gen fn iconsEmit(
 
 /// The identifiers a generated module binds itself.
 fn reservedNames() -> Array<String> {
-    return ["glyph", "el", "Html", "Attr", "A", "Raw"]
+    return ["glyph", "el", "Html", "Attr", "A", "Raw", "TrustedMarkup"]
 }
 
 /// No colour and no pixel size here: an Iconify body paints in
@@ -354,7 +354,7 @@ fn iconHelper() -> String {
     out = out + "            A(\"height\", \"1em\"),\n"
     out = out + "            A(\"aria-hidden\", \"true\"),\n"
     out = out + "        ],\n"
-    out = out + "        [Raw(markup.copy())],\n"
+    out = out + "        [Raw(TrustedMarkup(markup.copy()))],\n"
     out = out + "    )\n"
     out = out + "}\n"
     return out
@@ -985,7 +985,7 @@ test "a decorative glyph stays hidden and a labelled one is named" {
     let drawn = el(
         "svg",
         [A("viewBox", "0 0 16 16"), A("width", "1em"), A("height", "1em"), A("aria-hidden", "true")],
-        [Raw("<path/>")],
+        [Raw(TrustedMarkup("<path/>"))],
     )
     assert(
         toHtmlString(iconAttrs(drawn, "", "", ""))
@@ -994,7 +994,7 @@ test "a decorative glyph stays hidden and a labelled one is named" {
     let named = el(
         "svg",
         [A("viewBox", "0 0 16 16"), A("width", "1em"), A("height", "1em"), A("aria-hidden", "true")],
-        [Raw("<path/>")],
+        [Raw(TrustedMarkup("<path/>"))],
     )
     assert(
         toHtmlString(iconAttrs(named, "2em", "Search", "find"))
