@@ -109,7 +109,7 @@ export fn sha1(data: Array<UInt8>) -> Array<UInt8> {
         z = z + 1
     }
     let mut off = 0
-    while off < msg.length {
+    while off <= msg.length - 64 {
         // Sixteen big-endian words, extended to eighty.
         let mut t = 0
         while t < 16 {
