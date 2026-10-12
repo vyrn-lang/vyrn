@@ -51,11 +51,11 @@ fn countKmers(seq: Array<UInt8>, k: Int64) -> Map<Int64, Int64> {
     if seq.length < k {
         return m
     }
-    let modulus = modulusOf(k)
+    let mask = modulusOf(k) - 1
     let mut key = 0
     let mut i = 0
     while i < seq.length {
-        key = (key * 4 + code(seq[i])) % modulus
+        key = (key * 4 + code(seq[i])) & mask
         if i >= k - 1 {
             m.tally(key, 1)
         }

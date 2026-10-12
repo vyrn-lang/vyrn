@@ -5288,15 +5288,15 @@ fn a_kept_check_hint_says_why_it_stays() {
     client.send(&serde_json::json!({
         "jsonrpc": "2.0", "id": 92, "method": "textDocument/inlayHint",
         "params": { "textDocument": { "uri": uri }, "range": {
-            "start": { "line": 57, "character": 0 }, "end": { "line": 58, "character": 0 } } }
+            "start": { "line": 72, "character": 0 }, "end": { "line": 73, "character": 0 } } }
     }));
     let resp = client.read_response(&serde_json::json!(92));
     let hint = &resp["result"].as_array().expect("hints")[0];
-    assert_eq!(hint["label"], "division checked");
+    assert_eq!(hint["label"], "push may allocate, index checked");
     assert_eq!(hint["tooltip"]["kind"], "markdown");
     let tip = hint["tooltip"]["value"].as_str().unwrap();
     assert!(
-        tip.contains("`modulus` is the result of `modulusOf(..)` at line 54"),
+        tip.contains("the result of `modulusOf(..)` at line 71"),
         "{tip}"
     );
 }
