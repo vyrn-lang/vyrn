@@ -2,8 +2,8 @@
 # Compares the allocations of two `vyrn` binaries built with `--features allocs`
 # over the same roots and prints each root's total and the phases that moved.
 # Exits 1 when HEAD's total for any root exceeds BASE's by more than THRESHOLD percent.
-# The roots, `std/` and `web/` are the tree that holds this script, for both binaries,
-# so an edit there moves both alike: the check watches the compiler, not its input.
+# The roots are the tree that holds this script. Each binary reads the `std/` beside
+# its own `target/`: `std/runtime` changes with the emitter that calls it.
 # Usage: scripts/check-allocs.sh BASE_VYRN HEAD_VYRN [THRESHOLD]
 # THRESHOLD defaults to $CHECK_ALLOCS_THRESHOLD or 0.1.
 set -eu
@@ -15,8 +15,8 @@ import glob, os, subprocess, sys, tempfile
 base, head, limit = os.path.abspath(sys.argv[1]), os.path.abspath(sys.argv[2]), float(sys.argv[3])
 tree = sys.argv[4]
 out = os.path.join(tempfile.mkdtemp(), "out.wasm")
-env = {**os.environ, "VYRN_BUILD_PROFILE": "allocs", "VYRN_THREADS": "1",
-       "VYRN_STD": f"{tree}/std", "VYRN_WEB": f"{tree}/web"}
+env = {k: v for k, v in os.environ.items() if k not in ("VYRN_STD", "VYRN_WEB")}
+env.update(VYRN_BUILD_PROFILE="allocs", VYRN_THREADS="1")
 
 # Two builds of the same source differ by up to 10 allocations in a phase (hash
 # order and path lengths), so a smaller move is neither listed nor a failure.

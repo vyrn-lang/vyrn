@@ -1050,8 +1050,8 @@ jobs:
     # Compares this commit's `vyrn` with the commit it builds on: the pull
     # request's base, or the commit a push to main replaced. Both are built
     # here with `--features allocs`, so the toolchain and the OS cancel. An
-    # allocation count is not timing, so a shared PR runner is exact. Both
-    # binaries read this tree's `std/`, so a library edit moves them alike.
+    # allocation count is not timing, so a shared PR runner is exact. Each
+    # binary reads its own tree's `std/`, whose runtime its emitter calls.
     # `compiler_scaling` runs here because it needs the same feature build.
     runs-on: ubuntu-latest
     defaults:
