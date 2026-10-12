@@ -3581,8 +3581,9 @@ impl<'a> Walk<'a> {
         }
     }
 
-    /// The range of `n = a op b` where `b` is a literal that bounds it, or
-    /// the shift amount of a non-negative `a`.
+    /// The range of `n = a op b` where `b` is a literal that bounds it, an
+    /// operand of `&` the state proves non-negative, or the shift amount of a
+    /// non-negative `a`.
     fn bound(&self, pre: &State, n: Name, o: BinOp, la: &Lin, lb: &Lin) -> Out {
         let p = pre.prover();
         let holds = |g: &Lin| p.ge0(g).is_some_and(|c| c.verify(pre, g));
@@ -3608,7 +3609,10 @@ impl<'a> Walk<'a> {
             ]
         };
         let facts = match (o, lb.is_const().then_some(lb.c)) {
-            (BinOp::BitAnd, Some(c)) if c >= 0 => [Some(v.clone()), Lin::k(c).sub(&v), None],
+            (BinOp::BitAnd, _) => match [lb, la].into_iter().find(|m| holds(m)) {
+                Some(m) => [Some(v.clone()), m.sub(&v), None],
+                None => return Out::Nothing,
+            },
             (BinOp::Rem, Some(k)) if k >= 1 && nonneg => {
                 [Some(v.clone()), Lin::k(k - 1).sub(&v), None]
             }

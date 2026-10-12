@@ -5573,3 +5573,41 @@ fn a_goal_with_a_common_factor_proves_a_divisor() {
         "{err}"
     );
 }
+
+/// `h & m` lies in `0..=m` when the state proves `m >= 0`, so `t[h & m]` with
+/// `m = t.length - 1` needs no check. A mask one too wide, or one that may be
+/// negative (`-1` keeps every bit of `h`), keeps the check, which traps.
+#[test]
+fn a_mask_bounds_an_index_by_its_non_negative_operand() {
+    let src = |m: &str, guard: &str| {
+        format!(
+            "fn w(t: Array<Int64>, h: Int64) -> Int64 {{
+    let m = {m}
+    if m < {guard} {{
+        return 0
+    }}
+    return t[h & m]
+}}
+"
+        )
+    };
+    let calls = "    let e: Array<Int64> = []\n    print(w(xs, 7).toString())\n    print(w(e, 7).toString())";
+    let proof = src("t.length - 1", "0");
+    assert_eq!(verdicts(&proof, "w"), ["proved array-index"]);
+    assert_eq!(oracle(&proof, calls, "w").0, "");
+    let mut failures = Vec::new();
+    for (m, guard, at) in [("t.length", "0", 3), ("t.length - 1", "-1", 7)] {
+        let witness = src(m, guard);
+        let rows = verdicts(&witness, "w");
+        if rows != ["check array-index"] {
+            failures.push(format!("{witness}\nrows: {rows:?}"));
+        }
+        let (err, _) = oracle(&witness, calls, "w");
+        if !err.contains(&format!("array index {at} out of bounds"))
+            || err.contains(vyrn_frontend::trap::PROVED_CHECK_FAILED)
+        {
+            failures.push(format!("{witness}\nran: {err}"));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n\n"));
+}
