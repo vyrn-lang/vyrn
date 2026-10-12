@@ -1,0 +1,76 @@
+// A CSR graph built by pushes, walked breadth first.
+
+type Graph = { offsets: Array<Int64>, targets: Array<Int64> }
+
+fn build(n: Int64, src: Array<Int64>, dst: Array<Int64>) -> Graph {
+    let mut g = Graph { offsets: [0], targets: [] }
+    let mut v = 0
+    while v < n {
+        let mut e = 0
+        while e < src.length && e < dst.length {
+            let d = dst[e]
+            if src[e] == v && d >= 0 && d < n {
+                g.targets.push(d)
+            }
+            e = e + 1
+        }
+        g.offsets.push(g.targets.length)
+        v = v + 1
+    }
+    return g
+}
+
+fn bfs(g: Graph, start: Int64) -> Int64 {
+    let n = g.offsets.length - 1
+    let mut dist: Array<Int64> = []
+    let mut i = 0
+    while i < n {
+        dist.push(0 - 1)
+        i = i + 1
+    }
+    if start < 0 || start >= n {
+        return 0
+    }
+    let mut queue: Array<Int64> = [start]
+    dist[start] = 0
+    let mut head = 0
+    let mut sum = 0
+    while head < queue.length {
+        let v = queue[head]
+        head = head + 1
+        sum = sum + dist[v]
+        let mut e = g.offsets[v]
+        while e < g.offsets[v + 1] {
+            let w = g.targets[e]
+            if dist[w] < 0 {
+                dist[w] = dist[v] + 1
+                queue.push(w)
+            }
+            e = e + 1
+        }
+    }
+    return sum
+}
+
+fn main() -> Int64 {
+    let n = 400
+    let mut src: Array<Int64> = []
+    let mut dst: Array<Int64> = []
+    let mut v = 0
+    while v < n {
+        src.push(v)
+        dst.push((v * 7 + 1) % n)
+        src.push(v)
+        dst.push((v * 13 + 5) % n)
+        v = v + 1
+    }
+    let g = build(n, src, dst)
+    let mut total = 0
+    let mut s = 0
+    while s < 20 {
+        total = total + bfs(g, s)
+        s = s + 1
+    }
+    print(total)
+    return 0
+}

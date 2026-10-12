@@ -1,0 +1,88 @@
+// A permutation as a bare array: shuffle, apply, invert, count cycles.
+
+fn iota(n: Int64) -> Array<Int64> {
+    let mut out: Array<Int64> = []
+    let mut i = 0
+    while i < n {
+        out.push(i)
+        i = i + 1
+    }
+    return out
+}
+
+fn shuffle(p: modify Array<Int64>, seed: Int64) {
+    let mut s = seed
+    let mut i = p.length - 1
+    while i > 0 {
+        s = (s * 1103515245 + 12345) % 2147483648
+        let j = s % (i + 1)
+        let t = p[i]
+        p[i] = p[j]
+        p[j] = t
+        i = i - 1
+    }
+}
+
+fn apply(p: Array<Int64>, xs: Array<Int64>) -> Array<Int64> {
+    let mut out: Array<Int64> = []
+    let mut i = 0
+    while i < p.length {
+        out.push(xs[p[i]])
+        i = i + 1
+    }
+    return out
+}
+
+fn inverse(p: Array<Int64>) -> Array<Int64> {
+    let mut out: Array<Int64> = []
+    let mut i = 0
+    while i < p.length {
+        out.push(0)
+        i = i + 1
+    }
+    let mut k = 0
+    while k < p.length {
+        out[p[k]] = k
+        k = k + 1
+    }
+    return out
+}
+
+fn cycles(p: Array<Int64>) -> Int64 {
+    let mut seen: Array<Bool> = []
+    let mut i = 0
+    while i < p.length {
+        seen.push(false)
+        i = i + 1
+    }
+    let mut count = 0
+    let mut s = 0
+    while s < p.length {
+        if !seen[s] {
+            count = count + 1
+            let mut j = s
+            while !seen[j] {
+                seen[j] = true
+                j = p[j]
+            }
+        }
+        s = s + 1
+    }
+    return count
+}
+
+fn main() -> Int64 {
+    let mut total = 0
+    let mut round = 0
+    while round < 20 {
+        let mut p = iota(500)
+        shuffle(p, round + 7)
+        let q = inverse(p)
+        let xs = apply(p, iota(500))
+        let back = apply(q, xs)
+        total = total + cycles(p) + back[round]
+        round = round + 1
+    }
+    print(total)
+    return 0
+}

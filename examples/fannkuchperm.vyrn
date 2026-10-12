@@ -1,0 +1,111 @@
+// fannkuch-redux with the permutation in a record.
+
+let order = 7
+
+type Fold = { checksum: Int64, maxflips: Int64 }
+
+type Perm = { xs: Array<Int64> }
+
+fn flip(p: consume Perm) -> Perm {
+    let mut a = p
+    let mut i = 0
+    let mut j = a.xs[0]
+    while i < j {
+        let t = a.xs[i]
+        a.xs[i] = a.xs[j]
+        a.xs[j] = t
+        i = i + 1
+        j = j - 1
+    }
+    return a
+}
+
+fn iota(n: Int64) -> Array<Int64> {
+    let mut out: Array<Int64> = []
+    let mut i = 0
+    while i < n {
+        out.push(i)
+        i = i + 1
+    }
+    return out
+}
+
+fn zeroes(n: Int64) -> Array<Int64> {
+    let mut out: Array<Int64> = []
+    let mut i = 0
+    while i < n {
+        out.push(0)
+        i = i + 1
+    }
+    return out
+}
+
+type Folded = { flips: Int64, buf: Array<Int64> }
+
+fn foldCount(p: consume Array<Int64>) -> Folded {
+    let mut a = Perm { xs: p }
+    let mut flips = 0
+    while a.xs[0] != 0 {
+        a = flip(a)
+        flips = flips + 1
+    }
+    return Folded { flips: flips, buf: consume a.xs }
+}
+
+fn fannkuch(n: Int64 where value >= 1) -> Fold {
+    let mut perm1 = iota(n)
+    let mut work = zeroes(n)
+    let mut count = zeroes(n)
+    let mut maxflips = 0
+    let mut checksum = 0
+    let mut permcount = 0
+    let mut r = n
+    let mut done = false
+    while !done {
+        while r != 1 {
+            count[r - 1] = r
+            r = r - 1
+        }
+        work.copyFrom(perm1)
+        let folded = foldCount(consume work)
+        let flips = folded.flips
+        work = consume folded.buf
+        if flips > maxflips {
+            maxflips = flips
+        }
+        if permcount % 2 == 0 {
+            checksum = checksum + flips
+        } else {
+            checksum = checksum - flips
+        }
+        permcount = permcount + 1
+        let mut advanced = false
+        while !advanced && !done {
+            if r == n {
+                done = true
+            } else {
+                let first = perm1[0]
+                let mut m = 0
+                while m < r {
+                    perm1[m] = perm1[m + 1]
+                    m = m + 1
+                }
+                perm1[r] = first
+                count[r] = count[r] - 1
+                if count[r] > 0 {
+                    advanced = true
+                } else {
+                    r = r + 1
+                }
+            }
+        }
+    }
+    return Fold { checksum: checksum, maxflips: maxflips }
+}
+
+fn main() -> Int64 {
+    let f = fannkuch(order)
+    print(f.checksum)
+    print("Pfannkuchen(\{order}) = \{f.maxflips}")
+    return 0
+}

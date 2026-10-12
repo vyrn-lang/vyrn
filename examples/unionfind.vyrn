@@ -1,0 +1,58 @@
+// Union-find with path halving and union by size.
+
+type Forest = { parent: Array<Int64>, size: Array<Int64> }
+
+fn forest(n: Int64) -> Forest {
+    let mut f = Forest { parent: [], size: [] }
+    let mut i = 0
+    while i < n {
+        f.parent.push(i)
+        f.size.push(1)
+        i = i + 1
+    }
+    return f
+}
+
+fn find(f: modify Forest, x: Int64) -> Int64 {
+    let mut r = x
+    while f.parent[r] != r {
+        f.parent[r] = f.parent[f.parent[r]]
+        r = f.parent[r]
+    }
+    return r
+}
+
+fn union(f: modify Forest, a: Int64, b: Int64) {
+    let ra = find(f, a)
+    let rb = find(f, b)
+    if ra == rb {
+        return
+    }
+    if f.size[ra] < f.size[rb] {
+        f.parent[ra] = rb
+        f.size[rb] = f.size[rb] + f.size[ra]
+    } else {
+        f.parent[rb] = ra
+        f.size[ra] = f.size[ra] + f.size[rb]
+    }
+}
+
+fn main() -> Int64 {
+    let n = 2000
+    let mut f = forest(n)
+    let mut i = 0
+    while i < n {
+        union(f, i, (i * 37 + 11) % n)
+        i = i + 1
+    }
+    let mut roots = 0
+    let mut k = 0
+    while k < n {
+        if find(f, k) == k {
+            roots = roots + 1
+        }
+        k = k + 1
+    }
+    print(roots)
+    return 0
+}
