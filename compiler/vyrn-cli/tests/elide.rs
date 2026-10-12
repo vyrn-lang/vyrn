@@ -6156,3 +6156,39 @@ fn a_copy_of_the_counter_stays_below_its_bound() {
         "{err}"
     );
 }
+
+/// A pop of an array of at least one element shrinks it by exactly one:
+/// `t[3 - (before - a.length)]` reads `t[2]`. Where `a` may be empty, the
+/// pop may keep it, so the read may be `t[3]`: at `n = 0` it keeps its
+/// check and traps.
+#[test]
+fn a_pop_of_a_full_array_shrinks_it_by_one() {
+    let src = |clause: &str| {
+        format!(
+            "fn w(n: Int64{clause}) -> Int64 {{
+    let mut a: Array<Int64> = []
+    let mut i = 0
+    while i < n {{
+        a.push(i)
+        i = i + 1
+    }}
+    let before = a.length
+    a.pop()
+    let t = [1, 2, 3]
+    return t[3 - (before - a.length)]
+}}
+"
+        )
+    };
+    let proof = src(" where value >= 1");
+    assert_eq!(verdicts(&proof, "w"), ["proved array-index"]);
+    assert_eq!(oracle(&proof, "    print(w(2).toString())", "w").0, "");
+    let witness = src("");
+    assert_eq!(verdicts(&witness, "w"), ["check array-index"]);
+    let (err, _) = oracle(&witness, "    print(w(0).toString())", "w");
+    assert!(err.contains("array index 3 out of bounds"), "{err}");
+    assert!(
+        !err.contains(vyrn_frontend::trap::PROVED_CHECK_FAILED),
+        "{err}"
+    );
+}

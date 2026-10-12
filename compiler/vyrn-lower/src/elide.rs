@@ -4278,7 +4278,15 @@ impl<'a> Walk<'a> {
                     let old = Lin::of(*t);
                     match (lo.sub(&old), hi.sub(&old)) {
                         (Some(a), Some(b)) if a.is_const() && b.is_const() => {
-                            st.shift(*t, a.c, Some(b.c))
+                            // `ShrinksByOneIfNotEmpty` shrinks a length of at
+                            // least one by exactly one.
+                            let full = old.plus(-1).is_some_and(|g| {
+                                (st.prover().ge0_deep(&g)).is_some_and(|c| c.verify(st, &g))
+                            });
+                            match (a.c, b.c) {
+                                (-1, 0) if full => st.shift(*t, -1, Some(-1)),
+                                (a, b) => st.shift(*t, a, Some(b)),
+                            }
                         }
                         _ => self.resize(st, n),
                     }

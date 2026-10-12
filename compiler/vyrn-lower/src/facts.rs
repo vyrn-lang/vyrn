@@ -869,9 +869,9 @@ impl Prover<'_> {
     /// [`Prover::ge0`] with one premise more: a premise that names the
     /// goal's first term, then the rest by `ge0`. Some premise of a sum names
     /// each of the goal's terms, so no chain of three is missed for that
-    /// choice. The walk asks it only of a check's goal: asked at every join
-    /// and loop head too, it cost `elide: summaries` 7.6 times its
-    /// allocations.
+    /// choice. The walk asks it only of a check's goal and of a shrink's
+    /// receiver being non-empty: asked at every join and loop head too, it
+    /// cost `elide: summaries` 7.6 times its allocations.
     pub fn ge0_deep(&self, goal: &Lin) -> Option<Cert> {
         if let Some(c) = self.ge0(goal) {
             return Some(c);
