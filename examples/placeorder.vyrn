@@ -1,18 +1,9 @@
-/// What an index assignment through a place is allowed to observe.
-///
-/// `t.xs[k] = v` is one store into the place `t.xs[k]`. It evaluates the path's
-/// indices, then `k`, then `v`, each exactly once and left to right, and only
-/// then writes. The first two lines below read the very place the store writes,
-/// and would answer wrongly if the write came first. The rest pin the
-/// evaluation order.
-///
+// What an index assignment through a place may observe.
 
 type T = { xs: Array<Int64> }
 
 type Grid = { rows: Array<Array<Int64>> }
 
-/// Module state, so the "reads a place the statement is mutating" case is
-/// available to a callee as well as to a subexpression.
 let mut gt: T = T { xs: [5, 6, 7] }
 
 fn f() -> Int64 {
@@ -25,54 +16,38 @@ fn g() -> Int64 {
     return 20
 }
 
-/// Reads the very field the caller's statement writes. Only reachable through
-/// module state, which a local cannot see, so the store must run the
-/// call before it writes.
 fn peek() -> Int64 {
     return gt.xs[0]
 }
 
 fn main() -> Int64 {
-    // ---- the index reads the field it is indexing ---------------------------
     let mut t: T = T { xs: [1, 2, 3] }
     t.xs[t.xs.length - 1] = 99
     print(t.xs[2]) // 99
 
-    // ---- the value reads the field it is storing into ------------------------
     let mut u: T = T { xs: [1, 2, 3] }
     u.xs[0] = u.xs[2] + 5
     print(u.xs[0]) // 8
 
-    // ---- both at once, plus the field's own length ---------------------------
     let mut w: T = T { xs: [4, 5, 6] }
     w.xs[w.xs[0] - 4] = w.xs[1] + w.xs[2]
     print(w.xs[0]) // 11
 
-    // ---- evaluation order: index then value, once each ------------------------
     let mut o: T = T { xs: [0, 0] }
     o.xs[f()] = g()
     print(o.xs[1]) // 20 — and "f" printed before "g", both exactly once
 
-    // ---- a nested index: the outer index is needed by the load AND the
-    // write-back, so it must still run once ------------------------------------
     let mut rows: Array<Array<Int64>> = [[0, 0], [0, 0]]
     rows[f()][g() - 20] = 42
     print(rows[1][0]) // 42
 
-    // ---- a place two records deep, with a hoisted operand --------------------
     let mut grid: Grid = Grid { rows: [[0], [0]] }
     grid.rows[grid.rows.length - 1][0] = grid.rows[0].length + 6
     print(grid.rows[1][0]) // 7
 
-    // ---- a CALL in the value, reaching the module state being mutated --------
     gt.xs[1] = peek() + 100
     print(gt.xs[1]) // 105
 
-    // ---- write-through to a field of an element, same rules ------------------
-    // The value is a field of ANOTHER element, so it copies: `ps` releases its
-    // elements and each element releases its field, and
-    // storing the read would give one buffer two owners. The rule refuses it and
-    // names `ps[0].xs`.
     let mut ps: Array<T> = [T { xs: [1] }, T { xs: [2] }]
     ps[f()].xs = ps[0].xs.copy()
     print(ps[1].xs[0]) // 1
@@ -103,10 +78,6 @@ test "a nested place still writes back through every level" {
 }
 
 test "a field write does not disturb a copy taken before it" {
-    // `let before = t.xs` would read `t.xs` in place, and the element store
-    // writes through that place, so using `before`
-    // after the write is refused (the compiled routes would print 99 for it,
-    // the interpreter 1). A copy is its own value.
     let mut t: T = T { xs: [1, 2, 3] }
     let before = t.xs.copy()
     t.xs[0] = 99

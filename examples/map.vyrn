@@ -1,7 +1,4 @@
-// An integer-keyed map built entirely in Vyrn from an `Array` of key/value
-// records — no new builtin. Lookup is a recursive linear scan returning an
-// `Option`. This is a small capstone: arrays, records, `Option`, recursion, and
-// reclamation all compose into a real abstract data type.
+// An integer-keyed map written in Vyrn over an `Array` of records.
 
 type Entry = { key: Int64, value: Int64 }
 
@@ -14,9 +11,6 @@ fn scan(a: Array<Entry>, k: Int64, i: Int64) -> Option<Int64> {
 fn mapGet(a: Array<Entry>, k: Int64) -> Option<Int64> {
     return scan(a, k, 0)
 }
-// `put` hands `a`'s own buffer back through its result, so it takes `a`:
-// a `read` parameter cannot be returned, because `push` on one would return the
-// caller's buffer while the caller still holds it.
 fn put(a: consume Array<Entry>, k: Int64, v: Int64) -> Array<Entry> {
     return a.push(Entry { key: k, value: v })
 }
@@ -33,8 +27,6 @@ fn main() -> Int64 {
     print(miss)
 
     drop m
-    // hit + miss = 199, but exit codes are portable only in 0..126 (WASI's
-    // rule) — report success instead.
     if hit + miss == 199 { return 0 }
     return 1
 }

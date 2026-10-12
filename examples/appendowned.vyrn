@@ -1,6 +1,4 @@
-/// The refusal: `append` is a byte copy of the source's elements, and
-/// an element that owns heap — a String here — would give two arrays one
-/// buffer. The `@Heapless` bound on its row is the rule.
+// Refused on purpose: `append` of elements that own heap.
 fn main() -> Int64 {
     let mut a: Array<String> = ["x"]
     let b: Array<String> = ["y"]

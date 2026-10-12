@@ -1,4 +1,4 @@
-// A spelling the language removed is an ordinary name: a program may declare it.
+// A spelling the language removed is an ordinary name.
 fn len(xs: Array<Int64>) -> Int64 { return xs.length * 10 }
 fn concat(a: String, b: String) -> String { return a + "+" + b }
 

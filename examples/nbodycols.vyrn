@@ -1,8 +1,4 @@
-/// `nbody.vyrn` on a column layout: `std/columns` holds the bodies as one
-/// array per field, and the integration reads `b.x[i]` where `nbody.vyrn`
-/// reads `b[i].x`. The output is `nbody.vyrn`'s, byte for byte.
-///
-///     vyrn run examples/nbodycols.vyrn
+// `nbody.vyrn` on `std/columns`.
 
 import { Body } from "./lib/bodies"
 import { columns } from "std/columns"

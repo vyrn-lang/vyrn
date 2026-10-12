@@ -1,6 +1,4 @@
-// The refusal: `clear` forgets its elements without releasing
-// them, and an element that owns heap — a String here — would leak. The rule
-// is the `@Heapless` bound on its seeded row.
+// Refused on purpose: `clear` of elements that own heap.
 fn main() -> Int64 {
     let mut a: Array<String> = ["x"]
     a.clear()

@@ -1,24 +1,10 @@
-/// Typed RPC as a library — the deterministic, in-process flavor, so
-/// this is an ordinary three-way parity citizen (interp == native == wasm).
-///
-/// `clientInProcess("./fullstack/server/api")` reads the SAME api directory the
-/// browser demo serves and synthesizes `<module><Proc>(req, cb)` dispatchers that
-/// run the real procedures and hand the result to the callback synchronously — no
-/// wire, no externs, no host. The stubs are named exactly as `client()`'s wire
-/// stubs are, so a composition root swaps one import line and no
-/// call site moves. The wire flavor adds a network and a JS runtime, so it lives
-/// in `examples/fullstack/` under `vyrn dev`; this file keeps the procedures'
-/// logic covered by the parity corpus.
-///
-/// Inspect the synthesized dispatch module with:  vyrn emit-gen examples/rpc.vyrn
+// Typed RPC, in process.
 import { clientInProcess } from "std/rpc"
 import { usersById, usersCreate, usersDel, RpcReply } from clientInProcess("./fullstack/server/api")
 import { GetUserReq, CreateUserReq, User, DeleteReq, DeleteResult } from "./fullstack/shared/wire"
 
-// Module state: the last dispatch result, filled by the callbacks below.
 let mut line: String = "(none)"
 
-/// The completion callback for `usersById` — in-process, always `Done`.
 fn onGetUser(res: RpcReply<User>) {
     line = match res {
         Done(u) => "usersById -> \{u.name} (age \{u.age})",
@@ -27,7 +13,6 @@ fn onGetUser(res: RpcReply<User>) {
     }
 }
 
-/// The completion callback for `usersCreate`.
 fn onCreateUser(res: RpcReply<User>) {
     line = match res {
         Done(u) => "usersCreate -> id \{u.id} \{u.name}",
@@ -36,9 +21,6 @@ fn onCreateUser(res: RpcReply<User>) {
     }
 }
 
-/// The completion callback for `usersDel` — a `Result` procedure. An
-/// application-level `Err` is a `Done(Err(..))` here, distinct from the wire's
-/// decode failures (`Rejected`) and transport faults (`Failed`).
 fn onDeleteUser(res: RpcReply<DeleteResult>) {
     line = match res {
         Done(r) => match r {

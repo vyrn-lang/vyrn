@@ -1,7 +1,3 @@
-// A record literal's type parameter is apart from the enclosing function's
-// parameter of the same name: `Box`'s `T` is `Int64` here, while `mk`'s `T`
-// is `Bool`.
-
 type Box<T> = { items: Array<T>, first: T }
 
 fn mk<T>(x: Int64, y: T) -> Int64 {

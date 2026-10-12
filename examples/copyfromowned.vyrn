@@ -1,5 +1,4 @@
-/// The second refusal: `copyFrom` overwrites the receiver's elements
-/// by bytes, so its row carries `@Heapless` too.
+// Refused on purpose: `copyFrom` of elements that own heap.
 fn main() -> Int64 {
     let mut a: Array<String> = ["x"]
     let b: Array<String> = ["y"]

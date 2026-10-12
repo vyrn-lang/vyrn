@@ -1,13 +1,4 @@
-// A binary tree over `std/slots` — the handle shape extends from
-// linear lists to *branching* structures with no new machinery, exactly as
-// `Ref<T>` did. Each node holds two optional child handles; traversal and
-// reclamation recurse into both.
-//
-// One thing is different from the `Ref` version and it is worth naming. Every
-// node of this tree lives in ONE `Slots<Node>`, so the whole tree is two flat
-// arrays rather than a node's worth of `malloc` per node. Reclaiming it node by
-// node is what `treeFree` does below; dropping the container would reclaim all
-// of it at once, which a graph of boxed cells could never offer.
+// A binary tree over `std/slots`.
 
 import { Slots, Handle, newSlots, insert, remove } from "std/slots"
 
@@ -30,8 +21,6 @@ fn maxDepth(t: Slots<Tree>, h: Handle<Tree>) -> Int64 {
     return d
 }
 
-// Reclaim the whole tree: capture both children before removing this node, then
-// recurse into each.
 fn treeFree(t: modify Slots<Tree>, o: Option<Handle<Tree>>) -> Int64 {
     return match o { Some(h) => freeNode(t, h), None => 0 }
 }
@@ -47,11 +36,6 @@ fn leaf(t: modify Slots<Tree>, v: Int64) -> Option<Handle<Tree>> {
 }
 
 fn main() -> Int64 {
-    //        2
-    //       / \
-    //      1   4
-    //         /
-    //        3
     let mut nodes: Slots<Tree> = newSlots()
     let three = leaf(nodes, 3)
     let deep = Some(insert(nodes, Tree { value: 4, left: three, right: None }))

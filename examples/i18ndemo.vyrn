@@ -1,29 +1,9 @@
-/// Typed translations as a library on generator imports.
-///
-/// `i18n("./locales")` runs the std/i18n generator at load time: it reads
-/// `locales/en.json` + `locales/uk.json`, checks that both locales carry the
-/// SAME keys and the SAME per-key arguments (drift = a load error), and
-/// synthesizes a module of typed accessors. Everything below is then ordinary
-/// Vyrn — this file is a normal interp == native == wasm parity citizen.
-///
-///   - `t("home.title")` — the key is checked at compile time (TransKey is a
-///     finite string type; a typo is a compile error, and the LSP completes it).
-///   - `tCartItems(2)` / `tGreeting("Ada")` — typed args derived from the ICU
-///     message; the Ukrainian plural picks one/few/many by the CLDR rule.
-///   - `t("nav.\{sec}.label")` — a key built by interpolation. Because `sec` has
-///     a finite type, the whole interpolation is proven ⊆ TransKey
-///     with no runtime key validation.
-///
-/// Inspect the synthesized module with:  vyrn emit-gen examples/i18ndemo.vyrn
+// Typed translations on generator imports.
 import { i18n } from "std/i18n"
 import { t, transKey, setLocale, Locale, TransKey, tCartItems, tGreeting, tStatus } from i18n("./locales")
 
-/// The nav sections that exist — a finite language, so `"nav.\{s}.label"` is
-/// provably a TransKey.
 type NavSection = String where value =~ "home|settings"
 
-/// Translate a key that is only known at runtime, falling back to a marker when
-/// it is not a real key.
 fn lookup(key: String) -> String {
     return match transKey(key) {
         Some(k) => t(k),
@@ -32,7 +12,6 @@ fn lookup(key: String) -> String {
 }
 
 fn main() -> Int64 {
-    // Source locale (en) is the default.
     print(t("home.title")) // Welcome
     print(tGreeting("Ada")) // Hello, Ada!
     print(tCartItems(2)) // 2 items
@@ -41,12 +20,9 @@ fn main() -> Int64 {
     let sec: NavSection = "settings"
     print(t("nav.\{sec}.label")) // Settings — interpolation proven ⊆ TransKey
 
-    // A key that arrives as a plain String (here, a runtime value) is checked
-    // against the finite key set with `transKey`: valid → translate, invalid → None.
     print(lookup("home.title")) // Welcome
     print(lookup("does.not.exist")) // <missing>
 
-    // Switch to Ukrainian: the plural now exercises one / few / many.
     setLocale(Uk)
     print(t("home.title")) // Ласкаво просимо
     print(tCartItems(1)) // 1 товар    (one)
@@ -78,13 +54,10 @@ test "english plural and constant keys" {
 
 test "transKey checks a runtime String against the finite key set" {
     setLocale(En)
-    // A valid key round-trips into a TransKey and translates.
     assertEq(lookup("home.title"), "Welcome")
     assertEq(lookup("home.subtitle"), "Your dashboard")
-    // An unknown key is rejected — no TransKey is produced.
     assertEq(lookup("home.nope"), "<missing>")
     assertEq(lookup(""), "<missing>")
-    // The result composes with the current locale.
     setLocale(Uk)
     assertEq(lookup("home.title"), "Ласкаво просимо")
 }

@@ -236,7 +236,7 @@ fn hover_definition_completion_on_enum_vyrn() {
     let mut client = open_enum();
     let mut ids = Ids::new();
 
-    // `Circle` at the call site: 1-based line 19, cols 18-23.
+    // `Circle` at the call site: 1-based line 15, cols 18-23.
     let hover_id = ids.next();
     client.send(&serde_json::json!({
         "jsonrpc": "2.0",
@@ -244,7 +244,7 @@ fn hover_definition_completion_on_enum_vyrn() {
         "method": "textDocument/hover",
         "params": {
             "textDocument": { "uri": enum_uri() },
-            "position": { "line": 18, "character": 17 }
+            "position": { "line": 14, "character": 17 }
         }
     }));
     let hover_resp = client.read_response(&hover_id);
@@ -263,7 +263,7 @@ fn hover_definition_completion_on_enum_vyrn() {
         "hover carries the payload: {value}"
     );
 
-    // `area` at the call site: 1-based line 19, cols 13-16.
+    // `area` at the call site: 1-based line 15, cols 13-16.
     let def_id = ids.next();
     client.send(&serde_json::json!({
         "jsonrpc": "2.0",
@@ -271,12 +271,12 @@ fn hover_definition_completion_on_enum_vyrn() {
         "method": "textDocument/definition",
         "params": {
             "textDocument": { "uri": enum_uri() },
-            "position": { "line": 18, "character": 12 }
+            "position": { "line": 14, "character": 12 }
         }
     }));
     let def_resp = client.read_response(&def_id);
     let loc = def_resp.get("result").expect("definition result");
-    // `fn area`: 1-based line 10, name cols 4-7.
+    // `fn area`: 1-based line 6, name cols 4-7.
     let start_line = loc
         .pointer("/range/start/line")
         .and_then(|v| v.as_i64())
@@ -286,7 +286,7 @@ fn hover_definition_completion_on_enum_vyrn() {
         .and_then(|v| v.as_i64())
         .expect("range.start.character");
     assert_eq!(
-        start_line, 9,
+        start_line, 5,
         "definition lands on the fn area declaration line"
     );
     assert_eq!(
@@ -302,7 +302,7 @@ fn hover_definition_completion_on_enum_vyrn() {
         "method": "textDocument/completion",
         "params": {
             "textDocument": { "uri": enum_uri() },
-            "position": { "line": 18, "character": 1 }
+            "position": { "line": 14, "character": 1 }
         }
     }));
     let comp_resp = client.read_response(&comp_id);
@@ -382,10 +382,10 @@ fn document_symbol_lists_top_level_declarations() {
             "documentSymbol missing {expected}: {by_name:?}"
         );
     }
-    assert_eq!(by_name["Shape"].0, 3, "Shape declared on 0-based line 3");
-    assert_eq!(by_name["Circle"].0, 4, "Circle variant on 0-based line 4");
-    assert_eq!(by_name["area"].0, 9, "area declared on 0-based line 9");
-    assert_eq!(by_name["main"].0, 17, "main declared on 0-based line 17");
+    assert_eq!(by_name["Shape"].0, 0, "Shape declared on 0-based line 0");
+    assert_eq!(by_name["Circle"].0, 1, "Circle variant on 0-based line 1");
+    assert_eq!(by_name["area"].0, 5, "area declared on 0-based line 5");
+    assert_eq!(by_name["main"].0, 13, "main declared on 0-based line 13");
     assert_eq!(by_name["Shape"].1, 23, "type → Struct(23)");
     assert_eq!(by_name["Circle"].1, 22, "variant → EnumMember(22)");
     assert_eq!(by_name["area"].1, 12, "function → Function(12)");
@@ -5288,7 +5288,7 @@ fn a_kept_check_hint_says_why_it_stays() {
     client.send(&serde_json::json!({
         "jsonrpc": "2.0", "id": 92, "method": "textDocument/inlayHint",
         "params": { "textDocument": { "uri": uri }, "range": {
-            "start": { "line": 93, "character": 0 }, "end": { "line": 94, "character": 0 } } }
+            "start": { "line": 57, "character": 0 }, "end": { "line": 58, "character": 0 } } }
     }));
     let resp = client.read_response(&serde_json::json!(92));
     let hint = &resp["result"].as_array().expect("hints")[0];
@@ -5296,7 +5296,7 @@ fn a_kept_check_hint_says_why_it_stays() {
     assert_eq!(hint["tooltip"]["kind"], "markdown");
     let tip = hint["tooltip"]["value"].as_str().unwrap();
     assert!(
-        tip.contains("`modulus` is the result of `modulusOf(..)` at line 90"),
+        tip.contains("`modulus` is the result of `modulusOf(..)` at line 54"),
         "{tip}"
     );
 }

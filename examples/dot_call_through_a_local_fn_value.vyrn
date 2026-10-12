@@ -1,8 +1,3 @@
-// A dot call is taken by a local of `fn` type: `5.inc()` calls the local
-// `inc`, not `fn inc`, and a dot call skips the local `count`, which is no
-// function. `step` calls the generator's name through a local, so it still
-// has a run-time lowering.
-
 fn inc(x: Int64) -> Int64 {
     return x + 1
 }

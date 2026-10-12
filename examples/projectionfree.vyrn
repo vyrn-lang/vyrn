@@ -1,5 +1,3 @@
-// A projection named `at` answers to the free call `at(w, i)` and to the method
-// form `w.at(i)` as it does to `w[i]`.
 type Window = { data: Array<Int64>, start: Int64 }
 
 impl Index for Window {

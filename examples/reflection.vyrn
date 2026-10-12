@@ -1,12 +1,4 @@
-/// Extractable `where` — reflection. `schemaOf<TypeName>()` reads a
-/// validated type's declaration *at compile time* and yields a `Schema`:
-/// its name, base spelling, `///` doc, and everything the `where` predicate
-/// implies (numeric bounds, `multipleOf`, string length bounds, the regex
-/// pattern). It is NOT runtime reflection (Vyrn erases types); the compiler
-/// computes it from the declaration, so the interpreter and native backend
-/// produce identical results. Turn it into OpenAPI, JSON Schema, etc.
-/// (For a ready-made JSON Schema document, use `jsonSchema<TypeName>()` directly —
-/// see jsonschema.vyrn.)
+// `schemaOf<T>()` reads a `where` back.
 
 /// Age of an adult account holder.
 type Age = Int64 where value >= 18
@@ -23,8 +15,6 @@ fn optStrOr(o: Option<String>, d: String) -> String {
     return match o { Some(s) => s.copy(), None => d.copy() }
 }
 
-// Turn a Schema into an OpenAPI-style JSON fragment (the motivating use case).
-// `s.doc` — the type's `///` line — becomes the OpenAPI description.
 fn openApi(s: Schema) -> String {
     let mut json = "{ \"type\": \"integer\""
     if has(s.min) {
@@ -40,7 +30,6 @@ fn openApi(s: Schema) -> String {
     return json + " }"
 }
 
-// String schemas carry length bounds and the pattern as written.
 fn openApiString(s: Schema) -> String {
     let mut json = "{ \"type\": \"string\""
     if has(s.minLength) {

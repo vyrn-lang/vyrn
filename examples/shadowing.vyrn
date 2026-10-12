@@ -1,18 +1,3 @@
-// Shadowing: an inner binder is a new binding, never the outer one.
-//
-// Ownership analysis decides at every `let` whether the value is
-// a fresh heap String the block must free when it exits. To decide it has to
-// know the type of each name in the initializer, and to know that it has to
-// resolve the name to the binding actually in scope. Resolving past an inner
-// binder to an outer String read `let t = s + 1` as concatenation, and the
-// native backend then passed the integer 2 to `free` as if it were an address.
-//
-// Every binder kind shadows: a `let`, a `for` variable, a pattern's payload, a
-// lambda parameter. Each one is a different way into the same question, so each
-// gets a case here. The last case is the mirror — a shadowed String is still a
-// String and is still freed, because answering "an inner binding is never a
-// String" would trade the wrong free for a leak.
-
 fn shadowedByLet() -> Int64 {
     let s = "x"
     print(s)
@@ -75,10 +60,6 @@ fn shadowedByLambdaParam() -> Int64 {
     return 0
 }
 
-// The mirror. Both concatenations allocate, both bindings own what they
-// allocated, and both are freed at the end of their own block. Nothing here is
-// visible in the output — a missed free is a leak, not a wrong line — so what
-// this case guards is that the fix did not buy correctness by freeing nothing.
 fn shadowedStringIsStillFreed() -> Int64 {
     let a = "one "
     let s = a + "two"

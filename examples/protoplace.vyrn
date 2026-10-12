@@ -1,9 +1,4 @@
-/// A protocol may declare a projection: `-> read T` in a
-/// protocol body is a requirement an impl satisfies with a projection member
-/// — same name, same receiver capability, same signature. Dispatch is
-/// unchanged (a projection resolves by receiver type and inlines), so what
-/// the declaration buys is the CONTRACT: conformance speaks at the impl,
-/// not at the first call site that misses.
+// A projection declared in a protocol.
 
 protocol Shelf {
     fn size(self) -> Int64

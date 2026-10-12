@@ -1,27 +1,7 @@
-/// The exact bytes `toJson` produces.
-///
-/// A rewire moved `toJson`'s serializer half from the C shim's
-/// `__vyrn_vj_encode` to `std/json`'s `emit`, which is the same JSON writer
-/// written in Vyrn. The bytes have to be captured BEFORE that swap: a test
-/// written afterwards proves whatever came out, not that the two writers agree.
-/// So this example is deliberately dull. It walks the whole surface where two
-/// JSON writers can legally disagree — escaping, number formatting, field
-/// order, the `None`-omission — prints it from `main`, which is what makes
-/// parity check interp == native == wasm on it, and pins the interesting rows
-/// as literals in the `test` blocks below.
-///
-/// The literals are what the C shim produces TODAY, before any rewiring. Two of
-/// them are rows where `std/json` legally disagrees (bytes 0x08 and 0x0c, which it
-/// spells `\b` and `\f` rather than the long `\u00XX` form). Pinning the current
-/// answer first is what turns the swap's diff into a statement about which writer
-/// won, rather than a test that quietly agrees with whatever landed.
+// The exact bytes `toJson` produces.
 
-/// A string wrapper, so escaping is observed through a record field — the path a
-/// real `toJson` caller takes.
 type Esc = { s: String }
 
-/// Every numeric type `toJson` can encode, in one record, so a single line of
-/// output covers the whole number-formatting surface.
 type Nums = {
     i: Int64,
     i8v: Int8,
@@ -33,10 +13,8 @@ type Nums = {
     f32v: Float32,
 }
 
-/// Nesting, an array, an `Option` (omitted when `None`) and a `Bool`.
 type Nest = { name: String, tags: Array<String>, opt: Option<Int64>, on: Bool }
 
-/// `a<b>z`, so an escaped byte is observed with a literal byte on either side.
 fn ctl(b: UInt8) -> String {
     let mut out: Array<UInt8> = []
     out.push('a')
@@ -48,16 +26,11 @@ fn ctl(b: UInt8) -> String {
     }
 }
 
-/// `toJson` of `a<b>z` for one control byte.
 fn ctlJson(b: UInt8) -> String {
     return toJson(Esc { s: ctl(b) })
 }
 
 fn main() -> Int64 {
-    // Byte 0 is not reachable: `stringFromBytes` rejects NUL before a String can
-    // hold one (the NUL rule), which is also why the shim's NUL-terminated
-    // C strings never had to answer for truncation here. The rejection message is
-    // printed rather than skipped, so the reason stays visible in the output.
     let mut c = 0
     while c < 32 {
         print(ctlJson(UInt8(c)))
@@ -124,23 +97,11 @@ test "escapes as \\u00XX, lowercase hex" {
 }
 
 test "0x08 and 0x0c are the two writers' only disagreement" {
-    // The whole surface this example walks produced exactly two disagreements, and
-    // the swap moved these two rows and nothing else: the C shim wrote
-    // the long `\u0008` / `\u000c`, `std/json` writes the short `\b` / `\f`. Both
-    // are valid JSON and both parse back to the same string, so this was a choice,
-    // and it went to `std/json` because its `emit` has committed consumers
-    // (`std/tw`, `std/i18n`, `std/openapi` and their golden outputs) while the long
-    // form had no caller in the repo that could observe it.
-    //
-    // The pins were written BEFORE the swap, against the shim, which is what makes
-    // this a statement about which writer won rather than a description of whatever
-    // came out.
     assertEq(ctlJson(UInt8(8)), "{\"s\":\"a\\bz\"}")
     assertEq(ctlJson(UInt8(12)), "{\"s\":\"a\\fz\"}")
 }
 
 test "leaves alone what JSON does not require escaping" {
-    // `/` is escapable but never required; multi-byte UTF-8 passes through raw.
     assertEq(toJson(Esc { s: "a/b" }), "{\"s\":\"a/b\"}")
     assertEq(toJson(Esc { s: "ä€" }), "{\"s\":\"ä€\"}")
     assertEq(toJson(Esc { s: "" }), "{\"s\":\"\"}")

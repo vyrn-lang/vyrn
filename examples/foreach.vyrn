@@ -1,13 +1,4 @@
-// `for x in arr { .. }` — iterate an array, binding each element to `x`.
-//
-// A `for` loop works over either array kind: a fixed `Array<T, N>` value
-// aggregate or a growable `Array<T>`. The loop variable is a fresh immutable
-// binding of the element type, scoped to the body. It desugars to nothing
-// magic — a bounds-free index walk from 0 to the array's length — so the
-// interpreter and the native backend agree exactly.
-
 fn sumFixed() -> Int64 {
-    // Fixed-size array literal: no heap, lives on the stack.
     let squares: Array<Int64, 5> = [0, 1, 4, 9, 16]
     let mut total = 0
     for s in squares {
@@ -17,14 +8,12 @@ fn sumFixed() -> Int64 {
 }
 
 fn countLongWords() -> Int64 {
-    // Growable array of strings, built subject-first.
     let mut words: Array<String> = []
     words.push("hi")
     words.push("there")
     words.push("friend")
     words.push("yo")
 
-    // Iterate, printing each and counting the ones longer than 2 chars.
     let mut long = 0
     for w in words {
         print(w)

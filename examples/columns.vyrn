@@ -1,15 +1,4 @@
-/// One field of many records, read row-wise and column-wise.
-///
-/// `std/columns` lays `Particle` out as one array per field. The `sum` kernel
-/// reads `mass` alone, the case a column layout wins by construction: a row
-/// walk strides 64 bytes for 8 useful ones. The `move` kernel reads two fields
-/// and writes one.
-///
-///     vyrn run examples/columns.vyrn rows sum 1000000 20
-///     vyrn run examples/columns.vyrn columns sum 1000000 20
-///
-/// Both layouts print the same checksum; with no arguments the program checks
-/// that on a small size.
+// One field of many records, read row-wise and column-wise.
 
 import { Particle } from "./lib/bodies"
 import { columns } from "std/columns"

@@ -1,10 +1,4 @@
-/// JSON Schema type imports: `import type { .. }` from a
-/// `.json` file synthesizes validated Vyrn types from a JSON Schema document —
-/// the exact inverse of `jsonSchema<T>()`. Constraints become `where` clauses
-/// (auto-validated at every boundary, like any validated type), `required`
-/// steers `Option<T>`, and `$defs` entries are importable too. A schema using
-/// a keyword Vyrn can't express is a compile-time error, never a silently
-/// weaker type.
+// JSON Schema type imports.
 
 import type { User, Port } from "./user.schema.json"
 
@@ -22,8 +16,6 @@ fn main() -> Int64 {
     let dyn = mk("ada", 99) // runtime-checked construction
     print(dyn.age) // 99
 
-    // Round-trip: re-emitting the imported type reproduces the schema's
-    // property constraints exactly.
     print(jsonSchema<User>())
     return 0
 }

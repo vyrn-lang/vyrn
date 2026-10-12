@@ -1,10 +1,4 @@
-/// Inline field refinements (Zod/ArkType style): a field's constraint lives on
-/// the field itself, and the record-level trailing `where` remains the
-/// CROSS-FIELD invariant (the analog of Zod's object-level `.refine`). Each
-/// inline `where` desugars to a synthetic validated type (`User.age`), so the
-/// whole automatic-validation pipeline applies: constants are proven at compile
-/// time, dynamic values are checked at every boundary, and `jsonSchema` picks
-/// the constraints up field by field.
+// Inline field refinements beside a record-level `where`.
 
 type User = {
     name: String where value.byteLength >= 3,

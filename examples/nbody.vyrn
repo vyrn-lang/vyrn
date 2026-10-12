@@ -1,27 +1,7 @@
 // nbody, from the Computer Language Benchmarks Game.
-//
-// Five bodies, every pair, one symplectic step at a time. It measures ordinary
-// `Float64` arithmetic and a record field written through an array index in the
-// innermost loop of the whole benchmark set.
-//
-//   $ vyrn run examples/nbody.vyrn
-//   $ vyrn bench examples/nbody.vyrn
-//
-// `main` runs the benchmark at N = 1000.
-//
-// Two things this program carries because `std` does not have them:
-//
-//   * there is no scalar square root. `F64x2.sqrt(v).lane(0)` is one lane of
-//     the SIMD one, and a hand-written Newton iteration is not a
-//     substitute — 40 rounds land one ULP low, which is a printed digit here.
-//   * `print` on a `Float64` is fixed at six decimals and the game prints nine,
-//     so the nine come from scaling into an `Int64`.
 
-/// The N `main` runs — 1000 steps, the size the committed fixture was written at.
 let steps = 1000
 
-/// The bench N. Large enough that a sample is the integration and not the
-/// setup, small enough to stay a corpus program rather than a benchmark suite.
 let benchSteps = 50000
 
 type Body = {
@@ -34,13 +14,10 @@ type Body = {
     mass: Float64,
 }
 
-/// The square root of one `Float64`, which `std/math` does not export.
 fn sqrtF(v: Float64) -> Float64 {
     return F64x2.sqrt(F64x2(v, v)).lane(0)
 }
 
-/// `v` at nine decimal places, the format the game prints. `print` gives six, so
-/// the digits are scaled into an `Int64` and the fraction is padded.
 fn fixed9(v: Float64) -> String {
     let mut a = v
     let mut sign = ""
@@ -65,8 +42,6 @@ fn daysPerYear() -> Float64 {
     return 365.24
 }
 
-/// The sun and the four gas giants, at the positions and velocities the game
-/// publishes.
 fn system() -> Array<Body> {
     let sm = solarMass()
     let dy = daysPerYear()
@@ -111,11 +86,6 @@ fn system() -> Array<Body> {
     return b
 }
 
-/// The sun's velocity, set so the whole system's momentum is zero.
-///
-/// It is `consume` in and owned out because a helper that mutates an array the
-/// caller keeps using cannot borrow it: a `read` parameter may not be returned,
-/// and a return is owned. A move each way, and no copy — see `advance` too.
 fn offsetMomentum(bodies: consume Array<Body>) -> Array<Body> {
     let mut b = bodies
     let mut px = 0.0
@@ -132,8 +102,6 @@ fn offsetMomentum(bodies: consume Array<Body>) -> Array<Body> {
     return b
 }
 
-/// Kinetic energy plus the pairwise potential — the number the game prints
-/// before and after the integration.
 fn energy(b: Array<Body>) -> Float64 {
     let mut e = 0.0
     let mut i = 0
@@ -152,8 +120,6 @@ fn energy(b: Array<Body>) -> Float64 {
     return e
 }
 
-/// One time step: every pair exchanges momentum, then every body moves. The
-/// `consume`-and-return shape is `offsetMomentum`'s, for the same reason.
 fn advance(bodies: consume Array<Body>, dt: Float64) -> Array<Body> {
     let mut b = bodies
     let mut i = 0
@@ -187,9 +153,6 @@ fn advance(bodies: consume Array<Body>, dt: Float64) -> Array<Body> {
     return b
 }
 
-/// `n` steps from the published initial conditions, and the energy afterwards.
-/// The whole program apart from the two prints, so the bench block and `main`
-/// run the same code.
 fn integrate(n: Int64) -> Float64 {
     let mut b = offsetMomentum(system())
     let mut i = 0

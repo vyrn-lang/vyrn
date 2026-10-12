@@ -1,6 +1,3 @@
-// A callee's type parameter is apart from the caller's parameter of the same
-// name: `mapOne`'s `U` is `Int64` here, while `g`'s `U` is `Bool`.
-
 fn mapOne<T, U>(x: T, f: fn(T) -> U) -> U {
     return f(x)
 }

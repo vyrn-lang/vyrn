@@ -1,6 +1,4 @@
-// A key must be heapless ALL the way down. A `String` field
-// owns heap, so the record around it cannot key a map — the map stores,
-// compares and frees its keys, and a heapless key makes all three trivial.
+// Refused on purpose: a `Map` key with a heap field.
 import { Hashable } from "std/hash"
 
 type Tag = { name: String, n: Int64 }

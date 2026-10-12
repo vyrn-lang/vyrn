@@ -1,10 +1,4 @@
-/// clifail — the refusal half of `clidemo`.
-///
-/// One argv breaks four rules at once: an unknown option, a flag given a value,
-/// a port outside the range its own type states, and a required option nobody
-/// gave. `Validation` accumulates, so all four arrive together, each with the
-/// library's own wording and the field it belongs to. The exit code is 2, the
-/// usage code, and the run is byte-identical on all three backends.
+// The refusal half of `clidemo`.
 
 import { cli, wantsHelp } from "std/cli"
 import { parseServe, helpServe } from cli("./lib/serve")

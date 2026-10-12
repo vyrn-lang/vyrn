@@ -1,10 +1,4 @@
-// A user type as a Map key: a heapless record and a fieldless
-// enum, each admitted by its `impl Hashable` — the declared obligation that
-// equal values return equal hashes. Equality is field-wise (the runtime
-// compares canonical field bytes, never padding), and the impl is the type's
-// callable hash, exactly as `Int64`'s and `String`'s describe theirs.
-//
-//   $ vyrn run examples/mapkey.vyrn
+// A heapless record and a fieldless enum as `Map` keys.
 
 import { Hashable } from "std/hash"
 
@@ -34,8 +28,6 @@ impl Hashable for Suit {
 }
 
 fn main() -> Int64 {
-    // The ops, one by one: insert, update, tally, read, membership, snapshot,
-    // removal — insertion order preserved throughout.
     let mut m: Map<Point, Int64> = [:]
     m[Point { x: 1, y: 2 }] = 10
     m[Point { x: 3, y: 4 }] = 20
@@ -54,7 +46,6 @@ fn main() -> Int64 {
     }
     print("\{m.remove(Point { x: 3, y: 4 })} \{m.remove(Point { x: 3, y: 4 })} \{m.length}")
 
-    // A fieldless enum keys the same way.
     let mut suits: Map<Suit, Int64> = [:]
     suits.tally(Hearts, 2)
     suits.tally(Spades, 1)

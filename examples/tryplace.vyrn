@@ -1,8 +1,4 @@
-/// An option of a place: `if let Some(v) = s.tryAt(h)` reads the
-/// element where a live handle points and takes the `else` arm where a dead
-/// one does — no `Option` is built and nothing is copied on either path.
-/// `get` stays beside it for the value that must outlive the test, and the
-/// benches price the difference on the hit path.
+// `if let Some(v) = s.tryAt(h)`.
 
 import { Slots, Handle, newSlots, insert, remove, get } from "std/slots"
 import { Json, JsonField } from "std/json"
@@ -69,9 +65,6 @@ fn main() -> Int64 {
     } else {
         print("absent field: miss")
     }
-    // A non-object misses too: the scan runs inside an
-    // `if let`, and the payload binds only after the miss is decided —
-    // where `field` still traps, because there kind confusion is a bug.
     let plain = JStr("not an object")
     if let Some(v) = plain.tryField("any") {
         if let JStr(s) = v {

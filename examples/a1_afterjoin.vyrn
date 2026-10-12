@@ -3,8 +3,6 @@ fn take(v: consume String) -> Int64 {
     return 0
 }
 
-/// A1's reach: `s` moved on ONE branch, READ AFTER the join. Theorem 4's first
-/// case claims the checker refuses this. Does it?
 fn f(flag: Bool) -> Int64 {
     let s = "ab" + "cd"
     let mut n = 0

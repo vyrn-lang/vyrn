@@ -1,7 +1,3 @@
-// A function spelled like the flattened method of `impl Size for P` is a
-// declaration of its own: `p.size()` runs the impl and `Size__P__size(p)`
-// runs the function.
-
 type P = { x: Int64 }
 
 protocol Size {

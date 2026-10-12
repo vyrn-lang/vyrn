@@ -1,16 +1,5 @@
-/// `fromArray` TAKES the array, and the same is true of `fromStep`'s step.
-///
-/// A stream made from a buffer owns that buffer: its close frees it. A stream
-/// made from a step owns the step's captures: its close frees them. So the
-/// frame that handed either one over must not release it a second time.
-///
-/// Most call sites write `return fromArray(xs)`, where the `return` records the
-/// move anyway. This file is the other shape, a NAMED array that the same frame
-/// consumes, so parity covers it.
-///
-/// A use of the name after the call is refused. See streammove_after.vyrn.
+// `fromArray` and `fromStep` take their argument.
 
-/// A named array, consumed by the frame that made it. The buffer is freed once.
 fn named() -> Int64 {
     let xs: Array<Int64> = [1, 2, 3]
     let s = fromArray(xs)
@@ -21,9 +10,6 @@ fn named() -> Int64 {
     return sum
 }
 
-/// The same, on a type whose elements own heap of their own. An array releases
-/// its elements, so an `Array<String>` has more than a buffer
-/// to free twice.
 fn strings() -> Unit {
     let names: Array<String> = ["ada", "grace", "alan"]
     for n in fromArray(names) {
@@ -31,14 +17,11 @@ fn strings() -> Unit {
     }
 }
 
-/// A TEMPORARY argument has no binding to mark, and must keep working.
 fn mk() -> Array<Int64> {
     let xs: Array<Int64> = [10, 20, 30]
     return xs
 }
 
-/// A named step, handed to `fromStep` and closed by the loop. `run`'s capture
-/// block is freed by the stream's close, so this frame must not free it too.
 fn stepped() -> Int64 {
     let each = 7
     let mut left = 3

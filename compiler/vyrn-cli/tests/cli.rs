@@ -209,7 +209,7 @@ fn the_profile_counts_blocks_per_line() {
         "{table}"
     );
     for row in [
-        "  96  countKmers  ",
+        "  60  countKmers  ",
         "`tally(..)` may allocate",
         "allocates in `toUpper(..)` from std/strings",
     ] {

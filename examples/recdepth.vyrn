@@ -1,15 +1,4 @@
-/// Recursion runs until a stack runs out, and then the run ends with the same
-/// words on every engine.
-///
-/// No engine counts calls. `vyrn run` gives a program 32 MiB of wasmtime's
-/// stack, a native binary has the machine's, a browser has its engine's, and
-/// the shadow stack in linear memory holds the frames of aggregate locals.
-/// When any of them runs out, the host hands the overflow back to the module,
-/// which flushes what `print` buffered and traps `call stack exhausted`.
-///
-/// The depth at which that happens differs per engine. Depth 5,000 runs on
-/// every one; depth 1,000,000,000 runs out on every one. The remainder keeps
-/// the combine step from being one an optimizer turns into a loop.
+// Unbounded recursion ends with the same words on every engine.
 fn down(n: Int64) -> Int64 {
     if n <= 0 {
         return 0
@@ -20,7 +9,6 @@ fn down(n: Int64) -> Int64 {
 
 fn main() -> Int64 {
     print("\{down(5000)}")
-    // The run ends here.
     print("\{down(1000000000)}")
     return 0
 }
