@@ -228,7 +228,7 @@ fn binds(fact: &RecordFact, fields: &[Field], decls: &HashMap<String, TypeDecl>)
 /// The [`RecordFact`]s every record value with their fields keeps
 /// ([`invariants`]): two array fields of equal length, an integer field at
 /// least zero or one, an array or String field at least as long as an
-/// integer field's value.
+/// integer field's value or longer.
 #[derive(Debug, Default)]
 pub struct RecordFacts {
     /// Every fact no round has dropped.
@@ -733,7 +733,8 @@ fn invariants(
             for a in near {
                 of.insert(vec![(Part::Val(f.clone()), 1)]);
                 let parts = vec![(Part::Val(f.clone()), -1), (Part::Len(a.clone()), 1)];
-                of.insert(record_fact(parts));
+                of.insert(record_fact(parts.clone()));
+                of.insert(record_fact([parts, vec![(Part::One, -1)]].concat()));
             }
         }
         of.extend(element_facts(fs, decls, &through, &loose, &shrunk));

@@ -5611,3 +5611,35 @@ fn a_mask_bounds_an_index_by_its_non_negative_operand() {
     }
     assert!(failures.is_empty(), "{}", failures.join("\n\n"));
 }
+
+/// A record whose every builder makes an integer field below an array
+/// field's length states it, so `s.slots[h & s.mask]` needs no check. One
+/// builder that makes `mask` equal to the length drops the fact, and the
+/// read keeps its check, which traps.
+#[test]
+fn an_integer_field_below_a_length_proves_a_masked_index() {
+    let src = |mask: i64| {
+        format!(
+            "type Tab = {{ slots: Array<Int64>, mask: Int64 }}
+fn make() -> Tab {{
+    return Tab {{ slots: [0, 0, 0, 0], mask: {mask} }}
+}}
+fn w(s: Tab, h: Int64) -> Int64 {{
+    return s.slots[h & s.mask]
+}}
+"
+        )
+    };
+    let calls = "    print(w(make(), 4).toString())";
+    let proof = src(3);
+    assert_eq!(verdicts(&proof, "w"), ["proved array-index"]);
+    assert_eq!(oracle(&proof, calls, "w").0, "");
+    let witness = src(4);
+    assert_eq!(verdicts(&witness, "w"), ["check array-index"]);
+    let (err, _) = oracle(&witness, calls, "w");
+    assert!(err.contains("array index 4 out of bounds"), "{err}");
+    assert!(
+        !err.contains(vyrn_frontend::trap::PROVED_CHECK_FAILED),
+        "{err}"
+    );
+}
