@@ -3331,11 +3331,15 @@ impl<'a> Walk<'a> {
                 };
                 let mut a = self.block(yes, then);
                 let mut b = self.block(no, els);
-                if !a.dead && !b.dead {
-                    leave(&mut a, then, &[]);
-                    leave(&mut b, els, &[]);
+                if a.dead || b.dead {
+                    return State::join(&[a, b]);
                 }
-                State::join(&[a, b])
+                leave(&mut a, then, &[]);
+                leave(&mut b, els, &[]);
+                let ends = [a, b];
+                let mut j = State::join(&ends);
+                self.branch_facts(&mut j, cond, [then, els], &ends);
+                j
             }
             St::Block { body, .. } => self.block(st, body),
             St::Loop { body, .. } => self.looped(st, body),
@@ -3437,6 +3441,43 @@ impl<'a> Walk<'a> {
                 st
             }
         }
+    }
+
+    /// Keeps in `j`, the join of `if c`'s branch ends `ends`, each branch's
+    /// facts over the names it stores as the side of `c` that branch took:
+    /// `let t = if fast { table() } else { [] }` leaves `len(t) >= 256` where
+    /// `fast` holds. Only where neither branch writes `c`.
+    fn branch_facts(&self, j: &mut State, c: &Val, branches: [&[St]; 2], ends: &[State; 2]) {
+        let Val::Name(c) = c else { return };
+        if self.solving || !self.slot[c.index()].relevant {
+            return;
+        }
+        let (mut stored, mut written) = (BTreeSet::new(), BTreeSet::new());
+        for b in branches {
+            stores(b, &mut stored);
+            writes(b, &mut written);
+        }
+        if stored.is_empty() || written.contains(c) {
+            return;
+        }
+        let known = j.prover();
+        let [t, f] = ends.each_ref().map(|s| {
+            (s.facts.iter().cloned().chain(s.unshared(j)))
+                .filter(|l| {
+                    (l.terms.iter()).any(|(t, _)| {
+                        matches!(t, Term::Len(_) | Term::Col(..)) && stored.contains(&t.name())
+                    })
+                })
+                .filter(|l| known.ge0(l).is_none())
+                .map(Fact::Ge)
+                .collect::<Vec<_>>()
+        });
+        if t.is_empty() && f.is_empty() {
+            return;
+        }
+        let side = j.conds.entry(*c).or_default();
+        side.0.extend(t);
+        side.1.extend(f);
     }
 
     /// What must be `>= 0` for the check to pass, as far as linear facts can

@@ -5918,3 +5918,47 @@ fn take(lx: Lexer, out: modify Out) {{
         );
     }
 }
+
+/// Neither branch of `if small` writes `small`, so the join keeps what each
+/// proves of the names it stores as a side of `small`: `t` is at least
+/// `i + 1` long where `small` holds and empty where it does not. A read of
+/// `t[i]` under `!small` keeps its check and traps.
+#[test]
+fn a_join_keeps_each_branch_facts_under_its_condition() {
+    let src = |cond: &str| {
+        format!(
+            "fn table(n: Int64) -> Array<Int64> {{
+    let mut t: Array<Int64> = []
+    let mut k = 0
+    while k < n {{
+        t.push(k)
+        k = k + 1
+    }}
+    return t
+}}
+
+fn w(i: Int64 where value >= 0) -> Int64 {{
+    let small = i < 256
+    let t: Array<Int64> = if small {{ table(i + 1) }} else {{ [] }}
+    if {cond} {{
+        return t[i]
+    }}
+    return 0
+}}
+"
+        )
+    };
+    let calls = "    print(w(3).toString())
+    print(w(300).toString())";
+    let proof = src("small");
+    assert_eq!(verdicts(&proof, "w"), ["proved array-index"]);
+    assert_eq!(oracle(&proof, calls, "w").0, "");
+    let witness = src("!small");
+    assert_eq!(verdicts(&witness, "w"), ["check array-index"]);
+    let (err, _) = oracle(&witness, calls, "w");
+    assert!(err.contains("array index 300 out of bounds"), "{err}");
+    assert!(
+        !err.contains(vyrn_frontend::trap::PROVED_CHECK_FAILED),
+        "{err}"
+    );
+}

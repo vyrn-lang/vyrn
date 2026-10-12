@@ -776,7 +776,7 @@ impl State {
     }
 
     /// Each definition of `self` that `out` lacks, as its two facts.
-    fn unshared<'a>(&'a self, out: &'a State) -> impl Iterator<Item = Lin> + 'a {
+    pub fn unshared<'a>(&'a self, out: &'a State) -> impl Iterator<Item = Lin> + 'a {
         (self.defs.iter())
             .filter(|(t, v)| out.defs.get(t) != Some(v))
             .flat_map(|(t, v)| [Lin::of(*t).sub(v), v.sub(&Lin::of(*t))])
