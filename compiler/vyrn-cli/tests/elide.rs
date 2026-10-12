@@ -5045,6 +5045,20 @@ fn main() -> Int64 {
 "#,
         "array index 99 out of bounds",
     ),
+    // A literal holds an array its `let` made empty and a row then grew.
+    (
+        r#"fn main() -> Int64 {
+    let mut t = T { idx: [], data: [] }
+    add(t, 5)
+    let mut a: Array<Int64> = []
+    a.push(99)
+    let u = T { idx: a, data: [1] }
+    print((w(t, 0) + w(u, 0)).toString())
+    return 0
+}
+"#,
+        "array index 99 out of bounds",
+    ),
     // A `copyFrom` replaces the elements.
     (
         r#"fn main() -> Int64 {
@@ -5270,13 +5284,21 @@ fn an_element_fact_proves_the_index_it_bounds() {
 
 #[test]
 fn every_element_witness_keeps_its_index_and_traps_there() {
+    witnesses(ELEMENT_HEAD, ELEMENT_WITNESSES, &["check", "check"]);
+}
+
+/// Runs each `(main, trap)` of `mains` after `head`, and fails unless `w`'s
+/// check rows have the verdicts `rows` and the run traps with `trap`, never
+/// at a proved row.
+fn witnesses(head: &str, mains: &[(&str, &str)], rows: &[&str]) {
     let mut failures = Vec::new();
-    for (main, trap) in ELEMENT_WITNESSES {
-        let root = format!("{ELEMENT_HEAD}{main}");
+    for (main, trap) in mains {
+        let root = format!("{head}{main}");
         let (dir, file) = modules(&root, &[]);
-        let rows = rows_of(&file, "w");
-        if rows.iter().any(|v| v.starts_with("proved")) {
-            failures.push(format!("{root}\nrows: {rows:?}"));
+        let got = rows_of(&file, "w");
+        let verdicts: Vec<&str> = got.iter().map(|v| v.split(' ').next().unwrap()).collect();
+        if verdicts != rows {
+            failures.push(format!("{root}\nrows: {got:?}"));
         }
         let (err, _) = run_oracle(&dir, &file, "w");
         if !err.contains(trap) || err.contains(vyrn_frontend::trap::PROVED_CHECK_FAILED) {
@@ -5284,6 +5306,238 @@ fn every_element_witness_keeps_its_index_and_traps_there() {
         }
     }
     assert!(failures.is_empty(), "{}", failures.join("\n\n"));
+}
+
+/// [`ELEMENT_HEAD`] with a reader that loops over every element. The core
+/// reads `t.idx` and `t.data` through borrows it binds above the loop.
+const LOOP_HEAD: &str = r#"type T = { idx: Array<Int64>, data: Array<Int64> }
+fn add(t: modify T, x: Int64) {
+    t.data.push(x)
+    t.idx.push(t.data.length - 1)
+}
+fn w(t: T, k: Int64) -> Int64 {
+    let mut s = k
+    let mut j = 0
+    while j < t.idx.length {
+        s = s + t.data[t.idx[j]]
+        j = j + 1
+    }
+    return s
+}
+"#;
+
+#[test]
+fn a_loop_reads_a_fields_element_facts_through_its_borrow() {
+    for main in [GOOD_MAIN, COPY_MAIN] {
+        let (_dir, file) = modules(&format!("{LOOP_HEAD}{main}"), &[]);
+        assert_eq!(
+            rows_of(&file, "w"),
+            ["proved array-index", "proved array-index"]
+        );
+    }
+}
+
+/// The loop meets a bad element before the one each witness's `w` call
+/// names, so the trap's index differs.
+#[test]
+fn every_element_witness_keeps_its_index_in_a_loop() {
+    let mains: Vec<(&str, &str)> = (ELEMENT_WITNESSES.iter())
+        .map(|(main, _)| (*main, "out of bounds"))
+        .collect();
+    witnesses(LOOP_HEAD, &mains, &["proved", "check"]);
+}
+
+/// A graph in compressed rows: the targets of vertex `v` are
+/// `tgt[off[v]..off[v + 1]]`, so an offset may equal `tgt.length`.
+const ROWS_HEAD: &str = r#"type G = { off: Array<Int64>, tgt: Array<Int64> }
+fn vertex(g: modify G, a: Int64, b: Int64) {
+    g.tgt.push(a)
+    g.tgt.push(b)
+    g.off.push(g.tgt.length)
+}
+fn w(g: G, v: Int64) -> Int64 {
+    let mut s = 0
+    let mut e = g.off[v]
+    while e < g.off[v + 1] {
+        s = s + g.tgt[e]
+        e = e + 1
+    }
+    return s
+}
+"#;
+
+#[test]
+fn an_element_may_end_a_range_of_another_field() {
+    let main = r#"fn main() -> Int64 {
+    let mut g = G { off: [0], tgt: [] }
+    vertex(g, 1, 2)
+    vertex(g, 3, 4)
+    print(w(g, 1).toString())
+    return 0
+}
+"#;
+    let (_dir, file) = modules(&format!("{ROWS_HEAD}{main}"), &[]);
+    assert_eq!(
+        rows_of(&file, "w"),
+        [
+            "check array-index",
+            "check array-index",
+            "proved array-index"
+        ]
+    );
+}
+
+/// Programs that break the offsets of [`ROWS_HEAD`], each with its trap.
+const ROWS_WITNESSES: &[(&str, &str)] = &[
+    // An offset past the targets.
+    (
+        r#"fn main() -> Int64 {
+    let mut g = G { off: [0], tgt: [] }
+    vertex(g, 1, 2)
+    g.off.push(g.tgt.length + 1)
+    print(w(g, 1).toString())
+    return 0
+}
+"#,
+        "array index 2 out of bounds",
+    ),
+    // A literal whose first offset is past the targets.
+    (
+        r#"fn main() -> Int64 {
+    let mut g = G { off: [1], tgt: [] }
+    g.off.push(g.tgt.length + 2)
+    print(w(g, 0).toString())
+    return 0
+}
+"#,
+        "array index 1 out of bounds",
+    ),
+];
+
+#[test]
+fn every_offset_witness_keeps_its_index_and_traps_there() {
+    witnesses(ROWS_HEAD, ROWS_WITNESSES, &["check", "check", "check"]);
+}
+
+/// A forest whose roots point at themselves; `w` follows one parent.
+const FOREST_HEAD: &str = r#"type F = { parent: Array<Int64> }
+fn w(f: F, x: Int64) -> Int64 {
+    if x < 0 || x >= f.parent.length {
+        return 0
+    }
+    return f.parent[f.parent[x]]
+}
+"#;
+
+#[test]
+fn a_push_of_the_counter_keeps_its_fields_element_fact() {
+    let main = r#"fn main() -> Int64 {
+    let mut f = F { parent: [] }
+    let mut i = 0
+    while i < 4 {
+        f.parent.push(i)
+        i = i + 1
+    }
+    print(w(f, 3).toString())
+    return 0
+}
+"#;
+    let (_dir, file) = modules(&format!("{FOREST_HEAD}{main}"), &[]);
+    assert_eq!(
+        rows_of(&file, "w"),
+        ["proved array-index", "proved array-index"]
+    );
+}
+
+/// Programs that push past the bound of [`FOREST_HEAD`], each with its trap.
+const FOREST_WITNESSES: &[(&str, &str)] = &[
+    // A push one past the length it leaves.
+    (
+        r#"fn main() -> Int64 {
+    let mut f = F { parent: [] }
+    let mut i = 0
+    while i < 4 {
+        f.parent.push(i + 1)
+        i = i + 1
+    }
+    print(w(f, 3).toString())
+    return 0
+}
+"#,
+        "array index 4 out of bounds",
+    ),
+    // A push on some turns only: the counter outruns the length.
+    (
+        r#"fn main() -> Int64 {
+    let mut f = F { parent: [] }
+    let mut i = 0
+    while i < 4 {
+        if i % 2 == 0 {
+            f.parent.push(i)
+        }
+        i = i + 1
+    }
+    print(w(f, 1).toString())
+    return 0
+}
+"#,
+        "array index 2 out of bounds",
+    ),
+];
+
+#[test]
+fn every_forest_witness_keeps_its_index_and_traps_there() {
+    witnesses(FOREST_HEAD, FOREST_WITNESSES, &["proved", "check"]);
+}
+
+/// A writer that tests its arguments with `||` before an element store, and
+/// the reader the store's element fact proves.
+const PUT_HEAD: &str = r#"type S = { dense: Array<Int64>, sparse: Array<Int64> }
+fn put(s: modify S, i: Int64, x: Int64) {
+    if i < 0 || i >= s.dense.length || x < 0 || x >= s.sparse.length {
+        return
+    }
+    s.dense[i] = x
+}
+fn w(s: S, i: Int64) -> Int64 {
+    if i < 0 || i >= s.dense.length {
+        return 0
+    }
+    return s.sparse[s.dense[i]]
+}
+"#;
+
+#[test]
+fn a_store_after_an_or_test_keeps_its_element_fact() {
+    let main = r#"fn main() -> Int64 {
+    let mut s = S { dense: [0, 0], sparse: [5, 6, 7] }
+    put(s, 1, 2)
+    print(w(s, 1).toString())
+    return 0
+}
+"#;
+    let (_dir, file) = modules(&format!("{PUT_HEAD}{main}"), &[]);
+    assert_eq!(
+        rows_of(&file, "w"),
+        ["proved array-index", "proved array-index"]
+    );
+}
+
+#[test]
+fn a_store_the_test_does_not_cover_keeps_its_check() {
+    let head = PUT_HEAD.replace(" || x >= s.sparse.length", "");
+    let main = r#"fn main() -> Int64 {
+    let mut s = S { dense: [0, 0], sparse: [5, 6, 7] }
+    put(s, 1, 3)
+    print(w(s, 1).toString())
+    return 0
+}
+"#;
+    witnesses(
+        &head,
+        &[(main, "array index 3 out of bounds")],
+        &["proved", "check"],
+    );
 }
 
 /// A table of row offsets and the reader its facts prove: `w` steps a state

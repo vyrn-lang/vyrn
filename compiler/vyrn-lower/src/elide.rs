@@ -280,6 +280,11 @@ impl RecordFacts {
         self.of.is_empty()
     }
 
+    /// Whether a fact bounds the elements of a field named `f`.
+    fn bounds_elements_of(&self, f: &str) -> bool {
+        (self.of.iter()).any(|x| x.iter().any(|(p, _)| matches!(p, Part::Elem(e) if e == f)))
+    }
+
     /// The facts of the declared type of `modify` parameter `k` of `g`.
     fn param(&self, g: FnId, k: usize) -> Option<&[RecordFact]> {
         let d = self.params.get(&(g.index(), k))?;
@@ -1261,7 +1266,7 @@ fn element_scan<'b>(b: &'b Body, decls: &HashMap<String, TypeDecl>) -> ElementSc
     };
     for (s, _) in rows(&b.stmts) {
         match s {
-            St::Check(c) => through(b, decls, &defs, &c.guard, &mut out.through),
+            St::Check(c) => through(b, decls, &defs, &uses, &c.guard, &mut out.through),
             St::Store {
                 place: Place::Elem(base, _),
                 ..
@@ -1328,18 +1333,22 @@ fn element_scan<'b>(b: &'b Body, decls: &HashMap<String, TypeDecl>) -> ElementSc
 }
 
 /// Adds to `out` each `(f, g, c)` of [`ElementScan::through`] the check `guard`
-/// gives: it indexes field `g` of a record name by an index whose base
-/// takes an element of field `f` of the same name, in its `let` or in a row
-/// that stores the element's name into it (a loop's state), plus a value
-/// below `c` ([`reach`]).
+/// gives: it indexes field `g` of a record name, or a borrow of the field
+/// ([`field_borrows`]), by an index whose base takes an element of field `f`
+/// of the same name, in its `let` or in a row that stores the element's name
+/// into it (a loop's state), plus a value below `c` ([`reach`]).
 fn through<'b>(
     b: &'b Body,
     decls: &HashMap<String, TypeDecl>,
     defs: &[Option<&'b Rhs>],
+    uses: &[u32],
     guard: &'b Guard,
     out: &mut Vec<(&'b str, &'b str, i64)>,
 ) {
-    let Guard::Index(Place::Field(r, g), Val::Name(i)) = guard else {
+    let Guard::Index(place, Val::Name(i)) = guard else {
+        return;
+    };
+    let Place::Field(r, g) = through_borrow(place, defs, uses) else {
         return;
     };
     if !matches!(**r, Place::Name(_)) {
@@ -1350,7 +1359,7 @@ fn through<'b>(
         .unwrap_or((*i, 1));
     // The field of `r` whose element the `let` of `n` reads.
     let element = |n: Name| match defs[n.index()] {
-        Some(Rhs::Read(Place::Elem(base, _))) => match &**base {
+        Some(Rhs::Read(Place::Elem(base, _))) => match through_borrow(base, defs, uses) {
             Place::Field(r2, f) if r2 == r => Some(f.as_str()),
             _ => None,
         },
@@ -1442,6 +1451,39 @@ fn row_writes(s: &St) -> impl Iterator<Item = Name> + '_ {
     resized_places(s).filter_map(place_root).chain(written)
 }
 
+/// Per name a `let` binds to a read of a record name's field `keep` admits
+/// and no row writes, that field: the borrow the core hoists above a loop
+/// (`let @borrow = read r.f`). An element read or an index through the name
+/// reads the field.
+fn field_borrows<'s>(ss: &'s [St], keep: impl Fn(&str) -> bool) -> BTreeMap<Name, &'s Place> {
+    let mut out = BTreeMap::new();
+    for (s, _) in rows(ss) {
+        if let St::Let(n, Rhs::Read(p @ Place::Field(r, f))) = s {
+            if matches!(**r, Place::Name(_)) && keep(f) {
+                out.insert(*n, p);
+            }
+        }
+    }
+    if !out.is_empty() {
+        for (s, _) in rows(ss) {
+            row_writes(s).for_each(|n| _ = out.remove(&n));
+        }
+    }
+    out
+}
+
+/// `p`, or the field `p` names when it is a borrow of one ([`field_borrows`]),
+/// by each name's `let` and count of writes.
+fn through_borrow<'p>(p: &'p Place, defs: &[Option<&'p Rhs>], uses: &[u32]) -> &'p Place {
+    match p {
+        Place::Name(b) if uses[b.index()] == 0 => match defs[b.index()] {
+            Some(Rhs::Read(q @ Place::Field(r, _))) if matches!(**r, Place::Name(_)) => q,
+            _ => p,
+        },
+        _ => p,
+    }
+}
+
 /// Whether a length effect never shortens.
 fn grows(len: Length) -> bool {
     matches!(
@@ -1474,9 +1516,10 @@ fn int_elements(ty: &Type, decls: &HashMap<String, TypeDecl>) -> bool {
 /// The element facts of a record type with fields `fs`, Houdini's first
 /// guess: for each `(f, g, c)` of `through`, every element of the integer
 /// array field `f` is at least zero and at least `c` below the length of
-/// field `g`. A field of `loose` has no element fact and one of `shrunk`
-/// bounds none: a row may change the one's elements or shorten the other
-/// where no walk sees it.
+/// field `g`, or `c - 1` below it, since an element may end a half-open
+/// range (`e < r.offsets[v + 1]` before `r.targets[e]`). A field of `loose`
+/// has no element fact and one of `shrunk` bounds none: a row may change the
+/// one's elements or shorten the other where no walk sees it.
 fn element_facts(
     fs: &[Field],
     decls: &HashMap<String, TypeDecl>,
@@ -1496,7 +1539,10 @@ fn element_facts(
         }
         let (e, len) = (Part::Elem(f.to_string()), Part::Len(g.to_string()));
         out.push(vec![(e.clone(), 1)]);
-        out.push(record_fact(vec![(e, -1), (len, 1), (Part::One, -c)]));
+        for below in (c - 1).max(0)..=c {
+            let parts = vec![(e.clone(), -1), (len.clone(), 1), (Part::One, -below)];
+            out.push(record_fact(parts));
+        }
     }
     out
 }
@@ -2367,6 +2413,9 @@ struct Walk<'a> {
     /// Per global, the names a `let` binds to its whole value and no other
     /// row writes ([`global_borrows`]).
     borrows: BTreeMap<String, Vec<Name>>,
+    /// The borrows of record fields whose elements a [`RecordFacts`] fact
+    /// bounds ([`field_borrows`]).
+    fields: BTreeMap<Name, Place>,
 }
 
 /// What the walk keeps about one name.
@@ -2561,6 +2610,9 @@ impl<'a> Walk<'a> {
             assumed: BTreeSet::new(),
             pushed: BTreeMap::new(),
             borrows: global_borrows(stmts),
+            fields: (field_borrows(stmts, |f| sums.facts.bounds_elements_of(f)).into_iter())
+                .map(|(n, p)| (n, p.clone()))
+                .collect(),
         }
     }
 
@@ -2725,12 +2777,13 @@ impl<'a> Walk<'a> {
     }
 
     /// `fact` over the walk's terms of record name `r`, with `e` for the
-    /// element.
-    fn element_lin(&self, r: Name, fact: &RecordFact, e: &Lin) -> Option<Lin> {
+    /// element, and the length of field `grown` one more than its term: a
+    /// push holds its element to the length it leaves.
+    fn element_lin(&self, r: Name, fact: &RecordFact, e: &Lin, grown: Option<&str>) -> Option<Lin> {
         fact.iter().try_fold(Lin::k(0), |l, (p, k)| {
             let t = match p {
                 Part::Elem(_) => e.clone(),
-                Part::Len(g) => Lin::of(self.col_term(r, g)?),
+                Part::Len(g) => Lin::of(self.col_term(r, g)?).plus(i64::from(grown == Some(g)))?,
                 Part::Val(x) => Lin::of(self.field(&Place::Name(r), x)?),
                 Part::One => Lin::k(1),
             };
@@ -2738,14 +2791,19 @@ impl<'a> Walk<'a> {
         })
     }
 
-    /// Assumes of `n`, an element read from the field `base`, the field's
-    /// element facts, which every write into it proved ([`invariants`]).
+    /// Assumes of `n`, an element read from the field `base` or a borrow of
+    /// it, the field's element facts, which every write into it proved
+    /// ([`invariants`]).
     fn element_read(&mut self, st: &mut State, n: Name, base: &Place) {
+        let base = match base {
+            Place::Name(b) => self.fields.get(b).unwrap_or(base),
+            _ => base,
+        };
         let Place::Field(r, f) = base else { return };
         let Place::Name(r) = **r else { return };
         let e = Lin::of(Term::Val(n));
         for fact in self.element_facts_of(r, Some(f)) {
-            if let Some(l) = self.element_lin(r, fact, &e) {
+            if let Some(l) = self.element_lin(r, fact, &e, None) {
                 st.assume(&l);
                 if self.obliging {
                     self.assumed.insert(fact.clone());
@@ -2755,8 +2813,9 @@ impl<'a> Walk<'a> {
     }
 
     /// While obliging, drops each element fact of field `f` of record name
-    /// `r` that `v`, stored into the field, does not prove in `st`.
-    fn stored_element(&mut self, st: &State, r: Name, f: &str, v: Option<Val>) {
+    /// `r` that `v`, stored into an element of the field or pushed onto it
+    /// when `push`, does not prove in `st`.
+    fn stored_element(&mut self, st: &State, r: Name, f: &str, v: Option<Val>, push: bool) {
         if !self.obliging || !self.record || st.dead {
             return;
         }
@@ -2764,7 +2823,7 @@ impl<'a> Walk<'a> {
         let holds = |g: &Lin| st.ge0(g).is_some_and(|cert| cert.verify(st, g));
         for fact in self.element_facts_of(r, Some(f)) {
             let proved = (e.as_ref())
-                .and_then(|e| self.element_lin(r, fact, e))
+                .and_then(|e| self.element_lin(r, fact, e, push.then_some(f)))
                 .is_some_and(|g| holds(&g));
             if !proved {
                 self.broken.insert(fact.clone());
@@ -2773,9 +2832,10 @@ impl<'a> Walk<'a> {
     }
 
     /// While obliging, drops each element fact the record literal `n` of
-    /// `fields` from `parts` does not keep: the field's part is empty, or it
-    /// is a copy of the same field of a record name `src`, and each field the
-    /// fact bounds it by is at least as long as `src`'s.
+    /// `fields` from `parts` does not keep: the field's part is empty, or an
+    /// array literal whose every element the fact holds of over the other
+    /// parts, or a copy of the same field of a record name `src`, and each
+    /// field the fact bounds it by is at least as long as `src`'s.
     fn built_elements(&mut self, st: &State, n: Name, fields: &[String], parts: &[Val]) {
         if !self.record || st.dead {
             return;
@@ -2809,7 +2869,29 @@ impl<'a> Walk<'a> {
                     _ => true,
                 })
             };
-            if !empty && !from.is_some_and(longer) {
+            let over = |p: &Part, e: &Lin| match p {
+                Part::Elem(_) => Some(e.clone()),
+                Part::Len(g) => Some(Lin::of(Term::Len(part(g)?))),
+                Part::Val(x) => self.lin(&parts[fields.iter().position(|y| y == x)?]),
+                Part::One => Some(Lin::k(1)),
+            };
+            let holds_of = |v: &Val| {
+                let e = self.lin(v)?;
+                fact.iter()
+                    .try_fold(Lin::k(0), |l, (p, k)| l.add(&over(p, &e)?.scale(*k)?))
+            };
+            // The literal is the part's value when its `let` is its one write.
+            let unwritten = |m: &Name| writes_of(&self.body.stmts, *m) == 1;
+            let listed = match m
+                .filter(unwritten)
+                .and_then(|m| let_of(&self.body.stmts, m))
+            {
+                Some(Rhs::Make(Ctor::Array, items)) => {
+                    items.iter().all(|v| holds_of(v).is_some_and(|g| holds(&g)))
+                }
+                _ => false,
+            };
+            if !empty && !listed && !from.is_some_and(longer) {
                 self.broken.insert(fact.clone());
             }
         }
@@ -2852,7 +2934,7 @@ impl<'a> Walk<'a> {
                         Arg::Place(Place::Name(m)) => Some(Val::Name(*m)),
                         Arg::Place(_) => None,
                     });
-                    self.stored_element(st, r, &f, v);
+                    self.stored_element(st, r, &f, v, true);
                 }
                 self.pushed.insert(n, (r, f));
             }
@@ -2987,9 +3069,14 @@ impl<'a> Walk<'a> {
         let sums = self.sums;
         loop {
             let before = rel.iter().filter(|r| **r).count();
-            mark(self.body, self.decls, ss, &mut rel, false, &|r| {
-                sums.linked(r)
-            });
+            mark(
+                self.body,
+                self.decls,
+                ss,
+                &mut rel,
+                Goals::Obligations,
+                &|r| sums.linked(r),
+            );
             if rel.iter().filter(|r| **r).count() == before {
                 break;
             }
@@ -3249,7 +3336,7 @@ impl<'a> Walk<'a> {
                 if let Place::Elem(base, _) = &*place {
                     if let Place::Field(r, f) = &**base {
                         if let Place::Name(r) = **r {
-                            self.stored_element(&st, r, f, Some(value.clone()));
+                            self.stored_element(&st, r, f, Some(value.clone()), false);
                         }
                     }
                 }
@@ -4595,14 +4682,14 @@ impl<'a> Walk<'a> {
     }
 
     /// `a - b` and its negation, where `a` and `b` are the lengths of two
-    /// arrays or Strings the loop `body` stores to on the same paths, both of
-    /// which a check can depend on: a loop that grows them in step keeps them
-    /// as equal as it entered. The counter of a loop with a bound
-    /// ([`bound_test`]) takes part as its value; in a walk that proves a
-    /// result, only for a literal or parameter bound: any bound there cost
-    /// 1.1% more `elide: summaries` allocations on the site export and proved
-    /// no row. [`Walk::settle`] keeps a candidate only where the entry and
-    /// every turn prove it.
+    /// arrays or Strings the loop `body` stores to on the same paths, names
+    /// or fields of a record name, both of which a check can depend on: a
+    /// loop that grows them in step keeps them as equal as it entered. The
+    /// counter of a loop with a bound ([`bound_test`]) takes part as its
+    /// value; in a walk that proves a result, only for a literal or
+    /// parameter bound: any bound there cost 1.1% more `elide: summaries`
+    /// allocations on the site export and proved no row. [`Walk::settle`]
+    /// keeps a candidate only where the entry and every turn prove it.
     fn in_step(&self, body: &[St], stored: &BTreeSet<Name>) -> Vec<Lin> {
         let relevant = |n: &Name| self.slot[n.index()].relevant;
         let param =
@@ -4611,11 +4698,22 @@ impl<'a> Walk<'a> {
             .filter(|(.., b)| self.post.is_none() || b.is_const() || param(b)))
         .map(|(_, k, _)| k)
         .filter(relevant);
-        let term = |n: &Name| match Some(*n) == counter {
-            true => Some(Term::Val(*n)),
-            false => (relevant(n) && self.kind(*n) == Kind::Seq).then_some(Term::Len(*n)),
+        let term = |(n, f): &(Name, Option<&str>)| match (f, Some(*n) == counter) {
+            (None, true) => Some(Term::Val(*n)),
+            (None, false) => (relevant(n) && self.kind(*n) == Kind::Seq).then_some(Term::Len(*n)),
+            (Some(f), _) => relevant(n).then(|| self.col_term(*n, f)).flatten(),
         };
-        if stored.iter().filter_map(term).count() < 2 {
+        let named = stored.iter().filter_map(|n| term(&(*n, None))).count();
+        let field = || {
+            rows(body).any(|(s, _)| match s {
+                St::Store {
+                    place: Place::Field(r, f),
+                    ..
+                } => matches!(**r, Place::Name(r) if term(&(r, Some(f))).is_some()),
+                _ => false,
+            })
+        };
+        if named == 0 || named == 1 && !field() {
             return Vec::new();
         }
         let mut paths = BTreeMap::new();
@@ -5246,13 +5344,26 @@ fn relevant(
             }
         }
     }
+    let goals = match checks {
+        true => Goals::Checks,
+        false => Goals::Results,
+    };
     loop {
         let before = rel.iter().filter(|r| **r).count();
-        mark(body, decls, ss, &mut rel, checks, linked);
+        mark(body, decls, ss, &mut rel, goals, linked);
         if rel.iter().filter(|r| **r).count() == before {
             return rel;
         }
     }
+}
+
+/// What a walk proves, for [`mark`]: its kept checks, the record facts its
+/// rows oblige ([`obliged`]), or only the facts of its results (a solve).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Goals {
+    Checks,
+    Obligations,
+    Results,
 }
 
 fn mark(
@@ -5260,7 +5371,7 @@ fn mark(
     decls: &HashMap<String, TypeDecl>,
     ss: &[St],
     rel: &mut [bool],
-    checks: bool,
+    goals: Goals,
     linked: &dyn Fn(&Rhs) -> bool,
 ) {
     let val = |v: &Val| match v {
@@ -5271,7 +5382,7 @@ fn mark(
         match s {
             St::Check(c) => {
                 // A kept check's names are relevant; any other check links them.
-                let mut any = checks && c.verdict == Verdict::Kept;
+                let mut any = goals == Goals::Checks && c.verdict == Verdict::Kept;
                 guard_names(&c.guard, &mut |n| any |= rel[n.index()]);
                 if any {
                     guard_names(&c.guard, &mut |n| rel[n.index()] = true);
@@ -5329,15 +5440,16 @@ fn mark(
                 cond, then, els, ..
             } => {
                 // A Bool a branch stores takes the branch's facts at the join
-                // (`State::join`): `a && b && c` keeps `b`'s for a check.
-                if checks && val(cond).is_some_and(|c| rel[c.index()]) {
+                // (`State::join`): `a && b && c` keeps `b`'s for a check or an
+                // obligation.
+                if goals != Goals::Results && val(cond).is_some_and(|c| rel[c.index()]) {
                     let mut set = BTreeSet::new();
                     stores(std::slice::from_ref(s), &mut set);
                     set.retain(|n| body.names[n.index()].ty == Type::Bool);
                     set.iter().for_each(|n| rel[n.index()] = true);
                 }
-                mark(body, decls, then, rel, checks, linked);
-                mark(body, decls, els, rel, checks, linked);
+                mark(body, decls, then, rel, goals, linked);
+                mark(body, decls, els, rel, goals, linked);
             }
             St::Loop { body: l, .. } | St::Block { body: l, .. } => {
                 // A loop bound by a literal counts what it stores
@@ -5350,14 +5462,14 @@ fn mark(
                         rel[t.index()] = true;
                     }
                 }
-                mark(body, decls, l, rel, checks, linked)
+                mark(body, decls, l, rel, goals, linked)
             }
             St::Switch { on, arms, .. } => {
                 for a in arms {
                     if let Some(b) = some_binder(body, decls, on, a) {
                         link(rel, [b].into_iter().chain(val(on)));
                     }
-                    mark(body, decls, &a.body, rel, checks, linked)
+                    mark(body, decls, &a.body, rel, goals, linked)
                 }
             }
             _ => {}
@@ -5394,19 +5506,36 @@ fn link(rel: &mut [bool], names: impl Iterator<Item = Name> + Clone) {
     }
 }
 
-/// Per name the rows of `ss` store to, the path to each such store: the
-/// index of each enclosing row, and of the branch or arm taken.
-fn store_paths(ss: &[St], path: &mut Vec<u32>, out: &mut BTreeMap<Name, Vec<Vec<u32>>>) {
+/// Per name or field of a record name the rows of `ss` store to, the path to
+/// each such store: the index of each enclosing row, and of the branch or arm
+/// taken.
+fn store_paths<'s>(
+    ss: &'s [St],
+    path: &mut Vec<u32>,
+    out: &mut BTreeMap<(Name, Option<&'s str>), Vec<Vec<u32>>>,
+) {
     for (i, s) in (0u32..).zip(ss) {
         path.push(i);
-        match s {
+        let to = match s {
             St::Store {
                 place: Place::Name(n),
                 ..
-            } => out
-                .entry(*n)
+            } => Some((*n, None)),
+            St::Store {
+                place: Place::Field(r, f),
+                ..
+            } => match **r {
+                Place::Name(r) => Some((r, Some(f.as_str()))),
+                _ => None,
+            },
+            _ => None,
+        };
+        if let Some(to) = to {
+            out.entry(to)
                 .or_default()
-                .push(path[..path.len() - 1].to_vec()),
+                .push(path[..path.len() - 1].to_vec());
+        }
+        match s {
             St::If { then, els, .. } => {
                 for (k, b) in (0u32..).zip([then, els]) {
                     path.push(k);
