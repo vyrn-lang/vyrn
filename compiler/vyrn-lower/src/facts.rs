@@ -393,6 +393,28 @@ impl State {
         self.facts.contains(u) || axioms(u.terms.iter().map(|(t, _)| *t)).contains(u)
     }
 
+    /// The terms of `n` the state names: in a fact, a disequality, a
+    /// definition or a condition's side.
+    pub fn terms_of(&self, n: Name) -> Vec<Term> {
+        let mut out: Vec<Term> = Vec::new();
+        let mut note = |l: &Lin| {
+            for (t, _) in &l.terms {
+                if t.name() == n && !out.contains(t) {
+                    out.push(*t);
+                }
+            }
+        };
+        self.facts.iter().chain(&self.ne).for_each(&mut note);
+        for (d, v) in &self.defs {
+            note(&Lin::of(*d));
+            note(v);
+        }
+        for (yes, no) in self.conds.values() {
+            yes.iter().chain(no).for_each(|f| note(f.lin()));
+        }
+        out
+    }
+
     /// Forgets everything about `n`, its lengths and its fields. A definition
     /// `d = s*x + rest` with `s` one or minus one first restates every fact
     /// about `x` through `d`, so nothing known is lost to an exact rename.
@@ -505,10 +527,12 @@ impl State {
         self.unsay(|l| l.mentions(t));
     }
 
-    /// Moves the length `t` by an unknown amount in `lo..=hi`. A fact with
-    /// `k * t` holds of the new length once `-min(k*lo, k*hi)` is added; a
-    /// definition of or through the length becomes its two facts first.
-    pub fn shift(&mut self, t: Term, lo: i64, hi: i64) {
+    /// Moves the length `t` by an unknown amount in `lo..=hi`, with no upper
+    /// bound when `hi` is `None`. A fact with `k * t` holds of the new length
+    /// once `-min(k*lo, k*hi)` is added, so with no upper bound one with
+    /// `k < 0` goes; a definition of or through the length becomes its two
+    /// facts first.
+    pub fn shift(&mut self, t: Term, lo: i64, hi: Option<i64>) {
         let (through, defs) = std::mem::take(&mut self.defs)
             .into_iter()
             .partition(|(d, v)| *d == t || v.coef(t) != 0);
@@ -522,10 +546,12 @@ impl State {
         self.unsay(|l| l.mentions(t));
         for f in facts {
             let k = f.coef(t);
-            let moved = k
-                .checked_mul(lo)
-                .zip(k.checked_mul(hi))
-                .and_then(|(a, b)| f.plus(a.min(b).checked_neg()?));
+            let least = match hi {
+                Some(hi) => (k.checked_mul(lo).zip(k.checked_mul(hi))).map(|(a, b)| a.min(b)),
+                None if k >= 0 => k.checked_mul(lo),
+                None => None,
+            };
+            let moved = least.and_then(|m| f.plus(m.checked_neg()?));
             if let Some(f) = moved {
                 self.assume(&f);
             }
@@ -1019,7 +1045,7 @@ mod tests {
         let mut st = State::default();
         let len = Lin::of(Term::Len(Name(1)));
         st.define(Term::Val(Name(0)), &len);
-        st.shift(Term::Len(Name(1)), -1, 0);
+        st.shift(Term::Len(Name(1)), -1, Some(0));
         assert!(st.ge0(&v(0).sub(&len).unwrap()).is_some());
         assert!(st.ge0(&len.sub(&v(0)).unwrap().plus(1).unwrap()).is_some());
         assert!(st.ge0(&len.sub(&v(0)).unwrap()).is_none());

@@ -4,9 +4,11 @@
 //! [`decide`] walks a body's rows forward. A `let` or a store of an integer
 //! defines its name; a comparison remembers the facts its truth and falsehood
 //! give, a Bool copy and a join carry them, and an `if` on it assumes them; a
-//! builtin's row states how it moves its receiver's length, and any other
-//! `modify` or `consume` argument that is not a scalar forgets its name. After
-//! a check row the path has its guard, since it traps otherwise. A loop's head keeps the candidate facts that hold at
+//! builtin's row states how it moves its receiver's length, a direct call's
+//! whole `modify` argument moves as its callee's frame states ([`frames`]),
+//! and any other `modify` or `consume` argument that is not a scalar forgets
+//! its name. After a check row the path has its guard, since it traps
+//! otherwise. A loop's head keeps the candidate facts that hold at
 //! entry and after every turn (Houdini): each round drops at least one
 //! candidate or stops, so the candidate count bounds the rounds.
 //!
@@ -135,6 +137,8 @@ pub struct Summaries {
     /// What a call into each frame may do to module state, by the effect
     /// judgment ([`Walk::stale`]).
     state: Arc<HashMap<FnId, StateUse>>,
+    /// What a call may do to each `modify` argument's lengths ([`frames`]).
+    frames: Frames,
 }
 
 /// What [`invariants`] reads besides the bodies, made once per program.
@@ -321,28 +325,25 @@ struct View<'a> {
     values: &'a [Summary],
     facts: &'a RecordFacts,
     state: &'a HashMap<FnId, StateUse>,
+    frames: &'a Frames,
 }
 
-impl View<'_> {
+impl<'a> View<'a> {
     /// The summary of `f`, with its index.
     fn get(&self, f: FnId) -> Option<(usize, &Summary)> {
         let i = *self.at.get(&f)?;
         Some((i, self.values.get(i)?))
     }
 
-    /// The row whose body a direct call row runs ([`direct_call`]): an
-    /// instance's row for a call to a generic function. `None` for a call
-    /// whose `solved` no instance's type arguments equal.
+    /// The row whose body `rhs` runs ([`instance`]).
     fn call(&self, rhs: &Rhs) -> Option<FnId> {
-        let g = direct_call(rhs)?;
-        let Rhs::Call { solved, .. } = rhs else {
-            return None;
-        };
-        if solved.is_empty() {
-            return Some(g);
-        }
-        let mut of = self.instances.get(&g)?.iter();
-        of.find(|(args, _)| args == solved).map(|(_, f)| *f)
+        instance(self.instances, rhs)
+    }
+
+    /// What the direct call `rhs` may do to its `modify` argument `k`
+    /// ([`frames`]).
+    fn frame(&self, rhs: &Rhs, k: usize) -> Option<&'a [Moves]> {
+        Some(self.frames.get(&(self.call(rhs)?, k))?.as_slice())
     }
 
     /// Whether `f` states a fact of its result.
@@ -377,8 +378,24 @@ impl<'a> From<&'a Summaries> for View<'a> {
             values: &s.values,
             facts: &s.facts,
             state: &s.state,
+            frames: &s.frames,
         }
     }
+}
+
+/// The row whose body a direct call row runs ([`direct_call`]): an
+/// instance's row for a call to a generic function. `None` for a call whose
+/// `solved` no instance's type arguments equal.
+fn instance(instances: &Instances, rhs: &Rhs) -> Option<FnId> {
+    let g = direct_call(rhs)?;
+    let Rhs::Call { solved, .. } = rhs else {
+        return None;
+    };
+    if solved.is_empty() {
+        return Some(g);
+    }
+    let mut of = instances.get(&g)?.iter();
+    of.find(|(args, _)| args == solved).map(|(_, f)| *f)
 }
 
 /// The facts every return and every entry of each body in `bodies` state.
@@ -415,6 +432,7 @@ pub fn summaries<'a>(
 ) -> Summaries {
     let mut bodies: Vec<(FnId, &Body)> = bodies.collect();
     bodies.sort_by_key(|(f, _)| f.index());
+    let frames = frames(&bodies, decls, &instances);
     // A body's name count weighs its work.
     let weigh = |(_, b): &(FnId, &Body)| b.names.len();
     let firsts: Vec<(Vec<i64>, Option<Scan>)> = in_parallel(
@@ -474,6 +492,7 @@ pub fn summaries<'a>(
                         start,
                         &RecordFacts::default(),
                         &state,
+                        &frames,
                     )
                 }
             };
@@ -483,6 +502,7 @@ pub fn summaries<'a>(
                 values: &lengths,
                 facts: &RecordFacts::default(),
                 state: &state,
+                frames: &frames,
             };
             invariants(&bodies, &scans, decls, r, view)
         }
@@ -494,6 +514,7 @@ pub fn summaries<'a>(
         values: &values,
         facts: &facts,
         state: &state,
+        frames: &frames,
     };
     let start: BTreeSet<usize> =
         in_parallel(&bodies, weigh, || (), |(), (_, b)| seeds(b, decls, view))
@@ -501,7 +522,7 @@ pub fn summaries<'a>(
             .flatten()
             .collect();
     let mut values = solve(
-        &bodies, decls, &at, &instances, values, start, &facts, &state,
+        &bodies, decls, &at, &instances, values, start, &facts, &state, &frames,
     );
     let (closed, callees) = entered(&bodies, closed);
     let view = View {
@@ -510,6 +531,7 @@ pub fn summaries<'a>(
         values: &values,
         facts: &facts,
         state: &state,
+        frames: &frames,
     };
     let pres = in_parallel(
         &bodies,
@@ -542,6 +564,7 @@ pub fn summaries<'a>(
             values: &values,
             facts: &facts,
             state: &state,
+            frames: &frames,
         };
         callers.retain(|b| rows(&b.stmts).any(|(s, _)| view.pre(s).is_some()));
         let batch: Vec<&Body> = callers.drain(..(callers.len() * 2).div_ceil(3)).collect();
@@ -569,6 +592,278 @@ pub fn summaries<'a>(
         decided,
         facts,
         state,
+        frames,
+    }
+}
+
+/// How a call may move a slot of a `modify` argument: a record's array or
+/// String field's length or integer field's value, or an array's or String's
+/// length. Ordered from the least change up, so a join is `max`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Moves {
+    Keeps,
+    /// The length never falls.
+    Grows,
+    Any,
+}
+
+impl Moves {
+    /// How a builtin row that states `len` moves its receiver.
+    fn of(len: Length) -> Moves {
+        match len {
+            Length::Keeps => Moves::Keeps,
+            Length::GrowsByOne | Length::GrowsByLenOf(_) => Moves::Grows,
+            _ => Moves::Any,
+        }
+    }
+}
+
+/// Per body's row and `modify` parameter, its slots' [`Moves`]: one per
+/// field of a record, by the field's index, or one for an array's or
+/// String's length.
+type Frames = HashMap<(FnId, usize), Vec<Moves>>;
+
+/// The [`Frames`] of every `modify` parameter of `bodies` that is a record,
+/// an array or a String: the least fixpoint of [`frame`] over the call
+/// graph, from every slot kept. A slot rises at most twice, and a round that
+/// raises none ends the solve.
+///
+/// Sound by the postulate [`summaries`] states of a [`Callee::Fn`] row and
+/// the kernel's exclusivity judgment: a slot of the argument changes only
+/// where a row of the callee writes through the parameter or a second name
+/// for it, and [`frame`] reads every such row. A call to a row with no body
+/// here moves every slot.
+fn frames(
+    bodies: &[(FnId, &Body)],
+    decls: &HashMap<String, TypeDecl>,
+    instances: &Instances,
+) -> Frames {
+    let mut out = Frames::new();
+    for (f, b) in bodies {
+        for (k, p) in b.params.iter().enumerate() {
+            if let Some(n) = slots(b, *p, decls) {
+                out.insert((*f, k), vec![Moves::Keeps; n]);
+            }
+        }
+    }
+    let mut raised = !out.is_empty();
+    while raised {
+        raised = false;
+        for (f, b) in bodies {
+            for (k, p) in b.params.iter().enumerate() {
+                let Some(mut now) = out.get(&(*f, k)).cloned() else {
+                    continue;
+                };
+                {
+                    let out = &out;
+                    let callee = |rhs: &Rhs, i: usize| {
+                        Some(out.get(&(instance(instances, rhs)?, i))?.as_slice())
+                    };
+                    frame(b, *p, decls, &callee, &mut now);
+                }
+                if now != out[&(*f, k)] {
+                    raised = true;
+                    out.insert((*f, k), now);
+                }
+            }
+        }
+    }
+    out
+}
+
+/// How many slots parameter `p` of `b` has when it is a `modify` parameter:
+/// one per field of a record, one for an array or String. `None` for any
+/// other parameter.
+fn slots(b: &Body, p: Name, decls: &HashMap<String, TypeDecl>) -> Option<usize> {
+    let info = &b.names[p.index()];
+    if !info.is_modify_param() {
+        return None;
+    }
+    match kind_of(&info.ty, decls) {
+        Kind::Seq => Some(1),
+        Kind::Other => vyrn_frontend::types::record_fields(&info.ty, decls).map(|fs| fs.len()),
+        _ => None,
+    }
+}
+
+/// Where a place lies in a `modify` parameter: the parameter itself, one of
+/// its slots, or a part inside the parameter's value (an element, a field of
+/// a field), whose store keeps every slot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Hit {
+    Whole,
+    Slot(usize),
+    Inside,
+}
+
+/// Joins into `out` how the rows of `b` may move the slots of its `modify`
+/// parameter `p`, taking a direct call's from `callee`, by the call and the
+/// argument's index. A row moves a slot when it writes it through `p` or a
+/// second name for `p`: a store, a take, a `modify` or `consume` argument. A
+/// builtin's row written back (`let t = take p.f`, `let v = @push(consume t,
+/// ..)`, `p.f = v`) moves it as the row states; a store inside it keeps it;
+/// any other write moves it any way.
+fn frame<'o>(
+    b: &Body,
+    p: Name,
+    decls: &HashMap<String, TypeDecl>,
+    callee: &dyn Fn(&Rhs, usize) -> Option<&'o [Moves]>,
+    out: &mut [Moves],
+) {
+    let source = &b.names[p.index()].source;
+    let alias = |n: Name| {
+        matches!(&b.names[n.index()].borrow_kind,
+            Some(BorrowKind::Param { cap: "modify", of, .. }) if of == source)
+    };
+    let fields = vyrn_frontend::types::record_fields(&b.names[p.index()].ty, decls);
+    // `pl` as the parameter itself or one of its slots.
+    let own = |pl: &Place| match pl {
+        Place::Name(n) => alias(*n).then_some(Hit::Whole),
+        Place::Field(r, f) if matches!(**r, Place::Name(n) if alias(n)) => {
+            Some(match fields.as_ref() {
+                Some(fs) => fs
+                    .iter()
+                    .position(|x| x.name == *f)
+                    .map_or(Hit::Whole, Hit::Slot),
+                None => Hit::Whole,
+            })
+        }
+        _ => None,
+    };
+    // A store at a map's key may add an entry: it writes the map.
+    let hit = |pl: &Place| {
+        let at = match pl {
+            Place::Key(r, _) => own(r),
+            _ => own(pl),
+        };
+        at.or_else(|| place_root(pl).filter(|n| alias(*n)).map(|_| Hit::Inside))
+    };
+    let arg_hit = |a: &Arg| match a {
+        Arg::Val(Val::Name(n)) => alias(*n).then_some(Hit::Whole),
+        Arg::Place(pl) => hit(pl),
+        Arg::Val(Val::Lit(_)) => None,
+    };
+    let builtin = |rhs: &Rhs| {
+        matches!(
+            rhs,
+            Rhs::Call {
+                kind: Callee::Builtin | Callee::Reserved,
+                ..
+            }
+        )
+    };
+    // How a store of `v` into `h` moves it, when `v` is bound once to a
+    // builtin's row whose receiver it consumes: `h` itself, or a name bound
+    // once to a take of `h` and read nowhere else. With that name.
+    let written_back = |v: Name, h: Hit| -> Option<(Moves, Option<Name>)> {
+        let rhs = let_of(&b.stmts, v).filter(|r| builtin(r) && writes_of(&b.stmts, v) == 1);
+        let Some(Rhs::Call { callee, args, .. }) = rhs else {
+            return None;
+        };
+        let (a0, Capability::Consume) = args.first()? else {
+            return None;
+        };
+        let m = Moves::of(length_rule(callee, args));
+        if arg_hit(a0) == Some(h) {
+            return Some((m, None));
+        }
+        let (Arg::Val(Val::Name(t)) | Arg::Place(Place::Name(t))) = a0 else {
+            return None;
+        };
+        let Some(Rhs::Take(pl)) = let_of(&b.stmts, *t) else {
+            return None;
+        };
+        (writes_of(&b.stmts, *t) == 2 && hit(pl) == Some(h)).then_some((m, Some(*t)))
+    };
+    let record = fields.is_some();
+    let raise = |out: &mut [Moves], h: Hit, m: Moves| match (h, record) {
+        (Hit::Slot(i), _) => out[i] = out[i].max(m),
+        // A record replaced whole moves every slot.
+        (Hit::Whole, true) => out.fill(Moves::Any),
+        (Hit::Whole, false) => out[0] = out[0].max(m),
+        (Hit::Inside, _) => {}
+    };
+    let mut takers: Vec<Name> = Vec::new();
+    let mut results: Vec<Name> = Vec::new();
+    for (s, _) in rows(&b.stmts) {
+        let St::Store {
+            place,
+            value: Val::Name(v),
+            ..
+        } = s
+        else {
+            continue;
+        };
+        let back = hit(place)
+            .filter(|h| *h != Hit::Inside)
+            .and_then(|h| Some((h, written_back(*v, h)?)));
+        if let Some((h, (m, t))) = back {
+            raise(out, h, m);
+            results.push(*v);
+            takers.extend(t);
+        }
+    }
+    for (s, _) in rows(&b.stmts) {
+        match s {
+            St::Store {
+                value: Val::Name(v),
+                ..
+            } if results.contains(v) => {}
+            St::Store { place, .. } => {
+                if let Some(h) = hit(place) {
+                    raise(out, h, Moves::Any);
+                }
+            }
+            St::Let(n, Rhs::Take(pl)) if !takers.contains(n) => {
+                if let Some(h) = hit(pl) {
+                    raise(out, h, Moves::Any);
+                }
+            }
+            St::Let(_, rhs @ Rhs::Call { args, .. })
+            | St::Do {
+                rhs: rhs @ Rhs::Call { args, .. },
+                ..
+            } => {
+                let own = matches!(s, St::Let(n, _) if results.contains(n));
+                for (i, (a, cap)) in args.iter().enumerate() {
+                    let Some(h) = arg_hit(a).filter(|_| *cap != Capability::Read) else {
+                        continue;
+                    };
+                    let m = match (h, cap) {
+                        (Hit::Inside, _) => continue,
+                        (Hit::Whole, Capability::Consume) if own && i == 0 => continue,
+                        (_, Capability::Modify) if builtin(rhs) && i == 0 => {
+                            let Rhs::Call { callee, .. } = rhs else {
+                                continue;
+                            };
+                            Moves::of(length_rule(callee, args))
+                        }
+                        (Hit::Whole, Capability::Modify) if !builtin(rhs) => {
+                            match callee(rhs, i).filter(|t| t.len() == out.len()) {
+                                Some(theirs) => {
+                                    for (o, t) in out.iter_mut().zip(theirs) {
+                                        *o = (*o).max(*t);
+                                    }
+                                    continue;
+                                }
+                                None => Moves::Any,
+                            }
+                        }
+                        _ => Moves::Any,
+                    };
+                    raise(out, h, m);
+                }
+            }
+            St::Drop(n, ..) | St::Row { name: n, .. } if alias(*n) => {
+                raise(out, Hit::Whole, Moves::Any)
+            }
+            St::Switch {
+                on: Val::Name(n),
+                consuming: true,
+                ..
+            } if alias(*n) => raise(out, Hit::Whole, Moves::Any),
+            _ => {}
+        }
     }
 }
 
@@ -591,6 +886,7 @@ fn solve(
     start: BTreeSet<usize>,
     facts: &RecordFacts,
     state: &HashMap<FnId, StateUse>,
+    frames: &Frames,
 ) -> Vec<Summary> {
     let mut seen = vec![false; bodies.len()];
     start.iter().for_each(|&i| seen[i] = true);
@@ -606,6 +902,7 @@ fn solve(
             values,
             facts,
             state,
+            frames,
         };
         returns(bodies[i].1, decls, view, &values[i])
     };
@@ -3708,9 +4005,17 @@ impl<'a> Walk<'a> {
                     let old = Lin::of(*t);
                     match (lo.sub(&old), hi.sub(&old)) {
                         (Some(a), Some(b)) if a.is_const() && b.is_const() => {
-                            st.shift(*t, a.c, b.c)
+                            st.shift(*t, a.c, Some(b.c))
                         }
                         _ => self.resize(st, n),
+                    }
+                }
+                (Capability::Modify, _)
+                    if matches!(a, Arg::Val(_) | Arg::Place(Place::Name(_))) =>
+                {
+                    match self.sums.frame(rhs, i) {
+                        Some(moves) => self.frame(st, n, moves),
+                        None => self.resize(st, n),
                     }
                 }
                 _ => self.resize(st, n),
@@ -4048,6 +4353,49 @@ impl<'a> Walk<'a> {
             }
         }
         out
+    }
+
+    /// Moves the slots of `n`, a whole `modify` argument, as the callee's
+    /// frame states ([`frames`]): a kept slot keeps its facts, one that grows
+    /// keeps those that bound it from below, and any other forgets them. A
+    /// field term of a class of equal lengths moves as its fields' join.
+    fn frame(&mut self, st: &mut State, n: Name, moves: &[Moves]) {
+        let ty = &self.body.names[n.index()].ty;
+        let fields = vyrn_frontend::types::record_fields(ty, self.decls);
+        let class = |i: u32| -> Moves {
+            let Some(fs) = fields.as_deref() else {
+                return Moves::Any;
+            };
+            if self.rule(n).is_none() || self.open.contains(&n) {
+                return moves.get(i as usize).copied().unwrap_or(Moves::Any);
+            }
+            (fs.iter().zip(moves))
+                .filter(|(f, _)| self.col(n, &f.name).is_some_and(|(_, l)| l == i))
+                .map(|(_, m)| *m)
+                .max()
+                .unwrap_or(Moves::Any)
+        };
+        let mut moved = false;
+        for t in st.terms_of(n) {
+            let m = match t {
+                Term::Len(_) if fields.is_none() => moves.first().copied().unwrap_or(Moves::Any),
+                Term::Field(_, i) => moves.get(i as usize).copied().unwrap_or(Moves::Any),
+                Term::Col(_, i) => class(i),
+                Term::Val(_) | Term::Len(_) => Moves::Any,
+            };
+            match m {
+                Moves::Keeps => {}
+                Moves::Grows => st.shift(t, 0, None),
+                Moves::Any => st.forget(t),
+            }
+            moved |= m != Moves::Keeps;
+        }
+        if moved {
+            st.fresh.remove(&n);
+            if let Some(l) = self.loops.last_mut() {
+                l.seen.resized.insert(n);
+            }
+        }
     }
 
     /// A call took `n` by `modify` or `consume` and may have changed its length.

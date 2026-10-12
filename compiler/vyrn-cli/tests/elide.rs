@@ -5725,3 +5725,75 @@ fn a_premise_taken_twice_proves_a_strided_index() {
         "{err}"
     );
 }
+
+/// A `modify` call keeps what its callee cannot shrink: `note` writes
+/// another field of `log` or appends to `log.lines`, so `i < log.lines.length`
+/// holds after the call. A `pop` in `note` shrinks the array: the read stays
+/// a check and traps.
+#[test]
+fn a_modify_call_keeps_a_length_its_callee_cannot_shrink() {
+    let src = |turn: &str| {
+        format!(
+            "type Log = {{ lines: Array<Int64>, seen: Int64 }}
+type Cfg = {{ step: Int64 }}
+
+fn note(cfg: Cfg, log: modify Log) {{
+    {turn}
+}}
+
+fn w(cfg: Cfg, log: modify Log, i: Int64) -> Int64 {{
+    if i < 0 || i >= log.lines.length {{
+        return 0
+    }}
+    note(cfg, log)
+    return log.lines[i]
+}}
+"
+        )
+    };
+    let calls = "    let mut log = Log { lines: xs, seen: 0 }\n    \
+                 print(w(Cfg { step: 1 }, log, 2).toString())";
+    for turn in ["log.seen = log.seen + cfg.step", "log.lines.push(cfg.step)"] {
+        let proof = src(turn);
+        assert_eq!(verdicts(&proof, "w"), ["proved array-index"], "{turn}");
+        assert_eq!(oracle(&proof, calls, "w").0, "", "{turn}");
+    }
+    let witness = src("log.lines.pop()");
+    assert_eq!(verdicts(&witness, "w"), ["check array-index"]);
+    let (err, _) = oracle(&witness, calls, "w");
+    assert!(err.contains("array index 2 out of bounds"), "{err}");
+    assert!(
+        !err.contains(vyrn_frontend::trap::PROVED_CHECK_FAILED),
+        "{err}"
+    );
+}
+
+/// A length a `modify` call may grow keeps its lower bounds and loses its
+/// upper ones: after `note` appends, `log.lines.length <= t.length` no longer
+/// holds, so `t[log.lines.length - 1]` stays a check and traps.
+#[test]
+fn a_modify_call_that_grows_a_length_drops_its_upper_bound() {
+    let src = "type Log = { lines: Array<Int64> }
+
+fn note(log: modify Log) {
+    log.lines.push(0)
+}
+
+fn w(log: modify Log, t: Array<Int64>) -> Int64 {
+    if log.lines.length < 1 || log.lines.length > t.length {
+        return 0
+    }
+    note(log)
+    return t[log.lines.length - 1]
+}
+";
+    let calls = "    let ys = xs.copy()\n    let mut log = Log { lines: xs }\n    \
+                 print(w(log, ys).toString())";
+    assert_eq!(verdicts(src, "w"), ["check array-index"]);
+    let (err, _) = oracle(src, calls, "w");
+    assert!(err.contains("array index 3 out of bounds"), "{err}");
+    assert!(
+        !err.contains(vyrn_frontend::trap::PROVED_CHECK_FAILED),
+        "{err}"
+    );
+}
