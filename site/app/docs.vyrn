@@ -55,43 +55,26 @@ fn groupOf(m: String) -> String {
     return "Programs and tools"
 }
 
-fn groupDefs() -> Array<Array<String>> {
+fn groupDefs() -> Array<ApiGroup> {
     return [
-        ["Text and bytes", "file"],
-        ["Data", "archive"],
-        ["Web", "link"],
-        ["Programs and tools", "settings"],
+        ApiGroup { name: "Text and bytes", modules: [], icon: "file" },
+        ApiGroup { name: "Data", modules: [], icon: "archive" },
+        ApiGroup { name: "Web", modules: [], icon: "link" },
+        ApiGroup { name: "Programs and tools", modules: [], icon: "settings" },
     ]
-}
-
-fn groupNames() -> Array<String> {
-    let mut out: Array<String> = []
-    for d in groupDefs() {
-        out.push(d[0].copy())
-    }
-    return out
-}
-
-fn groupIcon(name: String) -> String {
-    for d in groupDefs() {
-        if d[0] == name {
-            return d[1].copy()
-        }
-    }
-    return ""
 }
 
 export fn apiGroups() -> Array<ApiGroup> {
     let mut out: Array<ApiGroup> = []
-    for g in groupNames() {
+    for g in groupDefs() {
         let mut mods: Array<ApiModule> = []
         for m in apiModules() {
-            if groupOf(m.name) == g {
+            if groupOf(m.name) == g.name {
                 mods.push(ApiModule { name: m.name.copy(), summary: m.summary.copy(), count: m.count })
             }
         }
         if mods.length > 0 {
-            out.push(ApiGroup { name: g.copy(), modules: mods.copy(), icon: groupIcon(g) })
+            out.push(ApiGroup { name: g.name.copy(), modules: mods.copy(), icon: g.icon.copy() })
         }
     }
     return out
