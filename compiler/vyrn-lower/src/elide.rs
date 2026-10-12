@@ -4492,7 +4492,7 @@ impl<'a> Walk<'a> {
                 _ => (i == m).then_some(0),
             };
             for (b, c) in indexed.iter().filter_map(|(b, i)| Some((b, below(i)?))) {
-                let Some(len) = self.length(b).map(Lin::of) else {
+                let Some(len) = self.head_length(body, b) else {
                     continue;
                 };
                 let Some(at) = v.plus(-c) else { continue };
@@ -4621,7 +4621,7 @@ impl<'a> Walk<'a> {
                 continue;
             };
             if stored.contains(&m) && matches!(self.kind(m), Kind::Int(..)) {
-                let len = self.length(b).map(Lin::of);
+                let len = self.head_length(body, b);
                 out.extend(len.and_then(|l| l.sub(&Lin::of(Term::Val(m)))?.plus(-c)));
             }
         }
@@ -4669,6 +4669,20 @@ impl<'a> Walk<'a> {
                 l.seen.resized.insert(n);
             }
         }
+    }
+
+    /// The length of `b`, an index base in the loop `body`, as a fact at the
+    /// loop's head can name it: a borrow the body binds (`let @borrow = read
+    /// xs`) stands for its source.
+    fn head_length(&self, body: &[St], b: &Place) -> Option<Lin> {
+        let src = match b {
+            Place::Name(x) => match let_of(body, *x) {
+                Some(Rhs::Read(p @ Place::Name(_))) => p,
+                _ => b,
+            },
+            _ => b,
+        };
+        self.length(src).map(Lin::of)
     }
 
     /// A call took `n` by `modify` or `consume` and may have changed its length.

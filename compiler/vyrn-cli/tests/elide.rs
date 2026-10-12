@@ -6068,3 +6068,49 @@ fn a_remainder_by_a_length_stays_below_it() {
         "{err}"
     );
 }
+
+/// An inner loop's ring index over an outer array: the outer loop binds
+/// its own borrow of `t` each turn, and its head states `k < t.length`
+/// through `t` itself. Modulo `t.length + 1` the read passes the end,
+/// keeps its check and traps.
+#[test]
+fn a_loop_head_names_a_borrow_by_its_source() {
+    let src = |m: &str| {
+        format!(
+            "fn w(t: Array<Int64> where value.length >= 1, n: Int64) -> Int64 {{
+    let mut s = 0
+    let mut k = 0
+    let mut j = 0
+    while j < n {{
+        let mut i = 0
+        while i < 2 {{
+            s = s + t[k]
+            k = (k + 1) % ({m})
+            i = i + 1
+        }}
+        j = j + 1
+    }}
+    return s
+}}
+"
+        )
+    };
+    let calls = "    print(w(xs, 2).toString())";
+    let proof = src("t.length");
+    assert_eq!(
+        verdicts(&proof, "w"),
+        ["proved array-index", "proved int-rem-zero"]
+    );
+    assert_eq!(oracle(&proof, calls, "w").0, "");
+    let witness = src("t.length + 1");
+    assert_eq!(
+        verdicts(&witness, "w"),
+        ["check array-index", "proved int-rem-zero"]
+    );
+    let (err, _) = oracle(&witness, calls, "w");
+    assert!(err.contains("array index 3 out of bounds"), "{err}");
+    assert!(
+        !err.contains(vyrn_frontend::trap::PROVED_CHECK_FAILED),
+        "{err}"
+    );
+}
