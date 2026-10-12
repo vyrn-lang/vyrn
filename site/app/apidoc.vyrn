@@ -367,34 +367,19 @@ export gen fn apiDocs(stdDir: String) -> String {
     let mut names: Array<String> = []
     let mut summaries: Array<String> = []
     let mut intros: Array<String> = []
-    let mut nameLists: Array<String> = []
-    let mut kindLists: Array<String> = []
-    let mut sigLists: Array<String> = []
-    let mut proseLists: Array<String> = []
-    let mut lineLists: Array<String> = []
+    let mut entryLists: Array<String> = []
     let mut testLists: Array<String> = []
     let mut counts: Array<String> = []
     for m in mods {
         names.push(m.name.copy())
         summaries.push(branch("m", m.name, quoted(summaryOf(m.doc))))
         intros.push(branch("m", m.name, quoted(proseHtml(m.doc))))
-        let mut en: Array<String> = []
-        let mut ek: Array<String> = []
         let mut es: Array<String> = []
-        let mut ep: Array<String> = []
-        let mut el: Array<String> = []
         for e in m.entries {
-            en.push(e.name.copy())
-            ek.push(e.kind.copy())
-            es.push(highlightSrc(e.sig, lex(e.sig)))
-            ep.push(proseHtml(e.doc))
-            el.push(e.line.toString())
+            let sig = quoted(highlightSrc(e.sig, lex(e.sig)))
+            es.push("DocEntry { name: " + quoted(e.name) + ", kind: " + quoted(e.kind) + ", sig: " + sig + ", prose: " + quoted(proseHtml(e.doc)) + ", line: " + e.line.toString() + " }")
         }
-        nameLists.push(branch("m", m.name, quotedList(en)))
-        kindLists.push(branch("m", m.name, quotedList(ek)))
-        sigLists.push(branch("m", m.name, quotedList(es)))
-        proseLists.push(branch("m", m.name, quotedList(ep)))
-        lineLists.push(branch("m", m.name, "[" + joinWith(el, ", ") + "]"))
+        entryLists.push(branch("m", m.name, "[" + joinWith(es, ", ") + "]"))
         testLists.push(branch("m", m.name, quotedList(m.tests)))
         counts.push(branch("m", m.name, m.entries.length.toString()))
     }
@@ -406,16 +391,9 @@ export gen fn apiDocs(stdDir: String) -> String {
     out = out + lookup("docSummary", "m", "String", summaries, "\"\"")
     out = out + "/// A module's header block, as HTML.\n"
     out = out + lookup("docIntro", "m", "String", intros, "\"\"")
-    out = out + "/// The names of a module's exports, in declaration order.\n"
-    out = out + lookup("docNames", "m", "Array<String>", nameLists, "[]")
-    out = out + "/// What each export is: `fn`, `type` or `protocol`.\n"
-    out = out + lookup("docKinds", "m", "Array<String>", kindLists, "[]")
-    out = out + "/// Each export's signature, coloured by the compiler's own lexer.\n"
-    out = out + lookup("docSigs", "m", "Array<String>", sigLists, "[]")
-    out = out + "/// Each export's `///` prose, as HTML.\n"
-    out = out + lookup("docProse", "m", "Array<String>", proseLists, "[]")
-    out = out + "/// The source line each export is declared on.\n"
-    out = out + lookup("docLines", "m", "Array<Int64>", lineLists, "[]")
+    out = out + "export type DocEntry = { name: String, kind: String, sig: String, prose: String, line: Int64 }\n"
+    out = out + "/// A module's exports in declaration order, each signature coloured by the compiler's lexer and its prose as HTML.\n"
+    out = out + lookup("docEntries", "m", "Array<DocEntry>", entryLists, "[]")
     out = out + "/// The name of every `test` block the module keeps, in source order.\n"
     out = out + lookup("docTests", "m", "Array<String>", testLists, "[]")
     out = out + "/// How many exports a module has.\n"

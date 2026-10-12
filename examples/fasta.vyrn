@@ -23,7 +23,7 @@ fn cumulative(ws: Array<Float64>) -> Array<Float64> {
     return out
 }
 
-fn pick(syms: Array<UInt8>, cum: Array<Float64>) -> UInt8 {
+fn pick(syms: Array<UInt8>, cum: Array<Float64> where value.length <= syms.length) -> UInt8 {
     let r = nextRandom(1.0)
     let mut i = 0
     while i < cum.length {
@@ -69,7 +69,7 @@ fn repeatFasta(header: String, src: String, count: Int64) {
     }
 }
 
-fn randomFasta(header: String, syms: Array<UInt8>, cum: Array<Float64>, count: Int64) {
+fn randomFasta(header: String, syms: Array<UInt8>, cum: Array<Float64> where value.length <= syms.length, count: Int64) {
     print(header)
     let mut todo = count
     let mut w: Array<UInt8> = []
@@ -102,7 +102,7 @@ fn run(n: Int64) {
     randomFasta(">THREE Homo sapiens frequency", bytes("acgt"), cumulative(humanWeights()), n * 5)
 }
 
-fn generate(syms: Array<UInt8>, cum: Array<Float64>, count: Int64) -> Int64 {
+fn generate(syms: Array<UInt8>, cum: Array<Float64> where value.length <= syms.length, count: Int64) -> Int64 {
     let mut written = 0
     let mut todo = count
     let mut w: Array<UInt8> = []

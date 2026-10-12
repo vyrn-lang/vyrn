@@ -8,7 +8,6 @@ fn thirdSequence() -> Array<UInt8>
    39  loop 2   `push(..)` may allocate when it outgrows its capacity
 fn countKmers(seq: Array<UInt8>, k: Int64) -> Map<Int64, Int64>
    50           allocates `Map<Int64, Int64>`
-   58  loop 1   division check: it needs `modulus >= 1`, and `modulus` is the result of `modulusOf(..)` at line 54, whose signature does not state it
    60  loop 1   `tally(..)` may allocate when it outgrows its capacity
 fn unpack(key: Int64, k: Int64) -> String
    68           allocates `Array<UInt8>`
@@ -37,4 +36,4 @@ fn syntheticSequence(n: Int64) -> Array<UInt8>
 fn main() -> Int64
   173  loop 1   copies `String`: interpolating a `String` copies it
        loop 1   allocates `String` x3
-summary: allocating rows 20 (9 in loops), growing rows 6 (5 in loops), copies 5 (4 in loops), checks kept 3 (3 in loops), checks proved 19 (14 in loops)
+summary: allocating rows 20 (9 in loops), growing rows 6 (5 in loops), copies 5 (4 in loops), checks kept 2 (2 in loops), checks proved 19 (14 in loops)

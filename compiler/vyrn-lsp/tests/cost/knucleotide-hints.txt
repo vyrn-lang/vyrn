@@ -3,7 +3,6 @@
 38 allocates Array<UInt8>, toUpper allocates
 39 push may allocate
 50 allocates Map<Int64, Int64>
-58 division checked
 60 tally may allocate
 68 allocates Array<UInt8>
 70 reserve may allocate

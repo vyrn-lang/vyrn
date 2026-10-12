@@ -48,8 +48,6 @@ pub enum Why {
     Counter(Name, Option<Arc<str>>),
     /// No rule applies: the goal the prover could not show.
     Unproved(Arc<str>),
-    /// A slice of `bytes(s, from, to)`: `std/runtime`'s `bytesOf` checks it.
-    Range,
     /// A record `where` rule other than equal lengths.
     Rule,
     /// A guard with no linear form.
@@ -86,9 +84,7 @@ impl Raises {
 pub enum Verdict {
     /// The emitter runs the check.
     Kept,
-    /// A pass proved the check cannot fail, and the emitter runs nothing. A
-    /// proved [`Guard::Range`] is refused: `std/runtime`'s `bytesOf` checks
-    /// its range inside and has no unchecked form.
+    /// A pass proved the check cannot fail, and the emitter runs nothing.
     Proved,
 }
 
@@ -100,8 +96,7 @@ pub enum Guard {
     /// `0 <= i` and `i + span <= length(base)`: a SIMD load or store of
     /// `span` elements.
     Span(Place, Val, i64),
-    /// `0 <= from <= to <= length(s)`: `bytes(s, from, to)`, checked by
-    /// `std/runtime`'s `bytesOf`.
+    /// `0 <= from <= to <= length(s)`: `bytes(s, from, to)`.
     Range(Val, Val, Val),
     /// The divisor is not zero.
     NonZero(Val),

@@ -377,16 +377,16 @@ fn parseArray(p: modify Parser, depth: Int64) -> Result<Json, String> {
 /// One object's seen keys: linear probing over FNV-1a-64, capacity a power of
 /// two (`mask = cap - 1`), grown at 70% load. A scan per member would make an
 /// N-key object O(N^2), which one wide untrusted body could exploit.
-type KeySet = { keys: Array<String>, slots: Array<Int64>, mask: UInt64 }
+type KeySet = { keys: Array<String>, slots: Array<Int64>, mask: Int64 }
 
 fn newKeySet() -> KeySet {
-    return KeySet { keys: [], slots: [0, 0, 0, 0, 0, 0, 0, 0], mask: UInt64(7) }
+    return KeySet { keys: [], slots: [0, 0, 0, 0, 0, 0, 0, 0], mask: 7 }
 }
 
 /// The slot holding `key`, or -1 when absent. `slots[i]` stores the key's
 /// index in `keys` plus one, so 0 marks an empty slot.
 fn ksFind(s: KeySet, key: String) -> Int64 {
-    let mut i = Int64(fnv1aStr(key) & s.mask)
+    let mut i = Int64(fnv1aStr(key)) & s.mask
     while true {
         if s.slots[i] == 0 {
             return -1
@@ -394,18 +394,18 @@ fn ksFind(s: KeySet, key: String) -> Int64 {
         if s.keys[s.slots[i] - 1] == key {
             return i
         }
-        i = Int64((UInt64(i) + UInt64(1)) & s.mask)
+        i = (i + 1) & s.mask
     }
     return -1
 }
 
-/// Places key index `ki` at the first empty slot from the key's hash.
-fn ksPlace(slots: modify Array<Int64>, key: String, mask: UInt64, ki: Int64) -> Unit {
-    let mut i = Int64(fnv1aStr(key) & mask)
-    while slots[i] != 0 {
-        i = Int64((UInt64(i) + UInt64(1)) & mask)
+/// Places key index `ki` at the first empty slot from its key's hash `h`.
+fn ksPlace(s: modify KeySet, h: UInt64, ki: Int64) -> Unit {
+    let mut i = Int64(h) & s.mask
+    while s.slots[i] != 0 {
+        i = (i + 1) & s.mask
     }
-    slots[i] = ki + 1
+    s.slots[i] = ki + 1
 }
 
 /// Records `key`. If the new entry pushes load past 70%, grows first and
@@ -413,8 +413,8 @@ fn ksPlace(slots: modify Array<Int64>, key: String, mask: UInt64, ki: Int64) -> 
 /// slot.
 fn ksAdd(s: modify KeySet, key: String) -> Unit {
     s.keys.push(key.copy())
-    let cap = Int64(s.mask) + 1
-    if Int64(s.keys.length) * 10 > cap * 7 {
+    let cap = s.mask + 1
+    if s.keys.length * 10 > cap * 7 {
         let mut slots: Array<Int64> = []
         let newCap = cap * 2
         let mut n = 0
@@ -422,20 +422,18 @@ fn ksAdd(s: modify KeySet, key: String) -> Unit {
             slots.push(0)
             n = n + 1
         }
-        s.mask = UInt64(newCap - 1)
+        s.mask = newCap - 1
+        s.slots = slots
         let mut ki = 0
         while ki < s.keys.length {
-            ksPlace(slots, s.keys[ki], s.mask, Int64(ki))
+            let h = fnv1aStr(s.keys[ki])
+            ksPlace(s, h, ki)
             ki = ki + 1
         }
-        s.slots = slots
         return
     }
-    let mut i = Int64(fnv1aStr(key) & s.mask)
-    while s.slots[i] != 0 {
-        i = Int64((UInt64(i) + UInt64(1)) & s.mask)
-    }
-    s.slots[i] = Int64(s.keys.length)
+    let last = s.keys.length - 1
+    ksPlace(s, fnv1aStr(key), last)
 }
 
 /// Parses an object, the cursor on `{`. `depth` counts this object.

@@ -228,7 +228,7 @@ fn binds(fact: &RecordFact, fields: &[Field], decls: &HashMap<String, TypeDecl>)
 /// The [`RecordFact`]s every record value with their fields keeps
 /// ([`invariants`]): two array fields of equal length, an integer field at
 /// least zero or one, an array or String field at least as long as an
-/// integer field's value.
+/// integer field's value or longer.
 #[derive(Debug, Default)]
 pub struct RecordFacts {
     /// Every fact no round has dropped.
@@ -733,7 +733,8 @@ fn invariants(
             for a in near {
                 of.insert(vec![(Part::Val(f.clone()), 1)]);
                 let parts = vec![(Part::Val(f.clone()), -1), (Part::Len(a.clone()), 1)];
-                of.insert(record_fact(parts));
+                of.insert(record_fact(parts.clone()));
+                of.insert(record_fact([parts, vec![(Part::One, -1)]].concat()));
             }
         }
         of.extend(element_facts(fs, decls, &through, &loose, &shrunk));
@@ -2760,7 +2761,7 @@ impl<'a> Walk<'a> {
 
     fn dead(&mut self, s: &mut St) {
         match s {
-            St::Check(c) if self.record && provable(&c.guard) => c.verdict = Verdict::Proved,
+            St::Check(c) if self.record => c.verdict = Verdict::Proved,
             St::If { then, els, .. } => {
                 then.iter_mut().for_each(|s| self.dead(s));
                 els.iter_mut().for_each(|s| self.dead(s));
@@ -2938,7 +2939,7 @@ impl<'a> Walk<'a> {
                     let holds =
                         |g: &Lin| (st.prover().ge0_deep(g)).is_some_and(|cert| cert.verify(&st, g));
                     let failing = goals.iter().flatten().find(|g| !holds(g));
-                    if goals.is_some() && failing.is_none() && provable(&c.guard) {
+                    if goals.is_some() && failing.is_none() {
                         c.verdict = Verdict::Proved;
                     } else {
                         c.why = self.why(&st, c, failing);
@@ -2961,11 +2962,15 @@ impl<'a> Walk<'a> {
                         }
                     }
                 }
-                // A passed index, span or shift check states its goals; a
-                // divisor's goals are only one way it can pass.
+                // A passed index, span, range or shift check states its
+                // goals; a divisor's goals are only one way it can pass.
                 if matches!(
                     c.guard,
-                    Guard::Index(..) | Guard::Span(..) | Guard::Shift(..) | Guard::Rule(..)
+                    Guard::Index(..)
+                        | Guard::Span(..)
+                        | Guard::Range(..)
+                        | Guard::Shift(..)
+                        | Guard::Rule(..)
                 ) {
                     for g in goals.into_iter().flatten() {
                         st.assume(&g);
@@ -3012,7 +3017,11 @@ impl<'a> Walk<'a> {
                 }
             }
             Guard::NoOverflow(_, d, _) => vec![self.lin(d)?],
-            Guard::Range(..) => return None,
+            Guard::Range(s, a, b) => {
+                let Val::Name(s) = s else { return None };
+                let (a, b) = (self.lin(a)?, self.lin(b)?);
+                vec![a.clone(), b.sub(&a)?, len(&Place::Name(*s))?.sub(&b)?]
+            }
             // Only where each field's length is its own term: elsewhere one
             // term stands for a whole class, and the goal holds by itself.
             Guard::Rule(r) if self.open.contains(r) => {
@@ -3573,8 +3582,9 @@ impl<'a> Walk<'a> {
         }
     }
 
-    /// The range of `n = a op b` where `b` is a literal that bounds it, or
-    /// the shift amount of a non-negative `a`.
+    /// The range of `n = a op b` where `b` is a literal that bounds it, an
+    /// operand of `&` the state proves non-negative, or the shift amount of a
+    /// non-negative `a`.
     fn bound(&self, pre: &State, n: Name, o: BinOp, la: &Lin, lb: &Lin) -> Out {
         let p = pre.prover();
         let holds = |g: &Lin| p.ge0(g).is_some_and(|c| c.verify(pre, g));
@@ -3600,7 +3610,10 @@ impl<'a> Walk<'a> {
             ]
         };
         let facts = match (o, lb.is_const().then_some(lb.c)) {
-            (BinOp::BitAnd, Some(c)) if c >= 0 => [Some(v.clone()), Lin::k(c).sub(&v), None],
+            (BinOp::BitAnd, _) => match [lb, la].into_iter().find(|m| holds(m)) {
+                Some(m) => [Some(v.clone()), m.sub(&v), None],
+                None => return Out::Nothing,
+            },
             (BinOp::Rem, Some(k)) if k >= 1 && nonneg => {
                 [Some(v.clone()), Lin::k(k - 1).sub(&v), None]
             }
@@ -3860,8 +3873,9 @@ impl<'a> Walk<'a> {
             head.assume(&l);
         }
         // Candidates: what entry knows about the written names, two fields
-        // of a record it grows that entry defines equally long, and the
-        // counter shapes an index needs.
+        // of a record it grows that entry defines equally long, the record
+        // facts of a written record whose fields a row set, and the counter
+        // shapes an index needs.
         let mut cands: BTreeSet<Lin> = BTreeSet::new();
         for f in &entry.facts {
             if f.terms.iter().any(|(t, _)| written.contains(&t.name())) {
@@ -3877,6 +3891,9 @@ impl<'a> Walk<'a> {
             }
         }
         cands.extend(equal_fields(entry, &written));
+        for n in written.iter().filter(|n| self.dirty.contains(n)) {
+            cands.extend(self.facts_of(*n).into_iter().map(|(l, _)| l));
+        }
         // A name a `let` in the loop binds is fresh each turn; a counter is a
         // name the loop stores to.
         let mut stored = BTreeSet::new();
@@ -3975,21 +3992,20 @@ impl<'a> Walk<'a> {
     /// `a - b` and its negation, where `a` and `b` are the lengths of two
     /// arrays or Strings the loop `body` stores to on the same paths, both of
     /// which a check can depend on: a loop that grows them in step keeps them
-    /// as equal as it entered. The counter of a loop bound by a literal
-    /// ([`bound_test`]) takes part as its value, and in a walk that proves a
-    /// result, the counter of a loop bound by a parameter: in every walk that
-    /// one cost 11.9% more `elide: summaries` allocations on the site export.
-    /// [`Walk::settle`] keeps a candidate only where the entry and every turn
-    /// prove it.
+    /// as equal as it entered. The counter of a loop with a bound
+    /// ([`bound_test`]) takes part as its value; in a walk that proves a
+    /// result, only for a literal or parameter bound: any bound there cost
+    /// 1.1% more `elide: summaries` allocations on the site export and proved
+    /// no row. [`Walk::settle`] keeps a candidate only where the entry and
+    /// every turn prove it.
     fn in_step(&self, body: &[St], stored: &BTreeSet<Name>) -> Vec<Lin> {
         let relevant = |n: &Name| self.slot[n.index()].relevant;
-        let param = |b: &Lin| match b.terms[..] {
-            [(Term::Val(p), 1)] => self.post.is_some() && self.body.params.contains(&p),
-            _ => false,
-        };
-        let counter = (bound_test(body).filter(|(.., b)| b.is_const() || param(b)))
-            .map(|(_, k, _)| k)
-            .filter(relevant);
+        let param =
+            |b: &Lin| matches!(b.terms[..], [(Term::Val(p), 1)] if self.body.params.contains(&p));
+        let counter = (bound_test(body)
+            .filter(|(.., b)| self.post.is_none() || b.is_const() || param(b)))
+        .map(|(_, k, _)| k)
+        .filter(relevant);
         let term = |n: &Name| match Some(*n) == counter {
             true => Some(Term::Val(*n)),
             false => (relevant(n) && self.kind(*n) == Kind::Seq).then_some(Term::Len(*n)),
@@ -4104,7 +4120,12 @@ impl<'a> Walk<'a> {
     fn why(&self, st: &State, c: &Check, failing: Option<&Lin>) -> Why {
         let operands = match (failing, &c.guard) {
             (Some(_), _) => [None, None],
-            (None, Guard::Range(..)) => return Why::Range,
+            (None, Guard::Range(s, a, b)) => {
+                if val_name(s).is_some_and(|s| self.length(&Place::Name(s)).is_none()) {
+                    return Why::Place(val_name(s));
+                }
+                [val_name(a), val_name(b)]
+            }
             (None, Guard::Index(p, i) | Guard::Span(p, i, _)) => {
                 if self.length(p).is_none() {
                     return Why::Place(place_root(p));
@@ -4405,12 +4426,6 @@ fn lands_on_result(args: &[(Arg, Capability)]) -> bool {
     args.first().is_some_and(|(_, c)| *c != Capability::Modify)
 }
 
-/// Whether a proved verdict is one the emitter can honour: `bytesOf` checks
-/// a range inside and has no unchecked form.
-fn provable(g: &Guard) -> bool {
-    !matches!(g, Guard::Range(..))
-}
-
 /// The name whose lengths a store into `p` may change: the name itself, or
 /// the record whose field it replaces. A store into an element keeps every
 /// length.
@@ -4623,12 +4638,13 @@ fn mark(
             St::If {
                 cond, then, els, ..
             } => {
-                // A loop's exit condition carries the facts of its operands
-                // when it is a Bool copy (`a && b`), for a check in the loop.
-                if let (true, Some(c), [], [St::Break { .. }]) =
-                    (checks, val(cond), &then[..], &els[..])
-                {
-                    rel[c.index()] = true;
+                // A Bool a branch stores takes the branch's facts at the join
+                // (`State::join`): `a && b && c` keeps `b`'s for a check.
+                if checks && val(cond).is_some_and(|c| rel[c.index()]) {
+                    let mut set = BTreeSet::new();
+                    stores(std::slice::from_ref(s), &mut set);
+                    set.retain(|n| body.names[n.index()].ty == Type::Bool);
+                    set.iter().for_each(|n| rel[n.index()] = true);
                 }
                 mark(body, decls, then, rel, checks, linked);
                 mark(body, decls, els, rel, checks, linked);
@@ -4672,7 +4688,7 @@ fn guard_names(g: &Guard, f: &mut dyn FnMut(Name)) {
             val(i);
         }
         Guard::Shift(k, _) | Guard::NonZero(k) | Guard::NoOverflow(_, k, _) => val(k),
-        Guard::Range(..) => {}
+        Guard::Range(s, a, b) => [s, a, b].into_iter().for_each(val),
         Guard::Rule(r) => val(&Val::Name(*r)),
         Guard::Clause { atoms, .. } => atoms.iter().for_each(|a| {
             val(&a.l.of);

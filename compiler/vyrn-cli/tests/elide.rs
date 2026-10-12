@@ -1284,6 +1284,114 @@ fn a_counter_down_to_one_proves_its_index_below_it() {
     );
 }
 
+/// A private function of an injected runtime module (`std/text`, spelled
+/// `text$`) starts with what every caller proves of its arguments, as a root
+/// module's does. With the caller's bound weakened by one, the read stays a
+/// check and traps.
+#[test]
+fn a_runtime_modules_private_function_takes_its_callers_facts() {
+    let run = |high: &str, i: i64| {
+        let dir = scratch("elide-rt-entry");
+        let std_dir = dir.join("std");
+        std::fs::create_dir_all(&std_dir).unwrap();
+        let repo_std = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../std");
+        for e in std::fs::read_dir(repo_std).unwrap() {
+            let e = e.unwrap().path();
+            std::fs::copy(&e, std_dir.join(e.file_name().unwrap())).unwrap();
+        }
+        let text = std_dir.join("text.vyrn");
+        let mut src = std::fs::read_to_string(&text).unwrap();
+        src.push_str(&format!(
+            "
+fn pickW(xs: Array<Int64>, i: Int64) -> Int64 {{
+    return xs[i]
+}}
+
+export fn pickAt(xs: Array<Int64>, i: Int64) -> Int64 {{
+    if i < 0 || {high} {{
+        return 0
+    }}
+    return pickW(xs, i)
+}}
+"
+        ));
+        std::fs::write(&text, src).unwrap();
+        let file = dir.join("p.vyrn");
+        std::fs::write(
+            &file,
+            format!(
+                "import {{ pickAt }} from \"std/text\"
+fn main() -> Int64 {{
+    let xs: Array<Int64> = [10, 20, 30]
+    print(pickAt(xs, {i}).toString())
+    return 0
+}}
+"
+            ),
+        )
+        .unwrap();
+        let log = dir.join("counts.tsv");
+        let out = vyrn()
+            .arg("run")
+            .arg(&file)
+            .env("VYRN_STD", &std_dir)
+            .env("VYRN_CHECKS", &log)
+            .output()
+            .unwrap();
+        let rows: Vec<String> = std::fs::read_to_string(&log)
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|l| {
+                let f: Vec<&str> = l.split('\t').collect();
+                (f[1] == "text$pickW").then(|| f[4..6].join(" "))
+            })
+            .collect();
+        (norm(&out.stderr), rows)
+    };
+    let (err, rows) = run("i >= xs.length", 2);
+    assert_eq!(err, "");
+    assert_eq!(rows, ["array-index proved"]);
+    let (err, rows) = run("i > xs.length", 3);
+    assert_eq!(rows, ["array-index kept"]);
+    assert!(err.contains("array index 3 out of bounds"), "{err}");
+    assert!(
+        !err.contains(vyrn_frontend::trap::PROVED_CHECK_FAILED),
+        "{err}"
+    );
+}
+
+/// A `bytes(s, a, b)` range is proved where the path bounds `0 <= a <= b <=
+/// s.byteLength`. With the upper bound weakened by one, the range stays a
+/// check and traps.
+#[test]
+fn a_bounded_range_proves_its_bytes_slice() {
+    let src = |high: &str| {
+        format!(
+            "fn w(s: String, a: Int64, b: Int64) -> Int64 {{
+    if a < 0 || {high} || a > b {{
+        return 0
+    }}
+    return bytes(s, a, b).length
+}}
+"
+        )
+    };
+    let proof = src("b > s.byteLength");
+    assert_eq!(verdicts(&proof, "w"), ["proved string-index"]);
+    assert_eq!(
+        oracle(&proof, "    print(w(\"ABCD\", 1, 4).toString())", "w").0,
+        ""
+    );
+    let witness = src("b > s.byteLength + 1");
+    assert_eq!(verdicts(&witness, "w"), ["check string-index"]);
+    let (err, _) = oracle(&witness, "    print(w(\"ABCD\", 1, 5).toString())", "w");
+    assert!(err.contains("string index 5 out of bounds"), "{err}");
+    assert!(
+        !err.contains(vyrn_frontend::trap::PROVED_CHECK_FAILED),
+        "{err}"
+    );
+}
+
 /// A check's goal takes a chain of three premises: `m < r`, `r < n` and
 /// `n <= xs.length` bound `xs[m]`. With one link weakened to `r <= n + 1`
 /// the chain does not hold, and the read stays a check and traps.
@@ -1316,6 +1424,50 @@ fn a_chain_of_three_premises_proves_an_index() {
     assert!(err.contains("array index 3 out of bounds"), "{err}");
     assert!(
         !err.contains(vyrn_frontend::trap::PROVED_CHECK_FAILED),
+        "{err}"
+    );
+}
+
+/// A Bool a branch stores takes that branch's facts: the `&&` chain's last
+/// operand bounds nothing, and `i + 1 < s.byteLength` still reaches the body.
+#[test]
+fn a_bool_a_branch_stores_keeps_the_branch_facts() {
+    let src = "fn w(s: String, i: Int64, c: Bool) -> Int64 {
+    if i >= 0 && i < s.byteLength && i + 1 < s.byteLength && c {
+        return Int64(s[i + 1])
+    }
+    return 0
+}
+";
+    assert_eq!(verdicts(src, "w"), ["proved string-index"]);
+    let calls = "    print(w(\"a/b\", 1, true).toString())";
+    assert_eq!(oracle(src, calls, "w").0, "");
+}
+
+/// The core binds `@borrow` once per read in a loop. A fact of the borrow of
+/// `s` proves `s[i]` and does not reach the borrow of `t`.
+#[test]
+fn a_borrow_fact_reaches_no_other_borrow() {
+    let src = "fn w(s: String, t: String) -> Int64 {
+    let mut n: Int64 = 0
+    let mut i: Int64 = 0
+    while i < s.byteLength {
+        if s[i] == 47 && i + 1 < s.byteLength && t[i + 1] == 42 {
+            n = n + 1
+        }
+        i = i + 1
+    }
+    return n
+}
+";
+    assert_eq!(
+        verdicts(src, "w"),
+        ["proved string-index", "check string-index"]
+    );
+    let (err, _) = oracle(src, "    print(w(\"/x\", \"a\").toString())", "w");
+    assert!(
+        err.contains("string index 1 out of bounds")
+            && !err.contains(vyrn_frontend::trap::PROVED_CHECK_FAILED),
         "{err}"
     );
 }
@@ -2101,6 +2253,44 @@ fn w(xs: modify Array<Int64>, j: Int64) -> Int64 {
 ",
         "    print(w(xs, 5, true).toString())",
         "array index 5 out of bounds",
+    ),
+    // A Bool a branch stores: `<=` leaves the index one past the String.
+    (
+        "fn w(s: String, i: Int64, c: Bool) -> Int64 {
+    if i >= 0 && i < s.byteLength && i + 1 <= s.byteLength && c {
+        return Int64(s[i + 1])
+    }
+    return 0
+}
+",
+        "    print(w(\"a/\", 1, true).toString())",
+        "string index 2 out of bounds",
+    ),
+    // ... and `||` joins a branch where the bound fails.
+    (
+        "fn w(s: String, i: Int64, c: Bool) -> Int64 {
+    if i >= 0 && i < s.byteLength && (i + 1 < s.byteLength || i == 1) && c {
+        return Int64(s[i + 1])
+    }
+    return 0
+}
+",
+        "    print(w(\"a/\", 1, true).toString())",
+        "string index 2 out of bounds",
+    ),
+    // A fact of one binding reaches no other binding of its spelling.
+    (
+        "fn w(xs: Array<Int64>, ys: Array<Int64>, i: Int64) -> Int64 {
+    let a = xs
+    if i >= 0 && i < a.length {
+        let a = ys
+        return a[i]
+    }
+    return 0
+}
+",
+        "    let mut ys: Array<Int64> = []\n    ys.push(1)\n    print(w(xs, ys, 2).toString())",
+        "array index 2 out of bounds",
     ),
     // A Bool temp stored again between its condition and its use.
     (
@@ -5292,6 +5482,204 @@ fn two_fields_grown_out_of_step_keep_the_index_and_trap_there() {
     assert_eq!(rows_of(&file, "w"), ["check array-index"]);
     let (err, _) = run_oracle(&dir, &file, "w");
     assert!(err.contains("array index 4 out of bounds"), "{err}");
+    assert!(
+        !err.contains(vyrn_frontend::trap::PROVED_CHECK_FAILED),
+        "{err}"
+    );
+}
+
+/// A loop that pushes once per turn while its counter is below a name's value
+/// leaves the array at least that long. A push on some turns only, or a turn
+/// that empties the array, keeps the read's check, which traps.
+#[test]
+fn a_loop_bound_by_a_name_counts_its_pushes() {
+    let src = |push: &str| {
+        format!(
+            "fn w(n: Int64) -> Int64 {{
+    let len = n + 1
+    let mut t: Array<Int64> = []
+    let mut i = 0
+    while i < len {{
+        {push}
+        i = i + 1
+    }}
+    let mut s = 0
+    let mut k = len
+    while k > 0 {{
+        s = s + t[k - 1]
+        k = k - 1
+    }}
+    return s
+}}
+"
+        )
+    };
+    let calls = "    print(w(3).toString())";
+    let proof = src("t.push(i)");
+    assert_eq!(verdicts(&proof, "w"), ["proved array-index"]);
+    assert_eq!(oracle(&proof, calls, "w").0, "");
+    let mut failures = Vec::new();
+    for push in [
+        "if i != 2 {\n            t.push(i)\n        }",
+        "t.push(i)\n        if i == 2 {\n            t.clear()\n        }",
+    ] {
+        let witness = src(push);
+        let rows = verdicts(&witness, "w");
+        if rows != ["check array-index"] {
+            failures.push(format!("{witness}\nrows: {rows:?}"));
+        }
+        let (err, _) = oracle(&witness, calls, "w");
+        if !err.contains("array index 3 out of bounds")
+            || err.contains(vyrn_frontend::trap::PROVED_CHECK_FAILED)
+        {
+            failures.push(format!("{witness}\nran: {err}"));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n\n"));
+}
+
+/// A goal whose coefficients share a factor is asked divided by it, its
+/// constant floored: `2 * k - 1 != 0` for `k >= 1` is `k - 1 >= 0`. The
+/// divisor `2 * k - 2` is zero at `k == 1`, keeps its check and traps.
+#[test]
+fn a_goal_with_a_common_factor_proves_a_divisor() {
+    let src = |d: &str| {
+        format!(
+            "fn w(t: Array<Int64>) -> Int64 {{
+    let mut k = t.length
+    let mut s = 0
+    while k > 0 {{
+        s = s + 1000 / ({d})
+        k = k - 1
+    }}
+    return s
+}}
+"
+        )
+    };
+    let calls = "    print(w(xs).toString())";
+    let proof = src("2 * k - 1");
+    assert_eq!(
+        verdicts(&proof, "w"),
+        ["proved int-div-zero", "proved int-div-overflow"]
+    );
+    assert_eq!(oracle(&proof, calls, "w").0, "");
+    let witness = src("2 * k - 2");
+    assert_eq!(verdicts(&witness, "w")[0], "check int-div-zero");
+    let (err, _) = oracle(&witness, calls, "w");
+    assert!(err.contains(vyrn_frontend::trap::DIV_ZERO), "{err}");
+    assert!(
+        !err.contains(vyrn_frontend::trap::PROVED_CHECK_FAILED),
+        "{err}"
+    );
+}
+
+/// `h & m` lies in `0..=m` when the state proves `m >= 0`, so `t[h & m]` with
+/// `m = t.length - 1` needs no check. A mask one too wide, or one that may be
+/// negative (`-1` keeps every bit of `h`), keeps the check, which traps.
+#[test]
+fn a_mask_bounds_an_index_by_its_non_negative_operand() {
+    let src = |m: &str, guard: &str| {
+        format!(
+            "fn w(t: Array<Int64>, h: Int64) -> Int64 {{
+    let m = {m}
+    if m < {guard} {{
+        return 0
+    }}
+    return t[h & m]
+}}
+"
+        )
+    };
+    let calls = "    let e: Array<Int64> = []\n    print(w(xs, 7).toString())\n    print(w(e, 7).toString())";
+    let proof = src("t.length - 1", "0");
+    assert_eq!(verdicts(&proof, "w"), ["proved array-index"]);
+    assert_eq!(oracle(&proof, calls, "w").0, "");
+    let mut failures = Vec::new();
+    for (m, guard, at) in [("t.length", "0", 3), ("t.length - 1", "-1", 7)] {
+        let witness = src(m, guard);
+        let rows = verdicts(&witness, "w");
+        if rows != ["check array-index"] {
+            failures.push(format!("{witness}\nrows: {rows:?}"));
+        }
+        let (err, _) = oracle(&witness, calls, "w");
+        if !err.contains(&format!("array index {at} out of bounds"))
+            || err.contains(vyrn_frontend::trap::PROVED_CHECK_FAILED)
+        {
+            failures.push(format!("{witness}\nran: {err}"));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n\n"));
+}
+
+/// A record whose every builder makes an integer field below an array
+/// field's length states it, so `s.slots[h & s.mask]` needs no check. One
+/// builder that makes `mask` equal to the length drops the fact, and the
+/// read keeps its check, which traps.
+#[test]
+fn an_integer_field_below_a_length_proves_a_masked_index() {
+    let src = |mask: i64| {
+        format!(
+            "type Tab = {{ slots: Array<Int64>, mask: Int64 }}
+fn make() -> Tab {{
+    return Tab {{ slots: [0, 0, 0, 0], mask: {mask} }}
+}}
+fn w(s: Tab, h: Int64) -> Int64 {{
+    return s.slots[h & s.mask]
+}}
+"
+        )
+    };
+    let calls = "    print(w(make(), 4).toString())";
+    let proof = src(3);
+    assert_eq!(verdicts(&proof, "w"), ["proved array-index"]);
+    assert_eq!(oracle(&proof, calls, "w").0, "");
+    let witness = src(4);
+    assert_eq!(verdicts(&witness, "w"), ["check array-index"]);
+    let (err, _) = oracle(&witness, calls, "w");
+    assert!(err.contains("array index 4 out of bounds"), "{err}");
+    assert!(
+        !err.contains(vyrn_frontend::trap::PROVED_CHECK_FAILED),
+        "{err}"
+    );
+}
+
+/// A loop that passes a record whose fields a row set to a `modify` call
+/// keeps the record's facts when every turn proves them, so the callee's
+/// masked read needs no check. A turn that shortens `slots` after the call
+/// drops them, and the read keeps its check, which traps on the next turn.
+#[test]
+fn a_record_written_in_a_loop_keeps_its_facts() {
+    let src = |turn: &str| {
+        format!(
+            "type Tab = {{ slots: Array<Int64>, mask: Int64 }}
+fn make() -> Tab {{
+    return Tab {{ slots: [0, 0], mask: 1 }}
+}}
+fn mark(s: modify Tab, h: Int64) {{
+    s.slots[h & s.mask] = 1
+}}
+fn grow(s: modify Tab, n: Int64) {{
+    s.slots = [0, 0, 0, 0]
+    s.mask = 3
+    let mut i = 0
+    while i < n {{
+        mark(s, i)
+        {turn}
+        i = i + 1
+    }}
+}}
+"
+        )
+    };
+    let calls = "    let mut s = make()\n    grow(s, 6)\n    print(s.mask.toString())";
+    let proof = src("s.slots[0] = i");
+    assert_eq!(verdicts(&proof, "mark"), ["proved array-index"]);
+    assert_eq!(oracle(&proof, calls, "mark").0, "");
+    let witness = src("s.slots = [0]");
+    assert_eq!(verdicts(&witness, "mark"), ["check array-index"]);
+    let (err, _) = oracle(&witness, calls, "mark");
+    assert!(err.contains("array index 1 out of bounds"), "{err}");
     assert!(
         !err.contains(vyrn_frontend::trap::PROVED_CHECK_FAILED),
         "{err}"

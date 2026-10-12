@@ -214,7 +214,6 @@ fn said(why: &Why, body: &Body, world: &World) -> String {
             code(*n)
         ),
         Why::Unproved(goal) => format!("it needs {goal}, and the compiler cannot show that here"),
-        Why::Range => "`bytes` checks its range itself".into(),
         Why::Rule => "the compiler proves only `where` rules that state equal lengths".into(),
         Why::Nonlinear => {
             "the compiler proves only sums of names and lengths times constants, and this check \

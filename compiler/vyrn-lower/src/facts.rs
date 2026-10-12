@@ -195,7 +195,17 @@ impl Fact {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Cert {
     Dead,
-    Sum { uses: Vec<Lin>, slack: i64 },
+    Sum {
+        uses: Vec<Lin>,
+        slack: i64,
+    },
+    /// `inner` proves the goal with every coefficient divided by `by` and the
+    /// constant floored, which holds exactly when the goal does, because every
+    /// term is an integer.
+    Scaled {
+        by: i64,
+        inner: Box<Cert>,
+    },
 }
 
 impl Cert {
@@ -224,6 +234,18 @@ impl Cert {
                     }
                 }
                 sum.values().all(|k| *k == 0) && c >= 0
+            }
+            Cert::Scaled { by, inner } => {
+                let Some(goal) = st.norm(goal) else {
+                    return false;
+                };
+                let terms: Option<Vec<(Term, i64)>> = (goal.terms.iter())
+                    .map(|&(t, k)| (*by > 1 && k % by == 0).then_some((t, k / by)))
+                    .collect();
+                terms.is_some_and(|terms| {
+                    let c = goal.c.div_euclid(*by);
+                    inner.verify(st, &Lin { terms, c })
+                })
             }
         }
     }
@@ -779,8 +801,26 @@ impl Prover<'_> {
         None
     }
 
-    /// [`State::ge0`], over the index.
+    /// [`State::ge0`], over the index. A goal whose coefficients share a
+    /// factor is also asked divided by it: `2k - 1 >= 0` as `k - 1 >= 0`.
     pub fn ge0(&self, goal: &Lin) -> Option<Cert> {
+        self.ge0_sum(goal).or_else(|| {
+            let g = self.st.norm(goal)?;
+            let by = (g.terms.iter()).fold(0, |d, (_, k)| gcd(d, k.unsigned_abs()));
+            let by = i64::try_from(by).ok().filter(|b| *b > 1)?;
+            let terms = g.terms.iter().map(|&(t, k)| (t, k / by)).collect();
+            let inner = self.ge0_sum(&Lin {
+                terms,
+                c: g.c.div_euclid(by),
+            })?;
+            Some(Cert::Scaled {
+                by,
+                inner: Box::new(inner),
+            })
+        })
+    }
+
+    fn ge0_sum(&self, goal: &Lin) -> Option<Cert> {
         if self.st.dead {
             return Some(Cert::Dead);
         }
@@ -843,6 +883,14 @@ impl Prover<'_> {
             }
         }
         None
+    }
+}
+
+fn gcd(a: u64, b: u64) -> u64 {
+    if b == 0 {
+        a
+    } else {
+        gcd(b, a % b)
     }
 }
 
