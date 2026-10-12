@@ -6114,3 +6114,45 @@ fn a_loop_head_names_a_borrow_by_its_source() {
         "{err}"
     );
 }
+
+/// The last index where `xs` holds 20: `at = i` keeps `at < i`, and the
+/// exit's `i <= xs.length` gives `at < xs.length`. Stored after the step,
+/// `at` can reach `xs.length`, keeps its check and traps.
+#[test]
+fn a_copy_of_the_counter_stays_below_its_bound() {
+    let src = |turn: &str| {
+        format!(
+            "fn w(xs: Array<Int64>) -> Int64 {{
+    let mut at = 0 - 1
+    let mut i = 0
+    while i < xs.length {{
+{turn}
+    }}
+    if at < 0 {{
+        return 0
+    }}
+    return xs[at]
+}}
+"
+        )
+    };
+    let calls = "    print(w(xs).toString())";
+    let proof = src("        if xs[i] == 30 {\n            at = i\n        }\n        i = i + 1");
+    assert_eq!(
+        verdicts(&proof, "w"),
+        ["proved array-index", "proved array-index"]
+    );
+    assert_eq!(oracle(&proof, calls, "w").0, "");
+    let witness =
+        src("        i = i + 1\n        if xs[i - 1] == 30 {\n            at = i\n        }");
+    assert_eq!(
+        verdicts(&witness, "w"),
+        ["proved array-index", "check array-index"]
+    );
+    let (err, _) = oracle(&witness, calls, "w");
+    assert!(err.contains("array index 3 out of bounds"), "{err}");
+    assert!(
+        !err.contains(vyrn_frontend::trap::PROVED_CHECK_FAILED),
+        "{err}"
+    );
+}

@@ -4506,6 +4506,12 @@ impl<'a> Walk<'a> {
         }
         cands.extend(self.reaches(body, &stored, &indexed));
         cands.extend(self.in_step(body, &stored));
+        let copies = self.copies(body, &stored);
+        for (k, m) in &copies {
+            let d = Lin::of(Term::Val(*k)).sub(&Lin::of(Term::Val(*m)));
+            cands.extend(d.as_ref().and_then(|d| d.plus(-1)));
+            cands.extend(d);
+        }
         if !cands.is_empty() {
             let at_entry = entry.prover();
             cands.retain(|c| at_entry.ge0(c).is_some());
@@ -4564,6 +4570,19 @@ impl<'a> Walk<'a> {
                 .collect();
             bounded.iter().for_each(|f| exit.assume(f));
         }
+        // A copy below the counter lies below the counter's own bound:
+        // `i - at - 1 >= 0` and `n - i >= 0` give `n - at - 1 >= 0`.
+        for (k, m) in copies {
+            let (k, m) = (Term::Val(k), Term::Val(m));
+            let below = |f: &&Lin| f.terms.len() == 2 && f.coef(k) == 1 && f.coef(m) == -1;
+            let lows: Vec<&Lin> = exit.facts.iter().filter(below).collect();
+            let length = |f: &&Lin| (f.terms.iter()).any(|(t, _)| matches!(t, Term::Len(_)));
+            let tops = (exit.facts.iter()).filter(|f| f.terms.len() == 2 && f.coef(k) == -1);
+            let bounded: Vec<Lin> = (tops.filter(length))
+                .flat_map(|t| lows.iter().filter_map(|l| t.add(l)))
+                .collect();
+            bounded.iter().for_each(|f| exit.assume(f));
+        }
         exit
     }
 
@@ -4604,6 +4623,27 @@ impl<'a> Walk<'a> {
                     let d = Lin::of(*a).sub(&Lin::of(*b));
                     out.extend(d.as_ref().and_then(|d| d.scale(-1)));
                     out.extend(d);
+                }
+            }
+        }
+        out
+    }
+
+    /// Each `(k, m)` where `body` stores `m = k`, `k` a counter the loop
+    /// stores to: `at = i` keeps `at < i` once `i` steps past, a candidate
+    /// at the head and a bound at the exit.
+    fn copies(&self, body: &[St], stored: &BTreeSet<Name>) -> Vec<(Name, Name)> {
+        let int = |n: &Name| self.slot[n.index()].relevant && self.kind(*n).is_int();
+        let mut out = Vec::new();
+        for (s, _) in rows(body) {
+            if let St::Store {
+                place: Place::Name(m),
+                value: Val::Name(k),
+                ..
+            } = s
+            {
+                if m != k && stored.contains(k) && int(m) && int(k) {
+                    out.push((*k, *m));
                 }
             }
         }
