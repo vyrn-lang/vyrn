@@ -1451,6 +1451,109 @@ fn row_writes(s: &St) -> impl Iterator<Item = Name> + '_ {
     resized_places(s).filter_map(place_root).chain(written)
 }
 
+/// The checks that index by an element of an array name, for the element
+/// templates the walk keeps per array ([`State::elems`]): per check whose
+/// index takes an element of integer array name `x`, through [`reach`] or a
+/// row that stores the element into the index, `x`, the place the check
+/// indexes, and the reach `c`. A borrow of an array name (`let b = read x`)
+/// is the array. A record field's elements are [`RecordFacts`]' ([`through`]).
+fn element_seeds(
+    b: &Body,
+    decls: &HashMap<String, TypeDecl>,
+    ss: &[St],
+) -> Vec<(Name, Place, i64)> {
+    let mut out = Vec::new();
+    let read = |s: &St| match s {
+        St::Let(_, Rhs::Read(Place::Elem(a, _))) => match **a {
+            Place::Name(a) => int_elements(&b.names[a.index()].ty, decls),
+            _ => false,
+        },
+        _ => false,
+    };
+    let by_name =
+        |s: &St| matches!(s, St::Check(c) if matches!(c.guard, Guard::Index(_, Val::Name(_))));
+    if !rows(ss).any(|(s, _)| read(s)) || !rows(ss).any(|(s, _)| by_name(s)) {
+        return out;
+    }
+    // Per name, its `let` and the count of other rows that write it.
+    let mut defs: Vec<(Option<&Rhs>, u32)> = vec![(None, 0); b.names.len()];
+    for (s, _) in rows(ss) {
+        if let St::Let(n, rhs) = s {
+            defs[n.index()].0 = Some(rhs);
+        }
+        for n in row_writes(s) {
+            defs[n.index()].1 += 1;
+        }
+    }
+    let root = |n: Name| match defs[n.index()] {
+        (Some(Rhs::Read(Place::Name(a))), 0) => *a,
+        _ => n,
+    };
+    let field = |n: Name| match defs[n.index()] {
+        (Some(Rhs::Read(q @ Place::Field(r, _))), 0) => matches!(**r, Place::Name(_)).then_some(q),
+        _ => None,
+    };
+    let element = |n: Name| match defs[n.index()].0 {
+        Some(Rhs::Read(Place::Elem(base, _))) => match &**base {
+            Place::Name(a) if field(*a).is_none() => {
+                Some(root(*a)).filter(|x| int_elements(&b.names[x.index()].ty, decls))
+            }
+            _ => None,
+        },
+        _ => None,
+    };
+    for (s, _) in rows(ss) {
+        let St::Check(Check {
+            guard: Guard::Index(place, Val::Name(i)),
+            ..
+        }) = s
+        else {
+            continue;
+        };
+        let (v, c) = (defs[i.index()].0)
+            .and_then(|d| reach(b, decls, d, &|x| defs[x.index()].0))
+            .unwrap_or((*i, 1));
+        let stored = rows(ss).filter_map(|(s, _)| match s {
+            St::Store {
+                place: Place::Name(n),
+                value: Val::Name(m),
+                ..
+            } if *n == v => Some(*m),
+            _ => None,
+        });
+        for x in element(v).into_iter().chain(stored.filter_map(element)) {
+            let target = match place {
+                Place::Name(y) => field(*y).cloned().unwrap_or(Place::Name(root(*y))),
+                p => p.clone(),
+            };
+            out.push((x, target, c));
+        }
+    }
+    out
+}
+
+/// `t` with array `from`'s element and length renamed to array `to`'s.
+fn renamed(t: &Lin, from: Name, to: Name) -> Option<Lin> {
+    t.map(|x| {
+        Some(Lin::of(match x {
+            Term::Val(n) if n == from => Term::Val(to),
+            Term::Len(n) if n == from => Term::Len(to),
+            x => x,
+        }))
+    })
+}
+
+/// The template `t` of array `a` for the element `e`.
+fn filled(t: &Lin, a: Name, e: &Lin) -> Option<Lin> {
+    t.map(|x| {
+        Some(if x == Term::Val(a) {
+            e.clone()
+        } else {
+            Lin::of(x)
+        })
+    })
+}
+
 /// Per name a `let` binds to a read of a record name's field `keep` admits
 /// and no row writes, that field: the borrow the core hoists above a loop
 /// (`let @borrow = read r.f`). An element read or an index through the name
@@ -1947,6 +2050,7 @@ fn seeds(b: &Body, decls: &HashMap<String, TypeDecl>, sums: View<'_>) -> Vec<usi
         true,
         &|r| sums.linked(r),
         &|_, _| false,
+        &BTreeSet::new(),
     );
     (rows(&b.stmts))
         .filter_map(|(s, _)| match s {
@@ -2284,6 +2388,7 @@ fn entry_templates(
             true,
             &|r| sums.linked(r),
             &|_, _| false,
+            &BTreeSet::new(),
         );
         let used = |k: usize| rel[body.params[k].index()];
         let ints = interface(&params, |k, kind| used(k) && kind.is_int(), Term::Val);
@@ -2416,6 +2521,12 @@ struct Walk<'a> {
     /// The borrows of record fields whose elements a [`RecordFacts`] fact
     /// bounds ([`field_borrows`]).
     fields: BTreeMap<Name, Place>,
+    /// The element templates a check may need ([`element_seeds`]), each with
+    /// the array whose element and length it names. An array starts with
+    /// those its elements meet ([`Walk::element_flow`]).
+    elem_cands: Vec<(Name, Lin)>,
+    /// Per borrow of an array name the walk keeps templates of, the array.
+    arrays: BTreeMap<Name, Name>,
 }
 
 /// What the walk keeps about one name.
@@ -2575,7 +2686,14 @@ impl<'a> Walk<'a> {
             solving && sums.get(g).is_some_and(|(_, s)| s.pre.iter().any(named))
         };
         let linked = |r: &Rhs| sums.linked(r);
-        Walk {
+        // Only a walk that decides checks reads a template: no `pre` or
+        // `post` states one.
+        let seeds = match solving {
+            true => Vec::new(),
+            false => element_seeds(body, decls, stmts),
+        };
+        let roots: BTreeSet<Name> = seeds.iter().map(|(x, ..)| *x).collect();
+        let mut w = Walk {
             body,
             decls,
             sums,
@@ -2587,6 +2705,7 @@ impl<'a> Walk<'a> {
                 !solving,
                 &linked,
                 &enters,
+                &roots,
             )
             .into_iter()
             .map(|relevant| Slot {
@@ -2613,6 +2732,176 @@ impl<'a> Walk<'a> {
             fields: (field_borrows(stmts, |f| sums.facts.bounds_elements_of(f)).into_iter())
                 .map(|(n, p)| (n, p.clone()))
                 .collect(),
+            elem_cands: Vec::new(),
+            arrays: BTreeMap::new(),
+        };
+        if seeds.is_empty() {
+            return w;
+        }
+        for (x, target, c) in &seeds {
+            let Some(len) = w.length(target).map(Lin::of) else {
+                continue;
+            };
+            let e = Lin::of(Term::Val(*x));
+            w.elem_cands.push((*x, e.clone()));
+            for below in (c - 1).max(0)..=*c {
+                if let Some(t) = len.sub(&e).and_then(|l| l.plus(-below)) {
+                    w.elem_cands.push((*x, t));
+                }
+            }
+        }
+        w.elem_cands.sort();
+        w.elem_cands.dedup();
+        for (s, _) in rows(stmts) {
+            if let St::Let(b, Rhs::Read(Place::Name(a))) = s {
+                if roots.contains(a) {
+                    w.arrays.insert(*b, *a);
+                }
+            }
+        }
+        for (s, _) in rows(stmts) {
+            row_writes(s).for_each(|n| _ = w.arrays.remove(&n));
+        }
+        w
+    }
+
+    /// The array a place's elements are: an array name, or the array a
+    /// borrow of one reads.
+    fn array_of(&self, p: &Place) -> Option<Name> {
+        match p {
+            Place::Name(b) => Some(self.arrays.get(b).copied().unwrap_or(*b)),
+            _ => None,
+        }
+    }
+
+    /// The candidate templates ([`Walk::elem_cands`]) over array `n`.
+    fn cands_for(&self, n: Name) -> BTreeSet<Lin> {
+        (self.elem_cands.iter())
+            .filter_map(|(x, t)| renamed(t, *x, n))
+            .collect()
+    }
+
+    /// Whether `st` proves template `t` of array `a` of the value `v`, with a
+    /// check's three premises: an element read the template proves is one.
+    fn meets(&self, st: &State, t: &Lin, a: Name, v: &Val) -> bool {
+        let goal = self.lin(v).and_then(|e| filled(t, a, &e));
+        goal.is_some_and(|g| (st.prover().ge0_deep(&g)).is_some_and(|cert| cert.verify(st, &g)))
+    }
+
+    /// The element templates of `n = rhs`: an array literal starts with each
+    /// candidate its parts meet; a builtin that rebuilds its first argument
+    /// keeps that argument's templates its length change keeps true, and a
+    /// push only those the pushed value meets; a take or copy of an array
+    /// name has the name's. A template of another array bounded by the
+    /// source's length is bounded by `n`'s where the length moved its way.
+    fn element_flow(&self, st: &mut State, n: Name, rhs: &Rhs) {
+        if self.elem_cands.is_empty() || self.kind(n) != Kind::Seq {
+            return;
+        }
+        let (m, len) = match rhs {
+            Rhs::Make(Ctor::Array, parts) => {
+                let ts: BTreeSet<Lin> = (self.cands_for(n).into_iter())
+                    .filter(|t| parts.iter().all(|v| self.meets(st, t, n, v)))
+                    .collect();
+                if !ts.is_empty() {
+                    st.elems.insert(n, ts);
+                }
+                return;
+            }
+            Rhs::Val(Val::Name(m)) | Rhs::Take(Place::Name(m)) => (*m, Length::Keeps),
+            Rhs::Call {
+                callee,
+                args,
+                kind: Callee::Builtin | Callee::Reserved,
+                ..
+            } if lands_on_result(args) => match args.first().and_then(|(a, _)| root(a)) {
+                Some(m) => (m, length_rule(callee, args)),
+                None => return,
+            },
+            _ => return,
+        };
+        let m = self.arrays.get(&m).copied().unwrap_or(m);
+        // Whether a template with `k * len(x)` stays true as `x` becomes `n`.
+        let follows = |t: &Lin, x: Name| {
+            let k = t.coef(Term::Len(x));
+            match len {
+                Length::Keeps => true,
+                Length::GrowsByOne | Length::GrowsByLenOf(_) => k >= 0,
+                Length::ShrinksByOneIfNotEmpty => k <= 0,
+                _ => k == 0,
+            }
+        };
+        let bounded: Vec<(Name, Lin)> = (st.elems.iter())
+            .filter(|(a, _)| **a != m && **a != n)
+            .flat_map(|(a, ts)| ts.iter().map(move |t| (*a, t)))
+            .filter(|(_, t)| t.coef(Term::Len(m)) != 0 && follows(t, m))
+            .filter_map(|(a, t)| Some((a, renamed(t, m, n)?)))
+            .collect();
+        for (a, t) in bounded {
+            st.elems.entry(a).or_default().insert(t);
+        }
+        let from = |y: Name, st: &State| -> Vec<Lin> {
+            let y = self.arrays.get(&y).copied().unwrap_or(y);
+            (st.elems.get(&y).into_iter().flatten())
+                .filter_map(|t| renamed(t, y, n))
+                .collect()
+        };
+        let row = match rhs {
+            Rhs::Call { callee, .. } => prelude::builtin(callee).map(|r| r.elements),
+            _ => Some(Elements::KeepsEachPosition),
+        };
+        let ts: BTreeSet<Lin> = match (row, len) {
+            (Some(_), Length::SetToZero) => self.cands_for(n),
+            (Some(Elements::KeepsEachPosition | Elements::KeepsRange), _) => {
+                let args: &[(Arg, Capability)] = match rhs {
+                    Rhs::Call { args, .. } => args,
+                    _ => &[],
+                };
+                let added = match len {
+                    Length::GrowsByOne => args.get(1).map(|(a, _)| a),
+                    _ => None,
+                };
+                let theirs = match len {
+                    Length::GrowsByLenOf(j) => args.get(j).and_then(|(a, _)| root(a)),
+                    _ => None,
+                }
+                .map(|y| from(y, st));
+                (from(m, st).into_iter())
+                    .filter(|t| follows(t, n))
+                    .filter(|t| theirs.as_ref().is_none_or(|y| y.contains(t)))
+                    .filter(|t| match added {
+                        Some(Arg::Val(v)) => self.meets(st, t, n, v),
+                        Some(Arg::Place(Place::Name(v))) => self.meets(st, t, n, &Val::Name(*v)),
+                        Some(Arg::Place(_)) => false,
+                        None => true,
+                    })
+                    .collect()
+            }
+            (Some(Elements::OfArg(j)), Length::SetToLenOf(l)) if j == l => {
+                let Rhs::Call { args, .. } = rhs else { return };
+                match args.get(j).and_then(|(a, _)| root(a)) {
+                    Some(y) => from(y, st).into_iter().collect(),
+                    None => return,
+                }
+            }
+            _ => return,
+        };
+        if !ts.is_empty() {
+            st.elems.insert(n, ts);
+        }
+    }
+
+    /// Keeps of array `a`, whose element `place` takes `value`, the
+    /// templates `value` meets.
+    fn element_store(&self, st: &mut State, a: Name, value: &Val) {
+        let Some(ts) = st.elems.get(&a) else { return };
+        let kept: BTreeSet<Lin> = (ts.iter())
+            .filter(|t| self.meets(st, t, a, value))
+            .cloned()
+            .collect();
+        match kept.is_empty() {
+            true => _ = st.elems.remove(&a),
+            false => _ = st.elems.insert(a, kept),
         }
     }
 
@@ -2795,6 +3084,13 @@ impl<'a> Walk<'a> {
     /// it, the field's element facts, which every write into it proved
     /// ([`invariants`]).
     fn element_read(&mut self, st: &mut State, n: Name, base: &Place) {
+        if let Some(a) = self.array_of(base) {
+            let e = Lin::of(Term::Val(n));
+            let ts: Vec<Lin> = (st.elems.get(&a).into_iter().flatten())
+                .filter_map(|t| filled(t, a, &e))
+                .collect();
+            ts.iter().for_each(|l| st.assume(l));
+        }
         let base = match base {
             Place::Name(b) => self.fields.get(b).unwrap_or(base),
             _ => base,
@@ -3076,6 +3372,7 @@ impl<'a> Walk<'a> {
                 &mut rel,
                 Goals::Obligations,
                 &|r| sums.linked(r),
+                &BTreeSet::new(),
             );
             if rel.iter().filter(|r| **r).count() == before {
                 break;
@@ -3340,6 +3637,19 @@ impl<'a> Walk<'a> {
                         }
                     }
                 }
+                // A store below an element (`xs[i][j] = v`) may change an
+                // element no template names; one into an element holds it to
+                // each template.
+                match (&*place, place_root(place)) {
+                    (Place::Elem(base, _), _) if matches!(**base, Place::Name(_)) => {
+                        if let Some(a) = self.array_of(base) {
+                            self.element_store(&mut st, a, value);
+                        }
+                    }
+                    (Place::Name(_), _) => {}
+                    (_, Some(a)) => _ = st.elems.remove(&a),
+                    _ => {}
+                }
                 if let Place::Name(n) = place {
                     // The value the store displaces is released.
                     self.keeps(&st, *n);
@@ -3384,6 +3694,7 @@ impl<'a> Walk<'a> {
                     if self.slot[n.index()].relevant {
                         self.assign(&mut st, *n, value);
                         self.range(&mut st, *n);
+                        self.element_flow(&mut st, *n, &Rhs::Val(value.clone()));
                     }
                 }
                 st
@@ -3795,6 +4106,7 @@ impl<'a> Walk<'a> {
         }
         self.same_length(st, n, rhs);
         self.range(st, n);
+        self.element_flow(st, n, rhs);
         self.effects(st, rhs);
         self.called(st, n, rhs);
     }
@@ -4354,6 +4666,22 @@ impl<'a> Walk<'a> {
                 self.open(st, p);
             }
         }
+        // A `modify` builtin that may change an element keeps no template of it.
+        if let (Callee::Builtin | Callee::Reserved, Rhs::Call { callee, .. }) = (kind, rhs) {
+            let keeps = prelude::builtin(callee).is_some_and(|r| {
+                matches!(
+                    r.elements,
+                    Elements::KeepsEachPosition | Elements::KeepsRange
+                )
+            });
+            if !keeps {
+                for (a, _) in args.iter().filter(|(_, c)| *c == Capability::Modify) {
+                    if let Some(n) = root(a) {
+                        st.elems.remove(&n);
+                    }
+                }
+            }
+        }
         let moved = self.resized(rhs).filter(|_| !lands_on_result(args));
         for (i, (a, cap)) in args.iter().enumerate() {
             let Some(n) = root(a) else { continue };
@@ -4620,27 +4948,47 @@ impl<'a> Walk<'a> {
                 resized: BTreeSet::new(),
             },
         });
+        // Each element template at entry is a candidate: an element store
+        // writes no name, so the head would hold the template unchecked. A
+        // turn keeps one where every end still holds it.
+        head.elems.clear();
+        let mut temps: Vec<(Name, Lin)> = (entry.elems.iter())
+            .flat_map(|(a, ts)| ts.iter().map(move |t| (*a, t.clone())))
+            .collect();
+        let held = |h: &mut State, temps: &[(Name, Lin)]| {
+            for (a, t) in temps {
+                h.elems.entry(*a).or_default().insert(t.clone());
+            }
+        };
         let record = std::mem::replace(&mut self.record, false);
         loop {
             let mut h = head.clone();
             cands.iter().for_each(|c| h.assume(c));
+            held(&mut h, &temps);
             let end = self.block(h, body);
             let l = self.loops.last_mut().expect("pushed above");
             l.breaks.clear();
             let conts = std::mem::take(&mut l.conts);
             let ends: Vec<State> = conts.into_iter().chain([end]).collect();
-            if cands.is_empty() {
+            if cands.is_empty() && temps.is_empty() {
                 break;
             }
-            let before = cands.len();
+            let before = (cands.len(), temps.len());
             let provers: Vec<_> = ends.iter().map(|s| s.prover()).collect();
             cands.retain(|c| provers.iter().all(|p| p.ge0(c).is_some()));
-            if cands.len() == before {
+            let live = ends.iter().filter(|e| !e.dead);
+            let kept = |(a, t): &(Name, Lin)| {
+                live.clone()
+                    .all(|e| e.elems.get(a).is_some_and(|x| x.contains(t)))
+            };
+            temps.retain(kept);
+            if (cands.len(), temps.len()) == before {
                 break;
             }
         }
         self.record = record;
         cands.iter().for_each(|c| head.assume(c));
+        held(&mut head, &temps);
         self.block(head, body);
         let l = self.loops.pop().expect("pushed above");
         if let Some(outer) = self.loops.last_mut() {
@@ -5316,8 +5664,10 @@ fn relevant(
     checks: bool,
     linked: &dyn Fn(&Rhs) -> bool,
     entering: &dyn Fn(FnId, usize) -> bool,
+    arrays: &BTreeSet<Name>,
 ) -> Vec<bool> {
     let mut rel = vec![false; body.names.len()];
+    arrays.iter().for_each(|a| rel[a.index()] = true);
     for (s, _) in rows(ss) {
         let (St::Let(_, rhs) | St::Do { rhs, .. }) = s else {
             continue;
@@ -5350,7 +5700,7 @@ fn relevant(
     };
     loop {
         let before = rel.iter().filter(|r| **r).count();
-        mark(body, decls, ss, &mut rel, goals, linked);
+        mark(body, decls, ss, &mut rel, goals, linked, arrays);
         if rel.iter().filter(|r| **r).count() == before {
             return rel;
         }
@@ -5373,6 +5723,7 @@ fn mark(
     rel: &mut [bool],
     goals: Goals,
     linked: &dyn Fn(&Rhs) -> bool,
+    arrays: &BTreeSet<Name>,
 ) {
     let val = |v: &Val| match v {
         Val::Name(n) => Some(*n),
@@ -5406,6 +5757,11 @@ fn mark(
                     Rhs::Prim(_, vs, _) => {
                         link(rel, n.into_iter().chain(vs.iter().filter_map(val)))
                     }
+                    // An array whose element templates the walk keeps holds
+                    // its literal's parts to them.
+                    Rhs::Make(Ctor::Array, vs) if n.is_some_and(|n| arrays.contains(&n)) => {
+                        link(rel, n.into_iter().chain(vs.iter().filter_map(val)))
+                    }
                     // A literal defines its array and String fields' lengths.
                     Rhs::Make(Ctor::Record(..), vs) => {
                         let seq = |m: &Name| kind_of(&body.names[m.index()].ty, decls) == Kind::Seq;
@@ -5428,6 +5784,13 @@ fn mark(
                     _ => {}
                 }
             }
+            St::Store {
+                place: Place::Elem(base, _),
+                value,
+                ..
+            } if place_root(base).is_some_and(|a| arrays.contains(&a)) => {
+                link(rel, place_root(base).into_iter().chain(val(value)));
+            }
             St::Store { place, value, .. } => {
                 if let (Some(n), Some(m)) = (resized_by_store(place), val(value)) {
                     if rel[n.index()] || rel[m.index()] {
@@ -5448,8 +5811,8 @@ fn mark(
                     set.retain(|n| body.names[n.index()].ty == Type::Bool);
                     set.iter().for_each(|n| rel[n.index()] = true);
                 }
-                mark(body, decls, then, rel, goals, linked);
-                mark(body, decls, els, rel, goals, linked);
+                mark(body, decls, then, rel, goals, linked, arrays);
+                mark(body, decls, els, rel, goals, linked, arrays);
             }
             St::Loop { body: l, .. } | St::Block { body: l, .. } => {
                 // A loop bound by a literal counts what it stores
@@ -5462,14 +5825,14 @@ fn mark(
                         rel[t.index()] = true;
                     }
                 }
-                mark(body, decls, l, rel, goals, linked)
+                mark(body, decls, l, rel, goals, linked, arrays)
             }
             St::Switch { on, arms, .. } => {
                 for a in arms {
                     if let Some(b) = some_binder(body, decls, on, a) {
                         link(rel, [b].into_iter().chain(val(on)));
                     }
-                    mark(body, decls, &a.body, rel, goals, linked)
+                    mark(body, decls, &a.body, rel, goals, linked, arrays)
                 }
             }
             _ => {}

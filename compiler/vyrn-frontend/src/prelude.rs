@@ -175,6 +175,8 @@ pub enum Elements {
     /// Every element after the call is one the receiver held, at any position:
     /// `@swapRemove` moves the last element into the removed slot.
     KeepsRange,
+    /// The receiver holds argument `k`'s elements, in order: `@copyFrom`.
+    OfArg(usize),
 }
 
 /// One builtin, keyed by the name a call site carries. The checker's contract,
@@ -624,7 +626,7 @@ fn table() -> Vec<Builtin> {
             .method("copyFrom", &[Array])
             .spec(Spec::Rebuilds)
             .hover("array.copyFrom(src) -> Array<T> — overwrite the elements with `src`'s, reusing the buffer; element type must not own heap")
-            .resizes(Length::SetToLenOf(1), Elements::Unknown),
+            .resizes(Length::SetToLenOf(1), Elements::OfArg(1)),
         b("@toArray")
             .takes(&[1], takes_none)
             .method("toArray", &[SmallArray])

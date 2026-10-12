@@ -6446,3 +6446,153 @@ fn a_pop_of_a_full_array_shrinks_it_by_one() {
         "{err}"
     );
 }
+
+/// The verdicts of the check rows of `body` on the source line that holds
+/// `text`, in the program rooted at `file`.
+fn verdicts_on(file: &std::path::Path, body: &str, text: &str) -> Vec<String> {
+    let src = std::fs::read_to_string(file).unwrap();
+    let line = 1 + src.lines().position(|l| l.contains(text)).unwrap();
+    let out = vyrn().arg("emit-lowered").arg(file).output().unwrap();
+    assert!(out.status.success(), "{}", norm(&out.stderr));
+    let mut rows = Vec::new();
+    let mut inside = false;
+    for l in norm(&out.stdout).lines() {
+        if let Some(head) = l.strip_prefix("fn ") {
+            inside = head.split('(').next() == Some(body);
+        } else if inside && l.contains(&format!("(line {line} #")) {
+            let w: Vec<&str> = l.split_whitespace().collect();
+            if matches!(w.first(), Some(&"proved" | &"check")) {
+                rows.push(w[0].to_string());
+            }
+        }
+    }
+    rows
+}
+
+/// A body that builds `idx` with every element below `data.length`, runs
+/// `pre`, then reads `data[idx[k]]` in a loop that runs `turn` after it. The
+/// core reads `idx` and `data` through borrows it binds above the loop.
+fn arrays(pre: &str, turn: &str) -> String {
+    format!(
+        r#"fn bump(xs: modify Array<Int64>) {{
+    xs[0] = 99
+}}
+fn shorten(xs: modify Array<Int64>) {{
+    xs.pop()
+}}
+fn w(n: Int64) -> Int64 {{
+    if n < 1 {{
+        return 0
+    }}
+    let mut data: Array<Int64> = []
+    let mut idx: Array<Int64> = []
+    let mut i = 0
+    while i < n {{
+        data.push(i * 3)
+        idx.push(i)
+        i = i + 1
+    }}
+{pre}
+    let mut s = 0
+    let mut k = 0
+    while k < idx.length {{
+        s = s + data[idx[k]]
+{turn}
+        k = k + 1
+    }}
+    return s
+}}
+fn main() -> Int64 {{
+    print(w(4).toString())
+    return 0
+}}
+"#
+    )
+}
+
+const READ: &str = "s = s + data[idx[k]]";
+
+#[test]
+fn an_array_names_element_templates_prove_the_index_it_bounds() {
+    let (_dir, file) = modules(&arrays("", ""), &[]);
+    assert_eq!(verdicts_on(&file, "w", READ), ["proved", "proved"]);
+}
+
+/// Rows that break the template of `idx` in [`arrays`], before the loop or
+/// inside it, each with its trap.
+const ARRAY_WITNESSES: &[(&str, &str, &str)] = &[
+    // A store of an element no template bounds.
+    ("    idx[0] = n", "", "array index 4 out of bounds"),
+    // A push of one.
+    ("    idx.push(n)", "", "array index 4 out of bounds"),
+    // The array is replaced whole.
+    ("    idx = [n + 5]", "", "array index 9 out of bounds"),
+    // The bounding array shrinks.
+    ("    data.pop()", "", "array index 3 out of bounds"),
+    ("    data.swapRemove(0)", "", "array index 3 out of bounds"),
+    ("    data.clear()", "", "array index 0 out of bounds"),
+    // An `append` or a `copyFrom` brings elements no template bounds.
+    ("    idx.append([n])", "", "array index 4 out of bounds"),
+    ("    idx.copyFrom([n])", "", "array index 4 out of bounds"),
+    // One branch stores an element no template bounds.
+    (
+        "    if n < 3 {
+        idx.push(0)
+    } else {
+        idx[0] = n
+    }",
+        "",
+        "array index 4 out of bounds",
+    ),
+    // A call takes the array `modify`.
+    ("    bump(idx)", "", "array index 99 out of bounds"),
+    ("    shorten(data)", "", "array index 3 out of bounds"),
+    // A store into the array while the loop reads it through a borrow.
+    (
+        "",
+        "        idx[idx.length - 1] = n",
+        "array index 4 out of bounds",
+    ),
+];
+
+#[test]
+fn every_array_witness_keeps_its_index_and_traps_there() {
+    let mut failures = Vec::new();
+    for (pre, turn, trap) in ARRAY_WITNESSES {
+        let root = arrays(pre, turn);
+        let (dir, file) = modules(&root, &[]);
+        let rows = verdicts_on(&file, "w", READ);
+        if rows != ["proved", "check"] {
+            failures.push(format!("{root}\nrows: {rows:?}"));
+        }
+        let (err, _) = run_oracle(&dir, &file, "w");
+        if !err.contains(trap) || err.contains(vyrn_frontend::trap::PROVED_CHECK_FAILED) {
+            failures.push(format!("{root}\nran: {err}"));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n\n"));
+}
+
+/// No template names a global: a call may shrink one, and the walk sees no
+/// row that writes it.
+#[test]
+fn an_index_into_a_global_array_keeps_its_check() {
+    let root = arrays("    shrink()", "")
+        .replace(
+            "    let mut data: Array<Int64> = []
+",
+            "",
+        )
+        .replace(
+            "fn bump",
+            "let mut data: Array<Int64> = []
+fn shrink() {
+    data.pop()
+}
+fn bump",
+        );
+    let (dir, file) = modules(&root, &[]);
+    assert_eq!(verdicts_on(&file, "w", READ), ["proved", "check"]);
+    let (err, _) = run_oracle(&dir, &file, "w");
+    assert!(err.contains("array index 3 out of bounds"), "{err}");
+}
