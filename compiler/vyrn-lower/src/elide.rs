@@ -14,11 +14,12 @@
 //!
 //! A direct call's result has the facts its callee's [`Summary`] states,
 //! over the call's arguments ([`summaries`]); a call to a generic function
-//! reads its instance's. Any other call's result is a fresh value. A body
-//! that only direct call rows enter starts with the facts every such row
-//! proves of its arguments. Every body starts with its parameters' `where`
-//! clauses ([`Body::assumes`]), which every call row checks; a call's clause
-//! check is a row like any other.
+//! reads its instance's. A sentinel's facts hold where its integer result is
+//! at least zero ([`Summary::when`]). Any other call's result is a fresh
+//! value. A body that only direct call rows enter starts with the facts
+//! every such row proves of its arguments. Every body starts with its
+//! parameters' `where` clauses ([`Body::assumes`]), which every call row
+//! checks; a call's clause check is a row like any other.
 //!
 //! The walk knows nothing about a global, an element, or a field of a field:
 //! each read of one is a fresh value with its type's range. The length of
@@ -123,6 +124,11 @@ pub struct Summary {
     /// true. A fact names only parameters the body never writes, so it holds
     /// of the arguments as the caller passed them.
     post: BTreeSet<Lin>,
+    /// For an integer result some return makes negative (a sentinel, as
+    /// `-1` for "none"): the facts over the parameters every return of a
+    /// value at least zero proves. The caller assumes them where the result
+    /// is at least zero ([`Walk::sentinel`]).
+    when: BTreeSet<Lin>,
 }
 
 /// Each summarized body's [`Summary`], keyed by its row in the World's
@@ -350,7 +356,8 @@ impl<'a> View<'a> {
 
     /// Whether `f` states a fact of its result.
     fn post(&self, f: FnId) -> bool {
-        self.get(f).is_some_and(|(_, s)| !s.post.is_empty())
+        self.get(f)
+            .is_some_and(|(_, s)| !s.post.is_empty() || !s.when.is_empty())
     }
 
     /// Whether `rhs` is a direct call whose callee states a fact of its result.
@@ -462,13 +469,15 @@ pub fn summaries<'a>(
             // A record field's constant length comes from a callee's result
             // (`classOf: byteClasses(bd)`): solve those facts first, with no
             // record fact, for the walks that prove the record's.
-            let start: BTreeSet<usize> = match scans.iter().any(|s| !s.lengths.is_empty()) {
+            let mut start: BTreeSet<usize> = match scans.iter().any(|s| !s.lengths.is_empty()) {
                 true => (scans.iter().flat_map(|s| &s.fills))
                     .filter_map(|g| at.get(g).copied())
                     .filter(|&i| values[i].post.iter().any(constant_length))
                     .collect(),
                 false => BTreeSet::new(),
             };
+            // A sentinel's facts let a writer of a record prove its facts.
+            start.extend((0..values.len()).filter(|&i| !values[i].when.is_empty()));
             let lengths = match start.is_empty() {
                 true => Vec::new(),
                 false => {
@@ -477,6 +486,7 @@ pub fn summaries<'a>(
                             params: v.params.clone(),
                             types: v.types.clone(),
                             pre: BTreeSet::new(),
+                            when: v.when.clone(),
                             post: v
                                 .post
                                 .iter()
@@ -586,7 +596,10 @@ pub fn summaries<'a>(
         .filter(|(i, _)| values[*i].pre.is_empty())
         .map(|(i, d)| (bodies[i].0, Mutex::new(Some(d))))
         .collect();
-    at.retain(|_, i| !values[*i].pre.is_empty() || !values[*i].post.is_empty());
+    at.retain(|_, i| {
+        let v = &values[*i];
+        !v.pre.is_empty() || !v.post.is_empty() || !v.when.is_empty()
+    });
     Summaries {
         at,
         instances,
@@ -912,12 +925,14 @@ fn solve(
     let mut values =
         crate::fixpoint::descend(values, start, weight, walk, |i, (kept, read), values| {
             let mut next = Vec::new();
-            if kept.len() < values[i].post.len() {
+            let (kept, when) = kept;
+            if kept.len() < values[i].post.len() || when.len() < values[i].when.len() {
                 next.extend(readers[i].iter().copied());
             }
             values[i].post = kept;
+            values[i].when = when;
             // A body with no facts left reads no callee's.
-            if !values[i].post.is_empty() {
+            if !values[i].post.is_empty() || !values[i].when.is_empty() {
                 for j in read {
                     let new = readers[j].insert(i);
                     if !std::mem::replace(&mut seen[j], true) {
@@ -933,6 +948,7 @@ fn solve(
     for (v, seen) in values.iter_mut().zip(&seen) {
         if !seen {
             v.post.clear();
+            v.when.clear();
         }
     }
     values
@@ -1660,7 +1676,7 @@ fn built(body: &Body, decls: &HashMap<String, TypeDecl>, facts: &RecordFacts) ->
                 for (f, v) in fields.iter().zip(parts) {
                     let named = of
                         .iter()
-                        .any(|x| matches!(&x[..], [(Part::Val(g), 1), (Part::One, _)] if g == f));
+                        .any(|x| matches!(&x[..], [(Part::Val(g), 1)] | [(Part::Val(g), 1), (Part::One, _)] if g == f));
                     if let (true, Val::Name(m)) = (named, v) {
                         out[m.index()] = true;
                     }
@@ -1894,7 +1910,7 @@ fn seeds(b: &Body, decls: &HashMap<String, TypeDecl>, sums: View<'_>) -> Vec<usi
         .filter_map(|(s, _)| match s {
             St::Let(n, rhs) if rel[n.index()] => {
                 let (i, sum) = sums.get(sums.call(rhs)?)?;
-                (!sum.post.is_empty()).then_some(i)
+                (!sum.post.is_empty() || !sum.when.is_empty()).then_some(i)
             }
             _ => None,
         })
@@ -1957,12 +1973,19 @@ fn templates(body: &Body, decls: &HashMap<String, TypeDecl>, needed: &BTreeSet<i
         writes(&body.stmts, &mut written);
     }
     let usable = |k: usize| !written.contains(&body.params[k]);
-    if truth {
-        post = truth_templates(body, decls, &params, usable);
+    let sentinel = matches!(r, Some(Some(Term::Val(_)))) && negative_return(body);
+    if truth || sentinel {
         types = (body.params.iter())
             .map(|p| body.names[p.index()].ty.clone())
             .collect();
     }
+    if truth {
+        post = truth_templates(body, decls, &params, usable);
+    }
+    let when = match sentinel {
+        true => guard_templates(body, decls, usable),
+        false => BTreeSet::new(),
+    };
     if let Some(Some(r)) = r {
         let ints = interface(&params, |k, kind| usable(k) && kind.is_int(), Term::Val);
         let seqs = interface(&params, |k, kind| usable(k) && kind == Kind::Seq, Term::Len);
@@ -2023,7 +2046,96 @@ fn templates(body: &Body, decls: &HashMap<String, TypeDecl>, needed: &BTreeSet<i
         types,
         pre: BTreeSet::new(),
         post,
+        when,
     }
+}
+
+/// The candidates of a sentinel's `when`: for each check row that indexes a
+/// parameter's array or array field by a parameter's integer or integer
+/// field, `i >= 0` and `len(a) - i - 1 >= 0` over the interface. The guards
+/// a sentinel reads under are the facts its callers want.
+fn guard_templates(
+    body: &Body,
+    decls: &HashMap<String, TypeDecl>,
+    usable: impl Fn(usize) -> bool,
+) -> BTreeSet<Lin> {
+    let param = |n: Name| {
+        let k = body
+            .params
+            .iter()
+            .position(|p| *p == n)
+            .filter(|&k| usable(k))?;
+        Some((k, Name(k as u32 + 1)))
+    };
+    let field = |r: Name, f: &str| {
+        let (k, p) = param(r)?;
+        let fields =
+            vyrn_frontend::types::record_fields(&body.names[body.params[k].index()].ty, decls)?;
+        let at = fields.iter().position(|x| x.name == f)?;
+        Some((p, u32::try_from(at).ok()?, kind_of(&fields[at].ty, decls)))
+    };
+    let int = |v: &Val| -> Option<Lin> {
+        let Val::Name(n) = v else { return None };
+        if let Some((_, p)) =
+            param(*n).filter(|_| kind_of(&body.names[n.index()].ty, decls).is_int())
+        {
+            return Some(Lin::of(Term::Val(p)));
+        }
+        if writes_of(&body.stmts, *n) != 1 {
+            return None;
+        }
+        let Some(Rhs::Read(Place::Field(r, f))) = let_of(&body.stmts, *n) else {
+            return None;
+        };
+        let Place::Name(r) = **r else { return None };
+        let (p, i, kind) = field(r, f)?;
+        kind.is_int().then_some(Lin::of(Term::Field(p, i)))
+    };
+    let seq = |pl: &Place| -> Option<Lin> {
+        match pl {
+            Place::Name(n) => {
+                let (_, p) = param(*n)?;
+                (kind_of(&body.names[n.index()].ty, decls) == Kind::Seq)
+                    .then_some(Lin::of(Term::Len(p)))
+            }
+            Place::Field(r, f) => {
+                let Place::Name(r) = **r else { return None };
+                let (p, i, kind) = field(r, f)?;
+                (kind == Kind::Seq).then_some(Lin::of(Term::Col(p, i)))
+            }
+            _ => None,
+        }
+    };
+    let mut out = BTreeSet::new();
+    for (s, _) in rows(&body.stmts) {
+        let St::Check(c) = s else { continue };
+        let Guard::Index(pl, i) = &c.guard else {
+            continue;
+        };
+        if let (Some(a), Some(i)) = (seq(pl), int(i)) {
+            out.extend(a.sub(&i).and_then(|l| l.plus(-1)));
+            out.insert(i);
+        }
+    }
+    out
+}
+
+/// Whether some return of `body` returns a negative integer literal, or a
+/// name bound once to `0 - k` with `k` a positive literal.
+fn negative_return(body: &Body) -> bool {
+    let negative = |n: Name| {
+        writes_of(&body.stmts, n) == 1
+            && matches!(let_of(&body.stmts, n), Some(Rhs::Prim(Op::Bin(BinOp::Sub), vs, _))
+                if matches!(vs.as_slice(), [Val::Lit(Lit::Int(0)), Val::Lit(Lit::Int(k))] if *k > 0))
+    };
+    rows(&body.stmts).any(|(s, _)| match s {
+        St::Return { value: Some(v), .. } => match v {
+            Val::Lit(Lit::Int(c)) => *c < 0,
+            Val::Name(n) => negative(*n),
+            Val::Lit(_) => false,
+        },
+        _ => false,
+    })
 }
 
 /// Whether the first return of `body` returns a Bool.
@@ -2160,22 +2272,27 @@ fn entry_templates(
     (candidates(&d0.stmts), Some(d0))
 }
 
-/// The facts of `cands`' `post` every live return of `body` proves, walking
-/// it with the callees' facts `sums` states, and the summaries it took facts
-/// from, by index. A path that ends without a value proves none.
+/// A body's `post` and `when` facts ([`Summary`]).
+type Kept = (BTreeSet<Lin>, BTreeSet<Lin>);
+
+/// The facts of `cands`' `post` and `when` every live return of `body`
+/// proves, walking it with the callees' facts `sums` states, and the
+/// summaries it took facts from, by index. A path that ends without a value
+/// proves none.
 fn returns(
     body: &Body,
     decls: &HashMap<String, TypeDecl>,
     sums: View<'_>,
     cands: &Summary,
-) -> (BTreeSet<Lin>, BTreeSet<usize>) {
+) -> (Kept, BTreeSet<usize>) {
     let mut stmts = body.stmts.clone();
     let mut w = Walk::new(body, decls, sums, &stmts, Some(Some(cands.post.clone())));
+    w.when = Some(cands.when.clone()).filter(|c| !c.is_empty());
     let st = w.entry(&BTreeSet::new());
     let end = w.block(st, &mut stmts);
-    match w.post {
-        Some(kept) if end.dead => (kept, w.read),
-        _ => (BTreeSet::new(), w.read),
+    match (w.post, w.when) {
+        (Some(kept), when) if end.dead => ((kept, when.unwrap_or_default()), w.read),
+        _ => ((BTreeSet::new(), BTreeSet::new()), w.read),
     }
 }
 
@@ -2214,6 +2331,8 @@ struct Walk<'a> {
     /// While solving: the facts of the body's `post` every return met so
     /// far proves; `None` when it has none.
     post: Option<BTreeSet<Lin>>,
+    /// While solving: the same of the body's `when` ([`Summary::when`]).
+    when: Option<BTreeSet<Lin>>,
     /// While solving: per callee with a `pre`, by index, the facts of it
     /// every call row met so far proves.
     entered: BTreeMap<usize, BTreeSet<Lin>>,
@@ -2432,6 +2551,7 @@ impl<'a> Walk<'a> {
             .collect(),
             solving,
             post,
+            when: None,
             entered: BTreeMap::new(),
             read: BTreeSet::new(),
             loops: Vec::new(),
@@ -3069,7 +3189,7 @@ impl<'a> Walk<'a> {
     fn block(&mut self, mut st: State, ss: &mut [St]) -> State {
         for s in ss {
             // A summary every return so far refuted gains nothing from the rest.
-            if self.post.as_ref().is_some_and(BTreeSet::is_empty) {
+            if self.post.as_ref().is_some_and(BTreeSet::is_empty) && self.when.is_none() {
                 return State::dead();
             }
             if st.dead {
@@ -3594,7 +3714,7 @@ impl<'a> Walk<'a> {
             return;
         };
         let Rhs::Call { args, .. } = rhs else { return };
-        if s.post.is_empty() || args.len() != s.params.len() {
+        if (s.post.is_empty() && s.when.is_empty()) || args.len() != s.params.len() {
             return;
         }
         if self.solving {
@@ -3628,6 +3748,15 @@ impl<'a> Walk<'a> {
             .iter()
             .filter_map(|f| f.map(at).filter(free))
             .collect();
+        // A sentinel's facts wait in the result's slot of `conds` for a
+        // comparison that shows it at least zero ([`Walk::sentinel`]).
+        let when: Vec<Fact> = (s.when.iter())
+            .filter_map(|f| f.map(at).filter(free))
+            .map(Fact::Ge)
+            .collect();
+        if !when.is_empty() && self.kind(n).is_int() {
+            st.conds.insert(n, (when, Vec::new()));
+        }
         // A Bool result's facts hold where it is true.
         if self.body.names[n.index()].ty == Type::Bool {
             st.conds
@@ -3724,6 +3853,7 @@ impl<'a> Walk<'a> {
     /// Keeps the summary candidates the state proves of the returned `value`;
     /// for a Bool, where it is true ([`Walk::truth`]).
     fn returned(&mut self, st: &State, value: Option<&Val>) {
+        self.returned_when(st, value);
         let Some(cands) = self.post.take() else {
             return;
         };
@@ -3735,7 +3865,6 @@ impl<'a> Walk<'a> {
             self.post = Some(cands);
             return;
         }
-        let params = &self.body.params;
         let at = |t: Term| -> Option<Lin> {
             match (t.name().index().checked_sub(1), t, value?) {
                 (None, Term::Val(_), Val::Name(m)) if self.payload(*m) => {
@@ -3743,10 +3872,7 @@ impl<'a> Walk<'a> {
                 }
                 (None, Term::Val(_), v) => self.lin(v),
                 (None, Term::Len(_), Val::Name(m)) => Some(Lin::of(self.length(&Place::Name(*m))?)),
-                (Some(k), Term::Val(_), _) => Some(Lin::of(Term::Val(*params.get(k)?))),
-                (Some(k), Term::Len(_), _) => Some(Lin::of(Term::Len(*params.get(k)?))),
-                (Some(k), Term::Field(_, i), _) => Some(Lin::of(Term::Field(*params.get(k)?, i))),
-                (Some(k), Term::Col(_, i), _) => Some(Lin::of(Term::Col(*params.get(k)?, i))),
+                (Some(_), ..) => self.param_term(t),
                 _ => None,
             }
         };
@@ -3755,6 +3881,35 @@ impl<'a> Walk<'a> {
             .filter(|c| c.map(at).is_some_and(|g| holds(&g)))
             .collect();
         self.post = Some(kept);
+    }
+
+    /// Keeps the `when` candidates the state proves where the returned
+    /// integer `value` is at least zero: all of them where it cannot be.
+    fn returned_when(&mut self, st: &State, value: Option<&Val>) {
+        let Some(cands) = self.when.take() else {
+            return;
+        };
+        let mut yes = st.clone();
+        if let Some(v) = value.and_then(|v| self.lin(v)) {
+            yes.add(&Fact::Ge(v));
+        }
+        let holds = |g: &Lin| yes.ge0(g).is_some_and(|cert| cert.verify(&yes, g));
+        let kept = (cands.into_iter())
+            .filter(|c| yes.dead || c.map(|t| self.param_term(t)).is_some_and(|g| holds(&g)))
+            .collect();
+        self.when = Some(kept);
+    }
+
+    /// A summary's term of parameter `k` (`Name(k + 1)`) as the body's own.
+    fn param_term(&self, t: Term) -> Option<Lin> {
+        let p = *self.body.params.get(t.name().index().checked_sub(1)?)?;
+        Some(Lin::of(match t {
+            Term::Val(_) => Term::Val(p),
+            Term::Len(_) => Term::Len(p),
+            Term::Field(_, i) => Term::Field(p, i),
+            Term::Col(_, i) => Term::Col(p, i),
+            Term::Inner(..) => return None,
+        }))
     }
 
     /// The state where the returned Bool `value` is true: none where it is
@@ -3897,6 +4052,7 @@ impl<'a> Walk<'a> {
                     }
                     None => return self.bound(pre, n, *o, &la, &lb),
                 };
+                let (t, f) = (self.sentinel(pre, a, b, t), self.sentinel(pre, a, b, f));
                 let norm = |fs: Vec<Option<Fact>>| {
                     fs.into_iter()
                         .flatten()
@@ -3967,6 +4123,36 @@ impl<'a> Walk<'a> {
     }
 
     /// `a && b` or `a || b`: the side that gives both operands' facts.
+    /// `side`, the facts one side of a comparison of `a` and `b` gives, with
+    /// the facts a sentinel's call left for `a` or `b` ([`Summary::when`])
+    /// where `side` alone shows it at least zero: `c == '('`, or `c < 0`
+    /// false.
+    fn sentinel(
+        &self,
+        pre: &State,
+        a: &Val,
+        b: &Val,
+        side: Vec<Option<Fact>>,
+    ) -> Vec<Option<Fact>> {
+        let mut out = side;
+        for v in [a, b] {
+            let Val::Name(m) = v else { continue };
+            let Some((when, _)) = pre.conds.get(m).filter(|_| self.kind(*m).is_int()) else {
+                continue;
+            };
+            let mut probe = State::default();
+            out.iter().flatten().for_each(|f| probe.add(f));
+            let at_least_zero = Lin::of(Term::Val(*m));
+            if probe
+                .ge0(&at_least_zero)
+                .is_some_and(|c| c.verify(&probe, &at_least_zero))
+            {
+                out.extend(when.iter().cloned().map(Some));
+            }
+        }
+        out
+    }
+
     fn logic(&self, pre: &State, o: BinOp, a: &Val, b: &Val) -> Out {
         let (Val::Name(a), Val::Name(b)) = (a, b) else {
             return Out::Nothing;

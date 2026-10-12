@@ -5860,3 +5860,61 @@ fn sumRow(t: Tally, g: modify Grid, r: Int64) -> Int64 {{
         );
     }
 }
+
+/// A sentinel's facts hold where its result is at least zero: `peek`
+/// returns `-1` past the end, so `peek(lx) == c` with `c >= 0` shows
+/// `lx.pos < lx.src.length`. A `peek` that returns `0` at the end, or a
+/// test the sentinel also passes (`!=`), leaves the read a check, and it
+/// traps.
+#[test]
+fn a_sentinel_result_at_least_zero_proves_its_guard() {
+    let src = |end: &str, test: &str| {
+        format!(
+            "type Lexer = {{ src: Array<Int64>, pos: Int64 }}
+type Out = {{ toks: Array<Int64> }}
+
+fn peek(lx: Lexer) -> Int64 {{
+    if lx.pos < 0 || lx.pos > lx.src.length {{
+        return 0 - 1
+    }}
+    if lx.pos == lx.src.length {{
+        return {end}
+    }}
+    return lx.src[lx.pos]
+}}
+
+fn take(lx: Lexer, out: modify Out) {{
+    if peek(lx) {test} {{
+        out.toks.push(lx.src[lx.pos])
+    }}
+}}
+"
+        )
+    };
+    let calls = |pos: i64| {
+        format!(
+            "    let mut out = Out {{ toks: [] }}
+    take(Lexer {{ src: xs, pos: {pos} }}, out)
+                 print(out.toks.length.toString())"
+        )
+    };
+    let run = |src: &str, pos: i64| {
+        let (dir, file) = program(src, &calls(pos));
+        (rows_of(&file, "take"), run_oracle(&dir, &file, "take").0)
+    };
+    let (rows, err) = run(&src("0 - 1", "== 10"), 3);
+    assert_eq!(rows, ["proved array-index"]);
+    assert_eq!(err, "");
+    for (end, test) in [("0", "== 0"), ("0 - 1", "!= 41")] {
+        let (rows, err) = run(&src(end, test), 3);
+        assert_eq!(rows, ["check array-index"], "{end} {test}");
+        assert!(
+            err.contains("array index 3 out of bounds"),
+            "{end} {test}: {err}"
+        );
+        assert!(
+            !err.contains(vyrn_frontend::trap::PROVED_CHECK_FAILED),
+            "{err}"
+        );
+    }
+}
