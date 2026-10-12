@@ -19,7 +19,7 @@ fn complementTable() -> Array<UInt8> {
     return t
 }
 
-fn reverseComplement(seq: Array<UInt8>, table: Array<UInt8>) -> Array<UInt8> {
+fn reverseComplement(seq: Array<UInt8>, table: Array<UInt8> where value.length >= 256) -> Array<UInt8> {
     let mut out: Array<UInt8> = []
     let mut i = seq.length - 1
     while i >= 0 {
