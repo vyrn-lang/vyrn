@@ -1078,6 +1078,16 @@ jobs:
           set -eu
           cargo build --quiet --release --manifest-path compiler/Cargo.toml -p vyrn-cli --features allocs
           cargo build --quiet --release --manifest-path base/compiler/Cargo.toml -p vyrn-cli --features allocs
+      - name: The largest allocation budget a compared commit declares
+        # A commit that buys a measured gain with allocations says so with an
+        # `Allocs-Budget: N%` line in its body; without one the threshold is 0.1%.
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RANGE: ${{ github.event.pull_request.base.sha || github.event.before }}...${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          budget=$(gh api "repos/${{ github.repository }}/compare/$RANGE" --jq '.commits[].commit.message' |
+            sed -n 's/^Allocs-Budget: \([0-9.]*\)%$/\1/p' | sort -g | tail -n 1)
+          echo "CHECK_ALLOCS_THRESHOLD=${budget:-0.1}" >> "$GITHUB_ENV"
       - name: Compare the allocations of both binaries
         run: sh scripts/check-allocs.sh base/compiler/target/release/vyrn compiler/target/release/vyrn | tee check-allocs.txt
       - name: Show the comparison in the job summary
