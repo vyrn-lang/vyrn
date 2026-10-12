@@ -46,13 +46,15 @@ export fn docsTree(current: String) -> Array<TreeGroup> {
     return out
 }
 
-fn areas() -> Array<Array<String>> {
+type Area = { key: String, href: String, label: String, icon: String }
+
+fn areas() -> Array<Area> {
     return [
-        ["guide", "/guide.html", "Guide", "book"],
-        ["web", "/web.html", "Web", "link"],
-        ["tooling", "/tooling.html", "Tooling", "settings"],
-        ["reference", "/docs.html", "Reference", "code"],
-        ["benchmarks", "/benchmarks.html", "Benchmarks", "activity"],
+        Area { key: "guide", href: "/guide.html", label: "Guide", icon: "book" },
+        Area { key: "web", href: "/web.html", label: "Web", icon: "link" },
+        Area { key: "tooling", href: "/tooling.html", label: "Tooling", icon: "settings" },
+        Area { key: "reference", href: "/docs.html", label: "Reference", icon: "code" },
+        Area { key: "benchmarks", href: "/benchmarks.html", label: "Benchmarks", icon: "activity" },
     ]
 }
 
@@ -205,8 +207,8 @@ test "each area's tree covers its shelf, in its named groups" {
 export fn docSubnav(current: String) -> String {
     let mut out = ""
     for it in areas() {
-        let markAttr = if it[0] == current { " aria-current=\"true\"" } else { "" }
-        out = out + "<a href=\"" + it[1] + "\"" + markAttr + ">" + markupString(drawNamed(it[3])) + it[2] + "</a>"
+        let markAttr = if it.key == current { " aria-current=\"true\"" } else { "" }
+        out = out + "<a href=\"" + it.href + "\"" + markAttr + ">" + markupString(drawNamed(it.icon)) + it.label + "</a>"
     }
     return out
 }

@@ -6,7 +6,7 @@ import { releaseTag, siteOrigin } from "./app/repo"
 import { demoIsFixture, demoPath, demoCommand, demoError } from "./app/demo"
 import { docSubnav } from "./app/docshell"
 import { apiModules, apiEntries, apiHref } from "./app/docs"
-import { chapterSlugs, chapterHref, chapterArea, movedChapters } from "./app/guide"
+import { chapterSlugs, chapterHref, chapterArea, movedChapters, Redirect } from "./app/guide"
 import { searchRows } from "./app/stdgraph"
 import { packages, packageHref, offerOf, addCommand } from "./app/packages"
 import { features } from "./app/editors"
@@ -21,8 +21,8 @@ import { includes } from "std/arrays"
 
 fn sitePaths() -> Array<String> {
     let mut out: Array<String> = [rootPath(), whyVyrnPath(), installPath(), toolingEditorsPath(), docsGraphPath(), releasesPath(), docsPath(), guidePath(), webPath(), toolingPath(), benchmarksPath(), explorePath(), playPath()]
-    for pair in redirects() {
-        out.push(pair[0].copy())
+    for r in redirects() {
+        out.push(r.from.copy())
     }
     for m in apiModules() {
         out.push(hrefDocsStd(m.name))
@@ -44,18 +44,23 @@ fn sitePaths() -> Array<String> {
     return out
 }
 
-fn redirects() -> Array<Array<String>> {
-    let mut out: Array<Array<String>> = [[philosophyPath(), whyVyrnPath()], [editorsPath(), toolingEditorsPath()], [docsEditorsPath(), toolingEditorsPath()], [comparePath(), benchmarksPath()]]
-    for pair in movedChapters() {
-        out.push(pair.copy())
+fn redirects() -> Array<Redirect> {
+    let mut out: Array<Redirect> = [
+        Redirect { from: philosophyPath(), to: whyVyrnPath() },
+        Redirect { from: editorsPath(), to: toolingEditorsPath() },
+        Redirect { from: docsEditorsPath(), to: toolingEditorsPath() },
+        Redirect { from: comparePath(), to: benchmarksPath() },
+    ]
+    for r in movedChapters() {
+        out.push(Redirect { from: r.from.copy(), to: r.to.copy() })
     }
     return out
 }
 
 fn redirectTarget(path: String) -> String {
-    for pair in redirects() {
-        if pair[0] == path {
-            return pair[1].copy()
+    for r in redirects() {
+        if r.from == path {
+            return r.to.copy()
         }
     }
     return ""
@@ -418,17 +423,20 @@ fn exportPath(outDir: String, path: String) -> Int64 {
 /// Every script in `site/public`, and the files from elsewhere in the
 /// repository. A binary file, such as `play.wasm`, is written by
 /// `.github/workflows/site.yml`.
-fn assets() -> Array<Array<String>> {
-    let mut out: Array<Array<String>> = [
-        ["web/wasi-min.js", "wasi-min.js"],
-        ["web/vyrn-nav.js", "vyrn-nav.js"],
-        ["web/vyrn-dom.js", "vyrn-dom.js"],
-        ["editor/vscode/icons/vyrn.svg", "favicon.svg"],
-        ["install.sh", "install.sh"],
-        ["install.ps1", "install.ps1"],
+/// A file the export copies: from `source` under the root to `name` in the output.
+type Asset = { source: String, name: String }
+
+fn assets() -> Array<Asset> {
+    let mut out: Array<Asset> = [
+        Asset { source: "web/wasi-min.js", name: "wasi-min.js" },
+        Asset { source: "web/vyrn-nav.js", name: "vyrn-nav.js" },
+        Asset { source: "web/vyrn-dom.js", name: "vyrn-dom.js" },
+        Asset { source: "editor/vscode/icons/vyrn.svg", name: "favicon.svg" },
+        Asset { source: "install.sh", name: "install.sh" },
+        Asset { source: "install.ps1", name: "install.ps1" },
         // GitHub Pages serves `.txt` as `text/plain`, so the link shows the script.
-        ["install.sh", "install.sh.txt"],
-        ["install.ps1", "install.ps1.txt"],
+        Asset { source: "install.sh", name: "install.sh.txt" },
+        Asset { source: "install.ps1", name: "install.ps1.txt" },
     ]
     let public = match listDir("site/public") {
         Ok(names) => names.copy(),
@@ -436,7 +444,7 @@ fn assets() -> Array<Array<String>> {
     }
     for name in consume public {
         if endsWith(name, ".js") {
-            out.push(["site/public/\{name}", name])
+            out.push(Asset { source: "site/public/\{name}", name: name })
         }
     }
     return out
@@ -581,7 +589,7 @@ fn main() -> Int64 {
         failures = failures + exportPath(outDir, path)
     }
     for asset in assets() {
-        failures = failures + copyAsset(outDir, asset[0], asset[1])
+        failures = failures + copyAsset(outDir, asset.source, asset.name)
     }
     failures = failures + writeStylesheet(outDir)
     for path in mdPaths() {
@@ -700,9 +708,9 @@ test "every published document marks exactly one thing in its masthead" {
 
 test "each renamed route publishes a stub that carries the reader to the new one" {
     assertEq(redirects().length, 6)
-    for pair in redirects() {
-        let old = pair[0]
-        let to = pair[1]
+    for r in redirects() {
+        let old = r.from
+        let to = r.to
         assertEq(documentStatus(old), 200)
         assertEq(route(dataRequest(old)).status, 200)
         assertEq(documentStatus(to), 200)
@@ -932,7 +940,7 @@ test "the published stylesheet keeps every rule and none of the prose" {
 test "every script in site/public is published" {
     let mut published: Array<String> = []
     for asset in assets() {
-        published.push(asset[1].copy())
+        published.push(asset.name.copy())
     }
     let listing = match listDir("site/public") {
         Ok(names) => names.copy(),
@@ -949,7 +957,7 @@ test "every script in site/public is published" {
 test "every published document points at an icon this export writes" {
     let mut copied = false
     for asset in assets() {
-        if asset[1] == "favicon.svg" {
+        if asset.name == "favicon.svg" {
             copied = true
         }
     }
