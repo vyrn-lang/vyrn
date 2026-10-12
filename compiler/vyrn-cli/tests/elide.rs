@@ -6027,3 +6027,44 @@ fn a_join_bounds_a_term_one_path_defines_as_a_constant() {
         "{err}"
     );
 }
+
+/// `(k + 1) % t.length` lies in `[0, t.length - 1]`: a ring buffer's index
+/// needs no check. Modulo `t.length + 1` it reaches `t.length`, keeps its
+/// check and traps.
+#[test]
+fn a_remainder_by_a_length_stays_below_it() {
+    let src = |m: &str| {
+        format!(
+            "fn w(t: Array<Int64> where value.length >= 1, n: Int64) -> Int64 {{
+    let mut s = 0
+    let mut k = 0
+    let mut i = 0
+    while i < n {{
+        s = s + t[k]
+        k = (k + 1) % ({m})
+        i = i + 1
+    }}
+    return s
+}}
+"
+        )
+    };
+    let calls = "    print(w(xs, 4).toString())";
+    let proof = src("t.length");
+    assert_eq!(
+        verdicts(&proof, "w"),
+        ["proved array-index", "proved int-rem-zero"]
+    );
+    assert_eq!(oracle(&proof, calls, "w").0, "");
+    let witness = src("t.length + 1");
+    assert_eq!(
+        verdicts(&witness, "w"),
+        ["check array-index", "proved int-rem-zero"]
+    );
+    let (err, _) = oracle(&witness, calls, "w");
+    assert!(err.contains("array index 3 out of bounds"), "{err}");
+    assert!(
+        !err.contains(vyrn_frontend::trap::PROVED_CHECK_FAILED),
+        "{err}"
+    );
+}

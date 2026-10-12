@@ -4122,7 +4122,8 @@ impl<'a> Walk<'a> {
         }
     }
 
-    /// The range of `n = a op b` where `b` is a literal that bounds it, an
+    /// The range of `n = a op b` where `b` is a literal that bounds it, a
+    /// divisor of a non-negative `a % b` the state proves at least one, an
     /// operand of `&` the state proves non-negative, or the shift amount of a
     /// non-negative `a`.
     fn bound(&self, pre: &State, n: Name, o: BinOp, la: &Lin, lb: &Lin) -> Out {
@@ -4146,8 +4147,8 @@ impl<'a> Walk<'a> {
                 Some(m) => [Some(v.clone()), m.sub(&v), None],
                 None => return Out::Nothing,
             },
-            (BinOp::Rem, Some(k)) if k >= 1 && nonneg => {
-                [Some(v.clone()), Lin::k(k - 1).sub(&v), None]
+            (BinOp::Rem, _) if nonneg && lb.plus(-1).is_some_and(|d| holds(&d)) => {
+                [Some(v.clone()), lb.plus(-1).and_then(|d| d.sub(&v)), None]
             }
             (BinOp::Div, Some(k)) if k >= 1 && nonneg => quotient(&|h| h / k),
             (BinOp::Shr, _) if nonneg => match least(lb) {
