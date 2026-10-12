@@ -1,20 +1,6 @@
-// The two counting probes: `tally` on a key, `tallyBytes` on the
-// bytes of one.
-//
-// `m.tally(k, n)` is insert-or-add in ONE probe — a miss stores the key and
-// starts the count at `n`, a hit adds through the slot the probe found.
-// `m.tallyBytes(w, n)` is the same map and the same probe for a key that is
-// still a window of bytes: the compare happens where the window lies, so a
-// hit builds no String, validates nothing and allocates nothing, and only a
-// miss pays for the key.
-//
-// The buffer is rewritten between calls, which is how a counting loop uses
-// one, and the last call hands it bytes that are not a String.
-//
-//   $ vyrn run examples/tallybytes.vyrn
+// `tally` and `tallyBytes`.
 
 fn main() -> Int64 {
-    // `tally` on a String key: two misses, then a hit through the same slot.
     let mut words: Map<String, Int64> = [:]
     words.tally("ash", 2)
     words.tally("elm", 5)
@@ -25,8 +11,6 @@ fn main() -> Int64 {
     }
     print("tally \{words.length} ash \{ash}")
 
-    // `tallyBytes` over every two-byte window of "ababcab", through ONE
-    // buffer: ab three times, ba, bc and ca once each.
     let text = bytes("ababcab")
     let mut pairs: Map<String, Int64> = [:]
     let mut w: Array<UInt8> = [0, 0]
@@ -46,8 +30,6 @@ fn main() -> Int64 {
         print("\{k} \{n}")
     }
 
-    // A key that is not one byte per character: the miss builds and validates
-    // it, the hit compares the window against the stored bytes.
     let mut runes: Map<String, Int64> = [:]
     let rune = bytes("é")
     runes.tallyBytes(rune, 1)
@@ -58,8 +40,6 @@ fn main() -> Int64 {
     }
     print("runes \{runes.length} e \{e}")
 
-    // The two agree: `tallyBytes` of a String's bytes counts into the slot
-    // `tally` of that String made.
     let mut both: Map<String, Int64> = [:]
     both.tally("ash", 1)
     let ashBytes = bytes("ash")
@@ -70,9 +50,6 @@ fn main() -> Int64 {
     }
     print("both \{both.length} ash \{sum}")
 
-    // The miss path's one failure, and it traps: a key must be a String, and
-    // the caller who wants the reason calls `stringFromBytes` and reads the
-    // `Err`.
     let bad: Array<UInt8> = [255, 254]
     both.tallyBytes(bad, 1)
     print("unreachable")

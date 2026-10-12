@@ -44,31 +44,31 @@ fn symbols_have_precise_name_columns() {
     let a = analyze(&enum_vyrn());
     let by_name: std::collections::HashMap<&str, &vyrn_frontend::Symbol> =
         a.symbols.iter().map(|s| (s.name.as_str(), s)).collect();
-    // `type Shape =` on line 4: "type" cols 1-4, space 5, "Shape" cols 6-10.
+    // `type Shape =` on line 1: "type" cols 1-4, space 5, "Shape" cols 6-10.
     let shape = by_name["Shape"];
     assert_eq!(shape.kind, SymbolKind::Type);
-    assert_eq!(shape.line, 4);
+    assert_eq!(shape.line, 1);
     assert_eq!(shape.col, 6);
-    // `| Circle(Int)` on line 5: "| " then "Circle" cols 7-12.
+    // `| Circle(Int)` on line 2: "| " then "Circle" cols 7-12.
     let circle = by_name["Circle"];
     assert_eq!(circle.kind, SymbolKind::Variant);
-    assert_eq!(circle.line, 5);
+    assert_eq!(circle.line, 2);
     assert_eq!(circle.col, 7);
-    // `fn area(...)` on line 10: "fn " then "area" cols 4-7.
+    // `fn area(...)` on line 6: "fn " then "area" cols 4-7.
     let area = by_name["area"];
     assert_eq!(area.kind, SymbolKind::Function);
-    assert_eq!(area.line, 10);
+    assert_eq!(area.line, 6);
     assert_eq!(area.col, 4);
 }
 
 #[test]
 fn resolve_variant_at_call_site() {
     let a = analyze(&enum_vyrn());
-    // Line 19: `    let a = area(Circle(2));`, `Circle` cols 18-23.
-    let r = resolve(&a, 19, 18).expect("Circle at (19,18) should resolve");
+    // Line 15: `    let a = area(Circle(2));`, `Circle` cols 18-23.
+    let r = resolve(&a, 15, 18).expect("Circle at (15,18) should resolve");
     assert_eq!(r.kind, SymbolKind::Variant);
     assert_eq!(r.name, "Circle");
-    assert_eq!(r.target_line, 5);
+    assert_eq!(r.target_line, 2);
     assert_eq!(r.target_col, 7);
     assert_eq!(r.hover, "variant of Shape: Circle(Int64)");
 }
@@ -76,10 +76,10 @@ fn resolve_variant_at_call_site() {
 #[test]
 fn resolve_function_at_call_site() {
     let a = analyze(&enum_vyrn());
-    // Line 19: `area` cols 13-16.
-    let r = resolve(&a, 19, 13).expect("area at (19,13) should resolve");
+    // Line 15: `area` cols 13-16.
+    let r = resolve(&a, 15, 13).expect("area at (15,13) should resolve");
     assert_eq!(r.kind, SymbolKind::Function);
-    assert_eq!(r.target_line, 10);
+    assert_eq!(r.target_line, 6);
     assert_eq!(r.target_col, 4);
     assert_eq!(r.hover, "fn area(s: Shape) -> Int64");
 }
@@ -87,10 +87,10 @@ fn resolve_function_at_call_site() {
 #[test]
 fn resolve_type_at_annotation() {
     let a = analyze(&enum_vyrn());
-    // Line 10: `fn area(s: Shape) -> Int {`, `Shape` cols 12-16.
-    let r = resolve(&a, 10, 12).expect("Shape at (10,12) should resolve");
+    // Line 6: `fn area(s: Shape) -> Int {`, `Shape` cols 12-16.
+    let r = resolve(&a, 6, 12).expect("Shape at (6,12) should resolve");
     assert_eq!(r.kind, SymbolKind::Type);
-    assert_eq!(r.target_line, 4);
+    assert_eq!(r.target_line, 1);
     assert_eq!(r.target_col, 6);
     assert_eq!(
         r.hover,
@@ -101,8 +101,8 @@ fn resolve_type_at_annotation() {
 #[test]
 fn resolve_returns_none_off_identifier() {
     let a = analyze(&enum_vyrn());
-    // Line 10, col 1 is the `f` of the keyword `fn`; no `TokenInfo` covers it.
-    assert!(resolve(&a, 10, 1).is_none());
+    // Line 6, col 1 is the `f` of the keyword `fn`; no `TokenInfo` covers it.
+    assert!(resolve(&a, 6, 1).is_none());
 }
 
 /// The client filters by prefix.
@@ -215,12 +215,12 @@ fn foreach_vyrn() -> String {
 #[test]
 fn resolve_param_at_use_site() {
     let a = analyze(&enum_vyrn());
-    // Line 11: `    return match s {`, `s` at col 18.
-    let r = resolve(&a, 11, 18).expect("param s at (11,18) should resolve");
+    // Line 7: `    return match s {`, `s` at col 18.
+    let r = resolve(&a, 7, 18).expect("param s at (7,18) should resolve");
     assert_eq!(r.kind, SymbolKind::Param);
     assert_eq!(r.name, "s");
-    // `fn area(s: Shape)` is on line 10; `s` at col 9.
-    assert_eq!(r.target_line, 10);
+    // `fn area(s: Shape)` is on line 6; `s` at col 9.
+    assert_eq!(r.target_line, 6);
     assert_eq!(r.target_col, 9);
     // A value of a user type also shows that type's shape.
     assert_eq!(
@@ -241,36 +241,36 @@ fn resolve_annotated_let() {
         "foreach.vyrn should be clean: {:?}",
         a.diagnostics
     );
-    // Line 13: `    for s in squares {`, `squares` at col 14.
-    let r = resolve(&a, 13, 14).expect("squares at (13,14) should resolve");
+    // Line 4: `    for s in squares {`, `squares` at col 14.
+    let r = resolve(&a, 4, 14).expect("squares at (4,14) should resolve");
     assert_eq!(r.kind, SymbolKind::Local);
     assert_eq!(r.name, "squares");
-    // `let squares: Array<Int, 5> = ..` is on line 11.
-    assert_eq!(r.target_line, 11);
+    // `let squares: Array<Int, 5> = ..` is on line 2.
+    assert_eq!(r.target_line, 2);
     assert_eq!(r.hover, "let squares: Array<Int64, 5>");
 }
 
 #[test]
 fn resolve_mutable_unannotated_let() {
     let a = analyze(&foreach_vyrn());
-    // Line 14: `        total = total + s;`, the first `total` at col 9.
-    let r = resolve(&a, 14, 9).expect("total at (14,9) should resolve");
+    // Line 5: `        total = total + s;`, the first `total` at col 9.
+    let r = resolve(&a, 5, 9).expect("total at (5,9) should resolve");
     assert_eq!(r.kind, SymbolKind::Local);
     assert_eq!(r.name, "total");
-    // `let mut total = 0;` is on line 12.
-    assert_eq!(r.target_line, 12);
+    // `let mut total = 0;` is on line 3.
+    assert_eq!(r.target_line, 3);
     assert_eq!(r.hover, "let mut total: Int64");
 }
 
 #[test]
 fn resolve_for_var() {
     let a = analyze(&foreach_vyrn());
-    // Line 14: `        total = total + s;`, the loop var `s` at col 25.
-    let r = resolve(&a, 14, 25).expect("for-var s at (14,25) should resolve");
+    // Line 5: `        total = total + s;`, the loop var `s` at col 25.
+    let r = resolve(&a, 5, 25).expect("for-var s at (5,25) should resolve");
     assert_eq!(r.kind, SymbolKind::Local);
     assert_eq!(r.name, "s");
-    // `for s in squares {` is on line 13; `s` is at col 9.
-    assert_eq!(r.target_line, 13);
+    // `for s in squares {` is on line 4; `s` is at col 9.
+    assert_eq!(r.target_line, 4);
     assert_eq!(r.hover, "for s: Int64");
 }
 

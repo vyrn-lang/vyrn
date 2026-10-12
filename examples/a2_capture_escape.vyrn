@@ -1,5 +1,4 @@
-/// Worse: the capturing lambda ESCAPES by return — the bracket would outlive
-/// the call that opened it. Lemma 3's real counterexample if accepted.
+// Refused on purpose: a lambda capturing a `read` parameter escapes by return.
 fn hold(s: String) -> fn() -> Int64 {
     let g: fn() -> Int64 = () -> s.byteLength
     return g

@@ -1,6 +1,3 @@
-// A local function value named like a generator is called through: `twice`
-// reaches no generator, so it has a run-time lowering.
-
 gen fn helper(t: TypeArg) -> String {
     return "x"
 }

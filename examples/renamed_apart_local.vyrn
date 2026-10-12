@@ -1,6 +1,3 @@
-// Two modules declare a private `helper`, so the linker renames one apart.
-// A local spelled like the minted name does not capture the renamed calls.
-
 import { fromA } from "./lib/renamed_helper_a.vyrn"
 import { fromB } from "./lib/renamed_helper_b.vyrn"
 

@@ -1,6 +1,4 @@
-// The containment rule: a `match` used as a VALUE keeps single-expression
-// arms. A block arm in expression position is refused by name, because a
-// block yields nothing a value position could consume.
+// Refused on purpose: a block arm in a `match` used as a value.
 fn main() -> Int64 {
     let x = match Some(1) {
         Some(n) => n,

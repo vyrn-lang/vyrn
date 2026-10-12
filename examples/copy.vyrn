@@ -1,18 +1,4 @@
-// `x.copy()`: a value of the receiver's type that shares no heap with it.
-//
-// `copy` is the word for a second, independent value. `s + ""` also allocates,
-// but it rests on an implementation fact to express that intent.
-//
-// The copy is structural and recursive: a record copies its fields, an array
-// copies its elements, a map copies its keys and its values, a sum copies the
-// payload of the variant it holds. It stops at two places, and both are
-// deliberate. A type that owns no heap IS its own copy — an `Int64`, a record of
-// numbers — so `copy` costs nothing there and means the same thing. And a
-// `Handle<T>` copies as the plain value it is, so the copy names the same slot:
-// a handle is how a Vyrn program says "share this", and copying one does not
-// un-share it.
-//
-// Every pair below mutates one side and prints both.
+// `x.copy()`: a value that shares no heap with the receiver.
 
 import { Slots, newSlots, insert } from "std/slots"
 import { Json, JsonField, emit } from "std/json"
@@ -23,8 +9,6 @@ type Outer = { label: String, inner: Inner, n: Int64 }
 
 type Note = | Blank | Text(String) | Counted(String, Int64)
 
-/// A String the compiler cannot fold: a literal lives in the data segment, and
-/// copying one has nothing interesting to say.
 fn built(s: String) -> String {
     return s + "!"
 }
@@ -43,19 +27,13 @@ fn strings() {
     a = a + " changed"
     print(a)
     print(b)
-    // The header carries the length, so a copy carries it
-    // too rather than re-deriving it. Multi-byte UTF-8 is where a recomputed
-    // length and a stored one part company.
     let wide = built("héllo wörld")
     let copy = wide.copy()
     print(copy)
     print(copy.byteLength)
     print(copy.charCount())
-    // The empty cases: nothing to copy, and still a value of the right type.
     let empty = ("" + "").copy()
     print(empty.byteLength)
-    // A literal lives in the data segment and carries `cap == 0` — never
-    // realloc'd, never freed. Its copy is an ordinary owned buffer.
     let fromStatic = "static".copy()
     print(fromStatic)
     print(fromStatic.byteLength)
@@ -69,8 +47,6 @@ fn arrays() {
     xs[0] = built("ONE")
     print(xs[0])
     print(ys[0])
-    // Nested: the inner arrays are copied too, so writing through one row of
-    // the copy leaves the original's row alone.
     let mut grid: Array<Array<String>> = []
     grid.push(ys.copy())
     let other = grid.copy()
@@ -82,15 +58,12 @@ fn arrays() {
 }
 
 fn smallArrays() {
-    // Inline: the elements live in the header, and the copy allocates only for
-    // the Strings.
     let mut inline: SmallArray<String, 4> = []
     inline.push(built("a"))
     let inlineCopy = inline.copy()
     inline[0] = built("A")
     print(inline[0])
     print(inlineCopy[0])
-    // Spilled: two elements past a capacity of one, so there is a buffer.
     let mut spilled: SmallArray<String, 1> = []
     spilled.push(built("x"))
     spilled.push(built("y"))
@@ -149,12 +122,6 @@ fn sums() {
     })
 }
 
-/// A handle copies as a handle. A store through the copy is visible through the
-/// original, because both name one slot in one container.
-///
-/// A handle is a plain value, so copying one does not un-share what it names.
-/// What copies as a second CONTAINER is the `Slots` itself, and
-/// `examples/slots.vyrn` pins that half.
 fn handles() {
     let mut numbers: Slots<Int64> = newSlots()
     let h = insert(numbers, 41)
@@ -163,13 +130,6 @@ fn handles() {
     print(numbers[h])
 }
 
-/// A self-referring type declares its copy AND its release — `impl Copy for Json`
-/// beside `impl Owned for Json`. The two rules have
-/// to compose: a copy shares nothing, so the original and the copy are two trees
-/// and each is released exactly once. A shared buffer released twice is a double
-/// free, which the memory suite cannot see — a double free frees — and which a
-/// run on three engines can. `examples/htmltree.vyrn` holds the same pair one
-/// type over.
 fn declaredCopies() {
     let mut fs: Array<JsonField> = []
     fs.push(JsonField { key: built("k"), value: JStr(built("v")) })
@@ -179,8 +139,6 @@ fn declaredCopies() {
     print(emit(clone))
 }
 
-/// A scalar copies to itself, and that is what makes `copy` usable in generic
-/// code: this same body is monomorphized per element type.
 fn twice<T>(x: T) -> Array<T> {
     let mut out: Array<T> = []
     out.push(x.copy())

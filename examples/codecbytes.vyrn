@@ -1,30 +1,7 @@
-/// Codecs in Vyrn: the six codec builtins, which ARE `std/codecs`.
-///
-/// `hexEncode`, `base64Encode`, `urlEncode` and their inverses have one
-/// definition, in ordinary Vyrn, over `bytes` and `stringFromBytes`, and every
-/// engine calls it.
-///
-/// This file is the three-way half of the pin. Parity runs the whole thing on the
-/// interpreter, the native backend and wasm, so "the six answer the same on all
-/// three engines" is the statement `main` makes. The rows are the values, not
-/// comparisons with a builtin: there is one function, so a comparison would read
-/// `true` by construction.
-///
-/// The `test` block pins the rows as literals. Every literal was captured from the
-/// C/Rust builtins BEFORE the swap (`tests/codecs.rs` carries the whole 6,354-check
-/// transcript as a digest, with the pre-swap one recorded beside it), which is what
-/// makes them a pin rather than a description of whatever came out.
-///
-/// The NUL rows are deliberately absent here and pinned in `std/codecs`'s own
-/// `test` block instead: a decoded `0x00` is `None` now, where the builtin answered
-/// `Some` and its engines then disagreed with each other — the interpreter kept the
-/// byte in a Rust `String`, native truncated the `char*` at it. That is the swap's
-/// one behavioural change, measured at 16 of 6,354 rows, and it is a fix.
+// The codec builtins of `std/codecs`.
 
 import { base64Decode, base64Encode, hexDecode, hexEncode, urlDecode, urlEncode } from "std/codecs"
 
-/// Every ASCII byte a `String` can hold, `0x01` through `0x7F` — which is the
-/// encoders' whole input alphabet on one line, since they work a byte at a time.
 fn asciiSweep() -> String {
     let mut b: Array<UInt8> = []
     let mut i = 1
@@ -38,8 +15,6 @@ fn asciiSweep() -> String {
     }
 }
 
-/// An `Option<String>` as printable text, so a `None` is visible rather than a
-/// blank line.
 fn show(o: Option<String>) -> String {
     return match o {
         Some(s) => s.copy(),
@@ -48,40 +23,31 @@ fn show(o: Option<String>) -> String {
 }
 
 fn main() -> Int64 {
-    // ---- hex ---------------------------------------------------------------
     print(hexEncode("Hi")) // 4869
     print(hexEncode("")) //
     print(hexEncode("café ☕")) // the UTF-8 bytes, not the code points
-    // Every ASCII byte at once: 127 bytes, 254 digits.
     print(hexEncode(asciiSweep()).byteLength) // 254
     print(show(hexDecode("4869"))) // Hi
-    // Mixed case reads back; odd length, non-hex and non-UTF-8 do not.
     print(show(hexDecode("C3a9"))) // é
     print(show(hexDecode("486"))) // None
     print(show(hexDecode("zz"))) // None
     print(show(hexDecode("80"))) // None  (a lone continuation byte)
 
-    // ---- base64: the three residues -----------------------------------------
     print(base64Encode("")) //
     print(base64Encode("A")) // QQ==
     print(base64Encode("AB")) // QUI=
     print(base64Encode("ABC")) // QUJD
-    // The two alphabet entries above 61 — `+` and `/` — and the sweep.
     print(base64Encode("~~~")) // fn5+
     print(base64Encode("ÿÿ")) // w7/Dvw==
     print(base64Encode(asciiSweep()).byteLength) // 172
     print(show(base64Decode("SGVsbG8="))) // Hello
-    // A full round trip through multi-byte text.
     print(show(base64Decode(base64Encode("café ☕")))) // café ☕
-    // Refusals: a length that is not a multiple of four, a digit outside the
-    // alphabet, `=X`, padding before the final group, non-UTF-8 bytes.
     print(show(base64Decode("QQ="))) // None
     print(show(base64Decode("QQ*="))) // None
     print(show(base64Decode("Q=QQ"))) // None
     print(show(base64Decode("QQ==QQ=="))) // None
     print(show(base64Decode("////"))) // None
 
-    // ---- percent encoding ---------------------------------------------------
     print(urlEncode("aZ09-_.~")) // aZ09-_.~   (the unreserved set, untouched)
     print(urlEncode("name=a b&x")) // name%3Da%20b%26x
     print(urlEncode("a+b")) // a%2Bb   (`+` is reserved, not a space)
@@ -94,7 +60,6 @@ fn main() -> Int64 {
     print(show(urlDecode("%zz"))) // None
     print(show(urlDecode("%80"))) // None
 
-    // ---- the round trip that has to hold for every codec --------------------
     let s = "Hello, Vyrn! ☕ 100% — é"
     print(show(hexDecode(hexEncode(s))) == s) // true
     print(show(base64Decode(base64Encode(s))) == s) // true
@@ -102,7 +67,6 @@ fn main() -> Int64 {
     return 0
 }
 
-/// The rows above, as literals. Captured against the pre-swap builtins.
 test "the routed codecs answer what the C and Rust ones answered" {
     assertEq(hexEncode("Hi"), "4869")
     assertEq(hexEncode(""), "")

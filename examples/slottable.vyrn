@@ -1,18 +1,4 @@
-/// A generation-checked slot table — Vale's whole mechanism — IMPORTED from
-/// `std/slots`, a library written in Vyrn: a checked language does not need a
-/// raw-memory view to write its own containers. No pointers, no `unsafe`, no
-/// capability, no new primitive.
-///
-/// Two things the container gets from protocols:
-///
-///   * `t[h]` and `t[h] = v` — `impl Index`, so a handle indexes a container the
-///     way an `Int64` indexes an array, including `t[h].field = v` writing in
-///     place,
-///   * `for x in t` — `impl Iterate`, over the LIVE elements.
-///
-/// And one more: a handle from another table type-checks, and its generation
-/// could match by coincidence. A container carries an identity and a handle
-/// carries a copy of it, so a foreign handle is dead rather than plausible.
+// A generation-checked slot table from `std/slots`.
 
 import { Slots, Handle, newSlots, insert, remove, get, count, capacity } from "std/slots"
 
@@ -30,7 +16,6 @@ fn main() -> Int64 {
     print(get(t, a) ?? 0 - 1) // -1 — released
     print(remove(t, a)) // false — removing a dead handle is a no-op
 
-    // The next insert reuses `a`'s slot, so the *same* index is live again.
     let seven = 7
     let c = insert(t, seven)
     print(c.slot == a.slot) // true — reused, not appended
@@ -39,7 +24,6 @@ fn main() -> Int64 {
     print(get(t, a) ?? 0 - 1) // -1 — the OLD handle, while that slot is live
 
     print(get(t, b) ?? 0 - 1) // 99 — untouched by any of it
-    // A handle nobody issued: out of range, and from no container at all.
     let bogus: Handle<Int64> = Handle { slot: 7, gen: 1, owner: 0 }
     print(get(t, bogus) ?? 0 - 1) // -1
 
@@ -72,9 +56,6 @@ test "remove is idempotent and does not corrupt the free list" {
     assertEq(capacity(t), 1)
 }
 
-/// A handle from one container is dead on another. The generation compare alone
-/// would pass here — both tables issue generation 1 for slot 0 — so this is the
-/// identity word and nothing else.
 test "a handle from another container is not plausible, it is dead" {
     let mut a: Slots<Int64> = newSlots()
     let mut b: Slots<Int64> = newSlots()
@@ -88,18 +69,6 @@ test "a handle from another container is not plausible, it is dead" {
     assertEq(get(b, ha) ?? 0 - 1, 0 - 1)
 }
 
-/// The write-through desugar on a record-field array is a MOVE, not a copy — the
-/// whole reason a container like this can be written in Vyrn at all. A copy per
-/// write would be just as *correct* and would make every loop below quadratic, so
-/// behaviour cannot distinguish them; only the shape of the cost can. 4,096
-/// values through one slot is 4,096 slot writes over a table that never exceeds
-/// one slot, which a per-write copy would still survive — so the second loop is
-/// the one that matters: 512 writes spread over a 512-slot table. Under a
-/// copying desugar that is ~131,000 element copies; under a move it is 512
-/// writes. Both finish here, which is the point: this test pins the RESULT so a
-/// regression to copying is caught by the parser test that pins the emitted
-/// statements (`index_assign_through_a_record_field_is_a_move`), while this one
-/// pins that the semantics those statements produce are right.
 test "many writes through the field, and the values all land" {
     let mut t: Slots<Int64> = newSlots()
     let mut i = 0
@@ -127,7 +96,6 @@ test "many writes through the field, and the values all land" {
     }
     assertEq(capacity(wide), 512)
 
-    // `for x in wide` walks the live elements through `impl Iterate`.
     let mut total = 0
     for x in wide {
         total = total + x

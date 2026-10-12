@@ -1,5 +1,4 @@
-/// `x.copy()` makes a fresh value, so it may share a call with `x` passed as
-/// `modify`: the fix the exclusivity refusal suggests.
+// `x.copy()` passed beside `x` as `modify`.
 fn append(a: modify Array<Int64>, b: Array<Int64>) {
     a.push(b.length)
 }

@@ -1,6 +1,4 @@
-// A payload-bearing enum key waits for a packer something real
-// demands — a fieldless enum or a record of scalars keys today, and the
-// refusal says so by name.
+// Refused on purpose: a payload-bearing enum as a `Map` key.
 import { Hashable } from "std/hash"
 
 type Shape =

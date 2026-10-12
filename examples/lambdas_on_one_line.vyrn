@@ -1,7 +1,3 @@
-// Two lambdas written on one line are two sources. A call through `inc`
-// runs `inc` alone, so it does not write `names`, and the loop may keep
-// reading `names` across the call.
-
 let mut names: Array<String> = []
 
 type Fns = { inc: fn(Int64) -> Int64, wipe: fn() -> Int64 }

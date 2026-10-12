@@ -1,8 +1,4 @@
-/// `listDir` and `listDirKinds` at run time: the names
-/// in a directory, sorted by their bytes, and the canonical `Err` for a
-/// directory that is not there. The same three answers come out of the
-/// interpreter and of `vyrn run --engine wasm`, where the listing is WASI's
-/// `fd_readdir`. Run from `examples/`.
+// `listDir` and `listDirKinds`.
 fn show(label: String, listed: Result<Array<String>, String>) {
     match listed {
         Ok(names) => {

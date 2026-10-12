@@ -1,5 +1,4 @@
-// A `match` binder and an `if let` binder shadow module state of their name
-// inside their arm only; after the arm, the name reads the module state again.
+// A match or if-let binder shadows module state of its name inside its arm only.
 
 let mut total: Int64 = 10
 

@@ -1,10 +1,3 @@
-// Protocols. A protocol is a named set of method signatures a type
-// can implement; a generic can be bounded by it. Dispatch is static (each generic
-// is monomorphized to the concrete impl), so there is no vtable and no runtime
-// cost — and the interpreter matches native by dispatching on the runtime type.
-//
-// Methods are subject-first: `x.show()` calls the `Show` impl for `x`'s type.
-
 protocol Show {
     fn show(self) -> String
 }
@@ -24,16 +17,6 @@ impl Show for String {
     fn show(self) -> String { return self.copy() }
 }
 
-// An impl head can bind type variables, so a protocol reaches a
-// generic type ONCE rather than one instantiation at a time. `T: Show` is the
-// same bound spelling `fn f<T: Show>` uses, and it is what lets the body call
-// `.show()` on the payload.
-//
-// Selection keys on the type constructor alone — `Option<Int64>` and
-// `Option<String>` both select this impl — and the payload type is recovered by
-// unifying the receiver against the head, exactly as a generic function's type
-// arguments are inferred from its arguments. So this stays statically
-// dispatched and monomorphized: one specialization per payload type, no vtable.
 impl<T: Show> Show for Option<T> {
     fn show(self) -> String {
         return match self {
@@ -43,7 +26,6 @@ impl<T: Show> Show for Option<T> {
     }
 }
 
-// A generic function bounded by `Show` can call `.show()` on its argument.
 fn label(x: Int64, flag: Bool) -> String {
     return "x=" + show(x) + " flag=" + show(flag)
 }
@@ -56,7 +38,6 @@ fn main() -> Int64 {
     print(describe(42)) // = 42       (generic, T = Int64)
     print(describe(true)) // = yes      (generic, T = Bool)
     print(label(7, false)) // x=7 flag=no
-    // One `impl<T: Show> Show for Option<T>`, two payload types, one program.
     let n: Option<Int64> = Some(7)
     let s: Option<String> = Some("hi")
     let nothing: Option<Int64> = None

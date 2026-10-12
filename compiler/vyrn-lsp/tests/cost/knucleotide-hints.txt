@@ -1,21 +1,21 @@
-39 allocates Array<String>
-68 allocates Option<String>
-72 allocates Array<UInt8>, toUpper allocates
-73 push may allocate
-86 allocates Map<Int64, Int64>
-94 division checked
-96 tally may allocate
-105 allocates Array<UInt8>
-107 reserve may allocate
-110 push may allocate, index checked
-113 allocates Result<String, String>
-122 allocates Array<UInt8>
-132 allocates String
-134 copies String, allocates String
-136 copies String, allocates String x3
-160 allocates Array<Int64>
-165 push may allocate
-177 copies String x2, allocates String x2
-204 allocates Array<UInt8>
-210 push may allocate, index checked
-231 copies String, allocates String x3
+12 allocates Array<String>
+34 allocates Option<String>
+38 allocates Array<UInt8>, toUpper allocates
+39 push may allocate
+50 allocates Map<Int64, Int64>
+58 division checked
+60 tally may allocate
+68 allocates Array<UInt8>
+70 reserve may allocate
+73 push may allocate, index checked
+76 allocates Result<String, String>
+84 allocates Array<UInt8>
+93 allocates String
+95 copies String, allocates String
+97 copies String, allocates String x3
+118 allocates Array<Int64>
+123 push may allocate
+132 copies String x2, allocates String x2
+146 allocates Array<UInt8>
+152 push may allocate, index checked
+173 copies String, allocates String x3

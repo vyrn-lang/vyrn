@@ -1,14 +1,4 @@
-// Logging: a leveled console logger with a threshold.
-//
-// `logger(name)` returns a named logger; the five levels are called subject-first
-// (`log.info(..)`). Messages use string interpolation. Logs are written to
-// stderr as `[LEVEL] name: message` — deliberately separate from program output
-// on stdout, so "where does it print" has a clear answer.
-//
-// The `logging { level: .., sink: .. }` block configures the logger. `level` sets
-// the threshold: calls below it are dropped at compile time (zero runtime cost,
-// identical in both backends) — here `debug`, so `trace` is filtered out. `sink`
-// chooses the destination: `stderr` (default), `stdout`, or `file("path")`.
+// A leveled console logger with a threshold.
 
 logging { level: debug, sink: stderr }
 

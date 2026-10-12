@@ -1,4 +1,4 @@
-/// A6: parameters are not reassignable. Claimed as "a parser rule today".
+// Refused on purpose: a parameter is not reassignable.
 fn f(x: Int64) -> Int64 {
     x = 3
     return x

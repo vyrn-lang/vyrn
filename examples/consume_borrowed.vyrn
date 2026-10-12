@@ -1,14 +1,4 @@
-// A `consume` parameter takes the value, so what reaches one must be the
-// calling frame's to give away. `caller` has nothing to give: `ys` is a `read`
-// parameter, and `main` still owns the array. This file is that refusal on
-// purpose: it does not build, and `vyrn check` names the parameter, the callee
-// and the two ways out.
-//
-// Before the rule, this program compiled. `take` freed the buffer, `main` read
-// its length afterwards and then freed it a second time. The interpreter
-// printed `6` because its values are shared; the native binary printed nothing
-// and exited 0xC0000374, STATUS_HEAP_CORRUPTION. See consume_handover.vyrn for
-// the two shapes that run.
+// Refused on purpose: a borrowed value passed to a `consume` parameter.
 
 fn take(xs: consume Array<Int64>) -> Int64 {
     let n = xs.length

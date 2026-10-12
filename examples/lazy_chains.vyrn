@@ -1,8 +1,3 @@
-// A read through a `lazy` field reads the forced value: `h.f.n` forces
-// `h.f` and reads `n` of the result. Each step forces again, the receiver
-// is released once the read's value is bound, and a part taken out of a
-// forced value is the binding's own.
-
 type Item = { n: Int64, s: String }
 type Holder = { f: lazy Item }
 type Outer = { b: lazy Holder }

@@ -1,24 +1,8 @@
-/// File-based routing as a library on generator imports.
-///
-/// `pages("./pages")` runs the std/ui generator at load time: it scans the
-/// `pages/` directory of ORDINARY page modules, checks each page's exported
-/// surface (via `moduleInterface`) against its `[bracket]` segments, and
-/// synthesizes a router exporting `route(req) -> Response` plus typed-URL helpers
-/// (`hrefUsers`, `hrefItems`, `rootPath`, `itemsPath`). Everything below is then
-/// ordinary Vyrn — driving `route` on synthetic requests makes this a normal
-/// interp == native == wasm parity citizen.
-///
-///   pages/index.vyrn        → GET /
-///   pages/items/index.vyrn  → GET /items
-///   pages/items/[id].vyrn   → GET /items/:id        (dynamic, no loader)
-///   pages/users/[id].vyrn   → GET /users/:id        (dynamic, with a loader)
-///
-/// Inspect the synthesized router with:  vyrn emit-gen examples/pagesdemo.vyrn
+// File-based routing on generator imports.
 import { pages } from "std/ui"
 import { route, hrefUsers, hrefItems, rootPath, itemsPath } from pages("./pages")
 import { contains } from "std/strpred"
 
-/// Drive one request through the router and print its status.
 fn show(method: String, path: String) {
     let r = route(Request { method: method.copy(), path: path.copy(), headers: [:], body: "" })
     print("\{method} \{path} -> \{r.status}")
@@ -32,10 +16,7 @@ fn main() -> Int64 {
     show("GET", "/users/7") // 200 — loader Valid
     show("GET", "/users/0") // 422 — loader Invalid renders an error page
     show("GET", "/nope") // 404 — unknown path
-    // The loader-Invalid path (`/users/0` → a 422 error page) destructures
-    // `Invalid(Array<Issue>)`. It runs in `main` as a full parity citizen.
 
-    // Typed URLs: static helpers and per-route dynamic helpers, all `RoutePath`.
     print(rootPath()) // /
     print(itemsPath()) // /items
     print(hrefItems(5)) // /items/5

@@ -1,11 +1,4 @@
-/// The error model. A structured, accumulating `Validation<T>`.
-///
-/// A validator collects EVERY failing check (not just the first) into an array of
-/// `Issue`s, each carrying an i18n `key`, a field `path`, and a default `message`.
-/// The caller can render them, or map the `key` to a localized string for i18n.
-///
-///   type Issue      = { key: String, path: String, message: String }
-///   type Validation<T> = | Valid(T) | Invalid(Array<Issue>)
+// The accumulating `Validation<T>`.
 
 type Person = { name: String, age: Int64 }
 
@@ -33,7 +26,6 @@ fn issuesOf(v: Validation<Person>) -> Array<Issue> {
     }
 }
 
-// i18n: map an issue key to a localized message (here: German).
 fn translateDe(key: String) -> String {
     if key == "name.required" { return "Name ist erforderlich" }
     if key == "age.min" { return "Alter muss mindestens 0 sein" }
@@ -42,16 +34,12 @@ fn translateDe(key: String) -> String {
 }
 
 fn main() -> Int64 {
-    // Two problems at once: empty name AND age out of range.
     let issues = issuesOf(validatePerson("", 200))
     print(issues.length) // 2
 
     for i in issues {
-        // key + path (for programmatic handling) and a localized message (i18n).
         print("\{i.path}: \{translateDe(i.key)}")
     }
-    // name: Name ist erforderlich
-    // age: Alter ist unplausibel
 
     return issues.length
 }

@@ -1,12 +1,8 @@
-// User-defined enums / sum types. A value is exactly one variant
-// `match` must cover them all. Variants may carry a single payload.
-
 type Shape =
     | Circle(Int64)
     | Rect(Int64, Int64) // a variant can carry more than one payload
     | Unit
 
-// Rough integer "area" for each shape (Unit has none).
 fn area(s: Shape) -> Int64 {
     return match s {
         Circle(r) => 3 * r * r, // ~pi r^2

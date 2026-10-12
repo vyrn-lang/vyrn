@@ -1,26 +1,12 @@
-/// web/vyrn-dom.js — the client runtime for the Vyrn UI layer.
-///
-/// The Elm Architecture, host-side: `view()` is a pure function of module state
-/// returning an `Html` tree; the app exports `vyrnView()` (= `toJson(view())`)
-/// and `vyrnSubs()` (= `toJson(subs())`), plus one `export extern fn` per
-/// event handler. The browser runtime builds the DOM, delegates events by name,
-/// diffs after every handler (keyed where `Key` attrs are present), and
-/// reconciles subscriptions by value. See `web/domdemo.html` for the page.
-///
-/// This module is ALSO an ordinary interp == native == wasm parity citizen:
-/// `main` drives the same handlers deterministically and prints the rendered
-/// HTML, so the pure view logic is checked three ways. The browser just calls
-/// the exported handlers on its own schedule instead.
+// The client side of the UI layer, driven by `web/vyrn-dom.js`.
 import { el, text, cls, attr, on, keyed, empty, toHtmlString, Html, Attr, Sub } from "std/html"
 
-// ---- module state (root-only) ---------------------------------------------
 let mut count: Int64 = 0
 let mut ticks: Int64 = 0
 let mut typed: String = ""
 let mut timerOn: Bool = true
 let mut order: Array<Int64> = [1, 2, 3, 4]
 
-/// A stable label per item id — the keyed list reorders ids, not labels.
 fn labelFor(id: Int64) -> String {
     if id == 1 {
         return "Widget"
@@ -36,8 +22,6 @@ fn labelFor(id: Int64) -> String {
     }
     return "Item"
 }
-
-// ---- the view (pure) -------------------------------------------------------
 
 fn counterView() -> Html {
     return el("section", [Id("counter")], [
@@ -60,8 +44,6 @@ fn inputView() -> Html {
 fn itemRow(id: Int64) -> Html {
     return keyed("\{id}", el("li", [cls("row")], [
         el("span", [cls("tag")], [text("#\{id} \{labelFor(id)}")]),
-        // An UNCONTROLLED input: whatever you type stays in the DOM node, so a
-        // keyed reorder that reuses the node carries your text with its row.
         el("input", [attr("placeholder", "note…")], []),
     ]))
 }
@@ -110,8 +92,6 @@ fn view() -> Html {
     ])
 }
 
-/// The declared subscriptions — effects as data. When `timerOn` is false the
-/// list is empty and the host unwires the interval (nothing to leak).
 fn subs() -> Array<Sub> {
     if timerOn {
         return [Every(1000, "onTick")]
@@ -119,8 +99,6 @@ fn subs() -> Array<Sub> {
     let none: Array<Sub> = []
     return none
 }
-
-// ---- handlers (exported; the browser and `main` both call these) -----------
 
 export extern fn increment(arg: String) {
     count = count + 1
@@ -134,12 +112,6 @@ export extern fn resetCount(arg: String) {
     count = 0
 }
 
-/// `arg.copy()` and not `arg`, because a String ARGUMENT is borrowed: the
-/// caller owns it, and across this boundary the caller is JS, which
-/// releases it as soon as the call returns. Keeping the pointer
-/// past that is a use-after-free, and it read as `count = 0` in the page —
-/// whatever the next allocation put in the recycled block. The store also
-/// releases what `typed` held, so the keystrokes do not pile up.
 export extern fn onType(arg: String) {
     typed = arg.copy()
 }
@@ -152,8 +124,6 @@ export extern fn toggleTimer(arg: String) {
     timerOn = !timerOn
 }
 
-/// Move the first id to the end — a reorder the keyed differ must handle by
-/// MOVING DOM nodes, not rebuilding them.
 export extern fn rotate(arg: String) {
     let mut next: Array<Int64> = []
     let mut i = 1
@@ -167,13 +137,7 @@ export extern fn rotate(arg: String) {
     order = next
 }
 
-// ---- the host bridge -------------------------------------------------------
-
-// NOTE: this demo DELIBERATELY exports only `vyrnView` and no
-// `vyrnPatch`. It is the regression proof for the host's protocol fallback —
-// with `vyrnPatch` absent, `web/vyrn-dom.js` keeps using today's full-view +
-// JS-diff loop unchanged. `vyxdomdemo` and the shelf client are the ones that
-// switch to the wasm-side patch loop.
+// Exports `vyrnView` and no `vyrnPatch` on purpose: the witness for the host's full-view fallback.
 export extern fn vyrnView() -> String {
     return toJson(view())
 }
@@ -183,8 +147,6 @@ export extern fn vyrnSubs() -> String {
 }
 
 fn main() -> Int64 {
-    // Drive the handlers deterministically, exactly as the browser would, so
-    // this stays a three-way parity citizen.
     print(vyrnView())
     increment("")
     increment("")
@@ -195,9 +157,6 @@ fn main() -> Int64 {
     print("subs on: \{vyrnSubs()}")
     toggleTimer("")
     print("subs off: \{vyrnSubs()}")
-    // Restore initial state so a host that instantiates this module (the
-    // browser, after `_start` runs `main` once) boots from a pristine view —
-    // `main` is only a deterministic smoke drive for the parity harness.
     count = 0
     typed = ""
     ticks = 0

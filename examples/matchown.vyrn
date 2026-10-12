@@ -1,27 +1,9 @@
-/// Who owns a payload that leaves its arm, and who owns a scrutinee no arm
-/// kept — the two halves of one rule, and the shapes no other example reaches.
-///
-/// Most `match`es in this corpus are over a TEMPORARY whose payload leaves the
-/// arm: a call result is no other binding's, so the value the arm hands out has
-/// exactly one owner. This file covers the arrangements beside it: letting a
-/// payload out of a NAMED scrutinee (one buffer, two owners, if done wrong), and
-/// keeping nothing out of a temporary one (no owner at all).
-///
-/// The third arrangement is the arm that hands its payload to a CALL that
-/// consumes it, rather than naming it. There the scrutinee must not keep a deep
-/// release of a value the callee already owns.
-///
-/// The interpreter reference-counts and was right about every line here, so
-/// three-way parity is the whole gate: a double free aborts the native build
-/// before its output flushes and corrupts the wasm free list.
+// Who owns a payload that leaves its arm, and a scrutinee no arm kept.
 
 type Node =
     | Leaf(Int64)
     | Bunch(Array<Int64>, String)
 
-/// A DECLARED release, because the program that found the third arrangement had
-/// one: `std/json`'s `Json`, whose scrutinee row is a `Release` rather than a
-/// structural walk.
 type Wrap =
     | Empty
     | Words(Array<String>)
@@ -100,14 +82,10 @@ fn words(n: Int64) -> Array<String> {
     return xs
 }
 
-/// The callee an arm gives its payload to: it consumes the array and hands it
-/// back, so the value has exactly one owner from the arm onward.
 fn takeWords(ws: consume Array<String>) -> Array<String> {
     return ws
 }
 
-/// The give out of a `consume` PARAMETER, in RETURN position —
-/// `std/openapi`'s `oaWithId`, and the shape the `$schema` fault was found on.
 fn unwrapWords(w: consume Wrap) -> Array<String> {
     return match w {
         Empty => emptyStrs(),
@@ -115,8 +93,6 @@ fn unwrapWords(w: consume Wrap) -> Array<String> {
     }
 }
 
-/// A payload out by `return`, over a temporary — the shape a named scrutinee is
-/// refused for (`rule 3`: a projection may not be returned).
 fn byReturn(n: Int64) -> String {
     return match tag(n) {
         Some(s) => s,
@@ -124,11 +100,6 @@ fn byReturn(n: Int64) -> String {
     }
 }
 
-/// The wrapped lend: a borrow put inside a constructor, stored in a local, and
-/// returned. Nothing at the `return` names a place, so only the STORE can record
-/// that this function hands back an element of its argument's array — and the
-/// caller must then release neither the result nor a scrutinee holding it.
-/// `std/html`'s `attrKey` is this function.
 fn attrKey(attrs: Array<Attr>) -> Option<String> {
     let mut found: Option<String> = None
     for a in attrs {
@@ -141,9 +112,6 @@ fn attrKey(attrs: Array<Attr>) -> Option<String> {
 }
 
 fn main() -> Int64 {
-    // A payload out by `let`, from a NAMED scrutinee. The everyday unwrap-or,
-    // and the one that aborted natively: `o` released the payload and `s` freed
-    // it again.
     let o = tag(7)
     let s = match o {
         Some(v) => v,
@@ -151,7 +119,6 @@ fn main() -> Int64 {
     }
     print("let=\{s}")
 
-    // The same through `if let`, assigning outward.
     let o2 = tag(9)
     let mut out = ""
     if let Some(v) = o2 {
@@ -159,7 +126,6 @@ fn main() -> Int64 {
     }
     print("iflet=\{out}")
 
-    // A payload that is a RECORD with owning fields.
     let dobj = boxed(3)
     let rec = match dobj {
         Some(d) => d,
@@ -167,7 +133,6 @@ fn main() -> Int64 {
     }
     print("rec=\{rec.title}/\{rec.body}")
 
-    // A payload that is an `Array<String>`.
     let ao = listed(2)
     let arr = match ao {
         Some(a) => a,
@@ -175,12 +140,6 @@ fn main() -> Int64 {
     }
     print("arr=\{arr.length}")
 
-    // A USER enum's payload, and a payload out of a NESTED enum. A
-    // multi-payload arm binds BOTH payloads, and the one it does not hand
-    // out is the arm's to finish — the consuming match takes the value, so
-    // `drop` on the ignored sibling is the spelling of "I bound it, I own
-    // it" (exit-residue round fifty-seven; the automatic sibling free is a
-    // recorded gap for multi-binder arms).
     let nd = mkNode(5)
     let mut xs: Array<Int64> = []
     match consume nd {
@@ -206,7 +165,6 @@ fn main() -> Int64 {
     }
     print("deep=\{deep}")
 
-    // A payload out by `return`, and one as a CALL ARGUMENT.
     print("ret=\{byReturn(6)}")
     let co = boxed(7)
     let n = match co {
@@ -215,11 +173,6 @@ fn main() -> Int64 {
     }
     print("call=\{n}")
 
-    // The third arrangement: the arm gives its payload to a call that CONSUMES
-    // it. The give is the CALL's, not the arm's, and reading only the arm's own
-    // spelling left the scrutinee a deep release of a buffer the callee owned.
-    // Once out of a named local, once out of a `consume` parameter in return
-    // position.
     let wo = Words(words(2))
     let w1 = match wo {
         Empty => emptyStrs(),
@@ -229,8 +182,6 @@ fn main() -> Int64 {
     let w2 = unwrapWords(Words(words(3)))
     print("giveret=\{w2.length}/\{w2[1]}")
 
-    // The wrapped lend. `got` names an element `attrs` still holds, so neither
-    // the binding nor the match below it may release one.
     let mut attrs: Array<Attr> = []
     attrs.push(Cls("row"))
     attrs.push(Key("k-\{1}"))
@@ -241,9 +192,6 @@ fn main() -> Int64 {
     }
     print("lend=\{kw}/\{attrs.length}")
 
-    // A statement-position `match` on a heap temporary, in a loop: nothing
-    // leaves the arms, so the match is the scrutinee's last owner. Unfixed this
-    // leaked one `Option<String>` a turn.
     let mut i = 0
     let mut sum = 0
     while i < 200 {
@@ -256,7 +204,6 @@ fn main() -> Int64 {
     }
     print("loop=\{sum}")
 
-    // The same shapes through `while let`, which walks a temporary too.
     let mut j = 0
     let mut seen = 0
     while let Some(v) = tag(4 - j) {
@@ -265,9 +212,6 @@ fn main() -> Int64 {
     }
     print("whilelet=\{seen}/\{j}")
 
-    // And every one of them inside a `region`, where the arena owns what the
-    // region allocated and the exit hands it back — so nothing here may free a
-    // block twice.
     region {
         let mut k = 0
         let mut inner = 0

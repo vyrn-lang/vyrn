@@ -1,40 +1,40 @@
 examples/knucleotide.vyrn
 fn namedFragments() -> Array<String>
-   39           allocates `Array<String>`  last run: 1 blocks, 24 bytes
+   12           allocates `Array<String>`  last run: 1 blocks, 24 bytes
 fn thirdSequence() -> Array<UInt8>
-   68  loop 1   allocates `Option<String>`  last run: 171 blocks, 13,680 bytes
-   72  loop 1   allocates `Array<UInt8>`  last run: 84 blocks, 5,336 bytes
+   34  loop 1   allocates `Option<String>`  last run: 171 blocks, 13,680 bytes
+   38  loop 1   allocates `Array<UInt8>`  last run: 84 blocks, 5,336 bytes
        loop 1   allocates in `toUpper(..)` from std/strings  last run: 587 blocks, 22,696 bytes
-   73  loop 2   `push(..)` may allocate when it outgrows its capacity  last run: 12 blocks, 16,384 bytes
+   39  loop 2   `push(..)` may allocate when it outgrows its capacity  last run: 12 blocks, 16,384 bytes
 fn countKmers(seq: Array<UInt8>, k: Int64) -> Map<Int64, Int64>
-   86           allocates `Map<Int64, Int64>`  last run: 0 blocks, 0 bytes
-   94  loop 1   division check: it needs `modulus >= 1`, and `modulus` is the result of `modulusOf(..)` at line 90, whose signature does not state it
-   96  loop 1   `tally(..)` may allocate when it outgrows its capacity  last run: 153 blocks, 1,331,584 bytes
+   50           allocates `Map<Int64, Int64>`  last run: 0 blocks, 0 bytes
+   58  loop 1   division check: it needs `modulus >= 1`, and `modulus` is the result of `modulusOf(..)` at line 54, whose signature does not state it
+   60  loop 1   `tally(..)` may allocate when it outgrows its capacity  last run: 153 blocks, 1,331,584 bytes
 fn unpack(key: Int64, k: Int64) -> String
-  105           allocates `Array<UInt8>`  last run: 20 blocks, 160 bytes
-  107           `reserve(..)` may allocate when it outgrows its capacity  last run: 20 blocks, 160 bytes
-  110  loop 1   `push(..)` may allocate when it outgrows its capacity  last run: 0 blocks, 0 bytes
-       loop 1   index check: it needs the value of line 110 >= 0, and that value is the result of `modulusOf(..)` at line 108, whose signature does not state it
-  113           allocates `Result<String, String>`  last run: 20 blocks, 320 bytes
+   68           allocates `Array<UInt8>`  last run: 20 blocks, 160 bytes
+   70           `reserve(..)` may allocate when it outgrows its capacity  last run: 20 blocks, 160 bytes
+   73  loop 1   `push(..)` may allocate when it outgrows its capacity  last run: 0 blocks, 0 bytes
+       loop 1   index check: it needs the value of line 73 >= 0, and that value is the result of `modulusOf(..)` at line 71, whose signature does not state it
+   76           allocates `Result<String, String>`  last run: 20 blocks, 320 bytes
 fn pack(frag: String) -> Int64
-  122           allocates `Array<UInt8>`  last run: 5 blocks, 64 bytes
+   84           allocates `Array<UInt8>`  last run: 5 blocks, 64 bytes
 fn fixed3(x: Float64) -> String
-  132           allocates `String`  last run: 40 blocks, 480 bytes
-  134  loop 1   copies `String`: interpolating a `String` copies it  last run: 3 blocks, 48 bytes
+   93           allocates `String`  last run: 40 blocks, 480 bytes
+   95  loop 1   copies `String`: interpolating a `String` copies it  last run: 3 blocks, 48 bytes
        loop 1   allocates `String`  last run: 3 blocks, 48 bytes
-  136           copies `String`: interpolating a `String` copies it  last run: 20 blocks, 320 bytes
+   97           copies `String`: interpolating a `String` copies it  last run: 20 blocks, 320 bytes
                 allocates `String` x3  last run: 80 blocks, 1,120 bytes
 fn ranked(m: Map<Int64, Int64>) -> Array<Entry>
-  160           allocates `Array<Int64>`  last run: 2 blocks, 200 bytes
-  165  loop 1   `push(..)` may allocate when it outgrows its capacity  last run: 8 blocks, 1,024 bytes
+  118           allocates `Array<Int64>`  last run: 2 blocks, 200 bytes
+  123  loop 1   `push(..)` may allocate when it outgrows its capacity  last run: 8 blocks, 1,024 bytes
 fn report(seq: Array<UInt8>, k: Int64) -> Unit
-  177  loop 1   copies `String` x2: interpolating a `String` copies it  last run: 40 blocks, 640 bytes
+  132  loop 1   copies `String` x2: interpolating a `String` copies it  last run: 40 blocks, 640 bytes
        loop 1   allocates `String` x2  last run: 40 blocks, 800 bytes
 fn syntheticSequence(n: Int64) -> Array<UInt8>
-  204           allocates `Array<UInt8>`  last run: 0 blocks, 0 bytes
-  210  loop 1   `push(..)` may allocate when it outgrows its capacity  last run: 0 blocks, 0 bytes
-       loop 1   index check: it needs the value of line 210 >= 0, and the compiler cannot show that here
+  146           allocates `Array<UInt8>`  last run: 0 blocks, 0 bytes
+  152  loop 1   `push(..)` may allocate when it outgrows its capacity  last run: 0 blocks, 0 bytes
+       loop 1   index check: it needs the value of line 152 >= 0, and the compiler cannot show that here
 fn main() -> Int64
-  231  loop 1   copies `String`: interpolating a `String` copies it  last run: 5 blocks, 104 bytes
+  173  loop 1   copies `String`: interpolating a `String` copies it  last run: 5 blocks, 104 bytes
        loop 1   allocates `String` x3  last run: 20 blocks, 312 bytes
 summary: allocating rows 20 (9 in loops), growing rows 6 (5 in loops), copies 5 (4 in loops), checks kept 3 (3 in loops), checks proved 19 (14 in loops)

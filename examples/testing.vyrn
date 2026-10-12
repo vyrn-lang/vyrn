@@ -1,16 +1,4 @@
-// Testing — `test` blocks, `assert`, `assertEq`, and `vyrn test`.
-//
-// A file may hold BOTH a `main` (an ordinary runnable program) AND `test`
-// blocks. `vyrn run` / `build` ignore the tests entirely — they are checked,
-// then stripped — so this stays a normal three-way parity citizen. To run the
-// tests instead of `main`, use `vyrn test`:
-//
-//   $ vyrn test examples/testing.vyrn
-//   test "clamp holds the bounds" ... ok
-//   test "clamp reports its edges" ... ok
-//   test "empty pops to None" ... ok
-//
-//   3 passed, 0 failed
+// `test` blocks, `assert`, `assertEq` and `vyrn test`.
 
 fn clamp(x: Int64, lo: Int64, hi: Int64) -> Int64 {
     if x < lo { return lo }

@@ -1,12 +1,4 @@
-/// Generator imports.
-///
-/// The compiler runs `palette("./data")` at load time (in its interpreter,
-/// deterministically and cached) and links the String it returns as an ordinary
-/// module. Everything below is normal Vyrn: `colorCount`/`themeCount`/
-/// `firstTheme` come from generated source, so this example is a normal
-/// interp == native == wasm parity citizen — the whole point of the feature.
-///
-/// Inspect the synthesized module with:  vyrn emit-gen examples/gendemo.vyrn
+// Generator imports.
 import { palette } from "./lib/gen_palette"
 import { colorCount, themeCount, firstTheme } from palette("./data")
 

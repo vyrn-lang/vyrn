@@ -1,6 +1,3 @@
-// `impl Tag for A__B` and `impl Tag__A for B` join their protocol and type key
-// differently, so `b.tag()` calls the impl for `B`.
-
 protocol Tag {
     fn tag(self) -> Int64
 }

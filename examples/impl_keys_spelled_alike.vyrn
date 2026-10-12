@@ -1,6 +1,3 @@
-// `impl Show for X__Int64` and `impl Show__X for Int64` join their protocol and
-// type key differently, so each keeps its own method.
-
 type X__Int64 = { v: Int64 }
 
 protocol Show {

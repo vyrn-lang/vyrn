@@ -1,8 +1,4 @@
-/// Reading a `Json` in place: `j[i]` and `j.field(key)` are
-/// projections — the refutable `let` inside them binds the payload as a
-/// borrow, and the place they return is read at the access site with no
-/// subtree copied. The benches price the census row this closed: one lookup
-/// in a 4096-element array, in place against the tolerant copying reader.
+// Reading a `Json` in place through projections.
 
 import { Json, JsonField } from "std/json"
 import { elemAt, fieldAt } from "std/jsondec"
@@ -53,8 +49,6 @@ fn main() -> Int64 {
     if let JStr(s) = items[1] {
         print("second: \{s}")
     }
-    // The tolerant readers stay beside the projections: a miss is `JNull`,
-    // and the value they answer outlives the document.
     let JObj(fields) = doc
     if let JNull = fieldAt(fields, "absent") {
         print("miss: JNull")

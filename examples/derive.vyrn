@@ -1,8 +1,4 @@
-/// derive: a generator run on a checked type.
-///
-/// `derive(shapeOf, x)` hands `shapeOf` the type the checker gave `x`, as a
-/// `TypeArg`, and calls the function it wrote for that type. The generator
-/// runs once for the whole program; a type used twice shares one function.
+// A generator run on a checked type.
 
 import { shapeOf } from "./lib/gen_shape"
 

@@ -1,19 +1,3 @@
-/// Files. `readFile`/`writeFile` move whole UTF-8 Strings;
-/// `readFileBytes`/`bytes`/`stringFromBytes` handle raw bytes.
-///
-/// Error payloads are CANONICAL Vyrn wording, never OS text — so all three
-/// backends (interpreter, native, wasm) produce byte-identical `Err`s:
-///
-///   readFile  -> Err("cannot read `<path>`")        any I/O reason
-///             -> Err("`<path>` is not valid UTF-8")  binary data
-///             -> Err("`<path>` contains a NUL byte") NUL can't live in a String
-///   writeFile -> Err("cannot write `<path>`")
-///
-/// Paths are relative to the working directory; the parity harness runs every
-/// backend from `examples/` (wasm gets it preopened via `wasmtime --dir .`).
-/// The written file goes to a `.tmp.txt` name (gitignored) and is truncated on
-/// each run, so the example stays re-runnable.
-
 fn showRead(r: Result<String, String>) -> String {
     return match r {
         Ok(s) => "ok: \{s}",
@@ -22,13 +6,10 @@ fn showRead(r: Result<String, String>) -> String {
 }
 
 fn main() -> Int64 {
-    // A committed fixture reads back exactly.
     print(showRead(readFile("data/greeting.txt")))
 
-    // A missing file is a value, not a crash — with the canonical message.
     print(showRead(readFile("data/no_such_file.txt")))
 
-    // writeFile -> readFile round-trip (create/truncate + write).
     let report = "three lines\nwritten by\nfiles.vyrn"
     let wrote = match writeFile("data/report.tmp.txt", report) {
         Ok(b) => "wrote: \{b}",
@@ -37,8 +18,6 @@ fn main() -> Int64 {
     print(wrote)
     print(showRead(readFile("data/report.tmp.txt")))
 
-    // Bytes (M2): a String's UTF-8 bytes are an Array<UInt8>, and
-    // `stringFromBytes` is the validated inverse — the round-trip is exact.
     let smile = "café ☕"
     let raw = bytes(smile)
     print("\{smile} is \{raw.length} bytes (\{smile.byteLength} via .byteLength)")
@@ -48,7 +27,6 @@ fn main() -> Int64 {
     }
     print("round-trip: \{back}")
 
-    // Binary file read: the byte count of the file we just wrote.
     let size = match readFileBytes("data/report.tmp.txt") {
         Ok(b) => b.length,
         Err(e) => -1,

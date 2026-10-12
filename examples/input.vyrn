@@ -1,16 +1,5 @@
-/// Reading stdin. `readLine()` returns one line as
-/// `Option<String>`: `Some(line)` with the trailing newline stripped (`\r\n`
-/// and `\n` both, so Windows and POSIX pipes read identically), `None` at EOF.
-/// Repeated calls stream through stdin.
-///
-/// The parity harness pipes `examples/input.stdin` into all three backends
-/// (interpreter, native, wasm) and requires byte-identical output. Run it
-/// yourself with:
-///
-///   vyrn run examples/input.vyrn < examples/input.stdin
+// Reading stdin.
 
-/// One line, or the sentinel when stdin is exhausted. (`match` is an
-/// expression; a helper keeps the loop body flat.)
 fn nextLine() -> String {
     return match readLine() {
         Some(s) => s,
@@ -18,7 +7,6 @@ fn nextLine() -> String {
     }
 }
 
-/// A line's numeric value (words count as 0).
 fn numericValue(line: String) -> Int64 {
     return match parse(line) {
         Some(n) => n,
@@ -26,7 +14,6 @@ fn numericValue(line: String) -> Int64 {
     }
 }
 
-/// Whether a line is a word rather than a number.
 fn isWord(line: String) -> Bool {
     return match parse(line) {
         Some(n) => false,

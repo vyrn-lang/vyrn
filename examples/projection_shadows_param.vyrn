@@ -1,6 +1,3 @@
-// A `let` inside a projection shadows a parameter of its name only in its own
-// block; the inlined body still reads the parameter elsewhere.
-
 type Q = { v: Array<Int64> }
 
 impl Index for Q {

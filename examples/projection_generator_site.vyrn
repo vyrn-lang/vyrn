@@ -1,6 +1,6 @@
-/// A projection site in a generator program and one in its importer, at the
-/// same node and line: each expands its own program's `pick`, so `probe`
-/// reads element 2 and this prints 37.
+// This `probe` and the one in lib/gen_projection_site.vyrn share a node and a line,
+// and each expands its own program's `pick`, so this prints 37.
+// Keep `fn probe` on line 18, its line in lib/gen_projection_site.vyrn.
 import { mk } from "./lib/gen_projection_site"
 import { v } from mk("x")
 

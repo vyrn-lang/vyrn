@@ -1,17 +1,9 @@
-// Block-bodied match arms: a `match` in STATEMENT position may
-// give an arm a brace-delimited body of statements. The arms yield nothing —
-// a match used as a value keeps single-expression arms — and that containment
-// is the design: the value story never meets a brace.
-//
-// The middle function is the shape the RFC exists for: a release that drops
-// two payloads in one arm, with no `give` trampoline standing where a block
-// could not.
+// Block-bodied match arms in statement position.
 
 type Shape =
     | Dot
     | Wide(String, String)
 
-/// The trampoline-free release: both payloads dropped in the arm, directly.
 fn toss(s: consume Shape) {
     match consume s {
         Dot => {}
@@ -30,7 +22,6 @@ fn maybe(i: Int64) -> Option<Int64> {
 }
 
 fn main() -> Int64 {
-    // Statements in an arm: a binding, two prints — no helper function.
     let t = Wide("left", "right")
     match t {
         Dot => print("dot"),
@@ -41,13 +32,11 @@ fn main() -> Int64 {
         }
     }
 
-    // Mixed arms: an expression arm beside a block arm, values discarded.
     match maybe(4) {
         Some(n) => print("even \{n}"),
         None => {}
     }
 
-    // `break` inside a block arm reaches the enclosing loop.
     let mut i = 0
     let mut sum = 0
     while i < 10 {

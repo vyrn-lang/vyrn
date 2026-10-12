@@ -1,6 +1,3 @@
-// A module that declares a method-form name calls its own declaration when it
-// writes `recv.name(..)`, and the statement form does not assign the result
-// back. A namespace member of that name is the module's export.
 import * as r from "./lib/remover"
 
 fn push(xs: Array<Int64>, v: Int64) {

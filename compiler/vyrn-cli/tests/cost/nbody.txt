@@ -1,16 +1,16 @@
 examples/nbody.vyrn
 fn fixed9(v: Float64) -> String
-   53           allocates `String`
-   55  loop 1   copies `String`: interpolating a `String` copies it
+   30           allocates `String`
+   32  loop 1   copies `String`: interpolating a `String` copies it
        loop 1   allocates `String`
-   57           copies `String` x2: interpolating a `String` copies it
+   34           copies `String` x2: interpolating a `String` copies it
                 allocates `String` x4
 fn system() -> Array<Body>
-   74           `push(..)` may allocate when it outgrows its capacity
-   75           `push(..)` may allocate when it outgrows its capacity
-   84           `push(..)` may allocate when it outgrows its capacity
-   93           `push(..)` may allocate when it outgrows its capacity
-  102           `push(..)` may allocate when it outgrows its capacity
+   49           `push(..)` may allocate when it outgrows its capacity
+   50           `push(..)` may allocate when it outgrows its capacity
+   59           `push(..)` may allocate when it outgrows its capacity
+   68           `push(..)` may allocate when it outgrows its capacity
+   77           `push(..)` may allocate when it outgrows its capacity
 fn offsetMomentum(bodies: Array<Body>) -> Array<Body>
-  129           index check: it needs `bodies` non-empty, and `bodies` is a parameter, so the function cannot know what its callers pass; only a `read` parameter takes a `where` clause that could state it
+   99           index check: it needs `bodies` non-empty, and `bodies` is a parameter, so the function cannot know what its callers pass; only a `read` parameter takes a `where` clause that could state it
 summary: allocating rows 6 (1 in loops), growing rows 5 (0 in loops), copies 3 (1 in loops), checks kept 1 (0 in loops), checks proved 50 (45 in loops)

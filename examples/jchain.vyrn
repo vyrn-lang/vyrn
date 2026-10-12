@@ -1,9 +1,4 @@
-/// A chained projection: a projection call may itself be the
-/// receiver of the next access, when every link's declared result is a
-/// concrete named type. `doc.field("items")[1]` resolves `field` to `Json`,
-/// then `Json`'s own `at` — each link inlines at the site, and no binding
-/// has to be spelled between them. A link whose declared result is generic
-/// still needs the `let`, and the checker says so.
+// A chained projection.
 
 import { Json, JsonField } from "std/json"
 

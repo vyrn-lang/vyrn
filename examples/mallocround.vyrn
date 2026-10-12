@@ -1,7 +1,4 @@
-/// A request in (2^31 - 8, 2^31] bytes rounds to 2^31, past an `Int32`.
-/// `malloc` rounds in 64 bits, so the block is 2 GiB, not 8 bytes that the
-/// pushes overrun into `b`. Two such blocks cannot fit a wasm32 memory, so the
-/// second traps `out of memory`.
+// A request just under 2^31 bytes rounds past an `Int32`, so the run is out of memory.
 fn main() -> Int64 {
     let mut a: Array<UInt8> = []
     a.reserve(2147483644)
