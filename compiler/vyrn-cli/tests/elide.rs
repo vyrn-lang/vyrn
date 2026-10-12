@@ -5725,3 +5725,196 @@ fn a_premise_taken_twice_proves_a_strided_index() {
         "{err}"
     );
 }
+
+/// A `modify` call keeps what its callee cannot shrink: `note` writes
+/// another field of `log` or appends to `log.lines`, so `i < log.lines.length`
+/// holds after the call. A `pop` in `note` shrinks the array: the read stays
+/// a check and traps.
+#[test]
+fn a_modify_call_keeps_a_length_its_callee_cannot_shrink() {
+    let src = |turn: &str| {
+        format!(
+            "type Log = {{ lines: Array<Int64>, seen: Int64 }}
+type Cfg = {{ step: Int64 }}
+
+fn note(cfg: Cfg, log: modify Log) {{
+    {turn}
+}}
+
+fn w(cfg: Cfg, log: modify Log, i: Int64) -> Int64 {{
+    if i < 0 || i >= log.lines.length {{
+        return 0
+    }}
+    note(cfg, log)
+    return log.lines[i]
+}}
+"
+        )
+    };
+    let calls = "    let mut log = Log { lines: xs, seen: 0 }\n    \
+                 print(w(Cfg { step: 1 }, log, 2).toString())";
+    for turn in ["log.seen = log.seen + cfg.step", "log.lines.push(cfg.step)"] {
+        let proof = src(turn);
+        assert_eq!(verdicts(&proof, "w"), ["proved array-index"], "{turn}");
+        assert_eq!(oracle(&proof, calls, "w").0, "", "{turn}");
+    }
+    let witness = src("log.lines.pop()");
+    assert_eq!(verdicts(&witness, "w"), ["check array-index"]);
+    let (err, _) = oracle(&witness, calls, "w");
+    assert!(err.contains("array index 2 out of bounds"), "{err}");
+    assert!(
+        !err.contains(vyrn_frontend::trap::PROVED_CHECK_FAILED),
+        "{err}"
+    );
+}
+
+/// A length a `modify` call may grow keeps its lower bounds and loses its
+/// upper ones: after `note` appends, `log.lines.length <= t.length` no longer
+/// holds, so `t[log.lines.length - 1]` stays a check and traps.
+#[test]
+fn a_modify_call_that_grows_a_length_drops_its_upper_bound() {
+    let src = "type Log = { lines: Array<Int64> }
+
+fn note(log: modify Log) {
+    log.lines.push(0)
+}
+
+fn w(log: modify Log, t: Array<Int64>) -> Int64 {
+    if log.lines.length < 1 || log.lines.length > t.length {
+        return 0
+    }
+    note(log)
+    return t[log.lines.length - 1]
+}
+";
+    let calls = "    let ys = xs.copy()\n    let mut log = Log { lines: xs }\n    \
+                 print(w(log, ys).toString())";
+    assert_eq!(verdicts(src, "w"), ["check array-index"]);
+    let (err, _) = oracle(src, calls, "w");
+    assert!(err.contains("array index 3 out of bounds"), "{err}");
+    assert!(
+        !err.contains(vyrn_frontend::trap::PROVED_CHECK_FAILED),
+        "{err}"
+    );
+}
+
+/// The length of an element an index name picks bounds a read of that
+/// element: `j < g.rows[k].length` proves `g.rows[k][j]`, across a call that
+/// takes another record. When `k` moves, or a store replaces the row, between
+/// the bound and the read, the read stays a check and traps.
+#[test]
+fn an_element_length_bounds_a_read_of_the_same_element() {
+    let src = |turn: &str| {
+        format!(
+            "type Grid = {{ rows: Array<Array<Int64>> }}
+type Tally = {{ w: Int64 }}
+
+fn sumRow(t: Tally, g: modify Grid, r: Int64) -> Int64 {{
+    if r < 0 || r >= g.rows.length || t.w < 0 || t.w >= g.rows.length {{
+        return 0
+    }}
+    let mut k = r
+    let mut s = 0
+    let mut j = 0
+    while j < g.rows[k].length {{
+        {turn}
+        s = s + g.rows[k][j]
+        j = j + 1
+    }}
+    return s
+}}
+"
+        )
+    };
+    let calls = "    let mut g = Grid { rows: [[1, 2, 3], [4]] }\n    \
+                 print(sumRow(Tally { w: 1 }, g, 0).toString())";
+    let rows = |a: &str, b: &str, c: &str| [a, b, c].map(String::from).to_vec();
+    let proof = src("s = s + t.w");
+    let proved = rows(
+        "proved array-index",
+        "proved array-index",
+        "proved array-index",
+    );
+    assert_eq!(verdicts(&proof, "sumRow"), proved);
+    assert_eq!(oracle(&proof, calls, "sumRow").0, "");
+    for turn in [
+        "if j == 1 {
+            k = t.w
+        }",
+        "if j == 1 {
+            g.rows[k] = [t.w]
+        }",
+    ] {
+        let witness = src(turn);
+        let read = verdicts(&witness, "sumRow");
+        assert_eq!(
+            read.last().map(String::as_str),
+            Some("check array-index"),
+            "{turn}"
+        );
+        let (err, _) = oracle(&witness, calls, "sumRow");
+        assert!(err.contains("array index 1 out of bounds"), "{turn}: {err}");
+        assert!(
+            !err.contains(vyrn_frontend::trap::PROVED_CHECK_FAILED),
+            "{err}"
+        );
+    }
+}
+
+/// A sentinel's facts hold where its result is at least zero: `peek`
+/// returns `-1` past the end, so `peek(lx) == c` with `c >= 0` shows
+/// `lx.pos < lx.src.length`. A `peek` that returns `0` at the end, or a
+/// test the sentinel also passes (`!=`), leaves the read a check, and it
+/// traps.
+#[test]
+fn a_sentinel_result_at_least_zero_proves_its_guard() {
+    let src = |end: &str, test: &str| {
+        format!(
+            "type Lexer = {{ src: Array<Int64>, pos: Int64 }}
+type Out = {{ toks: Array<Int64> }}
+
+fn peek(lx: Lexer) -> Int64 {{
+    if lx.pos < 0 || lx.pos > lx.src.length {{
+        return 0 - 1
+    }}
+    if lx.pos == lx.src.length {{
+        return {end}
+    }}
+    return lx.src[lx.pos]
+}}
+
+fn take(lx: Lexer, out: modify Out) {{
+    if peek(lx) {test} {{
+        out.toks.push(lx.src[lx.pos])
+    }}
+}}
+"
+        )
+    };
+    let calls = |pos: i64| {
+        format!(
+            "    let mut out = Out {{ toks: [] }}
+    take(Lexer {{ src: xs, pos: {pos} }}, out)
+                 print(out.toks.length.toString())"
+        )
+    };
+    let run = |src: &str, pos: i64| {
+        let (dir, file) = program(src, &calls(pos));
+        (rows_of(&file, "take"), run_oracle(&dir, &file, "take").0)
+    };
+    let (rows, err) = run(&src("0 - 1", "== 10"), 3);
+    assert_eq!(rows, ["proved array-index"]);
+    assert_eq!(err, "");
+    for (end, test) in [("0", "== 0"), ("0 - 1", "!= 41")] {
+        let (rows, err) = run(&src(end, test), 3);
+        assert_eq!(rows, ["check array-index"], "{end} {test}");
+        assert!(
+            err.contains("array index 3 out of bounds"),
+            "{end} {test}: {err}"
+        );
+        assert!(
+            !err.contains(vyrn_frontend::trap::PROVED_CHECK_FAILED),
+            "{err}"
+        );
+    }
+}
