@@ -4623,12 +4623,13 @@ fn mark(
             St::If {
                 cond, then, els, ..
             } => {
-                // A loop's exit condition carries the facts of its operands
-                // when it is a Bool copy (`a && b`), for a check in the loop.
-                if let (true, Some(c), [], [St::Break { .. }]) =
-                    (checks, val(cond), &then[..], &els[..])
-                {
-                    rel[c.index()] = true;
+                // A Bool a branch stores takes the branch's facts at the join
+                // (`State::join`): `a && b && c` keeps `b`'s for a check.
+                if checks && val(cond).is_some_and(|c| rel[c.index()]) {
+                    let mut set = BTreeSet::new();
+                    stores(std::slice::from_ref(s), &mut set);
+                    set.retain(|n| body.names[n.index()].ty == Type::Bool);
+                    set.iter().for_each(|n| rel[n.index()] = true);
                 }
                 mark(body, decls, then, rel, checks, linked);
                 mark(body, decls, els, rel, checks, linked);

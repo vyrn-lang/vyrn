@@ -1320,6 +1320,50 @@ fn a_chain_of_three_premises_proves_an_index() {
     );
 }
 
+/// A Bool a branch stores takes that branch's facts: the `&&` chain's last
+/// operand bounds nothing, and `i + 1 < s.byteLength` still reaches the body.
+#[test]
+fn a_bool_a_branch_stores_keeps_the_branch_facts() {
+    let src = "fn w(s: String, i: Int64, c: Bool) -> Int64 {
+    if i >= 0 && i < s.byteLength && i + 1 < s.byteLength && c {
+        return Int64(s[i + 1])
+    }
+    return 0
+}
+";
+    assert_eq!(verdicts(src, "w"), ["proved string-index"]);
+    let calls = "    print(w(\"a/b\", 1, true).toString())";
+    assert_eq!(oracle(src, calls, "w").0, "");
+}
+
+/// The core binds `@borrow` once per read in a loop. A fact of the borrow of
+/// `s` proves `s[i]` and does not reach the borrow of `t`.
+#[test]
+fn a_borrow_fact_reaches_no_other_borrow() {
+    let src = "fn w(s: String, t: String) -> Int64 {
+    let mut n: Int64 = 0
+    let mut i: Int64 = 0
+    while i < s.byteLength {
+        if s[i] == 47 && i + 1 < s.byteLength && t[i + 1] == 42 {
+            n = n + 1
+        }
+        i = i + 1
+    }
+    return n
+}
+";
+    assert_eq!(
+        verdicts(src, "w"),
+        ["proved string-index", "check string-index"]
+    );
+    let (err, _) = oracle(src, "    print(w(\"/x\", \"a\").toString())", "w");
+    assert!(
+        err.contains("string index 1 out of bounds")
+            && !err.contains(vyrn_frontend::trap::PROVED_CHECK_FAILED),
+        "{err}"
+    );
+}
+
 #[test]
 fn a_join_of_constants_keeps_the_values_between_out() {
     let src = "fn w(x: Int64) -> Int64 {
@@ -2101,6 +2145,44 @@ fn w(xs: modify Array<Int64>, j: Int64) -> Int64 {
 ",
         "    print(w(xs, 5, true).toString())",
         "array index 5 out of bounds",
+    ),
+    // A Bool a branch stores: `<=` leaves the index one past the String.
+    (
+        "fn w(s: String, i: Int64, c: Bool) -> Int64 {
+    if i >= 0 && i < s.byteLength && i + 1 <= s.byteLength && c {
+        return Int64(s[i + 1])
+    }
+    return 0
+}
+",
+        "    print(w(\"a/\", 1, true).toString())",
+        "string index 2 out of bounds",
+    ),
+    // ... and `||` joins a branch where the bound fails.
+    (
+        "fn w(s: String, i: Int64, c: Bool) -> Int64 {
+    if i >= 0 && i < s.byteLength && (i + 1 < s.byteLength || i == 1) && c {
+        return Int64(s[i + 1])
+    }
+    return 0
+}
+",
+        "    print(w(\"a/\", 1, true).toString())",
+        "string index 2 out of bounds",
+    ),
+    // A fact of one binding reaches no other binding of its spelling.
+    (
+        "fn w(xs: Array<Int64>, ys: Array<Int64>, i: Int64) -> Int64 {
+    let a = xs
+    if i >= 0 && i < a.length {
+        let a = ys
+        return a[i]
+    }
+    return 0
+}
+",
+        "    let mut ys: Array<Int64> = []\n    ys.push(1)\n    print(w(xs, ys, 2).toString())",
+        "array index 2 out of bounds",
     ),
     // A Bool temp stored again between its condition and its use.
     (
