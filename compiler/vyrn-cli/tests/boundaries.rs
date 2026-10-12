@@ -230,3 +230,67 @@ fn every_boundary_row_says_the_same_thing_in_every_engine() {
     );
     assert!(failures.is_empty(), "\n{}", failures.join("\n\n"));
 }
+
+/// The native overflow trap runs on the overflowed stack, below the exception
+/// frame Windows writes there, and the CPU's XSAVE state sizes that frame. A
+/// frame 12 KiB wider still ends in the `stack-exhausted` row's sentence.
+#[cfg(windows)]
+#[test]
+fn the_stack_row_survives_a_wider_exception_frame() {
+    use vyrn_codegen::toolchain::{find_clang, simde_from, wasm2c_from};
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let w2c = wasm2c_from(&root).unwrap_or_else(|e| panic!("{e}"));
+    let w2c_exe = w2c.as_ref().map(|t| t.exe.clone());
+    let simde = simde_from(&root).map(|(p, _)| p);
+    let (Some(_), Some(simde), Some(clang)) = (
+        require_tools("wasm2c", "VYRN_WASM2C", w2c_exe),
+        require_tools("simde", "VYRN_SIMDE", simde),
+        require_tools("clang", "VYRN_CLANG", find_clang()),
+    ) else {
+        eprintln!("SKIP: the native route's tools are missing");
+        return;
+    };
+    let w2c = w2c.expect("wasm2c");
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("boundaries");
+    let scratch = scratch("boundaries-frame");
+    let exe = scratch.join("stack.exe");
+    let build = vyrn()
+        .current_dir(&dir)
+        .arg("build")
+        .arg("stack-exhausted.vyrn")
+        .arg("-o")
+        .arg(&exe)
+        .output()
+        .expect("build");
+    assert!(build.status.success(), "{}", norm(&build.stderr));
+    let wide = scratch.join("wide.exe");
+    let link = std::process::Command::new(clang)
+        .arg(exe.with_extension("w2c.c"))
+        .arg(exe.with_extension("host.c"))
+        .arg(dir.join("stack-exhausted-frame.c"))
+        .arg(w2c.runtime.join("wasm-rt-impl.c"))
+        .arg(w2c.runtime.join("wasm-rt-mem-impl.c"))
+        .arg(format!("-I{}", w2c.include.display()))
+        .arg(format!("-I{}", w2c.runtime.display()))
+        .arg(format!("-I{}", simde.display()))
+        .arg("-DVYRN_W2C_HEADER=\"stack.w2c.h\"")
+        .arg("-DWASM_RT_NONCONFORMING_UNCHECKED_STACK_EXHAUSTION=1")
+        .arg("-Dmain=vyrn_host_main")
+        .arg("-O2")
+        .arg("-lbcrypt")
+        .arg("-o")
+        .arg(&wide)
+        .output()
+        .expect("clang");
+    assert!(link.status.success(), "{}", norm(&link.stderr));
+    let got = answer(run_io(
+        std::process::Command::new(&wide),
+        &dir,
+        &dir.join("nostdin"),
+    ));
+    let trap = vyrn_frontend::trap::line(vyrn_frontend::trap::STACK_EXHAUSTED);
+    assert_eq!(got.err, trap, "{got}");
+    assert_eq!(got.code, "1", "{got}");
+}

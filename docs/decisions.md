@@ -156,6 +156,7 @@ pull request.
 - `m.keys()` copies its keys; `Array<T>` owns its elements.
 - A map store takes its key.
 - No engine counts calls (decided 2026-10-08 by the user, reversing a limit of 1,000 counted in every prologue): a recursion runs until the engine's stack or the shadow stack runs out, and the host hands the overflow to the module's `__vyrn_overflow`, which traps `call stack exhausted`. The depth differs per engine; the counter was the largest single check in the static census, on 3,741 function bodies. A frame may claim 8,192 bytes.
+- The native host on Windows keeps 64 KiB of the main thread's stack for the overflow trap (`SetThreadStackGuarantee`). Windows writes the exception frame on the overflowed stack, and the CPU's XSAVE state sizes it; the default left about 4 KiB after wasm-rt's handler.
 - An array literal holds at most 512 elements, refused by the checker so `check` predicts `build`.
 - A `region` nests at most 64 deep.
 - Allocation failure prints `error: out of memory` and exits 1 on every engine. The bound may differ by engine.
