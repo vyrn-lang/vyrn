@@ -564,6 +564,16 @@ int main(int argc, char** argv) {
     g_argc = argc;
     g_argv = argv;
     g_started = mono_ns();
+#ifdef _WIN32
+    /* The overflow trap runs on the overflowed stack. Windows writes the
+       exception frame there, and the frame holds the thread's XSAVE context,
+       whose size the CPU decides: 3.2 KiB with AVX-512, 8 KiB more with AMX.
+       Without a guarantee about 4 KiB is left after wasm-rt's handler, and a
+       larger frame ends the process with an access violation and no output.
+       Do not remove. */
+    ULONG guarantee = 64 * 1024;
+    SetThreadStackGuarantee(&guarantee);
+#endif
     static struct w2c_wasi__snapshot__preview1 wasi;
     wasm_rt_init();
     VYRN_INSTANTIATE(&g_inst, &wasi);
