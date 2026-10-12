@@ -42,7 +42,7 @@ fn standing() -> String {
         <div class="findpanel" role="dialog" aria-modal="true" aria-label="Search">
             <div class="findrow">
                 <Icon name="bytesize:search"/>
-                <input type="search" data-find-input placeholder="Search the docs, the reference, packages" autocomplete="off" spellcheck="false" aria-controls="find-results"/>
+                <input type="search" data-find-input aria-label="Search the docs, the reference, packages" placeholder="Search the docs, the reference, packages" autocomplete="off" spellcheck="false" aria-controls="find-results"/>
                 <kbd class="key">esc</kbd>
             </div>
             <div class="findtabs" data-find-tabs>
