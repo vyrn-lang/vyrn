@@ -493,7 +493,7 @@ fn intern(re: Regex, sc: modify Scan) -> Int64 {
     let mut key = ""
     let mut accepts = false
     let mut pc = 0
-    while pc < re.op.length {
+    while pc < sc.mark.length {
         if sc.mark[pc] == sc.gen && re.op[pc] != opSplit {
             set.push(pc)
             key = key + "\{pc},"
