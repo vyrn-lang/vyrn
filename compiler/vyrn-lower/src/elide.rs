@@ -3873,8 +3873,9 @@ impl<'a> Walk<'a> {
             head.assume(&l);
         }
         // Candidates: what entry knows about the written names, two fields
-        // of a record it grows that entry defines equally long, and the
-        // counter shapes an index needs.
+        // of a record it grows that entry defines equally long, the record
+        // facts of a written record whose fields a row set, and the counter
+        // shapes an index needs.
         let mut cands: BTreeSet<Lin> = BTreeSet::new();
         for f in &entry.facts {
             if f.terms.iter().any(|(t, _)| written.contains(&t.name())) {
@@ -3890,6 +3891,9 @@ impl<'a> Walk<'a> {
             }
         }
         cands.extend(equal_fields(entry, &written));
+        for n in written.iter().filter(|n| self.dirty.contains(n)) {
+            cands.extend(self.facts_of(*n).into_iter().map(|(l, _)| l));
+        }
         // A name a `let` in the loop binds is fresh each turn; a counter is a
         // name the loop stores to.
         let mut stored = BTreeSet::new();

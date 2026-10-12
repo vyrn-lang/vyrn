@@ -5643,3 +5643,45 @@ fn w(s: Tab, h: Int64) -> Int64 {{
         "{err}"
     );
 }
+
+/// A loop that passes a record whose fields a row set to a `modify` call
+/// keeps the record's facts when every turn proves them, so the callee's
+/// masked read needs no check. A turn that shortens `slots` after the call
+/// drops them, and the read keeps its check, which traps on the next turn.
+#[test]
+fn a_record_written_in_a_loop_keeps_its_facts() {
+    let src = |turn: &str| {
+        format!(
+            "type Tab = {{ slots: Array<Int64>, mask: Int64 }}
+fn make() -> Tab {{
+    return Tab {{ slots: [0, 0], mask: 1 }}
+}}
+fn mark(s: modify Tab, h: Int64) {{
+    s.slots[h & s.mask] = 1
+}}
+fn grow(s: modify Tab, n: Int64) {{
+    s.slots = [0, 0, 0, 0]
+    s.mask = 3
+    let mut i = 0
+    while i < n {{
+        mark(s, i)
+        {turn}
+        i = i + 1
+    }}
+}}
+"
+        )
+    };
+    let calls = "    let mut s = make()\n    grow(s, 6)\n    print(s.mask.toString())";
+    let proof = src("s.slots[0] = i");
+    assert_eq!(verdicts(&proof, "mark"), ["proved array-index"]);
+    assert_eq!(oracle(&proof, calls, "mark").0, "");
+    let witness = src("s.slots = [0]");
+    assert_eq!(verdicts(&witness, "mark"), ["check array-index"]);
+    let (err, _) = oracle(&witness, calls, "mark");
+    assert!(err.contains("array index 1 out of bounds"), "{err}");
+    assert!(
+        !err.contains(vyrn_frontend::trap::PROVED_CHECK_FAILED),
+        "{err}"
+    );
+}
