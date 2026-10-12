@@ -5537,3 +5537,39 @@ fn a_loop_bound_by_a_name_counts_its_pushes() {
     }
     assert!(failures.is_empty(), "{}", failures.join("\n\n"));
 }
+
+/// A goal whose coefficients share a factor is asked divided by it, its
+/// constant floored: `2 * k - 1 != 0` for `k >= 1` is `k - 1 >= 0`. The
+/// divisor `2 * k - 2` is zero at `k == 1`, keeps its check and traps.
+#[test]
+fn a_goal_with_a_common_factor_proves_a_divisor() {
+    let src = |d: &str| {
+        format!(
+            "fn w(t: Array<Int64>) -> Int64 {{
+    let mut k = t.length
+    let mut s = 0
+    while k > 0 {{
+        s = s + 1000 / ({d})
+        k = k - 1
+    }}
+    return s
+}}
+"
+        )
+    };
+    let calls = "    print(w(xs).toString())";
+    let proof = src("2 * k - 1");
+    assert_eq!(
+        verdicts(&proof, "w"),
+        ["proved int-div-zero", "proved int-div-overflow"]
+    );
+    assert_eq!(oracle(&proof, calls, "w").0, "");
+    let witness = src("2 * k - 2");
+    assert_eq!(verdicts(&witness, "w")[0], "check int-div-zero");
+    let (err, _) = oracle(&witness, calls, "w");
+    assert!(err.contains(vyrn_frontend::trap::DIV_ZERO), "{err}");
+    assert!(
+        !err.contains(vyrn_frontend::trap::PROVED_CHECK_FAILED),
+        "{err}"
+    );
+}
