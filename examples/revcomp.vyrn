@@ -57,7 +57,7 @@ fn run() {
     let mut header = ""
     let mut seq: Array<UInt8> = []
     while let Some(l) = readLine() {
-        if l.byteLength > 0 && bytes(l)[0] == '>' {
+        if l.byteLength > 0 && l[0] == '>' {
             if header.byteLength > 0 {
                 print(header)
                 writeWrapped(reverseComplement(seq, table))

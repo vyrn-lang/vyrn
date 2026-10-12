@@ -602,14 +602,17 @@ export fn chapterHref(slug: String) -> String {
     return "/" + chapterArea(slug) + "/" + slug + ".html"
 }
 
-export fn movedChapters() -> Array<Array<String>> {
-    return [["/guide/testing", "/tooling/testing"], ["/guide/web", "/web/views"]]
+/// A route that moved: a reader of `from` is sent to `to`.
+export type Redirect = { from: String, to: String }
+
+export fn movedChapters() -> Array<Redirect> {
+    return [Redirect { from: "/guide/testing", to: "/tooling/testing" }, Redirect { from: "/guide/web", to: "/web/views" }]
 }
 
 export fn movedTarget(path: String) -> String {
-    for pair in movedChapters() {
-        if pair[0] == path {
-            return pair[1].copy()
+    for r in movedChapters() {
+        if r.from == path {
+            return r.to.copy()
         }
     }
     return ""
@@ -756,8 +759,8 @@ test "a slug appears once, and prev and next chain each area end to end" {
     assert(!chapterKnown("nope"))
     assertEq(chapterHref("testing"), "/tooling/testing.html")
     assertEq(chapterHref("values"), "/guide/values.html")
-    for pair in movedChapters() {
-        assert(movedTarget(pair[0]).byteLength > 0)
+    for r in movedChapters() {
+        assert(movedTarget(r.from).byteLength > 0)
     }
     assertEq(movedTarget("/guide/values"), "")
 }

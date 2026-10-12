@@ -5918,3 +5918,277 @@ fn take(lx: Lexer, out: modify Out) {{
         );
     }
 }
+
+/// Neither branch of `if small` writes `small`, so the join keeps what each
+/// proves of the names it stores as a side of `small`: `t` is at least
+/// `i + 1` long where `small` holds and empty where it does not. A read of
+/// `t[i]` under `!small` keeps its check and traps.
+#[test]
+fn a_join_keeps_each_branch_facts_under_its_condition() {
+    let src = |cond: &str| {
+        format!(
+            "fn table(n: Int64) -> Array<Int64> {{
+    let mut t: Array<Int64> = []
+    let mut k = 0
+    while k < n {{
+        t.push(k)
+        k = k + 1
+    }}
+    return t
+}}
+
+fn w(i: Int64 where value >= 0) -> Int64 {{
+    let small = i < 256
+    let t: Array<Int64> = if small {{ table(i + 1) }} else {{ [] }}
+    if {cond} {{
+        return t[i]
+    }}
+    return 0
+}}
+"
+        )
+    };
+    let calls = "    print(w(3).toString())
+    print(w(300).toString())";
+    let proof = src("small");
+    assert_eq!(verdicts(&proof, "w"), ["proved array-index"]);
+    assert_eq!(oracle(&proof, calls, "w").0, "");
+    let witness = src("!small");
+    assert_eq!(verdicts(&witness, "w"), ["check array-index"]);
+    let (err, _) = oracle(&witness, calls, "w");
+    assert!(err.contains("array index 300 out of bounds"), "{err}");
+    assert!(
+        !err.contains(vyrn_frontend::trap::PROVED_CHECK_FAILED),
+        "{err}"
+    );
+}
+
+/// `h & 7` lies in `[0, 7]` though `h` is a `UInt64`, whose values above
+/// `i64::MAX` a term reads as negatives. With the mask `15`, `h = 9` passes
+/// the table's end, keeps its check and traps.
+#[test]
+fn a_mask_bounds_a_wide_operand() {
+    let src = |mask: &str| {
+        format!(
+            "fn w(h: UInt64) -> Int64 {{
+    let t = [1, 2, 3, 4, 5, 6, 7, 8]
+    return t[Int64(h & {mask})]
+}}
+"
+        )
+    };
+    let calls = "    print(w(9).toString())";
+    let proof = src("7");
+    assert_eq!(verdicts(&proof, "w"), ["proved array-index"]);
+    assert_eq!(oracle(&proof, calls, "w").0, "");
+    let witness = src("15");
+    assert_eq!(verdicts(&witness, "w"), ["check array-index"]);
+    let (err, _) = oracle(&witness, calls, "w");
+    assert!(err.contains("array index 9 out of bounds"), "{err}");
+    assert!(
+        !err.contains(vyrn_frontend::trap::PROVED_CHECK_FAILED),
+        "{err}"
+    );
+}
+
+/// `k` is `0` on one path and `-e` on the other, with `e` in
+/// `[-100, 155]`: the join keeps `0 <= k <= 100`, so `t.length - k` is an
+/// exact sum. Without a write of `k` on the path where `e >= 0`, `k` is 0
+/// and `t[t.length - k]` passes the end, keeps its check and traps.
+#[test]
+fn a_join_bounds_a_term_one_path_defines_as_a_constant() {
+    let src = |end: &str| {
+        format!(
+            "fn w(x: UInt8, t: Array<Int64>) -> Int64 {{
+    let e = Int64(x) - 100
+    let mut k = 0
+    if e < 0 {{
+        k = 0 - e
+    }}
+    let i = t.length - k{end}
+    if i >= 0 {{
+        return t[i]
+    }}
+    return 0
+}}
+"
+        )
+    };
+    let calls = "    print(w(98, xs).toString())\n    print(w(200, xs).toString())";
+    let proof = src(" - 1");
+    assert_eq!(verdicts(&proof, "w"), ["proved array-index"]);
+    assert_eq!(oracle(&proof, calls, "w").0, "");
+    let witness = src("");
+    assert_eq!(verdicts(&witness, "w"), ["check array-index"]);
+    let (err, _) = oracle(&witness, calls, "w");
+    assert!(err.contains("array index 3 out of bounds"), "{err}");
+    assert!(
+        !err.contains(vyrn_frontend::trap::PROVED_CHECK_FAILED),
+        "{err}"
+    );
+}
+
+/// `(k + 1) % t.length` lies in `[0, t.length - 1]`: a ring buffer's index
+/// needs no check. Modulo `t.length + 1` it reaches `t.length`, keeps its
+/// check and traps.
+#[test]
+fn a_remainder_by_a_length_stays_below_it() {
+    let src = |m: &str| {
+        format!(
+            "fn w(t: Array<Int64> where value.length >= 1, n: Int64) -> Int64 {{
+    let mut s = 0
+    let mut k = 0
+    let mut i = 0
+    while i < n {{
+        s = s + t[k]
+        k = (k + 1) % ({m})
+        i = i + 1
+    }}
+    return s
+}}
+"
+        )
+    };
+    let calls = "    print(w(xs, 4).toString())";
+    let proof = src("t.length");
+    assert_eq!(
+        verdicts(&proof, "w"),
+        ["proved array-index", "proved int-rem-zero"]
+    );
+    assert_eq!(oracle(&proof, calls, "w").0, "");
+    let witness = src("t.length + 1");
+    assert_eq!(
+        verdicts(&witness, "w"),
+        ["check array-index", "proved int-rem-zero"]
+    );
+    let (err, _) = oracle(&witness, calls, "w");
+    assert!(err.contains("array index 3 out of bounds"), "{err}");
+    assert!(
+        !err.contains(vyrn_frontend::trap::PROVED_CHECK_FAILED),
+        "{err}"
+    );
+}
+
+/// An inner loop's ring index over an outer array: the outer loop binds
+/// its own borrow of `t` each turn, and its head states `k < t.length`
+/// through `t` itself. Modulo `t.length + 1` the read passes the end,
+/// keeps its check and traps.
+#[test]
+fn a_loop_head_names_a_borrow_by_its_source() {
+    let src = |m: &str| {
+        format!(
+            "fn w(t: Array<Int64> where value.length >= 1, n: Int64) -> Int64 {{
+    let mut s = 0
+    let mut k = 0
+    let mut j = 0
+    while j < n {{
+        let mut i = 0
+        while i < 2 {{
+            s = s + t[k]
+            k = (k + 1) % ({m})
+            i = i + 1
+        }}
+        j = j + 1
+    }}
+    return s
+}}
+"
+        )
+    };
+    let calls = "    print(w(xs, 2).toString())";
+    let proof = src("t.length");
+    assert_eq!(
+        verdicts(&proof, "w"),
+        ["proved array-index", "proved int-rem-zero"]
+    );
+    assert_eq!(oracle(&proof, calls, "w").0, "");
+    let witness = src("t.length + 1");
+    assert_eq!(
+        verdicts(&witness, "w"),
+        ["check array-index", "proved int-rem-zero"]
+    );
+    let (err, _) = oracle(&witness, calls, "w");
+    assert!(err.contains("array index 3 out of bounds"), "{err}");
+    assert!(
+        !err.contains(vyrn_frontend::trap::PROVED_CHECK_FAILED),
+        "{err}"
+    );
+}
+
+/// The last index where `xs` holds 20: `at = i` keeps `at < i`, and the
+/// exit's `i <= xs.length` gives `at < xs.length`. Stored after the step,
+/// `at` can reach `xs.length`, keeps its check and traps.
+#[test]
+fn a_copy_of_the_counter_stays_below_its_bound() {
+    let src = |turn: &str| {
+        format!(
+            "fn w(xs: Array<Int64>) -> Int64 {{
+    let mut at = 0 - 1
+    let mut i = 0
+    while i < xs.length {{
+{turn}
+    }}
+    if at < 0 {{
+        return 0
+    }}
+    return xs[at]
+}}
+"
+        )
+    };
+    let calls = "    print(w(xs).toString())";
+    let proof = src("        if xs[i] == 30 {\n            at = i\n        }\n        i = i + 1");
+    assert_eq!(
+        verdicts(&proof, "w"),
+        ["proved array-index", "proved array-index"]
+    );
+    assert_eq!(oracle(&proof, calls, "w").0, "");
+    let witness =
+        src("        i = i + 1\n        if xs[i - 1] == 30 {\n            at = i\n        }");
+    assert_eq!(
+        verdicts(&witness, "w"),
+        ["proved array-index", "check array-index"]
+    );
+    let (err, _) = oracle(&witness, calls, "w");
+    assert!(err.contains("array index 3 out of bounds"), "{err}");
+    assert!(
+        !err.contains(vyrn_frontend::trap::PROVED_CHECK_FAILED),
+        "{err}"
+    );
+}
+
+/// A pop of an array of at least one element shrinks it by exactly one:
+/// `t[3 - (before - a.length)]` reads `t[2]`. Where `a` may be empty, the
+/// pop may keep it, so the read may be `t[3]`: at `n = 0` it keeps its
+/// check and traps.
+#[test]
+fn a_pop_of_a_full_array_shrinks_it_by_one() {
+    let src = |clause: &str| {
+        format!(
+            "fn w(n: Int64{clause}) -> Int64 {{
+    let mut a: Array<Int64> = []
+    let mut i = 0
+    while i < n {{
+        a.push(i)
+        i = i + 1
+    }}
+    let before = a.length
+    a.pop()
+    let t = [1, 2, 3]
+    return t[3 - (before - a.length)]
+}}
+"
+        )
+    };
+    let proof = src(" where value >= 1");
+    assert_eq!(verdicts(&proof, "w"), ["proved array-index"]);
+    assert_eq!(oracle(&proof, "    print(w(2).toString())", "w").0, "");
+    let witness = src("");
+    assert_eq!(verdicts(&witness, "w"), ["check array-index"]);
+    let (err, _) = oracle(&witness, "    print(w(0).toString())", "w");
+    assert!(err.contains("array index 3 out of bounds"), "{err}");
+    assert!(
+        !err.contains(vyrn_frontend::trap::PROVED_CHECK_FAILED),
+        "{err}"
+    );
+}

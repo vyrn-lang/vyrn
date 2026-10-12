@@ -45,17 +45,13 @@ use vyrn_frontend::prelude::{self, Elements, Length};
 use vyrn_frontend::prim::Cmp;
 
 use crate::effects::StateUse;
-use crate::facts::{Cert, Fact, Lin, State, Term};
+use crate::facts::{Fact, Lin, State, Term, EXACT};
 use vyrn_frontend::core::check::{Atom, Check, Guard, Operand, Site, Verdict, Why};
 use vyrn_frontend::core::{
     rows, Arg, Arm, Body, BorrowKind, Callee, Ctor, Lit, Name, Op, Place, Rhs, St, Target, Test,
     Val,
 };
 use vyrn_frontend::par::in_parallel;
-
-/// The bound an exact `Int64` sum must provably stay within: `2^62`, so no
-/// premise or goal of the prover itself leaves `i64`.
-const EXACT: i64 = 1 << 62;
 
 /// Marks every check row of `body`, and of each lambda body it holds, that
 /// cannot fail [`Verdict::Proved`], with the callees' facts `sums` states.
@@ -3331,11 +3327,15 @@ impl<'a> Walk<'a> {
                 };
                 let mut a = self.block(yes, then);
                 let mut b = self.block(no, els);
-                if !a.dead && !b.dead {
-                    leave(&mut a, then, &[]);
-                    leave(&mut b, els, &[]);
+                if a.dead || b.dead {
+                    return State::join(&[a, b]);
                 }
-                State::join(&[a, b])
+                leave(&mut a, then, &[]);
+                leave(&mut b, els, &[]);
+                let ends = [a, b];
+                let mut j = State::join(&ends);
+                self.branch_facts(&mut j, cond, [then, els], &ends);
+                j
             }
             St::Block { body, .. } => self.block(st, body),
             St::Loop { body, .. } => self.looped(st, body),
@@ -3437,6 +3437,43 @@ impl<'a> Walk<'a> {
                 st
             }
         }
+    }
+
+    /// Keeps in `j`, the join of `if c`'s branch ends `ends`, each branch's
+    /// facts over the names it stores as the side of `c` that branch took:
+    /// `let t = if fast { table() } else { [] }` leaves `len(t) >= 256` where
+    /// `fast` holds. Only where neither branch writes `c`.
+    fn branch_facts(&self, j: &mut State, c: &Val, branches: [&[St]; 2], ends: &[State; 2]) {
+        let Val::Name(c) = c else { return };
+        if self.solving || !self.slot[c.index()].relevant {
+            return;
+        }
+        let (mut stored, mut written) = (BTreeSet::new(), BTreeSet::new());
+        for b in branches {
+            stores(b, &mut stored);
+            writes(b, &mut written);
+        }
+        if stored.is_empty() || written.contains(c) {
+            return;
+        }
+        let known = j.prover();
+        let [t, f] = ends.each_ref().map(|s| {
+            (s.facts.iter().cloned().chain(s.unshared(j)))
+                .filter(|l| {
+                    (l.terms.iter()).any(|(t, _)| {
+                        matches!(t, Term::Len(_) | Term::Col(..)) && stored.contains(&t.name())
+                    })
+                })
+                .filter(|l| known.ge0(l).is_none())
+                .map(Fact::Ge)
+                .collect::<Vec<_>>()
+        });
+        if t.is_empty() && f.is_empty() {
+            return;
+        }
+        let side = j.conds.entry(*c).or_default();
+        side.0.extend(t);
+        side.1.extend(f);
     }
 
     /// What must be `>= 0` for the check to pass, as far as linear facts can
@@ -4027,7 +4064,15 @@ impl<'a> Walk<'a> {
                 // An unsigned 64-bit literal above `i64::MAX` reads as a negative.
                 let wide = |v: &Val| matches!(v, Val::Name(m) if matches!(self.kind(*m), Kind::Int(64, false)));
                 if wide(a) || wide(b) {
-                    return Out::Nothing;
+                    // `x & c` lies in `[0, c]` for a literal `c >= 0`, whatever `x` holds.
+                    let v = Lin::of(Term::Val(n));
+                    let mask = [&la, &lb].into_iter().find(|l| l.is_const() && l.c >= 0);
+                    return match mask.filter(|_| *o == BinOp::BitAnd) {
+                        Some(m) => {
+                            Out::Facts([Some(v.clone()), m.sub(&v)].into_iter().flatten().collect())
+                        }
+                        None => Out::Nothing,
+                    };
                 }
                 let ge = |l: Option<Lin>| l.map(Fact::Ge);
                 let (t, f) = match o.compare() {
@@ -4077,21 +4122,14 @@ impl<'a> Walk<'a> {
         }
     }
 
-    /// The range of `n = a op b` where `b` is a literal that bounds it, an
+    /// The range of `n = a op b` where `b` is a literal that bounds it, a
+    /// divisor of a non-negative `a % b` the state proves at least one, an
     /// operand of `&` the state proves non-negative, or the shift amount of a
     /// non-negative `a`.
     fn bound(&self, pre: &State, n: Name, o: BinOp, la: &Lin, lb: &Lin) -> Out {
         let p = pre.prover();
         let holds = |g: &Lin| p.ge0(g).is_some_and(|c| c.verify(pre, g));
-        // The least value of `l` the state proves: the slack of
-        // `l + EXACT >= 0`, checked again as a goal of its own.
-        let least = |l: &Lin| {
-            let Cert::Sum { slack, .. } = p.ge0(&l.plus(EXACT)?)? else {
-                return None;
-            };
-            let m = slack - EXACT;
-            holds(&l.plus(-m)?).then_some(m)
-        };
+        let least = |l: &Lin| p.least(l);
         let nonneg = holds(la);
         let v = Lin::of(Term::Val(n));
         // For `a` in `[0, h]`, `a / d` and `a >> k` with `k >= s` lie in
@@ -4109,8 +4147,8 @@ impl<'a> Walk<'a> {
                 Some(m) => [Some(v.clone()), m.sub(&v), None],
                 None => return Out::Nothing,
             },
-            (BinOp::Rem, Some(k)) if k >= 1 && nonneg => {
-                [Some(v.clone()), Lin::k(k - 1).sub(&v), None]
+            (BinOp::Rem, _) if nonneg && lb.plus(-1).is_some_and(|d| holds(&d)) => {
+                [Some(v.clone()), lb.plus(-1).and_then(|d| d.sub(&v)), None]
             }
             (BinOp::Div, Some(k)) if k >= 1 && nonneg => quotient(&|h| h / k),
             (BinOp::Shr, _) if nonneg => match least(lb) {
@@ -4240,7 +4278,15 @@ impl<'a> Walk<'a> {
                     let old = Lin::of(*t);
                     match (lo.sub(&old), hi.sub(&old)) {
                         (Some(a), Some(b)) if a.is_const() && b.is_const() => {
-                            st.shift(*t, a.c, Some(b.c))
+                            // `ShrinksByOneIfNotEmpty` shrinks a length of at
+                            // least one by exactly one.
+                            let full = old.plus(-1).is_some_and(|g| {
+                                (st.prover().ge0_deep(&g)).is_some_and(|c| c.verify(st, &g))
+                            });
+                            match (a.c, b.c) {
+                                (-1, 0) if full => st.shift(*t, -1, Some(-1)),
+                                (a, b) => st.shift(*t, a, Some(b)),
+                            }
                         }
                         _ => self.resize(st, n),
                     }
@@ -4454,7 +4500,7 @@ impl<'a> Walk<'a> {
                 _ => (i == m).then_some(0),
             };
             for (b, c) in indexed.iter().filter_map(|(b, i)| Some((b, below(i)?))) {
-                let Some(len) = self.length(b).map(Lin::of) else {
+                let Some(len) = self.head_length(body, b) else {
                     continue;
                 };
                 let Some(at) = v.plus(-c) else { continue };
@@ -4468,6 +4514,12 @@ impl<'a> Walk<'a> {
         }
         cands.extend(self.reaches(body, &stored, &indexed));
         cands.extend(self.in_step(body, &stored));
+        let copies = self.copies(body, &stored);
+        for (k, m) in &copies {
+            let d = Lin::of(Term::Val(*k)).sub(&Lin::of(Term::Val(*m)));
+            cands.extend(d.as_ref().and_then(|d| d.plus(-1)));
+            cands.extend(d);
+        }
         if !cands.is_empty() {
             let at_entry = entry.prover();
             cands.retain(|c| at_entry.ge0(c).is_some());
@@ -4526,6 +4578,19 @@ impl<'a> Walk<'a> {
                 .collect();
             bounded.iter().for_each(|f| exit.assume(f));
         }
+        // A copy below the counter lies below the counter's own bound:
+        // `i - at - 1 >= 0` and `n - i >= 0` give `n - at - 1 >= 0`.
+        for (k, m) in copies {
+            let (k, m) = (Term::Val(k), Term::Val(m));
+            let below = |f: &&Lin| f.terms.len() == 2 && f.coef(k) == 1 && f.coef(m) == -1;
+            let lows: Vec<&Lin> = exit.facts.iter().filter(below).collect();
+            let length = |f: &&Lin| (f.terms.iter()).any(|(t, _)| matches!(t, Term::Len(_)));
+            let tops = (exit.facts.iter()).filter(|f| f.terms.len() == 2 && f.coef(k) == -1);
+            let bounded: Vec<Lin> = (tops.filter(length))
+                .flat_map(|t| lows.iter().filter_map(|l| t.add(l)))
+                .collect();
+            bounded.iter().for_each(|f| exit.assume(f));
+        }
         exit
     }
 
@@ -4572,6 +4637,27 @@ impl<'a> Walk<'a> {
         out
     }
 
+    /// Each `(k, m)` where `body` stores `m = k`, `k` a counter the loop
+    /// stores to: `at = i` keeps `at < i` once `i` steps past, a candidate
+    /// at the head and a bound at the exit.
+    fn copies(&self, body: &[St], stored: &BTreeSet<Name>) -> Vec<(Name, Name)> {
+        let int = |n: &Name| self.slot[n.index()].relevant && self.kind(*n).is_int();
+        let mut out = Vec::new();
+        for (s, _) in rows(body) {
+            if let St::Store {
+                place: Place::Name(m),
+                value: Val::Name(k),
+                ..
+            } = s
+            {
+                if m != k && stored.contains(k) && int(m) && int(k) {
+                    out.push((*k, *m));
+                }
+            }
+        }
+        out
+    }
+
     /// `len(b) - m - c`, for each index of `b` in `body` that a `let`
     /// defines as `m + x` ([`reach`]), `m` a counter the loop stores to: the
     /// counter shape of a row offset `m` and a column `x` below `c`.
@@ -4583,7 +4669,7 @@ impl<'a> Walk<'a> {
                 continue;
             };
             if stored.contains(&m) && matches!(self.kind(m), Kind::Int(..)) {
-                let len = self.length(b).map(Lin::of);
+                let len = self.head_length(body, b);
                 out.extend(len.and_then(|l| l.sub(&Lin::of(Term::Val(m)))?.plus(-c)));
             }
         }
@@ -4631,6 +4717,20 @@ impl<'a> Walk<'a> {
                 l.seen.resized.insert(n);
             }
         }
+    }
+
+    /// The length of `b`, an index base in the loop `body`, as a fact at the
+    /// loop's head can name it: a borrow the body binds (`let @borrow = read
+    /// xs`) stands for its source.
+    fn head_length(&self, body: &[St], b: &Place) -> Option<Lin> {
+        let src = match b {
+            Place::Name(x) => match let_of(body, *x) {
+                Some(Rhs::Read(p @ Place::Name(_))) => p,
+                _ => b,
+            },
+            _ => b,
+        };
+        self.length(src).map(Lin::of)
     }
 
     /// A call took `n` by `modify` or `consume` and may have changed its length.

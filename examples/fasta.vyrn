@@ -49,9 +49,8 @@ fn lineWidth(todo: Int64) -> Int64 {
     return 60
 }
 
-fn repeatFasta(header: String, src: String, count: Int64) {
+fn repeatFasta(header: String, b: Array<UInt8> where value.length >= 1, count: Int64) {
     print(header)
-    let b = bytes(src)
     let mut k = 0
     let mut todo = count
     let mut w: Array<UInt8> = []
@@ -97,7 +96,7 @@ fn humanWeights() -> Array<Float64> {
 }
 
 fn run(n: Int64) {
-    repeatFasta(">ONE Homo sapiens alu", alu, n * 2)
+    repeatFasta(">ONE Homo sapiens alu", bytes(alu), n * 2)
     randomFasta(">TWO IUB ambiguity codes", bytes("acgtBDHKMNRSVWY"), cumulative(iubWeights()), n * 3)
     randomFasta(">THREE Homo sapiens frequency", bytes("acgt"), cumulative(humanWeights()), n * 5)
 }

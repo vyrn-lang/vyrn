@@ -453,11 +453,18 @@ fn angleOf(i: Int64) -> Float64 {
     return Float64(i) * 6.283185307179586 / Float64(progNames().length)
 }
 
-fn pointAt(i: Int64, r: Int64) -> String {
+type Pixel = { x: Int64, y: Int64 }
+
+fn spot(i: Int64, r: Int64) -> Pixel {
     let a = angleOf(i)
     let x = Float64(cx()) + Float64(r) * sin(a)
     let y = Float64(cy()) - Float64(r) * cos(a)
-    return Int64(x + 0.5).toString() + "," + Int64(y + 0.5).toString()
+    return Pixel { x: Int64(x + 0.5), y: Int64(y + 0.5) }
+}
+
+fn pointAt(i: Int64, r: Int64) -> String {
+    let p = spot(i, r)
+    return p.x.toString() + "," + p.y.toString()
 }
 
 fn ringPoints(r: Int64) -> String {
@@ -504,15 +511,15 @@ export fn radarSpokes() -> Array<Spoke> {
     let mut out: Array<Spoke> = []
     let mut i = 0
     while i < progs.length {
-        let tip = split(pointAt(i, radius()), ",")
-        let label = split(pointAt(i, radius() + 32), ",")
+        let tip = spot(i, radius())
+        let label = spot(i, radius() + 32)
         out.push(Spoke {
             key: progs[i].key.copy(),
             name: progs[i].name.copy(),
-            x: tip[0].copy(),
-            y: tip[1].copy(),
-            lx: label[0].copy(),
-            ly: labelBaseline(i, label[1]),
+            x: tip.x.toString(),
+            y: tip.y.toString(),
+            lx: label.x.toString(),
+            ly: labelBaseline(i, label.y),
             anchor: anchorOf(i),
             wedge: wedgeOf(i),
         })
@@ -532,11 +539,7 @@ fn anchorOf(i: Int64) -> String {
     return "end"
 }
 
-fn labelBaseline(i: Int64, y: String) -> String {
-    let base = match parseFloat64(y) {
-        Some(v) => Int64(v),
-        None => cy(),
-    }
+fn labelBaseline(i: Int64, base: Int64) -> String {
     let half = progNames().length / 2
     if i == 0 {
         return (base - 2).toString()
@@ -555,10 +558,10 @@ fn wedgeOf(i: Int64) -> String {
 }
 
 fn midPoint(a: Int64, b: Int64) -> String {
-    let one = split(pointAt(a, radius() + 20), ",")
-    let two = split(pointAt(b, radius() + 20), ",")
-    let mx = (numOf(one[0]) + numOf(two[0])) / 2
-    let my = (numOf(one[1]) + numOf(two[1])) / 2
+    let one = spot(a, radius() + 20)
+    let two = spot(b, radius() + 20)
+    let mx = (one.x + two.x) / 2
+    let my = (one.y + two.y) / 2
     return mx.toString() + "," + my.toString()
 }
 
@@ -632,9 +635,9 @@ fn marksFor(contestant: String, base: String) -> Array<Mark> {
 }
 
 fn chevronAt(i: Int64) -> String {
-    let a = split(pointAt(i, radius() + 6), ",")
-    let b = split(pointAt(i, radius() + 20), ",")
-    return "M " + a[0] + " " + a[1] + " L " + b[0] + " " + b[1]
+    let a = spot(i, radius() + 6)
+    let b = spot(i, radius() + 20)
+    return "M " + a.x.toString() + " " + a.y.toString() + " L " + b.x.toString() + " " + b.y.toString()
 }
 
 fn readingsFor(program: String) -> Array<Reading> {
@@ -845,9 +848,9 @@ export fn axisPanels() -> Array<Panel> {
             key: p.key.copy(),
             name: p.name.copy(),
             n: p.n.copy(),
-            cause: row[2].copy(),
-            label: row[3].copy(),
-            verdict: row[1].copy(),
+            cause: row.cause.copy(),
+            label: row.label.copy(),
+            verdict: row.verdict.copy(),
             game: p.game.copy(),
             cells: readingsFor(p.key),
         })
@@ -855,27 +858,29 @@ export fn axisPanels() -> Array<Panel> {
     return out
 }
 
-fn causeRow(program: String) -> Array<String> {
+type Cause = { program: String, verdict: String, cause: String, label: String }
+
+fn causeRow(program: String) -> Cause {
     for row in causeRows() {
-        if row[0] == program {
-            return row.copy()
+        if row.program == program {
+            return Cause { program: row.program.copy(), verdict: row.verdict.copy(), cause: row.cause.copy(), label: row.label.copy() }
         }
     }
-    return ["", "", "", ""]
+    return Cause { program: "", verdict: "", cause: "", label: "" }
 }
 
-fn causeRows() -> Array<Array<String>> {
+fn causeRows() -> Array<Cause> {
     return [
-        ["nbody", "a deviation", "Rust's compiler folds the inner loop into instructions that do four sums at once; ours emits them one at a time. What that transformation needs to be safe \u{2014} that two arrays in the loop are never the same array \u{2014} the language already proves, because it uses the same fact to free memory. It does not yet reach the part of the compiler that would act on it.", "no vector instructions"],
-        ["spectralnorm", "inside the noise band", "", ""],
-        ["fannkuch", "inside the noise band", "The previous dataset was 679 ms behind Rust, and most of that was one array built fresh 39,916,800 times. The language gained a way to refill a buffer in place instead, and the row moved inside the band the day it landed.", "the copy that cost 600 ms"],
-        ["binarytrees", "at the edge of the band", "Node wins this one outright, and the WebAssembly build is twice as fast as the native one \u{2014} because it brings its own allocator with it, and the native build asks the operating system for every node. The memory this row used to carry is settled: it peaked above two gigabytes when nothing was being freed, and now sits level with Rust.", "who allocates the memory"],
-        ["fasta", "a deviation", "What one 60-byte output line costs: an array grown from nothing by doubling, then a check that its bytes are valid text \u{2014} over bytes already known to be plain ASCII \u{2014} and a second allocation, because the program still builds a piece of text per line. A way to write raw bytes straight out exists; this program has not been moved onto it.", "the price of one output line"],
-        ["revcomp", "a deviation", "Three passes over every byte, and a cost per output line on top: about 120 million appends for 40 million bases, each one a bounds and capacity check into an array that grows by doubling, where Rust's output loop allocates nothing at all. The spread of the whole set is in this one program \u{2014} the C entry is itself four times slower than Rust here, for reading its input a line at a time.", "a pass per byte, and a cost per line"],
-        ["knucleotide", "ahead of the band", "This row once took 211 times C's time, when looking a key up in a map meant reading every key in it. Maps carry a hash index now, and this program's key is a single number rolled along the sequence rather than a fresh piece of text at every position. Its N moved a hundredfold with this dataset: the old one was chosen for the slow version and outlived it.", "faster than C, and why"],
-        ["pidigits", "inside the noise band", "", ""],
-        ["mandelbrot", "inside the noise band", "Floating-point arithmetic with no allocation and no output shaping, so what is measured is the arithmetic \u{2014} which is why even the WebAssembly build, two to fourteen times slower everywhere else, is within 15% of C here. The program is on the list at all because Vyrn can write raw bytes now: this image's pixels are arbitrary bytes, and text cannot carry them.", "the closest five readings here"],
-        ["regexredux", "a deviation", "The entries are not running comparable engines, which is the first thing to say about the number. Vyrn runs a general-purpose regular-expression engine, written in Vyrn and compiled like any other program. The C and Rust entries carry the smallest matcher that covers this one corpus \u{2014} about sixty lines, hand-fitted to these patterns, no backtracking \u{2014} and node uses the engine built into it. So the gap is the shape of a general engine against a special-cased scan, and not a finding about the language. What it does measure honestly is that Vyrn's engine has had no optimisation work at all.", "not the same engine on both sides"],
+        Cause { program: "nbody", verdict: "a deviation", cause: "Rust's compiler folds the inner loop into instructions that do four sums at once; ours emits them one at a time. What that transformation needs to be safe \u{2014} that two arrays in the loop are never the same array \u{2014} the language already proves, because it uses the same fact to free memory. It does not yet reach the part of the compiler that would act on it.", label: "no vector instructions" },
+        Cause { program: "spectralnorm", verdict: "inside the noise band", cause: "", label: "" },
+        Cause { program: "fannkuch", verdict: "inside the noise band", cause: "The previous dataset was 679 ms behind Rust, and most of that was one array built fresh 39,916,800 times. The language gained a way to refill a buffer in place instead, and the row moved inside the band the day it landed.", label: "the copy that cost 600 ms" },
+        Cause { program: "binarytrees", verdict: "at the edge of the band", cause: "Node wins this one outright, and the WebAssembly build is twice as fast as the native one \u{2014} because it brings its own allocator with it, and the native build asks the operating system for every node. The memory this row used to carry is settled: it peaked above two gigabytes when nothing was being freed, and now sits level with Rust.", label: "who allocates the memory" },
+        Cause { program: "fasta", verdict: "a deviation", cause: "What one 60-byte output line costs: an array grown from nothing by doubling, then a check that its bytes are valid text \u{2014} over bytes already known to be plain ASCII \u{2014} and a second allocation, because the program still builds a piece of text per line. A way to write raw bytes straight out exists; this program has not been moved onto it.", label: "the price of one output line" },
+        Cause { program: "revcomp", verdict: "a deviation", cause: "Three passes over every byte, and a cost per output line on top: about 120 million appends for 40 million bases, each one a bounds and capacity check into an array that grows by doubling, where Rust's output loop allocates nothing at all. The spread of the whole set is in this one program \u{2014} the C entry is itself four times slower than Rust here, for reading its input a line at a time.", label: "a pass per byte, and a cost per line" },
+        Cause { program: "knucleotide", verdict: "ahead of the band", cause: "This row once took 211 times C's time, when looking a key up in a map meant reading every key in it. Maps carry a hash index now, and this program's key is a single number rolled along the sequence rather than a fresh piece of text at every position. Its N moved a hundredfold with this dataset: the old one was chosen for the slow version and outlived it.", label: "faster than C, and why" },
+        Cause { program: "pidigits", verdict: "inside the noise band", cause: "", label: "" },
+        Cause { program: "mandelbrot", verdict: "inside the noise band", cause: "Floating-point arithmetic with no allocation and no output shaping, so what is measured is the arithmetic \u{2014} which is why even the WebAssembly build, two to fourteen times slower everywhere else, is within 15% of C here. The program is on the list at all because Vyrn can write raw bytes now: this image's pixels are arbitrary bytes, and text cannot carry them.", label: "the closest five readings here" },
+        Cause { program: "regexredux", verdict: "a deviation", cause: "The entries are not running comparable engines, which is the first thing to say about the number. Vyrn runs a general-purpose regular-expression engine, written in Vyrn and compiled like any other program. The C and Rust entries carry the smallest matcher that covers this one corpus \u{2014} about sixty lines, hand-fitted to these patterns, no backtracking \u{2014} and node uses the engine built into it. So the gap is the shape of a general engine against a special-cased scan, and not a finding about the language. What it does measure honestly is that Vyrn's engine has had no optimisation work at all.", label: "not the same engine on both sides" },
     ]
 }
 
@@ -1161,17 +1166,14 @@ test "a row with nothing to explain explains nothing" {
             assert(p.cause.byteLength > 40)
         }
     }
-    for row in causeRows() {
-        assertEq(row.length, 4)
-    }
 }
 
 test "the page names no design record and no internal symbol" {
     let banned = ["RFC-", "std/", "noalias", "malloc", "sqrt", "()", "Int64", "wasm ", "UTF-8", "V8"]
     for row in causeRows() {
         for word in banned {
-            assert(!contains(row[2], word))
-            assert(!contains(row[3], word))
+            assert(!contains(row.cause, word))
+            assert(!contains(row.label, word))
         }
     }
 }
