@@ -5685,3 +5685,43 @@ fn grow(s: modify Tab, n: Int64) {{
         "{err}"
     );
 }
+
+/// A premise counts as many times as the rest of a goal's coefficients
+/// share a factor: `off + j * 2 < t.length` from `off <= t.length - 8` and
+/// twice `3 - j >= 0`. At `j == 4` the index passes the block's end, keeps
+/// its check and traps.
+#[test]
+fn a_premise_taken_twice_proves_a_strided_index() {
+    let src = |n: &str| {
+        format!(
+            "fn w(t: Array<Int64>) -> Int64 {{
+    let mut s = 0
+    let mut off = 0
+    while off <= t.length - 8 {{
+        let mut j = 0
+        while j < {n} {{
+            s = s + t[off + j * 2]
+            j = j + 1
+        }}
+        off = off + 8
+    }}
+    return s
+}}
+"
+        )
+    };
+    let calls =
+        "    xs.push(40)\n    xs.push(50)\n    xs.push(60)\n    xs.push(70)\n    xs.push(80)\n    \
+                 print(w(xs).toString())";
+    let proof = src("4");
+    assert_eq!(verdicts(&proof, "w"), ["proved array-index"]);
+    assert_eq!(oracle(&proof, calls, "w").0, "");
+    let witness = src("5");
+    assert_eq!(verdicts(&witness, "w"), ["check array-index"]);
+    let (err, _) = oracle(&witness, calls, "w");
+    assert!(err.contains("array index 8 out of bounds"), "{err}");
+    assert!(
+        !err.contains(vyrn_frontend::trap::PROVED_CHECK_FAILED),
+        "{err}"
+    );
+}

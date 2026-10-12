@@ -9,7 +9,8 @@
 //! answers `None` and proves nothing.
 //!
 //! [`State::ge0`] answers with a [`Cert`]: the premises it used, each a fact of
-//! the state or a length axiom, whose sum the goal exceeds by a constant.
+//! the state or a length axiom taken a whole number of times, whose sum the
+//! goal exceeds by a constant.
 //! [`Cert::verify`] checks that sum again in `i128`, sharing no code with the
 //! search.
 
@@ -190,13 +191,14 @@ impl Fact {
     }
 }
 
-/// Why a goal holds: `goal = sum(uses) + slack`, `slack >= 0`, each use a fact
-/// of the state or a length axiom. A dead state proves every goal.
+/// Why a goal holds: `goal = sum(k * use) + slack`, `slack >= 0`, each use a
+/// fact of the state or a length axiom and each `k >= 1`. A dead state proves
+/// every goal.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Cert {
     Dead,
     Sum {
-        uses: Vec<Lin>,
+        uses: Vec<(i64, Lin)>,
         slack: i64,
     },
     /// `inner` proves the goal with every coefficient divided by `by` and the
@@ -210,8 +212,8 @@ pub enum Cert {
 
 impl Cert {
     /// Whether the certificate proves `goal` in `st`: each use is a
-    /// premise of `st`, and `goal - sum(uses)` is a constant `>= 0`, computed in
-    /// `i128`.
+    /// premise of `st` taken at least once, and `goal - sum(k * use)` is a
+    /// constant `>= 0`, computed in `i128`.
     pub fn verify(&self, st: &State, goal: &Lin) -> bool {
         match self {
             Cert::Dead => st.dead,
@@ -219,7 +221,7 @@ impl Cert {
                 let Some(goal) = st.norm(goal) else {
                     return false;
                 };
-                if !uses.iter().all(|u| st.premise(u)) {
+                if !uses.iter().all(|(k, u)| *k >= 1 && st.premise(u)) {
                     return false;
                 }
                 let mut sum: BTreeMap<Term, i128> = BTreeMap::new();
@@ -227,10 +229,11 @@ impl Cert {
                 for (t, k) in &goal.terms {
                     *sum.entry(*t).or_insert(0) += i128::from(*k);
                 }
-                for u in uses {
-                    c -= i128::from(u.c);
+                for (m, u) in uses {
+                    let m = i128::from(*m);
+                    c -= m * i128::from(u.c);
                     for (t, k) in &u.terms {
-                        *sum.entry(*t).or_insert(0) -= i128::from(*k);
+                        *sum.entry(*t).or_insert(0) -= m * i128::from(*k);
                     }
                 }
                 sum.values().all(|k| *k == 0) && c >= 0
@@ -794,7 +797,7 @@ impl Prover<'_> {
         for p in named {
             let Some(d) = g.sub(p) else { continue };
             if let Some(Cert::Sum { uses, slack }) = self.ge0(&d) {
-                let uses = std::iter::once(p.clone()).chain(uses).collect();
+                let uses = std::iter::once((1, p.clone())).chain(uses).collect();
                 return Some(Cert::Sum { uses, slack });
             }
         }
@@ -833,9 +836,9 @@ impl Prover<'_> {
         }
         // The goal's own lengths may appear in no fact.
         let extra = axioms(g.terms.iter().map(|(t, _)| *t));
-        let one = |d: &Lin| {
-            let fact = self.best.get(d.terms.as_slice()).copied();
-            let axiom = self.axioms.iter().filter(|p| p.terms == d.terms);
+        let one = |terms: &[(Term, i64)], c: i64| {
+            let fact = self.best.get(terms).copied();
+            let axiom = self.axioms.iter().filter(|p| p.terms == terms);
             // The premise with the least constant, the first on a tie.
             let indexed = fact
                 .into_iter()
@@ -843,13 +846,13 @@ impl Prover<'_> {
                 .reduce(|m, p| if p.c < m.c { p } else { m });
             indexed
                 .into_iter()
-                .chain(extra.iter().filter(|p| p.terms == d.terms))
-                .find(|p| p.c <= d.c)
+                .chain(extra.iter().filter(|p| p.terms == terms))
+                .find(|p| p.c <= c)
         };
-        if let Some(p) = one(&g) {
+        if let Some(p) = one(&g.terms, g.c) {
             return Some(Cert::Sum {
                 slack: g.c - p.c,
-                uses: vec![p.clone()],
+                uses: vec![(1, p.clone())],
             });
         }
         let length =
@@ -858,11 +861,26 @@ impl Prover<'_> {
         let axiom_c = |k: i64| if k < 0 { LEN_MAX } else { 0 };
         for p in self.st.facts.iter().chain(&self.axioms).chain(&extra) {
             let Some(d) = g.sub(p) else { continue };
-            if let Some(q) = one(&d) {
+            if let Some(q) = one(&d.terms, d.c) {
                 return Some(Cert::Sum {
                     slack: d.c - q.c,
-                    uses: vec![p.clone(), q.clone()],
+                    uses: vec![(1, p.clone()), (1, q.clone())],
                 });
+            }
+            // A rest `k*t + c` takes the premise on `t` `|k|` times:
+            // `off + 4t` from `off >= 0` and four times `t >= 0`.
+            if let [(t, k)] = d.terms[..] {
+                let by = k.checked_abs().filter(|b| *b > 1);
+                let q = by.and_then(|by| one(&[(t, k / by)], d.c.div_euclid(by)));
+                let slack = q
+                    .zip(by)
+                    .and_then(|(q, by)| d.c.checked_sub(q.c.checked_mul(by)?));
+                if let (Some(q), Some(by), Some(slack)) = (q, by, slack) {
+                    return Some(Cert::Sum {
+                        slack,
+                        uses: vec![(1, p.clone()), (by, q.clone())],
+                    });
+                }
             }
             // A rest over lengths alone, each with coefficient one or minus
             // one, takes one axiom per length: `i <= a - b` gives
@@ -877,7 +895,10 @@ impl Prover<'_> {
                     c: axiom_c(k),
                 });
                 return Some(Cert::Sum {
-                    uses: std::iter::once(p.clone()).chain(rest).collect(),
+                    uses: std::iter::once(p.clone())
+                        .chain(rest)
+                        .map(|u| (1, u))
+                        .collect(),
                     slack,
                 });
             }
@@ -961,7 +982,7 @@ mod tests {
     fn a_certificate_with_a_premise_the_state_lacks_fails() {
         let st = State::default();
         let cert = Cert::Sum {
-            uses: vec![v(0)],
+            uses: vec![(1, v(0))],
             slack: 0,
         };
         assert!(!cert.verify(&st, &v(0)));
