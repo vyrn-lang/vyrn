@@ -127,7 +127,7 @@ fn main()
       let @t43 = prim sub(@b24_87.n, lit 1)
       @t41 = @t43  (Nothing)
     let @b24_87.j = @t41
-    check array-index c!.data[@b24_87.j]  (line 48 #2)
+    proved array-index c!.data[@b24_87.j]  (line 48 #2)
     let @borrow = read c!.data[@b24_87.j]
     let @t44! = builtin @str(read @borrow)
     let @t45! = prim add(@t40!, @t44!)

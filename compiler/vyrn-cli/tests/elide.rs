@@ -5990,3 +5990,40 @@ fn a_mask_bounds_a_wide_operand() {
         "{err}"
     );
 }
+
+/// `k` is `0` on one path and `-e` on the other, with `e` in
+/// `[-100, 155]`: the join keeps `0 <= k <= 100`, so `t.length - k` is an
+/// exact sum. Without a write of `k` on the path where `e >= 0`, `k` is 0
+/// and `t[t.length - k]` passes the end, keeps its check and traps.
+#[test]
+fn a_join_bounds_a_term_one_path_defines_as_a_constant() {
+    let src = |end: &str| {
+        format!(
+            "fn w(x: UInt8, t: Array<Int64>) -> Int64 {{
+    let e = Int64(x) - 100
+    let mut k = 0
+    if e < 0 {{
+        k = 0 - e
+    }}
+    let i = t.length - k{end}
+    if i >= 0 {{
+        return t[i]
+    }}
+    return 0
+}}
+"
+        )
+    };
+    let calls = "    print(w(98, xs).toString())\n    print(w(200, xs).toString())";
+    let proof = src(" - 1");
+    assert_eq!(verdicts(&proof, "w"), ["proved array-index"]);
+    assert_eq!(oracle(&proof, calls, "w").0, "");
+    let witness = src("");
+    assert_eq!(verdicts(&witness, "w"), ["check array-index"]);
+    let (err, _) = oracle(&witness, calls, "w");
+    assert!(err.contains("array index 3 out of bounds"), "{err}");
+    assert!(
+        !err.contains(vyrn_frontend::trap::PROVED_CHECK_FAILED),
+        "{err}"
+    );
+}

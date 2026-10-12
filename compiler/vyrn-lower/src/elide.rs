@@ -45,17 +45,13 @@ use vyrn_frontend::prelude::{self, Elements, Length};
 use vyrn_frontend::prim::Cmp;
 
 use crate::effects::StateUse;
-use crate::facts::{Cert, Fact, Lin, State, Term};
+use crate::facts::{Fact, Lin, State, Term, EXACT};
 use vyrn_frontend::core::check::{Atom, Check, Guard, Operand, Site, Verdict, Why};
 use vyrn_frontend::core::{
     rows, Arg, Arm, Body, BorrowKind, Callee, Ctor, Lit, Name, Op, Place, Rhs, St, Target, Test,
     Val,
 };
 use vyrn_frontend::par::in_parallel;
-
-/// The bound an exact `Int64` sum must provably stay within: `2^62`, so no
-/// premise or goal of the prover itself leaves `i64`.
-const EXACT: i64 = 1 << 62;
 
 /// Marks every check row of `body`, and of each lambda body it holds, that
 /// cannot fail [`Verdict::Proved`], with the callees' facts `sums` states.
@@ -4132,15 +4128,7 @@ impl<'a> Walk<'a> {
     fn bound(&self, pre: &State, n: Name, o: BinOp, la: &Lin, lb: &Lin) -> Out {
         let p = pre.prover();
         let holds = |g: &Lin| p.ge0(g).is_some_and(|c| c.verify(pre, g));
-        // The least value of `l` the state proves: the slack of
-        // `l + EXACT >= 0`, checked again as a goal of its own.
-        let least = |l: &Lin| {
-            let Cert::Sum { slack, .. } = p.ge0(&l.plus(EXACT)?)? else {
-                return None;
-            };
-            let m = slack - EXACT;
-            holds(&l.plus(-m)?).then_some(m)
-        };
+        let least = |l: &Lin| p.least(l);
         let nonneg = holds(la);
         let v = Lin::of(Term::Val(n));
         // For `a` in `[0, h]`, `a / d` and `a >> k` with `k >= s` lie in

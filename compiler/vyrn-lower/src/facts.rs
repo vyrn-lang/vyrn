@@ -276,6 +276,10 @@ impl Cert {
 /// The largest length of any array or String (obligation O9).
 const LEN_MAX: i64 = vyrn_frontend::trap::LENGTH_LIMIT as i64 + 1;
 
+/// The bound an exact `Int64` sum must provably stay within: `2^62`, so no
+/// premise or goal of the prover itself leaves `i64`.
+pub const EXACT: i64 = 1 << 62;
+
 /// The most values a join enumerates for one term ([`State::values`]).
 const VALUES: i64 = 16;
 
@@ -740,6 +744,23 @@ impl State {
         for t in consts {
             let mut all = BTreeSet::new();
             if !live.iter().all(|s| s.values(t, &mut all).is_some()) {
+                // Too many values to list: the least and greatest bound any
+                // state shows, `k = 0` joined with `k = -e`, `e >= -1074`.
+                let v = Lin::of(t);
+                let neg = Lin {
+                    terms: vec![(t, -1)],
+                    c: 0,
+                };
+                let bounds = |p: &Prover| Some((p.least(&v)?, p.least(&neg)?));
+                if let Some(b) = provers.iter().map(bounds).collect::<Option<Vec<_>>>() {
+                    let lo = b.iter().map(|(l, _)| *l).min();
+                    let hi = b.iter().map(|(_, h)| *h).min();
+                    let at = |l: &Lin, m: Option<i64>| l.plus(m?.checked_neg()?);
+                    at(&v, lo)
+                        .iter()
+                        .chain(&at(&neg, hi))
+                        .for_each(|f| out.assume(f));
+                }
                 continue;
             }
             let (Some(&lo), Some(&hi)) = (all.first(), all.last()) else {
@@ -868,6 +889,19 @@ impl Prover<'_> {
             }
         }
         None
+    }
+
+    /// The least value of `l` the state proves, when it is above `-EXACT`:
+    /// the slack of `l + EXACT >= 0`, checked again as a goal of its own.
+    pub fn least(&self, l: &Lin) -> Option<i64> {
+        let Cert::Sum { slack, .. } = self.ge0(&l.plus(EXACT)?)? else {
+            return None;
+        };
+        let m = slack.checked_sub(EXACT)?;
+        let g = l.plus(m.checked_neg()?)?;
+        self.ge0(&g)
+            .is_some_and(|c| c.verify(self.st, &g))
+            .then_some(m)
     }
 
     /// [`State::ge0`], over the index. A goal whose coefficients share a
