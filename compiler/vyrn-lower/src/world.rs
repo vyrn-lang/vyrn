@@ -63,8 +63,9 @@ pub struct World {
     /// ([`World::summaries`]).
     summaries: OnceLock<crate::elide::Summaries>,
     /// The declared functions only a call can enter: none is `export`,
-    /// `extern`, `gen`, `main`, synthesized, an `impl` method or a runtime
-    /// module's (a `$` spelling), or has a type parameter or a `fn`-typed
+    /// `extern`, `gen`, `main`, synthesized, an `impl` method or derived
+    /// function (two `$` in its spelling), or `std/runtime`'s, which the
+    /// emitter calls by name, or has a type parameter or a `fn`-typed
     /// parameter. [`World::summaries`] keeps those whose every caller it walks.
     private: HashSet<FnId>,
     /// What [`World::summaries`] infers record facts from besides the bodies
@@ -345,7 +346,8 @@ impl World {
                     || !f.type_params.is_empty()
                     || f.line == 0
                     || f.name == "main"
-                    || f.name.contains('$')
+                    || f.name.starts_with(vyrn_frontend::loader::RUNTIME_PREFIX)
+                    || vyrn_frontend::types::impl_method_member(&f.name).is_some()
                     || f.params.iter().any(fn_param))
             })
             .map(FnId::nth)

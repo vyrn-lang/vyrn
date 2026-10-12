@@ -1284,6 +1284,82 @@ fn a_counter_down_to_one_proves_its_index_below_it() {
     );
 }
 
+/// A private function of an injected runtime module (`std/text`, spelled
+/// `text$`) starts with what every caller proves of its arguments, as a root
+/// module's does. With the caller's bound weakened by one, the read stays a
+/// check and traps.
+#[test]
+fn a_runtime_modules_private_function_takes_its_callers_facts() {
+    let run = |high: &str, i: i64| {
+        let dir = scratch("elide-rt-entry");
+        let std_dir = dir.join("std");
+        std::fs::create_dir_all(&std_dir).unwrap();
+        let repo_std = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../std");
+        for e in std::fs::read_dir(repo_std).unwrap() {
+            let e = e.unwrap().path();
+            std::fs::copy(&e, std_dir.join(e.file_name().unwrap())).unwrap();
+        }
+        let text = std_dir.join("text.vyrn");
+        let mut src = std::fs::read_to_string(&text).unwrap();
+        src.push_str(&format!(
+            "
+fn pickW(xs: Array<Int64>, i: Int64) -> Int64 {{
+    return xs[i]
+}}
+
+export fn pickAt(xs: Array<Int64>, i: Int64) -> Int64 {{
+    if i < 0 || {high} {{
+        return 0
+    }}
+    return pickW(xs, i)
+}}
+"
+        ));
+        std::fs::write(&text, src).unwrap();
+        let file = dir.join("p.vyrn");
+        std::fs::write(
+            &file,
+            format!(
+                "import {{ pickAt }} from \"std/text\"
+fn main() -> Int64 {{
+    let xs: Array<Int64> = [10, 20, 30]
+    print(pickAt(xs, {i}).toString())
+    return 0
+}}
+"
+            ),
+        )
+        .unwrap();
+        let log = dir.join("counts.tsv");
+        let out = vyrn()
+            .arg("run")
+            .arg(&file)
+            .env("VYRN_STD", &std_dir)
+            .env("VYRN_CHECKS", &log)
+            .output()
+            .unwrap();
+        let rows: Vec<String> = std::fs::read_to_string(&log)
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|l| {
+                let f: Vec<&str> = l.split('\t').collect();
+                (f[1] == "text$pickW").then(|| f[4..6].join(" "))
+            })
+            .collect();
+        (norm(&out.stderr), rows)
+    };
+    let (err, rows) = run("i >= xs.length", 2);
+    assert_eq!(err, "");
+    assert_eq!(rows, ["array-index proved"]);
+    let (err, rows) = run("i > xs.length", 3);
+    assert_eq!(rows, ["array-index kept"]);
+    assert!(err.contains("array index 3 out of bounds"), "{err}");
+    assert!(
+        !err.contains(vyrn_frontend::trap::PROVED_CHECK_FAILED),
+        "{err}"
+    );
+}
+
 /// A `bytes(s, a, b)` range is proved where the path bounds `0 <= a <= b <=
 /// s.byteLength`. With the upper bound weakened by one, the range stays a
 /// check and traps.
