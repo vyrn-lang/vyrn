@@ -1,5 +1,5 @@
 import { apiDocs } from "./apidoc"
-import { docModules, docSummary, docIntro, docNames, docKinds, docSigs, docProse, docLines, docTests, docCount } from apiDocs("../../std")
+import { docModules, docSummary, docIntro, docEntries, docTests, docCount } from apiDocs("../../std")
 import { startsWith } from "std/strpred"
 import { substring, trimStart, split } from "std/strings"
 import { includes } from "std/arrays"
@@ -85,18 +85,7 @@ export fn apiKnown(m: String) -> Bool {
 }
 
 export fn apiEntries(m: String) -> Array<ApiEntry> {
-    let names = docNames(m)
-    let kinds = docKinds(m)
-    let sigs = docSigs(m)
-    let prose = docProse(m)
-    let lines = docLines(m)
-    let mut out: Array<ApiEntry> = []
-    let mut i = 0
-    while i < names.length {
-        out.push(ApiEntry { name: names[i].copy(), kind: kinds[i].copy(), sig: sigs[i].copy(), prose: prose[i].copy(), line: lines[i] })
-        i = i + 1
-    }
-    return out
+    return docEntries(m)
 }
 
 export fn exportPhrase(n: Int64) -> String {
@@ -154,7 +143,7 @@ test "every module has a name, a summary and at least one export" {
     }
 }
 
-test "a module's exports arrive zipped, in declaration order" {
+test "a module's exports arrive in declaration order" {
     let math = apiEntries("math")
     assertEq(math[0].name, "min")
     assertEq(math[0].kind, "fn")
