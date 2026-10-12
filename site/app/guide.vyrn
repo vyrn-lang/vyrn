@@ -129,19 +129,6 @@ fn blockHtml(b: Block) -> String {
     return out + "</div>"
 }
 
-export fn chapterNavHtml(slug: String) -> String {
-    let mut out = ""
-    let back = prevSlug(slug)
-    if back.byteLength > 0 {
-        out = out + "<a class=\"prev\" href=\"" + chapterHref(back) + "\"><span class=\"eyebrow\">Previous</span>" + escapeHtml(chapterOf(back).title) + "</a>"
-    }
-    let ahead = nextSlug(slug)
-    if ahead.byteLength > 0 {
-        out = out + "<a class=\"next\" href=\"" + chapterHref(ahead) + "\"><span class=\"eyebrow\">Next</span>" + escapeHtml(chapterOf(ahead).title) + "</a>"
-    }
-    return out
-}
-
 export fn sectionBody(s: Section) -> String {
     let mut out = ""
     for p in s.prose {
@@ -623,12 +610,12 @@ export fn movedTarget(path: String) -> String {
     return ""
 }
 
-fn prevSlug(slug: String) -> String {
+export fn prevSlug(slug: String) -> String {
     let n = chapterNumber(slug)
     return if n > 1 { areaChapters(chapterArea(slug))[n - 2].slug.copy() } else { "" }
 }
 
-fn nextSlug(slug: String) -> String {
+export fn nextSlug(slug: String) -> String {
     let n = chapterNumber(slug)
     let all = areaChapters(chapterArea(slug))
     return if n > 0 && n < all.length { all[n].slug.copy() } else { "" }

@@ -44,7 +44,7 @@ fn buildLabel(d: Package) -> String {
             <h1>{{ data.name }}</h1>
             <span class="kindpill">{{ data.kind }}</span>
         </div>
-        <p class="lede" v-html="data.summary"></p>
+        <p class="lede">{{ data.summary }}</p>
         <p class="pkgmeta">{{ unitLabel(data) }} · {{ depLabel(data) }} · <a :href="packageSource(data.slug)">source</a></p>
     </section>
 

@@ -66,7 +66,7 @@ fn pager() -> Pager {
 
     <section class="band" id="features">
         <h2>{{ features().length }} {{ featuresHeading() }}</h2>
-        <p v-html="featuresIntro()"></p>
+        <p>{{ featuresIntro() }}</p>
         <div class="scroller">
         <table>
             <thead>
@@ -81,7 +81,7 @@ fn pager() -> Pager {
             </tbody>
         </table>
         </div>
-        <p class="cap" v-html="featuresCap()"></p>
+        <p class="cap">{{ featuresCap() }}</p>
         <p class="notice" v-html="featuresNotice()"></p>
     </section>
 
@@ -105,7 +105,7 @@ fn pager() -> Pager {
     <section class="band" id="other">
         <h2>{{ otherHeading() }}</h2>
         <p v-html="otherIntro()"></p>
-        <p v-html="otherClose()"></p>
+        <p>{{ otherClose() }}</p>
     </section>
 
     <nav class="pager" aria-label="Pages">

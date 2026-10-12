@@ -48,7 +48,7 @@ fn exportsOf(p: Package) -> String {
                         <span class="kind">{{ p.kind }}</span>
                         <span class="nums">{{ numsOf(p) }}</span>
                     </div>
-                    <span class="d" v-html="p.summary"></span>
+                    <span class="d">{{ p.summary }}</span>
                 </li>
             </ul>
         </div>
