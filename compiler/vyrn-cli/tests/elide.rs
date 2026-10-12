@@ -5962,3 +5962,31 @@ fn w(i: Int64 where value >= 0) -> Int64 {{
         "{err}"
     );
 }
+
+/// `h & 7` lies in `[0, 7]` though `h` is a `UInt64`, whose values above
+/// `i64::MAX` a term reads as negatives. With the mask `15`, `h = 9` passes
+/// the table's end, keeps its check and traps.
+#[test]
+fn a_mask_bounds_a_wide_operand() {
+    let src = |mask: &str| {
+        format!(
+            "fn w(h: UInt64) -> Int64 {{
+    let t = [1, 2, 3, 4, 5, 6, 7, 8]
+    return t[Int64(h & {mask})]
+}}
+"
+        )
+    };
+    let calls = "    print(w(9).toString())";
+    let proof = src("7");
+    assert_eq!(verdicts(&proof, "w"), ["proved array-index"]);
+    assert_eq!(oracle(&proof, calls, "w").0, "");
+    let witness = src("15");
+    assert_eq!(verdicts(&witness, "w"), ["check array-index"]);
+    let (err, _) = oracle(&witness, calls, "w");
+    assert!(err.contains("array index 9 out of bounds"), "{err}");
+    assert!(
+        !err.contains(vyrn_frontend::trap::PROVED_CHECK_FAILED),
+        "{err}"
+    );
+}

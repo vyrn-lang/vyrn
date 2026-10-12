@@ -4068,7 +4068,15 @@ impl<'a> Walk<'a> {
                 // An unsigned 64-bit literal above `i64::MAX` reads as a negative.
                 let wide = |v: &Val| matches!(v, Val::Name(m) if matches!(self.kind(*m), Kind::Int(64, false)));
                 if wide(a) || wide(b) {
-                    return Out::Nothing;
+                    // `x & c` lies in `[0, c]` for a literal `c >= 0`, whatever `x` holds.
+                    let v = Lin::of(Term::Val(n));
+                    let mask = [&la, &lb].into_iter().find(|l| l.is_const() && l.c >= 0);
+                    return match mask.filter(|_| *o == BinOp::BitAnd) {
+                        Some(m) => {
+                            Out::Facts([Some(v.clone()), m.sub(&v)].into_iter().flatten().collect())
+                        }
+                        None => Out::Nothing,
+                    };
                 }
                 let ge = |l: Option<Lin>| l.map(Fact::Ge);
                 let (t, f) = match o.compare() {
