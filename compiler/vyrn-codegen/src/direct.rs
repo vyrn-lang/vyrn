@@ -3434,16 +3434,14 @@ impl<'p> Fn_<'_, 'p> {
         Ok(ty)
     }
 
-    /// `bytes(s)` and `bytes(s, start, end)`: a call to `std/runtime`'s `bytesOf`, which checks
-    /// the range and copies. The one-argument form is the range `0..s.byteLength`.
-    ///
-    /// `rule` is the three-argument form's check row's; `None` is the one-argument form, whose
-    /// range cannot trap.
+    /// `bytes(s)` and `bytes(s, start, end)`: a call to `std/runtime`'s `bytesOf`, which copies.
+    /// The one-argument form is the range `0..s.byteLength`. `row` is the three-argument form's
+    /// check, which runs here before the copy; `None` when a pass proved it.
     fn bytes_of(
         &mut self,
         m: &mut Module,
         b: &mut Frame,
-        rule: Option<vyrn_frontend::trap::Rule>,
+        row: Option<Check>,
         args: &[(Val, Capability)],
         line: usize,
     ) -> Result<Type, String> {
@@ -3455,20 +3453,48 @@ impl<'p> Fn_<'_, 'p> {
         let off = b.alloc(l.size, l.align);
         b.slot(off);
         self.core_arg(m, b, "bytes", args, 0, Some(&Type::Str), line)?;
-        if rule.is_some() {
-            self.core_arg(m, b, "bytes", args, 1, Some(&Type::Int), line)?;
-            self.core_arg(m, b, "bytes", args, 2, Some(&Type::Int), line)?;
-        } else {
-            let s = self.scratch(b, ValType::I32, 0);
-            b.ins(&Instruction::LocalTee(s));
-            b.ins(&Instruction::I64Const(0));
+        let s = b.local(ValType::I32);
+        b.ins(&Instruction::LocalTee(s));
+        let len = |b: &mut Frame| {
             b.ins(&Instruction::LocalGet(s));
             str_len(b);
             b.ins(&Instruction::I64ExtendI32U);
+        };
+        if args.len() == 1 {
+            b.ins(&Instruction::I64Const(0));
+            len(b);
+        } else {
+            let (from, to) = (b.local(ValType::I64), b.local(ValType::I64));
+            self.core_arg(m, b, "bytes", args, 1, Some(&Type::Int), line)?;
+            b.ins(&Instruction::LocalSet(from));
+            self.core_arg(m, b, "bytes", args, 2, Some(&Type::Int), line)?;
+            b.ins(&Instruction::LocalSet(to));
+            if let Some(row) = row {
+                // A range below zero or out of order traps at `from`, one past the string's end at `to`.
+                b.ins(&Instruction::LocalGet(from));
+                b.ins(&Instruction::I64Const(0));
+                b.ins(&Instruction::I64LtS);
+                b.ins(&Instruction::LocalGet(to));
+                b.ins(&Instruction::LocalGet(from));
+                b.ins(&Instruction::I64LtS);
+                b.ins(&Instruction::I32Or);
+                b.ins(&Instruction::If(BlockType::Empty));
+                self.depth += 1;
+                self.check_trap(b, &row, Some(from));
+                self.depth -= 1;
+                b.ins(&Instruction::End);
+                b.ins(&Instruction::LocalGet(to));
+                len(b);
+                b.ins(&Instruction::I64GtS);
+                b.ins(&Instruction::If(BlockType::Empty));
+                self.depth += 1;
+                self.check_trap(b, &row, Some(to));
+                self.depth -= 1;
+                b.ins(&Instruction::End);
+            }
+            b.ins(&Instruction::LocalGet(from));
+            b.ins(&Instruction::LocalGet(to));
         }
-        let rule = rule.unwrap_or(vyrn_frontend::trap::Rule::StringIndex);
-        b.ins(&Instruction::I32Const(rule.index() as i32));
-        b.ins(&Instruction::I32Const(self.cx.rt.trap_table as i32));
         b.ins(&Instruction::Call(self.cx.rt.bytes_of));
         b.slot(off);
         Ok(ty)
@@ -9010,8 +9036,8 @@ runtime_fns! {
     arr_append = "arrAppend" (I32; 4) -> ();
     arr_copy_from = "arrCopyFrom" (I32; 4) -> ();
     arr_clear = "arrClear" (I32; 2) -> ();
-    // `bytes(s, from, to)`: the triple's slot leads, the trap row and table trail.
-    bytes_of = "bytesOf" (I32, I32, I64, I64, I32, I32) -> ();
+    // `bytes(s, from, to)`: the triple's slot leads.
+    bytes_of = "bytesOf" (I32, I32, I64, I64) -> ();
     // The I/O family this emitter calls; the builtins route to their own functions
     // (`loader::RT_MODULES`). The fixed-clock keys trail.
     /// The ONE place bytes leave a program, with the stdout buffer behind it.
@@ -10903,19 +10929,7 @@ impl<'a, 'p> Fn_<'a, 'p> {
                             line,
                             |g| matches!(g, Guard::Range(x, y, z) if (x, y, z) == (s, from, to)),
                         )?;
-                        if c.verdict == Verdict::Proved {
-                            return Err(gap(
-                                "a proved `bytes` range: `bytesOf` checks inside",
-                                line,
-                            ));
-                        }
-                        match self.row(b, c).map(|c| c.rule) {
-                            Some(Raises::Row(rule)) => Some(rule),
-                            Some(Raises::Where | Raises::Clause) => {
-                                return Err(gap("a `bytes` range check with no trap row", line))
-                            }
-                            None => None,
-                        }
+                        self.row(b, c)
                     }
                     _ => None,
                 };

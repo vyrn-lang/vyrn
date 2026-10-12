@@ -1284,6 +1284,38 @@ fn a_counter_down_to_one_proves_its_index_below_it() {
     );
 }
 
+/// A `bytes(s, a, b)` range is proved where the path bounds `0 <= a <= b <=
+/// s.byteLength`. With the upper bound weakened by one, the range stays a
+/// check and traps.
+#[test]
+fn a_bounded_range_proves_its_bytes_slice() {
+    let src = |high: &str| {
+        format!(
+            "fn w(s: String, a: Int64, b: Int64) -> Int64 {{
+    if a < 0 || {high} || a > b {{
+        return 0
+    }}
+    return bytes(s, a, b).length
+}}
+"
+        )
+    };
+    let proof = src("b > s.byteLength");
+    assert_eq!(verdicts(&proof, "w"), ["proved string-index"]);
+    assert_eq!(
+        oracle(&proof, "    print(w(\"ABCD\", 1, 4).toString())", "w").0,
+        ""
+    );
+    let witness = src("b > s.byteLength + 1");
+    assert_eq!(verdicts(&witness, "w"), ["check string-index"]);
+    let (err, _) = oracle(&witness, "    print(w(\"ABCD\", 1, 5).toString())", "w");
+    assert!(err.contains("string index 5 out of bounds"), "{err}");
+    assert!(
+        !err.contains(vyrn_frontend::trap::PROVED_CHECK_FAILED),
+        "{err}"
+    );
+}
+
 /// A check's goal takes a chain of three premises: `m < r`, `r < n` and
 /// `n <= xs.length` bound `xs[m]`. With one link weakened to `r <= n + 1`
 /// the chain does not hold, and the read stays a check and traps.

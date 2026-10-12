@@ -2760,7 +2760,7 @@ impl<'a> Walk<'a> {
 
     fn dead(&mut self, s: &mut St) {
         match s {
-            St::Check(c) if self.record && provable(&c.guard) => c.verdict = Verdict::Proved,
+            St::Check(c) if self.record => c.verdict = Verdict::Proved,
             St::If { then, els, .. } => {
                 then.iter_mut().for_each(|s| self.dead(s));
                 els.iter_mut().for_each(|s| self.dead(s));
@@ -2938,7 +2938,7 @@ impl<'a> Walk<'a> {
                     let holds =
                         |g: &Lin| (st.prover().ge0_deep(g)).is_some_and(|cert| cert.verify(&st, g));
                     let failing = goals.iter().flatten().find(|g| !holds(g));
-                    if goals.is_some() && failing.is_none() && provable(&c.guard) {
+                    if goals.is_some() && failing.is_none() {
                         c.verdict = Verdict::Proved;
                     } else {
                         c.why = self.why(&st, c, failing);
@@ -2961,11 +2961,15 @@ impl<'a> Walk<'a> {
                         }
                     }
                 }
-                // A passed index, span or shift check states its goals; a
-                // divisor's goals are only one way it can pass.
+                // A passed index, span, range or shift check states its
+                // goals; a divisor's goals are only one way it can pass.
                 if matches!(
                     c.guard,
-                    Guard::Index(..) | Guard::Span(..) | Guard::Shift(..) | Guard::Rule(..)
+                    Guard::Index(..)
+                        | Guard::Span(..)
+                        | Guard::Range(..)
+                        | Guard::Shift(..)
+                        | Guard::Rule(..)
                 ) {
                     for g in goals.into_iter().flatten() {
                         st.assume(&g);
@@ -3012,7 +3016,11 @@ impl<'a> Walk<'a> {
                 }
             }
             Guard::NoOverflow(_, d, _) => vec![self.lin(d)?],
-            Guard::Range(..) => return None,
+            Guard::Range(s, a, b) => {
+                let Val::Name(s) = s else { return None };
+                let (a, b) = (self.lin(a)?, self.lin(b)?);
+                vec![a.clone(), b.sub(&a)?, len(&Place::Name(*s))?.sub(&b)?]
+            }
             // Only where each field's length is its own term: elsewhere one
             // term stands for a whole class, and the goal holds by itself.
             Guard::Rule(r) if self.open.contains(r) => {
@@ -4104,7 +4112,12 @@ impl<'a> Walk<'a> {
     fn why(&self, st: &State, c: &Check, failing: Option<&Lin>) -> Why {
         let operands = match (failing, &c.guard) {
             (Some(_), _) => [None, None],
-            (None, Guard::Range(..)) => return Why::Range,
+            (None, Guard::Range(s, a, b)) => {
+                if val_name(s).is_some_and(|s| self.length(&Place::Name(s)).is_none()) {
+                    return Why::Place(val_name(s));
+                }
+                [val_name(a), val_name(b)]
+            }
             (None, Guard::Index(p, i) | Guard::Span(p, i, _)) => {
                 if self.length(p).is_none() {
                     return Why::Place(place_root(p));
@@ -4405,12 +4418,6 @@ fn lands_on_result(args: &[(Arg, Capability)]) -> bool {
     args.first().is_some_and(|(_, c)| *c != Capability::Modify)
 }
 
-/// Whether a proved verdict is one the emitter can honour: `bytesOf` checks
-/// a range inside and has no unchecked form.
-fn provable(g: &Guard) -> bool {
-    !matches!(g, Guard::Range(..))
-}
-
 /// The name whose lengths a store into `p` may change: the name itself, or
 /// the record whose field it replaces. A store into an element keeps every
 /// length.
@@ -4673,7 +4680,7 @@ fn guard_names(g: &Guard, f: &mut dyn FnMut(Name)) {
             val(i);
         }
         Guard::Shift(k, _) | Guard::NonZero(k) | Guard::NoOverflow(_, k, _) => val(k),
-        Guard::Range(..) => {}
+        Guard::Range(s, a, b) => [s, a, b].into_iter().for_each(val),
         Guard::Rule(r) => val(&Val::Name(*r)),
         Guard::Clause { atoms, .. } => atoms.iter().for_each(|a| {
             val(&a.l.of);

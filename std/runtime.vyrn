@@ -1000,17 +1000,10 @@ export fn arrClear(dst: Int32, src: Int32) {
 }
 
 /// `bytes(s, from, to)`: the string's bytes `from..to`, copied into a fresh
-/// `Array<UInt8>` whose triple is written at `dst`. A range outside the string
-/// traps with the trap table's row `rule`, at the low offset when it is negative
-/// or out of order and at the high one otherwise. An empty copy still gets a
-/// buffer, so the triple's pointer is never null.
-export fn bytesOf(dst: Int32, s: Int32, from: Int64, to: Int64, rule: Int32, table: Int32) {
-    if from < 0 || to < from {
-        trapAt(rule, from, table)
-    }
-    if to > Int64(load32(s - 8)) {
-        trapAt(rule, to, table)
-    }
+/// `Array<UInt8>` whose triple is written at `dst`. The caller guarantees
+/// `0 <= from <= to <= s.byteLength`. An empty copy still gets a buffer, so the
+/// triple's pointer is never null.
+export fn bytesOf(dst: Int32, s: Int32, from: Int64, to: Int64) {
     let n = to - from
     store32(dst, UInt32(malloc(n + 1)))
     copy(Int32(load32(dst)), s + Int32(from), Int32(n))
