@@ -5487,3 +5487,53 @@ fn two_fields_grown_out_of_step_keep_the_index_and_trap_there() {
         "{err}"
     );
 }
+
+/// A loop that pushes once per turn while its counter is below a name's value
+/// leaves the array at least that long. A push on some turns only, or a turn
+/// that empties the array, keeps the read's check, which traps.
+#[test]
+fn a_loop_bound_by_a_name_counts_its_pushes() {
+    let src = |push: &str| {
+        format!(
+            "fn w(n: Int64) -> Int64 {{
+    let len = n + 1
+    let mut t: Array<Int64> = []
+    let mut i = 0
+    while i < len {{
+        {push}
+        i = i + 1
+    }}
+    let mut s = 0
+    let mut k = len
+    while k > 0 {{
+        s = s + t[k - 1]
+        k = k - 1
+    }}
+    return s
+}}
+"
+        )
+    };
+    let calls = "    print(w(3).toString())";
+    let proof = src("t.push(i)");
+    assert_eq!(verdicts(&proof, "w"), ["proved array-index"]);
+    assert_eq!(oracle(&proof, calls, "w").0, "");
+    let mut failures = Vec::new();
+    for push in [
+        "if i != 2 {\n            t.push(i)\n        }",
+        "t.push(i)\n        if i == 2 {\n            t.clear()\n        }",
+    ] {
+        let witness = src(push);
+        let rows = verdicts(&witness, "w");
+        if rows != ["check array-index"] {
+            failures.push(format!("{witness}\nrows: {rows:?}"));
+        }
+        let (err, _) = oracle(&witness, calls, "w");
+        if !err.contains("array index 3 out of bounds")
+            || err.contains(vyrn_frontend::trap::PROVED_CHECK_FAILED)
+        {
+            failures.push(format!("{witness}\nran: {err}"));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n\n"));
+}

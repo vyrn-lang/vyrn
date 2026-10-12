@@ -3983,21 +3983,20 @@ impl<'a> Walk<'a> {
     /// `a - b` and its negation, where `a` and `b` are the lengths of two
     /// arrays or Strings the loop `body` stores to on the same paths, both of
     /// which a check can depend on: a loop that grows them in step keeps them
-    /// as equal as it entered. The counter of a loop bound by a literal
-    /// ([`bound_test`]) takes part as its value, and in a walk that proves a
-    /// result, the counter of a loop bound by a parameter: in every walk that
-    /// one cost 11.9% more `elide: summaries` allocations on the site export.
-    /// [`Walk::settle`] keeps a candidate only where the entry and every turn
-    /// prove it.
+    /// as equal as it entered. The counter of a loop with a bound
+    /// ([`bound_test`]) takes part as its value; in a walk that proves a
+    /// result, only for a literal or parameter bound: any bound there cost
+    /// 1.1% more `elide: summaries` allocations on the site export and proved
+    /// no row. [`Walk::settle`] keeps a candidate only where the entry and
+    /// every turn prove it.
     fn in_step(&self, body: &[St], stored: &BTreeSet<Name>) -> Vec<Lin> {
         let relevant = |n: &Name| self.slot[n.index()].relevant;
-        let param = |b: &Lin| match b.terms[..] {
-            [(Term::Val(p), 1)] => self.post.is_some() && self.body.params.contains(&p),
-            _ => false,
-        };
-        let counter = (bound_test(body).filter(|(.., b)| b.is_const() || param(b)))
-            .map(|(_, k, _)| k)
-            .filter(relevant);
+        let param =
+            |b: &Lin| matches!(b.terms[..], [(Term::Val(p), 1)] if self.body.params.contains(&p));
+        let counter = (bound_test(body)
+            .filter(|(.., b)| self.post.is_none() || b.is_const() || param(b)))
+        .map(|(_, k, _)| k)
+        .filter(relevant);
         let term = |n: &Name| match Some(*n) == counter {
             true => Some(Term::Val(*n)),
             false => (relevant(n) && self.kind(*n) == Kind::Seq).then_some(Term::Len(*n)),
