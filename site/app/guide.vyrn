@@ -31,6 +31,7 @@ import { includes } from "std/arrays"
 import { escapeHtml, terminalHtml, inlineCode } from "./code"
 import { blob } from "./repo"
 import { blurbFrom, stripTags } from "./meta"
+import { Markup, markupString } from "std/html"
 
 export type Block = { id: String, lines: Array<String>, output: String, play: String, source: String }
 
@@ -129,20 +130,11 @@ fn blockHtml(b: Block) -> String {
     return out + "</div>"
 }
 
-export fn chapterNavHtml(slug: String) -> String {
-    let mut out = ""
-    let back = prevSlug(slug)
-    if back.byteLength > 0 {
-        out = out + "<a class=\"prev\" href=\"" + chapterHref(back) + "\"><span class=\"eyebrow\">Previous</span>" + escapeHtml(chapterOf(back).title) + "</a>"
-    }
-    let ahead = nextSlug(slug)
-    if ahead.byteLength > 0 {
-        out = out + "<a class=\"next\" href=\"" + chapterHref(ahead) + "\"><span class=\"eyebrow\">Next</span>" + escapeHtml(chapterOf(ahead).title) + "</a>"
-    }
-    return out
+export fn blockCode(id: String) -> Markup {
+    return TrustedMarkup(joinWith(guideLines(id), "\n"))
 }
 
-export fn sectionBody(s: Section) -> String {
+export fn sectionBody(s: Section) -> Markup {
     let mut out = ""
     for p in s.prose {
         out = out + "<p>" + p + "</p>"
@@ -150,7 +142,7 @@ export fn sectionBody(s: Section) -> String {
     for id in s.blocks {
         out = out + blockHtml(blockOf(id))
     }
-    return out
+    return TrustedMarkup(out)
 }
 
 fn section(anchor: String, heading: String, prose: Array<String>, blocks: Array<String>) -> Section {
@@ -434,7 +426,7 @@ export fn chapters() -> Array<Chapter> {
                     "A route component can also export <code>head()</code> for the document's title and <code>data()</code> for what the page needs; the server runs <code>data()</code> and the template renders its answer.",
                 ], []),
                 section("template", "Template syntax", [
-                    "<code>{{ x }}</code> puts a value into the page, escaped. <code>:href=\"f(x)\"</code> binds an attribute to an expression. <code>v-for</code> repeats an element over an array, and <code>:key</code> tells the differ which repeated element is which. <code>v-html</code> splices markup you built yourself — the escape hatch, for HTML a function already produced.",
+                    "<code>{{ x }}</code> puts a value into the page, escaped. <code>:href=\"f(x)\"</code> binds an attribute to an expression. <code>v-for</code> repeats an element over an array, and <code>:key</code> tells the differ which repeated element is which. <code>v-html</code> splices a <code>Markup</code>: a tree rendered by <code>toMarkup</code>, or markup the program owns, marked <code>TrustedMarkup</code>. A <code>String</code> there is refused.",
                     "A tag with a capital letter is a component you imported, and its attributes are the props: <code>&lt;Icon name=\"bytesize:search\"/&gt;</code> is a function call written as markup.",
                 ], []),
                 section("proof", "This site's routes", [
@@ -550,7 +542,7 @@ export fn chapterOf(slug: String) -> Chapter {
 }
 
 export fn chapterBlurb(slug: String) -> String {
-    return blurbFrom(inlineCode(chapterOf(slug).lede), "")
+    return blurbFrom(markupString(inlineCode(chapterOf(slug).lede)), "")
 }
 
 export fn chapterKnown(slug: String) -> Bool {
@@ -623,12 +615,12 @@ export fn movedTarget(path: String) -> String {
     return ""
 }
 
-fn prevSlug(slug: String) -> String {
+export fn prevSlug(slug: String) -> String {
     let n = chapterNumber(slug)
     return if n > 1 { areaChapters(chapterArea(slug))[n - 2].slug.copy() } else { "" }
 }
 
-fn nextSlug(slug: String) -> String {
+export fn nextSlug(slug: String) -> String {
     let n = chapterNumber(slug)
     let all = areaChapters(chapterArea(slug))
     return if n > 0 && n < all.length { all[n].slug.copy() } else { "" }

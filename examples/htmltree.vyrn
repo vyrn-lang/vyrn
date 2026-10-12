@@ -1,5 +1,5 @@
 // The std/html view tree and the SSR renderer.
-import { el, text, cls, attr, on, keyed, empty, toHtmlString, document, Html, Attr } from "std/html"
+import { el, text, cls, attr, on, keyed, empty, toHtmlString, toMarkup, document, Html, Attr } from "std/html"
 
 fn itemRow(id: Int64, label: consume String) -> Html {
     return keyed("\{id}", el("li", [cls("row"), attr("data-id", "\{id}")], [
@@ -19,7 +19,7 @@ fn cartBody() -> Html {
         el("form", [], [
             el("input", [attr("name", "q"), on("input", "onQuery", "")], []),
         ]),
-        Raw("<aside class=\"promo\">raw <b>markup</b> passes through</aside>"),
+        Raw(TrustedMarkup("<aside class=\"promo\">raw <b>markup</b> passes through</aside>")),
         el("ul", [cls("items")], [
             itemRow(1, "Widget"),
             itemRow(2, "Gadget & Co"),
@@ -56,7 +56,11 @@ test "attribute values escape amp and quote only, not angle brackets" {
 }
 
 test "raw bypasses escaping" {
-    assertEq(toHtmlString(Raw("<b>&</b>")), "<b>&</b>")
+    assertEq(toHtmlString(Raw(TrustedMarkup("<b>&</b>"))), "<b>&</b>")
+}
+
+test "text rendered into markup is escaped once" {
+    assertEq(toHtmlString(Raw(toMarkup(text("a < b & c")))), "a &lt; b &amp; c")
 }
 
 test "empty renders as nothing" {

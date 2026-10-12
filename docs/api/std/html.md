@@ -18,14 +18,27 @@ An attribute on an element. `On(event, handler, payload)` renders as
 calls the root-exported `export extern fn` named `handler`. `Key(k)` is list
 identity for the keyed differ and renders as `data-key="k"`.
 
+## Markup
+
+```vyrn
+type Markup = TrustedMarkup(String)
+```
+
+Markup the program vouches for. `Raw` and `v-html` take only this, so no
+`String` reaches the page unescaped. `toMarkup` renders a tree, and
+`toMarkup(text(s))` escapes a string. `TrustedMarkup(s)` is the escape
+hatch: write it only for markup the program owns, never for text from input.
+`fromJson` also builds one, so decode a `Markup` only from the program's own
+output.
+
 ## Html
 
 ```vyrn
-type Html = Empty | Text(String) | Raw(String) | El(String, Array<Attr>, Array<Html>)
+type Html = Empty | Text(String) | Raw(Markup) | El(String, Array<Attr>, Array<Html>)
 ```
 
-A node in the view tree. `Text` is always escaped; `Raw` is never escaped
-and is the only way to emit markup from a string. `Empty` renders as nothing.
+A node in the view tree. `Text` is always escaped; `Raw` is never escaped.
+`Empty` renders as nothing.
 
 ## Sub
 
@@ -105,6 +118,23 @@ is not.
 
 On a tag, attribute or event name outside `[A-Za-z0-9_:-]`, or children on
 a void element.
+
+## toMarkup
+
+```vyrn
+fn toMarkup(h: Html) -> Markup
+```
+
+Renders a view tree as `Markup`. Its `Text` is escaped here, once, and a
+`Raw` holding the result is never escaped again.
+
+## markupString
+
+```vyrn
+fn markupString(m: Markup) -> String
+```
+
+The markup as written, for a reader such as a search index.
 
 ## PatchOp
 

@@ -130,7 +130,7 @@ cargo nextest run --release --workspace --no-fail-fast --status-level fail
 cargo test --release --manifest-path vyrn-play/Cargo.toml
 VYRN_WASM_MANIFEST=check cargo nextest run --release -p vyrn-cli --no-fail-fast \
   --status-level fail --success-output final --run-ignored only \
-  -E 'binary(kernel) | binary(effects) | binary(typed) | binary(coretables) | binary(coredrive) | binary(wasmhash) | binary(parallel) | binary(recheck) | binary(testsweep) | binary(shapesweep) | binary(verdicts)'
+  -E 'binary(kernel) | binary(effects) | binary(typed) | binary(coretables) | binary(coredrive) | binary(wasmhash) | binary(parallel) | binary(recheck) | binary(testsweep) | binary(shapesweep) | binary(verdicts) | binary(fixtures)'
 cargo nextest run --release -p vyrn-cli --features allocs --no-fail-fast \
   --status-level fail --run-ignored only -E 'binary(compiler_scaling)'
 sh ../scripts/check-allocs.sh <main's allocs vyrn> target/release/vyrn

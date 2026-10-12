@@ -32,8 +32,8 @@ a swallowed fault would report rules on while they are off.
 that one report. The marker is plain text inside the input's own comment:
 
 ```text
-<!-- vyrn-ignore sec/raw-html: the summary is sanitized upstream -->
-<div v-html="summary"></div>
+<!-- vyrn-ignore a11y/tabindex-positive: the tour sets the order -->
+<div tabindex="2">Start here</div>
 ```
 
 ## HintPolicy

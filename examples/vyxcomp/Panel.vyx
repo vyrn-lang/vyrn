@@ -1,9 +1,11 @@
 <script>
+import { Markup } from "std/html"
+
 props { title: String }
 
-/// The raw separator markup, injected verbatim via `v-html` (NOT escaped).
-fn sepMarkup() -> String {
-    return "<hr class=\"sep\"/>"
+/// The separator, injected verbatim via `v-html`: markup this file owns.
+fn sepMarkup() -> Markup {
+    return TrustedMarkup("<hr class=\"sep\"/>")
 }
 </script>
 

@@ -19,7 +19,8 @@ A `.vyx` file has two sections:
 
 Template grammar (Vue-flavored):
   {{ expr }}                  -> text((expr).toString())     (escaped)
-  v-html="expr"               -> Raw(expr) as the element's content (not escaped)
+  v-html="expr"               -> Raw(expr) as the element's content; `expr` is a
+                                `Markup`, which `Raw` never escapes
   <slot/>                     -> splices the trailing children param
   v-if="c" / v-else-if="c" / v-else   -> nested Empty-elided conditionals; a
                                 v-else-if/v-else must be the next element

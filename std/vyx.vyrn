@@ -17,7 +17,8 @@
 ///
 /// Template grammar (Vue-flavored):
 ///   {{ expr }}                  -> text((expr).toString())     (escaped)
-///   v-html="expr"               -> Raw(expr) as the element's content (not escaped)
+///   v-html="expr"               -> Raw(expr) as the element's content; `expr` is a
+///                                 `Markup`, which `Raw` never escapes
 ///   <slot/>                     -> splices the trailing children param
 ///   v-if="c" / v-else-if="c" / v-else   -> nested Empty-elided conditionals; a
 ///                                 v-else-if/v-else must be the next element
@@ -4302,7 +4303,7 @@ test "a component uses children when the template has a slot" {
 }
 
 test "v-html lowers to a Raw content node" {
-    let src = "<script>props { html: String }</script><template><div v-html=\"html\"></div></template>"
+    let src = "<script>props { html: Markup }</script><template><div v-html=\"html\"></div></template>"
     let comp = vyxCompileComponent("R", src, "./c")
     assertEq(comp.err, "")
     let out = vyxBuildModule([comp], false, "")

@@ -6,8 +6,9 @@ import { includes } from "std/arrays"
 import { hrefOf } from "./nav"
 import { blob } from "./repo"
 import { blurbFrom } from "./meta"
+import { Markup, markupString } from "std/html"
 
-export type ApiEntry = { name: String, kind: String, sig: String, prose: String, line: Int64 }
+export type ApiEntry = { name: String, kind: String, sig: Markup, prose: Markup, line: Int64 }
 
 export type ApiModule = { name: String, summary: String, count: Int64 }
 
@@ -99,7 +100,7 @@ export fn apiBlurb(m: String) -> String {
     return blurbFrom(docSummary(m), " " + exportPhrase(docCount(m)) + ".")
 }
 
-export fn apiIntro(m: String) -> String {
+export fn apiIntro(m: String) -> Markup {
     return docIntro(m)
 }
 
@@ -123,10 +124,11 @@ test "every signature the reference renders is a whole declaration" {
     let mut total = 0
     for m in apiModules() {
         for e in apiEntries(m.name) {
-            assert(e.sig.byteLength > 0)
-            assertEq(split(e.sig, "{").length, split(e.sig, "}").length)
-            assertEq(split(e.sig, "(").length, split(e.sig, ")").length)
-            assertEq(split(e.sig, "[").length, split(e.sig, "]").length)
+            let sig = markupString(e.sig)
+            assert(sig.byteLength > 0)
+            assertEq(split(sig, "{").length, split(sig, "}").length)
+            assertEq(split(sig, "(").length, split(sig, ")").length)
+            assertEq(split(sig, "[").length, split(sig, "]").length)
             total = total + 1
         }
     }
@@ -148,7 +150,7 @@ test "a module's exports arrive in declaration order" {
     assertEq(math[0].name, "min")
     assertEq(math[0].kind, "fn")
     assert(math[0].line > 0)
-    assert(math[0].sig.byteLength > 0)
+    assert(markupString(math[0].sig).byteLength > 0)
     for e in math {
         assert(e.name.byteLength > 0)
         assert(e.kind == "fn" || e.kind == "type" || e.kind == "protocol")
@@ -159,7 +161,7 @@ test "the reference covers the modules it lists and nothing else" {
     assert(apiKnown("math"))
     assert(!apiKnown("nope"))
     assertEq(apiEntries("nope").length, 0)
-    assertEq(apiIntro("nope"), "")
+    assertEq(markupString(apiIntro("nope")), "")
 }
 
 test "a summary does not repeat the module's own name" {

@@ -320,21 +320,6 @@ fn vhElem(
                 "`\{a.name}` is a `javascript:` URL; only http, https, mailto, tel and relative URLs are safe here",
             )
         }
-        // sec/raw-html. `v-html` writes unescaped markup, the stack's one XSS
-        // sink. Waive it at the line where the value is proved safe.
-        if a.name == "v-html" {
-            out = out
-            + hint(
-                p,
-                "sec/raw-html",
-                Warning,
-                src,
-                file,
-                a.line,
-                a.col,
-                "`v-html` writes unescaped markup from `\{a.value}`; the value must never come from user input",
-            )
-        }
         // a11y/tabindex-positive. A positive `tabindex` reorders the whole page's
         // focus sequence.
         if a.name == "tabindex" && a.dyn == false && vhPositive(a.value) {
@@ -1999,16 +1984,6 @@ test "a literal javascript: URL is an error; http, relative and dynamic are not"
     assert(fires("<a href=\"javascript:go() \">x</a>", "sec/unsafe-url"))
 }
 
-test "v-html fires and can be waived at the line that earns it" {
-    assert(fires("<div v-html=\"body\"></div>", "sec/raw-html"))
-    let waived = vhCheck(
-        noPolicy(),
-        "<template>\n<!-- vyrn-ignore sec/raw-html: sanitized upstream -->\n<div v-html=\"body\"></div>\n</template>\n",
-        "T.vyx",
-    )
-    assert(contains(waived, "sec/raw-html") == false)
-}
-
 test "a positive tabindex fires; 0 and -1 do not" {
     assert(fires("<div tabindex=\"3\" @click=\"go()\">x</div>", "a11y/tabindex-positive"))
     assert(fires("<div tabindex=\"0\" @click=\"go()\">x</div>", "a11y/tabindex-positive") == false)
@@ -2140,17 +2115,18 @@ test "an entity in text fires; plain text, a bare ampersand and interpolation do
 }
 
 test "a waiver that waives nothing fires; one that earns its keep does not" {
-    // This marker covers sec/raw-html on the line below, so it is used.
+    // This marker covers a11y/tabindex-positive on the line below, so it is used.
     let used = vhCheck(
         noPolicy(),
-        "<template>\n<!-- vyrn-ignore sec/raw-html: sanitized upstream -->\n<div v-html=\"body\"></div>\n</template>\n",
+        "<template>\n<!-- vyrn-ignore a11y/tabindex-positive: the tour sets the order -->\n<div tabindex=\"2\">x</div>\n</template>\n",
         "T.vyx",
     )
+    assert(contains(used, "a11y/tabindex-positive") == false)
     assert(contains(used, "hint/unused-waiver") == false)
     // The same marker over a plain div waives nothing.
     let stale = vhCheck(
         noPolicy(),
-        "<template>\n<!-- vyrn-ignore sec/raw-html: sanitized upstream -->\n<div>x</div>\n</template>\n",
+        "<template>\n<!-- vyrn-ignore a11y/tabindex-positive: the tour sets the order -->\n<div>x</div>\n</template>\n",
         "T.vyx",
     )
     assert(contains(stale, "hint/unused-waiver"))
@@ -2160,7 +2136,7 @@ test "a waiver that waives nothing fires; one that earns its keep does not" {
     // A marker may vouch for a marker: the audit rule is waivable like any other.
     let vouched = vhCheck(
         noPolicy(),
-        "<template>\n<!-- vyrn-ignore hint/unused-waiver: seasonal template, rule returns -->\n<!-- vyrn-ignore sec/raw-html -->\n<div>x</div>\n</template>\n",
+        "<template>\n<!-- vyrn-ignore hint/unused-waiver: seasonal template, rule returns -->\n<!-- vyrn-ignore a11y/tabindex-positive -->\n<div>x</div>\n</template>\n",
         "T.vyx",
     )
     assert(contains(vouched, "hint/unused-waiver") == false)

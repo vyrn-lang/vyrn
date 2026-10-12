@@ -31,7 +31,7 @@ fn examples() -> Array<Example> {
                 </span>
             </p>
             <div class="filetree" data-play-files></div>
-            <input type="file" multiple hidden="hidden" data-play-uploadinput accept=".vyrn,.txt,.md,.json"/>
+            <input type="file" multiple hidden="hidden" data-play-uploadinput aria-label="Upload files" accept=".vyrn,.txt,.md,.json"/>
         </aside>
         <div class="sash v" data-play-sash="side" aria-hidden="true"></div>
 

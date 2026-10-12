@@ -1,6 +1,7 @@
 import { substring, split, joinWith, fromBytesOr } from "std/strings"
 import { contains } from "std/strpred"
 import { includes } from "std/arrays"
+import { Markup, markupString } from "std/html"
 
 export fn rustWords() -> Array<String> {
     return ["fn", "let", "mut", "if", "else", "while", "for", "in", "impl", "self", "return", "true", "false", "struct", "enum", "match", "pub", "use", "mod", "trait", "where", "const", "static", "unsafe", "move", "ref", "dyn", "async", "await", "crate"]
@@ -65,7 +66,7 @@ fn span(cls: String, text: String) -> String {
     return "<span class=\"" + cls + "\">" + escapeHtml(text) + "</span>"
 }
 
-export fn highlightWith(src: String, words: Array<String>) -> String {
+export fn highlightWith(src: String, words: Array<String>) -> Markup {
     let raw = bytes(src)
     let mut out = ""
     let mut i = 0
@@ -114,15 +115,15 @@ export fn highlightWith(src: String, words: Array<String>) -> String {
             i = i + 1
         }
     }
-    return out
+    return TrustedMarkup(out)
 }
 
-export fn shellHtml(src: String) -> String {
+export fn shellHtml(src: String) -> Markup {
     let mut out: Array<String> = []
     for line in split(src, "\n") {
         out.push(shellLine(line))
     }
-    return joinWith(out, "\n")
+    return TrustedMarkup(joinWith(out, "\n"))
 }
 
 fn shellLine(line: String) -> String {
@@ -167,7 +168,7 @@ export fn terminalHtml(text: String) -> String {
     return joinWith(out, "\n")
 }
 
-export fn inlineCode(text: String) -> String {
+export fn inlineCode(text: String) -> Markup {
     let mut out = ""
     let mut plain = 0
     let mut open = 0 - 1
@@ -185,34 +186,34 @@ export fn inlineCode(text: String) -> String {
         }
         i = i + 1
     }
-    return out + escapeHtml(substring(text, plain, text.byteLength))
+    return TrustedMarkup(out + escapeHtml(substring(text, plain, text.byteLength)))
 }
 
 test "a backtick span becomes code and everything else is escaped" {
-    assertEq(inlineCode("plain"), "plain")
-    assertEq(inlineCode("a `match` b"), "a <code>match</code> b")
-    assertEq(inlineCode("`Option<T>`"), "<code>Option&lt;T&gt;</code>")
-    assertEq(inlineCode("a < b"), "a &lt; b")
-    assertEq(inlineCode("`a` and `b`"), "<code>a</code> and <code>b</code>")
-    assertEq(inlineCode("a ` b"), "a ` b")
+    assertEq(markupString(inlineCode("plain")), "plain")
+    assertEq(markupString(inlineCode("a `match` b")), "a <code>match</code> b")
+    assertEq(markupString(inlineCode("`Option<T>`")), "<code>Option&lt;T&gt;</code>")
+    assertEq(markupString(inlineCode("a < b")), "a &lt; b")
+    assertEq(markupString(inlineCode("`a` and `b`")), "<code>a</code> and <code>b</code>")
+    assertEq(markupString(inlineCode("a ` b")), "a ` b")
 }
 
 test "another language uses its own word list" {
-    assertEq(highlightWith("func x", goWords()), "<span class=\"k\">func</span> x")
-    assertEq(highlightWith("pub struct Age", rustWords()), "<span class=\"k\">pub</span> <span class=\"k\">struct</span> <span class=\"t\">Age</span>")
+    assertEq(markupString(highlightWith("func x", goWords())), "<span class=\"k\">func</span> x")
+    assertEq(markupString(highlightWith("pub struct Age", rustWords())), "<span class=\"k\">pub</span> <span class=\"k\">struct</span> <span class=\"t\">Age</span>")
 }
 
 test "a comment runs to the end of its line and no further" {
-    assertEq(highlightWith("// note\nfn", rustWords()), "<span class=\"c\">// note</span>\n<span class=\"k\">fn</span>")
+    assertEq(markupString(highlightWith("// note\nfn", rustWords())), "<span class=\"c\">// note</span>\n<span class=\"k\">fn</span>")
 }
 
 test "markup in a snippet cannot escape the pre" {
     assertEq(escapeHtml("<script>&"), "&lt;script&gt;&amp;")
-    assertEq(highlightWith("a < b", goWords()), "a &lt; b")
+    assertEq(markupString(highlightWith("a < b", goWords())), "a &lt; b")
 }
 
 test "an escaped quote does not end the string" {
-    assertEq(highlightWith("\"a\\\"b\" c", goWords()), "<span class=\"s\">&quot;a\\&quot;b&quot;</span> c")
+    assertEq(markupString(highlightWith("\"a\\\"b\" c", goWords())), "<span class=\"s\">&quot;a\\&quot;b&quot;</span> c")
 }
 
 test "a signature cannot break out of an attribute" {
@@ -221,22 +222,22 @@ test "a signature cannot break out of an attribute" {
 }
 
 test "a shell block marks the program, its flags and its comments" {
-    assertEq(shellHtml("cargo build --release -p vyrn-cli"), "<span class=\"k\">cargo</span> build <span class=\"n\">--release</span> <span class=\"n\">-p</span> vyrn-cli")
-    assertEq(shellHtml("cd vyrn/compiler"), "<span class=\"k\">cd</span> vyrn/compiler")
-    assertEq(shellHtml("mkdir out # first"), "<span class=\"k\">mkdir</span> out <span class=\"c\"># first</span>")
+    assertEq(markupString(shellHtml("cargo build --release -p vyrn-cli")), "<span class=\"k\">cargo</span> build <span class=\"n\">--release</span> <span class=\"n\">-p</span> vyrn-cli")
+    assertEq(markupString(shellHtml("cd vyrn/compiler")), "<span class=\"k\">cd</span> vyrn/compiler")
+    assertEq(markupString(shellHtml("mkdir out # first")), "<span class=\"k\">mkdir</span> out <span class=\"c\"># first</span>")
 }
 
 test "every line of a shell block gets its own program word" {
-    assertEq(shellHtml("a\nb"), "<span class=\"k\">a</span>\n<span class=\"k\">b</span>")
-    assertEq(shellHtml("  a b"), "  <span class=\"k\">a</span> b")
+    assertEq(markupString(shellHtml("a\nb")), "<span class=\"k\">a</span>\n<span class=\"k\">b</span>")
+    assertEq(markupString(shellHtml("  a b")), "  <span class=\"k\">a</span> b")
 }
 
 test "a connector starts another command, not another argument" {
-    assertEq(shellHtml("a x && b"), "<span class=\"k\">a</span> x &amp;&amp; <span class=\"k\">b</span>")
+    assertEq(markupString(shellHtml("a x && b")), "<span class=\"k\">a</span> x &amp;&amp; <span class=\"k\">b</span>")
 }
 
 test "a shell argument cannot carry markup out of the block" {
-    assertEq(shellHtml("run <x> &"), "<span class=\"k\">run</span> &lt;x&gt; &amp;")
+    assertEq(markupString(shellHtml("run <x> &")), "<span class=\"k\">run</span> &lt;x&gt; &amp;")
 }
 
 test "tool output is marked line by line and never coloured as code" {
@@ -244,13 +245,13 @@ test "tool output is marked line by line and never coloured as code" {
     assertEq(terminalHtml("<x>"), "<span class=\"ol\">&lt;x&gt;</span>")
 }
 
-export fn shellOutHtml(cmd: String, out: String) -> String {
+export fn shellOutHtml(cmd: String, out: String) -> Markup {
     let mut lines: Array<String> = []
     for line in split(out, "\n") {
         lines.push(demoLineHtml(line))
     }
     let prompt = if cmd.byteLength > 0 { "<span class=\"pr\">$</span> <span class=\"cx\">" + escapeHtml(cmd) + "</span>\n" } else { "" }
-    return prompt + joinWith(lines, "\n")
+    return TrustedMarkup(prompt + joinWith(lines, "\n"))
 }
 
 fn demoLineHtml(line: String) -> String {

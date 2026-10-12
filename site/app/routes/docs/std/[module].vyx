@@ -8,9 +8,10 @@ import { pageHeadWith } from "../../../nav"
 import { mdUrl, askClaudeUrl } from "../../../pagemd"
 import { TreeGroup, Pager, docsTree, pagerFor } from "../../../docshell"
 import { Icon } from "../../../icons"
+import { Markup } from "std/html"
 params { module: String }
 
-type ModuleDoc = { name: String, intro: String, entries: Array<ApiEntry> }
+type ModuleDoc = { name: String, intro: Markup, entries: Array<ApiEntry> }
 
 export fn head(d: ModuleDoc) -> Head {
     return pageHeadWith("std/" + d.name + " — Vyrn", apiBlurb(d.name))

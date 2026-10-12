@@ -246,7 +246,7 @@ fn an_inline_handler_fails_the_build_with_no_flag() {
 
 #[test]
 fn a_waiver_in_the_component_drops_one_report_and_only_that_one() {
-    let widget = "<script>\nprops { body: String, other: String }\n</script>\n\n<template>\n<div>\n    <!-- vyrn-ignore sec/raw-html: rendered from the repo's own markdown -->\n    <p v-html=\"body\"></p>\n    <p v-html=\"other\"></p>\n</div>\n</template>\n";
+    let widget = "<script>\nprops { body: String, other: String }\n</script>\n\n<template>\n<div>\n    <!-- vyrn-ignore a11y/tabindex-positive: the tour sets the order -->\n    <p tabindex=\"2\">{{ body }}</p>\n    <p tabindex=\"3\">{{ other }}</p>\n</div>\n</template>\n";
     let dir = project("waiver", widget, APP, None);
     let r = run_in(&dir, "run", "app.vyrn");
     assert_eq!(r.code, 0, "{}", r.stderr);
@@ -256,7 +256,7 @@ fn a_waiver_in_the_component_drops_one_report_and_only_that_one() {
         r.stderr
     );
     assert!(
-        r.stderr.contains("Card.vyx:9:") && r.stderr.contains("sec/raw-html:"),
+        r.stderr.contains("Card.vyx:9:") && r.stderr.contains("a11y/tabindex-positive:"),
         "the next one still does:\n{}",
         r.stderr
     );

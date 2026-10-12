@@ -6,7 +6,6 @@ import { examplesUsing } from "./stdgraph"
 import { blob } from "./repo"
 import { ghSpec, ghRaw } from "./github"
 import { hrefOf } from "./nav"
-import { escapeHtml } from "./code"
 import { blurbFrom } from "./meta"
 import { joinWith, substring, indexOf, lastIndexOf, trim, replace, lines, split } from "std/strings"
 import { startsWith, endsWith, contains } from "std/strpred"
@@ -110,13 +109,13 @@ export fn packageSource(slug: String) -> String {
 fn summaryOf(slug: String) -> String {
     let offered = offerOf(slug).path
     if offered.byteLength > 0 {
-        return escapeHtml(firstSentence(headerOf(examplesDir() + "/" + slug + "/" + offered)))
+        return firstSentence(headerOf(examplesDir() + "/" + slug + "/" + offered))
     }
     let entries = artifactsOf(slug)
     if entries.length == 0 {
         return ""
     }
-    return escapeHtml(firstSentence(headerOf(examplesDir() + "/" + slug + "/" + entries[0].entry)))
+    return firstSentence(headerOf(examplesDir() + "/" + slug + "/" + entries[0].entry))
 }
 
 fn headerOf(path: String) -> String {

@@ -68,7 +68,7 @@ fn graphStyle() -> String {
 
     <section class="band" id="graph">
         <h2>Import graph</h2>
-        <p v-html="graphIntro()"></p>
+        <p>{{ graphIntro() }}</p>
         <div class="plate">
             <div class="plate-head">
                 <span class="pill">Built</span>
