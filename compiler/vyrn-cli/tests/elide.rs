@@ -6848,3 +6848,93 @@ fn every_own_length_witness_keeps_its_index_and_traps_there() {
     }
     assert!(failures.is_empty(), "{}", failures.join("\n\n"));
 }
+
+/// A callee's `pre` bounds a parameter's elements by another parameter's
+/// length where every call row proves it.
+fn first(calls: &str) -> String {
+    format!(
+        "fn w(idx: Array<Int64>, xs: Array<Int64>) -> Int64 {{
+    if idx.length < 1 {{
+        return 0
+    }}
+    return xs[idx[0]]
+}}
+fn main() -> Int64 {{
+    let ys: Array<Int64> = [1, 2, 3]
+    print(w([0, 2], ys).toString())
+{calls}
+    return 0
+}}
+"
+    )
+}
+
+#[test]
+fn a_pre_bounds_a_parameters_elements_where_every_call_proves_it() {
+    let (dir, file) = modules(&first(""), &[]);
+    assert_eq!(
+        verdicts_on(&file, "w", "return xs[idx[0]]"),
+        ["proved", "proved"]
+    );
+    let (err, _) = run_oracle(&dir, &file, "w");
+    assert_eq!(err, "");
+    let (dir, file) = modules(&first("    print(w([5], ys).toString())"), &[]);
+    let (err, _) = run_oracle(&dir, &file, "w");
+    assert!(
+        err.contains("array index 5 out of bounds")
+            && !err.contains(vyrn_frontend::trap::PROVED_CHECK_FAILED),
+        "{err}"
+    );
+    assert_eq!(
+        verdicts_on(&file, "w", "return xs[idx[0]]"),
+        ["proved", "check"]
+    );
+}
+
+/// `g`'s `pre` rests on `f`'s: `f` is walked under its own `pre`, and a
+/// call row that breaks `f`'s takes `g`'s with it.
+fn caller_chain(calls: &str) -> String {
+    format!(
+        "fn g(idx: Array<Int64>, xs: Array<Int64>) -> Int64 {{
+    if idx.length < 1 {{
+        return 0
+    }}
+    return xs[idx[0]]
+}}
+fn f(idx: Array<Int64>, xs: Array<Int64>) -> Int64 {{
+    if idx.length < 1 {{
+        return 0
+    }}
+    return g(idx, xs) + xs[idx[0]]
+}}
+fn main() -> Int64 {{
+    let ys: Array<Int64> = [1, 2, 3]
+    print(f([0, 2], ys).toString())
+{calls}
+    return 0
+}}
+"
+    )
+}
+
+#[test]
+fn a_pre_rests_on_the_pre_of_the_caller_walked_under_it() {
+    let (dir, file) = modules(&caller_chain(""), &[]);
+    assert_eq!(
+        verdicts_on(&file, "g", "return xs[idx[0]]"),
+        ["proved", "proved"]
+    );
+    let (err, _) = run_oracle(&dir, &file, "g");
+    assert_eq!(err, "");
+    let (dir, file) = modules(&caller_chain("    print(f([5], ys).toString())"), &[]);
+    let (err, _) = run_oracle(&dir, &file, "g");
+    assert!(
+        err.contains("array index 5 out of bounds")
+            && !err.contains(vyrn_frontend::trap::PROVED_CHECK_FAILED),
+        "{err}"
+    );
+    assert_eq!(
+        verdicts_on(&file, "g", "return xs[idx[0]]"),
+        ["proved", "check"]
+    );
+}

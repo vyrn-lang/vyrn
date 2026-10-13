@@ -569,6 +569,20 @@ pub fn summaries<'a>(
         .filter(|(_, gs)| gs.iter().any(|g| !values[at[g]].pre.is_empty()))
         .map(|((_, b), _)| *b)
         .collect();
+    // A caller whose own `pre` holds element templates is walked under it
+    // below: a template of its callee may rest on one of its own.
+    let templated = |i: usize| {
+        let seq = |j: usize| {
+            j.checked_sub(1)
+                .is_some_and(|k| values[i].params.get(k) == Some(&Kind::Seq))
+        };
+        values[i].pre.iter().any(|f| hole(f, seq).is_some())
+    };
+    let under: Vec<(usize, &Body)> = (callers.iter())
+        .filter_map(|b| Some((at[&b.id?], *b)))
+        .filter(|(i, _)| templated(*i))
+        .collect();
+    callers.retain(|b| !under.iter().any(|(_, u)| std::ptr::eq(*u, *b)));
     callers.sort_by_key(|b| b.names.len());
     while !callers.is_empty() {
         let view = View {
@@ -585,10 +599,39 @@ pub fn summaries<'a>(
             &batch,
             |b| b.names.len(),
             || (),
-            |(), b| entries(b, decls, view),
+            |(), b| entries(b, decls, view, &BTreeSet::new()),
         );
         for (g, facts) in proved.into_iter().flatten() {
             values[g].pre.retain(|f| facts.contains(f));
+        }
+    }
+    // The greatest fixpoint over the callers walked under their own `pre`,
+    // from the facts left: each round walks every one under the `pre` the
+    // round before left, and a round that goes on drops a fact, so the
+    // rounds are at most the facts. Sound by induction on the depth of a
+    // frame: a frame's caller entered under its own `pre`, which proved the
+    // facts at the call row.
+    let mut changed = !under.is_empty();
+    while changed {
+        let view = View {
+            at: &at,
+            instances: &instances,
+            values: &values,
+            facts: &facts,
+            state: &state,
+            frames: &frames,
+        };
+        let proved = in_parallel(
+            &under,
+            |(_, b)| b.names.len(),
+            || (),
+            |(), (i, b)| entries(b, decls, view, &values[*i].pre),
+        );
+        changed = false;
+        for (g, facts) in proved.into_iter().flatten() {
+            let before = values[g].pre.len();
+            values[g].pre.retain(|f| facts.contains(f));
+            changed |= values[g].pre.len() != before;
         }
     }
     // A body decided without a `pre` is decided as an emitter would decide it
@@ -908,30 +951,61 @@ fn frame<'o>(
     }
 }
 
-/// The names whose element templates a walk keeps for a callee's rows
-/// ([`Frame`]): at each direct call row, the array arguments of a `result` or
-/// an `own` row, and the result of a `result` row.
-fn template_roots(ss: &[St], sums: View<'_>) -> Vec<Name> {
+/// The names whose element templates a summary may state, for
+/// [`relevant`]: each array parameter of the body's own `pre`, each integer
+/// array the body returns when its `post` candidates hold templates, and at
+/// each direct call row the array arguments a callee's `pre` or rows
+/// ([`Frame`]) name and the result its `post` or a `result` row bounds.
+fn template_roots(
+    b: &Body,
+    decls: &HashMap<String, TypeDecl>,
+    ss: &[St],
+    sums: View<'_>,
+    pre: Option<&BTreeSet<Lin>>,
+    post: bool,
+) -> Vec<Name> {
     let mut out = Vec::new();
-    each_row(ss, &mut |s| {
-        let (St::Let(_, rhs @ Rhs::Call { args, .. })
+    let seq_param = |j: usize| {
+        let p = j.checked_sub(1).and_then(|k| b.params.get(k));
+        p.is_some_and(|p| kind_of(&b.names[p.index()].ty, decls) == Kind::Seq)
+    };
+    for f in pre.into_iter().flatten() {
+        out.extend(hole(f, seq_param).map(|j| b.params[j.index() - 1]));
+    }
+    each_row(ss, &mut |s| match s {
+        St::Return {
+            value: Some(Val::Name(r)),
+            ..
+        } if post && index_elements(&b.names[r.index()].ty, decls) => out.push(*r),
+        St::Let(_, rhs @ Rhs::Call { args, .. })
         | St::Do {
             rhs: rhs @ Rhs::Call { args, .. },
             ..
-        }) = s
-        else {
-            return;
-        };
-        let mut result = false;
-        for (k, (a, _)) in args.iter().enumerate() {
-            if let Some(f) = sums.frame(rhs, k).filter(|f| f.result || f.own) {
-                out.extend(root(a));
-                result |= f.result;
+        } => {
+            let Some(g) = sums.call(rhs) else { return };
+            let sum = sums.get(g).map(|(_, s)| s);
+            // `Val(Name(0))` is an element only of an array result.
+            let result = matches!(s, St::Let(n, _) if index_elements(&b.names[n.index()].ty, decls))
+                && sum.is_some_and(|s| s.post.iter().any(|l| l.coef(Term::Val(Name(0))) != 0));
+            let mut any = result;
+            for (k, (a, _)) in args.iter().enumerate() {
+                let row = sums.frame(rhs, k).is_some_and(|f| f.result || f.own);
+                let named = sum.is_some_and(|s| {
+                    s.params.get(k) == Some(&Kind::Seq)
+                        && s.pre
+                            .iter()
+                            .any(|l| l.coef(Term::Val(Name(k as u32 + 1))) != 0)
+                });
+                if row || named {
+                    out.extend(root(a));
+                    any |= row;
+                }
+            }
+            if let (true, St::Let(n, _)) = (any, s) {
+                out.push(*n);
             }
         }
-        if let (true, St::Let(n, _)) = (result, s) {
-            out.push(*n);
-        }
+        _ => {}
     });
     out
 }
@@ -944,6 +1018,68 @@ fn each_row<'s>(ss: &'s [St], f: &mut dyn FnMut(&'s St)) {
         f(s);
         s.lists().for_each(|l| each_row(l, f));
     }
+}
+
+/// The interface name whose element the summary fact `l` bounds: the one
+/// whose value it names among those `seq` marks as arrays. Such a fact is
+/// an element template with that value as its hole ([`State::elems`]).
+fn hole(l: &Lin, seq: impl Fn(usize) -> bool) -> Option<Name> {
+    l.terms.iter().find_map(|(t, _)| match t {
+        Term::Val(n) if seq(n.index()) => Some(*n),
+        _ => None,
+    })
+}
+
+/// The index array names an element of which a row of `ss` passes to a
+/// direct call (`k = a[0]` before `flip(a, k)`): the callee's `pre` may bound
+/// the argument by the array's length. A name a `let` binds to another
+/// (`let b = read a`, `let a = p`) reads as that one, and a name an element
+/// is stored into holds the element.
+fn elements_passed(b: &Body, decls: &HashMap<String, TypeDecl>, ss: &[St]) -> BTreeSet<Name> {
+    let mut alias: BTreeMap<Name, Name> = BTreeMap::new();
+    let mut element: BTreeMap<Name, Name> = BTreeMap::new();
+    for (s, _) in rows(ss) {
+        let of = |a: Name| alias.get(&a).copied().unwrap_or(a);
+        match s {
+            St::Let(
+                n,
+                Rhs::Read(Place::Name(a)) | Rhs::Take(Place::Name(a)) | Rhs::Val(Val::Name(a)),
+            ) => _ = alias.insert(*n, of(*a)),
+            St::Let(n, Rhs::Read(Place::Elem(a, _))) => {
+                if let Place::Name(a) = **a {
+                    element.insert(*n, of(a));
+                }
+            }
+            St::Store {
+                place: Place::Name(k),
+                value: Val::Name(v),
+                ..
+            } => {
+                if let Some(a) = element.get(v).copied() {
+                    element.insert(*k, a);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut out = BTreeSet::new();
+    for (s, _) in rows(ss) {
+        if let St::Let(_, rhs @ Rhs::Call { args, .. })
+        | St::Do {
+            rhs: rhs @ Rhs::Call { args, .. },
+            ..
+        } = s
+        {
+            if direct_call(rhs).is_some() {
+                out.extend(
+                    args.iter()
+                        .filter_map(|(a, _)| element.get(&root(a)?).copied()),
+                );
+            }
+        }
+    }
+    out.retain(|a| index_elements(&b.names[a.index()].ty, decls));
+    out
 }
 
 /// Whether some return of `b` hands back an index array ([`index_elements`]).
@@ -2335,6 +2471,17 @@ fn templates(body: &Body, decls: &HashMap<String, TypeDecl>, needed: &BTreeSet<i
                 Term::Len,
             );
             post.extend(consumed.iter().filter_map(|a| a.sub(&r)));
+            // Element templates of an index array result: its element,
+            // `Val(Name(0))`, at least zero and below a length or an integer
+            // parameter ([`State::elems`]).
+            if returns_index_array(body, decls) {
+                let e = Lin::of(Term::Val(Name(0)));
+                post.insert(e.clone());
+                post.extend(r.sub(&e).and_then(|l| l.plus(-1)));
+                for a in seqs.iter().chain(&ints) {
+                    post.extend(a.sub(&e).and_then(|l| l.plus(-1)));
+                }
+            }
             // A bound the body makes: a needed constant, or an integer
             // parameter in `ints`.
             let param = |n: Name| {
@@ -2575,6 +2722,42 @@ fn entry_templates(
                 out.extend(a.sub(p).and_then(|l| l.plus(-1)));
             }
         }
+        // Element templates of an index array parameter whose element
+        // indexes a kept check ([`element_seeds`]): its element,
+        // `Val(Name(k + 1))`, at least zero and below a length or an integer
+        // parameter, the indexed parameter's length and its own included
+        // ([`State::elems`]).
+        let indexed = |k: &usize| index_elements(&body.names[body.params[*k].index()].ty, decls);
+        if !(0..params.len()).any(|k| indexed(&k)) {
+            return out;
+        }
+        let param = |n: &Name| body.params.iter().position(|p| p == n);
+        let seeds = element_seeds(body, decls, ss);
+        let mut bounds = seqs.clone();
+        for (_, target, _) in &seeds {
+            if let Some(j) = (place_root(target).filter(|_| matches!(target, Place::Name(_))))
+                .and_then(|t| param(&t))
+            {
+                bounds.push(Lin::of(Term::Len(Name(j as u32 + 1))));
+            }
+        }
+        bounds.extend(ints.iter().cloned());
+        // So does a parameter whose element the body passes to a call.
+        let passed = elements_passed(body, decls, ss);
+        let rows: BTreeSet<usize> = (seeds.iter().filter_map(|(x, ..)| param(x)))
+            .chain((0..params.len()).filter(|&k| passed.contains(&body.params[k])))
+            .filter(indexed)
+            .collect();
+        for k in rows {
+            let e = Lin::of(Term::Val(Name(k as u32 + 1)));
+            out.insert(e.clone());
+            // A permutation's elements lie below its own length.
+            let own = Lin::of(Term::Len(Name(k as u32 + 1)));
+            for a in bounds.iter().chain([&own]) {
+                out.extend(a.sub(&e));
+                out.extend(a.sub(&e).and_then(|l| l.plus(-1)));
+            }
+        }
         out
     };
     if candidates(&body.stmts).is_empty() {
@@ -2618,15 +2801,16 @@ fn returns(
 
 /// Per callee of `body` with a `pre`, by index: the facts of it every live
 /// call row of `body` proves, walking it with the callees' facts `sums`
-/// states and none at its own entry.
+/// states and `pre` at its own entry.
 fn entries(
     body: &Body,
     decls: &HashMap<String, TypeDecl>,
     sums: View<'_>,
+    pre: &BTreeSet<Lin>,
 ) -> BTreeMap<usize, BTreeSet<Lin>> {
     let mut stmts = body.stmts.clone();
     let mut w = Walk::new(body, decls, sums, &stmts, Some(None), false);
-    let st = w.entry(&BTreeSet::new());
+    let st = w.entry(pre);
     w.block(st, &mut stmts);
     w.entered
 }
@@ -2874,7 +3058,17 @@ impl<'a> Walk<'a> {
             false => element_seeds(body, decls, stmts),
         };
         let mut roots: BTreeSet<Name> = seeds.iter().map(|(x, ..)| *x).collect();
-        roots.extend(template_roots(stmts, sums));
+        let own_pre = body.id.and_then(|f| sums.get(f)).map(|(_, s)| &s.pre);
+        let post_templates =
+            (post.as_ref()).is_some_and(|c| c.iter().any(|l| l.coef(Term::Val(Name(0))) != 0));
+        roots.extend(template_roots(
+            body,
+            decls,
+            stmts,
+            sums,
+            own_pre,
+            post_templates,
+        ));
         let ghosted: Vec<(usize, Name)> = match ghosts {
             true => (body.params.iter().copied().enumerate())
                 .filter(|(_, p)| index_elements(&body.names[p.index()].ty, decls))
@@ -2940,6 +3134,7 @@ impl<'a> Walk<'a> {
             w.elem_cands
                 .extend(ghost_pair(k, p).into_iter().map(|t| (p, t)));
         }
+        w.template_cands(stmts, own_pre, post_templates);
         if seeds.is_empty() && w.elem_cands.is_empty() {
             return w;
         }
@@ -2968,6 +3163,71 @@ impl<'a> Walk<'a> {
             row_writes(s).for_each(|n| _ = w.arrays.remove(&n));
         }
         w
+    }
+
+    /// Adds to [`Walk::elem_cands`] the templates a summary states: the
+    /// body's own `pre` of each array parameter, its `post` candidates of
+    /// each array it returns, and each callee's `pre` of the array argument
+    /// at each call row.
+    fn template_cands(&mut self, ss: &[St], pre: Option<&BTreeSet<Lin>>, post: bool) {
+        let params = &self.body.params;
+        let seq = |j: usize| {
+            let p = j.checked_sub(1).and_then(|k| params.get(k));
+            p.is_some_and(|p| self.kind(*p) == Kind::Seq)
+        };
+        let mut out: Vec<(Name, Lin)> = Vec::new();
+        for f in pre.into_iter().flatten() {
+            if let Some(j) = hole(f, seq) {
+                let p = params[j.index() - 1];
+                out.extend(f.map(|t| self.param_term(t)).map(|l| (p, l)));
+            }
+        }
+        if let (true, Some(cands)) = (post, self.post.as_ref()) {
+            let hole = Term::Val(Name(0));
+            each_row(ss, &mut |s| {
+                let St::Return {
+                    value: Some(Val::Name(r)),
+                    ..
+                } = s
+                else {
+                    return;
+                };
+                if !index_elements(&self.body.names[r.index()].ty, self.decls) {
+                    return;
+                }
+                let at = |t: Term| match t {
+                    _ if t == hole => Some(Lin::of(Term::Val(*r))),
+                    Term::Len(Name(0)) => Some(Lin::of(Term::Len(*r))),
+                    _ => self.param_term(t),
+                };
+                let ts = cands.iter().filter(|c| c.coef(hole) != 0);
+                out.extend(ts.filter_map(|c| c.map(at)).map(|l| (*r, l)));
+            });
+        }
+        each_row(ss, &mut |s| {
+            let Some((_, sum, args)) = self.sums.pre(s) else {
+                return;
+            };
+            let seq = |j: usize| {
+                j.checked_sub(1)
+                    .is_some_and(|k| sum.params.get(k) == Some(&Kind::Seq))
+            };
+            for f in &sum.pre {
+                let Some(j) = hole(f, seq) else { continue };
+                let Some(a) = args.get(j.index() - 1).and_then(|(a, _)| root(a)) else {
+                    continue;
+                };
+                let at = |t: Term| {
+                    if t == Term::Val(j) {
+                        return Some(Lin::of(Term::Val(a)));
+                    }
+                    let k = t.name()?.index().checked_sub(1)?;
+                    self.arg(t, &args.get(k)?.0, *sum.params.get(k)?)
+                };
+                out.extend(f.map(at).map(|l| (a, l)));
+            }
+        });
+        self.elem_cands.extend(out);
     }
 
     /// The array a place's elements are: an array name, or the array a
@@ -3117,6 +3377,20 @@ impl<'a> Walk<'a> {
         }
     }
 
+    /// Whether a template of array `a` in `st` implies `want`, a template of
+    /// `a` too: the two differ by what `st` proves at least zero, with the
+    /// same coefficient on the hole.
+    fn implied(&self, st: &State, a: Name, want: &Lin) -> bool {
+        let hole = Term::Val(a);
+        let k = want.coef(hole);
+        let prover = st.prover();
+        let theirs = st.elems.get(&a).into_iter().flatten();
+        (k != 0)
+            && (theirs.filter(|t| t.coef(hole) == k))
+                .filter_map(|t| want.sub(t))
+                .any(|d| prover.ge0_deep(&d).is_some_and(|cert| cert.verify(st, &d)))
+    }
+
     /// Keeps of array `a`, whose element `place` takes `value`, the
     /// templates `value` meets.
     fn element_store(&self, st: &mut State, a: Name, value: &Val) {
@@ -3149,9 +3423,18 @@ impl<'a> Walk<'a> {
                 Term::Col(..) | Term::Field(..) | Term::Inner(..) | Term::Ghost(..) => None,
             }
         };
+        let seq = |j: usize| {
+            let p = j.checked_sub(1).and_then(|k| params.get(k));
+            p.is_some_and(|p| self.kind(*p) == Kind::Seq)
+        };
         for f in pre {
-            if let Some(l) = f.map(at) {
-                st.assume(&l);
+            let Some(l) = f.map(at) else { continue };
+            match hole(f, seq) {
+                Some(j) => {
+                    let p = params[j.index() - 1];
+                    st.elems.entry(p).or_default().insert(l);
+                }
+                None => st.assume(&l),
             }
         }
         if self.rows.is_some() {
@@ -4417,6 +4700,22 @@ impl<'a> Walk<'a> {
                 .iter()
                 .any(|(t, _)| t.name().is_some_and(|n| written.contains(&n)))
         };
+        if self.kind(n) == Kind::Seq {
+            let hole = Term::Val(Name(0));
+            let ts: Vec<Lin> = (s.post.iter())
+                .filter(|f| f.coef(hole) != 0)
+                .filter_map(|f| {
+                    f.map(|t| match t == hole {
+                        true => Some(Lin::of(Term::Val(n))),
+                        false => at(t),
+                    })
+                })
+                .filter(free)
+                .collect();
+            if !ts.is_empty() {
+                st.elems.entry(n).or_default().extend(ts);
+            }
+        }
         let facts: Vec<Lin> = s
             .post
             .iter()
@@ -4472,8 +4771,28 @@ impl<'a> Walk<'a> {
             self.arg(t, &args.get(k)?.0, *s.params.get(k)?)
         };
         let holds = |g: &Lin| st.ge0(g).is_some_and(|cert| cert.verify(st, g));
+        let seq = |j: usize| {
+            j.checked_sub(1)
+                .is_some_and(|k| s.params.get(k) == Some(&Kind::Seq))
+        };
+        // A template holds where the argument's own templates imply it.
+        let met = |f: &Lin, j: Name| {
+            let Some(a) = (args.get(j.index() - 1)).and_then(|(a, _)| root(a)) else {
+                return false;
+            };
+            let a = self.arrays.get(&a).copied().unwrap_or(a);
+            let hole = Term::Val(j);
+            let want = f.map(|t| match t == hole {
+                true => Some(Lin::of(Term::Val(a))),
+                false => at(t),
+            });
+            want.is_some_and(|w| self.implied(st, a, &w))
+        };
         let kept = (self.entered.get(&i).unwrap_or(&s.pre).iter())
-            .filter(|f| f.map(at).is_some_and(|g| holds(&g)))
+            .filter(|f| match hole(f, seq) {
+                Some(j) => met(f, j),
+                None => f.map(at).is_some_and(|g| holds(&g)),
+            })
             .cloned()
             .collect();
         self.entered.insert(i, kept);
@@ -4569,8 +4888,25 @@ impl<'a> Walk<'a> {
             }
         };
         let holds = |g: &Lin| st.ge0(g).is_some_and(|cert| cert.verify(st, g));
+        // An array result's templates hold where its own imply them.
+        let array = match value {
+            Some(Val::Name(m)) if self.kind(*m) == Kind::Seq => self.array_of(&Place::Name(*m)),
+            _ => None,
+        };
+        let hole = Term::Val(Name(0));
+        let met = |c: &Lin| {
+            let Some(a) = array else { return false };
+            let want = c.map(|t| match t == hole {
+                true => Some(Lin::of(Term::Val(a))),
+                false => at(t),
+            });
+            want.is_some_and(|w| self.implied(st, a, &w))
+        };
         let kept = (cands.into_iter())
-            .filter(|c| c.map(at).is_some_and(|g| holds(&g)))
+            .filter(|c| match array.is_some() && c.coef(hole) != 0 {
+                true => met(c),
+                false => c.map(at).is_some_and(|g| holds(&g)),
+            })
             .collect();
         self.post = Some(kept);
     }
