@@ -388,6 +388,91 @@ fn a_some_payload_proves_its_callers_index() {
     assert!(failures.is_empty(), "{}", failures.join("\n\n"));
 }
 
+/// A function whose every `Some` return wraps a record with an integer field
+/// below a parameter's length states that of the payload's field, and the
+/// caller's `if let` binder takes it. A path that wraps the length itself, a
+/// `None` name a later store fills with it, a store into the field, a
+/// `modify` call that writes it, and a `modify` call on the caller's
+/// `Option` keep the caller's check.
+#[test]
+fn a_some_record_payload_proves_its_callers_index() {
+    let span = "type Span = { at: Int64, end: Int64 }
+fn shift(s: modify Span, n: Int64) {
+    s.at = n
+}
+fn reset(o: modify Option<Span>, n: Int64) {
+    o = Some(Span { at: n, end: n })
+}
+";
+    let find = "fn find(xs: Array<Int64>, v: Int64) -> Option<Span> {
+    let mut k = 0
+    while k < xs.length {
+        if xs[k] == v {
+            return Some(Span { at: k, end: k + 1 })
+        }
+        k = k + 1
+    }
+    return None
+}
+";
+    let w = "fn w(xs: Array<Int64>, v: Int64) -> Int64 {
+    if let Some(s) = find(xs, v) {
+        return xs[s.at]
+    }
+    return 0
+}
+";
+    let proof = format!("{span}{find}{w}");
+    assert_eq!(verdicts(&proof, "w"), ["proved array-index"]);
+    let (err, _) = oracle(&proof, "    print(w(xs, 20).toString())", "w");
+    assert_eq!(err, "");
+    let early = |path: &str| {
+        let at = "    let mut k = 0\n";
+        find.replace(at, &format!("    if v < 0 {{\n{path}    }}\n{at}"))
+    };
+    let finds = [
+        early("        return Some(Span { at: xs.length, end: xs.length })\n"),
+        "fn find(xs: Array<Int64>, v: Int64) -> Option<Span> {
+    let mut r: Option<Span> = None
+    if v < 0 {
+        r = Some(Span { at: xs.length, end: xs.length })
+    }
+    return r
+}
+"
+        .to_string(),
+        early("        let mut s = Span { at: 0, end: 1 }\n        s.at = xs.length\n        return Some(s)\n"),
+        early("        let mut s = Span { at: 0, end: 1 }\n        shift(s, xs.length)\n        return Some(s)\n"),
+    ];
+    let reset = "fn w(xs: Array<Int64>, v: Int64) -> Int64 {
+    let mut o = find(xs, v)
+    if v < 0 {
+        reset(o, xs.length)
+    }
+    if let Some(s) = o {
+        return xs[s.at]
+    }
+    return 0
+}
+";
+    let witnesses =
+        (finds.iter().map(|f| format!("{span}{f}{w}"))).chain([format!("{span}{find}{reset}")]);
+    let mut failures = Vec::new();
+    for src in witnesses {
+        let rows = verdicts(&src, "w");
+        if rows != ["check array-index"] {
+            failures.push(format!("{src}\nrows: {rows:?}"));
+        }
+        let (err, _) = oracle(&src, "    print(w(xs, 0 - 1).toString())", "w");
+        if !err.contains("array index 3 out of bounds")
+            || err.contains(vyrn_frontend::trap::PROVED_CHECK_FAILED)
+        {
+            failures.push(format!("{src}\nran: {err}"));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n\n"));
+}
+
 /// A function whose loop, bound by an integer parameter, pushes to or
 /// stores into every index of the array it returns states that its result is
 /// at least that long; a path that makes one entry fewer, a store the loop
