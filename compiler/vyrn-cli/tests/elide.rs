@@ -7084,3 +7084,57 @@ fn a_pre_takes_a_record_fact_through_the_borrows_of_two_fields() {
         );
     }
 }
+
+/// A counter that steps by one up to a length equals it at the loop's exit,
+/// so an array the loop pushes in step is as long as the bound: `seen[k]`
+/// with `k` below `p.length` is in range.
+#[test]
+fn a_loop_up_to_a_length_fills_an_array_as_long() {
+    let src = "fn marks(p: Array<Int64>) -> Int64 {
+    let mut seen: Array<Bool> = []
+    let mut i = 0
+    while i < p.length {
+        seen.push(false)
+        i = i + 1
+    }
+    let mut n = 0
+    let mut k = 0
+    while k < p.length {
+        if !seen[k] {
+            n = n + 1
+        }
+        k = k + 1
+    }
+    return n
+}
+";
+    assert_eq!(verdicts(src, "marks"), ["proved array-index"]);
+}
+
+/// An unrolled loop steps its counter twice a turn and can pass the bound,
+/// so the head keeps no upper bound on it and the exit states the pushed
+/// length only from below: `seen` is one longer than an odd `p`, and
+/// `p[seen.length - 1]` traps.
+#[test]
+fn a_loop_that_steps_past_a_length_keeps_the_check() {
+    let src = "fn pairs(p: Array<Int64>) -> Int64 {
+    let mut seen: Array<Int64> = []
+    let mut i = 0
+    while i < p.length {
+        seen.push(0)
+        i = i + 1
+        seen.push(0)
+        i = i + 1
+    }
+    return p[seen.length - 1]
+}
+";
+    assert_eq!(verdicts(src, "pairs"), ["check array-index"]);
+    let (err, rows) = oracle(src, "    print(pairs(xs).toString())", "pairs");
+    assert!(
+        err.contains("array index 3 out of bounds")
+            && !err.contains(vyrn_frontend::trap::PROVED_CHECK_FAILED),
+        "{err}"
+    );
+    assert_eq!(rows, ["10 0 array-index kept 1"]);
+}

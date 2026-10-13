@@ -5673,18 +5673,38 @@ impl<'a> Walk<'a> {
         // The counter of a loop bound by a literal is at least the bound at
         // the exit. A length the counter bounds then has the literal as its
         // own bound, which a goal would otherwise need a third premise for.
-        if let Some((_, k, _)) =
-            bound_test(body).filter(|(_, k, b)| b.is_const() && self.slot[k.index()].relevant)
-        {
+        // A counter that steps up to a length equals it at the exit, where
+        // the head kept it at most the length ([`Walk::in_step`]), so a
+        // length the counter bounds from either side has the bound's.
+        if let Some((_, k, b)) = bound_test(body).filter(|(_, k, b)| {
+            (b.is_const() || measured(body, b).is_some()) && self.slot[k.index()].relevant
+        }) {
             let k = Term::Val(k);
-            let low = (exit.facts.iter()).find(|f| f.terms == [(k, 1)]).cloned();
+            let len = (measured(body, &b))
+                .and_then(|p| self.head_length(body, p))
+                .and_then(|l| exit.norm(&l));
+            let (low, high) = match len {
+                None => {
+                    let low = (exit.facts.iter()).find(|f| f.terms == [(k, 1)]).cloned();
+                    (low, None)
+                }
+                Some(l) => {
+                    let held = |f: Option<Lin>| f.filter(|f| exit.facts.contains(f));
+                    let low = held(Lin::of(k).sub(&l));
+                    (low, held(l.sub(&Lin::of(k))))
+                }
+            };
             let length = |f: &Lin| (f.terms.iter()).any(|(t, _)| matches!(t, Term::Len(_)));
             // A bound the state already holds as one fact adds nothing.
             let held = |f: &Lin| (exit.facts.iter()).any(|g| g.terms == f.terms && g.c <= f.c);
             let bounded: Vec<Lin> = (exit.facts.iter())
-                .filter(|f| f.terms.len() == 2 && f.coef(k) < 0 && length(f))
-                .filter_map(|f| f.add(&low.as_ref()?.scale(-f.coef(k))?))
-                .filter(|f| !held(f))
+                .filter(|f| f.terms.len() == 2 && length(f))
+                .filter_map(|f| match f.coef(k) {
+                    c if c < 0 => f.add(&low.as_ref()?.scale(-c)?),
+                    c if c > 0 => f.add(&high.as_ref()?.scale(c)?),
+                    _ => None,
+                })
+                .filter(|f| !f.is_const() && !held(f))
                 .collect();
             bounded.iter().for_each(|f| exit.assume(f));
         }
@@ -5709,18 +5729,20 @@ impl<'a> Walk<'a> {
     /// or fields of a record name, both of which a check can depend on: a
     /// loop that grows them in step keeps them as equal as it entered. The
     /// counter of a loop with a bound ([`bound_test`]) takes part as its
-    /// value; in a walk that proves a result, only for a literal or
-    /// parameter bound: any bound there cost 1.1% more `elide: summaries`
+    /// value; in a walk that proves a result, only for a literal, parameter
+    /// or length bound: any bound there cost 1.1% more `elide: summaries`
     /// allocations on the site export and proved no row. [`Walk::settle`]
     /// keeps a candidate only where the entry and every turn prove it.
     fn in_step(&self, body: &[St], stored: &BTreeSet<Name>) -> Vec<Lin> {
         let relevant = |n: &Name| self.slot[n.index()].relevant;
         let param =
             |b: &Lin| matches!(b.terms[..], [(Term::Val(p), 1)] if self.body.params.contains(&p));
-        let counter = (bound_test(body)
-            .filter(|(.., b)| self.post.is_none() || b.is_const() || param(b)))
-        .map(|(_, k, _)| k)
-        .filter(relevant);
+        let test = bound_test(body).filter(|(_, k, _)| relevant(k));
+        let counter = (test.as_ref())
+            .filter(|(.., b)| {
+                self.post.is_none() || b.is_const() || param(b) || measured(body, b).is_some()
+            })
+            .map(|(_, k, _)| *k);
         let term = |(n, f): &(Name, Option<&str>)| match (f, Some(*n) == counter) {
             (None, true) => Some(Term::Val(*n)),
             (None, false) => (relevant(n) && self.kind(*n) == Kind::Seq).then_some(Term::Len(*n)),
@@ -5746,6 +5768,13 @@ impl<'a> Walk<'a> {
             .filter_map(|(n, p)| Some((term(n)?, p)))
             .collect();
         let mut out = Vec::new();
+        // A counter bound by a length it steps up to stays at most that
+        // length: `while i < xs.length { ys.push(..) ; i = i + 1 }` leaves
+        // `ys` as long as `xs`.
+        if let (Some(k), Some((.., b))) = (counter, &test) {
+            let len = measured(body, b).and_then(|p| self.head_length(body, p));
+            out.extend(len.and_then(|l| l.sub(&Lin::of(Term::Val(k)))));
+        }
         for (i, (a, pa)) in seqs.iter().enumerate() {
             for (b, pb) in &seqs[i + 1..] {
                 if pa == pb {
@@ -6183,8 +6212,17 @@ fn writes_of(ss: &[St], n: Name) -> usize {
 /// The test name, the counter `k` and its bound `c` of a loop `body` that
 /// opens with `if k < c else break`, or `if k <= c - 1 else break`, where
 /// `c` is an integer literal or a name's value: `k` is below `c` on every
-/// turn.
+/// turn. A `let` that reads the bound as a length may come first
+/// ([`measured`]).
 fn bound_test(body: &[St]) -> Option<(Name, Name, Lin)> {
+    let (body, measure) = match body {
+        [St::Let(l, Rhs::Read(Place::Field(_, f))), rest @ ..]
+            if f == "length" || f == "byteLength" =>
+        {
+            (rest, Some(*l))
+        }
+        _ => (body, None),
+    };
     let [St::Let(t, Rhs::Prim(Op::Bin(op @ (BinOp::Lt | BinOp::LtEq)), vs, _)), St::If {
         cond: Val::Name(c),
         then,
@@ -6199,8 +6237,27 @@ fn bound_test(body: &[St]) -> Option<(Name, Name, Lin)> {
         ([Val::Name(k), Val::Name(n)], [], [St::Break { .. }]) => (k, Lin::of(Term::Val(*n))),
         _ => return None,
     };
+    if measure.is_some_and(|l| bound != Lin::of(Term::Val(l))) {
+        return None;
+    }
     let bound = bound.plus(i64::from(*op == BinOp::LtEq))?;
     (c == t).then_some((*t, *k, bound))
+}
+
+/// The place whose length the loop `body` reads as its bound `b` in its
+/// first row ([`bound_test`]).
+fn measured<'b>(body: &'b [St], b: &Lin) -> Option<&'b Place> {
+    let [(Term::Val(n), 1)] = b.terms[..] else {
+        return None;
+    };
+    match body.first() {
+        Some(St::Let(m, Rhs::Read(Place::Field(base, f))))
+            if *m == n && b.c == 0 && (f == "length" || f == "byteLength") =>
+        {
+            Some(base)
+        }
+        _ => None,
+    }
 }
 
 fn any_continue(ss: &[St]) -> bool {
@@ -6514,9 +6571,11 @@ fn mark(
                 mark(body, decls, els, rel, goals, linked, arrays);
             }
             St::Loop { body: l, .. } | St::Block { body: l, .. } => {
-                // A loop bound by a literal counts what it stores
+                // A loop bound by a literal or a length counts what it stores
                 // ([`Walk::in_step`]).
-                if let Some((t, ..)) = bound_test(l).filter(|(.., b)| b.is_const()) {
+                if let Some((t, ..)) =
+                    bound_test(l).filter(|(.., b)| b.is_const() || measured(l, b).is_some())
+                {
                     let mut stored = BTreeSet::new();
                     stores(l, &mut stored);
                     let seq = |n: &Name| kind_of(&body.names[n.index()].ty, decls) == Kind::Seq;
