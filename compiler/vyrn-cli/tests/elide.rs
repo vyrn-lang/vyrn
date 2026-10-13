@@ -7138,3 +7138,118 @@ fn a_loop_that_steps_past_a_length_keeps_the_check() {
     );
     assert_eq!(rows, ["10 0 array-index kept 1"]);
 }
+
+/// A program and a scan of it: `newScan` fills `mark` to `p.code.length`,
+/// and `walk` passes both on to `visit`, which indexes the scan below the
+/// program's length, and to `count`, which indexes the program below the
+/// scan's. `MARK`, `RESET` and `CALL` are the rows a witness changes.
+const SCAN: &str = "type Prog = { code: Array<Int64> }
+type Scan = { mark: Array<Int64>, gen: Int64 }
+fn newScan(p: Prog) -> Scan {
+    let mut mark: Array<Int64> = []
+    let mut i = 0
+    while i < p.code.length {
+        mark.push(0)
+        i = i + 1
+    }
+    MARK
+    return Scan { mark: mark, gen: 1 }
+}
+fn reset(sc: modify Scan) {
+    RESET
+}
+fn visit(p: Prog, sc: modify Scan, pc: Int64) {
+    if pc < 0 || pc >= p.code.length {
+        return
+    }
+    sc.mark[pc] = sc.gen
+}
+fn count(p: Prog, sc: Scan) -> Int64 {
+    let mut n = 0
+    let mut pc = 0
+    while pc < sc.mark.length {
+        n = n + p.code[pc]
+        pc = pc + 1
+    }
+    return n
+}
+fn walk(p: Prog, sc: modify Scan) -> Int64 {
+    reset(sc)
+    let mut pc = 0
+    while pc < 10 {
+        visit(p, sc, pc)
+        pc = pc + 1
+    }
+    return count(p, sc)
+}
+fn main() -> Int64 {
+    let p = Prog { code: [1, 2, 3, 4, 5] }
+    let mut sc = newScan(p)
+    CALL
+    return 0
+}
+";
+
+/// [`SCAN`] with its three rows.
+fn scan(mark: &str, reset: &str, call: &str) -> (Scratch, std::path::PathBuf) {
+    let src = SCAN
+        .replace("MARK", mark)
+        .replace("RESET", reset)
+        .replace("CALL", call);
+    modules(&src, &[])
+}
+
+/// `newScan`'s result is as long as its program, a fact over two records
+/// that `walk`'s `pre` carries to `visit` and `count`.
+#[test]
+fn a_length_fact_across_two_records_crosses_calls() {
+    let (dir, file) = scan(
+        "i = i + 0",
+        "sc.gen = sc.gen + 1",
+        "print(walk(p, sc).toString())",
+    );
+    assert_eq!(verdicts_on(&file, "visit", "sc.mark[pc] ="), ["proved"]);
+    assert_eq!(
+        verdicts_on(&file, "count", "n = n + p.code[pc]"),
+        ["proved"]
+    );
+    let (err, _) = run_oracle(&dir, &file, "visit");
+    assert_eq!(err, "");
+}
+
+/// Each breaks the fact on one path and traps where it reads it: a scan
+/// passed with another program, a scan whose `mark` a pop shortens, and a
+/// callee that replaces `mark`.
+#[test]
+fn every_two_record_witness_keeps_its_index_and_traps_there() {
+    let cases = [
+        (
+            ("i = i + 0", "sc.gen = sc.gen + 1"),
+            "let q = Prog { code: [7] }\n    print(walk(q, sc).toString())",
+            ("count", "n = n + p.code[pc]", "array index 1 out of bounds"),
+        ),
+        (
+            ("mark.pop()", "sc.gen = sc.gen + 1"),
+            "print(walk(p, sc).toString())",
+            ("visit", "sc.mark[pc] =", "array index 4 out of bounds"),
+        ),
+        (
+            ("i = i + 0", "sc.mark = [0]"),
+            "print(walk(p, sc).toString())",
+            ("visit", "sc.mark[pc] =", "array index 1 out of bounds"),
+        ),
+    ];
+    for ((mark, reset), call, (body, text, trap)) in cases {
+        let (dir, file) = scan(mark, reset, call);
+        assert_eq!(
+            verdicts_on(&file, body, text),
+            ["check"],
+            "{mark} {reset} {call}"
+        );
+        let (err, _) = run_oracle(&dir, &file, body);
+        assert!(
+            err.contains(trap) && !err.contains(vyrn_frontend::trap::PROVED_CHECK_FAILED),
+            "{mark} {reset} {call}\n{err}"
+        );
+    }
+}

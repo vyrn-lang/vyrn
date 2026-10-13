@@ -111,8 +111,9 @@ fn walk(body: &mut Body, decls: &HashMap<String, TypeDecl>, sums: View<'_>) -> V
 pub struct Summary {
     /// Per parameter, its kind; a call whose arguments differ states nothing.
     params: Vec<Kind>,
-    /// For a Bool result, per parameter, its type: a field's index means the
-    /// same field only in an argument of the same type. Empty otherwise.
+    /// Where a fact names a parameter's field, per parameter, its type: a
+    /// field's index means the same field only in an argument of the same
+    /// type. Empty otherwise.
     types: Vec<Type>,
     /// Facts over the parameters that every call row proves of its
     /// arguments before the call. Empty for a body anything else may enter.
@@ -419,9 +420,12 @@ fn instance(instances: &Instances, rhs: &Rhs) -> Option<FnId> {
 /// from. Any other body keeps no `post`.
 ///
 /// Then a body of `closed` that [`entered`] keeps takes the candidates of
-/// [`entry_templates`] as its `pre`, less each fact some call row to it does
-/// not prove, its caller walked with every `post` and without its own `pre`
-/// ([`entries`]). Every caller is walked once, so no `pre` depends on another.
+/// [`entry_templates`], and the field facts its callees' candidates state of
+/// its parameters ([`forward`]), as its `pre`, less each fact some call row
+/// to it does not prove, its caller walked with every `post` ([`entries`]).
+/// A caller whose `pre` holds an element template or a field fact is walked
+/// under it, as a greatest fixpoint; every other caller is walked once,
+/// without its own `pre`.
 ///
 /// The result does not depend on the order of `bodies`. Soundness rests on
 /// two postulates: a [`Callee::Fn`] row runs the body `bodies` holds under
@@ -447,24 +451,46 @@ pub fn summaries<'a>(
     element_rows(&bodies, decls, &instances, &state, &mut frames);
     // A body's name count weighs its work.
     let weigh = |(_, b): &(FnId, &Body)| b.names.len();
-    let firsts: Vec<(Vec<i64>, Option<Scan>)> = in_parallel(
+    let firsts: Vec<(Vec<i64>, Option<Scan>, [Vec<Pair>; 2])> = in_parallel(
         &bodies,
         weigh,
         || (),
         |(), (_, b)| {
             let needs = needed_lengths(b, decls);
             let scan = records.map(|_| scan(b, decls, &needs));
-            (needs.into_iter().map(|(_, c)| c).collect(), scan)
+            let pairs = [indexed_pairs(b, decls), made_pairs(b, decls)];
+            (needs.into_iter().map(|(_, c)| c).collect(), scan, pairs)
         },
     );
-    let (needs, scans): (Vec<Vec<i64>>, Vec<Option<Scan>>) = firsts.into_iter().unzip();
-    let needed: BTreeSet<i64> = needs.into_iter().flatten().collect();
+    let mut needed = BTreeSet::new();
+    let (mut indexed, mut made) = (BTreeSet::new(), BTreeSet::new());
+    let mut scans = Vec::new();
+    for (needs, scan, [i, m]) in firsts {
+        needed.extend(needs);
+        scans.push(scan);
+        indexed.extend(i);
+        made.extend(m);
+    }
+    // A pair a body indexes by and a body makes, either way round.
+    let pairs: BTreeSet<Pair> = (indexed.into_iter())
+        .filter(|(t, u)| {
+            made.contains(&(t.clone(), u.clone())) || made.contains(&(u.clone(), t.clone()))
+        })
+        .collect();
     let values: Vec<Summary> = in_parallel(
         &bodies,
         weigh,
         || (),
-        |(), (_, b)| templates(b, decls, &needed),
+        |(), (_, b)| templates(b, decls, &needed, &pairs),
     );
+    // A record result's facts serve the call rows that prove a `pre`, which
+    // no check of the caller seeds: solve them all.
+    let records_out: BTreeSet<usize> = (0..values.len())
+        .filter(|&i| {
+            let result = |(t, _): &(Term, i64)| matches!(t, Term::Col(Name(0), _));
+            values[i].post.iter().any(|f| f.terms.iter().any(result))
+        })
+        .collect();
     let mut at: HashMap<FnId, usize> = (0..).zip(&bodies).map(|(i, (f, _))| (*f, i)).collect();
     let scans: Option<Vec<Scan>> = scans.into_iter().collect();
     let facts = match (records, scans) {
@@ -535,6 +561,7 @@ pub fn summaries<'a>(
         in_parallel(&bodies, weigh, || (), |(), (_, b)| seeds(b, decls, view))
             .into_iter()
             .flatten()
+            .chain(records_out)
             .collect();
     let mut values = solve(
         &bodies, decls, &at, &instances, values, start, &facts, &state, &frames,
@@ -553,7 +580,7 @@ pub fn summaries<'a>(
         weigh,
         || (),
         |(), (f, b)| match closed.contains(f) && any_check(&b.stmts) {
-            true => entry_templates(b, decls, view),
+            true => entry_templates(b, decls, view, &pairs),
             false => (BTreeSet::new(), None),
         },
     );
@@ -562,6 +589,7 @@ pub fn summaries<'a>(
         values[i].pre = pre;
         decided.extend(d0.map(|d| (i, d)));
     }
+    forward(&bodies, decls, &closed, &at, &instances, &mut values);
     // Every caller of a body with a `pre` proves it at each call row, or
     // the body loses the facts it does not. Lighter callers go first: a
     // `pre` they empty spares the heavier callers' walks. The intersection
@@ -571,14 +599,18 @@ pub fn summaries<'a>(
         .filter(|(_, gs)| gs.iter().any(|g| !values[at[g]].pre.is_empty()))
         .map(|((_, b), _)| *b)
         .collect();
-    // A caller whose own `pre` holds element templates is walked under it
-    // below: a template of its callee may rest on one of its own.
+    // A caller whose own `pre` holds element templates, or a fact over a
+    // record parameter's field, is walked under it below: a fact of its
+    // callee may rest on one of its own.
     let templated = |i: usize| {
         let seq = |j: usize| {
             j.checked_sub(1)
                 .is_some_and(|k| values[i].params.get(k) == Some(&Kind::Seq))
         };
-        values[i].pre.iter().any(|f| hole(f, seq).is_some())
+        values[i]
+            .pre
+            .iter()
+            .any(|f| hole(f, seq).is_some() || names_field(f))
     };
     let under: Vec<(usize, &Body)> = (callers.iter())
         .filter_map(|b| Some((at[&b.id?], *b)))
@@ -654,6 +686,81 @@ pub fn summaries<'a>(
         facts,
         state,
         frames,
+    }
+}
+
+/// Whether `f` names the length of a record's array field.
+fn names_field(f: &Lin) -> bool {
+    (f.terms.iter()).any(|(t, _)| matches!(t, Term::Col(..)))
+}
+
+/// Adds to the `pre` of each body only call rows enter ([`entered`]) each
+/// fact over the lengths of record fields alone that a callee's `pre`
+/// states of the arguments, where each argument it names is a parameter of
+/// the body passed whole, of the callee's parameter's type: the body can
+/// prove it at the call only from its own entry. Sets the parameter types of a
+/// body whose `pre` names a field, so a call row maps the field
+/// ([`Walk::field_arg`]).
+///
+/// Each round adds a fact or ends the loop. A fact added is a callee's with
+/// its parameters renamed to the body's, and a body has finitely many
+/// renamings of the finitely many seeded facts, so the rounds are bounded.
+fn forward(
+    bodies: &[(FnId, &Body)],
+    decls: &HashMap<String, TypeDecl>,
+    closed: &HashSet<FnId>,
+    at: &HashMap<FnId, usize>,
+    instances: &Instances,
+    values: &mut [Summary],
+) {
+    let ty = |i: usize, k: usize| {
+        let b = bodies[i].1;
+        vyrn_frontend::types::resolved(&b.names[b.params[k].index()].ty, decls)
+    };
+    let mut added = true;
+    while added {
+        added = false;
+        for (i, (f, b)) in bodies.iter().enumerate() {
+            if !closed.contains(f) {
+                continue;
+            }
+            let mut more = BTreeSet::new();
+            for (s, _) in rows(&b.stmts) {
+                let (St::Let(_, rhs) | St::Do { rhs, .. }) = s else {
+                    continue;
+                };
+                let Rhs::Call { args, .. } = rhs else {
+                    continue;
+                };
+                let Some(&g) = instance(instances, rhs).and_then(|g| at.get(&g)) else {
+                    continue;
+                };
+                let rename = |t: Term| {
+                    let Term::Col(n, x) = t else { return None };
+                    let k = n.index().checked_sub(1)?;
+                    let (Arg::Val(Val::Name(m)) | Arg::Place(Place::Name(m))) = &args.get(k)?.0
+                    else {
+                        return None;
+                    };
+                    let j = b.params.iter().position(|p| p == m)?;
+                    (ty(g, k) == ty(i, j)).then(|| Lin::of(Term::Col(Name(j as u32 + 1), x)))
+                };
+                let facts = values[g].pre.iter().filter(|f| names_field(f));
+                more.extend(facts.filter_map(|f| f.map(rename)));
+            }
+            more.retain(|f| !values[i].pre.contains(f));
+            if !more.is_empty() {
+                added = true;
+                values[i].pre.extend(more);
+            }
+        }
+    }
+    for (i, (_, b)) in bodies.iter().enumerate() {
+        if values[i].types.is_empty() && values[i].pre.iter().any(names_field) {
+            values[i].types = (b.params.iter())
+                .map(|p| b.names[p.index()].ty.clone())
+                .collect();
+        }
     }
 }
 
@@ -2396,7 +2503,12 @@ fn direct_call(rhs: &Rhs) -> Option<FnId> {
 /// field is at least zero, equal to or bounded by each integer parameter,
 /// and at most each length or below it. A Bool result takes the candidates
 /// of [`truth_templates`].
-fn templates(body: &Body, decls: &HashMap<String, TypeDecl>, needed: &BTreeSet<i64>) -> Summary {
+fn templates(
+    body: &Body,
+    decls: &HashMap<String, TypeDecl>,
+    needed: &BTreeSet<i64>,
+    pairs: &BTreeSet<Pair>,
+) -> Summary {
     let params: Vec<Kind> = (body.params.iter())
         .map(|p| kind_of(&body.names[p.index()].ty, decls))
         .collect();
@@ -2424,13 +2536,17 @@ fn templates(body: &Body, decls: &HashMap<String, TypeDecl>, needed: &BTreeSet<i
         _ => None,
     });
     let truth = truth_result(body);
+    let record = returned_type(body).and_then(|ty| match ty {
+        Type::Named(d) if pairs.iter().any(|(t, _)| t == d) => Some((ty, d)),
+        _ => None,
+    });
     let (mut post, mut types, mut written) = (BTreeSet::new(), Vec::new(), BTreeSet::new());
-    if truth || matches!(r, Some(Some(_))) {
+    if truth || matches!(r, Some(Some(_))) || record.is_some() {
         writes(&body.stmts, &mut written);
     }
     let usable = |k: usize| !written.contains(&body.params[k]);
     let sentinel = matches!(r, Some(Some(Term::Val(_)))) && negative_return(body);
-    if truth || sentinel {
+    if truth || sentinel || record.is_some() {
         types = (body.params.iter())
             .map(|p| body.names[p.index()].ty.clone())
             .collect();
@@ -2520,6 +2636,29 @@ fn templates(body: &Body, decls: &HashMap<String, TypeDecl>, needed: &BTreeSet<i
             }
         }
     }
+    // A record of a type that [`Pair`]s with a parameter's: each array field
+    // as long as each array of each such parameter the body never writes.
+    if let Some((ty, d)) = record {
+        let res = array_lengths(ty, Name(0), decls);
+        let ps: Vec<Lin> = (0..params.len())
+            .filter(|&k| usable(k))
+            .filter(|&k| {
+                matches!(&body.names[body.params[k].index()].ty,
+                    Type::Named(u) if pairs.contains(&(d.clone(), u.clone())))
+            })
+            .flat_map(|k| {
+                array_lengths(
+                    &body.names[body.params[k].index()].ty,
+                    Name(k as u32 + 1),
+                    decls,
+                )
+            })
+            .collect();
+        for (a, x) in res.iter().flat_map(|a| ps.iter().map(move |x| (a, x))) {
+            post.extend(a.sub(x));
+            post.extend(x.sub(a));
+        }
+    }
     Summary {
         params,
         types,
@@ -2527,6 +2666,141 @@ fn templates(body: &Body, decls: &HashMap<String, TypeDecl>, needed: &BTreeSet<i
         post,
         when,
     }
+}
+
+/// Two declared record types with array fields, by name, whose lengths a
+/// fact may relate: a body indexes a field of the first by a value of the
+/// second ([`indexed_pairs`]), and a body makes one from the other
+/// ([`made_pairs`]). A fact over two values pays only where both hold; on
+/// 2026-10-13 a record paired with an array parameter cost the site
+/// export's `elide: summaries` 10% more allocations and proved no row.
+type Pair = (String, String);
+
+/// The [`Pair`]s of each record parameter whose array field a check of `b`
+/// indexes, with each parameter of another record type with an array field.
+fn indexed_pairs(b: &Body, decls: &HashMap<String, TypeDecl>) -> Vec<Pair> {
+    let mut out = Vec::new();
+    for (k, _) in indexed_fields(b, decls, &b.stmts) {
+        let p = b.params[k];
+        if let Type::Named(t) = &b.names[p.index()].ty {
+            out.extend(holders(b, decls, p, t).map(|u| (t.clone(), u)));
+        }
+    }
+    out
+}
+
+/// The [`Pair`]s of the record type `b` returns with each parameter of
+/// another record type with an array field.
+fn made_pairs(b: &Body, decls: &HashMap<String, TypeDecl>) -> Vec<Pair> {
+    match returned_type(b) {
+        Some(ty @ Type::Named(t)) if kind_of(ty, decls) == Kind::Other => {
+            holders(b, decls, Name(u32::MAX), t)
+                .map(|u| (t.clone(), u))
+                .collect()
+        }
+        _ => Vec::new(),
+    }
+}
+
+/// The type of the name the first return of `b` returns.
+fn returned_type(b: &Body) -> Option<&Type> {
+    rows(&b.stmts).find_map(|(s, _)| match s {
+        St::Return {
+            value: Some(Val::Name(n)),
+            ..
+        } => Some(&b.names[n.index()].ty),
+        _ => None,
+    })
+}
+
+/// The record types other than `t` of the parameters of `b` other than
+/// `skip` that have an array field.
+fn holders<'b>(
+    b: &'b Body,
+    decls: &'b HashMap<String, TypeDecl>,
+    skip: Name,
+    t: &'b str,
+) -> impl Iterator<Item = String> + 'b {
+    (b.params.iter().filter(move |q| **q != skip))
+        .map(|q| &b.names[q.index()].ty)
+        .filter(|ty| !array_lengths(ty, Name(0), decls).is_empty())
+        .filter_map(move |ty| match ty {
+            Type::Named(u)
+                if u != t && vyrn_frontend::types::record_fields(ty, decls).is_some() =>
+            {
+                Some(u.clone())
+            }
+            _ => None,
+        })
+}
+
+/// The array fields of record parameters a kept check of `ss` indexes,
+/// directly or through a `let` that borrows the field: each as the
+/// parameter's position and the field's name.
+fn indexed_fields(b: &Body, decls: &HashMap<String, TypeDecl>, ss: &[St]) -> Vec<(usize, String)> {
+    let mut out = Vec::new();
+    let record = |p: &Name| kind_of(&b.names[p.index()].ty, decls) == Kind::Other;
+    if !b.params.iter().any(record) {
+        return out;
+    }
+    // Per name, its `let` and the count of rows that write it.
+    let mut defs: Vec<(Option<&Rhs>, u32)> = vec![(None, 0); b.names.len()];
+    for (s, _) in rows(ss) {
+        if let St::Let(n, rhs) = s {
+            defs[n.index()].0 = Some(rhs);
+        }
+        for n in row_writes(s) {
+            defs[n.index()].1 += 1;
+        }
+    }
+    for (s, _) in rows(ss) {
+        let St::Check(c) = s else { continue };
+        let Guard::Index(base, _) = &c.guard else {
+            continue;
+        };
+        let base = match base {
+            Place::Name(x) => match defs[x.index()] {
+                (Some(Rhs::Read(q)), 0) => q,
+                _ => continue,
+            },
+            _ => base,
+        };
+        let Place::Field(r, f) = base else { continue };
+        let Place::Name(r) = **r else { continue };
+        let Some(k) = b.params.iter().position(|p| *p == r) else {
+            continue;
+        };
+        if c.verdict != Verdict::Kept {
+            continue;
+        }
+        let fields = vyrn_frontend::types::record_fields(&b.names[r.index()].ty, decls);
+        let array = |x: &Field| vyrn_frontend::types::resolved(&x.ty, decls).is_seq();
+        if fields.is_some_and(|fs| fs.iter().any(|x| x.name == *f && array(x))) {
+            out.push((k, f.clone()));
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// The lengths of a value of type `ty` named `n`, as terms: its own for an
+/// array, one per class of equal length ([`col`]) of its array fields for a
+/// record, none for a String or anything else.
+fn array_lengths(ty: &Type, n: Name, decls: &HashMap<String, TypeDecl>) -> Vec<Lin> {
+    let array = |t: &Type| vyrn_frontend::types::resolved(t, decls).is_seq();
+    if array(ty) {
+        return vec![Lin::of(Term::Len(n))];
+    }
+    let Some(fields) = vyrn_frontend::types::record_fields(ty, decls) else {
+        return Vec::new();
+    };
+    let mut out: Vec<Lin> = (fields.iter().filter(|f| array(&f.ty)))
+        .filter_map(|f| Some(Lin::of(Term::Col(n, col(ty, &f.name, decls)?.1))))
+        .collect();
+    out.sort();
+    out.dedup();
+    out
 }
 
 /// The candidates of a sentinel's `when`: for each check row that indexes a
@@ -2708,6 +2982,7 @@ fn entry_templates(
     body: &Body,
     decls: &HashMap<String, TypeDecl>,
     sums: View<'_>,
+    pairs: &BTreeSet<Pair>,
 ) -> (BTreeSet<Lin>, Option<Body>) {
     let params: Vec<Kind> = (body.params.iter())
         .map(|p| kind_of(&body.names[p.index()].ty, decls))
@@ -2740,6 +3015,23 @@ fn entry_templates(
             for p in &ints {
                 out.extend(a.sub(p));
                 out.extend(a.sub(p).and_then(|l| l.plus(-1)));
+            }
+        }
+        // An array field of a record parameter a kept check indexes is at
+        // least as long as each array of another parameter its type
+        // [`Pair`]s with.
+        for (k, f) in indexed_fields(body, decls, ss) {
+            let ty = &body.names[body.params[k].index()].ty;
+            let (Some((_, i)), Type::Named(t)) = (col(ty, &f, decls), ty) else {
+                continue;
+            };
+            let a = Lin::of(Term::Col(Name(k as u32 + 1), i));
+            for j in (0..params.len()).filter(|&j| j != k && used(j)) {
+                let ty = &body.names[body.params[j].index()].ty;
+                if matches!(ty, Type::Named(u) if pairs.contains(&(t.clone(), u.clone()))) {
+                    let xs = array_lengths(ty, Name(j as u32 + 1), decls);
+                    out.extend(xs.iter().filter_map(|x| a.sub(x)));
+                }
             }
         }
         // Element templates of an index array parameter whose element
@@ -3472,7 +3764,8 @@ impl<'a> Walk<'a> {
             match t {
                 Term::Val(_) => Some(Lin::of(Term::Val(p))),
                 Term::Len(_) => Some(Lin::of(Term::Len(p))),
-                Term::Col(..) | Term::Field(..) | Term::Inner(..) | Term::Ghost(..) => None,
+                Term::Col(..) | Term::Field(..) => self.param_term(t),
+                Term::Inner(..) | Term::Ghost(..) => None,
             }
         };
         let seq = |j: usize| {
@@ -3951,40 +4244,9 @@ impl<'a> Walk<'a> {
         }
     }
 
-    /// The array or String field `f` of record name `r`, by its own index and
-    /// by the least index among the fields the record's `where` rule states of
-    /// equal length. The rule holds wherever the record is checked, so one
-    /// term is the length of every field of a class ([`Term::Col`]).
+    /// [`col`] of record name `r`'s type.
     fn col(&self, r: Name, f: &str) -> Option<(u32, u32)> {
-        let seq = |t: &Type| {
-            let t = vyrn_frontend::types::resolve(t, self.decls);
-            t.is_seq() || t == Type::Str
-        };
-        let ty = &self.body.names[r.index()].ty;
-        let fields = vyrn_frontend::types::record_fields(ty, self.decls)?;
-        let at = |g: &str| fields.iter().position(|x| x.name == g && seq(&x.ty));
-        let own = at(f)?;
-        let mut class = BTreeSet::from([own]);
-        let pairs = self
-            .rule(r)
-            .map(vyrn_frontend::types::predicate_equal_lengths)
-            .unwrap_or_default();
-        // Each round adds a field or stops.
-        loop {
-            let before = class.len();
-            for (a, b) in &pairs {
-                if let (Some(a), Some(b)) = (at(a), at(b)) {
-                    if class.contains(&a) || class.contains(&b) {
-                        class.extend([a, b]);
-                    }
-                }
-            }
-            if class.len() == before {
-                break;
-            }
-        }
-        let least = *class.first().expect("holds the field itself");
-        Some((u32::try_from(own).ok()?, u32::try_from(least).ok()?))
+        col(&self.body.names[r.index()].ty, f, self.decls)
     }
 
     /// The integer field `f` of record name `r` as one term: by the module's
@@ -4758,6 +5020,9 @@ impl<'a> Walk<'a> {
                         Some(Lin::of(Term::Field(n, i)))
                     }
                     Term::Len(_) if self.kind(n) == Kind::Seq => Some(Lin::of(Term::Len(n))),
+                    Term::Col(_, i) if self.kind(n) == Kind::Other => {
+                        Some(Lin::of(Term::Col(n, i)))
+                    }
                     _ => None,
                 };
             };
@@ -4840,7 +5105,11 @@ impl<'a> Walk<'a> {
         }
         let at = |t: Term| {
             let k = t.name()?.index().checked_sub(1)?;
-            self.arg(t, &args.get(k)?.0, *s.params.get(k)?)
+            let a = &args.get(k)?.0;
+            match t {
+                Term::Field(_, i) | Term::Col(_, i) => self.field_arg(t, i, a, s.types.get(k)?),
+                _ => self.arg(t, a, *s.params.get(k)?),
+            }
         };
         let holds = |g: &Lin| st.ge0(g).is_some_and(|cert| cert.verify(st, g));
         let seq = |j: usize| {
@@ -4958,6 +5227,9 @@ impl<'a> Walk<'a> {
                 }
                 (None, Term::Val(_), v) => self.lin(v),
                 (None, Term::Len(_), Val::Name(m)) => Some(Lin::of(self.length(&Place::Name(*m))?)),
+                (None, Term::Col(_, i), Val::Name(m)) if self.kind(*m) == Kind::Other => {
+                    Some(Lin::of(Term::Col(*m, i)))
+                }
                 (Some(_), ..) => self.param_term(t),
                 _ => None,
             }
@@ -6138,6 +6410,44 @@ impl<'a> Walk<'a> {
             (false, false, c) => format!("{} <= {}", sum(&neg, 0), sum(&pos, c)),
         }
     }
+}
+
+/// The array or String field `f` of the record type `ty`, by its own index and
+/// by the least index among the fields the type's `where` rule states of
+/// equal length. The rule holds wherever the record is checked, so one
+/// term is the length of every field of a class ([`Term::Col`]).
+fn col(ty: &Type, f: &str, decls: &HashMap<String, TypeDecl>) -> Option<(u32, u32)> {
+    let seq = |t: &Type| {
+        let t = vyrn_frontend::types::resolve(t, decls);
+        t.is_seq() || t == Type::Str
+    };
+    let fields = vyrn_frontend::types::record_fields(ty, decls)?;
+    let at = |g: &str| fields.iter().position(|x| x.name == g && seq(&x.ty));
+    let own = at(f)?;
+    let mut class = BTreeSet::from([own]);
+    let rule = match ty {
+        Type::Named(n) => decls.get(n).and_then(|d| d.predicate.as_ref()),
+        _ => None,
+    };
+    let pairs = rule
+        .map(vyrn_frontend::types::predicate_equal_lengths)
+        .unwrap_or_default();
+    // Each round adds a field or stops.
+    loop {
+        let before = class.len();
+        for (a, b) in &pairs {
+            if let (Some(a), Some(b)) = (at(a), at(b)) {
+                if class.contains(&a) || class.contains(&b) {
+                    class.extend([a, b]);
+                }
+            }
+        }
+        if class.len() == before {
+            break;
+        }
+    }
+    let least = *class.first().expect("holds the field itself");
+    Some((u32::try_from(own).ok()?, u32::try_from(least).ok()?))
 }
 
 fn val_name(v: &Val) -> Option<Name> {
