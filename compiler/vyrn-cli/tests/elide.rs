@@ -256,6 +256,91 @@ fn w(n: Int64) -> Int64 {
     assert!(failures.is_empty(), "{}", failures.join("\n\n"));
 }
 
+/// A loop bound by a parameter's length that pushes once a turn makes its
+/// array as long as the parameter, in the body and in the result's `post`; a
+/// turn that skips its push, or a counter that steps by two, keeps the check.
+#[test]
+fn a_loop_bound_by_a_parameters_length_counts_its_pushes() {
+    let proof = "fn copyOf(p: Array<Int64>) -> Array<Int64> {
+    let mut out: Array<Int64> = []
+    let mut i = 0
+    while i < p.length {
+        out.push(p[i])
+        i = i + 1
+    }
+    return out
+}
+fn marks(p: Array<Int64>) -> Int64 {
+    let mut seen: Array<Bool> = []
+    let mut i = 0
+    while i < p.length {
+        seen.push(false)
+        i = i + 1
+    }
+    let mut c = 0
+    let mut s = 0
+    while s < p.length {
+        if !seen[s] {
+            c = c + 1
+        }
+        s = s + 1
+    }
+    return c
+}
+fn w(n: Int64) -> Int64 {
+    let q = copyOf([n, n, n])
+    return q[2] + marks(q)
+}
+";
+    assert_eq!(verdicts(proof, "w"), ["proved array-index"]);
+    assert_eq!(verdicts(proof, "marks"), ["proved array-index"]);
+    let (err, _) = oracle(proof, "    print(w(3).toString())", "w");
+    assert_eq!(err, "");
+    let witnesses = [
+        "fn half(p: Array<Int64>) -> Array<Int64> {
+    let mut out: Array<Int64> = []
+    let mut i = 0
+    while i < p.length {
+        if i % 2 == 0 {
+            out.push(p[i])
+        }
+        i = i + 1
+    }
+    return out
+}
+fn w(n: Int64) -> Int64 {
+    let q = half([n, n, n])
+    return q[2]
+}
+",
+        "fn w(n: Int64) -> Int64 {
+    let p = [n, n, n]
+    let mut seen: Array<Int64> = []
+    let mut i = 0
+    while i < p.length {
+        seen.push(i)
+        i = i + 2
+    }
+    return seen[2]
+}
+",
+    ];
+    let mut failures = Vec::new();
+    for src in witnesses {
+        let rows = verdicts(src, "w");
+        if rows != ["check array-index"] {
+            failures.push(format!("{src}\nrows: {rows:?}"));
+        }
+        let (err, _) = oracle(src, "    print(w(10).toString())", "w");
+        if !err.contains("array index 2 out of bounds")
+            || err.contains(vyrn_frontend::trap::PROVED_CHECK_FAILED)
+        {
+            failures.push(format!("{src}\nran: {err}"));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n\n"));
+}
+
 /// A function that returns a table of a literal size states that length
 /// of its result; a path that returns a shorter one, or a `modify` call that
 /// shortens it, keeps the caller's check.

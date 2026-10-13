@@ -6881,11 +6881,9 @@ fn mark(
                 mark(body, decls, els, rel, goals, linked, arrays);
             }
             St::Loop { body: l, .. } | St::Block { body: l, .. } => {
-                // A loop bound by a literal or a length counts what it stores
+                // A loop bound by a literal counts what it stores
                 // ([`Walk::in_step`]).
-                if let Some((t, ..)) =
-                    bound_test(l).filter(|(.., b)| b.is_const() || measured(l, b).is_some())
-                {
+                if let Some((t, ..)) = bound_test(l).filter(|(.., b)| b.is_const()) {
                     let mut stored = BTreeSet::new();
                     stores(l, &mut stored);
                     let seq = |n: &Name| kind_of(&body.names[n.index()].ty, decls) == Kind::Seq;
