@@ -803,6 +803,11 @@ impl State {
             let (Some(&lo), Some(&hi)) = (all.first(), all.last()) else {
                 continue;
             };
+            // Constants far apart leave no gap worth a disequality, and
+            // `k = 1` joined with `k = 2000000000` would list two billion.
+            if hi.checked_sub(lo).is_none_or(|d| d >= VALUES) {
+                continue;
+            }
             for v in (lo..hi).filter(|v| !all.contains(v)) {
                 out.ne.extend(Lin::of(t).plus(-v).and_then(canon));
             }
