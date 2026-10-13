@@ -1,0 +1,10 @@
+// A call through `g` reads what `mk` returns as a `B`, with no copy between.
+type B = { y: Int64, x: Int64 }
+type W = { z: Int64, y: Int64, x: Int64 }
+fn mk() -> W {
+    return W { z: 9, y: 2, x: 1 }
+}
+fn main() -> Int64 {
+    let g: fn() -> B = mk
+    return g().x
+}

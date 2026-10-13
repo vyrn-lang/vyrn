@@ -5824,18 +5824,19 @@ impl<'a> Checker<'a> {
         };
         // Contravariant: the value's parameter type must accept what the
         // callee passes. The reverse check would let the callee pass a
-        // narrower record than the value reads.
+        // narrower record than the value reads. Both sit inside a function
+        // type, so a record matches only an interchangeable one.
         let params_accept = |vptys: &[Type],
                              vret: &Type,
                              subst: &mut HashMap<String, Type>|
          -> Result<bool, Diagnostic> {
             for (a, b) in vptys.iter().zip(&ptys) {
                 let b = &self.solve_fn_param(b, a, subst, line);
-                if !self.assignable(b, a) {
+                if !crate::types::interchangeable(b, a, self) {
                     return Ok(false);
                 }
             }
-            self.unify(&ret, vret, subst, line).map(|()| true)
+            self.unify_at(&ret, vret, false, subst, line).map(|()| true)
         };
         let value_matches = |vptys: &[Type],
                              vret: &Type,
@@ -6328,6 +6329,23 @@ impl<'a> Checker<'a> {
         subst: &mut HashMap<String, Type>,
         line: usize,
     ) -> Result<(), Diagnostic> {
+        self.unify_at(pty, aty, true, subst, line)
+    }
+
+    /// [`Self::unify`] at the top of a value (`top`) or below it, where a
+    /// record matches only an [`crate::types::interchangeable`] one.
+    fn unify_at(
+        &self,
+        pty: &Type,
+        aty: &Type,
+        top: bool,
+        subst: &mut HashMap<String, Type>,
+        line: usize,
+    ) -> Result<(), Diagnostic> {
+        let fits = |from: &Type, to: &Type| match top {
+            true => self.assignable(from, to),
+            false => crate::types::interchangeable(from, to, self),
+        };
         // `Err` and `Never` unify with anything: `f(panic(".."))` places no
         // demand on `T`, and `T = Never` would fit no value.
         if matches!(pty, Type::Err) || matches!(aty, Type::Err) || matches!(aty, Type::Never) {
@@ -6336,7 +6354,7 @@ impl<'a> Checker<'a> {
         match pty {
             Type::Param(t) => match subst.get(t) {
                 Some(bound) => {
-                    if !self.assignable(aty, bound) {
+                    if !fits(aty, bound) {
                         let t = crate::ast::written_param(t);
                         Err(cerr!(line, ParamConflict, t, bound, aty))
                     } else {
@@ -6351,7 +6369,7 @@ impl<'a> Checker<'a> {
             _ if crate::types::option_payload(pty).is_some() => {
                 let inner = crate::types::option_payload(pty).expect("an Option payload");
                 match crate::types::option_payload(aty) {
-                    Some(a) => self.unify(inner, a, subst, line),
+                    Some(a) => self.unify_at(inner, a, false, subst, line),
                     None => Err(cerr!(line, ExpectedOption, aty)),
                 }
             }
@@ -6359,8 +6377,8 @@ impl<'a> Checker<'a> {
                 let (pt, pe) = crate::types::result_payloads(pty).expect("Result payloads");
                 match crate::types::result_payloads(aty) {
                     Some((at, ae)) => {
-                        self.unify(pt, at, subst, line)?;
-                        self.unify(pe, ae, subst, line)
+                        self.unify_at(pt, at, false, subst, line)?;
+                        self.unify_at(pe, ae, false, subst, line)
                     }
                     None => Err(cerr!(line, ExpectedResult, aty)),
                 }
@@ -6368,7 +6386,7 @@ impl<'a> Checker<'a> {
             Type::App(pn, pargs) => match aty {
                 Type::App(an, aargs) if pn == an && pargs.len() == aargs.len() => {
                     for (p, a) in pargs.iter().zip(aargs) {
-                        self.unify(p, a, subst, line)?;
+                        self.unify_at(p, a, false, subst, line)?;
                     }
                     Ok(())
                 }
@@ -6377,20 +6395,20 @@ impl<'a> Checker<'a> {
             // Collections bind `T` from the element type; an alias resolves
             // first.
             Type::Array(inner) => match crate::types::resolve(aty, self) {
-                Type::Array(a) => self.unify(inner, &a, subst, line),
+                Type::Array(a) => self.unify_at(inner, &a, false, subst, line),
                 _ => Err(cerr!(line, Expected, pty, aty)),
             },
             Type::ArrayN(inner, n) => match aty {
-                Type::ArrayN(a, m) if m == n => self.unify(inner, a, subst, line),
+                Type::ArrayN(a, m) if m == n => self.unify_at(inner, a, false, subst, line),
                 _ => Err(cerr!(line, Expected, pty, aty)),
             },
             Type::Stream(inner) => match crate::types::resolve(aty, self) {
-                Type::Stream(a) => self.unify(inner, &a, subst, line),
+                Type::Stream(a) => self.unify_at(inner, &a, false, subst, line),
                 _ => Err(cerr!(line, Expected, pty, aty)),
             },
             // `N` must match: integer arguments do not infer.
             Type::SmallArray(inner, n) => match crate::types::resolve(aty, self) {
-                Type::SmallArray(a, m) if m == *n => self.unify(inner, &a, subst, line),
+                Type::SmallArray(a, m) if m == *n => self.unify_at(inner, &a, false, subst, line),
                 _ => Err(cerr!(line, Expected, pty, aty)),
             },
             // A generic function type binds through the value's signature. Two
@@ -6399,9 +6417,9 @@ impl<'a> Checker<'a> {
                 match crate::types::resolve(aty, self) {
                     Type::Fn(aps, ar) if aps.len() == pps.len() => {
                         for (p, a) in pps.iter().zip(&aps) {
-                            self.unify(p, a, subst, line)?;
+                            self.unify_at(p, a, false, subst, line)?;
                         }
-                        self.unify(pr, &ar, subst, line)
+                        self.unify_at(pr, &ar, false, subst, line)
                     }
                     _ => Err(cerr!(line, Expected, pty, aty)),
                 }
@@ -6415,17 +6433,21 @@ impl<'a> Checker<'a> {
                         Type::Fn(ps, _) if ps.is_empty()
                     ) =>
             {
-                self.unify(&crate::types::resolve(pty, self), aty, subst, line)
+                self.unify_at(&crate::types::resolve(pty, self), aty, top, subst, line)
             }
             Type::Map(pk, pv) => match crate::types::resolve(aty, self) {
                 Type::Map(ak, av) => {
-                    self.unify(pk, &ak, subst, line)?;
-                    self.unify(pv, &av, subst, line)
+                    self.unify_at(pk, &ak, false, subst, line)?;
+                    self.unify_at(pv, &av, false, subst, line)
                 }
                 _ => Err(cerr!(line, Expected, pty, aty)),
             },
             _ => {
-                if !self.coercible(aty, pty) {
+                let ok = match top {
+                    true => self.coercible(aty, pty),
+                    false => fits(aty, pty),
+                };
+                if !ok {
                     Err(cerr!(line, ArgExpected, pty, aty))
                 } else {
                     Ok(())

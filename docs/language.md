@@ -166,7 +166,7 @@ let mut next = u.copy()
 next.age = next.age + 1
 ```
 
-- Compatibility is by shape. A value with more fields fits where fewer are wanted, with no cast; two record types with the same fields are interchangeable.
+- Compatibility is by shape. A value with more fields fits where fewer are wanted, with no cast; two record types with the same fields are interchangeable. Width applies at the top of a value only: a record inside an array, an `Option`, `Result` or enum payload, a `Map`, a function type or another record's field must have the same fields as the one expected. Copy explicitly, for example with `xs.map(..)`.
 - A field of a `mut` binding is assigned in place.
 - `Omit<T, f, ..>`, `Pick<T, f, ..>`, `Merge<A, B>` (B wins a conflict) and `Partial<T>` (every field an `Option`) derive record types at compile time.
 - `==` and `!=` work on scalars and `String` only. Comparing two records or two enum values is refused; compare fields or `match`.

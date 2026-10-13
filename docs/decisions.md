@@ -18,7 +18,7 @@ pull request.
 
 ### Types
 
-- Records are structural with width subtyping: a record with more fields is usable where fewer are expected. Types describe shape, not identity.
+- Records are structural with width subtyping: a record with more fields is usable where fewer are expected. Types describe shape, not identity. Width applies at the top of a value only (`types::assignable`), because a wider record inside a container or a function type is read in place and would need a hidden copy of every element.
 - A record's layout is a function of its field set: fields sit in descending alignment, then by name. Two record types with the same fields are then one representation everywhere, as an `Option` payload, an `Array` element or a `fn` result, and no flow converts between them. Laid out in declared order, each such flow read one field as another.
 - No casts and no `as` on values. A conversion is a call named after the target type, and integer arithmetic wraps at the type's width (`language.md`), so memory is never reinterpreted.
 - The type transformers `Omit`, `Pick`, `Merge`, `Partial` and `A & B` are erased before lowering. `Readonly<T>` is `T`, because records are immutable.
