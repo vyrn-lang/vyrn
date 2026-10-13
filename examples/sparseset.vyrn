@@ -1,0 +1,62 @@
+// A sparse set of integers below a fixed universe.
+
+type SparseSet = { dense: Array<Int64>, sparse: Array<Int64>, n: Int64 }
+
+fn sparseSet(universe: Int64) -> SparseSet {
+    let mut s = SparseSet { dense: [], sparse: [], n: 0 }
+    let mut i = 0
+    while i < universe {
+        s.dense.push(0)
+        s.sparse.push(0)
+        i = i + 1
+    }
+    return s
+}
+
+fn contains(s: SparseSet, x: Int64) -> Bool {
+    if x < 0 || x >= s.sparse.length {
+        return false
+    }
+    let d = s.sparse[x]
+    return d < s.n && s.dense[d] == x
+}
+
+fn insert(s: modify SparseSet, x: Int64) {
+    if x < 0 || x >= s.sparse.length || contains(s, x) || s.n >= s.dense.length {
+        return
+    }
+    s.dense[s.n] = x
+    s.sparse[x] = s.n
+    s.n = s.n + 1
+}
+
+fn remove(s: modify SparseSet, x: Int64) {
+    if !contains(s, x) {
+        return
+    }
+    let d = s.sparse[x]
+    let last = s.dense[s.n - 1]
+    s.dense[d] = last
+    s.sparse[last] = d
+    s.n = s.n - 1
+}
+
+fn main() -> Int64 {
+    let mut s = sparseSet(1000)
+    let mut i = 0
+    let mut hits = 0
+    while i < 5000 {
+        let x = (i * 31) % 1000
+        if i % 3 == 0 {
+            remove(s, x)
+        } else {
+            insert(s, x)
+        }
+        if contains(s, (i * 17) % 1000) {
+            hits = hits + 1
+        }
+        i = i + 1
+    }
+    print(hits)
+    return 0
+}

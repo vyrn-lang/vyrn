@@ -297,6 +297,12 @@ pub struct State {
     /// The borrows of a global still equal to it: their lengths are the
     /// global's (`elide::Walk::borrowed`).
     pub fresh: BTreeSet<Name>,
+    /// Per array name, the templates every element meets: each a `Lin`
+    /// `>= 0` with the array's own [`Term::Val`] for the element. A template
+    /// is no fact: an empty array meets every template, so two of them could
+    /// prove a false length. The walk instantiates one at an element read
+    /// (`elide::Walk::element_read`), whose check shows the element exists.
+    pub elems: BTreeMap<Name, BTreeSet<Lin>>,
     pub dead: bool,
 }
 
@@ -442,7 +448,8 @@ impl State {
                 self.conds
                     .values()
                     .flat_map(|(yes, no)| yes.iter().chain(no).map(Fact::lin)),
-            );
+            )
+            .chain(self.elems.values().flatten());
         for l in lins {
             l.terms.iter().for_each(|(t, _)| note(*t));
         }
@@ -475,6 +482,7 @@ impl State {
         }
         self.conds.remove(&n);
         self.fresh.remove(&n);
+        self.unbound(|t| t.mentions_name(n));
         self.facts.retain(|f| !f.mentions_name(n));
         self.ne.retain(|d| !d.mentions_name(n));
         self.defs.retain(|_, v| !v.mentions_name(n));
@@ -563,6 +571,7 @@ impl State {
     /// Forgets everything about the one term `t`, restating what a definition
     /// through it knows as [`State::kill`] does.
     pub fn forget(&mut self, t: Term) {
+        self.unbound(|l| l.mentions(t));
         self.defs.remove(&t);
         self.restate(t);
         self.facts.retain(|f| !f.mentions(t));
@@ -588,18 +597,34 @@ impl State {
         }
         self.ne.retain(|d| !d.mentions(t));
         self.unsay(|l| l.mentions(t));
-        for f in facts {
+        let moved = |f: &Lin| {
             let k = f.coef(t);
             let least = match hi {
                 Some(hi) => (k.checked_mul(lo).zip(k.checked_mul(hi))).map(|(a, b)| a.min(b)),
                 None if k >= 0 => k.checked_mul(lo),
                 None => None,
-            };
-            let moved = least.and_then(|m| f.plus(m.checked_neg()?));
-            if let Some(f) = moved {
+            }?;
+            f.plus(least.checked_neg()?)
+        };
+        for f in facts {
+            if let Some(f) = moved(&f) {
                 self.assume(&f);
             }
         }
+        for ts in self.elems.values_mut() {
+            *ts = ts.iter().filter_map(moved).collect();
+        }
+    }
+
+    /// Drops each element template `stale` holds of.
+    fn unbound(&mut self, stale: impl Fn(&Lin) -> bool) {
+        if self.elems.is_empty() {
+            return;
+        }
+        for ts in self.elems.values_mut() {
+            ts.retain(|t| !stale(t));
+        }
+        self.elems.retain(|_, ts| !ts.is_empty());
     }
 
     fn restate(&mut self, x: Term) {
@@ -712,6 +737,18 @@ impl State {
             .filter(|n| live.iter().all(|s| s.fresh.contains(n)))
             .copied()
             .collect();
+        for (n, ts) in &first.elems {
+            let all: BTreeSet<Lin> = (ts.iter())
+                .filter(|t| {
+                    live.iter()
+                        .all(|s| s.elems.get(n).is_some_and(|x| x.contains(t)))
+                })
+                .cloned()
+                .collect();
+            if !all.is_empty() {
+                out.elems.insert(*n, all);
+            }
+        }
         for (t, v) in &first.defs {
             if live.iter().all(|s| s.defs.get(t) == Some(v)) {
                 out.defs.insert(*t, v.clone());

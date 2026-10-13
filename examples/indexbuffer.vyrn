@@ -1,0 +1,67 @@
+// A mesh as vertices and an index buffer of triangles.
+
+type Mesh = { xs: Array<Int64>, idx: Array<Int64> }
+
+fn addVertex(m: modify Mesh, x: Int64) -> Int64 {
+    m.xs.push(x)
+    return m.xs.length - 1
+}
+
+fn addTriangle(m: modify Mesh, a: Int64, b: Int64, c: Int64) {
+    let n = m.xs.length
+    if a < 0 || a >= n || b < 0 || b >= n || c < 0 || c >= n {
+        return
+    }
+    m.idx.push(a)
+    m.idx.push(b)
+    m.idx.push(c)
+}
+
+fn weight(m: Mesh) -> Int64 {
+    let mut sum = 0
+    let mut k = 0
+    while k + 2 < m.idx.length {
+        sum = sum + m.xs[m.idx[k]] + m.xs[m.idx[k + 1]] + m.xs[m.idx[k + 2]]
+        k = k + 3
+    }
+    return sum
+}
+
+fn weightBare(xs: Array<Int64>, idx: Array<Int64>) -> Int64 {
+    let mut sum = 0
+    let mut k = 0
+    while k < idx.length {
+        sum = sum + xs[idx[k]]
+        k = k + 1
+    }
+    return sum
+}
+
+fn main() -> Int64 {
+    let mut m = Mesh { xs: [], idx: [] }
+    let w = 30
+    let mut v = 0
+    while v < w * w {
+        addVertex(m, v % 17)
+        v = v + 1
+    }
+    let mut y = 0
+    while y + 1 < w {
+        let mut x = 0
+        while x + 1 < w {
+            let a = y * w + x
+            addTriangle(m, a, a + 1, a + w)
+            addTriangle(m, a + 1, a + w + 1, a + w)
+            x = x + 1
+        }
+        y = y + 1
+    }
+    let mut total = 0
+    let mut r = 0
+    while r < 10 {
+        total = total + weight(m) + weightBare(m.xs, m.idx)
+        r = r + 1
+    }
+    print(total)
+    return 0
+}
