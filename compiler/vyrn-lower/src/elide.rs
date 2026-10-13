@@ -91,7 +91,7 @@ fn walk(body: &mut Body, decls: &HashMap<String, TypeDecl>, sums: View<'_>) -> V
         .id
         .and_then(|f| sums.get(f))
         .map_or(&none, |(_, s)| &s.pre);
-    let mut w = Walk::new(body, decls, sums, &stmts, None);
+    let mut w = Walk::new(body, decls, sums, &stmts, None, false);
     let st = w.entry(pre);
     w.block(st, &mut stmts);
     let refuted = w.refuted;
@@ -349,10 +349,9 @@ impl<'a> View<'a> {
         instance(self.instances, rhs)
     }
 
-    /// What the direct call `rhs` may do to its `modify` argument `k`
-    /// ([`frames`]).
-    fn frame(&self, rhs: &Rhs, k: usize) -> Option<&'a [Moves]> {
-        Some(self.frames.get(&(self.call(rhs)?, k))?.as_slice())
+    /// What the direct call `rhs` may do to its argument `k` ([`frames`]).
+    fn frame(&self, rhs: &Rhs, k: usize) -> Option<&'a Frame> {
+        self.frames.get(&(self.call(rhs)?, k))
     }
 
     /// Whether `f` states a fact of its result.
@@ -442,7 +441,8 @@ pub fn summaries<'a>(
 ) -> Summaries {
     let mut bodies: Vec<(FnId, &Body)> = bodies.collect();
     bodies.sort_by_key(|(f, _)| f.index());
-    let frames = frames(&bodies, decls, &instances);
+    let mut frames = frames(&bodies, decls, &instances);
+    element_rows(&bodies, decls, &instances, &state, &mut frames);
     // A body's name count weighs its work.
     let weigh = |(_, b): &(FnId, &Body)| b.names.len();
     let firsts: Vec<(Vec<i64>, Option<Scan>)> = in_parallel(
@@ -634,10 +634,24 @@ impl Moves {
     }
 }
 
-/// Per body's row and `modify` parameter, its slots' [`Moves`]: one per
-/// field of a record, by the field's index, or one for an array's or
-/// String's length.
-type Frames = HashMap<(FnId, usize), Vec<Moves>>;
+/// What a call to one body may do to the argument of one parameter.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Frame {
+    /// For a `modify` record, array or String: its slots' [`Moves`], one per
+    /// field of a record by the field's index, or one for an array's or
+    /// String's length. Empty for any other parameter.
+    moves: Vec<Moves>,
+    /// For an index array ([`index_elements`]): every element of the result lies between the
+    /// least and the greatest element the argument held at entry
+    /// ([`element_rows`]).
+    result: bool,
+    /// For a `modify` index array: the same of every element the argument
+    /// holds at exit.
+    own: bool,
+}
+
+/// Per body's row and parameter, its [`Frame`].
+type Frames = HashMap<(FnId, usize), Frame>;
 
 /// The [`Frames`] of every `modify` parameter of `bodies` that is a record,
 /// an array or a String: the least fixpoint of [`frame`] over the call
@@ -657,8 +671,15 @@ fn frames(
     let mut out = Frames::new();
     for (f, b) in bodies {
         for (k, p) in b.params.iter().enumerate() {
-            if let Some(n) = slots(b, *p, decls) {
-                out.insert((*f, k), vec![Moves::Keeps; n]);
+            let moves = vec![Moves::Keeps; slots(b, *p, decls).unwrap_or(0)];
+            let row = index_elements(&b.names[p.index()].ty, decls);
+            if !moves.is_empty() || row {
+                let frame = Frame {
+                    result: row && returns_index_array(b, decls),
+                    own: row && !moves.is_empty(),
+                    moves,
+                };
+                out.insert((*f, k), frame);
             }
         }
     }
@@ -667,19 +688,23 @@ fn frames(
         raised = false;
         for (f, b) in bodies {
             for (k, p) in b.params.iter().enumerate() {
-                let Some(mut now) = out.get(&(*f, k)).cloned() else {
+                let Some(mut now) = (out.get(&(*f, k)))
+                    .map(|fr| fr.moves.clone())
+                    .filter(|m| !m.is_empty())
+                else {
                     continue;
                 };
                 {
                     let out = &out;
                     let callee = |rhs: &Rhs, i: usize| {
-                        Some(out.get(&(instance(instances, rhs)?, i))?.as_slice())
+                        Some(out.get(&(instance(instances, rhs)?, i))?.moves.as_slice())
                     };
                     frame(b, *p, decls, &callee, &mut now);
                 }
-                if now != out[&(*f, k)] {
+                let fr = out.get_mut(&(*f, k)).expect("read above");
+                if now != fr.moves {
                     raised = true;
-                    out.insert((*f, k), now);
+                    fr.moves = now;
                 }
             }
         }
@@ -881,6 +906,137 @@ fn frame<'o>(
             _ => {}
         }
     }
+}
+
+/// The names whose element templates a walk keeps for a callee's rows
+/// ([`Frame`]): at each direct call row, the array arguments of a `result` or
+/// an `own` row, and the result of a `result` row.
+fn template_roots(ss: &[St], sums: View<'_>) -> Vec<Name> {
+    let mut out = Vec::new();
+    each_row(ss, &mut |s| {
+        let (St::Let(_, rhs @ Rhs::Call { args, .. })
+        | St::Do {
+            rhs: rhs @ Rhs::Call { args, .. },
+            ..
+        }) = s
+        else {
+            return;
+        };
+        let mut result = false;
+        for (k, (a, _)) in args.iter().enumerate() {
+            if let Some(f) = sums.frame(rhs, k).filter(|f| f.result || f.own) {
+                out.extend(root(a));
+                result |= f.result;
+            }
+        }
+        if let (true, St::Let(n, _)) = (result, s) {
+            out.push(*n);
+        }
+    });
+    out
+}
+
+/// Calls `f` on every row of `ss` and every row under it, in program order,
+/// as [`rows`] yields them, without the stack [`rows`] allocates: a walk
+/// scans its body this way each time it starts.
+fn each_row<'s>(ss: &'s [St], f: &mut dyn FnMut(&'s St)) {
+    for s in ss {
+        f(s);
+        s.lists().for_each(|l| each_row(l, f));
+    }
+}
+
+/// Whether some return of `b` hands back an index array ([`index_elements`]).
+fn returns_index_array(b: &Body, decls: &HashMap<String, TypeDecl>) -> bool {
+    rows(&b.stmts).any(|(s, _)| {
+        matches!(s, St::Return { value: Some(Val::Name(n)), .. }
+            if index_elements(&b.names[n.index()].ty, decls))
+    })
+}
+
+/// The ghost templates of parameter `k`, the index array `p`: every
+/// element at most `Ghost(k, true)` and at least `Ghost(k, false)`.
+fn ghost_pair(k: usize, p: Name) -> [Lin; 2] {
+    let e = Lin::of(Term::Val(p));
+    let bound = |upper| Lin::of(Term::Ghost(k as u32, upper));
+    [
+        bound(true).sub(&e).expect("two terms"),
+        e.sub(&bound(false)).expect("two terms"),
+    ]
+}
+
+/// Weakens the `result` and `own` rows of `frames` to what each body's
+/// walk proves ([`Frame`]): the greatest fixpoint from every row holding,
+/// each walk taking its callees' rows from the round before. A round that
+/// weakens none ends the solve, and a row weakens at most once, so the
+/// rounds are at most the rows.
+///
+/// A walk starts each index array parameter `p` with the templates
+/// `G - e >= 0` and `e - H >= 0` over two ghosts, terms no fact names and
+/// no write moves. A value meets `G - v >= 0` only by a chain to an element
+/// read from such an array, so a stored value lies between the least and
+/// the greatest element `p` held at entry. The ghosts are universal, so
+/// every template of `p`, one linear bound on its element, holds of the
+/// value; an empty `p` yields no element, because the row admits only
+/// values read from it. Sound by induction on the depth of a call that
+/// returns: the calls it makes return at a lesser depth, so their rows hold
+/// where the walk reads them. A call that does not return claims nothing.
+fn element_rows(
+    bodies: &[(FnId, &Body)],
+    decls: &HashMap<String, TypeDecl>,
+    instances: &Instances,
+    state: &HashMap<FnId, StateUse>,
+    frames: &mut Frames,
+) {
+    let (at, values, facts) = (HashMap::new(), Vec::new(), RecordFacts::default());
+    loop {
+        let live = |(f, b): &&(FnId, &Body)| {
+            (0..b.params.len()).any(|k| frames.get(&(*f, k)).is_some_and(|r| r.result || r.own))
+        };
+        let todo: Vec<&(FnId, &Body)> = bodies.iter().filter(live).collect();
+        let view = View {
+            at: &at,
+            instances,
+            values: &values,
+            facts: &facts,
+            state,
+            frames,
+        };
+        let found: Vec<(FnId, (Vec<bool>, Vec<bool>))> = (todo.iter())
+            .map(|(f, b)| (*f, rows_of(b, decls, view)))
+            .collect();
+        let mut weakened = false;
+        for (f, (result, own)) in found {
+            for k in 0..result.len() {
+                if let Some(r) = frames.get_mut(&(f, k)) {
+                    let (a, b) = (r.result && result[k], r.own && own[k]);
+                    weakened |= (a, b) != (r.result, r.own);
+                    (r.result, r.own) = (a, b);
+                }
+            }
+        }
+        if !weakened {
+            return;
+        }
+    }
+}
+
+/// Per parameter of `body`, whether every return holds its `result` and its
+/// `own` row, walking it with the ghosts and the callees' rows `sums` holds.
+fn rows_of(
+    body: &Body,
+    decls: &HashMap<String, TypeDecl>,
+    sums: View<'_>,
+) -> (Vec<bool>, Vec<bool>) {
+    let mut stmts = body.stmts.clone();
+    let mut w = Walk::new(body, decls, sums, &stmts, Some(None), true);
+    let n = body.params.len();
+    w.rows = Some((vec![true; n], vec![true; n]));
+    let st = w.entry(&BTreeSet::new());
+    // A body that falls off its end returns there.
+    let end = w.block(st, &mut stmts);
+    w.returned(&end, None);
+    w.rows.expect("set above")
 }
 
 /// Whether `f` is a summary's `len(r) - c >= 0`.
@@ -1610,6 +1766,16 @@ fn keeps_elements(callee: &str, len: Length) -> bool {
     )
 }
 
+/// Whether `ty` is an array of integers that may index another array: wider
+/// than a byte, whose type bounds it, and no `UInt64`. Only such an array
+/// carries element templates across a call.
+fn index_elements(ty: &Type, decls: &HashMap<String, TypeDecl>) -> bool {
+    let t = vyrn_frontend::types::resolved(ty, decls);
+    t.elem().is_some_and(
+        |e| matches!(kind_of(e, decls), k @ Kind::Int(bits, _) if bits > 8 && k.is_int()),
+    )
+}
+
 /// Whether `ty` is an array of integers a term can stand for: no `UInt64`.
 fn int_elements(ty: &Type, decls: &HashMap<String, TypeDecl>) -> bool {
     let t = vyrn_frontend::types::resolved(ty, decls);
@@ -1931,7 +2097,7 @@ fn obliged(
 ) -> (BTreeSet<RecordFact>, BTreeSet<RecordFact>) {
     let view = View { facts, ..lengths };
     let mut stmts = body.stmts.clone();
-    let mut w = Walk::new(body, decls, view, &stmts, Some(None));
+    let mut w = Walk::new(body, decls, view, &stmts, Some(None), false);
     w.obliging = true;
     w.seed(&stmts, built(body, decls, facts));
     let st = w.entry(&BTreeSet::new());
@@ -2433,7 +2599,14 @@ fn returns(
     cands: &Summary,
 ) -> (Kept, BTreeSet<usize>) {
     let mut stmts = body.stmts.clone();
-    let mut w = Walk::new(body, decls, sums, &stmts, Some(Some(cands.post.clone())));
+    let mut w = Walk::new(
+        body,
+        decls,
+        sums,
+        &stmts,
+        Some(Some(cands.post.clone())),
+        false,
+    );
     w.when = Some(cands.when.clone()).filter(|c| !c.is_empty());
     let st = w.entry(&BTreeSet::new());
     let end = w.block(st, &mut stmts);
@@ -2452,7 +2625,7 @@ fn entries(
     sums: View<'_>,
 ) -> BTreeMap<usize, BTreeSet<Lin>> {
     let mut stmts = body.stmts.clone();
-    let mut w = Walk::new(body, decls, sums, &stmts, Some(None));
+    let mut w = Walk::new(body, decls, sums, &stmts, Some(None), false);
     let st = w.entry(&BTreeSet::new());
     w.block(st, &mut stmts);
     w.entered
@@ -2527,6 +2700,9 @@ struct Walk<'a> {
     elem_cands: Vec<(Name, Lin)>,
     /// Per borrow of an array name the walk keeps templates of, the array.
     arrays: BTreeMap<Name, Name>,
+    /// In a walk for [`element_rows`]: per parameter, whether every return
+    /// so far holds its `result` row and its `own` row ([`Frame`]).
+    rows: Option<(Vec<bool>, Vec<bool>)>,
 }
 
 /// What the walk keeps about one name.
@@ -2669,20 +2845,25 @@ fn some_binder(body: &Body, decls: &HashMap<String, TypeDecl>, on: &Val, a: &Arm
 
 impl<'a> Walk<'a> {
     /// A walk that decides `body`'s checks when `solve` is `None`, and
-    /// otherwise serves the solve with the `post` candidates it holds.
+    /// otherwise serves the solve with the `post` candidates it holds. With
+    /// `ghosts`, it serves [`element_rows`]: each index array parameter
+    /// starts with its elements between its two ghosts.
     fn new(
         body: &'a Body,
         decls: &'a HashMap<String, TypeDecl>,
         sums: impl Into<View<'a>>,
         stmts: &[St],
         solve: Option<Option<BTreeSet<Lin>>>,
+        ghosts: bool,
     ) -> Walk<'a> {
         let sums = sums.into();
         let solving = solve.is_some();
         let post = solve.flatten();
         // Argument `k` of a call to a body with a `pre` that names parameter `k`.
         let enters = |g: FnId, k: usize| {
-            let named = |f: &Lin| f.terms.iter().any(|(t, _)| t.name().index() == k + 1);
+            let named = |f: &Lin| {
+                (f.terms.iter()).any(|(t, _)| t.name().is_some_and(|n| n.index() == k + 1))
+            };
             solving && sums.get(g).is_some_and(|(_, s)| s.pre.iter().any(named))
         };
         let linked = |r: &Rhs| sums.linked(r);
@@ -2692,7 +2873,26 @@ impl<'a> Walk<'a> {
             true => Vec::new(),
             false => element_seeds(body, decls, stmts),
         };
-        let roots: BTreeSet<Name> = seeds.iter().map(|(x, ..)| *x).collect();
+        let mut roots: BTreeSet<Name> = seeds.iter().map(|(x, ..)| *x).collect();
+        roots.extend(template_roots(stmts, sums));
+        let ghosted: Vec<(usize, Name)> = match ghosts {
+            true => (body.params.iter().copied().enumerate())
+                .filter(|(_, p)| index_elements(&body.names[p.index()].ty, decls))
+                .collect(),
+            false => Vec::new(),
+        };
+        if !ghosted.is_empty() {
+            // A ghost walk keeps the templates of the parameters and of each
+            // array the body returns: a row reads no other.
+            roots.extend(ghosted.iter().map(|(_, p)| *p));
+            roots.extend(rows(stmts).filter_map(|(s, _)| match s {
+                St::Return {
+                    value: Some(Val::Name(r)),
+                    ..
+                } if index_elements(&body.names[r.index()].ty, decls) => Some(*r),
+                _ => None,
+            }));
+        }
         let mut w = Walk {
             body,
             decls,
@@ -2734,8 +2934,13 @@ impl<'a> Walk<'a> {
                 .collect(),
             elem_cands: Vec::new(),
             arrays: BTreeMap::new(),
+            rows: None,
         };
-        if seeds.is_empty() {
+        for (k, p) in ghosted {
+            w.elem_cands
+                .extend(ghost_pair(k, p).into_iter().map(|t| (p, t)));
+        }
+        if seeds.is_empty() && w.elem_cands.is_empty() {
             return w;
         }
         for (x, target, c) in &seeds {
@@ -2818,6 +3023,27 @@ impl<'a> Walk<'a> {
                 Some(m) => (m, length_rule(callee, args)),
                 None => return,
             },
+            // A direct call's result has every template of each argument
+            // whose `result` row holds ([`element_rows`]), over the caller's
+            // terms before the call, the argument's own length included: the
+            // result may be shorter. The call's effects then move them.
+            Rhs::Call { args, .. } => {
+                let mut ts = BTreeSet::new();
+                for (k, (a, _)) in args.iter().enumerate() {
+                    let row = self.sums.frame(rhs, k).is_some_and(|f| f.result);
+                    if let Some(m) = root(a).filter(|_| row) {
+                        let m = self.arrays.get(&m).copied().unwrap_or(m);
+                        let theirs = st.elems.get(&m).into_iter().flatten();
+                        ts.extend(
+                            theirs.filter_map(|t| t.subst(Term::Val(m), &Lin::of(Term::Val(n)))),
+                        );
+                    }
+                }
+                if !ts.is_empty() {
+                    st.elems.insert(n, ts);
+                }
+                return;
+            }
             _ => return,
         };
         let m = self.arrays.get(&m).copied().unwrap_or(m);
@@ -2916,16 +3142,23 @@ impl<'a> Walk<'a> {
             self.fresh(&mut st, *p);
         }
         let at = |t: Term| {
-            let p = *params.get(t.name().index().checked_sub(1)?)?;
+            let p = *params.get(t.name()?.index().checked_sub(1)?)?;
             match t {
                 Term::Val(_) => Some(Lin::of(Term::Val(p))),
                 Term::Len(_) => Some(Lin::of(Term::Len(p))),
-                Term::Col(..) | Term::Field(..) | Term::Inner(..) => None,
+                Term::Col(..) | Term::Field(..) | Term::Inner(..) | Term::Ghost(..) => None,
             }
         };
         for f in pre {
             if let Some(l) = f.map(at) {
                 st.assume(&l);
+            }
+        }
+        if self.rows.is_some() {
+            for (k, p) in params.iter().enumerate() {
+                if index_elements(&self.body.names[p.index()].ty, self.decls) {
+                    st.elems.insert(*p, ghost_pair(k, *p).into_iter().collect());
+                }
             }
         }
         for a in &self.body.assumes {
@@ -3859,7 +4092,8 @@ impl<'a> Walk<'a> {
             (s.facts.iter().cloned().chain(s.unshared(j)))
                 .filter(|l| {
                     (l.terms.iter()).any(|(t, _)| {
-                        matches!(t, Term::Len(_) | Term::Col(..)) && stored.contains(&t.name())
+                        matches!(t, Term::Len(_) | Term::Col(..))
+                            && t.name().is_some_and(|n| stored.contains(&n))
                     })
                 })
                 .filter(|l| known.ge0(l).is_none())
@@ -4163,7 +4397,7 @@ impl<'a> Walk<'a> {
             .filter_map(|k| root(&args[k].0))
             .collect();
         let at = |t: Term| -> Option<Lin> {
-            let Some(k) = t.name().index().checked_sub(1) else {
+            let Some(k) = t.name()?.index().checked_sub(1) else {
                 return match t {
                     Term::Val(_) if self.kind(n).is_int() || self.payload(n) => {
                         Some(Lin::of(Term::Val(n)))
@@ -4178,7 +4412,11 @@ impl<'a> Walk<'a> {
                 _ => self.arg(t, a, s.params[k]),
             }
         };
-        let free = |l: &Lin| !l.terms.iter().any(|(t, _)| written.contains(&t.name()));
+        let free = |l: &Lin| {
+            !l.terms
+                .iter()
+                .any(|(t, _)| t.name().is_some_and(|n| written.contains(&n)))
+        };
         let facts: Vec<Lin> = s
             .post
             .iter()
@@ -4230,7 +4468,7 @@ impl<'a> Walk<'a> {
             return;
         }
         let at = |t: Term| {
-            let k = t.name().index().checked_sub(1)?;
+            let k = t.name()?.index().checked_sub(1)?;
             self.arg(t, &args.get(k)?.0, *s.params.get(k)?)
         };
         let holds = |g: &Lin| st.ge0(g).is_some_and(|cert| cert.verify(st, g));
@@ -4290,6 +4528,24 @@ impl<'a> Walk<'a> {
     /// for a Bool, where it is true ([`Walk::truth`]).
     fn returned(&mut self, st: &State, value: Option<&Val>) {
         self.returned_when(st, value);
+        if let Some((mut result, mut own)) = self.rows.take() {
+            if !st.dead {
+                let array = match value {
+                    Some(Val::Name(m)) => self.array_of(&Place::Name(*m)),
+                    _ => None,
+                };
+                for (k, p) in self.body.params.iter().enumerate() {
+                    let held = |a: Name| {
+                        (ghost_pair(k, *p).iter())
+                            .filter_map(|t| renamed(t, *p, a))
+                            .all(|t| st.elems.get(&a).is_some_and(|ts| ts.contains(&t)))
+                    };
+                    result[k] &= array.is_some_and(held);
+                    own[k] &= held(*p);
+                }
+            }
+            self.rows = Some((result, own));
+        }
         let Some(cands) = self.post.take() else {
             return;
         };
@@ -4302,7 +4558,7 @@ impl<'a> Walk<'a> {
             return;
         }
         let at = |t: Term| -> Option<Lin> {
-            match (t.name().index().checked_sub(1), t, value?) {
+            match (t.name()?.index().checked_sub(1), t, value?) {
                 (None, Term::Val(_), Val::Name(m)) if self.payload(*m) => {
                     Some(Lin::of(Term::Val(*m)))
                 }
@@ -4338,13 +4594,13 @@ impl<'a> Walk<'a> {
 
     /// A summary's term of parameter `k` (`Name(k + 1)`) as the body's own.
     fn param_term(&self, t: Term) -> Option<Lin> {
-        let p = *self.body.params.get(t.name().index().checked_sub(1)?)?;
+        let p = *self.body.params.get(t.name()?.index().checked_sub(1)?)?;
         Some(Lin::of(match t {
             Term::Val(_) => Term::Val(p),
             Term::Len(_) => Term::Len(p),
             Term::Field(_, i) => Term::Field(p, i),
             Term::Col(_, i) => Term::Col(p, i),
-            Term::Inner(..) => return None,
+            Term::Inner(..) | Term::Ghost(..) => return None,
         }))
     }
 
@@ -4709,8 +4965,8 @@ impl<'a> Walk<'a> {
                 (Capability::Modify, _)
                     if matches!(a, Arg::Val(_) | Arg::Place(Place::Name(_))) =>
                 {
-                    match self.sums.frame(rhs, i) {
-                        Some(moves) => self.frame(st, n, moves),
+                    match self.sums.frame(rhs, i).filter(|f| !f.moves.is_empty()) {
+                        Some(f) => self.frame(st, n, f),
                         None => self.resize(st, n),
                     }
                 }
@@ -4828,7 +5084,10 @@ impl<'a> Walk<'a> {
                 || s == 0
                 || writes_of(body, k) != 1
                 || !matches!(self.kind(k), Kind::Int(..))
-                || k0.terms.iter().any(|(t, _)| written.contains(&t.name()))
+                || k0
+                    .terms
+                    .iter()
+                    .any(|(t, _)| t.name().is_some_and(|n| written.contains(&n)))
                 || !self.in_range(k, &k0, entry)
                 || !self.in_range(k, &end, entry)
             {
@@ -4879,13 +5138,18 @@ impl<'a> Walk<'a> {
         // shapes an index needs.
         let mut cands: BTreeSet<Lin> = BTreeSet::new();
         for f in &entry.facts {
-            if f.terms.iter().any(|(t, _)| written.contains(&t.name())) {
+            if f.terms
+                .iter()
+                .any(|(t, _)| t.name().is_some_and(|n| written.contains(&n)))
+            {
                 cands.insert(f.clone());
             }
         }
         for (t, v) in &entry.defs {
-            let mentions = written.contains(&t.name())
-                || v.terms.iter().any(|(x, _)| written.contains(&x.name()));
+            let mentions = t.name().is_some_and(|n| written.contains(&n))
+                || v.terms
+                    .iter()
+                    .any(|(x, _)| x.name().is_some_and(|n| written.contains(&n)));
             if mentions {
                 cands.extend(Lin::of(*t).sub(v));
                 cands.extend(v.sub(&Lin::of(*t)));
@@ -5126,7 +5390,8 @@ impl<'a> Walk<'a> {
     /// frame states ([`frames`]): a kept slot keeps its facts, one that grows
     /// keeps those that bound it from below, and any other forgets them. A
     /// field term of a class of equal lengths moves as its fields' join.
-    fn frame(&mut self, st: &mut State, n: Name, moves: &[Moves]) {
+    fn frame(&mut self, st: &mut State, n: Name, frame: &Frame) {
+        let moves = frame.moves.as_slice();
         let ty = &self.body.names[n.index()].ty;
         let fields = vyrn_frontend::types::record_fields(ty, self.decls);
         let class = |i: u32| -> Moves {
@@ -5148,7 +5413,9 @@ impl<'a> Walk<'a> {
                 Term::Len(_) if fields.is_none() => moves.first().copied().unwrap_or(Moves::Any),
                 Term::Field(_, i) => moves.get(i as usize).copied().unwrap_or(Moves::Any),
                 Term::Col(_, i) => class(i),
-                Term::Val(_) | Term::Len(_) | Term::Inner(..) => Moves::Any,
+                // An array's value is the hole of its element templates.
+                Term::Val(_) if fields.is_none() && frame.own => Moves::Keeps,
+                Term::Val(_) | Term::Len(_) | Term::Inner(..) | Term::Ghost(..) => Moves::Any,
             };
             match m {
                 Moves::Keeps => {}
@@ -5269,7 +5536,7 @@ impl<'a> Walk<'a> {
         let terms = || failing.into_iter().flat_map(|g| g.terms.iter());
         let names = || {
             terms()
-                .map(|(t, _)| t.name())
+                .filter_map(|(t, _)| t.name())
                 .chain(operands.into_iter().flatten())
         };
         let goal = || failing.map(|g| self.goal(st, g, None).0);
@@ -5281,9 +5548,12 @@ impl<'a> Walk<'a> {
             _ => {}
         }
         let resized = |n: Name| self.loops.iter().any(|l| l.seen.resized.contains(&n));
-        if let Some((t, _)) = terms().find(|(t, _)| !matches!(t, Term::Val(_)) && resized(t.name()))
-        {
-            return Why::Resized(t.name());
+        let grown = |(t, _): &(Term, i64)| {
+            t.name()
+                .filter(|n| !matches!(t, Term::Val(_)) && resized(*n))
+        };
+        if let Some(n) = terms().find_map(grown) {
+            return Why::Resized(n);
         }
         if let Some(seen) = self.loops.last().map(|l| &l.seen) {
             // Exactly one name of the goal is written, and it is a counter.
@@ -5316,8 +5586,10 @@ impl<'a> Walk<'a> {
     /// allows one.
     fn goal(&self, st: &State, g: &Lin, param: Option<Name>) -> (Arc<str>, Option<Arc<str>>) {
         let l = &st.norm(g).unwrap_or_else(|| g.clone());
-        let temp = (l.terms.iter())
-            .any(|(t, _)| self.body.names[t.name().index()].source.starts_with('@'));
+        let temp = (l.terms.iter()).any(|(t, _)| {
+            t.name()
+                .is_some_and(|n| self.body.names[n.index()].source.starts_with('@'))
+        });
         let says = match (l.terms.as_slice(), l.c, temp) {
             ([(Term::Len(n), 1)], -1, true) => format!("{} non-empty", self.body.spoken(*n)),
             ([(Term::Len(n), 1)], -1, false) => format!("`{}` non-empty", self.body.spoken(*n)),
@@ -5351,11 +5623,12 @@ impl<'a> Walk<'a> {
             && neg.len() <= 1
             && (pos.is_empty() || neg.is_empty() || l.c == 0 || l.c == -1);
         atoms
-            && l.terms.iter().any(|(t, _)| t.name() == p)
+            && l.terms.iter().any(|(t, _)| t.name() == Some(p))
             && (l.terms.iter()).all(|(t, k)| {
                 k.unsigned_abs() == 1
                     && !matches!(t, Term::Col(..) | Term::Inner(..))
-                    && (t.name() == p || (read(t.name()) && at(t.name()).is_some_and(|i| i < own)))
+                    && t.name()
+                        .is_some_and(|n| n == p || (read(n) && at(n).is_some_and(|i| i < own)))
             })
     }
 
@@ -5363,7 +5636,10 @@ impl<'a> Walk<'a> {
     /// `n >= 1`. `value` stands for `param`.
     fn lin_text(&self, l: &Lin, param: Option<Name>) -> String {
         let atom = |t: Term| -> String {
-            let n = t.name();
+            // A ghost is never a check's goal ([`element_rows`]).
+            let Some(n) = t.name() else {
+                return "a bound".into();
+            };
             let name = match Some(n) == param {
                 true => "value".into(),
                 false => self.body.spoken(n),
@@ -5398,6 +5674,7 @@ impl<'a> Walk<'a> {
                         None => format!("{name}[{at}].length"),
                     }
                 }
+                Term::Ghost(..) => "a bound".into(),
             }
         };
         // The constant in `i128`, so negating `i64::MIN` cannot overflow.
@@ -5947,8 +6224,9 @@ fn stores(ss: &[St], out: &mut BTreeSet<Name>) {
 /// where the entry and every turn prove it.
 fn equal_fields(entry: &State, written: &BTreeSet<Name>) -> Vec<Lin> {
     let cols = || {
-        (entry.defs.iter())
-            .filter(|(t, _)| matches!(t, Term::Col(..)) && written.contains(&t.name()))
+        (entry.defs.iter()).filter(|(t, _)| {
+            matches!(t, Term::Col(..)) && t.name().is_some_and(|n| written.contains(&n))
+        })
     };
     let mut out = Vec::new();
     for (i, (a, va)) in cols().enumerate() {
