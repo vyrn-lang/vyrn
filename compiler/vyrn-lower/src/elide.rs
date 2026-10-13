@@ -462,7 +462,10 @@ pub fn summaries<'a>(
             let needs = needed_lengths(b, decls);
             let scan = records.map(|_| scan(b, decls, &needs));
             let pairs = [indexed_pairs(b, decls), made_pairs(b, decls)];
-            (needs.into_iter().map(|(_, c)| c).collect(), scan, pairs)
+            // A result's candidate lengths start at two: one cost 0.2% more
+            // `elide: summaries` allocations there and proved no more rows.
+            let needs = needs.into_iter().map(|(_, c)| c).filter(|c| *c >= 2);
+            (needs.collect(), scan, pairs)
         },
     );
     let mut needed = BTreeSet::new();
@@ -2243,7 +2246,7 @@ fn needed_lengths(b: &Body, decls: &HashMap<String, TypeDecl>) -> Vec<(Place, i6
         }
     }
     let limit = vyrn_frontend::trap::LENGTH_LIMIT as i64;
-    out.retain(|(_, c)| (2..=limit).contains(c));
+    out.retain(|(_, c)| (1..=limit).contains(c));
     out
 }
 
@@ -4606,7 +4609,12 @@ impl<'a> Walk<'a> {
                 }
                 st
             }
-            St::Store { place, value, .. } => {
+            St::Store {
+                place,
+                value,
+                releases,
+                ..
+            } => {
                 if !matches!(place, Place::Name(_)) {
                     st.forget_inner();
                 }
@@ -4634,8 +4642,11 @@ impl<'a> Walk<'a> {
                     _ => {}
                 }
                 if let Place::Name(n) = place {
-                    // The value the store displaces is released.
-                    self.keeps(&st, *n);
+                    // The value the store displaces is released, where the
+                    // plan releases one: a value a `consume` took is not.
+                    if *releases {
+                        self.keeps(&st, *n);
+                    }
                     let o = self.slot[n.index()].origin.join(self.origin_of_val(value));
                     self.slot[n.index()].origin = o;
                 }
@@ -4678,6 +4689,11 @@ impl<'a> Walk<'a> {
                         self.assign(&mut st, *n, value);
                         self.range(&mut st, *n);
                         self.element_flow(&mut st, *n, &Rhs::Val(value.clone()));
+                        // A record the walk tracks takes another name's value,
+                        // whose facts `keeps` held above.
+                        if matches!(value, Val::Name(_)) && self.dirty.contains(n) {
+                            self.restate(&mut st, *n);
+                        }
                     }
                 }
                 st

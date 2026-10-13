@@ -2040,8 +2040,10 @@ fn w(c: modify C) -> Int64 {
     return 0
 }
 ";
-    assert_eq!(verdicts(src, "w"), ["check array-index", "proved where"]);
+    // A program that builds no `C` holds every record fact of it.
     let calls = "    let mut c = C { a: [], b: [] }\n    print(w(c).toString())";
+    let (_dir, file) = program(src, calls);
+    assert_eq!(rows_of(&file, "w"), ["check array-index", "proved where"]);
     let (err, _) = oracle(src, calls, "w");
     assert!(
         err.contains("array index 0 out of bounds")
@@ -7379,4 +7381,78 @@ fn w(n: Int64) -> Int64 {{
         verdicts(&witness, "hop"),
         ["proved array-index", "check array-index"]
     );
+}
+
+/// A record field a check indexes at zero is non-empty in every value of the
+/// record, through a parameter's array the literal takes and a call that
+/// replaces the record; a value built empty keeps the check. A store holds
+/// the value it stores to the facts, and a release of the value it displaces
+/// reads it.
+#[test]
+fn a_record_field_indexed_at_zero_is_non_empty() {
+    let src = |row: &str| {
+        format!(
+            "type Box = {{ xs: Array<Int64> }}
+fn first(b: Box) -> Int64 {{
+    return b.xs[0]
+}}
+fn pass(b: consume Box) -> Box {{
+    let c = b
+    return c
+}}
+fn wrap(xs: consume Array<Int64>) -> Box {{
+    let mut b = Box {{ xs: xs }}
+    b = pass(b)
+    return b
+}}
+fn w(n: Int64) -> Int64 {{
+    return first(wrap({row}))
+}}
+"
+        )
+    };
+    let proof = src("[n]");
+    assert_eq!(verdicts(&proof, "first"), ["proved array-index"]);
+    let (err, _) = oracle(&proof, "    print(w(3).toString())", "w");
+    assert_eq!(err, "");
+    let witnesses = [
+        src("[]"),
+        "type Box = { xs: Array<Int64> }
+fn first(b: Box) -> Int64 {
+    return b.xs[0]
+}
+fn w(n: Int64) -> Int64 {
+    let mut b = Box { xs: [n] }
+    let e = Box { xs: [] }
+    b = e
+    return first(b)
+}
+"
+        .to_string(),
+        "type Box = { xs: Array<Int64> }
+impl Owned for Box {
+    fn release(consume self) {
+        print(self.xs[0].toString())
+        let v = consume self.xs
+        drop v
+    }
+}
+fn w(n: Int64) -> Int64 {
+    let mut b = Box { xs: [] }
+    b = Box { xs: [n] }
+    return n
+}
+"
+        .to_string(),
+    ];
+    let mut failures = Vec::new();
+    for src in &witnesses {
+        let (err, _) = oracle(src, "    print(w(10).toString())", "w");
+        if !err.contains("array index 0 out of bounds")
+            || err.contains(vyrn_frontend::trap::PROVED_CHECK_FAILED)
+        {
+            failures.push(format!("{src}\nran: {err}"));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n\n"));
 }
