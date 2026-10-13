@@ -3384,11 +3384,27 @@ impl<'a> Walk<'a> {
         let hole = Term::Val(a);
         let k = want.coef(hole);
         let prover = st.prover();
-        let theirs = st.elems.get(&a).into_iter().flatten();
+        let theirs =
+            (st.elems.get(&a).into_iter().flatten().cloned()).chain(self.field_templates(a));
         (k != 0)
             && (theirs.filter(|t| t.coef(hole) == k))
-                .filter_map(|t| want.sub(t))
+                .filter_map(|t| want.sub(&t))
                 .any(|d| prover.ge0_deep(&d).is_some_and(|cert| cert.verify(st, &d)))
+    }
+
+    /// The element facts of the record field the borrow `b` reads, each as
+    /// a template of `b` ([`RecordFacts`]).
+    fn field_templates(&self, b: Name) -> Vec<Lin> {
+        let Some(Place::Field(r, f)) = self.fields.get(&b) else {
+            return Vec::new();
+        };
+        let Place::Name(r) = **r else {
+            return Vec::new();
+        };
+        let e = Lin::of(Term::Val(b));
+        (self.element_facts_of(r, Some(f)).into_iter())
+            .filter_map(|fact| self.element_lin(r, fact, &e, None))
+            .collect()
     }
 
     /// Keeps of array `a`, whose element `place` takes `value`, the

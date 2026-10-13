@@ -6938,3 +6938,64 @@ fn a_pre_rests_on_the_pre_of_the_caller_walked_under_it() {
         ["proved", "check"]
     );
 }
+
+/// [`first`]'s callee, called with the borrows of two fields whose record
+/// fact bounds one's elements by the other's length. `at` seeds the fact; a
+/// fact no check on a field seeds fills no `pre`.
+fn fields(calls: &str) -> String {
+    format!(
+        "type Mesh = {{ xs: Array<Int64>, idx: Array<Int64> }}
+fn at(m: Mesh, k: Int64) -> Int64 {{
+    if k < 0 || k >= m.idx.length {{
+        return 0
+    }}
+    return m.xs[m.idx[k]]
+}}
+fn w(idx: Array<Int64>, xs: Array<Int64>) -> Int64 {{
+    if idx.length < 1 {{
+        return 0
+    }}
+    return xs[idx[0]]
+}}
+fn add(m: modify Mesh, x: Int64) {{
+    m.xs.push(x)
+    m.idx.push(m.xs.length - 1)
+}}
+fn main() -> Int64 {{
+    let mut m = Mesh {{ xs: [], idx: [] }}
+    add(m, 5)
+    add(m, 6)
+    print(w(m.idx, m.xs).toString())
+    print(at(m, 1).toString())
+{calls}
+    return 0
+}}
+"
+    )
+}
+
+#[test]
+fn a_pre_takes_a_record_fact_through_the_borrows_of_two_fields() {
+    let (dir, file) = modules(&fields(""), &[]);
+    assert_eq!(
+        verdicts_on(&file, "w", "return xs[idx[0]]"),
+        ["proved", "proved"]
+    );
+    let (err, _) = run_oracle(&dir, &file, "w");
+    assert_eq!(err, "");
+    // The fact bounds the elements of `idx`, not those of `xs`.
+    for call in ["w(m.xs, m.idx)", "w(m.xs, m.xs)"] {
+        let (dir, file) = modules(&fields(&format!("    print({call}.toString())")), &[]);
+        let (err, _) = run_oracle(&dir, &file, "w");
+        assert!(
+            err.contains("array index 5 out of bounds")
+                && !err.contains(vyrn_frontend::trap::PROVED_CHECK_FAILED),
+            "{call}\n{err}"
+        );
+        assert_eq!(
+            verdicts_on(&file, "w", "return xs[idx[0]]"),
+            ["proved", "check"],
+            "{call}"
+        );
+    }
+}
