@@ -32,8 +32,7 @@ fn report(seq: Array<UInt8>, k: Int64) -> Unit
 fn syntheticSequence(n: Int64) -> Array<UInt8>
   146           allocates `Array<UInt8>`  last run: 0 blocks, 0 bytes
   152  loop 1   `push(..)` may allocate when it outgrows its capacity  last run: 0 blocks, 0 bytes
-       loop 1   index check: it needs the value of line 152 >= 0, and the compiler cannot show that here
 fn main() -> Int64
   173  loop 1   copies `String`: interpolating a `String` copies it  last run: 5 blocks, 104 bytes
        loop 1   allocates `String` x3  last run: 20 blocks, 312 bytes
-summary: allocating rows 20 (9 in loops), growing rows 6 (5 in loops), copies 5 (4 in loops), checks kept 2 (2 in loops), checks proved 19 (14 in loops)
+summary: allocating rows 20 (9 in loops), growing rows 6 (5 in loops), copies 5 (4 in loops), checks kept 1 (1 in loops), checks proved 20 (15 in loops)

@@ -7456,3 +7456,59 @@ fn w(n: Int64) -> Int64 {
     }
     assert!(failures.is_empty(), "{}", failures.join("\n\n"));
 }
+
+/// A counter a loop stores as a remainder by a literal stays below it, so a
+/// random state that starts in range multiplies exactly and its remainder
+/// indexes in range. A negative seed, or one so large the product wraps,
+/// keeps the check.
+#[test]
+fn a_remainder_by_a_literal_bounds_its_counter() {
+    let src = |seed: &str| {
+        format!(
+            "fn shuffle(p: modify Array<Int64>, seed: Int64) {{
+    let mut s = seed
+    let mut i = p.length - 1
+    while i > 0 {{
+        s = (s * 1103515245 + 12345) % 2147483648
+        let j = s % (i + 1)
+        let t = p[i]
+        p[i] = p[j]
+        p[j] = t
+        i = i - 1
+    }}
+}}
+fn w(n: Int64) -> Int64 {{
+    let mut p: Array<Int64> = [0, 1, n]
+    shuffle(p, {seed})
+    return p[0]
+}}
+"
+        )
+    };
+    assert_eq!(
+        verdicts(&src("1"), "shuffle"),
+        [
+            "proved int-rem-zero",
+            "proved int-rem-zero",
+            "proved array-index",
+            "proved array-index",
+            "proved array-index",
+            "proved array-index"
+        ]
+    );
+    let (err, _) = oracle(&src("1"), "    print(w(2).toString())", "w");
+    assert_eq!(err, "");
+    let mut failures = Vec::new();
+    for seed in ["0 - 5", "1099511627776"] {
+        let (err, _) = oracle(&src(seed), "    print(w(2).toString())", "w");
+        if !err.contains("out of bounds") || err.contains(vyrn_frontend::trap::PROVED_CHECK_FAILED)
+        {
+            failures.push(format!("{seed}\nran: {err}"));
+        }
+        let rows = verdicts(&src(seed), "shuffle");
+        if !rows.contains(&"check array-index".to_string()) {
+            failures.push(format!("{seed}\nrows: {rows:?}"));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n\n"));
+}

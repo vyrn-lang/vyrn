@@ -6004,6 +6004,27 @@ impl<'a> Walk<'a> {
         {
             let v = Lin::of(Term::Val(*m));
             cands.insert(v.clone());
+            // A counter stored as a remainder by a literal `c` stays below
+            // `c` after a turn, and at most `c` where it entered at most `c`:
+            // an `Int64` hash or random state then multiplies exactly.
+            let rem = |s: &St| match s {
+                St::Store {
+                    place: Place::Name(x),
+                    value: Val::Name(t),
+                    ..
+                } if x == m => match let_of(body, *t) {
+                    Some(Rhs::Prim(Op::Bin(BinOp::Rem), vs, _)) => match vs.as_slice() {
+                        [_, Val::Lit(Lit::Int(c))] if *c > 0 => Some(*c),
+                        _ => None,
+                    },
+                    _ => None,
+                },
+                _ => None,
+            };
+            for c in rows(body).filter_map(|(s, _)| rem(s)) {
+                cands.extend(Lin::k(c).sub(&v));
+                cands.extend(Lin::k(c - 1).sub(&v));
+            }
             // An index `m - c` by a literal `c` needs `m - c >= 0`, so a
             // counter that steps down to `c` keeps it.
             let below = |i: &Name| match let_of(body, *i) {
