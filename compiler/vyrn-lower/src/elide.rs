@@ -427,6 +427,9 @@ fn instance(instances: &Instances, rhs: &Rhs) -> Option<FnId> {
 /// under it, as a greatest fixpoint; every other caller is walked once,
 /// without its own `pre`.
 ///
+/// The record facts' walks assume [`parameter_facts`] at a body's entry. When
+/// a body's `pre` leaves one out, the solve starts again without it.
+///
 /// The result does not depend on the order of `bodies`. Soundness rests on
 /// two postulates: a [`Callee::Fn`] row runs the body `bodies` holds under
 /// its row, or for a generic function the body of the row `instances` names
@@ -459,7 +462,10 @@ pub fn summaries<'a>(
             let needs = needed_lengths(b, decls);
             let scan = records.map(|_| scan(b, decls, &needs));
             let pairs = [indexed_pairs(b, decls), made_pairs(b, decls)];
-            (needs.into_iter().map(|(_, c)| c).collect(), scan, pairs)
+            // A result's candidate lengths start at two: one cost 0.2% more
+            // `elide: summaries` allocations there and proved no more rows.
+            let needs = needs.into_iter().map(|(_, c)| c).filter(|c| *c >= 2);
+            (needs.collect(), scan, pairs)
         },
     );
     let mut needed = BTreeSet::new();
@@ -493,199 +499,231 @@ pub fn summaries<'a>(
         .collect();
     let mut at: HashMap<FnId, usize> = (0..).zip(&bodies).map(|(i, (f, _))| (*f, i)).collect();
     let scans: Option<Vec<Scan>> = scans.into_iter().collect();
-    let facts = match (records, scans) {
-        (Some(r), Some(scans)) => {
-            // A record field's constant length comes from a callee's result
-            // (`classOf: byteClasses(bd)`): solve those facts first, with no
-            // record fact, for the walks that prove the record's.
-            let mut start: BTreeSet<usize> = match scans.iter().any(|s| !s.lengths.is_empty()) {
-                true => (scans.iter().flat_map(|s| &s.fills))
-                    .filter_map(|g| at.get(g).copied())
-                    .filter(|&i| values[i].post.iter().any(constant_length))
-                    .collect(),
-                false => BTreeSet::new(),
-            };
-            // A sentinel's facts let a writer of a record prove its facts.
-            start.extend((0..values.len()).filter(|&i| !values[i].when.is_empty()));
-            let lengths = match start.is_empty() {
-                true => Vec::new(),
-                false => {
-                    let only = (values.iter())
-                        .map(|v| Summary {
-                            params: v.params.clone(),
-                            types: v.types.clone(),
-                            pre: BTreeSet::new(),
-                            when: v.when.clone(),
-                            post: v
-                                .post
-                                .iter()
-                                .filter(|f| constant_length(f))
-                                .cloned()
-                                .collect(),
-                        })
-                        .collect();
-                    solve(
-                        &bodies,
-                        decls,
-                        &at,
-                        &instances,
-                        only,
-                        start,
-                        &RecordFacts::default(),
-                        &state,
-                        &frames,
-                    )
+    let (closed, callees) = entered(&bodies, closed);
+    // The walks of [`invariants`] assume at a body's entry the facts it
+    // returns of the body's parameters, and the body's `pre` must keep each
+    // of them, or the solve starts again assuming only those it kept. Each
+    // later start assumes fewer, so the starts are at most the facts plus one.
+    let mut keep: Option<Vec<BTreeSet<Lin>>> = None;
+    let mut first = Some(values);
+    loop {
+        let mut values = first.take().unwrap_or_else(|| {
+            in_parallel(
+                &bodies,
+                weigh,
+                || (),
+                |(), (_, b)| templates(b, decls, &needed, &pairs),
+            )
+        });
+        let (facts, assumed) = match (records, scans.as_ref()) {
+            (Some(r), Some(scans)) => {
+                // A record field's constant length comes from a callee's
+                // result (`classOf: byteClasses(bd)`): solve those facts
+                // first, with no record fact, for the walks that prove the
+                // record's.
+                let mut start: BTreeSet<usize> = match scans.iter().any(|s| !s.lengths.is_empty()) {
+                    true => (scans.iter().flat_map(|s| &s.fills))
+                        .filter_map(|g| at.get(g).copied())
+                        .filter(|&i| values[i].post.iter().any(constant_length))
+                        .collect(),
+                    false => BTreeSet::new(),
+                };
+                // A sentinel's facts let a writer of a record prove its facts.
+                start.extend((0..values.len()).filter(|&i| !values[i].when.is_empty()));
+                let lengths = match start.is_empty() {
+                    true => Vec::new(),
+                    false => {
+                        let only = (values.iter())
+                            .map(|v| Summary {
+                                params: v.params.clone(),
+                                types: v.types.clone(),
+                                pre: BTreeSet::new(),
+                                when: v.when.clone(),
+                                post: v
+                                    .post
+                                    .iter()
+                                    .filter(|f| constant_length(f))
+                                    .cloned()
+                                    .collect(),
+                            })
+                            .collect();
+                        solve(
+                            &bodies,
+                            decls,
+                            &at,
+                            &instances,
+                            only,
+                            start,
+                            &RecordFacts::default(),
+                            &state,
+                            &frames,
+                        )
+                    }
+                };
+                let view = View {
+                    at: &at,
+                    instances: &instances,
+                    values: &lengths,
+                    facts: &RecordFacts::default(),
+                    state: &state,
+                    frames: &frames,
+                };
+                invariants(&bodies, scans, decls, r, view, &closed, keep.as_deref())
+            }
+            _ => (RecordFacts::default(), vec![BTreeSet::new(); bodies.len()]),
+        };
+        let view = View {
+            at: &at,
+            instances: &instances,
+            values: &values,
+            facts: &facts,
+            state: &state,
+            frames: &frames,
+        };
+        let start: BTreeSet<usize> =
+            in_parallel(&bodies, weigh, || (), |(), (_, b)| seeds(b, decls, view))
+                .into_iter()
+                .flatten()
+                .chain(records_out.iter().copied())
+                .collect();
+        values = solve(
+            &bodies, decls, &at, &instances, values, start, &facts, &state, &frames,
+        );
+        let view = View {
+            at: &at,
+            instances: &instances,
+            values: &values,
+            facts: &facts,
+            state: &state,
+            frames: &frames,
+        };
+        let pres = in_parallel(
+            &bodies,
+            weigh,
+            || (),
+            |(), (f, b)| {
+                let mine = &assumed[at[f]];
+                match closed.contains(f) && (any_check(&b.stmts) || !mine.is_empty()) {
+                    true => entry_templates(b, decls, view, &pairs, mine),
+                    false => (BTreeSet::new(), None),
                 }
+            },
+        );
+        let mut decided = Vec::new();
+        for (i, (pre, d0)) in pres.into_iter().enumerate() {
+            values[i].pre = pre;
+            decided.extend(d0.map(|d| (i, d)));
+        }
+        forward(&bodies, decls, &closed, &at, &instances, &mut values);
+        // Every caller of a body with a `pre` proves it at each call row, or
+        // the body loses the facts it does not. Lighter callers go first: a
+        // `pre` they empty spares the heavier callers' walks. The
+        // intersection does not depend on the order. Each batch takes two
+        // thirds of what is left.
+        let mut callers: Vec<&Body> = (bodies.iter().zip(&callees))
+            .filter(|(_, gs)| gs.iter().any(|g| !values[at[g]].pre.is_empty()))
+            .map(|((_, b), _)| *b)
+            .collect();
+        // A caller whose own `pre` holds element templates, or a fact over
+        // a record parameter's field, is walked under it below: a fact of
+        // its callee may rest on one of its own.
+        let templated = |i: usize| {
+            let seq = |j: usize| {
+                j.checked_sub(1)
+                    .is_some_and(|k| values[i].params.get(k) == Some(&Kind::Seq))
             };
+            values[i]
+                .pre
+                .iter()
+                .any(|f| hole(f, seq).is_some() || names_field(f))
+        };
+        let under: Vec<(usize, &Body)> = (callers.iter())
+            .filter_map(|b| Some((at[&b.id?], *b)))
+            .filter(|(i, _)| templated(*i))
+            .collect();
+        callers.retain(|b| !under.iter().any(|(_, u)| std::ptr::eq(*u, *b)));
+        callers.sort_by_key(|b| b.names.len());
+        while !callers.is_empty() {
             let view = View {
                 at: &at,
                 instances: &instances,
-                values: &lengths,
-                facts: &RecordFacts::default(),
+                values: &values,
+                facts: &facts,
                 state: &state,
                 frames: &frames,
             };
-            invariants(&bodies, &scans, decls, r, view)
+            callers.retain(|b| rows(&b.stmts).any(|(s, _)| view.pre(s).is_some()));
+            let batch: Vec<&Body> = callers.drain(..(callers.len() * 2).div_ceil(3)).collect();
+            let proved = in_parallel(
+                &batch,
+                |b| b.names.len(),
+                || (),
+                |(), b| entries(b, decls, view, &BTreeSet::new()),
+            );
+            for (g, facts) in proved.into_iter().flatten() {
+                values[g].pre.retain(|f| facts.contains(f));
+            }
         }
-        _ => RecordFacts::default(),
-    };
-    let view = View {
-        at: &at,
-        instances: &instances,
-        values: &values,
-        facts: &facts,
-        state: &state,
-        frames: &frames,
-    };
-    let start: BTreeSet<usize> =
-        in_parallel(&bodies, weigh, || (), |(), (_, b)| seeds(b, decls, view))
-            .into_iter()
-            .flatten()
-            .chain(records_out)
+        // The greatest fixpoint over the callers walked under their own
+        // `pre`, from the facts left: each round walks every one under the
+        // `pre` the round before left, and a round that goes on drops a
+        // fact, so the rounds are at most the facts. Sound by induction on
+        // the depth of a frame: a frame's caller entered under its own `pre`,
+        // which proved the facts at the call row.
+        let mut changed = !under.is_empty();
+        while changed {
+            let view = View {
+                at: &at,
+                instances: &instances,
+                values: &values,
+                facts: &facts,
+                state: &state,
+                frames: &frames,
+            };
+            let proved = in_parallel(
+                &under,
+                |(_, b)| b.names.len(),
+                || (),
+                |(), (i, b)| entries(b, decls, view, &values[*i].pre),
+            );
+            changed = false;
+            for (g, facts) in proved.into_iter().flatten() {
+                let before = values[g].pre.len();
+                values[g].pre.retain(|f| facts.contains(f));
+                changed |= values[g].pre.len() != before;
+            }
+        }
+        // The record facts rest on what their walks assumed at entry: each
+        // such fact must be in its body's `pre`. Sound by induction on the
+        // steps of a run: a record is built after its body's entry, and that
+        // entry's call row proved the `pre` under the record facts of the
+        // steps before.
+        let kept: Vec<BTreeSet<Lin>> = (assumed.iter().zip(&values))
+            .map(|(a, v)| a.intersection(&v.pre).cloned().collect())
             .collect();
-    let mut values = solve(
-        &bodies, decls, &at, &instances, values, start, &facts, &state, &frames,
-    );
-    let (closed, callees) = entered(&bodies, closed);
-    let view = View {
-        at: &at,
-        instances: &instances,
-        values: &values,
-        facts: &facts,
-        state: &state,
-        frames: &frames,
-    };
-    let pres = in_parallel(
-        &bodies,
-        weigh,
-        || (),
-        |(), (f, b)| match closed.contains(f) && any_check(&b.stmts) {
-            true => entry_templates(b, decls, view, &pairs),
-            false => (BTreeSet::new(), None),
-        },
-    );
-    let mut decided = Vec::new();
-    for (i, (pre, d0)) in pres.into_iter().enumerate() {
-        values[i].pre = pre;
-        decided.extend(d0.map(|d| (i, d)));
-    }
-    forward(&bodies, decls, &closed, &at, &instances, &mut values);
-    // Every caller of a body with a `pre` proves it at each call row, or
-    // the body loses the facts it does not. Lighter callers go first: a
-    // `pre` they empty spares the heavier callers' walks. The intersection
-    // does not depend on the order. Each batch takes two thirds of what is
-    // left.
-    let mut callers: Vec<&Body> = (bodies.iter().zip(&callees))
-        .filter(|(_, gs)| gs.iter().any(|g| !values[at[g]].pre.is_empty()))
-        .map(|((_, b), _)| *b)
-        .collect();
-    // A caller whose own `pre` holds element templates, or a fact over a
-    // record parameter's field, is walked under it below: a fact of its
-    // callee may rest on one of its own.
-    let templated = |i: usize| {
-        let seq = |j: usize| {
-            j.checked_sub(1)
-                .is_some_and(|k| values[i].params.get(k) == Some(&Kind::Seq))
-        };
-        values[i]
-            .pre
-            .iter()
-            .any(|f| hole(f, seq).is_some() || names_field(f))
-    };
-    let under: Vec<(usize, &Body)> = (callers.iter())
-        .filter_map(|b| Some((at[&b.id?], *b)))
-        .filter(|(i, _)| templated(*i))
-        .collect();
-    callers.retain(|b| !under.iter().any(|(_, u)| std::ptr::eq(*u, *b)));
-    callers.sort_by_key(|b| b.names.len());
-    while !callers.is_empty() {
-        let view = View {
-            at: &at,
-            instances: &instances,
-            values: &values,
-            facts: &facts,
-            state: &state,
-            frames: &frames,
-        };
-        callers.retain(|b| rows(&b.stmts).any(|(s, _)| view.pre(s).is_some()));
-        let batch: Vec<&Body> = callers.drain(..(callers.len() * 2).div_ceil(3)).collect();
-        let proved = in_parallel(
-            &batch,
-            |b| b.names.len(),
-            || (),
-            |(), b| entries(b, decls, view, &BTreeSet::new()),
-        );
-        for (g, facts) in proved.into_iter().flatten() {
-            values[g].pre.retain(|f| facts.contains(f));
+        if kept != assumed {
+            keep = Some(kept);
+            continue;
         }
-    }
-    // The greatest fixpoint over the callers walked under their own `pre`,
-    // from the facts left: each round walks every one under the `pre` the
-    // round before left, and a round that goes on drops a fact, so the
-    // rounds are at most the facts. Sound by induction on the depth of a
-    // frame: a frame's caller entered under its own `pre`, which proved the
-    // facts at the call row.
-    let mut changed = !under.is_empty();
-    while changed {
-        let view = View {
-            at: &at,
-            instances: &instances,
-            values: &values,
-            facts: &facts,
-            state: &state,
-            frames: &frames,
+        // A body decided without a `pre` is decided as an emitter would
+        // decide it when it keeps none.
+        let decided = (decided.into_iter())
+            .filter(|(i, _)| values[*i].pre.is_empty())
+            .map(|(i, d)| (bodies[i].0, Mutex::new(Some(d))))
+            .collect();
+        at.retain(|_, i| {
+            let v = &values[*i];
+            !v.pre.is_empty() || !v.post.is_empty() || !v.when.is_empty()
+        });
+        return Summaries {
+            at,
+            instances,
+            values,
+            decided,
+            facts,
+            state,
+            frames,
         };
-        let proved = in_parallel(
-            &under,
-            |(_, b)| b.names.len(),
-            || (),
-            |(), (i, b)| entries(b, decls, view, &values[*i].pre),
-        );
-        changed = false;
-        for (g, facts) in proved.into_iter().flatten() {
-            let before = values[g].pre.len();
-            values[g].pre.retain(|f| facts.contains(f));
-            changed |= values[g].pre.len() != before;
-        }
-    }
-    // A body decided without a `pre` is decided as an emitter would decide it
-    // when it keeps none.
-    let decided = (decided.into_iter())
-        .filter(|(i, _)| values[*i].pre.is_empty())
-        .map(|(i, d)| (bodies[i].0, Mutex::new(Some(d))))
-        .collect();
-    at.retain(|_, i| {
-        let v = &values[*i];
-        !v.pre.is_empty() || !v.post.is_empty() || !v.when.is_empty()
-    });
-    Summaries {
-        at,
-        instances,
-        values,
-        decided,
-        facts,
-        state,
-        frames,
     }
 }
 
@@ -1384,14 +1422,19 @@ fn solve(
 /// record.
 ///
 /// A walk takes a direct call's result facts from `lengths`, the constant
-/// lengths solved with no record fact.
+/// lengths solved with no record fact. A walk of a body of `closed` starts
+/// with [`parameter_facts`] as its `pre`, less those `keep` leaves out; the
+/// facts each walked body assumed are returned beside the record facts, for
+/// [`summaries`] to hold the body's `pre` to them.
 fn invariants(
     bodies: &[(FnId, &Body)],
     scans: &[Scan<'_>],
     decls: &HashMap<String, TypeDecl>,
     records: &Records,
     lengths: View<'_>,
-) -> RecordFacts {
+    closed: &HashSet<FnId>,
+    keep: Option<&[BTreeSet<Lin>]>,
+) -> (RecordFacts, Vec<BTreeSet<Lin>>) {
     let host = &records.host;
     let resolve = |t: &Type| vyrn_frontend::types::resolve(t, decls);
     let indexed: BTreeSet<&str> = scans
@@ -1463,21 +1506,54 @@ fn invariants(
         }
     }
     let mut facts = RecordFacts::new(of, decls, &records.params);
-    let maybe: Vec<&Body> = (bodies.iter().zip(scans))
-        .filter(|(_, s)| s.builds)
-        .map(|((_, b), _)| *b)
-        .collect();
+    let maybe: Vec<usize> = (0..bodies.len()).filter(|&i| scans[i].builds).collect();
     let touches = in_parallel(
         &maybe,
-        |b| b.names.len(),
+        |&i| bodies[i].1.names.len(),
         || (),
-        |(), b| built(b, decls, &facts).contains(&true),
+        |(), &i| built(bodies[i].1, decls, &facts).contains(&true),
     );
-    let touching: Vec<&Body> = (maybe.iter().zip(touches))
-        .filter_map(|(b, t)| t.then_some(*b))
+    let touching: Vec<usize> = (maybe.iter().zip(touches))
+        .filter_map(|(i, t)| t.then_some(*i))
         .collect();
-    let weight = |i: &usize| touching[*i].names.len();
+    let mut assumed = vec![BTreeSet::new(); bodies.len()];
+    for &i in &touching {
+        assumed[i] = parameter_facts(bodies[i], decls, &facts.of, closed);
+        if let Some(k) = keep {
+            assumed[i].retain(|f| k[i].contains(f));
+        }
+    }
+    // The walks read each body's assumed facts as its `pre`.
+    let with_pre: Vec<Summary>;
+    let lengths = match assumed.iter().all(BTreeSet::is_empty) {
+        true => lengths,
+        false => {
+            with_pre = (bodies.iter().zip(&assumed).enumerate())
+                .map(|(i, ((_, b), a))| {
+                    let bare = || Summary {
+                        params: (b.params.iter())
+                            .map(|p| kind_of(&b.names[p.index()].ty, decls))
+                            .collect(),
+                        types: Vec::new(),
+                        pre: BTreeSet::new(),
+                        post: BTreeSet::new(),
+                        when: BTreeSet::new(),
+                    };
+                    Summary {
+                        pre: a.clone(),
+                        ..lengths.values.get(i).cloned().unwrap_or_else(bare)
+                    }
+                })
+                .collect();
+            View {
+                values: &with_pre,
+                ..lengths
+            }
+        }
+    };
+    let weight = |i: &usize| bodies[touching[*i]].1.names.len();
     let mut used: Vec<BTreeSet<RecordFact>> = vec![BTreeSet::new(); touching.len()];
+    let mut walked = vec![false; touching.len()];
     let mut queue: Vec<usize> = (0..touching.len()).collect();
     while !facts.is_empty() && !queue.is_empty() {
         queue.sort_by_key(weight);
@@ -1486,12 +1562,13 @@ fn invariants(
             &batch,
             weight,
             || (),
-            |(), &i| obliged(touching[i], decls, &facts, lengths),
+            |(), &i| obliged(bodies[touching[i]].1, decls, &facts, lengths),
         );
         let mut dropped = BTreeSet::new();
         for (&i, (broken, u)) in batch.iter().zip(outs) {
             dropped.extend(broken);
             used[i] = u;
+            walked[i] = true;
         }
         if dropped.is_empty() {
             continue;
@@ -1504,9 +1581,60 @@ fn invariants(
                 queue.push(i);
             }
         }
-        queue.retain(|&i| built(touching[i], decls, &facts).contains(&true));
+        queue.retain(|&i| built(bodies[touching[i]].1, decls, &facts).contains(&true));
     }
-    facts
+    // A body no batch walked assumed nothing.
+    for (&i, w) in touching.iter().zip(walked) {
+        if !w || facts.is_empty() {
+            assumed[i].clear();
+        }
+    }
+    (facts, assumed)
+}
+
+/// The facts over the parameters of `b`, a body of `closed`, in a
+/// [`Summary`]'s terms, that its walk in [`invariants`] assumes at entry:
+/// for each array parameter a record literal takes whole as the part of a
+/// field, each fact of `of` that names that field alone, over the parameter.
+/// A fact on the field's elements is a template of the parameter.
+fn parameter_facts(
+    (f, b): (FnId, &Body),
+    decls: &HashMap<String, TypeDecl>,
+    of: &BTreeSet<RecordFact>,
+    closed: &HashSet<FnId>,
+) -> BTreeSet<Lin> {
+    let mut out = BTreeSet::new();
+    if !closed.contains(&f) {
+        return out;
+    }
+    for (s, _) in rows(&b.stmts) {
+        let St::Let(_, Rhs::Make(Ctor::Record(_, fields), parts)) = s else {
+            continue;
+        };
+        for (field, v) in fields.iter().zip(parts) {
+            let Val::Name(m) = v else { continue };
+            let Some(k) = b.params.iter().position(|p| p == m) else {
+                continue;
+            };
+            if kind_of(&b.names[m.index()].ty, decls) != Kind::Seq {
+                continue;
+            }
+            let p = Name(k as u32 + 1);
+            let term = |part: &Part| match part {
+                Part::Elem(x) if x == field => Some(Lin::of(Term::Val(p))),
+                Part::Len(x) if x == field => Some(Lin::of(Term::Len(p))),
+                Part::One => Some(Lin::k(1)),
+                _ => None,
+            };
+            for fact in of {
+                out.extend(
+                    fact.iter()
+                        .try_fold(Lin::k(0), |l, (x, c)| l.add(&term(x)?.scale(*c)?)),
+                );
+            }
+        }
+    }
+    out
 }
 
 /// What [`invariants`] reads of one body.
@@ -2118,7 +2246,7 @@ fn needed_lengths(b: &Body, decls: &HashMap<String, TypeDecl>) -> Vec<(Place, i6
         }
     }
     let limit = vyrn_frontend::trap::LENGTH_LIMIT as i64;
-    out.retain(|(_, c)| (2..=limit).contains(c));
+    out.retain(|(_, c)| (1..=limit).contains(c));
     out
 }
 
@@ -2333,7 +2461,8 @@ fn resized_places(s: &St) -> impl Iterator<Item = &Place> {
 
 /// The facts of `facts` that `body` does not prove of a record it builds or
 /// writes, where the record's value leaves the name ([`Walk::keeps`]), and
-/// the facts the walk assumed ([`Walk::restate`]).
+/// the facts the walk assumed ([`Walk::restate`]). The walk starts with the
+/// `pre` `lengths` states of the body.
 fn obliged(
     body: &Body,
     decls: &HashMap<String, TypeDecl>,
@@ -2341,11 +2470,13 @@ fn obliged(
     lengths: View<'_>,
 ) -> (BTreeSet<RecordFact>, BTreeSet<RecordFact>) {
     let view = View { facts, ..lengths };
+    let none = BTreeSet::new();
+    let pre = (body.id.and_then(|f| view.get(f))).map_or(&none, |(_, s)| &s.pre);
     let mut stmts = body.stmts.clone();
     let mut w = Walk::new(body, decls, view, &stmts, Some(None), false);
     w.obliging = true;
     w.seed(&stmts, built(body, decls, facts));
-    let st = w.entry(&BTreeSet::new());
+    let st = w.entry(pre);
     let end = w.block(st, &mut stmts);
     w.exits(&end);
     (w.broken, w.assumed)
@@ -2977,12 +3108,14 @@ fn interface(
 /// `len(a) - p - 1 >= 0` over the integer and array or String parameters
 /// ([`interface`]) a check that walk keeps can depend on ([`relevant`]):
 /// each candidate makes every caller walk. An `UInt64` is left out, as in
-/// [`templates`].
+/// [`templates`]. The facts the record facts' walk `assumed` at entry are
+/// candidates too.
 fn entry_templates(
     body: &Body,
     decls: &HashMap<String, TypeDecl>,
     sums: View<'_>,
     pairs: &BTreeSet<Pair>,
+    assumed: &BTreeSet<Lin>,
 ) -> (BTreeSet<Lin>, Option<Body>) {
     let params: Vec<Kind> = (body.params.iter())
         .map(|p| kind_of(&body.names[p.index()].ty, decls))
@@ -3001,7 +3134,7 @@ fn entry_templates(
         let used = |k: usize| rel[body.params[k].index()];
         let ints = interface(&params, |k, kind| used(k) && kind.is_int(), Term::Val);
         let seqs = interface(&params, |k, kind| used(k) && kind == Kind::Seq, Term::Len);
-        let mut out = BTreeSet::new();
+        let mut out = assumed.clone();
         for p in &ints {
             out.insert(p.clone());
             out.extend(p.plus(-1));
@@ -3989,10 +4122,11 @@ impl<'a> Walk<'a> {
     }
 
     /// While obliging, drops each element fact the record literal `n` of
-    /// `fields` from `parts` does not keep: the field's part is empty, or an
+    /// `fields` from `parts` does not keep: the field's part is empty, an
     /// array literal whose every element the fact holds of over the other
-    /// parts, or a copy of the same field of a record name `src`, and each
-    /// field the fact bounds it by is at least as long as `src`'s.
+    /// parts, an array whose element templates imply the fact, or a copy of
+    /// the same field of a record name `src`, and each field the fact bounds
+    /// it by is at least as long as `src`'s.
     fn built_elements(&mut self, st: &State, n: Name, fields: &[String], parts: &[Val]) {
         if !self.record || st.dead {
             return;
@@ -4032,11 +4166,16 @@ impl<'a> Walk<'a> {
                 Part::Val(x) => self.lin(&parts[fields.iter().position(|y| y == x)?]),
                 Part::One => Some(Lin::k(1)),
             };
-            let holds_of = |v: &Val| {
-                let e = self.lin(v)?;
+            // The fact over the parts, with `e` for the element.
+            let at = |e: &Lin| {
                 fact.iter()
-                    .try_fold(Lin::k(0), |l, (p, k)| l.add(&over(p, &e)?.scale(*k)?))
+                    .try_fold(Lin::k(0), |l, (p, k)| l.add(&over(p, e)?.scale(*k)?))
             };
+            let holds_of = |v: &Val| at(&self.lin(v)?);
+            // A template the part holds implies the fact of every element.
+            let templated = m.is_some_and(|m| {
+                at(&Lin::of(Term::Val(m))).is_some_and(|w| self.implied(st, m, &w))
+            });
             // The literal is the part's value when its `let` is its one write.
             let unwritten = |m: &Name| writes_of(&self.body.stmts, *m) == 1;
             let listed = match m
@@ -4048,7 +4187,7 @@ impl<'a> Walk<'a> {
                 }
                 _ => false,
             };
-            if !empty && !listed && !from.is_some_and(longer) {
+            if !empty && !listed && !templated && !from.is_some_and(longer) {
                 self.broken.insert(fact.clone());
             }
         }
@@ -4470,7 +4609,12 @@ impl<'a> Walk<'a> {
                 }
                 st
             }
-            St::Store { place, value, .. } => {
+            St::Store {
+                place,
+                value,
+                releases,
+                ..
+            } => {
                 if !matches!(place, Place::Name(_)) {
                     st.forget_inner();
                 }
@@ -4498,8 +4642,11 @@ impl<'a> Walk<'a> {
                     _ => {}
                 }
                 if let Place::Name(n) = place {
-                    // The value the store displaces is released.
-                    self.keeps(&st, *n);
+                    // The value the store displaces is released, where the
+                    // plan releases one: a value a `consume` took is not.
+                    if *releases {
+                        self.keeps(&st, *n);
+                    }
                     let o = self.slot[n.index()].origin.join(self.origin_of_val(value));
                     self.slot[n.index()].origin = o;
                 }
@@ -4542,6 +4689,11 @@ impl<'a> Walk<'a> {
                         self.assign(&mut st, *n, value);
                         self.range(&mut st, *n);
                         self.element_flow(&mut st, *n, &Rhs::Val(value.clone()));
+                        // A record the walk tracks takes another name's value,
+                        // whose facts `keeps` held above.
+                        if matches!(value, Val::Name(_)) && self.dirty.contains(n) {
+                            self.restate(&mut st, *n);
+                        }
                     }
                 }
                 st
@@ -5852,6 +6004,27 @@ impl<'a> Walk<'a> {
         {
             let v = Lin::of(Term::Val(*m));
             cands.insert(v.clone());
+            // A counter stored as a remainder by a literal `c` stays below
+            // `c` after a turn, and at most `c` where it entered at most `c`:
+            // an `Int64` hash or random state then multiplies exactly.
+            let rem = |s: &St| match s {
+                St::Store {
+                    place: Place::Name(x),
+                    value: Val::Name(t),
+                    ..
+                } if x == m => match let_of(body, *t) {
+                    Some(Rhs::Prim(Op::Bin(BinOp::Rem), vs, _)) => match vs.as_slice() {
+                        [_, Val::Lit(Lit::Int(c))] if *c > 0 => Some(*c),
+                        _ => None,
+                    },
+                    _ => None,
+                },
+                _ => None,
+            };
+            for c in rows(body).filter_map(|(s, _)| rem(s)) {
+                cands.extend(Lin::k(c).sub(&v));
+                cands.extend(Lin::k(c - 1).sub(&v));
+            }
             // An index `m - c` by a literal `c` needs `m - c >= 0`, so a
             // counter that steps down to `c` keeps it.
             let below = |i: &Name| match let_of(body, *i) {
@@ -6881,11 +7054,9 @@ fn mark(
                 mark(body, decls, els, rel, goals, linked, arrays);
             }
             St::Loop { body: l, .. } | St::Block { body: l, .. } => {
-                // A loop bound by a literal or a length counts what it stores
+                // A loop bound by a literal counts what it stores
                 // ([`Walk::in_step`]).
-                if let Some((t, ..)) =
-                    bound_test(l).filter(|(.., b)| b.is_const() || measured(l, b).is_some())
-                {
+                if let Some((t, ..)) = bound_test(l).filter(|(.., b)| b.is_const()) {
                     let mut stored = BTreeSet::new();
                     stores(l, &mut stored);
                     let seq = |n: &Name| kind_of(&body.names[n.index()].ty, decls) == Kind::Seq;

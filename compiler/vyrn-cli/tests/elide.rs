@@ -256,6 +256,91 @@ fn w(n: Int64) -> Int64 {
     assert!(failures.is_empty(), "{}", failures.join("\n\n"));
 }
 
+/// A loop bound by a parameter's length that pushes once a turn makes its
+/// array as long as the parameter, in the body and in the result's `post`; a
+/// turn that skips its push, or a counter that steps by two, keeps the check.
+#[test]
+fn a_loop_bound_by_a_parameters_length_counts_its_pushes() {
+    let proof = "fn copyOf(p: Array<Int64>) -> Array<Int64> {
+    let mut out: Array<Int64> = []
+    let mut i = 0
+    while i < p.length {
+        out.push(p[i])
+        i = i + 1
+    }
+    return out
+}
+fn marks(p: Array<Int64>) -> Int64 {
+    let mut seen: Array<Bool> = []
+    let mut i = 0
+    while i < p.length {
+        seen.push(false)
+        i = i + 1
+    }
+    let mut c = 0
+    let mut s = 0
+    while s < p.length {
+        if !seen[s] {
+            c = c + 1
+        }
+        s = s + 1
+    }
+    return c
+}
+fn w(n: Int64) -> Int64 {
+    let q = copyOf([n, n, n])
+    return q[2] + marks(q)
+}
+";
+    assert_eq!(verdicts(proof, "w"), ["proved array-index"]);
+    assert_eq!(verdicts(proof, "marks"), ["proved array-index"]);
+    let (err, _) = oracle(proof, "    print(w(3).toString())", "w");
+    assert_eq!(err, "");
+    let witnesses = [
+        "fn half(p: Array<Int64>) -> Array<Int64> {
+    let mut out: Array<Int64> = []
+    let mut i = 0
+    while i < p.length {
+        if i % 2 == 0 {
+            out.push(p[i])
+        }
+        i = i + 1
+    }
+    return out
+}
+fn w(n: Int64) -> Int64 {
+    let q = half([n, n, n])
+    return q[2]
+}
+",
+        "fn w(n: Int64) -> Int64 {
+    let p = [n, n, n]
+    let mut seen: Array<Int64> = []
+    let mut i = 0
+    while i < p.length {
+        seen.push(i)
+        i = i + 2
+    }
+    return seen[2]
+}
+",
+    ];
+    let mut failures = Vec::new();
+    for src in witnesses {
+        let rows = verdicts(src, "w");
+        if rows != ["check array-index"] {
+            failures.push(format!("{src}\nrows: {rows:?}"));
+        }
+        let (err, _) = oracle(src, "    print(w(10).toString())", "w");
+        if !err.contains("array index 2 out of bounds")
+            || err.contains(vyrn_frontend::trap::PROVED_CHECK_FAILED)
+        {
+            failures.push(format!("{src}\nran: {err}"));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n\n"));
+}
+
 /// A function that returns a table of a literal size states that length
 /// of its result; a path that returns a shorter one, or a `modify` call that
 /// shortens it, keeps the caller's check.
@@ -1955,8 +2040,10 @@ fn w(c: modify C) -> Int64 {
     return 0
 }
 ";
-    assert_eq!(verdicts(src, "w"), ["check array-index", "proved where"]);
+    // A program that builds no `C` holds every record fact of it.
     let calls = "    let mut c = C { a: [], b: [] }\n    print(w(c).toString())";
+    let (_dir, file) = program(src, calls);
+    assert_eq!(rows_of(&file, "w"), ["check array-index", "proved where"]);
     let (err, _) = oracle(src, calls, "w");
     assert!(
         err.contains("array index 0 out of bounds")
@@ -7252,4 +7339,176 @@ fn every_two_record_witness_keeps_its_index_and_traps_there() {
             "{mark} {reset} {call}\n{err}"
         );
     }
+}
+
+/// A record literal that takes a parameter's array whole holds the array's
+/// element templates, which its walk assumes at entry and the body's `pre`
+/// then keeps. A caller that passes an element out of range keeps the check
+/// that reads it.
+#[test]
+fn a_record_built_from_a_parameter_takes_its_element_templates() {
+    let src = |row: &str| {
+        format!(
+            "type Perm = {{ xs: Array<Int64> }}
+fn hop(p: Perm, k: Int64) -> Int64 {{
+    if k < 0 || k >= p.xs.length {{
+        return 0
+    }}
+    return p.xs[p.xs[k]]
+}}
+fn wrap(xs: consume Array<Int64>) -> Perm {{
+    return Perm {{ xs: xs }}
+}}
+fn w(n: Int64) -> Int64 {{
+    let p = wrap({row})
+    return hop(p, 0)
+}}
+"
+        )
+    };
+    let proof = src("[1, 0]");
+    assert_eq!(verdicts(&proof, "hop"), ["proved array-index"; 2]);
+    let (err, _) = oracle(&proof, "    print(w(10).toString())", "w");
+    assert_eq!(err, "");
+    let witness = src("[n, 0]");
+    let (err, _) = oracle(&witness, "    print(w(10).toString())", "w");
+    assert!(
+        err.contains("array index 10 out of bounds")
+            && !err.contains(vyrn_frontend::trap::PROVED_CHECK_FAILED),
+        "{err}"
+    );
+    assert_eq!(
+        verdicts(&witness, "hop"),
+        ["proved array-index", "check array-index"]
+    );
+}
+
+/// A record field a check indexes at zero is non-empty in every value of the
+/// record, through a parameter's array the literal takes and a call that
+/// replaces the record; a value built empty keeps the check. A store holds
+/// the value it stores to the facts, and a release of the value it displaces
+/// reads it.
+#[test]
+fn a_record_field_indexed_at_zero_is_non_empty() {
+    let src = |row: &str| {
+        format!(
+            "type Box = {{ xs: Array<Int64> }}
+fn first(b: Box) -> Int64 {{
+    return b.xs[0]
+}}
+fn pass(b: consume Box) -> Box {{
+    let c = b
+    return c
+}}
+fn wrap(xs: consume Array<Int64>) -> Box {{
+    let mut b = Box {{ xs: xs }}
+    b = pass(b)
+    return b
+}}
+fn w(n: Int64) -> Int64 {{
+    return first(wrap({row}))
+}}
+"
+        )
+    };
+    let proof = src("[n]");
+    assert_eq!(verdicts(&proof, "first"), ["proved array-index"]);
+    let (err, _) = oracle(&proof, "    print(w(3).toString())", "w");
+    assert_eq!(err, "");
+    let witnesses = [
+        src("[]"),
+        "type Box = { xs: Array<Int64> }
+fn first(b: Box) -> Int64 {
+    return b.xs[0]
+}
+fn w(n: Int64) -> Int64 {
+    let mut b = Box { xs: [n] }
+    let e = Box { xs: [] }
+    b = e
+    return first(b)
+}
+"
+        .to_string(),
+        "type Box = { xs: Array<Int64> }
+impl Owned for Box {
+    fn release(consume self) {
+        print(self.xs[0].toString())
+        let v = consume self.xs
+        drop v
+    }
+}
+fn w(n: Int64) -> Int64 {
+    let mut b = Box { xs: [] }
+    b = Box { xs: [n] }
+    return n
+}
+"
+        .to_string(),
+    ];
+    let mut failures = Vec::new();
+    for src in &witnesses {
+        let (err, _) = oracle(src, "    print(w(10).toString())", "w");
+        if !err.contains("array index 0 out of bounds")
+            || err.contains(vyrn_frontend::trap::PROVED_CHECK_FAILED)
+        {
+            failures.push(format!("{src}\nran: {err}"));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n\n"));
+}
+
+/// A counter a loop stores as a remainder by a literal stays below it, so a
+/// random state that starts in range multiplies exactly and its remainder
+/// indexes in range. A negative seed, or one so large the product wraps,
+/// keeps the check.
+#[test]
+fn a_remainder_by_a_literal_bounds_its_counter() {
+    let src = |seed: &str| {
+        format!(
+            "fn shuffle(p: modify Array<Int64>, seed: Int64) {{
+    let mut s = seed
+    let mut i = p.length - 1
+    while i > 0 {{
+        s = (s * 1103515245 + 12345) % 2147483648
+        let j = s % (i + 1)
+        let t = p[i]
+        p[i] = p[j]
+        p[j] = t
+        i = i - 1
+    }}
+}}
+fn w(n: Int64) -> Int64 {{
+    let mut p: Array<Int64> = [0, 1, n]
+    shuffle(p, {seed})
+    return p[0]
+}}
+"
+        )
+    };
+    assert_eq!(
+        verdicts(&src("1"), "shuffle"),
+        [
+            "proved int-rem-zero",
+            "proved int-rem-zero",
+            "proved array-index",
+            "proved array-index",
+            "proved array-index",
+            "proved array-index"
+        ]
+    );
+    let (err, _) = oracle(&src("1"), "    print(w(2).toString())", "w");
+    assert_eq!(err, "");
+    let mut failures = Vec::new();
+    for seed in ["0 - 5", "1099511627776"] {
+        let (err, _) = oracle(&src(seed), "    print(w(2).toString())", "w");
+        if !err.contains("out of bounds") || err.contains(vyrn_frontend::trap::PROVED_CHECK_FAILED)
+        {
+            failures.push(format!("{seed}\nran: {err}"));
+        }
+        let rows = verdicts(&src(seed), "shuffle");
+        if !rows.contains(&"check array-index".to_string()) {
+            failures.push(format!("{seed}\nrows: {rows:?}"));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n\n"));
 }

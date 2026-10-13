@@ -16,5 +16,5 @@
 123 push may allocate
 132 copies String x2, allocates String x2
 146 allocates Array<UInt8>
-152 push may allocate, index checked
+152 push may allocate
 173 copies String, allocates String x3
