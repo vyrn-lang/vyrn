@@ -233,8 +233,10 @@ per World by `fixpoint::descend`); a call through a value, a method, a
 projection or a generic instance takes none. A result exactly as long as a
 `consume` parameter takes the argument's length as it was before the call
 (`elide::Walk::same_length`). For an `Option` of an integer
-the facts are its payload's, over every `Some` return (a `None` proves them
-all), and the binder of a `Some` arm takes them (`elide::some_binder`). A private function that only
+the facts are its payload's, and for an `Option` of a record its payload's
+integer fields' (`elide::payload_fields`), over every `Some` return (a `None`
+proves them all), and the binder of a `Some` arm takes them
+(`elide::some_binder`). A private function that only
 direct call rows enter starts with the facts every such row proves of its
 arguments (`World::summaries` lists the candidates, `elide::entered` drops a
 function any row spells by name). The same walk answers a group's rule check

@@ -101,7 +101,9 @@ fn walk(body: &mut Body, decls: &HashMap<String, TypeDecl>, sums: View<'_>) -> V
 
 /// What every entry and every return of a body state, over its interface:
 /// in a fact, `Name(0)` is the result, or the payload of an `Option` of an
-/// integer ([`Walk::payload`]), and `Name(k + 1)` is parameter `k`; a
+/// integer ([`Walk::payload`]), and `Term::Field(Name(0), i)` is integer
+/// field `i` of an `Option` of a record's payload ([`payload_fields`]);
+/// `Name(k + 1)` is parameter `k`; a
 /// [`Term::Val`] is an integer's value and a [`Term::Len`] an array's or
 /// String's length, and a [`Term::Field`] or [`Term::Col`] the same of a
 /// record parameter's field, by its index in the record's fields.
@@ -2381,30 +2383,36 @@ fn direct_call(rhs: &Rhs) -> Option<FnId> {
 
 /// `body`'s summary with every candidate of its `post` and no `pre`. The
 /// first return of a name or an integer decides the result: an integer's
-/// value, an `Option` of an integer's payload, or an array's length; any
-/// other result, a String's included, states nothing. The parameters are
+/// value, an `Option` of an integer's payload, the integer fields of an
+/// `Option` of a record's payload, or an array's length; any other result,
+/// a String's or a record's included, states nothing. The parameters are
 /// those the body never writes. An `UInt64` is left out: the facts read its
 /// values above `i64::MAX` as negatives. An integer result equals `c` when
 /// every return returns the literal `c` ([`constant_result`]). An array
 /// result is at least as long as each array or String parameter, at most as
 /// long as each `consume` one, at least `c` long for each `c` of `needed`
 /// ([`needed_lengths`]) the body can make ([`made_lengths`]), and at least
-/// `p` long for each integer parameter `p` it can make. A Bool result takes
-/// the candidates of [`truth_templates`].
+/// `p` long for each integer parameter `p` it can make. A payload's integer
+/// field is at least zero, equal to or bounded by each integer parameter,
+/// and at most each length or below it. A Bool result takes the candidates
+/// of [`truth_templates`].
 fn templates(body: &Body, decls: &HashMap<String, TypeDecl>, needed: &BTreeSet<i64>) -> Summary {
     let params: Vec<Kind> = (body.params.iter())
         .map(|p| kind_of(&body.names[p.index()].ty, decls))
         .collect();
+    let mut fields = Vec::new();
     let r = rows(&body.stmts).find_map(|(s, _)| match s {
         St::Return {
             value: Some(Val::Name(n)),
             ..
         } => {
             let ty = &body.names[n.index()].ty;
+            fields = payload_fields(ty, decls);
             Some(match kind_of(ty, decls) {
                 _ if *ty == Type::Bool => None,
                 k if k.is_int() => Some(Term::Val(Name(0))),
                 _ if int_payload(ty, decls) => Some(Term::Val(Name(0))),
+                _ if !fields.is_empty() => Some(Term::Field(Name(0), fields[0])),
                 _ if vyrn_frontend::types::resolved(ty, decls).is_seq() => Some(Term::Len(Name(0))),
                 _ => None,
             })
@@ -2458,6 +2466,18 @@ fn templates(body: &Body, decls: &HashMap<String, TypeDecl>, needed: &BTreeSet<i
             if let Some(c) = constant_result(body) {
                 post.extend(r.plus(-c));
                 post.extend(Lin::k(c).sub(&r));
+            }
+        } else if let Term::Field(..) = r {
+            for f in fields.into_iter().map(|i| Lin::of(Term::Field(Name(0), i))) {
+                post.insert(f.clone());
+                for a in &seqs {
+                    post.extend(a.sub(&f));
+                    post.extend(a.sub(&f).and_then(|l| l.plus(-1)));
+                }
+                for p in &ints {
+                    post.extend(f.sub(p));
+                    post.extend(p.sub(&f));
+                }
             }
         } else {
             let r = Lin::of(r);
@@ -2996,6 +3016,19 @@ fn int_payload(ty: &Type, decls: &HashMap<String, TypeDecl>) -> bool {
     vyrn_frontend::types::option_payload(&ty).is_some_and(|p| kind_of(p, decls).is_int())
 }
 
+/// The integer fields, by index, of the record an `Option` of a record `ty`
+/// holds: the payload's [`Term::Field`]s. Empty for any other type.
+fn payload_fields(ty: &Type, decls: &HashMap<String, TypeDecl>) -> Vec<u32> {
+    let ty = vyrn_frontend::types::resolved(ty, decls);
+    let fields = vyrn_frontend::types::option_payload(&ty)
+        .and_then(|p| vyrn_frontend::types::record_fields(p, decls));
+    (0..)
+        .zip(fields.iter().flat_map(|fs| fs.iter()))
+        .filter(|(_, f)| kind_of(&f.ty, decls).is_int())
+        .map(|(i, _)| i)
+        .collect()
+}
+
 /// The name a `Some(v)` row wraps.
 fn some_part(rhs: &Rhs) -> Option<Name> {
     match rhs {
@@ -3018,11 +3051,14 @@ fn none_row(rhs: &Rhs) -> bool {
 }
 
 /// The binder of `a` when it is the `Some` arm of a switch on an `Option` of
-/// an integer, `on`.
+/// an integer or of a record with an integer field, `on`.
 fn some_binder(body: &Body, decls: &HashMap<String, TypeDecl>, on: &Val, a: &Arm) -> Option<Name> {
     let Val::Name(o) = on else { return None };
+    let ty = &body.names[o.index()].ty;
     match (&a.test, a.binds.as_slice()) {
-        (Test::Tag(1), [b]) if int_payload(&body.names[o.index()].ty, decls) => Some(*b),
+        (Test::Tag(1), [b]) if int_payload(ty, decls) || !payload_fields(ty, decls).is_empty() => {
+            Some(*b)
+        }
         _ => None,
     }
 }
@@ -4006,11 +4042,22 @@ impl<'a> Walk<'a> {
         int_payload(&self.body.names[n.index()].ty, self.decls)
     }
 
-    /// Defines the payload of `n = Some(v)` as `v`.
+    /// [`payload_fields`] of `n`'s type. A fact over `n`'s
+    /// `Term::Field(n, i)` holds whenever `n` is `Some`, as over a
+    /// [`Walk::payload`].
+    fn payload_fields(&self, n: Name) -> Vec<u32> {
+        payload_fields(&self.body.names[n.index()].ty, self.decls)
+    }
+
+    /// Defines the payload of `n = Some(v)` as `v`, or its integer fields as
+    /// `v`'s.
     fn wrapped(&self, st: &mut State, n: Name, rhs: &Rhs) {
-        let v = some_part(rhs).map(Val::Name);
-        if let Some(l) = v.and_then(|v| self.lin(&v)).filter(|_| self.payload(n)) {
+        let Some(v) = some_part(rhs) else { return };
+        if let Some(l) = self.lin(&Val::Name(v)).filter(|_| self.payload(n)) {
             st.define(Term::Val(n), &l);
+        }
+        for i in self.payload_fields(n) {
+            st.define(Term::Field(n, i), &Lin::of(Term::Field(v, i)));
         }
     }
 
@@ -4020,15 +4067,21 @@ impl<'a> Walk<'a> {
         let (Some(b), Val::Name(o)) = (some_binder(self.body, self.decls, on, a), on) else {
             return;
         };
-        if self.slot[b.index()].relevant {
+        if !self.slot[b.index()].relevant {
+            return;
+        }
+        if self.payload(*o) {
             st.define(Term::Val(b), &Lin::of(Term::Val(*o)));
+        }
+        for i in self.payload_fields(*o) {
+            st.define(Term::Field(b, i), &Lin::of(Term::Field(*o, i)));
         }
     }
 
     /// Whether every write of `m` binds it to `None`: a return of it states
     /// every payload fact.
     fn only_none(&self, m: Name) -> bool {
-        if !self.payload(m) {
+        if !self.payload(m) && self.payload_fields(m).is_empty() {
             return false;
         }
         let nones = (rows(&self.body.stmts))
@@ -4701,6 +4754,9 @@ impl<'a> Walk<'a> {
                     Term::Val(_) if self.kind(n).is_int() || self.payload(n) => {
                         Some(Lin::of(Term::Val(n)))
                     }
+                    Term::Field(_, i) if self.payload_fields(n).contains(&i) => {
+                        Some(Lin::of(Term::Field(n, i)))
+                    }
                     Term::Len(_) if self.kind(n) == Kind::Seq => Some(Lin::of(Term::Len(n))),
                     _ => None,
                 };
@@ -4896,6 +4952,9 @@ impl<'a> Walk<'a> {
             match (t.name()?.index().checked_sub(1), t, value?) {
                 (None, Term::Val(_), Val::Name(m)) if self.payload(*m) => {
                     Some(Lin::of(Term::Val(*m)))
+                }
+                (None, Term::Field(_, i), Val::Name(m)) if self.payload_fields(*m).contains(&i) => {
+                    Some(Lin::of(Term::Field(*m, i)))
                 }
                 (None, Term::Val(_), v) => self.lin(v),
                 (None, Term::Len(_), Val::Name(m)) => Some(Lin::of(self.length(&Place::Name(*m))?)),
@@ -6409,6 +6468,17 @@ fn mark(
                             link(rel, n.into_iter().chain(from));
                         }
                         link(rel, n.into_iter().chain(some_part(rhs)));
+                        // A solve states the integer fields of a payload a
+                        // literal builds ([`templates`]).
+                        let made = (some_part(rhs).filter(|_| goals == Goals::Results))
+                            .and_then(|v| let_of(&body.stmts, v));
+                        if let Some(Rhs::Make(Ctor::Record(..), vs)) = made {
+                            let int = |m: &Name| kind_of(&body.names[m.index()].ty, decls).is_int();
+                            link(
+                                rel,
+                                n.into_iter().chain(vs.iter().filter_map(val).filter(int)),
+                            );
+                        }
                     }
                     _ => {}
                 }
