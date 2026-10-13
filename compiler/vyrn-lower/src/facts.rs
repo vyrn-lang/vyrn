@@ -28,7 +28,10 @@ use vyrn_frontend::core::Name;
 /// value of a record name's integer field, by the field's index
 /// (`elide::Walk::field`). An `Inner` is the length of the element an index
 /// name picks from an array name, or from a record name's array field by the
-/// field's own index: `Inner(r, Some(f), i)` is `r.f[i].length`.
+/// field's own index: `Inner(r, Some(f), i)` is `r.f[i].length`. A `Ghost`
+/// is an unknown bound of the elements of the parameter it numbers, above
+/// them when `true`: part of no name, so no write forgets it
+/// (`elide::element_rows`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Term {
     Val(Name),
@@ -36,24 +39,27 @@ pub enum Term {
     Col(Name, u32),
     Field(Name, u32),
     Inner(Name, Option<u32>, Name),
+    Ghost(u32, bool),
 }
 
 impl Term {
-    /// The name the term is a part of: an `Inner`'s array root.
-    pub fn name(self) -> Name {
+    /// The name the term is a part of: an `Inner`'s array root. `None` for
+    /// a ghost.
+    pub fn name(self) -> Option<Name> {
         match self {
             Term::Val(n)
             | Term::Len(n)
             | Term::Col(n, _)
             | Term::Field(n, _)
-            | Term::Inner(n, _, _) => n,
+            | Term::Inner(n, _, _) => Some(n),
+            Term::Ghost(..) => None,
         }
     }
 
     /// Whether the term changes where `n` does: its name, or an `Inner`'s
     /// index.
     pub fn reads(self, n: Name) -> bool {
-        self.name() == n || matches!(self, Term::Inner(_, _, i) if i == n)
+        self.name() == Some(n) || matches!(self, Term::Inner(_, _, i) if i == n)
     }
 
     /// Whether the term is a length: at least zero, at most `LEN_MAX`.
@@ -169,7 +175,7 @@ impl Lin {
     }
 
     /// `self` with `t` replaced by `by`.
-    fn subst(&self, t: Term, by: &Lin) -> Option<Lin> {
+    pub fn subst(&self, t: Term, by: &Lin) -> Option<Lin> {
         let k = self.coef(t);
         if k == 0 {
             return Some(self.clone());
@@ -431,7 +437,7 @@ impl State {
     /// The terms of `n` the state names: in a fact, a disequality, a
     /// definition or a condition's side.
     pub fn terms_of(&self, n: Name) -> Vec<Term> {
-        self.terms(|t| t.name() == n)
+        self.terms(|t| t.name() == Some(n))
     }
 
     /// The terms the state names that satisfy `keep`.
@@ -662,6 +668,11 @@ impl State {
                 if let Some(n) = f.map(sub) {
                     *f = n;
                 }
+            }
+        }
+        for ts in self.elems.values_mut() {
+            if ts.iter().any(|t| t.mentions(x)) {
+                *ts = ts.iter().filter_map(sub).collect();
             }
         }
     }

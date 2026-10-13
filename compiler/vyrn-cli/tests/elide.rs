@@ -6617,3 +6617,385 @@ fn bump",
     let (err, _) = run_oracle(&dir, &file, "w");
     assert!(err.contains("array index 3 out of bounds"), "{err}");
 }
+
+/// Callees whose rows keep the templates of `idx` in [`arrays`], each with
+/// the row that calls one: a `modify` callee that only moves elements, the
+/// same through recursion, a result built from the argument's elements, and
+/// an in-place `copyFrom`.
+const CALL_KEEPS: &[(&str, &str)] = &[
+    (
+        "fn swap(xs: modify Array<Int64>) {
+    let t = xs[0]
+    xs[0] = xs[xs.length - 1]
+    xs[xs.length - 1] = t
+}
+",
+        "    swap(idx)",
+    ),
+    (
+        "fn rot(xs: modify Array<Int64>, n: Int64) {
+    if n > 0 {
+        let t = xs[0]
+        xs[0] = xs[xs.length - 1]
+        xs[xs.length - 1] = t
+        rot(xs, n - 1)
+    }
+}
+",
+        "    rot(idx, 3)",
+    ),
+    (
+        "fn rev(xs: Array<Int64>) -> Array<Int64> {
+    let mut out: Array<Int64> = []
+    let mut i = xs.length
+    while i > 0 {
+        i = i - 1
+        out.push(xs[i])
+    }
+    return out
+}
+",
+        "    idx = rev(idx)",
+    ),
+    (
+        "",
+        "    let mut cp: Array<Int64> = [0]
+    cp.copyFrom(idx)
+    idx.copyFrom(cp)",
+    ),
+];
+
+#[test]
+fn a_callee_that_moves_elements_keeps_their_templates() {
+    let mut failures = Vec::new();
+    for (fns, pre) in CALL_KEEPS {
+        let root = format!("{fns}{}", arrays(pre, ""));
+        let (dir, file) = modules(&root, &[]);
+        let rows = verdicts_on(&file, "w", READ);
+        let (err, _) = run_oracle(&dir, &file, "w");
+        if rows != ["proved", "proved"] || !err.is_empty() {
+            failures.push(format!("{root}\nrows: {rows:?}\nran: {err}"));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n\n"));
+}
+
+/// Callees whose rows do not keep the templates of `idx` in [`arrays`], each
+/// with its trap.
+const CALL_WITNESSES: &[(&str, &str, &str)] = &[
+    // An element read from the array, plus one, meets no ghost.
+    (
+        "fn inc(xs: modify Array<Int64>) {
+    xs[0] = xs[xs.length - 1] + 1
+}
+",
+        "    inc(idx)",
+        "array index 4 out of bounds",
+    ),
+    // A push of a value read from no element.
+    (
+        "fn grow(xs: modify Array<Int64>) {
+    xs.push(99)
+}
+",
+        "    grow(idx)",
+        "array index 99 out of bounds",
+    ),
+    // A result built from another argument's elements.
+    (
+        "fn pick(xs: Array<Int64>, ys: Array<Int64>) -> Array<Int64> {
+    return ys.copy()
+}
+",
+        "    idx = pick(idx, [7, 7, 7, 7])",
+        "array index 7 out of bounds",
+    ),
+    // `f` keeps the row only while `g` does, and `g` stores a bad element.
+    (
+        "fn f(xs: modify Array<Int64>, n: Int64) {
+    if n > 0 {
+        g(xs, n - 1)
+    }
+}
+fn g(xs: modify Array<Int64>, n: Int64) {
+    xs[0] = 99
+    f(xs, n)
+}
+",
+        "    f(idx, 1)",
+        "array index 99 out of bounds",
+    ),
+];
+
+#[test]
+fn every_call_witness_keeps_its_index_and_traps_there() {
+    let mut failures = Vec::new();
+    for (fns, pre, trap) in CALL_WITNESSES {
+        let root = format!("{fns}{}", arrays(pre, ""));
+        let (dir, file) = modules(&root, &[]);
+        let rows = verdicts_on(&file, "w", READ);
+        if rows != ["proved", "check"] {
+            failures.push(format!("{root}\nrows: {rows:?}"));
+        }
+        let (err, _) = run_oracle(&dir, &file, "w");
+        if !err.contains(trap) || err.contains(vyrn_frontend::trap::PROVED_CHECK_FAILED) {
+            failures.push(format!("{root}\nran: {err}"));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n\n"));
+}
+
+/// A body that builds the permutation `p` of `0..n`, runs `pre`, then reads
+/// `p[p[k]]` in a loop: the check needs every element below `p.length`.
+fn permutation(fns: &str, pre: &str) -> String {
+    format!(
+        r#"{fns}fn w(n: Int64) -> Int64 {{
+    if n < 2 {{
+        return 0
+    }}
+    let mut p: Array<Int64> = []
+    let mut i = 0
+    while i < n {{
+        p.push(i)
+        i = i + 1
+    }}
+{pre}
+    let mut s = 0
+    let mut k = 0
+    while k < p.length {{
+        s = s + p[p[k]]
+        k = k + 1
+    }}
+    return s
+}}
+fn main() -> Int64 {{
+    print(w(4).toString())
+    return 0
+}}
+"#
+    )
+}
+
+const SELF_READ: &str = "s = s + p[p[k]]";
+
+/// A callee that only appends elements of the array keeps a bound by the
+/// array's own length: each element at exit is at most the largest at entry,
+/// and the length only grew.
+#[test]
+fn a_callee_that_appends_its_own_elements_keeps_the_own_length_bound() {
+    let fns = "fn dup(xs: modify Array<Int64>) {
+    xs.push(xs[xs.length - 1])
+}
+";
+    let (dir, file) = modules(&permutation(fns, "    dup(p)"), &[]);
+    assert_eq!(verdicts_on(&file, "w", SELF_READ), ["proved", "proved"]);
+    let (err, _) = run_oracle(&dir, &file, "w");
+    assert_eq!(err, "");
+}
+
+/// Callees that break `p`'s bound by its own length, each with its trap.
+const SELF_WITNESSES: &[(&str, &str, &str)] = &[
+    // Every element stays between two at entry, but the array shrinks.
+    (
+        "fn churn(xs: modify Array<Int64>) {
+    let v = xs[xs.length - 1]
+    xs.push(v)
+    xs[0] = v
+    xs.pop()
+    xs.pop()
+}
+",
+        "    churn(p)",
+        "array index 3 out of bounds",
+    ),
+    // A result shorter than the argument whose elements it holds.
+    (
+        "fn last(xs: Array<Int64>) -> Array<Int64> {
+    let mut out: Array<Int64> = []
+    out.push(xs[xs.length - 1])
+    return out
+}
+",
+        "    p = last(p)",
+        "array index 3 out of bounds",
+    ),
+    // `copyFrom` gives `p` the elements of `q`, which a bound by `p`'s old
+    // length holds.
+    (
+        "",
+        "    let mut q: Array<Int64> = []
+    q.push(n - 1)
+    print(p[q[0]].toString())
+    p.copyFrom(q)",
+        "array index 3 out of bounds",
+    ),
+];
+
+#[test]
+fn every_own_length_witness_keeps_its_index_and_traps_there() {
+    let mut failures = Vec::new();
+    for (fns, pre, trap) in SELF_WITNESSES {
+        let root = permutation(fns, pre);
+        let (dir, file) = modules(&root, &[]);
+        let rows = verdicts_on(&file, "w", SELF_READ);
+        if rows != ["proved", "check"] {
+            failures.push(format!("{root}\nrows: {rows:?}"));
+        }
+        let (err, _) = run_oracle(&dir, &file, "w");
+        if !err.contains(trap) || err.contains(vyrn_frontend::trap::PROVED_CHECK_FAILED) {
+            failures.push(format!("{root}\nran: {err}"));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n\n"));
+}
+
+/// A callee's `pre` bounds a parameter's elements by another parameter's
+/// length where every call row proves it.
+fn first(calls: &str) -> String {
+    format!(
+        "fn w(idx: Array<Int64>, xs: Array<Int64>) -> Int64 {{
+    if idx.length < 1 {{
+        return 0
+    }}
+    return xs[idx[0]]
+}}
+fn main() -> Int64 {{
+    let ys: Array<Int64> = [1, 2, 3]
+    print(w([0, 2], ys).toString())
+{calls}
+    return 0
+}}
+"
+    )
+}
+
+#[test]
+fn a_pre_bounds_a_parameters_elements_where_every_call_proves_it() {
+    let (dir, file) = modules(&first(""), &[]);
+    assert_eq!(
+        verdicts_on(&file, "w", "return xs[idx[0]]"),
+        ["proved", "proved"]
+    );
+    let (err, _) = run_oracle(&dir, &file, "w");
+    assert_eq!(err, "");
+    let (dir, file) = modules(&first("    print(w([5], ys).toString())"), &[]);
+    let (err, _) = run_oracle(&dir, &file, "w");
+    assert!(
+        err.contains("array index 5 out of bounds")
+            && !err.contains(vyrn_frontend::trap::PROVED_CHECK_FAILED),
+        "{err}"
+    );
+    assert_eq!(
+        verdicts_on(&file, "w", "return xs[idx[0]]"),
+        ["proved", "check"]
+    );
+}
+
+/// `g`'s `pre` rests on `f`'s: `f` is walked under its own `pre`, and a
+/// call row that breaks `f`'s takes `g`'s with it.
+fn caller_chain(calls: &str) -> String {
+    format!(
+        "fn g(idx: Array<Int64>, xs: Array<Int64>) -> Int64 {{
+    if idx.length < 1 {{
+        return 0
+    }}
+    return xs[idx[0]]
+}}
+fn f(idx: Array<Int64>, xs: Array<Int64>) -> Int64 {{
+    if idx.length < 1 {{
+        return 0
+    }}
+    return g(idx, xs) + xs[idx[0]]
+}}
+fn main() -> Int64 {{
+    let ys: Array<Int64> = [1, 2, 3]
+    print(f([0, 2], ys).toString())
+{calls}
+    return 0
+}}
+"
+    )
+}
+
+#[test]
+fn a_pre_rests_on_the_pre_of_the_caller_walked_under_it() {
+    let (dir, file) = modules(&caller_chain(""), &[]);
+    assert_eq!(
+        verdicts_on(&file, "g", "return xs[idx[0]]"),
+        ["proved", "proved"]
+    );
+    let (err, _) = run_oracle(&dir, &file, "g");
+    assert_eq!(err, "");
+    let (dir, file) = modules(&caller_chain("    print(f([5], ys).toString())"), &[]);
+    let (err, _) = run_oracle(&dir, &file, "g");
+    assert!(
+        err.contains("array index 5 out of bounds")
+            && !err.contains(vyrn_frontend::trap::PROVED_CHECK_FAILED),
+        "{err}"
+    );
+    assert_eq!(
+        verdicts_on(&file, "g", "return xs[idx[0]]"),
+        ["proved", "check"]
+    );
+}
+
+/// [`first`]'s callee, called with the borrows of two fields whose record
+/// fact bounds one's elements by the other's length. `at` seeds the fact; a
+/// fact no check on a field seeds fills no `pre`.
+fn fields(calls: &str) -> String {
+    format!(
+        "type Mesh = {{ xs: Array<Int64>, idx: Array<Int64> }}
+fn at(m: Mesh, k: Int64) -> Int64 {{
+    if k < 0 || k >= m.idx.length {{
+        return 0
+    }}
+    return m.xs[m.idx[k]]
+}}
+fn w(idx: Array<Int64>, xs: Array<Int64>) -> Int64 {{
+    if idx.length < 1 {{
+        return 0
+    }}
+    return xs[idx[0]]
+}}
+fn add(m: modify Mesh, x: Int64) {{
+    m.xs.push(x)
+    m.idx.push(m.xs.length - 1)
+}}
+fn main() -> Int64 {{
+    let mut m = Mesh {{ xs: [], idx: [] }}
+    add(m, 5)
+    add(m, 6)
+    print(w(m.idx, m.xs).toString())
+    print(at(m, 1).toString())
+{calls}
+    return 0
+}}
+"
+    )
+}
+
+#[test]
+fn a_pre_takes_a_record_fact_through_the_borrows_of_two_fields() {
+    let (dir, file) = modules(&fields(""), &[]);
+    assert_eq!(
+        verdicts_on(&file, "w", "return xs[idx[0]]"),
+        ["proved", "proved"]
+    );
+    let (err, _) = run_oracle(&dir, &file, "w");
+    assert_eq!(err, "");
+    // The fact bounds the elements of `idx`, not those of `xs`.
+    for call in ["w(m.xs, m.idx)", "w(m.xs, m.xs)"] {
+        let (dir, file) = modules(&fields(&format!("    print({call}.toString())")), &[]);
+        let (err, _) = run_oracle(&dir, &file, "w");
+        assert!(
+            err.contains("array index 5 out of bounds")
+                && !err.contains(vyrn_frontend::trap::PROVED_CHECK_FAILED),
+            "{call}\n{err}"
+        );
+        assert_eq!(
+            verdicts_on(&file, "w", "return xs[idx[0]]"),
+            ["proved", "check"],
+            "{call}"
+        );
+    }
+}
