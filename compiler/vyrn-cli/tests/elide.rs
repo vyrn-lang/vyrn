@@ -1499,6 +1499,27 @@ fn a_join_of_constants_keeps_the_values_between_out() {
 }
 
 #[test]
+fn a_join_of_distant_constants_keeps_its_check() {
+    let src = "fn w(c: Bool, xs: Array<Int64>) -> Int64 {
+    let mut k: Int64 = 0
+    if c {
+        k = 1
+    } else {
+        k = 2000000000
+    }
+    return xs[k]
+}
+";
+    assert_eq!(verdicts(src, "w"), ["check array-index"]);
+    let (err, _) = oracle(src, "    print(w(false, [1, 2]).toString())", "w");
+    assert!(
+        err.contains("array index 2000000000 out of bounds")
+            && !err.contains(vyrn_frontend::trap::PROVED_CHECK_FAILED),
+        "{err}"
+    );
+}
+
+#[test]
 fn a_copy_of_a_same_typed_name_needs_no_range_proof() {
     let src = "fn w(xs: Array<Int64>) -> Int64 {
     let mut s: Int64 = 0
