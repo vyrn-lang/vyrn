@@ -7338,3 +7338,45 @@ fn every_two_record_witness_keeps_its_index_and_traps_there() {
         );
     }
 }
+
+/// A record literal that takes a parameter's array whole holds the array's
+/// element templates, which its walk assumes at entry and the body's `pre`
+/// then keeps. A caller that passes an element out of range keeps the check
+/// that reads it.
+#[test]
+fn a_record_built_from_a_parameter_takes_its_element_templates() {
+    let src = |row: &str| {
+        format!(
+            "type Perm = {{ xs: Array<Int64> }}
+fn hop(p: Perm, k: Int64) -> Int64 {{
+    if k < 0 || k >= p.xs.length {{
+        return 0
+    }}
+    return p.xs[p.xs[k]]
+}}
+fn wrap(xs: consume Array<Int64>) -> Perm {{
+    return Perm {{ xs: xs }}
+}}
+fn w(n: Int64) -> Int64 {{
+    let p = wrap({row})
+    return hop(p, 0)
+}}
+"
+        )
+    };
+    let proof = src("[1, 0]");
+    assert_eq!(verdicts(&proof, "hop"), ["proved array-index"; 2]);
+    let (err, _) = oracle(&proof, "    print(w(10).toString())", "w");
+    assert_eq!(err, "");
+    let witness = src("[n, 0]");
+    let (err, _) = oracle(&witness, "    print(w(10).toString())", "w");
+    assert!(
+        err.contains("array index 10 out of bounds")
+            && !err.contains(vyrn_frontend::trap::PROVED_CHECK_FAILED),
+        "{err}"
+    );
+    assert_eq!(
+        verdicts(&witness, "hop"),
+        ["proved array-index", "check array-index"]
+    );
+}
