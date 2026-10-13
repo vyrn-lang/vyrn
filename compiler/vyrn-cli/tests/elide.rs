@@ -7084,3 +7084,172 @@ fn a_pre_takes_a_record_fact_through_the_borrows_of_two_fields() {
         );
     }
 }
+
+/// A counter that steps by one up to a length equals it at the loop's exit,
+/// so an array the loop pushes in step is as long as the bound: `seen[k]`
+/// with `k` below `p.length` is in range.
+#[test]
+fn a_loop_up_to_a_length_fills_an_array_as_long() {
+    let src = "fn marks(p: Array<Int64>) -> Int64 {
+    let mut seen: Array<Bool> = []
+    let mut i = 0
+    while i < p.length {
+        seen.push(false)
+        i = i + 1
+    }
+    let mut n = 0
+    let mut k = 0
+    while k < p.length {
+        if !seen[k] {
+            n = n + 1
+        }
+        k = k + 1
+    }
+    return n
+}
+";
+    assert_eq!(verdicts(src, "marks"), ["proved array-index"]);
+}
+
+/// An unrolled loop steps its counter twice a turn and can pass the bound,
+/// so the head keeps no upper bound on it and the exit states the pushed
+/// length only from below: `seen` is one longer than an odd `p`, and
+/// `p[seen.length - 1]` traps.
+#[test]
+fn a_loop_that_steps_past_a_length_keeps_the_check() {
+    let src = "fn pairs(p: Array<Int64>) -> Int64 {
+    let mut seen: Array<Int64> = []
+    let mut i = 0
+    while i < p.length {
+        seen.push(0)
+        i = i + 1
+        seen.push(0)
+        i = i + 1
+    }
+    return p[seen.length - 1]
+}
+";
+    assert_eq!(verdicts(src, "pairs"), ["check array-index"]);
+    let (err, rows) = oracle(src, "    print(pairs(xs).toString())", "pairs");
+    assert!(
+        err.contains("array index 3 out of bounds")
+            && !err.contains(vyrn_frontend::trap::PROVED_CHECK_FAILED),
+        "{err}"
+    );
+    assert_eq!(rows, ["10 0 array-index kept 1"]);
+}
+
+/// A program and a scan of it: `newScan` fills `mark` to `p.code.length`,
+/// and `walk` passes both on to `visit`, which indexes the scan below the
+/// program's length, and to `count`, which indexes the program below the
+/// scan's. `MARK`, `RESET` and `CALL` are the rows a witness changes.
+const SCAN: &str = "type Prog = { code: Array<Int64> }
+type Scan = { mark: Array<Int64>, gen: Int64 }
+fn newScan(p: Prog) -> Scan {
+    let mut mark: Array<Int64> = []
+    let mut i = 0
+    while i < p.code.length {
+        mark.push(0)
+        i = i + 1
+    }
+    MARK
+    return Scan { mark: mark, gen: 1 }
+}
+fn reset(sc: modify Scan) {
+    RESET
+}
+fn visit(p: Prog, sc: modify Scan, pc: Int64) {
+    if pc < 0 || pc >= p.code.length {
+        return
+    }
+    sc.mark[pc] = sc.gen
+}
+fn count(p: Prog, sc: Scan) -> Int64 {
+    let mut n = 0
+    let mut pc = 0
+    while pc < sc.mark.length {
+        n = n + p.code[pc]
+        pc = pc + 1
+    }
+    return n
+}
+fn walk(p: Prog, sc: modify Scan) -> Int64 {
+    reset(sc)
+    let mut pc = 0
+    while pc < 10 {
+        visit(p, sc, pc)
+        pc = pc + 1
+    }
+    return count(p, sc)
+}
+fn main() -> Int64 {
+    let p = Prog { code: [1, 2, 3, 4, 5] }
+    let mut sc = newScan(p)
+    CALL
+    return 0
+}
+";
+
+/// [`SCAN`] with its three rows.
+fn scan(mark: &str, reset: &str, call: &str) -> (Scratch, std::path::PathBuf) {
+    let src = SCAN
+        .replace("MARK", mark)
+        .replace("RESET", reset)
+        .replace("CALL", call);
+    modules(&src, &[])
+}
+
+/// `newScan`'s result is as long as its program, a fact over two records
+/// that `walk`'s `pre` carries to `visit` and `count`.
+#[test]
+fn a_length_fact_across_two_records_crosses_calls() {
+    let (dir, file) = scan(
+        "i = i + 0",
+        "sc.gen = sc.gen + 1",
+        "print(walk(p, sc).toString())",
+    );
+    assert_eq!(verdicts_on(&file, "visit", "sc.mark[pc] ="), ["proved"]);
+    assert_eq!(
+        verdicts_on(&file, "count", "n = n + p.code[pc]"),
+        ["proved"]
+    );
+    let (err, _) = run_oracle(&dir, &file, "visit");
+    assert_eq!(err, "");
+}
+
+/// Each breaks the fact on one path and traps where it reads it: a scan
+/// passed with another program, a scan whose `mark` a pop shortens, and a
+/// callee that replaces `mark`.
+#[test]
+fn every_two_record_witness_keeps_its_index_and_traps_there() {
+    let cases = [
+        (
+            ("i = i + 0", "sc.gen = sc.gen + 1"),
+            "let q = Prog { code: [7] }\n    print(walk(q, sc).toString())",
+            ("count", "n = n + p.code[pc]", "array index 1 out of bounds"),
+        ),
+        (
+            ("mark.pop()", "sc.gen = sc.gen + 1"),
+            "print(walk(p, sc).toString())",
+            ("visit", "sc.mark[pc] =", "array index 4 out of bounds"),
+        ),
+        (
+            ("i = i + 0", "sc.mark = [0]"),
+            "print(walk(p, sc).toString())",
+            ("visit", "sc.mark[pc] =", "array index 1 out of bounds"),
+        ),
+    ];
+    for ((mark, reset), call, (body, text, trap)) in cases {
+        let (dir, file) = scan(mark, reset, call);
+        assert_eq!(
+            verdicts_on(&file, body, text),
+            ["check"],
+            "{mark} {reset} {call}"
+        );
+        let (err, _) = run_oracle(&dir, &file, body);
+        assert!(
+            err.contains(trap) && !err.contains(vyrn_frontend::trap::PROVED_CHECK_FAILED),
+            "{mark} {reset} {call}\n{err}"
+        );
+    }
+}
