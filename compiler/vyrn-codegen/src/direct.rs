@@ -351,6 +351,7 @@ fn compile_inner(
         layouts: RefCell::default(),
         reprs: RefCell::default(),
         flats: RefCell::default(),
+        members: RefCell::default(),
         oracle,
         sigs: HashMap::new(),
         rt,
@@ -1174,6 +1175,8 @@ struct Cx<'a> {
     reprs: RefCell<HashMap<Type, Repr>>,
     /// [`Cx::flat`]'s answers, by substituted type.
     flats: RefCell<HashMap<Type, Option<Rc<Flat>>>>,
+    /// [`Cx::fields`]'s answers, by substituted type.
+    members: RefCell<HashMap<Type, Option<Rc<[Field]>>>>,
     /// The check oracle's host imports and its row labels, under
     /// [`vyrn_lower::check::Mode::Count`]; `None` in every other build.
     oracle: Option<Oracle>,
@@ -1520,7 +1523,7 @@ impl<'a> Cx<'a> {
             return None;
         }
         let tys: Vec<Type> = match resolved {
-            Type::Record(_) => self.fields(ty)?.into_iter().map(|f| f.ty).collect(),
+            Type::Record(_) => self.fields(ty)?.iter().map(|f| f.ty.clone()).collect(),
             Type::Enum(_) => vec![Type::Int; layout.fields.len()],
             _ => return None,
         };
@@ -1575,8 +1578,21 @@ impl<'a> Cx<'a> {
         }
     }
 
-    fn fields(&self, ty: &Type) -> Option<Vec<Field>> {
-        ftypes::record_fields(&self.sub(ty), &self.types).map(std::borrow::Cow::into_owned)
+    /// The fields of the record `ty` in memory order ([`crate::in_layout_order`]), once per
+    /// substituted type: field `i` sits at `layout.fields[i]`.
+    fn fields(&self, ty: &Type) -> Option<Rc<[Field]>> {
+        let ty = self.sub(ty);
+        if let Some(fs) = self.members.borrow().get(&*ty) {
+            return fs.clone();
+        }
+        let fs = ftypes::record_fields(&ty, &self.types).map(|fields| {
+            let order = crate::in_layout_order(&fields, &self.types);
+            order.into_iter().map(|(f, _)| f.clone()).collect()
+        });
+        self.members
+            .borrow_mut()
+            .insert(ty.into_owned(), fs.clone());
+        fs
     }
 
     /// The signature a call site sees. `index` is filled in by the caller, which
@@ -3030,9 +3046,9 @@ impl<'p> Fn_<'_, 'p> {
         let l = self.cx.layout(ty, line)?;
         let fields =
             (self.cx.fields(ty)).ok_or_else(|| gap(&format!("the fields of `{ty}`"), line))?;
-        Ok((fields.into_iter().enumerate())
+        Ok((fields.iter().enumerate())
             .filter(|(_, f)| self.owns_heap(&f.ty))
-            .map(|(i, f)| (l.fields[i], f))
+            .map(|(i, f)| (l.fields[i], f.clone()))
             .collect())
     }
 
@@ -7957,7 +7973,7 @@ impl<'p> Fn_<'_, 'p> {
         ty: &Type,
         line: usize,
     ) -> Result<(), String> {
-        if let Type::Record(fs) = self.cx.resolve(ty) {
+        if let Some(fs) = self.cx.fields(ty) {
             let l = self.cx.layout(ty, line)?;
             for (i, f) in fs.iter().enumerate() {
                 self.pack_fields(b, src, dst, off + l.fields[i], &f.ty, line)?;
@@ -11944,7 +11960,7 @@ impl<'a, 'p> Fn_<'a, 'p> {
                     return unsupported("a record literal the row states", line);
                 };
                 let mut order = Vec::new();
-                for f in &decl {
+                for f in decl.iter() {
                     let at = names
                         .iter()
                         .position(|n| *n == f.name)
@@ -14463,6 +14479,7 @@ mod tests {
             layouts: RefCell::default(),
             reprs: RefCell::default(),
             flats: RefCell::default(),
+            members: RefCell::default(),
             oracle: None,
             sigs: HashMap::new(),
             gen: None,

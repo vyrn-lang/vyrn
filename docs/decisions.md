@@ -19,6 +19,7 @@ pull request.
 ### Types
 
 - Records are structural with width subtyping: a record with more fields is usable where fewer are expected. Types describe shape, not identity.
+- A record's layout is a function of its field set: fields sit in descending alignment, then by name. Two record types with the same fields are then one representation everywhere, as an `Option` payload, an `Array` element or a `fn` result, and no flow converts between them. Laid out in declared order, each such flow read one field as another.
 - No casts and no `as` on values. A conversion is a call named after the target type, and integer arithmetic wraps at the type's width (`language.md`), so memory is never reinterpreted.
 - The type transformers `Omit`, `Pick`, `Merge`, `Partial` and `A & B` are erased before lowering. `Readonly<T>` is `T`, because records are immutable.
 - Every numeric type names its size (`Int8` to `Int64`, `UInt8` to `UInt64`, `Float32`, `Float64`). There is no unsized `Int` or `Float` and no implicit widening.

@@ -1,0 +1,21 @@
+argument: 1 2
+return: 1 2
+Some: 1 2
+variant: 1 2
+payloads: 1 2 7
+Ok: 1 2
+record literal field: 1 2
+nested record: 1 2
+array literal: 1 2
+push: 1 2
+whole Option: 1 2
+whole Array: 1 2
+Array argument: 1 2
+Map literal value: 1 2
+whole Map: 1 2
+Map key: 1 2
+fn result: 1 2
+fn argument: 1 2
+0
+mixed widths: true 7 s 3
+generic record: 1 2 3

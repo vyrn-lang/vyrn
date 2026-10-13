@@ -7512,3 +7512,40 @@ fn w(n: Int64) -> Int64 {{
     }
     assert!(failures.is_empty(), "{}", failures.join("\n\n"));
 }
+
+/// [`fields`]'s mesh read as a record type that declares the two fields in the
+/// other order. The layout follows the field names, so the fact on `idx` holds
+/// for `h.idx`, and `h.xs` in its place still keeps the check.
+#[test]
+fn a_record_fact_holds_through_a_record_of_another_field_order() {
+    for (call, verdicts) in [
+        ("w(h.idx, h.xs)", ["proved", "proved"]),
+        ("w(h.xs, h.idx)", ["proved", "check"]),
+    ] {
+        let view = format!(
+            "type Hsem = {{ idx: Array<Int64>, xs: Array<Int64> }}
+fn view(h: Hsem) -> Int64 {{
+    return {call}
+}}
+fn main()"
+        );
+        let src = fields("    print(view(m).toString())").replace("fn main()", &view);
+        let (dir, file) = modules(&src, &[]);
+        assert_eq!(
+            verdicts_on(&file, "w", "return xs[idx[0]]"),
+            verdicts,
+            "{call}"
+        );
+        let (err, _) = run_oracle(&dir, &file, "w");
+        let trap = if verdicts[1] == "check" {
+            "array index 5 out of bounds"
+        } else {
+            ""
+        };
+        assert!(
+            err.contains(trap) && !err.contains(vyrn_frontend::trap::PROVED_CHECK_FAILED),
+            "{call}\n{err}"
+        );
+        assert_eq!(err.is_empty(), trap.is_empty(), "{call}\n{err}");
+    }
+}

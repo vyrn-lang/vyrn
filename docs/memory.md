@@ -298,6 +298,9 @@ The target is wasm32. A pointer is 4 bytes.
   32-bit. A literal lives in the data segment with `cap` all ones, and
   `free` ignores any address below `heapBase()`, so a literal is never freed.
 - An `Array<T>` is `{ ptr, len: i64, cap: i64 }`, 24 bytes with a hole.
+- A record's fields sit in descending alignment, then by name, whatever order
+  its type declares (`in_layout_order` in `vyrn-codegen`). No field pads
+  before another.
 - A `read` or `modify` aggregate argument is passed as its address. Only
   module state that is an aggregate or owns heap can hold it during the call,
   so the callee uses that address unless it may store into such state (`read`)
