@@ -40,6 +40,24 @@ macro_rules! cerr_at {
     }};
 }
 
+/// `d` as the mismatch of argument `i` of `callee`, where it is the one
+/// [`Checker::unify`] states with no callee to name.
+fn argued(d: Diagnostic, callee: &str, i: usize) -> Diagnostic {
+    match d.rule {
+        Some(Rule::ArgExpected { pty, aty }) => {
+            cerr!(
+                d.line,
+                FnValueArgType,
+                name = DeclName(callee),
+                arg = i + 1,
+                pty,
+                aty
+            )
+        }
+        _ => d,
+    }
+}
+
 /// The line a `cerr!` was given, by value: a node matched by reference hands
 /// out `&usize`, and this accepts both.
 pub(crate) fn line_of(l: impl std::borrow::Borrow<usize>) -> usize {
@@ -5619,7 +5637,7 @@ impl<'a> Checker<'a> {
                     ref w => Some(w),
                 };
                 let aty = self.expr(arg, scope, want_hint, fn_ret)?;
-                self.unify(pty, &aty, &mut subst, line)?;
+                (self.unify(pty, &aty, &mut subst, line)).map_err(|d| argued(d, shown, i))?;
                 // Proved against the solved type, so `f(0)` against a
                 // parameter already pinned to a validated type is refused here.
                 self.prove_coercion(arg, &want, line)?;
@@ -5836,7 +5854,9 @@ impl<'a> Checker<'a> {
                     return Ok(false);
                 }
             }
-            self.unify_at(&ret, vret, false, subst, line).map(|()| true)
+            (self.unify_at(&ret, vret, false, subst, line))
+                .map(|()| true)
+                .map_err(|d| argued(d, callee, i))
         };
         let value_matches = |vptys: &[Type],
                              vret: &Type,
