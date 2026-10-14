@@ -417,6 +417,10 @@ reports:
 - residue at exit: `free audit: N block(s), M bytes, never freed` and exit 135;
 - otherwise its own exit code.
 
+The audit fills every freed block with `0xA5` bytes, so a read after a free
+reads a wrong value instead of the stale one. A run that compares its output,
+such as `tests/shapesweep.rs`, then reports the use after free.
+
 An unaudited build emits no audit call, and `Module::sweep` drops the audit
 functions, so a shipped module holds none of it. The generator host and the
 language server never reach it.

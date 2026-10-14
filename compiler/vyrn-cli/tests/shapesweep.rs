@@ -4,14 +4,16 @@
 //! A shape is one operation on one place, in one context, under one root.
 //! The generator walks a fixed, ordered space (no randomness):
 //!
-//!   - element type: a scalar, `String`, a record with a `String`, an array
-//!     of `String`, an enum with a heap payload;
+//!   - element type: a scalar, `String`, a record with a `String`, a record
+//!     of scalars, an array of `String`, an enum with a heap payload;
 //!   - place: a name, `w.f`, `w.a.f`, `xs[i]`, `w.xs[i]`, `w.xss[0][i]`,
 //!     `w.ins[i].f`, `w.m[k]` and `w.h.bag[i]` (a user container);
 //!   - value stored: fresh, a read, a call that reads, a call that consumes,
 //!     a `.copy()` and a take, each of the same place, a sibling place and a
-//!     different container; a loop element, a payload binder and a borrow
-//!     handed to a function that stores it, all into a name;
+//!     different container; a call that reads and a `.copy()` of the same
+//!     place in a temporary (`rd(world().xs[i])`); a loop element, a payload
+//!     binder and a borrow handed to a function that stores it, all into a
+//!     name;
 //!   - index form: a literal or a run-time variable, equal or different;
 //!   - removal: `pop`, `swapRemove` and `Map.remove` on the container, and
 //!     `pop`/`swapRemove` through a place that holds an array;
@@ -61,10 +63,11 @@ enum Ty {
     Int,
     Str,
     Rec,
+    Pt,
     Arr,
     Enm,
 }
-const TYS: [Ty; 5] = [Ty::Int, Ty::Str, Ty::Rec, Ty::Arr, Ty::Enm];
+const TYS: [Ty; 6] = [Ty::Int, Ty::Str, Ty::Rec, Ty::Pt, Ty::Arr, Ty::Enm];
 
 impl Ty {
     fn tag(self) -> &'static str {
@@ -72,6 +75,7 @@ impl Ty {
             Ty::Int => "Int",
             Ty::Str => "Str",
             Ty::Rec => "Rec",
+            Ty::Pt => "Pt",
             Ty::Arr => "Arr",
             Ty::Enm => "Enm",
         }
@@ -81,6 +85,7 @@ impl Ty {
             Ty::Int => "Int64",
             Ty::Str => "String",
             Ty::Rec => "P",
+            Ty::Pt => "Pt",
             Ty::Arr => "Array<String>",
             Ty::Enm => "E",
         }
@@ -88,6 +93,7 @@ impl Ty {
     fn decls(self) -> &'static str {
         match self {
             Ty::Rec => "type P = { s: String, n: Int64 }",
+            Ty::Pt => "type Pt = { x: Int64, y: Int64 }",
             Ty::Enm => "type E = | A(String) | B(Int64)",
             _ => "",
         }
@@ -97,6 +103,7 @@ impl Ty {
             Ty::Int => "fn mk(k: Int64) -> Int64 { return k }",
             Ty::Str => "fn mk(k: Int64) -> String { return \"v\" + k.toString() }",
             Ty::Rec => "fn mk(k: Int64) -> P { return P { s: \"p\" + k.toString(), n: k } }",
+            Ty::Pt => "fn mk(k: Int64) -> Pt { return Pt { x: k, y: 0 - k } }",
             Ty::Arr => {
                 "fn mk(k: Int64) -> Array<String> { return [\"a\" + k.toString(), \"b\" + k.toString(), \"c\" + k.toString(), \"d\" + k.toString(), \"e\" + k.toString()] }"
             }
@@ -110,6 +117,7 @@ impl Ty {
             Ty::Int => "fn show(x: Int64) -> String { return x.toString() }",
             Ty::Str => "fn show(x: String) -> String { return x.copy() }",
             Ty::Rec => "fn show(x: P) -> String { return x.s + \"/\" + x.n.toString() }",
+            Ty::Pt => "fn show(x: Pt) -> String { return x.x.toString() + \"/\" + x.y.toString() }",
             Ty::Arr => {
                 "fn show(x: Array<String>) -> String {\n    let mut o = \"[\"\n    for e in x { o = o + e + \";\" }\n    return o + \"]\"\n}"
             }
@@ -124,6 +132,7 @@ impl Ty {
             Ty::Int => "0",
             Ty::Str => "\"\"",
             Ty::Rec => "P { s: \"\", n: 0 }",
+            Ty::Pt => "Pt { x: 0, y: 0 }",
             Ty::Arr => "[]",
             Ty::Enm => "B(0)",
         }
@@ -134,6 +143,7 @@ impl Ty {
             Ty::Int => k.to_string(),
             Ty::Str => format!("v{k}"),
             Ty::Rec => format!("p{k}/{k}"),
+            Ty::Pt => format!("{k}/{}", -k),
             Ty::Arr => format!("[a{k};b{k};c{k};d{k};e{k};]"),
             Ty::Enm if k % 2 == 0 => format!("Ae{k}"),
             Ty::Enm => format!("B{k}"),
@@ -367,6 +377,8 @@ enum Wh {
     Write,
     Sib,
     Other,
+    /// The written place in a fresh `world()` that no name holds.
+    Temp,
 }
 
 /// An index form: literal or variable, and the write and read indices.
@@ -471,9 +483,9 @@ fn names(root: Root) -> &'static Names {
 
 fn ptext(p: Pk, wh: Wh, ix: Ix, n: &Names) -> String {
     let i = match (wh, ix.var) {
-        (Wh::Write, true) => "i".to_string(),
+        (Wh::Write | Wh::Temp, true) => "i".to_string(),
         (_, true) => "j".to_string(),
-        (Wh::Write, false) => ix.wi.to_string(),
+        (Wh::Write | Wh::Temp, false) => ix.wi.to_string(),
         (_, false) => ix.ri.to_string(),
     };
     let k = match (wh, ix.var) {
@@ -484,6 +496,11 @@ fn ptext(p: Pk, wh: Wh, ix: Ix, n: &Names) -> String {
     };
     let w = n.w;
     match (p, wh) {
+        (Pk::Name | Pk::Mp | Pk::Ub, Wh::Temp) => {
+            unreachable!("`values` reads no temporary of {p:?}")
+        }
+        (Pk::E1, Wh::Temp) => format!("many(110)[{i}]"),
+        (_, Wh::Temp) => ptext(p, Wh::Write, ix, n).replacen(w, "world()", 1),
         (Pk::Name, Wh::Write) => n.s.to_string(),
         (Pk::Name, Wh::Sib) => n.t.to_string(),
         (Pk::Name, Wh::Other) => format!("{}[{i}]", n.ys),
@@ -512,6 +529,7 @@ fn ptext(p: Pk, wh: Wh, ix: Ix, n: &Names) -> String {
 fn slot<'a>(m: &'a mut Mdl, p: Pk, wh: Wh, ix: Ix) -> &'a mut String {
     let i = if wh == Wh::Write { ix.wi } else { ix.ri };
     match (p, wh) {
+        (_, Wh::Temp) => unreachable!("`apply` reads a temporary out of a fresh model"),
         (Pk::Name, Wh::Write) => &mut m.s,
         (Pk::Name, Wh::Sib) => &mut m.t,
         (Pk::Name, Wh::Other) => &mut m.ys[i],
@@ -559,6 +577,7 @@ enum Src {
     Same,
     Sib,
     Other,
+    Temp,
 }
 impl Src {
     fn wh(self) -> Wh {
@@ -566,6 +585,7 @@ impl Src {
             Src::Same => Wh::Write,
             Src::Sib => Wh::Sib,
             Src::Other => Wh::Other,
+            Src::Temp => Wh::Temp,
         }
     }
     fn tag(self) -> &'static str {
@@ -573,6 +593,7 @@ impl Src {
             Src::Same => "same",
             Src::Sib => "sib",
             Src::Other => "other",
+            Src::Temp => "temp",
         }
     }
 }
@@ -631,6 +652,12 @@ fn values(p: Pk) -> Vec<Vk> {
     }
     for s in SRCS {
         v.push(Vk::EatCopy(s));
+    }
+    // A user container's projection on a temporary is a gap in the core
+    // (`the core cannot state a projection whose yield is not a place`).
+    if !matches!(p, Pk::Name | Pk::Mp | Pk::Ub) {
+        v.push(Vk::Rd(Src::Temp));
+        v.push(Vk::Copy(Src::Temp));
     }
     if !p.indexed() {
         v.push(Vk::Take(Src::Same));
@@ -775,6 +802,9 @@ fn apply(op: &Op, ty: Ty, m: &mut Mdl) {
         Op::Store { p, v, ix } => {
             let val = match v {
                 Vk::Fresh => Some(ty.shown(KS)),
+                Vk::Rd(Src::Temp) | Vk::Copy(Src::Temp) => {
+                    Some(slot(&mut Mdl::new(ty), p, Wh::Write, ix).clone())
+                }
                 Vk::LoopElem => m.ys.last().cloned(),
                 Vk::Payload => Some(ty.shown(KP)),
                 Vk::Read(s)

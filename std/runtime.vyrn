@@ -367,6 +367,8 @@ fn auditDeath(p: Int32, cls: Int32) {
         auditFail(s)
     }
     store32(p - 4, 0)
+    // A read after the free reads 0xA5 bytes instead of the stale value.
+    fill(p, 165, classSize(cls))
     store32(s, load32(s) - 1)
     store32(s + 4, load32(s + 4) - UInt32(classSize(cls)))
     let table = Int32(load32(s + 24))
