@@ -660,7 +660,10 @@ pub(crate) fn shape_of(ty: &Type, types: &HashMap<String, TypeDecl>) -> Shape {
             leaf(Leaf::Ptr),
             Shape::Array(*n, Box::new(shape_of(inner, types))),
         ]),
-        Type::Record(fields) => st(fields.iter().map(|f| shape_of(&f.ty, types)).collect()),
+        Type::Record(fields) => st(in_layout_order(fields, types)
+            .into_iter()
+            .map(|(_, s)| s)
+            .collect()),
         // `{ i64 tag, i64 slot0, ... }`: one slot per payload word of the widest
         // variant, so a two-word payload rides inline, not in a heap box.
         Type::Enum(vs) => st(words(1 + enum_slots_of(vs, types))),
@@ -686,6 +689,19 @@ pub(crate) fn shape_of(ty: &Type, types: &HashMap<String, TypeDecl>) -> Shape {
         // `lazy T` field, so the `Lazy` arm is unreachable.
         Type::Fn(..) | Type::Lazy(_) => st(words(2)),
     }
+}
+
+/// A record's fields with their shapes, in memory order: descending alignment, then name.
+/// The order is a function of the field set, so two record types with the same fields share
+/// one layout whatever order each declares, and a value crosses between them with no
+/// instruction (`language.md`: they are interchangeable). No member pads before another.
+pub(crate) fn in_layout_order<'a>(
+    fields: &'a [Field],
+    types: &HashMap<String, TypeDecl>,
+) -> Vec<(&'a Field, Shape)> {
+    let mut members: Vec<_> = fields.iter().map(|f| (f, shape_of(&f.ty, types))).collect();
+    members.sort_by(|(f, s), (g, t)| t.align().cmp(&s.align()).then_with(|| f.name.cmp(&g.name)));
+    members
 }
 
 /// The slots one variant's payloads occupy, laid out consecutively.
@@ -757,13 +773,14 @@ mod tests {
             ),
             (fn0(), 16, 8, &[0, 8]),
             (rec(&[]), 0, 1, &[]),
+            // Descending alignment, then name: f2, f4, f1, f0, f3, with no hole.
             (
                 rec(&[Type::Bool, Type::Str, Type::Int, u8t.clone(), Type::Float]),
-                32,
+                24,
                 8,
-                &[0, 4, 8, 16, 24],
+                &[0, 8, 16, 20, 21],
             ),
-            // A vector's 16-alignment moves it to offset 16 and the size to 32.
+            // The vector goes first; the byte after it pads the size to 32.
             (rec(&[u8t.clone(), Type::F64x2]), 32, 16, &[0, 16]),
             (Type::ArrayN(Box::new(Type::I32x4), 3), 48, 16, &[]),
             (Type::ArrayN(Box::new(Type::Int), 4), 32, 8, &[]),
@@ -791,6 +808,24 @@ mod tests {
                 "the layout of `{ty}`"
             );
         }
+    }
+
+    /// Two record types with one field set lay their fields out in one order.
+    #[test]
+    fn a_record_layout_ignores_the_declared_field_order() {
+        let types = HashMap::new();
+        let f = |name: &str, ty: Type| Field {
+            name: name.into(),
+            ty,
+        };
+        let a = [f("b", Type::Bool), f("x", Type::Int), f("y", Type::Str)];
+        let b = [f("y", Type::Str), f("x", Type::Int), f("b", Type::Bool)];
+        let names = |fs: &[Field]| -> Vec<String> {
+            let order = in_layout_order(fs, &types);
+            order.into_iter().map(|(f, _)| f.name.clone()).collect()
+        };
+        assert_eq!(names(&a), ["x", "y", "b"]);
+        assert_eq!(names(&b), ["x", "y", "b"]);
     }
 
     /// `536870912 * 8` is 2^32, which wraps to zero: a 4 GiB array that would

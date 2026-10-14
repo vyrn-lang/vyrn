@@ -116,6 +116,16 @@ pub struct Layout {
 }
 
 impl Shape {
+    /// The alignment of this shape: a struct's is its widest member's.
+    pub fn align(&self) -> u32 {
+        match self {
+            Shape::Void => 1,
+            Shape::Leaf(l) => l.align(),
+            Shape::Struct(members) => members.iter().map(Shape::align).max().unwrap_or(1),
+            Shape::Array(_, elem) => elem.align(),
+        }
+    }
+
     /// Returns the layout of this shape, or the refusal of one past 4 GB.
     pub fn layout(&self) -> Result<Layout, String> {
         let scalar = |size, align| Layout {
@@ -130,14 +140,14 @@ impl Shape {
             Shape::Struct(members) => {
                 // In 64 bits: a total past 4 GB must be refused, and a wrapped
                 // `u32` total would be accepted.
-                let (mut size, mut align, mut fields) = (0u64, 1u32, Vec::new());
+                let (mut size, mut fields) = (0u64, Vec::new());
                 for m in members {
                     let f = m.layout()?;
                     size = round_up(size, f.align as u64);
                     fields.push(size);
                     size += f.size as u64;
-                    align = align.max(f.align);
                 }
+                let align = self.align();
                 // Tail padding, so `[N x S]` keeps every element aligned.
                 let size = fits(round_up(size, align as u64).into(), "a record")?;
                 Layout {
