@@ -492,7 +492,8 @@ pub enum Rung {
     Resize,
     /// Across the int/float line, or between the two float widths.
     FloatCross,
-    /// A record used as a differently shaped record: rebuilt field by field.
+    /// A borrowed record read as a differently shaped record: its fields copied,
+    /// owning nothing. An owned wider record is rebuilt by the core (`vyrn_lower::core::Builder::fit`).
     Rebuild,
     /// One sum at another shape of itself: the same variant names, a different
     /// slot count (`Validation<Unit>` and `Validation<Point>`, or a bare `None`
