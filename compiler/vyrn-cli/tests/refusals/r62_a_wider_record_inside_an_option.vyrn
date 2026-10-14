@@ -1,0 +1,13 @@
+// The payload sits in the `Option` at the place a `B` is read from.
+type B = { y: Int64, x: Int64 }
+type W = { z: Int64, y: Int64, x: Int64 }
+fn f(o: Option<B>) -> Int64 {
+    if let Some(b) = o {
+        return b.x
+    }
+    return 0
+}
+fn main() -> Int64 {
+    let o: Option<W> = Some(W { z: 9, y: 2, x: 1 })
+    return f(o)
+}

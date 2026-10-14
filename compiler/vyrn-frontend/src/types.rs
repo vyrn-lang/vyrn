@@ -1228,17 +1228,27 @@ pub fn decl_map(p: &crate::ast::Program) -> HashMap<String, TypeDecl> {
 
 /// Whether a value of type `from` can be used where `to` is expected, without
 /// validation. A validated type decays to its base (an `Age` is an `Int64`);
-/// the reverse needs [`coercible`].
+/// the reverse needs [`coercible`]. A record with more fields fits at the top
+/// of the value only; below it, see [`interchangeable`].
 pub fn assignable(from: &Type, to: &Type, types: &dyn Decls) -> bool {
-    assignable_d(from, to, 0, types)
+    assignable_d(from, to, true, 0, types)
+}
+
+/// [`assignable`] without width at the top: every record in `from` has the
+/// same field set as its place in `to`. A record inside an array, a sum, a
+/// map, a function type or another record is read in place, so a wider one
+/// would need a hidden copy of every element.
+pub fn interchangeable(from: &Type, to: &Type, types: &dyn Decls) -> bool {
+    assignable_d(from, to, false, 0, types)
 }
 
 const MAX_ASSIGNABLE_DEPTH: usize = 64;
 
-/// [`assignable`] with its descent depth. Comparing two recursive records
-/// (`NodeA`, `NodeB`) field by field never ends, so past the cap the answer is
-/// "not assignable": a type error instead of a stack overflow.
-fn assignable_d(from: &Type, to: &Type, depth: usize, types: &dyn Decls) -> bool {
+/// [`assignable`] with its descent depth, and `width` true at the top of a
+/// value only. Comparing two recursive records (`NodeA`, `NodeB`) field by
+/// field never ends, so past the cap the answer is "not assignable": a type
+/// error instead of a stack overflow.
+fn assignable_d(from: &Type, to: &Type, width: bool, depth: usize, types: &dyn Decls) -> bool {
     if depth > MAX_ASSIGNABLE_DEPTH {
         return false;
     }
@@ -1257,10 +1267,22 @@ fn assignable_d(from: &Type, to: &Type, depth: usize, types: &dyn Decls) -> bool
     // A `lazy T` field takes what a `fn() -> T` field takes; only the read
     // hides the thunk.
     if let Type::Lazy(t) = to {
-        return assignable_d(from, &Type::Fn(Vec::new(), t.clone()), depth + 1, types);
+        return assignable_d(
+            from,
+            &Type::Fn(Vec::new(), t.clone()),
+            width,
+            depth + 1,
+            types,
+        );
     }
     if let Type::Lazy(t) = from {
-        return assignable_d(&Type::Fn(Vec::new(), t.clone()), to, depth + 1, types);
+        return assignable_d(
+            &Type::Fn(Vec::new(), t.clone()),
+            to,
+            width,
+            depth + 1,
+            types,
+        );
     }
     // An alias with no `where` to one of these is interchangeable with its
     // resolved form.
@@ -1284,14 +1306,14 @@ fn assignable_d(from: &Type, to: &Type, depth: usize, types: &dyn Decls) -> bool
     if let Type::Named(n) = to {
         if let Some(d) = types.decl(n) {
             if d.predicate.is_none() && transparent(&d.base) {
-                return assignable_d(from, &d.base, depth + 1, types);
+                return assignable_d(from, &d.base, width, depth + 1, types);
             }
         }
     }
     if let Type::Named(n) = from {
         if let Some(d) = types.decl(n) {
             if d.predicate.is_none() && transparent(&d.base) {
-                return assignable_d(&d.base, to, depth + 1, types);
+                return assignable_d(&d.base, to, width, depth + 1, types);
             }
         }
     }
@@ -1303,20 +1325,22 @@ fn assignable_d(from: &Type, to: &Type, depth: usize, types: &dyn Decls) -> bool
     }
     // Covariant: values are immutable.
     if let (Some(a), Some(b)) = (option_payload(from), option_payload(to)) {
-        return assignable_d(a, b, depth + 1, types);
+        return assignable_d(a, b, false, depth + 1, types);
     }
     if let (Some((a, e1)), Some((b, e2))) = (result_payloads(from), result_payloads(to)) {
-        return assignable_d(a, b, depth + 1, types) && assignable_d(e1, e2, depth + 1, types);
+        return assignable_d(a, b, false, depth + 1, types)
+            && assignable_d(e1, e2, false, depth + 1, types);
     }
     if let (Type::Map(ka, va), Type::Map(kb, vb)) = (from, to) {
-        return assignable_d(ka, kb, depth + 1, types) && assignable_d(va, vb, depth + 1, types);
+        return assignable_d(ka, kb, false, depth + 1, types)
+            && assignable_d(va, vb, false, depth + 1, types);
     }
     if let (Type::Array(a), Type::Array(b)) = (from, to) {
-        return assignable_d(a, b, depth + 1, types);
+        return assignable_d(a, b, false, depth + 1, types);
     }
     // Invariant in the capacity `N`.
     if let (Type::SmallArray(a, na), Type::SmallArray(b, nb)) = (from, to) {
-        return na == nb && assignable_d(a, b, depth + 1, types);
+        return na == nb && assignable_d(a, b, false, depth + 1, types);
     }
     // A predicated named type admits only itself.
     if let Type::Named(n) = to {
@@ -1326,13 +1350,16 @@ fn assignable_d(from: &Type, to: &Type, depth: usize, types: &dyn Decls) -> bool
             }
         }
     }
-    // Width subtyping: every field `to` needs, with an assignable type.
+    // Width subtyping: every field `to` needs, with an assignable type, and
+    // no other field below the top.
     if let (Type::Record(ff), Type::Record(tf)) = (&resolve(from, types), &resolve(to, types)) {
-        return tf.iter().all(|need| {
-            ff.iter().any(|have| {
-                have.name == need.name && assignable_d(&have.ty, &need.ty, depth + 1, types)
-            })
-        });
+        return (width || ff.len() == tf.len())
+            && tf.iter().all(|need| {
+                ff.iter().any(|have| {
+                    have.name == need.name
+                        && assignable_d(&have.ty, &need.ty, false, depth + 1, types)
+                })
+            });
     }
     false
 }

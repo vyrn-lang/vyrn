@@ -1,0 +1,12 @@
+// `use` reads its argument as a `B`, but a call through `f` hands it a `W`.
+type B = { y: Int64, x: Int64 }
+type W = { z: Int64, y: Int64, x: Int64 }
+fn use(b: B) -> Int64 {
+    return b.x
+}
+fn call(f: fn(W) -> Int64) -> Int64 {
+    return f(W { z: 9, y: 2, x: 1 })
+}
+fn main() -> Int64 {
+    return call(use)
+}

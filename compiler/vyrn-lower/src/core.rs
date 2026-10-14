@@ -891,7 +891,9 @@ enum Misfit {
 /// The first way a value misses `slot`: its arity, then each of `params`
 /// (`None` where the slot types them, as it does a lambda's), then `ret`
 /// (`None` where the slot does not ask). A slot that returns `Unit` or a type
-/// parameter takes any return.
+/// parameter takes any return. A lambda's body is the top of the value it
+/// returns; a function's own types sit inside its `fn` type, so a record
+/// there matches only an interchangeable one.
 fn misfit(
     arity: usize,
     params: Option<&[Type]>,
@@ -899,7 +901,7 @@ fn misfit(
     slot: &Type,
     decls: &HashMap<String, TypeDecl>,
 ) -> Option<Misfit> {
-    use vyrn_frontend::types::{assignable, coercible, resolve};
+    use vyrn_frontend::types::{coercible, interchangeable, resolve};
     let Type::Fn(ptys, sret) = resolve(slot, decls) else {
         return None;
     };
@@ -907,11 +909,15 @@ fn misfit(
         return Some(Misfit::Arity(arity, ptys.len()));
     }
     let mut both = params.into_iter().flatten().zip(&ptys);
-    if let Some((a, b)) = both.find(|(a, b)| !assignable(b, a, decls)) {
+    if let Some((a, b)) = both.find(|(a, b)| !interchangeable(b, a, decls)) {
         return Some(Misfit::Param(a.clone(), b.clone()));
     }
     let got = ret.filter(|_| !matches!(*sret, Type::Unit | Type::Param(_)))?;
-    (!coercible(got, &sret, decls)).then(|| Misfit::Returns(got.clone(), *sret))
+    let fits = match params {
+        None => coercible(got, &sret, decls),
+        Some(_) => interchangeable(got, &sret, decls),
+    };
+    (!fits).then(|| Misfit::Returns(got.clone(), *sret))
 }
 
 /// The refusal of a call to `name` whose `fn` argument does not fit its

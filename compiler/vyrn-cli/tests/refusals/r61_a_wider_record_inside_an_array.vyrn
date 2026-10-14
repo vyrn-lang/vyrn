@@ -1,0 +1,11 @@
+// `f` reads each element in place as a `B`, so a wider element would need a
+// copy of the whole array.
+type B = { y: Int64, x: Int64 }
+type W = { z: Int64, y: Int64, x: Int64 }
+fn f(bs: Array<B>) -> Int64 {
+    return bs[0].x
+}
+fn main() -> Int64 {
+    let ws: Array<W> = [W { z: 9, y: 2, x: 1 }]
+    return f(ws)
+}

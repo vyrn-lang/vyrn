@@ -444,6 +444,36 @@ fn census() -> Vec<Row> {
             "the `where` clause of parameter `t` reads `t`, a `modify` parameter the body may change",
             Kernel::Elsewhere,
         ),
+        row(
+            "r61_a_wider_record_inside_an_array.vyrn",
+            "width applies at the top of a value: an array element",
+            "`f` argument 1 expects Array<B>, found Array<W>",
+            Kernel::Elsewhere,
+        ),
+        row(
+            "r62_a_wider_record_inside_an_option.vyrn",
+            "width applies at the top of a value: an `Option` payload",
+            "`f` argument 1 expects Option<B>, found Option<W>",
+            Kernel::Elsewhere,
+        ),
+        row(
+            "r63_a_wider_record_a_function_value_returns.vyrn",
+            "width applies at the top of a value: a function value's result",
+            "`mk` returns W, but the expected function type `fn() -> B` returns B",
+            Kernel::Elsewhere,
+        ),
+        row(
+            "r64_a_wider_record_a_function_value_takes.vyrn",
+            "width applies at the top of a value: a function value's parameter",
+            "`use` expects a B argument, but `call` will pass it W",
+            Kernel::Elsewhere,
+        ),
+        row(
+            "r65_a_wider_record_inside_a_record_field.vyrn",
+            "width applies at the top of a value: a record field",
+            "`f` argument 1 expects H, found HW",
+            Kernel::Elsewhere,
+        ),
     ]
 }
 

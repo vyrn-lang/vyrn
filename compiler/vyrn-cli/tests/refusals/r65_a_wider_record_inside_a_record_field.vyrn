@@ -1,0 +1,12 @@
+// Width applies at the top of a value: `HW` fits where `H` is wanted only if
+// each field's type is interchangeable with `H`'s.
+type B = { y: Int64, x: Int64 }
+type W = { z: Int64, y: Int64, x: Int64 }
+type H = { p: B }
+type HW = { p: W }
+fn f(h: H) -> Int64 {
+    return h.p.x
+}
+fn main() -> Int64 {
+    return f(HW { p: W { z: 9, y: 2, x: 1 } })
+}
