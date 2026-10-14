@@ -1,0 +1,70 @@
+type Pt = { x: Int64, y: Int64 }
+type Pin = { p: Pt, n: Int64 }
+type Line = { pts: Array<Pt> }
+type Tag = { p: Pt, pts: Array<Pt> }
+
+fn pair() -> Array<Pt> {
+    return [Pt { x: 1, y: 2 }, Pt { x: 3, y: 4 }]
+}
+
+fn other() -> Array<Pt> {
+    return [Pt { x: 91, y: 92 }, Pt { x: 93, y: 94 }]
+}
+
+fn line() -> Line {
+    return Line { pts: pair() }
+}
+
+fn pins() -> Array<Pin> {
+    return [Pin { p: Pt { x: 5, y: 6 }, n: 1 }, Pin { p: Pt { x: 7, y: 8 }, n: 2 }]
+}
+
+fn grid() -> Array<Array<Pt>> {
+    return [[Pt { x: 9, y: 10 }], [Pt { x: 11, y: 12 }]]
+}
+
+fn pass(xs: consume Array<Pt>) -> Array<Pt> {
+    return xs
+}
+
+fn noise() -> Int64 {
+    let a = other()
+    let b = [Pin { p: Pt { x: 81, y: 82 }, n: 3 }, Pin { p: Pt { x: 83, y: 84 }, n: 4 }]
+    let c = [[Pt { x: 71, y: 72 }], [Pt { x: 73, y: 74 }]]
+    return a.length + b.length + c.length
+}
+
+fn show(what: String, p: Pt) {
+    let n = noise()
+    print("\{what}: \{p.x} \{p.y} \{n}")
+}
+
+fn two(a: Pt, b: Pt) {
+    let n = noise()
+    print("two: \{a.x} \{a.y} \{b.x} \{b.y} \{n}")
+}
+
+fn sum(p: Pt) -> Int64 {
+    let n = noise()
+    return p.x + p.y + n
+}
+
+fn main() -> Int64 {
+    show("argument", pair()[1])
+    show("passed", pass([Pt { x: 1, y: 2 }])[0])
+    show("literal receiver", Line { pts: pair() }.pts[1])
+    show("field receiver", line().pts[1])
+    show("field of an element", pins()[1].p)
+    show("element of an element", grid()[1][0])
+    two(pair()[0], pair()[1])
+    print("receiver: \{pair()[1].sum()}")
+    print("operands: \{sum(pair()[1]) + sum(pair()[0])}")
+    if sum(pair()[1]) == 13 {
+        print("compared")
+    }
+    let t = Tag { p: pair()[1], pts: other() }
+    show("record part", t.p)
+    let xs = [pair()[1], other()[0]]
+    show("array part", xs[0])
+    return 0
+}

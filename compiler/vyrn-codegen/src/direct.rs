@@ -11368,8 +11368,9 @@ impl<'a, 'p> Fn_<'a, 'p> {
     /// observe the copy.
     ///
     /// A place is never copied to read it, so a borrow bound by a read of a layout is that
-    /// place for the read's extent. The kernel ends the alias at every store, take and drop
-    /// of the place, and refuses a read after one.
+    /// place for the read's extent. The kernel ends a borrow at every store, take and drop
+    /// of the place, and refuses a read after one; a minted name that owns no heap is no
+    /// borrow to it, so this function ends the alias at those rows itself.
     ///
     /// A layout that owns no heap is a borrow only where the core minted the name (a `for`
     /// head, a scrutinee or an argument). A `let` the reader wrote binds a value, and so does a
@@ -11453,13 +11454,19 @@ impl<'a, 'p> Fn_<'a, 'p> {
             let Some((root, _)) = vyrn_lower::kernel::root_of(on) else {
                 return Some(place);
             };
-            if rebuilt.iter().any(|(m, c)| {
-                *m == root && matches!(c, Some(Capability::Consume | Capability::Modify))
-            }) || vyrn_lower::kernel::modifies(
-                extent,
-                vyrn_lower::kernel::Root::N(root),
-                &body.names,
-            ) {
+            // A heapless name is a value to the kernel, so nothing refuses a read of it after
+            // its root is released: `show(mk()[1])` drops `mk()`'s array before the call.
+            let released = (extent.iter()).any(|s| matches!(s, St::Drop(m, ..) if *m == root));
+            if released
+                || rebuilt.iter().any(|(m, c)| {
+                    *m == root && matches!(c, Some(Capability::Consume | Capability::Modify))
+                })
+                || vyrn_lower::kernel::modifies(
+                    extent,
+                    vyrn_lower::kernel::Root::N(root),
+                    &body.names,
+                )
+            {
                 return None;
             }
             match read(root) {
@@ -12297,7 +12304,8 @@ impl<'a, 'p> Fn_<'a, 'p> {
                     && (matches!(ctor, Ctor::Map)
                         || matches!(v, Val::Name(n)
                             if body.names[n.index()].binding.is_some()
-                                || self.core_alias(*n).is_some())))
+                                || self.core_alias(*n).is_some()
+                                || self.core_copies(*n).is_some())))
                 || self.core_part_of(ss, i, v)
         })
     }
