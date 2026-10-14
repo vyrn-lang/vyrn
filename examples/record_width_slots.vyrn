@@ -83,5 +83,7 @@ fn main() -> Int64 {
     print("inner \{y.q.x} \{y.q.y}")
     let l: B = wide(18)
     print("let \{l.x} \{l.y}")
+    g.p = A { x: s(19), y: 19 }
+    print("reorder \{g.p.x} \{g.p.y}")
     return 0
 }
