@@ -23,7 +23,7 @@
 use std::borrow::Cow;
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::rc::Rc;
+use std::sync::Arc;
 
 use vyrn_frontend::ast::*;
 use vyrn_frontend::core::check::{Check, Guard, Raises, Verdict};
@@ -185,10 +185,7 @@ fn extern_abi_sig(f: &Function) -> (Vec<ValType>, Vec<ValType>) {
 /// ([`vyrn_frontend::project::Expansions::shared`]): in it a projection or a `schemaOf` has no row
 /// in the core. `world` is `program`'s: the load's ([`vyrn_lower::load_warned`]) or a new one
 /// ([`vyrn_lower::analyze`]).
-pub fn compile(
-    program: &Program,
-    world: std::sync::Arc<vyrn_lower::World>,
-) -> Result<Vec<u8>, String> {
+pub fn compile(program: &Program, world: Arc<vyrn_lower::World>) -> Result<Vec<u8>, String> {
     if !program.expansions.is_shared() {
         return Err("a compile needs the load's shared projection expansions".to_string());
     }
@@ -197,7 +194,7 @@ pub fn compile(
 
 /// Returns the module [`compile`] emits, as WAT (`vyrn emit-wat`), so a test can pin its shape.
 /// Printing stays off `compile`, because `vyrn build` writes bytes only.
-pub fn wat(program: &Program, world: std::sync::Arc<vyrn_lower::World>) -> Result<String, String> {
+pub fn wat(program: &Program, world: Arc<vyrn_lower::World>) -> Result<String, String> {
     let bytes = compile(program, world)?;
     wasmprinter::print_bytes(&bytes).map_err(|e| e.to_string())
 }
@@ -249,10 +246,7 @@ pub fn compile_gen_host(program: &Program) -> Result<Vec<u8>, GenError> {
     }
 }
 
-fn compile_inner(
-    program: &Program,
-    world: std::sync::Arc<vyrn_lower::World>,
-) -> Result<Vec<u8>, String> {
+fn compile_inner(program: &Program, world: Arc<vyrn_lower::World>) -> Result<Vec<u8>, String> {
     let _cg = vyrn_frontend::prof::phase("codegen");
     let mut m = Module::new();
     // Imports first — they share the function index space with definitions, so
@@ -296,8 +290,8 @@ fn compile_inner(
     let mut vyrn_rt = VyrnRt::reserve(&mut m);
     let rt = runtime(&mut m, &wasi, &vyrn_rt);
 
-    // `cx` takes `world`; its type declarations are borrowed through this second handle.
-    let analysis = std::sync::Arc::clone(&world);
+    // `base` takes `world`; its type declarations are borrowed through this second handle.
+    let analysis = Arc::clone(&world);
     // Three kinds of function define nothing and are skipped: lowering an unspecializable shell
     // would fail the build over a function nothing calls. The fourth kind is [`gen_reach`]'s.
     let gen_reach = gen_reach(program, &world);
@@ -339,16 +333,11 @@ fn compile_inner(
     }
 
     // The leak instrument; a generator host never carries it.
-    let audited = vyrn_frontend::loader::audit_build(program.host.gen);
+    let audit = vyrn_frontend::loader::audit_build(program.host.gen);
     let profile = vyrn_frontend::loader::profile_build(program.host.gen);
-    let oracle_on = oracle.is_some();
-    let mut cx = Cx {
+    let mut base = Base {
         types: analysis.ownership.proto.types(),
         lambdas: vyrn_frontend::ast::lambdas(program),
-        layouts: RefCell::default(),
-        reprs: RefCell::default(),
-        flats: RefCell::default(),
-        members: RefCell::default(),
         oracle,
         sigs: HashMap::new(),
         rt,
@@ -357,13 +346,8 @@ fn compile_inner(
         higher_order,
         skipped,
         mem,
-        subst: HashMap::new(),
-        mono: RefCell::new(Mono::default()),
-        fnvals: RefCell::new(Vec::new()),
         fnval_copy: 0,
         fnval_free: 0,
-        dispatch: RefCell::new(Dispatch::default()),
-        shapes: RefCell::new(Shapes::default()),
         globals: HashMap::new(),
         aliasing: std::collections::HashSet::new(),
         gappend: HashMap::new(),
@@ -373,11 +357,10 @@ fn compile_inner(
         log_sink: program.log_sink.clone(),
         // Reserved only for a file sink, so a console-sink module reserves nothing.
         log_fd: matches!(program.log_sink, LogSink::File(_)).then(|| m.reserve(4, 4)),
-        audit: audited,
-        sites: (profile || oracle_on).then(Sites::default),
+        audit,
         profile,
     };
-    if cx.profile {
+    if profile {
         m.profile();
         m.count_ops();
     }
@@ -390,14 +373,16 @@ fn compile_inner(
         |f| f.body.stmts.len(),
         || (),
         |(), f| {
-            cx.world.body_of(&f.name);
+            base.world.body_of(&f.name);
         },
     );
     drop(ck);
+    let cx = Cx::new(&base, Reg::default());
     let sg = vyrn_frontend::prof::phase("codegen: signatures");
     // Every function is indexed before any body exists, so a call can name a callee not yet
     // emitted (recursion, forward references). The encoder hands out the index and the body is
     // filled whenever it exists, so emission order does not decide numbering.
+    let mut sigs = HashMap::new();
     for f in user.iter() {
         let s = cx.signature(f, &f.name)?;
         let (wp, wr) = cx.wasm_sig(&s, f.line)?;
@@ -405,7 +390,7 @@ fn compile_inner(
             Some(reserved) => reserved,
             None => m.reserve_func(&wp, &wr),
         };
-        cx.sigs.insert(f.name.clone(), Sig { index, ..s });
+        sigs.insert(f.name.clone(), Sig { index, ..s });
     }
     vyrn_rt.check()?;
     drop(sg);
@@ -413,6 +398,7 @@ fn compile_inner(
     // Module state: each top-level `let` gets one fixed zeroed address, and every
     // access resolves to it through `Fn_::lookup`'s fallback. Reserved before any body, which may
     // read one, and after the signatures, because an unannotated initializer may be a call.
+    let mut globals = HashMap::new();
     for g in &program.globals {
         let ty = match &g.ty {
             Some(t) => t.clone(),
@@ -430,12 +416,12 @@ fn compile_inner(
         if cx.repr(&ty, g.line)? == Repr::Unit {
             return unsupported("module state of Unit", g.line);
         }
-        cx.globals.insert(
+        globals.insert(
             g.name.clone(),
             (Place::Static(m.reserve(l.size, l.align)), ty),
         );
     }
-    cx.aliasing = (cx.globals.iter())
+    let aliasing = (globals.iter())
         .filter(|(_, (_, ty))| {
             cx.resolve(ty) != Type::Str
                 && (vyrn_frontend::declared::owns_heap(&cx.sub(ty), &cx.types)
@@ -449,18 +435,14 @@ fn compile_inner(
     //
     // A reservation moves every reservation after it, so `global_append_candidates` returns an
     // ordered set.
-    let gaccs: Vec<String> = vyrn_lower::append::global_append_candidates(program)
-        .into_iter()
-        .filter(|n| {
-            cx.globals
-                .get(n)
-                .is_some_and(|(_, ty)| cx.resolve(ty) == Type::Str)
-        })
-        .collect();
-    for name in gaccs {
-        let at = m.reserve(4, 4);
-        cx.gappend.insert(name, at);
+    let mut gappend = HashMap::new();
+    for name in vyrn_lower::append::global_append_candidates(program) {
+        if (globals.get(&name)).is_some_and(|(_, ty)| cx.resolve(ty) == Type::Str) {
+            gappend.insert(name, m.reserve(4, 4));
+        }
     }
+    drop(cx);
+    (base.sigs, base.globals, base.aliasing, base.gappend) = (sigs, globals, aliasing, gappend);
 
     // The initializer's index, reserved like every other so nothing depends on
     // where in the sequence it lands.
@@ -469,18 +451,35 @@ fn compile_inner(
     // The teardown drops every module-state binding after `main`, so the
     // instrument reports the program's residue. Reserved only in an audited build, so an ordinary
     // module's indices do not move.
-    let teardown_index = (cx.audit && has_globals).then(|| m.reserve_func(&[], &[]));
+    let teardown_index = (base.audit && has_globals).then(|| m.reserve_func(&[], &[]));
     // The derived `fn`-value copy and release, reserved like a dispatcher: their switch covers
     // every construction in the module, so their bodies wait for the last body, while a copy site
     // mid-walk must be able to call them.
-    cx.fnval_copy = m.reserve_func(&[ValType::I64, ValType::I32], &[ValType::I32]);
-    cx.fnval_free = m.reserve_func(&[ValType::I64, ValType::I32], &[]);
+    base.fnval_copy = m.reserve_func(&[ValType::I64, ValType::I32], &[ValType::I32]);
+    base.fnval_free = m.reserve_func(&[ValType::I64, ValType::I32], &[]);
+    let base = &base;
+    let mut cx = Cx::new(base, Reg::default());
 
+    // Each body is emitted against the registries as they are here, on any thread, then applied
+    // in source order, so the module is the one a walk in source order makes ([`merge`]).
     let bd = vyrn_frontend::prof::phase("codegen: bodies");
-    for f in &user {
-        let sig = cx.sigs[&f.name].clone();
+    let observing = crate::observe::on();
+    let emitted = vyrn_frontend::par::in_parallel(
+        &user,
+        |f| f.body.stmts.len(),
+        || {
+            crate::observe::follow(observing);
+            Cx::new(base, Reg::default())
+        },
+        |w, f| emit(w, |log| lower_fn(log, f, w)),
+    );
+    for (f, e) in user.iter().zip(emitted) {
         crate::observe::note_inst(&f.name, &[]);
-        lower_fn(&mut m, f, &sig, &cx, HashMap::new())?;
+        let frame = match merge(&mut m, &cx, e) {
+            Some(frame) => frame,
+            None => emit_here(&mut m, &cx, |log| lower_fn(log, f, &cx)),
+        }?;
+        fill_named(&mut m, cx.sigs[&f.name].index, frame, &f.name)?;
     }
     drop(bd);
     let dr = vyrn_frontend::prof::phase("codegen: drain");
@@ -488,12 +487,12 @@ fn compile_inner(
     // The initializers, in declaration order, which the loader has made dependencies-first. One
     // function, called once from `_start`. Filled even with no module state, because a
     // reservation nobody fills is not a valid module.
-    let init = lower_globals_init(&mut m, program, &cx)?;
+    let init = emit_here(&mut m, &cx, |log| lower_globals_init(log, program, &cx))?;
     m.fill(init_index, init)?;
     // Before the drain: a global of a declared generic release reaches only the teardown, and its
     // instance must be on a worklist the drain still reads (`vyrn-lower`'s `<teardown>` root).
     if let Some(ti) = teardown_index {
-        let t = lower_globals_teardown(&mut m, program, &cx)?;
+        let t = emit_here(&mut m, &cx, |log| lower_globals_teardown(log, program, &cx))?;
         m.fill(ti, t)?;
     }
 
@@ -507,8 +506,8 @@ fn compile_inner(
     let mut derived = false;
     loop {
         let p = {
-            let mono = cx.mono.borrow();
-            mono.insts.get(mono.done).cloned()
+            let reg = cx.reg.borrow();
+            reg.mono.insts.get(reg.mono.done).cloned()
         };
         if let Some(p) = p {
             // The shared instantiation cap: polymorphic recursion leaves an instance every turn.
@@ -520,17 +519,11 @@ fn compile_inner(
                 Key::Lambda(..) => {}
             }
             cx.subst = p.subst.clone();
-            let body = lower_body(
-                &mut m,
-                &p.f,
-                &p.core_key,
-                p.body,
-                &p.sig,
-                &cx,
-                p.binds.clone(),
-            );
+            let body = emit_here(&mut m, &cx, |log| {
+                lower_body(log, &p.f, &p.core_key, p.body, &p.sig, &cx, p.binds.clone())
+            });
             cx.subst = HashMap::new();
-            cx.mono.borrow_mut().done += 1;
+            cx.reg.borrow_mut().mono.done += 1;
             match body {
                 Ok(body) => {
                     fill_named(&mut m, p.sig.index, body, &p.f.name)?;
@@ -547,26 +540,30 @@ fn compile_inner(
         // an instance. The substitution is empty because each shape's type was substituted where
         // it was asked for.
         let sh = {
-            let s = cx.shapes.borrow();
-            s.todo.get(s.done).cloned()
+            let reg = cx.reg.borrow();
+            reg.shapes.todo.get(reg.shapes.done).cloned()
         };
         if let Some((index, (rel, ty, holes), line)) = sh {
             cx.subst = HashMap::new();
-            let body = lower_shape(&mut m, &cx, rel, &ty, &holes, line)?;
+            let body = emit_here(&mut m, &cx, |log| {
+                lower_shape(log, &cx, rel, &ty, &holes, line)
+            })?;
             m.fill(index, body)?;
-            cx.shapes.borrow_mut().done += 1;
+            cx.reg.borrow_mut().shapes.done += 1;
             continue;
         }
         // A dispatcher switches over every construction of its signature in the module, so its
         // body is complete only after the last body is walked. See [`Fn_::dispatcher`].
         let d = {
-            let disp = cx.dispatch.borrow();
-            disp.sigs.get(disp.done).cloned()
+            let reg = cx.reg.borrow();
+            reg.dispatch.sigs.get(reg.dispatch.done).cloned()
         };
         if let Some((sig_ty, dsig)) = d {
-            let body = lower_dispatcher(&mut m, &cx, &sig_ty, &dsig)?;
+            let body = emit_here(&mut m, &cx, |log| {
+                lower_dispatcher(log, &cx, &sig_ty, &dsig)
+            })?;
             m.fill(dsig.index, body)?;
-            cx.dispatch.borrow_mut().done += 1;
+            cx.reg.borrow_mut().dispatch.done += 1;
             continue;
         }
         // The registry closes once every body is walked, so the two derived walks over it are
@@ -576,9 +573,9 @@ fn compile_inner(
             break;
         }
         derived = true;
-        let fncopy = lower_fnval_copy(&mut m, &cx)?;
+        let fncopy = emit_here(&mut m, &cx, |log| lower_fnval_copy(log, &cx))?;
         m.fill(cx.fnval_copy, fncopy)?;
-        let fnfree = lower_fnval_free(&mut m, &cx)?;
+        let fnfree = emit_here(&mut m, &cx, |log| lower_fnval_free(log, &cx))?;
         m.fill(cx.fnval_free, fnfree)?;
     }
     drop(dr);
@@ -630,9 +627,12 @@ fn compile_inner(
     };
     // The counter table: 16 bytes of totals, then a 32-byte row per site, site 0 first. Reserved
     // after every body, which is the first moment the sites are all known.
-    let table = cx.sites.as_ref().map_or(0, |s| {
-        m.reserve(16 + 32 * (s.rows.borrow().len() as u32 + 1), 8)
-    });
+    let counted = cx.profile || cx.oracle.is_some();
+    let sites = std::mem::take(&mut cx.reg.borrow_mut().sites.rows);
+    let table = match counted {
+        true => m.reserve(16 + 32 * (sites.len() as u32 + 1), 8),
+        false => 0,
+    };
     if let Some(o) = &cx.oracle {
         let mut b = Frame::new(&[ValType::I32], &[], &[], 0);
         let row = b.local(ValType::I32);
@@ -751,11 +751,9 @@ fn compile_inner(
     // interned data.
     m.sweep();
     abi_section(&mut m, &user, program);
-    if let Some(s) = &cx.sites {
+    if counted {
         let mut rows = vec![table.to_string()];
-        rows.extend(
-            (s.rows.borrow().iter()).map(|(f, line, label)| format!("{f}\t{line}\t{label}")),
-        );
+        rows.extend((sites.iter()).map(|(f, line, label)| format!("{f}\t{line}\t{label}")));
         m.custom("vyrn:sites", rows.join("\n").into_bytes());
     }
     m.finish()
@@ -890,7 +888,7 @@ impl MapKey {
 enum Repr {
     Unit,
     Scalar(ValType),
-    Agg(Rc<Layout>),
+    Agg(Arc<Layout>),
 }
 
 impl Repr {
@@ -909,7 +907,7 @@ impl Repr {
 /// ([`Place::Words`]); in memory it has its [`Layout`].
 #[derive(Debug, PartialEq, Eq)]
 struct Flat {
-    layout: Rc<Layout>,
+    layout: Arc<Layout>,
     /// Each part's offset in the layout and type: a record's fields, or a sum's `Int64` words.
     parts: Vec<(u32, Type, ValType)>,
 }
@@ -959,9 +957,9 @@ enum Ret {
     Unit,
     Scalar(ValType),
     /// Through a hidden leading address of the caller's storage.
-    Out(Rc<Layout>),
+    Out(Arc<Layout>),
     /// As wasm results, one per part.
-    Words(Rc<Flat>),
+    Words(Arc<Flat>),
 }
 
 impl Ret {
@@ -1034,9 +1032,9 @@ enum Body<'a> {
 struct Pending<'a> {
     key: Key,
     /// The shell: the name, line and signature the body is lowered under. It carries the
-    /// synthesized block for a [`Key::Lambda`] and no statements otherwise. An `Rc`, so a
+    /// synthesized block for a [`Key::Lambda`] and no statements otherwise. An `Arc`, so a
     /// drain turn shares the shell instead of copying it.
-    f: Rc<Function>,
+    f: Arc<Function>,
     /// The statements to walk, borrowed from the checked program.
     body: Body<'a>,
     sig: Sig,
@@ -1054,7 +1052,7 @@ struct Pending<'a> {
 /// A specialization is discovered at a call site, so only a body being lowered can feed it; a
 /// pre-pass would be a second traversal that must agree with lowering. One queue holds all three
 /// [`Key`] kinds, so "they feed each other" means appending to the list being read.
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct Mono<'a> {
     insts: Vec<Pending<'a>>,
     done: usize,
@@ -1079,7 +1077,7 @@ struct FnVal {
 ///
 /// Separate from [`Mono`]: a dispatcher is discovered from a signature called through, and its
 /// body waits until every body is walked, since any construction adds a variant.
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct Dispatch {
     sigs: Vec<(Type, Sig)>,
     done: usize,
@@ -1087,7 +1085,7 @@ struct Dispatch {
 
 /// One release and one copy function per type, so a drop site emits a call.
 /// Every step of the walk is a byte offset from [`crate::layout`], so the walk lives here.
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct Shapes {
     /// `(release rather than copy, substituted type, take holes)` -> function index. A linear
     /// scan: [`Type`] is `Eq` but not `Hash`, and a module has tens of these.
@@ -1134,46 +1132,331 @@ struct Oracle {
 /// line `k` of the custom section `vyrn:sites` after its first, and the counter row at
 /// `table + 16 + 32 * k`; site 0 is "before any site". An oracle row's label is its ordinal,
 /// rule and verdict, tab-separated.
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct Sites {
-    rows: RefCell<Vec<(String, u32, String)>>,
-    ids: RefCell<HashMap<(String, u32, String), u32>>,
+    rows: Vec<SiteKey>,
+    ids: HashMap<SiteKey, u32>,
 }
+
+type SiteKey = (String, u32, String);
 
 impl Sites {
     /// The site `key` names, made when `key` is new.
-    fn id(&self, key: (String, u32, String)) -> u32 {
-        let mut ids = self.ids.borrow_mut();
-        *ids.entry(key.clone()).or_insert_with(|| {
-            let mut rows = self.rows.borrow_mut();
-            rows.push(key);
-            rows.len() as u32
-        })
+    fn id(&mut self, key: SiteKey) -> u32 {
+        match self.ids.get(&key) {
+            Some(&id) => id,
+            None => self.fresh(key),
+        }
     }
 
     /// A site of its own, though another has `key`; `key` names it from here on.
-    fn fresh(&self, key: (String, u32, String)) -> u32 {
-        let mut rows = self.rows.borrow_mut();
-        rows.push(key.clone());
-        let id = rows.len() as u32;
-        self.ids.borrow_mut().insert(key, id);
+    fn fresh(&mut self, key: SiteKey) -> u32 {
+        self.rows.push(key.clone());
+        let id = self.rows.len() as u32;
+        self.ids.insert(key, id);
         id
     }
 }
 
-struct Cx<'a> {
+/// The module's registries: what the bodies discover, which a later body or the drain reads.
+/// Each list only grows, so the entries past a [`Lens`] are the ones an emission added.
+#[derive(Clone, Default)]
+struct Reg<'a> {
+    mono: Mono<'a>,
+    /// The stored-closure variant registry, module-global so a tag means the same thing in
+    /// every body that builds one.
+    fnvals: Vec<FnVal>,
+    dispatch: Dispatch,
+    /// One release and one copy per type, and the worklist of the bodies still
+    /// to write; see [`Shapes`].
+    shapes: Shapes,
+    /// Written by [`merge`] alone: a body logs the site it asks for ([`Log::site`]).
+    sites: Sites,
+}
+
+/// How long each list of a [`Reg`] was when an emission began.
+#[derive(Clone, Copy)]
+struct Lens {
+    insts: usize,
+    fnvals: usize,
+    dispatch: usize,
+    shapes: usize,
+}
+
+/// The entries one emission added to a [`Reg`], each list in the order they were added.
+struct Added<'a> {
+    insts: Vec<Pending<'a>>,
+    fnvals: Vec<FnVal>,
+    dispatch: Vec<(Type, Sig)>,
+    shapes: Vec<(u32, ShapeKey, usize)>,
+}
+
+impl<'a> Reg<'a> {
+    fn lens(&self) -> Lens {
+        Lens {
+            insts: self.mono.insts.len(),
+            fnvals: self.fnvals.len(),
+            dispatch: self.dispatch.sigs.len(),
+            shapes: self.shapes.todo.len(),
+        }
+    }
+
+    /// Takes the entries added past `at`. A shape is a `known` and a `todo` entry together.
+    fn split_off(&mut self, at: Lens) -> Added<'a> {
+        self.shapes.known.truncate(at.shapes);
+        Added {
+            insts: self.mono.insts.split_off(at.insts),
+            fnvals: self.fnvals.split_off(at.fnvals),
+            dispatch: self.dispatch.sigs.split_off(at.dispatch),
+            shapes: self.shapes.todo.split_off(at.shapes),
+        }
+    }
+
+    /// Whether an entry added past `at` answers `q`: a body that asked `q` of the registry as
+    /// it was at `at` may then have read another answer than it would now.
+    fn answers_since(&self, q: &Query, at: &Lens) -> bool {
+        match q {
+            Query::Lambda(key) => (self.mono.insts[at.insts..].iter())
+                .any(|p| p.core_key == *key && matches!(p.key, Key::Lambda(..))),
+            Query::Dispatch(ty) => (self.dispatch.sigs[at.dispatch..].iter()).any(|(t, _)| t == ty),
+        }
+    }
+}
+
+/// A registry lookup that is not a get-or-insert. Its absent and present answers differ by more
+/// than a function index, so [`merge`] checks that no entry added since the body's view
+/// answers it.
+enum Query {
+    /// [`Cx::lambda_sig`] of a core key.
+    Lambda(String),
+    /// [`Fn_::core_dispatch`] of a normalized signature.
+    Dispatch(Type),
+}
+
+/// The first function index of an emission's own reservations ([`Log::func`]). A module never
+/// holds this many functions, so a `call` at or above it names a reservation [`merge`] assigns.
+const LOCAL: u32 = 1 << 31;
+
+/// Which registry list a reservation is for: it is that list's next added entry.
+#[derive(Clone, Copy)]
+enum Owner {
+    Inst,
+    Dispatch,
+    Shape,
+}
+
+/// A constant in a body's code that the module decides. A [`Hole`] indexes [`Log::consts`].
+enum Const {
+    /// [`Module::data`] of the bytes at the alignment, plus an offset.
+    Data(Vec<u8>, u32, u32),
+    /// [`Module::reserve`] of the size at the alignment.
+    Reserve(u32, u32),
+    /// A counted site: [`Sites::fresh`] of the key when `true`, else [`Sites::id`].
+    Site(SiteKey, bool),
+    /// The tag of the stored-closure variant at this position of the view's [`Reg::fnvals`].
+    Tag(u32),
+}
+
+/// The id of a [`Const`], which a body pushes as [`Frame::hole`].
+#[derive(Clone, Copy)]
+struct Hole(u32);
+
+/// What one body asks of the module while it is emitted, in order. [`merge`] replays it, so a
+/// body never touches the module and any thread may emit it.
+#[derive(Default)]
+struct Log {
+    /// Each function reserved, `LOCAL + k` for the `k`th: its wasm signature and its owner.
+    funcs: Vec<(Vec<ValType>, Vec<ValType>, Owner)>,
+    consts: Vec<Const>,
+}
+
+impl Log {
+    /// A function whose body arrives later, for the next entry the body adds to `owner`'s list.
+    fn func(&mut self, params: &[ValType], results: &[ValType], owner: Owner) -> u32 {
+        self.funcs.push((params.to_vec(), results.to_vec(), owner));
+        LOCAL + self.funcs.len() as u32 - 1
+    }
+
+    fn hole(&mut self, c: Const) -> Hole {
+        self.consts.push(c);
+        Hole(self.consts.len() as u32 - 1)
+    }
+
+    /// The address of `bytes` in the data segment.
+    fn data(&mut self, bytes: Vec<u8>, align: u32) -> Hole {
+        self.hole(Const::Data(bytes, align, 0))
+    }
+
+    /// The address of a string literal's bytes, as [`Rt::intern`] places it.
+    fn intern(&mut self, s: &str) -> Hole {
+        self.hole(Const::Data(literal(s), 4, SHDR))
+    }
+
+    /// The address of `size` zero bytes of its own.
+    fn reserve(&mut self, size: u32, align: u32) -> Hole {
+        self.hole(Const::Reserve(size, align))
+    }
+
+    /// The id of the counted site `key`; `fresh` makes one though another has `key`.
+    fn site(&mut self, key: SiteKey, fresh: bool) -> Hole {
+        self.hole(Const::Site(key, fresh))
+    }
+}
+
+/// One body emitted against a [`Cx`]'s view and not yet applied to the module.
+struct Emitted<'p> {
+    frame: Result<Frame, String>,
+    log: Log,
+    added: Added<'p>,
+    /// The registry the body read: the list lengths of its view.
+    seen: Lens,
+    queries: Vec<Query>,
+    rows: crate::observe::Rows,
+}
+
+/// Emits one body with `body` against `cx`, and leaves `cx`'s registries as they were.
+fn emit<'p>(cx: &Cx<'p>, body: impl FnOnce(&mut Log) -> Result<Frame, String>) -> Emitted<'p> {
+    let seen = cx.reg.borrow().lens();
+    let at = crate::observe::mark();
+    let mut log = Log::default();
+    let frame = body(&mut log);
+    Emitted {
+        frame,
+        log,
+        added: cx.reg.borrow_mut().split_off(seen),
+        seen,
+        queries: cx.queries.take(),
+        rows: crate::observe::since(at),
+    }
+}
+
+/// Applies `e` to `m` and to `cx`'s registries in the order the body made each request, and
+/// returns its frame. An entry the body added that `cx` holds under an equal key is the held
+/// one, so `m` becomes the module a serial emission in this order makes, byte for byte.
+///
+/// Returns `None` when an entry added since `e`'s view answers one of its [`Query`]s. The body
+/// may then differ, and the caller emits it again against `cx`, which is never stale.
+fn merge<'p>(m: &mut Module, cx: &Cx<'p>, e: Emitted<'p>) -> Option<Result<Frame, String>> {
+    let mut reg = cx.reg.borrow_mut();
+    if (e.queries.iter()).any(|q| reg.answers_since(q, &e.seen)) {
+        return None;
+    }
+    // A key names only reservations made before its own, so `funcs` holds every one it reads.
+    let mut funcs: Vec<u32> = Vec::with_capacity(e.log.funcs.len());
+    let real = |funcs: &[u32], i: u32| match i.checked_sub(LOCAL) {
+        Some(k) => funcs[k as usize],
+        None => i,
+    };
+    let target = |funcs: &[u32], t: &mut FnTarget| t.sig.index = real(funcs, t.sig.index);
+    let Added {
+        insts,
+        fnvals,
+        dispatch,
+        shapes,
+    } = e.added;
+    let (mut insts, mut dispatch, mut shapes) =
+        (insts.into_iter(), dispatch.into_iter(), shapes.into_iter());
+    for (params, results, owner) in e.log.funcs {
+        let index = match owner {
+            Owner::Inst => {
+                let mut p = insts.next().expect("an added instance per reservation");
+                if let Key::Ho(_, _, ts) = &mut p.key {
+                    ts.iter_mut().for_each(|t| target(&funcs, t));
+                }
+                for b in p.binds.values_mut() {
+                    target(&funcs, &mut b.target);
+                }
+                match reg.mono.insts.iter().find(|q| q.key == p.key) {
+                    Some(q) => q.sig.index,
+                    None => {
+                        p.sig.index = m.reserve_func(&params, &results);
+                        let index = p.sig.index;
+                        reg.mono.insts.push(p);
+                        index
+                    }
+                }
+            }
+            Owner::Dispatch => {
+                let (ty, mut sig) = dispatch
+                    .next()
+                    .expect("an added dispatcher per reservation");
+                match reg.dispatch.sigs.iter().find(|(t, _)| *t == ty) {
+                    Some((_, s)) => s.index,
+                    None => {
+                        sig.index = m.reserve_func(&params, &results);
+                        let index = sig.index;
+                        reg.dispatch.sigs.push((ty, sig));
+                        index
+                    }
+                }
+            }
+            Owner::Shape => {
+                let (_, key, line) = shapes.next().expect("an added shape per reservation");
+                match reg.shapes.known.iter().find(|(k, _)| *k == key) {
+                    Some((_, i)) => *i,
+                    None => {
+                        let index = m.reserve_func(&params, &results);
+                        reg.shapes.known.push((key.clone(), index));
+                        reg.shapes.todo.push((index, key, line));
+                        index
+                    }
+                }
+            }
+        };
+        funcs.push(index);
+    }
+    assert!(
+        insts.next().is_none() && dispatch.next().is_none() && shapes.next().is_none(),
+        "a registry entry added with no reservation"
+    );
+    let tags: Vec<u32> = (fnvals.into_iter())
+        .map(|mut v| {
+            target(&funcs, &mut v.target);
+            let at = (reg.fnvals.iter()).position(|x| x.sig == v.sig && x.target == v.target);
+            at.unwrap_or_else(|| {
+                reg.fnvals.push(v);
+                reg.fnvals.len() - 1
+            }) as u32
+        })
+        .collect();
+    let values: Vec<Instruction<'static>> = (e.log.consts.into_iter())
+        .map(|c| match c {
+            Const::Data(bytes, align, plus) => {
+                Instruction::I32Const((m.data(&bytes, align) + plus) as i32)
+            }
+            Const::Reserve(size, align) => Instruction::I32Const(m.reserve(size, align) as i32),
+            Const::Site(key, true) => Instruction::I32Const(reg.sites.fresh(key) as i32),
+            Const::Site(key, false) => Instruction::I32Const(reg.sites.id(key) as i32),
+            Const::Tag(at) => Instruction::I64Const(match at.checked_sub(e.seen.fnvals as u32) {
+                Some(k) => tags[k as usize],
+                None => at,
+            } as i64),
+        })
+        .collect();
+    crate::observe::absorb(e.rows);
+    Some(e.frame.map(|mut f| {
+        f.remap_calls(|c| real(&funcs, c));
+        f.fill_holes(|id| values[id as usize].clone());
+        f
+    }))
+}
+
+/// Emits one body against `cx` and applies it to `m`.
+fn emit_here<'p>(
+    m: &mut Module,
+    cx: &Cx<'p>,
+    body: impl FnOnce(&mut Log) -> Result<Frame, String>,
+) -> Result<Frame, String> {
+    merge(m, cx, emit(cx, body)).expect("an emission against `cx` itself is never stale")
+}
+
+/// What every body's emitter reads and none writes: the program's tables and the indices and
+/// addresses fixed before the first body.
+struct Base<'a> {
     types: &'a HashMap<String, TypeDecl>,
     /// Every lambda literal the program holds, by node address and the function that holds it,
     /// so [`Fn_::lift_lambda`] queues the literal's own body instead of a clone.
     lambdas: HashMap<NodeId, (&'a str, &'a Expr)>,
-    /// Every layout, computed once per substituted type.
-    layouts: RefCell<HashMap<Type, Rc<Layout>>>,
-    /// [`Cx::repr`]'s answers, by substituted type.
-    reprs: RefCell<HashMap<Type, Repr>>,
-    /// [`Cx::flat`]'s answers, by substituted type.
-    flats: RefCell<HashMap<Type, Option<Rc<Flat>>>>,
-    /// [`Cx::fields`]'s answers, by substituted type.
-    members: RefCell<HashMap<Type, Option<Rc<[Field]>>>>,
     /// The check oracle's host imports and its row labels, under
     /// [`vyrn_lower::check::Mode::Count`]; `None` in every other build.
     oracle: Option<Oracle>,
@@ -1188,23 +1471,12 @@ struct Cx<'a> {
     /// Functions with a `fn`-typed parameter. Like a generic, a call to one is a
     /// discovery.
     higher_order: HashMap<String, &'a Function>,
-    /// The monomorphization whose body is being lowered; empty for an ordinary
-    /// function.
-    subst: HashMap<String, Type>,
-    mono: RefCell<Mono<'a>>,
-    /// The stored-closure variant registry, module-global so a tag means the same thing in
-    /// every body that builds one.
-    fnvals: RefCell<Vec<FnVal>>,
-    /// The module's one derived copy over that registry: `(tag, block) -> block`. Filled after
+    /// The module's one derived copy over [`Reg::fnvals`]: `(tag, block) -> block`. Filled after
     /// the drain loop, like a dispatcher, because capture layouts are complete only then.
     fnval_copy: u32,
     /// The module's one derived RELEASE over that registry: `(tag, block) -> ()`.
     /// The twin of [`Cx::fnval_copy`], reserved and filled beside it.
     fnval_free: u32,
-    dispatch: RefCell<Dispatch>,
-    /// One release and one copy per type, and the worklist of the bodies still
-    /// to write — see [`Shapes`].
-    shapes: RefCell<Shapes>,
     /// Module state: name -> its fixed address and declared type. Every body sees all
     /// of them; the checker forbids an initializer reading a later global.
     globals: HashMap<String, (Place, Type)>,
@@ -1229,7 +1501,7 @@ struct Cx<'a> {
     /// The program's analysis: the release steps placed per function, the `Owned` table they
     /// were decided with, the checker's record (a module-state initializer's type),
     /// and the core's bodies and facts, the only source of the releases this emitter emits.
-    world: std::sync::Arc<vyrn_lower::World>,
+    world: Arc<vyrn_lower::World>,
     /// The log threshold, as an ordinal. Compile-time, so a disabled log site emits no write.
     log_level: usize,
     /// Where a log line goes. Compile-time-known, so the write names its
@@ -1238,8 +1510,6 @@ struct Cx<'a> {
     /// The four bytes holding the file sink's descriptor. `None` for a console sink, which
     /// reserves nothing.
     log_fd: Option<u32>,
-    /// The counted sites of a profile or an oracle build; `None` in every other build.
-    sites: Option<Sites>,
     /// Whether this is a profile build: the `SITE` global, the audit's rows and the operation
     /// counters.
     profile: bool,
@@ -1247,6 +1517,50 @@ struct Cx<'a> {
     /// arms the instrument. Otherwise the calls are dropped and [`wasm::Module::sweep`] takes the
     /// bodies.
     audit: bool,
+}
+
+/// One emitter's view of the module: the [`Base`], its own caches, and the registries as its
+/// bodies see them ([`emit`]).
+struct Cx<'a> {
+    base: &'a Base<'a>,
+    /// Every layout, computed once per substituted type.
+    layouts: RefCell<HashMap<Type, Arc<Layout>>>,
+    /// [`Cx::repr`]'s answers, by substituted type.
+    reprs: RefCell<HashMap<Type, Repr>>,
+    /// [`Cx::flat`]'s answers, by substituted type.
+    flats: RefCell<HashMap<Type, Option<Arc<Flat>>>>,
+    /// [`Cx::fields`]'s answers, by substituted type.
+    members: RefCell<HashMap<Type, Option<Arc<[Field]>>>>,
+    /// The monomorphization whose body is being lowered; empty for an ordinary
+    /// function.
+    subst: HashMap<String, Type>,
+    reg: RefCell<Reg<'a>>,
+    /// The lookups [`merge`] checks, made since the last [`emit`] began.
+    queries: RefCell<Vec<Query>>,
+}
+
+impl<'a> std::ops::Deref for Cx<'a> {
+    type Target = Base<'a>;
+
+    fn deref(&self) -> &Base<'a> {
+        self.base
+    }
+}
+
+impl<'a> Cx<'a> {
+    /// A view of `base` with empty caches and the registries `reg`.
+    fn new(base: &'a Base<'a>, reg: Reg<'a>) -> Self {
+        Cx {
+            base,
+            layouts: RefCell::default(),
+            reprs: RefCell::default(),
+            flats: RefCell::default(),
+            members: RefCell::default(),
+            subst: HashMap::new(),
+            reg: RefCell::new(reg),
+            queries: RefCell::default(),
+        }
+    }
 }
 
 impl<'a> Cx<'a> {
@@ -1278,7 +1592,7 @@ impl<'a> Cx<'a> {
     }
 
     /// The layout of `ty`, or the refusal of a shape past 4 GB.
-    fn layout(&self, ty: &Type, line: usize) -> Result<Rc<Layout>, String> {
+    fn layout(&self, ty: &Type, line: usize) -> Result<Arc<Layout>, String> {
         let ty = self.sub(ty);
         if let Some(l) = self.layouts.borrow().get(&*ty) {
             return Ok(l.clone());
@@ -1286,7 +1600,7 @@ impl<'a> Cx<'a> {
         let l = crate::shape_of(&ty, &self.types)
             .layout()
             .map_err(|e| format!("direct backend: layout of `{ty}` at line {line}: {e}"))?;
-        let l = Rc::new(l);
+        let l = Arc::new(l);
         self.layouts.borrow_mut().insert(ty.into_owned(), l.clone());
         Ok(l)
     }
@@ -1348,25 +1662,24 @@ impl<'a> Cx<'a> {
     /// cleared: the signature belongs to the specialization.
     fn enqueue(
         &self,
-        m: &mut Module,
+        m: &mut Log,
         key: Key,
-        f: Rc<Function>,
+        f: Arc<Function>,
         body: Body<'a>,
         subst: HashMap<String, Type>,
         binds: HashMap<String, FnBinding>,
         core_key: String,
     ) -> Result<Sig, String> {
-        if let Some(p) = self.mono.borrow().insts.iter().find(|p| p.key == key) {
+        if let Some(p) = (self.reg.borrow().mono.insts.iter()).find(|p| p.key == key) {
             return Ok(p.sig.clone());
         }
         let s = self.signature(&f, &core_key)?;
         let (wp, wr) = self.wasm_sig(&s, f.line)?;
         let sig = Sig {
-            index: m.reserve_func(&wp, &wr),
+            index: m.func(&wp, &wr, Owner::Inst),
             ..s
         };
-        let mut mono = self.mono.borrow_mut();
-        mono.insts.push(Pending {
+        self.reg.borrow_mut().mono.insts.push(Pending {
             key,
             f,
             body,
@@ -1380,7 +1693,7 @@ impl<'a> Cx<'a> {
 
     /// Whether the function at `index` is a signature's dispatcher.
     fn is_dispatcher(&self, index: u32) -> bool {
-        (self.dispatch.borrow().sigs.iter()).any(|(_, s)| s.index == index)
+        (self.reg.borrow().dispatch.sigs.iter()).any(|(_, s)| s.index == index)
     }
 
     /// The parameter `name` of `f`'s declaration, which `p` stands for, or `p`
@@ -1404,17 +1717,20 @@ impl<'a> Cx<'a> {
 
     /// The core key a lifted lambda was queued under, by its function index.
     fn lambda_key(&self, index: u32) -> Option<String> {
-        let mono = self.mono.borrow();
-        let p = (mono.insts.iter())
+        let reg = self.reg.borrow();
+        let p = (reg.mono.insts.iter())
             .find(|p| p.sig.index == index && matches!(p.key, Key::Lambda(..)))?;
         Some(p.core_key.clone())
     }
 
     /// The signature of the one lifted lambda queued under `key`.
     fn lambda_sig(&self, key: &str) -> Option<Sig> {
-        let mono = self.mono.borrow();
-        let mut hits =
-            (mono.insts.iter()).filter(|p| p.core_key == key && matches!(p.key, Key::Lambda(..)));
+        self.queries
+            .borrow_mut()
+            .push(Query::Lambda(key.to_string()));
+        let reg = self.reg.borrow();
+        let mut hits = (reg.mono.insts.iter())
+            .filter(|p| p.core_key == key && matches!(p.key, Key::Lambda(..)));
         let p = hits.next()?;
         hits.next().is_none().then(|| p.sig.clone())
     }
@@ -1423,7 +1739,7 @@ impl<'a> Cx<'a> {
     /// parameter bound to its target, under the shell [`ho_shell`] states.
     fn specialize(
         &self,
-        m: &mut Module,
+        m: &mut Log,
         f: &'a Function,
         type_args: Vec<Type>,
         subst: HashMap<String, Type>,
@@ -1434,7 +1750,7 @@ impl<'a> Cx<'a> {
         self.enqueue(
             m,
             Key::Ho(f.name.clone(), type_args, targets),
-            Rc::new(sf),
+            Arc::new(sf),
             Body::Block(&f.body),
             subst,
             binds,
@@ -1445,7 +1761,7 @@ impl<'a> Cx<'a> {
     /// A generic instantiation: [`Cx::enqueue`] with no `fn` parameters.
     fn instantiate(
         &self,
-        m: &mut Module,
+        m: &mut Log,
         f: &'a Function,
         type_args: Vec<Type>,
         subst: HashMap<String, Type>,
@@ -1454,7 +1770,7 @@ impl<'a> Cx<'a> {
         self.enqueue(
             m,
             Key::Generic(f.name.clone(), type_args),
-            Rc::new(instance_shell(f, &subst)),
+            Arc::new(instance_shell(f, &subst)),
             Body::Block(&f.body),
             subst,
             HashMap::new(),
@@ -1497,7 +1813,7 @@ impl<'a> Cx<'a> {
 
     /// The parts of `ty` when it is [`Flat`]: an aggregate of one or two parts, each a scalar
     /// other than a vector, with no heap, no declared release and no `where` rule.
-    fn flat(&self, ty: &Type) -> Option<Rc<Flat>> {
+    fn flat(&self, ty: &Type) -> Option<Arc<Flat>> {
         let key = self.sub(ty);
         if let Some(f) = self.flats.borrow().get(&*key) {
             return f.clone();
@@ -1508,7 +1824,7 @@ impl<'a> Cx<'a> {
             Ok(Repr::Agg(l)) if l.fields.len() > 2 => return None,
             _ => {}
         }
-        let f = self.flat_of(&key).map(Rc::new);
+        let f = self.flat_of(&key).map(Arc::new);
         self.flats.borrow_mut().insert(key.into_owned(), f.clone());
         f
     }
@@ -1585,7 +1901,7 @@ impl<'a> Cx<'a> {
 
     /// The fields of the record `ty` in memory order ([`crate::in_layout_order`]), once per
     /// substituted type: field `i` sits at `layout.fields[i]`.
-    fn fields(&self, ty: &Type) -> Option<Rc<[Field]>> {
+    fn fields(&self, ty: &Type) -> Option<Arc<[Field]>> {
         let ty = self.sub(ty);
         if let Some(fs) = self.members.borrow().get(&*ty) {
             return fs.clone();
@@ -2100,7 +2416,7 @@ fn top_level<'a, 'p>(cx: &'a Cx<'p>) -> Fn_<'a, 'p> {
 
 /// The module-state initializer, which `_start` calls before `main`. It walks the core's
 /// module-state body; a program whose initializers the core lacks is refused at its first global.
-fn lower_globals_init(m: &mut Module, program: &Program, cx: &Cx<'_>) -> Result<Frame, String> {
+fn lower_globals_init(m: &mut Log, program: &Program, cx: &Cx<'_>) -> Result<Frame, String> {
     let mut b = Frame::new(&[], &[], &[], 0);
     let mut f = top_level(cx);
     let from_core = cx.world.body_of("").filter(|core| {
@@ -2135,7 +2451,7 @@ fn lower_globals_init(m: &mut Module, program: &Program, cx: &Cx<'_>) -> Result<
 /// The module-state teardown, emitted only in an audited build: every global released in
 /// reverse declaration order. Module state outlives `main`, so without it every global that
 /// owns heap would count as residue.
-fn lower_globals_teardown(m: &mut Module, program: &Program, cx: &Cx<'_>) -> Result<Frame, String> {
+fn lower_globals_teardown(m: &mut Log, program: &Program, cx: &Cx<'_>) -> Result<Frame, String> {
     let mut b = Frame::new(&[], &[], &[], 0);
     let mut f = top_level(cx);
     for g in program.globals.iter().rev() {
@@ -2148,18 +2464,10 @@ fn lower_globals_teardown(m: &mut Module, program: &Program, cx: &Cx<'_>) -> Res
     Ok(b)
 }
 
-/// `sig` is passed because a specialization has no entry in `Cx::sigs`: several instances
-/// share one `Function`. `binds` is non-empty only for a specialization; its keys are the
-/// callee's `fn`-typed parameter names, which the synthesized signature replaces with captures.
-fn lower_fn(
-    m: &mut Module,
-    f: &Function,
-    sig: &Sig,
-    cx: &Cx<'_>,
-    binds: HashMap<String, FnBinding>,
-) -> Result<(), String> {
-    let frame = lower_body(m, f, &f.name, Body::Block(&f.body), sig, cx, binds)?;
-    fill_named(m, sig.index, frame, &f.name)
+/// Lowers the declared function `f`, which [`Cx::sigs`] holds.
+fn lower_fn(m: &mut Log, f: &Function, cx: &Cx<'_>) -> Result<Frame, String> {
+    let sig = &cx.sigs[&f.name];
+    lower_body(m, f, &f.name, Body::Block(&f.body), sig, cx, HashMap::new())
 }
 
 /// Fills function `index` with `body` and, under `VYRN_WASM_NAMES` or an operation count, names
@@ -2174,8 +2482,11 @@ fn fill_named(m: &mut Module, index: u32, body: Frame, name: &str) -> Result<(),
 
 /// `f` is the declaration, `key` the name the core built the body under. `f` and `body` are
 /// separate because a specialization borrows the callee's statements ([`Pending::body`]).
+/// `sig` is passed because a specialization has no entry in `Cx::sigs`: several instances
+/// share one `Function`. `binds` is non-empty only for a specialization; its keys are the
+/// callee's `fn`-typed parameter names, which the synthesized signature replaces with captures.
 fn lower_body(
-    m: &mut Module,
+    m: &mut Log,
     f: &Function,
     key: &str,
     body: Body<'_>,
@@ -2488,11 +2799,11 @@ fn frame_fits(b: &Frame, name: &str, line: usize) -> Result<(), String> {
 /// The derived deep copy of a stored `fn` value's capture block: `(tag, block) -> block`.
 /// Only the tag says the block's size and captures, so the copy reads them off the registry.
 /// It mirrors [`lower_fnval_free`].
-fn lower_fnval_copy(m: &mut Module, cx: &Cx<'_>) -> Result<Frame, String> {
+fn lower_fnval_copy(m: &mut Log, cx: &Cx<'_>) -> Result<Frame, String> {
     let mut b = Frame::new(&[ValType::I64, ValType::I32], &[ValType::I32], &[], 0);
     let mut f = top_level(cx);
     let (tag, pay) = (0u32, 1u32);
-    let vals = cx.fnvals.borrow().clone();
+    let vals = cx.reg.borrow().fnvals.clone();
     for (i, v) in vals.iter().enumerate() {
         let cap_tys = v.target.sig.params[..v.target.ncaps].to_vec();
         // No captures means payload 0, which copies to itself.
@@ -2522,11 +2833,11 @@ fn lower_fnval_copy(m: &mut Module, cx: &Cx<'_>) -> Result<Frame, String> {
 
 /// The derived release of a stored `fn` value's capture block: `(tag, block) -> ()`. The block
 /// owns its captures' heap, and only the tag says which captures it holds.
-fn lower_fnval_free(m: &mut Module, cx: &Cx<'_>) -> Result<Frame, String> {
+fn lower_fnval_free(m: &mut Log, cx: &Cx<'_>) -> Result<Frame, String> {
     let mut b = Frame::new(&[ValType::I64, ValType::I32], &[], &[], 0);
     let mut f = top_level(cx);
     let (tag, pay) = (0u32, 1u32);
-    let vals = cx.fnvals.borrow().clone();
+    let vals = cx.reg.borrow().fnvals.clone();
     for (i, v) in vals.iter().enumerate() {
         let cap_tys = v.target.sig.params[..v.target.ncaps].to_vec();
         // The tail below frees the block itself.
@@ -2550,7 +2861,7 @@ fn lower_fnval_free(m: &mut Module, cx: &Cx<'_>) -> Result<Frame, String> {
 /// Walk the captures of the block at local `at`: release (`rel`) or deep-copy each one that
 /// owns heap.
 fn fnval_captures(
-    m: &mut Module,
+    m: &mut Log,
     f: &mut Fn_<'_, '_>,
     b: &mut Frame,
     at: u32,
@@ -2580,7 +2891,7 @@ fn fnval_captures(
 
 /// One shape body: `(addr) -> ()`, releasing or copying the value at `addr`.
 fn lower_shape(
-    m: &mut Module,
+    m: &mut Log,
     cx: &Cx<'_>,
     rel: bool,
     ty: &Type,
@@ -2599,12 +2910,7 @@ fn lower_shape(
 
 /// One signature's dispatcher: switch on the tag, unpack the capture block, and call the
 /// target directly. Nested `if`/`else` end in an `unreachable` arm, which types the chain.
-fn lower_dispatcher(
-    m: &mut Module,
-    cx: &Cx<'_>,
-    sig_ty: &Type,
-    dsig: &Sig,
-) -> Result<Frame, String> {
+fn lower_dispatcher(m: &mut Log, cx: &Cx<'_>, sig_ty: &Type, dsig: &Sig) -> Result<Frame, String> {
     let Type::Fn(ptys, ret) = sig_ty else {
         return unsupported("a dispatcher for a non-function type", 0);
     };
@@ -2649,10 +2955,7 @@ fn lower_dispatcher(
     load_wrapped(&mut b, fv, fl.fields[1]);
     b.ins(&Instruction::LocalSet(pl));
 
-    let variants: Vec<(usize, FnVal)> = cx
-        .fnvals
-        .borrow()
-        .iter()
+    let variants: Vec<(usize, FnVal)> = (cx.reg.borrow().fnvals.iter())
         .enumerate()
         .filter(|(_, v)| v.sig == *sig_ty)
         .map(|(i, v)| (i, v.clone()))
@@ -2734,11 +3037,10 @@ fn lower_dispatcher(
         b.ins(&Instruction::Else);
     }
     // Unreachable: every tag comes from a registered construction.
-    let msg = cx.rt.intern(
-        m,
-        &vyrn_frontend::trap::line(vyrn_frontend::trap::BAD_FN_VALUE),
-    );
-    b.ins(&Instruction::I32Const(msg as i32));
+    let msg = m.intern(&vyrn_frontend::trap::line(
+        vyrn_frontend::trap::BAD_FN_VALUE,
+    ));
+    b.hole(msg.0);
     b.ins(&Instruction::Call(cx.rt.trap));
     b.ins(&Instruction::Unreachable);
     for _ in &variants {
@@ -2767,7 +3069,7 @@ impl<'p> Fn_<'_, 'p> {
 
     fn emit_rel(
         &mut self,
-        m: &mut Module,
+        m: &mut Log,
         b: &mut Frame,
         p: Place,
         k: &Rel,
@@ -2838,7 +3140,7 @@ impl<'p> Fn_<'_, 'p> {
     /// `ty` where the impl is generic.
     fn release_call(
         &mut self,
-        m: &mut Module,
+        m: &mut Log,
         b: &mut Frame,
         f: &str,
         ty: &Type,
@@ -2997,7 +3299,7 @@ impl<'p> Fn_<'_, 'p> {
 
     /// The index of the release (or copy) of `ty`, reserved and queued on first request.
     /// The type is substituted here because the body is written later, under another instance.
-    fn shape_fn(&self, m: &mut Module, rel: bool, ty: &Type, line: usize) -> u32 {
+    fn shape_fn(&self, m: &mut Log, rel: bool, ty: &Type, line: usize) -> u32 {
         let key: ShapeKey = (
             rel,
             self.cx.sub(ty).into_owned(),
@@ -3007,11 +3309,12 @@ impl<'p> Fn_<'_, 'p> {
                 Vec::new()
             },
         );
-        let mut s = self.cx.shapes.borrow_mut();
+        let mut reg = self.cx.reg.borrow_mut();
+        let s = &mut reg.shapes;
         if let Some((_, i)) = s.known.iter().find(|(k, _)| *k == key) {
             return *i;
         }
-        let index = m.reserve_func(&[ValType::I32], &[]);
+        let index = m.func(&[ValType::I32], &[], Owner::Shape);
         s.known.push((key.clone(), index));
         s.todo.push((index, key, line));
         index
@@ -3021,7 +3324,7 @@ impl<'p> Fn_<'_, 'p> {
     /// function. A declared release is called directly.
     fn rel_at(
         &mut self,
-        m: &mut Module,
+        m: &mut Log,
         b: &mut Frame,
         a: u32,
         ty: &Type,
@@ -3095,7 +3398,7 @@ impl<'p> Fn_<'_, 'p> {
     /// It frees exactly the storage the copy allocates, so the two must agree on every shape.
     fn rel_body(
         &mut self,
-        m: &mut Module,
+        m: &mut Log,
         b: &mut Frame,
         a: u32,
         ty: &Type,
@@ -3251,7 +3554,7 @@ impl<'p> Fn_<'_, 'p> {
     /// under the rule [`Fn_::replaced_releases`] states.
     fn rel_entry(
         &mut self,
-        m: &mut Module,
+        m: &mut Log,
         b: &mut Frame,
         a: u32,
         ty: &Type,
@@ -3276,7 +3579,7 @@ impl<'p> Fn_<'_, 'p> {
     /// rides in the word; a wider payload is a pointer to a box.
     fn rel_word(
         &mut self,
-        m: &mut Module,
+        m: &mut Log,
         b: &mut Frame,
         a: u32,
         off: u32,
@@ -3384,7 +3687,7 @@ impl<'p> Fn_<'_, 'p> {
 
     fn free_snap(
         &mut self,
-        m: &mut Module,
+        m: &mut Log,
         b: &mut Frame,
         snap: Option<(Place, Rel)>,
         line: usize,
@@ -3431,7 +3734,7 @@ impl<'p> Fn_<'_, 'p> {
     /// a fresh `String`, as a `Result<String, String>` written through a slot allocated here.
     fn string_from_bytes(
         &mut self,
-        m: &mut Module,
+        m: &mut Log,
         b: &mut Frame,
         args: &[(Val, Capability)],
         line: usize,
@@ -3460,7 +3763,7 @@ impl<'p> Fn_<'_, 'p> {
     /// check, which runs here before the copy; `None` when a pass proved it.
     fn bytes_of(
         &mut self,
-        m: &mut Module,
+        m: &mut Log,
         b: &mut Frame,
         row: Option<Check>,
         args: &[(Val, Capability)],
@@ -3501,7 +3804,7 @@ impl<'p> Fn_<'_, 'p> {
                 b.ins(&Instruction::I32Or);
                 b.ins(&Instruction::If(BlockType::Empty));
                 self.depth += 1;
-                self.check_trap(b, &row, Some(from));
+                self.check_trap(m, b, &row, Some(from));
                 self.depth -= 1;
                 b.ins(&Instruction::End);
                 b.ins(&Instruction::LocalGet(to));
@@ -3509,7 +3812,7 @@ impl<'p> Fn_<'_, 'p> {
                 b.ins(&Instruction::I64GtS);
                 b.ins(&Instruction::If(BlockType::Empty));
                 self.depth += 1;
-                self.check_trap(b, &row, Some(to));
+                self.check_trap(m, b, &row, Some(to));
                 self.depth -= 1;
                 b.ins(&Instruction::End);
             }
@@ -3667,7 +3970,7 @@ impl<'p> Fn_<'_, 'p> {
     #[allow(clippy::too_many_arguments)]
     fn append_in_place(
         &mut self,
-        m: &mut Module,
+        m: &mut Log,
         b: &mut Frame,
         place: Place,
         own: Place,
@@ -3762,7 +4065,7 @@ impl<'p> Fn_<'_, 'p> {
     /// order; this is one arm per rung.
     fn coerce(
         &mut self,
-        m: &mut Module,
+        m: &mut Log,
         b: &mut Frame,
         from: &Type,
         to: &Type,
@@ -4042,10 +4345,10 @@ impl<'p> Fn_<'_, 'p> {
     /// 799,744 bytes). Byte equivalence classes would cut it if size matters.
     fn regex_dfa(
         &mut self,
-        m: &mut Module,
+        m: &mut Log,
         pat: &str,
         line: usize,
-    ) -> Result<(u32, u32, u32), String> {
+    ) -> Result<(Hole, Hole, u32), String> {
         // The checker compiled every pattern, so a failure here is a gap, not a panic.
         let dfa = vyrn_frontend::regex::compile(pat)
             .map_err(|e| gap(&format!("the pattern `{pat}` ({e})"), line))?;
@@ -4054,7 +4357,7 @@ impl<'p> Fn_<'_, 'p> {
             table.extend_from_slice(&n.to_le_bytes());
         }
         let accept: Vec<u8> = dfa.accepting.iter().map(|a| u8::from(*a)).collect();
-        Ok((m.data(&table, 4), m.data(&accept, 1), dfa.start))
+        Ok((m.data(table, 4), m.data(accept, 1), dfa.start))
     }
 
     /// A String operator on two stacked operands: `+` concatenates into the `region`'s arena,
@@ -4075,15 +4378,15 @@ impl<'p> Fn_<'_, 'p> {
     /// `s =~ pat` with `s` on the stack; leaves a `Bool`.
     fn str_match(
         &mut self,
-        m: &mut Module,
+        m: &mut Log,
         b: &mut Frame,
         pat: &str,
         line: usize,
     ) -> Result<(), String> {
         let (table, accept, start) = self.regex_dfa(m, pat, line)?;
-        b.ins(&Instruction::I32Const(table as i32));
+        b.hole(table.0);
         b.ins(&Instruction::I32Const(start as i32));
-        b.ins(&Instruction::I32Const(accept as i32));
+        b.hole(accept.0);
         b.ins(&Instruction::Call(self.cx.rt.regex_run));
         Ok(())
     }
@@ -4158,7 +4461,7 @@ impl<'p> Fn_<'_, 'p> {
     }
 
     /// Traps where the row's divisor `d` is zero or its shift amount is outside `0..bits`.
-    fn divisor_check(&mut self, b: &mut Frame, n: Num, d: u32, row: &Check) {
+    fn divisor_check(&mut self, m: &mut Log, b: &mut Frame, n: Num, d: u32, row: &Check) {
         b.ins(&Instruction::LocalGet(d));
         if let Guard::Shift(_, bits) = row.guard {
             // A shift by `>= bits` or a negative amount traps. One unsigned `>=` covers
@@ -4177,7 +4480,7 @@ impl<'p> Fn_<'_, 'p> {
         }
         b.ins(&Instruction::If(BlockType::Empty));
         self.depth += 1;
-        self.check_trap(b, row, None);
+        self.check_trap(m, b, row, None);
         self.depth -= 1;
         b.ins(&Instruction::End);
     }
@@ -4190,6 +4493,7 @@ impl<'p> Fn_<'_, 'p> {
     /// quotient's ([`Guard::NoOverflow`]).
     fn bin_ins(
         &mut self,
+        m: &mut Log,
         b: &mut Frame,
         op: BinOp,
         opty: &Type,
@@ -4316,7 +4620,7 @@ impl<'p> Fn_<'_, 'p> {
             b.ins(&Instruction::LocalSet(d));
             b.ins(&Instruction::LocalSet(num));
             if let Some(first) = first {
-                self.divisor_check(b, n, d, &first);
+                self.divisor_check(m, b, n, d, &first);
             }
             // The minimum over -1 has no representable answer. `%` is exempt: wasm's `rem_s`
             // gives 0 there, as the interpreter does.
@@ -4342,7 +4646,7 @@ impl<'p> Fn_<'_, 'p> {
                 b.ins(&Instruction::I32And);
                 b.ins(&Instruction::If(BlockType::Empty));
                 self.depth += 1;
-                self.check_trap(b, &over, None);
+                self.check_trap(m, b, &over, None);
                 self.depth -= 1;
                 b.ins(&Instruction::End);
             }
@@ -4362,7 +4666,7 @@ impl<'p> Fn_<'_, 'p> {
     /// Calls a generator host import ([`Spec::Host`]). `args` are the call's operands.
     fn host(
         &mut self,
-        m: &mut Module,
+        m: &mut Log,
         b: &mut Frame,
         name: &str,
         args: &[(Val, Capability)],
@@ -4516,7 +4820,7 @@ impl<'p> Fn_<'_, 'p> {
     /// type.
     fn extern_call(
         &mut self,
-        m: &mut Module,
+        m: &mut Log,
         b: &mut Frame,
         name: &str,
         args: &[(Val, Capability)],
@@ -4649,7 +4953,7 @@ impl<'p> Fn_<'_, 'p> {
     /// Emits a `std/mem` primitive from a core row, by [`mem_ins`]'s table.
     fn core_mem(
         &mut self,
-        m: &mut Module,
+        m: &mut Log,
         b: &mut Frame,
         prim: &str,
         args: &[(Val, vyrn_frontend::ast::Capability)],
@@ -4692,15 +4996,15 @@ impl<'p> Fn_<'_, 'p> {
     /// here. Five `write_all`s avoid allocating a joined string.
     fn log_write(
         &mut self,
-        m: &mut Module,
+        m: &mut Log,
         b: &mut Frame,
         level: &str,
         line: usize,
     ) -> Result<(), String> {
         let prefix = format!("[{}] ", level.trim_start_matches('@').to_uppercase());
-        let (at, plen) = (self.cx.rt.intern(m, &prefix), prefix.len() as i32);
-        let colon = self.cx.rt.intern(m, ": ");
-        let nl = self.cx.rt.intern(m, "\n");
+        let (at, plen) = (m.intern(&prefix), prefix.len() as i32);
+        let colon = m.intern(": ");
+        let nl = m.intern("\n");
         let (name, msg) = (
             self.scratch(b, ValType::I32, 7),
             self.scratch(b, ValType::I32, 8),
@@ -4724,9 +5028,9 @@ impl<'p> Fn_<'_, 'p> {
         if self.cx.log_fd.is_none() && matches!(self.cx.log_sink, LogSink::File(_)) {
             return unsupported("a `file(..)` log sink with no descriptor", line);
         }
-        let konst = |b: &mut Frame, p: u32, n: i32| {
+        let konst = |b: &mut Frame, p: Hole, n: i32| {
             fd(b);
-            b.ins(&Instruction::I32Const(p as i32))
+            b.hole(p.0)
                 .ins(&Instruction::I32Const(n))
                 .ins(&Instruction::Call(write_all))
                 .ins(&Instruction::Drop);
@@ -4825,7 +5129,7 @@ impl<'p> Fn_<'_, 'p> {
     /// The instance of generic `f` that `arg_tys` solves.
     fn generic_sig(
         &mut self,
-        m: &mut Module,
+        m: &mut Log,
         f: &'p Function,
         arg_tys: &[Type],
         line: usize,
@@ -4858,7 +5162,7 @@ impl<'p> Fn_<'_, 'p> {
     /// parameter's type.
     fn emit_call_with(
         &mut self,
-        m: &mut Module,
+        m: &mut Log,
         b: &mut Frame,
         sig: &Sig,
         args: &[(Place, Type)],
@@ -4914,7 +5218,7 @@ impl<'p> Fn_<'_, 'p> {
     #[allow(clippy::too_many_arguments)]
     fn lift_lambda(
         &mut self,
-        m: &mut Module,
+        m: &mut Log,
         at: &'p Expr,
         ptys: &[Type],
         expected_ret: &Type,
@@ -5013,7 +5317,7 @@ impl<'p> Fn_<'_, 'p> {
         let sig = self.cx.enqueue(
             m,
             key,
-            Rc::new(sf),
+            Arc::new(sf),
             queued,
             self.cx.subst.clone(),
             HashMap::new(),
@@ -5028,23 +5332,25 @@ impl<'p> Fn_<'_, 'p> {
     /// Returns the tag of a stored function value, registering it once per signature and target.
     /// The tag indexes the module-global list, so it means the same in every body; the
     /// dispatcher filters by signature and does not renumber.
-    fn register_fnval(&self, sig: &Type, target: &FnTarget) -> i64 {
-        let mut v = self.cx.fnvals.borrow_mut();
-        if let Some(i) = v.iter().position(|x| x.sig == *sig && x.target == *target) {
-            return i as i64;
-        }
-        v.push(FnVal {
-            sig: sig.clone(),
-            target: target.clone(),
-        });
-        (v.len() - 1) as i64
+    fn register_fnval(&self, m: &mut Log, sig: &Type, target: &FnTarget) -> Hole {
+        let mut reg = self.cx.reg.borrow_mut();
+        let v = &mut reg.fnvals;
+        let at =
+            (v.iter().position(|x| x.sig == *sig && x.target == *target)).unwrap_or_else(|| {
+                v.push(FnVal {
+                    sig: sig.clone(),
+                    target: target.clone(),
+                });
+                v.len() - 1
+            });
+        m.hole(Const::Tag(at as u32))
     }
 
     /// Lays out a capture block: the captures packed by value, in order.
-    fn cap_block(&self, cap_tys: &[Type]) -> Result<Rc<Layout>, String> {
+    fn cap_block(&self, cap_tys: &[Type]) -> Result<Arc<Layout>, String> {
         Shape::Struct(cap_tys.iter().map(|t| self.cx.shape(t)).collect())
             .layout()
-            .map(Rc::new)
+            .map(Arc::new)
             .map_err(|e| format!("direct backend: layout of a capture block: {e}"))
     }
 
@@ -5053,7 +5359,7 @@ impl<'p> Fn_<'_, 'p> {
     #[allow(clippy::too_many_arguments)]
     fn fnval_into(
         &mut self,
-        m: &mut Module,
+        m: &mut Log,
         b: &mut Frame,
         dest: Dest,
         sig_ty: &Type,
@@ -5068,7 +5374,7 @@ impl<'p> Fn_<'_, 'p> {
                 line,
             );
         }
-        let tag = self.register_fnval(sig_ty, &target);
+        let tag = self.register_fnval(m, sig_ty, &target);
         let Repr::Agg(l) = self.cx.repr(sig_ty, line)? else {
             return unsupported("a function value that is not an aggregate", line);
         };
@@ -5121,7 +5427,7 @@ impl<'p> Fn_<'_, 'p> {
             Some(p)
         };
         dest.addr(b, l.fields[0]);
-        b.ins(&Instruction::I64Const(tag));
+        b.hole(tag.0);
         b.ins(&Instruction::I64Store(at(0)));
         dest.addr(b, l.fields[1]);
         match payload {
@@ -5138,12 +5444,7 @@ impl<'p> Fn_<'_, 'p> {
     }
 
     /// Returns the target a stored lambda calls.
-    fn lift_stored(
-        &mut self,
-        m: &mut Module,
-        e: &'p Expr,
-        sig_ty: &Type,
-    ) -> Result<FnTarget, String> {
+    fn lift_stored(&mut self, m: &mut Log, e: &'p Expr, sig_ty: &Type) -> Result<FnTarget, String> {
         let Expr::Lambda { line, .. } = e else {
             return unsupported("a function value from a non-lambda", Expr::line(e));
         };
@@ -5156,14 +5457,8 @@ impl<'p> Fn_<'_, 'p> {
     /// Returns the dispatcher for one signature, reserving its index on first use.
     /// Its shape is `fn(fv: <sig>, a0: P0, ..) -> R`: a [`FnTarget`] with `ncaps == 1`,
     /// whose one capture is the fn value itself.
-    fn dispatcher(&mut self, m: &mut Module, sig_ty: &Type, line: usize) -> Result<Sig, String> {
-        if let Some((_, s)) = self
-            .cx
-            .dispatch
-            .borrow()
-            .sigs
-            .iter()
-            .find(|(t, _)| t == sig_ty)
+    fn dispatcher(&mut self, m: &mut Log, sig_ty: &Type, line: usize) -> Result<Sig, String> {
+        if let Some((_, s)) = (self.cx.reg.borrow().dispatch.sigs.iter()).find(|(t, _)| t == sig_ty)
         {
             return Ok(s.clone());
         }
@@ -5182,14 +5477,10 @@ impl<'p> Fn_<'_, 'p> {
         };
         let (wp, wr) = self.cx.wasm_sig(&s, line)?;
         let sig = Sig {
-            index: m.reserve_func(&wp, &wr),
+            index: m.func(&wp, &wr, Owner::Dispatch),
             ..s
         };
-        self.cx
-            .dispatch
-            .borrow_mut()
-            .sigs
-            .push((sig_ty.clone(), sig.clone()));
+        (self.cx.reg.borrow_mut().dispatch.sigs).push((sig_ty.clone(), sig.clone()));
         Ok(sig)
     }
 
@@ -5268,7 +5559,7 @@ impl<'p> Fn_<'_, 'p> {
     }
 
     /// Every `Stream<T>` shares one six-word header layout, whatever `T` is.
-    fn stream_layout(&self, line: usize) -> Result<Rc<Layout>, String> {
+    fn stream_layout(&self, line: usize) -> Result<Arc<Layout>, String> {
         self.cx.layout(&Type::Stream(Box::new(Type::Int)), line)
     }
 
@@ -5308,7 +5599,7 @@ impl<'p> Fn_<'_, 'p> {
     /// mints the cursor.
     fn stream_from_step(
         &mut self,
-        m: &mut Module,
+        m: &mut Log,
         b: &mut Frame,
         args: &[(Val, Capability)],
         line: usize,
@@ -5374,7 +5665,7 @@ impl<'p> Fn_<'_, 'p> {
     /// Checks the box whose `Int64` address is `addr`, or traps; returns the local holding it.
     fn stream_box_at(
         &mut self,
-        m: &mut Module,
+        m: &mut Log,
         b: &mut Frame,
         addr: &Val,
         line: usize,
@@ -5391,11 +5682,8 @@ impl<'p> Fn_<'_, 'p> {
         b.ins(&Instruction::I64GeU);
         b.ins(&Instruction::If(BlockType::Empty));
         self.depth += 1;
-        let msg = self.cx.rt.intern(
-            m,
-            &vyrn_frontend::trap::line(vyrn_frontend::trap::NO_STREAM),
-        );
-        b.ins(&Instruction::I32Const(msg as i32));
+        let msg = m.intern(&vyrn_frontend::trap::line(vyrn_frontend::trap::NO_STREAM));
+        b.hole(msg.0);
         b.ins(&Instruction::Call(self.cx.rt.trap));
         self.depth -= 1;
         b.ins(&Instruction::End);
@@ -5407,11 +5695,8 @@ impl<'p> Fn_<'_, 'p> {
         b.ins(&Instruction::I64Ne);
         b.ins(&Instruction::If(BlockType::Empty));
         self.depth += 1;
-        let msg = self.cx.rt.intern(
-            m,
-            &vyrn_frontend::trap::line(vyrn_frontend::trap::NO_STREAM),
-        );
-        b.ins(&Instruction::I32Const(msg as i32));
+        let msg = m.intern(&vyrn_frontend::trap::line(vyrn_frontend::trap::NO_STREAM));
+        b.hole(msg.0);
         b.ins(&Instruction::Call(self.cx.rt.trap));
         self.depth -= 1;
         b.ins(&Instruction::End);
@@ -5423,7 +5708,7 @@ impl<'p> Fn_<'_, 'p> {
     /// `std/stream` keeps the address in its cursor slot.
     fn stream_box(
         &mut self,
-        m: &mut Module,
+        m: &mut Log,
         b: &mut Frame,
         args: &[(Val, Capability)],
         line: usize,
@@ -5451,7 +5736,7 @@ impl<'p> Fn_<'_, 'p> {
     /// Emits `unboxStream(a)`: takes the stream out and frees the box.
     fn stream_unbox(
         &mut self,
-        m: &mut Module,
+        m: &mut Log,
         b: &mut Frame,
         elem: &Type,
         addr: &Val,
@@ -5478,7 +5763,7 @@ impl<'p> Fn_<'_, 'p> {
     /// The element type comes from the annotation, because an address is only an `Int64`.
     fn stream_pull_at(
         &mut self,
-        m: &mut Module,
+        m: &mut Log,
         b: &mut Frame,
         elem: &Type,
         addr: &Val,
@@ -5577,7 +5862,7 @@ impl<'p> Fn_<'_, 'p> {
     /// wraps a source, unboxes and `close`s it, so a chain unwinds as recursion in Vyrn.
     fn stream_release(
         &mut self,
-        m: &mut Module,
+        m: &mut Log,
         b: &mut Frame,
         place: Place,
         elem: &Type,
@@ -5597,7 +5882,7 @@ impl<'p> Fn_<'_, 'p> {
 
     fn stream_release_at(
         &mut self,
-        m: &mut Module,
+        m: &mut Log,
         b: &mut Frame,
         a: u32,
         elem: &Type,
@@ -5680,7 +5965,7 @@ impl<'p> Fn_<'_, 'p> {
     /// Neither arm branches out of itself, so `self.depth` stays right for a caller's `break`.
     fn stream_next(
         &mut self,
-        m: &mut Module,
+        m: &mut Log,
         b: &mut Frame,
         s: u32,
         place: Place,
@@ -5918,19 +6203,19 @@ impl<'p> Fn_<'_, 'p> {
     /// other engines, and waits in a local because `write_all` takes three operands.
     fn panic_line(
         &mut self,
-        m: &mut Module,
+        m: &mut Log,
         b: &mut Frame,
         at: Option<&str>,
-        msg: impl FnOnce(&mut Self, &mut Module, &mut Frame) -> Result<(), String>,
+        msg: impl FnOnce(&mut Self, &mut Log, &mut Frame) -> Result<(), String>,
     ) -> Result<(), String> {
         let write_all = self.cx.rt.write_all;
         let tail = at.map_or_else(|| "\n".to_string(), |at| format!(" ({at})\n"));
-        let (pre, nl) = (self.cx.rt.intern(m, "error: "), self.cx.rt.intern(m, &tail));
+        let (pre, nl) = (m.intern("error: "), m.intern(&tail));
         let slot = self.scratch(b, ValType::I32, 7);
         msg(self, m, b)?;
         b.ins(&Instruction::LocalSet(slot));
         b.ins(&Instruction::I32Const(2))
-            .ins(&Instruction::I32Const(pre as i32))
+            .hole(pre.0)
             .ins(&Instruction::I32Const(7))
             .ins(&Instruction::Call(write_all))
             .ins(&Instruction::Drop);
@@ -5939,8 +6224,7 @@ impl<'p> Fn_<'_, 'p> {
         b.ins(&Instruction::LocalGet(slot));
         str_len(b);
         b.ins(&Instruction::Call(write_all)).ins(&Instruction::Drop);
-        b.ins(&Instruction::I32Const(nl as i32))
-            .ins(&Instruction::Call(self.cx.rt.trap));
+        b.hole(nl.0).ins(&Instruction::Call(self.cx.rt.trap));
         Ok(())
     }
 
@@ -5976,12 +6260,11 @@ impl<'p> Fn_<'_, 'p> {
     /// The check a construct runs for `c`: the row when it is kept, `None` when a pass proved
     /// it. The oracle ([`vyrn_lower::check::Mode::Count`]) counts every row here and runs a
     /// proved one too, which [`Fn_::check_trap`] turns into a failed run.
-    fn row(&mut self, b: &mut Frame, c: Check) -> Option<Check> {
-        let (Some(o), Some(sites)) = (&self.cx.oracle, &self.cx.sites) else {
+    fn row(&mut self, m: &mut Log, b: &mut Frame, c: Check) -> Option<Check> {
+        let Some(o) = &self.cx.oracle else {
             return (c.verdict == Verdict::Kept).then_some(c);
         };
-        let id = sites.fresh(self.check_site(&c));
-        b.ins(&Instruction::I32Const(id as i32));
+        b.hole(m.site(self.check_site(&c), true).0);
         b.ins(&Instruction::Call(o.hit));
         Some(c)
     }
@@ -6003,7 +6286,7 @@ impl<'p> Fn_<'_, 'p> {
     #[allow(clippy::too_many_arguments)]
     fn core_rule_check(
         &mut self,
-        m: &mut Module,
+        m: &mut Log,
         b: &mut Frame,
         decl: &TypeDecl,
         n: Name,
@@ -6014,7 +6297,7 @@ impl<'p> Fn_<'_, 'p> {
             line,
             |g| matches!(g, Guard::Rule(m) if *m == n),
         )?;
-        let Some(row) = self.row(b, row) else {
+        let Some(row) = self.row(m, b, row) else {
             return Ok(());
         };
         if row.verdict == Verdict::Kept {
@@ -6043,7 +6326,7 @@ impl<'p> Fn_<'_, 'p> {
         b.ins(&Instruction::I32Eqz);
         b.ins(&Instruction::If(BlockType::Empty));
         self.depth += 1;
-        self.check_trap(b, &row, None);
+        self.check_trap(m, b, &row, None);
         self.depth -= 1;
         b.ins(&Instruction::End);
         Ok(())
@@ -6054,14 +6337,14 @@ impl<'p> Fn_<'_, 'p> {
     /// the operand stack across it ([`Fn_::core_stmts`]).
     fn clause_check(
         &mut self,
-        m: &mut Module,
+        m: &mut Log,
         b: &mut Frame,
         c: &Check,
         atoms: &[vyrn_frontend::core::check::Atom],
         says: &str,
     ) -> Result<(), String> {
         let line = c.site.line;
-        let Some(row) = self.row(b, c.clone()) else {
+        let Some(row) = self.row(m, b, c.clone()) else {
             return Ok(());
         };
         for a in atoms {
@@ -6094,7 +6377,7 @@ impl<'p> Fn_<'_, 'p> {
                 })?;
                 b.ins(&Instruction::Unreachable);
             } else {
-                self.check_trap(b, &row, None);
+                self.check_trap(m, b, &row, None);
             }
             self.depth -= 1;
             b.ins(&Instruction::End);
@@ -6104,11 +6387,10 @@ impl<'p> Fn_<'_, 'p> {
 
     /// The failing branch of `row`'s check: its trap, or under the oracle the failure of a
     /// proved row.
-    fn check_trap(&mut self, b: &mut Frame, row: &Check, val: Option<u32>) {
-        match (&self.cx.oracle, &self.cx.sites) {
-            (Some(o), Some(sites)) if row.verdict == Verdict::Proved => {
-                let id = sites.id(self.check_site(row));
-                b.ins(&Instruction::I32Const(id as i32));
+    fn check_trap(&mut self, m: &mut Log, b: &mut Frame, row: &Check, val: Option<u32>) {
+        match &self.cx.oracle {
+            Some(o) if row.verdict == Verdict::Proved => {
+                b.hole(m.site(self.check_site(row), false).0);
                 b.ins(&Instruction::Call(o.fail));
             }
             _ => match row.rule {
@@ -6124,13 +6406,13 @@ impl<'p> Fn_<'_, 'p> {
     }
 
     /// Traps unless `idx` is in `0..len`; the compare is unsigned, so it catches a negative.
-    fn bounds_check(&mut self, b: &mut Frame, w: &Walk, idx: u32, row: &Check) {
+    fn bounds_check(&mut self, m: &mut Log, b: &mut Frame, w: &Walk, idx: u32, row: &Check) {
         b.ins(&Instruction::LocalGet(idx));
         b.ins(&Instruction::LocalGet(w.len));
         b.ins(&Instruction::I64GeU);
         b.ins(&Instruction::If(BlockType::Empty));
         self.depth += 1;
-        self.check_trap(b, row, Some(idx));
+        self.check_trap(m, b, row, Some(idx));
         self.depth -= 1;
         b.ins(&Instruction::End);
     }
@@ -6138,7 +6420,7 @@ impl<'p> Fn_<'_, 'p> {
     /// Traps unless all of `idx..idx+span-1` are in `0..len`, with one branch per vector.
     /// `span` is 4 for the four-lane shapes and 2 for `@f64x2`. It needs two compares:
     /// `idx + span` wraps for a huge `idx`, but `len - span` cannot, because `len >= 0`.
-    fn bounds_check_span(&mut self, b: &mut Frame, w: &Walk, idx: u32, row: &Check) {
+    fn bounds_check_span(&mut self, m: &mut Log, b: &mut Frame, w: &Walk, idx: u32, row: &Check) {
         let Guard::Span(_, _, span) = row.guard else {
             unreachable!("`core_check` matched a span row")
         };
@@ -6164,7 +6446,7 @@ impl<'p> Fn_<'_, 'p> {
         b.ins(&Instruction::I64LtS);
         b.ins(&Instruction::Select);
         b.ins(&Instruction::LocalSet(at));
-        self.check_trap(b, row, Some(at));
+        self.check_trap(m, b, row, Some(at));
         self.depth -= 1;
         b.ins(&Instruction::End);
     }
@@ -6191,7 +6473,7 @@ impl<'p> Fn_<'_, 'p> {
     /// is built in place, so a nested literal costs no frame.
     fn fixed_elems(
         &mut self,
-        m: &mut Module,
+        m: &mut Log,
         b: &mut Frame,
         dest: Dest,
         elem: &Type,
@@ -6221,7 +6503,7 @@ impl<'p> Fn_<'_, 'p> {
     #[allow(clippy::too_many_arguments)]
     fn record_into(
         &mut self,
-        m: &mut Module,
+        m: &mut Log,
         b: &mut Frame,
         dest: Dest,
         decl: &[Field],
@@ -6251,7 +6533,7 @@ impl<'p> Fn_<'_, 'p> {
     /// Pushes part `i` of a literal at type `want`.
     fn part(
         &mut self,
-        m: &mut Module,
+        m: &mut Log,
         b: &mut Frame,
         parts: &[Val],
         i: usize,
@@ -6266,7 +6548,7 @@ impl<'p> Fn_<'_, 'p> {
     #[allow(clippy::too_many_arguments)]
     fn agg_part(
         &mut self,
-        m: &mut Module,
+        m: &mut Log,
         b: &mut Frame,
         parts: &[Val],
         i: usize,
@@ -6291,7 +6573,7 @@ impl<'p> Fn_<'_, 'p> {
     #[allow(clippy::too_many_arguments)]
     fn array_lit_heap(
         &mut self,
-        m: &mut Module,
+        m: &mut Log,
         b: &mut Frame,
         dest: Dest,
         inner: &Type,
@@ -6382,7 +6664,7 @@ impl<'p> Fn_<'_, 'p> {
         aty: &Type,
         verb: &str,
         line: usize,
-    ) -> Result<(Type, Rc<Layout>, i32, u32), String> {
+    ) -> Result<(Type, Arc<Layout>, i32, u32), String> {
         let Type::Array(elem) = self.cx.resolve(aty) else {
             return unsupported(&format!("`{verb}` on `{aty}`"), line);
         };
@@ -6404,7 +6686,7 @@ impl<'p> Fn_<'_, 'p> {
     /// (`std/hash`'s SHA-1 `w.push(rot1(w[t - 3] ^ ...))` does).
     fn arr_rebuild(
         &mut self,
-        m: &mut Module,
+        m: &mut Log,
         b: &mut Frame,
         name: &str,
         aty: &Type,
@@ -6487,7 +6769,7 @@ impl<'p> Fn_<'_, 'p> {
     #[allow(clippy::too_many_arguments)]
     fn push_elem(
         &mut self,
-        m: &mut Module,
+        m: &mut Log,
         b: &mut Frame,
         data: u32,
         last: u32,
@@ -6586,7 +6868,7 @@ impl<'p> Fn_<'_, 'p> {
     /// Emits `swapRemove` on the array whose address is in local `slot`, at the index `index` names.
     fn swap_remove_at(
         &mut self,
-        m: &mut Module,
+        m: &mut Log,
         b: &mut Frame,
         slot: u32,
         aty: &Type,
@@ -6607,7 +6889,7 @@ impl<'p> Fn_<'_, 'p> {
         let idx = b.local(ValType::I64);
         b.ins(&Instruction::LocalSet(idx));
         if let Some(row) = row {
-            self.bounds_check(b, &w, idx, &row);
+            self.bounds_check(m, b, &w, idx, &row);
         }
         let elem = w.elem.clone();
         // Take the removed element before the last one overwrites it; they can be one address.
@@ -6744,7 +7026,7 @@ impl<'p> Fn_<'_, 'p> {
     /// copied as bytes and then by [`Fn_::copy_at`].
     fn copy_stack(
         &mut self,
-        m: &mut Module,
+        m: &mut Log,
         b: &mut Frame,
         ty: &Type,
         line: usize,
@@ -6823,7 +7105,7 @@ impl<'p> Fn_<'_, 'p> {
     /// owns it. A copy walks any element that reaches heap, released or not.
     fn each(
         &mut self,
-        m: &mut Module,
+        m: &mut Log,
         b: &mut Frame,
         rel: bool,
         buf: u32,
@@ -6885,7 +7167,7 @@ impl<'p> Fn_<'_, 'p> {
     /// ([`Fn_::rel_at`]); [`Fn_::copy_body`] states it once per type.
     fn copy_at(
         &mut self,
-        m: &mut Module,
+        m: &mut Log,
         b: &mut Frame,
         a: u32,
         ty: &Type,
@@ -6902,7 +7184,7 @@ impl<'p> Fn_<'_, 'p> {
     /// Emits the walk that duplicates the storage a `ty` value at `a` owns.
     fn copy_body(
         &mut self,
-        m: &mut Module,
+        m: &mut Log,
         b: &mut Frame,
         a: u32,
         ty: &Type,
@@ -7096,7 +7378,7 @@ impl<'p> Fn_<'_, 'p> {
     /// boxed block, copied then walked.
     fn copy_word(
         &mut self,
-        m: &mut Module,
+        m: &mut Log,
         b: &mut Frame,
         a: u32,
         off: u32,
@@ -7195,7 +7477,7 @@ impl<'p> Fn_<'_, 'p> {
     #[allow(clippy::too_many_arguments)]
     fn build_variant(
         &mut self,
-        m: &mut Module,
+        m: &mut Log,
         b: &mut Frame,
         ty: &Type,
         tag: u64,
@@ -7264,11 +7546,11 @@ impl<'p> Fn_<'_, 'p> {
     /// two must agree on every value.
     fn try_construct(
         &mut self,
-        m: &mut Module,
+        m: &mut Log,
         b: &mut Frame,
         name: &str,
         line: usize,
-        operand: impl FnOnce(&mut Self, &mut Module, &mut Frame, &Type) -> Result<(), String>,
+        operand: impl FnOnce(&mut Self, &mut Log, &mut Frame, &Type) -> Result<(), String>,
         dest: impl FnOnce(&mut Frame, &Layout) -> Dest,
     ) -> Result<Type, String> {
         let decl = self
@@ -7555,7 +7837,7 @@ impl<'p> Fn_<'_, 'p> {
     /// [`Fn_::core_make`] calls this.
     fn map_into(
         &mut self,
-        m: &mut Module,
+        m: &mut Log,
         b: &mut Frame,
         dest: Dest,
         mty: &Type,
@@ -7586,7 +7868,7 @@ impl<'p> Fn_<'_, 'p> {
     /// `hdr` holds the header address; `window` is the bytes and `count` is `n`.
     fn map_tally_bytes(
         &mut self,
-        m: &mut Module,
+        m: &mut Log,
         b: &mut Frame,
         hdr: u32,
         mty: &Type,
@@ -7645,11 +7927,10 @@ impl<'p> Fn_<'_, 'p> {
         b.ins(&Instruction::I64Eqz);
         b.ins(&Instruction::If(BlockType::Empty));
         self.depth += 1;
-        let msg = self.cx.rt.intern(
-            m,
-            &vyrn_frontend::trap::line(vyrn_frontend::trap::io("tbytes")),
-        );
-        b.ins(&Instruction::I32Const(msg as i32));
+        let msg = m.intern(&vyrn_frontend::trap::line(vyrn_frontend::trap::io(
+            "tbytes",
+        )));
+        b.hole(msg.0);
         b.ins(&Instruction::Call(self.cx.rt.trap));
         b.ins(&Instruction::Unreachable);
         self.depth -= 1;
@@ -7702,7 +7983,7 @@ impl<'p> Fn_<'_, 'p> {
     /// `hdr` holds the header address; `count` is `n`.
     fn map_tally(
         &mut self,
-        m: &mut Module,
+        m: &mut Log,
         b: &mut Frame,
         hdr: u32,
         mty: &Type,
@@ -7780,7 +8061,7 @@ impl<'p> Fn_<'_, 'p> {
     /// value that names the map could name the bytes this frees.
     fn map_set(
         &mut self,
-        m: &mut Module,
+        m: &mut Log,
         b: &mut Frame,
         hdr: u32,
         l: &Layout,
@@ -8035,13 +8316,13 @@ impl<'p> Fn_<'_, 'p> {
     /// with the map's layout and key family.
     fn map_find(
         &mut self,
-        m: &mut Module,
+        m: &mut Log,
         b: &mut Frame,
         hdr: u32,
         mty: &Type,
         key: &Val,
         line: usize,
-    ) -> Result<(u32, Rc<Layout>, MapKey), String> {
+    ) -> Result<(u32, Arc<Layout>, MapKey), String> {
         let (k, l, mk) = self.map_key_local(m, b, mty, key, line)?;
         let idx = b.local(ValType::I32);
         self.map_scan(b, hdr, &l, k, idx, mk);
@@ -8052,12 +8333,12 @@ impl<'p> Fn_<'_, 'p> {
     /// with, with the map's layout and key family.
     fn map_key_local(
         &mut self,
-        m: &mut Module,
+        m: &mut Log,
         b: &mut Frame,
         mty: &Type,
         key: &Val,
         line: usize,
-    ) -> Result<(u32, Rc<Layout>, MapKey), String> {
+    ) -> Result<(u32, Arc<Layout>, MapKey), String> {
         let key_t = match self.cx.resolve(mty) {
             Type::Map(k, _) => *k,
             _ => Type::Str,
@@ -8090,7 +8371,7 @@ impl<'p> Fn_<'_, 'p> {
     /// `m[k]`: an `Option<V>`, never a trap. The map's address is on the stack.
     fn map_at(
         &mut self,
-        m: &mut Module,
+        m: &mut Log,
         b: &mut Frame,
         mty: &Type,
         val: &Type,
@@ -8155,7 +8436,7 @@ impl<'p> Fn_<'_, 'p> {
     /// `assert(c)` and `assertEq(a, b)`, the builtins [`Spec::Asserts`] names.
     fn asserts(
         &mut self,
-        m: &mut Module,
+        m: &mut Log,
         b: &mut Frame,
         name: &str,
         args: &[(Val, Capability)],
@@ -8165,13 +8446,12 @@ impl<'p> Fn_<'_, 'p> {
             // `assert(c)`: traps with the interpreter's message.
             "assert" => {
                 self.core_arg(m, b, name, args, 0, Some(&Type::Bool), line)?;
-                let msg = self.cx.rt.intern(
-                    m,
-                    &vyrn_frontend::trap::line(&format!("assertion failed at line {line}")),
-                );
+                let msg = m.intern(&vyrn_frontend::trap::line(&format!(
+                    "assertion failed at line {line}"
+                )));
                 b.ins(&Instruction::I32Eqz)
                     .ins(&Instruction::If(BlockType::Empty))
-                    .ins(&Instruction::I32Const(msg as i32))
+                    .hole(msg.0)
                     .ins(&Instruction::Call(self.cx.rt.trap))
                     .ins(&Instruction::End);
             }
@@ -8219,22 +8499,18 @@ impl<'p> Fn_<'_, 'p> {
                 let (write_all, trap, strlen) =
                     (self.cx.rt.write_all, self.cx.rt.trap, self.cx.rt.strlen);
                 let head = format!("error: assertion failed at line {line}: ");
-                let (head_at, sep_at, nl_at) = (
-                    self.cx.rt.intern(m, &head),
-                    self.cx.rt.intern(m, " != "),
-                    self.cx.rt.intern(m, "\n"),
-                );
+                let (head_at, sep_at, nl_at) = (m.intern(&head), m.intern(" != "), m.intern("\n"));
                 let rendered = self.scratch(b, ValType::I32, 7);
                 b.ins(&Instruction::If(BlockType::Empty))
                     .ins(&Instruction::I32Const(2))
-                    .ins(&Instruction::I32Const(head_at as i32))
+                    .hole(head_at.0)
                     .ins(&Instruction::I32Const(head.len() as i32))
                     .ins(&Instruction::Call(write_all))
                     .ins(&Instruction::Drop);
                 for (side, local) in [(0, la), (1, lb)] {
                     if side == 1 {
                         b.ins(&Instruction::I32Const(2))
-                            .ins(&Instruction::I32Const(sep_at as i32))
+                            .hole(sep_at.0)
                             .ins(&Instruction::I32Const(4))
                             .ins(&Instruction::Call(write_all))
                             .ins(&Instruction::Drop);
@@ -8265,7 +8541,7 @@ impl<'p> Fn_<'_, 'p> {
                         .ins(&Instruction::Call(write_all))
                         .ins(&Instruction::Drop);
                 }
-                b.ins(&Instruction::I32Const(nl_at as i32))
+                b.hole(nl_at.0)
                     .ins(&Instruction::Call(trap))
                     .ins(&Instruction::End);
             }
@@ -8277,7 +8553,7 @@ impl<'p> Fn_<'_, 'p> {
     /// [`Spec::Effect`] names.
     fn effect(
         &mut self,
-        m: &mut Module,
+        m: &mut Log,
         b: &mut Frame,
         name: &str,
         args: &[(Val, Capability)],
@@ -8286,9 +8562,9 @@ impl<'p> Fn_<'_, 'p> {
         match name {
             "boxStream" => return self.stream_box(m, b, args, line),
             "serveStream" => {
-                let msg = self.cx.rt.intern(m, vyrn_frontend::trap::SERVE_STREAM);
+                let msg = m.intern(vyrn_frontend::trap::SERVE_STREAM);
                 self.panic_line(m, b, None, |_, _, b| {
-                    b.ins(&Instruction::I32Const(msg as i32));
+                    b.hole(msg.0);
                     Ok(())
                 })?;
                 b.ins(&Instruction::Unreachable);
@@ -8316,7 +8592,7 @@ impl<'p> Fn_<'_, 'p> {
     /// Below the compile-time threshold it emits no write, so a disabled site costs nothing.
     fn logs(
         &mut self,
-        m: &mut Module,
+        m: &mut Log,
         b: &mut Frame,
         name: &str,
         args: &[(Val, Capability)],
@@ -8344,7 +8620,7 @@ impl<'p> Fn_<'_, 'p> {
     /// array elements. The vector operand's own type chooses the opcode.
     fn lanes(
         &mut self,
-        m: &mut Module,
+        m: &mut Log,
         b: &mut Frame,
         name: &str,
         args: &[(Val, Capability)],
@@ -8480,7 +8756,7 @@ impl<'p> Fn_<'_, 'p> {
                 let idx = b.local(ValType::I64);
                 b.ins(&Instruction::LocalSet(idx));
                 if let Some(row) = span {
-                    self.bounds_check_span(b, &w, idx, &row);
+                    self.bounds_check_span(m, b, &w, idx, &row);
                 }
                 if name.ends_with("Load") {
                     self.elem_addr(b, &w, idx);
@@ -8503,7 +8779,7 @@ impl<'p> Fn_<'_, 'p> {
     /// packed keys copy with the buffer.
     fn map_keys(
         &mut self,
-        m: &mut Module,
+        m: &mut Log,
         b: &mut Frame,
         hdr: u32,
         mty: &Type,
@@ -8546,7 +8822,7 @@ impl<'p> Fn_<'_, 'p> {
     /// and leaves whether it existed on the stack.
     fn map_remove(
         &mut self,
-        m: &mut Module,
+        m: &mut Log,
         b: &mut Frame,
         hdr: u32,
         mty: &Type,
@@ -8688,7 +8964,7 @@ impl<'p> Fn_<'_, 'p> {
     #[allow(clippy::too_many_arguments)]
     fn sa_into(
         &mut self,
-        m: &mut Module,
+        m: &mut Log,
         b: &mut Frame,
         dest: Dest,
         ty: &Type,
@@ -8709,7 +8985,7 @@ impl<'p> Fn_<'_, 'p> {
         hdr: u32,
         aty: &Type,
         line: usize,
-    ) -> Result<(Rc<Layout>, Walk), String> {
+    ) -> Result<(Arc<Layout>, Walk), String> {
         let Type::SmallArray(inner, n) = self.cx.resolve(aty) else {
             return unsupported(&format!("a SmallArray operation on `{aty}`"), line);
         };
@@ -8730,7 +9006,7 @@ impl<'p> Fn_<'_, 'p> {
     /// copies of the live elements. An array owns its elements, so each copy gets its own heap.
     fn sa_to_array(
         &mut self,
-        m: &mut Module,
+        m: &mut Log,
         b: &mut Frame,
         hdr: u32,
         aty: &Type,
@@ -9191,18 +9467,22 @@ impl std::ops::Deref for Rt {
 }
 
 impl Rt {
-    /// Intern a string literal in the data segment, 4-aligned: the `{ len, cap }` header, the
-    /// bytes, and the NUL. Returns the address of the bytes, so a literal is an ordinary `String`.
-    ///
-    /// An all-ones `cap` marks it static. A run-time empty `String`
-    /// has `cap` 0, so 0 cannot be the mark.
+    /// Interns a string literal in the data segment, 4-aligned, and returns the address of its
+    /// bytes, so a literal is an ordinary `String`.
     fn intern(&self, m: &mut Module, s: &str) -> u32 {
-        let mut bytes = (s.len() as u32).to_le_bytes().to_vec();
-        bytes.extend_from_slice(&u32::MAX.to_le_bytes());
-        bytes.extend_from_slice(s.as_bytes());
-        bytes.push(0);
-        m.data(&bytes, 4) + SHDR
+        m.data(&literal(s), 4) + SHDR
     }
+}
+
+/// A string literal as the data segment holds it: the `{ len, cap }` header, the bytes, and the
+/// NUL. An all-ones `cap` marks it static. A run-time empty `String` has `cap` 0, so 0 cannot be
+/// the mark.
+fn literal(s: &str) -> Vec<u8> {
+    let mut bytes = (s.len() as u32).to_le_bytes().to_vec();
+    bytes.extend_from_slice(&u32::MAX.to_le_bytes());
+    bytes.extend_from_slice(s.as_bytes());
+    bytes.push(0);
+    bytes
 }
 
 /// Size of the `{ i32 len, i32 cap }` header in front of every `String`'s bytes.
@@ -9469,7 +9749,7 @@ struct Walked {
 impl<'a, 'p> Fn_<'a, 'p> {
     /// Emit the rows held back for the read an exit hands back, in the order
     /// the core stated them.
-    fn core_releases(&mut self, m: &mut Module, b: &mut Frame) -> Result<(), String> {
+    fn core_releases(&mut self, m: &mut Log, b: &mut Frame) -> Result<(), String> {
         for (name, holes) in std::mem::take(&mut self.core_rows) {
             self.core_release(m, b, name, &holes)?;
         }
@@ -9482,7 +9762,7 @@ impl<'a, 'p> Fn_<'a, 'p> {
     /// makes, and a body it takes holds no other heap-owning value ([`Fn_::core_walkable`]).
     fn core_release(
         &mut self,
-        m: &mut Module,
+        m: &mut Log,
         b: &mut Frame,
         name: Name,
         holes: &[String],
@@ -9504,7 +9784,7 @@ impl<'a, 'p> Fn_<'a, 'p> {
     #[allow(clippy::too_many_arguments)]
     fn core_drop(
         &mut self,
-        m: &mut Module,
+        m: &mut Log,
         b: &mut Frame,
         n: Name,
         holes: &Option<Vec<String>>,
@@ -9535,7 +9815,7 @@ impl<'a, 'p> Fn_<'a, 'p> {
     #[allow(clippy::too_many_arguments)]
     fn core_switch(
         &mut self,
-        m: &mut Module,
+        m: &mut Log,
         b: &mut Frame,
         on: &Val,
         arms: &[Arm],
@@ -9702,7 +9982,7 @@ impl<'a, 'p> Fn_<'a, 'p> {
     ///
     /// Runs only where [`Fn_::core_walkable`] says the rows carry the whole body;
     /// [`lower_body`] refuses any other.
-    fn core_body(&mut self, m: &mut Module, b: &mut Frame) -> Result<(), String> {
+    fn core_body(&mut self, m: &mut Log, b: &mut Frame) -> Result<(), String> {
         self.core_stmts(m, b, &self.body().stmts)?;
         match self.core_w.checks.iter().find(|(_, ran)| !ran) {
             Some((c, _)) => unsupported("a check row no construct ran", c.site.line),
@@ -9713,7 +9993,7 @@ impl<'a, 'p> Fn_<'a, 'p> {
     /// Lift each lambda literal a call row in `rows` targets, at its slot's type, so the screen
     /// finds its signature ([`Cx::lambda_sig`]). [`lower_body`] calls it once, before either
     /// screen.
-    fn core_lift_targets(&mut self, m: &mut Module, rows: &[St]) {
+    fn core_lift_targets(&mut self, m: &mut Log, rows: &[St]) {
         let mut lambdas = Vec::new();
         for (x, _) in rows.iter().flat_map(St::rows) {
             let (St::Let(_, rhs) | St::Do { rhs, .. }) = x else {
@@ -9769,8 +10049,8 @@ impl<'a, 'p> Fn_<'a, 'p> {
     /// Under the profile instrument, makes row `s`'s site the current one before the row runs,
     /// so a block the row makes, or a callee outside the root file makes for it, counts at the
     /// row's line. A row that costs nothing leaves the last site as it was.
-    fn core_site(&self, b: &mut Frame, s: &St) {
-        let (true, Some(sites), body) = (self.cx.profile, &self.cx.sites, self.body()) else {
+    fn core_site(&self, m: &mut Log, b: &mut Frame, s: &St) {
+        let (true, body) = (self.cx.profile, self.body()) else {
             return;
         };
         let Some((line, kind)) = vyrn_lower::insight::row(s, body, &self.cx.world) else {
@@ -9786,14 +10066,16 @@ impl<'a, 'p> Fn_<'a, 'p> {
         else {
             return;
         };
-        let id = sites.id((self.owner.clone(), line, verb.word().to_string()));
         let at = b.here();
-        b.ins(&Instruction::I32Const(id as i32));
+        b.hole(
+            m.site((self.owner.clone(), line, verb.word().to_string()), false)
+                .0,
+        );
         b.ins(&Instruction::GlobalSet(SITE));
         b.instrument_since(at);
     }
 
-    fn core_stmts(&mut self, m: &mut Module, b: &mut Frame, ss: &[St]) -> Result<(), String> {
+    fn core_stmts(&mut self, m: &mut Log, b: &mut Frame, ss: &[St]) -> Result<(), String> {
         let body = self.body();
         let ends = vyrn_lower::core::extent_ends(ss, &self.core_w.occurs);
         let mut due = Vec::new();
@@ -9811,7 +10093,7 @@ impl<'a, 'p> Fn_<'a, 'p> {
                 self.core_give_back(b, &mut due, &ends[j]);
             }
             (last, mark) = (Some(i), b.mark());
-            self.core_site(b, s);
+            self.core_site(m, b, s);
             if let St::Store {
                 place: vyrn_frontend::core::Place::Name(n),
                 line,
@@ -10606,7 +10888,7 @@ impl<'a, 'p> Fn_<'a, 'p> {
     /// Emits a `let`'s right-hand side at type `want`.
     fn core_rhs(
         &mut self,
-        m: &mut Module,
+        m: &mut Log,
         b: &mut Frame,
         rhs: &Rhs,
         want: &Type,
@@ -10750,7 +11032,7 @@ impl<'a, 'p> Fn_<'a, 'p> {
     /// ([`Callee`]).
     fn core_call(
         &mut self,
-        m: &mut Module,
+        m: &mut Log,
         b: &mut Frame,
         callee: &str,
         kind: Callee,
@@ -10786,7 +11068,7 @@ impl<'a, 'p> Fn_<'a, 'p> {
     /// [`Fn_::core_call`] with every argument a value.
     fn core_call_vals(
         &mut self,
-        m: &mut Module,
+        m: &mut Log,
         b: &mut Frame,
         callee: &str,
         kind: Callee,
@@ -10842,7 +11124,7 @@ impl<'a, 'p> Fn_<'a, 'p> {
                 let Some(t) = self.cx.repr(ty, line)?.val() else {
                     return Ok(ty.clone());
                 };
-                let addr = m.reserve(16, 16) as i32;
+                let addr = m.reserve(16, 16);
                 let tmp = self.scratch(b, t, 9);
                 let at = |align| mem_arg(0, align);
                 let (store, load) = match t {
@@ -10853,10 +11135,10 @@ impl<'a, 'p> Fn_<'a, 'p> {
                     _ => (Instruction::V128Store(at(4)), Instruction::V128Load(at(4))),
                 };
                 b.ins(&Instruction::LocalSet(tmp))
-                    .ins(&Instruction::I32Const(addr))
+                    .hole(addr.0)
                     .ins(&Instruction::LocalGet(tmp))
                     .ins(&store)
-                    .ins(&Instruction::I32Const(addr))
+                    .hole(addr.0)
                     .ins(&load);
                 return Ok(ty.clone());
             }
@@ -10913,7 +11195,7 @@ impl<'a, 'p> Fn_<'a, 'p> {
                         line,
                         |g| matches!(g, Guard::Span(vyrn_frontend::core::Place::Name(p), v, _) if p == x && v == i),
                     )
-                    .map(|c| self.row(b, c)),
+                    .map(|c| self.row(m, b, c)),
                     _ => unsupported("a runtime check the core did not state", line),
                 };
                 return self.lanes(m, b, callee, args, span, line);
@@ -10959,7 +11241,7 @@ impl<'a, 'p> Fn_<'a, 'p> {
                             line,
                             |g| matches!(g, Guard::Range(x, y, z) if (x, y, z) == (s, from, to)),
                         )?;
-                        self.row(b, c)
+                        self.row(m, b, c)
                     }
                     _ => None,
                 };
@@ -11049,7 +11331,7 @@ impl<'a, 'p> Fn_<'a, 'p> {
     #[allow(clippy::too_many_arguments)]
     fn core_user_call(
         &mut self,
-        m: &mut Module,
+        m: &mut Log,
         b: &mut Frame,
         callee: &str,
         kind: Callee,
@@ -11162,7 +11444,7 @@ impl<'a, 'p> Fn_<'a, 'p> {
     /// body holding one stands down at [`Fn_::core_walkable`].
     fn core_read(
         &mut self,
-        m: &mut Module,
+        m: &mut Log,
         b: &mut Frame,
         p: &vyrn_frontend::core::Place,
         line: usize,
@@ -11214,7 +11496,7 @@ impl<'a, 'p> Fn_<'a, 'p> {
     /// A removal from the receiver of type `aty` whose address is in `slot`.
     fn core_remove(
         &mut self,
-        m: &mut Module,
+        m: &mut Log,
         b: &mut Frame,
         callee: &str,
         slot: u32,
@@ -11230,7 +11512,7 @@ impl<'a, 'p> Fn_<'a, 'p> {
                     line,
                     |g| matches!(g, Guard::Index(_, v) if v == i),
                 )?;
-                let row = self.row(b, row);
+                let row = self.row(m, b, row);
                 self.swap_remove_at(m, b, slot, aty, row, i, line)
             }
             ("@remove", [(k, _)]) => self.map_remove(m, b, slot, aty, k, line),
@@ -11243,7 +11525,7 @@ impl<'a, 'p> Fn_<'a, 'p> {
     /// step adds it ([`Fn_::core_step`]). `None` means the address is the place's own.
     fn core_addr(
         &mut self,
-        m: &mut Module,
+        m: &mut Log,
         b: &mut Frame,
         p: &vyrn_frontend::core::Place,
         line: usize,
@@ -11307,12 +11589,12 @@ impl<'a, 'p> Fn_<'a, 'p> {
                     line,
                     |g| matches!(g, Guard::Index(p, v) if p == &**base && v == i),
                 )?;
-                let row = self.row(b, row);
+                let row = self.row(m, b, row);
                 self.core_val(m, b, i, &Type::Int, line)?;
                 let ix = b.local(ValType::I64);
                 b.ins(&Instruction::LocalSet(ix));
                 if let Some(row) = row {
-                    self.bounds_check(b, &walk, ix, &row);
+                    self.bounds_check(m, b, &walk, ix, &row);
                 }
                 self.elem_addr(b, &walk, ix);
                 let byte = Type::IntN {
@@ -11767,7 +12049,7 @@ impl<'a, 'p> Fn_<'a, 'p> {
     /// payload does not fill is 0, as [`Fn_::build_variant`] writes them.
     fn core_make_words(
         &mut self,
-        m: &mut Module,
+        m: &mut Log,
         b: &mut Frame,
         n: Name,
         rhs: &Rhs,
@@ -11829,7 +12111,7 @@ impl<'a, 'p> Fn_<'a, 'p> {
     /// operand stack, and binds `n` to fresh locals holding the parts.
     fn core_call_words(
         &mut self,
-        m: &mut Module,
+        m: &mut Log,
         b: &mut Frame,
         n: Name,
         rhs: &Rhs,
@@ -11929,7 +12211,7 @@ impl<'a, 'p> Fn_<'a, 'p> {
     #[allow(clippy::too_many_arguments)]
     fn core_make(
         &mut self,
-        m: &mut Module,
+        m: &mut Log,
         b: &mut Frame,
         dest: Dest,
         ty: &Type,
@@ -12017,7 +12299,7 @@ impl<'a, 'p> Fn_<'a, 'p> {
                 let [v] = vs.as_slice() else {
                     return unsupported(&format!("`{name}?` at this arity"), line);
                 };
-                let operand = |s: &mut Self, m: &mut Module, b: &mut Frame, base: &Type| {
+                let operand = |s: &mut Self, m: &mut Log, b: &mut Frame, base: &Type| {
                     s.core_val(m, b, v, base, line)
                 };
                 self.try_construct(m, b, name, line, operand, |_, _| dest)?;
@@ -12937,7 +13219,8 @@ impl<'a, 'p> Fn_<'a, 'p> {
         let Type::Fn(ptys, ret) = &sig_ty else {
             return None;
         };
-        let index = (self.cx.dispatch.borrow().sigs.iter())
+        (self.cx.queries.borrow_mut()).push(Query::Dispatch(sig_ty.clone()));
+        let index = (self.cx.reg.borrow().dispatch.sigs.iter())
             .find(|(t, _)| *t == sig_ty)
             .map_or(0, |(_, s)| s.index);
         let params: Vec<Type> = std::iter::once(sig_ty.clone())
@@ -13027,7 +13310,7 @@ impl<'a, 'p> Fn_<'a, 'p> {
     /// choose the instruction.
     fn core_prim(
         &mut self,
-        m: &mut Module,
+        m: &mut Log,
         b: &mut Frame,
         op: &Op,
         vs: &[Val],
@@ -13104,11 +13387,11 @@ impl<'a, 'p> Fn_<'a, 'p> {
                         {
                             *ran = true;
                             let check = c.clone();
-                            *row = self.row(b, check);
+                            *row = self.row(m, b, check);
                         }
                     }
                 }
-                self.bin_ins(b, *o, &opty, &lt, rows, line)
+                self.bin_ins(m, b, *o, &opty, &lt, rows, line)
             }
             _ => unsupported("an operator of this arity", line),
         }
@@ -13119,7 +13402,7 @@ impl<'a, 'p> Fn_<'a, 'p> {
     #[allow(clippy::too_many_arguments)]
     fn core_arg(
         &mut self,
-        m: &mut Module,
+        m: &mut Log,
         b: &mut Frame,
         name: &str,
         args: &[(Val, Capability)],
@@ -13138,7 +13421,7 @@ impl<'a, 'p> Fn_<'a, 'p> {
     /// One value: the name's own place, or the literal the row names.
     fn core_val(
         &mut self,
-        m: &mut Module,
+        m: &mut Log,
         b: &mut Frame,
         v: &Val,
         want: &Type,
@@ -13190,8 +13473,8 @@ impl<'a, 'p> Fn_<'a, 'p> {
                     Type::Float
                 }
                 Lit::Str(s) => {
-                    let at = self.cx.rt.intern(m, s);
-                    b.ins(&Instruction::I32Const(at as i32));
+                    let at = m.intern(s);
+                    b.hole(at.0);
                     Type::Str
                 }
                 Lit::Opaque(_) => return unsupported("a value the row does not name", line),
@@ -14517,14 +14800,10 @@ mod tests {
     }
 
     fn cx() -> Cx<'static> {
-        Cx {
+        let base = Box::leak(Box::new(Base {
             world: Default::default(),
             types: Box::leak(Box::default()),
             lambdas: HashMap::new(),
-            layouts: RefCell::default(),
-            reprs: RefCell::default(),
-            flats: RefCell::default(),
-            members: RefCell::default(),
             oracle: None,
             sigs: HashMap::new(),
             gen: None,
@@ -14532,13 +14811,8 @@ mod tests {
             higher_order: HashMap::new(),
             skipped: std::collections::HashSet::new(),
             mem: HashMap::new(),
-            subst: HashMap::new(),
-            mono: RefCell::new(Mono::default()),
-            fnvals: RefCell::new(Vec::new()),
             fnval_copy: 0,
             fnval_free: 0,
-            dispatch: RefCell::new(Dispatch::default()),
-            shapes: RefCell::new(Shapes::default()),
             globals: HashMap::new(),
             aliasing: std::collections::HashSet::new(),
             gappend: HashMap::new(),
@@ -14548,11 +14822,11 @@ mod tests {
             log_sink: LogSink::Stderr,
             log_fd: None,
             audit: false,
-            sites: None,
             profile: false,
             // Every index 0: a `Cx` for a type-level test never emits a call.
             rt: Rt::default(),
-        }
+        }));
+        Cx::new(base, Reg::default())
     }
 
     /// The whole aggregate ABI in one assertion: a scalar is a wasm value, an
@@ -14581,7 +14855,7 @@ mod tests {
         // `{ i1, i64 }`: the byte, then seven bytes of padding.
         assert_eq!(
             r.unwrap(),
-            Repr::Agg(Rc::new(Layout {
+            Repr::Agg(Arc::new(Layout {
                 size: 16,
                 align: 8,
                 fields: vec![0, 8]

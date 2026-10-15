@@ -309,6 +309,10 @@ impl Module {
             ));
         }
         assert!(d.body.is_none(), "function {index} filled twice");
+        assert!(
+            f.holes.is_empty(),
+            "function {index} filled with a hole left"
+        );
         d.body = Some(f);
         Ok(())
     }
@@ -392,12 +396,14 @@ impl Module {
             keep[i - 1]
         });
         for d in &mut self.bodies {
-            for ins in d.body.as_mut().expect("a reachable body").body.iter_mut() {
-                if let Instruction::Call(c) = ins {
-                    *c = map[*c as usize];
-                    debug_assert_ne!(*c, u32::MAX, "a surviving call to a pruned function");
-                }
-            }
+            d.body.as_mut().expect("a reachable body").remap_calls(|c| {
+                debug_assert_ne!(
+                    map[c as usize],
+                    u32::MAX,
+                    "a surviving call to a pruned function"
+                );
+                map[c as usize]
+            });
         }
         for (_, i) in &mut self.exports {
             *i = map[*i as usize];
@@ -1017,6 +1023,8 @@ pub struct Frame {
     instrument_all: bool,
     /// The source and destination locals of a word copy ([`Frame::copy`]), taken at the first.
     copy_tmp: Option<(u32, u32)>,
+    /// Each [`Frame::hole`] not yet filled: its position in `body` and its id.
+    holes: Vec<(usize, u32)>,
 }
 
 impl Frame {
@@ -1037,6 +1045,7 @@ impl Frame {
             instrument: Vec::new(),
             instrument_all: false,
             copy_tmp: None,
+            holes: Vec::new(),
         }
     }
 
@@ -1056,12 +1065,38 @@ impl Frame {
     pub fn rewind(&mut self, at: usize) {
         debug_assert!(at <= self.body.len());
         self.body.truncate(at);
+        self.holes.retain(|&(pos, _)| pos < at);
         while let Some(r) = self.instrument.last_mut() {
             if r.0 < at {
                 r.1 = r.1.min(at);
                 break;
             }
             self.instrument.pop();
+        }
+    }
+
+    /// Appends a constant the caller decides later, under `id`. [`Module::fill`] refuses a
+    /// frame with a hole left; [`Frame::fill_holes`] fills them.
+    pub fn hole(&mut self, id: u32) -> &mut Self {
+        self.holes.push((self.body.len(), id));
+        self.body.push(Instruction::Nop);
+        self
+    }
+
+    /// Replaces each hole with the instruction `value` gives its id.
+    pub fn fill_holes(&mut self, mut value: impl FnMut(u32) -> Instruction<'static>) {
+        for (pos, id) in self.holes.drain(..) {
+            self.body[pos] = value(id);
+        }
+    }
+
+    /// Replaces the callee of every `call` with `to` of it. A `call` is the only instruction
+    /// that names a function ([`Module::reachable`]).
+    pub fn remap_calls(&mut self, to: impl Fn(u32) -> u32) {
+        for ins in &mut self.body {
+            if let Instruction::Call(c) = ins {
+                *c = to(*c);
+            }
         }
     }
 
