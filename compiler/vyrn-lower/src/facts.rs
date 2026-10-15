@@ -685,25 +685,27 @@ impl State {
             return;
         };
         self.defs.remove(&d);
+        // A sum that does not name `x` is its own substitution.
         let sub = |l: &Lin| l.subst(x, &by);
+        let moved = |l: Lin| if l.mentions(x) { sub(&l) } else { Some(l) };
         // A length's axioms outlive the length: they bound the renamed value.
         self.facts = std::mem::take(&mut self.facts)
             .into_iter()
             .chain(axioms([x].into_iter()))
-            .filter_map(|f| sub(&f))
+            .filter_map(moved)
             .collect();
         self.ne = std::mem::take(&mut self.ne)
             .into_iter()
-            .filter_map(|d| sub(&d).and_then(canon))
+            .filter_map(|d| moved(d).and_then(canon))
             .filter(|d| !d.is_const())
             .collect();
-        for v in self.defs.values_mut() {
+        for v in self.defs.values_mut().filter(|v| v.mentions(x)) {
             if let Some(n) = sub(v) {
                 *v = n;
             }
         }
         for (a, b) in self.conds.values_mut() {
-            for f in a.iter_mut().chain(b.iter_mut()) {
+            for f in (a.iter_mut().chain(b.iter_mut())).filter(|f| f.lin().mentions(x)) {
                 if let Some(n) = f.map(sub) {
                     *f = n;
                 }
