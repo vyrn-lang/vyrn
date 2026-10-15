@@ -36,6 +36,7 @@
 //! live name's source, so a name's length, and a record name's fields, change
 //! only where the walk sees the name itself written.
 
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
@@ -4545,7 +4546,8 @@ impl<'a> Walk<'a> {
             let (Some(hi), Some(lo)) = (Lin::k(m).sub(l), l.plus(m)) else {
                 return false;
             };
-            st.ge0(&hi).is_some() && st.ge0(&lo).is_some()
+            let p = st.prover();
+            p.proves(&hi) && p.proves(&lo)
         };
         let r = r?;
         let halves = || parts.len() == 2 && parts.iter().all(|p| within(p, EXACT / 2));
@@ -4711,35 +4713,40 @@ impl<'a> Walk<'a> {
                 cond, then, els, ..
             } => {
                 let (yes, no) = match cond {
-                    Val::Lit(Lit::Bool(true)) => (st.clone(), State::dead()),
-                    Val::Lit(Lit::Bool(false)) => (State::dead(), st.clone()),
+                    Val::Lit(Lit::Bool(true)) => (st, State::dead()),
+                    Val::Lit(Lit::Bool(false)) => (State::dead(), st),
                     Val::Name(c) => {
-                        let (t, f) = st.conds.get(c).cloned().unwrap_or_default();
-                        let (mut yes, mut no) = (st.clone(), st.clone());
-                        t.iter().for_each(|l| yes.add(l));
-                        f.iter().for_each(|l| no.add(l));
+                        let (mut yes, mut no) = (st.clone(), st);
+                        // Adding a fact reads no condition; a state it kills has none.
+                        if let Some((t, f)) = no.conds.remove(c) {
+                            t.iter().for_each(|l| yes.add(l));
+                            f.iter().for_each(|l| no.add(l));
+                            if !no.dead {
+                                no.conds.insert(*c, (t, f));
+                            }
+                        }
                         (yes, no)
                     }
-                    _ => (st.clone(), st.clone()),
+                    _ => (st.clone(), st),
                 };
                 let mut a = self.block(yes, then);
                 let mut b = self.block(no, els);
                 if a.dead || b.dead {
-                    return State::join(&[a, b]);
+                    return State::join(&mut [a, b]);
                 }
                 leave(&mut a, then, &[]);
                 leave(&mut b, els, &[]);
-                let ends = [a, b];
-                let mut j = State::join(&ends);
+                let mut ends = [a, b];
+                let mut j = State::join(&mut ends);
                 self.branch_facts(&mut j, cond, [then, els], &ends);
                 j
             }
             St::Block { body, .. } => self.block(st, body),
             St::Loop { body, .. } => self.looped(st, body),
             St::Switch { on, arms, .. } => {
-                let mut outs = vec![st.clone()];
+                let mut outs = vec![st];
                 for a in arms.iter_mut() {
-                    let mut s = st.clone();
+                    let mut s = outs[0].clone();
                     for b in &a.binds {
                         self.slot[b.index()].origin = self.origin_of_val(on);
                         self.fresh(&mut s, *b);
@@ -4752,7 +4759,7 @@ impl<'a> Walk<'a> {
                         leave(s, &a.body, &a.binds);
                     }
                 }
-                State::join(&outs)
+                State::join(&mut outs)
             }
             St::Break { .. } => {
                 if let Some(l) = self.loops.last_mut() {
@@ -4862,7 +4869,7 @@ impl<'a> Walk<'a> {
                             && t.name().is_some_and(|n| stored.contains(&n))
                     })
                 })
-                .filter(|l| known.ge0(l).is_none())
+                .filter(|l| !known.proves(l))
                 .map(Fact::Ge)
                 .collect::<Vec<_>>()
         });
@@ -5467,7 +5474,7 @@ impl<'a> Walk<'a> {
                 // A copy of a name of the same width and sign holds its value,
                 // which the type already bounds.
                 let copy = matches!(v, Val::Name(m) if self.kind(*m) == self.kind(n));
-                if let Some(l) = self.lin(v).and_then(|l| st.norm(&l)) {
+                if let Some(l) = self.lin(v).and_then(|l| Some(st.norm(&l)?.into_owned())) {
                     if copy || self.in_range(n, &l, st) {
                         st.define(Term::Val(n), &l);
                     }
@@ -5508,7 +5515,8 @@ impl<'a> Walk<'a> {
         let (Some(a), Some(b)) = (l.plus(-lo), Lin::k(hi).sub(l)) else {
             return false;
         };
-        st.ge0(&a).is_some() && st.ge0(&b).is_some()
+        let p = st.prover();
+        p.proves(&a) && p.proves(&b)
     }
 
     /// What `n = op(vs)` states, read in `pre`.
@@ -5591,7 +5599,7 @@ impl<'a> Walk<'a> {
                 let norm = |fs: Vec<Option<Fact>>| {
                     fs.into_iter()
                         .flatten()
-                        .filter_map(|f| f.map(|l| pre.norm(l)))
+                        .filter_map(|f| f.map(|l| Some(pre.norm(l)?.into_owned())))
                         .collect()
                 };
                 Out::Cond(norm(t), norm(f))
@@ -5604,10 +5612,12 @@ impl<'a> Walk<'a> {
                 Some((t, f)) => Out::Cond(f.clone(), t.clone()),
                 None => Out::Nothing,
             },
-            (Op::Conv(_), [a]) => match self.lin(a).and_then(|l| pre.norm(&l)) {
-                Some(l) if self.in_range(n, &l, pre) => Out::Def(l),
-                _ => Out::Nothing,
-            },
+            (Op::Conv(_), [a]) => {
+                match self.lin(a).and_then(|l| Some(pre.norm(&l)?.into_owned())) {
+                    Some(l) if self.in_range(n, &l, pre) => Out::Def(l),
+                    _ => Out::Nothing,
+                }
+            }
             _ => Out::Nothing,
         }
     }
@@ -5909,7 +5919,7 @@ impl<'a> Walk<'a> {
                 _ => continue,
             };
             let k = *k;
-            let Some(k0) = entry.norm(&Lin::of(Term::Val(k))) else {
+            let Some(k0) = entry.norm(&Lin::of(Term::Val(k))).map(Cow::into_owned) else {
                 continue;
             };
             let Some(end) = s.checked_mul(n).and_then(|d| k0.plus(d)) else {
@@ -6057,7 +6067,7 @@ impl<'a> Walk<'a> {
         }
         if !cands.is_empty() {
             let at_entry = entry.prover();
-            cands.retain(|c| at_entry.ge0(c).is_some());
+            cands.retain(|c| at_entry.proves(c));
         }
         self.loops.push(Loop {
             breaks: Vec::new(),
@@ -6095,7 +6105,7 @@ impl<'a> Walk<'a> {
             }
             let before = (cands.len(), temps.len());
             let provers: Vec<_> = ends.iter().map(|s| s.prover()).collect();
-            cands.retain(|c| provers.iter().all(|p| p.ge0(c).is_some()));
+            cands.retain(|c| provers.iter().all(|p| p.proves(c)));
             let live = ends.iter().filter(|e| !e.dead);
             let kept = |(a, t): &(Name, Lin)| {
                 live.clone()
@@ -6110,11 +6120,11 @@ impl<'a> Walk<'a> {
         cands.iter().for_each(|c| head.assume(c));
         held(&mut head, &temps);
         self.block(head, body);
-        let l = self.loops.pop().expect("pushed above");
+        let mut l = self.loops.pop().expect("pushed above");
         if let Some(outer) = self.loops.last_mut() {
             outer.seen.resized.extend(l.seen.resized);
         }
-        let mut exit = State::join(&l.breaks);
+        let mut exit = State::join(&mut l.breaks);
         // The counter of a loop bound by a literal is at least the bound at
         // the exit. A length the counter bounds then has the literal as its
         // own bound, which a goal would otherwise need a third premise for.
@@ -6127,7 +6137,7 @@ impl<'a> Walk<'a> {
             let k = Term::Val(k);
             let len = (measured(body, &b))
                 .and_then(|p| self.head_length(body, p))
-                .and_then(|l| exit.norm(&l));
+                .and_then(|l| Some(exit.norm(&l)?.into_owned()));
             let (low, high) = match len {
                 None => {
                     let low = (exit.facts.iter()).find(|f| f.terms == [(k, 1)]).cloned();
@@ -6470,7 +6480,7 @@ impl<'a> Walk<'a> {
     /// the goal as that parameter's `where` clause, where [`Walk::states`]
     /// allows one.
     fn goal(&self, st: &State, g: &Lin, param: Option<Name>) -> (Arc<str>, Option<Arc<str>>) {
-        let l = &st.norm(g).unwrap_or_else(|| g.clone());
+        let l = &st.norm(g).unwrap_or(Cow::Borrowed(g));
         let temp = (l.terms.iter()).any(|(t, _)| {
             t.name()
                 .is_some_and(|n| self.body.names[n.index()].source.starts_with('@'))
