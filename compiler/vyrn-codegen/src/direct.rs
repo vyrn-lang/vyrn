@@ -2230,7 +2230,7 @@ fn lower_body(
         fn_binds: binds,
         owner,
         core_key: key.to_string(),
-        core: core.as_ref(),
+        core: core.as_deref(),
         ..top_level(cx)
     };
     if let Some(core) = cx_fn.core {
@@ -2449,12 +2449,12 @@ fn ho_args(
 
 /// The core body a queued function reads, specialized for its targets where the core names
 /// them. `None` unless the body's parameters are `f`'s, by name and in order.
-fn core_body(
+fn core_body<'c>(
     key: &str,
     f: &Function,
     binds: &HashMap<String, FnBinding>,
-    cx: &Cx<'_>,
-) -> Option<vyrn_frontend::core::Body> {
+    cx: &'c Cx<'_>,
+) -> Option<Cow<'c, vyrn_frontend::core::Body>> {
     let body = cx.world.body_of(key)?;
     let bound: Option<Vec<(Name, Target)>> = (body.params.iter())
         .filter_map(|&n| Some((n, binds.get(&body.names[n.index()].source)?)))
@@ -2462,9 +2462,9 @@ fn core_body(
         .collect();
     let body = match bound {
         Some(bound) if !binds.is_empty() && bound.len() == binds.len() => {
-            vyrn_lower::core::specialize(body, &bound).unwrap_or_else(|| body.clone())
+            vyrn_lower::core::specialize(body, &bound).map_or(Cow::Borrowed(body), Cow::Owned)
         }
-        _ => body.clone(),
+        _ => Cow::Borrowed(body),
     };
     let sources = body.params.iter().map(|&n| &body.names[n.index()].source);
     (body.params.len() == f.params.len() && sources.eq(f.params.iter().map(|p| &p.name)))
