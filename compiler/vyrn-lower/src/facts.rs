@@ -117,14 +117,14 @@ impl Lin {
     /// `self + m * o` without a scaled copy of `o`; `None` on overflow.
     fn add_scaled(&self, o: &Lin, m: i64) -> Option<Lin> {
         let mut out = Lin::k(0);
-        self.add_scaled_into(o, m, &mut out)?;
+        self.add_scaled_into(&o.terms, o.c, m, &mut out)?;
         Some(out)
     }
 
-    /// [`Lin::add_scaled`] written over `out`, reusing its buffer; `out` is
-    /// garbage on `None`.
-    fn add_scaled_into(&self, o: &Lin, m: i64, out: &mut Lin) -> Option<()> {
-        let (a, b) = (&self.terms, &o.terms);
+    /// [`Lin::add_scaled`] of the sum `c + b`, written over `out`, reusing
+    /// its buffer; `out` is garbage on `None`.
+    fn add_scaled_into(&self, b: &[(Term, i64)], c: i64, m: i64, out: &mut Lin) -> Option<()> {
+        let a = &self.terms;
         let terms = &mut out.terms;
         terms.clear();
         terms.reserve(a.len() + b.len());
@@ -154,7 +154,7 @@ impl Lin {
         for (t, k) in &b[j..] {
             terms.push((*t, k.checked_mul(m)?));
         }
-        out.c = self.c.checked_add(o.c.checked_mul(m)?)?;
+        out.c = self.c.checked_add(c.checked_mul(m)?)?;
         Some(())
     }
 
@@ -436,7 +436,7 @@ impl State {
                 .flatten()
                 .filter_map(|e| {
                     let up = e.plus(-1)?;
-                    (p.ge0(&e).is_some() && p.ge0(&up).is_none()).then_some(up)
+                    (p.proves(&e) && !p.proves(&up)).then_some(up)
                 })
                 .collect();
             if raised.is_empty() {
@@ -724,10 +724,12 @@ impl State {
 
     /// The state's premises indexed once, for many queries.
     pub fn prover(&self) -> Prover<'_> {
-        let mut terms: BTreeSet<Term> = BTreeSet::new();
-        for f in &self.facts {
-            terms.extend(f.terms.iter().map(|(t, _)| *t));
-        }
+        let mut lengths: Vec<Term> = (self.facts.iter().flat_map(|f| &f.terms))
+            .map(|(t, _)| *t)
+            .filter(|t| t.is_length())
+            .collect();
+        lengths.sort_unstable();
+        lengths.dedup();
         let mut best: HashMap<&[(Term, i64)], &Lin> = HashMap::new();
         for p in &self.facts {
             let e = best.entry(p.terms.as_slice()).or_insert(p);
@@ -737,7 +739,7 @@ impl State {
         }
         Prover {
             st: self,
-            axioms: axioms(terms.into_iter()),
+            lengths,
             best,
         }
     }
@@ -812,7 +814,7 @@ impl State {
         }
         let provers: Vec<Prover> = live.iter().map(|s| s.prover()).collect();
         for c in cands {
-            if provers.iter().all(|p| p.ge0(&c).is_some()) {
+            if provers.iter().all(|p| p.proves(&c)) {
                 out.assume(&c);
             }
         }
@@ -934,7 +936,7 @@ impl State {
         }
         (j.facts.iter().cloned())
             .chain(j.unshared(known.st))
-            .filter(|c| known.ge0(c).is_none())
+            .filter(|c| !known.proves(c))
             .map(Fact::Ge)
             .chain((j.ne.iter().filter(|d| !known.differs(d))).map(|d| Fact::Ne(d.clone())))
             .collect()
@@ -945,19 +947,78 @@ impl State {
 /// (the least constant).
 pub struct Prover<'a> {
     st: &'a State,
-    /// The length axioms of the facts' terms. The premises are `st.facts`, then these.
-    axioms: Vec<Lin>,
+    /// The lengths the facts name, sorted. The premises are `st.facts`, then
+    /// the axioms of these.
+    lengths: Vec<Term>,
     /// For each term list, the fact with the least constant.
     best: HashMap<&'a [(Term, i64)], &'a Lin>,
 }
 
-impl Prover<'_> {
+/// A premise of a search: a fact of the state, or a length axiom held
+/// inline ([`axiom`]).
+#[derive(Clone, Copy)]
+enum Prem<'a> {
+    Fact(&'a Lin),
+    Axiom([(Term, i64); 1], i64),
+}
+
+impl Prem<'_> {
+    fn terms(&self) -> &[(Term, i64)] {
+        match self {
+            Prem::Fact(l) => &l.terms,
+            Prem::Axiom(t, _) => t,
+        }
+    }
+
+    fn c(&self) -> i64 {
+        match self {
+            Prem::Fact(l) => l.c,
+            Prem::Axiom(_, c) => *c,
+        }
+    }
+
+    fn lin(&self) -> Lin {
+        Lin {
+            terms: self.terms().to_vec(),
+            c: self.c(),
+        }
+    }
+}
+
+/// The axiom of the length `t` with coefficient `k`, one or minus one:
+/// `t >= 0`, or `LEN_MAX - t >= 0`.
+fn axiom(t: Term, k: i64) -> Prem<'static> {
+    Prem::Axiom([(t, k)], if k < 0 { LEN_MAX } else { 0 })
+}
+
+/// The axiom whose terms are `terms`, when they are one length `has` holds
+/// with coefficient one or minus one.
+fn axiom_on(terms: &[(Term, i64)], has: impl Fn(Term) -> bool) -> Option<Prem<'static>> {
+    match *terms {
+        [(t, k)] if t.is_length() && matches!(k, 1 | -1) && has(t) => Some(axiom(t, k)),
+        _ => None,
+    }
+}
+
+impl<'a> Prover<'a> {
     /// Whether the state proves `l != 0`: it holds it ([`State::differs`]),
     /// or a bound keeps `l` above or below zero.
     pub fn differs(&self, l: &Lin) -> bool {
-        let off =
-            |e: Option<Lin>| (e.and_then(|e| e.plus(-1))).is_some_and(|e| self.ge0(&e).is_some());
+        let off = |e: Option<Lin>| (e.and_then(|e| e.plus(-1))).is_some_and(|e| self.proves(&e));
         self.st.differs(l) || off(Some(l.clone())) || off(l.scale(-1))
+    }
+
+    /// The premises of a search for `g`: the facts, the axioms of their
+    /// lengths, then those of `g`'s own lengths, which may appear in no fact.
+    fn premises<'g>(&'g self, g: &'g Lin) -> impl Iterator<Item = Prem<'a>> + 'g {
+        let axioms = |t: &Term| [axiom(*t, 1), axiom(*t, -1)];
+        (self.st.facts.iter().map(Prem::Fact))
+            .chain(self.lengths.iter().flat_map(axioms))
+            .chain(
+                (g.terms.iter().map(|(t, _)| t))
+                    .filter(|t| t.is_length())
+                    .flat_map(axioms),
+            )
     }
 
     /// [`Prover::ge0`] with one premise more: a premise that names the
@@ -972,13 +1033,16 @@ impl Prover<'_> {
         }
         let g = self.st.norm(goal)?;
         let (first, _) = *g.terms.first()?;
-        let extra = axioms(g.terms.iter().map(|(t, _)| *t));
-        let named =
-            (self.st.facts.iter().chain(&self.axioms).chain(&extra)).filter(|p| p.mentions(first));
+        let named = self
+            .premises(&g)
+            .filter(|p| p.terms().iter().any(|(t, _)| *t == first));
         for p in named {
-            let Some(d) = g.sub(p) else { continue };
+            let mut d = Lin::k(0);
+            if g.add_scaled_into(p.terms(), p.c(), -1, &mut d).is_none() {
+                continue;
+            }
             if let Some(Cert::Sum { uses, slack }) = self.ge0(&d) {
-                let uses = std::iter::once((1, p.clone())).chain(uses).collect();
+                let uses = std::iter::once((1, p.lin())).chain(uses).collect();
                 return Some(Cert::Sum { uses, slack });
             }
         }
@@ -998,70 +1062,84 @@ impl Prover<'_> {
             .then_some(m)
     }
 
-    /// [`State::ge0`], over the index. A goal whose coefficients share a
-    /// factor is also asked divided by it: `2k - 1 >= 0` as `k - 1 >= 0`.
+    /// [`State::ge0`], over the index.
     pub fn ge0(&self, goal: &Lin) -> Option<Cert> {
-        self.ge0_sum(goal).or_else(|| {
-            let g = self.st.norm(goal)?;
-            let by = (g.terms.iter()).fold(0, |d, (_, k)| gcd(d, k.unsigned_abs()));
-            let by = i64::try_from(by).ok().filter(|b| *b > 1)?;
-            let terms = g.terms.iter().map(|&(t, k)| (t, k / by)).collect();
-            let inner = self.ge0_sum(&Lin {
-                terms,
-                c: g.c.div_euclid(by),
-            })?;
-            Some(Cert::Scaled {
-                by,
-                inner: Box::new(inner),
-            })
-        })
-    }
-
-    fn ge0_sum(&self, goal: &Lin) -> Option<Cert> {
         if self.st.dead {
             return Some(Cert::Dead);
         }
+        let sum = |uses: &[(i64, Prem)], slack| Cert::Sum {
+            uses: uses.iter().map(|(k, p)| (*k, p.lin())).collect(),
+            slack,
+        };
+        Some(match self.prove(goal, sum)? {
+            (1, sum) => sum,
+            (by, inner) => Cert::Scaled {
+                by,
+                inner: Box::new(inner),
+            },
+        })
+    }
+
+    /// Whether [`Prover::ge0`] proves `goal`, without its certificate.
+    pub fn proves(&self, goal: &Lin) -> bool {
+        self.st.dead || self.prove(goal, |_, _| ()).is_some()
+    }
+
+    /// The search of [`Prover::ge0`]: `done` of the premises and the slack it
+    /// found, with the factor it divided the goal by, one when none. A goal
+    /// whose coefficients share a factor is also asked divided by it:
+    /// `2k - 1 >= 0` as `k - 1 >= 0`.
+    fn prove<R>(
+        &self,
+        goal: &Lin,
+        done: impl Fn(&[(i64, Prem<'a>)], i64) -> R,
+    ) -> Option<(i64, R)> {
+        if let Some(r) = self.search(goal, &done) {
+            return Some((1, r));
+        }
+        let g = self.st.norm(goal)?;
+        let by = (g.terms.iter()).fold(0, |d, (_, k)| gcd(d, k.unsigned_abs()));
+        let by = i64::try_from(by).ok().filter(|b| *b > 1)?;
+        let terms = g.terms.iter().map(|&(t, k)| (t, k / by)).collect();
+        let divided = Lin {
+            terms,
+            c: g.c.div_euclid(by),
+        };
+        Some((by, self.search(&divided, &done)?))
+    }
+
+    /// Proves `goal >= 0` from at most two premises, or from one premise and
+    /// a length axiom for each length the rest names, and answers `done` of
+    /// the premises, each taken a whole number of times, and the slack.
+    fn search<R>(&self, goal: &Lin, done: impl Fn(&[(i64, Prem<'a>)], i64) -> R) -> Option<R> {
         let g = self.st.norm(goal)?;
         if g.is_const() {
-            return (g.c >= 0).then(|| Cert::Sum {
-                uses: Vec::new(),
-                slack: g.c,
-            });
+            return (g.c >= 0).then(|| done(&[], g.c));
         }
-        // The goal's own lengths may appear in no fact.
-        let extra = axioms(g.terms.iter().map(|(t, _)| *t));
         let one = |terms: &[(Term, i64)], c: i64| {
-            let fact = self.best.get(terms).copied();
-            let axiom = self.axioms.iter().filter(|p| p.terms == terms);
+            let fact = self.best.get(terms).map(|p| Prem::Fact(p));
+            let indexed = axiom_on(terms, |t| self.lengths.binary_search(&t).is_ok());
             // The premise with the least constant, the first on a tie.
             let indexed = fact
                 .into_iter()
-                .chain(axiom)
-                .reduce(|m, p| if p.c < m.c { p } else { m });
+                .chain(indexed)
+                .reduce(|m, p| if p.c() < m.c() { p } else { m });
             indexed
                 .into_iter()
-                .chain(extra.iter().filter(|p| p.terms == terms))
-                .find(|p| p.c <= c)
+                .chain(axiom_on(terms, |t| g.coef(t) != 0))
+                .find(|p| p.c() <= c)
         };
         if let Some(p) = one(&g.terms, g.c) {
-            return Some(Cert::Sum {
-                slack: g.c - p.c,
-                uses: vec![(1, p.clone())],
-            });
+            return Some(done(&[(1, p)], g.c - p.c()));
         }
         let length = |(t, k): &(Term, i64)| t.is_length() && matches!(k, 1 | -1);
-        // The constant of `len >= 0` or `LEN_MAX - len >= 0`, as `axioms` states them.
-        let axiom_c = |k: i64| if k < 0 { LEN_MAX } else { 0 };
         let mut d = Lin::k(0);
-        for p in self.st.facts.iter().chain(&self.axioms).chain(&extra) {
-            if g.add_scaled_into(p, -1, &mut d).is_none() {
+        for p in self.premises(&g) {
+            if g.add_scaled_into(p.terms(), p.c(), -1, &mut d).is_none() {
                 continue;
             }
             if let Some(q) = one(&d.terms, d.c) {
-                return Some(Cert::Sum {
-                    slack: d.c - q.c,
-                    uses: vec![(1, p.clone()), (1, q.clone())],
-                });
+                return Some(done(&[(1, p), (1, q)], d.c - q.c()));
             }
             // A rest `k*t + c` takes the premise on `t` `|k|` times:
             // `off + 4t` from `off >= 0` and four times `t >= 0`.
@@ -1070,12 +1148,9 @@ impl Prover<'_> {
                 let q = by.and_then(|by| one(&[(t, k / by)], d.c.div_euclid(by)));
                 let slack = q
                     .zip(by)
-                    .and_then(|(q, by)| d.c.checked_sub(q.c.checked_mul(by)?));
+                    .and_then(|(q, by)| d.c.checked_sub(q.c().checked_mul(by)?));
                 if let (Some(q), Some(by), Some(slack)) = (q, by, slack) {
-                    return Some(Cert::Sum {
-                        slack,
-                        uses: vec![(1, p.clone()), (by, q.clone())],
-                    });
+                    return Some(done(&[(1, p), (by, q)], slack));
                 }
             }
             // A rest over lengths alone, each with coefficient one or minus
@@ -1084,19 +1159,11 @@ impl Prover<'_> {
             if !d.terms.iter().all(length) {
                 continue;
             }
-            let slack = (d.terms.iter()).try_fold(d.c, |c, (_, k)| c.checked_sub(axiom_c(*k)));
+            let rest = d.terms.iter().map(|&(t, k)| axiom(t, k));
+            let slack = rest.clone().try_fold(d.c, |c, a| c.checked_sub(a.c()));
             if let Some(slack) = slack.filter(|s| *s >= 0) {
-                let rest = d.terms.iter().map(|&(t, k)| Lin {
-                    terms: vec![(t, k)],
-                    c: axiom_c(k),
-                });
-                return Some(Cert::Sum {
-                    uses: std::iter::once(p.clone())
-                        .chain(rest)
-                        .map(|u| (1, u))
-                        .collect(),
-                    slack,
-                });
+                let uses: Vec<_> = std::iter::once(p).chain(rest).map(|u| (1, u)).collect();
+                return Some(done(&uses, slack));
             }
         }
         None
@@ -1122,17 +1189,10 @@ fn canon(l: Lin) -> Option<Lin> {
 
 /// `len >= 0` and `LEN_MAX - len >= 0` for every length among `terms`.
 fn axioms(terms: impl Iterator<Item = Term>) -> Vec<Lin> {
-    let mut out = Vec::new();
-    for t in terms {
-        if t.is_length() {
-            out.push(Lin::of(t));
-            out.push(Lin {
-                terms: vec![(t, -1)],
-                c: LEN_MAX,
-            });
-        }
-    }
-    out
+    (terms.filter(|t| t.is_length()))
+        .flat_map(|t| [axiom(t, 1), axiom(t, -1)])
+        .map(|p| p.lin())
+        .collect()
 }
 
 #[cfg(test)]

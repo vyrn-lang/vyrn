@@ -4546,7 +4546,8 @@ impl<'a> Walk<'a> {
             let (Some(hi), Some(lo)) = (Lin::k(m).sub(l), l.plus(m)) else {
                 return false;
             };
-            st.ge0(&hi).is_some() && st.ge0(&lo).is_some()
+            let p = st.prover();
+            p.proves(&hi) && p.proves(&lo)
         };
         let r = r?;
         let halves = || parts.len() == 2 && parts.iter().all(|p| within(p, EXACT / 2));
@@ -4868,7 +4869,7 @@ impl<'a> Walk<'a> {
                             && t.name().is_some_and(|n| stored.contains(&n))
                     })
                 })
-                .filter(|l| known.ge0(l).is_none())
+                .filter(|l| !known.proves(l))
                 .map(Fact::Ge)
                 .collect::<Vec<_>>()
         });
@@ -5514,7 +5515,8 @@ impl<'a> Walk<'a> {
         let (Some(a), Some(b)) = (l.plus(-lo), Lin::k(hi).sub(l)) else {
             return false;
         };
-        st.ge0(&a).is_some() && st.ge0(&b).is_some()
+        let p = st.prover();
+        p.proves(&a) && p.proves(&b)
     }
 
     /// What `n = op(vs)` states, read in `pre`.
@@ -6065,7 +6067,7 @@ impl<'a> Walk<'a> {
         }
         if !cands.is_empty() {
             let at_entry = entry.prover();
-            cands.retain(|c| at_entry.ge0(c).is_some());
+            cands.retain(|c| at_entry.proves(c));
         }
         self.loops.push(Loop {
             breaks: Vec::new(),
@@ -6103,7 +6105,7 @@ impl<'a> Walk<'a> {
             }
             let before = (cands.len(), temps.len());
             let provers: Vec<_> = ends.iter().map(|s| s.prover()).collect();
-            cands.retain(|c| provers.iter().all(|p| p.ge0(c).is_some()));
+            cands.retain(|c| provers.iter().all(|p| p.proves(c)));
             let live = ends.iter().filter(|e| !e.dead);
             let kept = |(a, t): &(Name, Lin)| {
                 live.clone()
