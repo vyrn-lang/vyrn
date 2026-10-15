@@ -493,7 +493,7 @@ fn placed_reach(
     let mut bodies = Vec::new();
     let mut insts = Vec::new();
     for inst in lowered.instances.iter().filter(|i| !i.func.is_gen) {
-        if let Ok(b) = crate::core::build(program, inst, own) {
+        if let Ok(b) = crate::core::build(program, &world, inst) {
             bodies.push(b);
             insts.push(inst);
         }
@@ -589,7 +589,7 @@ pub(crate) fn judge_built<R>(
     }
     // The module-state initializer's lambdas are keyed under the empty
     // name.
-    let mut state = crate::core::build_module_state(program, own, fns, &lowered.globals).ok();
+    let mut state = crate::core::module_state_in(program, own, fns, &lowered.globals).ok();
     if let Some(b) = &mut state {
         fns.number(b);
     }

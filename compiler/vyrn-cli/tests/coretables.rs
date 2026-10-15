@@ -58,13 +58,12 @@ fn core_body(src: &str, which: &str) -> vyrn_frontend::core::Body {
     .unwrap_or_else(|d| panic!("{}", d.first().map(|d| d.render()).unwrap_or_default()));
     let lowered = vyrn_lower::lower(&program);
     let world = vyrn_lower::analyze(&program);
-    let own = &world.ownership;
     let inst = lowered
         .instances
         .iter()
         .find(|i| i.func.name == which)
         .unwrap_or_else(|| panic!("`{which}` is lowered"));
-    vyrn_lower::core::build(&program, inst, &own).expect("the body builds")
+    vyrn_lower::core::build(&program, &world, inst).expect("the body builds")
 }
 
 /// Returns the core's hole set for the `let` named `binding` in `main`. A `consume p` states
@@ -98,19 +97,19 @@ fn a_body_reads_its_own_analysis_after_another_program_is_placed() {
     let analyzed = |src: &str| {
         let program = vyrn_lower::load(src, "core.vyrn", &Default::default(), &DiskResolver, None)
             .unwrap_or_else(|d| panic!("{}", d[0].render()));
-        let own = vyrn_lower::analyze(&program).ownership.clone();
-        (program, own)
+        let world = vyrn_lower::analyze(&program);
+        (program, world)
     };
-    let main_of = |program: &Program, own: &vyrn_frontend::own::Ownership| {
-        let lowered = vyrn_lower::lower_with(program, own);
+    let main_of = |program: &Program, world: &vyrn_lower::World| {
+        let lowered = vyrn_lower::lower_with(program, &world.ownership);
         let inst = (lowered.instances.iter())
             .find(|i| i.func.name == "main")
             .expect("`main` is lowered");
-        vyrn_lower::core::build(program, inst, own)
+        vyrn_lower::core::build(program, world, inst)
             .expect("`main` builds")
             .render()
     };
-    let (a, own_a) = analyzed(
+    let (a, world_a) = analyzed(
         "type P = { name: String, tags: Array<String> }
          fn main() -> Int64 {
              let mut p = P { name: \"a\" + \"b\", tags: [\"x\"] }
@@ -119,8 +118,8 @@ fn a_body_reads_its_own_analysis_after_another_program_is_placed() {
              return n
          }",
     );
-    let before = main_of(&a, &own_a);
-    let (_b, _own_b) = analyzed(
+    let before = main_of(&a, &world_a);
+    let (_b, _world_b) = analyzed(
         "fn main() -> Int64 {
              let xs = [1, 2, 3]
              let mut s = \"q\"
@@ -128,7 +127,7 @@ fn a_body_reads_its_own_analysis_after_another_program_is_placed() {
              return s.byteLength
          }",
     );
-    assert_eq!(main_of(&a, &own_a), before);
+    assert_eq!(main_of(&a, &world_a), before);
 }
 
 /// A build against an analysis reads the placer's effect judgment: a `while` header on a global
@@ -352,7 +351,6 @@ fn run() {
         programs += 1;
         let lowered = vyrn_lower::lower(&program);
         let world = vyrn_lower::analyze(&program);
-        let own = &world.ownership;
         let facts = (world.facts.as_ref()).expect("the placer fills the core's facts");
 
         for core_says in facts.arms.values() {
@@ -393,7 +391,7 @@ fn run() {
 
         // The build is the placer's own, re-run because the fold keeps no `Rhs`.
         for inst in &lowered.instances {
-            let Ok(top) = vyrn_lower::core::build(&program, inst, &own) else {
+            let Ok(top) = vyrn_lower::core::build(&program, &world, inst) else {
                 continue;
             };
             for body in top.frames() {

@@ -115,17 +115,11 @@ fn run_corpus() {
         programs += 1;
         let lowered = vyrn_lower::lower(&program);
         let world = vyrn_lower::analyze(&program);
-        let own = &world.ownership;
         let file = path.file_name().unwrap().to_string_lossy().to_string();
         // The module-state initializer is a body but no instance: every `let` at
         // module scope is a store into the global it names.
         if !program.globals.is_empty() {
-            match vyrn_lower::core::build_module_state(
-                &program,
-                &own,
-                &Default::default(),
-                &lowered.globals,
-            ) {
+            match vyrn_lower::core::build_module_state(&program, &world, &lowered.globals) {
                 Err(g) => {
                     // A rule the core states is a refusal, not a gap.
                     if let Some(m) = g.rule.as_ref().map(|d| &d.message) {
@@ -157,13 +151,7 @@ fn run_corpus() {
         }
         // A `test` or `bench` body is a body but no instance: neither is a function.
         for ob in &lowered.bodies {
-            match vyrn_lower::core::build_outside(
-                &program,
-                &own,
-                &Default::default(),
-                &mut Default::default(),
-                ob,
-            ) {
+            match vyrn_lower::core::build_outside(&program, &world, ob) {
                 Err(g) => {
                     if let Some(m) = g.rule.as_ref().map(|d| &d.message) {
                         refused.push(format!("{file}: {}: line {}: {m}", ob.name, g.line));
@@ -193,7 +181,7 @@ fn run_corpus() {
             }
         }
         for inst in &lowered.instances {
-            match vyrn_lower::core::build(&program, inst, &own) {
+            match vyrn_lower::core::build(&program, &world, inst) {
                 Err(g) => {
                     if let Some(m) = g.rule.as_ref().map(|d| &d.message) {
                         refused.push(format!("{file}: {}: line {}: {m}", inst.spelling(), g.line));

@@ -478,11 +478,17 @@ fn gaps_rhs(body: &Body, r: &Rhs, out: &mut Vec<String>) {
     }
 }
 
-/// Builds the core of one instance. The first build records candidates and
+/// Builds the core of one instance against `world`, `program`'s analysis:
+/// its plan and its function table. The first build records candidates and
 /// takes nothing; where [`last_owner`] names any, a second build takes them.
-/// Its frames have no row ([`Body::id`]).
-pub fn build(program: &Program, inst: &Instance<'_>, own: &Ownership) -> Result<Body, Gap> {
-    build_in(program, inst, own, &Fns::default(), &mut Default::default())
+pub fn build(program: &Program, world: &crate::World, inst: &Instance<'_>) -> Result<Body, Gap> {
+    build_in(
+        program,
+        inst,
+        &world.ownership,
+        &world.fns,
+        &mut Default::default(),
+    )
 }
 
 /// [`build`] with the caller's function table and memo of `own`'s name facts.
@@ -1217,8 +1223,18 @@ fn seeded<'a>(
     Ok(b.body)
 }
 
-/// The module-state initializers as a body ([`Source::Globals`]).
+/// The module-state initializers as a body ([`Source::Globals`]), against
+/// `world` as [`build`] is.
 pub fn build_module_state<'a>(
+    program: &'a Program,
+    world: &'a crate::World,
+    facts: &NodeTypes<'a>,
+) -> Result<Body, Gap> {
+    module_state_in(program, &world.ownership, &world.fns, facts)
+}
+
+/// [`build_module_state`] with the caller's function table.
+pub(crate) fn module_state_in<'a>(
     program: &'a Program,
     own: &'a Ownership,
     fns: &'a Fns,
@@ -1233,8 +1249,24 @@ pub fn build_module_state<'a>(
     )
 }
 
-/// The body of a `test` or a `bench` ([`Source::Block`]).
+/// The body of a `test` or a `bench` ([`Source::Block`]), against `world`
+/// as [`build`] is.
 pub fn build_outside<'a>(
+    program: &'a Program,
+    world: &'a crate::World,
+    ob: &OutsideBody<'a>,
+) -> Result<Body, Gap> {
+    outside_in(
+        program,
+        &world.ownership,
+        &world.fns,
+        &mut NameMemo::default(),
+        ob,
+    )
+}
+
+/// [`build_outside`] with the caller's function table and name memo.
+pub(crate) fn outside_in<'a>(
     program: &'a Program,
     own: &'a Ownership,
     fns: &'a Fns,
@@ -8296,7 +8328,7 @@ pub fn augment(program: &Program, w: &mut World, judging: bool) {
     // load still needs its facts.
     let folds = !judging || vyrn_frontend::movecheck::emitting();
     if folds {
-        let state = build_module_state(program, own, &w.fns, &lowered.globals);
+        let state = module_state_in(program, own, &w.fns, &lowered.globals);
         let mut tops: Vec<Body> = state.into_iter().collect();
         // Rebuilt only where the pass above wrote a row for the function; the
         // rest fold the body that pass already built. The rebuilds read `own`
@@ -8325,7 +8357,7 @@ pub fn augment(program: &Program, w: &mut World, judging: bool) {
                 }
                 match j {
                     Job::Inst(inst) => build_in(program, inst, shared, fns, names).ok(),
-                    Job::Outside(ob) => build_outside(program, shared, fns, names, ob).ok(),
+                    Job::Outside(ob) => outside_in(program, shared, fns, names, ob).ok(),
                 }
             },
         );
@@ -8478,7 +8510,7 @@ impl Job<'_, '_> {
             }
             Job::Outside(ob) => {
                 let _p = vyrn_frontend::prof::phase("placer: build_outside");
-                build_outside(program, own, fns, names, ob)
+                outside_in(program, own, fns, names, ob)
             }
         }
     }

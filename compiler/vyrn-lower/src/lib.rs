@@ -270,7 +270,7 @@ pub fn render(program: &Program, world: &World, source: &str) -> String {
             continue;
         }
         // The World holds no body for a gap. The gap's words need the build.
-        match core::build(program, inst, own) {
+        match core::build(program, world, inst) {
             Ok(_) => out.push_str(&format!("; {}: no body is emitted\n", inst.spelling())),
             Err(g) => out.push_str(&format!(
                 "; {}: not lowered at line {}: {} {}\n",

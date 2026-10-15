@@ -282,11 +282,10 @@ fn run_corpus() {
         };
         let lowered = vyrn_lower::lower(&program);
         let world = vyrn_lower::analyze(&program);
-        let own = &world.ownership;
         let mut bodies = Vec::new();
         let mut insts = Vec::new();
         for inst in &lowered.instances {
-            match vyrn_lower::core::build(&program, inst, &own) {
+            match vyrn_lower::core::build(&program, &world, inst) {
                 Ok(b) => {
                     bodies.push(b);
                     insts.push(inst);
@@ -312,24 +311,13 @@ fn run_corpus() {
         // which is what a stored source names.
         let mut outside: Vec<vyrn_frontend::core::Body> = Vec::new();
         if !program.globals.is_empty() {
-            match vyrn_lower::core::build_module_state(
-                &program,
-                &own,
-                &Default::default(),
-                &lowered.globals,
-            ) {
+            match vyrn_lower::core::build_module_state(&program, &world, &lowered.globals) {
                 Ok(b) => outside.push(b),
                 Err(g) => *gaps.entry(g.what).or_default() += 1,
             }
         }
         for ob in &lowered.bodies {
-            match vyrn_lower::core::build_outside(
-                &program,
-                &own,
-                &Default::default(),
-                &mut Default::default(),
-                ob,
-            ) {
+            match vyrn_lower::core::build_outside(&program, &world, ob) {
                 Ok(b) => outside.push(b),
                 Err(g) => {
                     if show_gaps.as_deref().is_some_and(|w| g.what.contains(w)) {
@@ -360,7 +348,7 @@ fn run_corpus() {
                 facts: pr.facts.clone(),
                 releases: Vec::new(),
             };
-            match vyrn_lower::core::build(&program, &inst, &own) {
+            match vyrn_lower::core::build(&program, &world, &inst) {
                 Ok(b) => place_bodies.push((pr.func.name.as_str(), b)),
                 Err(g) => {
                     if show_gaps.as_deref().is_some_and(|w| g.what.contains(w)) {
