@@ -128,6 +128,7 @@ pull request.
 - A function returns an owned value. No borrowed return; projections cover in-place access.
 - A place owns its contents. A store releases what the place held, and releasing an aggregate releases its places.
 - Copying is explicit, spelled `x.copy()`. A hidden copy is an unbounded cost that nothing at the call site shows.
+- A validated record literal that is a part of its parent (an array literal's element, a field, a variant's payload) is built at its offset in the parent's storage, and its `where` check reads it there (`Fn_::core_ruled`). A slot and a copy would be a hidden copy. A failed check traps with the bound literal's words and frees nothing, as every trap does, so the parent's earlier parts stay unreleased.
 - No reference counting, deep copy on assignment, region inference or linear-everything. Each adds run-time cost, hidden behaviour or annotations on the common path.
 - No drop flags. An ambiguous join (moved on one path only) gets a release on the other edge or is refused.
 - A join arm that yields a name bound outside the construct moves it; a later use is refused with the `.copy()` fix. Treating the yield as an alias leaked the name on the edges that did not yield it.
