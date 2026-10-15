@@ -989,28 +989,35 @@ impl Place {
 /// Every row of `ss` and every row under it, in program order, each before
 /// the rows it holds, with the number of loops between the row and `ss`.
 pub fn rows(ss: &[St]) -> Rows<'_> {
-    Rows(vec![(ss.iter(), 0)])
+    Rows(ss.iter(), Vec::new())
 }
 
-/// The iterator [`rows`] returns: a stack of the lists still being walked,
-/// the innermost last, each with its loop depth.
-pub struct Rows<'a>(Vec<(std::slice::Iter<'a, St>, u32)>);
+/// The iterator [`rows`] returns: the outermost list, then a stack of the
+/// lists under it still being walked, the innermost last, each with its loop
+/// depth. A walk that meets no list under the outermost allocates nothing.
+pub struct Rows<'a>(
+    std::slice::Iter<'a, St>,
+    Vec<(std::slice::Iter<'a, St>, u32)>,
+);
 
 impl<'a> Iterator for Rows<'a> {
     type Item = (&'a St, u32);
 
     fn next(&mut self) -> Option<(&'a St, u32)> {
         loop {
-            let (list, depth) = self.0.last_mut()?;
-            let depth = *depth;
+            let (list, depth) = match self.1.last_mut() {
+                Some((list, depth)) => (list, *depth),
+                None => (&mut self.0, 0),
+            };
             let Some(s) = list.next() else {
-                self.0.pop();
+                // The outermost list is done once the stack is empty.
+                self.1.pop().is_some().then_some(())?;
                 continue;
             };
             let inner = depth + u32::from(matches!(s, St::Loop { .. }));
-            let at = self.0.len();
-            self.0.extend(s.lists().map(|l| (l.iter(), inner)));
-            self.0[at..].reverse();
+            let at = self.1.len();
+            self.1.extend(s.lists().map(|l| (l.iter(), inner)));
+            self.1[at..].reverse();
             return Some((s, depth));
         }
     }
