@@ -43,6 +43,7 @@
 //!   of the global. Every other unowned name is invisible here.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 use vyrn_frontend::ast::{Capability, FnId, NodeId};
 use vyrn_frontend::core::{
@@ -627,23 +628,23 @@ pub struct Took {
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum By {
     /// A `let` of a value, or a store into a name the reader wrote.
-    Binding(String),
+    Binding(Arc<str>),
     /// The container temporary of a `for x in consume xs` loop.
     ForConsume,
     /// A `let` of a value into a compiler temporary.
     Value,
     /// A call, by the callee's spelling.
-    Call(String),
+    Call(Arc<str>),
     /// A prefix `consume`.
     Consume,
     /// An array, map, record or variant literal.
     Literal,
     /// A store into a field (`f`), or a record literal's part (`R.f`).
-    Field(String),
+    Field(Arc<str>),
     /// A store into module state.
-    Global(String),
+    Global(Arc<str>),
     /// A store into an element or a key of a named container.
-    Container(String),
+    Container(Arc<str>),
     /// A store into a place no written name roots.
     Store,
     Return,
@@ -878,7 +879,7 @@ impl<'b> Kernel<'b> {
             .checked_sub(1)
             .and_then(|i| self.made.get(i))
         {
-            Some(field) => By::Field(field.clone()),
+            Some(field) => By::Field(field.as_str().into()),
             None => self.by.clone(),
         };
         // A literal's part is stored into its field, whatever the statement.
@@ -1495,7 +1496,7 @@ impl<'b> Kernel<'b> {
                 .and_then(|i| self.made.get(i))
             {
                 Some(field) => {
-                    let field = By::Field(field.clone());
+                    let field = By::Field(field.as_str().into());
                     format!("`{s}` may not be stored into {field}")
                 }
                 None => format!("`{s}` may not be stored into the literal"),
@@ -2235,7 +2236,7 @@ impl<'b> Kernel<'b> {
     fn by_of(&self, rhs: &Rhs, bound: Option<Name>) -> By {
         match rhs {
             Rhs::Val(_) => match bound {
-                Some(n) if !self.src(n).starts_with('@') => By::Binding(self.src(n).to_string()),
+                Some(n) if !self.src(n).starts_with('@') => By::Binding(self.src(n).into()),
                 // The reader wrote the loop, not its container temporary.
                 Some(n) if self.body.names[n.index()].for_consume => By::ForConsume,
                 _ => By::Value,
@@ -2244,11 +2245,7 @@ impl<'b> Kernel<'b> {
             // and the generic body word one refusal alike.
             Rhs::Call { callee, .. } => {
                 let member = vyrn_frontend::types::impl_method_member(callee).unwrap_or(callee);
-                By::Call(
-                    self.body
-                        .spelled(member.trim_start_matches('@'))
-                        .to_string(),
-                )
+                By::Call(self.body.spelled(member.trim_start_matches('@')).into())
             }
             Rhs::Take(_) => By::Consume,
             Rhs::Make(..) => By::Literal,
@@ -2304,15 +2301,15 @@ impl<'b> Kernel<'b> {
                 self.takes.set(Taker::Stores);
                 self.by = match place {
                     Place::Name(n) if !self.src(*n).starts_with('@') => {
-                        By::Binding(self.src(*n).to_string())
+                        By::Binding(self.src(*n).into())
                     }
-                    Place::Field(_, f) => By::Field(f.clone()),
+                    Place::Field(_, f) => By::Field(f.as_str().into()),
                     // An element or key store names its container, as the
                     // checker does.
-                    Place::Global(g) => By::Global(self.body.spelled(g).to_string()),
+                    Place::Global(g) => By::Global(self.body.spelled(g).into()),
                     p => match root_of(p) {
                         Some((n, _)) if !self.src(n).starts_with('@') => {
-                            By::Container(self.src(n).to_string())
+                            By::Container(self.src(n).into())
                         }
                         _ => By::Store,
                     },
