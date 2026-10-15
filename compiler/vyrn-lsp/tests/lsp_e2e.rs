@@ -2365,6 +2365,70 @@ fn vyx_without_interpolation_has_an_owner() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+const OUTLINE_APP: &str = "import { components } from \"std/vyx\"\n\
+    import { card } from components(\"./widgets\")\n\
+    fn main() -> Int64 { return 0 }\n";
+const OUTLINE_VYX: &str = "<script>\n\
+    props { label: String }\n\
+    type Tone = | Calm | Loud\n\
+    let greeting = \"hi\"\n\
+    fn shout(s: String) -> String { return s + greeting }\n\
+    </script>\n\
+    <template>\n\
+    <p>{{ shout(label) }}</p>\n\
+    </template>\n";
+
+/// A `.vyx` outline lists its script's declarations at their `.vyx` positions,
+/// and not the view function its template becomes.
+#[test]
+fn vyx_document_symbol_lists_script_declarations() {
+    let n = SCRATCH_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let dir = std::env::temp_dir().join(format!("vyrn_lsp_outline_{}_{n}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("widgets")).unwrap();
+    std::fs::write(dir.join("vyrn.json"), "{ \"name\": \"outline\" }").unwrap();
+    std::fs::write(dir.join("app.vyrn"), OUTLINE_APP).unwrap();
+    std::fs::write(dir.join("widgets/Card.vyx"), OUTLINE_VYX).unwrap();
+
+    let mut client = spawn_client();
+    let uri = file_uri(&dir.join("widgets/Card.vyx"));
+    did_open(&mut client, &uri, "vyx", OUTLINE_VYX);
+    let id = serde_json::json!("outline");
+    client.send(&serde_json::json!({
+        "jsonrpc": "2.0", "id": id, "method": "textDocument/documentSymbol",
+        "params": { "textDocument": { "uri": uri } }
+    }));
+    let resp = client.read_response(&id);
+    let items = resp["result"].as_array().expect("a symbol list");
+    let got: Vec<(String, u64, u64, u64)> = items
+        .iter()
+        .map(|s| {
+            (
+                s["name"].as_str().unwrap().to_string(),
+                s["kind"].as_u64().unwrap(),
+                s["range"]["start"]["line"].as_u64().unwrap(),
+                s["range"]["start"]["character"].as_u64().unwrap(),
+            )
+        })
+        .collect();
+    // LSP SymbolKind: Variable=13, Function=12, EnumMember=22, Struct=23.
+    let want = [
+        ("Tone", 23, 2, 5),
+        ("Calm", 22, 2, 14),
+        ("Loud", 22, 2, 21),
+        ("greeting", 13, 3, 4),
+        ("shout", 12, 4, 3),
+    ];
+    let want: Vec<(String, u64, u64, u64)> = want
+        .iter()
+        .map(|&(n, k, l, c)| (n.to_string(), k, l, c))
+        .collect();
+    assert_eq!(got, want);
+
+    let _ = client.child.kill();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// One `documentHighlight` occurrence: 1-based `line`, 0-based `ch`, and the
 /// `DocumentHighlightKind` (2 = Read, 3 = Write). `ch` shows in failure output.
 #[derive(Debug)]

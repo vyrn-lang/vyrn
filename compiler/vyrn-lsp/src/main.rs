@@ -1655,15 +1655,50 @@ fn handle_document_symbol(
     params: serde_json::Value,
 ) -> Option<DocumentSymbolResponse> {
     let p: DocumentSymbolParams = serde_json::from_value(params).ok()?;
-    let (analysis, _uri) = lookup(server, &p.text_document.uri)?;
-    let text = doc_text(server, &p.text_document.uri).unwrap_or_default();
-    let symbols: Vec<DocumentSymbol> = analysis
-        .symbols
-        .iter()
-        .filter(|s| s.file.is_none())
-        .filter_map(|s| to_document_symbol(s, &text))
-        .collect();
+    let uri = &p.text_document.uri;
+    let text = doc_text(server, uri).unwrap_or_default();
+    let symbols: Vec<DocumentSymbol> = if is_vyrn_uri(uri) {
+        let (analysis, _) = lookup(server, uri)?;
+        analysis
+            .symbols
+            .iter()
+            .filter(|s| s.file.is_none())
+            .filter_map(|s| to_document_symbol(s, &text))
+            .collect()
+    } else {
+        vyx_document_symbols(server, uri, &text)
+    };
     Some(DocumentSymbolResponse::Nested(symbols))
+}
+
+/// The `<script>` declarations of a `.vyx`: the generated modules' own
+/// top-level symbols whose name lies in a verbatim origin region, at the input
+/// columns. The view functions a template becomes lie in no region.
+fn vyx_document_symbols(server: &Server, vyx_uri: &Url, text: &str) -> Vec<DocumentSymbol> {
+    vyx_back_map(
+        server,
+        vyx_uri,
+        |_, _| true,
+        |sp, out| {
+            for s in &sp.synth.analysis.symbols {
+                if s.file.is_some() || !sp.within(s.line, s.col, s.end_col) {
+                    continue;
+                }
+                let end_col = sp.back(s.end_col);
+                if !name_ends_at(sp.vyx_line, end_col, &s.name) {
+                    continue;
+                }
+                let at = vyrn_frontend::Symbol {
+                    line: sp.region.origin.line,
+                    col: sp.back(s.col),
+                    end_col,
+                    ..s.clone()
+                };
+                out.extend(to_document_symbol(&at, text));
+            }
+        },
+        |d| (d.range.start.line, d.range.start.character),
+    )
 }
 
 /// One whole-document replace with the formatter's output; empty if already
