@@ -7906,11 +7906,12 @@ pub fn augment(program: &Program, w: &mut World, judging: bool) {
         .flatten();
     drop(js);
     let lw = vyrn_frontend::prof::phase("placer: lower_with");
-    let lowered = match memo {
+    let mut lowered = match memo {
         Some(_) => crate::lower_reusing(program, own),
         None => crate::lower_with(program, own),
     };
     drop(lw);
+    w.unresolved = (memo.is_none()).then(|| std::mem::take(&mut lowered.unresolved));
     w.fns = Fns::lowered(&lowered);
     // `VYRN_KERNEL_TRACE=1` prints every release the placer found owed, and
     // whether it could place it.
@@ -8353,7 +8354,8 @@ pub fn augment(program: &Program, w: &mut World, judging: bool) {
     // after one that built at least one of them, since only a new body's
     // placement adds to `placed`.
     while dispatches {
-        let again = crate::lower_with(program, own);
+        let mut again = crate::lower_with(program, own);
+        w.unresolved = Some(std::mem::take(&mut again.unresolved));
         let mut placed: Vec<Release> = Vec::new();
         for inst in &again.instances {
             if !had.insert(inst.spelling()) {
