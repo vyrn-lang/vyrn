@@ -75,6 +75,12 @@ pub struct World {
     /// `reached` holds no such instance, so [`crate::effects::reaches`] judges
     /// the program as placed instead.
     pub(crate) late: bool,
+    /// Where the placer's last lowering stopped ([`crate::Lowered::unresolved`]).
+    /// A row placed after that lowering dispatches only to an instance it
+    /// holds, so a lowering of the program as placed stops at the same calls.
+    /// `None` where an armed judgment memo ended the placer before its
+    /// fixpoint.
+    pub unresolved: Option<Vec<crate::Unresolved>>,
 }
 
 /// One row of the World's function table.

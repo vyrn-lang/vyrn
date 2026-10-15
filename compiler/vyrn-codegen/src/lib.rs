@@ -334,18 +334,30 @@ pub fn check_inst_depth<'a>(
     Ok(())
 }
 
-/// Runs `vyrn-lower`'s monomorphization and reports only its depth refusal, for
-/// `vyrn check`; other codegen errors stay outside `check`'s contract.
+/// Reports the monomorphization limit's refusal, for `vyrn check`; other
+/// codegen errors stay outside `check`'s contract. Of the calls the worklist
+/// stopped at past the limit ([`vyrn_lower::World::unresolved`]), it words the
+/// first by the callee's line, then its name and type arguments.
 /// `vyrn-cli/tests/lowered.rs` asserts over the corpus that every instance the
-/// emitter builds is one the lowering's worklist has. `world` is `program`'s.
-pub fn check_instantiations(program: &Program, world: &vyrn_lower::World) -> Result<(), String> {
-    let types = vyrn_frontend::types::decl_map(program);
-    for u in vyrn_lower::lower_with(program, &world.ownership).unresolved {
-        if u.why == vyrn_lower::Why::PastTheLimit {
-            check_inst_depth(&u.callee, u.args.iter(), u.line, &types)?;
-        }
-    }
-    Ok(())
+/// emitter builds is one the lowering's worklist has.
+///
+/// # Panics
+///
+/// `world` was judged under an armed judgment memo, which only the editor arms.
+pub fn check_instantiations(world: &vyrn_lower::World) -> Result<(), String> {
+    let decls = world.ownership.proto.types();
+    let stops = (world.unresolved.as_ref()).expect("the placer ran to its fixpoint");
+    let past = (stops.iter()).filter(|u| u.why == vyrn_lower::Why::PastTheLimit);
+    let at = |u: &&vyrn_lower::Unresolved| {
+        (
+            u.line,
+            u.callee.clone(),
+            u.args.iter().map(Type::to_string).collect::<Vec<_>>(),
+        )
+    };
+    past.min_by_key(at).map_or(Ok(()), |u| {
+        check_inst_depth(&u.callee, u.args.iter(), u.line, decls)
+    })
 }
 
 /// Deep-normalizes a stored-fn signature so structurally identical

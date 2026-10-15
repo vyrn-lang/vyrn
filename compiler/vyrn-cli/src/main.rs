@@ -586,19 +586,10 @@ impl Call {
 fn check_cmd(call: &Call) -> Outcome {
     let (p, path) = call.root()?;
     vyrn_frontend::movecheck::emit_nothing();
-    let (program, world) = p.checked(&path, &read_source(&path)?)?;
-    instantiable(&program, &world)?;
+    let (_, world) = p.checked(&path, &read_source(&path)?)?;
+    failed(vyrn_codegen::check_instantiations(&world))?;
     println!("ok");
     Ok(ExitCode::SUCCESS)
-}
-
-/// What `check` refuses, `run` refuses, with `check`'s sentence: a polymorphic
-/// recursion has no finite set of instances.
-fn instantiable(
-    program: &vyrn_frontend::ast::Program,
-    world: &vyrn_lower::World,
-) -> Result<(), ExitCode> {
-    failed(vyrn_codegen::check_instantiations(program, world))
 }
 
 /// A pass's `Err` printed as `error: ..`, exit 1.
@@ -4981,7 +4972,7 @@ fn run_cmd(call: &Call) -> Outcome {
     let source = read_source(&path)?;
     let (program, world) = p.checked(&path, &source)?;
     let load = clock.elapsed();
-    instantiable(&program, &world)?;
+    failed(vyrn_codegen::check_instantiations(&world))?;
     let profile = call
         .flags
         .profile
