@@ -136,6 +136,19 @@ impl Fns {
         id
     }
 
+    /// The first function `program` declares under `name`, with its row. The
+    /// table must be `program`'s: its first rows are `program.functions`.
+    pub(crate) fn declared<'p>(
+        &self,
+        program: &'p Program,
+        name: &str,
+    ) -> Option<(FnId, &'p Function)> {
+        let id = *self.ids.get(name)?;
+        let f = program.functions.get(id.index())?;
+        debug_assert_eq!(f.name, name, "the function table is another program's");
+        Some((id, f))
+    }
+
     /// The row named `name`, added when there is none.
     pub(crate) fn add(&mut self, name: &str) -> FnId {
         match self.id(name) {
