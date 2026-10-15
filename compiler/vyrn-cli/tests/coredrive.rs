@@ -206,9 +206,8 @@ fn run() {
         {
             let lowered = vyrn_lower::lower(&program);
             let world = vyrn_lower::analyze(&program);
-            let own = &world.ownership;
             for inst in &lowered.instances {
-                let Ok(top) = vyrn_lower::core::build(&program, inst, &own) else {
+                let Ok(top) = vyrn_lower::core::build(&program, &world, inst) else {
                     continue;
                 };
                 // A gen body is judged and emitted by the generator's own

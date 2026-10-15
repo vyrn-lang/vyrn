@@ -478,11 +478,17 @@ fn gaps_rhs(body: &Body, r: &Rhs, out: &mut Vec<String>) {
     }
 }
 
-/// Builds the core of one instance. The first build records candidates and
+/// Builds the core of one instance against `world`, `program`'s analysis:
+/// its plan and its function table. The first build records candidates and
 /// takes nothing; where [`last_owner`] names any, a second build takes them.
-/// Its frames have no row ([`Body::id`]).
-pub fn build(program: &Program, inst: &Instance<'_>, own: &Ownership) -> Result<Body, Gap> {
-    build_in(program, inst, own, &Fns::default(), &mut Default::default())
+pub fn build(program: &Program, world: &crate::World, inst: &Instance<'_>) -> Result<Body, Gap> {
+    build_in(
+        program,
+        inst,
+        &world.ownership,
+        &world.fns,
+        &mut Default::default(),
+    )
 }
 
 /// [`build`] with the caller's function table and memo of `own`'s name facts.
@@ -955,6 +961,7 @@ fn misfit(
 #[allow(clippy::too_many_arguments)]
 fn fn_slot(
     program: &Program,
+    fns: &Fns,
     name: &str,
     args: &[Expr],
     line: usize,
@@ -966,7 +973,7 @@ fn fn_slot(
 ) -> Option<(usize, String)> {
     use vyrn_frontend::types::{resolve, substitute};
     let recorded = |e: &Expr| types.get(&e.id()).filter(|t| **t != Type::Err);
-    let f = program.functions.iter().find(|f| f.name == name)?;
+    let (_, f) = fns.declared(program, name)?;
     let ([], [callee]) = sp.say([], [prelude::method_surface(name).trim_start_matches('@')]);
     let subst: HashMap<String, Type> = solved.iter().cloned().collect();
     let mut slots = f.params.iter().zip(args).enumerate();
@@ -1018,7 +1025,7 @@ fn fn_slot(
                 _ => None,
             },
             Expr::Var { name: vn, .. } => {
-                let g = program.functions.iter().find(|g| g.name == *vn)?;
+                let (_, g) = fns.declared(program, vn)?;
                 if !g.type_params.is_empty() {
                     return Some((line, rule!(GenericFnArg, vn).render()));
                 }
@@ -1217,8 +1224,18 @@ fn seeded<'a>(
     Ok(b.body)
 }
 
-/// The module-state initializers as a body ([`Source::Globals`]).
+/// The module-state initializers as a body ([`Source::Globals`]), against
+/// `world` as [`build`] is.
 pub fn build_module_state<'a>(
+    program: &'a Program,
+    world: &'a crate::World,
+    facts: &NodeTypes<'a>,
+) -> Result<Body, Gap> {
+    module_state_in(program, &world.ownership, &world.fns, facts)
+}
+
+/// [`build_module_state`] with the caller's function table.
+pub(crate) fn module_state_in<'a>(
     program: &'a Program,
     own: &'a Ownership,
     fns: &'a Fns,
@@ -1233,8 +1250,24 @@ pub fn build_module_state<'a>(
     )
 }
 
-/// The body of a `test` or a `bench` ([`Source::Block`]).
+/// The body of a `test` or a `bench` ([`Source::Block`]), against `world`
+/// as [`build`] is.
 pub fn build_outside<'a>(
+    program: &'a Program,
+    world: &'a crate::World,
+    ob: &OutsideBody<'a>,
+) -> Result<Body, Gap> {
+    outside_in(
+        program,
+        &world.ownership,
+        &world.fns,
+        &mut NameMemo::default(),
+        ob,
+    )
+}
+
+/// [`build_outside`] with the caller's function table and name memo.
+pub(crate) fn outside_in<'a>(
     program: &'a Program,
     own: &'a Ownership,
     fns: &'a Fns,
@@ -4342,7 +4375,7 @@ impl<'a> Builder<'a> {
         f: &str,
         recv: &Type,
     ) -> Option<Vec<(String, Type)>> {
-        let g = self.program.functions.iter().find(|g| g.name == f)?;
+        let (_, g) = self.declared(f)?;
         let mut subst = HashMap::new();
         vyrn_frontend::types::solve_param(&imp.ty, recv, &mut subst);
         (g.type_params.iter())
@@ -4350,11 +4383,13 @@ impl<'a> Builder<'a> {
             .collect()
     }
 
-    /// The id of the function the program declares under `name`.
+    /// The first function the program declares under `name`, with its row.
+    fn declared(&self, name: &str) -> Option<(FnId, &'a Function)> {
+        self.fns.declared(self.program, name)
+    }
+
     fn fn_id(&self, name: &str) -> Option<FnId> {
-        (self.program.functions.iter())
-            .position(|f| f.name == name)
-            .map(FnId::nth)
+        self.declared(name).map(|(id, _)| id)
     }
 
     fn is_map(&self, ty: &Type) -> bool {
@@ -4812,7 +4847,7 @@ impl<'a> Builder<'a> {
     /// Whether the program declares a callable of this name: a function, a
     /// method, a projection, or a seeded builtin.
     fn declares(&self, name: &str) -> bool {
-        self.program.functions.iter().any(|f| f.name == name)
+        self.declared(name).is_some()
             || self
                 .program
                 .impls
@@ -5098,11 +5133,7 @@ impl<'a> Builder<'a> {
                 }
                 // A function's name stored as a value: the closure enum's
                 // variant for it, which captures and owns nothing.
-                None if self
-                    .program
-                    .functions
-                    .iter()
-                    .any(|f| &f.name == name && f.type_params.is_empty())
+                None if self.concrete_fn(name)
                     && self.types.get(&e.id()).is_some_and(|t| {
                         matches!(
                             &*vyrn_frontend::types::resolved(t, self.proto.types()),
@@ -5111,7 +5142,7 @@ impl<'a> Builder<'a> {
                     }) =>
                 {
                     let ty = self.types[&e.id()].clone();
-                    let f = self.program.functions.iter().find(|f| &f.name == name);
+                    let f = self.declared(name).map(|(_, f)| f);
                     let decls = self.proto.types();
                     let refusal = stored_slot(None, f, &ty, &decls, *line, &self.body.speech());
                     self.body.mistyped.extend(refusal);
@@ -5125,7 +5156,7 @@ impl<'a> Builder<'a> {
                 // A function's name as a value (`sortWith(es, byCount)`), or
                 // a type's as an argument (`fromJson(Bag, src)`): static, and
                 // the checker types neither as an expression.
-                None if self.program.functions.iter().any(|f| &f.name == name)
+                None if self.declared(name).is_some()
                     || self.program.contracts.iter().any(|c| &c.name == name)
                     || self.proto.types().contains_key(name) =>
                 {
@@ -5584,7 +5615,7 @@ impl<'a> Builder<'a> {
         let t = self.ty_of(a).ok()?;
         let base = vyrn_frontend::types::resolve(&t, self.proto.types());
         vyrn_frontend::types::show_dispatch(&self.program.impls, &t, &base)
-            .filter(|f| self.program.functions.iter().any(|d| &d.name == f))
+            .filter(|f| self.declared(f).is_some())
     }
 
     /// `@copy` of the read `e`. The copy drains its operand as a call does: a
@@ -5877,7 +5908,7 @@ impl<'a> Builder<'a> {
                     vyrn_frontend::loader::routed_callee(name, type_args, args, |a| {
                         self.ty_of(a).ok().map(Cow::into_owned)
                     })
-                    .filter(|(f, _)| self.program.functions.iter().any(|d| &d.name == f))
+                    .filter(|(f, _)| self.declared(f).is_some())
                 {
                     return self.call(&f, fwd, *line, self.produced(e), None, out);
                 }
@@ -5925,6 +5956,7 @@ impl<'a> Builder<'a> {
                 let decls = self.proto.types();
                 let at = fn_slot(
                     self.program,
+                    self.fns,
                     name,
                     args,
                     *line,
@@ -6548,9 +6580,8 @@ impl<'a> Builder<'a> {
             // target that takes one otherwise (`Checker::reads_every_param`).
             kind = Callee::Value(n);
             vec![Capability::Read; args.len()]
-        } else if let Some(id) = self.fn_id(name) {
+        } else if let Some((id, f)) = self.declared(name) {
             kind = Callee::Fn(id);
-            let f = &self.program.functions[id.index()];
             f.params.iter().map(|p| p.capability).collect()
         } else if prelude::signature(name).is_some() {
             kind = Callee::Builtin;
@@ -6930,10 +6961,8 @@ impl<'a> Builder<'a> {
 
     /// Whether the program declares `f` as a non-generic function.
     fn concrete_fn(&self, f: &str) -> bool {
-        self.program
-            .functions
-            .iter()
-            .any(|g| g.name == f && g.type_params.is_empty())
+        self.declared(f)
+            .is_some_and(|(_, g)| g.type_params.is_empty())
     }
 
     /// Per argument of a call to `name`, the [`Target`] a `fn`-typed
@@ -6943,7 +6972,7 @@ impl<'a> Builder<'a> {
     /// stored value. Empty where the callee takes no function. A parameter is
     /// `fn`-typed as written; one of an alias type takes a stored value.
     fn targets_of(&self, name: &str, args: &[Expr]) -> Vec<Option<Target>> {
-        let Some(f) = self.program.functions.iter().find(|f| f.name == name) else {
+        let Some((_, f)) = self.declared(name) else {
             return Vec::new();
         };
         let mut out = Vec::new();
@@ -8296,7 +8325,7 @@ pub fn augment(program: &Program, w: &mut World, judging: bool) {
     // load still needs its facts.
     let folds = !judging || vyrn_frontend::movecheck::emitting();
     if folds {
-        let state = build_module_state(program, own, &w.fns, &lowered.globals);
+        let state = module_state_in(program, own, &w.fns, &lowered.globals);
         let mut tops: Vec<Body> = state.into_iter().collect();
         // Rebuilt only where the pass above wrote a row for the function; the
         // rest fold the body that pass already built. The rebuilds read `own`
@@ -8325,7 +8354,7 @@ pub fn augment(program: &Program, w: &mut World, judging: bool) {
                 }
                 match j {
                     Job::Inst(inst) => build_in(program, inst, shared, fns, names).ok(),
-                    Job::Outside(ob) => build_outside(program, shared, fns, names, ob).ok(),
+                    Job::Outside(ob) => outside_in(program, shared, fns, names, ob).ok(),
                 }
             },
         );
@@ -8478,7 +8507,7 @@ impl Job<'_, '_> {
             }
             Job::Outside(ob) => {
                 let _p = vyrn_frontend::prof::phase("placer: build_outside");
-                build_outside(program, own, fns, names, ob)
+                outside_in(program, own, fns, names, ob)
             }
         }
     }

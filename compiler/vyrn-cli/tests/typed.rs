@@ -132,20 +132,14 @@ fn step_ty(
 fn bodies_of(program: &Program) -> Vec<vyrn_frontend::core::Body> {
     let lowered = vyrn_lower::lower(program);
     let world = vyrn_lower::analyze(program);
-    let own = &world.ownership;
     let mut bodies = Vec::new();
     for inst in &lowered.instances {
-        if let Ok(b) = vyrn_lower::core::build(program, inst, &own) {
+        if let Ok(b) = vyrn_lower::core::build(program, &world, inst) {
             bodies.push(b);
         }
     }
     if !program.globals.is_empty() {
-        if let Ok(b) = vyrn_lower::core::build_module_state(
-            program,
-            &own,
-            &Default::default(),
-            &lowered.globals,
-        ) {
+        if let Ok(b) = vyrn_lower::core::build_module_state(program, &world, &lowered.globals) {
             bodies.push(b);
         }
     }

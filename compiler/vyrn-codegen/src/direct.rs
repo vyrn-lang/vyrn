@@ -296,11 +296,8 @@ fn compile_inner(
     let mut vyrn_rt = VyrnRt::reserve(&mut m);
     let rt = runtime(&mut m, &wasi, &vyrn_rt);
 
-    let types: HashMap<String, TypeDecl> = program
-        .type_decls
-        .iter()
-        .map(|t| (t.name.clone(), t.clone()))
-        .collect();
+    // `cx` takes `world`; its type declarations are borrowed through this second handle.
+    let analysis = std::sync::Arc::clone(&world);
     // Three kinds of function define nothing and are skipped: lowering an unspecializable shell
     // would fail the build over a function nothing calls. The fourth kind is [`gen_reach`]'s.
     let gen_reach = gen_reach(program, &world);
@@ -346,7 +343,7 @@ fn compile_inner(
     let profile = vyrn_frontend::loader::profile_build(program.host.gen);
     let oracle_on = oracle.is_some();
     let mut cx = Cx {
-        types,
+        types: analysis.ownership.proto.types(),
         lambdas: vyrn_frontend::ast::lambdas(program),
         layouts: RefCell::default(),
         reprs: RefCell::default(),
@@ -1165,7 +1162,7 @@ impl Sites {
 }
 
 struct Cx<'a> {
-    types: HashMap<String, TypeDecl>,
+    types: &'a HashMap<String, TypeDecl>,
     /// Every lambda literal the program holds, by node address and the function that holds it,
     /// so [`Fn_::lift_lambda`] queues the literal's own body instead of a clone.
     lambdas: HashMap<NodeId, (&'a str, &'a Expr)>,
@@ -14522,7 +14519,7 @@ mod tests {
     fn cx() -> Cx<'static> {
         Cx {
             world: Default::default(),
-            types: HashMap::new(),
+            types: Box::leak(Box::default()),
             lambdas: HashMap::new(),
             layouts: RefCell::default(),
             reprs: RefCell::default(),
