@@ -1182,6 +1182,8 @@ fn load_modules(
         };
         let parsed = PARSE_CACHE.with(|c| c.borrow().get(&hash).cloned());
 
+        // A generated module's comments and its parse read one scan.
+        let mut scanned = None;
         // Register a generated module's `//@origin` table before it is lexed:
         // the table is a line-scan, so a module that never parses
         // still maps its lex and parse errors onto its input file.
@@ -1203,7 +1205,8 @@ fn load_modules(
                     .comment_lines
                     .get_or_init(|| crate::origin::comment_lines(&text))
                     .clone(),
-                None => crate::origin::comment_lines(&text),
+                None => (scanned.insert(lexer::scan(&text)).as_ref().ok())
+                    .map(|s| crate::origin::comments_of(&s.items)),
             };
             let ctx = crate::origin::Context::new(comments, dir_of(importer), project);
             w.origins.add_module(key, &text, &ctx);
@@ -1287,7 +1290,8 @@ fn load_modules(
             Some(p) => p,
             None => {
                 let _p = crate::prof::phase("parse");
-                let tokens = lexer::lex(&text).map_err(|d| vec![in_module(d, key, root_key)])?;
+                let scan = scanned.unwrap_or_else(|| lexer::scan(&text));
+                let tokens = lexer::tokens(scan.map_err(|d| vec![in_module(d, key, root_key)])?);
                 let (program, errors) = parser::parse_accum(tokens);
                 if !errors.is_empty() {
                     return Err(errors

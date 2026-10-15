@@ -732,7 +732,11 @@ fn lex_byte_literal(
 /// Tokenizes `src`: [`scan`]'s items without comments, closed by `Eof`. Returns
 /// an error diagnostic for the first malformed token.
 pub fn lex(src: &str) -> Result<Vec<Token>, Diagnostic> {
-    let scanned = scan(src)?;
+    Ok(tokens(scan(src)?))
+}
+
+/// The tokens of a [`scan`], comments dropped and `Eof` last.
+pub fn tokens(scanned: Scan) -> Vec<Token> {
     let mut out = Vec::with_capacity(scanned.items.len() + 1);
     for it in scanned.items {
         let tok = match it.kind {
@@ -751,7 +755,7 @@ pub fn lex(src: &str) -> Result<Vec<Token>, Diagnostic> {
         line: scanned.end_line,
         col: scanned.end_col,
     });
-    Ok(out)
+    out
 }
 
 #[cfg(test)]

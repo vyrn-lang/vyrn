@@ -55,14 +55,15 @@ impl<'a> Context<'a> {
 /// when the text does not lex. Every control-line scan over generated text uses
 /// it, so a directive inside a string literal stays data.
 pub fn comment_lines(source: &str) -> Option<HashSet<usize>> {
-    Some(
-        crate::lexer::lex_with_trivia(source)
-            .ok()?
-            .iter()
-            .filter(|t| t.kind == crate::lexer::TrivKind::Comment)
-            .map(|t| t.start_line)
-            .collect(),
-    )
+    Some(comments_of(&crate::lexer::lex_with_trivia(source).ok()?))
+}
+
+/// [`comment_lines`] of a text already scanned.
+pub fn comments_of(items: &[crate::lexer::Triv]) -> HashSet<usize> {
+    (items.iter())
+        .filter(|t| t.kind == crate::lexer::TrivKind::Comment)
+        .map(|t| t.start_line)
+        .collect()
 }
 
 /// The input position an origin directive points at.
