@@ -13428,12 +13428,11 @@ impl<'a, 'p> Fn_<'a, 'p> {
                 // A value of the place's own validated type crosses nothing;
                 // any other one is a check the row does not state.
                 ty.is_some_and(|t| {
-                    let r = self.cx.resolve(&t);
                     let fits = match self.cx.repr(&t, 0) {
                         Ok(Repr::Unit | Repr::Scalar(_)) => self.core_val_readable( value),
                         Ok(Repr::Agg(_)) => {
                             matches!(value, Val::Name(v)
-                                    if self.cx.resolve(&body.names[v.index()].ty) == r)
+                                    if self.core_as_is(&body.names[v.index()].ty, &t))
                         }
                         _ => false,
                     };

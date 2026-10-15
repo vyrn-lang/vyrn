@@ -1,0 +1,89 @@
+// A wider record, or one with its fields in another order, lands in every
+// slot of a record type.
+
+import { map } from "std/arrays"
+
+type B = { y: Int64, x: String }
+type A = { x: String, y: Int64 }
+type W = { z: String, y: Int64, x: String }
+type H = { p: B, n: Int64 }
+type S = | P(B) | Q
+type X = { q: A, z: String }
+type Y = { q: B }
+
+let mut kept: B = B { y: 0, x: "" }
+
+fn s(n: Int64) -> String {
+    return "s\{n}"
+}
+
+fn wide(n: Int64) -> W {
+    return W { z: s(9), y: n, x: s(n) }
+}
+
+fn narrow(n: Int64) -> B {
+    return wide(n)
+}
+
+fn take(b: consume B) -> String {
+    return "\{b.x} \{b.y}"
+}
+
+fn pick(k: Option<Int64>) -> B {
+    let b: B = match k {
+        Some(n) => wide(n),
+        None => narrow(0),
+    }
+    return b
+}
+
+fn main() -> Int64 {
+    let xs: Array<B> = [wide(1)]
+    print("array \{xs[0].x} \{xs[0].y}")
+    let o: Option<B> = Some(wide(2))
+    if let Some(b) = o {
+        print("some \{b.x} \{b.y}")
+    }
+    let v: S = P(wide(3))
+    match v {
+        P(b) => print("variant \{b.x} \{b.y}"),
+        Q => print("variant none"),
+    }
+    let h = H { p: wide(4), n: 0 }
+    print("field \{h.p.x} \{h.p.y}")
+    let mut m: Map<String, B> = [:]
+    m["a"] = wide(5)
+    if let Some(b) = m["a"] {
+        print("map \{b.x} \{b.y}")
+    }
+    let f: fn(Int64) -> B = i -> wide(i)
+    let ys: Array<B> = map([6, 7], f)
+    print("lambda \{ys[1].x} \{ys[1].y}")
+    let mut zs: Array<B> = []
+    zs.push(wide(8))
+    zs[0] = wide(9)
+    print("element \{zs[0].x} \{zs[0].y}")
+    let mut g = H { p: narrow(0), n: 0 }
+    g.p = wide(10)
+    print("store \{g.p.x} \{g.p.y}")
+    kept = wide(11)
+    print("state \{kept.x} \{kept.y}")
+    let j: B = if xs.length > 0 { wide(12) } else { narrow(0) }
+    print("join \{j.x} \{j.y}")
+    let k = pick(Some(13))
+    print("match \{k.x} \{k.y}")
+    let r = narrow(14)
+    print("return \{r.x} \{r.y}")
+    print("argument \{take(wide(15))}")
+    let e: Option<B> = Some(A { x: s(16), y: 16 })
+    if let Some(b) = e {
+        print("order \{b.x} \{b.y}")
+    }
+    let y: Y = X { q: A { x: s(17), y: 17 }, z: s(9) }
+    print("inner \{y.q.x} \{y.q.y}")
+    let l: B = wide(18)
+    print("let \{l.x} \{l.y}")
+    g.p = A { x: s(19), y: 19 }
+    print("reorder \{g.p.x} \{g.p.y}")
+    return 0
+}

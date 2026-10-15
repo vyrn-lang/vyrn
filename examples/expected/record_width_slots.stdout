@@ -1,0 +1,17 @@
+array s1 1
+some s2 2
+variant s3 3
+field s4 4
+map s5 5
+lambda s7 7
+element s9 9
+store s10 10
+state s11 11
+join s12 12
+match s13 13
+return s14 14
+argument s15 15
+order s16 16
+inner s17 17
+let s18 18
+reorder s19 19

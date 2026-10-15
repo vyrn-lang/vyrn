@@ -877,6 +877,29 @@ fn unbound(
         .collect()
 }
 
+/// The fields of a record type, by name and type, in declaration order;
+/// `None` for any other type.
+fn fields_of(t: &Type, decls: &HashMap<String, TypeDecl>) -> Option<Vec<(String, Type)>> {
+    let fs = vyrn_frontend::types::record_fields(t, decls)?;
+    Some(fs.iter().map(|f| (f.name.clone(), f.ty.clone())).collect())
+}
+
+/// Whether a record of type `from` reaches a slot of record type `to` only by
+/// [`Builder::fit`]'s rebuild: `from` has more fields. The checker admits
+/// `to`'s fields as a subset of `from`'s, and two records of one field set
+/// share a layout, so a field count tells the two apart. Width applies at
+/// the top of a value only, so no field of either needs a rebuild.
+fn wider(from: &Type, to: &Type, decls: &HashMap<String, TypeDecl>) -> bool {
+    use vyrn_frontend::types::record_fields;
+    if from == to {
+        return false;
+    }
+    match (record_fields(from, decls), record_fields(to, decls)) {
+        (Some(ff), Some(tf)) => ff.len() != tf.len(),
+        _ => false,
+    }
+}
+
 /// How a function value misses the `fn` type of its slot, a call's parameter
 /// or a stored slot; each words it for its slot.
 enum Misfit {
@@ -1994,8 +2017,85 @@ impl<'a> Builder<'a> {
     ) -> Result<Val, Gap> {
         match to.and_then(|to| self.proven_crossing(e, to)) {
             Some(t) => Ok(Val::Name(self.checked_temp(&t, e, line, out)?)),
-            None => self.val(e, out),
+            None => {
+                let v = self.val(e, out)?;
+                self.fit(v, to, line, out)
+            }
         }
+    }
+
+    /// The owned value `v` at a slot of type `to`. A wider record is rebuilt
+    /// as a `to` literal: each of `to`'s fields is taken out of `v`, and `v`
+    /// is released around the holes, so its extra fields are freed.
+    ///
+    /// A borrowed crossing is the emitter's view (`vyrn_codegen::Rung::Rebuild`),
+    /// which copies the fields and owns nothing. A validated `to` is its
+    /// constructor's ([`Builder::checked`]).
+    fn fit(
+        &mut self,
+        v: Val,
+        to: Option<&Type>,
+        line: usize,
+        out: &mut Vec<St>,
+    ) -> Result<Val, Gap> {
+        let (Val::Name(n), Some(to)) = (&v, to) else {
+            return Ok(v);
+        };
+        let n = *n;
+        let decls = self.proto.types();
+        let from = &self.body.names[n.index()].ty;
+        if !wider(from, to, decls) || vyrn_frontend::validate::required(from, to, decls).is_some() {
+            return Ok(v);
+        }
+        let from = from.clone();
+        let owns = self.owns(&from);
+        if owns && self.body.names[n.index()].borrow {
+            return Ok(v);
+        }
+        let (Some(ff), Some(tf)) = (fields_of(&from, decls), fields_of(to, decls)) else {
+            return Ok(v);
+        };
+        let taken: Vec<String> = (tf.iter())
+            .filter(|(_, t)| self.owns(t))
+            .map(|(f, _)| f.clone())
+            .collect();
+        if !vyrn_frontend::declared::skippable(&self.own.proto, &from, &taken) {
+            return gap(
+                "a record with a declared release crossing into another record type",
+                line,
+            );
+        }
+        let mut parts = Vec::new();
+        for (f, _) in &tf {
+            let Some((_, gty)) = ff.iter().find(|(g, _)| g == f) else {
+                return gap_d("a record crossing that lacks a field of its slot", f, line);
+            };
+            let place = Place::Field(Box::new(Place::Name(n)), f.clone());
+            let t = self.temp(gty.clone(), line);
+            out.push(St::Let(
+                t,
+                match taken.contains(f) {
+                    true => Rhs::Take(place),
+                    false => Rhs::Read(place),
+                },
+            ));
+            parts.push(Val::Name(t));
+        }
+        let spelled = match to {
+            Type::Named(s) => s.clone(),
+            t => t.to_string(),
+        };
+        let r = self.temp(to.clone(), line);
+        let fields = tf.into_iter().map(|(f, _)| f).collect();
+        out.push(St::Let(r, Rhs::Make(Ctor::Record(spelled, fields), parts)));
+        if owns {
+            let holes = taken.iter().map(|f| format!(".{f}")).collect();
+            out.push(St::Drop(n, Site::None, 0, Some(holes)));
+        }
+        if let Some(h) = self.frame.held.iter_mut().find(|h| **h == n) {
+            *h = r;
+        }
+        Ok(Val::Name(r))
     }
 
     /// [`Builder::check`] bound to a temporary of the validated type `to`.
@@ -2775,7 +2875,18 @@ impl<'a> Builder<'a> {
                 self.frame.after_of_rhs = std::mem::replace(&mut self.frame.after, outer);
                 (rhs?, ty)
             }
-            None => (self.rhs(value, out)?, ty),
+            None => match annotation.filter(|t| wider(&ty, t, self.proto.types())) {
+                Some(t) => {
+                    let v = self.val(value, out)?;
+                    let v = self.fit(v, Some(t), line, out)?;
+                    let ty = match v {
+                        Val::Name(m) => self.body.names[m.index()].ty.clone(),
+                        Val::Lit(_) => ty,
+                    };
+                    (Rhs::Val(v), ty)
+                }
+                None => (self.rhs(value, out)?, ty),
+            },
         };
         // A literal, or a nullary constructor: nothing allocated it.
         let static_value = match &rhs {
@@ -2924,7 +3035,9 @@ impl<'a> Builder<'a> {
                 let v = match (check, grown) {
                     (_, Some((n, parts))) => self.str_append(n, &parts, *line, out),
                     (Some(to), None) => self.checked_temp(&to, value, *line, out).map(Val::Name),
-                    _ => self.val(value, out),
+                    _ => self
+                        .val(value, out)
+                        .and_then(|v| self.fit(v, to.as_ref(), *line, out)),
                 };
                 self.frame.rebinding = false;
                 let mut v = v?;
@@ -3857,7 +3970,10 @@ impl<'a> Builder<'a> {
         let mark = out.len();
         let v = match self.checked(&self.ty_of(value)?, &ety, value) {
             Some(to) => Val::Name(self.checked_temp(&to, value, line, out)?),
-            None => self.val(value, out)?,
+            None => {
+                let v = self.val(value, out)?;
+                self.fit(v, Some(&ety), line, out)?
+            }
         };
         // A key that owns heap is moved into the map by the store, so it is
         // read after the value; no copy of it exists to read before. Refused
@@ -5215,13 +5331,16 @@ impl<'a> Builder<'a> {
         let mut stmts = Vec::new();
         let r = match body {
             LambdaBody::Block(b) => self.block(b, &mut stmts),
-            LambdaBody::Expr(x) => self.val(x, &mut stmts).map(|v| {
+            LambdaBody::Expr(x) => self.val(x, &mut stmts).and_then(|v| {
+                let ret = self.frame.ret.clone();
+                let v = self.fit(v, ret.as_ref(), *line, &mut stmts)?;
                 stmts.push(St::Return {
                     value: Some(v),
                     site: NodeId::NONE,
                     is_try: false,
                     line: *line,
-                })
+                });
+                Ok(())
             }),
         };
         cut(&mut stmts);
@@ -5904,12 +6023,13 @@ impl<'a> Builder<'a> {
                 let ty = self.ty_of(e)?;
                 // The plan keys an if-expression's edge rows by the expression.
                 let site = e.id();
-                let res = self.temp(ty, *line);
+                let res = self.temp(ty.clone(), *line);
                 let c = self.condition(cond, "if", *line, out)?;
                 let mark = self.body.names.len();
                 let held = self.frame.held.len();
                 let mut t = Vec::new();
                 let tv = self.val(then_branch, &mut t)?;
+                let tv = self.fit(tv, Some(&ty), *line, &mut t)?;
                 let mut aliased = self.alias_out(then_branch, &tv, mark);
                 let then_v = tv.clone();
                 t.push(St::Store {
@@ -5927,6 +6047,7 @@ impl<'a> Builder<'a> {
                 match else_branch {
                     Some(eb) => {
                         let ev = self.val(eb, &mut f)?;
+                        let ev = self.fit(ev, Some(&ty), *line, &mut f)?;
                         aliased = aliased.or(self.alias_out(eb, &ev, mark));
                         let else_v = ev.clone();
                         f.push(St::Store {
@@ -5964,7 +6085,7 @@ impl<'a> Builder<'a> {
                 let sty = self.ty_of(scrutinee)?;
                 let rt = vyrn_frontend::types::resolve(&sty, self.proto.types());
                 let mid = e.id();
-                let res = self.temp(ty, *line);
+                let res = self.temp(ty.clone(), *line);
                 let (sv, consuming) =
                     self.scrutinee(scrutinee, mid, Some(arms_span(*line, arms)), out)?;
                 let owns = self.owns_boxes(scrutinee, consuming);
@@ -5988,6 +6109,7 @@ impl<'a> Builder<'a> {
                     match &arm.body {
                         ArmBody::Expr(ae) => {
                             let v = self.val(ae, &mut body)?;
+                            let v = self.fit(v, Some(&ty), *line, &mut body)?;
                             if let Some(a) = self.alias_out(ae, &v, outer) {
                                 self.frame.loop_aliased.insert(res, a);
                             }
@@ -6660,7 +6782,14 @@ impl<'a> Builder<'a> {
                 {
                     self.take_place(a, out)?
                 } else {
-                    self.val(a, out)?
+                    let v = self.val(a, out)?;
+                    match param_tys.get(k) {
+                        Some(t) => self.fit(v, Some(t), line, out)?,
+                        None => {
+                            let slot = self.builtin_slot(name, args, k, &v);
+                            self.fit(v, slot.as_ref(), line, out)?
+                        }
+                    }
                 }
             } else {
                 self.read_at(a, out, Some((name, of, k)))?
@@ -6724,6 +6853,25 @@ impl<'a> Builder<'a> {
             solved,
             targets,
         })
+    }
+
+    /// The type of the slot argument `k` of the builtin `name` fills with the
+    /// record `v`, under the type arguments its receiver solves: `T` of
+    /// `xs.push(v)` is the element type of `xs`. `None` where `v` is no
+    /// record, which [`Builder::fit`] leaves as it is.
+    fn builtin_slot(&self, name: &str, args: &[Expr], k: usize, v: &Val) -> Option<Type> {
+        let Val::Name(n) = v else {
+            return None;
+        };
+        vyrn_frontend::types::record_fields(&self.body.names[n.index()].ty, self.proto.types())?;
+        let sig = prelude::signature(name)?;
+        let recv = self.ty_of(args.first()?).ok()?;
+        let mut subst = HashMap::new();
+        vyrn_frontend::types::solve_param(&sig.params.first()?.ty, &recv, &mut subst);
+        Some(vyrn_frontend::types::substitute(
+            &sig.params.get(k)?.ty,
+            &subst,
+        ))
     }
 
     /// The impl function the method `name` dispatches to on `recv`'s type,

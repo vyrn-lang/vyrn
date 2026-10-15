@@ -474,6 +474,12 @@ fn census() -> Vec<Row> {
             "`f` argument 1 expects H, found HW",
             Kernel::Elsewhere,
         ),
+        row(
+            "r66_a_function_argument_whose_result_misfits.vyrn",
+            "a function argument returns what its parameter's type returns",
+            "`call` argument 1 expects Int64, found String",
+            Kernel::Elsewhere,
+        ),
     ]
 }
 

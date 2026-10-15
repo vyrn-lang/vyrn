@@ -1,0 +1,10 @@
+// `call` reads what `f` returns as an `Int64`; `name` returns a `String`.
+fn name() -> String {
+    return "s"
+}
+fn call(f: fn() -> Int64) -> Int64 {
+    return f()
+}
+fn main() -> Int64 {
+    return call(name)
+}
