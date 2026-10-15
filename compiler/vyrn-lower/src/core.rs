@@ -1263,11 +1263,11 @@ struct Builder<'a> {
     /// The bounds of the function's type parameters; `None` for a body that
     /// is no function.
     bounds: Option<&'a HashMap<String, Vec<String>>>,
-    types: HashMap<NodeId, Type>,
+    types: &'a HashMap<NodeId, Type>,
     /// The producer type of every typed expression, before the destination's
     /// coercion (see [`Rhs`]); `types` holds what the value must end up as.
-    produced: HashMap<NodeId, Type>,
-    solved: HashMap<NodeId, Vec<(String, Type)>>,
+    produced: &'a HashMap<NodeId, Type>,
+    solved: &'a HashMap<NodeId, Vec<(String, Type)>>,
     placed: HashMap<(Exit, NodeId), Vec<&'a Release>>,
     body: Body,
     frame: Frame,
@@ -1376,9 +1376,14 @@ impl<'a> Builder<'a> {
         own: &'a Ownership,
         fns: &'a Fns,
         names: &'a mut NameMemo,
-        source: &Source<'_, 'a>,
+        source: &Source<'a, 'a>,
         seed: &'a std::collections::HashSet<NodeId>,
     ) -> Self {
+        let all = match source {
+            Source::Instance(inst) => &inst.facts,
+            Source::Block(ob) => &ob.facts,
+            Source::Globals(facts) | Source::Expr { facts, .. } => *facts,
+        };
         let filtered;
         let (facts, file) = match source {
             Source::Instance(inst) => (&inst.facts, inst.func.module.clone()),
@@ -1437,9 +1442,9 @@ impl<'a> Builder<'a> {
             proto: &own.proto,
             names,
             bounds,
-            types: facts.types.clone(),
-            produced: facts.produced.clone(),
-            solved: facts.solved.clone(),
+            types: &all.types,
+            produced: &all.produced,
+            solved: &all.solved,
             placed,
             body: Body {
                 id,
