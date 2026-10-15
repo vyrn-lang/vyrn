@@ -733,12 +733,13 @@ impl State {
 
     /// The facts and disequalities every live state of `sts` proves, the
     /// definitions they all share, and per Bool name the facts each side gives
-    /// on every path ([`State::when`]).
-    pub fn join(sts: &[State]) -> State {
-        let live: Vec<&State> = sts.iter().filter(|s| !s.dead).collect();
-        if live.len() < 2 {
-            return live.first().map_or_else(State::dead, |s| (*s).clone());
+    /// on every path ([`State::when`]). A live state that is the only one is
+    /// the join, taken out of `sts`.
+    pub fn join(sts: &mut [State]) -> State {
+        if sts.iter().filter(|s| !s.dead).count() < 2 {
+            return (sts.iter_mut().find(|s| !s.dead)).map_or_else(State::dead, std::mem::take);
         }
+        let live: Vec<&State> = sts.iter().filter(|s| !s.dead).collect();
         let mut out = State::common(&live);
         // A name some branch does not condition loses its conditions: that
         // branch would prove a side's facts from its state alone.
@@ -1237,7 +1238,7 @@ mod tests {
         let (mut a, mut b) = (State::default(), State::default());
         a.assume(&v(0).plus(-2).unwrap());
         b.assume(&v(0).plus(-1).unwrap());
-        let j = State::join(&[a, b]);
+        let j = State::join(&mut [a, b]);
         assert!(j.ge0(&v(0).plus(-1).unwrap()).is_some());
         assert!(j.ge0(&v(0).plus(-2).unwrap()).is_none());
     }
@@ -1249,8 +1250,8 @@ mod tests {
             s.define(Term::Val(Name(0)), &Lin::k(c));
             s
         };
-        let inner = State::join(&[at(0), at(4)]);
-        let mut j = State::join(&[at(2), at(3), inner]);
+        let inner = State::join(&mut [at(0), at(4)]);
+        let mut j = State::join(&mut [at(2), at(3), inner]);
         assert!(j.ge0(&Lin::k(4).sub(&v(0)).unwrap()).is_some());
         j.differ(&v(0));
         assert!(j.ge0(&v(0).plus(-2).unwrap()).is_some());

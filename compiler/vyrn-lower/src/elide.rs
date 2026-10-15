@@ -4711,35 +4711,40 @@ impl<'a> Walk<'a> {
                 cond, then, els, ..
             } => {
                 let (yes, no) = match cond {
-                    Val::Lit(Lit::Bool(true)) => (st.clone(), State::dead()),
-                    Val::Lit(Lit::Bool(false)) => (State::dead(), st.clone()),
+                    Val::Lit(Lit::Bool(true)) => (st, State::dead()),
+                    Val::Lit(Lit::Bool(false)) => (State::dead(), st),
                     Val::Name(c) => {
-                        let (t, f) = st.conds.get(c).cloned().unwrap_or_default();
-                        let (mut yes, mut no) = (st.clone(), st.clone());
-                        t.iter().for_each(|l| yes.add(l));
-                        f.iter().for_each(|l| no.add(l));
+                        let (mut yes, mut no) = (st.clone(), st);
+                        // Adding a fact reads no condition; a state it kills has none.
+                        if let Some((t, f)) = no.conds.remove(c) {
+                            t.iter().for_each(|l| yes.add(l));
+                            f.iter().for_each(|l| no.add(l));
+                            if !no.dead {
+                                no.conds.insert(*c, (t, f));
+                            }
+                        }
                         (yes, no)
                     }
-                    _ => (st.clone(), st.clone()),
+                    _ => (st.clone(), st),
                 };
                 let mut a = self.block(yes, then);
                 let mut b = self.block(no, els);
                 if a.dead || b.dead {
-                    return State::join(&[a, b]);
+                    return State::join(&mut [a, b]);
                 }
                 leave(&mut a, then, &[]);
                 leave(&mut b, els, &[]);
-                let ends = [a, b];
-                let mut j = State::join(&ends);
+                let mut ends = [a, b];
+                let mut j = State::join(&mut ends);
                 self.branch_facts(&mut j, cond, [then, els], &ends);
                 j
             }
             St::Block { body, .. } => self.block(st, body),
             St::Loop { body, .. } => self.looped(st, body),
             St::Switch { on, arms, .. } => {
-                let mut outs = vec![st.clone()];
+                let mut outs = vec![st];
                 for a in arms.iter_mut() {
-                    let mut s = st.clone();
+                    let mut s = outs[0].clone();
                     for b in &a.binds {
                         self.slot[b.index()].origin = self.origin_of_val(on);
                         self.fresh(&mut s, *b);
@@ -4752,7 +4757,7 @@ impl<'a> Walk<'a> {
                         leave(s, &a.body, &a.binds);
                     }
                 }
-                State::join(&outs)
+                State::join(&mut outs)
             }
             St::Break { .. } => {
                 if let Some(l) = self.loops.last_mut() {
@@ -6110,11 +6115,11 @@ impl<'a> Walk<'a> {
         cands.iter().for_each(|c| head.assume(c));
         held(&mut head, &temps);
         self.block(head, body);
-        let l = self.loops.pop().expect("pushed above");
+        let mut l = self.loops.pop().expect("pushed above");
         if let Some(outer) = self.loops.last_mut() {
             outer.seen.resized.extend(l.seen.resized);
         }
-        let mut exit = State::join(&l.breaks);
+        let mut exit = State::join(&mut l.breaks);
         // The counter of a loop bound by a literal is at least the bound at
         // the exit. A length the counter bounds then has the literal as its
         // own bound, which a goal would otherwise need a third premise for.
