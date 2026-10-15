@@ -2217,6 +2217,115 @@ fn open_only_component_vyx_is_fully_analyzed() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+const FAR_ROOT_APP: &str = "import { pages } from \"std/ui\"\n\
+    import { route } from pages(\"./app/routes\")\n\
+    fn handle(req: Request) -> Response { return route(req) }\n";
+const FAR_ROOT_PAGE: &str = "<script>\n\
+    import { format, fromMillis } from \"std/time\"\n\
+    fn shown() -> String {\n\
+    let s = format(fromMillis(0))\n\
+    return s\n\
+    }\n\
+    </script>\n\
+    <template>\n\
+    <main>{{ shown() }}</main>\n\
+    </template>\n";
+
+/// The site's layout: the manifest sits at the repository root, a sibling tree
+/// holds more `.vyrn` files than discovery analyzes, and the generating root is
+/// two levels above the page.
+#[test]
+fn page_vyx_finds_a_root_far_below_the_manifest() {
+    let n = SCRATCH_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let dir = std::env::temp_dir().join(format!("vyrn_lsp_far_{}_{n}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("aaa")).unwrap();
+    std::fs::create_dir_all(dir.join("site/app/routes")).unwrap();
+    std::fs::write(dir.join("vyrn.json"), "{ \"name\": \"far\" }").unwrap();
+    for i in 0..60 {
+        let src = format!("fn f{i}() -> Int64 {{ return {i} }}\n");
+        std::fs::write(dir.join(format!("aaa/f{i:02}.vyrn")), src).unwrap();
+    }
+    std::fs::write(dir.join("site/export.vyrn"), FAR_ROOT_APP).unwrap();
+    std::fs::write(dir.join("site/app/routes/index.vyx"), FAR_ROOT_PAGE).unwrap();
+
+    let mut client = spawn_client();
+    let uri = file_uri(&dir.join("site/app/routes/index.vyx"));
+    did_open(&mut client, &uri, "vyx", FAR_ROOT_PAGE);
+
+    let (hl, hc) = at(FAR_ROOT_PAGE, 2, "format");
+    let v = hover_value(&mut client, &uri, hl, hc).expect("hover on the page");
+    assert!(v.contains("format"), "hover shows the import: {v}");
+
+    let hints = type_hints(&mut client, &uri);
+    assert_eq!(
+        hints,
+        vec![(3, 5, ": String".to_string())],
+        "the hint on `s`"
+    );
+
+    let (dl, dc) = at(FAR_ROOT_PAGE, 4, "format");
+    let target = definition_target(&mut client, &uri, dl, dc).expect("definition");
+    assert!(
+        target.contains("time"),
+        "definition lands in std/time: {target}"
+    );
+
+    let bad = FAR_ROOT_PAGE.replace("{{ shown() }}", "{{ missing() }}");
+    client.send(&serde_json::json!({
+        "jsonrpc": "2.0", "method": "textDocument/didChange",
+        "params": {
+            "textDocument": { "uri": uri, "version": 2 },
+            "contentChanges": [ { "text": bad } ]
+        }
+    }));
+    loop {
+        let d = read_diags_for(&mut client, "index.vyx");
+        if let Some(first) = d["params"]["diagnostics"]
+            .as_array()
+            .and_then(|a| a.first())
+        {
+            assert!(
+                first["message"].as_str().unwrap_or("").contains("missing"),
+                "the error names the unknown call: {first}"
+            );
+            break;
+        }
+    }
+
+    let _ = client.child.kill();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A `.vyx` no root maps gets one warning that names the search, not silence.
+#[test]
+fn ownerless_vyx_says_what_was_searched() {
+    let n = SCRATCH_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let dir = std::env::temp_dir().join(format!("vyrn_lsp_noowner_{}_{n}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("routes")).unwrap();
+    std::fs::write(dir.join("vyrn.json"), "{ \"name\": \"lone\" }").unwrap();
+    std::fs::write(dir.join("routes/index.vyx"), FAR_ROOT_PAGE).unwrap();
+
+    let mut client = spawn_client();
+    let uri = file_uri(&dir.join("routes/index.vyx"));
+    did_open(&mut client, &uri, "vyx", FAR_ROOT_PAGE);
+    let d = read_diags_for(&mut client, "index.vyx");
+    let diags = d["params"]["diagnostics"].as_array().unwrap();
+    assert_eq!(diags.len(), 1, "one warning: {diags:?}");
+    assert_eq!(diags[0]["severity"], 2, "a warning: {diags:?}");
+    assert!(
+        diags[0]["message"]
+            .as_str()
+            .unwrap()
+            .contains("nearest it under"),
+        "names the search: {diags:?}"
+    );
+
+    let _ = client.child.kill();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// One `documentHighlight` occurrence: 1-based `line`, 0-based `ch`, and the
 /// `DocumentHighlightKind` (2 = Read, 3 = Write). `ch` shows in failure output.
 #[derive(Debug)]

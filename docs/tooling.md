@@ -362,7 +362,10 @@ It serves diagnostics, hover, go-to-definition (across files), completion
 document symbols, document highlight, rename (including across a generator
 boundary, through the symbol maps), formatting (the same `fmt`), code actions,
 inlay hints and semantic tokens. Colour and hover use one resolution order, so
-they agree. A `.vyx` file is analysed through the `.vyrn` module that owns it.
+they agree. A `.vyx` file is analysed through the `.vyrn` module that owns it:
+the first of up to `MAX_OWNER_CANDIDATES` `.vyrn` files, nearest the `.vyx`
+first, up to the nearest `vyrn.json`, whose generators read the `.vyx`. A
+`.vyx` without an owner gets one warning that names the search.
 
 Each line that allocates, copies, grows a container, enters an allocating
 function of another file or keeps a check ends in an inlay hint of a few plain

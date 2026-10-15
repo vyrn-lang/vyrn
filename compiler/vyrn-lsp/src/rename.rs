@@ -568,7 +568,7 @@ fn candidates(
     };
     let root = vyrn_frontend::manifest::app_root(dir);
     let mut paths = Vec::new();
-    crate::collect_sources(&root, 0, usize::MAX, &["vyrn", "vyx"], &mut paths);
+    crate::collect_sources(&root, None, 0, usize::MAX, &["vyrn", "vyx"], &mut paths);
     let mut files = Vec::new();
     for path in paths {
         let slash = path.to_string_lossy().replace('\\', "/");
