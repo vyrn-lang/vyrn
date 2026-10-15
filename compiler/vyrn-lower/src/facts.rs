@@ -328,18 +328,31 @@ impl State {
     }
 
     pub fn norm(&self, l: &Lin) -> Option<Lin> {
-        let mut out = Lin::k(l.c);
+        // Every scaled term in the order a left fold of `add` meets it, so a
+        // stable sort and a fold per term overflow exactly where `add` does.
+        let mut parts = Vec::with_capacity(l.terms.len());
+        let mut c = l.c;
         for (t, k) in &l.terms {
-            let v = match self.defs.get(t) {
-                Some(d) => d.scale(*k)?,
-                None => Lin {
-                    terms: vec![(*t, *k)],
-                    c: 0,
-                },
-            };
-            out = out.add(&v)?;
+            match self.defs.get(t) {
+                Some(d) => {
+                    for (u, j) in &d.terms {
+                        parts.push((*u, j.checked_mul(*k)?));
+                    }
+                    c = c.checked_add(d.c.checked_mul(*k)?)?;
+                }
+                None => parts.push((*t, *k)),
+            }
         }
-        Some(out)
+        parts.sort_by_key(|(t, _)| *t);
+        let mut terms: Vec<(Term, i64)> = Vec::with_capacity(parts.len());
+        for (t, k) in parts {
+            match terms.last_mut() {
+                Some((u, j)) if *u == t => *j = j.checked_add(k)?,
+                _ => terms.push((t, k)),
+            }
+        }
+        terms.retain(|(_, k)| *k != 0);
+        Some(Lin { terms, c })
     }
 
     /// Adds `l >= 0`. A fact that does not normalize is dropped: it would
