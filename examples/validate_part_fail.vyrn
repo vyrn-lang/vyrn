@@ -1,0 +1,16 @@
+// A validated record literal that fails its `where` clause as a part of a
+// heap array traps with the same words as a bound one.
+
+type Tag = { name: String, n: Int64 } where n > 0
+
+fn rt(n: Int64) -> Int64 {
+    return n * 1
+}
+
+fn main() -> Int64 {
+    let ok: Array<Tag> = [Tag { name: "a", n: rt(1) }]
+    print(ok[0].n)
+    let bad: Array<Tag> = [Tag { name: "a", n: rt(1) }, Tag { name: "b", n: rt(0) }]
+    print(bad[1].n)
+    return 0
+}

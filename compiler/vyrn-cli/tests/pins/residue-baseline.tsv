@@ -192,6 +192,9 @@ twdemo	clean
 utility	clean
 validate	clean
 validate_fail	other
+validate_field_fail	other
+validate_part_fail	other
+validate_parts	clean
 validate_store	other
 validate_sum	other
 validatestr	clean

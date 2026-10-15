@@ -9936,6 +9936,15 @@ impl<'a, 'p> Fn_<'a, 'p> {
                         let ty = at.ty;
                         mark = b.mark();
                         self.core_make(m, b, dest, &ty, rhs, taken, line)?;
+                        if self.core_ruled(ss, i) {
+                            let place = match dest {
+                                Dest::Slot(off) => Place::Slot(off),
+                                Dest::Addr(l, off) => {
+                                    Place::Local(self.addr_local(b, Place::Local(l), off))
+                                }
+                            };
+                            self.core_bind(*n, place, ty)?;
+                        }
                         continue;
                     }
                     // The storage a part took before this row.
@@ -12331,7 +12340,8 @@ impl<'a, 'p> Fn_<'a, 'p> {
     /// The parent's storage is taken before the part's row ([`Fn_::core_part_dest`]), and
     /// every row stays in place, so no effect moves. No row between leaves the list, so an
     /// early part never sits in storage no row owns. The temporary occurs twice, in its
-    /// `let` and in the parent, so no release row reads it.
+    /// `let` and in the parent, and once more in its `where` row ([`Fn_::core_ruled`]),
+    /// so no release row reads it.
     fn core_part_at(&self, ss: &[St], i: usize) -> Option<PartAt> {
         let body = self.body();
         let St::Let(t, rhs) = &ss[i] else {
@@ -12340,8 +12350,9 @@ impl<'a, 'p> Fn_<'a, 'p> {
         let made =
             matches!(rhs, Rhs::Make(..) | Rhs::Prim(Op::Closure(_), ..)) || self.core_ctor(rhs);
         let taken = self.core_take_part(rhs);
+        let ruled = self.core_ruled(ss, i);
         if body.names[t.index()].binding.is_some()
-            || self.core_w.occurs.get(t.index()) != Some(&2)
+            || self.core_w.occurs.get(t.index()) != Some(&(2 + ruled as u32))
             || !(made || taken || self.core_agg_call(rhs))
         {
             return None;
@@ -12350,7 +12361,7 @@ impl<'a, 'p> Fn_<'a, 'p> {
         // taken field must already have its layout.
         let fits = |part: &Type| {
             if made {
-                !self.checks(part) && self.core_makes(part, rhs)
+                self.core_makes(part, rhs)
             } else {
                 self.core_payload_layout(&Val::Name(*t), part)
             }
@@ -12437,6 +12448,17 @@ impl<'a, 'p> Fn_<'a, 'p> {
             into,
             ty: part,
         })
+    }
+
+    /// Whether a `where` row checks the validated record the row at `ss[i]` makes
+    /// (`core::Builder`'s `bind`). A part made in its parent's storage is checked
+    /// there, before the parent's row: no slot, no copy.
+    fn core_ruled(&self, ss: &[St], i: usize) -> bool {
+        let St::Let(t, _) = &ss[i] else {
+            return false;
+        };
+        matches!(ss[i + 1..].iter().find(|s| !matches!(s, St::Check(_))),
+            Some(St::Do { rhs, .. }) if self.core_checks_made(rhs).is_some_and(|(_, n)| n == *t))
     }
 
     /// Whether a row takes a layout out of a field, which in part position

@@ -1,0 +1,17 @@
+// A validated record literal that fails its `where` clause as a field of a
+// record inside an array literal traps with the same words as a bound one.
+
+type Span = { lo: Int64, hi: Int64 } where lo < hi
+type Pair = { s: Span, k: Int64 }
+
+fn rt(n: Int64) -> Int64 {
+    return n * 1
+}
+
+fn main() -> Int64 {
+    let ok: SmallArray<Pair, 2> = [Pair { s: Span { lo: 0, hi: rt(1) }, k: 2 }]
+    print(ok[0].k)
+    let bad: SmallArray<Pair, 2> = [Pair { s: Span { lo: 3, hi: rt(3) }, k: 2 }]
+    print(bad[0].k)
+    return 0
+}

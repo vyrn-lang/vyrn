@@ -1,0 +1,36 @@
+// A validated record literal written as a part of its parent is built in the
+// parent's storage and checked there, as a bound one is.
+
+type Span = { lo: Int64, hi: Int64 } where lo < hi
+type Tag = { name: String, n: Int64 } where n > 0
+type Pair = { s: Span, k: Int64 }
+type Ranked = { s: Span, rank: Int64 } where rank > 0
+
+fn rt(n: Int64) -> Int64 {
+    return n * 1
+}
+
+fn width(s: Span) -> Int64 {
+    return s.hi - s.lo
+}
+
+fn spans(n: Int64) -> SmallArray<Span, 2> {
+    return [Span { lo: 0, hi: rt(n) }, Span { lo: 1, hi: rt(n + 1) }]
+}
+
+fn main() -> Int64 {
+    let small: SmallArray<Span, 2> = [Span { lo: 0, hi: rt(2) }, Span { lo: 1, hi: rt(4) }]
+    print(width(small[0]) + width(small[1])) // 5
+    let heap: Array<Tag> = [Tag { name: "a", n: rt(1) }, Tag { name: "bc", n: rt(2) }]
+    print(heap[1].name.byteLength + heap[1].n) // 4
+    let fixed: Array<Span, 2> = [Span { lo: 0, hi: rt(3) }, Span { lo: 2, hi: rt(3) }]
+    print(width(fixed[0]) + width(fixed[1])) // 4
+    let p = Pair { s: Span { lo: 1, hi: rt(5) }, k: 7 }
+    print(width(p.s) + p.k) // 11
+    let nested: Array<Ranked> = [Ranked { s: Span { lo: 0, hi: rt(1) }, rank: rt(3) }]
+    print(width(nested[0].s) + nested[0].rank) // 4
+    let back = spans(5)
+    print(width(back[0]) + width(back[1])) // 10
+    print(width(Span { lo: 4, hi: rt(6) })) // 2
+    return 0
+}
