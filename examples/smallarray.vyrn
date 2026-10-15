@@ -6,6 +6,17 @@ type Bucket =
     | Empty
     | Filled(SmallArray<Int64, 3>)
 
+type Point = { x: Int64, y: Int64 }
+type Swapped = { y: Int64, x: Int64 }
+type Named = { name: String, n: Int64 }
+type Slot =
+    | Free
+    | Held(String)
+
+fn firstPoint(ps: SmallArray<Swapped, 3>) -> String {
+    return "\{ps[0].x} \{ps[0].y}"
+}
+
 fn sumSmall(xs: SmallArray<Int64, 4>) -> Int64 {
     let mut total = 0
     for x in xs {
@@ -72,6 +83,20 @@ fn main() -> Int64 {
         Filled(vals) => vals[0] + vals[2],
     }
     print(bsum) // 12
+
+    let mut ps: SmallArray<Point, 3> = [Point { x: 1, y: 2 }, Point { x: 3, y: 4 }]
+    ps[0].x = 5
+    ps.push(Point { x: 6, y: 7 })
+    print("\{ps[0].x} \{ps[1].y} \{ps[2].x} \{ps.length}") // 5 4 6 3
+    print(firstPoint(ps)) // 5 2
+    let ns: SmallArray<Named, 2> = [Named { name: "ab", n: 1 }]
+    print("\{ns[0].name} \{ns[0].n}") // ab 1
+    let slots: SmallArray<Slot, 2> = [Held("k"), Free]
+    for slot in slots {
+        print(match slot { Free => "free", Held(k) => k }) // k, then free
+    }
+    let rows: SmallArray<Array<Int64>, 2> = [[1, 2], [3]]
+    print(rows[0][1] + rows[1][0]) // 5
 
     return 0
 }
