@@ -14,6 +14,7 @@
 //! [`Cert::verify`] checks that sum again in `i128`, sharing no code with the
 //! search.
 
+use std::borrow::Cow;
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
@@ -335,7 +336,15 @@ impl State {
         }
     }
 
-    pub fn norm(&self, l: &Lin) -> Option<Lin> {
+    /// `l` with each defined term replaced by its definition; `None` on
+    /// overflow. A sum is sorted with no zero coefficient, so one that names
+    /// no defined term is its own normal form and comes back borrowed.
+    pub fn norm<'l>(&self, l: &'l Lin) -> Option<Cow<'l, Lin>> {
+        debug_assert!(l.terms.windows(2).all(|w| w[0].0 < w[1].0));
+        debug_assert!(l.terms.iter().all(|(_, k)| *k != 0));
+        if !l.terms.iter().any(|(t, _)| self.defs.contains_key(t)) {
+            return Some(Cow::Borrowed(l));
+        }
         // Every scaled term in the order a left fold of `add` meets it, so a
         // stable sort and a fold per term overflow exactly where `add` does.
         let mut parts = Vec::with_capacity(l.terms.len());
@@ -360,7 +369,7 @@ impl State {
             }
         }
         terms.retain(|(_, k)| *k != 0);
-        Some(Lin { terms, c })
+        Some(Cow::Owned(Lin { terms, c }))
     }
 
     /// Adds `l >= 0`. A fact that does not normalize is dropped: it would
@@ -373,7 +382,9 @@ impl State {
                 }
             }
             Some(n) => {
-                self.facts.insert(n);
+                if !self.facts.contains(&*n) {
+                    self.facts.insert(n.into_owned());
+                }
             }
             None => {}
         }
@@ -389,7 +400,7 @@ impl State {
 
     /// Adds `l != 0`, then raises the bounds it touches ([`State::tighten`]).
     pub fn differ(&mut self, l: &Lin) {
-        match self.norm(l).and_then(canon) {
+        match self.norm(l).map(Cow::into_owned).and_then(canon) {
             Some(n) if n.is_const() => {
                 if n.c == 0 {
                     *self = State::dead();
@@ -406,7 +417,7 @@ impl State {
     /// Whether the state holds `l != 0` without a bound: `l` is a nonzero
     /// constant or a disequality.
     pub fn differs(&self, l: &Lin) -> bool {
-        match self.norm(l).and_then(canon) {
+        match self.norm(l).map(Cow::into_owned).and_then(canon) {
             Some(n) if n.is_const() => n.c != 0,
             Some(n) => self.ne.contains(&n),
             None => false,
@@ -447,7 +458,7 @@ impl State {
     /// appear in no fact: the caller has [`State::kill`]ed it.
     pub fn define(&mut self, t: Term, v: &Lin) {
         if let Some(n) = self.norm(v).filter(|n| n.coef(t) == 0) {
-            self.defs.insert(t, n);
+            self.defs.insert(t, n.into_owned());
         }
     }
 
@@ -808,7 +819,8 @@ impl State {
         let ne: BTreeSet<&Lin> = live.iter().flat_map(|s| &s.ne).collect();
         for d in ne {
             if provers.iter().all(|p| p.differs(d)) {
-                out.ne.extend(out.norm(d).and_then(canon));
+                out.ne
+                    .extend(out.norm(d).map(Cow::into_owned).and_then(canon));
             }
         }
         // A term some state defines as a constant takes one of the values

@@ -36,6 +36,7 @@
 //! live name's source, so a name's length, and a record name's fields, change
 //! only where the walk sees the name itself written.
 
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
@@ -5472,7 +5473,7 @@ impl<'a> Walk<'a> {
                 // A copy of a name of the same width and sign holds its value,
                 // which the type already bounds.
                 let copy = matches!(v, Val::Name(m) if self.kind(*m) == self.kind(n));
-                if let Some(l) = self.lin(v).and_then(|l| st.norm(&l)) {
+                if let Some(l) = self.lin(v).and_then(|l| Some(st.norm(&l)?.into_owned())) {
                     if copy || self.in_range(n, &l, st) {
                         st.define(Term::Val(n), &l);
                     }
@@ -5596,7 +5597,7 @@ impl<'a> Walk<'a> {
                 let norm = |fs: Vec<Option<Fact>>| {
                     fs.into_iter()
                         .flatten()
-                        .filter_map(|f| f.map(|l| pre.norm(l)))
+                        .filter_map(|f| f.map(|l| Some(pre.norm(l)?.into_owned())))
                         .collect()
                 };
                 Out::Cond(norm(t), norm(f))
@@ -5609,10 +5610,12 @@ impl<'a> Walk<'a> {
                 Some((t, f)) => Out::Cond(f.clone(), t.clone()),
                 None => Out::Nothing,
             },
-            (Op::Conv(_), [a]) => match self.lin(a).and_then(|l| pre.norm(&l)) {
-                Some(l) if self.in_range(n, &l, pre) => Out::Def(l),
-                _ => Out::Nothing,
-            },
+            (Op::Conv(_), [a]) => {
+                match self.lin(a).and_then(|l| Some(pre.norm(&l)?.into_owned())) {
+                    Some(l) if self.in_range(n, &l, pre) => Out::Def(l),
+                    _ => Out::Nothing,
+                }
+            }
             _ => Out::Nothing,
         }
     }
@@ -5914,7 +5917,7 @@ impl<'a> Walk<'a> {
                 _ => continue,
             };
             let k = *k;
-            let Some(k0) = entry.norm(&Lin::of(Term::Val(k))) else {
+            let Some(k0) = entry.norm(&Lin::of(Term::Val(k))).map(Cow::into_owned) else {
                 continue;
             };
             let Some(end) = s.checked_mul(n).and_then(|d| k0.plus(d)) else {
@@ -6132,7 +6135,7 @@ impl<'a> Walk<'a> {
             let k = Term::Val(k);
             let len = (measured(body, &b))
                 .and_then(|p| self.head_length(body, p))
-                .and_then(|l| exit.norm(&l));
+                .and_then(|l| Some(exit.norm(&l)?.into_owned()));
             let (low, high) = match len {
                 None => {
                     let low = (exit.facts.iter()).find(|f| f.terms == [(k, 1)]).cloned();
@@ -6475,7 +6478,7 @@ impl<'a> Walk<'a> {
     /// the goal as that parameter's `where` clause, where [`Walk::states`]
     /// allows one.
     fn goal(&self, st: &State, g: &Lin, param: Option<Name>) -> (Arc<str>, Option<Arc<str>>) {
-        let l = &st.norm(g).unwrap_or_else(|| g.clone());
+        let l = &st.norm(g).unwrap_or(Cow::Borrowed(g));
         let temp = (l.terms.iter()).any(|(t, _)| {
             t.name()
                 .is_some_and(|n| self.body.names[n.index()].source.starts_with('@'))
