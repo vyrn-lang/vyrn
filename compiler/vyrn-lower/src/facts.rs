@@ -110,11 +110,16 @@ impl Lin {
     }
 
     pub fn add(&self, o: &Lin) -> Option<Lin> {
+        self.add_scaled(o, 1)
+    }
+
+    /// `self + m * o` without a scaled copy of `o`; `None` on overflow.
+    fn add_scaled(&self, o: &Lin, m: i64) -> Option<Lin> {
         let (a, b) = (&self.terms, &o.terms);
         let mut terms = Vec::with_capacity(a.len() + b.len());
         let (mut i, mut j) = (0, 0);
         while i < a.len() && j < b.len() {
-            let (x, y) = (a[i], b[j]);
+            let (x, y) = (a[i], (b[j].0, b[j].1.checked_mul(m)?));
             let (t, k) = match x.0.cmp(&y.0) {
                 Ordering::Less => {
                     i += 1;
@@ -135,10 +140,12 @@ impl Lin {
             }
         }
         terms.extend_from_slice(&a[i..]);
-        terms.extend_from_slice(&b[j..]);
+        for (t, k) in &b[j..] {
+            terms.push((*t, k.checked_mul(m)?));
+        }
         Some(Lin {
             terms,
-            c: self.c.checked_add(o.c)?,
+            c: self.c.checked_add(o.c.checked_mul(m)?)?,
         })
     }
 
@@ -157,7 +164,7 @@ impl Lin {
     }
 
     pub fn sub(&self, o: &Lin) -> Option<Lin> {
-        self.add(&o.scale(-1)?)
+        self.add_scaled(o, -1)
     }
 
     pub fn plus(&self, c: i64) -> Option<Lin> {
@@ -169,7 +176,7 @@ impl Lin {
     pub fn map(&self, by: impl Fn(Term) -> Option<Lin>) -> Option<Lin> {
         let mut out = Lin::k(self.c);
         for (t, k) in &self.terms {
-            out = out.add(&by(*t)?.scale(*k)?)?;
+            out = out.add_scaled(&by(*t)?, *k)?;
         }
         Some(out)
     }
@@ -189,7 +196,7 @@ impl Lin {
                 .collect(),
             c: self.c,
         };
-        rest.add(&by.scale(k)?)
+        rest.add_scaled(by, k)
     }
 }
 
