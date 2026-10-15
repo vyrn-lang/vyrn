@@ -865,7 +865,10 @@ fn unbound(
             let solved = facts.solved.get(&e.id())?;
             solved.iter().find_map(|(tp, t)| {
                 let w = written.iter().find(|(p, _)| p == tp).map_or(t, |(_, w)| w);
-                if [t, w].iter().any(|t| types::resolve(t, decls) == Type::Err) {
+                if [t, w]
+                    .iter()
+                    .any(|t| *types::resolved(t, decls) == Type::Err)
+                {
                     return None;
                 }
                 bounds.get(tp)?.iter().find_map(|b| {
@@ -2830,7 +2833,7 @@ impl<'a> Builder<'a> {
                     let ([declared, vty], []) = self.body.speech().say([t, &vty], []);
                     Some(rule!(InitMismatch, name, declared, vty).render())
                 }
-                _ if vyrn_frontend::types::resolve(&vty, decls) == Type::Unit => {
+                _ if *vyrn_frontend::types::resolved(&vty, decls) == Type::Unit => {
                     Some(rule!(BindUnit, name).render())
                 }
                 _ => None,
@@ -3014,7 +3017,7 @@ impl<'a> Builder<'a> {
                     (None, None)
                         if self.frame.region == 0
                             && self.own.accumulators.contains(name)
-                            && vyrn_frontend::types::resolve(
+                            && *vyrn_frontend::types::resolved(
                                 &self.ty_of(value)?,
                                 self.proto.types(),
                             ) == Type::Str =>
@@ -3264,7 +3267,7 @@ impl<'a> Builder<'a> {
                     Expr::Var { name, .. } if self.lookup(name).is_some() => {
                         let n = self.lookup(name).unwrap();
                         let pulled = matches!(
-                            vyrn_frontend::types::resolve(&ity, &self.proto.types()),
+                            &*vyrn_frontend::types::resolved(&ity, &self.proto.types()),
                             Type::Stream(_)
                         );
                         if *consuming {
@@ -3323,7 +3326,7 @@ impl<'a> Builder<'a> {
                     self.body.names[it.index()].for_consume = true;
                 }
                 let streaming = matches!(
-                    vyrn_frontend::types::resolve(&ity, self.proto.types()),
+                    &*vyrn_frontend::types::resolved(&ity, self.proto.types()),
                     Type::Stream(_)
                 );
                 if streaming {
@@ -3411,7 +3414,7 @@ impl<'a> Builder<'a> {
                 let mut unreached = None;
                 if owned
                     && matches!(
-                        vyrn_frontend::types::resolve(&ity, self.proto.types()),
+                        &*vyrn_frontend::types::resolved(&ity, self.proto.types()),
                         Type::Array(_)
                     )
                 {
@@ -3564,7 +3567,7 @@ impl<'a> Builder<'a> {
     fn grows(&mut self, n: Name, name: &str) {
         let info = &mut self.body.names[n.index()];
         info.grows = self.frame.appends.contains(name)
-            && vyrn_frontend::types::resolve(&info.ty, self.proto.types()) == Type::Str;
+            && *vyrn_frontend::types::resolved(&info.ty, self.proto.types()) == Type::Str;
     }
 
     /// `s = s + a + b` on an accumulator: one `@strAppend` row that reads `s`
@@ -3612,7 +3615,7 @@ impl<'a> Builder<'a> {
     /// back.
     fn fresh_str(&self, ty: &Type, value: &Expr) -> bool {
         matches!(
-            vyrn_frontend::types::resolve(ty, self.proto.types()),
+            &*vyrn_frontend::types::resolved(ty, self.proto.types()),
             Type::Str
         ) && matches!(
             value,
@@ -3898,7 +3901,7 @@ impl<'a> Builder<'a> {
                     },
                 };
                 let i = ity.filter(|i| {
-                    !coercible(i, &key) && vyrn_frontend::types::resolve(i, decls) != Type::Err
+                    !coercible(i, &key) && *vyrn_frontend::types::resolved(i, decls) != Type::Err
                 });
                 match (i, vty) {
                     (Some(i), _) if key == Type::Int => {
@@ -4054,7 +4057,7 @@ impl<'a> Builder<'a> {
         out: &mut Vec<St>,
     ) -> Result<Val, Gap> {
         let t = self.ty_of(cond)?;
-        let bool = vyrn_frontend::types::resolve(&t, self.proto.types()) == Type::Bool;
+        let bool = *vyrn_frontend::types::resolved(&t, self.proto.types()) == Type::Bool;
         if !bool && t != Type::Err {
             let ([t], []) = self.body.speech().say([&t], []);
             let refusal = rule!(ConditionNotBool, word, t).render();
@@ -4203,7 +4206,7 @@ impl<'a> Builder<'a> {
                 ty = t;
             }
             let indexed = matches!(
-                vyrn_frontend::types::resolve(&ty, &decls),
+                &*vyrn_frontend::types::resolved(&ty, &decls),
                 Type::Array(_) | Type::SmallArray(..) | Type::Str
             );
             if !indexed
@@ -4355,13 +4358,12 @@ impl<'a> Builder<'a> {
 
     fn is_map(&self, ty: &Type) -> bool {
         let decls = self.proto.types();
-        matches!(vyrn_frontend::types::resolve(ty, &decls), Type::Map(..))
+        matches!(&*vyrn_frontend::types::resolved(ty, &decls), Type::Map(..))
     }
 
     fn field_ty(&self, ty: &Type, field: &str, line: usize) -> Result<Type, Gap> {
         let decls = self.proto.types();
-        let rt = vyrn_frontend::types::resolve(ty, &decls);
-        match rt {
+        match &*vyrn_frontend::types::resolved(ty, &decls) {
             Type::Record(fields) => fields
                 .iter()
                 .find(|f| f.name == field)
@@ -4378,8 +4380,8 @@ impl<'a> Builder<'a> {
 
     fn elem_ty(&self, ty: &Type, line: usize) -> Result<Type, Gap> {
         let decls = self.proto.types();
-        let t = vyrn_frontend::types::resolve(ty, &decls);
-        match (t.elem(), &t) {
+        let t = vyrn_frontend::types::resolved(ty, &decls);
+        match (t.elem(), &*t) {
             (Some(e), _) => Ok(e.clone()),
             (None, Type::Stream(e)) => Ok((**e).clone()),
             // A `for` over a String yields each byte as an `Int64`, the
@@ -4641,7 +4643,7 @@ impl<'a> Builder<'a> {
         for (i, (name, ty, key)) in payloads.into_iter().enumerate() {
             let owned = consuming && self.owns(&ty);
             let layout = matches!(
-                vyrn_frontend::types::resolve(&ty, &decls),
+                &*vyrn_frontend::types::resolved(&ty, &decls),
                 Type::Record(_)
                     | Type::Enum(_)
                     | Type::Array(_)
@@ -4872,8 +4874,7 @@ impl<'a> Builder<'a> {
         let decls = self.proto.types();
         let views = mc::lends_result(callee, &self.own.place_names);
         let view_copies = views
-            && matches!(
-                vyrn_frontend::types::resolve(&ty, &decls),
+            && matches!(&*vyrn_frontend::types::resolved(&ty, &decls),
                 Type::Array(ref et)
                     | Type::ArrayN(ref et, _)
                     | Type::SmallArray(ref et, _)
@@ -4899,7 +4900,7 @@ impl<'a> Builder<'a> {
         self.lookup(callee).is_some_and(|n| {
             let ty = &self.body.names[n.index()].ty;
             matches!(
-                vyrn_frontend::types::resolve(ty, &self.proto.types()),
+                &*vyrn_frontend::types::resolved(ty, &self.proto.types()),
                 Type::Fn(..)
             )
         })
@@ -5103,7 +5104,7 @@ impl<'a> Builder<'a> {
                     .any(|f| &f.name == name && f.type_params.is_empty())
                     && self.types.get(&e.id()).is_some_and(|t| {
                         matches!(
-                            vyrn_frontend::types::resolve(t, self.proto.types()),
+                            &*vyrn_frontend::types::resolved(t, self.proto.types()),
                             Type::Fn(..)
                         )
                     }) =>
@@ -5647,7 +5648,7 @@ impl<'a> Builder<'a> {
             && self.ty_of(e).is_ok_and(|t| !self.owns(&t))
             && self.ty_of(&args[0]).is_ok_and(|t| {
                 matches!(
-                    vyrn_frontend::types::resolve(&t, self.proto.types()),
+                    &*vyrn_frontend::types::resolved(&t, self.proto.types()),
                     Type::Array(_)
                         | Type::ArrayN(..)
                         | Type::SmallArray(..)
@@ -5794,7 +5795,7 @@ impl<'a> Builder<'a> {
                 let concat = matches!(op, BinOp::Add)
                     && self.ty_of(e).is_ok_and(|t| {
                         matches!(
-                            vyrn_frontend::types::resolve(&t, self.proto.types()),
+                            &*vyrn_frontend::types::resolved(&t, self.proto.types()),
                             Type::Str
                         )
                     });
@@ -6490,9 +6491,9 @@ impl<'a> Builder<'a> {
         // `value(s)` of a String: the box owns its payload (#512), so a String
         // read out of a place is copied first.
         if let ("value", [arg]) = (name, args) {
-            let string = self
-                .ty_of(arg)
-                .is_ok_and(|t| vyrn_frontend::types::resolve(&t, self.proto.types()) == Type::Str);
+            let string = self.ty_of(arg).is_ok_and(|t| {
+                *vyrn_frontend::types::resolved(&t, self.proto.types()) == Type::Str
+            });
             if string {
                 let v = if prelude::boxes_a_copy(arg, string) {
                     let copy = self.call("@copy", args, line, Some(Type::Str), None, out)?;
@@ -6533,7 +6534,7 @@ impl<'a> Builder<'a> {
         // declares, and `h(req)` is a call through the value.
         let bound = self.lookup(name).filter(|n| {
             matches!(
-                vyrn_frontend::types::resolve(&self.body.names[n.index()].ty, decls),
+                &*vyrn_frontend::types::resolved(&self.body.names[n.index()].ty, decls),
                 Type::Fn(..)
             )
         });
@@ -6624,7 +6625,7 @@ impl<'a> Builder<'a> {
         } else if let Some(g) = self.program.globals.iter().find(|g| {
             g.name == name
                 && matches!(
-                    vyrn_frontend::types::resolve(&g.ty.clone().unwrap_or(Type::Unit), decls),
+                    &*vyrn_frontend::types::resolved(&g.ty.clone().unwrap_or(Type::Unit), decls),
                     Type::Fn(..)
                 )
         }) {
@@ -6683,10 +6684,9 @@ impl<'a> Builder<'a> {
         // A stream is linear: a position it fills takes it, whatever
         // the position's word says.
         for (c, a) in caps.iter_mut().zip(args) {
-            if self
-                .ty_of(a)
-                .is_ok_and(|t| matches!(vyrn_frontend::types::resolve(&t, decls), Type::Stream(_)))
-            {
+            if self.ty_of(a).is_ok_and(|t| {
+                matches!(&*vyrn_frontend::types::resolved(&t, decls), Type::Stream(_))
+            }) {
                 *c = Capability::Consume;
             }
         }
