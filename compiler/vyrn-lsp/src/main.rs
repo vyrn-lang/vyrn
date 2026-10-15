@@ -2618,29 +2618,34 @@ fn ensure_vyx_owner(server: &mut Server, vyx_uri: &Url) {
     }
 }
 
-/// Discover and wire `vyx_uri`'s owner, publishing diagnostics. Returns whether
-/// an owner was found; a miss is cached as ownerless.
-fn discover_vyx_owner(connection: &Connection, server: &mut Server, vyx_uri: &Url) -> bool {
+/// Discover and wire `vyx_uri`'s owner, publishing diagnostics. A miss is
+/// cached as ownerless and published as one warning that names the search.
+fn discover_vyx_owner(connection: &Connection, server: &mut Server, vyx_uri: &Url) {
     let Some(path) = uri_path(vyx_uri) else {
-        return false;
+        return;
     };
     if server.vyx_owner.contains_key(&path) {
-        return true;
+        return;
     }
-    if server.vyx_ownerless.contains(&path) {
-        return false;
-    }
-    match probe_owner(server, &path) {
-        Some((owner, analysis)) => {
+    if !server.vyx_ownerless.contains(&path) {
+        if let Some((owner, analysis)) = probe_owner(server, &path) {
             let text = doc_text(server, &owner).unwrap_or_default();
             install_root(Some(connection), server, &owner, &text, analysis);
-            server.vyx_owner.contains_key(&path)
+            return;
         }
-        None => {
-            server.vyx_ownerless.insert(path);
-            false
-        }
+        server.vyx_ownerless.insert(path.clone());
     }
+    let file = std::path::Path::new(&path);
+    let root = vyrn_frontend::manifest::app_root(file.parent().unwrap_or(file));
+    let msg = format!(
+        "no `.vyrn` root maps its generated code to this file, so it has no types, \
+         hovers or hints; searched up to {MAX_OWNER_CANDIDATES} `.vyrn` files nearest \
+         it under `{}`",
+        root.display()
+    );
+    let text = doc_text(server, vyx_uri).unwrap_or_default();
+    let warning = vyrn_frontend::diagnostics::Diagnostic::warning(1, 0, "lsp", msg);
+    publish(connection, vyx_uri, &text, &[warning]);
 }
 
 /// The first candidate root whose origins claim `vyx_path`, with its analysis.
@@ -2753,9 +2758,8 @@ fn mounting_roots(path: &str, gens: &[&str]) -> Vec<Url> {
     let Some(dir) = file.parent() else {
         return Vec::new();
     };
-    let app_root = vyrn_frontend::manifest::app_root(dir);
     let mut files = Vec::new();
-    collect_vyrn(&app_root, 0, &mut files);
+    collect_vyrn(dir, &mut files);
     let mut scored: Vec<(usize, std::path::PathBuf)> = files
         .into_iter()
         .filter(|p| {
@@ -2897,10 +2901,8 @@ fn candidate_owners(vyx_path: &str) -> Vec<Url> {
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
-    let app_root = vyrn_frontend::manifest::app_root(vyx_dir);
-
     let mut files = Vec::new();
-    collect_vyrn(&app_root, 0, &mut files);
+    collect_vyrn(vyx_dir, &mut files);
 
     let mut scored: Vec<(i32, usize, std::path::PathBuf)> = files
         .into_iter()
@@ -2939,16 +2941,27 @@ fn has_generator_import(src: &str) -> bool {
         || src.contains("components ")
 }
 
-/// The `.vyrn` files under `dir`, at most [`MAX_OWNER_CANDIDATES`].
-fn collect_vyrn(dir: &std::path::Path, depth: usize, out: &mut Vec<std::path::PathBuf>) {
-    collect_sources(dir, depth, MAX_OWNER_CANDIDATES, &["vyrn"], out);
+/// The `.vyrn` files nearest `dir`, at most [`MAX_OWNER_CANDIDATES`]: `dir`'s
+/// subtree, then each ancestor's up to the app root. A manifest far above the
+/// generating root must not spend the cap on unrelated trees.
+fn collect_vyrn(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+    let root = vyrn_frontend::manifest::app_root(dir);
+    let mut walked: Option<&std::path::Path> = None;
+    for anc in dir.ancestors() {
+        collect_sources(anc, walked, 0, MAX_OWNER_CANDIDATES, &["vyrn"], out);
+        if anc == root || out.len() >= MAX_OWNER_CANDIDATES {
+            return;
+        }
+        walked = Some(anc);
+    }
 }
 
 /// Collect files with one of `exts` under `dir`, at most `cap`, skipping hidden,
-/// vendored, build and `public/` directories. Subdirectories are visited in name
-/// order, so a capped walk is deterministic.
+/// vendored, build and `public/` directories and the subtree `except`.
+/// Subdirectories are visited in name order, so a capped walk is deterministic.
 fn collect_sources(
     dir: &std::path::Path,
+    except: Option<&std::path::Path>,
     depth: usize,
     cap: usize,
     exts: &[&str],
@@ -2973,6 +2986,7 @@ fn collect_sources(
                 || name == "target"
                 || name == "node_modules"
                 || name == "public"
+                || Some(p.as_path()) == except
             {
                 continue;
             }
@@ -2987,7 +3001,7 @@ fn collect_sources(
     }
     subdirs.sort();
     for sub in subdirs {
-        collect_sources(&sub, depth + 1, cap, exts, out);
+        collect_sources(&sub, except, depth + 1, cap, exts, out);
         if out.len() >= cap {
             return;
         }
@@ -3304,7 +3318,7 @@ fn discover_stylesheets(root: &std::path::Path) -> Vec<std::path::PathBuf> {
         }
     }
     let mut vyx = Vec::new();
-    collect_sources(root, 0, MAX_VYX_SCAN, &["vyx"], &mut vyx);
+    collect_sources(root, None, 0, MAX_VYX_SCAN, &["vyx"], &mut vyx);
     vyx.sort();
     for v in &vyx {
         let Ok(src) = std::fs::read_to_string(v) else {
