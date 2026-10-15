@@ -12421,6 +12421,13 @@ impl<'a, 'p> Fn_<'a, 'p> {
                 let bytes = self.extent(&inner, ps.len(), 0).ok()?;
                 (*inner, off, PartIn::Buffer(bytes))
             }
+            (Ctor::Array, Type::SmallArray(inner, n)) if ps.len() <= n => {
+                let Ok(Repr::Agg(l)) = self.cx.repr(ty, 0) else {
+                    return None;
+                };
+                let off = l.fields[3] + self.stride(&inner, 0).ok()? * at as u32;
+                (*inner, off, PartIn::Parent)
+            }
             _ => return None,
         };
         fits(&part).then_some(PartAt {
