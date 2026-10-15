@@ -770,48 +770,40 @@ pub enum Use {
     Release,
 }
 
+/// The body of [`St::lists`] and [`St::lists_mut`], which differ only in the
+/// reference they take: `&` or `&mut`.
+macro_rules! lists {
+    ($s:expr, $iter:ident, $($ref_:tt)+) => {{
+        let (a, b, arms): (Option<$($ref_)+ Vec<St>>, Option<$($ref_)+ Vec<St>>, $($ref_)+ [Arm]) =
+            match $s {
+                St::If { then, els, .. } => (Some(then), Some(els), $($ref_)+ []),
+                St::Loop { body, .. } | St::Block { body, .. } => (Some(body), None, $($ref_)+ []),
+                St::Switch { arms, .. } => (None, None, arms),
+                St::Let(..)
+                | St::Store { .. }
+                | St::Drop(..)
+                | St::Row { .. }
+                | St::Break { .. }
+                | St::Continue { .. }
+                | St::Return { .. }
+                | St::Do { .. }
+                | St::Trap
+                | St::Check(_) => (None, None, $($ref_)+ []),
+            };
+        a.into_iter().chain(b).chain(arms.$iter().map(|a| $($ref_)+ a.body))
+    }};
+}
+
 impl St {
     /// The lists of rows this row holds, in program order: an `if`'s then
     /// and else, a loop's or a block's body, each arm's body.
     pub fn lists(&self) -> impl Iterator<Item = &Vec<St>> {
-        let (a, b, arms): (Option<&Vec<St>>, Option<&Vec<St>>, &[Arm]) = match self {
-            St::If { then, els, .. } => (Some(then), Some(els), &[]),
-            St::Loop { body, .. } | St::Block { body, .. } => (Some(body), None, &[]),
-            St::Switch { arms, .. } => (None, None, arms),
-            St::Let(..)
-            | St::Store { .. }
-            | St::Drop(..)
-            | St::Row { .. }
-            | St::Break { .. }
-            | St::Continue { .. }
-            | St::Return { .. }
-            | St::Do { .. }
-            | St::Trap
-            | St::Check(_) => (None, None, &[]),
-        };
-        a.into_iter().chain(b).chain(arms.iter().map(|a| &a.body))
+        lists!(self, iter, &)
     }
 
     /// [`St::lists`], to write to.
     pub fn lists_mut(&mut self) -> impl Iterator<Item = &mut Vec<St>> {
-        let (a, b, arms): (Option<&mut Vec<St>>, Option<&mut Vec<St>>, &mut [Arm]) = match self {
-            St::If { then, els, .. } => (Some(then), Some(els), &mut []),
-            St::Loop { body, .. } | St::Block { body, .. } => (Some(body), None, &mut []),
-            St::Switch { arms, .. } => (None, None, arms),
-            St::Let(..)
-            | St::Store { .. }
-            | St::Drop(..)
-            | St::Row { .. }
-            | St::Break { .. }
-            | St::Continue { .. }
-            | St::Return { .. }
-            | St::Do { .. }
-            | St::Trap
-            | St::Check(_) => (None, None, &mut []),
-        };
-        a.into_iter()
-            .chain(b)
-            .chain(arms.iter_mut().map(|a| &mut a.body))
+        lists!(self, iter_mut, &mut)
     }
 
     /// This row and every row under it, as [`rows`] walks them.
