@@ -2326,6 +2326,45 @@ fn ownerless_vyx_says_what_was_searched() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+const SHELL_APP: &str = "import { components } from \"std/vyx\"\n\
+    import { shell } from components(\"./widgets\")\n\
+    fn main() -> Int64 { return 0 }\n";
+const SHELL_VYX: &str = "<script>\n\
+    props { label: String }\n\
+    </script>\n\
+    <template>\n\
+    <main><Leaf :text=\"label\"/></main>\n\
+    </template>\n";
+const LEAF_VYX: &str = "<script>\n\
+    props { text: String }\n\
+    </script>\n\
+    <template>\n\
+    <p>{{ text }}</p>\n\
+    </template>\n";
+
+/// A component whose template binds only a child's attribute still has an owner.
+#[test]
+fn vyx_without_interpolation_has_an_owner() {
+    let n = SCRATCH_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let dir = std::env::temp_dir().join(format!("vyrn_lsp_shell_{}_{n}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("widgets")).unwrap();
+    std::fs::write(dir.join("vyrn.json"), "{ \"name\": \"shell\" }").unwrap();
+    std::fs::write(dir.join("app.vyrn"), SHELL_APP).unwrap();
+    std::fs::write(dir.join("widgets/Shell.vyx"), SHELL_VYX).unwrap();
+    std::fs::write(dir.join("widgets/Leaf.vyx"), LEAF_VYX).unwrap();
+
+    let mut client = spawn_client();
+    let uri = file_uri(&dir.join("widgets/Shell.vyx"));
+    did_open(&mut client, &uri, "vyx", SHELL_VYX);
+    let d = read_diags_for(&mut client, "Shell.vyx");
+    let diags = d["params"]["diagnostics"].as_array().unwrap();
+    assert!(diags.is_empty(), "no ownerless warning: {diags:?}");
+
+    let _ = client.child.kill();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// One `documentHighlight` occurrence: 1-based `line`, 0-based `ch`, and the
 /// `DocumentHighlightKind` (2 = Read, 3 = Write). `ch` shows in failure output.
 #[derive(Debug)]

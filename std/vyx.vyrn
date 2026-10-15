@@ -2334,8 +2334,11 @@ fn vyxEmitSignature(comp: VyxComp) -> String {
     return "export fn " + comp.fnName + "(" + joinWith(params, ", ") + ") -> Html {\n"
 }
 
+/// One component's view after an empty origin region at its `.vyx`'s first
+/// line. The region maps no text; it names the file, so a template that binds
+/// no expression still has an owner.
 gen fn vyxEmitComponent(comp: VyxComp, reg: VyxRegistry) -> VyxEmit {
-    let mut out = vyxEmitSignature(comp)
+    let mut out = vyxRegion("", comp.srcPath, 1, 1) + vyxEmitSignature(comp)
     let rootEmit = vyxEmitRoot(comp.root, reg, comp.srcPath)
     out = out + rootEmit.code + "}\n"
     return VyxEmit { code: out, err: consume rootEmit.err, imports: consume rootEmit.imports }
