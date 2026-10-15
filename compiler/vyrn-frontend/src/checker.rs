@@ -6448,8 +6448,7 @@ impl<'a> Checker<'a> {
             // generic one binds as that. Any other argument keeps the rule below.
             Type::Lazy(_)
                 if type_mentions_param(pty)
-                    && matches!(
-                        crate::types::resolve(aty, self),
+                    && matches!(&*crate::types::resolved(aty, self),
                         Type::Fn(ps, _) if ps.is_empty()
                     ) =>
             {

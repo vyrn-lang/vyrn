@@ -192,7 +192,7 @@ pub fn clauses(
             return Err(entry("the host calls it by name and checks no clause"));
         }
         let fn_typed =
-            |q: &crate::ast::Param| matches!(crate::types::resolve(&q.ty, decls), Type::Fn(..));
+            |q: &crate::ast::Param| matches!(&*crate::types::resolved(&q.ty, decls), Type::Fn(..));
         if f.params.iter().any(fn_typed) {
             return Err(entry(
                 "it takes a `fn` parameter, which a call binds apart from its arguments",

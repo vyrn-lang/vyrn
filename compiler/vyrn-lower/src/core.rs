@@ -11,6 +11,7 @@
 //! that is a leak. A construct this pass does not lower returns a [`Gap`], and
 //! the instance counts as unlowered.
 
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
@@ -865,7 +866,10 @@ fn unbound(
             let solved = facts.solved.get(&e.id())?;
             solved.iter().find_map(|(tp, t)| {
                 let w = written.iter().find(|(p, _)| p == tp).map_or(t, |(_, w)| w);
-                if [t, w].iter().any(|t| types::resolve(t, decls) == Type::Err) {
+                if [t, w]
+                    .iter()
+                    .any(|t| *types::resolved(t, decls) == Type::Err)
+                {
                     return None;
                 }
                 bounds.get(tp)?.iter().find_map(|b| {
@@ -1173,7 +1177,7 @@ fn seeded<'a>(
             for g in &program.globals {
                 // A crossing into a validated declared type is its constructor.
                 let check = match &g.ty {
-                    Some(to) => b.checked(&b.ty_of(&g.init)?, to, &g.init),
+                    Some(to) => b.checked(&*b.ty_of(&g.init)?, to, &g.init),
                     None => None,
                 };
                 let v = match check {
@@ -1263,11 +1267,11 @@ struct Builder<'a> {
     /// The bounds of the function's type parameters; `None` for a body that
     /// is no function.
     bounds: Option<&'a HashMap<String, Vec<String>>>,
-    types: HashMap<NodeId, Type>,
+    types: &'a HashMap<NodeId, Type>,
     /// The producer type of every typed expression, before the destination's
     /// coercion (see [`Rhs`]); `types` holds what the value must end up as.
-    produced: HashMap<NodeId, Type>,
-    solved: HashMap<NodeId, Vec<(String, Type)>>,
+    produced: &'a HashMap<NodeId, Type>,
+    solved: &'a HashMap<NodeId, Vec<(String, Type)>>,
     placed: HashMap<(Exit, NodeId), Vec<&'a Release>>,
     body: Body,
     frame: Frame,
@@ -1376,9 +1380,14 @@ impl<'a> Builder<'a> {
         own: &'a Ownership,
         fns: &'a Fns,
         names: &'a mut NameMemo,
-        source: &Source<'_, 'a>,
+        source: &Source<'a, 'a>,
         seed: &'a std::collections::HashSet<NodeId>,
     ) -> Self {
+        let all = match source {
+            Source::Instance(inst) => &inst.facts,
+            Source::Block(ob) => &ob.facts,
+            Source::Globals(facts) | Source::Expr { facts, .. } => *facts,
+        };
         let filtered;
         let (facts, file) = match source {
             Source::Instance(inst) => (&inst.facts, inst.func.module.clone()),
@@ -1437,9 +1446,9 @@ impl<'a> Builder<'a> {
             proto: &own.proto,
             names,
             bounds,
-            types: facts.types.clone(),
-            produced: facts.produced.clone(),
-            solved: facts.solved.clone(),
+            types: &all.types,
+            produced: &all.produced,
+            solved: &all.solved,
             placed,
             body: Body {
                 id,
@@ -1936,7 +1945,7 @@ impl<'a> Builder<'a> {
                 if !is_place_read(&p.place) {
                     return gap_d("a projection whose yield is not a place", name, line);
                 }
-                let ty = self.ty_of(&p.place)?;
+                let ty = self.ty_of(&p.place)?.into_owned();
                 let place = self.place(&p.place, &mut hit)?;
                 let n = self.name(bind, ty, false, line);
                 hit.push(St::Let(n, Rhs::Read(place)));
@@ -2181,12 +2190,12 @@ impl<'a> Builder<'a> {
             .cloned()
             // Fills only a projection expanded at the site, which has no row;
             // `ty_of` refuses everything else.
-            .or_else(|| self.ty_of(e).ok())
+            .or_else(|| self.ty_of(e).ok().map(Cow::into_owned))
     }
 
-    fn ty_of(&self, e: &Expr) -> Result<Type, Gap> {
+    fn ty_of(&self, e: &Expr) -> Result<Cow<'a, Type>, Gap> {
         match self.types.get(&e.id()) {
-            Some(t) => Ok(t.clone()),
+            Some(t) => Ok(Cow::Borrowed(t)),
             // A call to a projection the checker expanded at the site
             // (`people.tryAt(h)`): its declared result, under the
             // receiver's type arguments.
@@ -2198,10 +2207,10 @@ impl<'a> Builder<'a> {
                 };
                 let p = self.projection(name).unwrap();
                 let rty = self.ty_of(&args[0])?;
-                Ok(match self.program.impls.place(&rty, name) {
+                Ok(Cow::Owned(match self.program.impls.place(&rty, name) {
                     Some((imp, f)) => vyrn_frontend::types::under_head(imp, &rty, &f.ret),
                     None => p.ret.clone(),
-                })
+                }))
             }
             None => gap_d(
                 "an expression the checker did not type",
@@ -2710,7 +2719,7 @@ impl<'a> Builder<'a> {
         let Some((_, root, steps)) = vyrn_frontend::parser::place_steps(recv) else {
             return gap("a removal whose receiver is no place", line);
         };
-        let ty = |e: &Expr| self.ty_of(e).ok();
+        let ty = |e: &Expr| self.ty_of(e).ok().map(Cow::into_owned);
         let site = self
             .program
             .expansions
@@ -2825,14 +2834,14 @@ impl<'a> Builder<'a> {
                     let ([declared, vty], []) = self.body.speech().say([t, &vty], []);
                     Some(rule!(InitMismatch, name, declared, vty).render())
                 }
-                _ if vyrn_frontend::types::resolve(&vty, decls) == Type::Unit => {
+                _ if *vyrn_frontend::types::resolved(&vty, decls) == Type::Unit => {
                     Some(rule!(BindUnit, name).render())
                 }
                 _ => None,
             };
             self.body.mistyped.extend(refusal.map(|r| (line, r)));
         }
-        let ty = self.ty_of(value)?;
+        let ty = self.ty_of(value)?.into_owned();
         let check = annotation.and_then(|t| self.checked(&ty, t, value));
         let copied = check.is_none() && s.is_some_and(|s| self.copies(s, &ty));
         // Nothing may take module state: `let t = g`, `let t = consume g`
@@ -2995,7 +3004,7 @@ impl<'a> Builder<'a> {
                 let n = self.lookup(name);
                 // A crossing into a validated type is its constructor.
                 let check = match &to {
-                    Some(to) => self.checked(&self.ty_of(value)?, to, value),
+                    Some(to) => self.checked(&self.ty_of(value)?.into_owned(), to, value),
                     None => None,
                 };
                 let grown = match (n, &check) {
@@ -3009,8 +3018,8 @@ impl<'a> Builder<'a> {
                     (None, None)
                         if self.frame.region == 0
                             && self.own.accumulators.contains(name)
-                            && vyrn_frontend::types::resolve(
-                                &self.ty_of(value)?,
+                            && *vyrn_frontend::types::resolved(
+                                &self.ty_of(value)?.into_owned(),
                                 self.proto.types(),
                             ) == Type::Str =>
                     {
@@ -3043,7 +3052,7 @@ impl<'a> Builder<'a> {
                 let mut v = v?;
                 let ty = match n {
                     Some(n) => self.body.names[n.index()].ty.clone(),
-                    None => self.ty_of(value)?,
+                    None => self.ty_of(value)?.into_owned(),
                 };
                 // A slot that owns its value keeps owning: a borrow stored
                 // into it is copied, as `let mut` binds one (`copies`), and
@@ -3232,7 +3241,7 @@ impl<'a> Builder<'a> {
                 col: _,
                 id: _,
             } => {
-                let ity = self.ty_of(iter)?;
+                let ity = self.ty_of(iter)?.into_owned();
                 // A user container's element is what its `nth` projection
                 // yields. A `for` walks no map.
                 let elem = self
@@ -3259,7 +3268,7 @@ impl<'a> Builder<'a> {
                     Expr::Var { name, .. } if self.lookup(name).is_some() => {
                         let n = self.lookup(name).unwrap();
                         let pulled = matches!(
-                            vyrn_frontend::types::resolve(&ity, &self.proto.types()),
+                            &*vyrn_frontend::types::resolved(&ity, &self.proto.types()),
                             Type::Stream(_)
                         );
                         if *consuming {
@@ -3318,7 +3327,7 @@ impl<'a> Builder<'a> {
                     self.body.names[it.index()].for_consume = true;
                 }
                 let streaming = matches!(
-                    vyrn_frontend::types::resolve(&ity, self.proto.types()),
+                    &*vyrn_frontend::types::resolved(&ity, self.proto.types()),
                     Type::Stream(_)
                 );
                 if streaming {
@@ -3406,7 +3415,7 @@ impl<'a> Builder<'a> {
                 let mut unreached = None;
                 if owned
                     && matches!(
-                        vyrn_frontend::types::resolve(&ity, self.proto.types()),
+                        &*vyrn_frontend::types::resolved(&ity, self.proto.types()),
                         Type::Array(_)
                     )
                 {
@@ -3506,7 +3515,7 @@ impl<'a> Builder<'a> {
                 self.drop_since(mark, out);
             }
             Stmt::Expr(e, _) => {
-                let ty = self.ty_of(e).unwrap_or(Type::Unit);
+                let ty = self.ty_of(e).map_or(Type::Unit, Cow::into_owned);
                 let rhs = self.rhs(e, out)?;
                 if self.owns(&ty) || self.frame.owed.is_some() {
                     let owns = self.owns(&ty);
@@ -3559,7 +3568,7 @@ impl<'a> Builder<'a> {
     fn grows(&mut self, n: Name, name: &str) {
         let info = &mut self.body.names[n.index()];
         info.grows = self.frame.appends.contains(name)
-            && vyrn_frontend::types::resolve(&info.ty, self.proto.types()) == Type::Str;
+            && *vyrn_frontend::types::resolved(&info.ty, self.proto.types()) == Type::Str;
     }
 
     /// `s = s + a + b` on an accumulator: one `@strAppend` row that reads `s`
@@ -3607,7 +3616,7 @@ impl<'a> Builder<'a> {
     /// back.
     fn fresh_str(&self, ty: &Type, value: &Expr) -> bool {
         matches!(
-            vyrn_frontend::types::resolve(ty, self.proto.types()),
+            &*vyrn_frontend::types::resolved(ty, self.proto.types()),
             Type::Str
         ) && matches!(
             value,
@@ -3893,7 +3902,7 @@ impl<'a> Builder<'a> {
                     },
                 };
                 let i = ity.filter(|i| {
-                    !coercible(i, &key) && vyrn_frontend::types::resolve(i, decls) != Type::Err
+                    !coercible(i, &key) && *vyrn_frontend::types::resolved(i, decls) != Type::Err
                 });
                 match (i, vty) {
                     (Some(i), _) if key == Type::Int => {
@@ -3963,12 +3972,12 @@ impl<'a> Builder<'a> {
         // A user container's element type is the value's.
         let ety = match self.elem_ty(&bty, line) {
             Ok(t) => t,
-            Err(_) => self.ty_of(value)?,
+            Err(_) => self.ty_of(value)?.into_owned(),
         };
         // A crossing into a validated element is its constructor, proven or
         // not.
         let mark = out.len();
-        let v = match self.checked(&self.ty_of(value)?, &ety, value) {
+        let v = match self.checked(&self.ty_of(value)?.into_owned(), &ety, value) {
             Some(to) => Val::Name(self.checked_temp(&to, value, line, out)?),
             None => {
                 let v = self.val(value, out)?;
@@ -4048,8 +4057,8 @@ impl<'a> Builder<'a> {
         line: usize,
         out: &mut Vec<St>,
     ) -> Result<Val, Gap> {
-        let t = self.ty_of(cond)?;
-        let bool = vyrn_frontend::types::resolve(&t, self.proto.types()) == Type::Bool;
+        let t = self.ty_of(cond)?.into_owned();
+        let bool = *vyrn_frontend::types::resolved(&t, self.proto.types()) == Type::Bool;
         if !bool && t != Type::Err {
             let ([t], []) = self.body.speech().say([&t], []);
             let refusal = rule!(ConditionNotBool, word, t).render();
@@ -4096,7 +4105,7 @@ impl<'a> Builder<'a> {
         // A variable is no typed node; a field or an element is.
         let ty = match recv {
             Expr::Var { .. } => self.named_place(root, line).ok().map(|(_, ty)| ty),
-            _ => self.ty_of(recv).ok(),
+            _ => self.ty_of(recv).ok().map(Cow::into_owned),
         };
         let Some(ty) = ty.filter(|_| mutable) else {
             return;
@@ -4198,7 +4207,7 @@ impl<'a> Builder<'a> {
                 ty = t;
             }
             let indexed = matches!(
-                vyrn_frontend::types::resolve(&ty, &decls),
+                &*vyrn_frontend::types::resolved(&ty, &decls),
                 Type::Array(_) | Type::SmallArray(..) | Type::Str
             );
             if !indexed
@@ -4350,13 +4359,12 @@ impl<'a> Builder<'a> {
 
     fn is_map(&self, ty: &Type) -> bool {
         let decls = self.proto.types();
-        matches!(vyrn_frontend::types::resolve(ty, &decls), Type::Map(..))
+        matches!(&*vyrn_frontend::types::resolved(ty, &decls), Type::Map(..))
     }
 
     fn field_ty(&self, ty: &Type, field: &str, line: usize) -> Result<Type, Gap> {
         let decls = self.proto.types();
-        let rt = vyrn_frontend::types::resolve(ty, &decls);
-        match rt {
+        match &*vyrn_frontend::types::resolved(ty, &decls) {
             Type::Record(fields) => fields
                 .iter()
                 .find(|f| f.name == field)
@@ -4373,8 +4381,8 @@ impl<'a> Builder<'a> {
 
     fn elem_ty(&self, ty: &Type, line: usize) -> Result<Type, Gap> {
         let decls = self.proto.types();
-        let t = vyrn_frontend::types::resolve(ty, &decls);
-        match (t.elem(), &t) {
+        let t = vyrn_frontend::types::resolved(ty, &decls);
+        match (t.elem(), &*t) {
             (Some(e), _) => Ok(e.clone()),
             (None, Type::Stream(e)) => Ok((**e).clone()),
             // A `for` over a String yields each byte as an `Int64`, the
@@ -4636,7 +4644,7 @@ impl<'a> Builder<'a> {
         for (i, (name, ty, key)) in payloads.into_iter().enumerate() {
             let owned = consuming && self.owns(&ty);
             let layout = matches!(
-                vyrn_frontend::types::resolve(&ty, &decls),
+                &*vyrn_frontend::types::resolved(&ty, &decls),
                 Type::Record(_)
                     | Type::Enum(_)
                     | Type::Array(_)
@@ -4867,8 +4875,7 @@ impl<'a> Builder<'a> {
         let decls = self.proto.types();
         let views = mc::lends_result(callee, &self.own.place_names);
         let view_copies = views
-            && matches!(
-                vyrn_frontend::types::resolve(&ty, &decls),
+            && matches!(&*vyrn_frontend::types::resolved(&ty, &decls),
                 Type::Array(ref et)
                     | Type::ArrayN(ref et, _)
                     | Type::SmallArray(ref et, _)
@@ -4894,7 +4901,7 @@ impl<'a> Builder<'a> {
         self.lookup(callee).is_some_and(|n| {
             let ty = &self.body.names[n.index()].ty;
             matches!(
-                vyrn_frontend::types::resolve(ty, &self.proto.types()),
+                &*vyrn_frontend::types::resolved(ty, &self.proto.types()),
                 Type::Fn(..)
             )
         })
@@ -4969,7 +4976,7 @@ impl<'a> Builder<'a> {
     }
 
     fn read_val_inner(&mut self, e: &'a Expr, out: &mut Vec<St>) -> Result<Val, Gap> {
-        let ty = self.ty_of(e).ok();
+        let ty = self.ty_of(e).ok().map(Cow::into_owned);
         let owns = ty.as_ref().is_some_and(|t| self.owns(t));
         let is_place = match e {
             Expr::Field { .. } => self.deferred_of(e).is_none(),
@@ -5086,7 +5093,7 @@ impl<'a> Builder<'a> {
                 // A nullary constructor (`None`, a fieldless variant) parses
                 // as a bare name. Like a literal, it owns and borrows nothing.
                 None if self.is_nullary(name) => {
-                    let ty = self.ty_of(e)?;
+                    let ty = self.ty_of(e)?.into_owned();
                     self.nullary(name, ty, *line, out)
                 }
                 // A function's name stored as a value: the closure enum's
@@ -5098,7 +5105,7 @@ impl<'a> Builder<'a> {
                     .any(|f| &f.name == name && f.type_params.is_empty())
                     && self.types.get(&e.id()).is_some_and(|t| {
                         matches!(
-                            vyrn_frontend::types::resolve(t, self.proto.types()),
+                            &*vyrn_frontend::types::resolved(t, self.proto.types()),
                             Type::Fn(..)
                         )
                     }) =>
@@ -5139,7 +5146,7 @@ impl<'a> Builder<'a> {
             },
             Expr::Lambda { .. } => self.lambda(e, out),
             _ => {
-                let ty = self.ty_of(e)?;
+                let ty = self.ty_of(e)?.into_owned();
                 if is_place_read(e) && self.owns(&ty) && !self.forces(e) {
                     // `best = m.name`: a borrow (`movecheck::names_a_place`),
                     // so a take of it needs a `.copy()`.
@@ -5202,7 +5209,7 @@ impl<'a> Builder<'a> {
     /// The body is its own frame ([`Builder::lambda_frame`]).
     fn lambda(&mut self, e: &'a Expr, out: &mut Vec<St>) -> Result<Val, Gap> {
         let caps = self.captures(e);
-        let ty = self.ty_of(e).unwrap_or(Type::Unit);
+        let ty = self.ty_of(e).map_or(Type::Unit, Cow::into_owned);
         let t = self.name("@lambda", ty.clone(), self.owns(&ty), e.line());
         // Taken from the cell, so a nested or sibling lambda asks its own
         // position ([`NameInfo::closure_reads`]).
@@ -5239,7 +5246,11 @@ impl<'a> Builder<'a> {
                     // A body its slot does not take. [`fn_slot`] covers a
                     // call's parameter; this covers every other slot.
                     if let LambdaBody::Expr(x) = body {
-                        let got = self.ty_of(x).ok().filter(|g| *g != Type::Err);
+                        let got = self
+                            .ty_of(x)
+                            .ok()
+                            .map(Cow::into_owned)
+                            .filter(|g| *g != Type::Err);
                         let sp = self.body.speech();
                         let refusal =
                             got.and_then(|g| stored_slot(Some(&g), None, &t, &decls, *line, &sp));
@@ -5406,7 +5417,7 @@ impl<'a> Builder<'a> {
         out: &mut Vec<St>,
     ) -> Result<Val, Gap> {
         self.unknown_at(e);
-        let ty = self.ty_of(e)?;
+        let ty = self.ty_of(e)?.into_owned();
         let t = if self.owns(&ty) {
             self.borrow_name(e, ty, line)
         } else {
@@ -5510,7 +5521,7 @@ impl<'a> Builder<'a> {
         out: &mut Vec<St>,
         keyword: Option<(usize, usize)>,
     ) -> Result<Val, Gap> {
-        let ty = self.ty_of(e)?;
+        let ty = self.ty_of(e)?.into_owned();
         let place = self.place(e, out)?;
         self.frame.pending_receiver = None;
         if let Some(kw) = keyword {
@@ -5600,7 +5611,7 @@ impl<'a> Builder<'a> {
             args: vec![(Arg::Val(v), Capability::Read)],
             write_back: false,
             kind,
-            ret: Some(self.ty_of(e)?),
+            ret: Some(self.ty_of(e)?.into_owned()),
             solved,
             targets: Vec::new(),
         })
@@ -5642,7 +5653,7 @@ impl<'a> Builder<'a> {
             && self.ty_of(e).is_ok_and(|t| !self.owns(&t))
             && self.ty_of(&args[0]).is_ok_and(|t| {
                 matches!(
-                    vyrn_frontend::types::resolve(&t, self.proto.types()),
+                    &*vyrn_frontend::types::resolved(&t, self.proto.types()),
                     Type::Array(_)
                         | Type::ArrayN(..)
                         | Type::SmallArray(..)
@@ -5759,7 +5770,7 @@ impl<'a> Builder<'a> {
             Expr::Var { name, line, id: _ }
                 if self.lookup(name).is_none() && self.is_nullary(name) =>
             {
-                let ty = self.ty_of(e)?;
+                let ty = self.ty_of(e)?.into_owned();
                 self.call(name, &[], *line, Some(ty), None, out)
             }
             Expr::Var { .. } | Expr::Consume { .. } => Ok(Rhs::Val(self.val(e, out)?)),
@@ -5789,7 +5800,7 @@ impl<'a> Builder<'a> {
                 let concat = matches!(op, BinOp::Add)
                     && self.ty_of(e).is_ok_and(|t| {
                         matches!(
-                            vyrn_frontend::types::resolve(&t, self.proto.types()),
+                            &*vyrn_frontend::types::resolved(&t, self.proto.types()),
                             Type::Str
                         )
                     });
@@ -5864,7 +5875,7 @@ impl<'a> Builder<'a> {
                 // function where the program declares it.
                 if let Some((f, fwd)) =
                     vyrn_frontend::loader::routed_callee(name, type_args, args, |a| {
-                        self.ty_of(a).ok()
+                        self.ty_of(a).ok().map(Cow::into_owned)
                     })
                     .filter(|(f, _)| self.program.functions.iter().any(|d| &d.name == f))
                 {
@@ -6020,7 +6031,7 @@ impl<'a> Builder<'a> {
                 line,
                 id: _,
             } => {
-                let ty = self.ty_of(e)?;
+                let ty = self.ty_of(e)?.into_owned();
                 // The plan keys an if-expression's edge rows by the expression.
                 let site = e.id();
                 let res = self.temp(ty.clone(), *line);
@@ -6081,7 +6092,7 @@ impl<'a> Builder<'a> {
                 line,
                 ..
             } => {
-                let ty = self.ty_of(e)?;
+                let ty = self.ty_of(e)?.into_owned();
                 let sty = self.ty_of(scrutinee)?;
                 let rt = vyrn_frontend::types::resolve(&sty, self.proto.types());
                 let mid = e.id();
@@ -6153,8 +6164,8 @@ impl<'a> Builder<'a> {
                 Ok(Rhs::Val(Val::Name(res)))
             }
             Expr::Try { expr, line, id: _ } => {
-                let ty = self.ty_of(e)?;
-                let ity = self.ty_of(expr)?;
+                let ty = self.ty_of(e)?.into_owned();
+                let ity = self.ty_of(expr)?.into_owned();
                 let tid = e.id();
                 let res = self.temp(ty, *line);
                 let (sv, consuming) = self.scrutinee(expr, tid, None, out)?;
@@ -6453,7 +6464,7 @@ impl<'a> Builder<'a> {
                     // A literal receiver (`"abc".byteLength`): a temporary
                     // bound to the literal gives the chain a base.
                     Val::Lit(_) => {
-                        let ty = self.ty_of(e)?;
+                        let ty = self.ty_of(e)?.into_owned();
                         let t = self.temp(ty, e.line());
                         out.push(St::Let(t, Rhs::Val(v)));
                         Ok(Place::Name(t))
@@ -6485,9 +6496,9 @@ impl<'a> Builder<'a> {
         // `value(s)` of a String: the box owns its payload (#512), so a String
         // read out of a place is copied first.
         if let ("value", [arg]) = (name, args) {
-            let string = self
-                .ty_of(arg)
-                .is_ok_and(|t| vyrn_frontend::types::resolve(&t, self.proto.types()) == Type::Str);
+            let string = self.ty_of(arg).is_ok_and(|t| {
+                *vyrn_frontend::types::resolved(&t, self.proto.types()) == Type::Str
+            });
             if string {
                 let v = if prelude::boxes_a_copy(arg, string) {
                     let copy = self.call("@copy", args, line, Some(Type::Str), None, out)?;
@@ -6528,7 +6539,7 @@ impl<'a> Builder<'a> {
         // declares, and `h(req)` is a call through the value.
         let bound = self.lookup(name).filter(|n| {
             matches!(
-                vyrn_frontend::types::resolve(&self.body.names[n.index()].ty, decls),
+                &*vyrn_frontend::types::resolved(&self.body.names[n.index()].ty, decls),
                 Type::Fn(..)
             )
         });
@@ -6619,7 +6630,7 @@ impl<'a> Builder<'a> {
         } else if let Some(g) = self.program.globals.iter().find(|g| {
             g.name == name
                 && matches!(
-                    vyrn_frontend::types::resolve(&g.ty.clone().unwrap_or(Type::Unit), decls),
+                    &*vyrn_frontend::types::resolved(&g.ty.clone().unwrap_or(Type::Unit), decls),
                     Type::Fn(..)
                 )
         }) {
@@ -6678,10 +6689,9 @@ impl<'a> Builder<'a> {
         // A stream is linear: a position it fills takes it, whatever
         // the position's word says.
         for (c, a) in caps.iter_mut().zip(args) {
-            if self
-                .ty_of(a)
-                .is_ok_and(|t| matches!(vyrn_frontend::types::resolve(&t, decls), Type::Stream(_)))
-            {
+            if self.ty_of(a).is_ok_and(|t| {
+                matches!(&*vyrn_frontend::types::resolved(&t, decls), Type::Stream(_))
+            }) {
                 *c = Capability::Consume;
             }
         }

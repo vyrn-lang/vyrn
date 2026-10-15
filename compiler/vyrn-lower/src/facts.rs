@@ -110,11 +110,26 @@ impl Lin {
     }
 
     pub fn add(&self, o: &Lin) -> Option<Lin> {
+        self.add_scaled(o, 1)
+    }
+
+    /// `self + m * o` without a scaled copy of `o`; `None` on overflow.
+    fn add_scaled(&self, o: &Lin, m: i64) -> Option<Lin> {
+        let mut out = Lin::k(0);
+        self.add_scaled_into(o, m, &mut out)?;
+        Some(out)
+    }
+
+    /// [`Lin::add_scaled`] written over `out`, reusing its buffer; `out` is
+    /// garbage on `None`.
+    fn add_scaled_into(&self, o: &Lin, m: i64, out: &mut Lin) -> Option<()> {
         let (a, b) = (&self.terms, &o.terms);
-        let mut terms = Vec::with_capacity(a.len() + b.len());
+        let terms = &mut out.terms;
+        terms.clear();
+        terms.reserve(a.len() + b.len());
         let (mut i, mut j) = (0, 0);
         while i < a.len() && j < b.len() {
-            let (x, y) = (a[i], b[j]);
+            let (x, y) = (a[i], (b[j].0, b[j].1.checked_mul(m)?));
             let (t, k) = match x.0.cmp(&y.0) {
                 Ordering::Less => {
                     i += 1;
@@ -135,11 +150,11 @@ impl Lin {
             }
         }
         terms.extend_from_slice(&a[i..]);
-        terms.extend_from_slice(&b[j..]);
-        Some(Lin {
-            terms,
-            c: self.c.checked_add(o.c)?,
-        })
+        for (t, k) in &b[j..] {
+            terms.push((*t, k.checked_mul(m)?));
+        }
+        out.c = self.c.checked_add(o.c.checked_mul(m)?)?;
+        Some(())
     }
 
     pub fn scale(&self, m: i64) -> Option<Lin> {
@@ -157,7 +172,7 @@ impl Lin {
     }
 
     pub fn sub(&self, o: &Lin) -> Option<Lin> {
-        self.add(&o.scale(-1)?)
+        self.add_scaled(o, -1)
     }
 
     pub fn plus(&self, c: i64) -> Option<Lin> {
@@ -169,7 +184,7 @@ impl Lin {
     pub fn map(&self, by: impl Fn(Term) -> Option<Lin>) -> Option<Lin> {
         let mut out = Lin::k(self.c);
         for (t, k) in &self.terms {
-            out = out.add(&by(*t)?.scale(*k)?)?;
+            out = out.add_scaled(&by(*t)?, *k)?;
         }
         Some(out)
     }
@@ -189,7 +204,7 @@ impl Lin {
                 .collect(),
             c: self.c,
         };
-        rest.add(&by.scale(k)?)
+        rest.add_scaled(by, k)
     }
 }
 
@@ -321,18 +336,31 @@ impl State {
     }
 
     pub fn norm(&self, l: &Lin) -> Option<Lin> {
-        let mut out = Lin::k(l.c);
+        // Every scaled term in the order a left fold of `add` meets it, so a
+        // stable sort and a fold per term overflow exactly where `add` does.
+        let mut parts = Vec::with_capacity(l.terms.len());
+        let mut c = l.c;
         for (t, k) in &l.terms {
-            let v = match self.defs.get(t) {
-                Some(d) => d.scale(*k)?,
-                None => Lin {
-                    terms: vec![(*t, *k)],
-                    c: 0,
-                },
-            };
-            out = out.add(&v)?;
+            match self.defs.get(t) {
+                Some(d) => {
+                    for (u, j) in &d.terms {
+                        parts.push((*u, j.checked_mul(*k)?));
+                    }
+                    c = c.checked_add(d.c.checked_mul(*k)?)?;
+                }
+                None => parts.push((*t, *k)),
+            }
         }
-        Some(out)
+        parts.sort_by_key(|(t, _)| *t);
+        let mut terms: Vec<(Term, i64)> = Vec::with_capacity(parts.len());
+        for (t, k) in parts {
+            match terms.last_mut() {
+                Some((u, j)) if *u == t => *j = j.checked_add(k)?,
+                _ => terms.push((t, k)),
+            }
+        }
+        terms.retain(|(_, k)| *k != 0);
+        Some(Lin { terms, c })
     }
 
     /// Adds `l >= 0`. A fact that does not normalize is dropped: it would
@@ -1011,8 +1039,11 @@ impl Prover<'_> {
         let length = |(t, k): &(Term, i64)| t.is_length() && matches!(k, 1 | -1);
         // The constant of `len >= 0` or `LEN_MAX - len >= 0`, as `axioms` states them.
         let axiom_c = |k: i64| if k < 0 { LEN_MAX } else { 0 };
+        let mut d = Lin::k(0);
         for p in self.st.facts.iter().chain(&self.axioms).chain(&extra) {
-            let Some(d) = g.sub(p) else { continue };
+            if g.add_scaled_into(p, -1, &mut d).is_none() {
+                continue;
+            }
             if let Some(q) = one(&d.terms, d.c) {
                 return Some(Cert::Sum {
                     slack: d.c - q.c,

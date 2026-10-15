@@ -1295,7 +1295,15 @@ impl<'a> Cx<'a> {
     }
 
     fn resolve(&self, ty: &Type) -> Type {
-        ftypes::resolve(&self.sub(ty), &self.types)
+        self.resolved(ty).into_owned()
+    }
+
+    /// [`Cx::resolve`], borrowing where nothing is substituted or built.
+    fn resolved<'t>(&'t self, ty: &'t Type) -> Cow<'t, Type> {
+        match self.sub(ty) {
+            Cow::Borrowed(t) => ftypes::resolved(t, &self.types),
+            Cow::Owned(t) => Cow::Owned(ftypes::resolve(&t, &self.types)),
+        }
     }
 
     /// The slots a payload of type `ty` rides in.
@@ -2222,7 +2230,7 @@ fn lower_body(
         fn_binds: binds,
         owner,
         core_key: key.to_string(),
-        core: core.as_ref(),
+        core: core.as_deref(),
         ..top_level(cx)
     };
     if let Some(core) = cx_fn.core {
@@ -2441,12 +2449,12 @@ fn ho_args(
 
 /// The core body a queued function reads, specialized for its targets where the core names
 /// them. `None` unless the body's parameters are `f`'s, by name and in order.
-fn core_body(
+fn core_body<'c>(
     key: &str,
     f: &Function,
     binds: &HashMap<String, FnBinding>,
-    cx: &Cx<'_>,
-) -> Option<vyrn_frontend::core::Body> {
+    cx: &'c Cx<'_>,
+) -> Option<Cow<'c, vyrn_frontend::core::Body>> {
     let body = cx.world.body_of(key)?;
     let bound: Option<Vec<(Name, Target)>> = (body.params.iter())
         .filter_map(|&n| Some((n, binds.get(&body.names[n.index()].source)?)))
@@ -2454,9 +2462,9 @@ fn core_body(
         .collect();
     let body = match bound {
         Some(bound) if !binds.is_empty() && bound.len() == binds.len() => {
-            vyrn_lower::core::specialize(body, &bound).unwrap_or_else(|| body.clone())
+            vyrn_lower::core::specialize(body, &bound).map_or(Cow::Borrowed(body), Cow::Owned)
         }
-        _ => body.clone(),
+        _ => Cow::Borrowed(body),
     };
     let sources = body.params.iter().map(|&n| &body.names[n.index()].source);
     (body.params.len() == f.params.len() && sources.eq(f.params.iter().map(|p| &p.name)))
@@ -2820,7 +2828,7 @@ impl<'p> Fn_<'_, 'p> {
                 // A user enum's payload boxes are its own storage, which the declared release
                 // cannot reach.
                 let ty = ty.clone();
-                if !matches!(self.cx.resolve(&ty), Type::Enum(_)) {
+                if !matches!(*self.cx.resolved(&ty), Type::Enum(_)) {
                     return Ok(());
                 }
                 let a = self.addr_local(b, p, 0);
@@ -3280,7 +3288,7 @@ impl<'p> Fn_<'_, 'p> {
         line: usize,
     ) -> Result<(), String> {
         match w {
-            Word::Ext(ValType::I32) if matches!(self.cx.resolve(pty), Type::Str) => {
+            Word::Ext(ValType::I32) if matches!(*self.cx.resolved(pty), Type::Str) => {
                 load_wrapped(b, a, off);
                 str_hdr(b);
                 b.ins(&Instruction::Call(self.cx.rt.free));
@@ -4555,7 +4563,7 @@ impl<'p> Fn_<'_, 'p> {
             }
             for (i, p) in ext.params.iter().enumerate() {
                 self.core_arg(m, b, name, args, i, Some(p), line)?;
-                if matches!(self.cx.resolve(p), Type::Str) {
+                if matches!(*self.cx.resolved(p), Type::Str) {
                     // (ptr, len): the host decodes UTF-8 and needs the length. One scratch per
                     // argument, or a later string's length would overwrite an earlier one's.
                     let s = self.scratch(b, ValType::I32, 20 + i as u8);
@@ -5434,7 +5442,7 @@ impl<'p> Fn_<'_, 'p> {
         b.ins(&Instruction::I32Const(8));
         b.ins(&Instruction::I32Add);
         let got = self.core_arg(m, b, "boxStream", args, 0, None, line)?;
-        if !matches!(self.cx.resolve(&got), Type::Stream(_)) {
+        if !matches!(*self.cx.resolved(&got), Type::Stream(_)) {
             return unsupported(&format!("`boxStream` of `{got}`"), line);
         }
         b.copy(sl.size);
@@ -6748,7 +6756,7 @@ impl<'p> Fn_<'_, 'p> {
             return Ok(());
         }
         match self.cx.repr(ty, line)? {
-            Repr::Scalar(ValType::I32) if matches!(self.cx.resolve(ty), Type::Str) => {
+            Repr::Scalar(ValType::I32) if matches!(*self.cx.resolved(ty), Type::Str) => {
                 self.str_dup(b);
                 Ok(())
             }
@@ -7100,7 +7108,7 @@ impl<'p> Fn_<'_, 'p> {
         line: usize,
     ) -> Result<(), String> {
         match w {
-            Word::Ext(ValType::I32) if matches!(self.cx.resolve(pty), Type::Str) => {
+            Word::Ext(ValType::I32) if matches!(*self.cx.resolved(pty), Type::Str) => {
                 b.ins(&Instruction::LocalGet(a));
                 load_wrapped(b, a, off);
                 self.str_dup(b);
@@ -7705,7 +7713,7 @@ impl<'p> Fn_<'_, 'p> {
         count: &Val,
         line: usize,
     ) -> Result<Type, String> {
-        if !matches!(self.cx.resolve(mty), Type::Map(..)) {
+        if !matches!(*self.cx.resolved(mty), Type::Map(..)) {
             return unsupported(&format!("`tally` on `{mty}`"), line);
         }
         let (k, l, mk) = self.map_key_local(m, b, mty, key, line)?;
@@ -11185,7 +11193,7 @@ impl<'a, 'p> Fn_<'a, 'p> {
             }
             if let Some(bty) = self
                 .core_place_ty(base)
-                .filter(|t| length_ty(f, &self.cx.resolve(t)).is_some())
+                .filter(|t| length_ty(f, &self.cx.resolved(t)).is_some())
             {
                 if let Repr::Agg(_) = self.cx.repr(&bty, line)? {
                     let (_, off) = self.core_addr(m, b, base, line)?;
@@ -11285,7 +11293,7 @@ impl<'a, 'p> Fn_<'a, 'p> {
                     Some(walk) => walk,
                     None => {
                         let bty = match self.core_place_ty(base) {
-                            Some(t) if self.cx.resolve(&t) == Type::Str => {
+                            Some(t) if *self.cx.resolved(&t) == Type::Str => {
                                 self.core_read(m, b, base, line)?
                             }
                             _ => {
@@ -11343,7 +11351,7 @@ impl<'a, 'p> Fn_<'a, 'p> {
             }
             At::Field(base, f) => {
                 let bty = self.core_place_ty(base)?;
-                if let Some(t) = length_ty(f, &self.cx.resolve(&bty)) {
+                if let Some(t) = length_ty(f, &self.cx.resolved(&bty)) {
                     return Some(t);
                 }
                 Some(thunk_of(self.field_of(&bty, f, 0).ok()?.1))
@@ -11368,7 +11376,7 @@ impl<'a, 'p> Fn_<'a, 'p> {
         info.walked.is_some()
             && info.borrow
             && matches!(
-                self.cx.resolve(&info.ty),
+                *self.cx.resolved(&info.ty),
                 Type::Array(_) | Type::SmallArray(..) | Type::Str
             )
     }
@@ -12176,7 +12184,7 @@ impl<'a, 'p> Fn_<'a, 'p> {
     /// The tag and payload types of the variant `name` of the sum `ty`, or `None` where
     /// there is none. The row's binding type picks the variant.
     fn core_variant(&self, ty: &Type, name: &str) -> Option<(u64, Vec<Type>)> {
-        let Type::Enum(vs) = self.cx.resolve(ty) else {
+        let Type::Enum(vs) = &*self.cx.resolved(ty) else {
             return None;
         };
         let i = vs.iter().position(|v| v.name == name)?;
@@ -12252,7 +12260,7 @@ impl<'a, 'p> Fn_<'a, 'p> {
     /// at `T`'s base where the base is one wasm local ([`Fn_::try_construct`]).
     /// `None` when the row does not fill the layout exactly.
     fn core_part_tys(&self, ty: &Type, ctor: &Ctor, n: usize) -> Option<Vec<Type>> {
-        match (ctor, self.cx.resolve(ty)) {
+        match (ctor, &*self.cx.resolved(ty)) {
             (Ctor::Record(_, names), _) => {
                 let decl = self.cx.fields(ty)?;
                 if decl.len() != n || names.len() != n {
@@ -12263,17 +12271,21 @@ impl<'a, 'p> Fn_<'a, 'p> {
                     .map(|nm| decl.iter().find(|f| f.name == *nm).map(|f| f.ty.clone()))
                     .collect()
             }
-            (Ctor::Array, Type::Array(inner)) => Some(vec![*inner; n]),
-            (Ctor::Array, Type::ArrayN(inner, k)) if k == n && n > 0 => Some(vec![*inner; n]),
-            (Ctor::Array, Type::SmallArray(inner, k)) if n <= k => Some(vec![*inner; n]),
+            (Ctor::Array, Type::Array(inner)) => Some(vec![(**inner).clone(); n]),
+            (Ctor::Array, Type::ArrayN(inner, k)) if *k == n && n > 0 => {
+                Some(vec![(**inner).clone(); n])
+            }
+            (Ctor::Array, Type::SmallArray(inner, k)) if n <= *k => {
+                Some(vec![(**inner).clone(); n])
+            }
             // A key and a value per entry.
             (Ctor::Map, Type::Map(k, v)) if n % 2 == 0 => Some(
                 (0..n)
                     .map(|i| {
                         if i % 2 == 0 {
-                            (*k).clone()
+                            (**k).clone()
                         } else {
-                            (*v).clone()
+                            (**v).clone()
                         }
                     })
                     .collect(),
@@ -13661,7 +13673,7 @@ impl<'a, 'p> Fn_<'a, 'p> {
             && matches!(args.split_first(), Some(((Arg::Val(Val::Name(x)), _), rest))
                 if (body.names[x.index()].grows
                     || matches!(
-                        (callee.as_str(), self.cx.resolve(&body.names[x.index()].ty)),
+                        (callee.as_str(), &*self.cx.resolved(&body.names[x.index()].ty)),
                         (_, Type::Array(_))
                             | ("@push", Type::SmallArray(..))
                             | ("@tally" | "@tallyBytes", Type::Map(..))
@@ -13706,11 +13718,11 @@ impl<'a, 'p> Fn_<'a, 'p> {
             Arg::Place(p) => (self.core_place_ty(p)?, true),
             Arg::Val(Val::Lit(_)) => return None,
         };
-        let agg = match (callee, self.cx.resolve(&ty)) {
+        let agg = match (callee, &*self.cx.resolved(&ty)) {
             ("@remove", Type::Map(..)) => false,
             ("@pop", Type::Array(_) | Type::SmallArray(..)) => true,
             ("@swapRemove", Type::Array(e) | Type::SmallArray(e, _)) => {
-                matches!(self.cx.repr(&e, 0), Ok(Repr::Agg(_)))
+                matches!(self.cx.repr(e, 0), Ok(Repr::Agg(_)))
             }
             _ => return None,
         };
@@ -13898,7 +13910,7 @@ impl<'a, 'p> Fn_<'a, 'p> {
             // that hands back an aggregate is an aggregate call.
             Some(Spec::Removes) => self.core_removes(callee, kind, args) == Some(false),
             Some(Spec::Finds) => matches!(args, [(Arg::Val(Val::Name(x)), _), _]
-                if matches!(self.cx.resolve(&body.names[x.index()].ty), Type::Map(..))),
+                if matches!(*self.cx.resolved(&body.names[x.index()].ty), Type::Map(..))),
             // A rebuild is read together with the store after it
             // ([`Fn_::core_rebuilt`]), a built aggregate as an aggregate call
             // ([`Fn_::core_agg_call`]), and a routed builtin as the declared
@@ -13910,7 +13922,7 @@ impl<'a, 'p> Fn_<'a, 'p> {
     /// Whether `l o r` is `Code + Code`, the host's concatenation
     /// ([`Fn_::host`]), which exists only while a generator runs.
     fn core_code_concat(&self, o: BinOp, l: &Val, r: &Val) -> bool {
-        let is_code = |v: &Val| matches!(self.cx.resolve(&self.core_ty( v, &Type::Int)), Type::Named(n) if n == "Code");
+        let is_code = |v: &Val| matches!(&*self.cx.resolved(&self.core_ty( v, &Type::Int)), Type::Named(n) if n == "Code");
         self.cx.gen.is_some() && o == BinOp::Add && is_code(l) && is_code(r)
     }
 
@@ -13918,7 +13930,7 @@ impl<'a, 'p> Fn_<'a, 'p> {
     /// [`Fn_::str_match`] writes: a String on the left, and a String or, for
     /// `=~`, the pattern literal on the right.
     fn core_str_op(&self, o: BinOp, l: &Val, r: &Val) -> bool {
-        let is_str = |v: &Val| self.cx.resolve(&self.core_ty(v, &Type::Int)) == Type::Str;
+        let is_str = |v: &Val| *self.cx.resolved(&self.core_ty(v, &Type::Int)) == Type::Str;
         is_str(l)
             && match o {
                 BinOp::Match => matches!(r, Val::Lit(Lit::Str(_))),

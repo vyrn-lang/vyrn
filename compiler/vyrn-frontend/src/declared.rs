@@ -242,7 +242,7 @@ impl Owned {
             Type::Array(e) => Some(
                 if self.unbounded(&e).is_none()
                     && (self.release_kind(&e).is_some()
-                        || matches!(crate::types::resolve(&e, &self.types), Type::Param(_)))
+                        || matches!(&*crate::types::resolved(&e, &self.types), Type::Param(_)))
                 {
                     DropKind::Deep(Type::Array(e))
                 } else {

@@ -967,106 +967,70 @@ pub enum Type {
     Err,
 }
 
+/// The body of [`Type::children`] and [`Type::children_mut`], which differ
+/// only in the reference they take: `&` or `&mut`.
+macro_rules! children {
+    ($t:expr, $iter:ident, $($ref_:tt)+) => {{
+        let (list, fields, variants, boxes): (
+            $($ref_)+ [Type],
+            $($ref_)+ [Field],
+            $($ref_)+ [EnumVariant],
+            [Option<$($ref_)+ Type>; 2],
+        ) = match $t {
+            Type::Array(a)
+            | Type::Stream(a)
+            | Type::Partial(a)
+            | Type::Lazy(a)
+            | Type::ArrayN(a, _)
+            | Type::SmallArray(a, _)
+            | Type::Omit(a, _)
+            | Type::Pick(a, _) => ($($ref_)+ [], $($ref_)+ [], $($ref_)+ [], [Some($($ref_)+ **a), None]),
+            Type::Merge(a, b) | Type::Map(a, b) => {
+                ($($ref_)+ [], $($ref_)+ [], $($ref_)+ [], [Some($($ref_)+ **a), Some($($ref_)+ **b)])
+            }
+            Type::App(_, args) => (args, $($ref_)+ [], $($ref_)+ [], [None, None]),
+            Type::Record(fs) => ($($ref_)+ [], fs, $($ref_)+ [], [None, None]),
+            Type::Enum(vs) => ($($ref_)+ [], $($ref_)+ [], vs, [None, None]),
+            Type::Fn(params, ret) => (params, $($ref_)+ [], $($ref_)+ [], [Some($($ref_)+ **ret), None]),
+            // No `_` arm: a new variant must say which types it holds.
+            Type::Int
+            | Type::IntN { .. }
+            | Type::Float
+            | Type::Float32
+            | Type::F32x4
+            | Type::I32x4
+            | Type::F64x2
+            | Type::Mask32x4
+            | Type::Mask64x2
+            | Type::Bool
+            | Type::Str
+            | Type::Unit
+            | Type::Named(_)
+            | Type::Param(_)
+            | Type::ConstInt(_)
+            | Type::Logger
+            | Type::Never
+            | Type::Err => ($($ref_)+ [], $($ref_)+ [], $($ref_)+ [], [None, None]),
+        };
+        list.$iter()
+            .chain(fields.$iter().map(|f| $($ref_)+ f.ty))
+            .chain(variants.$iter().flat_map(|v| $($ref_)+ v.payload))
+            .chain(boxes.into_iter().flatten())
+    }};
+}
+
 impl Type {
     /// Returns the types `self` is built from, in source order: an element,
     /// the type arguments, the fields, the variants' payloads, or a function's
     /// parameters and then its result. A leaf has none.
     /// [`crate::types::walk_type`] visits every part through it.
     pub fn children(&self) -> impl Iterator<Item = &Type> {
-        type Parts<'t> = (
-            &'t [Type],
-            &'t [Field],
-            &'t [EnumVariant],
-            [Option<&'t Type>; 2],
-        );
-        let (list, fields, variants, boxes): Parts<'_> = match self {
-            Type::Array(a)
-            | Type::Stream(a)
-            | Type::Partial(a)
-            | Type::Lazy(a)
-            | Type::ArrayN(a, _)
-            | Type::SmallArray(a, _)
-            | Type::Omit(a, _)
-            | Type::Pick(a, _) => (&[], &[], &[], [Some(&**a), None]),
-            Type::Merge(a, b) | Type::Map(a, b) => (&[], &[], &[], [Some(&**a), Some(&**b)]),
-            Type::App(_, args) => (args, &[], &[], [None, None]),
-            Type::Record(fs) => (&[], fs, &[], [None, None]),
-            Type::Enum(vs) => (&[], &[], vs, [None, None]),
-            Type::Fn(params, ret) => (params, &[], &[], [Some(&**ret), None]),
-            // No `_` arm: a new variant must say which types it holds, here
-            // and in `children_mut`.
-            Type::Int
-            | Type::IntN { .. }
-            | Type::Float
-            | Type::Float32
-            | Type::F32x4
-            | Type::I32x4
-            | Type::F64x2
-            | Type::Mask32x4
-            | Type::Mask64x2
-            | Type::Bool
-            | Type::Str
-            | Type::Unit
-            | Type::Named(_)
-            | Type::Param(_)
-            | Type::ConstInt(_)
-            | Type::Logger
-            | Type::Never
-            | Type::Err => (&[], &[], &[], [None, None]),
-        };
-        list.iter()
-            .chain(fields.iter().map(|f| &f.ty))
-            .chain(variants.iter().flat_map(|v| &v.payload))
-            .chain(boxes.into_iter().flatten())
+        children!(self, iter, &)
     }
 
     /// [`Type::children`], each one writable.
     pub fn children_mut(&mut self) -> impl Iterator<Item = &mut Type> {
-        type Parts<'t> = (
-            &'t mut [Type],
-            &'t mut [Field],
-            &'t mut [EnumVariant],
-            [Option<&'t mut Type>; 2],
-        );
-        let (list, fields, variants, boxes): Parts<'_> = match self {
-            Type::Array(a)
-            | Type::Stream(a)
-            | Type::Partial(a)
-            | Type::Lazy(a)
-            | Type::ArrayN(a, _)
-            | Type::SmallArray(a, _)
-            | Type::Omit(a, _)
-            | Type::Pick(a, _) => (&mut [], &mut [], &mut [], [Some(&mut **a), None]),
-            Type::Merge(a, b) | Type::Map(a, b) => {
-                (&mut [], &mut [], &mut [], [Some(&mut **a), Some(&mut **b)])
-            }
-            Type::App(_, args) => (args, &mut [], &mut [], [None, None]),
-            Type::Record(fs) => (&mut [], fs, &mut [], [None, None]),
-            Type::Enum(vs) => (&mut [], &mut [], vs, [None, None]),
-            Type::Fn(params, ret) => (params, &mut [], &mut [], [Some(&mut **ret), None]),
-            Type::Int
-            | Type::IntN { .. }
-            | Type::Float
-            | Type::Float32
-            | Type::F32x4
-            | Type::I32x4
-            | Type::F64x2
-            | Type::Mask32x4
-            | Type::Mask64x2
-            | Type::Bool
-            | Type::Str
-            | Type::Unit
-            | Type::Named(_)
-            | Type::Param(_)
-            | Type::ConstInt(_)
-            | Type::Logger
-            | Type::Never
-            | Type::Err => (&mut [], &mut [], &mut [], [None, None]),
-        };
-        list.iter_mut()
-            .chain(fields.iter_mut().map(|f| &mut f.ty))
-            .chain(variants.iter_mut().flat_map(|v| &mut v.payload))
-            .chain(boxes.into_iter().flatten())
+        children!(self, iter_mut, &mut)
     }
 
     /// Returns `Option<T>` as its variant list: `None` is tag 0 and `Some` tag 1,
