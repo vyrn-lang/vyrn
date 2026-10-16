@@ -1090,11 +1090,9 @@ struct Dispatch {
 /// Every step of the walk is a byte offset from [`crate::layout`], so the walk lives here.
 #[derive(Clone, Default)]
 struct Shapes {
-    /// `(release rather than copy, substituted type, take holes)` -> function index. A linear
-    /// scan: [`Type`] is `Eq` but not `Hash`, and a module has tens of these.
-    known: Vec<(ShapeKey, u32)>,
-    /// The bodies still to write, and how many are written. A body may reach a type nothing has
-    /// released yet, so the driver rereads this every turn, as it does [`Mono`]'s.
+    /// Each body's function index, key and line, found by a linear scan: a module has tens of
+    /// them. The first `done` are written. A body may reach a type nothing has released yet, so
+    /// the driver rereads this every turn, as it does [`Mono`]'s.
     todo: Vec<(u32, ShapeKey, usize)>,
     done: usize,
 }
@@ -1204,9 +1202,8 @@ impl<'a> Reg<'a> {
         }
     }
 
-    /// Takes the entries added past `at`. A shape is a `known` and a `todo` entry together.
+    /// Takes the entries added past `at`.
     fn split_off(&mut self, at: Lens) -> Added<'a> {
-        self.shapes.known.truncate(at.shapes);
         Added {
             insts: self.mono.insts.split_off(at.insts),
             fnvals: self.fnvals.split_off(at.fnvals),
@@ -1396,11 +1393,10 @@ fn merge<'p>(m: &mut Module, cx: &Cx<'p>, e: Emitted<'p>) -> Option<Result<Frame
             }
             Owner::Shape => {
                 let (_, key, line) = shapes.next().expect("an added shape per reservation");
-                match reg.shapes.known.iter().find(|(k, _)| *k == key) {
-                    Some((_, i)) => *i,
+                match reg.shapes.todo.iter().find(|(_, k, _)| *k == key) {
+                    Some((i, ..)) => *i,
                     None => {
                         let index = m.reserve_func([ValType::I32], []);
-                        reg.shapes.known.push((key.clone(), index));
                         reg.shapes.todo.push((index, key, line));
                         index
                     }
@@ -3336,23 +3332,18 @@ impl<'p> Fn_<'_, 'p> {
     /// The index of the release (or copy) of `ty`, reserved and queued on first request.
     /// The type is substituted here because the body is written later, under another instance.
     fn shape_fn(&self, m: &mut Log, rel: bool, ty: &Type, line: usize) -> u32 {
-        let key: ShapeKey = (
-            rel,
-            self.cx.sub(ty).into_owned(),
-            if rel {
-                self.rel_holes.clone()
-            } else {
-                Vec::new()
-            },
-        );
+        let ty = self.cx.sub(ty);
+        let holes: &[String] = if rel { &self.rel_holes } else { &[] };
         let mut reg = self.cx.reg.borrow_mut();
         let s = &mut reg.shapes;
-        if let Some((_, i)) = s.known.iter().find(|(k, _)| *k == key) {
+        if let Some((i, ..)) =
+            (s.todo.iter()).find(|(_, k, _)| k.0 == rel && k.1 == *ty && k.2 == holes)
+        {
             return *i;
         }
         let index = m.func(Owner::Shape);
-        s.known.push((key.clone(), index));
-        s.todo.push((index, key, line));
+        s.todo
+            .push((index, (rel, ty.into_owned(), holes.to_vec()), line));
         index
     }
 
