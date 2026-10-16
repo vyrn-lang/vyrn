@@ -311,19 +311,27 @@ const VALUES: i64 = 16;
 /// copy bumps a count, and the first write copies the field. It has no
 /// `DerefMut`, so every write goes through [`Shared::get_mut`].
 #[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
-pub struct Shared<T>(Rc<T>);
+pub struct Shared<T> {
+    rc: Rc<T>,
+}
 
 impl<T: Clone> Shared<T> {
     /// The field to write, copied first if another state shares it.
     pub fn get_mut(&mut self) -> &mut T {
-        Rc::make_mut(&mut self.0)
+        Rc::make_mut(&mut self.rc)
+    }
+}
+
+impl<T> From<T> for Shared<T> {
+    fn from(t: T) -> Self {
+        Shared { rc: Rc::new(t) }
     }
 }
 
 impl<T> Deref for Shared<T> {
     type Target = T;
     fn deref(&self) -> &T {
-        &self.0
+        &self.rc
     }
 }
 
@@ -366,6 +374,10 @@ impl<K: Ord + Clone, V: Clone> Shared<BTreeMap<K, V>> {
     }
 }
 
+/// A Bool name's conditions: the facts its truth gives and those its
+/// falsehood gives. States that copy them share them.
+pub type Sides = Shared<(Vec<Fact>, Vec<Fact>)>;
+
 /// What is known at one point of a body. A copy shares each field until it
 /// writes it ([`Shared`]).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -377,7 +389,7 @@ pub struct State {
     /// `term = Lin`; see the module doc for the invariant.
     pub defs: Shared<BTreeMap<Term, Lin>>,
     /// Per Bool name, the facts its truth gives and those its falsehood gives.
-    pub conds: Shared<BTreeMap<Name, (Vec<Fact>, Vec<Fact>)>>,
+    pub conds: Shared<BTreeMap<Name, Sides>>,
     /// The borrows of a global still equal to it: their lengths are the
     /// global's (`elide::Walk::borrowed`).
     pub fresh: Shared<BTreeSet<Name>>,
@@ -571,11 +583,7 @@ impl State {
         };
         let lins = (self.facts.iter().chain(self.ne.iter()))
             .chain(self.defs.values())
-            .chain(
-                self.conds
-                    .values()
-                    .flat_map(|(yes, no)| yes.iter().chain(no).map(Fact::lin)),
-            )
+            .chain((self.conds.values()).flat_map(|s| s.0.iter().chain(&s.1).map(Fact::lin)))
             .chain(self.elems.values().flatten());
         for l in lins {
             l.terms.iter().for_each(|(t, _)| note(*t));
@@ -618,10 +626,11 @@ impl State {
     /// rest of what it stated, which still follows from its truth.
     fn unsay(&mut self, stale: impl Fn(&Lin) -> bool) {
         let said = |(a, b): &(Vec<Fact>, Vec<Fact>)| a.iter().chain(b).any(|f| stale(f.lin()));
-        if !self.conds.values().any(said) {
+        if !self.conds.values().any(|s| said(s)) {
             return;
         }
-        for (a, b) in self.conds.get_mut().values_mut() {
+        for s in self.conds.get_mut().values_mut().filter(|s| said(s)) {
+            let (a, b) = s.get_mut();
             a.retain(|f| !stale(f.lin()));
             b.retain(|f| !stale(f.lin()));
         }
@@ -671,14 +680,12 @@ impl State {
             // A fact over a length, or a side that cannot hold.
             let kept =
                 |l: &Lin| (l.terms.iter()).any(|(t, _)| t.is_length()) || (l.is_const() && l.c < 0);
-            let mentioned = |(_, (yes, _)): (&Name, &(Vec<Fact>, Vec<Fact>))| {
-                yes.iter().any(|f| f.lin().mentions(t))
-            };
-            if !self.conds.iter().any(mentioned) {
+            let mentioned = |s: &Sides| s.0.iter().any(|f| f.lin().mentions(t));
+            if !self.conds.values().any(mentioned) {
                 continue;
             }
-            for (c, (yes, _)) in self.conds.iter() {
-                for f in yes {
+            for (c, s) in self.conds.iter() {
+                for f in &s.0 {
                     let Fact::Ge(l) = f else { continue };
                     let k = l.coef(t);
                     if k == 0 {
@@ -699,8 +706,8 @@ impl State {
             self.assume(s);
         }
         for (c, l) in said.into_iter().filter(|(_, l)| !l.mentions_name(n)) {
-            if let Some((yes, _)) = self.conds.get_mut().get_mut(&c) {
-                yes.push(Fact::Ge(l));
+            if let Some(s) = self.conds.get_mut().get_mut(&c) {
+                s.get_mut().0.push(Fact::Ge(l));
             }
         }
     }
@@ -803,8 +810,9 @@ impl State {
         }
         let named =
             |(a, b): &(Vec<Fact>, Vec<Fact>)| a.iter().chain(b).any(|f| f.lin().mentions(x));
-        if self.conds.values().any(named) {
-            for (a, b) in self.conds.get_mut().values_mut() {
+        if self.conds.values().any(|s| named(s)) {
+            for s in self.conds.get_mut().values_mut().filter(|s| named(s)) {
+                let (a, b) = s.get_mut();
                 for f in (a.iter_mut().chain(b.iter_mut())).filter(|f| f.lin().mentions(x)) {
                     if let Some(n) = f.map(sub) {
                         *f = n;
@@ -869,16 +877,22 @@ impl State {
             return out;
         }
         let known = out.prover();
+        // Sides every live state shares are the join's: `when` answers
+        // each side as given.
         let conds: Vec<_> = (names.into_iter())
             .map(|n| {
+                let first = &live[0].conds[&n];
+                if live.iter().all(|s| s.conds[&n] == *first) {
+                    return (n, first.clone());
+                }
                 let t = State::when(&live, n, &known, |c| &c.0);
                 let f = State::when(&live, n, &known, |c| &c.1);
-                (n, (t, f))
+                (n, Sides::from((t, f)))
             })
             .collect();
         for (n, side) in conds
             .into_iter()
-            .filter(|(_, (t, f))| !t.is_empty() || !f.is_empty())
+            .filter(|(_, s)| !s.0.is_empty() || !s.1.is_empty())
         {
             out.conds.insert(n, side);
         }
@@ -1408,7 +1422,7 @@ mod tests {
         let len = Lin::of(Term::Len(Name(0)));
         st.assume(&v(1));
         let side = vec![Fact::Ge(len.sub(&v(1)).unwrap().plus(-1).unwrap())];
-        st.conds.insert(Name(2), (side, Vec::new()));
+        st.conds.insert(Name(2), Sides::from((side, Vec::new())));
         st.eliminate(Name(1));
         assert_eq!(st.conds[&Name(2)].0, [Fact::Ge(len.plus(-1).unwrap())]);
     }
