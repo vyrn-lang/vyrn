@@ -7,7 +7,7 @@ every one of them, proves they all print the same bytes, and only then times
 anything.
 
     python run.py                      # build, verify, time, write the record
-    python run.py --runs 15
+    python run.py --runs 200
     python run.py --only nbody,fasta
     python run.py --contestants vyrn-native --runs 1 --skip-verify   # calibrate
     python run.py --no-build --out /tmp/scratch.json
@@ -19,8 +19,15 @@ methodology:
   around the child, stdout discarded. So the number carries process
   start-up, and for the wasm leg it carries wasmtime's JIT — that is the
   price of running the thing, and hiding it would be a different measurement.
-  `python run.py --floor` prints the empty-program floor for each contestant
-  so the reader can subtract it.
+  Each cell keeps every run and states two of them, by nearest rank: p50 and
+  p99 are the values at positions ceil(0.5 n) and ceil(0.99 n) of the n sorted
+  runs. Under 100 runs p99 is the slowest run, so the default is 100.
+
+* **Startup is measured in every record.** The runner times an empty program
+  per contestant, built and run the way that contestant runs: the native exe
+  for C, Rust and Vyrn native, node and bun for JavaScript, wasmtime for the
+  two wasm legs. Its p50 is the record's `startup`, the part of every run of
+  that contestant an empty program already costs.
 
   Beside the wall clock the runner records the four other columns the game's
   own per-program pages print, so the record answers the questions a reader
@@ -34,8 +41,15 @@ methodology:
   - **mem** — peak working set of the child, from
     `GetProcessMemoryInfo(PeakWorkingSetSize)` on Windows and `ru_maxrss`
     elsewhere; the largest of the timed runs, because a peak is a peak.
-  - **make secs** — wall time to build that contestant's timed artifact, once
-    per program. Zero for node and bun, which have no build step.
+  - **make secs** — wall time to build that contestant's timed artifact, the
+    median of three builds. Zero for node and bun, which have no build step.
+    Beside it, the build's peak memory, the median of the same three builds.
+    A build is a process tree, so on Windows this is the most memory the
+    whole tree committed at once, from a job object, not one process's
+    working set as in **mem**.
+  - **artifact**: the bytes the contestant ships: the executable for C, Rust
+    and Vyrn native, the `.wasm` module for the two wasm legs, and the source
+    file itself for node and bun, which ship their source.
   - **gz** — the gzipped size of the single source file, which is the game's
     own stand-in for how much program it took. The Vyrn legs share one
     source and therefore one figure.
@@ -383,17 +397,60 @@ def sh(cmd: list, **kw) -> subprocess.CompletedProcess:
     return r
 
 
-# How long each contestant's timed artifact took to build, keyed (program,
-# contestant). The game calls this column `make secs`; here it is the wall time
-# of the one command that produces the thing that gets timed, so a `--no-build`
-# run records no figure rather than a stale one.
+# How long each contestant's timed artifact took to build, and the build's peak
+# memory, keyed (program, contestant). The game calls the first column `make
+# secs`; here each is the median over BUILDS runs of the one command that
+# produces the thing that gets timed, so a `--no-build` run records no figure
+# rather than a stale one.
 MAKE: dict[tuple[str, str], float] = {}
+MAKE_PEAK: dict[tuple[str, str], int] = {}
+BUILDS = 3
 
 
 def timed_sh(key: tuple[str, str], cmd: list, **kw):
+    walls, peaks = [], []
+    for _ in range(BUILDS):
+        wall, peak = build_once(cmd, **kw)
+        walls.append(wall)
+        if peak is not None:
+            peaks.append(peak)
+    MAKE[key] = statistics.median(walls)
+    if peaks:
+        MAKE_PEAK[key] = int(statistics.median(peaks))
+
+
+def build_once(cmd: list, **kw) -> tuple[float, int | None]:
+    """The wall time of one build and the peak memory of its whole process tree.
+
+    A build is a tree: `rustc` here is rustup's proxy, and `vyrn build` starts
+    clang. On Windows the build starts suspended inside its own job object, so
+    every process it starts is counted from its first instruction; the peak is
+    the job's `PeakJobMemoryUsed`, the most memory the tree committed at once.
+    Elsewhere it is `ru_maxrss` over the reaped children, as for a run.
+    """
+    before = None
+    if os.name != "nt":
+        import resource
+
+        before = resource.getrusage(resource.RUSAGE_CHILDREN)
+    else:
+        job = _K32.CreateJobObjectW(None, None)
+        kw["creationflags"] = 0x4  # CREATE_SUSPENDED
     t0 = time.perf_counter()
-    sh(cmd, **kw)
-    MAKE[key] = time.perf_counter() - t0
+    proc = subprocess.Popen([str(c) for c in cmd], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, **kw)
+    if os.name == "nt":
+        held = _K32.AssignProcessToJobObject(wintypes.HANDLE(job), wintypes.HANDLE(int(proc._handle)))
+        ctypes.windll.ntdll.NtResumeProcess(wintypes.HANDLE(int(proc._handle)))
+    out, err = proc.communicate()
+    wall = time.perf_counter() - t0
+    if proc.returncode != 0:
+        die(f"failed: {' '.join(str(c) for c in cmd)}\n{out}\n{err}")
+    if os.name != "nt":
+        return wall, usage_of(proc, before)[1]
+    info = _JobInfo()
+    ok = _K32.QueryInformationJobObject(wintypes.HANDLE(job), 9, ctypes.byref(info), ctypes.sizeof(info), None)
+    _K32.CloseHandle(wintypes.HANDLE(job))
+    return wall, int(info.PeakJobMemoryUsed) if held and ok else None
 
 
 def source_of(contestant: str, prog: Program) -> Path:
@@ -410,6 +467,15 @@ def source_of(contestant: str, prog: Program) -> Path:
     if contestant in JS_RUNTIMES:
         return HARNESS / "js" / f"{prog.name}.js"
     return EXAMPLES / f"{prog.name}.vyrn"
+
+
+def artifact_of(contestant: str, prog: Program) -> Path:
+    """The file one contestant ships: its executable, its module, or for node and bun its source."""
+    if contestant in JS_RUNTIMES:
+        return source_of(contestant, prog)
+    if contestant in ("vyrn-wasm", "vyrn-wasm-opt"):
+        return wasm_file(contestant, prog, "timing")
+    return exe({"c": f"c-{prog.name}", "rust": f"rust-{prog.name}", "vyrn-native": f"vyrn-{prog.name}-timing"}[contestant])
 
 
 def gz_bytes(path: Path) -> int:
@@ -616,6 +682,33 @@ if os.name == "nt":
             ("PeakPagefileUsage", ctypes.c_size_t),
         ]
 
+    class _JobLimits(ctypes.Structure):
+        _fields_ = [
+            ("PerProcessUserTimeLimit", ctypes.c_int64),
+            ("PerJobUserTimeLimit", ctypes.c_int64),
+            ("LimitFlags", wintypes.DWORD),
+            ("MinimumWorkingSetSize", ctypes.c_size_t),
+            ("MaximumWorkingSetSize", ctypes.c_size_t),
+            ("ActiveProcessLimit", wintypes.DWORD),
+            ("Affinity", ctypes.c_size_t),
+            ("PriorityClass", wintypes.DWORD),
+            ("SchedulingClass", wintypes.DWORD),
+        ]
+
+    # JOBOBJECT_EXTENDED_LIMIT_INFORMATION, information class 9.
+    class _JobInfo(ctypes.Structure):
+        _fields_ = [
+            ("Basic", _JobLimits),
+            ("Io", ctypes.c_uint64 * 6),
+            ("ProcessMemoryLimit", ctypes.c_size_t),
+            ("JobMemoryLimit", ctypes.c_size_t),
+            ("PeakProcessMemoryUsed", ctypes.c_size_t),
+            ("PeakJobMemoryUsed", ctypes.c_size_t),
+        ]
+
+    _K32 = ctypes.WinDLL("kernel32")
+    _K32.CreateJobObjectW.restype = wintypes.HANDLE
+
 
 def usage_of(proc: subprocess.Popen, before) -> tuple[float | None, int | None]:
     """The cpu time and peak resident memory of one FINISHED child.
@@ -692,9 +785,14 @@ def measure(cmd: list, stdin_path: Path | None, runs: int) -> tuple[list[float],
     return walls, cpus, peaks
 
 
-def floor(want: list[str], runs: int) -> dict:
-    """What an empty program costs each contestant — the start-up to subtract."""
-    tmp = Path(tempfile.mkdtemp(prefix="vyrn-floor-"))
+def nearest_rank(xs: list[float], p: int) -> float:
+    """The value at position ceil(p/100 * n) of the n sorted `xs`; `xs` is not empty."""
+    return sorted(xs)[max(1, -(-p * len(xs) // 100)) - 1]
+
+
+def startup(want: list[str], runs: int) -> dict:
+    """What an empty program costs each contestant, run the way that contestant runs."""
+    tmp = Path(tempfile.mkdtemp(prefix="vyrn-startup-"))
     out = {}
     try:
         (tmp / "e.c").write_text("int main(void){return 0;}\n")
@@ -719,37 +817,31 @@ def floor(want: list[str], runs: int) -> dict:
                 sh([vyrn_exe(), *flags, "build", tmp / "e.vyrn", "--target", "wasm", "-o", tmp / f"{c}.wasm"])
                 cmds[c] = [wasmtime_exe(), "run", tmp / f"{c}.wasm"]
         for c, cmd in cmds.items():
-            ts, cpus, peaks = measure(cmd, None, runs)
-            out[c] = {
-                "median_s": statistics.median(ts),
-                "runs_s": ts,
-                "cpu_median_s": statistics.median(cpus) if cpus else None,
-                "peak_bytes": max(peaks) if peaks else None,
-            }
+            ts, _, _ = measure(cmd, None, runs)
+            out[c] = {"p50_s": nearest_rank(ts, 50), "runs_s": ts}
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     return out
 
 
-def summarize(ts: list[float], cpus: list[float], peaks: list[int], make: float | None, gz: int) -> dict:
+def summarize(ts: list[float], cpus: list[float], peaks: list[int], key: tuple[str, str], gz: int, artifact: int) -> dict:
     """One cell of the record: the wall clock first, then the four columns the
     game's own per-program pages print beside it.
 
     Every key is a scalar or a flat list at one depth, because the site reads
     this file by slicing it at known indentation rather than parsing it.
     """
-    m = statistics.median(ts)
     return {
-        "median_s": m,
-        "min_s": min(ts),
-        "max_s": max(ts),
-        "spread_pct": round(100.0 * (max(ts) - min(ts)) / m, 2) if m else None,
+        "p50_s": nearest_rank(ts, 50),
+        "p99_s": nearest_rank(ts, 99),
         "runs_s": ts,
         "cpu_median_s": statistics.median(cpus) if cpus else None,
         "cpu_runs_s": cpus,
         "peak_bytes": max(peaks) if peaks else None,
-        "make_s": make,
+        "make_s": MAKE.get(key),
+        "make_peak_bytes": MAKE_PEAK.get(key),
         "gz_bytes": gz,
+        "artifact_bytes": artifact,
     }
 
 
@@ -758,17 +850,18 @@ def summarize(ts: list[float], cpus: list[float], peaks: list[int], make: float 
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--runs", type=int, default=10, help="timed runs per contestant (default 10)")
+    ap.add_argument("--runs", type=int, default=100, help="timed runs per contestant (default 100)")
     ap.add_argument("--only", default="", help="comma-separated program names")
     ap.add_argument("--contestants", default=",".join(CONTESTANTS))
     ap.add_argument("--no-build", action="store_true")
     ap.add_argument("--skip-verify", action="store_true", help="calibration only; never for a committed record")
-    ap.add_argument("--floor", action="store_true", help="also measure the empty-program floor")
     ap.add_argument("--out", default="", help="where to write the JSON (default results/<date>-<host>.json)")
     args = ap.parse_args()
 
-    if args.runs < 10 and not args.skip_verify:
-        print("run.py: note — a committed record wants at least 10 runs", file=sys.stderr)
+    if args.runs < 1:
+        die("--runs must be at least 1")
+    if args.runs < 100 and not args.skip_verify:
+        print("run.py: note — under 100 runs p99 is the slowest run; a committed record wants 100", file=sys.stderr)
 
     want = [c.strip() for c in args.contestants.split(",") if c.strip()]
     for c in want:
@@ -806,35 +899,43 @@ def main() -> int:
         row = {}
         for c in want:
             ts, cpus, peaks = measure(command(c, p, p.timing_n, "timing"), stdin_path, args.runs)
-            row[c] = summarize(ts, cpus, peaks, MAKE.get((p.name, c)), gz_bytes(source_of(c, p)))
+            row[c] = summarize(ts, cpus, peaks, (p.name, c), gz_bytes(source_of(c, p)), artifact_of(c, p).stat().st_size)
             cell = row[c]
-            print(f"  {p.name:<14} {c:<12} {cell['median_s'] * 1000:9.1f} ms"
+            print(f"  {p.name:<14} {c:<12} p50 {cell['p50_s'] * 1000:9.1f} ms"
+                  f"  p99 {cell['p99_s'] * 1000:9.1f} ms"
                   f"  cpu {(cell['cpu_median_s'] or 0) * 1000:8.1f} ms"
-                  f"  mem {(cell['peak_bytes'] or 0) // 1024:8d} KB"
-                  f"  (spread {cell['spread_pct']}%)", flush=True)
+                  f"  mem {(cell['peak_bytes'] or 0) // 1024:8d} KB", flush=True)
         results[p.name] = {"n": p.timing_n, "note": p.note, "contestants": row}
+
+    print(f"startup (empty program, {args.runs} runs each)")
+    boot = startup(want, args.runs)
+    for c, v in boot.items():
+        print(f"  {c:<12} p50 {v['p50_s'] * 1000:9.1f} ms", flush=True)
 
     record = {
         "date": date.today().isoformat(),
         "runs": args.runs,
-        "method": "whole-process wall time, stdout discarded, median of the runs",
+        "method": (
+            "whole-process wall time, stdout discarded; p50 and p99 by nearest rank, "
+            "the values at positions ceil(0.5 n) and ceil(0.99 n) of the n sorted runs"
+        ),
         "columns": {
-            "median_s": "wall clock of the whole process, median of the runs",
+            "p50_s": "wall clock of the whole process, 50th percentile of the runs by nearest rank",
+            "p99_s": "wall clock of the whole process, 99th percentile of the runs by nearest rank",
             "cpu_median_s": "user plus kernel time of the child, median of the runs",
             "peak_bytes": "peak working set of the child, the largest of the runs",
-            "make_s": "wall clock of the one command that builds the timed artifact, 0 for node and bun",
+            "make_s": "wall clock of the one command that builds the timed artifact, median of 3 builds, 0 for node and bun",
+            "make_peak_bytes": "the most memory the build's process tree committed at once, median of the 3 builds, null for node and bun",
             "gz_bytes": "the contestant's single source file, gzipped at level 9",
+            "artifact_bytes": "the file the contestant ships: the executable, the .wasm module, or for node and bun the source",
+            "startup": "per contestant, an empty program run as that contestant runs: p50_s by nearest rank, and runs_s",
         },
         "environment": env,
         "verification": verification,
+        "startup": boot,
         "results": results,
         "elapsed_s": round(time.time() - started, 1),
     }
-    if args.floor:
-        print("floor (empty program)")
-        record["floor"] = floor(want, args.runs)
-        for c, v in record["floor"].items():
-            print(f"  {c:<12} {v['median_s'] * 1000:9.1f} ms")
 
     RESULTS.mkdir(parents=True, exist_ok=True)
     if args.out:
