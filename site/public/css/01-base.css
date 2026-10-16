@@ -30,6 +30,7 @@
   --sr-rust: var(--amber);
   --sr-node: var(--syn-str);
   --sr-bun: oklch(0.45 0.14 320);
+  --sr-wasmopt: oklch(0.5 0.16 30);
   --sr-vyrn: var(--accent);
   --code-wash: 5%;
 
@@ -91,6 +92,7 @@
     --syn-kw: var(--cyan);
     --syn-str: oklch(0.78 0.1 150);
     --sr-bun: oklch(0.78 0.12 320);
+    --sr-wasmopt: oklch(0.75 0.14 30);
     --syn-com: var(--n1);
     --syn-type: var(--bright);
     --syn-num: var(--amber);
@@ -114,6 +116,7 @@
   --syn-kw: var(--cyan);
   --syn-str: oklch(0.78 0.1 150);
   --sr-bun: oklch(0.78 0.12 320);
+  --sr-wasmopt: oklch(0.75 0.14 30);
   --syn-com: var(--n1);
   --syn-type: var(--bright);
   --syn-num: var(--amber);

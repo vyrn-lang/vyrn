@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """The cross-language benchmark runner.
 
-Six contestants per program: C, Rust, JavaScript under node and under bun,
-Vyrn native, Vyrn wasm. The runner builds every one of them, proves they all print the same
-bytes, and only then times anything.
+Seven contestants per program: C, Rust, JavaScript under node and under bun,
+Vyrn native, Vyrn wasm, and Vyrn wasm after `wasm-opt -O3`. The runner builds
+every one of them, proves they all print the same bytes, and only then times
+anything.
 
     python run.py                      # build, verify, time, write the record
     python run.py --runs 15
@@ -36,7 +37,7 @@ methodology:
   - **make secs** — wall time to build that contestant's timed artifact, once
     per program. Zero for node and bun, which have no build step.
   - **gz** — the gzipped size of the single source file, which is the game's
-    own stand-in for how much program it took. The two Vyrn legs share one
+    own stand-in for how much program it took. The Vyrn legs share one
     source and therefore one figure.
 
 * **N reaches the Vyrn programs through a temp copy.** `examples/*.vyrn` hold
@@ -84,8 +85,9 @@ RESULTS = BENCHDIR / "results"
 
 # `vyrn-native` is the native route: the same wasm the `vyrn-wasm` leg runs,
 # through wasm2c and clang. It needs wabt and simde, which `vyrn build` finds
-# through the pin or under `tools/`.
-CONTESTANTS = ["c", "rust", "js", "bun", "vyrn-native", "vyrn-wasm"]
+# through the pin or under `tools/`. `vyrn-wasm-opt` is the `vyrn-wasm` module
+# rewritten by `vyrn --wasm-opt`, which finds wasm-opt the same way.
+CONTESTANTS = ["c", "rust", "js", "bun", "vyrn-native", "vyrn-wasm", "vyrn-wasm-opt"]
 
 # The two JavaScript contestants run the same `js/<name>.js`; the key names the
 # runtime. `js` stays node's key, because the committed records use it.
@@ -209,8 +211,8 @@ def vyrn_exe() -> Path:
     return p
 
 
-def lock_wasmtime() -> tuple[str, str]:
-    """The wasmtime the repository pins, as (version, sha256), from vyrn.lock.
+def lock_tool(tool: str) -> tuple[str, str]:
+    """The version and sha256 vyrn.lock pins for `tool` on this platform.
 
     "Measured against wasmtime 46.0.1" is a lock line, not a
     sentence. The runner reads the same line the compiler does, so the
@@ -222,32 +224,36 @@ def lock_wasmtime() -> tuple[str, str]:
         ("posix", "arm64"): "aarch64-macos",
         ("posix", "aarch64"): "aarch64-linux",
     }.get((os.name, platform.machine()), "x86_64-linux")
+    prefix = f"tool:{tool}@"
     for line in (ROOT / "vyrn.lock").read_text(encoding="utf-8").splitlines():
         parts = line.split("\t")
-        if parts and parts[0].startswith("tool:wasmtime@") and parts[0].endswith("/" + plat):
-            version = parts[0][len("tool:wasmtime@"):].split("/")[0]
+        if parts and parts[0].startswith(prefix) and parts[0].endswith("/" + plat):
+            version = parts[0][len(prefix):].split("/")[0]
             return version, parts[-1]
-    die("vyrn.lock pins no wasmtime for this platform")
+    die(f"vyrn.lock pins no {tool} for this platform")
+
+
+def pinned_exe(tool: str, name: str, var: str) -> Path:
+    """The executable `name` of the pinned `tool` in the tool store.
+
+    `$<var>` overrides, because that is the variable the compiler reads too.
+    """
+    if os.environ.get(var):
+        return Path(os.environ[var])
+    version, sha = lock_tool(tool)
+    home = Path(os.environ.get("VYRN_HOME", Path.home() / ".vyrn"))
+    store = home / "tools" / sha
+    # `wasmtime-min` sits beside wasmtime in the Windows archive and is a
+    # different build, so match the name exactly rather than by prefix.
+    for exe_name in (name + ".exe", name):
+        for cand in store.rglob(exe_name):
+            if cand.is_file():
+                return cand
+    die(f"pinned {tool} {version} not unpacked at {store} — run `vyrn update --locked`")
 
 
 def wasmtime_exe() -> Path:
-    """The pinned wasmtime binary in the tool store.
-
-    `$VYRN_WASMTIME` overrides, because that is the variable the rest of the
-    project already uses.
-    """
-    if os.environ.get("VYRN_WASMTIME"):
-        return Path(os.environ["VYRN_WASMTIME"])
-    version, sha = lock_wasmtime()
-    home = Path(os.environ.get("VYRN_HOME", Path.home() / ".vyrn"))
-    store = home / "tools" / sha
-    # `wasmtime-min` sits beside it in the Windows archive and is a different
-    # build, so match the name exactly rather than by prefix.
-    for name in ("wasmtime.exe", "wasmtime"):
-        for cand in store.rglob(name):
-            if cand.is_file():
-                return cand
-    die(f"pinned wasmtime {version} not unpacked at {store} — run `vyrn update --locked`")
+    return pinned_exe("wasmtime", "wasmtime", "VYRN_WASMTIME")
 
 
 def tool_version(cmd: list[str]) -> str:
@@ -311,7 +317,9 @@ def hardware() -> dict:
 
 
 def environment() -> dict:
-    version, sha = lock_wasmtime()
+    version, sha = lock_tool("wasmtime")
+    opt_version, opt_sha = lock_tool("binaryen")
+    wasm_opt = pinned_exe("binaryen", "wasm-opt", "VYRN_WASM_OPT")
     commit = subprocess.run(
         ["git", "-C", str(ROOT), "rev-parse", "HEAD"], capture_output=True, text=True
     ).stdout.strip()
@@ -341,6 +349,12 @@ def environment() -> dict:
             "lock_sha256": sha,
             "path": str(wasmtime_exe()),
         },
+        "wasm_opt": {
+            "version": tool_version([str(wasm_opt), "--version"]),
+            "lock_version": opt_version,
+            "lock_sha256": opt_sha,
+            "path": str(wasm_opt),
+        },
         "flags": {
             "c": "clang " + " ".join(CFLAGS),
             "rust": "rustc " + " ".join(RUSTFLAGS),
@@ -348,6 +362,7 @@ def environment() -> dict:
             "bun": "bun (no build step)",
             "vyrn-native": "vyrn build (the module through wasm2c, clang -O2 -ffp-contract=off with wasm-rt)",
             "vyrn-wasm": "vyrn build --target wasm (the emitter's module, no optimizer) + wasmtime run",
+            "vyrn-wasm-opt": "vyrn --wasm-opt build --target wasm (the emitter's module through wasm-opt -O3) + wasmtime run",
         },
     }
 
@@ -454,13 +469,19 @@ def build_all(progs: list[Program], want: list[str]):
             # Only the `timing` build is the one that gets timed, so only that
             # one is what `make secs` is of.
             native = (p.name, "vyrn-native") if tag == "timing" else None
-            wasm = (p.name, "vyrn-wasm") if tag == "timing" else None
             if "vyrn-native" in want:
                 cmd = [vyrn, "build", src, "-o", exe(f"vyrn-{p.name}-{tag}")]
                 timed_sh(native, cmd) if native else sh(cmd)
-            if "vyrn-wasm" in want:
-                cmd = [vyrn, "build", src, "--target", "wasm", "-o", BUILD / f"vyrn-{p.name}-{tag}.wasm"]
-                timed_sh(wasm, cmd) if wasm else sh(cmd)
+            # The `make secs` of `vyrn-wasm-opt` is one command: the emitter
+            # and wasm-opt.
+            for c, flags in (("vyrn-wasm", []), ("vyrn-wasm-opt", ["--wasm-opt"])):
+                if c in want:
+                    cmd = [vyrn, *flags, "build", src, "--target", "wasm", "-o", wasm_file(c, p, tag)]
+                    timed_sh((p.name, c), cmd) if tag == "timing" else sh(cmd)
+
+
+def wasm_file(contestant: str, prog: Program, tag: str) -> Path:
+    return BUILD / f"{contestant}-{prog.name}-{tag}.wasm"
 
 
 def command(contestant: str, prog: Program, n: int, tag: str) -> list:
@@ -478,8 +499,8 @@ def command(contestant: str, prog: Program, n: int, tag: str) -> list:
         return [JS_RUNTIMES[contestant], HARNESS / "js" / f"{prog.name}.js", *argv]
     if contestant == "vyrn-native":
         return [exe(f"vyrn-{prog.name}-{tag}")]
-    if contestant == "vyrn-wasm":
-        return [wasmtime_exe(), "run", BUILD / f"vyrn-{prog.name}-{tag}.wasm"]
+    if contestant in ("vyrn-wasm", "vyrn-wasm-opt"):
+        return [wasmtime_exe(), "run", wasm_file(contestant, prog, tag)]
     die(f"unknown contestant {contestant}")
 
 
@@ -693,9 +714,10 @@ def floor(want: list[str], runs: int) -> dict:
         if "vyrn-native" in want:
             sh([vyrn_exe(), "build", tmp / "e.vyrn", "-o", tmp / "e-v.exe"])
             cmds["vyrn-native"] = [tmp / "e-v.exe"]
-        if "vyrn-wasm" in want:
-            sh([vyrn_exe(), "build", tmp / "e.vyrn", "--target", "wasm", "-o", tmp / "e.wasm"])
-            cmds["vyrn-wasm"] = [wasmtime_exe(), "run", tmp / "e.wasm"]
+        for c, flags in (("vyrn-wasm", []), ("vyrn-wasm-opt", ["--wasm-opt"])):
+            if c in want:
+                sh([vyrn_exe(), *flags, "build", tmp / "e.vyrn", "--target", "wasm", "-o", tmp / f"{c}.wasm"])
+                cmds[c] = [wasmtime_exe(), "run", tmp / f"{c}.wasm"]
         for c, cmd in cmds.items():
             ts, cpus, peaks = measure(cmd, None, runs)
             out[c] = {
@@ -762,6 +784,7 @@ def main() -> int:
     print(f"  vyrn: {env['vyrn']['version']} @ {env['vyrn']['commit'][:12]}"
           f"{'' if env['vyrn']['worktree_clean'] else ' (dirty worktree)'}")
     print(f"  wasmtime: {env['wasmtime']['version']} (lock {env['wasmtime']['lock_sha256'][:12]})")
+    print(f"  wasm-opt: {env['wasm_opt']['version']} (lock {env['wasm_opt']['lock_sha256'][:12]})")
 
     if not args.no_build:
         print("building")

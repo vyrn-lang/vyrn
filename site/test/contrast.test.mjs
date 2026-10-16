@@ -167,11 +167,13 @@ const PAIRS = [
   ["the Rust line", "var(--sr-rust)", PLATE, 3],
   ["the node line", "var(--sr-node)", PLATE, 3],
   ["the bun line", "var(--sr-bun)", PLATE, 3],
+  ["the Vyrn wasm-opt line", "var(--sr-wasmopt)", PLATE, 3],
   ["the two Vyrn lines", "var(--sr-vyrn)", PLATE, 3],
   ["a legend label", "var(--sr-c)", PLATE, 4.5],
   ["a legend label (Rust)", "var(--sr-rust)", PLATE, 4.5],
   ["a legend label (node)", "var(--sr-node)", PLATE, 4.5],
   ["a legend label (bun)", "var(--sr-bun)", PLATE, 4.5],
+  ["a legend label (Vyrn wasm-opt)", "var(--sr-wasmopt)", PLATE, 4.5],
   ["a legend label (Vyrn)", "var(--sr-vyrn)", PLATE, 4.5],
 ];
 

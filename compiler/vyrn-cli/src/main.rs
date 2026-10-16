@@ -47,6 +47,8 @@ struct GlobalFlags {
     native_target: Option<NativeTarget>,
     /// `--profile` before the file.
     profile: bool,
+    /// `--wasm-opt`: [`wasm_opt`] rewrites each module a build emits.
+    wasm_opt: bool,
 }
 
 impl GlobalFlags {
@@ -67,6 +69,7 @@ impl GlobalFlags {
         let mut flags = GlobalFlags {
             offline: take("--offline") || std::env::var("VYRN_OFFLINE").is_ok(),
             deny_warnings: take("--deny-warnings") || std::env::var("VYRN_DENY_WARNINGS").is_ok(),
+            wasm_opt: take("--wasm-opt"),
             ..GlobalFlags::default()
         };
         let named = match args.iter().position(|a| a == "--native-target") {
@@ -321,6 +324,7 @@ const GLOBAL_FLAGS: &[Flag] = &[
     Flag("--deny-warnings", None, "a load warning fails the command (also VYRN_DENY_WARNINGS=1)"),
     Flag("--native-target", Some("target"), "the native build's microarchitecture, over vyrn.json's `nativeTarget` (also VYRN_NATIVE_TARGET)"),
     Flag("--profile", None, "where the time went, to stderr; it counts only before the file, so a program can take its own"),
+    Flag("--wasm-opt", None, "runs Binaryen's `wasm-opt -O3` over the module `build`, `bench` and `dev` emit (the `binaryen` pin, tools/, or $VYRN_WASM_OPT)"),
 ];
 
 const PORT: Flag = Flag("--port", Some("N"), "default 8080; 0 lets the OS pick");
@@ -2044,6 +2048,12 @@ fn print_toolchain(start: &Path, pins: &[(String, String)]) {
         pin("simde").as_deref(),
         "$VYRN_SIMDE, tools/",
     ));
+    rows.push(tool_row(
+        "wasm-opt",
+        vyrn_codegen::toolchain::wasm_opt_from(start),
+        pin("binaryen").as_deref(),
+        "$VYRN_WASM_OPT, tools/",
+    ));
 
     // The version column is not padded: a clang version line can run past a
     // hundred characters.
@@ -3357,7 +3367,14 @@ import {{ benchOne }} from \"std/bench\"
     };
     let out_path = dir.join(&exe_name);
     let world = vyrn_lower::analyze(&program);
-    let built = build_wasm2c(path, &program, world, &out_path.to_string_lossy(), target);
+    let built = build_wasm2c(
+        path,
+        &program,
+        world,
+        &out_path.to_string_lossy(),
+        target,
+        p.flags.wasm_opt,
+    );
     if built.is_err() {
         let _ = std::fs::remove_dir_all(&dir);
         return Err(ExitCode::FAILURE);
@@ -5340,16 +5357,70 @@ fn build_to(p: &Project, path: &str, out: Option<&str>, wasm: bool) -> Outcome {
             eprintln!("error: cannot write {out_path}: {e}");
             return Err(ExitCode::FAILURE);
         }
+        if p.flags.wasm_opt {
+            wasm_opt(&source_dir(path), Path::new(&out_path)).map_err(|()| ExitCode::FAILURE)?;
+        }
     } else {
         let target = native_target.unwrap_or(DEFAULT_NATIVE_TARGET);
-        build_wasm2c(path, &program, world, &out_path, target).map_err(|()| ExitCode::FAILURE)?;
+        build_wasm2c(path, &program, world, &out_path, target, p.flags.wasm_opt)
+            .map_err(|()| ExitCode::FAILURE)?;
     }
     println!("wrote {out_path}");
     Ok(ExitCode::SUCCESS)
 }
 
+/// Returns the directory a build's tools are looked up from: the source's,
+/// else the working directory.
+fn source_dir(path: &str) -> PathBuf {
+    Path::new(path)
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .map(Path::to_path_buf)
+        .or_else(|| std::env::current_dir().ok())
+        .unwrap_or_default()
+}
+
+/// Rewrites the module at `wasm` in place with `wasm-opt -O3`. The emitter
+/// never optimizes; this pass runs only under `--wasm-opt`.
+fn wasm_opt(start: &Path, wasm: &Path) -> Result<(), ()> {
+    let exe = match vyrn_codegen::toolchain::wasm_opt_from(start) {
+        Ok(Some((exe, _))) => exe,
+        Ok(None) => {
+            eprintln!(
+                "error: --wasm-opt could not find `wasm-opt`. Pin `binaryen` in vyrn.json's \
+                 `toolchain`, unpack a Binaryen release under tools/ \
+                 (tools/binaryen-version_<n>/bin/wasm-opt) or set VYRN_WASM_OPT to the executable."
+            );
+            return Err(());
+        }
+        Err(e) => {
+            eprintln!("error: {e}");
+            return Err(());
+        }
+    };
+    let st = Command::new(&exe)
+        .arg("-O3")
+        .args(vyrn_codegen::toolchain::WASM_OPT_FEATURES)
+        .arg(wasm)
+        .arg("-o")
+        .arg(wasm)
+        .status();
+    match st {
+        Ok(s) if s.success() => Ok(()),
+        Ok(s) => {
+            eprintln!("error: wasm-opt exited with {s}");
+            Err(())
+        }
+        Err(e) => {
+            eprintln!("error: failed to run wasm-opt ({}): {e}", exe.display());
+            Err(())
+        }
+    }
+}
+
 /// The native route: the program's wasm through wasm2c to C, compiled by clang
-/// with the WASI host and wabt's wasm-rt into an executable.
+/// with the WASI host and wabt's wasm-rt into an executable. Under `optimize`
+/// the module passes through [`wasm_opt`] first.
 ///
 /// The intermediate files stay beside the output for inspection: `<out>.wasm`,
 /// `<out>.w2c.c`, `<out>.w2c.h`, `<out>.host.c`.
@@ -5359,13 +5430,9 @@ fn build_wasm2c(
     world: std::sync::Arc<vyrn_lower::World>,
     out_path: &str,
     native_target: NativeTarget,
+    optimize: bool,
 ) -> Result<(), ()> {
-    let start = Path::new(path)
-        .parent()
-        .filter(|p| !p.as_os_str().is_empty())
-        .map(Path::to_path_buf)
-        .or_else(|| std::env::current_dir().ok())
-        .unwrap_or_default();
+    let start = source_dir(path);
     let w2c = match vyrn_codegen::toolchain::wasm2c_from(&start) {
         Ok(Some(t)) => t,
         Ok(None) => {
@@ -5419,6 +5486,9 @@ fn build_wasm2c(
     };
     if !write(&wasm_path, &bytes) {
         return Err(());
+    }
+    if optimize {
+        wasm_opt(&start, &wasm_path)?;
     }
     // The module name fixes the C names the host calls (`w2c_prog`,
     // `wasm2c_prog_instantiate`, `w2c_prog_0x5Fstart`); wasm2c would otherwise

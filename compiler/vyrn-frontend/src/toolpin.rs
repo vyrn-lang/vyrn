@@ -22,13 +22,15 @@ const PLATFORMS: [&str; 4] = [
 
 /// The tools the table knows. Any other name is refused, never looked up on
 /// PATH.
-pub const KNOWN_TOOLS: [&str; 4] = [
+pub const KNOWN_TOOLS: [&str; 5] = [
     "wasmtime",
     "cargo-nextest",
     // The native route's two: `wasm2c` from a wabt release, and the
     // SIMD header its output includes.
     "wabt",
     "simde",
+    // `wasm-opt`, the post-pass `--wasm-opt` asks for.
+    "binaryen",
 ];
 
 /// Returns this machine in [`PLATFORMS`]' vocabulary, which Rust's `ARCH` and
@@ -62,6 +64,7 @@ fn tool_env_var(name: &str) -> &'static str {
         "wasmtime" => "VYRN_WASMTIME",
         "wabt" => "VYRN_WASM2C",
         "simde" => "VYRN_SIMDE",
+        "binaryen" => "VYRN_WASM_OPT",
         _ => "",
     }
 }
@@ -132,6 +135,17 @@ pub fn tool_url(name: &str, version: &str, platform: &str) -> Result<String, Str
             };
             Ok(format!(
                 "https://github.com/WebAssembly/wabt/releases/download/{version}/wabt-{version}-{asset}.tar.gz"
+            ))
+        }
+        // Binaryen tags `version_<n>` and spells Apple silicon `arm64`.
+        "binaryen" => {
+            let asset = match platform {
+                "aarch64-macos" => "arm64-macos",
+                p if PLATFORMS.contains(&p) => p,
+                other => return Err(format!("this table records no binaryen asset for {other}")),
+            };
+            Ok(format!(
+                "https://github.com/WebAssembly/binaryen/releases/download/version_{version}/binaryen-version_{version}-{asset}.tar.gz"
             ))
         }
         // A source tag: simde is a header library, and the route needs only
@@ -426,11 +440,11 @@ mod tests {
         );
 
         // An unknown name lists the known ones and never falls through to PATH.
-        let e = tool_url("wasm-opt", "1", "x86_64-linux").unwrap_err();
+        let e = tool_url("wasm2js", "1", "x86_64-linux").unwrap_err();
         assert_eq!(
             e,
-            "unknown tool `wasm-opt` in vyrn.json's `toolchain` — the tools vyrn can pin \
-             are wasmtime, cargo-nextest, wabt, simde"
+            "unknown tool `wasm2js` in vyrn.json's `toolchain` — the tools vyrn can pin \
+             are wasmtime, cargo-nextest, wabt, simde, binaryen"
         );
 
         // wabt names its assets `<os>-<arch>`, and a platform outside the table is
@@ -450,6 +464,15 @@ mod tests {
             "https://github.com/simd-everywhere/simde/archive/refs/tags/v0.8.2.tar.gz"
         );
         assert_eq!(tool_platforms("simde"), ["any"]);
+        assert_eq!(
+            tool_url("binaryen", "133", "aarch64-macos").unwrap(),
+            "https://github.com/WebAssembly/binaryen/releases/download/version_133/binaryen-version_133-arm64-macos.tar.gz"
+        );
+        assert_eq!(
+            tool_url("binaryen", "133", "x86_64-windows").unwrap(),
+            "https://github.com/WebAssembly/binaryen/releases/download/version_133/binaryen-version_133-x86_64-windows.tar.gz"
+        );
+        assert!(tool_url("binaryen", "133", "riscv64-linux").is_err());
     }
 
     #[test]

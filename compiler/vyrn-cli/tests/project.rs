@@ -114,7 +114,7 @@ fn deps_reports_the_toolchain_and_why() {
     assert!(out.status.success());
     let text = String::from_utf8_lossy(&out.stdout);
     assert!(text.contains("toolchain:"), "{text}");
-    for tool in ["clang", "wasmtime", "wasm2c", "simde"] {
+    for tool in ["clang", "wasmtime", "wasm2c", "simde", "wasm-opt"] {
         assert!(
             text.lines().any(|l| l.trim_start().starts_with(tool)),
             "no row for {tool}: {text}"

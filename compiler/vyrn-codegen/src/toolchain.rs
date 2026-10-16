@@ -1,6 +1,7 @@
 //! Finds the tools that turn the emitted wasm into a binary: wasm2c, clang,
-//! simde and wasmtime. The native route feeds the module to wasm2c and
-//! compiles its C with clang beside [`WASI_HOST_C`]. This lives here, not in
+//! simde and wasmtime, and `wasm-opt`, which rewrites the module on request.
+//! The native route feeds the module to wasm2c and compiles its C with clang
+//! beside [`WASI_HOST_C`]. This lives here, not in
 //! the driver, because the wasm generation engine is an excluded
 //! crate and this crate is the nearest one both depend on.
 
@@ -121,6 +122,50 @@ fn tools_walk(start: &Path, rel: &Path) -> Option<PathBuf> {
     None
 }
 
+/// Returns `bin/<name>` of a release that lays its executables out under
+/// `bin/`, and why that one: `$<var>`, else the `<pin>` pin, else the `tools/`
+/// walk. Errors as [`wasmtime_from`].
+fn bin_tool_from(
+    start: &Path,
+    var: &str,
+    pin: &str,
+    name: &str,
+) -> Result<Option<(PathBuf, &'static str)>, String> {
+    let exe = if cfg!(windows) {
+        format!("{name}.exe")
+    } else {
+        name.to_string()
+    };
+    let rel = Path::new("bin").join(exe);
+    if let Some(p) = env_path(var) {
+        return Ok(Some((p, "override: environment")));
+    }
+    if let Some(dir) = pinned_tool_dir(start, pin)? {
+        return match vyrn_frontend::toolpin::tool_root(&dir, "bin") {
+            Some(root) => Ok(Some((root.join(&rel), "pinned"))),
+            None => Err(unpacked_without(pin, &dir, "`bin` directory")),
+        };
+    }
+    Ok(discovered_tool_from(start, &rel).map(|p| (p, "discovered: tools/")))
+}
+
+/// Finds Binaryen's `wasm-opt`: `$VYRN_WASM_OPT`, else the `binaryen` pin,
+/// else the `tools/` walk. Errors as [`wasmtime_from`].
+pub fn wasm_opt_from(start: &Path) -> Result<Option<(PathBuf, &'static str)>, String> {
+    bin_tool_from(start, "VYRN_WASM_OPT", "binaryen", "wasm-opt")
+}
+
+/// The features `wasm-opt` validates the module against: the ones the emitter
+/// uses. Binaryen's default set is the MVP, which refuses every module.
+pub const WASM_OPT_FEATURES: [&str; 6] = [
+    "--enable-bulk-memory",
+    "--enable-sign-ext",
+    "--enable-mutable-globals",
+    "--enable-nontrapping-float-to-int",
+    "--enable-simd",
+    "--enable-multivalue",
+];
+
 /// `wasm2c` from a wabt release, with the wasm-rt headers and runtime sources
 /// that release lays out around it.
 pub struct Wasm2c {
@@ -145,24 +190,8 @@ pub struct Wasm2c {
 /// (`include/wasm-rt.h`, `share/wabt/wasm2c/wasm-rt-impl.c`) around it: the
 /// route cannot link without the runtime.
 pub fn wasm2c_from(start: &Path) -> Result<Option<Wasm2c>, String> {
-    let exe = if cfg!(windows) {
-        "wasm2c.exe"
-    } else {
-        "wasm2c"
-    };
-    let rel = Path::new("bin").join(exe);
-    let (exe, why) = match env_path("VYRN_WASM2C") {
-        Some(p) => (p, "override: environment"),
-        None => match pinned_tool_dir(start, "wabt")? {
-            Some(dir) => match vyrn_frontend::toolpin::tool_root(&dir, "bin") {
-                Some(root) => (root.join(&rel), "pinned"),
-                None => return Err(unpacked_without("wabt", &dir, "`bin` directory")),
-            },
-            None => match discovered_tool_from(start, &rel) {
-                Some(p) => (p, "discovered: tools/"),
-                None => return Ok(None),
-            },
-        },
+    let Some((exe, why)) = bin_tool_from(start, "VYRN_WASM2C", "wabt", "wasm2c")? else {
+        return Ok(None);
     };
     let root = exe
         .parent()

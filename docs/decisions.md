@@ -206,6 +206,7 @@ pull request.
 - Wasm is emitted directly with `wasm-encoder`. No LLVM, clang or sysroot is needed to build or test the compiler.
 - A replaced path is deleted, not kept behind a flag. Gated multiplicity stays true and ungated multiplicity rots.
 - The emitter never optimizes; the engine that runs the wasm does. No shared emitter trait or instruction-builder abstraction.
+- `wasm-opt` is an optional post-pass over the emitted module, pinned as `binaryen` and run only under `--wasm-opt`. The emitter's output and the wasm manifest do not depend on it.
 - The sweep never moves a datum. A data address is an untyped constant, so relocating by value could rewrite a user's integer. A dead datum costs no module byte, and the static area ends at the last live datum or reservation.
 - Native code is the same wasm through `wasm2c` and clang `-O2`. No Cranelift route for `build`: against an LLVM baseline it measured 2 to 3x, and `wasm2c` 1.5 to 1.9x.
 - The native route passes no alignment flag. On `nbodycols`, moving the hot loop within a 64-byte line changed native time by under 0.6%. Clang's register allocation of the inlined `advance` changed it by 1.0% when `inplace-copies` changed only its caller, so an emitter change is not judged on a native drift near 1%.
