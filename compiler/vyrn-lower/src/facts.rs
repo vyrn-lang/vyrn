@@ -941,10 +941,10 @@ impl State {
             out.ne = first.ne.clone();
             return out;
         }
-        let mut cands: BTreeSet<Lin> = BTreeSet::new();
+        let mut cands: BTreeSet<Cow<Lin>> = BTreeSet::new();
         for s in live {
-            cands.extend(s.facts.iter().cloned());
-            cands.extend(s.unshared(&out));
+            cands.extend(s.facts.iter().map(Cow::Borrowed));
+            cands.extend(s.unshared(&out).map(Cow::Owned));
         }
         let provers: Vec<Prover> = live.iter().map(|s| s.prover()).collect();
         for c in cands {
