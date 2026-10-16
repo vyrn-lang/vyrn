@@ -154,6 +154,17 @@ pub fn wasm_opt_from(start: &Path) -> Result<Option<(PathBuf, &'static str)>, St
     bin_tool_from(start, "VYRN_WASM_OPT", "binaryen", "wasm-opt")
 }
 
+/// The features `wasm-opt` validates the module against: the ones the emitter
+/// uses. Binaryen's default set is the MVP, which refuses every module.
+pub const WASM_OPT_FEATURES: [&str; 6] = [
+    "--enable-bulk-memory",
+    "--enable-sign-ext",
+    "--enable-mutable-globals",
+    "--enable-nontrapping-float-to-int",
+    "--enable-simd",
+    "--enable-multivalue",
+];
+
 /// `wasm2c` from a wabt release, with the wasm-rt headers and runtime sources
 /// that release lays out around it.
 pub struct Wasm2c {

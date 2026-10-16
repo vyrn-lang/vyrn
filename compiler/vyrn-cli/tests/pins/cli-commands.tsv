@@ -1,11 +1,11 @@
 command	lines	sentences
 why	705	12
-bench	495	11
+bench	502	11
 serve, dev	464	6
-(dispatch)	334	4
+(dispatch)	335	4
 doc	283	9
+build	272	17
 routes	262	1
-build	219	13
 run	208	2
 deps	198	3
 update	194	5
@@ -14,7 +14,7 @@ dev	140	12
 fix	129	1
 test, bench	127	2
 build, bench	110	0
-(global)	91	2
+(global)	94	2
 vendor	66	6
 add	58	3
 new	42	4

@@ -177,3 +177,50 @@ fn the_trapping_examples_agree_between_the_route_and_vyrn_run() {
         );
     }
 }
+
+/// `--wasm-opt` rewrites the module and keeps what the program prints: one
+/// float-heavy example, built natively with and without it.
+#[test]
+#[ignore = "needs clang, wasm2c, simde and wasm-opt; run explicitly: cargo test -p vyrn-cli --release --test route -- --ignored"]
+fn wasm_opt_rewrites_the_module_and_keeps_the_output() {
+    if route_tools().is_none() {
+        eprintln!("SKIP: the wasm2c route's tools are not all present");
+        return;
+    }
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let found = vyrn_codegen::toolchain::wasm_opt_from(&root).unwrap_or_else(|e| panic!("{e}"));
+    if require_tools("wasm-opt", "VYRN_WASM_OPT", found.map(|(p, _)| p)).is_none() {
+        eprintln!("SKIP: wasm-opt is not present");
+        return;
+    }
+    let path = examples_dir().join("nbody.vyrn");
+    let out_dir = scratch("route-wasm-opt");
+    let built = |name: &str, flag: Option<&str>| {
+        let exe = out_dir.join(name);
+        let build = vyrn()
+            .args(flag)
+            .arg("build")
+            .arg(&path)
+            .arg("-o")
+            .arg(&exe)
+            .output()
+            .expect("build");
+        assert!(
+            build.status.success(),
+            "{name}:\n{}{}",
+            norm(&build.stdout),
+            norm(&build.stderr)
+        );
+        let run = Command::new(&exe).output().expect("run");
+        (std::fs::read(exe.with_extension("wasm")).unwrap(), run)
+    };
+    let (plain_wasm, plain) = built("plain.exe", None);
+    let (opt_wasm, opt) = built("opt.exe", Some("--wasm-opt"));
+    assert_ne!(
+        plain_wasm, opt_wasm,
+        "--wasm-opt left the module as emitted"
+    );
+    assert_eq!(opt.status.code(), plain.status.code());
+    assert_eq!(norm(&opt.stdout), norm(&plain.stdout));
+    assert_eq!(norm(&opt.stderr), norm(&plain.stderr));
+}
