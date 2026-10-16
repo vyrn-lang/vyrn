@@ -34,7 +34,7 @@ export type Reading = { key: String, name: String, tone: String, cpu: String, me
 export type Panel = { key: String, name: String, n: String, cause: String, label: String, verdict: String, game: String, cells: Array<Reading> }
 
 export fn run1File() -> String {
-    return "bench/results/2026-10-16.json"
+    return "bench/results/2026-10-16-run2.json"
 }
 
 export fn run1Href() -> String {
@@ -216,6 +216,7 @@ export fn contestants() -> Array<Series> {
         Series { key: "c", name: "C", tone: "sr-c" },
         Series { key: "rust", name: "Rust", tone: "sr-rust" },
         Series { key: "js", name: "node", tone: "sr-node" },
+        Series { key: "bun", name: "bun", tone: "sr-bun" },
         Series { key: "vyrn-native", name: "Vyrn native", tone: "sr-vyrn" },
         Series { key: "vyrn-wasm", name: "Vyrn wasm", tone: "sr-vyrn dashed" },
     ]
@@ -682,7 +683,7 @@ export fn srcHref(program: String, engine: String) -> String {
     if engine == "rust" {
         return ghBlob("bench/harness/rust/" + program + ".rs")
     }
-    if engine == "js" {
+    if engine == "js" || engine == "bun" {
         return ghBlob("bench/harness/js/" + program + ".js")
     }
     return ghBlob("examples/" + program + ".vyrn")
@@ -871,16 +872,16 @@ fn causeRow(program: String) -> Cause {
 
 fn causeRows() -> Array<Cause> {
     return [
-        Cause { program: "nbody", verdict: "a deviation", cause: "Rust's compiler turns the inner loop into instructions that work on two numbers at once, and ours works on one at a time: Rust's program holds 103 paired multiplies and ours holds 5. The WebAssembly build took 12.5 seconds in the last record, when a write to one field of an array element copied the whole element out and back. Most of that went when the write became a single store.", label: "no vector instructions" },
+        Cause { program: "nbody", verdict: "a deviation", cause: "Rust's compiler turns the inner loop into instructions that work on two numbers at once, and ours works on one at a time: Rust's program holds 103 paired multiplies and ours holds 5. The WebAssembly build took 12.5 seconds in the 2026-09-01 record, when a write to one field of an array element copied the whole element out and back. Most of that went when the write became a single store.", label: "no vector instructions" },
         Cause { program: "spectralnorm", verdict: "inside the noise band", cause: "", label: "" },
-        Cause { program: "fannkuch", verdict: "at the edge of the band", cause: "The loop allocates nothing and keeps no index check: one buffer is refilled in place for each of the 39,916,800 permutations. The native build still takes 181 ms more than Rust, and where that time goes has not been measured.", label: "nothing allocated in the loop" },
-        Cause { program: "binarytrees", verdict: "ahead of the band", cause: "Node wins this one, by 51 ms. Both Vyrn builds carry the same allocator, compiled into the program: a freed node goes onto a list of blocks of its size, and the next node of that size comes off the list. The C and Rust entries call the system's allocator for every node. The native build took 2,004 ms in the last record, when it too called the system's allocator for every node.", label: "who allocates the memory" },
+        Cause { program: "fannkuch", verdict: "inside the noise band", cause: "The loop allocates nothing and keeps no index check: one buffer is refilled in place for each of the 39,916,800 permutations. The native build still takes 115 ms more than Rust, and where that time goes has not been measured.", label: "nothing allocated in the loop" },
+        Cause { program: "binarytrees", verdict: "ahead of the band", cause: "Bun and node both beat the native build here, by 113 ms and 67 ms. Both Vyrn builds carry the same allocator, compiled into the program: a freed node goes onto a list of blocks of its size, and the next node of that size comes off the list. The C and Rust entries call the system's allocator for every node. The native build took 2,004 ms in the 2026-09-01 record, when it too called the system's allocator for every node.", label: "who allocates the memory" },
         Cause { program: "fasta", verdict: "a deviation", cause: "What one 60-byte output line costs. The program fills one reused buffer per line, checks that its bytes are valid text \u{2014} over bytes already known to be plain ASCII \u{2014} and builds a piece of text from them before it prints. A way to write raw bytes straight out exists; this program has not been moved onto it.", label: "the price of one output line" },
         Cause { program: "revcomp", verdict: "a deviation", cause: "Three passes over every byte, and a cost per line on top: about 120 million appends for 40 million bases, each with a capacity check, and every input line copied into a fresh array before its bases are appended. Rust's output loop allocates nothing at all. The widest spread of the set is in this program \u{2014} the C entry is itself 4.4 times slower than Rust here, for reading its input a line at a time.", label: "a pass per byte, and a cost per line" },
         Cause { program: "knucleotide", verdict: "ahead of the band", cause: "This row once took 211 times C's time, when looking a key up in a map meant reading every key in it. Maps carry a hash index, and this program's key is a single number rolled along the sequence rather than a fresh piece of text at every position.", label: "faster than C, and why" },
         Cause { program: "pidigits", verdict: "inside the noise band", cause: "", label: "" },
-        Cause { program: "mandelbrot", verdict: "inside the noise band", cause: "Floating-point arithmetic with no allocation and no output shaping, so what is measured is the arithmetic, and all five readings sit within 15% of C. The program is on the list because Vyrn can write raw bytes: this image's pixels are arbitrary bytes, and text cannot carry them.", label: "the closest five readings here" },
-        Cause { program: "regexredux", verdict: "a deviation", cause: "The entries are not running comparable engines, which is the first thing to say about the number. Vyrn runs a general-purpose regular-expression engine, written in Vyrn and compiled like any other program. The C and Rust entries carry the smallest matcher that covers this one corpus \u{2014} about sixty lines, hand-fitted to these patterns, no backtracking \u{2014} and node uses the engine built into it. The row took 1,177 ms in the last record. Most of the drop to 83 ms came when Vyrn's engine began to build a state machine as it searches, one state per set of live pattern positions, each transition read from a table after its first use.", label: "not the same engine on both sides" },
+        Cause { program: "mandelbrot", verdict: "inside the noise band", cause: "Floating-point arithmetic with no allocation and no output shaping, so what is measured is the arithmetic, and all six readings sit within 16% of C. The program is on the list because Vyrn can write raw bytes: this image's pixels are arbitrary bytes, and text cannot carry them.", label: "the closest six readings here" },
+        Cause { program: "regexredux", verdict: "a deviation", cause: "The entries are not running comparable engines, which is the first thing to say about the number. Vyrn runs a general-purpose regular-expression engine, written in Vyrn and compiled like any other program. The C and Rust entries carry the smallest matcher that covers this one corpus \u{2014} about sixty lines, hand-fitted to these patterns, no backtracking \u{2014} and node and bun each use the engine built into them. The row took 1,177 ms in the 2026-09-01 record. Most of the drop to 88 ms came when Vyrn's engine began to build a state machine as it searches, one state per set of live pattern positions, each transition read from a table after its first use.", label: "not the same engine on both sides" },
     ]
 }
 
@@ -918,12 +919,14 @@ export fn envRows() -> Array<Array<String>> {
         ["clang", textAt(env, "    ", "clang")],
         ["rustc", textAt(env, "    ", "rustc")],
         ["node", textAt(env, "    ", "node")],
+        ["bun", textAt(env, "    ", "bun")],
         ["python", textAt(env, "    ", "python")],
         ["vyrn", textAt(vyrn, "      ", "version") + " at " + textAt(vyrn, "      ", "commit")],
         ["wasmtime", textAt(wasmtime, "      ", "version") + ", sha256 " + textAt(wasmtime, "      ", "lock_sha256")],
         ["C flags", textAt(flags, "      ", "c")],
         ["Rust flags", textAt(flags, "      ", "rust")],
-        ["JavaScript", textAt(flags, "      ", "js")],
+        ["JavaScript on node", textAt(flags, "      ", "js")],
+        ["JavaScript on bun", textAt(flags, "      ", "bun")],
         ["Vyrn native", textAt(flags, "      ", "vyrn-native")],
         ["Vyrn wasm", textAt(flags, "      ", "vyrn-wasm")],
     ]
@@ -931,7 +934,7 @@ export fn envRows() -> Array<Array<String>> {
 
 test "the record still has the shape this reader cuts" {
     loadCells()
-    assertEq(cells.length, 50)
+    assertEq(cells.length, 60)
     for c in cells {
         assert(c.us > 0)
         assert(c.cpuUs > 0)
@@ -942,29 +945,30 @@ test "the record still has the shape this reader cuts" {
 }
 
 test "the medians are the ones the published record holds" {
-    assertEq(msOf(medianUs("nbody", "c")), "846 ms")
-    assertEq(msOf(medianUs("nbody", "rust")), "636 ms")
-    assertEq(msOf(medianUs("nbody", "js")), "1049 ms")
+    assertEq(msOf(medianUs("nbody", "c")), "849 ms")
+    assertEq(msOf(medianUs("nbody", "rust")), "639 ms")
+    assertEq(msOf(medianUs("nbody", "js")), "1037 ms")
     assertEq(msOf(medianUs("nbody", "vyrn-native")), "998 ms")
-    assertEq(msOf(medianUs("nbody", "vyrn-wasm")), "1202 ms")
-    assertEq(msOf(medianUs("knucleotide", "c")), "316 ms")
-    assertEq(msOf(medianUs("knucleotide", "rust")), "205 ms")
-    assertEq(msOf(medianUs("knucleotide", "vyrn-native")), "121 ms")
-    assertEq(msOf(medianUs("binarytrees", "js")), "405 ms")
-    assertEq(msOf(medianUs("pidigits", "vyrn-native")), "1269 ms")
+    assertEq(msOf(medianUs("nbody", "vyrn-wasm")), "1201 ms")
+    assertEq(msOf(medianUs("knucleotide", "c")), "281 ms")
+    assertEq(msOf(medianUs("knucleotide", "rust")), "197 ms")
+    assertEq(msOf(medianUs("knucleotide", "vyrn-native")), "109 ms")
+    assertEq(msOf(medianUs("binarytrees", "js")), "388 ms")
+    assertEq(msOf(medianUs("binarytrees", "bun")), "342 ms")
+    assertEq(msOf(medianUs("pidigits", "vyrn-native")), "1334 ms")
 }
 
 test "the normalized figures are the ones the record computes" {
     assertEq(ratioText(ratioOf("nbody", "vyrn-native", "c")), "1.18x")
-    assertEq(ratioText(ratioOf("nbody", "vyrn-wasm", "c")), "1.42x")
+    assertEq(ratioText(ratioOf("nbody", "vyrn-wasm", "c")), "1.41x")
     assertEq(ratioText(ratioOf("spectralnorm", "vyrn-native", "c")), "1.00x")
-    assertEq(ratioText(ratioOf("binarytrees", "js", "c")), "0.53x")
+    assertEq(ratioText(ratioOf("binarytrees", "js", "c")), "0.50x")
     assertEq(ratioText(ratioOf("revcomp", "rust", "c")), "0.23x")
-    assertEq(ratioText(ratioOf("knucleotide", "vyrn-native", "c")), "0.38x")
-    assertEq(ratioText(ratioOf("knucleotide", "vyrn-wasm", "c")), "0.86x")
-    assertEq(ratioText(ratioOf("nbody", "vyrn-native", "rust")), "1.57x")
-    assertEq(ratioText(ratioOf("pidigits", "vyrn-native", "rust")), "1.01x")
-    assertEq(ratioText(ratioOf("revcomp", "vyrn-native", "rust")), "3.61x")
+    assertEq(ratioText(ratioOf("knucleotide", "vyrn-native", "c")), "0.39x")
+    assertEq(ratioText(ratioOf("knucleotide", "vyrn-wasm", "c")), "0.90x")
+    assertEq(ratioText(ratioOf("nbody", "vyrn-native", "rust")), "1.56x")
+    assertEq(ratioText(ratioOf("pidigits", "vyrn-native", "rust")), "1.06x")
+    assertEq(ratioText(ratioOf("revcomp", "vyrn-native", "rust")), "3.59x")
 }
 
 test "the log scale puts a doubling on every ring" {
@@ -1006,7 +1010,7 @@ test "every polygon has one vertex per program" {
     for line in radarLines() {
         assertEq(split(line.points, " ").length, programs().length)
     }
-    assertEq(radarLines().length, 5)
+    assertEq(radarLines().length, 6)
     let base = radarRings()[belowBase() - 1]
     assertEq(radarLines()[0].points, base.points)
     assertEq(base.label, "1x")
@@ -1047,18 +1051,18 @@ test "a panel is the whole of what is known about one program" {
     let panels = axisPanels()
     assertEq(panels.length, 10)
     for p in panels {
-        assertEq(p.cells.length, 5)
+        assertEq(p.cells.length, 6)
         assert(p.verdict.byteLength > 0)
     }
     assertEq(panels[0].n, "25,000,000")
-    assertEq(panels[0].cells[0].ms, "846 ms")
-    assertEq(panels[0].cells[3].vsC, "1.18x")
-    assertEq(panels[0].cells[3].vsRust, "1.57x")
-    assertEq(nativeVsRust("nbody"), "1.57x")
-    assertEq(nativeVsRust("pidigits"), "1.01x")
-    assertEq(nativeVsRust("knucleotide"), "0.59x")
+    assertEq(panels[0].cells[0].ms, "849 ms")
+    assertEq(panels[0].cells[4].vsC, "1.18x")
+    assertEq(panels[0].cells[4].vsRust, "1.56x")
+    assertEq(nativeVsRust("nbody"), "1.56x")
+    assertEq(nativeVsRust("pidigits"), "1.06x")
+    assertEq(nativeVsRust("knucleotide"), "0.55x")
     assertEq(panels[1].verdict, "inside the noise band")
-    assertEq(panels[2].verdict, "at the edge of the band")
+    assertEq(panels[2].verdict, "inside the noise band")
     assertEq(panels[3].verdict, "ahead of the band")
     assertEq(panels[6].verdict, "ahead of the band")
     assertEq(panels[7].verdict, "inside the noise band")
@@ -1067,9 +1071,9 @@ test "a panel is the whole of what is known about one program" {
 test "the caption names the hardware and the toolchain, and never the machine" {
     let cap = benchMachine()
     assert(contains(cap, "Ryzen"))
-    assert(contains(cap, "wasmtime 46.0.1"))
+    assert(contains(cap, "wasmtime 49.0.3"))
     assert(contains(cap, "2026-10-16"))
-    assertEq(envRows().length, 14)
+    assertEq(envRows().length, 16)
     for row in envRows() {
         assert(row[0].byteLength > 0)
         assert(row[1].byteLength > 0)
@@ -1096,15 +1100,16 @@ test "every program links to the game's own page for it" {
 test "every cell carries the columns the game prints" {
     for p in programs() {
         let cells = readingsFor(p.key)
-        assertEq(cells.length, 5)
+        assertEq(cells.length, 6)
         for c in cells {
             assert(c.cpu.byteLength > 0)
             assert(c.mem.byteLength > 2)
             assert(c.gz.byteLength > 2)
         }
         assertEq(cells[2].make, "\u{2014}")
+        assertEq(cells[3].make, "\u{2014}")
         assert(cells[0].make != "\u{2014}")
-        assert(cells[3].make != "\u{2014}")
+        assert(cells[4].make != "\u{2014}")
     }
 }
 
@@ -1140,6 +1145,7 @@ test "every row points at the program behind it" {
         assertEq(srcHref(p.key, "c"), "https://github.com/vyrn-lang/vyrn/blob/main/bench/harness/c/" + p.key + ".c")
         assertEq(srcHref(p.key, "rust"), "https://github.com/vyrn-lang/vyrn/blob/main/bench/harness/rust/" + p.key + ".rs")
         assertEq(srcHref(p.key, "js"), "https://github.com/vyrn-lang/vyrn/blob/main/bench/harness/js/" + p.key + ".js")
+        assertEq(srcHref(p.key, "bun"), srcHref(p.key, "js"))
         assertEq(srcHref(p.key, "vyrn-native"), srcHref(p.key, "vyrn-wasm"))
         assertEq(srcHref(p.key, "vyrn-native"), "https://github.com/vyrn-lang/vyrn/blob/main/examples/" + p.key + ".vyrn")
     }

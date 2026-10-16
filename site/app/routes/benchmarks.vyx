@@ -124,10 +124,10 @@ fn progHref(key: String) -> String {
     <section class="band" id="method">
         <h2>Method</h2>
         <ul class="docprose">
-            <li>The C is plain C11, the Rust is safe and standard-library only, the JavaScript is plain node. No hand-written vector instructions and no threads in any of them.</li>
-            <li>All five printed the same bytes before anything was timed.</li>
+            <li>The C is plain C11, the Rust is safe and standard-library only, the JavaScript is plain JavaScript, run under node and under bun. No hand-written vector instructions and no threads in any of them.</li>
+            <li>All six printed the same bytes before anything was timed.</li>
             <li>Medians of {{ benchRuns() }} runs, every engine at its own defaults, one machine.</li>
-            <li>CI does not run this harness, because it needs clang, rustc, node and wasmtime together. It is run by hand, and the committed JSON is the record.</li>
+            <li>CI does not run this harness, because it needs clang, rustc, node, bun and wasmtime together. It is run by hand, and the committed JSON is the record.</li>
             <li>Nothing here claims a trend over time. For that there is <a href="/tooling/testing.html">vyrn bench</a>, which times one operation rather than one program.</li>
         </ul>
         <div class="scroller">

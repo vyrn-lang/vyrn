@@ -165,7 +165,7 @@ fn barStyle(pct: String) -> String {
         <section class="band" id="speed">
             <div class="benchhead">
                 <h2 class="display">Benchmarks</h2>
-                <p class="lede">Benchmarks Game programs in Vyrn, C, Rust and JavaScript on node, with Vyrn's WebAssembly build beside them. A card where Vyrn is slower names the cause.</p>
+                <p class="lede">Benchmarks Game programs in Vyrn, C, Rust and JavaScript on node and bun, with Vyrn's WebAssembly build beside them. A card where Vyrn is slower names the cause.</p>
                 <p class="ctarow"><a class="cta" href="/benchmarks.html">The benchmarks page</a></p>
             </div>
 
