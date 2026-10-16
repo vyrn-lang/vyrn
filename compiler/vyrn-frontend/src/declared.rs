@@ -20,7 +20,8 @@ pub struct Owned {
     impls: HashMap<String, String>,
     /// Type keys with `impl MustUse for T`.
     linear: std::collections::HashSet<String>,
-    types: HashMap<String, TypeDecl>,
+    /// Shared with each [`Owned::as_written`] copy; fixed by [`Owned::new`].
+    types: std::sync::Arc<HashMap<String, TypeDecl>>,
     /// Whether a type parameter answers as a String does ([`Owned::as_written`]).
     params_own: bool,
 }
@@ -62,7 +63,7 @@ impl Owned {
                 .filter(|i| i.protocol == crate::types::MUST_USE)
                 .filter_map(|i| crate::types::type_key(&i.ty))
                 .collect(),
-            types: crate::types::decl_map(program),
+            types: std::sync::Arc::new(crate::types::decl_map(program)),
             params_own: false,
         }
     }
@@ -100,10 +101,10 @@ impl Owned {
         }
         // A self-referring type has no bottom to walk; its obligation goes
         // unseen rather than the walk not returning.
-        if self_referring(ty, &self.types).is_some() {
+        if self_referring(ty, &*self.types).is_some() {
             return None;
         }
-        match crate::types::resolve(ty, &self.types) {
+        match crate::types::resolve(ty, &*self.types) {
             Type::Stream(_) => Some(Linear::Stream),
             // A container answers what its element does; containers
             // release their elements, so `drop` discharges each. A record field
@@ -156,7 +157,7 @@ impl Owned {
     /// [`Owned::release_kind`] being `Some` where a type owns heap but has no
     /// release row, such as a `Stream` or an unbounded self-referring type.
     pub fn owns_heap(&self, ty: &Type) -> bool {
-        owns_heap(&self.standing(ty), &self.types)
+        owns_heap(&self.standing(ty), &*self.types)
     }
 
     /// Returns the name `ty` reaches from itself with no declared release in
@@ -164,7 +165,7 @@ impl Owned {
     /// in. Unlike [`self_referring`], the walk stops at a type with
     /// `impl Owned`, which is released by a call.
     pub fn unbounded(&self, ty: &Type) -> Option<String> {
-        self_referring_past(ty, &self.types, &|n| self.impls.contains_key(n))
+        self_referring_past(ty, &*self.types, &|n| self.impls.contains_key(n))
     }
 
     /// Whether `name` is a declared `release` body. A consume-match inside one
@@ -187,7 +188,7 @@ impl Owned {
             if let Type::Named(n) | Type::App(n, _) = ty {
                 if !seen.contains(n) && o.types.contains_key(n) {
                     seen.push(n.clone());
-                    go(o, &crate::types::resolved(ty, &o.types), seen, out);
+                    go(o, &crate::types::resolved(ty, &*o.types), seen, out);
                 }
                 return;
             }
@@ -232,7 +233,7 @@ impl Owned {
         if let Some(r) = self.declared_release(ty) {
             return Some(r);
         }
-        match crate::types::resolve(ty, &self.types) {
+        match crate::types::resolve(ty, &*self.types) {
             Type::Str => Some(DropKind::FreeStr),
             // An array owns its elements (every route into one is a store), so
             // an element with a row makes it `Deep`, the release walk. A
@@ -242,7 +243,7 @@ impl Owned {
             Type::Array(e) => Some(
                 if self.unbounded(&e).is_none()
                     && (self.release_kind(&e).is_some()
-                        || matches!(&*crate::types::resolved(&e, &self.types), Type::Param(_)))
+                        || matches!(&*crate::types::resolved(&e, &*self.types), Type::Param(_)))
                 {
                     DropKind::Deep(Type::Array(e))
                 } else {
@@ -299,7 +300,7 @@ impl Owned {
             // declared release on the cycle answers `None` and leaks.
             // `Option` and `Result` resolve to enums and take this arm.
             t @ (Type::Record(_) | Type::Enum(_) | Type::ArrayN(..)) => {
-                (self.unbounded(ty).is_none() && owns_heap(&t, &self.types))
+                (self.unbounded(ty).is_none() && owns_heap(&t, &*self.types))
                     .then(|| DropKind::Deep(t))
             }
             // `resolve` answers `lazy T` as `fn() -> T`; this is its
@@ -430,7 +431,7 @@ pub fn skippable(proto: &Owned, ty: &Type, paths: &[String]) -> bool {
             if proto.declared_release(&proto.standing(&cur)).is_some() {
                 return false;
             }
-            let next = match &*crate::types::resolved(&cur, &proto.types) {
+            let next = match &*crate::types::resolved(&cur, &*proto.types) {
                 Type::Record(fields) => fields.iter().find(|f| f.name == seg).map(|f| f.ty.clone()),
                 Type::Enum(vs) => segs.next().and_then(|i| {
                     let v = vs.iter().find(|v| v.name == seg)?;
