@@ -3786,7 +3786,7 @@ impl<'a> Walk<'a> {
             .filter_map(|(a, t)| Some((a, renamed(t, m, n)?)))
             .collect();
         for (a, t) in bounded {
-            st.elems.entry(a).or_default().insert(t);
+            st.elems.get_mut().entry(a).or_default().insert(t);
         }
         let from = |y: Name, st: &State| -> Vec<Lin> {
             let y = self.arrays.get(&y).copied().unwrap_or(y);
@@ -3911,7 +3911,7 @@ impl<'a> Walk<'a> {
             match hole(f, seq) {
                 Some(j) => {
                     let p = params[j.index() - 1];
-                    st.elems.entry(p).or_default().insert(l);
+                    st.elems.get_mut().entry(p).or_default().insert(l);
                 }
                 None => st.assume(&l),
             }
@@ -4717,13 +4717,12 @@ impl<'a> Walk<'a> {
                     Val::Lit(Lit::Bool(false)) => (State::dead(), st),
                     Val::Name(c) => {
                         let (mut yes, mut no) = (st.clone(), st);
-                        // Adding a fact reads no condition; a state it kills has none.
-                        if let Some((t, f)) = no.conds.remove(c) {
+                        // Adding a fact writes no condition, so the sides
+                        // are read from a shared copy.
+                        let conds = yes.conds.clone();
+                        if let Some((t, f)) = conds.get(c) {
                             t.iter().for_each(|l| yes.add(l));
                             f.iter().for_each(|l| no.add(l));
-                            if !no.dead {
-                                no.conds.insert(*c, (t, f));
-                            }
                         }
                         (yes, no)
                     }
@@ -4876,7 +4875,7 @@ impl<'a> Walk<'a> {
         if t.is_empty() && f.is_empty() {
             return;
         }
-        let side = j.conds.entry(*c).or_default();
+        let side = j.conds.get_mut().entry(*c).or_default();
         side.0.extend(t);
         side.1.extend(f);
     }
@@ -5209,7 +5208,7 @@ impl<'a> Walk<'a> {
                 .filter(free)
                 .collect();
             if !ts.is_empty() {
-                st.elems.entry(n).or_default().extend(ts);
+                st.elems.get_mut().entry(n).or_default().extend(ts);
             }
         }
         let facts: Vec<Lin> = s
@@ -5982,7 +5981,7 @@ impl<'a> Walk<'a> {
         // facts of a written record whose fields a row set, and the counter
         // shapes an index needs.
         let mut cands: BTreeSet<Lin> = BTreeSet::new();
-        for f in &entry.facts {
+        for f in entry.facts.iter() {
             if f.terms
                 .iter()
                 .any(|(t, _)| t.name().is_some_and(|n| written.contains(&n)))
@@ -5990,7 +5989,7 @@ impl<'a> Walk<'a> {
                 cands.insert(f.clone());
             }
         }
-        for (t, v) in &entry.defs {
+        for (t, v) in entry.defs.iter() {
             let mentions = t.name().is_some_and(|n| written.contains(&n))
                 || v.terms
                     .iter()
@@ -6081,13 +6080,13 @@ impl<'a> Walk<'a> {
         // Each element template at entry is a candidate: an element store
         // writes no name, so the head would hold the template unchecked. A
         // turn keeps one where every end still holds it.
-        head.elems.clear();
+        head.elems = Default::default();
         let mut temps: Vec<(Name, Lin)> = (entry.elems.iter())
             .flat_map(|(a, ts)| ts.iter().map(move |t| (*a, t.clone())))
             .collect();
         let held = |h: &mut State, temps: &[(Name, Lin)]| {
             for (a, t) in temps {
-                h.elems.entry(*a).or_default().insert(t.clone());
+                h.elems.get_mut().entry(*a).or_default().insert(t.clone());
             }
         };
         let record = std::mem::replace(&mut self.record, false);

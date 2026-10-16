@@ -17,6 +17,8 @@
 use std::borrow::Cow;
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::ops::Deref;
+use std::rc::Rc;
 
 use vyrn_frontend::core::Name;
 
@@ -305,27 +307,107 @@ pub const EXACT: i64 = 1 << 62;
 /// The most values a join enumerates for one term ([`State::values`]).
 const VALUES: i64 = 16;
 
-/// What is known at one point of a body.
+/// A field that copies of a [`State`] share until one of them writes it: a
+/// copy bumps a count, and the first write copies the field. It has no
+/// `DerefMut`, so every write goes through [`Shared::get_mut`].
 #[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
+pub struct Shared<T>(Rc<T>);
+
+impl<T: Clone> Shared<T> {
+    /// The field to write, copied first if another state shares it.
+    pub fn get_mut(&mut self) -> &mut T {
+        Rc::make_mut(&mut self.0)
+    }
+}
+
+impl<T> Deref for Shared<T> {
+    type Target = T;
+    fn deref(&self) -> &T {
+        &self.0
+    }
+}
+
+// The writes below copy a shared field only when they change it.
+impl<T: Ord + Clone> Shared<BTreeSet<T>> {
+    pub fn insert(&mut self, t: T) {
+        if !self.contains(&t) {
+            self.get_mut().insert(t);
+        }
+    }
+
+    pub fn remove(&mut self, t: &T) {
+        if self.contains(t) {
+            self.get_mut().remove(t);
+        }
+    }
+
+    pub fn retain(&mut self, keep: impl Fn(&T) -> bool) {
+        if !self.iter().all(&keep) {
+            self.get_mut().retain(keep);
+        }
+    }
+}
+
+impl<K: Ord + Clone, V: Clone> Shared<BTreeMap<K, V>> {
+    pub fn insert(&mut self, k: K, v: V) {
+        self.get_mut().insert(k, v);
+    }
+
+    pub fn remove(&mut self, k: &K) {
+        if self.contains_key(k) {
+            self.get_mut().remove(k);
+        }
+    }
+
+    pub fn retain(&mut self, keep: impl Fn(&K, &V) -> bool) {
+        if !self.iter().all(|(k, v)| keep(k, v)) {
+            self.get_mut().retain(|k, v| keep(k, v));
+        }
+    }
+}
+
+/// What is known at one point of a body. A copy shares each field until it
+/// writes it ([`Shared`]).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct State {
     /// Each `>= 0`, normalized.
-    pub facts: BTreeSet<Lin>,
+    pub facts: Shared<BTreeSet<Lin>>,
     /// Each `!= 0`, normalized, in the form [`canon`] gives.
-    pub ne: BTreeSet<Lin>,
+    pub ne: Shared<BTreeSet<Lin>>,
     /// `term = Lin`; see the module doc for the invariant.
-    pub defs: BTreeMap<Term, Lin>,
+    pub defs: Shared<BTreeMap<Term, Lin>>,
     /// Per Bool name, the facts its truth gives and those its falsehood gives.
-    pub conds: BTreeMap<Name, (Vec<Fact>, Vec<Fact>)>,
+    pub conds: Shared<BTreeMap<Name, (Vec<Fact>, Vec<Fact>)>>,
     /// The borrows of a global still equal to it: their lengths are the
     /// global's (`elide::Walk::borrowed`).
-    pub fresh: BTreeSet<Name>,
+    pub fresh: Shared<BTreeSet<Name>>,
     /// Per array name, the templates every element meets: each a `Lin`
     /// `>= 0` with the array's own [`Term::Val`] for the element. A template
     /// is no fact: an empty array meets every template, so two of them could
     /// prove a false length. The walk instantiates one at an element read
     /// (`elide::Walk::element_read`), whose check shows the element exists.
-    pub elems: BTreeMap<Name, BTreeSet<Lin>>,
+    pub elems: Shared<BTreeMap<Name, BTreeSet<Lin>>>,
     pub dead: bool,
+}
+
+thread_local! {
+    /// The state every [`State::default`] shares, so a default state allocates
+    /// nothing until it is written.
+    static EMPTY: State = State {
+        facts: Shared::default(),
+        ne: Shared::default(),
+        defs: Shared::default(),
+        conds: Shared::default(),
+        fresh: Shared::default(),
+        elems: Shared::default(),
+        dead: false,
+    };
+}
+
+impl Default for State {
+    fn default() -> State {
+        EMPTY.with(State::clone)
+    }
 }
 
 impl State {
@@ -487,7 +569,7 @@ impl State {
                 out.push(t);
             }
         };
-        let lins = (self.facts.iter().chain(&self.ne))
+        let lins = (self.facts.iter().chain(self.ne.iter()))
             .chain(self.defs.values())
             .chain(
                 self.conds
@@ -528,19 +610,29 @@ impl State {
         self.conds.remove(&n);
         self.fresh.remove(&n);
         self.unbound(|t| t.mentions_name(n));
-        self.facts.retain(|f| !f.mentions_name(n));
-        self.ne.retain(|d| !d.mentions_name(n));
-        self.defs.retain(|_, v| !v.mentions_name(n));
+        self.drop_lins(|l| l.mentions_name(n));
         self.unsay(|l| l.mentions_name(n));
     }
 
     /// Drops each condition's facts that `stale` holds of: a side states the
     /// rest of what it stated, which still follows from its truth.
     fn unsay(&mut self, stale: impl Fn(&Lin) -> bool) {
-        for (a, b) in self.conds.values_mut() {
+        let said = |(a, b): &(Vec<Fact>, Vec<Fact>)| a.iter().chain(b).any(|f| stale(f.lin()));
+        if !self.conds.values().any(said) {
+            return;
+        }
+        for (a, b) in self.conds.get_mut().values_mut() {
             a.retain(|f| !stale(f.lin()));
             b.retain(|f| !stale(f.lin()));
         }
+    }
+
+    /// Drops each fact, disequality and definition whose sum `stale` holds
+    /// of.
+    fn drop_lins(&mut self, stale: impl Fn(&Lin) -> bool) {
+        self.facts.retain(|f| !stale(f));
+        self.ne.retain(|d| !stale(d));
+        self.defs.retain(|_, v| !stale(v));
     }
 
     /// Forgets `n` as [`State::kill`] does, keeping what the facts state
@@ -585,7 +677,7 @@ impl State {
             if !self.conds.iter().any(mentioned) {
                 continue;
             }
-            for (c, (yes, _)) in &self.conds {
+            for (c, (yes, _)) in self.conds.iter() {
                 for f in yes {
                     let Fact::Ge(l) = f else { continue };
                     let k = l.coef(t);
@@ -607,7 +699,7 @@ impl State {
             self.assume(s);
         }
         for (c, l) in said.into_iter().filter(|(_, l)| !l.mentions_name(n)) {
-            if let Some((yes, _)) = self.conds.get_mut(&c) {
+            if let Some((yes, _)) = self.conds.get_mut().get_mut(&c) {
                 yes.push(Fact::Ge(l));
             }
         }
@@ -619,9 +711,7 @@ impl State {
         self.unbound(|l| l.mentions(t));
         self.defs.remove(&t);
         self.restate(t);
-        self.facts.retain(|f| !f.mentions(t));
-        self.ne.retain(|d| !d.mentions(t));
-        self.defs.retain(|_, v| !v.mentions(t));
+        self.drop_lins(|l| l.mentions(t));
         self.unsay(|l| l.mentions(t));
     }
 
@@ -631,11 +721,11 @@ impl State {
     /// `k < 0` goes; a definition of or through the length becomes its two
     /// facts first.
     pub fn shift(&mut self, t: Term, lo: i64, hi: Option<i64>) {
-        let (through, defs) = std::mem::take(&mut self.defs)
+        let (through, defs): (BTreeMap<_, _>, _) = (std::mem::take(self.defs.get_mut()))
             .into_iter()
             .partition(|(d, v)| *d == t || v.coef(t) != 0);
-        self.defs = defs;
-        let mut facts = std::mem::take(&mut self.facts);
+        *self.defs.get_mut() = defs;
+        let mut facts = std::mem::take(self.facts.get_mut());
         for (d, v) in through {
             facts.extend(Lin::of(d).sub(&v));
             facts.extend(v.sub(&Lin::of(d)));
@@ -656,20 +746,23 @@ impl State {
                 self.assume(&f);
             }
         }
-        for ts in self.elems.values_mut() {
-            *ts = ts.iter().filter_map(moved).collect();
+        if !self.elems.is_empty() {
+            for ts in self.elems.get_mut().values_mut() {
+                *ts = ts.iter().filter_map(moved).collect();
+            }
         }
     }
 
     /// Drops each element template `stale` holds of.
     fn unbound(&mut self, stale: impl Fn(&Lin) -> bool) {
-        if self.elems.is_empty() {
+        if !self.elems.values().flatten().any(&stale) {
             return;
         }
-        for ts in self.elems.values_mut() {
+        let elems = self.elems.get_mut();
+        for ts in elems.values_mut() {
             ts.retain(|t| !stale(t));
         }
-        self.elems.retain(|_, ts| !ts.is_empty());
+        elems.retain(|_, ts| !ts.is_empty());
     }
 
     fn restate(&mut self, x: Term) {
@@ -689,31 +782,41 @@ impl State {
         let sub = |l: &Lin| l.subst(x, &by);
         let moved = |l: Lin| if l.mentions(x) { sub(&l) } else { Some(l) };
         // A length's axioms outlive the length: they bound the renamed value.
-        self.facts = std::mem::take(&mut self.facts)
-            .into_iter()
+        let facts = self.facts.get_mut();
+        *facts = (std::mem::take(facts).into_iter())
             .chain(axioms([x].into_iter()))
             .filter_map(moved)
             .collect();
-        self.ne = std::mem::take(&mut self.ne)
-            .into_iter()
-            .filter_map(|d| moved(d).and_then(canon))
-            .filter(|d| !d.is_const())
-            .collect();
-        for v in self.defs.values_mut().filter(|v| v.mentions(x)) {
-            if let Some(n) = sub(v) {
-                *v = n;
-            }
+        if self.ne.iter().any(|d| d.mentions(x)) {
+            let ne = self.ne.get_mut();
+            *ne = (std::mem::take(ne).into_iter())
+                .filter_map(|d| moved(d).and_then(canon))
+                .filter(|d| !d.is_const())
+                .collect();
         }
-        for (a, b) in self.conds.values_mut() {
-            for f in (a.iter_mut().chain(b.iter_mut())).filter(|f| f.lin().mentions(x)) {
-                if let Some(n) = f.map(sub) {
-                    *f = n;
+        if self.defs.values().any(|v| v.mentions(x)) {
+            for v in self.defs.get_mut().values_mut().filter(|v| v.mentions(x)) {
+                if let Some(n) = sub(v) {
+                    *v = n;
                 }
             }
         }
-        for ts in self.elems.values_mut() {
-            if ts.iter().any(|t| t.mentions(x)) {
-                *ts = ts.iter().filter_map(sub).collect();
+        let named =
+            |(a, b): &(Vec<Fact>, Vec<Fact>)| a.iter().chain(b).any(|f| f.lin().mentions(x));
+        if self.conds.values().any(named) {
+            for (a, b) in self.conds.get_mut().values_mut() {
+                for f in (a.iter_mut().chain(b.iter_mut())).filter(|f| f.lin().mentions(x)) {
+                    if let Some(n) = f.map(sub) {
+                        *f = n;
+                    }
+                }
+            }
+        }
+        if self.elems.values().flatten().any(|t| t.mentions(x)) {
+            for ts in self.elems.get_mut().values_mut() {
+                if ts.iter().any(|t| t.mentions(x)) {
+                    *ts = ts.iter().filter_map(sub).collect();
+                }
             }
         }
     }
@@ -733,7 +836,7 @@ impl State {
         lengths.sort_unstable();
         lengths.dedup();
         let mut best: HashMap<&[(Term, i64)], &Lin> = HashMap::new();
-        for p in &self.facts {
+        for p in self.facts.iter() {
             let e = best.entry(p.terms.as_slice()).or_insert(p);
             if p.c < e.c {
                 *e = p;
@@ -773,11 +876,12 @@ impl State {
                 (n, (t, f))
             })
             .collect();
-        out.conds.extend(
-            conds
-                .into_iter()
-                .filter(|(_, (t, f))| !t.is_empty() || !f.is_empty()),
-        );
+        for (n, side) in conds
+            .into_iter()
+            .filter(|(_, (t, f))| !t.is_empty() || !f.is_empty())
+        {
+            out.conds.insert(n, side);
+        }
         out
     }
 
@@ -788,11 +892,10 @@ impl State {
             return State::dead();
         };
         let mut out = State::default();
-        out.fresh = (first.fresh.iter())
-            .filter(|n| live.iter().all(|s| s.fresh.contains(n)))
-            .copied()
-            .collect();
-        for (n, ts) in &first.elems {
+        for n in (first.fresh.iter()).filter(|n| live.iter().all(|s| s.fresh.contains(n))) {
+            out.fresh.insert(*n);
+        }
+        for (n, ts) in first.elems.iter() {
             let all: BTreeSet<Lin> = (ts.iter())
                 .filter(|t| {
                     live.iter()
@@ -804,7 +907,7 @@ impl State {
                 out.elems.insert(*n, all);
             }
         }
-        for (t, v) in &first.defs {
+        for (t, v) in first.defs.iter() {
             if live.iter().all(|s| s.defs.get(t) == Some(v)) {
                 out.defs.insert(*t, v.clone());
             }
@@ -820,17 +923,18 @@ impl State {
                 out.assume(&c);
             }
         }
-        let ne: BTreeSet<&Lin> = live.iter().flat_map(|s| &s.ne).collect();
+        let ne: BTreeSet<&Lin> = live.iter().flat_map(|s| s.ne.iter()).collect();
         for d in ne {
             if provers.iter().all(|p| p.differs(d)) {
-                out.ne
-                    .extend(out.norm(d).map(Cow::into_owned).and_then(canon));
+                if let Some(d) = out.norm(d).map(Cow::into_owned).and_then(canon) {
+                    out.ne.insert(d);
+                }
             }
         }
         // A term some state defines as a constant takes one of the values
         // the states allow; a value between them no state allows is a
         // disequality: `w = 0` joined with `w = 2` keeps `w != 1`.
-        let consts: BTreeSet<Term> = (live.iter().flat_map(|s| &s.defs))
+        let consts: BTreeSet<Term> = (live.iter().flat_map(|s| s.defs.iter()))
             .filter(|(t, v)| v.is_const() && !out.defs.contains_key(t))
             .map(|(t, _)| *t)
             .collect();
@@ -865,7 +969,9 @@ impl State {
                 continue;
             }
             for v in (lo..hi).filter(|v| !all.contains(v)) {
-                out.ne.extend(Lin::of(t).plus(-v).and_then(canon));
+                if let Some(d) = Lin::of(t).plus(-v).and_then(canon) {
+                    out.ne.insert(d);
+                }
             }
         }
         out
