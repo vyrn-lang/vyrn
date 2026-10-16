@@ -121,10 +121,15 @@ The first of these wins: `--native-target`, `VYRN_NATIVE_TARGET`, the
 manifest's `"nativeTarget"`, the default. The setting is inert off x86-64.
 `VYRN_DEBUG_SYMBOLS=1` adds `-g`.
 
+`--wasm-opt`, before or after the command, rewrites the module with
+Binaryen's `wasm-opt -O3` before it is written as the output or handed to
+`wasm2c`. It applies to `build` on both targets, to `bench` and to the client
+`dev` builds. Without the flag the module is the emitter's, byte for byte.
+
 Tool discovery: clang through `$CLANG`, then `PATH`, then
-`C:\Program Files\LLVM\bin\clang.exe`. `wasm2c` and simde through
-`$VYRN_WASM2C` and `$VYRN_SIMDE`, then the `vyrn.lock` pin, then a `tools/`
-walk from the source and from the compiler.
+`C:\Program Files\LLVM\bin\clang.exe`. `wasm2c`, simde and `wasm-opt`
+through `$VYRN_WASM2C`, `$VYRN_SIMDE` and `$VYRN_WASM_OPT`, then the
+`vyrn.lock` pin, then a `tools/` walk from the source and from the compiler.
 
 ### `vyrn test [file] [--name <substring>]`
 
