@@ -312,6 +312,18 @@ core did not state". The emitter places no release and derives no type: a
 `St::Drop` becomes a call, and an expression's type comes from the checker's
 record (`core::node_ty`).
 
+The declared functions are emitted on every thread, and the module is the same
+on any thread count. A body never touches the module. What it asks of the
+module goes into its `Log`: a function index for an instance, a dispatcher or
+a shape, a data address, a counted site, a stored-closure tag. Its code holds
+a placeholder for each (an index from `LOCAL` up, or a `Frame::hole`).
+`merge` replays the logs in source order against the module and the
+registries and fills the placeholders, so the module is the one a walk in
+source order writes. A body that asked the registries a question an entry
+added since would answer otherwise (`Query`) is emitted again in place. The
+drain, the initializer and the derived bodies take the same path, one at a
+time.
+
 The emitter carries no optimizer. Optimization belongs to whatever runs the
 wasm. The emitter's job is to make that possible: a field read is one scalar
 load at a computed offset, never a copy of the aggregate
@@ -510,8 +522,8 @@ Rust style).
 |---|---|
 | `VYRN_NO_KERNEL=1` | stands the kernel aside, to attribute a refusal |
 | `VYRN_KERNEL_TRACE=1` | prints each release the placer adds or cannot place |
-| `VYRN_THREADS=<n>` | types, walks, builds and places bodies on `n` threads; `1` keeps a trace in body order |
-| `VYRN_SHUFFLE=<seed>` | permutes the order the checker's, the lowering's and the placer's threads take bodies in |
+| `VYRN_THREADS=<n>` | types, walks, builds, places and emits bodies on `n` threads; `1` keeps a trace in body order |
+| `VYRN_SHUFFLE=<seed>` | permutes the order the checker's, the lowering's, the placer's and the emitter's threads take bodies in |
 | `VYRN_LEAK_CHECK=1` | builds with the free audit |
 | `VYRN_FUEL=<file>` | meters `vyrn run` and appends the fuel `_start` spent, tab-separated from the program's name |
 | `VYRN_WASM_NAMES=1` | writes function names into the module |

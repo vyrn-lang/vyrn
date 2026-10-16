@@ -172,6 +172,38 @@ pub mod observe {
     pub(crate) fn on() -> bool {
         ON.with(|o| o.get())
     }
+
+    /// Records on this thread as the thread that started a parallel pass does: `on` is its
+    /// [`on`].
+    pub(crate) fn follow(on: bool) {
+        ON.with(|o| o.set(on));
+    }
+
+    /// The crossings and typings one body recorded, which its merge hands back in body order.
+    #[derive(Default)]
+    pub(crate) struct Rows(Vec<Crossing>, Vec<Typing>);
+
+    /// How many crossings and typings this thread holds, for [`since`].
+    pub(crate) fn mark() -> (usize, usize) {
+        (
+            CROSSINGS.with(|r| r.borrow().len()),
+            TYPINGS.with(|r| r.borrow().len()),
+        )
+    }
+
+    /// Takes the rows this thread recorded after `at`, a [`mark`].
+    pub(crate) fn since(at: (usize, usize)) -> Rows {
+        Rows(
+            CROSSINGS.with(|r| r.borrow_mut().split_off(at.0)),
+            TYPINGS.with(|r| r.borrow_mut().split_off(at.1)),
+        )
+    }
+
+    /// Appends rows [`since`] took, on the thread that reads them.
+    pub(crate) fn absorb(rows: Rows) {
+        CROSSINGS.with(|r| r.borrow_mut().extend(rows.0));
+        TYPINGS.with(|r| r.borrow_mut().extend(rows.1));
+    }
 }
 
 /// Every `wasi_snapshot_preview1` call a module imports, with its witx signature, in import

@@ -1,6 +1,6 @@
-//! Holds every output of the checker and the placer independent of how many
-//! threads type, build and place bodies, and of the order they take them in
-//! (`VYRN_THREADS`, `VYRN_SHUFFLE`). Each root is checked, reported by `vyrn
+//! Holds every output of the checker, the placer and the emitter independent of
+//! how many threads type, build, place and emit bodies, and of the order they
+//! take them in (`VYRN_THREADS`, `VYRN_SHUFFLE`). Each root is checked, reported by `vyrn
 //! why --cost`, printed by `vyrn emit-lowered` and built to wasm, and every
 //! byte must equal the one-thread run's: the typing refusals, the cost rows,
 //! the placed releases and the facts the emitter reads.

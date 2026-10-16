@@ -1,8 +1,8 @@
 //! Runs one pass's per-body work on every thread, with output independent of
 //! the thread count and the work order. [`in_parallel`] is the one scheduler;
-//! the checker's typing and the placer's builds call it.
+//! the checker's typing, the placer's builds and the emitter's bodies call it.
 
-/// How many threads type, build and place bodies: `VYRN_THREADS`, else the
+/// How many threads type, build, place and emit bodies: `VYRN_THREADS`, else the
 /// machine's available parallelism. One works on the calling thread, as a
 /// target without threads (wasm32) does, and keeps `VYRN_KERNEL_TRACE` in
 /// body order.
