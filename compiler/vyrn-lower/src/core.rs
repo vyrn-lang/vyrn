@@ -482,24 +482,28 @@ fn gaps_rhs(body: &Body, r: &Rhs, out: &mut Vec<String>) {
 /// its plan and its function table. The first build records candidates and
 /// takes nothing; where [`last_owner`] names any, a second build takes them.
 pub fn build(program: &Program, world: &crate::World, inst: &Instance<'_>) -> Result<Body, Gap> {
+    let own = &world.ownership;
     build_in(
         program,
         inst,
-        &world.ownership,
+        own,
+        &own.proto,
         &world.fns,
         &mut Default::default(),
     )
 }
 
-/// [`build`] with the caller's function table and memo of `own`'s name facts.
+/// [`build`] with the caller's function table and name memo, and the table
+/// `proto` it decides with: `own.proto`, or its [`Owned::as_written`].
 pub(crate) fn build_in(
     program: &Program,
     inst: &Instance<'_>,
     own: &Ownership,
+    proto: &Owned,
     fns: &Fns,
     names: &mut NameMemo,
 ) -> Result<Body, Gap> {
-    build_from(program, own, fns, names, &Source::Instance(inst))
+    build_from(program, own, proto, fns, names, &Source::Instance(inst))
 }
 
 /// A projection of [`Lowered::places`] with its body, built.
@@ -525,7 +529,7 @@ pub(crate) fn build_places<'l, 'a>(
                 facts: p.facts.clone(),
                 releases: Vec::new(),
             };
-            let mut body = build_in(program, &inst, own, fns, &mut names);
+            let mut body = build_in(program, &inst, own, &own.proto, fns, &mut names);
             if let Ok(b) = &mut body {
                 fns.number(b);
             }
@@ -571,13 +575,14 @@ impl Source<'_, '_> {
 fn build_from<'a>(
     program: &'a Program,
     own: &'a Ownership,
+    proto: &'a Owned,
     fns: &'a Fns,
     names: &mut NameMemo,
     source: &Source<'_, 'a>,
 ) -> Result<Body, Gap> {
     let none = std::collections::HashSet::new();
     let b1 = vyrn_frontend::prof::phase("placer: build: first");
-    let first = seeded(program, own, fns, names, source, &none)?;
+    let first = seeded(program, own, proto, fns, names, source, &none)?;
     drop(b1);
     if !source.two_pass() {
         return Ok(first);
@@ -587,7 +592,7 @@ fn build_from<'a>(
         return Ok(first);
     }
     let _b2 = vyrn_frontend::prof::phase("placer: build: seeded");
-    seeded(program, own, fns, names, source, &seed)
+    seeded(program, own, proto, fns, names, source, &seed)
 }
 
 /// The refusals the typed judgment states over the checker's answers at the
@@ -1112,12 +1117,13 @@ fn stored_slot(
 fn seeded<'a>(
     program: &'a Program,
     own: &'a Ownership,
+    proto: &'a Owned,
     fns: &'a Fns,
     names: &mut NameMemo,
     source: &Source<'_, 'a>,
     seed: &std::collections::HashSet<NodeId>,
 ) -> Result<Body, Gap> {
-    let mut b = Builder::new(program, own, fns, names, source, seed);
+    let mut b = Builder::new(program, own, proto, fns, names, source, seed);
     let mut out = Vec::new();
     match source {
         Source::Instance(inst) => {
@@ -1244,6 +1250,7 @@ pub(crate) fn module_state_in<'a>(
     build_from(
         program,
         own,
+        &own.proto,
         fns,
         &mut NameMemo::default(),
         &Source::Globals(facts),
@@ -1274,7 +1281,7 @@ pub(crate) fn outside_in<'a>(
     names: &mut NameMemo,
     ob: &OutsideBody<'a>,
 ) -> Result<Body, Gap> {
-    build_from(program, own, fns, names, &Source::Block(ob))
+    build_from(program, own, &own.proto, fns, names, &Source::Block(ob))
 }
 
 /// A `for` whose every element leaves through the loop variable
@@ -1411,6 +1418,7 @@ impl<'a> Builder<'a> {
     fn new(
         program: &'a Program,
         own: &'a Ownership,
+        proto: &'a Owned,
         fns: &'a Fns,
         names: &'a mut NameMemo,
         source: &Source<'a, 'a>,
@@ -1476,7 +1484,7 @@ impl<'a> Builder<'a> {
             program,
             own,
             fns,
-            proto: &own.proto,
+            proto,
             names,
             bounds,
             types: &all.types,
@@ -2101,7 +2109,7 @@ impl<'a> Builder<'a> {
             .filter(|(_, t)| self.owns(t))
             .map(|(f, _)| f.clone())
             .collect();
-        if !vyrn_frontend::declared::skippable(&self.own.proto, &from, &taken) {
+        if !vyrn_frontend::declared::skippable(self.proto, &from, &taken) {
             return gap(
                 "a record with a declared release crossing into another record type",
                 line,
@@ -4719,7 +4727,7 @@ impl<'a> Builder<'a> {
                         let at = format!("{variant}.{i}");
                         self.body.names[n.index()].payload = Some(
                             if vyrn_frontend::declared::skippable(
-                                &self.own.proto,
+                                self.proto,
                                 sty,
                                 std::slice::from_ref(&at),
                             ) {
@@ -5567,7 +5575,7 @@ impl<'a> Builder<'a> {
                 let rel = path.trim_start_matches('.').to_string();
                 if !rel.is_empty()
                     && vyrn_frontend::declared::skippable(
-                        &self.own.proto,
+                        self.proto,
                         &bty,
                         std::slice::from_ref(&rel),
                     )
@@ -8196,12 +8204,9 @@ pub fn augment(program: &Program, w: &mut World, judging: bool) {
     // Every generic function is built once more with its parameters as
     // written, the way the checker typed it, for the judgment alone. It
     // places no row and is never emitted.
-    let written = Ownership {
-        proto: own.proto.as_written(),
-        ..own.clone()
-    };
+    let written = own.proto.as_written();
     for inst in crate::as_written(program, own) {
-        match build_in(program, &inst, &written, &w.fns, &mut names) {
+        match build_in(program, &inst, own, &written, &w.fns, &mut names) {
             Ok(top) => {
                 typed(program, own, &mut r, &top, &inst.func.module, true);
                 for body in top.frames() {
@@ -8236,7 +8241,7 @@ pub fn augment(program: &Program, w: &mut World, judging: bool) {
             binds: None,
             e: &g.init,
         };
-        match build_from(program, own, &w.fns, &mut names, &source) {
+        match build_from(program, own, &own.proto, &w.fns, &mut names, &source) {
             Ok(top) => {
                 let at = program.source_id(SourceBody::Global(i));
                 crate::world::add_callees(&top, &by_name, calls.entry(at).or_default());
@@ -8262,7 +8267,7 @@ pub fn augment(program: &Program, w: &mut World, judging: bool) {
             binds: Some(&binds),
             e: p,
         };
-        match build_from(program, own, &w.fns, &mut names, &source) {
+        match build_from(program, own, &own.proto, &w.fns, &mut names, &source) {
             Ok(top) => {
                 let at = program.source_id(SourceBody::TypeDecl(i));
                 crate::world::add_callees(&top, &by_name, calls.entry(at).or_default());
@@ -8353,7 +8358,9 @@ pub fn augment(program: &Program, w: &mut World, judging: bool) {
                     return None;
                 }
                 match j {
-                    Job::Inst(inst) => build_in(program, inst, shared, fns, names).ok(),
+                    Job::Inst(inst) => {
+                        build_in(program, inst, shared, &shared.proto, fns, names).ok()
+                    }
                     Job::Outside(ob) => outside_in(program, shared, fns, names, ob).ok(),
                 }
             },
@@ -8391,7 +8398,7 @@ pub fn augment(program: &Program, w: &mut World, judging: bool) {
                 continue;
             }
             w.fns.instance(inst);
-            if let Ok(mut top) = build_in(program, inst, own, &w.fns, &mut names) {
+            if let Ok(mut top) = build_in(program, inst, own, &own.proto, &w.fns, &mut names) {
                 w.fns.number(&mut top);
                 crate::world::add_callees(&top, &by_name, calls.entry(inst.func_id).or_default());
                 let mut rows = Added::new();
@@ -8414,7 +8421,7 @@ pub fn augment(program: &Program, w: &mut World, judging: bool) {
             if !folds {
                 continue;
             }
-            let Ok(mut top) = build_in(program, inst, own, &w.fns, &mut names) else {
+            let Ok(mut top) = build_in(program, inst, own, &own.proto, &w.fns, &mut names) else {
                 continue;
             };
             fold_frames(
@@ -8503,7 +8510,7 @@ impl Job<'_, '_> {
             Job::Inst(inst) => {
                 let _p = vyrn_frontend::prof::phase("placer: core::build");
                 let inst = crate::walked(program, &own.record, inst);
-                build_in(program, &inst, own, fns, names)
+                build_in(program, &inst, own, &own.proto, fns, names)
             }
             Job::Outside(ob) => {
                 let _p = vyrn_frontend::prof::phase("placer: build_outside");
