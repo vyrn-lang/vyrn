@@ -1419,26 +1419,31 @@ fn merge<'p>(m: &mut Module, cx: &Cx<'p>, e: Emitted<'p>) -> Option<Result<Frame
             }) as u32
         })
         .collect();
-    let values: Vec<Instruction<'static>> = (e.log.consts.into_iter())
-        .map(|c| match c {
-            Const::Data(bytes, align, plus) => {
-                Instruction::I32Const((m.data(&bytes, align) + plus) as i32)
-            }
-            Const::Reserve(size, align) => Instruction::I32Const(m.reserve(size, align) as i32),
-            Const::Site(key, true) => Instruction::I32Const(reg.sites.fresh(key) as i32),
-            Const::Site(key, false) => Instruction::I32Const(reg.sites.id(key) as i32),
-            Const::Tag(at) => Instruction::I64Const(match at.checked_sub(e.seen.fnvals as u32) {
-                Some(k) => tags[k as usize],
-                None => at,
-            } as i64),
-        })
-        .collect();
+    let values = (e.log.consts.into_iter()).map(|c| match c {
+        Const::Data(bytes, align, plus) => {
+            Instruction::I32Const((m.data(&bytes, align) + plus) as i32)
+        }
+        Const::Reserve(size, align) => Instruction::I32Const(m.reserve(size, align) as i32),
+        Const::Site(key, true) => Instruction::I32Const(reg.sites.fresh(key) as i32),
+        Const::Site(key, false) => Instruction::I32Const(reg.sites.id(key) as i32),
+        Const::Tag(at) => Instruction::I64Const(match at.checked_sub(e.seen.fnvals as u32) {
+            Some(k) => tags[k as usize],
+            None => at,
+        } as i64),
+    });
     crate::observe::absorb(e.rows);
-    Some(e.frame.map(|mut f| {
-        f.remap_calls(|c| real(&funcs, c));
-        f.fill_holes(|id| values[id as usize].clone());
-        f
-    }))
+    // Every constant takes its place in the module, whether the body's code holds it or not.
+    Some(match e.frame {
+        Ok(mut f) => {
+            f.remap_calls(|c| real(&funcs, c));
+            f.fill_holes(values);
+            Ok(f)
+        }
+        Err(err) => {
+            values.for_each(drop);
+            Err(err)
+        }
+    })
 }
 
 /// Emits one body against `cx` and applies it to `m`.
