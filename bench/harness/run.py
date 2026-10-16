@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """The cross-language benchmark runner.
 
-Five contestants per program: C, Rust, JavaScript (node), Vyrn native, Vyrn
-wasm. The runner builds every one of them, proves they all print the same
+Six contestants per program: C, Rust, JavaScript under node and under bun,
+Vyrn native, Vyrn wasm. The runner builds every one of them, proves they all print the same
 bytes, and only then times anything.
 
     python run.py                      # build, verify, time, write the record
@@ -27,13 +27,14 @@ methodology:
 
   - **cpu secs** — user plus kernel time of the child process, from
     `GetProcessTimes` on Windows and `getrusage(RUSAGE_CHILDREN)` elsewhere.
-    Every contestant here is single-threaded, so cpu under wall is idle time
-    and cpu over wall would be parallelism; neither is hidden.
+    Every program here is single-threaded, so cpu under wall is idle time
+    and cpu over wall is the runtime's own threads, as node and bun show;
+    neither is hidden.
   - **mem** — peak working set of the child, from
     `GetProcessMemoryInfo(PeakWorkingSetSize)` on Windows and `ru_maxrss`
     elsewhere; the largest of the timed runs, because a peak is a peak.
   - **make secs** — wall time to build that contestant's timed artifact, once
-    per program. Zero for node, which has no build step.
+    per program. Zero for node and bun, which have no build step.
   - **gz** — the gzipped size of the single source file, which is the game's
     own stand-in for how much program it took. The two Vyrn legs share one
     source and therefore one figure.
@@ -47,7 +48,7 @@ methodology:
   fixture, which is what proves the rewrite changed nothing but N.
 
 * **Everything is verified before anything is timed.** Each contestant is
-  checked against the committed fixture at the fixture N, and then all five
+  checked against the committed fixture at the fixture N, and then all of them
   are checked against EACH OTHER at the timing N. Line endings are normalized
   first: a native Windows build writes `\\r\\n` where the interpreter, wasm,
   Rust and node write `\\n`.
@@ -84,7 +85,11 @@ RESULTS = BENCHDIR / "results"
 # `vyrn-native` is the native route: the same wasm the `vyrn-wasm` leg runs,
 # through wasm2c and clang. It needs wabt and simde, which `vyrn build` finds
 # through the pin or under `tools/`.
-CONTESTANTS = ["c", "rust", "js", "vyrn-native", "vyrn-wasm"]
+CONTESTANTS = ["c", "rust", "js", "bun", "vyrn-native", "vyrn-wasm"]
+
+# The two JavaScript contestants run the same `js/<name>.js`; the key names the
+# runtime. `js` stays node's key, because the committed records use it.
+JS_RUNTIMES = {"js": "node", "bun": "bun"}
 
 # The flags, stated rather than implied.
 #
@@ -324,6 +329,7 @@ def environment() -> dict:
         "clang": tool_version(["clang", "--version"]),
         "rustc": tool_version(["rustc", "-V"]),
         "node": tool_version(["node", "-v"]),
+        "bun": tool_version(["bun", "--version"]),
         "python": sys.version.split()[0],
         "vyrn": {
             "commit": commit,
@@ -339,6 +345,7 @@ def environment() -> dict:
             "c": "clang " + " ".join(CFLAGS),
             "rust": "rustc " + " ".join(RUSTFLAGS),
             "js": "node (no build step)",
+            "bun": "bun (no build step)",
             "vyrn-native": "vyrn build (the module through wasm2c, clang -O2 -ffp-contract=off with wasm-rt)",
             "vyrn-wasm": "vyrn build --target wasm (the emitter's module, no optimizer) + wasmtime run",
         },
@@ -385,7 +392,7 @@ def source_of(contestant: str, prog: Program) -> Path:
         return HARNESS / "c" / f"{prog.name}.c"
     if contestant == "rust":
         return HARNESS / "rust" / f"{prog.name}.rs"
-    if contestant == "js":
+    if contestant in JS_RUNTIMES:
         return HARNESS / "js" / f"{prog.name}.js"
     return EXAMPLES / f"{prog.name}.vyrn"
 
@@ -431,8 +438,9 @@ def build_all(progs: list[Program], want: list[str]):
                 ["rustc", *RUSTFLAGS, "-o", exe(f"rust-{p.name}"), HARNESS / "rust" / f"{p.name}.rs"],
                 cwd=BUILD,
             )
-        if "js" in want:
-            MAKE[(p.name, "js")] = 0.0  # node has no build step, and 0 says so
+        for c in JS_RUNTIMES:
+            if c in want:
+                MAKE[(p.name, c)] = 0.0  # no build step, and 0 says so
         # The Vyrn legs. A program whose N is a `let` gets two builds: the
         # committed source (which already carries the fixture N) and a stamped
         # copy at the timing N. A program that reads stdin gets one.
@@ -458,7 +466,7 @@ def build_all(progs: list[Program], want: list[str]):
 def command(contestant: str, prog: Program, n: int, tag: str) -> list:
     """How to invoke one contestant at size `n`.
 
-    C, Rust and node take N on the command line; the Vyrn legs cannot, so they
+    C, Rust and the JavaScript runtimes take N on the command line; the Vyrn legs cannot, so they
     take it from the build `tag` — the source was stamped with it.
     """
     argv = [] if prog.n_let is None else [str(n)]
@@ -466,8 +474,8 @@ def command(contestant: str, prog: Program, n: int, tag: str) -> list:
         return [exe(f"c-{prog.name}"), *argv]
     if contestant == "rust":
         return [exe(f"rust-{prog.name}"), *argv]
-    if contestant == "js":
-        return ["node", HARNESS / "js" / f"{prog.name}.js", *argv]
+    if contestant in JS_RUNTIMES:
+        return [JS_RUNTIMES[contestant], HARNESS / "js" / f"{prog.name}.js", *argv]
     if contestant == "vyrn-native":
         return [exe(f"vyrn-{prog.name}-{tag}")]
     if contestant == "vyrn-wasm":
@@ -535,7 +543,7 @@ def verify(progs: list[Program], want: list[str]) -> dict:
             if got != expected:
                 die(f"{p.name}: the stamped copy at N={p.fixture_n} does not print {p.fixture}\n{diff(expected, got)}")
 
-        # And all five against each other at the size that will be timed.
+        # And all of them against each other at the size that will be timed.
         timing_stdin = fasta_input(p.stdin_fasta_n) if p.stdin_fasta_n else None
         outs = {c: norm(capture(command(c, p, p.timing_n, "timing"), timing_stdin)) for c in want}
         first = want[0]
@@ -679,8 +687,9 @@ def floor(want: list[str], runs: int) -> dict:
         if "rust" in want:
             sh(["rustc", *RUSTFLAGS, "-o", tmp / "e-rs.exe", tmp / "e.rs"], cwd=tmp)
             cmds["rust"] = [tmp / "e-rs.exe"]
-        if "js" in want:
-            cmds["js"] = ["node", tmp / "e.js"]
+        for c, runtime in JS_RUNTIMES.items():
+            if c in want:
+                cmds[c] = [runtime, tmp / "e.js"]
         if "vyrn-native" in want:
             sh([vyrn_exe(), "build", tmp / "e.vyrn", "-o", tmp / "e-v.exe"])
             cmds["vyrn-native"] = [tmp / "e-v.exe"]
@@ -748,7 +757,7 @@ def main() -> int:
     started = time.time()
     print("toolchain")
     env = environment()
-    for k in ("clang", "rustc", "node"):
+    for k in ("clang", "rustc", "node", "bun"):
         print(f"  {k}: {env[k]}")
     print(f"  vyrn: {env['vyrn']['version']} @ {env['vyrn']['commit'][:12]}"
           f"{'' if env['vyrn']['worktree_clean'] else ' (dirty worktree)'}")
@@ -790,7 +799,7 @@ def main() -> int:
             "median_s": "wall clock of the whole process, median of the runs",
             "cpu_median_s": "user plus kernel time of the child, median of the runs",
             "peak_bytes": "peak working set of the child, the largest of the runs",
-            "make_s": "wall clock of the one command that builds the timed artifact, 0 for node",
+            "make_s": "wall clock of the one command that builds the timed artifact, 0 for node and bun",
             "gz_bytes": "the contestant's single source file, gzipped at level 9",
         },
         "environment": env,
