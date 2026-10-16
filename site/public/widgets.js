@@ -1,7 +1,7 @@
 import { $$ } from "./dom.js";
 import { announce, bindInlineCopy, copyButtons, copyPageButtons, markCopyable } from "./copy.js";
 import { tabsWidget } from "./tabs.js";
-import { radarWidget } from "./radar.js";
+import { closeLanes, lanesWidget } from "./lanes.js";
 import { moduleSearch } from "./search.js";
 import { bindFind } from "./find.js";
 import { graphWidget } from "./graph.js";
@@ -62,7 +62,7 @@ function boot() {
   railSpy();
   for (const el of $$('[data-widget="demo"]')) demoWidget(el);
   for (const el of $$("[data-tabs]")) tabsWidget(el);
-  for (const el of $$('[data-widget="radar"]')) radarWidget(el);
+  for (const el of $$(".lanebox")) lanesWidget(el);
   for (const el of $$(".picker")) guessOs(el);
   moduleSearch();
   const playgrounds = $$('[data-widget="play"]');
@@ -81,6 +81,7 @@ addEventListener("click", (e) => {
 });
 addEventListener("keydown", (e) => {
   if (e.key !== "Escape") return;
+  closeLanes();
   for (const m of $$(".pagemenu[open]")) m.open = false;
 });
 

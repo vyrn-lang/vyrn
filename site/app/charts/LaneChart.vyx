@@ -1,0 +1,24 @@
+<script>
+import { Lane } from "../bench"
+
+props { lanes: Array<Lane>, label: String, tail: Bool }
+
+fn laneClass(tone: String) -> String {
+    return "lane " + tone
+}
+</script>
+
+<template>
+<div class="lanechart">
+    <p class="lanekey" aria-hidden="true"><span></span><span><span class="build">build</span> <span class="start">startup</span> <span class="run">run at p50</span> <span class="tail" v-if="tail">to p99</span></span><span>peak mem</span></p>
+    <p class="readout" aria-hidden="true"><b>{{ lanes[0].name }}</b><Groups :groups="lanes[0].groups"/></p>
+    <ol class="lanes" :aria-label="label">
+        <li v-for="l in lanes" :key="l.key" :class="laneClass(l.tone)" :style="l.style" tabindex="0" :aria-label="l.say">
+            <a class="lname" :href="l.href" rel="noreferrer">{{ l.name }}</a>
+            <span class="ltrack"><span class="lbar"><span class="build"></span><span class="start"></span><span class="run"><b>{{ l.runText }}</b></span><span class="tail"></span></span><span class="ltotal">{{ l.total }}</span></span>
+            <span class="lmem">{{ l.mem }}</span>
+            <Groups :groups="l.groups"/>
+        </li>
+    </ol>
+</div>
+</template>

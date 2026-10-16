@@ -1,0 +1,19 @@
+<script>
+import { Spark } from "../bench"
+
+props { spark: Spark }
+</script>
+
+<template>
+<span class="spark" role="group" :aria-label="spark.say">
+    <span>{{ spark.first }}</span>
+    <span class="splot">
+        <svg viewBox="0 0 1200 240" aria-hidden="true">
+            <polyline v-for="t in spark.traces" :key="t.key" :class="t.tone" :points="t.points"/>
+            <g><circle v-for="t in spark.traces" :key="t.key" :class="t.tone" :cx="t.x" :cy="t.y" r="28"/></g>
+        </svg>
+        <span class="pts"><span class="pt" v-for="pt in spark.pts" :key="pt.key" tabindex="0" :aria-label="pt.say"><b class="lname">{{ pt.name }}</b><Groups :groups="pt.groups"/></span></span>
+    </span>
+    <span>{{ spark.last }}</span>
+</span>
+</template>

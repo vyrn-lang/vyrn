@@ -3,42 +3,55 @@ import { indexOf, substring, trim, split, joinWith, padStart } from "std/strings
 import { contains } from "std/strpred"
 import { sortBy } from "std/arrays"
 import { parseFloat64 } from "std/num"
-import { sin, cos } from "std/math"
 import { ghBlob } from "./github"
 
 /// Times in integer microseconds; -1 marks a field the reader could not cut.
 export type Measure = {
     program: String,
     contestant: String,
-    us: Int64,
+    p50Us: Int64,
+    p99Us: Int64,
+    startUs: Int64,
     cpuUs: Int64,
     peakBytes: Int64,
     makeUs: Int64,
+    makePeakBytes: Int64,
     gzBytes: Int64,
+    artifactBytes: Int64,
 }
 
 export type Prog = { key: String, name: String, n: String, note: String, game: String }
 
 export type Series = { key: String, name: String, tone: String }
 
-export type Ring = { id: String, points: String, label: String, y: String, tone: String }
+/// A named group of a readout's numbers. A row is a label, a value and the lane segment the value belongs to, or "" for none.
+export type NumGroup = { name: String, rows: Array<Array<String>> }
 
-export type Spoke = { key: String, name: String, x: String, y: String, lx: String, ly: String, anchor: String, wedge: String }
+/// One engine's time to an answer. `style` sets the bar's share of the track and each segment's share of the bar; `runText` is written inside the run segment. The readout, the expanded list and `say` print `groups`.
+export type Lane = { key: String, name: String, tone: String, href: String, style: String, runText: String, total: String, mem: String, say: String, groups: Array<NumGroup> }
 
-export type Line = { key: String, name: String, tone: String, points: String, marks: Array<Mark> }
+/// A record on a sparkline: `groups` read like a lane's.
+export type SparkStep = { key: String, name: String, say: String, groups: Array<NumGroup> }
 
-export type Mark = { id: String, d: String, title: String }
+/// One series of a sparkline with at least one point: `points` for a polyline, and the last point's `x` and `y` for its dot. The view box is 1200 by 240.
+export type Trace = { key: String, tone: String, points: String, x: String, y: String }
 
-export type Reading = { key: String, name: String, tone: String, cpu: String, mem: String, gz: String, make: String, ms: String, vsC: String, vsRust: String, pct: String, over: Bool }
+/// Vyrn's p50 for one program in every committed record, one step per record, on one scale from zero. `first` and `last` are Vyrn native's first and latest p50.
+export type Spark = { first: String, last: String, say: String, traces: Array<Trace>, pts: Array<SparkStep> }
 
-export type Panel = { key: String, name: String, n: String, cause: String, label: String, verdict: String, game: String, cells: Array<Reading> }
+/// `lanes` run fastest first; the readout shows the first until a reader points at another.
+export type Panel = { key: String, name: String, n: String, cause: String, label: String, verdict: String, game: String, lanes: Array<Lane>, spark: Spark }
 
 export fn run1File() -> String {
-    return "bench/results/2026-10-16-run3.json"
+    return "bench/results/2026-10-17.json"
 }
 
 export fn run1Href() -> String {
     return ghBlob(run1File())
+}
+
+fn historyFile() -> String {
+    return "bench/results/history.json"
 }
 
 fn after(src: String, needle: String) -> String {
@@ -211,7 +224,7 @@ fn gameHref(slug: String) -> String {
     return "https://benchmarksgame-team.pages.debian.net/benchmarksgame/performance/" + slug + ".html"
 }
 
-export fn contestants() -> Array<Series> {
+fn contestants() -> Array<Series> {
     return [
         Series { key: "c", name: "C", tone: "sr-c" },
         Series { key: "rust", name: "Rust", tone: "sr-rust" },
@@ -229,7 +242,9 @@ fn loadCells() {
     if cells.length > 0 {
         return
     }
-    let results = objectAt(recordText(run1File()), "  ", "results")
+    let src = recordText(run1File())
+    let results = objectAt(src, "  ", "results")
+    let boot = objectAt(src, "  ", "startup")
     for p in progNames() {
         let box = objectAt(objectAt(results, "    ", p[0]), "      ", "contestants")
         for s in contestants() {
@@ -237,11 +252,15 @@ fn loadCells() {
             cells.push(Measure {
                 program: p[0].copy(),
                 contestant: s.key.copy(),
-                us: microsOf(scalarAt(cell, "          ", "median_s")),
+                p50Us: microsOf(scalarAt(cell, "          ", "p50_s")),
+                p99Us: microsOf(scalarAt(cell, "          ", "p99_s")),
+                startUs: microsOf(scalarAt(objectAt(boot, "    ", s.key), "      ", "p50_s")),
                 cpuUs: microsOf(scalarAt(cell, "          ", "cpu_median_s")),
                 peakBytes: wholeOf(scalarAt(cell, "          ", "peak_bytes")),
                 makeUs: microsOf(scalarAt(cell, "          ", "make_s")),
+                makePeakBytes: wholeOf(scalarAt(cell, "          ", "make_peak_bytes")),
                 gzBytes: wholeOf(scalarAt(cell, "          ", "gz_bytes")),
+                artifactBytes: wholeOf(scalarAt(cell, "          ", "artifact_bytes")),
             })
         }
     }
@@ -257,16 +276,20 @@ fn cellOf(program: String, contestant: String) -> Measure {
     return Measure {
         program: program.copy(),
         contestant: contestant.copy(),
-        us: 0 - 1,
+        p50Us: 0 - 1,
+        p99Us: 0 - 1,
+        startUs: 0 - 1,
         cpuUs: 0 - 1,
         peakBytes: 0 - 1,
         makeUs: 0 - 1,
+        makePeakBytes: 0 - 1,
         gzBytes: 0 - 1,
+        artifactBytes: 0 - 1,
     }
 }
 
-fn medianUs(program: String, contestant: String) -> Int64 {
-    return cellOf(program, contestant).us
+fn p50Of(program: String, contestant: String) -> Int64 {
+    return cellOf(program, contestant).p50Us
 }
 
 fn tenthsText(t: Int64) -> String {
@@ -305,30 +328,24 @@ fn secsOf(us: Int64) -> String {
     return hundredthsText(cs)
 }
 
-fn makeOf(us: Int64) -> String {
-    if us == 0 {
-        return "\u{2014}"
-    }
-    return secsOf(us)
-}
-
 fn memOf(bytes: Int64) -> String {
     if bytes <= 0 {
         return "\u{2014}"
-    }
-    let kb = (bytes + 512) / 1024
-    if kb < 10240 {
-        return grouped(kb.toString()) + " KB"
     }
     let tenths = (bytes * 10 + 524288) / 1048576
     return grouped((tenths / 10).toString()) + "." + (tenths % 10).toString() + " MB"
 }
 
-fn bytesOf(n: Int64) -> String {
-    if n <= 0 {
+/// A file's size: KB under one MB and MB from there, one decimal either way.
+fn sizeOf(bytes: Int64) -> String {
+    if bytes <= 0 {
         return "\u{2014}"
     }
-    return grouped(n.toString())
+    let tenths = (bytes * 10 + 512) / 1024
+    if tenths < 10240 {
+        return (tenths / 10).toString() + "." + (tenths % 10).toString() + " KB"
+    }
+    return memOf(bytes)
 }
 
 fn hundredths(a: Int64, b: Int64) -> Int64 {
@@ -363,321 +380,161 @@ fn grouped(digits: String) -> String {
     return out
 }
 
-fn cx() -> Int64 {
-    return 350
-}
-
-fn cy() -> Int64 {
-    return 272
-}
-
-fn radius() -> Int64 {
-    return 200
-}
-
-fn decades() -> Int64 {
-    return 7
-}
-
-fn belowBase() -> Int64 {
-    return 3
-}
-
-export fn radarBox() -> String {
-    return "0 0 700 544"
-}
-
-export fn radarCx() -> String {
-    return cx().toString()
-}
-
-export fn radarCy() -> String {
-    return cy().toString()
-}
-
-fn log2(x: Float64) -> Float64 {
-    if x <= 0.0 {
-        return 0.0 - 1000.0
-    }
-    let mut m = x
-    let mut e = 0
-    while m >= 1.4142135623730951 {
-        m = m / 2.0
-        e = e + 1
-    }
-    while m < 0.7071067811865476 {
-        m = m * 2.0
-        e = e - 1
-    }
-    let z = (m - 1.0) / (m + 1.0)
-    let zz = z * z
-    let mut term = z
-    let mut sum = z
-    let mut k = 1
-    while k < 20 {
-        term = term * zz
-        sum = sum + term / Float64(2 * k + 1)
-        k = k + 1
-    }
-    return Float64(e) + 2.0 * sum / 0.6931471805599453
-}
-
-fn radiusOf(h: Int64) -> Int64 {
-    if h <= 0 {
-        return 0
-    }
-    let steps = log2(Float64(h) / 100.0) + Float64(belowBase())
-    if steps <= 0.0 {
-        return 0
-    }
-    let r = steps * Float64(radius()) / Float64(decades())
-    if r >= Float64(radius()) {
-        return radius()
-    }
-    return Int64(r + 0.5)
-}
-
-fn offScale(h: Int64) -> Bool {
-    return h > 100 * pow2(decades() - belowBase())
-}
-
-fn pow2(n: Int64) -> Int64 {
-    let mut v = 1
-    let mut i = 0
-    while i < n {
-        v = v * 2
-        i = i + 1
-    }
-    return v
-}
-
-fn angleOf(i: Int64) -> Float64 {
-    return Float64(i) * 6.283185307179586 / Float64(progNames().length)
-}
-
-type Pixel = { x: Int64, y: Int64 }
-
-fn spot(i: Int64, r: Int64) -> Pixel {
-    let a = angleOf(i)
-    let x = Float64(cx()) + Float64(r) * sin(a)
-    let y = Float64(cy()) - Float64(r) * cos(a)
-    return Pixel { x: Int64(x + 0.5), y: Int64(y + 0.5) }
-}
-
-fn pointAt(i: Int64, r: Int64) -> String {
-    let p = spot(i, r)
-    return p.x.toString() + "," + p.y.toString()
-}
-
-fn ringPoints(r: Int64) -> String {
-    let mut out: Array<String> = []
-    let mut i = 0
-    while i < progNames().length {
-        out.push(pointAt(i, r))
-        i = i + 1
-    }
-    return joinWith(out, " ")
-}
-
-export fn radarRings() -> Array<Ring> {
-    let mut out: Array<Ring> = []
-    let mut step = 1
-    while step <= decades() {
-        let r = ringRadius(step)
-        let power = step - belowBase()
-        out.push(Ring {
-            id: step.toString(),
-            points: ringPoints(r),
-            label: ringLabel(power),
-            y: (cy() - r).toString(),
-            tone: if power == 0 { "ring base" } else { "ring" },
-        })
-        step = step + 1
-    }
-    return out
-}
-
-fn ringRadius(step: Int64) -> Int64 {
-    return (radius() * step + decades() / 2) / decades()
-}
-
-fn ringLabel(power: Int64) -> String {
-    if power < 0 {
-        return "1/" + pow2(0 - power).toString() + "x"
-    }
-    return pow2(power).toString() + "x"
-}
-
-export fn radarSpokes() -> Array<Spoke> {
-    let progs = programs()
-    let mut out: Array<Spoke> = []
-    let mut i = 0
-    while i < progs.length {
-        let tip = spot(i, radius())
-        let label = spot(i, radius() + 32)
-        out.push(Spoke {
-            key: progs[i].key.copy(),
-            name: progs[i].name.copy(),
-            x: tip.x.toString(),
-            y: tip.y.toString(),
-            lx: label.x.toString(),
-            ly: labelBaseline(i, label.y),
-            anchor: anchorOf(i),
-            wedge: wedgeOf(i),
-        })
-        i = i + 1
-    }
-    return out
-}
-
-fn anchorOf(i: Int64) -> String {
-    let half = progNames().length / 2
-    if i == 0 || i == half {
-        return "middle"
-    }
-    if i < half {
-        return "start"
-    }
-    return "end"
-}
-
-fn labelBaseline(i: Int64, base: Int64) -> String {
-    let half = progNames().length / 2
-    if i == 0 {
-        return (base - 2).toString()
-    }
-    if i == half {
-        return (base + 12).toString()
-    }
-    return (base + 4).toString()
-}
-
-fn wedgeOf(i: Int64) -> String {
-    let n = progNames().length
-    let leftIdx = (i + n - 1) % n
-    let rightIdx = (i + 1) % n
-    return midPoint(i, leftIdx) + " " + cx().toString() + "," + cy().toString() + " " + midPoint(i, rightIdx) + " " + pointAt(i, radius() + 20)
-}
-
-fn midPoint(a: Int64, b: Int64) -> String {
-    let one = spot(a, radius() + 20)
-    let two = spot(b, radius() + 20)
-    let mx = (one.x + two.x) / 2
-    let my = (one.y + two.y) / 2
-    return mx.toString() + "," + my.toString()
-}
-
-fn numOf(s: String) -> Int64 {
-    return match parseFloat64(s) {
-        Some(v) => Int64(v),
-        None => 0,
-    }
-}
-
-export fn radarLines() -> Array<Line> {
-    let mut out: Array<Line> = []
-    for s in contestants() {
-        out.push(Line {
-            key: s.key.copy(),
-            name: s.name.copy(),
-            tone: s.tone.copy(),
-            points: polygonFor(s.key, "c"),
-            marks: marksFor(s.key, "c"),
-        })
-    }
-    return out
-}
-
-fn polygonFor(contestant: String, base: String) -> String {
-    let progs = programs()
-    let mut out: Array<String> = []
-    let mut i = 0
-    while i < progs.length {
-        out.push(pointAt(i, radiusOf(ratioOf(progs[i].key, contestant, base))))
-        i = i + 1
-    }
-    return joinWith(out, " ")
-}
-
-export fn ratioWay(program: String, contestant: String, base: String) -> String {
-    let h = ratioOf(program, contestant, base)
-    if h <= 0 {
-        return "level"
-    }
-    if h < 98 {
-        return "ahead"
-    }
-    if h > 102 {
-        return "behind"
-    }
-    return "level"
-}
-
 fn ratioOf(program: String, contestant: String, base: String) -> Int64 {
-    return hundredths(medianUs(program, contestant), medianUs(program, base))
+    return hundredths(p50Of(program, contestant), p50Of(program, base))
 }
 
-fn marksFor(contestant: String, base: String) -> Array<Mark> {
-    let progs = programs()
-    let baseName = if base == "c" { "C" } else { "Rust" }
-    let mut out: Array<Mark> = []
-    let mut i = 0
-    while i < progs.length {
-        let h = ratioOf(progs[i].key, contestant, base)
-        if offScale(h) {
-            out.push(Mark {
-                id: progs[i].key.copy(),
-                d: chevronAt(i),
-                title: progs[i].name + ": " + ratioText(h) + " " + baseName + ", past the " + ringLabel(decades() - belowBase()) + " rim of this scale",
-            })
+fn atLeast0(us: Int64) -> Int64 {
+    if us < 0 {
+        return 0
+    }
+    return us
+}
+
+/// Build, then the whole run at p50: the run's wall clock already holds its startup.
+fn totalOf(c: Measure) -> Int64 {
+    return atLeast0(c.makeUs) + atLeast0(c.p50Us)
+}
+
+/// Where a lane's bar ends: the build plus p99, or plus p50 where the lane has no p99.
+fn endOf(c: Measure) -> Int64 {
+    let p50 = atLeast0(c.p50Us)
+    return atLeast0(c.makeUs) + if c.p99Us > p50 { c.p99Us } else { p50 }
+}
+
+fn shareOf(part: Int64, whole: Int64) -> String {
+    if whole <= 0 {
+        return "0.0%"
+    }
+    return tenthsText(part * 1000 / whole) + "%"
+}
+
+fn thousandthsText(k: Int64) -> String {
+    return (k / 1000).toString() + "." + padStart((k % 1000).toString(), 3, "0")
+}
+
+fn buildOf(us: Int64) -> String {
+    if us == 0 {
+        return "none"
+    }
+    return msOf(us)
+}
+
+/// The lanes of one program, fastest total first, on one linear scale whose full width is the largest build plus p99.
+export fn lanesFor(program: String) -> Array<Lane> {
+    let mut ms: Array<Measure> = []
+    for s in contestants() {
+        ms.push(cellOf(program, s.key))
+    }
+    return lanesOf(ms, true)
+}
+
+/// Each engine summed over every program: its builds, one startup, one run at p50 and one artifact per program, and the largest of each peak. A sum of p99s is no percentile, so `p99Us` is -1 and the lane has no tail.
+fn summed() -> Array<Measure> {
+    let mut out: Array<Measure> = []
+    for s in contestants() {
+        let mut sum = Measure { program: "", contestant: s.key.copy(), p50Us: 0, p99Us: 0 - 1, startUs: 0, cpuUs: 0, peakBytes: 0, makeUs: 0, makePeakBytes: 0 - 1, gzBytes: 0, artifactBytes: 0 }
+        for p in progNames() {
+            let c = cellOf(p[0], s.key)
+            sum.p50Us = sum.p50Us + c.p50Us
+            sum.startUs = sum.startUs + c.startUs
+            sum.cpuUs = sum.cpuUs + c.cpuUs
+            sum.makeUs = sum.makeUs + c.makeUs
+            sum.gzBytes = sum.gzBytes + c.gzBytes
+            sum.artifactBytes = sum.artifactBytes + c.artifactBytes
+            if c.peakBytes > sum.peakBytes {
+                sum.peakBytes = c.peakBytes
+            }
+            if c.makePeakBytes > sum.makePeakBytes {
+                sum.makePeakBytes = c.makePeakBytes
+            }
         }
-        i = i + 1
+        out.push(sum)
     }
     return out
 }
 
-fn chevronAt(i: Int64) -> String {
-    let a = spot(i, radius() + 6)
-    let b = spot(i, radius() + 20)
-    return "M " + a.x.toString() + " " + a.y.toString() + " L " + b.x.toString() + " " + b.y.toString()
+/// The front page's lanes: every program, built and run once, per engine.
+export fn frontLanes() -> Array<Lane> {
+    return lanesOf(summed(), false)
 }
 
-fn readingsFor(program: String) -> Array<Reading> {
-    let base = medianUs(program, "c")
-    let mut out: Array<Reading> = []
+fn seriesOf(key: String) -> Series {
     for s in contestants() {
-        let cell = cellOf(program, s.key)
-        out.push(Reading {
+        if s.key == key {
+            return s
+        }
+    }
+    return Series { key: key.copy(), name: key.copy(), tone: "" }
+}
+
+/// The lanes on one linear scale whose full width is the largest end, so `--w` is at most 1. `full` adds the numbers only the benchmarks page shows: startup, p99, cpu and sizes.
+fn lanesOf(ms: Array<Measure>, full: Bool) -> Array<Lane> {
+    let order = sortBy(ms, m -> totalOf(m))
+    let best = totalOf(order[0])
+    let mut top = 1
+    for c in order {
+        if endOf(c) > top {
+            top = endOf(c)
+        }
+    }
+    let mut out: Array<Lane> = []
+    for c in order {
+        let s = seriesOf(c.contestant)
+        let build = atLeast0(c.makeUs)
+        let p50 = atLeast0(c.p50Us)
+        let end = endOf(c)
+        let start = if c.startUs < 0 { 0 } else if c.startUs > p50 { p50 } else { c.startUs }
+        let total = totalOf(c)
+        let groups = if full { fullGroups(c, total, best) } else { frontGroups(c, total, best) }
+        let mut said: Array<String> = []
+        for g in groups {
+            for r in g.rows {
+                said.push(g.name + " " + r[0] + " " + r[1])
+            }
+        }
+        out.push(Lane {
             key: s.key.copy(),
             name: s.name.copy(),
             tone: s.tone.copy(),
-            cpu: secsOf(cell.cpuUs),
-            mem: memOf(cell.peakBytes),
-            gz: bytesOf(cell.gzBytes),
-            make: makeOf(cell.makeUs),
-            ms: msOf(cell.us),
-            vsC: ratioText(ratioOf(program, s.key, "c")),
-            vsRust: ratioText(ratioOf(program, s.key, "rust")),
-            pct: trackPct(cell.us, base),
-            over: base > 0 && cell.us > base * trackTimes(),
+            href: if c.program.byteLength == 0 { "/benchmarks.html" } else { srcHref(c.program, c.contestant) },
+            style: "--w: " + thousandthsText(end * 1000 / top) + "; --b: " + shareOf(build, end) + "; --s: " + shareOf(start, end) + "; --r: " + shareOf(p50 - start, end) + "; --t: " + shareOf(end - build - p50, end),
+            runText: "run " + msOf(p50),
+            total: msOf(total),
+            mem: memOf(c.peakBytes),
+            say: s.name + ": " + joinWith(said, ", "),
+            groups: groups,
         })
     }
     return out
 }
 
-fn trackTimes() -> Int64 {
-    return 4
-}
-
-fn trackPct(us: Int64, base: Int64) -> String {
-    if us <= 0 || base <= 0 {
-        return "0.0"
+fn fullGroups(c: Measure, total: Int64, best: Int64) -> Array<NumGroup> {
+    let mut run: Array<Array<String>> = [["startup", msOf(c.startUs), "start"], ["p50", msOf(c.p50Us), "run"]]
+    if c.p99Us >= 0 {
+        run.push(["p99", msOf(c.p99Us), "tail"])
+        run.push(["p99/p50", ratioText(hundredths(c.p99Us, c.p50Us)), ""])
     }
-    let full = base * trackTimes()
-    return tenthsText(if us >= full { 1000 } else { us * 1000 / full })
+    run.push(["peak", memOf(c.peakBytes), ""])
+    run.push(["cpu", secsOf(c.cpuUs) + " s", ""])
+    return [
+        NumGroup { name: "build", rows: [["time", buildOf(c.makeUs), "build"], ["peak", if c.makeUs == 0 { "none" } else { memOf(c.makePeakBytes) }, "build"]] },
+        NumGroup { name: "run", rows: run },
+        NumGroup { name: "size", rows: [["source gz", sizeOf(c.gzBytes), ""], ["output", sizeOf(c.artifactBytes) + if c.makeUs == 0 { ", the source" } else { "" }, ""]] },
+        NumGroup { name: "total", rows: [["time", msOf(total), ""], ["vs fastest", ratioText(hundredths(total, best)), ""]] },
+    ]
 }
 
-export fn srcHref(program: String, engine: String) -> String {
+/// The front page's readout: what the reader needs to rank the lanes.
+fn frontGroups(c: Measure, total: Int64, best: Int64) -> Array<NumGroup> {
+    return [
+        NumGroup { name: "build", rows: [["time", buildOf(c.makeUs), "build"]] },
+        NumGroup { name: "run", rows: [["p50", msOf(c.p50Us), "run"], ["peak", memOf(c.peakBytes), ""]] },
+        NumGroup { name: "total", rows: [["time", msOf(total), ""], ["vs fastest", ratioText(hundredths(total, best)), ""]] },
+    ]
+}
+
+fn srcHref(program: String, engine: String) -> String {
     if engine == "c" {
         return ghBlob("bench/harness/c/" + program + ".c")
     }
@@ -690,154 +547,6 @@ export fn srcHref(program: String, engine: String) -> String {
     return ghBlob("examples/" + program + ".vyrn")
 }
 
-export type BarRow = { key: String, name: String, tone: String, ms: String, pct: String }
-
-export fn panelBars(program: String) -> Array<BarRow> {
-    let order = sortBy(readingsFor(program), c -> medianUs(program, c.key))
-    let mut top = 1
-    for c in order {
-        let us = medianUs(program, c.key)
-        if us > top {
-            top = us
-        }
-    }
-    let mut out: Array<BarRow> = []
-    for c in order {
-        out.push(BarRow {
-            key: c.key.copy(),
-            name: c.name.copy(),
-            tone: c.tone.copy(),
-            ms: c.ms.copy(),
-            pct: tenthsText(medianUs(program, c.key) * 1000 / top),
-        })
-    }
-    return out
-}
-
-export fn frontPanels() -> Array<Panel> {
-    let all = axisPanels()
-    let mut out: Array<Panel> = []
-    let mut i = 0
-    while i < all.length && i < 6 {
-        out.push(all[i].copy())
-        i = i + 1
-    }
-    return out
-}
-
-export fn panelNote(program: String) -> String {
-    for p in programs() {
-        if p.key == program {
-            return match indexOf(p.note, ". ") {
-                Some(at) => substring(p.note, 0, at + 1),
-                None => p.note.copy(),
-            }
-        }
-    }
-    return ""
-}
-
-export fn panelSpeed(program: String) -> String {
-    let mut ours = 0
-    let mut best = 0
-    let mut bestName = ""
-    for c in readingsFor(program) {
-        if c.key == "vyrn-wasm" || c.key == "vyrn-wasm-opt" {
-            continue
-        }
-        let us = medianUs(program, c.key)
-        if us <= 0 {
-            continue
-        }
-        if c.key == "vyrn-native" {
-            ours = us
-        }
-        if best == 0 || us < best {
-            best = us
-            bestName = c.name.copy()
-        }
-    }
-    if ours == 0 || best == 0 {
-        return ""
-    }
-    if ours <= best {
-        return "fastest of the five"
-    }
-    return ratioText(ours * 100 / best) + " " + bestName
-}
-
-fn panelMemRatio(program: String) -> String {
-    let mut ours = 0
-    let mut worst = 0
-    for c in readingsFor(program) {
-        let b = cellOf(program, c.key).peakBytes
-        if c.key == "vyrn-native" {
-            ours = b
-        }
-        if b > worst {
-            worst = b
-        }
-    }
-    if ours <= 0 || worst <= ours {
-        return ""
-    }
-    let tenths = worst * 10 / ours
-    if tenths % 10 == 0 {
-        return (tenths / 10).toString() + "x less"
-    }
-    return tenthsText(tenths) + "x less"
-}
-
-fn panelMemPair(program: String) -> String {
-    let mut ours = ""
-    let mut worstName = ""
-    let mut worstText = ""
-    let mut worst = 0
-    let mut runnerName = ""
-    let mut runnerText = ""
-    let mut runner = 0
-    for c in readingsFor(program) {
-        let b = cellOf(program, c.key).peakBytes
-        if c.key == "vyrn-native" {
-            ours = c.mem.copy()
-        }
-        if b > worst {
-            runner = worst
-            runnerName = worstName.copy()
-            runnerText = worstText.copy()
-            worst = b
-            worstName = c.name.copy()
-            worstText = c.mem.copy()
-        } else if b > runner {
-            runner = b
-            runnerName = c.name.copy()
-            runnerText = c.mem.copy()
-        }
-    }
-    if ours.byteLength == 0 || worstText.byteLength == 0 {
-        return ""
-    }
-    if worstName == "Vyrn native" {
-        if runnerText.byteLength == 0 {
-            return ours + " peak"
-        }
-        return ours + " peak \u{2014} the most here, over " + runnerName + " " + runnerText
-    }
-    return ours + " vs " + worstName + " " + worstText
-}
-
-export fn panelMemLine(program: String) -> String {
-    let pair = panelMemPair(program)
-    if pair.byteLength == 0 {
-        return ""
-    }
-    let ratio = panelMemRatio(program)
-    if ratio.byteLength == 0 {
-        return pair
-    }
-    return pair + " \u{B7} " + ratio
-}
-
 export fn nativeVsRust(program: String) -> String {
     return ratioText(ratioOf(program, "vyrn-native", "rust"))
 }
@@ -846,6 +555,7 @@ export fn axisPanels() -> Array<Panel> {
     let mut out: Array<Panel> = []
     for p in programs() {
         let row = causeRow(p.key)
+        let lanes = lanesFor(p.key)
         out.push(Panel {
             key: p.key.copy(),
             name: p.name.copy(),
@@ -854,10 +564,104 @@ export fn axisPanels() -> Array<Panel> {
             label: row.label.copy(),
             verdict: row.verdict.copy(),
             game: p.game.copy(),
-            cells: readingsFor(p.key),
+            lanes: lanes,
+            spark: sparkOf(p.key),
         })
     }
     return out
+}
+
+/// One list of the history file, which holds each on one line: `["a", "b"]` or `[0.88, null]`.
+fn listAt(src: String, indent: String, key: String) -> Array<String> {
+    let raw = scalarAt(src, indent, key)
+    let mut out: Array<String> = []
+    if raw.byteLength < 3 {
+        return out
+    }
+    for part in split(substring(raw, 1, raw.byteLength - 1), ", ") {
+        let t = trim(part)
+        out.push(if substring(t, 0, 1) == "\"" { substring(t, 1, t.byteLength - 1) } else { t })
+    }
+    return out
+}
+
+fn sparkOf(program: String) -> Spark {
+    let src = recordText(historyFile())
+    let files = listAt(src, "  ", "files")
+    let commits = listAt(src, "  ", "commits")
+    let row = objectAt(objectAt(src, "  ", "p50_s"), "    ", program)
+    let keys = ["vyrn-native", "vyrn-wasm", "vyrn-wasm-opt"]
+    let mut series: Array<Array<Int64>> = []
+    let mut top = 1
+    for k in keys {
+        let mut us: Array<Int64> = []
+        for v in listAt(row, "      ", k) {
+            let t = microsOf(v)
+            us.push(t)
+            if t > top {
+                top = t
+            }
+        }
+        series.push(us)
+    }
+    let n = files.length
+    let mut traces: Array<Trace> = []
+    let mut j = 0
+    while j < keys.length {
+        let mut at: Array<String> = []
+        let mut x = ""
+        let mut y = ""
+        let mut i = 0
+        while i < n {
+            let t = usAt(series[j], i)
+            if t >= 0 {
+                x = ((2 * i + 1) * 600 / n).toString()
+                y = (230 - t * 220 / top).toString()
+                at.push(x + "," + y)
+            }
+            i = i + 1
+        }
+        if at.length > 0 {
+            traces.push(Trace { key: keys[j].copy(), tone: seriesOf(keys[j]).tone.copy(), points: joinWith(at, " "), x: x, y: y })
+        }
+        j = j + 1
+    }
+    let mut pts: Array<SparkStep> = []
+    let mut i = 0
+    while i < n {
+        let commit = if i < commits.length { substring(commits[i], 0, 9) } else { "\u{2014}" }
+        let mut p50s: Array<Array<String>> = []
+        j = 0
+        while j < keys.length {
+            p50s.push([seriesOf(keys[j]).name, msOf(usAt(series[j], i)), ""])
+            j = j + 1
+        }
+        let groups: Array<NumGroup> = [NumGroup { name: "built at", rows: [["vyrn", commit, ""]] }, NumGroup { name: "p50", rows: p50s }]
+        let mut said: Array<String> = []
+        for g in groups {
+            for r in g.rows {
+                said.push(g.name + " " + r[0] + " " + r[1])
+            }
+        }
+        let name = substring(files[i], 0, files[i].byteLength - 5)
+        pts.push(SparkStep { key: name.copy(), name: name.copy(), say: name + ": " + joinWith(said, ", "), groups: groups })
+        i = i + 1
+    }
+    return Spark {
+        first: msOf(usAt(series[0], 0)),
+        last: msOf(usAt(series[0], n - 1)),
+        say: "Vyrn's p50 in each of " + n.toString() + " records, oldest first",
+        traces: traces,
+        pts: pts,
+    }
+}
+
+/// The `i`th time of a history list, or -1 where the list has none.
+fn usAt(us: Array<Int64>, i: Int64) -> Int64 {
+    if i < 0 || i >= us.length {
+        return 0 - 1
+    }
+    return us[i]
 }
 
 type Cause = { program: String, verdict: String, cause: String, label: String }
@@ -940,136 +744,63 @@ test "the record still has the shape this reader cuts" {
     loadCells()
     assertEq(cells.length, 70)
     for c in cells {
-        assert(c.us > 0)
+        assert(c.p50Us > 0)
+        assert(c.p99Us >= c.p50Us)
+        assert(c.startUs > 0)
+        assert(c.startUs < c.p50Us)
         assert(c.cpuUs > 0)
         assert(c.peakBytes > 0)
+        assert(c.artifactBytes > 0)
+        assert(c.makeUs == 0 || c.makePeakBytes > 0)
     }
-    assertEq(benchDate(), "2026-10-16")
-    assertEq(benchRuns(), "10")
+    assertEq(benchDate(), "2026-10-17")
+    assertEq(benchRuns(), "5")
 }
 
-test "the medians are the ones the published record holds" {
-    assertEq(msOf(medianUs("nbody", "c")), "849 ms")
-    assertEq(msOf(medianUs("nbody", "rust")), "639 ms")
-    assertEq(msOf(medianUs("nbody", "js")), "1035 ms")
-    assertEq(msOf(medianUs("nbody", "vyrn-native")), "1007 ms")
-    assertEq(msOf(medianUs("nbody", "vyrn-wasm")), "1226 ms")
-    assertEq(msOf(medianUs("nbody", "vyrn-wasm-opt")), "985 ms")
-    assertEq(msOf(medianUs("spectralnorm", "vyrn-wasm-opt")), "958 ms")
-    assertEq(msOf(medianUs("knucleotide", "c")), "282 ms")
-    assertEq(msOf(medianUs("knucleotide", "rust")), "197 ms")
-    assertEq(msOf(medianUs("knucleotide", "vyrn-native")), "109 ms")
-    assertEq(msOf(medianUs("binarytrees", "js")), "390 ms")
-    assertEq(msOf(medianUs("binarytrees", "bun")), "338 ms")
-    assertEq(msOf(medianUs("pidigits", "vyrn-native")), "1280 ms")
+test "the p50s are the ones the published record holds" {
+    assertEq(msOf(p50Of("nbody", "c")), "856 ms")
+    assertEq(msOf(p50Of("nbody", "rust")), "644 ms")
+    assertEq(msOf(p50Of("nbody", "js")), "1181 ms")
+    assertEq(msOf(p50Of("nbody", "vyrn-native")), "1029 ms")
+    assertEq(msOf(p50Of("nbody", "vyrn-wasm")), "1246 ms")
+    assertEq(msOf(p50Of("nbody", "vyrn-wasm-opt")), "979 ms")
+    assertEq(msOf(p50Of("spectralnorm", "vyrn-wasm-opt")), "969 ms")
+    assertEq(msOf(p50Of("knucleotide", "c")), "301 ms")
+    assertEq(msOf(p50Of("knucleotide", "rust")), "229 ms")
+    assertEq(msOf(p50Of("knucleotide", "vyrn-native")), "127 ms")
+    assertEq(msOf(p50Of("binarytrees", "js")), "616 ms")
+    assertEq(msOf(p50Of("binarytrees", "bun")), "378 ms")
+    assertEq(msOf(p50Of("pidigits", "vyrn-native")), "1316 ms")
 }
 
 test "the normalized figures are the ones the record computes" {
-    assertEq(ratioText(ratioOf("nbody", "vyrn-native", "c")), "1.19x")
-    assertEq(ratioText(ratioOf("nbody", "vyrn-wasm", "c")), "1.44x")
-    assertEq(ratioText(ratioOf("nbody", "vyrn-wasm-opt", "c")), "1.16x")
-    assertEq(ratioText(ratioOf("spectralnorm", "vyrn-native", "c")), "0.99x")
-    assertEq(ratioText(ratioOf("spectralnorm", "vyrn-wasm", "c")), "2.89x")
-    assertEq(ratioText(ratioOf("spectralnorm", "vyrn-wasm-opt", "c")), "1.02x")
-    assertEq(ratioText(ratioOf("binarytrees", "js", "c")), "0.50x")
+    assertEq(ratioText(ratioOf("nbody", "vyrn-native", "c")), "1.20x")
+    assertEq(ratioText(ratioOf("nbody", "vyrn-wasm", "c")), "1.46x")
+    assertEq(ratioText(ratioOf("nbody", "vyrn-wasm-opt", "c")), "1.14x")
+    assertEq(ratioText(ratioOf("spectralnorm", "vyrn-native", "c")), "1.00x")
+    assertEq(ratioText(ratioOf("spectralnorm", "vyrn-wasm", "c")), "2.93x")
+    assertEq(ratioText(ratioOf("spectralnorm", "vyrn-wasm-opt", "c")), "1.03x")
+    assertEq(ratioText(ratioOf("binarytrees", "js", "c")), "0.73x")
     assertEq(ratioText(ratioOf("revcomp", "rust", "c")), "0.23x")
-    assertEq(ratioText(ratioOf("knucleotide", "vyrn-native", "c")), "0.39x")
-    assertEq(ratioText(ratioOf("knucleotide", "vyrn-wasm", "c")), "0.90x")
-    assertEq(ratioText(ratioOf("nbody", "vyrn-native", "rust")), "1.58x")
-    assertEq(ratioText(ratioOf("pidigits", "vyrn-native", "rust")), "1.00x")
-    assertEq(ratioText(ratioOf("revcomp", "vyrn-native", "rust")), "3.54x")
-}
-
-test "the log scale puts a doubling on every ring" {
-    assertEq(radiusOf(100), ringRadius(belowBase()))
-    assertEq(radiusOf(200), ringRadius(belowBase() + 1))
-    assertEq(radiusOf(400), ringRadius(belowBase() + 2))
-    assertEq(radiusOf(50), ringRadius(belowBase() - 1))
-    assertEq(radiusOf(100), 86)
-    assertEq(radiusOf(200), 114)
-    assertEq(radiusOf(12), 0)
-    assertEq(radiusOf(1600), radius())
-    assertEq(radiusOf(30200), radius())
-    assertEq(ringLabel(0 - 3), "1/8x")
-    assertEq(ringLabel(0), "1x")
-    assertEq(ringLabel(4), "16x")
-}
-
-test "no cell is ever silently truncated" {
-    let mut clamped = 0
-    let mut marked = 0
-    for line in radarLines() {
-        marked = marked + line.marks.length
-        for p in programs() {
-            if offScale(ratioOf(p.key, line.key, "c")) {
-                clamped = clamped + 1
-            }
-        }
-    }
-    assertEq(clamped, marked)
-    assertEq(clamped, 0)
-    for line in radarLines() {
-        for p in programs() {
-            assert(radiusOf(ratioOf(p.key, line.key, "c")) > 0)
-        }
-    }
-}
-
-test "every polygon has one vertex per program" {
-    for line in radarLines() {
-        assertEq(split(line.points, " ").length, programs().length)
-    }
-    assertEq(radarLines().length, 7)
-    let base = radarRings()[belowBase() - 1]
-    assertEq(radarLines()[0].points, base.points)
-    assertEq(base.label, "1x")
-    assertEq(base.tone, "ring base")
-}
-
-test "no axis name runs off the sheet" {
-    let spokes = radarSpokes()
-    let mut i = 0
-    while i < spokes.length {
-        let x = numOf(spokes[i].lx)
-        let room = spokes[i].name.byteLength * 6
-        if spokes[i].anchor == "start" {
-            assert(x + room <= 700)
-        }
-        if spokes[i].anchor == "end" {
-            assert(x - room >= 0)
-        }
-        i = i + 1
-    }
-}
-
-test "every axis carries a name, a spoke and a wedge to reach it" {
-    let spokes = radarSpokes()
-    assertEq(spokes.length, 10)
-    assertEq(spokes[0].key, "nbody")
-    assertEq(spokes[0].anchor, "middle")
-    assertEq(spokes[2].anchor, "start")
-    assertEq(spokes[5].anchor, "middle")
-    assertEq(spokes[7].anchor, "end")
-    for s in spokes {
-        assert(s.name.byteLength > 0)
-        assert(split(s.wedge, " ").length == 4)
-    }
+    assertEq(ratioText(ratioOf("knucleotide", "vyrn-native", "c")), "0.42x")
+    assertEq(ratioText(ratioOf("knucleotide", "vyrn-wasm", "c")), "0.92x")
+    assertEq(ratioText(ratioOf("nbody", "vyrn-native", "rust")), "1.60x")
+    assertEq(ratioText(ratioOf("pidigits", "vyrn-native", "rust")), "0.95x")
+    assertEq(ratioText(ratioOf("revcomp", "vyrn-native", "rust")), "3.91x")
 }
 
 test "a panel is the whole of what is known about one program" {
     let panels = axisPanels()
     assertEq(panels.length, 10)
     for p in panels {
-        assertEq(p.cells.length, 7)
+        assertEq(p.lanes.length, 7)
         assert(p.verdict.byteLength > 0)
     }
     assertEq(panels[0].n, "25,000,000")
-    assertEq(panels[0].cells[0].ms, "849 ms")
-    assertEq(panels[0].cells[4].vsC, "1.19x")
-    assertEq(panels[0].cells[4].vsRust, "1.58x")
-    assertEq(panels[0].cells[6].ms, "985 ms")
-    assertEq(nativeVsRust("nbody"), "1.58x")
-    assertEq(nativeVsRust("pidigits"), "1.00x")
+    assertEq(msOf(p50Of("nbody", "c")), "856 ms")
+    assertEq(msOf(p50Of("nbody", "vyrn-wasm-opt")), "979 ms")
+    assertEq(nativeVsRust("nbody"), "1.60x")
+    assertEq(nativeVsRust("pidigits"), "0.95x")
     assertEq(nativeVsRust("knucleotide"), "0.55x")
     assertEq(panels[1].verdict, "inside the noise band")
     assertEq(panels[2].verdict, "at the edge of the band")
@@ -1082,7 +813,7 @@ test "the caption names the hardware and the toolchain, and never the machine" {
     let cap = benchMachine()
     assert(contains(cap, "Ryzen"))
     assert(contains(cap, "wasmtime 49.0.3"))
-    assert(contains(cap, "2026-10-16"))
+    assert(contains(cap, "2026-10-17"))
     assertEq(envRows().length, 18)
     for row in envRows() {
         assert(row[0].byteLength > 0)
@@ -1107,48 +838,115 @@ test "every program links to the game's own page for it" {
     assert(contains(progs[5].game, "/revcomp.html"))
 }
 
-test "every cell carries the columns the game prints" {
-    for p in programs() {
-        let cells = readingsFor(p.key)
-        assertEq(cells.length, 7)
-        for c in cells {
-            assert(c.cpu.byteLength > 0)
-            assert(c.mem.byteLength > 2)
-            assert(c.gz.byteLength > 2)
+fn numOf(l: Lane, group: String, label: String) -> String {
+    for g in l.groups {
+        for r in g.rows {
+            if g.name == group && r[0] == label {
+                return r[1].copy()
+            }
         }
-        assertEq(cells[2].make, "\u{2014}")
-        assertEq(cells[3].make, "\u{2014}")
-        assert(cells[0].make != "\u{2014}")
-        assert(cells[4].make != "\u{2014}")
-        assert(cells[6].make != "\u{2014}")
+    }
+    return ""
+}
+
+fn rowCount(l: Lane) -> Int64 {
+    let mut n = 0
+    for g in l.groups {
+        n = n + g.rows.length
+    }
+    return n
+}
+
+test "every lane carries the columns the game prints, its output and its build's memory" {
+    for p in programs() {
+        for l in lanesFor(p.key) {
+            assert(contains(numOf(l, "run", "cpu"), " s"))
+            assert(!contains(numOf(l, "run", "cpu"), "\u{2014}"))
+            assert(contains(numOf(l, "run", "peak"), " MB"))
+            assert(contains(l.mem, " MB"))
+            assert(contains(numOf(l, "size", "source gz"), " KB"))
+            assert(contains(numOf(l, "size", "output"), "B"))
+            if l.key == "js" || l.key == "bun" {
+                assertEq(numOf(l, "build", "peak"), "none")
+                assert(contains(numOf(l, "size", "output"), " KB, the source"))
+            } else {
+                assert(contains(numOf(l, "build", "peak"), " MB"))
+            }
+        }
     }
 }
 
-test "every bar is measured against the same track, and none is clipped in silence" {
-    assertEq(trackPct(medianUs("nbody", "c"), medianUs("nbody", "c")), "25.0")
+test "the lanes of a program share one scale and run fastest first" {
     for p in programs() {
-        let base = medianUs(p.key, "c")
-        for c in readingsFor(p.key) {
-            if c.key == "c" {
-                assertEq(c.pct, "25.0")
+        let lanes = lanesFor(p.key)
+        assertEq(lanes.length, 7)
+        let mut full = 0
+        let mut last = 0
+        for l in lanes {
+            let total = totalOf(cellOf(p.key, l.key))
+            assert(total >= last)
+            last = total
+            if contains(l.style, "--w: 1.000;") {
+                full = full + 1
             }
-            assertEq(c.over, medianUs(p.key, c.key) > base * 4)
-            if c.over {
-                assertEq(c.pct, "100.0")
-            } else {
-                assert(c.pct != "100.0")
+        }
+        assert(full >= 1)
+        assertEq(numOf(lanes[0], "total", "vs fastest"), "1.00x")
+    }
+}
+
+test "a lane is its build, its startup, the rest of its p50 and its tail to p99" {
+    let lanes = lanesFor("nbody")
+    assertEq(lanes[0].key, "rust")
+    assertEq(lanes[6].key, "vyrn-native")
+    for l in lanes {
+        if l.key == "c" {
+            assertEq(l.style, "--w: 0.422; --b: 14.5%; --s: 0.4%; --r: 84.0%; --t: 0.9%")
+            assertEq(l.total, "1004 ms")
+            assertEq(l.runText, "run 856 ms")
+        }
+        if l.key == "js" || l.key == "bun" {
+            assert(contains(l.style, "; --b: 0.0%;"))
+            assertEq(numOf(l, "build", "time"), "none")
+        }
+    }
+    assertEq(shareOf(1, 4), "25.0%")
+    assertEq(shareOf(1, 3), "33.3%")
+    assertEq(shareOf(5, 0), "0.0%")
+    assertEq(thousandthsText(1000), "1.000")
+    assertEq(thousandthsText(390), "0.390")
+    assertEq(thousandthsText(5), "0.005")
+}
+
+test "the front page's lanes sum every program, and claim no p99" {
+    let lanes = frontLanes()
+    assertEq(lanes.length, 7)
+    for l in lanes {
+        let mut total = 0
+        for p in progNames() {
+            total = total + totalOf(cellOf(p[0], l.key))
+        }
+        assertEq(l.total, msOf(total))
+        assertEq(rowCount(l), 5)
+        assertEq(numOf(l, "run", "peak"), l.mem)
+        assertEq(l.href, "/benchmarks.html")
+        assert(contains(l.style, "; --t: 0.0%"))
+        assert(!contains(l.say, "p99"))
+    }
+}
+
+test "a lane's accessible name carries every number its readout shows" {
+    for p in programs() {
+        for l in lanesFor(p.key) {
+            assertEq(rowCount(l), 12)
+            assert(contains(l.say, l.name + ": "))
+            for g in l.groups {
+                for r in g.rows {
+                    assert(contains(l.say, g.name + " " + r[0] + " " + r[1]))
+                }
             }
         }
     }
-    let mut past: Array<String> = []
-    for p in programs() {
-        for c in readingsFor(p.key) {
-            if c.over {
-                past.push(p.key + "/" + c.key)
-            }
-        }
-    }
-    assertEq(joinWith(past, " "), "")
 }
 
 test "every row points at the program behind it" {
@@ -1203,13 +1001,17 @@ test "a second, a memory size and a byte count read the way the game prints them
     assertEq(secsOf(4000), "<0.01")
     assertEq(secsOf(0), "0.00")
     assertEq(secsOf(0 - 1), "\u{2014}")
-    assertEq(makeOf(0), "\u{2014}")
-    assertEq(makeOf(591825), "0.59")
-    assertEq(memOf(4386816), "4,284 KB")
+    assertEq(buildOf(0), "none")
+    assertEq(buildOf(591825), "592 ms")
+    assertEq(memOf(4386816), "4.2 MB")
+    assertEq(memOf(1048576), "1.0 MB")
     assertEq(memOf(41000000), "39.1 MB")
     assertEq(memOf(0), "\u{2014}")
-    assertEq(bytesOf(1168), "1,168")
-    assertEq(bytesOf(0), "\u{2014}")
+    assertEq(sizeOf(1168), "1.1 KB")
+    assertEq(sizeOf(1048524), "1023.9 KB")
+    assertEq(sizeOf(1048576), "1.0 MB")
+    assertEq(sizeOf(1433088), "1.4 MB")
+    assertEq(sizeOf(0), "\u{2014}")
 }
 
 test "no escape survives into the page" {
@@ -1248,4 +1050,46 @@ test "a duration and a ratio read the way the record's tables print them" {
     assertEq(ratioText(9999), "99.99x")
     assertEq(ratioText(10000), "100x")
     assertEq(ratioText(28700), "287x")
+}
+
+test "a sparkline has one step per committed record, on one scale from zero" {
+    let s = sparkOf("nbody")
+    assertEq(s.pts.length, 5)
+    assertEq(s.pts[0].name, "2026-09-01")
+    assertEq(s.pts[4].name, "2026-10-16-run3")
+    assertEq(s.first, "882 ms")
+    assertEq(s.last, "1007 ms")
+    assertEq(s.traces.length, 3)
+    assertEq(s.traces[1].points, "120,13 360,10 600,210 840,210 1080,209")
+    assertEq(s.traces[2].points, "1080,213")
+    assertEq(s.pts[0].groups[1].rows[2][1], "\u{2014}")
+    for p in s.pts {
+        for g in p.groups {
+            for r in g.rows {
+                assert(contains(p.say, g.name + " " + r[0] + " " + r[1]))
+            }
+        }
+    }
+    assertEq(listAt("\n  \"k\": [\"a\", \"b\"],\n", "  ", "k").length, 2)
+    assertEq(listAt("\n  \"k\": [],\n", "  ", "k").length, 0)
+}
+
+test "no lane's bar or total crosses into the memory column" {
+    // `.lbar` takes `--w` of the track less 9ch for the total, so a bar fits when `--w` is at most 1 and the total is at most 9 characters.
+    let mut all: Array<Array<Lane>> = [frontLanes()]
+    for p in programs() {
+        all.push(lanesFor(p.key))
+    }
+    for lanes in all {
+        let mut widest = 0
+        for l in lanes {
+            let w = substring(l.style, 5, 10)
+            assert(w == "1.000" || substring(w, 0, 2) == "0.")
+            if w == "1.000" {
+                widest = widest + 1
+            }
+            assert(l.total.byteLength <= 9)
+        }
+        assert(widest >= 1)
+    }
 }
