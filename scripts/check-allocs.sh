@@ -3,18 +3,22 @@
 # over the same roots and prints each root's total and the phases that moved.
 # Exits 1 when HEAD's total for any root exceeds BASE's by more than THRESHOLD percent.
 # The roots are the tree that holds this script. Each binary reads the `std/` beside
-# its own `target/`: `std/runtime` changes with the emitter that calls it.
+# its own `target/`: `std/runtime` changes with the emitter that calls it. It also reads
+# its own tree's `vyrn.json` and `vyrn.lock`, because a binary refuses a manifest that
+# names a tool it does not know: each runs in a copy of the roots that holds them.
 # Usage: scripts/check-allocs.sh BASE_VYRN HEAD_VYRN [THRESHOLD]
 # THRESHOLD defaults to $CHECK_ALLOCS_THRESHOLD or 0.1.
 set -eu
 root=$(cd "$(dirname "$0")/.." && pwd)
 py=$(command -v python3 || command -v python)
 exec "$py" - "$1" "$2" "${3:-${CHECK_ALLOCS_THRESHOLD:-0.1}}" "$root" <<'PY'
-import glob, os, subprocess, sys, tempfile
+import glob, os, shutil, subprocess, sys, tempfile
 
 base, head, limit = os.path.abspath(sys.argv[1]), os.path.abspath(sys.argv[2]), float(sys.argv[3])
 tree = sys.argv[4]
 out = os.path.join(tempfile.mkdtemp(), "out.wasm")
+files = subprocess.run(["git", "-C", tree, "ls-files", "-z"], check=True,
+                       stdout=subprocess.PIPE, text=True).stdout.split("\0")
 env = {k: v for k, v in os.environ.items() if k not in ("VYRN_STD", "VYRN_WEB")}
 env.update(VYRN_BUILD_PROFILE="allocs", VYRN_THREADS="1")
 
@@ -28,12 +32,28 @@ roots = [("build", "site/export.vyrn"), ("check", "site/export.vyrn")] + [
         os.path.relpath(f, tree).replace(os.sep, "/") for f in glob.glob(f"{tree}/examples/*.vyrn"))]
 
 
+def copy_for(binary):
+    """Returns a copy of the roots' tracked files, outside `compiler/`, with the manifest and
+    lock of the tree the binary sits in (`<tree>/compiler/target/release/vyrn`)."""
+    own = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(binary))))
+    work = tempfile.mkdtemp()
+    for f in files:
+        if f and not f.startswith("compiler/") and os.path.isfile(os.path.join(tree, f)):
+            os.makedirs(os.path.join(work, os.path.dirname(f)), exist_ok=True)
+            shutil.copyfile(os.path.join(tree, f), os.path.join(work, f))
+    for f in ("vyrn.json", "vyrn.lock"):
+        if not os.path.isfile(os.path.join(own, f)):
+            sys.exit(f"{binary} sits in no tree with {f}: give it a binary built in its tree")
+        shutil.copyfile(os.path.join(own, f), os.path.join(work, f))
+    return work
+
+
 def phases(binary, cache, verb, root):
     """Runs the binary twice and returns the second run's {phase: allocations}, or None on failure."""
     args = [binary, verb, root] if verb == "check" else [binary, "build", "--target", "wasm", root, "-o", out]
     for _ in range(2):
         # The first run fills the generator cache; its counts are not compared.
-        p = subprocess.run(args, cwd=tree, env={**env, "VYRN_GEN_CACHE_DIR": cache},
+        p = subprocess.run(args, cwd=works[binary], env={**env, "VYRN_GEN_CACHE_DIR": cache},
                            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
         if p.returncode:
             return None
@@ -48,6 +68,7 @@ def phases(binary, cache, verb, root):
 
 
 caches = {b: tempfile.mkdtemp() for b in (base, head)}
+works = {b: copy_for(b) for b in (base, head)}
 failed = False
 skipped = []
 for verb, root in roots:
@@ -70,7 +91,10 @@ for verb, root in roots:
     # An example that did not move prints nothing; the two big roots always print.
     if moved or root.startswith("site/"):
         print("\n".join([f"{name}: base {ta}, head {tb}, {pct:+.3f}%{' FAIL' if over else ''}"] + moved))
-print(f"compared {len(roots) - len(skipped)} roots, skipped {len(skipped)} that a binary rejects: {', '.join(skipped)}")
+compared = len(roots) - len(skipped)
+print(f"compared {compared} roots, skipped {len(skipped)} that a binary rejects: {', '.join(skipped)}")
+# A run that compared nothing measured nothing; it is not a pass.
+failed |= compared == 0
 print(f"threshold {limit}%: {'FAIL' if failed else 'pass'}")
 sys.exit(failed)
 PY
