@@ -279,10 +279,14 @@ impl Module {
     /// Reserves a function index whose body [`Module::fill`] supplies later.
     /// A stored-closure dispatcher needs one: it is called mid-walk, but its body is
     /// complete only after the last body is walked.
-    pub fn reserve_func(&mut self, params: &[ValType], results: &[ValType]) -> u32 {
+    pub fn reserve_func(
+        &mut self,
+        params: impl Into<Vec<ValType>>,
+        results: impl Into<Vec<ValType>>,
+    ) -> u32 {
         self.bodies.push(Defined {
-            params: params.to_vec(),
-            results: results.to_vec(),
+            params: params.into(),
+            results: results.into(),
             body: None,
         });
         self.next_func() - 1
@@ -1083,11 +1087,17 @@ impl Frame {
         self
     }
 
-    /// Replaces each hole with the instruction `value` gives its id.
-    pub fn fill_holes(&mut self, mut value: impl FnMut(u32) -> Instruction<'static>) {
-        for (pos, id) in self.holes.drain(..) {
-            self.body[pos] = value(id);
+    /// Replaces each hole with its id's value: `values` yields them in id order, from 0. It
+    /// takes every value, whether a hole holds it or not.
+    pub fn fill_holes(&mut self, values: impl Iterator<Item = Instruction<'static>>) {
+        self.holes.sort_unstable_by_key(|&(_, id)| id);
+        let mut holes = self.holes.drain(..).peekable();
+        for (id, v) in values.enumerate() {
+            while let Some((pos, _)) = holes.next_if(|&(_, h)| h as usize == id) {
+                self.body[pos] = v.clone();
+            }
         }
+        assert!(holes.next().is_none(), "a hole with no value");
     }
 
     /// Replaces the callee of every `call` with `to` of it. A `call` is the only instruction

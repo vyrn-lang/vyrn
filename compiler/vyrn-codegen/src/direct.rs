@@ -359,6 +359,7 @@ fn compile_inner(program: &Program, world: Arc<vyrn_lower::World>) -> Result<Vec
         log_fd: matches!(program.log_sink, LogSink::File(_)).then(|| m.reserve(4, 4)),
         audit,
         profile,
+        seed: Caches::default(),
     };
     if profile {
         m.profile();
@@ -388,7 +389,7 @@ fn compile_inner(program: &Program, world: Arc<vyrn_lower::World>) -> Result<Vec
         let (wp, wr) = cx.wasm_sig(&s, f.line)?;
         let index = match vyrn_rt.take(&f.name, &wp, &wr, f.line)? {
             Some(reserved) => reserved,
-            None => m.reserve_func(&wp, &wr),
+            None => m.reserve_func(wp, wr),
         };
         sigs.insert(f.name.clone(), Sig { index, ..s });
     }
@@ -441,7 +442,7 @@ fn compile_inner(program: &Program, world: Arc<vyrn_lower::World>) -> Result<Vec
             gappend.insert(name, m.reserve(4, 4));
         }
     }
-    drop(cx);
+    base.seed = cx.caches.into_inner();
     (base.sigs, base.globals, base.aliasing, base.gappend) = (sigs, globals, aliasing, gappend);
 
     // The initializer's index, reserved like every other so nothing depends on
@@ -458,13 +459,14 @@ fn compile_inner(program: &Program, world: Arc<vyrn_lower::World>) -> Result<Vec
     base.fnval_copy = m.reserve_func(&[ValType::I64, ValType::I32], &[ValType::I32]);
     base.fnval_free = m.reserve_func(&[ValType::I64, ValType::I32], &[]);
     let base = &base;
-    let mut cx = Cx::new(base, Reg::default());
 
     // Each body is emitted against the registries as they are here, on any thread, then applied
     // in source order, so the module is the one a walk in source order makes ([`merge`]).
     let bd = vyrn_frontend::prof::phase("codegen: bodies");
     let observing = crate::observe::on();
-    let emitted = vyrn_frontend::par::in_parallel(
+    // The merging `Cx` keeps what every worker computed, for the drain.
+    let mut cx = Cx::new(base, Reg::default());
+    let emitted = vyrn_frontend::par::in_parallel_keep(
         &user,
         |f| f.body.stmts.len(),
         || {
@@ -472,6 +474,7 @@ fn compile_inner(program: &Program, world: Arc<vyrn_lower::World>) -> Result<Vec
             Cx::new(base, Reg::default())
         },
         |w, f| emit(w, |log| lower_fn(log, f, w)),
+        |w| cx.caches.get_mut().absorb(w.caches.into_inner()),
     );
     for (f, e) in user.iter().zip(emitted) {
         crate::observe::note_inst(&f.name, &[]);
@@ -1087,11 +1090,9 @@ struct Dispatch {
 /// Every step of the walk is a byte offset from [`crate::layout`], so the walk lives here.
 #[derive(Clone, Default)]
 struct Shapes {
-    /// `(release rather than copy, substituted type, take holes)` -> function index. A linear
-    /// scan: [`Type`] is `Eq` but not `Hash`, and a module has tens of these.
-    known: Vec<(ShapeKey, u32)>,
-    /// The bodies still to write, and how many are written. A body may reach a type nothing has
-    /// released yet, so the driver rereads this every turn, as it does [`Mono`]'s.
+    /// Each body's function index, key and line, found by a linear scan: a module has tens of
+    /// them. The first `done` are written. A body may reach a type nothing has released yet, so
+    /// the driver rereads this every turn, as it does [`Mono`]'s.
     todo: Vec<(u32, ShapeKey, usize)>,
     done: usize,
 }
@@ -1201,9 +1202,8 @@ impl<'a> Reg<'a> {
         }
     }
 
-    /// Takes the entries added past `at`. A shape is a `known` and a `todo` entry together.
+    /// Takes the entries added past `at`.
     fn split_off(&mut self, at: Lens) -> Added<'a> {
-        self.shapes.known.truncate(at.shapes);
         Added {
             insts: self.mono.insts.split_off(at.insts),
             fnvals: self.fnvals.split_off(at.fnvals),
@@ -1237,11 +1237,12 @@ enum Query {
 /// holds this many functions, so a `call` at or above it names a reservation [`merge`] assigns.
 const LOCAL: u32 = 1 << 31;
 
-/// Which registry list a reservation is for: it is that list's next added entry.
-#[derive(Clone, Copy)]
+/// Which registry list a reservation is for, with its wasm parameters and results: it is that
+/// list's next added entry.
 enum Owner {
-    Inst,
-    Dispatch,
+    Inst(Vec<ValType>, Vec<ValType>),
+    Dispatch(Vec<ValType>, Vec<ValType>),
+    /// A release or copy, whose signature is `(i32) -> ()`.
     Shape,
 }
 
@@ -1265,15 +1266,15 @@ struct Hole(u32);
 /// body never touches the module and any thread may emit it.
 #[derive(Default)]
 struct Log {
-    /// Each function reserved, `LOCAL + k` for the `k`th: its wasm signature and its owner.
-    funcs: Vec<(Vec<ValType>, Vec<ValType>, Owner)>,
+    /// Each function reserved, `LOCAL + k` for the `k`th.
+    funcs: Vec<Owner>,
     consts: Vec<Const>,
 }
 
 impl Log {
     /// A function whose body arrives later, for the next entry the body adds to `owner`'s list.
-    fn func(&mut self, params: &[ValType], results: &[ValType], owner: Owner) -> u32 {
-        self.funcs.push((params.to_vec(), results.to_vec(), owner));
+    fn func(&mut self, owner: Owner) -> u32 {
+        self.funcs.push(owner);
         LOCAL + self.funcs.len() as u32 - 1
     }
 
@@ -1356,9 +1357,9 @@ fn merge<'p>(m: &mut Module, cx: &Cx<'p>, e: Emitted<'p>) -> Option<Result<Frame
     } = e.added;
     let (mut insts, mut dispatch, mut shapes) =
         (insts.into_iter(), dispatch.into_iter(), shapes.into_iter());
-    for (params, results, owner) in e.log.funcs {
+    for owner in e.log.funcs {
         let index = match owner {
-            Owner::Inst => {
+            Owner::Inst(params, results) => {
                 let mut p = insts.next().expect("an added instance per reservation");
                 if let Key::Ho(_, _, ts) = &mut p.key {
                     ts.iter_mut().for_each(|t| target(&funcs, t));
@@ -1369,21 +1370,21 @@ fn merge<'p>(m: &mut Module, cx: &Cx<'p>, e: Emitted<'p>) -> Option<Result<Frame
                 match reg.mono.insts.iter().find(|q| q.key == p.key) {
                     Some(q) => q.sig.index,
                     None => {
-                        p.sig.index = m.reserve_func(&params, &results);
+                        p.sig.index = m.reserve_func(params, results);
                         let index = p.sig.index;
                         reg.mono.insts.push(p);
                         index
                     }
                 }
             }
-            Owner::Dispatch => {
+            Owner::Dispatch(params, results) => {
                 let (ty, mut sig) = dispatch
                     .next()
                     .expect("an added dispatcher per reservation");
                 match reg.dispatch.sigs.iter().find(|(t, _)| *t == ty) {
                     Some((_, s)) => s.index,
                     None => {
-                        sig.index = m.reserve_func(&params, &results);
+                        sig.index = m.reserve_func(params, results);
                         let index = sig.index;
                         reg.dispatch.sigs.push((ty, sig));
                         index
@@ -1392,11 +1393,10 @@ fn merge<'p>(m: &mut Module, cx: &Cx<'p>, e: Emitted<'p>) -> Option<Result<Frame
             }
             Owner::Shape => {
                 let (_, key, line) = shapes.next().expect("an added shape per reservation");
-                match reg.shapes.known.iter().find(|(k, _)| *k == key) {
-                    Some((_, i)) => *i,
+                match reg.shapes.todo.iter().find(|(_, k, _)| *k == key) {
+                    Some((i, ..)) => *i,
                     None => {
-                        let index = m.reserve_func(&params, &results);
-                        reg.shapes.known.push((key.clone(), index));
+                        let index = m.reserve_func([ValType::I32], []);
                         reg.shapes.todo.push((index, key, line));
                         index
                     }
@@ -1419,26 +1419,31 @@ fn merge<'p>(m: &mut Module, cx: &Cx<'p>, e: Emitted<'p>) -> Option<Result<Frame
             }) as u32
         })
         .collect();
-    let values: Vec<Instruction<'static>> = (e.log.consts.into_iter())
-        .map(|c| match c {
-            Const::Data(bytes, align, plus) => {
-                Instruction::I32Const((m.data(&bytes, align) + plus) as i32)
-            }
-            Const::Reserve(size, align) => Instruction::I32Const(m.reserve(size, align) as i32),
-            Const::Site(key, true) => Instruction::I32Const(reg.sites.fresh(key) as i32),
-            Const::Site(key, false) => Instruction::I32Const(reg.sites.id(key) as i32),
-            Const::Tag(at) => Instruction::I64Const(match at.checked_sub(e.seen.fnvals as u32) {
-                Some(k) => tags[k as usize],
-                None => at,
-            } as i64),
-        })
-        .collect();
+    let values = (e.log.consts.into_iter()).map(|c| match c {
+        Const::Data(bytes, align, plus) => {
+            Instruction::I32Const((m.data(&bytes, align) + plus) as i32)
+        }
+        Const::Reserve(size, align) => Instruction::I32Const(m.reserve(size, align) as i32),
+        Const::Site(key, true) => Instruction::I32Const(reg.sites.fresh(key) as i32),
+        Const::Site(key, false) => Instruction::I32Const(reg.sites.id(key) as i32),
+        Const::Tag(at) => Instruction::I64Const(match at.checked_sub(e.seen.fnvals as u32) {
+            Some(k) => tags[k as usize],
+            None => at,
+        } as i64),
+    });
     crate::observe::absorb(e.rows);
-    Some(e.frame.map(|mut f| {
-        f.remap_calls(|c| real(&funcs, c));
-        f.fill_holes(|id| values[id as usize].clone());
-        f
-    }))
+    // Every constant takes its place in the module, whether the body's code holds it or not.
+    Some(match e.frame {
+        Ok(mut f) => {
+            f.remap_calls(|c| real(&funcs, c));
+            f.fill_holes(values);
+            Ok(f)
+        }
+        Err(err) => {
+            values.for_each(drop);
+            Err(err)
+        }
+    })
 }
 
 /// Emits one body against `cx` and applies it to `m`.
@@ -1510,6 +1515,8 @@ struct Base<'a> {
     /// The four bytes holding the file sink's descriptor. `None` for a console sink, which
     /// reserves nothing.
     log_fd: Option<u32>,
+    /// The [`Caches`] the signatures filled, which every [`Cx`] reads before its own.
+    seed: Caches,
     /// Whether this is a profile build: the `SITE` global, the audit's rows and the operation
     /// counters.
     profile: bool,
@@ -1519,18 +1526,41 @@ struct Base<'a> {
     audit: bool,
 }
 
+/// The type questions a [`Cx`] answers once per substituted type. Each answer depends on the
+/// type alone, so any `Cx` may reuse another's.
+#[derive(Default)]
+struct Caches {
+    layouts: HashMap<Type, Arc<Layout>>,
+    /// [`Cx::repr`]'s answers.
+    reprs: HashMap<Type, Repr>,
+    /// [`Cx::flat`]'s answers.
+    flats: HashMap<Type, Option<Arc<Flat>>>,
+    /// [`Cx::fields`]'s answers.
+    members: HashMap<Type, Option<Arc<[Field]>>>,
+}
+
+impl Caches {
+    /// Adds the answers of `other` this one lacks.
+    fn absorb(&mut self, other: Caches) {
+        fn join<V>(a: &mut HashMap<Type, V>, mut b: HashMap<Type, V>) {
+            if a.len() < b.len() {
+                std::mem::swap(a, &mut b);
+            }
+            a.extend(b);
+        }
+        join(&mut self.layouts, other.layouts);
+        join(&mut self.reprs, other.reprs);
+        join(&mut self.flats, other.flats);
+        join(&mut self.members, other.members);
+    }
+}
+
 /// One emitter's view of the module: the [`Base`], its own caches, and the registries as its
 /// bodies see them ([`emit`]).
 struct Cx<'a> {
     base: &'a Base<'a>,
-    /// Every layout, computed once per substituted type.
-    layouts: RefCell<HashMap<Type, Arc<Layout>>>,
-    /// [`Cx::repr`]'s answers, by substituted type.
-    reprs: RefCell<HashMap<Type, Repr>>,
-    /// [`Cx::flat`]'s answers, by substituted type.
-    flats: RefCell<HashMap<Type, Option<Arc<Flat>>>>,
-    /// [`Cx::fields`]'s answers, by substituted type.
-    members: RefCell<HashMap<Type, Option<Arc<[Field]>>>>,
+    /// The answers this `Cx` computed that [`Base::seed`] lacks.
+    caches: RefCell<Caches>,
     /// The monomorphization whose body is being lowered; empty for an ordinary
     /// function.
     subst: HashMap<String, Type>,
@@ -1552,10 +1582,7 @@ impl<'a> Cx<'a> {
     fn new(base: &'a Base<'a>, reg: Reg<'a>) -> Self {
         Cx {
             base,
-            layouts: RefCell::default(),
-            reprs: RefCell::default(),
-            flats: RefCell::default(),
-            members: RefCell::default(),
+            caches: RefCell::default(),
             subst: HashMap::new(),
             reg: RefCell::new(reg),
             queries: RefCell::default(),
@@ -1571,6 +1598,18 @@ impl<'a> Cx<'a> {
             .facts
             .as_ref()
             .is_some_and(|f| f.loop_buffer_only.contains(&node))
+    }
+
+    /// The answer the map `pick` holds for `ty`, in [`Base::seed`] or in this `Cx`'s own.
+    fn cached<V: Clone>(
+        &self,
+        ty: &Type,
+        pick: impl Fn(&Caches) -> &HashMap<Type, V>,
+    ) -> Option<V> {
+        match pick(&self.seed).get(ty) {
+            Some(v) => Some(v.clone()),
+            None => pick(&self.caches.borrow()).get(ty).cloned(),
+        }
     }
 
     /// Substitutes the monomorphization this lowering is inside.
@@ -1594,14 +1633,14 @@ impl<'a> Cx<'a> {
     /// The layout of `ty`, or the refusal of a shape past 4 GB.
     fn layout(&self, ty: &Type, line: usize) -> Result<Arc<Layout>, String> {
         let ty = self.sub(ty);
-        if let Some(l) = self.layouts.borrow().get(&*ty) {
-            return Ok(l.clone());
+        if let Some(l) = self.cached(&ty, |c| &c.layouts) {
+            return Ok(l);
         }
         let l = crate::shape_of(&ty, &self.types)
             .layout()
             .map_err(|e| format!("direct backend: layout of `{ty}` at line {line}: {e}"))?;
         let l = Arc::new(l);
-        self.layouts.borrow_mut().insert(ty.into_owned(), l.clone());
+        (self.caches.borrow_mut().layouts).insert(ty.into_owned(), l.clone());
         Ok(l)
     }
 
@@ -1676,7 +1715,7 @@ impl<'a> Cx<'a> {
         let s = self.signature(&f, &core_key)?;
         let (wp, wr) = self.wasm_sig(&s, f.line)?;
         let sig = Sig {
-            index: m.func(&wp, &wr, Owner::Inst),
+            index: m.func(Owner::Inst(wp, wr)),
             ..s
         };
         self.reg.borrow_mut().mono.insts.push(Pending {
@@ -1783,8 +1822,8 @@ impl<'a> Cx<'a> {
     /// walks the type twice ([`Cx::ty_gap`], [`Cx::shape`]).
     fn repr(&self, ty: &Type, line: usize) -> Result<Repr, String> {
         let key = self.sub(ty);
-        if let Some(r) = self.reprs.borrow().get(&*key) {
-            return Ok(r.clone());
+        if let Some(r) = self.cached(&key, |c| &c.reprs) {
+            return Ok(r);
         }
         if let Some(why) = self.ty_gap(ty, 0) {
             return unsupported(&why, line);
@@ -1794,7 +1833,7 @@ impl<'a> Cx<'a> {
             Shape::Leaf(l) => Repr::Scalar(l.val_type()),
             Shape::Struct(_) | Shape::Array(..) => Repr::Agg(self.layout(ty, line)?),
         };
-        self.reprs.borrow_mut().insert(key.into_owned(), r.clone());
+        (self.caches.borrow_mut().reprs).insert(key.into_owned(), r.clone());
         Ok(r)
     }
 
@@ -1815,8 +1854,8 @@ impl<'a> Cx<'a> {
     /// other than a vector, with no heap, no declared release and no `where` rule.
     fn flat(&self, ty: &Type) -> Option<Arc<Flat>> {
         let key = self.sub(ty);
-        if let Some(f) = self.flats.borrow().get(&*key) {
-            return f.clone();
+        if let Some(f) = self.cached(&key, |c| &c.flats) {
+            return f;
         }
         // Most aggregates are wider than two words: answer them from the layout, uncached.
         match self.repr(ty, 0) {
@@ -1825,7 +1864,7 @@ impl<'a> Cx<'a> {
             _ => {}
         }
         let f = self.flat_of(&key).map(Arc::new);
-        self.flats.borrow_mut().insert(key.into_owned(), f.clone());
+        (self.caches.borrow_mut().flats).insert(key.into_owned(), f.clone());
         f
     }
 
@@ -1903,16 +1942,14 @@ impl<'a> Cx<'a> {
     /// substituted type: field `i` sits at `layout.fields[i]`.
     fn fields(&self, ty: &Type) -> Option<Arc<[Field]>> {
         let ty = self.sub(ty);
-        if let Some(fs) = self.members.borrow().get(&*ty) {
-            return fs.clone();
+        if let Some(fs) = self.cached(&ty, |c| &c.members) {
+            return fs;
         }
         let fs = ftypes::record_fields(&ty, &self.types).map(|fields| {
             let order = crate::in_layout_order(&fields, &self.types);
             order.into_iter().map(|(f, _)| f.clone()).collect()
         });
-        self.members
-            .borrow_mut()
-            .insert(ty.into_owned(), fs.clone());
+        (self.caches.borrow_mut().members).insert(ty.into_owned(), fs.clone());
         fs
     }
 
@@ -3300,23 +3337,18 @@ impl<'p> Fn_<'_, 'p> {
     /// The index of the release (or copy) of `ty`, reserved and queued on first request.
     /// The type is substituted here because the body is written later, under another instance.
     fn shape_fn(&self, m: &mut Log, rel: bool, ty: &Type, line: usize) -> u32 {
-        let key: ShapeKey = (
-            rel,
-            self.cx.sub(ty).into_owned(),
-            if rel {
-                self.rel_holes.clone()
-            } else {
-                Vec::new()
-            },
-        );
+        let ty = self.cx.sub(ty);
+        let holes: &[String] = if rel { &self.rel_holes } else { &[] };
         let mut reg = self.cx.reg.borrow_mut();
         let s = &mut reg.shapes;
-        if let Some((_, i)) = s.known.iter().find(|(k, _)| *k == key) {
+        if let Some((i, ..)) =
+            (s.todo.iter()).find(|(_, k, _)| k.0 == rel && k.1 == *ty && k.2 == holes)
+        {
             return *i;
         }
-        let index = m.func(&[ValType::I32], &[], Owner::Shape);
-        s.known.push((key.clone(), index));
-        s.todo.push((index, key, line));
+        let index = m.func(Owner::Shape);
+        s.todo
+            .push((index, (rel, ty.into_owned(), holes.to_vec()), line));
         index
     }
 
@@ -5477,7 +5509,7 @@ impl<'p> Fn_<'_, 'p> {
         };
         let (wp, wr) = self.cx.wasm_sig(&s, line)?;
         let sig = Sig {
-            index: m.func(&wp, &wr, Owner::Dispatch),
+            index: m.func(Owner::Dispatch(wp, wr)),
             ..s
         };
         (self.cx.reg.borrow_mut().dispatch.sigs).push((sig_ty.clone(), sig.clone()));
@@ -9371,7 +9403,7 @@ impl VyrnRt {
     fn reserve(m: &mut Module) -> Self {
         let index = VYRN_RUNTIME
             .iter()
-            .map(|(name, params, results)| (*name, m.reserve_func(params, results)))
+            .map(|(name, params, results)| (*name, m.reserve_func(*params, *results)))
             .collect();
         VyrnRt {
             index,
@@ -14825,6 +14857,7 @@ mod tests {
             profile: false,
             // Every index 0: a `Cx` for a type-level test never emits a call.
             rt: Rt::default(),
+            seed: Caches::default(),
         }));
         Cx::new(base, Reg::default())
     }

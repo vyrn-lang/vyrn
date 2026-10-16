@@ -32,11 +32,23 @@ const SERIAL_BELOW: usize = 600;
 /// permutes that order, for the test that holds every output independent of
 /// it. Each worker keeps one `S` from `fresh` across its items. A panic in a
 /// worker panics the caller.
-pub fn in_parallel<T: Sync, S, R: Send>(
+pub fn in_parallel<T: Sync, S: Send, R: Send>(
     items: &[T],
     weight: impl Fn(&T) -> usize,
     fresh: impl Fn() -> S + Sync,
     work: impl Fn(&mut S, &T) -> R + Sync,
+) -> Vec<R> {
+    in_parallel_keep(items, weight, fresh, work, drop)
+}
+
+/// [`in_parallel`], which also hands each worker's `S` after its last item to
+/// `keep`, on the calling thread, in no fixed order.
+pub fn in_parallel_keep<T: Sync, S: Send, R: Send>(
+    items: &[T],
+    weight: impl Fn(&T) -> usize,
+    fresh: impl Fn() -> S + Sync,
+    work: impl Fn(&mut S, &T) -> R + Sync,
+    mut keep: impl FnMut(S),
 ) -> Vec<R> {
     let weights: Vec<usize> = items.iter().map(weight).collect();
     let mut order: Vec<usize> = (0..items.len()).collect();
@@ -62,7 +74,7 @@ pub fn in_parallel<T: Sync, S, R: Send>(
         while let Some(&i) = order.get(next.fetch_add(1, std::sync::atomic::Ordering::Relaxed)) {
             done.push((i, work(&mut state, &items[i])));
         }
-        done
+        (done, state)
     };
     let n = match weights.iter().sum::<usize>() {
         w if w < SERIAL_BELOW => 1,
@@ -70,7 +82,9 @@ pub fn in_parallel<T: Sync, S, R: Send>(
     };
     let tag = crate::prof::tag();
     let mut done = if n <= 1 {
-        worker()
+        let (done, state) = worker();
+        keep(state);
+        done
     } else {
         std::thread::scope(|s| {
             // A worker recurses as deep as the calling thread, so it gets the
@@ -90,10 +104,12 @@ pub fn in_parallel<T: Sync, S, R: Send>(
                 .collect();
             let mut done = Vec::with_capacity(items.len());
             for w in workers {
-                let (d, phases, counts) = w.join().unwrap_or_else(|e| std::panic::resume_unwind(e));
+                let ((d, state), phases, counts) =
+                    w.join().unwrap_or_else(|e| std::panic::resume_unwind(e));
                 crate::prof::absorb(phases);
                 crate::prof::absorb_counts(&counts);
                 done.extend(d);
+                keep(state);
             }
             done
         })
