@@ -1,6 +1,7 @@
 //! Finds the tools that turn the emitted wasm into a binary: wasm2c, clang,
-//! simde and wasmtime, and `wasm-opt`, which rewrites the module on request. The native route feeds the module to wasm2c and
-//! compiles its C with clang beside [`WASI_HOST_C`]. This lives here, not in
+//! simde and wasmtime, and `wasm-opt`, which rewrites the module on request.
+//! The native route feeds the module to wasm2c and compiles its C with clang
+//! beside [`WASI_HOST_C`]. This lives here, not in
 //! the driver, because the wasm generation engine is an excluded
 //! crate and this crate is the nearest one both depend on.
 
