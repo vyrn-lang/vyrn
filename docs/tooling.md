@@ -276,7 +276,7 @@ policy.
 | `main` | the entry file for commands given no file |
 | `server`, `client`, `public` | `vyrn dev`'s server module, client module and static directory |
 | `dependencies` | alias to import specifier; `import { x } from "alias"` |
-| `toolchain` | tool name to version: `wasmtime`, `cargo-nextest`, `wabt`, `simde` |
+| `toolchain` | tool name to version: `wasmtime`, `cargo-nextest`, `wabt`, `simde`, `binaryen` |
 | `nativeTarget` | the default for `--native-target` |
 | `audience` | which directory segments are server, client or universal code |
 | `artifacts` | named entry plus target (`native`, `wasi`, `browser`); `main`, `server` and `client` are sugar for entries |

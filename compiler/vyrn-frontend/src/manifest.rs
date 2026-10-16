@@ -686,7 +686,10 @@ mod tests {
         .err()
         .expect("a tool the table cannot resolve is not a manifest this reads");
         assert!(e.contains("unknown tool `wasmtimee`"), "{e}");
-        assert!(e.contains("wasmtime, cargo-nextest, wabt, simde"), "{e}");
+        assert!(
+            e.contains("wasmtime, cargo-nextest, wabt, simde, binaryen"),
+            "{e}"
+        );
         // The two wasi-sdk tools left the table with the C shim: nothing reads them.
         for gone in ["wasi-sysroot", "wasi-builtins"] {
             let doc = format!(r#"{{"toolchain":{{"{gone}":"25.0"}}}}"#);

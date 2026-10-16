@@ -406,8 +406,9 @@ when the wasm route inlines runtime leaf calls.
 | Native | `vyrn build`, `vyrn bench` | `build_wasm2c`: wasm2c turns the module into C, and clang compiles it with `wasi_host.c` and wabt's `wasm-rt` |
 | Browser | `web/`, the site's playground | `web/wasi-min.js` answers the same imports with a browser's limits: no argv, EOF on stdin, no files |
 
-`vyrn_codegen::toolchain` finds wasm2c, clang, simde and wasmtime. `vyrn.lock`
-pins wabt, simde and wasmtime by sha256 under `tool:` rows, unpacked under
+`vyrn_codegen::toolchain` finds wasm2c, clang, simde, wasmtime and
+`wasm-opt`. `vyrn.lock` pins wabt, simde, wasmtime and binaryen by sha256
+under `tool:` rows, unpacked under
 `~/.vyrn/tools/`. clang is recorded, not pinned. `--native-target` picks the
 x86-64 level (the default is `v2`). clang always runs with
 `-ffp-contract=off`, so a native float result equals the wasm result.

@@ -2044,6 +2044,12 @@ fn print_toolchain(start: &Path, pins: &[(String, String)]) {
         pin("simde").as_deref(),
         "$VYRN_SIMDE, tools/",
     ));
+    rows.push(tool_row(
+        "wasm-opt",
+        vyrn_codegen::toolchain::wasm_opt_from(start),
+        pin("binaryen").as_deref(),
+        "$VYRN_WASM_OPT, tools/",
+    ));
 
     // The version column is not padded: a clang version line can run past a
     // hundred characters.
