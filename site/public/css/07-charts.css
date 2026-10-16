@@ -29,6 +29,7 @@ svg.chart.radar g.series.off { display: none; }
 .sr-c { color: var(--sr-c); --k: var(--sr-c); }
 .sr-rust { color: var(--sr-rust); --k: var(--sr-rust); }
 .sr-node { color: var(--sr-node); --k: var(--sr-node); }
+.sr-bun { color: var(--sr-bun); --k: var(--sr-bun); }
 .sr-vyrn { color: var(--sr-vyrn); --k: var(--sr-vyrn); }
 
 .serieskeys { display: flex; flex-wrap: wrap; gap: var(--s1); margin: 0; padding: var(--s2); border-top: 1px solid var(--hair); }
