@@ -921,10 +921,25 @@ impl State {
                 out.elems.insert(*n, all);
             }
         }
-        for (t, v) in first.defs.iter() {
-            if live.iter().all(|s| s.defs.get(t) == Some(v)) {
-                out.defs.insert(*t, v.clone());
+        if live.iter().all(|s| s.defs == first.defs) {
+            out.defs = first.defs.clone();
+        } else {
+            for (t, v) in first.defs.iter() {
+                if live.iter().all(|s| s.defs.get(t) == Some(v)) {
+                    out.defs.insert(*t, v.clone());
+                }
             }
+        }
+        // Live states with equal facts, disequalities and definitions join
+        // to them: each fact proves itself, names no defined term and is no
+        // constant, which `assume` would drop.
+        let same = |s: &&State| s.facts == first.facts && s.ne == first.ne && s.defs == first.defs;
+        if live.iter().all(same) && !first.facts.iter().any(Lin::is_const) {
+            debug_assert!((first.facts.iter().chain(first.ne.iter()))
+                .all(|l| matches!(first.norm(l), Some(Cow::Borrowed(_)))));
+            out.facts = first.facts.clone();
+            out.ne = first.ne.clone();
+            return out;
         }
         let mut cands: BTreeSet<Lin> = BTreeSet::new();
         for s in live {
