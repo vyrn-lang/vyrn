@@ -359,6 +359,7 @@ fn compile_inner(program: &Program, world: Arc<vyrn_lower::World>) -> Result<Vec
         log_fd: matches!(program.log_sink, LogSink::File(_)).then(|| m.reserve(4, 4)),
         audit,
         profile,
+        seed: Caches::default(),
     };
     if profile {
         m.profile();
@@ -441,7 +442,7 @@ fn compile_inner(program: &Program, world: Arc<vyrn_lower::World>) -> Result<Vec
             gappend.insert(name, m.reserve(4, 4));
         }
     }
-    drop(cx);
+    base.seed = cx.caches.into_inner();
     (base.sigs, base.globals, base.aliasing, base.gappend) = (sigs, globals, aliasing, gappend);
 
     // The initializer's index, reserved like every other so nothing depends on
@@ -458,13 +459,14 @@ fn compile_inner(program: &Program, world: Arc<vyrn_lower::World>) -> Result<Vec
     base.fnval_copy = m.reserve_func(&[ValType::I64, ValType::I32], &[ValType::I32]);
     base.fnval_free = m.reserve_func(&[ValType::I64, ValType::I32], &[]);
     let base = &base;
-    let mut cx = Cx::new(base, Reg::default());
 
     // Each body is emitted against the registries as they are here, on any thread, then applied
     // in source order, so the module is the one a walk in source order makes ([`merge`]).
     let bd = vyrn_frontend::prof::phase("codegen: bodies");
     let observing = crate::observe::on();
-    let emitted = vyrn_frontend::par::in_parallel(
+    // The merging `Cx` keeps what every worker computed, for the drain.
+    let mut cx = Cx::new(base, Reg::default());
+    let emitted = vyrn_frontend::par::in_parallel_keep(
         &user,
         |f| f.body.stmts.len(),
         || {
@@ -472,6 +474,7 @@ fn compile_inner(program: &Program, world: Arc<vyrn_lower::World>) -> Result<Vec
             Cx::new(base, Reg::default())
         },
         |w, f| emit(w, |log| lower_fn(log, f, w)),
+        |w| cx.caches.get_mut().absorb(w.caches.into_inner()),
     );
     for (f, e) in user.iter().zip(emitted) {
         crate::observe::note_inst(&f.name, &[]);
@@ -1510,6 +1513,8 @@ struct Base<'a> {
     /// The four bytes holding the file sink's descriptor. `None` for a console sink, which
     /// reserves nothing.
     log_fd: Option<u32>,
+    /// The [`Caches`] the signatures filled, which every [`Cx`] reads before its own.
+    seed: Caches,
     /// Whether this is a profile build: the `SITE` global, the audit's rows and the operation
     /// counters.
     profile: bool,
@@ -1519,18 +1524,41 @@ struct Base<'a> {
     audit: bool,
 }
 
+/// The type questions a [`Cx`] answers once per substituted type. Each answer depends on the
+/// type alone, so any `Cx` may reuse another's.
+#[derive(Default)]
+struct Caches {
+    layouts: HashMap<Type, Arc<Layout>>,
+    /// [`Cx::repr`]'s answers.
+    reprs: HashMap<Type, Repr>,
+    /// [`Cx::flat`]'s answers.
+    flats: HashMap<Type, Option<Arc<Flat>>>,
+    /// [`Cx::fields`]'s answers.
+    members: HashMap<Type, Option<Arc<[Field]>>>,
+}
+
+impl Caches {
+    /// Adds the answers of `other` this one lacks.
+    fn absorb(&mut self, other: Caches) {
+        fn join<V>(a: &mut HashMap<Type, V>, mut b: HashMap<Type, V>) {
+            if a.len() < b.len() {
+                std::mem::swap(a, &mut b);
+            }
+            a.extend(b);
+        }
+        join(&mut self.layouts, other.layouts);
+        join(&mut self.reprs, other.reprs);
+        join(&mut self.flats, other.flats);
+        join(&mut self.members, other.members);
+    }
+}
+
 /// One emitter's view of the module: the [`Base`], its own caches, and the registries as its
 /// bodies see them ([`emit`]).
 struct Cx<'a> {
     base: &'a Base<'a>,
-    /// Every layout, computed once per substituted type.
-    layouts: RefCell<HashMap<Type, Arc<Layout>>>,
-    /// [`Cx::repr`]'s answers, by substituted type.
-    reprs: RefCell<HashMap<Type, Repr>>,
-    /// [`Cx::flat`]'s answers, by substituted type.
-    flats: RefCell<HashMap<Type, Option<Arc<Flat>>>>,
-    /// [`Cx::fields`]'s answers, by substituted type.
-    members: RefCell<HashMap<Type, Option<Arc<[Field]>>>>,
+    /// The answers this `Cx` computed that [`Base::seed`] lacks.
+    caches: RefCell<Caches>,
     /// The monomorphization whose body is being lowered; empty for an ordinary
     /// function.
     subst: HashMap<String, Type>,
@@ -1552,10 +1580,7 @@ impl<'a> Cx<'a> {
     fn new(base: &'a Base<'a>, reg: Reg<'a>) -> Self {
         Cx {
             base,
-            layouts: RefCell::default(),
-            reprs: RefCell::default(),
-            flats: RefCell::default(),
-            members: RefCell::default(),
+            caches: RefCell::default(),
             subst: HashMap::new(),
             reg: RefCell::new(reg),
             queries: RefCell::default(),
@@ -1571,6 +1596,18 @@ impl<'a> Cx<'a> {
             .facts
             .as_ref()
             .is_some_and(|f| f.loop_buffer_only.contains(&node))
+    }
+
+    /// The answer the map `pick` holds for `ty`, in [`Base::seed`] or in this `Cx`'s own.
+    fn cached<V: Clone>(
+        &self,
+        ty: &Type,
+        pick: impl Fn(&Caches) -> &HashMap<Type, V>,
+    ) -> Option<V> {
+        match pick(&self.seed).get(ty) {
+            Some(v) => Some(v.clone()),
+            None => pick(&self.caches.borrow()).get(ty).cloned(),
+        }
     }
 
     /// Substitutes the monomorphization this lowering is inside.
@@ -1594,14 +1631,14 @@ impl<'a> Cx<'a> {
     /// The layout of `ty`, or the refusal of a shape past 4 GB.
     fn layout(&self, ty: &Type, line: usize) -> Result<Arc<Layout>, String> {
         let ty = self.sub(ty);
-        if let Some(l) = self.layouts.borrow().get(&*ty) {
-            return Ok(l.clone());
+        if let Some(l) = self.cached(&ty, |c| &c.layouts) {
+            return Ok(l);
         }
         let l = crate::shape_of(&ty, &self.types)
             .layout()
             .map_err(|e| format!("direct backend: layout of `{ty}` at line {line}: {e}"))?;
         let l = Arc::new(l);
-        self.layouts.borrow_mut().insert(ty.into_owned(), l.clone());
+        (self.caches.borrow_mut().layouts).insert(ty.into_owned(), l.clone());
         Ok(l)
     }
 
@@ -1783,8 +1820,8 @@ impl<'a> Cx<'a> {
     /// walks the type twice ([`Cx::ty_gap`], [`Cx::shape`]).
     fn repr(&self, ty: &Type, line: usize) -> Result<Repr, String> {
         let key = self.sub(ty);
-        if let Some(r) = self.reprs.borrow().get(&*key) {
-            return Ok(r.clone());
+        if let Some(r) = self.cached(&key, |c| &c.reprs) {
+            return Ok(r);
         }
         if let Some(why) = self.ty_gap(ty, 0) {
             return unsupported(&why, line);
@@ -1794,7 +1831,7 @@ impl<'a> Cx<'a> {
             Shape::Leaf(l) => Repr::Scalar(l.val_type()),
             Shape::Struct(_) | Shape::Array(..) => Repr::Agg(self.layout(ty, line)?),
         };
-        self.reprs.borrow_mut().insert(key.into_owned(), r.clone());
+        (self.caches.borrow_mut().reprs).insert(key.into_owned(), r.clone());
         Ok(r)
     }
 
@@ -1815,8 +1852,8 @@ impl<'a> Cx<'a> {
     /// other than a vector, with no heap, no declared release and no `where` rule.
     fn flat(&self, ty: &Type) -> Option<Arc<Flat>> {
         let key = self.sub(ty);
-        if let Some(f) = self.flats.borrow().get(&*key) {
-            return f.clone();
+        if let Some(f) = self.cached(&key, |c| &c.flats) {
+            return f;
         }
         // Most aggregates are wider than two words: answer them from the layout, uncached.
         match self.repr(ty, 0) {
@@ -1825,7 +1862,7 @@ impl<'a> Cx<'a> {
             _ => {}
         }
         let f = self.flat_of(&key).map(Arc::new);
-        self.flats.borrow_mut().insert(key.into_owned(), f.clone());
+        (self.caches.borrow_mut().flats).insert(key.into_owned(), f.clone());
         f
     }
 
@@ -1903,16 +1940,14 @@ impl<'a> Cx<'a> {
     /// substituted type: field `i` sits at `layout.fields[i]`.
     fn fields(&self, ty: &Type) -> Option<Arc<[Field]>> {
         let ty = self.sub(ty);
-        if let Some(fs) = self.members.borrow().get(&*ty) {
-            return fs.clone();
+        if let Some(fs) = self.cached(&ty, |c| &c.members) {
+            return fs;
         }
         let fs = ftypes::record_fields(&ty, &self.types).map(|fields| {
             let order = crate::in_layout_order(&fields, &self.types);
             order.into_iter().map(|(f, _)| f.clone()).collect()
         });
-        self.members
-            .borrow_mut()
-            .insert(ty.into_owned(), fs.clone());
+        (self.caches.borrow_mut().members).insert(ty.into_owned(), fs.clone());
         fs
     }
 
@@ -14825,6 +14860,7 @@ mod tests {
             profile: false,
             // Every index 0: a `Cx` for a type-level test never emits a call.
             rt: Rt::default(),
+            seed: Caches::default(),
         }));
         Cx::new(base, Reg::default())
     }
