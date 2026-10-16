@@ -553,16 +553,13 @@ pub(crate) fn judge_built<R>(
         !f.type_params.is_empty() && own.proto.is_release_fn(&f.name)
     };
     if program.functions.iter().any(generic_release) {
-        let written = vyrn_frontend::own::Ownership {
-            proto: own.proto.as_written(),
-            ..own.clone()
-        };
+        let written = own.proto.as_written();
         for inst in crate::as_written(program, own) {
             if !generic_release(inst.func) {
                 continue;
             }
             let built =
-                crate::core::build_in(program, &inst, &written, fns, &mut Default::default());
+                crate::core::build_in(program, &inst, own, &written, fns, &mut Default::default());
             if let Ok(mut b) = built {
                 fns.number(&mut b);
                 generic.push((inst.func.name.as_str(), b));
