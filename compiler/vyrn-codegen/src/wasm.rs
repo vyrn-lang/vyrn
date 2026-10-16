@@ -279,10 +279,14 @@ impl Module {
     /// Reserves a function index whose body [`Module::fill`] supplies later.
     /// A stored-closure dispatcher needs one: it is called mid-walk, but its body is
     /// complete only after the last body is walked.
-    pub fn reserve_func(&mut self, params: &[ValType], results: &[ValType]) -> u32 {
+    pub fn reserve_func(
+        &mut self,
+        params: impl Into<Vec<ValType>>,
+        results: impl Into<Vec<ValType>>,
+    ) -> u32 {
         self.bodies.push(Defined {
-            params: params.to_vec(),
-            results: results.to_vec(),
+            params: params.into(),
+            results: results.into(),
             body: None,
         });
         self.next_func() - 1

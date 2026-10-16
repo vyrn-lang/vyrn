@@ -389,7 +389,7 @@ fn compile_inner(program: &Program, world: Arc<vyrn_lower::World>) -> Result<Vec
         let (wp, wr) = cx.wasm_sig(&s, f.line)?;
         let index = match vyrn_rt.take(&f.name, &wp, &wr, f.line)? {
             Some(reserved) => reserved,
-            None => m.reserve_func(&wp, &wr),
+            None => m.reserve_func(wp, wr),
         };
         sigs.insert(f.name.clone(), Sig { index, ..s });
     }
@@ -1240,11 +1240,12 @@ enum Query {
 /// holds this many functions, so a `call` at or above it names a reservation [`merge`] assigns.
 const LOCAL: u32 = 1 << 31;
 
-/// Which registry list a reservation is for: it is that list's next added entry.
-#[derive(Clone, Copy)]
+/// Which registry list a reservation is for, with its wasm parameters and results: it is that
+/// list's next added entry.
 enum Owner {
-    Inst,
-    Dispatch,
+    Inst(Vec<ValType>, Vec<ValType>),
+    Dispatch(Vec<ValType>, Vec<ValType>),
+    /// A release or copy, whose signature is `(i32) -> ()`.
     Shape,
 }
 
@@ -1268,15 +1269,15 @@ struct Hole(u32);
 /// body never touches the module and any thread may emit it.
 #[derive(Default)]
 struct Log {
-    /// Each function reserved, `LOCAL + k` for the `k`th: its wasm signature and its owner.
-    funcs: Vec<(Vec<ValType>, Vec<ValType>, Owner)>,
+    /// Each function reserved, `LOCAL + k` for the `k`th.
+    funcs: Vec<Owner>,
     consts: Vec<Const>,
 }
 
 impl Log {
     /// A function whose body arrives later, for the next entry the body adds to `owner`'s list.
-    fn func(&mut self, params: &[ValType], results: &[ValType], owner: Owner) -> u32 {
-        self.funcs.push((params.to_vec(), results.to_vec(), owner));
+    fn func(&mut self, owner: Owner) -> u32 {
+        self.funcs.push(owner);
         LOCAL + self.funcs.len() as u32 - 1
     }
 
@@ -1359,9 +1360,9 @@ fn merge<'p>(m: &mut Module, cx: &Cx<'p>, e: Emitted<'p>) -> Option<Result<Frame
     } = e.added;
     let (mut insts, mut dispatch, mut shapes) =
         (insts.into_iter(), dispatch.into_iter(), shapes.into_iter());
-    for (params, results, owner) in e.log.funcs {
+    for owner in e.log.funcs {
         let index = match owner {
-            Owner::Inst => {
+            Owner::Inst(params, results) => {
                 let mut p = insts.next().expect("an added instance per reservation");
                 if let Key::Ho(_, _, ts) = &mut p.key {
                     ts.iter_mut().for_each(|t| target(&funcs, t));
@@ -1372,21 +1373,21 @@ fn merge<'p>(m: &mut Module, cx: &Cx<'p>, e: Emitted<'p>) -> Option<Result<Frame
                 match reg.mono.insts.iter().find(|q| q.key == p.key) {
                     Some(q) => q.sig.index,
                     None => {
-                        p.sig.index = m.reserve_func(&params, &results);
+                        p.sig.index = m.reserve_func(params, results);
                         let index = p.sig.index;
                         reg.mono.insts.push(p);
                         index
                     }
                 }
             }
-            Owner::Dispatch => {
+            Owner::Dispatch(params, results) => {
                 let (ty, mut sig) = dispatch
                     .next()
                     .expect("an added dispatcher per reservation");
                 match reg.dispatch.sigs.iter().find(|(t, _)| *t == ty) {
                     Some((_, s)) => s.index,
                     None => {
-                        sig.index = m.reserve_func(&params, &results);
+                        sig.index = m.reserve_func(params, results);
                         let index = sig.index;
                         reg.dispatch.sigs.push((ty, sig));
                         index
@@ -1398,7 +1399,7 @@ fn merge<'p>(m: &mut Module, cx: &Cx<'p>, e: Emitted<'p>) -> Option<Result<Frame
                 match reg.shapes.known.iter().find(|(k, _)| *k == key) {
                     Some((_, i)) => *i,
                     None => {
-                        let index = m.reserve_func(&params, &results);
+                        let index = m.reserve_func([ValType::I32], []);
                         reg.shapes.known.push((key.clone(), index));
                         reg.shapes.todo.push((index, key, line));
                         index
@@ -1713,7 +1714,7 @@ impl<'a> Cx<'a> {
         let s = self.signature(&f, &core_key)?;
         let (wp, wr) = self.wasm_sig(&s, f.line)?;
         let sig = Sig {
-            index: m.func(&wp, &wr, Owner::Inst),
+            index: m.func(Owner::Inst(wp, wr)),
             ..s
         };
         self.reg.borrow_mut().mono.insts.push(Pending {
@@ -3349,7 +3350,7 @@ impl<'p> Fn_<'_, 'p> {
         if let Some((_, i)) = s.known.iter().find(|(k, _)| *k == key) {
             return *i;
         }
-        let index = m.func(&[ValType::I32], &[], Owner::Shape);
+        let index = m.func(Owner::Shape);
         s.known.push((key.clone(), index));
         s.todo.push((index, key, line));
         index
@@ -5512,7 +5513,7 @@ impl<'p> Fn_<'_, 'p> {
         };
         let (wp, wr) = self.cx.wasm_sig(&s, line)?;
         let sig = Sig {
-            index: m.func(&wp, &wr, Owner::Dispatch),
+            index: m.func(Owner::Dispatch(wp, wr)),
             ..s
         };
         (self.cx.reg.borrow_mut().dispatch.sigs).push((sig_ty.clone(), sig.clone()));
@@ -9406,7 +9407,7 @@ impl VyrnRt {
     fn reserve(m: &mut Module) -> Self {
         let index = VYRN_RUNTIME
             .iter()
-            .map(|(name, params, results)| (*name, m.reserve_func(params, results)))
+            .map(|(name, params, results)| (*name, m.reserve_func(*params, *results)))
             .collect();
         VyrnRt {
             index,
