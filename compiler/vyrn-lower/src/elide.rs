@@ -46,7 +46,7 @@ use vyrn_frontend::prelude::{self, Elements, Length};
 use vyrn_frontend::prim::Cmp;
 
 use crate::effects::StateUse;
-use crate::facts::{Fact, Lin, State, Term, EXACT};
+use crate::facts::{Fact, Lin, Sides, State, Term, EXACT};
 use vyrn_frontend::core::check::{Atom, Check, Guard, Operand, Site, Verdict, Why};
 use vyrn_frontend::core::{
     rows, Arg, Arm, Body, BorrowKind, Callee, Ctor, Lit, Name, Op, Place, Rhs, St, Target, Test,
@@ -3786,7 +3786,7 @@ impl<'a> Walk<'a> {
             .filter_map(|(a, t)| Some((a, renamed(t, m, n)?)))
             .collect();
         for (a, t) in bounded {
-            st.elems.entry(a).or_default().insert(t);
+            st.elems.get_mut().entry(a).or_default().insert(t);
         }
         let from = |y: Name, st: &State| -> Vec<Lin> {
             let y = self.arrays.get(&y).copied().unwrap_or(y);
@@ -3911,7 +3911,7 @@ impl<'a> Walk<'a> {
             match hole(f, seq) {
                 Some(j) => {
                     let p = params[j.index() - 1];
-                    st.elems.entry(p).or_default().insert(l);
+                    st.elems.get_mut().entry(p).or_default().insert(l);
                 }
                 None => st.assume(&l),
             }
@@ -4717,13 +4717,12 @@ impl<'a> Walk<'a> {
                     Val::Lit(Lit::Bool(false)) => (State::dead(), st),
                     Val::Name(c) => {
                         let (mut yes, mut no) = (st.clone(), st);
-                        // Adding a fact reads no condition; a state it kills has none.
-                        if let Some((t, f)) = no.conds.remove(c) {
-                            t.iter().for_each(|l| yes.add(l));
-                            f.iter().for_each(|l| no.add(l));
-                            if !no.dead {
-                                no.conds.insert(*c, (t, f));
-                            }
+                        // Adding a fact writes no condition, so the sides
+                        // are read from a shared copy.
+                        let conds = yes.conds.clone();
+                        if let Some(s) = conds.get(c) {
+                            s.0.iter().for_each(|l| yes.add(l));
+                            s.1.iter().for_each(|l| no.add(l));
                         }
                         (yes, no)
                     }
@@ -4876,7 +4875,7 @@ impl<'a> Walk<'a> {
         if t.is_empty() && f.is_empty() {
             return;
         }
-        let side = j.conds.entry(*c).or_default();
+        let side = j.conds.get_mut().entry(*c).or_default().get_mut();
         side.0.extend(t);
         side.1.extend(f);
     }
@@ -5104,7 +5103,7 @@ impl<'a> Walk<'a> {
             Rhs::Prim(op, vs, _) => match self.prim(st, n, op, vs) {
                 Out::Def(r) => st.define(Term::Val(n), &r),
                 Out::Cond(t, f) => {
-                    st.conds.insert(n, (t, f));
+                    st.conds.insert(n, Sides::from((t, f)));
                 }
                 Out::Facts(fs) => fs.iter().for_each(|f| st.assume(f)),
                 Out::Nothing => {}
@@ -5209,7 +5208,7 @@ impl<'a> Walk<'a> {
                 .filter(free)
                 .collect();
             if !ts.is_empty() {
-                st.elems.entry(n).or_default().extend(ts);
+                st.elems.get_mut().entry(n).or_default().extend(ts);
             }
         }
         let facts: Vec<Lin> = s
@@ -5224,12 +5223,12 @@ impl<'a> Walk<'a> {
             .map(Fact::Ge)
             .collect();
         if !when.is_empty() && self.kind(n).is_int() {
-            st.conds.insert(n, (when, Vec::new()));
+            st.conds.insert(n, Sides::from((when, Vec::new())));
         }
         // A Bool result's facts hold where it is true.
         if self.body.names[n.index()].ty == Type::Bool {
-            st.conds
-                .insert(n, (facts.into_iter().map(Fact::Ge).collect(), Vec::new()));
+            let when = facts.into_iter().map(Fact::Ge).collect();
+            st.conds.insert(n, Sides::from((when, Vec::new())));
             return;
         }
         // A result the summary pins to one value is defined as that value, so
@@ -5496,7 +5495,7 @@ impl<'a> Walk<'a> {
                 } else {
                     (never, Vec::new())
                 };
-                st.conds.insert(n, c);
+                st.conds.insert(n, Sides::from(c));
             }
             _ => {}
         }
@@ -5608,7 +5607,7 @@ impl<'a> Walk<'a> {
                 Some(r) => Out::Def(r),
                 None => Out::Nothing,
             },
-            (Op::Un(UnOp::Not), [Val::Name(c)]) => match pre.conds.get(c) {
+            (Op::Un(UnOp::Not), [Val::Name(c)]) => match pre.conds.get(c).map(|s| &**s) {
                 Some((t, f)) => Out::Cond(f.clone(), t.clone()),
                 None => Out::Nothing,
             },
@@ -5675,7 +5674,7 @@ impl<'a> Walk<'a> {
         let mut out = side;
         for v in [a, b] {
             let Val::Name(m) = v else { continue };
-            let Some((when, _)) = pre.conds.get(m).filter(|_| self.kind(*m).is_int()) else {
+            let Some(c) = pre.conds.get(m).filter(|_| self.kind(*m).is_int()) else {
                 continue;
             };
             let mut probe = State::default();
@@ -5685,7 +5684,7 @@ impl<'a> Walk<'a> {
                 .ge0(&at_least_zero)
                 .is_some_and(|c| c.verify(&probe, &at_least_zero))
             {
-                out.extend(when.iter().cloned().map(Some));
+                out.extend(c.0.iter().cloned().map(Some));
             }
         }
         out
@@ -5695,9 +5694,10 @@ impl<'a> Walk<'a> {
         let (Val::Name(a), Val::Name(b)) = (a, b) else {
             return Out::Nothing;
         };
-        let (Some((at, af)), Some((bt, bf))) = (pre.conds.get(a), pre.conds.get(b)) else {
+        let (Some(x), Some(y)) = (pre.conds.get(a), pre.conds.get(b)) else {
             return Out::Nothing;
         };
+        let ((at, af), (bt, bf)) = (&**x, &**y);
         let both = |x: &Vec<Fact>, y: &Vec<Fact>| x.iter().chain(y).cloned().collect::<Vec<_>>();
         match o {
             BinOp::And => Out::Cond(both(at, bt), Vec::new()),
@@ -5982,7 +5982,7 @@ impl<'a> Walk<'a> {
         // facts of a written record whose fields a row set, and the counter
         // shapes an index needs.
         let mut cands: BTreeSet<Lin> = BTreeSet::new();
-        for f in &entry.facts {
+        for f in entry.facts.iter() {
             if f.terms
                 .iter()
                 .any(|(t, _)| t.name().is_some_and(|n| written.contains(&n)))
@@ -5990,7 +5990,7 @@ impl<'a> Walk<'a> {
                 cands.insert(f.clone());
             }
         }
-        for (t, v) in &entry.defs {
+        for (t, v) in entry.defs.iter() {
             let mentions = t.name().is_some_and(|n| written.contains(&n))
                 || v.terms
                     .iter()
@@ -6081,13 +6081,13 @@ impl<'a> Walk<'a> {
         // Each element template at entry is a candidate: an element store
         // writes no name, so the head would hold the template unchecked. A
         // turn keeps one where every end still holds it.
-        head.elems.clear();
+        head.elems = Default::default();
         let mut temps: Vec<(Name, Lin)> = (entry.elems.iter())
             .flat_map(|(a, ts)| ts.iter().map(move |t| (*a, t.clone())))
             .collect();
         let held = |h: &mut State, temps: &[(Name, Lin)]| {
             for (a, t) in temps {
-                h.elems.entry(*a).or_default().insert(t.clone());
+                h.elems.get_mut().entry(*a).or_default().insert(t.clone());
             }
         };
         let record = std::mem::replace(&mut self.record, false);
