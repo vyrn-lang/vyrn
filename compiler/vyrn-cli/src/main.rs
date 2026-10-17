@@ -5567,8 +5567,12 @@ fn build_wasm2c(
     // Linux and macOS. On Windows wasm-rt also counts calls in every prologue
     // unless told not to (2.5x on `benching.vyrn`'s "push 1000"); the handler
     // still catches the overflow without the counter.
+    //
+    // `WIN32_LEAN_AND_MEAN` halves the `windows.h` that `wasm-rt.h` includes
+    // (clang's header time falls by about 330 ms); the generated code is the same.
     if cfg!(windows) {
         cmd.arg("-DWASM_RT_NONCONFORMING_UNCHECKED_STACK_EXHAUSTION=1");
+        cmd.arg("-DWIN32_LEAN_AND_MEAN");
     }
     add_native_clang_flags(&mut cmd, native_target);
     if cfg!(windows) {
