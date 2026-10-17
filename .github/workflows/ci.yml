@@ -1088,12 +1088,25 @@ jobs:
           budget=$(gh api "repos/${{ github.repository }}/compare/$RANGE" --jq '.commits[].commit.message' |
             sed -n 's/^Allocs-Budget: \([0-9.]*\)%$/\1/p' | sort -g | tail -n 1)
           echo "CHECK_ALLOCS_THRESHOLD=${budget:-0.1}" >> "$GITHUB_ENV"
+          budget=$(gh api "repos/${{ github.repository }}/compare/$RANGE" --jq '.commits[].commit.message' |
+            sed -n 's/^Fuel-Budget: \([0-9.]*\)%$/\1/p' | sort -g | tail -n 1)
+          echo "VYRN_FUEL_BUDGET=${budget:-0.1}" >> "$GITHUB_ENV"
       - name: Compare the allocations of both binaries
         run: sh scripts/check-allocs.sh base/compiler/target/release/vyrn compiler/target/release/vyrn | tee check-allocs.txt
       - name: Show the comparison in the job summary
         if: always()
         run: |
           { echo '```'; cat check-allocs.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+      - name: No benchmark program spends more fuel than the base's pin
+        # Fuel is wasm instructions, exact on any machine. The base's pin is the
+        # reference, so a commit cannot hide growth by re-pinning. The first run
+        # after the pin lands has no base pin and compares against its own.
+        working-directory: compiler
+        run: |
+          set -eu
+          base=../base/compiler/vyrn-cli/tests/pins/fuel.tsv
+          [ -f "$base" ] || base=vyrn-cli/tests/pins/fuel.tsv
+          VYRN_FUEL_BASE="$PWD/$base" cargo test --quiet --release -p vyrn-cli --features allocs --test fuel -- --ignored --nocapture
       - name: No phase allocates faster than its input
         working-directory: compiler
         run: cargo test --quiet --release -p vyrn-cli --features allocs --test compiler_scaling -- --ignored --nocapture
