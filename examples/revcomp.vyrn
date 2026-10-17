@@ -29,27 +29,24 @@ fn reverseComplement(seq: Array<UInt8>, table: Array<UInt8> where value.length >
     return out
 }
 
-fn line(w: Array<UInt8>) -> String {
-    return match stringFromBytes(w) {
-        Ok(s) => s,
-        Err(_) => "",
-    }
-}
-
-fn writeWrapped(bs: Array<UInt8>) {
-    let mut w: Array<UInt8> = []
-    let mut i = 0
-    while i < bs.length {
-        w.push(bs[i])
-        if w.length == 60 {
-            print(line(w))
-            w.clear()
+fn writeReverseComplement(seq: Array<UInt8>, table: Array<UInt8> where value.length >= 256) {
+    let mut out: Array<UInt8> = []
+    out.reserve(seq.length + seq.length / 60 + 1)
+    let mut i = seq.length - 1
+    let mut col = 0
+    while i >= 0 {
+        out.push(table[Int64(seq[i])])
+        col = col + 1
+        if col == 60 {
+            out.push('\n')
+            col = 0
         }
-        i = i + 1
+        i = i - 1
     }
-    if w.length > 0 {
-        print(line(w))
+    if col > 0 {
+        out.push('\n')
     }
+    writeStdout(out)
 }
 
 fn run() {
@@ -60,19 +57,17 @@ fn run() {
         if l.byteLength > 0 && l[0] == '>' {
             if header.byteLength > 0 {
                 print(header)
-                writeWrapped(reverseComplement(seq, table))
-                seq = []
+                writeReverseComplement(seq, table)
+                seq.clear()
             }
             header = l
         } else {
-            for b in bytes(l) {
-                seq.push(b)
-            }
+            seq.append(bytes(l))
         }
     }
     if header.byteLength > 0 {
         print(header)
-        writeWrapped(reverseComplement(seq, table))
+        writeReverseComplement(seq, table)
     }
 }
 
