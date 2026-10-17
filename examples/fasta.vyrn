@@ -63,7 +63,8 @@ fn repeatFasta(header: String, b: Array<UInt8> where value.length >= 1, count: I
             k = (k + 1) % b.length
             i = i + 1
         }
-        print(line(w))
+        w.push('\n')
+        writeStdout(w)
         todo = todo - m
     }
 }
@@ -80,7 +81,8 @@ fn randomFasta(header: String, syms: Array<UInt8>, cum: Array<Float64> where val
             w.push(pick(syms, cum))
             i = i + 1
         }
-        print(line(w))
+        w.push('\n')
+        writeStdout(w)
         todo = todo - m
     }
 }

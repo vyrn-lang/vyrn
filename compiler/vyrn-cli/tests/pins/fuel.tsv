@@ -3,9 +3,9 @@ nbody	4205824
 spectralnorm	23399393
 fannkuch	5575740
 binarytrees	40090703
-fasta	2638991
-revcomp	5194594
-knucleotide	17617179
+fasta	2104982
+revcomp	1866996
+knucleotide	17073536
 pidigits	398803
 mandelbrot	49661433
-regexredux	36794522
+regexredux	36250879
