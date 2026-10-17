@@ -104,7 +104,10 @@ Without it, writes a native executable (default `<stem>`, `<stem>.exe` on
 Windows). The route is the same module through `wasm2c`, compiled by clang
 with the C WASI host (`compiler/vyrn-codegen/src/wasi_host.c`) and wabt's
 `wasm-rt`. The intermediate files stay beside the output for inspection:
-`<out>.wasm`, `<out>.w2c.c`, `<out>.w2c.h`, `<out>.host.c`.
+`<out>.wasm`, `<out>.w2c.c`, `<out>.w2c.h`, `<out>.host.c`. Only
+`<out>.w2c.c` compiles on a repeat build: the precompiled header and the
+runtime and host objects come from `~/.vyrn/cache/native`, which the first
+build of a toolchain fills (about as slow as a build was before the cache).
 
 Every native build passes `-O2 -ffp-contract=off`: contraction into FMA would
 change float bits. The microarchitecture comes from a curated set, never a
@@ -317,6 +320,9 @@ pin.
   `VYRN_NO_GEN_CACHE` disables it). A generation is keyed by everything it
   observed, absent inputs included, and each entry is authenticated with a
   per-user secret. Never restore it from another machine or CI run.
+- `~/.vyrn/cache/native/<key>/`: the precompiled header and the objects of the
+  native route that no program changes, for one clang, wasm2c, simde and flag
+  set. Safe to delete; the next `vyrn build` refills it.
 - `~/.vyrn/tools/<sha>/`: downloaded toolchain archives.
 
 Commands:
