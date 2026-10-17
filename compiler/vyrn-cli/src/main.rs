@@ -5380,8 +5380,8 @@ fn source_dir(path: &str) -> PathBuf {
         .unwrap_or_default()
 }
 
-/// Rewrites the module at `wasm` in place with `wasm-opt -O3`. The emitter
-/// never optimizes; this pass runs only under `--wasm-opt`.
+/// Rewrites the module at `wasm` in place with `wasm-opt -O3`. It runs only
+/// under `--wasm-opt`.
 fn wasm_opt(start: &Path, wasm: &Path) -> Result<(), ()> {
     let exe = match vyrn_codegen::toolchain::wasm_opt_from(start) {
         Ok(Some((exe, _))) => exe,
