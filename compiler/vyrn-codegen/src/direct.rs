@@ -920,12 +920,8 @@ impl Flat {
     fn store(&self, cx: &Cx<'_>, b: &mut Frame, a: u32, first: u32) {
         for (i, (off, ty, _)) in self.parts.iter().enumerate() {
             b.ins(&Instruction::LocalGet(a));
-            if *off != 0 {
-                b.ins(&Instruction::I32Const(*off as i32));
-                b.ins(&Instruction::I32Add);
-            }
             b.ins(&Instruction::LocalGet(first + i as u32));
-            b.ins(&cx.store(ty));
+            b.ins(&cx.store(ty, *off));
         }
     }
 
@@ -1692,8 +1688,8 @@ impl<'a> Cx<'a> {
         self.leaf(ty).load(off, signed)
     }
 
-    fn store(&self, ty: &Type) -> Instruction<'static> {
-        self.leaf(ty).store()
+    fn store(&self, ty: &Type, off: u32) -> Instruction<'static> {
+        self.leaf(ty).store(off)
     }
 
     /// Returns the signature of a body discovered during emission, reserving its function index
@@ -2238,18 +2234,22 @@ fn agg_landed(b: &mut Frame, size: u32, in_place: bool) {
 impl Dest {
     /// Push the address `off` bytes into this destination.
     fn addr(self, b: &mut Frame, off: u32) {
-        match self {
-            Dest::Slot(base) => {
-                b.slot(base + off);
-            }
-            Dest::Addr(l, base) => {
-                b.ins(&Instruction::LocalGet(l));
-                if base + off != 0 {
-                    b.ins(&Instruction::I32Const((base + off) as i32));
-                    b.ins(&Instruction::I32Add);
-                }
-            }
+        let k = self.base(b, off);
+        if k != 0 {
+            b.ins(&Instruction::I32Const(k as i32));
+            b.ins(&Instruction::I32Add);
         }
+    }
+
+    /// Pushes the address this destination is relative to and returns the offset of the
+    /// byte `off` into it, for a load or store to fold.
+    fn base(self, b: &mut Frame, off: u32) -> u32 {
+        let (l, base) = match self {
+            Dest::Slot(base) => (b.base(), base),
+            Dest::Addr(l, base) => (l, base),
+        };
+        b.ins(&Instruction::LocalGet(l));
+        base + off
     }
 
     /// Whether the binding's place `p` is this destination.
@@ -2724,7 +2724,7 @@ fn lower_body(
             (Place::Local(own), _) => {
                 b.ins(&Instruction::LocalGet(*arg));
                 b.ins(&Instruction::LocalGet(*own));
-                b.ins(&cx.store(ty));
+                b.ins(&cx.store(ty, 0));
             }
             (Place::Slot(off), Repr::Agg(l)) => {
                 b.ins(&Instruction::LocalGet(*arg));
@@ -2911,11 +2911,7 @@ fn fnval_captures(
             continue;
         }
         let a = b.local(ValType::I32);
-        b.ins(&Instruction::LocalGet(at));
-        if bl.fields[ci] != 0 {
-            b.ins(&Instruction::I32Const(bl.fields[ci] as i32));
-            b.ins(&Instruction::I32Add);
-        }
+        Dest::Addr(at, bl.fields[ci]).addr(b, 0);
         b.ins(&Instruction::LocalSet(a));
         if rel {
             f.rel_at(m, b, a, ct, 0)?;
@@ -3021,8 +3017,8 @@ fn lower_dispatcher(m: &mut Log, cx: &Cx<'_>, sig_ty: &Type, dsig: &Sig) -> Resu
                 let place = match cx.repr(ct, 0)? {
                     Repr::Scalar(vt) => {
                         let loc = b.local(vt);
-                        b.slot(at_off);
-                        b.ins(&cx.load(ct, 0));
+                        b.ins(&Instruction::LocalGet(b.base()));
+                        b.ins(&cx.load(ct, at_off));
                         b.ins(&Instruction::LocalSet(loc));
                         Place::Local(loc)
                     }
@@ -3643,13 +3639,7 @@ impl<'p> Fn_<'_, 'p> {
     /// aggregate's address, which [`Place::addr`] cannot answer.
     fn addr_local(&mut self, b: &mut Frame, p: Place, off: u32) -> u32 {
         match p {
-            Place::Local(l) => {
-                b.ins(&Instruction::LocalGet(l));
-                if off != 0 {
-                    b.ins(&Instruction::I32Const(off as i32))
-                        .ins(&Instruction::I32Add);
-                }
-            }
+            Place::Local(l) => Dest::Addr(l, off).addr(b, 0),
             _ => {
                 p.addr(b, off);
             }
@@ -3659,8 +3649,9 @@ impl<'p> Fn_<'_, 'p> {
         a
     }
 
-    /// Keep the value at `a` before a store overwrites it, with its release, or `None` when
-    /// displacing it releases nothing. [`Fn_::free_snap`] releases it after the store.
+    /// Keep the value `k` bytes past the address in `a` before a store overwrites it, with its
+    /// release, or `None` when displacing it releases nothing. [`Fn_::free_snap`] releases it
+    /// after the store.
     /// The snapshot comes first because an aggregate is built destination-first; callers
     /// reach here only where the new value does not name the place
     /// ([`vyrn_frontend::ast::mentions`]).
@@ -3668,6 +3659,7 @@ impl<'p> Fn_<'_, 'p> {
         &mut self,
         b: &mut Frame,
         a: u32,
+        k: u32,
         ty: &Type,
         line: usize,
     ) -> Result<Option<(Place, Rel)>, String> {
@@ -3677,13 +3669,15 @@ impl<'p> Fn_<'_, 'p> {
         let place = match self.cx.repr(ty, line)? {
             Repr::Agg(l) => {
                 let at = b.alloc(l.size, l.align);
-                b.slot(at).ins(&Instruction::LocalGet(a)).copy(l.size);
+                b.slot(at);
+                Dest::Addr(a, k).addr(b, 0);
+                b.copy(l.size);
                 Place::Slot(at)
             }
             Repr::Scalar(v) => {
                 let t = b.local(v);
                 b.ins(&Instruction::LocalGet(a))
-                    .ins(&self.cx.load(ty, 0))
+                    .ins(&self.cx.load(ty, k))
                     .ins(&Instruction::LocalSet(t));
                 Place::Local(t)
             }
@@ -3904,10 +3898,8 @@ impl<'p> Fn_<'_, 'p> {
     fn arena_route(&mut self, b: &mut Frame, on: bool) {
         if self.region_depth > 0 {
             b.ins(&Instruction::GlobalGet(HEAP_BASE))
-                .ins(&Instruction::I32Const(ARENA_ON as i32))
-                .ins(&Instruction::I32Add)
                 .ins(&Instruction::I32Const(i32::from(on)))
-                .ins(&Instruction::I32Store(word()));
+                .ins(&Instruction::I32Store(word_at(ARENA_ON)));
         }
     }
 
@@ -3984,9 +3976,9 @@ impl<'p> Fn_<'_, 'p> {
     fn str_append_shadow(&mut self, b: &mut Frame, l: u32, at: u32, site: NodeId, literal: bool) {
         let owns = !literal && self.releases_whole(site);
         self.str_append.insert(l, at);
-        b.slot(at)
+        b.ins(&Instruction::LocalGet(b.base()))
             .ins(&Instruction::I32Const(owns as i32))
-            .ins(&Instruction::I32Store(word()));
+            .ins(&Instruction::I32Store(word_at(at)));
     }
 
     /// Grows `s = s + a + b` in place: one runtime `strAppend` per part into `place`, whose
@@ -4248,10 +4240,10 @@ impl<'p> Fn_<'_, 'p> {
                     }
                     match self.cx.repr(&f.ty, line)? {
                         Repr::Scalar(_) => {
-                            b.slot(off + dl.fields[i]);
+                            b.ins(&Instruction::LocalGet(b.base()));
                             b.ins(&Instruction::LocalGet(src));
                             b.ins(&self.cx.load(&f.ty, sl.fields[j]));
-                            b.ins(&self.cx.store(&f.ty));
+                            b.ins(&self.cx.store(&f.ty, off + dl.fields[i]));
                         }
                         Repr::Agg(fl) => {
                             b.slot(off + dl.fields[i]);
@@ -5223,11 +5215,11 @@ impl<'p> Fn_<'_, 'p> {
         };
         let l2 = self.cx.layout(ty, line)?;
         let off = b.alloc(l2.size, l2.align);
-        b.slot(off);
+        b.ins(&Instruction::LocalGet(b.base()));
         b.ins(&Instruction::LocalGet(l));
-        b.ins(&self.cx.store(ty));
+        b.ins(&self.cx.store(ty, off));
         b.slot(off);
-        Ok((off, l, self.cx.load(ty, 0)))
+        Ok((l, self.cx.load(ty, off)))
     }
 
     /// This body's lambda literal under a closure row's key
@@ -5427,28 +5419,23 @@ impl<'p> Fn_<'_, 'p> {
                 // source mints is already the block's, and duplicating it orphans it:
                 // a `fn`-typed parameter in a specialization ([`Fn_::fnval_binding`]).
                 let dup = self.owns_heap(ty);
-                b.ins(&Instruction::LocalGet(p));
-                if bl.fields[i] != 0 {
-                    b.ins(&Instruction::I32Const(bl.fields[i] as i32));
-                    b.ins(&Instruction::I32Add);
-                }
-                self.part(m, b, caps, i, ty, line)?;
+                let at = Dest::Addr(p, bl.fields[i]);
                 match self.cx.repr(ty, line)? {
                     Repr::Scalar(_) => {
+                        let k = at.base(b, 0);
+                        self.part(m, b, caps, i, ty, line)?;
                         if dup {
                             self.copy_stack(m, b, ty, line)?;
                         }
-                        b.ins(&self.cx.store(ty));
+                        b.ins(&self.cx.store(ty, k));
                     }
                     Repr::Agg(fl) => {
+                        at.addr(b, 0);
+                        self.part(m, b, caps, i, ty, line)?;
                         b.copy(fl.size);
                         if dup {
                             let a = b.local(ValType::I32);
-                            b.ins(&Instruction::LocalGet(p));
-                            if bl.fields[i] != 0 {
-                                b.ins(&Instruction::I32Const(bl.fields[i] as i32));
-                                b.ins(&Instruction::I32Add);
-                            }
+                            at.addr(b, 0);
                             b.ins(&Instruction::LocalSet(a));
                             self.copy_at(m, b, a, ty, line)?;
                         }
@@ -5458,9 +5445,9 @@ impl<'p> Fn_<'_, 'p> {
             }
             Some(p)
         };
-        dest.addr(b, l.fields[0]);
+        let to = dest.base(b, l.fields[0]);
         b.hole(tag.0);
-        b.ins(&Instruction::I64Store(at(0)));
+        b.ins(&Instruction::I64Store(at(to)));
         dest.addr(b, l.fields[1]);
         match payload {
             Some(p) => {
@@ -5609,19 +5596,19 @@ impl<'p> Fn_<'_, 'p> {
             .layout(&Type::Array(Box::new(inner.clone())), line)?;
         let sl = self.stream_layout(line)?;
         let off = b.alloc(sl.size, sl.align);
-        b.slot(off + sl.fields[0]);
+        b.ins(&Instruction::LocalGet(b.base()));
         b.ins(&Instruction::LocalGet(arr));
         b.ins(&Instruction::I32Load(word_at(al.fields[0])));
-        b.ins(&Instruction::I32Store(word()));
-        b.slot(off + sl.fields[1]);
+        b.ins(&Instruction::I32Store(word_at(off + sl.fields[0])));
+        b.ins(&Instruction::LocalGet(b.base()));
         b.ins(&Instruction::LocalGet(arr));
         b.ins(&Instruction::I64Load(at(al.fields[1])));
-        b.ins(&Instruction::I64Store(at(0)));
+        b.ins(&Instruction::I64Store(at(off + sl.fields[1])));
         // Tag -1 marks a buffer for the stream's whole life; a buffer leaves words 3-5 zero.
         for (i, v) in [(2usize, -1i64), (3, 0), (4, 0), (5, 0)] {
-            b.slot(off + sl.fields[i]);
+            b.ins(&Instruction::LocalGet(b.base()));
             b.ins(&Instruction::I64Const(v));
-            b.ins(&Instruction::I64Store(at(0)));
+            b.ins(&Instruction::I64Store(at(off + sl.fields[i])));
         }
         b.slot(off);
         Ok(Type::Stream(Box::new(inner.clone())))
@@ -5670,21 +5657,21 @@ impl<'p> Fn_<'_, 'p> {
         };
         let sl = self.stream_layout(line)?;
         let off = b.alloc(sl.size, sl.align);
-        b.slot(off + sl.fields[0]);
+        b.ins(&Instruction::LocalGet(b.base()));
         b.ins(&Instruction::I32Const(0));
-        b.ins(&Instruction::I32Store(word()));
-        b.slot(off + sl.fields[1]);
+        b.ins(&Instruction::I32Store(word_at(off + sl.fields[0])));
+        b.ins(&Instruction::LocalGet(b.base()));
         b.ins(&Instruction::I64Const(0));
-        b.ins(&Instruction::I64Store(at(0)));
+        b.ins(&Instruction::I64Store(at(off + sl.fields[1])));
         b.slot(off + sl.fields[2]);
         b.ins(&Instruction::LocalGet(fv));
         b.copy(fl.size);
-        b.slot(off + sl.fields[4]);
+        b.ins(&Instruction::LocalGet(b.base()));
         b.ins(&Instruction::LocalGet(c0));
-        b.ins(&Instruction::I64Store(at(0)));
-        b.slot(off + sl.fields[5]);
+        b.ins(&Instruction::I64Store(at(off + sl.fields[4])));
+        b.ins(&Instruction::LocalGet(b.base()));
         b.ins(&Instruction::LocalGet(c1));
-        b.ins(&Instruction::I64Store(at(0)));
+        b.ins(&Instruction::I64Store(at(off + sl.fields[5])));
         b.slot(off);
         Ok(Type::Stream(Box::new(elem)))
     }
@@ -5816,14 +5803,14 @@ impl<'p> Fn_<'_, 'p> {
         let place = self.place_for(b, &r, line)?;
         let has = self.stream_next(m, b, src, place, &elem, line)?;
         let ooff = b.alloc(ol.size, ol.align);
-        b.slot(ooff);
+        b.ins(&Instruction::LocalGet(b.base()));
         b.ins(&Instruction::LocalGet(has));
         b.ins(&Instruction::I64ExtendI32U);
-        b.ins(&Instruction::I64Store(at(0)));
+        b.ins(&Instruction::I64Store(at(ooff)));
         for f in &ol.fields[1..] {
-            b.slot(ooff + f);
+            b.ins(&Instruction::LocalGet(b.base()));
             b.ins(&Instruction::I64Const(0));
-            b.ins(&Instruction::I64Store(at(0)));
+            b.ins(&Instruction::I64Store(at(ooff + f)));
         }
         b.ins(&Instruction::LocalGet(has));
         b.ins(&Instruction::If(BlockType::Empty));
@@ -6126,8 +6113,8 @@ impl<'p> Fn_<'_, 'p> {
         // contents, which `place` owns (`rel_word`'s boxed arm without the walk).
         if self.word2(elem)? == Word::Boxed {
             let p = b.local(ValType::I32);
-            b.slot(ooff);
-            b.ins(&Instruction::I64Load(at(ol.fields[1])));
+            b.ins(&Instruction::LocalGet(b.base()));
+            b.ins(&Instruction::I64Load(at(ooff + ol.fields[1])));
             b.ins(&Instruction::I32WrapI64);
             b.ins(&Instruction::LocalSet(p));
             b.ins(&Instruction::LocalGet(p))
@@ -6518,9 +6505,9 @@ impl<'p> Fn_<'_, 'p> {
             let at = stride * i as u32;
             match &r {
                 Repr::Scalar(_) => {
-                    dest.addr(b, at);
+                    let k = dest.base(b, at);
                     self.part(m, b, elems, i, elem, line)?;
-                    b.ins(&self.cx.store(elem));
+                    b.ins(&self.cx.store(elem, k));
                 }
                 Repr::Agg(_) => self.agg_part(m, b, elems, i, dest.at(at), stride, elem, line)?,
                 Repr::Unit => return unsupported("an array of Unit", line),
@@ -6547,9 +6534,9 @@ impl<'p> Fn_<'_, 'p> {
         for (i, f) in decl.iter().enumerate() {
             match self.cx.repr(&f.ty, line)? {
                 Repr::Scalar(_) => {
-                    dest.addr(b, l.fields[i]);
+                    let k = dest.base(b, l.fields[i]);
                     self.part(m, b, parts, order[i], &f.ty, line)?;
-                    b.ins(&self.cx.store(&f.ty));
+                    b.ins(&self.cx.store(&f.ty, k));
                 }
                 Repr::Agg(fl) => {
                     let at = dest.at(l.fields[i]);
@@ -6630,13 +6617,13 @@ impl<'p> Fn_<'_, 'p> {
         if n > 0 {
             self.fixed_elems(m, b, Dest::Addr(buf, 0), inner, elems, line)?;
         }
-        dest.addr(b, l.fields[0]);
+        let to = dest.base(b, l.fields[0]);
         b.ins(&Instruction::LocalGet(buf));
-        b.ins(&Instruction::I32Store(word()));
+        b.ins(&Instruction::I32Store(word_at(to)));
         for f in [l.fields[1], l.fields[2]] {
-            dest.addr(b, f);
+            let to = dest.base(b, f);
             b.ins(&Instruction::I64Const(n as i64));
-            b.ins(&Instruction::I64Store(at(0)));
+            b.ins(&Instruction::I64Store(at(to)));
         }
         dest.addr(b, 0);
         self.dest_used = used;
@@ -6673,14 +6660,14 @@ impl<'p> Fn_<'_, 'p> {
         b.copy(bytes as u32);
         let l = self.cx.layout(want, line)?;
         let off = b.alloc(l.size, l.align);
-        b.slot(off + l.fields[0]);
+        b.ins(&Instruction::LocalGet(b.base()));
         b.ins(&Instruction::LocalGet(buf));
-        b.ins(&Instruction::I32Store(word()));
+        b.ins(&Instruction::I32Store(word_at(off + l.fields[0])));
         // A literal's buffer is exactly full, so the first `push` grows it.
         for f in [l.fields[1], l.fields[2]] {
-            b.slot(off + f);
+            b.ins(&Instruction::LocalGet(b.base()));
             b.ins(&Instruction::I64Const(n as i64));
-            b.ins(&Instruction::I64Store(at(0)));
+            b.ins(&Instruction::I64Store(at(off + f)));
         }
         b.slot(off);
         Ok(())
@@ -6823,7 +6810,7 @@ impl<'p> Fn_<'_, 'p> {
         self.core_val(m, b, v, elem, line)?;
         match &r {
             Repr::Scalar(_) => {
-                b.ins(&self.cx.store(elem));
+                b.ins(&self.cx.store(elem, 0));
             }
             Repr::Agg(_) => {
                 b.copy(stride as u32);
@@ -6854,13 +6841,13 @@ impl<'p> Fn_<'_, 'p> {
         let ol = self.cx.layout(&opt, line)?;
         let out = b.alloc(ol.size, ol.align);
         // Write `None` first; the `Some` arm overwrites the tag and payload in place.
-        b.slot(out + ol.fields[0]);
+        b.ins(&Instruction::LocalGet(b.base()));
         b.ins(&Instruction::I64Const(0));
-        b.ins(&Instruction::I64Store(at(0)));
+        b.ins(&Instruction::I64Store(at(out + ol.fields[0])));
         for f in &ol.fields[1..] {
-            b.slot(out + f);
+            b.ins(&Instruction::LocalGet(b.base()));
             b.ins(&Instruction::I64Const(0));
-            b.ins(&Instruction::I64Store(at(0)));
+            b.ins(&Instruction::I64Store(at(out + f)));
         }
         b.ins(&Instruction::LocalGet(slot));
         let w = self.walk(b, aty, line)?;
@@ -6871,16 +6858,14 @@ impl<'p> Fn_<'_, 'p> {
         self.depth += 1;
         let last = b.local(ValType::I64);
         b.ins(&Instruction::LocalGet(slot));
-        b.ins(&Instruction::I32Const(al.fields[len_at] as i32));
-        b.ins(&Instruction::I32Add);
         b.ins(&Instruction::LocalGet(w.len));
         b.ins(&Instruction::I64Const(1));
         b.ins(&Instruction::I64Sub);
         b.ins(&Instruction::LocalTee(last));
-        b.ins(&Instruction::I64Store(at(0)));
-        b.slot(out + ol.fields[0]);
+        b.ins(&Instruction::I64Store(at(al.fields[len_at])));
+        b.ins(&Instruction::LocalGet(b.base()));
         b.ins(&Instruction::I64Const(1));
-        b.ins(&Instruction::I64Store(at(0)));
+        b.ins(&Instruction::I64Store(at(out + ol.fields[0])));
         b.slot(out + ol.fields[1]);
         self.elem_addr(b, &w, last);
         self.load_elem(b, &w, line)?;
@@ -6942,13 +6927,11 @@ impl<'p> Fn_<'_, 'p> {
         }
         let last = b.local(ValType::I64);
         b.ins(&Instruction::LocalGet(slot));
-        b.ins(&Instruction::I32Const(al.fields[len_at] as i32));
-        b.ins(&Instruction::I32Add);
         b.ins(&Instruction::LocalGet(w.len));
         b.ins(&Instruction::I64Const(1));
         b.ins(&Instruction::I64Sub);
         b.ins(&Instruction::LocalTee(last));
-        b.ins(&Instruction::I64Store(at(0)));
+        b.ins(&Instruction::I64Store(at(al.fields[len_at])));
         self.elem_addr(b, &w, idx);
         self.elem_addr(b, &w, last);
         b.copy(w.stride);
@@ -7484,7 +7467,7 @@ impl<'p> Fn_<'_, 'p> {
                 b.ins(&Instruction::Call(malloc));
                 b.ins(&Instruction::LocalTee(p));
                 b.ins(&Instruction::LocalGet(val));
-                b.ins(&self.cx.store(t));
+                b.ins(&self.cx.store(t, 0));
                 b.ins(&Instruction::LocalGet(p));
             }
             Repr::Agg(l) => {
@@ -7559,9 +7542,9 @@ impl<'p> Fn_<'_, 'p> {
             filled = slot + self.cx.words(t);
         }
         for slot in filled..l.fields.len() {
-            dest.addr(b, l.fields[slot]);
+            let to = dest.base(b, l.fields[slot]);
             b.ins(&Instruction::I64Const(0));
-            b.ins(&Instruction::I64Store(at(0)));
+            b.ins(&Instruction::I64Store(at(to)));
         }
         dest.addr(b, 0);
         self.dest_used = used;
@@ -7624,18 +7607,18 @@ impl<'p> Fn_<'_, 'p> {
         let tag = self.scratch(b, ValType::I32, 0);
         b.ins(&Instruction::LocalSet(tag));
         let d = dest(b, &l);
-        d.addr(b, l.fields[0]);
+        let to = d.base(b, l.fields[0]);
         b.ins(&Instruction::LocalGet(tag));
         b.ins(&Instruction::I64ExtendI32U);
-        b.ins(&Instruction::I64Store(at(0)));
-        d.addr(b, l.fields[1]);
+        b.ins(&Instruction::I64Store(at(to)));
+        let to = d.base(b, l.fields[1]);
         b.ins(&Instruction::LocalGet(held));
         self.encode_word2(b, &base, line)?;
-        b.ins(&Instruction::I64Store(at(0)));
+        b.ins(&Instruction::I64Store(at(to)));
         for f in &l.fields[2..] {
-            d.addr(b, *f);
+            let to = d.base(b, *f);
             b.ins(&Instruction::I64Const(0));
-            b.ins(&Instruction::I64Store(at(0)));
+            b.ins(&Instruction::I64Store(at(to)));
         }
         d.addr(b, 0);
         Ok(ty)
@@ -7954,8 +7937,8 @@ impl<'p> Fn_<'_, 'p> {
         let rl = self.cx.layout(&rty, line)?;
         let dest = b.alloc(rl.size, rl.align);
         self.str_from_bytes(b, dest, wsrc, &al, line)?;
-        b.slot(dest + rl.fields[0]);
-        b.ins(&Instruction::I64Load(at(0)));
+        b.ins(&Instruction::LocalGet(b.base()));
+        b.ins(&Instruction::I64Load(at(dest + rl.fields[0])));
         b.ins(&Instruction::I64Eqz);
         b.ins(&Instruction::If(BlockType::Empty));
         self.depth += 1;
@@ -7968,8 +7951,8 @@ impl<'p> Fn_<'_, 'p> {
         self.depth -= 1;
         b.ins(&Instruction::End);
         let k = b.local(ValType::I32);
-        b.slot(dest + rl.fields[1]);
-        b.ins(&Instruction::I64Load(at(0)));
+        b.ins(&Instruction::LocalGet(b.base()));
+        b.ins(&Instruction::I64Load(at(dest + rl.fields[1])));
         b.ins(&Instruction::I32WrapI64);
         b.ins(&Instruction::LocalSet(k));
         // The probe found no entry and the key is ours, so it is stored, not copied.
@@ -8201,7 +8184,7 @@ impl<'p> Fn_<'_, 'p> {
         b.ins(&Instruction::LocalGet(v));
         match &r {
             Repr::Scalar(_) => {
-                b.ins(&self.cx.store(val));
+                b.ins(&self.cx.store(val, 0));
             }
             Repr::Agg(vl) => {
                 b.copy(vl.size);
@@ -8299,16 +8282,8 @@ impl<'p> Fn_<'_, 'p> {
             return Ok(());
         }
         let sz = self.cx.layout(ty, line)?.size;
-        b.ins(&Instruction::LocalGet(dst));
-        if off != 0 {
-            b.ins(&Instruction::I32Const(off as i32));
-            b.ins(&Instruction::I32Add);
-        }
-        b.ins(&Instruction::LocalGet(src));
-        if off != 0 {
-            b.ins(&Instruction::I32Const(off as i32));
-            b.ins(&Instruction::I32Add);
-        }
+        Dest::Addr(dst, off).addr(b, 0);
+        Dest::Addr(src, off).addr(b, 0);
         b.copy(sz);
         Ok(())
     }
@@ -8431,9 +8406,9 @@ impl<'p> Fn_<'_, 'p> {
         b.ins(&Instruction::I32GeS);
         b.ins(&Instruction::If(BlockType::Empty));
         self.depth += 1;
-        b.slot(off + ol.fields[0]);
+        b.ins(&Instruction::LocalGet(b.base()));
         b.ins(&Instruction::I64Const(1));
-        b.ins(&Instruction::I64Store(at(0)));
+        b.ins(&Instruction::I64Store(at(off + ol.fields[0])));
         match self.word2(val)? {
             // Two words side by side in the value buffer: one copy, no encoding.
             Word::Inline2 => {
@@ -8446,17 +8421,17 @@ impl<'p> Fn_<'_, 'p> {
             // is a borrow of the entry, and every write to the map ends it before the
             // buffer can move, so nothing allocates and nothing frees a box (#463).
             Word::Boxed => {
-                b.slot(off + ol.fields[1]);
+                b.ins(&Instruction::LocalGet(b.base()));
                 self.map_val_addr(b, hdr, &l, idx, esz);
                 b.ins(&Instruction::I64ExtendI32U);
-                b.ins(&Instruction::I64Store(at(0)));
+                b.ins(&Instruction::I64Store(at(off + ol.fields[1])));
             }
             _ => {
-                b.slot(off + ol.fields[1]);
+                b.ins(&Instruction::LocalGet(b.base()));
                 self.map_val_addr(b, hdr, &l, idx, esz);
                 b.ins(&self.cx.load(val, 0));
                 self.encode_word2(b, val, line)?;
-                b.ins(&Instruction::I64Store(at(0)));
+                b.ins(&Instruction::I64Store(at(off + ol.fields[1])));
             }
         }
         self.depth -= 1;
@@ -8837,14 +8812,14 @@ impl<'p> Fn_<'_, 'p> {
             self.each(m, b, false, buf, len, 4, &Type::Str, line)?;
         }
         let off = b.alloc(al.size, al.align);
-        b.slot(off + al.fields[0]);
+        b.ins(&Instruction::LocalGet(b.base()));
         b.ins(&Instruction::LocalGet(buf));
-        b.ins(&Instruction::I32Store(word()));
+        b.ins(&Instruction::I32Store(word_at(off + al.fields[0])));
         for f in [al.fields[1], al.fields[2]] {
-            b.slot(off + f);
+            b.ins(&Instruction::LocalGet(b.base()));
             b.ins(&Instruction::LocalGet(len));
             b.ins(&Instruction::I64ExtendI32U);
-            b.ins(&Instruction::I64Store(at(0)));
+            b.ins(&Instruction::I64Store(at(off + f)));
         }
         b.slot(off);
         Ok(aty)
@@ -8915,15 +8890,15 @@ impl<'p> Fn_<'_, 'p> {
 /// Writes the inline state of a `SmallArray<T, N>` header at `dest`: `len`, `cap == n`
 /// and a null `data`.
 fn sa_head(b: &mut Frame, dest: Dest, l: &Layout, len: usize, n: usize) {
-    dest.addr(b, l.fields[0]);
+    let to = dest.base(b, l.fields[0]);
     b.ins(&Instruction::I64Const(len as i64));
-    b.ins(&Instruction::I64Store(at(0)));
-    dest.addr(b, l.fields[1]);
+    b.ins(&Instruction::I64Store(at(to)));
+    let to = dest.base(b, l.fields[1]);
     b.ins(&Instruction::I64Const(n as i64));
-    b.ins(&Instruction::I64Store(at(0)));
-    dest.addr(b, l.fields[2]);
+    b.ins(&Instruction::I64Store(at(to)));
+    let to = dest.base(b, l.fields[2]);
     b.ins(&Instruction::I32Const(0));
-    b.ins(&Instruction::I32Store(word()));
+    b.ins(&Instruction::I32Store(word_at(to)));
 }
 
 /// A `SmallArray<T, N>` is `{ i64 len, i64 cap, ptr data, [N x T] inline }` with two states:
@@ -9068,13 +9043,13 @@ impl<'p> Fn_<'_, 'p> {
         b.ins(&Instruction::LocalSet(count));
         self.each(m, b, false, buf, count, stride, inner, line)?;
         let off = b.alloc(al.size, al.align);
-        b.slot(off + al.fields[0]);
+        b.ins(&Instruction::LocalGet(b.base()));
         b.ins(&Instruction::LocalGet(buf));
-        b.ins(&Instruction::I32Store(word()));
+        b.ins(&Instruction::I32Store(word_at(off + al.fields[0])));
         for f in [al.fields[1], al.fields[2]] {
-            b.slot(off + f);
+            b.ins(&Instruction::LocalGet(b.base()));
             b.ins(&Instruction::LocalGet(len));
-            b.ins(&Instruction::I64Store(at(0)));
+            b.ins(&Instruction::I64Store(at(off + f)));
         }
         b.slot(off);
         Ok(want)
@@ -9270,13 +9245,14 @@ fn each_block(blk: &Block, fe: &mut dyn FnMut(&Expr), fs: &mut dyn FnMut(&Stmt))
     );
 }
 
-/// A scalar spilled for a `modify` call: its slot, its local and its load ([`Fn_::spill`]).
-type Spill = (u32, u32, Instruction<'static>);
+/// A scalar spilled for a `modify` call: its local and the load of its slot from the frame
+/// base ([`Fn_::spill`]).
+type Spill = (u32, Instruction<'static>);
 
 /// Write each spilled scalar back into its local after the call.
 fn reload(b: &mut Frame, spilled: &[Spill]) {
-    for (off, l, load) in spilled {
-        b.slot(*off);
+    for (l, load) in spilled {
+        b.ins(&Instruction::LocalGet(b.base()));
         b.ins(load);
         b.ins(&Instruction::LocalSet(*l));
     }
@@ -10643,11 +10619,19 @@ impl<'a, 'p> Fn_<'a, 'p> {
                     ..
                 } => {
                     let (ty, off) = self.core_addr(m, b, place, *line)?;
-                    self.core_step(b, off);
+                    // A scalar store folds the field step; an aggregate's copy needs it added.
+                    let r = self.cx.repr(&ty, *line)?;
+                    let k = match r {
+                        Repr::Scalar(_) => off.unwrap_or(0),
+                        _ => {
+                            self.core_step(b, off);
+                            0
+                        }
+                    };
                     let snap = if *releases {
                         let a = b.local(ValType::I32);
                         b.ins(&Instruction::LocalTee(a));
-                        self.snap_at(b, a, &ty, *line)?
+                        self.snap_at(b, a, k, &ty, *line)?
                             .map(|(p, rel)| (p, around(rel, holes)))
                     } else {
                         None
@@ -10660,10 +10644,10 @@ impl<'a, 'p> Fn_<'a, 'p> {
                         }
                         _ => {
                             self.core_val(m, b, value, &ty, *line)?;
-                            match self.cx.repr(&ty, *line)? {
+                            match r {
                                 Repr::Agg(l) => agg_landed(b, l.size, false),
                                 _ => {
-                                    b.ins(&self.cx.store(&ty));
+                                    b.ins(&self.cx.store(&ty, k));
                                 }
                             }
                         }
@@ -11590,11 +11574,11 @@ impl<'a, 'p> Fn_<'a, 'p> {
                 b.ins(&Instruction::I32Const(at as i32));
                 Ok((ty, None))
             }
+            // Nested field steps sum into one offset.
             At::Field(base, f) => {
                 let (bty, off) = self.core_addr(m, b, base, line)?;
-                self.core_step(b, off);
                 let (at, fty) = self.field_of(&bty, f, line)?;
-                Ok((thunk_of(fty), Some(at)))
+                Ok((thunk_of(fty), Some(off.unwrap_or(0) + at)))
             }
             // The header read, the bounds check, and one stride multiply. A String is walked
             // from its pointer, which is its value. Its element is a `UInt8`, where the walk
