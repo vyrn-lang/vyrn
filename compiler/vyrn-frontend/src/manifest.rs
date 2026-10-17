@@ -339,6 +339,12 @@ pub fn cache_dir() -> PathBuf {
     Path::new(&home()).join(".vyrn/cache/sha256")
 }
 
+/// The native route's cache: `~/.vyrn/cache/native`. Each subdirectory holds
+/// the objects and the precompiled header of one toolchain and flag set.
+pub fn native_cache_dir() -> PathBuf {
+    Path::new(&home()).join(".vyrn/cache/native")
+}
+
 /// A project's committed, air-gapped copy of the same blobs.
 pub fn vendor_dir(project_dir: &str) -> PathBuf {
     Path::new(project_dir).join("vyrn_vendor/sha256")

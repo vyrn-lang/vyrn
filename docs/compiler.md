@@ -406,7 +406,7 @@ when the wasm route inlines runtime leaf calls.
 |---|---|---|
 | In process | `vyrn run`, `test`, `bench --check`, `serve` | the embedded `wasmtime` under `vyrn_cli::wasmrun`, a hand-written host for the WASI calls `direct.rs` declares |
 | A file | `vyrn build --target wasm` | the bytes as emitted; `wasmtime run --dir .` runs them |
-| Native | `vyrn build`, `vyrn bench` | `build_wasm2c`: wasm2c turns the module into C, and clang compiles it with `wasi_host.c` and wabt's `wasm-rt` |
+| Native | `vyrn build`, `vyrn bench` | `build_wasm2c`: wasm2c turns the module into C, and clang compiles it against a precompiled header and links it with `wasi_host.c` and wabt's `wasm-rt`, whose objects `nativec` caches |
 | Browser | `web/`, the site's playground | `web/wasi-min.js` answers the same imports with a browser's limits: no argv, EOF on stdin, no files |
 
 `vyrn_codegen::toolchain` finds wasm2c, clang, simde, wasmtime and
@@ -418,6 +418,19 @@ x86-64 level (the default is `v2`). clang always runs with
 On Windows x64 the driver declares each multi-value function `sysv_abi`
 before clang runs (`toolchain::sysv_multi_returns`), so a two-word result
 returns in registers, as it does on Linux.
+
+The native route compiles only the program's C. The precompiled header
+(wasm-rt, libc, simde) and the objects of the host and of wabt's two runtime
+files live in `~/.vyrn/cache/native/<key>/` (`nativec.rs`). The key hashes
+`clang --version`, the wasm2c version, simde's `simde-common.h`, every compile
+flag (so `--native-target` and `VYRN_DEBUG_SYMBOLS` select a directory) and
+wabt's `wasm-rt*` files; a changed input names a new directory, so no entry
+is stale. The host object's name hashes the host text and the program's
+`.w2c.h` less its include guard, because the host reads `w2c_prog`'s layout
+from that header. Every entry is renamed into place, and a `.sum` file beside
+it holds the object's SHA-256 (the header's length), so a damaged entry is
+rebuilt. The first build of a toolchain fills the directory at the cost of a
+build without the cache; a directory of a retired toolchain is deleted by hand.
 
 `vyrn test` and `vyrn bench --check` compile the selected bodies into one
 module, each an exported `__vyrn_body_<k>`, and run them in one instance, so

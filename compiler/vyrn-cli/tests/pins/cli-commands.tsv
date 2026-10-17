@@ -4,7 +4,7 @@ bench	502	11
 serve, dev	464	6
 (dispatch)	335	4
 doc	283	9
-build	272	17
+build	265	17
 routes	262	1
 run	208	2
 deps	198	3
@@ -13,7 +13,7 @@ fmt	182	5
 dev	140	12
 fix	129	1
 test, bench	127	2
-build, bench	110	0
+build, bench	120	0
 (global)	94	2
 vendor	66	6
 add	58	3

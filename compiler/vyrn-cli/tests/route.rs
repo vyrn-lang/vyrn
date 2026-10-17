@@ -224,3 +224,58 @@ fn wasm_opt_rewrites_the_module_and_keeps_the_output() {
     assert_eq!(norm(&opt.stdout), norm(&plain.stdout));
     assert_eq!(norm(&opt.stderr), norm(&plain.stderr));
 }
+
+/// A cached object that fails its `.sum` is rebuilt, never linked: a truncated
+/// object and a deleted one both leave the build green and its output the same.
+#[test]
+#[ignore = "needs clang, wasm2c, simde and wasmtime; run explicitly: cargo test -p vyrn-cli --release --test route -- --ignored"]
+fn a_damaged_native_cache_entry_is_rebuilt() {
+    if route_tools().is_none() {
+        eprintln!("SKIP: the wasm2c route's tools are not all present");
+        return;
+    }
+    let path = examples_dir().join("nbody.vyrn");
+    let out_dir = scratch("route-native-cache");
+    // The cache lives under the home this test replaces, and so do the pinned
+    // tools: resolve them under the real home and hand them over by override.
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let wasm2c = vyrn_codegen::toolchain::wasm2c_from(&root)
+        .unwrap()
+        .unwrap()
+        .exe;
+    let (simde, _) = vyrn_codegen::toolchain::simde_from(&root).unwrap();
+    let home = out_dir.join("home");
+    let built = || {
+        let exe = out_dir.join("nbody.exe");
+        let build = vyrn()
+            .env("VYRN_WASM2C", &wasm2c)
+            .env("VYRN_SIMDE", &simde)
+            .env("USERPROFILE", &home)
+            .env("HOME", &home)
+            .arg("build")
+            .arg(&path)
+            .arg("-o")
+            .arg(&exe)
+            .output()
+            .expect("build");
+        assert!(build.status.success(), "{}", norm(&build.stderr));
+        assert_eq!(norm(&build.stderr), "", "a native build warns");
+        norm(&Command::new(&exe).output().expect("run").stdout)
+    };
+    let want = built();
+    let entry = std::fs::read_dir(home.join(".vyrn/cache/native"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path()
+        .join("wasm-rt-mem-impl.o");
+    // A COFF object carries its build time, so a rebuild matches in length only.
+    let whole = std::fs::read(&entry).unwrap();
+    std::fs::write(&entry, &whole[..whole.len() / 2]).unwrap();
+    assert_eq!(built(), want);
+    assert_eq!(std::fs::read(&entry).unwrap().len(), whole.len());
+    std::fs::remove_file(&entry).unwrap();
+    assert_eq!(built(), want);
+    assert!(entry.exists());
+}

@@ -17,6 +17,7 @@ use vyrn_lower::lastrun;
 
 use vyrn_codegen::toolchain::find_clang;
 
+mod nativec;
 mod remote;
 // In the library target because `vyrn-frontend`'s tests run their programs
 // through it too.
@@ -120,7 +121,7 @@ impl GlobalFlags {
 ///
 /// A curated set, not a passthrough `-march`: a typo would surface as a clang
 /// error, and an arbitrary `-march` can turn on FMA (see
-/// `add_native_clang_flags`).
+/// `native_compile_flags`).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum NativeTarget {
     /// The bare `x86-64` baseline: SSE2 and nothing later.
@@ -180,7 +181,7 @@ impl NativeTarget {
 /// calls (0.43x of C); SSE4.1's `roundps` makes the loop 2.1x faster.
 const DEFAULT_NATIVE_TARGET: NativeTarget = NativeTarget::V2;
 
-/// Every flag a native clang invocation needs. `bench_native` and `build` both
+/// Every flag a native clang compile needs. `bench_native` and `build` both
 /// call it, so the benchmark measures the binary `build` ships.
 ///
 /// - `-O2`: clang's default is `-O0`.
@@ -191,10 +192,7 @@ const DEFAULT_NATIVE_TARGET: NativeTarget = NativeTarget::V2;
 ///   engines. Passed unconditionally: aarch64's baseline has FMA. At v2 the
 ///   assembly is identical with and without it.
 /// - `-pthread`: worker threads. Win32 threads need no flag.
-/// - `-lm`: below SSE4.1 the vector roundings scalarize to `ceilf`/`floorf`/
-///   `truncf`/`rintf`, in libm on Unix. Windows links them from the UCRT by
-///   default, so a Windows-only check cannot see this missing.
-fn add_native_clang_flags(cmd: &mut Command, target: NativeTarget) {
+fn native_compile_flags(cmd: &mut Command, target: NativeTarget) {
     cmd.arg("-O2").arg("-ffp-contract=off");
     // `VYRN_DEBUG_SYMBOLS=1` keeps debug info for a symbolizer; `-g` changes
     // no codegen under -O2.
@@ -206,13 +204,26 @@ fn add_native_clang_flags(cmd: &mut Command, target: NativeTarget) {
     }
     if !cfg!(windows) {
         cmd.arg("-pthread");
-        cmd.arg("-lm");
     }
+}
+
+/// The flags only the link step takes; clang warns about them on a compile.
+///
+/// - `-lm`: below SSE4.1 the vector roundings scalarize to `ceilf`/`floorf`/
+///   `truncf`/`rintf`, in libm on Unix. Windows links them from the UCRT by
+///   default, so a Windows-only check cannot see this missing.
+/// - `/STACK`: the run stack; see `trap::RUN_STACK_BYTES`.
+/// - `-lbcrypt`: `random_get` is `BCryptGenRandom`, as in
+///   `vyrn-genwasm/src/wasi.rs`.
+fn native_link_flags(cmd: &mut Command) {
     if cfg!(windows) {
         cmd.arg(format!(
             "-Wl,/STACK:{}",
             vyrn_frontend::trap::RUN_STACK_BYTES
         ));
+        cmd.arg("-lbcrypt");
+    } else {
+        cmd.arg("-lm");
     }
 }
 
@@ -5536,10 +5547,8 @@ fn build_wasm2c(
             return Err(());
         }
     };
-    if !write(
-        &host_path,
-        vyrn_codegen::toolchain::wasi_host_c(&header).as_bytes(),
-    ) {
+    let host_text = vyrn_codegen::toolchain::wasi_host_c(&header);
+    if !write(&host_path, host_text.as_bytes()) {
         return Err(());
     }
 
@@ -5549,32 +5558,27 @@ fn build_wasm2c(
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
-    // `show_path` drops the `\\?\` prefix of a canonicalized start, which
-    // clang's include search does not take.
-    let mut cmd = Command::new(&clang);
-    cmd.arg(&c_path)
-        .arg(&host_path)
-        .arg(show_path(&w2c.runtime.join("wasm-rt-impl.c")))
-        .arg(show_path(&w2c.runtime.join("wasm-rt-mem-impl.c")))
+    let hdr_def = format!("-DVYRN_W2C_HEADER=\"{h_name}\"");
+    // Only the program's own C file compiles here; the rest is cached. See
+    // `nativec`.
+    let native = nativec::Native::open(&clang, &w2c, &simde, native_target)?;
+    let pch = native.pch()?;
+    // The link order of the single clang call this replaced; it fixes where
+    // the program's functions land.
+    let objs = [
+        native.host(&host_path, &host_text, &header, &hdr_def)?,
+        native.runtime("wasm-rt-impl")?,
+        native.runtime("wasm-rt-mem-impl")?,
+    ];
+    let mut cmd = native.cc();
+    cmd.arg("-include-pch")
+        .arg(&pch)
+        .arg(&c_path)
+        .args(&objs)
         .arg("-o")
         .arg(&out)
-        .arg(format!("-I{}", show_path(&w2c.include)))
-        .arg(format!("-I{}", show_path(&w2c.runtime)))
-        .arg(format!("-I{}", show_path(&simde)))
-        .arg(format!("-DVYRN_W2C_HEADER=\"{h_name}\""));
-    // wasm-rt's guard-page handler maps a stack overflow to a trap: a vectored
-    // exception handler on Windows, a signal handler on an alternate stack on
-    // Linux and macOS. On Windows wasm-rt also counts calls in every prologue
-    // unless told not to (2.5x on `benching.vyrn`'s "push 1000"); the handler
-    // still catches the overflow without the counter.
-    if cfg!(windows) {
-        cmd.arg("-DWASM_RT_NONCONFORMING_UNCHECKED_STACK_EXHAUSTION=1");
-    }
-    add_native_clang_flags(&mut cmd, native_target);
-    if cfg!(windows) {
-        // `random_get` is `BCryptGenRandom`, as in `vyrn-genwasm/src/wasi.rs`.
-        cmd.arg("-lbcrypt");
-    }
+        .arg(&hdr_def);
+    native_link_flags(&mut cmd);
     match cmd.status() {
         Ok(s) if s.success() => Ok(()),
         Ok(s) => {
@@ -5835,7 +5839,7 @@ another bench   # trailing reason
             NativeTarget::Native,
         ] {
             let mut cmd = Command::new("clang");
-            add_native_clang_flags(&mut cmd, t);
+            native_compile_flags(&mut cmd, t);
             let args: Vec<String> = cmd
                 .get_args()
                 .map(|a| a.to_string_lossy().into_owned())
