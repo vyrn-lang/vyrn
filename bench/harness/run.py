@@ -77,6 +77,7 @@ from __future__ import annotations
 
 import argparse
 import gzip
+import hashlib
 import json
 import os
 import platform
@@ -226,6 +227,49 @@ def vyrn_exe() -> Path:
     return p
 
 
+def check_vyrn_fresh():
+    """Refuses a driver older than the last commit to `compiler/` or `std/`.
+
+    The record names HEAD's commit, so it must time HEAD's compiler. A record
+    once ran a driver built from an older tree and named the newer commit.
+    """
+    last = subprocess.run(
+        ["git", "-C", str(ROOT), "log", "-1", "--format=%ct", "--", "compiler", "std"],
+        capture_output=True, text=True,
+    ).stdout.strip()
+    if last and vyrn_exe().stat().st_mtime < int(last):
+        die(f"{vyrn_exe()} is older than the last commit to compiler/ or std/; rebuild it")
+
+
+def sha256_of(path: Path | str | None) -> str | None:
+    """The file's sha256, or None when the tool cannot be found."""
+    if not path or not Path(path).is_file():
+        return None
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for block in iter(lambda: f.read(1 << 20), b""):
+            h.update(block)
+    return h.hexdigest()
+
+
+def binaries() -> dict:
+    """The sha256 of each binary that builds or runs a contestant.
+
+    `rustc` on PATH is rustup's proxy, so the compiler is read from the sysroot.
+    """
+    sysroot = tool_version(["rustc", "--print", "sysroot"])
+    rustc = Path(sysroot) / "bin" / ("rustc.exe" if os.name == "nt" else "rustc")
+    return {
+        "vyrn": sha256_of(vyrn_exe()),
+        "clang": sha256_of(shutil.which("clang")),
+        "rustc": sha256_of(rustc),
+        "node": sha256_of(shutil.which(JS_RUNTIMES["js"])),
+        "bun": sha256_of(shutil.which(JS_RUNTIMES["bun"])),
+        "wasmtime": sha256_of(wasmtime_exe()),
+        "wasm_opt": sha256_of(pinned_exe("binaryen", "wasm-opt", "VYRN_WASM_OPT")),
+    }
+
+
 def lock_tool(tool: str) -> tuple[str, str]:
     """The version and sha256 vyrn.lock pins for `tool` on this platform.
 
@@ -370,6 +414,7 @@ def environment() -> dict:
             "lock_sha256": opt_sha,
             "path": str(wasm_opt),
         },
+        "sha256": binaries(),
         "flags": {
             "c": "clang " + " ".join(CFLAGS),
             "rust": "rustc " + " ".join(RUSTFLAGS),
@@ -888,6 +933,7 @@ def main() -> int:
 
     started = time.time()
     print("toolchain")
+    check_vyrn_fresh()
     env = environment()
     for k in ("clang", "rustc", "node", "bun"):
         print(f"  {k}: {env[k]}")
