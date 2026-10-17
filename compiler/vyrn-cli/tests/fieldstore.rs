@@ -76,9 +76,10 @@ fn a_field_write_into_a_heapless_element_is_one_store_and_no_copy() {
         0,
         "the element was copied out or back around one field store:\n{body}"
     );
+    // `y` is at offset 8, which the store carries instead of an `i32.add`.
     assert!(
-        body.contains("f64.store"),
-        "the field store itself is missing:\n{body}"
+        body.contains("f64.store offset=8"),
+        "the field store does not fold its offset:\n{body}"
     );
 }
 

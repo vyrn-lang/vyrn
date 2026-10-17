@@ -78,9 +78,9 @@ impl Leaf {
         }
     }
 
-    /// The store of this leaf at offset 0. See [`Leaf::load`] for the `V128` hint.
-    pub fn store(self) -> Instruction<'static> {
-        let m = |align| mem_arg(0, align);
+    /// The store of this leaf at a static offset. See [`Leaf::load`] for the `V128` hint.
+    pub fn store(self, off: u32) -> Instruction<'static> {
+        let m = |align| mem_arg(off, align);
         match self {
             Leaf::I64 => Instruction::I64Store(m(3)),
             Leaf::F64 => Instruction::F64Store(m(3)),
