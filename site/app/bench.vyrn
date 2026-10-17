@@ -679,10 +679,10 @@ fn causeRows() -> Array<Cause> {
     return [
         Cause { program: "nbody", verdict: "a deviation", cause: "Rust's compiler turns the inner loop into instructions that work on two numbers at once, and ours works on one at a time: Rust's program holds 103 paired multiplies and ours holds 5. The WebAssembly build took 12.5 seconds in the 2026-09-01 record, when a write to one field of an array element copied the whole element out and back. Most of that went when the write became a single store.", label: "no vector instructions" },
         Cause { program: "spectralnorm", verdict: "inside the noise band", cause: "", label: "" },
-        Cause { program: "fannkuch", verdict: "at the edge of the band", cause: "The loop allocates nothing and keeps no index check: one buffer is refilled in place for each of the 39,916,800 permutations. The native build still takes 197 ms more than Rust, and where that time goes has not been measured.", label: "nothing allocated in the loop" },
-        Cause { program: "binarytrees", verdict: "ahead of the band", cause: "Bun and node both beat the native build here, by 120 ms and 68 ms. Both Vyrn builds carry the same allocator, compiled into the program: a freed node goes onto a list of blocks of its size, and the next node of that size comes off the list. The C and Rust entries call the system's allocator for every node. The native build took 2,004 ms in the 2026-09-01 record, when it too called the system's allocator for every node.", label: "who allocates the memory" },
-        Cause { program: "fasta", verdict: "a deviation", cause: "What one 60-byte output line costs. The program fills one reused buffer per line, checks that its bytes are valid text \u{2014} over bytes already known to be plain ASCII \u{2014} and builds a piece of text from them before it prints. A way to write raw bytes straight out exists; this program has not been moved onto it.", label: "the price of one output line" },
-        Cause { program: "revcomp", verdict: "a deviation", cause: "Three passes over every byte, and a cost per line on top: about 120 million appends for 40 million bases, each with a capacity check, and every input line copied into a fresh array before its bases are appended. Rust's output loop allocates nothing at all. The widest spread of the set is in this program \u{2014} the C entry is itself 4.4 times slower than Rust here, for reading its input a line at a time.", label: "a pass per byte, and a cost per line" },
+        Cause { program: "fannkuch", verdict: "at the edge of the band", cause: "The loop allocates nothing and keeps no index check: one buffer is refilled in place for each of the 39,916,800 permutations. The native build still takes 152 ms more than Rust, and where that time goes has not been measured.", label: "nothing allocated in the loop" },
+        Cause { program: "binarytrees", verdict: "ahead of the band", cause: "Bun and node both beat the native build here, by 124 ms and 76 ms. Both Vyrn builds carry the same allocator, compiled into the program: a freed node goes onto a list of blocks of its size, and the next node of that size comes off the list. The C and Rust entries call the system's allocator for every node. The native build took 2,004 ms in the 2026-09-01 record, when it too called the system's allocator for every node.", label: "who allocates the memory" },
+        Cause { program: "fasta", verdict: "a deviation", cause: "Each 60-byte line is built in one reused buffer and written out as raw bytes, with no check that they are valid text. What is left is the random generator: its seed lives in a module global, so it is read from memory and written back for every byte the generator draws, where Rust keeps it in a register.", label: "a seed kept in memory" },
+        Cause { program: "revcomp", verdict: "a deviation", cause: "One pass complements, reverses and wraps each sequence into one reserved array, and the array goes out as raw bytes in a single write. Every byte still goes in through an append that checks the array's capacity, where Rust's loop writes each byte into place. The widest spread of the set is in this program \u{2014} the C entry is itself 2.6 times slower than Rust here, for reading its input a line at a time.", label: "a capacity check per byte" },
         Cause { program: "knucleotide", verdict: "ahead of the band", cause: "This row once took 211 times C's time, when looking a key up in a map meant reading every key in it. Maps carry a hash index, and this program's key is a single number rolled along the sequence rather than a fresh piece of text at every position.", label: "faster than C, and why" },
         Cause { program: "pidigits", verdict: "inside the noise band", cause: "", label: "" },
         Cause { program: "mandelbrot", verdict: "inside the noise band", cause: "Floating-point arithmetic with no allocation and no output shaping, so what is measured is the arithmetic, and six of the seven readings sit within 17% of C. The program is on the list because Vyrn can write raw bytes: this image's pixels are arbitrary bytes, and text cannot carry them.", label: "the closest six readings here" },
@@ -754,39 +754,39 @@ test "the record still has the shape this reader cuts" {
         assert(c.makeUs == 0 || c.makePeakBytes > 0)
     }
     assertEq(benchDate(), "2026-10-17")
-    assertEq(benchRuns(), "5")
+    assertEq(benchRuns(), "100")
 }
 
 test "the p50s are the ones the published record holds" {
-    assertEq(msOf(p50Of("nbody", "c")), "856 ms")
-    assertEq(msOf(p50Of("nbody", "rust")), "644 ms")
-    assertEq(msOf(p50Of("nbody", "js")), "1181 ms")
-    assertEq(msOf(p50Of("nbody", "vyrn-native")), "1029 ms")
-    assertEq(msOf(p50Of("nbody", "vyrn-wasm")), "1246 ms")
-    assertEq(msOf(p50Of("nbody", "vyrn-wasm-opt")), "979 ms")
-    assertEq(msOf(p50Of("spectralnorm", "vyrn-wasm-opt")), "969 ms")
-    assertEq(msOf(p50Of("knucleotide", "c")), "301 ms")
-    assertEq(msOf(p50Of("knucleotide", "rust")), "229 ms")
-    assertEq(msOf(p50Of("knucleotide", "vyrn-native")), "127 ms")
-    assertEq(msOf(p50Of("binarytrees", "js")), "616 ms")
-    assertEq(msOf(p50Of("binarytrees", "bun")), "378 ms")
-    assertEq(msOf(p50Of("pidigits", "vyrn-native")), "1316 ms")
+    assertEq(msOf(p50Of("nbody", "c")), "847 ms")
+    assertEq(msOf(p50Of("nbody", "rust")), "637 ms")
+    assertEq(msOf(p50Of("nbody", "js")), "1030 ms")
+    assertEq(msOf(p50Of("nbody", "vyrn-native")), "974 ms")
+    assertEq(msOf(p50Of("nbody", "vyrn-wasm")), "1059 ms")
+    assertEq(msOf(p50Of("nbody", "vyrn-wasm-opt")), "933 ms")
+    assertEq(msOf(p50Of("spectralnorm", "vyrn-wasm-opt")), "949 ms")
+    assertEq(msOf(p50Of("knucleotide", "c")), "302 ms")
+    assertEq(msOf(p50Of("knucleotide", "rust")), "195 ms")
+    assertEq(msOf(p50Of("knucleotide", "vyrn-native")), "102 ms")
+    assertEq(msOf(p50Of("binarytrees", "js")), "386 ms")
+    assertEq(msOf(p50Of("binarytrees", "bun")), "338 ms")
+    assertEq(msOf(p50Of("pidigits", "vyrn-native")), "1267 ms")
 }
 
 test "the normalized figures are the ones the record computes" {
-    assertEq(ratioText(ratioOf("nbody", "vyrn-native", "c")), "1.20x")
-    assertEq(ratioText(ratioOf("nbody", "vyrn-wasm", "c")), "1.46x")
-    assertEq(ratioText(ratioOf("nbody", "vyrn-wasm-opt", "c")), "1.14x")
+    assertEq(ratioText(ratioOf("nbody", "vyrn-native", "c")), "1.15x")
+    assertEq(ratioText(ratioOf("nbody", "vyrn-wasm", "c")), "1.25x")
+    assertEq(ratioText(ratioOf("nbody", "vyrn-wasm-opt", "c")), "1.10x")
     assertEq(ratioText(ratioOf("spectralnorm", "vyrn-native", "c")), "1.00x")
-    assertEq(ratioText(ratioOf("spectralnorm", "vyrn-wasm", "c")), "2.93x")
-    assertEq(ratioText(ratioOf("spectralnorm", "vyrn-wasm-opt", "c")), "1.03x")
-    assertEq(ratioText(ratioOf("binarytrees", "js", "c")), "0.73x")
-    assertEq(ratioText(ratioOf("revcomp", "rust", "c")), "0.23x")
-    assertEq(ratioText(ratioOf("knucleotide", "vyrn-native", "c")), "0.42x")
-    assertEq(ratioText(ratioOf("knucleotide", "vyrn-wasm", "c")), "0.92x")
-    assertEq(ratioText(ratioOf("nbody", "vyrn-native", "rust")), "1.60x")
-    assertEq(ratioText(ratioOf("pidigits", "vyrn-native", "rust")), "0.95x")
-    assertEq(ratioText(ratioOf("revcomp", "vyrn-native", "rust")), "3.91x")
+    assertEq(ratioText(ratioOf("spectralnorm", "vyrn-wasm", "c")), "2.90x")
+    assertEq(ratioText(ratioOf("spectralnorm", "vyrn-wasm-opt", "c")), "1.02x")
+    assertEq(ratioText(ratioOf("binarytrees", "js", "c")), "0.49x")
+    assertEq(ratioText(ratioOf("revcomp", "rust", "c")), "0.39x")
+    assertEq(ratioText(ratioOf("knucleotide", "vyrn-native", "c")), "0.34x")
+    assertEq(ratioText(ratioOf("knucleotide", "vyrn-wasm", "c")), "0.81x")
+    assertEq(ratioText(ratioOf("nbody", "vyrn-native", "rust")), "1.53x")
+    assertEq(ratioText(ratioOf("pidigits", "vyrn-native", "rust")), "1.01x")
+    assertEq(ratioText(ratioOf("revcomp", "vyrn-native", "rust")), "1.50x")
 }
 
 test "a panel is the whole of what is known about one program" {
@@ -797,11 +797,11 @@ test "a panel is the whole of what is known about one program" {
         assert(p.verdict.byteLength > 0)
     }
     assertEq(panels[0].n, "25,000,000")
-    assertEq(msOf(p50Of("nbody", "c")), "856 ms")
-    assertEq(msOf(p50Of("nbody", "vyrn-wasm-opt")), "979 ms")
-    assertEq(nativeVsRust("nbody"), "1.60x")
-    assertEq(nativeVsRust("pidigits"), "0.95x")
-    assertEq(nativeVsRust("knucleotide"), "0.55x")
+    assertEq(msOf(p50Of("nbody", "c")), "847 ms")
+    assertEq(msOf(p50Of("nbody", "vyrn-wasm-opt")), "933 ms")
+    assertEq(nativeVsRust("nbody"), "1.53x")
+    assertEq(nativeVsRust("pidigits"), "1.01x")
+    assertEq(nativeVsRust("knucleotide"), "0.52x")
     assertEq(panels[1].verdict, "inside the noise band")
     assertEq(panels[2].verdict, "at the edge of the band")
     assertEq(panels[3].verdict, "ahead of the band")
@@ -898,12 +898,12 @@ test "the lanes of a program share one scale and run fastest first" {
 test "a lane is its build, its startup, the rest of its p50 and its tail to p99" {
     let lanes = lanesFor("nbody")
     assertEq(lanes[0].key, "rust")
-    assertEq(lanes[6].key, "vyrn-native")
+    assertEq(lanes[6].key, "bun")
     for l in lanes {
         if l.key == "c" {
-            assertEq(l.style, "--w: 0.422; --b: 14.5%; --s: 0.4%; --r: 84.0%; --t: 0.9%")
-            assertEq(l.total, "1004 ms")
-            assertEq(l.runText, "run 856 ms")
+            assertEq(l.style, "--w: 0.692; --b: 13.4%; --s: 0.3%; --r: 79.6%; --t: 6.5%")
+            assertEq(l.total, "989 ms")
+            assertEq(l.runText, "run 847 ms")
         }
         if l.key == "js" || l.key == "bun" {
             assert(contains(l.style, "; --b: 0.0%;"))
@@ -1054,14 +1054,14 @@ test "a duration and a ratio read the way the record's tables print them" {
 
 test "a sparkline has one step per committed record, on one scale from zero" {
     let s = sparkOf("nbody")
-    assertEq(s.pts.length, 5)
+    assertEq(s.pts.length, 6)
     assertEq(s.pts[0].name, "2026-09-01")
-    assertEq(s.pts[4].name, "2026-10-16-run3")
+    assertEq(s.pts[5].name, "2026-10-17")
     assertEq(s.first, "882 ms")
-    assertEq(s.last, "1007 ms")
+    assertEq(s.last, "974 ms")
     assertEq(s.traces.length, 3)
-    assertEq(s.traces[1].points, "120,13 360,10 600,210 840,210 1080,209")
-    assertEq(s.traces[2].points, "1080,213")
+    assertEq(s.traces[1].points, "100,13 300,10 500,210 700,210 900,209 1100,212")
+    assertEq(s.traces[2].points, "900,213 1100,214")
     assertEq(s.pts[0].groups[1].rows[2][1], "\u{2014}")
     for p in s.pts {
         for g in p.groups {
