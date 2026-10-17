@@ -236,10 +236,20 @@ fn a_damaged_native_cache_entry_is_rebuilt() {
     }
     let path = examples_dir().join("nbody.vyrn");
     let out_dir = scratch("route-native-cache");
+    // The cache lives under the home this test replaces, and so do the pinned
+    // tools: resolve them under the real home and hand them over by override.
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let wasm2c = vyrn_codegen::toolchain::wasm2c_from(&root)
+        .unwrap()
+        .unwrap()
+        .exe;
+    let (simde, _) = vyrn_codegen::toolchain::simde_from(&root).unwrap();
     let home = out_dir.join("home");
     let built = || {
         let exe = out_dir.join("nbody.exe");
         let build = vyrn()
+            .env("VYRN_WASM2C", &wasm2c)
+            .env("VYRN_SIMDE", &simde)
             .env("USERPROFILE", &home)
             .env("HOME", &home)
             .arg("build")
