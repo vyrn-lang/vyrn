@@ -324,13 +324,13 @@ added since would answer otherwise (`Query`) is emitted again in place. The
 drain, the initializer and the derived bodies take the same path, one at a
 time.
 
-The emitter carries no optimizer. Optimization belongs to whatever runs the
-wasm. The emitter's job is to make that possible: a field read is one scalar
-load at a computed offset, never a copy of the aggregate
-(`tests/fieldstore.rs` counts the instructions). `--wasm-opt` runs Binaryen's
-`wasm-opt -O3` over the written module, after the emitter and before
-wasm2c; `toolchain::WASM_OPT_FEATURES` names the features it validates
-against.
+The emitter writes the shape each engine optimizes well: a field read is one
+scalar load at a computed offset, never a copy of the aggregate
+(`tests/fieldstore.rs` counts the instructions). An optimization of its own
+lands where a benchmark licenses it (`docs/decisions.md`). `--wasm-opt` runs
+Binaryen's `wasm-opt -O3` over the written module, after the emitter and
+before wasm2c; `toolchain::WASM_OPT_FEATURES` names the features it
+validates against.
 
 The module's shape:
 
