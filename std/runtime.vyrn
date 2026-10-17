@@ -1025,7 +1025,7 @@ export fn bytesOf(dst: Int32, s: Int32, from: Int64, to: Int64) {
 //
 //   480    stdout buffer, 4,096 bytes    `writeAll` gathers fd 1 here
 //   4576   stdout position
-//   4580   stdin buffer, 4,096 bytes     `getByte` scatters fd 0 from here
+//   4580   stdin buffer, 4,096 bytes     `readLineV` scatters fd 0 from here
 //   8676   stdin length                  what the last `fd_read` returned
 //   8680   stdin position                the next byte
 //   8684   the length a slurp hands back (`readAll`, `slurpGen`, `readdirBlob`)
@@ -1234,61 +1234,77 @@ export fn argsV() -> Array<String> {
     return a
 }
 
-/// `getbyte`: one byte of stdin, or -1 at EOF and on any error. `fd_read`
-/// refills 4,096 bytes when the buffer is spent; the initial zero state reads
-/// as spent.
-export fn getByte() -> Int32 {
-    let base = heapBase()
-    let mut pos = Int32(load32(base + 8680))
-    if UInt32(pos) >= UInt32(load32(base + 8676)) {
-        let iov = base + 8696
-        store32(iov, UInt32(base + 4580))
-        store32(iov + 4, 4096)
-        store32(iov + 8, 0)
-        // An error and an empty read both answer EOF, and neither may leave
-        // the buffer looking full.
-        if fdRead(0, iov, 1, iov + 8) != 0 {
-            return -1
-        }
-        let got = Int32(load32(iov + 8))
-        if got == 0 {
-            return -1
-        }
-        store32(base + 8676, UInt32(got))
-        pos = 0
-    }
-    store32(base + 8680, UInt32(pos + 1))
-    return Int32(load8(base + 4580 + pos))
-}
-
 /// `read_line`: `readLine()`. `None` at EOF, for a line with a NUL byte, and
-/// for one that is not UTF-8 by `utf8Table`. The buffer starts at 64
-/// and doubles at `len + 2`, leaving room for the terminator. A trailing
-/// `\r` goes with the `\n`, so Windows and POSIX pipes read alike. The
-/// payload is the buffer, adopted as the String.
+/// for one that is not UTF-8 by `utf8Table`. Each pass scans the stdin buffer
+/// for `\n` and moves the run with one `copy`. `fd_read` refills 4,096 bytes
+/// when the buffer is spent; the initial zero state reads as spent. The line
+/// buffer is made at the first byte, so EOF allocates nothing; it starts at 64
+/// and doubles until `len + 2` fits, leaving room for the terminator. A
+/// trailing `\r` goes with the `\n`, so Windows and POSIX pipes read alike.
+/// The payload is the buffer, adopted as the String.
 export fn readLineV() -> Option<String> {
-    let mut c = getByte()
-    if c < 0 {
-        return None
-    }
+    let base = heapBase()
+    let inBuf = base + 4580
+    let mut pos = Int32(load32(base + 8680))
+    let mut end = Int32(load32(base + 8676))
     let mut cap: Int32 = 64
-    let mut buf = strNew(0, cap)
+    let mut buf: Int32 = 0
     let mut len: Int32 = 0
     let mut nul = false
-    while c >= 0 && c != '\n' {
-        if c == 0 {
-            nul = true
+    while true {
+        if UInt32(pos) >= UInt32(end) {
+            let iov = base + 8696
+            store32(iov, UInt32(inBuf))
+            store32(iov + 4, 4096)
+            store32(iov + 8, 0)
+            // An error and an empty read both answer EOF, and neither may
+            // leave the buffer looking full.
+            end = 0
+            if fdRead(0, iov, 1, iov + 8) == 0 {
+                end = Int32(load32(iov + 8))
+            }
+            pos = 0
+            store32(base + 8676, UInt32(end))
+            if end == 0 {
+                break
+            }
         }
-        if UInt32(len + 2) >= UInt32(cap) {
-            cap = cap << 1
+        if buf == 0 {
+            buf = strNew(0, cap)
+        }
+        let from = pos
+        let mut nl = false
+        while UInt32(pos) < UInt32(end) {
+            let c = load8(inBuf + pos)
+            if c == '\n' {
+                nl = true
+                break
+            }
+            if c == 0 {
+                nul = true
+            }
+            pos = pos + 1
+        }
+        let n = pos - from
+        if UInt32(len + n + 2) >= UInt32(cap) {
+            while UInt32(len + n + 2) >= UInt32(cap) {
+                cap = cap << 1
+            }
             let nb = strNew(0, cap)
             copy(nb, buf, len)
             free(buf - 8)
             buf = nb
         }
-        store8(buf + len, UInt8(c))
-        len = len + 1
-        c = getByte()
+        copy(buf + len, inBuf + from, n)
+        len = len + n
+        if nl {
+            pos = pos + 1
+            break
+        }
+    }
+    store32(base + 8680, UInt32(pos))
+    if buf == 0 {
+        return None
     }
     if len != 0 && load8(buf + len - 1) == '\r' {
         len = len - 1
