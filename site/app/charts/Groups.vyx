@@ -1,0 +1,9 @@
+<script>
+import { NumGroup } from "../bench"
+
+props { groups: Array<NumGroup> }
+</script>
+
+<template>
+<span class="rd" aria-hidden="true"><span class="rg" v-for="g in groups" :key="g.name"><i>{{ g.name }}</i><span v-for="r in g.rows" :key="r[0]" :data-k="r[2]">{{ r[0] }} <b>{{ r[1] }}</b></span></span></span>
+</template>

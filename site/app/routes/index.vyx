@@ -6,8 +6,10 @@ import { shellHtml } from "../code"
 import { hasRelease, releaseTag, releaseDate, releasePre, InstallTarget, installTargets, stdCount } from "../repo"
 import { blockCode, blockOf, chapterOfBlock, sectionOfBlock, chapterHref } from "../guide"
 import { ApiGroup, ApiModule, apiGroups, apiHref } from "../docs"
-import { Markup } from "std/html"
-import { frontPanels, panelBars, panelNote, panelSpeed, panelMemLine, benchMachine, benchRuns } from "../bench"
+import { Markup, toMarkup } from "std/html"
+import { components } from "std/vyx"
+import { laneChart } from components("../charts")
+import { frontLanes, benchMachine, benchRuns } from "../bench"
 import { demoSteps, demoVersion, demoRecorded, DemoStep } from "../demo"
 import { shellOutHtml } from "../code"
 import { demoCode } from "../demohl"
@@ -19,6 +21,10 @@ fn heroSnippet() -> String {
 
 export fn head() -> Head {
     return pageHeadOf("/")
+}
+
+fn frontChart() -> Markup {
+    return toMarkup(laneChart(frontLanes(), "Time to answer all ten programs, fastest first", false))
 }
 
 fn osId(p: InstallTarget) -> String {
@@ -109,9 +115,6 @@ fn stepHtml(s: DemoStep) -> Markup {
     return shellOutHtml(s.cmd, s.out)
 }
 
-fn barStyle(pct: String) -> String {
-    return "width: " + pct + "%"
-}
 </script>
 
 <template>
@@ -165,30 +168,13 @@ fn barStyle(pct: String) -> String {
         <section class="band" id="speed">
             <div class="benchhead">
                 <h2 class="display">Benchmarks</h2>
-                <p class="lede">Benchmarks Game programs in Vyrn, C, Rust and JavaScript on node and bun, with Vyrn's WebAssembly build beside them, as written and after wasm-opt. A card where Vyrn is slower names the cause.</p>
+                <p class="lede">Ten Benchmarks Game programs in Vyrn, C, Rust and JavaScript on node and bun, with Vyrn's WebAssembly build as written and after wasm-opt. Each lane is one engine's time to answer all ten from source: its ten builds summed, then one run of each at p50. Build time is included, so an engine that builds slowly shows it.</p>
                 <p class="ctarow"><a class="cta" href="/benchmarks.html">The benchmarks page</a></p>
             </div>
 
-            <div class="benchgrid">
-                <article class="benchcard" v-for="p in frontPanels()" :key="p.key">
-                    <h3>{{ p.name }}<span class="size">{{ p.n }}</span></h3>
-                    <p class="what">{{ panelNote(p.key) }}</p>
-                    <ul class="bars">
-                        <li v-for="b in panelBars(p.key)" :key="b.key" :data-tone="b.tone">
-                            <span class="who">{{ b.name }}</span>
-                            <span class="track"><span class="fill" :style="barStyle(b.pct)"></span></span>
-                            <span class="ms">{{ b.ms }}</span>
-                        </li>
-                    </ul>
-                    <p class="bfoot">
-                        <span class="bspeed">{{ panelSpeed(p.key) }}</span>
-                        <span class="bram">RAM {{ panelMemLine(p.key) }}</span>
-                    </p>
-                    <p class="bcause" v-if="p.label.byteLength > 0">{{ p.label }}</p>
-                </article>
-            </div>
+            <div class="lanebox thin" v-html="frontChart()"></div>
 
-            <p class="cap benchcap">{{ benchMachine() }} · medians of {{ benchRuns() }} · every engine at its own defaults · <a href="/benchmarks.html">every program, the table and the radar</a></p>
+            <p class="cap benchcap">{{ benchMachine() }} · p50 of {{ benchRuns() }} runs · build time included, summed over ten builds · every engine at its own defaults · <a href="/benchmarks.html">every program, lane by lane</a></p>
         </section>
 
         <!-- The inputs are written out, not `v-for`: see `install.vyx`. -->

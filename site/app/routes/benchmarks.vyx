@@ -1,34 +1,23 @@
 <script>
 import { Head } from "std/ui"
 import { pageHeadOf } from "../nav"
-import { contestants, radarBox, radarCx, radarCy, radarRings, radarSpokes, radarLines, ratioWay, axisPanels, srcHref, nativeVsRust, benchMachine, benchRuns, envRows, run1File, run1Href } from "../bench"
+import { Markup, toMarkup } from "std/html"
+import { components } from "std/vyx"
+import { laneChart, spark } from components("../charts")
+import { Panel, axisPanels, nativeVsRust, benchMachine, benchRuns, envRows, run1File, run1Href } from "../bench"
 
 export fn head() -> Head {
     return pageHeadOf("/benchmarks")
 }
 
-fn wayC(program: String, engine: String) -> String {
-    return ratioWay(program, engine, "c")
+fn chartOf(p: Panel) -> Markup {
+    return toMarkup(laneChart(p.lanes, "Time to an answer for " + p.name + ", fastest first", true))
 }
 
-fn wayRust(program: String, engine: String) -> String {
-    return ratioWay(program, engine, "rust")
+fn sparkOf(p: Panel) -> Markup {
+    return toMarkup(spark(p.spark))
 }
 
-fn barStyle(pct: String) -> String {
-    return "width: " + pct + "%"
-}
-
-fn overFlag(over: Bool) -> String {
-    if over {
-        return "true"
-    }
-    return "false"
-}
-
-fn progHref(key: String) -> String {
-    return "#" + key
-}
 </script>
 
 <template>
@@ -36,89 +25,27 @@ fn progHref(key: String) -> String {
     <section class="hero benchhero">
         <h1 class="display">Benchmarks</h1>
         <p class="lede">The Benchmarks Game programs in Vyrn, C, Rust and JavaScript, run on one machine.</p>
-        <p class="pkgmeta">{{ benchMachine() }} · medians of {{ benchRuns() }}</p>
+        <p class="pkgmeta">{{ benchMachine() }} · p50 and p99 of {{ benchRuns() }} runs</p>
     </section>
 
     <section class="band" id="programs" data-tabs>
         <h2>Results by program</h2>
         <p>A row is a deviation when Vyrn's own build is more than ten per cent off Rust, which is the run-to-run noise of this machine.</p>
+        <p>Each lane is one engine's time to an answer on one linear scale: the build, then the whole run at p50, with the hatch running on to p99. The run's first part, in light grey, is its startup, which is what an empty program costs that engine. The number after a lane is the build plus the run at p50, and the lanes are sorted by it. The run already holds its startup, so the startup is not added twice. The strip above the lanes holds the numbers of the lane you point at or focus, the fastest by default; on a phone, tap a lane to open its numbers.</p>
         <div class="tabs axes" aria-label="Choose a program">
             <button type="button" v-for="p in axisPanels()" :key="p.key" :data-tab="p.key">{{ p.name }}</button>
         </div>
-        <article class="progrow" v-for="p in axisPanels()" :key="p.key" :id="p.key" :data-pane="p.key">
+        <article class="progrow lanebox" v-for="p in axisPanels()" :key="p.key" :id="p.key" :data-pane="p.key">
             <header>
                 <h3><a :href="p.game" rel="noreferrer">{{ p.name }}</a></h3>
                 <span class="size">N = {{ p.n }}</span>
+                <span v-if="p.spark.pts.length > 0" v-html="sparkOf(p)"></span>
                 <span class="spacer"></span>
                 <span class="bverdict">{{ nativeVsRust(p.key) }} Rust · {{ p.verdict }}</span>
             </header>
-            <div class="scroller">
-                <table class="matrix progtable">
-                    <thead>
-                        <tr>
-                            <th scope="col">Engine</th>
-                            <th scope="col" class="trackhead">0 → 4x C</th>
-                            <th scope="col">time</th>
-                            <th scope="col">vs C</th>
-                            <th scope="col">vs Rust</th>
-                            <th scope="col">cpu s</th>
-                            <th scope="col">peak ram</th>
-                            <th scope="col">source gz</th>
-                            <th scope="col">build s</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        <tr v-for="c in p.cells" :key="c.key" :data-tone="c.tone">
-                            <th scope="row"><a :href="srcHref(p.key, c.key)" rel="noreferrer">{{ c.name }}</a></th>
-                            <td class="track"><span class="btrack"><span class="fill" :style="barStyle(c.pct)" :data-over="overFlag(c.over)"></span></span></td>
-                            <td class="ms">{{ c.ms }}</td>
-                            <td class="vs" :data-way="wayC(p.key, c.key)">{{ c.vsC }}</td>
-                            <td class="vs" :data-way="wayRust(p.key, c.key)">{{ c.vsRust }}</td>
-                            <td>{{ c.cpu }}</td>
-                            <td>{{ c.mem }}</td>
-                            <td>{{ c.gz }}</td>
-                            <td>{{ c.make }}</td>
-                        </tr>
-                    </tbody>
-                </table>
-            </div>
+            <div v-html="chartOf(p)"></div>
             <p class="bcause" v-if="p.cause.byteLength > 0"><b>{{ p.label }}</b> — {{ p.cause }}</p>
         </article>
-    </section>
-
-    <section class="band" id="radar">
-        <h2>All programs</h2>
-        <p>One axis per program, one polygon per engine. Further from the centre is slower.</p>
-        <div class="plate" data-widget="radar">
-            <div class="plate-head">
-                <a class="eyebrow" :href="run1Href()" rel="noreferrer">{{ run1File() }}</a>
-            </div>
-            <div class="stage">
-                <svg class="chart radar" :viewBox="radarBox()" role="img" aria-label="A radar with one axis per Benchmarks Game program and one polygon per contestant. Every reading it plots is in the table below it.">
-                    <g class="axis">
-                        <polygon v-for="r in radarRings()" :key="r.id" :class="r.tone" :points="r.points"/>
-                        <line v-for="s in radarSpokes()" :key="s.key" :x1="radarCx()" :y1="radarCy()" :x2="s.x" :y2="s.y"/>
-                        <text v-for="r in radarRings()" :key="r.id" :x="radarCx()" :y="r.y" dx="6" dy="-3">{{ r.label }}</text>
-                    </g>
-                    <g class="series" v-for="l in radarLines()" :key="l.key" :data-series="l.key">
-                        <polygon :class="l.tone" :points="l.points"/>
-                        <g class="marks">
-                            <path v-for="m in l.marks" :key="m.id" class="offscale" :d="m.d"><title>{{ l.name }} — {{ m.title }}</title></path>
-                        </g>
-                    </g>
-                    <g class="wedges">
-                        <a v-for="s in radarSpokes()" :key="s.key" :href="progHref(s.key)"><polygon class="wedge" :points="s.wedge"><title>{{ s.name }} — its ten rows</title></polygon></a>
-                    </g>
-                    <g class="names">
-                        <a v-for="s in radarSpokes()" :key="s.key" :href="progHref(s.key)"><text :x="s.lx" :y="s.ly" :text-anchor="s.anchor">{{ s.name }}</text></a>
-                    </g>
-                </svg>
-            </div>
-            <div class="serieskeys" role="group" aria-label="Show or hide a contestant">
-                <button type="button" v-for="s in contestants()" :key="s.key" :class="s.tone" :data-series-toggle="s.key" aria-pressed="true">{{ s.name }}</button>
-            </div>
-            <p class="cap">Every ring out from C is a doubling; the rim is sixteen times C, and a reading past it is drawn at the rim with a stroke continuing outward. An axis name opens that program above.</p>
-        </div>
     </section>
 
     <section class="band" id="method">
@@ -127,9 +54,11 @@ fn progHref(key: String) -> String {
             <li>The C is plain C11, the Rust is safe and standard-library only, the JavaScript is plain JavaScript, run under node and under bun. No hand-written vector instructions and no threads in any of them.</li>
             <li>Vyrn wasm-opt is the Vyrn WebAssembly build after Binaryen's <code>wasm-opt -O3</code>, a pass the compiler runs only when asked. The plain Vyrn wasm line is the module as the compiler writes it.</li>
             <li>All seven printed the same bytes before anything was timed.</li>
-            <li>Medians of {{ benchRuns() }} runs, every engine at its own defaults, one machine.</li>
-            <li>CI does not run this harness, because it needs clang, rustc, node, bun, wasmtime and wasm-opt together. It is run by hand, and the committed JSON is the record.</li>
-            <li>Nothing here claims a trend over time. For that there is <a href="/tooling/testing.html">vyrn bench</a>, which times one operation rather than one program.</li>
+            <li>{{ benchRuns() }} runs of each program on each engine, every engine at its own defaults, one machine. p50 and p99 are by nearest rank: the values at positions 0.5n and 0.99n, rounded up, of the n sorted runs.</li>
+            <li>A build time is the median of three builds. A build's peak memory is the most memory its whole process tree held at once, the median of the same three builds; the run's peak is the largest working set of the one process the run is.</li>
+            <li>Output is the file an engine ships: the executable for C, Rust and Vyrn native, the <code>.wasm</code> module for the two WebAssembly builds. node and bun ship their source, so theirs is the size of the source file.</li>
+            <li>CI does not run this harness, because it needs clang, rustc, node, bun, wasmtime and wasm-opt together. It is run by hand, and the committed JSON is the record: <a :href="run1Href()" rel="noreferrer">{{ run1File() }}</a>.</li>
+            <li>The line beside a program's name is Vyrn's time for it in every committed record, one step per record, oldest first, on one scale from zero: native solid, wasm dashed, wasm-opt in its own colour. The numbers either side are Vyrn native's first and latest. An older record holds a median, not a p50; the line reads it as the median (p50). To time one operation rather than one program, use <a href="/tooling/testing.html">vyrn bench</a>.</li>
         </ul>
         <div class="scroller">
             <table class="matrix">

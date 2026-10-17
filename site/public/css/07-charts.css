@@ -4,38 +4,81 @@ svg.graph { max-width: 726px; }
 .stage { overflow-x: auto; scrollbar-width: none; }
 .stage::-webkit-scrollbar { display: none; }
 svg.chart { min-width: 640px; }
-svg.chart.radar { min-width: 500px; }
 svg.graph { min-width: 520px; }
 
 svg.chart a text { text-decoration: underline; text-decoration-color: transparent; transition: text-decoration-color 160ms var(--expo); }
 svg.chart text { font-family: var(--mono); font-size: var(--t-svg); fill: var(--muted); }
 
-svg.chart.radar { max-width: 34rem; margin: 0 auto; }
-svg.chart.radar .ring { fill: none; stroke: currentColor; stroke-opacity: 0.13; stroke-width: 1; }
-svg.chart.radar .ring.base { stroke-opacity: 0.45; stroke-dasharray: 3 3; }
-svg.chart.radar .axis line { stroke: currentColor; stroke-opacity: 0.1; stroke-width: 1; }
-svg.chart.radar .axis text { font-size: var(--t-svg-s); fill: var(--n2); }
-svg.chart.radar .names text { font-family: var(--mono); font-size: var(--t-svg-s); fill: var(--n2); }
-svg.chart.radar .names a:hover text, svg.chart.radar .names a:focus-visible text { fill: var(--accent); font-weight: 600; }
-/* Names text: the link underline lands on the SVG text node. */
-svg.chart.radar .names a, svg.chart.radar .names a text { text-decoration: none; }
-svg.chart.radar .names a:hover text, svg.chart.radar .names a:focus-visible text { text-decoration: underline; text-underline-offset: 3px; }
-svg.chart.radar .wedge { fill: transparent; }
-svg.chart.radar g.series polygon { fill: currentColor; fill-opacity: 0.07; stroke: currentColor; stroke-width: 2; stroke-linejoin: round; }
-svg.chart.radar g.series polygon.dashed { fill-opacity: 0; stroke-dasharray: 5 4; }
-svg.chart.radar g.series .offscale { fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; }
-svg.chart.radar g.series.off { display: none; }
+.sr-c { --k: var(--sr-c); }
+.sr-rust { --k: var(--sr-rust); }
+.sr-node { --k: var(--sr-node); }
+.sr-bun { --k: var(--sr-bun); }
+.sr-wasmopt { --k: var(--sr-wasmopt); }
+.sr-vyrn { --k: var(--sr-vyrn); }
 
-.sr-c { color: var(--sr-c); --k: var(--sr-c); }
-.sr-rust { color: var(--sr-rust); --k: var(--sr-rust); }
-.sr-node { color: var(--sr-node); --k: var(--sr-node); }
-.sr-bun { color: var(--sr-bun); --k: var(--sr-bun); }
-.sr-wasmopt { color: var(--sr-wasmopt); --k: var(--sr-wasmopt); }
-.sr-vyrn { color: var(--sr-vyrn); --k: var(--sr-vyrn); }
+/* One lane per engine: the build and the startup at 40% of the lane's height, the run at p50 at full height in the engine's colour, and a hatch on to p99 at 60%. */
+.lanekey, .lanes li { display: grid; grid-template-columns: 7.5rem minmax(0, 1fr) 4.5rem; gap: var(--s1); align-items: center; }
+.lanekey { margin: var(--s2) 0 var(--s1); font: var(--t-key)/1.5 var(--mono); color: var(--n2); }
+.lanekey > span:last-child { text-align: right; }
+.lanekey > span > span { white-space: nowrap; margin-right: var(--s1); }
+.lanekey > span > span::before { content: ""; display: inline-block; vertical-align: middle; width: 14px; height: 4px; margin-right: 6px; }
+.lanekey .build::before { background: var(--lane-build); }
+.lanekey .start::before { background: var(--lane-start); }
+.lanekey .run::before { height: 10px; background: var(--sr-vyrn); }
+.lanekey .tail::before { height: 6px; background: repeating-linear-gradient(135deg, var(--sr-vyrn) 0 1.5px, transparent 1.5px 4px); }
+/* A group of the readout never breaks; the strip wraps between groups. */
+.readout { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px var(--s3); margin: 0 0 var(--s1); padding: 6px 0; border-block: 1px solid var(--hair); font: var(--t-key)/1.6 var(--mono); color: var(--n2); }
+.readout > b { color: var(--ink); }
+.readout .rg { display: flex; gap: 0 10px; white-space: nowrap; }
+.rg i { font-style: normal; color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em; }
+.rg b { font-weight: 400; color: var(--ink); }
+.lanebox:has(.lbar .build:hover) .readout [data-k="build"] b,
+.lanebox:has(.lbar .start:hover) .readout [data-k="start"] b,
+.lanebox:has(.lbar .run:hover) .readout [data-k="run"] b,
+.lanebox:has(.lbar .tail:hover) .readout [data-k="tail"] b { font-weight: 600; color: var(--accent); text-decoration: underline; text-underline-offset: 3px; }
+.lanes { list-style: none; margin: 0; padding: 0; }
+.lanes li { position: relative; padding: 5px 4px; margin: 0 -4px; border-radius: 4px; font: var(--t-key)/1.5 var(--mono); color: var(--muted); transition: opacity 120ms; }
+.lanes li:hover, .lanes li:focus-within { background: color-mix(in oklab, var(--ink) 6%, transparent); }
+.lanes:has(li:hover) li:not(:hover),
+.lanes:not(:has(li:hover)):has(li:focus-within) li:not(:focus-within) { opacity: 0.4; }
+.lanes .lname { justify-self: start; max-width: 100%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: inherit; text-decoration: none; }
+.lanes li.sr-vyrn .lname { color: var(--ink); font-weight: 600; }
+.lanes li .lname:hover { color: var(--accent); text-decoration: underline; }
+.lanes .ltrack { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.lanes .lbar { display: flex; align-items: center; flex: none; height: 18px; width: calc((100% - 9ch - 6px) * var(--w)); }
+.lanes .lbar > span { display: flex; align-items: center; flex: none; height: 40%; overflow: hidden; }
+.lanes .lbar > span:hover { filter: brightness(1.2) saturate(1.2); }
+.lanes .lbar b { padding: 0 4px; font: 400 var(--t-tick)/1 var(--mono); color: var(--paper); white-space: nowrap; }
+.lanes .lbar .tight b { visibility: hidden; }
+.lanes .lbar .build { width: var(--b); background: var(--lane-build); }
+.lanes .lbar .start { width: var(--s); background: var(--lane-start); }
+.lanes .lbar .run { width: var(--r); height: 100%; background: var(--k); }
+.lanes .lbar .tail { width: var(--t); height: 60%; background: repeating-linear-gradient(135deg, var(--k) 0 1.5px, transparent 1.5px 4px); }
+.lanes .ltotal { white-space: nowrap; color: var(--ink); }
+.lanes .lmem { text-align: right; white-space: nowrap; }
+.lanes .rd, .splot .rd { display: none; }
+.readout .rd { display: contents; }
+.thin .lanes li { padding-block: 2px; }
+.thin .lanes .lbar { height: 12px; }
 
-.serieskeys { display: flex; flex-wrap: wrap; gap: var(--s1); margin: 0; padding: var(--s2); border-top: 1px solid var(--hair); }
-.serieskeys button { font-size: var(--t-key); padding: 7px 12px; }
-.serieskeys button::before { content: ""; display: inline-block; vertical-align: middle; width: 12px; height: 3px; margin-right: 8px; background: var(--k, currentColor); }
-.serieskeys button.dashed::before { background: repeating-linear-gradient(90deg, var(--k) 0 4px, transparent 4px 7px); }
-.serieskeys button[aria-pressed="true"] { color: var(--k); border-color: var(--k); }
-.serieskeys button[aria-pressed="false"] { opacity: 0.5; text-decoration: line-through; }
+/* Vyrn's p50 per record: a 1200 by 240 view box drawn at 7.5rem by 1.5rem, under one hover target per record. */
+.spark { display: inline-flex; align-items: center; gap: 6px; font: var(--t-key)/1 var(--mono); color: var(--n2); }
+.splot { position: relative; width: 7.5rem; height: 1.5rem; }
+.splot svg { display: block; width: 100%; height: 100%; overflow: visible; }
+.splot polyline { fill: none; stroke: var(--k); stroke-width: 15; stroke-linejoin: round; }
+.splot polyline.dashed { stroke-dasharray: 40 30; }
+.splot circle { fill: var(--k); }
+.splot .pts { position: absolute; inset: 0; display: flex; }
+.splot .pt { flex: 1; border-radius: 2px; }
+.splot .pt:hover, .splot .pt:focus-visible { background: color-mix(in oklab, var(--ink) 10%, transparent); }
+.splot .lname { display: none; }
+
+@media (max-width: 640px) {
+  .lanekey, .lanes li { grid-template-columns: minmax(0, 1fr) auto; }
+  .lanekey > span:first-child, .readout { display: none; }
+  .lanes .ltrack { grid-column: 1 / -1; grid-row: 2; }
+  .lanes li { row-gap: 2px; }
+  .lanes li[data-open] .rd { display: grid; grid-column: 1 / -1; grid-template-columns: auto auto; justify-content: start; gap: 0 var(--s3); margin: 4px 0 2px; }
+  .lanes .rd .rg, .lanes .rd .rg > span { display: contents; }
+  .lanes .rd i { grid-column: 1 / -1; margin-top: 4px; }
+}

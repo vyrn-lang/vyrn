@@ -32,6 +32,8 @@
   --sr-bun: oklch(0.45 0.14 320);
   --sr-wasmopt: oklch(0.5 0.16 30);
   --sr-vyrn: var(--accent);
+  --lane-build: oklch(0.3 0.006 60);
+  --lane-start: oklch(0.6 0.006 60);
   --code-wash: 5%;
 
   /* Base system faces only: a fingerprint-hardened Firefox logs a notice for every other name. */
@@ -93,6 +95,8 @@
     --syn-str: oklch(0.78 0.1 150);
     --sr-bun: oklch(0.78 0.12 320);
     --sr-wasmopt: oklch(0.75 0.14 30);
+    --lane-build: oklch(0.5 0.004 60);
+    --lane-start: oklch(0.9 0.004 60);
     --syn-com: var(--n1);
     --syn-type: var(--bright);
     --syn-num: var(--amber);
@@ -117,6 +121,8 @@
   --syn-str: oklch(0.78 0.1 150);
   --sr-bun: oklch(0.78 0.12 320);
   --sr-wasmopt: oklch(0.75 0.14 30);
+  --lane-build: oklch(0.5 0.004 60);
+  --lane-start: oklch(0.9 0.004 60);
   --syn-com: var(--n1);
   --syn-type: var(--bright);
   --syn-num: var(--amber);
