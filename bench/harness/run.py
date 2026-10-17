@@ -16,9 +16,10 @@ Three things about the method, because a benchmark is only worth its
 methodology:
 
 * **Whole-process wall time.** The game's own convention. `perf_counter`
-  around the child, stdout discarded. So the number carries process
-  start-up, and for the wasm leg it carries wasmtime's JIT — that is the
-  price of running the thing, and hiding it would be a different measurement.
+  around the child, stdout read through a 1 MB pipe and discarded. So the
+  number carries process start-up, and for the wasm leg it carries
+  wasmtime's JIT — that is the price of running the thing, and hiding it
+  would be a different measurement. `measure` says why not the null device.
   Each cell keeps every run and states two of them, by nearest rank: p50 and
   p99 are the values at positions ceil(0.5 n) and ceil(0.99 n) of the n sorted
   runs. Under 100 runs p99 is the slowest run, so the default is 100.
@@ -748,13 +749,29 @@ def usage_of(proc: subprocess.Popen, before) -> tuple[float | None, int | None]:
     return cpu, int(now.ru_maxrss) * scale
 
 
+PIPE_BYTES = 1 << 20
+
+
+def big_pipe() -> tuple[int, int]:
+    """A pipe's read and write descriptors, with a buffer of PIPE_BYTES on Windows."""
+    if os.name != "nt":
+        return os.pipe()
+    import _winapi
+    import msvcrt
+
+    rh, wh = _winapi.CreatePipe(None, PIPE_BYTES)
+    return msvcrt.open_osfhandle(rh, os.O_RDONLY), msvcrt.open_osfhandle(wh, 0)
+
+
 def measure(cmd: list, stdin_path: Path | None, runs: int) -> tuple[list[float], list[float], list[int]]:
     """Whole-process wall time, cpu time and peak memory, `runs` times.
 
-    `subprocess.run` became `Popen` plus `wait` so the handle survives long
-    enough to be asked what the child cost. With stdout and stderr going to
-    the null device there is no pipe to drain, so the two are the same
-    sequence of calls and the wall clock is measured as `subprocess.run` measured it.
+    `Popen` plus `wait` keeps the handle long enough to ask what the child
+    cost. Stdout goes to a pipe of PIPE_BYTES that the runner reads and
+    discards, never to the null device: the C runtime on Windows takes NUL
+    for a character device and leaves a C program's stdout unbuffered, one
+    write per line. A pipe at the default size cost Rust's revcomp 73 ms to
+    713 ms; at 1 MB the Rust and Vyrn legs time as they did on NUL.
     """
     walls: list[float] = []
     cpus: list[float] = []
@@ -765,16 +782,16 @@ def measure(cmd: list, stdin_path: Path | None, runs: int) -> tuple[list[float],
             import resource
 
             before = resource.getrusage(resource.RUSAGE_CHILDREN)
+        r, w = big_pipe()
         with open(stdin_path, "rb") if stdin_path else open(os.devnull, "rb") as fh:
             t0 = time.perf_counter()
-            proc = subprocess.Popen(
-                [str(c) for c in cmd],
-                stdin=fh,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
+            proc = subprocess.Popen([str(c) for c in cmd], stdin=fh, stdout=w, stderr=subprocess.DEVNULL)
+            os.close(w)
+            while os.read(r, PIPE_BYTES):
+                pass
             rc = proc.wait()
             walls.append(time.perf_counter() - t0)
+            os.close(r)
             cpu, peak = usage_of(proc, before)
         if rc != 0:
             die(f"nonzero exit while timing {' '.join(str(c) for c in cmd)}: {rc}")
@@ -916,7 +933,7 @@ def main() -> int:
         "date": date.today().isoformat(),
         "runs": args.runs,
         "method": (
-            "whole-process wall time, stdout discarded; p50 and p99 by nearest rank, "
+            "whole-process wall time, stdout read through a 1 MB pipe and discarded; p50 and p99 by nearest rank, "
             "the values at positions ceil(0.5 n) and ceil(0.99 n) of the n sorted runs"
         ),
         "columns": {
