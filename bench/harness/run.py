@@ -97,7 +97,7 @@ JS_RUNTIMES = {"js": "node", "bun": "bun"}
 #
 # `vyrn build`'s native route passes clang `-O2 -ffp-contract=off` and no
 # `-march` on the default x86-64 target
-# (`add_native_clang_flags` in compiler/vyrn-cli/src/main.rs). The C leg is
+# (`native_compile_flags` in compiler/vyrn-cli/src/main.rs). The C leg is
 # given the same two that affect code: same optimization level, same refusal to
 # fuse `a*b+c`, same baseline ISA. Without `-ffp-contract=off` the C numbers
 # would differ from every other contestant's in the last printed digit, and the
