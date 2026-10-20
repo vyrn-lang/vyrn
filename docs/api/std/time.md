@@ -1,6 +1,6 @@
 # std/time
 
-std/time: wall-clock time at the host boundary.
+Wall-clock time at the host boundary, and a pure calendar breakdown.
 
 `now()` and `monotonic()` are host effects, so generators and comptime code
 cannot call them; the parity harness fixes the clock with `VYRN_FIXED_TIME`.

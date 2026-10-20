@@ -1,6 +1,6 @@
 # std/openapi
 
-std/openapi -- the contract as an OpenAPI 3.1 document, built from
+The contract as an OpenAPI 3.1 document, built from
 generator imports. `openapi(contract)` reflects the contract with
 `moduleInterface` and returns a module exporting `openapiJson() -> String`.
 

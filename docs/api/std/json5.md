@@ -1,6 +1,6 @@
 # std/json5
 
-std/json5: a JSON5 reader that builds the `Json` tree of `std/json`.
+A JSON5 reader that builds the `Json` tree of `std/json`.
 
   import { parseJson5 } from "std/json5"
 

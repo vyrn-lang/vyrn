@@ -1,4 +1,4 @@
-/// std/rpc -- typed RPC as a library, built on generator imports.
+/// Typed RPC as a library, built on generator imports.
 /// A procedure is an exported function of a procedure module with at
 /// most one parameter and both ends serializable (the `Api` contract plus
 /// `rpcWhyNotSerializable`); anything else fails the load at the generator call.

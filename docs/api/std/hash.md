@@ -1,6 +1,6 @@
 # std/hash
 
-std/hash: non-cryptographic byte hashing, and SHA-1 for the
+Non-cryptographic byte hashing, and SHA-1 for the
 WebSocket handshake.
 
 FNV-1a-64 mixes in `UInt64` with wrapping multiply and xor, so every engine

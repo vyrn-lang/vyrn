@@ -1,4 +1,4 @@
-/// std/connect -- Connect wire compatibility as a library, built on
+/// Connect wire compatibility as a library, built on
 /// generator imports. `connectServer` emits the `connectHandle` router
 /// and `connectClient` the in-Vyrn caller, for Connect's unary JSON flavor over
 /// HTTP/1 only: no gRPC, streaming, GET flavor or compression.

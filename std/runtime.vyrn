@@ -1,4 +1,4 @@
-/// std/runtime: the runtime in Vyrn. The compiler links
+/// The runtime in Vyrn. The compiler links
 /// it into every program; a user import of it or of `std/mem` is refused, and
 /// the loader puts it alone in `std/mem`'s audience.
 ///

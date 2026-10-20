@@ -1,6 +1,6 @@
 # std/imports
 
-std/imports: the import block of a generated module.
+The import block of a generated module.
 
 A generator that emits code over a module's types and procedures writes one
 `import` line per declaring module, so each type keeps its identity. A

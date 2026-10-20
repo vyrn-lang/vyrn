@@ -1,6 +1,6 @@
 # std/json
 
-std/json: the JSON value tree and its canonical writer.
+The JSON value tree and its canonical writer.
 
   import { Json, JsonField, emit, emitPretty, jsonEq } from "std/json"
   import { parseJson } from "std/jsonread"

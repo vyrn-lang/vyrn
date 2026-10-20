@@ -1,6 +1,6 @@
 # std/bench
 
-std/bench: the runtime the `vyrn bench` transform links against.
+The runtime the `vyrn bench` transform links against.
 Only the synthesized bench `main` imports it, so its clock use never reaches
 a `run` or `build`.
 

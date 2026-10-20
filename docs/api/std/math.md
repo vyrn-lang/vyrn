@@ -1,6 +1,6 @@
 # std/math
 
-std/math: integer helpers (min, max, abs, clamp) and float ones (pi, floor,
+Integer helpers (min, max, abs, clamp) and float ones (pi, floor,
 sine, cosine), written in Vyrn.
 
 ## min

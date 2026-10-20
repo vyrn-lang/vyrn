@@ -1,4 +1,4 @@
-/// std/strings: string helpers in Vyrn, over `slice` and `bytes()`.
+/// String helpers in Vyrn, over `slice` and `bytes()`.
 ///
 /// Indices and lengths are byte offsets. The case and whitespace helpers are
 /// ASCII-only and pass other bytes through, so multi-byte text is never

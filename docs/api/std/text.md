@@ -1,6 +1,6 @@
 # std/text
 
-std/text: UTF-8 decoding and byte-offset line and column, in Vyrn.
+UTF-8 decoding and byte-offset line and column, in Vyrn.
 
 The engines route `s.charCount()` to `charCountV`, `lineAt` to `lineAtV` and
 `colAt` to `colAtV`; `chars` is an ordinary export. `utf8Width` is the one

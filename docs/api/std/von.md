@@ -1,6 +1,6 @@
 # std/von
 
-std/von: VON, Vyrn Object Notation, Vyrn's literal grammar saved to a file.
+VON, Vyrn Object Notation, Vyrn's literal grammar saved to a file.
 
   import { parseVon, toVon, Von, VonDoc } from "std/von"
 

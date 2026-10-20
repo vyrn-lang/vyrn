@@ -1,6 +1,6 @@
 # std/scan
 
-std/scan: one comment- and string-aware cursor over foreign text (CSS, ICU
+One comment- and string-aware cursor over foreign text (CSS, ICU
 messages, HTML templates, SDL) for generators.
 
 Offsets are byte offsets. The scanner is a record advanced through `modify`

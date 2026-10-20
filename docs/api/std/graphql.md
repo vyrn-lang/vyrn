@@ -1,6 +1,6 @@
 # std/graphql
 
-std/graphql -- the contract as a GraphQL SDL document, built on
+The contract as a GraphQL SDL document, built on
 generator imports. `sdl(contract)` returns a module exporting
 `sdlText() -> String`, baked at generation time from the reflected type
 sources and procedure signatures.

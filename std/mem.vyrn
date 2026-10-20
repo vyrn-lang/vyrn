@@ -1,4 +1,4 @@
-/// std/mem: raw memory, the host imports and the trap, which `std/runtime`
+/// Raw memory, the host imports and the trap, which `std/runtime`
 /// stands on.
 ///
 /// Every function is a declaration: the emitter maps each call to one wasm

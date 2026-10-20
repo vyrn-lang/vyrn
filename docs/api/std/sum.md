@@ -1,6 +1,6 @@
 # std/sum
 
-std/sum: the exact sum of an `Array<Float64>`, written in Vyrn.
+The exact sum of an `Array<Float64>`, written in Vyrn.
 
 ## sum
 

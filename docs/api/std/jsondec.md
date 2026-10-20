@@ -1,6 +1,6 @@
 # std/jsondec
 
-std/jsondec: the untyped half of `fromJson`, and the generator of the
+The untyped half of `fromJson`, and the generator of the
 typed half.
 
 `jsonDecoders` writes the typed half per target type; what it writes

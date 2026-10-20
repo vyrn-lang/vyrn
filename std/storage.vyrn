@@ -1,4 +1,4 @@
-/// std/storage: crash-safe persistence, where a save replaces the whole file or
+/// Crash-safe persistence, where a save replaces the whole file or
 /// leaves the old one.
 ///
 /// `writeAtomic` writes a sibling temp file and renames it over the target, so

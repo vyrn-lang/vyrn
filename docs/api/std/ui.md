@@ -1,6 +1,6 @@
 # std/ui
 
-std/ui: file-based routing as a generator. `pages(dir)` scans a
+File-based routing as a generator: `pages(dir)` scans a
 directory of page modules at generation time and returns a router module.
 
   import { pages } from "std/ui"

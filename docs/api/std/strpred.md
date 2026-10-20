@@ -1,6 +1,6 @@
 # std/strpred
 
-std/strpred: the string predicates and `slice`, written on the byte view
+The string predicates and `slice`, written on the byte view
 (`bytes`, `s[i]`, `stringFromBytes`).
 
 Offsets and lengths are bytes. A byte-wise scan is safe on UTF-8: a valid

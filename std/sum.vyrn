@@ -1,4 +1,4 @@
-/// std/sum: the exact sum of an `Array<Float64>`, written in Vyrn.
+/// The exact sum of an `Array<Float64>`, written in Vyrn.
 
 // The exact sum. A finite `Float64` is `m * 2^(p - 1074)` for an integer `m`
 // below 2^53 and a position `p` from 0 to 2045, so a sum of them is an integer

@@ -1,6 +1,6 @@
 # std/http
 
-std/http -- the REST projection: hand-written routes over the same
+The REST projection: hand-written routes over the same
 procedures the derived RPC surface reflects on. A projection is opt-in,
 because a path like `GET /pastes/{id}` is API design that reflection cannot
 derive:
