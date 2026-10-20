@@ -70,9 +70,13 @@ h2, .cards h3 { font-family: var(--sans-d); letter-spacing: -0.02em; font-weight
   margin: 0;
 }
 
+/* Trimmed to the cap height, so a label sits in the middle of its box whatever the face's ascent. */
+button, .btn, .cta, .vx-btn, .find, .theme, .pagemenu > summary, .ostabs label { text-box: trim-both cap alphabetic; }
+/* A link styled as a button centres its label the way a <button> does. */
+a.btn { display: inline-flex; align-items: center; justify-content: center; }
 button, .btn {
   font: 500 var(--t-mono)/1 var(--sans);
-  padding: 8px 12px;
+  padding: 10px 12px;
   border: 1px solid var(--hair);
   background: color-mix(in oklab, var(--ink) 4%, transparent);
   color: var(--ink);
@@ -86,7 +90,7 @@ button[aria-pressed="true"], button.on { border-color: var(--accent); color: var
 .controls { display: flex; gap: var(--s1); flex-wrap: wrap; }
 
 /* Corners for every boxed thing, in one place. A box whose children paint to its edge clips them. */
-code, kbd, .key, .skip, .kindpill, .findtabs [data-sect], .pagemenu .acts a, .ostabs label, .idefile, .tabghost, .lanes li {
+code, kbd, .key, .skip, .kindpill, .findtabs [data-sect], .pagemenu .acts a, .pagemenu .acts .ic, .ostabs label, .idefile, .tabghost, .lanes li {
   border-radius: var(--r-s);
 }
 button, .btn, .find, .theme, .cmd, .ostabs, .notice, .finder input, .regsearch, .pager a, .pagemenu > summary, .pagemenu .acts, .ctxmenu, .tpl, .newname, .idehelp .tipbox {

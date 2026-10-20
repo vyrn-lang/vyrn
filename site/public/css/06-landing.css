@@ -124,6 +124,7 @@
 .progrow .bcause { margin: var(--s2) 0 0; max-width: 88ch; color: var(--n2); font: var(--t-meta)/1.6 var(--sans); }
 .progrow .bcause b { color: var(--ink); font-weight: 600; }
 .page.benchpage > * { grid-column: 1 / 13; }
+.page.benchpage .band > p, .page.benchpage .bcause { max-width: none; }
 .benchhero { padding: var(--s4) 0 var(--s3); }
 .benchhero .display { font-size: var(--t-h1); line-height: 1.06; margin: var(--s1) 0 var(--s2); }
 

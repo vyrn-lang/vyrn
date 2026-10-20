@@ -32,6 +32,7 @@
 .pkgmain { display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--s4); }
 .pkgside { display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--s2); position: sticky; top: var(--s3); }
 .pkgside .cmd { margin-top: var(--s1); }
+.pkgside .cap { margin-top: var(--s2); }
 .writes { margin-top: var(--s2); }
 .writes summary { cursor: pointer; color: var(--muted); font: var(--t-meta)/1.4 var(--sans); }
 .writes[open] summary { margin-bottom: var(--s1); }

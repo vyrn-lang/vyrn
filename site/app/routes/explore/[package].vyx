@@ -1,5 +1,5 @@
 <script>
-import { Package, Artifact, packageBlurb, packageKnown, packageOf, packageDeps, packageSource, offerOf, addCommand, manifestShape, lockShape, importFrom, artifactsOf } from "../../packages"
+import { Package, Artifact, packageBlurb, packageKnown, packageOf, packageDeps, packageSource, offerOf, addCommand, artifactsOf } from "../../packages"
 import { Head, PageError, ParamQuery, notFound, paramQuery } from "std/ui"
 import { pageHeadWith } from "../../nav"
 params { package: String }
@@ -96,25 +96,6 @@ fn buildLabel(d: Package) -> String {
                     <code :data-spec="offerOf(data.slug).spec">{{ addCommand(data.slug) }}</code>
                     <button type="button" data-copy-btn aria-label="Copy it">Copy</button>
                 </div>
-                <details class="writes">
-                    <summary>What the command writes</summary>
-                    <p><code>vyrn.json</code> gains the alias your <code>import</code> lines use:</p>
-                    <pre class="code">{{ manifestShape(data.slug) }}</pre>
-                    <p><code>vyrn.lock</code> gains the pin: the specifier, the immutable URL it resolved to, and the sha256 of the bytes:</p>
-                    <div class="scroller">
-                    <pre class="code">{{ lockShape(data.slug) }}</pre>
-                    </div>
-                    <p class="cap"><code>vyrn add</code> writes the commit and the <code>sha256</code>. This page cannot know either.</p>
-                </details>
-                <p class="cap">The command pins what it fetched. <a href="/tooling/projects.html">Projects and dependencies</a> explains <code>vyrn.json</code> and <code>vyrn.lock</code>.</p>
-            </div>
-            <div class="regcard">
-                <p class="eyebrow">import</p>
-                <div class="cmd" data-copy>
-                    <code>{{ importFrom(data.slug) }}</code>
-                    <button type="button" data-copy-btn aria-label="Copy it">Copy</button>
-                </div>
-                <p class="cap">The alias is a bare specifier the manifest maps.</p>
             </div>
             <div class="regcard">
                 <p class="eyebrow">symbols</p>
