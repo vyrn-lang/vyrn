@@ -25,8 +25,8 @@ import * as gTests from "../guide/tests"
 import * as gText from "../guide/text"
 import * as gValidated from "../guide/validated"
 import { base64Encode } from "std/codecs"
-import { replace, joinWith, substring, trimEnd } from "std/strings"
-import { startsWith } from "std/strpred"
+import { replace, joinWith, substring, trimEnd, split } from "std/strings"
+import { startsWith, contains } from "std/strpred"
 import { includes } from "std/arrays"
 import { escapeHtml, terminalHtml, inlineCode } from "./code"
 import { blob } from "./repo"
@@ -186,31 +186,31 @@ export fn chapters() -> Array<Chapter> {
             lede: "What carries over from Rust, TypeScript or Go, what is deliberately different, and what Vyrn does not have at all.",
             sections: [
                 compared("rules", "Validation", [
-                    "The thing that is most likely to be new is where a RULE lives. In the languages beside it a rule is code somebody has to call: a constructor, a schema object, a validating function. The type says nothing about whether it ever ran. In Vyrn the rule is part of the type, so `Age` is a number that has passed it.",
-                    "The compiler proves what it can while the program compiles. So `Age(30)` costs nothing at run time, and `Age(5)` is a compile error rather than a failed check. Input from outside the program is not a constant, so it takes the total form. `Age?(n)` answers <code>Option&lt;Age&gt;</code>, and no path produces an unchecked `Age`.",
+                    "The thing that is most likely to be new is where a rule lives. In the languages beside it a rule is code somebody has to call: a constructor, a schema object, a validating function. The type says nothing about whether it ever ran. In Vyrn the rule is part of the type, so <code>Age</code> is a number that has passed it.",
+                    "The compiler proves what it can while the program compiles. So <code>Age(30)</code> costs nothing at run time, and <code>Age(5)</code> is a compile error rather than a failed check. Input from outside the program is not a constant, so it takes the total form. <code>Age?(n)</code> answers <code>Option&lt;Age&gt;</code>, and no path produces an unchecked <code>Age</code>.",
                 ], "types"),
                 compared("intent", "Ownership", [
-                    "Rust says this with borrows and lifetimes, TypeScript cannot say it at all, and Go says it with a pointer and a comment. Vyrn writes the intent on the parameter as a word: `read`, `modify`, `consume`.",
+                    "Rust says this with borrows and lifetimes, TypeScript cannot say it at all, and Go says it with a pointer and a comment. Vyrn writes the intent on the parameter as a word: <code>read</code>, <code>modify</code>, <code>consume</code>.",
                     "There is no lifetime grammar to learn, because the word is the whole declaration — the compiler decides where the value is released from what the words say. <a href=\"/guide/ownership.html\">Ownership, consume, regions</a> is the chapter that teaches it.",
                 ], "memory"),
                 compared("failure", "Errors", [
-                    "There is no null and no exception. An absent value is `Option`, a failure is `Result`, and `?` hands a failure to the caller unchanged — the same three shapes Rust uses, without the conversion traits.",
-                    "A `panic` is for a case that cannot happen. Nothing unwinds: there is no `catch` anywhere in the language, so a panic ends the program.",
+                    "There is no null and no exception. An absent value is <code>Option</code>, a failure is <code>Result</code>, and <code>?</code> hands a failure to the caller unchanged — the same three shapes Rust uses, without the conversion traits.",
+                    "A <code>panic</code> is for a case that cannot happen. Nothing unwinds: there is no <code>catch</code> anywhere in the language, so a panic ends the program.",
                 ], "failure"),
                 section("shapes", "Records and enums", [
-                    "A `record` is a struct with named fields and no inheritance. An `enum` is a closed choice with payloads, and `match` covers every case. The compiler counts the arms, so a new variant is a compile error at every site that reads it.",
+                    "A <code>record</code> is a struct with named fields and no inheritance. An <code>enum</code> is a closed choice with payloads, and <code>match</code> covers every case. The compiler counts the arms, so a new variant is a compile error at every site that reads it.",
                     "Generics are monomorphised, protocols are how a type says what it can do, and a protocol bound is checked at the call rather than at run time. Records are structural, as in TypeScript: a record with the same fields, or more, fits where a record type is wanted.",
                 ], []),
                 section("absent", "What Vyrn does not have", [
                     "<strong>No garbage collector.</strong> Memory is released where the ownership words say it is, and the editor's hover shows that decision per binding.",
-                    "<strong>No exceptions, no unwinding, no `async` colour.</strong> A program is a program; the runtime that serves HTTP is a library written in the language.",
+                    "<strong>No exceptions, no unwinding, no <code>async</code> colour.</strong> A program is a program; the runtime that serves HTTP is a library written in the language.",
                     "<strong>No macros.</strong> A generator is an ordinary Vyrn function that runs while you compile and emits Vyrn — <code>vyrn emit-gen</code> prints exactly what it wrote. <a href=\"/guide/generators.html\">gen fns and generators</a> is the chapter.",
                     "<strong>No inheritance and no null.</strong> Both are covered above, and neither has a workaround to learn.",
                 ], []),
                 section("next", "Next steps", [
                     "If you write Rust: read <a href=\"/guide/ownership.html\">Ownership</a> first — it is the chapter where this language differs from yours the most, and it is shorter than you expect.",
                     "If you write TypeScript: read <a href=\"/guide/values.html\">Values and types</a> and then <a href=\"/guide/errors.html\">Errors</a>. Numbers state their width here, and validation is a type rather than a library.",
-                    "If you write Go: read <a href=\"/guide/records.html\">Records, enums, match</a> — the closed enum and exhaustive `match` are what replace the interface-and-type-switch pattern.",
+                    "If you write Go: read <a href=\"/guide/records.html\">Records, enums, match</a> — the closed enum and exhaustive <code>match</code> are what replace the interface-and-type-switch pattern.",
                     "The <a href=\"/benchmarks.html\">benchmarks</a> answer the other question a reader arrives with, and every reading there is published.",
                 ], []),
             ],
@@ -734,6 +734,34 @@ test "every chapter names an area, a slug, a title and at least one section" {
             assert(s.anchor.byteLength > 0)
             assert(s.heading.byteLength > 0)
             assert(s.prose.length > 0)
+        }
+    }
+}
+
+// The prose of `p` outside its `<code>` elements.
+fn outsideCode(p: String) -> String {
+    let mut out = ""
+    let mut first = true
+    for piece in split(p, "<code>") {
+        if first {
+            out = out + piece
+        } else {
+            let rest = split(piece, "</code>")
+            if rest.length > 1 {
+                out = out + rest[1]
+            }
+        }
+        first = false
+    }
+    return out
+}
+
+test "section prose is HTML, so it writes code as <code> and never as a backtick" {
+    for c in chapters() {
+        for s in c.sections {
+            for p in s.prose {
+                assert(!contains(outsideCode(p), "`"))
+            }
         }
     }
 }
