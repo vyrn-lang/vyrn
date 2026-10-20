@@ -155,19 +155,11 @@ fn roles_come_from_the_manifest() {
     let page = roles.iter().find(|r| r.contract == "Page").unwrap();
     assert_eq!(page.scope, RoleScope::Segment("routes".into()));
     assert_eq!(page.module, "std/ui");
-    // The chrome default: a layout is not a page.
-    assert!(page.except.iter().any(|e| e == "layout"));
+    // The string form leaves the chrome stems to the module's companion.
+    assert_eq!(page.except, None);
 
     let r = role_for("/app/routes/index.vyx", &roles).expect("a page is in the role");
     assert_eq!(r.contract, "Page");
-    assert!(
-        role_for("/app/routes/layout.vyx", &roles).is_none(),
-        "a layout has no contract to be a member of"
-    );
-    assert!(
-        role_for("/app/routes/error.vyx", &roles).is_none(),
-        "nor does an error page"
-    );
     assert!(
         role_for("/app/store.vyrn", &roles).is_none(),
         "a module outside every role is governed by nothing"

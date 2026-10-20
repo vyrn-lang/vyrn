@@ -48,16 +48,13 @@ pub struct Role {
     /// a manifest role, whose specifier resolves against the manifest.
     pub module_file: Option<String>,
     pub contract: String,
-    /// File stems in scope that are not modules of the role: `layout.vyx` and
-    /// `error.vyx` in `routes/` are chrome with no contract, so offering
-    /// `head`/`data` in them would misfire. The default mirrors `std/ui`'s
-    /// `uiScanAll`; `vyrn.json` overrides it per role.
-    pub except: Vec<String>,
+    /// File stems in scope that are not modules of the role, such as a page
+    /// directory's layout, whose contract members would misfire. `vyrn.json`
+    /// may list them per role; otherwise [`roles_for_project`] asks the
+    /// module's editor companion (`vyrnChrome*`). `None` until one of the two
+    /// answers.
+    pub except: Option<Vec<String>>,
 }
-
-/// The stems a role excludes by default: `std/ui`'s chrome. See
-/// [`Role::except`].
-const DEFAULT_ROLE_EXCEPT: &[&str] = &["layout", "error"];
 
 /// Splits `spec` as `module:Contract` (`"std/ui:Page"`). `None` without a
 /// `:`; the caller ignores a malformed entry, and the generator's own check
@@ -77,10 +74,10 @@ fn split_spec(spec: &str) -> Option<(String, String)> {
 /// ```
 ///
 /// A value may be an object, `{ "contract": "std/ui:Page", "except":
-/// ["layout", "error"] }`, to override the chrome stems; the string form
-/// takes [`DEFAULT_ROLE_EXCEPT`]. An empty result means no `roles` key. It
-/// takes the parsed document because a parse failure belongs to whoever read
-/// the file.
+/// ["layout", "error"] }`, to state the chrome stems; the string form leaves
+/// [`Role::except`] to the module's companion. An empty result means no
+/// `roles` key. It takes the parsed document because a parse failure belongs
+/// to whoever read the file.
 pub fn roles_from_manifest(doc: &Json) -> Vec<Role> {
     let Some(Json::Obj(entries)) = doc.get("roles") else {
         return Vec::new();
@@ -88,10 +85,7 @@ pub fn roles_from_manifest(doc: &Json) -> Vec<Role> {
     let mut out = Vec::new();
     for (segment, value) in entries {
         let (spec, except) = match value {
-            Json::Str(s) => (
-                s.clone(),
-                DEFAULT_ROLE_EXCEPT.iter().map(|s| s.to_string()).collect(),
-            ),
+            Json::Str(s) => (s.clone(), None),
             Json::Obj(fields) => {
                 let Some(Json::Str(spec)) =
                     fields.iter().find(|(k, _)| k == "contract").map(|(_, v)| v)
@@ -108,7 +102,7 @@ pub fn roles_from_manifest(doc: &Json) -> Vec<Role> {
                         .collect(),
                     _ => Vec::new(),
                 };
-                (spec.clone(), except)
+                (spec.clone(), Some(except))
             }
             _ => continue,
         };
@@ -128,20 +122,49 @@ pub fn roles_from_manifest(doc: &Json) -> Vec<Role> {
 /// Returns a project's roles: the ones its manifest declares, or else the
 /// ones [`discovered_roles`] finds. `doc` is the manifest the caller already
 /// read ([`crate::manifest::role_roots`] says why), and `roots` is that
-/// function's answer.
+/// function's answer. A role without stated exceptions takes the chrome stems
+/// its module's editor companion names in `vyrnChrome*() -> String`, one per
+/// line.
 pub fn roles_for_project(
     doc: Option<&Json>,
     roots: &[(String, String)],
     opts: &LoadOptions,
     resolver: &dyn ModuleResolver,
+    engine: Option<&crate::gen::GenEngine>,
 ) -> Vec<Role> {
-    if let Some(doc) = doc {
-        let declared = roles_from_manifest(doc);
-        if !declared.is_empty() {
-            return declared;
-        }
+    let declared = doc.map(roles_from_manifest).unwrap_or_default();
+    let mut roles = if declared.is_empty() {
+        discovered_roles(roots, opts, resolver)
+    } else {
+        declared
+    };
+    let manifest = format!("{}/vyrn.json", opts.alias_base);
+    for role in roles.iter_mut().filter(|r| r.except.is_none()) {
+        // A manifest role's module resolves against the manifest; a
+        // discovered one's file names itself.
+        let (importer, spec) = match role.module_file.as_deref() {
+            Some(file) => (
+                file,
+                format!("./{}", file.rsplit('/').next().unwrap_or(file)),
+            ),
+            None => (manifest.as_str(), role.module.clone()),
+        };
+        let stems = crate::loader::call_generator(
+            importer,
+            &spec,
+            "vyrnChrome",
+            &[],
+            true,
+            opts,
+            resolver,
+            engine,
+        );
+        role.except = Some(match stems {
+            Some(Ok(stems)) => stems.lines().map(String::from).collect(),
+            _ => Vec::new(),
+        });
     }
-    discovered_roles(roots, opts, resolver)
+    roles
 }
 
 /// Returns the roles found from the generator call sites in `roots`, the
@@ -180,7 +203,7 @@ pub fn discovered_roles(
                 module: gen_module,
                 module_file: Some(gen_file),
                 contract,
-                except: DEFAULT_ROLE_EXCEPT.iter().map(|s| s.to_string()).collect(),
+                except: None,
             };
             if !out.contains(&role) {
                 out.push(role);
@@ -275,7 +298,7 @@ pub fn role_for<'r>(path: &str, roles: &'r [Role]) -> Option<&'r Role> {
                 }
             }
         };
-        if role.except.iter().any(|e| e == stem) {
+        if role.except.iter().flatten().any(|e| e == stem) {
             continue;
         }
         if best.map(|(b, _)| depth > b).unwrap_or(true) {

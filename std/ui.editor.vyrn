@@ -6,14 +6,27 @@
 import { vyxScriptView, vyxHasTemplate, vyxStemOf } from "std/vyx.editor"
 import { vyxPageShape } from "std/vyx"
 import { joinWith } from "std/strings"
+import { includes } from "std/arrays"
+
+/// The file stems in a `pages` directory that are chrome, not pages: a
+/// `layout.vyx` wraps every page and an `error.vyx` renders a failure, so
+/// neither answers the `Page` contract.
+gen fn uiChrome() -> Array<String> {
+    return ["layout", "error"]
+}
+
+/// The chrome stems of a `pages` directory, `layout` and `error`, one per
+/// line: a tool grades every other file there against `Page`.
+export gen fn vyrnChromeUi() -> String {
+    return joinWith(uiChrome(), "\n")
+}
 
 /// The view of the page source `src` whose file stem is `stem`:
 /// `std/vyx.editor`'s [`vyxScriptView`], then the `page` its `<template>` compiles
-/// to. A `layout.vyx` or `error.vyx` is chrome, not a page, and declares
-/// nothing more.
+/// to. A [`uiChrome`] file is not a page and declares nothing more.
 gen fn uiPageView(src: String, stem: String) -> String {
     let view = vyxScriptView(src)
-    if stem == "layout" || stem == "error" || vyxHasTemplate(src) == false {
+    if includes(uiChrome(), stem) || vyxHasTemplate(src) == false {
         return view
     }
     let shape = vyxPageShape(src)

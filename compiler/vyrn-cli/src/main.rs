@@ -932,7 +932,13 @@ fn why_cmd(call: &Call) -> Outcome {
     // file are two policies when one of them fails.
     let doc = p.manifest.as_ref().map(|m| &m.doc);
     let roots = vyrn_frontend::manifest::role_roots(&app_dir, doc);
-    let roles = vyrn_frontend::contracts::roles_for_project(doc, &roots, &p.opts, &p.resolver);
+    let roles = vyrn_frontend::contracts::roles_for_project(
+        doc,
+        &roots,
+        &p.opts,
+        &p.resolver,
+        Some(&*engine()),
+    );
     let Some(role) = vyrn_frontend::contracts::role_for(&path, &roles) else {
         p.save_lock()?;
         println!("{path}");
