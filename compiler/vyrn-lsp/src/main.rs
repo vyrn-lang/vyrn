@@ -272,8 +272,8 @@ fn main() {
                 session: Session::new(std::env::var("VYRN_NO_MEMO").is_err()),
                 docs: HashMap::new(),
                 analyses: HashMap::new(),
-                vyx_owner: HashMap::new(),
-                vyx_ownerless: HashSet::new(),
+                input_owner: HashMap::new(),
+                input_ownerless: HashSet::new(),
                 synth_cache: RefCell::new(HashMap::new()),
                 css_cache: RefCell::new(HashMap::new()),
                 contract_cache: RefCell::new(HashMap::new()),
@@ -296,19 +296,19 @@ fn main() {
 }
 
 struct Server {
-    /// Source text per open URI: Vyrn documents and generator inputs (`.vyx`).
+    /// Source text per open URI: Vyrn documents and generator inputs.
     docs: HashMap<Url, String>,
     /// The [`Analysis`] per Vyrn document, built once per change so a request
     /// never re-parses.
     analyses: HashMap<Url, Analysis>,
     /// A generator input (slash path) -> the Vyrn root whose analysis generated
-    /// from it: the root a `.vyx` request maps through and a `.vyx` edit
+    /// from it: the root an input's request maps through and an input's edit
     /// re-analyzes. Filled by analysis and by owner discovery.
-    vyx_owner: HashMap<String, Url>,
-    /// `.vyx` files (slash path) whose owner discovery found no root. Cleared
-    /// whole when a `.vyrn` opens or changes, and per file when a `.vyx` opens.
-    vyx_ownerless: HashSet<String>,
-    /// Per owner root, its generated modules and their analyses, which `.vyx`
+    input_owner: HashMap<String, Url>,
+    /// Generator inputs (slash path) whose owner discovery found no root. Cleared
+    /// whole when a `.vyrn` opens or changes, and per file when the input opens.
+    input_ownerless: HashSet<String>,
+    /// Per owner root, its generated modules and their analyses, which input
     /// requests reuse. `RefCell` because request handlers hold `&Server`.
     synth_cache: RefCell<HashMap<Url, OwnerSynth>>,
     /// Per app root, its stylesheets for a safelisted-class hover. Re-read only
@@ -550,19 +550,19 @@ fn main_loop(connection: &Connection, server: &mut Server) {
 
 /// Dispatch a request to its handler, or answer method-not-found.
 fn handle_request(server: &mut Server, req: Request) -> Response {
-    // Owner discovery for a `.vyx` also runs here, in case a request precedes
+    // Owner discovery for a generator input also runs here, in case a request precedes
     // the open's discovery. It publishes no diagnostics; didOpen does.
     if let Some(uri) = request_uri(&req) {
         if !is_vyrn_uri(&uri) {
-            ensure_vyx_owner(server, &uri);
+            ensure_input_owner(server, &uri);
             dbg_log(&format!(
-                "  vyx owner for {} => {:?} (ownerless={})",
+                "  input owner for {} => {:?} (ownerless={})",
                 uri.path(),
                 uri_path(&uri)
-                    .and_then(|p| server.vyx_owner.get(&p))
+                    .and_then(|p| server.input_owner.get(&p))
                     .map(|u| u.to_string()),
                 uri_path(&uri)
-                    .map(|p| server.vyx_ownerless.contains(&p))
+                    .map(|p| server.input_ownerless.contains(&p))
                     .unwrap_or(false)
             ));
         }
@@ -740,7 +740,7 @@ fn handle_hover(server: &Server, params: serde_json::Value) -> Option<Hover> {
     let text = doc_text(server, uri)?;
     let (line, col) = to_frontend(&text, &p.text_document_position_params.position);
     // The contract note and the derived wire facts stand without an ordinary
-    // hover: in a `.vyx` script the forward map has nothing for a declaration.
+    // hover: in an input's embedded code the forward map has nothing for a declaration.
     let note = match (
         contract_hover_note(server, uri, line, col),
         derived_hover_note(server, uri, line, col),
@@ -757,7 +757,7 @@ fn handle_hover(server: &Server, params: serde_json::Value) -> Option<Hover> {
                 .map(Err),
         })
     } else {
-        vyx_forward(server, uri, line, col).and_then(|fwd| {
+        input_forward(server, uri, line, col).and_then(|fwd| {
             let a = &fwd.synth.analysis;
             match resolve(a, fwd.line, fwd.col) {
                 Some(r) => Some(Ok(fence_signature(&r))),
@@ -812,7 +812,7 @@ fn handle_definition(server: &Server, params: serde_json::Value) -> Option<GotoD
         if let Some(loc) = component_tag_definition(server, uri, line, col) {
             return Some(loc);
         }
-        let fwd = vyx_forward(server, uri, line, col)?;
+        let fwd = input_forward(server, uri, line, col)?;
         (resolve(&fwd.synth.analysis, fwd.line, fwd.col)?, None)
     };
     // A built-in method resolves for hover but has no declaration.
@@ -822,7 +822,7 @@ fn handle_definition(server: &Server, params: serde_json::Value) -> Option<GotoD
     // A remote module key (`github:...`) is no file, so it has no definition.
     let target_uri = match &r.target_file {
         Some(f) => Url::from_file_path(f.replace('/', std::path::MAIN_SEPARATOR_STR)).ok()?,
-        // In place in a Vyrn document; a `.vyx` target in the generated module
+        // In place in a Vyrn document; an input's target in the generated module
         // has no file.
         None => home_uri?,
     };
@@ -993,7 +993,7 @@ fn handle_document_highlight(
         let (analysis, _) = lookup(server, uri)?;
         references(analysis, line, col)
     } else {
-        vyx_highlights(server, uri, line, col)
+        input_highlights(server, uri, line, col)
     };
     Some(
         refs.into_iter()
@@ -1009,18 +1009,18 @@ fn handle_document_highlight(
     )
 }
 
-/// One verbatim origin region of a `.vyx`, aligned with its generated line.
-struct VyxSpan<'a> {
+/// One verbatim origin region of a generator input, aligned with its generated line.
+struct InputSpan<'a> {
     region: &'a vyrn_frontend::origin::Region,
     synth: &'a Rc<AnalyzedSynth>,
-    vyx_line: &'a str,
+    input_line: &'a str,
     /// 1-based column in the generated line where the verbatim span starts, and
     /// its length in chars.
     gcol: usize,
     span_len: usize,
 }
 
-impl VyxSpan<'_> {
+impl InputSpan<'_> {
     /// Whether a generated range lies on the region's first line, inside the
     /// verbatim span. Only such a range maps back.
     fn within(&self, line: usize, col: usize, end_col: usize) -> bool {
@@ -1035,39 +1035,39 @@ impl VyxSpan<'_> {
     }
 }
 
-/// Maps a per-feature answer about a `.vyx`'s generated modules back into the
-/// `.vyx`: for each region of the file that `wants` (given the input line), the
+/// Maps a per-feature answer about an input's generated modules back into the
+/// input: for each region of the file that `wants` (given the input line), the
 /// region's module, its aligned span and the input line go to `step`, which
 /// pushes mapped items. The result is sorted by `key` and deduplicated on it,
 /// because overlapping regions can emit a position twice. Empty when the file
 /// has no owner.
-fn vyx_back_map<T, K: Ord>(
+fn input_back_map<T, K: Ord>(
     server: &Server,
-    vyx_uri: &Url,
+    input_uri: &Url,
     wants: impl Fn(&vyrn_frontend::origin::Region, &str) -> bool,
-    mut step: impl FnMut(&VyxSpan, &mut Vec<T>),
+    mut step: impl FnMut(&InputSpan, &mut Vec<T>),
     key: impl Fn(&T) -> K,
 ) -> Vec<T> {
     let mut out = Vec::new();
-    let Some(vyx_path) = uri_path(vyx_uri) else {
+    let Some(input_path) = uri_path(input_uri) else {
         return out;
     };
-    let Some(owner) = server.vyx_owner.get(&vyx_path) else {
+    let Some(owner) = server.input_owner.get(&input_path) else {
         return out;
     };
     let Some(owner_analysis) = server.analyses.get(owner) else {
         return out;
     };
-    let Some(vyx_text) = doc_text(server, vyx_uri) else {
+    let Some(input_text) = doc_text(server, input_uri) else {
         return out;
     };
     // `synth_for` re-hashes the owner on every call, so hold one per banner.
     let mut synths: HashMap<String, Option<Rc<AnalyzedSynth>>> = HashMap::new();
-    for region in owner_analysis.origins.regions_for(&vyx_path) {
-        let Some(vyx_line) = vyx_text.lines().nth(region.origin.line.saturating_sub(1)) else {
+    for region in owner_analysis.origins.regions_for(&input_path) {
+        let Some(input_line) = input_text.lines().nth(region.origin.line.saturating_sub(1)) else {
             continue;
         };
-        if !wants(&region, vyx_line) {
+        if !wants(&region, input_line) {
             continue;
         }
         let Some(synth) = synths
@@ -1083,13 +1083,14 @@ fn vyx_back_map<T, K: Ord>(
         else {
             continue;
         };
-        let Some((gcol, span_len)) = align_expr_span(vyx_line, region.origin.col, gen_line) else {
+        let Some((gcol, span_len)) = align_expr_span(input_line, region.origin.col, gen_line)
+        else {
             continue;
         };
-        let span = VyxSpan {
+        let span = InputSpan {
             region: &region,
             synth,
-            vyx_line,
+            input_line,
             gcol,
             span_len,
         };
@@ -1100,16 +1101,16 @@ fn vyx_back_map<T, K: Ord>(
     out
 }
 
-/// Highlights in a `.vyx`: references in the generated module, mapped back
+/// Highlights in a generator input: references in the generated module, mapped back
 /// through the verbatim origin regions. References outside a region are dropped.
-fn vyx_highlights(server: &Server, vyx_uri: &Url, line: usize, col: usize) -> Vec<RefRange> {
-    let Some(fwd) = vyx_forward(server, vyx_uri, line, col) else {
+fn input_highlights(server: &Server, input_uri: &Url, line: usize, col: usize) -> Vec<RefRange> {
+    let Some(fwd) = input_forward(server, input_uri, line, col) else {
         return Vec::new();
     };
     let refs = references(&fwd.synth.analysis, fwd.line, fwd.col);
-    vyx_back_map(
+    input_back_map(
         server,
-        vyx_uri,
+        input_uri,
         |_, _| true,
         |sp, out| {
             // `refs` index the cursor's module only.
@@ -1206,7 +1207,7 @@ fn vyx_completion(
         } => {
             // The Tw alphabet comes from the generated module; an unthemed `.vyx`
             // gets nothing.
-            let fwd = vyx_forward(server, uri, line, col)?;
+            let fwd = input_forward(server, uri, line, col)?;
             let cls = class_completions(
                 &fwd.synth.analysis,
                 &fwd.synth.gen_source,
@@ -1219,7 +1220,7 @@ fn vyx_completion(
             // Contract members must not depend on the forward map: a blank line
             // at module scope has no origin, and that is where they are offered.
             let mut members = contract_completion_items(server, uri, line, col);
-            let Some(fwd) = vyx_forward(server, uri, line, col) else {
+            let Some(fwd) = input_forward(server, uri, line, col) else {
                 return (!members.is_empty()).then_some(CompletionResponse::Array(members));
             };
             let gen = &fwd.synth.gen_source;
@@ -1482,26 +1483,26 @@ fn to_completion_item(c: vyrn_frontend::Completion) -> CompletionItem {
     }
 }
 
-/// A `.vyx` cursor mapped into its generated module.
-struct VyxFwd {
+/// A generator input cursor mapped into its generated module.
+struct InputFwd {
     synth: Rc<AnalyzedSynth>,
     /// 1-based generated line and column.
     line: usize,
     col: usize,
 }
 
-/// Map a `.vyx` cursor into its analyzed generated module (forward
+/// Map an input cursor into its analyzed generated module (forward
 /// origin mapping). A verbatim region maps column-exactly; a derived one (a `{#for}`
 /// head) maps to the region's start. `None` outside any region or when the
 /// owner cannot generate.
-fn vyx_forward(server: &Server, vyx_uri: &Url, line: usize, col: usize) -> Option<VyxFwd> {
-    let vyx_path = uri_path(vyx_uri)?;
-    let owner = server.vyx_owner.get(&vyx_path)?.clone();
+fn input_forward(server: &Server, input_uri: &Url, line: usize, col: usize) -> Option<InputFwd> {
+    let input_path = uri_path(input_uri)?;
+    let owner = server.input_owner.get(&input_path)?.clone();
     let owner_analysis = server.analyses.get(&owner)?;
 
     // The rightmost region on this line that starts at or before the cursor.
     let mut region: Option<vyrn_frontend::origin::Region> = None;
-    for r in owner_analysis.origins.regions_for(&vyx_path) {
+    for r in owner_analysis.origins.regions_for(&input_path) {
         if r.origin.line == line && r.origin.col <= col {
             let better = region
                 .as_ref()
@@ -1516,21 +1517,21 @@ fn vyx_forward(server: &Server, vyx_uri: &Url, line: usize, col: usize) -> Optio
 
     let synth = synth_for(server, &owner, &region.gen_module)?;
 
-    let vyx_text = doc_text(server, vyx_uri)?;
-    let vyx_line = vyx_text.lines().nth(line.saturating_sub(1))?;
+    let input_text = doc_text(server, input_uri)?;
+    let input_line = input_text.lines().nth(line.saturating_sub(1))?;
     let gen_line = synth
         .gen_source
         .lines()
         .nth(region.gen_start_line.saturating_sub(1))
         .unwrap_or("");
     let (gline, gcol) = map_into_region(
-        vyx_line,
+        input_line,
         region.origin.col,
         col,
         gen_line,
         region.gen_start_line,
     );
-    Some(VyxFwd {
+    Some(InputFwd {
         synth,
         line: gline,
         col: gcol,
@@ -1626,14 +1627,14 @@ fn owner_sig(owner_text: &str, owner_path: &str, overlays: &HashMap<String, Stri
 /// region's input start column. Column-exact when the input expression is found
 /// in `gen_line`, else the line start.
 fn map_into_region(
-    vyx_line: &str,
+    input_line: &str,
     origin_col: usize,
     col: usize,
     gen_line: &str,
     gen_start_line: usize,
 ) -> (usize, usize) {
     let delta = col.saturating_sub(origin_col);
-    match align_expr_span(vyx_line, origin_col, gen_line) {
+    match align_expr_span(input_line, origin_col, gen_line) {
         Some((gcol, _)) => (gen_start_line, gcol + delta),
         None => (gen_start_line, 1),
     }
@@ -1643,8 +1644,8 @@ fn map_into_region(
 /// imports resolve as at generation time.
 fn synth_path_for(owner_path: &str) -> String {
     match owner_path.rfind('/') {
-        Some(i) => format!("{}/__vyrn_vyx_synth__.vyrn", &owner_path[..i]),
-        None => "__vyrn_vyx_synth__.vyrn".to_string(),
+        Some(i) => format!("{}/__vyrn_synth__.vyrn", &owner_path[..i]),
+        None => "__vyrn_synth__.vyrn".to_string(),
     }
 }
 
@@ -1666,18 +1667,18 @@ fn handle_document_symbol(
             .filter_map(|s| to_document_symbol(s, &text))
             .collect()
     } else {
-        vyx_document_symbols(server, uri, &text)
+        input_document_symbols(server, uri, &text)
     };
     Some(DocumentSymbolResponse::Nested(symbols))
 }
 
-/// The `<script>` declarations of a `.vyx`: the generated modules' own
+/// The embedded declarations of a generator input: the generated modules' own
 /// top-level symbols whose name lies in a verbatim origin region, at the input
 /// columns. The view functions a template becomes lie in no region.
-fn vyx_document_symbols(server: &Server, vyx_uri: &Url, text: &str) -> Vec<DocumentSymbol> {
-    vyx_back_map(
+fn input_document_symbols(server: &Server, input_uri: &Url, text: &str) -> Vec<DocumentSymbol> {
+    input_back_map(
         server,
-        vyx_uri,
+        input_uri,
         |_, _| true,
         |sp, out| {
             for s in &sp.synth.analysis.symbols {
@@ -1685,7 +1686,7 @@ fn vyx_document_symbols(server: &Server, vyx_uri: &Url, text: &str) -> Vec<Docum
                     continue;
                 }
                 let end_col = sp.back(s.end_col);
-                if !name_ends_at(sp.vyx_line, end_col, &s.name) {
+                if !name_ends_at(sp.input_line, end_col, &s.name) {
                     continue;
                 }
                 let at = vyrn_frontend::Symbol {
@@ -1805,7 +1806,7 @@ fn sem_mods_bits(m: SemMods) -> u32 {
     b
 }
 
-/// Semantic tokens for the whole document. A `.vyx` maps through the origin map;
+/// Semantic tokens for the whole document. A generator input maps through the origin map;
 /// unmapped and region-level spans get none.
 fn handle_semantic_tokens_full(
     server: &Server,
@@ -1833,19 +1834,19 @@ fn handle_semantic_tokens_range(
     )))
 }
 
-/// The classified tokens for `uri`; a `.vyx` maps them from its generated module.
+/// The classified tokens for `uri`; an input maps them from its generated module.
 fn document_sem_tokens(server: &Server, uri: &Url) -> Option<Vec<vyrn_frontend::SemToken>> {
     if is_vyrn_uri(uri) {
         let (analysis, _) = lookup(server, uri)?;
         Some(vyrn_frontend::semantic_tokens(analysis))
     } else {
-        Some(vyx_semantic_tokens(server, uri))
+        Some(input_semantic_tokens(server, uri))
     }
 }
 
 /// Inlay hints in the requested lines: a label at every move, the type of
-/// every binding whose line does not say it, and what the line costs ([`cost::hints`]). A `.vyx` gets type hints only,
-/// from [`vyx_type_hints`].
+/// every binding whose line does not say it, and what the line costs ([`cost::hints`]). A generator input gets type hints only,
+/// from [`input_type_hints`].
 fn handle_inlay_hint(server: &Server, params: serde_json::Value) -> Option<Vec<InlayHint>> {
     let p: InlayHintParams = serde_json::from_value(params).ok()?;
     let (from, to) = (
@@ -1853,7 +1854,7 @@ fn handle_inlay_hint(server: &Server, params: serde_json::Value) -> Option<Vec<I
         p.range.end.line as usize + 1,
     );
     if !is_vyrn_uri(&p.text_document.uri) {
-        return Some(vyx_type_hints(server, &p.text_document.uri, from, to));
+        return Some(input_type_hints(server, &p.text_document.uri, from, to));
     }
     let (analysis, _) = lookup(server, &p.text_document.uri)?;
     let src = doc_text(server, &p.text_document.uri);
@@ -1952,18 +1953,18 @@ fn type_hint_at(line_text: &str, line: usize, end_col: usize, label: String) -> 
     }
 }
 
-/// Type hints for a `.vyx`: bindings of the generated module mapped back through
-/// the verbatim regions, as [`vyx_semantic_tokens`] does. A hint is kept only
+/// Type hints for a generator input: bindings of the generated module mapped back through
+/// the verbatim regions, as [`input_semantic_tokens`] does. A hint is kept only
 /// where the author's own name ends at the mapped column; a misplaced hint is
 /// worse than a missing one.
-fn vyx_type_hints(server: &Server, vyx_uri: &Url, from: usize, to: usize) -> Vec<InlayHint> {
-    vyx_back_map(
+fn input_type_hints(server: &Server, input_uri: &Url, from: usize, to: usize) -> Vec<InlayHint> {
+    input_back_map(
         server,
-        vyx_uri,
+        input_uri,
         // A line without a binding keyword carries no hint; most template lines.
-        |region, vyx_line| {
+        |region, input_line| {
             (from..=to).contains(&region.origin.line)
-                && (vyx_line.contains("let") || vyx_line.contains("for"))
+                && (input_line.contains("let") || input_line.contains("for"))
         },
         |sp, out| {
             for b in &sp.synth.analysis.locals {
@@ -1971,15 +1972,20 @@ fn vyx_type_hints(server: &Server, vyx_uri: &Url, from: usize, to: usize) -> Vec
                     continue;
                 }
                 let col = sp.back(b.end_col);
-                if !name_ends_at(sp.vyx_line, col, &b.name) {
+                if !name_ends_at(sp.input_line, col, &b.name) {
                     continue;
                 }
                 let Some(label) =
-                    type_hint_label(b, &sp.synth.analysis.spellings, sp.vyx_line, col)
+                    type_hint_label(b, &sp.synth.analysis.spellings, sp.input_line, col)
                 else {
                     continue;
                 };
-                out.push(type_hint_at(sp.vyx_line, sp.region.origin.line, col, label));
+                out.push(type_hint_at(
+                    sp.input_line,
+                    sp.region.origin.line,
+                    col,
+                    label,
+                ));
             }
         },
         |h| (h.position.line, h.position.character),
@@ -2073,13 +2079,13 @@ fn encode_tokens(mut toks: Vec<vyrn_frontend::SemToken>, text: &str) -> Semantic
     }
 }
 
-/// Semantic tokens of a `.vyx`: the generated module's tokens inside each
+/// Semantic tokens of a generator input: the generated module's tokens inside each
 /// verbatim origin region, re-anchored at the input columns. Derived regions
 /// contribute nothing and stay with the TextMate grammar.
-fn vyx_semantic_tokens(server: &Server, vyx_uri: &Url) -> Vec<vyrn_frontend::SemToken> {
-    vyx_back_map(
+fn input_semantic_tokens(server: &Server, input_uri: &Url) -> Vec<vyrn_frontend::SemToken> {
+    input_back_map(
         server,
-        vyx_uri,
+        input_uri,
         |_, _| true,
         |sp, out| {
             for st in sp.synth.tokens.iter() {
@@ -2101,8 +2107,8 @@ fn vyx_semantic_tokens(server: &Server, vyx_uri: &Url) -> Vec<vyrn_frontend::Sem
 /// The `(1-based gen col, char length)` of the longest prefix of the input tail
 /// at `origin_col` found in `gen_line`: the verbatim span of a region. The bytes
 /// after the expression (`}`, `>`) diverge from the generated wrapper.
-fn align_expr_span(vyx_line: &str, origin_col: usize, gen_line: &str) -> Option<(usize, usize)> {
-    let tail: Vec<char> = vyx_line
+fn align_expr_span(input_line: &str, origin_col: usize, gen_line: &str) -> Option<(usize, usize)> {
+    let tail: Vec<char> = input_line
         .chars()
         .skip(origin_col.saturating_sub(1))
         .collect();
@@ -2542,8 +2548,8 @@ fn install_root(
     }
     for f in analysis.origins.input_files() {
         let f = vyrn_frontend::origin::OriginMaps::norm_path_key(&f);
-        server.vyx_ownerless.remove(&f);
-        server.vyx_owner.insert(f, root_uri.clone());
+        server.input_ownerless.remove(&f);
+        server.input_owner.insert(f, root_uri.clone());
     }
     if let Some(c) = connection {
         publish_remapped(c, server, &analysis);
@@ -2567,71 +2573,68 @@ fn install_root(
     server.analyses.insert(root_uri.clone(), analysis);
 }
 
-// `.vyx` owner discovery: a `.vyx` opened alone has no owner until a `.vyrn`
-// that generates from it is analyzed. Discovery ranks the `.vyrn` files under
-// the app root and analyzes them in order, within a bound, until one's origins
-// claim the `.vyx`.
+// Owner discovery: a generator input opened alone has no owner until a `.vyrn`
+// that generates from it is analyzed. Discovery analyzes the `.vyrn` files
+// whose generator imports claim the input ([`claimants`]), in order, until
+// one's origins map the input.
 
-/// The most `.vyrn` roots discovery analyzes for one `.vyx`.
+/// The most `.vyrn` files discovery reads for one generator input.
 const MAX_OWNER_CANDIDATES: usize = 48;
 /// The deepest directory level `collect_sources` descends to.
 const MAX_COLLECT_DEPTH: usize = 8;
 
-/// Wire `vyx_uri`'s owner, discovering it without publishing. A no-op for a
-/// `.vyx` already owned or known ownerless.
-fn ensure_vyx_owner(server: &mut Server, vyx_uri: &Url) {
-    let Some(path) = uri_path(vyx_uri) else {
+/// Wire `input_uri`'s owner, discovering it without publishing. A no-op for an
+/// input already owned or known ownerless.
+fn ensure_input_owner(server: &mut Server, input_uri: &Url) {
+    let Some(path) = uri_path(input_uri) else {
         return;
     };
-    if !path.ends_with(".vyx") {
-        return;
-    }
-    if server.vyx_owner.contains_key(&path) || server.vyx_ownerless.contains(&path) {
+    if server.input_owner.contains_key(&path) || server.input_ownerless.contains(&path) {
         return;
     }
     match probe_owner(server, &path) {
         Some((owner, analysis)) => install_root(None, server, &owner, "", analysis),
         None => {
-            server.vyx_ownerless.insert(path);
+            server.input_ownerless.insert(path);
         }
     }
 }
 
-/// Discover and wire `vyx_uri`'s owner, publishing diagnostics. A miss is
+/// Discover and wire `input_uri`'s owner, publishing diagnostics. A miss is
 /// cached as ownerless and published as one warning that names the search.
-fn discover_vyx_owner(connection: &Connection, server: &mut Server, vyx_uri: &Url) {
-    let Some(path) = uri_path(vyx_uri) else {
+fn discover_input_owner(connection: &Connection, server: &mut Server, input_uri: &Url) {
+    let Some(path) = uri_path(input_uri) else {
         return;
     };
-    if server.vyx_owner.contains_key(&path) {
+    if server.input_owner.contains_key(&path) {
         return;
     }
-    if !server.vyx_ownerless.contains(&path) {
+    if !server.input_ownerless.contains(&path) {
         if let Some((owner, analysis)) = probe_owner(server, &path) {
             let text = doc_text(server, &owner).unwrap_or_default();
             install_root(Some(connection), server, &owner, &text, analysis);
             return;
         }
-        server.vyx_ownerless.insert(path.clone());
+        server.input_ownerless.insert(path.clone());
     }
     let file = std::path::Path::new(&path);
     let root = vyrn_frontend::manifest::app_root(file.parent().unwrap_or(file));
     let msg = format!(
-        "no `.vyrn` root maps its generated code to this file, so it has no types, \
-         hovers or hints; searched up to {MAX_OWNER_CANDIDATES} `.vyrn` files nearest \
-         it under `{}`",
+        "no `.vyrn` file whose generator import names this file maps generated code \
+         to it, so it has no types, hovers or hints; searched the \
+         {MAX_OWNER_CANDIDATES} `.vyrn` files nearest it under `{}`",
         root.display()
     );
-    let text = doc_text(server, vyx_uri).unwrap_or_default();
+    let text = doc_text(server, input_uri).unwrap_or_default();
     let warning = vyrn_frontend::diagnostics::Diagnostic::warning(1, 0, "lsp", msg);
-    publish(connection, vyx_uri, &text, &[warning]);
+    publish(connection, input_uri, &text, &[warning]);
 }
 
-/// The first candidate root whose origins claim `vyx_path`, with its analysis.
+/// The first candidate root whose origins claim `input_path`, with its analysis.
 /// Mutates nothing; the caller wires the winner.
-fn probe_owner(server: &Server, vyx_path: &str) -> Option<(Url, Analysis)> {
-    let want = vyrn_frontend::origin::OriginMaps::norm_path_key(vyx_path);
-    probe_roots(server, vyx_path, |a| {
+fn probe_owner(server: &Server, input_path: &str) -> Option<(Url, Analysis)> {
+    let want = vyrn_frontend::origin::OriginMaps::norm_path_key(input_path);
+    probe_roots(server, input_path, |a| {
         a.origins
             .input_files()
             .iter()
@@ -2639,14 +2642,14 @@ fn probe_owner(server: &Server, vyx_path: &str) -> Option<(Url, Analysis)> {
     })
 }
 
-/// Analyze the ranked `.vyrn` roots near `path` until one `claims` it.
+/// Analyze the [`claimants`] of `path` until one `claims` it.
 fn probe_roots(
     server: &Server,
     path: &str,
     claims: impl Fn(&Analysis) -> bool,
 ) -> Option<(Url, Analysis)> {
     let overlays = overlays_of(server);
-    for cand in candidate_owners(path) {
+    for cand in claimants(server, path) {
         let text = match doc_text(server, &cand) {
             Some(t) => t,
             None => continue,
@@ -2808,7 +2811,7 @@ fn derived_hover_note(server: &Server, uri: &Url, line: usize, col: usize) -> Op
 // Rename: the target is resolved here, from the server's caches; `rename.rs`
 // does the rest, pure over what it is handed.
 
-/// The rename target at a position, or the reason there is none. A `.vyx` is
+/// The rename target at a position, or the reason there is none. An input is
 /// refused: the file to edit would be a generated module.
 fn rename_target(
     server: &Server,
@@ -2816,7 +2819,7 @@ fn rename_target(
 ) -> Result<(rename::Target, Url), String> {
     let uri = &pos.text_document.uri;
     if !is_vyrn_uri(uri) {
-        return Err("rename works on a `.vyrn` declaration; a `.vyx` is a generator input".into());
+        return Err("rename works on a `.vyrn` declaration; this file is a generator input".into());
     }
     let text = doc_text(server, uri).ok_or_else(|| "this document is not open".to_string())?;
     let (line, col) = to_frontend(&text, &pos.position);
@@ -2868,56 +2871,37 @@ fn handle_rename(server: &Server, params: serde_json::Value) -> Result<Workspace
     )
 }
 
-/// The `.vyrn` files under the app root to try as owners of `vyx_path`, at most
-/// [`MAX_OWNER_CANDIDATES`]: a generator importer that names the `.vyx`'s
-/// directory first, then any generator importer, then by proximity.
-fn candidate_owners(vyx_path: &str) -> Vec<Url> {
-    let vyx = std::path::Path::new(vyx_path);
-    let Some(vyx_dir) = vyx.parent() else {
+/// The `.vyrn` files among the [`MAX_OWNER_CANDIDATES`] nearest `path` whose
+/// generator imports claim it ([`vyrn_frontend::audience::Claim`]), in path
+/// order. Only the imports are parsed, so a file nothing claims costs no
+/// analysis.
+fn claimants(server: &Server, path: &str) -> Vec<Url> {
+    let file = std::path::Path::new(path);
+    let Some(dir) = file.parent() else {
         return Vec::new();
     };
-    let dir_name = vyx_dir
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_default();
+    let Some(opts) = Url::from_file_path(file)
+        .ok()
+        .and_then(|u| load_context(&server.session, &u, &HashMap::new()))
+        .map(|(opts, ..)| opts)
+    else {
+        return Vec::new();
+    };
     let mut files = Vec::new();
-    collect_vyrn(vyx_dir, &mut files);
-
-    let mut scored: Vec<(i32, usize, std::path::PathBuf)> = files
+    collect_vyrn(dir, &mut files);
+    files.sort();
+    let claims = |cand: &Url| -> Option<bool> {
+        let importer = uri_path(cand)?;
+        let tokens = vyrn_frontend::lexer::lex(&doc_text(server, cand)?).ok()?;
+        let program = vyrn_frontend::parser::parse_accum(tokens).0;
+        let claims = vyrn_frontend::audience::claims(&importer, &program, &opts);
+        Some(claims.iter().any(|c| c.covers(path)))
+    };
+    files
         .into_iter()
-        .map(|p| {
-            let src = std::fs::read_to_string(&p).unwrap_or_default();
-            let generator = has_generator_import(&src);
-            let names_dir = !dir_name.is_empty() && src.contains(&dir_name);
-            let mut score = 0;
-            if generator {
-                score += 2;
-            }
-            if generator && names_dir {
-                score += 4;
-            }
-            let proximity = path_distance(&p, vyx_dir);
-            (score, proximity, p)
-        })
-        .collect();
-    scored.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
-    scored
-        .into_iter()
-        .take(MAX_OWNER_CANDIDATES)
-        .filter_map(|(_, _, p)| Url::from_file_path(p).ok())
+        .filter_map(|p| Url::from_file_path(p).ok())
+        .filter(|cand| claims(cand) == Some(true))
         .collect()
-}
-
-/// Whether a `.vyrn` source mentions a page or component generator, the roots
-/// that own `.vyx` files. A textual heuristic that only ranks owner candidates:
-/// a comment or a string that spells `pages(` counts.
-fn has_generator_import(src: &str) -> bool {
-    src.contains("pagesThemed")
-        || src.contains("componentsThemed")
-        || src.contains("pages(")
-        || src.contains("components(")
-        || src.contains("pages ")
-        || src.contains("components ")
 }
 
 /// The `.vyrn` files nearest `dir`, at most [`MAX_OWNER_CANDIDATES`]: `dir`'s
@@ -2988,16 +2972,16 @@ fn collect_sources(
 }
 
 /// The number of path components outside the common prefix of `cand`'s
-/// directory and `vyx_dir`.
-fn path_distance(cand: &std::path::Path, vyx_dir: &std::path::Path) -> usize {
+/// directory and `dir`.
+fn path_distance(cand: &std::path::Path, dir: &std::path::Path) -> usize {
     let a: Vec<_> = cand.parent().unwrap_or(cand).components().collect();
-    let b: Vec<_> = vyx_dir.components().collect();
+    let b: Vec<_> = dir.components().collect();
     let common = a.iter().zip(b.iter()).take_while(|(x, y)| x == y).count();
     (a.len() - common) + (b.len() - common)
 }
 
 /// Publish remapped diagnostics per generator input, so a template error shows
-/// in its `.vyx`. Every input is republished, empty when clean, so a fix clears.
+/// in its input file. Every input is republished, empty when clean, so a fix clears.
 fn publish_remapped(connection: &Connection, server: &Server, analysis: &Analysis) {
     let mut by_file: HashMap<String, Vec<vyrn_frontend::diagnostics::Diagnostic>> = HashMap::new();
     for f in analysis.origins.input_files() {
@@ -3026,30 +3010,30 @@ fn publish_remapped(connection: &Connection, server: &Server, analysis: &Analysi
 fn refresh_document(connection: &Connection, server: &mut Server, uri: &Url) {
     if is_vyrn_uri(uri) {
         // A `.vyrn` change may have made an owner.
-        server.vyx_ownerless.clear();
+        server.input_ownerless.clear();
         reanalyze_root(connection, server, uri);
     } else if let Some(owner) = uri_path(uri)
-        .and_then(|p| server.vyx_owner.get(&p))
+        .and_then(|p| server.input_owner.get(&p))
         .cloned()
     {
         reanalyze_root(connection, server, &owner);
     } else {
-        discover_vyx_owner(connection, server, uri);
+        discover_input_owner(connection, server, uri);
     }
 }
 
 /// Apply a notification to the server state and return the analysis it owes.
 /// `main_loop` defers that until the queue drains, so a burst of keystrokes
-/// costs one analysis; a `.vyx` edit re-runs generators for seconds.
+/// costs one analysis; an input's edit re-runs generators for seconds.
 fn handle_notification(connection: &Connection, server: &mut Server, notif: Notification) -> Owed {
     if DidOpenTextDocument::METHOD == notif.method {
         if let Ok(params) = serde_json::from_value::<DidOpenTextDocumentParams>(notif.params) {
             let uri = params.text_document.uri.clone();
             let text = params.text_document.text;
             server.docs.insert(uri.clone(), text.clone());
-            // Opening a `.vyx` retries owner discovery.
+            // Opening a generator input retries owner discovery.
             if let Some(p) = uri_path(&uri) {
-                server.vyx_ownerless.remove(&p);
+                server.input_ownerless.remove(&p);
             }
             return Owed::Analyze(uri);
         }

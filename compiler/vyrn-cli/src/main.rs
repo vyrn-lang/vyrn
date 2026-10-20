@@ -1855,9 +1855,8 @@ fn files_under(dir: &Path, exts: &[&str]) -> Vec<String> {
 /// Every `importer -> imported` edge in a project, resolved with the loader's
 /// own `resolve_spec`.
 ///
-/// A generator import contributes edges too. A call naming one file is
-/// resolved by `audience::generator_input`, the function that decides that
-/// module's audience; a call naming a directory reaches every source under it.
+/// A generator import contributes an edge to every project source its
+/// `audience::Claim` covers, or to the file it names.
 fn project_imports(app_dir: &Path, opts: &loader::LoadOptions) -> Vec<(String, String)> {
     let files: Vec<(String, String)> = files_under(app_dir, &["vyrn", "vyx"])
         .into_iter()
@@ -1875,28 +1874,14 @@ fn project_imports(app_dir: &Path, opts: &loader::LoadOptions) -> Vec<(String, S
         };
         let (program, _) = vyrn_frontend::parser::parse_accum(tokens);
         for imp in &program.imports {
-            use vyrn_frontend::ast::{Expr, ImportSource};
-            let spec = match &imp.source {
-                ImportSource::Path(s) => s.clone(),
-                ImportSource::Generator { args, .. } => match args.first() {
-                    Some(Expr::Str(s, _)) => {
-                        if let Some(input) = vyrn_frontend::audience::generator_input(path, s) {
-                            out.push((path.clone(), input));
-                            continue;
-                        }
-                        s.clone()
-                    }
-                    _ => continue,
-                },
-            };
-            let Ok(resolved) = vyrn_frontend::loader::resolve_spec(&spec, path, opts) else {
+            let vyrn_frontend::ast::ImportSource::Path(spec) = &imp.source else {
                 continue;
             };
-            let stripped = resolved
-                .strip_suffix(".vyrn")
-                .unwrap_or(&resolved)
-                .to_string();
-            if Path::new(&stripped).is_dir() {
+            let Ok(resolved) = vyrn_frontend::loader::resolve_spec(spec, path, opts) else {
+                continue;
+            };
+            let stripped = resolved.strip_suffix(".vyrn").unwrap_or(&resolved);
+            if Path::new(stripped).is_dir() {
                 for (kid, _) in &files {
                     if kid.starts_with(&format!("{stripped}/")) {
                         out.push((path.clone(), kid.clone()));
@@ -1904,6 +1889,17 @@ fn project_imports(app_dir: &Path, opts: &loader::LoadOptions) -> Vec<(String, S
                 }
             } else {
                 out.push((path.clone(), resolved));
+            }
+        }
+        for claim in vyrn_frontend::audience::claims(path, &program, opts) {
+            let before = out.len();
+            for (kid, _) in &files {
+                if claim.covers(kid) {
+                    out.push((path.clone(), kid.clone()));
+                }
+            }
+            if out.len() == before && Path::new(&claim.target).is_file() {
+                out.push((path.clone(), claim.target));
             }
         }
     }

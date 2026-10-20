@@ -8,9 +8,7 @@
 //! query functions and maps their results to LSP shapes; it holds no contract
 //! knowledge.
 
-use crate::ast::{
-    ContractDecl, ContractMember, ContractMemberKind, Expr, ImportSource, Program, Type,
-};
+use crate::ast::{ContractDecl, ContractMember, ContractMemberKind, Program, Type};
 use crate::loader::{LoadOptions, ModuleResolver};
 use crate::schema::Json;
 
@@ -168,14 +166,8 @@ pub fn discovered_roles(
             continue;
         };
         let (program, _) = crate::parser::parse_accum(tokens);
-        for imp in &program.imports {
-            let ImportSource::Generator { name, args, .. } = &imp.source else {
-                continue;
-            };
-            let Some(Expr::Str(dir_spec, _)) = args.first() else {
-                continue;
-            };
-            let Some(gen_module) = generator_module(&program, name) else {
+        for claim in crate::audience::claims(path, &program, opts) {
+            let Some(gen_module) = claim.module else {
                 continue;
             };
             let Some((contract, gen_file)) =
@@ -183,14 +175,8 @@ pub fn discovered_roles(
             else {
                 continue;
             };
-            let Ok(dir) = crate::loader::resolve_spec(dir_spec, path, opts) else {
-                continue;
-            };
-            // `resolve_spec` appends `.vyrn` to an extension-less specifier; the
-            // argument is a directory, so strip it.
-            let dir = dir.strip_suffix(".vyrn").unwrap_or(&dir).to_string();
             let role = Role {
-                scope: RoleScope::Dir(dir),
+                scope: RoleScope::Dir(claim.target),
                 module: gen_module,
                 module_file: Some(gen_file),
                 contract,
@@ -202,19 +188,6 @@ pub fn discovered_roles(
         }
     }
     out
-}
-
-/// Returns the specifier the generator `name` was imported from. A local
-/// `gen fn` has none.
-fn generator_module(program: &Program, name: &str) -> Option<String> {
-    for imp in &program.imports {
-        if let ImportSource::Path(spec) = &imp.source {
-            if imp.names.iter().any(|n| n.local() == name) {
-                return Some(spec.clone());
-            }
-        }
-    }
-    None
 }
 
 /// Returns the one contract a module exports and the module's file. `None`

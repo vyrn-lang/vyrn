@@ -2392,6 +2392,47 @@ fn ownerless_vyx_says_what_was_searched() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+const TBL_GEN: &str = "export gen fn table(path: String) -> String {\n\
+    let src = match readFile(path) {\n\
+    Ok(s) => s,\n\
+    Err(e) => \"\",\n\
+    }\n\
+    return \"//@origin \" + path + \":1:1\\n\" + src\n\
+    }\n";
+const TBL_APP: &str = "import { table } from \"./gen\"\n\
+    import { f } from table(\"./users.tbl\")\n\
+    fn main() -> Int64 { return f() }\n";
+const TBL_INPUT: &str = "export fn f() -> Int64 { return \"x\" }\n";
+
+/// A generator input of any extension, opened alone, finds the module that
+/// claims it and carries its remapped error.
+#[test]
+fn an_input_of_any_extension_finds_its_claimant() {
+    let n = SCRATCH_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let dir = std::env::temp_dir().join(format!("vyrn_lsp_tbl_{}_{n}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("vyrn.json"), "{ \"name\": \"tbl\" }").unwrap();
+    std::fs::write(dir.join("gen.vyrn"), TBL_GEN).unwrap();
+    std::fs::write(dir.join("app.vyrn"), TBL_APP).unwrap();
+    std::fs::write(dir.join("users.tbl"), TBL_INPUT).unwrap();
+
+    let mut client = spawn_client();
+    let uri = file_uri(&dir.join("users.tbl"));
+    did_open(&mut client, &uri, "tbl", TBL_INPUT);
+    let d = read_diags_for(&mut client, "users.tbl");
+    let diags = d["params"]["diagnostics"].as_array().unwrap();
+    assert_eq!(diags.len(), 1, "the remapped type error: {diags:?}");
+    assert_eq!(diags[0]["severity"], 1, "an error: {diags:?}");
+    assert_eq!(
+        diags[0]["range"]["start"]["line"], 0,
+        "at its origin: {diags:?}"
+    );
+
+    let _ = client.child.kill();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 const SHELL_APP: &str = "import { components } from \"std/vyx\"\n\
     import { shell } from components(\"./widgets\")\n\
     fn main() -> Int64 { return 0 }\n";

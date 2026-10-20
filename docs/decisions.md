@@ -366,7 +366,7 @@ pull request.
 - Vyrn does not build tools from source, wrap a package manager, or take a crate for curl, git or tar.
 - Native builds choose from a curated set of microarchitectures and always pass `-ffp-contract=off`, because FMA changes float bits.
 - The editor grammar colours only words the compiler names, and its keywords equal the lexer's.
-- A `.vyx` file is analysed through the `.vyrn` module that owns it.
+- A generator input is analysed through the module that claims it and whose generated code maps to it through `//@origin`. A module claims a file when the first string argument of one of its generator imports resolves to the file or a directory above it; the import graph is the only registry, so there is no extension map.
 - One `.vsix` serves every platform; the server ships in each platform's release archive.
 
 ## Process
