@@ -1,7 +1,7 @@
 <script>
 import { navRows, themeControl } from "../nav"
 import { Icon } from "../icons"
-import { exampleCount, backendCount, hasRelease, releaseTag, releasePre } from "../repo"
+import { hasRelease, releaseTag, releasePre } from "../repo"
 head {
     stylesheet "/style.css"
     module "/theme.js"
@@ -34,7 +34,7 @@ fn standing() -> String {
         <div class="tools">
             <!-- `[data-js]`-gated: without script it would take focus and do nothing. -->
             <button type="button" class="find" data-find-open aria-label="Search this site. Press slash."><Icon name="bytesize:search"/> <span class="word">Search<span class="hint"> docs, reference…</span></span> <kbd class="key">/</kbd></button>
-            <a class="gh" href="https://github.com/vyrn-lang/vyrn" aria-label="Vyrn on GitHub"><Icon name="bytesize:github"/></a>
+            <a class="gh" href="https://github.com/vyrn-lang/vyrn"><Icon name="bytesize:github" label="Vyrn on GitHub"/></a>
             <span class="slot" v-html="themeControl()"></span>
         </div>
     </header>
@@ -65,9 +65,8 @@ fn standing() -> String {
     <div id="main" class="skip-target" tabindex="-1"></div>
     <slot/>
     <footer class="foot">
-        <span>{{ exampleCount() }} examples, {{ backendCount() }} backends</span>
+        <span>Copyright 2026 Max Demydenko. MIT or Apache-2.0.</span>
         <a href="/releases.html"><Icon name="bytesize:tag"/> Releases</a>
-        <a href="https://github.com/vyrn-lang/vyrn"><Icon name="bytesize:github"/> Source on GitHub <Icon name="bytesize:external" label="opens on github.com"/></a>
         <span>{{ standing() }}</span>
     </footer>
 </div>

@@ -4,10 +4,10 @@ import { fieldsOf, fieldAt, tagOf } from "std/jsondec"
 import { apiHref, apiKnown, apiModules } from "./docs"
 import { examplesUsing } from "./stdgraph"
 import { blob } from "./repo"
-import { ghSpec, ghRaw } from "./github"
+import { ghSpec } from "./github"
 import { hrefOf } from "./nav"
 import { blurbFrom } from "./meta"
-import { joinWith, substring, indexOf, lastIndexOf, trim, replace, lines, split } from "std/strings"
+import { substring, indexOf, lastIndexOf, trim, replace, lines, split } from "std/strings"
 import { startsWith, endsWith, contains } from "std/strpred"
 import { entriesOf } from "./gensrc"
 
@@ -265,28 +265,6 @@ export fn addCommand(slug: String) -> String {
     return "vyrn add " + offerOf(slug).spec
 }
 
-export fn manifestShape(slug: String) -> String {
-    let o = offerOf(slug)
-    return "{\n    \"dependencies\": {\n        \"" + o.alias + "\": \"" + o.spec + "\"\n    }\n}"
-}
-
-export fn lockShape(slug: String) -> String {
-    let o = offerOf(slug)
-    return o.spec + "\t" + rawUrl(slug) + "\t<sha256>"
-}
-
-fn rawUrl(slug: String) -> String {
-    return ghRaw("<commit>", examplesDir() + "/" + slug + "/" + offerOf(slug).path)
-}
-
-export fn importFrom(slug: String) -> String {
-    let o = offerOf(slug)
-    if o.alias.byteLength == 0 {
-        return ""
-    }
-    return "import { " + joinWith(o.exports, ", ") + " } from \"" + o.alias + "\""
-}
-
 export fn artifactsOf(slug: String) -> Array<Artifact> {
     let top = manifestFields(slug)
     let mut out: Array<Artifact> = []
@@ -357,7 +335,6 @@ test "a package offers the module the project does not build from" {
     assertEq(offerOf("bin").alias, "paste")
     assertEq(offerOf("nope").path, "")
     assertEq(offerOf("nope").spec, "")
-    assertEq(importFrom("nope"), "")
 }
 
 test "the export scan reads the names the source declares" {
@@ -384,10 +361,6 @@ test "every install line is a specifier the compiler's grammar accepts" {
         assert(startsWith(o.spec, "github:vyrn-lang/vyrn@main/examples/" + slug + "/"))
         assert(endsWith(o.spec, ".vyrn"))
         assertEq(addCommand(slug), "vyrn add " + o.spec)
-        assert(startsWith(importFrom(slug), "import { "))
-        assert(endsWith(importFrom(slug), " } from \"" + o.alias + "\""))
-        assert(contains(manifestShape(slug), "\"" + o.alias + "\": \"" + o.spec + "\""))
-        assert(startsWith(lockShape(slug), o.spec + "\thttps://raw.githubusercontent.com/vyrn-lang/vyrn/"))
     }
 }
 

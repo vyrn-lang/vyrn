@@ -22,7 +22,7 @@ async function generatorNames() {
 }
 
 const SHELL = "layout.vyx";
-const SHELL_MARK = "Source on GitHub";
+const SHELL_MARK = 'class="wordmark"';
 const PAGE_TAGS = {
   "docs/index.vyx": "docs.html",
   "docs/graph.vyx": "docs/graph.html",
