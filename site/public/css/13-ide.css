@@ -176,8 +176,8 @@
 .intel .diag { font: var(--t-code-s)/1.5 var(--mono); color: var(--danger); }
 .intel .diag.warning { color: var(--amber); }
 .intel .diag .note { display: block; color: var(--muted); }
-.intel.picks { min-width: 16rem; max-width: min(32rem, 90vw); max-height: 15rem; overflow-y: auto; padding: 2px; font: var(--t-code-s)/1.6 var(--mono); }
-.intel.picks .it { display: flex; align-items: baseline; gap: var(--s1); padding: 0 8px; white-space: nowrap; color: var(--ink); cursor: pointer; }
+.intel.picks { min-width: 16rem; max-width: min(32rem, 90vw); max-height: 15rem; overflow-y: auto; padding: 4px; font: var(--t-code-s)/1.6 var(--mono); }
+.intel.picks .it { display: flex; align-items: baseline; gap: var(--s1); padding: 0 8px; border-radius: var(--r-s); white-space: nowrap; color: var(--ink); cursor: pointer; }
 .intel.picks .it.on { background: color-mix(in oklab, var(--accent) 16%, transparent); }
 .intel.picks .ik { width: 1ch; color: var(--muted); }
 .intel.picks .ik:is(.type, .variant) { color: var(--syn-type); }
