@@ -4,6 +4,7 @@ import { encodeSource, projectFromHash } from "./play-share.js";
 import { zipOf } from "./play-zip.js";
 import { editorKeys } from "./play-keys.js";
 import { openMenu } from "./play-menu.js";
+import { bindIntel } from "./play-intel.js";
 
 const KEY_FILES = "vyrn.play.files.v1";
 const KEY_FOLDERS = "vyrn.play.folders.v1";
@@ -58,7 +59,7 @@ function bindProblems(root, diagPane) {
 }
 
 export function mountIde(root, core) {
-  const { input, layer, editor, runBtn, stdin, examples, diagPane, paint, scheduleCheck, spansOf, ready, startCompiler } = core;
+  const { input, layer, editor, runBtn, stdin, examples, diagPane, paint, scheduleCheck, spansOf, ready, startCompiler, api } = core;
   bindProblems(root, diagPane);
   const tabsBox = $("[data-play-tabs]", root);
   const filesBox = $("[data-play-files]", root);
@@ -295,6 +296,7 @@ export function mountIde(root, core) {
   }
 
   function bindGroup(g) {
+    bindIntel(g.input, api);
     g.input.addEventListener("focus", () => {
       focusedG = g;
       syncG(g);

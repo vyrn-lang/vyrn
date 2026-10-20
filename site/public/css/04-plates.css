@@ -93,7 +93,7 @@ button[aria-pressed="true"], button.on { border-color: var(--accent); color: var
 code, kbd, .key, .skip, .kindpill, .findtabs [data-sect], .pagemenu .acts a, .pagemenu .acts .ic, .ostabs label, .idefile, .tabghost, .lanes li {
   border-radius: var(--r-s);
 }
-button, .btn, .find, .theme, .cmd, .ostabs, .notice, .finder input, .regsearch, .pager a, .pagemenu > summary, .pagemenu .acts, .ctxmenu, .tpl, .newname, .idehelp .tipbox {
+button, .btn, .find, .theme, .cmd, .ostabs, .notice, .finder input, .regsearch, .pager a, .pagemenu > summary, .pagemenu .acts, .ctxmenu, .tpl, .newname, .idehelp .tipbox, .intel {
   border-radius: var(--r-m);
 }
 .plate, pre.code, pre.doccode, .cards > li, .specplate, .reglist, .findpanel, .idewrap > .ideside, .idewrap > .idemain, .idewrap > .idepanel {

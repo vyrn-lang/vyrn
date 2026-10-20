@@ -158,6 +158,9 @@ macro_rules! tokens {
         /// Every punctuation spelling, two-character forms first. The form
         /// census (`tests/forms.rs`) counts operators against it.
         pub const PUNCT_SPELLINGS: &[&str] = &[$(concat!($a, $b),)* $(concat!($c),)*];
+
+        /// Every reserved word, in table order.
+        pub const KEYWORDS: &[&str] = &[$($w,)*];
     };
 }
 

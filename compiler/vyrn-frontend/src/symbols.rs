@@ -1073,6 +1073,83 @@ pub fn completions(analysis: &Analysis) -> Vec<Completion> {
     out
 }
 
+/// [`completions`] plus the locals in scope on 1-based `line`: each
+/// parameter, `let` and loop variable of the enclosing function declared at or
+/// before it, the latest of each name. Blind to where a block ends, as
+/// [`local_at`] is.
+pub fn scope_completions(analysis: &Analysis, line: usize) -> Vec<Completion> {
+    let mut out = completions(analysis);
+    let Some(fn_line) = enclosing_fn_line(analysis, line) else {
+        return out;
+    };
+    let mut seen = std::collections::HashSet::new();
+    for b in analysis.locals.iter().rev() {
+        if b.fn_line == fn_line && b.line <= line && seen.insert(b.name.as_str()) {
+            out.push(Completion {
+                label: b.name.clone(),
+                kind: match b.kind {
+                    LocalKind::Param => SymbolKind::Param,
+                    LocalKind::Let { .. } | LocalKind::ForVar => SymbolKind::Local,
+                },
+                detail: local_detail(b, &analysis.spellings),
+                doc: None,
+            });
+        }
+    }
+    out
+}
+
+/// Whether the 1-based `(line, col)` cursor of `source` follows a `.` and an
+/// optional partial member name: the line scan that routes completion to
+/// [`member_completions`]. The receiver must be on the same line.
+pub fn member_context(source: &str, line: usize, col: usize) -> bool {
+    let Some(line_text) = source.lines().nth(line.saturating_sub(1)) else {
+        return false;
+    };
+    // `col` counts chars, so walk chars, not bytes.
+    let chars: Vec<char> = line_text.chars().collect();
+    let mut i = col.saturating_sub(2);
+    // Skip the partial member name; identifiers are Unicode, as in the lexer.
+    while i < chars.len() && (chars[i].is_alphanumeric() || chars[i] == '_') {
+        if i == 0 {
+            return false;
+        }
+        i -= 1;
+    }
+    while i < chars.len() && chars[i] == ' ' {
+        if i == 0 {
+            return false;
+        }
+        i -= 1;
+    }
+    i < chars.len() && chars[i] == '.'
+}
+
+/// Whether an odd number of unescaped `"` precede the 1-based `(line, col)`
+/// cursor on its line of `source`. A per-line scan to route completion; the
+/// completion functions re-lex.
+pub fn string_context(source: &str, line: usize, col: usize) -> bool {
+    let Some(line_text) = source.lines().nth(line.saturating_sub(1)) else {
+        return false;
+    };
+    let mut in_str = false;
+    let mut escaped = false;
+    for ch in line_text.chars().take(col.saturating_sub(1)) {
+        if in_str {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                in_str = false;
+            }
+        } else if ch == '"' {
+            in_str = true;
+        }
+    }
+    in_str
+}
+
 /// Completions for a `.foo` member access at a cursor on or after a `.`.
 ///
 /// The receiver is the identifier before the dot. A namespace offers its

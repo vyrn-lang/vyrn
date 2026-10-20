@@ -521,7 +521,7 @@ fn table() -> Vec<Builtin> {
                 arr(t()),
                 &[],
             ))
-            .method("push", lists)
+            .method("push", &[Array, SmallArray])
             .spec(Spec::Rebuilds)
             .hover("array.push(value) -> Array<T> — append to a growable array; a statement writes the result back through the receiver")
             .resizes(Length::GrowsByOne, Elements::KeepsEachPosition),

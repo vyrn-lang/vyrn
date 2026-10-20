@@ -196,7 +196,7 @@ export function mountPlay(root, opts = {}) {
     });
   }
 
-  const ide = mountIde(root, { input, layer, editor, runBtn, stdin, examples, diagPane, paint, scheduleCheck, spansOf, ready: () => play !== null, startCompiler });
+  const ide = mountIde(root, { input, layer, editor, runBtn, stdin, examples, diagPane, paint, scheduleCheck, spansOf, ready: () => play !== null, startCompiler, api: () => play });
   const srcHost = ide ? ide.srcHost : () => input;
 
   if (shareBtn) {

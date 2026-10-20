@@ -369,7 +369,8 @@ client without the capability has every module and generator input read on
 each change, as `vyrn check` reads them.
 
 It serves diagnostics, hover, go-to-definition (across files), completion
-(including `.member` completion from protocol impls and record fields),
+(the names in scope, with the locals the enclosing function binds above the
+cursor, and `.member` completion from protocol impls and record fields),
 document symbols, document highlight, rename (including across a generator
 boundary, through the symbol maps), formatting (the same `fmt`), code actions,
 inlay hints and semantic tokens. Colour and hover use one resolution order, so
@@ -457,7 +458,10 @@ a dependency.
 `compiler/vyrn-play` compiles the front end and the wasm emitter to a
 `wasm32-unknown-unknown` module for the website. It exports `play_tokens`
 (highlighting with the real lexer), `play_check` (diagnostics from the real
-loader) and `play_compile` (the bytes `vyrn build --target wasm` writes).
+loader), `play_compile` (the bytes `vyrn build --target wasm` writes), and
+`play_complete`, which answers the editor from the analysis `vyrn-lsp` serves.
+A local typed on a line that does not parse has no type, so completion after
+a `.` analyses the line with a placeholder member name.
 `site/public/play-worker.js` runs the compiled program with `web/wasi-min.js`.
 A `derive` generator runs in the page: the module calls its one import,
 `vyrn_play.run_generator`, and `site/public/play-wasm.js` instantiates the

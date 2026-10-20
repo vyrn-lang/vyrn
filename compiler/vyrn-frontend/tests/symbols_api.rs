@@ -2,7 +2,10 @@
 
 use std::collections::HashSet;
 
-use vyrn_frontend::{analyze, completions, member_completions, resolve, SymbolKind};
+use vyrn_frontend::{
+    analyze, completions, member_completions, member_context, resolve, scope_completions,
+    string_context, SymbolKind,
+};
 
 /// The real `examples/enum.vyrn`, not an inline copy that could go stale.
 fn enum_vyrn() -> String {
@@ -787,4 +790,65 @@ fn the_pinned_columns_over_the_corpus() {
             );
         }
     });
+}
+
+#[test]
+fn member_context_survives_a_non_ascii_receiver() {
+    assert!(member_context("caf\u{e9}.", 1, 6));
+    assert!(member_context("caf\u{e9}.pu", 1, 8));
+    assert!(!member_context("caf\u{e9}", 1, 5));
+    assert!(member_context("arr.pu", 1, 7));
+    assert!(!member_context("let x = 1", 1, 10));
+}
+
+#[test]
+fn string_context_counts_unescaped_quotes_before_the_cursor() {
+    assert!(string_context("from \"std/", 1, 11));
+    assert!(!string_context("let s = \"a\\\"b\" + x", 1, 18));
+    assert!(!string_context("let s = 1", 1, 9));
+}
+
+#[test]
+fn scope_completions_offer_the_locals_declared_above_the_cursor() {
+    let src = "\
+fn f(n: Int64) -> Int64 {
+    let xs = [1, 2]
+    let later = 3
+    return n
+}
+";
+    let a = analyze(src);
+    let labels: HashSet<String> = scope_completions(&a, 2)
+        .into_iter()
+        .map(|c| c.label)
+        .collect();
+    for expected in ["n", "xs", "f"] {
+        assert!(labels.contains(expected), "{expected} missing: {labels:?}");
+    }
+    assert!(
+        !labels.contains("later"),
+        "a local below the cursor: {labels:?}"
+    );
+}
+
+#[test]
+fn member_completions_on_a_fixed_size_array_offer_only_what_it_accepts() {
+    let src = "\
+fn main() -> Int64 {
+    let xs = [1, 2]
+    let n = xs.length
+    return n
+}
+";
+    let a = analyze(src);
+    let labels: HashSet<String> = member_completions(&a, 3, 16)
+        .into_iter()
+        .map(|c| c.label)
+        .collect();
+    for expected in ["at", "length", "copy"] {
+        assert!(labels.contains(expected), "{expected} missing: {labels:?}");
+    }
+    for refused in ["push", "pop", "swapRemove", "reserve"] {
+        assert!(!labels.contains(refused), "{refused} offered: {labels:?}");
+    }
 }

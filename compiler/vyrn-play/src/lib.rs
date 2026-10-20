@@ -1,7 +1,8 @@
 //! The Vyrn front end as a wasm module for the website's playground:
 //! [`play_tokens`] (highlighting with the compiler's lexer), [`play_check`]
 //! (diagnostics from the real loader) and [`play_compile`] (the bytes
-//! `vyrn build --target wasm` writes). `site/public/play-worker.js` runs the
+//! `vyrn build --target wasm` writes). [`play_complete`] answers the editor
+//! from the analysis `vyrn-lsp` serves, at a 1-based line and char column. `site/public/play-worker.js` runs the
 //! module with `web/wasi-min.js`; this crate cannot, because it is one. `std/`
 //! is embedded by `build.rs`; a relative import reports `module not found`.
 //!
@@ -18,6 +19,10 @@ use vyrn_frontend::diagnostics::{Diagnostic, Severity};
 use vyrn_frontend::lexer::{self, Tok, Triv, TrivKind};
 use vyrn_frontend::loader::{LoadOptions, MapResolver};
 use vyrn_frontend::rules::{IntoHole, Rule};
+use vyrn_frontend::{
+    analyze_linked, member_completions, member_context, scope_completions, string_context,
+    string_literal_completions, Analysis, Completion, SymbolKind,
+};
 
 thread_local! {
     static INPUT: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
@@ -264,10 +269,36 @@ fn gen_request(module: &[u8], argv: &[String], atoms: &[vyrn_genwasm::Atom]) -> 
     out
 }
 
+/// The playground's generation engine: each generator runs in the page.
+fn engine() -> Box<vyrn_frontend::gen::GenEngine> {
+    vyrn_lower::gen_engine(|p, f, a, i| vyrn_genwasm::run_pure(p, f, a, i, run_generator))
+}
+
+fn options(expansions: std::sync::Arc<vyrn_frontend::project::Expansions>) -> LoadOptions {
+    LoadOptions {
+        std_root: Some("std".into()),
+        aliases: Default::default(),
+        alias_base: String::new(),
+        audience: None,
+        artifacts: None,
+        expansions,
+        session: None,
+        nest: Default::default(),
+    }
+}
+
+/// A resolver that holds `std/` alone, so a relative import reports `module not found`.
+fn std_resolver() -> MapResolver {
+    MapResolver(
+        std_modules::STD
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect(),
+    )
+}
+
 /// Loads `src` as a one-file program through `load_warned`, the CLI's entry
-/// point, with a resolver that holds `std/` alone.
-///
-/// Runs each generator on the playground's own engine.
+/// point.
 fn load(
     src: &str,
     expansions: std::sync::Arc<vyrn_frontend::project::Expansions>,
@@ -281,25 +312,14 @@ fn load(
     >,
     Vec<Diagnostic>,
 ) {
-    let engine =
-        vyrn_lower::gen_engine(|p, f, a, i| vyrn_genwasm::run_pure(p, f, a, i, run_generator));
-    let opts = LoadOptions {
-        std_root: Some("std".into()),
-        aliases: Default::default(),
-        alias_base: String::new(),
-        audience: None,
-        artifacts: None,
-        expansions,
-        session: None,
-        nest: Default::default(),
-    };
-    let resolver = MapResolver(
-        std_modules::STD
-            .iter()
-            .map(|(k, v)| (k.to_string(), v.to_string()))
-            .collect(),
-    );
-    vyrn_lower::load_warned(src, "play.vyrn", &opts, &resolver, Some(&*engine))
+    let engine = engine();
+    vyrn_lower::load_warned(
+        src,
+        "play.vyrn",
+        &options(expansions),
+        &std_resolver(),
+        Some(&*engine),
+    )
 }
 
 fn check_json(src: &str) -> String {
@@ -330,6 +350,122 @@ fn compile_result(src: &str) -> Vec<u8> {
             format!("{{\"diagnostics\":[{}]}}", diag_json(&d)).into_bytes()
         }
     }
+}
+
+/// Completions at the 1-based `(line, col)` cursor, `col` in chars:
+/// `{"items":[{"label","kind","detail","doc"}]}`, unfiltered; the page
+/// filters by the typed prefix.
+#[no_mangle]
+pub extern "C" fn play_complete(src_len: usize, line: usize, col: usize) -> usize {
+    with_input(src_len, |src| complete_json(src, line, col).into_bytes())
+}
+
+/// The analysis `vyrn-lsp` answers an editor from, linked against the
+/// embedded `std/`.
+fn analysis(src: &str) -> Analysis {
+    let engine = engine();
+    analyze_linked(
+        src,
+        "play.vyrn",
+        &options(Default::default()),
+        &std_resolver(),
+        Some(&*engine),
+    )
+}
+
+/// Routes the cursor as `vyrn-lsp` routes it: a string offers std module
+/// names after `from "std/` and the keys of a finite string type, a member
+/// position the receiver's members, anywhere else the names in scope and the
+/// keywords.
+fn complete_json(src: &str, line: usize, col: usize) -> String {
+    let mut out = Vec::new();
+    if string_context(src, line, col) {
+        if let Some(prefix) = std_import_prefix(src, line, col) {
+            for (key, _) in std_modules::STD {
+                let name = key.trim_end_matches(".vyrn");
+                if let Some(rest) = name.strip_prefix(prefix) {
+                    out.push(item_json(rest, "module", name, None));
+                }
+            }
+        } else {
+            for c in string_literal_completions(&analysis(src), src, line, col) {
+                out.push(completion_json(&c));
+            }
+        }
+    } else if member_context(src, line, col) {
+        for c in member_completions(&analysis(&with_member_name(src, line, col)), line, col) {
+            out.push(completion_json(&c));
+        }
+    } else {
+        for c in scope_completions(&analysis(src), line) {
+            out.push(completion_json(&c));
+        }
+        for k in lexer::KEYWORDS.iter().chain(CONTEXTUAL) {
+            out.push(item_json(k, "keyword", "keyword", None));
+        }
+    }
+    format!("{{\"items\":[{}]}}", out.join(","))
+}
+
+/// The directory part of a `from "std/...` specifier the cursor is typing,
+/// up to its last `/`, or `None` when the string is not such a specifier.
+fn std_import_prefix(src: &str, line: usize, col: usize) -> Option<&str> {
+    let text = src.lines().nth(line.checked_sub(1)?)?;
+    let head = &text[..col_byte(text, col)];
+    let quote = head.rfind('"')?;
+    let spec = &head[quote + 1..];
+    if !head[..quote].trim_end().ends_with("from") || !spec.starts_with("std/") {
+        return None;
+    }
+    Some(&spec[..=spec.rfind('/')?])
+}
+
+/// `src` with a placeholder member name at a cursor right after `.`, so a
+/// line still being typed parses and its receiver is typed.
+fn with_member_name(src: &str, line: usize, col: usize) -> String {
+    let mut out = String::with_capacity(src.len() + 1);
+    for (i, text) in src.split_inclusive('\n').enumerate() {
+        let at = col_byte(text, col);
+        if i + 1 == line && text[..at].ends_with('.') {
+            out.push_str(&text[..at]);
+            out.push('x');
+            out.push_str(&text[at..]);
+        } else {
+            out.push_str(text);
+        }
+    }
+    out
+}
+
+/// The byte offset of 1-based char column `col` in `text`, clamped to its end.
+fn col_byte(text: &str, col: usize) -> usize {
+    (text.char_indices().nth(col.saturating_sub(1))).map_or(text.len(), |(i, _)| i)
+}
+
+fn kind_name(k: SymbolKind) -> &'static str {
+    match k {
+        SymbolKind::Function => "function",
+        SymbolKind::Type => "type",
+        SymbolKind::Variant => "variant",
+        SymbolKind::Method => "method",
+        SymbolKind::Field => "field",
+        SymbolKind::Param => "param",
+        SymbolKind::Local => "local",
+        SymbolKind::Global => "global",
+    }
+}
+
+fn completion_json(c: &Completion) -> String {
+    item_json(&c.label, kind_name(c.kind), &c.detail, c.doc.as_deref())
+}
+
+fn item_json(label: &str, kind: &str, detail: &str, doc: Option<&str>) -> String {
+    format!(
+        "{{\"label\":{},\"kind\":\"{kind}\",\"detail\":{},\"doc\":{}}}",
+        json_str(label),
+        json_str(detail),
+        doc.map_or("null".to_string(), json_str)
+    )
 }
 
 /// `s` as a JSON string literal, quotes included, escaped by the canonical
@@ -589,5 +725,34 @@ mod tests {
     #[test]
     fn a_control_character_in_output_survives_the_json() {
         assert_eq!(json_str("a\u{1}b\n"), "\"a\\u0001b\\n\"");
+    }
+
+    const SPLIT: &str = "import { split } from \"std/strings\"\n\nfn main() -> Int64 {\n    let parts = split(\"a,b\", \",\")\n    return 0\n}\n";
+
+    #[test]
+    fn a_dot_still_being_typed_offers_the_receivers_members() {
+        let src = "fn main() -> Int64 {\n    let xs = [1, 2]; xs.\n    return 0\n}\n";
+        let json = complete_json(src, 2, 25);
+        for m in ["at", "length"] {
+            assert!(json.contains(&format!("\"label\":\"{m}\"")), "{json}");
+        }
+        assert!(
+            !json.contains("\"label\":\"push\""),
+            "a fixed-size array cannot grow: {json}"
+        );
+    }
+
+    #[test]
+    fn a_name_offers_locals_imports_and_keywords() {
+        let json = complete_json(SPLIT, 5, 5);
+        for m in ["parts", "split", "main", "return"] {
+            assert!(json.contains(&format!("\"label\":\"{m}\"")), "{json}");
+        }
+    }
+
+    #[test]
+    fn a_std_specifier_offers_the_embedded_modules() {
+        let json = complete_json("import { split } from \"std/st", 1, 30);
+        assert!(json.contains("\"label\":\"strings\""), "{json}");
     }
 }

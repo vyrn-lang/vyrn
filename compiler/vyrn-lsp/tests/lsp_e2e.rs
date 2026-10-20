@@ -663,6 +663,45 @@ fn main() -> Int64 {
     );
 }
 
+/// A fixed-size array cannot grow, so completion offers no `push` on one.
+#[test]
+fn member_completion_on_a_fixed_size_array_offers_no_growing_method() {
+    let mut client = LspClient::spawn().expect("spawn vyrn-lsp");
+    let init_id = serde_json::json!(1);
+    client.send(&serde_json::json!({
+        "jsonrpc": "2.0", "id": init_id, "method": "initialize",
+        "params": { "capabilities": {}, "processId": null }
+    }));
+    let _ = client.read_response(&init_id);
+    client.send(&serde_json::json!({ "jsonrpc": "2.0", "method": "initialized", "params": {} }));
+    let uri = "file:///member/fixed.vyrn";
+    let src = "\
+fn main() -> Int64 {
+    let xs = [1, 2]
+    let n = xs.length
+    return n
+}
+";
+    client.send(&serde_json::json!({
+        "jsonrpc": "2.0", "method": "textDocument/didOpen",
+        "params": { "textDocument": { "uri": uri, "languageId": "vyrn", "version": 1, "text": src } }
+    }));
+    let _ = client.read_notification("textDocument/publishDiagnostics");
+    let labels = completion_labels(&mut client, uri, 2, 15);
+    for expected in ["at", "length", "copy"] {
+        assert!(
+            labels.iter().any(|l| l == expected),
+            "{expected} missing: {labels:?}"
+        );
+    }
+    for refused in ["push", "pop", "swapRemove"] {
+        assert!(
+            !labels.iter().any(|l| l == refused),
+            "{refused} offered: {labels:?}"
+        );
+    }
+}
+
 /// The hover's `modify` is the only place that says `t.record(..)` mutates `t`.
 #[test]
 fn member_completion_and_hover_show_a_modify_self_receiver() {

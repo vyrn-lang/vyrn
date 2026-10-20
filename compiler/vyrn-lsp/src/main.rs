@@ -47,9 +47,9 @@ use lsp_types::{
 
 use vyrn_frontend::symbolmap::MappedSymbol;
 use vyrn_frontend::{
-    analyze_judged, class_completions, class_token_hover, completions, member_completions,
-    references, resolve, string_literal_completions, Analysis, Completion, LocalKind, RefRange,
-    SemKind, SemMods, SymbolKind,
+    analyze_judged, class_completions, class_token_hover, member_completions, member_context,
+    references, resolve, scope_completions, string_context, string_literal_completions, Analysis,
+    Completion, LocalKind, RefRange, SemKind, SemMods, SymbolKind,
 };
 
 use templates::VyxCursor;
@@ -1142,7 +1142,7 @@ fn handle_completion(server: &Server, params: serde_json::Value) -> Option<Compl
     let (analysis, _uri) = lookup(server, uri)?;
     // In a string literal: the class alphabet for a sequence type (`Tw`), else
     // the language of a finite string type (`t("` -> every key).
-    if is_string_literal_context(Some(&raw), line, col) {
+    if string_context(&raw, line, col) {
         if let Some(cls) = class_completions(analysis, &raw, line, col) {
             return Some(class_completion_response(&raw, line, col, cls));
         }
@@ -1152,16 +1152,16 @@ fn handle_completion(server: &Server, params: serde_json::Value) -> Option<Compl
             .collect();
         return Some(CompletionResponse::Array(items));
     }
-    let mut items: Vec<CompletionItem> = if is_member_context(Some(&raw), line, col) {
+    let mut items: Vec<CompletionItem> = if member_context(&raw, line, col) {
         member_completions(analysis, line, col)
     } else {
-        completions(analysis)
+        scope_completions(analysis, line)
     }
     .into_iter()
     .map(to_completion_item)
     .collect();
     // At module scope, the contract's members come first.
-    if !is_member_context(Some(&raw), line, col) {
+    if !member_context(&raw, line, col) {
         let mut members = contract_completion_items(server, uri, line, col);
         members.append(&mut items);
         items = members;
@@ -1223,7 +1223,7 @@ fn vyx_completion(
                 return (!members.is_empty()).then_some(CompletionResponse::Array(members));
             };
             let gen = &fwd.synth.gen_source;
-            if is_string_literal_context(Some(gen), fwd.line, fwd.col) {
+            if string_context(gen, fwd.line, fwd.col) {
                 if let Some(cls) = class_completions(&fwd.synth.analysis, gen, fwd.line, fwd.col) {
                     return Some(class_completion_response(&raw, line, col, cls));
                 }
@@ -1233,10 +1233,10 @@ fn vyx_completion(
                     .collect();
                 return Some(CompletionResponse::Array(items));
             }
-            let items = if is_member_context(Some(gen), fwd.line, fwd.col) {
+            let items = if member_context(gen, fwd.line, fwd.col) {
                 member_completions(&fwd.synth.analysis, fwd.line, fwd.col)
             } else {
-                completions(&fwd.synth.analysis)
+                scope_completions(&fwd.synth.analysis, fwd.line)
             };
             let mut out: Vec<CompletionItem> = items.into_iter().map(to_completion_item).collect();
             members.append(&mut out);
@@ -2148,60 +2148,6 @@ fn to_document_symbol(sym: &vyrn_frontend::Symbol, text: &str) -> Option<Documen
     })
 }
 
-/// Whether the cursor at 1-based `(line, col)` follows a `.`, past the partial
-/// member name and spaces.
-fn is_member_context(text: Option<&String>, line: usize, col: usize) -> bool {
-    let line_text = match text.and_then(|t| t.lines().nth(line.saturating_sub(1))) {
-        Some(l) => l,
-        None => return false,
-    };
-    // `col` counts chars, so walk chars, not bytes.
-    let chars: Vec<char> = line_text.chars().collect();
-    let mut i = col.saturating_sub(2);
-    // Skip the partial member name; identifiers are Unicode, as in the lexer.
-    while i < chars.len() && (chars[i].is_alphanumeric() || chars[i] == '_') {
-        if i == 0 {
-            return false;
-        }
-        i -= 1;
-    }
-    while i < chars.len() && chars[i] == ' ' {
-        if i == 0 {
-            return false;
-        }
-        i -= 1;
-    }
-    i < chars.len() && chars[i] == '.'
-}
-
-/// Whether an odd number of unescaped `"` precede the 1-based `(line, col)` on
-/// its line. A per-line scan to route completion; the frontend re-lexes.
-fn is_string_literal_context(text: Option<&String>, line: usize, col: usize) -> bool {
-    let line_text = match text.and_then(|t| t.lines().nth(line.saturating_sub(1))) {
-        Some(l) => l,
-        None => return false,
-    };
-    let mut in_str = false;
-    let mut escaped = false;
-    for (idx, ch) in line_text.chars().enumerate() {
-        if idx + 1 >= col {
-            break;
-        }
-        if in_str {
-            if escaped {
-                escaped = false;
-            } else if ch == '\\' {
-                escaped = true;
-            } else if ch == '"' {
-                in_str = false;
-            }
-        } else if ch == '"' {
-            in_str = true;
-        }
-    }
-    in_str
-}
-
 /// The cached [`Analysis`] of an open document.
 fn lookup<'s>(server: &'s Server, uri: &Url) -> Option<(&'s Analysis, Url)> {
     Some((server.analyses.get(uri)?, uri.clone()))
@@ -2529,9 +2475,7 @@ fn to_lsp_kind(kind: SymbolKind) -> CompletionItemKind {
         SymbolKind::Type => CompletionItemKind::CLASS,
         SymbolKind::Variant => CompletionItemKind::ENUM_MEMBER,
         SymbolKind::Field => CompletionItemKind::FIELD,
-        SymbolKind::Global => CompletionItemKind::VARIABLE,
-        // `completions` never returns these; the match is exhaustive.
-        SymbolKind::Param | SymbolKind::Local => CompletionItemKind::VARIABLE,
+        SymbolKind::Global | SymbolKind::Param | SymbolKind::Local => CompletionItemKind::VARIABLE,
     }
 }
 
@@ -3637,20 +3581,6 @@ mod tests {
         assert_eq!(encoded.data.len(), 1);
         assert_eq!(encoded.data[0].delta_start, 8);
         assert_eq!(encoded.data[0].length, 5);
-    }
-
-    #[test]
-    fn member_context_survives_a_non_ascii_receiver() {
-        let cafedot = String::from("café.");
-        assert!(is_member_context(Some(&cafedot), 1, 6));
-        let partial = String::from("café.pu");
-        assert!(is_member_context(Some(&partial), 1, 8));
-        let noreceiver = String::from("café");
-        assert!(!is_member_context(Some(&noreceiver), 1, 5));
-        let ascii = String::from("arr.pu");
-        assert!(is_member_context(Some(&ascii), 1, 7));
-        let plain = String::from("let x = 1");
-        assert!(!is_member_context(Some(&plain), 1, 10));
     }
 
     #[test]
