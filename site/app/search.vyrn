@@ -2,7 +2,7 @@ import { emit, Json, JsonField } from "std/json"
 import { apiModules, apiEntries, apiHref } from "./docs"
 import { chapterSlugs, chapterOf, chapterHref } from "./guide"
 import { packages, packageHref } from "./packages"
-import { pageMetas, stripTags } from "./meta"
+import { pageMetas, stripTags, decodeEntities } from "./meta"
 import { hasRelease, releaseTag, releaseDate, releasePre } from "./repo"
 import { hrefOf } from "./nav"
 import { substring, replace } from "std/strings"
@@ -49,7 +49,7 @@ fn firstOf(xs: Array<String>) -> String {
 }
 
 fn oneLine(text: String) -> String {
-    let flat = replace(replace(stripTags(text), "\n", " "), "  ", " ")
+    let flat = replace(replace(decodeEntities(stripTags(text)), "\n", " "), "  ", " ")
     if flat.byteLength <= 60 {
         return flat.copy()
     }
@@ -125,7 +125,7 @@ test "no row is empty, and no row points at nothing" {
         assert(r.t.byteLength > 0)
         assert(r.u.byteLength > 0)
         assertEq(r.u[0], '/')
-        assert(!contains(r.d, "<"))
+        assert(!contains(r.d, "&lt;") && !contains(r.d, "&amp;"))
         assert(!contains(r.d, "\n"))
         assert(r.d.byteLength <= 160)
         if r.s == "Reference" {
