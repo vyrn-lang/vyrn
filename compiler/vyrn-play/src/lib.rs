@@ -110,9 +110,10 @@ const CONTEXTUAL: &[&str] = &[
     "read", "modify", "consume", "gen", "test", "bench", "panic", "from", "as",
 ];
 
-/// The stylesheet's CSS class for one lexed item (`k`, `s`, `n`, `c`, `t`), or
-/// `""` for text with no colour.
-fn class_of(item: &Triv) -> &'static str {
+/// The stylesheet's CSS class for one lexed item (`k`, `s`, `n`, `c`, `t`,
+/// `f`), or `""` for text with no colour. `callee` says a `(` follows the item
+/// or `fn` precedes it, as `site/app/hl.vyrn` decides.
+fn class_of(item: &Triv, callee: bool) -> &'static str {
     match &item.kind {
         TrivKind::Comment | TrivKind::Doc(_) => "c",
         TrivKind::Tok(tok) => match tok {
@@ -124,6 +125,8 @@ fn class_of(item: &Triv) -> &'static str {
                     "k"
                 } else if name.starts_with(char::is_uppercase) {
                     "t"
+                } else if callee {
+                    "f"
                 } else {
                     ""
                 }
@@ -136,6 +139,13 @@ fn class_of(item: &Triv) -> &'static str {
                 }
             }
         },
+    }
+}
+
+fn tok_of(item: &Triv) -> Option<&Tok> {
+    match &item.kind {
+        TrivKind::Tok(t) => Some(t),
+        _ => None,
     }
 }
 
@@ -152,7 +162,13 @@ fn tokens_json(src: &str) -> String {
     let mut byte_at = 0usize;
     let mut u16_at = 0usize;
     let mut first = true;
-    for item in &items {
+    let mut prev: Option<&Tok> = None;
+    for (i, item) in items.iter().enumerate() {
+        let callee = matches!(items[i + 1..].iter().find_map(tok_of), Some(Tok::LParen))
+            || matches!(prev, Some(Tok::Fn));
+        if let Some(t) = tok_of(item) {
+            prev = Some(t);
+        }
         if item.text.is_empty() {
             continue;
         }
@@ -164,7 +180,7 @@ fn tokens_json(src: &str) -> String {
         let start = byte_at + found;
         u16_at += src[byte_at..start].encode_utf16().count();
         let len = item.text.encode_utf16().count();
-        let cls = class_of(item);
+        let cls = class_of(item, callee);
         if !cls.is_empty() {
             if !first {
                 out.push(',');
@@ -643,7 +659,9 @@ mod tests {
             got,
             vec![
                 ("fn".to_string(), "k".to_string()),
+                ("main".to_string(), "f".to_string()),
                 ("Int64".to_string(), "t".to_string()),
+                ("print".to_string(), "f".to_string()),
                 ("\"hi\"".to_string(), "s".to_string()),
                 ("// go".to_string(), "c".to_string()),
                 ("return".to_string(), "k".to_string()),

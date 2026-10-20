@@ -68,6 +68,36 @@ match seat(t) {
 ",
         },
         Piece {
+            id: "cardProps",
+            src: "let xs = readAges()
+  .sort(byAge)
+  .reverse()
+  .filter(isAdult)
+  .map(jitter)
+xs.push(17)
+binarySearch(xs, 30)  // needs sorted(byAge)
+",
+        },
+        Piece {
+            id: "cardEffects",
+            src: "fn table() -> Array<Int64> {
+    let xs = build()
+    print(xs.length)
+    count = count + 1
+    return xs
+}
+",
+        },
+        Piece {
+            id: "cardOwn",
+            src: "fn main() {
+    let xs = readAges()     // owned by xs
+    let s = summarize(xs)   // xs moves in
+    print(s)                // released at its end
+}
+",
+        },
+        Piece {
             id: "capConsume",
             src: "fn redeem(t: consume Ticket) -> Int64 {
     return t.id  // the caller may not name t again
@@ -182,7 +212,7 @@ fn extentOf(raw: Array<UInt8>, start: Int64, kind: String, text: String) -> Int6
     return start + text.byteLength
 }
 
-fn classOf(kind: String, text: String) -> String {
+fn classOf(kind: String, text: String, callee: Bool) -> String {
     if kind == "keyword" {
         return "k"
     }
@@ -203,8 +233,21 @@ fn classOf(kind: String, text: String) -> String {
         if b.length > 0 && b[0] >= 'A' && b[0] <= 'Z' {
             return "t"
         }
+        if callee {
+            return "f"
+        }
     }
     return ""
+}
+
+gen fn isPunct(t: Token, text: String) -> Bool {
+    return t.kind == "punct" && t.text == text
+}
+
+// A name a `(` follows, or the name `fn` declares.
+gen fn callee(toks: Array<Token>, i: Int64) -> Bool {
+    let called = i + 1 < toks.length && isPunct(toks[i + 1], "(")
+    return called || (i > 0 && toks[i - 1].kind == "keyword" && toks[i - 1].text == "fn")
 }
 
 fn trivia(src: String, raw: Array<UInt8>, from: Int64, to: Int64) -> String {
@@ -231,14 +274,16 @@ export gen fn highlightSrc(src: String, toks: Array<Token>) -> String {
     let starts = lineStarts(src)
     let mut out = ""
     let mut cursor = 0
+    let mut i = 0
     for t in toks {
         let start = starts[t.line - 1] + t.col - 1
         if start >= cursor {
             out = out + trivia(src, raw, cursor, start)
             let stop = extentOf(raw, start, t.kind, t.text)
-            out = out + emit(classOf(t.kind, t.text), substring(src, start, stop))
+            out = out + emit(classOf(t.kind, t.text, callee(toks, i)), substring(src, start, stop))
             cursor = stop
         }
+        i = i + 1
     }
     return out + trivia(src, raw, cursor, raw.length)
 }
@@ -290,8 +335,14 @@ test "a string's extent is its quotes, not its decoded text" {
 test "a capability word is a keyword here and an ordinary name is not" {
     assert(includes(contextual(), "consume"))
     assert(!includes(contextual(), "consumer"))
-    assertEq(classOf("ident", "read"), "k")
-    assertEq(classOf("ident", "Ticket"), "t")
-    assertEq(classOf("ident", "seats"), "")
-    assertEq(classOf("keyword", "where"), "k")
+    assertEq(classOf("ident", "read", false), "k")
+    assertEq(classOf("ident", "Ticket", false), "t")
+    assertEq(classOf("ident", "seats", false), "")
+    assertEq(classOf("keyword", "where", false), "k")
+}
+
+test "a lower-case callee is a function and a capital one stays a type" {
+    assertEq(classOf("ident", "print", true), "f")
+    assertEq(classOf("ident", "Some", true), "t")
+    assertEq(classOf("ident", "panic", true), "k")
 }

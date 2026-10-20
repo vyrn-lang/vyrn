@@ -3,6 +3,8 @@ import { Head } from "std/ui"
 import { pageHeadOf } from "../nav"
 import { shellHtml } from "../code"
 import { hasRelease, releaseTag, InstallTarget, installTargets } from "../repo"
+import { Markup } from "std/html"
+import { vyrnLine } from "../snippets"
 
 export fn head() -> Head {
     return pageHeadOf("/")
@@ -10,6 +12,18 @@ export fn head() -> Head {
 
 fn osId(p: InstallTarget) -> String {
     return "os-" + p.id
+}
+
+fn props(n: Int64) -> Markup {
+    return vyrnLine("cardProps", n)
+}
+
+fn fx(n: Int64) -> Markup {
+    return vyrnLine("cardEffects", n)
+}
+
+fn own(n: Int64) -> Markup {
+    return vyrnLine("cardOwn", n)
 }
 
 fn installLabel() -> String {
@@ -40,14 +54,14 @@ fn installLabel() -> String {
         </div>
         <div class="vx-code">
             <div class="vx-head"><span>ages.vyrn</span><span data-vx="props-state">proved</span></div>
-            <div class="vx-line">let xs = readAges()</div>
-            <div class="vx-line vx-op" data-g="p" data-op="sort">  .sort(byAge)</div>
-            <div class="vx-line vx-op" data-g="p" data-op="reverse">  .reverse()</div>
-            <div class="vx-line vx-op" data-g="p" data-op="filter">  .filter(isAdult)</div>
-            <div class="vx-line vx-op" data-g="p" data-op="map">  .map(jitter)</div>
-            <div class="vx-line vx-op" data-g="p" data-op="push">xs.push(17)</div>
-            <div class="vx-line">binarySearch(xs, 30)<span class="vx-cm">  // needs sorted(byAge)</span></div>
-            <div class="vx-line vx-cm vx-js">// click a line to add or remove it</div>
+            <div class="vx-line" v-html="props(0)"></div>
+            <div class="vx-line vx-op" data-g="p" data-op="sort" v-html="props(1)"></div>
+            <div class="vx-line vx-op" data-g="p" data-op="reverse" v-html="props(2)"></div>
+            <div class="vx-line vx-op" data-g="p" data-op="filter" v-html="props(3)"></div>
+            <div class="vx-line vx-op" data-g="p" data-op="map" v-html="props(4)"></div>
+            <div class="vx-line vx-op" data-g="p" data-op="push" v-html="props(5)"></div>
+            <div class="vx-line" v-html="props(6)"></div>
+            <div class="vx-line c vx-js">// click a line to add or remove it</div>
             <p class="vx-diag" data-vx="props-diag" aria-live="polite"></p>
         </div>
     </section>
@@ -60,13 +74,13 @@ fn installLabel() -> String {
         </div>
         <div class="vx-code">
             <div class="vx-head"><span>table.vyrn</span><span data-vx="fx-state">pure</span></div>
-            <div class="vx-line"><span class="vx-op" data-g="e" data-op="gen">gen </span><span class="vx-kw">fn</span> table() {{ "->" }} <span class="vx-ty">Array</span>{{ "<" }}<span class="vx-ty">Int64</span>{{ ">" }} {</div>
-            <div class="vx-line">    let xs = build()</div>
-            <div class="vx-line vx-op" data-g="e" data-op="print">    print(xs.length)</div>
-            <div class="vx-line vx-op" data-g="e" data-op="state">    count = count + 1</div>
-            <div class="vx-line">    return xs</div>
-            <div class="vx-line">}</div>
-            <div class="vx-line vx-cm vx-js">// click gen, print or count</div>
+            <div class="vx-line"><span class="vx-op" data-g="e" data-op="gen"><span class="k">gen</span> </span><span v-html="fx(0)"></span></div>
+            <div class="vx-line" v-html="fx(1)"></div>
+            <div class="vx-line vx-op" data-g="e" data-op="print" v-html="fx(2)"></div>
+            <div class="vx-line vx-op" data-g="e" data-op="state" v-html="fx(3)"></div>
+            <div class="vx-line" v-html="fx(4)"></div>
+            <div class="vx-line" v-html="fx(5)"></div>
+            <div class="vx-line c vx-js">// click gen, print or count</div>
             <p class="vx-diag" data-vx="fx-diag" aria-live="polite"></p>
         </div>
     </section>
@@ -79,11 +93,11 @@ fn installLabel() -> String {
         </div>
         <div class="vx-code">
             <div class="vx-head"><span>main.vyrn</span><span data-vx="own-state">ready</span></div>
-            <div class="vx-line"><span class="vx-kw">fn</span> main() {</div>
-            <div class="vx-line">    let xs = readAges()     <span class="vx-cm">// owned by xs</span></div>
-            <div class="vx-line">    let s = summarize(xs)   <span class="vx-cm">// xs moves in</span></div>
-            <div class="vx-line">    print(s)                <span class="vx-cm">// released at its end</span></div>
-            <div class="vx-line">}</div>
+            <div class="vx-line" v-html="own(0)"></div>
+            <div class="vx-line" v-html="own(1)"></div>
+            <div class="vx-line" v-html="own(2)"></div>
+            <div class="vx-line" v-html="own(3)"></div>
+            <div class="vx-line" v-html="own(4)"></div>
             <div class="vx-stat vx-js"><span><b>90,000</b>allocated</span><span><b data-vx="freed">0</b>released</span></div>
             <div class="vx-cta vx-js"><button type="button" class="vx-btn" data-vx="run">Run</button><button type="button" class="vx-btn ghost" data-vx="refill">Refill</button></div>
         </div>

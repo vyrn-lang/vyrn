@@ -10,6 +10,11 @@ export fn vyrnHtml(id: String) -> Markup {
     return TrustedMarkup(joinWith(hlLines(id), "\n"))
 }
 
+/// Line `n` of a snippet, coloured, 0-based.
+export fn vyrnLine(id: String, n: Int64) -> Markup {
+    return TrustedMarkup(hlLines(id)[n].copy())
+}
+
 export fn vyrnSource(id: String) -> String {
     return hlSource(id)
 }
@@ -132,7 +137,7 @@ test "a Vyrn snippet comes back coloured by the compiler's own lexer" {
 
 test "the capability words are tinted, because they are the argument" {
     let lines = hlLines("cmpMemory")
-    assertEq(lines[0], "<span class=\"k\">fn</span> seatCount(t: <span class=\"k\">read</span> <span class=\"t\">Ticket</span>) -&gt; <span class=\"t\">Int64</span> { <span class=\"k\">return</span> t.seats }")
+    assertEq(lines[0], "<span class=\"k\">fn</span> <span class=\"f\">seatCount</span>(t: <span class=\"k\">read</span> <span class=\"t\">Ticket</span>) -&gt; <span class=\"t\">Int64</span> { <span class=\"k\">return</span> t.seats }")
 }
 
 test "every specimen set covers the same four languages" {
