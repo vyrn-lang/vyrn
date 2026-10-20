@@ -1146,7 +1146,7 @@ test "every playground link carries base64url and nothing else" {
             }
         }
     }
-    assert(links > 20)
+    assert(links > 15)
 }
 
 test "every export the search offers has an anchor on the page it points at" {

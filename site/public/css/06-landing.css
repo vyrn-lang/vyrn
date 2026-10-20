@@ -7,19 +7,6 @@
 .hero.split { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: var(--s4); align-items: stretch; }
 @media (max-width: 1024px) { .hero.split { grid-template-columns: minmax(0, 1fr); } }
 .hero.split > div { min-width: 0; }
-.heroplay { display: flex; flex-direction: column; }
-.heroplay .editor { flex: 0 0 auto; margin: 0; }
-/* Three classes: .play .editor pre.hl in 10-play.css comes later. */
-.play.heroplay .editor pre.hl { background: none; }
-.heroplay .out { margin: 0; border-left: 0; border-top: 1px solid var(--hair); background: none; }
-
-/* Three classes: .play .editor textarea in 10-play.css comes later. */
-.play.heroplay .editor textarea { height: auto; min-height: 0; resize: none; }
-.heroplay .editor pre, .heroplay .editor textarea, .heroplay .out { scrollbar-width: none; }
-.heroplay .editor pre::-webkit-scrollbar, .heroplay .editor textarea::-webkit-scrollbar, .heroplay .out::-webkit-scrollbar { display: none; }
-@media (max-width: 640px) { .heroplay .pill { display: none; } }
-.heroplay .out { flex: 1; min-height: 6em; max-height: none; overflow: auto; }
-.heroplay .plate-head { border-bottom: 1px solid var(--rule); }
 .btn.jsonly { display: none; }
 [data-js] .btn.jsonly { display: inline-flex; }
 
@@ -42,7 +29,6 @@
 .hero.mid .ctarow { text-align: center; margin-top: var(--s2); }
 
 .picker { margin: var(--s4) 0 var(--s2); border: 0; padding: 0; min-width: 0; }
-.cmdlabel + .picker { margin-top: var(--s2); }
 
 .tabrow { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s2); margin: 0 0 var(--s2); }
 .ospanes + .tabrow { margin: var(--s2) 0 0; }
@@ -64,9 +50,6 @@
 .ospane .cmd { margin-top: 0; }
 .ospanes > .ospane:nth-child(1) .cmd code::before { content: "$ "; color: var(--accent); }
 .ospanes > .ospane:nth-child(2) .cmd code::before { content: "> "; color: var(--accent); }
-.cmdlabel { font: 600 var(--t-cmd)/1.4 var(--sans); margin: var(--s4) 0 calc(-1 * var(--s1)); }
-.cmdlabel a { color: inherit; text-decoration: none; color: var(--accent); }
-.cmdlabel a:hover { text-decoration: underline; text-underline-offset: 3px; }
 .tabrow .tablink {
   margin-left: auto;
   font: 500 var(--t-mono)/1 var(--sans);
@@ -77,58 +60,6 @@
 .tabrow .tablink:hover { color: var(--accent); }
 .ospane > .eyebrow { margin-top: var(--s2); margin-bottom: 0; }
 
-.showhead { max-width: 46rem; margin-bottom: var(--s3); }
-.showhead .display { font-size: var(--t-h1); line-height: 1.06; margin: var(--s1) 0 var(--s2); }
-.showhead .lede { margin: 0; }
-.picker.showcase { border: 0; padding: 0; margin: 0; }
-.showgrid { display: grid; grid-template-columns: 16rem minmax(0, 1fr); gap: var(--s3); align-items: start; }
-@media (max-width: 860px) { .showgrid { grid-template-columns: 1fr; } }
-.showlist { display: grid; gap: 2px; }
-.showlist label { display: flex; align-items: center; gap: var(--s1); padding: 8px 10px; border-radius: 8px; cursor: pointer; color: var(--muted); font: 500 var(--t-body-s)/1.35 var(--sans); }
-.showlist label::before { content: ""; width: 7px; height: 7px; flex: 0 0 auto; border-radius: 50%; background: color-mix(in oklab, var(--muted) 45%, transparent); }
-.showlist label:hover { color: var(--ink); }
-.showpanes { min-width: 0; }
-.showpane { display: none; border: 1px solid var(--rule); border-radius: 10px; overflow: hidden; background: color-mix(in oklab, var(--plate) 35%, transparent); }
-.showbar { display: flex; align-items: baseline; gap: var(--s2); padding: 9px var(--s2); border-bottom: 1px solid var(--hair); }
-.showbar .what { flex: 1 1 auto; min-width: 0; color: var(--muted); font: var(--t-meta)/1.45 var(--sans); }
-.showbar .docs { white-space: nowrap; font: var(--t-key)/1 var(--mono); }
-.showpane .file { margin: 0; padding: 7px var(--s2) 0; font: var(--t-key)/1 var(--mono); color: var(--n2); }
-.showpane pre.code { margin: 0; border: 0; background: none; max-height: 26em; overflow: auto; }
-.showpane .cap { border-top: 1px solid var(--hair); }
-
-.picker.showcase input:nth-of-type(1):checked ~ .showgrid .showlist > :nth-child(1),
-.picker.showcase input:nth-of-type(2):checked ~ .showgrid .showlist > :nth-child(2),
-.picker.showcase input:nth-of-type(3):checked ~ .showgrid .showlist > :nth-child(3),
-.picker.showcase input:nth-of-type(4):checked ~ .showgrid .showlist > :nth-child(4),
-.picker.showcase input:nth-of-type(5):checked ~ .showgrid .showlist > :nth-child(5),
-.picker.showcase input:nth-of-type(6):checked ~ .showgrid .showlist > :nth-child(6) {
-  color: var(--ink);
-  background: color-mix(in oklab, var(--accent) 10%, transparent);
-}
-.picker.showcase input:nth-of-type(1):checked ~ .showgrid .showlist > :nth-child(1)::before,
-.picker.showcase input:nth-of-type(2):checked ~ .showgrid .showlist > :nth-child(2)::before,
-.picker.showcase input:nth-of-type(3):checked ~ .showgrid .showlist > :nth-child(3)::before,
-.picker.showcase input:nth-of-type(4):checked ~ .showgrid .showlist > :nth-child(4)::before,
-.picker.showcase input:nth-of-type(5):checked ~ .showgrid .showlist > :nth-child(5)::before,
-.picker.showcase input:nth-of-type(6):checked ~ .showgrid .showlist > :nth-child(6)::before {
-  background: var(--accent);
-}
-.picker.showcase input:nth-of-type(1):checked ~ .showgrid .showpanes > :nth-child(1),
-.picker.showcase input:nth-of-type(2):checked ~ .showgrid .showpanes > :nth-child(2),
-.picker.showcase input:nth-of-type(3):checked ~ .showgrid .showpanes > :nth-child(3),
-.picker.showcase input:nth-of-type(4):checked ~ .showgrid .showpanes > :nth-child(4),
-.picker.showcase input:nth-of-type(5):checked ~ .showgrid .showpanes > :nth-child(5),
-.picker.showcase input:nth-of-type(6):checked ~ .showgrid .showpanes > :nth-child(6) {
-  display: block;
-}
-.picker.showcase input:nth-of-type(1):focus-visible ~ .showgrid .showlist > :nth-child(1),
-.picker.showcase input:nth-of-type(2):focus-visible ~ .showgrid .showlist > :nth-child(2),
-.picker.showcase input:nth-of-type(3):focus-visible ~ .showgrid .showlist > :nth-child(3),
-.picker.showcase input:nth-of-type(4):focus-visible ~ .showgrid .showlist > :nth-child(4),
-.picker.showcase input:nth-of-type(5):focus-visible ~ .showgrid .showlist > :nth-child(5),
-.picker.showcase input:nth-of-type(6):focus-visible ~ .showgrid .showlist > :nth-child(6) {
-  outline: 2px solid var(--accent); outline-offset: 2px;
-}
 .picker input:nth-of-type(1):checked ~ .tabrow .ostabs > :nth-child(1),
 .picker input:nth-of-type(2):checked ~ .tabrow .ostabs > :nth-child(2),
 .picker input:nth-of-type(3):checked ~ .tabrow .ostabs > :nth-child(3),
@@ -150,20 +81,8 @@
   outline: 2px solid var(--accent); outline-offset: 2px;
 }
 
-.modteaser { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: var(--s3) var(--s2); }
-.modteaser > li { min-width: 0; }
-.modteaser > li > .eyebrow { padding-bottom: var(--s1); border-bottom: 1px solid var(--rule); }
-.modteaser a { display: flex; justify-content: space-between; gap: var(--s1); align-items: baseline; padding: 6px 0; text-decoration: none; border-bottom: 1px solid var(--hair); }
-.modteaser a:hover { color: var(--accent); }
-.modteaser code { font-size: var(--t-mono); background: none; border: 0; padding: 0; color: var(--accent); }
-.modteaser span { font: var(--t-key)/1.4 var(--mono); color: var(--n2); }
-
 .ctarow { display: flex; flex-wrap: wrap; gap: var(--s2); margin-top: var(--s3); }
 .ctarow .cta { white-space: normal; }
-
-.benchhead { max-width: 46rem; margin-bottom: var(--s4); }
-.benchhead .display { font-size: var(--t-h1); line-height: 1.06; margin: var(--s1) 0 var(--s2); }
-.benchhead .lede { margin: 0 0 var(--s2); }
 
 .specplate { margin: var(--s2) 0 var(--s3); border: 1px solid var(--rule); overflow: hidden; background: color-mix(in oklab, var(--plate) 35%, transparent); }
 .specplate .tabs,
@@ -207,12 +126,6 @@
 .page.benchpage > * { grid-column: 1 / 13; }
 .benchhero { padding: var(--s4) 0 var(--s3); }
 .benchhero .display { font-size: var(--t-h1); line-height: 1.06; margin: var(--s1) 0 var(--s2); }
-.benchcap { border-top: 0; padding-left: 0; padding-right: 0; margin-top: var(--s3); }
-
-.minutehead { max-width: 40rem; margin-bottom: var(--s4); }
-.minutehead .display { font-size: var(--t-h1); line-height: 1.05; margin: var(--s1) 0 var(--s2); }
-.minutehead .lede { margin: 0; }
-.minutecap { border-top: 0; padding-left: 0; padding-right: 0; margin-top: var(--s3); }
 
 .cap.entrycap { display: flex; align-items: center; gap: var(--s2); }
 .entryacts { margin-left: auto; display: inline-flex; align-items: center; gap: 2px; }
@@ -229,57 +142,6 @@
 }
 .iconlink:hover { color: var(--accent); background: color-mix(in oklab, var(--accent) 10%, transparent); }
 .iconlink svg { width: 15px; height: 15px; }
-
-.demo { display: grid; grid-template-columns: minmax(0, 5fr) minmax(0, 7fr); gap: var(--s4); align-items: start; }
-
-.demo .steps { list-style: none; margin: 0; padding: 0; counter-reset: step; }
-.demo .steps > li { position: relative; counter-increment: step; display: grid; grid-template-columns: 2.4ch minmax(0, 1fr); gap: 0 var(--s2); align-content: start; padding: var(--s2); border-radius: 10px; }
-.demo .steps > li + li { margin-top: 2px; }
-.demo .steps > li::before { content: counter(step, decimal-leading-zero); grid-column: 1; grid-row: 1 / span 3; font: var(--t-key)/1.9 var(--mono); color: var(--n2); }
-.demo .steps h3 { grid-column: 2; font: 600 var(--t-h5)/1.4 var(--sans); margin: 0; }
-.demo .steps .cmd { grid-column: 2; margin-top: 2px; border: 0; background: none; }
-.demo .steps .cmd code { padding: 2px 0; }
-.demo .steps .cmd code::before { content: "$ "; color: var(--n2); }
-.demo .steps .stepnote { grid-column: 2; margin: var(--s1) 0 0; color: var(--muted); font: var(--t-meta)/1.55 var(--sans); max-width: 42ch; }
-
-.demo .term { border: 1px solid var(--rule); border-radius: 10px; overflow: hidden; background: color-mix(in oklab, var(--ink) 6%, var(--paper)); display: flex; flex-direction: column; min-height: 22rem; }
-.demo .termbar { display: flex; align-items: center; gap: var(--s2); padding: 8px var(--s2); border-bottom: 1px solid var(--chromeline, var(--hair)); font: var(--t-key)/1 var(--mono); color: var(--muted); }
-.demo .termbar .lights { display: inline-flex; gap: 6px; }
-.demo .termbar .lights i { width: 9px; height: 9px; border-radius: 50%; background: color-mix(in oklab, var(--muted) 45%, transparent); }
-.demo .termbar .where { flex: 1 1 auto; min-width: 0; text-align: center; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.demo .termbar .counter { color: var(--n2); white-space: nowrap; }
-.demo .panes { min-width: 0; flex: 1 1 auto; padding: var(--s2); display: flex; flex-direction: column; }
-.demo .pane { min-width: 0; display: flex; flex-direction: column; }
-.demo .pane .out { flex: 0 1 auto; min-height: 12em; max-height: 30em; margin: 0; overflow: auto; background: none; border-left: 0; padding: 0; font: var(--t-code)/1.5 var(--mono); color: var(--muted); white-space: pre; }
-.demo .out .pr { color: var(--accent); }
-.demo .out .cx { color: var(--ink); font-weight: 600; }
-.demo .out .pa { color: color-mix(in oklab, var(--muted) 85%, transparent); }
-.demo .out .pl { color: var(--muted); }
-
-.demo .demobar { display: flex; align-items: center; justify-content: flex-end; gap: var(--s1); padding: 6px var(--s2) 10px; }
-.demo .demobar button { min-height: 26px; padding: 3px 10px; font: var(--t-key)/1 var(--mono); border: 1px solid var(--hair); background: none; color: var(--muted); border-radius: 999px; cursor: pointer; }
-.demo .demobar button:hover { color: var(--ink); border-color: color-mix(in oklab, var(--accent) 45%, transparent); }
-.demo .demobar button:disabled { opacity: 0.35; cursor: default; }
-
-.demo.stepped .pane { display: none; }
-.demo.stepped .pane.on { display: flex; flex: 1; }
-.demo.stepped .steps > li { cursor: pointer; }
-.demo.stepped .steps > li:not(.on) .stepnote { display: none; }
-.demo.stepped .steps > li.on { background: color-mix(in oklab, var(--accent) 8%, transparent); }
-.demo.stepped .steps > li.on::before { color: var(--accent); }
-.demo.stepped .steps > li:not(.on) h3 { color: var(--muted); font-weight: 500; }
-.demo.stepped .steps > li:not(.on):hover h3 { color: var(--ink); }
-.demo .steps > li .tick { position: absolute; left: var(--s2); right: var(--s2); bottom: 7px; height: 2px; width: auto; transform: scaleX(0); transform-origin: left center; background: var(--accent); border-radius: 999px; }
-.demo.stepped .steps > li.on .tick { animation: demotick 4200ms linear forwards; }
-.demo.paused .steps > li.on .tick, .demo.held .steps > li.on .tick { animation-play-state: paused; }
-.demo.held .steps > li.on .tick { display: none; }
-@keyframes demotick { from { transform: scaleX(0); } to { transform: scaleX(1); } }
-@media (prefers-reduced-motion: reduce) { .demo.stepped .steps > li.on .tick { animation: none; } }
-
-@media (max-width: 900px) {
-  .demo { grid-template-columns: minmax(0, 1fr); }
-  .demo .steps { border-right: 0; border-bottom: 1px solid var(--hair); }
-}
 
 details.disc { margin-top: var(--s2); font: var(--t-meta)/1.6 var(--sans); color: var(--muted); }
 details.disc > summary { cursor: pointer; min-height: 24px; padding: 2px 0; }
