@@ -82,6 +82,7 @@ pub fn web_root() -> Option<String> {
 
 /// The project manifest, `vyrn.json`. Every field is optional; unknown keys are
 /// ignored.
+#[derive(Clone)]
 pub struct Manifest {
     /// Directory the manifest lives in (slash-separated), as walked up to.
     pub dir: String,

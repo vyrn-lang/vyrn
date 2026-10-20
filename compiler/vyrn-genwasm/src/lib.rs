@@ -835,8 +835,8 @@ pub struct GenState {
     cursor: usize,
     /// The generator's declarations, so `contractOf` and `lex` are answered on
     /// this thread without the resolver.
-    types: std::collections::HashMap<String, vyrn_frontend::ast::TypeDecl>,
-    contracts: Vec<vyrn_frontend::ast::ContractDecl>,
+    types: std::sync::Arc<std::collections::HashMap<String, vyrn_frontend::ast::TypeDecl>>,
+    contracts: std::sync::Arc<Vec<vyrn_frontend::ast::ContractDecl>>,
     /// What the generator's `TypeArg` parameter receives.
     type_arg: Option<Expr>,
     /// The line to the thread that holds the resolver; `None` for a `test`
@@ -849,12 +849,8 @@ impl GenState {
     /// Takes the declarations `contractOf` and `lex` reflect over.
     pub fn new(p: &Program) -> Self {
         GenState {
-            types: p
-                .type_decls
-                .iter()
-                .map(|t| (t.name.clone(), t.clone()))
-                .collect(),
-            contracts: p.contracts.clone(),
+            types: std::sync::Arc::new(type_map(p)),
+            contracts: std::sync::Arc::new(p.contracts.clone()),
             ..GenState::default()
         }
     }
@@ -1422,7 +1418,80 @@ fn run_module(
             m
         }
     };
-    run_hosted(&module, argv, program, inputs, reads)
+    run_hosted(key, &module, argv, program, inputs, reads)
+}
+
+/// A program's type declarations by name, which reflection resolves against.
+fn type_map(p: &Program) -> std::collections::HashMap<String, vyrn_frontend::ast::TypeDecl> {
+    (p.type_decls.iter())
+        .map(|t| (t.name.clone(), t.clone()))
+        .collect()
+}
+
+/// What every run of one artifact shares: the module linked for a generator,
+/// and the declarations its reflection reads.
+#[cfg(feature = "host")]
+struct Prepared {
+    pre: wasmtime::InstancePre<wasi::Guest<()>>,
+    types: std::sync::Arc<std::collections::HashMap<String, vyrn_frontend::ast::TypeDecl>>,
+    contracts: std::sync::Arc<Vec<vyrn_frontend::ast::ContractDecl>>,
+}
+
+/// The [`Prepared`] of the artifact `key`, made once per process. The key names
+/// the program, so `program` only fills a miss.
+#[cfg(feature = "host")]
+fn prepared(
+    key: &str,
+    module: &wasmtime::Module,
+    program: &Program,
+) -> Result<std::sync::Arc<Prepared>, EngineError> {
+    type Cache = std::sync::Mutex<std::collections::HashMap<String, std::sync::Arc<Prepared>>>;
+    static CACHE: std::sync::OnceLock<Cache> = std::sync::OnceLock::new();
+    let cache = CACHE.get_or_init(Default::default);
+    if let Some(p) = cache.lock().ok().and_then(|c| c.get(key).cloned()) {
+        return Ok(p);
+    }
+    let policy = wasi::Policy::generator(0);
+    let p = std::sync::Arc::new(Prepared {
+        pre: wasi::linked(module, &policy, |_| Ok(())).map_err(EngineError::Failed)?,
+        types: std::sync::Arc::new(type_map(program)),
+        contracts: std::sync::Arc::new(program.contracts.clone()),
+    });
+    if let Ok(mut c) = cache.lock() {
+        c.insert(key.to_string(), p.clone());
+    }
+    Ok(p)
+}
+
+/// A job for a guest thread.
+#[cfg(feature = "host")]
+type Job = Box<dyn FnOnce() + Send>;
+
+#[cfg(feature = "host")]
+thread_local! {
+    /// This thread's idle guest thread, reused across runs: spawning one with
+    /// its 16 MB stack costs as much as a small generator's run. A run takes it
+    /// out, so a generator nested in another's capability request gets a thread
+    /// of its own.
+    static GUEST: std::cell::RefCell<Option<mpsc::Sender<Job>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// A guest thread that runs each job it receives until its sender is dropped.
+#[cfg(feature = "host")]
+fn guest_thread() -> Result<mpsc::Sender<Job>, EngineError> {
+    let (tx, rx) = mpsc::channel::<Job>();
+    std::thread::Builder::new()
+        // Compiled code runs on this stack; a deeply recursive generator would
+        // overflow the default before wasmtime's own stack limit.
+        .stack_size(16 * 1024 * 1024)
+        .spawn(move || {
+            while let Ok(job) = rx.recv() {
+                job();
+            }
+        })
+        .map_err(|e| EngineError::Failed(e.to_string()))?;
+    Ok(tx)
 }
 
 /// Runs the guest on its own thread and serves its capability requests from
@@ -1430,6 +1499,7 @@ fn run_module(
 /// and with it its `Sender`, is dropped.
 #[cfg(feature = "host")]
 fn run_hosted(
+    key: &str,
     module: &wasmtime::Module,
     argv: &[String],
     program: &Program,
@@ -1439,44 +1509,40 @@ fn run_hosted(
     let fuel = wasm_fuel(inputs.fuel);
     let (req_tx, req_rx) = mpsc::channel::<(String, i32)>();
     let (resp_tx, resp_rx) = mpsc::channel::<Result<Served, String>>();
+    let (done_tx, done_rx) = mpsc::channel::<Result<String, EngineError>>();
 
-    let module = module.clone();
+    let prepared = prepared(key, module, program)?;
     let argv: Vec<String> = argv.to_vec();
     // Cloned because the store's data must be `'static`.
-    let types = program
-        .type_decls
-        .iter()
-        .map(|t| (t.name.clone(), t.clone()))
-        .collect();
-    let contracts = program.contracts.clone();
     let type_arg = inputs.type_arg.clone();
-    let guest = std::thread::Builder::new()
-        // Compiled code runs on this stack; a deeply recursive generator would
-        // overflow the default before wasmtime's own stack limit.
-        .stack_size(16 * 1024 * 1024)
-        .spawn(move || {
-            run_wasm(
-                &module,
-                &argv,
-                types,
-                contracts,
-                type_arg,
-                fuel,
-                Caps {
-                    req: req_tx,
-                    resp: resp_rx,
-                },
-            )
-        })
-        .map_err(|e| EngineError::Failed(e.to_string()))?;
+    let job: Job = Box::new(move || {
+        let caps = Caps {
+            req: req_tx,
+            resp: resp_rx,
+        };
+        let _ = done_tx.send(run_wasm(&prepared, &argv, type_arg, fuel, caps));
+    });
+    let mut worker = match GUEST.with(|g| g.borrow_mut().take()) {
+        Some(w) => w,
+        None => guest_thread()?,
+    };
+    // A thread a panic ended refuses the job, which comes back for a new one.
+    if let Err(mpsc::SendError(job)) = worker.send(job) {
+        worker = guest_thread()?;
+        let _ = worker.send(job);
+    }
 
+    // The loop ends when the run drops its store, and with it the sender.
     while let Ok((path, mode)) = req_rx.recv() {
         if resp_tx.send(serve(inputs, reads, &path, mode)).is_err() {
             break;
         }
     }
-    match guest.join() {
-        Ok(r) => r,
+    match done_rx.recv() {
+        Ok(r) => {
+            GUEST.with(|g| *g.borrow_mut() = Some(worker));
+            r
+        }
         Err(_) => Err(EngineError::Failed("generator panicked".into())),
     }
 }
@@ -1487,18 +1553,16 @@ fn run_hosted(
 /// Embedded rather than spawned: the `wasmtime` CLI's launch measured ~106 ms.
 #[cfg(feature = "host")]
 fn run_wasm(
-    module: &wasmtime::Module,
+    prepared: &Prepared,
     argv: &[String],
-    types: std::collections::HashMap<String, vyrn_frontend::ast::TypeDecl>,
-    contracts: Vec<vyrn_frontend::ast::ContractDecl>,
     type_arg: Option<Expr>,
     fuel: u64,
     caps: Caps,
 ) -> Result<String, EngineError> {
     let gen = GenState {
         caps: Some(caps),
-        types,
-        contracts,
+        types: prepared.types.clone(),
+        contracts: prepared.contracts.clone(),
         type_arg,
         ..GenState::default()
     };
@@ -1507,8 +1571,8 @@ fn run_wasm(
         .chain(argv.iter().cloned())
         .collect();
     let policy = wasi::Policy::generator(fuel);
-    let (mut store, inst) = wasi::instantiate(module, &policy, &argv, gen, (), |_| Ok(()))
-        .map_err(EngineError::Failed)?;
+    let (mut store, inst) =
+        wasi::start(&prepared.pre, &policy, &argv, gen, ()).map_err(EngineError::Failed)?;
     let result = match inst.get_typed_func::<(), ()>(&mut store, "_start") {
         Ok(start) => start.call(&mut store, ()),
         Err(e) => return Err(EngineError::Failed(format!("_start: {e}"))),

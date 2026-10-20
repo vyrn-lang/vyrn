@@ -1768,8 +1768,26 @@ pub fn call_generator(
     engine: Option<&crate::gen::GenEngine>,
 ) -> Option<Result<String, Vec<Diagnostic>>> {
     let key = resolve_spec(spec, importer, opts).ok()?;
-    let mut seen = HashSet::new();
-    let (module, name) = gen_export(&key, prefix, args.len(), opts, resolver, &mut seen)?;
+    let memo_key = (key.clone(), prefix.to_string(), args.len());
+    let held = GEN_EXPORTS.with(|m| m.borrow().get(&memo_key).cloned());
+    let held = held.filter(|(texts, _)| texts.iter().all(|(p, t)| resolver.read(p).ok() == *t));
+    let (module, name) = match held {
+        Some((_, found)) => found?,
+        None => {
+            let (mut seen, mut texts) = (HashSet::new(), Vec::new());
+            let found = gen_export(
+                &key,
+                prefix,
+                args.len(),
+                opts,
+                resolver,
+                &mut seen,
+                &mut texts,
+            );
+            GEN_EXPORTS.with(|m| m.borrow_mut().insert(memo_key, (texts, found.clone())));
+            found?
+        }
+    };
     let site = Site {
         line: 0,
         root_key: importer,
@@ -1789,9 +1807,22 @@ pub fn call_generator(
     ))
 }
 
+/// What [`gen_export`] answered: the companion and the function, or none, and
+/// every text the search read, `None` for a file it could not read.
+type GenExport = (Vec<(String, Option<String>)>, Option<(String, String)>);
+
+thread_local! {
+    /// [`gen_export`]'s answers by module, prefix and arity, for the editor's
+    /// per-keystroke calls; an answer stands while every text it read reads the
+    /// same.
+    static GEN_EXPORTS: std::cell::RefCell<HashMap<(String, String, usize), GenExport>> =
+        std::cell::RefCell::new(HashMap::new());
+}
+
 /// The companion and name of the first exported `gen fn` of `arity`
 /// parameters whose name starts with `prefix`, beside `key` or a module it
-/// imports; see [`call_generator`]. `seen` holds the modules already searched.
+/// imports; see [`call_generator`]. `seen` holds the modules already searched,
+/// and `texts` receives each file the search read.
 fn gen_export(
     key: &str,
     prefix: &str,
@@ -1799,12 +1830,15 @@ fn gen_export(
     opts: &LoadOptions,
     resolver: &dyn ModuleResolver,
     seen: &mut HashSet<String>,
+    texts: &mut Vec<(String, Option<String>)>,
 ) -> Option<(String, String)> {
     if !seen.insert(key.to_string()) {
         return None;
     }
-    let parse = |k: &str| {
-        let tokens = crate::lexer::lex(&resolver.read(k).ok()?).ok()?;
+    let mut parse = |k: &str| {
+        let text = resolver.read(k).ok();
+        texts.push((k.to_string(), text.clone()));
+        let tokens = crate::lexer::lex(&text?).ok()?;
         Some(crate::parser::parse_accum(tokens).0)
     };
     let companion = format!("{}.editor.vyrn", key.strip_suffix(".vyrn").unwrap_or(key));
@@ -1820,7 +1854,7 @@ fn gen_export(
     program.imports.iter().find_map(|imp| match &imp.source {
         ImportSource::Path(spec) => {
             let next = resolve_spec(spec, key, opts).ok()?;
-            gen_export(&next, prefix, arity, opts, resolver, seen)
+            gen_export(&next, prefix, arity, opts, resolver, seen, texts)
         }
         ImportSource::Generator { .. } => None,
     })

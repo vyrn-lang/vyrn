@@ -140,7 +140,7 @@ fn load_context(
         ..Default::default()
     };
     let found = match std::path::Path::new(&path).parent() {
-        Some(d) => find_manifest(d),
+        Some(d) => manifest_of(d),
         None => Ok(None),
     };
     let mut manifest_error = None;
@@ -167,7 +167,40 @@ fn load_context(
 
 // The project context is read by the build's own reader, so the editor never
 // answers a different question from the build.
-use vyrn_frontend::manifest::{find as find_manifest, pinned_blob, std_root, Lock};
+use vyrn_frontend::manifest::{find as find_manifest, pinned_blob, Lock};
+
+/// The std root, found once: every request's load asks, and the search stats
+/// the directories above the executable.
+fn std_root() -> Option<String> {
+    static ROOT: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    ROOT.get_or_init(vyrn_frontend::manifest::std_root).clone()
+}
+
+/// The manifest `find_manifest` reads for `dir`, read again only when the
+/// nearest `vyrn.json`, or its absence, changes length or modification time:
+/// every request asks, and a parse costs about 0.2 ms.
+fn manifest_of(dir: &std::path::Path) -> Result<Option<vyrn_frontend::manifest::Manifest>, String> {
+    type Stamp = Option<(u64, Option<std::time::SystemTime>)>;
+    type Kept = (
+        Stamp,
+        Result<Option<vyrn_frontend::manifest::Manifest>, String>,
+    );
+    thread_local! {
+        static MANIFESTS: RefCell<HashMap<std::path::PathBuf, Kept>> = RefCell::new(HashMap::new());
+    }
+    let file = vyrn_frontend::manifest::app_root(dir).join("vyrn.json");
+    let stamp: Stamp = std::fs::metadata(&file)
+        .ok()
+        .map(|m| (m.len(), m.modified().ok()));
+    MANIFESTS.with(|kept| {
+        if let Some((_, m)) = kept.borrow().get(&file).filter(|(s, _)| *s == stamp) {
+            return m.clone();
+        }
+        let m = find_manifest(dir);
+        kept.borrow_mut().insert(file, (stamp, m.clone()));
+        m
+    })
+}
 
 /// Read-only, offline module resolver: local paths from open buffers or disk;
 /// remote specifiers from `vyrn_vendor/` or the user cache, only when
@@ -312,10 +345,11 @@ struct Server {
     /// Generator inputs (slash path) whose owner discovery found no root. Cleared
     /// whole when a `.vyrn` opens or changes, and per file when the input opens.
     input_ownerless: HashSet<String>,
-    /// A generator input (slash path) -> the claimant [`input_claim`] last found
-    /// by the walk, so a keystroke reads one `.vyrn` file, not the walk's. Each
-    /// use checks the claim again; cleared whole when a `.vyrn` opens or changes.
-    input_claimant: RefCell<HashMap<String, Url>>,
+    /// A generator input (slash path) -> the claimant, claim and claimant text
+    /// [`input_claim`] last answered, so a keystroke reads one `.vyrn` file and
+    /// parses none. It stands while the text reads the same and the claimant is
+    /// the owner or there is none; cleared whole when a `.vyrn` opens or changes.
+    input_claimant: RefCell<HashMap<String, (Url, vyrn_frontend::audience::Claim, String)>>,
     /// The client's capabilities as `initialize` sent them.
     client_caps: serde_json::Value,
     /// Manifest directories whose `inputs` globs the client was asked to send.
@@ -498,7 +532,7 @@ const INPUT_METHODS: [(&str, &str); 11] = [
 /// manifest. A method the client cannot register dynamically is not asked
 /// for. The client answers with a response nothing reads.
 fn register_inputs(connection: &Connection, server: &mut Server, dir: &std::path::Path) {
-    let Ok(Some(m)) = find_manifest(dir) else {
+    let Ok(Some(m)) = manifest_of(dir) else {
         return;
     };
     if m.inputs.is_empty() || !server.inputs_registered.insert(m.dir.clone()) {
@@ -2851,21 +2885,23 @@ fn input_claim(
 ) -> Option<(Url, vyrn_frontend::audience::Claim, String)> {
     let path = uri_path(uri)?;
     let file = (uri.to_file_path().ok()?.to_string_lossy()).replace('\\', "/");
-    let held = (server.input_owner.get(&path).cloned())
-        .or_else(|| server.input_claimant.borrow().get(&path).cloned());
-    let held = held.and_then(|root| {
-        let opts = input_load_options(server, &path)?;
-        let claim = claim_on(server, &opts, &root, &path)?;
-        Some((root, claim))
-    });
-    let (root, claim) = match held {
-        Some(h) => h,
-        None => {
-            let found = claimants(server, &path).into_iter().next()?;
-            (server.input_claimant.borrow_mut()).insert(path, found.0.clone());
-            found
-        }
+    let owner = server.input_owner.get(&path);
+    let kept = server.input_claimant.borrow().get(&path).cloned();
+    let stands = |(root, _, text): &(Url, _, String)| {
+        owner.is_none_or(|o| o == root) && doc_text(server, root).as_ref() == Some(text)
     };
+    if let Some((root, claim, _)) = kept.filter(stands) {
+        return Some((root, claim, file));
+    }
+    let owned = owner.and_then(|root| {
+        let opts = input_load_options(server, &path)?;
+        Some((root.clone(), claim_on(server, &opts, root, &path)?))
+    });
+    let (root, claim) = owned.or_else(|| claimants(server, &path).into_iter().next())?;
+    if let Some(text) = doc_text(server, &root) {
+        let kept = (root.clone(), claim.clone(), text);
+        server.input_claimant.borrow_mut().insert(path, kept);
+    }
     Some((root, claim, file))
 }
 
@@ -3238,7 +3274,7 @@ fn css_sig<'a>(files: impl Iterator<Item = &'a std::path::Path>) -> u64 {
 /// then path order, deduplicated, at most [`MAX_STYLESHEETS`]. Empty without
 /// the key: the editor guesses no app's layout.
 fn app_stylesheet_paths(root: &std::path::Path) -> Vec<std::path::PathBuf> {
-    let globs = match find_manifest(root) {
+    let globs = match manifest_of(root) {
         Ok(Some(m)) => m.stylesheets,
         _ => Vec::new(),
     };
