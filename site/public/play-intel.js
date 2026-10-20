@@ -1,12 +1,12 @@
 import { highlight } from "./play-paint.js";
 
-// Completion, hover and signature help for one editor textarea, served by play.wasm's
+// Completion, hover, signature help and squiggles for one editor textarea, served by play.wasm's
 // play_complete, play_hover and play_signature. Lines and columns sent to it are 1-based, columns in code points.
 
 const HOVER_DELAY_MS = 350;
 const MAX_ITEMS = 60;
 const IDENT = /[\p{L}\p{N}_]/u;
-
+const squiggles = new WeakMap();
 let reported = false;
 
 // A failure of play.wasm is a defect, so the first one reaches the console; the editor keeps working without the answer.
@@ -138,19 +138,74 @@ function infoHtml(api, info) {
   return out;
 }
 
-// The hover box's markup at 1-based (line, col) of `text`: the hover of the name there, or empty.
-export function hoverHtml(play, text, line, col) {
-  const row = text.split("\n")[line - 1];
-  if (row === undefined || col < 1 || !IDENT.test([...row][col - 1] || "")) return "";
-  try {
-    return infoHtml(play, play.hover(text, line, col));
-  } catch (err) {
-    report(err);
-    return "";
-  }
+// The 1-based columns [from, to) a diagnostic marks on its line `text`: its own span, else the line's non-blank
+// run. null when there is nothing to mark.
+export function markOf(d, text) {
+  const chars = [...text];
+  if (d.col > 0) return [d.col, d.endCol > d.col ? Math.min(d.endCol, chars.length + 1) : chars.length + 1];
+  const lead = chars.findIndex((c) => c.trim() !== "");
+  if (lead < 0) return null;
+  return [lead + 1, [...text.trimEnd()].length + 1];
 }
 
-export function bindIntel(t, api) {
+// The hover box's markup at 1-based (line, col) of `text`: each diagnostic marking that cell, then the hover of the
+// name there. Empty when there is neither.
+export function hoverHtml(play, text, line, col, diags) {
+  const row = text.split("\n")[line - 1];
+  if (row === undefined || col < 1) return "";
+  let html = "";
+  for (const d of diags) {
+    const mark = d.line === line ? markOf(d, row) : null;
+    if (mark && col >= mark[0] && col < mark[1]) {
+      html += '<div class="diag ' + d.severity + '">' + proseHtml(d.message) + (d.note ? '<span class="note">' + proseHtml(d.note) + "</span>" : "") + "</div>";
+    }
+  }
+  if (IDENT.test([...row][col - 1] || "")) {
+    try {
+      html += infoHtml(play, play.hover(text, line, col));
+    } catch (err) {
+      report(err);
+    }
+  }
+  return html;
+}
+
+// Draws the diagnostics of the text in `t` as wavy underlines.
+export function squiggle(t, diags) {
+  const s = squiggles.get(t);
+  if (!s) return;
+  s.diags = (diags || []).filter((d) => d.line > 0);
+  s.draw();
+}
+
+export function bindIntel(t, editorEl, api) {
+  const box = document.createElement("div");
+  box.className = "squig";
+  box.setAttribute("aria-hidden", "true");
+  const sheet = document.createElement("div");
+  box.append(sheet);
+  editorEl.append(box);
+  const state = { diags: [], draw };
+  squiggles.set(t, state);
+
+  function draw() {
+    const m = metrics(t);
+    Object.assign(box.style, { left: t.offsetLeft + "px", top: t.offsetTop + "px", width: t.clientWidth + t.clientLeft + "px", height: t.clientHeight + t.clientTop + "px", font: `${m.font}`, lineHeight: m.lh + "px" });
+    sheet.style.transform = `translate(${-t.scrollLeft}px, ${-t.scrollTop}px)`;
+    sheet.textContent = "";
+    const lines = t.value.split("\n");
+    for (const d of state.diags) {
+      const span = lines[d.line - 1] === undefined ? null : markOf(d, lines[d.line - 1]);
+      if (!span) continue;
+      const mark = document.createElement("i");
+      mark.className = d.severity;
+      mark.textContent = "\u00a0".repeat(Math.max(1, span[1] - span[0]));
+      mark.style.left = m.left + (span[0] - 1) * m.cw + "px";
+      mark.style.top = m.top + (d.line - 1) * m.lh + "px";
+      sheet.append(mark);
+    }
+  }
+
   const tip = floating("intel tip");
   const sigTip = floating("intel tip sigtip");
   const menu = floating("intel picks");
@@ -311,13 +366,14 @@ export function bindIntel(t, api) {
   t.addEventListener("scroll", () => {
     closeMenu();
     tip.hidden = true;
+    draw();
   });
 
   function hoverAt(x, y) {
     const play = api();
     if (!play) return;
     const { line, col } = cellAt(t, x, y);
-    const html = hoverHtml(play, t.value, line, col);
+    const html = hoverHtml(play, t.value, line, col, state.diags);
     if (!html) return;
     tip.innerHTML = html;
     const p = pointOf(t, line, col);
@@ -334,4 +390,6 @@ export function bindIntel(t, api) {
     clearTimeout(hoverTimer);
     tip.hidden = true;
   });
+
+  new ResizeObserver(draw).observe(t);
 }

@@ -296,7 +296,7 @@ export function mountIde(root, core) {
   }
 
   function bindGroup(g) {
-    bindIntel(g.input, api);
+    bindIntel(g.input, g.editorEl, api);
     g.input.addEventListener("focus", () => {
       focusedG = g;
       syncG(g);

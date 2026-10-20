@@ -5,6 +5,7 @@ import { highlight, scrollLayer, showDiagnostics } from "./play-paint.js";
 import { runInWorker, say, showRun, stopWorker } from "./play-run.js";
 import { encodeSource, sourceFromHash } from "./play-share.js";
 import { mountIde } from "./play-ide.js";
+import { squiggle } from "./play-intel.js";
 
 const CHECK_DELAY_MS = 350;
 
@@ -67,7 +68,10 @@ export function mountPlay(root, opts = {}) {
     scrollLayer(input, layer);
   }
 
-  const showDiags = (diags) => showDiagnostics(diagPane, diags, caretToLine);
+  function showDiags(diags) {
+    showDiagnostics(diagPane, diags, caretToLine);
+    squiggle(srcHost(), diags);
+  }
 
   function caretToLine(line) {
     const host = srcHost();

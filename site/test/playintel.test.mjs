@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { instantiatePlay } from "../public/play-wasm.js";
-import { hoverHtml, lineCol, prefixAt, rank, splitParams } from "../public/play-intel.js";
+import { hoverHtml, lineCol, markOf, prefixAt, rank, splitParams } from "../public/play-intel.js";
 import { sheet } from "./sheet.mjs";
 
 const root = new URL("../../", import.meta.url);
@@ -83,6 +83,14 @@ test("the hover box shows each name of the buffer that resolves, a builtin funct
   assert.match(hoverHtml(play, PUSHED, 2, 6, []), /<pre class="sig">.*print/);
   assert.match(hoverHtml(play, PUSHED, 3, 9, []), /<pre class="sig">.*xs/);
   assert.equal(hoverHtml(play, PUSHED, 1, 21, []), "");
+});
+
+test("a diagnostic without a column marks its line's text and hovers there", () => {
+  const [d] = play.check(PUSHED).diagnostics;
+  assert.deepEqual([d.line, d.col], [4, 0]);
+  assert.deepEqual(markOf(d, "    xs.push(3)  "), [5, 15]);
+  assert.equal(markOf(d, "   "), null);
+  assert.match(hoverHtml(play, PUSHED, 4, 6, [d]), /^<div class="diag error">.*needs an Array/);
 });
 
 test("a fixed-size array is not offered push", () => {

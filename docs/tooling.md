@@ -463,7 +463,9 @@ loader), `play_compile` (the bytes `vyrn build --target wasm` writes), and
 from the analysis `vyrn-lsp` serves. In a buffer that does not parse, no
 local is typed and no import is linked, so completion after a `.` analyses the
 line with a placeholder member name, and signature help on an open call
-analyses the line with the call closed.
+analyses the line with the call closed. The editor underlines each diagnostic
+`play_check` returns, its own span or, without a column, its line's text, and
+shows its sentence on hover.
 `site/public/play-worker.js` runs the compiled program with `web/wasi-min.js`.
 A `derive` generator runs in the page: the module calls its one import,
 `vyrn_play.run_generator`, and `site/public/play-wasm.js` instantiates the
