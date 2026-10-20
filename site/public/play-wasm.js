@@ -181,6 +181,18 @@ function api(instance) {
       const [n] = put([src]);
       return take(wasm.play_check(n));
     },
+    complete(src, line, col) {
+      const [n] = put([src]);
+      return take(wasm.play_complete(n, line, col));
+    },
+    hover(src, line, col) {
+      const [n] = put([src]);
+      return take(wasm.play_hover(n, line, col));
+    },
+    signature(src, line, col) {
+      const [n] = put([src]);
+      return take(wasm.play_signature(n, line, col));
+    },
     compile(src) {
       const [n] = put([src]);
       const len = wasm.play_compile(n);

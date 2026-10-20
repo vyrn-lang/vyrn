@@ -4,7 +4,6 @@
   --vx-moon: oklch(0.945 0.012 250);
   --vx-soft: oklch(0.87 0.017 250);
   --vx-dim: oklch(0.67 0.03 257);
-  --vx-faint: oklch(0.58 0.03 257);
   --vx-amber: oklch(0.81 0.13 72);
   --vx-coral: oklch(0.7 0.19 32);
   --vx-teal: oklch(0.8 0.115 180);
@@ -54,13 +53,11 @@ html:not(.vx-live) .vx-js { display: none; }
 }
 .vx-line { white-space: pre; }
 .vx-head { display: flex; justify-content: space-between; margin-bottom: 8px; font: 500 var(--t-key)/1.4 var(--sans); letter-spacing: 0.14em; text-transform: uppercase; color: var(--vx-dim); }
-.vx-kw { color: oklch(0.77 0.05 255); }
-.vx-ty { color: var(--vx-teal); }
-.vx-cm { color: var(--vx-faint); }
 .vx-diag { margin-top: 8px; min-height: 20px; font: var(--t-code-s)/1.55 var(--mono); color: var(--vx-dim); }
 .vx .bad { color: var(--vx-coral); }
 .vx-live .vx-op { cursor: pointer; border-radius: 4px; color: var(--vx-dim); text-decoration: line-through; text-decoration-color: color-mix(in oklab, var(--vx-dim) 50%, transparent); }
 .vx-live .vx-op.on { color: var(--vx-moon); text-decoration: none; }
+.vx-live .vx-op:not(.on) * { color: inherit; }
 .vx-op:hover { background: color-mix(in oklab, var(--vx-moon) 7%, transparent); }
 .vx-stat { display: flex; gap: 22px; margin-top: 10px; font: 500 var(--t-eyebrow)/1.4 var(--sans); letter-spacing: 0.05em; color: var(--vx-dim); }
 .vx-stat b { margin-right: 6px; font: 500 var(--t-body)/1 var(--mono); color: var(--vx-moon); }

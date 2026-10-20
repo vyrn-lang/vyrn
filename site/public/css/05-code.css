@@ -16,6 +16,7 @@ pre.code::-webkit-scrollbar { display: none; }
 .c { color: var(--syn-com); font-style: italic; }
 .t { color: var(--syn-type); font-weight: 600; }
 .n { color: var(--syn-num); }
+.f { font-weight: 600; }
 
 .out {
   margin: var(--s2) 0 0;

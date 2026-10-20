@@ -45,10 +45,11 @@ pub mod vyx;
 
 pub use symbols::{
     analyze, analyze_judged, analyze_linked, at_module_scope, class_completions, class_token_hover,
-    classify_at, completions, import_spec_at, inlay_hints, member_completions, module_doc,
-    references, references_to, resolve, semantic_tokens, string_literal_completions, Analysis,
-    Completion, CostLine, DocExport, FnCost, InlayHint, Judge, LocalBinding, LocalKind, MemoryNote,
-    ModuleDoc, RefRange, Resolution, SemKind, SemMods, SemToken, Symbol, SymbolKind, TokenInfo,
+    classify_at, completions, import_spec_at, inlay_hints, member_completions, member_context,
+    module_doc, references, references_to, resolve, scope_completions, semantic_tokens,
+    string_context, string_literal_completions, Analysis, Completion, CostLine, DocExport, FnCost,
+    InlayHint, Judge, LocalBinding, LocalKind, MemoryNote, ModuleDoc, RefRange, Resolution,
+    SemKind, SemMods, SemToken, Symbol, SymbolKind, TokenInfo,
 };
 // Hover's type spelling, shared with the LSP's inlay hints.
 pub use symbols::type_to_string;
