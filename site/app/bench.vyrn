@@ -231,8 +231,8 @@ fn contestants() -> Array<Series> {
         Series { key: "js", name: "node", tone: "sr-node" },
         Series { key: "bun", name: "bun", tone: "sr-bun" },
         Series { key: "vyrn-native", name: "Vyrn native", tone: "sr-vyrn" },
-        Series { key: "vyrn-wasm", name: "Vyrn wasm", tone: "sr-vyrn dashed" },
-        Series { key: "vyrn-wasm-opt", name: "Vyrn wasm-opt", tone: "sr-wasmopt dashed" },
+        Series { key: "vyrn-wasm", name: "Vyrn wasm", tone: "sr-vyrn sr-wasm" },
+        Series { key: "vyrn-wasm-opt", name: "Vyrn wasm-opt", tone: "sr-vyrn sr-wasmopt" },
     ]
 }
 

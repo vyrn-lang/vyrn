@@ -1,4 +1,4 @@
-/// std/arrays: higher-order array helpers, in Vyrn.
+/// Higher-order array helpers such as `map`, `filter` and `fold`, in Vyrn.
 
 /// Applies `f` to every element, collecting the results into a new array.
 export fn map<T, U>(xs: Array<T>, f: fn(T) -> U) -> Array<U> {

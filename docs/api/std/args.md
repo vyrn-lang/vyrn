@@ -1,6 +1,6 @@
 # std/args
 
-std/args: command-line argument parsing over `args()`, in Vyrn.
+Command-line argument parsing over `args()`, in Vyrn.
 
 Four probes: `flag`, `opt` (`--name value` or `--name=value`),
 `positionals` and `rest` (a `--` passthrough tail). There is no spec, no

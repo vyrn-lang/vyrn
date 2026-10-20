@@ -1,6 +1,6 @@
 # std/arrays
 
-std/arrays: higher-order array helpers, in Vyrn.
+Higher-order array helpers such as `map`, `filter` and `fold`, in Vyrn.
 
 ## map
 

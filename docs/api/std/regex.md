@@ -1,6 +1,6 @@
 # std/regex
 
-std/regex: a regular expression that searches, counts and replaces.
+A regular expression that searches, counts and replaces.
 
 `=~` only answers whether a whole string matches a constant pattern. The walk
 is Vyrn, not a builtin, so every engine runs one source and agrees on offsets

@@ -1,6 +1,6 @@
 # std/codecs
 
-std/codecs -- hex, base64 and percent encoding over UTF-8 bytes. These are the
+Hex, base64 and percent encoding over UTF-8 bytes. These are the
 `hexEncode`, `hexDecode`, `base64Encode`, `base64Decode`, `urlEncode` and
 `urlDecode` builtins on every engine; `tests/codecs.rs` pins their output.
 

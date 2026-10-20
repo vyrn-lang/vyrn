@@ -81,6 +81,10 @@ fn usedInLabel(m: String, e: ApiEntry) -> String {
     return "Used in the guide: " + title
 }
 
+fn sourceLabel(m: String, e: ApiEntry) -> String {
+    return "std/" + m + ".vyrn, line " + e.line.toString()
+}
+
 fn hasDemo(m: String, e: ApiEntry) -> Bool {
     return demoFor(m, e.name).block.byteLength > 0
 }
@@ -171,10 +175,10 @@ fn claudeHref(m: String) -> String {
             <pre class="code" v-html="e.sig"></pre>
             <div class="prose" v-html="e.prose"></div>
             <p class="cap entrycap">
-                <a :href="apiSourceLine(data.name, e.line)">std/{{ data.name }}.vyrn, line {{ e.line }}</a>
-                <span class="entryacts" v-if="hasDemo(data.name, e)">
-                    <a class="iconlink" :href="demoChapterHref(data.name, e)" :title="usedInLabel(data.name, e)"><Icon name="bytesize:book"/><span class="sr-only">{{ usedInLabel(data.name, e) }}</span></a>
-                    <a class="iconlink" :href="demoOf(data.name, e).play" title="Run it in the playground"><Icon name="bytesize:play"/><span class="sr-only">Run it in the playground</span></a>
+                <span class="entryacts">
+                    <a class="iconlink" :href="apiSourceLine(data.name, e.line)" :title="sourceLabel(data.name, e)"><Icon name="bytesize:code"/><span class="sr-only">{{ sourceLabel(data.name, e) }}</span></a>
+                    <a class="iconlink" v-if="hasDemo(data.name, e)" :href="demoChapterHref(data.name, e)" :title="usedInLabel(data.name, e)"><Icon name="bytesize:book"/><span class="sr-only">{{ usedInLabel(data.name, e) }}</span></a>
+                    <a class="iconlink" v-if="hasDemo(data.name, e)" :href="demoOf(data.name, e).play" title="Run it in the playground"><Icon name="bytesize:play"/><span class="sr-only">Run it in the playground</span></a>
                 </span>
             </p>
         </article>

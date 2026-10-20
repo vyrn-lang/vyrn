@@ -1,6 +1,6 @@
 # std/contract
 
-std/contract -- check a module against a module contract.
+Check a module against a module contract.
 
 `checkContract` compares a `contract` declaration with a module's
 `moduleInterface` and returns `Issue`s:

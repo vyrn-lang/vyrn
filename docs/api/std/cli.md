@@ -1,6 +1,6 @@
 # std/cli
 
-std/cli: the command line is a record type.
+The command line is a record type, and `cli` writes its parser and help.
 
   import { cli } from "std/cli"
   import { parseServe, helpServe } from cli("./serve")

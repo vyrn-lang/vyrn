@@ -1,4 +1,4 @@
-/// std/math: integer helpers (min, max, abs, clamp) and float ones (pi, floor,
+/// Integer helpers (min, max, abs, clamp) and float ones (pi, floor,
 /// sine, cosine), written in Vyrn.
 
 export fn min(a: Int64, b: Int64) -> Int64 {

@@ -1,6 +1,6 @@
 # std/symbolmap
 
-std/symbolmap: the symbol map of a generated module. For each
+The symbol map of a generated module: for each
 exported symbol, the source declaration it stands for and any derived facts.
 
   import { symbol, strField, mapJson, symbolMapFn } from "std/symbolmap"

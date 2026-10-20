@@ -1,6 +1,6 @@
 # std/columns
 
-std/columns: a record type laid out as one array per field.
+A record type laid out as one array per field.
 
   import { columns } from "std/columns"
   import { BodyColumns, bodyColumns, pushBody, bodyAt } from columns("./bodies")

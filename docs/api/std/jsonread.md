@@ -1,6 +1,6 @@
 # std/jsonread
 
-std/jsonread: the strict JSON reader over the `Json` tree of `std/json`.
+The strict JSON reader over the `Json` tree of `std/json`.
 
   import { parseJson } from "std/jsonread"
   import { Json, JsonField, emit } from "std/json"

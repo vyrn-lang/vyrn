@@ -1019,7 +1019,7 @@ test "every page says what it is to a crawler, and no two pages say the same" {
     assert(contains(leaf, "<meta property=\"og:title\" content=\"std/json\">"))
     assert(contains(leaf, "<meta property=\"og:type\" content=\"article\">"))
     assert(contains(leaf, "<meta property=\"article:section\" content=\"Reference\">"))
-    assert(contains(leaf, "<meta name=\"description\" content=\"std/json: the JSON value tree"))
+    assert(contains(leaf, "<meta name=\"description\" content=\"The JSON value tree"))
 }
 
 test "a title fits a search result, and the site name is only in the tab" {

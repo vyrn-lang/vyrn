@@ -1,4 +1,4 @@
-/// std/stream: the `Stream<T>` combinators, in Vyrn.
+/// The linear `Stream<T>` combinators, written in Vyrn.
 ///
 /// Every combinator takes a `Stream` parameter, so it inherits the linearity
 /// rule: an abandoned `map(...)` result fails to compile for the same reason an

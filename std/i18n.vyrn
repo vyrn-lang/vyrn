@@ -1,4 +1,4 @@
-/// std/i18n: typed translations as a generator library.
+/// Typed translations as a generator library.
 ///
 ///   import { i18n } from "std/i18n"
 ///   import { t, setLocale, locale, Locale, TransKey, tCartItems } from i18n("./locales")

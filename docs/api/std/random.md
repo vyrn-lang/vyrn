@@ -1,6 +1,6 @@
 # std/random
 
-std/random: deterministic pseudo-randomness with a host-seeded escape.
+Deterministic pseudo-randomness with a host-seeded escape.
 
 The generator is a value (`Rng`): each draw returns the value and the
 advanced `Rng`, so a seeded run reproduces on every engine. There is no

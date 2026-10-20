@@ -1,6 +1,6 @@
 # std/slots
 
-std/slots: a generational slab over `Array`, in Vyrn.
+A generational slab over `Array`, in Vyrn.
 
 A `Handle<T>` is a plain value: a slot, the generation live when it was
 issued, and the identity of the container that issued it. It owns no heap, so

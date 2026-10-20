@@ -1,4 +1,4 @@
-/// std/num: text -> number, correctly rounded, and `Float64` -> `%f` text.
+/// Text -> number, correctly rounded, and `Float64` -> `%f` text.
 ///
 /// A library, not a builtin: the direct wasm backend has no `strtod`, so one
 /// Vyrn implementation serves every engine. The only primitives are the

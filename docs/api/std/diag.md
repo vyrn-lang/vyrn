@@ -1,6 +1,6 @@
 # std/diag
 
-std/diag: a generator reports a diagnostic.
+A generator reports a diagnostic, anchored in a file it read.
 
 A line of a `gen fn`'s output may be a report: a severity, an anchor in a
 file the generator read, and a message. The loader lifts it out, and every
