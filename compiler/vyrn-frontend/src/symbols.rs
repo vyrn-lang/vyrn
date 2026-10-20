@@ -969,12 +969,20 @@ pub fn resolve(analysis: &Analysis, line: usize, col: usize) -> Option<Resolutio
             ),
         )),
         Some(Named::Symbol(s)) => Some(at(s, hover_of(&s.detail, &[doc_piece(&s.doc)]))),
-        // A built-in method or function name (`push`, `info`, `len`), then the
-        // ambient `Result` and `Option` and their constructors, imported or not.
+        // A built-in method or function name (`push`, `info`, `len`), then a
+        // built-in function by its contract (`print`), then the ambient
+        // `Result` and `Option` and their constructors, imported or not.
         None => match builtin_method(&tok.text) {
             Some(b) => Some(nowhere(b.name, SymbolKind::Method, hover_of(b.detail, &[]))),
-            None => builtin_type_or_ctor(&tok.text)
-                .map(|(kind, hover)| nowhere(&tok.text, kind, hover_of(&hover, &[]))),
+            None => match crate::prelude::builtin(&tok.text).and_then(|b| b.sig.as_ref()) {
+                Some(f) => Some(nowhere(
+                    &tok.text,
+                    SymbolKind::Function,
+                    hover_of(&function_detail(f, &analysis.spellings), &[]),
+                )),
+                None => builtin_type_or_ctor(&tok.text)
+                    .map(|(kind, hover)| nowhere(&tok.text, kind, hover_of(&hover, &[]))),
+            },
         },
     }
 }

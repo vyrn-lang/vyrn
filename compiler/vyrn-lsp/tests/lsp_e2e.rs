@@ -702,6 +702,33 @@ fn main() -> Int64 {
     }
 }
 
+/// A builtin function has no declaration, so its hover is its contract.
+#[test]
+fn hover_on_a_builtin_function_shows_its_contract() {
+    let mut client = LspClient::spawn().expect("spawn vyrn-lsp");
+    let init_id = serde_json::json!(1);
+    client.send(&serde_json::json!({
+        "jsonrpc": "2.0", "id": init_id, "method": "initialize",
+        "params": { "capabilities": {}, "processId": null }
+    }));
+    let _ = client.read_response(&init_id);
+    client.send(&serde_json::json!({ "jsonrpc": "2.0", "method": "initialized", "params": {} }));
+    let uri = "file:///hover/builtin.vyrn";
+    let src = "\
+fn main() -> Int64 {
+    print(1)
+    return 0
+}
+";
+    client.send(&serde_json::json!({
+        "jsonrpc": "2.0", "method": "textDocument/didOpen",
+        "params": { "textDocument": { "uri": uri, "languageId": "vyrn", "version": 1, "text": src } }
+    }));
+    let _ = client.read_notification("textDocument/publishDiagnostics");
+    let hover = hover_value(&mut client, uri, 1, 5).expect("a hover on a builtin function");
+    assert!(hover.contains("fn print"), "{hover}");
+}
+
 /// The hover's `modify` is the only place that says `t.record(..)` mutates `t`.
 #[test]
 fn member_completion_and_hover_show_a_modify_self_receiver() {

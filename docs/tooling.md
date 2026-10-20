@@ -459,9 +459,11 @@ a dependency.
 `wasm32-unknown-unknown` module for the website. It exports `play_tokens`
 (highlighting with the real lexer), `play_check` (diagnostics from the real
 loader), `play_compile` (the bytes `vyrn build --target wasm` writes), and
-`play_complete`, which answers the editor from the analysis `vyrn-lsp` serves.
-A local typed on a line that does not parse has no type, so completion after
-a `.` analyses the line with a placeholder member name.
+`play_complete`, `play_hover` and `play_signature`, which answer the editor
+from the analysis `vyrn-lsp` serves. In a buffer that does not parse, no
+local is typed and no import is linked, so completion after a `.` analyses the
+line with a placeholder member name, and signature help on an open call
+analyses the line with the call closed.
 `site/public/play-worker.js` runs the compiled program with `web/wasi-min.js`.
 A `derive` generator runs in the page: the module calls its one import,
 `vyrn_play.run_generator`, and `site/public/play-wasm.js` instantiates the

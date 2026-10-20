@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { instantiatePlay } from "../public/play-wasm.js";
-import { lineCol, prefixAt, rank } from "../public/play-intel.js";
+import { hoverHtml, lineCol, prefixAt, rank, splitParams } from "../public/play-intel.js";
 import { sheet } from "./sheet.mjs";
 
 const root = new URL("../../", import.meta.url);
@@ -30,6 +30,13 @@ test("prefix matches rank before substring matches, once per label", () => {
   assert.deepEqual(rank(items, "").length, 4);
 });
 
+test("the active parameter is cut out at depth zero", () => {
+  const sig = "fn put(m: Map<String, Int64>, k: String) -> Bool";
+  assert.deepEqual(splitParams(sig, 1), ["fn put(m: Map<String, Int64>,", " k: String", ") -> Bool"]);
+  assert.equal(splitParams(sig, 2), null);
+  assert.equal(splitParams("Int64", 0), null);
+});
+
 test("typing a dot after an array offers the array's members", () => {
   const src = "fn main() -> Int64 {\n    let xs = [1,2]; xs.\n    return 0\n}\n";
   const got = labels(play.complete(src, 2, 24));
@@ -39,6 +46,19 @@ test("typing a dot after an array offers the array's members", () => {
 test("a name offers the locals, the imports and the keywords", () => {
   const got = labels(play.complete(SPLIT, 5, 5));
   for (const m of ["parts", "split", "return"]) assert.ok(got.includes(m), `${m} in ${got}`);
+});
+
+test("hovering a std function shows its signature and its doc", () => {
+  const h = play.hover(SPLIT, 4, 18);
+  assert.match(h.signature, /fn split\(s: String, sep: String\) -> Array<String>/);
+  assert.match(h.doc, /^Splits `s` on every occurrence of `sep`/);
+});
+
+test("inside a call the signature names the argument under the caret", () => {
+  const h = play.signature(SPLIT, 4, 30);
+  assert.match(h.signature, /fn split/);
+  assert.equal(h.arg, 1);
+  assert.deepEqual(play.signature(SPLIT, 5, 5), {});
 });
 
 test("a floating box's classes are styled only under .intel, so no shell rule reaches it", () => {
@@ -54,6 +74,15 @@ test("a floating box's classes are styled only under .intel, so no shell rule re
     }
   }
   assert.deepEqual(leaks, []);
+});
+
+const PUSHED = 'fn main() -> Int64 {\n    print("hello")\n    let xs = [1, 2]\n    xs.push(3)\n    return 0\n}\n';
+
+test("the hover box shows each name of the buffer that resolves, a builtin function included", () => {
+  assert.match(hoverHtml(play, PUSHED, 1, 4, []), /<pre class="sig">.*main/);
+  assert.match(hoverHtml(play, PUSHED, 2, 6, []), /<pre class="sig">.*print/);
+  assert.match(hoverHtml(play, PUSHED, 3, 9, []), /<pre class="sig">.*xs/);
+  assert.equal(hoverHtml(play, PUSHED, 1, 21, []), "");
 });
 
 test("a fixed-size array is not offered push", () => {

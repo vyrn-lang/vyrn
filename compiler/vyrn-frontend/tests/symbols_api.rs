@@ -852,3 +852,22 @@ fn main() -> Int64 {
         assert!(!labels.contains(refused), "{refused} offered: {labels:?}");
     }
 }
+
+#[test]
+fn hover_on_a_builtin_function_shows_its_contract() {
+    let src = "\
+fn main() -> Int64 {
+    print(1)
+    return 0
+}
+";
+    let r = resolve(&analyze(src), 2, 6).expect("print resolves");
+    assert_eq!(r.kind, SymbolKind::Function);
+    assert!(!r.definition);
+    assert!(
+        r.signature
+            .as_deref()
+            .is_some_and(|s| s.starts_with("fn print")),
+        "{r:?}"
+    );
+}
