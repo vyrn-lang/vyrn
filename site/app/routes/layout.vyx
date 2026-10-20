@@ -24,7 +24,7 @@ fn standing() -> String {
 <div class="shell">
 <a class="skip" href="#main">Skip to content</a>
 <header class="masthead">
-        <a href="/index.html" class="wordmark">vyrn</a>
+        <a href="/" class="wordmark">vyrn</a>
         <details class="menu">
             <summary>Menu</summary>
             <nav class="nav" aria-label="Site">

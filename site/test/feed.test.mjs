@@ -83,11 +83,11 @@ test("the feed is one RSS 2.0 channel with the elements a reader needs", () => {
   assert.equal(rss.attrs["xmlns:atom"], "http://www.w3.org/2005/Atom");
   assert.equal(child(channel, "title").text, "Vyrn releases");
   assert.ok(child(channel, "description").text.length > 20);
-  assert.equal(child(channel, "link").text, "https://vyrn-lang.github.io/vyrn/releases.html");
+  assert.equal(child(channel, "link").text, "https://vyrn-lang.github.io/releases.html");
   const self = child(channel, "atom:link");
   assert.equal(self.attrs.rel, "self");
   assert.equal(self.attrs.type, "application/rss+xml");
-  assert.equal(self.attrs.href, "https://vyrn-lang.github.io/vyrn/releases.xml");
+  assert.equal(self.attrs.href, "https://vyrn-lang.github.io/releases.xml");
 });
 
 test("every release the history knows is an item, newest first", () => {

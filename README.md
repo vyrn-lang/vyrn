@@ -1,6 +1,6 @@
 <div align="center">
 
-<a href="https://vyrn-lang.github.io/vyrn/">
+<a href="https://vyrn-lang.github.io/">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset=".github/assets/vyrn-logo-dark.svg">
     <img alt="Vyrn" src=".github/assets/vyrn-logo-light.svg" width="312">
@@ -11,10 +11,10 @@
 
 [![CI](https://github.com/vyrn-lang/vyrn/actions/workflows/ci.yml/badge.svg)](https://github.com/vyrn-lang/vyrn/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/vyrn-lang/vyrn?include_prereleases&label=release&color=1c7f9c)](https://github.com/vyrn-lang/vyrn/releases)
-[![Docs](https://img.shields.io/badge/docs-vyrn--lang.github.io-22b8d4)](https://vyrn-lang.github.io/vyrn/)
+[![Docs](https://img.shields.io/badge/docs-vyrn--lang.github.io-22b8d4)](https://vyrn-lang.github.io/)
 [![License](https://img.shields.io/badge/license-MIT%20or%20Apache--2.0-123258)](#license)
 
-[Website](https://vyrn-lang.github.io/vyrn/) &middot;
+[Website](https://vyrn-lang.github.io/) &middot;
 [Install](#install) &middot;
 [Examples](examples/) &middot;
 [Standard library](docs/api/)

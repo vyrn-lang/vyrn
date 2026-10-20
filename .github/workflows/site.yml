@@ -12,13 +12,13 @@ on:
   schedule:
     - cron: '17 6 * * *'
 
-# The build job runs pull-request code, so the grant is read-only; `pages` and `id-token` are on `deploy` alone.
+# The build job runs pull-request code, so the grant is read-only; the deploy key is read by `deploy` alone.
 permissions:
   contents: read
 
 # Keyed by ref, so a pull-request build cannot cancel the main-line deploy.
 concurrency:
-  group: pages-${{ github.ref }}
+  group: site-${{ github.ref }}
   cancel-in-progress: true
 
 env:
@@ -162,18 +162,41 @@ jobs:
         with:
           path: out
 
+  # https://vyrn-lang.github.io/ is the repository vyrn-lang.github.io, served from its `main` branch.
+  # This job replaces that branch with one commit holding the build.
   deploy:
     needs: build
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     permissions:
-      contents: read
-      pages: write
-      id-token: write
-    environment:
-      name: github-pages
-      url: ${{ steps.deploy.outputs.page_url }}
+      actions: read
+    concurrency:
+      group: site-deploy
+      cancel-in-progress: false
     steps:
-      - id: deploy
-        # actions/deploy-pages@v5.0.1
-        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346
+      - name: The built site
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          gh run download "${{ github.run_id }}" --repo "${{ github.repository }}" --name github-pages --dir artifact
+          mkdir out
+          tar -xf artifact/artifact.tar -C out
+          # Without it Pages runs Jekyll, which drops files whose names start with `_`.
+          touch out/.nojekyll
+
+      - name: Publish to vyrn-lang.github.io
+        env:
+          KEY: ${{ secrets.SITE_DEPLOY_KEY }}
+          SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+        run: |
+          set -eu
+          mkdir -p ~/.ssh
+          printf '%s\n' "$KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan -t ed25519 github.com >> ~/.ssh/known_hosts
+          cd out
+          git init -q -b main
+          git add -A
+          git -c user.name=vyrn-site -c user.email=vyrn-site@users.noreply.github.com commit -q -m "site at vyrn-lang/vyrn@$SHA"
+          git push -q --force git@github.com:vyrn-lang/vyrn-lang.github.io.git main
