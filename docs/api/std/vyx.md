@@ -97,6 +97,14 @@ fn vyxIsWs(b: UInt8) -> Bool
 
 True for an ASCII space, tab, CR, or LF.
 
+## vyxIsIdent
+
+```vyrn
+fn vyxIsIdent(b: UInt8) -> Bool
+```
+
+True for an ASCII letter, digit, or `_` (identifier bytes).
+
 ## vyxLowerFirst
 
 ```vyrn

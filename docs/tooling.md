@@ -381,11 +381,11 @@ module that claims it (`audience::Claim`): of the `MAX_OWNER_CANDIDATES`
 `.vyrn` files nearest it, up to the nearest `vyrn.json`, the first in path
 order whose generator import names the file or a directory above it, and whose
 generated code maps to it through `//@origin`. An input without an owner gets
-one warning that names the search. Completion in the input's own grammar comes
-from the `gen fn vyrnComplete*` in the claiming generator module's editor
-companion (`loader::call_generator`), `std/vyx.editor`'s `vyrnCompleteVyx` for
-`.vyx`; anywhere
-else the cursor maps through `//@origin` into the generated module.
+one warning that names the search. Completion and go-to-definition in the
+input's own grammar come from the `gen fn vyrnComplete*` and
+`vyrnDefinition*` in the claiming generator module's editor companion
+(`loader::call_generator`), `std/vyx.editor`'s for `.vyx`; anywhere else the
+cursor maps through `//@origin` into the generated module.
 
 Each line that allocates, copies, grows a container, enters an allocating
 function of another file or keeps a check ends in an inlay hint of a few plain

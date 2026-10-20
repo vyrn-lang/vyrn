@@ -54,3 +54,15 @@ fn vyrnSourceVyx(path: String) -> String
 
 The Vyrn a tool reads in the component at `path`: its `<script>` at the
 file's own positions, then the view function its `<template>` compiles to.
+
+## vyrnDefinitionVyx
+
+```vyrn
+fn vyrnDefinitionVyx(root: String, path: String, line: Int64, col: Int64) -> String
+```
+
+The definition of the component tag at 1-based `line` and `col` of the
+`.vyx` at `path`, as an anchor in `//@origin` notation: the sibling
+`<Name>.vyx` at its first line, for a cursor on `<Name` or `</Name` in the
+template. `root` is the directory the generator was pointed at. Returns ""
+anywhere else, or when no such sibling exists.

@@ -810,8 +810,7 @@ fn handle_definition(server: &Server, params: serde_json::Value) -> Option<GotoD
         let (analysis, u) = lookup(server, uri)?;
         (resolve(analysis, line, col)?, Some(u))
     } else {
-        // A component tag is no identifier in the generated module.
-        if let Some(loc) = component_tag_definition(server, uri, line, col) {
+        if let Some(loc) = input_definition(server, uri, line, col) {
             return Some(loc);
         }
         let fwd = input_forward(server, uri, line, col)?;
@@ -835,63 +834,33 @@ fn handle_definition(server: &Server, params: serde_json::Value) -> Option<GotoD
     }))
 }
 
-/// The sibling `CreateForm.vyx` for a cursor on `<CreateForm` or `</CreateForm`,
-/// or `None` when there is no PascalCase tag or no such file.
-fn component_tag_definition(
+/// The definition the claiming generator module's editor companion gives at
+/// `line`, `col` of the input `uri`
+/// ([`vyrn_frontend::audience::input_definition`]): a foreign grammar's own
+/// names, such as a component tag, are no identifier in the generated module.
+fn input_definition(
     server: &Server,
     uri: &Url,
     line: usize,
     col: usize,
 ) -> Option<GotoDefinitionResponse> {
-    let raw = doc_text(server, uri)?;
-    let text = raw.lines().nth(line.saturating_sub(1))?;
-    let chars: Vec<char> = text.chars().collect();
-    let cur = col.saturating_sub(1).min(chars.len());
-    let is_ident = |c: char| c.is_ascii_alphanumeric() || c == '_';
-    let mut start = cur;
-    while start > 0 && chars.get(start - 1).is_some_and(|&c| is_ident(c)) {
-        start -= 1;
-    }
-    let mut end = cur;
-    while end < chars.len() && chars.get(end).is_some_and(|&c| is_ident(c)) {
-        end += 1;
-    }
-    if start >= end {
-        return None;
-    }
-    // The token must be a PascalCase tag opened by `<` or `</` (skipping a `/`).
-    let before = {
-        let mut i = start;
-        while i > 0 && chars[i - 1] == '/' {
-            i -= 1;
-        }
-        i.checked_sub(1).and_then(|j| chars.get(j)).copied()
-    };
-    if before != Some('<') {
-        return None;
-    }
-    let name: String = chars[start..end].iter().collect();
-    if !name.chars().next().is_some_and(|c| c.is_ascii_uppercase()) {
-        return None;
-    }
-    let (dir, _self_name) = vyx_dir_and_name(uri)?;
-    let sibling = dir.join(format!("{name}.vyx"));
-    if !sibling.is_file() {
-        return None;
-    }
-    let target = Url::from_file_path(&sibling).ok()?;
+    let (root, claim, file) = input_claim(server, uri)?;
+    let overlays = overlays_of(server);
+    let (opts, resolver, _, _) = load_context(&server.session, &root, &overlays)?;
+    let at = vyrn_frontend::audience::input_definition(
+        &claim,
+        &file,
+        line,
+        col,
+        &opts,
+        &resolver,
+        Some(&*engine()),
+    )?;
+    let target = Url::from_file_path(at.file.replace('/', std::path::MAIN_SEPARATOR_STR)).ok()?;
+    let text = doc_text(server, &target).unwrap_or_default();
     Some(GotoDefinitionResponse::Scalar(Location {
+        range: lsp_range(&text, at.line, at.col, at.col),
         uri: target,
-        range: Range {
-            start: Position {
-                line: 0,
-                character: 0,
-            },
-            end: Position {
-                line: 0,
-                character: 0,
-            },
-        },
     }))
 }
 
@@ -1377,14 +1346,6 @@ fn edit_item(label: &str, kind: CompletionItemKind, detail: &str, range: Range) 
         })),
         ..Default::default()
     }
-}
-
-/// The directory of a `.vyx` URI and the component's base name.
-fn vyx_dir_and_name(uri: &Url) -> Option<(std::path::PathBuf, String)> {
-    let path = uri.to_file_path().ok()?;
-    let dir = path.parent()?.to_path_buf();
-    let name = path.file_stem()?.to_string_lossy().into_owned();
-    Some((dir, name))
 }
 
 fn to_completion_item(c: vyrn_frontend::Completion) -> CompletionItem {

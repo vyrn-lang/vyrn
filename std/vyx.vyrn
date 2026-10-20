@@ -118,7 +118,7 @@ export fn vyxIsWs(b: UInt8) -> Bool {
 }
 
 /// True for an ASCII letter, digit, or `_` (identifier bytes).
-fn vyxIsIdent(b: UInt8) -> Bool {
+export fn vyxIsIdent(b: UInt8) -> Bool {
     return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9') || b == '_'
 }
 

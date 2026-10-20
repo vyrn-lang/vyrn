@@ -3,7 +3,7 @@
 /// No program links this module, so a program that uses `std/vyx` pays
 /// nothing for it. A tool finds it beside `std/vyx` by its name.
 
-import { vyxSection, vyxSectionAvoid, vyxIsWs, vyxSlice, vyxFindLast, vyxDirOf, vyxParseScriptAt, vyxLowerFirst } from "std/vyx"
+import { vyxSection, vyxSectionAvoid, vyxIsWs, vyxIsIdent, vyxSlice, vyxFindLast, vyxDirOf, vyxParseScriptAt, vyxLowerFirst } from "std/vyx"
 import { joinWith, lines, trim, fromBytesOr } from "std/strings"
 import { Json, JsonField, emit } from "std/json"
 import { endsWith, startsWith } from "std/strpred"
@@ -413,6 +413,44 @@ export gen fn vyrnSourceVyx(path: String) -> String {
         Err(e) => "",
     }
     return vyxComponentView(src, vyxStemOf(path))
+}
+
+/// The definition of the component tag at 1-based `line` and `col` of the
+/// `.vyx` at `path`, as an anchor in `//@origin` notation: the sibling
+/// `<Name>.vyx` at its first line, for a cursor on `<Name` or `</Name` in the
+/// template. `root` is the directory the generator was pointed at. Returns ""
+/// anywhere else, or when no such sibling exists.
+export gen fn vyrnDefinitionVyx(root: String, path: String, line: Int64, col: Int64) -> String {
+    let src = match readFile(path) {
+        Ok(s) => s,
+        Err(e) => "",
+    }
+    let ba = bytes(src)
+    let at = vyxOffsetAt(ba, line, col)
+    if at < 0 || vyxInScript(ba, at) {
+        return ""
+    }
+    let mut s = at
+    while s > 0 && vyxIsIdent(ba[s - 1]) {
+        s = s - 1
+    }
+    let mut e = at
+    while e < ba.length && vyxIsIdent(ba[e]) {
+        e = e + 1
+    }
+    let mut lt = s
+    while lt > 0 && ba[lt - 1] == '/' {
+        lt = lt - 1
+    }
+    let name = vyxSlice(ba, s, e)
+    if lt == 0 || ba[lt - 1] != '<' || vyxCapitalized(name) == false {
+        return ""
+    }
+    let target = vyxDirOf(path) + "/" + name + ".vyx"
+    return match readFile(target) {
+        Ok(t) => target + ":1:1",
+        Err(e) => "",
+    }
 }
 
 test "a cursor right after a closed value is no attribute-name slot" {

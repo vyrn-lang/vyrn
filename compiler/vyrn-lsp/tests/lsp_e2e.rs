@@ -1565,6 +1565,27 @@ fn component_tag_completion() {
     );
 }
 
+/// A component tag is no identifier in the generated module; its definition
+/// is the sibling file the editor companion names, from an open or a close tag.
+#[test]
+fn component_tag_definition_opens_the_sibling() {
+    let dir = struct_dir();
+    let mut client = spawn_client();
+    let uri = file_uri(&dir.join("Panel.vyx"));
+    did_open(&mut client, &uri, "vyx", STRUCT_PANEL);
+    for typed in ["<BookC", "</BookC"] {
+        let (l, c) = pos_after(STRUCT_PANEL, typed);
+        let target = definition_target(&mut client, &uri, l, c).expect("definition on a tag");
+        assert!(target.ends_with("BookCard.vyx"), "{typed}: {target}");
+    }
+    let (l, c) = pos_after(STRUCT_PANEL, "<Bo");
+    assert_eq!(
+        definition_target(&mut client, &uri, l, c),
+        None,
+        "no Book.vyx"
+    );
+}
+
 #[test]
 fn component_prop_completion() {
     let dir = struct_dir();
