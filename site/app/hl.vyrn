@@ -153,13 +153,38 @@ export fn lineStarts(src: String) -> Array<Int64> {
 fn scanString(raw: Array<UInt8>, start: Int64) -> Int64 {
     let mut i = start + 1
     while i < raw.length && raw[i] != '"' {
-        if raw[i] == 92 {
+        if raw[i] == 92 && i + 1 < raw.length && raw[i + 1] == '{' {
+            i = holeEnd(raw, i + 2)
+        } else if raw[i] == 92 {
             i = i + 1
         }
         i = i + 1
     }
     if i < raw.length {
         i = i + 1
+    }
+    return i
+}
+
+// The `}` that closes a hole whose source starts at `at`, past nested braces and strings.
+fn holeEnd(raw: Array<UInt8>, at: Int64) -> Int64 {
+    let mut depth = 0
+    let mut i = at
+    while i < raw.length {
+        if raw[i] == '"' {
+            i = scanString(raw, i)
+        } else {
+            if raw[i] == '}' {
+                if depth == 0 {
+                    return i
+                }
+                depth = depth - 1
+            }
+            if raw[i] == '{' {
+                depth = depth + 1
+            }
+            i = i + 1
+        }
     }
     return i
 }
@@ -269,6 +294,27 @@ fn trivia(src: String, raw: Array<UInt8>, from: Int64, to: Int64) -> String {
     return out + emit("", substring(src, plain, to))
 }
 
+// The interpolated string from `start` to `stop`: each hole as code, the rest as string.
+gen fn template(src: String, raw: Array<UInt8>, start: Int64, stop: Int64) -> String {
+    let mut out = ""
+    let mut from = start
+    let mut i = start
+    while i + 1 < stop {
+        if raw[i] == 92 && raw[i + 1] == '{' {
+            let close = holeEnd(raw, i + 2)
+            let hole = substring(src, i + 2, close)
+            out = out + emit("s", substring(src, from, i + 2)) + highlightSrc(hole, lex(hole))
+            from = close
+            i = close
+        } else if raw[i] == 92 {
+            i = i + 2
+        } else {
+            i = i + 1
+        }
+    }
+    return out + emit("s", substring(src, from, stop))
+}
+
 export gen fn highlightSrc(src: String, toks: Array<Token>) -> String {
     let raw = bytes(src)
     let starts = lineStarts(src)
@@ -280,7 +326,11 @@ export gen fn highlightSrc(src: String, toks: Array<Token>) -> String {
         if start >= cursor {
             out = out + trivia(src, raw, cursor, start)
             let stop = extentOf(raw, start, t.kind, t.text)
-            out = out + emit(classOf(t.kind, t.text, callee(toks, i)), substring(src, start, stop))
+            if t.kind == "template" {
+                out = out + template(src, raw, start, stop)
+            } else {
+                out = out + emit(classOf(t.kind, t.text, callee(toks, i)), substring(src, start, stop))
+            }
             cursor = stop
         }
         i = i + 1
@@ -330,6 +380,7 @@ test "a number ends where the language ends it" {
 test "a string's extent is its quotes, not its decoded text" {
     assertEq(scanString(bytes("\"a//b\" x"), 0), 6)
     assertEq(scanString(bytes("\"a\\\"b\""), 0), 6)
+    assertEq(scanString(bytes("\"a\\{f(\"x\")}b\" y"), 0), 13)
 }
 
 test "a capability word is a keyword here and an ordinary name is not" {
