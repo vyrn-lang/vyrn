@@ -212,12 +212,18 @@ fn paint_template(
         let Some(found) = text[from..].find(&format!("\\{{{}", hole.src)) else {
             break;
         };
-        let code = from + found + 2;
-        let n = text[from..code].encode_utf16().count();
-        out.push(format!("[{at},{n},\"s\"]"));
-        paint(&hole.src, at + n, out)?;
-        at += n + hole.src.encode_utf16().count();
-        from = code + hole.src.len();
+        let n = text[from..from + found].encode_utf16().count();
+        if n > 0 {
+            out.push(format!("[{at},{n},\"s\"]"));
+        }
+        at += n;
+        out.push(format!("[{at},2,\"i\"]"));
+        paint(&hole.src, at + 2, out)?;
+        at += 2 + hole.src.encode_utf16().count();
+        // The lexer ends a hole at its closing `}`, one byte.
+        out.push(format!("[{at},1,\"i\"]"));
+        at += 1;
+        from += found + 2 + hole.src.len() + 1;
     }
     out.push(format!(
         "[{at},{},\"s\"]",
@@ -790,7 +796,7 @@ mod tests {
     fn an_interpolation_hole_is_painted_as_code() {
         assert_eq!(
             tokens_json(r#"x("a\{f(1)}b")"#),
-            r#"{"spans":[[0,1,"f"],[2,4,"s"],[6,1,"f"],[8,1,"n"],[10,3,"s"]]}"#
+            r#"{"spans":[[0,1,"f"],[2,2,"s"],[4,2,"i"],[6,1,"f"],[8,1,"n"],[10,1,"i"],[11,2,"s"]]}"#
         );
     }
 

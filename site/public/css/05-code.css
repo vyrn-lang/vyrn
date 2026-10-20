@@ -13,6 +13,8 @@ pre.code::-webkit-scrollbar { display: none; }
 
 .k { color: var(--syn-kw); }
 .s { color: var(--syn-str); }
+/* The `\{` and `}` around an interpolation hole. */
+.i { color: var(--syn-kw); }
 .c { color: var(--syn-com); font-style: italic; }
 .t { color: var(--syn-type); font-weight: 600; }
 .n { color: var(--syn-num); }
