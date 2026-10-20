@@ -51,10 +51,6 @@ fn claim(
     args: &[ConstVal],
     inputs: &GenInputs<'_>,
 ) -> Option<Result<GenOutput, GenError>> {
-    if let Some(what) = reaches_unserved(program) {
-        decline(&format!("the module reaches `{what}`"));
-        return None;
-    }
     match run(program, fn_name, args, inputs) {
         Err(EngineError::Unsupported) => None,
         Err(EngineError::Failed(e)) => Some(Err(GenError::Failed(e))),
@@ -147,7 +143,12 @@ fn run(
     let mut reads = Vec::new();
     // Only a fingerprinted key is trusted across processes; see `artifact_key`.
     let persist = inputs.sources_fingerprint.is_some();
+    // Judged only when the artifact is built: the key names the program's
+    // sources, so a cached artifact is one a program with no unserved call built.
     let source = run_module(&key, persist, &argv, program, inputs, &mut reads, || {
+        if let Some(what) = reaches_unserved(program) {
+            return Err(decline(&format!("the module reaches `{what}`")));
+        }
         let wrapper = wrapper_program(program)
             .ok_or_else(|| decline("the wrapper program cannot be synthesized"))?;
         compile_to_wasm(&key, &wrapper)

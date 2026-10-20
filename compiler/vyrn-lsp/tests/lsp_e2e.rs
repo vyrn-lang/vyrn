@@ -1522,7 +1522,13 @@ fn transkey_completion_inside_mustache() {
     );
 }
 
-// Structural completion works on a raw `.vyx` with no owning root.
+// Structural completion comes from the claiming generator module's
+// `vyrnComplete*`, so it needs a root that claims the file, not one whose
+// generation succeeds: `<Book>` names no component.
+const STRUCT_APP: &str = "import { components } from \"std/vyx\"\n\
+    import { panel } from components(\"./widgets\")\n\
+    fn main() -> Int64 { return 0 }\n";
+
 const STRUCT_PANEL: &str = "<template>\n\
     <Book></Book>\n\
     <BookCard t></BookCard>\n\
@@ -1537,10 +1543,12 @@ fn struct_dir() -> std::path::PathBuf {
     let n = SCRATCH_COUNTER.fetch_add(1, Ordering::SeqCst);
     let dir = std::env::temp_dir().join(format!("vyrn_lsp_struct_{}_{n}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    std::fs::write(dir.join("Panel.vyx"), STRUCT_PANEL).unwrap();
-    std::fs::write(dir.join("BookCard.vyx"), STRUCT_CARD).unwrap();
-    dir
+    std::fs::create_dir_all(dir.join("widgets")).unwrap();
+    std::fs::write(dir.join("vyrn.json"), "{ \"name\": \"struct\" }").unwrap();
+    std::fs::write(dir.join("app.vyrn"), STRUCT_APP).unwrap();
+    std::fs::write(dir.join("widgets/Panel.vyx"), STRUCT_PANEL).unwrap();
+    std::fs::write(dir.join("widgets/BookCard.vyx"), STRUCT_CARD).unwrap();
+    dir.join("widgets")
 }
 
 #[test]

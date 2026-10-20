@@ -1,0 +1,364 @@
+/// Editor support for the `.vyx` files `std/vyx` claims.
+///
+/// No program links this module, so a program that uses `std/vyx` pays
+/// nothing for it. A tool finds it beside `std/vyx` by its name.
+
+import { vyxSection, vyxIsWs, vyxSlice, vyxFindLast, vyxDirOf, vyxParseScriptAt } from "std/vyx"
+import { Json, JsonField, emit } from "std/json"
+import { endsWith, startsWith } from "std/strpred"
+
+/// Where a completion cursor sits in a `.vyx` template. `kind` is `"tag"` (a
+/// tag name), `"attr"` (an attribute name on `tag`), `"event"` (after `@`), or
+/// `""` where the editor's forward map answers: the script, an interpolation, a
+/// value, text. `from` is the 1-based column where the typed word starts.
+type VyxCursor = { kind: String, tag: String, prefix: String, from: Int64 }
+
+gen fn vyxNoCursor() -> VyxCursor {
+    return VyxCursor { kind: "", tag: "", prefix: "", from: 0 }
+}
+
+/// True for the first byte of a UTF-8 character.
+gen fn vyxCharStart(b: UInt8) -> Bool {
+    return b < '\x80' || b >= '\xc0'
+}
+
+/// The byte offset of 1-based `line` and `col` in `ba`, `col` counting
+/// characters; -1 when the text has no such position.
+gen fn vyxOffsetAt(ba: Array<UInt8>, line: Int64, col: Int64) -> Int64 {
+    let mut l = 1
+    let mut c = 1
+    let mut i = 0
+    while i < ba.length {
+        if vyxCharStart(ba[i]) {
+            if l == line && c == col {
+                return i
+            }
+            if ba[i] == '\n' {
+                l = l + 1
+                c = 1
+            } else {
+                c = c + 1
+            }
+        }
+        i = i + 1
+    }
+    if l == line && c == col {
+        return ba.length
+    }
+    return 0 - 1
+}
+
+/// The 1-based character column of byte `at` in `ba`.
+gen fn vyxCharColAt(ba: Array<UInt8>, at: Int64) -> Int64 {
+    let mut s = at
+    while s > 0 && ba[s - 1] != '\n' {
+        s = s - 1
+    }
+    let mut c = 1
+    while s < at {
+        if vyxCharStart(ba[s]) {
+            c = c + 1
+        }
+        s = s + 1
+    }
+    return c
+}
+
+/// Whether byte `at` is inside the `<script>` body. A section never closed
+/// owns everything after its open tag.
+gen fn vyxInScript(ba: Array<UInt8>, at: Int64) -> Bool {
+    let s = vyxSection(ba, "script", true)
+    if s.found {
+        return at >= s.start && at <= s.end
+    }
+    return s.openAt >= 0 && at > s.openAt
+}
+
+/// Whether byte `at` is inside a `{{ ... }}` interpolation.
+gen fn vyxInMustache(ba: Array<UInt8>, at: Int64) -> Bool {
+    let mut open = 0 - 1
+    let mut close = 0 - 1
+    let mut i = 0
+    while i + 1 < at {
+        if ba[i] == '{' && ba[i + 1] == '{' {
+            open = i
+        } else if ba[i] == '}' && ba[i + 1] == '}' {
+            close = i
+        }
+        i = i + 1
+    }
+    return open >= 0 && open > close
+}
+
+/// The `<` of the element open tag that encloses byte `at`, or -1 in text, a
+/// close tag or a comment. A `>` inside a quoted value closes nothing, and an
+/// HTML comment is skipped whole, so `don't` in one opens no quote.
+gen fn vyxEnclosingOpenTag(ba: Array<UInt8>, at: Int64) -> Int64 {
+    let mut inTag = 0 - 1
+    let mut isOpen = false
+    let mut quote: UInt8 = '\0'
+    let mut i = 0
+    while i < at {
+        let c = ba[i]
+        if inTag < 0 {
+            if c == '<' {
+                if i + 3 < ba.length && ba[i + 1] == '!' && ba[i + 2] == '-' && ba[i + 3] == '-' {
+                    let mut j = i + 4
+                    while j + 2 < at && (ba[j] == '-' && ba[j + 1] == '-' && ba[j + 2] == '>') == false {
+                        j = j + 1
+                    }
+                    i = if j + 2 < at { j + 3 } else { at }
+                    continue
+                }
+                let next = if i + 1 < ba.length { ba[i + 1] } else { '\0' }
+                isOpen = next != '/' && next != '!'
+                inTag = i
+            }
+        } else if quote != '\0' {
+            if c == quote {
+                quote = '\0'
+            }
+        } else if c == '"' || c == '\'' {
+            quote = c
+        } else if c == '>' {
+            inTag = 0 - 1
+        }
+        i = i + 1
+    }
+    return if inTag >= 0 && isOpen { inTag } else { 0 - 1 }
+}
+
+/// Classifies a cursor inside the open tag whose `<` is at `lt`.
+gen fn vyxCursorInTag(ba: Array<UInt8>, lt: Int64, at: Int64) -> VyxCursor {
+    let nameStart = lt + 1
+    let mut i = nameStart
+    while i < at && vyxIsWs(ba[i]) == false && ba[i] != '/' && ba[i] != '>' {
+        i = i + 1
+    }
+    let tag = vyxSlice(ba, nameStart, i)
+    if i >= at {
+        return VyxCursor { kind: "tag", tag: "", prefix: tag, from: vyxCharColAt(ba, nameStart) }
+    }
+    let mut quote: UInt8 = '\0'
+    // A word ends at whitespace, `=` or `/`; a quoted value is no word. Just
+    // past a closed value (`class="x"|`) no name completes: its edit would
+    // delete the value.
+    let mut wordStart = i
+    let mut closedValue = false
+    let mut j = i
+    while j < at {
+        let c = ba[j]
+        if quote != '\0' {
+            if c == quote {
+                quote = '\0'
+                closedValue = true
+            }
+        } else {
+            closedValue = false
+            if c == '"' || c == '\'' {
+                quote = c
+                wordStart = j + 1
+            } else if vyxIsWs(c) || c == '=' || c == '/' {
+                wordStart = j + 1
+            } else if wordStart > j {
+                wordStart = j
+            }
+        }
+        j = j + 1
+    }
+    if quote != '\0' || closedValue {
+        return vyxNoCursor()
+    }
+    let prefix = vyxSlice(ba, wordStart, at)
+    let kind = if prefix.startsWith("@") { "event" } else { "attr" }
+    return VyxCursor { kind: kind, tag: tag, prefix: prefix, from: vyxCharColAt(ba, wordStart) }
+}
+
+/// Classifies the cursor at 1-based `line` and `col` of `.vyx` source `src`.
+gen fn vyxCursorAt(src: String, line: Int64, col: Int64) -> VyxCursor {
+    let ba = bytes(src)
+    let at = vyxOffsetAt(ba, line, col)
+    if at < 0 || vyxInScript(ba, at) || vyxInMustache(ba, at) {
+        return vyxNoCursor()
+    }
+    let lt = vyxEnclosingOpenTag(ba, at)
+    if lt < 0 {
+        return vyxNoCursor()
+    }
+    return vyxCursorInTag(ba, lt, at)
+}
+
+/// The template directives, each with its editor detail.
+gen fn vyxDirectives() -> Array<Array<String>> {
+    return [
+        ["v-if", "conditional render"],
+        ["v-else-if", "conditional render (chained)"],
+        ["v-else", "conditional render (fallback)"],
+        ["v-for", "list render"],
+        ["v-html", "raw inner HTML"],
+        [":key", "keyed-list identity"],
+        [":", "dynamic attribute (: prefix)"],
+        ["@", "event handler (@ prefix)"],
+    ]
+}
+
+/// The element names offered after `<`.
+gen fn vyxElementNames() -> Array<String> {
+    return ["div", "span", "p", "a", "ul", "ol", "li", "section", "header", "footer", "nav", "main", "article", "aside", "h1", "h2", "h3", "h4", "h5", "h6", "button", "input", "label", "select", "option", "textarea", "form", "img", "table", "thead", "tbody", "tr", "td", "th", "pre", "code", "strong", "em"]
+}
+
+/// The attributes offered on every element.
+gen fn vyxGlobalAttrs() -> Array<String> {
+    return ["id", "class", "style", "title", "hidden", "tabindex", "role", "lang", "dir", "draggable", "contenteditable", "spellcheck", "accesskey", "aria-label", "aria-hidden", "data-"]
+}
+
+/// The attributes element `tag` adds to the global ones.
+gen fn vyxElementAttrs(tag: String) -> Array<String> {
+    if tag == "a" {
+        return ["href", "target", "rel", "download"]
+    } else if tag == "input" {
+        return ["type", "value", "name", "placeholder", "checked", "disabled", "readonly", "required", "min", "max", "step", "pattern", "autocomplete"]
+    } else if tag == "textarea" {
+        return ["value", "placeholder", "rows", "cols", "disabled", "readonly", "required"]
+    } else if tag == "select" {
+        return ["value", "name", "disabled", "required", "multiple"]
+    } else if tag == "option" {
+        return ["value", "selected", "disabled"]
+    } else if tag == "button" {
+        return ["type", "disabled", "name", "value"]
+    } else if tag == "form" {
+        return ["action", "method", "novalidate"]
+    } else if tag == "label" {
+        return ["for"]
+    } else if tag == "img" {
+        return ["src", "alt", "width", "height", "loading"]
+    } else if tag == "video" || tag == "audio" {
+        return ["src", "controls", "autoplay", "loop", "muted", "preload"]
+    } else if tag == "source" {
+        return ["src", "type", "srcset", "media"]
+    } else if tag == "table" {
+        return ["summary"]
+    } else if tag == "td" || tag == "th" {
+        return ["colspan", "rowspan", "headers", "scope"]
+    } else if tag == "meta" {
+        return ["name", "content", "charset", "property"]
+    } else if tag == "link" {
+        return ["href", "rel", "type", "media"]
+    } else if tag == "script" {
+        return ["src", "type", "async", "defer"]
+    }
+    return []
+}
+
+/// The DOM events the runtime dispatches, offered after `@`.
+gen fn vyxEvents() -> Array<String> {
+    return ["click", "dblclick", "input", "change", "submit", "reset", "focus", "blur", "keydown", "keyup", "keypress", "mousedown", "mouseup", "mousemove", "mouseover", "mouseout", "mouseenter", "mouseleave", "contextmenu", "wheel", "scroll", "drag", "dragstart", "dragend", "dragover", "drop", "touchstart", "touchmove", "touchend", "pointerdown", "pointerup"]
+}
+
+/// One completion item as `vyrnCompleteVyx` writes it.
+gen fn vyxItem(label: String, kind: String, detail: String, from: Int64) -> Json {
+    return JObj([
+        JsonField { key: "label", value: JStr(label.copy()) },
+        JsonField { key: "kind", value: JStr(kind.copy()) },
+        JsonField { key: "detail", value: JStr(detail.copy()) },
+        JsonField { key: "from", value: JNum("\{from}") },
+    ])
+}
+
+/// Whether `s` starts with an ASCII capital, as a component tag does.
+gen fn vyxCapitalized(s: String) -> Bool {
+    let b = bytes(s)
+    return b.length > 0 && b[0] >= 'A' && b[0] <= 'Z'
+}
+
+/// Completion items at 1-based `line` and `col` of the `.vyx` at `path`: a
+/// tag name offers the capitalized sibling components and, for a lowercase
+/// prefix, element names; an attribute name offers a component's props or an
+/// element's attributes and the directives; `@` offers the DOM events. `root`
+/// is the directory the generator was pointed at and `path` the file, both
+/// spelled from the importer. Returns a JSON array of `{label, kind, detail,
+/// from}`, empty where the editor's forward map answers instead.
+export gen fn vyrnCompleteVyx(root: String, path: String, line: Int64, col: Int64) -> String {
+    let src = match readFile(path) {
+        Ok(s) => s,
+        Err(e) => "",
+    }
+    let cur = vyxCursorAt(src, line, col)
+    let dir = vyxDirOf(path)
+    let mut items: Array<Json> = []
+    if cur.kind == "tag" {
+        let pb = bytes(path)
+        let own = vyxSlice(pb, vyxFindLast(pb, bytes("/"), 0) + 1, pb.length)
+        let listed = match listDir(dir) {
+            Ok(ns) => ns,
+            Err(e) => [],
+        }
+        for name in listed {
+            if name.endsWith(".vyx") && vyxCapitalized(name) && name != own {
+                let nb = bytes(name)
+                items.push(vyxItem(vyxSlice(nb, 0, nb.length - 4), "class", "component", cur.from))
+            }
+        }
+        if vyxCapitalized(cur.prefix) == false {
+            for el in vyxElementNames() {
+                items.push(vyxItem(el, "keyword", "html element", cur.from))
+            }
+        }
+    } else if cur.kind == "event" {
+        for e in vyxEvents() {
+            items.push(vyxItem("@" + e, "event", "dom event", cur.from))
+        }
+    } else if cur.kind == "attr" && vyxCapitalized(cur.tag) {
+        let comp = match readFile(dir + "/" + cur.tag + ".vyx") {
+            Ok(s) => s,
+            Err(e) => "",
+        }
+        let cb = bytes(comp)
+        let sec = vyxSection(cb, "script", true)
+        if sec.found {
+            let sc = vyxParseScriptAt(cb, sec.start, sec.end, dir, cur.tag)
+            let mut k = 0
+            while k < sc.propNames.length {
+                let detail = "prop: " + sc.propTypes[k]
+                items.push(vyxItem(sc.propNames[k], "field", detail, cur.from))
+                items.push(vyxItem(":" + sc.propNames[k], "field", detail, cur.from))
+                k = k + 1
+            }
+        }
+    } else if cur.kind == "attr" {
+        for a in vyxGlobalAttrs() {
+            items.push(vyxItem(a, "property", "html attribute", cur.from))
+        }
+        for a in vyxElementAttrs(cur.tag) {
+            items.push(vyxItem(a, "property", "html attribute", cur.from))
+        }
+        for d in vyxDirectives() {
+            items.push(vyxItem(d[0], "keyword", d[1], cur.from))
+        }
+    }
+    return emit(JArr(items))
+}
+
+test "a cursor right after a closed value is no attribute-name slot" {
+    assertEq(vyxCursorAt("<div class=\"x\"", 1, 15).kind, "")
+    assertEq(vyxCursorAt("<div class=\"x\"/>", 1, 15).kind, "")
+    assertEq(vyxCursorAt("<div class=\"x\" ", 1, 16).kind, "attr")
+}
+
+test "an apostrophe inside an HTML comment opens no quote" {
+    let c = vyxCursorAt("<!-- don't panic -->\n<div ", 2, 6)
+    assertEq(c.kind, "attr")
+    assertEq(c.tag, "div")
+}
+
+test "a tag name, an event and the script classify apart" {
+    let src = "<script>\nlet a = 1\n</script>\n<template>\n<Bo\n<a @cl></a>\n</template>\n"
+    let t = vyxCursorAt(src, 5, 4)
+    assertEq(t.kind, "tag")
+    assertEq(t.prefix, "Bo")
+    assertEq(t.from, 2)
+    let e = vyxCursorAt(src, 6, 7)
+    assertEq(e.kind, "event")
+    assertEq(e.from, 4)
+    assertEq(vyxCursorAt(src, 2, 5).kind, "")
+}

@@ -356,6 +356,8 @@ pub struct Claim {
     pub line: usize,
     /// The specifier the generator was imported from; `None` for a local `gen fn`.
     pub module: Option<String>,
+    /// The first argument as the import spells it.
+    pub arg: String,
     /// The first argument resolved against `importer`: the file
     /// [`generator_input`] names, else a directory or a module path with the
     /// `.vyrn` that `resolve_spec` appends stripped.
@@ -369,6 +371,19 @@ impl Claim {
         let key = crate::origin::OriginMaps::norm_path_key;
         let (t, f) = (key(&self.target), key(file));
         f == t || f == format!("{t}.vyrn") || f.starts_with(&format!("{t}/"))
+    }
+
+    /// Spells a file the claim covers as the import would: [`Self::arg`], then
+    /// the file's path under the target. `None` for a file it does not cover.
+    pub fn spell(&self, file: &str) -> Option<String> {
+        let key = crate::origin::OriginMaps::norm_path_key;
+        let (t, f) = (key(&self.target), key(file));
+        if f == t {
+            return Some(self.arg.clone());
+        }
+        let under = f.strip_prefix(&format!("{t}/"))?;
+        let rest = file.get(file.len() - under.len()..)?;
+        Some(format!("{}/{rest}", self.arg))
     }
 }
 
@@ -408,6 +423,7 @@ pub fn claims(
             importer: importer.to_string(),
             line: imp.line,
             module: module_of(name),
+            arg: arg.clone(),
             target,
         });
     }
@@ -547,6 +563,11 @@ mod tests {
         assert!(!cs[0].covers("/p/routesx/index.vyx"));
         assert_eq!(cs[1].module, None);
         assert!(cs[1].covers("/p/users.tbl"));
+        assert_eq!(
+            cs[0].spell("/p/routes/Blog/a.vyx").as_deref(),
+            Some("./routes/Blog/a.vyx")
+        );
+        assert_eq!(cs[1].spell("/p/users.tbl").as_deref(), Some("./users.tbl"));
         assert!(!cs[1].covers("/p/users.tblx"));
     }
 

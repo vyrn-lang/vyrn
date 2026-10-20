@@ -43,3 +43,4 @@
 - [std/von](std/von.md) — VON, Vyrn Object Notation, Vyrn's literal grammar saved to a file.
 - [std/vyx](std/vyx.md) — The `.vyx` single-file component compiler, in comptime-pure Vyrn.
 - [std/vyx-hints](std/vyx-hints.md) — Accessibility, security and performance rules for `.vyx` components.
+- [std/vyx.editor](std/vyx.editor.md) — Editor support for the `.vyx` files `std/vyx` claims.

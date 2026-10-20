@@ -17,7 +17,6 @@ use vyrn_genwasm::engine;
 mod contracts;
 mod cost;
 mod rename;
-mod templates;
 
 use lsp_server::{Connection, Message, Notification, Request, Response};
 use lsp_types::notification::{
@@ -51,8 +50,6 @@ use vyrn_frontend::{
     references, resolve, scope_completions, string_context, string_literal_completions, Analysis,
     Completion, LocalKind, RefRange, SemKind, SemMods, SymbolKind,
 };
-
-use templates::VyxCursor;
 
 /// Whether the client asked for what each line costs ([`cost`]): its `costHints`
 /// initialization option, on when it sends none.
@@ -274,6 +271,7 @@ fn main() {
                 analyses: HashMap::new(),
                 input_owner: HashMap::new(),
                 input_ownerless: HashSet::new(),
+                input_claimant: RefCell::new(HashMap::new()),
                 synth_cache: RefCell::new(HashMap::new()),
                 css_cache: RefCell::new(HashMap::new()),
                 contract_cache: RefCell::new(HashMap::new()),
@@ -308,6 +306,10 @@ struct Server {
     /// Generator inputs (slash path) whose owner discovery found no root. Cleared
     /// whole when a `.vyrn` opens or changes, and per file when the input opens.
     input_ownerless: HashSet<String>,
+    /// A generator input (slash path) -> the claimant [`input_claim`] last found
+    /// by the walk, so a keystroke reads one `.vyrn` file, not the walk's. Each
+    /// use checks the claim again; cleared whole when a `.vyrn` opens or changes.
+    input_claimant: RefCell<HashMap<String, Url>>,
     /// Per owner root, its generated modules and their analyses, which input
     /// requests reuse. `RefCell` because request handlers hold `&Server`.
     synth_cache: RefCell<HashMap<Url, OwnerSynth>>,
@@ -369,7 +371,7 @@ fn handle_initialize(connection: &Connection) -> Result<Vec<String>, ()> {
         hover_provider: Some(true.into()),
         definition_provider: Some(OneOf::Left(true)),
         completion_provider: Some(CompletionOptions {
-            // `.` for members; the rest for `.vyx` template completion.
+            // `.` for members; the rest for a generator input's own grammar.
             trigger_characters: Some(
                 [".", "<", "@", ":", "-", " ", "\""]
                     .iter()
@@ -1138,7 +1140,7 @@ fn handle_completion(server: &Server, params: serde_json::Value) -> Option<Compl
     let raw = doc_text(server, uri)?;
     let (line, col) = to_frontend(&raw, &p.text_document_position.position);
     if !is_vyrn_uri(uri) {
-        return vyx_completion(server, uri, line, col);
+        return input_completion(server, uri, line, col);
     }
     let (analysis, _uri) = lookup(server, uri)?;
     // In a string literal: the class alphabet for a sequence type (`Tw`), else
@@ -1170,194 +1172,109 @@ fn handle_completion(server: &Server, params: serde_json::Value) -> Option<Compl
     Some(CompletionResponse::Array(items))
 }
 
-/// Completion in a `.vyx`: a structural position is answered from the template
-/// vocabularies and sibling components; any other goes through the forward map.
-fn vyx_completion(
+/// Completion in a generator input. The generator module that claims the file
+/// answers through `vyrnComplete` where its grammar offers a vocabulary;
+/// anywhere else the cursor goes through the forward map.
+fn input_completion(
     server: &Server,
     uri: &Url,
     line: usize,
     col: usize,
 ) -> Option<CompletionResponse> {
     let raw = doc_text(server, uri)?;
-    match templates::classify(&raw, line, col) {
-        VyxCursor::TagName { prefix, start_col } => Some(tag_name_completion(
-            uri, &raw, &prefix, line, start_col, col,
-        )),
-        VyxCursor::AttrName {
-            tag,
-            prefix: _,
-            is_component,
-            start_col,
-        } => Some(attr_name_completion(
-            uri,
-            &raw,
-            &tag,
-            is_component,
-            line,
-            start_col,
-            col,
-        )),
-        VyxCursor::EventName {
-            prefix: _,
-            start_col,
-        } => Some(event_name_completion(&raw, line, start_col, col)),
-        VyxCursor::ClassValue {
-            token: _,
-            start_col,
-        } => {
-            // The Tw alphabet comes from the generated module; an unthemed `.vyx`
-            // gets nothing.
-            let fwd = input_forward(server, uri, line, col)?;
-            let cls = class_completions(
-                &fwd.synth.analysis,
-                &fwd.synth.gen_source,
-                fwd.line,
-                fwd.col,
-            )?;
-            Some(class_token_response(&raw, line, start_col, col, cls))
-        }
-        VyxCursor::Other => {
-            // Contract members must not depend on the forward map: a blank line
-            // at module scope has no origin, and that is where they are offered.
-            let mut members = contract_completion_items(server, uri, line, col);
-            let Some(fwd) = input_forward(server, uri, line, col) else {
-                return (!members.is_empty()).then_some(CompletionResponse::Array(members));
-            };
-            let gen = &fwd.synth.gen_source;
-            if string_context(gen, fwd.line, fwd.col) {
-                if let Some(cls) = class_completions(&fwd.synth.analysis, gen, fwd.line, fwd.col) {
-                    return Some(class_completion_response(&raw, line, col, cls));
-                }
-                let items = string_literal_completions(&fwd.synth.analysis, gen, fwd.line, fwd.col)
-                    .into_iter()
-                    .map(to_completion_item)
-                    .collect();
-                return Some(CompletionResponse::Array(items));
-            }
-            let items = if member_context(gen, fwd.line, fwd.col) {
-                member_completions(&fwd.synth.analysis, fwd.line, fwd.col)
-            } else {
-                scope_completions(&fwd.synth.analysis, fwd.line)
-            };
-            let mut out: Vec<CompletionItem> = items.into_iter().map(to_completion_item).collect();
-            members.append(&mut out);
-            Some(CompletionResponse::Array(members))
-        }
+    let items = generator_completion(server, uri, &raw, line, col);
+    if !items.is_empty() {
+        return Some(CompletionResponse::Array(items));
     }
+    // Contract members must not depend on the forward map: a blank line at
+    // module scope has no origin, and that is where they are offered.
+    let mut members = contract_completion_items(server, uri, line, col);
+    let Some(fwd) = input_forward(server, uri, line, col) else {
+        return (!members.is_empty()).then_some(CompletionResponse::Array(members));
+    };
+    let gen = &fwd.synth.gen_source;
+    if string_context(gen, fwd.line, fwd.col) {
+        // A class token: the alphabet of the `cls(..)` call it maps into.
+        if let Some(cls) = class_completions(&fwd.synth.analysis, gen, fwd.line, fwd.col) {
+            return Some(class_completion_response(&raw, line, col, cls));
+        }
+        let items = string_literal_completions(&fwd.synth.analysis, gen, fwd.line, fwd.col)
+            .into_iter()
+            .map(to_completion_item)
+            .collect();
+        return Some(CompletionResponse::Array(items));
+    }
+    let items = if member_context(gen, fwd.line, fwd.col) {
+        member_completions(&fwd.synth.analysis, fwd.line, fwd.col)
+    } else {
+        scope_completions(&fwd.synth.analysis, fwd.line)
+    };
+    members.extend(items.into_iter().map(to_completion_item));
+    Some(CompletionResponse::Array(members))
 }
 
-/// Component tags (sibling PascalCase `.vyx`) plus, for a lowercase prefix, the
-/// document's plain symbols. Each item replaces the partial tag name.
-fn tag_name_completion(
+/// The items the claiming generator module offers at `line`, `col` of the
+/// input `uri`, through the `gen fn vyrnComplete*` of its editor companion
+/// ([`vyrn_frontend::loader::call_generator`]). Empty when no module claims the
+/// file, no companion declares such a function, or the answer is not a JSON
+/// array.
+///
+/// The call is `(root, path, line, col)`: `root` the claim's argument as the
+/// import spells it, so the function may read beside the input, and `path` the
+/// input spelled from the same importer. Each item is `{"label", "kind",
+/// "detail", "from"}`, `from` the 1-based column the label replaces from.
+fn generator_completion(
+    server: &Server,
     uri: &Url,
     raw: &str,
-    prefix: &str,
     line: usize,
-    start_col: usize,
     col: usize,
-) -> CompletionResponse {
-    let range = replace_range(raw, line, start_col, col);
-    let mut items: Vec<CompletionItem> = Vec::new();
-    if let Some((dir, self_name)) = vyx_dir_and_name(uri) {
-        for name in templates::sibling_components(&dir, &self_name) {
-            items.push(edit_item(
-                &name,
-                CompletionItemKind::CLASS,
-                "component",
-                range,
-            ));
-        }
-    }
-    if !prefix
-        .chars()
-        .next()
-        .is_some_and(|c| c.is_ascii_uppercase())
-    {
-        for el in HTML_ELEMENTS {
-            items.push(edit_item(
-                el,
-                CompletionItemKind::KEYWORD,
-                "html element",
-                range,
-            ));
-        }
-    }
-    CompletionResponse::Array(items)
-}
-
-/// Attribute-name completion: a component tag offers its declared props; an
-/// element offers global + per-element HTML attributes and the `v-*` directives.
-fn attr_name_completion(
-    uri: &Url,
-    raw: &str,
-    tag: &str,
-    is_component: bool,
-    line: usize,
-    start_col: usize,
-    col: usize,
-) -> CompletionResponse {
-    let range = replace_range(raw, line, start_col, col);
-    let mut items: Vec<CompletionItem> = Vec::new();
-    if is_component {
-        if let Some((dir, _)) = vyx_dir_and_name(uri) {
-            let path = dir.join(format!("{tag}.vyx"));
-            for prop in templates::component_props(&path) {
-                let label = prop.name.clone();
-                let detail = format!("prop: {}", prop.ty);
-                items.push(edit_item(&label, CompletionItemKind::FIELD, &detail, range));
-                items.push(edit_item(
-                    &format!(":{label}"),
-                    CompletionItemKind::FIELD,
-                    &detail,
-                    range,
-                ));
-            }
-        }
-        return CompletionResponse::Array(items);
-    }
-    for a in templates::GLOBAL_ATTRS {
-        items.push(edit_item(
-            a,
-            CompletionItemKind::PROPERTY,
-            "html attribute",
-            range,
-        ));
-    }
-    for a in templates::element_attrs(tag) {
-        items.push(edit_item(
-            a,
-            CompletionItemKind::PROPERTY,
-            "html attribute",
-            range,
-        ));
-    }
-    for (d, detail) in templates::DIRECTIVES {
-        items.push(edit_item(d, CompletionItemKind::KEYWORD, detail, range));
-    }
-    CompletionResponse::Array(items)
-}
-
-/// `@event` completion: the DOM events the runtime dispatches.
-fn event_name_completion(
-    raw: &str,
-    line: usize,
-    start_col: usize,
-    col: usize,
-) -> CompletionResponse {
-    // Replace from the `@`, which the inserted label carries.
-    let range = replace_range(raw, line, start_col, col);
-    let items = templates::EVENTS
-        .iter()
-        .map(|e| {
-            edit_item(
-                &format!("@{e}"),
-                CompletionItemKind::EVENT,
-                "dom event",
-                range,
-            )
-        })
-        .collect();
-    CompletionResponse::Array(items)
+) -> Vec<CompletionItem> {
+    let call = || -> Option<String> {
+        let (root, claim, file) = input_claim(server, uri)?;
+        let overlays = overlays_of(server);
+        let (opts, resolver, importer, _) = load_context(&server.session, &root, &overlays)?;
+        use vyrn_frontend::consteval::ConstVal;
+        let args = [
+            ConstVal::Str(claim.arg.clone()),
+            ConstVal::Str(claim.spell(&file)?),
+            ConstVal::Int(line as i64),
+            ConstVal::Int(col as i64),
+        ];
+        let (module, engine) = (claim.module.as_deref()?, engine());
+        let out = vyrn_frontend::loader::call_generator(
+            &importer,
+            module,
+            "vyrnComplete",
+            &args,
+            false,
+            &opts,
+            &resolver,
+            Some(&*engine),
+        )?;
+        out.ok()
+    };
+    let Some(out) = call() else {
+        return Vec::new();
+    };
+    let Ok(serde_json::Value::Array(items)) = serde_json::from_str(&out) else {
+        return Vec::new();
+    };
+    let item = |it: &serde_json::Value| {
+        let kind = match it.get("kind")?.as_str()? {
+            "class" => CompletionItemKind::CLASS,
+            "field" => CompletionItemKind::FIELD,
+            "property" => CompletionItemKind::PROPERTY,
+            "keyword" => CompletionItemKind::KEYWORD,
+            "event" => CompletionItemKind::EVENT,
+            _ => CompletionItemKind::TEXT,
+        };
+        let from = it.get("from")?.as_u64()? as usize;
+        let detail = it.get("detail").and_then(|d| d.as_str()).unwrap_or("");
+        let range = replace_range(raw, line, from, col);
+        Some(edit_item(it.get("label")?.as_str()?, kind, detail, range))
+    };
+    items.iter().filter_map(item).collect()
 }
 
 /// Class-token completions that replace the typed token.
@@ -1459,14 +1376,6 @@ fn vyx_dir_and_name(uri: &Url) -> Option<(std::path::PathBuf, String)> {
     let name = path.file_stem()?.to_string_lossy().into_owned();
     Some((dir, name))
 }
-
-/// Common HTML element names for a lowercase tag.
-const HTML_ELEMENTS: &[&str] = &[
-    "div", "span", "p", "a", "ul", "ol", "li", "section", "header", "footer", "nav", "main",
-    "article", "aside", "h1", "h2", "h3", "h4", "h5", "h6", "button", "input", "label", "select",
-    "option", "textarea", "form", "img", "table", "thead", "tbody", "tr", "td", "th", "pre",
-    "code", "strong", "em",
-];
 
 fn to_completion_item(c: vyrn_frontend::Completion) -> CompletionItem {
     CompletionItem {
@@ -2649,7 +2558,7 @@ fn probe_roots(
     claims: impl Fn(&Analysis) -> bool,
 ) -> Option<(Url, Analysis)> {
     let overlays = overlays_of(server);
-    for cand in claimants(server, path) {
+    for (cand, _) in claimants(server, path) {
         let text = match doc_text(server, &cand) {
             Some(t) => t,
             None => continue,
@@ -2872,36 +2781,70 @@ fn handle_rename(server: &Server, params: serde_json::Value) -> Result<Workspace
 }
 
 /// The `.vyrn` files among the [`MAX_OWNER_CANDIDATES`] nearest `path` whose
-/// generator imports claim it ([`vyrn_frontend::audience::Claim`]), in path
+/// generator imports claim it, each with its first claim on `path`, in path
 /// order. Only the imports are parsed, so a file nothing claims costs no
 /// analysis.
-fn claimants(server: &Server, path: &str) -> Vec<Url> {
+fn claimants(server: &Server, path: &str) -> Vec<(Url, vyrn_frontend::audience::Claim)> {
     let file = std::path::Path::new(path);
-    let Some(dir) = file.parent() else {
-        return Vec::new();
-    };
-    let Some(opts) = Url::from_file_path(file)
-        .ok()
-        .and_then(|u| load_context(&server.session, &u, &HashMap::new()))
-        .map(|(opts, ..)| opts)
-    else {
+    let (Some(dir), Some(opts)) = (file.parent(), input_load_options(server, path)) else {
         return Vec::new();
     };
     let mut files = Vec::new();
     collect_vyrn(dir, &mut files);
     files.sort();
-    let claims = |cand: &Url| -> Option<bool> {
-        let importer = uri_path(cand)?;
-        let tokens = vyrn_frontend::lexer::lex(&doc_text(server, cand)?).ok()?;
-        let program = vyrn_frontend::parser::parse_accum(tokens).0;
-        let claims = vyrn_frontend::audience::claims(&importer, &program, &opts);
-        Some(claims.iter().any(|c| c.covers(path)))
-    };
     files
         .into_iter()
         .filter_map(|p| Url::from_file_path(p).ok())
-        .filter(|cand| claims(cand) == Some(true))
+        .filter_map(|cand| Some((cand.clone(), claim_on(server, &opts, &cand, path)?)))
         .collect()
+}
+
+/// The load options a generator input at `path` is read under: its project's.
+fn input_load_options(server: &Server, path: &str) -> Option<vyrn_frontend::loader::LoadOptions> {
+    let uri = Url::from_file_path(path).ok()?;
+    load_context(&server.session, &uri, &HashMap::new()).map(|(opts, ..)| opts)
+}
+
+/// The first claim the generator imports of `cand` make on `path`.
+fn claim_on(
+    server: &Server,
+    opts: &vyrn_frontend::loader::LoadOptions,
+    cand: &Url,
+    path: &str,
+) -> Option<vyrn_frontend::audience::Claim> {
+    let importer = uri_path(cand)?;
+    let tokens = vyrn_frontend::lexer::lex(&doc_text(server, cand)?).ok()?;
+    let program = vyrn_frontend::parser::parse_accum(tokens).0;
+    (vyrn_frontend::audience::claims(&importer, &program, opts).into_iter())
+        .find(|c| c.covers(path))
+}
+
+/// The claim a generator input `uri` is read through, with the module that
+/// wrote it and the input's path as the disk spells it: the owner's claim when
+/// discovery found one, else the claimant the walk last found, else the first
+/// claimant's. The first two read one file.
+fn input_claim(
+    server: &Server,
+    uri: &Url,
+) -> Option<(Url, vyrn_frontend::audience::Claim, String)> {
+    let path = uri_path(uri)?;
+    let file = (uri.to_file_path().ok()?.to_string_lossy()).replace('\\', "/");
+    let held = (server.input_owner.get(&path).cloned())
+        .or_else(|| server.input_claimant.borrow().get(&path).cloned());
+    let held = held.and_then(|root| {
+        let opts = input_load_options(server, &path)?;
+        let claim = claim_on(server, &opts, &root, &path)?;
+        Some((root, claim))
+    });
+    let (root, claim) = match held {
+        Some(h) => h,
+        None => {
+            let found = claimants(server, &path).into_iter().next()?;
+            (server.input_claimant.borrow_mut()).insert(path, found.0.clone());
+            found
+        }
+    };
+    Some((root, claim, file))
 }
 
 /// The `.vyrn` files nearest `dir`, at most [`MAX_OWNER_CANDIDATES`]: `dir`'s
@@ -3009,8 +2952,9 @@ fn publish_remapped(connection: &Connection, server: &Server, analysis: &Analysi
 /// its owner, and an input without a known owner through discovery.
 fn refresh_document(connection: &Connection, server: &mut Server, uri: &Url) {
     if is_vyrn_uri(uri) {
-        // A `.vyrn` change may have made an owner.
+        // A `.vyrn` change may have made an owner or a nearer claimant.
         server.input_ownerless.clear();
+        server.input_claimant.get_mut().clear();
         reanalyze_root(connection, server, uri);
     } else if let Some(owner) = uri_path(uri)
         .and_then(|p| server.input_owner.get(&p))
@@ -3031,9 +2975,14 @@ fn handle_notification(connection: &Connection, server: &mut Server, notif: Noti
             let uri = params.text_document.uri.clone();
             let text = params.text_document.text;
             server.docs.insert(uri.clone(), text.clone());
-            // Opening a generator input retries owner discovery.
+            // Opening a generator input retries owner discovery, and checks and
+            // compiles its claimant's editor companion, which the first
+            // completion would otherwise wait for.
             if let Some(p) = uri_path(&uri) {
                 server.input_ownerless.remove(&p);
+            }
+            if !is_vyrn_uri(&uri) {
+                generator_completion(server, &uri, &text, 1, 1);
             }
             return Owed::Analyze(uri);
         }
