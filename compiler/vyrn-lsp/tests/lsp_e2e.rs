@@ -2996,8 +2996,8 @@ const STYLED_VYX: &str = "<script>\n\
     <div class=\"book-card\"><span class=\"no-style\">{{ x }}</span><p class=\"bg-brand-500\">{{ x }}</p></div>\n\
     </template>\n";
 
-/// Declares the app's stylesheet; discovery reads only its
-/// `stylesheet` line.
+/// Links the app's stylesheet, which the editor does not read: the
+/// manifest's `stylesheets` key names it.
 const STYLED_LAYOUT: &str = "<script>\nhead {\n    stylesheet \"/app.css\"\n}\n</script>\n\
     <template>\n<div><slot/></div>\n</template>\n";
 
@@ -3008,7 +3008,7 @@ const STYLED_CSS: &str = ".book-card-x { color: red; }\n\
 li.list .book-card {\n  padding: 2px;\n}\n\
 .book-card:hover { color: green; }\n";
 
-/// Undeclared, so ignored while a declared stylesheet exists.
+/// No glob of the manifest names it, so its rules are never shown.
 const STYLED_DECOY_CSS: &str = ".book-card { content: \"DECOYRULE\"; }\n";
 
 fn styled_scratch() -> std::path::PathBuf {
@@ -3022,14 +3022,21 @@ fn styled_scratch() -> std::path::PathBuf {
     std::fs::write(dir.join("routes/layout.vyx"), STYLED_LAYOUT).unwrap();
     std::fs::write(dir.join("app.vyrn"), STYLED_APP).unwrap();
     std::fs::write(dir.join("theme.json"), STYLED_THEME).unwrap();
-    std::fs::write(dir.join("vyrn.json"), "{ \"name\": \"s\" }").unwrap();
+    std::fs::write(
+        dir.join("vyrn.json"),
+        "{ \"name\": \"s\", \"stylesheets\": [\"**/app*.css\"] }",
+    )
+    .unwrap();
     std::fs::write(dir.join("public/app.css"), STYLED_CSS).unwrap();
     std::fs::write(dir.join("public/decoy.css"), STYLED_DECOY_CSS).unwrap();
     dir
 }
 
 fn open_styled() -> (LspClient, String) {
-    let dir = styled_scratch();
+    open_styled_in(styled_scratch())
+}
+
+fn open_styled_in(dir: std::path::PathBuf) -> (LspClient, String) {
     let mut client = spawn_client();
     let app_uri = file_uri(&dir.join("app.vyrn"));
     did_open(&mut client, &app_uri, "vyrn", STYLED_APP);
@@ -3072,6 +3079,18 @@ fn safelisted_hover_shows_the_apps_own_css() {
         !v.contains("DECOYRULE"),
         "undeclared stylesheet not consulted: {v}"
     );
+    let _ = client.child.kill();
+}
+
+/// Without a `stylesheets` key the editor reads no CSS of the app's.
+#[test]
+fn safelisted_hover_without_the_key_shows_no_css() {
+    let dir = styled_scratch();
+    std::fs::write(dir.join("vyrn.json"), "{ \"name\": \"s\" }").unwrap();
+    let (mut client, uri) = open_styled_in(dir);
+    let (l, c) = pos_after(STYLED_VYX, "book-car");
+    let v = hover_value(&mut client, &uri, l, c).expect("hover on safelisted class");
+    assert_eq!(v, "**`book-card`** — safelisted (app-styled)", "{v}");
     let _ = client.child.kill();
 }
 

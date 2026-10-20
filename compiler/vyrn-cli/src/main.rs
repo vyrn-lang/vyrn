@@ -2242,10 +2242,10 @@ fn fmt_cmd(call: &Call) -> Outcome {
     let mut would_change: Vec<String> = Vec::new();
     let mut written = 0usize;
     for path in &targets {
-        // The formatter would lex a `.vyx` template as Vyrn tokens and put spaces
-        // inside every tag and sentence, so it skips the file.
-        if path.ends_with(".vyx") {
-            eprintln!("note: skipping {path}: `vyrn fmt` cannot format a .vyx template yet");
+        // The formatter lexes Vyrn: another grammar, such as a generator input's,
+        // would gain spaces inside every tag and sentence.
+        if !path.ends_with(".vyrn") && !path.ends_with(".von") {
+            eprintln!("note: skipping {path}: `vyrn fmt` formats only .vyrn and .von files");
             continue;
         }
         let source = match std::fs::read_to_string(path) {

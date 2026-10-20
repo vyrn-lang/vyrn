@@ -314,7 +314,7 @@ struct Server {
     /// requests reuse. `RefCell` because request handlers hold `&Server`.
     synth_cache: RefCell<HashMap<Url, OwnerSynth>>,
     /// Per app root, its stylesheets for a safelisted-class hover. Re-read only
-    /// when the signature (files' len+mtime, app-root and `public/` mtimes) moves.
+    /// when the signature of the files the manifest's globs name moves.
     css_cache: RefCell<HashMap<std::path::PathBuf, CssIndex>>,
     /// Per app root, its roles and the contracts they resolve to.
     contract_cache: RefCell<HashMap<std::path::PathBuf, contracts::ContractIndex>>,
@@ -912,41 +912,26 @@ fn import_target_file(
     dir_target(dir)
 }
 
-/// A jump target for a directory a generator consumes: a same-named or `index`
-/// entry file, else the first `.vyx`/`.vyrn` inside, else the directory itself.
-/// `None` when `dir` is not a directory.
+/// A jump target for a directory a generator consumes, which claims every file
+/// in it: the file named like the directory, else the one named `index`, else
+/// the first by name, of any extension; the directory itself when it holds no
+/// file. `None` when `dir` is not a directory.
 fn dir_target(dir: &str) -> Option<String> {
     let p = std::path::Path::new(dir);
-    if !p.is_dir() {
-        return None;
-    }
-    let name = p
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    for cand in [
-        format!("{name}.vyx"),
-        format!("{name}.vyrn"),
-        "index.vyx".into(),
-        "index.vyrn".into(),
-    ] {
-        let f = p.join(&cand);
-        if f.is_file() {
-            return Some(f.to_string_lossy().replace('\\', "/"));
-        }
-    }
-    if let Ok(rd) = std::fs::read_dir(p) {
-        let mut names: Vec<String> = rd
-            .filter_map(|e| e.ok())
-            .map(|e| e.path().to_string_lossy().replace('\\', "/"))
-            .filter(|s| s.ends_with(".vyx") || s.ends_with(".vyrn"))
-            .collect();
-        names.sort();
-        if let Some(f) = names.into_iter().next() {
-            return Some(f);
-        }
-    }
-    Some(dir.to_string())
+    let mut files: Vec<std::path::PathBuf> = (std::fs::read_dir(p).ok()?.flatten())
+        .map(|e| e.path())
+        .filter(|f| f.is_file())
+        .collect();
+    files.sort();
+    let name = p.file_name().map(|n| n.to_string_lossy().into_owned());
+    let stem = |f: &&std::path::PathBuf| f.file_stem().map(|s| s.to_string_lossy().into_owned());
+    let pick = (files.iter().find(|f| stem(f) == name))
+        .or_else(|| files.iter().find(|f| stem(f).as_deref() == Some("index")))
+        .or(files.first());
+    Some(pick.map_or_else(
+        || dir.to_string(),
+        |f| f.to_string_lossy().replace('\\', "/"),
+    ))
 }
 
 /// The scope-aware references of the binding under the cursor; the definition
@@ -3076,8 +3061,8 @@ fn line_utf16_len(source: &str, line_idx: usize) -> u32 {
 const MAX_CSS_RULES: usize = 3;
 /// Stop appending rules once the shown CSS reaches this many lines.
 const MAX_CSS_LINES: usize = 40;
-/// The most `.vyx` files scanned for `stylesheet "..."` declarations.
-const MAX_VYX_SCAN: usize = 64;
+/// The most stylesheets one manifest's globs name.
+const MAX_STYLESHEETS: usize = 64;
 
 /// `hover` with the app's CSS rules for the safelisted `class` appended.
 fn with_app_css(server: &Server, uri: &Url, hover: String, class: &str) -> String {
@@ -3126,123 +3111,111 @@ fn app_css_rules(
     out
 }
 
-/// The app's stylesheets (path, text), cached per root until [`css_sig`] moves.
+/// The app's stylesheets (path, text), cached per root until [`css_sig`] of the
+/// files the globs name moves.
 fn app_stylesheets(server: &Server, root: &std::path::Path) -> Vec<(std::path::PathBuf, String)> {
+    let paths = app_stylesheet_paths(root);
+    let sig = css_sig(paths.iter().map(|p| p.as_path()));
     let mut cache = server.css_cache.borrow_mut();
-    if let Some(idx) = cache.get(root) {
-        if idx.sig == css_sig(root, idx.files.iter().map(|(p, _)| p.as_path())) {
-            return idx.files.clone();
-        }
+    if let Some(idx) = cache.get(root).filter(|idx| idx.sig == sig) {
+        return idx.files.clone();
     }
-    let files: Vec<(std::path::PathBuf, String)> = discover_stylesheets(root)
-        .into_iter()
+    let files: Vec<(std::path::PathBuf, String)> = (paths.into_iter())
         .filter_map(|p| std::fs::read_to_string(&p).ok().map(|t| (p, t)))
         .collect();
-    let sig = css_sig(root, files.iter().map(|(p, _)| p.as_path()));
-    cache.insert(
-        root.to_path_buf(),
-        CssIndex {
-            sig,
-            files: files.clone(),
-        },
-    );
+    let index = CssIndex {
+        sig,
+        files: files.clone(),
+    };
+    cache.insert(root.to_path_buf(), index);
     files
 }
 
-/// A change signature for a root's stylesheets from `stat` alone: each file's
-/// path, length and mtime, plus the mtimes of the root and `public/`, which move
-/// when a stylesheet is added or removed.
-fn css_sig<'a>(root: &std::path::Path, files: impl Iterator<Item = &'a std::path::Path>) -> u64 {
+/// A change signature for a set of stylesheets from `stat` alone: each file's
+/// path, length and mtime.
+fn css_sig<'a>(files: impl Iterator<Item = &'a std::path::Path>) -> u64 {
     let mut h = std::collections::hash_map::DefaultHasher::new();
-    fn stamp(p: &std::path::Path, h: &mut std::collections::hash_map::DefaultHasher) {
-        p.to_string_lossy().hash(h);
-        if let Ok(m) = std::fs::metadata(p) {
-            m.len().hash(h);
+    for f in files {
+        f.to_string_lossy().hash(&mut h);
+        if let Ok(m) = std::fs::metadata(f) {
+            m.len().hash(&mut h);
             if let Ok(t) = m.modified() {
                 if let Ok(d) = t.duration_since(std::time::UNIX_EPOCH) {
-                    d.as_nanos().hash(h);
+                    d.as_nanos().hash(&mut h);
                 }
             }
         }
     }
-    stamp(root, &mut h);
-    stamp(&root.join("public"), &mut h);
-    for f in files {
-        stamp(f, &mut h);
-    }
     h.finish()
 }
 
-/// Stylesheet files for an app root, in priority order:
-/// 1. Declared: every `stylesheet "..."` URL in the app's `.vyx` files, served
-///    from `<root>/public/`, else `<root>/`.
-/// 2. Only if none of those exist: every `*.css` directly under `<root>/public/`
-///    then `<root>/`.
-///
-/// Deduplicated; existing files only.
-fn discover_stylesheets(root: &std::path::Path) -> Vec<std::path::PathBuf> {
-    let mut out: Vec<std::path::PathBuf> = Vec::new();
-    fn push(p: std::path::PathBuf, out: &mut Vec<std::path::PathBuf>) {
-        if p.is_file() && !out.contains(&p) {
-            out.push(p);
-        }
-    }
-    let mut vyx = Vec::new();
-    collect_sources(root, None, 0, MAX_VYX_SCAN, &["vyx"], &mut vyx);
-    vyx.sort();
-    for v in &vyx {
-        let Ok(src) = std::fs::read_to_string(v) else {
-            continue;
-        };
-        for url in stylesheet_urls(&src) {
-            let rel = url.trim_start_matches('/');
-            if rel.is_empty() {
-                continue;
-            }
-            let rel = rel.replace('/', std::path::MAIN_SEPARATOR_STR);
-            let in_public = root.join("public").join(&rel);
-            if in_public.is_file() {
-                push(in_public, &mut out);
-            } else {
-                push(root.join(&rel), &mut out);
-            }
-        }
-    }
-    if !out.is_empty() {
-        return out;
-    }
-    for dir in [root.join("public"), root.to_path_buf()] {
-        let Ok(entries) = std::fs::read_dir(&dir) else {
-            continue;
-        };
-        let mut css: Vec<std::path::PathBuf> = entries
-            .flatten()
-            .map(|e| e.path())
-            .filter(|p| p.extension().and_then(|x| x.to_str()) == Some("css"))
+/// The files the `stylesheets` globs of the manifest at `root` name, in glob
+/// then path order, deduplicated, at most [`MAX_STYLESHEETS`]. Empty without
+/// the key: the editor guesses no app's layout.
+fn app_stylesheet_paths(root: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let globs = match find_manifest(root) {
+        Ok(Some(m)) => m.stylesheets,
+        _ => Vec::new(),
+    };
+    let mut out = Vec::new();
+    for g in &globs {
+        let segs: Vec<&str> = g
+            .split('/')
+            .filter(|s| !s.is_empty() && *s != ".")
             .collect();
-        css.sort();
-        for p in css {
-            push(p, &mut out);
-        }
+        glob_files(root, &segs, &mut out);
     }
     out
 }
 
-/// The URLs of the `stylesheet "..."` lines in a `.vyx` source, found by text.
-fn stylesheet_urls(src: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    for line in src.lines() {
-        let Some(rest) = line.trim_start().strip_prefix("stylesheet") else {
-            continue;
-        };
-        let Some(rest) = rest.trim_start().strip_prefix('"') else {
-            continue;
-        };
-        if let Some(end) = rest.find('"') {
-            out.push(rest[..end].to_string());
+/// Appends the files under `dir` whose relative path matches the glob
+/// segments `segs`: `**` is any number of directories, `*` and `?` match
+/// within one name. Symbolic links are not followed, so the walk ends on any
+/// tree; it stops at [`MAX_STYLESHEETS`].
+fn glob_files(dir: &std::path::Path, segs: &[&str], out: &mut Vec<std::path::PathBuf>) {
+    let Some((first, rest)) = segs.split_first() else {
+        return;
+    };
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let mut entries: Vec<(std::path::PathBuf, std::fs::FileType)> = (rd.flatten())
+        .filter_map(|e| Some((e.path(), e.file_type().ok()?)))
+        .collect();
+    entries.sort_by(|a, b| a.0.cmp(&b.0));
+    if *first == "**" {
+        glob_files(dir, rest, out);
+    }
+    for (path, kind) in entries {
+        if out.len() >= MAX_STYLESHEETS {
+            return;
+        }
+        let name = path.file_name().map(|n| n.to_string_lossy().into_owned());
+        if *first == "**" {
+            if kind.is_dir() {
+                glob_files(&path, segs, out);
+            }
+        } else if name.is_some_and(|n| glob_name(first.as_bytes(), n.as_bytes())) {
+            if rest.is_empty() {
+                if kind.is_file() && !out.contains(&path) {
+                    out.push(path);
+                }
+            } else if kind.is_dir() {
+                glob_files(&path, rest, out);
+            }
         }
     }
-    out
+}
+
+/// Whether the name `s` matches the one-segment glob `p` (`*`, `?`, literals).
+fn glob_name(p: &[u8], s: &[u8]) -> bool {
+    match (p.split_first(), s.split_first()) {
+        (None, None) => true,
+        (Some((b'*', pr)), _) => glob_name(pr, s) || (!s.is_empty() && glob_name(p, &s[1..])),
+        (Some((b'?', pr)), Some((_, sr))) => glob_name(pr, sr),
+        (Some((a, pr)), Some((b, sr))) if a == b => glob_name(pr, sr),
+        _ => false,
+    }
 }
 
 /// Every rule block in `css` whose selector names `class` as a whole token, as
@@ -3352,6 +3325,17 @@ fn line_of(css: &str, at: usize) -> usize {
 mod tests {
     use super::*;
     use vyrn_frontend::ast::{EnumVariant, Type};
+
+    #[test]
+    fn a_glob_segment_matches_a_star_and_a_question_mark_within_one_name() {
+        assert!(glob_name(b"app*.css", b"app.css"));
+        assert!(glob_name(b"app*.css", b"app-dark.css"));
+        assert!(!glob_name(b"app*.css", b"decoy.css"));
+        assert!(glob_name(b"?.css", b"a.css"));
+        assert!(!glob_name(b"?.css", b"ab.css"));
+        assert!(glob_name(b"", b""));
+        assert!(!glob_name(b"", b"a"));
+    }
 
     /// An anonymous enum binding is hinted with hover's spelling, which keeps
     /// the payloads `Type`'s `Display` drops.
