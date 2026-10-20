@@ -128,6 +128,23 @@ fn completions_list_top_level() {
     }
 }
 
+#[test]
+fn completions_offer_builtin_functions_by_name() {
+    let a = analyze("fn main() -> Int64 { return 0 }");
+    let print = completions(&a).into_iter().find(|c| c.label == "print");
+    assert!(print.is_some_and(|c| c.detail.starts_with("fn print")));
+}
+
+#[test]
+fn a_refinement_completes_with_its_rule() {
+    let a = analyze("type Age = Int64 where value >= 18");
+    let age = completions(&a).into_iter().find(|c| c.label == "Age");
+    assert_eq!(
+        age.map(|c| c.detail).as_deref(),
+        Some("type Age = Int64 where value >= 18")
+    );
+}
+
 /// Inline-refinement types (`User.age` from a field-level `where`) are
 /// desugaring artifacts.
 #[test]

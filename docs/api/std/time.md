@@ -10,7 +10,7 @@ database, no DST, no locale.
 ## Instant
 
 ```vyrn
-type Instant = Int64 (validated)
+type Instant = Int64 where value >= 0
 ```
 
 Milliseconds since the Unix epoch, UTC. A distinct type, so a timestamp does

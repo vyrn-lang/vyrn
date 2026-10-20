@@ -73,8 +73,10 @@ h2, .cards h3 { font-family: var(--sans-d); letter-spacing: -0.02em; font-weight
 /* Trimmed to the cap height, so a label sits in the middle of its box whatever the face's ascent. */
 button, .btn, .cta, .vx-btn, .find, .theme, .pagemenu > summary, .ostabs label { text-box: trim-both cap alphabetic; }
 /* A link styled as a button centres its label the way a <button> does. */
-a.btn { display: inline-flex; align-items: center; justify-content: center; }
+a.btn { display: inline-flex; justify-content: center; }
+/* A flex button, such as a .jsonly one, centres its label as a block one does. */
 button, .btn {
+  align-items: center;
   font: 500 var(--t-mono)/1 var(--sans);
   padding: 10px 12px;
   border: 1px solid var(--hair);

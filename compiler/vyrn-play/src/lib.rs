@@ -152,16 +152,20 @@ fn tok_of(item: &Triv) -> Option<&Tok> {
 /// One coloured run: `[start, length, class]`, in UTF-16 code units, because
 /// that is what a JavaScript string index counts.
 fn tokens_json(src: &str) -> String {
-    let items = match lexer::lex_with_trivia(src) {
-        Ok(items) => items,
+    let mut spans = Vec::new();
+    match paint(src, 0, &mut spans) {
+        Ok(()) => format!("{{\"spans\":[{}]}}", spans.join(",")),
         // Mid-keystroke the source is often not lexable; the page shows plain
         // text for this frame.
-        Err(d) => return format!("{{\"error\":{}}}", json_str(&d.message)),
-    };
-    let mut out = String::from("{\"spans\":[");
+        Err(d) => format!("{{\"error\":{}}}", json_str(&d.message)),
+    }
+}
+
+/// Pushes the runs of `src`, which starts `base` UTF-16 units into the buffer.
+fn paint(src: &str, base: usize, out: &mut Vec<String>) -> Result<(), Diagnostic> {
+    let items = lexer::lex_with_trivia(src)?;
     let mut byte_at = 0usize;
-    let mut u16_at = 0usize;
-    let mut first = true;
+    let mut u16_at = base;
     let mut prev: Option<&Tok> = None;
     for (i, item) in items.iter().enumerate() {
         let callee = matches!(items[i + 1..].iter().find_map(tok_of), Some(Tok::LParen))
@@ -180,19 +184,46 @@ fn tokens_json(src: &str) -> String {
         let start = byte_at + found;
         u16_at += src[byte_at..start].encode_utf16().count();
         let len = item.text.encode_utf16().count();
-        let cls = class_of(item, callee);
-        if !cls.is_empty() {
-            if !first {
-                out.push(',');
+        if let TrivKind::Tok(Tok::TemplateStr { exprs, .. }) = &item.kind {
+            paint_template(&item.text, exprs, u16_at, out)?;
+        } else {
+            let cls = class_of(item, callee);
+            if !cls.is_empty() {
+                out.push(format!("[{u16_at},{len},\"{cls}\"]"));
             }
-            first = false;
-            out.push_str(&format!("[{u16_at},{len},\"{cls}\"]"));
         }
         u16_at += len;
         byte_at = start + item.text.len();
     }
-    out.push_str("]}");
-    out
+    Ok(())
+}
+
+/// Pushes the runs of the interpolated string `text`, which starts at UTF-16
+/// offset `at`: each hole is painted as code, the rest as string. A hole's
+/// source is shorter than `text`, so the recursion ends.
+fn paint_template(
+    text: &str,
+    holes: &[lexer::Hole],
+    mut at: usize,
+    out: &mut Vec<String>,
+) -> Result<(), Diagnostic> {
+    let mut from = 0usize;
+    for hole in holes {
+        let Some(found) = text[from..].find(&format!("\\{{{}", hole.src)) else {
+            break;
+        };
+        let code = from + found + 2;
+        let n = text[from..code].encode_utf16().count();
+        out.push(format!("[{at},{n},\"s\"]"));
+        paint(&hole.src, at + n, out)?;
+        at += n + hole.src.encode_utf16().count();
+        from = code + hole.src.len();
+    }
+    out.push(format!(
+        "[{at},{},\"s\"]",
+        text[from..].encode_utf16().count()
+    ));
+    Ok(())
 }
 
 /// The standard library, as `build.rs` walked it out of `std/`.
@@ -753,6 +784,14 @@ mod tests {
         let json = String::from_utf8_lossy(unsafe { std::slice::from_raw_parts(result_ptr(), n) })
             .into_owned();
         assert!(json.contains("exceeds the input buffer"), "{json}");
+    }
+
+    #[test]
+    fn an_interpolation_hole_is_painted_as_code() {
+        assert_eq!(
+            tokens_json(r#"x("a\{f(1)}b")"#),
+            r#"{"spans":[[0,1,"f"],[2,4,"s"],[6,1,"f"],[8,1,"n"],[10,3,"s"]]}"#
+        );
     }
 
     #[test]
