@@ -356,6 +356,8 @@ pub struct Claim {
     pub line: usize,
     /// The specifier the generator was imported from; `None` for a local `gen fn`.
     pub module: Option<String>,
+    /// The generator's name as its module exports it.
+    pub generator: String,
     /// The first argument as the import spells it.
     pub arg: String,
     /// The first argument resolved against `importer`: the file
@@ -398,9 +400,9 @@ pub fn claims(
     use crate::ast::{Expr, ImportSource};
     let module_of = |name: &str| {
         program.imports.iter().find_map(|imp| match &imp.source {
-            ImportSource::Path(spec) if imp.names.iter().any(|n| n.local() == name) => {
-                Some(spec.clone())
-            }
+            ImportSource::Path(spec) => (imp.names.iter())
+                .find(|n| n.local() == name)
+                .map(|n| (spec.clone(), n.original.clone())),
             _ => None,
         })
     };
@@ -419,10 +421,15 @@ pub fn claims(
                 Err(_) => continue,
             },
         };
+        let (module, generator) = match module_of(name) {
+            Some((spec, original)) => (Some(spec), original),
+            None => (None, name.clone()),
+        };
         out.push(Claim {
             importer: importer.to_string(),
             line: imp.line,
-            module: module_of(name),
+            module,
+            generator,
             arg: arg.clone(),
             target,
         });

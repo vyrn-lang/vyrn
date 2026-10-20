@@ -2644,15 +2644,13 @@ fn route_facts_for_file(server: &Server, path: &str) -> Rc<Vec<MappedSymbol>> {
     let probed = if server.analyses.values().any(claims) {
         None
     } else {
-        // Only roots that call a map-emitting generator, so a hover in a module
+        // Only roots that call a map-baking generator, so a hover in a module
         // nothing mounts analyzes nothing.
-        mounting_roots(path, RPC_GENERATORS)
-            .into_iter()
-            .find_map(|cand| {
-                let text = doc_text(server, &cand)?;
-                let a = analyze_doc(&server.session, &cand, &text, &overlays_of(server));
-                claims(&a).then_some(a)
-            })
+        mounting_roots(server, path).into_iter().find_map(|cand| {
+            let text = doc_text(server, &cand)?;
+            let a = analyze_doc(&server.session, &cand, &text, &overlays_of(server));
+            claims(&a).then_some(a)
+        })
     };
     // Cache every file these analyses map, and the requested path either way,
     // so an unmounted module is probed once.
@@ -2676,49 +2674,58 @@ fn route_facts_for_file(server: &Server, path: &str) -> Rc<Vec<MappedSymbol>> {
         .unwrap_or_else(|| Rc::new(Vec::new()))
 }
 
-/// The generators whose maps carry a derived route, for hovers and lenses.
-const RPC_GENERATORS: &[&str] = &[
-    "rpc(",
-    "rpcServer(",
-    "client(",
-    "rpcClient(",
-    "rpcInProcess(",
-];
-
-/// Every generator that emits a map. `http()`'s carries no route, but a rename
-/// needs it: nothing else records that its re-export is the same declaration.
-const MAP_GENERATORS: &[&str] = &[
-    "rpc(",
-    "rpcServer(",
-    "client(",
-    "rpcClient(",
-    "rpcInProcess(",
-    "http(",
-];
-
-/// The `.vyrn` roots near `path` that call one of `gens`, nearest first.
+/// The `.vyrn` roots near `path` with a generator import whose generator bakes
+/// a symbol map, nearest first. A map may name a file no claim covers (a shared
+/// wire type), so the roots are ranked by distance, not by claim.
 ///
-/// A textual filter, so as few roots as possible are analyzed.
-fn mounting_roots(path: &str, gens: &[&str]) -> Vec<Url> {
+/// Only the imports are parsed, so as few roots as possible are analyzed.
+fn mounting_roots(server: &Server, path: &str) -> Vec<Url> {
     let file = std::path::Path::new(path);
-    let Some(dir) = file.parent() else {
+    let (Some(dir), Some(opts)) = (file.parent(), input_load_options(server, path)) else {
         return Vec::new();
     };
     let mut files = Vec::new();
     collect_vyrn(dir, &mut files);
-    let mut scored: Vec<(usize, std::path::PathBuf)> = files
-        .into_iter()
-        .filter(|p| {
-            let src = std::fs::read_to_string(p).unwrap_or_default();
-            gens.iter().any(|g| src.contains(g))
-        })
-        .map(|p| (path_distance(&p, dir), p))
+    let mut scored: Vec<(usize, Url)> = (files.into_iter())
+        .filter_map(|p| Some((path_distance(&p, dir), Url::from_file_path(p).ok()?)))
+        .filter(|(_, root)| bakes_a_map(server, &opts, root))
         .collect();
     scored.sort_by_key(|(d, _)| *d);
-    scored
-        .into_iter()
-        .filter_map(|(_, p)| Url::from_file_path(p).ok())
-        .collect()
+    scored.into_iter().map(|(_, root)| root).collect()
+}
+
+/// Whether a generator import of `root` calls a generator whose module's editor
+/// companion lists it in `vyrnSymbolMaps*`: the generators that bake a
+/// `symbolMap` export into what they write.
+fn bakes_a_map(server: &Server, opts: &vyrn_frontend::loader::LoadOptions, root: &Url) -> bool {
+    let (Some(importer), Some(text)) = (uri_path(root), doc_text(server, root)) else {
+        return false;
+    };
+    let Ok(tokens) = vyrn_frontend::lexer::lex(&text) else {
+        return false;
+    };
+    let program = vyrn_frontend::parser::parse_accum(tokens).0;
+    let overlays = overlays_of(server);
+    let Some((_, resolver, _, _)) = load_context(&server.session, root, &overlays) else {
+        return false;
+    };
+    let claims = vyrn_frontend::audience::claims(&importer, &program, opts);
+    claims.iter().any(|c| {
+        let Some(module) = c.module.as_deref() else {
+            return false;
+        };
+        let out = vyrn_frontend::loader::call_generator(
+            &importer,
+            module,
+            "vyrnSymbolMaps",
+            &[],
+            true,
+            opts,
+            &resolver,
+            Some(&*engine()),
+        );
+        matches!(out, Some(Ok(names)) if names.lines().any(|n| n == c.generator))
+    })
 }
 
 /// Every generated symbol standing for a declaration in `path`, from every root
@@ -2727,7 +2734,7 @@ fn mounting_roots(path: &str, gens: &[&str]) -> Vec<Url> {
 fn all_mapped_symbols(server: &Server, path: &str) -> Vec<MappedSymbol> {
     let mut out: Vec<MappedSymbol> = route_facts_for_file(server, path).as_ref().clone();
     let overlays = overlays_of(server);
-    for cand in mounting_roots(path, MAP_GENERATORS) {
+    for cand in mounting_roots(server, path) {
         let Some(text) = doc_text(server, &cand) else {
             continue;
         };

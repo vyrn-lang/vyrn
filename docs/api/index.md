@@ -15,6 +15,7 @@
 - [std/hints](std/hints.md) — Policy for checking libraries: per-project rule levels and per-line waivers.
 - [std/html](std/html.md) — The view tree and its string renderer. A view is a pure function
 - [std/http](std/http.md) — The REST projection: hand-written routes over the same
+- [std/http.editor](std/http.editor.md) — Editor support for the generators `std/http` exports.
 - [std/i18n](std/i18n.md) — Typed translations as a generator library.
 - [std/icons](std/icons.md) — Inline SVG icons generated from a pinned Iconify collection, one function
 - [std/imports](std/imports.md) — The import block of a generated module.
@@ -28,6 +29,7 @@
 - [std/random](std/random.md) — Deterministic pseudo-randomness with a host-seeded escape.
 - [std/regex](std/regex.md) — A regular expression that searches, counts and replaces.
 - [std/rpc](std/rpc.md) — Typed RPC as a library, built on generator imports.
+- [std/rpc.editor](std/rpc.editor.md) — Editor support for the generators `std/rpc` exports.
 - [std/scan](std/scan.md) — One comment- and string-aware cursor over foreign text (CSS, ICU
 - [std/slots](std/slots.md) — A generational slab over `Array`, in Vyrn.
 - [std/storage](std/storage.md)
