@@ -49,4 +49,5 @@ pre.code::-webkit-scrollbar { display: none; }
   mask-image: linear-gradient(90deg, #000 calc(100% - 24px), transparent);
 }
 .cmd code::-webkit-scrollbar { display: none; }
-.cmd button { border: 0; align-self: stretch; background: none; font-size: var(--t-key); color: var(--n2); }
+.cmd button { border: 0; border-left: 1px solid var(--hair); border-radius: 0; align-self: stretch; padding: 0 var(--s2); background: none; font: 500 var(--t-mono)/1 var(--sans); color: var(--ink); }
+.cmd button:hover { color: var(--accent); background: color-mix(in oklab, var(--ink) 5%, transparent); }

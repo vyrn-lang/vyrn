@@ -146,7 +146,11 @@ jobs:
         run: cargo test --release
 
       - name: Render every page
-        run: compiler/target/release/vyrn run site/export.vyrn out
+        # The fonts are binary, so the workflow copies them, with their licences.
+        run: |
+          compiler/target/release/vyrn run site/export.vyrn out
+          mkdir -p out/fonts
+          cp site/fonts/* out/fonts/
 
       - name: The site's node tests
         # After the export: they check the tree it wrote.

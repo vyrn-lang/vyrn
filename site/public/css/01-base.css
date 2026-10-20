@@ -1,3 +1,9 @@
+/* The three faces live in site/fonts, latin subset, OFL; the workflow copies them beside style.css. */
+@font-face { font-family: "Inter"; font-weight: 100 900; font-display: swap; src: url("fonts/inter.woff2") format("woff2"); }
+@font-face { font-family: "JetBrains Mono"; font-weight: 100 800; font-display: swap; src: url("fonts/jetbrains-mono.woff2") format("woff2"); }
+@font-face { font-family: "Instrument Serif"; font-weight: 400; font-display: swap; src: url("fonts/instrument-serif.woff2") format("woff2"); }
+@font-face { font-family: "Instrument Serif"; font-style: italic; font-weight: 400; font-display: swap; src: url("fonts/instrument-serif-italic.woff2") format("woff2"); }
+
 :root {
   --navy: oklch(0.3153 0.0778 254.59);
   --cyan: oklch(0.7221 0.1214 214.54);
@@ -5,11 +11,11 @@
   --danger: oklch(0.515 0.2078 25.33);
   --amber: oklch(0.487 0.1447 70.08);
 
-  --n0: oklch(0.2 0.006 60);
-  --n1: oklch(0.4 0.006 60);
-  --n2: oklch(0.475 0.006 60);
-  --n3: oklch(0.88 0.03 60);
-  --n4: oklch(0.93 0.024 60);
+  --n0: oklch(0.2 0.014 262);
+  --n1: oklch(0.4 0.014 260);
+  --n2: oklch(0.475 0.014 260);
+  --n3: oklch(0.91 0.01 255);
+  --n4: oklch(0.97 0.005 255);
 
   --ink: var(--n0);
   --muted: var(--n1);
@@ -36,10 +42,12 @@
   --lane-start: oklch(0.6 0.006 60);
   --code-wash: 5%;
 
-  /* Base system faces only: a fingerprint-hardened Firefox logs a notice for every other name. */
-  --mono: ui-monospace, SFMono-Regular, Consolas, Menlo, monospace;
-  --sans: ui-sans-serif, "Segoe UI", Roboto, Helvetica, sans-serif;
-  --sans-d: ui-sans-serif, system-ui, "Segoe UI", Roboto, Helvetica, sans-serif;
+  /* The fallbacks are base system faces only: a fingerprint-hardened Firefox logs a notice for every other name. */
+  --mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Consolas, Menlo, monospace;
+  --sans: "Inter", ui-sans-serif, "Segoe UI", Roboto, Helvetica, sans-serif;
+  --sans-d: "Inter", ui-sans-serif, system-ui, "Segoe UI", Roboto, Helvetica, sans-serif;
+  /* The landing page's display face only. */
+  --serif: "Instrument Serif", Georgia, serif;
 
   --t-display: clamp(2.1rem, 0.9rem + 4.6vw, 5.1rem);
   --t-h1: clamp(1.7rem, 1.1rem + 1.8vw, 2.4rem);
@@ -52,6 +60,13 @@
   --t-minimap: 2px;
 
   --t-svg: 18px; --t-svg-s: 17px;
+  --t-hero: clamp(84px, 10vw, 168px); --t-hero-lede: clamp(23px, 2.3vw, 32px);
+  --t-scene: clamp(36px, 3.8vw, 58px); --t-scene-lede: clamp(19px, 1.7vw, 23px);
+
+  /* Corners, one per size of box: a chip, a control, a panel. A pill is fully round. */
+  --r-s: 6px;
+  --r-m: 10px;
+  --r-l: 14px;
 
   --s1: 8px;
   --s2: 16px;
@@ -79,19 +94,19 @@
 /* Written twice: a selector list cannot hold a media query. */
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
-    --n0: oklch(0.97 0.002 60);
-    --n1: oklch(0.72 0.004 60);
-    --n2: oklch(0.62 0.004 60);
-    --n3: oklch(0.24 0.005 60);
-    --n4: oklch(0.155 0.005 60);
-    --rule: color-mix(in oklab, var(--n0) 22%, transparent);
-    --hair: color-mix(in oklab, var(--n0) 12%, transparent);
-    --accent: var(--bright);
+    --n0: oklch(0.945 0.012 250);
+    --n1: oklch(0.7 0.026 255);
+    --n2: oklch(0.64 0.024 255);
+    --n3: oklch(0.19 0.014 262);
+    --n4: oklch(0.115 0.01 262);
+    --rule: color-mix(in oklab, var(--n0) 16%, transparent);
+    --hair: color-mix(in oklab, var(--n0) 9%, transparent);
+    --accent: oklch(0.8 0.115 180);
     --code-wash: 12%;
-    --danger: oklch(0.72 0.17 25.33);
-    --amber: oklch(0.8 0.15 70.08);
-    --scrim: oklch(0.08 0.004 60 / 0.72);
-    --syn-kw: var(--cyan);
+    --danger: oklch(0.72 0.17 30);
+    --amber: oklch(0.81 0.13 72);
+    --scrim: oklch(0.06 0.01 262 / 0.72);
+    --syn-kw: oklch(0.77 0.05 255);
     --syn-str: oklch(0.78 0.1 150);
     --sr-bun: oklch(0.78 0.12 320);
     --sr-wasmopt: oklch(0.75 0.14 30);
@@ -104,20 +119,20 @@
   }
 }
 
-:root[data-theme="dark"] {
-  --n0: oklch(0.97 0.002 60);
-  --n1: oklch(0.72 0.004 60);
-  --n2: oklch(0.62 0.004 60);
-  --n3: oklch(0.24 0.005 60);
-  --n4: oklch(0.155 0.005 60);
-  --rule: color-mix(in oklab, var(--n0) 22%, transparent);
-  --hair: color-mix(in oklab, var(--n0) 12%, transparent);
-  --accent: var(--bright);
+:root[data-theme="dark"], :root[data-landing] {
+  --n0: oklch(0.945 0.012 250);
+  --n1: oklch(0.7 0.026 255);
+  --n2: oklch(0.64 0.024 255);
+  --n3: oklch(0.19 0.014 262);
+  --n4: oklch(0.115 0.01 262);
+  --rule: color-mix(in oklab, var(--n0) 16%, transparent);
+  --hair: color-mix(in oklab, var(--n0) 9%, transparent);
+  --accent: oklch(0.8 0.115 180);
   --code-wash: 12%;
-  --danger: oklch(0.72 0.17 25.33);
-  --amber: oklch(0.8 0.15 70.08);
-  --scrim: oklch(0.08 0.004 60 / 0.72);
-  --syn-kw: var(--cyan);
+  --danger: oklch(0.72 0.17 30);
+  --amber: oklch(0.81 0.13 72);
+  --scrim: oklch(0.06 0.01 262 / 0.72);
+  --syn-kw: oklch(0.77 0.05 255);
   --syn-str: oklch(0.78 0.1 150);
   --sr-bun: oklch(0.78 0.12 320);
   --sr-wasmopt: oklch(0.75 0.14 30);
@@ -156,7 +171,8 @@ a:hover { text-decoration-color: var(--accent); }
 p a, li a, dd a, dt a, caption a, figcaption a, .note a, .notice a, .cap a, td a, .foot a {
   padding-block: 2px;
 }
-code, pre, kbd { font-family: var(--mono); }
+/* No ligatures: a reader of code must see `->` and `!=` as typed. */
+code, pre, kbd, .vx-code { font-family: var(--mono); font-variant-ligatures: none; }
 :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
 code {

@@ -30,6 +30,10 @@ const SCALE = {
   "--t-minimap": "2px",
   "--t-svg": "18px",
   "--t-svg-s": "17px",
+  "--t-hero": "clamp(84px, 10vw, 168px)",
+  "--t-hero-lede": "clamp(23px, 2.3vw, 32px)",
+  "--t-scene": "clamp(36px, 3.8vw, 58px)",
+  "--t-scene-lede": "clamp(19px, 1.7vw, 23px)",
 };
 
 const ONE_OFFS = new Set(["1.6rem", "1.25rem", "0.92em", "0.9em", "inherit"]);

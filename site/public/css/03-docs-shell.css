@@ -119,6 +119,9 @@ button, .btn, summary, .ostabs label { user-select: none; }
 .docutils > a:not(.btn):hover { color: var(--accent); }
 .docutils .btn { min-height: 32px; padding: 6px 12px; text-decoration: none; }
 .docutils .btn + .pagemenu { margin-left: calc(-1 * var(--s2) - 1px); }
+/* Copy page and its menu are one split button: the corners where they meet are square. */
+.docutils .btn:has(+ .pagemenu) { border-start-end-radius: 0; border-end-end-radius: 0; }
+.docutils .btn + .pagemenu > summary { border-start-start-radius: 0; border-end-start-radius: 0; }
 
 .docpage .hero { padding: var(--s4) 0 var(--s2); }
 .docpage .band { padding: var(--s4) 0; }

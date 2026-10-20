@@ -32,7 +32,10 @@
   font: var(--t-cmd)/1 var(--sans);
 }
 
-.wordmark { font: 600 var(--t-mark)/1 var(--mono); letter-spacing: 0.18em; text-transform: uppercase; text-decoration: none; color: var(--accent); }
+.wordmark { font: 500 var(--t-mark)/1 var(--sans); letter-spacing: 0.34em; text-transform: uppercase; text-decoration: none; color: var(--ink); }
+.masthead .gh { justify-content: center; width: 44px; border-radius: 50%; color: var(--muted); transition: color 160ms var(--expo), background 160ms var(--expo); }
+.masthead .gh:hover { color: var(--ink); background: color-mix(in oklab, var(--ink) 8%, transparent); }
+.masthead .gh svg { width: 20px; height: 20px; }
 
 .masthead a, .masthead button, .masthead summary { display: inline-flex; align-items: center; min-height: 44px; }
 
@@ -96,14 +99,12 @@
 .cta {
   display: inline-flex; align-items: center; justify-content: center;
   min-height: 40px; padding: 0 var(--s3);
-  background: var(--accent); color: var(--paper);
-  border: 1px solid var(--accent); text-decoration: none;
-  font: 600 var(--t-cmd)/1.4 var(--sans);
+  background: var(--ink); color: var(--paper);
+  border: 1px solid var(--ink); text-decoration: none;
+  font: 500 var(--t-cmd)/1.4 var(--sans);
   white-space: nowrap;
 }
-.masthead .cta { min-height: 44px; padding: 0 var(--s2); }
-.cta:hover { background: color-mix(in oklab, var(--accent) 85%, var(--ink)); }
-.cta[aria-current="page"] { background: none; color: var(--accent); }
+.cta:hover { background: color-mix(in oklab, var(--ink) 85%, var(--paper)); }
 .ctarow .cta {
   background: none; border: 0; color: var(--accent);
   padding: 0; min-height: 44px;

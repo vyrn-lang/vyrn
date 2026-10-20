@@ -84,3 +84,16 @@ button:active { transform: translateY(1px); }
 button[aria-pressed="true"], button.on { border-color: var(--accent); color: var(--accent); }
 
 .controls { display: flex; gap: var(--s1); flex-wrap: wrap; }
+
+/* Corners for every boxed thing, in one place. A box whose children paint to its edge clips them. */
+code, kbd, .key, .skip, .kindpill, .findtabs [data-sect], .pagemenu .acts a, .ostabs label, .idefile, .tabghost, .lanes li {
+  border-radius: var(--r-s);
+}
+button, .btn, .find, .theme, .cmd, .ostabs, .notice, .finder input, .regsearch, .pager a, .pagemenu > summary, .pagemenu .acts, .ctxmenu, .tpl, .newname, .idehelp .tipbox {
+  border-radius: var(--r-m);
+}
+.plate, pre.code, pre.doccode, .cards > li, .specplate, .reglist, .findpanel, .idewrap > .ideside, .idewrap > .idemain, .idewrap > .idepanel {
+  border-radius: var(--r-l);
+}
+.pill, .cta { border-radius: 999px; }
+.plate, .cmd, .reglist, .findpanel { overflow: hidden; }

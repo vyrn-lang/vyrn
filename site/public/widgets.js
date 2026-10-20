@@ -9,6 +9,7 @@ import { demoWidget } from "./demo.js";
 import { armHeroEditor } from "./hero.js";
 import { railSpy } from "./rail.js";
 import { anchorShell, markEditorChrome, markNav } from "./masthead.js";
+import { vortexWidget } from "./vortex.js";
 
 window.__vyrnNavConfig = { staticData: true };
 
@@ -71,6 +72,7 @@ function boot() {
   }
   for (const el of $$('[data-widget="playhero"]')) armHeroEditor(el);
   for (const el of $$("svg.graph")) graphWidget(el);
+  for (const el of $$('[data-widget="vortex"]')) vortexWidget(el);
 }
 
 bindInlineCopy();
