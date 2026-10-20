@@ -272,6 +272,8 @@ fn main() {
                 input_owner: HashMap::new(),
                 input_ownerless: HashSet::new(),
                 input_claimant: RefCell::new(HashMap::new()),
+                client_caps: serde_json::Value::Null,
+                inputs_registered: HashSet::new(),
                 synth_cache: RefCell::new(HashMap::new()),
                 css_cache: RefCell::new(HashMap::new()),
                 contract_cache: RefCell::new(HashMap::new()),
@@ -279,8 +281,12 @@ fn main() {
                 watched: Vec::new(),
             };
             // An error here means the client left before `initialize`.
-            if let Ok(watched) = handle_initialize(&connection) {
+            if let Ok((watched, caps, folders)) = handle_initialize(&connection) {
                 server.watched = watched;
+                server.client_caps = caps;
+                for folder in folders {
+                    register_inputs(&connection, &mut server, &folder);
+                }
                 main_loop(&connection, &mut server);
             }
             connection
@@ -310,6 +316,10 @@ struct Server {
     /// by the walk, so a keystroke reads one `.vyrn` file, not the walk's. Each
     /// use checks the claim again; cleared whole when a `.vyrn` opens or changes.
     input_claimant: RefCell<HashMap<String, Url>>,
+    /// The client's capabilities as `initialize` sent them.
+    client_caps: serde_json::Value,
+    /// Manifest directories whose `inputs` globs the client was asked to send.
+    inputs_registered: HashSet<String>,
     /// Per owner root, its generated modules and their analyses, which input
     /// requests reuse. `RefCell` because request handlers hold `&Server`.
     synth_cache: RefCell<HashMap<Url, OwnerSynth>>,
@@ -360,8 +370,11 @@ struct AnalyzedSynth {
 /// Answers `initialize`, and asks a client that can send file events for them
 /// under its workspace folders and the std root. Returns those directories, or
 /// none when the client cannot. Reads the `costHints` initialization option.
-fn handle_initialize(connection: &Connection) -> Result<Vec<String>, ()> {
+fn handle_initialize(
+    connection: &Connection,
+) -> Result<(Vec<String>, serde_json::Value, Vec<std::path::PathBuf>), ()> {
     let (id, params) = connection.initialize_start().map_err(|_| ())?;
+    let caps = params.get("capabilities").cloned().unwrap_or_default();
     let params: InitializeParams = serde_json::from_value(params).unwrap_or_default();
     let off = (params.initialization_options.as_ref()).and_then(|o| o.get("costHints")?.as_bool());
     let _ = COST_HINTS.set(off.unwrap_or(true));
@@ -372,12 +385,7 @@ fn handle_initialize(connection: &Connection) -> Result<Vec<String>, ()> {
         definition_provider: Some(OneOf::Left(true)),
         completion_provider: Some(CompletionOptions {
             // `.` for members; the rest for a generator input's own grammar.
-            trigger_characters: Some(
-                [".", "<", "@", ":", "-", " ", "\""]
-                    .iter()
-                    .map(|s| s.to_string())
-                    .collect(),
-            ),
+            trigger_characters: Some(TRIGGERS.iter().map(|s| s.to_string()).collect()),
             ..Default::default()
         }),
         document_symbol_provider: Some(OneOf::Left(true)),
@@ -413,21 +421,23 @@ fn handle_initialize(connection: &Connection) -> Result<Vec<String>, ()> {
     };
     let value = serde_json::to_value(result).unwrap();
     connection.initialize_finish(id, value).map_err(|_| ())?;
+    #[allow(deprecated)]
+    let folders = match params.workspace_folders {
+        Some(fs) => fs.into_iter().map(|f| f.uri).collect(),
+        None => params.root_uri.into_iter().collect::<Vec<_>>(),
+    };
+    let dirs: Vec<std::path::PathBuf> = (folders.iter())
+        .filter_map(|u| u.to_file_path().ok())
+        .collect();
     let events =
         (params.capabilities.workspace.as_ref()).and_then(|w| w.did_change_watched_files.as_ref());
     // A base outside the workspace needs a relative pattern.
     if !events.is_some_and(|e| {
         e.dynamic_registration == Some(true) && e.relative_pattern_support == Some(true)
     }) {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), caps, dirs));
     }
-    #[allow(deprecated)]
-    let folders = match params.workspace_folders {
-        Some(fs) => fs.into_iter().map(|f| f.uri).collect(),
-        None => params.root_uri.into_iter().collect::<Vec<_>>(),
-    };
-    let roots: Vec<String> = (folders.iter())
-        .filter_map(|u| u.to_file_path().ok())
+    let roots: Vec<String> = (dirs.iter())
         .map(|p| p.to_string_lossy().replace('\\', "/"))
         .chain(std_root())
         .collect();
@@ -460,7 +470,77 @@ fn handle_initialize(connection: &Connection) -> Result<Vec<String>, ()> {
         .sender
         .send(Message::Request(request))
         .map_err(|_| ())?;
-    Ok(roots)
+    Ok((roots, caps, dirs))
+}
+
+/// Completion triggers: `.` for members; the rest for a generator input's own
+/// grammar.
+const TRIGGERS: [&str; 7] = [".", "<", "@", ":", "-", " ", "\""];
+
+/// The methods a generator input is served, each with the client capability
+/// that says whether the client registers it dynamically.
+const INPUT_METHODS: [(&str, &str); 11] = [
+    ("textDocument/didOpen", "synchronization"),
+    ("textDocument/didChange", "synchronization"),
+    ("textDocument/didClose", "synchronization"),
+    ("textDocument/hover", "hover"),
+    ("textDocument/definition", "definition"),
+    ("textDocument/completion", "completion"),
+    ("textDocument/documentSymbol", "documentSymbol"),
+    ("textDocument/documentHighlight", "documentHighlight"),
+    ("textDocument/rename", "rename"),
+    ("textDocument/inlayHint", "inlayHint"),
+    ("textDocument/semanticTokens", "semanticTokens"),
+];
+
+/// Asks the client to send the documents the `inputs` globs of the manifest
+/// governing `dir` name, and to send this server their requests, once per
+/// manifest. A method the client cannot register dynamically is not asked
+/// for. The client answers with a response nothing reads.
+fn register_inputs(connection: &Connection, server: &mut Server, dir: &std::path::Path) {
+    let Ok(Some(m)) = find_manifest(dir) else {
+        return;
+    };
+    if m.inputs.is_empty() || !server.inputs_registered.insert(m.dir.clone()) {
+        return;
+    }
+    let Ok(base) = Url::from_directory_path(&m.dir) else {
+        return;
+    };
+    let selector: Vec<serde_json::Value> = (m.inputs.iter())
+        .map(|g| serde_json::json!({ "pattern": { "baseUri": base, "pattern": g } }))
+        .collect();
+    let dynamic = |cap: &str| {
+        let at = format!("/textDocument/{cap}/dynamicRegistration");
+        server.client_caps.pointer(&at) == Some(&serde_json::Value::Bool(true))
+    };
+    let registrations: Vec<serde_json::Value> = (INPUT_METHODS.iter())
+        .filter(|(_, cap)| dynamic(cap))
+        .map(|(method, _)| {
+            let mut options = match *method {
+                "textDocument/didChange" => serde_json::json!({ "syncKind": 1 }),
+                "textDocument/completion" => serde_json::json!({ "triggerCharacters": TRIGGERS }),
+                "textDocument/rename" => serde_json::json!({ "prepareProvider": true }),
+                "textDocument/semanticTokens" => serde_json::json!({
+                    "legend": semantic_tokens_legend(), "range": true, "full": true
+                }),
+                _ => serde_json::json!({}),
+            };
+            options["documentSelector"] = serde_json::json!(selector);
+            serde_json::json!({
+                "id": format!("{}:{method}", m.dir), "method": method, "registerOptions": options
+            })
+        })
+        .collect();
+    if registrations.is_empty() {
+        return;
+    }
+    let request = Request::new(
+        format!("vyrn/inputs:{}", m.dir).into(),
+        RegisterCapability::METHOD.to_string(),
+        serde_json::json!({ "registrations": registrations }),
+    );
+    let _ = connection.sender.send(Message::Request(request));
 }
 
 fn main_loop(connection: &Connection, server: &mut Server) {
@@ -2926,6 +3006,11 @@ fn handle_notification(connection: &Connection, server: &mut Server, notif: Noti
             }
             if !is_vyrn_uri(&uri) {
                 generator_completion(server, &uri, &text, 1, 1);
+            }
+            if let Some(dir) =
+                (uri.to_file_path().ok()).and_then(|p| p.parent().map(|d| d.to_path_buf()))
+            {
+                register_inputs(connection, server, &dir);
             }
             return Owed::Analyze(uri);
         }

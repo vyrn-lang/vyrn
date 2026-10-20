@@ -1586,6 +1586,53 @@ fn component_tag_definition_opens_the_sibling() {
     );
 }
 
+/// The `inputs` globs of a workspace folder's `vyrn.json` reach the client as
+/// dynamic registrations, one per method the client can register, each with
+/// the globs relative to the manifest's directory.
+#[test]
+fn the_manifest_inputs_globs_are_registered_with_the_client() {
+    let n = SCRATCH_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let dir = std::env::temp_dir().join(format!("vyrn_lsp_inputs_{}_{n}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("vyrn.json"), r#"{ "inputs": ["**/*.tbl"] }"#).unwrap();
+    let mut client = LspClient::spawn().expect("spawn vyrn-lsp");
+    let caps = serde_json::json!({ "textDocument": {
+        "synchronization": { "dynamicRegistration": true },
+        "hover": { "dynamicRegistration": true },
+        "completion": { "dynamicRegistration": false }
+    } });
+    let init_id = serde_json::json!(1);
+    client.send(&serde_json::json!({
+        "jsonrpc": "2.0", "id": init_id, "method": "initialize",
+        "params": { "capabilities": caps, "processId": null, "workspaceFolders": [
+            { "uri": file_uri(&dir), "name": "w" }
+        ] }
+    }));
+    let _ = client.read_response(&init_id);
+    client.send(&serde_json::json!({ "jsonrpc": "2.0", "method": "initialized", "params": {} }));
+    let register = client.read_notification("client/registerCapability");
+    let regs = register["params"]["registrations"].as_array().unwrap();
+    let methods: Vec<&str> = regs.iter().filter_map(|r| r["method"].as_str()).collect();
+    assert_eq!(
+        methods,
+        [
+            "textDocument/didOpen",
+            "textDocument/didChange",
+            "textDocument/didClose",
+            "textDocument/hover"
+        ],
+        "{register}"
+    );
+    let filter = &regs[0]["registerOptions"]["documentSelector"][0]["pattern"];
+    assert_eq!(filter["pattern"], "**/*.tbl", "{register}");
+    let base = filter["baseUri"].as_str().unwrap();
+    let leaf = dir.file_name().unwrap().to_string_lossy().into_owned();
+    assert!(base.trim_end_matches('/').ends_with(&leaf), "{base}");
+    assert_eq!(regs[1]["registerOptions"]["syncKind"], 1, "{register}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn component_prop_completion() {
     let dir = struct_dir();

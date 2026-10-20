@@ -356,6 +356,7 @@ pull request.
 - `vyrn doc` writes Markdown only. `docs/api/` is committed and CI checks it with `--verify`.
 - `vyrn emit-lowered` is deterministic, promises no format and has no parser.
 - The LSP is a synchronous pure adapter over the front end. No generator logic and no input grammar is compiled into it: completion and definition in a foreign grammar are the `vyrnComplete` and `vyrnDefinition` of the claiming generator module's companion, and the rest goes through `//@origin`.
+- The editor sends the language server the files the `inputs` globs of `vyrn.json` name, which the server registers with the client per manifest. `.vyx` is a default of the VS Code extension's packaging, not of the server.
 - The editor reads an app's CSS only from the files the `stylesheets` globs of `vyrn.json` name; without the key a safelisted class hovers with no rule, because a guess would name one framework's layout.
 - The editor never decides which local binding a name names. The check records what each name occurrence in a root body names, by position (`checker::Binders::uses`), and the editor reads it. A token the check did not resolve takes the latest same-named binding at or before its line. A node's `ast::Id` carries the column of the name it spells.
 - The LSP gets no incremental parsing, salsa, incremental sync or delta tokens. Lexing and parsing are under 1% of a keystroke; latency came from repeated pure work, fixed by memoizing it.

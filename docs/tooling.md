@@ -293,6 +293,7 @@ policy.
 | `roles` | directory to module contract, for example `"routes": "std/ui:Page"` |
 | `hints` | per-rule severity for the hint libraries (`std/hints`, `std/vyx-hints`) |
 | `stylesheets` | globs naming the app's own CSS, whose rules the editor's hover on a safelisted class shows |
+| `inputs` | globs naming the generator inputs the editor sends the language server, beside the `.vyx` files the VS Code extension sends |
 
 An unknown tool name under `toolchain` is refused and the error lists the known
 tools. With no `audience` key every module is universal. With no artifacts

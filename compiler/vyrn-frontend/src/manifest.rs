@@ -108,6 +108,9 @@ pub struct Manifest {
     /// The `stylesheets` key: globs, relative to `dir`, naming the app's own
     /// CSS, which the editor's class hover reads. Empty when absent.
     pub stylesheets: Vec<String>,
+    /// The `inputs` key: globs, relative to `dir`, naming the generator inputs
+    /// the editor sends the language server. Empty when absent.
+    pub inputs: Vec<String>,
 }
 
 /// Returns the nearest directory at or above `start` that holds `vyrn.json`.
@@ -204,6 +207,7 @@ fn from_doc(doc: Json, slash_dir: String) -> Result<Manifest, String> {
     };
     let dependencies = str_map("dependencies")?;
     let stylesheets = str_list("stylesheets")?;
+    let inputs = str_list("inputs")?;
     // An unknown tool name is refused where it is written: a typo that declared
     // nothing would leave the build on PATH, a silent fallback.
     let toolchain = str_map("toolchain")?;
@@ -231,6 +235,7 @@ fn from_doc(doc: Json, slash_dir: String) -> Result<Manifest, String> {
         main: str_key("main"),
         native_target: str_key("nativeTarget"),
         stylesheets,
+        inputs,
         dependencies,
         toolchain,
         audience,
@@ -740,6 +745,8 @@ mod tests {
             String::new(),
         );
         assert_eq!(m.unwrap().stylesheets, ["b.css", "**/a.css"]);
+        let m = from_doc(parse(r#"{"inputs":["**/*.tbl"]}"#), String::new());
+        assert_eq!(m.unwrap().inputs, ["**/*.tbl"]);
         let none = from_doc(parse(r#"{"name":"x"}"#), String::new());
         assert!(none.unwrap().stylesheets.is_empty());
         for doc in [
