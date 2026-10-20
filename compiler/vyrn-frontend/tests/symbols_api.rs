@@ -128,6 +128,18 @@ fn completions_list_top_level() {
     }
 }
 
+#[test]
+fn completions_offer_builtin_functions_by_name() {
+    let a = analyze(
+        "fn main() -> Int64 {
+    return 0
+}
+",
+    );
+    let print = completions(&a).into_iter().find(|c| c.label == "print");
+    assert!(print.is_some_and(|c| c.detail.starts_with("fn print")));
+}
+
 /// Inline-refinement types (`User.age` from a field-level `where`) are
 /// desugaring artifacts.
 #[test]

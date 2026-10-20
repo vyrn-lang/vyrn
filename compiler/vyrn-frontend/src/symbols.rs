@@ -1078,6 +1078,17 @@ pub fn completions(analysis: &Analysis) -> Vec<Completion> {
             });
         }
     }
+    // A builtin a call names bare (`print`, `assert`), by the contract hover shows.
+    for b in crate::prelude::builtins() {
+        if let (Some(f), None, false) = (&b.sig, b.method, b.name.starts_with('@')) {
+            out.push(Completion {
+                label: b.name.to_string(),
+                kind: SymbolKind::Function,
+                detail: function_detail(f, &analysis.spellings),
+                doc: None,
+            });
+        }
+    }
     out
 }
 
