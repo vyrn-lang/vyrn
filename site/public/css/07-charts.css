@@ -13,8 +13,9 @@ svg.chart text { font-family: var(--mono); font-size: var(--t-svg); fill: var(--
 .sr-rust { --k: var(--sr-rust); }
 .sr-node { --k: var(--sr-node); }
 .sr-bun { --k: var(--sr-bun); }
-.sr-wasmopt { --k: var(--sr-wasmopt); }
 .sr-vyrn { --k: var(--sr-vyrn); }
+.sr-wasm { --k: var(--sr-wasm); }
+.sr-wasmopt { --k: var(--sr-wasmopt); }
 
 /* One lane per engine: the build and the startup at 40% of the lane's height, the run at p50 at full height in the engine's colour, and a hatch on to p99 at 60%. */
 .lanekey, .lanes li { display: grid; grid-template-columns: 7.5rem minmax(0, 1fr) 4.5rem; gap: var(--s1); align-items: center; }
@@ -25,7 +26,7 @@ svg.chart text { font-family: var(--mono); font-size: var(--t-svg); fill: var(--
 .lanekey .build::before { background: var(--lane-build); }
 .lanekey .start::before { background: var(--lane-start); }
 .lanekey .run::before { height: 10px; background: var(--sr-vyrn); }
-.lanekey .tail::before { height: 6px; background: repeating-linear-gradient(135deg, var(--sr-vyrn) 0 1.5px, transparent 1.5px 4px); }
+.lanekey .tail::before { --k: var(--sr-vyrn); height: 6px; }
 /* A group of the readout never breaks; the strip wraps between groups. */
 .readout { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px var(--s3); margin: 0 0 var(--s1); padding: 6px 0; border-block: 1px solid var(--hair); font: var(--t-key)/1.6 var(--mono); color: var(--n2); }
 .readout > b { color: var(--ink); }
@@ -53,7 +54,9 @@ svg.chart text { font-family: var(--mono); font-size: var(--t-svg); fill: var(--
 .lanes .lbar .build { width: var(--b); background: var(--lane-build); }
 .lanes .lbar .start { width: var(--s); background: var(--lane-start); }
 .lanes .lbar .run { width: var(--r); height: 100%; background: var(--k); }
-.lanes .lbar .tail { width: var(--t); height: 60%; background: repeating-linear-gradient(135deg, var(--k) 0 1.5px, transparent 1.5px 4px); }
+.lanes .lbar .tail { width: var(--t); height: 60%; }
+/* Each stripe edge ramps over 0.8px; a hard stop on a diagonal aliases into steps. */
+.lanes .lbar .tail, .lanekey .tail::before { background: repeating-linear-gradient(135deg, var(--k) 0 1.1px, transparent 1.9px 4px); }
 .lanes .ltotal { white-space: nowrap; color: var(--ink); }
 .lanes .lmem { text-align: right; white-space: nowrap; }
 .lanes .rd, .splot .rd { display: none; }
@@ -66,7 +69,6 @@ svg.chart text { font-family: var(--mono); font-size: var(--t-svg); fill: var(--
 .splot { position: relative; width: 7.5rem; height: 1.5rem; }
 .splot svg { display: block; width: 100%; height: 100%; overflow: visible; }
 .splot polyline { fill: none; stroke: var(--k); stroke-width: 15; stroke-linejoin: round; }
-.splot polyline.dashed { stroke-dasharray: 40 30; }
 .splot circle { fill: var(--k); }
 .splot .pts { position: absolute; inset: 0; display: flex; }
 .splot .pt { flex: 1; border-radius: 2px; }

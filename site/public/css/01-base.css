@@ -36,8 +36,10 @@
   --sr-rust: var(--amber);
   --sr-node: var(--syn-str);
   --sr-bun: oklch(0.45 0.14 320);
-  --sr-wasmopt: oklch(0.5 0.16 30);
   --sr-vyrn: var(--accent);
+  /* Vyrn's other engines: the accent, tinted toward the ink, so the text inside a run keeps its contrast in both themes. */
+  --sr-wasm: color-mix(in oklab, var(--accent) 70%, var(--ink));
+  --sr-wasmopt: color-mix(in oklab, var(--accent) 45%, var(--ink));
   --lane-build: oklch(0.3 0.006 60);
   --lane-start: oklch(0.6 0.006 60);
   --code-wash: 5%;
@@ -109,7 +111,6 @@
     --syn-kw: oklch(0.77 0.05 255);
     --syn-str: oklch(0.78 0.1 150);
     --sr-bun: oklch(0.78 0.12 320);
-    --sr-wasmopt: oklch(0.75 0.14 30);
     --lane-build: oklch(0.5 0.004 60);
     --lane-start: oklch(0.9 0.004 60);
     --syn-com: var(--n1);
@@ -135,7 +136,6 @@
   --syn-kw: oklch(0.77 0.05 255);
   --syn-str: oklch(0.78 0.1 150);
   --sr-bun: oklch(0.78 0.12 320);
-  --sr-wasmopt: oklch(0.75 0.14 30);
   --lane-build: oklch(0.5 0.004 60);
   --lane-start: oklch(0.9 0.004 60);
   --syn-com: var(--n1);
