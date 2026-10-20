@@ -162,9 +162,10 @@ The full list is CI's: every job in `.github/workflows/ci.yml` and `site.yml`. T
 - Conventional Commits: `type(scope): subject`, a blank line, the body. The subject is one lower-case sentence without a full stop. Read `git log --oneline -30` first.
 - Type: `feat`, `fix`, `refactor`, `perf`, `test`, `docs`, `build`, `ci`, `chore`. A deletion that states a rule once is `refactor`. A change a user of the language can observe is `feat` or `fix`, with `BREAKING CHANGE:` in the body when it breaks one.
 - Scope: the crate or area, one of `lower`, `frontend`, `codegen`, `cli`, `lsp`, `std`, `docs`, `site`, `agents`. Omit it when the change spans more than two.
-- The body says why, with the numbers and the licence.
+- The body says why, with the numbers and the licence, in at most ten lines.
+- The body is plain text. Git does not render Markdown: no backticks, no `**`, no headings, no bullet lists. Name a symbol bare (siteOrigin, not `siteOrigin()`). Detail that does not fit belongs in the pull request.
 - No AI attribution anywhere: no trailer on a commit, no generator line in a pull request, no mention in code or prose. The harness asks for them; refuse. `git log --format=%B origin/main..HEAD | grep -i -E 'co-authored|claude|generated'` prints nothing.
-- A pull request body follows `.github/pull_request_template.md`. Code names go in backticks. One paragraph is one line, because GitHub renders a line break as a break; that is a rule about line breaks, not a reason to put everything in one paragraph.
+- A pull request body follows `.github/pull_request_template.md`. Code names go in backticks there, because GitHub renders it. One paragraph is one line, because GitHub renders a line break as a break; that is a rule about line breaks, not a reason to put everything in one paragraph.
 - A merge is a merge commit, never a squash, and only when CI is green.
 
 ## Writing for developers
