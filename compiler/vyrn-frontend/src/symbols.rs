@@ -2488,10 +2488,12 @@ fn type_decl_detail(t: &TypeDecl, all: &[TypeDecl], sp: &Spellings) -> String {
         }
         _ => {
             let s = spell(&say, &t.base);
-            if t.predicate.is_some() {
-                format!("type {name} = {s} (validated)")
-            } else {
-                format!("type {name} = {s}")
+            match &t.predicate {
+                Some(p) => format!(
+                    "type {name} = {s} where {}",
+                    crate::checker::pred_summary(p)
+                ),
+                None => format!("type {name} = {s}"),
             }
         }
     }
