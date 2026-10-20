@@ -1,0 +1,54 @@
+/// Editor support for the `.vyx` pages `std/ui` claims.
+///
+/// No program links this module, so a program that uses `std/ui` pays
+/// nothing for it. A tool finds it beside `std/ui` by its name.
+
+import { vyxScriptView, vyxHasTemplate, vyxStemOf } from "std/vyx.editor"
+import { vyxPageShape } from "std/vyx"
+import { joinWith } from "std/strings"
+
+/// The view of the page source `src` whose file stem is `stem`:
+/// `std/vyx.editor`'s [`vyxScriptView`], then the `page` its `<template>` compiles
+/// to. A `layout.vyx` or `error.vyx` is chrome, not a page, and declares
+/// nothing more.
+gen fn uiPageView(src: String, stem: String) -> String {
+    let view = vyxScriptView(src)
+    if stem == "layout" || stem == "error" || vyxHasTemplate(src) == false {
+        return view
+    }
+    let shape = vyxPageShape(src)
+    let mut params: Array<String> = []
+    if shape.paramNames.length > 0 {
+        params.push("p: Params")
+    }
+    if shape.hasLoad {
+        params.push("d: Data")
+    }
+    return view + "\nexport fn page(" + joinWith(params, ", ") + ") -> Html {}\n"
+}
+
+/// The Vyrn a tool reads in the `.vyx` page at `path`: its `<script>` at the
+/// file's own positions, then the `page` its `<template>` compiles to.
+export gen fn vyrnSourceUi(path: String) -> String {
+    let src = match readFile(path) {
+        Ok(s) => s,
+        Err(e) => "",
+    }
+    return uiPageView(src, vyxStemOf(path))
+}
+
+test "a page view ends in the page its template compiles to" {
+    let v = uiPageView("<script>\nexport fn helper() -> Int64 {\n    return 1\n}\n</script>\n<template><h1>hi</h1></template>\n", "index")
+    assert(v.endsWith("\nexport fn page() -> Html {}\n"))
+}
+
+test "a page without a template, and a layout, provide nothing" {
+    let half = "<script>\n</script>\n"
+    assertEq(uiPageView(half, "index"), vyxScriptView(half))
+    let shell = "<template><main><slot/></main></template>\n"
+    assertEq(uiPageView(shell, "layout"), vyxScriptView(shell))
+}
+
+test "a template with no script at all is still a page" {
+    assert(uiPageView("<template>\n<p></p>\n</template>\n", "index").endsWith("export fn page() -> Html {}\n"))
+}

@@ -97,6 +97,14 @@ fn vyxIsWs(b: UInt8) -> Bool
 
 True for an ASCII space, tab, CR, or LF.
 
+## vyxLowerFirst
+
+```vyrn
+fn vyxLowerFirst(s: String) -> String
+```
+
+Lowercases the first ASCII byte of `s` (`ItemRow` -> `itemRow`).
+
 ## vyxFindLast
 
 ```vyrn
@@ -153,6 +161,15 @@ fn vyxSection(ba: Array<UInt8>, name: String, isCode: Bool) -> VyxSection
 The content bounds of `<name> ... </name>` in `ba`, found by the scanner for
 the section's language: code when `isCode` (`<script>`), markup otherwise.
 So a literal `</script>` in a helper string never truncates the section.
+
+## vyxSectionAvoid
+
+```vyrn
+fn vyxSectionAvoid(ba: Array<UInt8>, name: String, isCode: Bool, avoidS: Int64, avoidE: Int64) -> VyxSection
+```
+
+`vyxSection` skipping any open tag inside `[avoidS, avoidE)`, so a literal
+`<template>` in a script helper string never claims the template section.
 
 ## VyxScript
 

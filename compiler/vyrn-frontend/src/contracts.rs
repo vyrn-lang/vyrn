@@ -561,39 +561,6 @@ pub struct ContractCompletion {
     pub required: bool,
 }
 
-/// Returns the contract members a file's form provides without declaring
-/// them: names `vyrn why --contract` must not report absent and
-/// [`contract_completions`] must not offer.
-///
-/// A `.vyx`'s `<template>` is its view: `std/vyx` compiles it into an
-/// `Html`-returning export that the `<script>` never mentions. The test is
-/// the member's return type, not its name, because the consuming generator
-/// chooses the name.
-pub fn synthesized_members(view: &ContractView, path: &str, file_text: &str) -> Vec<String> {
-    if !path.ends_with(".vyx") || !has_template(file_text) {
-        return Vec::new();
-    }
-    view.members
-        .iter()
-        .filter(|m| {
-            !m.shapes.is_empty() && m.shapes.iter().all(|s| s.kind == "fn" && s.ret == "Html")
-        })
-        .map(|m| m.name.clone())
-        .collect()
-}
-
-/// Returns whether a `.vyx` source has a `<template>` section outside the
-/// `<script>`, on either side of it, as `std/vyx`'s `vyxSectionAvoid` allows.
-/// [`crate::vyx::script_body`] finds the script by `std/vyx`'s rule.
-fn has_template(text: &str) -> bool {
-    let (before, after) = match crate::vyx::script_body(text) {
-        // `text[..start]` ends with the open tag, which holds no `<template`.
-        Some((start, end)) => (&text[..start], &text[end + "</script>".len()..]),
-        None => ("", text),
-    };
-    before.contains("<template") || after.contains("<template")
-}
-
 /// Returns the contract members to offer at module scope, required first.
 ///
 /// A name in `already`, the module's exports, is not offered again. A member

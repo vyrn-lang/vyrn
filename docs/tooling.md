@@ -228,9 +228,11 @@ compile, except `--contract`.
   module is linked first, as `moduleInterface` links it, so a type reached
   through `import * as m` reads as the generator reads it; a module that does
   not link prints the loader's diagnostics and exits 1, with no report. A
-  `.vyx` page is read from its `<script>`, as `vyxPageInterface` reads it. The
-  app root is the editor's: the directory of the nearest `vyrn.json`, at any
-  depth, else the file's directory. Exits 1 if the file has no role.
+  generator input is read through its generator's view
+  (`audience::InputView`), and a member its form writes reads "the file's
+  form writes it". The app root is the editor's: the directory of the nearest
+  `vyrn.json`, at any depth, else the file's directory. Exits 1 if the file
+  has no role.
 - `vyrn why --cost <file>`: per function of the file, the lines that allocate,
   copy, grow a container, enter an allocating function of another file or keep
   a check, with the loop depth of each, and a summary. A row names what it

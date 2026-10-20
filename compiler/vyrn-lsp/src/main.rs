@@ -1213,6 +1213,16 @@ fn input_completion(
     Some(CompletionResponse::Array(members))
 }
 
+/// The generator input `uri` as the `vyrnSource*` of its claiming generator
+/// module's editor companion writes it ([`vyrn_frontend::audience::InputView`]), read with the open
+/// buffers.
+fn input_view(server: &Server, uri: &Url) -> Option<vyrn_frontend::audience::InputView> {
+    let (root, claim, file) = input_claim(server, uri)?;
+    let overlays = overlays_of(server);
+    let (opts, resolver, _, _) = load_context(&server.session, &root, &overlays)?;
+    vyrn_frontend::audience::input_view(&claim, &file, &opts, &resolver, Some(&*engine()))
+}
+
 /// The items the claiming generator module offers at `line`, `col` of the
 /// input `uri`, through the `gen fn vyrnComplete*` of its editor companion
 /// ([`vyrn_frontend::loader::call_generator`]). Empty when no module claims the
@@ -2071,21 +2081,17 @@ fn lookup<'s>(server: &'s Server, uri: &Url) -> Option<(&'s Analysis, Url)> {
 /// A document seen through the contract that governs it.
 struct ContractCtx {
     view: vyrn_frontend::contracts::ContractView,
-    /// The buffer for a `.vyrn`, the `<script>` body for a `.vyx`.
+    /// The buffer for a `.vyrn`; a generator input's view of its Vyrn code, at
+    /// the buffer's own positions.
     source: String,
-    /// Lines to add to a `source` position to reach the buffer (0 for `.vyrn`).
-    line_offset: usize,
-    /// The members the document's form writes, such as a `.vyx`'s `<template>`.
-    /// Completion must not offer one: it would collide with the generated export.
-    synthesized: Vec<String>,
+    /// A generator input's view; `None` for a `.vyrn`.
+    input: Option<vyrn_frontend::audience::InputView>,
 }
 
 impl ContractCtx {
-    /// A buffer line -> its line in [`Self::source`], or `None` outside a
-    /// `.vyx` script.
-    fn to_source_line(&self, line: usize) -> Option<usize> {
-        let l = line.checked_sub(self.line_offset)?;
-        (l > 0 && l <= self.source.lines().count() + 1).then_some(l)
+    /// Whether buffer `line` is Vyrn code, where the contract's members apply.
+    fn is_code(&self, line: usize) -> bool {
+        self.input.as_ref().is_none_or(|v| v.is_code(line))
     }
 }
 
@@ -2096,14 +2102,11 @@ impl ContractCtx {
 /// no role or an unreadable contract module.
 fn contract_ctx(server: &Server, uri: &Url) -> Option<ContractCtx> {
     let path = uri_path(uri)?;
-    let text = doc_text(server, uri)?;
-    // `raw` is the whole `.vyx`, whose `<template>` is outside the script body.
-    // Empty for a `.vyrn`.
-    let (source, line_offset, raw) = if is_vyrn_uri(uri) {
-        (text, 0, String::new())
+    let (source, input) = if is_vyrn_uri(uri) {
+        (doc_text(server, uri)?, None)
     } else {
-        let (body, offset) = contracts::vyx_script(&text)?;
-        (body, offset, text)
+        let view = input_view(server, uri)?;
+        (view.code.clone(), Some(view))
     };
 
     let dir = std::path::Path::new(&path).parent()?.to_path_buf();
@@ -2140,12 +2143,10 @@ fn contract_ctx(server: &Server, uri: &Url) -> Option<ContractCtx> {
     // A cached view is trusted only while its own declaring file is unchanged.
     if let Some((was, view)) = entry.views.get(&key) {
         if *was == contracts::file_sig(std::path::Path::new(&view.file)) {
-            let synthesized = vyrn_frontend::contracts::synthesized_members(view, &path, &raw);
             return Some(ContractCtx {
                 view: view.clone(),
                 source,
-                line_offset,
-                synthesized,
+                input,
             });
         }
     }
@@ -2157,12 +2158,10 @@ fn contract_ctx(server: &Server, uri: &Url) -> Option<ContractCtx> {
     let view = vyrn_frontend::contracts::load_role_contract(&role, &manifest, &opts, &resolver)?;
     let file_sig = contracts::file_sig(std::path::Path::new(&view.file));
     entry.views.insert(key, (file_sig, view.clone()));
-    let synthesized = vyrn_frontend::contracts::synthesized_members(&view, &path, &raw);
     Some(ContractCtx {
         view,
         source,
-        line_offset,
-        synthesized,
+        input,
     })
 }
 
@@ -2177,15 +2176,12 @@ fn contract_completion_items(
     let Some(ctx) = contract_ctx(server, uri) else {
         return Vec::new();
     };
-    let Some(src_line) = ctx.to_source_line(line) else {
-        return Vec::new();
-    };
-    if !vyrn_frontend::at_module_scope(&ctx.source, src_line, col) {
+    if !ctx.is_code(line) || !vyrn_frontend::at_module_scope(&ctx.source, line, col) {
         return Vec::new();
     }
     // What the document already exports, from its source or its form.
     let mut already = contracts::exported_names(&ctx.source);
-    already.extend(ctx.synthesized.iter().cloned());
+    already.extend(ctx.input.iter().flat_map(|v| v.provided.iter().cloned()));
     vyrn_frontend::contracts::contract_completions(&ctx.view, &already)
         .into_iter()
         .map(|c| CompletionItem {
@@ -2217,8 +2213,7 @@ fn contract_member_at(
     col: usize,
 ) -> Option<(ContractCtx, String)> {
     let ctx = contract_ctx(server, uri)?;
-    let src_line = ctx.to_source_line(line)?;
-    if !vyrn_frontend::at_module_scope(&ctx.source, src_line, col) {
+    if !ctx.is_code(line) || !vyrn_frontend::at_module_scope(&ctx.source, line, col) {
         return None;
     }
     let text = server.docs.get(uri)?;
@@ -2266,7 +2261,7 @@ fn handle_code_action(
     let mut out = Vec::new();
     let text = doc_text(server, uri).unwrap_or_default();
     for fix in vyrn_frontend::contracts::contract_fixes(&ctx.view, &ctx.source) {
-        let range = lsp_range(&text, fix.line + ctx.line_offset, fix.col, fix.end_col);
+        let range = lsp_range(&text, fix.line, fix.col, fix.end_col);
         if !ranges_overlap(&range, &p.range) {
             continue;
         }
@@ -2777,6 +2772,7 @@ fn handle_rename(server: &Server, params: serde_json::Value) -> Result<Workspace
         &uri,
         &overlays,
         &opts,
+        &|u: &Url| input_view(server, u).map(|v| v.code),
     )
 }
 
@@ -2862,8 +2858,9 @@ fn collect_vyrn(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
     }
 }
 
-/// Collect files with one of `exts` under `dir`, at most `cap`, skipping hidden,
-/// vendored, build and `public/` directories and the subtree `except`.
+/// Collect files with one of `exts`, or any file when `exts` is empty, under
+/// `dir`, at most `cap`, skipping hidden, vendored, build and `public/`
+/// directories and the subtree `except`.
 /// Subdirectories are visited in name order, so a capped walk is deterministic.
 fn collect_sources(
     dir: &std::path::Path,
@@ -2897,10 +2894,10 @@ fn collect_sources(
                 continue;
             }
             subdirs.push(p);
-        } else if p
-            .extension()
-            .and_then(|x| x.to_str())
-            .is_some_and(|x| exts.contains(&x))
+        } else if exts.is_empty()
+            || p.extension()
+                .and_then(|x| x.to_str())
+                .is_some_and(|x| exts.contains(&x))
         {
             out.push(p);
         }

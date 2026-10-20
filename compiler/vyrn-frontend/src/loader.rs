@@ -1711,7 +1711,7 @@ fn run_generator(
         &consts,
         &gen_mod_key,
         Site { line, root_key },
-        true,
+        (true, false),
         opts,
         resolver,
         engine,
@@ -1776,7 +1776,16 @@ pub fn call_generator(
     };
     let mut read = HashMap::new();
     Some(run_resolved(
-        importer, &name, args, &module, site, cache, opts, resolver, engine, &mut read,
+        importer,
+        &name,
+        args,
+        &module,
+        site,
+        (cache, true),
+        opts,
+        resolver,
+        engine,
+        &mut read,
     ))
 }
 
@@ -1827,7 +1836,9 @@ struct Site<'a> {
 /// Runs `name` of the generator module `gen_mod_key` on `consts`, as a call
 /// written in `importer`: the cache, the sandbox's input roots, the load and
 /// check of the generator's program, and the run. Returns the output text.
-/// With `cache` false the output is neither looked up nor stored.
+/// `(cache, memo)`: with `cache` false the output is neither looked up nor
+/// stored; with `memo` a checked generator program is reused while its sources
+/// are unchanged, which the editor's and the tools' calls ask for.
 #[allow(clippy::too_many_arguments)]
 fn run_resolved(
     importer: &str,
@@ -1835,7 +1846,7 @@ fn run_resolved(
     consts: &[crate::consteval::ConstVal],
     gen_mod_key: &str,
     site: Site<'_>,
-    cache: bool,
+    (cache, memo): (bool, bool),
     opts: &LoadOptions,
     resolver: &dyn ModuleResolver,
     engine: Option<&crate::gen::GenEngine>,
@@ -1932,7 +1943,7 @@ fn run_resolved(
         inner.expansions = crate::project::Expansions::shared();
     }
     let checked =
-        checked_generator(&gen_mod_key, !cache, &inner, resolver, engine, read).map_err(|e| {
+        checked_generator(&gen_mod_key, memo, &inner, resolver, engine, read).map_err(|e| {
             e.unwrap_or_else(|why| err(rule!(GenModuleReread, module = gen_mod_key, why)))
         })?;
     let gen_program = &checked.program;
@@ -2022,8 +2033,8 @@ struct CheckedGen {
 }
 
 thread_local! {
-    /// Checked generator programs for the editor's per-cursor calls, by module
-    /// and load context; an entry stands while every source hashes the same.
+    /// Checked generator programs for [`call_generator`], by module and load
+    /// context; an entry stands while every source hashes the same.
     static CHECKED_GENS: std::cell::RefCell<HashMap<String, Rc<CheckedGen>>> =
         std::cell::RefCell::new(HashMap::new());
 }

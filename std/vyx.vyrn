@@ -123,7 +123,7 @@ fn vyxIsIdent(b: UInt8) -> Bool {
 }
 
 /// Lowercases the first ASCII byte of `s` (`ItemRow` -> `itemRow`).
-fn vyxLowerFirst(s: String) -> String {
+export fn vyxLowerFirst(s: String) -> String {
     let ba = bytes(s)
     let mut out: Array<UInt8> = []
     let mut i = 0
@@ -958,7 +958,7 @@ export fn vyxSection(ba: Array<UInt8>, name: String, isCode: Bool) -> VyxSection
 
 /// `vyxSection` skipping any open tag inside `[avoidS, avoidE)`, so a literal
 /// `<template>` in a script helper string never claims the template section.
-fn vyxSectionAvoid(ba: Array<UInt8>, name: String, isCode: Bool, avoidS: Int64, avoidE: Int64) -> VyxSection {
+export fn vyxSectionAvoid(ba: Array<UInt8>, name: String, isCode: Bool, avoidS: Int64, avoidE: Int64) -> VyxSection {
     let openPat = bytes("<" + name + ">")
     let mut from = 0
     let mut openAt = 0 - 1

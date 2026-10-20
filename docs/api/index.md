@@ -40,6 +40,7 @@
 - [std/time](std/time.md) — Wall-clock time at the host boundary, and a pure calendar breakdown.
 - [std/tw](std/tw.md) — Theme-derived utility classes as a checked type. `tw(theme)` reads
 - [std/ui](std/ui.md) — File-based routing as a generator: `pages(dir)` scans a
+- [std/ui.editor](std/ui.editor.md) — Editor support for the `.vyx` pages `std/ui` claims.
 - [std/von](std/von.md) — VON, Vyrn Object Notation, Vyrn's literal grammar saved to a file.
 - [std/vyx](std/vyx.md) — The `.vyx` single-file component compiler, in comptime-pure Vyrn.
 - [std/vyx-hints](std/vyx-hints.md) — Accessibility, security and performance rules for `.vyx` components.
