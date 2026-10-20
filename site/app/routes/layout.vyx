@@ -65,7 +65,7 @@ fn standing() -> String {
     <div id="main" class="skip-target" tabindex="-1"></div>
     <slot/>
     <footer class="foot">
-        <span>Copyright 2026 Max Demydenko. MIT or Apache-2.0.</span>
+        <span>Copyright 2026 vyrn-lang. MIT or Apache-2.0.</span>
         <a href="/releases.html"><Icon name="bytesize:tag"/> Releases</a>
         <span>{{ standing() }}</span>
     </footer>
