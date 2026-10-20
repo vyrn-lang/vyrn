@@ -1,8 +1,7 @@
 import { substring, split, repeat } from "std/strings"
-import { startsWith } from "std/strpred"
 import { Head, noHead, withTitle, withMeta } from "std/ui"
 import { metaOf } from "./meta"
-import { Markup, markupString } from "std/html"
+import { Markup } from "std/html"
 
 export fn pageHead(title: String) -> Head {
     return pageHeadWith(title, "Vyrn is a systems language with the expressiveness of TypeScript. Types carry the rules that make a value valid. Ownership is a word you write on a parameter. No garbage collector, and one program for three backends.")
@@ -49,10 +48,6 @@ export fn navRows() -> Array<NavRow> {
 }
 
 /// A string, not template markup: `markCurrent` in `site/export.vyrn` needs `href` then `data-key` first.
-export fn installCta() -> Markup {
-    return TrustedMarkup("<a href=\"\{hrefOf("/install")}\" data-key=\"\{hrefOf("/install")}\" class=\"cta\">Install</a>")
-}
-
 test "the home page keeps the bare index name" {
     assertEq(published("/"), "index.html")
     assertEq(hrefOf("/"), "/index.html")
@@ -86,9 +81,4 @@ test "the navigation is three rows, and the book keeps its label" {
         assert(row.href != hrefOf("/tooling/editors"))
         assert(row.href != hrefOf("/releases"))
     }
-}
-
-test "the call to action names the install route, and names it first" {
-    let cta = markupString(installCta())
-    assert(startsWith(cta, "<a href=\"/install.html\" data-key=\"/install.html\""))
 }

@@ -12,7 +12,7 @@
 .idecompact .masthead .wordmark { min-height: 30px; }
 .idewrap { --chrome: color-mix(in oklab, var(--ink) 6%, var(--paper)); --chromeline: color-mix(in oklab, var(--ink) 12%, var(--paper)); --side-w: 224px; --panel-h: 200px; --split-a: 1fr; --split-b: 1fr; display: grid; gap: 0; align-items: stretch; grid-template-columns: var(--side-w) 6px minmax(0, 1fr); grid-template-rows: minmax(0, 1fr) 6px var(--panel-h) auto; padding: 6px; background: var(--chrome); height: calc(100dvh - var(--mast, 64px)); min-height: 30rem; box-sizing: border-box; }
 .idewrap.splitview { grid-template-columns: var(--side-w) 6px minmax(0, var(--split-a)) 6px minmax(0, var(--split-b)); }
-.idewrap > .ideside, .idewrap > .idemain, .idewrap > .idepanel { border: 1px solid var(--chromeline); border-radius: 8px; overflow: hidden; background: var(--paper); }
+.idewrap > .ideside, .idewrap > .idemain, .idewrap > .idepanel { border: 1px solid var(--chromeline); overflow: hidden; background: var(--paper); }
 .sash { position: relative; }
 .sash.v { cursor: col-resize; }
 .sash.h { cursor: row-resize; }

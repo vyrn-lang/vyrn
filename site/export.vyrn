@@ -88,9 +88,6 @@ fn currentNav(path: String) -> String {
             return row.href.copy()
         }
     }
-    if path == "/install" {
-        return hrefOf("/install")
-    }
     if path == "/docs" || startsWith(path, "/docs/") || startsWith(path, "/guide/") {
         return hrefOf("/guide")
     }
@@ -103,7 +100,7 @@ fn currentNav(path: String) -> String {
     return ""
 }
 
-/// The first match is the masthead's. The needle stops before `>` so it also matches `installCta`.
+/// The first match is the masthead's.
 fn markCurrent(html: String, path: String) -> String {
     let href = currentNav(path)
     if href.byteLength == 0 {
@@ -691,7 +688,7 @@ test "the two representations of one URL differ" {
 }
 
 test "every published document marks exactly one thing in its masthead" {
-    let mut targets: Array<String> = [hrefOf("/install")]
+    let mut targets: Array<String> = []
     for row in navRows() {
         targets.push(row.href.copy())
     }
@@ -701,7 +698,7 @@ test "every published document marks exactly one thing in its masthead" {
         for href in targets {
             marked = marked + countOf(html, "data-key=\"\{href}\" aria-current=\"page\"")
         }
-        let orphan = path == "/" || path == "/compare" || path == "/why-vyrn" || path == "/releases" || redirectTarget(path).byteLength > 0
+        let orphan = path == "/" || path == "/install" || path == "/compare" || path == "/why-vyrn" || path == "/releases" || redirectTarget(path).byteLength > 0
         assertEq(marked, if orphan { 0 } else { 1 })
     }
 }
@@ -764,7 +761,7 @@ test "every documentation page marks Docs, and the home page nothing" {
     assertEq(currentNav("/tooling/editors"), "/guide.html")
     assertEq(currentNav("/docs/editors"), "")
     assertEq(currentNav("/editors"), "")
-    assertEq(currentNav("/install"), "/install.html")
+    assertEq(currentNav("/install"), "")
     assertEq(currentNav("/"), "")
     assertEq(currentNav("/compare"), "")
     assertEq(currentNav("/why-vyrn"), "")
@@ -775,8 +772,6 @@ test "the marker lands on the navigation, not on the first link in the body" {
     let nav = "<a href=\"/guide.html\" data-key=\"/guide.html\">Docs</a>"
     let body = "<p>" + nav + "</p>"
     assertEq(markCurrent(nav + body, "/docs"), "<a href=\"/guide.html\" data-key=\"/guide.html\" aria-current=\"page\">Docs</a>" + body)
-    let cta = "<a href=\"/install.html\" data-key=\"/install.html\" class=\"cta\">Install</a>"
-    assertEq(markCurrent(cta, "/install"), "<a href=\"/install.html\" data-key=\"/install.html\" aria-current=\"page\" class=\"cta\">Install</a>")
 }
 
 test "every name in a module's index points at an export that is on the page" {
