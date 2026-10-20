@@ -59,7 +59,7 @@ export fn isPrerelease(tag: String) -> Bool {
 }
 
 export fn siteOrigin() -> String {
-    return "https://vyrn-lang.github.io/vyrn/"
+    return "https://vyrn-lang.github.io/"
 }
 
 export fn installScript(name: String) -> String {
@@ -100,9 +100,9 @@ test "two install commands, and both of them name this site" {
     let rows = installTargets()
     assertEq(rows.length, 2)
     assertEq(rows[0].id, "unix")
-    assertEq(rows[0].cmd, "curl -fsSL https://vyrn-lang.github.io/vyrn/install.sh | sh")
+    assertEq(rows[0].cmd, "curl -fsSL https://vyrn-lang.github.io/install.sh | sh")
     assertEq(rows[1].id, "windows")
-    assertEq(rows[1].cmd, "powershell -c \"irm https://vyrn-lang.github.io/vyrn/install.ps1|iex\"")
+    assertEq(rows[1].cmd, "powershell -c \"irm https://vyrn-lang.github.io/install.ps1|iex\"")
     assertEq(installScript("install.sh"), siteOrigin() + "install.sh")
 }
 

@@ -383,9 +383,12 @@ fn withRedirect(html: String, path: String) -> String {
     return insertInHead(html, "<meta http-equiv=\"refresh\" content=\"0; url=\{upTo(path)}\{published(to)}\"><link rel=\"canonical\" href=\"\{hrefOf(to)}\">")
 }
 
+/// A link to the root itself becomes `./` on a top-level page, because an empty `href` is refused.
 fn relativize(text: String, path: String) -> String {
     let up = upTo(path)
-    let plain = replace(replace(text, " href=\"/", " href=\"" + up), " src=\"/", " src=\"" + up)
+    let home = if up.byteLength == 0 { "./" } else { up.copy() }
+    let homed = replace(replace(text, " href=\"/\"", " href=\"" + home + "\""), " href=\\\"/\\\"", " href=\\\"" + home + "\\\"")
+    let plain = replace(replace(homed, " href=\"/", " href=\"" + up), " src=\"/", " src=\"" + up)
     return replace(replace(plain, " href=\\\"/", " href=\\\"" + up), " src=\\\"/", " src=\\\"" + up)
 }
 
@@ -836,6 +839,8 @@ test "a URL is written relative to the document that carries it" {
     assertEq(relativize("<a href=\"/docs.html\">", "/guide/values"), "<a href=\"../docs.html\">")
     assertEq(relativize("<script src=\"/widgets.js\">", "/docs/std/json"), "<script src=\"../../widgets.js\">")
     assertEq(relativize("<a href=\"#main\">", "/docs/std/json"), "<a href=\"#main\">")
+    assertEq(relativize("<a href=\"/\">", "/"), "<a href=\"./\">")
+    assertEq(relativize("<a href=\"/\">", "/guide/values"), "<a href=\"../\">")
     assertEq(relativize("<a href=\"https://x/y\">", "/guide/values"), "<a href=\"https://x/y\">")
     assertEq(relativize("<a data-key=\"/docs.html\">", "/guide/values"), "<a data-key=\"/docs.html\">")
     assertEq(relativize("{\"p\":\"<a href=\\\"/docs.html\\\">\"}", "/guide/values"), "{\"p\":\"<a href=\\\"../docs.html\\\">\"}")

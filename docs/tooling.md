@@ -498,4 +498,6 @@ node tests serve `out/` under a path prefix and fetch every page and link.
 
 `site.yml` runs this on every pull request, plus `vyrn test` over each site
 module, `vyrn run site/markup.vyrn` (the template hints) and `vyrn fmt --check`.
-On `main` it publishes `out/` to GitHub Pages.
+On `main` it force-pushes `out/` as one commit to the `main` branch of
+`vyrn-lang/vyrn-lang.github.io`, which Pages serves at https://vyrn-lang.github.io/.
+The push uses the deploy key in the `SITE_DEPLOY_KEY` secret.
