@@ -1639,9 +1639,14 @@ fn vyxCountNewlines(s: String) -> Int64 {
 }
 
 /// Normalizes a script line for matching: trimmed, with a leading `export `
-/// dropped, since page auto-export may add one to a copied helper.
+/// dropped, since page auto-export may add one to a copied helper, and a
+/// contract accessor under its private name.
 fn vyxNormHelper(line: String) -> String {
     let t = trim(line)
+    let acc = vyxAccessorDecl(t)
+    if acc != "" {
+        return acc
+    }
     if t.startsWith("export ") {
         return trim(vyxSlice(bytes(t), 7, bytes(t).length))
     }
@@ -3058,6 +3063,18 @@ fn vyxRenameAccessor(t: String, name: String) -> String {
     return "fn " + vyxAccessorName(name) + vyxSlice(bb, open, bb.length)
 }
 
+/// The trimmed script line `t` renamed when it declares the `head` or `data`
+/// accessor, else "".
+fn vyxAccessorDecl(t: String) -> String {
+    if vyxIsDeclOf(t, "head") {
+        return vyxRenameAccessor(t, "head")
+    }
+    if vyxIsDeclOf(t, "data") {
+        return vyxRenameAccessor(t, "data")
+    }
+    return ""
+}
+
 /// Exports a statement-leading `type Data` line, which the router reaches
 /// through the page's namespace, and renames the `head` and `data` accessors
 /// to their private names. Lines already exported pass through.
@@ -3065,12 +3082,11 @@ fn vyxAutoExportPageDecls(script: String) -> String {
     let mut out = ""
     for line in lines(script) {
         let t = trim(line)
+        let acc = vyxAccessorDecl(t)
         if vyxIsLayoutLine(line) {
             // `layout="none"` is consumed by the router shape; it is not Vyrn.
-        } else if vyxIsDeclOf(t, "head") {
-            out = out + vyxRenameAccessor(t, "head") + "\n"
-        } else if vyxIsDeclOf(t, "data") {
-            out = out + vyxRenameAccessor(t, "data") + "\n"
+        } else if acc != "" {
+            out = out + acc + "\n"
         } else if t.startsWith("type Data") {
             out = out + "export " + line + "\n"
         } else {

@@ -1284,6 +1284,63 @@ fn vyx_lex_error_publishes_into_the_vyx_buffer() {
     );
 }
 
+const ROUTES_APP: &str = "import { pages } from \"std/ui\"\n\
+    import { route } from pages(\"./routes\")\n\
+    fn handle(req: Request) -> Response { return route(req) }\n";
+
+/// Writes `app` as `app.vyrn` and each `(path, text)` of `files` into a fresh
+/// directory, opens the app, and returns the first diagnostic published into
+/// the file named `needle` as `(line, character, message)`, 0-based.
+fn first_input_diag(app: &str, files: &[(&str, &str)], needle: &str) -> (i64, i64, String) {
+    let n = SCRATCH_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let dir = std::env::temp_dir().join(format!("vyrn_lsp_origin_{}_{n}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    for (path, text) in files {
+        let p = dir.join(path);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, text).unwrap();
+    }
+    std::fs::write(dir.join("app.vyrn"), app).unwrap();
+    let mut client = spawn_client();
+    did_open(&mut client, &file_uri(&dir.join("app.vyrn")), "vyrn", app);
+    let note = read_nonempty_diags_for(&mut client, needle);
+    let d0 = &note["params"]["diagnostics"][0];
+    let start = &d0["range"]["start"];
+    let msg = d0["message"].as_str().unwrap_or("").to_string();
+    let _ = client.child.kill();
+    let _ = std::fs::remove_dir_all(&dir);
+    (
+        start["line"].as_i64().unwrap(),
+        start["character"].as_i64().unwrap(),
+        msg,
+    )
+}
+
+/// The `head` accessor compiles under a private name, and its declaration
+/// still maps to its own line.
+#[test]
+fn page_head_declaration_error_maps_to_its_line() {
+    let page = "<script>\nimport { Head, Query, noHead, query } from \"std/ui\"\n\
+        type Row = { title: String }\n\
+        export fn head(d: Rowe) -> Head {\n    return noHead()\n}\n\
+        export fn data() -> Query<Row> {\n    return query(() -> Row { title: \"x\" })\n}\n\
+        </script>\n<template>\n<main>x</main>\n</template>\n";
+    let (line, col, msg) = first_input_diag(ROUTES_APP, &[("routes/index.vyx", page)], "index.vyx");
+    assert!(msg.contains("Rowe"), "{msg}");
+    assert_eq!((line, col), (3, 0), "{msg}");
+}
+
+/// Like the `head` accessor, the `data` accessor maps to its own line.
+#[test]
+fn page_data_declaration_error_maps_to_its_line() {
+    let page = "<script>\nimport { Query, query } from \"std/ui\"\n\
+        export fn data() -> Query<Rowx> {\n    return query(() -> 1)\n}\n</script>\n\
+        <template>\n<main>x</main>\n</template>\n";
+    let (line, col, msg) = first_input_diag(ROUTES_APP, &[("routes/index.vyx", page)], "index.vyx");
+    assert!(msg.contains("Rowx"), "{msg}");
+    assert_eq!((line, col), (2, 0), "{msg}");
+}
+
 /// The break exists only in a `didChange` overlay, so the generator cache must
 /// re-verify its inputs through the overlay-aware resolver.
 #[test]
