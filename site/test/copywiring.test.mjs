@@ -53,3 +53,13 @@ test("every docs page carries the Copy page button", () => {
     if (!html.includes("data-copy-md")) throw new Error(`${p} is a docs page with no Copy page button`);
   }
 });
+
+test("a Copy page link restores the label it had before the first click", async () => {
+  const js = await readFile(fileURLToPath(new URL("../public/copy.js", import.meta.url)), "utf8");
+  const fn = js.slice(js.indexOf("export function copyPageButtons("));
+  const label = fn.indexOf("const was = link.textContent;");
+  const click = fn.indexOf('link.addEventListener("click"');
+  if (label < 0 || click < 0 || label > click) {
+    throw new Error("the label is read inside the click handler, so a second click restores \"Copied\"");
+  }
+});
