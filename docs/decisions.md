@@ -360,6 +360,7 @@ pull request.
 - The LSP trusts its client's file events: under a watched directory it reads a file again only after an event names it. Without the capability it reads the disk on every load, as `vyrn check` does.
 - Remote imports are pinned by SHA-256 in `vyrn.lock`, content-addressed in `~/.vyrn/cache`, vendorable and buildable offline. Only `vyrn update` changes a pin. No semver registry.
 - A manifest that does not parse is an error, never an empty policy.
+- A file another `vyrn` process may read at the same moment (a cache entry, `vyrn.lock`, `vyrn.json`, a vendored blob) is written under a name no other writer uses and renamed into place (`manifest::write_whole`). `vyrn.lock` is saved as this process's changes over the file as it is then, so a pin another build saved survives.
 - A `vyrn` command reads `vyrn.json` and `vyrn.lock` once, into one `Project`. Every load it makes reports through it: the lock is saved, the diagnostics and warnings print one way, and `--offline` and `--deny-warnings` reach every load.
 - Tools are pinned per project in the same lock, and bytes are shared per user. A pinned tool that cannot resolve fails; it never falls back to `PATH`.
 - clang is discovered and recorded, never pinned, because it links against the host's libc.
@@ -378,6 +379,7 @@ pull request.
 - A change that moves emitted wasm bytes rewrites the SHA-256 manifest in the same commit and names every moved row.
 - Censuses of the type constructors and syntax forms are pinned by tests, so the tables cannot drift.
 - Pins are written by gates and merged with the `pin` driver, never by hand.
+- A test sets an environment variable on a child's command, or as the one test of its binary that reads it. `vyrn-lsp` and `vyrn-genwasm` run under `cargo test`, a thread per test, where `set_var` decides by scheduling which test sees it.
 - A test of what `vyrn check` says about one program is `tests/check/<name>.vyrn` and its `.stderr`, not a Rust string.
 - A prediction is written as a program before the change lands and reported either way. Nothing is deleted until the corpus is green on its replacement.
 - A gate that is missed says so; the bar is never moved quietly.
