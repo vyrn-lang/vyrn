@@ -9,6 +9,7 @@
 //! `tests/pins/fuel.tsv` holds the count per program. `VYRN_PIN=write` rewrites it. Fuel may grow
 //! by `VYRN_FUEL_BUDGET` percent (default 0.1) over its row. `VYRN_FUEL_BASE` names another pin
 //! to compare against, so CI measures a pull request against the pin of the commit it builds on.
+//! A program that pin has no row for, one the pull request adds, is held to the tree's own pin.
 //! Against the tree's own pin a count that shrinks by more than the budget also fails: re-pin it.
 
 mod common;
@@ -92,7 +93,8 @@ fn no_benchmark_program_spends_more_fuel_than_its_pin() {
         return;
     }
     let base = std::env::var_os("VYRN_FUEL_BASE");
-    let pinned = read_pin(base.as_ref().map_or(pin_file(), Into::into).as_path());
+    let own = read_pin(&pin_file());
+    let pinned = base.as_ref().map(|b| read_pin(std::path::Path::new(b)));
     let budget: f64 = std::env::var("VYRN_FUEL_BUDGET").map_or(0.1, |b| {
         b.parse()
             .unwrap_or_else(|_| panic!("VYRN_FUEL_BUDGET: {b:?}"))
@@ -100,7 +102,8 @@ fn no_benchmark_program_spends_more_fuel_than_its_pin() {
 
     let mut failures = Vec::new();
     for (name, fuel) in &got {
-        let Some(&was) = pinned.get(name) else {
+        let from_base = pinned.as_ref().and_then(|p| p.get(name));
+        let Some(&was) = from_base.or_else(|| own.get(name)) else {
             failures.push(format!(
                 "{name}: no row in the pin; add it with VYRN_PIN=write"
             ));
@@ -111,7 +114,7 @@ fn no_benchmark_program_spends_more_fuel_than_its_pin() {
             failures.push(format!(
                 "{name}: {was} -> {fuel} fuel, +{change:.3}% (budget {budget}%)"
             ));
-        } else if base.is_none() && change < -budget {
+        } else if from_base.is_none() && change < -budget {
             failures.push(format!(
                 "{name}: {was} -> {fuel} fuel, {change:.3}%; re-pin with VYRN_PIN=write"
             ));
