@@ -2862,11 +2862,14 @@ fn add(call: &Call) -> Outcome {
     ))?;
     p.save_lock()?;
 
-    // Rewrites the document already read; key order stays stable.
-    let manifest_path = Path::new(&manifest.dir).join("vyrn.json");
+    // Rewrites the file as it is under the project lock, so an edit made since
+    // the read above survives; key order stays stable.
+    let dir = Path::new(&manifest.dir);
+    let manifest_path = dir.join("vyrn.json");
+    let _held = failed(vyrn_frontend::manifest::lock_project_files(dir))?;
     use vyrn_frontend::schema::Json;
-    let mut fields = match &manifest.doc {
-        Json::Obj(f) => f.clone(),
+    let mut fields = match failed(vyrn_frontend::manifest::find(dir))?.map(|m| m.doc) {
+        Some(Json::Obj(f)) => f,
         _ => Vec::new(),
     };
     let dep_entry = (alias.clone(), Json::Str(spec.clone()));

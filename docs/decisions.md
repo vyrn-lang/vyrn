@@ -362,6 +362,7 @@ pull request.
 - Remote imports are pinned by SHA-256 in `vyrn.lock`, content-addressed in `~/.vyrn/cache`, vendorable and buildable offline. Only `vyrn update` changes a pin. No semver registry.
 - A manifest that does not parse is an error, never an empty policy.
 - A file another `vyrn` process may read at the same moment (a cache entry, `vyrn.lock`, `vyrn.json`, a vendored blob) is written under a name no other writer uses and renamed into place (`manifest::write_whole`). `vyrn.lock` is saved as this process's changes over the file as it is then, so a pin another build saved survives.
+- `vyrn.lock` and `vyrn.json` writes take an OS advisory lock (`File::lock`) on one lock file per project directory, `~/.vyrn/locks/<hash>.files` (`manifest::lock_project_files`), held across reload, merge and rename and never across a build, so the lost update closes.
 - A `vyrn` command reads `vyrn.json` and `vyrn.lock` once, into one `Project`. Every load it makes reports through it: the lock is saved, the diagnostics and warnings print one way, and `--offline` and `--deny-warnings` reach every load.
 - Tools are pinned per project in the same lock, and bytes are shared per user. A pinned tool that cannot resolve fails; it never falls back to `PATH`.
 - clang is discovered and recorded, never pinned, because it links against the host's libc.

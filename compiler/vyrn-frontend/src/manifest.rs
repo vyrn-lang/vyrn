@@ -314,6 +314,8 @@ impl Lock {
     /// Writes this lock's changes over the file as it is now, so a pin another
     /// process saved since [`Lock::load`] survives, and replaces the file whole.
     pub fn save(&self) -> Result<(), String> {
+        let dir = self.path.parent().filter(|d| !d.as_os_str().is_empty());
+        let _held = lock_project_files(dir.unwrap_or(Path::new(".")))?;
         let mut merged = Lock::load(self.path.clone())?.entries;
         merged.retain(|spec, _| self.entries.contains_key(spec) || !self.loaded.contains_key(spec));
         for (spec, pin) in &self.entries {
@@ -344,6 +346,37 @@ fn home() -> String {
     std::env::var("USERPROFILE")
         .or_else(|_| std::env::var("HOME"))
         .unwrap_or_else(|_| ".".to_string())
+}
+
+/// Takes this machine's lock on the `vyrn.lock` and `vyrn.json` of
+/// `project_dir`, waiting while another process holds it. The lock goes with
+/// the returned file. Hold it across one reload, merge and rename, never
+/// across a build.
+pub fn lock_project_files(project_dir: &Path) -> Result<std::fs::File, String> {
+    let file = project_lock_file(project_dir, "files")?;
+    file.lock()
+        .map_err(|e| format!("cannot lock {}: {e}", project_dir.display()))?;
+    Ok(file)
+}
+
+/// Opens `~/.vyrn/locks/<hash of the canonical directory>.<what>`: one file
+/// per project and purpose, outside the project, so a checkout gains no file.
+/// An OS lock on it goes with a killed holder.
+fn project_lock_file(project_dir: &Path, what: &str) -> Result<std::fs::File, String> {
+    let path = project_lock_path(project_dir, what);
+    path.parent()
+        .map_or(Ok(()), std::fs::create_dir_all)
+        .and_then(|()| {
+            let mut open = std::fs::OpenOptions::new();
+            open.create(true).truncate(false).write(true).open(&path)
+        })
+        .map_err(|e| format!("cannot open the project lock {}: {e}", path.display()))
+}
+
+fn project_lock_path(project_dir: &Path, what: &str) -> PathBuf {
+    let key = std::fs::canonicalize(project_dir).unwrap_or_else(|_| project_dir.to_path_buf());
+    let name = crate::hash::sha256_hex(key.to_string_lossy().as_bytes());
+    Path::new(&home()).join(format!(".vyrn/locks/{name}.{what}"))
 }
 
 /// The user's module cache: `~/.vyrn/cache/sha256/<hex>`.
@@ -596,6 +629,19 @@ mod tests {
             on_disk.keys().collect::<Vec<_>>(),
             ["https://x.dev/a.vyrn", "https://x.dev/b.vyrn"]
         );
+    }
+
+    #[test]
+    fn a_project_lock_excludes_a_second_holder_until_it_drops() {
+        let dir = tmp("project-lock");
+        let held = lock_project_files(&dir).unwrap();
+        let other = project_lock_file(&dir, "files").unwrap();
+        assert!(matches!(
+            other.try_lock(),
+            Err(std::fs::TryLockError::WouldBlock)
+        ));
+        drop(held);
+        assert!(other.try_lock().is_ok());
     }
 
     #[test]
