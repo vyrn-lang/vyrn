@@ -117,12 +117,16 @@ pub struct Analysis {
     /// Every sequence validated string type: an infinite
     /// space-separated sequence over a finite alphabet, such as `Tw`. Maps it to
     /// its single-token alphabet, taken from the DFA the compiler checks against,
-    /// for token completion inside `class="..."` and `theme.cls("...")`.
+    /// for token completion inside `class="..."` and a class call's argument.
     pub sequence_string_types: Vec<(String, Vec<String>)>,
-    /// The theme's utility stylesheet, the constant `std/tw`'s `css()` returns,
-    /// so hover on a class token shows its rule or reports it
-    /// safelisted. Empty when no theme is linked.
-    pub tw_css: String,
+    /// The function whose string argument is a class list, as a generator's
+    /// editor companion names it in `vyrnClassCall*`. Empty when no claim's
+    /// companion names one.
+    pub class_call: String,
+    /// The theme's stylesheet: the constant that the function a companion
+    /// names in `vyrnStylesheet*` returns, so hover on a class token shows its
+    /// rule or reports it safelisted. Empty when no theme is linked.
+    pub class_css: String,
     /// Each `import * as ns` binding and the exported symbols it reaches,
     /// so `ns.` completes and `ns.member` hovers and jumps. Filled
     /// only by [`analyze_linked`].
@@ -623,13 +627,21 @@ fn analyze_inner(
             sequence_string_types.push((t.name.clone(), alphabet));
         }
     }
-    // The theme stylesheet (`std/tw`'s baked `css()`), captured only when a
-    // sequence type is present, so an unrelated user `css()` is not picked up.
-    let tw_css = if sequence_string_types.is_empty() {
-        String::new()
-    } else {
-        css_constant(member_src).unwrap_or_default()
+    // The class call and the stylesheet come from the companions of the
+    // root's claims, asked only when a sequence type is present, so a program
+    // without a theme runs no companion.
+    let ask = |prefix: &str| match linker {
+        Some((root, opts, resolver)) if !sequence_string_types.is_empty() => {
+            let answers =
+                crate::audience::companion_answers(root, &program, prefix, opts, resolver, engine);
+            (answers.into_iter().map(|(_, answer)| answer))
+                .find(|answer| !answer.is_empty())
+                .unwrap_or_default()
+        }
+        _ => String::new(),
     };
+    let class_call = ask("vyrnClassCall");
+    let class_css = string_constant(member_src, &ask("vyrnStylesheet")).unwrap_or_default();
 
     // Memory notes only when the checks ran and found no error: the analysis
     // reads a program the checker approved. `remapped` counts too, because a
@@ -667,7 +679,8 @@ fn analyze_inner(
         finite_string_types,
         fn_param_types,
         sequence_string_types,
-        tw_css,
+        class_call,
+        class_css,
         namespaces,
         origins,
         remapped,
@@ -745,7 +758,8 @@ fn empty_analysis(diagnostics: Vec<Diagnostic>) -> Analysis {
         finite_string_types: Vec::new(),
         fn_param_types: Vec::new(),
         sequence_string_types: Vec::new(),
-        tw_css: String::new(),
+        class_call: String::new(),
+        class_css: String::new(),
         namespaces: Vec::new(),
         origins: crate::origin::OriginMaps::default(),
         remapped: Vec::new(),
@@ -1322,20 +1336,20 @@ pub fn string_literal_completions(
         .collect()
 }
 
-/// Completions for a `cls("...")` string whose expected type is a sequence
-/// string type such as `Tw`: the theme's whole token alphabet. The
-/// caller filters by the token under the cursor. `None` when the string is not
-/// such an argument; the caller then tries [`string_literal_completions`].
+/// Completions for a string argument of [`Analysis::class_call`] whose
+/// expected type is a sequence string type such as `Tw`: the theme's whole
+/// token alphabet. The caller filters by the token under the cursor. `None`
+/// when the string is not such an argument; the caller then tries
+/// [`string_literal_completions`].
 pub fn class_completions(
     analysis: &Analysis,
     source: &str,
     line: usize,
     col: usize,
 ) -> Option<Vec<Completion>> {
-    // Gate on the `cls(...)` call, the std/tw bridge (`theme.cls` in `.vyrn`,
-    // `vyxTheme.cls` in a themed `.vyx`), not on the parameter's declared type:
-    // a linked module lowers the `Tw` alias to its `String` base.
-    if !cls_call_arg(source, line, col) {
+    // Gate on the class call, not on the parameter's declared type: a linked
+    // module lowers the `Tw` alias to its `String` base.
+    if !class_call_arg(analysis, source, line, col) {
         return None;
     }
     let (ty_name, alphabet) = sequence_type_at(analysis, source, line, col)?;
@@ -1352,9 +1366,9 @@ pub fn class_completions(
     )
 }
 
-/// Whether the string literal under the cursor is a direct argument of a
-/// `cls(...)` call, bare or as the last segment of `ns.cls`.
-fn cls_call_arg(source: &str, line: usize, col: usize) -> bool {
+/// Whether the string literal under the cursor is a direct argument of a call
+/// of [`Analysis::class_call`], bare or as the last segment of `ns.<call>`.
+fn class_call_arg(analysis: &Analysis, source: &str, line: usize, col: usize) -> bool {
     let Ok(toks) = lexer::lex(source) else {
         return false;
     };
@@ -1380,7 +1394,8 @@ fn cls_call_arg(source: &str, line: usize, col: usize) -> bool {
             Tok::RParen => depth += 1,
             Tok::LParen => {
                 if depth == 0 {
-                    return i >= 1 && matches!(&toks[i - 1].tok, Tok::Ident(c) if c == "cls");
+                    return i >= 1
+                        && matches!(&toks[i - 1].tok, Tok::Ident(c) if *c == analysis.class_call);
                 }
                 depth -= 1;
             }
@@ -1390,7 +1405,7 @@ fn cls_call_arg(source: &str, line: usize, col: usize) -> bool {
     false
 }
 
-/// The sequence string type at the cursor's `cls(...)` argument: the one named
+/// The sequence string type at the cursor's class call argument: the one named
 /// by the call's declared parameter type when that resolves, so two themes do
 /// not blur, else the first enumerated theme. A linked module lowers `Tw` to
 /// `String`, so the fallback is often the only answer.
@@ -1409,7 +1424,7 @@ fn sequence_type_at(
         .cloned()
 }
 
-/// The hover of a class token in a `cls("...")` string.
+/// The hover of a class token in a class call's string.
 pub struct ClassHover {
     pub text: String,
     /// The class, when the theme safelists it without a rule of its own, so
@@ -1417,8 +1432,8 @@ pub struct ClassHover {
     pub safelisted: Option<String>,
 }
 
-/// Hover for the class token under the cursor in a `cls("...")` string: the
-/// CSS rule `std/tw`'s `css()` emits for a utility, or "safelisted" for a
+/// Hover for the class token under the cursor in a class call's string: the
+/// CSS rule [`Analysis::class_css`] holds for a utility, or "safelisted" for a
 /// safelist entry. `None` when the cursor is not on a class token of a linked
 /// theme.
 pub fn class_token_hover(
@@ -1427,7 +1442,7 @@ pub fn class_token_hover(
     line: usize,
     col: usize,
 ) -> Option<ClassHover> {
-    if !cls_call_arg(source, line, col) {
+    if !class_call_arg(analysis, source, line, col) {
         return None;
     }
     let (ty_name, alphabet) = sequence_type_at(analysis, source, line, col)?;
@@ -1435,7 +1450,7 @@ pub fn class_token_hover(
     if !alphabet.iter().any(|c| c == &token) {
         return None;
     }
-    Some(match css_rule_for(&analysis.tw_css, &token) {
+    Some(match css_rule_for(&analysis.class_css, &token) {
         Some(rule) => ClassHover {
             text: format!("**`{token}`** — `{ty_name}` utility class\n\n```css\n{rule}\n```"),
             safelisted: None,
@@ -1502,13 +1517,13 @@ fn css_rule_for(css: &str, class: &str) -> Option<String> {
     None
 }
 
-/// The string a zero-parameter `css()` returns (`std/tw`'s baked stylesheet), if
-/// the program has one. Its body is a single `return "<literal>"`.
-fn css_constant(program: &ast::Program) -> Option<String> {
+/// The string the zero-parameter function `name` of `program` returns, when its
+/// body is a single `return "<literal>"`.
+fn string_constant(program: &ast::Program, name: &str) -> Option<String> {
     let f = program
         .functions
         .iter()
-        .find(|f| f.name == "css" && f.params.is_empty())?;
+        .find(|f| f.name == name && f.params.is_empty())?;
     for stmt in &f.body.stmts {
         if let Stmt::Return {
             value: Some(Expr::Str(s, _)),
@@ -3204,8 +3219,10 @@ mod tests {
     }
 
     /// A sequence (`Tw`) string type's alphabet is enumerated;
-    /// `class_completions` offers it at a `cls("...")` argument, and
-    /// `class_token_hover` shows the utility's CSS or "safelisted".
+    /// `class_completions` offers it at the class call's argument, and
+    /// `class_token_hover` shows the utility's CSS or "safelisted". A linked
+    /// analysis takes the call and the stylesheet from a companion; this one
+    /// is given them.
     #[test]
     fn tw_alphabet_completion_and_hover() {
         let src = "type TwClass = String where value =~ \"(a-1|a-2|flex)\"\n\
@@ -3213,7 +3230,10 @@ mod tests {
                    fn cls(c: Tw) -> Int64 { return 0 }\n\
                    fn css() -> String { return \".a-1 {color:red}\\n.flex {display:flex}\" }\n\
                    fn main() -> Int64 { return cls(\"flex a-1\") }\n";
-        let a = analyze(src);
+        let mut a = analyze(src);
+        a.class_call = "cls".into();
+        let program = parser::parse_accum(lexer::lex(src).unwrap()).0;
+        a.class_css = string_constant(&program, "css").expect("the stylesheet");
         // The alphabet is enumerated, in any order.
         let (_, alpha) = a
             .sequence_string_types
@@ -3984,7 +4004,9 @@ fn main() -> Int64 {
                    fn cls(c: TwB) -> Int64 { return 0 }\n\
                    fn css() -> String { return \".dog{color:brown}\" }\n\
                    fn main() -> Int64 { return cls(\"dog\") }\n";
-        let a = analyze(src);
+        let mut a = analyze(src);
+        a.class_call = "cls".into();
+        a.class_css = ".dog{color:brown}".into();
         assert!(a.diagnostics.is_empty(), "{:?}", a.diagnostics);
         let line = 5;
         let col = src.lines().nth(4).unwrap().find("\"dog\"").unwrap() + 2;

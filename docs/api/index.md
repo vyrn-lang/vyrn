@@ -41,6 +41,7 @@
 - [std/text](std/text.md) — UTF-8 decoding and byte-offset line and column, in Vyrn.
 - [std/time](std/time.md) — Wall-clock time at the host boundary, and a pure calendar breakdown.
 - [std/tw](std/tw.md) — Theme-derived utility classes as a checked type. `tw(theme)` reads
+- [std/tw.editor](std/tw.editor.md) — Editor support for the theme modules `std/tw` writes.
 - [std/ui](std/ui.md) — File-based routing as a generator: `pages(dir)` scans a
 - [std/ui.editor](std/ui.editor.md) — Editor support for the `.vyx` pages `std/ui` claims.
 - [std/von](std/von.md) — VON, Vyrn Object Notation, Vyrn's literal grammar saved to a file.

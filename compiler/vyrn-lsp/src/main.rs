@@ -2714,23 +2714,15 @@ fn bakes_a_map(server: &Server, opts: &vyrn_frontend::loader::LoadOptions, root:
     let Some((_, resolver, _, _)) = load_context(&server.session, root, &overlays) else {
         return false;
     };
-    let claims = vyrn_frontend::audience::claims(&importer, &program, opts);
-    claims.iter().any(|c| {
-        let Some(module) = c.module.as_deref() else {
-            return false;
-        };
-        let out = vyrn_frontend::loader::call_generator(
-            &importer,
-            module,
-            "vyrnSymbolMaps",
-            &[],
-            true,
-            opts,
-            &resolver,
-            Some(&*engine()),
-        );
-        matches!(out, Some(Ok(names)) if names.lines().any(|n| n == c.generator))
-    })
+    let answers = vyrn_frontend::audience::companion_answers(
+        &importer,
+        &program,
+        "vyrnSymbolMaps",
+        opts,
+        &resolver,
+        Some(&*engine()),
+    );
+    (answers.iter()).any(|(c, names)| names.lines().any(|n| n == c.generator))
 }
 
 /// Every generated symbol standing for a declaration in `path`, from every root

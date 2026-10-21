@@ -437,6 +437,35 @@ pub fn claims(
     out
 }
 
+/// Returns each claim of `program` whose generator module's editor companion
+/// exports a `gen fn` named `prefix` plus a slug, with its answer
+/// ([`crate::loader::call_generator`]). A claim whose export fails is left out.
+pub fn companion_answers(
+    importer: &str,
+    program: &crate::ast::Program,
+    prefix: &str,
+    opts: &crate::loader::LoadOptions,
+    resolver: &dyn crate::loader::ModuleResolver,
+    engine: Option<&crate::gen::GenEngine>,
+) -> Vec<(Claim, String)> {
+    (claims(importer, program, opts).into_iter())
+        .filter_map(|c| {
+            let module = c.module.as_deref()?;
+            let answer = crate::loader::call_generator(
+                importer,
+                module,
+                prefix,
+                &[],
+                true,
+                opts,
+                resolver,
+                engine,
+            )?;
+            Some((c, answer.ok()?))
+        })
+        .collect()
+}
+
 /// The Vyrn a tool reads in a generator input, as the editor companion of the
 /// claiming generator module writes it through `gen fn vyrnSource*(path:
 /// String) -> String`: the input with every character outside Vyrn code
