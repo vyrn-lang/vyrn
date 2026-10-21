@@ -291,6 +291,11 @@ pub struct GenInputs<'a> {
     /// The `TypeArg` literal a derived-code generator's one parameter
     /// receives; `None` for an import target.
     pub type_arg: Option<Expr>,
+    /// Whether the program passed its check. An unchecked program runs only
+    /// from a compiled module the engine already holds for
+    /// `sources_fingerprint`; otherwise the engine answers
+    /// [`GenError::Unchecked`].
+    pub checked: bool,
 }
 
 /// Resolves a mediated path argument against the importer's directory and
@@ -452,6 +457,9 @@ pub enum GenError {
     Refused(Vec<Diagnostic>),
     /// The run failed: a trap, a decline, or no engine.
     Failed(String),
+    /// The engine holds no compiled module for an unchecked program; the caller
+    /// checks it and runs again.
+    Unchecked,
 }
 
 /// The generation engine. It judges the generator's type-checked program
@@ -812,11 +820,13 @@ fn run_derive(
             max_output: crate::loader::GEN_MAX_OUTPUT,
             sources_fingerprint: Some(fingerprint),
             type_arg: Some(arg),
+            checked: true,
         },
     )
     .map_err(|e| match e {
         GenError::Refused(ds) => refused(&ds),
         GenError::Failed(trap) => trap,
+        GenError::Unchecked => "the engine asked to check a checked program".to_string(),
     })?
     .source;
     let tokens = crate::lexer::lex(&src).map_err(|d| {

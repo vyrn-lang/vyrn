@@ -52,6 +52,9 @@ fn claim(
     inputs: &GenInputs<'_>,
 ) -> Option<Result<GenOutput, GenError>> {
     match run(program, fn_name, args, inputs) {
+        // A decline judges the program (`vyrn_lower::gen_engine`), which only a
+        // checked program may meet.
+        Err(EngineError::Unsupported) if !inputs.checked => Some(Err(GenError::Unchecked)),
         Err(EngineError::Unsupported) => None,
         Err(EngineError::Failed(e)) => Some(Err(GenError::Failed(e))),
         Err(EngineError::Refused(ds)) => Some(Err(GenError::Refused(ds))),
@@ -794,6 +797,7 @@ fn compile_to_wasm(_key: &str, program: &Program) -> Result<Vec<u8>, EngineError
     vyrn_codegen::direct::compile_gen_host(program).map_err(|e| match e {
         GenError::Refused(ds) => EngineError::Refused(ds),
         GenError::Failed(e) => decline(&e),
+        GenError::Unchecked => decline("the backend asked to check a checked program"),
     })
 }
 
@@ -1398,6 +1402,8 @@ fn run_module(
                     trace("deserialize", t.elapsed());
                     m
                 }
+                // Only a checked program compiles.
+                None if !inputs.checked => return Err(EngineError::Unsupported),
                 None => {
                     // A compile the typed judgment refused fails here, so no
                     // cache holds a module for it (`direct::compile_gen_host`).
