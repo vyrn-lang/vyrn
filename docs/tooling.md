@@ -228,9 +228,11 @@ compile, except `--contract`.
   module is linked first, as `moduleInterface` links it, so a type reached
   through `import * as m` reads as the generator reads it; a module that does
   not link prints the loader's diagnostics and exits 1, with no report. A
-  `.vyx` page is read from its `<script>`, as `vyxPageInterface` reads it. The
-  app root is the editor's: the directory of the nearest `vyrn.json`, at any
-  depth, else the file's directory. Exits 1 if the file has no role.
+  generator input is read through its generator's view
+  (`audience::InputView`), and a member its form writes reads "the file's
+  form writes it". The app root is the editor's: the directory of the nearest
+  `vyrn.json`, at any depth, else the file's directory. Exits 1 if the file
+  has no role.
 - `vyrn why --cost <file>`: per function of the file, the lines that allocate,
   copy, grow a container, enter an allocating function of another file or keep
   a check, with the loop depth of each, and a summary. A row names what it
@@ -290,6 +292,8 @@ policy.
 | `artifacts` | named entry plus target (`native`, `wasi`, `browser`); `main`, `server` and `client` are sugar for entries |
 | `roles` | directory to module contract, for example `"routes": "std/ui:Page"` |
 | `hints` | per-rule severity for the hint libraries (`std/hints`, `std/vyx-hints`) |
+| `stylesheets` | globs naming the app's own CSS, whose rules the editor's hover on a safelisted class shows |
+| `inputs` | globs naming the generator inputs the editor sends the language server, beside the `.vyx` files the VS Code extension sends |
 
 An unknown tool name under `toolchain` is refused and the error lists the known
 tools. With no `audience` key every module is universal. With no artifacts
@@ -374,10 +378,16 @@ cursor, and `.member` completion from protocol impls and record fields),
 document symbols, document highlight, rename (including across a generator
 boundary, through the symbol maps), formatting (the same `fmt`), code actions,
 inlay hints and semantic tokens. Colour and hover use one resolution order, so
-they agree. A `.vyx` file is analysed through the `.vyrn` module that owns it:
-the first of up to `MAX_OWNER_CANDIDATES` `.vyrn` files, nearest the `.vyx`
-first, up to the nearest `vyrn.json`, whose generators read the `.vyx`. A
-`.vyx` without an owner gets one warning that names the search.
+they agree. A generator input, such as a `.vyx` file, is analysed through the
+module that claims it (`audience::Claim`): of the `MAX_OWNER_CANDIDATES`
+`.vyrn` files nearest it, up to the nearest `vyrn.json`, the first in path
+order whose generator import names the file or a directory above it, and whose
+generated code maps to it through `//@origin`. An input without an owner gets
+one warning that names the search. Completion and go-to-definition in the
+input's own grammar come from the `gen fn vyrnComplete*` and
+`vyrnDefinition*` in the claiming generator module's editor companion
+(`loader::call_generator`), `std/vyx.editor`'s for `.vyx`; anywhere else the
+cursor maps through `//@origin` into the generated module.
 
 Each line that allocates, copies, grows a container, enters an allocating
 function of another file or keeps a check ends in an inlay hint of a few plain

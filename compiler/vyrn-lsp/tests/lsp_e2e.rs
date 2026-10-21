@@ -1523,7 +1523,13 @@ fn transkey_completion_inside_mustache() {
     );
 }
 
-// Structural completion works on a raw `.vyx` with no owning root.
+// Structural completion comes from the claiming generator module's
+// `vyrnComplete*`, so it needs a root that claims the file, not one whose
+// generation succeeds: `<Book>` names no component.
+const STRUCT_APP: &str = "import { components } from \"std/vyx\"\n\
+    import { panel } from components(\"./widgets\")\n\
+    fn main() -> Int64 { return 0 }\n";
+
 const STRUCT_PANEL: &str = "<template>\n\
     <Book></Book>\n\
     <BookCard t></BookCard>\n\
@@ -1538,10 +1544,12 @@ fn struct_dir() -> std::path::PathBuf {
     let n = SCRATCH_COUNTER.fetch_add(1, Ordering::SeqCst);
     let dir = std::env::temp_dir().join(format!("vyrn_lsp_struct_{}_{n}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    std::fs::write(dir.join("Panel.vyx"), STRUCT_PANEL).unwrap();
-    std::fs::write(dir.join("BookCard.vyx"), STRUCT_CARD).unwrap();
-    dir
+    std::fs::create_dir_all(dir.join("widgets")).unwrap();
+    std::fs::write(dir.join("vyrn.json"), "{ \"name\": \"struct\" }").unwrap();
+    std::fs::write(dir.join("app.vyrn"), STRUCT_APP).unwrap();
+    std::fs::write(dir.join("widgets/Panel.vyx"), STRUCT_PANEL).unwrap();
+    std::fs::write(dir.join("widgets/BookCard.vyx"), STRUCT_CARD).unwrap();
+    dir.join("widgets")
 }
 
 #[test]
@@ -1556,6 +1564,74 @@ fn component_tag_completion() {
         labels.contains(&"BookCard".to_string()),
         "sibling component offered: {labels:?}"
     );
+}
+
+/// A component tag is no identifier in the generated module; its definition
+/// is the sibling file the editor companion names, from an open or a close tag.
+#[test]
+fn component_tag_definition_opens_the_sibling() {
+    let dir = struct_dir();
+    let mut client = spawn_client();
+    let uri = file_uri(&dir.join("Panel.vyx"));
+    did_open(&mut client, &uri, "vyx", STRUCT_PANEL);
+    for typed in ["<BookC", "</BookC"] {
+        let (l, c) = pos_after(STRUCT_PANEL, typed);
+        let target = definition_target(&mut client, &uri, l, c).expect("definition on a tag");
+        assert!(target.ends_with("BookCard.vyx"), "{typed}: {target}");
+    }
+    let (l, c) = pos_after(STRUCT_PANEL, "<Bo");
+    assert_eq!(
+        definition_target(&mut client, &uri, l, c),
+        None,
+        "no Book.vyx"
+    );
+}
+
+/// The `inputs` globs of a workspace folder's `vyrn.json` reach the client as
+/// dynamic registrations, one per method the client can register, each with
+/// the globs relative to the manifest's directory.
+#[test]
+fn the_manifest_inputs_globs_are_registered_with_the_client() {
+    let n = SCRATCH_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let dir = std::env::temp_dir().join(format!("vyrn_lsp_inputs_{}_{n}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("vyrn.json"), r#"{ "inputs": ["**/*.tbl"] }"#).unwrap();
+    let mut client = LspClient::spawn().expect("spawn vyrn-lsp");
+    let caps = serde_json::json!({ "textDocument": {
+        "synchronization": { "dynamicRegistration": true },
+        "hover": { "dynamicRegistration": true },
+        "completion": { "dynamicRegistration": false }
+    } });
+    let init_id = serde_json::json!(1);
+    client.send(&serde_json::json!({
+        "jsonrpc": "2.0", "id": init_id, "method": "initialize",
+        "params": { "capabilities": caps, "processId": null, "workspaceFolders": [
+            { "uri": file_uri(&dir), "name": "w" }
+        ] }
+    }));
+    let _ = client.read_response(&init_id);
+    client.send(&serde_json::json!({ "jsonrpc": "2.0", "method": "initialized", "params": {} }));
+    let register = client.read_notification("client/registerCapability");
+    let regs = register["params"]["registrations"].as_array().unwrap();
+    let methods: Vec<&str> = regs.iter().filter_map(|r| r["method"].as_str()).collect();
+    assert_eq!(
+        methods,
+        [
+            "textDocument/didOpen",
+            "textDocument/didChange",
+            "textDocument/didClose",
+            "textDocument/hover"
+        ],
+        "{register}"
+    );
+    let filter = &regs[0]["registerOptions"]["documentSelector"][0]["pattern"];
+    assert_eq!(filter["pattern"], "**/*.tbl", "{register}");
+    let base = filter["baseUri"].as_str().unwrap();
+    let leaf = dir.file_name().unwrap().to_string_lossy().into_owned();
+    assert!(base.trim_end_matches('/').ends_with(&leaf), "{base}");
+    assert_eq!(regs[1]["registerOptions"]["syncKind"], 1, "{register}");
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
@@ -2393,6 +2469,47 @@ fn ownerless_vyx_says_what_was_searched() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+const TBL_GEN: &str = "export gen fn table(path: String) -> String {\n\
+    let src = match readFile(path) {\n\
+    Ok(s) => s,\n\
+    Err(e) => \"\",\n\
+    }\n\
+    return \"//@origin \" + path + \":1:1\\n\" + src\n\
+    }\n";
+const TBL_APP: &str = "import { table } from \"./gen\"\n\
+    import { f } from table(\"./users.tbl\")\n\
+    fn main() -> Int64 { return f() }\n";
+const TBL_INPUT: &str = "export fn f() -> Int64 { return \"x\" }\n";
+
+/// A generator input of any extension, opened alone, finds the module that
+/// claims it and carries its remapped error.
+#[test]
+fn an_input_of_any_extension_finds_its_claimant() {
+    let n = SCRATCH_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let dir = std::env::temp_dir().join(format!("vyrn_lsp_tbl_{}_{n}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("vyrn.json"), "{ \"name\": \"tbl\" }").unwrap();
+    std::fs::write(dir.join("gen.vyrn"), TBL_GEN).unwrap();
+    std::fs::write(dir.join("app.vyrn"), TBL_APP).unwrap();
+    std::fs::write(dir.join("users.tbl"), TBL_INPUT).unwrap();
+
+    let mut client = spawn_client();
+    let uri = file_uri(&dir.join("users.tbl"));
+    did_open(&mut client, &uri, "tbl", TBL_INPUT);
+    let d = read_diags_for(&mut client, "users.tbl");
+    let diags = d["params"]["diagnostics"].as_array().unwrap();
+    assert_eq!(diags.len(), 1, "the remapped type error: {diags:?}");
+    assert_eq!(diags[0]["severity"], 1, "an error: {diags:?}");
+    assert_eq!(
+        diags[0]["range"]["start"]["line"], 0,
+        "at its origin: {diags:?}"
+    );
+
+    let _ = client.child.kill();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 const SHELL_APP: &str = "import { components } from \"std/vyx\"\n\
     import { shell } from components(\"./widgets\")\n\
     fn main() -> Int64 { return 0 }\n";
@@ -2927,8 +3044,8 @@ const STYLED_VYX: &str = "<script>\n\
     <div class=\"book-card\"><span class=\"no-style\">{{ x }}</span><p class=\"bg-brand-500\">{{ x }}</p></div>\n\
     </template>\n";
 
-/// Declares the app's stylesheet; discovery reads only its
-/// `stylesheet` line.
+/// Links the app's stylesheet, which the editor does not read: the
+/// manifest's `stylesheets` key names it.
 const STYLED_LAYOUT: &str = "<script>\nhead {\n    stylesheet \"/app.css\"\n}\n</script>\n\
     <template>\n<div><slot/></div>\n</template>\n";
 
@@ -2939,7 +3056,7 @@ const STYLED_CSS: &str = ".book-card-x { color: red; }\n\
 li.list .book-card {\n  padding: 2px;\n}\n\
 .book-card:hover { color: green; }\n";
 
-/// Undeclared, so ignored while a declared stylesheet exists.
+/// No glob of the manifest names it, so its rules are never shown.
 const STYLED_DECOY_CSS: &str = ".book-card { content: \"DECOYRULE\"; }\n";
 
 fn styled_scratch() -> std::path::PathBuf {
@@ -2953,14 +3070,21 @@ fn styled_scratch() -> std::path::PathBuf {
     std::fs::write(dir.join("routes/layout.vyx"), STYLED_LAYOUT).unwrap();
     std::fs::write(dir.join("app.vyrn"), STYLED_APP).unwrap();
     std::fs::write(dir.join("theme.json"), STYLED_THEME).unwrap();
-    std::fs::write(dir.join("vyrn.json"), "{ \"name\": \"s\" }").unwrap();
+    std::fs::write(
+        dir.join("vyrn.json"),
+        "{ \"name\": \"s\", \"stylesheets\": [\"**/app*.css\"] }",
+    )
+    .unwrap();
     std::fs::write(dir.join("public/app.css"), STYLED_CSS).unwrap();
     std::fs::write(dir.join("public/decoy.css"), STYLED_DECOY_CSS).unwrap();
     dir
 }
 
 fn open_styled() -> (LspClient, String) {
-    let dir = styled_scratch();
+    open_styled_in(styled_scratch())
+}
+
+fn open_styled_in(dir: std::path::PathBuf) -> (LspClient, String) {
     let mut client = spawn_client();
     let app_uri = file_uri(&dir.join("app.vyrn"));
     did_open(&mut client, &app_uri, "vyrn", STYLED_APP);
@@ -3003,6 +3127,18 @@ fn safelisted_hover_shows_the_apps_own_css() {
         !v.contains("DECOYRULE"),
         "undeclared stylesheet not consulted: {v}"
     );
+    let _ = client.child.kill();
+}
+
+/// Without a `stylesheets` key the editor reads no CSS of the app's.
+#[test]
+fn safelisted_hover_without_the_key_shows_no_css() {
+    let dir = styled_scratch();
+    std::fs::write(dir.join("vyrn.json"), "{ \"name\": \"s\" }").unwrap();
+    let (mut client, uri) = open_styled_in(dir);
+    let (l, c) = pos_after(STYLED_VYX, "book-car");
+    let v = hover_value(&mut client, &uri, l, c).expect("hover on safelisted class");
+    assert_eq!(v, "**`book-card`** — safelisted (app-styled)", "{v}");
     let _ = client.child.kill();
 }
 

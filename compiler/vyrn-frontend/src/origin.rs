@@ -136,7 +136,7 @@ impl OriginMaps {
                 });
                 continue;
             }
-            match parse_origin_body(rest, ctx) {
+            match anchor(rest, ctx) {
                 Ok(origin) => dirs.push(Directive {
                     gen_line,
                     origin: Some(origin),
@@ -290,7 +290,7 @@ pub fn diagnostics(banner: &str, source: &str, ctx: &Context<'_>) -> Vec<Diagnos
             Some(_) => (None, rest),
             None => match rest.split_once(char::is_whitespace) {
                 Some((NO_POSITION, tail)) => (None, tail.trim()),
-                Some((head, tail)) => match parse_origin_body(head, ctx) {
+                Some((head, tail)) => match anchor(head, ctx) {
                     Ok(origin) => (Some(origin), tail.trim()),
                     Err(_) => (None, rest),
                 },
@@ -330,9 +330,10 @@ pub fn diagnostics(banner: &str, source: &str, ctx: &Context<'_>) -> Vec<Diagnos
     out
 }
 
-/// Parses `<path>:<line>:<col>`, splitting from the right so the path keeps
-/// any interior colon, and resolves the path.
-fn parse_origin_body(body: &str, ctx: &Context<'_>) -> Result<Origin, String> {
+/// Parses an anchor in `//@origin` notation, `<path>:<line>:<col>`, splitting
+/// from the right so the path keeps any interior colon, and resolves the path.
+/// `Err` says why the anchor is malformed.
+pub fn anchor(body: &str, ctx: &Context<'_>) -> Result<Origin, String> {
     let (rest, col) = body
         .rsplit_once(':')
         .ok_or_else(|| "missing `:col`".to_string())?;

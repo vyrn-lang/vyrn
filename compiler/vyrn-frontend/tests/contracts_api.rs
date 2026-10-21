@@ -7,7 +7,7 @@ mod common;
 
 use vyrn_frontend::contracts::{
     contract_completions, contract_fixes, contract_member_hover, edit_distance, load_contract,
-    role_for, roles_from_manifest, synthesized_members, RoleScope,
+    role_for, roles_from_manifest, RoleScope,
 };
 use vyrn_frontend::loader::{DiskResolver, LoadOptions};
 
@@ -155,19 +155,11 @@ fn roles_come_from_the_manifest() {
     let page = roles.iter().find(|r| r.contract == "Page").unwrap();
     assert_eq!(page.scope, RoleScope::Segment("routes".into()));
     assert_eq!(page.module, "std/ui");
-    // The chrome default: a layout is not a page.
-    assert!(page.except.iter().any(|e| e == "layout"));
+    // The string form leaves the chrome stems to the module's companion.
+    assert_eq!(page.except, None);
 
     let r = role_for("/app/routes/index.vyx", &roles).expect("a page is in the role");
     assert_eq!(r.contract, "Page");
-    assert!(
-        role_for("/app/routes/layout.vyx", &roles).is_none(),
-        "a layout has no contract to be a member of"
-    );
-    assert!(
-        role_for("/app/routes/error.vyx", &roles).is_none(),
-        "nor does an error page"
-    );
     assert!(
         role_for("/app/store.vyrn", &roles).is_none(),
         "a module outside every role is governed by nothing"
@@ -418,48 +410,6 @@ fn edit_distance_matches_the_vyrn_one() {
         disagreements, 0,
         "std/strings:editDistance and contracts::edit_distance disagree on {disagreements} of {} pairs",
         PAIRS.len()
-    );
-}
-
-/// `Component` names no members, so there is no absence to report. The rule reads
-/// the contract's declarations, never a table of generator names.
-#[test]
-fn a_component_vyx_has_no_members_to_synthesize() {
-    let v = load_contract(
-        "std/vyx",
-        "Component",
-        &repo("examples/bin/server.vyrn"),
-        &opts(),
-        &DiskResolver,
-    )
-    .unwrap();
-    let path = repo("examples/bin/app/widgets/CreateForm.vyx");
-    let src = std::fs::read_to_string(&path).unwrap();
-    assert!(synthesized_members(&v, &path, &src).is_empty());
-}
-
-/// A `.vyx` still being written has no view, and the report must not invent one.
-#[test]
-fn a_templateless_vyx_synthesizes_nothing() {
-    let v = page();
-    assert!(synthesized_members(&v, "/app/routes/half.vyx", "<script>\n</script>\n").is_empty());
-    assert_eq!(
-        synthesized_members(
-            &v,
-            "/app/routes/half.vyx",
-            "<template>\n<p></p>\n</template>\n"
-        ),
-        vec!["page".to_string()],
-        "a template with no script at all is still a view"
-    );
-    assert!(
-        synthesized_members(
-            &v,
-            "/app/routes/half.vyx",
-            "<script>\nlet s = \"<template>\"\n</script>\n"
-        )
-        .is_empty(),
-        "a template tag inside the script is a string, not a section"
     );
 }
 
