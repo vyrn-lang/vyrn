@@ -6,10 +6,11 @@ import { fileURLToPath } from "node:url";
 const root = new URL("../../", import.meta.url);
 const read = (p) => readFile(fileURLToPath(new URL(p, root)), "utf8");
 
-const [runJs, heroJs, playJs] = await Promise.all([
+const [runJs, heroJs, playJs, ideJs] = await Promise.all([
   read("site/public/play-run.js"),
   read("site/public/hero.js"),
   read("site/public/play.js"),
+  read("site/public/play-ide.js"),
 ]);
 
 function body(src, name) {
@@ -65,5 +66,13 @@ test("a run's diagnostics paint only over the text that ran", () => {
   }
   if (!run.includes("if (srcHost().value === src) showDiags(r.diagnostics);")) {
     throw new Error("a compile failure paints its diagnostics over an edit made while it ran");
+  }
+});
+
+test("a bfcache restore wakes only the mount still in the page", () => {
+  const at = ideJs.indexOf('addEventListener("pageshow"');
+  const guard = ideJs.indexOf("if (!e.persisted || !root.isConnected) return;", at);
+  if (at < 0 || guard < 0 || guard - at > 200) {
+    throw new Error("a mount detached by soft navigation restarts its compiler and its session on a restore");
   }
 });
