@@ -1,5 +1,5 @@
-//! Ratchet on wasmtime fuel: the wasm instructions each Benchmarks Game program spends on its
-//! committed input.
+//! Ratchet on wasmtime fuel: the wasm instructions each Benchmarks Game program and the
+//! `fromJson` benchmark spend on their committed input.
 //!
 //! Fuel counts instructions at wasmtime's prices. It does not see native code, memory latency,
 //! inlining or the length of a `memory.copy`, so a fuel row never licenses a speed claim; it
@@ -14,7 +14,7 @@
 mod common;
 use common::*;
 
-/// The programs `benchgame.rs` checks, with the fixture each prints.
+/// The programs `benchgame.rs` checks and `jsondecode`, with the fixture each prints.
 const PROGRAMS: &[(&str, &str)] = &[
     ("nbody", "nbody-1000.expected"),
     ("spectralnorm", "spectralnorm-100.expected"),
@@ -26,6 +26,7 @@ const PROGRAMS: &[(&str, &str)] = &[
     ("pidigits", "pidigits-27.expected"),
     ("mandelbrot", "mandelbrot-200.expected"),
     ("regexredux", "regexredux-1000.expected"),
+    ("jsondecode", "../examples/expected/jsondecode.stdout"),
 ];
 
 const HEADER: &str = "program\tfuel";

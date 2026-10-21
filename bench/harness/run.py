@@ -137,7 +137,21 @@ class Program:
     # When set, stdin is a FASTA generated at this N. The fixture run uses
     # `fasta-1000.expected`, which is the same generator at n = 1000.
     stdin_fasta_n: int | None = None
+    # When set, stdin is this committed file under examples/, at every N.
+    stdin_file: str | None = None
+    # A program with no C, Rust or JavaScript entry times the Vyrn legs alone.
+    vyrn_only: bool = False
     note: str = ""
+
+    def legs(self, want: list[str]) -> list[str]:
+        return [c for c in want if c.startswith("vyrn")] if self.vyrn_only else want
+
+    def stdin(self, fixture: bool) -> Path | None:
+        if self.stdin_file:
+            return EXAMPLES / self.stdin_file
+        if self.stdin_fasta_n:
+            return BENCHDIR / "fasta-1000.expected" if fixture else fasta_input(self.stdin_fasta_n)
+        return None
 
 
 # Timing N per program. Chosen so the Vyrn NATIVE leg lands roughly 0.5-5 s on
@@ -206,6 +220,21 @@ PROGRAMS: list[Program] = [
             "band as the others; at the fixture size the whole run was 17 ms, "
             "close enough to the process floor that a scheduler hiccup showed "
             "up as a multiple"
+        ),
+    ),
+    Program(
+        "jsondecode",
+        "../examples/expected/jsondecode.stdout",
+        1,
+        60,
+        n_let="rounds",
+        stdin_file="jsondecode.stdin",
+        vyrn_only=True,
+        note=(
+            "N is the number of passes of `fromJson` over the 344 KB of orders in "
+            "examples/jsondecode.stdin, which bench/jsondecode.py writes; one "
+            "document in 25 is refused, and its Issues are part of the output. "
+            "Not a Benchmarks Game program, so there is no C, Rust or JavaScript leg"
         ),
     ),
 ]
@@ -552,11 +581,12 @@ def stamp(prog: Program, n: int) -> Path:
     return out
 
 
-def build_all(progs: list[Program], want: list[str]):
+def build_all(progs: list[Program], wanted: list[str]):
     BUILD.mkdir(parents=True, exist_ok=True)
     vyrn = vyrn_exe()
     for p in progs:
         print(f"  build {p.name}", flush=True)
+        want = p.legs(wanted)
         if "c" in want:
             timed_sh((p.name, "c"), ["clang", *CFLAGS, "-o", exe(f"c-{p.name}"), HARNESS / "c" / f"{p.name}.c"])
         if "rust" in want:
@@ -655,13 +685,14 @@ def fasta_input(n: int) -> Path:
     return path
 
 
-def verify(progs: list[Program], want: list[str]) -> dict:
+def verify(progs: list[Program], wanted: list[str]) -> dict:
     """Every contestant against the fixture, then all of them against each other."""
     report = {}
     for p in progs:
         print(f"  verify {p.name}", flush=True)
         expected = norm((BENCHDIR / p.fixture).read_bytes())
-        fixture_stdin = BENCHDIR / "fasta-1000.expected" if p.stdin_fasta_n else None
+        fixture_stdin = p.stdin(True)
+        want = p.legs(wanted)
 
         for c in want:
             got = norm(capture(command(c, p, p.fixture_n, "fixture"), fixture_stdin))
@@ -677,7 +708,7 @@ def verify(progs: list[Program], want: list[str]) -> dict:
                 die(f"{p.name}: the stamped copy at N={p.fixture_n} does not print {p.fixture}\n{diff(expected, got)}")
 
         # And all of them against each other at the size that will be timed.
-        timing_stdin = fasta_input(p.stdin_fasta_n) if p.stdin_fasta_n else None
+        timing_stdin = p.stdin(False)
         outs = {c: norm(capture(command(c, p, p.timing_n, "timing"), timing_stdin)) for c in want}
         first = want[0]
         for c in want[1:]:
@@ -958,9 +989,9 @@ def main() -> int:
     print(f"timing ({args.runs} runs each)")
     results = {}
     for p in progs:
-        stdin_path = fasta_input(p.stdin_fasta_n) if p.stdin_fasta_n else None
+        stdin_path = p.stdin(False)
         row = {}
-        for c in want:
+        for c in p.legs(want):
             ts, cpus, peaks = measure(command(c, p, p.timing_n, "timing"), stdin_path, args.runs)
             row[c] = summarize(ts, cpus, peaks, (p.name, c), gz_bytes(source_of(c, p)), artifact_of(c, p).stat().st_size)
             cell = row[c]
