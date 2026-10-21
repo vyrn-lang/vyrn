@@ -242,12 +242,14 @@ fn dbg_log(msg: &str) {
             .unwrap_or_else(|_| ".".into());
         format!("{tmp}/vyrn-lsp-debug.log")
     });
+    // One write per line: `writeln!` on a `File` writes each piece apart, and
+    // two servers appending to one log split each other's lines.
     if let Ok(mut f) = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
         .open(&path)
     {
-        let _ = writeln!(f, "{msg}");
+        let _ = f.write_all(format!("{msg}\n").as_bytes());
     }
 }
 
