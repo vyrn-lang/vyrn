@@ -383,6 +383,7 @@ pull request.
 - A change that moves emitted wasm bytes rewrites the SHA-256 manifest in the same commit and names every moved row.
 - Censuses of the type constructors and syntax forms are pinned by tests, so the tables cannot drift.
 - Pins are written by gates and merged with the `pin` driver, never by hand.
+- A test's scratch directory is its own: `vyrn-cli`'s tests take `common::scratch`, a guard that owns a directory unique to the process and the call and removes it when the test passes, and a helper that would return a path in it returns the guard. A unit test in another crate names its directory with the process id.
 - A test sets an environment variable on a child's command, or as the one test of its binary that reads it. `vyrn-lsp` and `vyrn-genwasm` run under `cargo test`, a thread per test, where `set_var` decides by scheduling which test sees it.
 - A test of what `vyrn check` says about one program is `tests/check/<name>.vyrn` and its `.stderr`, not a Rust string.
 - A prediction is written as a program before the change lands and reported either way. Nothing is deleted until the corpus is green on its replacement.

@@ -3,9 +3,10 @@
 
 use std::process::Command;
 
+mod common;
+
 fn check(src: &str) -> String {
-    let dir = std::env::temp_dir().join("vyrn-unary");
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = common::scratch("unary");
     let f = dir.join("u.vyrn");
     std::fs::write(&f, src).unwrap();
     let out = Command::new(env!("CARGO_BIN_EXE_vyrn"))

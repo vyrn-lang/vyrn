@@ -348,7 +348,7 @@ mod tests {
 
     #[test]
     fn offline_without_lock_is_a_clear_error() {
-        let dir = std::env::temp_dir().join("vyrn-remote-test2");
+        let dir = std::env::temp_dir().join(format!("vyrn-remote-test2-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let lock = Lock::load(dir.join("vyrn.lock")).unwrap();
         let r = RemoteResolver {

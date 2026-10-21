@@ -13,6 +13,8 @@
 use std::path::PathBuf;
 use std::process::Command;
 
+mod common;
+
 /// How many separate compilers have to agree. Three accumulators have six orders,
 /// so seven runs agree by luck about once in 300,000. A deterministic compiler
 /// always passes.
@@ -54,17 +56,12 @@ fn main() -> Int64 {
 }
 "#;
 
-fn dir() -> PathBuf {
-    let d = std::env::temp_dir().join("vyrn-reproducible");
-    std::fs::create_dir_all(&d).unwrap();
-    d
-}
-
-/// Written once per row so two rows cannot race on a path.
-fn source(name: &str) -> PathBuf {
-    let f = dir().join(format!("{name}.vyrn"));
+/// Writes `SRC` in a scratch directory; the guard owns it and the path names the file.
+fn source() -> (common::Scratch, PathBuf) {
+    let dir = common::scratch("reproducible");
+    let f = dir.join("repro.vyrn");
     std::fs::write(&f, SRC).unwrap();
-    f
+    (dir, f)
 }
 
 fn vyrn() -> Command {
@@ -101,11 +98,10 @@ fn all_equal(runs: &[Vec<u8>], what: &str) {
 
 #[test]
 fn the_same_source_builds_to_the_same_wasm_bytes_in_every_process() {
-    let src = source("repro");
+    let (dir, src) = source();
     let outs: Vec<Vec<u8>> = (0..RUNS)
         .map(|i| {
-            let out = dir().join(format!("repro{i}.wasm"));
-            let _ = std::fs::remove_file(&out);
+            let out = dir.join(format!("repro{i}.wasm"));
             let o = vyrn()
                 .args(["build", &src.display().to_string(), "--target", "wasm"])
                 .arg("-o")
@@ -128,7 +124,7 @@ fn the_same_source_builds_to_the_same_wasm_bytes_in_every_process() {
 /// per-instance substitution); neither may reach the dump's order.
 #[test]
 fn the_same_source_lowers_to_the_same_text_in_every_process() {
-    let src = source("repolower");
+    let (_dir, src) = source();
     let outs: Vec<Vec<u8>> = (0..RUNS)
         .map(|_| {
             let o = vyrn()

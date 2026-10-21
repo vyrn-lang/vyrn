@@ -1498,9 +1498,10 @@ fn every_ownership_shape_is_refused_or_runs_clean() {
         engine_us: AtomicUsize::new(0),
         route_us: AtomicUsize::new(0),
     };
+    // A scratch directory unless the caller names one; a failing run keeps it.
+    let scratch_dir = common::scratch("shapesweep");
     let out_dir = std::env::var_os("VYRN_SHAPESWEEP_OUT")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| std::env::temp_dir().join("vyrn-shapesweep"));
+        .map_or_else(|| scratch_dir.to_path_buf(), PathBuf::from);
     let _ = std::fs::remove_dir_all(&out_dir);
 
     let mut shapes = space();

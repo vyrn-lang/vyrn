@@ -13,6 +13,8 @@ use std::process::Command;
 
 use vyrn_frontend::hash::sha256_hex;
 
+mod common;
+
 fn repo_file(rel: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
@@ -307,8 +309,7 @@ fn the_codec_builtins_answer_exactly_this_over_the_whole_surface() {
     let dec = decoder_corpus();
     let src = corpus_program(&enc, &dec);
 
-    let dir = std::env::temp_dir().join("vyrn-m4c-codecs");
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = common::scratch("m4c-codecs");
     let file = dir.join("corpus.vyrn");
     std::fs::write(&file, &src).unwrap();
     let out = vyrn().arg("run").arg(&file).output().expect("vyrn run");
@@ -454,8 +455,7 @@ fn main() -> Int64 {
     return 0
 }
 "#;
-    let dir = std::env::temp_dir().join("vyrn-m4c-collide");
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = common::scratch("m4c-collide");
     let file = dir.join("main.vyrn");
     std::fs::write(&file, src).unwrap();
     let out = vyrn().arg("run").arg(&file).output().expect("vyrn run");

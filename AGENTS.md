@@ -106,7 +106,7 @@ Fast: before you claim speed or spend lines on it, write down which layer the ch
 - Work only in your own worktree. Never delete a worktree or its `tools` junction.
 - Never `git stash`: every worktree shares one stash list. Set work aside as a patch file.
 - rerere stays off (`git config rerere.enabled` prints `false`); a shared cache once reverted main's code in a rebase. After every rebase, `git diff origin/main...HEAD --stat` lists only your files, and no hunk removes main's code.
-- Set `TMP` and `TEMP` to a shallow directory of your own before any cargo test; the suites scratch under fixed names.
+- Set `TMP` and `TEMP` to a shallow directory of your own before any cargo test.
 - One cargo command at a time per worktree.
 - Run every command in the foreground under `timeout 600`, output redirected to a file, then read the file. Never pipe a suite's output: a leaked child holds the pipe open and the run looks hung.
 - A teammate is not woken when a background command ends. So never `run_in_background`, `&`, `nohup`, a marker file, a poll loop, `sleep`, `tail -f`, or any call whose purpose is to pass time. Each has left a track idle for half an hour.

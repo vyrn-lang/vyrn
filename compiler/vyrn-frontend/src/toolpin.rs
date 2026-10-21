@@ -485,7 +485,7 @@ mod tests {
     /// change: the specifier is opaque to `Lock::load`.
     #[test]
     fn a_tool_line_round_trips_through_the_lock_that_already_exists() {
-        let dir = std::env::temp_dir().join("vyrn-toolpin-lock");
+        let dir = std::env::temp_dir().join(format!("vyrn-toolpin-lock-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("vyrn.lock");
         let _ = std::fs::remove_file(&path);
@@ -518,7 +518,7 @@ mod tests {
     /// lock covers, the command that adds one, and the escape hatch.
     #[test]
     fn no_entry_for_this_platform_is_a_refusal_that_says_all_six_things() {
-        let dir = std::env::temp_dir().join("vyrn-toolpin-refusal");
+        let dir = std::env::temp_dir().join(format!("vyrn-toolpin-refusal-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let mut lock = Lock::load(dir.join("vyrn.lock")).unwrap();
         // Pinned for two platforms, neither of them this one.
@@ -550,7 +550,8 @@ mod tests {
     /// it.
     #[test]
     fn pinned_but_uncached_fails_and_names_the_hash() {
-        let dir = std::env::temp_dir().join("vyrn-toolpin-uncached");
+        let dir =
+            std::env::temp_dir().join(format!("vyrn-toolpin-uncached-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let mut lock = Lock::load(dir.join("vyrn.lock")).unwrap();
         let sha = "a".repeat(64);
@@ -578,7 +579,8 @@ mod tests {
         assert!(!is_sha256("../../escape"));
         assert!(!is_sha256(""));
 
-        let dir = std::env::temp_dir().join("vyrn-toolpin-traversal");
+        let dir =
+            std::env::temp_dir().join(format!("vyrn-toolpin-traversal-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let mut lock = Lock::load(dir.join("vyrn.lock")).unwrap();
         lock.entries.insert(

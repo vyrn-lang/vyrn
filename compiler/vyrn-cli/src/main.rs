@@ -6014,7 +6014,7 @@ another bench   # trailing reason
 
     #[test]
     fn dev_static_paths_cannot_escape_their_root() {
-        let dir = std::env::temp_dir().join("vyrn-dev-static-test");
+        let dir = std::env::temp_dir().join(format!("vyrn-dev-static-test-{}", std::process::id()));
         std::fs::create_dir_all(dir.join("public")).unwrap();
         std::fs::write(dir.join("public/index.html"), b"<html>").unwrap();
         std::fs::write(dir.join("secret.txt"), b"s").unwrap();
@@ -6149,7 +6149,7 @@ fn handle(req: Request) -> Response {
     return Response { status: 200, contentType: "text/plain", body: "\{hits}", vary: "v", headers: ["X-Echo": req.method.copy()] }
 }
 "#;
-        let dir = std::env::temp_dir().join("vyrn-serve-doors");
+        let dir = std::env::temp_dir().join(format!("vyrn-serve-doors-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let file = dir.join(format!("doors-{}.vyrn", std::process::id()));
         let source = format!("{SRC}\n{SERVE_SHIM}");

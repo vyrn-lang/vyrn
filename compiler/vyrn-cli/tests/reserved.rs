@@ -8,11 +8,11 @@
 
 use std::process::Command;
 
-/// `slot` names a directory of this test's own: tests in one binary run in
-/// parallel.
+mod common;
+
+/// `slot` names the scratch directory in a failure's path.
 fn check_in(slot: &str, src: &str) -> String {
-    let dir = std::env::temp_dir().join(format!("vyrn-reserved-{slot}"));
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = common::scratch(&format!("reserved-{slot}"));
     let f = dir.join("r.vyrn");
     std::fs::write(&f, src).unwrap();
     let out = Command::new(env!("CARGO_BIN_EXE_vyrn"))

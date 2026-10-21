@@ -17,6 +17,8 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+mod common;
+
 /// Where the sweep reads test sources from.
 ///
 /// `vyrn-frontend` does not link the kernel, and `vyrn-lsp` installs it only in
@@ -247,8 +249,7 @@ fn check(path: &Path, no_kernel: bool) -> (bool, String) {
 #[ignore = "spawns two `vyrn check` runs per lifted program; run explicitly: \
             cargo test -p vyrn-cli --test testsweep -- --ignored"]
 fn no_program_a_test_writes_is_accepted_without_the_kernel_and_refused_with_it() {
-    let dir = std::env::temp_dir().join("vyrn-testsweep");
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = common::scratch("testsweep");
     let mut files: Vec<PathBuf> = test_sources()
         .into_iter()
         .flat_map(|d| {

@@ -2,6 +2,8 @@
 
 use std::process::Command;
 
+mod common;
+
 fn vyrn() -> Command {
     Command::new(env!("CARGO_BIN_EXE_vyrn"))
 }
@@ -26,8 +28,7 @@ fn version_prints_the_crate_version_and_exits_zero() {
 /// CLI's only before the file; after it, `app.vyrn` gets it as an ordinary argument.
 #[test]
 fn profile_writes_the_table_to_stderr_and_not_to_stdout() {
-    let dir = std::env::temp_dir().join("vyrn-cli-profile");
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = common::scratch("cli-profile");
     let file = dir.join("p.vyrn");
     std::fs::write(
         &file,
@@ -90,8 +91,7 @@ fn profile_writes_the_table_to_stderr_and_not_to_stdout() {
 /// The build phases and `lines read` print only under `VYRN_BUILD_PROFILE`.
 #[test]
 fn the_compiled_profile_reports_a_repeatable_count_and_no_phases() {
-    let dir = std::env::temp_dir().join("vyrn-cli-profile-wasm");
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = common::scratch("cli-profile-wasm");
     let file = dir.join("p.vyrn");
     std::fs::write(
         &file,
