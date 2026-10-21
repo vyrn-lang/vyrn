@@ -2698,24 +2698,27 @@ impl<'a> AstVisit<'a> for Spelled<'a, '_> {
     const SCOPED: bool = false;
 
     fn stmt(&mut self, s: &'a Stmt, _: &std::collections::HashSet<String>) {
-        if let Stmt::Assign { name, .. } | Stmt::Store { name, .. } = s {
+        if let Stmt::Assign { name, .. } | Stmt::Store { name, .. } | Stmt::Drop { name, .. } = s {
             self.0.push(name);
         }
     }
 
     fn expr(&mut self, e: &'a Expr, _: &std::collections::HashSet<String>) -> bool {
-        if let Expr::Call { name, .. } | Expr::TryConstruct { name, .. } | Expr::Var { name, .. } =
-            e
-        {
-            self.0.push(name);
+        match e {
+            Expr::Call { name, .. } | Expr::TryConstruct { name, .. } | Expr::Var { name, .. } => {
+                self.0.push(name)
+            }
+            Expr::Field { field, .. } => self.0.push(field),
+            _ => {}
         }
         true
     }
 }
 
-/// Pushes onto `out` every name `b` spells as a callee, a variable or a store
-/// target. A local counts too, so the names hold every function and module
-/// state `b` reaches.
+/// Pushes onto `out` every name `b` spells as a callee, a variable, a field or
+/// a store target. A local and a field count too, so the names hold every
+/// function and module state `b` reaches, before the link or after it: a
+/// namespace member `ns.f` is a field until the link resolves it.
 pub fn spelled<'a>(b: &'a Block, out: &mut Vec<&'a str>) {
     ast_block(b, &mut std::collections::HashSet::new(), &mut Spelled(out));
 }

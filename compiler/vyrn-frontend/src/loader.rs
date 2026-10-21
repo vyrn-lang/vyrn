@@ -311,7 +311,12 @@ fn site_file(key: &str, root_key: &str, std_root: Option<&str>) -> String {
 /// Rewrites every `panic(msg)` in `program` to [`PANIC_AT`]`(msg, "file:line")`,
 /// in every body [`crate::project::walk_program`] visits.
 fn stamp_panic_sites(program: &mut Program, file: &str) {
-    let mut stamp = |e: &mut Expr| {
+    crate::project::walk_program(program, &mut panic_stamp(file));
+}
+
+/// The rewrite [`stamp_panic_sites`] makes at each expression.
+fn panic_stamp(file: &str) -> impl FnMut(&mut Expr) + '_ {
+    move |e: &mut Expr| {
         if let Expr::Call {
             dot: _,
             name,
@@ -326,8 +331,7 @@ fn stamp_panic_sites(program: &mut Program, file: &str) {
                 args.push(Expr::str(format!("{file}:{line}")));
             }
         }
-    };
-    crate::project::walk_program(program, &mut stamp);
+    }
 }
 
 /// The directory part of a resolved module path ("" when it has none).
@@ -657,6 +661,11 @@ struct Module {
     hash: Option<String>,
     /// [`program_ref_names`] of `program` as loaded, before `link` renames.
     refs: Rc<HashSet<String>>,
+    /// The parse whose skimmed bodies `program`'s empty ones stand for.
+    skimmed: Option<Rc<Parsed>>,
+    /// The line and column of each function [`parse_reached`] left with an
+    /// empty block for its unparsed body. [`drop_unreached`] drops every one.
+    unparsed: Vec<(usize, usize)>,
 }
 
 /// The state one load walks: the modules entered, their loading state, the
@@ -1190,7 +1199,19 @@ fn load_modules(
             }
             format!("{h:x}:{}", text.len())
         };
-        let parsed = PARSE_CACHE.with(|c| c.borrow().get(&hash).cloned());
+        // An imported std module's top-level bodies are parsed when a root
+        // reaches them ([`parse_reached`]). The floor reads every body's
+        // carriers at load, so a load that declares artifacts parses them all.
+        let skim = !is_root && opts.artifacts.is_none() && {
+            let spec = import_specifier("", key, opts.std_root.as_deref());
+            spec.starts_with("std/") && RT_MODULES.iter().all(|rt| rt.spec != spec)
+        };
+        let cache_key = if skim {
+            format!("{hash}:skim")
+        } else {
+            hash.clone()
+        };
+        let parsed = PARSE_CACHE.with(|c| c.borrow().get(&cache_key).cloned());
 
         // A generated module's comments and its parse read one scan.
         let mut scanned = None;
@@ -1284,6 +1305,8 @@ fn load_modules(
                 injected: None,
                 hash: None,
                 refs: Rc::default(),
+                skimmed: None,
+                unparsed: Vec::new(),
             };
             module.refs = Rc::new(program_ref_names(&module.program));
             w.modules.push(module);
@@ -1302,17 +1325,40 @@ fn load_modules(
                 let _p = crate::prof::phase("parse");
                 let scan = scanned.unwrap_or_else(|| lexer::scan(&text));
                 let tokens = lexer::tokens(scan.map_err(|d| vec![in_module(d, key, root_key)])?);
-                let (program, errors) = parser::parse_accum(tokens);
-                if !errors.is_empty() {
-                    return Err(errors
-                        .into_iter()
+                let in_key = |errors: Vec<Diagnostic>| -> Vec<Diagnostic> {
+                    (errors.into_iter())
                         .map(|d| in_module(d, key, root_key))
-                        .collect());
+                        .collect()
+                };
+                let (mut program, errors, skimmed) = match skim {
+                    true => {
+                        let (program, errors, skimmed) = parser::parse_skimming(tokens);
+                        (program, errors, Some(skimmed))
+                    }
+                    false => {
+                        let (program, errors) = parser::parse_accum(tokens);
+                        (program, errors, None)
+                    }
+                };
+                if !errors.is_empty() {
+                    return Err(in_key(errors));
+                }
+                if let Some(s) = &skimmed {
+                    // A body that may mention a runtime builtin is parsed now, so
+                    // the mention scan below sees every mention.
+                    for f in &mut program.functions {
+                        if s.tokens(f).is_some_and(mentions_runtime) {
+                            if let Some(body) = s.body(f) {
+                                f.body = body.map_err(in_key)?;
+                            }
+                        }
+                    }
                 }
                 let p = Rc::new(Parsed {
                     refs: Rc::new(program_ref_names(&program)),
                     program,
                     comment_lines: OnceCell::new(),
+                    skimmed,
                 });
                 PARSE_CACHE.with(|c| {
                     let mut c = c.borrow_mut();
@@ -1321,7 +1367,7 @@ fn load_modules(
                     if c.len() > 512 {
                         c.clear();
                     }
-                    c.insert(hash.clone(), p.clone());
+                    c.insert(cache_key, p.clone());
                 });
                 p
             }
@@ -1476,6 +1522,8 @@ fn load_modules(
             injected: None,
             hash: Some(hash),
             refs: parsed.refs.clone(),
+            skimmed: parsed.skimmed.is_some().then(|| parsed.clone()),
+            unparsed: Vec::new(),
         });
         Ok(())
     }
@@ -1537,6 +1585,10 @@ fn load_modules(
         if let Some(m) = w.modules.iter_mut().find(|m| m.key == target) {
             m.injected = Some(rt.prefix);
         }
+    }
+
+    if let Err(diags) = parse_reached(&mut w.modules, opts) {
+        return Err(failed(diags, w.origins));
     }
 
     // The floor. Last, so it walks everything the artifact links,
@@ -1615,6 +1667,9 @@ struct Parsed {
     /// [`crate::origin::comment_lines`] of the text, once a generated module
     /// with this text asks.
     comment_lines: OnceCell<Option<HashSet<usize>>>,
+    /// The bodies a skimming parse left unparsed; `program` holds an empty
+    /// block for each.
+    skimmed: Option<parser::Skimmed>,
 }
 
 thread_local! {
@@ -3860,6 +3915,10 @@ fn link(
         let imports = m.program.imports.iter().flat_map(|imp| &imp.names);
         named.extend(imports.map(|n| n.original.clone()));
     }
+    let unparsed: HashMap<String, Vec<(usize, usize)>> = (modules.iter())
+        .filter(|m| !m.unparsed.is_empty())
+        .map(|m| (m.key.clone(), m.unparsed.clone()))
+        .collect();
     // Merge. The root goes last so its injected builtins and log config win;
     // imported modules' injected decls are dropped.
     let mut merged: Option<Program> = None;
@@ -3927,9 +3986,143 @@ fn link(
     program.imports.clear(); // consumed
     program.module_hashes = module_hashes;
     program.spellings = std::sync::Arc::new(spellings);
-    drop_unreached(&mut program, lazy, named);
+    drop_unreached(&mut program, lazy, named, &unparsed);
     program.number();
     Ok(program)
+}
+
+/// Whether a skimmed body's tokens can mention a builtin whose mention links a
+/// runtime module ([`RT_MODULES`]): its name, or a `save`, `load`, `loadOr` or
+/// template, which the parser desugars to `toJson`, `fromJson` and `@str`
+/// (`Parser::storage_desugar`, `Parser::template`).
+fn mentions_runtime(tokens: &[lexer::Token]) -> bool {
+    static NAMES: std::sync::OnceLock<HashSet<&'static str>> = std::sync::OnceLock::new();
+    let names = NAMES.get_or_init(|| {
+        let linking = RT_MODULES.iter().filter(|rt| !rt.always);
+        (linking.flat_map(|rt| {
+            rt.desugared
+                .iter()
+                .copied()
+                .chain(rt.routes().map(|(b, _)| b))
+        }))
+        .chain(["save", "load", "loadOr"])
+        .collect()
+    });
+    tokens.iter().any(|t| match &t.tok {
+        lexer::Tok::Ident(n) => names.contains(n.as_str()),
+        lexer::Tok::TemplateStr { .. } => true,
+        _ => false,
+    })
+}
+
+/// Parses the skimmed body of each function a root can reach by its spelling,
+/// and records in [`Module::unparsed`] each one it leaves unparsed.
+///
+/// The spellings a root reaches are [`crate::ast::spelled`] of every body but a
+/// skimmed module's top-level functions, every imported name and every name in
+/// [`LoadOptions::host_calls`]. A reached function's spellings are reached too.
+/// They are taken before `link` renames, so a spelling reaches every function
+/// that declares it, and a namespace member `ns.f` is the field `f`: every
+/// function the link's walk keeps ([`drop_unreached`]) is parsed, and it
+/// asserts so. A program that calls `derive` parses every skimmed body.
+fn parse_reached(modules: &mut [Module], opts: &LoadOptions) -> Result<(), Vec<Diagnostic>> {
+    // The skimmed modules' top-level functions no spelling reached yet, by
+    // name. A body that mentions a runtime builtin was parsed at load.
+    let mut waiting: HashMap<String, Vec<(usize, usize)>> = HashMap::new();
+    for (mi, m) in modules.iter().enumerate() {
+        let Some(s) = m.skimmed.as_ref().and_then(|p| p.skimmed.as_ref()) else {
+            continue;
+        };
+        for (fi, f) in m.program.functions.iter().enumerate() {
+            if s.tokens(f).is_some() {
+                waiting.entry(f.name.clone()).or_default().push((mi, fi));
+            }
+        }
+    }
+    if waiting.is_empty() {
+        return Ok(());
+    }
+    let unparsed = |mi: usize, f: &Function| {
+        waiting
+            .get(&f.name)
+            .is_some_and(|w| w.iter().any(|(m, _)| *m == mi))
+    };
+    let mut names: Vec<&str> = opts.host_calls.to_vec();
+    for (mi, m) in modules.iter().enumerate() {
+        for f in m.program.functions.iter().filter(|f| !unparsed(mi, f)) {
+            crate::ast::spelled(&f.body, &mut names);
+        }
+        for t in m.program.tests.iter().chain(&m.program.benches) {
+            crate::ast::spelled(&t.body, &mut names);
+        }
+        for f in (m.program.impls.iter()).flat_map(|im| im.methods.iter().chain(&im.places)) {
+            crate::ast::spelled(&f.body, &mut names);
+        }
+        for g in &m.program.globals {
+            crate::ast::expr_spelled(&g.init, &mut names);
+        }
+        for p in m
+            .program
+            .type_decls
+            .iter()
+            .filter_map(|t| t.predicate.as_ref())
+        {
+            crate::ast::expr_spelled(p, &mut names);
+        }
+        let contracts = m.program.contracts.iter().flat_map(|c| &c.members);
+        for d in contracts.filter_map(|m| m.default()) {
+            crate::ast::expr_spelled(d, &mut names);
+        }
+        let imports = m.program.imports.iter().flat_map(|imp| &imp.names);
+        names.extend(imports.map(|n| n.original.as_str()));
+    }
+    let mut derive = names.contains(&"derive");
+    let mut work: Vec<(usize, usize)> = Vec::new();
+    for n in names {
+        work.extend(waiting.remove(n).into_iter().flatten());
+    }
+    loop {
+        while let Some((mi, fi)) = work.pop() {
+            let m = &modules[mi];
+            let f = &m.program.functions[fi];
+            let parse = m.skimmed.as_ref().and_then(|p| p.skimmed.as_ref());
+            let parse = parse.filter(|_| f.body.stmts.is_empty());
+            let body = match parse.and_then(|s| s.body(f)) {
+                Some(body) => {
+                    let in_key = |ds: Vec<Diagnostic>| -> Vec<Diagnostic> {
+                        ds.into_iter().map(|d| in_module(d, &m.key, "")).collect()
+                    };
+                    let mut body = body.map_err(in_key)?;
+                    let site = site_file(&m.key, "", opts.std_root.as_deref());
+                    crate::project::walk_block(&mut body, &mut panic_stamp(&site));
+                    Some(body)
+                }
+                None => None,
+            };
+            let mut names: Vec<&str> = Vec::new();
+            crate::ast::spelled(body.as_ref().unwrap_or(&f.body), &mut names);
+            derive |= names.contains(&"derive");
+            for n in names {
+                work.extend(waiting.remove(n).into_iter().flatten());
+            }
+            if let Some(body) = body {
+                modules[mi].program.functions[fi].body = body;
+            }
+        }
+        // A `derive` generator writes calls after the check, to any function.
+        if !derive || waiting.is_empty() {
+            break;
+        }
+        work.extend(waiting.drain().flat_map(|(_, at)| at));
+    }
+    for (mi, fi) in waiting.into_values().flatten() {
+        let f = &modules[mi].program.functions[fi];
+        if f.body.stmts.is_empty() {
+            let at = (f.line, f.col);
+            modules[mi].unparsed.push(at);
+        }
+    }
+    Ok(())
 }
 
 /// The modules whose unreached functions, tests and benches the link drops:
@@ -3960,8 +4153,21 @@ fn lazy_modules(modules: &[Module], root_key: &str, opts: &LoadOptions) -> HashS
 ///
 /// A program that calls `derive` drops nothing: its generator writes calls
 /// after the check, to any function of the program.
-fn drop_unreached(program: &mut Program, lazy: &HashSet<String>, named: Vec<String>) {
+///
+/// `unparsed` names, by module and position, each function whose body
+/// [`parse_reached`] left unparsed. The walk reaching one panics: the link
+/// would hand the checker an empty block for a body it never read.
+fn drop_unreached(
+    program: &mut Program,
+    lazy: &HashSet<String>,
+    named: Vec<String>,
+    unparsed: &HashMap<String, Vec<(usize, usize)>>,
+) {
     if lazy.is_empty() {
+        assert!(
+            unparsed.is_empty(),
+            "a load that drops nothing left a body unparsed"
+        );
         return;
     }
     let is_lazy = |m: &Option<String>| m.as_ref().is_some_and(|k| lazy.contains(k));
@@ -3986,7 +4192,24 @@ fn drop_unreached(program: &mut Program, lazy: &HashSet<String>, named: Vec<Stri
     }
     let keep = reached(program, roots);
     if keep.contains("derive") {
+        assert!(
+            unparsed.is_empty(),
+            "`derive` reached and a body is unparsed"
+        );
         return;
+    }
+    for f in program
+        .functions
+        .iter()
+        .filter(|f| keep.contains(f.name.as_str()))
+    {
+        let left = f.module.as_ref().and_then(|k| unparsed.get(k));
+        let at = (f.line, f.col);
+        assert!(
+            !left.is_some_and(|l| l.contains(&at)),
+            "`{}` is reached and unparsed",
+            f.name
+        );
     }
     let kept: Vec<bool> = (program.functions.iter())
         .map(|f| !is_lazy(&f.module) || keep.contains(f.name.as_str()))
