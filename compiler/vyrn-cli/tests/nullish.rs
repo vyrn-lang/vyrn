@@ -7,6 +7,8 @@
 use std::path::PathBuf;
 use std::process::Command;
 
+mod common;
+
 fn vyrn() -> Command {
     Command::new(env!("CARGO_BIN_EXE_vyrn"))
 }
@@ -15,12 +17,12 @@ fn norm(bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes).replace("\r\n", "\n")
 }
 
-fn write(name: &str, src: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join("vyrn-nullish");
-    std::fs::create_dir_all(&dir).unwrap();
+/// Writes `src` as `name.vyrn` in a scratch directory the returned guard owns.
+fn write(name: &str, src: &str) -> (common::Scratch, PathBuf) {
+    let dir = common::scratch("nullish");
     let path = dir.join(format!("{name}.vyrn"));
     std::fs::write(&path, src).unwrap();
-    path
+    (dir, path)
 }
 
 /// The sums under test, plus `loud`, whose call is observable.
@@ -53,7 +55,7 @@ fn loud(n: Int64) -> Int64 {
 fn prints(name: &str, exprs: &[&str]) -> String {
     let body: String = exprs.iter().map(|e| format!("    print({e})\n")).collect();
     let src = format!("{PRELUDE}\nfn main() -> Int64 {{\n{body}    return 0\n}}\n");
-    let path = write(name, &src);
+    let (_dir, path) = write(name, &src);
     let out = vyrn().arg("run").arg(&path).output().expect("vyrn run");
     assert!(
         out.status.success(),
@@ -143,7 +145,7 @@ fn the_desugar_is_the_match_it_desugars_to() {
     let module = |name: &str, expr: &str| -> String {
         let src =
             format!("{PRELUDE}\nfn main() -> Int64 {{\n    let n = {expr}\n    return n\n}}\n");
-        let path = write(name, &src);
+        let (_dir, path) = write(name, &src);
         let out = vyrn()
             .arg("emit-wat")
             .arg(&path)

@@ -230,38 +230,31 @@ fn unpack_tool(sha: &str, bytes: &[u8]) -> Result<PathBuf, String> {
             return Err(format!("cannot run tar: {e}"));
         }
     }
-    // A `.gate` file held across place and certify serializes them per hash:
-    // without it, a loser could see the winner's rename before its marker and
-    // delete the winner's directory. If the gate cannot be created, this process
-    // places without it.
-    let gate = tools_dir().join(format!("{sha}.gate"));
-    let gated = hold_gate(&gate);
-    let placed = place_staged_tool(&stage, &out, sha);
-    if gated {
-        let _ = std::fs::remove_file(&gate);
+    // A lock on `<sha>.gate` held across place and certify serializes them per
+    // hash: without it, a loser could see the winner's rename before its marker
+    // and delete the winner's directory.
+    let gate = hold_gate(&tools_dir().join(format!("{sha}.gate")));
+    let placed = gate.and_then(|_held| place_staged_tool(&stage, &out, sha));
+    if placed.is_err() {
+        let _ = std::fs::remove_dir_all(&stage);
     }
     placed?;
     Ok(out)
 }
 
-/// Creates `gate`, waiting up to 60 s while another process holds it. Returns
-/// whether this process holds it; a gate left by a killed process costs one
-/// wait, then the caller places without it.
-fn hold_gate(gate: &Path) -> bool {
-    for _ in 0..600 {
-        match std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(gate)
-        {
-            Ok(_) => return true,
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                std::thread::sleep(std::time::Duration::from_millis(100));
-            }
-            Err(_) => return false,
-        }
-    }
-    false
+/// Takes an OS lock on `gate`, waiting while another process holds it. The
+/// lock goes with the returned file and with a killed holder, so no gate is
+/// ever stale. The file stays: unlinking a lock file splits its waiters.
+fn hold_gate(gate: &Path) -> Result<std::fs::File, String> {
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(gate)
+        .map_err(|e| format!("cannot open {}: {e}", slash(gate)))?;
+    file.lock()
+        .map_err(|e| format!("cannot lock {}: {e}", slash(gate)))?;
+    Ok(file)
 }
 
 /// Moves the staged copy to `out` and writes the certification marker,
@@ -492,7 +485,7 @@ mod tests {
     /// change: the specifier is opaque to `Lock::load`.
     #[test]
     fn a_tool_line_round_trips_through_the_lock_that_already_exists() {
-        let dir = std::env::temp_dir().join("vyrn-toolpin-lock");
+        let dir = std::env::temp_dir().join(format!("vyrn-toolpin-lock-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("vyrn.lock");
         let _ = std::fs::remove_file(&path);
@@ -525,7 +518,7 @@ mod tests {
     /// lock covers, the command that adds one, and the escape hatch.
     #[test]
     fn no_entry_for_this_platform_is_a_refusal_that_says_all_six_things() {
-        let dir = std::env::temp_dir().join("vyrn-toolpin-refusal");
+        let dir = std::env::temp_dir().join(format!("vyrn-toolpin-refusal-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let mut lock = Lock::load(dir.join("vyrn.lock")).unwrap();
         // Pinned for two platforms, neither of them this one.
@@ -557,7 +550,8 @@ mod tests {
     /// it.
     #[test]
     fn pinned_but_uncached_fails_and_names_the_hash() {
-        let dir = std::env::temp_dir().join("vyrn-toolpin-uncached");
+        let dir =
+            std::env::temp_dir().join(format!("vyrn-toolpin-uncached-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let mut lock = Lock::load(dir.join("vyrn.lock")).unwrap();
         let sha = "a".repeat(64);
@@ -585,7 +579,8 @@ mod tests {
         assert!(!is_sha256("../../escape"));
         assert!(!is_sha256(""));
 
-        let dir = std::env::temp_dir().join("vyrn-toolpin-traversal");
+        let dir =
+            std::env::temp_dir().join(format!("vyrn-toolpin-traversal-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let mut lock = Lock::load(dir.join("vyrn.lock")).unwrap();
         lock.entries.insert(
@@ -622,24 +617,24 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// A second unpack of the same hash waits for the first to release the gate.
+    /// A gate a killed process left behind is a file with no lock: the next
+    /// unpack takes it at once, where a create-only gate waited 60 s.
     #[test]
-    fn a_held_gate_makes_the_next_unpack_wait() {
-        let dir = std::env::temp_dir().join("vyrn-toolpin-gate");
+    fn a_left_gate_does_not_stall_and_a_held_one_excludes() {
+        let dir = std::env::temp_dir().join(format!("vyrn-toolpin-gate-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let gate = dir.join("x.gate");
         std::fs::write(&gate, "").unwrap();
-        let held = gate.clone();
-        // Taken before the spawn: a delay between the spawn and this line
-        // would otherwise shorten the measured wait below 300 ms.
         let start = std::time::Instant::now();
-        let release = std::thread::spawn(move || {
-            std::thread::sleep(std::time::Duration::from_millis(300));
-            std::fs::remove_file(held).unwrap();
-        });
-        assert!(hold_gate(&gate));
-        assert!(start.elapsed() >= std::time::Duration::from_millis(300));
-        release.join().unwrap();
-        std::fs::remove_file(&gate).unwrap();
+        let held = hold_gate(&gate).unwrap();
+        assert!(start.elapsed() < std::time::Duration::from_secs(10));
+        let other = std::fs::OpenOptions::new().write(true).open(&gate).unwrap();
+        assert!(matches!(
+            other.try_lock(),
+            Err(std::fs::TryLockError::WouldBlock)
+        ));
+        drop(held);
+        assert!(other.try_lock().is_ok());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

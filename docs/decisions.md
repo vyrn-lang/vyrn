@@ -345,6 +345,7 @@ pull request.
 
 - The workspace builds and tests with no LLVM, clang or sysroot. `vyrn-lsp`, `vyrn-genwasm` and `vyrn-play` sit outside it.
 - `vyrn fmt` has one style and no options, never joins or splits lines, and refuses any output whose tokens differ from the input's.
+- `vyrn fmt` and `vyrn fix` write the canonical target path (symlinks resolved) through a staged file in the same directory that copies the target's permissions, and refuse with a sentence naming the file if its bytes changed between the read and the write (`manifest::rewrite_whole`).
 - `vyrn fix` applies only `.copy()`. `consume` and `for x in consume xs` change a contract, so they stay the author's decision.
 - `vyrn why --cost` reads the decided core and replaces `vyrn why --memory`. The LSP hover keeps the binding rows of the ownership table, with one wording.
 - A kept check's reason is a field of `Check` (`Why`), written with the verdict, not a side table: one home for a check's facts. It speaks source terms: the goal as the source would test it (`` `xs` non-empty ``, `` `i < xs.length` ``), and the change that would drop the check where one exists, such as a parameter's `where` clause.
@@ -366,10 +367,13 @@ pull request.
 - Remote imports are pinned by SHA-256 in `vyrn.lock`, content-addressed in `~/.vyrn/cache`, vendorable and buildable offline. Only `vyrn update` changes a pin. No semver registry.
 - A manifest that does not parse is an error, never an empty policy.
 - A file another `vyrn` process may read at the same moment (a cache entry, `vyrn.lock`, `vyrn.json`, a vendored blob) is written under a name no other writer uses and renamed into place (`manifest::write_whole`). `vyrn.lock` is saved as this process's changes over the file as it is then, so a pin another build saved survives.
+- `vyrn.lock` and `vyrn.json` writes take an OS advisory lock (`File::lock`) on one lock file per project directory, `~/.vyrn/locks/<hash>.files` (`manifest::lock_project_files`), held across reload, merge and rename and never across a build, so the lost update closes.
+- A second `vyrn dev` on one project refuses with a sentence naming the first's port. The first holds `~/.vyrn/locks/<hash>.dev` for its life (`manifest::try_lock_dev`), a file of its own beside the save lock, which a server-long hold would block, and records its port in `<hash>.port`.
 - A `vyrn` command reads `vyrn.json` and `vyrn.lock` once, into one `Project`. Every load it makes reports through it: the lock is saved, the diagnostics and warnings print one way, and `--offline` and `--deny-warnings` reach every load.
 - Tools are pinned per project in the same lock, and bytes are shared per user. A pinned tool that cannot resolve fails; it never falls back to `PATH`.
 - clang is discovered and recorded, never pinned, because it links against the host's libc.
 - Vyrn does not build tools from source, wrap a package manager, or take a crate for curl, git or tar.
+- `vyrn build -o` writes its output through a staged file beside it and a rename (`manifest::stage_beside`), so a reader sees the last build or the new one and a failed build leaves the last one. The native route's intermediates (`<out>.wasm`, `<out>.w2c.c`) stay in place for inspection.
 - Native builds choose from a curated set of microarchitectures and always pass `-ffp-contract=off`, because FMA changes float bits.
 - The editor grammar colours only words the compiler names, and its keywords equal the lexer's.
 - A generator input is analysed through the module that claims it and whose generated code maps to it through `//@origin`. A module claims a file when the first string argument of one of its generator imports resolves to the file or a directory above it; the import graph is the only registry, so there is no extension map.
@@ -384,6 +388,7 @@ pull request.
 - A change that moves emitted wasm bytes rewrites the SHA-256 manifest in the same commit and names every moved row.
 - Censuses of the type constructors and syntax forms are pinned by tests, so the tables cannot drift.
 - Pins are written by gates and merged with the `pin` driver, never by hand.
+- A test's scratch directory is its own: `vyrn-cli`'s tests take `common::scratch`, a guard that owns a directory unique to the process and the call and removes it when the test passes, and a helper that would return a path in it returns the guard. A unit test in another crate names its directory with the process id.
 - A test sets an environment variable on a child's command, or as the one test of its binary that reads it. `vyrn-lsp` and `vyrn-genwasm` run under `cargo test`, a thread per test, where `set_var` decides by scheduling which test sees it.
 - A test of what `vyrn check` says about one program is `tests/check/<name>.vyrn` and its `.stderr`, not a Rust string.
 - A prediction is written as a program before the change lands and reported either way. Nothing is deleted until the corpus is green on its replacement.

@@ -345,6 +345,8 @@ impl Lock {
     /// Writes this lock's changes over the file as it is now, so a pin another
     /// process saved since [`Lock::load`] survives, and replaces the file whole.
     pub fn save(&self) -> Result<(), String> {
+        let dir = self.path.parent().filter(|d| !d.as_os_str().is_empty());
+        let _held = lock_project_files(dir.unwrap_or(Path::new(".")))?;
         let mut merged = Lock::load(self.path.clone())?.entries;
         merged.retain(|spec, _| self.entries.contains_key(spec) || !self.loaded.contains_key(spec));
         for (spec, pin) in &self.entries {
@@ -376,6 +378,62 @@ fn home() -> String {
         .or_else(|_| std::env::var("HOME"))
         .unwrap_or_else(|_| ".".to_string())
 }
+
+/// Takes this machine's lock on the `vyrn.lock` and `vyrn.json` of
+/// `project_dir`, waiting while another process holds it. The lock goes with
+/// the returned file. Hold it across one reload, merge and rename, never
+/// across a build.
+pub fn lock_project_files(project_dir: &Path) -> Result<std::fs::File, String> {
+    let file = project_lock_file(project_dir, "files")?;
+    file.lock()
+        .map_err(|e| format!("cannot lock {}: {e}", project_dir.display()))?;
+    Ok(file)
+}
+
+/// Takes the lock `vyrn dev` holds on `project_dir` for its life, or `None`
+/// while another process holds it. Its own file, not [`lock_project_files`]'s:
+/// a lock held for a server's life would stop every build's save.
+pub fn try_lock_dev(project_dir: &Path) -> Result<Option<std::fs::File>, String> {
+    let file = project_lock_file(project_dir, "dev")?;
+    match file.try_lock() {
+        Ok(()) => Ok(Some(file)),
+        Err(std::fs::TryLockError::WouldBlock) => Ok(None),
+        Err(std::fs::TryLockError::Error(e)) => {
+            Err(format!("cannot lock {}: {e}", project_dir.display()))
+        }
+    }
+}
+
+/// Where the holder of [`try_lock_dev`] records its port. Not in the locked
+/// file: on Windows another process cannot read a locked range.
+pub fn dev_port_file(project_dir: &Path) -> PathBuf {
+    project_lock_path(project_dir, "port")
+}
+
+/// Opens `~/.vyrn/locks/<hash of the canonical directory>.<what>`: one file
+/// per project and purpose, outside the project, so a checkout gains no file.
+/// An OS lock on it goes with a killed holder.
+fn project_lock_file(project_dir: &Path, what: &str) -> Result<std::fs::File, String> {
+    let path = project_lock_path(project_dir, what);
+    path.parent()
+        .map_or(Ok(()), std::fs::create_dir_all)
+        .and_then(|()| {
+            let mut open = std::fs::OpenOptions::new();
+            open.create(true).truncate(false).write(true).open(&path)
+        })
+        .map_err(|e| format!("cannot open the project lock {}: {e}", path.display()))
+}
+
+fn project_lock_path(project_dir: &Path, what: &str) -> PathBuf {
+    let key = std::fs::canonicalize(project_dir).unwrap_or_else(|_| project_dir.to_path_buf());
+    let name = crate::hash::sha256_hex(key.to_string_lossy().as_bytes());
+    Path::new(&home()).join(format!(".vyrn/locks/{name}.{what}"))
+}
+
+/// How far a filesystem's mtime can trail the clock: the coarsest common
+/// timestamp (FAT's 2 s; HFS+ keeps 1 s, Linux a scheduler tick). A file whose
+/// mtime lies within it of a check can change again without moving its mtime.
+pub const MTIME_SLACK: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// The user's module cache: `~/.vyrn/cache/sha256/<hex>`.
 pub fn cache_dir() -> PathBuf {
@@ -430,15 +488,63 @@ pub fn gen_cache_put(key: &str, value: &str) {
 /// The bytes go to a name no other writer uses, then a rename replaces
 /// `path`. On a failed rename the staged file is removed.
 pub fn write_whole(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    static SEQ: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-    let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let mut name = path.file_name().unwrap_or_default().to_os_string();
-    name.push(format!(".{}.{seq}.tmp", std::process::id()));
-    let stage = path.with_file_name(name);
+    let stage = stage_beside(path);
     std::fs::write(&stage, bytes)?;
     std::fs::rename(&stage, path).inspect_err(|_| {
         let _ = std::fs::remove_file(&stage);
     })
+}
+
+/// A name beside `path` that no other writer, process or thread, uses. It
+/// keeps `path`'s extension last, so a linker that reads it writes the same
+/// kind of file.
+pub fn stage_beside(path: &Path) -> PathBuf {
+    static SEQ: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let mut name = path.file_stem().unwrap_or_default().to_os_string();
+    name.push(format!(".{}.{seq}.tmp", std::process::id()));
+    if let Some(ext) = path.extension() {
+        name.push(".");
+        name.push(ext);
+    }
+    path.with_file_name(name)
+}
+
+/// Replaces the user's file at `path` with `bytes` if it still holds `read`,
+/// the bytes the caller read from it.
+///
+/// The write goes to the canonical path, so a symlink keeps pointing at the
+/// file, through a staged file beside it with the target's permissions, so a
+/// reader sees the old bytes or the new ones.
+///
+/// # Errors
+///
+/// The file changed since the caller read it (another writer, such as an
+/// editor's save, came between), or an I/O step failed. Either way nothing is
+/// written. The check and the rename are two steps: a write between them is
+/// lost, and no lock can stop a writer that takes none.
+pub fn rewrite_whole(path: &Path, read: &[u8], bytes: &[u8]) -> Result<(), String> {
+    let shown = path.display();
+    let target = std::fs::canonicalize(path).map_err(|e| format!("cannot resolve {shown}: {e}"))?;
+    let perms = std::fs::metadata(&target)
+        .map_err(|e| format!("cannot read {shown}: {e}"))?
+        .permissions();
+    let stage = stage_beside(&target);
+    let staged =
+        std::fs::write(&stage, bytes).and_then(|()| std::fs::set_permissions(&stage, perms));
+    let placed = match staged {
+        Err(e) => Err(format!("cannot write {shown}: {e}")),
+        Ok(()) if std::fs::read(&target).ok().as_deref() != Some(read) => Err(format!(
+            "{shown} changed after it was read; nothing was written, run the command again"
+        )),
+        Ok(()) => {
+            std::fs::rename(&stage, &target).map_err(|e| format!("cannot write {shown}: {e}"))
+        }
+    };
+    if placed.is_err() {
+        let _ = std::fs::remove_file(&stage);
+    }
+    placed
 }
 
 /// Reads a content-addressed blob and verifies its hash.
@@ -493,7 +599,7 @@ mod tests {
     use crate::audience::{audience_of, Audience};
 
     fn tmp(name: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("vyrn-manifest-{name}"));
+        let d = std::env::temp_dir().join(format!("vyrn-manifest-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         d
@@ -584,6 +690,54 @@ mod tests {
         assert_eq!(
             on_disk.keys().collect::<Vec<_>>(),
             ["https://x.dev/a.vyrn", "https://x.dev/b.vyrn"]
+        );
+    }
+
+    #[test]
+    fn a_project_lock_excludes_a_second_holder_until_it_drops() {
+        let dir = tmp("project-lock");
+        let held = lock_project_files(&dir).unwrap();
+        let other = project_lock_file(&dir, "files").unwrap();
+        assert!(matches!(
+            other.try_lock(),
+            Err(std::fs::TryLockError::WouldBlock)
+        ));
+        drop(held);
+        assert!(other.try_lock().is_ok());
+    }
+
+    #[test]
+    fn a_rewrite_refuses_a_file_that_changed_after_the_read() {
+        let path = tmp("rewrite-changed").join("a.vyrn");
+        std::fs::write(&path, "saved by the editor").unwrap();
+        let e = rewrite_whole(&path, b"read by fmt", b"formatted").unwrap_err();
+        assert!(e.contains("changed after it was read"), "{e}");
+        assert_eq!(std::fs::read(&path).unwrap(), b"saved by the editor");
+        assert_eq!(
+            std::fs::read_dir(path.parent().unwrap()).unwrap().count(),
+            1,
+            "no staged file is left"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_rewrite_keeps_the_symlink_and_the_mode() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tmp("rewrite-link");
+        let (real, link) = (dir.join("real.vyrn"), dir.join("link.vyrn"));
+        std::fs::write(&real, "old").unwrap();
+        std::fs::set_permissions(&real, std::fs::Permissions::from_mode(0o640)).unwrap();
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        rewrite_whole(&link, b"old", b"new").unwrap();
+        assert!(std::fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(std::fs::read(&real).unwrap(), b"new");
+        assert_eq!(
+            std::fs::metadata(&real).unwrap().permissions().mode() & 0o777,
+            0o640
         );
     }
 

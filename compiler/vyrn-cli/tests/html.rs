@@ -7,18 +7,13 @@
 //! A refusal, not an escape: a name lands outside the quotes, where value escaping means
 //! nothing and a space starts a second attribute, as in `<img src" onload="alert(1)="x">`.
 
-use std::path::PathBuf;
 use std::process::Command;
+
+mod common;
+use common::scratch;
 
 fn vyrn() -> Command {
     Command::new(env!("CARGO_BIN_EXE_vyrn"))
-}
-
-fn scratch(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join("vyrn-html-tests").join(name);
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
 }
 
 /// Runs one program and returns `(stdout, stderr, exit code)`.

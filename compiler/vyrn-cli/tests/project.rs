@@ -4,15 +4,11 @@
 use std::path::PathBuf;
 use std::process::Command;
 
+mod common;
+use common::scratch;
+
 fn vyrn() -> Command {
     Command::new(env!("CARGO_BIN_EXE_vyrn"))
-}
-
-fn scratch(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join("vyrn-project-tests").join(name);
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
 }
 
 #[test]
@@ -67,6 +63,67 @@ fn new_refuses_a_name_that_exists_and_creates_missing_parents() {
     assert_eq!(
         std::fs::read_to_string(dir.join("deep/app/vyrn.json")).unwrap(),
         "{}"
+    );
+}
+
+/// The lock is held here, as a first `vyrn dev` holds it for its life.
+#[test]
+fn a_second_dev_server_of_one_project_refuses_and_names_the_first_port() {
+    use vyrn_frontend::manifest::{dev_port_file, try_lock_dev};
+    let dir = scratch("dev-twice");
+    let manifest = r#"{"server": "server.vyrn", "client": "client.vyrn"}"#;
+    std::fs::write(dir.join("vyrn.json"), manifest).unwrap();
+    let first = try_lock_dev(&dir)
+        .unwrap()
+        .expect("nothing serves a fresh scratch project");
+    std::fs::write(dev_port_file(&dir), "8123").unwrap();
+    let out = vyrn().current_dir(&dir).arg("dev").output().unwrap();
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success());
+    assert!(
+        err.contains("already serves this project on http://localhost:8123"),
+        "{err}"
+    );
+    drop(first);
+    let _ = std::fs::remove_file(dev_port_file(&dir));
+}
+
+/// The build is staged beside the output and renamed, so a build that fails after
+/// the emitter (here `wasm-opt`, pointed at a file that is no program) leaves the
+/// last good output and no staged file.
+#[test]
+fn a_failed_build_leaves_the_last_output_whole() {
+    let dir = scratch("build-staged");
+    std::fs::write(dir.join("main.vyrn"), "fn main() -> Int64 { return 0 }\n").unwrap();
+    std::fs::write(dir.join("out.wasm"), "the last good build").unwrap();
+    std::fs::write(dir.join("not-wasm-opt"), "no program").unwrap();
+    let out = vyrn()
+        .current_dir(&dir)
+        .env("VYRN_WASM_OPT", dir.join("not-wasm-opt"))
+        .args([
+            "--wasm-opt",
+            "build",
+            "main.vyrn",
+            "--target",
+            "wasm",
+            "-o",
+            "out.wasm",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        !out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        std::fs::read(dir.join("out.wasm")).unwrap(),
+        b"the last good build"
+    );
+    assert_eq!(
+        std::fs::read_dir(&dir).unwrap().count(),
+        3,
+        "no staged file is left"
     );
 }
 

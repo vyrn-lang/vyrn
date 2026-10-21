@@ -2,18 +2,13 @@
 //! `fix:` per way out. `vyrn fix` applies the one entry that is an edit rather than a
 //! decision, `.copy()`, and refuses the rest by name; each refusal has its own test.
 
-use std::path::PathBuf;
 use std::process::Command;
+
+mod common;
+use common::scratch;
 
 fn vyrn() -> Command {
     Command::new(env!("CARGO_BIN_EXE_vyrn"))
-}
-
-fn scratch(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join("vyrn-fix-tests").join(name);
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
 }
 
 /// Writes `src`, runs `vyrn fix` on it, and returns `(stdout, the file afterwards)`.

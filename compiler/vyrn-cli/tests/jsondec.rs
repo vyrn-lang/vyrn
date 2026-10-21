@@ -14,6 +14,8 @@ use std::process::Command;
 
 use vyrn_frontend::hash::sha256_hex;
 
+mod common;
+
 /// The transcript's SHA-256.
 const CORPUS_DIGEST: &str = "41b65a23126315011a6659be00463b187c6bb674c11c950f34a3ed734d095b02";
 
@@ -512,11 +514,10 @@ fn rows() -> usize {
     TARGETS.iter().map(|t| t.inputs.len()).sum()
 }
 
-/// Runs the corpus and returns its transcript, leaving the program and the
-/// transcript on disk for a failure to point at.
-fn transcript() -> (String, PathBuf) {
-    let dir = std::env::temp_dir().join("vyrn-m3-jsondec");
-    std::fs::create_dir_all(&dir).unwrap();
+/// Runs the corpus and returns its transcript, with the guard of the directory
+/// holding the program and the transcript, which a failure keeps to point at.
+fn transcript() -> (String, common::Scratch) {
+    let dir = common::scratch("m3-jsondec");
     let prog = dir.join("corpus.vyrn");
     std::fs::write(&prog, program()).unwrap();
     let out = vyrn()

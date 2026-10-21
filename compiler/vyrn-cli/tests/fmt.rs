@@ -2,18 +2,13 @@
 //! file's line endings, CRLF or LF, so a canonical CRLF file is no diff under `--check`
 //! and `fmt` never rewrites a whole file to flip its newlines. No clang needed.
 
-use std::path::PathBuf;
 use std::process::Command;
+
+mod common;
+use common::scratch;
 
 fn vyrn() -> Command {
     Command::new(env!("CARGO_BIN_EXE_vyrn"))
-}
-
-fn scratch(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join("vyrn-fmt-tests").join(name);
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
 }
 
 /// A canonically-formatted program (matches `vyrn fmt` output) with LF endings.

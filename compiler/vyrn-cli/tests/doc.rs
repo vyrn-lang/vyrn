@@ -8,18 +8,13 @@
 //! `test` block (both omitted), and a protocol with one documented method (gets
 //! a `###` section) beside one undocumented (does not).
 
-use std::path::PathBuf;
 use std::process::Command;
+
+mod common;
+use common::scratch;
 
 fn vyrn() -> Command {
     Command::new(env!("CARGO_BIN_EXE_vyrn"))
-}
-
-fn scratch(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join("vyrn-doc-tests").join(name);
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
 }
 
 const FIXTURE: &str = r#"/// A tiny fixture module for `vyrn doc` golden output. It exercises the
@@ -141,7 +136,9 @@ const EXPECTED_INDEX: &str = r"# API Reference
 
 /// Documents the fixture in directory mode, so the `import` line is parsed and
 /// never resolved.
-fn generate(name: &str) -> PathBuf {
+/// Runs `vyrn doc` on the fixture; the guard owns the directory, and `out` under it
+/// holds the pages.
+fn generate(name: &str) -> common::Scratch {
     let dir = scratch(name);
     std::fs::write(dir.join("widgets.vyrn"), FIXTURE).unwrap();
     let out = dir.join("out");
@@ -158,13 +155,13 @@ fn generate(name: &str) -> PathBuf {
         "stderr: {}",
         String::from_utf8_lossy(&status.stderr)
     );
-    out
+    dir
 }
 
 #[test]
 fn golden_module_page_is_byte_pinned() {
-    let out = generate("golden-page");
-    let page = std::fs::read_to_string(out.join("widgets.md")).unwrap();
+    let dir = generate("golden-page");
+    let page = std::fs::read_to_string(dir.join("out/widgets.md")).unwrap();
     assert_eq!(
         page, EXPECTED_PAGE,
         "generated page drifted from the golden"
@@ -173,8 +170,8 @@ fn golden_module_page_is_byte_pinned() {
 
 #[test]
 fn golden_index_is_byte_pinned() {
-    let out = generate("golden-index");
-    let index = std::fs::read_to_string(out.join("index.md")).unwrap();
+    let dir = generate("golden-index");
+    let index = std::fs::read_to_string(dir.join("out/index.md")).unwrap();
     assert_eq!(
         index, EXPECTED_INDEX,
         "generated index drifted from the golden"

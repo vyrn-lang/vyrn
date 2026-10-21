@@ -5794,3 +5794,38 @@ fn an_edited_buffer_makes_the_profile_stale() {
     assert!(lenses[0].contains("profile stale"), "{lenses:?}");
     assert!(lenses.iter().all(|l| !l.contains("last run")), "{lenses:?}");
 }
+
+/// Each publish names the version of the text it describes, so a client can drop one
+/// for a text it has since changed.
+#[test]
+fn diagnostics_carry_the_version_of_the_text_they_describe() {
+    let dir = std::env::temp_dir().join(format!("vyrn-lsp-version-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("v.vyrn");
+    std::fs::write(&path, "fn main() -> Int64 { return 0 }\n").unwrap();
+    let uri = file_uri(&plain(&path));
+    let mut client = spawn_client();
+    did_open(
+        &mut client,
+        &uri,
+        "vyrn",
+        "fn main() -> Int64 { return 0 }\n",
+    );
+    assert_eq!(
+        read_diags_for(&mut client, "v.vyrn")["params"]["version"],
+        1
+    );
+    client.send(&serde_json::json!({
+        "jsonrpc": "2.0", "method": "textDocument/didChange",
+        "params": {
+            "textDocument": { "uri": uri, "version": 7 },
+            "contentChanges": [ { "text": "fn main() -> Int64 { return x }\n" } ]
+        }
+    }));
+    assert_eq!(
+        read_diags_for(&mut client, "v.vyrn")["params"]["version"],
+        7
+    );
+    drop(client);
+    let _ = std::fs::remove_dir_all(&dir);
+}

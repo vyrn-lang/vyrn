@@ -5,15 +5,11 @@
 use std::path::PathBuf;
 use std::process::Command;
 
+mod common;
+use common::scratch;
+
 fn vyrn() -> Command {
     Command::new(env!("CARGO_BIN_EXE_vyrn"))
-}
-
-fn scratch(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join("vyrn-benching-tests").join(name);
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
 }
 
 fn norm(bytes: &[u8]) -> String {

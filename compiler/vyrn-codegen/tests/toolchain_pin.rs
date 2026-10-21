@@ -14,7 +14,7 @@ use vyrn_frontend::manifest::{cache_dir, write_blob};
 use vyrn_frontend::toolpin::{host_platform, tool_spec, tools_dir};
 
 fn tmp(name: &str) -> PathBuf {
-    let d = std::env::temp_dir().join(format!("vyrn-toolpin-{name}"));
+    let d = std::env::temp_dir().join(format!("vyrn-toolpin-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&d);
     std::fs::create_dir_all(&d).unwrap();
     d
@@ -35,7 +35,8 @@ fn fake_archive(tag: &str, files: &[String], content: &[u8]) -> Vec<u8> {
     }
     // Beside the staging directory: inside it, `tar -C stage .` would archive
     // the archive it is writing.
-    let archive = std::env::temp_dir().join(format!("vyrn-toolpin-{tag}.tar"));
+    let archive =
+        std::env::temp_dir().join(format!("vyrn-toolpin-{tag}-{}.tar", std::process::id()));
     let st = std::process::Command::new("tar")
         .args(["-cf", &slash(&archive), "-C", &slash(&stage), "."])
         .status()
