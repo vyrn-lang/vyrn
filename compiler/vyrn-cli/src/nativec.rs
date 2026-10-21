@@ -128,8 +128,7 @@ impl Native {
         if let Some(hit) = self.hit("pre.h.pch", false) {
             return Ok(hit);
         }
-        std::fs::write(&h, PCH_H)
-            .map_err(|e| eprintln!("error: cannot write {}: {e}", h.display()))?;
+        place_header(&h)?;
         self.build("pre.h.pch", false, fill)
     }
 
@@ -189,7 +188,7 @@ impl Native {
     ) -> Result<PathBuf, ()> {
         let (dest, tmp) = (
             self.dir.join(name),
-            self.dir.join(format!("{name}.tmp{}", std::process::id())),
+            self.dir.join(format!("{name}.{}", tmp_suffix())),
         );
         let mut c = self.cc();
         fill(&mut c);
@@ -213,9 +212,7 @@ impl Native {
         }
         // A `.sum` that does not land leaves the entry unverified: the next build
         // rebuilds it.
-        let sum_tmp = self
-            .dir
-            .join(format!("{name}.sum.tmp{}", std::process::id()));
+        let sum_tmp = self.dir.join(format!("{name}.sum.{}", tmp_suffix()));
         if std::fs::write(&sum_tmp, sum).is_ok()
             && std::fs::rename(&sum_tmp, self.dir.join(format!("{name}.sum"))).is_err()
         {
@@ -225,11 +222,78 @@ impl Native {
     }
 }
 
+/// A temporary's suffix that no other writer, in this process or another,
+/// holds at the same time: the process id and a per-process count.
+fn tmp_suffix() -> String {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    format!("tmp{}.{n}", std::process::id())
+}
+
+/// Writes [`PCH_H`] to `h` unless `h` already holds it.
+///
+/// Clang records `h`'s mtime in the precompiled header and refuses it once
+/// `h` is newer, so a concurrent build must never rewrite a correct `h`: the
+/// peer that built from it would fail. A missing `h` is linked into place from
+/// a whole temporary, and the link fails rather than replaces where a peer
+/// placed it first.
+fn place_header(h: &Path) -> Result<(), ()> {
+    let stale = match std::fs::read(h) {
+        Ok(b) if b == PCH_H.as_bytes() => return Ok(()),
+        Ok(_) => true,
+        Err(_) => false,
+    };
+    let tmp = h.with_file_name(format!("pre.h.{}", tmp_suffix()));
+    std::fs::write(&tmp, PCH_H)
+        .map_err(|e| eprintln!("error: cannot write {}: {e}", tmp.display()))?;
+    let placed = if stale {
+        std::fs::rename(&tmp, h)
+    } else {
+        match std::fs::hard_link(&tmp, h) {
+            Err(e) if e.kind() != std::io::ErrorKind::AlreadyExists => std::fs::rename(&tmp, h),
+            _ => Ok(()),
+        }
+    };
+    let _ = std::fs::remove_file(&tmp);
+    placed.map_err(|e| eprintln!("error: cannot write {}: {e}", h.display()))
+}
+
 /// The SHA-256 of the file, or its length where hashing costs more than it saves.
 fn digest(p: &Path, hashed: bool) -> Option<String> {
     if hashed {
         Some(sha256_hex(&std::fs::read(p).ok()?))
     } else {
         Some(std::fs::metadata(p).ok()?.len().to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn scratch(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("vyrn-{name}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir.join("pre.h")
+    }
+
+    #[test]
+    fn a_correct_header_keeps_its_mtime() {
+        let h = scratch("pch-keep");
+        place_header(&h).unwrap();
+        let old = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000);
+        let f = std::fs::File::options().write(true).open(&h).unwrap();
+        f.set_modified(old).unwrap();
+        drop(f);
+        place_header(&h).unwrap();
+        assert_eq!(std::fs::metadata(&h).unwrap().modified().unwrap(), old);
+    }
+
+    #[test]
+    fn a_stale_header_is_replaced() {
+        let h = scratch("pch-stale");
+        std::fs::write(&h, "stale").unwrap();
+        place_header(&h).unwrap();
+        assert_eq!(std::fs::read(&h).unwrap(), PCH_H.as_bytes());
     }
 }
