@@ -338,6 +338,8 @@ const WATCH_REQUEST: &str = "vyrn/watchFiles";
 /// One app root's stylesheets, with the signature they were read at.
 struct CssIndex {
     sig: u64,
+    /// The clock before the files were read.
+    read_at: std::time::SystemTime,
     /// `(absolute path, file text)` in discovery order (declared order first).
     files: Vec<(std::path::PathBuf, String)>,
 }
@@ -3256,51 +3258,70 @@ fn app_css_rules(
     out
 }
 
-/// The app's stylesheets (path, text), cached per root until [`css_sig`] moves.
+/// The app's stylesheets (path, text), cached per root (see [`stylesheets_in`]).
 fn app_stylesheets(server: &Server, root: &std::path::Path) -> Vec<(std::path::PathBuf, String)> {
-    let mut cache = server.css_cache.borrow_mut();
+    stylesheets_in(&mut server.css_cache.borrow_mut(), root)
+}
+
+/// How far a filesystem's mtime can trail the clock: the coarsest common
+/// timestamp (FAT's 2 s; HFS+ keeps 1 s, Linux a scheduler tick).
+const MTIME_SLACK: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// The stylesheets of `root` from `cache`, read again when [`css_sig`] moved,
+/// or when a stamped mtime falls within [`MTIME_SLACK`] of the last read: a
+/// write in that window can keep its length and show the mtime the read saw.
+fn stylesheets_in(
+    cache: &mut HashMap<std::path::PathBuf, CssIndex>,
+    root: &std::path::Path,
+) -> Vec<(std::path::PathBuf, String)> {
     if let Some(idx) = cache.get(root) {
-        if idx.sig == css_sig(root, idx.files.iter().map(|(p, _)| p.as_path())) {
+        let (sig, newest) = css_sig(root, idx.files.iter().map(|(p, _)| p.as_path()));
+        if sig == idx.sig && newest + MTIME_SLACK < idx.read_at {
             return idx.files.clone();
         }
     }
+    let read_at = std::time::SystemTime::now();
     let files: Vec<(std::path::PathBuf, String)> = discover_stylesheets(root)
         .into_iter()
         .filter_map(|p| std::fs::read_to_string(&p).ok().map(|t| (p, t)))
         .collect();
-    let sig = css_sig(root, files.iter().map(|(p, _)| p.as_path()));
-    cache.insert(
-        root.to_path_buf(),
-        CssIndex {
-            sig,
-            files: files.clone(),
-        },
-    );
+    let (sig, _) = css_sig(root, files.iter().map(|(p, _)| p.as_path()));
+    let idx = CssIndex {
+        sig,
+        read_at,
+        files: files.clone(),
+    };
+    cache.insert(root.to_path_buf(), idx);
     files
 }
 
 /// A change signature for a root's stylesheets from `stat` alone: each file's
 /// path, length and mtime, plus the mtimes of the root and `public/`, which move
-/// when a stylesheet is added or removed.
-fn css_sig<'a>(root: &std::path::Path, files: impl Iterator<Item = &'a std::path::Path>) -> u64 {
+/// when a stylesheet is added or removed. Also returns the newest of those mtimes.
+fn css_sig<'a>(
+    root: &std::path::Path,
+    files: impl Iterator<Item = &'a std::path::Path>,
+) -> (u64, std::time::SystemTime) {
     let mut h = std::collections::hash_map::DefaultHasher::new();
-    fn stamp(p: &std::path::Path, h: &mut std::collections::hash_map::DefaultHasher) {
-        p.to_string_lossy().hash(h);
+    let mut newest = std::time::UNIX_EPOCH;
+    let mut stamp = |p: &std::path::Path| {
+        p.to_string_lossy().hash(&mut h);
         if let Ok(m) = std::fs::metadata(p) {
-            m.len().hash(h);
+            m.len().hash(&mut h);
             if let Ok(t) = m.modified() {
+                newest = newest.max(t);
                 if let Ok(d) = t.duration_since(std::time::UNIX_EPOCH) {
-                    d.as_nanos().hash(h);
+                    d.as_nanos().hash(&mut h);
                 }
             }
         }
-    }
-    stamp(root, &mut h);
-    stamp(&root.join("public"), &mut h);
+    };
+    stamp(root);
+    stamp(&root.join("public"));
     for f in files {
-        stamp(f, &mut h);
+        stamp(f);
     }
-    h.finish()
+    (h.finish(), newest)
 }
 
 /// Stylesheet files for an app root, in priority order:
@@ -3480,6 +3501,25 @@ fn line_of(css: &str, at: usize) -> usize {
 
 #[cfg(test)]
 mod tests {
+
+    /// A same-length write inside one mtime tick of the read keeps the length and
+    /// the mtime the read saw; the slack window reads the file again.
+    #[test]
+    fn a_stylesheet_rewritten_within_the_mtime_slack_is_read_again() {
+        let root = std::env::temp_dir().join(format!("vyrn-lsp-css-{}", std::process::id()));
+        std::fs::create_dir_all(root.join("public")).unwrap();
+        let css = root.join("public/app.css");
+        std::fs::write(&css, ".a { color: red }").unwrap();
+        let mtime = std::fs::metadata(&css).unwrap().modified().unwrap();
+        let mut cache = HashMap::new();
+        assert_eq!(stylesheets_in(&mut cache, &root)[0].1, ".a { color: red }");
+        std::fs::write(&css, ".a { color: tan }").unwrap();
+        let file = std::fs::File::options().write(true).open(&css).unwrap();
+        file.set_modified(mtime).unwrap();
+        drop(file);
+        assert_eq!(stylesheets_in(&mut cache, &root)[0].1, ".a { color: tan }");
+        let _ = std::fs::remove_dir_all(&root);
+    }
     use super::*;
     use vyrn_frontend::ast::{EnumVariant, Type};
 
