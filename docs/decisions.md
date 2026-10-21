@@ -309,6 +309,7 @@ pull request.
 - A `std/regex` search runs the NFA as a lazy DFA over byte-class runs, built per search; past `dfaCap` table entries it falls back to the Thompson simulation, so a search's memory stays bounded and its answers stay the simulation's.
 - The JSON codec is canonical: declaration order, no whitespace, `None` fields omitted. `fromJson` returns `Validation`, runs every `where`, parses integers exactly, ignores unknown fields.
 - `std/json` is the one strict JSON reader: numbers keep their text, duplicate keys and trailing commas are refused.
+- `fromJson` reads its document once through `std/jsonread`'s `JsonReader` and writes each value into its record; it builds no `Json` tree. `parseJson` reads with the same functions, so both refuse a document at the same position with the same sentence. A refused document yields its `json.parse` Issue alone, and a record's Issues follow its declaration order, not the document's key order.
 - A payload enum crosses the wire externally tagged (`"Unit"`, `{"Circle":5}`, `{"Rect":[2,3]}`), one wire form per value.
 - `Map<Int64, V>` crosses the wire as a JSON object with canonical decimal keys; user-keyed maps are refused by the codec.
 - VON is Vyrn's record-literal grammar as a data file, read by the compiler's own lexer. It refuses null, interpolation, anchors, environment references and duplicate keys.

@@ -1,0 +1,155 @@
+// Decodes a stream of order documents with `fromJson`, `rounds` times over,
+// and prints every Issue of the first round and a digest of every round.
+// The input is `jsondecode.stdin`, which `bench/jsondecode.py` writes.
+
+let rounds = 1
+
+type Status = | Pending | Paid | Shipped | Delivered | Returned
+
+type Qty = Int64 where value >= 1 && value <= 1000
+
+type Geo = { lat: Float64, lon: Float64 }
+
+type Address = { street: String, city: String, zip: String, country: String, geo: Option<Geo> }
+
+type Customer = { id: Int64, name: String, email: String, vip: Bool, address: Address }
+
+type Item = {
+    sku: String,
+    title: String,
+    qty: Qty,
+    price: Float64,
+    tags: Array<String>,
+    note: Option<String>,
+}
+
+type Order = {
+    id: Int64,
+    placed: String,
+    status: Status,
+    customer: Customer,
+    items: Array<Item>,
+    attrs: Map<String, Int64>,
+    total: Float64,
+    shipping: Option<Address>,
+    coupon: Option<String>,
+}
+
+type Digest = {
+    orders: Int64,
+    invalid: Int64,
+    issues: Int64,
+    items: Int64,
+    qty: Int64,
+    price: Float64,
+    total: Float64,
+    textBytes: Int64,
+    vip: Int64,
+    geo: Int64,
+    shipped: Int64,
+    coupons: Int64,
+    attrs: Int64,
+}
+
+fn addressBytes(a: Address) -> Int64 {
+    return a.street.byteLength + a.city.byteLength + a.zip.byteLength + a.country.byteLength
+}
+
+fn hasGeo(a: Address) -> Int64 {
+    if let Some(g) = a.geo {
+        return 1
+    }
+    return 0
+}
+
+fn tally(d: modify Digest, o: Order) -> Unit {
+    d.orders = d.orders + 1
+    d.total = d.total + o.total
+    d.textBytes = d.textBytes + o.placed.byteLength + o.customer.name.byteLength + o.customer.email.byteLength
+    d.textBytes = d.textBytes + addressBytes(o.customer.address)
+    d.geo = d.geo + hasGeo(o.customer.address)
+    if o.customer.vip {
+        d.vip = d.vip + 1
+    }
+    let shipped = match o.status {
+        Pending => 0,
+        Paid => 0,
+        Shipped => 1,
+        Delivered => 1,
+        Returned => 0,
+    }
+    d.shipped = d.shipped + shipped
+    for it in o.items {
+        d.items = d.items + 1
+        d.qty = d.qty + it.qty
+        d.price = d.price + it.price
+        d.textBytes = d.textBytes + it.sku.byteLength + it.title.byteLength
+        for t in it.tags {
+            d.textBytes = d.textBytes + t.byteLength
+        }
+        if let Some(n) = it.note {
+            d.textBytes = d.textBytes + n.byteLength
+        }
+    }
+    for k in o.attrs.keys() {
+        if let Some(v) = o.attrs[k] {
+            d.attrs = d.attrs + v
+        }
+    }
+    if let Some(s) = o.shipping {
+        d.textBytes = d.textBytes + addressBytes(s)
+        d.geo = d.geo + hasGeo(s)
+    }
+    if let Some(c) = o.coupon {
+        d.coupons = d.coupons + 1
+    }
+}
+
+fn main() -> Int64 {
+    let mut docs: Array<String> = []
+    while let Some(l) = readLine() {
+        docs.push(l)
+    }
+    let mut d = Digest {
+        orders: 0,
+        invalid: 0,
+        issues: 0,
+        items: 0,
+        qty: 0,
+        price: 0.0,
+        total: 0.0,
+        textBytes: 0,
+        vip: 0,
+        geo: 0,
+        shipped: 0,
+        coupons: 0,
+        attrs: 0,
+    }
+    let mut r = 0
+    while r < rounds {
+        let mut i = 0
+        while i < docs.length {
+            match fromJson<Order>(docs[i]) {
+                Valid(o) => tally(d, o),
+                Invalid(iss) => {
+                    d.invalid = d.invalid + 1
+                    d.issues = d.issues + iss.length
+                    if r == 0 {
+                        for x in iss {
+                            print("line \{(i + 1).toString()}: \{x.key} | \{x.path} | \{x.message}")
+                        }
+                    }
+                }
+            }
+            i = i + 1
+        }
+        r = r + 1
+    }
+    print("rounds \{rounds.toString()} documents \{docs.length.toString()}")
+    print("orders \{d.orders.toString()} invalid \{d.invalid.toString()} issues \{d.issues.toString()}")
+    print("items \{d.items.toString()} qty \{d.qty.toString()} attrs \{d.attrs.toString()}")
+    print("price \{d.price.toString()} total \{d.total.toString()}")
+    print("text bytes \{d.textBytes.toString()}")
+    print("vip \{d.vip.toString()} geo \{d.geo.toString()} shipped \{d.shipped.toString()} coupons \{d.coupons.toString()}")
+    return 0
+}
