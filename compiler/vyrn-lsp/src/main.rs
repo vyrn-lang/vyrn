@@ -3263,12 +3263,8 @@ fn app_stylesheets(server: &Server, root: &std::path::Path) -> Vec<(std::path::P
     stylesheets_in(&mut server.css_cache.borrow_mut(), root)
 }
 
-/// How far a filesystem's mtime can trail the clock: the coarsest common
-/// timestamp (FAT's 2 s; HFS+ keeps 1 s, Linux a scheduler tick).
-const MTIME_SLACK: std::time::Duration = std::time::Duration::from_secs(2);
-
 /// The stylesheets of `root` from `cache`, read again when [`css_sig`] moved,
-/// or when a stamped mtime falls within [`MTIME_SLACK`] of the last read: a
+/// or when a stamped mtime falls within [`vyrn_frontend::manifest::MTIME_SLACK`] of the last read: a
 /// write in that window can keep its length and show the mtime the read saw.
 fn stylesheets_in(
     cache: &mut HashMap<std::path::PathBuf, CssIndex>,
@@ -3276,7 +3272,7 @@ fn stylesheets_in(
 ) -> Vec<(std::path::PathBuf, String)> {
     if let Some(idx) = cache.get(root) {
         let (sig, newest) = css_sig(root, idx.files.iter().map(|(p, _)| p.as_path()));
-        if sig == idx.sig && newest + MTIME_SLACK < idx.read_at {
+        if sig == idx.sig && newest + vyrn_frontend::manifest::MTIME_SLACK < idx.read_at {
             return idx.files.clone();
         }
     }

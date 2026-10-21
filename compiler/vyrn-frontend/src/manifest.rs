@@ -399,6 +399,11 @@ fn project_lock_path(project_dir: &Path, what: &str) -> PathBuf {
     Path::new(&home()).join(format!(".vyrn/locks/{name}.{what}"))
 }
 
+/// How far a filesystem's mtime can trail the clock: the coarsest common
+/// timestamp (FAT's 2 s; HFS+ keeps 1 s, Linux a scheduler tick). A file whose
+/// mtime lies within it of a check can change again without moving its mtime.
+pub const MTIME_SLACK: std::time::Duration = std::time::Duration::from_secs(2);
+
 /// The user's module cache: `~/.vyrn/cache/sha256/<hex>`.
 pub fn cache_dir() -> PathBuf {
     Path::new(&home()).join(".vyrn/cache/sha256")
