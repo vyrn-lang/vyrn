@@ -37,9 +37,9 @@
   --sr-node: var(--syn-str);
   --sr-bun: oklch(0.45 0.14 320);
   --sr-vyrn: var(--accent);
-  /* Vyrn's other engines: the accent, tinted toward the ink, so the text inside a run keeps its contrast in both themes. */
-  --sr-wasm: color-mix(in oklab, var(--accent) 70%, var(--ink));
-  --sr-wasmopt: color-mix(in oklab, var(--accent) 45%, var(--ink));
+  /* Vyrn's other engines: the accent stepped toward the page, as far as the text inside a run keeps its contrast in both themes. */
+  --sr-wasm: color-mix(in oklab, var(--accent) 85%, var(--paper));
+  --sr-wasmopt: color-mix(in oklab, var(--accent) 70%, var(--paper));
   --lane-build: oklch(0.3 0.006 60);
   --lane-start: oklch(0.6 0.006 60);
   --code-wash: 5%;

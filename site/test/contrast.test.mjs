@@ -171,6 +171,7 @@ const PAIRS = [
   ["a value written inside a lane's node run segment", "var(--paper)", "var(--sr-node)", 4.5],
   ["a value written inside a lane's bun run segment", "var(--paper)", "var(--sr-bun)", 4.5],
   ["a value written inside a lane's Vyrn wasm-opt run segment", "var(--paper)", "var(--sr-wasmopt)", 4.5],
+  ["a value written inside a lane's Vyrn wasm run segment", "var(--paper)", "var(--sr-wasm)", 4.5],
   ["a value written inside a lane's Vyrn run segment", "var(--paper)", "var(--sr-vyrn)", 4.5],
 ];
 

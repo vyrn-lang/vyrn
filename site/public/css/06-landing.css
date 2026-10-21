@@ -128,7 +128,9 @@
 .benchhero { padding: var(--s4) 0 var(--s3); }
 .benchhero .display { font-size: var(--t-h1); line-height: 1.06; margin: var(--s1) 0 var(--s2); }
 
-.cap.entrycap { display: flex; align-items: center; gap: var(--s2); }
+/* The heading's own margin moves to the row, so the icons centre on the name. */
+.entryhead { display: flex; align-items: center; gap: var(--s2); margin-bottom: var(--s2); }
+.band .entryhead h2 { margin-bottom: 0; }
 .entryacts { margin-left: auto; display: inline-flex; align-items: center; gap: 2px; }
 .iconlink {
   display: inline-flex;
