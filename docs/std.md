@@ -101,9 +101,9 @@ The compiler injects these declarations into every program, so a file names them
 | Module | Provides |
 |---|---|
 | `std/json` | The `Json` tree (`JNum` keeps the number's text, objects keep field order), `emit`, `emitPretty`, `jsonEq`, `sortKeys`. `j.tryField(k)` and `j[i]` read in place. It imports nothing, so a program that only writes JSON links no parser. |
-| `std/jsonread` | `parseJson`: strict JSON. Commas are required, trailing commas and duplicate keys are refused, and every error starts `line N, col M:`. |
+| `std/jsonread` | `parseJson`: strict JSON. Commas are required, trailing commas and duplicate keys are refused, and every error starts `line N, col M:`. The `JsonReader` functions it reads with are exported, so `fromJson` reads the same grammar. |
 | `std/json5` | `parseJson5` into the same tree. There is no JSON5 writer. |
-| `std/jsondec` | The untyped half of `fromJson`; the compiler generates the typed half per target type. |
+| `std/jsondec` | The untyped half of `fromJson`, and the tree accessors (`fieldsOf`, `fieldAt`, `itemsOf`) for a parsed `Json`. The compiler generates the typed half per target type; it reads the document once and builds no `Json` tree. |
 | `std/von` | VON, Vyrn's literal grammar as a file format: `parseVon` (a `gen fn`, so a config error is a build error), `toVon`, `emitVon`, `jsonToVon`. |
 | `std/storage` | `writeAtomic(path, content)`: a temp file renamed over the target, so a crash leaves the old file or the new one. The builtins `save`, `load` and `loadOr` expand to it with `toJson` and `fromJson`. |
 
