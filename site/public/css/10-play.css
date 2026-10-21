@@ -1,4 +1,6 @@
+/* One line height for the text, its highlight layer and the IDE's gutter, so their lines stay in step. */
 .play .editor {
+  --ed-lh: 1.5;
   position: relative;
   margin: var(--s3) var(--s2) 0;
 }
@@ -9,7 +11,7 @@
   margin: 0;
   padding: var(--s2);
   border: 1px solid transparent;
-  font: var(--t-code)/1.5 var(--mono);
+  font: var(--t-code)/var(--ed-lh) var(--mono);
   tab-size: 2;
   white-space: pre;
   word-break: normal;
