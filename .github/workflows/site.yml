@@ -16,11 +16,6 @@ on:
 permissions:
   contents: read
 
-# Keyed by ref, so a pull-request build cannot cancel the main-line deploy.
-concurrency:
-  group: site-${{ github.ref }}
-  cancel-in-progress: true
-
 env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: 0
@@ -28,15 +23,27 @@ env:
 jobs:
   build:
     if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
+    # Per job, not per workflow: a skipped job joins no group, so a run that
+    # builds nothing (CI cancelled or failed) cancels nothing. Every deploying
+    # event shares one group, so the newest started build cancels an older one
+    # in progress; a pull request cancels only its own older build.
+    concurrency:
+      group: site-build-${{ github.event_name == 'pull_request' && github.ref || 'deploy' }}
+      cancel-in-progress: true
     runs-on: ubuntu-latest
+    outputs:
+      sha: ${{ steps.built.outputs.sha }}
     steps:
       # actions/checkout@v7.0.1
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           # On workflow_run, github.sha can be newer than the commit CI passed.
-          ref: ${{ github.event.workflow_run.head_sha }}
+          # A release event builds main: its tag can be older than what is deployed.
+          ref: ${{ github.event.workflow_run.head_sha || github.event_name == 'release' && github.event.repository.default_branch || '' }}
           # The whole history: the site draws commits and releases per day.
           fetch-depth: 0
+      - id: built
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
       - name: Rust cache
         # Swatinem/rust-cache@v2
@@ -170,6 +177,8 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       actions: read
+    # Deploys run one at a time and are never cancelled once started; a newer
+    # pending deploy replaces an older pending one.
     concurrency:
       group: site-deploy
       cancel-in-progress: false
@@ -188,7 +197,7 @@ jobs:
       - name: Publish to vyrn-lang.github.io
         env:
           KEY: ${{ secrets.SITE_DEPLOY_KEY }}
-          SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+          SHA: ${{ needs.build.outputs.sha }}
         run: |
           set -eu
           mkdir -p ~/.ssh

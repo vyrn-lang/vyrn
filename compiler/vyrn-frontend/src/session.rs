@@ -48,6 +48,8 @@ struct Disk {
     reads: HashMap<String, Result<String, String>>,
     lists: HashMap<String, Result<Vec<String>, String>>,
     reals: HashMap<String, Option<String>>,
+    /// Counts [`Session::changed`] calls, so a read that one overtook is not kept.
+    forgets: u64,
 }
 
 /// Locks `m`. A panic under the lock leaves every cache a set of whole
@@ -83,11 +85,14 @@ impl Session {
     /// events never calls it, and every load reads the disk again. A path
     /// outside `roots` is always read again.
     pub fn watch(&self, roots: &[String]) {
-        *locked(&self.disk) = Some(Disk {
+        let mut disk = locked(&self.disk);
+        let forgets = disk.as_ref().map_or(0, |d| d.forgets + 1);
+        *disk = Some(Disk {
             roots: (roots.iter()).map(|r| format!("{}/", key_of(r))).collect(),
             reads: HashMap::new(),
             lists: HashMap::new(),
             reals: HashMap::new(),
+            forgets,
         });
     }
 
@@ -104,6 +109,7 @@ impl Session {
                     .is_some_and(|r| r.starts_with('/'))
         };
         if let Some(d) = locked(&self.disk).as_mut() {
+            d.forgets += 1;
             d.reads.retain(|k, _| !stale(k));
             d.reals.retain(|k, _| !stale(k));
             d.lists.retain(|k, _| !stale(k) && key_of(k) != parent);
@@ -128,7 +134,7 @@ impl Session {
     }
 
     /// The answer kept for `path` in `table`, or `read`'s, kept when `path`
-    /// lies under a watched root.
+    /// lies under a watched root and no [`Session::changed`] ran during the read.
     fn on_disk<T: Clone>(
         &self,
         table: fn(&mut Disk) -> &mut HashMap<String, T>,
@@ -138,14 +144,15 @@ impl Session {
         let watched = locked(&self.disk).as_mut().and_then(|d| {
             let key = key_of(path);
             (d.roots.iter().any(|r| key.starts_with(r.as_str())))
-                .then(|| table(d).get(path).cloned())
+                .then(|| (table(d).get(path).cloned(), d.forgets))
         });
         match watched {
             None => read(),
-            Some(Some(kept)) => kept,
-            Some(None) => {
+            Some((Some(kept), _)) => kept,
+            Some((None, seen)) => {
                 let answer = read();
-                if let Some(d) = locked(&self.disk).as_mut() {
+                let mut disk = locked(&self.disk);
+                if let Some(d) = disk.as_mut().filter(|d| d.forgets == seen) {
                     table(d).insert(path.to_string(), answer.clone());
                 }
                 answer
@@ -203,5 +210,28 @@ impl std::fmt::Debug for SessionRef {
 impl PartialEq for SessionRef {
     fn eq(&self, _: &SessionRef) -> bool {
         true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_read_that_a_change_overtook_is_not_kept() {
+        let s = Session::new(false);
+        s.watch(&["/w".to_string()]);
+        let read = |text: &str| {
+            s.on_disk(
+                |d| &mut d.reads,
+                "/w/a.vyrn",
+                || {
+                    s.changed("/w/a.vyrn");
+                    Ok(text.to_string())
+                },
+            )
+        };
+        assert_eq!(read("old"), Ok("old".to_string()));
+        assert_eq!(read("new"), Ok("new".to_string()));
     }
 }

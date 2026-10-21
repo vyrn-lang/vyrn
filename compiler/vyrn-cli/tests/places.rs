@@ -162,8 +162,7 @@ fn best_of_3(dir: &std::path::Path, name: &str, src: &str, expect: &str) -> std:
 #[test]
 fn the_interpreter_does_not_copy_the_array_once_per_write() {
     const N: usize = 32_000;
-    let dir = std::env::temp_dir().join("vyrn-places");
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = scratch("places");
 
     // Both build the array as a local: `push` through a field has its own test,
     // and measuring it here would hide this one.
@@ -203,8 +202,7 @@ fn the_interpreter_does_not_copy_the_array_once_per_write() {
 #[test]
 fn the_interpreter_does_not_copy_the_array_once_per_append() {
     const N: usize = 32_000;
-    let dir = std::env::temp_dir().join("vyrn-places");
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = scratch("places");
 
     let local = format!(
         "fn main() -> Int64 {{\n\
@@ -238,8 +236,7 @@ fn the_interpreter_does_not_copy_the_array_once_per_append() {
 #[test]
 fn the_interpreter_does_not_copy_the_row_once_per_append() {
     const N: usize = 32_000;
-    let dir = std::env::temp_dir().join("vyrn-places");
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = scratch("places");
 
     let local = format!(
         "fn main() -> Int64 {{\n\
@@ -271,8 +268,7 @@ fn the_interpreter_does_not_copy_the_row_once_per_append() {
 /// 160,000 stores and different row lengths: about 15x with the rebuild, 1.0x without.
 #[test]
 fn the_interpreter_does_not_rebuild_a_row_per_element_store() {
-    let dir = std::env::temp_dir().join("vyrn-places");
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = scratch("places");
     let grid = |rows: usize, cols: usize| {
         format!(
             "fn main() -> Int64 {{\n\
@@ -311,8 +307,7 @@ fn the_interpreter_does_not_rebuild_a_row_per_element_store() {
 #[test]
 fn a_validated_element_type_costs_a_constant_per_store() {
     const N: usize = 8_000;
-    let dir = std::env::temp_dir().join("vyrn-places");
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = scratch("places");
     let prog = |decl: &str, elem: &str| {
         format!(
             "{decl}type T = {{ xs: Array<{elem}> }}\n\
@@ -346,8 +341,7 @@ fn a_validated_element_type_costs_a_constant_per_store() {
 /// 1.4x, not 1.0x; a `HashMap` clone per element measures about 9.7x.
 #[test]
 fn an_element_store_does_not_restamp_its_row() {
-    let dir = std::env::temp_dir().join("vyrn-places");
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = scratch("places");
     let grid = |rows: usize, cols: usize| {
         format!(
             "type Cell = {{ v: Int64 }}\n\
@@ -385,8 +379,7 @@ fn an_element_store_does_not_restamp_its_row() {
 /// the copy.
 #[test]
 fn a_trapping_test_does_not_leave_a_hole_in_module_state() {
-    let dir = std::env::temp_dir().join("vyrn-places");
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = scratch("places");
     let file = dir.join("trap-hole.vyrn");
     std::fs::write(
         &file,
@@ -410,8 +403,7 @@ fn a_trapping_test_does_not_leave_a_hole_in_module_state() {
 /// is the worst outcome, so it is refused with the forms that work.
 #[test]
 fn a_call_result_is_still_not_an_assignable_place() {
-    let dir = std::env::temp_dir().join("vyrn-places");
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = scratch("places");
     let file = dir.join("nonplace.vyrn");
     std::fs::write(&file, "fn main() -> Int64 { f()[0] = 9  return 0 }\n").unwrap();
     let out = vyrn().arg("check").arg(&file).output().expect("vyrn check");
@@ -428,8 +420,7 @@ fn a_call_result_is_still_not_an_assignable_place() {
 /// the copy, 1.3x without.
 #[test]
 fn a_map_read_does_not_copy_the_table() {
-    let dir = std::env::temp_dir().join("vyrn-places");
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = scratch("places");
     let prog = |entries: usize| {
         format!(
             "fn main() -> Int64 {{\n\
@@ -460,8 +451,7 @@ fn a_map_read_does_not_copy_the_table() {
 /// copy, 1.0x without.
 #[test]
 fn passing_a_record_does_not_copy_its_fields() {
-    let dir = std::env::temp_dir().join("vyrn-places");
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = scratch("places");
     let prog = |fields: usize| {
         let decl: Vec<String> = (0..fields).map(|i| format!("f{i}: Int64")).collect();
         let init: Vec<String> = (0..fields).map(|i| format!("f{i}: {i}")).collect();

@@ -291,8 +291,11 @@ pub fn compile(bytes: &[u8], metered: bool) -> Result<Compiled, String> {
     let sites = custom_section(bytes, "vyrn:sites");
     let module = Module::new(engine(metered), bytes).map_err(|e| {
         // A module the engine refuses is a compiler defect, and the bytes are
-        // its only evidence (#444).
-        let kept = std::env::temp_dir().join(format!("vyrn-invalid-{}.wasm", std::process::id()));
+        // its only evidence (#444). The counter keeps two threads' modules apart.
+        static KEPT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let n = KEPT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let kept =
+            std::env::temp_dir().join(format!("vyrn-invalid-{}-{n}.wasm", std::process::id()));
         match std::fs::write(&kept, bytes) {
             Ok(()) => format!(
                 "wasm: {e:?}\n  note: the module is kept at {}",
@@ -674,6 +677,24 @@ mod tests {
             .expect("the error names the file");
         assert_eq!(std::fs::read(kept).expect("the file is there"), bad);
         let _ = std::fs::remove_file(kept);
+    }
+
+    #[test]
+    fn two_refused_modules_are_kept_apart() {
+        let kept = |bad: &[u8]| {
+            let e = compile(bad, false)
+                .err()
+                .expect("a truncated module compiled");
+            e.split("kept at ")
+                .nth(1)
+                .expect("the error names the file")
+                .to_string()
+        };
+        let (a, b) = (b"\0asm\x01\0\0\0\x01", b"\0asm\x01\0\0\0\x02");
+        let (at_a, at_b) = (kept(a), kept(b));
+        assert_eq!(std::fs::read(&at_a).unwrap(), a);
+        assert_eq!(std::fs::read(&at_b).unwrap(), b);
+        let _ = (std::fs::remove_file(at_a), std::fs::remove_file(at_b));
     }
 
     /// A program with module state and an exported door.

@@ -870,9 +870,21 @@ fn scaffold(call: &Call) -> Outcome {
         return Err(ExitCode::FAILURE);
     }
     let root = Path::new(name);
-    if root.exists() {
-        eprintln!("error: `{name}` already exists");
-        return Err(ExitCode::FAILURE);
+    // One call checks and creates, so two `vyrn new` cannot both pass the check.
+    let parent = root.parent().filter(|p| !p.as_os_str().is_empty());
+    match parent
+        .map_or(Ok(()), std::fs::create_dir_all)
+        .and_then(|()| std::fs::create_dir(root))
+    {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            eprintln!("error: `{name}` already exists");
+            return Err(ExitCode::FAILURE);
+        }
+        Err(e) => {
+            eprintln!("error: cannot create {name}: {e}");
+            return Err(ExitCode::FAILURE);
+        }
     }
     let manifest = format!(
         "{{\n    \"name\": \"{name}\",\n    \"main\": \"src/main.vyrn\",\n    \"dependencies\": {{}}\n}}\n"
@@ -2891,7 +2903,8 @@ fn add(call: &Call) -> Outcome {
         Some((_, other)) => *other = Json::Obj(vec![dep_entry]),
         None => fields.push(("dependencies".into(), Json::Obj(vec![dep_entry]))),
     }
-    if let Err(e) = std::fs::write(&manifest_path, json_pretty(&Json::Obj(fields), 0)) {
+    let text = json_pretty(&Json::Obj(fields), 0);
+    if let Err(e) = vyrn_frontend::manifest::write_whole(&manifest_path, text.as_bytes()) {
         eprintln!("error: cannot write {}: {e}", manifest_path.display());
         return Err(ExitCode::FAILURE);
     }
@@ -3127,9 +3140,7 @@ fn vendor(call: &Call) -> Outcome {
         let cached = cache.join(sha);
         match std::fs::read(&cached) {
             Ok(bytes) if remote::sha256_hex(&bytes) == *sha => {
-                if let Err(e) =
-                    std::fs::create_dir_all(&vend).and_then(|_| std::fs::write(&vendored, &bytes))
-                {
+                if let Err(e) = remote::write_blob(&vend, sha, &bytes) {
                     eprintln!("error: cannot vendor `{spec}`: {e}");
                     return Err(ExitCode::FAILURE);
                 }
@@ -5089,7 +5100,8 @@ fn run_wasm(
                 out.counts.as_ref(),
                 table.as_ref(),
             ) {
-                lastrun::save(path, stamp, &counts.sites);
+                let dir = vyrn_frontend::manifest::profile_dir();
+                lastrun::save(&dir, path, stamp, &counts.sites);
                 wasm_profile(*load, compile, meter, (counts, program, table.as_slice()));
             }
             ExitCode::from((out.code & 0xff) as u8)

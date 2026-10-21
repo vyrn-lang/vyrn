@@ -317,14 +317,15 @@ mod tests {
         }
     }
 
+    /// The blob sits in a vendor directory of the test's own: the user cache is
+    /// shared with every other run on the machine, and the tamper would reach them.
     #[test]
-    fn locked_content_loads_offline_from_cache_and_rejects_tampering() {
+    fn locked_content_loads_offline_from_a_copy_and_rejects_tampering() {
         let text = b"export fn one() -> Int64 { return 1 }\n";
         let sha = sha256_hex(text);
-        write_blob(&cache_dir(), &sha, text).unwrap();
-
-        let dir = std::env::temp_dir().join("vyrn-remote-test");
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = std::env::temp_dir().join(format!("vyrn-remote-test-{}", std::process::id()));
+        let project = dir.to_string_lossy().into_owned();
+        write_blob(&vendor_dir(&project), &sha, text).unwrap();
         let mut lock = Lock::load(dir.join("vyrn.lock")).unwrap();
         lock.entries.insert(
             "https://x.dev/one.vyrn".into(),
@@ -332,17 +333,17 @@ mod tests {
         );
         let r = RemoteResolver {
             lock: RefCell::new(lock),
-            project_dir: None,
+            project_dir: Some(project.clone()),
             offline: true,
         };
         let got = r.read_remote("https://x.dev/one.vyrn").unwrap();
         assert_eq!(got.as_bytes(), text);
 
-        // Tamper with the cached blob: the hash check must fail loudly.
-        std::fs::write(cache_dir().join(&sha), b"evil").unwrap();
+        // Tamper with the copy: the hash check must fail loudly.
+        std::fs::write(vendor_dir(&project).join(&sha), b"evil").unwrap();
         let e = r.read_remote("https://x.dev/one.vyrn").unwrap_err();
         assert!(e.contains("does not match its recorded sha256"), "{e}");
-        write_blob(&cache_dir(), &sha, text).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

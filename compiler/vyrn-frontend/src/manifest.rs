@@ -288,6 +288,8 @@ pub struct Lock {
     pub path: PathBuf,
     pub entries: BTreeMap<String, (String, String)>,
     pub dirty: bool,
+    /// `entries` as read: [`Lock::save`] applies only what changed since.
+    loaded: BTreeMap<String, (String, String)>,
 }
 
 impl Lock {
@@ -329,6 +331,7 @@ impl Lock {
         }
         Ok(Lock {
             path,
+            loaded: entries.clone(),
             entries,
             dirty: false,
         })
@@ -339,9 +342,18 @@ impl Lock {
         Lock::load(Path::new(project_dir).join("vyrn.lock"))
     }
 
+    /// Writes this lock's changes over the file as it is now, so a pin another
+    /// process saved since [`Lock::load`] survives, and replaces the file whole.
     pub fn save(&self) -> Result<(), String> {
+        let mut merged = Lock::load(self.path.clone())?.entries;
+        merged.retain(|spec, _| self.entries.contains_key(spec) || !self.loaded.contains_key(spec));
+        for (spec, pin) in &self.entries {
+            if self.loaded.get(spec) != Some(pin) {
+                merged.insert(spec.clone(), pin.clone());
+            }
+        }
         let mut out = String::new();
-        for (spec, (url, sha)) in &self.entries {
+        for (spec, (url, sha)) in &merged {
             // A tab or newline in a field would split differently on read. Specifiers
             // come from unconstrained source strings, so refuse them here.
             for field in [spec, url, sha] {
@@ -355,7 +367,7 @@ impl Lock {
             }
             out.push_str(&format!("{spec}\t{url}\t{sha}\n"));
         }
-        std::fs::write(&self.path, out).map_err(|e| e.to_string())
+        write_whole(&self.path, out.as_bytes()).map_err(|e| e.to_string())
     }
 }
 
@@ -552,6 +564,27 @@ mod tests {
         lock.save().unwrap();
         let reloaded = Lock::load(path).unwrap();
         assert_eq!(lock.entries, reloaded.entries);
+    }
+
+    #[test]
+    fn a_save_keeps_the_pin_another_process_saved_since_the_load() {
+        let path = tmp("lock-merge").join("vyrn.lock");
+        let pin = |sha: &str| ("https://x.dev/m.vyrn".to_string(), sha.to_string());
+        let mut first = Lock::load(path.clone()).unwrap();
+        let mut second = Lock::load(path.clone()).unwrap();
+        first
+            .entries
+            .insert("https://x.dev/a.vyrn".into(), pin("aa"));
+        first.save().unwrap();
+        second
+            .entries
+            .insert("https://x.dev/b.vyrn".into(), pin("bb"));
+        second.save().unwrap();
+        let on_disk = Lock::load(path).unwrap().entries;
+        assert_eq!(
+            on_disk.keys().collect::<Vec<_>>(),
+            ["https://x.dev/a.vyrn", "https://x.dev/b.vyrn"]
+        );
     }
 
     /// A damaged lock stops the build instead of reading as unpinned.

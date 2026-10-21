@@ -6,7 +6,7 @@ serve, dev	464	6
 doc	293	9
 build	265	17
 routes	262	1
-run	208	2
+run	209	2
 deps	198	3
 update	194	5
 fmt	182	5
@@ -15,9 +15,9 @@ fix	129	1
 test, bench	127	2
 build, bench	120	0
 (global)	94	2
-vendor	66	6
-add	58	3
-new	42	4
+vendor	64	6
+add	59	3
+new	54	5
 emit-gen	33	3
 test	25	0
 emit-wat, emit-lowered	23	0

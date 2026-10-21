@@ -925,7 +925,8 @@ export function mountIde(root, core) {
   queueMicrotask(firstLight);
 
   addEventListener("pageshow", (e) => {
-    if (!e.persisted) return;
+    // A mount that soft navigation detached keeps this listener; only the live one wakes.
+    if (!e.persisted || !root.isConnected) return;
     if (!focusedG.active) firstLight();
     startCompiler();
   });

@@ -2444,11 +2444,12 @@ fn gen_cache_secret() -> &'static [u8] {
         .as_slice()
 }
 
-/// The key file's bytes, if it holds a whole key. A short read is a file caught
-/// mid-creation by another process; this run keeps its own key and misses.
+/// The key file's bytes, if it holds a whole key: the 64 hex digits
+/// [`fresh_secret`] writes. A short read is a file caught mid-creation by
+/// another process; this run keeps its own key and misses.
 fn read_secret(path: &std::path::Path) -> Option<Vec<u8>> {
     let bytes = std::fs::read(path).ok()?;
-    (bytes.len() >= 32).then_some(bytes)
+    (bytes.len() == 64).then_some(bytes)
 }
 
 /// A fresh key. `RandomState` is seeded from the operating system's randomness;
@@ -4537,6 +4538,18 @@ mod tests {
                 .map(|(k, v)| (k.to_string(), v.to_string()))
                 .collect(),
         )
+    }
+
+    /// A torn key would tag entries no other process trusts, for this process's life.
+    #[test]
+    fn a_key_file_caught_mid_write_is_not_a_key() {
+        let path = std::env::temp_dir().join(format!("vyrn-key-{}", std::process::id()));
+        let key = fresh_secret();
+        std::fs::write(&path, &key[..40]).unwrap();
+        assert_eq!(read_secret(&path), None);
+        std::fs::write(&path, &key).unwrap();
+        assert_eq!(read_secret(&path), Some(key));
+        let _ = std::fs::remove_file(&path);
     }
 
     fn opts() -> LoadOptions {

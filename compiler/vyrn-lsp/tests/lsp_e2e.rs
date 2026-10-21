@@ -70,7 +70,8 @@ impl LspClient {
     fn spawn() -> std::io::Result<Self> {
         let bin = env!("CARGO_BIN_EXE_vyrn-lsp");
         let mut cmd = Command::new(bin);
-        cmd.env("VYRN_NO_GEN_CACHE", "1");
+        cmd.env("VYRN_NO_GEN_CACHE", "1")
+            .env("VYRN_PROFILE_DIR", profile_dir());
         let mut child = cmd
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -5592,24 +5593,20 @@ fn a_disk_edit_is_read_after_its_event_or_always_without_events() {
 
 // What each line costs: inlay hints and `vyrn/costLenses`, over `vyrn why --cost`'s rows.
 
-/// The directory the server and this process save profiles in, set once so no test reads the
-/// profiles the machine's user has saved.
+/// The directory the servers and this process save profiles in, so no test reads the profiles
+/// the machine's user has saved. Each server gets it on its own command line: `set_var` beside
+/// another test thread's spawn decides by scheduling which servers inherit it.
 fn profile_dir() -> &'static std::path::Path {
     static DIR: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
     DIR.get_or_init(|| {
         let dir = std::env::temp_dir().join(format!("vyrn-lsp-cost-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        std::env::set_var("VYRN_PROFILE_DIR", &dir);
-        // The test binary sits one directory deeper than the server, where `std` is not found.
-        let std = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../std");
-        std::env::set_var("VYRN_STD", plain(&std));
         dir
     })
 }
 
 /// Opens `path` with `text` in a fresh server and waits for its diagnostics, which must be empty.
 fn open_for_cost(path: &std::path::Path, text: &str) -> (LspClient, String) {
-    profile_dir();
     let mut client = spawn_client();
     let uri = file_uri(path);
     did_open(&mut client, &uri, "vyrn", text);
@@ -5736,8 +5733,10 @@ fn main() -> Int64 {
 
 /// Saves a profile of `WORD` at `path`, as `vyrn run --profile` would, stamped with `text`.
 fn save_word_profile(path: &std::path::Path, text: &str) {
+    // The test binary sits one directory deeper than the server, where `std` is not found.
+    let std = plain(&std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../std"));
     let opts = vyrn_frontend::loader::LoadOptions {
-        std_root: vyrn_frontend::manifest::std_root(),
+        std_root: Some(std.to_string_lossy().into_owned()),
         ..Default::default()
     };
     let slash = path.to_string_lossy().replace('\\', "/");
@@ -5759,7 +5758,7 @@ fn save_word_profile(path: &std::path::Path, text: &str) {
     };
     let stamp = vyrn_lower::lastrun::stamp(text, &hashes);
     let sites = [site("allocates", 3, 40)];
-    vyrn_lower::lastrun::save(&path.to_string_lossy(), &stamp, &sites);
+    vyrn_lower::lastrun::save(profile_dir(), &path.to_string_lossy(), &stamp, &sites);
 }
 
 fn word_file(tag: &str) -> std::path::PathBuf {
@@ -5774,7 +5773,6 @@ fn word_file(tag: &str) -> std::path::PathBuf {
 #[test]
 fn a_fresh_profile_adds_the_runs_blocks() {
     let path = word_file("fresh");
-    profile_dir();
     save_word_profile(&path, WORD);
     let (mut client, uri) = open_for_cost(&path, WORD);
     assert_eq!(
@@ -5788,7 +5786,6 @@ fn a_fresh_profile_adds_the_runs_blocks() {
 #[test]
 fn an_edited_buffer_makes_the_profile_stale() {
     let path = word_file("stale");
-    profile_dir();
     save_word_profile(&path, WORD);
     let (mut client, uri) = open_for_cost(&path, &format!("{WORD}\n"));
     let hints = cost_hints(&mut client, &uri);

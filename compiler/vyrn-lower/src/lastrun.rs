@@ -45,16 +45,17 @@ pub fn stamp(source: &str, module_hashes: &BTreeMap<String, String>) -> String {
     sha256_hex(text.as_bytes())
 }
 
-fn file(root: &str) -> PathBuf {
+fn file(dir: &std::path::Path, root: &str) -> PathBuf {
     let root = std::fs::canonicalize(root).map_or_else(
         |_| root.to_string(),
         |p| p.to_string_lossy().replace('\\', "/"),
     );
-    vyrn_frontend::manifest::profile_dir().join(sha256_hex(root.as_bytes()))
+    dir.join(sha256_hex(root.as_bytes()))
 }
 
-/// Saves `sites` as the last run of `root`. A failure is ignored: the profile is optional.
-pub fn save(root: &str, stamp: &str, sites: &[SiteCount]) {
+/// Saves `sites` as the last run of `root` in `dir`, which [`load`] reads as
+/// [`vyrn_frontend::manifest::profile_dir`]. A failure is ignored: the profile is optional.
+pub fn save(dir: &std::path::Path, root: &str, stamp: &str, sites: &[SiteCount]) {
     let mut text = format!("{stamp}\n");
     for s in sites.iter().filter(|s| s.blocks > 0 || s.freed > 0) {
         text.push_str(&format!(
@@ -62,7 +63,7 @@ pub fn save(root: &str, stamp: &str, sites: &[SiteCount]) {
             s.function, s.line, s.verb, s.blocks, s.bytes, s.freed, s.live
         ));
     }
-    let file = file(root);
+    let file = file(dir, root);
     if let Some(dir) = file.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
@@ -72,7 +73,8 @@ pub fn save(root: &str, stamp: &str, sites: &[SiteCount]) {
 /// The last run of `root`, if its stamp is `stamp`. Site 0, the blocks made before any site
 /// ran, has no function and is not saved.
 pub fn load(root: &str, stamp: &str) -> Found {
-    let Ok(text) = std::fs::read_to_string(file(root)) else {
+    let Ok(text) = std::fs::read_to_string(file(&vyrn_frontend::manifest::profile_dir(), root))
+    else {
         return Found::Never;
     };
     let mut lines = text.lines();

@@ -363,7 +363,8 @@ function paintMain(treeJson) {
 
 // ---------------------------------------------------------------------------
 // Navigation. One in-flight guard: a second click while a soft nav is running
-// falls back to a hard navigation (fallback bias).
+// falls back to a hard navigation (fallback bias). The guard holds until the
+// body is read, so two navigations never both paint.
 // ---------------------------------------------------------------------------
 let inflight = null;
 
@@ -497,7 +498,6 @@ async function navigateLazy(url, { push }, resolved) {
     return;
   }
   clearTimeout(timer);
-  inflight = null;
   if (!res.ok) {
     emit("nav-error", { url, reason: "non-2xx" });
     hardNav(url);
@@ -516,6 +516,7 @@ async function navigateLazy(url, { push }, resolved) {
     hardNav(url);
     return;
   }
+  inflight = null;
 
   // 3) Fill in `Ready` (or repaint wholesale for an @error / page mismatch).
   try {
@@ -626,7 +627,6 @@ async function navigate(url, { push }) {
     return;
   }
   clearTimeout(timer);
-  inflight = null;
 
   if (!res.ok) {
     emit("nav-error", { url, reason: "non-2xx" });
@@ -648,6 +648,7 @@ async function navigate(url, { push }) {
       hardNav(url);
       return;
     }
+    inflight = null;
     try {
       const treeJson = pageRenderer(payloadText);
       if (!treeJson || treeJson === "__vyrn_fallback__") {
@@ -684,6 +685,7 @@ async function navigate(url, { push }) {
       hardNav(url);
       return;
     }
+    inflight = null;
     try {
       const doc = new DOMParser().parseFromString(html, "text/html");
       if (push) pushEntry(url);

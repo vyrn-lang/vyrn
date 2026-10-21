@@ -44,11 +44,12 @@ export function copyButtons() {
 export function copyPageButtons() {
   for (const link of $$("a[data-copy-md]")) {
     let fetchFailed = false;
+    // Read once: a second click inside the 1.6 s would read "Copied" back as the label.
+    const was = link.textContent;
     link.addEventListener("click", async (e) => {
       if (fetchFailed || !navigator.clipboard) return;
       e.preventDefault();
       pinWidth(link);
-      const was = link.textContent;
       const res = await fetch(link.href).catch(() => null);
       const md = res && res.ok ? await res.text() : "";
       fetchFailed = !md;
