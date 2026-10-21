@@ -8,3 +8,9 @@
 export gen fn vyrnSymbolMapsRpc() -> String {
     return "rpc\nclient"
 }
+
+/// The generators of `std/rpc` that mount a server surface, one name per
+/// line: a root that calls one is a root `vyrn dev` serves.
+export gen fn vyrnDevServerRpc() -> String {
+    return "rpc\nrpcServer"
+}

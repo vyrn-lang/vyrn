@@ -747,7 +747,9 @@ fn handle_request(server: &mut Server, req: Request) -> Response {
     }
 }
 
-/// `vyrn/isDevEntry`: [`is_dev_entry`] on the open buffer, else the file.
+/// `vyrn/isDevEntry`: whether the open buffer, else the file, calls a generator
+/// its module's editor companion lists in `vyrnDevServer*`: a root `vyrn dev`
+/// serves.
 fn handle_is_dev_entry(server: &Server, params: serde_json::Value) -> bool {
     let Some(uri) = params.pointer("/textDocument/uri").and_then(|v| v.as_str()) else {
         return false;
@@ -755,14 +757,9 @@ fn handle_is_dev_entry(server: &Server, params: serde_json::Value) -> bool {
     let Ok(uri) = Url::parse(uri) else {
         return false;
     };
-    if !is_vyrn_uri(&uri) {
-        return false;
-    }
-    let src = doc_text(server, &uri);
-    match src {
-        Some(text) => is_dev_entry(&text),
-        None => false,
-    }
+    let opts = (is_vyrn_uri(&uri).then(|| uri_path(&uri)).flatten())
+        .and_then(|path| input_load_options(server, &path));
+    opts.is_some_and(|opts| companion_lists(server, &opts, &uri, "vyrnDevServer"))
 }
 
 /// `vyrn/costLenses`: one `{ line, title }` per function that allocates, copies, grows a
@@ -815,27 +812,6 @@ fn handle_route_lenses(server: &Server, params: serde_json::Value) -> Vec<serde_
     }
     out.sort_by_key(|v| v.get("line").and_then(|l| l.as_u64()).unwrap_or(0));
     out
-}
-
-/// Whether `source` is a root `vyrn dev` serves: it imports `std/rpc` and mounts
-/// a server surface with `rpc(..)` or `rpcServer(..)`. Parses the root only.
-fn is_dev_entry(source: &str) -> bool {
-    use vyrn_frontend::ast::ImportSource;
-    let Ok(tokens) = vyrn_frontend::lexer::lex(source) else {
-        return false;
-    };
-    let Ok(program) = vyrn_frontend::parser::parse(tokens) else {
-        return false;
-    };
-    let imports_rpc = program
-        .imports
-        .iter()
-        .any(|i| matches!(&i.source, ImportSource::Path(p) if p == "std/rpc"));
-    let calls_server = program
-        .imports
-        .iter()
-        .any(|i| matches!(&i.source, ImportSource::Generator { name, .. } if name == "rpc" || name == "rpcServer"));
-    imports_rpc && calls_server
 }
 
 /// The hover of a resolved name, its signature fenced as ` ```vyrn ` for
@@ -2680,7 +2656,7 @@ fn route_facts_for_file(server: &Server, path: &str) -> Rc<Vec<MappedSymbol>> {
 }
 
 /// The `.vyrn` roots near `path` with a generator import whose generator bakes
-/// a symbol map, nearest first. A map may name a file no claim covers (a shared
+/// a symbol map (`vyrnSymbolMaps*` lists it), nearest first. A map may name a file no claim covers (a shared
 /// wire type), so the roots are ranked by distance, not by claim.
 ///
 /// Only the imports are parsed, so as few roots as possible are analyzed.
@@ -2693,16 +2669,21 @@ fn mounting_roots(server: &Server, path: &str) -> Vec<Url> {
     collect_vyrn(dir, &mut files);
     let mut scored: Vec<(usize, Url)> = (files.into_iter())
         .filter_map(|p| Some((path_distance(&p, dir), Url::from_file_path(p).ok()?)))
-        .filter(|(_, root)| bakes_a_map(server, &opts, root))
+        .filter(|(_, root)| companion_lists(server, &opts, root, "vyrnSymbolMaps"))
         .collect();
     scored.sort_by_key(|(d, _)| *d);
     scored.into_iter().map(|(_, root)| root).collect()
 }
 
 /// Whether a generator import of `root` calls a generator whose module's editor
-/// companion lists it in `vyrnSymbolMaps*`: the generators that bake a
-/// `symbolMap` export into what they write.
-fn bakes_a_map(server: &Server, opts: &vyrn_frontend::loader::LoadOptions, root: &Url) -> bool {
+/// companion lists it, one per line, in the export named `prefix` plus a slug.
+/// Only the imports are parsed.
+fn companion_lists(
+    server: &Server,
+    opts: &vyrn_frontend::loader::LoadOptions,
+    root: &Url,
+    prefix: &str,
+) -> bool {
     let (Some(importer), Some(text)) = (uri_path(root), doc_text(server, root)) else {
         return false;
     };
@@ -2717,7 +2698,7 @@ fn bakes_a_map(server: &Server, opts: &vyrn_frontend::loader::LoadOptions, root:
     let answers = vyrn_frontend::audience::companion_answers(
         &importer,
         &program,
-        "vyrnSymbolMaps",
+        prefix,
         opts,
         &resolver,
         Some(&*engine()),
