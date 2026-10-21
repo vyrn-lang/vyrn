@@ -92,6 +92,45 @@ fn a_second_dev_server_of_one_project_refuses_and_names_the_first_port() {
     let _ = std::fs::remove_file(dev_port_file(&dir));
 }
 
+/// The build is staged beside the output and renamed, so a build that fails after
+/// the emitter (here `wasm-opt`, pointed at a file that is no program) leaves the
+/// last good output and no staged file.
+#[test]
+fn a_failed_build_leaves_the_last_output_whole() {
+    let dir = scratch("build-staged");
+    std::fs::write(dir.join("main.vyrn"), "fn main() -> Int64 { return 0 }\n").unwrap();
+    std::fs::write(dir.join("out.wasm"), "the last good build").unwrap();
+    std::fs::write(dir.join("not-wasm-opt"), "no program").unwrap();
+    let out = vyrn()
+        .current_dir(&dir)
+        .env("VYRN_WASM_OPT", dir.join("not-wasm-opt"))
+        .args([
+            "--wasm-opt",
+            "build",
+            "main.vyrn",
+            "--target",
+            "wasm",
+            "-o",
+            "out.wasm",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        !out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        std::fs::read(dir.join("out.wasm")).unwrap(),
+        b"the last good build"
+    );
+    assert_eq!(
+        std::fs::read_dir(&dir).unwrap().count(),
+        3,
+        "no staged file is left"
+    );
+}
+
 #[test]
 fn bare_specifiers_resolve_through_the_manifest() {
     let dir = scratch("aliases");

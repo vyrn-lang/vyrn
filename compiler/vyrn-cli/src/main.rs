@@ -5413,13 +5413,16 @@ fn build_to(p: &Project, path: &str, out: Option<&str>, wasm: bool) -> Outcome {
     // same bytes.
     if wasm {
         let bytes = failed(vyrn_codegen::direct::compile(&program, world))?;
-        if let Err(e) = std::fs::write(&out_path, bytes) {
-            eprintln!("error: cannot write {out_path}: {e}");
-            return Err(ExitCode::FAILURE);
-        }
-        if p.flags.wasm_opt {
-            wasm_opt(&source_dir(path), Path::new(&out_path)).map_err(|()| ExitCode::FAILURE)?;
-        }
+        let stage = vyrn_frontend::manifest::stage_beside(Path::new(&out_path));
+        let built = match std::fs::write(&stage, bytes) {
+            Err(e) => {
+                eprintln!("error: cannot write {out_path}: {e}");
+                Err(())
+            }
+            Ok(()) if p.flags.wasm_opt => wasm_opt(&source_dir(path), &stage),
+            Ok(()) => Ok(()),
+        };
+        place_built(&stage, Path::new(&out_path), built).map_err(|()| ExitCode::FAILURE)?;
     } else {
         let target = native_target.unwrap_or(DEFAULT_NATIVE_TARGET);
         build_wasm2c(path, &program, world, &out_path, target, p.flags.wasm_opt)
@@ -5427,6 +5430,19 @@ fn build_to(p: &Project, path: &str, out: Option<&str>, wasm: bool) -> Outcome {
     }
     println!("wrote {out_path}");
     Ok(ExitCode::SUCCESS)
+}
+
+/// Renames a finished `stage` over `out`, so a reader of `out` sees the old
+/// build or the new one, never a part; removes the stage of a failed build.
+fn place_built(stage: &Path, out: &Path, built: Result<(), ()>) -> Result<(), ()> {
+    let placed = built.and_then(|()| {
+        std::fs::rename(stage, out)
+            .map_err(|e| eprintln!("error: cannot write {}: {e}", out.display()))
+    });
+    if placed.is_err() {
+        let _ = std::fs::remove_file(stage);
+    }
+    placed
 }
 
 /// Returns the directory a build's tools are looked up from: the source's,
@@ -5619,16 +5635,17 @@ fn build_wasm2c(
         native.runtime("wasm-rt-impl")?,
         native.runtime("wasm-rt-mem-impl")?,
     ];
+    let stage = vyrn_frontend::manifest::stage_beside(&out);
     let mut cmd = native.cc();
     cmd.arg("-include-pch")
         .arg(&pch)
         .arg(&c_path)
         .args(&objs)
         .arg("-o")
-        .arg(&out)
+        .arg(&stage)
         .arg(&hdr_def);
     native_link_flags(&mut cmd);
-    match cmd.status() {
+    let linked = match cmd.status() {
         Ok(s) if s.success() => Ok(()),
         Ok(s) => {
             eprintln!("error: clang exited with {s}");
@@ -5638,7 +5655,8 @@ fn build_wasm2c(
             eprintln!("error: failed to run clang ({}): {e}", clang.display());
             Err(())
         }
-    }
+    };
+    place_built(&stage, &out, linked)
 }
 
 #[cfg(test)]

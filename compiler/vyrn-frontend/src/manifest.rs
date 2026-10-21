@@ -459,12 +459,18 @@ pub fn write_whole(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     })
 }
 
-/// A name beside `path` that no other writer, process or thread, uses.
-fn stage_beside(path: &Path) -> PathBuf {
+/// A name beside `path` that no other writer, process or thread, uses. It
+/// keeps `path`'s extension last, so a linker that reads it writes the same
+/// kind of file.
+pub fn stage_beside(path: &Path) -> PathBuf {
     static SEQ: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
     let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let mut name = path.file_name().unwrap_or_default().to_os_string();
+    let mut name = path.file_stem().unwrap_or_default().to_os_string();
     name.push(format!(".{}.{seq}.tmp", std::process::id()));
+    if let Some(ext) = path.extension() {
+        name.push(".");
+        name.push(ext);
+    }
     path.with_file_name(name)
 }
 

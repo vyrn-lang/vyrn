@@ -368,6 +368,7 @@ pull request.
 - Tools are pinned per project in the same lock, and bytes are shared per user. A pinned tool that cannot resolve fails; it never falls back to `PATH`.
 - clang is discovered and recorded, never pinned, because it links against the host's libc.
 - Vyrn does not build tools from source, wrap a package manager, or take a crate for curl, git or tar.
+- `vyrn build -o` writes its output through a staged file beside it and a rename (`manifest::stage_beside`), so a reader sees the last build or the new one and a failed build leaves the last one. The native route's intermediates (`<out>.wasm`, `<out>.w2c.c`) stay in place for inspection.
 - Native builds choose from a curated set of microarchitectures and always pass `-ffp-contract=off`, because FMA changes float bits.
 - The editor grammar colours only words the compiler names, and its keywords equal the lexer's.
 - A `.vyx` file is analysed through the `.vyrn` module that owns it.
