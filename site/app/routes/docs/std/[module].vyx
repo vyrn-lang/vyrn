@@ -171,16 +171,16 @@ fn claudeHref(m: String) -> String {
 
     <section class="band" id="api">
         <article class="entry" v-for="e in data.entries" :key="e.name" :id="anchorOf(e.name)">
-            <h2><a :href="hrefFor(e.name)">{{ e.name }}</a> <span class="kindpill">{{ e.kind }}</span></h2>
-            <pre class="code" v-html="e.sig"></pre>
-            <div class="prose" v-html="e.prose"></div>
-            <p class="cap entrycap">
+            <div class="entryhead">
+                <h2><a :href="hrefFor(e.name)">{{ e.name }}</a> <span class="kindpill">{{ e.kind }}</span></h2>
                 <span class="entryacts">
                     <a class="iconlink" :href="apiSourceLine(data.name, e.line)" :title="sourceLabel(data.name, e)"><Icon name="bytesize:code"/><span class="sr-only">{{ sourceLabel(data.name, e) }}</span></a>
                     <a class="iconlink" v-if="hasDemo(data.name, e)" :href="demoChapterHref(data.name, e)" :title="usedInLabel(data.name, e)"><Icon name="bytesize:book"/><span class="sr-only">{{ usedInLabel(data.name, e) }}</span></a>
                     <a class="iconlink" v-if="hasDemo(data.name, e)" :href="demoOf(data.name, e).play" title="Run it in the playground"><Icon name="bytesize:play"/><span class="sr-only">Run it in the playground</span></a>
                 </span>
-            </p>
+            </div>
+            <pre class="code" v-html="e.sig"></pre>
+            <div class="prose" v-html="e.prose"></div>
         </article>
     </section>
 
