@@ -89,6 +89,9 @@ the playground serves an embedded `std/`. The loader:
 - links the modules (`link`), so no later pass sees a module boundary, and
   refuses cycles, missing or unexported names, duplicates and two impls of
   one pair;
+- drops each function, test and bench of an imported `std/` module that no
+  root reaches by name (`drop_unreached`), so an importer pays for what it
+  calls and not for the size of the module;
 - links `std/runtime` into every program, each declaration renamed with the
   `runtime$` prefix, and links `std/json` and similar modules when a builtin
   that lives in one is mentioned;

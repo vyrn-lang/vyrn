@@ -2692,6 +2692,39 @@ impl AstVisit<'_> for Binders<'_> {
     }
 }
 
+struct Spelled<'a, 'o>(&'o mut Vec<&'a str>);
+
+impl<'a> AstVisit<'a> for Spelled<'a, '_> {
+    const SCOPED: bool = false;
+
+    fn stmt(&mut self, s: &'a Stmt, _: &std::collections::HashSet<String>) {
+        if let Stmt::Assign { name, .. } | Stmt::Store { name, .. } = s {
+            self.0.push(name);
+        }
+    }
+
+    fn expr(&mut self, e: &'a Expr, _: &std::collections::HashSet<String>) -> bool {
+        if let Expr::Call { name, .. } | Expr::TryConstruct { name, .. } | Expr::Var { name, .. } =
+            e
+        {
+            self.0.push(name);
+        }
+        true
+    }
+}
+
+/// Pushes onto `out` every name `b` spells as a callee, a variable or a store
+/// target. A local counts too, so the names hold every function and module
+/// state `b` reaches.
+pub fn spelled<'a>(b: &'a Block, out: &mut Vec<&'a str>) {
+    ast_block(b, &mut std::collections::HashSet::new(), &mut Spelled(out));
+}
+
+/// [`spelled`] for an expression.
+pub fn expr_spelled<'a>(e: &'a Expr, out: &mut Vec<&'a str>) {
+    ast_expr(e, &std::collections::HashSet::new(), &mut Spelled(out));
+}
+
 /// Calls `f` with every name `b` binds: `let`s, loop variables, pattern binders
 /// and lambda parameters.
 pub fn each_binding(b: &Block, f: &mut dyn FnMut(&str)) {

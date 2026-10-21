@@ -338,6 +338,7 @@ fn options(expansions: std::sync::Arc<vyrn_frontend::project::Expansions>) -> Lo
         expansions,
         session: None,
         nest: Default::default(),
+        host_calls: &[],
     }
 }
 

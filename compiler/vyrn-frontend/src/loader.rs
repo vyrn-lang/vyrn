@@ -532,6 +532,10 @@ pub struct LoadOptions {
     /// The generator runs that enclose this load. A host's load is outermost:
     /// the default.
     pub nest: Nest,
+    /// The functions a host calls into the linked program that no source
+    /// names: `vyrn bench`'s harness and `vyrn routes`. The link keeps them and
+    /// what they reach ([`drop_unreached`]).
+    pub host_calls: &'static [&'static str],
 }
 
 /// The generator runs that enclose a load or a check.
@@ -1021,7 +1025,13 @@ fn load_with_origins_inner(
         Ok((modules, root_key, origins, warnings, pending)) => {
             let _p = crate::prof::phase("load: link");
             let graph = graph_of(&modules);
-            let linked = link(modules, &root_key).map(|mut p| {
+            // The floor's judgment reads the effects of every instance, so a
+            // load it still has to judge drops nothing.
+            let lazy = match pending {
+                Some(_) => HashSet::new(),
+                None => lazy_modules(&modules, &root_key, opts),
+            };
+            let linked = link(modules, &root_key, &lazy, opts.host_calls).map(|mut p| {
                 p.expansions = opts.expansions.clone();
                 p.session = crate::session::SessionRef(opts.session.clone());
                 p
@@ -3484,7 +3494,12 @@ impl BodyVisitMut for NsResolver<'_> {
     }
 }
 
-fn link(mut modules: Vec<Module>, root_key: &str) -> Result<Program, Vec<Diagnostic>> {
+fn link(
+    mut modules: Vec<Module>,
+    root_key: &str,
+    lazy: &HashSet<String>,
+    host_calls: &[&str],
+) -> Result<Program, Vec<Diagnostic>> {
     let mut errors: Vec<Diagnostic> = Vec::new();
     // Fold import aliases into the flat namespace first.
     let alias_span = crate::prof::phase("link: resolve_aliases");
@@ -3838,6 +3853,13 @@ fn link(mut modules: Vec<Module>, root_key: &str) -> Result<Program, Vec<Diagnos
     }
 
     let _merge = crate::prof::phase("link: merge");
+    // An imported name is a root: the editor's hover and completion read the
+    // declarations the root imports from the linked program.
+    let mut named: Vec<String> = host_calls.iter().map(|n| n.to_string()).collect();
+    for m in modules.iter().filter(|m| !lazy.contains(&m.key)) {
+        let imports = m.program.imports.iter().flat_map(|imp| &imp.names);
+        named.extend(imports.map(|n| n.original.clone()));
+    }
     // Merge. The root goes last so its injected builtins and log config win;
     // imported modules' injected decls are dropped.
     let mut merged: Option<Program> = None;
@@ -3905,8 +3927,115 @@ fn link(mut modules: Vec<Module>, root_key: &str) -> Result<Program, Vec<Diagnos
     program.imports.clear(); // consumed
     program.module_hashes = module_hashes;
     program.spellings = std::sync::Arc::new(spellings);
+    drop_unreached(&mut program, lazy, named);
     program.number();
     Ok(program)
+}
+
+/// The modules whose unreached functions, tests and benches the link drops:
+/// every `std/` module but the root and the injected runtime modules, whose
+/// functions the emitter and the desugars call by name. Std checks each of its
+/// bodies as the root of its own load (`tests/std_suite.rs`, the corpus), and a
+/// body no root reaches adds no verdict to another program's.
+fn lazy_modules(modules: &[Module], root_key: &str, opts: &LoadOptions) -> HashSet<String> {
+    let Some(std_root) = &opts.std_root else {
+        return HashSet::new();
+    };
+    // The test `import_specifier` spells a `std/` specifier by.
+    let std_root = format!("{}/", normalize(std_root));
+    (modules.iter())
+        .filter(|m| m.key != root_key && m.injected.is_none() && !is_remote(&m.key))
+        .filter(|m| normalize(&m.key).starts_with(&std_root))
+        .map(|m| m.key.clone())
+        .collect()
+}
+
+/// Drops each function of a `lazy` module that no root reaches by name
+/// ([`reached`]), and every test and bench of a `lazy` module.
+/// The roots are every other module's functions, tests, benches and imported
+/// names, `named`, every module-state initializer and `where` predicate, and
+/// each `extern` and `export extern` function, which a host enters by name. A
+/// method call `x.f()` arrives as a call named `f`, and the linked namespace is
+/// flat, so a name reaches the one function it can mean.
+///
+/// A program that calls `derive` drops nothing: its generator writes calls
+/// after the check, to any function of the program.
+fn drop_unreached(program: &mut Program, lazy: &HashSet<String>, named: Vec<String>) {
+    if lazy.is_empty() {
+        return;
+    }
+    let is_lazy = |m: &Option<String>| m.as_ref().is_some_and(|k| lazy.contains(k));
+    let mut roots: Vec<&str> = named.iter().map(String::as_str).collect();
+    for f in &program.functions {
+        if !is_lazy(&f.module) || f.is_extern || f.is_export_extern {
+            roots.push(&f.name);
+        }
+    }
+    for t in program.tests.iter().chain(&program.benches) {
+        if !is_lazy(&t.module) {
+            crate::ast::spelled(&t.body, &mut roots);
+        }
+    }
+    roots.extend(program.globals.iter().map(|g| g.name.as_str()));
+    for p in program
+        .type_decls
+        .iter()
+        .filter_map(|t| t.predicate.as_ref())
+    {
+        crate::ast::expr_spelled(p, &mut roots);
+    }
+    let keep = reached(program, roots);
+    if keep.contains("derive") {
+        return;
+    }
+    let kept: Vec<bool> = (program.functions.iter())
+        .map(|f| !is_lazy(&f.module) || keep.contains(f.name.as_str()))
+        .collect();
+    let functions = std::mem::take(&mut program.functions).into_iter().zip(kept);
+    program.functions = functions.filter_map(|(f, k)| k.then_some(f)).collect();
+    program.tests.retain(|t| !is_lazy(&t.module));
+    program.benches.retain(|b| !is_lazy(&b.module));
+}
+
+/// Returns every name `roots` reach in `program`: its functions and module
+/// state, and each other name their bodies spell, a builtin's included. A
+/// local that shares a function's name reaches the function, so the set holds
+/// every name the scoped walk of `gen::generator_program` reaches. Its implicit
+/// roots are that walk's: every `$` name (an injected runtime module's, which
+/// the emitter calls by name, and an impl's flattened method, which dispatch
+/// reaches by type) and every name a contract default, an impl method or a
+/// projection spells.
+fn reached<'a>(program: &'a Program, mut work: Vec<&'a str>) -> HashSet<&'a str> {
+    let by_name: HashMap<&str, &Function> = (program.functions.iter())
+        .map(|f| (f.name.as_str(), f))
+        .collect();
+    let state: HashMap<&str, &Expr> = (program.globals.iter())
+        .map(|s| (s.name.as_str(), &s.init))
+        .collect();
+    work.extend(
+        (program.functions.iter())
+            .filter(|f| f.name.contains('$'))
+            .map(|f| f.name.as_str()),
+    );
+    let defaults = (program.contracts.iter().flat_map(|c| &c.members)).filter_map(|m| m.default());
+    for d in defaults {
+        crate::ast::expr_spelled(d, &mut work);
+    }
+    for m in (program.impls.iter()).flat_map(|i| i.methods.iter().chain(&i.places)) {
+        crate::ast::spelled(&m.body, &mut work);
+    }
+    let mut keep: HashSet<&str> = HashSet::new();
+    while let Some(n) = work.pop() {
+        if !keep.insert(n) {
+            continue;
+        }
+        if let Some(f) = by_name.get(n) {
+            crate::ast::spelled(&f.body, &mut work);
+        } else if let Some(init) = state.get(n) {
+            crate::ast::expr_spelled(init, &mut work);
+        }
+    }
+    keep
 }
 
 /// Attaches `key` to a diagnostic as its file, unless `key` is the root: a root
