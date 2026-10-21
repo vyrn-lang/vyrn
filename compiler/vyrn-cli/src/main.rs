@@ -4260,6 +4260,20 @@ fn dev_cmd(call: &Call) -> Outcome {
         eprintln!("error: vyrn.json is missing a `\"client\"` entry (the wasm module to build)");
         return Err(ExitCode::FAILURE);
     };
+    // Two servers of one project would share `.vyrn-dev`; the second refuses.
+    let project = Path::new(&manifest.dir);
+    let port_file = vyrn_frontend::manifest::dev_port_file(project);
+    let Some(_dev) = failed(vyrn_frontend::manifest::try_lock_dev(project))? else {
+        let port = std::fs::read_to_string(&port_file).ok();
+        let at = port.map_or(String::new(), |p| {
+            format!(" on http://localhost:{}", p.trim())
+        });
+        eprintln!(
+            "error: `vyrn dev` already serves this project{at}; stop it before starting another"
+        );
+        return Err(ExitCode::FAILURE);
+    };
+    let _ = std::fs::remove_file(&port_file);
     let public_rel = get_str("public").unwrap_or_else(|| "public".to_string());
     let server_path = format!("{}/{server_rel}", manifest.dir);
     let client_path = format!("{}/{client_rel}", manifest.dir);
@@ -4290,6 +4304,7 @@ fn dev_cmd(call: &Call) -> Outcome {
     };
     let public_shown = assets.public_dir.display().to_string();
     serve_loop(call, &p, &server_path, Some(&assets), |port, n| {
+        let _ = vyrn_frontend::manifest::write_whole(&port_file, port.to_string().as_bytes());
         eprintln!("dev: serving {server_rel} on http://localhost:{port}");
         eprintln!("dev:   /rpc/*         -> server `handle` (rpcHandle + your pages)");
         eprintln!("dev:   /client.wasm   -> built from {client_rel}");

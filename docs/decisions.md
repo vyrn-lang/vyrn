@@ -363,6 +363,7 @@ pull request.
 - A manifest that does not parse is an error, never an empty policy.
 - A file another `vyrn` process may read at the same moment (a cache entry, `vyrn.lock`, `vyrn.json`, a vendored blob) is written under a name no other writer uses and renamed into place (`manifest::write_whole`). `vyrn.lock` is saved as this process's changes over the file as it is then, so a pin another build saved survives.
 - `vyrn.lock` and `vyrn.json` writes take an OS advisory lock (`File::lock`) on one lock file per project directory, `~/.vyrn/locks/<hash>.files` (`manifest::lock_project_files`), held across reload, merge and rename and never across a build, so the lost update closes.
+- A second `vyrn dev` on one project refuses with a sentence naming the first's port. The first holds `~/.vyrn/locks/<hash>.dev` for its life (`manifest::try_lock_dev`), a file of its own beside the save lock, which a server-long hold would block, and records its port in `<hash>.port`.
 - A `vyrn` command reads `vyrn.json` and `vyrn.lock` once, into one `Project`. Every load it makes reports through it: the lock is saved, the diagnostics and warnings print one way, and `--offline` and `--deny-warnings` reach every load.
 - Tools are pinned per project in the same lock, and bytes are shared per user. A pinned tool that cannot resolve fails; it never falls back to `PATH`.
 - clang is discovered and recorded, never pinned, because it links against the host's libc.

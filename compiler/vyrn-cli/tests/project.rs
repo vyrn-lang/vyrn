@@ -70,6 +70,28 @@ fn new_refuses_a_name_that_exists_and_creates_missing_parents() {
     );
 }
 
+/// The lock is held here, as a first `vyrn dev` holds it for its life.
+#[test]
+fn a_second_dev_server_of_one_project_refuses_and_names_the_first_port() {
+    use vyrn_frontend::manifest::{dev_port_file, try_lock_dev};
+    let dir = scratch("dev-twice");
+    let manifest = r#"{"server": "server.vyrn", "client": "client.vyrn"}"#;
+    std::fs::write(dir.join("vyrn.json"), manifest).unwrap();
+    let first = try_lock_dev(&dir)
+        .unwrap()
+        .expect("nothing serves a fresh scratch project");
+    std::fs::write(dev_port_file(&dir), "8123").unwrap();
+    let out = vyrn().current_dir(&dir).arg("dev").output().unwrap();
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success());
+    assert!(
+        err.contains("already serves this project on http://localhost:8123"),
+        "{err}"
+    );
+    drop(first);
+    let _ = std::fs::remove_file(dev_port_file(&dir));
+}
+
 #[test]
 fn bare_specifiers_resolve_through_the_manifest() {
     let dir = scratch("aliases");

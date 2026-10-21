@@ -359,6 +359,26 @@ pub fn lock_project_files(project_dir: &Path) -> Result<std::fs::File, String> {
     Ok(file)
 }
 
+/// Takes the lock `vyrn dev` holds on `project_dir` for its life, or `None`
+/// while another process holds it. Its own file, not [`lock_project_files`]'s:
+/// a lock held for a server's life would stop every build's save.
+pub fn try_lock_dev(project_dir: &Path) -> Result<Option<std::fs::File>, String> {
+    let file = project_lock_file(project_dir, "dev")?;
+    match file.try_lock() {
+        Ok(()) => Ok(Some(file)),
+        Err(std::fs::TryLockError::WouldBlock) => Ok(None),
+        Err(std::fs::TryLockError::Error(e)) => {
+            Err(format!("cannot lock {}: {e}", project_dir.display()))
+        }
+    }
+}
+
+/// Where the holder of [`try_lock_dev`] records its port. Not in the locked
+/// file: on Windows another process cannot read a locked range.
+pub fn dev_port_file(project_dir: &Path) -> PathBuf {
+    project_lock_path(project_dir, "port")
+}
+
 /// Opens `~/.vyrn/locks/<hash of the canonical directory>.<what>`: one file
 /// per project and purpose, outside the project, so a checkout gains no file.
 /// An OS lock on it goes with a killed holder.
