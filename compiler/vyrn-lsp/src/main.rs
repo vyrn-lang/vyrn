@@ -271,6 +271,7 @@ fn main() {
                 // `VYRN_NO_MEMO=1` stands it aside for measurement.
                 session: Session::new(std::env::var("VYRN_NO_MEMO").is_err()),
                 docs: HashMap::new(),
+                versions: HashMap::new(),
                 analyses: HashMap::new(),
                 vyx_owner: HashMap::new(),
                 vyx_ownerless: HashSet::new(),
@@ -298,6 +299,9 @@ fn main() {
 struct Server {
     /// Source text per open URI: Vyrn documents and generator inputs (`.vyx`).
     docs: HashMap<Url, String>,
+    /// The client's version of each text in `docs`, sent with its diagnostics
+    /// so a client drops a publish for a text it has since changed.
+    versions: HashMap<Url, i32>,
     /// The [`Analysis`] per Vyrn document, built once per change so a request
     /// never re-parses.
     analyses: HashMap<Url, Analysis>,
@@ -2538,7 +2542,8 @@ fn install_root(
     analysis: Analysis,
 ) {
     if let Some(c) = connection {
-        publish(c, root_uri, text, &analysis.diagnostics);
+        let version = server.versions.get(root_uri).copied();
+        publish(c, root_uri, version, text, &analysis.diagnostics);
     }
     for f in analysis.origins.input_files() {
         let f = vyrn_frontend::origin::OriginMaps::norm_path_key(&f);
@@ -2624,7 +2629,8 @@ fn discover_vyx_owner(connection: &Connection, server: &mut Server, vyx_uri: &Ur
     );
     let text = doc_text(server, vyx_uri).unwrap_or_default();
     let warning = vyrn_frontend::diagnostics::Diagnostic::warning(1, 0, "lsp", msg);
-    publish(connection, vyx_uri, &text, &[warning]);
+    let version = server.versions.get(vyx_uri).copied();
+    publish(connection, vyx_uri, version, &text, &[warning]);
 }
 
 /// The first candidate root whose origins claim `vyx_path`, with its analysis.
@@ -3016,7 +3022,13 @@ fn publish_remapped(connection: &Connection, server: &Server, analysis: &Analysi
                 .get(&uri)
                 .cloned()
                 .unwrap_or_else(|| std::fs::read_to_string(&file).unwrap_or_default());
-            publish(connection, &uri, &src, &diags);
+            publish(
+                connection,
+                &uri,
+                server.versions.get(&uri).copied(),
+                &src,
+                &diags,
+            );
         }
     }
 }
@@ -3047,6 +3059,9 @@ fn handle_notification(connection: &Connection, server: &mut Server, notif: Noti
             let uri = params.text_document.uri.clone();
             let text = params.text_document.text;
             server.docs.insert(uri.clone(), text.clone());
+            server
+                .versions
+                .insert(uri.clone(), params.text_document.version);
             // Opening a `.vyx` retries owner discovery.
             if let Some(p) = uri_path(&uri) {
                 server.vyx_ownerless.remove(&p);
@@ -3059,6 +3074,9 @@ fn handle_notification(connection: &Connection, server: &mut Server, notif: Noti
             // Full sync: the last change is the whole text.
             if let Some(change) = params.content_changes.into_iter().last() {
                 server.docs.insert(uri.clone(), change.text.clone());
+                server
+                    .versions
+                    .insert(uri.clone(), params.text_document.version);
                 return Owed::Analyze(uri);
             }
         }
@@ -3073,6 +3091,7 @@ fn handle_notification(connection: &Connection, server: &mut Server, notif: Noti
     } else if DidCloseTextDocument::METHOD == notif.method {
         if let Ok(params) = serde_json::from_value::<DidCloseTextDocumentParams>(notif.params) {
             server.docs.remove(&params.text_document.uri);
+            server.versions.remove(&params.text_document.uri);
             server.analyses.remove(&params.text_document.uri);
             let closed = params.text_document.uri.clone();
             let _ = connection
@@ -3101,12 +3120,14 @@ enum Owed {
 
 /// Push the frontend's diagnostics for `uri` to the client.
 ///
-/// `source` is the text the diagnostics were computed from. A diagnostic with
+/// `source` is the text the diagnostics were computed from, and `version` the
+/// client's version of it, `None` for a file read from disk. A diagnostic with
 /// `col == 0` knows only its line and squiggles the whole line; a zero-length
 /// range would mark just the first token.
 fn publish(
     connection: &Connection,
     uri: &Url,
+    version: Option<i32>,
     source: &str,
     diags: &[vyrn_frontend::diagnostics::Diagnostic],
 ) {
@@ -3164,7 +3185,7 @@ fn publish(
             PublishDiagnosticsParams {
                 uri: uri.clone(),
                 diagnostics: mapped,
-                version: None,
+                version,
             },
         )));
 }
