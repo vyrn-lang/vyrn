@@ -1289,9 +1289,8 @@ const ROUTES_APP: &str = "import { pages } from \"std/ui\"\n\
     fn handle(req: Request) -> Response { return route(req) }\n";
 
 /// Writes `app` as `app.vyrn` and each `(path, text)` of `files` into a fresh
-/// directory, opens the app, and returns the first diagnostic published into
-/// the file named `needle` as `(line, character, message)`, 0-based.
-fn first_input_diag(app: &str, files: &[(&str, &str)], needle: &str) -> (i64, i64, String) {
+/// directory, and returns the directory.
+fn input_scratch(app: &str, files: &[(&str, &str)]) -> std::path::PathBuf {
     let n = SCRATCH_COUNTER.fetch_add(1, Ordering::SeqCst);
     let dir = std::env::temp_dir().join(format!("vyrn_lsp_origin_{}_{n}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
@@ -1301,6 +1300,13 @@ fn first_input_diag(app: &str, files: &[(&str, &str)], needle: &str) -> (i64, i6
         std::fs::write(p, text).unwrap();
     }
     std::fs::write(dir.join("app.vyrn"), app).unwrap();
+    dir
+}
+
+/// Opens the [`input_scratch`] app and returns the first diagnostic published
+/// into the file named `needle` as `(line, character, message)`, 0-based.
+fn first_input_diag(app: &str, files: &[(&str, &str)], needle: &str) -> (i64, i64, String) {
+    let dir = input_scratch(app, files);
     let mut client = spawn_client();
     did_open(&mut client, &file_uri(&dir.join("app.vyrn")), "vyrn", app);
     let note = read_nonempty_diags_for(&mut client, needle);
@@ -1339,6 +1345,49 @@ fn page_data_declaration_error_maps_to_its_line() {
     let (line, col, msg) = first_input_diag(ROUTES_APP, &[("routes/index.vyx", page)], "index.vyx");
     assert!(msg.contains("Rowx"), "{msg}");
     assert_eq!((line, col), (2, 0), "{msg}");
+}
+
+const CARD_APP: &str = "import { components } from \"std/vyx\"\n\
+    import { list } from components(\"./comp\")\n\
+    fn main() -> Int64 { return 0 }\n";
+const CARD_VYX: &str = "<script>\nprops { title: String, count: Int64 }\n</script>\n\
+    <template>\n<li>{{ title }} {{ count }}</li>\n</template>\n";
+
+/// Each argument of a child component call sits on its own line under its
+/// attribute's origin. `    <Card :title="` is 18 bytes.
+#[test]
+fn child_argument_error_maps_to_its_column() {
+    let list = "<script>\nprops { rows: Array<String> }\n</script>\n<template>\n<ul>\n\
+        \x20   <Card :title=\"rows.nam\" :count=\"1\"/>\n</ul>\n</template>\n";
+    let files = [("comp/Card.vyx", CARD_VYX), ("comp/List.vyx", list)];
+    let (line, col, msg) = first_input_diag(CARD_APP, &files, "List.vyx");
+    assert!(msg.contains("nam"), "{msg}");
+    assert_eq!((line, col), (5, 18), "{msg}");
+}
+
+/// A name inside a child component's argument resolves to its declaration.
+#[test]
+fn child_argument_definition_reaches_the_declaration() {
+    let list = "<script>\nimport { format, fromMillis } from \"std/time\"\n</script>\n\
+        <template>\n<ul>\n\x20   <Card :title=\"format(fromMillis(0))\" :count=\"1\"/>\n</ul>\n</template>\n";
+    let dir = input_scratch(
+        CARD_APP,
+        &[("comp/Card.vyx", CARD_VYX), ("comp/List.vyx", list)],
+    );
+    let mut client = spawn_client();
+    did_open(
+        &mut client,
+        &file_uri(&dir.join("app.vyrn")),
+        "vyrn",
+        CARD_APP,
+    );
+    let _ = read_diags_for(&mut client, "List.vyx");
+    let uri = file_uri(&dir.join("comp/List.vyx"));
+    did_open(&mut client, &uri, "vyx", list);
+    let (l, c) = pos_after(list, ":title=\"for");
+    let target = definition_target(&mut client, &uri, l, c).expect("definition in an argument");
+    assert!(target.ends_with("time.vyrn"), "{target}");
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// The break exists only in a `didChange` overlay, so the generator cache must

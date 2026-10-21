@@ -693,16 +693,16 @@ fn vyxParseElem(ba: Array<UInt8>, i: Int64, e: Int64, srcFile: String) -> VyxNod
 }
 
 /// A directive lookup result: the directive's value plus its 1-based position.
-type VyxDir = { found: Bool, value: String, line: Int64, col: Int64 }
+type VyxDir = { found: Bool, value: String, dyn: Bool, line: Int64, col: Int64 }
 
 /// Looks up directive or attribute `name` (exact, non-event) on `attrs`.
 fn vyxDir(attrs: Array<VyxAttr>, name: String) -> VyxDir {
     for a in attrs {
         if a.evt == false && a.name == name {
-            return VyxDir { found: true, value: a.value.copy(), line: a.line, col: a.col }
+            return VyxDir { found: true, value: a.value.copy(), dyn: a.dyn, line: a.line, col: a.col }
         }
     }
-    return VyxDir { found: false, value: "", line: 0, col: 0 }
+    return VyxDir { found: false, value: "", dyn: false, line: 0, col: 0 }
 }
 
 /// `attrs` without the structural directives (and `key` when `dropKey`).
@@ -1803,7 +1803,9 @@ gen fn vyxEmitElem(tag: String, isComp: Bool, attrs: Array<VyxAttr>, kids: Array
 }
 
 /// Emits a component call, resolving props by name against the component's
-/// declaration and passing `<slot/>` content when it accepts children.
+/// declaration and passing `<slot/>` content when it accepts children. The
+/// call opens under the tag's line and each argument sits on its own line
+/// under its attribute's origin, so an error inside an argument maps to it.
 gen fn vyxEmitComp(tag: String, attrs: Array<VyxAttr>, kids: Array<VyxNode>, line: Int64, acc: String, path: String, reg: VyxRegistry, src: String) -> VyxEmit {
     let idx = vyxLookup(reg, tag)
     if idx < 0 {
@@ -1815,18 +1817,17 @@ gen fn vyxEmitComp(tag: String, attrs: Array<VyxAttr>, kids: Array<VyxNode>, lin
     }
     let comp = reg.comps[idx]
     let mut err = ""
-    let mut args: Array<String> = []
+    let mut args = vyxRegion(acc + ".push(" + comp.fnName + "(\n", src, line, 1)
     let mut pi = 0
     while pi < comp.propNames.length {
         let pn = comp.propNames[pi]
-        let av = vyxFindAttr(attrs, pn)
+        let av = vyxDir(attrs, pn)
         if av.found == false {
             err = err + vyxErr(src, line, "`<\{tag}>` is given no `\{pn}`, which its `props` block declares — every prop is required")
-            args.push("empty()")
-        } else if av.dyn {
-            args.push(consume av.value)
+            args = args + "empty(),\n"
         } else {
-            args.push(vyxStrLit(av.value))
+            let v = if av.dyn { consume av.value } else { vyxStrLit(av.value) }
+            args = args + vyxRegion(v + ",\n", src, av.line, av.col)
         }
         pi = pi + 1
     }
@@ -1841,13 +1842,13 @@ gen fn vyxEmitComp(tag: String, attrs: Array<VyxAttr>, kids: Array<VyxNode>, lin
     if comp.takesChildren {
         let kacc = "k" + path
         let kids2 = vyxEmitChildren(kids, kacc, path, reg, src)
-        let code = "let mut " + kacc + ": Array<Html> = []\n" + kids2.code + acc + ".push(" + comp.fnName + "(" + vyxJoinArgs(args) + kacc + "))\n"
+        let code = "let mut " + kacc + ": Array<Html> = []\n" + kids2.code + args + kacc + "))\n"
         return VyxEmit { code: code, err: err + kids2.err, imports: consume kids2.imports }
     }
     if hasKids {
         err = err + vyxErr(src, line, "`<\{tag}>` is given children, and its `<template>` has no `<slot/>` to put them in")
     }
-    return VyxEmit { code: acc + ".push(" + comp.fnName + "(" + vyxJoinArgsClose(args) + "))\n", err: err, imports: "" }
+    return VyxEmit { code: args + "))\n", err: err, imports: "" }
 }
 
 /// Emits one provider tag: the nested generator import that runs provider `tag`
@@ -1911,21 +1912,6 @@ fn vyxProvAttrs(attrs: Array<VyxAttr>) -> String {
     return emit(JObj(fs))
 }
 
-/// The argument prefix `a, b, ` (trailing separator) for a call that appends a
-/// children accumulator; "" for no args.
-fn vyxJoinArgs(args: Array<String>) -> String {
-    let mut out = ""
-    for a in args {
-        out = out + a + ", "
-    }
-    return out
-}
-
-/// The argument list `a, b` for a childless call.
-fn vyxJoinArgsClose(args: Array<String>) -> String {
-    return joinWith(args, ", ")
-}
-
 /// The non-whitespace text of the paired children: a coarse signal to reject
 /// children on a childless component.
 fn vyxChildText(kids: Array<VyxNode>) -> String {
@@ -1942,18 +1928,6 @@ fn vyxChildText(kids: Array<VyxNode>) -> String {
         }
     }
     return out
-}
-
-/// A found attribute value.
-type VyxAttrFound = { found: Bool, value: String, dyn: Bool }
-
-fn vyxFindAttr(attrs: Array<VyxAttr>, name: String) -> VyxAttrFound {
-    for a in attrs {
-        if a.evt == false && a.name == name {
-            return VyxAttrFound { found: true, value: a.value.copy(), dyn: a.dyn }
-        }
-    }
-    return VyxAttrFound { found: false, value: "", dyn: false }
 }
 
 /// Emits a `v-if` chain: each branch fills its own accumulator, then splices
