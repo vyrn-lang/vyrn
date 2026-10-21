@@ -11,6 +11,8 @@ use std::process::Command;
 
 use vyrn_frontend::hash::sha256_hex;
 
+mod common;
+
 fn repo_file(rel: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
@@ -54,9 +56,8 @@ fn utf8_of(cp: u32) -> Vec<u8> {
         .into_bytes()
 }
 
-fn run_lines(dir: &str, src: &str) -> Vec<String> {
-    let dir = std::env::temp_dir().join(dir);
-    std::fs::create_dir_all(&dir).unwrap();
+fn run_lines(tag: &str, src: &str) -> Vec<String> {
+    let dir = common::scratch(tag);
     let file = dir.join("oracle.vyrn");
     std::fs::write(&file, src).unwrap();
     let out = vyrn().arg("run").arg(&file).output().expect("vyrn run");
@@ -147,7 +148,7 @@ fn row(b: Array<UInt8>) -> String {
         .map(|b| format!("    print(row({}))\n", byte_array(b)))
         .collect();
     let src = format!("{harness}\nfn main() -> Int64 {{\n{calls}    return 0\n}}\n");
-    let lines = run_lines("vyrn-m4c-codepoints", &src);
+    let lines = run_lines("m4c-codepoints", &src);
     assert_eq!(lines.len(), buffers.len(), "one line per buffer");
     assert!(
         !lines.iter().any(|l| l == "reject"),
@@ -252,7 +253,7 @@ fn decodeutf8_and_stringfrombytes_refuse_exactly_what_rust_refuses() {
         .map(|b| format!("    print(row({}))\n", byte_array(b)))
         .collect();
     let src = format!("{DECODE_HARNESS}\nfn main() -> Int64 {{\n{calls}    return 0\n}}\n");
-    let lines = run_lines("vyrn-m4b-malformed", &src);
+    let lines = run_lines("m4b-malformed", &src);
     assert_eq!(lines.len(), buffers.len(), "one line per buffer");
     // The judge is Rust's `from_utf8`: `stringFromBytes` and `decodeUtf8` share
     // `utf8Width`, so neither can judge the other.
@@ -313,7 +314,7 @@ fn line_and_column_match_the_builtins_at_every_offset() {
         }
     }
     let src = format!("{harness}\nfn main() -> Int64 {{\n{calls}    return 0\n}}\n");
-    let lines = run_lines("vyrn-m4b-linecol", &src);
+    let lines = run_lines("m4b-linecol", &src);
     assert_eq!(lines.len(), rows.len(), "one line per (buffer, offset)");
     let bad: Vec<String> = lines
         .iter()
@@ -402,7 +403,7 @@ fn row(b: Array<UInt8>) -> String {
         .map(|b| format!("    print(row({}))\n", byte_array(b)))
         .collect();
     let src = format!("{harness}\nfn main() -> Int64 {{\n{calls}    return 0\n}}\n");
-    let lines = run_lines("vyrn-charcount-oracle", &src);
+    let lines = run_lines("charcount-oracle", &src);
     assert_eq!(lines.len(), buffers.len(), "one line per buffer");
     assert!(
         !lines.iter().any(|l| l.starts_with("MISMATCH")),
@@ -431,7 +432,7 @@ fn row(b: Array<UInt8>) -> String {
 
     // `examples/bytecount.vyrn`'s rows, equal on all three engines.
     let rows = run_lines(
-        "vyrn-charcount-oracle",
+        "charcount-oracle",
         "fn show(s: String) -> String {\n    \
          return s.byteLength.toString() + \"/\" + s.charCount().toString()\n}\n\
          fn main() -> Int64 {\n    \

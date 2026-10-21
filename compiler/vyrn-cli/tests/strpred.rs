@@ -10,6 +10,8 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+mod common;
+
 fn repo_file(rel: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
@@ -49,8 +51,7 @@ fn string_predicate_pins_hold() {
 /// test on purpose: a location that drifts silently is worth less than none.
 #[test]
 fn substring_names_the_offset_it_refused() {
-    let dir = std::env::temp_dir().join("vyrn-strpred");
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = common::scratch("strpred");
     for (name, literal, start, end, expect) in [
         (
             "oob_start_gt_end",

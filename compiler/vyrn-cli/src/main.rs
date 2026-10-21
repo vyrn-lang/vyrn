@@ -2288,8 +2288,12 @@ fn fmt_cmd(call: &Call) -> Outcome {
                 if formatted != source {
                     if check {
                         would_change.push(path.clone());
-                    } else if let Err(e) = std::fs::write(path, &formatted) {
-                        eprintln!("error: cannot write {path}: {e}");
+                    } else if let Err(e) = vyrn_frontend::manifest::rewrite_whole(
+                        Path::new(path),
+                        source.as_bytes(),
+                        formatted.as_bytes(),
+                    ) {
+                        eprintln!("error: {e}");
                         had_error = true;
                     } else {
                         written += 1;
@@ -2763,8 +2767,13 @@ fn fix_cmd(call: &Call) -> Outcome {
 
     p.save_lock()?;
     if text != source {
-        if let Err(e) = std::fs::write(&path, &text) {
-            eprintln!("error: cannot write {path}: {e}");
+        let written = vyrn_frontend::manifest::rewrite_whole(
+            Path::new(&path),
+            source.as_bytes(),
+            text.as_bytes(),
+        );
+        if let Err(e) = written {
+            eprintln!("error: {e}");
             return Err(ExitCode::FAILURE);
         }
     }
@@ -2887,11 +2896,14 @@ fn add(call: &Call) -> Outcome {
     ))?;
     p.save_lock()?;
 
-    // Rewrites the document already read; key order stays stable.
-    let manifest_path = Path::new(&manifest.dir).join("vyrn.json");
+    // Rewrites the file as it is under the project lock, so an edit made since
+    // the read above survives; key order stays stable.
+    let dir = Path::new(&manifest.dir);
+    let manifest_path = dir.join("vyrn.json");
+    let _held = failed(vyrn_frontend::manifest::lock_project_files(dir))?;
     use vyrn_frontend::schema::Json;
-    let mut fields = match &manifest.doc {
-        Json::Obj(f) => f.clone(),
+    let mut fields = match failed(vyrn_frontend::manifest::find(dir))?.map(|m| m.doc) {
+        Some(Json::Obj(f)) => f,
         _ => Vec::new(),
     };
     let dep_entry = (alias.clone(), Json::Str(spec.clone()));
@@ -4282,6 +4294,20 @@ fn dev_cmd(call: &Call) -> Outcome {
         eprintln!("error: vyrn.json is missing a `\"client\"` entry (the wasm module to build)");
         return Err(ExitCode::FAILURE);
     };
+    // Two servers of one project would share `.vyrn-dev`; the second refuses.
+    let project = Path::new(&manifest.dir);
+    let port_file = vyrn_frontend::manifest::dev_port_file(project);
+    let Some(_dev) = failed(vyrn_frontend::manifest::try_lock_dev(project))? else {
+        let port = std::fs::read_to_string(&port_file).ok();
+        let at = port.map_or(String::new(), |p| {
+            format!(" on http://localhost:{}", p.trim())
+        });
+        eprintln!(
+            "error: `vyrn dev` already serves this project{at}; stop it before starting another"
+        );
+        return Err(ExitCode::FAILURE);
+    };
+    let _ = std::fs::remove_file(&port_file);
     let public_rel = get_str("public").unwrap_or_else(|| "public".to_string());
     let server_path = format!("{}/{server_rel}", manifest.dir);
     let client_path = format!("{}/{client_rel}", manifest.dir);
@@ -4312,6 +4338,7 @@ fn dev_cmd(call: &Call) -> Outcome {
     };
     let public_shown = assets.public_dir.display().to_string();
     serve_loop(call, &p, &server_path, Some(&assets), |port, n| {
+        let _ = vyrn_frontend::manifest::write_whole(&port_file, port.to_string().as_bytes());
         eprintln!("dev: serving {server_rel} on http://localhost:{port}");
         eprintln!("dev:   /rpc/*         -> server `handle` (rpcHandle + your pages)");
         eprintln!("dev:   /client.wasm   -> built from {client_rel}");
@@ -5423,13 +5450,16 @@ fn build_to(p: &Project, path: &str, out: Option<&str>, wasm: bool) -> Outcome {
     // same bytes.
     if wasm {
         let bytes = failed(vyrn_codegen::direct::compile(&program, world))?;
-        if let Err(e) = std::fs::write(&out_path, bytes) {
-            eprintln!("error: cannot write {out_path}: {e}");
-            return Err(ExitCode::FAILURE);
-        }
-        if p.flags.wasm_opt {
-            wasm_opt(&source_dir(path), Path::new(&out_path)).map_err(|()| ExitCode::FAILURE)?;
-        }
+        let stage = vyrn_frontend::manifest::stage_beside(Path::new(&out_path));
+        let built = match std::fs::write(&stage, bytes) {
+            Err(e) => {
+                eprintln!("error: cannot write {out_path}: {e}");
+                Err(())
+            }
+            Ok(()) if p.flags.wasm_opt => wasm_opt(&source_dir(path), &stage),
+            Ok(()) => Ok(()),
+        };
+        place_built(&stage, Path::new(&out_path), built).map_err(|()| ExitCode::FAILURE)?;
     } else {
         let target = native_target.unwrap_or(DEFAULT_NATIVE_TARGET);
         build_wasm2c(path, &program, world, &out_path, target, p.flags.wasm_opt)
@@ -5437,6 +5467,19 @@ fn build_to(p: &Project, path: &str, out: Option<&str>, wasm: bool) -> Outcome {
     }
     println!("wrote {out_path}");
     Ok(ExitCode::SUCCESS)
+}
+
+/// Renames a finished `stage` over `out`, so a reader of `out` sees the old
+/// build or the new one, never a part; removes the stage of a failed build.
+fn place_built(stage: &Path, out: &Path, built: Result<(), ()>) -> Result<(), ()> {
+    let placed = built.and_then(|()| {
+        std::fs::rename(stage, out)
+            .map_err(|e| eprintln!("error: cannot write {}: {e}", out.display()))
+    });
+    if placed.is_err() {
+        let _ = std::fs::remove_file(stage);
+    }
+    placed
 }
 
 /// Returns the directory a build's tools are looked up from: the source's,
@@ -5629,16 +5672,17 @@ fn build_wasm2c(
         native.runtime("wasm-rt-impl")?,
         native.runtime("wasm-rt-mem-impl")?,
     ];
+    let stage = vyrn_frontend::manifest::stage_beside(&out);
     let mut cmd = native.cc();
     cmd.arg("-include-pch")
         .arg(&pch)
         .arg(&c_path)
         .args(&objs)
         .arg("-o")
-        .arg(&out)
+        .arg(&stage)
         .arg(&hdr_def);
     native_link_flags(&mut cmd);
-    match cmd.status() {
+    let linked = match cmd.status() {
         Ok(s) if s.success() => Ok(()),
         Ok(s) => {
             eprintln!("error: clang exited with {s}");
@@ -5648,7 +5692,8 @@ fn build_wasm2c(
             eprintln!("error: failed to run clang ({}): {e}", clang.display());
             Err(())
         }
-    }
+    };
+    place_built(&stage, &out, linked)
 }
 
 #[cfg(test)]
@@ -6006,7 +6051,7 @@ another bench   # trailing reason
 
     #[test]
     fn dev_static_paths_cannot_escape_their_root() {
-        let dir = std::env::temp_dir().join("vyrn-dev-static-test");
+        let dir = std::env::temp_dir().join(format!("vyrn-dev-static-test-{}", std::process::id()));
         std::fs::create_dir_all(dir.join("public")).unwrap();
         std::fs::write(dir.join("public/index.html"), b"<html>").unwrap();
         std::fs::write(dir.join("secret.txt"), b"s").unwrap();
@@ -6141,7 +6186,7 @@ fn handle(req: Request) -> Response {
     return Response { status: 200, contentType: "text/plain", body: "\{hits}", vary: "v", headers: ["X-Echo": req.method.copy()] }
 }
 "#;
-        let dir = std::env::temp_dir().join("vyrn-serve-doors");
+        let dir = std::env::temp_dir().join(format!("vyrn-serve-doors-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let file = dir.join(format!("doors-{}.vyrn", std::process::id()));
         let source = format!("{SRC}\n{SERVE_SHIM}");

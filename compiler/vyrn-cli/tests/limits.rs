@@ -6,16 +6,17 @@
 //! The numbers are read from the code that enforces them, so a test cannot pin a
 //! limit the compiler does not take.
 
+use std::path::Path;
 use std::process::{Command, Output};
 
+mod common;
+
 fn run(cmd: &str, src: &str, name: &str) -> Output {
-    run_args(cmd, src, name, &[])
+    run_args(&common::scratch("limits"), cmd, src, name, &[])
 }
 
-/// [`run`] with extra arguments after the file.
-fn run_args(cmd: &str, src: &str, name: &str, args: &[String]) -> Output {
-    let dir = std::env::temp_dir().join("vyrn-limits");
-    std::fs::create_dir_all(&dir).unwrap();
+/// [`run`] with extra arguments after the file, in `dir`.
+fn run_args(dir: &Path, cmd: &str, src: &str, name: &str, args: &[String]) -> Output {
     let f = dir.join(format!("{name}.vyrn"));
     std::fs::write(&f, src).unwrap();
     Command::new(env!("CARGO_BIN_EXE_vyrn"))
@@ -26,14 +27,12 @@ fn run_args(cmd: &str, src: &str, name: &str, args: &[String]) -> Output {
         .unwrap()
 }
 
-/// `vyrn build --target wasm` of `src`, giving the output and the module path.
-fn build_wasm(src: &str, name: &str) -> (Output, std::path::PathBuf) {
-    let out = std::env::temp_dir()
-        .join("vyrn-limits")
-        .join(format!("{name}.wasm"));
-    // Removed first, so "a refused build left no module" is about this run.
-    let _ = std::fs::remove_file(&out);
+/// `vyrn build --target wasm` of `src` in `dir`, giving the output and the
+/// module path.
+fn build_wasm(dir: &Path, src: &str, name: &str) -> (Output, std::path::PathBuf) {
+    let out = dir.join(format!("{name}.wasm"));
     let o = run_args(
+        dir,
         "build",
         src,
         name,
@@ -235,6 +234,7 @@ fn an_ordinary_generic_still_compiles() {
 /// refuses it, and every command that reads a program refuses it too.
 #[test]
 fn an_array_literal_past_the_limit_is_a_diagnostic_not_a_two_minute_crash() {
+    let dir = common::scratch("limits");
     let limit = vyrn_frontend::trap::ARRAY_LIT_LIMIT;
     let n = limit + 1;
     let elems: Vec<String> = (0..n).map(|i| (i % 97).to_string()).collect();
@@ -245,7 +245,7 @@ fn an_array_literal_past_the_limit_is_a_diagnostic_not_a_two_minute_crash() {
     );
     for cmd in ["check", "run", "emit-wat", "build"] {
         let (out, _) = if cmd == "build" {
-            build_wasm(&src, "biglit")
+            build_wasm(&dir, &src, "biglit")
         } else {
             (run(cmd, &src, "biglit"), Default::default())
         };
@@ -272,6 +272,7 @@ fn an_array_literal_past_the_limit_is_a_diagnostic_not_a_two_minute_crash() {
 /// must fit in a frame the backend admits, beside the array it becomes.
 #[test]
 fn an_array_literal_at_the_limit_still_runs() {
+    let dir = common::scratch("limits");
     let limit = vyrn_frontend::trap::ARRAY_LIT_LIMIT;
     let elems: Vec<String> = (0..limit).map(|i| (i % 97).to_string()).collect();
     let src = format!(
@@ -282,7 +283,7 @@ fn an_array_literal_at_the_limit_still_runs() {
     let out = run("run", &src, "litok");
     assert_eq!(text(&out).trim(), limit.to_string(), "{}", text(&out));
     assert_eq!(out.status.code(), Some(0));
-    let (build, _) = build_wasm(&src, "litok");
+    let (build, _) = build_wasm(&dir, &src, "litok");
     assert!(
         build.status.success(),
         "a literal at the limit must still build:\n{}",
@@ -295,6 +296,7 @@ fn an_array_literal_at_the_limit_still_runs() {
 /// its own locals, and its author can shrink them.
 #[test]
 fn a_frame_that_cannot_fit_is_a_diagnostic_not_a_module_that_traps() {
+    let dir = common::scratch("limits");
     // Three 4 KB records: past the limit by a whole record, so no rounding decides.
     let src = "type K8 = { a: Int64, b: Int64, c: Int64, d: Int64, e: Int64, f: Int64, \
                g: Int64, h: Int64 }\n\
@@ -309,7 +311,7 @@ fn a_frame_that_cannot_fit_is_a_diagnostic_not_a_module_that_traps() {
                fn wide(n: Int64) -> Int64 {\n    let one = mk512(n)\n    let two = mk512(n + 1)\n    let three = mk512(n + 2)\n    \
                return one.a.a.h - two.b.b.h + three.c.c.h\n}\n\n\
                fn main() -> Int64 {\n    print(\"\\{wide(3)}\")\n    return 0\n}\n";
-    let (out, module) = build_wasm(src, "bigframe");
+    let (out, module) = build_wasm(&dir, src, "bigframe");
     let got = text(&out);
     assert!(
         got.contains(vyrn_codegen::FRAME_LIMIT_NEEDLE)
@@ -340,6 +342,7 @@ fn a_frame_that_cannot_fit_is_a_diagnostic_not_a_module_that_traps() {
 /// 4 GiB array would pass the frame limit as needing no stack.
 #[test]
 fn a_shape_past_the_address_space_is_a_diagnostic_not_a_wrapped_number() {
+    let dir = common::scratch("limits");
     let cases = [
         // A parameter, which is where a big fixed array is cheapest to write.
         (
@@ -365,7 +368,7 @@ fn a_shape_past_the_address_space_is_a_diagnostic_not_a_wrapped_number() {
         ),
     ];
     for (name, src, bytes) in cases {
-        let (out, module) = build_wasm(src, name);
+        let (out, module) = build_wasm(&dir, src, name);
         let got = text(&out);
         assert!(
             got.contains(&format!("needs {bytes} bytes")),
@@ -398,6 +401,7 @@ fn a_shape_past_the_address_space_is_a_diagnostic_not_a_wrapped_number() {
 /// parameter alone is the caller's storage.
 #[test]
 fn a_shape_under_the_bound_is_still_measured() {
+    let dir = common::scratch("limits");
     for (name, n, bytes) in [
         // 8 MB, reported to the byte.
         (
@@ -413,7 +417,7 @@ fn a_shape_under_the_bound_is_still_measured() {
             "fn sum(xs: consume Array<Int64, {n}>) -> Int64 {{\n    let mut ys = xs\n    return ys[0]\n}}\n\n\
              fn main() -> Int64 {{\n    return 0\n}}\n"
         );
-        let got = text(&build_wasm(&src, name).0);
+        let got = text(&build_wasm(&dir, &src, name).0);
         assert!(
             got.contains(vyrn_codegen::FRAME_LIMIT_NEEDLE),
             "{name}: the frame limit is the bound this breaks, got:\n{got}"
@@ -435,13 +439,14 @@ fn a_shape_under_the_bound_is_still_measured() {
 /// `wasm.rs`, because a build at the limit is an 8 MB module to link.
 #[test]
 fn statics_past_what_the_module_holds_are_a_diagnostic_not_a_panic() {
+    let dir = common::scratch("limits");
     let mut src = String::from("fn main() -> Int64 {\n");
     for i in 0..90 {
         src.push_str(&format!("    print(\"s{i}-{}\")\n", "q".repeat(100_000)));
     }
     src.push_str("    return 0\n}\n");
 
-    let (out, module) = build_wasm(&src, "bigstatics");
+    let (out, module) = build_wasm(&dir, &src, "bigstatics");
     let got = text(&out);
     assert!(
         got.contains(vyrn_codegen::STATICS_LIMIT_NEEDLE),
@@ -473,6 +478,7 @@ fn statics_past_what_the_module_holds_are_a_diagnostic_not_a_panic() {
 /// a stack sized by hand fails here.
 #[test]
 fn every_limit_has_one_source() {
+    let dir = common::scratch("limits");
     use vyrn_frontend::trap::{ARRAY_LIT_LIMIT, FRAME_LIMIT, LENGTH_LIMIT, REGION_MAX};
     assert_eq!(
         vyrn_codegen::wasm::DATA_BASE,
@@ -499,7 +505,7 @@ fn every_limit_has_one_source() {
     let msg = format!("error: region nesting exceeds {REGION_MAX}");
     let wat = text(&run("emit-wat", src, "regionsrc"));
     assert!(wat.contains(&msg), "the emitter's wording:\n{wat}");
-    let (build, module) = build_wasm(src, "regionsrc");
+    let (build, module) = build_wasm(&dir, src, "regionsrc");
     assert!(build.status.success(), "{}", text(&build));
     let bytes = std::fs::read(&module).unwrap();
     assert!(

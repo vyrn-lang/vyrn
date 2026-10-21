@@ -5,6 +5,8 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+mod common;
+
 fn repo_file(rel: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
@@ -134,8 +136,7 @@ fn f64str_is_byte_identical_to_rusts_own_formatter() {
     let src = format!(
         "import {{ f64Str }} from \"std/num\"\nfn main() -> Int64 {{\n{calls}    return 0\n}}\n"
     );
-    let dir = std::env::temp_dir().join("vyrn-m1-f64str");
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = common::scratch("m1-f64str");
     let file = dir.join("f64str.vyrn");
     std::fs::write(&file, &src).unwrap();
     let out = vyrn().arg("run").arg(&file).output().expect("vyrn run");
@@ -320,8 +321,7 @@ fn parsefloat64_is_bit_identical_to_rusts_own_parser() {
         "import {{ parseFloat64 }} from \"std/num\"\nfn main() -> Int64 {{\n{calls}    return 0\n}}\n"
     );
 
-    let dir = std::env::temp_dir().join("vyrn-m4a-strtod");
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = common::scratch("m4a-strtod");
     let file = dir.join("strtod.vyrn");
     std::fs::write(&file, &src).unwrap();
     let out = vyrn().arg("run").arg(&file).output().expect("vyrn run");

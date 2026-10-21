@@ -326,6 +326,13 @@ impl AsRef<Path> for Scratch {
     }
 }
 
+/// So a guard passes where an argument or a variable takes a path: `.arg(&dir)`.
+impl AsRef<std::ffi::OsStr> for Scratch {
+    fn as_ref(&self) -> &std::ffi::OsStr {
+        self.0.as_os_str()
+    }
+}
+
 impl Drop for Scratch {
     fn drop(&mut self) {
         // A failing test keeps its artifacts as evidence.

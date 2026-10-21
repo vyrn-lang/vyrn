@@ -6,18 +6,14 @@
 //! Every row is offline: a remote key's bytes come out of the project's own
 //! `vyrn_vendor/`, where an air-gapped build reads them.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
+
+mod common;
+use common::scratch;
 
 fn vyrn() -> Command {
     Command::new(env!("CARGO_BIN_EXE_vyrn"))
-}
-
-fn scratch(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join("vyrn-icons-tests").join(name);
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
 }
 
 /// A two-glyph Iconify collection, exercising the header, the box and the body. The

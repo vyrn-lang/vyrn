@@ -479,26 +479,46 @@ pub type GenEngine = dyn Fn(
 /// Identifies the running compiler build: the crate version, then the
 /// executable's size and mtime. A persisted generator output or artifact is
 /// reused only by the same build.
+///
+/// An executable written within [`crate::manifest::MTIME_SLACK`] of now is
+/// named by the hash of its bytes instead: a second build of the same size in
+/// that window can carry the same mtime. Later, no write can, so the stat
+/// suffices.
 pub fn compiler_identity() -> String {
     static ID: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     ID.get_or_init(|| {
-        let m = std::env::current_exe().and_then(std::fs::metadata);
-        let exe = match m {
-            Ok(m) => format!(
-                "{}:{:?}",
-                m.len(),
-                m.modified().ok().and_then(|t| t
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .ok()
-                    .map(|d| d.as_nanos()))
-            ),
+        let exe = std::env::current_exe().ok();
+        let exe_id = match exe.as_ref().and_then(|p| std::fs::metadata(p).ok()) {
+            Some(m) => executable_id(m.len(), m.modified().ok(), || {
+                std::fs::read(exe.as_ref()?).ok()
+            }),
             // A build that cannot be identified must not reuse outputs across
             // processes.
-            Err(_) => format!("unknown-{}", std::process::id()),
+            None => format!("unknown-{}", std::process::id()),
         };
-        format!("{}:{exe}", env!("CARGO_PKG_VERSION"))
+        format!("{}:{exe_id}", env!("CARGO_PKG_VERSION"))
     })
     .clone()
+}
+
+/// The executable part of [`compiler_identity`]: `len:mtime` once the mtime is
+/// settled, else the hash of `bytes()`.
+fn executable_id(
+    len: u64,
+    mtime: Option<std::time::SystemTime>,
+    bytes: impl FnOnce() -> Option<Vec<u8>>,
+) -> String {
+    let settled = mtime
+        .and_then(|t| t.elapsed().ok())
+        .is_some_and(|age| age >= crate::manifest::MTIME_SLACK);
+    let nanos = mtime.and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok());
+    match (settled, nanos) {
+        (true, Some(d)) => format!("{len}:{}", d.as_nanos()),
+        _ => match bytes() {
+            Some(b) => format!("sha256:{}", crate::hash::sha256_hex(&b)),
+            None => format!("unknown-{}", std::process::id()),
+        },
+    }
 }
 
 /// Runs `fn_name` in `program` as a generation target on `inputs.engine`,
@@ -849,4 +869,21 @@ fn run_derive(
     }
     crate::loader::rewrite_names(&mut written, &map);
     Ok((written.functions, written.type_decls))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Two builds of one size written in one mtime tick differ by their bytes;
+    /// a settled mtime is trusted.
+    #[test]
+    fn a_fresh_executable_is_named_by_its_bytes() {
+        let now = Some(std::time::SystemTime::now());
+        let a = executable_id(4, now, || Some(b"bldA".to_vec()));
+        let b = executable_id(4, now, || Some(b"bldB".to_vec()));
+        assert_ne!(a, b);
+        let old = Some(std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000));
+        assert_eq!(executable_id(4, old, || None), "4:1000000000000000");
+    }
 }

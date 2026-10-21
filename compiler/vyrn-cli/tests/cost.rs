@@ -13,11 +13,9 @@ fn root() -> std::path::PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
 
-/// An empty directory for the profiles of the test `name`.
-fn profiles(name: &str) -> std::path::PathBuf {
-    let dir = std::env::temp_dir().join(format!("vyrn-cost-{name}"));
-    let _ = std::fs::remove_dir_all(&dir);
-    dir
+/// An empty directory for the profiles of the test `name`, owned by the guard.
+fn profiles(name: &str) -> Scratch {
+    scratch(&format!("cost-{name}"))
 }
 
 /// The standard output of `vyrn why --cost file`, from the repository root.
@@ -98,7 +96,7 @@ fn the_last_run_shows_beside_the_rows() {
     let dir = profiles("last-run");
     let run = vyrn()
         .current_dir(root())
-        .env("VYRN_PROFILE_DIR", &dir)
+        .env("VYRN_PROFILE_DIR", &*dir)
         .args(["run", "--profile", "examples/knucleotide.vyrn"])
         .stdin(std::fs::File::open(root().join("examples/knucleotide.stdin")).unwrap())
         .output()
@@ -123,12 +121,13 @@ fn main() -> Int64 {
 #[test]
 fn an_edited_source_makes_the_last_run_stale() {
     let dir = profiles("stale");
-    let src = std::env::temp_dir().join("vyrn-cost-stale.vyrn");
+    let src_dir = scratch("cost-stale-src");
+    let src = src_dir.join("stale.vyrn");
     let text = WORD;
     std::fs::write(&src, text).unwrap();
     let file = src.to_string_lossy().replace('\\', "/");
     let run = vyrn()
-        .env("VYRN_PROFILE_DIR", &dir)
+        .env("VYRN_PROFILE_DIR", &*dir)
         .args(["run", "--profile", &file])
         .output()
         .expect("vyrn run --profile");

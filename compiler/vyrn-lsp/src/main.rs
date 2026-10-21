@@ -272,12 +272,14 @@ fn dbg_log(msg: &str) {
             .unwrap_or_else(|_| ".".into());
         format!("{tmp}/vyrn-lsp-debug.log")
     });
+    // One write per line: `writeln!` on a `File` writes each piece apart, and
+    // two servers appending to one log split each other's lines.
     if let Ok(mut f) = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
         .open(&path)
     {
-        let _ = writeln!(f, "{msg}");
+        let _ = f.write_all(format!("{msg}\n").as_bytes());
     }
 }
 
@@ -301,6 +303,7 @@ fn main() {
                 // `VYRN_NO_MEMO=1` stands it aside for measurement.
                 session: Session::new(std::env::var("VYRN_NO_MEMO").is_err()),
                 docs: HashMap::new(),
+                versions: HashMap::new(),
                 analyses: HashMap::new(),
                 input_owner: HashMap::new(),
                 input_ownerless: HashSet::new(),
@@ -335,6 +338,9 @@ fn main() {
 struct Server {
     /// Source text per open URI: Vyrn documents and generator inputs.
     docs: HashMap<Url, String>,
+    /// The client's version of each text in `docs`, sent with its diagnostics
+    /// so a client drops a publish for a text it has since changed.
+    versions: HashMap<Url, i32>,
     /// The [`Analysis`] per Vyrn document, built once per change so a request
     /// never re-parses.
     analyses: HashMap<Url, Analysis>,
@@ -380,6 +386,8 @@ const WATCH_REQUEST: &str = "vyrn/watchFiles";
 /// One app root's stylesheets, with the signature they were read at.
 struct CssIndex {
     sig: u64,
+    /// The clock before the files were read.
+    read_at: std::time::SystemTime,
     /// `(absolute path, file text)` in discovery order (declared order first).
     files: Vec<(std::path::PathBuf, String)>,
 }
@@ -2489,7 +2497,8 @@ fn install_root(
     analysis: Analysis,
 ) {
     if let Some(c) = connection {
-        publish(c, root_uri, text, &analysis.diagnostics);
+        let version = server.versions.get(root_uri).copied();
+        publish(c, root_uri, version, text, &analysis.diagnostics);
     }
     for f in analysis.origins.input_files() {
         let f = vyrn_frontend::origin::OriginMaps::norm_path_key(&f);
@@ -2572,7 +2581,8 @@ fn discover_input_owner(connection: &Connection, server: &mut Server, input_uri:
     );
     let text = doc_text(server, input_uri).unwrap_or_default();
     let warning = vyrn_frontend::diagnostics::Diagnostic::warning(1, 0, "lsp", msg);
-    publish(connection, input_uri, &text, &[warning]);
+    let version = server.versions.get(input_uri).copied();
+    publish(connection, input_uri, version, &text, &[warning]);
 }
 
 /// The first candidate root whose origins claim `input_path`, with its analysis.
@@ -2987,7 +2997,13 @@ fn publish_remapped(connection: &Connection, server: &Server, analysis: &Analysi
                 .get(&uri)
                 .cloned()
                 .unwrap_or_else(|| std::fs::read_to_string(&file).unwrap_or_default());
-            publish(connection, &uri, &src, &diags);
+            publish(
+                connection,
+                &uri,
+                server.versions.get(&uri).copied(),
+                &src,
+                &diags,
+            );
         }
     }
 }
@@ -3019,6 +3035,9 @@ fn handle_notification(connection: &Connection, server: &mut Server, notif: Noti
             let uri = params.text_document.uri.clone();
             let text = params.text_document.text;
             server.docs.insert(uri.clone(), text.clone());
+            server
+                .versions
+                .insert(uri.clone(), params.text_document.version);
             // Opening a generator input retries owner discovery, and checks and
             // compiles its claimant's editor companion, which the first
             // completion would otherwise wait for.
@@ -3041,6 +3060,9 @@ fn handle_notification(connection: &Connection, server: &mut Server, notif: Noti
             // Full sync: the last change is the whole text.
             if let Some(change) = params.content_changes.into_iter().last() {
                 server.docs.insert(uri.clone(), change.text.clone());
+                server
+                    .versions
+                    .insert(uri.clone(), params.text_document.version);
                 return Owed::Analyze(uri);
             }
         }
@@ -3055,6 +3077,7 @@ fn handle_notification(connection: &Connection, server: &mut Server, notif: Noti
     } else if DidCloseTextDocument::METHOD == notif.method {
         if let Ok(params) = serde_json::from_value::<DidCloseTextDocumentParams>(notif.params) {
             server.docs.remove(&params.text_document.uri);
+            server.versions.remove(&params.text_document.uri);
             server.analyses.remove(&params.text_document.uri);
             let closed = params.text_document.uri.clone();
             let _ = connection
@@ -3083,12 +3106,14 @@ enum Owed {
 
 /// Push the frontend's diagnostics for `uri` to the client.
 ///
-/// `source` is the text the diagnostics were computed from. A diagnostic with
+/// `source` is the text the diagnostics were computed from, and `version` the
+/// client's version of it, `None` for a file read from disk. A diagnostic with
 /// `col == 0` knows only its line and squiggles the whole line; a zero-length
 /// range would mark just the first token.
 fn publish(
     connection: &Connection,
     uri: &Url,
+    version: Option<i32>,
     source: &str,
     diags: &[vyrn_frontend::diagnostics::Diagnostic],
 ) {
@@ -3146,7 +3171,7 @@ fn publish(
             PublishDiagnosticsParams {
                 uri: uri.clone(),
                 diagnostics: mapped,
-                version: None,
+                version,
             },
         )));
 }
@@ -3217,13 +3242,26 @@ fn app_css_rules(
     out
 }
 
-/// The app's stylesheets (path, text), cached per root until [`css_sig`] of the
-/// files the globs name moves.
+/// The app's stylesheets (path, text), cached per root (see [`stylesheets_in`]).
 fn app_stylesheets(server: &Server, root: &std::path::Path) -> Vec<(std::path::PathBuf, String)> {
+    stylesheets_in(&mut server.css_cache.borrow_mut(), root)
+}
+
+/// The files the globs of the manifest at `root` name, from `cache` while
+/// [`css_sig`] holds and every mtime lies [`vyrn_frontend::manifest::MTIME_SLACK`]
+/// before the last read: a write inside that window can keep its length and
+/// show the mtime the read saw.
+fn stylesheets_in(
+    cache: &mut HashMap<std::path::PathBuf, CssIndex>,
+    root: &std::path::Path,
+) -> Vec<(std::path::PathBuf, String)> {
+    let read_at = std::time::SystemTime::now();
     let paths = app_stylesheet_paths(root);
-    let sig = css_sig(paths.iter().map(|p| p.as_path()));
-    let mut cache = server.css_cache.borrow_mut();
-    if let Some(idx) = cache.get(root).filter(|idx| idx.sig == sig) {
+    let (sig, newest) = css_sig(paths.iter().map(|p| p.as_path()));
+    let settled = |idx: &&CssIndex| {
+        idx.sig == sig && newest + vyrn_frontend::manifest::MTIME_SLACK < idx.read_at
+    };
+    if let Some(idx) = cache.get(root).filter(settled) {
         return idx.files.clone();
     }
     let files: Vec<(std::path::PathBuf, String)> = (paths.into_iter())
@@ -3231,6 +3269,7 @@ fn app_stylesheets(server: &Server, root: &std::path::Path) -> Vec<(std::path::P
         .collect();
     let index = CssIndex {
         sig,
+        read_at,
         files: files.clone(),
     };
     cache.insert(root.to_path_buf(), index);
@@ -3238,21 +3277,23 @@ fn app_stylesheets(server: &Server, root: &std::path::Path) -> Vec<(std::path::P
 }
 
 /// A change signature for a set of stylesheets from `stat` alone: each file's
-/// path, length and mtime.
-fn css_sig<'a>(files: impl Iterator<Item = &'a std::path::Path>) -> u64 {
+/// path, length and mtime. Also returns the newest mtime.
+fn css_sig<'a>(files: impl Iterator<Item = &'a std::path::Path>) -> (u64, std::time::SystemTime) {
     let mut h = std::collections::hash_map::DefaultHasher::new();
+    let mut newest = std::time::UNIX_EPOCH;
     for f in files {
         f.to_string_lossy().hash(&mut h);
         if let Ok(m) = std::fs::metadata(f) {
             m.len().hash(&mut h);
             if let Ok(t) = m.modified() {
+                newest = newest.max(t);
                 if let Ok(d) = t.duration_since(std::time::UNIX_EPOCH) {
                     d.as_nanos().hash(&mut h);
                 }
             }
         }
     }
-    h.finish()
+    (h.finish(), newest)
 }
 
 /// The files the `stylesheets` globs of the manifest at `root` name, in glob
@@ -3429,6 +3470,30 @@ fn line_of(css: &str, at: usize) -> usize {
 
 #[cfg(test)]
 mod tests {
+
+    /// A same-length write inside one mtime tick of the read keeps the length and
+    /// the mtime the read saw; the slack window reads the file again.
+    #[test]
+    fn a_stylesheet_rewritten_within_the_mtime_slack_is_read_again() {
+        let root = std::env::temp_dir().join(format!("vyrn-lsp-css-{}", std::process::id()));
+        std::fs::create_dir_all(root.join("public")).unwrap();
+        std::fs::write(
+            root.join("vyrn.json"),
+            r#"{"stylesheets": ["public/*.css"]}"#,
+        )
+        .unwrap();
+        let css = root.join("public/app.css");
+        std::fs::write(&css, ".a { color: red }").unwrap();
+        let mtime = std::fs::metadata(&css).unwrap().modified().unwrap();
+        let mut cache = HashMap::new();
+        assert_eq!(stylesheets_in(&mut cache, &root)[0].1, ".a { color: red }");
+        std::fs::write(&css, ".a { color: tan }").unwrap();
+        let file = std::fs::File::options().write(true).open(&css).unwrap();
+        file.set_modified(mtime).unwrap();
+        drop(file);
+        assert_eq!(stylesheets_in(&mut cache, &root)[0].1, ".a { color: tan }");
+        let _ = std::fs::remove_dir_all(&root);
+    }
     use super::*;
     use vyrn_frontend::ast::{EnumVariant, Type};
 

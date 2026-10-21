@@ -4,6 +4,8 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+mod common;
+
 fn repo_file(rel: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
@@ -21,8 +23,7 @@ fn vyrn() -> Command {
 /// accepts exactly the JSON grammar is pinned by `std/jsonread`'s round trip.
 #[test]
 fn emit_refuses_a_jnum_that_is_not_a_json_number() {
-    let dir = std::env::temp_dir().join("vyrn-json-badnum");
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = common::scratch("json-badnum");
     for (name, raw) in [
         ("hex", "0x1f"),
         ("leading-zero", "007"),
@@ -60,8 +61,7 @@ fn emit_refuses_a_jnum_that_is_not_a_json_number() {
 /// sharpest, since a variant clash with a linked module is otherwise refused.
 #[test]
 fn an_injected_runtime_module_cannot_collide_with_the_users_names() {
-    let dir = std::env::temp_dir().join("vyrn-m2b-inject");
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = common::scratch("m2b-inject");
     let file = dir.join("collide.vyrn");
     std::fs::write(
         &file,
@@ -122,8 +122,7 @@ fn tojson_byte_pins_hold() {
 #[test]
 fn the_json_writer_does_not_copy_once_per_element() {
     const N: usize = 20_000;
-    let dir = std::env::temp_dir().join("vyrn-json-linear");
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = common::scratch("json-linear");
     let best_of_3 = |name: &str, n: usize| -> std::time::Duration {
         let src = format!(
             "fn main() -> Int64 {{\n\
@@ -187,8 +186,7 @@ fn fromjson_byte_pins_hold() {
 /// answers in the alias, which is its base (#527).
 #[test]
 fn a_decoder_for_a_scalar_alias_is_typed_as_written() {
-    let dir = std::env::temp_dir().join("vyrn-json-alias");
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = common::scratch("json-alias");
     let file = dir.join("alias.vyrn");
     std::fs::write(
         &file,
@@ -226,8 +224,7 @@ fn main() -> Int64 {
 /// to a spelling nothing looks up.
 #[test]
 fn a_declared_impl_in_an_injected_module_is_reached_in_both_link_modes() {
-    let dir = std::env::temp_dir().join("vyrn-0096-keys");
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = common::scratch("0096-keys");
     // (file, source, the release the binding must be reclaimed by).
     let cases = [
         (

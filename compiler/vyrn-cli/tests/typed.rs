@@ -166,8 +166,7 @@ fn judge(program: &Program, refs: &[&vyrn_frontend::core::Body]) -> judgment::Ju
 /// unannotated global).
 #[test]
 fn a_read_of_a_validated_place_produces_its_type() {
-    let dir = std::env::temp_dir().join("vyrn-typed-read");
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = common::scratch("typed-read");
     let path = dir.join("read.vyrn");
     std::fs::write(
         &path,

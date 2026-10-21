@@ -6,6 +6,8 @@
 use std::path::PathBuf;
 use std::process::Command;
 
+mod common;
+
 fn vyrn() -> Command {
     Command::new(env!("CARGO_BIN_EXE_vyrn"))
 }
@@ -14,12 +16,12 @@ fn norm(bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes).replace("\r\n", "\n")
 }
 
-fn write(name: &str, src: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join("vyrn-fallible");
-    std::fs::create_dir_all(&dir).unwrap();
+/// Writes `src` as `name.vyrn` in a scratch directory the returned guard owns.
+fn write(name: &str, src: &str) -> (common::Scratch, PathBuf) {
+    let dir = common::scratch("fallible");
     let path = dir.join(format!("{name}.vyrn"));
     std::fs::write(&path, src).unwrap();
-    path
+    (dir, path)
 }
 
 /// Two successes sharing one `Output`, and two failures, one carrying a payload the
@@ -64,7 +66,7 @@ fn say(h: Http) -> String {
 ";
 
 fn run(name: &str, src: &str) -> String {
-    let path = write(name, src);
+    let (_dir, path) = write(name, src);
     let out = vyrn().arg("run").arg(&path).output().expect("vyrn run");
     assert!(
         out.status.success(),
@@ -77,7 +79,7 @@ fn run(name: &str, src: &str) -> String {
 
 /// Asserts `vyrn check` refuses `src` with a diagnostic containing `needle`.
 fn rejects(name: &str, src: &str, needle: &str) {
-    let path = write(name, src);
+    let (_dir, path) = write(name, src);
     let out = vyrn().arg("check").arg(&path).output().expect("vyrn check");
     let all = norm(&out.stdout) + &norm(&out.stderr);
     assert!(!out.status.success(), "{name} was accepted:\n{all}");

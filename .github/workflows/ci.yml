@@ -900,8 +900,10 @@ jobs:
         run: cargo build --quiet -p vyrn-cli
       - name: Pinned tool cache
         id: wasm-tools
-        # actions/cache@v6.1.0
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        # Restore only: the route job saves this key, so two jobs never race to
+        # create one entry.
+        # actions/cache/restore@v6.1.0
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
         with:
           path: ~/.vyrn/tools
           key: vyrn-tools-v2-${{ hashFiles('vyrn.lock') }}

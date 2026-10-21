@@ -6,6 +6,8 @@
 use std::path::PathBuf;
 use std::process::Command;
 
+mod common;
+
 fn vyrn() -> Command {
     Command::new(env!("CARGO_BIN_EXE_vyrn"))
 }
@@ -14,23 +16,23 @@ fn norm(bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes).replace("\r\n", "\n")
 }
 
-fn write(name: &str, src: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join("vyrn-lazyfield");
-    std::fs::create_dir_all(&dir).unwrap();
+/// Writes `src` as `name.vyrn` in a scratch directory the returned guard owns.
+fn write(name: &str, src: &str) -> (common::Scratch, PathBuf) {
+    let dir = common::scratch("lazyfield");
     let path = dir.join(format!("{name}.vyrn"));
     std::fs::write(&path, src).unwrap();
-    path
+    (dir, path)
 }
 
 /// `vyrn check` on `src`, as one string (stdout + stderr).
 fn check(name: &str, src: &str) -> String {
-    let path = write(name, src);
+    let (_dir, path) = write(name, src);
     let out = vyrn().arg("check").arg(&path).output().unwrap();
     format!("{}{}", norm(&out.stdout), norm(&out.stderr))
 }
 
 fn run(name: &str, src: &str) -> String {
-    let path = write(name, src);
+    let (_dir, path) = write(name, src);
     let out = vyrn().arg("run").arg(&path).output().unwrap();
     assert!(
         out.status.success(),
@@ -163,7 +165,7 @@ fn lazy_is_still_an_ordinary_identifier_everywhere_else() {
 #[test]
 fn a_lazy_field_lowers_exactly_as_the_stored_closure_it_is() {
     let wat_of = |name: &str, src: &str| -> String {
-        let path = write(name, src);
+        let (_dir, path) = write(name, src);
         let out = vyrn()
             .env("VYRN_WASM_NAMES", "1")
             .arg("emit-wat")
