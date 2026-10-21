@@ -126,6 +126,7 @@ const CENSUS: &[(&str, Why, &str)] = &[
     // square root, and parity compares bytes.
     ("@f32x4Sqrt", Semantics, "a Vyrn Newton iteration is not the correctly-rounded IEEE result"),
     ("@f64x2Sqrt", Semantics, "as `@f32x4Sqrt`, at 64 bits"),
+    ("@sqrt", Semantics, "as `@f32x4Sqrt`, on one Float64 or Float32"),
     // Against the best Vyrn spelling, over 65536 UInt32 values. Clang folds
     // the Vyrn `ctz` and `popcount` to one instruction; Cranelift does not.
     ("@clz", Measured, "1.9x native (2.04 ms against 1.05 ms per 4 M counts) / 51x wasm (801 ms against 16 ms per 67 M), against a five-step binary search"),

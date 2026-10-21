@@ -454,7 +454,7 @@ fn table() -> Vec<Builtin> {
     // instruction. A bit view reads the same 64 bits at the other type, so it
     // is not a conversion.
     let one = |n, p: &Type, r: &Type| b(n).spec(Spec::Typed(vec![p.clone()], r.clone()));
-    // A method on a number that is one instruction at each admitted width.
+    // A method on a number that is one instruction at each admitted type.
     // Narrower integers are left out: they live in an `i32` that `clz` would
     // count from bit 31.
     let unary = |n, m, admits| {
@@ -831,6 +831,8 @@ fn table() -> Vec<Builtin> {
             .hover("x.ctz() -> T — the count of zero bits below the lowest set bit of an Int32, UInt32, Int64 or UInt64; the width when `x` is 0"),
         unary("@popcount", "popcount", ints)
             .hover("x.popcount() -> T — the count of set bits of an Int32, UInt32, Int64 or UInt64"),
+        unary("@sqrt", "sqrt", vec![Float, Type::Float32])
+            .hover("x.sqrt() -> T — the correctly rounded square root of a Float64 or Float32; NaN below zero, and -0.0 at -0.0"),
         // `bytes` copies (`__vyrn_str_bytes_range` allocates), so it does not
         // lend and its result is owned. One row serves both arities: the
         // offsets change nothing about ownership.

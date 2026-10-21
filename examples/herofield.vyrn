@@ -1,5 +1,5 @@
 // The website hero's luminance field.
-import { sin, cos, floorF } from "std/math"
+import { sin, cos, floor } from "std/math"
 import { substring } from "std/strings"
 
 fn ramp() -> String {
@@ -43,7 +43,7 @@ export fn field(u: Float64, v: Float64, t: Float64) -> Float64 {
 }
 
 export fn luminance(u: Float64, v: Float64, t: Float64) -> Int64 {
-    let lum = floorF(255.0 * unit((field(u, v, t) + 1.1) / 2.6))
+    let lum = floor(255.0 * unit((field(u, v, t) + 1.1) / 2.6))
     if lum < 0.0 {
         return 0
     }

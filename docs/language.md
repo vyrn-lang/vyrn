@@ -89,6 +89,7 @@ Every number type states its width. There is no unsized `Int`.
 - A conversion is a call named after the target type: `Int64(x)` widens or sign-extends, `UInt8(300)` wraps to `44`, `Int64(2.9)` truncates to `2`, `Float64(n)` converts.
 - Bitwise operators are `& | ^ ~ << >>` on integers. `>>` is arithmetic on a signed operand and logical on an unsigned one. `~` stays within the width. A shift amount outside `0` to width minus one traps, and a constant one is refused.
 - `x.clz()`, `x.ctz()` and `x.popcount()` count leading zeros, trailing zeros and set bits of an `Int32`, `UInt32`, `Int64` or `UInt64`, at the operand's type. Each is one wasm instruction. On zero, `clz` and `ctz` answer the width.
+- `x.sqrt()` is the correctly rounded square root of a `Float64` or `Float32`, one wasm instruction. [std/math](std.md#numbers) holds the other float functions.
 - `print` and interpolation render a float with six decimals: `0.1 + 0.2` prints `0.300000`.
 
 Operator precedence, loosest first: `||`, `&&`, `== != =~`, `< <= > >=`, `??`, `|`, `^`, `&`, `<< >>`, `+ -`, `* / %`, then unary `- ! ~`. Bitwise binds tighter than comparison, so `flags & mask == mask` is `(flags & mask) == mask`. `??` is right-associative.

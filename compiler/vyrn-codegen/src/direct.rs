@@ -9661,18 +9661,17 @@ fn builtin_spec(
 /// does not admit.
 fn unary_ins(name: &str, ty: &Type) -> Option<Instruction<'static>> {
     use Instruction::*;
-    let wide = match ty {
-        Type::Int | Type::IntN { bits: 64, .. } => true,
-        Type::IntN { bits: 32, .. } => false,
-        _ => return None,
-    };
-    Some(match (name, wide) {
-        ("@clz", false) => I32Clz,
-        ("@clz", true) => I64Clz,
-        ("@ctz", false) => I32Ctz,
-        ("@ctz", true) => I64Ctz,
-        ("@popcount", false) => I32Popcnt,
-        ("@popcount", true) => I64Popcnt,
+    let wide = matches!(ty, Type::Int | Type::IntN { bits: 64, .. });
+    let narrow = matches!(ty, Type::IntN { bits: 32, .. });
+    Some(match name {
+        "@clz" if narrow => I32Clz,
+        "@clz" if wide => I64Clz,
+        "@ctz" if narrow => I32Ctz,
+        "@ctz" if wide => I64Ctz,
+        "@popcount" if narrow => I32Popcnt,
+        "@popcount" if wide => I64Popcnt,
+        "@sqrt" if *ty == Type::Float => F64Sqrt,
+        "@sqrt" if *ty == Type::Float32 => F32Sqrt,
         _ => return None,
     })
 }
