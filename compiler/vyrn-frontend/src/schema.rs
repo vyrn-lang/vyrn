@@ -364,6 +364,7 @@ pub fn synthesize(
         out.push(TypeDecl {
             name,
             exported,
+            export_to: Vec::new(),
             module: Some(module.to_string()),
             doc: doc_of(schema),
             type_params: Vec::new(),
@@ -642,6 +643,7 @@ fn convert(
                 nested.push(TypeDecl {
                     name: format!("{name}.item"),
                     exported: false,
+                    export_to: Vec::new(),
                     module: None,
                     doc: None,
                     type_params: Vec::new(),
@@ -673,6 +675,7 @@ fn convert(
                     nested.push(TypeDecl {
                         name: format!("{name}.value"),
                         exported: false,
+                        export_to: Vec::new(),
                         module: None,
                         doc: None,
                         type_params: Vec::new(),
@@ -738,6 +741,7 @@ fn convert(
                     nested.push(TypeDecl {
                         name: sub_name.clone(),
                         exported: false,
+                        export_to: Vec::new(),
                         module: None,
                         doc: doc_of(fschema),
                         type_params: Vec::new(),
@@ -873,6 +877,7 @@ fn convert_payload_type(
         nested.push(TypeDecl {
             name: sub_name.to_string(),
             exported: false,
+            export_to: Vec::new(),
             module: None,
             doc: None,
             type_params: Vec::new(),
