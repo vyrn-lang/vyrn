@@ -86,9 +86,9 @@ function activate(context) {
   };
 
   const clientOptions = {
-    // `.vyrn` sources, plus `.vyx` generator inputs: the server maps
-    // hover/completion/go-to-definition and remapped diagnostics into the `.vyx`
-    // buffer through the synthesized module that consumes it.
+    // `.vyrn` sources, plus `.vyx`, the generator inputs this extension ships a
+    // grammar for. The server registers the other inputs a project's
+    // `vyrn.json` lists under `inputs`.
     documentSelector: [
       { scheme: "file", language: "vyrn" },
       { scheme: "file", language: "vyx" },

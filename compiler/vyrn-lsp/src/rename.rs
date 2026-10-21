@@ -7,22 +7,22 @@
 //! Only sources are edited: generated modules regenerate on the next load, so
 //! the new generated names are predicted, not observed. References are found by
 //! token ([`vyrn_frontend::references_to`]) in the project's `.vyrn` files and
-//! `.vyx` script bodies whose imports provably reach the declaring module. Out
-//! of reach: `.vyx` template expressions (only the script is lexed; a miss is a
-//! build error) and external HTTP clients of the moved wire path. A generated
+//! the views of generator inputs ([`vyrn_frontend::audience::InputView`]) whose
+//! imports provably reach the declaring module. Out of reach: what a view
+//! blanks, such as a template expression (a miss is a build error), and external
+//! HTTP clients of the moved wire path. A generated
 //! name that cannot be derived refuses the whole rename ([`derive_generated`]).
 
 use std::collections::HashMap;
 
 use vyrn_frontend::ast::{Expr, ImportDecl, ImportSource};
 
-use crate::contracts::vyx_script;
 use lsp_types::{Position, PrepareRenameResponse, Range, TextEdit, Url, WorkspaceEdit};
 use vyrn_frontend::symbolmap::{same_file, MappedSymbol};
 use vyrn_frontend::{analyze, references, references_to, Analysis, SymbolKind};
 
-/// The most project files a rename will read. Higher than the `.vyx` owner
-/// probe's cap: a rename runs once per refactor, and a miss breaks the build.
+/// The most project files a rename will read. Higher than the owner probe's
+/// cap: a rename runs once per refactor, and a miss breaks the build.
 const MAX_RENAME_FILES: usize = 512;
 
 /// The declaration a rename request resolves to.
@@ -209,12 +209,11 @@ fn wanted(target: &Target, new: &str, maps: &[MappedSymbol]) -> Result<Vec<Wante
     Ok(out)
 }
 
-/// A candidate file: its Vyrn body, the body's line offset within the file, and
-/// the file's full text, whose lines the UTF-16 conversion reads.
+/// A candidate file: its Vyrn body at the file's own positions, and the file's
+/// full text, whose lines the UTF-16 conversion reads.
 struct Candidate {
     uri: Url,
     body: String,
-    line_offset: usize,
     file_text: String,
 }
 
@@ -420,7 +419,8 @@ fn covers_dir(resolved: &str, target_file: &str) -> bool {
 /// The project-wide edit that renames `target` to `new`.
 ///
 /// `decl_text` is the declaring file's live text. `overlays` maps every open
-/// buffer's slash path to its text, read in place of the file.
+/// buffer's slash path to its text, read in place of the file. `view` reads a
+/// generator input's Vyrn, `None` for a file no generator claims.
 pub fn workspace_edit(
     target: &Target,
     decl_text: &str,
@@ -430,6 +430,7 @@ pub fn workspace_edit(
     decl_uri: &Url,
     overlays: &HashMap<String, String>,
     opts: &vyrn_frontend::loader::LoadOptions,
+    view: &dyn Fn(&Url) -> Option<String>,
 ) -> Result<WorkspaceEdit, String> {
     if !valid_identifier(new) {
         return Err(format!("`{new}` is not a valid identifier"));
@@ -445,13 +446,13 @@ pub fn workspace_edit(
     let refs = references(decl_analysis, target.line, target.col);
     let edits: Vec<TextEdit> = refs
         .iter()
-        .map(|r| edit_at(decl_text, r.line, r.col, r.end_col, new, 0))
+        .map(|r| edit_at(decl_text, r.line, r.col, r.end_col, new))
         .collect();
     if !edits.is_empty() {
         changes.insert(decl_uri.clone(), edits);
     }
 
-    for cand in candidates(&target.file, &names, overlays)? {
+    for cand in candidates(&target.file, &names, overlays, view)? {
         if cand.uri == *decl_uri {
             continue;
         }
@@ -485,14 +486,7 @@ pub fn workspace_edit(
             let all = references_to(&analysis, &w.old, &quals);
             if reach.bare_is_ours(&w.old) {
                 for r in all {
-                    edits.push(edit_at(
-                        &cand.file_text,
-                        r.line,
-                        r.col,
-                        r.end_col,
-                        &w.new,
-                        cand.line_offset,
-                    ));
+                    edits.push(edit_at(&cand.file_text, r.line, r.col, r.end_col, &w.new));
                 }
                 continue;
             }
@@ -501,14 +495,7 @@ pub fn workspace_edit(
                 if bare.iter().any(|b| b.line == r.line && b.col == r.col) {
                     continue;
                 }
-                edits.push(edit_at(
-                    &cand.file_text,
-                    r.line,
-                    r.col,
-                    r.end_col,
-                    &w.new,
-                    cand.line_offset,
-                ));
+                edits.push(edit_at(&cand.file_text, r.line, r.col, r.end_col, &w.new));
             }
         }
         edits.sort_by_key(|e| (e.range.start.line, e.range.start.character));
@@ -523,17 +510,10 @@ pub fn workspace_edit(
     })
 }
 
-/// One replacement, from a frontend 1-based char span plus the body's line
-/// offset within `file_text`, sent as UTF-16 code units.
-fn edit_at(
-    file_text: &str,
-    line: usize,
-    col: usize,
-    end_col: usize,
-    new: &str,
-    line_offset: usize,
-) -> TextEdit {
-    let l = (line + line_offset - 1) as u32;
+/// One replacement, from a frontend 1-based char span in `file_text`, sent as
+/// UTF-16 code units.
+fn edit_at(file_text: &str, line: usize, col: usize, end_col: usize, new: &str) -> TextEdit {
+    let l = (line - 1) as u32;
     let line_text = crate::line_of_text(file_text, l as usize);
     TextEdit {
         range: Range {
@@ -552,7 +532,8 @@ fn edit_at(
 
 /// Every project source a rename might touch: the files under the declaration's
 /// app root whose text contains one of `names`, since a reference is a token of
-/// that spelling; `.vyx` files contribute their `<script>` bodies.
+/// that spelling. A `.vyrn` file is its own body; any other file contributes its
+/// generator's view, and is no candidate without one.
 ///
 /// The cap is a refusal, not a truncation, and counts only those files: a root
 /// of any size is walked, but a file that names the declaration and was never
@@ -561,6 +542,7 @@ fn candidates(
     decl_file: &str,
     names: &[Wanted],
     overlays: &HashMap<String, String>,
+    view: &dyn Fn(&Url) -> Option<String>,
 ) -> Result<Vec<Candidate>, String> {
     let decl = std::path::Path::new(decl_file);
     let Some(dir) = decl.parent() else {
@@ -568,7 +550,7 @@ fn candidates(
     };
     let root = vyrn_frontend::manifest::app_root(dir);
     let mut paths = Vec::new();
-    crate::collect_sources(&root, None, 0, usize::MAX, &["vyrn", "vyx"], &mut paths);
+    crate::collect_sources(&root, None, 0, usize::MAX, &[], &mut paths);
     let mut files = Vec::new();
     for path in paths {
         let slash = path.to_string_lossy().replace('\\', "/");
@@ -579,9 +561,25 @@ fn candidates(
         else {
             continue;
         };
-        if names.iter().any(|w| text.contains(&w.old)) {
-            files.push((path, slash, text));
+        if !names.iter().any(|w| text.contains(&w.old)) {
+            continue;
         }
+        let Ok(uri) = Url::from_file_path(&path) else {
+            continue;
+        };
+        let body = if slash.ends_with(".vyrn") {
+            text.clone()
+        } else {
+            match view(&uri) {
+                Some(body) => body,
+                None => continue,
+            }
+        };
+        files.push(Candidate {
+            uri,
+            body,
+            file_text: text,
+        });
     }
     if files.len() > MAX_RENAME_FILES {
         return Err(format!(
@@ -591,30 +589,7 @@ fn candidates(
             names[0].old
         ));
     }
-    let mut out = Vec::new();
-    for (path, slash, text) in files {
-        let Ok(uri) = Url::from_file_path(&path) else {
-            continue;
-        };
-        if slash.ends_with(".vyx") {
-            if let Some((body, line_offset)) = vyx_script(&text) {
-                out.push(Candidate {
-                    uri,
-                    body,
-                    line_offset,
-                    file_text: text,
-                });
-            }
-        } else {
-            out.push(Candidate {
-                uri,
-                body: text.clone(),
-                line_offset: 0,
-                file_text: text,
-            });
-        }
-    }
-    Ok(out)
+    Ok(files)
 }
 
 #[cfg(test)]
@@ -662,19 +637,6 @@ mod tests {
         assert!(!valid_identifier("9lives"));
         assert!(!valid_identifier("two words"));
         assert!(!valid_identifier("has-dash"));
-    }
-
-    #[test]
-    fn a_vyx_script_body_maps_back_by_line_addition() {
-        let vyx =
-            "<script>\nimport { recent } from \"./api\"\n</script>\n<template>\n</template>\n";
-        let (body, off) = vyx_script(vyx).expect("a script section");
-        assert_eq!(off, 0, "the body starts on the `<script>` line itself");
-        // Body line 2 is the import; in the file it is also line 2.
-        assert_eq!(
-            body.lines().nth(1),
-            Some("import { recent } from \"./api\"")
-        );
     }
 
     /// References are found by token: a comment, a longer identifier and a

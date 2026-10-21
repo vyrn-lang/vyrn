@@ -119,7 +119,8 @@ fn write_preserves_crlf_endings() {
 
 #[test]
 fn a_vyx_component_is_left_alone() {
-    // `fmt` refuses a `.vyx` file: lexed as a Vyrn module, its template gains spaces
+    // `fmt` skips a file that is not `.vyrn` or `.von`: lexed as a Vyrn module, a `.vyx`
+    // template gains spaces
     // inside every tag and sentence (`< / p >`), and the re-lex invariant does not catch
     // it because the mangled text re-lexes to the same tokens.
     let dir = scratch("vyx-skip");
@@ -140,7 +141,7 @@ fn a_vyx_component_is_left_alone() {
         "fmt rewrote a .vyx template"
     );
     assert!(
-        String::from_utf8_lossy(&out.stderr).contains("cannot format a .vyx"),
+        String::from_utf8_lossy(&out.stderr).contains("formats only .vyrn and .von files"),
         "expected a note naming the skip, got: {}",
         String::from_utf8_lossy(&out.stderr)
     );

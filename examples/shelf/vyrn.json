@@ -3,6 +3,7 @@
   "server": "server.vyrn",
   "client": "client/boot.vyrn",
   "public": "public",
+  "stylesheets": ["public/*.css"],
   "artifacts": {
     "server": { "entry": "server.vyrn", "target": "native" },
     "client": { "entry": "client/boot.vyrn", "target": "browser" }

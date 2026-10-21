@@ -600,7 +600,7 @@ fn why_contract_reports_the_matched_shape_of_a_real_page() {
     );
     // A `.vyx`'s `<template>` is its page, though the `<script>` never names it.
     assert!(
-        text.contains("ok        page: the `<template>` compiles to it"),
+        text.contains("ok        page: the file's form writes it"),
         "the page the template writes:\n{text}"
     );
     assert!(
@@ -725,7 +725,7 @@ fn why_contract_reports_every_status_class() {
         "defaulted:\n{text}"
     );
     assert!(
-        text.contains("ok        page: the `<template>` compiles to it"),
+        text.contains("ok        page: the file's form writes it"),
         "synthesized by the form, which is a fifth status class:\n{text}"
     );
     assert!(
