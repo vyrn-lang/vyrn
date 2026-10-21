@@ -173,19 +173,20 @@ fn paint(src: &str, base: usize, out: &mut Vec<String>) -> Result<(), Diagnostic
         if let Some(t) = tok_of(item) {
             prev = Some(t);
         }
-        if item.text.is_empty() {
+        let text = item.text(src);
+        if text.is_empty() {
             continue;
         }
         // Each item's `text` is its verbatim source slice, in source order, so
         // a forward search finds its extent.
-        let Some(found) = src[byte_at..].find(item.text.as_str()) else {
+        let Some(found) = src[byte_at..].find(text) else {
             continue;
         };
         let start = byte_at + found;
         u16_at += src[byte_at..start].encode_utf16().count();
-        let len = item.text.encode_utf16().count();
+        let len = text.encode_utf16().count();
         if let TrivKind::Tok(Tok::TemplateStr { exprs, .. }) = &item.kind {
-            paint_template(&item.text, exprs, u16_at, out)?;
+            paint_template(text, exprs, u16_at, out)?;
         } else {
             let cls = class_of(item, callee);
             if !cls.is_empty() {
@@ -193,7 +194,7 @@ fn paint(src: &str, base: usize, out: &mut Vec<String>) -> Result<(), Diagnostic
             }
         }
         u16_at += len;
-        byte_at = start + item.text.len();
+        byte_at = start + text.len();
     }
     Ok(())
 }
