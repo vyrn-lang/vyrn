@@ -50,7 +50,7 @@ from `collection`: a relative `.json` path or a `vyrn.json` dependency alias.
 fn iconsAt(collection: String, names: String, anchorFile: String, line: Int64, col: Int64) -> String
 ```
 
-[`icons`] with reports anchored at `anchorFile`/`line`/`col`, the template
+[`icons`](#icons) with reports anchored at `anchorFile`/`line`/`col`, the template
 tag that asked. A provider emits an import of this, so the collection alias
 is this generation's own constant argument and resolves through `vyrn.json`.
 
@@ -60,7 +60,7 @@ is this generation's own constant argument and resolves through `vyrn.json`.
 fn iconsModule(collectionText: String, collectionPath: String, names: String, anchorFile: String, line: Int64, col: Int64) -> String
 ```
 
-[`icons`] over collection text already read. `collectionPath` is only
+[`icons`](#icons) over collection text already read. `collectionPath` is only
 named in diagnostics and the header. An empty `anchorFile` anchors reports
 in the collection file.
 
@@ -73,7 +73,7 @@ fn iconProvider(attrs: String, file: String, line: Int64, col: Int64, collection
 A project's `<Icon>` provider. `collections` is a space-separated list of
 `vyrn.json` aliases, and those names are the tag's prefixes. With one
 collection bound a bare name means that one; with more it is refused.
-Reads nothing: it emits an [`iconsAt`] import, where the alias resolves.
+Reads nothing: it emits an [`iconsAt`](#iconsat) import, where the alias resolves.
 
 ## iconAttrs
 

@@ -165,7 +165,7 @@ per component. `class` is unchecked; `componentsThemed` checks it.
 fn componentsThemed(dir: String, theme: String) -> String
 ```
 
-[`components`] with a theme: the module imports `tw(<theme>)` as
+[`components`](#components) with a theme: the module imports `tw(<theme>)` as
 `vyxTheme`, a static class literal is checked against `Tw` at compile time
 at its `.vyx` position, and a dynamic `:class` is coerced at run time.
 `theme` resolves relative to the importing module, like `dir`.
@@ -285,7 +285,7 @@ of exactly its path arguments.
 fn vyxPageThemed(vyxPath: String, theme: String) -> String
 ```
 
-[`vyxPage`] with the page's classes checked against `theme`.
+[`vyxPage`](#vyxpage) with the page's classes checked against `theme`.
 
 ## vyxPageClient
 
@@ -293,7 +293,7 @@ fn vyxPageThemed(vyxPath: String, theme: String) -> String
 fn vyxPageClient(vyxPath: String) -> String
 ```
 
-[`vyxPage`] for the client bundle: no `load`, head or
+[`vyxPage`](#vyxpage) for the client bundle: no `load`, head or
 title, for `std/ui`'s `pagesClient`.
 
 ## vyxPageClientThemed
@@ -302,7 +302,7 @@ title, for `std/ui`'s `pagesClient`.
 fn vyxPageClientThemed(vyxPath: String, theme: String) -> String
 ```
 
-[`vyxPageClient`] with classes checked against `theme`.
+[`vyxPageClient`](#vyxpageclient) with classes checked against `theme`.
 
 ## vyxBuildLayoutModule
 
@@ -336,7 +336,7 @@ Synthesizes a `.vyx` layout module from `vyxPath`.
 fn vyxLayoutThemed(vyxPath: String, theme: String) -> String
 ```
 
-[`vyxLayout`] with the layout's classes checked against `theme`.
+[`vyxLayout`](#vyxlayout) with the layout's classes checked against `theme`.
 
 ## vyxBuildErrorModule
 
@@ -370,4 +370,4 @@ Synthesizes a `.vyx` error-page module from `vyxPath`.
 fn vyxErrorThemed(vyxPath: String, theme: String) -> String
 ```
 
-[`vyxError`] with classes checked against `theme`.
+[`vyxError`](#vyxerror) with classes checked against `theme`.

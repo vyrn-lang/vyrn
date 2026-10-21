@@ -888,3 +888,20 @@ fn main() -> Int64 {
         "{r:?}"
     );
 }
+
+#[test]
+fn a_doc_link_to_a_known_name_takes_the_renderers_target() {
+    let out = vyrn_frontend::doc_links("see [`b`]", |n| Some(format!("<{n}>")));
+    assert_eq!(out, "see <b>");
+}
+
+#[test]
+fn a_doc_link_to_an_unknown_name_reads_as_code() {
+    assert_eq!(vyrn_frontend::doc_links("see [`b`].", |_| None), "see `b`.");
+}
+
+#[test]
+fn a_doc_link_with_its_own_target_stays_as_written() {
+    let doc = "see [`b`](https://example.com) and [a] list";
+    assert_eq!(vyrn_frontend::doc_links(doc, |_| Some(String::new())), doc);
+}

@@ -25,7 +25,7 @@ key, in any JSON file passed to the generator as a constant path:
 { "hints": { "a11y/img-alt": "error", "perf/img-size": "off" } }
 ```
 
-[`policyOf`] refuses a config that does not parse or names an unknown level:
+[`policyOf`](#policyof) refuses a config that does not parse or names an unknown level:
 a swallowed fault would report rules on while they are off.
 
 `vyrn-ignore <code>` on the reported line, or on the line above it, drops
@@ -43,7 +43,7 @@ type HintPolicy = { codes: Array<String>, levels: Array<String>, strict: Bool }
 ```
 
 Per-code severity overrides, as parallel arrays (a code and its level word).
-`strict` ignores waivers; only [`strictly`] sets it, for [`unusedWaivers`].
+`strict` ignores waivers; only [`strictly`](#strictly) sets it, for [`unusedWaivers`](#unusedwaivers).
 
 ## noPolicy
 
@@ -60,7 +60,7 @@ fn strictly(p: HintPolicy) -> HintPolicy
 ```
 
 `p` with waivers ignored: what a rule would report. Builds the `raw`
-input of [`unusedWaivers`].
+input of [`unusedWaivers`](#unusedwaivers).
 
 ## policyOf
 
@@ -108,8 +108,8 @@ fn unusedWaivers(p: HintPolicy, src: String, file: String, raw: String) -> Strin
 ```
 
 Reports every `vyrn-ignore` marker in `src` that waives nothing. `raw` is
-the same report built under [`strictly`]; a marker at line L is used when
+the same report built under [`strictly`](#strictly); a marker at line L is used when
 `raw` reports its code at L or L + 1.
 
-Reports go through [`hint`] with `p`, so `hint/unused-waiver` is configured
+Reports go through [`hint`](#hint) with `p`, so `hint/unused-waiver` is configured
 and waived like any other rule.

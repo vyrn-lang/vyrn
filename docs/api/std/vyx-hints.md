@@ -46,7 +46,7 @@ Checks every `<Name>.vyx` under `dir` at default severities. Emits
 fn vyxHintsConfigured(dir: String, config: String) -> String
 ```
 
-[`vyxHints`] under the `"hints"` object of the JSON document at `config`.
+[`vyxHints`](#vyxhints) under the `"hints"` object of the JSON document at `config`.
 A config that cannot be read or is refused by `policyOf` is an error, and no
 file is checked.
 
