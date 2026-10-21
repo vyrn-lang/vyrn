@@ -1,5 +1,6 @@
-import { substring, split, joinWith, trim, trimEnd } from "std/strings"
-import { startsWith, endsWith } from "std/strpred"
+import { substring, split, joinWith, trim, trimEnd, indexOf } from "std/strings"
+import { startsWith, endsWith, contains } from "std/strpred"
+import { includes } from "std/arrays"
 import { escapeHtml } from "./code"
 import { highlightSrc, lineStarts } from "./hl"
 import { quoted, quotedList, branch, lookup, vyrnStems } from "./gensrc"
@@ -316,6 +317,32 @@ fn isBanner(t: String) -> Bool {
     return true
 }
 
+// Rewrites each `[<code>name</code>]` a doc link became: to a link to the
+// entry when the module exports `name`, else to the code span alone. A link
+// that names its own target, followed by `(`, stays as written.
+fn linked(html: String, names: Array<String>) -> String {
+    let parts = split(html, "[<code>")
+    let mut out = parts[0].copy()
+    let mut i = 1
+    while i < parts.length {
+        let p = parts[i]
+        let ends = match indexOf(p, "</code>]") {
+            Some(e) => e,
+            None => 0 - 1,
+        }
+        if ends < 0 || contains(substring(p, 0, ends), "<") || startsWith(substring(p, ends + 8, p.byteLength), "(") {
+            out = out + "[<code>" + p
+        } else {
+            let name = substring(p, 0, ends)
+            let code = "<code>" + name + "</code>"
+            let link = if includes(names, name) { "<a href=\"#e-" + name + "\">" + code + "</a>" } else { code }
+            out = out + link + substring(p, ends + 8, p.byteLength)
+        }
+        i = i + 1
+    }
+    return out
+}
+
 fn summaryOf(doc: String) -> String {
     let mut flat = ""
     for line in split(doc, "\n") {
@@ -338,7 +365,7 @@ fn summaryOf(doc: String) -> String {
         }
         i = i + 1
     }
-    return inlineHtml(substring(flat, 0, cut))
+    return linked(inlineHtml(substring(flat, 0, cut)), [])
 }
 
 /// Mirrors `is_fenced` in `compiler/vyrn-frontend/src/loader.rs`, which a generator cannot call.
@@ -376,13 +403,17 @@ export gen fn apiDocs(stdDir: String) -> String {
     let mut testLists: Array<String> = []
     let mut counts: Array<String> = []
     for m in mods {
+        let mut exported: Array<String> = []
+        for e in m.entries {
+            exported.push(e.name.copy())
+        }
         names.push(m.name.copy())
         summaries.push(branch("m", m.name, quoted(summaryOf(m.doc))))
-        intros.push(branch("m", m.name, trusted(proseHtml(m.doc))))
+        intros.push(branch("m", m.name, trusted(linked(proseHtml(m.doc), exported))))
         let mut es: Array<String> = []
         for e in m.entries {
             let sig = trusted(highlightSrc(e.sig, lex(e.sig)))
-            es.push("DocEntry { name: " + quoted(e.name) + ", kind: " + quoted(e.kind) + ", sig: " + sig + ", prose: " + trusted(proseHtml(e.doc)) + ", line: " + e.line.toString() + " }")
+            es.push("DocEntry { name: " + quoted(e.name) + ", kind: " + quoted(e.kind) + ", sig: " + sig + ", prose: " + trusted(linked(proseHtml(e.doc), exported)) + ", line: " + e.line.toString() + " }")
         }
         entryLists.push(branch("m", m.name, "[" + joinWith(es, ", ") + "]"))
         testLists.push(branch("m", m.name, quotedList(m.tests)))
@@ -405,6 +436,12 @@ export gen fn apiDocs(stdDir: String) -> String {
     out = out + "/// How many exports a module has.\n"
     out = out + lookup("docCount", "m", "Int64", counts, "0")
     return out
+}
+
+test "a doc link to an export links its entry, and any other reads as code" {
+    assertEq(linked("see [<code>b</code>].", ["b"]), "see <a href=\"#e-b\"><code>b</code></a>.")
+    assertEq(linked("see [<code>b</code>].", []), "see <code>b</code>.")
+    assertEq(linked("[<code>b</code>](x) and [a]", ["b"]), "[<code>b</code>](x) and [a]")
 }
 
 test "a code span becomes a code element and a stray tick stays text" {

@@ -19,5 +19,5 @@ fn parseJson(src: String) -> Result<Json, String>
 ```
 
 Parses a whole JSON document, or returns a `line N, col M: <reason>` error.
-Numbers are validated and stored as raw text; nesting past [`maxDepth`] is
+Numbers are validated and stored as raw text; nesting past `maxDepth` is
 an `Err`.

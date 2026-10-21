@@ -2535,9 +2535,19 @@ fn render_doc_index(modules: &[DocModule]) -> String {
 /// Renders one module page: the header doc, then per export a `##` heading, the
 /// signature and its doc, and a `###` section per documented protocol method.
 fn render_doc_page(name: &str, doc: &vyrn_frontend::ModuleDoc) -> String {
+    // A doc link to an export reaches its `## name` heading, whose anchor
+    // GitHub spells in lower case.
+    let links = |d: &str| {
+        vyrn_frontend::doc_links(d, |n| {
+            doc.exports
+                .iter()
+                .any(|e| e.name == n)
+                .then(|| format!("[`{n}`](#{})", n.to_lowercase()))
+        })
+    };
     let mut blocks: Vec<String> = vec![format!("# {name}")];
     if let Some(h) = &doc.header_doc {
-        blocks.push(h.clone());
+        blocks.push(links(h));
     }
     if doc.exports.is_empty() {
         blocks.push("_No exported declarations._".to_string());
@@ -2548,11 +2558,11 @@ fn render_doc_page(name: &str, doc: &vyrn_frontend::ModuleDoc) -> String {
             format!("```vyrn\n{}\n```", e.signature),
         ];
         if let Some(d) = &e.doc {
-            parts.push(d.clone());
+            parts.push(links(d));
         }
         for (sig, d) in &e.members {
             parts.push(format!("### `{sig}`"));
-            parts.push(d.clone());
+            parts.push(links(d));
         }
         blocks.push(parts.join("\n\n"));
     }
