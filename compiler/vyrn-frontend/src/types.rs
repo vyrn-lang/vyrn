@@ -1323,6 +1323,14 @@ fn assignable_d(from: &Type, to: &Type, width: bool, depth: usize, types: &dyn D
             return &resolve(from, types) == to;
         }
     }
+    // A type argument counts where no field mentions it: a `Handle<Order>` is
+    // no `Handle<Person>`. A field that mentions one already demands this.
+    if let (Type::App(n, aa), Type::App(m, bb)) = (from, to) {
+        let fits = |(a, b): (&Type, &Type)| assignable_d(a, b, false, depth + 1, types);
+        if n == m && !aa.iter().zip(bb).all(fits) {
+            return false;
+        }
+    }
     // Covariant: values are immutable.
     if let (Some(a), Some(b)) = (option_payload(from), option_payload(to)) {
         return assignable_d(a, b, false, depth + 1, types);
