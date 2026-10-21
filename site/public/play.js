@@ -125,11 +125,14 @@ export function mountPlay(root, opts = {}) {
     setLabel(runBtn, "Running", "busy");
     status.textContent = "Running…";
     say(outPane, "…", "dim");
-    runInWorker(srcHost().value, stdin ? stdin.value : "", {
+    const src = srcHost().value;
+    runInWorker(src, stdin ? stdin.value : "", {
       done: (r) => {
         if (r.exitCode === undefined) {
           say(outPane, "This program did not compile.", "dim");
-          showDiags(r.diagnostics);
+          // The diagnostics describe the text that ran; a newer edit gets a check of its own.
+          if (srcHost().value === src) showDiags(r.diagnostics);
+          else recheck();
           finish("Did not compile");
           return;
         }
