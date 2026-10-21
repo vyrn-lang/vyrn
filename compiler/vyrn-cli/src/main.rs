@@ -610,9 +610,16 @@ fn check_cmd(call: &Call) -> Outcome {
 /// A pass's `Err` printed as `error: ..`, exit 1.
 fn failed<T, E: std::fmt::Display>(r: Result<T, E>) -> Result<T, ExitCode> {
     r.map_err(|e| {
-        eprintln!("error: {e}");
+        said(e);
         ExitCode::FAILURE
     })
+}
+
+/// Prints `error: {e}` and returns the line it printed.
+fn said(e: impl std::fmt::Display) -> String {
+    let e = format!("error: {e}\n");
+    eprint!("{e}");
+    e
 }
 
 /// `vyrn emit-gen [file] [--maps]`: prints the source of every generated module
@@ -719,11 +726,15 @@ impl Project {
     /// The project that governs `dir`. The lock sits beside the manifest, else
     /// in `dir`. Errors as [`Project::of`].
     fn at(dir: &Path, flags: GlobalFlags) -> Result<Project, ExitCode> {
-        let fail = |e: String| {
-            eprintln!("error: {e}");
+        Project::read_at(dir, flags).map_err(|e| {
+            said(e);
             ExitCode::from(2)
-        };
-        let manifest = find_manifest(dir).map_err(fail)?;
+        })
+    }
+
+    /// [`Project::at`], with the error unprinted.
+    fn read_at(dir: &Path, flags: GlobalFlags) -> Result<Project, String> {
+        let manifest = find_manifest(dir)?;
         let mut opts = loader::LoadOptions {
             std_root: std_root(),
             ..Default::default()
@@ -739,9 +750,10 @@ impl Project {
             None => dir.join("vyrn.lock"),
         };
         let resolver = remote::RemoteResolver {
-            lock: std::cell::RefCell::new(remote::Lock::load(lock).map_err(fail)?),
+            lock: std::cell::RefCell::new(remote::Lock::load(lock)?),
             project_dir: manifest.as_ref().map(|m| m.dir.clone()),
             offline: flags.offline,
+            seen: None,
         };
         Ok(Project {
             manifest,
@@ -782,23 +794,26 @@ impl Project {
     fn report<T>(
         &self,
         root: &str,
-        (result, warnings): (Result<T, Vec<Diagnostic>>, loader::Warnings),
+        loaded: (Result<T, Vec<Diagnostic>>, loader::Warnings),
     ) -> Result<T, ExitCode> {
+        self.reported(root, loaded).map_err(|_| ExitCode::FAILURE)
+    }
+
+    /// [`Project::report`], with the failure as the text it printed.
+    fn reported<T>(
+        &self,
+        root: &str,
+        (result, warnings): (Result<T, Vec<Diagnostic>>, loader::Warnings),
+    ) -> Result<T, String> {
         // Pins are saved even when the load failed.
-        self.save_lock()?;
+        self.save_lock().map_err(|_| SEE_TERMINAL.to_string())?;
         let root_key = dos_to_slash(root);
-        let t = result.map_err(|diags| {
-            print_diagnostics(&diags, &root_key, "");
-            ExitCode::FAILURE
-        })?;
+        let t = result.map_err(|diags| print_diagnostics(&diags, &root_key, ""))?;
         if !warnings.is_empty() {
-            print_diagnostics(&warnings, &root_key, "warning: ");
+            let text = print_diagnostics(&warnings, &root_key, "warning: ");
             if self.flags.deny_warnings {
-                eprintln!(
-                    "error: {} warning(s) — refused by --deny-warnings",
-                    warnings.len()
-                );
-                return Err(ExitCode::FAILURE);
+                let n = warnings.len();
+                return Err(text + &said(format!("{n} warning(s) — refused by --deny-warnings")));
             }
         }
         Ok(t)
@@ -809,13 +824,19 @@ impl Project {
     /// `for x in c` over a user container inline a projection at the access
     /// site, and side tables are keyed by node address.
     fn checked(&self, root: &str, source: &str) -> Result<Loaded, ExitCode> {
+        self.checked_said(root, source)
+            .map_err(|_| ExitCode::FAILURE)
+    }
+
+    /// [`Project::checked`], with the failure as the text it printed.
+    fn checked_said(&self, root: &str, source: &str) -> Result<Loaded, String> {
         let opts = loader::LoadOptions {
             expansions: Expansions::shared(),
             ..self.opts.clone()
         };
         let key = dos_to_slash(root);
         let loaded = vyrn_lower::load_warned(source, &key, &opts, &self.resolver, Some(&*engine()));
-        self.report(root, loaded)
+        self.reported(root, loaded)
     }
 
     /// Every module `root` reaches, loaded and not checked.
@@ -2850,17 +2871,29 @@ type Loaded = (
 );
 
 /// Prints `file:line:col: message` per diagnostic, the file defaulting to
-/// `root_key`, with its note below. `marker` is `""` for an error and
-/// `"warning: "` for a warning.
-fn print_diagnostics(diags: &[Diagnostic], root_key: &str, marker: &str) {
+/// `root_key`, with its note below, and returns what it printed. `marker` is
+/// `""` for an error and `"warning: "` for a warning.
+fn print_diagnostics(diags: &[Diagnostic], root_key: &str, marker: &str) -> String {
+    use std::fmt::Write;
+    let mut text = String::new();
     for d in diags {
         let file = d.file.as_deref().unwrap_or(root_key);
-        eprintln!("{}:{}:{}: {}{}", file, d.line, d.col, marker, d.message);
+        let _ = writeln!(
+            text,
+            "{}:{}:{}: {}{}",
+            file, d.line, d.col, marker, d.message
+        );
         if let Some(note) = &d.note {
-            eprintln!("  note: {note}");
+            let _ = writeln!(text, "  note: {note}");
         }
     }
+    eprint!("{text}");
+    text
 }
+
+/// What a failure the page cannot be told in full says there: its own lines
+/// went to stderr where they arose.
+const SEE_TERMINAL: &str = "error: the build failed; the terminal shows why\n";
 
 /// `vyrn add <specifier> [--name alias]`: fetches and pins a remote module and
 /// records it in vyrn.json's dependencies.
@@ -4049,7 +4082,12 @@ fn serve_wasm_call(res: &mut wasmrun::Resident, call: ServeCall) -> Result<Serve
 /// running the file's `handle`, by default on port 8080. See [`serve_loop`].
 fn serve_cmd(call: &Call) -> Outcome {
     let (p, path) = call.root()?;
-    serve_loop(call, &p, &path, None, |port, n| match n {
+    let what = call.cmd.name;
+    let build = |workers| {
+        let source = read_source(&path)?;
+        serve_build(&p, &path, &source, workers, what).map_err(|_| ExitCode::FAILURE)
+    };
+    serve_loop(call, None, build, |port, n| match n {
         Some(n) => eprintln!("serving {path} on http://localhost:{port} with {n} workers"),
         None => eprintln!("serving {path} on http://localhost:{port}"),
     })
@@ -4068,143 +4106,71 @@ fn has_served_handle(program: &vyrn_frontend::ast::Program) -> bool {
     })
 }
 
-/// The one serving path of `vyrn serve` and `vyrn dev`: loads `root` with the
-/// [`SERVE_SHIM`], binds `--port`, then answers on it until the process ends.
-///
-/// Without `--workers`, one resident instance answers every request, one at a
-/// time: `_start` runs `main` once and the store stays open, so each request
-/// sees what `main` wrote. With it, [`serve_pool_wasm`] answers, behind
-/// [`refuse_workers_if_stateful`].
-///
-/// `banner` prints once `main` has run, given the bound port and the worker
-/// count. `assets` is `vyrn dev`'s static tree.
-fn serve_loop(
-    call: &Call,
-    p: &Project,
-    root: &str,
-    assets: Option<&DevAssets>,
-    banner: impl Fn(u16, Option<usize>) + Send,
-) -> Outcome {
-    let port = call
-        .parsed("--port", "a number in 0..=65535")?
-        .unwrap_or(8080);
-    let workers = call.parsed::<std::num::NonZeroUsize>("--workers", "a positive number")?;
-    let what = call.cmd.name;
-    // Appended before the load, so it is checked and every program line keeps
-    // its number.
-    let source = format!("{}\n{SERVE_SHIM}", read_source(root)?);
-    let (mut program, _) = p.checked(root, &source)?;
-    serve_rewrite(&mut program);
-    let (program, world) = (&program, &vyrn_lower::analyze(&program));
-    if !has_served_handle(program) {
-        eprintln!("error: `vyrn {what}` needs `fn handle(req: Request) -> Response` in {root}");
-        return Err(ExitCode::FAILURE);
-    }
-    // Bound before `main` runs, so a port clash fails first.
-    let listener = std::net::TcpListener::bind(("127.0.0.1", port)).map_err(|e| {
-        eprintln!("error: cannot bind port {port}: {e}");
-        ExitCode::FAILURE
-    })?;
-    let port = listener.local_addr().map_or(port, |a| a.port());
-    let banner = move |n| {
-        use std::io::Write;
-        let _ = std::io::stdout().flush();
-        banner(port, n);
-    };
-    let argv = vec![root.to_string()];
-    if let Some(n) = workers.map(usize::from) {
-        if let Some(exit) = refuse_workers_if_stateful(program, world) {
-            return Err(exit);
-        }
-        let (tx, rx) = std::sync::mpsc::channel::<std::net::TcpStream>();
-        let rx = std::sync::Mutex::new(rx);
-        let each =
-            |_i: usize, call_handle: &mut dyn FnMut(ServeCall) -> Result<ServeAnswer, String>| loop {
-                // Each idle worker takes the next connection.
-                let stream = rx.lock().unwrap().recv();
-                match stream {
-                    Ok(mut s) => serve_one(&mut s, assets, call_handle),
-                    Err(_) => break, // accept loop gone; drain out
-                }
-            };
-        let listen = move || {
-            banner(Some(n));
-            for stream in listener.incoming() {
-                match stream {
-                    Ok(s) => {
-                        if tx.send(s).is_err() {
-                            break;
-                        }
-                    }
-                    Err(_) => continue,
-                }
-            }
-            Ok(())
-        };
-        failed(serve_pool_wasm(program, world, argv, n, each, listen))?;
-        return Ok(ExitCode::SUCCESS);
-    }
-    let bytes = failed(vyrn_codegen::direct::compile(program, world.clone()))?;
-    let run = wasmrun::Run {
-        argv,
+/// A served root, built: its `main` has run once.
+enum Served {
+    /// The sequential loop's one resident instance.
+    One(wasmrun::Resident),
+    /// The `--workers` module, whose `main` returns 0 at once, and the run
+    /// each worker starts its own instance of it with.
+    Pool(std::sync::Arc<(wasmrun::Compiled, wasmrun::Run)>),
+}
+
+/// The run every instance of a served `root` starts with.
+fn serve_run(root: &str) -> wasmrun::Run {
+    wasmrun::Run {
+        argv: vec![root.to_string()],
         // Read per call, so a trap logs its wording, not a wasm backtrace.
         capture_stderr: true,
         ..Default::default()
-    };
-    let mut res = match failed(wasmrun::start(&bytes, &run, None))? {
-        (res, 0) => res,
-        (mut res, code) => {
-            eprint!("{}", res.drain_err());
-            eprintln!("error: main returned {code}, aborting {what}");
-            return Err(ExitCode::FAILURE);
-        }
-    };
-    eprint!("{}", res.drain_err());
-    banner(None);
-    let mut call_handle = |call| serve_wasm_call(&mut res, call);
-    for stream in listener.incoming() {
-        match stream {
-            Ok(mut s) => serve_one(&mut s, assets, &mut call_handle),
-            Err(_) => continue,
-        }
     }
-    Ok(ExitCode::SUCCESS)
 }
 
-/// The `--workers` pool: one resident instance per worker thread, over one
-/// compile.
+/// Loads `root`'s `source` with the [`SERVE_SHIM`], compiles it and runs its
+/// `main` once. `what` names the command.
 ///
-/// `main` runs once, on a setup instance that is then dropped. The workers run
-/// a copy whose `main` returns 0, so each still initializes its module state
-/// and none repeats `main`'s effects. Sound only because
-/// [`refuse_workers_if_stateful`] proved `handle` touches no module state.
-fn serve_pool_wasm<W, A>(
-    program: &vyrn_frontend::ast::Program,
-    world: &std::sync::Arc<vyrn_lower::World>,
-    argv: Vec<String>,
-    workers: usize,
-    worker: W,
-    accept: A,
-) -> Result<(), String>
-where
-    W: Fn(usize, &mut dyn FnMut(ServeCall) -> Result<ServeAnswer, String>) + Send + Sync,
-    A: FnOnce() -> Result<(), String> + Send,
-{
+/// Without `workers`, `main` runs on the instance that answers every request,
+/// so each request sees what `main` wrote. With it, `main` runs on a setup
+/// instance that is then dropped, and the workers run a copy whose `main`
+/// returns 0: each still initializes its module state and none repeats
+/// `main`'s effects. Sound only because [`refuse_workers_if_stateful`] proved
+/// `handle` touches no module state.
+///
+/// # Errors
+///
+/// The text it printed on stderr: the load's diagnostics or one `error:` line.
+fn serve_build(
+    p: &Project,
+    root: &str,
+    source: &str,
+    workers: bool,
+    what: &str,
+) -> Result<Served, String> {
     use vyrn_frontend::ast::{Block, Expr, Id, Stmt};
-    let run = wasmrun::Run {
-        argv,
-        capture_stderr: true,
-        ..Default::default()
-    };
-    let bytes = vyrn_codegen::direct::compile(program, world.clone())?;
-    let (mut setup, code) = wasmrun::start(&bytes, &run, None)?;
-    eprint!("{}", setup.drain_err());
-    if code != 0 {
-        return Err(format!("main returned {code}, aborting serve"));
+    // Appended before the load, so it is checked and every program line keeps
+    // its number.
+    let (mut program, _) = p.checked_said(root, &format!("{source}\n{SERVE_SHIM}"))?;
+    serve_rewrite(&mut program);
+    let world = vyrn_lower::analyze(&program);
+    if !has_served_handle(&program) {
+        return Err(said(format!(
+            "`vyrn {what}` needs `fn handle(req: Request) -> Response` in {root}"
+        )));
     }
-    drop(setup);
-
-    let mut quiet = program.clone();
+    if workers {
+        if let Some(refusal) = refuse_workers_if_stateful(&program, &world) {
+            return Err(said(refusal));
+        }
+    }
+    let bytes = vyrn_codegen::direct::compile(&program, world).map_err(said)?;
+    let (mut res, code) = wasmrun::start(&bytes, &serve_run(root), None).map_err(said)?;
+    eprint!("{}", res.drain_err());
+    if code != 0 {
+        return Err(said(format!("main returned {code}, aborting {what}")));
+    }
+    if !workers {
+        return Ok(Served::One(res));
+    }
+    let mut quiet = program;
     if let Some(main) = quiet
         .functions
         .iter_mut()
@@ -4217,42 +4183,137 @@ where
     }
     quiet.number();
     let quiet_world = vyrn_lower::analyze(&quiet);
-    let module = wasmrun::compile(&vyrn_codegen::direct::compile(&quiet, quiet_world)?, false)?;
+    let bytes = vyrn_codegen::direct::compile(&quiet, quiet_world).map_err(said)?;
+    let module = wasmrun::compile(&bytes, false).map_err(said)?;
+    Ok(Served::Pool(std::sync::Arc::new((module, serve_run(root)))))
+}
 
+/// The one serving path of `vyrn serve` and `vyrn dev`: binds `--port`, builds
+/// with `build`, then answers on the port until the process ends.
+///
+/// `build` gets whether `--workers` was given. A [`Served::One`] answers every
+/// request, one at a time, so module state needs no locking; a
+/// [`Served::Pool`] answers through [`serve_pool`]. `banner` prints once the
+/// build is up, given the bound port and the worker count.
+///
+/// `dev` is `vyrn dev`'s static tree and watcher: before each request, the
+/// loop starts a newer build if the watcher published one.
+fn serve_loop(
+    call: &Call,
+    dev: Option<&DevAssets>,
+    build: impl FnOnce(bool) -> Result<Served, ExitCode>,
+    banner: impl Fn(u16, Option<usize>),
+) -> Outcome {
+    let port = call
+        .parsed("--port", "a number in 0..=65535")?
+        .unwrap_or(8080);
+    let workers = call.parsed::<std::num::NonZeroUsize>("--workers", "a positive number")?;
+    // Bound before `main` runs, so a port clash fails first.
+    let listener = std::net::TcpListener::bind(("127.0.0.1", port)).map_err(|e| {
+        eprintln!("error: cannot bind port {port}: {e}");
+        ExitCode::FAILURE
+    })?;
+    let port = listener.local_addr().map_or(port, |a| a.port());
+    let served = build(workers.is_some())?;
+    let banner = move |n| {
+        use std::io::Write;
+        let _ = std::io::stdout().flush();
+        banner(port, n);
+    };
+    // The build that answers; a page it serves names it.
+    let mut gen = dev.map_or(0, |d| d.live.first);
+    let mut res = match served {
+        Served::One(res) => res,
+        Served::Pool(pool) => {
+            // `build` made a pool, so `--workers` was given.
+            let n = workers.map_or(1, usize::from);
+            serve_pool(&pool, n, listener, dev, gen, || banner(Some(n)));
+            return Ok(ExitCode::SUCCESS);
+        }
+    };
+    banner(None);
+    for stream in listener.incoming() {
+        let Ok(mut s) = stream else { continue };
+        if let Some(Served::One(next)) = dev.and_then(|d| d.live.newer(&mut gen)) {
+            res = next;
+        }
+        let dev = dev.map(|d| (d, gen));
+        serve_one(&mut s, dev, &mut |call| serve_wasm_call(&mut res, call));
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+/// The `--workers` loop: `n` threads, each with its own instance of `pool`,
+/// take the next connection from the accept loop. Under `dev`, a worker starts
+/// an instance of a newer build before its next request; `gen` names the build
+/// `pool` is.
+fn serve_pool(
+    pool: &(wasmrun::Compiled, wasmrun::Run),
+    n: usize,
+    listener: std::net::TcpListener,
+    dev: Option<&DevAssets>,
+    gen: u64,
+    banner: impl FnOnce(),
+) {
+    let (tx, rx) = std::sync::mpsc::channel::<std::net::TcpStream>();
+    let rx = std::sync::Mutex::new(rx);
     std::thread::scope(|s| {
-        let (worker, module, run) = (&worker, &module, &run);
-        for i in 0..workers {
+        for i in 0..n {
+            let (rx, mut gen) = (&rx, gen);
+            let start = move |(m, run): &(_, _)| match wasmrun::start_on(m, run, None) {
+                Ok((res, 0)) => Some(res),
+                Ok((_, code)) => {
+                    eprintln!("error: worker {i}: main returned {code}");
+                    None
+                }
+                Err(e) => {
+                    eprintln!("error: worker {i}: {e}");
+                    None
+                }
+            };
             std::thread::Builder::new()
                 .stack_size(vyrn_frontend::trap::RUN_STACK_BYTES)
                 .spawn_scoped(s, move || {
-                    let mut res = match wasmrun::start_on(module, run, None) {
-                        Ok((res, 0)) => res,
-                        Ok((_, code)) => {
-                            eprintln!("error: worker {i}: main returned {code}");
-                            return;
+                    let Some(mut res) = start(pool) else { return };
+                    // Each idle worker takes the next connection; with the
+                    // accept loop gone, it drains out.
+                    loop {
+                        let Ok(mut stream) = vyrn_frontend::session::locked(rx).recv() else {
+                            break;
+                        };
+                        if let Some(Served::Pool(next)) = dev.and_then(|d| d.live.newer(&mut gen)) {
+                            res = start(&*next).unwrap_or(res);
                         }
-                        Err(e) => {
-                            eprintln!("error: worker {i}: {e}");
-                            return;
-                        }
-                    };
-                    let mut handler = |call| serve_wasm_call(&mut res, call);
-                    worker(i, &mut handler);
+                        let dev = dev.map(|d| (d, gen));
+                        serve_one(&mut stream, dev, &mut |call| {
+                            serve_wasm_call(&mut res, call)
+                        });
+                    }
                 })
                 .expect("failed to spawn a worker thread");
         }
-        accept()
-    })
+        banner();
+        for stream in listener.incoming() {
+            match stream {
+                Ok(s) => {
+                    if tx.send(s).is_err() {
+                        break;
+                    }
+                }
+                Err(_) => continue,
+            }
+        }
+    });
 }
 
 /// The `--workers` gate: `handle` must reach no module state, transitively.
-/// Prints the refusal with the call path and returns the exit code, or `None`
-/// when workers are sound. Other effects (`print`, file I/O) are allowed: each
-/// output line stays atomic.
+/// Returns the refusal with the call path, or `None` when workers are sound.
+/// Other effects (`print`, file I/O) are allowed: each output line stays
+/// atomic.
 fn refuse_workers_if_stateful(
     program: &vyrn_frontend::ast::Program,
     world: &vyrn_lower::World,
-) -> Option<ExitCode> {
+) -> Option<String> {
     // Calls through stored function values reach every collected source.
     let stored = &world.ownership.record.stored;
     let (chain, global) = vyrn_frontend::checker::module_state_use(program, "handle", stored)?;
@@ -4261,17 +4322,17 @@ fn refuse_workers_if_stateful(
         .map(|f| format!("`{f}`"))
         .collect::<Vec<_>>()
         .join(" -> ");
-    eprintln!(
-        "error: `--workers` needs a module-state-free `handle`: {path} reads or writes \
+    Some(format!(
+        "`--workers` needs a module-state-free `handle`: {path} reads or writes \
          module state `{global}` (shared by definition) — run without `--workers` for \
          the sequential loop"
-    );
-    Some(ExitCode::FAILURE)
+    ))
 }
 
-/// `vyrn dev [--port N] [--workers N]`: builds the manifest's `client` to wasm,
-/// then serves the `server` root's `handle` with static assets in front (see
-/// [`dev_static_path`]). `public` defaults to `public`.
+/// `vyrn dev [--port N] [--workers N]`: builds the manifest's `server` and
+/// `client`, serves the server's `handle` with static assets in front (see
+/// [`dev_static_path`]), and builds again whenever a file the last build read
+/// changes ([`dev_watch`]). `public` defaults to `public`.
 fn dev_cmd(call: &Call) -> Outcome {
     let p = Project::of(None, call.flags)?;
     let Some(manifest) = &p.manifest else {
@@ -4325,19 +4386,37 @@ fn dev_cmd(call: &Call) -> Outcome {
     }
     let wasm_out = dev_dir.join("client.wasm");
     let _ = std::fs::remove_file(&wasm_out); // a stale wasm must not mask a failed build
-    eprintln!("dev: building client {client_rel} -> wasm");
-    let built = build_to(&p, &client_path, Some(&wasm_out.to_string_lossy()), true);
-    if !wasm_out.is_file() {
-        return built;
-    }
 
     let assets = DevAssets {
         public_dir,
         web_dir,
         wasm: wasm_out,
+        live: std::sync::Arc::new(DevLive::new()),
+    };
+    let watch = Watch {
+        dir: project.to_path_buf(),
+        flags: call.flags,
+        workers: false,
+        server: server_path,
+        client: client_path,
+        out: assets.wasm.clone(),
+    };
+    let build = |workers| {
+        let watch = Watch { workers, ..watch };
+        let (built, seen) = watch.build();
+        let first = built.map_err(|_| ExitCode::FAILURE)?;
+        let live = assets.live.clone();
+        std::thread::Builder::new()
+            .stack_size(vyrn_frontend::trap::DEEP_STACK_BYTES)
+            .spawn(move || dev_watch(&watch, &live, seen))
+            .map_err(|e| {
+                eprintln!("error: cannot start the watcher: {e}");
+                ExitCode::FAILURE
+            })?;
+        Ok(first)
     };
     let public_shown = assets.public_dir.display().to_string();
-    serve_loop(call, &p, &server_path, Some(&assets), |port, n| {
+    serve_loop(call, Some(&assets), build, |port, n| {
         let _ = vyrn_frontend::manifest::write_whole(&port_file, port.to_string().as_bytes());
         eprintln!("dev: serving {server_rel} on http://localhost:{port}");
         eprintln!("dev:   /rpc/*         -> server `handle` (rpcHandle + your pages)");
@@ -4352,11 +4431,245 @@ fn dev_cmd(call: &Call) -> Outcome {
     })
 }
 
-/// Static asset roots for `vyrn dev`.
+/// What one `vyrn dev` build reads its project by: the manifest's directory,
+/// the global flags, `--workers`, the two roots, and the client wasm it
+/// writes.
+struct Watch {
+    dir: PathBuf,
+    flags: GlobalFlags,
+    workers: bool,
+    server: String,
+    client: String,
+    out: PathBuf,
+}
+
+impl Watch {
+    /// Builds the project: starts the `server` root and writes the `client`
+    /// root to `out` as wasm. A failed build changes neither the running
+    /// server nor `out`.
+    ///
+    /// Also returns every file the attempt read, each stamped before its read,
+    /// whether or not it succeeded. A build's result depends on these files
+    /// alone, so they are the files to watch.
+    ///
+    /// # Errors
+    ///
+    /// The text the build printed on stderr.
+    fn build(&self) -> (Result<Served, String>, remote::Stamps) {
+        let dir = self.dir.to_string_lossy();
+        let roots = [
+            format!("{dir}/vyrn.json"),
+            format!("{dir}/vyrn.lock"),
+            self.server.clone(),
+            self.client.clone(),
+        ]
+        .map(|f| {
+            let stamp = remote::stamp(&f);
+            (f, stamp)
+        });
+        let mut p = match Project::read_at(&self.dir, self.flags) {
+            Ok(p) => p,
+            Err(e) => return (Err(said(e)), roots.into()),
+        };
+        p.resolver.seen = Some(std::cell::RefCell::new(roots.into()));
+        let read = |root: &str| {
+            std::fs::read_to_string(root).map_err(|e| said(format!("cannot read {root}: {e}")))
+        };
+        let built = read(&self.server)
+            .and_then(|source| serve_build(&p, &self.server, &source, self.workers, "dev"))
+            .and_then(|served| {
+                let (program, world) = p.checked_said(&self.client, &read(&self.client)?)?;
+                let bytes = vyrn_codegen::direct::compile(&program, world).map_err(said)?;
+                place_wasm(&p, &self.client, bytes, &self.out)
+                    .map_err(|()| SEE_TERMINAL.to_string())?;
+                Ok(served)
+            });
+        (
+            built,
+            p.resolver.seen.take().unwrap_or_default().into_inner(),
+        )
+    }
+}
+
+/// How often `vyrn dev` stamps the files the last build read. A change waits
+/// until one poll sees nothing new, so a burst of saves makes one build.
+const DEV_POLL: std::time::Duration = std::time::Duration::from_millis(50);
+
+/// Builds again whenever a file in `seen` changes, and publishes each build
+/// to `live`. It never returns.
+fn dev_watch(watch: &Watch, live: &DevLive, mut seen: remote::Stamps) {
+    loop {
+        settle(&seen);
+        let clock = std::time::Instant::now();
+        let (built, read) = watch.build();
+        match built {
+            Ok(served) => {
+                live.publish(served);
+                eprintln!("dev: rebuilt in {} ms", clock.elapsed().as_millis());
+            }
+            Err(failure) => {
+                live.fail(failure);
+                eprintln!("dev: the build failed; the last good build still serves");
+            }
+        }
+        seen = read;
+    }
+}
+
+/// Returns once a stamp in `seen` has changed on disk and a poll after it saw
+/// no further change.
+fn settle(seen: &remote::Stamps) {
+    let mut last: Vec<remote::Stamp> = seen.values().cloned().collect();
+    let mut moved = false;
+    loop {
+        std::thread::sleep(DEV_POLL);
+        let now: Vec<remote::Stamp> = seen.keys().map(|f| remote::stamp(f)).collect();
+        if now != last {
+            (moved, last) = (true, now);
+        } else if moved {
+            return;
+        }
+    }
+}
+
+/// The path of the event stream a page served by `vyrn dev` listens on. No
+/// byte a page receives says "vyrn" (docs/decisions.md).
+const RELOAD_PATH: &str = "/__reload";
+
+/// What `vyrn dev`'s watcher hands the loops that serve.
+struct DevLive {
+    /// The number of the build the loops start with.
+    first: u64,
+    state: std::sync::Mutex<DevState>,
+}
+
+struct DevState {
+    /// The latest good build's number.
+    gen: u64,
+    /// That build's server, until the sequential loop takes it. A `Pool`
+    /// stays, for every worker.
+    served: Option<Served>,
+    /// What the latest build printed, if it failed after the latest good one.
+    failure: Option<String>,
+    /// The pages' open event streams.
+    pages: Vec<std::net::TcpStream>,
+}
+
+impl DevLive {
+    /// The first build's number is the time in milliseconds, so a page that an
+    /// earlier `vyrn dev` served reloads too.
+    fn new() -> DevLive {
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH);
+        let first = now.map_or(0, |d| d.as_millis() as u64);
+        DevLive {
+            first,
+            state: std::sync::Mutex::new(DevState {
+                gen: first,
+                served: None,
+                failure: None,
+                pages: Vec::new(),
+            }),
+        }
+    }
+
+    /// Publishes a good build and tells every page its number.
+    fn publish(&self, served: Served) {
+        let mut s = vyrn_frontend::session::locked(&self.state);
+        s.gen += 1;
+        s.served = Some(served);
+        s.failure = None;
+        let event = format!("data: {}\n\n", s.gen);
+        tell(&mut s.pages, &event);
+    }
+
+    /// Records a failed build and shows every page what it printed.
+    fn fail(&self, failure: String) {
+        let mut s = vyrn_frontend::session::locked(&self.state);
+        let event = fail_event(&failure);
+        s.failure = Some(failure);
+        tell(&mut s.pages, &event);
+    }
+
+    /// Keeps `stream` as a page's event stream: writes the head, the number of
+    /// the latest good build, and the failure since it, if any.
+    fn listen(&self, stream: &std::net::TcpStream) {
+        use std::io::Write;
+        let Ok(mut page) = stream.try_clone() else {
+            return;
+        };
+        // A page that stops reading must not stall the watcher.
+        let _ = page.set_write_timeout(Some(std::time::Duration::from_secs(1)));
+        let mut s = vyrn_frontend::session::locked(&self.state);
+        let mut head = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-store\r\n\r\ndata: {}\n\n",
+            s.gen
+        );
+        if let Some(failure) = &s.failure {
+            head.push_str(&fail_event(failure));
+        }
+        if page.write_all(head.as_bytes()).is_ok() {
+            s.pages.push(page);
+        }
+    }
+
+    /// The server of a build newer than `gen`, which then names it. The
+    /// sequential loop takes the instance; each worker shares the module.
+    fn newer(&self, gen: &mut u64) -> Option<Served> {
+        let mut s = vyrn_frontend::session::locked(&self.state);
+        if s.gen == *gen {
+            return None;
+        }
+        *gen = s.gen;
+        match s.served.take()? {
+            Served::Pool(m) => {
+                s.served = Some(Served::Pool(m.clone()));
+                Some(Served::Pool(m))
+            }
+            one => Some(one),
+        }
+    }
+}
+
+/// Writes `event` to each page and forgets each page whose write fails.
+fn tell(pages: &mut Vec<std::net::TcpStream>, event: &str) {
+    use std::io::Write;
+    pages.retain_mut(|p| p.write_all(event.as_bytes()).is_ok());
+}
+
+/// `failure` as a server-sent event named `fail`, one `data:` line per line.
+fn fail_event(failure: &str) -> String {
+    let mut event = String::from("event: fail\n");
+    for line in failure.trim_end().split('\n') {
+        event.push_str("data: ");
+        event.push_str(line);
+        event.push('\n');
+    }
+    event + "\n"
+}
+
+/// The script `vyrn dev` appends to each HTML page, `gen` being the build that
+/// served it. The page reloads when its event stream names another build, and
+/// shows a failed build's text until the next good one. A parser moves what
+/// follows `</html>` into the body.
+fn reload_script(gen: u64) -> String {
+    format!(
+        "<script>(()=>{{const s=new EventSource(\"{RELOAD_PATH}\");\
+         s.onmessage=e=>{{if(e.data!==\"{gen}\")location.reload()}};\
+         s.addEventListener(\"fail\",e=>{{let p=document.getElementById(\"__reload\");\
+         if(!p){{p=document.createElement(\"pre\");p.id=\"__reload\";\
+         p.style.cssText=\"position:fixed;left:0;right:0;bottom:0;max-height:50vh;overflow:auto;\
+         margin:0;padding:1em;background:#fee;color:#600;font:13px monospace;\
+         white-space:pre-wrap;z-index:2147483647\";document.body.append(p)}}\
+         p.textContent=e.data}})}})()</script>"
+    )
+}
+
+/// Static asset roots for `vyrn dev`, and its watcher's state.
 struct DevAssets {
     public_dir: PathBuf,
     web_dir: String,
     wasm: PathBuf,
+    live: std::sync::Arc<DevLive>,
 }
 
 /// Resolves a GET path to a static file, or `None` so the request goes to
@@ -4511,11 +4824,13 @@ const MAX_BODY: usize = 8 * 1024 * 1024;
 /// Handles one connection: parse, gate, then a static asset or `handle`, then
 /// close. A trap is logged and answered 500, and the server keeps running.
 ///
-/// `assets` is `vyrn dev`'s: a GET or HEAD that names one is answered off the
-/// disk. `None` is `vyrn serve`.
+/// `dev` is `vyrn dev`'s, with the number of the build that answers: a GET or
+/// HEAD that names a static asset is answered off the disk, a GET of
+/// [`RELOAD_PATH`] becomes a page's event stream, and each HTML answer carries
+/// the [`reload_script`]. `None` is `vyrn serve`.
 fn serve_one(
     stream: &mut std::net::TcpStream,
-    assets: Option<&DevAssets>,
+    dev: Option<(&DevAssets, u64)>,
     call_handle: &mut dyn FnMut(ServeCall) -> Result<ServeAnswer, String>,
 ) {
     let req = match parse_request(stream) {
@@ -4547,12 +4862,20 @@ fn serve_one(
         return;
     }
     // GET and HEAD only, so nothing shadows a POST.
-    if let Some(assets) = assets {
+    if let Some((assets, gen)) = dev {
+        if req.method == "GET" && req.path == RELOAD_PATH {
+            eprintln!("GET {RELOAD_PATH} -> 200 (events)");
+            assets.live.listen(stream);
+            return;
+        }
         if req.method == "GET" || req.method == "HEAD" {
             if let Some(file) = dev_static_path(&req.path, assets) {
                 match std::fs::read(&file) {
-                    Ok(bytes) => {
+                    Ok(mut bytes) => {
                         eprintln!("{} {} -> 200 (static)", req.method, req.path);
+                        if dev_content_type(&file).starts_with("text/html") {
+                            bytes.extend_from_slice(reload_script(gen).as_bytes());
+                        }
                         if req.method == "HEAD" {
                             // RFC 9110 section 9.3.2: GET's headers, true
                             // Content-Length included, and no body.
@@ -4577,8 +4900,18 @@ fn serve_one(
             eprintln!("{method} {path} -> {} (stream)", head.status);
             pump_stream(stream, &head, call_handle);
         }
-        Ok(ServeAnswer::Buffered(resp)) => {
+        Ok(ServeAnswer::Buffered(mut resp)) => {
             eprintln!("{method} {path} -> {}", resp.status);
+            if let Some((_, gen)) = dev.filter(|_| resp.content_type.starts_with("text/html")) {
+                resp.body.push_str(&reload_script(gen));
+                // A validator of the page without the script would let the
+                // browser show a kept copy that names an older build, which
+                // reloads forever.
+                let validator = |n: &str| {
+                    n.eq_ignore_ascii_case("etag") || n.eq_ignore_ascii_case("last-modified")
+                };
+                resp.headers.retain(|(n, _)| !validator(n));
+            }
             write_response_vary(
                 stream,
                 resp.status,
@@ -5450,16 +5783,7 @@ fn build_to(p: &Project, path: &str, out: Option<&str>, wasm: bool) -> Outcome {
     // same bytes.
     if wasm {
         let bytes = failed(vyrn_codegen::direct::compile(&program, world))?;
-        let stage = vyrn_frontend::manifest::stage_beside(Path::new(&out_path));
-        let built = match std::fs::write(&stage, bytes) {
-            Err(e) => {
-                eprintln!("error: cannot write {out_path}: {e}");
-                Err(())
-            }
-            Ok(()) if p.flags.wasm_opt => wasm_opt(&source_dir(path), &stage),
-            Ok(()) => Ok(()),
-        };
-        place_built(&stage, Path::new(&out_path), built).map_err(|()| ExitCode::FAILURE)?;
+        place_wasm(p, path, bytes, Path::new(&out_path)).map_err(|()| ExitCode::FAILURE)?;
     } else {
         let target = native_target.unwrap_or(DEFAULT_NATIVE_TARGET);
         build_wasm2c(path, &program, world, &out_path, target, p.flags.wasm_opt)
@@ -5467,6 +5791,21 @@ fn build_to(p: &Project, path: &str, out: Option<&str>, wasm: bool) -> Outcome {
     }
     println!("wrote {out_path}");
     Ok(ExitCode::SUCCESS)
+}
+
+/// Writes the wasm `bytes` built from `path` to `out` through a stage beside
+/// it, after `wasm-opt` under `--wasm-opt`. Prints its own error.
+fn place_wasm(p: &Project, path: &str, bytes: Vec<u8>, out: &Path) -> Result<(), ()> {
+    let stage = vyrn_frontend::manifest::stage_beside(out);
+    let built = match std::fs::write(&stage, bytes) {
+        Err(e) => {
+            eprintln!("error: cannot write {}: {e}", out.display());
+            Err(())
+        }
+        Ok(()) if p.flags.wasm_opt => wasm_opt(&source_dir(path), &stage),
+        Ok(()) => Ok(()),
+    };
+    place_built(&stage, out, built)
 }
 
 /// Renames a finished `stage` over `out`, so a reader of `out` sees the old
@@ -6060,6 +6399,7 @@ another bench   # trailing reason
             public_dir: dir.join("public"),
             web_dir: dir.to_string_lossy().into_owned(),
             wasm: dir.join("client.wasm"),
+            live: std::sync::Arc::new(DevLive::new()),
         };
         let go = |p: &str| dev_static_path(p, &assets);
         assert_eq!(go("/"), Some(dir.join("public").join("index.html")));
