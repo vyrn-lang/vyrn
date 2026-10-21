@@ -82,6 +82,7 @@ pub fn web_root() -> Option<String> {
 
 /// The project manifest, `vyrn.json`. Every field is optional; unknown keys are
 /// ignored.
+#[derive(Clone)]
 pub struct Manifest {
     /// Directory the manifest lives in (slash-separated), as walked up to.
     pub dir: String,
@@ -105,6 +106,12 @@ pub struct Manifest {
     pub artifacts: Option<crate::artifacts::ArtifactMap>,
     /// The `nativeTarget` key as written, so a diagnostic can quote it.
     pub native_target: Option<String>,
+    /// The `stylesheets` key: globs, relative to `dir`, naming the app's own
+    /// CSS, which the editor's class hover reads. Empty when absent.
+    pub stylesheets: Vec<String>,
+    /// The `inputs` key: globs, relative to `dir`, naming the generator inputs
+    /// the editor sends the language server. Empty when absent.
+    pub inputs: Vec<String>,
 }
 
 /// Returns the nearest directory at or above `start` that holds `vyrn.json`.
@@ -179,7 +186,29 @@ fn from_doc(doc: Json, slash_dir: String) -> Result<Manifest, String> {
             )),
         }
     };
+    // A present list key that is not an array of strings is refused, as a map
+    // key is.
+    let str_list = |k: &str| -> Result<Vec<String>, String> {
+        match doc.get(k) {
+            None => Ok(Vec::new()),
+            Some(Json::Arr(items)) => (items.iter())
+                .map(|v| match v {
+                    Json::Str(s) => Ok(s.clone()),
+                    other => Err(format!(
+                        "`{k}` must be an array of glob strings, found {} in it",
+                        json_kind(other)
+                    )),
+                })
+                .collect(),
+            Some(other) => Err(format!(
+                "`{k}` must be an array of glob strings, found {}",
+                json_kind(other)
+            )),
+        }
+    };
     let dependencies = str_map("dependencies")?;
+    let stylesheets = str_list("stylesheets")?;
+    let inputs = str_list("inputs")?;
     // An unknown tool name is refused where it is written: a typo that declared
     // nothing would leave the build on PATH, a silent fallback.
     let toolchain = str_map("toolchain")?;
@@ -206,6 +235,8 @@ fn from_doc(doc: Json, slash_dir: String) -> Result<Manifest, String> {
     Ok(Manifest {
         main: str_key("main"),
         native_target: str_key("nativeTarget"),
+        stylesheets,
+        inputs,
         dependencies,
         toolchain,
         audience,
@@ -703,6 +734,31 @@ mod tests {
                 .err()
                 .expect("a tool nothing reads is not a manifest this reads");
             assert!(e.contains(&format!("unknown tool `{gone}`")), "{e}");
+        }
+    }
+
+    /// A glob list reads in order; a present list that is not one is refused.
+    #[test]
+    fn a_stylesheets_list_reads_in_order_and_a_mistyped_one_stops_the_read() {
+        let parse = |src: &str| crate::schema::parse_json(src).unwrap();
+        let m = from_doc(
+            parse(r#"{"stylesheets":["b.css","**/a.css"]}"#),
+            String::new(),
+        );
+        assert_eq!(m.unwrap().stylesheets, ["b.css", "**/a.css"]);
+        let m = from_doc(parse(r#"{"inputs":["**/*.tbl"]}"#), String::new());
+        assert_eq!(m.unwrap().inputs, ["**/*.tbl"]);
+        let none = from_doc(parse(r#"{"name":"x"}"#), String::new());
+        assert!(none.unwrap().stylesheets.is_empty());
+        for doc in [
+            r#"{"stylesheets":"a.css"}"#,
+            r#"{"stylesheets":["a.css",1]}"#,
+        ] {
+            let e = from_doc(parse(doc), String::new()).err().expect(doc);
+            assert!(
+                e.contains("`stylesheets` must be an array of glob strings"),
+                "{e}"
+            );
         }
     }
 

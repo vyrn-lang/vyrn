@@ -41,7 +41,6 @@ pub mod toolpin;
 pub mod trap;
 pub mod types;
 pub mod validate;
-pub mod vyx;
 
 pub use symbols::{
     analyze, analyze_judged, analyze_linked, at_module_scope, class_completions, class_token_hover,
@@ -57,9 +56,8 @@ pub use symbols::type_to_string;
 // Contract knowledge lives here; the LSP and the CLI are adapters over it.
 pub use contracts::{
     contract_completions, contract_fixes, contract_member_hover, discovered_roles, is_projection,
-    load_contract, load_role_contract, role_for, roles_from_manifest, synthesized_members,
-    ContractCompletion, ContractFix, ContractMemberView, ContractShape, ContractView, Role,
-    RoleScope,
+    load_contract, load_role_contract, role_for, roles_from_manifest, ContractCompletion,
+    ContractFix, ContractMemberView, ContractShape, ContractView, Role, RoleScope,
 };
 
 // `fmt` names both the module and the function; they live in different namespaces.

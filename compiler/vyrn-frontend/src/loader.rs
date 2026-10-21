@@ -1652,23 +1652,7 @@ fn run_generator(
             None => return Err(err(rule!(GenImportConstArgs, name))),
         }
     }
-    let arg_repr = consts
-        .iter()
-        .map(|c| c.to_string())
-        .collect::<Vec<_>>()
-        .join(", ");
-
-    // A generator imported by a generated module resolves its path arguments
-    // against the real importing file, not the banner key, as `resolve_spec` does.
-    let path_importer = generated_importer(importer).unwrap_or(importer);
-    let importer_dir = dir_of(path_importer).to_string();
-    let join_dir = |s: &str| -> String {
-        normalize(&if importer_dir.is_empty() {
-            s.to_string()
-        } else {
-            format!("{importer_dir}/{s}")
-        })
-    };
+    let arg_repr = args_repr(&consts);
 
     // Identity: the generator name, each string path argument rebased
     // onto the importer's directory, and every other argument verbatim. Two
@@ -1679,7 +1663,7 @@ fn run_generator(
     for c in &consts {
         match c {
             crate::consteval::ConstVal::Str(s) => {
-                ident.push_str(&join_dir(s));
+                ident.push_str(&join_importer_dir(importer, s));
             }
             other => ident.push_str(&other.to_string()),
         }
@@ -1721,6 +1705,193 @@ fn run_generator(
             got = consts.len()
         )));
     }
+    let source = run_resolved(
+        importer,
+        name,
+        &consts,
+        &gen_mod_key,
+        Site { line, root_key },
+        (true, false),
+        opts,
+        resolver,
+        engine,
+        read,
+    )?;
+    Ok((gen_key, Some(source)))
+}
+
+/// The constants of a generator call as its banner spells them.
+fn args_repr(consts: &[crate::consteval::ConstVal]) -> String {
+    consts
+        .iter()
+        .map(|c| c.to_string())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// `s` joined to the directory of the file that wrote a generator call. A
+/// generator imported by a generated module resolves its path arguments against
+/// the real importing file, not the banner key, as `resolve_spec` does.
+fn join_importer_dir(importer: &str, s: &str) -> String {
+    let dir = dir_of(generated_importer(importer).unwrap_or(importer));
+    normalize(&if dir.is_empty() {
+        s.to_string()
+    } else {
+        format!("{dir}/{s}")
+    })
+}
+
+/// Runs the exported `gen fn` whose name starts with `prefix` that the editor
+/// companion of the module `spec` names, or of a module it imports, declares,
+/// as an import `from <name>(args)` written in `importer` would, and returns
+/// its output unparsed. `None` when no such function takes `args.len()`
+/// parameters.
+///
+/// A module's editor companion is `<stem>.editor.vyrn` beside it; no program
+/// links it, so its functions cost a program nothing. The search takes the
+/// module's companion first, then those of the modules it imports, depth first
+/// in import order. A name is program-wide, so the prefix lets two companions
+/// carry their own slug (`vyrnCompleteVyx`) and link into one program, as
+/// `symbolMap` does. With `cache` false the generation cache is neither read
+/// nor written: a call per cursor position would fill it with entries nothing
+/// reads again. The checked generator program is reused while its sources are
+/// unchanged.
+#[allow(clippy::too_many_arguments)]
+pub fn call_generator(
+    importer: &str,
+    spec: &str,
+    prefix: &str,
+    args: &[crate::consteval::ConstVal],
+    cache: bool,
+    opts: &LoadOptions,
+    resolver: &dyn ModuleResolver,
+    engine: Option<&crate::gen::GenEngine>,
+) -> Option<Result<String, Vec<Diagnostic>>> {
+    let key = resolve_spec(spec, importer, opts).ok()?;
+    let memo_key = (key.clone(), prefix.to_string(), args.len());
+    let held = GEN_EXPORTS.with(|m| m.borrow().get(&memo_key).cloned());
+    let held = held.filter(|(texts, _)| texts.iter().all(|(p, t)| resolver.read(p).ok() == *t));
+    let (module, name) = match held {
+        Some((_, found)) => found?,
+        None => {
+            let (mut seen, mut texts) = (HashSet::new(), Vec::new());
+            let found = gen_export(
+                &key,
+                prefix,
+                args.len(),
+                opts,
+                resolver,
+                &mut seen,
+                &mut texts,
+            );
+            GEN_EXPORTS.with(|m| m.borrow_mut().insert(memo_key, (texts, found.clone())));
+            found?
+        }
+    };
+    let site = Site {
+        line: 0,
+        root_key: importer,
+    };
+    let mut read = HashMap::new();
+    Some(run_resolved(
+        importer,
+        &name,
+        args,
+        &module,
+        site,
+        (cache, true),
+        opts,
+        resolver,
+        engine,
+        &mut read,
+    ))
+}
+
+/// What [`gen_export`] answered: the companion and the function, or none, and
+/// every text the search read, `None` for a file it could not read.
+type GenExport = (Vec<(String, Option<String>)>, Option<(String, String)>);
+
+thread_local! {
+    /// [`gen_export`]'s answers by module, prefix and arity, for the editor's
+    /// per-keystroke calls; an answer stands while every text it read reads the
+    /// same.
+    static GEN_EXPORTS: std::cell::RefCell<HashMap<(String, String, usize), GenExport>> =
+        std::cell::RefCell::new(HashMap::new());
+}
+
+/// The companion and name of the first exported `gen fn` of `arity`
+/// parameters whose name starts with `prefix`, beside `key` or a module it
+/// imports; see [`call_generator`]. `seen` holds the modules already searched,
+/// and `texts` receives each file the search read.
+fn gen_export(
+    key: &str,
+    prefix: &str,
+    arity: usize,
+    opts: &LoadOptions,
+    resolver: &dyn ModuleResolver,
+    seen: &mut HashSet<String>,
+    texts: &mut Vec<(String, Option<String>)>,
+) -> Option<(String, String)> {
+    if !seen.insert(key.to_string()) {
+        return None;
+    }
+    let mut parse = |k: &str| {
+        let text = resolver.read(k).ok();
+        texts.push((k.to_string(), text.clone()));
+        let tokens = crate::lexer::lex(&text?).ok()?;
+        Some(crate::parser::parse_accum(tokens).0)
+    };
+    let companion = format!("{}.editor.vyrn", key.strip_suffix(".vyrn").unwrap_or(key));
+    let own = parse(&companion).and_then(|p| {
+        p.functions.into_iter().find(|f| {
+            f.is_gen && f.exported && f.name.starts_with(prefix) && f.params.len() == arity
+        })
+    });
+    if let Some(f) = own {
+        return Some((companion, f.name));
+    }
+    let program = parse(key)?;
+    program.imports.iter().find_map(|imp| match &imp.source {
+        ImportSource::Path(spec) => {
+            let next = resolve_spec(spec, key, opts).ok()?;
+            gen_export(&next, prefix, arity, opts, resolver, seen, texts)
+        }
+        ImportSource::Generator { .. } => None,
+    })
+}
+
+/// Where a generator call stands, for its diagnostics.
+#[derive(Clone, Copy)]
+struct Site<'a> {
+    line: usize,
+    root_key: &'a str,
+}
+
+/// Runs `name` of the generator module `gen_mod_key` on `consts`, as a call
+/// written in `importer`: the cache, the sandbox's input roots, the load and
+/// check of the generator's program, and the run. Returns the output text.
+/// `(cache, memo)`: with `cache` false the output is neither looked up nor
+/// stored; with `memo` a checked generator program is reused while its sources
+/// are unchanged, which the editor's and the tools' calls ask for.
+#[allow(clippy::too_many_arguments)]
+fn run_resolved(
+    importer: &str,
+    name: &str,
+    consts: &[crate::consteval::ConstVal],
+    gen_mod_key: &str,
+    site: Site<'_>,
+    (cache, memo): (bool, bool),
+    opts: &LoadOptions,
+    resolver: &dyn ModuleResolver,
+    engine: Option<&crate::gen::GenEngine>,
+    read: &mut HashMap<String, Option<String>>,
+) -> Result<String, Vec<Diagnostic>> {
+    let Site { line, root_key } = site;
+    let err = |rule: Rule| -> Vec<Diagnostic> { vec![load_error(importer, root_key, line, rule)] };
+    let gen_mod_key = gen_mod_key.to_string();
+    let arg_repr = args_repr(consts);
+    let importer_dir = dir_of(generated_importer(importer).unwrap_or(importer)).to_string();
+    let join_dir = |s: &str| join_importer_dir(importer, s);
 
     // Each constant string path argument is an allowed input root; a path with
     // no extension also admits its `.vyrn` file. A path that names a manifest
@@ -1729,7 +1900,7 @@ fn run_generator(
     // resolved key joins the cache key, so re-pinning the dependency misses.
     let mut allowed: Vec<String> = Vec::new();
     let mut aliased: Vec<(String, String)> = Vec::new();
-    for c in &consts {
+    for c in consts {
         if let crate::consteval::ConstVal::Str(s) = c {
             allowed.push(join_dir(s));
             if !s.ends_with(".vyrn") && !s.ends_with(".json") {
@@ -1753,7 +1924,7 @@ fn run_generator(
         &arg_repr,
         &allowed,
     );
-    let no_cache = std::env::var("VYRN_NO_GEN_CACHE").is_ok();
+    let no_cache = !cache || std::env::var("VYRN_NO_GEN_CACHE").is_ok();
 
     // Cache hit: the entry is one this compiler wrote for this key, it records
     // the generator's own module, and every recorded input still hashes the
@@ -1789,16 +1960,13 @@ fn run_generator(
                 }
                 m.insert(sources_hash, entry);
             });
-            return Ok((gen_key, Some(output)));
+            return Ok(output);
         }
     }
 
     // Cache miss: load and check the generator as a runnable program. Skipping
     // this on a hit is sound: an entry is written only after a run that passed
     // this check, and an edit to the generator's sources misses.
-    let gen_source = resolver
-        .read(&gen_mod_key)
-        .map_err(|e| err(rule!(GenModuleReread, module = gen_mod_key, why = e)))?;
     // The generator's load, its check and every load its run makes nest one
     // deeper than this load.
     let mut inner = opts.clone();
@@ -1808,64 +1976,20 @@ fn run_generator(
     if opts.expansions.is_shared() {
         inner.expansions = crate::project::Expansions::shared();
     }
-    let (loaded, _, _, gen_graph, _) =
-        load_with_origins(&gen_source, &gen_mod_key, &inner, resolver, engine);
-    let mut gen_program = loaded?;
-    // A generator is a runnable program compiled to wasm, so it gets
-    // the check and synthesis a root gets.
-    let (gdiags, _, _, _) = crate::check_and_synthesize(&mut gen_program, engine, &inner.nest);
-    if !gdiags.is_empty() {
-        return Err(gdiags);
-    }
-
-    // Contract provenance. A generator is re-loaded as its own root,
-    // so a contract declared in it would carry `module: None` and its diagnostics
-    // would not say which library demanded it. Restamp each contract with its
-    // module's import specifier (`std/ui`, `./contract`), which a reader can
-    // type. Only the generator's private copy changes, after its check.
-    let std_root = opts.std_root.as_deref();
-    let gen_dir = dir_of(&gen_mod_key).to_string();
-    for c in &mut gen_program.contracts {
-        let key = c.module.clone().unwrap_or_else(|| gen_mod_key.clone());
-        c.module = Some(import_specifier(&gen_dir, &key, std_root));
-    }
-
-    // The generator's transitive sources, hashed: the cache entry records them
-    // as inputs, and the wasm engine keys its compiled artifact on them.
-    //
-    // A generated module's banner key has no readable file. A closure holding
-    // one has no fingerprint: no cache entry, since an unverifiable input is
-    // worse than a miss, and no artifact key.
-    let mut gen_sources: Vec<(String, String)> = Vec::new();
-    let mut describable = true;
-    for (key, _, _) in &gen_graph {
-        match current_input_hash(resolver, key, read) {
-            Some(h) => gen_sources.push((key.clone(), h)),
-            None => {
-                describable = false;
-                break;
-            }
-        }
-    }
-    // The contract restamping above resolves specifiers against `gen_mod_key`
-    // and the std root, so both join the fingerprint.
-    let fingerprint = describable.then(|| {
-        let mut fp = format!("{gen_mod_key}\u{0}{}\u{0}", std_root.unwrap_or(""));
-        for (k, h) in &gen_sources {
-            fp.push_str(k);
-            fp.push('\u{0}');
-            fp.push_str(h);
-            fp.push('\u{0}');
-        }
-        fp
-    });
+    let checked =
+        checked_generator(&gen_mod_key, memo, &inner, resolver, engine, read).map_err(|e| {
+            e.unwrap_or_else(|why| err(rule!(GenModuleReread, module = gen_mod_key, why)))
+        })?;
+    let gen_program = &checked.program;
+    let (gen_sources, describable) = (checked.sources.clone(), checked.describable);
+    let fingerprint = checked.fingerprint.clone();
 
     // Run the generator in the mediated sandbox. The engine judges its
     // program with the lowering's judgments first.
     let out = crate::gen::generate(
         &gen_program,
         name,
-        &consts,
+        consts,
         crate::gen::GenInputs {
             engine,
             resolver,
@@ -1926,7 +2050,127 @@ fn run_generator(
             );
         }
     }
-    Ok((gen_key, Some(out.source)))
+    Ok(out.source)
+}
+
+/// A generator module loaded and checked as a runnable program, with its
+/// transitive sources and the fingerprint the engine keys its artifact on.
+struct CheckedGen {
+    program: Program,
+    /// Each source of the generator's closure with its content hash.
+    sources: Vec<(String, String)>,
+    /// Whether every source has a readable file. A generated module's banner key
+    /// has none, and a closure holding one has no fingerprint: no cache entry,
+    /// since an unverifiable input is worse than a miss, and no artifact key.
+    describable: bool,
+    fingerprint: Option<String>,
+}
+
+thread_local! {
+    /// Checked generator programs for [`call_generator`], by module and load
+    /// context; an entry stands while every source hashes the same.
+    static CHECKED_GENS: std::cell::RefCell<HashMap<String, Rc<CheckedGen>>> =
+        std::cell::RefCell::new(HashMap::new());
+}
+
+/// Loads and checks the generator module `gen_mod_key` under `inner`. With
+/// `memo`, a program checked before under the same context is reused while its
+/// sources are unchanged. The error is the loader's diagnostics, or the reason
+/// the module could not be read again.
+fn checked_generator(
+    gen_mod_key: &str,
+    memo: bool,
+    inner: &LoadOptions,
+    resolver: &dyn ModuleResolver,
+    engine: Option<&crate::gen::GenEngine>,
+    read: &mut HashMap<String, Option<String>>,
+) -> Result<Rc<CheckedGen>, Result<Vec<Diagnostic>, String>> {
+    let std_root = inner.std_root.as_deref();
+    let memo_key = memo.then(|| {
+        let mut aliases: Vec<_> = inner.aliases.iter().collect();
+        aliases.sort();
+        let n = &inner.nest;
+        format!(
+            "{gen_mod_key}\u{0}{std_root:?}\u{0}{}\u{0}{:?}\u{0}{aliases:?}",
+            n.depth, n.deriving
+        )
+    });
+    if let Some(k) = &memo_key {
+        let hit = CHECKED_GENS.with(|m| m.borrow().get(k).cloned());
+        let mut fresh = |c: &CheckedGen| {
+            (c.sources.iter())
+                .all(|(p, h)| current_input_hash(resolver, p, read).as_ref() == Some(h))
+        };
+        if let Some(c) = hit.filter(|c| c.describable && fresh(c)) {
+            return Ok(c);
+        }
+    }
+    let gen_source = resolver.read(gen_mod_key).map_err(Err)?;
+    let (loaded, _, _, gen_graph, _) =
+        load_with_origins(&gen_source, gen_mod_key, inner, resolver, engine);
+    let mut gen_program = loaded.map_err(Ok)?;
+    // A generator is a runnable program compiled to wasm, so it gets
+    // the check and synthesis a root gets.
+    let (gdiags, _, _, _) = crate::check_and_synthesize(&mut gen_program, engine, &inner.nest);
+    if !gdiags.is_empty() {
+        return Err(Ok(gdiags));
+    }
+
+    // Contract provenance. A generator is re-loaded as its own root,
+    // so a contract declared in it would carry `module: None` and its diagnostics
+    // would not say which library demanded it. Restamp each contract with its
+    // module's import specifier (`std/ui`, `./contract`), which a reader can
+    // type. Only the generator's private copy changes, after its check.
+    let gen_dir = dir_of(gen_mod_key).to_string();
+    for c in &mut gen_program.contracts {
+        let key = c.module.clone().unwrap_or_else(|| gen_mod_key.to_string());
+        c.module = Some(import_specifier(&gen_dir, &key, std_root));
+    }
+
+    // The generator's transitive sources, hashed: the cache entry records them
+    // as inputs, and the wasm engine keys its compiled artifact on them.
+    let mut gen_sources: Vec<(String, String)> = Vec::new();
+    let mut describable = true;
+    for (key, _, _) in &gen_graph {
+        match current_input_hash(resolver, key, read) {
+            Some(h) => gen_sources.push((key.clone(), h)),
+            None => {
+                describable = false;
+                break;
+            }
+        }
+    }
+    // The contract restamping above resolves specifiers against `gen_mod_key`
+    // and the std root, so both join the fingerprint.
+    let fingerprint = describable.then(|| {
+        let mut fp = format!("{gen_mod_key}\u{0}{}\u{0}", std_root.unwrap_or(""));
+        for (k, h) in &gen_sources {
+            fp.push_str(k);
+            fp.push('\u{0}');
+            fp.push_str(h);
+            fp.push('\u{0}');
+        }
+        fp
+    });
+
+    let checked = Rc::new(CheckedGen {
+        program: gen_program,
+        sources: gen_sources,
+        describable,
+        fingerprint,
+    });
+    if let Some(k) = memo_key {
+        CHECKED_GENS.with(|m| {
+            let mut m = m.borrow_mut();
+            // ponytail: an edited generator leaves its old entry behind. Cleared
+            // at 64 entries, a few per generator module.
+            if m.len() > 64 {
+                m.clear();
+            }
+            m.insert(k, checked.clone());
+        });
+    }
+    Ok(checked)
 }
 
 /// The cache lookup key: `sha256(compiler identity ++ generator module ++ name

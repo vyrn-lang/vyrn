@@ -1,0 +1,24 @@
+# std/tw.editor
+
+Editor support for the theme modules `std/tw` writes.
+
+No program links this module, so a program that uses `std/tw` pays
+nothing for it. A tool finds it beside `std/tw` by its name.
+
+## vyrnClassCallTw
+
+```vyrn
+fn vyrnClassCallTw() -> String
+```
+
+The function of a theme module whose string argument is a class list, so a
+tool completes and hovers the theme's classes there.
+
+## vyrnStylesheetTw
+
+```vyrn
+fn vyrnStylesheetTw() -> String
+```
+
+The zero-parameter function of a theme module that returns its stylesheet,
+so a class hover shows the rule the theme emits.

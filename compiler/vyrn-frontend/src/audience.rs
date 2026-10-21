@@ -345,6 +345,261 @@ pub fn generator_input(importer: &str, arg: &str) -> Option<String> {
     Some(join_normalized(&dir, arg))
 }
 
+/// One generator import's claim on the files its first argument names. The
+/// import graph is the only registry of generator inputs: a file is an input
+/// because a claim covers it, whatever its extension.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Claim {
+    /// The module that wrote the import, as the caller spelled it.
+    pub importer: String,
+    /// The import's 1-based line in `importer`.
+    pub line: usize,
+    /// The specifier the generator was imported from; `None` for a local `gen fn`.
+    pub module: Option<String>,
+    /// The generator's name as its module exports it.
+    pub generator: String,
+    /// The first argument as the import spells it.
+    pub arg: String,
+    /// The first argument resolved against `importer`: the file
+    /// [`generator_input`] names, else a directory or a module path with the
+    /// `.vyrn` that `resolve_spec` appends stripped.
+    pub target: String,
+}
+
+impl Claim {
+    /// Whether the claim covers `file`: the target, a file under it, or the
+    /// module the target names.
+    pub fn covers(&self, file: &str) -> bool {
+        let key = crate::origin::OriginMaps::norm_path_key;
+        let (t, f) = (key(&self.target), key(file));
+        f == t || f == format!("{t}.vyrn") || f.starts_with(&format!("{t}/"))
+    }
+
+    /// Spells a file the claim covers as the import would: [`Self::arg`], then
+    /// the file's path under the target. `None` for a file it does not cover.
+    pub fn spell(&self, file: &str) -> Option<String> {
+        let key = crate::origin::OriginMaps::norm_path_key;
+        let (t, f) = (key(&self.target), key(file));
+        if f == t {
+            return Some(self.arg.clone());
+        }
+        let under = f.strip_prefix(&format!("{t}/"))?;
+        let rest = file.get(file.len() - under.len()..)?;
+        Some(format!("{}/{rest}", self.arg))
+    }
+}
+
+/// Returns the claims of `program`'s generator imports, in source order. An
+/// import whose first argument is not a string literal, or does not resolve,
+/// claims nothing.
+pub fn claims(
+    importer: &str,
+    program: &crate::ast::Program,
+    opts: &crate::loader::LoadOptions,
+) -> Vec<Claim> {
+    use crate::ast::{Expr, ImportSource};
+    let module_of = |name: &str| {
+        program.imports.iter().find_map(|imp| match &imp.source {
+            ImportSource::Path(spec) => (imp.names.iter())
+                .find(|n| n.local() == name)
+                .map(|n| (spec.clone(), n.original.clone())),
+            _ => None,
+        })
+    };
+    let mut out = Vec::new();
+    for imp in &program.imports {
+        let ImportSource::Generator { name, args, .. } = &imp.source else {
+            continue;
+        };
+        let Some(Expr::Str(arg, _)) = args.first() else {
+            continue;
+        };
+        let target = match generator_input(importer, arg) {
+            Some(file) => file,
+            None => match crate::loader::resolve_spec(arg, importer, opts) {
+                Ok(r) => r.strip_suffix(".vyrn").unwrap_or(&r).to_string(),
+                Err(_) => continue,
+            },
+        };
+        let (module, generator) = match module_of(name) {
+            Some((spec, original)) => (Some(spec), original),
+            None => (None, name.clone()),
+        };
+        out.push(Claim {
+            importer: importer.to_string(),
+            line: imp.line,
+            module,
+            generator,
+            arg: arg.clone(),
+            target,
+        });
+    }
+    out
+}
+
+/// Returns each claim of `program` whose generator module's editor companion
+/// exports a `gen fn` named `prefix` plus a slug, with its answer
+/// ([`crate::loader::call_generator`]). A claim whose export fails is left out.
+pub fn companion_answers(
+    importer: &str,
+    program: &crate::ast::Program,
+    prefix: &str,
+    opts: &crate::loader::LoadOptions,
+    resolver: &dyn crate::loader::ModuleResolver,
+    engine: Option<&crate::gen::GenEngine>,
+) -> Vec<(Claim, String)> {
+    (claims(importer, program, opts).into_iter())
+        .filter_map(|c| {
+            let module = c.module.as_deref()?;
+            let answer = crate::loader::call_generator(
+                importer,
+                module,
+                prefix,
+                &[],
+                true,
+                opts,
+                resolver,
+                engine,
+            )?;
+            Some((c, answer.ok()?))
+        })
+        .collect()
+}
+
+/// The Vyrn a tool reads in a generator input, as the editor companion of the
+/// claiming generator module writes it through `gen fn vyrnSource*(path:
+/// String) -> String`: the input with every character outside Vyrn code
+/// replaced by a space and each LF kept, then declarations the file's form
+/// provides. Positions in `code` are the
+/// input's, so a tool maps none.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InputView {
+    /// The view's first lines, one per line of the input.
+    pub code: String,
+    /// Per input line, whether it is Vyrn code. A line with a character the view
+    /// keeps is; a line the view blanks is not; an empty line takes the verdict
+    /// of the nearest line above or below that has one, so a blank line inside
+    /// a script is code and one between two template lines is not.
+    pub code_lines: Vec<bool>,
+    /// The names the declarations after the input's last line export: members
+    /// the file's form writes, such as a view its template compiles to.
+    pub provided: Vec<String>,
+}
+
+impl InputView {
+    /// Splits the generator's `view` of an input whose text is `input`.
+    pub fn new(input: &str, view: &str) -> InputView {
+        let n = input.lines().count();
+        let lines: Vec<&str> = view.lines().collect();
+        let code = lines[..n.min(lines.len())].join("\n");
+        let tail = lines.get(n..).unwrap_or_default().join("\n");
+        let provided = match crate::lexer::lex(&tail) {
+            Ok(tokens) => (crate::parser::parse_accum(tokens).0.functions.into_iter())
+                .filter(|f| f.exported)
+                .map(|f| f.name)
+                .collect(),
+            Err(_) => Vec::new(),
+        };
+        let kept: Vec<Option<bool>> =
+            (input.lines().zip(code.lines().chain(std::iter::repeat(""))))
+                .map(|(i, v)| (!i.trim().is_empty()).then(|| !v.trim().is_empty()))
+                .collect();
+        let near = |k: usize| {
+            let above = kept[..k].iter().rev().find_map(|v| *v);
+            let below = kept[k..].iter().find_map(|v| *v);
+            above == Some(true) || below == Some(true)
+        };
+        let code_lines = (0..kept.len())
+            .map(|k| kept[k].unwrap_or_else(|| near(k)))
+            .collect();
+        InputView {
+            code,
+            code_lines,
+            provided,
+        }
+    }
+
+    /// Whether 1-based `line` of the input is Vyrn code.
+    pub fn is_code(&self, line: usize) -> bool {
+        line.checked_sub(1).and_then(|l| self.code_lines.get(l)) == Some(&true)
+    }
+}
+
+/// Returns the view of the input `file` that `claim` covers, through the
+/// `gen fn vyrnSource*` of its generator module's editor companion
+/// ([`crate::loader::call_generator`]). `None` when the claim names no module,
+/// no companion declares such a function, the file cannot be read, or the run
+/// fails.
+pub fn input_view(
+    claim: &Claim,
+    file: &str,
+    opts: &crate::loader::LoadOptions,
+    resolver: &dyn crate::loader::ModuleResolver,
+    engine: Option<&crate::gen::GenEngine>,
+) -> Option<InputView> {
+    let input = resolver.read(file).ok()?;
+    let arg = crate::consteval::ConstVal::Str(claim.spell(file)?);
+    let module = claim.module.as_deref()?;
+    let view = crate::loader::call_generator(
+        &claim.importer,
+        module,
+        "vyrnSource",
+        &[arg],
+        true,
+        opts,
+        resolver,
+        engine,
+    )?
+    .ok()?;
+    Some(InputView::new(&input, &view))
+}
+
+/// Returns the definition the editor companion of `claim`'s generator module
+/// gives for 1-based `line` and `col` of the input `file`, through its
+/// `gen fn vyrnDefinition*(root, path, line, col) -> String`
+/// ([`crate::loader::call_generator`]). The answer is an anchor in `//@origin`
+/// notation, resolved as an origin path is. `None` when the claim names no
+/// module, no companion declares such a function, the run fails, or the answer
+/// is empty or malformed.
+#[allow(clippy::too_many_arguments)]
+pub fn input_definition(
+    claim: &Claim,
+    file: &str,
+    line: usize,
+    col: usize,
+    opts: &crate::loader::LoadOptions,
+    resolver: &dyn crate::loader::ModuleResolver,
+    engine: Option<&crate::gen::GenEngine>,
+) -> Option<crate::origin::Origin> {
+    use crate::consteval::ConstVal;
+    let args = [
+        ConstVal::Str(claim.arg.clone()),
+        ConstVal::Str(claim.spell(file)?),
+        ConstVal::Int(line as i64),
+        ConstVal::Int(col as i64),
+    ];
+    let module = claim.module.as_deref()?;
+    let out = crate::loader::call_generator(
+        &claim.importer,
+        module,
+        "vyrnDefinition",
+        &args,
+        false,
+        opts,
+        resolver,
+        engine,
+    )?
+    .ok()?;
+    let dir = claim.importer.rsplit_once('/').map_or("", |(d, _)| d);
+    let project = if opts.alias_base.is_empty() {
+        dir
+    } else {
+        opts.alias_base.as_str()
+    };
+    let ctx = crate::origin::Context::new(None, dir, project);
+    crate::origin::anchor(out.trim(), &ctx).ok()
+}
+
 /// Returns the first string argument of the innermost generator call in a
 /// banner key (`generated by vyxPage("./x.vyx") at ...`).
 fn first_generator_arg(key: &str) -> Option<String> {
@@ -464,6 +719,27 @@ pub fn display_path(path: &str, map: &AudienceMap) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_generator_import_claims_what_its_first_argument_names() {
+        let src = "import { pages } from \"std/ui\"\n\
+                   import { route } from pages(\"./routes\")\n\
+                   import { f } from table(\"./users.tbl\")\n";
+        let program = crate::parser::parse_accum(crate::lexer::lex(src).unwrap()).0;
+        let cs = claims("/p/app.vyrn", &program, &Default::default());
+        assert_eq!(cs.len(), 2, "{cs:?}");
+        assert_eq!((cs[0].line, cs[0].module.as_deref()), (2, Some("std/ui")));
+        assert!(cs[0].covers("/p/routes/blog/index.vyx"));
+        assert!(!cs[0].covers("/p/routesx/index.vyx"));
+        assert_eq!(cs[1].module, None);
+        assert!(cs[1].covers("/p/users.tbl"));
+        assert_eq!(
+            cs[0].spell("/p/routes/Blog/a.vyx").as_deref(),
+            Some("./routes/Blog/a.vyx")
+        );
+        assert_eq!(cs[1].spell("/p/users.tbl").as_deref(), Some("./users.tbl"));
+        assert!(!cs[1].covers("/p/users.tblx"));
+    }
 
     fn map() -> AudienceMap {
         AudienceMap {

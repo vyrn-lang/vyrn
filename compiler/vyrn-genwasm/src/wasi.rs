@@ -11,7 +11,7 @@
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use wasmtime::{Caller, Instance, Linker, Memory, Module, Store};
+use wasmtime::{Caller, Instance, InstancePre, Linker, Memory, Module, Store};
 
 use crate::GenState;
 
@@ -155,6 +155,16 @@ pub fn instantiate<X: 'static>(
     x: X,
     extra: impl FnOnce(&mut Linker<Guest<X>>) -> wasmtime::Result<()>,
 ) -> Result<(Store<Guest<X>>, Instance), String> {
+    start(&linked(module, policy, extra)?, policy, argv, gen, x)
+}
+
+/// `module` linked under `policy` and `extra`, ready for [`start`] in any
+/// number of stores. Only `policy.ambient` decides the links.
+pub fn linked<X: 'static>(
+    module: &Module,
+    policy: &Policy,
+    extra: impl FnOnce(&mut Linker<Guest<X>>) -> wasmtime::Result<()>,
+) -> Result<InstancePre<Guest<X>>, String> {
     let mut linker = Linker::new(module.engine());
     link(&mut linker, policy).map_err(|e| e.to_string())?;
     crate::link(&mut linker).map_err(|e| e.to_string())?;
@@ -162,17 +172,30 @@ pub fn instantiate<X: 'static>(
     linker
         .define_unknown_imports_as_traps(module)
         .map_err(|e| e.to_string())?;
+    linker
+        .instantiate_pre(module)
+        .map_err(|e| format!("instantiate: {e}"))
+}
+
+/// A fresh store for `pre`'s module under `policy`, and its instance.
+pub fn start<X: 'static>(
+    pre: &InstancePre<Guest<X>>,
+    policy: &Policy,
+    argv: &[String],
+    gen: GenState,
+    x: X,
+) -> Result<(Store<Guest<X>>, Instance), String> {
     let guest = Guest {
         wasi: Wasi::new(policy, argv),
         gen,
         x,
     };
-    let mut store = Store::new(module.engine(), guest);
+    let mut store = Store::new(pre.module().engine(), guest);
     if let Some(fuel) = policy.fuel {
         store.set_fuel(fuel).map_err(|e| e.to_string())?;
     }
-    let inst = linker
-        .instantiate(&mut store, module)
+    let inst = pre
+        .instantiate(&mut store)
         .map_err(|e| format!("instantiate: {e}"))?;
     store.data_mut().wasi.mem = match inst.get_export(&mut store, "memory") {
         Some(wasmtime::Extern::Memory(m)) => Some(m),

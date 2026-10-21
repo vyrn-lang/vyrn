@@ -831,9 +831,9 @@ const DECOY_SCRIPTS: &[(&str, &str)] = &[
     ),
 ];
 
-/// Two implementations that cannot share code decide the `.vyx` section boundary:
-/// `std/vyx`'s scanner, which compiles the component, and `vyrn_frontend::vyx`, which
-/// the tools read it with. The test fails if either drifts.
+/// The tools read a `.vyx` through `std/vyx`'s own view (`vyrnSourceVyx`), so
+/// `vyrn why` and the generator find one section boundary. A decoy `</script>`
+/// must close neither.
 #[test]
 fn audit_hostile_sections_agree_with_the_generator() {
     for (tag, decoy) in DECOY_SCRIPTS {

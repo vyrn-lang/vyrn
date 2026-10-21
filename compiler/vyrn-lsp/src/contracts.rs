@@ -50,20 +50,9 @@ pub fn roles_sig(app_dir: &std::path::Path, roots: &[(String, String)]) -> u64 {
     h.finish()
 }
 
-/// The `<script> ... </script>` body of a `.vyx`, and how many lines to subtract
-/// from a buffer line to reach the same line of that body.
-///
-/// The body starts mid-line after the tag's `>`, so the offset counts newlines
-/// before it, not lines.
-pub fn vyx_script(text: &str) -> Option<(String, usize)> {
-    let (body_start, close) = vyrn_frontend::vyx::script_body(text)?;
-    let line_offset = text[..body_start].matches('\n').count();
-    Some((text[body_start..close].to_string(), line_offset))
-}
-
 /// The identifier token covering the 1-based `(line, col)` cursor in `text`,
-/// with its 1-based column span. A text scan, because a `.vyx` buffer is not a
-/// Vyrn document.
+/// with its 1-based column span. A text scan, because a generator input's
+/// buffer is not a Vyrn document.
 pub fn ident_at(text: &str, line: usize, col: usize) -> Option<(String, usize, usize)> {
     let src = text.lines().nth(line.checked_sub(1)?)?;
     let chars: Vec<char> = src.chars().collect();

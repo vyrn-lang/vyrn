@@ -146,9 +146,9 @@ export fn features() -> Array<Feature> {
         },
         Feature {
             name: "Templates are the same language",
-            what: TrustedMarkup("A <code>.vyx</code> file gets the same diagnostics, hover, definition, highlight, hints and completion, mapped back into the coordinates you wrote. Templates add their own completions: tag names, sibling components, props, <code>@events</code> and class tokens."),
-            path: "compiler/vyrn-lsp/src/templates.rs",
-            symbol: "classify",
+            what: TrustedMarkup("A file a generator reads, such as a <code>.vyx</code> template, gets the same diagnostics, hover, definition, highlight, hints and completion, mapped back into the coordinates you wrote. The generator's own module adds the completions of its grammar; for <code>.vyx</code> they are tag names, sibling components, props and <code>@events</code>, and class tokens come from the theme."),
+            path: "compiler/vyrn-lsp/src/main.rs",
+            symbol: "generator_completion",
         },
         Feature {
             name: "Syntax highlighting",

@@ -932,7 +932,13 @@ fn why_cmd(call: &Call) -> Outcome {
     // file are two policies when one of them fails.
     let doc = p.manifest.as_ref().map(|m| &m.doc);
     let roots = vyrn_frontend::manifest::role_roots(&app_dir, doc);
-    let roles = vyrn_frontend::contracts::roles_for_project(doc, &roots, &p.opts, &p.resolver);
+    let roles = vyrn_frontend::contracts::roles_for_project(
+        doc,
+        &roots,
+        &p.opts,
+        &p.resolver,
+        Some(&*engine()),
+    );
     let Some(role) = vyrn_frontend::contracts::role_for(&path, &roles) else {
         p.save_lock()?;
         println!("{path}");
@@ -963,14 +969,16 @@ fn why_cmd(call: &Call) -> Outcome {
         return Err(ExitCode::FAILURE);
     };
 
-    // A `.vyx`'s module is its `<script>`, plus the `<template>`, which compiles
-    // to an export.
-    let raw = std::fs::read_to_string(&path).unwrap_or_default();
-    let synthesized = vyrn_frontend::contracts::synthesized_members(&view, &path, &raw);
-    let source = if path.ends_with(".vyx") {
-        vyx_script_body(&raw).unwrap_or_default()
-    } else {
-        raw
+    // A generator input's module is its generator's view of it, plus the
+    // members its form writes.
+    let input = (!path.ends_with(".vyrn"))
+        .then(|| input_view(&project_claims(&app_dir, &p.opts), &path, &p));
+    let (source, synthesized) = match input {
+        Some(v) => v.map(|v| (v.code, v.provided)).unwrap_or_default(),
+        None => (
+            std::fs::read_to_string(&path).unwrap_or_default(),
+            Vec::new(),
+        ),
     };
     let parsed = |text: &str| {
         vyrn_frontend::lexer::lex(text)
@@ -988,9 +996,9 @@ fn why_cmd(call: &Call) -> Outcome {
     // The generator's `contractOf` names the module as its importer wrote it.
     decl.module = Some(view.module.clone());
     // A `.vyrn` module is reflected linked, as `moduleInterface` reflects it: a
-    // page that does not compile has no interface to judge. A `.vyx` page is
-    // reflected from its source, as `vyxPageInterface` reflects it.
-    let interface = if path.ends_with(".vyx") {
+    // page that does not compile has no interface to judge. A generator input is
+    // reflected from its view, which no load links.
+    let interface = if !path.ends_with(".vyrn") {
         use vyrn_frontend::schema_reflect::{module_interface_lit, Origins};
         module_interface_lit(&module, &Default::default(), &Origins::new([]))
     } else {
@@ -1066,12 +1074,8 @@ fn why_cmd(call: &Call) -> Outcome {
                 m.shapes.len()
             )
         } else if synthesized.contains(&m.name) && !exports.contains(&m.name.as_str()) {
-            // The file's form writes it: a `.vyx` has no other way to declare
-            // a view.
-            format!(
-                "ok        {}: the `<template>` compiles to it — {want}",
-                m.name
-            )
+            // The file's form writes it, as a template writes a view.
+            format!("ok        {}: the file's form writes it — {want}", m.name)
         } else if let Some(line) = objection(&m.name) {
             line
         } else {
@@ -1507,13 +1511,17 @@ fn why_cost(flags: GlobalFlags, file: &str) -> Outcome {
         }
     };
     let raw = read_source(&path)?;
-    // A `.vyx`'s module is its `<script>`.
-    let source = if path.ends_with(".vyx") {
-        vyx_script_body(&raw).unwrap_or_default()
-    } else {
-        raw
-    };
     let p = Project::of(Some(&path), flags)?;
+    // A generator input's module is its generator's view of it.
+    let source = if path.ends_with(".vyrn") {
+        raw
+    } else {
+        let dir = Path::new(&path).parent().unwrap_or(Path::new("."));
+        let claims = project_claims(&vyrn_frontend::manifest::app_root(dir), &p.opts);
+        input_view(&claims, &path, &p)
+            .map(|v| v.code)
+            .unwrap_or_default()
+    };
     let (program, world) = p.checked(&path, &source)?;
 
     println!("{}", dos_to_slash(file));
@@ -1633,7 +1641,7 @@ fn why_audience(flags: GlobalFlags, file: &str) -> Outcome {
 
     // Read off the sources, with no load: the file asked about may be the one
     // that does not compile.
-    let edges = project_imports(Path::new(&app_slash), &p.opts);
+    let edges = project_imports(Path::new(&app_slash), &p);
     let chains = import_chains(&path, &edges);
     if chains.is_empty() {
         println!("  imported by: nothing in this project reaches it");
@@ -1824,9 +1832,9 @@ fn rel_to(path: &str, base: &str) -> String {
         .unwrap_or_else(|| path.to_string())
 }
 
-/// Every file under `dir` with one of the extensions `exts`, as sorted slash
-/// paths. Hidden directories, build output and vendored trees are skipped:
-/// they are not the project.
+/// Every file under `dir` with one of the extensions `exts`, or any file when
+/// `exts` is empty, as sorted slash paths. Hidden directories, build output
+/// and vendored trees are skipped: they are not the project.
 fn files_under(dir: &Path, exts: &[&str]) -> Vec<String> {
     fn walk(dir: &Path, exts: &[&str], out: &mut Vec<String>) {
         let Ok(entries) = std::fs::read_dir(dir) else {
@@ -1841,7 +1849,8 @@ fn files_under(dir: &Path, exts: &[&str]) -> Vec<String> {
                 {
                     walk(&p, exts, out);
                 }
-            } else if p.extension().is_some_and(|x| exts.iter().any(|e| x == *e)) {
+            } else if exts.is_empty() || p.extension().is_some_and(|x| exts.iter().any(|e| x == *e))
+            {
                 out.push(dos_to_slash(&p.to_string_lossy()));
             }
         }
@@ -1855,48 +1864,39 @@ fn files_under(dir: &Path, exts: &[&str]) -> Vec<String> {
 /// Every `importer -> imported` edge in a project, resolved with the loader's
 /// own `resolve_spec`.
 ///
-/// A generator import contributes edges too. A call naming one file is
-/// resolved by `audience::generator_input`, the function that decides that
-/// module's audience; a call naming a directory reaches every source under it.
-fn project_imports(app_dir: &Path, opts: &loader::LoadOptions) -> Vec<(String, String)> {
-    let files: Vec<(String, String)> = files_under(app_dir, &["vyrn", "vyx"])
+/// A generator import contributes an edge to every project source its
+/// `audience::Claim` covers, or to the file it names.
+fn project_imports(app_dir: &Path, p: &Project) -> Vec<(String, String)> {
+    let opts = &p.opts;
+    let mut files: Vec<(String, String)> = files_under(app_dir, &["vyrn"])
         .into_iter()
         .filter_map(|path| Some((path.clone(), std::fs::read_to_string(&path).ok()?)))
         .collect();
+    // Every generator input a claim covers, read through its generator's view.
+    let claims = project_claims(app_dir, opts);
+    for path in files_under(app_dir, &[]) {
+        if path.ends_with(".vyrn") {
+            continue;
+        }
+        if let Some(view) = input_view(&claims, &path, p) {
+            files.push((path, view.code));
+        }
+    }
     let mut out: Vec<(String, String)> = Vec::new();
-    for (path, source) in &files {
-        let body = if path.ends_with(".vyx") {
-            vyx_script_body(source).unwrap_or_default()
-        } else {
-            source.clone()
-        };
-        let Ok(tokens) = vyrn_frontend::lexer::lex(&body) else {
+    for (path, body) in &files {
+        let Ok(tokens) = vyrn_frontend::lexer::lex(body) else {
             continue;
         };
         let (program, _) = vyrn_frontend::parser::parse_accum(tokens);
         for imp in &program.imports {
-            use vyrn_frontend::ast::{Expr, ImportSource};
-            let spec = match &imp.source {
-                ImportSource::Path(s) => s.clone(),
-                ImportSource::Generator { args, .. } => match args.first() {
-                    Some(Expr::Str(s, _)) => {
-                        if let Some(input) = vyrn_frontend::audience::generator_input(path, s) {
-                            out.push((path.clone(), input));
-                            continue;
-                        }
-                        s.clone()
-                    }
-                    _ => continue,
-                },
-            };
-            let Ok(resolved) = vyrn_frontend::loader::resolve_spec(&spec, path, opts) else {
+            let vyrn_frontend::ast::ImportSource::Path(spec) = &imp.source else {
                 continue;
             };
-            let stripped = resolved
-                .strip_suffix(".vyrn")
-                .unwrap_or(&resolved)
-                .to_string();
-            if Path::new(&stripped).is_dir() {
+            let Ok(resolved) = vyrn_frontend::loader::resolve_spec(spec, path, opts) else {
+                continue;
+            };
+            let stripped = resolved.strip_suffix(".vyrn").unwrap_or(&resolved);
+            if Path::new(stripped).is_dir() {
                 for (kid, _) in &files {
                     if kid.starts_with(&format!("{stripped}/")) {
                         out.push((path.clone(), kid.clone()));
@@ -1904,6 +1904,17 @@ fn project_imports(app_dir: &Path, opts: &loader::LoadOptions) -> Vec<(String, S
                 }
             } else {
                 out.push((path.clone(), resolved));
+            }
+        }
+        for claim in vyrn_frontend::audience::claims(path, &program, opts) {
+            let before = out.len();
+            for (kid, _) in &files {
+                if claim.covers(kid) {
+                    out.push((path.clone(), kid.clone()));
+                }
+            }
+            if out.len() == before && Path::new(&claim.target).is_file() {
+                out.push((path.clone(), claim.target));
             }
         }
     }
@@ -1961,11 +1972,34 @@ fn import_chains(target: &str, edges: &[(String, String)]) -> Vec<Vec<String>> {
     out
 }
 
-/// The `<script>` body of a `.vyx`, bounded by `vyrn_frontend::vyx`, the rule
-/// `std/vyx` compiles with.
-fn vyx_script_body(text: &str) -> Option<String> {
-    let (start, end) = vyrn_frontend::vyx::script_body(text)?;
-    Some(text[start..end].to_string())
+/// Every claim the generator imports of the `.vyrn` files under `app_dir`
+/// make, in path order (`audience::Claim`).
+fn project_claims(
+    app_dir: &Path,
+    opts: &loader::LoadOptions,
+) -> Vec<vyrn_frontend::audience::Claim> {
+    let claims = |importer: String| {
+        let text = std::fs::read_to_string(&importer).ok()?;
+        let program = vyrn_frontend::parser::parse_accum(vyrn_frontend::lexer::lex(&text).ok()?).0;
+        Some(vyrn_frontend::audience::claims(&importer, &program, opts))
+    };
+    files_under(app_dir, &["vyrn"])
+        .into_iter()
+        .filter_map(claims)
+        .flatten()
+        .collect()
+}
+
+/// The view of the generator input `path` (`audience::InputView`), through the
+/// first of `claims` that covers it. `None` for a file no claim covers, or a
+/// generator module with no view.
+fn input_view(
+    claims: &[vyrn_frontend::audience::Claim],
+    path: &str,
+    p: &Project,
+) -> Option<vyrn_frontend::audience::InputView> {
+    let claim = claims.iter().find(|c| c.covers(path))?;
+    vyrn_frontend::audience::input_view(claim, path, &p.opts, &p.resolver, Some(&*engine()))
 }
 
 /// One `toolchain:` row: the tool, the path that would be used, its version,
@@ -2214,10 +2248,10 @@ fn fmt_cmd(call: &Call) -> Outcome {
     let mut would_change: Vec<String> = Vec::new();
     let mut written = 0usize;
     for path in &targets {
-        // The formatter would lex a `.vyx` template as Vyrn tokens and put spaces
-        // inside every tag and sentence, so it skips the file.
-        if path.ends_with(".vyx") {
-            eprintln!("note: skipping {path}: `vyrn fmt` cannot format a .vyx template yet");
+        // The formatter lexes Vyrn: another grammar, such as a generator input's,
+        // would gain spaces inside every tag and sentence.
+        if !path.ends_with(".vyrn") && !path.ends_with(".von") {
+            eprintln!("note: skipping {path}: `vyrn fmt` formats only .vyrn and .von files");
             continue;
         }
         let source = match std::fs::read_to_string(path) {

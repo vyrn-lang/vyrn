@@ -286,6 +286,9 @@ pull request.
 - A generator reports a diagnostic by writing `//@diag <severity> <anchor> <message>` into its output, so the report survives the cache. Two severities; an unknown word is a warning.
 - The compiler knows no lint rule names, codes, registry or suppression syntax.
 - A generator symbol map is an exported function inside the generated module, so it cannot go stale against cached code.
+- A generator module's editor support lives in its editor companion, `<stem>.editor.vyrn` beside it, which no program links, so a program that uses the generator pays nothing for it.
+- A generator or library tells tools its conventions through its companion `<stem>.editor.vyrn`; no compiler or LSP source names a std module, a generator, a stem or a call.
+- A companion extends the editor through exported `gen fn`s with fixed name prefixes, searched in the claiming generator module's companion, then the companions of the modules it imports, depth first. A name is program-wide, so each companion appends its own slug, as `symbolMap` does. `vyrnComplete<Slug>(root: String, path: String, line: Int64, col: Int64) -> String` returns completion items as JSON; `root` is the claim's argument, so the function reads beside the input under the sandbox's own rule. `vyrnSource<Slug>(path: String) -> String` returns the input with every character outside Vyrn code replaced by a space and each LF kept, then the declarations the file's form provides; its positions are the input's, so a tool maps none. `vyrnDefinition<Slug>(root: String, path: String, line: Int64, col: Int64) -> String` returns the definition of a name the input's own grammar declares, as an anchor in `//@origin` notation, or an empty string. `vyrnSymbolMaps<Slug>() -> String` names, one per line, the module's generators that bake a `symbolMap` export into what they write. `vyrnChrome<Slug>() -> String` names, one per line, the file stems in a role's directory that are chrome and answer no contract; a `vyrn.json` role that lists `except` overrides it. `vyrnClassCall<Slug>() -> String` names the function of a module the generator writes whose string argument is a class list, and `vyrnStylesheet<Slug>() -> String` the zero-parameter function there that returns its stylesheet. `vyrnDevServer<Slug>() -> String` names, one per line, the generators that mount a server surface, so a root that calls one is a root `vyrn dev` serves.
 - A generator import's identity is its resolved path arguments, so two spellings of one path are one module.
 - A JSON Schema type import round-trips byte-exact with the schema emitter; an inexpressible keyword is an error, never a silent drop.
 - The placer rebuilds a body its placement touched; placement is not an edit of the core (95% of rebuilt bodies only gain `drop` statements, 5 in 938 renumber names, and the name numbers decide the order of wasm locals). The rebuild runs on every thread and merges in job order.
@@ -353,7 +356,9 @@ pull request.
 - `vyrn routes` and `vyrn why` read what generators and the source wrote; they recompute nothing.
 - `vyrn doc` writes Markdown only. `docs/api/` is committed and CI checks it with `--verify`.
 - `vyrn emit-lowered` is deterministic, promises no format and has no parser.
-- The LSP is a synchronous pure adapter over the front end. No generator logic is compiled into it.
+- The LSP is a synchronous pure adapter over the front end. No generator logic and no input grammar is compiled into it: completion and definition in a foreign grammar are the `vyrnComplete` and `vyrnDefinition` of the claiming generator module's companion, and the rest goes through `//@origin`.
+- The editor sends the language server the files the `inputs` globs of `vyrn.json` name, which the server registers with the client per manifest. `.vyx` is a default of the VS Code extension's packaging, not of the server.
+- The editor reads an app's CSS only from the files the `stylesheets` globs of `vyrn.json` name; without the key a safelisted class hovers with no rule, because a guess would name one framework's layout.
 - The editor never decides which local binding a name names. The check records what each name occurrence in a root body names, by position (`checker::Binders::uses`), and the editor reads it. A token the check did not resolve takes the latest same-named binding at or before its line. A node's `ast::Id` carries the column of the name it spells.
 - The LSP gets no incremental parsing, salsa, incremental sync or delta tokens. Lexing and parsing are under 1% of a keystroke; latency came from repeated pure work, fixed by memoizing it.
 - A keystroke's load reuses only what one text decides, and links every module again: `link` renames a module's declarations by every module's names, the root's included.
@@ -366,7 +371,7 @@ pull request.
 - Vyrn does not build tools from source, wrap a package manager, or take a crate for curl, git or tar.
 - Native builds choose from a curated set of microarchitectures and always pass `-ffp-contract=off`, because FMA changes float bits.
 - The editor grammar colours only words the compiler names, and its keywords equal the lexer's.
-- A `.vyx` file is analysed through the `.vyrn` module that owns it.
+- A generator input is analysed through the module that claims it and whose generated code maps to it through `//@origin`. A module claims a file when the first string argument of one of its generator imports resolves to the file or a directory above it; the import graph is the only registry, so there is no extension map.
 - One `.vsix` serves every platform; the server ships in each platform's release archive.
 
 ## Process
