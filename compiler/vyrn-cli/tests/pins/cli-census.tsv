@@ -1,8 +1,8 @@
 kind	lines	sentences
-a command's own path	4499	111
+a command's own path	4532	111
 a rule another pass also states	0	0
 a path only a deleted route reached	0	0
 machinery with a copy elsewhere	0	0
 the WASI host and the wasmtime embedding	668	0
-shared machinery	1350	21
+shared machinery	1351	21
 tests	844	2
