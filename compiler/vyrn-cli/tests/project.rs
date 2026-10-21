@@ -48,6 +48,28 @@ fn new_scaffolds_a_runnable_project() {
     );
 }
 
+/// The directory is the claim: a second `vyrn new` of one name refuses and writes nothing.
+#[test]
+fn new_refuses_a_name_that_exists_and_creates_missing_parents() {
+    let dir = scratch("scaffold-twice");
+    let new = |name: &str| {
+        vyrn()
+            .current_dir(&dir)
+            .args(["new", name])
+            .output()
+            .unwrap()
+    };
+    assert!(new("deep/app").status.success());
+    std::fs::write(dir.join("deep/app/vyrn.json"), "{}").unwrap();
+    let again = new("deep/app");
+    assert!(!again.status.success());
+    assert!(String::from_utf8_lossy(&again.stderr).contains("`deep/app` already exists"));
+    assert_eq!(
+        std::fs::read_to_string(dir.join("deep/app/vyrn.json")).unwrap(),
+        "{}"
+    );
+}
+
 #[test]
 fn bare_specifiers_resolve_through_the_manifest() {
     let dir = scratch("aliases");
