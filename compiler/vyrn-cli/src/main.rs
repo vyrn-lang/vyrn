@@ -2254,8 +2254,12 @@ fn fmt_cmd(call: &Call) -> Outcome {
                 if formatted != source {
                     if check {
                         would_change.push(path.clone());
-                    } else if let Err(e) = std::fs::write(path, &formatted) {
-                        eprintln!("error: cannot write {path}: {e}");
+                    } else if let Err(e) = vyrn_frontend::manifest::rewrite_whole(
+                        Path::new(path),
+                        source.as_bytes(),
+                        formatted.as_bytes(),
+                    ) {
+                        eprintln!("error: {e}");
                         had_error = true;
                     } else {
                         written += 1;
@@ -2729,8 +2733,13 @@ fn fix_cmd(call: &Call) -> Outcome {
 
     p.save_lock()?;
     if text != source {
-        if let Err(e) = std::fs::write(&path, &text) {
-            eprintln!("error: cannot write {path}: {e}");
+        let written = vyrn_frontend::manifest::rewrite_whole(
+            Path::new(&path),
+            source.as_bytes(),
+            text.as_bytes(),
+        );
+        if let Err(e) = written {
+            eprintln!("error: {e}");
             return Err(ExitCode::FAILURE);
         }
     }

@@ -399,15 +399,57 @@ pub fn gen_cache_put(key: &str, value: &str) {
 /// The bytes go to a name no other writer uses, then a rename replaces
 /// `path`. On a failed rename the staged file is removed.
 pub fn write_whole(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    static SEQ: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-    let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let mut name = path.file_name().unwrap_or_default().to_os_string();
-    name.push(format!(".{}.{seq}.tmp", std::process::id()));
-    let stage = path.with_file_name(name);
+    let stage = stage_beside(path);
     std::fs::write(&stage, bytes)?;
     std::fs::rename(&stage, path).inspect_err(|_| {
         let _ = std::fs::remove_file(&stage);
     })
+}
+
+/// A name beside `path` that no other writer, process or thread, uses.
+fn stage_beside(path: &Path) -> PathBuf {
+    static SEQ: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let mut name = path.file_name().unwrap_or_default().to_os_string();
+    name.push(format!(".{}.{seq}.tmp", std::process::id()));
+    path.with_file_name(name)
+}
+
+/// Replaces the user's file at `path` with `bytes` if it still holds `read`,
+/// the bytes the caller read from it.
+///
+/// The write goes to the canonical path, so a symlink keeps pointing at the
+/// file, through a staged file beside it with the target's permissions, so a
+/// reader sees the old bytes or the new ones.
+///
+/// # Errors
+///
+/// The file changed since the caller read it (another writer, such as an
+/// editor's save, came between), or an I/O step failed. Either way nothing is
+/// written. The check and the rename are two steps: a write between them is
+/// lost, and no lock can stop a writer that takes none.
+pub fn rewrite_whole(path: &Path, read: &[u8], bytes: &[u8]) -> Result<(), String> {
+    let shown = path.display();
+    let target = std::fs::canonicalize(path).map_err(|e| format!("cannot resolve {shown}: {e}"))?;
+    let perms = std::fs::metadata(&target)
+        .map_err(|e| format!("cannot read {shown}: {e}"))?
+        .permissions();
+    let stage = stage_beside(&target);
+    let staged =
+        std::fs::write(&stage, bytes).and_then(|()| std::fs::set_permissions(&stage, perms));
+    let placed = match staged {
+        Err(e) => Err(format!("cannot write {shown}: {e}")),
+        Ok(()) if std::fs::read(&target).ok().as_deref() != Some(read) => Err(format!(
+            "{shown} changed after it was read; nothing was written, run the command again"
+        )),
+        Ok(()) => {
+            std::fs::rename(&stage, &target).map_err(|e| format!("cannot write {shown}: {e}"))
+        }
+    };
+    if placed.is_err() {
+        let _ = std::fs::remove_file(&stage);
+    }
+    placed
 }
 
 /// Reads a content-addressed blob and verifies its hash.
@@ -553,6 +595,41 @@ mod tests {
         assert_eq!(
             on_disk.keys().collect::<Vec<_>>(),
             ["https://x.dev/a.vyrn", "https://x.dev/b.vyrn"]
+        );
+    }
+
+    #[test]
+    fn a_rewrite_refuses_a_file_that_changed_after_the_read() {
+        let path = tmp("rewrite-changed").join("a.vyrn");
+        std::fs::write(&path, "saved by the editor").unwrap();
+        let e = rewrite_whole(&path, b"read by fmt", b"formatted").unwrap_err();
+        assert!(e.contains("changed after it was read"), "{e}");
+        assert_eq!(std::fs::read(&path).unwrap(), b"saved by the editor");
+        assert_eq!(
+            std::fs::read_dir(path.parent().unwrap()).unwrap().count(),
+            1,
+            "no staged file is left"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_rewrite_keeps_the_symlink_and_the_mode() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tmp("rewrite-link");
+        let (real, link) = (dir.join("real.vyrn"), dir.join("link.vyrn"));
+        std::fs::write(&real, "old").unwrap();
+        std::fs::set_permissions(&real, std::fs::Permissions::from_mode(0o640)).unwrap();
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        rewrite_whole(&link, b"old", b"new").unwrap();
+        assert!(std::fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(std::fs::read(&real).unwrap(), b"new");
+        assert_eq!(
+            std::fs::metadata(&real).unwrap().permissions().mode() & 0o777,
+            0o640
         );
     }
 

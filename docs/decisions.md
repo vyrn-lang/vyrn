@@ -342,6 +342,7 @@ pull request.
 
 - The workspace builds and tests with no LLVM, clang or sysroot. `vyrn-lsp`, `vyrn-genwasm` and `vyrn-play` sit outside it.
 - `vyrn fmt` has one style and no options, never joins or splits lines, and refuses any output whose tokens differ from the input's.
+- `vyrn fmt` and `vyrn fix` write the canonical target path (symlinks resolved) through a staged file in the same directory that copies the target's permissions, and refuse with a sentence naming the file if its bytes changed between the read and the write (`manifest::rewrite_whole`).
 - `vyrn fix` applies only `.copy()`. `consume` and `for x in consume xs` change a contract, so they stay the author's decision.
 - `vyrn why --cost` reads the decided core and replaces `vyrn why --memory`. The LSP hover keeps the binding rows of the ownership table, with one wording.
 - A kept check's reason is a field of `Check` (`Why`), written with the verdict, not a side table: one home for a check's facts. It speaks source terms: the goal as the source would test it (`` `xs` non-empty ``, `` `i < xs.length` ``), and the change that would drop the check where one exists, such as a parameter's `where` clause.
