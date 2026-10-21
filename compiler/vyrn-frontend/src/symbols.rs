@@ -2206,7 +2206,13 @@ fn hover_of(detail: &str, tail: &[Option<&str>]) -> Hover {
         "impl ",
         "contract ",
     ];
-    let tail = || tail.iter().flatten().copied();
+    // A hover has nowhere to link to, so a doc link reads as its code span.
+    let tail: Vec<String> = tail
+        .iter()
+        .flatten()
+        .map(|t| doc_links(t, |_| None))
+        .collect();
+    let tail = || tail.iter().map(String::as_str);
     let text = std::iter::once(detail)
         .chain(tail())
         .collect::<Vec<_>>()
@@ -2563,6 +2569,34 @@ pub struct DocExport {
     /// for everything else: an undocumented member adds nothing the protocol's
     /// signature does not say.
     pub members: Vec<(String, String)>,
+}
+
+/// Rewrites each ``[`name`]`` link of a `///` doc to what `link` answers for
+/// `name`, or to the code span `` `name` `` where it answers `None`. A link
+/// that already names its target, ``[`name`](url)``, stays as written.
+pub fn doc_links(doc: &str, link: impl Fn(&str) -> Option<String>) -> String {
+    let mut out = String::with_capacity(doc.len());
+    let mut rest = doc;
+    while let Some(at) = rest.find("[`") {
+        out.push_str(&rest[..at]);
+        let tail = &rest[at + 2..];
+        match tail.find("`]") {
+            Some(end) if !tail[..end].contains('`') && !tail[end + 2..].starts_with('(') => {
+                let name = &tail[..end];
+                match link(name) {
+                    Some(l) => out.push_str(&l),
+                    None => out.push_str(&format!("`{name}`")),
+                }
+                rest = &tail[end + 2..];
+            }
+            _ => {
+                out.push_str("[`");
+                rest = tail;
+            }
+        }
+    }
+    out.push_str(rest);
+    out
 }
 
 /// A module's documentation model for `vyrn doc`: the detached

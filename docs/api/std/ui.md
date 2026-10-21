@@ -136,7 +136,7 @@ type Query = { run: fn() -> T }
 ```
 
 A page's data, produced by a deferred call. The page blocks until the data
-lands; return a [`Lazy`] to render first and fill in later.
+lands; return a [`Lazy`](#lazy) to render first and fill in later.
 
     export fn data() -> Query<Array<Paste>> {
         return query(|| listPastes().pastes)
@@ -247,7 +247,7 @@ so this is never substituted.
 fn uiNoRespond() -> Response
 ```
 
-The default that makes `respond` optional. See [`uiNoView`].
+The default that makes `respond` optional. See [`uiNoView`](#uinoview).
 
 ## uiDataQuery
 
@@ -342,7 +342,7 @@ Scans `dir` for `.vyrn` and `.vyx` pages and returns the router module.
 fn pagesThemed(dir: String, theme: String) -> String
 ```
 
-[`pages`], with every `.vyx` page's classes checked against `theme`.
+[`pages`](#pages), with every `.vyx` page's classes checked against `theme`.
 `theme` resolves relative to the importing module.
 
 ## pagesClient
@@ -359,4 +359,4 @@ The client page bundle for `dir`.
 fn pagesClientThemed(dir: String, theme: String) -> String
 ```
 
-[`pagesClient`] with a theme; the server side is [`pagesThemed`].
+[`pagesClient`](#pagesclient) with a theme; the server side is [`pagesThemed`](#pagesthemed).

@@ -70,7 +70,7 @@ millions of times, and an allocation per call cost it about 10%.
 fn findSkipping(s: String, needle: String, from: Int64 where value >= 0, skip: Array<UInt32> where value.length >= 256) -> Option<Int64>
 ```
 
-[`findPlain`] with a table from [`skipTable`]: it compares from the end of
+[`findPlain`](#findplain) with a table from [`skipTable`](#skiptable): it compares from the end of
 the window and, on a mismatch, skips by the table entry for the window's
 last byte, so it visits about `n / m` positions.
 
