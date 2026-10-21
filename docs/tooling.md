@@ -179,9 +179,30 @@ line stays atomic.
 ### `vyrn dev [--port N] [--workers N]`
 
 The full-stack loop. It needs a `vyrn.json` with `"server"` (the module with
-`handle`) and `"client"` (the module built to wasm). It builds the client into
-`.vyrn-dev/client.wasm`, then serves the server's `handle` with the `"public"`
-directory (default `public`) and the browser runtimes from `web/` in front.
+`handle`) and `"client"` (the module built to wasm). It builds the server,
+writes the client to `.vyrn-dev/client.wasm`, then serves the server's `handle`
+with the `"public"` directory (default `public`) and the browser runtimes from
+`web/` in front. A first build that fails ends the command.
+
+It then watches the files the last build read: every module and generator
+input the loads read or listed, the two roots, `vyrn.json` and `vyrn.lock`. A
+file outside that set starts no build, so a `public/` asset is served fresh
+but reloads no page. Every 50 ms it compares each file's modification time and
+length with what it saw before the read; after a change, it builds once no
+further change arrives within one poll, so a burst of saves makes one build.
+The `server`, `client` and `public` keys and the flags are read once, at start.
+
+A good build replaces the server instance before the next request, and its
+`main` runs again: module state does not carry over. A failed build prints its
+diagnostics and leaves the last good build serving, `.vyrn-dev/client.wasm`
+included.
+
+Each HTML response, from `handle` or from `public/`, ends with a script that
+listens on `/__reload`, a stream of server-sent events. The page reloads when a
+newer build is up, and shows a failed build's diagnostics until the next good
+one. Such a response loses its `ETag` and `Last-Modified`, so the browser never
+revalidates a copy that names an older build. `vyrn serve` and `vyrn build`
+inject nothing.
 
 ### `vyrn fmt [file ...] [--check]`
 
