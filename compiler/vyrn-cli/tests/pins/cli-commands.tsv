@@ -11,8 +11,8 @@ deps	198	3
 update	194	5
 fmt	182	5
 dev	140	12
+test, bench	130	2
 fix	129	1
-test, bench	127	2
 build, bench	120	0
 (global)	94	2
 vendor	64	6

@@ -399,3 +399,51 @@ fn an_unwatched_load_reads_every_edit() {
         ],
     );
 }
+
+/// An editor call runs a companion unchecked only from a module the engine
+/// compiled for its exact sources. After an edit the check runs again and
+/// refuses, where a module kept from before the edit would answer; after the
+/// edit is undone, the kept module answers unchecked.
+#[test]
+fn an_edited_companion_is_checked_again() {
+    let dir = common::scratch("warmcheck");
+    std::fs::write(
+        dir.join("gen.vyrn"),
+        "export fn g() -> Int64 { return 0 }\n",
+    )
+    .unwrap();
+    let gen = dir.join("gen.editor.vyrn");
+    let answers = "export gen fn vyrnProbeX() -> String {\n    return \"one\"\n}\n";
+    std::fs::write(dir.join("main.vyrn"), "fn main() -> Int64 { return 0 }\n").unwrap();
+    std::fs::write(&gen, answers).unwrap();
+    let importer = dir.join("main.vyrn").to_string_lossy().replace('\\', "/");
+    let opts = LoadOptions {
+        std_root: vyrn_frontend::manifest::std_root(),
+        ..Default::default()
+    };
+    let engine = vyrn_genwasm::engine();
+    let call = || {
+        let out = vyrn_frontend::loader::call_generator(
+            &importer,
+            "./gen",
+            "vyrnProbe",
+            &[],
+            true,
+            &opts,
+            &DiskResolver,
+            Some(&*engine),
+        );
+        out.expect("the companion exports a vyrnProbe generator")
+    };
+    assert_eq!(call().ok().as_deref(), Some("one"));
+
+    std::fs::write(&gen, answers.replace("\"one\"", "1")).unwrap();
+    let edited = call();
+    assert!(
+        edited.is_err(),
+        "the edited companion is checked: {edited:?}"
+    );
+
+    std::fs::write(&gen, answers).unwrap();
+    assert_eq!(call().ok().as_deref(), Some("one"));
+}

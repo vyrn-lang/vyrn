@@ -5321,6 +5321,9 @@ fn bodies_wasm(
                     vyrn_frontend::gen::GenError::Refused(ds) => {
                         ds.iter().map(|d| d.render()).collect()
                     }
+                    vyrn_frontend::gen::GenError::Unchecked => {
+                        "the engine asked to check a checked program".to_string()
+                    }
                 })
             })
     } else {

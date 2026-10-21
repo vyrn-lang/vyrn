@@ -1976,36 +1976,45 @@ fn run_resolved(
     if opts.expansions.is_shared() {
         inner.expansions = crate::project::Expansions::shared();
     }
-    let checked =
-        checked_generator(&gen_mod_key, memo, &inner, resolver, engine, read).map_err(|e| {
-            e.unwrap_or_else(|why| err(rule!(GenModuleReread, module = gen_mod_key, why)))
-        })?;
-    let gen_program = &checked.program;
-    let (gen_sources, describable) = (checked.sources.clone(), checked.describable);
-    let fingerprint = checked.fingerprint.clone();
-
     // Run the generator in the mediated sandbox. The engine judges its
-    // program with the lowering's judgments first.
-    let out = crate::gen::generate(
-        &gen_program,
-        name,
-        consts,
-        crate::gen::GenInputs {
-            engine,
-            resolver,
-            opts: &inner,
-            importer_dir,
-            allowed,
-            aliased,
-            fuel: GEN_FUEL_OVERRIDE.with(|c| c.get()).unwrap_or(GEN_FUEL),
-            max_output: GEN_MAX_OUTPUT_OVERRIDE
-                .with(|c| c.get())
-                .unwrap_or(GEN_MAX_OUTPUT),
-            sources_fingerprint: fingerprint,
-            type_arg: None,
-        },
-    )
-    .map_err(|e| match e {
+    // program with the lowering's judgments first. An editor call (`memo`)
+    // runs a generator unchecked while the engine holds its compiled module
+    // ([`checked_generator`] says why that is sound); the engine answers
+    // `Unchecked` when it holds none, and the second turn checks. The first
+    // turn with `check` set is the last.
+    let mut check = !memo;
+    let (checked, out) = loop {
+        let checked = checked_generator(&gen_mod_key, memo, check, &inner, resolver, engine, read)
+            .map_err(|e| {
+                e.unwrap_or_else(|why| err(rule!(GenModuleReread, module = gen_mod_key, why)))
+            })?;
+        let out = crate::gen::generate(
+            &checked.program,
+            name,
+            consts,
+            crate::gen::GenInputs {
+                engine,
+                resolver,
+                opts: &inner,
+                importer_dir: importer_dir.clone(),
+                allowed: allowed.clone(),
+                aliased: aliased.clone(),
+                fuel: GEN_FUEL_OVERRIDE.with(|c| c.get()).unwrap_or(GEN_FUEL),
+                max_output: GEN_MAX_OUTPUT_OVERRIDE
+                    .with(|c| c.get())
+                    .unwrap_or(GEN_MAX_OUTPUT),
+                sources_fingerprint: checked.fingerprint.clone(),
+                type_arg: None,
+                checked: checked.checked,
+            },
+        );
+        match out {
+            Err(crate::gen::GenError::Unchecked) if !checked.checked => check = true,
+            out => break (checked, out),
+        }
+    };
+    let (gen_sources, describable) = (checked.sources.clone(), checked.describable);
+    let out = out.map_err(|e| match e {
         // The generator's module is the root of its own load, so a refusal
         // there carries no file; in this load it names the module.
         crate::gen::GenError::Refused(ds) => ds
@@ -2016,6 +2025,12 @@ fn run_resolved(
             })
             .collect(),
         crate::gen::GenError::Failed(trap) => err(rule!(GenFailed, name, args = arg_repr, trap)),
+        crate::gen::GenError::Unchecked => err(rule!(
+            GenFailed,
+            name,
+            args = arg_repr,
+            trap = "the engine asked to check a checked program"
+        )),
     })?;
     bump_gen_runs();
 
@@ -2064,6 +2079,8 @@ struct CheckedGen {
     /// since an unverifiable input is worse than a miss, and no artifact key.
     describable: bool,
     fingerprint: Option<String>,
+    /// Whether `program` passed its check; see [`checked_generator`].
+    checked: bool,
 }
 
 thread_local! {
@@ -2080,6 +2097,7 @@ thread_local! {
 fn checked_generator(
     gen_mod_key: &str,
     memo: bool,
+    check: bool,
     inner: &LoadOptions,
     resolver: &dyn ModuleResolver,
     engine: Option<&crate::gen::GenEngine>,
@@ -2101,7 +2119,7 @@ fn checked_generator(
             (c.sources.iter())
                 .all(|(p, h)| current_input_hash(resolver, p, read).as_ref() == Some(h))
         };
-        if let Some(c) = hit.filter(|c| c.describable && fresh(c)) {
+        if let Some(c) = hit.filter(|c| c.describable && (c.checked || !check) && fresh(c)) {
             return Ok(c);
         }
     }
@@ -2109,23 +2127,6 @@ fn checked_generator(
     let (loaded, _, _, gen_graph, _) =
         load_with_origins(&gen_source, gen_mod_key, inner, resolver, engine);
     let mut gen_program = loaded.map_err(Ok)?;
-    // A generator is a runnable program compiled to wasm, so it gets
-    // the check and synthesis a root gets.
-    let (gdiags, _, _, _) = crate::check_and_synthesize(&mut gen_program, engine, &inner.nest);
-    if !gdiags.is_empty() {
-        return Err(Ok(gdiags));
-    }
-
-    // Contract provenance. A generator is re-loaded as its own root,
-    // so a contract declared in it would carry `module: None` and its diagnostics
-    // would not say which library demanded it. Restamp each contract with its
-    // module's import specifier (`std/ui`, `./contract`), which a reader can
-    // type. Only the generator's private copy changes, after its check.
-    let gen_dir = dir_of(gen_mod_key).to_string();
-    for c in &mut gen_program.contracts {
-        let key = c.module.clone().unwrap_or_else(|| gen_mod_key.to_string());
-        c.module = Some(import_specifier(&gen_dir, &key, std_root));
-    }
 
     // The generator's transitive sources, hashed: the cache entry records them
     // as inputs, and the wasm engine keys its compiled artifact on them.
@@ -2140,10 +2141,21 @@ fn checked_generator(
             }
         }
     }
-    // The contract restamping above resolves specifiers against `gen_mod_key`
-    // and the std root, so both join the fingerprint.
+    // The fingerprint names every input of the check, so an artifact the engine
+    // holds for it was compiled from a program that passed this check: the
+    // closure's keys and content hashes (`gen_graph` holds the generator, its
+    // imports and the runtime modules the load links), the std root the contract
+    // restamping resolves against, and the nest, because a `derive` in the check
+    // refuses a generator already deriving and runs its own loads one deeper.
+    // The engine adds the compiler's identity (`vyrn_genwasm::artifact_key`).
     let fingerprint = describable.then(|| {
-        let mut fp = format!("{gen_mod_key}\u{0}{}\u{0}", std_root.unwrap_or(""));
+        let n = &inner.nest;
+        let mut fp = format!(
+            "{gen_mod_key}\u{0}{}\u{0}{}\u{0}{:?}\u{0}",
+            std_root.unwrap_or(""),
+            n.depth,
+            n.deriving
+        );
         for (k, h) in &gen_sources {
             fp.push_str(k);
             fp.push('\u{0}');
@@ -2152,12 +2164,25 @@ fn checked_generator(
         }
         fp
     });
+    // A generator is a runnable program compiled to wasm, so it gets the check
+    // and synthesis a root gets. A caller may skip it only for a program with a
+    // fingerprint: the engine then runs it from a module compiled for that
+    // fingerprint or answers `Unchecked`, so no unchecked program compiles.
+    let checked = check || fingerprint.is_none();
+    if checked {
+        let (gdiags, _, _, _) = crate::check_and_synthesize(&mut gen_program, engine, &inner.nest);
+        if !gdiags.is_empty() {
+            return Err(Ok(gdiags));
+        }
+    }
+    restamp_contracts(&mut gen_program, gen_mod_key, std_root);
 
     let checked = Rc::new(CheckedGen {
         program: gen_program,
         sources: gen_sources,
         describable,
         fingerprint,
+        checked,
     });
     if let Some(k) = memo_key {
         CHECKED_GENS.with(|m| {
@@ -2171,6 +2196,19 @@ fn checked_generator(
         });
     }
     Ok(checked)
+}
+
+/// Contract provenance. A generator is re-loaded as its own root, so a
+/// contract declared in it would carry `module: None` and its diagnostics would
+/// not say which library demanded it. Restamps each contract with its module's
+/// import specifier (`std/ui`, `./contract`), which a reader can type. Only the
+/// generator's private copy changes, after its check.
+fn restamp_contracts(program: &mut Program, gen_mod_key: &str, std_root: Option<&str>) {
+    let gen_dir = dir_of(gen_mod_key).to_string();
+    for c in &mut program.contracts {
+        let key = c.module.clone().unwrap_or_else(|| gen_mod_key.to_string());
+        c.module = Some(import_specifier(&gen_dir, &key, std_root));
+    }
 }
 
 /// The cache lookup key: `sha256(compiler identity ++ generator module ++ name
