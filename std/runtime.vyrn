@@ -236,13 +236,8 @@ export fn malloc(n: Int64) -> Int32 {
     if t < 7 {
         t = 7
     }
-    // `shift = floorLog2(t) - 2`; `t >= 7`, so `u >= 1`.
-    let mut shift: Int32 = 0
-    let mut u = t >> 2
-    while u > 1 {
-        u = u >> 1
-        shift = shift + 1
-    }
+    // `shift = floorLog2(t) - 2`; `t >= 7`, so `shift >= 0`.
+    let shift = 29 - t.clz()
     let sub = (t >> shift) & 3
     let cls = (shift << 2) + sub
     let size = (sub + 5) << shift

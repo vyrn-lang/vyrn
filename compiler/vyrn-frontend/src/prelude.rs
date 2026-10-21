@@ -440,6 +440,10 @@ fn table() -> Vec<Builtin> {
         bits: 64,
         signed: false,
     };
+    let u32_ = || Type::IntN {
+        bits: 32,
+        signed: false,
+    };
     let i32_ = Type::IntN {
         bits: 32,
         signed: true,
@@ -450,6 +454,15 @@ fn table() -> Vec<Builtin> {
     // instruction. A bit view reads the same 64 bits at the other type, so it
     // is not a conversion.
     let one = |n, p: &Type, r: &Type| b(n).spec(Spec::Typed(vec![p.clone()], r.clone()));
+    // A method on a number that is one instruction at each admitted width.
+    // Narrower integers are left out: they live in an `i32` that `clz` would
+    // count from bit 31.
+    let unary = |n, m, admits| {
+        b(n).takes(&[1], takes_none)
+            .method(m, &[Scalar])
+            .spec(Spec::Unary(admits))
+    };
+    let ints = vec![i32_.clone(), u32_(), Int, u64_()];
     let (f4, d2) = (Type::F32x4, Type::F64x2);
     // A vector row the checker types alone, in the vector surface's words.
     let ctor = |n, lane: Type, vec: Type, k: usize| {
@@ -812,6 +825,12 @@ fn table() -> Vec<Builtin> {
             Float,
             &[],
         )),
+        unary("@clz", "clz", ints.clone())
+            .hover("x.clz() -> T — the count of zero bits above the highest set bit of an Int32, UInt32, Int64 or UInt64; the width when `x` is 0"),
+        unary("@ctz", "ctz", ints.clone())
+            .hover("x.ctz() -> T — the count of zero bits below the lowest set bit of an Int32, UInt32, Int64 or UInt64; the width when `x` is 0"),
+        unary("@popcount", "popcount", ints)
+            .hover("x.popcount() -> T — the count of set bits of an Int32, UInt32, Int64 or UInt64"),
         // `bytes` copies (`__vyrn_str_bytes_range` allocates), so it does not
         // lend and its result is owned. One row serves both arities: the
         // offsets change nothing about ownership.
@@ -1217,6 +1236,10 @@ pub enum Spec {
     /// One operand, at whatever type the row put on the name it reads, and a
     /// result of that same type.
     OwnType,
+    /// One operand at one of these types, and a result at the operand's type.
+    /// The checker refuses any other type; the operand's width picks the one
+    /// instruction (`x.clz()` of a `UInt32` is `i32.clz`).
+    Unary(Vec<Type>),
     /// One operand at its own type, handed back as the same value, not a
     /// copy, behind an optimization barrier (`blackBox`).
     Barrier,

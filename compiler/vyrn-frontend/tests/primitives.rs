@@ -126,6 +126,11 @@ const CENSUS: &[(&str, Why, &str)] = &[
     // square root, and parity compares bytes.
     ("@f32x4Sqrt", Semantics, "a Vyrn Newton iteration is not the correctly-rounded IEEE result"),
     ("@f64x2Sqrt", Semantics, "as `@f32x4Sqrt`, at 64 bits"),
+    // Against the best Vyrn spelling, over 65536 UInt32 values. Clang folds
+    // the Vyrn `ctz` and `popcount` to one instruction; Cranelift does not.
+    ("@clz", Measured, "1.9x native (2.04 ms against 1.05 ms per 4 M counts) / 51x wasm (801 ms against 16 ms per 67 M), against a five-step binary search"),
+    ("@ctz", Measured, "1.0x native (0.93 ms against 0.94 ms) / 14x wasm (196 ms against 14 ms), against `popcount((x & -x) - 1)`"),
+    ("@popcount", Measured, "1.0x native (0.76 ms against 0.76 ms) / 6.2x wasm (101 ms against 16 ms), against the SWAR sum"),
     // The interpreter's `{:.6}` float rendering is kept as the differential
     // oracle; floats render through `std/num`'s `f64Str`. The scalar rendering
     // is the seed a `Show` declaration overrides, one lowering per engine.
