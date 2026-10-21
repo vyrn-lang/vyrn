@@ -4,19 +4,19 @@ bench	502	11
 serve, dev	464	6
 (dispatch)	335	4
 doc	293	9
-build	265	17
+build	283	18
 routes	262	1
 run	209	2
 deps	198	3
 update	194	5
-fmt	182	5
-dev	140	12
+fmt	186	5
+dev	155	13
+fix	134	1
 test, bench	130	2
-fix	129	1
 build, bench	120	0
 (global)	94	2
 vendor	64	6
-add	59	3
+add	62	3
 new	54	5
 emit-gen	33	3
 test	25	0
