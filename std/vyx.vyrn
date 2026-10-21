@@ -386,7 +386,8 @@ export type VyxAttr = { name: String, value: String, dyn: Bool, evt: Bool, line:
 
 /// A node in a parsed template. Lines are absolute in the `.vyx` file. A
 /// trailing `(line, col)` pair is the pass-through's position for
-/// origin directives; `VNIf` carries parallel per-condition position arrays.
+/// origin directives; `VNFor` carries its iterable's, then its key's, and
+/// `VNIf` carries parallel per-condition position arrays.
 export type VyxNode =
     | VNText(String)
     | VNInterp(String, Int64, Int64)
@@ -394,7 +395,7 @@ export type VyxNode =
     | VNChildren
     | VNElem(String, Bool, Array<VyxAttr>, Array<VyxNode>, Int64)
     | VNIf(Array<String>, Array<Int64>, Array<Int64>, Array<VyxBody>, VyxBody, Bool)
-    | VNFor(String, String, String, Array<VyxNode>, Int64, Int64)
+    | VNFor(String, String, String, Array<VyxNode>, Int64, Int64, Int64, Int64)
 
 /// A node list, so bodies can nest in a payload without `Array<Array<...>>`.
 export type VyxBody = { nodes: Array<VyxNode> }
@@ -436,7 +437,7 @@ impl Owned for VyxNode {
                 let elsNodes = consume els.nodes
                 drop elsNodes
             }
-            VNFor(v, it, key, body, l, c) => {
+            VNFor(v, it, key, body, l, c, kl, kc) => {
                 drop v
                 drop it
                 drop key
@@ -762,7 +763,7 @@ fn vyxIsWsText(n: VyxNode) -> Bool {
         VNChildren => false,
         VNElem(t, cc, a, k, l) => false,
         VNIf(cs, cl, cc, bs, e, h) => false,
-        VNFor(v, it, k, bd, l, c) => false,
+        VNFor(v, it, k, bd, l, c, kl, kc) => false,
     }
 }
 
@@ -775,7 +776,7 @@ fn vyxElemHasDir(n: VyxNode, name: String) -> Bool {
         VNRaw(x, l, c) => false,
         VNChildren => false,
         VNIf(cs, cl, ccc, bs, e, h) => false,
-        VNFor(v, it, kk, bd, l, c) => false,
+        VNFor(v, it, kk, bd, l, c, kl, kc) => false,
     }
 }
 
@@ -791,7 +792,7 @@ fn vyxProcessElem(n: consume VyxNode, srcFile: String) -> VyxOne {
         VNRaw(x, l, c) => VyxOne { node: VNRaw(x, l, c), err: "" },
         VNChildren => VyxOne { node: VNChildren, err: "" },
         VNIf(cs, cl, cc, bs, e, h) => VyxOne { node: VNIf(cs, cl, cc, bs, e, h), err: "" },
-        VNFor(v, it, k, bd, l, c) => VyxOne { node: VNFor(v, it, k, bd, l, c), err: "" },
+        VNFor(v, it, k, bd, l, c, kl, kc) => VyxOne { node: VNFor(v, it, k, bd, l, c, kl, kc), err: "" },
     }
 }
 
@@ -816,7 +817,7 @@ fn vyxProcessElemInner(tag: String, isComp: Bool, attrs: Array<VyxAttr>, kids: c
         let h = vyxParseForHead(vfor.value, srcFile, vfor.line)
         err = err + h.err
         let elem = VNElem(tag.copy(), isComp, vyxStripDirectives(attrs, true), childNodes, line)
-        return VyxOne { node: VNFor(h.var.copy(), h.iter.copy(), key.value.copy(), [elem], vfor.line, vfor.col), err: err }
+        return VyxOne { node: VNFor(h.var.copy(), h.iter.copy(), key.value.copy(), [elem], vfor.line, vfor.col, key.line, key.col), err: err }
     }
     return VyxOne { node: VNElem(tag.copy(), isComp, vyxStripDirectives(attrs, false), childNodes, line), err: err }
 }
@@ -922,7 +923,7 @@ fn vyxAttrsOf(n: VyxNode) -> Array<VyxAttr> {
         VNRaw(x, l, c) => [],
         VNChildren => [],
         VNIf(cs, cl, ccc, bs, e, h) => [],
-        VNFor(v, it, kk, bd, l, c) => [],
+        VNFor(v, it, kk, bd, l, c, kl, kc) => [],
     }
 }
 
@@ -935,7 +936,7 @@ fn vyxElemLine(n: VyxNode) -> Int64 {
         VNRaw(x, l, c) => l,
         VNChildren => 0,
         VNIf(cs, cl, ccc, bs, e, h) => 0,
-        VNFor(v, it, kk, bd, l, c) => l,
+        VNFor(v, it, kk, bd, l, c, kl, kc) => l,
     }
 }
 
@@ -1353,7 +1354,7 @@ fn vyxNodeUsesChildren(n: VyxNode) -> Bool {
         VNChildren => true,
         VNElem(t, c, a, kids, l) => vyxUsesChildren(kids),
         VNIf(conds, cl, cc, bodies, els, has) => vyxIfUsesChildren(bodies, els, has),
-        VNFor(v, it, k, body, l, c) => vyxUsesChildren(body),
+        VNFor(v, it, k, body, l, c, kl, kc) => vyxUsesChildren(body),
         VNText(s) => false,
         VNInterp(x, l, c) => false,
         VNRaw(x, l, c) => false,
@@ -1482,7 +1483,7 @@ export gen fn vyxCompileComponent(compName: String, source: String, dir: String)
         VNRaw(_, _, _) => false,
         VNChildren => false,
         VNIf(_, _, _, _, _, _) => false,
-        VNFor(_, _, _, _, _, _) => false,
+        VNFor(_, _, _, _, _, _, _, _) => false,
     }
     if rootIsText {
         return vyxCompErr(compName, fnName, srcPath, vyxErr(srcPath, 0, "this component's `<template>` holds no element — a component's view is exactly one root element"))
@@ -1526,7 +1527,7 @@ fn vyxElementRoots(nodes: consume Array<VyxNode>) -> Array<VyxNode> {
             VNRaw(x, l, c) => true,
             VNChildren => true,
             VNIf(cc, cl, ccc, bb, ee, hh) => true,
-            VNFor(v, it, kk, bd, l, c) => true,
+            VNFor(v, it, kk, bd, l, c, kl, kc) => true,
         }
         if keep {
             out.push(n)
@@ -1541,7 +1542,7 @@ fn vyxRootLine(roots: Array<VyxNode>) -> Int64 {
         VNElem(t, c, a, k, l) => l,
         VNInterp(x, l, c) => l,
         VNRaw(x, l, c) => l,
-        VNFor(v, it, kk, bd, l, c) => l,
+        VNFor(v, it, kk, bd, l, c, kl, kc) => l,
         VNChildren => 0,
         VNText(s) => 0,
         VNIf(cc, cl, ccc, bb, ee, hh) => 0,
@@ -1609,7 +1610,7 @@ fn vyxShiftNode(n: VyxNode, d: Int64) -> VyxNode {
         VNChildren => VNChildren,
         VNElem(t, comp, a, k, l) => VNElem(t.copy(), comp, vyxShiftAttrs(a, d), vyxShiftNodes(k, d), l + d),
         VNIf(conds, cl, cc, bodies, els, has) => vyxShiftIf(conds, cl, cc, bodies, els, has, d),
-        VNFor(v, it, k, body, l, c) => VNFor(v.copy(), it.copy(), k.copy(), vyxShiftNodes(body, d), l + d, c),
+        VNFor(v, it, k, body, l, c, kl, kc) => VNFor(v.copy(), it.copy(), k.copy(), vyxShiftNodes(body, d), l + d, c, kl + d, kc),
     }
 }
 
@@ -1785,7 +1786,7 @@ gen fn vyxEmitPush(n: VyxNode, acc: String, path: String, reg: VyxRegistry, src:
         VNChildren => VyxEmit { code: "for vyxCh in consume children {\n" + acc + ".push(vyxCh)\n}\n", err: "", imports: "" },
         VNElem(tag, isComp, attrs, kids, l) => vyxEmitElem(tag, isComp, attrs, kids, l, acc, path, reg, src),
         VNIf(conds, cl, cc, bodies, els, has) => vyxEmitIf(conds, cl, cc, bodies, els, has, acc, path, reg, src),
-        VNFor(v, it, k, body, l, c) => vyxEmitFor(v, it, k, body, l, c, acc, path, reg, src),
+        VNFor(v, it, k, body, l, c, kl, kc) => vyxEmitFor(v, it, k, body, l, c, kl, kc, acc, path, reg, src),
     }
 }
 
@@ -1924,7 +1925,7 @@ fn vyxChildText(kids: Array<VyxNode>) -> String {
             VNChildren => "c",
             VNElem(t, c, a, k, l) => "e",
             VNIf(cc, cl, ccc, bb, ee, hh) => "i",
-            VNFor(v, it, kk, bd, l, c) => "f",
+            VNFor(v, it, kk, bd, l, c, kl, kc) => "f",
         }
     }
     return out
@@ -1963,13 +1964,13 @@ gen fn vyxEmitIf(conds: Array<String>, condLines: Array<Int64>, condCols: Array<
 }
 
 /// Emits a `v-for` loop: each iteration fills a fresh accumulator, spliced into
-/// `acc` with a `Key`.
-gen fn vyxEmitFor(v: String, it: String, key: String, body: Array<VyxNode>, line: Int64, col: Int64, acc: String, path: String, reg: VyxRegistry, src: String) -> VyxEmit {
+/// `acc` with a `Key` on a line under the key's origin.
+gen fn vyxEmitFor(v: String, it: String, key: String, body: Array<VyxNode>, line: Int64, col: Int64, keyLine: Int64, keyCol: Int64, acc: String, path: String, reg: VyxRegistry, src: String) -> VyxEmit {
     let facc = "k" + path + "_f"
     let inner = vyxEmitChildren(body, facc, path + "_f", reg, src)
     let mut code = vyxRegion("for " + v + " in " + it + " {\n", src, line, col)
     code = code + "let mut " + facc + ": Array<Html> = []\n" + inner.code
-    code = code + "for vyxN in consume " + facc + " {\n" + acc + ".push(keyed((" + key + ").toString(), vyxN))\n}\n"
+    code = code + "for vyxN in consume " + facc + " {\n" + vyxRegion(acc + ".push(keyed((" + key + ").toString(), vyxN))\n", src, keyLine, keyCol) + "}\n"
     code = code + "}\n"
     return VyxEmit { code: code, err: consume inner.err, imports: consume inner.imports }
 }
@@ -2331,7 +2332,7 @@ gen fn vyxEmitRoot(root: VyxNode, reg: VyxRegistry, src: String) -> VyxEmit {
         VNRaw(x, l, c) => VyxEmit { code: vyxRegion("return Raw(" + x + ")\n", src, l, c), err: "", imports: "" },
         VNChildren => VyxEmit { code: "let mut kr: Array<Html> = []\nfor vyxCh in consume children {\nkr.push(vyxCh)\n}\nreturn el(\"div\", [], kr)\n", err: "", imports: "" },
         VNIf(cc, cl, ccc, bb, ee, hh) => vyxEmitRootWrap(root, reg, src),
-        VNFor(v, it, k, bd, l, c) => vyxEmitRootWrap(root, reg, src),
+        VNFor(v, it, k, bd, l, c, kl, kc) => vyxEmitRootWrap(root, reg, src),
     }
 }
 

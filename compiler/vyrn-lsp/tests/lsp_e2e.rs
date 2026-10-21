@@ -1390,6 +1390,17 @@ fn child_argument_definition_reaches_the_declaration() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// The `v-for` key's splice line sits under the key's origin.
+/// `    <li v-for="r in rows" :key="` is 32 bytes.
+#[test]
+fn v_for_key_error_maps_to_its_column() {
+    let widget = "<script>\ntype Row = { name: String }\nprops { rows: Array<Row> }\n</script>\n\
+        <template>\n<ul>\n\x20   <li v-for=\"r in rows\" :key=\"r.nam\">x</li>\n</ul>\n</template>\n";
+    let (line, col, msg) = first_input_diag(VYX_APP, &[("comp/Widget.vyx", widget)], "Widget.vyx");
+    assert!(msg.contains("nam"), "{msg}");
+    assert_eq!((line, col), (6, 32), "{msg}");
+}
+
 /// The break exists only in a `didChange` overlay, so the generator cache must
 /// re-verify its inputs through the overlay-aware resolver.
 #[test]
