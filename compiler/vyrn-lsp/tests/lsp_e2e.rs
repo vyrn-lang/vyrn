@@ -1401,6 +1401,19 @@ fn v_for_key_error_maps_to_its_column() {
     assert_eq!((line, col), (6, 32), "{msg}");
 }
 
+/// Each `head` block entry of a layout sits under its expression's origin.
+/// `    stylesheet ` is 15 bytes.
+#[test]
+fn layout_head_entry_error_maps_to_its_column() {
+    let layout = "<script>\nhead {\n    stylesheet 42\n}\n</script>\n\
+        <template>\n<div><slot/></div>\n</template>\n";
+    let page = "<template>\n<main>x</main>\n</template>\n";
+    let files = [("routes/index.vyx", page), ("routes/layout.vyx", layout)];
+    let (line, col, msg) = first_input_diag(ROUTES_APP, &files, "layout.vyx");
+    assert!(msg.contains("String"), "{msg}");
+    assert_eq!((line, col), (2, 15), "{msg}");
+}
+
 /// The break exists only in a `didChange` overlay, so the generator cache must
 /// re-verify its inputs through the overlay-aware resolver.
 #[test]

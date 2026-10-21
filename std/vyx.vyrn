@@ -3092,60 +3092,68 @@ fn vyxPageArgs(names: Array<String>) -> String {
 //   }
 // ===========================================================================
 
-/// One head entry: a `kind` (`stylesheet`/`module`/`script`) and its source
-/// `expr`, any String expression.
-type VyxHeadItem = { kind: String, expr: String }
+/// One head entry: a `kind` (`title`/`stylesheet`/`module`/`script`), its
+/// source `expr`, any String expression, and the expression's 1-based
+/// position in the `.vyx` file.
+type VyxHeadItem = { kind: String, expr: String, line: Int64, col: Int64 }
 
-/// A parsed head block: whether it declared a `title:`, that title expression,
-/// the ordered head entries, and any diagnostic.
-type VyxHead = { found: Bool, hasTitle: Bool, titleExpr: String, items: Array<VyxHeadItem>, err: String }
+/// A parsed head block: its entries in order and any diagnostic. The last
+/// `title` entry is the document title.
+type VyxHead = { found: Bool, items: Array<VyxHeadItem>, err: String }
 
 fn vyxNoHead() -> VyxHead {
-    return VyxHead { found: false, hasTitle: false, titleExpr: "", items: [], err: "" }
+    return VyxHead { found: false, items: [], err: "" }
 }
 
-/// Parses the body of a `head { ... }` block, between its braces.
-fn vyxParseHead(body: String, srcFile: String) -> VyxHead {
-    let mut hasTitle = false
-    let mut titleExpr = ""
+/// The head entry of `kind` whose expression follows `from` on the line that
+/// ends at `le`.
+fn vyxHeadEntry(ba: Array<UInt8>, kind: String, from: Int64, le: Int64) -> VyxHeadItem {
+    let x = vyxSkipWs(ba, from, le)
+    return VyxHeadItem { kind: kind.copy(), expr: trim(vyxSlice(ba, x, le)), line: vyxLineAt(ba, x), col: vyxColAt(ba, x) }
+}
+
+/// Parses the body of a `head { ... }` block, `ba[start, end)`.
+fn vyxParseHead(ba: Array<UInt8>, start: Int64, end: Int64, srcFile: String) -> VyxHead {
     let mut items: Array<VyxHeadItem> = []
-    for line in lines(body) {
-        let t = trim(line)
+    let mut ls = start
+    while ls < end {
+        let nl = vyxFind(ba, bytes("\n"), ls)
+        let le = if nl < 0 || nl > end { end } else { nl }
+        let at = vyxSkipWs(ba, ls, le)
+        let t = trim(vyxSlice(ba, at, le))
         if t.byteLength == 0 || t.startsWith("//") {
             // blank / comment
         } else if t.startsWith("title:") {
-            hasTitle = true
-            // A second `title:` replaces the first, so the first is released.
-            drop titleExpr
-            titleExpr = trim(vyxSlice(bytes(t), 6, bytes(t).length))
+            items.push(vyxHeadEntry(ba, "title", at + 6, le))
         } else if t.startsWith("stylesheet ") {
-            items.push(VyxHeadItem { kind: "stylesheet", expr: trim(vyxSlice(bytes(t), 11, bytes(t).length)) })
+            items.push(vyxHeadEntry(ba, "stylesheet", at + 11, le))
         } else if t.startsWith("module ") {
-            items.push(VyxHeadItem { kind: "module", expr: trim(vyxSlice(bytes(t), 7, bytes(t).length)) })
+            items.push(vyxHeadEntry(ba, "module", at + 7, le))
         } else if t.startsWith("script ") {
-            items.push(VyxHeadItem { kind: "script", expr: trim(vyxSlice(bytes(t), 7, bytes(t).length)) })
+            items.push(vyxHeadEntry(ba, "script", at + 7, le))
         } else {
-            return VyxHead { found: true, hasTitle: hasTitle, titleExpr: titleExpr, items: items, err: vyxErr(srcFile, 0, "`\{t}` is not a `head` entry — a head entry is `title:`, `stylesheet`, `module` or `script`") }
+            return VyxHead { found: true, items: items, err: vyxErr(srcFile, 0, "`\{t}` is not a `head` entry — a head entry is `title:`, `stylesheet`, `module` or `script`") }
         }
+        ls = le + 1
     }
-    return VyxHead { found: true, hasTitle: hasTitle, titleExpr: titleExpr, items: items, err: "" }
+    return VyxHead { found: true, items: items, err: "" }
 }
 
 /// A script with its `head { ... }` block sliced out, and the parsed head.
 type VyxHeadSplit = { rest: String, head: VyxHead }
 
-/// Removes a statement-leading `head { ... }` block from `script`; `found` is
-/// false when there is none.
-gen fn vyxStripHead(script: String, srcFile: String) -> VyxHeadSplit {
+/// Removes a statement-leading `head { ... }` block from the script
+/// `ba[sStart, sEnd)`; `found` is false when there is none.
+gen fn vyxStripHead(ba: Array<UInt8>, sStart: Int64, sEnd: Int64, srcFile: String) -> VyxHeadSplit {
+    let script = vyxSlice(ba, sStart, sEnd)
     let sb = bytes(script)
     let hb = vyxFindKwBlock(sb, "head")
     if hb.found == false || hb.malformed {
-        return VyxHeadSplit { rest: script.copy(), head: vyxNoHead() }
+        return VyxHeadSplit { rest: script, head: vyxNoHead() }
     }
     let end = vyxMatchCurly(sb, hb.braceAt)
-    let body = vyxSlice(sb, hb.braceAt + 1, end - 1)
     let rest = vyxSlice(sb, 0, hb.kwAt) + vyxSlice(sb, end, sb.length)
-    return VyxHeadSplit { rest: rest, head: vyxParseHead(body, srcFile) }
+    return VyxHeadSplit { rest: rest, head: vyxParseHead(ba, sStart + hb.braceAt + 1, sStart + end - 1, srcFile) }
 }
 
 /// The `std/html` element expression for one head entry.
@@ -3162,15 +3170,18 @@ fn vyxHeadItemExpr(it: VyxHeadItem) -> String {
 /// Emits the module's `head(<sig>) -> Array<Html>` and
 /// `headTitle(<sig>) -> String`. `sig` is the parameter list ("" for a layout);
 /// `prelude` binds the locals the entries read (`let id = p.id`). Always
-/// emitted; an empty head gives `[]` and "".
-fn vyxEmitHeadFns(head: VyxHead, sig: String, prelude: String) -> String {
+/// emitted; an empty head gives `[]` and "". Each entry's line sits under its
+/// origin in `src`.
+gen fn vyxEmitHeadFns(head: VyxHead, sig: String, prelude: String, src: String) -> String {
     let mut out = "export fn head(" + sig + ") -> Array<Html> {\n" + prelude
     out = out + "    let mut uiHd: Array<Html> = []\n"
     for it in head.items {
-        out = out + "    uiHd.push(" + vyxHeadItemExpr(it) + ")\n"
+        if it.kind != "title" {
+            out = out + vyxRegion("    uiHd.push(" + vyxHeadItemExpr(it) + ")\n", src, it.line, it.col)
+        }
     }
     out = out + "    return uiHd\n}\n"
-    out = out + vyxEmitHeadTitleFn(head, sig, prelude)
+    out = out + vyxEmitHeadTitleFn(head, sig, prelude, src)
     return out
 }
 
@@ -3228,14 +3239,15 @@ fn vyxEmitAccessorHeadTitle(sig: String, args: String) -> String {
 
 /// Emits only `headTitle(<sig>) -> String`. The client bundle keeps it for a
 /// dataless page, so the host resolves the title with no round-trip.
-fn vyxEmitHeadTitleFn(head: VyxHead, sig: String, prelude: String) -> String {
-    let mut out = "export fn headTitle(" + sig + ") -> String {\n" + prelude
-    if head.hasTitle {
-        out = out + "    return (" + head.titleExpr + ")\n}\n"
-    } else {
-        out = out + "    return \"\"\n}\n"
+gen fn vyxEmitHeadTitleFn(head: VyxHead, sig: String, prelude: String, src: String) -> String {
+    let mut ret = "    return \"\"\n"
+    for it in head.items {
+        if it.kind == "title" {
+            drop ret
+            ret = vyxRegion("    return (" + it.expr + ")\n", src, it.line, it.col)
+        }
     }
-    return out
+    return "export fn headTitle(" + sig + ") -> String {\n" + prelude + ret + "}\n"
 }
 
 // Client-page compilation: the view only. `load` runs on
@@ -3882,10 +3894,10 @@ gen fn vyxBuildPageModuleImpl(source: String, srcPath: String, dir: String, them
         // no round-trip. A loader page's title depends on its data and travels
         // in the payload.
         if hasLoad == false {
-            out = out + if hasHeadFn { vyxEmitAccessorHeadTitle(sig, headArgs) } else { vyxEmitHeadTitleFn(vyxNoHead(), sig, prelude) }
+            out = out + if hasHeadFn { vyxEmitAccessorHeadTitle(sig, headArgs) } else { vyxEmitHeadTitleFn(vyxNoHead(), sig, prelude, "") }
         }
     } else {
-        out = out + if hasHeadFn { vyxEmitAccessorHeadFns(sig, headArgs) } else { vyxEmitHeadFns(vyxNoHead(), sig, prelude) }
+        out = out + if hasHeadFn { vyxEmitAccessorHeadFns(sig, headArgs) } else { vyxEmitHeadFns(vyxNoHead(), sig, prelude, "") }
         // A loader page exports a typed props encoder: `toJson` cannot infer a
         // match-bound value's type, but a parameter carries it.
         if hasLoad {
@@ -3967,9 +3979,8 @@ export gen fn vyxBuildLayoutModuleAt(source: String, srcPath: String, dir: Strin
         return reportHere(Error, "this layout has no `<template>` section — a layout's view is the one element inside it")
     }
     let templateBody = vyxSlice(ba, templateSec.start, templateSec.end)
-    let script = if scriptSec.found { vyxSlice(ba, scriptSec.start, scriptSec.end) } else { "" }
 
-    let hs = vyxStripHead(script, "vyx_layout")
+    let hs = vyxStripHead(ba, scriptSec.start, scriptSec.end, "vyx_layout")
     if hs.head.err != "" {
         return consume hs.head.err
     }
@@ -3990,13 +4001,14 @@ export gen fn vyxBuildLayoutModuleAt(source: String, srcPath: String, dir: Strin
             "the layout in `\{dir}` has no `<slot/>` — a layout wraps its page, so it must say where the page goes",
         )
     }
+    let src = comp.srcPath.copy()
     let moduleStr = vyxBuildModule([comp], themed, theme)
     if moduleStr.contains("export fn uiLayoutBody") == false {
         return moduleStr
     }
     let mut out = moduleStr
     out = out + "export fn layout(children: consume Array<Html>) -> Html {\n    return uiLayoutBody(children)\n}\n"
-    out = out + vyxEmitHeadFns(hs.head, "", "")
+    out = out + vyxEmitHeadFns(hs.head, "", "", src)
     return out
 }
 
@@ -4042,10 +4054,9 @@ export gen fn vyxBuildErrorModuleAt(source: String, srcPath: String, dir: String
         return reportHere(Error, "this error page has no `<template>` section — its view is the one element inside it")
     }
     let templateBody = vyxSlice(ba, templateSec.start, templateSec.end)
-    let script = if scriptSec.found { vyxSlice(ba, scriptSec.start, scriptSec.end) } else { "" }
 
     // Error pages render inside the layout, which owns the head.
-    let hs = vyxStripHead(script, "vyx_error")
+    let hs = vyxStripHead(ba, scriptSec.start, scriptSec.end, "vyx_error")
     if hs.head.err != "" {
         return consume hs.head.err
     }
