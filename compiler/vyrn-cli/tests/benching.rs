@@ -331,18 +331,18 @@ fn a_root_function_does_not_replace_a_std_module_private_of_the_same_name() {
 #[test]
 #[ignore = "needs clang; run explicitly: cargo test -p vyrn-cli --test benching -- --ignored"]
 fn a_root_private_may_share_a_name_with_an_injected_module_private() {
-    // `cur` and `step` are private to `std/jsonread`, which the harness pulls in.
-    // A root `cur` over a different record shape must not be coerced to theirs.
+    // `peek` and `step` are private to `std/jsonread`, which the harness pulls in.
+    // A root `peek` over a different record shape must not be coerced to theirs.
     let dir = scratch("loud-collision");
     let file = dir.join("b.vyrn");
     std::fs::write(
         &file,
         "type MyP = { toks: Array<Int64>, n: Int64 }
-         fn cur(p: MyP) -> Int64 { return p.n }
+         fn peek(p: MyP) -> Int64 { return p.n }
          fn step(p: MyP) -> Int64 { return p.toks.length }
          bench \"t\" {
              let a = MyP { toks: [1, 2], n: 2 }
-             blackBox(cur(a) + step(a))
+             blackBox(peek(a) + step(a))
          }
          fn main() -> Int64 { return 0 }
 ",

@@ -1,0 +1,25 @@
+line 25: validate | items[0].qty | validation failed for `Qty`
+line 50: json.missing | customer.email | missing required field `email`
+line 75: json.type | id | expected integer, found string
+line 100: json.type | status | expected one of `Pending`, `Paid`, `Shipped`, `Delivered`, `Returned`, found string
+line 125: json.type | customer.vip | expected boolean, found null
+line 150: json.type | items[0].tags[0] | expected string, found number
+line 175: json.type | total | expected number, found string
+line 200: json.type | customer.address.street | expected string, found number
+line 225: json.type | items[0] | expected object, found number
+line 250: json.parse |  | line 1, col 112: trailing comma before '}'
+line 275: json.parse |  | line 1, col 13: duplicate object key: id
+line 300: json.type | customer | expected object, found array
+line 325: json.missing | customer.email | missing required field `email`
+line 325: validate | items[0].qty | validation failed for `Qty`
+line 350: json.type | customer.address.zip | expected string, found number
+line 350: json.type | customer.address.country | expected string, found boolean
+line 375: json.type | items[0].sku | expected string, found null
+line 375: json.type | items[0].price | expected number, found array
+line 400: validate | items[0].qty | validation failed for `Qty`
+rounds 1 documents 400
+orders 384 invalid 16 issues 19
+items 1378 qty 8958 attrs 282460
+price 463216.365282 total 116942.447037
+text bytes 105797
+vip 83 geo 337 shipped 147 coupons 92

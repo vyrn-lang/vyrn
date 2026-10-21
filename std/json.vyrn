@@ -517,6 +517,12 @@ gen fn jsonVariant(t: TypeArg, m: TypeMember) -> String {
     return m.name + "(" + binds + ") => VyrnRt_JObj([VyrnRt_JsonField { key: \"" + m.name + "\", value: " + value + " }])"
 }
 
+/// A cursor over one document, which `std/jsonread`'s functions read. It is
+/// declared here so that `fromJson`'s generated decoders can name it. `depth`
+/// counts the arrays and objects open at `pos`; `err` is the refusal, `""`
+/// while there is none.
+export type JsonReader = { src: String, n: Int64, pos: Int64, depth: Int64, err: String }
+
 test "emits compact JSON with correct escaping" {
     assertEq(emit(JNull), "null")
     assertEq(emit(JArr([JNum("1"), JStr("a\nb")])), "[1,\"a\\nb\"]")

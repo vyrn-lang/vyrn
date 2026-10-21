@@ -1,5 +1,5 @@
-//! Ratchet on wasmtime fuel: the wasm instructions each Benchmarks Game program spends on its
-//! committed input.
+//! Ratchet on wasmtime fuel: the wasm instructions each Benchmarks Game program and the
+//! `fromJson` benchmark spend on their committed input.
 //!
 //! Fuel counts instructions at wasmtime's prices. It does not see native code, memory latency,
 //! inlining or the length of a `memory.copy`, so a fuel row never licenses a speed claim; it
@@ -9,12 +9,13 @@
 //! `tests/pins/fuel.tsv` holds the count per program. `VYRN_PIN=write` rewrites it. Fuel may grow
 //! by `VYRN_FUEL_BUDGET` percent (default 0.1) over its row. `VYRN_FUEL_BASE` names another pin
 //! to compare against, so CI measures a pull request against the pin of the commit it builds on.
+//! A program that pin has no row for, one the pull request adds, is held to the tree's own pin.
 //! Against the tree's own pin a count that shrinks by more than the budget also fails: re-pin it.
 
 mod common;
 use common::*;
 
-/// The programs `benchgame.rs` checks, with the fixture each prints.
+/// The programs `benchgame.rs` checks and `jsondecode`, with the fixture each prints.
 const PROGRAMS: &[(&str, &str)] = &[
     ("nbody", "nbody-1000.expected"),
     ("spectralnorm", "spectralnorm-100.expected"),
@@ -26,6 +27,7 @@ const PROGRAMS: &[(&str, &str)] = &[
     ("pidigits", "pidigits-27.expected"),
     ("mandelbrot", "mandelbrot-200.expected"),
     ("regexredux", "regexredux-1000.expected"),
+    ("jsondecode", "../examples/expected/jsondecode.stdout"),
 ];
 
 const HEADER: &str = "program\tfuel";
@@ -91,7 +93,8 @@ fn no_benchmark_program_spends_more_fuel_than_its_pin() {
         return;
     }
     let base = std::env::var_os("VYRN_FUEL_BASE");
-    let pinned = read_pin(base.as_ref().map_or(pin_file(), Into::into).as_path());
+    let own = read_pin(&pin_file());
+    let pinned = base.as_ref().map(|b| read_pin(std::path::Path::new(b)));
     let budget: f64 = std::env::var("VYRN_FUEL_BUDGET").map_or(0.1, |b| {
         b.parse()
             .unwrap_or_else(|_| panic!("VYRN_FUEL_BUDGET: {b:?}"))
@@ -99,7 +102,8 @@ fn no_benchmark_program_spends_more_fuel_than_its_pin() {
 
     let mut failures = Vec::new();
     for (name, fuel) in &got {
-        let Some(&was) = pinned.get(name) else {
+        let from_base = pinned.as_ref().and_then(|p| p.get(name));
+        let Some(&was) = from_base.or_else(|| own.get(name)) else {
             failures.push(format!(
                 "{name}: no row in the pin; add it with VYRN_PIN=write"
             ));
@@ -110,7 +114,7 @@ fn no_benchmark_program_spends_more_fuel_than_its_pin() {
             failures.push(format!(
                 "{name}: {was} -> {fuel} fuel, +{change:.3}% (budget {budget}%)"
             ));
-        } else if base.is_none() && change < -budget {
+        } else if from_base.is_none() && change < -budget {
             failures.push(format!(
                 "{name}: {was} -> {fuel} fuel, {change:.3}%; re-pin with VYRN_PIN=write"
             ));

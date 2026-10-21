@@ -4,6 +4,7 @@
 //! same verdict without the network. The sha256 is verified on every load.
 
 use std::cell::RefCell;
+use std::collections::BTreeMap;
 use std::process::Command;
 
 // The lock and cache readers live in `vyrn_frontend::manifest`: the LSP reads
@@ -162,6 +163,32 @@ pub struct RemoteResolver {
     /// The vendor location; `None` means no manifest.
     pub project_dir: Option<String>,
     pub offline: bool,
+    /// Each local path read or listed, stamped before its first read, so a
+    /// later stamp that differs is an edit the build did not see. `None`
+    /// records nothing; `vyrn dev` arms it and watches what it records.
+    pub seen: Option<RefCell<Stamps>>,
+}
+
+/// A file's or a directory's modification time and length; `None` when it is
+/// absent or unreadable.
+pub type Stamp = Option<(std::time::SystemTime, u64)>;
+
+/// Paths and their stamps, in path order.
+pub type Stamps = BTreeMap<String, Stamp>;
+
+/// The stamp of `path` now.
+pub fn stamp(path: &str) -> Stamp {
+    let m = std::fs::metadata(path).ok()?;
+    Some((m.modified().ok()?, m.len()))
+}
+
+impl RemoteResolver {
+    /// Records `path` in [`RemoteResolver::seen`], if armed.
+    fn note(&self, path: &str) {
+        if let Some(seen) = &self.seen {
+            (seen.borrow_mut().entry(path.to_string())).or_insert_with(|| stamp(path));
+        }
+    }
 }
 
 impl RemoteResolver {
@@ -216,11 +243,14 @@ impl vyrn_frontend::loader::ModuleResolver for RemoteResolver {
         if vyrn_frontend::loader::is_remote(resolved) {
             self.read_remote(resolved)
         } else {
+            self.note(resolved);
             DiskResolver.read(resolved)
         }
     }
     fn list_kinds(&self, resolved: &str) -> Result<Vec<String>, String> {
-        // A remote key has no directory to enumerate.
+        // A remote key has no directory to enumerate. A directory's time
+        // moves when an entry is created, removed or renamed.
+        self.note(resolved);
         DiskResolver.list_kinds(resolved)
     }
     fn gen_cache_get(&self, key: &str) -> Option<String> {
@@ -335,6 +365,7 @@ mod tests {
             lock: RefCell::new(lock),
             project_dir: Some(project.clone()),
             offline: true,
+            seen: None,
         };
         let got = r.read_remote("https://x.dev/one.vyrn").unwrap();
         assert_eq!(got.as_bytes(), text);
@@ -355,6 +386,7 @@ mod tests {
             lock: RefCell::new(lock),
             project_dir: None,
             offline: true,
+            seen: None,
         };
         let e = r.read_remote("https://x.dev/never-seen.vyrn").unwrap_err();
         assert!(e.contains("not in vyrn.lock"), "{e}");
