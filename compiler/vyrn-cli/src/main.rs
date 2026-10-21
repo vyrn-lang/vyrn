@@ -5066,7 +5066,8 @@ fn run_wasm(
                 out.counts.as_ref(),
                 table.as_ref(),
             ) {
-                lastrun::save(path, stamp, &counts.sites);
+                let dir = vyrn_frontend::manifest::profile_dir();
+                lastrun::save(&dir, path, stamp, &counts.sites);
                 wasm_profile(*load, compile, meter, (counts, program, table.as_slice()));
             }
             ExitCode::from((out.code & 0xff) as u8)
