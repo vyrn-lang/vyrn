@@ -85,7 +85,7 @@ Whether `needle` occurs in `s`; an empty needle occurs everywhere.
 ## SliceError
 
 ```vyrn
-type SliceError = OutOfRange(Int64) | SplitsCharacter(Int64)
+type SliceError = enum { OutOfRange(Int64), SplitsCharacter(Int64) }
 ```
 
 The two ways a byte range fails to name a substring, each carrying the

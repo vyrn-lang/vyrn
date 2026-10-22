@@ -10,7 +10,7 @@ patches the DOM.
 ## Attr
 
 ```vyrn
-type Attr = Cls(String) | Id(String) | A(String, String) | On(String, String, String) | Key(String)
+type Attr = enum { Cls(String), Id(String), A(String, String), On(String, String, String), Key(String) }
 ```
 
 An attribute on an element. `On(event, handler, payload)` renders as
@@ -21,7 +21,7 @@ identity for the keyed differ and renders as `data-key="k"`.
 ## Markup
 
 ```vyrn
-type Markup = TrustedMarkup(String)
+type Markup = enum { TrustedMarkup(String) }
 ```
 
 Markup the program vouches for. `Raw` and `v-html` take only this, so no
@@ -34,7 +34,7 @@ output.
 ## Html
 
 ```vyrn
-type Html = Empty | Text(String) | Raw(Markup) | El(String, Array<Attr>, Array<Html>)
+type Html = enum { Empty, Text(String), Raw(Markup), El(String, Array<Attr>, Array<Html>) }
 ```
 
 A node in the view tree. `Text` is always escaped; `Raw` is never escaped.
@@ -43,7 +43,7 @@ A node in the view tree. `Text` is always escaped; `Raw` is never escaped.
 ## Sub
 
 ```vyrn
-type Sub = Every(Int64, String) | Keydown(String, String)
+type Sub = enum { Every(Int64, String), Keydown(String, String) }
 ```
 
 A host subscription. An app may export `vyrnSubs() -> String` returning
@@ -139,7 +139,7 @@ The markup as written, for a reader such as a search index.
 ## PatchOp
 
 ```vyrn
-type PatchOp = OpSetText(Array<Int64>, String) | OpSetAttrs(Array<Int64>, Array<Attr>) | OpReplace(Array<Int64>, Html) | OpInsert(Array<Int64>, Int64, Html) | OpRemove(Array<Int64>, Int64) | OpMove(Array<Int64>, Int64, Int64)
+type PatchOp = enum { OpSetText(Array<Int64>, String), OpSetAttrs(Array<Int64>, Array<Attr>), OpReplace(Array<Int64>, Html), OpInsert(Array<Int64>, Int64, Html), OpRemove(Array<Int64>, Int64), OpMove(Array<Int64>, Int64, Int64) }
 ```
 
 A DOM edit produced by `diff`, applied in order by `web/vyrn-dom.js`; the

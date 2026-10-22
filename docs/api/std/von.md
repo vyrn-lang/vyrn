@@ -34,7 +34,7 @@ One `"key": value` entry of a map literal.
 ## Von
 
 ```vyrn
-type Von = VRecord(String, Array<VonField>) | VVariant(String, Array<Von>) | VArray(Array<Von>) | VMap(Array<VonEntry>) | VStr(String) | VInt(String) | VFloat(String) | VBool(Bool)
+type Von = enum { VRecord(String, Array<VonField>), VVariant(String, Array<Von>), VArray(Array<Von>), VMap(Array<VonEntry>), VStr(String), VInt(String), VFloat(String), VBool(Bool) }
 ```
 
 A VON value. Numbers hold their raw, validated source text, so

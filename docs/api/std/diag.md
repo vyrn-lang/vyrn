@@ -25,7 +25,7 @@ against the module that imported the generator.
 ## Severity
 
 ```vyrn
-type Severity = Warning | Error
+type Severity = enum { Warning, Error }
 ```
 
 `Warning`: this compiled, but. `Error`: this does not compile.
