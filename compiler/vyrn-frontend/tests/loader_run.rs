@@ -269,7 +269,7 @@ mod tests {
     fn aliased_enum_import_brings_variants_under_own_names() {
         // Importing an enum under an alias still brings its variants by their
         // own (unaliased) names.
-        let lib = "export type Color = | Red | Green | Blue";
+        let lib = "export type Color = enum { Red, Green, Blue }";
         let root = "import { Color as Hue } from \"./lib\" \
                     fn pick(h: Hue) -> Int64 { return match h { Red => 1, Green => 2, Blue => 3 } } \
                     fn main() -> Int64 { let c: Hue = Green return pick(c) }";
@@ -493,7 +493,7 @@ mod tests {
 
     #[test]
     fn importing_an_enum_brings_its_variants() {
-        let lib = "export type Shape = | Circle(Int64) | Dot \
+        let lib = "export type Shape = enum { Circle(Int64), Dot } \
                    export fn area(s: Shape) -> Int64 { \
                        return match s { Circle(r) => 3 * r * r, Dot => 0 } }";
         let root = "import { Shape, area } from \"./lib\" \
@@ -868,7 +868,7 @@ mod tests {
 
     #[test]
     fn namespace_enum_variant_with_payload() {
-        let lib = "export type Shape = | Circle(Int64) | Dot \
+        let lib = "export type Shape = enum { Circle(Int64), Dot } \
                    export fn area(s: Shape) -> Int64 { return match s { Circle(r) => r * r, Dot => 0 } }";
         let root = "import * as g from \"./lib\" \
                     fn main() -> Int64 { return g.area(g.Shape.Circle(6)) }";
@@ -1033,7 +1033,7 @@ mod tests {
         // Variant renames of an injected module follow only an import of the enum itself;
         // importing only `emit` leaves the consumer's own `JStr` alone.
         let root = "import { emit } from \"std/json\" \
-                    type T = | JStr(Int64) | JEnd \
+                    type T = enum { JStr(Int64), JEnd } \
                     fn main() -> Int64 { \
                         let t: T = JStr(41) \
                         return match t { JStr(n) => n, JEnd => 0 } \

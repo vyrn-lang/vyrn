@@ -124,7 +124,7 @@ fn main() -> Int64 {
 /// keyword off the message.
 #[test]
 fn match_exhaustiveness_pinned_to_match_keyword() {
-    let src = "type T = | A(Int64) | B
+    let src = "type T = enum { A(Int64), B }
 fn f(x: T) -> Int64 {
     let r = match x {
         A(n) => n,

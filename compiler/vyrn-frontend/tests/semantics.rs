@@ -830,7 +830,7 @@ fn if_let_over_result_and_user_enum() {
     let ok = "fn f() -> Result<Int64, String> { return Ok(4) } \
                   fn main() -> Int64 { if let Ok(n) = f() { return n } return 0 }";
     assert_eq!(run(ok).unwrap(), 4);
-    let enm = "type Shape = | Circle(Int64) | Rect(Int64, Int64) | Empty \
+    let enm = "type Shape = enum { Circle(Int64), Rect(Int64, Int64), Empty } \
                    fn main() -> Int64 { let s = Rect(3, 4) \
                        if let Rect(w, h) = s { return w * h } return 0 }";
     assert_eq!(run(enm).unwrap(), 12);

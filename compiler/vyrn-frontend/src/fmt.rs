@@ -231,12 +231,11 @@ fn open_levels(opens: &[usize]) -> i32 {
 }
 
 /// Indentation, in 4-space units, of a line whose first token is `first`. A
-/// leading closer dedents; a leading `|` (enum variant) indents one more.
+/// leading closer dedents.
 fn indent_level(opens: &[usize], first: Option<&Tok>) -> usize {
     let d = open_levels(opens);
     let d = match first {
         Some(Tok::RParen | Tok::RBracket | Tok::RBrace) => d - 1,
-        Some(Tok::Pipe) => d + 1,
         _ => d,
     };
     d.max(0) as usize
@@ -545,11 +544,11 @@ mod tests {
     }
 
     #[test]
-    fn leading_pipe_enum_indents() {
-        let src = "type Shape =\n| Circle(Int64)\n| Rect(Int64, Int64)\n| Unit\n";
+    fn an_enum_indents_its_variants_by_brace_depth() {
+        let src = "type Shape=enum{\nCircle(Int64),\nRect(Int64,Int64),\nUnit,\n}\n";
         assert_eq!(
             f(src),
-            "type Shape =\n    | Circle(Int64)\n    | Rect(Int64, Int64)\n    | Unit\n"
+            "type Shape = enum {\n    Circle(Int64),\n    Rect(Int64, Int64),\n    Unit,\n}\n"
         );
     }
 

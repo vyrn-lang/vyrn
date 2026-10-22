@@ -32,7 +32,7 @@ export fn decodeUtf8(b: Array<UInt8>) -> Option<Array<UInt32>> {
         } else {
             out.push(
                 ((b0 & 7) << 18) | ((UInt32(b[i + 1]) & 63) << 12) | ((UInt32(b[i + 2]) & 63) << 6)
-                    | (UInt32(b[i + 3]) & 63),
+                | (UInt32(b[i + 3]) & 63),
             )
         }
         i = i + w

@@ -477,7 +477,7 @@ fn non_exhaustive_match_squiggles_the_match_keyword() {
     // `match` is at 1-based line 3, cols 13-17.
     let uri = "file:///non/exhaustive.vyrn";
     let src = "\
-type T = | A(Int64) | B;
+type T = enum { A(Int64), B };
 fn f(x: T) -> Int64 {
     let r = match x {
         A(n) => n,
@@ -1900,7 +1900,7 @@ fn semantic_tokens_classify_by_kind() {
     std::fs::write(
         dir.join("lib.vyrn"),
         "export fn greet(name: String) -> String {\n    return name\n}\n\
-         export type Color = | Red | Green | Blue\n",
+         export type Color = enum { Red, Green, Blue }\n",
     )
     .unwrap();
     let main_src = "import { greet, Color } from \"./lib\"\n\
@@ -2117,7 +2117,7 @@ fn semantic_tokens_classify_constructors_as_enum_member() {
     let dir = std::env::temp_dir().join(format!("vyrn-lsp-ctor-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
-    let main_src = "type Shape = | Circle(Int64) | Dot\n\
+    let main_src = "type Shape = enum { Circle(Int64), Dot }\n\
 fn make(n: Int64) -> Shape {\n\
     return Circle(n)\n\
 }\n\
@@ -2684,7 +2684,7 @@ const OUTLINE_APP: &str = "import { components } from \"std/vyx\"\n\
     fn main() -> Int64 { return 0 }\n";
 const OUTLINE_VYX: &str = "<script>\n\
     props { label: String }\n\
-    type Tone = | Calm | Loud\n\
+    type Tone = enum { Calm, Loud }\n\
     let greeting = \"hi\"\n\
     fn shout(s: String) -> String { return s + greeting }\n\
     </script>\n\
@@ -2728,8 +2728,8 @@ fn vyx_document_symbol_lists_script_declarations() {
     // LSP SymbolKind: Variable=13, Function=12, EnumMember=22, Struct=23.
     let want = [
         ("Tone", 23, 2, 5),
-        ("Calm", 22, 2, 14),
-        ("Loud", 22, 2, 21),
+        ("Calm", 22, 2, 19),
+        ("Loud", 22, 2, 25),
         ("greeting", 13, 3, 4),
         ("shout", 12, 4, 3),
     ];

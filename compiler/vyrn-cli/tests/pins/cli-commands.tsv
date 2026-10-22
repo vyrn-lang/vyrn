@@ -11,7 +11,7 @@ run	209	2
 deps	198	3
 update	194	5
 fmt	186	5
-fix	134	1
+fix	140	1
 test, bench	130	2
 build, bench	120	0
 (global)	94	2

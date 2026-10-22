@@ -52,9 +52,12 @@ fn emit_gen_shows_the_synthesized_translation_module() {
     let src = String::from_utf8_lossy(&out.stdout);
 
     // Module state is the generator sandbox's carve-out.
-    assert!(src.contains("export type Locale ="), "Locale enum:\n{src}");
     assert!(
-        src.contains("| En") && src.contains("| Uk"),
+        src.contains("export type Locale = enum {"),
+        "Locale enum:\n{src}"
+    );
+    assert!(
+        src.contains("    En,") && src.contains("    Uk }"),
         "locale variants:\n{src}"
     );
     assert!(

@@ -367,7 +367,7 @@ const fn cmd(
 const COMMANDS: &[Cmd] = &[
     cmd("run", Pos::Program, run_cmd, "compiles and runs; trailing args reach the program's args()", &[]),
     cmd("check", Pos::File, check_cmd, "loads, checks and judges the program, runs every generator, and prints ok", &[]),
-    cmd("fix", Pos::File, fix_cmd, "applies the `.copy()` a move diagnostic names, in the file given; every other fix on the menu is a decision and is refused", &[]),
+    cmd("fix", Pos::File, fix_cmd, "braces each leading-bar enum and applies the `.copy()` a move diagnostic names, in the file given; every other fix on the menu is a decision and is refused", &[]),
     cmd("build", Pos::File, build, "a native executable: the module through wasm2c and clang (needs wabt and simde under tools/, or $VYRN_WASM2C and $VYRN_SIMDE)", &[
         Flag("-o", Some("out"), ""),
         Flag("--target", Some("wasm"), "writes the module itself, with no LLVM, clang or sysroot"),
@@ -2712,9 +2712,10 @@ fn existing_md_files(dir: &str) -> Vec<String> {
         .collect()
 }
 
-/// `vyrn fix [file]`: applies the `.copy()` a diagnostic carries as a
-/// [`Fix`] and reports every other diagnostic in the file, because `consume`
-/// and `for x in consume xs` are decisions, not edits.
+/// `vyrn fix [file]`: rewrites each leading-bar enum into the braced form
+/// ([`vyrn_frontend::migrate::brace_enums`]), applies the `.copy()` a diagnostic
+/// carries as a [`Fix`] and reports every other diagnostic in the file, because
+/// `consume` and `for x in consume xs` are decisions, not edits.
 ///
 /// It edits only the file given; a diagnostic in an import is reported. A round
 /// is kept only if the diagnostic count falls, so the file never compiles worse
@@ -2723,9 +2724,14 @@ fn fix_cmd(call: &Call) -> Outcome {
     let (p, path) = call.root()?;
     let source = read_source(&path)?;
     let root_key = dos_to_slash(&path);
-    let mut text = source.to_string();
+    // A removed spelling does not parse, so its rewrite runs before the file loads. A
+    // lex error leaves the text alone; the first round reports it.
+    let (mut text, braced) = vyrn_frontend::migrate::brace_enums(&source)
+        .unwrap_or_else(|_| (source.to_string(), Vec::new()));
     let mut rounds = 0usize;
-    let mut applied: Vec<String> = Vec::new();
+    let mut applied: Vec<String> = (braced.iter())
+        .map(|line| format!("{root_key}:{line}: enum braced"))
+        .collect();
     let mut refused: Vec<String> = Vec::new();
     let note = |refused: &mut Vec<String>, n: String| {
         if !refused.contains(&n) {

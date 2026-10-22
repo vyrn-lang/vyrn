@@ -23,7 +23,7 @@
 // The built-in `Value` enum: the closed set of types a tagged
 // template can interpolate. Injected so every program can name `Array<Value>`
 // and match `IntVal`/`StrVal`/`BoolVal` — the tag surface — without a `use`.
-type Value = | IntVal(Int64) | StrVal(String) | BoolVal(Bool)
+type Value = enum { IntVal(Int64), StrVal(String), BoolVal(Bool) }
 
 // The built-in `Template` record: the structured form of an
 // interpolated string — literal `parts` interleaved with boxed `values`.
@@ -36,7 +36,7 @@ type Template = { parts: Array<String>, values: Array<Value> }
 // so every problem is reported at once and each carries a translation key.
 type Issue = { key: String, path: String, message: String }
 
-type Validation<T> = | Valid(T) | Invalid(Array<Issue>)
+type Validation<T> = enum { Valid(T), Invalid(Array<Issue>) }
 
 // Persistence outcome: the three honest results of `load`ing a
 // typed value from a file — the file is absent (`Missing`), present but not
@@ -44,7 +44,7 @@ type Validation<T> = | Valid(T) | Invalid(Array<Issue>)
 // A missing file is deliberately NOT the same as a corrupt one. Injected like
 // `Validation` so `load(TypeName, path)` (a call-site desugar) can name its
 // variants without an import.
-type LoadResult<T> = | Missing | Corrupt(Array<Issue>) | Loaded(T)
+type LoadResult<T> = enum { Missing, Corrupt(Array<Issue>), Loaded(T) }
 
 // `Schema` (type reflection): the extractable shape of a validated type,
 // produced by `schemaOf(TypeName)` — its name, base spelling, `///` doc,

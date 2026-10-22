@@ -291,7 +291,7 @@ const TARGETS: &[Target] = &[
     },
     Target {
         tag: "enum",
-        decls: "type Color = | Red | Green",
+        decls: "type Color = enum { Red, Green }",
         ty: "Color",
         show: "toJson(x)",
         inputs: &[
@@ -308,7 +308,7 @@ const TARGETS: &[Target] = &[
     },
     Target {
         tag: "shape",
-        decls: "type Shape = | Dot | Circle(Int64) | Rect(Int64, Int64)",
+        decls: "type Shape = enum { Dot, Circle(Int64), Rect(Int64, Int64) }",
         ty: "Shape",
         show: "toJson(x)",
         inputs: &[
@@ -418,7 +418,7 @@ const TARGETS: &[Target] = &[
     },
     Target {
         tag: "tuple",
-        decls: "type Op = | Nop | Move(Int64, Age) | Say(String) 
+        decls: "type Op = enum { Nop, Move(Int64, Age), Say(String) } 
  type Ops = Array<Op>",
         ty: "Ops",
         show: "toJson(x)",
@@ -433,7 +433,7 @@ const TARGETS: &[Target] = &[
     // only the arity check refuses it.
     Target {
         tag: "optpair",
-        decls: "type OP = | P(Option<Int64>, Option<Int64>)",
+        decls: "type OP = enum { P(Option<Int64>, Option<Int64>) }",
         ty: "OP",
         show: "toJson(x)",
         inputs: &[

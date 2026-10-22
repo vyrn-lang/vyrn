@@ -77,11 +77,11 @@ fn shapes(n: usize) -> Vec<(&'static str, String)> {
     out.push(("many locals", s));
 
     // A long `match`: one enum of `n` variants, one arm each.
-    let mut s = String::from("type T =\n");
+    let mut s = String::from("type T = enum {\n");
     for i in 0..n {
-        writeln!(s, "    | V{i}").unwrap();
+        writeln!(s, "    V{i},").unwrap();
     }
-    s.push_str("fn pick(t: T) -> Int64 {\n    return match t {\n");
+    s.push_str("}\nfn pick(t: T) -> Int64 {\n    return match t {\n");
     for i in 0..n {
         writeln!(s, "        V{i} => {i},").unwrap();
     }
@@ -91,14 +91,15 @@ fn shapes(n: usize) -> Vec<(&'static str, String)> {
     // A match over payload variants: `n` variants that each carry a String,
     // `n` arms that each bind it.
     let mut s = String::from(
-        "type T =
+        "type T = enum {
 ",
     );
     for i in 0..n {
-        writeln!(s, "    | V{i}(String)").unwrap();
+        writeln!(s, "    V{i}(String),").unwrap();
     }
     s.push_str(
-        "fn pick(t: T) -> Int64 {
+        "}
+fn pick(t: T) -> Int64 {
     return match t {
 ",
     );

@@ -1,0 +1,10 @@
+type Opt<T> = enum {
+    Wrap(T),
+    Empty,
+}
+
+fn get(o: Opt<Int64>) -> Int64 {
+    return match o { Wrap(x) => x, Empty => 0 }
+}
+
+fn main() -> Int64 { return get(Wrap(1)) + get(Empty) }

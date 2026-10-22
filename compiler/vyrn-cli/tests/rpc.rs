@@ -244,11 +244,11 @@ fn emit_gen_client_shows_stubs_and_dispatchers() {
         "RpcIssue type:\n{src}"
     );
     assert!(
-        src.contains("export type RpcReply<T> ="),
+        src.contains("export type RpcReply<T> = enum {"),
         "RpcReply type:\n{src}"
     );
     assert!(
-        src.contains("| Rejected(Array<RpcIssue>)"),
+        src.contains("    Rejected(Array<RpcIssue>),"),
         "RpcReply Rejected arm:\n{src}"
     );
     assert!(

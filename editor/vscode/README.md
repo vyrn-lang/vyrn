@@ -73,7 +73,7 @@ re-parsing).
    - Hover an identifier (e.g. `Circle` in `area(Circle(2))`) → a tooltip with
      the variant/function/type detail.
    - F12 / Ctrl-click on `area` → jumps to the `fn area` line; on `Circle` →
-     jumps to `| Circle(Int64)`.
+     jumps to the `Circle(Int64)` variant.
    - Trigger completion (Ctrl+Space, or type a prefix) → top-level functions,
      types, and variants.
 

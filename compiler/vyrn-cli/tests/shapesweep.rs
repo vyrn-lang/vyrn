@@ -94,7 +94,7 @@ impl Ty {
         match self {
             Ty::Rec => "type P = { s: String, n: Int64 }",
             Ty::Pt => "type Pt = { x: Int64, y: Int64 }",
-            Ty::Enm => "type E = | A(String) | B(Int64)",
+            Ty::Enm => "type E = enum { A(String), B(Int64) }",
             _ => "",
         }
     }
@@ -171,7 +171,7 @@ impl Index for Bag {
 }
 type H = { bag: Bag }
 type W = { f: @T@, g: @T@, a: In, b: In, xs: Array<@T@>, ys: Array<@T@>, xss: Array<Array<@T@>>, ins: Array<In>, m: Map<String, @T@>, h: H, k: H }
-type Cell = | Hold(@T@) | Nothing
+type Cell = enum { Hold(@T@), Nothing }
 fn idx(k: Int64) -> Int64 { return k }
 fn key(k: Int64) -> String { return "k" + k.toString() }
 @MK@

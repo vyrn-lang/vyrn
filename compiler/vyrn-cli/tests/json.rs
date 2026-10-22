@@ -65,7 +65,7 @@ fn an_injected_runtime_module_cannot_collide_with_the_users_names() {
     let file = dir.join("collide.vyrn");
     std::fs::write(
         &file,
-        "type Json = | Mine | JStr(String)\n\
+        "type Json = enum { Mine, JStr(String) }\n\
          type P = { n: Int64 }\n\
          fn emit(x: Int64) -> String { return \"user emit \" + x.toString() }\n\
          fn hex2(b: Int64) -> String { return \"user hex2\" }\n\

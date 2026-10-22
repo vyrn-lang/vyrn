@@ -47,16 +47,16 @@ fn symbols_have_precise_name_columns() {
     let a = analyze(&enum_vyrn());
     let by_name: std::collections::HashMap<&str, &vyrn_frontend::Symbol> =
         a.symbols.iter().map(|s| (s.name.as_str(), s)).collect();
-    // `type Shape =` on line 1: "type" cols 1-4, space 5, "Shape" cols 6-10.
+    // `type Shape = enum {` on line 1: "type" cols 1-4, space 5, "Shape" cols 6-10.
     let shape = by_name["Shape"];
     assert_eq!(shape.kind, SymbolKind::Type);
     assert_eq!(shape.line, 1);
     assert_eq!(shape.col, 6);
-    // `| Circle(Int)` on line 2: "| " then "Circle" cols 7-12.
+    // `    Circle(Int64),` on line 2: "Circle" cols 5-10.
     let circle = by_name["Circle"];
     assert_eq!(circle.kind, SymbolKind::Variant);
     assert_eq!(circle.line, 2);
-    assert_eq!(circle.col, 7);
+    assert_eq!(circle.col, 5);
     // `fn area(...)` on line 6: "fn " then "area" cols 4-7.
     let area = by_name["area"];
     assert_eq!(area.kind, SymbolKind::Function);
@@ -72,7 +72,7 @@ fn resolve_variant_at_call_site() {
     assert_eq!(r.kind, SymbolKind::Variant);
     assert_eq!(r.name, "Circle");
     assert_eq!(r.target_line, 2);
-    assert_eq!(r.target_col, 7);
+    assert_eq!(r.target_col, 5);
     assert_eq!(r.hover, "variant of Shape: Circle(Int64)");
 }
 

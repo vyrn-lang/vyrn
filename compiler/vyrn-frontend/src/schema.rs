@@ -1248,7 +1248,7 @@ mod tests {
             other => panic!("expected an enum, got {other:?}"),
         }
         // Emit, import, re-emit: byte-equal.
-        let src = "type Color = | Red | Green | Blue\nfn main() -> Int64 { return 0 }";
+        let src = "type Color = enum { Red, Green, Blue }\nfn main() -> Int64 { return 0 }";
         let program = crate::check(src).unwrap();
         let types: HashMap<String, TypeDecl> = program
             .type_decls
@@ -1270,7 +1270,7 @@ mod tests {
     /// A mixed nullary and payload enum round-trips through `oneOf`.
     #[test]
     fn payload_enum_schema_round_trips() {
-        let src = "type Shape = | Circle(Int64) | Rect(Int64, Int64) | Unit\n\
+        let src = "type Shape = enum { Circle(Int64), Rect(Int64, Int64), Unit }\n\
                    fn main() -> Int64 { return 0 }";
         let program = crate::check(src).unwrap();
         let types: HashMap<String, TypeDecl> = program

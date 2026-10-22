@@ -395,7 +395,7 @@ fn push_node(
     }
     let written = match kind {
         "record" => format!("{{ {} }}", spelled.join(", ")),
-        "enum" => format!("| {}", spelled.join(" | ")),
+        "enum" => format!("enum {{ {} }}", spelled.join(", ")),
         _ => ty.to_string(),
     };
     let spelling = match &pred {
@@ -692,8 +692,9 @@ fn render_type_decl(t: &TypeDecl, types: &HashMap<String, TypeDecl>) -> String {
                 .iter()
                 .map(|v| variant_arm(v, &|t| t.to_string()))
                 .collect();
-            out.push_str("| ");
-            out.push_str(&rendered.join(" | "));
+            out.push_str("enum { ");
+            out.push_str(&rendered.join(", "));
+            out.push_str(" }");
         }
         base => {
             out.push_str(&base.to_string());
@@ -851,10 +852,10 @@ mod tests {
 
     #[test]
     fn renders_enum() {
-        let (d, t) = decl("export type Shape = | Circle(Int64) | Dot\n", "Shape");
+        let (d, t) = decl("export type Shape = enum { Circle(Int64), Dot }\n", "Shape");
         assert_eq!(
             render_type_decl(&d, &t),
-            "export type Shape = | Circle(Int64) | Dot"
+            "export type Shape = enum { Circle(Int64), Dot }"
         );
     }
 
@@ -932,11 +933,11 @@ mod tests {
                 "String  `String` [] ",
             ]
         );
-        let (d, t) = decl("type Id = Int64\ntype E = | X | Y(Id, UInt8)\n", "E");
+        let (d, t) = decl("type Id = Int64\ntype E = enum { X, Y(Id, UInt8) }\n", "E");
         assert_eq!(
             shape_rows(&shape_lit(&d, &t)),
             [
-                "enum  `| X | Y(Id, UInt8)` [] X[] Y[1, 2]",
+                "enum  `enum { X, Y(Id, UInt8) }` [] X[] Y[1, 2]",
                 "named Id `Id` [] ",
                 "UInt8  `UInt8` [] ",
             ]
@@ -1113,7 +1114,7 @@ mod tests {
         let wire = "\
             export type Id = Int64 where value >= 1\n\
             export type Inner = { n: Int64 }\n\
-            export type Shape = | Circle(Id) | Dot\n\
+            export type Shape = enum { Circle(Id), Dot }\n\
             export type Book = { id: Id, shape: Shape }\n\
             export type Req = { book: Book }\n\
             export type Wrap = Array<Inner>\n\
