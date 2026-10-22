@@ -6,10 +6,6 @@ import { BodyColumns, bodyColumns, pushBody } from columns("./lib/bodies")
 
 let steps = 1000
 
-fn sqrtF(v: Float64) -> Float64 {
-    return F64x2.sqrt(F64x2(v, v)).lane(0)
-}
-
 fn fixed9(v: Float64) -> String {
     let mut a = v
     let mut sign = ""
@@ -103,7 +99,7 @@ fn energy(b: BodyColumns) -> Float64 {
             let dx = b.x[i] - b.x[j]
             let dy = b.y[i] - b.y[j]
             let dz = b.z[i] - b.z[j]
-            e = e - b.mass[i] * b.mass[j] / sqrtF(dx * dx + dy * dy + dz * dz)
+            e = e - b.mass[i] * b.mass[j] / (dx * dx + dy * dy + dz * dz).sqrt()
             j = j + 1
         }
         i = i + 1
@@ -122,7 +118,7 @@ fn advance(bodies: consume BodyColumns, dt: Float64) -> BodyColumns {
             let dy = b.y[i] - b.y[j]
             let dz = b.z[i] - b.z[j]
             let d2 = dx * dx + dy * dy + dz * dz
-            let mag = dt / (d2 * sqrtF(d2))
+            let mag = dt / (d2 * d2.sqrt())
             let mi = b.mass[i]
             let mj = b.mass[j]
             b.vx[i] = b.vx[i] - dx * mj * mag

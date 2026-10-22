@@ -9658,6 +9658,25 @@ fn builtin_spec(
     Some((params.as_slice(), ins, ret))
 }
 
+/// A [`Spec::Unary`] row's instruction at the operand's type, or `None` at a type the row
+/// does not admit.
+fn unary_ins(name: &str, ty: &Type) -> Option<Instruction<'static>> {
+    use Instruction::*;
+    let wide = matches!(ty, Type::Int | Type::IntN { bits: 64, .. });
+    let narrow = matches!(ty, Type::IntN { bits: 32, .. });
+    Some(match name {
+        "@clz" if narrow => I32Clz,
+        "@clz" if wide => I64Clz,
+        "@ctz" if narrow => I32Ctz,
+        "@ctz" if wide => I64Ctz,
+        "@popcount" if narrow => I32Popcnt,
+        "@popcount" if wide => I64Popcnt,
+        "@sqrt" if *ty == Type::Float => F64Sqrt,
+        "@sqrt" if *ty == Type::Float32 => F32Sqrt,
+        _ => return None,
+    })
+}
+
 /// The arguments, where every one is a value.
 fn arg_vals(
     args: &[(Arg, vyrn_frontend::ast::Capability)],
@@ -11014,6 +11033,9 @@ impl<'a, 'p> Fn_<'a, 'p> {
                 Some(Spec::Lanes) => at
                     .clone()
                     .ok_or_else(|| gap("a lane builtin the checker did not type", line)),
+                Some(Spec::Unary(_)) => at
+                    .clone()
+                    .ok_or_else(|| gap("a unary builtin the checker did not type", line)),
                 // A removal returns the element, or an `Option` of it.
                 Some(Spec::Removes) => at
                     .clone()
@@ -11115,6 +11137,18 @@ impl<'a, 'p> Fn_<'a, 'p> {
                 }
                 b.ins(&ins);
                 return Ok(ret.clone());
+            }
+            Some(Spec::Unary(_)) => {
+                let [(v, _)] = args else {
+                    return unsupported(&format!("`{callee}` of other than one value"), line);
+                };
+                let ty = self.cx.resolve(&self.core_ty(v, &Type::Int));
+                let Some(ins) = unary_ins(callee, &ty) else {
+                    return unsupported(&format!("`{callee}` of `{ty}`"), line);
+                };
+                self.core_val(m, b, v, &ty, line)?;
+                b.ins(&ins);
+                return Ok(ty);
             }
             // `x.copy()`: the operand at its own type, then the duplication it asks for. A
             // type with `impl Copy for T` never reaches here; the core calls its declaration.
@@ -14189,6 +14223,7 @@ impl<'a, 'p> Fn_<'a, 'p> {
         match core_builtin(self.cx, callee, kind) {
             Some(
                 Spec::Typed(..)
+                | Spec::Unary(_)
                 | Spec::OwnType
                 | Spec::Barrier
                 | Spec::Renders(_)
@@ -14778,13 +14813,21 @@ mod tests {
     #[test]
     fn builtin_rows_all_emit() {
         for (name, spec) in vyrn_lower::core::builtin_rows() {
-            let Spec::Typed(params, _) = spec else {
-                continue;
-            };
-            assert!(
-                builtin_spec(name, params.len(), false).is_some(),
-                "`{name}` has a row and no instruction"
-            );
+            match spec {
+                Spec::Typed(params, _) => assert!(
+                    builtin_spec(name, params.len(), false).is_some(),
+                    "`{name}` has a row and no instruction"
+                ),
+                Spec::Unary(admits) => {
+                    for t in admits {
+                        assert!(
+                            unary_ins(name, t).is_some(),
+                            "`{name}` has no instruction at `{t}`"
+                        );
+                    }
+                }
+                _ => {}
+            }
         }
     }
 

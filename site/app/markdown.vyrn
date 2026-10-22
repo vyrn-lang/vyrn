@@ -1,0 +1,174 @@
+/// Renders a package README for its registry page. It reads ATX headings,
+/// paragraphs, `-` and `1.` lists, fenced code, code spans, links, images and
+/// `**` bold; any other line is paragraph text. All text is escaped first, so
+/// no markup in the source survives. Headings drop one level below the page's
+/// own `h1`.
+import { ghBlob, ghRaw } from "./github"
+import { escapeHtml } from "./code"
+import { substring, indexOf, lastIndexOf, trim, lines, split, joinWith } from "std/strings"
+import { startsWith, contains } from "std/strpred"
+
+/// Returns `md` as HTML. `dir` is the README's directory from the repository
+/// root: a relative link resolves to the file's GitHub page, a relative image
+/// to its raw bytes, and a target with a scheme or `#` stays as written.
+export fn markdownHtml(md: String, dir: String) -> String {
+    let mut out = ""
+    let mut kind = ""
+    let mut rows: Array<String> = []
+    for line in lines(md) {
+        let flat = trim(line)
+        let fence = startsWith(flat, "```")
+        if kind == "code" && !fence {
+            rows.push(line.copy())
+            continue
+        }
+        let list = listKind(flat)
+        let level = headingLevel(flat)
+        if fence || flat.byteLength == 0 || level > 0 || (list.byteLength > 0 && list != kind) {
+            out = out + blockHtml(kind, rows, dir)
+            rows = []
+            kind = if fence && kind != "code" { "code" } else { "" }
+        }
+        if level > 0 {
+            let tag = "h" + (if level < 6 { level + 1 } else { 6 }).toString()
+            out = out + "<" + tag + ">" + inlineHtml(substring(flat, level + 1, flat.byteLength), dir) + "</" + tag + ">"
+        } else if list.byteLength > 0 {
+            kind = list
+            rows.push(substring(flat, markerEnd(flat), flat.byteLength))
+        } else if (kind == "ul" || kind == "ol") && flat.byteLength > 0 {
+            rows[rows.length - 1] = rows[rows.length - 1] + " " + flat
+        } else if !fence && flat.byteLength > 0 {
+            kind = "p"
+            rows.push(flat.copy())
+        }
+    }
+    return out + blockHtml(kind, rows, dir)
+}
+
+fn headingLevel(flat: String) -> Int64 {
+    let raw = bytes(flat)
+    let mut n = 0
+    while n < raw.length && n < 6 && raw[n] == '#' {
+        n = n + 1
+    }
+    return if n > 0 && n < raw.length && raw[n] == ' ' { n } else { 0 }
+}
+
+fn listKind(flat: String) -> String {
+    if startsWith(flat, "- ") || startsWith(flat, "* ") {
+        return "ul"
+    }
+    let raw = bytes(flat)
+    let mut n = 0
+    while n < raw.length && raw[n] >= '0' && raw[n] <= '9' {
+        n = n + 1
+    }
+    return if n > 0 && startsWith(substring(flat, n, flat.byteLength), ". ") { "ol" } else { "" }
+}
+
+fn markerEnd(flat: String) -> Int64 {
+    return match indexOf(flat, " ") {
+        Some(at) => at + 1,
+        None => flat.byteLength,
+    }
+}
+
+fn blockHtml(kind: String, rows: Array<String>, dir: String) -> String {
+    if rows.length == 0 {
+        return ""
+    }
+    if kind == "code" {
+        return "<pre class=\"code\">" + escapeHtml(joinWith(rows, "\n")) + "</pre>"
+    }
+    if kind == "p" {
+        return "<p>" + inlineHtml(joinWith(rows, " "), dir) + "</p>"
+    }
+    let mut out = "<" + kind + ">"
+    for row in rows {
+        out = out + "<li>" + inlineHtml(row, dir) + "</li>"
+    }
+    return out + "</" + kind + ">"
+}
+
+fn inlineHtml(s: String, dir: String) -> String {
+    let parts = split(escapeHtml(s), "`")
+    let mut out = ""
+    let mut i = 0
+    while i < parts.length {
+        if i % 2 == 1 && i + 1 < parts.length {
+            out = out + "<code>" + parts[i] + "</code>"
+        } else {
+            let text = if i % 2 == 1 { "`" + parts[i] } else { parts[i].copy() }
+            out = out + boldHtml(linksHtml(text, dir))
+        }
+        i = i + 1
+    }
+    return out
+}
+
+fn boldHtml(s: String) -> String {
+    let parts = split(s, "**")
+    let mut out = parts[0].copy()
+    let mut i = 1
+    while i < parts.length {
+        let tag = if i % 2 == 0 { "</strong>" } else if i + 1 < parts.length { "<strong>" } else { "**" }
+        out = out + tag + parts[i]
+        i = i + 1
+    }
+    return out
+}
+
+fn linksHtml(s: String, dir: String) -> String {
+    let mut out = ""
+    let mut rest = s.copy()
+    while let Some(mid) = indexOf(rest, "](") {
+        let tail = substring(rest, mid + 2, rest.byteLength)
+        let shut = indexOf(tail, ")")
+        let open = lastIndexOf(substring(rest, 0, mid), "[")
+        if let Some(close) = shut {
+            if let Some(at) = open {
+                let label = substring(rest, at + 1, mid)
+                let target = substring(tail, 0, close)
+                let image = at > 0 && bytes(rest)[at - 1] == '!'
+                out = out + substring(rest, 0, if image { at - 1 } else { at })
+                out = out + if image {
+                    "<img src=\"" + urlOf(target, dir, true) + "\" alt=\"" + label + "\">"
+                } else {
+                    "<a href=\"" + urlOf(target, dir, false) + "\">" + label + "</a>"
+                }
+                rest = substring(tail, close + 1, tail.byteLength)
+                continue
+            }
+        }
+        out = out + substring(rest, 0, mid + 2)
+        rest = tail
+    }
+    return out + rest
+}
+
+fn urlOf(target: String, dir: String, raw: Bool) -> String {
+    if contains(target, ":") || startsWith(target, "#") {
+        return target.copy()
+    }
+    let path = if startsWith(target, "/") { substring(target, 1, target.byteLength) } else { dir + "/" + target }
+    return if raw { ghRaw("main", path) } else { ghBlob(path) }
+}
+
+test "a README's blocks render in source order" {
+    let md = "# shelf\n\nA **book** list.\nSecond line.\n\n- one\n  wrapped\n- `two`\n\n1. first\n\n```vyrn\nfn main() {}\n```\n"
+    assertEq(markdownHtml(md, "x"), "<h2>shelf</h2><p>A <strong>book</strong> list. Second line.</p><ul><li>one wrapped</li><li><code>two</code></li></ul><ol><li>first</li></ol><pre class=\"code\">fn main() {}</pre>")
+}
+
+test "a relative link opens on GitHub and a relative image loads raw" {
+    assertEq(markdownHtml("[run](server.vyrn) ![shot](img/a.png)", "examples/bin"), "<p><a href=\"https://github.com/vyrn-lang/vyrn/blob/main/examples/bin/server.vyrn\">run</a> <img src=\"https://raw.githubusercontent.com/vyrn-lang/vyrn/main/examples/bin/img/a.png\" alt=\"shot\"></p>")
+    assertEq(markdownHtml("[guide](https://vyrn.dev/guide) [up](#top) [root](/docs/std.md)", "d"), "<p><a href=\"https://vyrn.dev/guide\">guide</a> <a href=\"#top\">up</a> <a href=\"https://github.com/vyrn-lang/vyrn/blob/main/docs/std.md\">root</a></p>")
+}
+
+test "source markup is escaped and stray markers stay text" {
+    assertEq(markdownHtml("<b>x</b> a ** b [c] `d", "d"), "<p>&lt;b&gt;x&lt;/b&gt; a ** b [c] `d</p>")
+    assertEq(markdownHtml("", "d"), "")
+}
+
+test "a fence that never closes still renders its code" {
+    assertEq(markdownHtml("```\na < b", "d"), "<pre class=\"code\">a &lt; b</pre>")
+}

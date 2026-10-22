@@ -868,6 +868,12 @@ fn callsLocal() -> Int64 {
     let addPair = 1
     return addPair(1, 2)
 }
+// A bit count is one instruction at 32 or 64 bits, so a float or a
+// narrower integer has none.
+fn unaryOperand() -> Int64 {
+    let x = 2.5
+    return x.clz()
+}
 fn main() -> Int64 {
     return 0
 }

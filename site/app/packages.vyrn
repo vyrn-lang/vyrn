@@ -10,6 +10,8 @@ import { blurbFrom } from "./meta"
 import { substring, indexOf, lastIndexOf, trim, replace, lines, split } from "std/strings"
 import { startsWith, endsWith, contains } from "std/strpred"
 import { entriesOf } from "./gensrc"
+import { markdownHtml } from "./markdown"
+import { Markup, markupString } from "std/html"
 
 export type Package = { slug: String, name: String, kind: String, summary: String, exports: Int64, deps: Int64, href: String }
 
@@ -138,6 +140,12 @@ fn firstSentence(prose: String) -> String {
         Some(at) => substring(plain, 0, at + 1),
         None => plain.copy(),
     }
+}
+
+/// Returns the package's README.md as HTML, with links into the repository.
+export fn packageReadme(slug: String) -> Markup {
+    let dir = examplesDir() + "/" + slug
+    return TrustedMarkup(markdownHtml(fileText(dir + "/README.md"), dir))
 }
 
 export fn packageDeps(slug: String) -> Array<PkgLink> {
@@ -399,6 +407,13 @@ test "a package's dependencies leave for the reference" {
     }
     assert(checked > 20)
     assert(packageDeps("shelf").length > 3)
+}
+
+test "every package page shows its README" {
+    for slug in projectSlugs() {
+        assert(startsWith(markupString(packageReadme(slug)), "<h2>"))
+    }
+    assertEq(markupString(packageReadme("nope")), "")
 }
 
 test "a summary is a sentence, and a header is read only as far as it goes" {

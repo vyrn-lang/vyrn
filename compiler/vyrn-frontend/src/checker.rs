@@ -4622,6 +4622,39 @@ impl<'a> Checker<'a> {
         Ok(row.ret.clone())
     }
 
+    /// Types a call to a [`crate::prelude::Spec::Unary`] row: the operand at one
+    /// of `admits`, which the expected type reaches as it reaches a unary
+    /// operator's, and the result at the operand's type.
+    #[allow(clippy::too_many_arguments)]
+    fn unary_row(
+        &self,
+        name: &str,
+        admits: &[Type],
+        args: &[Expr],
+        line: usize,
+        scope: &Scope,
+        expected: Option<&Type>,
+        fn_ret: Option<&Type>,
+    ) -> Result<Type, Diagnostic> {
+        let want = expected.filter(|t| admits.contains(&self.base(t)));
+        let t = self.base(&self.expr(&args[0], scope, want, fn_ret)?);
+        if t == Type::Err || admits.contains(&t) {
+            return Ok(t);
+        }
+        use crate::rules::Hole;
+        let mut parts = Vec::new();
+        for (i, a) in admits.iter().enumerate() {
+            let sep = match i {
+                0 => "",
+                _ if i + 1 == admits.len() => " or ",
+                _ => ", ",
+            };
+            parts.extend([Hole::Text(sep.to_string()), Hole::Type(a.clone())]);
+        }
+        let (what, admits) = (crate::prelude::method_surface(name), Hole::Parts(parts));
+        Err(cerr!(line, UnaryOperand, what, admits, t))
+    }
+
     /// Types the vector builtins for `F32x4`, `I32x4` and `F64x2`.
     /// A lane index must be a constant in range, so no backend emits a bounds
     /// check for it. `load` and `store` take a runtime index and check it once
@@ -4923,6 +4956,9 @@ impl<'a> Checker<'a> {
             }
             if let Some(typed) = &row.typed {
                 return self.typed_row(name, typed, args, line, scope, fn_ret);
+            }
+            if let Some(crate::prelude::Spec::Unary(admits)) = &row.spec {
+                return self.unary_row(name, admits, args, line, scope, expected, fn_ret);
             }
         }
         if name == "assertEq" {

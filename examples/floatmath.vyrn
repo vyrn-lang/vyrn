@@ -1,0 +1,35 @@
+// The square root and `std/math`'s float functions, as bit patterns, so the
+// two engines are held to the same bits. tan(1e22) takes the long reduction.
+
+import { exp, log, pow, tan, atan2, trunc, floor, ceil, round } from "std/math"
+
+fn show(x: Float64) {
+    print(floatBits(x))
+}
+
+fn main() -> Int64 {
+    let tiny = floatFromBits(1)
+    let largest = floatFromBits(9218868437227405311)
+    show((2.0).sqrt())
+    show(tiny.sqrt())
+    show(largest.sqrt())
+    let nan = (-1.0).sqrt()
+    print(nan != nan) // true: a NaN's sign bit is the engine's
+    let two: Float32 = 2.0
+    print(two.sqrt()) // 1.414214
+    show(exp(1.0))
+    show(exp(-745.0))
+    show(log(10.0))
+    show(log(tiny))
+    show(pow(2.5, 3.7))
+    show(pow(-0.5, -7.0))
+    show(tan(1.0))
+    show(tan(10000000000000000000000.0))
+    show(atan2(-7.0, 3.0))
+    show(atan2(-0.0, -1.0))
+    show(trunc(-2.7))
+    show(floor(-0.5))
+    show(ceil(-0.5))
+    show(round(2.5))
+    return 0
+}
