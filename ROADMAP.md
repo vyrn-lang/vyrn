@@ -26,7 +26,7 @@ Open work, one line each, with what blocks it. [docs/decisions.md](docs/decision
 ## Language
 
 - Compile-time facts on values: `sorted` under an order, `unique` and `grouped` under an equivalence, `all` under a predicate, `subsetOf` and `disjointFrom` between two values. Each is proven with no run-time check and kept by an operation exactly where it stays true; user functions, comparators, keys and containers take part. Designed; the builtin shape maps and `vyrn why --provenance` are built (#178). Next: canonical identity for relations, then orders and the first facts.
-- Unions of validated types written in source (`type Open = Port | Age`), beside the union an `if` or `match` joins to (#180). Blocked by the `enum { .. }` declaration form, which frees `|`.
+- Write a union of validated types in source: `type Open = Port | Age`. An `if` or `match` already produces one when its branches differ (#180). Waits for enums to move to `enum { .. }`, so that `|` means only a union.
 - Field and variant docs in reflection (`FieldInfo.doc`). Blocked by a parser change: `ast::Field` has no doc. It would remove the source re-scans in `std/http`, `std/graphql` and `std/cli`.
 - `FromElements` and `FromEntries`, so `[]` and `[:]` build user containers. Blocked by a receiver-less protocol method dispatched by expected type.
 - A `Codable` protocol in place of the codec's hand-written verdicts. Designed, not started.
