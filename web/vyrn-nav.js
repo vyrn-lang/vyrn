@@ -749,8 +749,24 @@ function onClick(e) {
   navigate(url.href, { push: true });
 }
 
+// The URL the page on screen was rendered for. Back and Forward change the URL
+// before the swap, so until the next page lands its relative links would
+// resolve against the wrong directory: `docs/std/strings.html` from `/docs.html`
+// became `/tooling/docs/std/strings.html`.
+let shownUrl = typeof location !== "undefined" ? location.href : "";
+
+// Rewrites each relative link under `root` to the absolute URL it names from
+// `base`. A bare `#fragment` stays: it belongs to whichever page is shown.
+export function pinLinks(root, base) {
+  for (const a of root.querySelectorAll("a[href]")) {
+    const href = a.getAttribute("href");
+    if (!href.startsWith("#")) a.setAttribute("href", new URL(href, base).href);
+  }
+}
+
 function onPopState(e) {
   if (!e.state || !e.state.vyrnNav) return; // not one of ours
+  pinLinks(document, shownUrl);
   pendingPopScroll = e.state.scrollY || 0;
   navigate(location.href, { push: false });
 }
@@ -855,6 +871,9 @@ export function start() {
 
   document.addEventListener("click", onClick);
   window.addEventListener("popstate", onPopState);
+  document.addEventListener("vyrn:nav-end", () => {
+    shownUrl = location.href;
+  });
   window.addEventListener("scroll", saveScroll, { passive: true });
 
   if (CONFIG.progress) installProgressBar();
