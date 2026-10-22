@@ -71,6 +71,24 @@ fn run_oracle(dir: &std::path::Path, file: &std::path::Path, body: &str) -> (Str
     (norm(&out.stderr), rows)
 }
 
+/// A union decays to its base, so a `Port | Age` reaching a `Port` keeps the
+/// boundary check any `Int64` gets: out of `Port`'s range from the `Age` branch,
+/// it traps. Decayed to its first member, it would pass unchecked.
+#[test]
+fn a_union_reaching_one_member_keeps_the_boundary_check() {
+    let src = "type Port = Int64 where value >= 1 && value <= 65535
+type Age = Int64 where value >= 18
+fn pick(fast: Bool) -> Port {
+    return if fast { Port(8080) } else { Age(70000) }
+}";
+    let (_dir, file) = program(src, "    print(pick(false).toString())");
+    let out = vyrn().arg("run").arg(&file).output().unwrap();
+    assert_eq!(
+        (norm(&out.stderr).as_str(), out.status.code()),
+        ("error: validation failed for `Port`\n", Some(1))
+    );
+}
+
 /// A parameter's `where` clause is the body's premise and a check at each call
 /// row: proved where the caller's facts show it, kept and trapping where they
 /// do not. The body is exported, so no inferred entry fact proves it.

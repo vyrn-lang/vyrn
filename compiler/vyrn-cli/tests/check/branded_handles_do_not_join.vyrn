@@ -1,0 +1,10 @@
+type Handle<T> = { slot: Int64 }
+type Person = { name: String }
+type Order = { id: Int64 }
+
+fn main() -> Int64 {
+    let p: Handle<Person> = Handle { slot: 1 }
+    let o: Handle<Order> = Handle { slot: 2 }
+    let h = if true { p } else { o }
+    return h.slot
+}
