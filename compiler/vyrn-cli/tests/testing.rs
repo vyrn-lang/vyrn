@@ -88,6 +88,21 @@ fn name_filter_selects_a_subset() {
 }
 
 #[test]
+fn a_name_filter_that_selects_nothing_prints_no_tests() {
+    let dir = scratch("filter-none");
+    let file = dir.join("t.vyrn");
+    std::fs::write(&file, "test \"a\" { assert(true) }\n").unwrap();
+    let out = vyrn()
+        .arg("test")
+        .arg(&file)
+        .args(["--name", "z"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    assert_eq!(norm(&out.stdout), "no tests\n");
+}
+
+#[test]
 fn no_tests_prints_no_tests_and_exits_zero() {
     let dir = scratch("none");
     let file = dir.join("t.vyrn");

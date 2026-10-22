@@ -3307,10 +3307,6 @@ fn test_cmd(call: &Call) -> Outcome {
     let (p, path) = call.root()?;
     let filter = call.value("--name");
     let (program, _) = p.checked(&path, &read_source(&path)?)?;
-    if program.tests.is_empty() {
-        println!("no tests");
-        return Ok(ExitCode::SUCCESS);
-    }
     let bodies: Vec<Body> = program
         .tests
         .iter()
@@ -3321,6 +3317,10 @@ fn test_cmd(call: &Call) -> Outcome {
             line: t.line,
         })
         .collect();
+    if bodies.is_empty() {
+        println!("no tests");
+        return Ok(ExitCode::SUCCESS);
+    }
     Ok(bodies_wasm(&path, &program, "test", &bodies))
 }
 
@@ -5671,7 +5671,8 @@ struct Body {
 /// One module and one instance, with each body an exported
 /// `__vyrn_body_<k>`, so body `k+1` sees the module state body `k` wrote.
 /// A trap ends the call, not the store: its message becomes the
-/// `FAILED:` line and the next body runs.
+/// `FAILED:` line and the next body runs. Each caller says `no tests` or
+/// `no benches` instead of passing no body.
 fn bodies_wasm(
     path: &str,
     program: &vyrn_frontend::ast::Program,
@@ -5679,11 +5680,6 @@ fn bodies_wasm(
     bodies: &[Body],
 ) -> ExitCode {
     use vyrn_frontend::ast::{Block, Expr, Id, Stmt, Type};
-    if bodies.is_empty() {
-        // `test` said `no tests` before the filter; `bench` says it after.
-        println!("no {kind}es");
-        return ExitCode::SUCCESS;
-    }
     let mut prog = program.clone();
     prog.functions
         .retain(|f| !(f.name == "main" && f.module.is_none()));
