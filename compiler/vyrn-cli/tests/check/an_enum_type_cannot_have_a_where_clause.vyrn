@@ -1,1 +1,1 @@
-type E = | A | B where value > 0
+type E = enum { A, B } where value > 0

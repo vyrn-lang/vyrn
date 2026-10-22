@@ -388,14 +388,14 @@ export type VyxAttr = { name: String, value: String, dyn: Bool, evt: Bool, line:
 /// trailing `(line, col)` pair is the pass-through's position for
 /// origin directives; `VNFor` carries its iterable's, then its key's, and
 /// `VNIf` carries parallel per-condition position arrays.
-export type VyxNode =
-    | VNText(String)
-    | VNInterp(String, Int64, Int64)
-    | VNRaw(String, Int64, Int64)
-    | VNChildren
-    | VNElem(String, Bool, Array<VyxAttr>, Array<VyxNode>, Int64)
-    | VNIf(Array<String>, Array<Int64>, Array<Int64>, Array<VyxBody>, VyxBody, Bool)
-    | VNFor(String, String, String, Array<VyxNode>, Int64, Int64, Int64, Int64)
+export type VyxNode = enum {
+    VNText(String),
+    VNInterp(String, Int64, Int64),
+    VNRaw(String, Int64, Int64),
+    VNChildren,
+    VNElem(String, Bool, Array<VyxAttr>, Array<VyxNode>, Int64),
+    VNIf(Array<String>, Array<Int64>, Array<Int64>, Array<VyxBody>, VyxBody, Bool),
+    VNFor(String, String, String, Array<VyxNode>, Int64, Int64, Int64, Int64) }
 
 /// A node list, so bodies can nest in a payload without `Array<Array<...>>`.
 export type VyxBody = { nodes: Array<VyxNode> }

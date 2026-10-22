@@ -46,7 +46,7 @@ export fn badRequest(message: String) -> PageError {
 /// A lazy page's view data. `Loading` exists only on a client soft
 /// nav; the server always renders `Ready`. Defined once here, because each
 /// constructor may register only once.
-export type PageData<T> = | Loading | Ready(T)
+export type PageData<T> = enum { Loading, Ready(T) }
 
 // Contract members are functions because every top-level `let` is
 // module-private, and page data is per request, not per module init.

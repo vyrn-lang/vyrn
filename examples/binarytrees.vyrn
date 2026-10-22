@@ -4,7 +4,7 @@ let order = 10
 
 let benchOrder = 14
 
-type Tree = | Leaf | Node(Tree, Tree)
+type Tree = enum { Leaf, Node(Tree, Tree) }
 
 impl Owned for Tree {
     fn release(consume self) {

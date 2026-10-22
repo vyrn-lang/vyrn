@@ -2,10 +2,10 @@
 
 type Radius = Int64 where value >= 1
 
-type Shape =
-    | Circle(Radius)
-    | Rect(Int64, Int64)
-    | Nothing
+type Shape = enum {
+    Circle(Radius),
+    Rect(Int64, Int64),
+    Nothing }
 
 type Lookup = Result<Shape, String>
 

@@ -4,8 +4,8 @@ import { Hashable } from "std/hash"
 
 type A = { x: Int64, y: Int64 }
 type B = { y: Int64, x: Int64 }
-type E = | Nothing | Has(B)
-type Pair = | Two(B, Int64) | Empty
+type E = enum { Nothing, Has(B) }
+type Pair = enum { Two(B, Int64), Empty }
 type HA = { p: A }
 type HB = { p: B }
 type P = { b: Bool, n: Int64, s: String, k: Int8 }

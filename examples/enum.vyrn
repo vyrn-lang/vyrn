@@ -1,7 +1,7 @@
-type Shape =
-    | Circle(Int64)
-    | Rect(Int64, Int64) // a variant can carry more than one payload
-    | Unit
+type Shape = enum {
+    Circle(Int64),
+    Rect(Int64, Int64), // a variant can carry more than one payload
+    Unit }
 
 fn area(s: Shape) -> Int64 {
     return match s {

@@ -1,0 +1,5 @@
+type Shape =
+    | Circle(Int64)
+    | Point
+
+fn main() -> Int64 { return 0 }

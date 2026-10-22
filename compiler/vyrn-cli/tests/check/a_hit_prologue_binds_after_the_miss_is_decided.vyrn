@@ -1,6 +1,6 @@
 // Statements after the one decision run only on the hit, so a payload binding
 // may live there.
-type E = | Tag(Array<Int64>) | Blank
+type E = enum { Tag(Array<Int64>), Blank }
 type B = { v: E }
 impl Index for B {
     fn tryAt(read self, i: Int64) -> read Option<Int64> {

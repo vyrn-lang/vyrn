@@ -1270,7 +1270,7 @@ impl<'a> std::fmt::Display for Said<'a> {
                 [n, s] if n.name == "None" && n.payload.is_empty() && s.name == "Some" => {
                     match s.payload.first() {
                         Some(t) => write!(f, "Option<{}>", say(t)),
-                        None => write!(f, "enum {{ None | Some }}"),
+                        None => write!(f, "enum {{ None, Some }}"),
                     }
                 }
                 [e, o]
@@ -1283,7 +1283,7 @@ impl<'a> std::fmt::Display for Said<'a> {
                 }
                 _ => {
                     let names: Vec<String> = vs.iter().map(|v| name(&v.name)).collect();
-                    write!(f, "enum {{ {} }}", names.join(" | "))
+                    write!(f, "enum {{ {} }}", names.join(", "))
                 }
             },
             Type::App(n, args) => {

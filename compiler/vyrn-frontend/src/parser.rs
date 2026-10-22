@@ -1702,7 +1702,7 @@ impl Parser {
         // Collect inline field refinements while the base parses; the collector is
         // what makes `where` legal in field position.
         self.field_preds = Some(Vec::new());
-        let base = if *self.peek() == Tok::Pipe {
+        let base = if *self.peek() == Tok::Enum {
             self.enum_type()?
         } else {
             self.type_()?
@@ -1781,12 +1781,13 @@ impl Parser {
         Capability::Read
     }
 
-    /// `| Variant(Type) | Variant | ...`: an enum. The leading `|` is required; it
-    /// tells an enum from the other type forms.
+    /// `enum { Variant(Type), Variant, ... }`: an enum. A trailing comma is allowed,
+    /// as in a record; the checker refuses an enum with no variant.
     fn enum_type(&mut self) -> Result<Type, Diagnostic> {
+        self.eat(&Tok::Enum)?;
+        self.eat(&Tok::LBrace)?;
         let mut variants = Vec::new();
-        while *self.peek() == Tok::Pipe {
-            self.advance();
+        while *self.peek() != Tok::RBrace {
             let name = self.expect_ident()?;
             let mut payload = Vec::new();
             if *self.peek() == Tok::LParen {
@@ -1802,7 +1803,13 @@ impl Parser {
                 self.eat(&Tok::RParen)?;
             }
             variants.push(EnumVariant { name, payload });
+            if *self.peek() == Tok::Comma {
+                self.advance();
+            } else {
+                break;
+            }
         }
+        self.eat(&Tok::RBrace)?;
         Ok(Type::Enum(variants))
     }
 
@@ -4365,7 +4372,7 @@ test \"t\" {{ assert(c(1) == 1) }}"
     #[test]
     fn a_refutable_let_desugars_to_a_match_with_a_default_arm() {
         let p = parse_src(
-            "type Shape = | Circle(Int64) | Dot\n\
+            "type Shape = enum { Circle(Int64), Dot }\n\
              fn main() -> Int64 { let c = Circle(7)\n let Circle(r) = c\n return r }",
         );
         let f = p.functions.iter().find(|f| f.name == "main").unwrap();
@@ -4393,7 +4400,7 @@ test \"t\" {{ assert(c(1) == 1) }}"
     #[test]
     fn a_multi_payload_refutable_let_binds_each_position() {
         let p = parse_src(
-            "type Pair = | Two(Int64, Int64) | Zero\n\
+            "type Pair = enum { Two(Int64, Int64), Zero }\n\
              fn main() -> Int64 { let q = Two(1, 2)\n let Two(a, b) = q\n return a + b }",
         );
         let f = p.functions.iter().find(|f| f.name == "main").unwrap();

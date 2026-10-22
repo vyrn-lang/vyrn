@@ -87,7 +87,13 @@ generator cache to mean anything.
 
 ### `vyrn fix [file]`
 
-Applies the `.copy()` that a diagnostic carries as a `Fix`, at the line and
+First rewrites each leading-bar enum, `type T = | A(Int64) | B`, into the
+braced form, `type T = enum { A(Int64), B }`. The rewrite reads tokens only,
+because the old form does not parse, and it keeps every line: a variant stays
+on its line, and ` }` closes the last one's. So a diagnostic and a trap name the
+same line before and after.
+
+Then applies the `.copy()` that a diagnostic carries as a `Fix`, at the line and
 column the diagnostic gives, in the file given. A `consume p.f` that a hole
 refuses becomes `p.f.copy()`: the fix deletes the keyword and inserts the call,
 because `consume p.f.copy()` is refused. Every other fix on the menu

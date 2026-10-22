@@ -2,7 +2,7 @@
 
 import { Fallible } from "std/fallible"
 
-type Slot<T> = | Full(T) | Gone(String)
+type Slot<T> = enum { Full(T), Gone(String) }
 
 impl<T> Fallible for Slot<T> {
     type Output = T

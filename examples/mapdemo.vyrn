@@ -4,7 +4,7 @@ type Count = Int64 where value >= 0
 
 type IntMap = Map<String, Int64>
 
-type Event = | Batch(Map<String, Int64>) | Empty
+type Event = enum { Batch(Map<String, Int64>), Empty }
 
 fn look(m: Map<String, Int64>, k: String) -> Int64 {
     return match m[k] {

@@ -212,6 +212,7 @@ tokens! {
         "true" => Tok::True,
         "false" => Tok::False,
         "type" => Tok::Type,
+        "enum" => Tok::Enum,
         "where" => Tok::Where,
         "match" => Tok::Match,
         "region" => Tok::Region,

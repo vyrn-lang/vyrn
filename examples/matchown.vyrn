@@ -1,12 +1,12 @@
 // Who owns a payload that leaves its arm, and a scrutinee no arm kept.
 
-type Node =
-    | Leaf(Int64)
-    | Bunch(Array<Int64>, String)
+type Node = enum {
+    Leaf(Int64),
+    Bunch(Array<Int64>, String) }
 
-type Wrap =
-    | Empty
-    | Words(Array<String>)
+type Wrap = enum {
+    Empty,
+    Words(Array<String>) }
 
 impl Owned for Wrap {
     fn release(consume self) {
@@ -21,9 +21,9 @@ impl Owned for Wrap {
 
 type Doc = { title: String, body: String }
 
-type Attr =
-    | Cls(String)
-    | Key(String)
+type Attr = enum {
+    Cls(String),
+    Key(String) }
 
 fn emptyInts() -> Array<Int64> {
     let xs: Array<Int64> = []

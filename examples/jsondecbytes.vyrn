@@ -6,8 +6,8 @@ type Fam = { sur: String, kids: Array<Kid>, note: Option<String> }
 
 type Nums = { i: Int64, i8v: Int8, u32v: UInt32, u64v: UInt64, f: Float64, b: Bool }
 
-type Color = | Red | Green
-type Shape = | Dot | Circle(Int64) | Rect(Int64, Int64)
+type Color = enum { Red, Green }
+type Shape = enum { Dot, Circle(Int64), Rect(Int64, Int64) }
 
 fn issue(i: Issue) -> String {
     return i.key + "@" + i.path + ": " + i.message

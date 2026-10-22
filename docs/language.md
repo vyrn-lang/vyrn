@@ -20,7 +20,7 @@ fn main() -> Int64 {
 - A statement ends at the end of its line. `;` is an optional separator, so `let x = 1; let y = 2` is two statements.
 - `//` starts a comment. `///` is a documentation comment on the declaration that follows; `vyrn doc` and editor hover read it. There are no block comments.
 - Names are lowerCamelCase for values and functions, UpperCamelCase for types and variants.
-- Keywords: `fn let mut if else while for in drop protocol import export impl self return true false type where match region break continue`. The words `gen`, `extern`, `test`, `bench`, `contract`, `logging`, `read`, `modify`, `consume`, `lazy` and `as` are keywords only where the grammar expects them.
+- Keywords: `fn let mut if else while for in drop protocol import export impl self return true false type enum where match region break continue`. The words `gen`, `extern`, `test`, `bench`, `contract`, `logging`, `read`, `modify`, `consume`, `lazy` and `as` are keywords only where the grammar expects them.
 
 Literals:
 
@@ -116,7 +116,7 @@ print("\{w} by \{h} is \{w * h}")
 
 A value renders if it is a number, a `Bool`, a `String`, or its type has `impl Show`. Anything else is refused, with a hint to add the impl.
 
-A name before a string literal is a tagged template. `tag"a \{x} b"` calls `tag(["a ", " b"], [value(x)])`: the literal parts arrive as `Array<String>` and the holes as `Array<Value>`, where `Value = IntVal(Int64) | StrVal(String) | BoolVal(Bool)`. A hole is always data and never structure, which is how a `sql` tag builds a parameterized query that no input can inject into.
+A name before a string literal is a tagged template. `tag"a \{x} b"` calls `tag(["a ", " b"], [value(x)])`: the literal parts arrive as `Array<String>` and the holes as `Array<Value>`, where `Value = enum { IntVal(Int64), StrVal(String), BoolVal(Bool) }`. A hole is always data and never structure, which is how a `sql` tag builds a parameterized query that no input can inject into.
 
 `template"..."` builds the `Template` record `{ parts: Array<String>, values: Array<Value> }` without calling anything. `vyrn"..."` is a code quote; see [Generators](#generators).
 
@@ -179,15 +179,19 @@ next.age = next.age + 1
 An enum value is exactly one variant, and a variant may carry payloads.
 
 ```vyrn
-type Shape =
-    | Circle(Int64)
-    | Rect(Int64, Int64)
-    | Point
+type Shape = enum {
+    Circle(Int64),
+    Rect(Int64, Int64),
+    Point,
+}
+
+type Level = enum { Debug, Info, Warn }
 ```
 
+- An enum declares one variant or more, separated by commas; a trailing comma is allowed.
 - A variant name is unique across the whole program, so `Circle(2)` needs no qualifier. Declaring the same variant name in two enums is refused.
 - A nullary variant takes its type from context: `let s: Shape = Point`.
-- A record or enum type may take type parameters: `type Box<T> = { value: T }`, `type Opt<T> = | Wrap(T) | Empty`.
+- A record or enum type may take type parameters: `type Box<T> = { value: T }`, `type Opt<T> = enum { Wrap(T), Empty }`.
 
 ### Option and Result
 
@@ -376,7 +380,7 @@ A refutable `let` binds a variant's payloads in the enclosing scope, and traps w
 - `panic(msg)` ends the program with `error: msg (file:line)` on standard error and exit code 1. It is for a case that cannot happen. Nothing unwinds and nothing catches a panic.
 - A trap (an index out of range, a division by zero, a failed validation) ends the program with `error: <reason>` on standard error and exit code 1. Every engine prints the same bytes.
 - Recursion has no fixed limit. A recursion that outgrows the stack traps `call stack exhausted`; the depth at which that happens depends on the engine and on the frames.
-- `Validation<T> = Valid(T) | Invalid(Array<Issue>)` reports every problem at once. An `Issue` is `{ key, path, message }`, where `key` is a translation key. `fromJson` and `std/cli` answer in this form.
+- `Validation<T> = enum { Valid(T), Invalid(Array<Issue>) }` reports every problem at once. An `Issue` is `{ key, path, message }`, where `key` is a translation key. `fromJson` and `std/cli` answer in this form.
 
 ```vyrn
 fn quadrupled(text: String) -> Result<Int64, String> {

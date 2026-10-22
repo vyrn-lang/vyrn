@@ -3148,7 +3148,7 @@ fn main() -> Int64 {
     ),
     // Every arm of a `return match` is a return.
     (
-        r#"type K = | Zero | More
+        r#"type K = enum { Zero, More }
 fn pick(i: Int64, k: K) -> Int64 {
     return match k {
         Zero => i,

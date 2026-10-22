@@ -1,4 +1,4 @@
-type E = | Tag(Array<Int64>) | Blank
+type E = enum { Tag(Array<Int64>), Blank }
 let mut g: E = Blank
 fn main() -> Int64 {
     let Tag(xs) = g

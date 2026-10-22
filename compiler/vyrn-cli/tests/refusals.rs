@@ -915,7 +915,7 @@ fn the_shapes_rule_twos_unit_tests_pinned_are_still_refused() {
 /// the whole first line, since the wording is what is pinned.
 #[test]
 fn the_shapes_rule_threes_unit_tests_pinned_are_still_refused() {
-    const TAG: &str = "type Tag = | Word(String) | Num(Int64) \
+    const TAG: &str = "type Tag = enum { Word(String), Num(Int64) } \
                        let mut tag = Word(\"w\") ";
     const END: &str = " fn main() -> Int64 { return 0 }";
     let cases: &[(&str, &str, String)] = &[
@@ -1079,7 +1079,7 @@ fn wrapped_lends() -> Vec<Wrapped> {
         Wrapped {
             stem: "attrkey",
             seeds: "lending",
-            source: "type Attr =\n    | Key(String)\n    | Pair(String, String)\n\n\
+            source: "type Attr = enum {\n    Key(String),\n    Pair(String, String) }\n\n\
                      fn attrKey(xs: Array<Attr>) -> Option<String> {\n\
                      \x20 let mut found: Option<String> = None\n\
                      \x20 for a in xs {\n\
@@ -1099,7 +1099,7 @@ fn wrapped_lends() -> Vec<Wrapped> {
         Wrapped {
             stem: "firstkey",
             seeds: "lending",
-            source: "type Attr = | Key(String) | Pair(String, String)\n\n\
+            source: "type Attr = enum { Key(String), Pair(String, String) }\n\n\
                      fn firstKey(xs: Array<Attr>) -> Option<String> {\n\
                      \x20 for a in xs {\n\
                      \x20   return match a {\n\
@@ -1187,7 +1187,7 @@ fn wrapped_lends() -> Vec<Wrapped> {
         Wrapped {
             stem: "rewrap",
             seeds: "lending",
-            source: "type Bag = | One(Array<String>) | Nil\n\n\
+            source: "type Bag = enum { One(Array<String>), Nil }\n\n\
                      fn take(b: Bag) -> Bag {\n\
                      \x20 return match b {\n\
                      \x20   One(xs) => One(xs),\n\
@@ -1859,7 +1859,7 @@ fn an_argument_that_reads_a_global_the_call_writes_is_refused() {
 /// `release`.
 #[test]
 fn a_payload_of_a_type_that_declares_release_is_not_handed_on() {
-    let src = "type Node =\n  | Elem(String, Array<Int64>)\n  | Text(String)\n\
+    let src = "type Node = enum {\n  Elem(String, Array<Int64>),\n  Text(String) }\n\
                impl Owned for Node {\n  fn release(consume self) {\n    match consume self {\n      \
                Elem(tag, kids) => {\n        drop tag\n        drop kids\n      }\n      \
                Text(s) => {\n        drop s\n      }\n    }\n  }\n}\n\

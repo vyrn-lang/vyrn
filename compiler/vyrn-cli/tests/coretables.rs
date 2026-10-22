@@ -175,7 +175,7 @@ fn a_copy_of_a_type_with_impl_copy_is_a_call_row_to_the_impl() {
 /// module state would free the global's buffer at block exit, under the next read.
 #[test]
 fn a_payload_binding_from_module_state_owes_no_release() {
-    let src = "type E = | Tag(Array<Int64>) | Blank
+    let src = "type E = enum { Tag(Array<Int64>), Blank }
                let mut g: E = Blank
                fn main() -> Int64 {
                    let Tag(xs) = g

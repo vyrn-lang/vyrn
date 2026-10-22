@@ -69,9 +69,9 @@ export type UserId = Int64 where value >= 1
 /// A bounded display name.
 export type UserName = String where value.byteLength >= 1 && value.byteLength <= 40
 /// A shape with payload and nullary variants.
-export type Shape = | Circle(Int64) | Rect(Int64, Int64) | Dot
+export type Shape = enum { Circle(Int64), Rect(Int64, Int64), Dot }
 /// A nullary-only colour.
-export type Colour = | Red | Green | Blue
+export type Colour = enum { Red, Green, Blue }
 /// A stored user.
 export type User = { id: UserId, name: UserName, colour: Colour }
 /// A create request.

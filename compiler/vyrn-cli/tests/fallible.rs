@@ -33,7 +33,7 @@ protocol Fallible {
     fn success(self) -> Output
 }
 
-type Http = | Body(String) | Created(String) | NotFound | ServerError(String)
+type Http = enum { Body(String), Created(String), NotFound, ServerError(String) }
 
 impl Fallible for Http {
     type Output = String
@@ -130,7 +130,7 @@ protocol Fallible {
     fn success(self) -> Output
 }
 
-type Slot<T> = | Full(T) | Gone(String)
+type Slot<T> = enum { Full(T), Gone(String) }
 
 impl<T> Fallible for Slot<T> {
     type Output = T
@@ -192,7 +192,7 @@ fn a_type_with_no_impl_is_refused_and_the_message_names_the_protocol() {
     rejects(
         "no_impl",
         "\
-type Http = | Body(String) | NotFound
+type Http = enum { Body(String), NotFound }
 
 fn pass(h: Http) -> Http {
     let b = h?

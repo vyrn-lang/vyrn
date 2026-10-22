@@ -324,7 +324,7 @@ fn gqlMembers(decl: GqlDecl, iface: ModuleInterface) -> Array<GqlMember> {
     if rhs.startsWith("{") {
         return gqlRecordMembers(rhs, iface)
     }
-    if rhs.startsWith("|") {
+    if rhs.startsWith("enum ") {
         return gqlVariantMembers(rhs, iface)
     }
     if rhs.startsWith("Result<") {
@@ -395,13 +395,7 @@ fn gqlVariantMembers(rhs: String, iface: ModuleInterface) -> Array<GqlMember> {
 }
 
 fn gqlVariantsOf(rhs: String) -> Array<String> {
-    let body = trim(rhs)
-    let stripped = if body.startsWith("|") {
-        trim(gqlSlice(bytes(body), 1, bytes(body).length))
-    } else {
-        body
-    }
-    return gqlSplitTop(stripped, 124)
+    return gqlSplitTop(gqlBetweenBraces(rhs), 44)
 }
 
 /// The `{ ... }` body of an object or input definition. GraphQL refuses an empty
@@ -515,7 +509,7 @@ fn gqlTypeSdl(t: TypeInfo, iface: ModuleInterface) -> String {
     if ms.length > 0 {
         return gqlObjectSdl(decl.name, doc, ms)
     }
-    if decl.rhs.startsWith("|") {
+    if decl.rhs.startsWith("enum ") {
         return gqlEnum(decl, doc)
     }
     return gqlScalar(decl, iface)

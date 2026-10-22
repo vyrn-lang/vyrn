@@ -3534,7 +3534,10 @@ mod tests {
         };
         let label = type_hint_label(&b, &Default::default(), "let e = pick()", 6)
             .expect("the call hides the type");
-        assert_eq!(label, "{ A(Int64) | B }", "the arms, as hover writes them");
+        assert_eq!(
+            label, "enum { A(Int64), B }",
+            "the arms, as hover writes them"
+        );
         assert_eq!(
             label,
             vyrn_frontend::type_to_string(&ty, &Default::default()),

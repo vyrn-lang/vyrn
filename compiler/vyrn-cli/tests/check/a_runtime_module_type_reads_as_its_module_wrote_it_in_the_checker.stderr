@@ -3,5 +3,5 @@ a_runtime_module_type_reads_as_its_module_wrote_it_in_the_checker.vyrn:17:0: `ta
 a_runtime_module_type_reads_as_its_module_wrote_it_in_the_checker.vyrn:22:0: `c` declared Option<Json> but initializer is Int64
 a_runtime_module_type_reads_as_its_module_wrote_it_in_the_checker.vyrn:27:0: `JStr` takes 1 argument(s), got 2
 a_runtime_module_type_reads_as_its_module_wrote_it_in_the_checker.vyrn:32:0: variant `JNull` takes no arguments
-a_runtime_module_type_reads_as_its_module_wrote_it_in_the_checker.vyrn:38:0: cannot access field `nosuch` on non-record type enum { JNull | JBool | JNum | JStr | JArr | JObj }
+a_runtime_module_type_reads_as_its_module_wrote_it_in_the_checker.vyrn:38:0: cannot access field `nosuch` on non-record type enum { JNull, JBool, JNum, JStr, JArr, JObj }
 a_runtime_module_type_reads_as_its_module_wrote_it_in_the_checker.vyrn:44:0: `bound` requires `S: R`, but Json does not satisfy `R`

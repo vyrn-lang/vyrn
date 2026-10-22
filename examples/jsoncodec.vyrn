@@ -4,7 +4,7 @@ type Age = Int64 where value >= 0 && value <= 130
 
 type Username = String where value.byteLength >= 1
 
-type Role = | Guest | Member | Admin
+type Role = enum { Guest, Member, Admin }
 
 type User = { name: Username, age: Age, role: Role, nick: Option<String> }
 

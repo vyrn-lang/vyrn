@@ -7838,7 +7838,7 @@ mod tests {
 
     #[test]
     fn accepts_generic_enum() {
-        let src = "type Opt<T> = | Wrap(T) | Empty; \
+        let src = "type Opt<T> = enum { Wrap(T), Empty }; \
                    fn oe<T>(o: Opt<T>, d: T) -> T { return match o { Wrap(x) => x, Empty => d }; } \
                    fn main() -> Int64 { let a = Wrap(41); let b: Opt<Int64> = Empty; \
                                       return oe(a, 0) + oe(b, 1); }";

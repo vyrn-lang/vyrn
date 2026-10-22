@@ -131,10 +131,10 @@ export gen fn validateContract(iface: ModuleInterface) -> String {
 /// share one global table, and the prelude `Validation` owns `Invalid`.
 fn rpcReplyTypes() -> String {
     let mut out = "export type RpcIssue = { key: String, path: String, message: String }\n"
-    out = out + "export type RpcReply<T> =\n"
-    out = out + "    | Done(T)\n"
-    out = out + "    | Rejected(Array<RpcIssue>)\n"
-    out = out + "    | Failed(String)\n"
+    out = out + "export type RpcReply<T> = enum {\n"
+    out = out + "    Done(T),\n"
+    out = out + "    Rejected(Array<RpcIssue>),\n"
+    out = out + "    Failed(String) }\n"
     out = out + "/// Map validation `Issue`s (a client-side `fromJson` prevalidation) into the\n"
     out = out + "/// same `RpcIssue` shape a server 422 yields, so both rejection sides render one shape.\n"
     out = out + "export fn rpcIssuesFrom(from: Array<Issue>) -> Array<RpcIssue> {\n"

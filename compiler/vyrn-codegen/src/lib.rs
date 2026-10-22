@@ -1153,7 +1153,7 @@ mod tests {
             (
                 "Enum",
                 "type Cell = { v: Int64 }\n\
-                 type Wrap<T> = | Empty | W({ v: T })\n\
+                 type Wrap<T> = enum { Empty, W({ v: T }) }\n\
                  fn main() -> Int64 { let c = Cell { v: 7 }\n let w = W(c)\n return 0 }",
             ),
         ];

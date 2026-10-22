@@ -1,6 +1,6 @@
 // The inner `at` declares `-> read T`, which has no impl key without a
 // substitution, so the next projection cannot resolve.
-type E = | Tag(String) | Blank
+type E = enum { Tag(String), Blank }
 type Slab<T> = { vals: Array<T> }
 impl<T> Index for Slab<T> {
     fn at(read self, i: Int64) -> read T {

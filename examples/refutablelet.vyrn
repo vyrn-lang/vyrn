@@ -1,8 +1,8 @@
 // The refutable `let`.
 
-type Entry =
-    | Tagged(String, Int64)
-    | Blank
+type Entry = enum {
+    Tagged(String, Int64),
+    Blank }
 
 let mut ledger: Entry = Blank
 

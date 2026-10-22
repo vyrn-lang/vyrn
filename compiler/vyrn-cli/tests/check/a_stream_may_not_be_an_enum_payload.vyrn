@@ -1,1 +1,1 @@
-type E = | A(Stream<Int64>) | B
+type E = enum { A(Stream<Int64>), B }

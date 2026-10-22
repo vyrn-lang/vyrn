@@ -1,8 +1,8 @@
 // Block-bodied match arms in statement position.
 
-type Shape =
-    | Dot
-    | Wide(String, String)
+type Shape = enum {
+    Dot,
+    Wide(String, String) }
 
 fn toss(s: consume Shape) {
     match consume s {

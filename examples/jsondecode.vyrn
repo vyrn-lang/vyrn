@@ -4,7 +4,7 @@
 
 let rounds = 1
 
-type Status = | Pending | Paid | Shipped | Delivered | Returned
+type Status = enum { Pending, Paid, Shipped, Delivered, Returned }
 
 type Qty = Int64 where value >= 1 && value <= 1000
 

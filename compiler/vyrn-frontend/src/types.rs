@@ -1557,7 +1557,7 @@ fn resolve_d<'a>(ty: &'a Type, types: &'a dyn Decls, depth: usize) -> Cow<'a, Ty
     }
 }
 
-/// What an `Option<T>` (`| None | Some(T)`) carries. `None` is tag 0.
+/// What an `Option<T>` (`enum { None, Some(T) }`) carries. `None` is tag 0.
 pub fn option_payload(ty: &Type) -> Option<&Type> {
     match ty {
         Type::Enum(vs) => match vs.as_slice() {
@@ -1570,7 +1570,7 @@ pub fn option_payload(ty: &Type) -> Option<&Type> {
     }
 }
 
-/// What a `Result<T, E>` (`| Err(E) | Ok(T)`) carries, as `(T, E)`. `Err` is
+/// What a `Result<T, E>` (`enum { Err(E), Ok(T) }`) carries, as `(T, E)`. `Err` is
 /// tag 0.
 pub fn result_payloads(ty: &Type) -> Option<(&Type, &Type)> {
     match ty {
@@ -2090,7 +2090,7 @@ mod json_schema_tests {
     #[test]
     fn payloadless_enum_emits_enum_schema() {
         assert_eq!(
-            schema_of("type Color = | Red | Green | Blue", "Color"),
+            schema_of("type Color = enum { Red, Green, Blue }", "Color"),
             "{\"$schema\":\"https://json-schema.org/draft/2020-12/schema\",\
              \"enum\":[\"Red\",\"Green\",\"Blue\"]}"
         );
@@ -2099,7 +2099,7 @@ mod json_schema_tests {
     #[test]
     fn payload_enum_emits_oneof() {
         let s = schema_of(
-            "type Shape = | Circle(Int64) | Rect(Int64, Int64) | Unit",
+            "type Shape = enum { Circle(Int64), Rect(Int64, Int64), Unit }",
             "Shape",
         );
         assert_eq!(
@@ -2292,7 +2292,7 @@ mod sum_alias_tests {
 
     #[test]
     fn a_declared_enum_still_declares_its_variants() {
-        let src = "type Shape =\n    | Circle(Int64)\n    | Rect(Int64, Int64)\n    | Nothing\ntype Lookup = Result<Shape, String>\n";
+        let src = "type Shape = enum {\n    Circle(Int64),\n    Rect(Int64, Int64),\n    Nothing }\ntype Lookup = Result<Shape, String>\n";
         let shape = decl_of(src, "Shape");
         assert!(!is_sum_alias(&shape.base));
         let vs = declared_variants(&shape.base).expect("Shape declares variants");

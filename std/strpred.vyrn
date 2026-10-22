@@ -154,7 +154,7 @@ export fn contains(s: String, needle: String) -> Bool {
 
 /// The two ways a byte range fails to name a substring, each carrying the
 /// offset that failed.
-export type SliceError = | OutOfRange(Int64) | SplitsCharacter(Int64)
+export type SliceError = enum { OutOfRange(Int64), SplitsCharacter(Int64) }
 
 /// The bytes of `s` from `start` up to `end`, both byte offsets on UTF-8
 /// character boundaries.

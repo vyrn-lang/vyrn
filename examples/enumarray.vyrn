@@ -2,12 +2,12 @@
 
 type Point = { x: Int64, y: Int64 }
 
-type Bag =
-    | Empty
-    | Ints(Array<Int64>)
-    | Words(Array<String>)
-    | Points(Array<Point>)
-    | Tagged(Int64, Array<Int64>)
+type Bag = enum {
+    Empty,
+    Ints(Array<Int64>),
+    Words(Array<String>),
+    Points(Array<Point>),
+    Tagged(Int64, Array<Int64>) }
 
 fn total(xs: Array<Int64>) -> Int64 {
     let mut sum = 0

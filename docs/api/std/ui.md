@@ -49,7 +49,7 @@ fn badRequest(message: String) -> PageError
 ## PageData
 
 ```vyrn
-type PageData = Loading | Ready(T)
+type PageData = enum { Loading, Ready(T) }
 ```
 
 A lazy page's view data. `Loading` exists only on a client soft

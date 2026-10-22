@@ -1,9 +1,9 @@
 // Refused on purpose: a payload-bearing enum as a `Map` key.
 import { Hashable } from "std/hash"
 
-type Shape =
-    | Dot
-    | Line(Int64)
+type Shape = enum {
+    Dot,
+    Line(Int64) }
 
 impl Hashable for Shape {
     fn hash(self) -> UInt64 {

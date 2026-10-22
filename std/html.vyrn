@@ -13,12 +13,12 @@ import { fromBytesOr } from "std/strings"
 /// `data-on-<event>="handler" data-arg-<event>="payload"`; `web/vyrn-dom.js`
 /// calls the root-exported `export extern fn` named `handler`. `Key(k)` is list
 /// identity for the keyed differ and renders as `data-key="k"`.
-export type Attr =
-    | Cls(String)
-    | Id(String)
-    | A(String, String)
-    | On(String, String, String)
-    | Key(String)
+export type Attr = enum {
+    Cls(String),
+    Id(String),
+    A(String, String),
+    On(String, String, String),
+    Key(String) }
 
 /// Markup the program vouches for. `Raw` and `v-html` take only this, so no
 /// `String` reaches the page unescaped. `toMarkup` renders a tree, and
@@ -26,24 +26,24 @@ export type Attr =
 /// hatch: write it only for markup the program owns, never for text from input.
 /// `fromJson` also builds one, so decode a `Markup` only from the program's own
 /// output.
-export type Markup = | TrustedMarkup(String)
+export type Markup = enum { TrustedMarkup(String) }
 
 /// A node in the view tree. `Text` is always escaped; `Raw` is never escaped.
 /// `Empty` renders as nothing.
-export type Html =
-    | Empty
-    | Text(String)
-    | Raw(Markup)
-    | El(String, Array<Attr>, Array<Html>)
+export type Html = enum {
+    Empty,
+    Text(String),
+    Raw(Markup),
+    El(String, Array<Attr>, Array<Html>) }
 
 /// A host subscription. An app may export `vyrnSubs() -> String` returning
 /// `toJson(subs())`; after each render `web/vyrn-dom.js` diffs the list by
 /// value and wires what appeared and unwires what went. `Every(ms, handler)`
 /// calls `handler` every `ms` milliseconds; `Keydown(key, handler)` calls it
 /// when `key` (a `KeyboardEvent.key` value) is pressed on the document.
-export type Sub =
-    | Every(Int64, String)
-    | Keydown(String, String)
+export type Sub = enum {
+    Every(Int64, String),
+    Keydown(String, String) }
 
 /// Written out because `Html` reaches itself through `El`, and the structural
 /// copy has no bottom to stop at.
@@ -307,13 +307,13 @@ export fn markupString(m: Markup) -> String {
 ///     keys high to low; then, left to right, `OpInsert` new keys and `OpMove`
 ///     reused ones (always leftward); then diff matched children at their final
 ///     indices.
-export type PatchOp =
-    | OpSetText(Array<Int64>, String)
-    | OpSetAttrs(Array<Int64>, Array<Attr>)
-    | OpReplace(Array<Int64>, Html)
-    | OpInsert(Array<Int64>, Int64, Html)
-    | OpRemove(Array<Int64>, Int64)
-    | OpMove(Array<Int64>, Int64, Int64)
+export type PatchOp = enum {
+    OpSetText(Array<Int64>, String),
+    OpSetAttrs(Array<Int64>, Array<Attr>),
+    OpReplace(Array<Int64>, Html),
+    OpInsert(Array<Int64>, Int64, Html),
+    OpRemove(Array<Int64>, Int64),
+    OpMove(Array<Int64>, Int64, Int64) }
 
 /// Applying the ops in order turns a DOM built from `old` into one built from `new`.
 export fn diff(old: Html, new: Html) -> Array<PatchOp> {

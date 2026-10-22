@@ -4,8 +4,8 @@ protocol Unwrap {
     fn valueOr(self, fallback: Output) -> Output
 }
 
-type Reading = | Unread | Celsius(Int64)
-type Line = | Blank | Words(String)
+type Reading = enum { Unread, Celsius(Int64) }
+type Line = enum { Blank, Words(String) }
 
 impl<T> Unwrap for Option<T> {
     type Output = T

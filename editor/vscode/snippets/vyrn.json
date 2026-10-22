@@ -27,11 +27,12 @@
   "type (enum)": {
     "prefix": "type enum",
     "body": [
-      "type ${1:Name} =",
-      "    | ${2:Variant}",
-      "    | ${0:Other}"
+      "type ${1:Name} = enum {",
+      "    ${2:Variant},",
+      "    ${0:Other},",
+      "}"
     ],
-    "description": "An enum / sum type (leading-pipe style)"
+    "description": "An enum / sum type"
   },
   "protocol": {
     "prefix": "protocol",

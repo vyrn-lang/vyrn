@@ -21,6 +21,7 @@ pub mod hash;
 pub mod lexer;
 pub mod loader;
 pub mod manifest;
+pub mod migrate;
 pub mod movecheck;
 pub mod origin;
 pub mod own;

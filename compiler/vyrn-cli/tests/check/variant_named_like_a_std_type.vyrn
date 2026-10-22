@@ -1,5 +1,5 @@
 import { compile } from "std/regex"
-type Coll = | Match | Miss
+type Coll = enum { Match, Miss }
 fn main() -> Int64 {
     match compile("a+") { Ok(re) => print("compiled"), Err(e) => print(e) }
     return 0

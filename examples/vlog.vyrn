@@ -24,7 +24,7 @@ type LogLine = { ts: Millis, level: String, msg: String }
 
 type Rec = { raw: String, line: LogLine }
 
-type Level = | Trace | Debug | Info | Warn | Error
+type Level = enum { Trace, Debug, Info, Warn, Error }
 
 type Decoded = { ok: Bool, line: LogLine, err: String }
 

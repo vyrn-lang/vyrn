@@ -604,7 +604,7 @@ const ROWS: &[Row] = &[
         export: "selfReferring",
         today: Shape::Steady,
         why: "a type that reaches ITSELF is released by DECLARATION. The release walk \
-              is structural, so `type Twig = | Fork(String, Array<Twig>)` has no bottom to stop \
+              is structural, so `type Twig = enum { Fork(String, Array<Twig>) }` has no bottom to stop \
               at, and `release_kind` answered `None` — for the type, for `Array<Twig>`, and for \
               every record that merely REACHES one. That was 63 of the corpus's unreclaimed \
               bindings, all of them in `std/vyx` and `std/graphql`. A declared `release` IS the \
@@ -819,9 +819,9 @@ type Doc = {{ title: String, body: String }}
 /// A type that reaches ITSELF — `Twig` holds `Array<Twig>`. The shape the
 /// release walk needs a declaration to enter, and the shape `std/vyx`'s
 /// `VyxNode` and `std/graphql`'s `GqlSel` have.
-type Twig =
-    | Tip(String)
-    | Fork(String, Array<Twig>)
+type Twig = enum {{
+    Tip(String),
+    Fork(String, Array<Twig>) }}
 
 /// A record that merely REACHES the self-referring type. It had no row either,
 /// for the same missing bottom, and gets its structural one back with the
@@ -1959,9 +1959,9 @@ fn a_method_call_passes_its_argument_as_the_dispatched_impl_declares() {
 // riding in a payload word. Each store below displaced a value whose heap
 // the store's shallow snapshot never reached (record `m7-box`).
 const DISPLACED: &str = r#"type R = { o: Option<Array<Int64>>, n: Int64 }
-type E =
-    | A(Array<String>)
-    | B(Int64)
+type E = enum {
+    A(Array<String>),
+    B(Int64) }
 
 let mut g: Option<Array<Int64>> = None
 
@@ -2059,9 +2059,9 @@ fn a_store_runs_the_declared_release_of_what_it_displaces() {
 // `consume` parameter, leaves a hole in the scrutinee, and the scrutinee's
 // release walks around it (`vyxProcessElem` in `std/vyx.vyrn`). A miss is a
 // double free, exit 134.
-const PAYLOAD_DECLS: &str = r#"type Node =
-    | Elem(String, Array<Int64>, Int64)
-    | Text(String)
+const PAYLOAD_DECLS: &str = r#"type Node = enum {
+    Elem(String, Array<Int64>, Int64),
+    Text(String) }
 
 fn sum(xs: consume Array<Int64>) -> Int64 {
     let mut t = 0

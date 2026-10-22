@@ -19,7 +19,7 @@ type JsonField = { key: String, value: Json }
 ## Json
 
 ```vyrn
-type Json = JNull | JBool(Bool) | JNum(String) | JStr(String) | JArr(Array<Json>) | JObj(Array<JsonField>)
+type Json = enum { JNull, JBool(Bool), JNum(String), JStr(String), JArr(Array<Json>), JObj(Array<JsonField>) }
 ```
 
 A JSON value. `JNum` holds the raw, validated number text, never a float,
