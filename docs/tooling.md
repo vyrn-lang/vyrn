@@ -267,6 +267,17 @@ compile, except `--contract`.
   imports, each allocating, copying, growing or entering row also reads
   `last run: N blocks, B bytes`. If the source or an import changed since that
   run, the report prints one line, `profile: stale; ...`, and no counts.
+- `vyrn why --provenance <file>`: per function of the file that returns an
+  array, which positions of its array parameters the result's positions read,
+  such as ``identity+fresh(end) pointwise, from `path` ``. The class is
+  identity, prefix, suffix, subsequence, stutter, reverse,
+  reverse-subsequence, permutation, injection or gather, or concat or shuffle
+  where two parameters meet, each then named with its own class.
+  `+fresh(end)` and `+fresh(inside)` mark positions the body writes from no
+  parameter; `pointwise` and `field-update(f)` mark changed values. `fresh`
+  means no position reads a parameter, and `unknown` gives the reason. A
+  generic function is reported through its first instance in the file. The
+  report accepts and refuses nothing.
 - `vyrn why --capability <fs|stdin|args|extern> <entry-or-artifact>`: every
   import chain that pulls that capability into an artifact's closure.
 
