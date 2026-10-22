@@ -42,7 +42,7 @@ use std::sync::{Arc, Mutex};
 
 use vyrn_frontend::ast::{BinOp, Capability, Field, FnId, Type, TypeDecl, UnOp};
 use vyrn_frontend::effects::Effect;
-use vyrn_frontend::prelude::{self, Elements, Length};
+use vyrn_frontend::prelude::{self, ShapeMap};
 use vyrn_frontend::prim::Cmp;
 
 use crate::effects::StateUse;
@@ -815,11 +815,11 @@ enum Moves {
 }
 
 impl Moves {
-    /// How a builtin row that states `len` moves its receiver.
-    fn of(len: Length) -> Moves {
-        match len {
-            Length::Keeps => Moves::Keeps,
-            Length::GrowsByOne | Length::GrowsByLenOf(_) => Moves::Grows,
+    /// How a builtin row that states `map` moves its receiver.
+    fn of(map: ShapeMap) -> Moves {
+        match map {
+            ShapeMap::Same => Moves::Keeps,
+            ShapeMap::Pushes(_) | ShapeMap::Appends(_) => Moves::Grows,
             _ => Moves::Any,
         }
     }
@@ -995,7 +995,7 @@ fn frame<'o>(
         let (a0, Capability::Consume) = args.first()? else {
             return None;
         };
-        let m = Moves::of(length_rule(callee, args));
+        let m = Moves::of(shape_map(callee, args));
         if arg_hit(a0) == Some(h) {
             return Some((m, None));
         }
@@ -1068,7 +1068,7 @@ fn frame<'o>(
                             let Rhs::Call { callee, .. } = rhs else {
                                 continue;
                             };
-                            Moves::of(length_rule(callee, args))
+                            Moves::of(shape_map(callee, args))
                         }
                         (Hit::Whole, Capability::Modify) if !builtin(rhs) => {
                             match callee(rhs, i).filter(|t| t.len() == out.len()) {
@@ -1836,17 +1836,17 @@ fn element_scan<'b>(b: &'b Body, decls: &HashMap<String, TypeDecl>) -> ElementSc
         // builtin (`@pop`, `@swapRemove`); a row it may admit later that
         // moves elements in place loses the field's facts.
         let builtin = matches!(kind, Callee::Builtin | Callee::Reserved);
-        let len = match builtin {
-            true => length_rule(callee, args),
-            false => Length::Unknown,
+        let map = match builtin {
+            true => shape_map(callee, args),
+            false => ShapeMap::Unknown,
         };
         for (a, _) in args.iter().filter(|(_, c)| *c != Capability::Read) {
             match a {
                 Arg::Place(Place::Field(_, x)) => {
-                    if !grows(len) {
+                    if !grows(map) {
                         out.shrunk.push(x);
                     }
-                    if !(builtin && keeps_elements(callee, len)) {
+                    if !keeps_elements(map) {
                         out.loose.push(x);
                     }
                 }
@@ -1950,9 +1950,9 @@ fn refill(
                 else {
                     return (false, false);
                 };
-                let len = length_rule(callee, args);
-                length &= grows(len);
-                elements &= (callee == "@push" && tracked) || keeps_elements(callee, len);
+                let map = shape_map(callee, args);
+                length &= grows(map);
+                elements &= (callee == "@push" && tracked) || keeps_elements(map);
                 cur = *t;
             }
             _ => return (false, false),
@@ -2117,26 +2117,20 @@ fn through_borrow<'p>(p: &'p Place, defs: &[Option<&'p Rhs>], uses: &[u32]) -> &
     }
 }
 
-/// Whether a length effect never shortens.
-fn grows(len: Length) -> bool {
+/// Whether a shape map never shortens.
+fn grows(map: ShapeMap) -> bool {
     matches!(
-        len,
-        Length::Keeps | Length::GrowsByOne | Length::GrowsByLenOf(_)
+        map,
+        ShapeMap::Same | ShapeMap::Pushes(_) | ShapeMap::Appends(_)
     )
 }
 
-/// Whether builtin `callee` with length effect `len` leaves its receiver
-/// only elements it held.
-fn keeps_elements(callee: &str, len: Length) -> bool {
-    let kept = prelude::builtin(callee).is_some_and(|r| {
-        matches!(
-            r.elements,
-            Elements::KeepsEachPosition | Elements::KeepsRange
-        )
-    });
-    kept && matches!(
-        len,
-        Length::Keeps | Length::ShrinksByOneIfNotEmpty | Length::SetToZero
+/// Whether a builtin with shape map `map` leaves its receiver only elements
+/// it held.
+fn keeps_elements(map: ShapeMap) -> bool {
+    matches!(
+        map,
+        ShapeMap::Same | ShapeMap::DropsLast | ShapeMap::SwapsOut(_) | ShapeMap::Empties
     )
 }
 
@@ -2322,7 +2316,7 @@ fn made_lengths(b: &Body) -> BTreeSet<Lin> {
                 },
             ) if returned.contains(n) => {
                 let keeps = prelude::builtin(callee)
-                    .is_some_and(|b| b.length_at(args.len()) == Length::Keeps);
+                    .is_some_and(|b| b.shape_map_at(args.len()) == ShapeMap::Same);
                 if let (true, Some((Arg::Val(Val::Lit(Lit::Str(x))), _))) = (keeps, args.first()) {
                     out.insert(Lin::k(x.len() as i64));
                 }
@@ -3725,7 +3719,7 @@ impl<'a> Walk<'a> {
         if self.elem_cands.is_empty() || self.kind(n) != Kind::Seq {
             return;
         }
-        let (m, len) = match rhs {
+        let (m, map) = match rhs {
             Rhs::Make(Ctor::Array, parts) => {
                 let ts: BTreeSet<Lin> = (self.cands_for(n).into_iter())
                     .filter(|t| parts.iter().all(|v| self.meets(st, t, n, v)))
@@ -3735,14 +3729,14 @@ impl<'a> Walk<'a> {
                 }
                 return;
             }
-            Rhs::Val(Val::Name(m)) | Rhs::Take(Place::Name(m)) => (*m, Length::Keeps),
+            Rhs::Val(Val::Name(m)) | Rhs::Take(Place::Name(m)) => (*m, ShapeMap::Same),
             Rhs::Call {
                 callee,
                 args,
                 kind: Callee::Builtin | Callee::Reserved,
                 ..
             } if lands_on_result(args) => match args.first().and_then(|(a, _)| root(a)) {
-                Some(m) => (m, length_rule(callee, args)),
+                Some(m) => (m, shape_map(callee, args)),
                 None => return,
             },
             // A direct call's result has every template of each argument
@@ -3772,10 +3766,10 @@ impl<'a> Walk<'a> {
         // Whether a template with `k * len(x)` stays true as `x` becomes `n`.
         let follows = |t: &Lin, x: Name| {
             let k = t.coef(Term::Len(x));
-            match len {
-                Length::Keeps => true,
-                Length::GrowsByOne | Length::GrowsByLenOf(_) => k >= 0,
-                Length::ShrinksByOneIfNotEmpty => k <= 0,
+            match map {
+                ShapeMap::Same => true,
+                ShapeMap::Pushes(_) | ShapeMap::Appends(_) => k >= 0,
+                ShapeMap::DropsLast | ShapeMap::SwapsOut(_) => k <= 0,
                 _ => k == 0,
             }
         };
@@ -3794,23 +3788,24 @@ impl<'a> Walk<'a> {
                 .filter_map(|t| renamed(t, y, n))
                 .collect()
         };
-        let row = match rhs {
-            Rhs::Call { callee, .. } => prelude::builtin(callee).map(|r| r.elements),
-            _ => Some(Elements::KeepsEachPosition),
-        };
-        let ts: BTreeSet<Lin> = match (row, len) {
-            (Some(_), Length::SetToZero) => self.cands_for(n),
-            (Some(Elements::KeepsEachPosition | Elements::KeepsRange), _) => {
+        let ts: BTreeSet<Lin> = match map {
+            ShapeMap::Empties => self.cands_for(n),
+            ShapeMap::Same
+            | ShapeMap::Pushes(_)
+            | ShapeMap::Appends(_)
+            | ShapeMap::Extends
+            | ShapeMap::DropsLast
+            | ShapeMap::SwapsOut(_) => {
                 let args: &[(Arg, Capability)] = match rhs {
                     Rhs::Call { args, .. } => args,
                     _ => &[],
                 };
-                let added = match len {
-                    Length::GrowsByOne => args.get(1).map(|(a, _)| a),
+                let added = match map {
+                    ShapeMap::Pushes(j) => args.get(j).map(|(a, _)| a),
                     _ => None,
                 };
-                let theirs = match len {
-                    Length::GrowsByLenOf(j) => args.get(j).and_then(|(a, _)| root(a)),
+                let theirs = match map {
+                    ShapeMap::Appends(j) => args.get(j).and_then(|(a, _)| root(a)),
                     _ => None,
                 }
                 .map(|y| from(y, st));
@@ -3825,14 +3820,14 @@ impl<'a> Walk<'a> {
                     })
                     .collect()
             }
-            (Some(Elements::OfArg(j)), Length::SetToLenOf(l)) if j == l => {
+            ShapeMap::CopiesFrom(j) => {
                 let Rhs::Call { args, .. } = rhs else { return };
                 match args.get(j).and_then(|(a, _)| root(a)) {
                     Some(y) => from(y, st).into_iter().collect(),
                     None => return,
                 }
             }
-            _ => return,
+            ShapeMap::Unknown => return,
         };
         if !ts.is_empty() {
             st.elems.insert(n, ts);
@@ -5707,7 +5702,7 @@ impl<'a> Walk<'a> {
     }
 
     /// The length term of the receiver of a builtin call in `rhs` whose row
-    /// states its length effect, `None` for a String literal, and the bounds
+    /// states its shape map, `None` for a String literal, and the bounds
     /// of its new length as sums over the old.
     fn resized(&self, rhs: &Rhs) -> Option<(Option<Term>, Lin, Lin)> {
         let Rhs::Call {
@@ -5729,17 +5724,17 @@ impl<'a> Walk<'a> {
             _ => term(i).map(Lin::of),
         };
         let old = len(0)?;
-        let (lo, hi) = match length_rule(callee, args) {
-            Length::Unknown => return None,
-            Length::Keeps => (old.clone(), old),
-            Length::GrowsByOne => (old.plus(1)?, old.plus(1)?),
-            Length::ShrinksByOneIfNotEmpty => (old.plus(-1)?, old),
-            Length::SetToZero => (Lin::k(0), Lin::k(0)),
-            Length::GrowsByLenOf(i) => {
+        let (lo, hi) = match shape_map(callee, args) {
+            ShapeMap::Unknown | ShapeMap::Extends => return None,
+            ShapeMap::Same => (old.clone(), old),
+            ShapeMap::Pushes(_) => (old.plus(1)?, old.plus(1)?),
+            ShapeMap::DropsLast | ShapeMap::SwapsOut(_) => (old.plus(-1)?, old),
+            ShapeMap::Empties => (Lin::k(0), Lin::k(0)),
+            ShapeMap::Appends(i) => {
                 let sum = old.add(&len(i)?)?;
                 (sum.clone(), sum)
             }
-            Length::SetToLenOf(i) => {
+            ShapeMap::CopiesFrom(i) => {
                 let l = len(i)?;
                 (l.clone(), l)
             }
@@ -5770,10 +5765,7 @@ impl<'a> Walk<'a> {
         // A `modify` builtin that may change an element keeps no template of it.
         if let (Callee::Builtin | Callee::Reserved, Rhs::Call { callee, .. }) = (kind, rhs) {
             let keeps = prelude::builtin(callee).is_some_and(|r| {
-                matches!(
-                    r.elements,
-                    Elements::KeepsEachPosition | Elements::KeepsRange
-                )
+                !matches!(r.shape_map, ShapeMap::Unknown | ShapeMap::CopiesFrom(_))
             });
             if !keeps {
                 for (a, _) in args.iter().filter(|(_, c)| *c == Capability::Modify) {
@@ -5794,8 +5786,8 @@ impl<'a> Walk<'a> {
                     let old = Lin::of(*t);
                     match (lo.sub(&old), hi.sub(&old)) {
                         (Some(a), Some(b)) if a.is_const() && b.is_const() => {
-                            // `ShrinksByOneIfNotEmpty` shrinks a length of at
-                            // least one by exactly one.
+                            // `DropsLast` and `SwapsOut` shrink a length of
+                            // at least one by exactly one.
                             let full = old.plus(-1).is_some_and(|g| {
                                 (st.prover().ge0_deep(&g)).is_some_and(|c| c.verify(st, &g))
                             });
@@ -6776,26 +6768,26 @@ fn conjuncts(e: &vyrn_frontend::ast::Expr) -> usize {
     }
 }
 
-/// Whether a builtin's length effect lands on its result: its receiver is not
-/// passed `modify`, so the call hands the resized array back (`@push`).
-/// The length a walk reads for a call to the builtin `callee` with `args`:
-/// the row's ([`prelude::Builtin::length_at`]), except that a row that
+/// The shape map a walk reads for a call to the builtin `callee` with `args`:
+/// the row's ([`prelude::Builtin::shape_map_at`]), except that a row that
 /// builds its result from a name (`bytes(s)`) states nothing. Read from a
 /// name, `bytes` proved 9 more static rows, run 342 times in all, for 1.6%
 /// more `elide: summaries` allocations on the site export; from a String
 /// literal (`bytes("..")`) it costs none.
-fn length_rule(callee: &str, args: &[(Arg, Capability)]) -> Length {
+fn shape_map(callee: &str, args: &[(Arg, Capability)]) -> ShapeMap {
     let Some(row) = prelude::builtin(callee) else {
-        return Length::Unknown;
+        return ShapeMap::Unknown;
     };
     match (&row.spec, args.first()) {
         (Some(prelude::Spec::Builds(_)), Some((Arg::Val(Val::Name(_)) | Arg::Place(_), _))) => {
-            Length::Unknown
+            ShapeMap::Unknown
         }
-        _ => row.length_at(args.len()),
+        _ => row.shape_map_at(args.len()),
     }
 }
 
+/// Whether a builtin's shape map lands on its result: its receiver is not
+/// passed `modify`, so the call hands the resized array back (`@push`).
 fn lands_on_result(args: &[(Arg, Capability)]) -> bool {
     args.first().is_some_and(|(_, c)| *c != Capability::Modify)
 }
@@ -7012,7 +7004,10 @@ fn mark(
                         callee, args, kind, ..
                     } => {
                         let lengths = matches!(kind, Callee::Builtin | Callee::Reserved)
-                            && length_rule(callee, args) != Length::Unknown;
+                            && !matches!(
+                                shape_map(callee, args),
+                                ShapeMap::Unknown | ShapeMap::Extends
+                            );
                         if lengths || linked(rhs) {
                             let from = args.iter().filter_map(|(a, _)| root(a));
                             link(rel, n.into_iter().chain(from));

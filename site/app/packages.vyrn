@@ -198,7 +198,7 @@ fn exportName(line: String) -> String {
     let mut i = 0
     while i < words.length {
         let w = words[i]
-        if w == "impl" {
+        if w == "impl" || (i == 0 && w == "to") {
             return ""
         }
         if w == "mut" || w == "extern" || w == "gen" || w == "fn" || w == "type" || w == "protocol" || w == "let" || w.byteLength == 0 {
@@ -344,6 +344,8 @@ test "the export scan reads the names the source declares" {
     assertEq(exportName("export type Lang = String where value == \"vyrn\""), "Lang")
     assertEq(exportName("export gen fn rows(dir: String) -> String {"), "rows")
     assertEq(exportName("export impl Show for Book {"), "")
+    assertEq(exportName("export to \"./editor\" fn helper() -> Int64 {"), "")
+    assertEq(exportName("export type to = Int64"), "to")
     assertEq(exportNames("examples/shelf/shared/wire.vyrn").length, 14)
     assertEq(exportNames("examples/leak/shared/format.vyrn").length, 2)
     assertEq(exportNames("nope/nothing.vyrn").length, 0)

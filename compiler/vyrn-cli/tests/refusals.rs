@@ -480,6 +480,12 @@ fn census() -> Vec<Row> {
             "`call` argument 1 expects Int64, found String",
             Kernel::Elsewhere,
         ),
+        row(
+            "r67_a_type_argument_no_field_mentions.vyrn",
+            "a type argument counts where no field mentions it",
+            "`f` argument 1 expects Handle<Person>, found Handle<Order>",
+            Kernel::Elsewhere,
+        ),
     ]
 }
 
@@ -2081,6 +2087,90 @@ fn a_gen_body_no_program_runs_is_refused() {
     let err = String::from_utf8_lossy(&out.stderr).replace("\r\n", "\n");
     assert!(!out.status.success(), "accepted:\n{err}");
     assert!(err.starts_with("lib.vyrn:9:"), "{err}");
+}
+
+/// A module whose `secret` and `mk` only `./friend` may import.
+const QUALIFIED_LIB: &str = "export to \"./friend\" fn secret() -> Int64 { return 7 }\n\
+     export fn open() -> Int64 { return 1 }\n\
+     export to \"./friend\" gen fn mk(x: String) -> String { return \"export fn made() -> Int64 { return 3 }\" }\n";
+
+/// What `vyrn check` says of `src`, saved as `file` beside [`QUALIFIED_LIB`]
+/// saved as `lib.vyrn`: success, and standard error.
+fn check_beside_qualified(tag: &str, file: &str, src: &str) -> (bool, String) {
+    let dir = common::scratch(tag);
+    std::fs::write(dir.join("lib.vyrn"), QUALIFIED_LIB).expect("write lib.vyrn");
+    std::fs::write(dir.join(file), src).expect("write the importer");
+    let out = vyrn()
+        .current_dir(&*dir)
+        .args(["check", file])
+        .output()
+        .expect("vyrn check");
+    let err = String::from_utf8_lossy(&out.stderr).replace("\r\n", "\n");
+    (out.status.success(), err)
+}
+
+#[test]
+fn an_import_of_an_export_to_declaration_from_a_module_it_names_is_accepted() {
+    let src = "import { secret } from \"./lib\"\nfn main() -> Int64 { return secret() }\n";
+    let (ok, err) = check_beside_qualified("export-to-friend", "friend.vyrn", src);
+    assert!(ok, "{err}");
+}
+
+#[test]
+fn an_import_of_an_export_to_declaration_from_another_module_is_refused() {
+    let src = "import { secret } from \"./lib\"\nfn main() -> Int64 { return secret() }\n";
+    let (ok, err) = check_beside_qualified("export-to-import", "other.vyrn", src);
+    assert!(!ok, "accepted");
+    assert_eq!(
+        err,
+        "other.vyrn:1:0: `secret` is exported from `./lib` only to `./friend`\n"
+    );
+}
+
+#[test]
+fn a_namespace_use_of_an_export_to_declaration_is_refused_where_it_is_used() {
+    let src = "import * as l from \"./lib\"\nfn main() -> Int64 { return l.open() + l.secret() }\n";
+    let (ok, err) = check_beside_qualified("export-to-ns", "other.vyrn", src);
+    assert!(!ok, "accepted");
+    assert_eq!(
+        err,
+        "other.vyrn:2:0: `secret` is exported from `./lib` only to `./friend`\n"
+    );
+}
+
+#[test]
+fn a_generator_import_of_an_export_to_gen_fn_is_refused() {
+    let src = "import { open } from \"./lib\"\nimport { made } from mk(\"x\")\n\
+               fn main() -> Int64 { return made() + open() }\n";
+    let (ok, err) = check_beside_qualified("export-to-gen", "other.vyrn", src);
+    assert!(!ok, "accepted");
+    assert_eq!(
+        err,
+        "other.vyrn:2:0: `mk` is exported from `./lib` only to `./friend`\n"
+    );
+}
+
+#[test]
+fn an_export_to_path_that_does_not_resolve_is_refused_at_its_declaration() {
+    let src =
+        "export to \"nowhere\" fn f() -> Int64 { return 1 }\nfn main() -> Int64 { return f() }\n";
+    let (ok, err) = check_beside_qualified("export-to-unresolved", "other.vyrn", src);
+    assert!(!ok, "accepted");
+    assert!(
+        err.starts_with("other.vyrn:1:0: cannot resolve import `nowhere`"),
+        "{err}"
+    );
+}
+
+#[test]
+fn an_extern_fn_takes_no_export_to() {
+    let src = "export to \"./lib\" extern fn f() -> Int64 { return 1 }\nfn main() -> Int64 { return 0 }\n";
+    let (ok, err) = check_beside_qualified("export-to-extern", "other.vyrn", src);
+    assert!(!ok, "accepted");
+    assert_eq!(
+        err,
+        "other.vyrn:1:19: an `extern fn` takes no `export to` — the JS host imports it, not a module\n"
+    );
 }
 
 /// Declarations whose `Ow` release stores into `gs`, the module state a

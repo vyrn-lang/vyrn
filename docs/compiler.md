@@ -89,6 +89,11 @@ the playground serves an embedded `std/`. The loader:
 - links the modules (`link`), so no later pass sees a module boundary, and
   refuses cycles, missing or unexported names, duplicates and two impls of
   one pair;
+- parses an imported `std/` module's top-level function bodies only where a
+  root can reach them by spelling (`parse_reached`), and drops each function,
+  test and bench of such a module that no root reaches by name
+  (`drop_unreached`), so an importer pays to lex the module and to parse and
+  check what it calls;
 - links `std/runtime` into every program, each declaration renamed with the
   `runtime$` prefix, and links `std/json` and similar modules when a builtin
   that lives in one is mentioned;
@@ -564,6 +569,18 @@ reason in `Check::why`, written beside the verdict by `elide::Walk::why` from
 the first goal that failed and the origin of its names (`elide::Origin`); it
 calls the prover no more often.
 
+`vyrn why --provenance` prints `provenance::table`: per function of the root
+file that returns an array, the class of the backward map from the result's
+positions to each array parameter's, read from the same bodies as `--cost`.
+`provenance::of` interprets one body abstractly: per array it keeps each
+parameter's monotonicity, last and first index pushed, and for an in-place
+store the one duplicated position and the names that hold the content it
+displaced. A builtin's effect on positions is its row's `ShapeMap`. A loop
+whose head test is its only exit, whose counter steps by one, and which
+pushes one element of a parameter at the counter every turn covers the
+parameter from the counter's start to the bound. `tests/provenance.rs` pins
+the classes of the 48 functions the analytic report classified by hand.
+
 ## Where a change goes
 
 - A new surface form: a desugar in the parser, or a lowering in `core::build`.
@@ -574,7 +591,7 @@ calls the prover no more often.
 - A new refusal or acceptance test: a program in `tests/check/` and its
   `.stderr`, never a program in a Rust string.
 - A new builtin: one `prelude::Builtin` row, with its contract (a capability
-  per parameter), method spelling, `Spec`, effect, route, length effect and
+  per parameter), method spelling, `Spec`, effect, route, shape map and
   editor text; its operand count (`takes`) and, when no `sig` types it, its
   operand and result types (`typed`); `fresh` when the result shares no
   storage with an operand. A row whose typing needs a receiver's kind or a

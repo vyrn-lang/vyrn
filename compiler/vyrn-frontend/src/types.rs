@@ -1226,6 +1226,29 @@ pub fn decl_map(p: &crate::ast::Program) -> HashMap<String, TypeDecl> {
         .collect()
 }
 
+/// The member names of a union: the anonymous validated type that joins
+/// branches of different validated scalar types over one base
+/// (`Checker::union`). Its name is its members' names joined by ` | `, in
+/// source order, each once; a declared name holds no space. Its rule is the
+/// `||` of its members' rules, and no value is checked against it: each
+/// branch was checked against its own member.
+pub fn union_members(ty: &Type) -> Option<std::str::Split<'_, &'static str>> {
+    match ty {
+        Type::Named(n) if n.contains(" | ") => Some(n.split(" | ")),
+        _ => None,
+    }
+}
+
+/// `ty` with each union inside it replaced by its base, so no pass after the
+/// checker meets a type no declaration names.
+pub fn decay_unions(ty: &mut Type, types: &dyn Decls) {
+    walk_type_mut(ty, &mut |t| {
+        if union_members(t).is_some() {
+            *t = resolve(t, types);
+        }
+    });
+}
+
 /// Whether a value of type `from` can be used where `to` is expected, without
 /// validation. A validated type decays to its base (an `Age` is an `Int64`);
 /// the reverse needs [`coercible`]. A record with more fields fits at the top
@@ -1263,6 +1286,14 @@ fn assignable_d(from: &Type, to: &Type, width: bool, depth: usize, types: &dyn D
     // `Never` is the bottom type, in one direction only.
     if matches!(from, Type::Never) {
         return true;
+    }
+    // A union fits where each member fits, and a type fits a union where it
+    // fits one member.
+    if let Some(mut ms) = union_members(from) {
+        return ms.all(|m| assignable_d(&Type::Named(m.into()), to, width, depth + 1, types));
+    }
+    if let Some(mut ms) = union_members(to) {
+        return ms.any(|m| assignable_d(from, &Type::Named(m.into()), width, depth + 1, types));
     }
     // A `lazy T` field takes what a `fn() -> T` field takes; only the read
     // hides the thunk.
@@ -1321,6 +1352,14 @@ fn assignable_d(from: &Type, to: &Type, width: bool, depth: usize, types: &dyn D
     if let Type::Named(_) = from {
         if matches!(to, Type::Int | Type::Bool | Type::Str) {
             return &resolve(from, types) == to;
+        }
+    }
+    // A type argument counts where no field mentions it: a `Handle<Order>` is
+    // no `Handle<Person>`. A field that mentions one already demands this.
+    if let (Type::App(n, aa), Type::App(m, bb)) = (from, to) {
+        let fits = |(a, b): (&Type, &Type)| assignable_d(a, b, false, depth + 1, types);
+        if n == m && !aa.iter().zip(bb).all(fits) {
+            return false;
         }
     }
     // Covariant: values are immutable.
@@ -1438,6 +1477,10 @@ fn resolve_d<'a>(ty: &'a Type, types: &'a dyn Decls, depth: usize) -> Cow<'a, Ty
     use Cow::{Borrowed, Owned};
     if depth > MAX_DEPTH {
         return Owned(Type::Unit);
+    }
+    // A union's members share one base.
+    if let Some(first) = union_members(ty).and_then(|mut ms| ms.next()) {
+        return Owned(resolve_d(&Type::Named(first.into()), types, depth + 1).into_owned());
     }
     match ty {
         // The builtin opaque `Code` resolves to itself; a user `type Code` wins.

@@ -71,7 +71,7 @@ const CONTEXTUAL_COLUMNS: &[(&str, &[&str])] = &[
 /// position. The playground's `CONTEXTUAL` list must be a subset.
 const CONTEXTUAL_WORDS: &[&str] = &[
     "read", "modify", "consume", "gen", "test", "bench", "panic", "from", "as", "extern", "lazy",
-    "logging", "contract",
+    "logging", "contract", "to",
 ];
 
 fn repo_root() -> PathBuf {
@@ -565,6 +565,11 @@ fn count_tokens(tokens: &[vyrn_frontend::lexer::Token], into: &mut Uses) {
                 "from" => i > 0 && matches!(after, Some(Tok::Str(_) | Tok::Ident(_))),
                 "as" => i > 0 && matches!(after, Some(Tok::Ident(_))),
                 "panic" => matches!(after, Some(Tok::LParen)),
+                "to" => {
+                    i > 0
+                        && matches!(tokens[i - 1].tok, Tok::Export)
+                        && matches!(after, Some(Tok::Str(_)))
+                }
                 _ => false,
             };
             if contextual {
