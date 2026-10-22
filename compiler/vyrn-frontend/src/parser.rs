@@ -89,18 +89,19 @@ pub fn parse(tokens: Vec<Token>) -> Result<Program, Diagnostic> {
 /// top-level starter. The `Program` holds the declarations that parsed; a caller
 /// should not run later checks when the error list is non-empty.
 pub fn parse_accum(tokens: Vec<Token>) -> (Program, Vec<Diagnostic>) {
-    let (program, errors, _) = parse_with(tokens, false);
+    let (program, errors, _) = parse_with(tokens, false, false);
     (program, errors)
 }
 
-/// [`parse_accum`] that leaves the body of each top-level function, `test` and
-/// `bench` unparsed, in an empty block. [`Skimmed::body`] parses a function's
-/// body when a caller needs it.
-pub fn parse_skimming(tokens: Vec<Token>) -> (Program, Vec<Diagnostic>, Skimmed) {
-    parse_with(tokens, true)
+/// [`parse_accum`] for an imported module: its `test` and `bench` blocks are
+/// skipped unparsed and left out of the program. With `skim`, the body of each
+/// top-level function is left unparsed too, in an empty block, and
+/// [`Skimmed::body`] parses it when a caller needs it.
+pub fn parse_imported(tokens: Vec<Token>, skim: bool) -> (Program, Vec<Diagnostic>, Skimmed) {
+    parse_with(tokens, true, skim)
 }
 
-/// The top-level function bodies [`parse_skimming`] left unparsed.
+/// The top-level function bodies a skimming [`parse_imported`] left unparsed.
 pub struct Skimmed {
     /// The module's tokens, as the lexer wrote them.
     tokens: Vec<Token>,
@@ -144,11 +145,16 @@ impl Skimmed {
     }
 }
 
-fn parse_with(tokens: Vec<Token>, skim: bool) -> (Program, Vec<Diagnostic>, Skimmed) {
+fn parse_with(
+    tokens: Vec<Token>,
+    imported: bool,
+    skim: bool,
+) -> (Program, Vec<Diagnostic>, Skimmed) {
     // A declaration can follow its use, so the names are known only after one
     // parse. A module that answers to a method-form name parses again, and each
     // `recv.m(..)` and the statement desugar around it are decided once.
     let mut p = Parser {
+        imported,
         skim: skim.then(Vec::new),
         ..Parser::over(tokens)
     };
@@ -158,6 +164,7 @@ fn parse_with(tokens: Vec<Token>, skim: bool) -> (Program, Vec<Diagnostic>, Skim
         p.unsplit();
         p = Parser {
             answers,
+            imported,
             skim: skim.then(Vec::new),
             ..Parser::over(std::mem::take(&mut p.tokens))
         };
@@ -251,8 +258,11 @@ struct Parser {
     /// Each `>=` or `>>` that [`Parser::eat`] split in place, with the token it
     /// was, so [`Parser::unsplit`] gives a second parse the lexer's tokens.
     split: Vec<(usize, Tok)>,
-    /// With `Some`, each top-level function, `test` and `bench` body is skipped,
-    /// and a function's is recorded here ([`parse_skimming`]).
+    /// An imported module's parse ([`parse_imported`]): each `test` and `bench`
+    /// block is skipped and left out of the program.
+    imported: bool,
+    /// With `Some`, each top-level function body is skipped and recorded here
+    /// ([`parse_imported`]). Only an imported module's parse skims.
     skim: Option<Vec<((usize, usize), std::ops::Range<usize>)>>,
 }
 
@@ -360,6 +370,7 @@ impl Parser {
             depth: 0,
             answers: HashSet::new(),
             split: Vec::new(),
+            imported: false,
             skim: None,
         }
     }
@@ -470,16 +481,16 @@ impl Parser {
         Ok(())
     }
 
-    /// The body of a top-level function, `test` or `bench`: parsed, or with
-    /// [`Parser::skim`] skipped. A skipped function body is recorded under `at`,
-    /// the line and column of the function's name.
-    fn top_block(&mut self, at: Option<(usize, usize)>) -> Result<Block, Diagnostic> {
+    /// The body of a top-level function: parsed, or with [`Parser::skim`]
+    /// skipped and recorded under `at`, the line and column of the function's
+    /// name.
+    fn top_block(&mut self, at: (usize, usize)) -> Result<Block, Diagnostic> {
         if self.skim.is_none() {
             return self.block();
         }
         let start = self.pos;
         self.skip_braces()?;
-        if let (Some(at), Some(skipped)) = (at, self.skim.as_mut()) {
+        if let Some(skipped) = self.skim.as_mut() {
             skipped.push((at, start..self.pos));
         }
         Ok(Block {
@@ -798,10 +809,11 @@ impl Parser {
                     if name == "test" && matches!(self.tokens[self.pos + 1].tok, Tok::Str(_)) =>
                 {
                     match self.named_block("test") {
-                        Ok(mut t) => {
+                        Ok(Some(mut t)) => {
                             t.doc = doc;
                             tests.push(t);
                         }
+                        Ok(None) => {}
                         Err(d) => {
                             errors.push(d);
                             self.sync_to_decl();
@@ -813,10 +825,11 @@ impl Parser {
                     if name == "bench" && matches!(self.tokens[self.pos + 1].tok, Tok::Str(_)) =>
                 {
                     match self.named_block("bench") {
-                        Ok(mut b) => {
+                        Ok(Some(mut b)) => {
                             b.doc = doc;
                             benches.push(b);
                         }
+                        Ok(None) => {}
                         Err(d) => {
                             errors.push(d);
                             self.sync_to_decl();
@@ -2020,7 +2033,7 @@ impl Parser {
             Type::Unit
         };
 
-        let body = self.top_block(Some((line, col)))?;
+        let body = self.top_block((line, col))?;
         self.type_params.clear();
         Ok(Function {
             name,
@@ -2046,8 +2059,8 @@ impl Parser {
     /// `test "name" { body }` and `bench "name" { body }`: one declaration.
     /// The caller has checked the lookahead, so `word` only words the
     /// refusal. The checker allows `assert`/`assertEq` in a test and `blackBox` in
-    /// a bench.
-    fn named_block(&mut self, word: &str) -> Result<NamedBlock, Diagnostic> {
+    /// a bench. `None` for an imported module's block, skipped unparsed.
+    fn named_block(&mut self, word: &str) -> Result<Option<NamedBlock>, Diagnostic> {
         let line = self.line();
         self.advance();
         let name = match self.advance() {
@@ -2063,17 +2076,20 @@ impl Parser {
                 ))
             }
         };
+        if self.imported {
+            self.skip_braces()?;
+            return Ok(None);
+        }
         // A test and a bench are monomorphic.
         self.type_params.clear();
-        let body = self.top_block(None)?;
+        let body = self.block()?;
         self.type_params.clear();
-        Ok(NamedBlock {
+        Ok(Some(NamedBlock {
             name,
             body,
             doc: None,
-            module: None,
             line,
-        })
+        }))
     }
 
     /// `extern fn name(params) -> Ret`; `exported` says `export`

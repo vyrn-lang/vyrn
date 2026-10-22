@@ -1,6 +1,6 @@
 command	lines	sentences
 why	768	12
-bench	504	11
+bench	500	11
 serve, dev	486	3
 dev	408	15
 (dispatch)	336	4
@@ -19,7 +19,7 @@ vendor	64	6
 add	62	3
 new	54	5
 emit-gen	33	3
-test	25	0
+test	24	0
 emit-wat, emit-lowered	23	0
 serve	15	2
 check	12	0

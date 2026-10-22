@@ -233,7 +233,6 @@ pub struct OutsideBody<'a> {
     pub name: String,
     pub id: FnId,
     pub block: &'a vyrn_frontend::ast::Block,
-    pub module: Option<String>,
     pub line: usize,
     pub facts: NodeTypes<'a>,
 }
@@ -890,7 +889,6 @@ fn build<'a>(
             id: id(SourceBody::Test(i)),
             name: format!("test@{i}"),
             block: &t.body,
-            module: t.module.clone(),
             line: t.line,
             facts,
         });
@@ -900,7 +898,6 @@ fn build<'a>(
             id: id(SourceBody::Bench(i)),
             name: format!("bench@{i}"),
             block: &b.body,
-            module: b.module.clone(),
             line: b.line,
             facts,
         });

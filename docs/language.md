@@ -597,7 +597,7 @@ test "clamp holds the bounds" {
 
 - `assert` and `assertEq` exist only inside a `test` block.
 - A test name is unique within its file. `vyrn test --name <substring>` selects tests.
-- An imported module's tests type-check but do not run.
+- Only the root module's `test` and `bench` blocks are parsed and checked. An importer pays nothing for another module's tests, and a broken test fails only its own module.
 
 A `bench` block is a body the timer runs. `vyrn bench` compiles it natively and reports the minimum, median and mean over many samples; `--check` runs each body once. `blackBox(x)` hides a value from the optimizer, so the measured work is not folded away.
 

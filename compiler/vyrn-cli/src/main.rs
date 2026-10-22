@@ -3307,15 +3307,14 @@ fn test_cmd(call: &Call) -> Outcome {
     let (p, path) = call.root()?;
     let filter = call.value("--name");
     let (program, _) = p.checked(&path, &read_source(&path)?)?;
-    let has_tests = program.tests.iter().any(|t| t.module.is_none());
-    if !has_tests {
+    if program.tests.is_empty() {
         println!("no tests");
         return Ok(ExitCode::SUCCESS);
     }
     let bodies: Vec<Body> = program
         .tests
         .iter()
-        .filter(|t| t.module.is_none() && filter.is_none_or(|s| t.name.contains(s)))
+        .filter(|t| filter.is_none_or(|s| t.name.contains(s)))
         .map(|t| Body {
             name: t.name.clone(),
             body: t.body.clone(),
@@ -3355,11 +3354,7 @@ fn bench_cmd(call: &Call) -> Outcome {
     let (program, _) = p.checked(&path, &read_source(&path)?)?;
 
     let matches = |name: &str| filter.is_none_or(|sub| name.contains(sub));
-    let has_selected = program
-        .benches
-        .iter()
-        .any(|b| b.module.is_none() && matches(&b.name));
-    if !has_selected {
+    if !program.benches.iter().any(|b| matches(&b.name)) {
         println!("no benches");
         return Ok(ExitCode::SUCCESS);
     }
@@ -3368,7 +3363,7 @@ fn bench_cmd(call: &Call) -> Outcome {
         let bodies: Vec<Body> = program
             .benches
             .iter()
-            .filter(|b| b.module.is_none() && matches(&b.name))
+            .filter(|b| matches(&b.name))
             .map(|b| Body {
                 name: b.name.clone(),
                 body: b.body.clone(),
@@ -3416,7 +3411,7 @@ import {{ benchOne }} from \"std/bench\"
     let selected: Vec<vyrn_frontend::ast::NamedBlock> = program
         .benches
         .iter()
-        .filter(|b| b.module.is_none() && filter.is_none_or(|sub| b.name.contains(sub)))
+        .filter(|b| filter.is_none_or(|sub| b.name.contains(sub)))
         .cloned()
         .collect();
     let mut harness_stmts: Vec<Stmt> = Vec::new();

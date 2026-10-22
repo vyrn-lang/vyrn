@@ -144,8 +144,9 @@ through `$VYRN_WASM2C`, `$VYRN_SIMDE` and `$VYRN_WASM_OPT`, then the
 
 Runs the root file's `test "name" { ... }` blocks in declaration order and exits
 1 if any failed. `assert` and `assertEq` are legal only inside a test body.
-Test blocks are type-checked with the program and stripped from `run` and
-`build`. A file with no tests prints `no tests` and exits 0.
+The root's test blocks are type-checked with the program and stripped from
+`run` and `build`; an imported module's are neither parsed nor checked. A file
+with no tests prints `no tests` and exits 0.
 
 ### `vyrn bench [file] [--name <substring>] [...]`
 

@@ -6,6 +6,6 @@ protocols	1	8	7	0	0	7	0	23
 contracts	0	9	4	0	0	0	1	14
 impls	1	12	28	2	0	5	0	48
 globals	1	13	13	1	0	2	0	30
-tests	0	10	2	1	0	1	5	19
-benches	0	10	2	1	0	1	6	20
-all	8	130	80	8	0	41	31	298
+tests	0	6	2	1	0	1	5	15
+benches	0	6	2	1	0	1	6	16
+all	8	122	80	8	0	41	31	290

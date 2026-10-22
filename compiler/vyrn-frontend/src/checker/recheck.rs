@@ -193,10 +193,7 @@ impl<'a> Session<'a> {
                     write!(h, "{:?}|{}|{}|{:?}", f.params, f.line, f.col, f.body)
                 }
             },
-            Text::Block(b) => match hashed(&b.module) {
-                Some(mh) => write!(h, "{:?}|{mh}|{}|{}", b.module, b.name, b.line),
-                None => write!(h, "{:?}|{:?}|{}|{:?}", b.module, b.name, b.line, b.body),
-            },
+            Text::Block(b) => write!(h, "{:?}|{}|{:?}", b.name, b.line, b.body),
         };
         h.0.finish()
     }

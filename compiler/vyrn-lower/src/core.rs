@@ -1432,7 +1432,7 @@ impl<'a> Builder<'a> {
         let filtered;
         let (facts, file) = match source {
             Source::Instance(inst) => (&inst.facts, inst.func.module.clone()),
-            Source::Block(ob) => (&ob.facts, ob.module.clone()),
+            Source::Block(ob) => (&ob.facts, None),
             Source::Globals(facts) => (*facts, None),
             Source::Expr { facts, file, e, .. } => {
                 let mut mine = Vec::new();
@@ -8468,7 +8468,7 @@ impl Job<'_, '_> {
     fn module(&self) -> &Option<String> {
         match self {
             Job::Inst(inst) => &inst.func.module,
-            Job::Outside(ob) => &ob.module,
+            Job::Outside(_) => &None,
         }
     }
 
@@ -8482,12 +8482,11 @@ impl Job<'_, '_> {
     }
 
     /// The judgment memo's key. A `test` or `bench` body is keyed with its
-    /// line too: the `test@<i>` index is global, so a test added to an
-    /// earlier module renumbers every later one.
+    /// line too: a test added before it renumbers its `test@<i>` index.
     fn key(&self, memo: &vyrn_frontend::movecheck::Judgments<'_>) -> Option<JudgmentKey> {
         match self {
             Job::Inst(inst) => memo.key(inst.func.module.as_deref(), &inst.spelling()),
-            Job::Outside(ob) => memo.key(ob.module.as_deref(), &format!("{}@{}", ob.name, ob.line)),
+            Job::Outside(ob) => memo.key(None, &format!("{}@{}", ob.name, ob.line)),
         }
     }
 

@@ -965,6 +965,32 @@ fn imports_resolve_across_files() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// The open file is the root: its own `test` blocks are checked, and an
+/// imported module's are not parsed.
+#[test]
+fn only_the_open_files_tests_are_checked() {
+    let dir = std::env::temp_dir().join(format!("vyrn-lsp-tests-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let lib = "export fn two() -> Int64 { return 2 }\n\
+               test \"ill-typed\" { let x: Int64 = \"two\" }\n";
+    let main = "import { two } from \"./lib\"\nfn main() -> Int64 { return two() }\n";
+    std::fs::write(dir.join("lib.vyrn"), lib).unwrap();
+    std::fs::write(dir.join("main.vyrn"), main).unwrap();
+    let mut client = spawn_client();
+
+    did_open(&mut client, &file_uri(&dir.join("main.vyrn")), "vyrn", main);
+    let note = read_diags_for(&mut client, "main.vyrn");
+    assert_eq!(note["params"]["diagnostics"], serde_json::json!([]));
+
+    did_open(&mut client, &file_uri(&dir.join("lib.vyrn")), "vyrn", lib);
+    let said = read_diags_for(&mut client, "lib.vyrn")["params"]["diagnostics"].to_string();
+    assert!(
+        said.contains("declared Int64 but initializer is String"),
+        "{said}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// One full-range `TextEdit` holding the canonical form.
 #[test]
 fn document_formatting_returns_canonical_edit() {
