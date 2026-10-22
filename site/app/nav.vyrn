@@ -4,7 +4,7 @@ import { metaOf } from "./meta"
 import { Markup } from "std/html"
 
 export fn pageHead(title: String) -> Head {
-    return pageHeadWith(title, "Vyrn is a systems language with the expressiveness of TypeScript. Types carry the rules that make a value valid. Ownership is a word you write on a parameter. No garbage collector, and one program for three backends.")
+    return pageHeadWith(title, "Vyrn is a systems language with the expressiveness of TypeScript. Write the rule, and the compiler proves it, checks it, or tells you why not. No garbage collector.")
 }
 
 export fn pageHeadWith(title: String, description: String) -> Head {

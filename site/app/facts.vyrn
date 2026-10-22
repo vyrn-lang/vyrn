@@ -49,7 +49,7 @@ export gen fn repoFacts(examplesDir: String, stdDir: String, releaseFile: String
     let examples = vyrnStems(examplesDir).length
     let mods = vyrnStems(stdDir)
     let mut out = "/// Counted from the repository while the site compiled. Do not edit.\n"
-    out = out + "/// Single-file programs in `examples/`. Every one runs on all three backends.\n"
+    out = out + "/// Single-file programs in `examples/`. Each one meant to run runs as WebAssembly and as a native binary.\n"
     out = out + "export fn exampleCount() -> Int64 { return " + examples.toString() + " }\n"
     out = out + "/// Modules in `std/`, all written in Vyrn.\n"
     out = out + "export fn stdCount() -> Int64 { return " + mods.length.toString() + " }\n"
