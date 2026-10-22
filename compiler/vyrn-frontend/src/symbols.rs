@@ -1973,7 +1973,7 @@ fn index_namespaces(
     linker: Option<Linker<'_>>,
     origins: &OriginIndex,
 ) -> Vec<NamespaceInfo> {
-    let Some((root_path, _, resolver)) = linker else {
+    let Some((root_path, opts, resolver)) = linker else {
         return Vec::new();
     };
     if !root.imports.iter().any(|i| i.namespace.is_some()) {
@@ -1994,7 +1994,7 @@ fn index_namespaces(
                 .iter()
                 .find(|(k, _, _)| k == target)
                 .and_then(|(_, _, g)| g.as_deref());
-            let mut members = namespace_members(target, resolver, gen);
+            let mut members = namespace_members(target, (&root_key, opts), resolver, gen);
             for m in &mut members {
                 let generated = m.name.clone();
                 origins.apply(target, &generated, m);
@@ -2008,15 +2008,17 @@ fn index_namespaces(
     out
 }
 
-/// The exported declarations of `target` as [`Symbol`]s, parsed from the
-/// target's own source, so a collision rename in the linked program never shows.
-/// An unreadable target without `gen_source` yields none.
+/// The exported declarations of `target` that `importer`, a module key read
+/// under its load options, may import, as [`Symbol`]s parsed from the target's
+/// own source, so a collision rename in the linked program never shows. An
+/// unreadable target without `gen_source` yields none.
 ///
 /// `gen_source` is the generated text when `target` is a generated module. Its
 /// members hover, with docs, but carry no `file`: there is nothing on disk to
 /// jump to.
 fn namespace_members(
     target: &str,
+    (importer, opts): (&str, &crate::loader::LoadOptions),
     resolver: &dyn crate::loader::ModuleResolver,
     gen_source: Option<&str>,
 ) -> Vec<Symbol> {
@@ -2032,8 +2034,16 @@ fn namespace_members(
         return Vec::new();
     };
     let (program, _errs) = parser::parse_accum(tokens);
-    let exported = |of, _: &str, _: &Option<String>, exported| {
-        exported && matches!(of, Of::Function | Of::Protocol | Of::Type)
+    let mut real_paths = std::collections::HashMap::new();
+    let qualified = (program.functions.iter().map(|f| (&f.name, &f.export_to)))
+        .chain(program.protocols.iter().map(|p| (&p.name, &p.export_to)))
+        .chain(program.type_decls.iter().map(|t| (&t.name, &t.export_to)));
+    let shut_out: std::collections::HashSet<&str> = qualified
+        .filter(|(_, to)| !crate::loader::admits(to, target, importer, opts, &mut real_paths))
+        .map(|(name, _)| name.as_str())
+        .collect();
+    let exported = |of, name: &str, _: &Option<String>, exported| {
+        exported && matches!(of, Of::Function | Of::Protocol | Of::Type) && !shut_out.contains(name)
     };
     let mut out = Vec::new();
     for d in decl_symbols(&program, &Spellings::default(), exported) {
@@ -2653,7 +2663,9 @@ fn module_header_doc(tokens: &[lexer::Token]) -> Option<String> {
 
 /// Builds the documentation model for one module's source: every
 /// exported function, protocol and type, with its hover signature and `///`
-/// block, sorted by declaration line. The parse recovers, as in the LSP.
+/// block, sorted by declaration line. An `export to` declaration is not on the
+/// page: only the modules it names may import it. The parse recovers, as in
+/// the LSP.
 pub fn module_doc(source: &str) -> ModuleDoc {
     let Ok(tokens) = lexer::lex(source) else {
         return ModuleDoc {
@@ -2665,7 +2677,7 @@ pub fn module_doc(source: &str) -> ModuleDoc {
     let (program, _errs) = parser::parse_accum(tokens);
     let mut exports: Vec<DocExport> = Vec::new();
     for f in &program.functions {
-        if f.exported {
+        if f.exported && f.export_to.is_empty() {
             exports.push(DocExport {
                 name: f.name.clone(),
                 kind: SymbolKind::Function,
@@ -2677,7 +2689,7 @@ pub fn module_doc(source: &str) -> ModuleDoc {
         }
     }
     for p in &program.protocols {
-        if p.exported {
+        if p.exported && p.export_to.is_empty() {
             exports.push(DocExport {
                 name: p.name.clone(),
                 kind: SymbolKind::Type,
@@ -2698,7 +2710,7 @@ pub fn module_doc(source: &str) -> ModuleDoc {
     }
     for t in &program.type_decls {
         // Skip synthetic decls: line-0 records and dotted inline-refinement types.
-        if t.line == 0 || ast::is_synthetic(&t.name) || !t.exported {
+        if t.line == 0 || ast::is_synthetic(&t.name) || !t.exported || !t.export_to.is_empty() {
             continue;
         }
         exports.push(DocExport {
@@ -3501,6 +3513,26 @@ mod tests {
     }
 
     #[test]
+    fn a_namespace_offers_an_export_to_member_only_to_a_module_it_names() {
+        use crate::loader::{LoadOptions, MapResolver};
+        let api = "export to \"./friend\" fn inner() -> Int64 { return 1 }\n\
+                   export fn outer() -> Int64 { return 2 }";
+        let resolver = MapResolver([("api.vyrn".to_string(), api.to_string())].into());
+        let root = "import * as api from \"./api\"\nfn main() -> Int64 { return api.outer() }";
+        let members = |path: &str| {
+            let a = analyze_linked(root, path, &LoadOptions::default(), &resolver, None);
+            let ns = a
+                .namespaces
+                .into_iter()
+                .find(|n| n.name == "api")
+                .expect("indexed");
+            ns.members.into_iter().map(|m| m.name).collect::<Vec<_>>()
+        };
+        assert_eq!(members("main.vyrn"), ["outer"]);
+        assert_eq!(members("friend.vyrn"), ["inner", "outer"]);
+    }
+
+    #[test]
     fn analyze_linked_indexes_namespace_members() {
         // `import * as ns` indexes the module's exports for `ns.` completion and
         // `ns.member` hover and go-to-definition.
@@ -3699,6 +3731,18 @@ mod tests {
         assert_eq!(names, ["b", "A"]);
         assert_eq!(d.exports[0].signature, "fn b() -> Int64");
         assert_eq!(d.exports[1].signature, "type A = { x: Int64 }");
+    }
+
+    #[test]
+    fn module_doc_leaves_out_an_export_to_declaration() {
+        let src = "export to \"./editor\" fn helper() -> Int64 { return 0 }\n\
+                   export fn api() -> Int64 { return 0 }\n";
+        let names: Vec<String> = module_doc(src)
+            .exports
+            .into_iter()
+            .map(|e| e.name)
+            .collect();
+        assert_eq!(names, ["api"]);
     }
 
     #[test]

@@ -561,6 +561,26 @@ impl Parser {
         })
     }
 
+    /// The paths of an `export to "a", "b"` clause, read after `export`; empty
+    /// without one. `to` is contextual: a word only before a path.
+    fn export_to(&mut self) -> Vec<String> {
+        let mut out = Vec::new();
+        let at_path = |p: &Self, at: usize| matches!(p.tokens[at].tok, Tok::Str(_));
+        if !(matches!(self.peek(), Tok::Ident(w) if w == "to") && at_path(self, self.pos + 1)) {
+            return out;
+        }
+        self.advance();
+        while let Tok::Str(path) = self.peek().clone() {
+            self.advance();
+            out.push(path);
+            if *self.peek() != Tok::Comma || !at_path(self, self.pos + 1) {
+                break;
+            }
+            self.advance();
+        }
+        out
+    }
+
     fn expect_ident(&mut self) -> Result<String, Diagnostic> {
         match self.advance() {
             Tok::Ident(name) => Ok(name),
@@ -601,8 +621,10 @@ impl Parser {
                 break;
             }
             // `export` marks the following declaration importable.
+            let mut export_to = Vec::new();
             let exported = if *self.peek() == Tok::Export {
                 self.advance();
+                export_to = self.export_to();
                 // `export extern fn`: `extern` is contextual, a starter only before `fn`.
                 let is_export_extern = matches!(self.peek(), Tok::Ident(n) if n == "extern")
                     && matches!(self.tokens[self.pos + 1].tok, Tok::Fn);
@@ -629,6 +651,11 @@ impl Parser {
                     self.sync_to_decl();
                     continue;
                 }
+                if is_export_extern && !export_to.is_empty() {
+                    errors.push(refuse!("parse", self.line(), self.col(), ExportToExtern));
+                    self.sync_to_decl();
+                    continue;
+                }
                 true
             } else {
                 false
@@ -645,6 +672,7 @@ impl Parser {
                     Ok(mut ds) => {
                         ds[0].doc = doc;
                         ds[0].exported = exported;
+                        ds[0].export_to = export_to;
                         type_decls.extend(ds);
                     }
                     Err(d) => {
@@ -656,6 +684,7 @@ impl Parser {
                     Ok(mut f) => {
                         f.doc = doc;
                         f.exported = exported;
+                        f.export_to = export_to;
                         functions.push(f);
                     }
                     Err(d) => {
@@ -673,6 +702,7 @@ impl Parser {
                         Ok(mut f) => {
                             f.doc = doc;
                             f.exported = exported;
+                            f.export_to = export_to;
                             functions.push(f);
                         }
                         Err(d) => {
@@ -689,6 +719,7 @@ impl Parser {
                         Ok(mut f) => {
                             f.doc = doc;
                             f.exported = exported;
+                            f.export_to = export_to;
                             f.is_mut = true;
                             functions.push(f);
                         }
@@ -702,6 +733,7 @@ impl Parser {
                     Ok(mut p) => {
                         p.doc = doc;
                         p.exported = exported;
+                        p.export_to = export_to;
                         protocols.push(p);
                     }
                     Err(d) => {
@@ -716,6 +748,7 @@ impl Parser {
                         Ok(mut c) => {
                             c.doc = doc;
                             c.exported = exported;
+                            c.export_to = export_to;
                             contracts.push(c);
                         }
                         Err(d) => {
@@ -1011,6 +1044,7 @@ impl Parser {
         self.eat(&Tok::RBrace)?;
         Ok(ProtocolDecl {
             exported: false,
+            export_to: Vec::new(),
             module: None,
             name,
             doc: None,
@@ -1102,6 +1136,7 @@ impl Parser {
         Ok(ContractDecl {
             name,
             exported: false,
+            export_to: Vec::new(),
             module: None,
             doc: None,
             members,
@@ -1435,6 +1470,7 @@ impl Parser {
         Ok((
             Function {
                 exported: false,
+                export_to: Vec::new(),
                 module: None,
                 name,
                 doc: None,
@@ -1701,6 +1737,7 @@ impl Parser {
                     .expect("collected predicate names an existing field");
                 decls.push(TypeDecl {
                     exported: false,
+                    export_to: Vec::new(),
                     module: None,
                     name: synthetic.clone(),
                     doc: None,
@@ -1716,6 +1753,7 @@ impl Parser {
             TypeDecl {
                 name,
                 exported: false,
+                export_to: Vec::new(),
                 module: None,
                 doc: None,
                 type_params,
@@ -1980,6 +2018,7 @@ impl Parser {
         Ok(Function {
             name,
             exported: false,
+            export_to: Vec::new(),
             module: None,
             doc: None,
             type_params,
@@ -2067,6 +2106,7 @@ impl Parser {
             return Ok(Function {
                 name,
                 exported: true,
+                export_to: Vec::new(),
                 module: None,
                 doc: None,
                 type_params: Vec::new(),
@@ -2089,6 +2129,7 @@ impl Parser {
         Ok(Function {
             name,
             exported: false,
+            export_to: Vec::new(),
             module: None,
             doc: None,
             type_params: Vec::new(),
@@ -4534,6 +4575,22 @@ test \"t\" {{ assert(c(1) == 1) }}"
         assert!(!g.is_extern);
         let m = p.functions.iter().find(|f| f.name == "main").unwrap();
         assert!(!m.is_gen);
+    }
+
+    #[test]
+    fn export_to_names_its_paths_and_leaves_to_a_name_elsewhere() {
+        let p = parse_src(
+            "export to \"./a\", \"std/b\" gen fn g() -> String { return \"\" } \
+             export type to = Int64 \
+             fn main() -> Int64 { let to = 1 return to }",
+        );
+        let g = p.functions.iter().find(|f| f.name == "g").unwrap();
+        assert!(g.is_gen && g.exported);
+        assert_eq!(g.export_to, ["./a", "std/b"]);
+        assert!(p
+            .type_decls
+            .iter()
+            .any(|t| t.name == "to" && t.export_to.is_empty()));
     }
 
     #[test]

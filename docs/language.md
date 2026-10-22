@@ -167,6 +167,7 @@ next.age = next.age + 1
 ```
 
 - Compatibility is by shape. A value with more fields fits where fewer are wanted, with no cast; two record types with the same fields are interchangeable. Width applies at the top of a value only: a record inside an array, an `Option`, `Result` or enum payload, a `Map`, a function type or another record's field must have the same fields as the one expected. Copy explicitly, for example with `xs.map(..)`.
+- A type argument counts even where no field mentions it: a `Handle<Order>` is no `Handle<Person>`, at the top of a value or inside one, as in `Array<Handle<Order>>`. Two arguments with the same fields are interchangeable, so the brand is the argument's shape. A record type with the same fields and no argument fits in either direction, which is how `Handle { .. }` builds a handle of any brand.
 - A field of a `mut` binding is assigned in place.
 - `Omit<T, f, ..>`, `Pick<T, f, ..>`, `Merge<A, B>` (B wins a conflict) and `Partial<T>` (every field an `Option`) derive record types at compile time.
 - `==` and `!=` work on scalars and `String` only. Comparing two records or two enum values is refused; compare fields or `match`.
@@ -214,7 +215,7 @@ type User = {
 - Between a group's first store and its check, nothing reads the record whole. When the record is a `modify` parameter, the group also calls no function the program declares and no function value, and has no `?`, because the caller would see the record with the rule unchecked. A `?` or a trap inside the group leaves a record the function owns unobserved, so both are allowed there. A `return` statement ends the group, so the check runs before it.
 - An element of an array field the rule reads only as `.length` is assigned in place with no check: `c.xs[i] = v` keeps every length. A store into a field of module state, or into a field of a nested record with its own rule, is refused; rebuild the record.
 - A validated value decays to its base type, so a `Port` is usable as an `Int64`.
-- An alias without `where` is transparent: `type Id = Int64` names `Int64`, and each value assigns to the other. An alias has no constructor. A distinct type is a validated type, or a record with one field.
+- An alias without `where` is transparent: `type Id = Int64` names `Int64`, and each value assigns to the other. An alias has no constructor. A distinct type is a validated type, or a generic record applied to another argument (see Records). A record with one field is not distinct: it fits wherever a record with that one field is wanted.
 - A `String` type whose regular expression denotes a finite language is a finite string type. An interpolation whose holes are all finite types has a finite type too, and assigning it to a validated `String` type is proven by automaton containment at compile time, or refused with the key that escapes.
 
 `schemaOf<T>()` reads a validated type's declaration at compile time and answers a `Schema` record: name, base type, `///` doc, bounds, `multipleOf`, length bounds and pattern. `jsonSchema<T>()` writes the JSON Schema document for any type. Neither is runtime reflection: the compiler computes the answer, and types are erased before the program runs.
@@ -464,6 +465,7 @@ import type { User, Port } from "./user.schema.json"
 - A relative specifier resolves beside the importing file, with `.vyrn` appended. `std/name` is the standard library. A bare name resolves through the manifest's `dependencies`.
 - `import { a as b }` binds `a` under the local name `b`. `import * as ns` reaches the exports as `ns.name`.
 - Importing a name the module does not export is refused. An import cycle is refused.
+- `export to "./editor", "std/ui" fn f()` names the only modules that may import `f`. Each path resolves as an import written in the exporting module would; one that does not resolve is refused. Any other import of `f`, a namespace use of it, or a generator call of it is refused with a sentence naming the permitted importers. The declaration is still an export everywhere else: in `moduleInterface`, a contract and the module's own uses. `vyrn doc` leaves it off the module's page, and editor completion offers it only where it may be imported. `to` is a word only after `export`, before a path; an `extern fn` takes none.
 - Every module links into one program. An exported name is program-wide, so two flat imports of the same name from two modules are refused, even under an alias. Import one of them as a namespace instead. A private name stays private to its module.
 - An `impl` applies program-wide, wherever it is written.
 - `main` and `logging` are root-module only. Module state exists in every module and is private to it; `export let` is refused, so export accessor functions.

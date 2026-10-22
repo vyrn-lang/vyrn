@@ -614,6 +614,14 @@ mod tests {
     }
 
     #[test]
+    fn an_export_to_list_formats_to_the_canonical_form() {
+        assert_eq!(
+            f("export   to  \"./a\" ,\"./b\"   fn f() -> Int64 { return 1 }\n"),
+            "export to \"./a\", \"./b\" fn f() -> Int64 { return 1 }\n"
+        );
+    }
+
+    #[test]
     fn contract_declarations_round_trip() {
         // `fn *(..)`'s `*` lexes as a multiply and would otherwise print spaced.
         let src = "export contract Page {\n\

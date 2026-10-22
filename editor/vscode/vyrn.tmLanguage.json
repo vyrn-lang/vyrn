@@ -122,14 +122,15 @@
       "match": "\\b(?:test|bench)\\b(?=\\s+\")"
     },
     "contextual-keywords": {
-      "comment": "`as` (import aliasing: `{ x as y }`, `* as ns`), `gen fn`, `extern fn`, `from`, `logging` and `lazy` (a record field modifier) are CONTEXTUAL — the lexer emits them as plain identifiers and the parser recognizes them only in position (so `let as = 1` / `let gen = 1` stay ordinary bindings, per the parser tests). Match them contextually — `as` only when a name follows it, `gen`/`extern` only directly before `fn`, `lazy` only in a record field's TYPE position (`name: lazy T`) — so a binding named `as`/`gen`/`extern` is never mis-coloured, and `std/ui`'s `lazy(..)` FUNCTION (lazy pages, a different mechanism one layer up) keeps its call colour. Placed before #keywords/#function-calls/#identifiers so they win the position. `from` and `logging` live here, not in #keywords: neither is a lexer keyword (`keyword_or_ident` in compiler/vyrn-frontend/src/lexer.rs holds 24 names and neither is among them), so `let from = 1` and `let logging = 2` are ordinary bindings and must not be coloured as reserved words. `from` matches only before the module an import names, which is a string or a generator call; `logging` only before its block's brace. editor/vscode/test/grammar.test.mjs compares the two lists.",
+      "comment": "`as` (import aliasing: `{ x as y }`, `* as ns`), `gen fn`, `extern fn`, `from`, `logging` and `lazy` (a record field modifier) are CONTEXTUAL — the lexer emits them as plain identifiers and the parser recognizes them only in position (so `let as = 1` / `let gen = 1` stay ordinary bindings, per the parser tests). Match them contextually — `as` only when a name follows it, `gen`/`extern` only directly before `fn`, `lazy` only in a record field's TYPE position (`name: lazy T`) — so a binding named `as`/`gen`/`extern` is never mis-coloured, and `std/ui`'s `lazy(..)` FUNCTION (lazy pages, a different mechanism one layer up) keeps its call colour. Placed before #keywords/#function-calls/#identifiers so they win the position. `from` and `logging` live here, not in #keywords: neither is a lexer keyword (`keyword_or_ident` in compiler/vyrn-frontend/src/lexer.rs holds 24 names and neither is among them), so `let from = 1` and `let logging = 2` are ordinary bindings and must not be coloured as reserved words. `from` matches only before the module an import names, which is a string or a generator call; `logging` only before its block's brace; `to` only between `export` and the path of an `export to` clause. editor/vscode/test/grammar.test.mjs compares the two lists.",
       "patterns": [
         { "match": "\\bas\\b(?=\\s+[A-Za-z_])", "name": "keyword.control.vyrn" },
         { "match": "\\b(gen|extern)\\b(?=\\s+fn\\b)", "name": "keyword.control.vyrn" },
         { "match": "(?<=:\\s)lazy\\b(?=\\s+[A-Za-z_])", "name": "keyword.control.vyrn" },
         { "match": "\\b(read|modify)\\b(?=\\s+self\\b)", "name": "keyword.control.vyrn" },
         { "match": "\\bfrom\\b(?=\\s*(\\\"|[A-Za-z_][A-Za-z0-9_]*\\s*\\())", "name": "keyword.control.vyrn" },
-        { "match": "\\blogging\\b(?=\\s*\\{)", "name": "keyword.control.vyrn" }
+        { "match": "\\blogging\\b(?=\\s*\\{)", "name": "keyword.control.vyrn" },
+        { "match": "(?<=\\bexport\\s)to\\b(?=\\s+\\\")", "name": "keyword.control.vyrn" }
       ]
     },
     "fn-declaration": {

@@ -12,8 +12,8 @@
 // reserved fails here too.
 //
 // CONTEXTUAL WORDS ARE NOT KEYWORDS and are deliberately not compared. `as`,
-// `gen`, `extern`, `lazy`, `read`, `modify`, `test`, `bench`, `from` and
-// `logging` are identifiers the parser recognises by position; the grammar
+// `gen`, `extern`, `lazy`, `read`, `modify`, `test`, `bench`, `from`,
+// `logging` and `to` are identifiers the parser recognises by position; the grammar
 // matches each with its own lookahead in `#contextual-keywords`.
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -86,6 +86,17 @@ test("from and logging are matched in position, not as keywords", async () => {
 
   assert.ok(fires(logging, "logging { level: warn, sink: stderr }"), "a logging block");
   assert.ok(!fires(logging, "let logging = 2"), "`logging` as a binding must stay plain");
+});
+
+test("to is matched after export, before a path, and nowhere else", async () => {
+  const g = JSON.parse(
+    await readFile(path.join(here, "..", "vyrn.tmLanguage.json"), "utf8"),
+  );
+  const contextual = g.repository["contextual-keywords"].patterns.map((p) => p.match);
+  const to = new RegExp(contextual.find((m) => m.includes("to\\b")));
+  assert.ok(to.test('export to "./vyx.editor" fn vyxSlice('), "an export to clause");
+  assert.ok(!to.test("let to = 1"), "`to` as a binding must stay plain");
+  assert.ok(!to.test("export type to = Int64"), "`to` as a declared name must stay plain");
 });
 
 // A byte literal is scoped `constant.character`, which VS Code reads as code, so
