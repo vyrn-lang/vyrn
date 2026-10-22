@@ -480,6 +480,12 @@ fn census() -> Vec<Row> {
             "`call` argument 1 expects Int64, found String",
             Kernel::Elsewhere,
         ),
+        row(
+            "r67_a_type_argument_no_field_mentions.vyrn",
+            "a type argument counts where no field mentions it",
+            "`f` argument 1 expects Handle<Person>, found Handle<Order>",
+            Kernel::Elsewhere,
+        ),
     ]
 }
 
