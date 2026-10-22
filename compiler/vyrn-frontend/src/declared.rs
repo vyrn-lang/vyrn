@@ -607,6 +607,7 @@ mod tests {
                     },
                 ]),
                 exported: false,
+                export_to: Vec::new(),
                 module: None,
                 doc: None,
                 type_params: vec![],
