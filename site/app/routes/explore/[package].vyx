@@ -1,5 +1,5 @@
 <script>
-import { Package, Artifact, packageBlurb, packageKnown, packageOf, packageDeps, packageSource, offerOf, addCommand, artifactsOf } from "../../packages"
+import { Package, Artifact, packageBlurb, packageKnown, packageOf, packageDeps, packageSource, offerOf, addCommand, artifactsOf, packageReadme } from "../../packages"
 import { Head, PageError, ParamQuery, notFound, paramQuery } from "std/ui"
 import { pageHeadWith } from "../../nav"
 params { package: String }
@@ -49,45 +49,7 @@ fn buildLabel(d: Package) -> String {
     </section>
 
     <section class="band pkgbody">
-        <div class="pkgmain">
-            <div class="pkgblock" id="api">
-                <h2>Specifier</h2>
-                <p>The specifier names <code>{{ offerOf(data.slug).path }}</code>. Any other module in the tree takes the same specifier with its own path in it.</p>
-            </div>
-
-            <div class="pkgblock" id="builds">
-                <h2>{{ buildLabel(data) }}</h2>
-                <div class="scroller">
-                <table>
-                    <thead>
-                        <tr><th scope="col">Artifact</th><th scope="col">Entry</th><th scope="col">Target</th></tr>
-                    </thead>
-                    <tbody>
-                        <tr v-for="a in artifactsOf(data.slug)" :key="a.name">
-                            <td><code>{{ a.name }}</code></td>
-                            <td><code>{{ a.entry }}</code></td>
-                            <td><code>{{ a.target }}</code></td>
-                        </tr>
-                    </tbody>
-                </table>
-                </div>
-                <p class="cap">From <code>{{ data.name }}/vyrn.json</code>. A clone builds these; a dependency does not.</p>
-            </div>
-
-            <div class="pkgblock" id="deps">
-                <h2>{{ depLabel(data) }}</h2>
-                <dl class="specs">
-                    <div>
-                        <dt>Depends on</dt>
-                        <dd class="links">
-                            <a v-for="d in packageDeps(data.slug)" :key="d.name" :href="d.href">{{ d.name }}</a>
-                            <span class="none" v-if="data.deps == 0">nothing at all</span>
-                        </dd>
-                    </div>
-                </dl>
-                <p class="cap">Standard library modules and nothing else. Each arrives with the compiler, so none is a fetch.</p>
-            </div>
-        </div>
+        <div class="pkgmain prose" v-html="packageReadme(data.slug)"></div>
 
         <aside class="pkgside">
             <div class="regcard">
@@ -103,6 +65,18 @@ fn buildLabel(d: Package) -> String {
                     <code v-for="e in offerOf(data.slug).exports" :key="e">{{ e }}</code>
                 </p>
                 <p class="cap">{{ unitLabel(data) }}, from <code>{{ offerOf(data.slug).path }}</code>.</p>
+            </div>
+            <div class="regcard" id="builds">
+                <p class="eyebrow">{{ buildLabel(data) }}</p>
+                <ul class="arts">
+                    <li v-for="a in artifactsOf(data.slug)" :key="a.name"><code>{{ a.name }}</code><span>{{ a.entry }}</span><span class="target">{{ a.target }}</span></li>
+                </ul>
+            </div>
+            <div class="regcard" id="deps">
+                <p class="eyebrow">{{ depLabel(data) }}</p>
+                <p class="syms">
+                    <a v-for="d in packageDeps(data.slug)" :key="d.name" :href="d.href">{{ d.name }}</a>
+                </p>
             </div>
         </aside>
     </section>
