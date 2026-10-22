@@ -715,11 +715,12 @@ pub(crate) fn shape_of(ty: &Type, types: &HashMap<String, TypeDecl>) -> Shape {
         // On a generator host, `Code` is an opaque `i64` handle into the host's
         // piece arena: the one `Named` that survives `resolve` undeclared.
         Type::Named(n) if n == "Code" => leaf(Leaf::I64),
-        // Unreachable after `resolve` (Named/App/transformers/params reduced
+        // Unreachable after `resolve` (Named/Union/App/transformers/params reduced
         // away). A bare integer type argument never stands alone: `SmallArray`
         // consumes it. `Err` is the checker's recovery sentinel, and a program
         // with an `Err` has diagnostics and never reaches codegen.
         Type::Named(_)
+        | Type::Union(_)
         | Type::App(..)
         | Type::Omit(..)
         | Type::Pick(..)
@@ -942,6 +943,7 @@ mod tests {
             Type::Str,
             Type::Unit,
             Type::Named("Nowhere".into()),
+            Type::Union(vec![Type::Named("Nowhere".into())]),
             Type::Record(Vec::new()),
             Type::Omit(b(Type::Record(Vec::new())), vec!["f".into()]),
             Type::Pick(b(Type::Record(Vec::new())), vec!["f".into()]),

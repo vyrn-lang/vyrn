@@ -317,6 +317,7 @@ mod tests {
             Type::Str,
             Type::Unit,
             Type::Named("R".into()),
+            Type::Union(vec![Type::Named("R".into())]),
             Type::Record(vec![Field {
                 name: "a".into(),
                 ty: Type::Int,

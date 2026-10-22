@@ -4443,20 +4443,19 @@ impl<'a> Checker<'a> {
         Ok(joined)
     }
 
-    /// The union of `a` and `b` ([`crate::types::union_members`]), where each
-    /// is a union or a validated scalar type that takes no type parameter,
-    /// over one base. A validated record or array stays out: a store into
-    /// its part is checked against its declared rule, and a union declares
-    /// none.
+    /// The union of `a` and `b` ([`Type::Union`]), where each is a union or
+    /// a validated scalar type that takes no type parameter, over one base. A
+    /// validated record or array stays out: a store into its part is checked
+    /// against its declared rule, and a union declares none.
     fn union(&self, a: &Type, b: &Type) -> Option<Type> {
-        let members = |t: &Type| -> Option<Vec<String>> {
-            if let Some(ms) = crate::types::union_members(t) {
-                return Some(ms.map(String::from).collect());
+        let members = |t: &Type| -> Option<Vec<Type>> {
+            if let Type::Union(ms) = t {
+                return Some(ms.clone());
             }
             let Type::Named(n) = t else { return None };
             let d = self.decl(n)?;
             let scalar = d.predicate.is_some() && d.type_params.is_empty();
-            (scalar && self.base(t).is_scalar()).then(|| vec![n.clone()])
+            (scalar && self.base(t).is_scalar()).then(|| vec![t.clone()])
         };
         let (mut all, more) = (members(a)?, members(b)?);
         if self.base(a) != self.base(b) {
@@ -4467,7 +4466,7 @@ impl<'a> Checker<'a> {
                 all.push(m);
             }
         }
-        Some(Type::Named(all.join(" | ")))
+        Some(Type::Union(all))
     }
 
     fn binop_type(&self, op: BinOp, l: Type, r: Type, line: usize) -> Result<Type, Diagnostic> {
