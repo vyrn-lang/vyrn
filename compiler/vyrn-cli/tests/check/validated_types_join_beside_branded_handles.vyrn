@@ -1,0 +1,13 @@
+type Handle<T> = { slot: Int64 }
+type Port = Int64 where value >= 1 && value <= 65535
+type Age = Int64 where value >= 18
+
+fn listen(h: Handle<Port>, p: Port) -> Int64 {
+    return h.slot + p
+}
+
+fn main() -> Int64 {
+    let h: Handle<Port> = Handle { slot: 1 }
+    let x = if true { Port(8080) } else { Age(30) }
+    return listen(h, x)
+}

@@ -1,0 +1,7 @@
+type Up = { n: Int64 } where n > 0
+type Down = { n: Int64 } where n < 0
+
+fn main() -> Int64 {
+    let x = if true { Up { n: 1 } } else { Down { n: -1 } }
+    return x.n
+}

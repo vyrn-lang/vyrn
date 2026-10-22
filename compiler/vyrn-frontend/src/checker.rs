@@ -1110,18 +1110,23 @@ fn check_accum_inner(
             *t = w;
         }
     };
+    // Hover shows a union; the passes after this one see its base.
+    let lowered = |t: &mut Type| {
+        written(t);
+        crate::types::decay_unions(t, &checker);
+    };
     for s in effects.sources.iter_mut().chain(&mut effects.arg_sources) {
-        written(&mut s.sig);
+        lowered(&mut s.sig);
         for t in s.lambda.iter_mut().flat_map(|l| &mut l.nested_sigs) {
-            written(t);
+            lowered(t);
         }
     }
-    effects.calls.iter_mut().for_each(|(_, t)| written(t));
+    effects.calls.iter_mut().for_each(|(_, t)| lowered(t));
     acc.binders.values_mut().for_each(written);
     let mut derived = acc.derive;
     for site in &mut derived {
-        written(&mut site.ty);
-        written(&mut site.entry);
+        lowered(&mut site.ty);
+        lowered(&mut site.entry);
     }
     let binders = Binders {
         locals: local_index(program, &acc.binders),
@@ -2849,7 +2854,7 @@ impl<'a> Checker<'a> {
                     }
                     self.prove_coercion(&g.init, declared, g.line)?;
                 }
-                Ok(g.ty.clone().unwrap_or(vty))
+                Ok(g.ty.clone().unwrap_or_else(|| self.slot(vty, g.mutable)))
             });
             let binding = match bty {
                 Ok(t) => Binding {
@@ -2992,6 +2997,16 @@ impl<'a> Checker<'a> {
         self.bind_seen(Some(ty.clone()), at.0, at.1);
         let frame = scope.last_mut().expect("a scope has a frame");
         frame.insert(name.to_string(), Binding { ty, mutable, at });
+    }
+
+    /// The type an unannotated binding of a `ty` value holds. A `mut` one
+    /// holds a union's base: an assignment is checked against a declared
+    /// rule, and a union declares none.
+    fn slot(&self, mut ty: Type, mutable: bool) -> Type {
+        if mutable {
+            crate::types::decay_unions(&mut ty, self);
+        }
+        ty
     }
 
     /// Makes `frame` the function being checked.
@@ -3176,7 +3191,7 @@ impl<'a> Checker<'a> {
                     Some(t) if self.coercible(&vty, t) => t.clone(),
                     Some(_) => Type::Err,
                     None if self.base(&vty) == Type::Unit => Type::Err,
-                    None => vty,
+                    None => self.slot(vty, *mutable),
                 };
                 self.bind(scope, name, bty, *mutable, (*line, *col));
                 Ok(())
@@ -3657,16 +3672,21 @@ impl<'a> Checker<'a> {
             NodeId::NONE,
             "the checker typed a node no numbering reached: {expr:?}"
         );
-        let pending = self.pending_subst.take();
+        let mut pending = self.pending_subst.take();
         let call = self.pending_call.take();
+        let mut recorded = t.clone();
+        crate::types::decay_unions(&mut recorded, self);
+        for (_, ty) in pending.iter_mut().flat_map(|(_, s)| s) {
+            crate::types::decay_unions(ty, self);
+        }
         if let Some(r) = &mut self.acc.borrow_mut().record {
             if let Some(d) = call {
                 r.calls.insert(key, d);
             }
-            r.node_types.insert(key, t.clone());
             if matches!(expr, Expr::Match { .. } | Expr::IfExpr { .. }) {
-                r.joins.insert(key, t.clone());
+                r.joins.insert(key, recorded.clone());
             }
+            r.node_types.insert(key, recorded);
             if let Some(call) = pending {
                 r.node_substs.insert(key, call);
             }
@@ -4301,7 +4321,7 @@ impl<'a> Checker<'a> {
                 match &arm.body {
                     ArmBody::Expr(e) => {
                         let bty = self.expr(e, &inner, result.as_ref(), fn_ret)?;
-                        self.unify_arm(&mut result, bty, line)?;
+                        self.unify_arm(&mut result, bty, line, "`match` arms")?;
                     }
                     ArmBody::Block(b) => {
                         self.arm_block(b, stmt_pos, line, &mut inner, fn_ret)?;
@@ -4363,7 +4383,7 @@ impl<'a> Checker<'a> {
             match &arm.body {
                 ArmBody::Expr(e) => {
                     let bty = self.expr(e, &inner, result.as_ref(), fn_ret)?;
-                    self.unify_arm(&mut result, bty, line)?;
+                    self.unify_arm(&mut result, bty, line, "`match` arms")?;
                 }
                 ArmBody::Block(b) => {
                     self.arm_block(b, stmt_pos, line, &mut inner, fn_ret)?;
@@ -4397,17 +4417,19 @@ impl<'a> Checker<'a> {
         self.expr(cond, scope, Some(&Type::Bool), fn_ret)?;
         let mut result: Option<Type> = expected.cloned();
         let tty = self.expr(then_branch, scope, result.as_ref(), fn_ret)?;
-        self.unify_arm(&mut result, tty, line)?;
+        self.unify_arm(&mut result, tty, line, "`if` branches")?;
         let ety = self.expr(else_branch, scope, result.as_ref(), fn_ret)?;
-        self.unify_arm(&mut result, ety, line)
+        self.unify_arm(&mut result, ety, line, "`if` branches")
     }
 
-    /// Joins an arm's type into the match's result type and returns the join.
+    /// Joins an arm's type into the result type of the arms `form` names and
+    /// returns the join.
     fn unify_arm(
         &self,
         result: &mut Option<Type>,
         bty: Type,
         line: usize,
+        form: &str,
     ) -> Result<Type, Diagnostic> {
         let joined = match result.take() {
             None => bty,
@@ -4415,10 +4437,40 @@ impl<'a> Checker<'a> {
             // The join is the wider type: keeping a validated `Age` would pass
             // a raw `Int` arm without its check.
             Some(rt) if self.assignable(&rt, &bty) => bty,
-            Some(rt) => return Err(cerr!(line, MatchArmMismatch, rt, bty)),
+            Some(rt) => match self.union(&rt, &bty) {
+                Some(u) => u,
+                None => return Err(cerr!(line, ArmMismatch, form, rt, bty)),
+            },
         };
         *result = Some(joined.clone());
         Ok(joined)
+    }
+
+    /// The union of `a` and `b` ([`crate::types::union_members`]), where each
+    /// is a union or a validated scalar type that takes no type parameter,
+    /// over one base. A validated record or array stays out: a store into
+    /// its part is checked against its declared rule, and a union declares
+    /// none.
+    fn union(&self, a: &Type, b: &Type) -> Option<Type> {
+        let members = |t: &Type| -> Option<Vec<String>> {
+            if let Some(ms) = crate::types::union_members(t) {
+                return Some(ms.map(String::from).collect());
+            }
+            let Type::Named(n) = t else { return None };
+            let d = self.decl(n)?;
+            let scalar = d.predicate.is_some() && d.type_params.is_empty();
+            (scalar && self.base(t).is_scalar()).then(|| vec![n.clone()])
+        };
+        let (mut all, more) = (members(a)?, members(b)?);
+        if self.base(a) != self.base(b) {
+            return None;
+        }
+        for m in more {
+            if !all.contains(&m) {
+                all.push(m);
+            }
+        }
+        Some(Type::Named(all.join(" | ")))
     }
 
     fn binop_type(&self, op: BinOp, l: Type, r: Type, line: usize) -> Result<Type, Diagnostic> {
@@ -5914,7 +5966,8 @@ impl<'a> Checker<'a> {
                 } else if !ret_known {
                     self.unify(&ret, &body_ty, subst, *lline)?;
                 }
-                let sig = crate::types::substitute(expected_fn, subst);
+                let mut sig = crate::types::substitute(expected_fn, subst);
+                crate::types::decay_unions(&mut sig, self);
                 self.record_arg_fn(&sig, None, Some((*lline, *lcol)));
                 // The core types the literal's closure from this row (a
                 // `consume` position names no target).

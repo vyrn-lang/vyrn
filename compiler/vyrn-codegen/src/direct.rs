@@ -2293,6 +2293,7 @@ fn f_shell(line: usize) -> Function {
     Function {
         name: LAMBDA.to_string(),
         exported: false,
+        export_to: Vec::new(),
         module: None,
         doc: None,
         type_params: Vec::new(),

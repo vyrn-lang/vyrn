@@ -6694,8 +6694,9 @@ impl<'a> Builder<'a> {
             (Callee::Value(_), ..) => CapsOf::None,
             _ => self.own.arg_caps.named(name),
         };
-        let length = prelude::builtin(name).map(|b| b.length);
-        if let (Some(prelude::Length::ShrinksByOneIfNotEmpty), Some(recv)) = (length, args.first())
+        let map = prelude::builtin(name).map(|b| b.shape_map);
+        if let (Some(prelude::ShapeMap::DropsLast | prelude::ShapeMap::SwapsOut(_)), Some(recv)) =
+            (map, args.first())
         {
             self.shrinks(&name[1..], recv, line);
         }

@@ -311,7 +311,12 @@ fn site_file(key: &str, root_key: &str, std_root: Option<&str>) -> String {
 /// Rewrites every `panic(msg)` in `program` to [`PANIC_AT`]`(msg, "file:line")`,
 /// in every body [`crate::project::walk_program`] visits.
 fn stamp_panic_sites(program: &mut Program, file: &str) {
-    let mut stamp = |e: &mut Expr| {
+    crate::project::walk_program(program, &mut panic_stamp(file));
+}
+
+/// The rewrite [`stamp_panic_sites`] makes at each expression.
+fn panic_stamp(file: &str) -> impl FnMut(&mut Expr) + '_ {
+    move |e: &mut Expr| {
         if let Expr::Call {
             dot: _,
             name,
@@ -326,8 +331,7 @@ fn stamp_panic_sites(program: &mut Program, file: &str) {
                 args.push(Expr::str(format!("{file}:{line}")));
             }
         }
-    };
-    crate::project::walk_program(program, &mut stamp);
+    }
 }
 
 /// The directory part of a resolved module path ("" when it has none).
@@ -532,6 +536,10 @@ pub struct LoadOptions {
     /// The generator runs that enclose this load. A host's load is outermost:
     /// the default.
     pub nest: Nest,
+    /// The functions a host calls into the linked program that no source
+    /// names: `vyrn bench`'s harness and `vyrn routes`. The link keeps them and
+    /// what they reach ([`drop_unreached`]).
+    pub host_calls: &'static [&'static str],
 }
 
 /// The generator runs that enclose a load or a check.
@@ -581,6 +589,68 @@ fn audience_objection(
     )))
 }
 
+/// Whether module keys `a` and `b` name one file. A key and a std spec can
+/// spell one file two ways (`vyrn check std/runtime.vyrn` is relative to the
+/// shell, the std root absolute), so identity falls back to the real path,
+/// which `real_paths` caches.
+fn same_file(
+    a: &str,
+    b: &str,
+    opts: &LoadOptions,
+    real_paths: &mut HashMap<String, Option<String>>,
+) -> bool {
+    let mut real = |p: &str| {
+        real_paths
+            .entry(p.to_string())
+            .or_insert_with(|| match &opts.session {
+                Some(s) => s.real_path(p),
+                None => crate::manifest::real_path(p),
+            })
+            .clone()
+    };
+    a == b || matches!((real(a), real(b)), (Some(x), Some(y)) if x == y)
+}
+
+/// Whether `importer` may import a declaration of `exporter` whose `export to`
+/// paths are `to`. Every module may when `to` is empty. A path resolves as an
+/// import written in `exporter` would; one that does not resolve admits
+/// nothing, and the link reports it at the declaration.
+pub(crate) fn admits(
+    to: &[String],
+    exporter: &str,
+    importer: &str,
+    opts: &LoadOptions,
+    real_paths: &mut HashMap<String, Option<String>>,
+) -> bool {
+    to.is_empty()
+        || to.iter().any(|spec| {
+            resolve_spec(spec, exporter, opts)
+                .is_ok_and(|k| same_file(&k, importer, opts, real_paths))
+        })
+}
+
+/// [`Rule::ExportedOnlyTo`] for `importer`'s use of `name`, a declaration of
+/// `exporter` with `export to` paths `to`. Each module is spelled as an import
+/// in `importer` would spell it.
+fn exported_only_to(
+    name: &str,
+    to: &[String],
+    exporter: &str,
+    importer: &str,
+    opts: &LoadOptions,
+) -> Rule {
+    let dir = dir_of(generated_importer(importer).unwrap_or(importer));
+    let shown = |key: &str| import_specifier(dir, key, opts.std_root.as_deref());
+    let importers = (to.iter())
+        .map(|spec| match resolve_spec(spec, exporter, opts) {
+            Ok(k) => format!("`{}`", shown(&k)),
+            Err(_) => format!("`{spec}`"),
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    rule!(ExportedOnlyTo, name, target = shown(exporter), importers)
+}
+
 /// Refuses an import of `std/mem` from anywhere but `std/runtime`, and of
 /// `std/runtime` from anywhere.
 ///
@@ -595,23 +665,8 @@ fn runtime_fence(
     opts: &LoadOptions,
     real_paths: &mut HashMap<String, Option<String>>,
 ) -> Option<Diagnostic> {
-    // A key and a std spec can spell one file two ways (`vyrn check
-    // std/runtime.vyrn` is relative to the shell, the std root absolute), so
-    // identity falls back to the real path.
-    let mut real = |p: &str| {
-        real_paths
-            .entry(p.to_string())
-            .or_insert_with(|| match &opts.session {
-                Some(s) => s.real_path(p),
-                None => crate::manifest::real_path(p),
-            })
-            .clone()
-    };
     let mut is = |key: &str, spec: &str| {
-        let Ok(k) = resolve_spec(spec, importer, opts) else {
-            return false;
-        };
-        key == k || matches!((real(key), real(&k)), (Some(a), Some(b)) if a == b)
+        resolve_spec(spec, importer, opts).is_ok_and(|k| same_file(key, &k, opts, real_paths))
     };
     let fenced = if is(imported, MEM_SPEC) {
         if is(importer, RUNTIME_SPEC) {
@@ -653,6 +708,11 @@ struct Module {
     hash: Option<String>,
     /// [`program_ref_names`] of `program` as loaded, before `link` renames.
     refs: Rc<HashSet<String>>,
+    /// The parse whose skimmed bodies `program`'s empty ones stand for.
+    skimmed: Option<Rc<Parsed>>,
+    /// The line and column of each function [`parse_reached`] left with an
+    /// empty block for its unparsed body. [`drop_unreached`] drops every one.
+    unparsed: Vec<(usize, usize)>,
 }
 
 /// The state one load walks: the modules entered, their loading state, the
@@ -1021,7 +1081,13 @@ fn load_with_origins_inner(
         Ok((modules, root_key, origins, warnings, pending)) => {
             let _p = crate::prof::phase("load: link");
             let graph = graph_of(&modules);
-            let linked = link(modules, &root_key).map(|mut p| {
+            // The floor's judgment reads the effects of every instance, so a
+            // load it still has to judge drops nothing.
+            let lazy = match pending {
+                Some(_) => HashSet::new(),
+                None => lazy_modules(&modules, &root_key, opts),
+            };
+            let linked = link(modules, &root_key, &lazy, opts).map(|mut p| {
                 p.expansions = opts.expansions.clone();
                 p.session = crate::session::SessionRef(opts.session.clone());
                 p
@@ -1180,7 +1246,19 @@ fn load_modules(
             }
             format!("{h:x}:{}", text.len())
         };
-        let parsed = PARSE_CACHE.with(|c| c.borrow().get(&hash).cloned());
+        // An imported std module's top-level bodies are parsed when a root
+        // reaches them ([`parse_reached`]). The floor reads every body's
+        // carriers at load, so a load that declares artifacts parses them all.
+        let skim = !is_root && opts.artifacts.is_none() && {
+            let spec = import_specifier("", key, opts.std_root.as_deref());
+            spec.starts_with("std/") && RT_MODULES.iter().all(|rt| rt.spec != spec)
+        };
+        let cache_key = if skim {
+            format!("{hash}:skim")
+        } else {
+            hash.clone()
+        };
+        let parsed = PARSE_CACHE.with(|c| c.borrow().get(&cache_key).cloned());
 
         // A generated module's comments and its parse read one scan.
         let mut scanned = None;
@@ -1274,6 +1352,8 @@ fn load_modules(
                 injected: None,
                 hash: None,
                 refs: Rc::default(),
+                skimmed: None,
+                unparsed: Vec::new(),
             };
             module.refs = Rc::new(program_ref_names(&module.program));
             w.modules.push(module);
@@ -1292,17 +1372,40 @@ fn load_modules(
                 let _p = crate::prof::phase("parse");
                 let scan = scanned.unwrap_or_else(|| lexer::scan(&text));
                 let tokens = lexer::tokens(scan.map_err(|d| vec![in_module(d, key, root_key)])?);
-                let (program, errors) = parser::parse_accum(tokens);
-                if !errors.is_empty() {
-                    return Err(errors
-                        .into_iter()
+                let in_key = |errors: Vec<Diagnostic>| -> Vec<Diagnostic> {
+                    (errors.into_iter())
                         .map(|d| in_module(d, key, root_key))
-                        .collect());
+                        .collect()
+                };
+                let (mut program, errors, skimmed) = match skim {
+                    true => {
+                        let (program, errors, skimmed) = parser::parse_skimming(tokens);
+                        (program, errors, Some(skimmed))
+                    }
+                    false => {
+                        let (program, errors) = parser::parse_accum(tokens);
+                        (program, errors, None)
+                    }
+                };
+                if !errors.is_empty() {
+                    return Err(in_key(errors));
+                }
+                if let Some(s) = &skimmed {
+                    // A body that may mention a runtime builtin is parsed now, so
+                    // the mention scan below sees every mention.
+                    for f in &mut program.functions {
+                        if s.tokens(f).is_some_and(mentions_runtime) {
+                            if let Some(body) = s.body(f) {
+                                f.body = body.map_err(in_key)?;
+                            }
+                        }
+                    }
                 }
                 let p = Rc::new(Parsed {
                     refs: Rc::new(program_ref_names(&program)),
                     program,
                     comment_lines: OnceCell::new(),
+                    skimmed,
                 });
                 PARSE_CACHE.with(|c| {
                     let mut c = c.borrow_mut();
@@ -1311,7 +1414,7 @@ fn load_modules(
                     if c.len() > 512 {
                         c.clear();
                     }
-                    c.insert(hash.clone(), p.clone());
+                    c.insert(cache_key, p.clone());
                 });
                 p
             }
@@ -1466,6 +1569,8 @@ fn load_modules(
             injected: None,
             hash: Some(hash),
             refs: parsed.refs.clone(),
+            skimmed: parsed.skimmed.is_some().then(|| parsed.clone()),
+            unparsed: Vec::new(),
         });
         Ok(())
     }
@@ -1527,6 +1632,10 @@ fn load_modules(
         if let Some(m) = w.modules.iter_mut().find(|m| m.key == target) {
             m.injected = Some(rt.prefix);
         }
+    }
+
+    if let Err(diags) = parse_reached(&mut w.modules, opts) {
+        return Err(failed(diags, w.origins));
     }
 
     // The floor. Last, so it walks everything the artifact links,
@@ -1605,6 +1714,9 @@ struct Parsed {
     /// [`crate::origin::comment_lines`] of the text, once a generated module
     /// with this text asks.
     comment_lines: OnceCell<Option<HashSet<usize>>>,
+    /// The bodies a skimming parse left unparsed; `program` holds an empty
+    /// block for each.
+    skimmed: Option<parser::Skimmed>,
 }
 
 thread_local! {
@@ -2533,6 +2645,9 @@ struct Decl<'a> {
     /// Always `false` for a global: module state is module-private,
     /// and another module reaches it through an accessor function.
     exported: bool,
+    /// The `export to` paths ([`Function::export_to`]).
+    export_to: &'a [String],
+    line: usize,
     /// A parser-injected builtin type ([`is_injected`]), present in every file.
     injected: bool,
     /// An `extern fn`: a host-ABI contract under its source spelling,
@@ -2544,11 +2659,19 @@ struct Decl<'a> {
 /// Every reader in this file asks this one function, so a new declaration form
 /// is added once.
 fn decls(p: &Program) -> impl Iterator<Item = Decl<'_>> {
-    fn d(name: &str, kind: DeclKind, exported: bool) -> Decl<'_> {
+    fn d<'a>(
+        name: &'a str,
+        kind: DeclKind,
+        exported: bool,
+        to: &'a [String],
+        line: usize,
+    ) -> Decl<'a> {
         Decl {
             name,
             kind,
             exported,
+            export_to: to,
+            line,
             injected: false,
             is_extern: false,
         }
@@ -2557,26 +2680,34 @@ fn decls(p: &Program) -> impl Iterator<Item = Decl<'_>> {
         .iter()
         .map(|t| Decl {
             injected: is_injected(t),
-            ..d(&t.name, DeclKind::Type, t.exported)
+            ..d(&t.name, DeclKind::Type, t.exported, &t.export_to, t.line)
         })
         .chain(p.functions.iter().map(|f| Decl {
             is_extern: f.is_extern,
-            ..d(&f.name, DeclKind::Fn, f.exported)
+            ..d(&f.name, DeclKind::Fn, f.exported, &f.export_to, f.line)
         }))
-        .chain(
-            p.protocols
-                .iter()
-                .map(|pr| d(&pr.name, DeclKind::Protocol, pr.exported)),
-        )
-        .chain(
-            p.contracts
-                .iter()
-                .map(|c| d(&c.name, DeclKind::Contract, c.exported)),
-        )
+        .chain(p.protocols.iter().map(|pr| {
+            d(
+                &pr.name,
+                DeclKind::Protocol,
+                pr.exported,
+                &pr.export_to,
+                pr.line,
+            )
+        }))
+        .chain(p.contracts.iter().map(|c| {
+            d(
+                &c.name,
+                DeclKind::Contract,
+                c.exported,
+                &c.export_to,
+                c.line,
+            )
+        }))
         .chain(
             p.globals
                 .iter()
-                .map(|g| d(&g.name, DeclKind::Global, false)),
+                .map(|g| d(&g.name, DeclKind::Global, false, &[], g.line)),
         )
 }
 
@@ -3484,7 +3615,12 @@ impl BodyVisitMut for NsResolver<'_> {
     }
 }
 
-fn link(mut modules: Vec<Module>, root_key: &str) -> Result<Program, Vec<Diagnostic>> {
+fn link(
+    mut modules: Vec<Module>,
+    root_key: &str,
+    lazy: &HashSet<String>,
+    opts: &LoadOptions,
+) -> Result<Program, Vec<Diagnostic>> {
     let mut errors: Vec<Diagnostic> = Vec::new();
     // Fold import aliases into the flat namespace first.
     let alias_span = crate::prof::phase("link: resolve_aliases");
@@ -3505,6 +3641,8 @@ fn link(mut modules: Vec<Module>, root_key: &str) -> Result<Program, Vec<Diagnos
     // `clash_diagnostics` turns them into one diagnostic per module pair, at an
     // import site in a real file.
     let mut clashes: Vec<(String, String, String)> = Vec::new();
+    // `(module, name)` -> the `export to` paths of every qualified export.
+    let mut qualified: HashMap<(&str, &str), &[String]> = HashMap::new();
 
     // Names whose every declaration is a non-exported `extern fn` of one
     // signature, in two or more modules: one host-ABI contract restated per
@@ -3580,6 +3718,16 @@ fn link(mut modules: Vec<Module>, root_key: &str) -> Result<Program, Vec<Diagnos
                 continue;
             }
             register(d.name, &m.key, d.exported, &mut clashes);
+            if d.export_to.is_empty() {
+                continue;
+            }
+            qualified.insert((&m.key, d.name), d.export_to);
+            for spec in d.export_to {
+                if let Err(e) = resolve_spec(spec, &m.key, opts) {
+                    let d = Diagnostic::error(d.line, 0, "load", e);
+                    errors.push(in_module(d, &m.key, root_key));
+                }
+            }
         }
         for t in &m.program.type_decls {
             if is_injected(t) {
@@ -3614,16 +3762,34 @@ fn link(mut modules: Vec<Module>, root_key: &str) -> Result<Program, Vec<Diagnos
     // Per-module import and visibility checks. `surface_shadows` gathers the
     // shadowing fact for the checker (see `ast::Program::surface_shadows`).
     let mut surface_shadows: HashSet<(Option<String>, String)> = HashSet::new();
+    // The `export to` paths of `def_module`'s `name` when they leave out
+    // `importer`. Every refusal of a qualified export asks this one function.
+    let mut real_paths = HashMap::new();
+    let mut shut_out = |name: &str, def_module: &str, importer: &str| {
+        let to: &[String] = qualified.get(&(def_module, name))?;
+        (!admits(to, def_module, importer, opts, &mut real_paths)).then_some(to)
+    };
     for m in &modules {
         let mut visible: HashSet<String> = HashSet::new(); // foreign names imported here
         for (imp, target) in m.program.imports.iter().zip(&m.import_targets) {
             // A namespace import reaches every exported decl of the
-            // target, and its `ns.member` uses already name those symbols, so
-            // they are visible.
+            // target that admits this module, and its `ns.member` uses already
+            // name those symbols, so they are visible.
             if imp.namespace.is_some() {
                 for (name, (def_module, exported)) in &owner {
-                    if def_module == target && *exported {
+                    if def_module == target && *exported && shut_out(name, target, &m.key).is_none()
+                    {
                         visible.insert(name.clone());
+                    }
+                }
+            }
+            // A generator runs at load, so the name it is called by is
+            // checked here, with its owner's `export to` paths.
+            if let ImportSource::Generator { name, line, .. } = &imp.source {
+                if let Some((def_module, _)) = owner.get(name) {
+                    if let Some(to) = shut_out(name, def_module, &m.key) {
+                        let rule = exported_only_to(name, to, def_module, &m.key, opts);
+                        errors.push(load_error(&m.key, root_key, *line, rule));
                     }
                 }
             }
@@ -3640,6 +3806,9 @@ fn link(mut modules: Vec<Module>, root_key: &str) -> Result<Program, Vec<Diagnos
                                 imp.line,
                                 rule!(NotExported, name, target),
                             ));
+                        } else if let Some(to) = shut_out(name, target, &m.key) {
+                            let rule = exported_only_to(name, to, target, &m.key, opts);
+                            errors.push(load_error(&m.key, root_key, imp.line, rule));
                         }
                         // Importing an enum brings its variants, and a protocol its
                         // methods; the check below resolves them through this name.
@@ -3714,7 +3883,7 @@ fn link(mut modules: Vec<Module>, root_key: &str) -> Result<Program, Vec<Diagnos
                 surface_shadows.insert((home, b.to_string()));
             }
         }
-        let check_name = |name: &str, line: usize, what: &str, errors: &mut Vec<Diagnostic>| {
+        let mut check_name = |name: &str, line: usize, what: &str, errors: &mut Vec<Diagnostic>| {
             // Resolve constructors and methods to their owning declarations.
             // Same-named variants or methods in different modules are ordinary,
             // so every candidate is tried before the use is called foreign.
@@ -3748,12 +3917,11 @@ fn link(mut modules: Vec<Module>, root_key: &str) -> Result<Program, Vec<Diagnos
                         if gen_importer.as_deref() == Some(def_module.as_str()) {
                             return;
                         }
-                        errors.push(load_error(
-                            &m.key,
-                            root_key,
-                            line,
-                            rule!(NotImported, what, name, def_module),
-                        ));
+                        let rule = match shut_out(name, def_module, &m.key) {
+                            Some(to) => exported_only_to(name, to, def_module, &m.key, opts),
+                            None => rule!(NotImported, what, name, def_module),
+                        };
+                        errors.push(load_error(&m.key, root_key, line, rule));
                     }
                 }
                 return;
@@ -3838,6 +4006,17 @@ fn link(mut modules: Vec<Module>, root_key: &str) -> Result<Program, Vec<Diagnos
     }
 
     let _merge = crate::prof::phase("link: merge");
+    // An imported name is a root: the editor's hover and completion read the
+    // declarations the root imports from the linked program.
+    let mut named: Vec<String> = opts.host_calls.iter().map(|n| n.to_string()).collect();
+    for m in modules.iter().filter(|m| !lazy.contains(&m.key)) {
+        let imports = m.program.imports.iter().flat_map(|imp| &imp.names);
+        named.extend(imports.map(|n| n.original.clone()));
+    }
+    let unparsed: HashMap<String, Vec<(usize, usize)>> = (modules.iter())
+        .filter(|m| !m.unparsed.is_empty())
+        .map(|m| (m.key.clone(), m.unparsed.clone()))
+        .collect();
     // Merge. The root goes last so its injected builtins and log config win;
     // imported modules' injected decls are dropped.
     let mut merged: Option<Program> = None;
@@ -3905,8 +4084,279 @@ fn link(mut modules: Vec<Module>, root_key: &str) -> Result<Program, Vec<Diagnos
     program.imports.clear(); // consumed
     program.module_hashes = module_hashes;
     program.spellings = std::sync::Arc::new(spellings);
+    drop_unreached(&mut program, lazy, named, &unparsed);
     program.number();
     Ok(program)
+}
+
+/// Whether a skimmed body's tokens can mention a builtin whose mention links a
+/// runtime module ([`RT_MODULES`]): its name, or a `save`, `load`, `loadOr` or
+/// template, which the parser desugars to `toJson`, `fromJson` and `@str`
+/// (`Parser::storage_desugar`, `Parser::template`).
+fn mentions_runtime(tokens: &[lexer::Token]) -> bool {
+    static NAMES: std::sync::OnceLock<HashSet<&'static str>> = std::sync::OnceLock::new();
+    let names = NAMES.get_or_init(|| {
+        let linking = RT_MODULES.iter().filter(|rt| !rt.always);
+        (linking.flat_map(|rt| {
+            rt.desugared
+                .iter()
+                .copied()
+                .chain(rt.routes().map(|(b, _)| b))
+        }))
+        .chain(["save", "load", "loadOr"])
+        .collect()
+    });
+    tokens.iter().any(|t| match &t.tok {
+        lexer::Tok::Ident(n) => names.contains(n.as_str()),
+        lexer::Tok::TemplateStr { .. } => true,
+        _ => false,
+    })
+}
+
+/// Parses the skimmed body of each function a root can reach by its spelling,
+/// and records in [`Module::unparsed`] each one it leaves unparsed.
+///
+/// The spellings a root reaches are [`crate::ast::spelled`] of every body but a
+/// skimmed module's top-level functions, every imported name and every name in
+/// [`LoadOptions::host_calls`]. A reached function's spellings are reached too.
+/// They are taken before `link` renames, so a spelling reaches every function
+/// that declares it, and a namespace member `ns.f` is the field `f`: every
+/// function the link's walk keeps ([`drop_unreached`]) is parsed, and it
+/// asserts so. A program that calls `derive` parses every skimmed body.
+fn parse_reached(modules: &mut [Module], opts: &LoadOptions) -> Result<(), Vec<Diagnostic>> {
+    // The skimmed modules' top-level functions no spelling reached yet, by
+    // name. A body that mentions a runtime builtin was parsed at load.
+    let mut waiting: HashMap<String, Vec<(usize, usize)>> = HashMap::new();
+    for (mi, m) in modules.iter().enumerate() {
+        let Some(s) = m.skimmed.as_ref().and_then(|p| p.skimmed.as_ref()) else {
+            continue;
+        };
+        for (fi, f) in m.program.functions.iter().enumerate() {
+            if s.tokens(f).is_some() {
+                waiting.entry(f.name.clone()).or_default().push((mi, fi));
+            }
+        }
+    }
+    if waiting.is_empty() {
+        return Ok(());
+    }
+    let unparsed = |mi: usize, f: &Function| {
+        waiting
+            .get(&f.name)
+            .is_some_and(|w| w.iter().any(|(m, _)| *m == mi))
+    };
+    let mut names: Vec<&str> = opts.host_calls.to_vec();
+    for (mi, m) in modules.iter().enumerate() {
+        for f in m.program.functions.iter().filter(|f| !unparsed(mi, f)) {
+            crate::ast::spelled(&f.body, &mut names);
+        }
+        for t in m.program.tests.iter().chain(&m.program.benches) {
+            crate::ast::spelled(&t.body, &mut names);
+        }
+        for f in (m.program.impls.iter()).flat_map(|im| im.methods.iter().chain(&im.places)) {
+            crate::ast::spelled(&f.body, &mut names);
+        }
+        for g in &m.program.globals {
+            crate::ast::expr_spelled(&g.init, &mut names);
+        }
+        for p in m
+            .program
+            .type_decls
+            .iter()
+            .filter_map(|t| t.predicate.as_ref())
+        {
+            crate::ast::expr_spelled(p, &mut names);
+        }
+        let contracts = m.program.contracts.iter().flat_map(|c| &c.members);
+        for d in contracts.filter_map(|m| m.default()) {
+            crate::ast::expr_spelled(d, &mut names);
+        }
+        let imports = m.program.imports.iter().flat_map(|imp| &imp.names);
+        names.extend(imports.map(|n| n.original.as_str()));
+    }
+    let mut derive = names.contains(&"derive");
+    let mut work: Vec<(usize, usize)> = Vec::new();
+    for n in names {
+        work.extend(waiting.remove(n).into_iter().flatten());
+    }
+    loop {
+        while let Some((mi, fi)) = work.pop() {
+            let m = &modules[mi];
+            let f = &m.program.functions[fi];
+            let parse = m.skimmed.as_ref().and_then(|p| p.skimmed.as_ref());
+            let parse = parse.filter(|_| f.body.stmts.is_empty());
+            let body = match parse.and_then(|s| s.body(f)) {
+                Some(body) => {
+                    let in_key = |ds: Vec<Diagnostic>| -> Vec<Diagnostic> {
+                        ds.into_iter().map(|d| in_module(d, &m.key, "")).collect()
+                    };
+                    let mut body = body.map_err(in_key)?;
+                    let site = site_file(&m.key, "", opts.std_root.as_deref());
+                    crate::project::walk_block(&mut body, &mut panic_stamp(&site));
+                    Some(body)
+                }
+                None => None,
+            };
+            let mut names: Vec<&str> = Vec::new();
+            crate::ast::spelled(body.as_ref().unwrap_or(&f.body), &mut names);
+            derive |= names.contains(&"derive");
+            for n in names {
+                work.extend(waiting.remove(n).into_iter().flatten());
+            }
+            if let Some(body) = body {
+                modules[mi].program.functions[fi].body = body;
+            }
+        }
+        // A `derive` generator writes calls after the check, to any function.
+        if !derive || waiting.is_empty() {
+            break;
+        }
+        work.extend(waiting.drain().flat_map(|(_, at)| at));
+    }
+    for (mi, fi) in waiting.into_values().flatten() {
+        let f = &modules[mi].program.functions[fi];
+        if f.body.stmts.is_empty() {
+            let at = (f.line, f.col);
+            modules[mi].unparsed.push(at);
+        }
+    }
+    Ok(())
+}
+
+/// The modules whose unreached functions, tests and benches the link drops:
+/// every `std/` module but the root and the injected runtime modules, whose
+/// functions the emitter and the desugars call by name. Std checks each of its
+/// bodies as the root of its own load (`tests/std_suite.rs`, the corpus), and a
+/// body no root reaches adds no verdict to another program's.
+fn lazy_modules(modules: &[Module], root_key: &str, opts: &LoadOptions) -> HashSet<String> {
+    let Some(std_root) = &opts.std_root else {
+        return HashSet::new();
+    };
+    // The test `import_specifier` spells a `std/` specifier by.
+    let std_root = format!("{}/", normalize(std_root));
+    (modules.iter())
+        .filter(|m| m.key != root_key && m.injected.is_none() && !is_remote(&m.key))
+        .filter(|m| normalize(&m.key).starts_with(&std_root))
+        .map(|m| m.key.clone())
+        .collect()
+}
+
+/// Drops each function of a `lazy` module that no root reaches by name
+/// ([`reached`]), and every test and bench of a `lazy` module.
+/// The roots are every other module's functions, tests, benches and imported
+/// names, `named`, every module-state initializer and `where` predicate, and
+/// each `extern` and `export extern` function, which a host enters by name. A
+/// method call `x.f()` arrives as a call named `f`, and the linked namespace is
+/// flat, so a name reaches the one function it can mean.
+///
+/// A program that calls `derive` drops nothing: its generator writes calls
+/// after the check, to any function of the program.
+///
+/// `unparsed` names, by module and position, each function whose body
+/// [`parse_reached`] left unparsed. The walk reaching one panics: the link
+/// would hand the checker an empty block for a body it never read.
+fn drop_unreached(
+    program: &mut Program,
+    lazy: &HashSet<String>,
+    named: Vec<String>,
+    unparsed: &HashMap<String, Vec<(usize, usize)>>,
+) {
+    if lazy.is_empty() {
+        assert!(
+            unparsed.is_empty(),
+            "a load that drops nothing left a body unparsed"
+        );
+        return;
+    }
+    let is_lazy = |m: &Option<String>| m.as_ref().is_some_and(|k| lazy.contains(k));
+    let mut roots: Vec<&str> = named.iter().map(String::as_str).collect();
+    for f in &program.functions {
+        if !is_lazy(&f.module) || f.is_extern || f.is_export_extern {
+            roots.push(&f.name);
+        }
+    }
+    for t in program.tests.iter().chain(&program.benches) {
+        if !is_lazy(&t.module) {
+            crate::ast::spelled(&t.body, &mut roots);
+        }
+    }
+    roots.extend(program.globals.iter().map(|g| g.name.as_str()));
+    for p in program
+        .type_decls
+        .iter()
+        .filter_map(|t| t.predicate.as_ref())
+    {
+        crate::ast::expr_spelled(p, &mut roots);
+    }
+    let keep = reached(program, roots);
+    if keep.contains("derive") {
+        assert!(
+            unparsed.is_empty(),
+            "`derive` reached and a body is unparsed"
+        );
+        return;
+    }
+    for f in program
+        .functions
+        .iter()
+        .filter(|f| keep.contains(f.name.as_str()))
+    {
+        let left = f.module.as_ref().and_then(|k| unparsed.get(k));
+        let at = (f.line, f.col);
+        assert!(
+            !left.is_some_and(|l| l.contains(&at)),
+            "`{}` is reached and unparsed",
+            f.name
+        );
+    }
+    let kept: Vec<bool> = (program.functions.iter())
+        .map(|f| !is_lazy(&f.module) || keep.contains(f.name.as_str()))
+        .collect();
+    let functions = std::mem::take(&mut program.functions).into_iter().zip(kept);
+    program.functions = functions.filter_map(|(f, k)| k.then_some(f)).collect();
+    program.tests.retain(|t| !is_lazy(&t.module));
+    program.benches.retain(|b| !is_lazy(&b.module));
+}
+
+/// Returns every name `roots` reach in `program`: its functions and module
+/// state, and each other name their bodies spell, a builtin's included. A
+/// local that shares a function's name reaches the function, so the set holds
+/// every name the scoped walk of `gen::generator_program` reaches. Its implicit
+/// roots are that walk's: every `$` name (an injected runtime module's, which
+/// the emitter calls by name, and an impl's flattened method, which dispatch
+/// reaches by type) and every name a contract default, an impl method or a
+/// projection spells.
+fn reached<'a>(program: &'a Program, mut work: Vec<&'a str>) -> HashSet<&'a str> {
+    let by_name: HashMap<&str, &Function> = (program.functions.iter())
+        .map(|f| (f.name.as_str(), f))
+        .collect();
+    let state: HashMap<&str, &Expr> = (program.globals.iter())
+        .map(|s| (s.name.as_str(), &s.init))
+        .collect();
+    work.extend(
+        (program.functions.iter())
+            .filter(|f| f.name.contains('$'))
+            .map(|f| f.name.as_str()),
+    );
+    let defaults = (program.contracts.iter().flat_map(|c| &c.members)).filter_map(|m| m.default());
+    for d in defaults {
+        crate::ast::expr_spelled(d, &mut work);
+    }
+    for m in (program.impls.iter()).flat_map(|i| i.methods.iter().chain(&i.places)) {
+        crate::ast::spelled(&m.body, &mut work);
+    }
+    let mut keep: HashSet<&str> = HashSet::new();
+    while let Some(n) = work.pop() {
+        if !keep.insert(n) {
+            continue;
+        }
+        if let Some(f) = by_name.get(n) {
+            crate::ast::spelled(&f.body, &mut work);
+        } else if let Some(init) = state.get(n) {
+            crate::ast::expr_spelled(init, &mut work);
+        }
+    }
+    keep
 }
 
 /// Attaches `key` to a diagnostic as its file, unless `key` is the root: a root

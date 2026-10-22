@@ -29,7 +29,7 @@ pub fn brace_enums(source: &str) -> Result<(String, Vec<usize>), Diagnostic> {
         .chain((source.chars().enumerate()).filter_map(|(i, c)| (c == '\n').then_some(i + 1)))
         .collect();
     let at = |t: &Triv| starts[t.start_line - 1] + t.col - 1;
-    let end = |t: &Triv| at(t) + t.text.chars().count();
+    let end = |t: &Triv| at(t) + t.text(source).chars().count();
     let chars: Vec<char> = source.chars().collect();
 
     // Each edit replaces the chars in `from..to` with `with`; they never overlap.

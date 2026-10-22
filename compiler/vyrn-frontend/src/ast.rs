@@ -462,6 +462,8 @@ pub fn is_synthetic(name: &str) -> bool {
 pub struct TypeDecl {
     pub name: String,
     pub exported: bool,
+    /// As [`Function::export_to`].
+    pub export_to: Vec<String>,
     /// `None` for the root module. Set by the loader.
     pub module: Option<String>,
     pub doc: Option<String>,
@@ -491,6 +493,8 @@ pub struct EnumVariant {
 pub struct ProtocolDecl {
     pub name: String,
     pub exported: bool,
+    /// As [`Function::export_to`].
+    pub export_to: Vec<String>,
     /// `None` for the root module. Set by the loader.
     pub module: Option<String>,
     pub doc: Option<String>,
@@ -532,6 +536,8 @@ pub struct MethodSig {
 pub struct ContractDecl {
     pub name: String,
     pub exported: bool,
+    /// As [`Function::export_to`].
+    pub export_to: Vec<String>,
     /// `None` for the root module. Set by the loader.
     pub module: Option<String>,
     pub doc: Option<String>,
@@ -702,6 +708,10 @@ impl ImplBlock {
 pub struct Function {
     pub name: String,
     pub exported: bool,
+    /// The module specifiers of `export to "a", "b"`, as written: only those
+    /// modules may import the declaration. Empty when every module may, and
+    /// always empty when not `exported`.
+    pub export_to: Vec<String>,
     /// `None` for the root module. Set by the loader.
     pub module: Option<String>,
     pub doc: Option<String>,
@@ -742,6 +752,7 @@ impl Function {
         Function {
             name: name.into(),
             exported: false,
+            export_to: Vec::new(),
             module: None,
             doc: None,
             type_params: Vec::new(),
@@ -1234,7 +1245,10 @@ impl<'a> std::fmt::Display for Said<'a> {
             Type::Bool => write!(f, "Bool"),
             Type::Str => write!(f, "String"),
             Type::Unit => write!(f, "Unit"),
-            Type::Named(n) => write!(f, "{}", name(n)),
+            Type::Named(n) => match crate::types::union_members(self.0) {
+                Some(ms) => write!(f, "{}", ms.map(name).collect::<Vec<_>>().join(" | ")),
+                None => write!(f, "{}", name(n)),
+            },
             Type::Param(n) => write!(f, "{}", written_param(n)),
             Type::Record(fields) => {
                 write!(f, "{{ ")?;
@@ -2690,6 +2704,42 @@ impl AstVisit<'_> for Binders<'_> {
     fn bind(&mut self, name: &str, _: usize, _: usize, _: LocalKind, _: Option<&Type>) {
         (self.0)(name)
     }
+}
+
+struct Spelled<'a, 'o>(&'o mut Vec<&'a str>);
+
+impl<'a> AstVisit<'a> for Spelled<'a, '_> {
+    const SCOPED: bool = false;
+
+    fn stmt(&mut self, s: &'a Stmt, _: &std::collections::HashSet<String>) {
+        if let Stmt::Assign { name, .. } | Stmt::Store { name, .. } | Stmt::Drop { name, .. } = s {
+            self.0.push(name);
+        }
+    }
+
+    fn expr(&mut self, e: &'a Expr, _: &std::collections::HashSet<String>) -> bool {
+        match e {
+            Expr::Call { name, .. } | Expr::TryConstruct { name, .. } | Expr::Var { name, .. } => {
+                self.0.push(name)
+            }
+            Expr::Field { field, .. } => self.0.push(field),
+            _ => {}
+        }
+        true
+    }
+}
+
+/// Pushes onto `out` every name `b` spells as a callee, a variable, a field or
+/// a store target. A local and a field count too, so the names hold every
+/// function and module state `b` reaches, before the link or after it: a
+/// namespace member `ns.f` is a field until the link resolves it.
+pub fn spelled<'a>(b: &'a Block, out: &mut Vec<&'a str>) {
+    ast_block(b, &mut std::collections::HashSet::new(), &mut Spelled(out));
+}
+
+/// [`spelled`] for an expression.
+pub fn expr_spelled<'a>(e: &'a Expr, out: &mut Vec<&'a str>) {
+    ast_expr(e, &std::collections::HashSet::new(), &mut Spelled(out));
 }
 
 /// Calls `f` with every name `b` binds: `let`s, loop variables, pattern binders
