@@ -88,14 +88,25 @@ export fn sortWith<T>(xs: Array<T>, cmp: fn(T, T) -> Int64) -> Array<T> {
 
 test "sortWith orders by the comparator, stably" {
     let xs: Array<Int64> = [3, 1, 2, 1]
-    let up = sortWith(xs, (a, b) -> a - b)
+    let up = sortWith(xs, (a, b) -> if a < b { -1 } else if a > b { 1 } else { 0 })
     assertEq(up[0], 1)
     assertEq(up[1], 1)
     assertEq(up[2], 2)
     assertEq(up[3], 3)
-    let down = sortWith(xs, (a, b) -> b - a)
+    let down = sortWith(xs, (a, b) -> if b < a { -1 } else if b > a { 1 } else { 0 })
     assertEq(down[0], 3)
     assertEq(down[3], 1)
+}
+
+test "sortWith orders across the Int64 limits" {
+    let max = 9223372036854775807
+    let min = 0 - max - 1
+    let xs: Array<Int64> = [max, -1, 5, min]
+    let up = sortWith(xs, (a, b) -> if a < b { -1 } else if a > b { 1 } else { 0 })
+    assertEq(up[0], min)
+    assertEq(up[1], -1)
+    assertEq(up[2], 5)
+    assertEq(up[3], max)
 }
 
 /// A stable sorted copy, ascending by an `Int64` key. Insertion sort.

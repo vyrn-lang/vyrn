@@ -89,9 +89,10 @@ fn main() -> Int64 {
     let counted: fn() -> Int64 = () -> chain.length
     print(counted()) // 3
 
-    let negate: Transform = x -> 0 - x
+    // -1 - x reverses the order of every Int64 and cannot wrap; 0 - x wraps at the minimum.
+    let descending: Transform = x -> 0 - 1 - x
     let unsorted: Array<Int64> = [3, 1, 2]
-    let sorted = sortBy(unsorted, negate)
+    let sorted = sortBy(unsorted, descending)
     print(sorted[0] * 100 + sorted[1] * 10 + sorted[2]) // 321
 
     let mut local: Array<Transform> = []
