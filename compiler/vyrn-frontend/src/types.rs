@@ -612,8 +612,8 @@ struct SchemaCx<'a> {
 }
 
 /// The JSON Schema object for a type. A named type renders as a `$ref` into
-/// [`SchemaCx::defs`], except a synthetic refinement helper (`User.age`),
-/// which stays inline. [`crate::codec::wire`] decides the shape; this only
+/// [`SchemaCx::defs`], except a synthetic refinement helper (`User.age`) and
+/// a union `ctor::name_unions` declared, which stay inline. [`crate::codec::wire`] decides the shape; this only
 /// spells it.
 fn type_schema(ty: &Type, cx: &mut SchemaCx) -> String {
     match ty {
@@ -622,7 +622,8 @@ fn type_schema(ty: &Type, cx: &mut SchemaCx) -> String {
                 return "{\"$ref\":\"#\"}".to_string();
             }
             let types = cx.types;
-            if is_synthetic(n) {
+            let unnamed = |d: &TypeDecl| d.line == 0 && !d.members.is_empty();
+            if is_synthetic(n) || types.decl(n).is_some_and(unnamed) {
                 return match types.decl(n) {
                     Some(d) => named_schema(d, cx),
                     None => "{}".to_string(),
@@ -760,6 +761,10 @@ fn intn_schema(bits: u8, signed: bool, extra: &[(String, String)]) -> String {
 /// The schema for a named declaration: a validated scalar carries its `where`
 /// constraints; anything else defers to its base.
 fn named_schema(decl: &TypeDecl, cx: &mut SchemaCx) -> String {
+    if !decl.members.is_empty() {
+        let ms: Vec<String> = decl.members.iter().map(|m| type_schema(m, cx)).collect();
+        return format!("{{\"anyOf\":[{}]}}", ms.join(","));
+    }
     let pred = decl.predicate.as_ref();
     match &decl.base {
         Type::Int => scalar_with_constraints("integer", pred),

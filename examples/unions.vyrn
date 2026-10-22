@@ -40,5 +40,16 @@ fn main() -> Int64 {
     print(checked(70000 - 69999))
     print(key("abc"))
     print(key("42"))
+    print(jsonSchema<Listener>())
+    for doc in ["{\"at\": 20, \"backlog\": [8080]}", "{\"at\": 70000, \"backlog\": [0]}"] {
+        match fromJson<Listener>(doc) {
+            Valid(v) => print(v.at),
+            Invalid(issues) => {
+                for i in issues {
+                    print("\{i.path}: \{i.message}")
+                }
+            }
+        }
+    }
     return 0
 }

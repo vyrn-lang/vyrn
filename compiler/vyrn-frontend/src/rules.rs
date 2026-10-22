@@ -538,6 +538,8 @@ rules! {
     ConversionType { name, src } "`{name}(..)` converts a number, found {src}";
     TargetAsTypeArg { name, was, suffix }
         "`{name}` names its target as a type argument — write `{name}<{was}>({suffix})`";
+    SchemaOfUnion { t }
+        "`schemaOf` describes one declaration, and `{t}` is a union of several: ask it of each member";
     ContractOfArity { got } "`contractOf` takes 1 argument (a contract name), got {got}";
     ContractOfUnknown { cn }
         "`contractOf` needs a declared contract name; \

@@ -226,6 +226,20 @@ pub fn name_unions(program: &mut Program) {
     program.type_decls.extend(made);
 }
 
+/// `ty` with each union that `name_unions` declared in `types` replaced by its
+/// name.
+pub fn declared_unions(ty: &mut Type, types: &dyn Decls) {
+    crate::types::walk_type_mut(ty, &mut |t| {
+        let Type::Union(ms) = t else { return };
+        if let Ok(u @ Type::Union(_)) = crate::types::canonical_union(ms, types) {
+            let n = u.to_string();
+            if types.decl(&n).is_some() {
+                *t = Type::Named(n);
+            }
+        }
+    });
+}
+
 /// Calls `f` on every type `program` writes, and on each part of it, outer
 /// first: a declaration's base, a signature, an annotation and a call's type
 /// arguments.

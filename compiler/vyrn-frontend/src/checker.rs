@@ -5192,6 +5192,12 @@ impl<'a> Checker<'a> {
                 }
             ));
         }
+        // A `Schema` describes one declaration, and a union is none of its own.
+        if let ("schemaOf", [t]) = (name, written) {
+            if crate::types::union_of(t, self).is_some() {
+                return Err(cerr!(line, SchemaOfUnion, t));
+            }
+        }
         // `contractOf(C)`: the argument is a contract name, not a value.
         if name == "contractOf" {
             if !self.frame.borrow().in_gen {

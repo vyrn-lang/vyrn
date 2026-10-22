@@ -230,7 +230,7 @@ type User = {
 - An alias without `where` is transparent: `type Id = Int64` names `Int64`, and each value assigns to the other. An alias has no constructor. A distinct type is a validated type, or a generic record applied to another argument (see Records). A record with one field is not distinct: it fits wherever a record with that one field is wanted.
 - A `String` type whose regular expression denotes a finite language is a finite string type. An interpolation whose holes are all finite types has a finite type too, and assigning it to a validated `String` type is proven by automaton containment at compile time, or refused with the key that escapes.
 
-`schemaOf<T>()` reads a validated type's declaration at compile time and answers a `Schema` record: name, base type, `///` doc, bounds, `multipleOf`, length bounds and pattern. `jsonSchema<T>()` writes the JSON Schema document for any type. Neither is runtime reflection: the compiler computes the answer, and types are erased before the program runs.
+`schemaOf<T>()` reads a validated type's declaration at compile time and answers a `Schema` record: name, base type, `///` doc, bounds, `multipleOf`, length bounds and pattern. `jsonSchema<T>()` writes the JSON Schema document for any type, and a union's as the `anyOf` of its members' schemas. `schemaOf` of a union is refused, because one `Schema` describes one declaration. Neither is runtime reflection: the compiler computes the answer, and types are erased before the program runs.
 
 ### Function types
 
@@ -572,7 +572,7 @@ These builtins need no import. Paths are relative to the working directory.
 | `renameFile(a, b)`, `fsyncFile(p)` | `Result<Bool, String>`. |
 | `listDir(p)`, `listDirKinds(p)` | `Result<Array<String>, String>`; the second marks a directory with a trailing `/`. |
 | `toJson(x)` | The canonical JSON `String`: fields in declaration order, no whitespace, a `None` field omitted. |
-| `fromJson<T>(s)` | `Validation<T>`. Runs every `where` clause, ignores unknown fields, and reports every problem with its path. |
+| `fromJson<T>(s)` | `Validation<T>`. Runs every `where` clause, ignores unknown fields, and reports every problem with its path. A union decodes its base and holds where one member's rule does; its issue names the union. |
 
 `save(path, value)`, `load(T, path)` and `loadOr` persist a typed value atomically through `std/storage`; `load` answers `Missing`, `Corrupt(issues)` or `Loaded(value)`.
 

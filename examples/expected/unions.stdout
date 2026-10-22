@@ -6,3 +6,7 @@
 1
 key abc
 key 42
+{"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","properties":{"at":{"anyOf":[{"$ref":"#/$defs/Port"},{"$ref":"#/$defs/Age"}]},"backlog":{"type":"array","items":{"anyOf":[{"$ref":"#/$defs/Port"},{"$ref":"#/$defs/Age"}]}}},"required":["at","backlog"],"$defs":{"Port":{"type":"integer","minimum":1,"maximum":65535},"Age":{"type":"integer","minimum":18,"maximum":150}}}
+20
+at: validation failed for `Port | Age`
+backlog[0]: validation failed for `Port | Age`
