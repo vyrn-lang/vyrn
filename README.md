@@ -93,7 +93,8 @@ To try it without installing, the [playground](https://vyrn-lang.github.io/play.
 
 ## Features
 
-- **Validated types.** A `where` clause is part of the type. The compiler rejects an invalid constant, removes the check where it proves the value valid, and emits it where it cannot. ([validate](examples/validate.vyrn), [autovalidate](examples/autovalidate.vyrn))
+- **Validated types.** A `where` clause is part of the type. The compiler rejects an invalid constant, removes the check where it proves the value valid, and emits it where it cannot. A parameter can state a rule over the arguments before it (`i: Int64 where value < b.length`), checked at the call unless the caller's facts prove it. A string type whose pattern has finitely many matches is proven at compile time by automaton containment. ([validate](examples/validate.vyrn), [autovalidate](examples/autovalidate.vyrn))
+- **Untrusted input meets the same rules.** `Port?(n)` answers `None` instead of trapping, `fromJson` runs every `where` clause and reports every problem with its path, and `import type` turns a JSON Schema document into validated types. ([jsoncodec](examples/jsoncodec.vyrn), [schemaimport](examples/schemaimport.vyrn))
 - **Ownership by declaration.** `read`, `modify` and `consume` on a parameter drive moves and aliasing. `vyrn why --cost <file>` says which lines allocate, copy and keep a check. ([consume](examples/consume.vyrn), [ownership](examples/ownership.vyrn))
 - **One module, two ways to run it.** `vyrn build --target wasm` emits WebAssembly directly, with no LLVM and no clang. `vyrn build` turns the same module into a native executable, and CI checks that both print the same output.
 - **Generators, not compiler features.** A `gen fn` is ordinary Vyrn that runs at compile time and returns source. RPC, UI, i18n, OpenAPI and GraphQL are libraries in [`std/`](std/), not keywords. ([gendemo](examples/gendemo.vyrn))
