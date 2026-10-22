@@ -2496,8 +2496,8 @@ fn type_decl_detail(t: &TypeDecl, all: &[TypeDecl], sp: &Spellings) -> String {
             let arms = (vs.iter())
                 .map(|v| variant_arm(v, &|t| spell(&say, t)))
                 .collect::<Vec<_>>()
-                .join(" | ");
-            format!("type {name} = {arms}")
+                .join(", ");
+            format!("type {name} = enum {{ {arms} }}")
         }
         Type::Record(fields) => {
             let fs = fields
@@ -2539,7 +2539,7 @@ fn spell(say: &Speech, ty: &Type) -> String {
                 .iter()
                 .map(|v| variant_arm(v, &|t| spell(say, t)))
                 .collect::<Vec<_>>();
-            format!("{{ {} }}", arms.join(" | "))
+            format!("enum {{ {} }}", arms.join(", "))
         }
         other => say.ty(other).to_string(),
     }

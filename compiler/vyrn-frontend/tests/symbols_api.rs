@@ -97,7 +97,7 @@ fn resolve_type_at_annotation() {
     assert_eq!(r.target_col, 6);
     assert_eq!(
         r.hover,
-        "type Shape = Circle(Int64) | Rect(Int64, Int64) | Unit"
+        "type Shape = enum { Circle(Int64), Rect(Int64, Int64), Unit }"
     );
 }
 
