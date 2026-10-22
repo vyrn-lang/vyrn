@@ -754,7 +754,7 @@ fn nothing_in_the_corpus_writes_these() {
 
 /// Nothing in `std/`, `examples/`, `site/`, the CLI's fixtures or the docs
 /// writes these. Empty: everything the language spells is written.
-const ZERO_IN_THE_CORPUS: &[&str] = &["word to"];
+const ZERO_IN_THE_CORPUS: &[&str] = &[];
 
 /// Only a compiler test writes these. Empty: no form is kept alive by its own
 /// fixture.
