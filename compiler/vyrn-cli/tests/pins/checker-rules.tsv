@@ -171,3 +171,4 @@ checker-rules.vyrn:563:0: call to unknown function `Label`
 checker-rules.vyrn:571:0: call to unknown function `Label`
 checker-rules.vyrn:869:0: `addPair` is a local of type Int64, not a function
   fix: rename the local to call the function `addPair`
+checker-rules.vyrn:875:0: `clz` needs Int32, UInt32, Int64 or UInt64, found Float64

@@ -14,10 +14,6 @@ type Body = {
     mass: Float64,
 }
 
-fn sqrtF(v: Float64) -> Float64 {
-    return F64x2.sqrt(F64x2(v, v)).lane(0)
-}
-
 fn fixed9(v: Float64) -> String {
     let mut a = v
     let mut sign = ""
@@ -112,7 +108,7 @@ fn energy(b: Array<Body>) -> Float64 {
             let dx = b[i].x - b[j].x
             let dy = b[i].y - b[j].y
             let dz = b[i].z - b[j].z
-            e = e - b[i].mass * b[j].mass / sqrtF(dx * dx + dy * dy + dz * dz)
+            e = e - b[i].mass * b[j].mass / (dx * dx + dy * dy + dz * dz).sqrt()
             j = j + 1
         }
         i = i + 1
@@ -130,7 +126,7 @@ fn advance(bodies: consume Array<Body>, dt: Float64) -> Array<Body> {
             let dy = b[i].y - b[j].y
             let dz = b[i].z - b[j].z
             let d2 = dx * dx + dy * dy + dz * dz
-            let mag = dt / (d2 * sqrtF(d2))
+            let mag = dt / (d2 * d2.sqrt())
             let mi = b[i].mass
             let mj = b[j].mass
             b[i].vx = b[i].vx - dx * mj * mag

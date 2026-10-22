@@ -499,6 +499,7 @@ rules! {
     RawAtArity { got } "`rawAt` takes 4 arguments (text, path, line, col), got {got}";
     BytesArity { got } "`bytes` takes 1 argument, or 3 with a byte range, got {got}";
     BytesType { t } "`bytes` needs a String, found {t}";
+    UnaryOperand { what, admits, t } "`{what}` needs {admits}, found {t}";
     BytesOffsets { n } "`bytes` needs Int64 offsets, found {n}";
     PushReceiver { other } "`push` needs an Array as its first argument, found {other}";
     PushValue { v, elem } "`push` value is {v} but the array holds {elem}";

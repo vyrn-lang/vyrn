@@ -4,10 +4,6 @@ let order = 100
 
 let benchOrder = 500
 
-fn sqrtF(v: Float64) -> Float64 {
-    return F64x2.sqrt(F64x2(v, v)).lane(0)
-}
-
 fn fixed9(v: Float64) -> String {
     let mut a = v
     let mut sign = ""
@@ -90,7 +86,7 @@ fn spectralNorm(n: Int64) -> Float64 {
         vv = vv + v[k] * v[k]
         k = k + 1
     }
-    return sqrtF(vbv / vv)
+    return (vbv / vv).sqrt()
 }
 
 bench "spectral-norm, N = 500" {

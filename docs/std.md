@@ -79,7 +79,7 @@ The compiler injects these declarations into every program, so a file names them
 
 | Module | Provides |
 |---|---|
-| `std/math` | `min`, `max`, `abs`, `clamp` on `Int64`, and `pi`, `floorF`, `sin`, `cos` on `Float64`. `abs` of `Int64` min saturates. |
+| `std/math` | `min`, `max`, `abs`, `clamp` on `Int64`; `pi`, `trunc`, `floor`, `ceil`, `round`, `sin`, `cos`, `tan`, `atan2`, `exp`, `log` and `pow` on `Float64`. `abs` of `Int64` min saturates. The rounding functions are exact; `exp`, `log`, `pow` and `tan` are within 1 ulp, and `atan2` within 2. The square root is the builtin `x.sqrt()`. |
 | `std/num` | `parseInt64`, `parseUInt64`, `parseFloat64`, `parseFloat32` (each an `Option`), and `f64Str`. Parsing is correctly rounded, with no `strtod` underneath. |
 | `std/time` | `now() -> Instant` (UTC milliseconds), `monotonic()`, the calendar breakdown (`civil`, `year` to `second`) and `format`, `formatIso`. UTC only. `now` and `monotonic` are host effects, so a generator cannot call them. |
 | `std/random` | `Rng`, `seededRng`, `nextInt`, `nextInRange`: SplitMix64 as a value, so a seeded run reproduces everywhere. `randomSeed()` is the one host effect. Not for secrets. |

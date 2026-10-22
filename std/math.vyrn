@@ -1,5 +1,7 @@
-/// Integer helpers (min, max, abs, clamp) and float ones (pi, floor,
-/// sine, cosine), written in Vyrn.
+/// Integer helpers (min, max, abs, clamp) and `Float64` functions (pi,
+/// rounding, sine, cosine, exp, log, pow, tan, atan2), written in Vyrn. The
+/// rounding functions are exact, and exp, log, pow, tan and atan2 state
+/// their error in ulps against the exact result.
 
 export fn min(a: Int64, b: Int64) -> Int64 {
     if a < b { return a }
@@ -36,14 +38,52 @@ export fn pi() -> Float64 {
     return 3.141592653589793
 }
 
-/// The greatest whole number at or below `x`, as a `Float64`.
-export fn floorF(x: Float64) -> Float64 {
-    // 2^53: past it every `Float64` is already whole.
-    if x > 9007199254740992.0 || x < 0.0 - 9007199254740992.0 {
+/// `x` rounded toward zero to a whole number. Exact. A zero keeps its sign,
+/// and an infinity or a NaN is returned as it is.
+export fn trunc(x: Float64) -> Float64 {
+    let bits = floatBits(x)
+    let e = Int64((bits >> 52) & 2047) - 1023
+    // From 2^52 up every `Float64` is whole; 1024 is an infinity or a NaN.
+    if e >= 52 {
         return x
     }
-    let t = Float64(Int64(x))
+    let sign: UInt64 = 9223372036854775808
+    if e < 0 {
+        return floatFromBits(bits & sign)
+    }
+    let fraction: UInt64 = 4503599627370495
+    return floatFromBits(bits & ~(fraction >> UInt64(e)))
+}
+
+/// The greatest whole number at or below `x`. Exact, with `trunc`'s zeros,
+/// infinities and NaN.
+export fn floor(x: Float64) -> Float64 {
+    let t = trunc(x)
     if t > x {
+        return t - 1.0
+    }
+    return t
+}
+
+/// The least whole number at or above `x`. Exact; `ceil(-0.5)` is `-0.0`.
+export fn ceil(x: Float64) -> Float64 {
+    let t = trunc(x)
+    if t < x {
+        return t + 1.0
+    }
+    return t
+}
+
+/// `x` rounded to the nearest whole number, a half away from zero:
+/// `round(2.5)` is `3.0` and `round(-0.5)` is `-1.0`. Exact.
+export fn round(x: Float64) -> Float64 {
+    let t = trunc(x)
+    // Exact: `t` is `x` with its fraction bits cleared.
+    let d = x - t
+    if d >= 0.5 {
+        return t + 1.0
+    }
+    if d <= -0.5 {
         return t - 1.0
     }
     return t
@@ -59,7 +99,7 @@ export fn floorF(x: Float64) -> Float64 {
 export fn sin(x: Float64) -> Float64 {
     let twoPi = 6.283185307179586
     let halfPi = 1.5707963267948966
-    let mut r = x - twoPi * floorF(x / twoPi + 0.5)
+    let mut r = x - twoPi * floor(x / twoPi + 0.5)
     if r > halfPi {
         r = pi() - r
     }
@@ -80,6 +120,673 @@ export fn cos(x: Float64) -> Float64 {
     return sin(x + 1.5707963267948966)
 }
 
+// exp, log, pow, tan and atan2 follow FreeBSD msun's e_exp.c, e_log.c,
+// e_pow.c, k_tan.c, e_rem_pio2.c, s_atan.c and e_atan2.c, which carry this
+// notice:
+//
+// Copyright (C) 1993-2004 by Sun Microsystems, Inc. All rights reserved.
+// Permission to use, copy, modify, and distribute this software is freely
+// granted, provided that this notice is preserved.
+//
+// The integer constants are the high words of `Float64` encodings, written
+// in decimal: 1072693248 is 0x3ff00000, the high word of 1.0. Every step is
+// one rounded operation and native code compiles with `-ffp-contract=off`,
+// so every engine returns the same bits.
+
+/// e raised to `x`. Within 1 ulp. NaN gives NaN, and `x` above 709.78
+/// gives infinity; below -745.13, zero.
+export fn exp(x: Float64) -> Float64 {
+    let hx = hiWord(x) & 2147483647
+    // |x| >= 708.39 or NaN: overflow, underflow or a NaN.
+    if hx >= 1082535490 {
+        if x != x {
+            return x
+        }
+        if x > 709.782712893384 {
+            return infinity()
+        }
+        if x < -745.1332191019411 {
+            return 0.0
+        }
+    }
+    // x = k ln2 + r with |r| <= ln2 / 2, and r carried as hi - lo.
+    let ln2Hi = 0.6931471803691238
+    let ln2Lo = 0.00000000019082149292705877
+    let mut k: Int32 = 0
+    let mut hi = x
+    let mut lo = 0.0
+    if hx > 1071001154 {
+        if hx >= 1072734898 {
+            let half = if x < 0.0 { -0.5 } else { 0.5 }
+            k = Int32(1.4426950408889634 * x + half)
+        } else {
+            k = if x < 0.0 { -1 } else { 1 }
+        }
+        hi = x - Float64(k) * ln2Hi
+        lo = Float64(k) * ln2Lo
+    } else if hx <= 1043333120 {
+        // |x| <= 2^-28: exp(x) rounds to 1 + x.
+        return 1.0 + x
+    }
+    let r = hi - lo
+    let rr = r * r
+    let p = 0.000000041381367970572385 * rr - 0.0000016533902205465252
+    let c = r - rr * (0.16666666666666602 + rr * (-0.0027777777777015593 + rr * (0.00006613756321437934 + rr * p)))
+    let y = 1.0 + (r * c / (2.0 - c) - lo + hi)
+    if k == 0 {
+        return y
+    }
+    return scalbn(y, k)
+}
+
+/// The natural logarithm of `x`. Within 1 ulp. Zero gives -infinity, a
+/// negative `x` or NaN gives NaN, and infinity gives infinity.
+export fn log(x: Float64) -> Float64 {
+    let mut ui = floatBits(x)
+    let mut hx = UInt32(ui >> 32)
+    let mut k: Int32 = 0
+    if hx < 1048576 || (hx >> 31) != 0 {
+        if (ui << 1) == 0 {
+            return -infinity()
+        }
+        if (hx >> 31) != 0 {
+            return notANumber()
+        }
+        // A subnormal: scale it by 2^54 into the normal range.
+        k = -54
+        ui = floatBits(x * 18014398509481984.0)
+        hx = UInt32(ui >> 32)
+    } else if hx >= 2146435072 {
+        return x
+    } else if hx == 1072693248 && (ui << 32) == 0 {
+        return 0.0
+    }
+    // x = 2^k (1 + f) with sqrt(2) / 2 < 1 + f < sqrt(2).
+    hx = hx + 614242
+    k = k + Int32(hx >> 20) - 1023
+    hx = (hx & 1048575) + 1072079006
+    let low: UInt64 = 4294967295
+    let f = floatFromBits((UInt64(hx) << 32) | (ui & low)) - 1.0
+    let hfsq = 0.5 * f * f
+    let s = f / (2.0 + f)
+    let z = s * s
+    let w = z * z
+    let t1 = w * (0.3999999999940942 + w * (0.22222198432149784 + w * 0.15313837699209373))
+    let t2 = z * (0.6666666666666735 + w * (0.2857142874366239 + w * (0.1818357216161805 + w * 0.14798198605116586)))
+    let r = t2 + t1
+    let dk = Float64(k)
+    return s * (hfsq + r) + dk * 0.00000000019082149292705877 - hfsq + f + dk * 0.6931471803691238
+}
+
+/// `x` raised to `y`. Within 1 ulp, and exact where the result is a whole
+/// number a `Float64` holds. `pow(x, 0.0)` and `pow(1.0, y)` are 1 even for
+/// NaN; a negative `x` to a fractional `y` is NaN; otherwise the C99 rules
+/// for zeros and infinities hold.
+export fn pow(x: Float64, y: Float64) -> Float64 {
+    let hx = hiWord(x)
+    let lx = loWord(x)
+    let hy = hiWord(y)
+    let ly = loWord(y)
+    let mut ix = hx & 2147483647
+    let iy = hy & 2147483647
+    if iy == 0 && ly == 0 {
+        return 1.0
+    }
+    if hx == 1072693248 && lx == 0 {
+        return 1.0
+    }
+    if ix > 2146435072 || (ix == 2146435072 && lx != 0) || iy > 2146435072 || (iy == 2146435072 && ly != 0) {
+        return x + y
+    }
+    // For a negative `x`: 0 when `y` is not whole, 1 when odd, 2 when even.
+    let mut yisint: Int32 = 0
+    if hx < 0 {
+        if iy >= 1128267776 {
+            yisint = 2
+        } else if iy >= 1072693248 {
+            let e = (iy >> 20) - 1023
+            if e > 20 {
+                let sh = UInt32(52 - e)
+                let j = ly >> sh
+                if (j << sh) == ly {
+                    yisint = 2 - Int32(j & 1)
+                }
+            } else if ly == 0 {
+                let j = iy >> (20 - e)
+                if (j << (20 - e)) == iy {
+                    yisint = 2 - (j & 1)
+                }
+            }
+        }
+    }
+    if ly == 0 {
+        if iy == 2146435072 {
+            if ((ix - 1072693248) | Int32(lx)) == 0 {
+                return 1.0
+            }
+            if ix >= 1072693248 {
+                return if hy >= 0 { y } else { 0.0 }
+            }
+            return if hy >= 0 { 0.0 } else { -y }
+        }
+        if iy == 1072693248 {
+            return if hy >= 0 { x } else { 1.0 / x }
+        }
+        if hy == 1073741824 {
+            return x * x
+        }
+        if hy == 1071644672 && hx >= 0 {
+            return x.sqrt()
+        }
+    }
+    let mut ax = absF(x)
+    // x is a zero, an infinity or one: the result is exact.
+    if lx == 0 && (ix == 2146435072 || ix == 0 || ix == 1072693248) {
+        let mut z = ax
+        if hy < 0 {
+            z = 1.0 / z
+        }
+        if hx < 0 {
+            if ((ix - 1072693248) | yisint) == 0 {
+                return notANumber()
+            }
+            if yisint == 1 {
+                z = -z
+            }
+        }
+        return z
+    }
+    let mut sign = 1.0
+    if hx < 0 {
+        if yisint == 0 {
+            return notANumber()
+        }
+        if yisint == 1 {
+            sign = -1.0
+        }
+    }
+    // log2(|x|) as t1 + t2, with t1's low word zero.
+    let mut t1 = 0.0
+    let mut t2 = 0.0
+    if iy > 1105199104 {
+        // |y| > 2^31: overflow or underflow unless x is within 2^-20 of 1.
+        if iy > 1139802112 {
+            if ix <= 1072693247 {
+                return if hy < 0 { infinity() } else { 0.0 }
+            }
+            return if hy > 0 { infinity() } else { 0.0 }
+        }
+        if ix < 1072693247 {
+            return if hy < 0 { sign * infinity() } else { sign * 0.0 }
+        }
+        if ix > 1072693248 {
+            return if hy > 0 { sign * infinity() } else { sign * 0.0 }
+        }
+        let t = ax - 1.0
+        let w = (t * t) * (0.5 - t * (0.3333333333333333 - t * 0.25))
+        let u = 1.4426950216293335 * t
+        let v = t * 0.000000019259629911266175 - w * 1.4426950408889634
+        t1 = zeroLo(u + v)
+        t2 = v - (t1 - u)
+    } else {
+        let mut n: Int32 = 0
+        if ix < 1048576 {
+            ax = ax * 9007199254740992.0
+            n = -53
+            ix = hiWord(ax)
+        }
+        n = n + (ix >> 20) - 1023
+        let j = ix & 1048575
+        ix = j | 1072693248
+        // bp is 1 or 1.5, whichever is nearer |x| scaled into [1, 2).
+        let mut k: Int32 = 0
+        if j >= 767610 {
+            n = n + 1
+            ix = ix - 1048576
+        } else if j > 235662 {
+            k = 1
+        }
+        ax = withHi(ax, ix)
+        let bp = if k == 0 { 1.0 } else { 1.5 }
+        let dpH = if k == 0 { 0.0 } else { 0.5849624872207642 }
+        let dpL = if k == 0 { 0.0 } else { 0.00000001350039202129749 }
+        // ss = sH + sL = (ax - bp) / (ax + bp).
+        let u = ax - bp
+        let v = 1.0 / (ax + bp)
+        let ss = u * v
+        let sH = zeroLo(ss)
+        let tH = withHi(0.0, ((ix >> 1) | 536870912) + 524288 + (k << 18))
+        let tL = ax - (tH - bp)
+        let sL = v * ((u - sH * tH) - sH * tL)
+        let s2 = ss * ss
+        let q = 0.272728123808534 + s2 * (0.23066074577556175 + s2 * 0.20697501780033842)
+        let r = s2 * s2 * (0.5999999999999946 + s2 * (0.4285714285785502 + s2 * (0.33333332981837743 + s2 * q))) + sL * (sH + ss)
+        let sH2 = sH * sH
+        let tH2 = zeroLo(3.0 + sH2 + r)
+        let tL2 = r - ((tH2 - 3.0) - sH2)
+        let u2 = sH * tH2
+        let v2 = sL * tH2 + tL2 * ss
+        let pH = zeroLo(u2 + v2)
+        let pL = v2 - (pH - u2)
+        // 2 / (3 ln2) times (ss + ...), as zH + zL.
+        let zH = 0.9617967009544373 * pH
+        let zL = -0.000000007028461650952758 * pH + pL * 0.9617966939259756 + dpL
+        let t = Float64(n)
+        t1 = zeroLo(((zH + zL) + dpH) + t)
+        t2 = zL - (((t1 - t) - dpH) - zH)
+    }
+    // y log2(|x|) = pH + pL, with y split into y1 + (y - y1).
+    let y1 = zeroLo(y)
+    let pL = (y - y1) * t1 + y * t2
+    let mut pH = y1 * t1
+    let z = pL + pH
+    let j = hiWord(z)
+    let i = Int32(loWord(z))
+    if j >= 1083179008 {
+        // z >= 1024
+        if ((j - 1083179008) | i) != 0 || pL + 0.00000000000000008008566259537294 > z - pH {
+            return sign * infinity()
+        }
+    } else if (j & 2147483647) >= 1083231232 {
+        // z <= -1075
+        if ((UInt32(j) - 3230714880) | UInt32(i)) != 0 || pL <= z - pH {
+            return sign * 0.0
+        }
+    }
+    // 2^(pH + pL) = 2^n 2^(pH + pL - n), with |pH + pL - n| <= 0.5.
+    let ij = j & 2147483647
+    let mut n: Int32 = 0
+    if ij > 1071644672 {
+        n = j + (1048576 >> ((ij >> 20) - 1022))
+        let e = ((n & 2147483647) >> 20) - 1023
+        let t = withHi(0.0, n & ~(1048575 >> e))
+        n = ((n & 1048575) | 1048576) >> (20 - e)
+        if j < 0 {
+            n = -n
+        }
+        pH = pH - t
+    }
+    let t = zeroLo(pL + pH)
+    let u = t * 0.6931471824645996
+    let v = (pL - (t - pH)) * 0.6931471805599453 - t * 0.000000001904654299957768
+    let zz = u + v
+    let w = v - (zz - u)
+    let tt = zz * zz
+    let p = 0.000000041381367970572385 * tt - 0.0000016533902205465252
+    let c = zz - tt * (0.16666666666666602 + tt * (-0.0027777777777015593 + tt * (0.00006613756321437934 + tt * p)))
+    let r = (zz * c) / (c - 2.0) - (w + zz * w)
+    let out = 1.0 - (r - zz)
+    let hj = hiWord(out) + (n << 20)
+    if (hj >> 20) <= 0 {
+        return sign * scalbn(out, n)
+    }
+    return sign * withHi(out, hj)
+}
+
+/// Tangent of `x` radians. Within 1 ulp at every finite `x`; an infinity or
+/// NaN gives NaN.
+export fn tan(x: Float64) -> Float64 {
+    let ix = hiWord(x) & 2147483647
+    if ix <= 1072243195 {
+        // |x| <= pi/4, and below 2^-27 tan(x) rounds to x.
+        if ix < 1044381696 {
+            return x
+        }
+        return tanKernel(x, 0.0, 0)
+    }
+    if ix >= 2146435072 {
+        return notANumber()
+    }
+    let q = reducePio2(x)
+    return tanKernel(q.hi, q.lo, q.n & 1)
+}
+
+/// The angle of the point (`x`, `y`) from the positive x axis, in radians
+/// within [-pi, pi]. Within 2 ulps. The signs of zeros and infinities pick
+/// the quadrant as C99 states: `atan2(0.0, -1.0)` is pi and
+/// `atan2(-0.0, -1.0)` is -pi. NaN in either gives NaN.
+export fn atan2(y: Float64, x: Float64) -> Float64 {
+    if x != x || y != y {
+        return x + y
+    }
+    let pi = 3.141592653589793
+    let piLo = 0.00000000000000012246467991473532
+    let mut ix = UInt32(floatBits(x) >> 32)
+    let lx = loWord(x)
+    let mut iy = UInt32(floatBits(y) >> 32)
+    let ly = loWord(y)
+    if ((ix - 1072693248) | lx) == 0 {
+        return atan(y)
+    }
+    // Twice the sign of x plus the sign of y.
+    let m = ((iy >> 31) & 1) | ((ix >> 30) & 2)
+    ix = ix & 2147483647
+    iy = iy & 2147483647
+    if (iy | ly) == 0 {
+        if m < 2 {
+            return y
+        }
+        return if m == 2 { pi } else { -pi }
+    }
+    if (ix | lx) == 0 {
+        return if (m & 1) != 0 { -pi / 2.0 } else { pi / 2.0 }
+    }
+    if ix == 2146435072 {
+        if iy == 2146435072 {
+            if m == 0 {
+                return pi / 4.0
+            }
+            if m == 1 {
+                return -pi / 4.0
+            }
+            return if m == 2 { 3.0 * pi / 4.0 } else { -3.0 * pi / 4.0 }
+        }
+        if m == 0 {
+            return 0.0
+        }
+        if m == 1 {
+            return -0.0
+        }
+        return if m == 2 { pi } else { -pi }
+    }
+    // |y / x| > 2^64
+    if ix + 67108864 < iy || iy == 2146435072 {
+        return if (m & 1) != 0 { -pi / 2.0 } else { pi / 2.0 }
+    }
+    // |y / x| < 2^-64 with x < 0 rounds to pi without the quotient.
+    let z = if (m & 2) != 0 && iy + 67108864 < ix { 0.0 } else { atan(absF(y / x)) }
+    if m == 0 {
+        return z
+    }
+    if m == 1 {
+        return -z
+    }
+    if m == 2 {
+        return pi - (z - piLo)
+    }
+    return (z - piLo) - pi
+}
+
+// The arctangent of `x`: atan2's kernel.
+fn atan(x0: Float64) -> Float64 {
+    let hx = hiWord(x0)
+    let ix = hx & 2147483647
+    // |x| >= 2^66 or NaN: pi/2 rounded, with the sign of x.
+    if ix >= 1141899264 {
+        if x0 != x0 {
+            return x0
+        }
+        return if hx < 0 { -1.5707963267948966 } else { 1.5707963267948966 }
+    }
+    // Reduce |x| against the nearest of 0.5, 1, 1.5 and infinity.
+    let mut x = x0
+    let mut id: Int64 = -1
+    if ix < 1071382528 {
+        if ix < 1044381696 {
+            return x0
+        }
+    } else {
+        x = absF(x0)
+        if ix < 1072037888 {
+            id = 0
+            x = (2.0 * x - 1.0) / (2.0 + x)
+        } else if ix < 1072889856 {
+            id = 1
+            x = (x - 1.0) / (x + 1.0)
+        } else if ix < 1073971200 {
+            id = 2
+            x = (x - 1.5) / (1.0 + 1.5 * x)
+        } else {
+            id = 3
+            x = -1.0 / x
+        }
+    }
+    let z = x * x
+    let w = z * z
+    let s1 = z * (0.3333333333333293 + w * (0.14285714272503466 + w * (0.09090887133436507 + w * (0.06661073137387531 + w * (0.049768779946159324 + w * 0.016285820115365782)))))
+    let s2 = w * (-0.19999999999876483 + w * (-0.11111110405462356 + w * (-0.0769187620504483 + w * (-0.058335701337905735 - w * 0.036531572744216916))))
+    if id < 0 {
+        return x - x * (s1 + s2)
+    }
+    let hi: Array<Float64, 4> = [0.4636476090008061, 0.7853981633974483, 0.982793723247329, 1.5707963267948966]
+    let lo: Array<Float64, 4> = [0.000000000000000022698777452961687, 0.00000000000000003061616997868383, 0.000000000000000013903311031230998, 0.00000000000000006123233995736766]
+    let r = hi[id] - (x * (s1 + s2) - lo[id] - x)
+    return if hx < 0 { -r } else { r }
+}
+
+// tan(x + y) for |x + y| <= pi/4 with |y| far below |x|, or -1 / tan(x + y)
+// when `odd` is 1.
+fn tanKernel(x0: Float64, y0: Float64, odd: Int32) -> Float64 {
+    let hx = hiWord(x0)
+    // |x| >= 0.6744: tan(pi/4 - x) keeps the polynomial short.
+    let big = (hx & 2147483647) >= 1072010280
+    let mut x = x0
+    let mut y = y0
+    if big {
+        if hx < 0 {
+            x = -x
+            y = -y
+        }
+        x = (0.7853981633974483 - x) + (0.00000000000000003061616997868383 - y)
+        y = 0.0
+    }
+    let z = x * x
+    let w = z * z
+    let r = 0.13333333333320124 + w * (0.021869488294859542 + w * (0.0035920791075913124 + w * (0.0005880412408202641 + w * (0.00007817944429395571 - w * 0.000018558637485527546))))
+    let v = z * (0.05396825397622605 + w * (0.0088632398235993 + w * (0.0014562094543252903 + w * (0.0002464631348184699 + w * (0.00007140724913826082 + w * 0.00002590730518636337)))))
+    let s = z * x
+    let rr = y + z * (s * (r + v) + y) + s * 0.3333333333333341
+    let ww = x + rr
+    if big {
+        let sg = 1.0 - 2.0 * Float64(odd)
+        let vv = sg - 2.0 * (x + (rr - ww * ww / (ww + sg)))
+        return if hx < 0 { -vv } else { vv }
+    }
+    if odd == 0 {
+        return ww
+    }
+    // -1 / ww to under 1 ulp: w0 + v2 is x + rr, and a0 the quotient's head.
+    let w0 = zeroLo(ww)
+    let v2 = rr - (w0 - x)
+    let a = -1.0 / ww
+    let a0 = zeroLo(a)
+    return a0 + a * (1.0 + a0 * w0 + a0 * v2)
+}
+
+// x = n pi/2 + hi + lo, with |hi + lo| a little over pi/4 at most and lo far
+// below hi.
+type Quadrant = { n: Int32, hi: Float64, lo: Float64 }
+
+// Reduces a finite `x` by pi/2. Below 2^20 pi/2 the multiple n is exact in a
+// `Float64` and pi/2 in three parts covers every cancellation; above it
+// `reducePio2Large` multiplies by 2/pi to 190 bits.
+fn reducePio2(x: Float64) -> Quadrant {
+    let ix = hiWord(x) & 2147483647
+    if ix >= 1094263291 {
+        return reducePio2Large(x)
+    }
+    // x 2/pi rounded to a whole number: adding 1.5 * 2^52 drops the fraction.
+    let toInt = 6755399441055744.0
+    let f = (x * 0.6366197723675814 + toInt) - toInt
+    let mut r = x - f * 1.5707963267341256
+    let mut w = f * 0.00000000006077100506506192
+    let mut y = r - w
+    let ex = ix >> 20
+    if ex - ((hiWord(y) >> 20) & 2047) > 16 {
+        // A large cancellation: the second part of pi/2, good to 118 bits.
+        let t = r
+        w = f * 0.00000000006077100506303966
+        r = t - w
+        w = f * 0.0000000000000000000020222662487959506 - ((t - r) - w)
+        y = r - w
+        if ex - ((hiWord(y) >> 20) & 2047) > 49 {
+            // The third part, good to 151 bits.
+            let t2 = r
+            w = f * 0.0000000000000000000020222662487111665
+            r = t2 - w
+            w = f * 0.000000000000000000000000000000084784276603689 - ((t2 - r) - w)
+            y = r - w
+        }
+    }
+    return Quadrant { n: Int32(f), hi: y, lo: (r - y) - w }
+}
+
+// Payne and Hanek's reduction of a finite |x| >= 2^20 pi/2. With
+// |x| = m 2^e, the bits of 2/pi worth a multiple of 4 against m drop out,
+// so a 192-bit window of them times the 53-bit m gives x 2/pi mod 4 to
+// 2^-137. No `Float64` comes closer than 2^-61 to a multiple of pi/2, so
+// the 190 fraction bits keep at least 120 significant ones.
+fn reducePio2Large(x: Float64) -> Quadrant {
+    // 2/pi in 32-bit limbs, most significant first, after two zero limbs
+    // that let the window start before the binary point.
+    let twoOverPi: Array<UInt64, 40> = [0, 0, 2734261102, 1313084713, 4230436817, 4113882560, 3680671129, 1011060801, 4266746795, 3736847713, 3072618042, 1112396512, 105459434, 164729372, 4263373596, 2972297022, 3900847605, 784024708, 3919343654, 3026157121, 965858873, 2203269620, 2625920907, 3187222587, 536385535, 3724908559, 4012839307, 1510632735, 1832287951, 667617719, 1330003814, 2657085997, 1965537991, 3957715323, 1023883767, 2320667370, 1811636145, 529358088, 1443049542, 4235946923]
+    let mask: UInt64 = 4294967295
+    let bits = floatBits(x)
+    let fraction: UInt64 = 4503599627370495
+    let m = (bits & fraction) | (fraction + 1)
+    // The window starts e + 62 bits into the padded table, and e >= -32.
+    let start = Int64((bits >> 52) & 2047) - 1013
+    let q = start / 32
+    let sh = UInt64(32 - start % 32)
+    let mut win: Array<UInt64, 6> = [0, 0, 0, 0, 0, 0]
+    let mut k = 0
+    while k < 6 {
+        win[k] = (((twoOverPi[q + k] << 32) | twoOverPi[q + k + 1]) >> sh) & mask
+        k = k + 1
+    }
+    // p = m win in 32-bit limbs, most significant first: 245 bits in 8.
+    let mh = m >> 32
+    let ml = m & mask
+    let mut p: Array<UInt64, 8> = [0, 0, 0, 0, 0, 0, 0, 0]
+    let mut carry: UInt64 = 0
+    let mut i = 5
+    while i >= 0 {
+        // win[i] ml lands at limb i + 2 and win[i] mh at i + 1, and each
+        // carry goes one limb up; every sum stays below 2^64.
+        let lowPart = win[i] * ml + p[i + 2]
+        p[i + 2] = lowPart & mask
+        let highPart = win[i] * mh + (lowPart >> 32) + carry
+        p[i + 1] = highPart & mask
+        carry = highPart >> 32
+        i = i - 1
+    }
+    // Bits 190 and 191 of p are x 2/pi mod 4; bits 0 to 189 its fraction.
+    let mut n = Int32((p[2] >> 30) & 3)
+    let mut g: Array<UInt64, 6> = [p[2] & 1073741823, p[3], p[4], p[5], p[6], p[7]]
+    let neg = ((p[2] >> 29) & 1) == 1
+    if neg {
+        // A fraction of a half or more rounds n up and leaves 2^190 - g.
+        n = n + 1
+        let mut borrow: UInt64 = 0
+        let mut b = 5
+        while b >= 0 {
+            let d = (mask + 1) - g[b] - borrow
+            g[b] = d & mask
+            borrow = 1 - (d >> 32)
+            b = b - 1
+        }
+        g[0] = g[0] & 1073741823
+    }
+    // g 2^-190 as hi + lo, summing the limbs from the top: g[0] weighs 2^-30.
+    let mut hi = 0.0
+    let mut lo = 0.0
+    let mut scale = 0.000000000931322574615478515625
+    let mut c = 0
+    while c < 6 {
+        let d = Float64(g[c]) * scale
+        let s = hi + d
+        lo = lo + ((hi - s) + d)
+        hi = s
+        scale = scale * 0.00000000023283064365386962890625
+        c = c + 1
+    }
+    // (hi + lo) pi/2, with hi times pi/2's head exact by Dekker's product.
+    let pio2Hi = 1.5707963267948966
+    let pio2Lo = 0.00000000000000006123233995736766
+    let prod = hi * pio2Hi
+    let split = 134217729.0
+    let ca = split * hi
+    let aH = ca - (ca - hi)
+    let aL = hi - aH
+    let cb = split * pio2Hi
+    let bH = cb - (cb - pio2Hi)
+    let bL = pio2Hi - bH
+    let err = ((aH * bH - prod) + aH * bL + aL * bH) + aL * bL
+    let tail = err + hi * pio2Lo + lo * pio2Hi
+    let y0 = prod + tail
+    let y1 = tail - (y0 - prod)
+    // A negative fraction, or a negative x, flips the remainder's sign.
+    let flip = neg != (x < 0.0)
+    let sgn = if flip { -1.0 } else { 1.0 }
+    let nn = if x < 0.0 { -n } else { n }
+    return Quadrant { n: nn, hi: sgn * y0, lo: sgn * y1 }
+}
+
+// The high word of `x`'s encoding, fdlibm's view: sign, exponent and the
+// top 20 fraction bits.
+fn hiWord(x: Float64) -> Int32 {
+    return Int32(floatBits(x) >> 32)
+}
+
+fn loWord(x: Float64) -> UInt32 {
+    return UInt32(floatBits(x))
+}
+
+// `x` with its low word cleared, so the product of two such is exact.
+fn zeroLo(x: Float64) -> Float64 {
+    let high: UInt64 = 18446744069414584320
+    return floatFromBits(floatBits(x) & high)
+}
+
+fn withHi(x: Float64, hi: Int32) -> Float64 {
+    let low: UInt64 = 4294967295
+    return floatFromBits((UInt64(UInt32(hi)) << 32) | (floatBits(x) & low))
+}
+
+fn absF(x: Float64) -> Float64 {
+    let magnitude: UInt64 = 9223372036854775807
+    return floatFromBits(floatBits(x) & magnitude)
+}
+
+fn infinity() -> Float64 {
+    return floatFromBits(9218868437227405312)
+}
+
+fn notANumber() -> Float64 {
+    return floatFromBits(9221120237041090560)
+}
+
+// `x * 2^n`, rounded once: a subnormal result is scaled in two steps.
+fn scalbn(x: Float64, n0: Int32) -> Float64 {
+    // 2^1023, and 2^-969 = 2^-1022 * 2^53.
+    let up = floatFromBits(9214364837600034816)
+    let down = floatFromBits(243194379878006784)
+    let mut y = x
+    let mut n = n0
+    if n > 1023 {
+        y = y * up
+        n = n - 1023
+        if n > 1023 {
+            y = y * up
+            n = n - 1023
+            if n > 1023 {
+                n = 1023
+            }
+        }
+    } else if n < -1022 {
+        y = y * down
+        n = n + 969
+        if n < -1022 {
+            y = y * down
+            n = n + 969
+            if n < -1022 {
+                n = -1022
+            }
+        }
+    }
+    return y * floatFromBits(UInt64(n + 1023) << 52)
+}
+
 test "sine hits the values the unit circle fixes" {
     assertEq(sin(0.0), 0.0)
     assert(sin(pi() / 6.0) > 0.4999999 && sin(pi() / 6.0) < 0.5000001)
@@ -94,12 +801,6 @@ test "sine stays in range far from the origin" {
     assert(sin(0.0 - 1.0) > 0.0 - 0.8415 && sin(0.0 - 1.0) < 0.0 - 0.8414)
 }
 
-test "floorF steps down on the negative side" {
-    assertEq(floorF(2.7), 2.0)
-    assertEq(floorF(0.0 - 2.7), 0.0 - 3.0)
-    assertEq(floorF(0.0 - 3.0), 0.0 - 3.0)
-}
-
 test "abs saturates at the minimum instead of wrapping negative" {
     assertEq(abs(5), 5)
     assertEq(abs(0 - 5), 5)
@@ -109,4 +810,197 @@ test "abs saturates at the minimum instead of wrapping negative" {
     let least = Int64(minBits)
     assertEq(abs(least), 9223372036854775807)
     assert(abs(least) > 0)
+}
+
+// How many `Float64`s lie between `a` and `b`, which are finite or equal.
+// Each encoding maps onto one increasing line, with both zeros at 2^63.
+fn ulpsApart(a: Float64, b: Float64) -> UInt64 {
+    let sign: UInt64 = 9223372036854775808
+    let ka = if floatBits(a) >= sign { sign - (floatBits(a) - sign) } else { floatBits(a) + sign }
+    let kb = if floatBits(b) >= sign { sign - (floatBits(b) - sign) } else { floatBits(b) + sign }
+    if ka > kb {
+        return ka - kb
+    }
+    return kb - ka
+}
+
+test "the rounding functions are exact and keep the sign of a zero" {
+    let negZero: UInt64 = 9223372036854775808
+    let inf = 1.0 / 0.0
+    let largest = floatFromBits(9218868437227405311)
+    let tiny = floatFromBits(1)
+    assertEq(trunc(2.7), 2.0)
+    assertEq(trunc(-2.7), -2.0)
+    assertEq(floatBits(trunc(-0.5)), negZero)
+    assertEq(floor(2.7), 2.0)
+    assertEq(floor(-2.7), -3.0)
+    assertEq(floor(-3.0), -3.0)
+    assertEq(floatBits(floor(-0.0)), negZero)
+    assertEq(floor(-tiny), -1.0)
+    assertEq(ceil(2.1), 3.0)
+    assertEq(ceil(-2.7), -2.0)
+    assertEq(floatBits(ceil(-0.5)), negZero)
+    assertEq(ceil(tiny), 1.0)
+    assertEq(round(2.5), 3.0)
+    assertEq(round(-2.5), -3.0)
+    assertEq(round(0.49999999999999994), 0.0)
+    assertEq(floatBits(round(-0.4)), negZero)
+    assertEq(round(4503599627370495.5), 4503599627370496.0)
+    assertEq(round(-4503599627370495.5), -4503599627370496.0)
+    assertEq(round(4503599627370497.0), 4503599627370497.0)
+    assertEq(trunc(largest), largest)
+    assertEq(floor(-largest), -largest)
+    assertEq(ceil(inf), inf)
+    assertEq(round(-inf), -inf)
+    let nan = 0.0 / 0.0
+    assert(trunc(nan) != trunc(nan))
+    assert(round(nan) != round(nan))
+}
+
+test "exp is within 1 ulp and saturates at its edges" {
+    let inf = 1.0 / 0.0
+    let largest = floatFromBits(9218868437227405311)
+    let tiny = floatFromBits(1)
+    assertEq(exp(0.0), 1.0)
+    assertEq(exp(-0.0), 1.0)
+    assertEq(exp(tiny), 1.0)
+    assertEq(exp(-tiny), 1.0)
+    assertEq(exp(largest), inf)
+    assertEq(exp(-largest), 0.0)
+    assertEq(exp(inf), inf)
+    assertEq(exp(-inf), 0.0)
+    assert(exp(0.0 / 0.0) != exp(0.0 / 0.0))
+    // The largest argument with a finite result, and the smallest with a
+    // nonzero one: a subnormal.
+    assert(ulpsApart(exp(709.782712893384), floatFromBits(9218868437227405098)) <= 1)
+    assert(ulpsApart(exp(-745.1332191019411), tiny) <= 1)
+    assert(ulpsApart(exp(-708.5), floatFromBits(4060456990316460)) <= 1)
+    assert(ulpsApart(exp(-700.5), floatFromBits(55449777393420802)) <= 1)
+    assert(ulpsApart(exp(-20.25), floatFromBits(4475333236920666683)) <= 1)
+    assert(ulpsApart(exp(-1.0), 0.36787944117144233) <= 1)
+    assert(ulpsApart(exp(-0.001), 0.999000499833375) <= 1)
+    assert(ulpsApart(exp(0.3), 1.3498588075760032) <= 1)
+    assert(ulpsApart(exp(1.0), 2.718281828459045) <= 1)
+    assert(ulpsApart(exp(2.5), 12.182493960703473) <= 1)
+    assert(ulpsApart(exp(10.0), 22026.465794806718) <= 1)
+    assert(ulpsApart(exp(88.7), floatFromBits(5183439786081234524)) <= 1)
+    assert(ulpsApart(exp(700.5), floatFromBits(9158177991636768450)) <= 1)
+}
+
+test "log is within 1 ulp, subnormals included" {
+    let inf = 1.0 / 0.0
+    let largest = floatFromBits(9218868437227405311)
+    assertEq(log(1.0), 0.0)
+    assertEq(log(0.0), -inf)
+    assertEq(log(-0.0), -inf)
+    assertEq(log(inf), inf)
+    assert(log(-1.0) != log(-1.0))
+    assert(log(-inf) != log(-inf))
+    assert(log(0.0 / 0.0) != log(0.0 / 0.0))
+    assert(ulpsApart(log(largest), 709.782712893384) <= 1)
+    assert(ulpsApart(log(floatFromBits(1)), -744.4400719213812) <= 1)
+    assert(ulpsApart(log(floatFromBits(4503599627370496)), -708.3964185322641) <= 1)
+    assert(ulpsApart(log(floatFromBits(118622047889322841)), -690.7755278982137) <= 1)
+    assert(ulpsApart(log(0.001), -6.907755278982137) <= 1)
+    assert(ulpsApart(log(0.5), -0.6931471805599453) <= 1)
+    assert(ulpsApart(log(0.9999), -0.00010000500033334732) <= 1)
+    assert(ulpsApart(log(1.0001), 0.00009999500033329732) <= 1)
+    assert(ulpsApart(log(2.0), 0.6931471805599453) <= 1)
+    assert(ulpsApart(log(10.0), 2.302585092994046) <= 1)
+    assert(ulpsApart(log(floatFromBits(6103021453049119613)), 230.25850929940458) <= 1)
+    assert(ulpsApart(log(floatFromBits(9094988921128908188)), 690.7755278982137) <= 1)
+    assert(ulpsApart(log(floatFromBits(70840788657559)), -712.5486158596588) <= 1)
+}
+
+test "pow is within 1 ulp and exact on whole results" {
+    let inf = 1.0 / 0.0
+    let nan = 0.0 / 0.0
+    let negZero: UInt64 = 9223372036854775808
+    let largest = floatFromBits(9218868437227405311)
+    assertEq(pow(nan, 0.0), 1.0)
+    assertEq(pow(1.0, nan), 1.0)
+    assert(pow(nan, 1.0) != pow(nan, 1.0))
+    assert(pow(-8.0, 1.0 / 3.0) != pow(-8.0, 1.0 / 3.0))
+    assertEq(pow(-1.0, inf), 1.0)
+    assertEq(pow(0.5, inf), 0.0)
+    assertEq(pow(1.5, -inf), 0.0)
+    assertEq(pow(0.0, -1.0), inf)
+    assertEq(pow(-0.0, -1.0), -inf)
+    assertEq(floatBits(pow(-0.0, 3.0)), negZero)
+    assertEq(pow(inf, -1.0), 0.0)
+    assertEq(pow(-inf, 3.0), -inf)
+    assertEq(pow(2.0, 1024.0), inf)
+    assertEq(pow(2.0, -1074.0), floatFromBits(1))
+    assertEq(pow(2.0, -1076.0), 0.0)
+    assertEq(pow(largest, 1.0), largest)
+    assertEq(pow(-2.0, 3.0), -8.0)
+    assertEq(pow(10.0, 22.0), 10000000000000000000000.0)
+    assertEq(pow(3.0, 33.0), 5559060566555523.0)
+    assert(ulpsApart(pow(largest, 0.5), floatFromBits(6913025428013711359)) <= 1)
+    assert(ulpsApart(pow(2.0, 0.5), 1.4142135623730951) <= 1)
+    assert(ulpsApart(pow(2.5, 3.7), 29.67413253642086) <= 1)
+    assert(ulpsApart(pow(10.0, -3.0), 0.001) <= 1)
+    assert(ulpsApart(pow(0.9, 1000.0), floatFromBits(3922615982779712321)) <= 1)
+    assert(ulpsApart(pow(1.0000001, 10000000.0), 2.7182816941320818) <= 1)
+    assert(ulpsApart(pow(7.0, -2.5), 0.007713560673657699) <= 1)
+    assert(ulpsApart(pow(-3.0, 5.0), -243.0) <= 1)
+    assert(ulpsApart(pow(-0.5, -7.0), -128.0) <= 1)
+    assert(ulpsApart(pow(123.456, 7.89), floatFromBits(4853815956115198930)) <= 1)
+    assert(ulpsApart(pow(floatFromBits(4457293557087583675), 0.3), 0.0010000000000000002) <= 1)
+}
+
+test "tan is within 1 ulp at any finite argument" {
+    let inf = 1.0 / 0.0
+    let negZero: UInt64 = 9223372036854775808
+    assertEq(tan(0.0), 0.0)
+    assertEq(floatBits(tan(-0.0)), negZero)
+    assertEq(tan(floatFromBits(1)), floatFromBits(1))
+    assert(tan(inf) != tan(inf))
+    assert(tan(0.0 / 0.0) != tan(0.0 / 0.0))
+    assert(ulpsApart(tan(-1.0), -1.5574077246549023) <= 1)
+    // pi/2 rounded, the largest finite value, 10^22, and the Float64 nearest a
+    // multiple of pi/2.
+    assert(ulpsApart(tan(1.5707963267948966), 16331239353195370.0) <= 1)
+    assert(ulpsApart(tan(floatFromBits(9218868437227405311)), -0.004962015874444895) <= 1)
+    assert(ulpsApart(tan(10000000000000000000000.0), -1.6287782256068988) <= 1)
+    assert(ulpsApart(tan(floatFromBits(8432616859780293119)), floatFromBits(14104600760957752886)) <= 1)
+    assert(ulpsApart(tan(floatFromBits(4472406533629990549)), floatFromBits(4472406533629990549)) <= 1)
+    assert(ulpsApart(tan(0.5), 0.5463024898437905) <= 1)
+    assert(ulpsApart(tan(0.785), 0.9992039901050427) <= 1)
+    assert(ulpsApart(tan(1.0), 1.5574077246549023) <= 1)
+    assert(ulpsApart(tan(1.57), 1255.7655915007897) <= 1)
+    assert(ulpsApart(tan(3.0), -0.1425465430742778) <= 1)
+    assert(ulpsApart(tan(-100.0), 0.5872139151569291) <= 1)
+    assert(ulpsApart(tan(12345.678), -0.9914971407432149) <= 1)
+    assert(ulpsApart(tan(10000000000.0), -0.5583496378112418) <= 1)
+    assert(ulpsApart(tan(floatFromBits(9094988921128908188)), 1.4214488238747245) <= 1)
+}
+
+test "atan2 is within 2 ulps and takes the quadrant from the signs" {
+    let inf = 1.0 / 0.0
+    let negZero: UInt64 = 9223372036854775808
+    let pi = 3.141592653589793
+    assertEq(atan2(0.0, 1.0), 0.0)
+    assertEq(floatBits(atan2(-0.0, 1.0)), negZero)
+    assertEq(atan2(0.0, -1.0), pi)
+    assertEq(atan2(-0.0, -1.0), -pi)
+    assertEq(atan2(1.0, 0.0), pi / 2.0)
+    assertEq(atan2(-1.0, -0.0), -pi / 2.0)
+    assertEq(atan2(inf, inf), pi / 4.0)
+    assertEq(atan2(-inf, -inf), -3.0 * pi / 4.0)
+    assertEq(atan2(1.0, inf), 0.0)
+    assertEq(atan2(1.0, -inf), pi)
+    assertEq(atan2(floatFromBits(9218868437227405311), floatFromBits(1)), pi / 2.0)
+    assertEq(atan2(floatFromBits(1), floatFromBits(9218868437227405311)), 0.0)
+    assert(atan2(0.0 / 0.0, 1.0) != atan2(0.0 / 0.0, 1.0))
+    assert(ulpsApart(atan2(1.0, 2.0), 0.4636476090008061) <= 2)
+    assert(ulpsApart(atan2(-1.0, 2.0), -0.4636476090008061) <= 2)
+    assert(ulpsApart(atan2(1.0, -2.0), 2.677945044588987) <= 2)
+    assert(ulpsApart(atan2(-1.0, -2.0), -2.677945044588987) <= 2)
+    assert(ulpsApart(atan2(3.0, floatFromBits(4457293557087583675)), 1.5707963267615632) <= 2)
+    assert(ulpsApart(atan2(0.5, 0.5), 0.7853981633974483) <= 2)
+    assert(ulpsApart(atan2(100.0, -0.01), 1.5708963267945633) <= 2)
+    assert(ulpsApart(atan2(-7.0, 3.0), -1.1659045405098132) <= 2)
+    assert(ulpsApart(atan2(floatFromBits(118622047889322841), floatFromBits(268231017195544690)), floatFromBits(4457293557087583674)) <= 2)
+    assert(ulpsApart(atan2(2.0, floatFromBits(4918767769633086136)), floatFromBits(4299526033431425064)) <= 2)
 }

@@ -1,0 +1,26 @@
+// The bit counts at both widths, signed and unsigned, on zero, one, the
+// extremes and a mixed pattern.
+
+fn main() -> Int64 {
+    let z32: UInt32 = 0
+    let one32: UInt32 = 1
+    let max32: UInt32 = 4294967295
+    let mix32: UInt32 = 2882400000
+    let neg32: Int32 = -2147483648
+    print("\{z32.clz()} \{z32.ctz()} \{z32.popcount()}") // 32 32 0
+    print("\{one32.clz()} \{one32.ctz()} \{one32.popcount()}") // 31 0 1
+    print("\{max32.clz()} \{max32.ctz()} \{max32.popcount()}") // 0 0 32
+    print("\{mix32.clz()} \{mix32.ctz()} \{mix32.popcount()}") // 0 8 17
+    print("\{neg32.clz()} \{neg32.ctz()} \{neg32.popcount()}") // 0 31 1
+    let z64: UInt64 = 0
+    let max64: UInt64 = 18446744073709551615
+    let mix64: UInt64 = 1311768467463790320
+    let n: Int64 = -1
+    let six: Int64 = 6
+    print("\{z64.clz()} \{z64.ctz()} \{z64.popcount()}") // 64 64 0
+    print("\{max64.clz()} \{max64.ctz()} \{max64.popcount()}") // 0 0 64
+    print("\{mix64.clz()} \{mix64.ctz()} \{mix64.popcount()}") // 3 4 32
+    print("\{n.clz()} \{n.ctz()} \{n.popcount()}") // 0 0 64
+    print("\{six.clz()} \{six.ctz()} \{six.popcount()}") // 61 1 2
+    return 0
+}
