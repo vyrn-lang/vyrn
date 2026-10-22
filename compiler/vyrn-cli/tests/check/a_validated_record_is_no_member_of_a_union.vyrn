@@ -1,0 +1,8 @@
+type Port = Int64 where value >= 1 && value <= 65535
+type Age = Int64 where value >= 18 && value <= 150
+type Span = { lo: Int64, hi: Int64 } where lo <= hi
+
+fn main() -> Int64 {
+    let xs: Array<Port | Span> = []
+    return 0
+}

@@ -320,6 +320,10 @@ rules! {
     EnumWhere {} "an enum type cannot have a `where` clause";
     EnumEmpty { name } "enum `{name}` has no variants";
     AliasWhere { noun } "a `{noun}` alias cannot have a `where` clause";
+    UnionMember { m }
+        "`{m}` cannot be a member of a union: each member is a validated scalar type, or a union of them";
+    UnionBases { a, ab, b, bb }
+        "a union's members share one base, but `{a}` is over `{ab}` and `{b}` over `{bb}`";
     RecordWhere {} "a record type cannot have a `where` clause";
     NotRecord { name } "`{name}` does not resolve to a record";
     ValidatedBaseNotScalar { name }
@@ -534,6 +538,8 @@ rules! {
     ConversionType { name, src } "`{name}(..)` converts a number, found {src}";
     TargetAsTypeArg { name, was, suffix }
         "`{name}` names its target as a type argument — write `{name}<{was}>({suffix})`";
+    SchemaOfUnion { t }
+        "`schemaOf` describes one declaration, and `{t}` is a union of several: ask it of each member";
     ContractOfArity { got } "`contractOf` takes 1 argument (a contract name), got {got}";
     ContractOfUnknown { cn }
         "`contractOf` needs a declared contract name; \
@@ -1186,6 +1192,7 @@ rules! {
         scalars";
     FieldOnNonRecord { field, other } "cannot access field `{field}` on non-record type {other}";
     TryConstructNotScalar { name } "`{name}?(..)` is only for validated/nominal scalar types";
+    UnionConstruct { name } "`{name}` is a union, which has no constructor: construct one of its members";
     TryConstructArity { name, got } "`{name}?` takes 1 argument, got {got}";
     ConstructArity { name, got } "`{name}` construction takes 1 argument, got {got}";
     ConstructFrom { name, base, aty } "`{name}` is built from {base}, but the argument is {aty}";

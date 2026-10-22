@@ -523,6 +523,13 @@ impl ArgWalk<'_> {
         self.at.insert(key.clone(), (i, ty.clone()));
         if let Some(decl) = self.refined(ty) {
             let base = self.node(&decl.base)?;
+            // A union's value holds where one member's predicate does.
+            if !decl.members.is_empty() {
+                let ms = decl.members.iter().map(|m| member(spell(m), Vec::new()));
+                let why = crate::trap::validation_of(&decl);
+                self.nodes[i] = type_node("union", &key, ty, vec![base], ms.collect(), why);
+                return Some(i);
+            }
             let binds = crate::types::predicate_binds(&decl)
                 .into_iter()
                 .filter(|(_, _, field)| field.is_some())

@@ -1,0 +1,8 @@
+type Port = Int64 where value >= 1 && value <= 65535
+type Age = Int64 where value >= 18 && value <= 150
+type Open = Port | Age
+
+fn main() -> Int64 {
+    let x = Open(20)
+    return x
+}

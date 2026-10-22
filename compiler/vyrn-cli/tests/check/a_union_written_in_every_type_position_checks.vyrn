@@ -1,0 +1,20 @@
+type Port = Int64 where value >= 1 && value <= 65535
+type Age = Int64 where value >= 18 && value <= 150
+
+type Open = Port | Age
+type Listener = { at: Port | Age, backlog: Array<Port | Age> }
+
+fn widen(x: Open) -> Int64 {
+    return x
+}
+
+fn pick(fast: Bool) -> Port | Age {
+    return if fast { Port(8080) } else { Age(30) }
+}
+
+fn main() -> Int64 {
+    let l = Listener { at: pick(true), backlog: [Port(1), Age(20)] }
+    let o: Option<Port | Age> = Some(Port(5))
+    let raw: Port | Age = 20
+    return widen(l.at) + raw
+}

@@ -1,0 +1,8 @@
+type Port = Int64 where value >= 1 && value <= 65535
+type Age = Int64 where value >= 18 && value <= 150
+
+fn main() -> Int64 {
+    let s = schemaOf<Port | Age>()
+    print(s.name)
+    return 0
+}

@@ -189,6 +189,7 @@ threeengines	clean
 tree	other
 tryplace	clean
 twdemo	clean
+unions_fail	other
 utility	clean
 validate	clean
 validate_fail	other

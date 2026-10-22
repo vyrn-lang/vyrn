@@ -469,6 +469,11 @@ pub struct TypeDecl {
     pub base: Type,
     /// A predicate over the variable `value`.
     pub predicate: Option<Expr>,
+    /// The members of the union this declaration names, each a validated
+    /// scalar type, in source order; empty for any other declaration. Only
+    /// `ctor::name_unions` fills it, before the checker, with `base` the
+    /// members' base and `predicate` the `||` of their rules.
+    pub members: Vec<Type>,
     pub line: usize,
 }
 
@@ -915,6 +920,11 @@ pub enum Type {
     Unit,
     /// Resolved against the program's [`TypeDecl`]s.
     Named(String),
+    /// `A | B`: a value of any member's type, so the base with the `||` of
+    /// the members' rules. The checker keeps it canonical (`Checker::union`):
+    /// each member a validated scalar type over one base, listed once, in
+    /// source order.
+    Union(Vec<Type>),
     /// Ordered named fields. Compatibility is by shape, not name.
     Record(Vec<Field>),
     /// `Omit<T, f, ...>`: record `T` without the named fields.
@@ -997,7 +1007,7 @@ macro_rules! children {
             Type::Merge(a, b) | Type::Map(a, b) => {
                 ($($ref_)+ [], $($ref_)+ [], $($ref_)+ [], [Some($($ref_)+ **a), Some($($ref_)+ **b)])
             }
-            Type::App(_, args) => (args, $($ref_)+ [], $($ref_)+ [], [None, None]),
+            Type::App(_, args) | Type::Union(args) => (args, $($ref_)+ [], $($ref_)+ [], [None, None]),
             Type::Record(fs) => ($($ref_)+ [], fs, $($ref_)+ [], [None, None]),
             Type::Enum(vs) => ($($ref_)+ [], $($ref_)+ [], vs, [None, None]),
             Type::Fn(params, ret) => (params, $($ref_)+ [], $($ref_)+ [], [Some($($ref_)+ **ret), None]),
@@ -1141,6 +1151,7 @@ impl Type {
         "Str",
         "Unit",
         "Named",
+        "Union",
         "Record",
         "Omit",
         "Pick",
@@ -1179,6 +1190,7 @@ impl Type {
             Type::Str => "Str",
             Type::Unit => "Unit",
             Type::Named(_) => "Named",
+            Type::Union(_) => "Union",
             Type::Record(_) => "Record",
             Type::Omit(..) => "Omit",
             Type::Pick(..) => "Pick",
@@ -1243,10 +1255,11 @@ impl<'a> std::fmt::Display for Said<'a> {
             Type::Bool => write!(f, "Bool"),
             Type::Str => write!(f, "String"),
             Type::Unit => write!(f, "Unit"),
-            Type::Named(n) => match crate::types::union_members(self.0) {
-                Some(ms) => write!(f, "{}", ms.map(name).collect::<Vec<_>>().join(" | ")),
-                None => write!(f, "{}", name(n)),
-            },
+            Type::Named(n) => write!(f, "{}", name(n)),
+            Type::Union(ms) => {
+                let ms: Vec<String> = ms.iter().map(|m| say(m).to_string()).collect();
+                write!(f, "{}", ms.join(" | "))
+            }
             Type::Param(n) => write!(f, "{}", written_param(n)),
             Type::Record(fields) => {
                 write!(f, "{{ ")?;
@@ -1761,11 +1774,11 @@ impl Pattern {
             .collect()
     }
 
-    pub fn binders(&self) -> Vec<&Binder> {
+    pub fn binders(&self) -> &[Binder] {
         match self {
-            Pattern::Success(b) | Pattern::Failure(b) => vec![b],
-            Pattern::Variant(_, binds) => binds.iter().collect(),
-            Pattern::Other => Vec::new(),
+            Pattern::Success(b) | Pattern::Failure(b) => std::slice::from_ref(b),
+            Pattern::Variant(_, binds) => binds,
+            Pattern::Other => &[],
         }
     }
 

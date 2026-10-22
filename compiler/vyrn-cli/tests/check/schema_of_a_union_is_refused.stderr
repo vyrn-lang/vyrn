@@ -1,0 +1,1 @@
+schema_of_a_union_is_refused.vyrn:5:0: `schemaOf` describes one declaration, and `Port | Age` is a union of several: ask it of each member

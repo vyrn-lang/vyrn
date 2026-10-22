@@ -222,11 +222,15 @@ type User = {
 - An element of an array field the rule reads only as `.length` is assigned in place with no check: `c.xs[i] = v` keeps every length. A store into a field of module state, or into a field of a nested record with its own rule, is refused; rebuild the record.
 - A validated value decays to its base type, so a `Port` is usable as an `Int64`.
 - Branches of an `if` or arms of a `match` of different validated scalar types over one base join to their union. `if fast { Port(8080) } else { Age(30) }` is a `Port | Age`: an `Int64` where `Port`'s rule or `Age`'s holds. Each branch proved its own side, so the join adds no check.
-- A union lists each member once, in source order, and a union of unions flattens. `Port | Int64` is `Int64`. A union decays to its base, and where a `Port` is required it is checked at the boundary, as an `Age` is. A union has no spelling and no constructor, a raw value never becomes one, and a `let mut` binding of one holds its base. Validated records and arrays, and types over different bases, do not join.
+- A union is written `Port | Age` in any type position: an annotation, a parameter, a return, a record field, a type argument and an alias (`type Open = Port | Age`). `|` binds loosest in a type, so `Option<Port | Age>` holds a union and `fn() -> Port | Age` returns one.
+- Each member is a validated scalar type, or a union of them, over one base. A record, an array, an enum, a type parameter, a generic validated type and a member over another base are refused, each with one sentence. A union lists each member once, in source order, and a union of unions flattens. A member equal to the base absorbs the rest, so `Port | Int64` is `Int64`, and a union of one member is that member. Validated records and arrays, and types over different bases, do not join.
+- A written union is a validated type whose rule is the `||` of its members' rules. Every boundary checks it, and a raw base value that satisfies no member traps with ``validation failed for `Port | Age` ``. A value of a member type, or of a union of its members, fits with no check, and a constant or an interpolation proven in one member costs nothing. A union decays to its base, and where a `Port` is required it is checked at the boundary, as an `Age` is.
+- A union has no name of its own, so it has no constructor and no `?` form. An alias of one is transparent: `Open` and `Port | Age` assign to each other. A `where` over a union is refused, as over any non-scalar base.
+- A join decays to its base in every pass after the checker. So where a join meets a written union the boundary check runs, and a `let mut` binding of a join holds its base.
 - An alias without `where` is transparent: `type Id = Int64` names `Int64`, and each value assigns to the other. An alias has no constructor. A distinct type is a validated type, or a generic record applied to another argument (see Records). A record with one field is not distinct: it fits wherever a record with that one field is wanted.
 - A `String` type whose regular expression denotes a finite language is a finite string type. An interpolation whose holes are all finite types has a finite type too, and assigning it to a validated `String` type is proven by automaton containment at compile time, or refused with the key that escapes.
 
-`schemaOf<T>()` reads a validated type's declaration at compile time and answers a `Schema` record: name, base type, `///` doc, bounds, `multipleOf`, length bounds and pattern. `jsonSchema<T>()` writes the JSON Schema document for any type. Neither is runtime reflection: the compiler computes the answer, and types are erased before the program runs.
+`schemaOf<T>()` reads a validated type's declaration at compile time and answers a `Schema` record: name, base type, `///` doc, bounds, `multipleOf`, length bounds and pattern. `jsonSchema<T>()` writes the JSON Schema document for any type, and a union's as the `anyOf` of its members' schemas. `schemaOf` of a union is refused, because one `Schema` describes one declaration. Neither is runtime reflection: the compiler computes the answer, and types are erased before the program runs.
 
 ### Function types
 
@@ -568,7 +572,7 @@ These builtins need no import. Paths are relative to the working directory.
 | `renameFile(a, b)`, `fsyncFile(p)` | `Result<Bool, String>`. |
 | `listDir(p)`, `listDirKinds(p)` | `Result<Array<String>, String>`; the second marks a directory with a trailing `/`. |
 | `toJson(x)` | The canonical JSON `String`: fields in declaration order, no whitespace, a `None` field omitted. |
-| `fromJson<T>(s)` | `Validation<T>`. Runs every `where` clause, ignores unknown fields, and reports every problem with its path. |
+| `fromJson<T>(s)` | `Validation<T>`. Runs every `where` clause, ignores unknown fields, and reports every problem with its path. A union decodes its base and holds where one member's rule does; its issue names the union. |
 
 `save(path, value)`, `load(T, path)` and `loadOr` persist a typed value atomically through `std/storage`; `load` answers `Missing`, `Corrupt(issues)` or `Loaded(value)`.
 

@@ -1,0 +1,7 @@
+type Port = Int64 where value >= 1 && value <= 65535
+type Age = Int64 where value >= 18 && value <= 150
+type Grown = Port | Age where value > 20
+
+fn main() -> Int64 {
+    return 0
+}

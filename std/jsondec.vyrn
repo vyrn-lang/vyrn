@@ -472,16 +472,24 @@ gen fn expectLine(kind: String, what: String) -> String {
 /// value; each part's issues are already recorded.
 gen fn jsonDecoderBody(t: TypeArg, n: TypeNode) -> String {
     let out = "    let mut out: Array<" + n.spelling + "> = []\n"
-    // Decode the base, then run the declaration's predicate. The push into
-    // `Array<T>` is the construction, and it holds for a record base too.
-    if n.kind == "where" {
+    // Decode the base, then run the declaration's predicate, or a union's
+    // members' predicates until one holds. The push into `Array<T>` is the
+    // construction, and it holds for a record base too.
+    if n.kind == "where" || n.kind == "union" {
         let mut binds = ""
+        let mut holds = ""
         for m in n.members {
-            binds = binds + (if binds == "" { "" } else { ", " }) + "b." + m.name
+            if n.kind == "union" {
+                holds = holds + (if holds == "" { "" } else { " || " }) + "VyrnWp_" + m.name + "(b)"
+            } else {
+                binds = binds + (if binds == "" { "" } else { ", " }) + "b." + m.name
+            }
         }
-        let args = if binds == "" { "b" } else { binds }
+        if n.kind == "where" {
+            holds = "VyrnWp_" + n.spelling + "(" + (if binds == "" { "b" } else { binds }) + ")"
+        }
         let base = "    for b in d" + t.nodes[n.args[0]].name + "(p, path, seg, idx, iss) {\n"
-        let test = "        if VyrnWp_" + n.spelling + "(" + args + ") {\n            out.push(b)\n"
+        let test = "        if " + holds + " {\n            out.push(b)\n"
         let fail = "        } else {\n            VyrnRd_pushValidate(iss, VyrnRd_pathAt(path, seg, idx), \"" + n.predicate + "\")\n        }\n    }\n"
         return out + base + test + fail + "    return out\n"
     }

@@ -288,6 +288,7 @@ impl Owned {
             | Type::Mask64x2
             | Type::Bool
             | Type::Unit
+            | Type::Union(_)
             | Type::ConstInt(_)
             | Type::Logger
             | Type::Never
@@ -612,6 +613,7 @@ mod tests {
                 doc: None,
                 type_params: vec![],
                 predicate: None,
+                members: Vec::new(),
                 line: 1,
             },
         );

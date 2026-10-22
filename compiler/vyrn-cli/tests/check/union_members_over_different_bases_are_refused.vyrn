@@ -1,0 +1,11 @@
+type Port = Int64 where value >= 1 && value <= 65535
+type Age = Int64 where value >= 18 && value <= 150
+type Tiny = Int32 where value < 10
+
+fn f() -> Port | Tiny {
+    return Port(3)
+}
+
+fn main() -> Int64 {
+    return 0
+}

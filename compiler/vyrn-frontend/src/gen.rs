@@ -649,10 +649,12 @@ pub fn derive(
                     s.ty
                 )));
             };
-            let got = crate::ast::Type::Fn(
+            let mut got = crate::ast::Type::Fn(
                 f.params.iter().map(|p| p.ty.clone()).collect(),
                 Box::new(f.ret.clone()),
             );
+            // Generated code spells a named union as written.
+            crate::ctor::declared_unions(&mut got, &types);
             if got != s.entry {
                 let rule = crate::rules::rule!(DeriveEntryMismatch, g, got, want = s.entry);
                 return Err(Diagnostic::refusal(s.line, 0, "check", rule));

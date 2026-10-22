@@ -1,0 +1,55 @@
+// A union of validated types written in source: the base, where one member's rule holds.
+
+type Port = Int64 where value >= 1 && value <= 65535
+type Age = Int64 where value >= 18 && value <= 150
+type Open = Port | Age
+
+type Slug = String where value =~ "[a-z]+"
+type Digits = String where value =~ "[0-9]+"
+
+type Listener = { at: Port | Age, backlog: Array<Port | Age> }
+
+fn pick(fast: Bool) -> Port | Age {
+    return if fast { Port(8080) } else { Age(30) }
+}
+
+fn widen(x: Open) -> Int64 {
+    return x + 1
+}
+
+fn checked(n: Int64) -> Port | Age {
+    let x: Port | Age = n
+    return x
+}
+
+fn key(k: Slug | Digits) -> String {
+    return "key \{k}"
+}
+
+fn main() -> Int64 {
+    let l = Listener { at: pick(true), backlog: [Port(1), Age(20), pick(false)] }
+    print(widen(l.at))
+    for b in l.backlog {
+        print(b)
+    }
+    let maybe: Option<Port | Age> = Some(Age(40))
+    match maybe {
+        Some(v) => print(v),
+        None => print(0),
+    }
+    print(checked(70000 - 69999))
+    print(key("abc"))
+    print(key("42"))
+    print(jsonSchema<Listener>())
+    for doc in ["{\"at\": 20, \"backlog\": [8080]}", "{\"at\": 70000, \"backlog\": [0]}"] {
+        match fromJson<Listener>(doc) {
+            Valid(v) => print(v.at),
+            Invalid(issues) => {
+                for i in issues {
+                    print("\{i.path}: \{i.message}")
+                }
+            }
+        }
+    }
+    return 0
+}

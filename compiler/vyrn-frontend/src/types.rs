@@ -612,8 +612,8 @@ struct SchemaCx<'a> {
 }
 
 /// The JSON Schema object for a type. A named type renders as a `$ref` into
-/// [`SchemaCx::defs`], except a synthetic refinement helper (`User.age`),
-/// which stays inline. [`crate::codec::wire`] decides the shape; this only
+/// [`SchemaCx::defs`], except a synthetic refinement helper (`User.age`) and
+/// a union `ctor::name_unions` declared, which stay inline. [`crate::codec::wire`] decides the shape; this only
 /// spells it.
 fn type_schema(ty: &Type, cx: &mut SchemaCx) -> String {
     match ty {
@@ -622,7 +622,8 @@ fn type_schema(ty: &Type, cx: &mut SchemaCx) -> String {
                 return "{\"$ref\":\"#\"}".to_string();
             }
             let types = cx.types;
-            if is_synthetic(n) {
+            let unnamed = |d: &TypeDecl| d.line == 0 && !d.members.is_empty();
+            if is_synthetic(n) || types.decl(n).is_some_and(unnamed) {
                 return match types.decl(n) {
                     Some(d) => named_schema(d, cx),
                     None => "{}".to_string(),
@@ -760,6 +761,10 @@ fn intn_schema(bits: u8, signed: bool, extra: &[(String, String)]) -> String {
 /// The schema for a named declaration: a validated scalar carries its `where`
 /// constraints; anything else defers to its base.
 fn named_schema(decl: &TypeDecl, cx: &mut SchemaCx) -> String {
+    if !decl.members.is_empty() {
+        let ms: Vec<String> = decl.members.iter().map(|m| type_schema(m, cx)).collect();
+        return format!("{{\"anyOf\":[{}]}}", ms.join(","));
+    }
     let pred = decl.predicate.as_ref();
     match &decl.base {
         Type::Int => scalar_with_constraints("integer", pred),
@@ -1226,24 +1231,94 @@ pub fn decl_map(p: &crate::ast::Program) -> HashMap<String, TypeDecl> {
         .collect()
 }
 
-/// The member names of a union: the anonymous validated type that joins
-/// branches of different validated scalar types over one base
-/// (`Checker::union`). Its name is its members' names joined by ` | `, in
-/// source order, each once; a declared name holds no space. Its rule is the
-/// `||` of its members' rules, and no value is checked against it: each
-/// branch was checked against its own member.
-pub fn union_members(ty: &Type) -> Option<std::str::Split<'_, &'static str>> {
+/// The members of `ty` if it is a union: a [`Type::Union`], or the name of a
+/// declaration of one ([`TypeDecl::members`]), or of an alias
+/// `type Open = Port | Age` that `ctor::name_unions` has not made one yet.
+pub fn union_of<'a>(ty: &'a Type, types: &'a dyn Decls) -> Option<&'a [Type]> {
     match ty {
-        Type::Named(n) if n.contains(" | ") => Some(n.split(" | ")),
+        Type::Union(ms) => Some(ms),
+        Type::Named(n) => match types.decl(n)? {
+            d if !d.members.is_empty() => Some(&d.members),
+            TypeDecl {
+                base: Type::Union(ms),
+                predicate: None,
+                ..
+            } => Some(ms),
+            _ => None,
+        },
         _ => None,
     }
+}
+
+/// Why a list of types forms no union ([`canonical_union`]).
+#[derive(Debug)]
+pub enum UnionFault {
+    /// A member that is neither a validated scalar type that takes no type
+    /// parameter, nor a union of them, nor the base.
+    Member(Type),
+    /// Two members over different bases: each member, then its base.
+    Bases(Type, Type, Type, Type),
+}
+
+/// The union of `ms`: each member a validated scalar type that takes no type
+/// parameter, listed once, in source order, with a union's members in its
+/// place. A member equal to the base absorbs the rest, so `Port | Int64` is
+/// `Int64`. Both a written union and `Checker::union`'s join state it here.
+pub fn canonical_union(ms: &[Type], types: &dyn Decls) -> Result<Type, UnionFault> {
+    // Each level enters a union's members; past `MAX_DEPTH` an alias cycle
+    // (`type A = B | Port`, `type B = A | Age`) is the only way down.
+    fn flat(
+        ms: &[Type],
+        types: &dyn Decls,
+        depth: usize,
+        out: &mut Vec<Type>,
+    ) -> Result<(), UnionFault> {
+        for m in ms {
+            match union_of(m, types) {
+                Some(_) if depth > MAX_DEPTH => return Err(UnionFault::Member(m.clone())),
+                Some(inner) => flat(inner, types, depth + 1, out)?,
+                None => out.push(m.clone()),
+            }
+        }
+        Ok(())
+    }
+    let mut flattened = Vec::new();
+    flat(ms, types, 0, &mut flattened)?;
+    let mut members: Vec<Type> = Vec::new();
+    let mut first: Option<(Type, Type)> = None;
+    let mut absorbed = false;
+    for m in flattened {
+        let rule = match &m {
+            Type::Named(n) | Type::App(n, _) => types.decl(n).filter(|d| d.predicate.is_some()),
+            _ => None,
+        };
+        let base = resolve(&m, types);
+        if !base.is_scalar() || rule.is_some_and(|d| !d.type_params.is_empty()) {
+            return Err(UnionFault::Member(m));
+        }
+        match &first {
+            Some((f, fb)) if *fb != base => {
+                return Err(UnionFault::Bases(f.clone(), fb.clone(), m, base))
+            }
+            Some(_) => {}
+            None => first = Some((m.clone(), base)),
+        }
+        absorbed |= rule.is_none();
+        if rule.is_some() && !members.contains(&m) {
+            members.push(m);
+        }
+    }
+    Ok(match (absorbed, first) {
+        (true, Some((_, base))) => base,
+        _ => Type::Union(members),
+    })
 }
 
 /// `ty` with each union inside it replaced by its base, so no pass after the
 /// checker meets a type no declaration names.
 pub fn decay_unions(ty: &mut Type, types: &dyn Decls) {
     walk_type_mut(ty, &mut |t| {
-        if union_members(t).is_some() {
+        if matches!(t, Type::Union(_)) {
             *t = resolve(t, types);
         }
     });
@@ -1289,11 +1364,15 @@ fn assignable_d(from: &Type, to: &Type, width: bool, depth: usize, types: &dyn D
     }
     // A union fits where each member fits, and a type fits a union where it
     // fits one member.
-    if let Some(mut ms) = union_members(from) {
-        return ms.all(|m| assignable_d(&Type::Named(m.into()), to, width, depth + 1, types));
+    if let Some(ms) = union_of(from, types) {
+        return ms
+            .iter()
+            .all(|m| assignable_d(m, to, width, depth + 1, types));
     }
-    if let Some(mut ms) = union_members(to) {
-        return ms.any(|m| assignable_d(from, &Type::Named(m.into()), width, depth + 1, types));
+    if let Some(ms) = union_of(to, types) {
+        return ms
+            .iter()
+            .any(|m| assignable_d(from, m, width, depth + 1, types));
     }
     // A `lazy T` field takes what a `fn() -> T` field takes; only the read
     // hides the thunk.
@@ -1478,10 +1557,6 @@ fn resolve_d<'a>(ty: &'a Type, types: &'a dyn Decls, depth: usize) -> Cow<'a, Ty
     if depth > MAX_DEPTH {
         return Owned(Type::Unit);
     }
-    // A union's members share one base.
-    if let Some(first) = union_members(ty).and_then(|mut ms| ms.next()) {
-        return Owned(resolve_d(&Type::Named(first.into()), types, depth + 1).into_owned());
-    }
     match ty {
         // The builtin opaque `Code` resolves to itself; a user `type Code` wins.
         Type::Named(n) if n == "Code" && types.decl("Code").is_none() => Borrowed(ty),
@@ -1508,6 +1583,11 @@ fn resolve_d<'a>(ty: &'a Type, types: &'a dyn Decls, depth: usize) -> Cow<'a, Ty
         }
         Type::Named(n) => match types.decl(n) {
             Some(d) => resolve_d(&d.base, types, depth + 1),
+            None => Owned(Type::Unit),
+        },
+        // A union's members share one base.
+        Type::Union(ms) => match ms.first() {
+            Some(m) => resolve_d(m, types, depth + 1),
             None => Owned(Type::Unit),
         },
         Type::App(name, args) => match types.decl(name) {
@@ -2247,6 +2327,7 @@ pub fn solve_param(pty: &Type, aty: &Type, subst: &mut HashMap<String, Type>) {
         | Type::Str
         | Type::Unit
         | Type::Named(_)
+        | Type::Union(_)
         | Type::ConstInt(_)
         | Type::Logger
         | Type::Never
