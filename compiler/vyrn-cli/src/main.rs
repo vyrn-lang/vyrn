@@ -3302,11 +3302,63 @@ fn json_pretty(j: &vyrn_frontend::schema::Json, depth: usize) -> String {
 
 /// `vyrn test [file] [--name <substring>]`: runs the root file's `test` blocks
 /// in declaration order and exits 1 if any failed. A file with no tests prints
-/// `no tests` and exits 0.
+/// `no tests` and exits 0. With no file, inside a project, runs the project's
+/// modules ([`test_project`]).
 fn test_cmd(call: &Call) -> Outcome {
+    if call.file.is_none() {
+        let p = Project::of(None, call.flags)?;
+        if let Some(dir) = p.manifest.as_ref().map(|m| m.dir.clone()) {
+            return test_project(call, &p, &dir);
+        }
+    }
     let (p, path) = call.root()?;
+    test_root(call, &p, &path)
+}
+
+/// Runs each module under `dir` that declares a `test`, as its own root, under
+/// a line naming its path. A directory holding its own `vyrn.json` or
+/// `Cargo.toml` is another project, whose `.vyrn` files are its own, and is
+/// skipped. A module that does not lex counts, so its error is reported. Exits
+/// 1 if any module fails to check or any test fails.
+fn test_project(call: &Call, p: &Project, dir: &str) -> Outcome {
+    let base = Path::new(dir);
+    let nested = |f: &Path| {
+        (f.ancestors().skip(1)).take_while(|a| *a != base).any(|a| {
+            ["vyrn.json", "Cargo.toml"]
+                .iter()
+                .any(|m| a.join(m).is_file())
+        })
+    };
+    let declares_test = |f: &str| {
+        let src = std::fs::read_to_string(f).unwrap_or_default();
+        vyrn_frontend::lexer::lex(&src).map_or(true, |t| {
+            !vyrn_frontend::parser::parse_accum(t).0.tests.is_empty()
+        })
+    };
+    let (mut modules, mut failed) = (0, 0);
+    for f in files_under(base, &["vyrn"]) {
+        if nested(Path::new(&f)) || !declares_test(&f) {
+            continue;
+        }
+        let rel = f.strip_prefix(&format!("{dir}/")).unwrap_or(&f);
+        println!("{}{rel}", if modules == 0 { "" } else { "\n" });
+        modules += 1;
+        if test_root(call, p, &f) != Ok(ExitCode::SUCCESS) {
+            failed += 1;
+        }
+    }
+    println!("\n{modules} modules, {failed} failed");
+    Ok(if failed == 0 {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    })
+}
+
+/// Runs the `test` blocks of the root `path` ([`test_cmd`]).
+fn test_root(call: &Call, p: &Project, path: &str) -> Outcome {
     let filter = call.value("--name");
-    let (program, _) = p.checked(&path, &read_source(&path)?)?;
+    let (program, _) = p.checked(path, &read_source(path)?)?;
     let bodies: Vec<Body> = program
         .tests
         .iter()
@@ -3321,7 +3373,7 @@ fn test_cmd(call: &Call) -> Outcome {
         println!("no tests");
         return Ok(ExitCode::SUCCESS);
     }
-    Ok(bodies_wasm(&path, &program, "test", &bodies))
+    Ok(bodies_wasm(path, &program, "test", &bodies))
 }
 
 /// `vyrn bench`: runs the root file's `bench` blocks in declaration order.

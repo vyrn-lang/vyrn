@@ -148,6 +148,12 @@ The root's test blocks are type-checked with the program and stripped from
 `run` and `build`; an imported module's are neither parsed nor checked. A file
 with no tests, or none that `--name` selects, prints `no tests` and exits 0.
 
+With no file, inside a project, runs every module under the manifest's
+directory that declares a test, each as its own root under a line naming its
+path, then prints `N modules, F failed`. It skips a directory that holds its own
+`vyrn.json` or `Cargo.toml`, a hidden directory, and `target`, `vendor` and
+`node_modules`. It exits 1 if any module fails to check or any test fails.
+
 ### `vyrn bench [file] [--name <substring>] [...]`
 
 Runs the root file's `bench "name" { ... }` blocks in declaration order.
