@@ -47,6 +47,9 @@ const surf = (r, a) => new V3(Math.cos(a) * r, funnel(r) + 0.03, Math.sin(a) * r
 
 /* Shaders. Every pass writes linear light; the last one tone-maps (ACES) and encodes sRGB. */
 
+// The water turns at one rate on every panel: the slow drift of the last one.
+const SWIRL = 0.11;
+
 const FOG = "float fogK(float d){return exp(-pow(0.06*d,2.0));}";
 
 const WATER_VS = `in vec4 seed;
@@ -54,10 +57,10 @@ uniform mat4 uV,uP;uniform float uFocus,uT,uRing,uHit,uPx,uSpin,uVis,uDrainT,uDr
 out vec3 vC;out float vA;
 float F(float r){return -0.55/(r+0.16)+0.55/6.2;}
 void main(){
- float spd=(0.018+0.03*seed.z)*(1.0-0.8*uCalm)*(1.0+5.0*uDrain);
+ float spd=(0.018+0.03*seed.z)*mix(0.2,6.0,uDrain);
  float cyc=seed.x+uT*spd,life=fract(cyc),born=(floor(cyc)-seed.x)/spd;
  float r=mix(6.0,0.06,pow(life,0.55));
- float a=seed.y+uSpin*(uT*0.55*(1.0-0.8*uCalm)/(r+0.25)+life*9.0/(r+0.6));
+ float a=seed.y+uSpin*(uT*${SWIRL}/(r+0.25)+life*9.0/(r+0.6));
  float band=sin(a*3.0+log(r)*6.0);
  float y=F(r)+0.02*band*smoothstep(0.2,1.5,r)*(1.0-uCalm)+(seed.w-0.5)*0.015*r;
  vec4 mv=uV*vec4(cos(a)*r,y,sin(a)*r,1.0);gl_Position=uP*mv;
@@ -77,7 +80,7 @@ uniform mat4 uV,uP;uniform float uFocus,uT,uRing,uPx,uRule,uVis;
 out vec3 vC;out float vA;
 float F(float r){return -0.55/(r+0.16)+0.55/6.2;}
 float R0(float l){return mix(6.0,0.06,pow(l,0.55));}
-float ang(float l,float r){return dseed.y+uT*0.55/(r+0.25)+l*9.0/(r+0.6);}
+float ang(float l,float r){return dseed.y+uT*${SWIRL}/(r+0.25)+l*9.0/(r+0.6);}
 void main(){
  float l=fract(dseed.x+uT*0.03),lc=pow(clamp((6.0-uRing)/5.94,0.0,1.0),1.0/0.55);
  float val=1.0+floor(dseed.w*40.0);bool inp=dseed.z<0.3;bool pass=val>=uRule;float k=l-lc;
@@ -553,7 +556,7 @@ export function vortexWidget(root) {
         d.life = 0;
         reval(d);
       }
-      const r = L(6, 0.06, Math.pow(d.life, 0.55)), a = d.a0 + (T * 0.55) / (r + 0.25) + (d.life * 9) / (r + 0.6);
+      const r = L(6, 0.06, Math.pow(d.life, 0.55)), a = d.a0 + (T * SWIRL) / (r + 0.25) + (d.life * 9) / (r + 0.6);
       if (d.state !== 0 || r > ringR || show <= 0.5) continue;
       const pass = d.val >= rule, at = new V3(Math.cos(a) * ringR, funnel(ringR), Math.sin(a) * ringR);
       if (d.kind === "c") {
@@ -942,7 +945,7 @@ export function vortexWidget(root) {
     heroRing.o = ringOn;
     heroRing.c.set(0.9 + hit * 1.3, 0.95 - hit * 0.65, 1.05 - hit * 0.85);
     gates.forEach((s, i) => {
-      const a = i * 2.094 + (T * 0.55) / (ringR + 0.25);
+      const a = i * 2.094 + (T * SWIRL) / (ringR + 0.25);
       s.p.set(Math.cos(a) * ringR, funnel(ringR), Math.sin(a) * ringR);
       s.o = w(0);
     });
