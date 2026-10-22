@@ -462,6 +462,8 @@ pub fn is_synthetic(name: &str) -> bool {
 pub struct TypeDecl {
     pub name: String,
     pub exported: bool,
+    /// As [`Function::export_to`].
+    pub export_to: Vec<String>,
     /// `None` for the root module. Set by the loader.
     pub module: Option<String>,
     pub doc: Option<String>,
@@ -491,6 +493,8 @@ pub struct EnumVariant {
 pub struct ProtocolDecl {
     pub name: String,
     pub exported: bool,
+    /// As [`Function::export_to`].
+    pub export_to: Vec<String>,
     /// `None` for the root module. Set by the loader.
     pub module: Option<String>,
     pub doc: Option<String>,
@@ -532,6 +536,8 @@ pub struct MethodSig {
 pub struct ContractDecl {
     pub name: String,
     pub exported: bool,
+    /// As [`Function::export_to`].
+    pub export_to: Vec<String>,
     /// `None` for the root module. Set by the loader.
     pub module: Option<String>,
     pub doc: Option<String>,
@@ -702,6 +708,10 @@ impl ImplBlock {
 pub struct Function {
     pub name: String,
     pub exported: bool,
+    /// The module specifiers of `export to "a", "b"`, as written: only those
+    /// modules may import the declaration. Empty when every module may, and
+    /// always empty when not `exported`.
+    pub export_to: Vec<String>,
     /// `None` for the root module. Set by the loader.
     pub module: Option<String>,
     pub doc: Option<String>,
@@ -742,6 +752,7 @@ impl Function {
         Function {
             name: name.into(),
             exported: false,
+            export_to: Vec::new(),
             module: None,
             doc: None,
             type_params: Vec::new(),

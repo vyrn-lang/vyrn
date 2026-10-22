@@ -1,0 +1,12 @@
+// A type argument counts where no field mentions it: a `Handle<Order>` is no
+// `Handle<Person>`, although both have the same fields.
+type Handle<T> = { slot: Int64 }
+type Person = { name: String }
+type Order = { id: Int64 }
+fn f(h: Handle<Person>) -> Int64 {
+    return h.slot
+}
+fn main() -> Int64 {
+    let o: Handle<Order> = Handle { slot: 0 }
+    return f(o)
+}
