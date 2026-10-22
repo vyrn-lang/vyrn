@@ -1,0 +1,1 @@
+branded_handles_do_not_join.vyrn:8:0: `if` branches have differing types: Handle<Person> vs Handle<Order>

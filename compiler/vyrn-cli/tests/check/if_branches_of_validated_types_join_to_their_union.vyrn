@@ -1,0 +1,12 @@
+type Port = Int64 where value >= 1 && value <= 65535
+type Age = Int64 where value >= 18
+
+fn listen(p: Port) -> Int64 {
+    return p + 0
+}
+
+fn main() -> Int64 {
+    let fast = true
+    let x = if fast { Port(8080) } else { Age(30) }
+    return listen(x)
+}

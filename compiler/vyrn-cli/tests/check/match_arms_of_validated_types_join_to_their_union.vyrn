@@ -1,0 +1,11 @@
+type Port = Int64 where value >= 1 && value <= 65535
+type Age = Int64 where value >= 18
+
+fn main() -> Int64 {
+    let x = match Some(3) {
+        Some(n) => Age(n + 18),
+        None => Port(1),
+    }
+    let n: Int64 = x
+    return n
+}
