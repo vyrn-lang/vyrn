@@ -470,8 +470,9 @@ fn row_kind(
 /// Whether `callee` rebuilds its receiver and may reallocate it: `push`,
 /// `reserve`, `tally`, `@strAppend`. `clear` rebuilds and keeps the buffer.
 fn grows(callee: &str) -> bool {
-    use vyrn_frontend::prelude::{builtin, Length, Spec};
-    builtin(callee).is_some_and(|b| b.spec == Some(Spec::Rebuilds) && b.length != Length::SetToZero)
+    use vyrn_frontend::prelude::{builtin, ShapeMap, Spec};
+    builtin(callee)
+        .is_some_and(|b| b.spec == Some(Spec::Rebuilds) && b.shape_map != ShapeMap::Empties)
 }
 
 /// What a row makes when no name binds it, in the words the report uses.

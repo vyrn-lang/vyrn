@@ -574,7 +574,7 @@ calls the prover no more often.
 - A new refusal or acceptance test: a program in `tests/check/` and its
   `.stderr`, never a program in a Rust string.
 - A new builtin: one `prelude::Builtin` row, with its contract (a capability
-  per parameter), method spelling, `Spec`, effect, route, length effect and
+  per parameter), method spelling, `Spec`, effect, route, shape map and
   editor text; its operand count (`takes`) and, when no `sig` types it, its
   operand and result types (`typed`); `fresh` when the result shares no
   storage with an operand. A row whose typing needs a receiver's kind or a
