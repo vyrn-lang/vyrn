@@ -248,7 +248,7 @@ fn resolve_param_at_use_site() {
         "s: Shape
 
 ```vyrn
-type Shape = Circle(Int64) | Rect(Int64, Int64) | Unit
+type Shape = enum { Circle(Int64), Rect(Int64, Int64), Unit }
 ```"
     );
 }
