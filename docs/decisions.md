@@ -19,6 +19,7 @@ pull request.
 ### Types
 
 - Records are structural with width subtyping: a record with more fields is usable where fewer are expected. Types describe shape, not identity. Width applies at the top of a value only (`types::assignable`), because a wider record inside a container or a function type is read in place and would need a hidden copy of every element.
+- A type argument counts for compatibility even where no field mentions it (`types::assignable`): two applications of one generic type fit only if their arguments are interchangeable. A brand such as `Handle<T>` in `std/slots` is then checked at compile time without a phantom field in its layout.
 - A record's layout is a function of its field set: fields sit in descending alignment, then by name. Two record types with the same fields are then one representation everywhere, as an `Option` payload, an `Array` element or a `fn` result, and no flow converts between them. Laid out in declared order, each such flow read one field as another.
 - A record that lands in a slot of a record type with fewer fields is rebuilt where it lands: the core takes the slot's fields and releases the rest (`vyrn_lower::core::Builder::fit`), so the extra fields are freed and no owned wider record reaches the emitter at a narrower slot. A borrowed crossing is the emitter's `Rung::Rebuild`, a copy that owns nothing.
 - No casts and no `as` on values. A conversion is a call named after the target type, and integer arithmetic wraps at the type's width (`language.md`), so memory is never reinterpreted.
@@ -90,6 +91,7 @@ pull request.
 - The loader flattens modules into one program; the checker and emitter never see a module. Import cycles are refused, and impl coherence is global.
 - `import * as ns` binds a compile-time name that is not a value, one level deep. No `import * from` wildcard and no re-exports.
 - A private name that collides across modules is renamed by the linker. A collision with a name the module itself imports is an error.
+- An export a library shares with one companion module is `export to "<path>"`, a qualified export as in Java's `exports .. to`, so it stays off the public page and out of completion. The loader's visibility pass is its one check; a path names a file, so a generated module is never a permitted importer.
 - A sentence quotes a declaration as its module wrote it, never by the linker's name, through the loader's one rename table (`ast::Spellings`). Where one sentence shows two declarations of one spelling, each declared outside the sentence's module adds the path its module imports it by: `Cfg from "./lib/cfg"`. A runtime module's reserved spelling reads the same way: `json$Json` is `Json`. Hover, completion details and type hints follow the same rule.
 - Importing `Result` or `Option` from `std/result` or `std/option` is legal and changes nothing; ambient use stays legal.
 - A name whose body lives in std is an import, not a global, and a missing import names its module. `print`, `bytes`, `panic` and `parse` stay global.

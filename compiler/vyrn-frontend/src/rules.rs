@@ -879,6 +879,8 @@ rules! {
     ExportNeedsDecl {}
         "`export` must be followed by `fn`, `type`, `protocol`, `contract`, \
         `extern fn`, `gen fn`, or `mut fn`";
+    ExportToExtern {}
+        "an `extern fn` takes no `export to` — the JS host imports it, not a module";
     LambdaNotHere { form, fix }
         "`{form} ...` is not a lambda here; a lambda takes its parameters before an arrow"
         fix "{fix}";
@@ -919,6 +921,8 @@ rules! {
     NotExported { name, target }
         "`{name}` exists in `{target}` but is not exported — \
         add `export` to its declaration";
+    ExportedOnlyTo { name, target, importers }
+        "`{name}` is exported from `{target}` only to {importers}";
     NotDefinedIn { name, target, def_module }
         "`{name}` is not defined in `{target}` (it lives in \
         `{def_module}`)";

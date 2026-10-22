@@ -581,6 +581,68 @@ fn audience_objection(
     )))
 }
 
+/// Whether module keys `a` and `b` name one file. A key and a std spec can
+/// spell one file two ways (`vyrn check std/runtime.vyrn` is relative to the
+/// shell, the std root absolute), so identity falls back to the real path,
+/// which `real_paths` caches.
+fn same_file(
+    a: &str,
+    b: &str,
+    opts: &LoadOptions,
+    real_paths: &mut HashMap<String, Option<String>>,
+) -> bool {
+    let mut real = |p: &str| {
+        real_paths
+            .entry(p.to_string())
+            .or_insert_with(|| match &opts.session {
+                Some(s) => s.real_path(p),
+                None => crate::manifest::real_path(p),
+            })
+            .clone()
+    };
+    a == b || matches!((real(a), real(b)), (Some(x), Some(y)) if x == y)
+}
+
+/// Whether `importer` may import a declaration of `exporter` whose `export to`
+/// paths are `to`. Every module may when `to` is empty. A path resolves as an
+/// import written in `exporter` would; one that does not resolve admits
+/// nothing, and the link reports it at the declaration.
+pub(crate) fn admits(
+    to: &[String],
+    exporter: &str,
+    importer: &str,
+    opts: &LoadOptions,
+    real_paths: &mut HashMap<String, Option<String>>,
+) -> bool {
+    to.is_empty()
+        || to.iter().any(|spec| {
+            resolve_spec(spec, exporter, opts)
+                .is_ok_and(|k| same_file(&k, importer, opts, real_paths))
+        })
+}
+
+/// [`Rule::ExportedOnlyTo`] for `importer`'s use of `name`, a declaration of
+/// `exporter` with `export to` paths `to`. Each module is spelled as an import
+/// in `importer` would spell it.
+fn exported_only_to(
+    name: &str,
+    to: &[String],
+    exporter: &str,
+    importer: &str,
+    opts: &LoadOptions,
+) -> Rule {
+    let dir = dir_of(generated_importer(importer).unwrap_or(importer));
+    let shown = |key: &str| import_specifier(dir, key, opts.std_root.as_deref());
+    let importers = (to.iter())
+        .map(|spec| match resolve_spec(spec, exporter, opts) {
+            Ok(k) => format!("`{}`", shown(&k)),
+            Err(_) => format!("`{spec}`"),
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    rule!(ExportedOnlyTo, name, target = shown(exporter), importers)
+}
+
 /// Refuses an import of `std/mem` from anywhere but `std/runtime`, and of
 /// `std/runtime` from anywhere.
 ///
@@ -595,23 +657,8 @@ fn runtime_fence(
     opts: &LoadOptions,
     real_paths: &mut HashMap<String, Option<String>>,
 ) -> Option<Diagnostic> {
-    // A key and a std spec can spell one file two ways (`vyrn check
-    // std/runtime.vyrn` is relative to the shell, the std root absolute), so
-    // identity falls back to the real path.
-    let mut real = |p: &str| {
-        real_paths
-            .entry(p.to_string())
-            .or_insert_with(|| match &opts.session {
-                Some(s) => s.real_path(p),
-                None => crate::manifest::real_path(p),
-            })
-            .clone()
-    };
     let mut is = |key: &str, spec: &str| {
-        let Ok(k) = resolve_spec(spec, importer, opts) else {
-            return false;
-        };
-        key == k || matches!((real(key), real(&k)), (Some(a), Some(b)) if a == b)
+        resolve_spec(spec, importer, opts).is_ok_and(|k| same_file(key, &k, opts, real_paths))
     };
     let fenced = if is(imported, MEM_SPEC) {
         if is(importer, RUNTIME_SPEC) {
@@ -1021,7 +1068,7 @@ fn load_with_origins_inner(
         Ok((modules, root_key, origins, warnings, pending)) => {
             let _p = crate::prof::phase("load: link");
             let graph = graph_of(&modules);
-            let linked = link(modules, &root_key).map(|mut p| {
+            let linked = link(modules, &root_key, opts).map(|mut p| {
                 p.expansions = opts.expansions.clone();
                 p.session = crate::session::SessionRef(opts.session.clone());
                 p
@@ -2533,6 +2580,9 @@ struct Decl<'a> {
     /// Always `false` for a global: module state is module-private,
     /// and another module reaches it through an accessor function.
     exported: bool,
+    /// The `export to` paths ([`Function::export_to`]).
+    export_to: &'a [String],
+    line: usize,
     /// A parser-injected builtin type ([`is_injected`]), present in every file.
     injected: bool,
     /// An `extern fn`: a host-ABI contract under its source spelling,
@@ -2544,11 +2594,19 @@ struct Decl<'a> {
 /// Every reader in this file asks this one function, so a new declaration form
 /// is added once.
 fn decls(p: &Program) -> impl Iterator<Item = Decl<'_>> {
-    fn d(name: &str, kind: DeclKind, exported: bool) -> Decl<'_> {
+    fn d<'a>(
+        name: &'a str,
+        kind: DeclKind,
+        exported: bool,
+        to: &'a [String],
+        line: usize,
+    ) -> Decl<'a> {
         Decl {
             name,
             kind,
             exported,
+            export_to: to,
+            line,
             injected: false,
             is_extern: false,
         }
@@ -2557,26 +2615,34 @@ fn decls(p: &Program) -> impl Iterator<Item = Decl<'_>> {
         .iter()
         .map(|t| Decl {
             injected: is_injected(t),
-            ..d(&t.name, DeclKind::Type, t.exported)
+            ..d(&t.name, DeclKind::Type, t.exported, &t.export_to, t.line)
         })
         .chain(p.functions.iter().map(|f| Decl {
             is_extern: f.is_extern,
-            ..d(&f.name, DeclKind::Fn, f.exported)
+            ..d(&f.name, DeclKind::Fn, f.exported, &f.export_to, f.line)
         }))
-        .chain(
-            p.protocols
-                .iter()
-                .map(|pr| d(&pr.name, DeclKind::Protocol, pr.exported)),
-        )
-        .chain(
-            p.contracts
-                .iter()
-                .map(|c| d(&c.name, DeclKind::Contract, c.exported)),
-        )
+        .chain(p.protocols.iter().map(|pr| {
+            d(
+                &pr.name,
+                DeclKind::Protocol,
+                pr.exported,
+                &pr.export_to,
+                pr.line,
+            )
+        }))
+        .chain(p.contracts.iter().map(|c| {
+            d(
+                &c.name,
+                DeclKind::Contract,
+                c.exported,
+                &c.export_to,
+                c.line,
+            )
+        }))
         .chain(
             p.globals
                 .iter()
-                .map(|g| d(&g.name, DeclKind::Global, false)),
+                .map(|g| d(&g.name, DeclKind::Global, false, &[], g.line)),
         )
 }
 
@@ -3484,7 +3550,11 @@ impl BodyVisitMut for NsResolver<'_> {
     }
 }
 
-fn link(mut modules: Vec<Module>, root_key: &str) -> Result<Program, Vec<Diagnostic>> {
+fn link(
+    mut modules: Vec<Module>,
+    root_key: &str,
+    opts: &LoadOptions,
+) -> Result<Program, Vec<Diagnostic>> {
     let mut errors: Vec<Diagnostic> = Vec::new();
     // Fold import aliases into the flat namespace first.
     let alias_span = crate::prof::phase("link: resolve_aliases");
@@ -3505,6 +3575,8 @@ fn link(mut modules: Vec<Module>, root_key: &str) -> Result<Program, Vec<Diagnos
     // `clash_diagnostics` turns them into one diagnostic per module pair, at an
     // import site in a real file.
     let mut clashes: Vec<(String, String, String)> = Vec::new();
+    // `(module, name)` -> the `export to` paths of every qualified export.
+    let mut qualified: HashMap<(&str, &str), &[String]> = HashMap::new();
 
     // Names whose every declaration is a non-exported `extern fn` of one
     // signature, in two or more modules: one host-ABI contract restated per
@@ -3580,6 +3652,16 @@ fn link(mut modules: Vec<Module>, root_key: &str) -> Result<Program, Vec<Diagnos
                 continue;
             }
             register(d.name, &m.key, d.exported, &mut clashes);
+            if d.export_to.is_empty() {
+                continue;
+            }
+            qualified.insert((&m.key, d.name), d.export_to);
+            for spec in d.export_to {
+                if let Err(e) = resolve_spec(spec, &m.key, opts) {
+                    let d = Diagnostic::error(d.line, 0, "load", e);
+                    errors.push(in_module(d, &m.key, root_key));
+                }
+            }
         }
         for t in &m.program.type_decls {
             if is_injected(t) {
@@ -3614,16 +3696,34 @@ fn link(mut modules: Vec<Module>, root_key: &str) -> Result<Program, Vec<Diagnos
     // Per-module import and visibility checks. `surface_shadows` gathers the
     // shadowing fact for the checker (see `ast::Program::surface_shadows`).
     let mut surface_shadows: HashSet<(Option<String>, String)> = HashSet::new();
+    // The `export to` paths of `def_module`'s `name` when they leave out
+    // `importer`. Every refusal of a qualified export asks this one function.
+    let mut real_paths = HashMap::new();
+    let mut shut_out = |name: &str, def_module: &str, importer: &str| {
+        let to: &[String] = qualified.get(&(def_module, name))?;
+        (!admits(to, def_module, importer, opts, &mut real_paths)).then_some(to)
+    };
     for m in &modules {
         let mut visible: HashSet<String> = HashSet::new(); // foreign names imported here
         for (imp, target) in m.program.imports.iter().zip(&m.import_targets) {
             // A namespace import reaches every exported decl of the
-            // target, and its `ns.member` uses already name those symbols, so
-            // they are visible.
+            // target that admits this module, and its `ns.member` uses already
+            // name those symbols, so they are visible.
             if imp.namespace.is_some() {
                 for (name, (def_module, exported)) in &owner {
-                    if def_module == target && *exported {
+                    if def_module == target && *exported && shut_out(name, target, &m.key).is_none()
+                    {
                         visible.insert(name.clone());
+                    }
+                }
+            }
+            // A generator runs at load, so the name it is called by is
+            // checked here, with its owner's `export to` paths.
+            if let ImportSource::Generator { name, line, .. } = &imp.source {
+                if let Some((def_module, _)) = owner.get(name) {
+                    if let Some(to) = shut_out(name, def_module, &m.key) {
+                        let rule = exported_only_to(name, to, def_module, &m.key, opts);
+                        errors.push(load_error(&m.key, root_key, *line, rule));
                     }
                 }
             }
@@ -3640,6 +3740,9 @@ fn link(mut modules: Vec<Module>, root_key: &str) -> Result<Program, Vec<Diagnos
                                 imp.line,
                                 rule!(NotExported, name, target),
                             ));
+                        } else if let Some(to) = shut_out(name, target, &m.key) {
+                            let rule = exported_only_to(name, to, target, &m.key, opts);
+                            errors.push(load_error(&m.key, root_key, imp.line, rule));
                         }
                         // Importing an enum brings its variants, and a protocol its
                         // methods; the check below resolves them through this name.
@@ -3714,7 +3817,7 @@ fn link(mut modules: Vec<Module>, root_key: &str) -> Result<Program, Vec<Diagnos
                 surface_shadows.insert((home, b.to_string()));
             }
         }
-        let check_name = |name: &str, line: usize, what: &str, errors: &mut Vec<Diagnostic>| {
+        let mut check_name = |name: &str, line: usize, what: &str, errors: &mut Vec<Diagnostic>| {
             // Resolve constructors and methods to their owning declarations.
             // Same-named variants or methods in different modules are ordinary,
             // so every candidate is tried before the use is called foreign.
@@ -3748,12 +3851,11 @@ fn link(mut modules: Vec<Module>, root_key: &str) -> Result<Program, Vec<Diagnos
                         if gen_importer.as_deref() == Some(def_module.as_str()) {
                             return;
                         }
-                        errors.push(load_error(
-                            &m.key,
-                            root_key,
-                            line,
-                            rule!(NotImported, what, name, def_module),
-                        ));
+                        let rule = match shut_out(name, def_module, &m.key) {
+                            Some(to) => exported_only_to(name, to, def_module, &m.key, opts),
+                            None => rule!(NotImported, what, name, def_module),
+                        };
+                        errors.push(load_error(&m.key, root_key, line, rule));
                     }
                 }
                 return;
