@@ -1769,11 +1769,11 @@ impl Pattern {
             .collect()
     }
 
-    pub fn binders(&self) -> Vec<&Binder> {
+    pub fn binders(&self) -> &[Binder] {
         match self {
-            Pattern::Success(b) | Pattern::Failure(b) => vec![b],
-            Pattern::Variant(_, binds) => binds.iter().collect(),
-            Pattern::Other => Vec::new(),
+            Pattern::Success(b) | Pattern::Failure(b) => std::slice::from_ref(b),
+            Pattern::Variant(_, binds) => binds,
+            Pattern::Other => &[],
         }
     }
 
