@@ -1,0 +1,11 @@
+type Port = Int64 where value >= 1 && value <= 65535
+type Age = Int64 where value >= 18 && value <= 150
+type Point = { x: Int64, y: Int64 }
+
+fn f(p: Port | Point) -> Int64 {
+    return 0
+}
+
+fn main() -> Int64 {
+    return 0
+}

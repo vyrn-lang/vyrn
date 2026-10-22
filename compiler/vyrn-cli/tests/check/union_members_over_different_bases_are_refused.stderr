@@ -1,0 +1,1 @@
+union_members_over_different_bases_are_refused.vyrn:5:0: a union's members share one base, but `Port` is over `Int64` and `Tiny` over `Int32`

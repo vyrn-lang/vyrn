@@ -713,7 +713,11 @@ fn judged(facts: &NodeTypes<'_>, own: &Ownership, sp: &Speech) -> Vec<(usize, St
             {
                 let base = &decls[name].base;
                 let tries = matches!(e, Expr::TryConstruct { .. });
+                let union = !decls[name].members.is_empty();
                 let ([], [name]) = sp.say([], [name]);
+                if union {
+                    return Some(rule!(UnionConstruct, name).render());
+                }
                 if tries && !matches!(base, Type::Int | Type::Bool | Type::Str) {
                     return Some(rule!(TryConstructNotScalar, name).render());
                 }

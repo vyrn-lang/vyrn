@@ -320,6 +320,10 @@ rules! {
     EnumWhere {} "an enum type cannot have a `where` clause";
     EnumEmpty { name } "enum `{name}` has no variants";
     AliasWhere { noun } "a `{noun}` alias cannot have a `where` clause";
+    UnionMember { m }
+        "`{m}` cannot be a member of a union: each member is a validated scalar type, or a union of them";
+    UnionBases { a, ab, b, bb }
+        "a union's members share one base, but `{a}` is over `{ab}` and `{b}` over `{bb}`";
     RecordWhere {} "a record type cannot have a `where` clause";
     NotRecord { name } "`{name}` does not resolve to a record";
     ValidatedBaseNotScalar { name }
@@ -1186,6 +1190,7 @@ rules! {
         scalars";
     FieldOnNonRecord { field, other } "cannot access field `{field}` on non-record type {other}";
     TryConstructNotScalar { name } "`{name}?(..)` is only for validated/nominal scalar types";
+    UnionConstruct { name } "`{name}` is a union, which has no constructor: construct one of its members";
     TryConstructArity { name, got } "`{name}?` takes 1 argument, got {got}";
     ConstructArity { name, got } "`{name}` construction takes 1 argument, got {got}";
     ConstructFrom { name, base, aty } "`{name}` is built from {base}, but the argument is {aty}";

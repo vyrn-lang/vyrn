@@ -1,0 +1,1 @@
+a_constant_outside_every_member_of_a_union_is_refused.vyrn:4:0: 0 does not satisfy `Port | Age` (predicate `where value >= 1 && value <= 65535 || value >= 18 && value <= 150` is false)

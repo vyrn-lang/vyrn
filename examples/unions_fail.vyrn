@@ -1,0 +1,15 @@
+// A raw value that satisfies no member of a union traps at the boundary.
+
+type Port = Int64 where value >= 1 && value <= 65535
+type Age = Int64 where value >= 18 && value <= 150
+
+fn checked(n: Int64) -> Port | Age {
+    let x: Port | Age = n
+    return x
+}
+
+fn main() -> Int64 {
+    print(checked(1))
+    print(checked(70000))
+    return 0
+}

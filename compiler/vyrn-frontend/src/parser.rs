@@ -1757,6 +1757,7 @@ impl Parser {
                     type_params: Vec::new(),
                     base: std::mem::replace(&mut field.ty, Type::Named(synthetic)),
                     predicate: Some(pred),
+                    members: Vec::new(),
                     line,
                 });
             }
@@ -1772,6 +1773,7 @@ impl Parser {
                 type_params,
                 base,
                 predicate,
+                members: Vec::new(),
                 line,
             },
         );
@@ -2172,9 +2174,24 @@ impl Parser {
         })
     }
 
+    /// A type, possibly a union `A | B | ...` of intersections. `|` binds
+    /// loosest, so `fn() -> A | B` returns the union.
+    fn type_(&mut self) -> Result<Type, Diagnostic> {
+        let first = self.intersection()?;
+        if *self.peek() != Tok::Pipe {
+            return Ok(first);
+        }
+        let mut members = vec![first];
+        while *self.peek() == Tok::Pipe {
+            self.advance();
+            members.push(self.intersection()?);
+        }
+        Ok(Type::Union(members))
+    }
+
     /// A type, possibly an intersection `A & B & ...` (left-associative
     /// `Merge<A, B>`).
-    fn type_(&mut self) -> Result<Type, Diagnostic> {
+    fn intersection(&mut self) -> Result<Type, Diagnostic> {
         let mut t = self.type_atom()?;
         while *self.peek() == Tok::Amp {
             self.advance();

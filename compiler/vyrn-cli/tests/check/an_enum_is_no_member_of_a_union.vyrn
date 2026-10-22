@@ -1,0 +1,8 @@
+type Port = Int64 where value >= 1 && value <= 65535
+type Age = Int64 where value >= 18 && value <= 150
+type Color = enum { Red, Green }
+type Open = Port | Color
+
+fn main() -> Int64 {
+    return 0
+}

@@ -469,6 +469,11 @@ pub struct TypeDecl {
     pub base: Type,
     /// A predicate over the variable `value`.
     pub predicate: Option<Expr>,
+    /// The members of the union this declaration names, each a validated
+    /// scalar type, in source order; empty for any other declaration. Only
+    /// `ctor::name_unions` fills it, before the checker, with `base` the
+    /// members' base and `predicate` the `||` of their rules.
+    pub members: Vec<Type>,
     pub line: usize,
 }
 

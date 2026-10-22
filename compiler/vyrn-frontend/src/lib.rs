@@ -123,6 +123,7 @@ pub fn check_and_synthesize(
     Option<checker::Recorded>,
 ) {
     let check_span = prof::phase("check");
+    ctor::name_unions(program);
     let ((mut diags, derived, mut refused), binders, record) =
         checker::check_accum_with_sites(program);
     let mut record = Some(record);
@@ -135,6 +136,7 @@ pub fn check_and_synthesize(
                 let at = program.functions.len();
                 program.functions.extend(fns);
                 program.type_decls.extend(decls);
+                ctor::name_unions(program);
                 program
                     .functions
                     .extend(ctor::constructors(&types::decl_map(program)));

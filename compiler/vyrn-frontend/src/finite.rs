@@ -191,13 +191,22 @@ pub enum Proof {
 
 /// Proves or refutes that `expr` flowing into the validated string type `to`
 /// is contained. `resolve` types the holes and, in the variable case, `expr`.
-/// The checker's error path and the backends' skip path share it.
+/// The checker's error path and the backends' skip path share it. A union
+/// is proven where one member is, and refuted nowhere: a language outside
+/// each member can still lie inside their union.
 pub fn prove_string_flow(
     expr: &Expr,
     to: &Type,
     types: &dyn Decls,
     resolve: &dyn Fn(&Expr) -> Option<Type>,
 ) -> Proof {
+    if let Some(ms) = crate::types::union_of(to, types) {
+        let one = |m: &Type| matches!(prove_string_flow(expr, m, types, resolve), Proof::Proven);
+        return match ms.iter().any(one) {
+            true => Proof::Proven,
+            false => Proof::NotApplicable,
+        };
+    }
     // The target must be a pure-regex validated string type.
     let Some(tdecl) = string_type_decl(to, types) else {
         return Proof::NotApplicable;

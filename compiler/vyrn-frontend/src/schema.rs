@@ -370,6 +370,7 @@ pub fn synthesize(
             type_params: Vec::new(),
             base,
             predicate,
+            members: Vec::new(),
             line: 1, // line 0 means "parser-injected" and is deduplicated away
         });
         // The `Parent.field` helpers for constrained inline fields and elements.
@@ -649,6 +650,7 @@ fn convert(
                     type_params: Vec::new(),
                     base: inner,
                     predicate: pred,
+                    members: Vec::new(),
                     line: 1,
                 });
                 Type::Named(format!("{name}.item"))
@@ -681,6 +683,7 @@ fn convert(
                         type_params: Vec::new(),
                         base: inner,
                         predicate: pred,
+                        members: Vec::new(),
                         line: 1,
                     });
                     Type::Named(format!("{name}.value"))
@@ -747,6 +750,7 @@ fn convert(
                         type_params: Vec::new(),
                         base: fty,
                         predicate: fpred,
+                        members: Vec::new(),
                         line: 1,
                     });
                     Type::Named(sub_name)
@@ -883,6 +887,7 @@ fn convert_payload_type(
             type_params: Vec::new(),
             base: pty,
             predicate: ppred,
+            members: Vec::new(),
             line: 1,
         });
         Ok(Type::Named(sub_name.to_string()))

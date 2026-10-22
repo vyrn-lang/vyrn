@@ -1,0 +1,1 @@
+a_record_is_no_member_of_a_union.vyrn:5:0: `Point` cannot be a member of a union: each member is a validated scalar type, or a union of them

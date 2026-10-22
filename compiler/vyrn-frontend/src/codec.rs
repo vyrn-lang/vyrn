@@ -356,6 +356,7 @@ mod tests {
             type_params: params,
             base,
             predicate: None,
+            members: Vec::new(),
             line: 0,
         };
         let mut m = HashMap::new();
@@ -497,6 +498,7 @@ mod tests {
                 type_params: Vec::new(),
                 base: Type::option(Type::Int),
                 predicate: None,
+                members: Vec::new(),
                 line: 0,
             },
         );
@@ -530,6 +532,7 @@ mod tests {
                     ty: Type::Array(Box::new(Type::Named("L".into()))),
                 }]),
                 predicate: None,
+                members: Vec::new(),
                 line: 0,
             },
         );

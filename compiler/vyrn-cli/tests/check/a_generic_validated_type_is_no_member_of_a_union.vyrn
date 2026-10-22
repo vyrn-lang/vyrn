@@ -1,0 +1,8 @@
+type Port = Int64 where value >= 1 && value <= 65535
+type Age = Int64 where value >= 18 && value <= 150
+type Positive<T> = Int64 where value > 0
+
+fn main() -> Int64 {
+    let x: Port | Positive<Int64> = 3
+    return 0
+}

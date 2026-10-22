@@ -613,6 +613,7 @@ mod tests {
                 doc: None,
                 type_params: vec![],
                 predicate: None,
+                members: Vec::new(),
                 line: 1,
             },
         );

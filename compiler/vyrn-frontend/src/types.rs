@@ -1226,6 +1226,89 @@ pub fn decl_map(p: &crate::ast::Program) -> HashMap<String, TypeDecl> {
         .collect()
 }
 
+/// The members of `ty` if it is a union: a [`Type::Union`], or the name of a
+/// declaration of one ([`TypeDecl::members`]), or of an alias
+/// `type Open = Port | Age` that `ctor::name_unions` has not made one yet.
+pub fn union_of<'a>(ty: &'a Type, types: &'a dyn Decls) -> Option<&'a [Type]> {
+    match ty {
+        Type::Union(ms) => Some(ms),
+        Type::Named(n) => match types.decl(n)? {
+            d if !d.members.is_empty() => Some(&d.members),
+            TypeDecl {
+                base: Type::Union(ms),
+                predicate: None,
+                ..
+            } => Some(ms),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// Why a list of types forms no union ([`canonical_union`]).
+#[derive(Debug)]
+pub enum UnionFault {
+    /// A member that is neither a validated scalar type that takes no type
+    /// parameter, nor a union of them, nor the base.
+    Member(Type),
+    /// Two members over different bases: each member, then its base.
+    Bases(Type, Type, Type, Type),
+}
+
+/// The union of `ms`: each member a validated scalar type that takes no type
+/// parameter, listed once, in source order, with a union's members in its
+/// place. A member equal to the base absorbs the rest, so `Port | Int64` is
+/// `Int64`. Both a written union and `Checker::union`'s join state it here.
+pub fn canonical_union(ms: &[Type], types: &dyn Decls) -> Result<Type, UnionFault> {
+    // Each level enters a union's members; past `MAX_DEPTH` an alias cycle
+    // (`type A = B | Port`, `type B = A | Age`) is the only way down.
+    fn flat(
+        ms: &[Type],
+        types: &dyn Decls,
+        depth: usize,
+        out: &mut Vec<Type>,
+    ) -> Result<(), UnionFault> {
+        for m in ms {
+            match union_of(m, types) {
+                Some(_) if depth > MAX_DEPTH => return Err(UnionFault::Member(m.clone())),
+                Some(inner) => flat(inner, types, depth + 1, out)?,
+                None => out.push(m.clone()),
+            }
+        }
+        Ok(())
+    }
+    let mut flattened = Vec::new();
+    flat(ms, types, 0, &mut flattened)?;
+    let mut members: Vec<Type> = Vec::new();
+    let mut first: Option<(Type, Type)> = None;
+    let mut absorbed = false;
+    for m in flattened {
+        let rule = match &m {
+            Type::Named(n) | Type::App(n, _) => types.decl(n).filter(|d| d.predicate.is_some()),
+            _ => None,
+        };
+        let base = resolve(&m, types);
+        if !base.is_scalar() || rule.is_some_and(|d| !d.type_params.is_empty()) {
+            return Err(UnionFault::Member(m));
+        }
+        match &first {
+            Some((f, fb)) if *fb != base => {
+                return Err(UnionFault::Bases(f.clone(), fb.clone(), m, base))
+            }
+            Some(_) => {}
+            None => first = Some((m.clone(), base)),
+        }
+        absorbed |= rule.is_none();
+        if rule.is_some() && !members.contains(&m) {
+            members.push(m);
+        }
+    }
+    Ok(match (absorbed, first) {
+        (true, Some((_, base))) => base,
+        _ => Type::Union(members),
+    })
+}
+
 /// `ty` with each union inside it replaced by its base, so no pass after the
 /// checker meets a type no declaration names.
 pub fn decay_unions(ty: &mut Type, types: &dyn Decls) {
@@ -1276,12 +1359,12 @@ fn assignable_d(from: &Type, to: &Type, width: bool, depth: usize, types: &dyn D
     }
     // A union fits where each member fits, and a type fits a union where it
     // fits one member.
-    if let Type::Union(ms) = from {
+    if let Some(ms) = union_of(from, types) {
         return ms
             .iter()
             .all(|m| assignable_d(m, to, width, depth + 1, types));
     }
-    if let Type::Union(ms) = to {
+    if let Some(ms) = union_of(to, types) {
         return ms
             .iter()
             .any(|m| assignable_d(from, m, width, depth + 1, types));

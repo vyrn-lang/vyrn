@@ -460,7 +460,10 @@ fn analyze_inner(
                     cost = judged.cost;
                     (judged.diagnostics, judged.binders)
                 }
-                None => checker::check_accum_recording(prog),
+                None => {
+                    crate::ctor::name_unions(prog);
+                    checker::check_accum_recording(prog)
+                }
             });
             drop(cs);
             // A diagnostic at an origin-governed line of a generated module moves
@@ -3935,6 +3938,21 @@ type Age = Int64 where value >= 18
         );
         let r = resolve(&a, 4, 9).expect("x resolves");
         assert!(r.hover.contains("x: Port | Age"), "{}", r.hover);
+    }
+
+    #[test]
+    fn a_written_union_hovers_as_written() {
+        let a = analyze(
+            "type Port = Int64 where value >= 1
+type Age = Int64 where value >= 18
+fn main() -> Int64 {
+    let y: Port | Age = 20
+    return y
+}
+",
+        );
+        let r = resolve(&a, 4, 9).expect("y resolves");
+        assert!(r.hover.contains("y: Port | Age"), "{}", r.hover);
     }
 
     #[test]

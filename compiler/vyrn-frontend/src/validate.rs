@@ -24,14 +24,17 @@ pub fn of<T: std::borrow::Borrow<TypeDecl>>(found: Option<T>) -> Option<T> {
 
 /// [`of`] at a boundary between two known types, as the backends ask it. The
 /// exactly-same named type is no crossing: it was checked when it was built.
-/// [`proven`] is the other exemption, which needs the expression.
+/// Neither is a member of a union, or a union of its members, crossing into
+/// it. [`proven`] is the other exemption, which needs the expression.
 pub fn required<'t>(
     from: &Type,
     to: &Type,
     types: &'t HashMap<String, TypeDecl>,
 ) -> Option<&'t TypeDecl> {
     let Type::Named(n) = to else { return None };
-    if from == to {
+    let member =
+        || crate::types::union_of(to, types).is_some() && crate::types::assignable(from, to, types);
+    if from == to || member() {
         return None;
     }
     of(types.get(n))

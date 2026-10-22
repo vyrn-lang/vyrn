@@ -2428,6 +2428,17 @@ impl<'a> Checker<'a> {
                 }
             }
             Type::Array(inner) | Type::ArrayN(inner, _) => self.ensure_type_exists(inner, line)?,
+            Type::Union(ms) => {
+                for m in ms {
+                    self.ensure_type_exists(m, line)?;
+                }
+                use crate::types::UnionFault::*;
+                match crate::types::canonical_union(ms, self) {
+                    Ok(_) => {}
+                    Err(Member(m)) => return Err(cerr!(line, UnionMember, m)),
+                    Err(Bases(a, ab, b, bb)) => return Err(cerr!(line, UnionBases, a, ab, b, bb)),
+                }
+            }
             Type::Stream(inner) => self.ensure_type_exists(inner, line)?,
             // A `lazy T` stores a T, so T's rules apply through it.
             Type::Lazy(inner) => self.ensure_type_exists(inner, line)?,
@@ -2618,6 +2629,11 @@ impl<'a> Checker<'a> {
             }
             self.ensure_type_exists(&t.base, t.line)?;
             return Ok(());
+        }
+        // A union alias `ctor::name_unions` left forms no union, and this
+        // refuses it; a `where` over a union falls to the scalar base refusal.
+        if matches!(t.base, Type::Union(_)) && t.predicate.is_none() {
+            return self.ensure_type_exists(&t.base, t.line);
         }
         // A function type alias is interchangeable with its structural form.
         if matches!(t.base, Type::Fn(..)) {
@@ -3945,7 +3961,10 @@ impl<'a> Checker<'a> {
             }
             Expr::TryConstruct { name, args, .. } => {
                 let base = match self.decl(name) {
-                    Some(d) if matches!(d.base, Type::Int | Type::Bool | Type::Str) => {
+                    Some(d)
+                        if d.members.is_empty()
+                            && matches!(d.base, Type::Int | Type::Bool | Type::Str) =>
+                    {
                         d.base.clone()
                     }
                     _ => return self.judged(),
@@ -4443,30 +4462,11 @@ impl<'a> Checker<'a> {
         Ok(joined)
     }
 
-    /// The union of `a` and `b` ([`Type::Union`]), where each is a union or
-    /// a validated scalar type that takes no type parameter, over one base. A
+    /// The union of `a` and `b` ([`crate::types::canonical_union`]). A
     /// validated record or array stays out: a store into its part is checked
     /// against its declared rule, and a union declares none.
     fn union(&self, a: &Type, b: &Type) -> Option<Type> {
-        let members = |t: &Type| -> Option<Vec<Type>> {
-            if let Type::Union(ms) = t {
-                return Some(ms.clone());
-            }
-            let Type::Named(n) = t else { return None };
-            let d = self.decl(n)?;
-            let scalar = d.predicate.is_some() && d.type_params.is_empty();
-            (scalar && self.base(t).is_scalar()).then(|| vec![t.clone()])
-        };
-        let (mut all, more) = (members(a)?, members(b)?);
-        if self.base(a) != self.base(b) {
-            return None;
-        }
-        for m in more {
-            if !all.contains(&m) {
-                all.push(m);
-            }
-        }
-        Some(Type::Union(all))
+        crate::types::canonical_union(&[a.clone(), b.clone()], self).ok()
     }
 
     fn binop_type(&self, op: BinOp, l: Type, r: Type, line: usize) -> Result<Type, Diagnostic> {
@@ -5390,7 +5390,11 @@ impl<'a> Checker<'a> {
             return Ok(Type::App(info.enum_name.clone(), targs));
         }
 
-        // Only a validated type constructs; an alias has no constructor.
+        // Only a validated type constructs; an alias has no constructor, and
+        // the typed judgment refuses a union's.
+        if self.decl(name).is_some_and(|d| !d.members.is_empty()) {
+            return self.judged();
+        }
         if let Some(decl) = self.decl(name).filter(|d| d.predicate.is_some()) {
             return self.check_construction(decl, args, line, scope, fn_ret);
         }

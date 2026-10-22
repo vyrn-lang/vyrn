@@ -1,0 +1,1 @@
+a_union_has_no_constructor.vyrn:6:0: `Open` is a union, which has no constructor: construct one of its members
