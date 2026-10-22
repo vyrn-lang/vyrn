@@ -15,9 +15,12 @@
 [![License](https://img.shields.io/badge/license-MIT%20or%20Apache--2.0-123258)](#license)
 
 [Website](https://vyrn-lang.github.io/) &middot;
+[Guide](https://vyrn-lang.github.io/guide.html) &middot;
+[Playground](https://vyrn-lang.github.io/play.html) &middot;
 [Install](#install) &middot;
 [Examples](examples/) &middot;
-[Standard library](docs/api/)
+[Standard library](docs/api/) &middot;
+[Benchmarks](https://vyrn-lang.github.io/benchmarks.html)
 
 </div>
 
@@ -86,17 +89,17 @@ Then run a program:
 vyrn run examples/fib.vyrn
 ```
 
-[Install](#install) lists the platforms, how to pick a version, and how to build from source.
+To try it without installing, the [playground](https://vyrn-lang.github.io/play.html) compiles and runs a program in the browser. [Install](#install) lists the platforms, how to pick a version, and how to build from source.
 
 ## Features
 
 - **Validated types.** A `where` clause is part of the type. The compiler rejects an invalid constant, removes the check where it proves the value valid, and emits it where it cannot. ([validate](examples/validate.vyrn), [autovalidate](examples/autovalidate.vyrn))
-- **Ownership by declaration.** `read`, `modify`, `consume` and `share` on a parameter drive moves and aliasing. `vyrn why --cost <file>` says which lines allocate, copy and keep a check. ([consume](examples/consume.vyrn), [ownership](examples/ownership.vyrn))
+- **Ownership by declaration.** `read`, `modify` and `consume` on a parameter drive moves and aliasing. `vyrn why --cost <file>` says which lines allocate, copy and keep a check. ([consume](examples/consume.vyrn), [ownership](examples/ownership.vyrn))
 - **One module, two ways to run it.** `vyrn build --target wasm` emits WebAssembly directly, with no LLVM and no clang. `vyrn build` turns the same module into a native executable, and CI checks that both print the same output.
 - **Generators, not compiler features.** A `gen fn` is ordinary Vyrn that runs at compile time and returns source. RPC, UI, i18n, OpenAPI and GraphQL are libraries in [`std/`](std/), not keywords. ([gendemo](examples/gendemo.vyrn))
 - **Failure is a value.** No null: `Option<T>`, `Result<T, E>`, exhaustive `match` and `?`. ([option](examples/option.vyrn), [fallible](examples/fallible.vyrn))
 - **No async.** The host owns the event loop: the browser page, the HTTP server, or a runtime you write. ([eventloop](examples/eventloop.vyrn), [server](examples/server.vyrn))
-- **Tools in the box.** A formatter, a test runner and a benchmark runner for blocks in the source file, a doc generator, a package manager with a lock file, and a language server with a VS Code extension.
+- **Tools in the box.** A formatter, a test runner and a benchmark runner for blocks in the source file, a doc generator, a package manager with a lock file, a dev server that rebuilds on save and reloads the page, and a language server with a VS Code extension.
 
 ## Examples
 
@@ -127,6 +130,8 @@ Serve an HTTP handler, or a full-stack app with a wasm client:
 vyrn serve examples/server.vyrn
 cd examples/fullstack && vyrn dev
 ```
+
+`vyrn dev` watches every file its last build read. A save rebuilds the client and the server and reloads the page; a build that fails keeps the last good one serving and shows its errors in the page.
 
 Read what a generator wrote, or what each line costs:
 
