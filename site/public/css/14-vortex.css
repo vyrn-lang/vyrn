@@ -3,7 +3,7 @@
   --vx-deep: oklch(0.07 0.008 262);
   --vx-moon: oklch(0.945 0.012 250);
   --vx-soft: oklch(0.87 0.017 250);
-  --vx-dim: oklch(0.67 0.03 257);
+  --vx-dim: oklch(0.74 0.03 257);
   --vx-amber: oklch(0.81 0.13 72);
   --vx-coral: oklch(0.7 0.19 32);
   --vx-teal: oklch(0.8 0.115 180);
@@ -104,6 +104,15 @@ html:not(.vx-live) .vx-js { display: none; }
   opacity: 0; pointer-events: none;
 }
 .vx-live .vx-panel[data-panel="Install"] { width: min(760px, 88vw); }
+/* The ring and the brightest water cross the prose; a soft backing of the deep colour dims them under the text block, and the halo below keeps each glyph clear of what still shows. */
+.vx-live .vx-panel > div:first-child { position: relative; isolation: isolate; }
+.vx-live .vx-panel > div:first-child::before {
+  content: ""; position: absolute; inset: -40px -64px; z-index: -1; pointer-events: none;
+  background: radial-gradient(closest-side, oklch(0.07 0.008 262 / 0.82) 55%, oklch(0.07 0.008 262 / 0.5) 80%, transparent);
+  filter: blur(14px);
+}
+/* The water can be brighter than the prose over it; a halo of the deep colour keeps each glyph on dark. A lit word sets its own glow. */
+.vx-live :is(.vx-rail, .vx-panel :is(.vx-title, .vx-h, .vx-lede, .vx-note, .vx-eyebrow, .vx-btn.ghost, .tablink)) { text-shadow: 0 0 2px var(--vx-deep), 0 0 10px var(--vx-deep), 0 0 24px var(--vx-deep), 0 0 48px var(--vx-deep); }
 .vx-live .vx-panel.live :is(.vx-cta, .vx-code, .picker) { pointer-events: auto; }
 
 @media (max-width: 900px) {
