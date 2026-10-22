@@ -135,12 +135,13 @@ that keeps its `v-` prefix and is consumed by the grouping pass.
 ## VyxNode
 
 ```vyrn
-type VyxNode = VNText(String) | VNInterp(String, Int64, Int64) | VNRaw(String, Int64, Int64) | VNChildren | VNElem(String, Bool, Array<VyxAttr>, Array<VyxNode>, Int64) | VNIf(Array<String>, Array<Int64>, Array<Int64>, Array<VyxBody>, VyxBody, Bool) | VNFor(String, String, String, Array<VyxNode>, Int64, Int64)
+type VyxNode = VNText(String) | VNInterp(String, Int64, Int64) | VNRaw(String, Int64, Int64) | VNChildren | VNElem(String, Bool, Array<VyxAttr>, Array<VyxNode>, Int64) | VNIf(Array<String>, Array<Int64>, Array<Int64>, Array<VyxBody>, VyxBody, Bool) | VNFor(String, String, String, Array<VyxNode>, Int64, Int64, Int64, Int64)
 ```
 
 A node in a parsed template. Lines are absolute in the `.vyx` file. A
 trailing `(line, col)` pair is the pass-through's position for
-origin directives; `VNIf` carries parallel per-condition position arrays.
+origin directives; `VNFor` carries its iterable's, then its key's, and
+`VNIf` carries parallel per-condition position arrays.
 
 ## VyxBody
 

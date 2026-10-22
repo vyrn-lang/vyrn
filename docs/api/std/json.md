@@ -101,3 +101,14 @@ Writes the encoders `toJson` calls: for each root, the function that renders
 its value, and for each node, the function that builds its `Json` tree.
 Generated source cannot spell this module's reserved names, so it writes
 them as `VyrnRt_` placeholders the compiler folds back.
+
+## JsonReader
+
+```vyrn
+type JsonReader = { src: String, n: Int64, pos: Int64, depth: Int64, err: String }
+```
+
+A cursor over one document, which `std/jsonread`'s functions read. It is
+declared here so that `fromJson`'s generated decoders can name it. `depth`
+counts the arrays and objects open at `pos`; `err` is the refusal, `""`
+while there is none.

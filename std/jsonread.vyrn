@@ -1,4 +1,4 @@
-/// The strict JSON reader over the `Json` tree of `std/json`.
+/// The strict JSON reader: `parseJson`, and the cursor `fromJson` reads with.
 ///
 ///   import { parseJson } from "std/jsonread"
 ///   import { Json, JsonField, emit } from "std/json"
@@ -9,14 +9,18 @@
 /// duplicate keys are refused, every escape is decoded (a lone surrogate is an
 /// error), and object fields keep source order. Offsets are bytes; every error
 /// starts with `line N, col M:`.
+///
+/// The grammar lives in the `JsonReader` functions: `parseJson` builds a tree
+/// with them, and a `fromJson` decoder writes straight into its record. Each
+/// value reader expects the cursor on the value's first byte and leaves it on
+/// the byte after the value. The first refusal is the document's error; it
+/// moves the cursor to the end, so every later reader sees the end of input,
+/// refuses nothing more, and returns.
 
-import { Json, JsonField, emit, emitPretty, jsonEq } from "std/json"
+import { Json, JsonField, JsonReader, emit, emitPretty, jsonEq } from "std/json"
 import { fnv1aStr } from "std/hash"
 
-/// The reader cursor: the source bytes and a 1-based `line`/`col` position.
-type Parser = { src: Array<UInt8>, n: Int64, pos: Int64, line: Int64, col: Int64 }
-
-/// The deepest nesting `parseJson` accepts. Past the engine's call cap the
+/// The deepest nesting the reader accepts. Past the engine's call cap the
 /// recursion traps, which no `Err` arm catches. Each level costs about two
 /// frames here and two in `emit`, so 128 levels leave room for a re-emit, a
 /// `fromJson` decode and the caller's stack.
@@ -24,15 +28,15 @@ fn maxDepth() -> Int64 {
     return 128
 }
 
-fn newParser(s: String) -> Parser {
-    let ba = bytes(s)
-    // Read the length before the literal: `src: ba` moves `ba`.
-    let n = ba.length
-    return Parser { src: ba, n: n, pos: 0, line: 1, col: 1 }
+/// A reader over `s`, its cursor on the first byte that is not whitespace.
+export fn jsonReader(s: String) -> JsonReader {
+    let mut p = JsonReader { src: s.copy(), n: s.byteLength, pos: 0, depth: 0, err: "" }
+    skipWs(p)
+    return p
 }
 
-/// The current byte, or `-1` at end of input.
-fn cur(p: Parser) -> Int64 {
+/// The byte at the cursor, or `-1` at the end of input.
+fn peek(p: JsonReader) -> Int64 {
     if p.pos >= p.n {
         return -1
     }
@@ -40,7 +44,7 @@ fn cur(p: Parser) -> Int64 {
 }
 
 /// The byte `k` ahead, or `-1` past the end.
-fn ahead(p: Parser, k: Int64) -> Int64 {
+fn ahead(p: JsonReader, k: Int64) -> Int64 {
     let i = p.pos + k
     if i < 0 || i >= p.n {
         return -1
@@ -48,36 +52,102 @@ fn ahead(p: Parser, k: Int64) -> Int64 {
     return Int64(p.src[i])
 }
 
-/// Advance one byte, keeping `line`/`col` in sync (an LF starts a new line).
-fn step(p: modify Parser) -> Unit {
-    if p.pos >= p.n {
-        return
-    }
-    let b = Int64(p.src[p.pos])
-    p.pos = p.pos + 1
-    if b == '\n' {
-        p.line = p.line + 1
-        p.col = 1
-    } else {
-        p.col = p.col + 1
+fn step(p: modify JsonReader) -> Unit {
+    if p.pos < p.n {
+        p.pos = p.pos + 1
     }
 }
 
-/// `msg` prefixed with the cursor's 1-based `line N, col M:` position.
-fn errAt(p: Parser, msg: String) -> String {
-    return "line " + p.line.toString() + ", col " + p.col.toString() + ": " + msg
+/// `msg` prefixed with the cursor's 1-based `line N, col M:` position. A line
+/// ends at an LF.
+fn errAt(p: JsonReader, msg: String) -> String {
+    let mut line = 1
+    let mut col = 1
+    let mut i = 0
+    while i < p.pos {
+        if Int64(p.src[i]) == '\n' {
+            line = line + 1
+            col = 1
+        } else {
+            col = col + 1
+        }
+        i = i + 1
+    }
+    return "line " + line.toString() + ", col " + col.toString() + ": " + msg
+}
+
+/// Records `msg` at the cursor, unless the document is already refused, and
+/// moves the cursor to the end.
+fn refuse(p: modify JsonReader, msg: String) -> Unit {
+    if p.err.byteLength == 0 {
+        p.err = errAt(p, msg)
+    }
+    p.pos = p.n
+}
+
+/// Whether the document is refused; `p.err` holds the message.
+export fn jsonRefused(p: JsonReader) -> Bool {
+    return p.err.byteLength > 0
 }
 
 /// Skips JSON whitespace: space, tab, CR and LF only.
-fn skipWs(p: modify Parser) -> Unit {
+fn skipWs(p: modify JsonReader) -> Unit {
     while true {
-        let b = cur(p)
+        let b = peek(p)
         if b == ' ' || b == '\t' || b == '\r' || b == '\n' {
             step(p)
         } else {
             return
         }
     }
+}
+
+/// Refuses content after the document's one value.
+export fn finishJson(p: modify JsonReader) -> Unit {
+    skipWs(p)
+    if p.pos < p.n {
+        refuse(p, "trailing content after the JSON value")
+    }
+}
+
+/// The kind of the value at the cursor, named by a byte that starts it: `{`,
+/// `[`, `"`, `t` for a boolean, `n` for `null` and `0` for a number. `-1`
+/// where no value can start, which a read then refuses.
+export fn jsonKindAt(p: JsonReader) -> Int64 {
+    let b = peek(p)
+    if b == 'f' {
+        return 't'
+    }
+    if b == '-' || (b >= '1' && b <= '9') {
+        return '0'
+    }
+    if b == '{' || b == '[' || b == '"' || b == 't' || b == 'n' || b == '0' {
+        return b
+    }
+    return -1
+}
+
+/// A `jsonKindAt` kind as `expected <X>, found <kind>` words it; `""` for `-1`.
+export fn jsonKindName(k: Int64) -> String {
+    if k == '{' {
+        return "object"
+    }
+    if k == '[' {
+        return "array"
+    }
+    if k == '"' {
+        return "string"
+    }
+    if k == 't' {
+        return "boolean"
+    }
+    if k == 'n' {
+        return "null"
+    }
+    if k == '0' {
+        return "number"
+    }
+    return ""
 }
 
 fn isHex(b: Int64) -> Bool {
@@ -113,42 +183,56 @@ fn pushUtf8(out: modify Array<UInt8>, cp: Int64) -> Unit {
     }
 }
 
-/// Reads the 4 hex digits of a `\uXXXX` escape; the cursor is just past the `u`.
-fn readHex4(p: modify Parser) -> Result<Int64, String> {
+/// Reads the 4 hex digits of a `\uXXXX` escape, the cursor just past the `u`;
+/// `-1` when refused.
+fn readHex4(p: modify JsonReader) -> Int64 {
     let mut v = 0
     let mut i = 0
     while i < 4 {
-        let b = cur(p)
+        let b = peek(p)
         if isHex(b) == false {
-            return Err(errAt(p, "invalid \\u escape: expected 4 hex digits"))
+            refuse(p, "invalid \\u escape: expected 4 hex digits")
+            return -1
         }
         v = v * 16 + hexVal(b)
         step(p)
         i = i + 1
     }
-    return Ok(v)
+    return v
 }
 
-/// Parses a JSON string, the cursor on the opening `"`, and decodes every
-/// escape to UTF-8.
-fn parseString(p: modify Parser) -> Result<String, String> {
+/// Reads a JSON string, the cursor on the opening `"`, and decodes every
+/// escape to UTF-8. Refused, it answers `""`.
+export fn readJsonString(p: modify JsonReader) -> String {
     step(p) // opening "
-    let mut out: Array<UInt8> = []
+    let start = p.pos
+    while p.pos < p.n {
+        let c = Int64(p.src[p.pos])
+        if c == '"' || c == '\\' || c < 32 {
+            break
+        }
+        p.pos = p.pos + 1
+    }
+    // A string with no escape is one run of the source, copied in one call.
+    // Otherwise the run starts the decoded bytes, and the loop below reads on
+    // from the first byte the run stopped at.
+    let mut out = bytes(p.src, start, p.pos)
     while true {
-        let b = cur(p)
+        let b = peek(p)
         if b < 0 {
-            return Err(errAt(p, "unterminated string"))
+            refuse(p, "unterminated string")
+            return ""
         }
         if b == '"' {
             step(p) // closing "
             return match stringFromBytes(out) {
-                Ok(v) => Ok(v),
-                Err(e) => Err(errAt(p, "string is not valid UTF-8")),
+                Ok(v) => v,
+                Err(e) => refusedString(p, "string is not valid UTF-8"),
             }
         }
         if b == '\\' {
             step(p) // backslash
-            let e = cur(p)
+            let e = peek(p)
             if e == '"' {
                 out.push('"')
                 step(p)
@@ -175,217 +259,242 @@ fn parseString(p: modify Parser) -> Result<String, String> {
                 step(p)
             } else if e == 'u' {
                 step(p) // u
-                let hi = readHex4(p)?
+                let hi = readHex4(p)
+                if hi < 0 {
+                    return ""
+                }
                 if hi >= 55296 && hi <= 56319 {
                     // A low surrogate `\uDC00..DFFF` must follow.
-                    if cur(p) != '\\' || ahead(p, 1) != 'u' {
-                        return Err(errAt(p, "unpaired high surrogate in \\u escape"))
+                    if peek(p) != '\\' || ahead(p, 1) != 'u' {
+                        return refusedString(p, "unpaired high surrogate in \\u escape")
                     }
                     step(p) // backslash
                     step(p) // u
-                    let lo = readHex4(p)?
+                    let lo = readHex4(p)
+                    if lo < 0 {
+                        return ""
+                    }
                     if lo < 56320 || lo > 57343 {
-                        return Err(errAt(p, "unpaired high surrogate in \\u escape"))
+                        return refusedString(p, "unpaired high surrogate in \\u escape")
                     }
                     let cp = 65536 + (hi - 55296) * 1024 + (lo - 56320)
                     pushUtf8(out, cp)
                 } else if hi >= 56320 && hi <= 57343 {
-                    return Err(errAt(p, "unexpected low surrogate in \\u escape"))
+                    return refusedString(p, "unexpected low surrogate in \\u escape")
                 } else {
                     pushUtf8(out, hi)
                 }
             } else if e < 0 {
-                return Err(errAt(p, "unterminated string"))
+                return refusedString(p, "unterminated string")
             } else {
-                return Err(errAt(p, "invalid escape in string"))
+                return refusedString(p, "invalid escape in string")
             }
         } else if b < 32 {
-            return Err(errAt(p, "control character in string (must be escaped)"))
+            return refusedString(p, "control character in string (must be escaped)")
         } else {
             out.push(UInt8(b))
             step(p)
         }
     }
-    return Err(errAt(p, "unterminated string"))
+    return refusedString(p, "unterminated string")
 }
 
-/// Validates a JSON number, the cursor on `-` or a digit, and returns its raw
-/// text. Grammar: `-?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][+-]?[0-9]+)?`.
-fn parseNumber(p: modify Parser) -> Result<String, String> {
-    let mut raw: Array<UInt8> = []
-    if cur(p) == '-' {
-        raw.push('-')
+fn refusedString(p: modify JsonReader, msg: String) -> String {
+    refuse(p, msg)
+    return ""
+}
+
+/// Reads a JSON number, the cursor on `-` or a digit, and returns its raw text.
+/// Grammar: `-?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][+-]?[0-9]+)?`. Refused, it
+/// answers `""`.
+export fn readJsonNumber(p: modify JsonReader) -> String {
+    let start = p.pos
+    if peek(p) == '-' {
         step(p)
     }
-    let d = cur(p)
+    let d = peek(p)
     if d == '0' {
-        raw.push('0')
         step(p)
     } else if d >= '1' && d <= '9' {
-        raw.push(UInt8(d))
-        step(p)
-        while cur(p) >= '0' && cur(p) <= '9' {
-            raw.push(UInt8(cur(p)))
-            step(p)
-        }
+        skipDigits(p)
     } else {
-        return Err(errAt(p, "invalid number: expected a digit"))
+        return refusedString(p, "invalid number: expected a digit")
     }
-    if cur(p) == '.' {
-        raw.push('.')
+    if peek(p) == '.' {
         step(p)
-        if (cur(p) >= '0' && cur(p) <= '9') == false {
-            return Err(errAt(p, "invalid number: expected a digit after '.'"))
+        if isDigit(peek(p)) == false {
+            return refusedString(p, "invalid number: expected a digit after '.'")
         }
-        while cur(p) >= '0' && cur(p) <= '9' {
-            raw.push(UInt8(cur(p)))
-            step(p)
-        }
+        skipDigits(p)
     }
-    if cur(p) == 'e' || cur(p) == 'E' {
-        raw.push(UInt8(cur(p)))
+    if peek(p) == 'e' || peek(p) == 'E' {
         step(p)
-        if cur(p) == '+' || cur(p) == '-' {
-            raw.push(UInt8(cur(p)))
+        if peek(p) == '+' || peek(p) == '-' {
             step(p)
         }
-        if (cur(p) >= '0' && cur(p) <= '9') == false {
-            return Err(errAt(p, "invalid number: expected a digit in the exponent"))
+        if isDigit(peek(p)) == false {
+            return refusedString(p, "invalid number: expected a digit in the exponent")
         }
-        while cur(p) >= '0' && cur(p) <= '9' {
-            raw.push(UInt8(cur(p)))
-            step(p)
-        }
+        skipDigits(p)
     }
-    return match stringFromBytes(raw) {
-        Ok(v) => Ok(v),
-        Err(e) => Err(errAt(p, "invalid number")),
+    return match stringFromBytes(bytes(p.src, start, p.pos)) {
+        Ok(v) => v,
+        Err(e) => refusedString(p, "invalid number"),
     }
 }
 
-/// Consumes the keyword `word`, the cursor on its first byte.
-fn parseKeyword(p: modify Parser, word: String, val: Json) -> Result<Json, String> {
-    let wb = bytes(word)
+fn isDigit(b: Int64) -> Bool {
+    return b >= '0' && b <= '9'
+}
+
+fn skipDigits(p: modify JsonReader) -> Unit {
+    while p.pos < p.n && isDigit(Int64(p.src[p.pos])) {
+        p.pos = p.pos + 1
+    }
+}
+
+/// Reads the keyword `true`, `false` or `null`, the cursor on its first byte,
+/// and answers whether it is `true`.
+export fn readJsonKeyword(p: modify JsonReader) -> Bool {
+    let b = peek(p)
+    let word = if b == 't' { "true" } else if b == 'f' { "false" } else { "null" }
     let mut i = 0
-    while i < wb.length {
-        if cur(p) != Int64(wb[i]) {
-            return Err(errAt(p, "invalid literal: expected `" + word + "`"))
+    while i < word.byteLength {
+        if peek(p) != Int64(word[i]) {
+            refuse(p, "invalid literal: expected `" + word + "`")
+            return false
         }
         step(p)
         i = i + 1
     }
-    return Ok(val.copy())
+    return b == 't'
 }
 
-/// Parses one value; the caller skipped leading whitespace. `depth` counts the
-/// enclosing arrays and objects, and this is the one place it is checked.
-fn parseValue(p: modify Parser, depth: Int64) -> Result<Json, String> {
-    let b = cur(p)
-    if b < 0 {
-        return Err(errAt(p, "unexpected end of input"))
+/// Opens the array or object at the cursor and answers whether it has a first
+/// member, the cursor on it. An empty one is read whole.
+fn enter(p: modify JsonReader, close: Int64) -> Bool {
+    if p.depth >= maxDepth() {
+        refuse(p, "nesting deeper than " + maxDepth().toString() + " levels")
+        return false
     }
-    if b == '{' || b == '[' {
-        if depth >= maxDepth() {
-            return Err(errAt(p, "nesting deeper than " + maxDepth().toString() + " levels"))
-        }
-    }
-    if b == '{' {
-        return parseObject(p, depth + 1)
-    }
-    if b == '[' {
-        return parseArray(p, depth + 1)
-    }
-    if b == '"' {
-        return match parseString(p) {
-            Ok(s) => Ok(JStr(s)),
-            Err(e) => Err(e),
-        }
-    }
-    if b == 't' {
-        return parseKeyword(p, "true", JBool(true))
-    }
-    if b == 'f' {
-        return parseKeyword(p, "false", JBool(false))
-    }
-    if b == 'n' {
-        return parseKeyword(p, "null", JNull)
-    }
-    if b == '-' || (b >= '0' && b <= '9') {
-        return match parseNumber(p) {
-            Ok(s) => Ok(JNum(s)),
-            Err(e) => Err(e),
-        }
-    }
-    return Err(errAt(p, "unexpected character"))
-}
-
-/// Parses an array, the cursor on `[`. `depth` counts this array.
-fn parseArray(p: modify Parser, depth: Int64) -> Result<Json, String> {
-    step(p) // [
-    let mut items: Array<Json> = []
-    let mut failMsg = ""
+    p.depth = p.depth + 1
+    step(p)
     skipWs(p)
-    if cur(p) == ']' {
-        step(p)
-        return Ok(JArr(items))
+    if peek(p) == close {
+        return leave(p)
     }
-    while true {
-        skipWs(p)
-        // A statement match, not `?`: the failure must drop the partial tree,
-        // and `?` has no statement to hang a `drop` on. So the failure keeps the
-        // message, breaks, and the drop runs after the loop.
-        let mut v = JNull
-        match parseValue(p, depth) {
-            Ok(ax) => {
-                v = ax
-            }
-            Err(ae) => {
-                failMsg = ae.copy()
-            }
-        }
-        if failMsg.byteLength > 0 {
-            break
-        }
-        items.push(v)
-        skipWs(p)
-        let b = cur(p)
-        if b == ',' {
-            step(p)
-            skipWs(p)
-            if cur(p) == ']' {
-                // Drop the partial tree by hand: `Json` declares its release,
-                // and only an explicit `drop` releases it on all three engines.
-                drop items
-                return Err(errAt(p, "trailing comma before ']'"))
-            }
-        } else if b == ']' {
-            step(p)
-            return Ok(JArr(items))
-        } else if b < 0 {
-            drop items
-            return Err(errAt(p, "unterminated array"))
-        } else {
-            drop items
-            return Err(errAt(p, "expected ',' or ']' in array"))
-        }
-    }
-    // Only the element-failure break reaches here.
-    drop items
-    return Err(failMsg)
+    return true
 }
 
-/// One object's seen keys: linear probing over FNV-1a-64, capacity a power of
-/// two (`mask = cap - 1`), grown at 70% load. A scan per member would make an
-/// N-key object O(N^2), which one wide untrusted body could exploit.
-type KeySet = { keys: Array<String>, slots: Array<Int64>, mask: Int64 }
+/// Closes the array or object whose last byte is at the cursor; answers
+/// `false`, the end of its members.
+fn leave(p: modify JsonReader) -> Bool {
+    p.depth = p.depth - 1
+    step(p)
+    return false
+}
 
-fn newKeySet() -> KeySet {
-    return KeySet { keys: [], slots: [0, 0, 0, 0, 0, 0, 0, 0], mask: 7 }
+/// `enter` for the object at the cursor.
+export fn enterJsonObject(p: modify JsonReader) -> Bool {
+    return enter(p, '}')
+}
+
+/// `enter` for the array at the cursor.
+export fn enterJsonArray(p: modify JsonReader) -> Bool {
+    return enter(p, ']')
+}
+
+/// Reads the key of an object member, the cursor on it. Refused, it answers
+/// `""`. The caller checks the key for a duplicate before `readJsonColon`, so
+/// a duplicate is refused just past the key.
+export fn readJsonKey(p: modify JsonReader) -> String {
+    if peek(p) != '"' {
+        return refusedString(p, "expected a string key")
+    }
+    return readJsonString(p)
+}
+
+/// Reads the key at the cursor and answers `true` if it is `name` spelled with
+/// no escape. Otherwise it moves nothing and answers `false`, and `readJsonKey`
+/// reads the key. It allocates nothing.
+export fn readJsonKeyIf(p: modify JsonReader, name: String) -> Bool {
+    let close = p.pos + name.byteLength + 1
+    if close >= p.n || Int64(p.src[p.pos]) != '"' || Int64(p.src[close]) != '"' {
+        return false
+    }
+    let mut i = 0
+    while i < name.byteLength {
+        if p.src[p.pos + 1 + i] != name[i] {
+            return false
+        }
+        i = i + 1
+    }
+    p.pos = close + 1
+    return true
+}
+
+/// Reads the `:` after an object key, the cursor then on the value.
+export fn readJsonColon(p: modify JsonReader) -> Unit {
+    skipWs(p)
+    if peek(p) != ':' {
+        refuse(p, "expected ':' after object key")
+        return
+    }
+    step(p)
+    skipWs(p)
+}
+
+/// Reads what follows an object member's value and answers whether another
+/// member follows, the cursor on its key.
+export fn nextJsonMember(p: modify JsonReader) -> Bool {
+    return next(p, '}', "trailing comma before '}'", "unterminated object", "expected ',' or '}' in object")
+}
+
+/// Reads what follows an array element and answers whether another element
+/// follows, the cursor on it.
+export fn nextJsonItem(p: modify JsonReader) -> Bool {
+    return next(p, ']', "trailing comma before ']'", "unterminated array", "expected ',' or ']' in array")
+}
+
+fn next(p: modify JsonReader, close: Int64, trailing: String, open: String, other: String) -> Bool {
+    skipWs(p)
+    let b = peek(p)
+    if b == ',' {
+        step(p)
+        skipWs(p)
+        if peek(p) == close {
+            refuse(p, trailing)
+            return false
+        }
+        return true
+    }
+    if b == close {
+        return leave(p)
+    }
+    if b < 0 {
+        refuse(p, open)
+    } else {
+        refuse(p, other)
+    }
+    return false
+}
+
+/// The keys one object has shown: linear probing over FNV-1a-64, capacity a
+/// power of two (`mask = cap - 1`), grown at 70% load. A scan per member would
+/// make an N-key object O(N^2), which one wide untrusted body could exploit.
+/// Empty, it holds no slots, so a set no key reaches allocates nothing.
+export type JsonKeySet = { keys: Array<String>, slots: Array<Int64>, mask: Int64 }
+
+export fn jsonKeySet() -> JsonKeySet {
+    return JsonKeySet { keys: [], slots: [], mask: 0 }
 }
 
 /// The slot holding `key`, or -1 when absent. `slots[i]` stores the key's
 /// index in `keys` plus one, so 0 marks an empty slot.
-fn ksFind(s: KeySet, key: String) -> Int64 {
+fn ksFind(s: JsonKeySet, key: String) -> Int64 {
+    if s.keys.length == 0 {
+        return -1
+    }
     let mut i = Int64(fnv1aStr(key)) & s.mask
     while true {
         if s.slots[i] == 0 {
@@ -400,7 +509,7 @@ fn ksFind(s: KeySet, key: String) -> Int64 {
 }
 
 /// Places key index `ki` at the first empty slot from its key's hash `h`.
-fn ksPlace(s: modify KeySet, h: UInt64, ki: Int64) -> Unit {
+fn ksPlace(s: modify JsonKeySet, h: UInt64, ki: Int64) -> Unit {
     let mut i = Int64(h) & s.mask
     while s.slots[i] != 0 {
         i = (i + 1) & s.mask
@@ -411,12 +520,12 @@ fn ksPlace(s: modify KeySet, h: UInt64, ki: Int64) -> Unit {
 /// Records `key`. If the new entry pushes load past 70%, grows first and
 /// rehashes every key, the new one included, so a probe always finds an empty
 /// slot.
-fn ksAdd(s: modify KeySet, key: String) -> Unit {
+fn ksAdd(s: modify JsonKeySet, key: String) -> Unit {
     s.keys.push(key.copy())
-    let cap = s.mask + 1
+    let cap = s.slots.length
     if s.keys.length * 10 > cap * 7 {
         let mut slots: Array<Int64> = []
-        let newCap = cap * 2
+        let newCap = if cap == 0 { 8 } else { cap * 2 }
         let mut n = 0
         while n < newCap {
             slots.push(0)
@@ -436,103 +545,101 @@ fn ksAdd(s: modify KeySet, key: String) -> Unit {
     ksPlace(s, fnv1aStr(key), last)
 }
 
-/// Parses an object, the cursor on `{`. `depth` counts this object.
-fn parseObject(p: modify Parser, depth: Int64) -> Result<Json, String> {
-    step(p) // {
+/// Records `key` in `seen` and answers `true`, or refuses it as a duplicate
+/// and answers `false`.
+export fn admitJsonKey(p: modify JsonReader, seen: modify JsonKeySet, key: String) -> Bool {
+    if ksFind(seen, key) != -1 {
+        refuseJsonDuplicate(p, key)
+        return false
+    }
+    ksAdd(seen, key)
+    return true
+}
+
+/// Refuses `key` as a repeat of a key its object already holds.
+export fn refuseJsonDuplicate(p: modify JsonReader, key: String) -> Unit {
+    refuse(p, "duplicate object key: " + key)
+}
+
+/// Reads one value into a tree. `depth` is checked in `enter`, the one place.
+fn parseValue(p: modify JsonReader) -> Json {
+    let k = jsonKindAt(p)
+    if k == '{' {
+        return parseObject(p)
+    }
+    if k == '[' {
+        return parseArray(p)
+    }
+    if k == '"' {
+        return JStr(readJsonString(p))
+    }
+    if k == 't' {
+        return JBool(readJsonKeyword(p))
+    }
+    if k == 'n' {
+        readJsonKeyword(p)
+        return JNull
+    }
+    if k == '0' {
+        return JNum(readJsonNumber(p))
+    }
+    let end = peek(p) < 0
+    refuse(p, if end { "unexpected end of input" } else { "unexpected character" })
+    return JNull
+}
+
+/// Reads and drops one value, refusing what `parseJson` refuses.
+export fn skipJsonValue(p: modify JsonReader) -> Unit {
+    let v = parseValue(p)
+    drop v
+}
+
+/// Reads an array, the cursor on `[`. A refused array holds what was read.
+fn parseArray(p: modify JsonReader) -> Json {
+    let mut items: Array<Json> = []
+    if enterJsonArray(p) {
+        while true {
+            items.push(parseValue(p))
+            if nextJsonItem(p) == false {
+                break
+            }
+        }
+    }
+    return JArr(items)
+}
+
+/// Reads an object, the cursor on `{`. A refused object holds what was read.
+fn parseObject(p: modify JsonReader) -> Json {
     let mut fields: Array<JsonField> = []
-    let mut seen = newKeySet()
-    let mut failMsg = ""
-    skipWs(p)
-    if cur(p) == '}' {
-        step(p)
-        return Ok(JObj(fields))
-    }
-    while true {
-        skipWs(p)
-        if cur(p) != '"' {
-            // Every refusal drops the partial tree, as in `parseArray`.
-            drop fields
-            return Err(errAt(p, "expected a string key"))
-        }
-        let mut key = ""
-        match parseString(p) {
-            Ok(kx) => {
-                key = kx
+    if enterJsonObject(p) {
+        let mut seen = jsonKeySet()
+        while true {
+            let key = readJsonKey(p)
+            if admitJsonKey(p, seen, key) == false {
+                break
             }
-            Err(ke) => {
-                failMsg = ke.copy()
+            readJsonColon(p)
+            fields.push(JsonField { key: key, value: parseValue(p) })
+            if nextJsonMember(p) == false {
+                break
             }
-        }
-        if failMsg.byteLength > 0 {
-            break
-        }
-        if ksFind(seen, key) != -1 {
-            let dupMsg = errAt(p, "duplicate object key: " + key)
-            drop key
-            drop fields
-            return Err(dupMsg)
-        }
-        skipWs(p)
-        if cur(p) != ':' {
-            drop key
-            drop fields
-            return Err(errAt(p, "expected ':' after object key"))
-        }
-        step(p) // :
-        skipWs(p)
-        let mut v = JNull
-        match parseValue(p, depth) {
-            Ok(vx) => {
-                v = vx
-            }
-            Err(ve) => {
-                failMsg = ve.copy()
-            }
-        }
-        if failMsg.byteLength > 0 {
-            // Park the key in the partial tree so the drop releases it.
-            fields.push(JsonField { key: key, value: JNull })
-            break
-        }
-        ksAdd(seen, key)
-        fields.push(JsonField { key: key, value: v })
-        skipWs(p)
-        let b = cur(p)
-        if b == ',' {
-            step(p)
-            skipWs(p)
-            if cur(p) == '}' {
-                drop fields
-                return Err(errAt(p, "trailing comma before '}'"))
-            }
-        } else if b == '}' {
-            step(p)
-            return Ok(JObj(fields))
-        } else if b < 0 {
-            drop fields
-            return Err(errAt(p, "unterminated object"))
-        } else {
-            drop fields
-            return Err(errAt(p, "expected ',' or '}' in object"))
         }
     }
-    // Only the key and value failure breaks reach here.
-    drop fields
-    return Err(failMsg)
+    return JObj(fields)
 }
 
 /// Parses a whole JSON document, or returns a `line N, col M: <reason>` error.
 /// Numbers are validated and stored as raw text; nesting past [`maxDepth`] is
 /// an `Err`.
 export fn parseJson(src: String) -> Result<Json, String> {
-    let mut p = newParser(src)
-    skipWs(p)
-    let v = parseValue(p, 0)?
-    skipWs(p)
-    if p.pos < p.n {
-        // Drop the tree by hand, as `parseArray` does.
+    let mut p = jsonReader(src)
+    let v = parseValue(p)
+    finishJson(p)
+    if jsonRefused(p) {
+        // `Json` declares its release, and only an explicit `drop` releases a
+        // partial tree on every engine.
         drop v
-        return Err(errAt(p, "trailing content after the JSON value"))
+        return Err(p.err.copy())
     }
     return Ok(v)
 }

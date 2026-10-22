@@ -93,7 +93,10 @@ fn emit_gen_shows_the_synthesized_component_module() {
         src.contains("keyed((it.id).toString()"),
         "keyed push:\n{src}"
     );
-    assert!(src.contains("row(it)"), "internal component call:\n{src}");
+    assert!(
+        src.contains("push(row(\n//@origin end\n//@origin ./vyxcomp/Listing.vyx:8:50\nit,\n"),
+        "internal component call, its argument under the attribute's origin:\n{src}"
+    );
 
     assert!(
         src.contains("On(\"click\", \"removeRow\", (item.id).toString())"),
