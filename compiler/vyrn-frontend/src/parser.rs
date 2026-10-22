@@ -89,18 +89,79 @@ pub fn parse(tokens: Vec<Token>) -> Result<Program, Diagnostic> {
 /// top-level starter. The `Program` holds the declarations that parsed; a caller
 /// should not run later checks when the error list is non-empty.
 pub fn parse_accum(tokens: Vec<Token>) -> (Program, Vec<Diagnostic>) {
+    let (program, errors, _) = parse_with(tokens, false);
+    (program, errors)
+}
+
+/// [`parse_accum`] that leaves the body of each top-level function, `test` and
+/// `bench` unparsed, in an empty block. [`Skimmed::body`] parses a function's
+/// body when a caller needs it.
+pub fn parse_skimming(tokens: Vec<Token>) -> (Program, Vec<Diagnostic>, Skimmed) {
+    parse_with(tokens, true)
+}
+
+/// The top-level function bodies [`parse_skimming`] left unparsed.
+pub struct Skimmed {
+    /// The module's tokens, as the lexer wrote them.
+    tokens: Vec<Token>,
+    /// Each skimmed function's body, as a range of `tokens`, by the line and
+    /// column of the function's name.
+    bodies: Vec<((usize, usize), std::ops::Range<usize>)>,
+    /// The module's [`answered_methods`], which a body's parse reads.
+    answers: HashSet<String>,
+}
+
+impl Skimmed {
+    /// The tokens of `f`'s skimmed body, or `None` when the parse did not skim
+    /// it.
+    pub fn tokens(&self, f: &Function) -> Option<&[Token]> {
+        let (_, range) = self.bodies.iter().find(|(at, _)| *at == (f.line, f.col))?;
+        Some(&self.tokens[range.clone()])
+    }
+
+    /// Parses `f`'s skimmed body, as [`parse_accum`] would have, or returns
+    /// `None` when the parse did not skim it.
+    pub fn body(&self, f: &Function) -> Option<Result<Block, Vec<Diagnostic>>> {
+        let mut tokens = self.tokens(f)?.to_vec();
+        let close = tokens.last()?;
+        let (line, col) = (close.line, close.col);
+        tokens.push(Token {
+            tok: Tok::Eof,
+            line,
+            col,
+        });
+        let mut p = Parser {
+            answers: self.answers.clone(),
+            type_params: f.type_params.clone(),
+            ..Parser::over(tokens)
+        };
+        let body = p.block();
+        Some(match body {
+            Ok(b) if p.errors.is_empty() => Ok(b),
+            Ok(_) => Err(p.errors),
+            Err(d) => Err(p.errors.into_iter().chain([d]).collect()),
+        })
+    }
+}
+
+fn parse_with(tokens: Vec<Token>, skim: bool) -> (Program, Vec<Diagnostic>, Skimmed) {
     // A declaration can follow its use, so the names are known only after one
     // parse. A module that answers to a method-form name parses again, and each
-    // `recv.m(..)` and the statement desugar around it are decided once. The
-    // copy is kept because [`Parser::eat`] splits `>>` and `>=` in place.
-    let (mut program, mut errors) = Parser::over(tokens.clone()).program_accum();
+    // `recv.m(..)` and the statement desugar around it are decided once.
+    let mut p = Parser {
+        skim: skim.then(Vec::new),
+        ..Parser::over(tokens)
+    };
+    let (mut program, mut errors) = p.program_accum();
     let answers = answered_methods(&program);
     if !answers.is_empty() {
-        (program, errors) = Parser {
+        p.unsplit();
+        p = Parser {
             answers,
-            ..Parser::over(tokens)
-        }
-        .program_accum();
+            skim: skim.then(Vec::new),
+            ..Parser::over(std::mem::take(&mut p.tokens))
+        };
+        (program, errors) = p.program_accum();
     }
     // The prelude: the declarations every program gets, stated in `prelude.vyrn`.
     program
@@ -136,7 +197,13 @@ pub fn parse_accum(tokens: Vec<Token>) -> (Program, Vec<Diagnostic>) {
     }
     program.functions.extend(flat);
     program.number();
-    (program, errors)
+    p.unsplit();
+    let skimmed = Skimmed {
+        bodies: p.skim.take().unwrap_or_default(),
+        answers: std::mem::take(&mut p.answers),
+        tokens: p.tokens,
+    };
+    (program, errors, skimmed)
 }
 
 struct Parser {
@@ -181,6 +248,12 @@ struct Parser {
     depth: u32,
     /// See [`answered_methods`]; empty on the first parse.
     answers: HashSet<String>,
+    /// Each `>=` or `>>` that [`Parser::eat`] split in place, with the token it
+    /// was, so [`Parser::unsplit`] gives a second parse the lexer's tokens.
+    split: Vec<(usize, Tok)>,
+    /// With `Some`, each top-level function, `test` and `bench` body is skipped,
+    /// and a function's is recorded here ([`parse_skimming`]).
+    skim: Option<Vec<((usize, usize), std::ops::Range<usize>)>>,
 }
 
 /// Returns how a binary operator is written, for a diagnostic that quotes one.
@@ -286,6 +359,8 @@ impl Parser {
             errors: Vec::new(),
             depth: 0,
             answers: HashSet::new(),
+            split: Vec::new(),
+            skim: None,
         }
     }
 
@@ -370,6 +445,49 @@ impl Parser {
         t
     }
 
+    /// Restores every token [`Parser::eat`] split, latest first.
+    fn unsplit(&mut self) {
+        while let Some((at, tok)) = self.split.pop() {
+            self.tokens[at].tok = tok;
+            self.tokens[at].col -= 1;
+        }
+    }
+
+    /// Moves past one `{ .. }` group without parsing it.
+    fn skip_braces(&mut self) -> Result<(), Diagnostic> {
+        self.eat(&Tok::LBrace)?;
+        let mut depth = 1usize;
+        while depth > 0 {
+            match self.peek() {
+                Tok::LBrace => depth += 1,
+                Tok::RBrace => depth -= 1,
+                // The refusal an unclosed block's parse states.
+                Tok::Eof => return self.eat(&Tok::RBrace),
+                _ => {}
+            }
+            self.pos += 1;
+        }
+        Ok(())
+    }
+
+    /// The body of a top-level function, `test` or `bench`: parsed, or with
+    /// [`Parser::skim`] skipped. A skipped function body is recorded under `at`,
+    /// the line and column of the function's name.
+    fn top_block(&mut self, at: Option<(usize, usize)>) -> Result<Block, Diagnostic> {
+        if self.skim.is_none() {
+            return self.block();
+        }
+        let start = self.pos;
+        self.skip_braces()?;
+        if let (Some(at), Some(skipped)) = (at, self.skim.as_mut()) {
+            skipped.push((at, start..self.pos));
+        }
+        Ok(Block {
+            id: Id::NEW,
+            stmts: Vec::new(),
+        })
+    }
+
     fn eat(&mut self, expected: &Tok) -> Result<(), Diagnostic> {
         if self.peek() == expected {
             self.advance();
@@ -377,6 +495,7 @@ impl Parser {
         } else if *expected == Tok::Gt && *self.peek() == Tok::GtEq {
             // `Array<Int>= []`: the lexer max-munches `>=`; closing a generic argument
             // list takes the `>` and leaves an `=`.
+            self.split.push((self.pos, Tok::GtEq));
             self.tokens[self.pos].tok = Tok::Eq;
             self.tokens[self.pos].col += 1;
             Ok(())
@@ -384,6 +503,7 @@ impl Parser {
             // `Array<Array<T>>`: the lexer max-munches `>>`. Closing a generic list takes
             // one `>` and leaves one for the enclosing list, so a shift survives only
             // where the expression parser consumes it.
+            self.split.push((self.pos, Tok::Shr));
             self.tokens[self.pos].tok = Tok::Gt;
             self.tokens[self.pos].col += 1;
             Ok(())
@@ -1893,7 +2013,7 @@ impl Parser {
             Type::Unit
         };
 
-        let body = self.block()?;
+        let body = self.top_block(Some((line, col)))?;
         self.type_params.clear();
         Ok(Function {
             name,
@@ -1938,7 +2058,7 @@ impl Parser {
         };
         // A test and a bench are monomorphic.
         self.type_params.clear();
-        let body = self.block()?;
+        let body = self.top_block(None)?;
         self.type_params.clear();
         Ok(NamedBlock {
             name,
@@ -3493,7 +3613,8 @@ impl Parser {
         for (k, src) in exprs.iter().enumerate() {
             let e = self.parse_hole(src, line, col)?;
             // `@str` and `@concat` are unlexable, so a user call to `str` or `concat`
-            // gets the migration hint.
+            // gets the migration hint. The loader's `mentions_runtime` reads a
+            // template as a mention of `@str`.
             pieces.push(Expr::call("@str", vec![e], line));
             if !parts[k + 1].is_empty() {
                 pieces.push(Expr::str(parts[k + 1].clone()));
@@ -3795,7 +3916,8 @@ impl Parser {
     ///   loadOr(TypeName, path, d) -> ... Valid(v) => v, Invalid(i) => d, Err => d
     ///
     /// A module using `save` must import `writeAtomic` from `std/storage`; the read
-    /// helpers need no import.
+    /// helpers need no import. The loader's `mentions_runtime` lists these names,
+    /// because a skimmed body mentions `toJson` and `fromJson` only through them.
     fn storage_desugar(name: &str, args: &[Expr], line: usize) -> Option<Expr> {
         let call = |n: &str, a: Vec<Expr>| Expr::call(n, a, line);
         // `load(TypeName, path)` takes a type name as an argument; the desugar turns it

@@ -18,7 +18,7 @@ use crate::rules::refuse;
 pub fn fmt(source: &str) -> Result<String, Diagnostic> {
     let before = lexer::lex(source)?;
     let items = lexer::lex_with_trivia(source)?;
-    let output = print(&items);
+    let output = print(source, &items);
 
     // Safety invariant: lex(fmt(src)) == lex(src) without Semi tokens.
     let after = lexer::lex(&output)?;
@@ -253,7 +253,7 @@ fn bump_depth(opens: &mut Vec<usize>, tok: &Tok, line: usize) {
     }
 }
 
-fn print(items: &[Triv]) -> String {
+fn print(source: &str, items: &[Triv]) -> String {
     let roles = compute_roles(items);
     let mut out = String::new();
     // The source line of each open bracket.
@@ -286,7 +286,7 @@ fn print(items: &[Triv]) -> String {
                     indent_level(&opens, tok)
                 };
                 out.push_str(&"    ".repeat(indent));
-                out.push_str(&it.text);
+                out.push_str(it.text(source));
             }
             Some(prev_line) => {
                 let gap = it.start_line.saturating_sub(prev_line);
@@ -294,7 +294,7 @@ fn print(items: &[Triv]) -> String {
                     if is_comment || is_doc {
                         // Trailing comment: one space before it.
                         out.push(' ');
-                        out.push_str(&it.text);
+                        out.push_str(it.text(source));
                     } else {
                         let t = tok.expect("non-comment item is a token");
                         let sp = match prev_tok {
@@ -326,7 +326,7 @@ fn print(items: &[Triv]) -> String {
                         if sp {
                             out.push(' ');
                         }
-                        out.push_str(&it.text);
+                        out.push_str(it.text(source));
                     }
                 } else {
                     // Collapse blank-line runs to one, but keep one: a blank line after a `///`
@@ -341,7 +341,7 @@ fn print(items: &[Triv]) -> String {
                         indent_level(&opens, tok)
                     };
                     out.push_str(&"    ".repeat(indent));
-                    out.push_str(&it.text);
+                    out.push_str(it.text(source));
                 }
             }
         }

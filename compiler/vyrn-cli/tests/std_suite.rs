@@ -101,3 +101,24 @@ fn every_test_block_in_std_runs_and_passes() {
     );
     eprintln!("std sweep: {ran} test blocks across {modules} modules");
 }
+
+/// Every std module without a `test` block checks clean as its own root. An
+/// importer links only the std functions it reaches (`loader::drop_unreached`),
+/// so a std module's own load is where its unreached bodies are judged; `vyrn
+/// test` loads the modules the sweep above runs.
+#[test]
+fn every_std_module_without_tests_checks_as_its_own_root() {
+    let failures: Vec<String> = (std_modules().iter())
+        .filter(|p| declared_blocks(&std::fs::read_to_string(p).expect("read a std module")) == 0)
+        .filter_map(|p| {
+            let out = Command::new(env!("CARGO_BIN_EXE_vyrn"))
+                .arg("check")
+                .arg(loader_path(p))
+                .output()
+                .expect("spawn vyrn check");
+            let err = String::from_utf8_lossy(&out.stderr).to_string();
+            (!out.status.success()).then(|| format!("{}:\n{err}", p.display()))
+        })
+        .collect();
+    assert!(failures.is_empty(), "{}", failures.join("\n\n"));
+}

@@ -826,14 +826,21 @@ impl Project {
     /// `for x in c` over a user container inline a projection at the access
     /// site, and side tables are keyed by node address.
     fn checked(&self, root: &str, source: &str) -> Result<Loaded, ExitCode> {
-        self.checked_said(root, source)
+        self.checked_said(root, source, &[])
             .map_err(|_| ExitCode::FAILURE)
     }
 
-    /// [`Project::checked`], with the failure as the text it printed.
-    fn checked_said(&self, root: &str, source: &str) -> Result<Loaded, String> {
+    /// [`Project::checked`], with the failure as the text it printed, keeping
+    /// the functions `host_calls` names ([`loader::LoadOptions::host_calls`]).
+    fn checked_said(
+        &self,
+        root: &str,
+        source: &str,
+        host_calls: &'static [&'static str],
+    ) -> Result<Loaded, String> {
         let opts = loader::LoadOptions {
             expansions: Expansions::shared(),
+            host_calls,
             ..self.opts.clone()
         };
         let key = dos_to_slash(root);
@@ -1294,6 +1301,7 @@ fn routes_cmd(call: &Call) -> Outcome {
     // rows above are still true.
     let opts = loader::LoadOptions {
         expansions: Expansions::shared(),
+        host_calls: &["mountedRows"],
         ..p.opts.clone()
     };
     match vyrn_lower::load(&source, &root_key, &opts, &p.resolver, Some(&*engine()))
@@ -3395,7 +3403,9 @@ fn bench_native(
 import {{ benchOne }} from \"std/bench\"
 "
     );
-    let (mut program, _) = p.checked(path, &source)?;
+    let harness = &["benchMeasure", "benchJson"];
+    let (mut program, _) =
+        (p.checked_said(path, &source, harness)).map_err(|_| ExitCode::FAILURE)?;
 
     let selected: Vec<vyrn_frontend::ast::NamedBlock> = program
         .benches
@@ -4180,7 +4190,7 @@ fn serve_build(
     use vyrn_frontend::ast::{Block, Expr, Id, Stmt};
     // Appended before the load, so it is checked and every program line keeps
     // its number.
-    let (mut program, _) = p.checked_said(root, &format!("{source}\n{SERVE_SHIM}"))?;
+    let (mut program, _) = p.checked_said(root, &format!("{source}\n{SERVE_SHIM}"), &[])?;
     serve_rewrite(&mut program);
     let world = vyrn_lower::analyze(&program);
     if !has_served_handle(&program) {
@@ -4510,7 +4520,7 @@ impl Watch {
         let built = read(&self.server)
             .and_then(|source| serve_build(&p, &self.server, &source, self.workers, "dev"))
             .and_then(|served| {
-                let (program, world) = p.checked_said(&self.client, &read(&self.client)?)?;
+                let (program, world) = p.checked_said(&self.client, &read(&self.client)?, &[])?;
                 let bytes = vyrn_codegen::direct::compile(&program, world).map_err(said)?;
                 place_wasm(&p, &self.client, bytes, &self.out)
                     .map_err(|()| SEE_TERMINAL.to_string())?;
