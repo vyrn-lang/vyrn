@@ -17,6 +17,7 @@ pub mod insight;
 pub mod kernel;
 pub mod lastrun;
 mod pipeline;
+pub mod provenance;
 pub mod rules;
 pub mod typed;
 mod world;

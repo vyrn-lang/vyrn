@@ -14,6 +14,7 @@ use vyrn_frontend::project::Expansions;
 use vyrn_genwasm::engine;
 use vyrn_lower::insight::{self, CostFn, CostTable, Verb};
 use vyrn_lower::lastrun;
+use vyrn_lower::provenance;
 
 use vyrn_codegen::toolchain::find_clang;
 
@@ -397,6 +398,7 @@ const COMMANDS: &[Cmd] = &[
     cmd("why", Pos::One("file"), why_cmd, "a module's audience, the path segment that decided it, and every import chain that reaches it", &[
         Flag("--contract", None, "which module contract governs the file, and every export's status against it"),
         Flag("--cost", None, "per line: what it allocates, copies and grows, and the checks it keeps"),
+        Flag("--provenance", None, "per function returning an array: which parameter positions the result's positions read"),
         Flag("--capability", Some("capability"), "every import chain that pulls the capability into the artifact the file argument names"),
     ]),
     cmd("routes", Pos::File, routes_cmd, "the resolved wire table: every derived, pinned, hand-written and page path the router mounts, with its source", &[
@@ -934,8 +936,8 @@ fn scaffold(call: &Call) -> Outcome {
     Ok(ExitCode::SUCCESS)
 }
 
-/// `vyrn why`: dispatches to the audience, `--contract`, `--cost` or
-/// `--capability` report. `--contract` prints the contract that governs a
+/// `vyrn why`: dispatches to the audience, `--contract`, `--cost`,
+/// `--provenance` or `--capability` report. `--contract` prints the contract that governs a
 /// module and the status of each of its members; it exits 1 when the file is
 /// in no role.
 fn why_cmd(call: &Call) -> Outcome {
@@ -945,6 +947,9 @@ fn why_cmd(call: &Call) -> Outcome {
     }
     if call.has("--cost") {
         return why_cost(flags, file);
+    }
+    if call.has("--provenance") {
+        return why_provenance(flags, file);
     }
     if !call.has("--contract") {
         return why_audience(flags, file);
@@ -1536,27 +1541,7 @@ fn cost_table(
 /// copy, grow a container, enter an allocating function of another file or
 /// keep a check, and how many loops enclose each. Exit 0 whenever it could answer.
 fn why_cost(flags: GlobalFlags, file: &str) -> Outcome {
-    let path = match Path::new(file).canonicalize() {
-        Ok(p) => dos_to_slash(&p.to_string_lossy()),
-        Err(e) => {
-            eprintln!("error: cannot read {file}: {e}");
-            return Err(ExitCode::from(2));
-        }
-    };
-    let raw = read_source(&path)?;
-    let p = Project::of(Some(&path), flags)?;
-    // A generator input's module is its generator's view of it.
-    let source = if path.ends_with(".vyrn") {
-        raw
-    } else {
-        let dir = Path::new(&path).parent().unwrap_or(Path::new("."));
-        let claims = project_claims(&vyrn_frontend::manifest::app_root(dir), &p.opts);
-        input_view(&claims, &path, &p)
-            .map(|v| v.code)
-            .unwrap_or_default()
-    };
-    let (program, world) = p.checked(&path, &source)?;
-
+    let (path, source, (program, world)) = why_checked(flags, file)?;
     println!("{}", dos_to_slash(file));
     // The last `vyrn run --profile` of this root, when its source and imports are the same.
     let last = match lastrun::load(&path, &lastrun::stamp(&source, &program.module_hashes)) {
@@ -1573,18 +1558,7 @@ fn why_cost(flags: GlobalFlags, file: &str) -> Outcome {
             continue;
         }
         let f = &program.functions[id.index()];
-        let mut tys: Vec<&vyrn_frontend::ast::Type> = f.params.iter().map(|p| &p.ty).collect();
-        tys.push(&f.ret);
-        let sp = program.spellings.speech(&None).sentence(&tys, &[&f.name]);
-        let params: Vec<String> = (f.params.iter())
-            .map(|p| format!("{}: {}", p.name, sp.ty(&p.ty)))
-            .collect();
-        println!(
-            "fn {}({}) -> {}",
-            sp.name(&f.name),
-            params.join(", "),
-            sp.ty(&f.ret)
-        );
+        println!("{}", fn_head(&program, id));
         let mut last_line = 0;
         for ((line, verb), row) in &shown {
             let num = if *line == last_line {
@@ -1624,6 +1598,64 @@ fn why_cost(flags: GlobalFlags, file: &str) -> Outcome {
         count(kept, "checks kept"),
         count(proved, "checks proved"),
     );
+    Ok(ExitCode::SUCCESS)
+}
+
+/// The canonical path of `file`, the source a `why` report reads, and the
+/// program checked from it. A generator input's source is its generator's
+/// view of it.
+fn why_checked(flags: GlobalFlags, file: &str) -> Result<(String, String, Loaded), ExitCode> {
+    let path = match Path::new(file).canonicalize() {
+        Ok(p) => dos_to_slash(&p.to_string_lossy()),
+        Err(e) => {
+            eprintln!("error: cannot read {file}: {e}");
+            return Err(ExitCode::from(2));
+        }
+    };
+    let raw = read_source(&path)?;
+    let p = Project::of(Some(&path), flags)?;
+    let source = if path.ends_with(".vyrn") {
+        raw
+    } else {
+        let dir = Path::new(&path).parent().unwrap_or(Path::new("."));
+        let claims = project_claims(&vyrn_frontend::manifest::app_root(dir), &p.opts);
+        input_view(&claims, &path, &p)
+            .map(|v| v.code)
+            .unwrap_or_default()
+    };
+    let loaded = p.checked(&path, &source)?;
+    Ok((path, source, loaded))
+}
+
+/// `fn name(param: Type, ..) -> Type` of the source function `id`, in the
+/// program's spellings.
+fn fn_head(program: &vyrn_frontend::ast::Program, id: vyrn_frontend::ast::FnId) -> String {
+    let f = &program.functions[id.index()];
+    let mut tys: Vec<&vyrn_frontend::ast::Type> = f.params.iter().map(|p| &p.ty).collect();
+    tys.push(&f.ret);
+    let sp = program.spellings.speech(&None).sentence(&tys, &[&f.name]);
+    let params: Vec<String> = (f.params.iter())
+        .map(|p| format!("{}: {}", p.name, sp.ty(&p.ty)))
+        .collect();
+    format!(
+        "fn {}({}) -> {}",
+        sp.name(&f.name),
+        params.join(", "),
+        sp.ty(&f.ret)
+    )
+}
+
+/// `vyrn why --provenance <file>`: per function of the file that returns an
+/// array, which parameter positions the result's positions read
+/// ([`provenance::table`]). Exit 0 whenever it could answer.
+fn why_provenance(flags: GlobalFlags, file: &str) -> Outcome {
+    let (_, _, (program, world)) = why_checked(flags, file)?;
+    println!("{}", dos_to_slash(file));
+    for (id, body, p) in provenance::table(&program, &world) {
+        println!("{}", fn_head(&program, id));
+        let name = |n: vyrn_frontend::core::Name| body.names[n.index()].source.clone();
+        println!("  result: {}", p.text(&name));
+    }
     Ok(ExitCode::SUCCESS)
 }
 

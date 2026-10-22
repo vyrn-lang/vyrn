@@ -564,6 +564,18 @@ reason in `Check::why`, written beside the verdict by `elide::Walk::why` from
 the first goal that failed and the origin of its names (`elide::Origin`); it
 calls the prover no more often.
 
+`vyrn why --provenance` prints `provenance::table`: per function of the root
+file that returns an array, the class of the backward map from the result's
+positions to each array parameter's, read from the same bodies as `--cost`.
+`provenance::of` interprets one body abstractly: per array it keeps each
+parameter's monotonicity, last and first index pushed, and for an in-place
+store the one duplicated position and the names that hold the content it
+displaced. A builtin's effect on positions is its row's `ShapeMap`. A loop
+whose head test is its only exit, whose counter steps by one, and which
+pushes one element of a parameter at the counter every turn covers the
+parameter from the counter's start to the bound. `tests/provenance.rs` pins
+the classes of the 48 functions the analytic report classified by hand.
+
 ## Where a change goes
 
 - A new surface form: a desugar in the parser, or a lowering in `core::build`.
