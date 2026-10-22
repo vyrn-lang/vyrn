@@ -23,7 +23,7 @@
 import { replace } from "std/strings"
 
 /// `Warning`: this compiled, but. `Error`: this does not compile.
-export type Severity = | Warning | Error
+export type Severity = enum { Warning, Error }
 
 /// A report anchored in an input file, at a 1-based `line` and `col`.
 export fn report(

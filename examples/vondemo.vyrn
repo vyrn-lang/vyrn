@@ -4,7 +4,7 @@ import { configTypeName, configFieldNames, configText } from vonModule("./vondem
 
 export type Port = Int64 where value >= 1 && value <= 65535
 
-export type Level = | Debug | Info | Warn | Error
+export type Level = enum { Debug, Info, Warn, Error }
 
 export type AppConfig = {
     name: String,
@@ -18,7 +18,7 @@ export type AppConfig = {
 
 export type TlsFiles = { cert: String, key: String }
 
-export type Tls = | Disabled | Enabled(TlsFiles)
+export type Tls = enum { Disabled, Enabled(TlsFiles) }
 
 fn main() -> Int64 {
     print(configTypeName())

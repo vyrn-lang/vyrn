@@ -2,9 +2,9 @@
 // directly. `if let` reads one variant when the others need no arm of their own.
 import { joinWith, indexOf } from "std/strings"
 
-type Level =
-    | Info
-    | Warn(String)
+type Level = enum {
+    Info,
+    Warn(String) }
 
 fn found(haystack: String, needle: String) -> String {
     if let Some(at) = indexOf(haystack, needle) {

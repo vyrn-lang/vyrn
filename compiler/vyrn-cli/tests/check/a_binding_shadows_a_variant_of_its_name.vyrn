@@ -1,6 +1,6 @@
 // A parameter and a `let` shadow the variant of their name, as an inner
 // binding shadows an outer one; the variant is back after the block.
-type E = | A | B
+type E = enum { A, B }
 
 fn f(A: Int64) -> Int64 {
     return A + 1

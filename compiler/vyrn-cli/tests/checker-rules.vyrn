@@ -7,8 +7,8 @@
 type P = { a: Int64, age: Age }
 type Age = Int64 where value >= 18
 type Span = { lo: Int64, hi: Int64 } where lo < hi
-type E = | A(Int64) | B
-type M<T> = | Nothing | Just(T)
+type E = enum { A(Int64), B }
+type M<T> = enum { Nothing, Just(T) }
 type Keyed = { data: Array<Int64> }
 impl Index for Keyed {
     fn at(read self, k: String) -> read Int64 {

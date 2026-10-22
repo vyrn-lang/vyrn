@@ -2,16 +2,16 @@
 
 type Histogram = { name: String, counts: SmallArray<Int64, 4> }
 
-type Bucket =
-    | Empty
-    | Filled(SmallArray<Int64, 3>)
+type Bucket = enum {
+    Empty,
+    Filled(SmallArray<Int64, 3>) }
 
 type Point = { x: Int64, y: Int64 }
 type Swapped = { y: Int64, x: Int64 }
 type Named = { name: String, n: Int64 }
-type Slot =
-    | Free
-    | Held(String)
+type Slot = enum {
+    Free,
+    Held(String) }
 
 fn firstPoint(ps: SmallArray<Swapped, 3>) -> String {
     return "\{ps[0].x} \{ps[0].y}"

@@ -1,8 +1,8 @@
 // Named projections.
 
-type Entry =
-    | Named(String)
-    | Blank
+type Entry = enum {
+    Named(String),
+    Blank }
 
 type Ledger = { entries: Array<Entry>, labels: Array<String> }
 

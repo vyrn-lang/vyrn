@@ -12,13 +12,13 @@ export type JsonField = { key: String, value: Json }
 
 /// A JSON value. `JNum` holds the raw, validated number text, never a float,
 /// so emit -> parse -> emit is byte-stable.
-export type Json =
-    | JNull
-    | JBool(Bool)
-    | JNum(String)
-    | JStr(String)
-    | JArr(Array<Json>)
-    | JObj(Array<JsonField>)
+export type Json = enum {
+    JNull,
+    JBool(Bool),
+    JNum(String),
+    JStr(String),
+    JArr(Array<Json>),
+    JObj(Array<JsonField>) }
 
 /// A hand-written copy: `Json` reaches itself through `JArr` and `JObj`, so the
 /// structural copy has no bottom and is refused. The declaration covers a

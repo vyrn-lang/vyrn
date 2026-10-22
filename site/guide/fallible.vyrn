@@ -4,10 +4,10 @@
 import { Fallible } from "std/fallible"
 import { joinWith } from "std/strings"
 
-type Http =
-    | Body(String)
-    | NotFound
-    | ServerError(String)
+type Http = enum {
+    Body(String),
+    NotFound,
+    ServerError(String) }
 
 impl Fallible for Http {
     type Output = String

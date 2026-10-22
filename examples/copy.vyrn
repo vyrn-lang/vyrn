@@ -7,7 +7,7 @@ type Inner = { tag: String }
 
 type Outer = { label: String, inner: Inner, n: Int64 }
 
-type Note = | Blank | Text(String) | Counted(String, Int64)
+type Note = enum { Blank, Text(String), Counted(String, Int64) }
 
 fn built(s: String) -> String {
     return s + "!"

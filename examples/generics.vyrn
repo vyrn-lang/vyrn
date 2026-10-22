@@ -27,9 +27,9 @@ fn unbox<T>(b: Box<T>) -> T {
     return b.value.copy()
 }
 
-type Opt<T> =
-    | Wrap(T)
-    | Empty
+type Opt<T> = enum {
+    Wrap(T),
+    Empty }
 
 fn orElse<T>(o: Opt<T>, fallback: T) -> T {
     return match o {

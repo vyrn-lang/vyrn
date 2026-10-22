@@ -1,6 +1,6 @@
 // Every link declares a concrete named result (`E`, then `String`), so the
 // chain resolves.
-type E = | Tag(String) | Blank
+type E = enum { Tag(String), Blank }
 type Led = { rows: Array<E> }
 impl Index for Led {
     fn at(read self, i: Int64) -> read E {

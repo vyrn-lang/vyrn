@@ -2,10 +2,10 @@
 // must cover every one — leave an arm out and the file does not compile.
 import { joinWith } from "std/strings"
 
-type Shape =
-    | Circle(Int64)
-    | Rect(Int64, Int64)
-    | Point
+type Shape = enum {
+    Circle(Int64),
+    Rect(Int64, Int64),
+    Point }
 
 fn describeShape(s: Shape) -> String {
     return match s {

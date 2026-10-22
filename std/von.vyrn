@@ -24,15 +24,15 @@ export type VonEntry = { key: String, value: Von, line: Int64 }
 
 /// A VON value. Numbers hold their raw, validated source text, so
 /// `18446744073709551615` survives and emit -> parse -> emit is byte-stable.
-export type Von =
-    | VRecord(String, Array<VonField>)
-    | VVariant(String, Array<Von>)
-    | VArray(Array<Von>)
-    | VMap(Array<VonEntry>)
-    | VStr(String)
-    | VInt(String)
-    | VFloat(String)
-    | VBool(Bool)
+export type Von = enum {
+    VRecord(String, Array<VonField>),
+    VVariant(String, Array<Von>),
+    VArray(Array<Von>),
+    VMap(Array<VonEntry>),
+    VStr(String),
+    VInt(String),
+    VFloat(String),
+    VBool(Bool) }
 
 /// One `import type { A, B } from "spec"` line of a document header.
 export type VonImport = { names: Array<String>, module: String }

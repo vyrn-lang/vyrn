@@ -2,7 +2,7 @@
 
 type Cargo = { weight: Int64, label: String }
 
-type Crate<T> = | Empty | Held(T)
+type Crate<T> = enum { Empty, Held(T) }
 
 fn unwrapInline() -> Cargo {
     return match Held(Cargo { weight: 7, label: "seven" }) {
@@ -11,7 +11,7 @@ fn unwrapInline() -> Cargo {
     }
 }
 
-type Choice = | First | Second
+type Choice = enum { First, Second }
 
 fn nested(p: Choice) -> Cargo {
     let boxed = match p {

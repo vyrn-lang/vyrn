@@ -10,11 +10,11 @@ impl Hashable for Point {
     }
 }
 
-type Suit =
-    | Clubs
-    | Diamonds
-    | Hearts
-    | Spades
+type Suit = enum {
+    Clubs,
+    Diamonds,
+    Hearts,
+    Spades }
 
 impl Hashable for Suit {
     fn hash(self) -> UInt64 {

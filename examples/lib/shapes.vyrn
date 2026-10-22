@@ -4,10 +4,10 @@
 
 export type Point = { x: Int64, y: Int64 }
 
-export type Color =
-    | Red
-    | Green
-    | Blue
+export type Color = enum {
+    Red,
+    Green,
+    Blue }
 
 export fn origin() -> Point {
     return Point { x: 0, y: 0 }

@@ -7,7 +7,7 @@ type B = { y: Int64, x: String }
 type A = { x: String, y: Int64 }
 type W = { z: String, y: Int64, x: String }
 type H = { p: B, n: Int64 }
-type S = | P(B) | Q
+type S = enum { P(B), Q }
 type X = { q: A, z: String }
 type Y = { q: B }
 

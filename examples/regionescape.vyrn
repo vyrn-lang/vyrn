@@ -5,9 +5,9 @@ import { joinWith } from "std/strings"
 
 type Tagged = { label: String, size: Int64 }
 
-type Boxed =
-    | Empty
-    | Wrapped(String, Int64)
+type Boxed = enum {
+    Empty,
+    Wrapped(String, Int64) }
 
 let mut held: String = ""
 

@@ -2,11 +2,11 @@
 
 import { Fallible } from "std/fallible"
 
-type Http =
-    | Body(String)
-    | Created(String)
-    | NotFound
-    | ServerError(String)
+type Http = enum {
+    Body(String),
+    Created(String),
+    NotFound,
+    ServerError(String) }
 
 impl Fallible for Http {
     type Output = String
