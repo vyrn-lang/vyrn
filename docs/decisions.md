@@ -33,7 +33,7 @@ pull request.
 - `SmallArray<T, N>` is the only type with an integer argument (1 to 64). There are no user const generics, and `Array` has no hidden small-buffer optimization, because that would ripple through the ABI.
 - Absence is `Option<T>` and failure is `Result<T, E>` or `Validation<T>`. There is no null and there are no exceptions.
 - `Option` and `Result` are ordinary declared sums (`enum { None, Some(T) }`, `enum { Err(E), Ok(T) }`), so one rule serves every sum in every pass.
-- An enum is declared `type T = enum { A(Int64), B }` (the user's decision of 2026-10-22). The leading-bar form `type T = | A(Int64) | B` gets the sentence any `|` in type position gets, with no hint, as the spellings dropped on 2026-10-01 do; `vyrn fix` rewrites it and keeps every line. `|` in type position stays free for unions of validated types.
+- An enum is declared `type T = enum { A(Int64), B }` (the user's decision of 2026-10-22). The leading-bar form `type T = | A(Int64) | B` gets the parse error a leading `|` in a type gets, with no hint, as the spellings dropped on 2026-10-01 do; `vyrn fix` rewrites it and keeps every line. `|` in type position spells a union of validated types.
 - Accumulating validation is the prelude's `Issue { key, path, message }` with `Validation<T> = enum { Valid(T), Invalid(Array<Issue>) }`. A form needs every error at once, and `key` is a stable i18n id.
 - An interpolation whose holes are finite string types is checked by DFA containment. A proof costs nothing at run time, and a failure names a witness string.
 - A `lazy T` field holds a `fn() -> T`, with `T` as written, as every `fn` type keeps its parts. A forced read is a call through that type, so it carries its initializer's effects.
