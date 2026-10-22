@@ -3302,27 +3302,78 @@ fn json_pretty(j: &vyrn_frontend::schema::Json, depth: usize) -> String {
 
 /// `vyrn test [file] [--name <substring>]`: runs the root file's `test` blocks
 /// in declaration order and exits 1 if any failed. A file with no tests prints
-/// `no tests` and exits 0.
+/// `no tests` and exits 0. With no file, inside a project, runs the project's
+/// modules ([`test_project`]).
 fn test_cmd(call: &Call) -> Outcome {
-    let (p, path) = call.root()?;
-    let filter = call.value("--name");
-    let (program, _) = p.checked(&path, &read_source(&path)?)?;
-    let has_tests = program.tests.iter().any(|t| t.module.is_none());
-    if !has_tests {
-        println!("no tests");
-        return Ok(ExitCode::SUCCESS);
+    if call.file.is_none() {
+        let p = Project::of(None, call.flags)?;
+        if let Some(dir) = p.manifest.as_ref().map(|m| m.dir.clone()) {
+            return test_project(call, &p, &dir);
+        }
     }
+    let (p, path) = call.root()?;
+    test_root(call, &p, &path)
+}
+
+/// Runs each module under `dir` that declares a `test`, as its own root, under
+/// a line naming its path. A directory holding its own `vyrn.json` or
+/// `Cargo.toml` is another project, whose `.vyrn` files are its own, and is
+/// skipped. A module that does not lex counts, so its error is reported. Exits
+/// 1 if any module fails to check or any test fails.
+fn test_project(call: &Call, p: &Project, dir: &str) -> Outcome {
+    let base = Path::new(dir);
+    let nested = |f: &Path| {
+        (f.ancestors().skip(1)).take_while(|a| *a != base).any(|a| {
+            ["vyrn.json", "Cargo.toml"]
+                .iter()
+                .any(|m| a.join(m).is_file())
+        })
+    };
+    let declares_test = |f: &str| {
+        let src = std::fs::read_to_string(f).unwrap_or_default();
+        vyrn_frontend::lexer::lex(&src).map_or(true, |t| {
+            !vyrn_frontend::parser::parse_accum(t).0.tests.is_empty()
+        })
+    };
+    let (mut modules, mut failed) = (0, 0);
+    for f in files_under(base, &["vyrn"]) {
+        if nested(Path::new(&f)) || !declares_test(&f) {
+            continue;
+        }
+        let rel = f.strip_prefix(&format!("{dir}/")).unwrap_or(&f);
+        println!("{}{rel}", if modules == 0 { "" } else { "\n" });
+        modules += 1;
+        if test_root(call, p, &f) != Ok(ExitCode::SUCCESS) {
+            failed += 1;
+        }
+    }
+    println!("\n{modules} modules, {failed} failed");
+    Ok(if failed == 0 {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    })
+}
+
+/// Runs the `test` blocks of the root `path` ([`test_cmd`]).
+fn test_root(call: &Call, p: &Project, path: &str) -> Outcome {
+    let filter = call.value("--name");
+    let (program, _) = p.checked(path, &read_source(path)?)?;
     let bodies: Vec<Body> = program
         .tests
         .iter()
-        .filter(|t| t.module.is_none() && filter.is_none_or(|s| t.name.contains(s)))
+        .filter(|t| filter.is_none_or(|s| t.name.contains(s)))
         .map(|t| Body {
             name: t.name.clone(),
             body: t.body.clone(),
             line: t.line,
         })
         .collect();
-    Ok(bodies_wasm(&path, &program, "test", &bodies))
+    if bodies.is_empty() {
+        println!("no tests");
+        return Ok(ExitCode::SUCCESS);
+    }
+    Ok(bodies_wasm(path, &program, "test", &bodies))
 }
 
 /// `vyrn bench`: runs the root file's `bench` blocks in declaration order.
@@ -3355,11 +3406,7 @@ fn bench_cmd(call: &Call) -> Outcome {
     let (program, _) = p.checked(&path, &read_source(&path)?)?;
 
     let matches = |name: &str| filter.is_none_or(|sub| name.contains(sub));
-    let has_selected = program
-        .benches
-        .iter()
-        .any(|b| b.module.is_none() && matches(&b.name));
-    if !has_selected {
+    if !program.benches.iter().any(|b| matches(&b.name)) {
         println!("no benches");
         return Ok(ExitCode::SUCCESS);
     }
@@ -3368,7 +3415,7 @@ fn bench_cmd(call: &Call) -> Outcome {
         let bodies: Vec<Body> = program
             .benches
             .iter()
-            .filter(|b| b.module.is_none() && matches(&b.name))
+            .filter(|b| matches(&b.name))
             .map(|b| Body {
                 name: b.name.clone(),
                 body: b.body.clone(),
@@ -3416,7 +3463,7 @@ import {{ benchOne }} from \"std/bench\"
     let selected: Vec<vyrn_frontend::ast::NamedBlock> = program
         .benches
         .iter()
-        .filter(|b| b.module.is_none() && filter.is_none_or(|sub| b.name.contains(sub)))
+        .filter(|b| filter.is_none_or(|sub| b.name.contains(sub)))
         .cloned()
         .collect();
     let mut harness_stmts: Vec<Stmt> = Vec::new();
@@ -5676,7 +5723,8 @@ struct Body {
 /// One module and one instance, with each body an exported
 /// `__vyrn_body_<k>`, so body `k+1` sees the module state body `k` wrote.
 /// A trap ends the call, not the store: its message becomes the
-/// `FAILED:` line and the next body runs.
+/// `FAILED:` line and the next body runs. Each caller says `no tests` or
+/// `no benches` instead of passing no body.
 fn bodies_wasm(
     path: &str,
     program: &vyrn_frontend::ast::Program,
@@ -5684,11 +5732,6 @@ fn bodies_wasm(
     bodies: &[Body],
 ) -> ExitCode {
     use vyrn_frontend::ast::{Block, Expr, Id, Stmt, Type};
-    if bodies.is_empty() {
-        // `test` said `no tests` before the filter; `bench` says it after.
-        println!("no {kind}es");
-        return ExitCode::SUCCESS;
-    }
     let mut prog = program.clone();
     prog.functions
         .retain(|f| !(f.name == "main" && f.module.is_none()));

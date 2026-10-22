@@ -325,8 +325,8 @@ pub struct Host {
 /// Both are checked as a Unit-returning function body under an unspellable name
 /// (`test@<index>`, `bench@<index>`), so every body analysis applies unchanged.
 /// The keyword decides the [`Program`] field, and the field decides which
-/// subcommand runs it. Only the root module's blocks run; an imported module's
-/// still type-check.
+/// subcommand runs it. Only the root module's blocks are parsed, checked and
+/// run; an imported module's are skipped unparsed ([`crate::parser::parse_imported`]).
 #[derive(Debug, Clone, PartialEq)]
 pub struct NamedBlock {
     /// The string literal after `test` or `bench`. Unique per file.
@@ -334,8 +334,6 @@ pub struct NamedBlock {
     /// Timed under `vyrn bench`, run once under `--check`.
     pub body: Block,
     pub doc: Option<String>,
-    /// `None` for the root module. Set by the loader.
-    pub module: Option<String>,
     pub line: usize,
 }
 

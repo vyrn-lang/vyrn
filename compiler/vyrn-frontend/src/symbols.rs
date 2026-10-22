@@ -1832,14 +1832,11 @@ fn decl_symbols(
         (Of::Test, "test", &program.tests),
         (Of::Bench, "bench", &program.benches),
     ] {
-        for b in blocks
-            .iter()
-            .filter(|b| keep(of, &b.name, &b.module, false))
-        {
+        for b in blocks.iter().filter(|b| keep(of, &b.name, &None, false)) {
             let detail = format!("{word} {:?}", b.name);
             out.push(one(
                 of,
-                &b.module,
+                &None,
                 sym(&b.name, SymbolKind::Method, b.line, detail, b.doc.clone()),
             ));
         }

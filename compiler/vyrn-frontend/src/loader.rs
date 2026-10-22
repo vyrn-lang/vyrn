@@ -1253,10 +1253,12 @@ fn load_modules(
             let spec = import_specifier("", key, opts.std_root.as_deref());
             spec.starts_with("std/") && RT_MODULES.iter().all(|rt| rt.spec != spec)
         };
-        let cache_key = if skim {
-            format!("{hash}:skim")
-        } else {
-            hash.clone()
+        // The root parses its `test` and `bench` blocks, an imported module skips
+        // them, so one text loaded as both parses twice.
+        let cache_key = match (is_root, skim) {
+            (true, _) => hash.clone(),
+            (false, false) => format!("{hash}:imported"),
+            (false, true) => format!("{hash}:skim"),
         };
         let parsed = PARSE_CACHE.with(|c| c.borrow().get(&cache_key).cloned());
 
@@ -1377,14 +1379,14 @@ fn load_modules(
                         .map(|d| in_module(d, key, root_key))
                         .collect()
                 };
-                let (mut program, errors, skimmed) = match skim {
+                let (mut program, errors, skimmed) = match is_root {
                     true => {
-                        let (program, errors, skimmed) = parser::parse_skimming(tokens);
-                        (program, errors, Some(skimmed))
-                    }
-                    false => {
                         let (program, errors) = parser::parse_accum(tokens);
                         (program, errors, None)
+                    }
+                    false => {
+                        let (program, errors, skimmed) = parser::parse_imported(tokens, skim);
+                        (program, errors, skim.then_some(skimmed))
                     }
                 };
                 if !errors.is_empty() {
@@ -2711,12 +2713,10 @@ fn decls(p: &Program) -> impl Iterator<Item = Decl<'_>> {
         )
 }
 
-/// The owning-module slot of everything a module holds, tests, benches and
-/// impl members included. A contract's names the library a diagnostic blames,
-/// a global's carries the same-module initializer rule, a test's or bench's
-/// lets `vyrn test <root>` run the root's alone, and an impl member's keeps
-/// the editor's root index to the root. Separate from [`decls`] because the
-/// borrow is unique.
+/// The owning-module slot of everything a module holds, impl members included.
+/// A contract's names the library a diagnostic blames, a global's carries the
+/// same-module initializer rule, and an impl member's keeps the editor's root
+/// index to the root. Separate from [`decls`] because the borrow is unique.
 fn decl_modules_mut(p: &mut Program) -> impl Iterator<Item = &mut Option<String>> {
     let members = (p.impls.iter_mut()).flat_map(|i| i.methods.iter_mut().chain(&mut i.places));
     (p.type_decls.iter_mut().map(|t| &mut t.module))
@@ -2725,8 +2725,6 @@ fn decl_modules_mut(p: &mut Program) -> impl Iterator<Item = &mut Option<String>
         .chain(p.protocols.iter_mut().map(|pr| &mut pr.module))
         .chain(p.contracts.iter_mut().map(|c| &mut c.module))
         .chain(p.globals.iter_mut().map(|g| &mut g.module))
-        .chain(p.tests.iter_mut().map(|t| &mut t.module))
-        .chain(p.benches.iter_mut().map(|b| &mut b.module))
 }
 
 /// Resolves import aliases into the flat namespace, before the
@@ -4025,8 +4023,6 @@ fn link(
     let mut extra_protocols = Vec::new();
     let mut extra_contracts = Vec::new();
     let mut extra_impls = Vec::new();
-    let mut extra_tests = Vec::new();
-    let mut extra_benches = Vec::new();
     // Every module's state joins the linked program and initializes before
     // `main` in linker order: dependencies first.
     let mut extra_globals = Vec::new();
@@ -4045,10 +4041,6 @@ fn link(
             extra_contracts.extend(p.contracts);
             extra_impls.extend(p.impls);
             extra_globals.extend(p.globals);
-            // Imported tests and benches keep their `module` tag: they type-check
-            // but do not run under `vyrn test <root>`.
-            extra_tests.extend(p.tests);
-            extra_benches.extend(p.benches);
         }
     }
     let mut program = merged.expect("root module was loaded");
@@ -4079,8 +4071,6 @@ fn link(
     let mut ordered = extra_globals;
     ordered.append(&mut program.globals);
     program.globals = ordered;
-    program.tests.extend(extra_tests);
-    program.benches.extend(extra_benches);
     program.imports.clear(); // consumed
     program.module_hashes = module_hashes;
     program.spellings = std::sync::Arc::new(spellings);
@@ -4276,9 +4266,7 @@ fn drop_unreached(
         }
     }
     for t in program.tests.iter().chain(&program.benches) {
-        if !is_lazy(&t.module) {
-            crate::ast::spelled(&t.body, &mut roots);
-        }
+        crate::ast::spelled(&t.body, &mut roots);
     }
     roots.extend(program.globals.iter().map(|g| g.name.as_str()));
     for p in program
@@ -4314,8 +4302,6 @@ fn drop_unreached(
         .collect();
     let functions = std::mem::take(&mut program.functions).into_iter().zip(kept);
     program.functions = functions.filter_map(|(f, k)| k.then_some(f)).collect();
-    program.tests.retain(|t| !is_lazy(&t.module));
-    program.benches.retain(|b| !is_lazy(&b.module));
 }
 
 /// Returns every name `roots` reach in `program`: its functions and module

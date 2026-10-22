@@ -1474,14 +1474,12 @@ fn check_named_blocks(
     body: fn(u32) -> SourceBody,
     out: &mut Vec<Diagnostic>,
 ) {
-    let mut seen: HashMap<(Option<String>, String), usize> = HashMap::new();
+    let mut seen: HashMap<&str, usize> = HashMap::new();
     for t in blocks {
-        let key = (t.module.clone(), t.name.clone());
-        if let Some(prev) = seen.get(&key) {
-            let d = cerr!(t.line, DuplicateBlockName, noun, name = t.name, prev);
-            out.push(d.in_file(t.module.clone()));
+        if let Some(prev) = seen.get(t.name.as_str()) {
+            out.push(cerr!(t.line, DuplicateBlockName, noun, name = t.name, prev));
         } else {
-            seen.insert(key, t.line);
+            seen.insert(&t.name, t.line);
         }
     }
     *host.borrow_mut() = true;
@@ -1490,15 +1488,14 @@ fn check_named_blocks(
             // The head is synthetic but the body is the real node, so what the
             // checker records lands on the nodes `own` and the lowering walk.
             let synthetic = Function {
-                module: t.module.clone(),
                 line: t.line,
                 ..Function::synth(format!("{noun}@{i}"), Vec::new(), Type::Unit, Vec::new())
             };
             if let Err(s) = checker.function_body(&synthetic, &t.body) {
-                out.push(s.in_file(t.module.clone()));
+                out.push(s.in_file(None));
             }
             for s in checker.errors.borrow_mut().drain(..) {
-                out.push(s.in_file(t.module.clone()));
+                out.push(s.in_file(None));
             }
         });
     }
