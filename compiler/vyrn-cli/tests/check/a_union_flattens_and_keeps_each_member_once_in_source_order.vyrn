@@ -1,0 +1,12 @@
+type Port = Int64 where value >= 1 && value <= 65535
+type Age = Int64 where value >= 18
+type Small = Int64 where value < 10
+
+fn main() -> Int64 {
+    let c = true
+    let a = if c { Age(20) } else { Port(1) }
+    let b = if c { Small(2) } else { Age(21) }
+    let u = if c { a } else { b }
+    let d = if c { u } else { "no" }
+    return 0
+}

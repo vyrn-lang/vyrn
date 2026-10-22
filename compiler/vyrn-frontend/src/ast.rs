@@ -1234,7 +1234,10 @@ impl<'a> std::fmt::Display for Said<'a> {
             Type::Bool => write!(f, "Bool"),
             Type::Str => write!(f, "String"),
             Type::Unit => write!(f, "Unit"),
-            Type::Named(n) => write!(f, "{}", name(n)),
+            Type::Named(n) => match crate::types::union_members(self.0) {
+                Some(ms) => write!(f, "{}", ms.map(name).collect::<Vec<_>>().join(" | ")),
+                None => write!(f, "{}", name(n)),
+            },
             Type::Param(n) => write!(f, "{}", written_param(n)),
             Type::Record(fields) => {
                 write!(f, "{{ ")?;

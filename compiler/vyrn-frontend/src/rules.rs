@@ -411,7 +411,7 @@ rules! {
     IfNeedsElse {}
         "`if` used as an expression needs an `else` (every branch \
         must yield a value)";
-    MatchArmMismatch { rt, bty } "`match` arms have differing types: {rt} vs {bty}";
+    ArmMismatch { form, rt, bty } "{form} have differing types: {rt} vs {bty}";
     ParamOperand { t, r } "cannot combine type parameter `{t}` with {r}";
     ParamNeedsNum { t } "`{t}` needs a `Num` bound for arithmetic";
     ParamNeedsOrd { t } "`{t}` needs an `Ord` bound to compare";

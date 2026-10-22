@@ -214,6 +214,8 @@ type User = {
 - Between a group's first store and its check, nothing reads the record whole. When the record is a `modify` parameter, the group also calls no function the program declares and no function value, and has no `?`, because the caller would see the record with the rule unchecked. A `?` or a trap inside the group leaves a record the function owns unobserved, so both are allowed there. A `return` statement ends the group, so the check runs before it.
 - An element of an array field the rule reads only as `.length` is assigned in place with no check: `c.xs[i] = v` keeps every length. A store into a field of module state, or into a field of a nested record with its own rule, is refused; rebuild the record.
 - A validated value decays to its base type, so a `Port` is usable as an `Int64`.
+- Branches of an `if` or arms of a `match` of different validated scalar types over one base join to their union. `if fast { Port(8080) } else { Age(30) }` is a `Port | Age`: an `Int64` where `Port`'s rule or `Age`'s holds. Each branch proved its own side, so the join adds no check.
+- A union lists each member once, in source order, and a union of unions flattens. `Port | Int64` is `Int64`. A union decays to its base, and where a `Port` is required it is checked at the boundary, as an `Age` is. A union has no spelling and no constructor, a raw value never becomes one, and a `let mut` binding of one holds its base. Validated records and arrays, and types over different bases, do not join.
 - An alias without `where` is transparent: `type Id = Int64` names `Int64`, and each value assigns to the other. An alias has no constructor. A distinct type is a validated type, or a record with one field.
 - A `String` type whose regular expression denotes a finite language is a finite string type. An interpolation whose holes are all finite types has a finite type too, and assigning it to a validated `String` type is proven by automaton containment at compile time, or refused with the key that escapes.
 
@@ -344,7 +346,7 @@ let text = match s {
 ```
 
 - A pattern is a variant name with one binder per payload. There are no wildcard arms, no nested patterns and no literal patterns; write an arm per variant, and bind an unused payload to `_`.
-- `match` is an expression, and its arms unify to one type. An arm that calls `panic` has type `Never` and fits any arm type.
+- `match` is an expression, and its arms unify to one type, or to a union of validated types ([Validated types](#validated-types)). An arm that calls `panic` has type `Never` and fits any arm type.
 - In statement position an arm may be a block: `Wide(a, b) => { .. }`. A block arm yields no value.
 - `match consume s { .. }` moves the payloads out of `s`.
 

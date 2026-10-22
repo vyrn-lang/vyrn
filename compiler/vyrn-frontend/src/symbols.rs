@@ -3882,6 +3882,21 @@ fn main() -> Int64 {
     }
 
     #[test]
+    fn a_join_of_validated_types_hovers_as_their_union() {
+        let a = analyze(
+            "type Port = Int64 where value >= 1
+type Age = Int64 where value >= 18
+             fn main() -> Int64 {
+    let x = if true { Port(1) } else { Age(30) }
+    return x
+}
+",
+        );
+        let r = resolve(&a, 4, 9).expect("x resolves");
+        assert!(r.hover.contains("x: Port | Age"), "{}", r.hover);
+    }
+
+    #[test]
     fn a_move_gets_an_inlay_hint_where_the_value_goes() {
         let a = mem_analysis();
         let hints = inlay_hints(&a);
