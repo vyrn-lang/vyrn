@@ -124,7 +124,7 @@ fn main_sections() -> Vec<Section> {
         sec("fn serve_rewrite", Cmd("serve, dev")),
         sec("fn serve_cmd", Cmd("serve")),
         sec("fn has_served_handle", Cmd("serve, dev")),
-        sec("fn serve_pool_wasm", Cmd("serve, dev")),
+        sec("fn serve_pool", Cmd("serve, dev")),
         sec("fn dev_cmd", Cmd("dev")),
         sec("struct DevAssets", Cmd("dev")),
         sec("fn request_header", Shared),

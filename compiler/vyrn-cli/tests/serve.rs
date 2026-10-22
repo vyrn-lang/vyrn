@@ -5,6 +5,7 @@
 //! the listener from the moment the OS assigns it, so the harness must never pick
 //! a port itself. A `Drop` guard kills the child.
 
+mod common;
 mod serving;
 
 use std::io::{Read, Write};
@@ -1159,4 +1160,126 @@ fn many_opened_and_dropped_streams_leave_the_cursor_slab_alone() {
         status, "HTTP/1.1 200 OK",
         "200 opened-and-dropped streams later"
     );
+}
+
+/// A `vyrn dev` child on a scratch project whose page shows what `msg.vyrn`
+/// returns. Fields drop in order: the server dies before its project is removed.
+struct Dev {
+    server: serving::Server,
+    stderr: Arc<Mutex<String>>,
+    dir: common::Scratch,
+}
+
+/// `msg.vyrn` returning `text`.
+fn dev_msg(text: &str) -> String {
+    format!("export fn msg() -> String {{\n    return \"{text}\"\n}}\n")
+}
+
+fn start_dev() -> Dev {
+    let dir = common::scratch("dev-reload");
+    let files = [
+        (
+            "vyrn.json",
+            r#"{"server": "server.vyrn", "client": "client.vyrn"}"#.to_string(),
+        ),
+        (
+            "server.vyrn",
+            r#"import { msg } from "./msg"
+
+fn main() -> Int64 {
+    return 0
+}
+
+fn handle(req: Request) -> Response {
+    return Response { status: 200, contentType: "text/html", body: "<p>\{msg()}</p>", vary: "", headers: [:] }
+}
+"#
+            .to_string(),
+        ),
+        ("msg.vyrn", dev_msg("one")),
+        ("client.vyrn", "fn main() -> Int64 {\n    return 0\n}\n".to_string()),
+    ];
+    for (name, text) in files {
+        std::fs::write(dir.join(name), text).unwrap();
+    }
+    let mut child = Command::new(env!("CARGO_BIN_EXE_vyrn"))
+        .args(["dev", "--port", "0"])
+        .current_dir(&dir)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn vyrn dev");
+    let stdout = serving::drain(child.stdout.take().unwrap());
+    let stderr = serving::drain(child.stderr.take().unwrap());
+    let err = stderr.0.clone();
+    let port = serving::wait_for_port(&mut child, stdout, stderr, Duration::from_secs(60))
+        .unwrap_or_else(|e| panic!("{e}"));
+    Dev {
+        server: serving::Server { child, port },
+        stderr: err,
+        dir,
+    }
+}
+
+impl Dev {
+    /// Writes `msg.vyrn` and waits for the build it starts to print `outcome`.
+    fn edit(&self, text: &str, outcome: &str) -> String {
+        std::fs::write(self.dir.join("msg.vyrn"), text).unwrap();
+        wait_for(&self.stderr, outcome, Duration::from_secs(60))
+    }
+}
+
+#[test]
+fn dev_serves_the_request_after_an_edit_from_the_new_build() {
+    let d = start_dev();
+    assert!(get(d.server.port, "/").1.starts_with("<p>one</p>"));
+    d.edit(&dev_msg("two"), "dev: rebuilt");
+    let (status, body) = get(d.server.port, "/");
+    assert_eq!(status, "HTTP/1.1 200 OK");
+    assert!(body.starts_with("<p>two</p>"), "{body}");
+}
+
+#[test]
+fn dev_keeps_the_last_good_build_after_a_broken_edit_and_shows_the_error() {
+    let d = start_dev();
+    let (page, _) = open_stream(d.server.port, "/__reload", 0);
+    let err = d.edit(
+        &dev_msg("two").replace("\"two\"", "2"),
+        "dev: the build failed",
+    );
+    assert!(err.contains("msg.vyrn:2:"), "{err}");
+    assert!(get(d.server.port, "/").1.starts_with("<p>one</p>"));
+    // The page hears the failure on the stream it opened before it.
+    let mut page = page;
+    page.set_read_timeout(Some(Duration::from_secs(60)))
+        .unwrap();
+    let mut heard = String::new();
+    let mut buf = [0u8; 512];
+    while !heard.contains("event: fail\ndata: ") {
+        let n = page.read(&mut buf).expect("the stream stays open");
+        assert!(n > 0, "the stream ended:\n{heard}");
+        heard.push_str(&String::from_utf8_lossy(&buf[..n]));
+    }
+    assert!(heard.contains("msg.vyrn:2:"), "{heard}");
+}
+
+#[test]
+fn dev_builds_nothing_for_a_file_the_build_did_not_read() {
+    let d = start_dev();
+    std::fs::write(
+        d.dir.join("other.vyrn"),
+        "fn main() -> Int64 { return 1 }\n",
+    )
+    .unwrap();
+    std::fs::write(d.dir.join("notes.txt"), "x").unwrap();
+    // Twenty of the watcher's 50 ms polls.
+    std::thread::sleep(Duration::from_secs(1));
+    let err = d.stderr.lock().unwrap().clone();
+    assert!(
+        !err.contains("dev: rebuilt") && !err.contains("dev: the build"),
+        "{err}"
+    );
+    // The watcher is alive: an edit of a file the build read still builds.
+    let err = d.edit(&dev_msg("two"), "dev: rebuilt");
+    assert_eq!(err.matches("dev: rebuilt").count(), 1, "{err}");
 }

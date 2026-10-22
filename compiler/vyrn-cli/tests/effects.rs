@@ -797,7 +797,7 @@ fn run_corpus() {
         open.first().map(String::as_str).unwrap_or("none")
     );
     // An empty set is an answer, not a hole.
-    const EMPTY_SETS: usize = 6;
+    const EMPTY_SETS: usize = 3;
     assert_eq!(
         empty_sets.len(),
         EMPTY_SETS,
@@ -832,7 +832,7 @@ fn run_corpus() {
         module_state_missed.first().map(String::as_str).unwrap_or("none")
     );
     // It may fall, never rise.
-    const MODULE_STATE_EXTRA: usize = 23;
+    const MODULE_STATE_EXTRA: usize = 22;
     assert!(
         module_state_extra.len() <= MODULE_STATE_EXTRA,
         "{} functions the `module-state` row reaches and the checker's walk does not, more than          the {MODULE_STATE_EXTRA} recorded; the first new one is worth reading: {}",

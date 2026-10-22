@@ -148,35 +148,37 @@ impl Shape {
     }
 }
 
-/// What a call does to its receiver's length: the fact a pass that removes a
-/// bounds check may carry across the call (obligation O3). Every other operand
-/// is read, so it keeps its length and its elements.
+/// A call's shape map: for each position of the array the call leaves, the
+/// position of its receiver it reads, and the positions it writes from
+/// another operand. The length a pass that removes a bounds check carries
+/// across the call (obligation O3) and the class of position map the
+/// provenance analysis composes both follow from it. Every other operand is
+/// read, so it keeps its length and its elements.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
-pub enum Length {
-    /// States nothing, so the pass forgets what it knew.
+pub enum ShapeMap {
+    /// States nothing, so a pass forgets what it knew.
     #[default]
     Unknown,
-    Keeps,
-    GrowsByOne,
-    /// By one; `@pop` of an empty array keeps it, and `@swapRemove` of one traps.
-    ShrinksByOneIfNotEmpty,
-    SetToZero,
-    GrowsByLenOf(usize),
-    SetToLenOf(usize),
-}
-
-/// What a call does to its receiver's elements, in the sense of [`Length`].
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
-pub enum Elements {
-    #[default]
-    Unknown,
-    /// Every position that survives the call holds the element it held.
-    KeepsEachPosition,
-    /// Every element after the call is one the receiver held, at any position:
-    /// `@swapRemove` moves the last element into the removed slot.
-    KeepsRange,
-    /// The receiver holds argument `k`'s elements, in order: `@copyFrom`.
-    OfArg(usize),
+    /// Each position reads itself.
+    Same,
+    /// Each position reads itself, and operand `k` follows the last.
+    Pushes(usize),
+    /// Each position reads itself, and operand `k`'s elements follow, in
+    /// order.
+    Appends(usize),
+    /// Each position reads itself, and positions no operand counts follow.
+    Extends,
+    /// Each position but the last reads itself; an empty receiver stays
+    /// empty.
+    DropsLast,
+    /// Each position but the last reads itself, except the one operand `k`
+    /// names, which reads the last. An empty receiver traps.
+    SwapsOut(usize),
+    /// No position stays.
+    Empties,
+    /// Each position reads the same position of operand `k`, for each of its
+    /// positions.
+    CopiesFrom(usize),
 }
 
 /// One builtin, keyed by the name a call site carries. The checker's contract,
@@ -204,13 +206,12 @@ pub struct Builtin {
     pub gen_route: Option<&'static str>,
     /// Hover and completion text, under the method's spelling.
     pub hover: Option<String>,
-    /// [`Length::Unknown`] for a row that neither takes its receiver
+    /// [`ShapeMap::Unknown`] for a row that neither takes its receiver
     /// ([`Spec::Rebuilds`]) nor shrinks it ([`Spec::Removes`]), except a row
     /// that builds its result from its first operand (`bytes`), which states
-    /// the result's length against the operand's. Read it through
-    /// [`Builtin::length_at`].
-    pub length: Length,
-    pub elements: Elements,
+    /// the result's positions against the operand's. Read it through
+    /// [`Builtin::shape_map_at`].
+    pub shape_map: ShapeMap,
     /// The operand counts a call admits, checked before anything types it.
     pub arity: Option<Arity>,
     /// How the checker types a call's operands and result from this row
@@ -308,13 +309,13 @@ fn b(name: &'static str) -> Builtin {
 }
 
 impl Builtin {
-    /// [`Builtin::length`] for a call with `args` operands. It states the
+    /// [`Builtin::shape_map`] for a call with `args` operands. It states the
     /// call at its signature's arity; any other arity (`bytes(s, from, to)`)
     /// states nothing.
-    pub fn length_at(&self, args: usize) -> Length {
+    pub fn shape_map_at(&self, args: usize) -> ShapeMap {
         match &self.sig {
-            Some(f) if f.params.len() != args => Length::Unknown,
-            _ => self.length,
+            Some(f) if f.params.len() != args => ShapeMap::Unknown,
+            _ => self.shape_map,
         }
     }
 
@@ -410,12 +411,8 @@ impl Builtin {
             ..self
         }
     }
-    fn resizes(self, length: Length, elements: Elements) -> Self {
-        Builtin {
-            length,
-            elements,
-            ..self
-        }
+    fn resizes(self, shape_map: ShapeMap) -> Self {
+        Builtin { shape_map, ..self }
     }
 }
 
@@ -537,7 +534,7 @@ fn table() -> Vec<Builtin> {
             .method("push", &[Array, SmallArray])
             .spec(Spec::Rebuilds)
             .hover("array.push(value) -> Array<T> — append to a growable array; a statement writes the result back through the receiver")
-            .resizes(Length::GrowsByOne, Elements::KeepsEachPosition),
+            .resizes(ShapeMap::Pushes(1)),
         // The builtin containers' `place at` / `place atSet`. The body names no
         // type, so one pair serves every container and each backend types
         // [`ELEM`] itself; the `Unit` types are inert. `xs[i]` is `@at` too, and
@@ -565,7 +562,7 @@ fn table() -> Vec<Builtin> {
             .method("pop", &[Array, SmallArray])
             .spec(Spec::Removes)
             .hover("array.pop() -> Option<T> — remove and return the last element (None if empty)")
-            .resizes(Length::ShrinksByOneIfNotEmpty, Elements::KeepsEachPosition),
+            .resizes(ShapeMap::DropsLast),
         b("@swapRemove")
             .takes(&[2], |_, _, got| rule!(SwapRemoveArity, got = got.saturating_sub(1)))
             .sig(row(
@@ -578,7 +575,7 @@ fn table() -> Vec<Builtin> {
             .method("swapRemove", &[Array, SmallArray])
             .spec(Spec::Removes)
             .hover("array.swapRemove(index) -> T — O(1) unordered remove: move the last element into the slot")
-            .resizes(Length::ShrinksByOneIfNotEmpty, Elements::KeepsRange)
+            .resizes(ShapeMap::SwapsOut(1))
             .indexes(Indexes::Element),
         // Rebuilds like `push`: the result carries the possibly reallocated
         // buffer and the statement form writes it back. A named array type
@@ -594,7 +591,7 @@ fn table() -> Vec<Builtin> {
             .method("reserve", &[Array])
             .spec(Spec::Rebuilds)
             .hover("array.reserve(n) -> Array<T> — make room for n more elements ahead of time, so a known-size build is one allocation")
-            .resizes(Length::Keeps, Elements::KeepsEachPosition),
+            .resizes(ShapeMap::Same),
         // The [`HEAPLESS`] rows. `clear` keeps the buffer for the next fill.
         // `append` copies its source's elements in by bytes, and `copyFrom`
         // overwrites the receiver's, reusing its buffer.
@@ -607,7 +604,7 @@ fn table() -> Vec<Builtin> {
             .method("clear", &[Array])
             .spec(Spec::Rebuilds)
             .hover("array.clear() -> Array<T> — length to zero, buffer kept for the next fill; element type must not own heap")
-            .resizes(Length::SetToZero, Elements::KeepsEachPosition),
+            .resizes(ShapeMap::Empties),
         b("@append")
             .sig(bounded(
                 row(
@@ -623,7 +620,7 @@ fn table() -> Vec<Builtin> {
             .method("append", &[Array])
             .spec(Spec::Rebuilds)
             .hover("array.append(other) -> Array<T> — copy every element of `other` on, in order; element type must not own heap")
-            .resizes(Length::GrowsByLenOf(1), Elements::KeepsEachPosition),
+            .resizes(ShapeMap::Appends(1)),
         b("@copyFrom")
             .sig(bounded(
                 row(
@@ -639,7 +636,7 @@ fn table() -> Vec<Builtin> {
             .method("copyFrom", &[Array])
             .spec(Spec::Rebuilds)
             .hover("array.copyFrom(src) -> Array<T> — overwrite the elements with `src`'s, reusing the buffer; element type must not own heap")
-            .resizes(Length::SetToLenOf(1), Elements::OfArg(1)),
+            .resizes(ShapeMap::CopiesFrom(1)),
         b("@toArray")
             .takes(&[1], takes_none)
             .method("toArray", &[SmallArray])
@@ -723,7 +720,7 @@ fn table() -> Vec<Builtin> {
             .method("copy", &[Shape::Str, Array, ArrayN, SmallArray, Map, Record, Enum])
             .spec(Spec::OwnType)
             .fresh()
-            .resizes(Length::Keeps, Elements::KeepsEachPosition)
+            .resizes(ShapeMap::Same)
             .hover("x.copy() -> T — a value of the receiver's type that shares no heap with it; deep and structural. A handle copies as the value it is, so the copy names the same thing"),
         // Insert-or-add in one probe. The key is read: a miss copies it in.
         b("@tally")
@@ -850,7 +847,7 @@ fn table() -> Vec<Builtin> {
             )
             .stops(1)
             .indexes(Indexes::Bytes)
-            .resizes(Length::Keeps, Elements::Unknown),
+            .resizes(ShapeMap::Same),
         // A `Result`, because the bytes may not be UTF-8. Spelling it `String`
         // released the aggregate as a String buffer and crashed native code.
         b("stringFromBytes")
@@ -975,7 +972,7 @@ fn table() -> Vec<Builtin> {
         // The parts' lengths add up to the growth, which no one operand states.
         b("@strAppend")
             .spec(Spec::Rebuilds)
-            .resizes(Length::Unknown, Elements::KeepsEachPosition),
+            .resizes(ShapeMap::Extends),
         // String `a + b` and interpolation: copies both and allocates.
         b("@concat").fresh().sig(row(
             "@concat",
@@ -1443,21 +1440,23 @@ mod tests {
         }
     }
 
-    /// A pass that removes a bounds check reads the length effect; an array
-    /// row that resizes and states none makes it forget every length. A copy
-    /// states that it keeps its receiver's length.
+    /// A pass that removes a bounds check reads the shape map; an array row
+    /// that resizes and states none makes it forget every length. A copy
+    /// states that it keeps its receiver's positions.
     #[test]
-    fn every_array_resizing_row_states_its_length_effect() {
+    fn every_array_resizing_row_states_its_shape_map() {
         for b in builtins() {
             let resizes = matches!(b.spec, Some(Spec::Rebuilds | Spec::Removes))
                 && b.sig
                     .as_ref()
                     .and_then(|f| f.params.first())
                     .is_some_and(|p| matches!(p.ty, Type::Array(_)));
-            // `bytes` states its result's length against its operand's.
+            // `bytes` states its result's positions against its operand's,
+            // and `@strAppend`, with no `sig`, its String receiver's.
+            let states = ["bytes", "@strAppend"].contains(&b.name);
             assert_eq!(
-                resizes || b.spec == Some(Spec::OwnType) || b.name == "bytes",
-                b.length != Length::Unknown,
+                resizes || b.spec == Some(Spec::OwnType) || states,
+                b.shape_map != ShapeMap::Unknown,
                 "`{}` resizes an array: {resizes}",
                 b.name
             );

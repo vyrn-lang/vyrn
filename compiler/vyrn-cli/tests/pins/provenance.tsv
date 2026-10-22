@@ -1,0 +1,49 @@
+function	provenance	unknown because	hand label	verdict
+std/arrays map	identity pointwise		identity pointwise	agrees
+std/arrays filter	subsequence		subsequence	agrees
+std/arrays sortWith	permutation		permutation	agrees
+std/arrays sortBy	permutation		permutation	agrees
+std/bench sortedCopy	unknown	no order relates its indexes	permutation	differs
+std/graphql copyGqlErrs	identity pointwise		identity	differs
+std/graphql gqlStep	identity+fresh(end) pointwise		identity+fresh(end)	differs
+std/graphql gqlArgsBesides	subsequence field-update(value)		subsequence	differs
+std/html copyHtmlArray	identity pointwise		identity	differs
+std/html withKey	identity+fresh(end)		identity+fresh(end)	agrees
+std/html childPath	identity+fresh(end)		identity+fresh(end)	agrees
+std/html listInsert	identity+fresh(inside)		identity+fresh(inside)	agrees
+std/html listMove	unknown	it returns an array the body did not build	gather	differs
+std/http httpNamesOf	fresh		fresh	agrees
+std/http httpBraced	identity pointwise		identity pointwise	agrees
+std/json copyJsonArray	identity pointwise		identity	differs
+std/json copyJsonFields	identity field-update(value)		identity	differs
+std/json sortKeysArray	identity pointwise		identity pointwise	agrees
+std/json sortKeysFields	gather field-update(value)		gather	differs
+std/openapi oaSorted	unknown	two paths hold different arrays	unknown	agrees
+std/regex joinHoles	concat		concat	agrees
+std/ui uiAppendStr	identity+fresh(end)		identity+fresh(end)	agrees
+std/ui uiDynNamesOf	subsequence pointwise		subsequence pointwise	agrees
+std/ui uiHeadJoin2	no core body		concat	differs
+std/ui uiDynArgs	fresh		fresh	agrees
+std/ui uiDispatchOrder	fresh		fresh	agrees
+std/von copyVonArray	identity pointwise		identity	differs
+std/vyx vyxAppend	identity+fresh(end)		identity+fresh(end)	agrees
+std/vyx vyxStripDirectives	subsequence		subsequence	agrees
+std/vyx vyxElementRoots	subsequence		subsequence	agrees
+std/vyx vyxShiftAttrs	identity field-update(line)		identity field-update(line)	agrees
+std/vyx vyxShiftNodes	identity pointwise		identity pointwise	agrees
+std/vyx vyxCompNames	fresh		fresh	agrees
+std/vyx vyxImportedNames	fresh		fresh	agrees
+std/stream merge	no core body		shuffle	differs
+examples/capturefn applyAll	identity pointwise		identity pointwise	agrees
+examples/clearkeep fill	identity+fresh(end)		identity+fresh(end)	agrees
+examples/consumeloop spliced	concat		concat	agrees
+examples/consumeloop lengthsOf	identity		identity	agrees
+examples/fannkuch flip	permutation		permutation	agrees
+examples/map put	identity+fresh(end)		identity+fresh(end)	agrees
+examples/matchown takeWords	identity		identity	agrees
+examples/part_of_a_temporary pass	identity		identity	agrees
+examples/permute apply	gather		gather	agrees
+examples/permute inverse	fresh		fresh	agrees
+examples/revcomp reverseComplement	gather		reverse pointwise	differs
+examples/recordorder arrays	identity		identity	agrees
+examples/copy twice	fresh		stutter	differs

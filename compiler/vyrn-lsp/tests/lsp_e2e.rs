@@ -1284,6 +1284,136 @@ fn vyx_lex_error_publishes_into_the_vyx_buffer() {
     );
 }
 
+const ROUTES_APP: &str = "import { pages } from \"std/ui\"\n\
+    import { route } from pages(\"./routes\")\n\
+    fn handle(req: Request) -> Response { return route(req) }\n";
+
+/// Writes `app` as `app.vyrn` and each `(path, text)` of `files` into a fresh
+/// directory, and returns the directory.
+fn input_scratch(app: &str, files: &[(&str, &str)]) -> std::path::PathBuf {
+    let n = SCRATCH_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let dir = std::env::temp_dir().join(format!("vyrn_lsp_origin_{}_{n}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    for (path, text) in files {
+        let p = dir.join(path);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, text).unwrap();
+    }
+    std::fs::write(dir.join("app.vyrn"), app).unwrap();
+    dir
+}
+
+/// Opens the [`input_scratch`] app and returns the first diagnostic published
+/// into the file named `needle` as `(line, character, message)`, 0-based.
+fn first_input_diag(app: &str, files: &[(&str, &str)], needle: &str) -> (i64, i64, String) {
+    let dir = input_scratch(app, files);
+    let mut client = spawn_client();
+    did_open(&mut client, &file_uri(&dir.join("app.vyrn")), "vyrn", app);
+    let note = read_nonempty_diags_for(&mut client, needle);
+    let d0 = &note["params"]["diagnostics"][0];
+    let start = &d0["range"]["start"];
+    let msg = d0["message"].as_str().unwrap_or("").to_string();
+    let _ = client.child.kill();
+    let _ = std::fs::remove_dir_all(&dir);
+    (
+        start["line"].as_i64().unwrap(),
+        start["character"].as_i64().unwrap(),
+        msg,
+    )
+}
+
+/// The `head` accessor compiles under a private name, and its declaration
+/// still maps to its own line.
+#[test]
+fn page_head_declaration_error_maps_to_its_line() {
+    let page = "<script>\nimport { Head, Query, noHead, query } from \"std/ui\"\n\
+        type Row = { title: String }\n\
+        export fn head(d: Rowe) -> Head {\n    return noHead()\n}\n\
+        export fn data() -> Query<Row> {\n    return query(() -> Row { title: \"x\" })\n}\n\
+        </script>\n<template>\n<main>x</main>\n</template>\n";
+    let (line, col, msg) = first_input_diag(ROUTES_APP, &[("routes/index.vyx", page)], "index.vyx");
+    assert!(msg.contains("Rowe"), "{msg}");
+    assert_eq!((line, col), (3, 0), "{msg}");
+}
+
+/// Like the `head` accessor, the `data` accessor maps to its own line.
+#[test]
+fn page_data_declaration_error_maps_to_its_line() {
+    let page = "<script>\nimport { Query, query } from \"std/ui\"\n\
+        export fn data() -> Query<Rowx> {\n    return query(() -> 1)\n}\n</script>\n\
+        <template>\n<main>x</main>\n</template>\n";
+    let (line, col, msg) = first_input_diag(ROUTES_APP, &[("routes/index.vyx", page)], "index.vyx");
+    assert!(msg.contains("Rowx"), "{msg}");
+    assert_eq!((line, col), (2, 0), "{msg}");
+}
+
+const CARD_APP: &str = "import { components } from \"std/vyx\"\n\
+    import { list } from components(\"./comp\")\n\
+    fn main() -> Int64 { return 0 }\n";
+const CARD_VYX: &str = "<script>\nprops { title: String, count: Int64 }\n</script>\n\
+    <template>\n<li>{{ title }} {{ count }}</li>\n</template>\n";
+
+/// Each argument of a child component call sits on its own line under its
+/// attribute's origin. `    <Card :title="` is 18 bytes.
+#[test]
+fn child_argument_error_maps_to_its_column() {
+    let list = "<script>\nprops { rows: Array<String> }\n</script>\n<template>\n<ul>\n\
+        \x20   <Card :title=\"rows.nam\" :count=\"1\"/>\n</ul>\n</template>\n";
+    let files = [("comp/Card.vyx", CARD_VYX), ("comp/List.vyx", list)];
+    let (line, col, msg) = first_input_diag(CARD_APP, &files, "List.vyx");
+    assert!(msg.contains("nam"), "{msg}");
+    assert_eq!((line, col), (5, 18), "{msg}");
+}
+
+/// A name inside a child component's argument resolves to its declaration.
+#[test]
+fn child_argument_definition_reaches_the_declaration() {
+    let list = "<script>\nimport { format, fromMillis } from \"std/time\"\n</script>\n\
+        <template>\n<ul>\n\x20   <Card :title=\"format(fromMillis(0))\" :count=\"1\"/>\n</ul>\n</template>\n";
+    let dir = input_scratch(
+        CARD_APP,
+        &[("comp/Card.vyx", CARD_VYX), ("comp/List.vyx", list)],
+    );
+    let mut client = spawn_client();
+    did_open(
+        &mut client,
+        &file_uri(&dir.join("app.vyrn")),
+        "vyrn",
+        CARD_APP,
+    );
+    let _ = read_diags_for(&mut client, "List.vyx");
+    let uri = file_uri(&dir.join("comp/List.vyx"));
+    did_open(&mut client, &uri, "vyx", list);
+    let (l, c) = pos_after(list, ":title=\"for");
+    let target = definition_target(&mut client, &uri, l, c).expect("definition in an argument");
+    assert!(target.ends_with("time.vyrn"), "{target}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The `v-for` key's splice line sits under the key's origin.
+/// `    <li v-for="r in rows" :key="` is 32 bytes.
+#[test]
+fn v_for_key_error_maps_to_its_column() {
+    let widget = "<script>\ntype Row = { name: String }\nprops { rows: Array<Row> }\n</script>\n\
+        <template>\n<ul>\n\x20   <li v-for=\"r in rows\" :key=\"r.nam\">x</li>\n</ul>\n</template>\n";
+    let (line, col, msg) = first_input_diag(VYX_APP, &[("comp/Widget.vyx", widget)], "Widget.vyx");
+    assert!(msg.contains("nam"), "{msg}");
+    assert_eq!((line, col), (6, 32), "{msg}");
+}
+
+/// Each `head` block entry of a layout sits under its expression's origin.
+/// `    stylesheet ` is 15 bytes.
+#[test]
+fn layout_head_entry_error_maps_to_its_column() {
+    let layout = "<script>\nhead {\n    stylesheet 42\n}\n</script>\n\
+        <template>\n<div><slot/></div>\n</template>\n";
+    let page = "<template>\n<main>x</main>\n</template>\n";
+    let files = [("routes/index.vyx", page), ("routes/layout.vyx", layout)];
+    let (line, col, msg) = first_input_diag(ROUTES_APP, &files, "layout.vyx");
+    assert!(msg.contains("String"), "{msg}");
+    assert_eq!((line, col), (2, 15), "{msg}");
+}
+
 /// The break exists only in a `didChange` overlay, so the generator cache must
 /// re-verify its inputs through the overlay-aware resolver.
 #[test]

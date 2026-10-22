@@ -234,35 +234,52 @@ fn number(facts: &mut [Fact]) {
     }
 }
 
-/// The facts of each function the root file declares, as `(source function,
-/// facts)` in function-table order, a lifted lambda counted with its function.
-/// The first instance answers for a generic function, and a function with no
-/// fact is left out. A `test` or `bench` block is no function of `program`.
-pub fn root(program: &Program, world: &World) -> Vec<(FnId, Vec<Fact>)> {
+/// Each frame of each function the root file declares, as `(source
+/// function, frame)` in function-table order: the first instance of a generic
+/// function and the lambdas lifted out of it. A `test` or `bench` block is no
+/// function of `program`.
+pub fn root_frames<'w>(program: &Program, world: &'w World) -> Vec<(FnId, &'w Body)> {
     let rows = world.fn_rows();
-    let named = |name: &str| world.fn_id(name);
     let source = |id: FnId| rows[id.index()].generic.as_ref().map_or(id, |g| g.0);
-    let mut out: Vec<(FnId, FnId, Vec<Fact>)> = Vec::new();
+    let mut holders: Vec<(FnId, FnId)> = Vec::new();
+    let mut out = Vec::new();
     for i in 0..rows.len() {
         let Some(body) = world.body_at(FnId::nth(i)).filter(|b| b.file.is_none()) else {
             continue;
         };
         // `f@lambda:L:C` is the lambda lifted out of `f`.
-        let Some(holder) = named(body.name.split("@lambda").next().unwrap_or_default()) else {
+        let Some(holder) = world.fn_id(body.name.split("@lambda").next().unwrap_or_default())
+        else {
             continue;
         };
-        if source(holder).index() >= program.functions.len() {
+        let s = source(holder);
+        if s.index() >= program.functions.len() {
             continue;
         }
-        let facts = facts(body, world);
-        match out.iter_mut().find(|r| r.0 == source(holder)) {
-            Some(r) if r.1 == holder => r.2.extend(facts),
+        match holders.iter().find(|h| h.0 == s) {
+            Some(h) if h.1 != holder => continue,
             Some(_) => {}
-            None => out.push((source(holder), holder, facts)),
+            None => holders.push((s, holder)),
+        }
+        out.push((s, body));
+    }
+    out
+}
+
+/// The facts of each function the root file declares ([`root_frames`]), as
+/// `(source function, facts)`, a lifted lambda counted with its function. A
+/// function with no fact is left out.
+pub fn root(program: &Program, world: &World) -> Vec<(FnId, Vec<Fact>)> {
+    let mut out: Vec<(FnId, Vec<Fact>)> = Vec::new();
+    for (s, body) in root_frames(program, world) {
+        let facts = facts(body, world);
+        match out.iter_mut().find(|r| r.0 == s) {
+            Some(r) => r.1.extend(facts),
+            None => out.push((s, facts)),
         }
     }
     out.into_iter()
-        .map(|(id, _, mut facts)| {
+        .map(|(id, mut facts)| {
             number(&mut facts);
             (id, facts)
         })
@@ -470,8 +487,9 @@ fn row_kind(
 /// Whether `callee` rebuilds its receiver and may reallocate it: `push`,
 /// `reserve`, `tally`, `@strAppend`. `clear` rebuilds and keeps the buffer.
 fn grows(callee: &str) -> bool {
-    use vyrn_frontend::prelude::{builtin, Length, Spec};
-    builtin(callee).is_some_and(|b| b.spec == Some(Spec::Rebuilds) && b.length != Length::SetToZero)
+    use vyrn_frontend::prelude::{builtin, ShapeMap, Spec};
+    builtin(callee)
+        .is_some_and(|b| b.spec == Some(Spec::Rebuilds) && b.shape_map != ShapeMap::Empties)
 }
 
 /// What a row makes when no name binds it, in the words the report uses.

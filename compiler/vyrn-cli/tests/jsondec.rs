@@ -429,8 +429,8 @@ const TARGETS: &[Target] = &[
             "{\"Nop\":null}",
         ],
     },
-    // `elemAt` answers `JNull` past the end and `JNull` is a legal `None`, so
-    // only the arity check refuses a short all-`Option` tuple.
+    // A short all-`Option` tuple would read its missing members as `None`, so
+    // only the arity check refuses it.
     Target {
         tag: "optpair",
         decls: "type OP = | P(Option<Int64>, Option<Int64>)",

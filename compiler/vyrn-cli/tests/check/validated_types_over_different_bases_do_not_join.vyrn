@@ -1,0 +1,7 @@
+type Port = Int64 where value >= 1 && value <= 65535
+type Tiny = Int32 where value < 10
+
+fn main() -> Int64 {
+    let x = if true { Port(8080) } else { Tiny(3) }
+    return 0
+}

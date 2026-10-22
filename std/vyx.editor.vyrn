@@ -343,7 +343,7 @@ export gen fn vyrnCompleteVyx(root: String, path: String, line: Int64, col: Int6
 /// `src` with every character outside its `<script>` body replaced by a
 /// space and each LF kept: the Vyrn a tool reads in a `.vyx`, at the file's
 /// own lines and columns. A section never closed keeps nothing.
-export gen fn vyxScriptView(src: String) -> String {
+export to "./ui.editor" gen fn vyxScriptView(src: String) -> String {
     let ba = bytes(src)
     let sec = vyxSection(ba, "script", true)
     let mut out: Array<UInt8> = []
@@ -362,7 +362,7 @@ export gen fn vyxScriptView(src: String) -> String {
 
 /// Whether `src` has a `<template>` section outside its `<script>`, closed or
 /// not.
-export gen fn vyxHasTemplate(src: String) -> Bool {
+export to "./ui.editor" gen fn vyxHasTemplate(src: String) -> Bool {
     let ba = bytes(src)
     let s = vyxSection(ba, "script", true)
     let t = if s.found {
@@ -374,7 +374,7 @@ export gen fn vyxHasTemplate(src: String) -> Bool {
 }
 
 /// The file name of `path` without its `.vyx` extension.
-export gen fn vyxStemOf(path: String) -> String {
+export to "./ui.editor" gen fn vyxStemOf(path: String) -> String {
     let pb = bytes(path)
     let name = vyxSlice(pb, vyxFindLast(pb, bytes("/"), 0) + 1, pb.length)
     let nb = bytes(name)

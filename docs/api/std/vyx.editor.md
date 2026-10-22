@@ -19,33 +19,6 @@ is the directory the generator was pointed at and `path` the file, both
 spelled from the importer. Returns a JSON array of `{label, kind, detail,
 from}`, empty where the editor's forward map answers instead.
 
-## vyxScriptView
-
-```vyrn
-fn vyxScriptView(src: String) -> String
-```
-
-`src` with every character outside its `<script>` body replaced by a
-space and each LF kept: the Vyrn a tool reads in a `.vyx`, at the file's
-own lines and columns. A section never closed keeps nothing.
-
-## vyxHasTemplate
-
-```vyrn
-fn vyxHasTemplate(src: String) -> Bool
-```
-
-Whether `src` has a `<template>` section outside its `<script>`, closed or
-not.
-
-## vyxStemOf
-
-```vyrn
-fn vyxStemOf(path: String) -> String
-```
-
-The file name of `path` without its `.vyx` extension.
-
 ## vyrnSourceVyx
 
 ```vyrn

@@ -45,16 +45,18 @@ pub fn token_name_and_text(tok: &Tok) -> (String, String) {
     }
 }
 
-/// One lexical item, a token or a comment, with its raw source text and the
-/// lines it spans. [`lex`] drops the comments and keeps the payloads. The
-/// formatter keeps the comments and prints the raw `text`, changing only the
-/// whitespace between items, so it never re-escapes a literal.
+/// One lexical item, a token or a comment, with the span of its raw source
+/// text and the lines it spans. [`lex`] drops the comments and keeps the
+/// payloads. The formatter keeps the comments and prints the raw text
+/// ([`Triv::text`]), changing only the whitespace between items, so it never
+/// re-escapes a literal.
 #[derive(Debug, Clone)]
 pub struct Triv {
     pub kind: TrivKind,
-    /// Raw source text. A comment keeps its slashes; trailing whitespace and CR
-    /// are stripped.
-    pub text: String,
+    /// The raw source text, as a byte range of the scanned source
+    /// ([`Triv::text`]). A comment keeps its slashes; its trailing whitespace
+    /// and CR fall outside the range.
+    pub span: std::ops::Range<usize>,
     /// 1-based line the item starts on.
     pub start_line: usize,
     /// 1-based start column. The formatter never reads it: it re-indents everything.
@@ -69,13 +71,20 @@ pub struct Triv {
 #[derive(Debug, Clone, PartialEq)]
 pub enum TrivKind {
     /// A token with its payload. The formatter reads only its kind and prints the
-    /// raw `text`.
+    /// raw text.
     Tok(Tok),
     /// A `//` line comment, `////+` included.
     Comment,
     /// A `///` doc line. The payload is the markdown [`lex`] attaches to the next
     /// declaration: the line minus `///`, a trailing CR and one leading space.
     Doc(String),
+}
+
+impl Triv {
+    /// The raw source text of the item in `src`, the source [`scan`] read.
+    pub fn text<'s>(&self, src: &'s str) -> &'s str {
+        &src[self.span.clone()]
+    }
 }
 
 /// One scan of a source file: every item in order, and the end position where
@@ -262,6 +271,11 @@ tokens! {
 /// scans again.
 pub fn scan(src: &str) -> Result<Scan, Diagnostic> {
     let chars: Vec<char> = src.chars().collect();
+    // The byte offset of each char index, and of the end.
+    let at: Vec<usize> = (src.char_indices().map(|(b, _)| b))
+        .chain([src.len()])
+        .collect();
+    let span = |from: usize, to: usize| at[from]..at[to];
     let mut i = 0usize;
     let mut line = 1usize;
     // Index of the current line's first character; a column is `i - line_start + 1`.
@@ -269,16 +283,6 @@ pub fn scan(src: &str) -> Result<Scan, Diagnostic> {
     let mut out: Vec<Triv> = Vec::new();
     // The file start counts as space before the first token.
     let mut space_before = true;
-
-    // Strips a trailing CR and blanks, so a printed comment carries no trailing
-    // whitespace. A doc's payload comes from the untrimmed line.
-    let trim_comment = |s: &[char]| -> String {
-        let mut t: String = s.iter().collect();
-        while t.ends_with('\r') || t.ends_with(' ') || t.ends_with('\t') {
-            t.pop();
-        }
-        t
-    };
 
     while i < chars.len() {
         let c = chars[i];
@@ -309,16 +313,22 @@ pub fn scan(src: &str) -> Result<Scan, Diagnostic> {
                 i += 1;
             }
             let kind = if is_doc {
-                let text: String = chars[start + 3..i].iter().collect();
+                let text = &src[span(start + 3, i)];
                 // A CRLF file leaves a trailing `\r`; strip it so it never reaches markdown.
-                let text = text.strip_suffix('\r').unwrap_or(&text);
+                let text = text.strip_suffix('\r').unwrap_or(text);
                 TrivKind::Doc(text.strip_prefix(' ').unwrap_or(text).to_string())
             } else {
                 TrivKind::Comment
             };
+            // A printed comment carries no trailing CR or blank. A doc's payload
+            // comes from the untrimmed line.
+            let mut end = i;
+            while matches!(chars[end - 1], '\r' | ' ' | '\t') {
+                end -= 1;
+            }
             out.push(Triv {
                 kind,
-                text: trim_comment(&chars[start..i]),
+                span: span(start, end),
                 start_line,
                 col,
                 end_line: start_line,
@@ -513,7 +523,7 @@ pub fn scan(src: &str) -> Result<Scan, Diagnostic> {
             };
             out.push(Triv {
                 kind: TrivKind::Tok(tok),
-                text: chars[start..i].iter().collect(),
+                span: span(start, i),
                 start_line,
                 col: start_col,
                 end_line: line,
@@ -527,11 +537,10 @@ pub fn scan(src: &str) -> Result<Scan, Diagnostic> {
         // Vyrn has no char type.
         if c == '\'' {
             let (val, next) = lex_byte_literal(&chars, i, line, col)?;
-            let text: String = chars[start..next].iter().collect();
             i = next; // past the closing quote
             out.push(Triv {
                 kind: TrivKind::Tok(Tok::Byte(val)),
-                text,
+                span: span(start, next),
                 start_line,
                 col,
                 end_line: line,
@@ -554,7 +563,7 @@ pub fn scan(src: &str) -> Result<Scan, Diagnostic> {
                     i += 1;
                 }
             }
-            let text: String = chars[start..i].iter().collect();
+            let text = &src[span(start, i)];
             let tok = if is_float {
                 let value: f64 = text
                     .parse()
@@ -574,7 +583,7 @@ pub fn scan(src: &str) -> Result<Scan, Diagnostic> {
             };
             out.push(Triv {
                 kind: TrivKind::Tok(tok),
-                text,
+                span: span(start, i),
                 start_line,
                 col,
                 end_line: line,
@@ -588,11 +597,10 @@ pub fn scan(src: &str) -> Result<Scan, Diagnostic> {
             while i < chars.len() && (chars[i].is_alphanumeric() || chars[i] == '_') {
                 i += 1;
             }
-            let text: String = chars[start..i].iter().collect();
-            let tok = keyword_or_ident(&text);
+            let tok = keyword_or_ident(&src[span(start, i)]);
             out.push(Triv {
                 kind: TrivKind::Tok(tok),
-                text,
+                span: span(start, i),
                 start_line,
                 col,
                 end_line: line,
@@ -625,7 +633,7 @@ pub fn scan(src: &str) -> Result<Scan, Diagnostic> {
         i += width;
         out.push(Triv {
             kind: TrivKind::Tok(tok),
-            text: chars[start..i].iter().collect(),
+            span: span(start, i),
             start_line,
             col,
             end_line: line,

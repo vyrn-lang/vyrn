@@ -188,7 +188,7 @@ fn vhNode(
         vhElem(p, src, file, tag, isComp, attrs, kids, line, inFor, inLabel, inForm, inForeign),
         // `vyxParseTemplate` does not group, so these nodes do not appear. Walked
         // anyway, so a rule stays correct on a grouped tree.
-        VNFor(v, it, key, body, line, col) =>
+        VNFor(v, it, key, body, line, col, keyLine, keyCol) =>
         vhNodes(p, src, file, body, true, inLabel, inForm, inForeign),
         VNIf(conds, cl, cc, bodies, els, has) =>
         vhBodies(p, src, file, bodies, els, has, inFor, inLabel, inForm, inForeign),
@@ -717,7 +717,7 @@ fn vhIsRow(n: VyxNode) -> Bool {
         VNRaw(x, line, col) => false,
         VNChildren => false,
         VNIf(conds, cl, cc, bodies, els, has) => false,
-        VNFor(v, it, key, body, line, col) => false,
+        VNFor(v, it, key, body, line, col, keyLine, keyCol) => false,
     }
 }
 
@@ -1904,7 +1904,7 @@ fn vhNodeHasContent(n: VyxNode) -> Bool {
         VNChildren => true,
         VNElem(tag, isComp, attrs, kids, line) => true,
         VNIf(conds, cl, cc, bodies, els, has) => true,
-        VNFor(v, it, key, body, line, col) => true,
+        VNFor(v, it, key, body, line, col, keyLine, keyCol) => true,
     }
 }
 

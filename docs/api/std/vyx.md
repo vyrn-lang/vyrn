@@ -81,46 +81,6 @@ check the provider's shape, because a template-named provider is outside its
 read roots; a wrong shape fails the emitted import with the loader's
 diagnostic.
 
-## vyxSlice
-
-```vyrn
-fn vyxSlice(ba: Array<UInt8>, s: Int64, e: Int64) -> String
-```
-
-The bytes `ba[s..e)` as a String, or "" when they are not UTF-8.
-
-## vyxIsWs
-
-```vyrn
-fn vyxIsWs(b: UInt8) -> Bool
-```
-
-True for an ASCII space, tab, CR, or LF.
-
-## vyxIsIdent
-
-```vyrn
-fn vyxIsIdent(b: UInt8) -> Bool
-```
-
-True for an ASCII letter, digit, or `_` (identifier bytes).
-
-## vyxLowerFirst
-
-```vyrn
-fn vyxLowerFirst(s: String) -> String
-```
-
-Lowercases the first ASCII byte of `s` (`ItemRow` -> `itemRow`).
-
-## vyxFindLast
-
-```vyrn
-fn vyxFindLast(ba: Array<UInt8>, needle: Array<UInt8>, from: Int64) -> Int64
-```
-
-The index of the LAST occurrence of `needle` in `ba` at or after `from`, or -1.
-
 ## VyxAttr
 
 ```vyrn
@@ -135,12 +95,13 @@ that keeps its `v-` prefix and is consumed by the grouping pass.
 ## VyxNode
 
 ```vyrn
-type VyxNode = VNText(String) | VNInterp(String, Int64, Int64) | VNRaw(String, Int64, Int64) | VNChildren | VNElem(String, Bool, Array<VyxAttr>, Array<VyxNode>, Int64) | VNIf(Array<String>, Array<Int64>, Array<Int64>, Array<VyxBody>, VyxBody, Bool) | VNFor(String, String, String, Array<VyxNode>, Int64, Int64)
+type VyxNode = VNText(String) | VNInterp(String, Int64, Int64) | VNRaw(String, Int64, Int64) | VNChildren | VNElem(String, Bool, Array<VyxAttr>, Array<VyxNode>, Int64) | VNIf(Array<String>, Array<Int64>, Array<Int64>, Array<VyxBody>, VyxBody, Bool) | VNFor(String, String, String, Array<VyxNode>, Int64, Int64, Int64, Int64)
 ```
 
 A node in a parsed template. Lines are absolute in the `.vyx` file. A
 trailing `(line, col)` pair is the pass-through's position for
-origin directives; `VNIf` carries parallel per-condition position arrays.
+origin directives; `VNFor` carries its iterable's, then its key's, and
+`VNIf` carries parallel per-condition position arrays.
 
 ## VyxBody
 
@@ -149,56 +110,6 @@ type VyxBody = { nodes: Array<VyxNode> }
 ```
 
 A node list, so bodies can nest in a payload without `Array<Array<...>>`.
-
-## VyxSection
-
-```vyrn
-type VyxSection = { found: Bool, start: Int64, end: Int64, openAt: Int64 }
-```
-
-A section's content bounds. `found` is false when the section is absent or
-opens but never closes; `openAt` is -1 when no open tag exists, so a caller
-can name the unterminated case.
-
-## vyxSection
-
-```vyrn
-fn vyxSection(ba: Array<UInt8>, name: String, isCode: Bool) -> VyxSection
-```
-
-The content bounds of `<name> ... </name>` in `ba`, found by the scanner for
-the section's language: code when `isCode` (`<script>`), markup otherwise.
-So a literal `</script>` in a helper string never truncates the section.
-
-## vyxSectionAvoid
-
-```vyrn
-fn vyxSectionAvoid(ba: Array<UInt8>, name: String, isCode: Bool, avoidS: Int64, avoidE: Int64) -> VyxSection
-```
-
-`vyxSection` skipping any open tag inside `[avoidS, avoidE)`, so a literal
-`<template>` in a script helper string never claims the template section.
-
-## VyxScript
-
-```vyrn
-type VyxScript = { propNames: Array<String>, propTypes: Array<String>, imports: Array<String>, importLines: Array<Int64>, importCols: Array<Int64>, helpers: String, helperTexts: Array<String>, helperLines: Array<Int64>, helperCols: Array<Int64>, err: String }
-```
-
-The parsed `<script>` section: props (parallel name/type arrays), rebased
-import lines, and pass-through helper source. `err` is set on a props fault.
-The position arrays hold the 1-based `.vyx` position of each import and
-helper line, for `//@origin` directives.
-
-## vyxParseScriptAt
-
-```vyrn
-fn vyxParseScriptAt(ba: Array<UInt8>, sStart: Int64, sEnd: Int64, dir: String, srcFile: String) -> VyxScript
-```
-
-Parses the `<script>` section `ba[sStart, sEnd)`: the single `props {...}`
-block, rebased imports, and everything else as helper source, each with its
-whole-file `.vyx` position for `//@origin` directives.
 
 ## VyxTemplate
 
@@ -393,14 +304,6 @@ fn vyxPageClientThemed(vyxPath: String, theme: String) -> String
 ```
 
 [`vyxPageClient`](#vyxpageclient) with classes checked against `theme`.
-
-## vyxDirOf
-
-```vyrn
-fn vyxDirOf(path: String) -> String
-```
-
-The directory part of `path`, before the last `/`.
 
 ## vyxBuildLayoutModule
 

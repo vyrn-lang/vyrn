@@ -349,6 +349,7 @@ mod tests {
         let d = |name: &str, base: Type, params: Vec<String>| TypeDecl {
             name: name.to_string(),
             exported: false,
+            export_to: Vec::new(),
             module: None,
             doc: None,
             type_params: params,
@@ -489,6 +490,7 @@ mod tests {
             TypeDecl {
                 name: "MaybeInt".to_string(),
                 exported: false,
+                export_to: Vec::new(),
                 module: None,
                 doc: None,
                 type_params: Vec::new(),
@@ -518,6 +520,7 @@ mod tests {
             TypeDecl {
                 name: "L".to_string(),
                 exported: false,
+                export_to: Vec::new(),
                 module: None,
                 doc: None,
                 type_params: Vec::new(),
