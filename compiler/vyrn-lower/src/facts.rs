@@ -1321,6 +1321,20 @@ impl<'a> Prover<'a> {
     }
 }
 
+/// What `q = a / k` states besides `0 <= q <= a`, for `a >= 0` and a literal
+/// `k >= 2`: `k*q <= a`, `a - k*q <= k - 1`, and `q <= a - 1` where
+/// `positive` says `a >= 1`. Truncated division is floor division for
+/// `a >= 0`, and `k*q` is at most `a`, so no sum wraps.
+pub fn divided(a: &Lin, q: &Lin, k: i64, positive: bool) -> Vec<Lin> {
+    if k < 2 {
+        return Vec::new();
+    }
+    let rest = q.scale(k).and_then(|kq| a.sub(&kq));
+    let top = rest.as_ref().and_then(|r| r.scale(-1)?.plus(k - 1));
+    let below = (a.plus(-1).filter(|_| positive)).and_then(|b| b.sub(q));
+    [rest, top, below].into_iter().flatten().collect()
+}
+
 fn gcd(a: u64, b: u64) -> u64 {
     if b == 0 {
         a
@@ -1352,6 +1366,26 @@ mod tests {
 
     fn v(n: u32) -> Lin {
         Lin::of(Term::Val(Name(n)))
+    }
+
+    /// Every fact of [`divided`] holds of `a / k` for `k` in 2 to 32 and `a`
+    /// in 0 to 4,999 and the 64 values below `2^62`.
+    #[test]
+    fn the_division_facts_hold_by_brute_force() {
+        let at = |l: &Lin, a: i64, q: i64| {
+            (l.terms.iter()).fold(i128::from(l.c), |s, &(t, k)| {
+                s + i128::from(k) * i128::from(if t == Term::Val(Name(0)) { a } else { q })
+            })
+        };
+        for k in 2..=32 {
+            for a in (0..5000).chain((0..64).map(|j| (1i64 << 62) - j)) {
+                let facts = divided(&v(0), &v(1), k, a >= 1);
+                assert_eq!(facts.len(), 2 + usize::from(a >= 1));
+                for f in &facts {
+                    assert!(at(f, a, a / k) >= 0, "{f:?} fails at a = {a}, k = {k}");
+                }
+            }
+        }
     }
 
     #[test]

@@ -228,7 +228,10 @@ export fn port(n: Int64) -> Port {
         (err.as_str(), rows),
         (
             "error: validation failed for `Port`\n",
-            vec!["4 0 where proved 1".to_string(), "6 0 where kept 1".to_string()]
+            vec![
+                "4 0 where proved 1".to_string(),
+                "6 0 where kept 1".to_string()
+            ]
         )
     );
 }
@@ -248,6 +251,36 @@ export fn out(xs: Array<Int64, 3>, i: Out) -> Int64 {
 ";
     assert_eq!(verdicts(src, "odd"), ["check array-index"]);
     assert_eq!(verdicts(src, "out"), ["check array-index"]);
+}
+
+/// A quotient by a literal `k >= 2` of `a >= 0` takes `k*q <= a`,
+/// `a - k*q <= k - 1` and, where `a >= 1`, `q <= a - 1`
+/// (`facts::divided`): `a - 2 * q` indexes two elements, and `d - 1 - q` is
+/// at least zero.
+#[test]
+fn a_quotient_by_a_literal_bounds_its_remainder() {
+    let src = "export fn pair(xs: Array<Int64, 2>, a: Int64) -> Int64 {
+    if a >= 0 && a < 1000 {
+        let q = a / 2
+        return xs[a - 2 * q]
+    }
+    return 0
+}
+export fn half(xs: Array<Int64>, d: Int64) -> Int64 {
+    if d >= 1 && d <= xs.length {
+        let q = d / 2
+        return xs[d - 1 - q]
+    }
+    return 0
+}
+";
+    let proved = [
+        "proved int-div-zero",
+        "proved int-div-overflow",
+        "proved array-index",
+    ];
+    assert_eq!(verdicts(src, "pair"), proved);
+    assert_eq!(verdicts(src, "half"), proved);
 }
 
 #[test]

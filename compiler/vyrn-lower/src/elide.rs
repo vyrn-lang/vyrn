@@ -5651,7 +5651,8 @@ impl<'a> Walk<'a> {
     /// The range of `n = a op b` where `b` is a literal that bounds it, a
     /// divisor of a non-negative `a % b` the state proves at least one, an
     /// operand of `&` the state proves non-negative, or the shift amount of a
-    /// non-negative `a`.
+    /// non-negative `a`. A quotient by a literal also takes
+    /// [`crate::facts::divided`].
     fn bound(&self, pre: &State, n: Name, o: BinOp, la: &Lin, lb: &Lin) -> Out {
         let p = pre.prover();
         let holds = |g: &Lin| p.ge0(g).is_some_and(|c| c.verify(pre, g));
@@ -5676,7 +5677,12 @@ impl<'a> Walk<'a> {
             (BinOp::Rem, _) if nonneg && lb.plus(-1).is_some_and(|d| holds(&d)) => {
                 [Some(v.clone()), lb.plus(-1).and_then(|d| d.sub(&v)), None]
             }
-            (BinOp::Div, Some(k)) if k >= 1 && nonneg => quotient(&|h| h / k),
+            (BinOp::Div, Some(k)) if k >= 1 && nonneg => {
+                let positive = la.plus(-1).is_some_and(|a| holds(&a));
+                let more = crate::facts::divided(la, &v, k, positive);
+                let facts = quotient(&|h| h / k).into_iter().flatten().chain(more);
+                return Out::Facts(facts.collect());
+            }
             (BinOp::Shr, _) if nonneg => match least(lb) {
                 Some(s) if s >= 0 => quotient(&|h| h >> s.min(63)),
                 _ => return Out::Nothing,
