@@ -1172,10 +1172,13 @@ fn seeded<'a>(
                 .flat_map(|(_, atoms)| atoms)
                 .filter_map(|a| a.with(&param))
                 .collect();
-            // A clause the checker refused states nothing.
-            let func = b.body.spelled(&f.name).to_string();
-            b.body.ensures =
-                vyrn_frontend::core::check::Ensures::of(f, b.proto.types(), &func).unwrap_or(None);
+            // A clause the checker refused states nothing. Only a function
+            // with a clause spells its name, which costs an allocation.
+            if f.ret_clause.is_some() {
+                let func = b.body.spelled(&f.name).to_string();
+                b.body.ensures = vyrn_frontend::core::check::Ensures::of(f, b.proto.types(), &func)
+                    .unwrap_or(None);
+            }
             b.frame.appends = crate::append::append_candidates(&f.body);
             rebound(&f.body, &mut b.frame.rebound);
             b.block(&f.body, &mut out)?;
