@@ -20,7 +20,28 @@ fn run(src: &str) -> Result<(), String> {
     std::hash::Hash::hash(src, &mut h);
     let path = dir.join(format!("p{:016x}.vyrn", std::hash::Hasher::finish(&h)));
     std::fs::write(&path, src).expect("write the program");
-    let out = vyrn().arg("check").arg(&path).output().expect("vyrn check");
+    verdict(vyrn().arg("check").arg(&path))
+}
+
+/// [`run`] over `src` as `std/stream` itself, the one module that may call the box
+/// builtins: a copy of `std/` whose `stream.vyrn` is `src`.
+fn run_as_stream(src: &str) -> Result<(), String> {
+    let std_dir = common::scratch("mustuse-std").join("std");
+    std::fs::create_dir_all(&std_dir).expect("create the std copy");
+    let repo_std = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../std");
+    for e in std::fs::read_dir(repo_std).expect("read std") {
+        let e = e.expect("a std entry").path();
+        let name = e.file_name().expect("a std file name");
+        std::fs::copy(&e, std_dir.join(name)).expect("copy a std file");
+    }
+    let path = std_dir.join("stream.vyrn");
+    std::fs::write(&path, src).expect("write the program");
+    verdict(vyrn().arg("check").arg(&path).env("VYRN_STD", &std_dir))
+}
+
+/// `Ok` for an accepted check, or its whole standard error.
+fn verdict(c: &mut std::process::Command) -> Result<(), String> {
+    let out = c.output().expect("vyrn check");
     match out.status.success() {
         true => Ok(()),
         false => Err(String::from_utf8_lossy(&out.stderr)
@@ -84,7 +105,8 @@ fn a_stepped_producer_carries_the_same_obligation() {
 fn a_wrapper_carries_the_obligation_and_swallows_its_source() {
     // `boxStream` discharges its source by an ordinary move. `unboxStream`
     // acquires one, so a wrapper's release path is checked here rather
-    // than trusted to the runtime.
+    // than trusted to the runtime. Each program stands in for `std/stream`,
+    // the one module that may call them.
     let base = "fn tick(sl: Int64, gn: Int64, cl: Bool) -> Option<Int64> { \
                 if cl { return None } return Some(sl) } ";
     let src = format!(
@@ -92,12 +114,15 @@ fn a_wrapper_carries_the_obligation_and_swallows_its_source() {
          let a = boxStream(s) return 0 }}"
     );
     // Whatever holds the box owes the stream.
-    assert!(run(&src).is_ok(), "the wrapper owes it, not `main`");
+    assert!(
+        run_as_stream(&src).is_ok(),
+        "the wrapper owes it, not `main`"
+    );
     let src = format!(
         "{base} fn main() -> Int64 {{ let s = fromStep(0, 1, tick) \
          let a = boxStream(s) let t: Stream<Int64> = unboxStream(a) return 0 }}"
     );
-    let e = run(&src).unwrap_err();
+    let e = run_as_stream(&src).unwrap_err();
     assert!(
         e.contains("`t` is a `Stream<Int64>` and is never disposed"),
         "{e}"
@@ -106,13 +131,13 @@ fn a_wrapper_carries_the_obligation_and_swallows_its_source() {
         "{base} fn main() -> Int64 {{ let s = fromStep(0, 1, tick) \
          let a = boxStream(s) let t: Stream<Int64> = unboxStream(a) close(t) return 0 }}"
     );
-    assert!(run(&src).is_ok());
+    assert!(run_as_stream(&src).is_ok());
     // Closed as well as boxed is a double release.
     let src = format!(
         "{base} fn main() -> Int64 {{ let s = fromStep(0, 1, tick) \
          let a = boxStream(s) close(s) return 0 }}"
     );
-    let e = run(&src).unwrap_err();
+    let e = run_as_stream(&src).unwrap_err();
     assert!(e.contains("is disposed more than once"), "{e}");
 }
 
@@ -262,7 +287,8 @@ fn a_combinator_neither_swallows_the_obligation_nor_launders_it() {
 
 /// `boxStream` and `serveStream` hand a stream away for good, and each has one corpus
 /// caller. The type carries the fact: every mention of a stream binding is a disposal,
-/// so a second one is refused whatever the callee.
+/// so a second one is refused whatever the callee. Each program stands in for
+/// `std/stream`, the one module that may call `boxStream`.
 #[test]
 fn a_stream_is_handed_away_once_however_it_is_handed_away() {
     // Each producer feeds the stream type its consumer declares: `serveStream`
@@ -273,7 +299,7 @@ fn a_stream_is_handed_away_once_however_it_is_handed_away() {
         ("boxStream(s)", FEED, "Int64", "feed()", "let a = "),
         ("serveStream(s)", TEXT, "String", "lines()", ""),
     ] {
-        let e = run(&format!(
+        let e = run_as_stream(&format!(
             "{prelude} fn go(s: Stream<{ty}>) -> Int64 {{ {bind}{call} {bind}{call} \
              return 0 }} fn main() -> Int64 {{ return go({feed}) }}"
         ))
@@ -281,14 +307,14 @@ fn a_stream_is_handed_away_once_however_it_is_handed_away() {
         assert!(e.contains("disposed more than once"), "{call}: {e}");
     }
     // On a local, where the binding is the frame's own.
-    let e = run(&format!(
+    let e = run_as_stream(&format!(
         "{FEED} fn main() -> Int64 {{ let s = feed() let a = boxStream(s) \
          let b = boxStream(s) return 0 }}"
     ))
     .unwrap_err();
     assert!(e.contains("disposed more than once"), "{e}");
     // The box owes the release, which `close` after `unboxStream` discharges.
-    assert!(run(&format!(
+    assert!(run_as_stream(&format!(
         "{FEED} fn main() -> Int64 {{ let s = feed() let a = boxStream(s) \
          let back: Stream<Int64> = unboxStream(a) close(back) return 0 }}"
     ))

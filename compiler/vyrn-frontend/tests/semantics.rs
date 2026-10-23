@@ -108,6 +108,15 @@ const STD: &[(&str, &str)] = &[
 /// truncates to a byte: the test's `main` is renamed and a wrapper prints its answer. A
 /// trapping program traps before the print and returns `Err` with the trap's wording.
 fn run(source: &str) -> Result<i64, String> {
+    run_as("main.vyrn", source)
+}
+
+/// The key of a program that calls a builtin only `std/stream` may call, so that it
+/// stands in for that module.
+const STREAM: &str = "std/stream.vyrn";
+
+/// [`run`], with the program loaded under `key`.
+fn run_as(key: &str, source: &str) -> Result<i64, String> {
     scratch();
     let wrapped = format!(
         "{}
@@ -133,7 +142,7 @@ fn main() -> Int64 {{
     // constructors and JSON codecs, as the CLI does.
     let (program, world) = vyrn_lower::load_warned(
         &wrapped,
-        "main.vyrn",
+        key,
         &opts,
         &vyrn_frontend::loader::MapResolver(files),
         Some(&*engine()),
@@ -1054,18 +1063,6 @@ fn stored_lambda_coerces_arguments_to_signature_types() {
     assert_eq!(run(src).unwrap(), 44);
 }
 
-/// A stream `map`, spelled as `std/stream` spells it: no `for ... in`, a step that reads
-/// its source with `pullAt`, and a wrapper owning the box the source moved into. Its
-/// closing call takes the source back out and closes it.
-const LMAP: &str = "fn lmap<T, U>(s: Stream<T>, f: fn(T) -> U) -> Stream<U> { \
-                        let a = boxStream(s) \
-                        let g: fn(T) -> U = f \
-                        let step: fn(Int64, Int64, Bool) -> Option<U> = (sl, gn, cl) -> { \
-                        if cl { let src: Stream<T> = unboxStream(a) close(src) return None } \
-                        let x: Option<T> = pullAt(a) \
-                        if let Some(v) = x { return Some(g(v)) } return None } \
-                        return fromStep(0, 1, step) } ";
-
 #[test]
 fn releasing_a_chain_closes_one_stream_per_link() {
     // Three wrappers over one producer: four streams, four releases, each wrapper
@@ -1073,16 +1070,16 @@ fn releasing_a_chain_closes_one_stream_per_link() {
     // traps and a missed one leaves the count short: 10 000 cycles, four closes each,
     // and `closed` counts the producer's own closing call.
     let src = format!(
-        "let mut cur = 0 \
+        "import {{ map }} from \"std/stream\" \
+             let mut cur = 0 \
              let mut closed = 0 \
              fn tick(sl: Int64, gn: Int64, cl: Bool) -> Option<Int64> {{ \
              if cl {{ closed = closed + 1 return None }} \
              let n = cur cur = n + 1 return Some(n) }} \
              fn double(n: Int64) -> Int64 {{ return n * 2 }} \
-             {LMAP} \
              fn main() -> Int64 {{ let mut i = 0 \
                while i < 10000 {{ \
-                 let s = lmap(lmap(lmap(fromStep(0, 1, tick), double), double), double) \
+                 let s = map(map(map(fromStep(0, 1, tick), double), double), double) \
                  close(s) i = i + 1 }} \
                return closed }}"
     );
@@ -1091,10 +1088,10 @@ fn releasing_a_chain_closes_one_stream_per_link() {
 
 #[test]
 fn pull_at_an_address_with_no_stream_traps() {
-    // `pullAt` is a builtin and an address is an ordinary `Int64`, so a program can
-    // call it on a number. The wording is the compiled backends'.
+    // An address is an ordinary `Int64`, so even `std/stream` can hand `pullAt` a
+    // number. The wording is the compiled backends'.
     let src = "fn main() -> Int64 { let x: Option<Int64> = pullAt(24) return 0 }";
-    match run(src) {
+    match run_as(STREAM, src) {
         Err(e) => assert!(e.contains("no stream in this box"), "unexpected trap: {e}"),
         other => panic!("expected a trap, got {other:?}"),
     }
@@ -1104,7 +1101,7 @@ fn pull_at_an_address_with_no_stream_traps() {
                    fn main() -> Int64 { let a = boxStream(fromStep(0, 1, tick)) \
                      let s: Stream<Int64> = unboxStream(a) close(s) \
                      let t: Stream<Int64> = unboxStream(a) close(t) return 0 }";
-    match run(src) {
+    match run_as(STREAM, src) {
         Err(e) => assert!(e.contains("no stream in this box"), "unexpected trap: {e}"),
         other => panic!("expected a trap, got {other:?}"),
     }
@@ -1117,7 +1114,7 @@ fn a_box_address_past_the_32_bit_range_traps_rather_than_wrapping() {
     let src = "fn main() -> Int64 { let h = boxStream(fromArray([7, 8])) \
                  let x: Option<Int64> = pullAt(h + 4294967296) \
                  let s: Stream<Int64> = unboxStream(h) close(s) return 0 }";
-    match run(src) {
+    match run_as(STREAM, src) {
         Err(e) => assert!(e.contains("no stream in this box"), "unexpected trap: {e}"),
         other => panic!("expected a trap, got {other:?}"),
     }

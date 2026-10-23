@@ -224,6 +224,10 @@ pub struct Builtin {
     /// The index check a call makes of its operands, which a pass that proves
     /// bounds in range may remove.
     pub indexes: Option<Indexes>,
+    /// The one module that may call it, as an import specifier. The loader
+    /// refuses a call from any other module: a call that could read a value
+    /// at a type no argument fixes is trusted to that module alone.
+    pub home: Option<&'static str>,
 }
 
 /// The operands a builtin indexes with, and the check it makes of them.
@@ -413,6 +417,12 @@ impl Builtin {
     }
     fn resizes(self, shape_map: ShapeMap) -> Self {
         Builtin { shape_map, ..self }
+    }
+    fn home(self, spec: &'static str) -> Self {
+        Builtin {
+            home: Some(spec),
+            ..self
+        }
     }
 }
 
@@ -946,10 +956,13 @@ fn table() -> Vec<Builtin> {
             ))
             .spec(Spec::Builds(stm(t())))
             .hover("fromStep(slot, generation, step) -> Stream<T> — a stream that pulls from `step: fn(Int64, Int64, Bool) -> Option<T>` over a cursor its caller minted; `std/stream`'s `unfold` is the one to call"),
+        // The box's address is an `Int64` and says nothing of `T`, so a call
+        // anywhere but `std/stream` could read the stream at any type.
         b("boxStream")
             .sig(row("boxStream", &["T"], &[("s", Consume, stm(t()))], Int, &[]))
             .spec(Spec::Effect(Int))
-            .hover("boxStream(s) -> Int64 — move a stream into one heap box and answer its address; `std/stream` keeps a wrapper's source this way"),
+            .home("std/stream")
+            .hover("boxStream(s) -> Int64 — move a stream into one heap box and answer its address; only `std/stream` may call it, to keep a wrapper's source"),
         // Hands the stream to the host, which pulls and writes one encoded
         // frame at a time and `close`s it when a write fails. It is a builtin
         // because the stream escapes the call that made it.
@@ -963,11 +976,13 @@ fn table() -> Vec<Builtin> {
         b("unboxStream").takes(&[1], takes_one)
             .sig(row("unboxStream", &["T"], &[("a", Read, Int)], stm(t()), &[]))
             .spec(Spec::Builds(stm(t())))
-            .hover("unboxStream(address) -> Stream<T> — take a boxed stream back out; needs its type from the annotation: `let s: Stream<T> = unboxStream(a)`"),
+            .home("std/stream")
+            .hover("unboxStream(address) -> Stream<T> — take a boxed stream back out at the annotated type; only `std/stream` may call it"),
         b("pullAt")
             .takes(&[1], takes_one)
             .spec(Spec::Builds(opt(t())))
-            .hover("pullAt(address) -> Option<T> — one element from the stream in that box; needs its type from the annotation: `let x: Option<T> = pullAt(a)`"),
+            .home("std/stream")
+            .hover("pullAt(address) -> Option<T> — one element from the stream in that box, at the annotated type; only `std/stream` may call it"),
         b("@pull").spec(Spec::Pulls),
         // The parts' lengths add up to the growth, which no one operand states.
         b("@strAppend")

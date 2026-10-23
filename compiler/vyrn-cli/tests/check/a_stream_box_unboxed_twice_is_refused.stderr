@@ -1,0 +1,3 @@
+a_stream_box_unboxed_twice_is_refused.vyrn:4:0: only `std/stream` may call `boxStream`
+a_stream_box_unboxed_twice_is_refused.vyrn:6:0: only `std/stream` may call `unboxStream`
+a_stream_box_unboxed_twice_is_refused.vyrn:7:0: only `std/stream` may call `unboxStream`

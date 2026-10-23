@@ -2707,6 +2707,11 @@ pub fn each_expr(b: &Block, f: &mut dyn FnMut(&Expr) -> bool) {
     ast_block(b, &mut std::collections::HashSet::new(), &mut Each(f));
 }
 
+/// [`each_expr`] for `e` and its children.
+pub fn each_expr_in(e: &Expr, f: &mut dyn FnMut(&Expr) -> bool) {
+    ast_expr(e, &std::collections::HashSet::new(), &mut Each(f));
+}
+
 struct Binders<'f>(&'f mut dyn FnMut(&str));
 
 impl AstVisit<'_> for Binders<'_> {

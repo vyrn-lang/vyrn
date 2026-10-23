@@ -851,6 +851,7 @@ rules! {
         "`{importer}` is {from} and cannot import `{imported}`, which is {to}";
     AudienceRuntime { shown, fenced }
         "`{shown}` cannot import `{fenced}`, whose audience is the runtime";
+    AwayFromHome { name, home } "only `{home}` may call `{name}`";
     GenImportsDeep { max }
         "generator imports nest more than {max} deep — a generator \
         likely imports itself with a growing argument";

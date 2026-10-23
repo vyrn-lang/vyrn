@@ -1,0 +1,4 @@
+fn id(x: Int64) -> Int64 { return x }
+test "box in a test" {
+    let x: Option<Int64> = pullAt(4096)
+}

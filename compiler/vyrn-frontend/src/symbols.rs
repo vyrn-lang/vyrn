@@ -1095,8 +1095,12 @@ pub fn completions(analysis: &Analysis) -> Vec<Completion> {
             });
         }
     }
-    // A builtin a call names bare (`print`, `assert`), by the contract hover shows.
-    for b in crate::prelude::builtins() {
+    // A builtin a call names bare (`print`, `assert`), by the contract hover
+    // shows. One with a home is left out, as an `export to` is.
+    for b in crate::prelude::builtins()
+        .iter()
+        .filter(|b| b.home.is_none())
+    {
         if let (Some(f), None, false) = (&b.sig, b.method, b.name.starts_with('@')) {
             out.push(Completion {
                 label: b.name.to_string(),
