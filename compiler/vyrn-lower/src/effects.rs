@@ -142,8 +142,7 @@ impl Judged<'_> {
         {
             let Some(id) = b.id else { continue };
             let u = out.entry(id).or_default();
-            u.host |= e.has(Effect::Extern);
-            u.touches |= e.has(Effect::ModuleState);
+            u.effects = u.effects.join(*e);
             u.writes.append(&mut writes);
             u.via = u.via.or(step.and_then(|j| refs.get(j)?.id));
         }
@@ -180,13 +179,12 @@ impl Judged<'_> {
     }
 }
 
-/// What a call into one frame may do to module state, by the effect judgment.
+/// What a call into one frame may do, by the effect judgment. An `extern`
+/// effect is a host import, which may call an export back.
 #[derive(Debug, Clone, Default)]
 pub struct StateUse {
-    /// It may call a host import, which may call an export back.
-    pub host: bool,
-    /// It may read or store module state.
-    pub touches: bool,
+    /// Its effect set.
+    pub effects: Effects,
     /// The globals it may store into.
     pub writes: std::collections::BTreeSet<String>,
     /// The frame a call into it reaches module state through, one step on a

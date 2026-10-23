@@ -36,3 +36,17 @@ fn main() -> Int64
   173  loop 1   copies `String`: interpolating a `String` copies it
        loop 1   allocates `String` x3
 summary: allocating rows 20 (9 in loops), growing rows 6 (5 in loops), copies 5 (4 in loops), checks kept 1 (1 in loops), checks proved 20 (15 in loops)
+  namedFragments: trap-free: yes; kernel: no, its effect set is alloc
+  code: trap-free: yes; kernel: no, `b` is UInt8, not Int32, UInt32, Bool or a read array of one
+  modulusOf: trap-free: yes; kernel: no, `k` is Int64, and WGSL has no 64-bit integer
+  thirdSequence: trap-free: yes; kernel: no, its effect set is alloc, read-input
+  countKmers: trap-free: no, it calls `panic` at line 48; kernel: no, its effect set is alloc, module-state, trap
+  unpack: trap-free: no, it keeps an index check at line 73; kernel: no, its effect set is alloc
+  pack: trap-free: yes; kernel: no, its effect set is alloc
+  fixed3: trap-free: yes; kernel: no, its effect set is alloc
+  byCountThenFrag: trap-free: yes; kernel: no, `a` is Entry, not Int32, UInt32, Bool or a read array of one
+  ranked: trap-free: no, it calls `sortWith` at line 125, which is not trap-free; kernel: no, its effect set is alloc
+  report: trap-free: no, it calls `countKmers` at line 129, which is not trap-free; kernel: no, its effect set is alloc, write-output, module-state, trap
+  countOf: trap-free: no, it calls `countKmers` at line 138, which is not trap-free; kernel: no, its effect set is alloc, module-state, trap
+  syntheticSequence: trap-free: yes; kernel: no, its effect set is alloc
+  main: trap-free: no, it calls `report` at line 170, which is not trap-free; kernel: no, its effect set is alloc, read-input, write-output, module-state, trap

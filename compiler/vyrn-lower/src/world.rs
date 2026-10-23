@@ -55,8 +55,8 @@ pub struct World {
     /// placer judged them, a body the judgment memo served included, with their file: what
     /// [`World::allocating_file`] answers.
     pub(crate) allocating: HashMap<FnId, Arc<str>>,
-    /// What a call into each frame the placer built may do to module state, as
-    /// the effect judgment found it: what [`World::state_use`] answers.
+    /// What a call into each frame the placer built may do, as the effect
+    /// judgment found it: what [`World::state_use`] answers.
     pub(crate) state_uses: Arc<HashMap<FnId, crate::effects::StateUse>>,
     /// What every entry and every return of each directly called body
     /// states, made once from `bodies` when an emitter first decides one
@@ -473,7 +473,7 @@ impl World {
         })
     }
 
-    /// What a call into the frame `f` may do to module state. `None` for a frame
+    /// What a call into the frame `f` may do. `None` for a frame
     /// the placer did not build, which no judgment answers for.
     pub fn state_use(&self, f: FnId) -> Option<&crate::effects::StateUse> {
         self.state_uses.get(&f)
@@ -485,7 +485,8 @@ impl World {
     /// state.
     pub fn state_path(&self, f: FnId) -> Option<(Vec<FnId>, Option<&str>)> {
         let mut path = vec![f];
-        self.state_use(f).filter(|u| u.touches)?;
+        self.state_use(f)
+            .filter(|u| u.effects.has(vyrn_frontend::effects::Effect::ModuleState))?;
         // Each `via` goes one call nearer the state, so the walk ends. Frames
         // that share a row share one `via`; the check stops a cycle that makes.
         while let Some(next) = self.state_use(path[path.len() - 1]).and_then(|u| u.via) {

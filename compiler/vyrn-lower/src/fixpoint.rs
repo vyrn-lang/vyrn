@@ -93,7 +93,7 @@ pub(crate) fn descend<L: Sync, T: Send>(
 /// Returns the strongly connected components of `callees`, each sorted, a
 /// component after every component it reaches (Tarjan's algorithm, with an
 /// explicit stack so a deep call chain cannot overflow the native one).
-fn components(callees: &[Vec<usize>]) -> Vec<Vec<usize>> {
+pub(crate) fn components(callees: &[Vec<usize>]) -> Vec<Vec<usize>> {
     const UNSEEN: usize = usize::MAX;
     let n = callees.len();
     let mut index = vec![UNSEEN; n];

@@ -132,7 +132,7 @@ pub fn row(s: &St, body: &Body, world: &World) -> Option<(u32, Kind)> {
 }
 
 /// What `guard` protects, in the words the hints use.
-fn guarded(guard: &Guard) -> &'static str {
+pub(crate) fn guarded(guard: &Guard) -> &'static str {
     match guard {
         Guard::Index(..) | Guard::Span(..) => "index",
         Guard::Range(..) => "slice",

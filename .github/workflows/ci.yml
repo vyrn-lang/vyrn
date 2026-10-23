@@ -548,6 +548,9 @@ jobs:
       - name: The printed check verdicts are the emitted ones
         working-directory: compiler
         run: cargo test --quiet -p vyrn-cli --test verdicts -- --ignored --nocapture
+      - name: Each function's trap-free and kernel verdicts over the corpus
+        working-directory: compiler
+        run: cargo test --quiet -p vyrn-cli --test fnverdicts -- --ignored --nocapture
 
   route:
     name: the native route (wasm2c == wasm)

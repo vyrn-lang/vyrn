@@ -6,3 +6,10 @@ fn run(n: Int64) -> Unit
    70  loop 1   allocates `String` x7
    73           allocates `String` x5
 summary: allocating rows 18 (7 in loops), growing rows 0 (0 in loops), copies 0 (0 in loops), checks kept 0 (0 in loops), checks proved 0 (0 in loops)
+  make: trap-free: yes; kernel: no, its effect set is alloc
+  check: trap-free: yes; kernel: no, it is recursive
+  checkAll: trap-free: yes; kernel: no, its effect set is alloc
+  iterationsFor: trap-free: yes; kernel: no, `depth` is Int64, and WGSL has no 64-bit integer
+  run: trap-free: yes; kernel: no, its effect set is alloc, write-output
+  main: trap-free: yes; kernel: no, its effect set is alloc, write-output, module-state
+  Owned$Tree$release: trap-free: yes; kernel: no, it is recursive

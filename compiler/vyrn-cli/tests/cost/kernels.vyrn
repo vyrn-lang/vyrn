@@ -1,0 +1,72 @@
+// One function per rule `vyrn why --cost` checks a kernel against, in the
+// order it checks them, and two kernels.
+
+/// A kernel: 32-bit integers, no effect, no check.
+fn add32(a: Int32, b: Int32) -> Int32 {
+    return a + b
+}
+
+/// A kernel: a counter loop to a bound fixed before it, and a read array.
+fn tri(xs: Array<Int32>, n: Int32) -> Int32 {
+    let mut s: Int32 = 0
+    let mut i: Int32 = 0
+    while i < n {
+        s = s + i
+        i = i + 1
+    }
+    return s
+}
+
+fn shout(n: Int32) -> Int32 {
+    print(n)
+    return n
+}
+
+export fn div32(a: Int32, b: Int32) -> Int32 {
+    return a / b
+}
+
+fn down(n: Int32) -> Int32 {
+    if n <= 0 {
+        return 0
+    }
+    return down(n - 1)
+}
+
+fn wide(n: Int64) -> Int64 {
+    return n + 1
+}
+
+fn half(x: Float32) -> Float32 {
+    return x + x
+}
+
+fn twice(x: Float64) -> Float64 {
+    return x + x
+}
+
+fn byte(x: UInt8) -> UInt8 {
+    return x
+}
+
+/// A loop that counts down is no counter loop.
+fn countdown(n: Int32) -> Int32 {
+    let mut s: Int32 = 0
+    let mut i: Int32 = n
+    while i > 0 {
+        s = s + i
+        i = i - 1
+    }
+    return s
+}
+
+fn viaCountdown(n: Int32) -> Int32 {
+    return add32(n, 1) + countdown(n)
+}
+
+fn main() -> Int64 {
+    let xs: Array<Int32> = [1, 2]
+    let k = add32(1, 2) + tri(xs, 3) + shout(1) + div32(4, 2) + down(3) + viaCountdown(2)
+    print("\{k} \{byte(7)} \{wide(1)} \{half(1.0)} \{twice(1.0)}")
+    return 0
+}

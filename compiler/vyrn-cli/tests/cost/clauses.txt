@@ -6,3 +6,7 @@ fn main() -> Int64
    27           allocates `Array<Int64>`
    28           allocates `String`
 summary: allocating rows 3 (0 in loops), growing rows 0 (0 in loops), copies 0 (0 in loops), checks kept 1 (0 in loops), checks proved 2 (1 in loops)
+  at: trap-free: yes; kernel: no, `b` is Array<Int64>, and WGSL has no 64-bit integer
+  sum: trap-free: yes; kernel: no, `b` is Array<Int64>, and WGSL has no 64-bit integer
+  fromInput: trap-free: no, it keeps a where clause check at line 23; kernel: no, its effect set is alloc, read-input
+  main: trap-free: no, it calls `fromInput` at line 28, which is not trap-free; kernel: no, its effect set is alloc, read-input, write-output

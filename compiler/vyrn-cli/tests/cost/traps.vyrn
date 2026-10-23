@@ -1,0 +1,51 @@
+// One function per cause `vyrn why --cost` gives a function that is not
+// trap-free, and two that are.
+extern fn hostTick() -> Int64
+
+/// Recursion with no cause in its cycle.
+fn depth(n: Int64) -> Int64 {
+    if n <= 0 {
+        return 0
+    }
+    return 1 + depth(n - 1)
+}
+
+/// A counter loop whose index check the bound proves.
+fn total(xs: Array<Int64>) -> Int64 {
+    let mut s = 0
+    let mut i = 0
+    while i < xs.length {
+        s = s + xs[i]
+        i = i + 1
+    }
+    return s
+}
+
+fn fails(n: Int64) -> Int64 {
+    if n < 0 {
+        panic("negative")
+    }
+    return n
+}
+
+fn first(xs: Array<Int64>) -> Int64 {
+    return xs[0]
+}
+
+fn apply(f: fn(Int64) -> Int64, n: Int64) -> Int64 {
+    return f(n)
+}
+
+fn tick() -> Int64 {
+    return hostTick()
+}
+
+fn viaFirst(xs: Array<Int64>) -> Int64 {
+    return total(xs) + first(xs)
+}
+
+fn main() -> Int64 {
+    let xs: Array<Int64> = [1, 2, 3]
+    print(depth(3) + fails(1) + viaFirst(xs) + apply(n -> n + 1, 1) + tick())
+    return 0
+}
