@@ -6,3 +6,10 @@ fn run(n: Int64) -> Unit
    70  loop 1   allocates `String` x7
    73           allocates `String` x5
 summary: allocating rows 18 (7 in loops), growing rows 0 (0 in loops), copies 0 (0 in loops), checks kept 0 (0 in loops), checks proved 0 (0 in loops)
+  make: trap-free: yes
+  check: trap-free: yes
+  checkAll: trap-free: yes
+  iterationsFor: trap-free: yes
+  run: trap-free: yes
+  main: trap-free: yes
+  Owned$Tree$release: trap-free: yes

@@ -1,0 +1,14 @@
+compiler/vyrn-cli/tests/cost/traps.vyrn
+fn first(xs: Array<Int64>) -> Int64
+   32           index check: it needs `xs` non-empty, and `xs` is a parameter, so the function cannot know what its callers pass; add `where value.length >= 1` to `xs`, and each call checks it where the caller cannot show it
+fn main() -> Int64
+   48           allocates `Array<Int64>`
+summary: allocating rows 1 (0 in loops), growing rows 0 (0 in loops), copies 0 (0 in loops), checks kept 1 (0 in loops), checks proved 1 (1 in loops)
+  depth: trap-free: yes
+  total: trap-free: yes
+  fails: trap-free: no, it calls `panic` at line 26
+  first: trap-free: no, it keeps an index check at line 32
+  apply: trap-free: no, it calls a function value at line 36
+  tick: trap-free: no, it calls the extern `hostTick` at line 40
+  viaFirst: trap-free: no, it calls `first` at line 44, which is not trap-free
+  main: trap-free: no, it calls `fails` at line 49, which is not trap-free

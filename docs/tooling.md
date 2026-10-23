@@ -280,6 +280,15 @@ compile, except `--contract`.
   imports, each allocating, copying, growing or entering row also reads
   `last run: N blocks, B bytes`. If the source or an import changed since that
   run, the report prints one line, `profile: stale; ...`, and no counts.
+  After the summary, one line per function of the file says whether it is
+  trap-free: `trap-free: yes`, or `trap-free: no, ` and the first cause with
+  its line. A function is trap-free when no call from it can reach a `panic`,
+  an `assert`, a check the compiler keeps, a call through a function value,
+  an extern, or a callee with no body to judge; a callee that is not
+  trap-free is a cause, so following the causes ends at one of those rows.
+  The verdict does not cover allocation failure, call-stack exhaustion, a
+  `region` nesting past its limit, or a failure inside a builtin with an I/O
+  effect.
 - `vyrn why --provenance <file>`: per function of the file that returns an
   array, which positions of its array parameters the result's positions read,
   such as ``identity+fresh(end) pointwise, from `path` ``. The class is

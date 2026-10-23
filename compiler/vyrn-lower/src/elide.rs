@@ -323,6 +323,20 @@ impl Summaries {
     pub fn decided(&self, f: FnId) -> Option<Body> {
         self.decided.get(&f)?.lock().ok()?.take()
     }
+
+    /// The row whose body the call row `rhs` runs ([`runs`]).
+    pub(crate) fn runs(&self, rhs: &Rhs) -> Option<FnId> {
+        runs(&self.instances, rhs)
+    }
+
+    /// The rows of the instances of the generic function `g`.
+    pub(crate) fn instances_of(&self, g: FnId) -> impl Iterator<Item = FnId> + '_ {
+        self.instances
+            .get(&g)
+            .into_iter()
+            .flatten()
+            .map(|(_, f)| *f)
+    }
 }
 
 /// Per generic function's row, each instance's row under the type arguments
@@ -396,18 +410,29 @@ impl<'a> From<&'a Summaries> for View<'a> {
     }
 }
 
-/// The row whose body a direct call row runs ([`direct_call`]): an
-/// instance's row for a call to a generic function. `None` for a call whose
-/// `solved` no instance's type arguments equal.
+/// The row whose body a direct call row runs ([`direct_call`], [`runs`]).
 fn instance(instances: &Instances, rhs: &Rhs) -> Option<FnId> {
-    let g = direct_call(rhs)?;
-    let Rhs::Call { solved, .. } = rhs else {
+    direct_call(rhs)?;
+    runs(instances, rhs)
+}
+
+/// The row whose body a [`Callee::Fn`] call row runs, before any `fn`-typed
+/// argument is bound: an instance's row for a call to a generic function.
+/// `None` for any other call, and for one whose `solved` no instance's type
+/// arguments equal.
+fn runs(instances: &Instances, rhs: &Rhs) -> Option<FnId> {
+    let Rhs::Call {
+        kind: Callee::Fn(g),
+        solved,
+        ..
+    } = rhs
+    else {
         return None;
     };
     if solved.is_empty() {
-        return Some(g);
+        return Some(*g);
     }
-    let mut of = instances.get(&g)?.iter();
+    let mut of = instances.get(g)?.iter();
     of.find(|(args, _)| args == solved).map(|(_, f)| *f)
 }
 

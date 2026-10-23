@@ -1,0 +1,3671 @@
+root	function	trap-free
+examples/a1_afterjoin.vyrn		does not check
+examples/a2_capture.vyrn		does not check
+examples/a2_capture_escape.vyrn		does not check
+examples/a6_reassign.vyrn		does not check
+examples/aliascontext.vyrn	sum	yes
+examples/aliascontext.vyrn	describe	yes
+examples/aliascontext.vyrn	main	no, it calls `derive$json$jsonEncoders$t52339b6344f7e59b`, which is not trap-free
+examples/aliascontext.vyrn	where$pAge	yes
+examples/aliascontext.vyrn	where$cAge	no, it calls `panic`
+examples/appendowned.vyrn		does not check
+examples/appendreserve.vyrn	line	yes
+examples/appendreserve.vyrn	main	no, it keeps an index check
+examples/args.vyrn	main	yes
+examples/argsdemo.vyrn	showOpt	yes
+examples/argsdemo.vyrn	main	no, it calls `flag`, which is not trap-free
+examples/arrays.vyrn	weekdayLetters	yes
+examples/arrays.vyrn	main	yes
+examples/assoctype.vyrn	main	yes
+examples/assoctype.vyrn	Unwrap$Reading$present	yes
+examples/assoctype.vyrn	Unwrap$Reading$valueOr	yes
+examples/assoctype.vyrn	Unwrap$Line$present	yes
+examples/assoctype.vyrn	Unwrap$Line$valueOr	yes
+examples/assoctype.vyrn	Unwrap$Option$valueOr	yes
+examples/assoctype_unbound.vyrn		does not check
+examples/autorelease.vyrn	main	no, it calls `panic`
+examples/autovalidate.vyrn	greet	yes
+examples/autovalidate.vyrn	clamp	yes
+examples/autovalidate.vyrn	span	yes
+examples/autovalidate.vyrn	main	no, it keeps a where rule check
+examples/autovalidate.vyrn	where$pAge	yes
+examples/autovalidate.vyrn	where$cAge	no, it calls `panic`
+examples/autovalidate.vyrn	where$pRange	yes
+examples/autovalidate.vyrn	where$cRange	no, it calls `panic`
+examples/benching.vyrn	hashTo	yes
+examples/benching.vyrn	main	yes
+examples/bin/client/boot.vyrn	oneIssue	yes
+examples/bin/client/boot.vyrn	view	yes
+examples/bin/client/boot.vyrn	onPastesCreate	yes
+examples/bin/client/boot.vyrn	afterCreate	yes
+examples/bin/client/boot.vyrn	goToPaste	yes
+examples/bin/client/boot.vyrn	setIssues	yes
+examples/bin/client/boot.vyrn	setDraftTitle	yes
+examples/bin/client/boot.vyrn	setDraftBody	yes
+examples/bin/client/boot.vyrn	setDraftLang	yes
+examples/bin/client/boot.vyrn	submitCreate	no, it calls `pastesCreate`, which is not trap-free
+examples/bin/client/boot.vyrn	takeNav	yes
+examples/bin/client/boot.vyrn	vyrnView	no, it calls `derive$json$jsonEncoders$t62d5a5c67072e4b3`, which is not trap-free
+examples/bin/client/boot.vyrn	vyrnPatch	no, it calls `derive$json$jsonEncoders$t086736aeab103791`, which is not trap-free
+examples/bin/client/boot.vyrn	vyrnRenderPage	no, it calls `renderPage`, which is not trap-free
+examples/bin/client/boot.vyrn	vyrnResolvePage	no, it calls `resolvePage`, which is not trap-free
+examples/bin/client/boot.vyrn	main	yes
+examples/bin/client/boot.vyrn	where$pBody	yes
+examples/bin/client/boot.vyrn	where$cBody	no, it calls `panic`
+examples/bin/client/boot.vyrn	where$pBody__from0	yes
+examples/bin/client/boot.vyrn	where$cBody__from0	no, it calls `panic`
+examples/bin/client/boot.vyrn	where$pCreated	yes
+examples/bin/client/boot.vyrn	where$cCreated	no, it calls `panic`
+examples/bin/client/boot.vyrn	where$pCreated__from0	yes
+examples/bin/client/boot.vyrn	where$cCreated__from0	no, it calls `panic`
+examples/bin/client/boot.vyrn	where$pInstant	yes
+examples/bin/client/boot.vyrn	where$cInstant	no, it calls `panic`
+examples/bin/client/boot.vyrn	where$pLang	yes
+examples/bin/client/boot.vyrn	where$cLang	no, it calls `panic`
+examples/bin/client/boot.vyrn	where$pLang__from0	yes
+examples/bin/client/boot.vyrn	where$cLang__from0	no, it calls `panic`
+examples/bin/client/boot.vyrn	where$pPasteId	yes
+examples/bin/client/boot.vyrn	where$cPasteId	no, it calls `panic`
+examples/bin/client/boot.vyrn	where$pPasteId__from0	yes
+examples/bin/client/boot.vyrn	where$cPasteId__from0	no, it calls `panic`
+examples/bin/client/boot.vyrn	where$pTitle	yes
+examples/bin/client/boot.vyrn	where$cTitle	no, it calls `panic`
+examples/bin/client/boot.vyrn	where$pTitle__from0	yes
+examples/bin/client/boot.vyrn	where$cTitle__from0	no, it calls `panic`
+examples/bin/client/boot.vyrn	where$pTransKey	yes
+examples/bin/client/boot.vyrn	where$cTransKey	no, it calls `panic`
+examples/bin/client/boot.vyrn	where$pTw	yes
+examples/bin/client/boot.vyrn	where$cTw	no, it calls `panic`
+examples/bin/client/boot.vyrn	where$pTwClass	yes
+examples/bin/client/boot.vyrn	where$cTwClass	no, it calls `panic`
+examples/bin/server.vyrn	runMiddleware	no, it calls a function value
+examples/bin/server.vyrn	handle	no, it calls `runMiddleware`, which is not trap-free
+examples/bin/server.vyrn	routed	no, it calls `mount`, which is not trap-free
+examples/bin/server.vyrn	main	no, it calls `handle`, which is not trap-free
+examples/bin/server.vyrn	where$pBody	yes
+examples/bin/server.vyrn	where$cBody	no, it calls `panic`
+examples/bin/server.vyrn	where$pCreated	yes
+examples/bin/server.vyrn	where$cCreated	no, it calls `panic`
+examples/bin/server.vyrn	where$pInstant	yes
+examples/bin/server.vyrn	where$cInstant	no, it calls `panic`
+examples/bin/server.vyrn	where$pLang	yes
+examples/bin/server.vyrn	where$cLang	no, it calls `panic`
+examples/bin/server.vyrn	where$pPasteId	yes
+examples/bin/server.vyrn	where$cPasteId	no, it calls `panic`
+examples/bin/server.vyrn	where$pPathById	yes
+examples/bin/server.vyrn	where$cPathById	no, it calls `panic`
+examples/bin/server.vyrn	where$pPathCreate	yes
+examples/bin/server.vyrn	where$cPathCreate	no, it calls `panic`
+examples/bin/server.vyrn	where$pPathRecent	yes
+examples/bin/server.vyrn	where$cPathRecent	no, it calls `panic`
+examples/bin/server.vyrn	where$pRoutePath__from0	yes
+examples/bin/server.vyrn	where$cRoutePath__from0	no, it calls `panic`
+examples/bin/server.vyrn	where$pRoutePath__from1	yes
+examples/bin/server.vyrn	where$cRoutePath__from1	no, it calls `panic`
+examples/bin/server.vyrn	where$pTitle	yes
+examples/bin/server.vyrn	where$cTitle	no, it calls `panic`
+examples/bin/server.vyrn	where$pTransKey	yes
+examples/bin/server.vyrn	where$cTransKey	no, it calls `panic`
+examples/bin/server.vyrn	where$pTw	yes
+examples/bin/server.vyrn	where$cTw	no, it calls `panic`
+examples/bin/server.vyrn	where$pTwClass	yes
+examples/bin/server.vyrn	where$cTwClass	no, it calls `panic`
+examples/bin/server/api/pastes.http.vyrn	routes	no, it calls `recent`, which is not trap-free
+examples/bin/server/api/pastes.http.vyrn	tailStep	no, it calls `cursorGet`, which is not trap-free
+examples/bin/server/api/pastes.http.vyrn	tail	yes
+examples/bin/server/api/pastes.http.vyrn	feeds	no, it calls `sse`, which is not trap-free
+examples/bin/server/api/pastes.http.vyrn	socketStep	no, it calls `cursorGet`, which is not trap-free
+examples/bin/server/api/pastes.http.vyrn	socketTail	yes
+examples/bin/server/api/pastes.http.vyrn	sockets	no, it calls `ws`, which is not trap-free
+examples/bin/server/api/pastes.http.vyrn	where$pBody	yes
+examples/bin/server/api/pastes.http.vyrn	where$cBody	no, it calls `panic`
+examples/bin/server/api/pastes.http.vyrn	where$pCreated	yes
+examples/bin/server/api/pastes.http.vyrn	where$cCreated	no, it calls `panic`
+examples/bin/server/api/pastes.http.vyrn	where$pInstant	yes
+examples/bin/server/api/pastes.http.vyrn	where$cInstant	no, it calls `panic`
+examples/bin/server/api/pastes.http.vyrn	where$pLang	yes
+examples/bin/server/api/pastes.http.vyrn	where$cLang	no, it calls `panic`
+examples/bin/server/api/pastes.http.vyrn	where$pPasteId	yes
+examples/bin/server/api/pastes.http.vyrn	where$cPasteId	no, it calls `panic`
+examples/bin/server/api/pastes.http.vyrn	where$pPathById	yes
+examples/bin/server/api/pastes.http.vyrn	where$cPathById	no, it calls `panic`
+examples/bin/server/api/pastes.http.vyrn	where$pPathCreate	yes
+examples/bin/server/api/pastes.http.vyrn	where$cPathCreate	no, it calls `panic`
+examples/bin/server/api/pastes.http.vyrn	where$pPathRecent	yes
+examples/bin/server/api/pastes.http.vyrn	where$cPathRecent	no, it calls `panic`
+examples/bin/server/api/pastes.http.vyrn	where$pTitle	yes
+examples/bin/server/api/pastes.http.vyrn	where$cTitle	no, it calls `panic`
+examples/bin/server/api/pastes.vyrn	recent	no, it calls `listPastes`, which is not trap-free
+examples/bin/server/api/pastes.vyrn	byId	yes
+examples/bin/server/api/pastes.vyrn	create	no, it calls `createPaste`, which is not trap-free
+examples/bin/server/api/pastes.vyrn	where$pBody	yes
+examples/bin/server/api/pastes.vyrn	where$cBody	no, it calls `panic`
+examples/bin/server/api/pastes.vyrn	where$pCreated	yes
+examples/bin/server/api/pastes.vyrn	where$cCreated	no, it calls `panic`
+examples/bin/server/api/pastes.vyrn	where$pInstant	yes
+examples/bin/server/api/pastes.vyrn	where$cInstant	no, it calls `panic`
+examples/bin/server/api/pastes.vyrn	where$pLang	yes
+examples/bin/server/api/pastes.vyrn	where$cLang	no, it calls `panic`
+examples/bin/server/api/pastes.vyrn	where$pPasteId	yes
+examples/bin/server/api/pastes.vyrn	where$cPasteId	no, it calls `panic`
+examples/bin/server/api/pastes.vyrn	where$pTitle	yes
+examples/bin/server/api/pastes.vyrn	where$cTitle	no, it calls `panic`
+examples/bin/server/persist.vyrn	loadStore	no, it calls `derive$jsondec$jsonDecoders$t7b41935a1aea7dd7`, which is not trap-free
+examples/bin/server/persist.vyrn	emptyStore	yes
+examples/bin/server/persist.vyrn	warnEmpty	yes
+examples/bin/server/persist.vyrn	saveStore	no, it calls `derive$json$jsonEncoders$t7b41935a1aea7dd7`, which is not trap-free
+examples/bin/server/persist.vyrn	logFail	yes
+examples/bin/server/persist.vyrn	where$pBody	yes
+examples/bin/server/persist.vyrn	where$cBody	no, it calls `panic`
+examples/bin/server/persist.vyrn	where$pCreated	yes
+examples/bin/server/persist.vyrn	where$cCreated	no, it calls `panic`
+examples/bin/server/persist.vyrn	where$pLang	yes
+examples/bin/server/persist.vyrn	where$cLang	no, it calls `panic`
+examples/bin/server/persist.vyrn	where$pPasteId	yes
+examples/bin/server/persist.vyrn	where$cPasteId	no, it calls `panic`
+examples/bin/server/persist.vyrn	where$pTitle	yes
+examples/bin/server/persist.vyrn	where$cTitle	no, it calls `panic`
+examples/bin/server/routes/raw/[id].vyrn	respond	yes
+examples/bin/server/routes/raw/[id].vyrn	rawOk	yes
+examples/bin/server/routes/raw/[id].vyrn	rawMissing	yes
+examples/bin/server/routes/raw/[id].vyrn	where$pBody	yes
+examples/bin/server/routes/raw/[id].vyrn	where$cBody	no, it calls `panic`
+examples/bin/server/routes/raw/[id].vyrn	where$pCreated	yes
+examples/bin/server/routes/raw/[id].vyrn	where$cCreated	no, it calls `panic`
+examples/bin/server/routes/raw/[id].vyrn	where$pInstant	yes
+examples/bin/server/routes/raw/[id].vyrn	where$cInstant	no, it calls `panic`
+examples/bin/server/routes/raw/[id].vyrn	where$pLang	yes
+examples/bin/server/routes/raw/[id].vyrn	where$cLang	no, it calls `panic`
+examples/bin/server/routes/raw/[id].vyrn	where$pPasteId	yes
+examples/bin/server/routes/raw/[id].vyrn	where$cPasteId	no, it calls `panic`
+examples/bin/server/routes/raw/[id].vyrn	where$pTitle	yes
+examples/bin/server/routes/raw/[id].vyrn	where$cTitle	no, it calls `panic`
+examples/bin/server/store.vyrn	copyPaste	yes
+examples/bin/server/store.vyrn	snapshot	yes
+examples/bin/server/store.vyrn	idTaken	yes
+examples/bin/server/store.vyrn	prefixOf	no, it calls `substring`, which is not trap-free
+examples/bin/server/store.vyrn	deriveId	no, it calls `prefixOf`, which is not trap-free
+examples/bin/server/store.vyrn	listPastes	no, it keeps an index check
+examples/bin/server/store.vyrn	getPaste	yes
+examples/bin/server/store.vyrn	createPaste	no, it keeps a where rule check
+examples/bin/server/store.vyrn	pasteCount	yes
+examples/bin/server/store.vyrn	pasteAt	no, it keeps an index check
+examples/bin/server/store.vyrn	decodeOrEmpty	no, it calls `derive$jsondec$jsonDecoders$t7b41935a1aea7dd7`, which is not trap-free
+examples/bin/server/store.vyrn	where$pBody	yes
+examples/bin/server/store.vyrn	where$cBody	no, it calls `panic`
+examples/bin/server/store.vyrn	where$pCreated	yes
+examples/bin/server/store.vyrn	where$cCreated	no, it calls `panic`
+examples/bin/server/store.vyrn	where$pInstant	yes
+examples/bin/server/store.vyrn	where$cInstant	no, it calls `panic`
+examples/bin/server/store.vyrn	where$pLang	yes
+examples/bin/server/store.vyrn	where$cLang	no, it calls `panic`
+examples/bin/server/store.vyrn	where$pPasteId	yes
+examples/bin/server/store.vyrn	where$cPasteId	no, it calls `panic`
+examples/bin/server/store.vyrn	where$pTitle	yes
+examples/bin/server/store.vyrn	where$cTitle	no, it calls `panic`
+examples/bin/server/util.vyrn	digit36	no, it keeps an index check
+examples/bin/server/util.vyrn	base36	no, it calls `digit36`, which is not trap-free
+examples/bin/server/util.vyrn	fullDigest	no, it calls `base36`, which is not trap-free
+examples/bin/shared/wire/paste.vyrn	where$pBody	yes
+examples/bin/shared/wire/paste.vyrn	where$cBody	no, it calls `panic`
+examples/bin/shared/wire/paste.vyrn	where$pCreated	yes
+examples/bin/shared/wire/paste.vyrn	where$cCreated	no, it calls `panic`
+examples/bin/shared/wire/paste.vyrn	where$pLang	yes
+examples/bin/shared/wire/paste.vyrn	where$cLang	no, it calls `panic`
+examples/bin/shared/wire/paste.vyrn	where$pPasteId	yes
+examples/bin/shared/wire/paste.vyrn	where$cPasteId	no, it calls `panic`
+examples/bin/shared/wire/paste.vyrn	where$pTitle	yes
+examples/bin/shared/wire/paste.vyrn	where$cTitle	no, it calls `panic`
+examples/binarytrees.vyrn	make	yes
+examples/binarytrees.vyrn	check	yes
+examples/binarytrees.vyrn	checkAll	yes
+examples/binarytrees.vyrn	iterationsFor	yes
+examples/binarytrees.vyrn	run	yes
+examples/binarytrees.vyrn	main	yes
+examples/binarytrees.vyrn	Owned$Tree$release	yes
+examples/binder_shadows_state.vyrn	bump	yes
+examples/binder_shadows_state.vyrn	peek	yes
+examples/binder_shadows_state.vyrn	main	yes
+examples/bitcount.vyrn	main	yes
+examples/bits.vyrn	dynamicWidth	yes
+examples/bits.vyrn	main	no, it keeps a shift check
+examples/blockarms.vyrn	toss	yes
+examples/blockarms.vyrn	maybe	yes
+examples/blockarms.vyrn	main	yes
+examples/blockvalarm.vyrn		does not check
+examples/bounded_call_dispatches_through_the_bounds_protocol.vyrn	mk	yes
+examples/bounded_call_dispatches_through_the_bounds_protocol.vyrn	main	yes
+examples/bounded_call_dispatches_through_the_bounds_protocol.vyrn	Qa$P$eat	yes
+examples/bounded_call_dispatches_through_the_bounds_protocol.vyrn	Pa$P$eat	yes
+examples/bounded_call_dispatches_through_the_bounds_protocol.vyrn	Qb$P$keep	yes
+examples/bounded_call_dispatches_through_the_bounds_protocol.vyrn	Pb$P$keep	yes
+examples/bounded_call_dispatches_through_the_bounds_protocol.vyrn	eats	yes
+examples/bounded_call_dispatches_through_the_bounds_protocol.vyrn	keeps	yes
+examples/branchtypes.vyrn	addOne	yes
+examples/branchtypes.vyrn	first	yes
+examples/branchtypes.vyrn	head	yes
+examples/branchtypes.vyrn	main	no, it keeps an index check
+examples/branchtypes.vyrn	where$pAge	yes
+examples/branchtypes.vyrn	where$cAge	no, it calls `panic`
+examples/bytecount.vyrn	countDigits	yes
+examples/bytecount.vyrn	maxBraceDepth	yes
+examples/bytecount.vyrn	show	yes
+examples/bytecount.vyrn	main	yes
+examples/bytesrange.vyrn	main	no, it keeps an index check
+examples/call_parameter_apart_from_the_callers.vyrn	main	no, it calls `g`, which is not trap-free
+examples/call_parameter_apart_from_the_callers.vyrn	g	no, it calls `mapOne`, which is not trap-free
+examples/call_parameter_apart_from_the_callers.vyrn	mapOne	no, it calls a function value
+examples/capture_copy.vyrn	keep	yes
+examples/capture_copy.vyrn	ask	yes
+examples/capture_copy.vyrn	main	no, it calls a function value
+examples/capturefn.vyrn	twice	yes
+examples/capturefn.vyrn	negate	yes
+examples/capturefn.vyrn	applyAll	no, it calls a function value
+examples/capturefn.vyrn	shiftAll	no, it calls `map`, which is not trap-free
+examples/capturefn.vyrn	zipApply	no, it calls `map`, which is not trap-free
+examples/capturefn.vyrn	viaOnward	no, it calls `applyAll`, which is not trap-free
+examples/capturefn.vyrn	main	no, it keeps an index check
+examples/clearkeep.vyrn	fill__from0	yes
+examples/clearkeep.vyrn	main	yes
+examples/clearowned.vyrn		does not check
+examples/clidemo.vyrn	report	yes
+examples/clidemo.vyrn	main	no, it calls `parseServe`, which is not trap-free
+examples/clidemo.vyrn	where$pPort	yes
+examples/clidemo.vyrn	where$cPort	no, it calls `panic`
+examples/clidemo.vyrn	where$pRoot	yes
+examples/clidemo.vyrn	where$cRoot	no, it calls `panic`
+examples/clifail.vyrn	main	no, it calls `parseServe`, which is not trap-free
+examples/clifail.vyrn	refuse	yes
+examples/clifail.vyrn	where$pPort	yes
+examples/clifail.vyrn	where$cPort	no, it calls `panic`
+examples/clifail.vyrn	where$pRoot	yes
+examples/clifail.vyrn	where$cRoot	no, it calls `panic`
+examples/clock.vyrn	showFields	yes
+examples/clock.vyrn	main	no, it calls `nextInRange`, which is not trap-free
+examples/clock.vyrn	where$pInstant	yes
+examples/clock.vyrn	where$cInstant	no, it calls `panic`
+examples/closures2.vyrn	double	yes
+examples/closures2.vyrn	apply	no, it calls a function value
+examples/closures2.vyrn	makeAdder	yes
+examples/closures2.vyrn	addGuard	yes
+examples/closures2.vyrn	runChain	no, it calls a function value
+examples/closures2.vyrn	main	no, it calls a function value
+examples/codecbytes.vyrn	asciiSweep	yes
+examples/codecbytes.vyrn	show	yes
+examples/codecbytes.vyrn	main	no, it calls `hexDecode`, which is not trap-free
+examples/columns.vyrn	particle	yes
+examples/columns.vyrn	rowsOf	yes
+examples/columns.vyrn	columnsOf__from0	no, it calls `particleColumns`, which is not trap-free
+examples/columns.vyrn	sumRows	yes
+examples/columns.vyrn	sumColumns	yes
+examples/columns.vyrn	moveRows	no, it keeps an index check
+examples/columns.vyrn	moveColumns	no, it keeps an index check
+examples/columns.vyrn	run	no, it calls `moveRows`, which is not trap-free
+examples/columns.vyrn	numberAt	yes
+examples/columns.vyrn	main	no, it calls `run`, which is not trap-free
+examples/columns.vyrn	where$pBodyColumns	yes
+examples/columns.vyrn	where$cBodyColumns	no, it calls `panic`
+examples/columns.vyrn	where$pParticleColumns	yes
+examples/columns.vyrn	where$cParticleColumns	no, it calls `panic`
+examples/consume.vyrn	redeem	yes
+examples/consume.vyrn	peek	yes
+examples/consume.vyrn	main	yes
+examples/consume_borrowed.vyrn		does not check
+examples/consume_handover.vyrn	take	yes
+examples/consume_handover.vyrn	owner	yes
+examples/consume_handover.vyrn	lender	yes
+examples/consume_handover.vyrn	main	yes
+examples/consumeloop.vyrn	spliced	yes
+examples/consumeloop.vyrn	make	yes
+examples/consumeloop.vyrn	lengthsOf	yes
+examples/consumeloop.vyrn	joinTemporary	yes
+examples/consumeloop.vyrn	firstShort	yes
+examples/consumeloop.vyrn	firstLong	yes
+examples/consumeloop.vyrn	show	yes
+examples/consumeloop.vyrn	main	yes
+examples/container.vyrn	build	yes
+examples/container.vyrn	main	no, it keeps an index check
+examples/container.vyrn	Iterate$Window$size	yes
+examples/container.vyrn	Owned$Pool$release	yes
+examples/container.vyrn	Copy$Pool$copy	yes
+examples/container.vyrn	Owned$Chain$release	yes
+examples/container.vyrn	Copy$Chain$copy	yes
+examples/contractquery.vyrn	noSchema	yes
+examples/contractquery.vyrn	noOrigin	yes
+examples/contractquery.vyrn	fnOf	yes
+examples/contractquery.vyrn	memberOf	yes
+examples/contractquery.vyrn	ensure	yes
+examples/contractquery.vyrn	main	no, it calls `matchedMember`, which is not trap-free
+examples/controlflow.vyrn	nextDown	yes
+examples/controlflow.vyrn	firstMultiple	yes
+examples/controlflow.vyrn	positive	yes
+examples/controlflow.vyrn	main	yes
+examples/copy.vyrn	built	yes
+examples/copy.vyrn	render	yes
+examples/copy.vyrn	strings	yes
+examples/copy.vyrn	arrays	no, it keeps an index check
+examples/copy.vyrn	smallArrays	yes
+examples/copy.vyrn	maps	yes
+examples/copy.vyrn	records	yes
+examples/copy.vyrn	sums	yes
+examples/copy.vyrn	handles__from0	no, it calls `panic`
+examples/copy.vyrn	declaredCopies	no, it calls `emit`, which is not trap-free
+examples/copy.vyrn	main	no, it keeps an index check
+examples/copy.vyrn	twice	yes
+examples/copyfromowned.vyrn		does not check
+examples/csrcount.vyrn	build	no, it keeps an index check
+examples/csrcount.vyrn	bfs	no, it keeps an index check
+examples/csrcount.vyrn	main	no, it calls `build`, which is not trap-free
+examples/csrpush.vyrn	build	yes
+examples/csrpush.vyrn	bfs	no, it keeps an index check
+examples/csrpush.vyrn	main	no, it calls `bfs`, which is not trap-free
+examples/derive.vyrn	main	yes
+examples/domdemo.vyrn	labelFor	yes
+examples/domdemo.vyrn	counterView	yes
+examples/domdemo.vyrn	inputView	yes
+examples/domdemo.vyrn	itemRow	yes
+examples/domdemo.vyrn	rowsView	yes
+examples/domdemo.vyrn	listView	yes
+examples/domdemo.vyrn	toggleLabel	yes
+examples/domdemo.vyrn	subsView	yes
+examples/domdemo.vyrn	view	yes
+examples/domdemo.vyrn	subs	yes
+examples/domdemo.vyrn	increment	yes
+examples/domdemo.vyrn	decrement	yes
+examples/domdemo.vyrn	resetCount	yes
+examples/domdemo.vyrn	onType	yes
+examples/domdemo.vyrn	onTick	yes
+examples/domdemo.vyrn	toggleTimer	yes
+examples/domdemo.vyrn	rotate	no, it keeps an index check
+examples/domdemo.vyrn	vyrnView	no, it calls `derive$json$jsonEncoders$t62d5a5c67072e4b3`, which is not trap-free
+examples/domdemo.vyrn	vyrnSubs	no, it calls `derive$json$jsonEncoders$t48e810dd4472dc6d`, which is not trap-free
+examples/domdemo.vyrn	main	no, it calls `rotate`, which is not trap-free
+examples/dot_call_through_a_local_fn_value.vyrn	inc	yes
+examples/dot_call_through_a_local_fn_value.vyrn	count	yes
+examples/dot_call_through_a_local_fn_value.vyrn	shout	yes
+examples/dot_call_through_a_local_fn_value.vyrn	step	no, it calls a function value
+examples/dot_call_through_a_local_fn_value.vyrn	main	no, it calls a function value
+examples/dropparam.vyrn		does not check
+examples/ecs.vyrn	main	yes
+examples/encoding.vyrn	charCount	yes
+examples/encoding.vyrn	show	yes
+examples/encoding.vyrn	main	no, it keeps an index check
+examples/enum.vyrn	area	yes
+examples/enum.vyrn	main	yes
+examples/enumarray.vyrn	total	yes
+examples/enumarray.vyrn	describe	no, it keeps an index check
+examples/enumarray.vyrn	load	yes
+examples/enumarray.vyrn	showLoad	yes
+examples/enumarray.vyrn	pick	yes
+examples/enumarray.vyrn	showOpt	no, it keeps an index check
+examples/enumarray.vyrn	main	no, it calls `describe`, which is not trap-free
+examples/enumcodec.vyrn	report	no, it keeps an index check
+examples/enumcodec.vyrn	roundShape	no, it calls `derive$json$jsonEncoders$t4b01abd665fdb523`, which is not trap-free
+examples/enumcodec.vyrn	decodeShape	no, it calls `report`, which is not trap-free
+examples/enumcodec.vyrn	decodeLookup	no, it calls `report`, which is not trap-free
+examples/enumcodec.vyrn	main	no, it calls `decodeShape`, which is not trap-free
+examples/enumcodec.vyrn	where$pRadius	yes
+examples/enumcodec.vyrn	where$cRadius	no, it calls `panic`
+examples/eventloop.vyrn	main	yes
+examples/eventloop.vyrn	onTick	yes
+examples/eventloop.vyrn	reset	yes
+examples/excl_alias.vyrn		does not check
+examples/externdemo.vyrn	sumTo	yes
+examples/externdemo.vyrn	main	no, it calls the extern `jsNow`
+examples/externdemo2.vyrn	vyrnAdd	yes
+examples/externdemo2.vyrn	greet	yes
+examples/externdemo2.vyrn	main	yes
+examples/fallible.vyrn	fetch	yes
+examples/fallible.vyrn	greet	no, it calls `Fallible$Http$success`, which is not trap-free
+examples/fallible.vyrn	describe	yes
+examples/fallible.vyrn	main	no, it calls `greet`, which is not trap-free
+examples/fallible.vyrn	Fallible$Http$isSuccess	yes
+examples/fallible.vyrn	Fallible$Http$success	no, it calls `panic`
+examples/falliblegeneric.vyrn	twice	no, it calls `Fallible$Slot$success`, which is not trap-free
+examples/falliblegeneric.vyrn	shout	no, it calls `Fallible$Slot$success`, which is not trap-free
+examples/falliblegeneric.vyrn	describeInt	yes
+examples/falliblegeneric.vyrn	describeStr	yes
+examples/falliblegeneric.vyrn	main	no, it calls `twice`, which is not trap-free
+examples/falliblegeneric.vyrn	Fallible$Slot$isSuccess	yes
+examples/falliblegeneric.vyrn	Fallible$Slot$success	no, it calls `panic`
+examples/fannkuch.vyrn	flip	yes
+examples/fannkuch.vyrn	iota	yes
+examples/fannkuch.vyrn	zeroes	yes
+examples/fannkuch.vyrn	foldCount	yes
+examples/fannkuch.vyrn	fannkuch	yes
+examples/fannkuch.vyrn	main	no, it keeps a where clause check
+examples/fannkuchperm.vyrn	flip	yes
+examples/fannkuchperm.vyrn	iota	yes
+examples/fannkuchperm.vyrn	zeroes	yes
+examples/fannkuchperm.vyrn	foldCount	yes
+examples/fannkuchperm.vyrn	fannkuch	yes
+examples/fannkuchperm.vyrn	main	no, it keeps a where clause check
+examples/fasta.vyrn	nextRandom	yes
+examples/fasta.vyrn	cumulative	yes
+examples/fasta.vyrn	pick	no, it keeps an index check
+examples/fasta.vyrn	line	yes
+examples/fasta.vyrn	lineWidth	yes
+examples/fasta.vyrn	repeatFasta	yes
+examples/fasta.vyrn	randomFasta	no, it calls `pick`, which is not trap-free
+examples/fasta.vyrn	iubWeights	yes
+examples/fasta.vyrn	humanWeights	yes
+examples/fasta.vyrn	run	no, it keeps a where clause check
+examples/fasta.vyrn	generate	no, it calls `pick`, which is not trap-free
+examples/fasta.vyrn	main	no, it calls `run`, which is not trap-free
+examples/fib.vyrn	fib	yes
+examples/fib.vyrn	main	yes
+examples/fieldmut.vyrn	sumFirst	no, it keeps an index check
+examples/fieldmut.vyrn	record	yes
+examples/fieldmut.vyrn	main	no, it keeps an index check
+examples/files.vyrn	showRead	yes
+examples/files.vyrn	main	yes
+examples/finitekeys.vyrn	t	yes
+examples/finitekeys.vyrn	navLabel	yes
+examples/finitekeys.vyrn	main	yes
+examples/finitekeys.vyrn	where$pSection	yes
+examples/finitekeys.vyrn	where$cSection	no, it calls `panic`
+examples/finitekeys.vyrn	where$pTransKey	yes
+examples/finitekeys.vyrn	where$cTransKey	no, it calls `panic`
+examples/floatkey.vyrn		does not check
+examples/floatmath.vyrn	show	yes
+examples/floatmath.vyrn	main	no, it calls `pow`, which is not trap-free
+examples/floats.vyrn	areaOfCircle	yes
+examples/floats.vyrn	addF32	yes
+examples/floats.vyrn	main	yes
+examples/fn_named_like_a_host_extern.vyrn	hostRandomSeed	yes
+examples/fn_named_like_a_host_extern.vyrn	main	yes
+examples/fn_param_shadowed.vyrn	apply	no, it calls a function value
+examples/fn_param_shadowed.vyrn	inc	yes
+examples/fn_param_shadowed.vyrn	main	no, it calls `apply`, which is not trap-free
+examples/fnvalarg.vyrn	addTen	yes
+examples/fnvalarg.vyrn	apply	no, it calls a function value
+examples/fnvalarg.vyrn	scale	yes
+examples/fnvalarg.vyrn	label	yes
+examples/fnvalarg.vyrn	sideFn	yes
+examples/fnvalarg.vyrn	sideInt	yes
+examples/fnvalarg.vyrn	main	no, it calls a function value
+examples/fnvalarg.vyrn	callWith	no, it calls a function value
+examples/fnvalarg.vyrn	defer	yes
+examples/fnvalstore.vyrn	onInt	yes
+examples/fnvalstore.vyrn	onUser	yes
+examples/fnvalstore.vyrn	onVal	yes
+examples/fnvalstore.vyrn	onRes	yes
+examples/fnvalstore.vyrn	pushInt	yes
+examples/fnvalstore.vyrn	makeHandlers	yes
+examples/fnvalstore.vyrn	wrapSink	yes
+examples/fnvalstore.vyrn	greet	yes
+examples/fnvalstore.vyrn	onUserTagged	yes
+examples/fnvalstore.vyrn	double	yes
+examples/fnvalstore.vyrn	fireInt	no, it calls a function value
+examples/fnvalstore.vyrn	fireUser	no, it calls a function value
+examples/fnvalstore.vyrn	fireVal	no, it calls a function value
+examples/fnvalstore.vyrn	fireRes	no, it calls a function value
+examples/fnvalstore.vyrn	showValidation	yes
+examples/fnvalstore.vyrn	showResult	yes
+examples/fnvalstore.vyrn	main	no, it calls a function value
+examples/fnvalstore.vyrn	defer	yes
+examples/fnvalstore.vyrn	force	no, it calls a function value
+examples/foreach.vyrn	sumFixed	yes
+examples/foreach.vyrn	countLongWords	yes
+examples/foreach.vyrn	main	yes
+examples/freednames.vyrn	len	yes
+examples/freednames.vyrn	concat	yes
+examples/freednames.vyrn	main	yes
+examples/freelist.vyrn	sum	no, it calls `panic`
+examples/freelist.vyrn	freeList	no, it calls `freeNode`, which is not trap-free
+examples/freelist.vyrn	freeNode	no, it calls `panic`
+examples/freelist.vyrn	main	no, it calls `sum`, which is not trap-free
+examples/fullstack/client/boot.vyrn	parseId	no, it calls `derive$jsondec$jsonDecoders$t7ead28b954edc299`, which is not trap-free
+examples/fullstack/client/boot.vyrn	setUser	yes
+examples/fullstack/client/boot.vyrn	setIssues	yes
+examples/fullstack/client/boot.vyrn	renderIssues	no, it keeps an index check
+examples/fullstack/client/boot.vyrn	showCreated	yes
+examples/fullstack/client/boot.vyrn	onGetUser	no, it calls `renderIssues`, which is not trap-free
+examples/fullstack/client/boot.vyrn	onCreateUser	no, it calls `renderIssues`, which is not trap-free
+examples/fullstack/client/boot.vyrn	onDeleteUser	no, it calls `renderIssues`, which is not trap-free
+examples/fullstack/client/boot.vyrn	view	yes
+examples/fullstack/client/boot.vyrn	setId	yes
+examples/fullstack/client/boot.vyrn	loadUser	no, it calls `usersById`, which is not trap-free
+examples/fullstack/client/boot.vyrn	removeUser	no, it calls `usersDel`, which is not trap-free
+examples/fullstack/client/boot.vyrn	showServerIssues	no, it calls `renderIssues`, which is not trap-free
+examples/fullstack/client/boot.vyrn	vyrnView	no, it calls `derive$json$jsonEncoders$t62d5a5c67072e4b3`, which is not trap-free
+examples/fullstack/client/boot.vyrn	main	yes
+examples/fullstack/client/boot.vyrn	where$pAge	yes
+examples/fullstack/client/boot.vyrn	where$cAge	no, it calls `panic`
+examples/fullstack/client/boot.vyrn	where$pUsername	yes
+examples/fullstack/client/boot.vyrn	where$cUsername	no, it calls `panic`
+examples/fullstack/server.vyrn	handle	no, it calls `route`, which is not trap-free
+examples/fullstack/server.vyrn	main	no, it calls `handle`, which is not trap-free
+examples/fullstack/server.vyrn	where$pAge	yes
+examples/fullstack/server.vyrn	where$cAge	no, it calls `panic`
+examples/fullstack/server.vyrn	where$pInstant	yes
+examples/fullstack/server.vyrn	where$cInstant	no, it calls `panic`
+examples/fullstack/server.vyrn	where$pRoutePath	yes
+examples/fullstack/server.vyrn	where$cRoutePath	no, it calls `panic`
+examples/fullstack/server.vyrn	where$pUsername	yes
+examples/fullstack/server.vyrn	where$cUsername	no, it calls `panic`
+examples/fullstack/server/api/users.http.vyrn	routes	no, it calls `byId`, which is not trap-free
+examples/fullstack/server/api/users.http.vyrn	where$pAge	yes
+examples/fullstack/server/api/users.http.vyrn	where$cAge	no, it calls `panic`
+examples/fullstack/server/api/users.http.vyrn	where$pInstant	yes
+examples/fullstack/server/api/users.http.vyrn	where$cInstant	no, it calls `panic`
+examples/fullstack/server/api/users.http.vyrn	where$pPathById	yes
+examples/fullstack/server/api/users.http.vyrn	where$cPathById	no, it calls `panic`
+examples/fullstack/server/api/users.http.vyrn	where$pPathCreate	yes
+examples/fullstack/server/api/users.http.vyrn	where$cPathCreate	no, it calls `panic`
+examples/fullstack/server/api/users.http.vyrn	where$pPathDel	yes
+examples/fullstack/server/api/users.http.vyrn	where$cPathDel	no, it calls `panic`
+examples/fullstack/server/api/users.http.vyrn	where$pUsername	yes
+examples/fullstack/server/api/users.http.vyrn	where$cUsername	no, it calls `panic`
+examples/fullstack/server/api/users.vyrn	byId	yes
+examples/fullstack/server/api/users.vyrn	create	yes
+examples/fullstack/server/api/users.vyrn	del	yes
+examples/fullstack/server/api/users.vyrn	where$pAge	yes
+examples/fullstack/server/api/users.vyrn	where$cAge	no, it calls `panic`
+examples/fullstack/server/api/users.vyrn	where$pUsername	yes
+examples/fullstack/server/api/users.vyrn	where$cUsername	no, it calls `panic`
+examples/fullstack/server/pages/index.vyrn	page	yes
+examples/fullstack/server/pages/users/[id].vyrn	data	yes
+examples/fullstack/server/pages/users/[id].vyrn	fetchUser	yes
+examples/fullstack/server/pages/users/[id].vyrn	page	yes
+examples/fullstack/server/pages/users/[id].vyrn	where$pAge	yes
+examples/fullstack/server/pages/users/[id].vyrn	where$cAge	no, it calls `panic`
+examples/fullstack/server/pages/users/[id].vyrn	where$pUsername	yes
+examples/fullstack/server/pages/users/[id].vyrn	where$cUsername	no, it calls `panic`
+examples/fullstack/shared/wire.vyrn	where$pAge	yes
+examples/fullstack/shared/wire.vyrn	where$cAge	no, it calls `panic`
+examples/fullstack/shared/wire.vyrn	where$pUsername	yes
+examples/fullstack/shared/wire.vyrn	where$cUsername	no, it calls `panic`
+examples/gendemo.vyrn	main	yes
+examples/gendemo.vyrn	where$pCount	yes
+examples/gendemo.vyrn	where$cCount	no, it calls `panic`
+examples/genericpayload.vyrn	unwrapInline	yes
+examples/genericpayload.vyrn	nested	yes
+examples/genericpayload.vyrn	runOps	no, it calls a function value
+examples/genericpayload.vyrn	main	no, it calls `runOps`, which is not trap-free
+examples/generics.vyrn	widthOf	yes
+examples/generics.vyrn	main	no, it calls a function value
+examples/generics.vyrn	id	yes
+examples/generics.vyrn	max	yes
+examples/generics.vyrn	orElse	yes
+examples/generics.vyrn	pick	yes
+examples/generics.vyrn	same	yes
+examples/generics.vyrn	sum3	yes
+examples/generics.vyrn	unbox	yes
+examples/genref.vyrn	bump	no, it calls `panic`
+examples/genref.vyrn	measure	no, it calls `panic`
+examples/genref.vyrn	main	no, it calls `panic`
+examples/gentable.vyrn	main	yes
+examples/gentablefail.vyrn		does not check
+examples/graphql.vyrn	ask	no, it calls `graphqlHandle`, which is not trap-free
+examples/graphql.vyrn	main	no, it calls `gqlAnswer`, which is not trap-free
+examples/graphql.vyrn	topSchema	yes
+examples/graphql.vyrn	topResolve	yes
+examples/graphql.vyrn	reply	no, it calls `graphqlHandle`, which is not trap-free
+examples/graphql.vyrn	where$pBookId	yes
+examples/graphql.vyrn	where$cBookId	no, it calls `panic`
+examples/graphql.vyrn	where$pRating	yes
+examples/graphql.vyrn	where$cRating	no, it calls `panic`
+examples/graphql.vyrn	where$pStars	yes
+examples/graphql.vyrn	where$cStars	no, it calls `panic`
+examples/graphql.vyrn	where$pTag	yes
+examples/graphql.vyrn	where$cTag	no, it calls `panic`
+examples/graphql.vyrn	where$pTitle	yes
+examples/graphql.vyrn	where$cTitle	no, it calls `panic`
+examples/graphql.vyrn	where$pUrl	yes
+examples/graphql.vyrn	where$cUrl	no, it calls `panic`
+examples/heapfieldkey.vyrn		does not check
+examples/heapkey.vyrn		does not check
+examples/herofield.vyrn	ramp	yes
+examples/herofield.vyrn	unit	yes
+examples/herofield.vyrn	noise	yes
+examples/herofield.vyrn	lattice	yes
+examples/herofield.vyrn	crossing	yes
+examples/herofield.vyrn	seam	yes
+examples/herofield.vyrn	field	yes
+examples/herofield.vyrn	luminance	yes
+examples/herofield.vyrn	frame	no, it calls `substring`, which is not trap-free
+examples/herofield.vyrn	heroFrame	no, it calls `frame`, which is not trap-free
+examples/herofield.vyrn	parityReport	no, it calls `frame`, which is not trap-free
+examples/herofield.vyrn	main	no, it calls `parityReport`, which is not trap-free
+examples/htmlrefuse.vyrn	untrusted	yes
+examples/htmlrefuse.vyrn	main	no, it calls `toHtmlString`, which is not trap-free
+examples/htmltree.vyrn	itemRow	yes
+examples/htmltree.vyrn	cartBody	yes
+examples/htmltree.vyrn	declaredCopies	no, it calls `toHtmlString`, which is not trap-free
+examples/htmltree.vyrn	main	no, it calls `toHtmlString`, which is not trap-free
+examples/i18ndemo.vyrn	lookup	yes
+examples/i18ndemo.vyrn	main	yes
+examples/i18ndemo.vyrn	where$pNavSection	yes
+examples/i18ndemo.vyrn	where$cNavSection	no, it calls `panic`
+examples/i18ndemo.vyrn	where$pTStatusState	yes
+examples/i18ndemo.vyrn	where$cTStatusState	no, it calls `panic`
+examples/i18ndemo.vyrn	where$pTransKey	yes
+examples/i18ndemo.vyrn	where$cTransKey	no, it calls `panic`
+examples/ifexpr.vyrn	loud	yes
+examples/ifexpr.vyrn	tier	yes
+examples/ifexpr.vyrn	main	yes
+examples/ifexpr.vyrn	maxOf	yes
+examples/ifexpr.vyrn	where$pAge	yes
+examples/ifexpr.vyrn	where$cAge	no, it calls `panic`
+examples/impl_keys_spelled_alike.vyrn	main	yes
+examples/impl_keys_spelled_alike.vyrn	Show$X__Int64$label	yes
+examples/impl_keys_spelled_alike.vyrn	Show__X$Int64$label	yes
+examples/impl_method_spelled_by_a_fn.vyrn	Size__P__size	yes
+examples/impl_method_spelled_by_a_fn.vyrn	main	yes
+examples/impl_method_spelled_by_a_fn.vyrn	Size$P$size	yes
+examples/impl_method_spelled_by_an_import.vyrn	main	yes
+examples/impl_method_spelled_by_an_import.vyrn	Area$Pt$area	yes
+examples/impl_of_renamed_privates.vyrn	main	yes
+examples/impl_protocols_spelled_alike.vyrn	main	yes
+examples/impl_protocols_spelled_alike.vyrn	Tag$A__B$tag	yes
+examples/impl_protocols_spelled_alike.vyrn	Tag__A$B$tag	yes
+examples/indexbuffer.vyrn	addVertex	yes
+examples/indexbuffer.vyrn	addTriangle	yes
+examples/indexbuffer.vyrn	weight	yes
+examples/indexbuffer.vyrn	weightBare	yes
+examples/indexbuffer.vyrn	main	yes
+examples/inlinewhere.vyrn	mk	no, it keeps a where rule check
+examples/inlinewhere.vyrn	main	no, it calls `mk`, which is not trap-free
+examples/inlinewhere.vyrn	where$pUser	yes
+examples/inlinewhere.vyrn	where$cUser	no, it calls `panic`
+examples/inlinewhere.vyrn	where$pUser.age	yes
+examples/inlinewhere.vyrn	where$cUser.age	no, it calls `panic`
+examples/inlinewhere.vyrn	where$pUser.name	yes
+examples/inlinewhere.vyrn	where$cUser.name	no, it calls `panic`
+examples/input.vyrn	nextLine	yes
+examples/input.vyrn	numericValue	yes
+examples/input.vyrn	isWord	yes
+examples/input.vyrn	main	yes
+examples/intkeys.vyrn	countRolling	no, it keeps a division check
+examples/intkeys.vyrn	main	no, it calls `countRolling`, which is not trap-free
+examples/jchain.vyrn	main	no, it calls `panic`
+examples/jsonbytes.vyrn	ctl	yes
+examples/jsonbytes.vyrn	ctlJson	no, it calls `derive$json$jsonEncoders$t43085a5614edeee8`, which is not trap-free
+examples/jsonbytes.vyrn	main	no, it calls `derive$json$jsonEncoders$t43085a5614edeee8`, which is not trap-free
+examples/jsoncodec.vyrn	report	no, it keeps an index check
+examples/jsoncodec.vyrn	showUser	yes
+examples/jsoncodec.vyrn	main	no, it calls `report`, which is not trap-free
+examples/jsoncodec.vyrn	where$pAge	yes
+examples/jsoncodec.vyrn	where$cAge	no, it calls `panic`
+examples/jsoncodec.vyrn	where$pUsername	yes
+examples/jsoncodec.vyrn	where$cUsername	no, it calls `panic`
+examples/jsondecbytes.vyrn	issue	yes
+examples/jsondecbytes.vyrn	issues	yes
+examples/jsondecbytes.vyrn	showFam	no, it calls `derive$json$jsonEncoders$tbb46622e4fc16a56`, which is not trap-free
+examples/jsondecbytes.vyrn	showNums	no, it calls `derive$json$jsonEncoders$td8302285ddfe2bc2`, which is not trap-free
+examples/jsondecbytes.vyrn	showColor	no, it calls `derive$json$jsonEncoders$t6851ce33f4a59d5d`, which is not trap-free
+examples/jsondecbytes.vyrn	showShape	no, it calls `derive$json$jsonEncoders$t4b01abd665fdb523`, which is not trap-free
+examples/jsondecbytes.vyrn	famOf	no, it calls `derive$jsondec$jsonDecoders$tbb46622e4fc16a56`, which is not trap-free
+examples/jsondecbytes.vyrn	numsOf	no, it calls `derive$jsondec$jsonDecoders$td8302285ddfe2bc2`, which is not trap-free
+examples/jsondecbytes.vyrn	ageOf	no, it calls `derive$jsondec$jsonDecoders$t841e44dfab58ab21`, which is not trap-free
+examples/jsondecbytes.vyrn	colorOf	no, it calls `showColor`, which is not trap-free
+examples/jsondecbytes.vyrn	shapeOf	no, it calls `derive$jsondec$jsonDecoders$t4b01abd665fdb523`, which is not trap-free
+examples/jsondecbytes.vyrn	showS	no, it calls `derive$json$jsonEncoders$t604b2fc45680fc61`, which is not trap-free
+examples/jsondecbytes.vyrn	sOf	no, it calls `derive$jsondec$jsonDecoders$t604b2fc45680fc61`, which is not trap-free
+examples/jsondecbytes.vyrn	main	no, it calls `famOf`, which is not trap-free
+examples/jsondecbytes.vyrn	where$pAge	yes
+examples/jsondecbytes.vyrn	where$cAge	no, it calls `panic`
+examples/jsondecode.vyrn	addressBytes	yes
+examples/jsondecode.vyrn	hasGeo	yes
+examples/jsondecode.vyrn	tally	yes
+examples/jsondecode.vyrn	main	no, it calls `derive$jsondec$jsonDecoders$tc2eed040ec81503a`, which is not trap-free
+examples/jsondecode.vyrn	where$pQty	yes
+examples/jsondecode.vyrn	where$cQty	no, it calls `panic`
+examples/jsondepth.vyrn	nest__from0	yes
+examples/jsondepth.vyrn	answer	no, it calls `emit`, which is not trap-free
+examples/jsondepth.vyrn	main	no, it calls `answer`, which is not trap-free
+examples/jsonplace.vyrn	smallDoc	yes
+examples/jsonplace.vyrn	ensureDoc	yes
+examples/jsonplace.vyrn	main	no, it calls `panic`
+examples/jsonschema.vyrn	main	yes
+examples/jsonschema.vyrn	where$pAge	yes
+examples/jsonschema.vyrn	where$cAge	no, it calls `panic`
+examples/jsonschema.vyrn	where$pEven	yes
+examples/jsonschema.vyrn	where$cEven	no, it calls `panic`
+examples/jsonschema.vyrn	where$pPort	yes
+examples/jsonschema.vyrn	where$cPort	no, it calls `panic`
+examples/jsonschema.vyrn	where$pRatio	yes
+examples/jsonschema.vyrn	where$cRatio	no, it calls `panic`
+examples/jsonschema.vyrn	where$pUsername	yes
+examples/jsonschema.vyrn	where$cUsername	no, it calls `panic`
+examples/knucleotide.vyrn	namedFragments	yes
+examples/knucleotide.vyrn	code	yes
+examples/knucleotide.vyrn	modulusOf	yes
+examples/knucleotide.vyrn	thirdSequence	yes
+examples/knucleotide.vyrn	countKmers	no, it calls `panic`
+examples/knucleotide.vyrn	unpack	no, it keeps an index check
+examples/knucleotide.vyrn	pack	yes
+examples/knucleotide.vyrn	fixed3	yes
+examples/knucleotide.vyrn	byCountThenFrag	yes
+examples/knucleotide.vyrn	ranked	no, it calls `sortWith`, which is not trap-free
+examples/knucleotide.vyrn	report	no, it calls `countKmers`, which is not trap-free
+examples/knucleotide.vyrn	countOf	no, it calls `countKmers`, which is not trap-free
+examples/knucleotide.vyrn	syntheticSequence	yes
+examples/knucleotide.vyrn	main	no, it calls `report`, which is not trap-free
+examples/lambda_in_loop_arm.vyrn	main	no, it calls a function value
+examples/lambdas.vyrn	double	yes
+examples/lambdas.vyrn	sum	no, it calls `fold`, which is not trap-free
+examples/lambdas.vyrn	firstOf	no, it calls a function value
+examples/lambdas.vyrn	mapThenSum	no, it calls `map`, which is not trap-free
+examples/lambdas.vyrn	main	no, it calls `map`, which is not trap-free
+examples/lambdas_on_one_line.vyrn	wipe	yes
+examples/lambdas_on_one_line.vyrn	main	no, it calls a function value
+examples/langbench.vyrn	keyList	yes
+examples/langbench.vyrn	mapBuild	yes
+examples/langbench.vyrn	mapHits	yes
+examples/langbench.vyrn	mapMisses	yes
+examples/langbench.vyrn	interpolate	yes
+examples/langbench.vyrn	callN	no, it calls a function value
+examples/langbench.vyrn	doc	yes
+examples/langbench.vyrn	size	yes
+examples/langbench.vyrn	parseSize	yes
+examples/langbench.vyrn	main	no, it calls `split`, which is not trap-free
+examples/langbench.vyrn	Weigh$Stone$weigh	yes
+examples/langbench.vyrn	weighN	yes
+examples/lazy_chains.vyrn	holder	yes
+examples/lazy_chains.vyrn	main	no, it calls a function value
+examples/lazyfield.vyrn	loadBody	yes
+examples/lazyfield.vyrn	shelf	yes
+examples/lazyfield.vyrn	neverRead	yes
+examples/lazyfield.vyrn	readOne	no, it keeps an index check
+examples/lazyfield.vyrn	readTwice	no, it calls a function value
+examples/lazyfield.vyrn	capturedAtConstruction	no, it calls a function value
+examples/lazyfield.vyrn	encodingForces	no, it calls `derive$json$jsonEncoders$t7ef46852005be061`, which is not trap-free
+examples/lazyfield.vyrn	main	no, it calls `readOne`, which is not trap-free
+examples/leak/client/boot.vyrn		does not check
+examples/leak/server/db.vyrn	loadNote	yes
+examples/leak/server/main.vyrn	main	yes
+examples/leak/shared/format.vyrn	title	yes
+examples/leak/shared/format.vyrn	titleOf	yes
+examples/lib/area_spelling.vyrn	Area__Pt__area	yes
+examples/lib/gen_palette.vyrn	palette	yes
+examples/lib/gen_projection_site.vyrn	d1	yes
+examples/lib/gen_projection_site.vyrn	probe	yes
+examples/lib/gen_projection_site.vyrn	mk	yes
+examples/lib/gen_shape.vyrn	describe	no, it keeps an index check
+examples/lib/gen_shape.vyrn	shapeOf	no, it keeps an index check
+examples/lib/gen_surface.vyrn	surface	yes
+examples/lib/gen_table.vyrn	table	no, it keeps an index check
+examples/lib/gen_table.vyrn	reportHereFailed	no, it calls `reportHere`, which is not trap-free
+examples/lib/gen_table.vyrn	contains__from0	yes
+examples/lib/gen_von.vyrn	vonModule	no, it calls `panic`
+examples/lib/gen_von.vyrn	headTypeName	yes
+examples/lib/gen_von.vyrn	topFieldNames	yes
+examples/lib/gen_von.vyrn	joinFieldNames	yes
+examples/lib/gen_von.vyrn	emitModule	no, it calls `toVon`, which is not trap-free
+examples/lib/greet_cat.vyrn	catSays	yes
+examples/lib/greet_cat.vyrn	Greet$Pet$greet	yes
+examples/lib/greet_cat.vyrn	Speak$Pet$speak	yes
+examples/lib/greet_dog.vyrn	dogSays	yes
+examples/lib/greet_dog.vyrn	Greet$Pet$greet	yes
+examples/lib/greet_dog.vyrn	Speak$Pet$speak	yes
+examples/lib/mathutil.vyrn	scale	yes
+examples/lib/mathutil.vyrn	double	yes
+examples/lib/mathutil.vyrn	where$pPercent	yes
+examples/lib/mathutil.vyrn	where$cPercent	no, it calls `panic`
+examples/lib/metrics.vyrn	origin	yes
+examples/lib/metrics.vyrn	describe	yes
+examples/lib/remover.vyrn	remove	yes
+examples/lib/renamed_helper_a.vyrn	helper	yes
+examples/lib/renamed_helper_a.vyrn	fromA	yes
+examples/lib/renamed_helper_b.vyrn	helper	yes
+examples/lib/renamed_helper_b.vyrn	fromB	yes
+examples/lib/serve.vyrn	where$pPort	yes
+examples/lib/serve.vyrn	where$cPort	no, it calls `panic`
+examples/lib/serve.vyrn	where$pRoot	yes
+examples/lib/serve.vyrn	where$cRoot	no, it calls `panic`
+examples/lib/shapes.vyrn	origin	yes
+examples/lib/shapes.vyrn	shift	yes
+examples/lib/shapes.vyrn	colorRank	yes
+examples/lib/shapes.vyrn	describe	yes
+examples/linkedlist.vyrn	sum	no, it calls `panic`
+examples/linkedlist.vyrn	length	no, it calls `panic`
+examples/linkedlist.vyrn	freeList	no, it calls `freeNode`, which is not trap-free
+examples/linkedlist.vyrn	freeNode	no, it calls `panic`
+examples/linkedlist.vyrn	main	no, it calls `length`, which is not trap-free
+examples/listdir.vyrn	show	yes
+examples/listdir.vyrn	main	yes
+examples/listing/client/boot.vyrn		does not check
+examples/local_fn_named_like_a_generator.vyrn	helper	yes
+examples/local_fn_named_like_a_generator.vyrn	twice	no, it calls a function value
+examples/local_fn_named_like_a_generator.vyrn	main	no, it calls `twice`, which is not trap-free
+examples/logging.vyrn	factorial	yes
+examples/logging.vyrn	main	yes
+examples/loopalias.vyrn		does not check
+examples/looptemp.vyrn	mk	yes
+examples/looptemp.vyrn	one	yes
+examples/looptemp.vyrn	two	no, it keeps an index check
+examples/looptemp.vyrn	main	no, it calls `two`, which is not trap-free
+examples/mallocround.vyrn	main	yes
+examples/mandelbrot.vyrn	ascii	yes
+examples/mandelbrot.vyrn	main	yes
+examples/map.vyrn	scan__from0	yes
+examples/map.vyrn	mapGet	yes
+examples/map.vyrn	put	yes
+examples/map.vyrn	main	yes
+examples/mapdemo.vyrn	look	yes
+examples/mapdemo.vyrn	total	yes
+examples/mapdemo.vyrn	report	yes
+examples/mapdemo.vyrn	main	no, it calls `derive$json$jsonEncoders$t4986ea0126622a62`, which is not trap-free
+examples/mapdemo.vyrn	where$pCount	yes
+examples/mapdemo.vyrn	where$cCount	no, it calls `panic`
+examples/mapkey.vyrn	main	yes
+examples/mapkey.vyrn	Hashable$Point$hash	yes
+examples/mapkey.vyrn	Hashable$Suit$hash	yes
+examples/mapkeyborrowed.vyrn		does not check
+examples/mapkeyowned.vyrn	keyList	yes
+examples/mapkeyowned.vyrn	indexBuild	yes
+examples/mapkeyowned.vyrn	loopBuild	yes
+examples/mapkeyowned.vyrn	tally	yes
+examples/mapkeyowned.vyrn	lookup	yes
+examples/mapkeyowned.vyrn	main	yes
+examples/matchown.vyrn	emptyInts	yes
+examples/matchown.vyrn	emptyStrs	yes
+examples/matchown.vyrn	tag	yes
+examples/matchown.vyrn	mkNode	yes
+examples/matchown.vyrn	mkDoc	yes
+examples/matchown.vyrn	boxed	yes
+examples/matchown.vyrn	listed	yes
+examples/matchown.vyrn	nested	yes
+examples/matchown.vyrn	width	yes
+examples/matchown.vyrn	words	yes
+examples/matchown.vyrn	takeWords	yes
+examples/matchown.vyrn	unwrapWords	yes
+examples/matchown.vyrn	byReturn	yes
+examples/matchown.vyrn	attrKey	yes
+examples/matchown.vyrn	main	no, it keeps an index check
+examples/matchown.vyrn	Owned$Wrap$release	yes
+examples/membench.vyrn	pad	yes
+examples/membench.vyrn	concatFresh	no, it keeps an index check
+examples/membench.vyrn	spine	yes
+examples/membench.vyrn	globalSpine	yes
+examples/membench.vyrn	pushChurn	yes
+examples/membench.vyrn	oneToN	yes
+examples/membench.vyrn	elemRead	no, it keeps a division check
+examples/membench.vyrn	fixedRead	no, it keeps an index check
+examples/membench.vyrn	fixedFieldRead	no, it keeps an index check
+examples/membench.vyrn	heapRead	no, it keeps an index check
+examples/membench.vyrn	iterSum	yes
+examples/membench.vyrn	elemStore	no, it keeps an index check
+examples/membench.vyrn	slabChurn	no, it keeps an index check
+examples/membench.vyrn	slotsChurn	no, it calls `panic`
+examples/membench.vyrn	slotsLifetime	yes
+examples/membench.vyrn	copyString	no, it keeps an index check
+examples/membench.vyrn	copyArray	no, it keeps an index check
+examples/membench.vyrn	spliceConsuming	yes
+examples/membench.vyrn	spliceCopying	yes
+examples/membench.vyrn	words	yes
+examples/membench.vyrn	keyMap	yes
+examples/membench.vyrn	keysSnapshot	yes
+examples/membench.vyrn	naturals	no, it calls `cursorGet`, which is not trap-free
+examples/membench.vyrn	double	yes
+examples/membench.vyrn	streamPull	yes
+examples/membench.vyrn	streamMapped	yes
+examples/membench.vyrn	streamCycles	yes
+examples/membench.vyrn	main	no, it calls `concatFresh`, which is not trap-free
+examples/methodnames.vyrn	push	yes
+examples/methodnames.vyrn	main	yes
+examples/modify.vyrn	bump	yes
+examples/modify.vyrn	reset	yes
+examples/modify.vyrn	main	yes
+examples/modifycopy.vyrn	append	yes
+examples/modifycopy.vyrn	main	no, it keeps an index check
+examples/modifyself.vyrn	main	yes
+examples/modifyself.vyrn	Counting$Tally$record	yes
+examples/modifyself.vyrn	Counting$Tally$sum	yes
+examples/modifyself.vyrn	Owned$Tally$release	yes
+examples/modifyself.vyrn	feed	yes
+examples/modules.vyrn	main	yes
+examples/modules.vyrn	where$pPercent	yes
+examples/modules.vyrn	where$cPercent	no, it calls `panic`
+examples/mustuse.vyrn	begin	yes
+examples/mustuse.vyrn	finish	yes
+examples/mustuse.vyrn	carry	yes
+examples/mustuse.vyrn	pool	yes
+examples/mustuse.vyrn	main	yes
+examples/mustuse.vyrn	Owned$Txn$release	yes
+examples/mustuse_abandoned.vyrn		does not check
+examples/namedplace.vyrn	tagCopy	no, it keeps an index check
+examples/namedplace.vyrn	ensureBench	yes
+examples/namedplace.vyrn	main	yes
+examples/namespace.vyrn	colorName	yes
+examples/namespace.vyrn	main	no, it calls `derive$jsondec$jsonDecoders$td626a623af1d62f2`, which is not trap-free
+examples/namespace.vyrn	where$pCount	yes
+examples/namespace.vyrn	where$cCount	no, it calls `panic`
+examples/nbody.vyrn	fixed9	yes
+examples/nbody.vyrn	solarMass	yes
+examples/nbody.vyrn	daysPerYear	yes
+examples/nbody.vyrn	system	yes
+examples/nbody.vyrn	offsetMomentum	no, it keeps an index check
+examples/nbody.vyrn	energy	yes
+examples/nbody.vyrn	advance	yes
+examples/nbody.vyrn	integrate	no, it calls `offsetMomentum`, which is not trap-free
+examples/nbody.vyrn	main	no, it calls `offsetMomentum`, which is not trap-free
+examples/nbodycols.vyrn	fixed9	yes
+examples/nbodycols.vyrn	solarMass	yes
+examples/nbodycols.vyrn	system	no, it calls `bodyColumns`, which is not trap-free
+examples/nbodycols.vyrn	offsetMomentum	no, it keeps an index check
+examples/nbodycols.vyrn	energy	yes
+examples/nbodycols.vyrn	advance	yes
+examples/nbodycols.vyrn	integrate	no, it calls `offsetMomentum`, which is not trap-free
+examples/nbodycols.vyrn	main	no, it calls `offsetMomentum`, which is not trap-free
+examples/nbodycols.vyrn	where$pBodyColumns	yes
+examples/nbodycols.vyrn	where$cBodyColumns	no, it calls `panic`
+examples/nbodycols.vyrn	where$pParticleColumns	yes
+examples/nbodycols.vyrn	where$cParticleColumns	no, it calls `panic`
+examples/nestedsum.vyrn	wrapOpt	yes
+examples/nestedsum.vyrn	wrapRes	yes
+examples/nestedsum.vyrn	optOfRes	yes
+examples/nestedsum.vyrn	show	yes
+examples/nestedsum.vyrn	peel	yes
+examples/nestedsum.vyrn	main	yes
+examples/nohashkey.vyrn		does not check
+examples/numbytes.vyrn	opaque	yes
+examples/numbytes.vyrn	pow10	yes
+examples/numbytes.vyrn	halved	yes
+examples/numbytes.vyrn	p	yes
+examples/numbytes.vyrn	main	yes
+examples/numparse.vyrn	bitsOf	yes
+examples/numparse.vyrn	shown	yes
+examples/numparse.vyrn	main	yes
+examples/option.vyrn	safeDiv	yes
+examples/option.vyrn	unwrapOr	yes
+examples/option.vyrn	parseAge	yes
+examples/option.vyrn	agePlus	yes
+examples/option.vyrn	main	yes
+examples/option.vyrn	where$pAge	yes
+examples/option.vyrn	where$cAge	no, it calls `panic`
+examples/own_fn_beside_imported_variant.vyrn	JNum	yes
+examples/own_fn_beside_imported_variant.vyrn	main	yes
+examples/ownedcontainer.vyrn	ringOf	yes
+examples/ownedcontainer.vyrn	tallyOf	yes
+examples/ownedcontainer.vyrn	inner	yes
+examples/ownedcontainer.vyrn	main	yes
+examples/ownedcontainer.vyrn	Owned$Ring$release	yes
+examples/ownedcontainer.vyrn	Owned$Tally$release	yes
+examples/ownership.vyrn	greetingLen	yes
+examples/ownership.vyrn	fullName	yes
+examples/ownership.vyrn	main	yes
+examples/pages/index.vyrn	page	yes
+examples/pages/items/[id].vyrn	page	yes
+examples/pages/items/index.vyrn	page	yes
+examples/pages/users/[id].vyrn	data	yes
+examples/pages/users/[id].vyrn	fetchUser	yes
+examples/pages/users/[id].vyrn	page	yes
+examples/pagesdemo.vyrn	show	no, it calls `route`, which is not trap-free
+examples/pagesdemo.vyrn	main	no, it calls `show`, which is not trap-free
+examples/pagesdemo.vyrn	where$pInstant	yes
+examples/pagesdemo.vyrn	where$cInstant	no, it calls `panic`
+examples/pagesdemo.vyrn	where$pRoutePath	yes
+examples/pagesdemo.vyrn	where$cRoutePath	no, it calls `panic`
+examples/part_of_a_temporary.vyrn	pair	yes
+examples/part_of_a_temporary.vyrn	other	yes
+examples/part_of_a_temporary.vyrn	line	yes
+examples/part_of_a_temporary.vyrn	pins	yes
+examples/part_of_a_temporary.vyrn	grid	yes
+examples/part_of_a_temporary.vyrn	pass	yes
+examples/part_of_a_temporary.vyrn	noise	yes
+examples/part_of_a_temporary.vyrn	show	yes
+examples/part_of_a_temporary.vyrn	two	yes
+examples/part_of_a_temporary.vyrn	sum	yes
+examples/part_of_a_temporary.vyrn	main	no, it keeps an index check
+examples/patchdemo.vyrn	row	yes
+examples/patchdemo.vyrn	show	no, it calls `derive$json$jsonEncoders$t086736aeab103791`, which is not trap-free
+examples/patchdemo.vyrn	main	no, it calls `show`, which is not trap-free
+examples/payloadkey.vyrn		does not check
+examples/permute.vyrn	iota	yes
+examples/permute.vyrn	shuffle	yes
+examples/permute.vyrn	apply	yes
+examples/permute.vyrn	inverse	yes
+examples/permute.vyrn	cycles	yes
+examples/permute.vyrn	main	no, it keeps an index check
+examples/pidigits.vyrn	piDigits	no, it keeps an index check
+examples/pidigits.vyrn	run	no, it keeps an index check
+examples/pidigits.vyrn	main	no, it calls `run`, which is not trap-free
+examples/placeorder.vyrn	f	yes
+examples/placeorder.vyrn	g	yes
+examples/placeorder.vyrn	peek	no, it keeps an index check
+examples/placeorder.vyrn	main	no, it keeps an index check
+examples/polyrecursion.vyrn	main	no, it calls `f`, which is not trap-free
+examples/polyrecursion.vyrn	f	no, it calls `f`, which is not trap-free
+examples/polyrecursion.vyrn	mk	yes
+examples/projection.vyrn	build	yes
+examples/projection.vyrn	main	yes
+examples/projection_generator_site.vyrn	probe__from1	yes
+examples/projection_generator_site.vyrn	main	yes
+examples/projection_shadows_param.vyrn	main	yes
+examples/projectionfree.vyrn	main	yes
+examples/protocol.vyrn	label	yes
+examples/protocol.vyrn	main	yes
+examples/protocol.vyrn	Show$Int64$show	yes
+examples/protocol.vyrn	Show$Bool$show	yes
+examples/protocol.vyrn	Show$String$show	yes
+examples/protocol.vyrn	Show$Option$show	yes
+examples/protocol.vyrn	describe	yes
+examples/protocol_conformance.vyrn		does not check
+examples/protocol_extra.vyrn		does not check
+examples/protocol_incomplete.vyrn		does not check
+examples/protocol_overlap.vyrn		does not check
+examples/protocol_scalar.vyrn		does not check
+examples/protoplace.vyrn	main	yes
+examples/protoplace.vyrn	Shelf$Crate$size	yes
+examples/protoplace.vyrn	Shelf$Bin$size	yes
+examples/protorec.vyrn	loud	yes
+examples/protorec.vyrn	main	yes
+examples/protorec.vyrn	Bump$Box$bump	yes
+examples/protorec.vyrn	Bump$Box$label	yes
+examples/protorec.vyrn	Bump$Crate$bump	yes
+examples/protorec.vyrn	Bump$Crate$label	yes
+examples/protorec.vyrn	Grow$Box$grow	yes
+examples/protorec.vyrn	describe	yes
+examples/recdepth.vyrn	down	yes
+examples/recdepth.vyrn	main	yes
+examples/record.vyrn	greet	yes
+examples/record.vyrn	deposit	yes
+examples/record.vyrn	main	yes
+examples/record_literal_parameter_apart_from_the_callers.vyrn	main	yes
+examples/record_literal_parameter_apart_from_the_callers.vyrn	mk	yes
+examples/record_width_slots.vyrn	s	yes
+examples/record_width_slots.vyrn	wide	yes
+examples/record_width_slots.vyrn	narrow	yes
+examples/record_width_slots.vyrn	take	yes
+examples/record_width_slots.vyrn	pick	yes
+examples/record_width_slots.vyrn	main	no, it keeps an index check
+examples/recordorder.vyrn	show	yes
+examples/recordorder.vyrn	asB	yes
+examples/recordorder.vyrn	some	yes
+examples/recordorder.vyrn	has	yes
+examples/recordorder.vyrn	two	yes
+examples/recordorder.vyrn	ok	yes
+examples/recordorder.vyrn	nested	yes
+examples/recordorder.vyrn	options	yes
+examples/recordorder.vyrn	arrays	yes
+examples/recordorder.vyrn	first	yes
+examples/recordorder.vyrn	lookup	yes
+examples/recordorder.vyrn	firstKey	yes
+examples/recordorder.vyrn	make	yes
+examples/recordorder.vyrn	callMake	no, it calls a function value
+examples/recordorder.vyrn	callShow	no, it calls a function value
+examples/recordorder.vyrn	showInt	yes
+examples/recordorder.vyrn	mixed	yes
+examples/recordorder.vyrn	boxed	yes
+examples/recordorder.vyrn	main	no, it calls `callMake`, which is not trap-free
+examples/recordorder.vyrn	Hashable$A$hash	yes
+examples/recordorder.vyrn	Hashable$B$hash	yes
+examples/reflection.vyrn	has	yes
+examples/reflection.vyrn	optOr	yes
+examples/reflection.vyrn	optStrOr	yes
+examples/reflection.vyrn	openApi	yes
+examples/reflection.vyrn	openApiString	yes
+examples/reflection.vyrn	main	yes
+examples/reflection.vyrn	where$pAge	yes
+examples/reflection.vyrn	where$cAge	no, it calls `panic`
+examples/reflection.vyrn	where$pPort	yes
+examples/reflection.vyrn	where$cPort	no, it calls `panic`
+examples/reflection.vyrn	where$pUsername	yes
+examples/reflection.vyrn	where$cUsername	no, it calls `panic`
+examples/refutablelet.vyrn	ensure	yes
+examples/refutablelet.vyrn	main	no, it calls `panic`
+examples/regex.vyrn	register	yes
+examples/regex.vyrn	main	yes
+examples/regex.vyrn	where$pEmail	yes
+examples/regex.vyrn	where$cEmail	no, it calls `panic`
+examples/regex.vyrn	where$pEveryOther	yes
+examples/regex.vyrn	where$cEveryOther	no, it calls `panic`
+examples/regex.vyrn	where$pUsername	yes
+examples/regex.vyrn	where$cUsername	no, it calls `panic`
+examples/regexredux.vyrn	readAll__from0	yes
+examples/regexredux.vyrn	variants	yes
+examples/regexredux.vyrn	substitutions	yes
+examples/regexredux.vyrn	compiled	no, it calls `panic`
+examples/regexredux.vyrn	main	no, it keeps an index check
+examples/region.vyrn	viaString	yes
+examples/region.vyrn	main	yes
+examples/region_consume.vyrn		does not check
+examples/regionarena.vyrn	keep	yes
+examples/regionarena.vyrn	measure	yes
+examples/regionarena.vyrn	minted	yes
+examples/regionarena.vyrn	main	yes
+examples/regionarena.vyrn	tally	yes
+examples/regionescape.vyrn	detect	yes
+examples/regionescape.vyrn	main	yes
+examples/releaseacrossexit.vyrn	ringOf	yes
+examples/releaseacrossexit.vyrn	maybeRing	yes
+examples/releaseacrossexit.vyrn	overMatch	yes
+examples/releaseacrossexit.vyrn	overHandover	yes
+examples/releaseacrossexit.vyrn	overIfLet	yes
+examples/releaseacrossexit.vyrn	ringList	yes
+examples/releaseacrossexit.vyrn	overForIn	yes
+examples/releaseacrossexit.vyrn	overBreak	yes
+examples/releaseacrossexit.vyrn	overContinue	yes
+examples/releaseacrossexit.vyrn	overReturn	yes
+examples/releaseacrossexit.vyrn	main	yes
+examples/releaseacrossexit.vyrn	Owned$Ring$release	yes
+examples/releaseacrosstry.vyrn	ringOf	yes
+examples/releaseacrosstry.vyrn	missing	yes
+examples/releaseacrosstry.vyrn	failing	yes
+examples/releaseacrosstry.vyrn	overOption	yes
+examples/releaseacrosstry.vyrn	overResult	yes
+examples/releaseacrosstry.vyrn	nested	yes
+examples/releaseacrosstry.vyrn	overReturn	yes
+examples/releaseacrosstry.vyrn	main	yes
+examples/releaseacrosstry.vyrn	Owned$Ring$release	yes
+examples/renamed_apart_local.vyrn	main	yes
+examples/reservewrap.vyrn	main	yes
+examples/rest.vyrn	handle	no, it calls `mount`, which is not trap-free
+examples/rest.vyrn	hit	no, it calls `handle`, which is not trap-free
+examples/rest.vyrn	hitIfNoneMatch	no, it calls `handle`, which is not trap-free
+examples/rest.vyrn	show	yes
+examples/rest.vyrn	header	yes
+examples/rest.vyrn	main	no, it calls `hit`, which is not trap-free
+examples/rest.vyrn	where$pAge	yes
+examples/rest.vyrn	where$cAge	no, it calls `panic`
+examples/rest.vyrn	where$pInstant	yes
+examples/rest.vyrn	where$cInstant	no, it calls `panic`
+examples/rest.vyrn	where$pPathById	yes
+examples/rest.vyrn	where$cPathById	no, it calls `panic`
+examples/rest.vyrn	where$pPathCreate	yes
+examples/rest.vyrn	where$cPathCreate	no, it calls `panic`
+examples/rest.vyrn	where$pPathDel	yes
+examples/rest.vyrn	where$cPathDel	no, it calls `panic`
+examples/rest.vyrn	where$pUsername	yes
+examples/rest.vyrn	where$cUsername	no, it calls `panic`
+examples/revcomp.vyrn	complementTable	yes
+examples/revcomp.vyrn	reverseComplement	yes
+examples/revcomp.vyrn	writeReverseComplement	yes
+examples/revcomp.vyrn	run	yes
+examples/revcomp.vyrn	syntheticSequence	no, it keeps an index check
+examples/revcomp.vyrn	main	yes
+examples/rpc.vyrn	onGetUser	yes
+examples/rpc.vyrn	onCreateUser	yes
+examples/rpc.vyrn	onDeleteUser	yes
+examples/rpc.vyrn	main	no, it calls `usersById`, which is not trap-free
+examples/rpc.vyrn	where$pAge	yes
+examples/rpc.vyrn	where$cAge	no, it calls `panic`
+examples/rpc.vyrn	where$pUsername	yes
+examples/rpc.vyrn	where$cUsername	no, it calls `panic`
+examples/rpcsplit.vyrn	onGetItem	yes
+examples/rpcsplit.vyrn	main	no, it calls `itemsById`, which is not trap-free
+examples/rpcsplit.vyrn	where$pId	yes
+examples/rpcsplit.vyrn	where$cId	no, it calls `panic`
+examples/rpcsplit/server/api/items.vyrn	byId	yes
+examples/rpcsplit/server/api/items.vyrn	where$pId	yes
+examples/rpcsplit/server/api/items.vyrn	where$cId	no, it calls `panic`
+examples/rpcsplit/server/store.vyrn	getItem	yes
+examples/rpcsplit/server/store.vyrn	where$pId	yes
+examples/rpcsplit/server/store.vyrn	where$cId	no, it calls `panic`
+examples/rpcsplit/shared/wire.vyrn	where$pId	yes
+examples/rpcsplit/shared/wire.vyrn	where$cId	no, it calls `panic`
+examples/scan.vyrn	main	no, it calls `ident`, which is not trap-free
+examples/schemaimport.vyrn	mk	yes
+examples/schemaimport.vyrn	main	yes
+examples/schemaimport.vyrn	where$pPort	yes
+examples/schemaimport.vyrn	where$cPort	no, it calls `panic`
+examples/schemaimport.vyrn	where$pUser.age	yes
+examples/schemaimport.vyrn	where$cUser.age	no, it calls `panic`
+examples/schemaimport.vyrn	where$pUser.name	yes
+examples/schemaimport.vyrn	where$cUser.name	no, it calls `panic`
+examples/server.vyrn	main	yes
+examples/server.vyrn	handle	yes
+examples/sha1.vyrn	check	no, it calls `panic`
+examples/sha1.vyrn	repeat	yes
+examples/sha1.vyrn	main	no, it calls `check`, which is not trap-free
+examples/shadowbuiltin.vyrn	raw	yes
+examples/shadowbuiltin.vyrn	render	yes
+examples/shadowbuiltin.vyrn	main	yes
+examples/shadowing.vyrn	shadowedByLet	yes
+examples/shadowing.vyrn	shadowedByLoopVar	yes
+examples/shadowing.vyrn	shadowedByPatternBinder	yes
+examples/shadowing.vyrn	shadowedByMatchArm	yes
+examples/shadowing.vyrn	applyTo	no, it calls a function value
+examples/shadowing.vyrn	shadowedByLambdaParam	no, it calls `applyTo`, which is not trap-free
+examples/shadowing.vyrn	shadowedStringIsStillFreed	yes
+examples/shadowing.vyrn	main	no, it calls `shadowedByLambdaParam`, which is not trap-free
+examples/shelf/client/boot.vyrn	parseId	no, it calls `derive$jsondec$jsonDecoders$td26b40f9d46f6953`, which is not trap-free
+examples/shelf/client/boot.vyrn	tagsText	yes
+examples/shelf/client/boot.vyrn	renderIssues	yes
+examples/shelf/client/boot.vyrn	labels	yes
+examples/shelf/client/boot.vyrn	bookViews	yes
+examples/shelf/client/boot.vyrn	histogram	yes
+examples/shelf/client/boot.vyrn	tagViews	yes
+examples/shelf/client/boot.vyrn	listView	yes
+examples/shelf/client/boot.vyrn	detailView	yes
+examples/shelf/client/boot.vyrn	view	yes
+examples/shelf/client/boot.vyrn	onListBooks	yes
+examples/shelf/client/boot.vyrn	setBooks	yes
+examples/shelf/client/boot.vyrn	onGetBook	yes
+examples/shelf/client/boot.vyrn	showDetail	yes
+examples/shelf/client/boot.vyrn	fillDetail	yes
+examples/shelf/client/boot.vyrn	setDetailStatus	yes
+examples/shelf/client/boot.vyrn	onAddBook	no, it calls `afterAdd`, which is not trap-free
+examples/shelf/client/boot.vyrn	afterAdd	no, it calls `addSucceeded`, which is not trap-free
+examples/shelf/client/boot.vyrn	addSucceeded	no, it calls `refetch`, which is not trap-free
+examples/shelf/client/boot.vyrn	onDeleteBook	no, it calls `afterDelete`, which is not trap-free
+examples/shelf/client/boot.vyrn	afterDelete	no, it calls `refetchClear`, which is not trap-free
+examples/shelf/client/boot.vyrn	refetchClear	no, it calls `refetch`, which is not trap-free
+examples/shelf/client/boot.vyrn	onRateBook	no, it calls `afterRate`, which is not trap-free
+examples/shelf/client/boot.vyrn	afterRate	no, it calls `refetch`, which is not trap-free
+examples/shelf/client/boot.vyrn	setIssues	yes
+examples/shelf/client/boot.vyrn	refetch	no, it calls `booksBrowse`, which is not trap-free
+examples/shelf/client/boot.vyrn	bootList	no, it calls `refetch`, which is not trap-free
+examples/shelf/client/boot.vyrn	bootDetail	no, it calls `booksById`, which is not trap-free
+examples/shelf/client/boot.vyrn	setDraftTitle	yes
+examples/shelf/client/boot.vyrn	setDraftUrl	yes
+examples/shelf/client/boot.vyrn	setDraftTags	yes
+examples/shelf/client/boot.vyrn	submitAdd	no, it calls `booksAdd`, which is not trap-free
+examples/shelf/client/boot.vyrn	askDelete	no, it calls `parseId`, which is not trap-free
+examples/shelf/client/boot.vyrn	cancelDelete	yes
+examples/shelf/client/boot.vyrn	confirmDelete	no, it calls `deleteById`, which is not trap-free
+examples/shelf/client/boot.vyrn	deleteById	no, it calls `booksDel`, which is not trap-free
+examples/shelf/client/boot.vyrn	cycleRate	no, it calls `booksRate`, which is not trap-free
+examples/shelf/client/boot.vyrn	nextRating	yes
+examples/shelf/client/boot.vyrn	showServerIssues	no, it calls `derive$jsondec$jsonDecoders$t1c738c01737dd8fc`, which is not trap-free
+examples/shelf/client/boot.vyrn	setFilter	yes
+examples/shelf/client/boot.vyrn	clearFilter	yes
+examples/shelf/client/boot.vyrn	toggleLang	yes
+examples/shelf/client/boot.vyrn	vyrnView	no, it calls `derive$json$jsonEncoders$t62d5a5c67072e4b3`, which is not trap-free
+examples/shelf/client/boot.vyrn	vyrnPatch	no, it calls `derive$json$jsonEncoders$t086736aeab103791`, which is not trap-free
+examples/shelf/client/boot.vyrn	main	yes
+examples/shelf/client/boot.vyrn	where$pBookId	yes
+examples/shelf/client/boot.vyrn	where$cBookId	no, it calls `panic`
+examples/shelf/client/boot.vyrn	where$pRating	yes
+examples/shelf/client/boot.vyrn	where$cRating	no, it calls `panic`
+examples/shelf/client/boot.vyrn	where$pStars	yes
+examples/shelf/client/boot.vyrn	where$cStars	no, it calls `panic`
+examples/shelf/client/boot.vyrn	where$pTag	yes
+examples/shelf/client/boot.vyrn	where$cTag	no, it calls `panic`
+examples/shelf/client/boot.vyrn	where$pTitle	yes
+examples/shelf/client/boot.vyrn	where$cTitle	no, it calls `panic`
+examples/shelf/client/boot.vyrn	where$pTransKey	yes
+examples/shelf/client/boot.vyrn	where$cTransKey	no, it calls `panic`
+examples/shelf/client/boot.vyrn	where$pTw	yes
+examples/shelf/client/boot.vyrn	where$cTw	no, it calls `panic`
+examples/shelf/client/boot.vyrn	where$pTwClass	yes
+examples/shelf/client/boot.vyrn	where$cTwClass	no, it calls `panic`
+examples/shelf/client/boot.vyrn	where$pUrl	yes
+examples/shelf/client/boot.vyrn	where$cUrl	no, it calls `panic`
+examples/shelf/server.vyrn	runMiddleware	no, it calls a function value
+examples/shelf/server.vyrn	handle	no, it calls `runMiddleware`, which is not trap-free
+examples/shelf/server.vyrn	routed	no, it calls `graphqlHandle`, which is not trap-free
+examples/shelf/server.vyrn	main	no, it calls `handle`, which is not trap-free
+examples/shelf/server.vyrn	where$pBookId	yes
+examples/shelf/server.vyrn	where$cBookId	no, it calls `panic`
+examples/shelf/server.vyrn	where$pInstant	yes
+examples/shelf/server.vyrn	where$cInstant	no, it calls `panic`
+examples/shelf/server.vyrn	where$pRating	yes
+examples/shelf/server.vyrn	where$cRating	no, it calls `panic`
+examples/shelf/server.vyrn	where$pRoutePath	yes
+examples/shelf/server.vyrn	where$cRoutePath	no, it calls `panic`
+examples/shelf/server.vyrn	where$pStars	yes
+examples/shelf/server.vyrn	where$cStars	no, it calls `panic`
+examples/shelf/server.vyrn	where$pTag	yes
+examples/shelf/server.vyrn	where$cTag	no, it calls `panic`
+examples/shelf/server.vyrn	where$pTitle	yes
+examples/shelf/server.vyrn	where$cTitle	no, it calls `panic`
+examples/shelf/server.vyrn	where$pTransKey	yes
+examples/shelf/server.vyrn	where$cTransKey	no, it calls `panic`
+examples/shelf/server.vyrn	where$pTw	yes
+examples/shelf/server.vyrn	where$cTw	no, it calls `panic`
+examples/shelf/server.vyrn	where$pTwClass	yes
+examples/shelf/server.vyrn	where$cTwClass	no, it calls `panic`
+examples/shelf/server.vyrn	where$pUrl	yes
+examples/shelf/server.vyrn	where$cUrl	no, it calls `panic`
+examples/shelf/server/api/books.vyrn	browse	yes
+examples/shelf/server/api/books.vyrn	byId	yes
+examples/shelf/server/api/books.vyrn	add	yes
+examples/shelf/server/api/books.vyrn	del	yes
+examples/shelf/server/api/books.vyrn	rate	no, it calls `rateBook`, which is not trap-free
+examples/shelf/server/api/books.vyrn	tags	yes
+examples/shelf/server/api/books.vyrn	where$pBookId	yes
+examples/shelf/server/api/books.vyrn	where$cBookId	no, it calls `panic`
+examples/shelf/server/api/books.vyrn	where$pRating	yes
+examples/shelf/server/api/books.vyrn	where$cRating	no, it calls `panic`
+examples/shelf/server/api/books.vyrn	where$pStars	yes
+examples/shelf/server/api/books.vyrn	where$cStars	no, it calls `panic`
+examples/shelf/server/api/books.vyrn	where$pTag	yes
+examples/shelf/server/api/books.vyrn	where$cTag	no, it calls `panic`
+examples/shelf/server/api/books.vyrn	where$pTitle	yes
+examples/shelf/server/api/books.vyrn	where$cTitle	no, it calls `panic`
+examples/shelf/server/api/books.vyrn	where$pUrl	yes
+examples/shelf/server/api/books.vyrn	where$cUrl	no, it calls `panic`
+examples/shelf/server/routes/about.vyrn	page	yes
+examples/shelf/server/routes/about.vyrn	where$pBookId	yes
+examples/shelf/server/routes/about.vyrn	where$cBookId	no, it calls `panic`
+examples/shelf/server/routes/about.vyrn	where$pRating	yes
+examples/shelf/server/routes/about.vyrn	where$cRating	no, it calls `panic`
+examples/shelf/server/routes/about.vyrn	where$pStars	yes
+examples/shelf/server/routes/about.vyrn	where$cStars	no, it calls `panic`
+examples/shelf/server/routes/about.vyrn	where$pTag	yes
+examples/shelf/server/routes/about.vyrn	where$cTag	no, it calls `panic`
+examples/shelf/server/routes/about.vyrn	where$pTitle	yes
+examples/shelf/server/routes/about.vyrn	where$cTitle	no, it calls `panic`
+examples/shelf/server/routes/about.vyrn	where$pTransKey	yes
+examples/shelf/server/routes/about.vyrn	where$cTransKey	no, it calls `panic`
+examples/shelf/server/routes/about.vyrn	where$pTw	yes
+examples/shelf/server/routes/about.vyrn	where$cTw	no, it calls `panic`
+examples/shelf/server/routes/about.vyrn	where$pTwClass	yes
+examples/shelf/server/routes/about.vyrn	where$cTwClass	no, it calls `panic`
+examples/shelf/server/routes/about.vyrn	where$pUrl	yes
+examples/shelf/server/routes/about.vyrn	where$cUrl	no, it calls `panic`
+examples/shelf/server/routes/books/[id].vyrn	data	yes
+examples/shelf/server/routes/books/[id].vyrn	fetchBook	yes
+examples/shelf/server/routes/books/[id].vyrn	page	yes
+examples/shelf/server/routes/books/[id].vyrn	where$pBookId	yes
+examples/shelf/server/routes/books/[id].vyrn	where$cBookId	no, it calls `panic`
+examples/shelf/server/routes/books/[id].vyrn	where$pRating	yes
+examples/shelf/server/routes/books/[id].vyrn	where$cRating	no, it calls `panic`
+examples/shelf/server/routes/books/[id].vyrn	where$pStars	yes
+examples/shelf/server/routes/books/[id].vyrn	where$cStars	no, it calls `panic`
+examples/shelf/server/routes/books/[id].vyrn	where$pTag	yes
+examples/shelf/server/routes/books/[id].vyrn	where$cTag	no, it calls `panic`
+examples/shelf/server/routes/books/[id].vyrn	where$pTitle	yes
+examples/shelf/server/routes/books/[id].vyrn	where$cTitle	no, it calls `panic`
+examples/shelf/server/routes/books/[id].vyrn	where$pTransKey	yes
+examples/shelf/server/routes/books/[id].vyrn	where$cTransKey	no, it calls `panic`
+examples/shelf/server/routes/books/[id].vyrn	where$pTw	yes
+examples/shelf/server/routes/books/[id].vyrn	where$cTw	no, it calls `panic`
+examples/shelf/server/routes/books/[id].vyrn	where$pTwClass	yes
+examples/shelf/server/routes/books/[id].vyrn	where$cTwClass	no, it calls `panic`
+examples/shelf/server/routes/books/[id].vyrn	where$pUrl	yes
+examples/shelf/server/routes/books/[id].vyrn	where$cUrl	no, it calls `panic`
+examples/shelf/server/routes/index.vyrn	page	yes
+examples/shelf/server/routes/index.vyrn	where$pBookId	yes
+examples/shelf/server/routes/index.vyrn	where$cBookId	no, it calls `panic`
+examples/shelf/server/routes/index.vyrn	where$pRating	yes
+examples/shelf/server/routes/index.vyrn	where$cRating	no, it calls `panic`
+examples/shelf/server/routes/index.vyrn	where$pStars	yes
+examples/shelf/server/routes/index.vyrn	where$cStars	no, it calls `panic`
+examples/shelf/server/routes/index.vyrn	where$pTag	yes
+examples/shelf/server/routes/index.vyrn	where$cTag	no, it calls `panic`
+examples/shelf/server/routes/index.vyrn	where$pTitle	yes
+examples/shelf/server/routes/index.vyrn	where$cTitle	no, it calls `panic`
+examples/shelf/server/routes/index.vyrn	where$pTransKey	yes
+examples/shelf/server/routes/index.vyrn	where$cTransKey	no, it calls `panic`
+examples/shelf/server/routes/index.vyrn	where$pTw	yes
+examples/shelf/server/routes/index.vyrn	where$cTw	no, it calls `panic`
+examples/shelf/server/routes/index.vyrn	where$pTwClass	yes
+examples/shelf/server/routes/index.vyrn	where$cTwClass	no, it calls `panic`
+examples/shelf/server/routes/index.vyrn	where$pUrl	yes
+examples/shelf/server/routes/index.vyrn	where$cUrl	no, it calls `panic`
+examples/shelf/server/store.vyrn	copyBook	yes
+examples/shelf/server/store.vyrn	listBooks	yes
+examples/shelf/server/store.vyrn	getBook	yes
+examples/shelf/server/store.vyrn	addBook	yes
+examples/shelf/server/store.vyrn	deleteBook	yes
+examples/shelf/server/store.vyrn	rateBook	no, it keeps an index check
+examples/shelf/server/store.vyrn	tagCounts	yes
+examples/shelf/server/store.vyrn	countOf	yes
+examples/shelf/server/store.vyrn	where$pBookId	yes
+examples/shelf/server/store.vyrn	where$cBookId	no, it calls `panic`
+examples/shelf/server/store.vyrn	where$pRating	yes
+examples/shelf/server/store.vyrn	where$cRating	no, it calls `panic`
+examples/shelf/server/store.vyrn	where$pStars	yes
+examples/shelf/server/store.vyrn	where$cStars	no, it calls `panic`
+examples/shelf/server/store.vyrn	where$pTag	yes
+examples/shelf/server/store.vyrn	where$cTag	no, it calls `panic`
+examples/shelf/server/store.vyrn	where$pTitle	yes
+examples/shelf/server/store.vyrn	where$cTitle	no, it calls `panic`
+examples/shelf/server/store.vyrn	where$pUrl	yes
+examples/shelf/server/store.vyrn	where$cUrl	no, it calls `panic`
+examples/shelf/server/view.vyrn	navLink	yes
+examples/shelf/server/view.vyrn	bookRow	yes
+examples/shelf/server/view.vyrn	homePage	yes
+examples/shelf/server/view.vyrn	pluralRow	yes
+examples/shelf/server/view.vyrn	aboutPage	yes
+examples/shelf/server/view.vyrn	detailPage	yes
+examples/shelf/server/view.vyrn	where$pBookId	yes
+examples/shelf/server/view.vyrn	where$cBookId	no, it calls `panic`
+examples/shelf/server/view.vyrn	where$pRating	yes
+examples/shelf/server/view.vyrn	where$cRating	no, it calls `panic`
+examples/shelf/server/view.vyrn	where$pStars	yes
+examples/shelf/server/view.vyrn	where$cStars	no, it calls `panic`
+examples/shelf/server/view.vyrn	where$pTag	yes
+examples/shelf/server/view.vyrn	where$cTag	no, it calls `panic`
+examples/shelf/server/view.vyrn	where$pTitle	yes
+examples/shelf/server/view.vyrn	where$cTitle	no, it calls `panic`
+examples/shelf/server/view.vyrn	where$pTransKey	yes
+examples/shelf/server/view.vyrn	where$cTransKey	no, it calls `panic`
+examples/shelf/server/view.vyrn	where$pTw	yes
+examples/shelf/server/view.vyrn	where$cTw	no, it calls `panic`
+examples/shelf/server/view.vyrn	where$pTwClass	yes
+examples/shelf/server/view.vyrn	where$cTwClass	no, it calls `panic`
+examples/shelf/server/view.vyrn	where$pUrl	yes
+examples/shelf/server/view.vyrn	where$cUrl	no, it calls `panic`
+examples/shelf/shared/util.vyrn	splitTrim	no, it calls `split`, which is not trap-free
+examples/shelf/shared/wire.vyrn	where$pBookId	yes
+examples/shelf/shared/wire.vyrn	where$cBookId	no, it calls `panic`
+examples/shelf/shared/wire.vyrn	where$pRating	yes
+examples/shelf/shared/wire.vyrn	where$cRating	no, it calls `panic`
+examples/shelf/shared/wire.vyrn	where$pStars	yes
+examples/shelf/shared/wire.vyrn	where$cStars	no, it calls `panic`
+examples/shelf/shared/wire.vyrn	where$pTag	yes
+examples/shelf/shared/wire.vyrn	where$cTag	no, it calls `panic`
+examples/shelf/shared/wire.vyrn	where$pTitle	yes
+examples/shelf/shared/wire.vyrn	where$cTitle	no, it calls `panic`
+examples/shelf/shared/wire.vyrn	where$pUrl	yes
+examples/shelf/shared/wire.vyrn	where$cUrl	no, it calls `panic`
+examples/show.vyrn	tag	no, it keeps an index check
+examples/show.vyrn	showValue	yes
+examples/show.vyrn	main	no, it calls `tag`, which is not trap-free
+examples/show.vyrn	Show$Point$show	yes
+examples/show.vyrn	Show$Int64$show	yes
+examples/show.vyrn	label	yes
+examples/simd.vyrn	lanes	yes
+examples/simd.vyrn	main	yes
+examples/simdbench.vyrn	min1	yes
+examples/simdbench.vyrn	max1	yes
+examples/simdbench.vyrn	abs1	yes
+examples/simdbench.vyrn	trunc1	yes
+examples/simdbench.vyrn	floor1	yes
+examples/simdbench.vyrn	ceil1	yes
+examples/simdbench.vyrn	nearest1	yes
+examples/simdbench.vyrn	min1w	yes
+examples/simdbench.vyrn	max1w	yes
+examples/simdbench.vyrn	minV	yes
+examples/simdbench.vyrn	maxV	yes
+examples/simdbench.vyrn	absV	yes
+examples/simdbench.vyrn	ceilV	yes
+examples/simdbench.vyrn	floorV	yes
+examples/simdbench.vyrn	truncV	yes
+examples/simdbench.vyrn	nearestV	yes
+examples/simdbench.vyrn	selectV	yes
+examples/simdbench.vyrn	anyV	yes
+examples/simdbench.vyrn	allV	yes
+examples/simdbench.vyrn	sum	yes
+examples/simdbench.vyrn	minWv	yes
+examples/simdbench.vyrn	maxWv	yes
+examples/simdbench.vyrn	sumW	yes
+examples/simdbench.vyrn	data	yes
+examples/simdbench.vyrn	data64	yes
+examples/simdbench.vyrn	sumScalar	no, it keeps an index check
+examples/simdbench.vyrn	sumWide	no, it keeps an index check
+examples/simdbench.vyrn	minWBuiltin	no, it keeps an index check
+examples/simdbench.vyrn	minWVyrn	no, it keeps an index check
+examples/simdbench.vyrn	maxWBuiltin	no, it keeps an index check
+examples/simdbench.vyrn	maxWVyrn	no, it keeps an index check
+examples/simdbench.vyrn	minBuiltin	no, it keeps an index check
+examples/simdbench.vyrn	minVyrn	no, it keeps an index check
+examples/simdbench.vyrn	maxBuiltin	no, it keeps an index check
+examples/simdbench.vyrn	maxVyrn	no, it keeps an index check
+examples/simdbench.vyrn	absVyrn	no, it keeps an index check
+examples/simdbench.vyrn	ceilBuiltin	no, it keeps an index check
+examples/simdbench.vyrn	ceilVyrn	no, it keeps an index check
+examples/simdbench.vyrn	floorBuiltin	no, it keeps an index check
+examples/simdbench.vyrn	floorVyrn	no, it keeps an index check
+examples/simdbench.vyrn	truncBuiltin	no, it keeps an index check
+examples/simdbench.vyrn	truncVyrn	no, it keeps an index check
+examples/simdbench.vyrn	nearestBuiltin	no, it keeps an index check
+examples/simdbench.vyrn	nearestVyrn	no, it keeps an index check
+examples/simdbench.vyrn	selVyrn	no, it keeps an index check
+examples/simdbench.vyrn	anyBuiltin	no, it keeps an index check
+examples/simdbench.vyrn	anyVyrn	no, it keeps an index check
+examples/simdbench.vyrn	allBuiltin	no, it keeps an index check
+examples/simdbench.vyrn	allVyrn	no, it keeps an index check
+examples/simdbench.vyrn	main	no, it calls `minBuiltin`, which is not trap-free
+examples/simdint.vyrn	lanes	yes
+examples/simdint.vyrn	opaque	yes
+examples/simdint.vyrn	minLanes	yes
+examples/simdint.vyrn	maxLanes	yes
+examples/simdint.vyrn	main	yes
+examples/simdmem.vyrn	lanes	yes
+examples/simdmem.vyrn	mlanes	yes
+examples/simdmem.vyrn	reduce	yes
+examples/simdmem.vyrn	select	yes
+examples/simdmem.vyrn	abs	yes
+examples/simdmem.vyrn	main	yes
+examples/simdmem2.vyrn	lanes	yes
+examples/simdmem2.vyrn	main	yes
+examples/simdoob.vyrn	idx	yes
+examples/simdoob.vyrn	main	no, it keeps an index check
+examples/simdoobstore.vyrn	idx	yes
+examples/simdoobstore.vyrn	main	no, it keeps an index check
+examples/simdround.vyrn	lanes	yes
+examples/simdround.vyrn	round4	yes
+examples/simdround.vyrn	main	yes
+examples/simdwide.vyrn	lanes	yes
+examples/simdwide.vyrn	both	yes
+examples/simdwide.vyrn	min1	yes
+examples/simdwide.vyrn	max1	yes
+examples/simdwide.vyrn	main	yes
+examples/sizedints.vyrn	wrap32	yes
+examples/sizedints.vyrn	main	yes
+examples/slots.vyrn	main	no, it calls `panic`
+examples/slottable.vyrn	main	yes
+examples/smallarray.vyrn	firstPoint	yes
+examples/smallarray.vyrn	sumSmall	yes
+examples/smallarray.vyrn	main	no, it keeps an index check
+examples/sparseset.vyrn	sparseSet	yes
+examples/sparseset.vyrn	contains	yes
+examples/sparseset.vyrn	insert	yes
+examples/sparseset.vyrn	remove	no, it keeps an index check
+examples/sparseset.vyrn	main	no, it calls `remove`, which is not trap-free
+examples/spectralnorm.vyrn	fixed9	yes
+examples/spectralnorm.vyrn	cell	yes
+examples/spectralnorm.vyrn	multiplyAv	yes
+examples/spectralnorm.vyrn	multiplyAtv	yes
+examples/spectralnorm.vyrn	filled	yes
+examples/spectralnorm.vyrn	spectralNorm	yes
+examples/spectralnorm.vyrn	main	yes
+examples/statemod.vyrn	main	yes
+examples/statemod/left.vyrn	bumpFromLeft	yes
+examples/statemod/right.vyrn	bumpFromRight	yes
+examples/statemod/store.vyrn	currentCount	yes
+examples/statemod/store.vyrn	bump	yes
+examples/statemod/trace.vyrn	mark	yes
+examples/storage.vyrn	describe	yes
+examples/storage.vyrn	main	no, it calls `derive$json$jsonEncoders$tcfed6fa2bea6a177`, which is not trap-free
+examples/stream.vyrn	feed	yes
+examples/stream.vyrn	relay	yes
+examples/stream.vyrn	total	yes
+examples/stream.vyrn	main	yes
+examples/stream_abandoned.vyrn		does not check
+examples/stream_combinator_abandoned.vyrn		does not check
+examples/streamlazy.vyrn	naturals	no, it calls `cursorGet`, which is not trap-free
+examples/streamlazy.vyrn	double	yes
+examples/streamlazy.vyrn	byThree	yes
+examples/streamlazy.vyrn	small	yes
+examples/streamlazy.vyrn	mapCost	yes
+examples/streamlazy.vyrn	filterCost	yes
+examples/streamlazy.vyrn	chainCycles	yes
+examples/streamlazy.vyrn	firstOver	yes
+examples/streamlazy.vyrn	main	yes
+examples/streamlazy.vyrn	upToFive	no, it calls `cursorGet`, which is not trap-free
+examples/streammove.vyrn	named	yes
+examples/streammove.vyrn	strings	yes
+examples/streammove.vyrn	mk	yes
+examples/streammove.vyrn	stepped	yes
+examples/streammove.vyrn	main	yes
+examples/streammove_after.vyrn		does not check
+examples/streamops.vyrn	feed	yes
+examples/streamops.vyrn	double	yes
+examples/streamops.vyrn	odd	yes
+examples/streamops.vyrn	pipeline	yes
+examples/streamops.vyrn	discard	yes
+examples/streamops.vyrn	firstOver	yes
+examples/streamops.vyrn	main	no, it calls `merge`, which is not trap-free
+examples/streamunfold.vyrn	naturals	no, it calls `cursorGet`, which is not trap-free
+examples/streamunfold.vyrn	upToThree	no, it calls `cursorGet`, which is not trap-free
+examples/streamunfold.vyrn	powers	no, it calls `cursorGet`, which is not trap-free
+examples/streamunfold.vyrn	double	yes
+examples/streamunfold.vyrn	odd	yes
+examples/streamunfold.vyrn	discard	yes
+examples/streamunfold.vyrn	cost	yes
+examples/streamunfold.vyrn	cycles	yes
+examples/streamunfold.vyrn	main	yes
+examples/streamunfold.vyrn	firstOver	yes
+examples/stringops.vyrn	everyEvenIsA	yes
+examples/stringops.vyrn	toInt	yes
+examples/stringops.vyrn	main	yes
+examples/stringops.vyrn	where$pGreeting	yes
+examples/stringops.vyrn	where$cGreeting	no, it calls `panic`
+examples/strings.vyrn	showIdx	yes
+examples/strings.vyrn	main	no, it keeps an index check
+examples/strpredbytes.vyrn	bit	yes
+examples/strpredbytes.vyrn	preds	yes
+examples/strpredbytes.vyrn	sl	yes
+examples/strpredbytes.vyrn	bl	yes
+examples/strpredbytes.vyrn	main	yes
+examples/sugarnames.vyrn	at	yes
+examples/sugarnames.vyrn	toString	yes
+examples/sugarnames.vyrn	main	yes
+examples/tagged.vyrn	sql	yes
+examples/tagged.vyrn	showValue	yes
+examples/tagged.vyrn	main	yes
+examples/tallybytes.vyrn	main	yes
+examples/templates.vyrn	greet	yes
+examples/templates.vyrn	showValue	yes
+examples/templates.vyrn	render	no, it keeps an index check
+examples/templates.vyrn	main	no, it calls `render`, which is not trap-free
+examples/testing.vyrn	clamp	yes
+examples/testing.vyrn	main	yes
+examples/textbytes.vyrn	cps	yes
+examples/textbytes.vyrn	verdict	yes
+examples/textbytes.vyrn	lc	yes
+examples/textbytes.vyrn	main	yes
+examples/threeengines.vyrn	chain	yes
+examples/threeengines.vyrn	roundsOf	yes
+examples/threeengines.vyrn	main	yes
+examples/tree.vyrn	treeSum	no, it calls `panic`
+examples/tree.vyrn	treeDepth	no, it calls `maxDepth`, which is not trap-free
+examples/tree.vyrn	maxDepth	no, it calls `panic`
+examples/tree.vyrn	treeFree	no, it calls `freeNode`, which is not trap-free
+examples/tree.vyrn	freeNode	no, it calls `panic`
+examples/tree.vyrn	leaf	yes
+examples/tree.vyrn	main	no, it calls `treeSum`, which is not trap-free
+examples/tryplace.vyrn	ensureSlab	yes
+examples/tryplace.vyrn	main	no, it calls `panic`
+examples/twdemo.vyrn	badge	no, it calls `toHtmlString`, which is not trap-free
+examples/twdemo.vyrn	main	no, it calls `badge`, which is not trap-free
+examples/twdemo.vyrn	where$pTw	yes
+examples/twdemo.vyrn	where$cTw	no, it calls `panic`
+examples/twdemo.vyrn	where$pTwClass	yes
+examples/twdemo.vyrn	where$cTwClass	no, it calls `panic`
+examples/unionfind.vyrn	forest	yes
+examples/unionfind.vyrn	find	no, it keeps an index check
+examples/unionfind.vyrn	union	no, it keeps an index check
+examples/unionfind.vyrn	main	no, it calls `union`, which is not trap-free
+examples/unionfindtested.vyrn	forest	yes
+examples/unionfindtested.vyrn	find	yes
+examples/unionfindtested.vyrn	union	yes
+examples/unionfindtested.vyrn	main	yes
+examples/unions.vyrn	pick	yes
+examples/unions.vyrn	widen	yes
+examples/unions.vyrn	checked	no, it keeps a where rule check
+examples/unions.vyrn	key	yes
+examples/unions.vyrn	main	no, it calls `checked`, which is not trap-free
+examples/unions.vyrn	where$pAge	yes
+examples/unions.vyrn	where$cAge	no, it calls `panic`
+examples/unions.vyrn	where$pDigits	yes
+examples/unions.vyrn	where$cDigits	no, it calls `panic`
+examples/unions.vyrn	where$pOpen	yes
+examples/unions.vyrn	where$cOpen	no, it calls `panic`
+examples/unions.vyrn	where$pPort	yes
+examples/unions.vyrn	where$cPort	no, it calls `panic`
+examples/unions.vyrn	where$pPort | Age	yes
+examples/unions.vyrn	where$cPort | Age	no, it calls `panic`
+examples/unions.vyrn	where$pSlug	yes
+examples/unions.vyrn	where$cSlug	no, it calls `panic`
+examples/unions.vyrn	where$pSlug | Digits	yes
+examples/unions.vyrn	where$cSlug | Digits	no, it calls `panic`
+examples/unions_fail.vyrn	checked	no, it keeps a where rule check
+examples/unions_fail.vyrn	main	no, it calls `checked`, which is not trap-free
+examples/unions_fail.vyrn	where$pAge	yes
+examples/unions_fail.vyrn	where$cAge	no, it calls `panic`
+examples/unions_fail.vyrn	where$pPort	yes
+examples/unions_fail.vyrn	where$cPort	no, it calls `panic`
+examples/unions_fail.vyrn	where$pPort | Age	yes
+examples/unions_fail.vyrn	where$cPort | Age	no, it calls `panic`
+examples/utility.vyrn	showPublic	yes
+examples/utility.vyrn	showId	yes
+examples/utility.vyrn	main	yes
+examples/validate.vyrn	checkedAge	no, it keeps a where rule check
+examples/validate.vyrn	make	yes
+examples/validate.vyrn	main	no, it calls `checkedAge`, which is not trap-free
+examples/validate.vyrn	where$pAge	yes
+examples/validate.vyrn	where$cAge	no, it calls `panic`
+examples/validate.vyrn	where$pPort	yes
+examples/validate.vyrn	where$cPort	no, it calls `panic`
+examples/validate_compile.vyrn		does not check
+examples/validate_fail.vyrn	checked	no, it keeps a where rule check
+examples/validate_fail.vyrn	main	no, it calls `checked`, which is not trap-free
+examples/validate_fail.vyrn	where$pAge	yes
+examples/validate_fail.vyrn	where$cAge	no, it calls `panic`
+examples/validate_field_fail.vyrn	rt	yes
+examples/validate_field_fail.vyrn	main	no, it keeps a where rule check
+examples/validate_field_fail.vyrn	where$pSpan	yes
+examples/validate_field_fail.vyrn	where$cSpan	no, it calls `panic`
+examples/validate_part_fail.vyrn	rt	yes
+examples/validate_part_fail.vyrn	main	no, it keeps a where rule check
+examples/validate_part_fail.vyrn	where$pTag	yes
+examples/validate_part_fail.vyrn	where$cTag	no, it calls `panic`
+examples/validate_parts.vyrn	rt	yes
+examples/validate_parts.vyrn	width	yes
+examples/validate_parts.vyrn	spans	no, it keeps a where rule check
+examples/validate_parts.vyrn	main	no, it keeps a where rule check
+examples/validate_parts.vyrn	where$pRanked	yes
+examples/validate_parts.vyrn	where$cRanked	no, it calls `panic`
+examples/validate_parts.vyrn	where$pSpan	yes
+examples/validate_parts.vyrn	where$cSpan	no, it calls `panic`
+examples/validate_parts.vyrn	where$pTag	yes
+examples/validate_parts.vyrn	where$cTag	no, it calls `panic`
+examples/validate_store.vyrn	rt	yes
+examples/validate_store.vyrn	enroll	yes
+examples/validate_store.vyrn	main	no, it keeps an index check
+examples/validate_store.vyrn	where$pAge	yes
+examples/validate_store.vyrn	where$cAge	no, it calls `panic`
+examples/validate_sum.vyrn	rt	yes
+examples/validate_sum.vyrn	main	yes
+examples/validate_sum.vyrn	where$pAge	yes
+examples/validate_sum.vyrn	where$cAge	no, it calls `panic`
+examples/validatestr.vyrn	give	yes
+examples/validatestr.vyrn	main	yes
+examples/validatestr.vyrn	where$pRoot	yes
+examples/validatestr.vyrn	where$cRoot	no, it calls `panic`
+examples/validation.vyrn	validatePerson	yes
+examples/validation.vyrn	issuesOf	yes
+examples/validation.vyrn	translateDe	yes
+examples/validation.vyrn	main	yes
+examples/vlog.vyrn	parseLevel	yes
+examples/vlog.vyrn	levelName	yes
+examples/vlog.vyrn	hms	no, it calls `padStart`, which is not trap-free
+examples/vlog.vyrn	humanizeDuration	no, it calls `trim`, which is not trap-free
+examples/vlog.vyrn	decodeLine	no, it calls `derive$jsondec$jsonDecoders$t95b53cb0efef827d`, which is not trap-free
+examples/vlog.vyrn	readStdinLines	yes
+examples/vlog.vyrn	recordsFrom	no, it calls `trim`, which is not trap-free
+examples/vlog.vyrn	tallyLevels	yes
+examples/vlog.vyrn	countOf	yes
+examples/vlog.vyrn	levelsOf	yes
+examples/vlog.vyrn	matchesLevel	yes
+examples/vlog.vyrn	cmdCount	yes
+examples/vlog.vyrn	cmdFmt	no, it calls `hms`, which is not trap-free
+examples/vlog.vyrn	cmdTail	no, it keeps an index check
+examples/vlog.vyrn	cmdFilter	no, it calls `opt`, which is not trap-free
+examples/vlog.vyrn	cmdStats	no, it calls `humanizeDuration`, which is not trap-free
+examples/vlog.vyrn	cmdOverview	no, it calls `cmdFmt`, which is not trap-free
+examples/vlog.vyrn	usage	yes
+examples/vlog.vyrn	loadLines	no, it calls `opt`, which is not trap-free
+examples/vlog.vyrn	main	no, it calls `opt`, which is not trap-free
+examples/vlog.vyrn	where$pInstant	yes
+examples/vlog.vyrn	where$cInstant	no, it calls `panic`
+examples/vlog.vyrn	where$pMillis	yes
+examples/vlog.vyrn	where$cMillis	no, it calls `panic`
+examples/vondemo.vyrn	main	yes
+examples/vondemo.vyrn	where$pPort	yes
+examples/vondemo.vyrn	where$cPort	no, it calls `panic`
+examples/vyxdemo.vyrn	demo	yes
+examples/vyxdemo.vyrn	main	no, it calls `toHtmlString`, which is not trap-free
+examples/wirekey.vyrn	main	no, it calls `derive$json$jsonEncoders$t61b47f29d68a5d7d`, which is not trap-free
+site/app/apidoc.vyrn	offsetOf	no, it keeps an index check
+site/app/apidoc.vyrn	sigEnd	no, it keeps an index check
+site/app/apidoc.vyrn	trimTail	no, it calls `split`, which is not trap-free
+site/app/apidoc.vyrn	declAt	no, it keeps an index check
+site/app/apidoc.vyrn	exportsOf	no, it calls `declAt`, which is not trap-free
+site/app/apidoc.vyrn	testNames	yes
+site/app/apidoc.vyrn	headerDoc	yes
+site/app/apidoc.vyrn	tickHtml	no, it calls `split`, which is not trap-free
+site/app/apidoc.vyrn	inlineHtml	no, it calls `split`, which is not trap-free
+site/app/apidoc.vyrn	blockHtml	no, it calls `trimEnd`, which is not trap-free
+site/app/apidoc.vyrn	indentOf	yes
+site/app/apidoc.vyrn	proseHtml	no, it keeps an index check
+site/app/apidoc.vyrn	isBanner	yes
+site/app/apidoc.vyrn	linked	no, it keeps an index check
+site/app/apidoc.vyrn	summaryOf	no, it calls `split`, which is not trap-free
+site/app/apidoc.vyrn	fenced	yes
+site/app/apidoc.vyrn	trusted	no, it calls `quoted`, which is not trap-free
+site/app/apidoc.vyrn	apiDocs	no, it calls `proseHtml`, which is not trap-free
+site/app/bench.vyrn	run1File	yes
+site/app/bench.vyrn	run1Href	yes
+site/app/bench.vyrn	historyFile	yes
+site/app/bench.vyrn	after	no, it calls `substring`, which is not trap-free
+site/app/bench.vyrn	upTo	no, it calls `substring`, which is not trap-free
+site/app/bench.vyrn	objectAt	no, it calls `after`, which is not trap-free
+site/app/bench.vyrn	scalarAt	no, it calls `substring`, which is not trap-free
+site/app/bench.vyrn	textAt	no, it calls `substring`, which is not trap-free
+site/app/bench.vyrn	unescaped	no, it calls `substring`, which is not trap-free
+site/app/bench.vyrn	hexAt	no, it keeps an index check
+site/app/bench.vyrn	charOf	yes
+site/app/bench.vyrn	microsOf	yes
+site/app/bench.vyrn	recordText	yes
+site/app/bench.vyrn	programs	no, it keeps an index check
+site/app/bench.vyrn	progNames	yes
+site/app/bench.vyrn	gameHref	yes
+site/app/bench.vyrn	contestants	yes
+site/app/bench.vyrn	loadCells	no, it keeps an index check
+site/app/bench.vyrn	cellOf	no, it calls `loadCells`, which is not trap-free
+site/app/bench.vyrn	p50Of	no, it calls `cellOf`, which is not trap-free
+site/app/bench.vyrn	tenthsText	yes
+site/app/bench.vyrn	hundredthsText	no, it calls `padStart`, which is not trap-free
+site/app/bench.vyrn	msOf	yes
+site/app/bench.vyrn	wholeOf	yes
+site/app/bench.vyrn	secsOf	no, it calls `hundredthsText`, which is not trap-free
+site/app/bench.vyrn	memOf	no, it calls `grouped`, which is not trap-free
+site/app/bench.vyrn	sizeOf	no, it calls `memOf`, which is not trap-free
+site/app/bench.vyrn	hundredths	yes
+site/app/bench.vyrn	ratioText	no, it calls `hundredthsText`, which is not trap-free
+site/app/bench.vyrn	grouped	no, it calls `trim`, which is not trap-free
+site/app/bench.vyrn	ratioOf	no, it calls `p50Of`, which is not trap-free
+site/app/bench.vyrn	atLeast0	yes
+site/app/bench.vyrn	totalOf	yes
+site/app/bench.vyrn	endOf	yes
+site/app/bench.vyrn	shareOf	yes
+site/app/bench.vyrn	thousandthsText	no, it calls `padStart`, which is not trap-free
+site/app/bench.vyrn	buildOf	yes
+site/app/bench.vyrn	lanesFor	no, it calls `lanesOf`, which is not trap-free
+site/app/bench.vyrn	summed	no, it keeps an index check
+site/app/bench.vyrn	frontLanes	no, it calls `summed`, which is not trap-free
+site/app/bench.vyrn	seriesOf	yes
+site/app/bench.vyrn	lanesOf	no, it keeps an index check
+site/app/bench.vyrn	fullGroups	no, it calls `ratioText`, which is not trap-free
+site/app/bench.vyrn	frontGroups	no, it calls `memOf`, which is not trap-free
+site/app/bench.vyrn	srcHref	yes
+site/app/bench.vyrn	nativeVsRust	no, it calls `ratioText`, which is not trap-free
+site/app/bench.vyrn	axisPanels	no, it calls `programs`, which is not trap-free
+site/app/bench.vyrn	listAt	no, it calls `substring`, which is not trap-free
+site/app/bench.vyrn	sparkOf	no, it keeps a division check
+site/app/bench.vyrn	usAt	yes
+site/app/bench.vyrn	causeRow	yes
+site/app/bench.vyrn	causeRows	yes
+site/app/bench.vyrn	envText	no, it calls `objectAt`, which is not trap-free
+site/app/bench.vyrn	benchMachine	no, it calls `textAt`, which is not trap-free
+site/app/bench.vyrn	benchDate	no, it calls `textAt`, which is not trap-free
+site/app/bench.vyrn	benchRuns	no, it calls `scalarAt`, which is not trap-free
+site/app/bench.vyrn	envRows	no, it calls `textAt`, which is not trap-free
+site/app/bench.vyrn	numOf	no, it keeps an index check
+site/app/bench.vyrn	rowCount	yes
+site/app/code.vyrn	rustWords	yes
+site/app/code.vyrn	tsWords	yes
+site/app/code.vyrn	goWords	yes
+site/app/code.vyrn	escapeByte	yes
+site/app/code.vyrn	escapeHtml	no, it calls `substring`, which is not trap-free
+site/app/code.vyrn	isLetter	yes
+site/app/code.vyrn	isDigit	yes
+site/app/code.vyrn	isWordByte	yes
+site/app/code.vyrn	span	no, it calls `escapeHtml`, which is not trap-free
+site/app/code.vyrn	highlightWith	no, it calls `substring`, which is not trap-free
+site/app/code.vyrn	shellHtml	no, it calls `split`, which is not trap-free
+site/app/code.vyrn	shellLine	no, it calls `substring`, which is not trap-free
+site/app/code.vyrn	terminalHtml	no, it calls `split`, which is not trap-free
+site/app/code.vyrn	inlineCode	no, it calls `substring`, which is not trap-free
+site/app/code.vyrn	shellOutHtml	no, it calls `split`, which is not trap-free
+site/app/code.vyrn	demoLineHtml	no, it calls `escapeHtml`, which is not trap-free
+site/app/demo.vyrn	demoPath	yes
+site/app/demo.vyrn	demoCommand	yes
+site/app/demo.vyrn	demoIsFixture	no, it calls `loadDemo`, which is not trap-free
+site/app/demo.vyrn	demoError	no, it calls `loadDemo`, which is not trap-free
+site/app/demo.vyrn	loadDemo	no, it calls `readData`, which is not trap-free
+site/app/demo.vyrn	demoSteps	no, it calls `loadDemo`, which is not trap-free
+site/app/demo.vyrn	demoVersion	no, it calls `loadDemo`, which is not trap-free
+site/app/demo.vyrn	demoRecorded	no, it calls `loadDemo`, which is not trap-free
+site/app/demohl.vyrn	demoCode	no, it keeps an index check
+site/app/demohl.vyrn	stepsOf	no, it keeps an index check
+site/app/demohl.vyrn	fieldAfter	no, it keeps an index check
+site/app/demohl.vyrn	unescapeJson	no, it calls `split`, which is not trap-free
+site/app/demohl.vyrn	looksLikeSource	yes
+site/app/deps.vyrn	usesOf	no, it calls `importsOf`, which is not trap-free
+site/app/deps.vyrn	walk	no, it calls `usesOf`, which is not trap-free
+site/app/deps.vyrn	depthOf	yes
+site/app/deps.vyrn	moduleDeps	no, it calls `vyrnStems`, which is not trap-free
+site/app/docs.vyrn	apiModules	yes
+site/app/docs.vyrn	groupOf	yes
+site/app/docs.vyrn	groupDefs	yes
+site/app/docs.vyrn	apiGroups	yes
+site/app/docs.vyrn	apiKnown	yes
+site/app/docs.vyrn	apiEntries	yes
+site/app/docs.vyrn	exportPhrase	yes
+site/app/docs.vyrn	apiBlurb	no, it calls `blurbFrom`, which is not trap-free
+site/app/docs.vyrn	apiIntro	yes
+site/app/docs.vyrn	apiTests	yes
+site/app/docs.vyrn	apiHref	no, it calls `hrefOf`, which is not trap-free
+site/app/docs.vyrn	apiSource	yes
+site/app/docs.vyrn	apiSourceLine	yes
+site/app/docshell.vyrn		does not check
+site/app/editors.vyrn	extensionDir	yes
+site/app/editors.vyrn	serverDir	yes
+site/app/editors.vyrn	pageTitle	yes
+site/app/editors.vyrn	lede	yes
+site/app/editors.vyrn	notice	yes
+site/app/editors.vyrn	featuresHeading	yes
+site/app/editors.vyrn	featuresIntro	yes
+site/app/editors.vyrn	featuresCap	yes
+site/app/editors.vyrn	featuresNotice	yes
+site/app/editors.vyrn	installHeading	yes
+site/app/editors.vyrn	installIntro	yes
+site/app/editors.vyrn	installNotice	yes
+site/app/editors.vyrn	installCap	yes
+site/app/editors.vyrn	otherHeading	yes
+site/app/editors.vyrn	otherIntro	yes
+site/app/editors.vyrn	otherClose	yes
+site/app/editors.vyrn	features	yes
+site/app/editors.vyrn	steps	yes
+site/app/editors.vyrn	implHref	yes
+site/app/facts.vyrn	contentLines	no, it calls `lines`, which is not trap-free
+site/app/facts.vyrn	releaseTagOf	no, it calls `releaseField`, which is not trap-free
+site/app/facts.vyrn	releaseField	no, it calls `contentLines`, which is not trap-free
+site/app/facts.vyrn	safeTag	yes
+site/app/facts.vyrn	repoFacts	no, it calls `vyrnStems`, which is not trap-free
+site/app/feed.vyrn	feedName	yes
+site/app/feed.vyrn	feedUrl	yes
+site/app/feed.vyrn	feedItemCount	no, it calls `releaseRows`, which is not trap-free
+site/app/feed.vyrn	feedXml	no, it calls `feedOf`, which is not trap-free
+site/app/feed.vyrn	feedOf	no, it calls `substring`, which is not trap-free
+site/app/feed.vyrn	channelWords	yes
+site/app/feed.vyrn	item	no, it calls `escapeHtml`, which is not trap-free
+site/app/feed.vyrn	rfc822	no, it calls `split`, which is not trap-free
+site/app/feed.vyrn	dayName	no, it keeps an index check
+site/app/feed.vyrn	monthName	yes
+site/app/feed.vyrn	feedFault	no, it calls `feedOf`, which is not trap-free
+site/app/feed.vyrn	linkFault	no, it calls `timesIn`, which is not trap-free
+site/app/feed.vyrn	timesIn	no, it calls `split`, which is not trap-free
+site/app/gensrc.vyrn	quoted	no, it calls `substring`, which is not trap-free
+site/app/gensrc.vyrn	quotedList	no, it calls `quoted`, which is not trap-free
+site/app/gensrc.vyrn	branch	no, it calls `quoted`, which is not trap-free
+site/app/gensrc.vyrn	lookup	yes
+site/app/gensrc.vyrn	entriesOf	yes
+site/app/gensrc.vyrn	vyrnStems	no, it calls `substring`, which is not trap-free
+site/app/github.vyrn	repoName	yes
+site/app/github.vyrn	ghBlob	yes
+site/app/github.vyrn	ghSpec	yes
+site/app/github.vyrn	ghRaw	yes
+site/app/github.vyrn	ghRelease	yes
+site/app/guide.vyrn	blockOutput	no, it calls `demo`, which is not trap-free
+site/app/guide.vyrn	playHref	no, it calls `replace`, which is not trap-free
+site/app/guide.vyrn	blockSource	yes
+site/app/guide.vyrn	blockOf	no, it calls `blockOutput`, which is not trap-free
+site/app/guide.vyrn	escapeSrc	no, it calls `replace`, which is not trap-free
+site/app/guide.vyrn	lineCount	no, it calls `trimEnd`, which is not trap-free
+site/app/guide.vyrn	blockHtml	no, it calls `terminalHtml`, which is not trap-free
+site/app/guide.vyrn	blockCode	yes
+site/app/guide.vyrn	sectionBody	no, it calls `blockOf`, which is not trap-free
+site/app/guide.vyrn	section	yes
+site/app/guide.vyrn	compared	yes
+site/app/guide.vyrn	chapters	yes
+site/app/guide.vyrn	chapterSlugs	yes
+site/app/guide.vyrn	chapterOf	yes
+site/app/guide.vyrn	chapterBlurb	no, it calls `inlineCode`, which is not trap-free
+site/app/guide.vyrn	chapterKnown	yes
+site/app/guide.vyrn	areaChapters	yes
+site/app/guide.vyrn	areaGroups	yes
+site/app/guide.vyrn	groupChapters	yes
+site/app/guide.vyrn	chapterArea	yes
+site/app/guide.vyrn	chapterCount	yes
+site/app/guide.vyrn	chapterNumber	yes
+site/app/guide.vyrn	chapterHref	yes
+site/app/guide.vyrn	movedChapters	yes
+site/app/guide.vyrn	movedTarget	yes
+site/app/guide.vyrn	prevSlug	no, it keeps an index check
+site/app/guide.vyrn	nextSlug	yes
+site/app/guide.vyrn	chapterOfBlock	yes
+site/app/guide.vyrn	sectionOfBlock	yes
+site/app/guide.vyrn	blockCount	yes
+site/app/guide.vyrn	noDemo	yes
+site/app/guide.vyrn	demoFor	no, it calls `demosFor`, which is not trap-free
+site/app/guide.vyrn	guideUseCount	no, it calls `demosFor`, which is not trap-free
+site/app/guide.vyrn	demosFor	no, it calls `playHref`, which is not trap-free
+site/app/guide.vyrn	outsideCode	no, it calls `split`, which is not trap-free
+site/app/guide.vyrn	where$pAge	yes
+site/app/guide.vyrn	where$cAge	no, it calls `panic`
+site/app/guide.vyrn	where$pPort	yes
+site/app/guide.vyrn	where$cPort	no, it calls `panic`
+site/app/guidecode.vyrn	mainTail	yes
+site/app/guidecode.vyrn	hasDemo	yes
+site/app/guidecode.vyrn	fromAfter	no, it keeps an index check
+site/app/guidecode.vyrn	namesBetween	no, it keeps an index check
+site/app/guidecode.vyrn	importsOf	no, it keeps an index check
+site/app/guidecode.vyrn	guideCode	no, it calls `importsOf`, which is not trap-free
+site/app/history.vyrn	readData	no, it calls `parseJson`, which is not trap-free
+site/app/history.vyrn	textOf	yes
+site/app/history.vyrn	historyPath	yes
+site/app/history.vyrn	historyCommand	yes
+site/app/history.vyrn	fixturePath	yes
+site/app/history.vyrn	historyIsFixture	no, it calls `loadHistory`, which is not trap-free
+site/app/history.vyrn	loadHistory	no, it calls `readData`, which is not trap-free
+site/app/history.vyrn	historyError	no, it calls `loadHistory`, which is not trap-free
+site/app/history.vyrn	releasesIn	yes
+site/app/history.vyrn	fixtureReleaseRows	no, it calls `readData`, which is not trap-free
+site/app/history.vyrn	numberAt	yes
+site/app/history.vyrn	wholeOf	yes
+site/app/history.vyrn	days	no, it calls `loadHistory`, which is not trap-free
+site/app/history.vyrn	releaseRows	no, it calls `loadHistory`, which is not trap-free
+site/app/history.vyrn	testBlockCount	no, it calls `loadHistory`, which is not trap-free
+site/app/history.vyrn	testFileCount	no, it calls `loadHistory`, which is not trap-free
+site/app/hl.vyrn	pieces	yes
+site/app/hl.vyrn	contextual	yes
+site/app/hl.vyrn	emit	no, it calls `split`, which is not trap-free
+site/app/hl.vyrn	digitByte	yes
+site/app/hl.vyrn	letterByte	yes
+site/app/hl.vyrn	lineStarts	yes
+site/app/hl.vyrn	scanString	no, it keeps an index check
+site/app/hl.vyrn	holeEnd	no, it calls `scanString`, which is not trap-free
+site/app/hl.vyrn	scanToEol	no, it keeps an index check
+site/app/hl.vyrn	scanNumber	no, it keeps an index check
+site/app/hl.vyrn	extentOf	no, it calls `scanString`, which is not trap-free
+site/app/hl.vyrn	classOf	yes
+site/app/hl.vyrn	isPunct	yes
+site/app/hl.vyrn	callee	no, it keeps an index check
+site/app/hl.vyrn	trivia	no, it keeps an index check
+site/app/hl.vyrn	template	no, it keeps an index check
+site/app/hl.vyrn	highlightSrc	no, it keeps an index check
+site/app/hl.vyrn	highlightRows	no, it calls `highlightSrc`, which is not trap-free
+site/app/hl.vyrn	vyrnCode	no, it calls `highlightRows`, which is not trap-free
+site/app/icons.vyrn	Icon	no, it calls `iconProvider`, which is not trap-free
+site/app/markdown.vyrn	markdownHtml	no, it keeps an index check
+site/app/markdown.vyrn	headingLevel	yes
+site/app/markdown.vyrn	listKind	no, it calls `substring`, which is not trap-free
+site/app/markdown.vyrn	markerEnd	yes
+site/app/markdown.vyrn	blockHtml	no, it calls `escapeHtml`, which is not trap-free
+site/app/markdown.vyrn	inlineHtml	no, it calls `split`, which is not trap-free
+site/app/markdown.vyrn	boldHtml	no, it keeps an index check
+site/app/markdown.vyrn	linksHtml	no, it keeps an index check
+site/app/markdown.vyrn	urlOf	no, it calls `substring`, which is not trap-free
+site/app/meta.vyrn	pageMetas	yes
+site/app/meta.vyrn	metaOf	yes
+site/app/meta.vyrn	hasMeta	yes
+site/app/meta.vyrn	blurbLimit	yes
+site/app/meta.vyrn	blurbFloor	yes
+site/app/meta.vyrn	blurbFrom	no, it calls `substring`, which is not trap-free
+site/app/meta.vyrn	withoutDanglingJoiner	no, it calls `trimEnd`, which is not trap-free
+site/app/meta.vyrn	stripTags	no, it calls `substring`, which is not trap-free
+site/app/meta.vyrn	decodeEntities	no, it calls `replace`, which is not trap-free
+site/app/meta.vyrn	collapse	no, it calls `replace`, which is not trap-free
+site/app/meta.vyrn	lastSentenceEnd	yes
+site/app/meta.vyrn	wordEnd	yes
+site/app/nav.vyrn	pageHead	yes
+site/app/nav.vyrn	pageHeadWith	yes
+site/app/nav.vyrn	pageHeadOf	yes
+site/app/nav.vyrn	themeControl	yes
+site/app/nav.vyrn	published	no, it calls `substring`, which is not trap-free
+site/app/nav.vyrn	hrefOf	no, it calls `published`, which is not trap-free
+site/app/nav.vyrn	upTo	no, it calls `split`, which is not trap-free
+site/app/nav.vyrn	navRows	no, it calls `hrefOf`, which is not trap-free
+site/app/packages.vyrn	examplesDir	yes
+site/app/packages.vyrn	projectSlugs	yes
+site/app/packages.vyrn	fileText	yes
+site/app/packages.vyrn	manifestText	yes
+site/app/packages.vyrn	packageKnown	no, it calls `packages`, which is not trap-free
+site/app/packages.vyrn	packages	no, it calls `offerOf`, which is not trap-free
+site/app/packages.vyrn	packageOf	no, it calls `summaryOf`, which is not trap-free
+site/app/packages.vyrn	packageBlurb	no, it calls `blurbFrom`, which is not trap-free
+site/app/packages.vyrn	packageHref	no, it calls `hrefOf`, which is not trap-free
+site/app/packages.vyrn	packageSource	yes
+site/app/packages.vyrn	summaryOf__from1	no, it calls `headerOf`, which is not trap-free
+site/app/packages.vyrn	headerOf	no, it calls `lines`, which is not trap-free
+site/app/packages.vyrn	firstSentence	no, it calls `replace`, which is not trap-free
+site/app/packages.vyrn	packageReadme	no, it calls `markdownHtml`, which is not trap-free
+site/app/packages.vyrn	packageDeps	no, it calls `apiHref`, which is not trap-free
+site/app/packages.vyrn	named	yes
+site/app/packages.vyrn	moduleFiles	yes
+site/app/packages.vyrn	exportNames	no, it calls `lines`, which is not trap-free
+site/app/packages.vyrn	exportName	no, it calls `substring`, which is not trap-free
+site/app/packages.vyrn	cutAt	no, it calls `substring`, which is not trap-free
+site/app/packages.vyrn	isEntry	no, it calls `artifactsOf`, which is not trap-free
+site/app/packages.vyrn	offerOf	no, it calls `exportNames`, which is not trap-free
+site/app/packages.vyrn	aliasOf	no, it calls `substring`, which is not trap-free
+site/app/packages.vyrn	addCommand	no, it calls `offerOf`, which is not trap-free
+site/app/packages.vyrn	artifactsOf	no, it calls `manifestFields`, which is not trap-free
+site/app/packages.vyrn	withArtifact	yes
+site/app/packages.vyrn	manifestFields	no, it calls `parseJson`, which is not trap-free
+site/app/pagemd.vyrn	mdUrl	no, it calls `swapExtension`, which is not trap-free
+site/app/pagemd.vyrn	mdName	no, it calls `published`, which is not trap-free
+site/app/pagemd.vyrn	swapExtension	no, it calls `substring`, which is not trap-free
+site/app/pagemd.vyrn	mdPaths	yes
+site/app/pagemd.vyrn	markdownOf	no, it calls `substring`, which is not trap-free
+site/app/pagemd.vyrn	editorsMd	no, it calls `asMarkdown`, which is not trap-free
+site/app/pagemd.vyrn	graphMd	no, it calls `asMarkdown`, which is not trap-free
+site/app/pagemd.vyrn	chapterMd	no, it calls `asMarkdown`, which is not trap-free
+site/app/pagemd.vyrn	moduleMd	no, it calls `asMarkdown`, which is not trap-free
+site/app/pagemd.vyrn	fenced__from1	no, it calls `trimEnd`, which is not trap-free
+site/app/pagemd.vyrn	trailer	yes
+site/app/pagemd.vyrn	absolute	no, it calls `substring`, which is not trap-free
+site/app/pagemd.vyrn	asMarkdown	no, it calls `substring`, which is not trap-free
+site/app/pagemd.vyrn	closeFrom	yes
+site/app/pagemd.vyrn	tagName	no, it calls `substring`, which is not trap-free
+site/app/pagemd.vyrn	attr__from0	no, it calls `substring`, which is not trap-free
+site/app/pagemd.vyrn	upTo__from0	no, it calls `substring`, which is not trap-free
+site/app/pagemd.vyrn	collapse__from1	no, it calls `replace`, which is not trap-free
+site/app/pagemd.vyrn	askClaudeUrl	no, it calls `substring`, which is not trap-free
+site/app/pagemd.vyrn	where$pAge	yes
+site/app/pagemd.vyrn	where$cAge	no, it calls `panic`
+site/app/pagemd.vyrn	where$pPort	yes
+site/app/pagemd.vyrn	where$cPort	no, it calls `panic`
+site/app/play.vyrn	playExamples	yes
+site/app/repo.vyrn	exampleCount	yes
+site/app/repo.vyrn	stdCount	yes
+site/app/repo.vyrn	stdModules	yes
+site/app/repo.vyrn	blob	yes
+site/app/repo.vyrn	backendCount	yes
+site/app/repo.vyrn	hasRelease	no, it calls `releaseTag`, which is not trap-free
+site/app/repo.vyrn	releaseTag	no, it calls `newest`, which is not trap-free
+site/app/repo.vyrn	releaseDate	no, it calls `newest`, which is not trap-free
+site/app/repo.vyrn	newest	no, it calls `releaseRows`, which is not trap-free
+site/app/repo.vyrn	releasePre	no, it calls `releaseTag`, which is not trap-free
+site/app/repo.vyrn	isPrerelease	yes
+site/app/repo.vyrn	siteOrigin	yes
+site/app/repo.vyrn	installScript	yes
+site/app/repo.vyrn	installTargets	yes
+site/app/repo.vyrn	releaseUrl	no, it calls `releaseTag`, which is not trap-free
+site/app/repo.vyrn	releaseUrlOf	yes
+site/app/search.vyrn	rows	no, it calls `oneLine`, which is not trap-free
+site/app/search.vyrn	firstOf	yes
+site/app/search.vyrn	oneLine__from0	no, it calls `replace`, which is not trap-free
+site/app/search.vyrn	boundaryAt	yes
+site/app/search.vyrn	indexJsonOf	no, it calls `emit`, which is not trap-free
+site/app/search.vyrn	indexName	yes
+site/app/search.vyrn	sectionCount	yes
+site/app/search.vyrn	exportCount	yes
+site/app/search.vyrn	where$pAge	yes
+site/app/search.vyrn	where$cAge	no, it calls `panic`
+site/app/search.vyrn	where$pPort	yes
+site/app/search.vyrn	where$cPort	no, it calls `panic`
+site/app/snippets.vyrn	vyrnHtml	yes
+site/app/snippets.vyrn	vyrnLine	no, it keeps an index check
+site/app/snippets.vyrn	vyrnSource	yes
+site/app/snippets.vyrn	snippet	yes
+site/app/snippets.vyrn	specSet	no, it calls `typeSpecs`, which is not trap-free
+site/app/snippets.vyrn	typeSpecs	no, it calls `highlightWith`, which is not trap-free
+site/app/snippets.vyrn	memorySpecs	no, it calls `highlightWith`, which is not trap-free
+site/app/snippets.vyrn	failureSpecs	no, it calls `highlightWith`, which is not trap-free
+site/app/stdgraph.vyrn	searchRows	no, it calls `stripTags`, which is not trap-free
+site/app/stdgraph.vyrn	searchGroups	no, it calls `searchRows`, which is not trap-free
+site/app/stdgraph.vyrn	depthOf__from1	yes
+site/app/stdgraph.vyrn	deepest	yes
+site/app/stdgraph.vyrn	layer	yes
+site/app/stdgraph.vyrn	tallest	yes
+site/app/stdgraph.vyrn	columnStep	yes
+site/app/stdgraph.vyrn	rowStep	yes
+site/app/stdgraph.vyrn	columnX	yes
+site/app/stdgraph.vyrn	rowY	yes
+site/app/stdgraph.vyrn	labelWidth	yes
+site/app/stdgraph.vyrn	rowOf	yes
+site/app/stdgraph.vyrn	nodeX	yes
+site/app/stdgraph.vyrn	nodeY	yes
+site/app/stdgraph.vyrn	graphWidth	yes
+site/app/stdgraph.vyrn	graphHeight	yes
+site/app/stdgraph.vyrn	graphViewBox	yes
+site/app/stdgraph.vyrn	graphNodes	no, it calls `apiHref`, which is not trap-free
+site/app/stdgraph.vyrn	nodeLabel	yes
+site/app/stdgraph.vyrn	countWord	yes
+site/app/stdgraph.vyrn	wire	yes
+site/app/stdgraph.vyrn	graphEdges	yes
+site/app/stdgraph.vyrn	edgeCount	yes
+site/app/stdgraph.vyrn	leafCount	yes
+site/app/stdgraph.vyrn	examplesUsing	yes
+site/app/stdgraph.vyrn	usesOfModule	yes
+site/app/stdgraph.vyrn	usedByModule	yes
+site/app/stdgraph.vyrn	graphLede	yes
+site/app/stdgraph.vyrn	graphIntro	yes
+site/app/stdgraph.vyrn	graphCaption	yes
+site/export.vyrn		does not check
+site/guide/arrays.vyrn	demo	yes
+site/guide/benches.vyrn	hashTo	yes
+site/guide/benches.vyrn	demo	yes
+site/guide/capabilities.vyrn	seatCount	yes
+site/guide/capabilities.vyrn	addSeat	yes
+site/guide/capabilities.vyrn	redeem	yes
+site/guide/capabilities.vyrn	demo	yes
+site/guide/cliargs.vyrn	demo	no, it calls `opt`, which is not trap-free
+site/guide/closures.vyrn	makeAdder	yes
+site/guide/closures.vyrn	demo	no, it calls a function value
+site/guide/enums.vyrn	describeShape	yes
+site/guide/enums.vyrn	demo	yes
+site/guide/fallible.vyrn	fetch	yes
+site/guide/fallible.vyrn	shout	no, it calls `Fallible$Http$success`, which is not trap-free
+site/guide/fallible.vyrn	describeHttp	yes
+site/guide/fallible.vyrn	demo	no, it calls `shout`, which is not trap-free
+site/guide/fallible.vyrn	Fallible$Http$isSuccess	yes
+site/guide/fallible.vyrn	Fallible$Http$success	no, it calls `panic`
+site/guide/firstfn.vyrn	area	yes
+site/guide/firstfn.vyrn	demo	yes
+site/guide/gentiny.vyrn	squares	yes
+site/guide/genuse.vyrn	demo	yes
+site/guide/hello.vyrn	demo	yes
+site/guide/html.vyrn	row	yes
+site/guide/html.vyrn	view	yes
+site/guide/html.vyrn	demo	no, it calls `toHtmlString`, which is not trap-free
+site/guide/imports.vyrn	demo	no, it calls `padStart`, which is not trap-free
+site/guide/lambdas.vyrn	double	yes
+site/guide/lambdas.vyrn	demo	no, it keeps an index check
+site/guide/maps.vyrn	score	yes
+site/guide/maps.vyrn	demo	yes
+site/guide/matching.vyrn	found	yes
+site/guide/matching.vyrn	demo	yes
+site/guide/numbers.vyrn	demo	yes
+site/guide/options.vyrn	doubled	yes
+site/guide/options.vyrn	quadrupled	yes
+site/guide/options.vyrn	showResult	yes
+site/guide/options.vyrn	demo	yes
+site/guide/protocols.vyrn	demo	yes
+site/guide/protocols.vyrn	Show$Int64$show	yes
+site/guide/protocols.vyrn	Show$Bool$show	yes
+site/guide/protocols.vyrn	label	yes
+site/guide/records.vyrn	greet	yes
+site/guide/records.vyrn	demo	yes
+site/guide/regions.vyrn	demo	yes
+site/guide/schema.vyrn	bound	yes
+site/guide/schema.vyrn	demo	yes
+site/guide/schema.vyrn	where$pPort	yes
+site/guide/schema.vyrn	where$cPort	no, it calls `panic`
+site/guide/tests.vyrn	clamp	yes
+site/guide/tests.vyrn	demo	yes
+site/guide/text.vyrn	demo	no, it calls `split`, which is not trap-free
+site/guide/validated.vyrn	admit	yes
+site/guide/validated.vyrn	demo	yes
+site/guide/validated.vyrn	where$pAge	yes
+site/guide/validated.vyrn	where$cAge	no, it calls `panic`
+site/markup.vyrn	main	yes
+std/args.vyrn	cli	yes
+std/args.vyrn	cliOf	yes
+std/args.vyrn	terminatorAt	yes
+std/args.vyrn	flag	no, it keeps an index check
+std/args.vyrn	opt	no, it keeps an index check
+std/args.vyrn	positionals	no, it keeps an index check
+std/args.vyrn	rest	yes
+std/arrays.vyrn	includes	yes
+std/bench.vyrn	minOf	no, it keeps an index check
+std/bench.vyrn	mean	no, it keeps a division check
+std/bench.vyrn	sortedCopy	no, it keeps an index check
+std/bench.vyrn	median	no, it keeps an index check
+std/bench.vyrn	pad2__from0	yes
+std/bench.vyrn	twoDecimals	yes
+std/bench.vyrn	formatDuration	yes
+std/bench.vyrn	padRight	yes
+std/bench.vyrn	benchMeasure	no, it calls a function value
+std/bench.vyrn	benchOne	no, it calls `benchMeasure`, which is not trap-free
+std/bench.vyrn	benchJson	no, it calls `emit`, which is not trap-free
+std/bench.vyrn	where$pInstant	yes
+std/bench.vyrn	where$cInstant	no, it calls `panic`
+std/cli.vyrn	cliIssueOf	yes
+std/cli.vyrn	cliOptAt	yes
+std/cli.vyrn	readArgv	no, it calls `substring`, which is not trap-free
+std/cli.vyrn	cliFlag	yes
+std/cli.vyrn	cliValue	yes
+std/cli.vyrn	cliIssues	yes
+std/cli.vyrn	wantsHelp	yes
+std/cli.vyrn	cliMissing	yes
+std/cli.vyrn	cliNotNumber	yes
+std/cli.vyrn	cliRefused	yes
+std/cli.vyrn	cliUnexpected	yes
+std/cli.vyrn	cliKebab	yes
+std/cli.vyrn	cliCapFirst	yes
+std/cli.vyrn	cliInitial	yes
+std/cli.vyrn	cliTypeOf	yes
+std/cli.vyrn	cliBaseOf	yes
+std/cli.vyrn	cliBytes	yes
+std/cli.vyrn	cliBoundsText	yes
+std/cli.vyrn	cliWant	yes
+std/cli.vyrn	cliPlansOf	no, it keeps an index check
+std/cli.vyrn	cliDeclaresHelp	yes
+std/cli.vyrn	cliHelpLeft	yes
+std/cli.vyrn	cliHelpRight	yes
+std/cli.vyrn	cliHelpText	no, it calls `padEnd`, which is not trap-free
+std/cli.vyrn	cliEmitHelp	yes
+std/cli.vyrn	cliEmitSpec	yes
+std/cli.vyrn	cliStore	yes
+std/cli.vyrn	cliEmitAccept	yes
+std/cli.vyrn	cliEmitField	yes
+std/cli.vyrn	cliCommand	no, it calls `cliPlansOf`, which is not trap-free
+std/cli.vyrn	cli	no, it calls `panic`
+std/cli.vyrn	twoOpts	yes
+std/codecs.vyrn	hexDigit	yes
+std/codecs.vyrn	hexDigitUpper	yes
+std/codecs.vyrn	hexVal	yes
+std/codecs.vyrn	decoded	yes
+std/codecs.vyrn	ascii	yes
+std/codecs.vyrn	hexEncode	yes
+std/codecs.vyrn	hexDecode	no, it keeps an index check
+std/codecs.vyrn	b64Alphabet	yes
+std/codecs.vyrn	b64Val	yes
+std/codecs.vyrn	base64Encode	yes
+std/codecs.vyrn	base64EncodeBytes	yes
+std/codecs.vyrn	base64Decode	no, it keeps an index check
+std/codecs.vyrn	urlUnreserved	yes
+std/codecs.vyrn	urlEncode	yes
+std/codecs.vyrn	urlDecode	yes
+std/columns.vyrn	columns	no, it keeps an index check
+std/columns.vyrn	columnsOf	no, it keeps an index check
+std/connect.vyrn	connectCapFirst	yes
+std/connect.vyrn	connectIsNamedType	yes
+std/connect.vyrn	connectServiceName	yes
+std/connect.vyrn	connectValidateContract	no, it calls `reportHere`, which is not trap-free
+std/connect.vyrn	connectDispatchFn	yes
+std/connect.vyrn	connectRouterFn	yes
+std/connect.vyrn	connectServer	no, it calls `connectValidateContract`, which is not trap-free
+std/connect.vyrn	connectUnifyFn	yes
+std/connect.vyrn	connectProcFns	yes
+std/connect.vyrn	connectClient	no, it calls `connectValidateContract`, which is not trap-free
+std/contract.vyrn	nearThreshold	yes
+std/contract.vyrn	trimSpaces	no, it calls `panic`
+std/contract.vyrn	isTypeParam	yes
+std/contract.vyrn	headOf	no, it calls `panic`
+std/contract.vyrn	argsOf	no, it calls `panic`
+std/contract.vyrn	typeMatches	no, it calls `headOf`, which is not trap-free
+std/contract.vyrn	sigSpelling	yes
+std/contract.vyrn	moduleExports	yes
+std/contract.vyrn	exportSpelling	yes
+std/contract.vyrn	memberSpelling	yes
+std/contract.vyrn	contractSite	yes
+std/contract.vyrn	issue	yes
+std/contract.vyrn	didYouMean	yes
+std/contract.vyrn	hasMember	yes
+std/contract.vyrn	alternatives	yes
+std/contract.vyrn	memberNames	yes
+std/contract.vyrn	nameOptional	yes
+std/contract.vyrn	altSpelling	yes
+std/contract.vyrn	matchIndex	no, it calls `typeMatches`, which is not trap-free
+std/contract.vyrn	exportIndex	yes
+std/contract.vyrn	openRule	yes
+std/contract.vyrn	matchesSignature	no, it calls `typeMatches`, which is not trap-free
+std/contract.vyrn	checkContract	no, it calls `matchIndex`, which is not trap-free
+std/contract.vyrn	suppliesMember	no, it calls `matchedMember`, which is not trap-free
+std/contract.vyrn	matchedMember	no, it keeps an index check
+std/contract.vyrn	fnSatisfies	no, it calls `typeMatches`, which is not trap-free
+std/diag.vyrn	report	no, it calls `oneLine`, which is not trap-free
+std/diag.vyrn	reportHere	no, it calls `oneLine`, which is not trap-free
+std/diag.vyrn	word	yes
+std/diag.vyrn	oneLine	no, it calls `replace`, which is not trap-free
+std/diag.vyrn	atLeastOne	yes
+std/graphql.vyrn	gqlSlice	no, it keeps an index check
+std/graphql.vyrn	gqlIsWs	yes
+std/graphql.vyrn	gqlStripBang	no, it calls `gqlSlice`, which is not trap-free
+std/graphql.vyrn	gqlBetweenAngles	no, it calls `gqlSlice`, which is not trap-free
+std/graphql.vyrn	gqlSplitTop	no, it calls `gqlSlice`, which is not trap-free
+std/graphql.vyrn	gqlIndexOf	yes
+std/graphql.vyrn	gqlSplitDecl	no, it calls `trim`, which is not trap-free
+std/graphql.vyrn	gqlSourceOf	yes
+std/graphql.vyrn	gqlIsRecord	no, it calls `gqlSplitDecl`, which is not trap-free
+std/graphql.vyrn	gqlPrim	no, it calls `trim`, which is not trap-free
+std/graphql.vyrn	gqlRef	no, it calls `trim`, which is not trap-free
+std/graphql.vyrn	gqlRawDoc	no, it calls `gqlFoldWs`, which is not trap-free
+std/graphql.vyrn	gqlDocOf	no, it calls `gqlRawDoc`, which is not trap-free
+std/graphql.vyrn	gqlDescBlock	yes
+std/graphql.vyrn	gqlEscTripleQuote	yes
+std/graphql.vyrn	gqlFoldWs	no, it calls `trim`, which is not trap-free
+std/graphql.vyrn	gqlMembers	no, it calls `trim`, which is not trap-free
+std/graphql.vyrn	gqlNullableMember	no, it calls `gqlRef`, which is not trap-free
+std/graphql.vyrn	gqlRecordMembers	no, it calls `gqlSlice`, which is not trap-free
+std/graphql.vyrn	gqlVariantMembers	no, it calls `trim`, which is not trap-free
+std/graphql.vyrn	gqlVariantsOf	no, it calls `gqlBetweenBraces`, which is not trap-free
+std/graphql.vyrn	gqlBlock	yes
+std/graphql.vyrn	gqlObjectSdl	yes
+std/graphql.vyrn	gqlRecord	yes
+std/graphql.vyrn	gqlBetweenBraces	no, it calls `gqlSlice`, which is not trap-free
+std/graphql.vyrn	gqlStripWhere	no, it calls `gqlSlice`, which is not trap-free
+std/graphql.vyrn	gqlEnum	no, it calls `trim`, which is not trap-free
+std/graphql.vyrn	gqlBetweenParens	no, it calls `gqlSlice`, which is not trap-free
+std/graphql.vyrn	gqlScalar	no, it calls `trim`, which is not trap-free
+std/graphql.vyrn	gqlTypeSdl	no, it calls `gqlSplitDecl`, which is not trap-free
+std/graphql.vyrn	gqlDeclNames	no, it calls `gqlSplitDecl`, which is not trap-free
+std/graphql.vyrn	gqlDefinedBy	yes
+std/graphql.vyrn	gqlDefine	no, it calls `reportHere`, which is not trap-free
+std/graphql.vyrn	gqlReservedName	no, it calls `reportHere`, which is not trap-free
+std/graphql.vyrn	gqlRootOf	yes
+std/graphql.vyrn	gqlRootType	yes
+std/graphql.vyrn	gqlRootField	no, it calls `gqlRef`, which is not trap-free
+std/graphql.vyrn	gqlNamed	yes
+std/graphql.vyrn	gqlRootMembers	no, it calls `gqlNullableMember`, which is not trap-free
+std/graphql.vyrn	gqlPlaceholderMember	yes
+std/graphql.vyrn	sdl	no, it calls `gqlSplitDecl`, which is not trap-free
+std/graphql.vyrn	gqlScanner	yes
+std/graphql.vyrn	gqlAt	yes
+std/graphql.vyrn	gqlSetErr	yes
+std/graphql.vyrn	gqlValErr	yes
+std/graphql.vyrn	gqlIsNumByte	yes
+std/graphql.vyrn	gqlValue	no, it calls `ident`, which is not trap-free
+std/graphql.vyrn	gqlMaxDepth	yes
+std/graphql.vyrn	gqlTooDeep	yes
+std/graphql.vyrn	gqlNumberValue	no, it calls `parseJson`, which is not trap-free
+std/graphql.vyrn	gqlListValue	no, it calls `gqlValue`, which is not trap-free
+std/graphql.vyrn	gqlObjectValue	no, it calls `ident`, which is not trap-free
+std/graphql.vyrn	gqlArgList	no, it calls `ident`, which is not trap-free
+std/graphql.vyrn	gqlSelSet	no, it calls `ident`, which is not trap-free
+std/graphql.vyrn	gqlParseQuery	no, it calls `ident`, which is not trap-free
+std/graphql.vyrn	gqlFieldIndex	yes
+std/graphql.vyrn	gqlCheckSel	no, it calls a function value
+std/graphql.vyrn	gqlOk	yes
+std/graphql.vyrn	gqlFaultAt	yes
+std/graphql.vyrn	gqlCopyErr	yes
+std/graphql.vyrn	copyGqlErrs	yes
+std/graphql.vyrn	gqlStep	yes
+std/graphql.vyrn	gqlElemRef	no, it calls `gqlSlice`, which is not trap-free
+std/graphql.vyrn	gqlProject	no, it calls `gqlStripBang`, which is not trap-free
+std/graphql.vyrn	gqlPickNamed	no, it calls `gqlPick`, which is not trap-free
+std/graphql.vyrn	gqlProjectCore	no, it calls `gqlElemRef`, which is not trap-free
+std/graphql.vyrn	gqlProjectEach	no, it calls `gqlProject`, which is not trap-free
+std/graphql.vyrn	gqlPick	no, it calls a function value
+std/graphql.vyrn	gqlFieldFault	no, it calls `gqlCheckSel`, which is not trap-free
+std/graphql.vyrn	gqlQueryText	no, it calls `parseJson`, which is not trap-free
+std/graphql.vyrn	gqlEnvelopeQuery	yes
+std/graphql.vyrn	gqlQueryMember	yes
+std/graphql.vyrn	gqlStrOr	yes
+std/graphql.vyrn	gqlErrorBody	no, it calls `emit`, which is not trap-free
+std/graphql.vyrn	gqlExecBody	no, it calls `emit`, which is not trap-free
+std/graphql.vyrn	gqlErrJson	yes
+std/graphql.vyrn	gqlReply	yes
+std/graphql.vyrn	gqlArgOf	no, it calls `emit`, which is not trap-free
+std/graphql.vyrn	gqlArgsBesides	yes
+std/graphql.vyrn	gqlNoArgs	yes
+std/graphql.vyrn	gqlArgError	yes
+std/graphql.vyrn	gqlValidateSel	no, it calls a function value
+std/graphql.vyrn	gqlValidate	no, it calls `gqlValidateSel`, which is not trap-free
+std/graphql.vyrn	gqlAnswer	no, it calls a function value
+std/graphql.vyrn	gqlAnswerOne	no, it calls a function value
+std/graphql.vyrn	gqlAnswerValue	no, it calls `gqlCheckSel`, which is not trap-free
+std/graphql.vyrn	gqlResolverTable	no, it calls `gqlRootMembers`, which is not trap-free
+std/graphql.vyrn	gqlResolverArm	yes
+std/graphql.vyrn	gqlSchemaTable	no, it calls `gqlSplitDecl`, which is not trap-free
+std/graphql.vyrn	gqlSchemaArm	yes
+std/graphql.vyrn	graphqlServer	no, it calls `gqlSchemaTable`, which is not trap-free
+std/graphql.vyrn	gqlTestValue	yes
+std/graphql.vyrn	gqlTestSchema	yes
+std/graphql.vyrn	gqlTestProject	no, it keeps an index check
+std/graphql.vyrn	gqlNestedSel	yes
+std/graphql.vyrn	gqlListNest	yes
+std/graphql.vyrn	gqlSpyResolve	yes
+std/graphql.vyrn	gqlExecTestSchema	yes
+std/graphql.vyrn	gqlEmptyRootSchema	yes
+std/graphql.vyrn	gqlNullResolve	yes
+std/graphql.vyrn	Owned$GqlSel$release	yes
+std/hash.vyrn	fnv1a	yes
+std/hash.vyrn	fnv1aStr	yes
+std/hash.vyrn	sha1	yes
+std/hash.vyrn	sha1Hex	yes
+std/hash.vyrn	sha1Rotl1	yes
+std/hash.vyrn	sha1Rotl5	yes
+std/hash.vyrn	sha1Rotl30	yes
+std/hash.vyrn	Hashable$Int64$hash	yes
+std/hash.vyrn	Hashable$String$hash	yes
+std/hints.vyrn	noPolicy	yes
+std/hints.vyrn	strictly	yes
+std/hints.vyrn	policyOf	no, it calls `emit`, which is not trap-free
+std/hints.vyrn	levelOf	yes
+std/hints.vyrn	hint	no, it calls `waived`, which is not trap-free
+std/hints.vyrn	waived	no, it calls `substring`, which is not trap-free
+std/hints.vyrn	waivesLine	no, it keeps an index check
+std/hints.vyrn	unusedWaivers	no, it calls `substring`, which is not trap-free
+std/hints.vyrn	waiverCode	no, it keeps an index check
+std/hints.vyrn	rawReports	no, it calls `rawLineHas`, which is not trap-free
+std/hints.vyrn	rawLineHas	no, it calls `substring`, which is not trap-free
+std/hints.vyrn	continuesCode	no, it keeps an index check
+std/hints.vyrn	lineText	no, it calls `substring`, which is not trap-free
+std/hints.vyrn	isObject	yes
+std/hints.vyrn	policyOr	no, it calls `policyOf`, which is not trap-free
+std/hints.vyrn	refusal	no, it calls `policyOf`, which is not trap-free
+std/html.vyrn	copyHtmlArray	yes
+std/html.vyrn	el	yes
+std/html.vyrn	text	yes
+std/html.vyrn	empty	yes
+std/html.vyrn	cls	yes
+std/html.vyrn	attr	yes
+std/html.vyrn	on	yes
+std/html.vyrn	keyed	yes
+std/html.vyrn	withKey	yes
+std/html.vyrn	escapeText	yes
+std/html.vyrn	escapeAttr	yes
+std/html.vyrn	nameOk	yes
+std/html.vyrn	requireName	no, it calls `panic`
+std/html.vyrn	isVoid	yes
+std/html.vyrn	renderAttr	no, it calls `attrPair`, which is not trap-free
+std/html.vyrn	attrPair	no, it calls `requireName`, which is not trap-free
+std/html.vyrn	onPair	no, it calls `requireName`, which is not trap-free
+std/html.vyrn	renderAttrs	no, it calls `renderAttr`, which is not trap-free
+std/html.vyrn	renderKids	no, it calls `toHtmlString`, which is not trap-free
+std/html.vyrn	renderEl	no, it calls `panic`
+std/html.vyrn	toHtmlString	no, it calls `renderEl`, which is not trap-free
+std/html.vyrn	toMarkup	no, it calls `toHtmlString`, which is not trap-free
+std/html.vyrn	markupString	yes
+std/html.vyrn	diff	no, it calls `diffNode`, which is not trap-free
+std/html.vyrn	noOps	yes
+std/html.vyrn	htmlKey	yes
+std/html.vyrn	attrKey	yes
+std/html.vyrn	sameKind	yes
+std/html.vyrn	htmlText	yes
+std/html.vyrn	htmlRaw	yes
+std/html.vyrn	htmlAttrs	yes
+std/html.vyrn	htmlKids	yes
+std/html.vyrn	attrsEqual	no, it calls `renderAttrs`, which is not trap-free
+std/html.vyrn	childPath	yes
+std/html.vyrn	diffNode	no, it calls `diffEl`, which is not trap-free
+std/html.vyrn	diffText	yes
+std/html.vyrn	diffRaw	yes
+std/html.vyrn	diffEl	no, it calls `diffChildren`, which is not trap-free
+std/html.vyrn	anyKeyed	yes
+std/html.vyrn	diffChildren	no, it calls `diffKeyed`, which is not trap-free
+std/html.vyrn	diffPositional	no, it keeps an index check
+std/html.vyrn	diffKeyed	no, it keeps an index check
+std/html.vyrn	matchNew	no, it calls `findOld`, which is not trap-free
+std/html.vyrn	findOld	no, it keeps an index check
+std/html.vyrn	listInsert	yes
+std/html.vyrn	listIndexOf	yes
+std/html.vyrn	listMove	no, it keeps an index check
+std/html.vyrn	document	no, it calls `toHtmlString`, which is not trap-free
+std/html.vyrn	Copy$Html$copy	yes
+std/html.vyrn	Owned$Html$release	yes
+std/http.editor.vyrn	vyrnSymbolMapsHttp	yes
+std/http.vyrn	httpNoRun	yes
+std/http.vyrn	httpNoWhole	yes
+std/http.vyrn	httpNeverMissing	yes
+std/http.vyrn	httpRoute	no, it calls `httpTidy`, which is not trap-free
+std/http.vyrn	httpCopy	yes
+std/http.vyrn	httpTidy	no, it calls `substring`, which is not trap-free
+std/http.vyrn	GET	yes
+std/http.vyrn	POST	yes
+std/http.vyrn	PUT	yes
+std/http.vyrn	PATCH	yes
+std/http.vyrn	DELETE	yes
+std/http.vyrn	httpWithMethod	yes
+std/http.vyrn	surface	no, it calls `httpTidy`, which is not trap-free
+std/http.vyrn	sse	no, it calls `httpTidy`, which is not trap-free
+std/http.vyrn	event	no, it calls `replace`, which is not trap-free
+std/http.vyrn	sseOneLine	yes
+std/http.vyrn	ws	no, it calls `httpTidy`, which is not trap-free
+std/http.vyrn	httpWsGuid	yes
+std/http.vyrn	httpOpenSocket	no, it calls `httpFeed`, which is not trap-free
+std/http.vyrn	httpTokenAsOffered	no, it calls `split`, which is not trap-free
+std/http.vyrn	httpHasToken	no, it calls `httpTokenAsOffered`, which is not trap-free
+std/http.vyrn	httpSocketRoute	no, it calls `httpRoute`, which is not trap-free
+std/http.vyrn	httpSocketMatch	no, it calls `httpMatch`, which is not trap-free
+std/http.vyrn	httpLiveRoute	no, it calls `httpRoute`, which is not trap-free
+std/http.vyrn	httpOpen	no, it calls `httpFeed`, which is not trap-free
+std/http.vyrn	httpFeed	no, it calls a function value
+std/http.vyrn	httpLastEventId	yes
+std/http.vyrn	mount	no, it calls `httpCheckMount`, which is not trap-free
+std/http.vyrn	httpInvoke	no, it calls a function value
+std/http.vyrn	httpInvokeWhole	no, it calls a function value
+std/http.vyrn	httpApply	no, it calls `httpStamp`, which is not trap-free
+std/http.vyrn	httpStatus	yes
+std/http.vyrn	httpHeaders	yes
+std/http.vyrn	httpEtag	yes
+std/http.vyrn	httpFresh	no, it calls `httpAnyMatch`, which is not trap-free
+std/http.vyrn	httpHeader	yes
+std/http.vyrn	httpAnyMatch	no, it calls `trim`, which is not trap-free
+std/http.vyrn	httpUnweak	no, it calls `substring`, which is not trap-free
+std/http.vyrn	httpMapMissing	no, it calls `httpMaybe404`, which is not trap-free
+std/http.vyrn	httpMaybe404	no, it calls `httpAsk`, which is not trap-free
+std/http.vyrn	httpAsk	no, it calls a function value
+std/http.vyrn	httpErrOf	no, it calls `httpSingle`, which is not trap-free
+std/http.vyrn	httpStrOf	yes
+std/http.vyrn	httpSingle	no, it calls `parseJson`, which is not trap-free
+std/http.vyrn	httpSingleOf	yes
+std/http.vyrn	httpPayload	no, it calls `httpSingle`, which is not trap-free
+std/http.vyrn	httpScalar	no, it calls `httpPayload`, which is not trap-free
+std/http.vyrn	httpText	yes
+std/http.vyrn	httpFill	no, it calls `replace`, which is not trap-free
+std/http.vyrn	httpStamp	no, it calls `httpDate`, which is not trap-free
+std/http.vyrn	httpDate	no, it keeps an index check
+std/http.vyrn	httpPad2	no, it calls `padStart`, which is not trap-free
+std/http.vyrn	httpMatch	no, it calls `split`, which is not trap-free
+std/http.vyrn	httpIsUrl	no, it calls `httpPathOnly`, which is not trap-free
+std/http.vyrn	httpPathOnly	no, it calls `substring`, which is not trap-free
+std/http.vyrn	httpIsPlaceholder	yes
+std/http.vyrn	httpPlaceholderName	no, it calls `substring`, which is not trap-free
+std/http.vyrn	httpLiveMatch	no, it calls `httpMatch`, which is not trap-free
+std/http.vyrn	httpCheckMount	no, it calls `panic`
+std/http.vyrn	httpSelfShadow	no, it calls `httpSubsumes`, which is not trap-free
+std/http.vyrn	httpSubsumes	no, it calls `split`, which is not trap-free
+std/http.vyrn	httpInput	no, it calls `emit`, which is not trap-free
+std/http.vyrn	httpValue	yes
+std/http.vyrn	httpAt	yes
+std/http.vyrn	httpBodyFields	no, it calls `parseJson`, which is not trap-free
+std/http.vyrn	httpCapFirst	yes
+std/http.vyrn	httpBasePath	no, it keeps an index check
+std/http.vyrn	httpFields	no, it keeps an index check
+std/http.vyrn	httpIsNumeric	yes
+std/http.vyrn	httpIsNumericBase	yes
+std/http.vyrn	httpNamesOf	yes
+std/http.vyrn	httpNumericLit	yes
+std/http.vyrn	httpPathRegex	yes
+std/http.vyrn	httpProcedure	no, it keeps an index check
+std/http.vyrn	httpBraced	yes
+std/http.vyrn	http	no, it calls `httpBasePath`, which is not trap-free
+std/http.vyrn	mountedRows	yes
+std/http.vyrn	Policy$Route$cacheFor	yes
+std/http.vyrn	Policy$Route$etag	yes
+std/http.vyrn	Policy$Route$lastModified	yes
+std/http.vyrn	Policy$Route$vary	yes
+std/http.vyrn	Policy$Route$status	yes
+std/http.vyrn	Policy$Route$createdAt	yes
+std/http.vyrn	Policy$Route$notFoundWhen	yes
+std/http.vyrn	Wire$Live$retryAfter	yes
+std/http.vyrn	Wire$Live$resumable	yes
+std/http.vyrn	Frames$Socket$closeCode	yes
+std/http.vyrn	Frames$Socket$subprotocol	yes
+std/http.vyrn	Frames$Socket$maxFrame	yes
+std/http.vyrn	where$pInstant	yes
+std/http.vyrn	where$cInstant	no, it calls `panic`
+std/i18n.vyrn	sliceStr	no, it keeps an index check
+std/i18n.vyrn	isWs	yes
+std/i18n.vyrn	skipWs__from0	no, it keeps an index check
+std/i18n.vyrn	upperFirst	yes
+std/i18n.vyrn	keyTypeBase	no, it calls `split`, which is not trap-free
+std/i18n.vyrn	keyFnName	no, it calls `keyTypeBase`, which is not trap-free
+std/i18n.vyrn	keyPlainName	no, it calls `keyTypeBase`, which is not trap-free
+std/i18n.vyrn	lowerFirst	yes
+std/i18n.vyrn	strLit	yes
+std/i18n.vyrn	regexEscapeKey	yes
+std/i18n.vyrn	dataError	yes
+std/i18n.vyrn	i18nUnsupported	yes
+std/i18n.vyrn	addEntry	yes
+std/i18n.vyrn	flattenObj	yes
+std/i18n.vyrn	flattenValue	yes
+std/i18n.vyrn	localeFromObj	yes
+std/i18n.vyrn	localeFromJson	yes
+std/i18n.vyrn	parseLocaleJson	no, it calls `parseJson`, which is not trap-free
+std/i18n.vyrn	localeKeys	yes
+std/i18n.vyrn	entryIndex	yes
+std/i18n.vyrn	hasKey	yes
+std/i18n.vyrn	icuApostrophe	no, it keeps an index check
+std/i18n.vyrn	readLiteral	no, it keeps an index check
+std/i18n.vyrn	matchBrace	no, it keeps an index check
+std/i18n.vyrn	splitTopCommas	no, it keeps an index check
+std/i18n.vyrn	parseBranches	no, it keeps an index check
+std/i18n.vyrn	branchText	yes
+std/i18n.vyrn	hasBranch	yes
+std/i18n.vyrn	argError	yes
+std/i18n.vyrn	argReserved	yes
+std/i18n.vyrn	joinSortedSelectors	yes
+std/i18n.vyrn	scanArgs	no, it keeps an index check
+std/i18n.vyrn	branchBlob	no, it keeps an index check
+std/i18n.vyrn	dedupeArgs	no, it keeps an index check
+std/i18n.vyrn	argSignature	yes
+std/i18n.vyrn	pluralCategories	yes
+std/i18n.vyrn	pluralSupported	yes
+std/i18n.vyrn	pluralAbs	yes
+std/i18n.vyrn	pluralCondition	yes
+std/i18n.vyrn	compileBody	no, it keeps an index check
+std/i18n.vyrn	compilePlural	no, it keeps an index check
+std/i18n.vyrn	compileSelect	no, it calls `compileBody`, which is not trap-free
+std/i18n.vyrn	emitChain	no, it keeps an index check
+std/i18n.vyrn	localeErr	no, it calls `report`, which is not trap-free
+std/i18n.vyrn	icuBadBrace	no, it keeps an index check
+std/i18n.vyrn	keyCollisionErrors	no, it calls `keyFnName`, which is not trap-free
+std/i18n.vyrn	keyReservedErrors	no, it calls `keyPlainName`, which is not trap-free
+std/i18n.vyrn	i18n	no, it keeps an index check
+std/i18n.vyrn	buildModule	no, it keeps an index check
+std/i18n.vyrn	buildTransKey	yes
+std/i18n.vyrn	splitCsv	no, it calls `sliceStr`, which is not trap-free
+std/i18n.vyrn	paramList	no, it calls `argType`, which is not trap-free
+std/i18n.vyrn	argList	yes
+std/i18n.vyrn	argType	no, it calls `keyTypeBase`, which is not trap-free
+std/i18n.vyrn	buildKeyFns	no, it keeps an index check
+std/i18n.vyrn	docComment	yes
+std/i18n.vyrn	buildT	no, it keeps an index check
+std/icons.vyrn	icons	no, it calls `iconsModule`, which is not trap-free
+std/icons.vyrn	iconsAt	no, it calls `iconsModule`, which is not trap-free
+std/icons.vyrn	cannotRead	yes
+std/icons.vyrn	iconsModule	no, it calls `splitWhitespace`, which is not trap-free
+std/icons.vyrn	iconCollection	no, it calls `parseJson`, which is not trap-free
+std/icons.vyrn	collectionOf	yes
+std/icons.vyrn	collectionError	yes
+std/icons.vyrn	boxOf	yes
+std/icons.vyrn	glyphBox	no, it calls `splitWhitespace`, which is not trap-free
+std/icons.vyrn	pick	yes
+std/icons.vyrn	noLicense	yes
+std/icons.vyrn	licenseLine	yes
+std/icons.vyrn	iconsEmit	no, it calls `camel`, which is not trap-free
+std/icons.vyrn	reservedNames	yes
+std/icons.vyrn	iconHelper	yes
+std/icons.vyrn	glyphSource	no, it calls `resolveGlyph`, which is not trap-free
+std/icons.vyrn	qualified	yes
+std/icons.vyrn	aliasDepth	yes
+std/icons.vyrn	resolveGlyph	no, it calls `glyphOf`, which is not trap-free
+std/icons.vyrn	aliasGlyph	no, it calls `overrideBox`, which is not trap-free
+std/icons.vyrn	glyphOf	no, it calls `glyphBox`, which is not trap-free
+std/icons.vyrn	overrideBox	no, it calls `glyphBox`, which is not trap-free
+std/icons.vyrn	notFound	yes
+std/icons.vyrn	nearest	yes
+std/icons.vyrn	iconProvider	no, it calls `splitWhitespace`, which is not trap-free
+std/icons.vyrn	iconRequest	no, it calls `parseJson`, which is not trap-free
+std/icons.vyrn	iconCollectionOf	yes
+std/icons.vyrn	iconNowhere	yes
+std/icons.vyrn	iconProviderModule	no, it calls `camel`, which is not trap-free
+std/icons.vyrn	lit	yes
+std/icons.vyrn	iconAttrs	yes
+std/icons.vyrn	iconAttrList	yes
+std/icons.vyrn	iconAttrOne	yes
+std/icons.vyrn	iconAttrKeep	yes
+std/icons.vyrn	iconAttrNamed	yes
+std/icons.vyrn	anchored	no, it calls `report`, which is not trap-free
+std/icons.vyrn	camel	no, it keeps an index check
+std/icons.vyrn	beforeColon	yes
+std/icons.vyrn	afterColon	yes
+std/icons.vyrn	jsonKind	yes
+std/icons.vyrn	toyCollection	yes
+std/imports.vyrn	procImports	yes
+std/imports.vyrn	importBlock	yes
+std/json.vyrn	json$copyJson	yes
+std/json.vyrn	json$copyJsonArray	yes
+std/json.vyrn	json$copyJsonFields	yes
+std/json.vyrn	json$sortKeys	no, it calls `sortKeysFields`, which is not trap-free
+std/json.vyrn	json$sortKeysArray	no, it calls `sortKeys`, which is not trap-free
+std/json.vyrn	json$sortKeysFields	no, it keeps an index check
+std/json.vyrn	json$hex2	yes
+std/json.vyrn	json$emitString	no, it keeps an index check
+std/json.vyrn	json$numberOk	yes
+std/json.vyrn	json$emitNumber	no, it calls `panic`
+std/json.vyrn	json$emitArr	no, it calls `emit`, which is not trap-free
+std/json.vyrn	json$emitObj	no, it calls `emitString`, which is not trap-free
+std/json.vyrn	json$emit	no, it calls `emitNumber`, which is not trap-free
+std/json.vyrn	json$spaces	no, it calls `panic`
+std/json.vyrn	json$prettyIntoAt	no, it calls `emitNumber`, which is not trap-free
+std/json.vyrn	json$emitPretty	no, it calls `prettyIntoAt`, which is not trap-free
+std/json.vyrn	json$jsonEq	no, it calls `emit`, which is not trap-free
+std/json.vyrn	json$jsonEncoders	no, it keeps an index check
+std/json.vyrn	json$jsonEncoderBody	no, it keeps an index check
+std/json.vyrn	json$jsonVariant	no, it keeps an index check
+std/json.vyrn	Copy$json$Json$copy	yes
+std/json.vyrn	Owned$json$Json$release	yes
+std/json5.vyrn	maxDepth	yes
+std/json5.vyrn	newP5	yes
+std/json5.vyrn	cur	yes
+std/json5.vyrn	ahead	yes
+std/json5.vyrn	step	yes
+std/json5.vyrn	errAt	yes
+std/json5.vyrn	isHex	yes
+std/json5.vyrn	hexVal	yes
+std/json5.vyrn	pushUtf8	yes
+std/json5.vyrn	wsLen	yes
+std/json5.vyrn	skipGap	yes
+std/json5.vyrn	readHex4	yes
+std/json5.vyrn	parseString5	yes
+std/json5.vyrn	isIdentStart	yes
+std/json5.vyrn	isIdentPart	yes
+std/json5.vyrn	parseIdentKey	yes
+std/json5.vyrn	eatWord	yes
+std/json5.vyrn	parseNumber5	yes
+std/json5.vyrn	parseValue5	yes
+std/json5.vyrn	parseJson5	yes
+std/json5.vyrn	parsed	yes
+std/json5.vyrn	parseErr	yes
+std/jsondec.vyrn	jsondec$fieldsOf	yes
+std/jsondec.vyrn	jsondec$itemsOf	yes
+std/jsondec.vyrn	jsondec$numText	yes
+std/jsondec.vyrn	jsondec$hasField	yes
+std/jsondec.vyrn	jsondec$fieldAt	yes
+std/jsondec.vyrn	jsondec$elemAt	yes
+std/jsondec.vyrn	jsondec$tagOf	yes
+std/jsondec.vyrn	jsondec$pushType	yes
+std/jsondec.vyrn	jsondec$pushMissing	yes
+std/jsondec.vyrn	jsondec$pushValidate	yes
+std/jsondec.vyrn	jsondec$fieldPath	yes
+std/jsondec.vyrn	jsondec$indexPath	yes
+std/jsondec.vyrn	jsondec$pathAt	yes
+std/jsondec.vyrn	jsondec$openDoc	yes
+std/jsondec.vyrn	jsondec$closeDoc	yes
+std/jsondec.vyrn	jsondec$kindAt	yes
+std/jsondec.vyrn	jsondec$kindName	yes
+std/jsondec.vyrn	jsondec$expect	no, it calls `skipJsonValue`, which is not trap-free
+std/jsondec.vyrn	jsondec$readNull	yes
+std/jsondec.vyrn	jsondec$readString	yes
+std/jsondec.vyrn	jsondec$skipValue	no, it calls `skipJsonValue`, which is not trap-free
+std/jsondec.vyrn	jsondec$enterObject	yes
+std/jsondec.vyrn	jsondec$enterArray	yes
+std/jsondec.vyrn	jsondec$readKey	yes
+std/jsondec.vyrn	jsondec$keyIs	yes
+std/jsondec.vyrn	jsondec$nextMember	yes
+std/jsondec.vyrn	jsondec$nextItem	yes
+std/jsondec.vyrn	jsondec$keySet	yes
+std/jsondec.vyrn	jsondec$member	yes
+std/jsondec.vyrn	jsondec$mapMember	no, it calls `admitJsonKey`, which is not trap-free
+std/jsondec.vyrn	jsondec$skipMember	no, it calls `mapMember`, which is not trap-free
+std/jsondec.vyrn	jsondec$takeIssues	no, it keeps an index check
+std/jsondec.vyrn	jsondec$putIssues	no, it keeps an index check
+std/jsondec.vyrn	jsondec$copyIssue	yes
+std/jsondec.vyrn	jsondec$dStr	no, it calls `expect`, which is not trap-free
+std/jsondec.vyrn	jsondec$dBool	no, it calls `expect`, which is not trap-free
+std/jsondec.vyrn	jsondec$dInt64	no, it calls `dIntRange`, which is not trap-free
+std/jsondec.vyrn	jsondec$dIntKey	yes
+std/jsondec.vyrn	jsondec$dIntRange	no, it calls `readJsonNumber`, which is not trap-free
+std/jsondec.vyrn	jsondec$dUIntMax	no, it calls `readJsonNumber`, which is not trap-free
+std/jsondec.vyrn	jsondec$dFloat64	no, it calls `readJsonNumber`, which is not trap-free
+std/jsondec.vyrn	jsondec$dFloat32	no, it calls `readJsonNumber`, which is not trap-free
+std/jsondec.vyrn	jsondec$jsonDecoders	no, it keeps an index check
+std/jsondec.vyrn	jsondec$isName	yes
+std/jsondec.vyrn	jsondec$expectLine	yes
+std/jsondec.vyrn	jsondec$jsonDecoderBody	no, it keeps an index check
+std/jsondec.vyrn	jsondec$jsonRecordBody	no, it keeps an index check
+std/jsondec.vyrn	jsondec$jsonVariantsBody	no, it calls `jsonPayloadArm`, which is not trap-free
+std/jsondec.vyrn	jsondec$jsonPayloadArm	no, it keeps an index check
+std/jsondec.vyrn	jsondec$jsonScalarBody	yes
+std/jsonread.vyrn	maxDepth	yes
+std/jsonread.vyrn	jsonReader	yes
+std/jsonread.vyrn	peek	yes
+std/jsonread.vyrn	ahead	yes
+std/jsonread.vyrn	step	yes
+std/jsonread.vyrn	errAt	yes
+std/jsonread.vyrn	refuse	yes
+std/jsonread.vyrn	jsonRefused	yes
+std/jsonread.vyrn	skipWs	yes
+std/jsonread.vyrn	finishJson	yes
+std/jsonread.vyrn	jsonKindAt	yes
+std/jsonread.vyrn	jsonKindName	yes
+std/jsonread.vyrn	isHex	yes
+std/jsonread.vyrn	hexVal	yes
+std/jsonread.vyrn	pushUtf8	yes
+std/jsonread.vyrn	readHex4	yes
+std/jsonread.vyrn	readJsonString	yes
+std/jsonread.vyrn	refusedString	yes
+std/jsonread.vyrn	readJsonNumber	no, it keeps a slice check
+std/jsonread.vyrn	isDigit	yes
+std/jsonread.vyrn	skipDigits	yes
+std/jsonread.vyrn	readJsonKeyword	yes
+std/jsonread.vyrn	enter	yes
+std/jsonread.vyrn	leave	yes
+std/jsonread.vyrn	enterJsonObject	yes
+std/jsonread.vyrn	enterJsonArray	yes
+std/jsonread.vyrn	readJsonKey	yes
+std/jsonread.vyrn	readJsonKeyIf	yes
+std/jsonread.vyrn	readJsonColon	yes
+std/jsonread.vyrn	nextJsonMember	yes
+std/jsonread.vyrn	nextJsonItem	yes
+std/jsonread.vyrn	next	yes
+std/jsonread.vyrn	jsonKeySet	yes
+std/jsonread.vyrn	ksFind	no, it keeps an index check
+std/jsonread.vyrn	ksPlace	no, it keeps an index check
+std/jsonread.vyrn	ksAdd	no, it calls `ksPlace`, which is not trap-free
+std/jsonread.vyrn	admitJsonKey	no, it calls `ksFind`, which is not trap-free
+std/jsonread.vyrn	refuseJsonDuplicate	yes
+std/jsonread.vyrn	parseValue	no, it calls `readJsonNumber`, which is not trap-free
+std/jsonread.vyrn	skipJsonValue	no, it calls `parseValue`, which is not trap-free
+std/jsonread.vyrn	parseArray	no, it calls `parseValue`, which is not trap-free
+std/jsonread.vyrn	parseObject	no, it calls `admitJsonKey`, which is not trap-free
+std/jsonread.vyrn	parseJson	no, it calls `parseValue`, which is not trap-free
+std/jsonread.vyrn	parseOr	no, it calls `parseJson`, which is not trap-free
+std/jsonread.vyrn	parseErr	no, it calls `parseJson`, which is not trap-free
+std/jsonread.vyrn	nest	yes
+std/math.vyrn	min	yes
+std/math.vyrn	max	yes
+std/math.vyrn	abs	yes
+std/math.vyrn	clamp	yes
+std/math.vyrn	pi	yes
+std/math.vyrn	trunc	yes
+std/math.vyrn	floor	yes
+std/math.vyrn	ceil	yes
+std/math.vyrn	round	yes
+std/math.vyrn	sin	yes
+std/math.vyrn	cos	yes
+std/math.vyrn	exp	yes
+std/math.vyrn	log	yes
+std/math.vyrn	pow	no, it keeps a shift check
+std/math.vyrn	tan	no, it calls `reducePio2`, which is not trap-free
+std/math.vyrn	atan2	yes
+std/math.vyrn	atan	yes
+std/math.vyrn	tanKernel	yes
+std/math.vyrn	reducePio2	no, it calls `reducePio2Large`, which is not trap-free
+std/math.vyrn	reducePio2Large	no, it keeps an index check
+std/math.vyrn	hiWord	yes
+std/math.vyrn	loWord	yes
+std/math.vyrn	zeroLo	yes
+std/math.vyrn	withHi	yes
+std/math.vyrn	absF	yes
+std/math.vyrn	infinity	yes
+std/math.vyrn	notANumber	yes
+std/math.vyrn	scalbn	yes
+std/math.vyrn	ulpsApart	yes
+std/num.vyrn	num$maxDigits	yes
+std/num.vyrn	num$tidy	yes
+std/num.vyrn	num$halveBy	yes
+std/num.vyrn	num$twiceBy	yes
+std/num.vyrn	num$scan	yes
+std/num.vyrn	num$ldexp	yes
+std/num.vyrn	num$pow10Exact	yes
+std/num.vyrn	num$toFloat	yes
+std/num.vyrn	num$parseFloat64	yes
+std/num.vyrn	num$parseFloat32	yes
+std/num.vyrn	num$parseInt64	yes
+std/num.vyrn	num$parseUInt64	yes
+std/num.vyrn	num$f64Str	no, it keeps an index check
+std/num.vyrn	num$asciiStr	no, it calls `panic`
+std/openapi.vyrn	oaBaseName	yes
+std/openapi.vyrn	oaEscBody	yes
+std/openapi.vyrn	oaSorted	yes
+std/openapi.vyrn	oaIsNamedType	yes
+std/openapi.vyrn	oaIssuesSchema	yes
+std/openapi.vyrn	oaResponseSchema	yes
+std/openapi.vyrn	oaRequestSchema	yes
+std/openapi.vyrn	oaPathValue	yes
+std/openapi.vyrn	oaTypeNames	yes
+std/openapi.vyrn	openapi	yes
+std/random.vyrn	randomSeed	yes
+std/random.vyrn	seededRng	yes
+std/random.vyrn	nextInt	yes
+std/random.vyrn	nextInRange	no, it keeps a division check
+std/random.vyrn	int64Min	yes
+std/regex.vyrn	noBytes	yes
+std/regex.vyrn	addByte	yes
+std/regex.vyrn	hasByte	yes
+std/regex.vyrn	emit	yes
+std/regex.vyrn	patch	no, it keeps an index check
+std/regex.vyrn	joinHoles	yes
+std/regex.vyrn	peek	yes
+std/regex.vyrn	bracketClass	yes
+std/regex.vyrn	parseAtom	no, it keeps an index check
+std/regex.vyrn	parseRepeat	no, it calls `parseAtom`, which is not trap-free
+std/regex.vyrn	parseConcat	no, it calls `patch`, which is not trap-free
+std/regex.vyrn	parseAlt	no, it calls `parseConcat`, which is not trap-free
+std/regex.vyrn	byteClasses	yes
+std/regex.vyrn	compile	no, it calls `patch`, which is not trap-free
+std/regex.vyrn	follow	no, it keeps an index check
+std/regex.vyrn	addThread	yes
+std/regex.vyrn	nfaMatchAt	no, it keeps an index check
+std/regex.vyrn	intern	yes
+std/regex.vyrn	newScan	yes
+std/regex.vyrn	nextMatch	no, it keeps an index check
+std/regex.vyrn	find	no, it keeps a where clause check
+std/regex.vyrn	countMatches	no, it calls `nextMatch`, which is not trap-free
+std/regex.vyrn	replaceAll	no, it calls `nextMatch`, which is not trap-free
+std/regex.vyrn	draw	yes
+std/regex.vyrn	genPattern	no, it keeps an index check
+std/rpc.editor.vyrn	vyrnSymbolMapsRpc	yes
+std/rpc.editor.vyrn	vyrnDevServerRpc	yes
+std/rpc.vyrn	capFirst	yes
+std/rpc.vyrn	isNamedType	yes
+std/rpc.vyrn	rpcWhyNotSerializable	yes
+std/rpc.vyrn	validateContract	no, it calls `reportHere`, which is not trap-free
+std/rpc.vyrn	rpcReplyTypes	yes
+std/rpc.vyrn	serverHandlerFn	yes
+std/rpc.vyrn	serverSchemaFn	yes
+std/rpc.vyrn	serverRouterFn	yes
+std/rpc.vyrn	rpcServer	no, it calls `validateContract`, which is not trap-free
+std/rpc.vyrn	clientUnifyFn	yes
+std/rpc.vyrn	cbType	yes
+std/rpc.vyrn	clientProcFns	yes
+std/rpc.vyrn	rpcClient	no, it calls `validateContract`, which is not trap-free
+std/rpc.vyrn	inProcStub	yes
+std/rpc.vyrn	rpcInProcess	no, it calls `validateContract`, which is not trap-free
+std/rpc.vyrn	rpcStem	yes
+std/rpc.vyrn	rpcScan	no, it calls `panic`
+std/rpc.vyrn	rpcReadJson	no, it calls `parseJson`, which is not trap-free
+std/rpc.vyrn	rpcApplyConfig	yes
+std/rpc.vyrn	rpcConfig	no, it calls `rpcReadJson`, which is not trap-free
+std/rpc.vyrn	rpcTemplatePath	no, it calls `replace`, which is not trap-free
+std/rpc.vyrn	rpcPathFor	no, it calls `rpcTemplatePath`, which is not trap-free
+std/rpc.vyrn	rpcRoutesOf	no, it calls `rpcTemplatePath`, which is not trap-free
+std/rpc.vyrn	rpcCollision	no, it calls `reportHere`, which is not trap-free
+std/rpc.vyrn	rpcValidateAll	no, it calls `rpcQualifiedCollision`, which is not trap-free
+std/rpc.vyrn	rpcDefinedAs	yes
+std/rpc.vyrn	rpcTypeCollision	no, it calls `report`, which is not trap-free
+std/rpc.vyrn	rpcQualified	no, it calls `split`, which is not trap-free
+std/rpc.vyrn	rpcQualifiedCollision	no, it calls `rpcQualClash`, which is not trap-free
+std/rpc.vyrn	rpcQualClash	no, it keeps an index check
+std/rpc.vyrn	rpcDerived	yes
+std/rpc.vyrn	rpcProcSymbol	no, it calls `rpcTemplatePath`, which is not trap-free
+std/rpc.vyrn	rpcRouteDirectives	yes
+std/rpc.vyrn	rpcNs	yes
+std/rpc.vyrn	rpcDirImports	no, it calls `rpcHasPair`, which is not trap-free
+std/rpc.vyrn	rpcHasPair	no, it keeps an index check
+std/rpc.vyrn	rpcDirHandler	yes
+std/rpc.vyrn	rpcDirSchema	no, it calls `rpcPathFor`, which is not trap-free
+std/rpc.vyrn	rpcDirRouter	no, it calls `rpcQualified`, which is not trap-free
+std/rpc.vyrn	rpc	no, it calls `rpcScan`, which is not trap-free
+std/rpc.vyrn	rpcDirUnifyFn	yes
+std/rpc.vyrn	rpcDirClientFns	yes
+std/rpc.vyrn	rpcClientTypes	yes
+std/rpc.vyrn	client	no, it calls `rpcScan`, which is not trap-free
+std/rpc.vyrn	rpcDirInProcStub	yes
+std/rpc.vyrn	clientInProcess	no, it calls `rpcScan`, which is not trap-free
+std/runtime.vyrn	runtime$strLen	no, it calls `load8`, which has no body to judge
+std/runtime.vyrn	runtime$strCmp	no, it calls `load8`, which has no body to judge
+std/runtime.vyrn	runtime$starts	no, it calls `load8`, which has no body to judge
+std/runtime.vyrn	runtime$intStr	no, it calls `panic`
+std/runtime.vyrn	runtime$parseV	no, it calls `addr`, which has no body to judge
+std/runtime.vyrn	runtime$strI64	no, it calls `load8`, which has no body to judge
+std/runtime.vyrn	runtime$utf8Valid	no, it calls `load64`, which has no body to judge
+std/runtime.vyrn	runtime$regexRun	no, it calls `load8`, which has no body to judge
+std/runtime.vyrn	runtime$malloc	no, it calls `panic`
+std/runtime.vyrn	runtime$free	no, it calls `heapBase`, which has no body to judge
+std/runtime.vyrn	runtime$classSize	no, it keeps a shift check
+std/runtime.vyrn	runtime$auditInit	no, it calls `store32`, which has no body to judge
+std/runtime.vyrn	runtime$auditBirthNew	yes
+std/runtime.vyrn	runtime$auditBirth	no, it calls `heapBase`, which has no body to judge
+std/runtime.vyrn	runtime$auditDeath	no, it calls `heapBase`, which has no body to judge
+std/runtime.vyrn	runtime$auditForget	no, it calls `heapBase`, which has no body to judge
+std/runtime.vyrn	runtime$auditFail	no, it calls `load32`, which has no body to judge
+std/runtime.vyrn	runtime$auditExit	no, it calls `heapBase`, which has no body to judge
+std/runtime.vyrn	runtime$arenaAlloc	no, it calls `panic`
+std/runtime.vyrn	runtime$regionEnter	no, it calls `heapBase`, which has no body to judge
+std/runtime.vyrn	runtime$regionExit	no, it calls `heapBase`, which has no body to judge
+std/runtime.vyrn	runtime$strNew	no, it calls `heapBase`, which has no body to judge
+std/runtime.vyrn	runtime$strConcat	no, it calls `load32`, which has no body to judge
+std/runtime.vyrn	runtime$strAppend	no, it calls `load32`, which has no body to judge
+std/runtime.vyrn	runtime$strFromBytes	no, it calls `copy`, which has no body to judge
+std/runtime.vyrn	runtime$mapHash	no, it calls `load8`, which has no body to judge
+std/runtime.vyrn	runtime$mapKeyStride	yes
+std/runtime.vyrn	runtime$mapBytesEq	no, it calls `load8`, which has no body to judge
+std/runtime.vyrn	runtime$mapKeyEq	no, it calls `load32`, which has no body to judge
+std/runtime.vyrn	runtime$mapSlotI64	no, it calls `load64`, which has no body to judge
+std/runtime.vyrn	runtime$mapSlotBytes	no, it calls `load64`, which has no body to judge
+std/runtime.vyrn	runtime$mapFind	no, it calls `load64`, which has no body to judge
+std/runtime.vyrn	runtime$mapPut	no, it calls `load64`, which has no body to judge
+std/runtime.vyrn	runtime$mapReindex	no, it calls `fill`, which has no body to judge
+std/runtime.vyrn	runtime$mapReserve	no, it calls `load64`, which has no body to judge
+std/runtime.vyrn	runtime$mapRemoveAt	no, it calls `load64`, which has no body to judge
+std/runtime.vyrn	runtime$mapKeysCopy	no, it calls `load64`, which has no body to judge
+std/runtime.vyrn	runtime$arrPush	no, it calls `load32`, which has no body to judge
+std/runtime.vyrn	runtime$saPush	no, it calls `load64`, which has no body to judge
+std/runtime.vyrn	runtime$arrReserve	no, it calls `load32`, which has no body to judge
+std/runtime.vyrn	runtime$arrAppend	no, it calls `load32`, which has no body to judge
+std/runtime.vyrn	runtime$arrCopyFrom	no, it calls `load32`, which has no body to judge
+std/runtime.vyrn	runtime$arrClear	no, it calls `copy`, which has no body to judge
+std/runtime.vyrn	runtime$bytesOf	no, it calls `store32`, which has no body to judge
+std/runtime.vyrn	runtime$drain	no, it calls `heapBase`, which has no body to judge
+std/runtime.vyrn	runtime$writeAll	no, it calls `heapBase`, which has no body to judge
+std/runtime.vyrn	runtime$printStr	no, it calls `heapBase`, which has no body to judge
+std/runtime.vyrn	runtime$envGet	no, it calls `heapBase`, which has no body to judge
+std/runtime.vyrn	runtime$injected	no, it calls `load8`, which has no body to judge
+std/runtime.vyrn	runtime$nowMillis	no, it calls `heapBase`, which has no body to judge
+std/runtime.vyrn	runtime$monoNanos	no, it calls `heapBase`, which has no body to judge
+std/runtime.vyrn	runtime$randomSeedV	no, it calls `heapBase`, which has no body to judge
+std/runtime.vyrn	runtime$argsAt	no, it calls `heapBase`, which has no body to judge
+std/runtime.vyrn	runtime$argsV	no, it calls `addr`, which has no body to judge
+std/runtime.vyrn	runtime$readLineV	no, it calls `heapBase`, which has no body to judge
+std/runtime.vyrn	runtime$openAt	no, it calls `heapBase`, which has no body to judge
+std/runtime.vyrn	runtime$readAll	no, it calls `heapBase`, which has no body to judge
+std/runtime.vyrn	runtime$err3	no, it calls `strConcat`, which is not trap-free
+std/runtime.vyrn	runtime$ioErr	no, it calls `ioTable`, which has no body to judge
+std/runtime.vyrn	runtime$slurpFile	no, it calls `fdClose`, which has no body to judge
+std/runtime.vyrn	runtime$slurpGen	no, it calls `heapBase`, which has no body to judge
+std/runtime.vyrn	runtime$genErr	no, it calls `heapBase`, which has no body to judge
+std/runtime.vyrn	runtime$readFileFrom	no, it calls `load8`, which has no body to judge
+std/runtime.vyrn	runtime$readFileAt	no, it calls `heapBase`, which has no body to judge
+std/runtime.vyrn	runtime$readFileGenAt	no, it calls `heapBase`, which has no body to judge
+std/runtime.vyrn	runtime$bytesBox	no, it calls `store32`, which has no body to judge
+std/runtime.vyrn	runtime$readFileBytesAt	no, it calls `heapBase`, which has no body to judge
+std/runtime.vyrn	runtime$readFileBytesGenAt	no, it calls `heapBase`, which has no body to judge
+std/runtime.vyrn	runtime$writeBytesAt	no, it calls `fdClose`, which has no body to judge
+std/runtime.vyrn	runtime$writeFileBytesV	no, it calls `addr`, which has no body to judge
+std/runtime.vyrn	runtime$writeFileV	no, it calls `addr`, which has no body to judge
+std/runtime.vyrn	runtime$writeStdoutV	no, it calls `addr`, which has no body to judge
+std/runtime.vyrn	runtime$renameAt	no, it calls `heapBase`, which has no body to judge
+std/runtime.vyrn	runtime$fsyncAt	no, it calls `fdSync`, which has no body to judge
+std/runtime.vyrn	runtime$readdirBlob	no, it calls `heapBase`, which has no body to judge
+std/runtime.vyrn	runtime$strCopy	no, it calls `copy`, which has no body to judge
+std/runtime.vyrn	runtime$splitNames	no, it calls `load8`, which has no body to judge
+std/runtime.vyrn	runtime$listDirAt	no, it calls `heapBase`, which has no body to judge
+std/runtime.vyrn	runtime$listDirGenAt	no, it calls `heapBase`, which has no body to judge
+std/runtime.vyrn	runtime$readFileV	no, it calls `addr`, which has no body to judge
+std/runtime.vyrn	runtime$readFileGenV	no, it calls `addr`, which has no body to judge
+std/runtime.vyrn	runtime$readFileBytesV	no, it calls `addr`, which has no body to judge
+std/runtime.vyrn	runtime$readFileBytesGenV	no, it calls `addr`, which has no body to judge
+std/runtime.vyrn	runtime$renameFileV	no, it calls `addr`, which has no body to judge
+std/runtime.vyrn	runtime$fsyncFileV	no, it calls `addr`, which has no body to judge
+std/runtime.vyrn	runtime$listDirV	no, it calls `addr`, which has no body to judge
+std/runtime.vyrn	runtime$listDirKindsV	no, it calls `addr`, which has no body to judge
+std/runtime.vyrn	runtime$listDirGenV	no, it calls `addr`, which has no body to judge
+std/runtime.vyrn	runtime$listDirKindsGenV	no, it calls `addr`, which has no body to judge
+std/runtime.vyrn	runtime$digitsAt	no, it calls `store8`, which has no body to judge
+std/runtime.vyrn	runtime$printI64	no, it calls `heapBase`, which has no body to judge
+std/runtime.vyrn	runtime$boolStr	yes
+std/runtime.vyrn	runtime$trapV	no, it calls `trap`
+std/runtime.vyrn	runtime$trapAt	no, it calls `load32`, which has no body to judge
+std/scan.vyrn	newScanner	yes
+std/scan.vyrn	cssScanner	yes
+std/scan.vyrn	scanner	yes
+std/scan.vyrn	atEnd	yes
+std/scan.vyrn	peek	yes
+std/scan.vyrn	peekAt	yes
+std/scan.vyrn	looksAt	yes
+std/scan.vyrn	isSpaceByte	yes
+std/scan.vyrn	isWordByte	yes
+std/scan.vyrn	advance	yes
+std/scan.vyrn	skipBlockComment	yes
+std/scan.vyrn	skipWs	yes
+std/scan.vyrn	walked	yes
+std/scan.vyrn	ident	no, it calls `panic`
+std/scan.vyrn	isQuoteByte	yes
+std/scan.vyrn	quotedString	no, it calls `panic`
+std/scan.vyrn	skipUnit	no, it calls `quotedString`, which is not trap-free
+std/scan.vyrn	until	no, it calls `panic`
+std/scan.vyrn	untilStr	no, it calls `panic`
+std/scan.vyrn	balanced	no, it calls `panic`
+std/slots.vyrn	takeIdentity	yes
+std/storage.vyrn	writeAtomic	yes
+std/storage.vyrn	writeAtomicTemp	yes
+std/storage.vyrn	tempName	yes
+std/stream.vyrn	handleOf	yes
+std/stream.vyrn	newCursor	yes
+std/stream.vyrn	takeCursor	no, it calls `panic`
+std/stream.vyrn	cursorGet	no, it calls `panic`
+std/stream.vyrn	cursorSet	no, it calls `panic`
+std/stream.vyrn	srcOf	no, it calls `panic`
+std/strings.vyrn	fromBytesOr	yes
+std/strings.vyrn	repeat	yes
+std/strings.vyrn	joinWith	yes
+std/strings.vyrn	substring	no, it calls `panic`
+std/strings.vyrn	isAsciiSpace	yes
+std/strings.vyrn	indexOf	yes
+std/strings.vyrn	lastIndexOf	yes
+std/strings.vyrn	split	no, it calls `panic`
+std/strings.vyrn	lines	no, it calls `panic`
+std/strings.vyrn	splitWhitespace	no, it calls `panic`
+std/strings.vyrn	trimStart	no, it calls `panic`
+std/strings.vyrn	trimEnd	no, it calls `panic`
+std/strings.vyrn	trim	no, it calls `panic`
+std/strings.vyrn	toLower	yes
+std/strings.vyrn	toUpper	yes
+std/strings.vyrn	replace	no, it calls `panic`
+std/strings.vyrn	padStart	no, it calls `panic`
+std/strings.vyrn	padEnd	no, it calls `panic`
+std/strings.vyrn	toHex	yes
+std/strings.vyrn	editDistance	yes
+std/strpred.vyrn	byteLengthV	yes
+std/strpred.vyrn	startsWith	yes
+std/strpred.vyrn	endsWith	yes
+std/strpred.vyrn	skipTable	yes
+std/strpred.vyrn	findPlain	yes
+std/strpred.vyrn	worthPreparing	yes
+std/strpred.vyrn	findSkipping	yes
+std/strpred.vyrn	contains	yes
+std/strpred.vyrn	slice	yes
+std/sum.vyrn	exactAdd	no, it calls `exactLimbs`, which is not trap-free
+std/sum.vyrn	exactLimbs	no, it keeps an index check
+std/sum.vyrn	exactSpecial	no, it keeps an index check
+std/sum.vyrn	exactTerm	yes
+std/sum.vyrn	exactBit	no, it keeps an index check
+std/sum.vyrn	exactFinish	no, it keeps an index check
+std/sum.vyrn	sum	no, it keeps an index check
+std/sum.vyrn	pow2	yes
+std/sum.vyrn	repeated	yes
+std/sum.vyrn	sumBits	no, it calls `sum`, which is not trap-free
+std/symbolmap.vyrn	symbol	yes
+std/symbolmap.vyrn	strField	yes
+std/symbolmap.vyrn	originJson	yes
+std/symbolmap.vyrn	mapJson	no, it calls `emit`, which is not trap-free
+std/symbolmap.vyrn	mapSlug	yes
+std/symbolmap.vyrn	symbolMapFn	no, it calls `mapJson`, which is not trap-free
+std/text.vyrn	text$decodeUtf8	yes
+std/text.vyrn	text$utf8Width	yes
+std/text.vyrn	text$stringFault	yes
+std/text.vyrn	text$chars	yes
+std/text.vyrn	text$charCountV	yes
+std/text.vyrn	text$lineAtV	yes
+std/text.vyrn	text$colAtV	yes
+std/text.vyrn	text$showCps	yes
+std/time.vyrn	now	yes
+std/time.vyrn	monotonic	yes
+std/time.vyrn	toMillis	yes
+std/time.vyrn	fromMillis	yes
+std/time.vyrn	civilFromDays	yes
+std/time.vyrn	civil	yes
+std/time.vyrn	year	yes
+std/time.vyrn	month	yes
+std/time.vyrn	day	yes
+std/time.vyrn	hour	yes
+std/time.vyrn	minute	yes
+std/time.vyrn	second	yes
+std/time.vyrn	pad2	yes
+std/time.vyrn	pad4	yes
+std/time.vyrn	format	yes
+std/time.vyrn	formatIso	yes
+std/time.vyrn	where$pInstant	yes
+std/time.vyrn	where$cInstant	no, it calls `panic`
+std/tw.editor.vyrn	vyrnClassCallTw	yes
+std/tw.editor.vyrn	vyrnStylesheetTw	yes
+std/tw.vyrn	twClassSafe	yes
+std/tw.vyrn	twValueSafe	yes
+std/tw.vyrn	twCssSingleToken	yes
+std/tw.vyrn	twCssNothingAfter	yes
+std/tw.vyrn	twCssValueSafe	yes
+std/tw.vyrn	twThemeError	yes
+std/tw.vyrn	twUnsupported	yes
+std/tw.vyrn	twAddEntry	yes
+std/tw.vyrn	twAddLeaf	yes
+std/tw.vyrn	twFlattenElem	yes
+std/tw.vyrn	twFlattenArr	yes
+std/tw.vyrn	twFlattenObj	yes
+std/tw.vyrn	twFlatten	yes
+std/tw.vyrn	twThemeFromObj	yes
+std/tw.vyrn	twThemeFromJson	yes
+std/tw.vyrn	twParseTheme	no, it calls `parseJson`, which is not trap-free
+std/tw.vyrn	twDropHead	no, it calls `substring`, which is not trap-free
+std/tw.vyrn	twDashDots	yes
+std/tw.vyrn	twAxisOf	no, it calls `twDropHead`, which is not trap-free
+std/tw.vyrn	twKnownFamilies	yes
+std/tw.vyrn	twKnownTopLevel	yes
+std/tw.vyrn	twUnknownKeyErrors	no, it calls `twHeadOf`, which is not trap-free
+std/tw.vyrn	twHeadOf	no, it calls `substring`, which is not trap-free
+std/tw.vyrn	twColorClasses	yes
+std/tw.vyrn	twBoxDecl	yes
+std/tw.vyrn	twBoxClasses	yes
+std/tw.vyrn	twGapClasses	yes
+std/tw.vyrn	twRoundedClasses	yes
+std/tw.vyrn	twTextSizeClasses	yes
+std/tw.vyrn	twSizeClasses	yes
+std/tw.vyrn	twStaticClasses	yes
+std/tw.vyrn	twBuildVocab	no, it calls `twAxisOf`, which is not trap-free
+std/tw.vyrn	twSafelist	no, it calls `twAxisOf`, which is not trap-free
+std/tw.vyrn	twUnsafeSafelistErrors	no, it calls `reportHere`, which is not trap-free
+std/tw.vyrn	twUnsafeNameErrors	no, it calls `reportHere`, which is not trap-free
+std/tw.vyrn	twUnsafeBreakpointErrors	no, it calls `reportHere`, which is not trap-free
+std/tw.vyrn	twUnsafeValueErrors	no, it calls `twHeadOf`, which is not trap-free
+std/tw.vyrn	twCssEscape	yes
+std/tw.vyrn	twStateLayer	yes
+std/tw.vyrn	twRuleFlat	no, it keeps a division check
+std/tw.vyrn	twBlockLit	no, it calls `twRuleFlat`, which is not trap-free
+std/tw.vyrn	twCssBody	no, it calls `twBlockLit`, which is not trap-free
+std/tw.vyrn	twBuildCss	no, it calls `twCssBody`, which is not trap-free
+std/tw.vyrn	twTokenRegex	yes
+std/tw.vyrn	twSheetSafetyErrors	no, it calls `twUnsafeValueErrors`, which is not trap-free
+std/tw.vyrn	twBuildModule	no, it calls `twCssBody`, which is not trap-free
+std/tw.vyrn	twEmitCss	yes
+std/tw.vyrn	tw	no, it calls `twLoaded`, which is not trap-free
+std/tw.vyrn	twLoaded	no, it calls `reportHere`, which is not trap-free
+std/tw.vyrn	cannotReadTheme	yes
+std/ui.editor.vyrn	uiChrome	yes
+std/ui.editor.vyrn	vyrnChromeUi	yes
+std/ui.editor.vyrn	uiPageView	no, it calls `vyxPageShape`, which is not trap-free
+std/ui.editor.vyrn	vyrnSourceUi	no, it calls `vyxStemOf`, which is not trap-free
+std/ui.vyrn	pageError	yes
+std/ui.vyrn	notFound	yes
+std/ui.vyrn	badRequest	yes
+std/ui.vyrn	noHead	yes
+std/ui.vyrn	withTitle	yes
+std/ui.vyrn	withStylesheet	yes
+std/ui.vyrn	withModule	yes
+std/ui.vyrn	withScript	yes
+std/ui.vyrn	withMeta	yes
+std/ui.vyrn	headHtml	yes
+std/ui.vyrn	headTitleOf	yes
+std/ui.vyrn	noQuery	yes
+std/ui.vyrn	uiNoData	yes
+std/ui.vyrn	uiNoView	yes
+std/ui.vyrn	uiNoRespond	yes
+std/ui.vyrn	uiDataQuery	yes
+std/ui.vyrn	uiDataLazy	yes
+std/ui.vyrn	uiDataParamQuery	yes
+std/ui.vyrn	uiDataParamLazy	yes
+std/ui.vyrn	uiAcceptNames	yes
+std/ui.vyrn	uiWantsData	yes
+std/ui.vyrn	uiPayload	no, it calls `derive$json$jsonEncoders$t8084a51b3c649e88`, which is not trap-free
+std/ui.vyrn	uiErrorPayload	yes
+std/ui.vyrn	uiDataResponse	yes
+std/ui.vyrn	uiDataMiss	yes
+std/ui.vyrn	uiErrorResponseOf	no, it calls `derive$json$jsonEncoders$t565771f7ce08c4d9`, which is not trap-free
+std/ui.vyrn	uiSliceStr	no, it keeps an index check
+std/ui.vyrn	uiUpperFirst	yes
+std/ui.vyrn	uiAppendStr	yes
+std/ui.vyrn	uiHole	yes
+std/ui.vyrn	uiStrLit	yes
+std/ui.vyrn	uiRegexEscapeLit	yes
+std/ui.vyrn	uiStem	no, it calls `uiSliceStr`, which is not trap-free
+std/ui.vyrn	uiIsDynSeg	yes
+std/ui.vyrn	uiDynName	no, it calls `uiSliceStr`, which is not trap-free
+std/ui.vyrn	uiRouteSegsFor	yes
+std/ui.vyrn	uiDynNamesOf	no, it calls `uiDynName`, which is not trap-free
+std/ui.vyrn	uiCollisionKey	yes
+std/ui.vyrn	uiUrlPatternOf	no, it calls `uiDynName`, which is not trap-free
+std/ui.vyrn	uiWirePatternOf	no, it calls `uiDynName`, which is not trap-free
+std/ui.vyrn	uiPageKeyOf	yes
+std/ui.vyrn	uiRoutePathBranch	no, it keeps an index check
+std/ui.vyrn	uiSegIdent	yes
+std/ui.vyrn	uiIdentLead	yes
+std/ui.vyrn	uiStaticHelperName	yes
+std/ui.vyrn	uiDynHelperName	yes
+std/ui.vyrn	uiHelperNameOf	yes
+std/ui.vyrn	uiDynHelperBody	no, it keeps an index check
+std/ui.vyrn	uiRecordBody	no, it calls `uiSliceStr`, which is not trap-free
+std/ui.vyrn	uiSplitFields	no, it calls `uiSliceStr`, which is not trap-free
+std/ui.vyrn	uiParseFields	no, it calls `trim`, which is not trap-free
+std/ui.vyrn	uiFieldType	yes
+std/ui.vyrn	uiSupportedParamType	yes
+std/ui.vyrn	uiSegRegex	yes
+std/ui.vyrn	uiHasFn	yes
+std/ui.vyrn	uiFnArity	yes
+std/ui.vyrn	uiFnRet	yes
+std/ui.vyrn	uiHasType	yes
+std/ui.vyrn	uiTypeSource	yes
+std/ui.vyrn	uiTypeModule	yes
+std/ui.vyrn	uiPageErrAt	no, it calls `report`, which is not trap-free
+std/ui.vyrn	uiContractErrs	no, it calls `checkContract`, which is not trap-free
+std/ui.vyrn	uiInspectPage	no, it calls `matchedMember`, which is not trap-free
+std/ui.vyrn	uiReadVyx	yes
+std/ui.vyrn	uiReadDirOf	yes
+std/ui.vyrn	uiInspectVyxPage	no, it calls `vyxPageShape`, which is not trap-free
+std/ui.vyrn	uiPageErr	no, it calls `uiUrlPatternOf`, which is not trap-free
+std/ui.vyrn	uiScanAll	no, it calls `panic`
+std/ui.vyrn	uiIsPrefixOf	yes
+std/ui.vyrn	uiLayoutChain	yes
+std/ui.vyrn	uiErrorIndex	yes
+std/ui.vyrn	uiCollisionErrors	no, it calls `uiUrlPatternOf`, which is not trap-free
+std/ui.vyrn	uiHelperCollisions	no, it calls `uiUrlPatternOf`, which is not trap-free
+std/ui.vyrn	uiFixedRuntime	yes
+std/ui.vyrn	uiHeadRuntime	yes
+std/ui.vyrn	uiErrorRuntime	yes
+std/ui.vyrn	uiEmitRoute	no, it calls `uiEmitTryFn`, which is not trap-free
+std/ui.vyrn	uiEmitDataRoute	no, it calls `uiEmitTryFn`, which is not trap-free
+std/ui.vyrn	uiEmitTryFn	no, it calls `uiEmitDynMatch`, which is not trap-free
+std/ui.vyrn	uiSegNeedsDecode	yes
+std/ui.vyrn	uiAnyEncodedStatic	yes
+std/ui.vyrn	uiEmitDynMatch	no, it keeps an index check
+std/ui.vyrn	uiDynArgs	yes
+std/ui.vyrn	uiDynSegIndex	yes
+std/ui.vyrn	uiPageCallArgs	yes
+std/ui.vyrn	uiBodyCall	yes
+std/ui.vyrn	uiNeedsThreading	yes
+std/ui.vyrn	uiWrapLayout	yes
+std/ui.vyrn	uiHeadExpr	yes
+std/ui.vyrn	uiTitleExpr	yes
+std/ui.vyrn	uiSuccessResponse	yes
+std/ui.vyrn	uiUsesErrDoc	yes
+std/ui.vyrn	uiEmitErrDoc	yes
+std/ui.vyrn	uiLoadCall	yes
+std/ui.vyrn	uiEmitLoadDispatch	yes
+std/ui.vyrn	uiEmitRender	no, it calls `uiParamFieldInits`, which is not trap-free
+std/ui.vyrn	uiDataSuccessBody	yes
+std/ui.vyrn	uiEmitDataLoadDispatch	yes
+std/ui.vyrn	uiEmitDataRender	no, it calls `uiParamFieldInits`, which is not trap-free
+std/ui.vyrn	uiParamFieldInits	no, it calls `uiDynName`, which is not trap-free
+std/ui.vyrn	uiEmitImport	yes
+std/ui.vyrn	uiEmitTypedUrl	no, it keeps an index check
+std/ui.vyrn	uiAnyStrSeg	yes
+std/ui.vyrn	uiAnyVyx	yes
+std/ui.vyrn	uiVyxGenImports	yes
+std/ui.vyrn	uiEmitChromeImport	yes
+std/ui.vyrn	uiBuildModule	no, it calls `uiRoutePathBranch`, which is not trap-free
+std/ui.vyrn	uiEmitMountable	no, it calls `uiWirePatternOf`, which is not trap-free
+std/ui.vyrn	uiDispatchOrder	yes
+std/ui.vyrn	pages	no, it calls `uiScanAll`, which is not trap-free
+std/ui.vyrn	pagesThemed	no, it calls `uiScanAll`, which is not trap-free
+std/ui.vyrn	uiPageId	yes
+std/ui.vyrn	uiClientRenderable	yes
+std/ui.vyrn	uiClientPageImport	yes
+std/ui.vyrn	uiClientRuntime	yes
+std/ui.vyrn	uiClientMatchFn	yes
+std/ui.vyrn	uiResolveTitleExpr	yes
+std/ui.vyrn	uiEmitResolvePage	yes
+std/ui.vyrn	uiBuildClientModule	yes
+std/ui.vyrn	pagesClient	no, it calls `uiScanAll`, which is not trap-free
+std/ui.vyrn	pagesClientThemed	no, it calls `uiScanAll`, which is not trap-free
+std/ui.vyrn	query	yes
+std/von.vyrn	copyVonArray	yes
+std/von.vyrn	copyVonFields	yes
+std/von.vyrn	copyVonEntries	yes
+std/von.vyrn	kindAt	no, it keeps an index check
+std/von.vyrn	textAt	no, it keeps an index check
+std/von.vyrn	kindAhead	no, it keeps an index check
+std/von.vyrn	textAhead	no, it keeps an index check
+std/von.vyrn	tokLine	no, it keeps an index check
+std/von.vyrn	tokCol	no, it keeps an index check
+std/von.vyrn	bump	yes
+std/von.vyrn	skipDocs	no, it calls `kindAt`, which is not trap-free
+std/von.vyrn	errAt	no, it calls `tokLine`, which is not trap-free
+std/von.vyrn	atPunct	no, it calls `kindAt`, which is not trap-free
+std/von.vyrn	atKeyword	no, it calls `kindAt`, which is not trap-free
+std/von.vyrn	showTok	no, it calls `kindAt`, which is not trap-free
+std/von.vyrn	lineStartOffset	yes
+std/von.vyrn	colOffset	yes
+std/von.vyrn	rawNumber	no, it keeps an index check
+std/von.vyrn	hasLeadingZero	yes
+std/von.vyrn	readNumber	no, it calls `kindAt`, which is not trap-free
+std/von.vyrn	fieldLine	yes
+std/von.vyrn	entryLine	yes
+std/von.vyrn	vonMaxDepth	yes
+std/von.vyrn	deeper	no, it calls `errAt`, which is not trap-free
+std/von.vyrn	readRecord	no, it calls `kindAt`, which is not trap-free
+std/von.vyrn	readVariantArgs	no, it calls `skipDocs`, which is not trap-free
+std/von.vyrn	readArray	no, it calls `skipDocs`, which is not trap-free
+std/von.vyrn	readMap	no, it calls `kindAt`, which is not trap-free
+std/von.vyrn	readBracket	no, it calls `kindAt`, which is not trap-free
+std/von.vyrn	readNamed	no, it calls `textAt`, which is not trap-free
+std/von.vyrn	readValue	no, it calls `kindAt`, which is not trap-free
+std/von.vyrn	readSigned	no, it calls `tokLine`, which is not trap-free
+std/von.vyrn	readImport	no, it calls `kindAt`, which is not trap-free
+std/von.vyrn	readImportFrom	no, it calls `kindAt`, which is not trap-free
+std/von.vyrn	tabIndentLine	yes
+std/von.vyrn	hasBom	yes
+std/von.vyrn	layoutError	yes
+std/von.vyrn	parseVon	no, it calls `walkVon`, which is not trap-free
+std/von.vyrn	vonLex	yes
+std/von.vyrn	walkVon	no, it calls `skipDocs`, which is not trap-free
+std/von.vyrn	firstErrorToken	yes
+std/von.vyrn	indent	yes
+std/von.vyrn	hex2__from0	yes
+std/von.vyrn	emitString__from0	no, it calls `pushUnicodeEscape`, which is not trap-free
+std/von.vyrn	pushUnicodeEscape	no, it keeps an index check
+std/von.vyrn	requireName	no, it calls `panic`
+std/von.vyrn	numberOk__from0	no, it keeps an index check
+std/von.vyrn	emitNumber__from0	no, it calls `panic`
+std/von.vyrn	isFlat	yes
+std/von.vyrn	allFlatValues	yes
+std/von.vyrn	allFlatEntries	yes
+std/von.vyrn	emitRecord	no, it calls `requireName`, which is not trap-free
+std/von.vyrn	emitRecordBlock	no, it calls `requireName`, which is not trap-free
+std/von.vyrn	emitArrayBlock	no, it calls `emitAt`, which is not trap-free
+std/von.vyrn	emitArrayInline	no, it calls `emitAt`, which is not trap-free
+std/von.vyrn	emitMapBlock	no, it calls `emitString`, which is not trap-free
+std/von.vyrn	emitMapInline	no, it calls `emitString`, which is not trap-free
+std/von.vyrn	emitVariant	no, it calls `requireName`, which is not trap-free
+std/von.vyrn	emitVariantArgs	no, it calls `emitAt`, which is not trap-free
+std/von.vyrn	emitAt	no, it calls `emitNumber`, which is not trap-free
+std/von.vyrn	emitVon	no, it calls `emitAt`, which is not trap-free
+std/von.vyrn	toVon	no, it calls `joinNames`, which is not trap-free
+std/von.vyrn	joinNames	no, it calls `requireName`, which is not trap-free
+std/von.vyrn	isKeyword	yes
+std/von.vyrn	isIdent	yes
+std/von.vyrn	hasExponent	yes
+std/von.vyrn	hasPoint	yes
+std/von.vyrn	jsonValueToVon	yes
+std/von.vyrn	jsonNumberToVon	yes
+std/von.vyrn	jsonArrayToVon	yes
+std/von.vyrn	jsonObjectToVon	yes
+std/von.vyrn	jsonTopToVon	yes
+std/von.vyrn	jsonToVon	no, it calls `jsonTopDoc`, which is not trap-free
+std/von.vyrn	notAnObject	yes
+std/von.vyrn	jsonTopDoc	no, it calls `toVon`, which is not trap-free
+std/von.vyrn	parseErr	no, it calls `parseVon`, which is not trap-free
+std/von.vyrn	roundTrip	no, it calls `toVon`, which is not trap-free
+std/von.vyrn	converted	no, it calls `jsonToVon`, which is not trap-free
+std/von.vyrn	nested	yes
+std/von.vyrn	Copy$Von$copy	yes
+std/von.vyrn	Owned$Von$release	yes
+std/vyx-hints.vyrn	hintsKey	yes
+std/vyx-hints.vyrn	vyxHints	no, it calls `vhScan`, which is not trap-free
+std/vyx-hints.vyrn	vyxHintsConfigured	no, it calls `vhScan`, which is not trap-free
+std/vyx-hints.vyrn	vhScan	no, it calls `panic`
+std/vyx-hints.vyrn	vhPolicy	no, it calls `policyOf`, which is not trap-free
+std/vyx-hints.vyrn	vhModule	yes
+std/vyx-hints.vyrn	vhCheck	no, it calls `vyxParseTemplate`, which is not trap-free
+std/vyx-hints.vyrn	vhNodes	no, it calls `vhNode`, which is not trap-free
+std/vyx-hints.vyrn	vhNode	no, it calls `vhElem`, which is not trap-free
+std/vyx-hints.vyrn	vhBodies	no, it calls `vhNodes`, which is not trap-free
+std/vyx-hints.vyrn	vhElem	no, it calls `vhDeprecatedTag`, which is not trap-free
+std/vyx-hints.vyrn	vhNeedsAlt	yes
+std/vyx-hints.vyrn	vhNamedByContent	yes
+std/vyx-hints.vyrn	vhIsNameable	yes
+std/vyx-hints.vyrn	vhIsVoid	yes
+std/vyx-hints.vyrn	vhHasDirectRow	yes
+std/vyx-hints.vyrn	vhIsRow	yes
+std/vyx-hints.vyrn	vhSriUrlAttr	no, it calls `vhIsExternalUrl`, which is not trap-free
+std/vyx-hints.vyrn	vhIsExternalUrl	no, it calls `trim`, which is not trap-free
+std/vyx-hints.vyrn	vhInteractive	yes
+std/vyx-hints.vyrn	vhIsUrlAttr	yes
+std/vyx-hints.vyrn	vhIsJavascriptUrl	yes
+std/vyx-hints.vyrn	vhStripForScheme	yes
+std/vyx-hints.vyrn	vhSlice	yes
+std/vyx-hints.vyrn	vhEntityInText	no, it calls `vhEntityIn`, which is not trap-free
+std/vyx-hints.vyrn	vhEntityIn	no, it calls `substring`, which is not trap-free
+std/vyx-hints.vyrn	vhKnownTag	no, it keeps an index check
+std/vyx-hints.vyrn	vhDeprecatedTag	no, it keeps an index check
+std/vyx-hints.vyrn	vhAriaAttr	no, it keeps an index check
+std/vyx-hints.vyrn	vhDeprecatedAttrOn	yes
+std/vyx-hints.vyrn	vhGlobalAttr	no, it keeps an index check
+std/vyx-hints.vyrn	vhElementAttr	yes
+std/vyx-hints.vyrn	vhIsHandlerAttr	yes
+std/vyx-hints.vyrn	vhPointerHandler	yes
+std/vyx-hints.vyrn	vhKeyboardHandler	yes
+std/vyx-hints.vyrn	vhFormHandler	yes
+std/vyx-hints.vyrn	vhLoadHandler	yes
+std/vyx-hints.vyrn	vhEventOf	yes
+std/vyx-hints.vyrn	vhPositive	no, it calls `trim`, which is not trap-free
+std/vyx-hints.vyrn	vhHas	yes
+std/vyx-hints.vyrn	vhHasAny	yes
+std/vyx-hints.vyrn	vhValue	yes
+std/vyx-hints.vyrn	vhHasEvent	yes
+std/vyx-hints.vyrn	vhAnyEvent	yes
+std/vyx-hints.vyrn	vhHasContent	no, it calls `vhNodeHasContent`, which is not trap-free
+std/vyx-hints.vyrn	vhNodeHasContent	no, it calls `trim`, which is not trap-free
+std/vyx-hints.vyrn	vhAnchorLine	yes
+std/vyx-hints.vyrn	vhAnchorCol	yes
+std/vyx-hints.vyrn	checkOf	no, it calls `vhCheck`, which is not trap-free
+std/vyx-hints.vyrn	fires	no, it calls `checkOf`, which is not trap-free
+std/vyx.editor.vyrn	vyxNoCursor	yes
+std/vyx.editor.vyrn	vyxCharStart	yes
+std/vyx.editor.vyrn	vyxOffsetAt	yes
+std/vyx.editor.vyrn	vyxCharColAt	no, it keeps an index check
+std/vyx.editor.vyrn	vyxInScript	no, it calls `vyxSection`, which is not trap-free
+std/vyx.editor.vyrn	vyxInMustache	no, it keeps an index check
+std/vyx.editor.vyrn	vyxEnclosingOpenTag	no, it keeps an index check
+std/vyx.editor.vyrn	vyxCursorInTag	no, it keeps an index check
+std/vyx.editor.vyrn	vyxCursorAt	no, it calls `vyxInMustache`, which is not trap-free
+std/vyx.editor.vyrn	vyxDirectives	yes
+std/vyx.editor.vyrn	vyxElementNames	yes
+std/vyx.editor.vyrn	vyxGlobalAttrs	yes
+std/vyx.editor.vyrn	vyxElementAttrs	yes
+std/vyx.editor.vyrn	vyxEvents	yes
+std/vyx.editor.vyrn	vyxItem	yes
+std/vyx.editor.vyrn	vyxCapitalized	yes
+std/vyx.editor.vyrn	vyrnCompleteVyx	no, it keeps an index check
+std/vyx.editor.vyrn	vyxScriptView	no, it calls `vyxSection`, which is not trap-free
+std/vyx.editor.vyrn	vyxHasTemplate	no, it calls `vyxSectionAvoid`, which is not trap-free
+std/vyx.editor.vyrn	vyxStemOf	no, it calls `vyxSlice`, which is not trap-free
+std/vyx.editor.vyrn	vyxComponentView	no, it calls `vyxParseScriptAt`, which is not trap-free
+std/vyx.editor.vyrn	vyrnSourceVyx	no, it calls `vyxStemOf`, which is not trap-free
+std/vyx.editor.vyrn	vyrnDefinitionVyx	no, it calls `vyxSlice`, which is not trap-free
+std/vyx.vyrn	vyxSlice	no, it keeps an index check
+std/vyx.vyrn	vyxIsWs	yes
+std/vyx.vyrn	vyxIsIdent	yes
+std/vyx.vyrn	vyxLowerFirst	yes
+std/vyx.vyrn	vyxAppend	yes
+std/vyx.vyrn	vyxLineAt	yes
+std/vyx.vyrn	vyxColAt	yes
+std/vyx.vyrn	vyxSkipWs	no, it keeps an index check
+std/vyx.vyrn	vyxEscSecond	yes
+std/vyx.vyrn	vyxStrLit	yes
+std/vyx.vyrn	vyxFind	no, it keeps an index check
+std/vyx.vyrn	vyxFindLast	no, it calls `vyxFind`, which is not trap-free
+std/vyx.vyrn	vyxCollapseWs	yes
+std/vyx.vyrn	vyxScanFindCode	no, it keeps an index check
+std/vyx.vyrn	vyxMatchAt	yes
+std/vyx.vyrn	vyxScanFindMarkup	no, it keeps an index check
+std/vyx.vyrn	vyxMatchInterp	no, it keeps an index check
+std/vyx.vyrn	vyxScanQuote	yes
+std/vyx.vyrn	vyxScanAttrValue	no, it keeps an index check
+std/vyx.vyrn	vyxReadTagName	no, it keeps an index check
+std/vyx.vyrn	vyxErr	no, it calls `report`, which is not trap-free
+std/vyx.vyrn	vyxParseAttrs	no, it keeps an index check
+std/vyx.vyrn	vyxParseNodes	no, it keeps an index check
+std/vyx.vyrn	vyxParseElem	no, it keeps an index check
+std/vyx.vyrn	vyxDir	yes
+std/vyx.vyrn	vyxStripDirectives	yes
+std/vyx.vyrn	vyxParseForHead	no, it calls `vyxSlice`, which is not trap-free
+std/vyx.vyrn	vyxIsWsText	no, it calls `trim`, which is not trap-free
+std/vyx.vyrn	vyxElemHasDir	yes
+std/vyx.vyrn	vyxProcessElem	no, it calls `vyxProcessElemInner`, which is not trap-free
+std/vyx.vyrn	vyxProcessElemInner	no, it calls `vyxParseForHead`, which is not trap-free
+std/vyx.vyrn	vyxGroupNodes	no, it calls `vyxIsWsText`, which is not trap-free
+std/vyx.vyrn	vyxAttrsOf	yes
+std/vyx.vyrn	vyxElemLine	yes
+std/vyx.vyrn	vyxSectionUnclosed	yes
+std/vyx.vyrn	vyxSection	no, it calls `vyxSectionAvoid`, which is not trap-free
+std/vyx.vyrn	vyxSectionAvoid	no, it calls `vyxFind`, which is not trap-free
+std/vyx.vyrn	vyxSplitFields	no, it calls `vyxSlice`, which is not trap-free
+std/vyx.vyrn	vyxRebaseImport	no, it calls `vyxFind`, which is not trap-free
+std/vyx.vyrn	vyxLineStartOffset	yes
+std/vyx.vyrn	vyxLexKwBlock	no, it keeps an index check
+std/vyx.vyrn	vyxFindPropsBlock	no, it calls `vyxFindKwBlock`, which is not trap-free
+std/vyx.vyrn	vyxFindKwBlock	no, it calls `vyxLexKwBlock`, which is not trap-free
+std/vyx.vyrn	vyxMatchCurly	no, it keeps an index check
+std/vyx.vyrn	vyxImportsFirstViolation	no, it keeps an index check
+std/vyx.vyrn	vyxFirstNonWs	yes
+std/vyx.vyrn	vyxParseScript	no, it calls `vyxParseScriptAt`, which is not trap-free
+std/vyx.vyrn	vyxParseScriptAt	no, it calls `vyxSlice`, which is not trap-free
+std/vyx.vyrn	vyxFindPropsBlockFrom	no, it keeps an index check
+std/vyx.vyrn	vyxScriptErr	yes
+std/vyx.vyrn	vyxUsesChildren	yes
+std/vyx.vyrn	vyxNodeUsesChildren	yes
+std/vyx.vyrn	vyxIfUsesChildren	yes
+std/vyx.vyrn	vyxParseTemplate	no, it calls `vyxParseNodes`, which is not trap-free
+std/vyx.vyrn	vyxCompileComponent	no, it calls `vyxImportsFirstViolation`, which is not trap-free
+std/vyx.vyrn	vyxElementRoots	no, it calls `trim`, which is not trap-free
+std/vyx.vyrn	vyxRootLine	no, it keeps an index check
+std/vyx.vyrn	vyxCompErr	yes
+std/vyx.vyrn	vyxRegion	yes
+std/vyx.vyrn	vyxShiftAttrs	yes
+std/vyx.vyrn	vyxShiftNodes	yes
+std/vyx.vyrn	vyxShiftNode	yes
+std/vyx.vyrn	vyxShiftIf	yes
+std/vyx.vyrn	vyxCountNewlines	yes
+std/vyx.vyrn	vyxNormHelper	no, it calls `trim`, which is not trap-free
+std/vyx.vyrn	vyxRelocateComp	no, it calls `vyxParseScriptAt`, which is not trap-free
+std/vyx.vyrn	vyxLookup	yes
+std/vyx.vyrn	vyxEmitChildren	no, it calls `vyxEmitPush`, which is not trap-free
+std/vyx.vyrn	vyxEmitPush	no, it calls `vyxEmitIf`, which is not trap-free
+std/vyx.vyrn	vyxEmitElem	no, it calls `vyxEmitComp`, which is not trap-free
+std/vyx.vyrn	vyxEmitComp	no, it keeps an index check
+std/vyx.vyrn	vyxEmitProvider	no, it calls `vyxProvAttrs`, which is not trap-free
+std/vyx.vyrn	vyxProvNs	yes
+std/vyx.vyrn	vyxIdentBytes	yes
+std/vyx.vyrn	vyxProvAttrs	no, it calls `emit`, which is not trap-free
+std/vyx.vyrn	vyxChildText	yes
+std/vyx.vyrn	vyxEmitIf	no, it keeps an index check
+std/vyx.vyrn	vyxEmitFor	no, it calls `vyxEmitChildren`, which is not trap-free
+std/vyx.vyrn	vyxEmitAttrs	no, it calls `vyxEmitEvent`, which is not trap-free
+std/vyx.vyrn	vyxEmitEvent	no, it calls `trim`, which is not trap-free
+std/vyx.vyrn	vyxIsIdentifier	yes
+std/vyx.vyrn	vyxHasTopComma	no, it keeps an index check
+std/vyx.vyrn	vyxParseImport	no, it calls `vyxFind`, which is not trap-free
+std/vyx.vyrn	vyxMergeImports	no, it calls `vyxParseImport`, which is not trap-free
+std/vyx.vyrn	vyxImportLine	yes
+std/vyx.vyrn	vyxEmitSignature	yes
+std/vyx.vyrn	vyxEmitComponent	no, it calls `vyxEmitRoot`, which is not trap-free
+std/vyx.vyrn	vyxEmitRoot	no, it calls `vyxEmitRootElem`, which is not trap-free
+std/vyx.vyrn	vyxEmitRootElem	no, it calls `vyxEmitComp`, which is not trap-free
+std/vyx.vyrn	vyxEmitRootWrap	no, it calls `vyxEmitPush`, which is not trap-free
+std/vyx.vyrn	vyxBuildModule	no, it calls `trim`, which is not trap-free
+std/vyx.vyrn	vyxImportedNames	no, it calls `vyxParseImport`, which is not trap-free
+std/vyx.vyrn	vyxHelperBlock	yes
+std/vyx.vyrn	vyxCompNames	yes
+std/vyx.vyrn	vyxNoSchema	yes
+std/vyx.vyrn	vyxNoOrigin	yes
+std/vyx.vyrn	vyxEmittedInterface	yes
+std/vyx.vyrn	vyxFinish	no, it calls `vyxBuildModule`, which is not trap-free
+std/vyx.vyrn	vyxCannotRead	yes
+std/vyx.vyrn	vyxReadDir	yes
+std/vyx.vyrn	vyxReadFileOf	yes
+std/vyx.vyrn	components	no, it calls `vyxSlice`, which is not trap-free
+std/vyx.vyrn	componentsThemed	no, it calls `vyxSlice`, which is not trap-free
+std/vyx.vyrn	vyxIsDeclOf	no, it calls `vyxSlice`, which is not trap-free
+std/vyx.vyrn	vyxDeclLine	no, it calls `lines`, which is not trap-free
+std/vyx.vyrn	vyxScriptHasDecl	no, it calls `vyxDeclLine`, which is not trap-free
+std/vyx.vyrn	vyxDeclRet	no, it calls `vyxFind`, which is not trap-free
+std/vyx.vyrn	vyxDataForm	yes
+std/vyx.vyrn	vyxDataFormIsLazy	yes
+std/vyx.vyrn	vyxDataFormHasParams	yes
+std/vyx.vyrn	vyxDataRunner	yes
+std/vyx.vyrn	vyxQueryDataType	no, it calls `vyxFind`, which is not trap-free
+std/vyx.vyrn	vyxLoaderDataType	no, it calls `vyxFind`, which is not trap-free
+std/vyx.vyrn	vyxScriptLayoutNone	no, it calls `lines`, which is not trap-free
+std/vyx.vyrn	vyxIsLayoutLine	no, it calls `trim`, which is not trap-free
+std/vyx.vyrn	vyxDataShapeOf	no, it calls `vyxDeclRet`, which is not trap-free
+std/vyx.vyrn	vyxDeclParamTypes	no, it keeps an index check
+std/vyx.vyrn	vyxAfterColon	no, it calls `vyxSlice`, which is not trap-free
+std/vyx.vyrn	vyxPageInterface	no, it calls `vyxSlice`, which is not trap-free
+std/vyx.vyrn	vyxRetOfDecl	no, it calls `vyxFind`, which is not trap-free
+std/vyx.vyrn	vyxPageShape	no, it calls `vyxImportsFirstViolation`, which is not trap-free
+std/vyx.vyrn	vyxAccessorName	yes
+std/vyx.vyrn	vyxUpperFirst	yes
+std/vyx.vyrn	vyxRenameAccessor	no, it calls `vyxSlice`, which is not trap-free
+std/vyx.vyrn	vyxAccessorDecl	no, it calls `vyxIsDeclOf`, which is not trap-free
+std/vyx.vyrn	vyxAutoExportPageDecls	no, it calls `lines`, which is not trap-free
+std/vyx.vyrn	vyxPageArgs	yes
+std/vyx.vyrn	vyxNoHead	yes
+std/vyx.vyrn	vyxHeadEntry	no, it calls `vyxSkipWs`, which is not trap-free
+std/vyx.vyrn	vyxParseHead	no, it calls `vyxFind`, which is not trap-free
+std/vyx.vyrn	vyxStripHead	no, it calls `vyxSlice`, which is not trap-free
+std/vyx.vyrn	vyxHeadItemExpr	yes
+std/vyx.vyrn	vyxEmitHeadFns	yes
+std/vyx.vyrn	vyxHeadCallArgs	yes
+std/vyx.vyrn	vyxHeadArgsOk	yes
+std/vyx.vyrn	vyxEmitAccessorHeadFns	yes
+std/vyx.vyrn	vyxEmitAccessorHeadTitle	yes
+std/vyx.vyrn	vyxEmitHeadTitleFn	yes
+std/vyx.vyrn	vyxIsIdentByte	yes
+std/vyx.vyrn	vyxWordUsed	yes
+std/vyx.vyrn	vyxIsDataDecl	no, it calls `vyxIsDeclOf`, which is not trap-free
+std/vyx.vyrn	vyxStripLoadFn	no, it calls `vyxSlice`, which is not trap-free
+std/vyx.vyrn	vyxCalledInCorpus	yes
+std/vyx.vyrn	vyxImportIsRelative	no, it calls `vyxFind`, which is not trap-free
+std/vyx.vyrn	vyxMentionsIdent	no, it keeps an index check
+std/vyx.vyrn	vyxStripDeadHelpers	no, it calls `vyxStripDeadHelpersOnce`, which is not trap-free
+std/vyx.vyrn	vyxStripDeadHelpersOnce	no, it calls `vyxSlice`, which is not trap-free
+std/vyx.vyrn	vyxDeclNameOf	no, it calls `vyxFind`, which is not trap-free
+std/vyx.vyrn	vyxClientHelperViolation	no, it calls `lines`, which is not trap-free
+std/vyx.vyrn	vyxImportBoundName	no, it calls `vyxFind`, which is not trap-free
+std/vyx.vyrn	vyxLastIdent	no, it calls `vyxSlice`, which is not trap-free
+std/vyx.vyrn	vyxImportNameDead	yes
+std/vyx.vyrn	vyxPruneOneImport	no, it calls `vyxFind`, which is not trap-free
+std/vyx.vyrn	vyxStripLineComment	no, it calls `vyxFind`, which is not trap-free
+std/vyx.vyrn	vyxNonImportBody	no, it calls `lines`, which is not trap-free
+std/vyx.vyrn	vyxJoinExcept	no, it calls `vyxStripLineComment`, which is not trap-free
+std/vyx.vyrn	vyxPruneClientImports	no, it calls `lines`, which is not trap-free
+std/vyx.vyrn	vyxEmitClientRender	yes
+std/vyx.vyrn	vyxEmitPageLoading	yes
+std/vyx.vyrn	vyxEmitClientRenderLoading	yes
+std/vyx.vyrn	vyxBuildPageModule	no, it calls `vyxBuildPageModuleAt`, which is not trap-free
+std/vyx.vyrn	vyxBuildPageClientModuleAt	no, it calls `vyxBuildPageModuleImpl`, which is not trap-free
+std/vyx.vyrn	vyxBuildPageModuleAt	no, it calls `vyxBuildPageModuleImpl`, which is not trap-free
+std/vyx.vyrn	vyxDataCap	yes
+std/vyx.vyrn	vyxBuildPageModuleImpl	no, it calls `vyxSlice`, which is not trap-free
+std/vyx.vyrn	vyxPage	no, it calls `vyxDirOf`, which is not trap-free
+std/vyx.vyrn	vyxPageThemed	no, it calls `vyxDirOf`, which is not trap-free
+std/vyx.vyrn	vyxPageClient	no, it calls `vyxDirOf`, which is not trap-free
+std/vyx.vyrn	vyxPageClientThemed	no, it calls `vyxDirOf`, which is not trap-free
+std/vyx.vyrn	vyxDirOf	no, it calls `vyxSlice`, which is not trap-free
+std/vyx.vyrn	vyxBuildLayoutModule	no, it calls `vyxBuildLayoutModuleAt`, which is not trap-free
+std/vyx.vyrn	vyxBuildLayoutModuleAt	no, it calls `vyxSlice`, which is not trap-free
+std/vyx.vyrn	vyxLayout	no, it calls `vyxDirOf`, which is not trap-free
+std/vyx.vyrn	vyxLayoutThemed	no, it calls `vyxDirOf`, which is not trap-free
+std/vyx.vyrn	vyxBuildErrorModule	no, it calls `vyxBuildErrorModuleAt`, which is not trap-free
+std/vyx.vyrn	vyxBuildErrorModuleAt	no, it calls `vyxSlice`, which is not trap-free
+std/vyx.vyrn	vyxError	no, it calls `vyxDirOf`, which is not trap-free
+std/vyx.vyrn	vyxErrorThemed	no, it calls `vyxDirOf`, which is not trap-free
+std/vyx.vyrn	Owned$VyxNode$release	yes

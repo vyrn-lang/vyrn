@@ -1606,6 +1606,13 @@ fn why_cost(flags: GlobalFlags, file: &str) -> Outcome {
         count(kept, "checks kept"),
         count(proved, "checks proved"),
     );
+    for (id, cause) in vyrn_lower::verdict::trap_free(&program, &world) {
+        let name = program
+            .spellings
+            .written(&program.functions[id.index()].name);
+        let said = cause.map_or("yes".into(), |c| format!("no, {}", c.text(true)));
+        println!("  {name}: trap-free: {said}");
+    }
     Ok(ExitCode::SUCCESS)
 }
 

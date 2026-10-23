@@ -36,3 +36,17 @@ fn main() -> Int64
   173  loop 1   copies `String`: interpolating a `String` copies it
        loop 1   allocates `String` x3
 summary: allocating rows 20 (9 in loops), growing rows 6 (5 in loops), copies 5 (4 in loops), checks kept 1 (1 in loops), checks proved 20 (15 in loops)
+  namedFragments: trap-free: yes
+  code: trap-free: yes
+  modulusOf: trap-free: yes
+  thirdSequence: trap-free: yes
+  countKmers: trap-free: no, it calls `panic` at line 48
+  unpack: trap-free: no, it keeps an index check at line 73
+  pack: trap-free: yes
+  fixed3: trap-free: yes
+  byCountThenFrag: trap-free: yes
+  ranked: trap-free: no, it calls `sortWith` at line 125, which is not trap-free
+  report: trap-free: no, it calls `countKmers` at line 129, which is not trap-free
+  countOf: trap-free: no, it calls `countKmers` at line 138, which is not trap-free
+  syntheticSequence: trap-free: yes
+  main: trap-free: no, it calls `report` at line 170, which is not trap-free

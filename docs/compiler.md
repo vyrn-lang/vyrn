@@ -505,6 +505,8 @@ run as their own gate:
 - `effects.rs`: the effect judgment agrees with the floor and the audience
   pass, or the disagreement is on the ratchet.
 - `typed.rs`: every store into a validated place has a legal producer.
+- `fnverdicts.rs`: each function's trap-free verdict and first cause, against
+  `tests/pins/fn-verdicts.tsv`.
 
 Memory at run time:
 
@@ -570,6 +572,16 @@ callee outside the root file counts at the calling line through
 reason in `Check::why`, written beside the verdict by `elide::Walk::why` from
 the first goal that failed and the origin of its names (`elide::Origin`); it
 calls the prover no more often.
+
+`verdict::trap_free` (`verdict.rs`) gives each function of the root file its
+trap-free verdict for the same report. It walks the decided bodies the root's
+functions reach by direct calls and declared releases: a frame's own cause is
+its first explicit trap call, kept check row, call through a function value,
+extern call or call into a row with no body. The distance in calls to the
+nearest own cause is solved by `fixpoint::solve`, so a cycle with no cause is
+trap-free (the greatest fixpoint). It cannot join the effect judgment's walk,
+which runs before `check::state` adds the rows. `tests/fnverdicts.rs` pins
+the verdict of every function of the corpus.
 
 `vyrn why --provenance` prints `provenance::table`: per function of the root
 file that returns an array, the class of the backward map from the result's

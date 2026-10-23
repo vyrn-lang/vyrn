@@ -14,3 +14,12 @@ fn system() -> Array<Body>
 fn offsetMomentum(bodies: Array<Body>) -> Array<Body>
    95           index check: it needs `bodies` non-empty, and `bodies` is a parameter, so the function cannot know what its callers pass; only a `read` parameter takes a `where` clause that could state it
 summary: allocating rows 6 (1 in loops), growing rows 5 (0 in loops), copies 3 (1 in loops), checks kept 1 (0 in loops), checks proved 50 (45 in loops)
+  fixed9: trap-free: yes
+  solarMass: trap-free: yes
+  daysPerYear: trap-free: yes
+  system: trap-free: yes
+  offsetMomentum: trap-free: no, it keeps an index check at line 95
+  energy: trap-free: yes
+  advance: trap-free: yes
+  integrate: trap-free: no, it calls `offsetMomentum` at line 153, which is not trap-free
+  main: trap-free: no, it calls `offsetMomentum` at line 167, which is not trap-free

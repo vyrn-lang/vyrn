@@ -20,6 +20,7 @@ mod pipeline;
 pub mod provenance;
 pub mod rules;
 pub mod typed;
+pub mod verdict;
 mod world;
 
 pub use pipeline::{

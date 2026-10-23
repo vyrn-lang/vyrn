@@ -23,3 +23,13 @@ fn unproved(n: Int64) -> Int64
 fn fromOutside(a: Array<Int64>) -> Int64
    71           index check: it needs `a` non-empty, and `a` is a parameter, so the function cannot know what its callers pass; add `where value.length >= 1` to `a`, and each call checks it where the caller cannot show it
 summary: allocating rows 4 (0 in loops), growing rows 1 (0 in loops), copies 0 (0 in loops), checks kept 8 (2 in loops), checks proved 0 (0 in loops)
+  make: trap-free: yes
+  drain: trap-free: yes
+  fromInput: trap-free: no, it keeps an index check at line 15
+  fromCall: trap-free: no, it keeps an index check at line 23
+  fromCaller: trap-free: no, it keeps an index check at line 28
+  resized: trap-free: no, it keeps an index check at line 37
+  fromField: trap-free: no, it keeps an index check at line 46
+  counted: trap-free: no, it keeps an index check at line 54
+  unproved: trap-free: no, it keeps an index check at line 66
+  fromOutside: trap-free: no, it keeps an index check at line 71
