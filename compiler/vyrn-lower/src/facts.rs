@@ -1039,8 +1039,8 @@ impl State {
 
     /// One side of `n`'s conditions after a join of `live` into the state
     /// `known` indexes: what every live state proves with that side assumed,
-    /// less what `known` proves alone. A state the side makes dead proves
-    /// every fact.
+    /// less what one premise of `known` states ([`Prover::states`]). A state
+    /// the side makes dead proves every fact.
     fn when(
         live: &[&State],
         n: Name,
@@ -1073,7 +1073,7 @@ impl State {
         }
         (j.facts.iter().cloned())
             .chain(j.unshared(known.st))
-            .filter(|c| !known.proves(c))
+            .filter(|c| !known.states(c))
             .map(Fact::Ge)
             .chain((j.ne.iter().filter(|d| !known.differs(d))).map(|d| Fact::Ne(d.clone())))
             .collect()
@@ -1222,6 +1222,16 @@ impl<'a> Prover<'a> {
         self.st.dead || self.prove(goal, |_, _| ()).is_some()
     }
 
+    /// Whether one premise proves `goal`. A fact only a chain proves is
+    /// still a premise a longer goal may need, because the search chains at
+    /// most two.
+    pub fn states(&self, goal: &Lin) -> bool {
+        self.st.dead
+            || (self.st.norm(goal)).is_some_and(|g| {
+                (g.is_const() && g.c >= 0) || self.one(&g, &g.terms, g.c).is_some()
+            })
+    }
+
     /// The search of [`Prover::ge0`]: `done` of the premises and the slack it
     /// found, with the factor it divided the goal by, one when none. A goal
     /// whose coefficients share a factor is also asked divided by it:
@@ -1245,6 +1255,22 @@ impl<'a> Prover<'a> {
         Some((by, self.search(&divided, &done)?))
     }
 
+    /// The premise of a search for `g` whose terms are `terms` with the
+    /// least constant, when that constant is at most `c`: a fact, or the
+    /// axiom of a length a fact or `g` names. The first on a tie.
+    fn one(&self, g: &Lin, terms: &[(Term, i64)], c: i64) -> Option<Prem<'a>> {
+        let fact = self.best.get(terms).map(|p| Prem::Fact(p));
+        let indexed = axiom_on(terms, |t| self.lengths.binary_search(&t).is_ok());
+        let indexed = fact
+            .into_iter()
+            .chain(indexed)
+            .reduce(|m, p| if p.c() < m.c() { p } else { m });
+        indexed
+            .into_iter()
+            .chain(axiom_on(terms, |t| g.coef(t) != 0))
+            .find(|p| p.c() <= c)
+    }
+
     /// Proves `goal >= 0` from at most two premises, or from one premise and
     /// a length axiom for each length the rest names, and answers `done` of
     /// the premises, each taken a whole number of times, and the slack.
@@ -1253,19 +1279,7 @@ impl<'a> Prover<'a> {
         if g.is_const() {
             return (g.c >= 0).then(|| done(&[], g.c));
         }
-        let one = |terms: &[(Term, i64)], c: i64| {
-            let fact = self.best.get(terms).map(|p| Prem::Fact(p));
-            let indexed = axiom_on(terms, |t| self.lengths.binary_search(&t).is_ok());
-            // The premise with the least constant, the first on a tie.
-            let indexed = fact
-                .into_iter()
-                .chain(indexed)
-                .reduce(|m, p| if p.c() < m.c() { p } else { m });
-            indexed
-                .into_iter()
-                .chain(axiom_on(terms, |t| g.coef(t) != 0))
-                .find(|p| p.c() <= c)
-        };
+        let one = |terms: &[(Term, i64)], c: i64| self.one(&g, terms, c);
         if let Some(p) = one(&g.terms, g.c) {
             return Some(done(&[(1, p)], g.c - p.c()));
         }

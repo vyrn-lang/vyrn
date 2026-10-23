@@ -165,6 +165,38 @@ fn a_condition_stored_in_a_bool_proves_its_index() {
     );
 }
 
+/// The inner `lo < xs.length` follows from the outer guards by a chain of two,
+/// and stays a premise: `d`'s exactness needs it beside a length axiom, a
+/// chain of three without it. Written in the other order, the guards proved
+/// the read already (`facts::Prover::states`).
+#[test]
+fn a_condition_a_chain_implies_stays_a_premise() {
+    let src = "export fn w(xs: Array<Int64>, lo: Int64, hi: Int64) -> Int64 {
+    if lo < hi && hi <= xs.length {
+        if lo >= 0 && lo < xs.length {
+            let d = hi - lo
+            let q = d / 2
+            if q < d && q < xs.length {
+                return xs[lo + q]
+            }
+        }
+    }
+    return 0
+}
+";
+    assert_eq!(
+        verdicts(src, "w"),
+        [
+            "proved int-div-zero",
+            "proved int-div-overflow",
+            "proved array-index"
+        ]
+    );
+    let (err, rows) = oracle(src, "    print(w(xs, 0, 3).toString())", "w");
+    assert_eq!(err, "");
+    assert_eq!(rows[2], "7 0 array-index proved 1");
+}
+
 #[test]
 fn two_arrays_a_loop_grows_in_step_keep_equal_lengths() {
     let src = "fn w(n: Int64) -> Int64 {
