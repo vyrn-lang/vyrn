@@ -359,19 +359,7 @@ fn handle(req: Request) -> Response {
     return Response { status: 200, contentType: "text/plain", body: bump().toString(), vary: "", headers: [:] }
 }
 "#;
-    let file = write_temp_source(src);
-
-    let out = Command::new(env!("CARGO_BIN_EXE_vyrn"))
-        .arg("serve")
-        .arg(&file.path)
-        .arg("--port")
-        .arg("0")
-        .arg("--workers")
-        .arg("2")
-        .output()
-        .expect("run vyrn serve");
-    assert!(!out.status.success(), "the gate must refuse --workers");
-    let err = String::from_utf8_lossy(&out.stderr);
+    let err = workers_refusal(src);
     assert!(
         err.contains(
             "error: `--workers` needs a module-state-free `handle`: `handle` -> `bump` \
@@ -380,6 +368,44 @@ fn handle(req: Request) -> Response {
         ),
         "refusal names the call path:\n{err}"
     );
+}
+
+#[test]
+fn workers_are_refused_when_handle_reaches_module_state_through_a_function_value() {
+    let src = r#"
+let mut hits: Int64 = 0
+
+fn bump(x: Int64) -> Int64 {
+    hits = hits + x
+    return hits
+}
+
+fn apply(f: fn(Int64) -> Int64, x: Int64) -> Int64 {
+    return f(x)
+}
+
+fn handle(req: Request) -> Response {
+    return Response { status: 200, contentType: "text/plain", body: apply(bump, 1).toString(), vary: "", headers: [:] }
+}
+"#;
+    let err = workers_refusal(src);
+    assert!(
+        err.contains("`handle` -> `apply` -> `bump` reads or writes module state `hits`"),
+        "refusal names the call path through the argument:\n{err}"
+    );
+}
+
+/// The stderr of `vyrn serve --workers 2` on `src`, which the gate refuses.
+fn workers_refusal(src: &str) -> String {
+    let file = write_temp_source(src);
+    let out = Command::new(env!("CARGO_BIN_EXE_vyrn"))
+        .arg("serve")
+        .arg(&file.path)
+        .args(["--port", "0", "--workers", "2"])
+        .output()
+        .expect("run vyrn serve");
+    assert!(!out.status.success(), "the gate must refuse --workers");
+    String::from_utf8_lossy(&out.stderr).to_string()
 }
 
 /// The gate names module state as its module wrote it, though the loader

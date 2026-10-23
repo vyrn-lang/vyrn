@@ -1117,11 +1117,7 @@ fn check_accum_inner(
     };
     for s in effects.sources.iter_mut().chain(&mut effects.arg_sources) {
         lowered(&mut s.sig);
-        for t in s.lambda.iter_mut().flat_map(|l| &mut l.nested_sigs) {
-            lowered(t);
-        }
     }
-    effects.calls.iter_mut().for_each(|(_, t)| lowered(t));
     acc.binders.values_mut().for_each(written);
     let mut derived = acc.derive;
     for site in &mut derived {
@@ -1536,7 +1532,8 @@ pub struct Recorded {
     /// A declared call whose arity, type-argument count or argument the typed
     /// judgment refuses, keyed by the [`Expr::Call`] node.
     pub calls: HashMap<NodeId, CallDecl>,
-    /// The stored-function-value collection the `--workers` gate reads.
+    /// The function values the program stores and passes, which the effect
+    /// judgment reads for a call through a value.
     pub stored: StoredFnEffects,
     /// Each source body's name lookups, each key once per body, in the order
     /// read: a function, module state, a type declaration and an enum
@@ -3085,12 +3082,7 @@ impl<'a> Checker<'a> {
         let mark = self.errors.borrow().len();
         let stored = {
             let s = &self.acc.borrow().stored;
-            (
-                s.sources.len(),
-                s.arg_sources.len(),
-                s.calls.len(),
-                s.dispatched.len(),
-            )
+            (s.sources.len(), s.arg_sources.len(), s.dispatched.len())
         };
         let saved = self.pending_subst.take();
         let mut sc = scope.clone();
@@ -3100,8 +3092,7 @@ impl<'a> Checker<'a> {
         let s = &mut self.acc.borrow_mut().stored;
         s.sources.truncate(stored.0);
         s.arg_sources.truncate(stored.1);
-        s.calls.truncate(stored.2);
-        s.dispatched.truncate(stored.3);
+        s.dispatched.truncate(stored.2);
     }
 
     fn block(&self, block: &Block, ret: &Type, scope: &mut Scope) {
@@ -4846,17 +4837,6 @@ impl<'a> Checker<'a> {
                     }
                     self.prove_coercion(arg, pty, line)?;
                 }
-                // A call through a stored value (any binding outside the
-                // params frame, index 1) dispatches over the signature's
-                // collected sources, so the effect fixpoint needs
-                // (caller, signature). A parameter call keeps caller-site
-                // attribution.
-                let frame = scope.iter().rposition(|f| f.contains_key(name));
-                if frame != Some(1) {
-                    let caller = self.frame.borrow().name.clone();
-                    let sig = self.base(&binding.ty);
-                    self.acc.borrow_mut().stored.calls.push((caller, sig));
-                }
                 self.acc.borrow_mut().stored.through.insert(node);
                 return Ok((*ret).clone());
             }
@@ -6103,9 +6083,6 @@ impl<'a> Checker<'a> {
         }
         let mut locals: HashSet<String> = params.iter().map(|p| p.name.clone()).collect();
         self.check_lambda_body_captures(body, scope, &mut locals, *line)?;
-        // Stored calls in the body belong to this lambda's summary, not the
-        // enclosing function's: the body runs wherever the value is invoked.
-        let calls_before = self.acc.borrow().stored.calls.len();
         match body {
             LambdaBody::Expr(e) => {
                 // The core refuses a body the slot does not take.
@@ -6116,43 +6093,6 @@ impl<'a> Checker<'a> {
             }
             LambdaBody::Block(b) => self.block(b, &ret, &mut inner),
         }
-        let nested_sigs: Vec<Type> = self.acc.borrow().stored.calls[calls_before..]
-            .iter()
-            .map(|(_, s)| s.clone())
-            .collect();
-        // Effect summary for `--workers`: the body's call names and the first
-        // module-state binding it touches.
-        let mut calls: std::collections::HashSet<String> = Default::default();
-        {
-            let acc = self.acc.borrow();
-            let mut v = Calls(&mut calls, &acc.stored.through);
-            let mut locals = HashSet::new();
-            match body {
-                LambdaBody::Expr(e) => body_expr(e, &locals, &mut v),
-                LambdaBody::Block(b) => body_block(b, &mut locals, &mut v),
-            }
-        }
-        // Names that shadow module state: the lambda's parameters and every
-        // frame (module state is `Scope`'s fall-through, not a frame). The
-        // walk adds the body's binders where their scopes start.
-        let mut local_names: HashSet<String> = params.iter().map(|p| p.name.clone()).collect();
-        for frame in scope.iter() {
-            local_names.extend(frame.keys().cloned());
-        }
-        let globals = self.globals.borrow();
-        let mut gnames: Vec<&String> = globals.keys().collect();
-        gnames.sort();
-        let touches_global = gnames
-            .into_iter()
-            .find(|g| {
-                let single: std::collections::HashSet<String> =
-                    std::iter::once((*g).clone()).collect();
-                match body {
-                    LambdaBody::Expr(e) => global_ref_expr(e, &single, &local_names),
-                    LambdaBody::Block(b) => global_ref_block(b, &single, &local_names),
-                }
-            })
-            .cloned();
         self.acc.borrow_mut().stored.sources.push(StoredSource {
             sig: sig.clone(),
             named: None,
@@ -6160,9 +6100,6 @@ impl<'a> Checker<'a> {
                 defined_in: self.frame.borrow().name.clone(),
                 line: *line,
                 col: *col,
-                calls,
-                touches_global,
-                nested_sigs,
             }),
         });
         Ok(exp.clone())
@@ -6206,15 +6143,10 @@ impl<'a> Checker<'a> {
         let source = StoredSource {
             sig: self.base(sig),
             named: named.map(str::to_string),
-            // Only the frame key is filled: the workers analysis reads
-            // `sources` alone (see `StoredFnEffects::arg_sources`).
             lambda: lambda_at.map(|(line, col)| StoredLambda {
                 defined_in: self.frame.borrow().name.clone(),
                 line,
                 col,
-                calls: HashSet::new(),
-                touches_global: None,
-                nested_sigs: Vec::new(),
             }),
         };
         self.acc.borrow_mut().stored.arg_sources.push(source);
@@ -6971,20 +6903,13 @@ pub struct StoredSource {
     pub lambda: Option<StoredLambda>,
 }
 
-/// A lambda source's effect summary, computed where the literal is checked;
-/// the workers analysis unions these over a signature's sources.
+/// A lambda source, by the key its frame is found under.
 #[derive(Debug, Clone)]
 pub struct StoredLambda {
     /// The function whose body contains the literal.
     pub defined_in: String,
     pub line: usize,
     pub col: usize,
-    /// Every call name in the body (functions, builtins, methods).
-    pub calls: std::collections::HashSet<String>,
-    /// The first module-state binding the body reads or writes.
-    pub touches_global: Option<String>,
-    /// Signatures of other stored function values the body calls.
-    pub nested_sigs: Vec<Type>,
 }
 
 /// Whole-program call facts a call name does not carry: stored function
@@ -6995,12 +6920,8 @@ pub struct StoredFnEffects {
     /// The functions handed to a `fn`-typed parameter at a call site.
     ///
     /// Kept apart from `sources` because an argument carries no
-    /// defunctionalization tag; the `--workers` analysis reads `sources`
-    /// alone, and the effect judgment reads both. Only `sig`, `named` and a
-    /// lambda's `defined_in`, `line` and `col` are filled.
+    /// defunctionalization tag; the effect judgment reads both.
     pub arg_sources: Vec<StoredSource>,
-    /// `(function, signature)` for each call through a stored fn value.
-    pub calls: Vec<(String, Type)>,
     /// Every call node resolved through a binding of `fn` type, parameter
     /// calls included ([`Checker::call`]); [`fn_calls`] leaves them out.
     pub through: HashSet<NodeId>,
@@ -7016,7 +6937,6 @@ impl StoredFnEffects {
     fn extend(&mut self, tail: StoredFnEffects) {
         self.sources.extend(tail.sources);
         self.arg_sources.extend(tail.arg_sources);
-        self.calls.extend(tail.calls);
         self.through.extend(tail.through);
         self.dispatched.extend(tail.dispatched);
     }
@@ -7063,127 +6983,6 @@ pub fn fn_sigs_match(a: &Type, b: &Type) -> bool {
         }
         _ => a == b,
     }
-}
-
-/// Returns the shortest call chain from `root` to a function that reads or
-/// writes module state, with the global's name, or `None`. Gates `vyrn serve
-/// --workers`: per-worker copies of module state would diverge. Output and
-/// file I/O do not gate it.
-pub fn module_state_use(
-    program: &Program,
-    root: &str,
-    stored: &StoredFnEffects,
-) -> Option<(Vec<String>, String)> {
-    let global_names: std::collections::HashSet<String> =
-        program.globals.iter().map(|g| g.name.clone()).collect();
-    if global_names.is_empty() {
-        return None;
-    }
-    // Each signature called through a stored value is a pseudo node whose
-    // callees are its sources. A lambda source that touches module state is
-    // itself the offender.
-    let pseudo_id = |sig: &Type| format!("a stored `{sig}` value");
-    let mut pseudo_sigs: Vec<Type> = Vec::new();
-    for (_, sig) in &stored.calls {
-        if !pseudo_sigs.iter().any(|s| fn_sigs_match(s, sig)) {
-            pseudo_sigs.push(sig.clone());
-        }
-    }
-    let funcs: HashMap<&str, &Function> = program
-        .functions
-        .iter()
-        .map(|f| (f.name.as_str(), f))
-        .collect();
-    // Breadth-first with parent links, so the first hit is the shortest
-    // chain; callees visit in sorted order.
-    let mut parent: HashMap<String, Option<String>> = HashMap::from([(root.to_string(), None)]);
-    let mut queue: std::collections::VecDeque<String> =
-        std::collections::VecDeque::from([root.to_string()]);
-    let chain_to = |cur: &String, parent: &HashMap<String, Option<String>>| {
-        let mut chain = vec![cur.clone()];
-        let mut p = parent[cur].clone();
-        while let Some(prev) = p {
-            p = parent[&prev].clone();
-            chain.push(prev);
-        }
-        chain.reverse();
-        let written = |n: String| program.spellings.written(&n).to_string();
-        chain.into_iter().map(written).collect::<Vec<String>>()
-    };
-    while let Some(cur) = queue.pop_front() {
-        if let Some(sig) = pseudo_sigs.iter().find(|s| pseudo_id(s) == cur) {
-            let mut callees: Vec<String> = Vec::new();
-            for src in &stored.sources {
-                if !fn_sigs_match(&src.sig, sig) {
-                    continue;
-                }
-                if let Some(n) = &src.named {
-                    callees.push(n.clone());
-                }
-                if let Some(l) = &src.lambda {
-                    if let Some(g) = &l.touches_global {
-                        return Some((
-                            chain_to(&cur, &parent),
-                            program.spellings.written(g).to_string(),
-                        ));
-                    }
-                    callees.extend(l.calls.iter().cloned());
-                    callees.extend(l.nested_sigs.iter().map(&pseudo_id));
-                }
-            }
-            callees.sort();
-            for callee in callees {
-                let known = funcs.contains_key(callee.as_str())
-                    || pseudo_sigs.iter().any(|s| pseudo_id(s) == callee);
-                if known && !parent.contains_key(&callee) {
-                    parent.insert(callee.clone(), Some(cur.clone()));
-                    queue.push_back(callee);
-                }
-            }
-            continue;
-        }
-        let Some(f) = funcs.get(cur.as_str()) else {
-            continue;
-        };
-        if touches_globals(f, &global_names) {
-            let mut names: Vec<&String> = program.globals.iter().map(|g| &g.name).collect();
-            names.sort();
-            let which = names
-                .into_iter()
-                .find(|g| {
-                    let single: std::collections::HashSet<String> =
-                        std::iter::once((*g).clone()).collect();
-                    touches_globals(f, &single)
-                })
-                .cloned()
-                .unwrap_or_default();
-            return Some((
-                chain_to(&cur, &parent),
-                program.spellings.written(&which).to_string(),
-            ));
-        }
-        let mut callees: Vec<String> = fn_calls(&f.body, &stored.through).into_iter().collect();
-        for (fname, to) in &stored.dispatched {
-            if fname == &cur {
-                callees.push(to.clone());
-            }
-        }
-        for (fname, sig) in &stored.calls {
-            if fname == &cur {
-                callees.push(pseudo_id(sig));
-            }
-        }
-        callees.sort();
-        for callee in callees {
-            let known = funcs.contains_key(callee.as_str())
-                || pseudo_sigs.iter().any(|s| pseudo_id(s) == callee);
-            if known && !parent.contains_key(&callee) {
-                parent.insert(callee.clone(), Some(cur.clone()));
-                queue.push_back(callee);
-            }
-        }
-    }
-    None
 }
 
 /// Whether `f` reads or writes a global no local of the same name shadows.
@@ -7251,20 +7050,6 @@ fn global_ref_block(
         found: false,
     };
     body_block(b, &mut locals, &mut v);
-    v.found
-}
-
-/// [`global_ref_block`] for one expression.
-fn global_ref_expr(
-    e: &Expr,
-    globals: &std::collections::HashSet<String>,
-    local: &std::collections::HashSet<String>,
-) -> bool {
-    let mut v = GlobalRef {
-        globals,
-        found: false,
-    };
-    body_expr(e, local, &mut v);
     v.found
 }
 
@@ -7550,118 +7335,6 @@ mod tests {
         ))
         .unwrap_err();
         assert!(e.contains("`Age`"), "{e}");
-    }
-
-    #[test]
-    fn module_state_use_reports_the_call_chain_and_global() {
-        let src = "let mut hits: Int64 = 0\n\
-                   fn bump() -> Int64 { hits = hits + 1\n return hits }\n\
-                   fn respond() -> Int64 { return bump() }\n\
-                   fn handle(n: Int64) -> Int64 { return respond() }\n";
-        let program = parse(lex(src).unwrap()).unwrap();
-        let (chain, global) =
-            module_state_use(&program, "handle", &Default::default()).expect("stateful");
-        assert_eq!(chain, vec!["handle", "respond", "bump"]);
-        assert_eq!(global, "hits");
-    }
-
-    #[test]
-    fn workers_gate_walks_through_stored_values() {
-        // The global is reached only through the stored value's source, so
-        // the chain names the pseudo node and the source function.
-        let src = "let mut hits: Int64 = 0\n\
-             fn stateful(x: Int64) -> Int64 { return x + hits }\n\
-             fn make() -> fn(Int64) -> Int64 { return stateful }\n\
-             fn respond(x: Int64) -> Int64 { let m = make()  return m(x) }\n\
-             fn handle(n: Int64) -> Int64 { return respond(n) }\n";
-        let program = parse(lex(src).unwrap()).unwrap();
-        let stored = record(&program).stored;
-        let (chain, global) =
-            module_state_use(&program, "handle", &stored).expect("stateful through storage");
-        assert_eq!(global, "hits");
-        assert_eq!(
-            chain,
-            vec![
-                "handle".to_string(),
-                "respond".to_string(),
-                "a stored `fn(Int64) -> Int64` value".to_string(),
-                "stateful".to_string(),
-            ],
-            "{chain:?}"
-        );
-    }
-
-    #[test]
-    fn workers_gate_walks_the_impl_a_method_call_dispatches_to() {
-        // `Pa` and `Qa` both declare `describe`; `handle` calls `P`'s alone.
-        let src = "let mut hits: Int64 = 0
-             type P = { x: Int64 }
-             type Q = { y: Int64 }
-             protocol Pa { fn describe(self) -> Int64 }
-             protocol Qa { fn describe(self) -> Int64 }
-             impl Pa for P { fn describe(self) -> Int64 { return self.x } }
-             impl Qa for Q { fn describe(self) -> Int64 { return self.y + hits } }
-             fn handle(n: Int64) -> Int64 { let p = P { x: n }  return p.describe() }
-";
-        let program = parse(lex(src).unwrap()).unwrap();
-        let stored = record(&program).stored;
-        assert_eq!(module_state_use(&program, "handle", &stored), None);
-        let reaches_q = src.replace("P { x: n }", "Q { y: n }");
-        let program = parse(lex(&reaches_q).unwrap()).unwrap();
-        let stored = record(&program).stored;
-        let (chain, global) = module_state_use(&program, "handle", &stored).expect("stateful");
-        assert_eq!(
-            (chain, global.as_str()),
-            (
-                vec!["handle".to_string(), "Qa$Q$describe".to_string()],
-                "hits"
-            )
-        );
-    }
-
-    #[test]
-    fn workers_gate_ignores_isolated_stored_values() {
-        let src = "let mut hits: Int64 = 0\n\
-             fn pure(x: Int64) -> Int64 { return x * 2 }\n\
-             fn make() -> fn(Int64) -> Int64 { return pure }\n\
-             fn respond(x: Int64) -> Int64 { let m = make()  return m(x) }\n\
-             fn handle(n: Int64) -> Int64 { return respond(n) }\n";
-        let program = parse(lex(src).unwrap()).unwrap();
-        let stored = record(&program).stored;
-        assert!(module_state_use(&program, "handle", &stored).is_none());
-    }
-
-    #[test]
-    fn module_state_use_gates_on_non_root_module_state() {
-        // After linking, an imported module's global is an ordinary global.
-        // Tagging the state and its accessor with a foreign module simulates
-        // the linked program; the gate still fires.
-        let src = "let mut count: Int64 = 0\n\
-                   fn bump() -> Int64 { count = count + 1\n return count }\n\
-                   fn handle(n: Int64) -> Int64 { return bump() }\n";
-        let mut program = parse(lex(src).unwrap()).unwrap();
-        for g in &mut program.globals {
-            g.module = Some("store.vyrn".into());
-        }
-        if let Some(f) = program.functions.iter_mut().find(|f| f.name == "bump") {
-            f.module = Some("store.vyrn".into());
-        }
-        let (chain, global) =
-            module_state_use(&program, "handle", &Default::default()).expect("stateful");
-        assert_eq!(chain, vec!["handle", "bump"]);
-        assert_eq!(global, "count");
-    }
-
-    #[test]
-    fn module_state_use_is_none_for_a_pure_tree_even_with_globals_present() {
-        // Only `handle`'s call tree counts, and output and file I/O do not gate.
-        let src = "let mut hits: Int64 = 0\n\
-                   fn other() -> Int64 { hits = hits + 1\n return hits }\n\
-                   fn pure(n: Int64) -> Int64 { return n * 2 }\n\
-                   fn handle(n: Int64) -> Int64 { print(n)\n let r = readFile(\"x\")\n \
-                       return pure(n) }\n";
-        let program = parse(lex(src).unwrap()).unwrap();
-        assert!(module_state_use(&program, "handle", &Default::default()).is_none());
     }
 
     #[test]

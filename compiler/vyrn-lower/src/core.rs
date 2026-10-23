@@ -7257,7 +7257,7 @@ pub fn specialize(body: &Body, bound: &[(Name, Target)]) -> Option<Body> {
             (info.releases, info.heap, info.borrow, info.borrow_kind) = (true, true, false, None);
         }
         let made = St::Let(*n, Rhs::Make(Ctor::Closure(t.clone()), parts));
-        if reads[n.index()] > 1 || !make_before_read(&mut out.stmts, reads.len(), *n, made, release)
+        if reads[n.index()] > 1 || !make_before_read(&mut out.stmts, &out.names, *n, made, release)
         {
             return None;
         }
@@ -7274,10 +7274,17 @@ pub fn specialize(body: &Body, bound: &[(Name, Target)]) -> Option<Body> {
 
 /// Puts `made`, the row that binds `n`, before the one row that reads `n`, at
 /// that row's depth, and with `release` a release of `n` after it. `names` is
-/// the body's name count. `false` where no row reads it, and where `release`
-/// and the read is no lambda's capture, which copies what it reads.
-fn make_before_read(ss: &mut Vec<St>, names: usize, n: Name, made: St, release: bool) -> bool {
-    let mut reads = vec![0; names];
+/// the body's names. `false` where no row reads it, and where `release` and
+/// the read is neither a lambda's capture nor a copy, each of which copies
+/// what it reads.
+fn make_before_read(
+    ss: &mut Vec<St>,
+    names: &[NameInfo],
+    n: Name,
+    made: St,
+    release: bool,
+) -> bool {
+    let mut reads = vec![0; names.len()];
     for i in 0..ss.len() {
         let nested: Vec<&mut Vec<St>> = ss[i].lists_mut().collect();
         let mut inner = 0;
@@ -7297,7 +7304,12 @@ fn make_before_read(ss: &mut Vec<St>, names: usize, n: Name, made: St, release: 
         count_reads(std::slice::from_ref(&ss[i]), &mut reads);
         if reads[n.index()] > 0 {
             if release {
-                if !matches!(ss[i], St::Let(_, Rhs::Prim(Op::Closure(_), ..))) {
+                let copies = match &ss[i] {
+                    St::Let(_, Rhs::Prim(Op::Closure(_), ..)) => true,
+                    St::Let(_, rhs) => rhs.copies(names) == Some(Copied::Value),
+                    _ => false,
+                };
+                if !copies {
                     return false;
                 }
                 ss.insert(i + 1, St::Drop(n, Site::None, 0, None));

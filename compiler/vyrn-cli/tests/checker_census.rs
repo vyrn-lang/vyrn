@@ -141,7 +141,6 @@ fn sections() -> Vec<Section> {
         sec("fn extern_abi_type_ok", Surface),
         sec("fn check_comptime_purity", Refusal),
         sec("struct StoredSource", Shared),
-        sec("fn module_state_use", Shared),
         sec("fn touches_globals", Surface),
         sec("struct GlobalRef", Shared),
         sec("struct InitRules", Refusal),

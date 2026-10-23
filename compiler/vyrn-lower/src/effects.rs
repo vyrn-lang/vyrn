@@ -90,6 +90,8 @@ pub struct Judged<'a> {
     pub frames: &'a [&'a Walked],
     /// Per body, each call's index into `callees`.
     resolved: Vec<Vec<usize>>,
+    /// Per body, the bodies a call into it may run, sorted.
+    edges: Vec<Vec<usize>>,
     /// Every callee the calls resolved to, once.
     callees: Vec<Callee>,
     /// Per callee, whether a call to it may store into any global.
@@ -133,15 +135,48 @@ impl Judged<'_> {
     /// [`StateUse`] of every frame of `refs` with a row, by frame id. It takes the
     /// judgment so the write sets move rather than copy.
     fn into_state_uses(self, refs: &[&Body]) -> HashMap<FnId, StateUse> {
+        let steps = self.state_steps();
         let mut out: HashMap<FnId, StateUse> = HashMap::with_capacity(refs.len());
-        for ((b, e), mut writes) in refs.iter().zip(&self.effects).zip(self.writes) {
+        for (((b, e), mut writes), step) in
+            refs.iter().zip(&self.effects).zip(self.writes).zip(steps)
+        {
             let Some(id) = b.id else { continue };
             let u = out.entry(id).or_default();
             u.host |= e.has(Effect::Extern);
             u.touches |= e.has(Effect::ModuleState);
             u.writes.append(&mut writes);
+            u.via = u.via.or(step.and_then(|j| refs.get(j)?.id));
         }
         out
+    }
+
+    /// Per body, the body it reaches module state through on a shortest call
+    /// path to a body whose own statements touch it. `None` for such a body
+    /// and for one that reaches no module state.
+    fn state_steps(&self) -> Vec<Option<usize>> {
+        let touches = |i: usize| self.effects[i].has(Effect::ModuleState);
+        let mut depth: Vec<Option<usize>> = (self.frames.iter())
+            .map(|f| f.own.has(Effect::ModuleState).then_some(0))
+            .collect();
+        let mut steps = vec![None; self.frames.len()];
+        // Round `r` gives depth `r` to each touching body with an edge to depth
+        // `r - 1`. A round that gives none ends the walk, and every touching body
+        // has a finite depth, so it ends after at most one round per body.
+        for r in 1.. {
+            let mut gave = false;
+            for i in 0..depth.len() {
+                if depth[i].is_some() || !touches(i) {
+                    continue;
+                }
+                if let Some(&j) = self.edges[i].iter().find(|j| depth[**j] == Some(r - 1)) {
+                    (depth[i], steps[i], gave) = (Some(r), Some(j), true);
+                }
+            }
+            if !gave {
+                break;
+            }
+        }
+        steps
     }
 }
 
@@ -154,6 +189,10 @@ pub struct StateUse {
     pub touches: bool,
     /// The globals it may store into.
     pub writes: std::collections::BTreeSet<String>,
+    /// The frame a call into it reaches module state through, one step on a
+    /// shortest call path ([`crate::World::state_path`]). `None` where its own
+    /// statements touch module state, and where it touches none.
+    pub via: Option<FnId>,
 }
 
 /// The globals a call to `callee` in the frame `frame` may store into, by
@@ -175,25 +214,7 @@ pub fn walk_frames(bodies: &[&Body]) -> Vec<Walked> {
         // A frame's walk takes about 3 us on `site/export.vyrn`; each weighs one.
         |_| 1,
         || (),
-        |_, b| {
-            let mut w = Walk {
-                body: b,
-                out: Walked {
-                    name: b.name.clone(),
-                    own: Effects::PURE,
-                    writes: Default::default(),
-                    calls: Vec::new(),
-                    lambdas: Vec::new(),
-                },
-            };
-            rows(&b.stmts).for_each(|(s, _)| w.stmt(s));
-            for info in b.names.iter().filter(|i| !i.borrow) {
-                for r in &info.runs {
-                    w.call(r, None, info.line, false);
-                }
-            }
-            w.out
-        },
+        |_, b| walk(b).out,
     );
     let index: HashMap<*const Body, usize> = bodies
         .iter()
@@ -314,6 +335,7 @@ pub fn judge<'a>(
         through: via,
         frames,
         resolved,
+        edges,
         callees,
         stores,
         writes,
@@ -328,14 +350,44 @@ fn global_root(p: &Place) -> Option<&String> {
     }
 }
 
+/// Returns the first global `b`'s own statements read or store, as the effect
+/// judgment reads them; `None` when they touch no module state.
+pub fn first_global(b: &Body) -> Option<&str> {
+    walk(b).global
+}
+
+/// Walks the frame `b`: its own statements and its names' releases.
+fn walk(b: &Body) -> Walk<'_> {
+    let mut w = Walk {
+        body: b,
+        global: None,
+        out: Walked {
+            name: b.name.clone(),
+            own: Effects::PURE,
+            writes: Default::default(),
+            calls: Vec::new(),
+            lambdas: Vec::new(),
+        },
+    };
+    rows(&b.stmts).for_each(|(s, _)| w.stmt(s));
+    for info in b.names.iter().filter(|i| !i.borrow) {
+        for r in &info.runs {
+            w.call(r, None, info.line, false);
+        }
+    }
+    w
+}
+
 /// One frame's walk, which resolves no callee.
 struct Walk<'a> {
     body: &'a Body,
+    /// The first global a place of the frame is rooted at.
+    global: Option<&'a str>,
     out: Walked,
 }
 
-impl Walk<'_> {
-    fn stmt(&mut self, s: &St) {
+impl<'a> Walk<'a> {
+    fn stmt(&mut self, s: &'a St) {
         match s {
             St::Let(n, rhs) => {
                 let line = self.body.names[n.index()].line;
@@ -372,16 +424,19 @@ impl Walk<'_> {
 
     /// A place rooted at a global is module state; one rooted at a name is the
     /// frame's own and has no effect.
-    fn place(&mut self, p: &Place) {
+    fn place(&mut self, p: &'a Place) {
         match p {
-            Place::Global(_) => self.out.own = self.out.own.with(Effect::ModuleState),
+            Place::Global(g) => {
+                self.out.own = self.out.own.with(Effect::ModuleState);
+                self.global = self.global.or(Some(g));
+            }
             Place::Name(_) => {}
             Place::Field(b, _) | Place::Elem(b, _) | Place::Key(b, _) => self.place(b),
         }
     }
 
     /// Records `r` when it is a call; `born` when it binds an owned result.
-    fn rhs(&mut self, r: &Rhs, line: usize, born: bool) {
+    fn rhs(&mut self, r: &'a Rhs, line: usize, born: bool) {
         let Rhs::Call {
             callee, kind, args, ..
         } = r

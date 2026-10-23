@@ -1,0 +1,22 @@
+// A `fn` parameter bound to a capturing lambda, copied out of the call.
+
+let mut pending: Array<fn(Int64)> = []
+
+fn keep(cb: fn(Int64)) -> fn(Int64) {
+    return cb.copy()
+}
+
+fn ask(cb: fn(Int64)) {
+    pending.push(cb.copy())
+}
+
+fn main() -> Int64 {
+    let who = 7
+    let f = keep(s -> print(who + s))
+    f(3) // 10
+    let name = "ada"
+    ask(s -> print("\{name} \{s}"))
+    let g = pending[0]
+    g(200) // ada 200
+    return 0
+}

@@ -186,7 +186,7 @@ keeps running on the same instance. The call stack and region nesting return
 to their state before the request. Module state keeps what the handler wrote,
 and heap blocks it held leak. `--workers N` runs `handle` on N threads, each with its own
 instance. Startup refuses it, naming the call path, if `handle` reaches module
-state transitively. Printing and file I/O do not block workers; each output
+state transitively, through a call or a function value. Printing and file I/O do not block workers; each output
 line stays atomic.
 
 ### `vyrn dev [--port N] [--workers N]`
