@@ -14,5 +14,5 @@ fn vyrnTestMain() -> Int64
        loop 1   index check: it needs the value of line 26 < xs.length, and `xs` is the result of `mkSs(..)` at line 11, whose signature does not state it
    30           `strAppend(..)` may allocate when it outgrows its capacity
 summary: allocating rows 11 (0 in loops), growing rows 1 (0 in loops), copies 4 (1 in loops), checks kept 2 (1 in loops), checks proved 2 (1 in loops)
-  mkSs: trap-free: yes
-  vyrnTestMain: trap-free: no, it keeps an index check at line 16
+  mkSs: trap-free: yes; kernel: no, its effect set is alloc
+  vyrnTestMain: trap-free: no, it keeps an index check at line 16; kernel: no, its effect set is alloc

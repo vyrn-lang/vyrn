@@ -49,8 +49,8 @@ use crate::effects::StateUse;
 use crate::facts::{Fact, Lin, Sides, State, Term, EXACT};
 use vyrn_frontend::core::check::{scalar_rule, Atom, Check, Guard, Operand, Site, Verdict, Why};
 use vyrn_frontend::core::{
-    rows, Arg, Arm, Body, BorrowKind, Callee, Ctor, Lit, Name, Op, Place, Rhs, St, Target, Test,
-    Val,
+    rows, Arg, Arm, Body, BorrowKind, Callee, Ctor, Lit, Name, NameInfo, Op, Place, Rhs, St,
+    Target, Test, Val,
 };
 use vyrn_frontend::par::in_parallel;
 
@@ -5060,7 +5060,7 @@ impl<'a> Walk<'a> {
                 let frame = self.sums.call(rhs).and_then(|f| self.sums.state.get(&f));
                 match (kind, frame) {
                     (Callee::Ctor, _) => {}
-                    (Callee::Fn(_), Some(u)) if !u.host => {
+                    (Callee::Fn(_), Some(u)) if !u.effects.has(Effect::Extern) => {
                         gs.extend(u.writes.iter().map(String::as_str))
                     }
                     _ => return every(),
@@ -6790,6 +6790,59 @@ fn bound_test(body: &[St]) -> Option<(Name, Name, Lin)> {
     }
     let bound = bound.plus(i64::from(*op == BinOp::LtEq))?;
     (c == t).then_some((*t, *k, bound))
+}
+
+/// Whether the loop `body` is a counter loop ([`crate::verdict`]). It opens
+/// with [`bound_test`]'s test `k < c`; `c` is a literal, a name no row of
+/// the loop writes, or the length of a place no row of it writes. Each turn,
+/// before any `continue`, a row of the loop's own list stores `k + d` into
+/// `k` for a literal `d >= 1`, and no other row writes `k`. The step cannot
+/// wrap: a literal `c` has `c - 1 + d` within `k`'s type, and a name `c`
+/// has `d = 1`. So `c - k` falls by `d` each turn and the loop ends.
+pub(crate) fn counter_loop(body: &[St], names: &[NameInfo]) -> bool {
+    let Some((_, k, bound)) = bound_test(body) else {
+        return false;
+    };
+    let turn = every_turn(body);
+    let Some(at) = (turn.iter()).position(
+        |s| matches!(s, St::Store { place: Place::Name(n), value: Val::Name(_), .. } if *n == k),
+    ) else {
+        return false;
+    };
+    let St::Store {
+        value: Val::Name(t),
+        ..
+    } = turn[at]
+    else {
+        return false;
+    };
+    let step = turn[..at].iter().find_map(|s| match s {
+        St::Let(n, Rhs::Prim(Op::Bin(BinOp::Add), vs, _)) if n == t => match vs[..] {
+            [Val::Name(m), Val::Lit(Lit::Int(d))] if m == k && d >= 1 => Some(d),
+            _ => None,
+        },
+        _ => None,
+    });
+    let Some(d) = step else {
+        return false;
+    };
+    let max = match vyrn_frontend::validate::width(&names[k.index()].ty) {
+        Some((bits, true)) => (1i128 << (bits - 1)) - 1,
+        Some((bits, false)) => (1i128 << bits) - 1,
+        None => return false,
+    };
+    let fixed = match bound.terms[..] {
+        [] => i128::from(bound.c) - 1 + i128::from(d) <= max,
+        [(Term::Val(c), 1)] if bound.c == 0 && d == 1 => match measured(body, &bound) {
+            Some(p) => place_root(p).is_some_and(|r| writes_of(body, r) == 0),
+            None => writes_of(body, c) == 0,
+        },
+        _ => false,
+    };
+    let skips = turn[..at]
+        .iter()
+        .any(|s| any_continue(std::slice::from_ref(*s)));
+    fixed && !skips && writes_of(body, k) == 1
 }
 
 /// The place whose length the loop `body` reads as its bound `b` in its

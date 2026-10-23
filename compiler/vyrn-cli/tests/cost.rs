@@ -1,4 +1,4 @@
-//! `vyrn why --cost` over seven programs, each pinned in `tests/cost/`.
+//! `vyrn why --cost` over eight programs, each pinned in `tests/cost/`.
 //!
 //! The pin is the command's whole standard output, run from the repository
 //! root so the header names a relative path. `VYRN_PIN=write` rewrites it.
@@ -94,6 +94,13 @@ fn a_parameter_clause_checks_at_the_call() {
 #[test]
 fn a_function_that_is_not_trap_free_names_its_first_cause() {
     holds("traps", "compiler/vyrn-cli/tests/cost/traps.vyrn");
+}
+
+/// Each rule a function fails as a kernel, once and in the order checked, and two kernels: one
+/// with 32-bit integers alone, one with a counter loop and a `read` array.
+#[test]
+fn a_function_that_is_no_kernel_names_its_first_rule() {
+    holds("kernels", "compiler/vyrn-cli/tests/cost/kernels.vyrn");
 }
 
 /// `vyrn run --profile` saves its counts, and `why --cost` prints them beside the rows whose

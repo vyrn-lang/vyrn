@@ -2602,7 +2602,9 @@ fn lower_body(
         None => (true, true),
         Some(u) => {
             let stores = u.writes.iter().any(|g| cx.aliasing.contains(g));
-            (u.host || stores, u.host || u.touches)
+            let has = |e| u.effects.has(e);
+            use vyrn_lower::effects::Effect::{Extern, ModuleState};
+            (has(Extern) || stores, has(Extern) || has(ModuleState))
         }
     };
     let mut copy_out: Vec<(u32, Place, Repr, Type)> = Vec::new();

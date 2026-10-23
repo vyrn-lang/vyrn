@@ -14,12 +14,12 @@ fn system() -> Array<Body>
 fn offsetMomentum(bodies: Array<Body>) -> Array<Body>
    95           index check: it needs `bodies` non-empty, and `bodies` is a parameter, so the function cannot know what its callers pass; only a `read` parameter takes a `where` clause that could state it
 summary: allocating rows 6 (1 in loops), growing rows 5 (0 in loops), copies 3 (1 in loops), checks kept 1 (0 in loops), checks proved 50 (45 in loops)
-  fixed9: trap-free: yes
-  solarMass: trap-free: yes
-  daysPerYear: trap-free: yes
-  system: trap-free: yes
-  offsetMomentum: trap-free: no, it keeps an index check at line 95
-  energy: trap-free: yes
-  advance: trap-free: yes
-  integrate: trap-free: no, it calls `offsetMomentum` at line 153, which is not trap-free
-  main: trap-free: no, it calls `offsetMomentum` at line 167, which is not trap-free
+  fixed9: trap-free: yes; kernel: no, its effect set is alloc
+  solarMass: trap-free: yes; kernel: no, the value of line 34 is Float64, and WGSL has no 64-bit float
+  daysPerYear: trap-free: yes; kernel: no, the result is Float64, and WGSL has no 64-bit float
+  system: trap-free: yes; kernel: no, its effect set is alloc
+  offsetMomentum: trap-free: no, it keeps an index check at line 95; kernel: no, it is not trap-free
+  energy: trap-free: yes; kernel: no, `b` is Array<Body>, not Int32, UInt32, Bool or a read array of one
+  advance: trap-free: yes; kernel: no, `bodies` is Array<Body>, not Int32, UInt32, Bool or a read array of one
+  integrate: trap-free: no, it calls `offsetMomentum` at line 153, which is not trap-free; kernel: no, its effect set is alloc
+  main: trap-free: no, it calls `offsetMomentum` at line 167, which is not trap-free; kernel: no, its effect set is alloc, write-output, module-state
