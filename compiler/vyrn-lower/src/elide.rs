@@ -47,7 +47,9 @@ use vyrn_frontend::prim::Cmp;
 
 use crate::effects::StateUse;
 use crate::facts::{Fact, Lin, Sides, State, Term, EXACT};
-use vyrn_frontend::core::check::{scalar_rule, Atom, Check, Guard, Operand, Site, Verdict, Why};
+use vyrn_frontend::core::check::{
+    scalar_rule, Atom, Check, Ensures, Guard, Operand, Site, Verdict, Why,
+};
 use vyrn_frontend::core::{
     rows, Arg, Arm, Body, BorrowKind, Callee, Ctor, Lit, Name, NameInfo, Op, Place, Rhs, St,
     Target, Test, Val,
@@ -108,7 +110,7 @@ fn walk(body: &mut Body, decls: &HashMap<String, TypeDecl>, sums: View<'_>) -> V
 /// [`Term::Val`] is an integer's value and a [`Term::Len`] an array's or
 /// String's length, and a [`Term::Field`] or [`Term::Col`] the same of a
 /// record parameter's field, by its index in the record's fields.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Summary {
     /// Per parameter, its kind; a call whose arguments differ states nothing.
     params: Vec<Kind>,
@@ -129,6 +131,10 @@ pub struct Summary {
     /// value at least zero proves. The caller assumes them where the result
     /// is at least zero ([`Walk::sentinel`]).
     when: BTreeSet<Lin>,
+    /// The declared result clause ([`Body::ensures`]), which a check before
+    /// every return states. The caller assumes it over its arguments
+    /// ([`Walk::ensured`]).
+    ensures: Option<Ensures>,
 }
 
 /// Each summarized body's [`Summary`], keyed by its row in the World's
@@ -565,6 +571,7 @@ pub fn summaries<'a>(
                                 types: v.types.clone(),
                                 pre: BTreeSet::new(),
                                 when: v.when.clone(),
+                                ensures: v.ensures.clone(),
                                 post: v
                                     .post
                                     .iter()
@@ -739,7 +746,7 @@ pub fn summaries<'a>(
             .collect();
         at.retain(|_, i| {
             let v = &values[*i];
-            !v.pre.is_empty() || !v.post.is_empty() || !v.when.is_empty()
+            !v.pre.is_empty() || !v.post.is_empty() || !v.when.is_empty() || v.ensures.is_some()
         });
         return Summaries {
             at,
@@ -1564,6 +1571,7 @@ fn invariants(
                         pre: BTreeSet::new(),
                         post: BTreeSet::new(),
                         when: BTreeSet::new(),
+                        ensures: None,
                     };
                     Summary {
                         pre: a.clone(),
@@ -2816,6 +2824,7 @@ fn templates(
         pre: BTreeSet::new(),
         post,
         when,
+        ensures: body.ensures.clone(),
     }
 }
 
@@ -4647,6 +4656,7 @@ impl<'a> Walk<'a> {
                 self.observe(&st, rhs);
                 self.enter(&st, rhs);
                 self.effects(&mut st, rhs);
+                self.ensured(&mut st, None, rhs);
                 // The rule holds again after its check.
                 if let Some(r) = rhs.checks_rule(&self.body.names) {
                     self.open.remove(&r);
@@ -5089,7 +5099,8 @@ impl<'a> Walk<'a> {
             self.dirty.insert(n);
         }
         if !self.slot[n.index()].relevant {
-            return self.effects(st, rhs);
+            self.effects(st, rhs);
+            return self.ensured(st, Some(n), rhs);
         }
         match rhs {
             Rhs::Val(v) => self.assign(st, n, v),
@@ -5167,6 +5178,26 @@ impl<'a> Walk<'a> {
         self.element_flow(st, n, rhs);
         self.effects(st, rhs);
         self.called(st, n, rhs);
+        self.ensured(st, Some(n), rhs);
+    }
+
+    /// Assumes the declared result clause of the callee of `rhs`, a direct
+    /// call, over its arguments and `n`, the name the call binds. The check
+    /// before each of the callee's returns states it, so it holds after the
+    /// call. A side the call does not hand a value is left out: an argument
+    /// read from a place, or the result of a call no name binds.
+    fn ensured(&self, st: &mut State, n: Option<Name>, rhs: &Rhs) {
+        let Some((_, s)) = self.sums.call(rhs).and_then(|g| self.sums.get(g)) else {
+            return;
+        };
+        let (Rhs::Call { args, .. }, Some(e)) = (rhs, &s.ensures) else {
+            return;
+        };
+        let result = n.map(Val::Name);
+        let param = |k: usize| args.get(k)?.0.val().cloned();
+        for a in e.over(result.as_ref(), &param).flatten() {
+            self.holds(st, &a);
+        }
     }
 
     /// Defines the length of `n = rhs`, a direct call, as a `consume`

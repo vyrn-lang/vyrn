@@ -1,0 +1,7 @@
+// A result clause compares single operands, as a parameter clause does.
+fn half(n: Int64) -> Int64 where value + value <= n {
+    return n / 2
+}
+fn main() -> Int64 {
+    return half(4)
+}

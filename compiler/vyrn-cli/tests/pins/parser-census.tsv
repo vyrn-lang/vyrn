@@ -1,5 +1,5 @@
 file	kind	lines	diagnostics
-parser.rs	the grammar's own arm	3110	50
+parser.rs	the grammar's own arm	3121	50
 parser.rs	a desugar the parser states	625	7
 parser.rs	a table stated a second time	0	0
 parser.rs	recovery and the diagnostic sentences	150	2

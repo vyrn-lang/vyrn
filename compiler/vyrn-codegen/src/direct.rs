@@ -2300,6 +2300,7 @@ fn f_shell(line: usize) -> Function {
         type_bounds: HashMap::new(),
         params: Vec::new(),
         ret: Type::Unit,
+        ret_clause: None,
         body: Block {
             id: Id::NEW,
             stmts: Vec::new(),
@@ -6455,7 +6456,7 @@ impl<'p> Fn_<'_, 'p> {
                 // A kept `where` check traps inside its type's constructor
                 // ([`Fn_::core_rule_check`]), and a kept clause check prints
                 // its sentence ([`Fn_::clause_check`]).
-                Raises::Where | Raises::Clause => {
+                Raises::Where | Raises::Clause | Raises::Result => {
                     b.ins(&Instruction::Unreachable);
                 }
             },

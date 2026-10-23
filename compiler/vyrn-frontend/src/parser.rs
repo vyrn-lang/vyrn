@@ -1491,6 +1491,7 @@ impl Parser {
                 type_bounds: Default::default(),
                 params,
                 ret,
+                ret_clause: None,
                 body,
                 line,
                 col,
@@ -2034,6 +2035,13 @@ impl Parser {
         } else {
             Type::Unit
         };
+        let ret_clause = match self.peek() {
+            Tok::Where => {
+                self.advance();
+                Some(self.cond_expr()?)
+            }
+            _ => None,
+        };
 
         let body = self.top_block((line, col))?;
         self.type_params.clear();
@@ -2047,6 +2055,7 @@ impl Parser {
             type_bounds,
             params,
             ret,
+            ret_clause,
             body,
             line,
             col,
@@ -2138,6 +2147,7 @@ impl Parser {
                 type_bounds: Default::default(),
                 params,
                 ret,
+                ret_clause: None,
                 body,
                 line,
                 col,
@@ -2161,6 +2171,7 @@ impl Parser {
             type_bounds: Default::default(),
             params,
             ret,
+            ret_clause: None,
             body: Block {
                 id: Id::NEW,
                 stmts: Vec::new(),

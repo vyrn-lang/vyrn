@@ -124,6 +124,77 @@ fn past(b: Array<Int64>) -> Int64 {
     );
 }
 
+/// A result clause is a check before each return: proved where the body's
+/// facts show it, kept and trapping where they do not.
+#[test]
+fn a_result_clause_is_a_check_at_each_return() {
+    let src = "fn pick(n: Int64, hi: Int64) -> Int64 where value >= 0 && value < hi {
+    if n >= 0 && n < hi {
+        return n
+    }
+    return 0
+}
+";
+    let rows = ["proved where-result", "check where-result"];
+    assert_eq!(verdicts(src, "pick"), rows);
+    let (err, rows) = oracle(src, "    print(pick(5, 0).toString())", "pick");
+    assert_eq!(
+        (err.as_str(), rows),
+        (
+            "error: validation failed for the result of `pick`\n",
+            vec![
+                "3 0 where-result proved 0".to_string(),
+                "5 0 where-result kept 1".to_string()
+            ]
+        )
+    );
+}
+
+/// A caller assumes its callee's result clause over the arguments, so the
+/// index the clause bounds needs no check. Without the clause, the callee's
+/// inferred summary cannot show `value < hi`, because `return 0` breaks it
+/// where `hi` is 0, and the caller keeps its check.
+#[test]
+fn a_caller_assumes_its_callees_result_clause() {
+    let callee = "fn pick(n: Int64, hi: Int64) -> Int64 where value >= 0 && value < hi {
+    if n >= 0 && n < hi {
+        return n
+    }
+    return 0
+}
+fn at(xs: Array<Int64>, n: Int64) -> Int64 {
+    return xs[pick(n, xs.length)]
+}
+";
+    assert_eq!(verdicts(callee, "at"), ["proved array-index"]);
+    let bare = callee.replace(" where value >= 0 && value < hi", "");
+    assert_eq!(verdicts(&bare, "at"), ["check array-index"]);
+}
+
+/// A clause on a `Unit` result that names only parameters is a lemma: the
+/// check at the body's end stands on the clause's line, and a caller that
+/// calls it for its effect assumes it, an exported caller too.
+#[test]
+fn a_unit_result_clause_is_a_lemma() {
+    let src = "fn inRange(i: Int64, n: Int64) -> Unit where i >= 0 && i < n {
+    if i < 0 || i >= n {
+        panic(\"out of range\")
+    }
+}
+export fn get(xs: Array<Int64>, i: Int64) -> Int64 {
+    inRange(i, xs.length)
+    return xs[i]
+}
+";
+    assert_eq!(verdicts(src, "inRange"), ["proved where-result"]);
+    assert_eq!(verdicts(src, "get"), ["proved array-index"]);
+    let (err, rows) = oracle(src, "    print(get(xs, 1).toString())", "inRange");
+    assert_eq!(
+        (err.as_str(), rows),
+        ("", vec!["1 0 where-result proved 1".to_string()])
+    );
+}
+
 #[test]
 fn the_oracle_counts_each_run_of_a_check_row() {
     let src = "fn get(xs: Array<Int64>, i: Int64) -> Int64 {\n    return xs[i]\n}\n";

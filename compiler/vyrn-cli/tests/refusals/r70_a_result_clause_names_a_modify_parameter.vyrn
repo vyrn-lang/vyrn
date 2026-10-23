@@ -1,0 +1,9 @@
+// A result clause reads only `read` parameters, which no return changes.
+fn grow(xs: modify Array<Int64>) -> Int64 where value <= xs.length {
+    xs.push(1)
+    return 0
+}
+fn main() -> Int64 {
+    let mut xs: Array<Int64> = []
+    return grow(xs)
+}

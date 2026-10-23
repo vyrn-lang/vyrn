@@ -422,7 +422,7 @@ fn traps(s: &St) -> bool {
 /// "must return T on all paths", stated once for a function and a lambda.
 /// A row after one that ends is never reached. A loop may run zero times or
 /// be left by a `break`, so it ends nothing.
-fn returns(ss: &[St]) -> bool {
+pub(crate) fn returns(ss: &[St]) -> bool {
     ss.iter().any(|s| match s {
         St::Return { .. } | St::Trap => true,
         St::If { then, els, .. } => returns(then) && returns(els),
@@ -1172,6 +1172,10 @@ fn seeded<'a>(
                 .flat_map(|(_, atoms)| atoms)
                 .filter_map(|a| a.with(&param))
                 .collect();
+            // A clause the checker refused states nothing.
+            let func = b.body.spelled(&f.name).to_string();
+            b.body.ensures =
+                vyrn_frontend::core::check::Ensures::of(f, b.proto.types(), &func).unwrap_or(None);
             b.frame.appends = crate::append::append_candidates(&f.body);
             rebound(&f.body, &mut b.frame.rebound);
             b.block(&f.body, &mut out)?;
@@ -1504,6 +1508,7 @@ impl<'a> Builder<'a> {
                 names: Vec::new(),
                 params: Vec::new(),
                 assumes: Vec::new(),
+                ensures: None,
                 stmts: Vec::new(),
                 lambdas: Vec::new(),
                 cands: Vec::new(),
@@ -5337,6 +5342,7 @@ impl<'a> Builder<'a> {
                 names: Vec::new(),
                 params: Vec::new(),
                 assumes: Vec::new(),
+                ensures: None,
                 stmts: Vec::new(),
                 lambdas: Vec::new(),
                 cands: Vec::new(),

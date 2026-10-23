@@ -1,0 +1,12 @@
+/// Row `where-result`. A result clause the body cannot prove is a check
+/// before the return, with the function's own wording.
+
+fn below(n: Int64, hi: Int64) -> Int64 where value < hi {
+    return n
+}
+
+fn main() -> Int64 {
+    print(below(1, 5).toString())
+    print(below(7, 5).toString())
+    return 0
+}

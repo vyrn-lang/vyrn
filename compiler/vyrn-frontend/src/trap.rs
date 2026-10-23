@@ -238,6 +238,12 @@ pub fn clause(func: &str, param: &str) -> String {
     format!("validation failed for parameter `{param}` of `{func}`")
 }
 
+/// Returns what a failed `where` clause on a function's result says, naming
+/// the function as [`clause`] does.
+pub fn result_clause(func: &str) -> String {
+    format!("validation failed for the result of `{func}`")
+}
+
 /// [`validation`] for a declaration.
 pub fn validation_of(decl: &TypeDecl) -> String {
     validation(&decl.name, crate::validate::is_cross_field(decl))

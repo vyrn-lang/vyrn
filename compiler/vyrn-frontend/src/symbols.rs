@@ -2395,8 +2395,11 @@ fn function_detail(f: &Function, sp: &Spellings) -> String {
     } else {
         "fn"
     };
+    let ensures = (f.ret_clause.as_ref())
+        .map(|e| format!(" where {}", crate::checker::pred_summary(e)))
+        .unwrap_or_default();
     format!(
-        "{} {}{}({}) -> {}",
+        "{} {}{}({}) -> {}{ensures}",
         kw,
         say.name(&f.name),
         tp,
@@ -3758,6 +3761,18 @@ mod tests {
         let d = module_doc(src);
         assert_eq!(d.exports[0].signature, "mut fn create(x: Int64) -> Int64");
         assert_eq!(d.exports[1].signature, "fn read() -> Int64");
+    }
+
+    #[test]
+    fn a_result_clause_shows_in_the_signature() {
+        // A caller assumes the clause, so hover, completion and `vyrn doc`
+        // show it after the result type.
+        let src = "export fn clamp(n: Int64, hi: Int64) -> Int64 where value <= hi { return 0 }\n";
+        let d = module_doc(src);
+        assert_eq!(
+            d.exports[0].signature,
+            "fn clamp(n: Int64, hi: Int64) -> Int64 where value <= hi"
+        );
     }
 
     #[test]

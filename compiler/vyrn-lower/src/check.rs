@@ -11,7 +11,9 @@
 //! nothing where it stands: the emitter runs it inside the row it guards,
 //! where the operands are on hand, so it reads no name and no walker counts
 //! it. A clause check is the exception: it runs where it stands, over names
-//! the call reads after it ([`Guard::Clause`]).
+//! the call reads after it ([`Guard::Clause`]). A function's result clause
+//! is a clause check before each `return`, and at the end of a body that
+//! falls off it ([`Body::ensures`]).
 //!
 //! One runtime check is one row. A store that puts a taken element back into
 //! the place it was taken from (`a[i].push(v)`: `take a[i]`, the call, the
@@ -66,6 +68,14 @@ pub fn state(body: &mut Body, tys: &Types<'_>) {
     let mut stmts = std::mem::take(&mut body.stmts);
     let mut lines = BTreeMap::new();
     list(body, tys, &mut stmts, &mut lines);
+    if let Some(e) = body
+        .ensures
+        .as_ref()
+        .filter(|_| !crate::core::returns(&stmts))
+    {
+        let guard = ensured(body, None);
+        stmts.push(St::Check(row(&mut lines, e.line, Raises::Result, guard)));
+    }
     body.stmts = stmts;
     for l in &mut body.lambdas {
         state(l, tys);
@@ -79,6 +89,7 @@ fn list(body: &Body, tys: &Types<'_>, ss: &mut Vec<St>, lines: &mut BTreeMap<usi
         let mut guards = Vec::new();
         let mut clauses = Vec::new();
         let mut ruled = None;
+        let mut returned = None;
         let line = match &s {
             St::Let(n, rhs) => {
                 rhs_guards(body, tys, rhs, &mut guards);
@@ -102,26 +113,19 @@ fn list(body: &Body, tys: &Types<'_>, ss: &mut Vec<St>, lines: &mut BTreeMap<usi
                 }
                 *line
             }
+            St::Return { value, line, .. } => {
+                returned = body.ensures.as_ref().map(|_| ensured(body, value.as_ref()));
+                *line
+            }
             _ => 0,
         };
         let guards = (guards.into_iter())
             .map(|(r, g)| (Raises::Row(r), g))
             .chain(ruled.map(|g| (Raises::Where, g)))
-            .chain(clauses.into_iter().map(|g| (Raises::Clause, g)));
+            .chain(clauses.into_iter().map(|g| (Raises::Clause, g)))
+            .chain(returned.map(|g| (Raises::Result, g)));
         for (rule, guard) in guards {
-            let ordinal = lines.entry(line).or_insert(0);
-            let site = Site {
-                line,
-                ordinal: *ordinal,
-            };
-            *ordinal += 1;
-            out.push(St::Check(Check {
-                rule,
-                guard,
-                site,
-                verdict: Verdict::Kept,
-                why: Why::Unsaid,
-            }));
+            out.push(St::Check(row(lines, line, rule, guard)));
         }
         match &mut s {
             St::If { then, els, .. } => {
@@ -139,6 +143,38 @@ fn list(body: &Body, tys: &Types<'_>, ss: &mut Vec<St>, lines: &mut BTreeMap<usi
         out.push(s);
     }
     *ss = out;
+}
+
+/// A kept check row of `guard` on `line`, numbered after the line's others.
+fn row(lines: &mut BTreeMap<usize, u32>, line: usize, rule: Raises, guard: Guard) -> Check {
+    let ordinal = lines.entry(line).or_insert(0);
+    let site = Site {
+        line,
+        ordinal: *ordinal,
+    };
+    *ordinal += 1;
+    Check {
+        rule,
+        guard,
+        site,
+        verdict: Verdict::Kept,
+        why: Why::Unsaid,
+    }
+}
+
+/// The check of `body`'s result clause before a return of `value`, `None`
+/// for a return of nothing. The body has a clause.
+fn ensured(body: &Body, value: Option<&Val>) -> Guard {
+    let e = body.ensures.as_ref().expect("a body with a result clause");
+    let param = |k: usize| body.params.get(k).map(|n| Val::Name(*n));
+    Guard::Clause {
+        atoms: (e.over(value, &param))
+            // `value` is a comparison's side only for a result type the
+            // clause compares, so every return hands one back.
+            .map(|a| a.expect("a result clause's operands are on hand"))
+            .collect(),
+        says: e.says.clone(),
+    }
 }
 
 fn rhs_guards(body: &Body, tys: &Types<'_>, rhs: &Rhs, out: &mut Vec<(Rule, Guard)>) {

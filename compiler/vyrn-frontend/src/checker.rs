@@ -2935,6 +2935,8 @@ impl<'a> Checker<'a> {
             }
             self.ensure_type_exists(&f.ret, f.line)?;
             crate::core::check::clauses(f, self).map_err(|(line, rule)| cerr!(line; rule))?;
+            crate::core::check::Ensures::of(f, self, &f.name)
+                .map_err(|(line, rule)| cerr!(line; rule))?;
             // An `extern` import has no body; an `export extern` has one. Both
             // signatures must fit the host ABI.
             if f.is_extern {
