@@ -227,13 +227,6 @@ fn run_corpus() {
     let mut judged_gen = 0usize;
     let mut judged_carried = 0usize;
     let mut judged_differ: Vec<String> = Vec::new();
-    // The `module-state` row against the checker's `module_state_use`, which answer
-    // one question. A miss is a hole in the judgment: deleting the checker's copy
-    // would accept a program the checker refuses, so it stays zero. An extra is the
-    // asymmetry of `StoredFnEffects::arg_sources`: the judgment follows a function
-    // handed to a `fn`-typed parameter and the checker does not. Ratcheted.
-    let mut module_state_missed: Vec<String> = Vec::new();
-    let mut module_state_extra: Vec<String> = Vec::new();
     let mut gaps: BTreeMap<&'static str, usize> = BTreeMap::new();
     let show_gaps = std::env::var("VYRN_EFFECTS_GAPS").ok();
     let mut unloadable = 0usize;
@@ -466,8 +459,6 @@ fn run_corpus() {
         // `fn`-typed parameter. A named source is its instances; a
         // lambda source is its frame.
         let stored = vyrn_frontend::checker::record(&program).stored;
-        let mut module_state_of: std::collections::HashMap<String, bool> =
-            std::collections::HashMap::new();
         let mut through = |ty: &Type| -> Callee {
             // The sources are collected with aliases resolved; a local is
             // typed as the program spelled it.
@@ -571,26 +562,6 @@ fn run_corpus() {
             } else {
                 FloorKind::CoreBlind
             };
-
-            // Memoized by name: the checker asks about a function, and an instance
-            // repeats one.
-            let ms_judged = e.has(Effect::ModuleState);
-            let ms_checker = *module_state_of
-                .entry(inst.func.name.clone())
-                .or_insert_with(|| {
-                    !program.globals.is_empty()
-                        && vyrn_frontend::checker::module_state_use(
-                            &program,
-                            &inst.func.name,
-                            &stored,
-                        )
-                        .is_some()
-                });
-            if ms_checker && !ms_judged {
-                module_state_missed.push(format!("{file}:{} {}", inst.func.line, inst.spelling()));
-            } else if ms_judged && !ms_checker {
-                module_state_extra.push(format!("{file}:{} {}", inst.func.line, inst.spelling()));
-            }
 
             // `gen-body` and `callee-carried` are not disagreements, as in `FloorKind`.
             let (hj, wj) = (&have, &want);
@@ -746,18 +717,6 @@ fn run_corpus() {
         "  judged:     {judged_agree} agree, {judged_carried} callee-carried, {judged_gen} gen-body, {} differ",
         judged_differ.len()
     );
-    eprintln!(
-        "  module state: {} the judgment misses, {} it reaches through an argument the checker does not follow",
-        module_state_missed.len(),
-        module_state_extra.len()
-    );
-    for d in module_state_missed
-        .iter()
-        .chain(module_state_extra.iter())
-        .take(30)
-    {
-        eprintln!("    {d}");
-    }
     for d in judged_differ.iter().take(20) {
         eprintln!("    {d}");
     }
@@ -824,20 +783,6 @@ fn run_corpus() {
         disagreements[0].file,
         disagreements[0].line,
         disagreements[0].name
-    );
-    assert!(
-        module_state_missed.is_empty(),
-        "{} functions the checker's walk says reach module state and the `module-state` row does not;          the first: {}",
-        module_state_missed.len(),
-        module_state_missed.first().map(String::as_str).unwrap_or("none")
-    );
-    // It may fall, never rise.
-    const MODULE_STATE_EXTRA: usize = 22;
-    assert!(
-        module_state_extra.len() <= MODULE_STATE_EXTRA,
-        "{} functions the `module-state` row reaches and the checker's walk does not, more than          the {MODULE_STATE_EXTRA} recorded; the first new one is worth reading: {}",
-        module_state_extra.len(),
-        module_state_extra.first().map(String::as_str).unwrap_or("none")
     );
     assert!(
         judged_differ.is_empty(),

@@ -4401,25 +4401,25 @@ fn serve_pool(
     });
 }
 
-/// The `--workers` gate: `handle` must reach no module state, transitively.
-/// Returns the refusal with the call path, or `None` when workers are sound.
-/// Other effects (`print`, file I/O) are allowed: each output line stays
-/// atomic.
+/// The `--workers` gate: `handle` must reach no module state, transitively,
+/// by the effect judgment's `module-state` verdict. Returns the refusal with
+/// the call path, or `None` when workers are sound. Other effects (`print`,
+/// file I/O) are allowed: each output line stays atomic.
 fn refuse_workers_if_stateful(
     program: &vyrn_frontend::ast::Program,
     world: &vyrn_lower::World,
 ) -> Option<String> {
-    // Calls through stored function values reach every collected source.
-    let stored = &world.ownership.record.stored;
-    let (chain, global) = vyrn_frontend::checker::module_state_use(program, "handle", stored)?;
-    let path = chain
-        .iter()
-        .map(|f| format!("`{f}`"))
+    let (path, global) = world.state_path(world.fn_id("handle")?)?;
+    let rows = world.fn_rows();
+    let written = |n: &str| program.spellings.written(n).to_string();
+    let path = (path.iter())
+        .map(|f| format!("`{}`", written(&rows[f.index()].name)))
         .collect::<Vec<_>>()
         .join(" -> ");
+    let global = global.map_or(String::new(), |g| format!(" `{}`", written(g)));
     Some(format!(
         "`--workers` needs a module-state-free `handle`: {path} reads or writes \
-         module state `{global}` (shared by definition) — run without `--workers` for \
+         module state{global} (shared by definition) — run without `--workers` for \
          the sequential loop"
     ))
 }

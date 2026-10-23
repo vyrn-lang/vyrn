@@ -479,6 +479,25 @@ impl World {
         self.state_uses.get(&f)
     }
 
+    /// The frames from `f` to one whose own statements read or store module
+    /// state, on a shortest call path by the effect judgment, with the first
+    /// global that frame names. `None` when a call into `f` reaches no module
+    /// state.
+    pub fn state_path(&self, f: FnId) -> Option<(Vec<FnId>, Option<&str>)> {
+        let mut path = vec![f];
+        self.state_use(f).filter(|u| u.touches)?;
+        // Each `via` goes one call nearer the state, so the walk ends. Frames
+        // that share a row share one `via`; the check stops a cycle that makes.
+        while let Some(next) = self.state_use(path[path.len() - 1]).and_then(|u| u.via) {
+            if path.contains(&next) {
+                break;
+            }
+            path.push(next);
+        }
+        let last = self.body_at(path[path.len() - 1]);
+        Some((path, last.and_then(crate::effects::first_global)))
+    }
+
     /// The file `f` is declared in, when that is not the root file and a call to `f` may
     /// allocate: its effect set holds `alloc`.
     pub fn allocating_file(&self, f: FnId) -> Option<&str> {
