@@ -128,7 +128,11 @@ fn every_function_of_the_corpus_has_its_verdict() {
     let mut done: Vec<(usize, Vec<Row>)> = std::thread::scope(|s| {
         let workers: Vec<_> = (0..threads)
             .map(|_| {
-                s.spawn(|| {
+                // A debug build lowers the deepest roots past the default
+                // thread stack; `effects` and `coretables` reserve the same.
+                let deep =
+                    std::thread::Builder::new().stack_size(vyrn_frontend::trap::DEEP_STACK_BYTES);
+                deep.spawn_scoped(s, || {
                     let mut out = Vec::new();
                     loop {
                         let i = next.fetch_add(1, Ordering::Relaxed);
@@ -137,6 +141,7 @@ fn every_function_of_the_corpus_has_its_verdict() {
                     }
                     out
                 })
+                .expect("a census worker starts")
             })
             .collect();
         (workers.into_iter())
