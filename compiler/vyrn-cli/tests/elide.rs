@@ -197,6 +197,59 @@ fn a_condition_a_chain_implies_stays_a_premise() {
     assert_eq!(rows[2], "7 0 array-index proved 1");
 }
 
+/// A name of a validated integer type carries its rule's comparisons, because
+/// every boundary that makes one checks the rule. The body is exported, so no
+/// inferred entry fact proves the read.
+#[test]
+fn a_validated_integer_parameter_proves_its_index() {
+    let src = "type Idx = Int64 where value >= 0 && value < 3
+export fn at(xs: Array<Int64, 3>, i: Idx) -> Int64 {
+    return xs[i]
+}
+";
+    assert_eq!(verdicts(src, "at"), ["proved array-index"]);
+}
+
+/// A construction from a name is a check row: proved behind a guard that
+/// shows the rule, kept and trapping where nothing does.
+#[test]
+fn a_validated_construction_is_a_check_row() {
+    let src = "type Port = Int64 where value >= 1 && value <= 65535
+export fn port(n: Int64) -> Port {
+    if n >= 1 && n <= 65535 {
+        return Port(n)
+    }
+    return Port(n + 70000)
+}
+";
+    assert_eq!(verdicts(src, "port"), ["proved where", "check where"]);
+    let (err, rows) = oracle(src, "    print(port(80))\n    print(port(0))", "port");
+    assert_eq!(
+        (err.as_str(), rows),
+        (
+            "error: validation failed for `Port`\n",
+            vec!["4 0 where proved 1".to_string(), "6 0 where kept 1".to_string()]
+        )
+    );
+}
+
+/// Only the rule's comparisons of `value` with a literal are premises: an
+/// operand with arithmetic or a `||` states nothing, so `i >= 0` is unknown.
+#[test]
+fn a_rule_states_only_its_comparisons() {
+    let src = "type Odd = Int64 where value % 2 == 1 && value < 3
+type Out = Int64 where value < 0 || value > 2
+export fn odd(xs: Array<Int64, 3>, i: Odd) -> Int64 {
+    return xs[i]
+}
+export fn out(xs: Array<Int64, 3>, i: Out) -> Int64 {
+    return xs[i]
+}
+";
+    assert_eq!(verdicts(src, "odd"), ["check array-index"]);
+    assert_eq!(verdicts(src, "out"), ["check array-index"]);
+}
+
 #[test]
 fn two_arrays_a_loop_grows_in_step_keep_equal_lengths() {
     let src = "fn w(n: Int64) -> Int64 {

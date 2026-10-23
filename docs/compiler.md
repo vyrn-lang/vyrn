@@ -207,7 +207,9 @@ disequality `d != 0` the state holds. A fact may name the length of
 a record name's array field, and a `where` rule's `a.length == b.length` makes
 one term of both (`facts::Term::Col`), except inside a group of stores into
 the record's fields, where each field has its own term until the row that
-checks the rule (`check::Guard::Rule`). A record fact
+checks the rule (`check::Guard::Rule`). A name of a validated integer type
+carries its rule's comparisons (`elide::Walk::premises`), and a construction of
+one from a name is a check row (`check::Guard::Scalar`). A record fact
 (`elide::RecordFacts`) is a linear fact over the fields of every record
 value with those fields: two array fields equally long, an integer field at
 least zero, an indexed array or String field at least as long as an integer
