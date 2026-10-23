@@ -1,0 +1,1 @@
+a_stream_box_in_module_state_is_refused.vyrn:1:0: only `std/stream` may call `boxStream`

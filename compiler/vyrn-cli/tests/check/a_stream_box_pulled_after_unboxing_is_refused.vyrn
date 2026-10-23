@@ -1,0 +1,9 @@
+fn main() -> Int64 {
+    let xs: Array<Int64> = [1]
+    let s: Stream<Int64> = fromArray(xs)
+    let a = boxStream(s)
+    let back: Stream<Int64> = unboxStream(a)
+    close(back)
+    let x: Option<Int64> = pullAt(a)
+    return 0
+}

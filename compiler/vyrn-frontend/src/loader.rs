@@ -690,6 +690,69 @@ fn runtime_fence(
     )))
 }
 
+/// Refuses each call of a builtin with a [`crate::prelude::Builtin::home`] in
+/// a module other than that home. Identity is by resolved path, as at the
+/// [`runtime_fence`]. Runs after [`parse_reached`], so it sees every body the
+/// link keeps.
+fn away_from_home(
+    modules: &[Module],
+    root_key: &str,
+    opts: &LoadOptions,
+    real_paths: &mut HashMap<String, Option<String>>,
+) -> Vec<Diagnostic> {
+    let homed: Vec<_> = (crate::prelude::builtins().iter())
+        .filter_map(|b| Some((b.name, b.home?)))
+        .collect();
+    let mut out = Vec::new();
+    for m in modules {
+        let mut calls = Vec::new();
+        let mut visit = |e: &Expr| {
+            if let Expr::Call { name, line, .. } = e {
+                if let Some(&h) = homed.iter().find(|(n, _)| *n == name.as_str()) {
+                    calls.push((h, *line));
+                }
+            }
+            true
+        };
+        let p = &m.program;
+        let methods = p
+            .impls
+            .iter()
+            .flat_map(|im| im.methods.iter().chain(&im.places));
+        for f in p.functions.iter().chain(methods) {
+            crate::ast::each_expr(&f.body, &mut visit);
+        }
+        for t in p.tests.iter().chain(&p.benches) {
+            crate::ast::each_expr(&t.body, &mut visit);
+        }
+        let predicates = p.type_decls.iter().filter_map(|t| t.predicate.as_ref());
+        let defaults = p
+            .contracts
+            .iter()
+            .flat_map(|c| &c.members)
+            .filter_map(|m| m.default());
+        for e in (p.globals.iter().map(|g| &g.init))
+            .chain(predicates)
+            .chain(defaults)
+        {
+            crate::ast::each_expr_in(e, &mut visit);
+        }
+        for ((name, home), line) in calls {
+            let at_home = resolve_spec(home, &m.key, opts)
+                .is_ok_and(|k| same_file(&m.key, &k, opts, real_paths));
+            if !at_home {
+                out.push(load_error(
+                    &m.key,
+                    root_key,
+                    line,
+                    rule!(AwayFromHome, name, home),
+                ));
+            }
+        }
+    }
+    out
+}
+
 /// One parsed module awaiting linking.
 struct Module {
     key: String,
@@ -1638,6 +1701,10 @@ fn load_modules(
 
     if let Err(diags) = parse_reached(&mut w.modules, opts) {
         return Err(failed(diags, w.origins));
+    }
+    let away = away_from_home(&w.modules, &root_key, opts, &mut w.real_paths);
+    if !away.is_empty() {
+        return Err(failed(away, w.origins));
     }
 
     // The floor. Last, so it walks everything the artifact links,

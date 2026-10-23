@@ -1,0 +1,1 @@
+a_stream_box_pulled_in_a_test_is_refused.vyrn:3:0: only `std/stream` may call `pullAt`

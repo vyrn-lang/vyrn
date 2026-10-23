@@ -1,0 +1,11 @@
+fn main() -> Int64 {
+    let xs: Array<Int64> = [100, 200]
+    let s: Stream<Int64> = fromArray(xs)
+    let a = boxStream(s)
+    let b = a
+    let s1: Stream<Int64> = unboxStream(a)
+    let s2: Stream<Int64> = unboxStream(b)
+    close(s1)
+    close(s2)
+    return 0
+}
