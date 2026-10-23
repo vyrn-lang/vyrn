@@ -1,0 +1,3 @@
+a_stream_box_read_as_a_validated_type_is_refused.vyrn:6:0: only `std/stream` may call `boxStream`
+a_stream_box_read_as_a_validated_type_is_refused.vyrn:7:0: only `std/stream` may call `pullAt`
+a_stream_box_read_as_a_validated_type_is_refused.vyrn:12:0: only `std/stream` may call `unboxStream`

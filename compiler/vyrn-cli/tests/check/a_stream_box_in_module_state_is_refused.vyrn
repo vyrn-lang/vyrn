@@ -1,0 +1,2 @@
+let mut a: Int64 = boxStream(fromArray([1, 2]))
+fn main() -> Int64 { return 0 }

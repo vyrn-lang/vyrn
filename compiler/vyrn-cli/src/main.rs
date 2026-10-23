@@ -3961,6 +3961,24 @@ let mut vyrnServeOutVals: Array<String> = []
 let mut vyrnServeLive: Int64 = 0
 let mut vyrnServeFrame: String = ""
 
+/// `boxStream`, `pullAt` and `unboxStream` at `String`, which only `std/stream`
+/// may call. The CLI's rewrite turns each call of these in `vyrnServePark`,
+/// `vyrnServeNext` and `vyrnServeClose` into the builtin after the check, so a
+/// body below runs only for a call the program writes itself.
+fn vyrnServeBox(s: consume Stream<String>) -> Int64 {
+    close(s)
+    return 0
+}
+
+fn vyrnServePull(a: Int64) -> Option<String> {
+    return None
+}
+
+fn vyrnServeUnbox(a: Int64) -> Stream<String> {
+    let none: Array<String> = []
+    return fromArray(none)
+}
+
 /// What `serveStream` becomes on the served route. The producer goes into one
 /// box and its address into module state, which is the only place a `Stream<T>`
 /// may rest: linearity forbids a field, and `boxStream` exists for exactly
@@ -3969,7 +3987,7 @@ fn vyrnServePark(s: consume Stream<String>) {
     if vyrnServeLive != 0 {
         panic("serveStream: this request already opened a stream")
     }
-    vyrnServeLive = boxStream(s)
+    vyrnServeLive = vyrnServeBox(s)
 }
 
 /// One request's fields, one call each.
@@ -4071,11 +4089,11 @@ export extern fn vyrnServeNext() -> Bool {
     }
     let at = vyrnServeLive
     vyrnServeLive = 0
-    let got: Option<String> = pullAt(at)
+    let got: Option<String> = vyrnServePull(at)
     if vyrnServeLive == 0 {
         vyrnServeLive = at
     } else {
-        let old: Stream<String> = unboxStream(at)
+        let old: Stream<String> = vyrnServeUnbox(at)
         close(old)
     }
     if let Some(f) = got {
@@ -4095,7 +4113,7 @@ export extern fn vyrnServeClose() {
     if vyrnServeLive != 0 {
         let at = vyrnServeLive
         vyrnServeLive = 0
-        let s: Stream<String> = unboxStream(at)
+        let s: Stream<String> = vyrnServeUnbox(at)
         close(s)
     }
 }
@@ -4109,13 +4127,21 @@ fn vyrnServeMain() -> Int64 {
 "#;
 
 /// Turns a loaded program into the one the serving host runs: every
-/// `serveStream` call becomes `vyrnServePark`, and `vyrnServeMain` becomes
-/// `main` when the program has none.
+/// `serveStream` call becomes `vyrnServePark`, each stand-in call in the
+/// [`SERVE_SHIM`]'s park, next and close becomes its builtin, and
+/// `vyrnServeMain` becomes `main` when the program has none.
 ///
-/// Both are renames after the check, sound because `vyrnServePark` has
-/// `serveStream`'s signature (`consume Stream<String>` to `Unit`).
+/// All are renames after the check, sound because each callee has the other's
+/// signature (`vyrnServePark` and `serveStream`: `consume Stream<String>` to
+/// `Unit`). The stand-ins are renamed in the shim's own functions only, which
+/// no program can declare again, so no call the program writes reaches a box.
 fn serve_rewrite(program: &mut vyrn_frontend::ast::Program) {
     use vyrn_frontend::ast::Expr;
+    const BOXES: [(&str, &str); 3] = [
+        ("vyrnServeBox", "boxStream"),
+        ("vyrnServePull", "pullAt"),
+        ("vyrnServeUnbox", "unboxStream"),
+    ];
     let has_main = program
         .functions
         .iter()
@@ -4124,10 +4150,15 @@ fn serve_rewrite(program: &mut vyrn_frontend::ast::Program) {
         if !has_main && f.name == "vyrnServeMain" {
             f.name = "main".to_string();
         }
+        let shim = f.module.is_none()
+            && ["vyrnServePark", "vyrnServeNext", "vyrnServeClose"].contains(&f.name.as_str());
         vyrn_frontend::project::walk_block(&mut f.body, &mut |e| {
             if let Expr::Call { name, args, .. } = e {
                 if name == "serveStream" && args.len() == 1 {
                     *name = "vyrnServePark".to_string();
+                }
+                if let Some((_, b)) = BOXES.iter().find(|(s, _)| shim && *s == name.as_str()) {
+                    *name = b.to_string();
                 }
             }
         });

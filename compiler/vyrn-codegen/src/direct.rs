@@ -5679,9 +5679,9 @@ impl<'p> Fn_<'_, 'p> {
         Ok(Type::Stream(Box::new(elem)))
     }
 
-    /// The first word of every boxed stream. A program can spell any address, so
-    /// `unboxStream` and `pullAt` check it, and `unboxStream` clears it before freeing:
-    /// a second `unboxStream` of one address traps.
+    /// The first word of every boxed stream. `std/stream` can hand any `Int64` as an
+    /// address, so `unboxStream` and `pullAt` check it, and `unboxStream` clears it
+    /// before freeing: a second `unboxStream` of one address traps.
     const BOX_MAGIC: i64 = 3735928559;
 
     /// Checks the box whose `Int64` address is `addr`, or traps; returns the local holding it.
