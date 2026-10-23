@@ -26,7 +26,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use vyrn_frontend::ast::*;
-use vyrn_frontend::core::check::{Check, Guard, Raises, Verdict};
+use vyrn_frontend::core::check::{integer_rule, Check, Guard, Raises, Verdict};
 /// The core's statements and values. `Body` stays qualified at each use,
 /// because this file defines its own `Body`.
 use vyrn_frontend::core::{
@@ -6343,12 +6343,47 @@ impl<'p> Fn_<'_, 'p> {
             }
         }
         b.ins(&Instruction::Call(index));
+        self.unless_true(m, b, &row);
+        Ok(())
+    }
+
+    /// Fails `row` unless the Bool on the stack, a rule's predicate, is true.
+    fn unless_true(&mut self, m: &mut Log, b: &mut Frame, row: &Check) {
         b.ins(&Instruction::I32Eqz);
         b.ins(&Instruction::If(BlockType::Empty));
         self.depth += 1;
-        self.check_trap(m, b, &row, None);
+        self.check_trap(m, b, row, None);
         self.depth -= 1;
         b.ins(&Instruction::End);
+    }
+
+    /// The `where` check of the validated integer type `decl` on the value on the stack, built
+    /// from the name `n`: its constructor when the check is kept; nothing when a pass proved
+    /// it, and under the oracle the predicate, whose failure fails the run. The value stays
+    /// on the stack.
+    fn core_scalar_check(
+        &mut self,
+        m: &mut Log,
+        b: &mut Frame,
+        decl: &TypeDecl,
+        n: Name,
+        line: usize,
+    ) -> Result<(), String> {
+        let row = core_check(
+            &mut self.core_w,
+            line,
+            |g| matches!(g, Guard::Scalar(k, _) if *k == n),
+        )?;
+        let Some(row) = self.row(m, b, row) else {
+            return Ok(());
+        };
+        if row.verdict == Verdict::Kept {
+            return self.emit_validation(b, decl, line);
+        }
+        let held = (self.predicate_holds(b, decl, line)?)
+            .ok_or_else(|| gap("a rule check of a type with no rule", line))?;
+        self.unless_true(m, b, &row);
+        b.ins(&Instruction::LocalGet(held));
         Ok(())
     }
 
@@ -11356,14 +11391,19 @@ impl<'a, 'p> Fn_<'a, 'p> {
             Some(Spec::Routes(_)) | None => {}
         }
         // `T(v)` of a validated type: the operand at the base, then the check, which does
-        // not run on a crossing the checker proved (`Callee::Proven`).
+        // not run on a crossing the checker proved (`Callee::Proven`). A validated integer
+        // built from a name checks from its row.
         if let Some(decl) = self.core_named(callee, kind) {
             let [(v, _)] = args else {
                 return unsupported(&format!("`{callee}` at this arity"), line);
             };
             self.core_val(m, b, v, &decl.base, line)?;
-            if kind == Callee::Named {
-                self.emit_validation(b, &decl, line)?;
+            match (kind, v) {
+                (Callee::Named, Val::Name(n)) if integer_rule(&decl) => {
+                    self.core_scalar_check(m, b, &decl, *n, line)?
+                }
+                (Callee::Named, _) => self.emit_validation(b, &decl, line)?,
+                _ => {}
             }
             return Ok(Type::Named(decl.name));
         }

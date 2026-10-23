@@ -138,7 +138,7 @@ fn guarded(guard: &Guard) -> &'static str {
         Guard::Range(..) => "slice",
         Guard::NonZero(_) | Guard::NoOverflow(..) => "division",
         Guard::Shift(..) => "shift",
-        Guard::Rule(_) => "where rule",
+        Guard::Rule(_) | Guard::Scalar(..) => "where rule",
         Guard::Clause { .. } => "where clause",
     }
 }

@@ -3,9 +3,10 @@
 //!
 //! [`state`] inserts a [`St::Check`] before each row whose operation can trap:
 //! an element place on an array or a String, an integer `/`, `%`, `<<` or
-//! `>>`, `@swapRemove`, a SIMD span load or store, `bytes(s, a, b)`, and a
-//! record type's constructor run on a name to check its `where` rule, and a
-//! call to a function whose parameters carry `where` clauses. The emitter
+//! `>>`, `@swapRemove`, a SIMD span load or store, `bytes(s, a, b)`, a
+//! record type's constructor run on a name to check its `where` rule, a
+//! validated integer type's constructor run on a name, and a call to a
+//! function whose parameters carry `where` clauses. The emitter
 //! emits each check from its row and from nowhere else. A check row emits
 //! nothing where it stands: the emitter runs it inside the row it guards,
 //! where the operands are on hand, so it reads no name and no walker counts
@@ -22,7 +23,7 @@ use vyrn_frontend::ast::{BinOp, Capability, Function, Type, TypeDecl};
 use vyrn_frontend::prelude::Indexes;
 use vyrn_frontend::trap::Rule;
 
-use vyrn_frontend::core::check::{Check, Guard, Raises, Site, Verdict, Why};
+use vyrn_frontend::core::check::{scalar_arg, Check, Guard, Raises, Site, Verdict, Why};
 use vyrn_frontend::core::{Arg, Body, Callee, Op, Place, Rhs, St, Val};
 
 /// What a build does with its check rows, from the environment variable
@@ -82,6 +83,7 @@ fn list(body: &Body, tys: &Types<'_>, ss: &mut Vec<St>, lines: &mut BTreeMap<usi
             St::Let(n, rhs) => {
                 rhs_guards(body, tys, rhs, &mut guards);
                 clauses.extend(clause_guards(body, tys, rhs));
+                ruled = scalar_arg(rhs, tys.decls).map(|(n, t)| Guard::Scalar(n, t));
                 if let Rhs::Take(p) = rhs {
                     taken.push(p.clone());
                 }
@@ -90,7 +92,8 @@ fn list(body: &Body, tys: &Types<'_>, ss: &mut Vec<St>, lines: &mut BTreeMap<usi
             St::Do { rhs, line, .. } => {
                 rhs_guards(body, tys, rhs, &mut guards);
                 clauses.extend(clause_guards(body, tys, rhs));
-                ruled = rhs.checks_rule(&body.names);
+                ruled = (rhs.checks_rule(&body.names).map(Guard::Rule))
+                    .or_else(|| scalar_arg(rhs, tys.decls).map(|(n, t)| Guard::Scalar(n, t)));
                 *line
             }
             St::Store { place, line, .. } => {
@@ -103,7 +106,7 @@ fn list(body: &Body, tys: &Types<'_>, ss: &mut Vec<St>, lines: &mut BTreeMap<usi
         };
         let guards = (guards.into_iter())
             .map(|(r, g)| (Raises::Row(r), g))
-            .chain(ruled.map(|n| (Raises::Where, Guard::Rule(n))))
+            .chain(ruled.map(|g| (Raises::Where, g)))
             .chain(clauses.into_iter().map(|g| (Raises::Clause, g)));
         for (rule, guard) in guards {
             let ordinal = lines.entry(line).or_insert(0);

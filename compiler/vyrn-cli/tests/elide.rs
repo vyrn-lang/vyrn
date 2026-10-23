@@ -165,6 +165,124 @@ fn a_condition_stored_in_a_bool_proves_its_index() {
     );
 }
 
+/// The inner `lo < xs.length` follows from the outer guards by a chain of two,
+/// and stays a premise: `d`'s exactness needs it beside a length axiom, a
+/// chain of three without it. Written in the other order, the guards proved
+/// the read already (`facts::Prover::states`).
+#[test]
+fn a_condition_a_chain_implies_stays_a_premise() {
+    let src = "export fn w(xs: Array<Int64>, lo: Int64, hi: Int64) -> Int64 {
+    if lo < hi && hi <= xs.length {
+        if lo >= 0 && lo < xs.length {
+            let d = hi - lo
+            let q = d / 2
+            if q < d && q < xs.length {
+                return xs[lo + q]
+            }
+        }
+    }
+    return 0
+}
+";
+    assert_eq!(
+        verdicts(src, "w"),
+        [
+            "proved int-div-zero",
+            "proved int-div-overflow",
+            "proved array-index"
+        ]
+    );
+    let (err, rows) = oracle(src, "    print(w(xs, 0, 3).toString())", "w");
+    assert_eq!(err, "");
+    assert_eq!(rows[2], "7 0 array-index proved 1");
+}
+
+/// A name of a validated integer type carries its rule's comparisons, because
+/// every boundary that makes one checks the rule. The body is exported, so no
+/// inferred entry fact proves the read.
+#[test]
+fn a_validated_integer_parameter_proves_its_index() {
+    let src = "type Idx = Int64 where value >= 0 && value < 3
+export fn at(xs: Array<Int64, 3>, i: Idx) -> Int64 {
+    return xs[i]
+}
+";
+    assert_eq!(verdicts(src, "at"), ["proved array-index"]);
+}
+
+/// A construction from a name is a check row: proved behind a guard that
+/// shows the rule, kept and trapping where nothing does.
+#[test]
+fn a_validated_construction_is_a_check_row() {
+    let src = "type Port = Int64 where value >= 1 && value <= 65535
+export fn port(n: Int64) -> Port {
+    if n >= 1 && n <= 65535 {
+        return Port(n)
+    }
+    return Port(n + 70000)
+}
+";
+    assert_eq!(verdicts(src, "port"), ["proved where", "check where"]);
+    let (err, rows) = oracle(src, "    print(port(80))\n    print(port(0))", "port");
+    assert_eq!(
+        (err.as_str(), rows),
+        (
+            "error: validation failed for `Port`\n",
+            vec![
+                "4 0 where proved 1".to_string(),
+                "6 0 where kept 1".to_string()
+            ]
+        )
+    );
+}
+
+/// Only the rule's comparisons of `value` with a literal are premises: an
+/// operand with arithmetic or a `||` states nothing, so `i >= 0` is unknown.
+#[test]
+fn a_rule_states_only_its_comparisons() {
+    let src = "type Odd = Int64 where value % 2 == 1 && value < 3
+type Out = Int64 where value < 0 || value > 2
+export fn odd(xs: Array<Int64, 3>, i: Odd) -> Int64 {
+    return xs[i]
+}
+export fn out(xs: Array<Int64, 3>, i: Out) -> Int64 {
+    return xs[i]
+}
+";
+    assert_eq!(verdicts(src, "odd"), ["check array-index"]);
+    assert_eq!(verdicts(src, "out"), ["check array-index"]);
+}
+
+/// A quotient by a literal `k >= 2` of `a >= 0` takes `k*q <= a`,
+/// `a - k*q <= k - 1` and, where `a >= 1`, `q <= a - 1`
+/// (`facts::divided`): `a - 2 * q` indexes two elements, and `d - 1 - q` is
+/// at least zero.
+#[test]
+fn a_quotient_by_a_literal_bounds_its_remainder() {
+    let src = "export fn pair(xs: Array<Int64, 2>, a: Int64) -> Int64 {
+    if a >= 0 && a < 1000 {
+        let q = a / 2
+        return xs[a - 2 * q]
+    }
+    return 0
+}
+export fn half(xs: Array<Int64>, d: Int64) -> Int64 {
+    if d >= 1 && d <= xs.length {
+        let q = d / 2
+        return xs[d - 1 - q]
+    }
+    return 0
+}
+";
+    let proved = [
+        "proved int-div-zero",
+        "proved int-div-overflow",
+        "proved array-index",
+    ];
+    assert_eq!(verdicts(src, "pair"), proved);
+    assert_eq!(verdicts(src, "half"), proved);
+}
+
 #[test]
 fn two_arrays_a_loop_grows_in_step_keep_equal_lengths() {
     let src = "fn w(n: Int64) -> Int64 {

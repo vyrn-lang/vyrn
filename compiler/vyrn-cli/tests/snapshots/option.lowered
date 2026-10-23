@@ -51,6 +51,7 @@ fn parseAge(n)
     let @t1 = prim gteq(n, lit 18)
     if @t1
       {
+        proved where n holds the rule of Age  (line 21 #0)
         let @t2 = named Age(consume n)
         let @t3 = ctor Ok(consume @t2)
         return @t3

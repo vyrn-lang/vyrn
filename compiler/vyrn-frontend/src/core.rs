@@ -1228,6 +1228,7 @@ impl Body {
             }
             G::Shift(k, bits) => format!("{} in 0..{bits}", self.val(k)),
             G::Rule(n) => format!("{} holds its rule", self.spell(*n)),
+            G::Scalar(n, t) => format!("{} holds the rule of {t}", self.spell(*n)),
             G::Clause { atoms, .. } => {
                 let side = |o: &check::Operand| match &o.part {
                     Some(f) => format!("{}.{f}", self.val(&o.of)),

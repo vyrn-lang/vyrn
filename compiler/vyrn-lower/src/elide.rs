@@ -47,7 +47,7 @@ use vyrn_frontend::prim::Cmp;
 
 use crate::effects::StateUse;
 use crate::facts::{Fact, Lin, Sides, State, Term, EXACT};
-use vyrn_frontend::core::check::{Atom, Check, Guard, Operand, Site, Verdict, Why};
+use vyrn_frontend::core::check::{scalar_rule, Atom, Check, Guard, Operand, Site, Verdict, Why};
 use vyrn_frontend::core::{
     rows, Arg, Arm, Body, BorrowKind, Callee, Ctor, Lit, Name, Op, Place, Rhs, St, Target, Test,
     Val,
@@ -4520,6 +4520,28 @@ impl<'a> Walk<'a> {
             Kind::Other if !self.dirty.contains(&n) => self.restate(st, n),
             _ => {}
         }
+        if let Type::Named(t) = &self.body.names[n.index()].ty {
+            self.premises(st, n, t);
+        }
+    }
+
+    /// The comparisons the rule of the validated integer type `t` states of
+    /// `n` ([`scalar_rule`]), and whether they are the whole rule.
+    fn scalar(&self, n: Name, t: &str) -> Option<(Vec<Atom>, bool)> {
+        let (atoms, whole) = scalar_rule(self.decls.get(t)?)?;
+        let atoms = (atoms.iter())
+            .filter_map(|a| a.with(&|_| Some(Val::Name(n))))
+            .collect();
+        Some((atoms, whole))
+    }
+
+    /// Assumes what the rule of the validated integer type `t` states of `n`.
+    /// It holds of every value of `t`, because every boundary that makes one
+    /// checks the rule.
+    fn premises(&self, st: &mut State, n: Name, t: &str) {
+        for a in self.scalar(n, t).map(|(a, _)| a).unwrap_or_default() {
+            self.holds(st, &a);
+        }
     }
 
     /// The exact value of `v`, if it is an integer.
@@ -4832,6 +4854,9 @@ impl<'a> Walk<'a> {
                 if let Guard::Clause { atoms, .. } = &c.guard {
                     atoms.iter().for_each(|a| self.holds(&mut st, a));
                 }
+                if let Guard::Scalar(n, t) = &c.guard {
+                    self.premises(&mut st, *n, t);
+                }
                 st
             }
         }
@@ -4930,25 +4955,32 @@ impl<'a> Walk<'a> {
                 out
             }
             Guard::Rule(_) => return None,
-            // A disequality is shown by the state, not by a goal.
-            Guard::Clause { atoms, .. } => {
-                let mut out = Vec::new();
-                for f in atoms
-                    .iter()
-                    .map(|a| self.atom(a))
-                    .collect::<Option<Vec<_>>>()?
-                {
-                    for f in f {
-                        match f {
-                            Fact::Ge(l) => out.push(l),
-                            Fact::Ne(l) if st.differs(&l) => {}
-                            Fact::Ne(_) => return None,
-                        }
-                    }
-                }
-                out
-            }
+            Guard::Scalar(n, t) => match self.scalar(*n, t)? {
+                (atoms, true) => self.atom_goals(st, &atoms)?,
+                (_, false) => return None,
+            },
+            Guard::Clause { atoms, .. } => self.atom_goals(st, atoms)?,
         })
+    }
+
+    /// The goals of the comparisons `atoms`. A disequality is shown by the
+    /// state, not by a goal.
+    fn atom_goals(&self, st: &State, atoms: &[Atom]) -> Option<Vec<Lin>> {
+        let mut out = Vec::new();
+        for f in atoms
+            .iter()
+            .map(|a| self.atom(a))
+            .collect::<Option<Vec<_>>>()?
+        {
+            for f in f {
+                match f {
+                    Fact::Ge(l) => out.push(l),
+                    Fact::Ne(l) if st.differs(&l) => {}
+                    Fact::Ne(_) => return None,
+                }
+            }
+        }
+        Some(out)
     }
 
     /// The length of `p`, a field `g.f` of a global, as the same field of a
@@ -5619,7 +5651,8 @@ impl<'a> Walk<'a> {
     /// The range of `n = a op b` where `b` is a literal that bounds it, a
     /// divisor of a non-negative `a % b` the state proves at least one, an
     /// operand of `&` the state proves non-negative, or the shift amount of a
-    /// non-negative `a`.
+    /// non-negative `a`. A quotient by a literal also takes
+    /// [`crate::facts::divided`].
     fn bound(&self, pre: &State, n: Name, o: BinOp, la: &Lin, lb: &Lin) -> Out {
         let p = pre.prover();
         let holds = |g: &Lin| p.ge0(g).is_some_and(|c| c.verify(pre, g));
@@ -5644,7 +5677,12 @@ impl<'a> Walk<'a> {
             (BinOp::Rem, _) if nonneg && lb.plus(-1).is_some_and(|d| holds(&d)) => {
                 [Some(v.clone()), lb.plus(-1).and_then(|d| d.sub(&v)), None]
             }
-            (BinOp::Div, Some(k)) if k >= 1 && nonneg => quotient(&|h| h / k),
+            (BinOp::Div, Some(k)) if k >= 1 && nonneg => {
+                let positive = la.plus(-1).is_some_and(|a| holds(&a));
+                let more = crate::facts::divided(la, &v, k, positive);
+                let facts = quotient(&|h| h / k).into_iter().flatten().chain(more);
+                return Out::Facts(facts.collect());
+            }
             (BinOp::Shr, _) if nonneg => match least(lb) {
                 Some(s) if s >= 0 => quotient(&|h| h >> s.min(63)),
                 _ => return Out::Nothing,
@@ -6417,7 +6455,7 @@ impl<'a> Walk<'a> {
             }
             (None, Guard::NonZero(k) | Guard::Shift(k, _)) => [val_name(k), None],
             (None, Guard::NoOverflow(a, d, _)) => [val_name(a), val_name(d)],
-            (None, Guard::Rule(r)) => [Some(*r), None],
+            (None, Guard::Rule(r) | Guard::Scalar(r, _)) => [Some(*r), None],
             (None, Guard::Clause { .. }) => [None, None],
         };
         let terms = || failing.into_iter().flat_map(|g| g.terms.iter());
@@ -7098,7 +7136,7 @@ fn guard_names(g: &Guard, f: &mut dyn FnMut(Name)) {
         }
         Guard::Shift(k, _) | Guard::NonZero(k) | Guard::NoOverflow(_, k, _) => val(k),
         Guard::Range(s, a, b) => [s, a, b].into_iter().for_each(val),
-        Guard::Rule(r) => val(&Val::Name(*r)),
+        Guard::Rule(r) | Guard::Scalar(r, _) => val(&Val::Name(*r)),
         Guard::Clause { atoms, .. } => atoms.iter().for_each(|a| {
             val(&a.l.of);
             val(&a.r.of);

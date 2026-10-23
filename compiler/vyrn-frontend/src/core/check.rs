@@ -2,8 +2,8 @@
 
 use std::sync::Arc;
 
-use super::{Lit, Name, Place, Val};
-use crate::ast::{BinOp, Capability, Expr, FnId, Function, Type, UnOp};
+use super::{Arg, Callee, Lit, Name, Place, Rhs, Val};
+use crate::ast::{BinOp, Capability, Expr, FnId, Function, Type, TypeDecl, UnOp};
 use crate::rules::rule;
 use crate::trap::Rule;
 use crate::types::Decls;
@@ -108,6 +108,10 @@ pub enum Guard {
     /// The record name satisfies its type's `where` rule: the row after the
     /// check calls the type's constructor on it.
     Rule(Name),
+    /// The name satisfies the `where` rule of the validated integer type
+    /// named: the row after the check constructs the type from it
+    /// ([`scalar_arg`]).
+    Scalar(Name, String),
     /// The arguments of the call row after the check satisfy one parameter's
     /// `where` clause: each comparison holds. `says` is the sentence a
     /// failure prints. Unlike every other check, it runs where it stands:
@@ -287,6 +291,92 @@ fn operand(
     };
     let (of, part) = (Val::Name(Name(j as u32)), part.cloned());
     Ok((Operand { of, part }, Some(ty)))
+}
+
+/// Whether `decl` is a validated integer type: a construction of it from a
+/// name is a check row ([`Guard::Scalar`]).
+pub fn integer_rule(decl: &TypeDecl) -> bool {
+    decl.predicate.is_some()
+        && decl.type_params.is_empty()
+        && crate::validate::width(&decl.base).is_some()
+}
+
+/// The name `rhs` constructs a validated integer type from at run time, and
+/// the type: `T(consume n)`. A constant the checker proved is a
+/// [`Callee::Proven`] call and has no row.
+pub fn scalar_arg(rhs: &Rhs, decls: &dyn Decls) -> Option<(Name, String)> {
+    let Rhs::Call {
+        callee,
+        args,
+        kind: Callee::Named,
+        ..
+    } = rhs
+    else {
+        return None;
+    };
+    let [(Arg::Val(Val::Name(n)), _)] = args.as_slice() else {
+        return None;
+    };
+    integer_rule(decls.decl(callee)?).then(|| (*n, callee.clone()))
+}
+
+/// The comparisons the rule of the validated integer type `decl` states of
+/// every value of it, over `Val::Name(Name(0))` for `value` ([`Atom::with`]),
+/// and whether they are the whole rule. Each `&&` operand that compares
+/// `value` or an integer literal the base holds is one. Any other operand
+/// states none: a `||`, arithmetic, which wraps, `=~` or a call. `None` where
+/// [`integer_rule`] is false.
+pub fn scalar_rule(decl: &TypeDecl) -> Option<(Vec<Atom>, bool)> {
+    if !integer_rule(decl) {
+        return None;
+    }
+    let mut atoms = Vec::new();
+    let whole = scalar_conjuncts(decl.predicate.as_ref()?, &decl.base, &mut atoms);
+    Some((atoms, whole))
+}
+
+/// Appends the comparisons of `e`, one `&&` operand of a rule over `value`
+/// of the integer type `ty`, and answers whether they are all of `e`.
+fn scalar_conjuncts(e: &Expr, ty: &Type, out: &mut Vec<Atom>) -> bool {
+    let Expr::Binary { op, lhs, rhs, .. } = e else {
+        return false;
+    };
+    if *op == BinOp::And {
+        let l = scalar_conjuncts(lhs, ty, out);
+        return scalar_conjuncts(rhs, ty, out) && l;
+    }
+    let Some((bits, signed)) = crate::validate::width(ty) else {
+        return false;
+    };
+    let lit = |k: i64| (crate::validate::wrap(k, bits, signed) == k).then(|| Val::Lit(Lit::Int(k)));
+    let operand = |e: &Expr| {
+        let of = match e {
+            Expr::Var { name, .. } if name == "value" => Val::Name(Name(0)),
+            Expr::Int(k, _) => lit(*k)?,
+            Expr::Unary {
+                op: UnOp::Neg,
+                expr,
+                ..
+            } => match &**expr {
+                Expr::Int(k, _) => lit(k.checked_neg()?)?,
+                _ => return None,
+            },
+            _ => return None,
+        };
+        Some(Operand { of, part: None })
+    };
+    match (op.compare(), operand(lhs), operand(rhs)) {
+        (Some(_), Some(l), Some(r)) => {
+            out.push(Atom {
+                l,
+                op: *op,
+                r,
+                ty: ty.clone(),
+            });
+            true
+        }
+        _ => false,
+    }
 }
 
 /// The parameter `name` names in the clause of parameter `k` of `f`: `value`
