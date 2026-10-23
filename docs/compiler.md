@@ -507,6 +507,8 @@ run as their own gate:
 - `typed.rs`: every store into a validated place has a legal producer.
 - `fnverdicts.rs`: each function's trap-free and kernel verdicts, against
   `tests/pins/fn-verdicts.tsv`.
+- `canon.rs`: how many relations and conditions of the corpus share an
+  identity at each layer of `canon`, against `tests/pins/canon.tsv`.
 
 Memory at run time:
 
@@ -597,6 +599,41 @@ whose head test is its only exit, whose counter steps by one, and which
 pushes one element of a parameter at the counter every turn covers the
 parameter from the counter's start to the bound. `tests/provenance.rs` pins
 the classes of the 48 functions the analytic report classified by hand.
+
+## Relation identity
+
+`canon.rs` decides when two relations a fact names are one: a predicate, a
+key lambda, a loop-free function, or a condition. No compiler pass
+reads it; `tests/canon.rs` is its census. It reads the decided bodies.
+`Table::relation` replaces each name of a body by the tree of its value,
+numbers the parameters by position and names a capture by its spelling; an
+`if` with a branch that returns runs the rest of the body under each branch.
+A loop, a `match`, a store outside a local or a call for its effect leaves
+the body without a tree. `Table::conditions` keeps the names the reader bound
+as leaves. Every node lives hash-consed in one `Table` per program, so an
+identity is an `Id`, and `Table::key` spells it across programs.
+
+Each layer is a rewrite that keeps the value and the traps on every input:
+
+- Layer 0, `Level::Syntax`: the tree, with the operands of `==` and `!=` in
+  key order. The core already writes `a && b` as `if a { b } else { false }`.
+- Layer 1, `Level::Boolean`: `!`, an `if` at a Bool position and `==` between
+  Bools are structure; every other Bool is an atom, `a != b` as `!(a == b)`.
+  The structure becomes two reduced ordered decision diagrams, answers true
+  and answers false, over atoms ordered by key. An atom with an element that
+  may trap (an index, a key, a division, a remainder, a shift by a
+  non-literal, a call `verdict::TrapFree` does not clear) answers only where
+  a definedness variable per element holds.
+- Layer 2, `Level::Atoms`: an integer comparison compares linear forms
+  modulo `2^w` over opaque terms; an equality moves every term to one side,
+  an order comparison flips to `<` and steps a constant. A `String` comparison
+  flips and negates, a float one only flips. An integer key body is its
+  linear form.
+
+Past `BUDGET` (16 atoms, 1,024 nodes) a Boolean structure degrades in steps:
+trap-free conjuncts over disjoint atoms are decided apart, then sifting
+looks for a variable order within budget, then each part that fits is
+decided and the rest stays syntax (`Step`).
 
 ## Where a change goes
 
