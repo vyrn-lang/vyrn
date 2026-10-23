@@ -551,6 +551,9 @@ jobs:
       - name: Each function's trap-free and kernel verdicts over the corpus
         working-directory: compiler
         run: cargo test --quiet -p vyrn-cli --test fnverdicts -- --ignored --nocapture
+      - name: The relation identity census over the corpus
+        working-directory: compiler
+        run: cargo test --quiet -p vyrn-cli --test canon -- --ignored --nocapture
 
   route:
     name: the native route (wasm2c == wasm)

@@ -266,37 +266,14 @@ impl<'w> Graph<'w> {
                 St::Let(_, rhs) | St::Do { rhs, .. } => rhs,
                 _ => continue,
             };
-            let Rhs::Call { callee, kind, .. } = rhs else {
+            let Rhs::Call { callee, .. } = rhs else {
                 continue;
             };
             let name = b.spelled(callee);
-            if atom(callee) == Some(Effect::Trap) {
-                // The loader stamps each `panic`, which no source spells so.
-                let said = if vyrn_frontend::ast::is_panic(callee) {
-                    "panic"
-                } else {
-                    name
-                };
-                cause(Trap::Explicit(Some(said.to_string())), last);
-                continue;
-            }
-            match kind {
-                Callee::Value(_) | Callee::Bound => cause(Trap::Value, last),
-                Callee::Method | Callee::Projection => cause(Trap::Unbuilt(name.into()), last),
-                Callee::Fn(f) => match program.functions.get(f.index()) {
-                    Some(d) if d.is_extern => match extern_effect(d) {
-                        // A host-boundary extern the runtime implements on
-                        // every target.
-                        Some(Effect::Clock | Effect::Random) => {}
-                        _ => cause(Trap::Extern(name.into()), last),
-                    },
-                    _ => into(name, sums.runs(rhs), last, &mut cause),
-                },
-                Callee::Builtin
-                | Callee::Reserved
-                | Callee::Ctor
-                | Callee::Named
-                | Callee::Proven => {}
+            match reach(program, world, b, rhs) {
+                Reach::Free => {}
+                Reach::Traps(t) => cause(t, last),
+                Reach::Runs(id) => into(name, id, last, &mut cause),
             }
         }
         // A name's declared releases run where it is released. A generic
@@ -350,6 +327,84 @@ impl<'w> Graph<'w> {
                 }
             })
             .collect()
+    }
+}
+
+/// What a call row does about traps.
+enum Reach {
+    /// It cannot trap: a builtin without the `trap` atom, a constructor, or
+    /// an extern the runtime implements on every target.
+    Free,
+    /// It may trap by itself.
+    Traps(Trap),
+    /// It runs the body of this row, or of no row the core built.
+    Runs(Option<FnId>),
+}
+
+/// What the call `rhs` of `b` does about traps. `rhs` is a [`Rhs::Call`].
+fn reach(program: &Program, world: &World, b: &Body, rhs: &Rhs) -> Reach {
+    let Rhs::Call { callee, kind, .. } = rhs else {
+        return Reach::Free;
+    };
+    let name = b.spelled(callee);
+    if atom(callee) == Some(Effect::Trap) {
+        // The loader stamps each `panic`, which no source spells so.
+        let said = if vyrn_frontend::ast::is_panic(callee) {
+            "panic"
+        } else {
+            name
+        };
+        return Reach::Traps(Trap::Explicit(Some(said.to_string())));
+    }
+    match kind {
+        Callee::Value(_) | Callee::Bound => Reach::Traps(Trap::Value),
+        Callee::Method | Callee::Projection => Reach::Traps(Trap::Unbuilt(name.into())),
+        Callee::Fn(f) => match program.functions.get(f.index()) {
+            Some(d) if d.is_extern => match extern_effect(d) {
+                // A host-boundary extern the runtime implements on every
+                // target.
+                Some(Effect::Clock | Effect::Random) => Reach::Free,
+                _ => Reach::Traps(Trap::Extern(name.into())),
+            },
+            _ => Reach::Runs(world.summaries().runs(rhs)),
+        },
+        Callee::Builtin | Callee::Reserved | Callee::Ctor | Callee::Named | Callee::Proven => {
+            Reach::Free
+        }
+    }
+}
+
+/// The trap-free verdict of every frame the root file's frames, lambdas
+/// included, reach by calls, which [`TrapFree::traps`] reads per call row.
+pub struct TrapFree<'w> {
+    program: &'w Program,
+    world: &'w World,
+    free: HashMap<FnId, bool>,
+}
+
+impl<'w> TrapFree<'w> {
+    pub fn of(program: &'w Program, world: &'w World) -> TrapFree<'w> {
+        let tops = crate::insight::root_frames(program, world);
+        let graph = Graph::of(program, world, &tops);
+        let causes = graph.causes();
+        let free = (graph.at.iter())
+            .map(|(id, i)| (*id, causes[*i].is_none()))
+            .collect();
+        TrapFree {
+            program,
+            world,
+            free,
+        }
+    }
+
+    /// Whether the call `rhs`, a row of a frame [`TrapFree::of`] walked, may
+    /// trap. A call into a frame the walk did not reach may.
+    pub fn traps(&self, b: &Body, rhs: &Rhs) -> bool {
+        match reach(self.program, self.world, b, rhs) {
+            Reach::Free => false,
+            Reach::Traps(_) | Reach::Runs(None) => true,
+            Reach::Runs(Some(id)) => !self.free.get(&id).copied().unwrap_or(false),
+        }
     }
 }
 

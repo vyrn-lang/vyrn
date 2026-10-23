@@ -7,6 +7,7 @@
 //! because the checker types every expression against its destination.
 
 pub mod append;
+pub mod canon;
 pub mod check;
 pub mod core;
 pub mod effects;
