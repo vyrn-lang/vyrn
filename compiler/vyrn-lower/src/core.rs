@@ -8137,7 +8137,7 @@ pub fn augment(program: &Program, w: &mut World, judging: bool) {
     // A body that did not build gives the judgment nothing, served or not.
     let late: Vec<(&str, &[Walked])> = states.iter().filter_map(JobState::answered).collect();
     let places = build_places(program, &lowered, own, &mut w.fns);
-    let ((mut state, read, answers, reached, allocating), uses) = crate::effects::judge_built(
+    let ((mut state, read, answers, reached, allocating), uses, ran) = crate::effects::judge_built(
         program,
         &lowered,
         own,
@@ -8259,7 +8259,7 @@ pub fn augment(program: &Program, w: &mut World, judging: bool) {
         },
     );
     let mut outside: Vec<Option<Body>> = Vec::with_capacity(lowered.bodies.len());
-    let facts = crate::fact_flow::Facts::of(program, &w.fns.rows, own.proto.types());
+    let facts = crate::fact_flow::Facts::of(program, &w.fns, own.proto.types(), ran);
     for (
         JobState {
             job: j,
@@ -8317,10 +8317,6 @@ pub fn augment(program: &Program, w: &mut World, judging: bool) {
             trace,
         );
         let refused = typed(program, own, &mut r, &top, j.module(), j.as_written());
-        let key = key.filter(|_| !refused);
-        remember(memo.as_ref(), key, kept, &r.kernel[refused_before..]);
-        // After the memo: a fact verdict reads other modules' clauses, which
-        // the memo's key does not cover.
         if let Some(facts) = &facts {
             match j {
                 Job::Inst(inst) => {
@@ -8329,6 +8325,8 @@ pub fn augment(program: &Program, w: &mut World, judging: bool) {
                 Job::Outside(_) => facts.judge(None, &Default::default(), &top, &mut r.kernel),
             }
         }
+        let key = key.filter(|_| !refused);
+        remember(memo.as_ref(), key, kept, &r.kernel[refused_before..]);
         into.push(Some(top));
     }
     drop(facts);

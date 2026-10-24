@@ -638,6 +638,9 @@ rules! {
     OrderArity { name, want } "`{name}` takes {want}";
     NotAnOrder { ty } "`{ty}` is no order: an order is an `Asc`, a `Desc` or a `Then`";
     FactForm { word } "a fact clause is written `{word}<O>(value)`, with one order";
+    FactConjunct { word }
+        "`{word}` states a fact, which no run-time check decides, so it is joined to \
+        its clause only by `&&`, never under `||` or `!`";
     FactOrder { word, ty }
         "`{word}<{ty}>(value)` names `{ty}`, which is no order: write an `Asc`, a `Desc`, \
         a `Then`, or a type parameter bound by `Order`";

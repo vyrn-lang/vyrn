@@ -296,9 +296,10 @@ pub fn reset_judgment_tally() {
 /// Hashes every declaration the kernel's judgment of an imported module's body
 /// can read across a module boundary, and no function body, so an edit inside
 /// one body re-judges no other. It includes each parameter's capability (`read
-/// x` to `consume x` changes what every caller owes), each projection's whole
-/// body (it is inlined into its callers), and each validated type's predicate
-/// and module-state initializer. The parts are sorted first because three
+/// x` to `consume x` changes what every caller owes), each parameter's and
+/// result's `where` clause (a caller's fact verdict reads them), each
+/// projection's whole body (it is inlined into its callers), and each
+/// validated type's predicate and module-state initializer. The parts are sorted first because three
 /// sources are hash maps. Every part but a projection is written without its
 /// positions and docs ([`unplaced`]), so a line moved or a doc edited in the
 /// root moves no part; a projection's expansion keeps its lines, which an
@@ -328,6 +329,8 @@ fn declaration_fingerprint(program: &Program) -> u64 {
     let sig = |f: &Function| {
         let mut s = String::from("f");
         crate::checker::recheck::head(&mut s, f);
+        let clauses: Vec<_> = f.params.iter().map(|p| &p.clause).collect();
+        s.push_str(&unplaced(&(clauses, &f.ret_clause)));
         s
     };
     let mut parts: Vec<String> =

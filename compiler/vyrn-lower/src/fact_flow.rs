@@ -1,8 +1,8 @@
 //! The fact judgment: which arrays are sorted, and by which order, over the
 //! core of every body, after the ownership and effect judgments.
 //!
-//! `core::augment` builds one [`Facts`] and calls [`Facts::judge`] on each
-//! body it built, after the effect judgment. The judgment writes only
+//! `core::augment` builds one [`Facts`] once the effect judgment ran, and
+//! calls [`Facts::judge`] on each body it built. The judgment writes only
 //! refusals. No pass after it reads its state, and the check prover never
 //! takes a fact as a premise, so a wrong fact can wrongly accept a program
 //! but never moves emitted code.
@@ -26,7 +26,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-use vyrn_frontend::ast::{Capability, FnId, Function, Program, Type};
+use vyrn_frontend::ast::{Capability, FnId, Program, Type};
 use vyrn_frontend::core::check::{guarantees, requirements, Guarantee, Requirement, Word};
 use vyrn_frontend::core::{Arg, Body, Callee, Ctor, Lit, Name, Place, Rhs, St, Test, Val};
 use vyrn_frontend::diagnostics::Diagnostic;
@@ -36,25 +36,31 @@ use vyrn_frontend::rule;
 use vyrn_frontend::rules::Rule;
 use vyrn_frontend::types::Decls;
 
-use crate::FnRow;
+use crate::effects::Ran;
+use crate::Fns;
 
 /// The fact clauses of one program's functions and its `before`: what the
 /// judgment reads at each call and return. The placer builds one before its
-/// loop over the built bodies and calls [`Facts::judge`] on each, after the
-/// effect judgment ran.
+/// loop over the built bodies and calls [`Facts::judge`] on each.
 pub(crate) struct Facts<'a> {
-    functions: &'a [Function],
-    /// Per function with a fact clause, by its index in `functions`.
+    program: &'a Program,
+    /// Per function with a fact clause, by its index in `program.functions`.
     clauses: HashMap<usize, (Vec<Requirement>, Vec<Guarantee>)>,
     before: Option<usize>,
-    rows: Rows<'a>,
+    fns: &'a Fns,
 }
 
 impl<'a> Facts<'a> {
-    /// The facts of `program`, whose function table is `rows`. `None`, with
-    /// nothing allocated, for a program that links no `std/order`, or that
-    /// states no fact and declares no `before`.
-    pub(crate) fn of(program: &'a Program, rows: &'a [FnRow], decls: &dyn Decls) -> Option<Self> {
+    /// The facts of `program`, whose function table is `fns`, once `_after`
+    /// shows the effect judgment ran. `None`, with nothing allocated, for a
+    /// program that links no `std/order`, or that states no fact and declares
+    /// no `before`.
+    pub(crate) fn of(
+        program: &'a Program,
+        fns: &'a Fns,
+        decls: &dyn Decls,
+        _after: Ran,
+    ) -> Option<Self> {
         let orders = &program.orders;
         if orders.is_empty() {
             return None;
@@ -76,15 +82,11 @@ impl<'a> Facts<'a> {
         if clauses.is_empty() && before.is_none() {
             return None;
         }
-        let rows = Rows {
-            rows,
-            declared: program.functions.len(),
-        };
         Some(Facts {
-            functions: &program.functions,
+            program,
             clauses,
             before,
-            rows,
+            fns,
         })
     }
 
@@ -113,7 +115,7 @@ impl<'a> Facts<'a> {
             let mut j = Judge {
                 body,
                 facts: self,
-                name: decl.map_or(&top.name, |d| &self.functions[d.index()].name),
+                name: decl.map_or(&top.name, |d| &self.program.functions[d.index()].name),
                 own: if k == 0 { own } else { &[] },
                 subst: &subst,
                 orders: Vec::new(),
@@ -160,8 +162,9 @@ impl<'a> Facts<'a> {
                         ..
                     },
                 ..
-            } => (self.rows.decl(g.index()))
-                .is_some_and(|(d, _)| self.clauses.contains_key(&d) || Some(d) == self.before),
+            } => (self.fns.declaration(self.program, *g)).is_some_and(|(d, _)| {
+                self.clauses.contains_key(&d.index()) || Some(d.index()) == self.before
+            }),
             _ => false,
         };
         any(&top.stmts, &fact) || top.lambdas.iter().any(|l| self.calls(l))
@@ -701,13 +704,15 @@ impl Judge<'_> {
                         _ => self.writes(st, args, line),
                     }
                 }
-                (Callee::Fn(g), _, _, _) => match self.facts.rows.decl(g.index()) {
-                    // An instance's row holds its type arguments; a call
-                    // into a generic body, which no instance judges, its own.
-                    Some((d, [])) => self.call(st, d, args, solved, n, line),
-                    Some((d, of)) => self.call(st, d, args, of, n, line),
-                    None => self.writes(st, args, line),
-                },
+                (Callee::Fn(g), _, _, _) => {
+                    match self.facts.fns.declaration(self.facts.program, *g) {
+                        // An instance's row holds its type arguments; a call
+                        // into a generic body, which no instance judges, its own.
+                        Some((d, [])) => self.call(st, d.index(), args, solved, n, line),
+                        Some((d, of)) => self.call(st, d.index(), args, of, n, line),
+                        None => self.writes(st, args, line),
+                    }
+                }
                 _ => self.writes(st, args, line),
             },
             _ => {}
@@ -834,7 +839,8 @@ impl Judge<'_> {
                 continue;
             };
             if !self.holds(st, a, want) {
-                let callee = self.body.spelled(&self.facts.functions[g].name).to_string();
+                let callee = (self.body).spelled(&self.facts.program.functions[g].name);
+                let callee = callee.to_string();
                 self.refuse_need(st, line, &callee, a, want);
             }
         }
@@ -941,30 +947,6 @@ impl Judge<'_> {
         match self.body.names[n.index()].source.starts_with('@') {
             true => s.into_owned(),
             false => format!("`{s}`"),
-        }
-    }
-}
-
-/// The World's function table, read by declaration.
-struct Rows<'a> {
-    rows: &'a [FnRow],
-    /// The table's first rows are `program.functions`, in order
-    /// ([`vyrn_frontend::ast::Program::source_names`]).
-    declared: usize,
-}
-
-impl Rows<'_> {
-    /// The declaration row `id` is the body of, as an index into
-    /// `program.functions`, and its instance's type arguments: empty for a
-    /// declaration's own row. `None` for a test, a lambda frame or the
-    /// module state.
-    fn decl(&self, id: usize) -> Option<(usize, &[(String, Type)])> {
-        if id < self.declared {
-            return Some((id, &[]));
-        }
-        match &self.rows.get(id)?.generic {
-            Some((g, args)) if g.index() < self.declared => Some((g.index(), args)),
-            _ => None,
         }
     }
 }

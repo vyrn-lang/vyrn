@@ -303,10 +303,11 @@ The fact judgment (`vyrn_lower::fact_flow`) follows the three. It judges
 which arrays are sorted, and by which order, and writes only refusals into
 the kernel's list. `core::augment` builds one `fact_flow::Facts` from the
 program's `std/order` names and its functions' fact clauses
-(`core::check::requirements`, `core::check::guarantees`), then calls
-`Facts::judge` on each body it built, after the effect judgment and after
-the judgment memo took the body's verdict, because a fact verdict reads
-other modules' clauses and the memo's key does not cover them. A program
+(`core::check::requirements`, `core::check::guarantees`) and the
+`effects::Ran` only the effect judgment returns, so it runs after that
+judgment. It calls `Facts::judge` on each body it built, before the judgment
+memo takes the body's verdict: the memo's declaration fingerprint holds every
+clause a fact verdict reads, so a served body keeps its fact refusals. A program
 that links no `std/order`, and a body that calls no function with a fact
 clause and no `before`, cost no allocation. The walk reads a body's rows:
 an empty array literal, a move or store, `@push` (its obligation), `@pop`

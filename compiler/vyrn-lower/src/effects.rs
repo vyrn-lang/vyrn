@@ -587,8 +587,8 @@ fn placed_reach(
 /// reads it, because a lambda in a test is not in the artifact. It is the first
 /// judgment itself when no call through a value reached such a frame.
 ///
-/// Returns what `then` returns, and the first judgment's [`StateUse`] of each
-/// frame built.
+/// Returns what `then` returns, the first judgment's [`StateUse`] of each
+/// frame built, and the [`Ran`] a later judgment takes.
 pub(crate) fn judge_built<R>(
     program: &vyrn_frontend::ast::Program,
     lowered: &crate::Lowered<'_>,
@@ -598,7 +598,7 @@ pub(crate) fn judge_built<R>(
     tops: &[(&str, &Body)],
     served: &[(&str, &[Walked])],
     then: impl FnOnce(&Judged, &Judged, &[&Body], &[usize], &[usize]) -> R,
-) -> (R, HashMap<FnId, StateUse>) {
+) -> (R, HashMap<FnId, StateUse>, Ran) {
     let mut generic: Vec<(&str, Body)> = Vec::new();
     // Nor does a generic declared `release` until the placer writes the row
     // that calls it, so it is judged as written.
@@ -768,5 +768,9 @@ pub(crate) fn judge_built<R>(
         &top,
         &served_at,
     );
-    (r, judged.into_state_uses(&refs))
+    (r, judged.into_state_uses(&refs), Ran(()))
 }
+
+/// Shows that [`judge_built`] judged the bodies being placed: only it makes
+/// one, so a judgment that takes one runs after the effect judgment.
+pub(crate) struct Ran(());

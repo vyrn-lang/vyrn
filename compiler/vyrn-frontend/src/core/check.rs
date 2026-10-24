@@ -451,14 +451,18 @@ fn conjuncts(
             };
         }
     }
+    let form = || match fact_under(e) {
+        Some(word) => rule!(FactConjunct, word = word.spelled()),
+        None => of.form(f),
+    };
     let Expr::Binary { op, lhs, rhs, .. } = e else {
-        return Err(of.form(f));
+        return Err(form());
     };
     if *op == BinOp::And {
         conjuncts(f, of, lhs, decls, out, facts)?;
         return conjuncts(f, of, rhs, decls, out, facts);
     }
-    op.compare().ok_or_else(|| of.form(f))?;
+    op.compare().ok_or_else(form)?;
     let (l, lt) = operand(f, of, lhs, decls)?;
     let (r, rt) = operand(f, of, rhs, decls)?;
     let ty = match (lt, rt) {
@@ -469,6 +473,18 @@ fn conjuncts(
     };
     out.push(Atom { l, op: *op, r, ty });
     Ok(())
+}
+
+/// The first fact word `e` calls, at any depth.
+fn fact_under(e: &Expr) -> Option<Word> {
+    let mut found = None;
+    crate::ast::each_expr_in(e, &mut |x| {
+        if let Expr::Call { name, .. } = x {
+            found = found.or(Word::of(name));
+        }
+        found.is_none()
+    });
+    found
 }
 
 /// One side of a comparison in the clause `of` states in `f`, with its
