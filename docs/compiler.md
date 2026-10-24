@@ -312,11 +312,19 @@ that links no `std/order`, and a body that calls no function with a fact
 clause and no `before`, cost no allocation. The walk reads a body's rows:
 an empty array literal, a move or store, `@push` (its obligation), `@pop`
 and its `Option` switch, `@copy`, a `before` call and the `if` on its
-answer, and calls with their requirements and guarantees. Any other write
+answer, and calls with their requirements and guarantees or summaries. Any other write
 drops the facts of the array it writes. A `let`'s promise
 (`core::check::Promise`, in `Body::promises`) is judged at each row that
 writes its binding, and its comparisons are clause rows after each such
-write (`vyrn_lower::check`). A loop's head is the greatest state
+write (`vyrn_lower::check`). Before the loop, `Facts::of` solves the
+summary of each private function that returns an array and states no
+result fact: its candidates are both facts of every order its walk and its
+callees' walks meet, a least fixpoint by `fixpoint::solve`; each body starts
+holding them all, and `fixpoint::descend` walks it under its callees'
+summaries and drops each candidate a return does not show. A call reads the
+summary of the instance it names, by function and type arguments. The memo
+keeps each body's summary (`movecheck::Judgment::summary`), so a body built
+again reads the summary of a callee the memo served. A loop's head is the greatest state
 that holds at entry and after every turn, within `fact_flow::ROUNDS` rounds.
 No later pass reads a fact, and the check prover takes none as a premise.
 

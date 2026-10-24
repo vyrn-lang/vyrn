@@ -1,0 +1,13 @@
+import { Asc, sort, lowerBound } from "std/order"
+
+type Person = { name: String, age: Int64 }
+
+export fn byAge(ps: consume Array<Person>) -> Array<Person> {
+    return sort<Asc<Person, age>>(ps)
+}
+
+fn main() -> Int64 {
+    let ps: Array<Person> = [Person { name: "b", age: 30 }, Person { name: "a", age: 20 }]
+    let p = Person { name: "c", age: 25 }
+    return lowerBound<Asc<Person, age>>(byAge(ps), p)
+}

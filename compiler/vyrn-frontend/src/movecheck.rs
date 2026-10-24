@@ -188,6 +188,9 @@ pub struct Judgment {
     /// Per frame, each callee with the module state a call to it may store
     /// into: the effect judgment's answer that `verdict` read.
     pub state: Vec<Vec<(String, Vec<String>)>>,
+    /// What a private function's result holds by the fact judgment's
+    /// summary: a caller in the same module the placer builds reads it.
+    pub summary: Vec<crate::core::check::Fact>,
 }
 
 thread_local! {
