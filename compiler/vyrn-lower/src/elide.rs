@@ -48,7 +48,7 @@ use vyrn_frontend::prim::Cmp;
 use crate::effects::StateUse;
 use crate::facts::{Fact, Lin, Sides, State, Term, EXACT};
 use vyrn_frontend::core::check::{
-    scalar_rule, Atom, Check, Ensures, Guard, Operand, Site, Verdict, Why,
+    scalar_rule, Atom, Check, Ensures, Guard, Operand, Raises, Site, Verdict, Why,
 };
 use vyrn_frontend::core::{
     rows, Arg, Arm, Body, BorrowKind, Callee, Ctor, Lit, Name, NameInfo, Op, Place, Rhs, St,
@@ -75,13 +75,20 @@ fn decide_in(body: &mut Body, decls: &HashMap<String, TypeDecl>, sums: View<'_>)
 pub type Refuted = (Site, String, String);
 
 /// Decides the check rows of the one frame `body` as [`decide`] does, without
-/// its lambdas and without the callees' facts: a refusal must not depend on
-/// another body's summary, so `vyrn check` and the emitters refuse alike.
-/// Answers each rule check that ends a group ([`crate::typed::groups`]) where
-/// the facts prove one field of an equal pair longer than the other, on every
+/// its lambdas, from the body, its parameters' clauses, its names' validated
+/// types and the result clauses `declared` states of its callees
+/// ([`Summaries::declared`]): the demanded walk a refusal reads. A refusal
+/// must not depend on an inferred summary or entry fact, which the judgment
+/// memo does not key, so `vyrn check` and the emitters refuse alike. Answers
+/// each rule check that ends a group ([`crate::typed::groups`]) where the
+/// facts prove one field of an equal pair longer than the other, on every
 /// live path. A dead state proves every goal, so it refutes none.
-pub fn refuted(body: &mut Body, decls: &HashMap<String, TypeDecl>) -> Vec<Refuted> {
-    walk(body, decls, (&Summaries::default()).into())
+pub fn demanded(
+    body: &mut Body,
+    decls: &HashMap<String, TypeDecl>,
+    declared: &Summaries,
+) -> Vec<Refuted> {
+    walk(body, decls, declared.into())
 }
 
 fn walk(body: &mut Body, decls: &HashMap<String, TypeDecl>, sums: View<'_>) -> Vec<Refuted> {
@@ -324,6 +331,25 @@ impl RecordFacts {
 }
 
 impl Summaries {
+    /// The summaries a demanded walk reads ([`demanded`]): each callee's
+    /// declared result clause, by the row a direct call names, and nothing
+    /// inferred. A call to a generic function reads none.
+    pub fn declared(clauses: impl IntoIterator<Item = (FnId, Ensures)>) -> Summaries {
+        let mut s = Summaries::default();
+        for (f, e) in clauses {
+            s.at.insert(f, s.values.len());
+            s.values.push(Summary {
+                params: Vec::new(),
+                types: Vec::new(),
+                pre: BTreeSet::new(),
+                post: BTreeSet::new(),
+                when: BTreeSet::new(),
+                ensures: Some(e),
+            });
+        }
+        s
+    }
+
     /// The body of `f` as [`decide`] decides it, when [`summaries`] decided
     /// it and no caller took it before.
     pub fn decided(&self, f: FnId) -> Option<Body> {
@@ -3361,6 +3387,9 @@ struct Walk<'a> {
     /// In a walk for [`element_rows`]: per parameter, whether every return
     /// so far holds its `result` row and its `own` row ([`Frame`]).
     rows: Option<(Vec<bool>, Vec<bool>)>,
+    /// The names a sum or difference binds that a recording walk could not
+    /// show exact ([`Walk::fits`]), which a `prove` row's reason names.
+    wraps: BTreeSet<Name>,
 }
 
 /// What the walk keeps about one name.
@@ -3619,6 +3648,7 @@ impl<'a> Walk<'a> {
             elem_cands: Vec::new(),
             arrays: BTreeMap::new(),
             rows: None,
+            wraps: BTreeSet::new(),
         };
         for (k, p) in ghosted {
             w.elem_cands
@@ -5165,6 +5195,9 @@ impl<'a> Walk<'a> {
             Rhs::Call { .. } if some_part(rhs).is_some() => self.wrapped(st, n, rhs),
             Rhs::Prim(op, vs, _) => match self.prim(st, n, op, vs) {
                 Out::Def(r) => st.define(Term::Val(n), &r),
+                _ if self.record && matches!(op, Op::Bin(BinOp::Add | BinOp::Sub)) => {
+                    self.wraps.insert(n);
+                }
                 Out::Cond(t, f) => {
                     st.conds.insert(n, Sides::from((t, f)));
                 }
@@ -6495,6 +6528,14 @@ impl<'a> Walk<'a> {
     /// when it states no goal. The strongest origin among them decides, then
     /// a length a call resized, then a loop that writes one of them.
     fn why(&self, st: &State, c: &Check, failing: Option<&Lin>) -> Why {
+        let terms = || failing.into_iter().flat_map(|g| g.terms.iter());
+        let wraps = |(t, _): &(Term, i64)| match t {
+            Term::Val(n) if self.wraps.contains(n) => Some(*n),
+            _ => None,
+        };
+        if let Some(n) = terms().find_map(wraps).filter(|_| c.rule == Raises::Prove) {
+            return Why::Wraps(n);
+        }
         let operands = match (failing, &c.guard) {
             (Some(_), _) => [None, None],
             (None, Guard::Range(s, a, b)) => {
@@ -6514,7 +6555,6 @@ impl<'a> Walk<'a> {
             (None, Guard::Rule(r) | Guard::Scalar(r, _)) => [Some(*r), None],
             (None, Guard::Clause { .. }) => [None, None],
         };
-        let terms = || failing.into_iter().flat_map(|g| g.terms.iter());
         let names = || {
             terms()
                 .filter_map(|(t, _)| t.name())

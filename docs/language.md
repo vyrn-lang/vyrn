@@ -236,6 +236,28 @@ type User = {
 
 `schemaOf<T>()` reads a validated type's declaration at compile time and answers a `Schema` record: name, base type, `///` doc, bounds, `multipleOf`, length bounds and pattern. `jsonSchema<T>()` writes the JSON Schema document for any type, and a union's as the `anyOf` of its members' schemas. `schemaOf` of a union is refused, because one `Schema` describes one declaration. Neither is runtime reflection: the compiler computes the answer, and types are erased before the program runs.
 
+### Proofs
+
+`prove(c)` from `std/proof` asks the compiler to show `c` where the call stands. `c` is one integer comparison, or several joined by `&&`.
+
+```vyrn
+import { prove } from "std/proof"
+
+fn mid(xs: Array<Int64>, lo: Int64 where value >= 0, hi: Int64 where value > lo && value <= xs.length) -> Int64
+    where value >= lo && value < hi && value < xs.length
+{
+    prove(lo < xs.length)
+    let q = (hi - lo) / 2
+    prove(q < xs.length)
+    return lo + q
+}
+```
+
+- The compiler proves `c` from the body, the parameters' clauses, the validated types of the names it reads and the result clauses of the functions the body calls. It reads nothing it inferred about another function, so the proof holds in every program that links the module. A comparison it cannot show is refused with the reason: ``` `prove` cannot show its comparison here: it needs `i < n`, and `i` is a parameter, so the function cannot know what its callers pass ```.
+- Every check after the call assumes `c`. So a `prove` splits a chain the prover cannot take in one step into steps it can: in `mid`, every check and the result clause are proved, and a binary search that calls `mid` runs no index check.
+- A sum or difference in `c` states a fact only where the compiler shows it stays within `-2^62..=2^62`. Elsewhere it may wrap, and the refusal says ``the sum `a + b` may wrap``.
+- The call checks nothing at run time. `prove` is no function value, because a call through a value proves nothing.
+
 ### Function types
 
 `fn(A, B) -> R` is a type. A function value can be a named function or a lambda, and it can be stored in a binding, a field, an array, a map, an `Option` or module state. A function value reads every argument, so a function with a `consume` or `modify` parameter is not a value of any `fn` type.
@@ -627,6 +649,7 @@ Each line is a program the compiler refuses, and the reason.
 - A parameter's `where` clause that names a later or a `modify` parameter: it would not hold for the whole call.
 - A call whose argument the flow does not show sorted, by the order a fact clause names: a fact has no run-time check.
 - A write that may break a fact a `let` promises: the promise holds at every write, and nothing checks a fact at run time.
+- A `prove` the compiler cannot show from the body, the clauses and the declared result clauses of its callees: it checks nothing at run time.
 - Assignment to a binding without `mut`.
 - `?` in a function whose return kind differs from the operand's.
 - A `Stream` or `MustUse` value that is not disposed on every path.

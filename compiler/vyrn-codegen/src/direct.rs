@@ -6454,9 +6454,9 @@ impl<'p> Fn_<'_, 'p> {
             _ => match row.rule {
                 Raises::Row(rule) => self.trap_row(b, rule, val),
                 // A kept `where` check traps inside its type's constructor
-                // ([`Fn_::core_rule_check`]), and a kept clause check prints
-                // its sentence ([`Fn_::clause_check`]).
-                Raises::Where | Raises::Clause | Raises::Result | Raises::Let => {
+                // ([`Fn_::core_rule_check`]), and a kept clause or `prove`
+                // check prints its sentence ([`Fn_::clause_check`]).
+                Raises::Where | Raises::Clause | Raises::Result | Raises::Let | Raises::Prove => {
                     b.ins(&Instruction::Unreachable);
                 }
             },

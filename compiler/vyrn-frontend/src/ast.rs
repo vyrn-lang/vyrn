@@ -304,6 +304,9 @@ pub struct Program {
     /// The linked names of `std/order`'s compiler-known declarations, which
     /// the loader records at the link.
     pub orders: crate::order::Names,
+    /// The linked name of `std/proof`'s `prove`, which the loader records at
+    /// the link. `None` where the program does not link `std/proof`.
+    pub prove: Option<String>,
     /// The session of the host that analyses this program. The loader stamps
     /// the load's; a parsed program has none.
     pub session: crate::session::SessionRef,

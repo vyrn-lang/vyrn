@@ -684,6 +684,11 @@ rules! {
     ResultClauseChanges { name, param, cap }
         "the `where` clause on the result of `{name}` reads `{param}`, a `{cap}` \
         parameter the body may change";
+    ProveValue {}
+        "`prove` cannot be used as a function value: a call through a value proves \
+        nothing";
+    ProveForm {}
+        "`prove` takes one comparison, or comparisons joined by `&&`";
     ModifyNotMut { fname, arg, vn }
         "`{fname}` argument {arg} is `modify`, so `{vn}` must be \
         declared `mut`";
@@ -1204,6 +1209,7 @@ rules! {
         than `{name}.{short}`, which breaks the `where` rule of `{n}`"
         fix "store into `{name}.{short}` before any statement after line {k} that does not \
             store into `{name}`";
+    ProveUnshown { why } "`prove` cannot show its comparison here: {why}";
     RemoveNotMut { op, name } "cannot `{op}` from `{name}` (declared without `mut`)";
     AssignNotMut { name } "cannot assign to `{name}` (declared without `mut`)";
     FieldNotMut { name } "cannot mutate a field of `{name}` (declared without `mut`)";

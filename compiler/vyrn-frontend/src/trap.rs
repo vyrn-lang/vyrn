@@ -249,6 +249,13 @@ pub fn let_clause(name: &str) -> String {
     format!("validation failed for the `where` clause of `{name}`")
 }
 
+/// Returns what a failed `prove` comparison says. Only a build that keeps
+/// every check (`VYRN_CHECKS=keep`) runs one: any other build refuses a
+/// `prove` it cannot show.
+pub fn prove() -> &'static str {
+    "a `prove` comparison failed"
+}
+
 /// [`validation`] for a declaration.
 pub fn validation_of(decl: &TypeDecl) -> String {
     validation(&decl.name, crate::validate::is_cross_field(decl))

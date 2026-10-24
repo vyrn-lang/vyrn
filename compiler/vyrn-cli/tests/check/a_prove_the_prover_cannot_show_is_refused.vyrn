@@ -1,0 +1,6 @@
+import { prove } from "std/proof"
+
+export fn first(i: Int64, n: Int64) -> Int64 {
+    prove(i < n)
+    return i
+}

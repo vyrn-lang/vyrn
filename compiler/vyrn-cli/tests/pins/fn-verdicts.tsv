@@ -2884,6 +2884,7 @@ std/openapi.vyrn	oaRequestSchema	yes	no, its effect set is alloc
 std/openapi.vyrn	oaPathValue	yes	no, its effect set is alloc
 std/openapi.vyrn	oaTypeNames	yes	no, its effect set is alloc
 std/openapi.vyrn	openapi	yes	no, its effect set is alloc, gen-only
+std/proof.vyrn	prove	yes	no, the result is Unit, not Int32, UInt32, Bool or a read array of one
 std/random.vyrn	randomSeed	yes	no, its effect set is random
 std/random.vyrn	seededRng	yes	no, `seed` is Int64, and WGSL has no 64-bit integer
 std/random.vyrn	nextInt	yes	no, `rng` is Rng, not Int32, UInt32, Bool or a read array of one

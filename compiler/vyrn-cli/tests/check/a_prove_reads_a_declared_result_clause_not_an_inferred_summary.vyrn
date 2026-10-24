@@ -1,0 +1,27 @@
+import { prove } from "std/proof"
+
+fn clampDeclared(n: Int64) -> Int64 where value >= 0 {
+    if n < 0 {
+        return 0
+    }
+    return n
+}
+
+fn clampInferred(n: Int64) -> Int64 {
+    if n < 0 {
+        return 0
+    }
+    return n
+}
+
+export fn declared(n: Int64) -> Int64 {
+    let c = clampDeclared(n)
+    prove(c >= 0)
+    return c
+}
+
+export fn inferred(n: Int64) -> Int64 {
+    let c = clampInferred(n)
+    prove(c >= 0)
+    return c
+}

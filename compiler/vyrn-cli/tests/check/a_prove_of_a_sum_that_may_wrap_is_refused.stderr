@@ -1,0 +1,1 @@
+a_prove_of_a_sum_that_may_wrap_is_refused.vyrn:4:0: `prove` cannot show its comparison here: the sum `a + b` may wrap, and the compiler keeps no fact of a sum it cannot show stays within 2^62

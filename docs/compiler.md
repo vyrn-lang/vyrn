@@ -246,10 +246,15 @@ proves them all), and the binder of a `Some` arm takes them
 (`elide::some_binder`). A private function that only
 direct call rows enter starts with the facts every such row proves of its
 arguments (`World::summaries` lists the candidates, `elide::entered` drops a
-function any row spells by name). The same walk answers a group's rule check
-that the facts prove false (`elide::refuted`); `vyrn check` states and walks
-its own copy of a body with a group for it, and `typed::groups` refuses each
-such group at its first store. A right-hand side (`core::Rhs`) is a value, a `Read` or `Take` of a
+function any row spells by name). A refusal reads the demanded walk
+(`elide::demanded`): the same walk over the body, its parameters' clauses, its
+names' validated types and the declared result clauses of its direct callees
+(`elide::Summaries::declared`), and no inferred summary or entry fact, which
+the judgment memo does not key. The typed judgment states and walks its own
+copy of a body with a group or a `prove` call by it. `typed::groups` refuses
+a group whose rule check the facts prove false at its first store, and a
+`prove` row the walk keeps (`check::Raises::Prove`, a clause check of the
+comparison the call's argument computes) is refused with its `Check::why`. A right-hand side (`core::Rhs`) is a value, a `Read` or `Take` of a
 place, a `Call`, a `Prim` (one row of the primitive table), a `Make` of a
 record, array or variant, or a function name. A place (`core::Place`) is a
 name, a global, a field, an element or a map key. Evaluation order is left

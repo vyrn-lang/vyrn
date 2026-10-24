@@ -1,0 +1,6 @@
+import { prove } from "std/proof"
+
+export fn total(a: Int64 where value >= 0, b: Int64 where value >= 0) -> Int64 {
+    prove(a + b >= 0)
+    return a + b
+}

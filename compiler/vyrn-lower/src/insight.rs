@@ -8,10 +8,11 @@
 
 use std::collections::BTreeMap;
 
+use vyrn_frontend::ast::BinOp;
 use vyrn_frontend::ast::{FnId, Program};
 use vyrn_frontend::core::check::{Guard, Verdict, Why};
 use vyrn_frontend::core::{
-    rows, Body, BorrowKind, Callee, Copied, Ctor, Made, Name, NameInfo, Op, Rhs, St,
+    rows, Body, BorrowKind, Callee, Copied, Ctor, Lit, Made, Name, NameInfo, Op, Rhs, St, Val,
 };
 
 use vyrn_frontend::symbols::{CostLine, FnCost};
@@ -123,7 +124,9 @@ pub fn row(s: &St, body: &Body, world: &World) -> Option<(u32, Kind)> {
             Some(Kind::Check {
                 what: guarded(&c.guard),
                 kept: c.verdict == Verdict::Kept,
-                why: said(&c.why, body, world),
+                why: said(&c.why, body, &|f| {
+                    Some(world.fn_rows().get(f.index())?.name.as_str())
+                }),
             }),
         ),
         _ => return None,
@@ -145,8 +148,9 @@ pub(crate) fn guarded(guard: &Guard) -> &'static str {
 
 /// A kept check's reason, over the names the body's source spells: what the
 /// check needs, why the compiler cannot show it, and what would let it drop
-/// the check, where something would. Empty for [`Why::Unsaid`].
-fn said(why: &Why, body: &Body, world: &World) -> String {
+/// the check, where something would. `named` answers the linked name of a
+/// function row. Empty for [`Why::Unsaid`].
+pub fn said<'n>(why: &Why, body: &Body, named: &dyn Fn(FnId) -> Option<&'n str>) -> String {
     let temp = |n: Name| body.names[n.index()].source.starts_with('@');
     // A temporary reads `the value of line N`, which is no code.
     let code = |n: Name| match temp(n) {
@@ -161,10 +165,9 @@ fn said(why: &Why, body: &Body, world: &World) -> String {
         Why::Unsaid => String::new(),
         Why::Input(n) => format!("{} is read from input", code(*n)),
         Why::Callee(n, f, goal) => {
-            let from = (f.and_then(|f| world.fn_rows().get(f.index())))
-                .map_or("a call".to_string(), |r| {
-                    format!("`{}(..)`", body.spelled(&r.name))
-                });
+            let from = (f.and_then(named)).map_or("a call".to_string(), |r| {
+                format!("`{}(..)`", body.spelled(r))
+            });
             let line = body.names[n.index()].line;
             let who = match temp(*n) && goal.is_some() {
                 true => "that value".to_string(),
@@ -214,6 +217,30 @@ fn said(why: &Why, body: &Body, world: &World) -> String {
             code(*n)
         ),
         Why::Unproved(goal) => format!("it needs {goal}, and the compiler cannot show that here"),
+        Why::Wraps(n) => {
+            let sum = rows(&body.stmts).find_map(|(s, _)| match s {
+                St::Let(m, Rhs::Prim(Op::Bin(op @ (BinOp::Add | BinOp::Sub)), vs, _))
+                    if m == n && vs.len() == 2 =>
+                {
+                    let side = |v: &Val| match v {
+                        Val::Name(v) => body.names[v.index()]
+                            .path
+                            .clone()
+                            .unwrap_or_else(|| body.spoken(*v).into_owned()),
+                        Val::Lit(Lit::Int(k)) => k.to_string(),
+                        Val::Lit(_) => "a literal".into(),
+                    };
+                    let op = if *op == BinOp::Add { "+" } else { "-" };
+                    Some(format!("`{} {op} {}`", side(&vs[0]), side(&vs[1])))
+                }
+                _ => None,
+            });
+            format!(
+                "the sum {} may wrap, and the compiler keeps no fact of a sum it cannot show \
+                 stays within 2^62",
+                sum.unwrap_or_else(|| code(*n))
+            )
+        }
         Why::Rule => "the compiler proves only `where` rules that state equal lengths".into(),
         Why::Nonlinear => {
             "the compiler proves only sums of names and lengths times constants, and this check \

@@ -1,0 +1,1 @@
+a_prove_reads_a_declared_result_clause_not_an_inferred_summary.vyrn:25:0: `prove` cannot show its comparison here: it needs `c >= 0`, and `c` is the result of `clampInferred(..)` at line 24, whose signature does not state it

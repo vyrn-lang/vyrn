@@ -1,0 +1,1 @@
+a_prove_the_prover_cannot_show_is_refused.vyrn:4:0: `prove` cannot show its comparison here: it needs `i < n`, and `i` is a parameter, so the function cannot know what its callers pass

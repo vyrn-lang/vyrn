@@ -195,6 +195,69 @@ export fn get(xs: Array<Int64>, i: Int64) -> Int64 {
     );
 }
 
+/// `prove(c)` is a check of `c` that no build runs: the prover shows it, and
+/// every row after it assumes `c`. The binary search of the manual-proofs
+/// research proves every check of `mid` and `bsearch` with two `prove` rows
+/// and `mid`'s result clause, which `bsearch` reads at the call.
+#[test]
+fn prove_rows_and_a_result_clause_prove_a_binary_search() {
+    let src = "import { prove } from \"std/proof\"
+fn mid(xs: Array<Int64>, lo: Int64 where value >= 0, hi: Int64 where value > lo && value <= xs.length) -> Int64
+    where value >= lo && value < hi && value < xs.length
+{
+    prove(lo < xs.length)
+    let q = (hi - lo) / 2
+    prove(q < xs.length)
+    return lo + q
+}
+export fn bsearch(xs: Array<Int64>, v: Int64) -> Int64 {
+    let mut lo = 0
+    let mut hi = xs.length
+    while lo < hi {
+        let m = mid(xs, lo, hi)
+        if xs[m] < v {
+            lo = m + 1
+        } else {
+            hi = m
+        }
+    }
+    return lo
+}
+";
+    let mid = [
+        "proved prove",
+        "proved int-div-zero",
+        "proved int-div-overflow",
+        "proved prove",
+        "proved where-result",
+    ];
+    assert_eq!(verdicts(src, "mid"), mid);
+    let bsearch = ["proved where-arg", "proved where-arg", "proved array-index"];
+    assert_eq!(verdicts(src, "bsearch"), bsearch);
+    let (err, rows) = oracle(src, "    print(bsearch(xs, 20).toString())", "mid");
+    assert_eq!((err.as_str(), rows.len()), ("", 5));
+}
+
+/// A quotient by a literal of `d >= 1` is at most `d - 1` (`facts::divided`),
+/// so the research's `goalQd` proves its `prove` and the read it bounds.
+#[test]
+fn a_prove_of_a_quotient_bound_holds() {
+    let src = "import { prove } from \"std/proof\"
+export fn goalQd(d: Int64 where value >= 1, xs: Array<Int64> where value.length >= d) -> Int64 {
+    let q = d / 2
+    prove(q <= d - 1)
+    return xs[d - 1 - q]
+}
+";
+    let rows = [
+        "proved int-div-zero",
+        "proved int-div-overflow",
+        "proved prove",
+        "proved array-index",
+    ];
+    assert_eq!(verdicts(src, "goalQd"), rows);
+}
+
 /// A `let` clause is a check after each write of its binding: proved where
 /// the flow shows it, kept and trapping where it does not.
 #[test]
