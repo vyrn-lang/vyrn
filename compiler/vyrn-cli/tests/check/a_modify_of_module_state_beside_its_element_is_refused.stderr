@@ -1,0 +1,3 @@
+a_modify_of_module_state_beside_its_element_is_refused.vyrn:9:0: `names` is passed to `grow` as `modify` and read again in the same call — a `modify` borrow is exclusive
+  fix: `names.copy()` for the second argument
+  fix: or split the call so the two accesses do not overlap

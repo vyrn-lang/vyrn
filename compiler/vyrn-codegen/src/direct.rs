@@ -3662,7 +3662,7 @@ impl<'p> Fn_<'_, 'p> {
     /// after the store.
     /// The snapshot comes first because an aggregate is built destination-first; callers
     /// reach here only where the new value does not name the place
-    /// ([`vyrn_frontend::ast::mentions`]).
+    /// ([`vyrn_frontend::ast::mentions_place`]).
     fn snap_at(
         &mut self,
         b: &mut Frame,
@@ -13953,13 +13953,8 @@ impl<'a, 'p> Fn_<'a, 'p> {
             let v = match a {
                 Arg::Val(v) => v,
                 // A place a `modify` parameter writes crosses as its address,
-                // as a layout name does; a scalar one has no local to reload.
-                Arg::Place(p) => {
-                    return *c == Cap::Modify
-                        && self
-                            .core_place_ty(p)
-                            .is_some_and(|t| matches!(self.cx.repr(&t, 0), Ok(Repr::Agg(_))));
-                }
+                // as a layout name does: it lies in memory, so nothing reloads.
+                Arg::Place(p) => return *c == Cap::Modify && self.core_place_ty(p).is_some(),
             };
             let layout = self.core_layout_name(v);
             match c {

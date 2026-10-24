@@ -338,7 +338,7 @@ A parameter states what the function does with its argument.
 | Word | Meaning |
 |---|---|
 | `read` (the default) | Observes the value. The caller keeps it. |
-| `modify` | Changes it in place. The argument must be a `mut` binding, and the change is visible to the caller. |
+| `modify` | Changes it in place. The argument must be a `mut` binding or a field of one, and the change is visible to the caller. |
 | `consume` | Takes ownership. The caller may not name the value again. |
 
 ```vyrn
@@ -352,7 +352,7 @@ fn redeem(t: consume Ticket) -> Int64 {
 
 - A method receiver takes the same words: `read self` (a bare `self`), `modify self`, `consume self`.
 - Using a consumed value is refused, naming the line that took it.
-- A `modify` argument read again in the same call is refused, because the callee has exclusive access. So is a `consume` argument passed again, whole or in part, because the callee could free it before it reads the other argument.
+- A `modify` or `consume` argument is exclusive: another argument of the same call that names it or an overlapping path is refused, because the callee could write or free it before it reads the other argument. Paths compare field by field: `f(p.a, p.b)` is accepted; `f(p, p.a)` and `f(p.a, p.a.b)` are refused.
 - The words are erased before the program runs.
 
 `consume place` in an expression moves a value out of a binding or a field chain; the place is dead afterwards. `drop x` releases a value and ends the binding. `region { .. }` frees every allocation made inside it at its closing brace; storing a heap value made inside into a binding that outlives the region is refused. [memory.md](memory.md) states when the compiler releases each value.

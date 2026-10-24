@@ -194,8 +194,9 @@ fn census() -> Vec<Row> {
             "a `modify` borrow is exclusive",
             "`a` is passed to `bump` as `modify` and read again in the same call — a `modify` \
              borrow is exclusive",
-            // The checker states it in `check_modify_arg`.
-            Kernel::Elsewhere,
+            // The kernel states it by path, with the `consume` rule
+            // (`Kernel::exclusive`).
+            Kernel::Its,
         ),
         row(
             "r24_capture_that_outlives_the_call.vyrn",
@@ -1315,29 +1316,17 @@ fn the_shapes_the_last_three_rules_unit_tests_pinned_are_still_refused() {
             "a modify borrow read again in the same call",
             "`xs` is passed to `f` as `modify` and read again in the same call — a `modify` \
              borrow is exclusive",
-            false,
+            true,
             format!(
                 "fn f(a: modify Array<Int64>, b: Array<Int64>) -> Int64 {{ return a.length }} \
                  fn go() -> Int64 {{ let mut xs: Array<Int64> = [] return f(xs, xs) }}{END}"
             ),
         ),
         (
-            "a modify borrow read again through a copy of a call",
-            "`xs` is passed to `f` as `modify` and read again in the same call — a `modify` \
-             borrow is exclusive",
-            false,
-            format!(
-                "fn f(a: modify Array<Int64>, b: Array<Int64>) -> Int64 {{ return a.length }} \
-                 fn id(a: Array<Int64>) -> Array<Int64> {{ return a }} \
-                 fn go() -> Int64 {{ let mut xs: Array<Int64> = [] \
-                 return f(xs, id(xs).copy()) }}{END}"
-            ),
-        ),
-        (
             "a modify receiver read again in the same call",
             "`t` is passed to `merge` as `modify` and read again in the same call — a `modify` \
              borrow is exclusive",
-            false,
+            true,
             format!(
                 "type T = {{ n: Int64 }} \
                  protocol Merging {{ fn merge(modify self, other: T) -> Unit }} \

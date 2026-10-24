@@ -913,6 +913,12 @@ examples/modify.vyrn	reset	yes	no, `c` is Counter, not Int32, UInt32, Bool or a 
 examples/modify.vyrn	main	yes	no, its effect set is write-output
 examples/modifycopy.vyrn	append	yes	no, its effect set is alloc
 examples/modifycopy.vyrn	main	no, it keeps an index check	no, its effect set is alloc, write-output
+examples/modifypaths.vyrn	record	yes	no, its effect set is alloc
+examples/modifypaths.vyrn	fill__from0	yes	no, its effect set is alloc
+examples/modifypaths.vyrn	bump	yes	no, `k` is Int64, and WGSL has no 64-bit integer
+examples/modifypaths.vyrn	grow__from0	yes	no, its effect set is alloc
+examples/modifypaths.vyrn	main	no, it keeps an index check	no, its effect set is alloc, write-output, module-state
+examples/modifypaths.vyrn	Merging$Tally$absorb	yes	no, its effect set is alloc
 examples/modifyself.vyrn	main	yes	no, its effect set is alloc, write-output
 examples/modifyself.vyrn	Counting$Tally$record	yes	no, its effect set is alloc
 examples/modifyself.vyrn	Counting$Tally$sum	yes	no, `self` is Tally, not Int32, UInt32, Bool or a read array of one

@@ -2841,7 +2841,7 @@ impl<'a> Builder<'a> {
         Ok((place, ty))
     }
 
-    /// The place `recv` names, which a call shrinks where it lies. A step through
+    /// The place `recv` names, which a call writes where it lies. A step through
     /// a user container is replaced by the place its `atSet` yields
     /// ([`vyrn_frontend::project::Expansions::modify_site`]), whose prologue runs
     /// first. The steps after it walk from the place it yields.
@@ -2852,7 +2852,7 @@ impl<'a> Builder<'a> {
         out: &mut Vec<St>,
     ) -> Result<(Place, Type), Gap> {
         let Some((_, root, steps)) = vyrn_frontend::parser::place_steps(recv) else {
-            return gap("a removal whose receiver is no place", line);
+            return gap("a `modify` argument that is no place", line);
         };
         let ty = |e: &Expr| self.ty_of(e).ok().map(Cow::into_owned);
         let site = self
@@ -6941,16 +6941,11 @@ impl<'a> Builder<'a> {
             let global = matches!(a, Expr::Var { name, .. }
                 if self.lookup(name).is_none()
                     && self.program.globals.iter().any(|g| &g.name == name));
-            // Module state handed to `modify` (`insert(cells, v)`) is passed
-            // as the place: a borrow of it would be written through.
-            if let (Capability::Modify, Expr::Var { name, .. }, true) = (cap, a, global) {
-                vs.push((Arg::Place(Place::Global(name.clone())), *cap));
-                continue;
-            }
-            // A removal's receiver that is a field or an element
-            // (`r.xs.pop()`) is passed as the place: the call shrinks the
-            // array where it lies.
-            if let (0, true) = (k, prelude::removes(name) && !matches!(a, Expr::Var { .. })) {
+            // A `modify` argument that is module state (`insert(cells, v)`),
+            // a field or an element (`fill(p.a)`, `r.xs.pop()`) is passed as
+            // the place: the callee writes it where it lies, and a borrow of
+            // it would be written through.
+            if *cap == Capability::Modify && (global || !matches!(a, Expr::Var { .. })) {
                 let at = self.modify_place(a, line, out)?;
                 vs.push((Arg::Place(at.0), *cap));
                 continue;

@@ -1,0 +1,3 @@
+a_modify_record_beside_its_field_is_refused.vyrn:12:0: `p` is passed to `whole` as `modify` and read again in the same call — a `modify` borrow is exclusive
+  fix: `p.copy()` for the second argument
+  fix: or split the call so the two accesses do not overlap

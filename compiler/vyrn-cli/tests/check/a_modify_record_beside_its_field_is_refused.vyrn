@@ -1,0 +1,14 @@
+// A `modify` argument may not overlap another argument: `p` holds `p.a`.
+type Cell = { n: Int64, xs: Array<Int64> }
+
+type Pair = { a: Cell, b: Cell }
+
+fn whole(x: modify Pair, y: modify Cell) {
+    x.a.n = y.n
+}
+
+fn main() -> Int64 {
+    let mut p = Pair { a: Cell { n: 1, xs: [1] }, b: Cell { n: 2, xs: [] } }
+    whole(p, p.a)
+    return 0
+}

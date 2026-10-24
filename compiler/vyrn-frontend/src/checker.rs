@@ -5787,16 +5787,7 @@ impl<'a> Checker<'a> {
                 match caps.and_then(|c| c.get(i)) {
                     Some(&Capability::Modify) => {
                         let concrete_pty = crate::types::substitute(pty, &subst);
-                        self.check_modify_arg(
-                            shown,
-                            i,
-                            arg,
-                            args,
-                            &atys[i],
-                            &concrete_pty,
-                            scope,
-                            line,
-                        )?;
+                        self.check_modify_arg(shown, i, arg, &atys[i], &concrete_pty, scope, line)?;
                     }
                     Some(&Capability::Consume) => {
                         self.region_consume_guard(shown, i, &atys[i], line)?
@@ -5911,7 +5902,7 @@ impl<'a> Checker<'a> {
             };
             match caps.and_then(|c| c.get(i)) {
                 Some(&Capability::Modify) => {
-                    self.check_modify_arg(shown, i, arg, args, &aty, pty, scope, line)?
+                    self.check_modify_arg(shown, i, arg, &aty, pty, scope, line)?
                 }
                 Some(&Capability::Consume) => self.region_consume_guard(shown, i, &aty, line)?,
                 _ => {}
@@ -6375,37 +6366,28 @@ impl<'a> Checker<'a> {
         }
     }
 
-    /// Checks a `modify` argument: a mutable variable, of exactly the
-    /// parameter type, named by no other argument of the call. Width subtyping
-    /// is unsound here: a whole reassignment written back through a wider
-    /// record drops its extra fields. Exclusivity: two names for
-    /// one value break the callee's promise of one.
+    /// Checks a `modify` argument: a mutable variable or a field of one, of
+    /// exactly the parameter type. Width subtyping is unsound here: a whole
+    /// reassignment written back through a wider record drops its extra
+    /// fields. The kernel states exclusivity, by path (`Kernel::exclusive`).
     fn check_modify_arg(
         &self,
         fname: &str,
         i: usize,
         arg: &Expr,
-        args: &[Expr],
         aty: &Type,
         pty: &Type,
         scope: &Scope,
         line: usize,
     ) -> Result<(), Diagnostic> {
         let fname = DeclName(fname);
-        if let Some((root, path)) = crate::ast::place_path(arg) {
-            for (j, b) in args.iter().enumerate() {
-                if j != i && crate::ast::mentions(b, &root) {
-                    return Err(cerr!(line, ModifyAliased, path, fname, root));
-                }
-            }
-        }
-        match arg {
-            Expr::Var { name: vn, .. } => {
-                if self.lookup(scope, vn).is_some_and(|b| !b.mutable) {
+        match crate::ast::place_path(arg) {
+            Some((vn, _)) => {
+                if self.lookup(scope, &vn).is_some_and(|b| !b.mutable) {
                     return Err(cerr!(line, ModifyNotMut, fname, arg = i + 1, vn));
                 }
             }
-            _ => return Err(cerr!(line, ModifyTemporary, fname, arg = i + 1)),
+            None => return Err(cerr!(line, ModifyTemporary, fname, arg = i + 1)),
         }
         if !matches!(aty, Type::Err) && !matches!(pty, Type::Err) && aty != pty {
             return Err(cerr!(line, ModifyExactType, fname, arg = i + 1, pty, aty));

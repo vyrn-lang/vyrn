@@ -232,6 +232,10 @@ const LEFT_THE_CHECKER: &[(&str, &str)] = &[
     // A rule the checker never had: the fact judgment (`vyrn_lower::fact_flow`)
     // writes into the kernel's list. `tests/check` pins its sentences.
     ("sorted by `", "a fact a call or a return needs"),
+    (
+        "as `modify` and read again in the same call",
+        "row 23, a `modify` borrow is exclusive",
+    ),
 ];
 
 fn check(path: &Path, no_kernel: bool) -> (bool, String) {

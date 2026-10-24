@@ -1,0 +1,11 @@
+// Module state passed as `modify` may not overlap a read of its element.
+fn grow(xs: modify Array<String>, s: String) {
+    xs.push(s.copy())
+}
+
+let mut names: Array<String> = ["a"]
+
+fn main() -> Int64 {
+    grow(names, names[0])
+    return 0
+}

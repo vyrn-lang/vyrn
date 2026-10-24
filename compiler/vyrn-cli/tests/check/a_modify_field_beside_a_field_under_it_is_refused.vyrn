@@ -1,0 +1,14 @@
+// `p.a` is a prefix of `p.a.xs`, so the two `modify` arguments overlap.
+type Cell = { n: Int64, xs: Array<Int64> }
+
+type Pair = { a: Cell, b: Cell }
+
+fn deep(x: modify Cell, y: modify Array<Int64>) {
+    x.n = y.length
+}
+
+fn main() -> Int64 {
+    let mut p = Pair { a: Cell { n: 1, xs: [1] }, b: Cell { n: 2, xs: [] } }
+    deep(p.a, p.a.xs)
+    return 0
+}

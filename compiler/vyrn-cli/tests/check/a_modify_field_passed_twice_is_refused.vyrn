@@ -1,0 +1,14 @@
+// Two `modify` arguments may not name one path.
+type Cell = { n: Int64, xs: Array<Int64> }
+
+type Pair = { a: Cell, b: Cell }
+
+fn two(x: modify Cell, y: modify Cell) {
+    x.n = y.n
+}
+
+fn main() -> Int64 {
+    let mut p = Pair { a: Cell { n: 1, xs: [1] }, b: Cell { n: 2, xs: [] } }
+    two(p.a, p.a)
+    return 0
+}
