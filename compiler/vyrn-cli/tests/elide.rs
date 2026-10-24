@@ -7911,3 +7911,80 @@ fn a_call_into_a_proved_module_keeps_its_clause_check_outside() {
         )
     );
 }
+
+/// Four lemmas `use` calls for their result clauses: `ordered` passes
+/// the erasure rules ([`vyrn_lower::verdict::erased`]), `positive`, which no
+/// caller's facts reach, keeps its clause check, `inRange` may panic, and
+/// `down` calls itself.
+const LEMMAS: &str =
+    "fn ordered(lo: Int64 where value >= 0, hi: Int64 where value > lo) -> Unit where hi >= 1 {
+}
+export fn positive(n: Int64) -> Unit where n > 0 {
+}
+fn inRange(i: Int64, n: Int64) -> Unit where i >= 0 && i < n {
+    if i < 0 || i >= n {
+        panic(\"out of range\")
+    }
+}
+fn down(n: Int64 where value >= 0) -> Unit where n >= 0 {
+    if n > 1 {
+        down(n / 2)
+    }
+}
+export fn use(xs: Array<Int64>, lo: Int64 where value >= 0, hi: Int64 where value > lo) -> Int64 {
+    ordered(lo, hi)
+    positive(hi)
+    inRange(lo, xs.length)
+    down(lo)
+    return xs[lo] + hi
+}
+";
+
+/// The lemmas `use` calls in its module, in row order, with the function
+/// names the module carries under `VYRN_WASM_NAMES`.
+fn lemma_calls() -> Vec<String> {
+    let (_dir, file) = program(LEMMAS, "    print(use(xs, 1, 3).toString())");
+    let out = vyrn()
+        .arg("emit-wat")
+        .arg(&file)
+        .env("VYRN_WASM_NAMES", "1")
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", norm(&out.stderr));
+    let wat = norm(&out.stdout);
+    let body = wat.split("\n  (func $use ").nth(1).expect("use");
+    let body = &body[..body.find("\n  )").expect("unterminated function")];
+    (body.lines())
+        .filter_map(|l| l.trim().strip_prefix("call $"))
+        .filter(|c| ["ordered", "positive", "inRange", "down"].contains(c))
+        .map(str::to_string)
+        .collect()
+}
+
+/// A call for its effect into a pure, read-only, trap-free function that
+/// calls no function in a cycle emits nothing, and the run prints the same.
+#[test]
+fn a_lemma_call_the_rules_pass_is_erased() {
+    assert!(!lemma_calls().contains(&"ordered".to_string()));
+    let (_dir, file) = program(LEMMAS, "    print(use(xs, 1, 3).toString())");
+    let out = vyrn().arg("run").arg(&file).output().unwrap();
+    assert_eq!(norm(&out.stdout), "23\n", "{}", norm(&out.stderr));
+}
+
+/// A lemma that keeps a check, one that may trap and a recursive one are
+/// called, and `vyrn why --cost` names the rule each fails.
+#[test]
+fn a_lemma_that_traps_or_recurs_is_called_and_why_says_so() {
+    assert_eq!(lemma_calls(), ["positive", "inRange", "down"]);
+    let (_dir, file) = program(LEMMAS, "");
+    let why = vyrn().args(["why", "--cost"]).arg(&file).output().unwrap();
+    let out = norm(&why.stdout);
+    let kept = [
+        "   17           call kept: `positive(..)`, because it is not trap-free\n",
+        "   18           call kept: `inRange(..)`, because its effect set is trap\n",
+        "   19           call kept: `down(..)`, because it is recursive\n",
+    ];
+    for line in kept {
+        assert!(out.contains(line), "{out}");
+    }
+}

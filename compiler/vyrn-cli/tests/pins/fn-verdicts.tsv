@@ -247,6 +247,9 @@ examples/branchtypes.vyrn	head	yes	no, `xs` is Array<Int64>, and WGSL has no 64-
 examples/branchtypes.vyrn	main	no, it keeps an index check	no, its effect set is alloc, write-output
 examples/branchtypes.vyrn	where$pAge	yes	no, `value` is Int64, and WGSL has no 64-bit integer
 examples/branchtypes.vyrn	where$cAge	no, it calls `panic`	no, its effect set is trap
+examples/bsearch.vyrn	mid	yes	no, `xs` is Array<Int64>, and WGSL has no 64-bit integer
+examples/bsearch.vyrn	bsearch	yes	no, `xs` is Array<Int64>, and WGSL has no 64-bit integer
+examples/bsearch.vyrn	main	yes	no, its effect set is alloc, write-output
 examples/bytecount.vyrn	countDigits	yes	no, `s` is String, not Int32, UInt32, Bool or a read array of one
 examples/bytecount.vyrn	maxBraceDepth	yes	no, `s` is String, not Int32, UInt32, Bool or a read array of one
 examples/bytecount.vyrn	show	yes	no, its effect set is alloc, write-output

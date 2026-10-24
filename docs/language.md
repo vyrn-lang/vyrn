@@ -243,9 +243,7 @@ type User = {
 ```vyrn
 import { prove } from "std/proof"
 
-fn mid(xs: Array<Int64>, lo: Int64 where value >= 0, hi: Int64 where value > lo && value <= xs.length) -> Int64
-    where value >= lo && value < hi && value < xs.length
-{
+fn mid(xs: Array<Int64>, lo: Int64 where value >= 0, hi: Int64 where value > lo && value <= xs.length) -> Int64 where value >= lo && value < hi && value < xs.length {
     prove(lo < xs.length)
     let q = (hi - lo) / 2
     prove(q < xs.length)
@@ -256,13 +254,18 @@ fn mid(xs: Array<Int64>, lo: Int64 where value >= 0, hi: Int64 where value > lo 
 - The compiler proves `c` from the body, the parameters' clauses, the validated types of the names it reads and the result clauses of the functions the body calls. It reads nothing it inferred about another function, so the proof holds in every program that links the module. A comparison it cannot show is refused with the reason: ``` `prove` cannot show its comparison here: it needs `i < n`, and `i` is a parameter, so the function cannot know what its callers pass ```.
 - Every check after the call assumes `c`. So a `prove` splits a chain the prover cannot take in one step into steps it can: in `mid`, every check and the result clause are proved, and a binary search that calls `mid` runs no index check.
 - A sum or difference in `c` states a fact only where the compiler shows it stays within `-2^62..=2^62`. Elsewhere it may wrap, and the refusal says ``the sum `a + b` may wrap``.
-- The call checks nothing at run time. `prove` is no function value, because a call through a value proves nothing.
+- The call runs nothing: the emitter erases it as it erases a lemma call (below). `prove` is no function value, because a call through a value proves nothing.
 
 A project demands a proof of every check in a module by naming it in the `proved` key of `vyrn.json`: `{ "main": "main.vyrn", "proved": ["core/**", "scan.vyrn"] }`. Each entry is a glob relative to the manifest's directory: `*` and `?` match within one name, and `**` matches any number of directories.
 
 - A check that a body of such a module keeps is refused with its reason and the fix, if one exists: ``` the index check stays at run time, and this module is in `proved` (vyrn.json): it needs `i >= 0`, and `i` is a parameter, so the function cannot know what its callers pass; add `where value >= 0` to `i`, and each call checks it where the caller cannot show it ```.
 - The proof reads what a `prove` reads: the body, the clauses, the validated types and the declared result clauses of the callees. A fact the compiler infers about a callee does not count, so a callee's result needs its clause written: `-> Int64 where value < hi`.
 - A parameter's clause is the module's boundary. A call from a module outside `proved` keeps its clause check at run time; a call inside one must prove it.
+
+The emitter erases a call whose result is `Unit` or unused when its callee, after elision, has an empty effect set, takes every parameter by `read`, is trap-free, is not recursive, runs only counter loops and calls only such functions. Such a call writes nothing, traps nowhere and ends, so the program prints the same without it. A lemma whose clause the compiler proves costs no call at run time; its arguments are still evaluated.
+
+- `vyrn why --cost` prints each lemma call that stays with the first rule its callee fails: ``call kept: `down(..)`, because it is recursive``.
+- A recursive lemma runs: no measure shows that its recursion ends.
 
 ### Function types
 

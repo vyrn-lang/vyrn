@@ -513,6 +513,12 @@ impl World {
         })
     }
 
+    /// Each frame the World serves, as stated before its checks are decided,
+    /// in no order: a reader of the rows alone, not their verdicts.
+    pub(crate) fn stated(&self) -> impl Iterator<Item = &Body> {
+        (self.bodies.values()).filter_map(|s| Some(&s.as_ref()?.body))
+    }
+
     /// Whether `body` is of a module the manifest's `proved` key names.
     pub fn proves(&self, body: &Body) -> bool {
         self.proved.contains(&body.file)

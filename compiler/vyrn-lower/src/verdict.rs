@@ -12,6 +12,10 @@
 //! that finds no memory, a call stack or a region nesting past its limit,
 //! and a failure inside a builtin with an effect, which the effect set
 //! names.
+//!
+//! [`erased`] judges each function a call row for its effect enters by the
+//! kernel's rules with the parameters' capabilities in place of the types:
+//! the emitter removes a call into one that passes ([`Erased`]).
 
 use std::collections::HashMap;
 
@@ -96,6 +100,10 @@ pub enum Unfit {
     Loop(usize),
     /// A call into a function that is not a kernel, by name and line.
     Callee(String, usize),
+    /// A parameter a call may write or take: its name and capability.
+    Param(String, &'static str),
+    /// A call into a function whose call stays, by name and line.
+    Stays(String, usize),
 }
 
 /// A type as a kernel sees it. WGSL has no 64-bit integer or float, and it
@@ -135,6 +143,8 @@ impl Unfit {
             ),
             Unfit::Loop(l) => format!("the loop{} is no counter loop", line(l)),
             Unfit::Callee(f, l) => format!("it calls `{f}`{}, which is not a kernel", line(l)),
+            Unfit::Param(p, cap) => format!("it takes `{p}` by `{cap}`"),
+            Unfit::Stays(f, l) => format!("it calls `{f}`{}, whose call stays", line(l)),
         }
     }
 }
@@ -166,7 +176,7 @@ pub fn table(program: &Program, world: &World, wide: bool) -> Vec<Verdicts> {
         .collect();
     let graph = Graph::of(program, world, &tops);
     let causes = graph.causes();
-    let unfit = graph.kernels(program, world, &causes, wide);
+    let unfit = graph.judged(program, world, &causes, Rules::Kernel { wide });
     (tops.into_iter())
         .filter_map(|(id, b)| {
             let i = *graph.at.get(&b.id?)?;
@@ -428,16 +438,25 @@ impl crate::fixpoint::Lattice for Dist {
     }
 }
 
+/// What [`Graph::judged`] holds a frame to beside an empty effect set, no
+/// trap and no cycle: a kernel's types (`wide` counts a 64-bit integer as
+/// 32-bit), or an erased call's `read` parameters.
+#[derive(Clone, Copy)]
+enum Rules {
+    Kernel { wide: bool },
+    Erased,
+}
+
 impl Graph<'_> {
-    /// Each frame's first rule it fails as a kernel. Frames go by component,
-    /// callees first, so each callee is judged before its callers; a frame
-    /// of a cycle fails by its own rules or by the cycle.
-    fn kernels(
+    /// Each frame's first rule it fails under `rules`. Frames go by
+    /// component, callees first, so each callee is judged before its
+    /// callers; a frame of a cycle fails by its own rules or by the cycle.
+    fn judged(
         &self,
         program: &Program,
         world: &World,
         causes: &[Option<Cause>],
-        wide: bool,
+        rules: Rules,
     ) -> Vec<Option<Unfit>> {
         let edges = self.edges();
         let mut out: Vec<Option<Unfit>> = vec![None; self.frames.len()];
@@ -446,19 +465,123 @@ impl Graph<'_> {
             for &i in &comp {
                 let (id, b) = self.frames[i];
                 let callee = (self.calls[i].iter()).find(|c| out[c.2].is_some());
+                let own = || match rules {
+                    Rules::Kernel { wide } => unfit_type(program, world, id, b, wide),
+                    Rules::Erased => unfit_param(program, world, id),
+                };
+                let called = |c: &Call| match rules {
+                    Rules::Kernel { .. } => Unfit::Callee(c.0.clone(), c.1),
+                    Rules::Erased => Unfit::Stays(c.0.clone(), c.1),
+                };
                 out[i] = match world.state_use(id).map(|u| u.effects) {
                     Some(e) if !e.is_pure() => Some(Unfit::Effects(Some(e))),
                     None => Some(Unfit::Effects(None)),
                     Some(_) if causes[i].is_some() => Some(Unfit::Traps),
                     Some(_) if cyclic => Some(Unfit::Recursive),
-                    Some(_) => (unfit_type(program, world, id, b, wide))
+                    Some(_) => own()
                         .or_else(|| unfit_loop(b))
-                        .or_else(|| callee.map(|c| Unfit::Callee(c.0.clone(), c.1))),
+                        .or_else(|| callee.map(called)),
                 };
             }
         }
         out
     }
+}
+
+/// The calls the emitter removes: each call row for its effect into a
+/// function that, after elision, has an empty effect set, takes every
+/// parameter by `read`, is trap-free, is in no cycle of the call graph, runs
+/// only counter loops and calls only such functions. Such a call writes
+/// nothing the caller can see, traps on no row and ends, so the program
+/// without it prints the same. A call row for its effect binds no result, and
+/// its argument rows stay.
+#[derive(Debug, Default)]
+pub struct Erased {
+    /// Per row a call for its effect runs: `None` where its calls are
+    /// erased, else the first rule it fails.
+    at: HashMap<FnId, Option<Unfit>>,
+}
+
+impl Erased {
+    /// Whether the emitter removes the row `s`.
+    pub fn erases(&self, world: &World, s: &St) -> bool {
+        matches!(
+            effect_call(world, s).map(|f| self.at.get(&f)),
+            Some(Some(None))
+        )
+    }
+
+    /// Why the call row `s` stays: the callee and the first rule it fails.
+    /// `None` for an erased row and a row that is no call for its effect.
+    pub fn stays(&self, world: &World, s: &St) -> Option<(FnId, &Unfit)> {
+        let f = effect_call(world, s)?;
+        Some((f, self.at.get(&f)?.as_ref()?))
+    }
+}
+
+/// The row the call `s` runs, where `s` is a direct call for its effect.
+fn effect_call(world: &World, s: &St) -> Option<FnId> {
+    let St::Do {
+        rhs: rhs @ Rhs::Call {
+            kind: Callee::Fn(_),
+            ..
+        },
+        ..
+    } = s
+    else {
+        return None;
+    };
+    world.summaries().runs(rhs)
+}
+
+/// The judgment of every row a call row for its effect runs, in the bodies
+/// the World serves ([`Erased`]). Only a row with an empty effect set and
+/// `read` parameters is walked: any other fails by those rules alone, and
+/// every row it reaches has an empty set too.
+pub fn erased(program: &Program, world: &World) -> Erased {
+    let mut called: Vec<FnId> = Vec::new();
+    for b in world.stated() {
+        for (s, _) in rows(&b.stmts) {
+            if let Some(f) = effect_call(world, s).filter(|f| !called.contains(f)) {
+                called.push(f);
+            }
+        }
+    }
+    called.sort_by_key(|f| f.index());
+    let mut at = HashMap::new();
+    let mut tops = Vec::new();
+    for f in called {
+        let local = match world.state_use(f).map(|u| u.effects) {
+            Some(e) if !e.is_pure() => Some(Unfit::Effects(Some(e))),
+            None => Some(Unfit::Effects(None)),
+            Some(_) => unfit_param(program, world, f),
+        };
+        match (local, world.body_at(f)) {
+            (None, Some(b)) => tops.push((f, b)),
+            (local, _) => _ = at.insert(f, local.or(Some(Unfit::Effects(None)))),
+        }
+    }
+    let graph = Graph::of(program, world, &tops);
+    let causes = graph.causes();
+    let unfit = graph.judged(program, world, &causes, Rules::Erased);
+    for (f, b) in tops {
+        let i = b.id.and_then(|id| graph.at.get(&id).copied());
+        at.insert(
+            f,
+            i.map_or(Some(Unfit::Effects(None)), |i| unfit[i].clone()),
+        );
+    }
+    Erased { at }
+}
+
+/// The first parameter of row `id` a call may write or take.
+fn unfit_param(program: &Program, world: &World, id: FnId) -> Option<Unfit> {
+    let row = world.fn_rows().get(id.index());
+    let f = row.and_then(|r| r.generic.as_ref()).map_or(id, |(g, _)| *g);
+    let params = &program.functions.get(f.index())?.params;
+    (params.iter())
+        .find(|p| p.capability != vyrn_frontend::ast::Capability::Read)
+        .map(|p| Unfit::Param(p.name.clone(), p.capability.word()))
 }
 
 /// The source line of the row `s` of `b`; `None` for a row without one.

@@ -108,7 +108,8 @@ fn kernel_kind(unfit: &Option<Unfit>) -> &'static str {
         Some(Unfit::Type(.., Scalar::Float64)) => "Float64",
         Some(Unfit::Type(.., Scalar::Fits | Scalar::Other)) => "other type",
         Some(Unfit::Loop(_)) => "loop",
-        Some(Unfit::Callee(..)) => "callee",
+        Some(Unfit::Callee(..) | Unfit::Stays(..)) => "callee",
+        Some(Unfit::Param(..)) => "parameter",
     }
 }
 

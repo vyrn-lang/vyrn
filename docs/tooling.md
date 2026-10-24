@@ -275,7 +275,9 @@ compile, except `--contract`.
   the compiler cannot show it, and what would drop it, where something would.
   In a module the manifest's `proved` key names, a kept check reads `check
   refused`, and the report answers although the program is refused for it. A
-  proved check prints nothing, a `prove` row's included.
+  proved check prints nothing, a `prove` row's included. A call into a lemma
+  that the emitter keeps reads ``call kept: `down(..)`, because it is
+  recursive``, with the first rule the callee fails (language.md, Proofs).
   A call into a function of
   another file counts that function's allocations at the calling line. A
   function with nothing to report is left out. The LSP's hover keeps the

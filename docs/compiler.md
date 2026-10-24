@@ -626,6 +626,14 @@ graph's components (`fixpoint::components`), callees first, and the loop form
 `elide::counter_loop`, beside the `elide::bound_test` it starts from.
 `tests/fnverdicts.rs` pins both verdicts of every function of the corpus.
 
+`verdict::erased` judges every row a call for its effect (`St::Do`) enters, in
+the bodies `World` serves, by the kernel's walk with the kernel's types
+replaced by `read` parameters (`verdict::Rules`). The emitter takes the table
+once, after the checks phase, and emits nothing for a row
+`verdict::Erased::erases` names, nor reads it for a first read. `vyrn why
+--cost` prints a call into a function with a result clause that stays
+(`insight::Kind::Stays`), with the rule `Erased::stays` names.
+
 `vyrn why --provenance` prints `provenance::table`: per function of the root
 file that returns an array, the class of the backward map from the result's
 positions to each array parameter's, read from the same bodies as `--cost`.

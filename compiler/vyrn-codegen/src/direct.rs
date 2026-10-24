@@ -353,6 +353,7 @@ fn compile_inner(program: &Program, world: Arc<vyrn_lower::World>) -> Result<Vec
         gappend: HashMap::new(),
         externs,
         world,
+        erased: Default::default(),
         log_level: program.log_level,
         log_sink: program.log_sink.clone(),
         // Reserved only for a file sink, so a console-sink module reserves nothing.
@@ -378,6 +379,7 @@ fn compile_inner(program: &Program, world: Arc<vyrn_lower::World>) -> Result<Vec
         },
     );
     drop(ck);
+    base.erased = vyrn_lower::verdict::erased(program, &base.world);
     let cx = Cx::new(&base, Reg::default());
     let sg = vyrn_frontend::prof::phase("codegen: signatures");
     // Every function is indexed before any body exists, so a call can name a callee not yet
@@ -1503,6 +1505,8 @@ struct Base<'a> {
     /// were decided with, the checker's record (a module-state initializer's type),
     /// and the core's bodies and facts, the only source of the releases this emitter emits.
     world: Arc<vyrn_lower::World>,
+    /// The call rows the World's judgment removes ([`vyrn_lower::verdict::erased`]).
+    erased: vyrn_lower::verdict::Erased,
     /// The log threshold, as an ordinal. Compile-time, so a disabled log site emits no write.
     log_level: usize,
     /// Where a log line goes. Compile-time-known, so the write names its
@@ -10119,19 +10123,14 @@ impl<'a, 'p> Fn_<'a, 'p> {
         let (true, body) = (self.cx.profile, self.body()) else {
             return;
         };
-        let Some((line, kind)) = vyrn_lower::insight::row(s, body, &self.cx.world) else {
+        let Some((line, kind)) = vyrn_lower::insight::row(s, body, &self.cx.world, &self.cx.erased)
+        else {
             return;
         };
         if body.file.is_some() {
             return;
         }
-        // A kept check makes no block; counting its runs is not part of this instrument.
-        let Some(verb) = kind.verb().filter(|v| {
-            !matches!(
-                v,
-                vyrn_lower::insight::Verb::Keeps | vyrn_lower::insight::Verb::Refuses
-            )
-        }) else {
+        let Some(verb) = kind.verb().filter(|v| v.blocks()) else {
             return;
         };
         let at = b.here();
@@ -10903,6 +10902,8 @@ impl<'a, 'p> Fn_<'a, 'p> {
                     let (decl, n) = self.core_checks_made(rhs).expect("the guard's");
                     self.core_rule_check(m, b, &decl, n, *line)?;
                 }
+                // A call the World erases emits nothing.
+                s @ St::Do { .. } if self.cx.erased.erases(&self.cx.world, s) => {}
                 // A discarded layout read: its address, for the checks on the way.
                 St::Do {
                     rhs: rhs @ Rhs::Read(p),
@@ -14196,6 +14197,7 @@ impl<'a, 'p> Fn_<'a, 'p> {
     fn core_first_read(&self, s: Option<&St>) -> Option<Name> {
         let body = self.body();
         match s? {
+            s if self.cx.erased.erases(&self.cx.world, s) => None,
             St::Let(_, Rhs::Call { kind, .. })
             | St::Do {
                 rhs: Rhs::Call { kind, .. },
@@ -14907,6 +14909,7 @@ mod tests {
     fn cx() -> Cx<'static> {
         let base = Box::leak(Box::new(Base {
             world: Default::default(),
+            erased: Default::default(),
             types: Box::leak(Box::default()),
             lambdas: HashMap::new(),
             oracle: None,

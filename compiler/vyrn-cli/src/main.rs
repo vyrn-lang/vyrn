@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 use vyrn_frontend::project::Expansions;
 use vyrn_genwasm::engine;
-use vyrn_lower::insight::{self, CostFn, CostTable, Verb};
+use vyrn_lower::insight::{self, CostFn, CostTable};
 use vyrn_lower::lastrun;
 use vyrn_lower::provenance;
 
@@ -1601,7 +1601,8 @@ fn why_cost(flags: GlobalFlags, file: &str) -> Outcome {
             };
             last_line = *line;
             let ran = match (&last, verb) {
-                (Some(_), Verb::Keeps | Verb::Refuses) | (None, _) => String::new(),
+                (Some(_), v) if !v.blocks() => String::new(),
+                (None, _) => String::new(),
                 (Some(sites), _) => {
                     let [blocks, bytes, ..] = sites
                         .get(&(f.name.clone(), *line, verb.word().to_string()))
