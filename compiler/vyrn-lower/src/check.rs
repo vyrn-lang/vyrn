@@ -14,7 +14,9 @@
 //! the call reads after it ([`Guard::Clause`]). A function's result clause
 //! is a clause check before each `return`, and at the end of a body that
 //! falls off it ([`Body::ensures`]). A `let`'s clause is a clause check after
-//! each row that writes its binding ([`Body::promises`]).
+//! each row that writes its binding ([`Body::promises`]). A call to
+//! `std/proof`'s `prove` has a clause check of its comparison before it
+//! ([`proved`]), which no build runs: a program refuses one that stays.
 //!
 //! One runtime check is one row. A store that puts a taken element back into
 //! the place it was taken from (`a[i].push(v)`: `take a[i]`, the call, the
@@ -26,8 +28,10 @@ use vyrn_frontend::ast::{BinOp, Capability, Function, Type, TypeDecl};
 use vyrn_frontend::prelude::Indexes;
 use vyrn_frontend::trap::Rule;
 
-use vyrn_frontend::core::check::{scalar_arg, Check, Guard, Raises, Site, Verdict, Why};
-use vyrn_frontend::core::{Arg, Body, Callee, Name, Op, Place, Rhs, St, Val};
+use vyrn_frontend::core::check::{
+    scalar_arg, Atom, Check, Guard, Operand, Raises, Site, Verdict, Why,
+};
+use vyrn_frontend::core::{Arg, Body, Callee, Lit, Name, Op, Place, Rhs, St, Val};
 
 /// What a build does with its check rows, from the environment variable
 /// `VYRN_CHECKS`, which this function alone reads.
@@ -56,12 +60,14 @@ pub enum Mode {
 }
 
 /// What [`state`] reads besides the body: the program's type declarations,
-/// the declared type of each module-state name, and the declared functions by
-/// their `FnId`.
+/// the declared type of each module-state name, the declared functions by
+/// their `FnId`, and the linked name of `std/proof`'s `prove`
+/// (`Program::prove`).
 pub struct Types<'a> {
     pub decls: &'a HashMap<String, TypeDecl>,
     pub global: &'a dyn Fn(&str) -> Option<Type>,
     pub fns: &'a [Function],
+    pub prove: Option<&'a str>,
 }
 
 /// Inserts the check rows of `body` and of every lambda body it holds.
@@ -91,6 +97,7 @@ fn list(body: &Body, tys: &Types<'_>, ss: &mut Vec<St>, lines: &mut BTreeMap<usi
         let mut clauses = Vec::new();
         let mut ruled = None;
         let mut returned = None;
+        let mut proves = None;
         let line = match &s {
             St::Let(n, rhs) => {
                 rhs_guards(body, tys, rhs, &mut guards);
@@ -104,6 +111,7 @@ fn list(body: &Body, tys: &Types<'_>, ss: &mut Vec<St>, lines: &mut BTreeMap<usi
             St::Do { rhs, line, .. } => {
                 rhs_guards(body, tys, rhs, &mut guards);
                 clauses.extend(clause_guards(body, tys, rhs));
+                proves = proved(body, tys, rhs, &out);
                 ruled = (rhs.checks_rule(&body.names).map(Guard::Rule))
                     .or_else(|| scalar_arg(rhs, tys.decls).map(|(n, t)| Guard::Scalar(n, t)));
                 *line
@@ -124,7 +132,8 @@ fn list(body: &Body, tys: &Types<'_>, ss: &mut Vec<St>, lines: &mut BTreeMap<usi
             .map(|(r, g)| (Raises::Row(r), g))
             .chain(ruled.map(|g| (Raises::Where, g)))
             .chain(clauses.into_iter().map(|g| (Raises::Clause, g)))
-            .chain(returned.map(|g| (Raises::Result, g)));
+            .chain(returned.map(|g| (Raises::Result, g)))
+            .chain(proves.map(|g| (Raises::Prove, g)));
         for (rule, guard) in guards {
             out.push(St::Check(row(lines, line, rule, guard)));
         }
@@ -268,6 +277,70 @@ fn clause_guards(body: &Body, tys: &Types<'_>, rhs: &Rhs) -> Vec<Guard> {
             says: vyrn_frontend::trap::clause(body.spelled(&f.name), &f.params[k].name).into(),
         })
         .collect()
+}
+
+/// The check of the comparison a call `rhs` to `prove` reads, which the row
+/// that binds its argument among `before` computes; `None` for any other row.
+/// The checker takes only comparisons joined by `&&`, and the core makes each
+/// its own call (`core::Builder::call`).
+fn proved(body: &Body, tys: &Types<'_>, rhs: &Rhs, before: &[St]) -> Option<Guard> {
+    let Rhs::Call {
+        kind: Callee::Fn(g),
+        args,
+        ..
+    } = rhs
+    else {
+        return None;
+    };
+    tys.prove
+        .filter(|p| tys.fns.get(g.index()).is_some_and(|f| f.name == *p))?;
+    let atom = match args.as_slice() {
+        [(Arg::Val(Val::Name(c)), _)] => {
+            let compared = before.iter().rev().find_map(|s| match s {
+                St::Let(n, Rhs::Prim(Op::Bin(op), vs, _)) if n == c && op.compare().is_some() => {
+                    Some((*op, vs.as_slice()))
+                }
+                _ => None,
+            });
+            let Some((op, [l, r])) = compared else {
+                panic!("a `prove` argument is a comparison the row before binds");
+            };
+            let ty = |v: &Val| match v {
+                Val::Name(n) => Some(body.names[n.index()].ty.clone()),
+                Val::Lit(_) => None,
+            };
+            let operand = |v: &Val| Operand {
+                of: v.clone(),
+                part: None,
+            };
+            Atom {
+                l: operand(l),
+                op,
+                r: operand(r),
+                ty: ty(l).or_else(|| ty(r)).unwrap_or(Type::Int),
+            }
+        }
+        // A comparison of two literals the checker decided: `0 == 0` holds and
+        // `0 != 0` does not.
+        [(Arg::Val(Val::Lit(Lit::Bool(holds))), _)] => {
+            let zero = Operand {
+                of: Val::Lit(Lit::Int(0)),
+                part: None,
+            };
+            let op = if *holds { BinOp::Eq } else { BinOp::NotEq };
+            Atom {
+                l: zero.clone(),
+                op,
+                r: zero,
+                ty: Type::Int,
+            }
+        }
+        _ => panic!("a `prove` argument is a Bool name or literal"),
+    };
+    Some(Guard::Clause {
+        atoms: vec![atom],
+        says: vyrn_frontend::trap::prove().into(),
+    })
 }
 
 /// The checks of a builtin that indexes its receiver.

@@ -1,0 +1,38 @@
+// A binary search whose index reads the compiler proves: two `prove` rows
+// and the result clause of `mid` state what the prover cannot find, and the
+// emitter removes each `prove` call, so no check and no call runs for them.
+
+import { prove } from "std/proof"
+
+fn mid(xs: Array<Int64>, lo: Int64 where value >= 0, hi: Int64 where value > lo && value <= xs.length) -> Int64 where value >= lo && value < hi && value < xs.length {
+    prove(lo < xs.length)
+    let q = (hi - lo) / 2
+    prove(q < xs.length)
+    return lo + q
+}
+
+export fn bsearch(xs: Array<Int64>, v: Int64) -> Int64 {
+    let mut lo = 0
+    let mut hi = xs.length
+    while lo < hi {
+        let m = mid(xs, lo, hi)
+        if xs[m] < v {
+            lo = m + 1
+        } else {
+            hi = m
+        }
+    }
+    return lo
+}
+
+fn main() -> Int64 {
+    let mut xs: Array<Int64> = []
+    xs.push(1)
+    xs.push(3)
+    xs.push(5)
+    xs.push(7)
+    print(bsearch(xs, 7).toString())
+    print(bsearch(xs, 4).toString())
+    print(bsearch(xs, 0).toString())
+    return 0
+}

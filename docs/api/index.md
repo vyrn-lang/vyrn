@@ -27,6 +27,7 @@
 - [std/num](std/num.md) — Text -> number, correctly rounded, and `Float64` -> `%f` text.
 - [std/openapi](std/openapi.md) — The contract as an OpenAPI 3.1 document, built from
 - [std/order](std/order.md) — Orders, the comparison under one, and the functions that sort by one.
+- [std/proof](std/proof.md) — Comparisons the compiler proves where a call states them.
 - [std/random](std/random.md) — Deterministic pseudo-randomness with a host-seeded escape.
 - [std/regex](std/regex.md) — A regular expression that searches, counts and replaces.
 - [std/rpc](std/rpc.md) — Typed RPC as a library, built on generator imports.

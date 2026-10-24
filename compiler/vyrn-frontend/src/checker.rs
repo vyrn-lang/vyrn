@@ -969,6 +969,7 @@ fn check_accum_inner(
         extern_fns: &extern_fns,
         gen_fns: &gen_fns,
         orders: &program.orders,
+        prove: program.prove.as_deref(),
         record_reads: recording && program.session.get().is_some(),
         record_uses: USES.with(|u| u.get()),
     };
@@ -1631,6 +1632,8 @@ struct Cx<'a> {
     gen_fns: &'a std::collections::HashSet<String>,
     /// `std/order`'s compiler-known declarations.
     orders: &'a crate::order::Names,
+    /// `std/proof`'s `prove`, by its linked name ([`Program::prove`]).
+    prove: Option<&'a str>,
     /// Whether a recording check records read rows ([`Recorded::reads`]): yes
     /// in a host with a session ([`crate::session`]), which rechecks per
     /// function. `vyrn check` has none, and a row costs a push per name lookup.
@@ -4899,6 +4902,22 @@ impl<'a> Checker<'a> {
         {
             return Err(cerr!(line, BlackBoxOutsideBench));
         }
+        // The core reads each conjunct of a `prove` as one comparison.
+        if Some(name) == self.prove {
+            let mut cs = args.iter().collect::<Vec<_>>();
+            while let Some(e) = cs.pop() {
+                match e {
+                    Expr::Binary {
+                        op: BinOp::And,
+                        lhs,
+                        rhs,
+                        ..
+                    } => cs.extend([&**lhs, &**rhs]),
+                    Expr::Binary { op, .. } if op.compare().is_some() => {}
+                    _ => return Err(cerr!(line, ProveForm)),
+                }
+            }
+        }
 
         // Every builtin whose whole contract is a row in `prelude::rows` is
         // typed at the fall-through (`prelude::checkable`). The arms here carry
@@ -6194,6 +6213,9 @@ impl<'a> Checker<'a> {
     /// `read`. A `Type::Fn` carries no capabilities, so a call through a
     /// value passes every argument as `read`.
     fn reads_every_param(&self, name: &str, line: usize) -> Result<(), Diagnostic> {
+        if Some(name) == self.prove {
+            return Err(cerr!(line, ProveValue));
+        }
         let Some(d) = self.resolve_fn(name) else {
             return Ok(());
         };

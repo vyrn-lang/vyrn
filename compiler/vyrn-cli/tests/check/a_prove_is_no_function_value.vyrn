@@ -1,0 +1,7 @@
+import { prove } from "std/proof"
+
+export fn later(i: Int64) -> Int64 {
+    let p = prove
+    p(i >= 0)
+    return i
+}

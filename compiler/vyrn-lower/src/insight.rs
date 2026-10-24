@@ -8,14 +8,16 @@
 
 use std::collections::BTreeMap;
 
+use vyrn_frontend::ast::BinOp;
 use vyrn_frontend::ast::{FnId, Program};
 use vyrn_frontend::core::check::{Guard, Verdict, Why};
 use vyrn_frontend::core::{
-    rows, Body, BorrowKind, Callee, Copied, Ctor, Made, Name, NameInfo, Op, Rhs, St,
+    rows, Body, BorrowKind, Callee, Copied, Ctor, Lit, Made, Name, NameInfo, Op, Rhs, St, Val,
 };
 
 use vyrn_frontend::symbols::{CostLine, FnCost};
 
+use crate::verdict::Erased;
 use crate::World;
 
 /// One cost a core row carries.
@@ -45,12 +47,19 @@ pub enum Kind {
         /// `where rule` or `where clause`.
         what: &'static str,
         kept: bool,
+        /// A kept check of a module the manifest's `proved` key names, which
+        /// the program is refused for ([`World::proves`]).
+        refused: bool,
         /// A kept check's reason in source terms; empty when no pass gave one.
         why: String,
     },
     /// A call into a function outside the root file whose effect set holds
     /// `alloc`. Its blocks count at this line: the callee, and its file.
     Enters(String, String),
+    /// A call for its effect into a function with a result clause that the
+    /// emitter keeps ([`crate::verdict::Erased`]): the callee, and the first
+    /// rule it fails.
+    Stays(String, String),
 }
 
 /// What a fact does, in the order a reader asks: what is copied, what is
@@ -62,6 +71,10 @@ pub enum Verb {
     Enters,
     Grows,
     Keeps,
+    /// A kept check that a `proved` module refuses.
+    Refuses,
+    /// A call into a function with a result clause that is not erased.
+    Stays,
 }
 
 impl Verb {
@@ -73,7 +86,15 @@ impl Verb {
             Verb::Enters => "enters",
             Verb::Grows => "grows",
             Verb::Keeps => "check kept",
+            Verb::Refuses => "check refused",
+            Verb::Stays => "call kept",
         }
+    }
+
+    /// Whether a row of this verb can make a block, so a profile counts its
+    /// runs.
+    pub fn blocks(self) -> bool {
+        !matches!(self, Verb::Keeps | Verb::Refuses | Verb::Stays)
     }
 }
 
@@ -85,7 +106,12 @@ impl Kind {
             Kind::Alloc(_) => Some(Verb::Allocates),
             Kind::Enters(..) => Some(Verb::Enters),
             Kind::Grows(_) => Some(Verb::Grows),
-            Kind::Check { kept, .. } => kept.then_some(Verb::Keeps),
+            Kind::Stays(..) => Some(Verb::Stays),
+            Kind::Check { kept, refused, .. } => match (kept, refused) {
+                (_, true) => Some(Verb::Refuses),
+                (true, false) => Some(Verb::Keeps),
+                (false, false) => None,
+            },
         }
     }
 }
@@ -93,10 +119,10 @@ impl Kind {
 /// Every fact of the frame `body`, ordered by line and then by the row's
 /// position. A row with no source line (line 0) carries none. A lifted
 /// lambda is a frame of its own ([`root`] joins it to its function).
-pub fn facts(body: &Body, world: &World) -> Vec<Fact> {
+pub fn facts(body: &Body, world: &World, erased: &Erased) -> Vec<Fact> {
     let mut out: Vec<Fact> = Vec::new();
     for (s, depth) in rows(&body.stmts) {
-        if let Some((line, kind)) = row(s, body, world) {
+        if let Some((line, kind)) = row(s, body, world, erased) {
             out.push(Fact {
                 line,
                 ordinal: 0,
@@ -110,12 +136,28 @@ pub fn facts(body: &Body, world: &World) -> Vec<Fact> {
 }
 
 /// What the row `s` of `body` costs, and the source line it costs at. A row
-/// with no source line (line 0) costs nothing.
-pub fn row(s: &St, body: &Body, world: &World) -> Option<(u32, Kind)> {
+/// with no source line (line 0) costs nothing. `erased` is the program's
+/// [`crate::verdict::erased`].
+pub fn row(s: &St, body: &Body, world: &World, erased: &Erased) -> Option<(u32, Kind)> {
     let (line, kind) = match s {
         St::Let(n, rhs) => (
             body.names[n.index()].line,
             row_kind(rhs, &body.names, Some(*n), world, body),
+        ),
+        St::Do {
+            rhs: rhs @ Rhs::Call { callee, .. },
+            line,
+            ..
+        } => (
+            *line,
+            row_kind(rhs, &body.names, None, world, body).or_else(|| {
+                let (f, unfit) = erased.stays(world, s)?;
+                world.body_at(f)?.ensures.as_ref()?;
+                Some(Kind::Stays(
+                    body.spelled(callee).to_string(),
+                    unfit.text(true),
+                ))
+            }),
         ),
         St::Do { rhs, line, .. } => (*line, row_kind(rhs, &body.names, None, world, body)),
         St::Check(c) => (
@@ -123,7 +165,10 @@ pub fn row(s: &St, body: &Body, world: &World) -> Option<(u32, Kind)> {
             Some(Kind::Check {
                 what: guarded(&c.guard),
                 kept: c.verdict == Verdict::Kept,
-                why: said(&c.why, body, world),
+                refused: c.verdict == Verdict::Kept && world.proves(body),
+                why: said(&c.why, body, &|f| {
+                    Some(world.fn_rows().get(f.index())?.name.as_str())
+                }),
             }),
         ),
         _ => return None,
@@ -145,8 +190,9 @@ pub(crate) fn guarded(guard: &Guard) -> &'static str {
 
 /// A kept check's reason, over the names the body's source spells: what the
 /// check needs, why the compiler cannot show it, and what would let it drop
-/// the check, where something would. Empty for [`Why::Unsaid`].
-fn said(why: &Why, body: &Body, world: &World) -> String {
+/// the check, where something would. `named` answers the linked name of a
+/// function row. Empty for [`Why::Unsaid`].
+pub fn said<'n>(why: &Why, body: &Body, named: &dyn Fn(FnId) -> Option<&'n str>) -> String {
     let temp = |n: Name| body.names[n.index()].source.starts_with('@');
     // A temporary reads `the value of line N`, which is no code.
     let code = |n: Name| match temp(n) {
@@ -161,10 +207,9 @@ fn said(why: &Why, body: &Body, world: &World) -> String {
         Why::Unsaid => String::new(),
         Why::Input(n) => format!("{} is read from input", code(*n)),
         Why::Callee(n, f, goal) => {
-            let from = (f.and_then(|f| world.fn_rows().get(f.index())))
-                .map_or("a call".to_string(), |r| {
-                    format!("`{}(..)`", body.spelled(&r.name))
-                });
+            let from = (f.and_then(named)).map_or("a call".to_string(), |r| {
+                format!("`{}(..)`", body.spelled(r))
+            });
             let line = body.names[n.index()].line;
             let who = match temp(*n) && goal.is_some() {
                 true => "that value".to_string(),
@@ -214,6 +259,30 @@ fn said(why: &Why, body: &Body, world: &World) -> String {
             code(*n)
         ),
         Why::Unproved(goal) => format!("it needs {goal}, and the compiler cannot show that here"),
+        Why::Wraps(n) => {
+            let sum = rows(&body.stmts).find_map(|(s, _)| match s {
+                St::Let(m, Rhs::Prim(Op::Bin(op @ (BinOp::Add | BinOp::Sub)), vs, _))
+                    if m == n && vs.len() == 2 =>
+                {
+                    let side = |v: &Val| match v {
+                        Val::Name(v) => body.names[v.index()]
+                            .path
+                            .clone()
+                            .unwrap_or_else(|| body.spoken(*v).into_owned()),
+                        Val::Lit(Lit::Int(k)) => k.to_string(),
+                        Val::Lit(_) => "a literal".into(),
+                    };
+                    let op = if *op == BinOp::Add { "+" } else { "-" };
+                    Some(format!("`{} {op} {}`", side(&vs[0]), side(&vs[1])))
+                }
+                _ => None,
+            });
+            format!(
+                "the sum {} may wrap, and the compiler keeps no fact of a sum it cannot show \
+                 stays within 2^62",
+                sum.unwrap_or_else(|| code(*n))
+            )
+        }
         Why::Rule => "the compiler proves only `where` rules that state equal lengths".into(),
         Why::Nonlinear => {
             "the compiler proves only sums of names and lengths times constants, and this check \
@@ -270,9 +339,10 @@ pub fn root_frames<'w>(program: &Program, world: &'w World) -> Vec<(FnId, &'w Bo
 /// `(source function, facts)`, a lifted lambda counted with its function. A
 /// function with no fact is left out.
 pub fn root(program: &Program, world: &World) -> Vec<(FnId, Vec<Fact>)> {
+    let erased = crate::verdict::erased(program, world);
     let mut out: Vec<(FnId, Vec<Fact>)> = Vec::new();
     for (s, body) in root_frames(program, world) {
-        let facts = facts(body, world);
+        let facts = facts(body, world, &erased);
         match out.iter_mut().find(|r| r.0 == s) {
             Some(r) => r.1.extend(facts),
             None => out.push((s, facts)),
@@ -318,6 +388,8 @@ impl CostRow {
             Verb::Enters => format!("{nouns} allocates"),
             Verb::Grows => format!("{nouns} may allocate"),
             Verb::Keeps => format!("{nouns} checked"),
+            Verb::Refuses => format!("{nouns} check refused"),
+            Verb::Stays => format!("{nouns} call kept"),
         }
     }
 
@@ -346,6 +418,13 @@ impl CostRow {
                 self.nouns(call).join(", ")
             ),
             Verb::Keeps => reasoned(self.nouns(|n| format!("{n} check")), ": ").join("; "),
+            Verb::Refuses => {
+                reasoned(self.nouns(|n| format!("{n} check refused")), ": ").join("; ")
+            }
+            Verb::Stays => format!(
+                "call kept: {}",
+                reasoned(self.nouns(call), ", because ").join("; ")
+            ),
         }
     }
 }
@@ -366,16 +445,22 @@ pub fn table(program: &Program, world: &World, named: &dyn Fn(&str) -> String) -
         let mut shown: BTreeMap<(u32, Verb), CostRow> = BTreeMap::new();
         for f in &facts {
             let (slot, what) = match &f.kind {
-                Kind::Copy { ty, why } => (2, (ty.clone(), why.to_string())),
-                Kind::Alloc(w) => (0, (w.clone(), String::new())),
-                Kind::Enters(c, from) => (0, (c.clone(), named(from))),
-                Kind::Grows(b) => (1, (b.clone(), String::new())),
-                Kind::Check { what, kept, why } => {
-                    (3 + usize::from(!kept), (what.to_string(), why.clone()))
-                }
+                Kind::Copy { ty, why } => (Some(2), (ty.clone(), why.to_string())),
+                Kind::Alloc(w) => (Some(0), (w.clone(), String::new())),
+                Kind::Enters(c, from) => (Some(0), (c.clone(), named(from))),
+                Kind::Grows(b) => (Some(1), (b.clone(), String::new())),
+                Kind::Check {
+                    what, kept, why, ..
+                } => (
+                    Some(3 + usize::from(!kept)),
+                    (what.to_string(), why.clone()),
+                ),
+                Kind::Stays(c, why) => (None, (c.clone(), why.clone())),
             };
-            tally[slot].0 += 1;
-            tally[slot].1 += usize::from(f.depth > 0);
+            if let Some(slot) = slot {
+                tally[slot].0 += 1;
+                tally[slot].1 += usize::from(f.depth > 0);
+            }
             let Some(verb) = f.kind.verb() else { continue };
             let row = shown.entry((f.line, verb)).or_default();
             row.depth = row.depth.max(f.depth);

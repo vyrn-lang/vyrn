@@ -163,10 +163,7 @@ fn cli_load(root: &str) -> vyrn_frontend::loader::LoadOptions {
     };
     let dir = Path::new(root).parent().expect("a file has a directory");
     if let Some(m) = vyrn_frontend::manifest::find(dir).expect("the manifest parses") {
-        opts.aliases = m.dependencies.into_iter().collect();
-        opts.alias_base = m.dir;
-        opts.audience = m.audience;
-        opts.artifacts = m.artifacts;
+        m.load_options(&mut opts);
     }
     opts
 }

@@ -246,10 +246,19 @@ proves them all), and the binder of a `Some` arm takes them
 (`elide::some_binder`). A private function that only
 direct call rows enter starts with the facts every such row proves of its
 arguments (`World::summaries` lists the candidates, `elide::entered` drops a
-function any row spells by name). The same walk answers a group's rule check
-that the facts prove false (`elide::refuted`); `vyrn check` states and walks
-its own copy of a body with a group for it, and `typed::groups` refuses each
-such group at its first store. A right-hand side (`core::Rhs`) is a value, a `Read` or `Take` of a
+function any row spells by name). A refusal reads the demanded walk
+(`elide::demanded`): the same walk over the body, its parameters' clauses, its
+names' validated types and the declared result clauses of its direct callees
+(`elide::Summaries::declared`), and no inferred summary or entry fact, which
+the judgment memo does not key. The typed judgment states and walks its own
+copy of a body with a group or a `prove` call by it. `typed::groups` refuses
+a group whose rule check the facts prove false at its first store, and a
+`prove` row the walk keeps (`check::Raises::Prove`, a clause check of the
+comparison the call's argument computes) is refused with its `Check::why`. In
+a module the manifest's `proved` key names (`Program::proved`, from
+`manifest::Proved`) every kept row is refused, and `World::body_at` decides
+the module's bodies by the same walk, so the emitter and `vyrn why --cost`
+read the verdicts the refusal read. A right-hand side (`core::Rhs`) is a value, a `Read` or `Take` of a
 place, a `Call`, a `Prim` (one row of the primitive table), a `Make` of a
 record, array or variant, or a function name. A place (`core::Place`) is a
 name, a global, a field, an element or a map key. Evaluation order is left
@@ -616,6 +625,14 @@ rules read the effect set the judgment kept (`World::state_use`), the call
 graph's components (`fixpoint::components`), callees first, and the loop form
 `elide::counter_loop`, beside the `elide::bound_test` it starts from.
 `tests/fnverdicts.rs` pins both verdicts of every function of the corpus.
+
+`verdict::erased` judges every row a call for its effect (`St::Do`) enters, in
+the bodies `World` serves, by the kernel's walk with the kernel's types
+replaced by `read` parameters (`verdict::Rules`). The emitter takes the table
+once, after the checks phase, and emits nothing for a row
+`verdict::Erased::erases` names, nor reads it for a first read. `vyrn why
+--cost` prints a call into a function with a result clause that stays
+(`insight::Kind::Stays`), with the rule `Erased::stays` names.
 
 `vyrn why --provenance` prints `provenance::table`: per function of the root
 file that returns an array, the class of the backward map from the result's

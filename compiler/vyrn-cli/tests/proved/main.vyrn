@@ -1,0 +1,16 @@
+import { at, total } from "./core/scan"
+
+// An unproved module: the clause check of `at` stays at run time here.
+export fn pick(xs: Array<Int64>, n: Int64) -> Int64 {
+    return at(xs, n)
+}
+
+fn main() -> Int64 {
+    let mut xs: Array<Int64> = []
+    xs.push(10)
+    xs.push(20)
+    print(total(xs).toString())
+    print(pick(xs, 1).toString())
+    print(pick(xs, 2).toString())
+    return 0
+}

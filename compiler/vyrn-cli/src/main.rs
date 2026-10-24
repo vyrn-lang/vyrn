@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 use vyrn_frontend::project::Expansions;
 use vyrn_genwasm::engine;
-use vyrn_lower::insight::{self, CostFn, CostTable, Verb};
+use vyrn_lower::insight::{self, CostFn, CostTable};
 use vyrn_lower::lastrun;
 use vyrn_lower::provenance;
 
@@ -743,10 +743,7 @@ impl Project {
         };
         let lock = match &manifest {
             Some(m) => {
-                opts.aliases = m.dependencies.iter().cloned().collect();
-                opts.alias_base = m.dir.clone();
-                opts.audience = m.audience.clone();
-                opts.artifacts = m.artifacts.clone();
+                m.load_options(&mut opts);
                 Path::new(&m.dir).join("vyrn.lock")
             }
             None => dir.join("vyrn.lock"),
@@ -838,13 +835,36 @@ impl Project {
         source: &str,
         host_calls: &'static [&'static str],
     ) -> Result<Loaded, String> {
+        self.loaded(root, source, host_calls, &|_| false)
+    }
+
+    /// [`Project::checked`] for a report, which also loads a program refused
+    /// only for the checks a `proved` module keeps: the report marks them
+    /// ([`insight::Verb::Refuses`]).
+    fn reported_on(&self, root: &str, source: &str) -> Result<Loaded, ExitCode> {
+        let marked =
+            |d: &Diagnostic| matches!(d.rule, Some(vyrn_frontend::rules::Rule::ProvedKept { .. }));
+        (self.loaded(root, source, &[], &marked)).map_err(|_| ExitCode::FAILURE)
+    }
+
+    /// Loads and checks `root` as [`Project::checked_said`] does, admitting
+    /// the diagnostics `admitted` answers for ([`vyrn_lower::load_admitting`]).
+    fn loaded(
+        &self,
+        root: &str,
+        source: &str,
+        host_calls: &'static [&'static str],
+        admitted: &dyn Fn(&Diagnostic) -> bool,
+    ) -> Result<Loaded, String> {
         let opts = loader::LoadOptions {
             expansions: Expansions::shared(),
             host_calls,
             ..self.opts.clone()
         };
         let key = dos_to_slash(root);
-        let loaded = vyrn_lower::load_warned(source, &key, &opts, &self.resolver, Some(&*engine()));
+        let engine = Some(&*engine());
+        let loaded =
+            vyrn_lower::load_admitting(source, &key, &opts, &self.resolver, engine, admitted);
         self.reported(root, loaded)
     }
 
@@ -1581,7 +1601,8 @@ fn why_cost(flags: GlobalFlags, file: &str) -> Outcome {
             };
             last_line = *line;
             let ran = match (&last, verb) {
-                (Some(_), Verb::Keeps) | (None, _) => String::new(),
+                (Some(_), v) if !v.blocks() => String::new(),
+                (None, _) => String::new(),
                 (Some(sites), _) => {
                     let [blocks, bytes, ..] = sites
                         .get(&(f.name.clone(), *line, verb.word().to_string()))
@@ -1642,7 +1663,7 @@ fn why_checked(flags: GlobalFlags, file: &str) -> Result<(String, String, Loaded
             .map(|v| v.code)
             .unwrap_or_default()
     };
-    let loaded = p.checked(&path, &source)?;
+    let loaded = p.reported_on(&path, &source)?;
     Ok((path, source, loaded))
 }
 

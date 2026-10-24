@@ -146,10 +146,7 @@ fn load_context(
     let mut manifest_error = None;
     let manifest_dir = match found {
         Ok(m) => m.map(|m| {
-            opts.aliases = m.dependencies.into_iter().collect();
-            opts.alias_base = m.dir.clone();
-            opts.audience = m.audience;
-            opts.artifacts = m.artifacts;
+            m.load_options(&mut opts);
             m.dir
         }),
         Err(e) => {
@@ -3342,7 +3339,9 @@ fn glob_files(dir: &std::path::Path, segs: &[&str], out: &mut Vec<std::path::Pat
             if kind.is_dir() {
                 glob_files(&path, segs, out);
             }
-        } else if name.is_some_and(|n| glob_name(first.as_bytes(), n.as_bytes())) {
+        } else if name
+            .is_some_and(|n| vyrn_frontend::manifest::glob_name(first.as_bytes(), n.as_bytes()))
+        {
             if rest.is_empty() {
                 if kind.is_file() && !out.contains(&path) {
                     out.push(path);
@@ -3351,17 +3350,6 @@ fn glob_files(dir: &std::path::Path, segs: &[&str], out: &mut Vec<std::path::Pat
                 glob_files(&path, rest, out);
             }
         }
-    }
-}
-
-/// Whether the name `s` matches the one-segment glob `p` (`*`, `?`, literals).
-fn glob_name(p: &[u8], s: &[u8]) -> bool {
-    match (p.split_first(), s.split_first()) {
-        (None, None) => true,
-        (Some((b'*', pr)), _) => glob_name(pr, s) || (!s.is_empty() && glob_name(p, &s[1..])),
-        (Some((b'?', pr)), Some((_, sr))) => glob_name(pr, sr),
-        (Some((a, pr)), Some((b, sr))) if a == b => glob_name(pr, sr),
-        _ => false,
     }
 }
 
@@ -3496,17 +3484,6 @@ mod tests {
     }
     use super::*;
     use vyrn_frontend::ast::{EnumVariant, Type};
-
-    #[test]
-    fn a_glob_segment_matches_a_star_and_a_question_mark_within_one_name() {
-        assert!(glob_name(b"app*.css", b"app.css"));
-        assert!(glob_name(b"app*.css", b"app-dark.css"));
-        assert!(!glob_name(b"app*.css", b"decoy.css"));
-        assert!(glob_name(b"?.css", b"a.css"));
-        assert!(!glob_name(b"?.css", b"ab.css"));
-        assert!(glob_name(b"", b""));
-        assert!(!glob_name(b"", b"a"));
-    }
 
     /// An anonymous enum binding is hinted with hover's spelling, which keeps
     /// the payloads `Type`'s `Display` drops.

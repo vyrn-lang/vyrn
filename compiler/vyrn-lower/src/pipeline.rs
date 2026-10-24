@@ -38,6 +38,23 @@ pub fn load_warned(
     Result<(ast::Program, Arc<crate::World>), Vec<Diagnostic>>,
     loader::Warnings,
 ) {
+    load_admitting(root_source, root_path, opts, resolver, engine, &|_| false)
+}
+
+/// [`load_warned`], which also returns the World of a program whose every
+/// diagnostic `admitted` answers for. A report admits the refusals it marks
+/// itself: `vyrn why --cost` admits the checks a `proved` module keeps.
+pub fn load_admitting(
+    root_source: &str,
+    root_path: &str,
+    opts: &loader::LoadOptions,
+    resolver: &dyn loader::ModuleResolver,
+    engine: Option<&GenEngine>,
+    admitted: &dyn Fn(&Diagnostic) -> bool,
+) -> (
+    Result<(ast::Program, Arc<crate::World>), Vec<Diagnostic>>,
+    loader::Warnings,
+) {
     let load_span = prof::phase("load (total)");
     let (loaded, origins, warnings, _graph, pending) =
         loader::load_with_origins(root_source, root_path, opts, resolver, engine);
@@ -49,7 +66,7 @@ pub fn load_warned(
     };
     let (judged, world) = check(&mut program, engine, pending);
     let mut diags = judged.diagnostics;
-    if let (true, Some(world)) = (diags.is_empty(), world) {
+    if let (true, Some(world)) = (diags.iter().all(admitted), world) {
         (Ok((program, world)), warnings)
     } else {
         // A diagnostic at an origin-governed line of a generated module moves to

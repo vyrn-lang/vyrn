@@ -273,6 +273,11 @@ compile, except `--contract`.
   allocates or copies by type, such as allocates `Folded`. A copy the compiler makes
   where the program wrote none says why. A kept check says what it needs, why
   the compiler cannot show it, and what would drop it, where something would.
+  In a module the manifest's `proved` key names, a kept check reads `check
+  refused`, and the report answers although the program is refused for it. A
+  proved check prints nothing, a `prove` row's included. A call into a lemma
+  that the emitter keeps reads ``call kept: `down(..)`, because it is
+  recursive``, with the first rule the callee fails (language.md, Proofs).
   A call into a function of
   another file counts that function's allocations at the calling line. A
   function with nothing to report is left out. The LSP's hover keeps the
@@ -355,6 +360,7 @@ policy.
 | `hints` | per-rule severity for the hint libraries (`std/hints`, `std/vyx-hints`) |
 | `stylesheets` | globs naming the app's own CSS, whose rules the editor's hover on a safelisted class shows |
 | `inputs` | globs naming the generator inputs the editor sends the language server, beside the `.vyx` files the VS Code extension sends |
+| `proved` | globs naming the modules where every check must be proved (language.md, Proofs); `vyrn check`, `build`, `run`, `why` and the editor read it, and no flag replaces it |
 
 An unknown tool name under `toolchain` is refused and the error lists the known
 tools. With no `audience` key every module is universal. With no artifacts

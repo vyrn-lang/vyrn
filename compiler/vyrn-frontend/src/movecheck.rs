@@ -302,7 +302,9 @@ pub fn reset_judgment_tally() {
 /// x` to `consume x` changes what every caller owes), each parameter's and
 /// result's `where` clause (a caller's fact verdict reads them), each
 /// projection's whole body (it is inlined into its callers), and each
-/// validated type's predicate and module-state initializer. The parts are sorted first because three
+/// validated type's predicate and module-state initializer, and the modules
+/// the manifest's `proved` key names (a body there refuses every check it
+/// keeps). The parts are sorted first because three
 /// sources are hash maps. Every part but a projection is written without its
 /// positions and docs ([`unplaced`]), so a line moved or a doc edited in the
 /// root moves no part; a projection's expansion keeps its lines, which an
@@ -355,6 +357,7 @@ fn declaration_fingerprint(program: &Program) -> u64 {
             g.module, g.name, g.ty, g.mutable as u8, g.init
         ));
     }
+    parts.extend(program.proved.iter().map(|m| format!("v{m:?}")));
     for p in &program.protocols {
         parts.push(format!(
             "p{:?}/{}<{:?}>={}",

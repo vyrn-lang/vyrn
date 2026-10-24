@@ -1,0 +1,6 @@
+import { prove } from "std/proof"
+
+export fn either(i: Int64) -> Int64 {
+    prove(i < 0 || i > 0)
+    return i
+}

@@ -1,0 +1,15 @@
+/// A proved module: every check below is proved, the call in `total` by
+/// its loop and `at`'s index by its parameter's clause.
+export fn at(xs: Array<Int64>, i: Int64 where value >= 0 && value < xs.length) -> Int64 {
+    return xs[i]
+}
+
+export fn total(xs: Array<Int64>) -> Int64 {
+    let mut s: Int64 = 0
+    let mut i: Int64 = 0
+    while i < xs.length {
+        s = s + at(xs, i)
+        i = i + 1
+    }
+    return s
+}

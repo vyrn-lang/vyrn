@@ -428,6 +428,10 @@ pub fn builtin_alias_exports(spec: &str) -> Option<Vec<&'static str>> {
     (!names.is_empty()).then_some(names)
 }
 
+/// The module whose `prove` the compiler knows by its declaration
+/// ([`Program::prove`]).
+pub const PROOF: &str = "std/proof";
+
 /// Resolves an import specifier written inside `importer` to a module key.
 ///
 /// The editor reuses it for go-to-definition on an import path. The
@@ -527,6 +531,8 @@ pub struct LoadOptions {
     /// The artifacts the manifest declares, or `None`. The floor
     /// ([`crate::floor`]) runs only when the root is one artifact's entry point.
     pub artifacts: Option<crate::artifacts::ArtifactMap>,
+    /// The modules the manifest's `proved` key names ([`Program::proved`]).
+    pub proved: crate::manifest::Proved,
     /// The projection expansions of this compile, stamped on the program the
     /// load links. A compile passes [`crate::project::Expansions::shared`].
     pub expansions: std::sync::Arc<crate::project::Expansions>,
@@ -1411,6 +1417,8 @@ fn load_modules(
                     expansions: Default::default(),
                     spellings: Default::default(),
                     orders: Default::default(),
+                    prove: None,
+                    proved: Default::default(),
                     session: Default::default(),
                 },
                 import_targets: Vec::new(),
@@ -3688,13 +3696,12 @@ fn link(
     opts: &LoadOptions,
 ) -> Result<Program, Vec<Diagnostic>> {
     let mut errors: Vec<Diagnostic> = Vec::new();
-    // The key of `std/order`, whose declarations the compiler reads.
-    // The root's key may spell the file another way (`std/order.vyrn` run as
-    // the root of its own tests); only a root of that file name pays the
-    // path lookup.
-    let order_key = resolve_spec(crate::order::SPEC, root_key, opts)
-        .ok()
-        .map(|k| {
+    // The keys of `std/order` and `std/proof`, whose declarations the
+    // compiler reads. The root's key may spell the file another way
+    // (`std/order.vyrn` run as the root of its own tests); only a root of that
+    // file name pays the path lookup.
+    let std_key = |spec: &str| {
+        resolve_spec(spec, root_key, opts).ok().map(|k| {
             let file = |p: &str| {
                 std::path::Path::new(p)
                     .file_name()
@@ -3705,7 +3712,10 @@ fn link(
                 true => root_key.to_string(),
                 false => k,
             }
-        });
+        })
+    };
+    let order_key = std_key(crate::order::SPEC);
+    let proof_key = std_key(PROOF);
     // Fold import aliases into the flat namespace first.
     let alias_span = crate::prof::phase("link: resolve_aliases");
     let spellings = resolve_aliases(&mut modules, &mut errors, root_key);
@@ -4162,6 +4172,20 @@ fn link(
     program.spellings = std::sync::Arc::new(spellings);
     let ours = |m: &Option<String>| order_key.as_deref() == Some(m.as_deref().unwrap_or(root_key));
     program.orders = crate::order::Names::of(&program, &ours);
+    let proof = |m: &Option<String>| proof_key.as_deref() == Some(m.as_deref().unwrap_or(root_key));
+    program.prove = (program.functions.iter())
+        .find(|f| proof(&f.module) && program.spellings.written(&f.name) == "prove")
+        .map(|f| f.name.clone());
+    if !opts.proved.is_empty() {
+        let keys: BTreeSet<&Option<String>> = (program.functions.iter().map(|f| &f.module))
+            .chain(program.globals.iter().map(|g| &g.module))
+            .chain(program.type_decls.iter().map(|d| &d.module))
+            .collect();
+        program.proved = (keys.into_iter())
+            .filter(|m| opts.proved.holds(m.as_deref().unwrap_or(root_key)))
+            .cloned()
+            .collect();
+    }
     drop_unreached(&mut program, lazy, named, &unparsed);
     program.number();
     Ok(program)

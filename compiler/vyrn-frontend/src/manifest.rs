@@ -112,6 +112,83 @@ pub struct Manifest {
     /// The `inputs` key: globs, relative to `dir`, naming the generator inputs
     /// the editor sends the language server. Empty when absent.
     pub inputs: Vec<String>,
+    /// The `proved` key: the modules where every check must be proved.
+    pub proved: Proved,
+}
+
+impl Manifest {
+    /// Sets in `opts` what a load reads of the manifest: the dependencies and
+    /// the directory they resolve against, the audience, the artifacts and the
+    /// `proved` modules. Every host that loads a project calls it.
+    pub fn load_options(&self, opts: &mut crate::loader::LoadOptions) {
+        opts.aliases = self.dependencies.iter().cloned().collect();
+        opts.alias_base = self.dir.clone();
+        opts.audience = self.audience.clone();
+        opts.artifacts = self.artifacts.clone();
+        opts.proved = self.proved.clone();
+    }
+}
+
+/// The modules a manifest's `proved` key names: slash globs relative to its
+/// directory ([`glob_path`]). Every tool's load reads it through
+/// `LoadOptions::proved`; without the key it names none.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Proved {
+    /// The manifest's directory as the filesystem names it.
+    base: String,
+    globs: Vec<String>,
+}
+
+impl Proved {
+    /// Whether the globs name no module: the manifest has no `proved` key, or
+    /// an empty one.
+    pub fn is_empty(&self) -> bool {
+        self.globs.is_empty()
+    }
+
+    /// Whether the module `key` is one the globs name: its real path,
+    /// relative to the manifest's directory, matches one. A module outside
+    /// the directory (std, a remote or vendored module) is none.
+    pub fn holds(&self, key: &str) -> bool {
+        if self.is_empty() {
+            return false;
+        }
+        let path = real_path(key).unwrap_or_else(|| key.replace('\\', "/"));
+        crate::audience::relative_to(&path, &self.base)
+            .is_some_and(|rel| self.globs.iter().any(|g| glob_path(g, &rel)))
+    }
+}
+
+/// Whether the slash path `path` matches the slash glob `glob`, one segment
+/// against one name ([`glob_name`]): a `**` segment matches any number of
+/// directories. Each step consumes a segment of the glob or of the path.
+pub fn glob_path(glob: &str, path: &str) -> bool {
+    fn segs(s: &str) -> Vec<&str> {
+        s.split('/')
+            .filter(|x| !x.is_empty() && *x != ".")
+            .collect()
+    }
+    fn go(g: &[&str], p: &[&str]) -> bool {
+        match g.split_first() {
+            None => p.is_empty(),
+            Some((&"**", rest)) => go(rest, p) || (!p.is_empty() && go(g, &p[1..])),
+            Some((first, rest)) => p
+                .split_first()
+                .is_some_and(|(n, pr)| glob_name(first.as_bytes(), n.as_bytes()) && go(rest, pr)),
+        }
+    }
+    go(&segs(glob), &segs(path))
+}
+
+/// Whether the name `s` matches the one-segment glob `p` (`*`, `?`, literals).
+pub fn glob_name(p: &[u8], s: &[u8]) -> bool {
+    match (p.split_first(), s.split_first()) {
+        (None, None) => true,
+        (Some((b'*', pr)), _) => glob_name(pr, s) || (!s.is_empty() && glob_name(p, &s[1..])),
+        (Some((b'?', pr)), Some((_, sr))) => glob_name(pr, sr),
+        (Some((a, pr)), Some((b, sr))) if a == b => glob_name(pr, sr),
+        _ => false,
+    }
 }
 
 /// Returns the nearest directory at or above `start` that holds `vyrn.json`.
@@ -209,6 +286,7 @@ fn from_doc(doc: Json, slash_dir: String) -> Result<Manifest, String> {
     let dependencies = str_map("dependencies")?;
     let stylesheets = str_list("stylesheets")?;
     let inputs = str_list("inputs")?;
+    let proved = str_list("proved")?;
     // An unknown tool name is refused where it is written: a typo that declared
     // nothing would leave the build on PATH, a silent fallback.
     let toolchain = str_map("toolchain")?;
@@ -232,11 +310,16 @@ fn from_doc(doc: Json, slash_dir: String) -> Result<Manifest, String> {
     // rules.
     let artifacts =
         crate::artifacts::from_manifest(&doc, &audience_base)?.map(|m| m.with_realpath(real_path));
+    let proved = Proved {
+        base: audience_base,
+        globs: proved,
+    };
     Ok(Manifest {
         main: str_key("main"),
         native_target: str_key("nativeTarget"),
         stylesheets,
         inputs,
+        proved,
         dependencies,
         toolchain,
         audience,
@@ -922,6 +1005,28 @@ mod tests {
                 .expect("a tool nothing reads is not a manifest this reads");
             assert!(e.contains(&format!("unknown tool `{gone}`")), "{e}");
         }
+    }
+
+    #[test]
+    fn a_glob_segment_matches_a_star_and_a_question_mark_within_one_name() {
+        assert!(glob_name(b"app*.css", b"app.css"));
+        assert!(glob_name(b"app*.css", b"app-dark.css"));
+        assert!(!glob_name(b"app*.css", b"decoy.css"));
+        assert!(glob_name(b"?.css", b"a.css"));
+        assert!(!glob_name(b"?.css", b"ab.css"));
+        assert!(glob_name(b"", b""));
+        assert!(!glob_name(b"", b"a"));
+    }
+
+    #[test]
+    fn a_double_star_segment_matches_any_number_of_directories() {
+        assert!(glob_path("src/core/**", "src/core/scan.vyrn"));
+        assert!(glob_path("src/core/**", "src/core/deep/scan.vyrn"));
+        assert!(glob_path("**/scan.vyrn", "scan.vyrn"));
+        assert!(glob_path("src/*.vyrn", "./src/scan.vyrn"));
+        assert!(!glob_path("src/*.vyrn", "src/core/scan.vyrn"));
+        assert!(!glob_path("src/core/**", "src/scan.vyrn"));
+        assert!(!glob_path("", "scan.vyrn"));
     }
 
     /// A glob list reads in order; a present list that is not one is refused.
