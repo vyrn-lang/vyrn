@@ -753,6 +753,7 @@ fn generator_program(program: &Program, g: &str) -> Program {
         spellings: program.spellings.clone(),
         orders: program.orders.clone(),
         prove: program.prove.clone(),
+        proved: program.proved.clone(),
         session: program.session.clone(),
     }
 }

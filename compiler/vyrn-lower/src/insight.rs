@@ -46,6 +46,9 @@ pub enum Kind {
         /// `where rule` or `where clause`.
         what: &'static str,
         kept: bool,
+        /// A kept check of a module the manifest's `proved` key names, which
+        /// the program is refused for ([`World::proves`]).
+        refused: bool,
         /// A kept check's reason in source terms; empty when no pass gave one.
         why: String,
     },
@@ -63,6 +66,8 @@ pub enum Verb {
     Enters,
     Grows,
     Keeps,
+    /// A kept check that a `proved` module refuses.
+    Refuses,
 }
 
 impl Verb {
@@ -74,6 +79,7 @@ impl Verb {
             Verb::Enters => "enters",
             Verb::Grows => "grows",
             Verb::Keeps => "check kept",
+            Verb::Refuses => "check refused",
         }
     }
 }
@@ -86,7 +92,11 @@ impl Kind {
             Kind::Alloc(_) => Some(Verb::Allocates),
             Kind::Enters(..) => Some(Verb::Enters),
             Kind::Grows(_) => Some(Verb::Grows),
-            Kind::Check { kept, .. } => kept.then_some(Verb::Keeps),
+            Kind::Check { kept, refused, .. } => match (kept, refused) {
+                (_, true) => Some(Verb::Refuses),
+                (true, false) => Some(Verb::Keeps),
+                (false, false) => None,
+            },
         }
     }
 }
@@ -124,6 +134,7 @@ pub fn row(s: &St, body: &Body, world: &World) -> Option<(u32, Kind)> {
             Some(Kind::Check {
                 what: guarded(&c.guard),
                 kept: c.verdict == Verdict::Kept,
+                refused: c.verdict == Verdict::Kept && world.proves(body),
                 why: said(&c.why, body, &|f| {
                     Some(world.fn_rows().get(f.index())?.name.as_str())
                 }),
@@ -345,6 +356,7 @@ impl CostRow {
             Verb::Enters => format!("{nouns} allocates"),
             Verb::Grows => format!("{nouns} may allocate"),
             Verb::Keeps => format!("{nouns} checked"),
+            Verb::Refuses => format!("{nouns} check refused"),
         }
     }
 
@@ -373,6 +385,9 @@ impl CostRow {
                 self.nouns(call).join(", ")
             ),
             Verb::Keeps => reasoned(self.nouns(|n| format!("{n} check")), ": ").join("; "),
+            Verb::Refuses => {
+                reasoned(self.nouns(|n| format!("{n} check refused")), ": ").join("; ")
+            }
         }
     }
 }
@@ -397,9 +412,9 @@ pub fn table(program: &Program, world: &World, named: &dyn Fn(&str) -> String) -
                 Kind::Alloc(w) => (0, (w.clone(), String::new())),
                 Kind::Enters(c, from) => (0, (c.clone(), named(from))),
                 Kind::Grows(b) => (1, (b.clone(), String::new())),
-                Kind::Check { what, kept, why } => {
-                    (3 + usize::from(!kept), (what.to_string(), why.clone()))
-                }
+                Kind::Check {
+                    what, kept, why, ..
+                } => (3 + usize::from(!kept), (what.to_string(), why.clone())),
             };
             tally[slot].0 += 1;
             tally[slot].1 += usize::from(f.depth > 0);

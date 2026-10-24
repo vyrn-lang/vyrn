@@ -62,6 +62,11 @@ pub struct World {
     /// states, made once from `bodies` when an emitter first decides one
     /// ([`World::summaries`]).
     summaries: OnceLock<crate::elide::Summaries>,
+    /// The declared result clause of each body that has one, which a body of
+    /// a `proved` module reads in place of `summaries` ([`World::body_at`]).
+    declared: OnceLock<crate::elide::Summaries>,
+    /// The modules the manifest's `proved` key names ([`Program::proved`]).
+    proved: std::collections::BTreeSet<Option<String>>,
     /// The declared functions only a call can enter: none is `export`,
     /// `extern`, `gen`, `main`, synthesized, an `impl` method or derived
     /// function (two `$` in its spelling), or `std/runtime`'s, which the
@@ -405,6 +410,7 @@ impl World {
             ownership,
             private,
             records,
+            proved: program.proved.clone(),
             ..World::default()
         };
         world.reads.replace(rows);
@@ -431,13 +437,28 @@ impl World {
         self.body_at(self.fn_id(name)?)
     }
 
-    /// [`World::body_of`] for the function table's row `id`.
+    /// [`World::body_of`] for the function table's row `id`. A body of a
+    /// module the manifest proves is decided by the demanded walk, which the
+    /// typed judgment refuses its kept rows by ([`crate::elide::demanded`]).
     pub fn body_at(&self, id: FnId) -> Option<&Body> {
         let s = self.bodies.get(&id)?.as_ref()?;
         if !crate::core::decides() {
             return Some(&s.body);
         }
         Some(s.decided.get_or_init(|| {
+            if self.proves(&s.body) {
+                let mut body = s.body.clone();
+                let declared = self.declared.get_or_init(|| {
+                    let mut clauses: Vec<_> = (self.bodies.iter())
+                        .filter_map(|(f, s)| Some((*f, s.as_ref()?.body.ensures.clone()?)))
+                        .collect();
+                    clauses.sort_by_key(|(f, _)| f.index());
+                    crate::elide::Summaries::declared(clauses)
+                });
+                let decls = self.ownership.proto.types();
+                body.each_frame_mut(&mut |f| _ = crate::elide::demanded(f, decls, declared));
+                return body;
+            }
             let sums = self.summaries();
             sums.decided(id).unwrap_or_else(|| {
                 let mut body = s.body.clone();
@@ -490,6 +511,11 @@ impl World {
             let state = Arc::clone(&self.state_uses);
             crate::elide::summaries(bodies, types, &closed, records, instances, state)
         })
+    }
+
+    /// Whether `body` is of a module the manifest's `proved` key names.
+    pub fn proves(&self, body: &Body) -> bool {
+        self.proved.contains(&body.file)
     }
 
     /// What a call into the frame `f` may do. `None` for a frame

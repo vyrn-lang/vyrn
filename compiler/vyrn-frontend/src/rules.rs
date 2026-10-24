@@ -1210,6 +1210,8 @@ rules! {
         fix "store into `{name}.{short}` before any statement after line {k} that does not \
             store into `{name}`";
     ProveUnshown { why } "`prove` cannot show its comparison here: {why}";
+    ProvedKept { what, why }
+        "the {what} check stays at run time, and this module is in `proved` (vyrn.json): {why}";
     RemoveNotMut { op, name } "cannot `{op}` from `{name}` (declared without `mut`)";
     AssignNotMut { name } "cannot assign to `{name}` (declared without `mut`)";
     FieldNotMut { name } "cannot mutate a field of `{name}` (declared without `mut`)";

@@ -894,6 +894,7 @@ impl Parser {
                 spellings: Default::default(),
                 orders: Default::default(),
                 prove: None,
+                proved: Default::default(),
                 session: Default::default(),
             },
             errors,

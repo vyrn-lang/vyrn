@@ -254,7 +254,11 @@ the judgment memo does not key. The typed judgment states and walks its own
 copy of a body with a group or a `prove` call by it. `typed::groups` refuses
 a group whose rule check the facts prove false at its first store, and a
 `prove` row the walk keeps (`check::Raises::Prove`, a clause check of the
-comparison the call's argument computes) is refused with its `Check::why`. A right-hand side (`core::Rhs`) is a value, a `Read` or `Take` of a
+comparison the call's argument computes) is refused with its `Check::why`. In
+a module the manifest's `proved` key names (`Program::proved`, from
+`manifest::Proved`) every kept row is refused, and `World::body_at` decides
+the module's bodies by the same walk, so the emitter and `vyrn why --cost`
+read the verdicts the refusal read. A right-hand side (`core::Rhs`) is a value, a `Read` or `Take` of a
 place, a `Call`, a `Prim` (one row of the primitive table), a `Make` of a
 record, array or variant, or a function name. A place (`core::Place`) is a
 name, a global, a field, an element or a map key. Evaluation order is left

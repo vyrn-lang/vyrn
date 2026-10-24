@@ -336,6 +336,7 @@ fn options(expansions: std::sync::Arc<vyrn_frontend::project::Expansions>) -> Lo
         alias_base: String::new(),
         audience: None,
         artifacts: None,
+        proved: Default::default(),
         expansions,
         session: None,
         nest: Default::default(),

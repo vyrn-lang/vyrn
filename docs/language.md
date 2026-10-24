@@ -258,6 +258,12 @@ fn mid(xs: Array<Int64>, lo: Int64 where value >= 0, hi: Int64 where value > lo 
 - A sum or difference in `c` states a fact only where the compiler shows it stays within `-2^62..=2^62`. Elsewhere it may wrap, and the refusal says ``the sum `a + b` may wrap``.
 - The call checks nothing at run time. `prove` is no function value, because a call through a value proves nothing.
 
+A project demands a proof of every check in a module by naming it in the `proved` key of `vyrn.json`: `{ "main": "main.vyrn", "proved": ["core/**", "scan.vyrn"] }`. Each entry is a glob relative to the manifest's directory: `*` and `?` match within one name, and `**` matches any number of directories.
+
+- A check that a body of such a module keeps is refused with its reason and the fix, if one exists: ``` the index check stays at run time, and this module is in `proved` (vyrn.json): it needs `i >= 0`, and `i` is a parameter, so the function cannot know what its callers pass; add `where value >= 0` to `i`, and each call checks it where the caller cannot show it ```.
+- The proof reads what a `prove` reads: the body, the clauses, the validated types and the declared result clauses of the callees. A fact the compiler infers about a callee does not count, so a callee's result needs its clause written: `-> Int64 where value < hi`.
+- A parameter's clause is the module's boundary. A call from a module outside `proved` keeps its clause check at run time; a call inside one must prove it.
+
 ### Function types
 
 `fn(A, B) -> R` is a type. A function value can be a named function or a lambda, and it can be stored in a binding, a field, an array, a map, an `Option` or module state. A function value reads every argument, so a function with a `consume` or `modify` parameter is not a value of any `fn` type.
@@ -650,6 +656,7 @@ Each line is a program the compiler refuses, and the reason.
 - A call whose argument the flow does not show sorted, by the order a fact clause names: a fact has no run-time check.
 - A write that may break a fact a `let` promises: the promise holds at every write, and nothing checks a fact at run time.
 - A `prove` the compiler cannot show from the body, the clauses and the declared result clauses of its callees: it checks nothing at run time.
+- A check kept in a module the `proved` key of `vyrn.json` names: the project asked for none at run time there.
 - Assignment to a binding without `mut`.
 - `?` in a function whose return kind differs from the operand's.
 - A `Stream` or `MustUse` value that is not disposed on every path.

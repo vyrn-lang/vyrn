@@ -7959,10 +7959,12 @@ fn typed(
             .any(|f| rows(&f.stmts).any(|(s, _)| matches!(s, St::Do { rhs, .. } if called(rhs))))
     });
     // The facts come from the check rows, which only an emitter's body
-    // states, so a body with a group or a `prove` states its own copy and
-    // decides it by the demanded walk.
+    // states, so a body with a group or a `prove`, or of a module the
+    // manifest proves, states its own copy and decides it by the demanded
+    // walk.
+    let proved = program.proved.contains(file);
     let mut unshown = Vec::new();
-    if ended || proves {
+    if ended || proves || proved {
         let mut body = stated(program, own, top);
         let declared = declared(program, own, &body);
         let mut refuted = Vec::new();
@@ -7976,9 +7978,19 @@ fn typed(
         for f in body.frames() {
             for (s, _) in rows(&f.stmts) {
                 let St::Check(c) = s else { continue };
-                if c.rule == Raises::Prove && c.verdict == Verdict::Kept {
-                    let why = crate::insight::said(&c.why, f, &named);
-                    unshown.push((c.site.line, rule!(ProveUnshown, why).render()));
+                if c.verdict == Verdict::Proved || !(proved || c.rule == Raises::Prove) {
+                    continue;
+                }
+                let why = crate::insight::said(&c.why, f, &named);
+                let rule = match c.rule {
+                    Raises::Prove => rule!(ProveUnshown, why),
+                    _ => rule!(ProvedKept, what = crate::insight::guarded(&c.guard), why),
+                };
+                let d = Diagnostic::refusal(c.site.line, 0, "check", rule).in_file(file.clone());
+                let same =
+                    |x: &Diagnostic| (&x.file, x.line, &x.message) == (&d.file, d.line, &d.message);
+                if !out.iter().chain(&unshown).any(same) {
+                    unshown.push(d);
                 }
             }
         }
@@ -7986,7 +7998,6 @@ fn typed(
     for u in crate::typed::refused(top, as_written)
         .into_iter()
         .chain(groups)
-        .chain(unshown)
     {
         let said = |d: &Diagnostic| (&d.file, d.line, &d.message) == (file, u.0, &u.1);
         if !out.iter().any(said) && !found.contains(&u) {
@@ -7997,12 +8008,13 @@ fn typed(
         found.extend(crate::typed::drops(top, program, own.proto.types()));
     }
     found.sort_by_key(|(line, _)| *line);
-    let refused = !found.is_empty();
+    let refused = !found.is_empty() || !unshown.is_empty();
     out.extend(
         found.into_iter().map(|(line, message)| {
             Diagnostic::error(line, 0, "check", message).in_file(file.clone())
         }),
     );
+    out.extend(unshown);
     refused
 }
 

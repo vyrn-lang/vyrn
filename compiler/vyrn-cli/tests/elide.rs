@@ -7857,3 +7857,57 @@ fn main()"
         assert_eq!(err.is_empty(), trap.is_empty(), "{call}\n{err}");
     }
 }
+
+/// `tests/proved`, whose `vyrn.json` names `core/**` in `proved`.
+fn proved(file: &str) -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/proved")
+        .join(file)
+}
+
+/// A module the manifest's `proved` key names refuses every check it keeps,
+/// with the check's reason and its fix; `vyrn why --cost` marks the row
+/// `refused` and answers.
+#[test]
+fn a_proved_module_refuses_a_kept_check_with_its_fix() {
+    let out = vyrn()
+        .arg("check")
+        .arg(proved("core/bad.vyrn"))
+        .output()
+        .unwrap();
+    let err = norm(&out.stderr);
+    assert_eq!(out.status.code(), Some(1), "{err}");
+    let says = "3:0: the index check stays at run time, and this module is in `proved` \
+                (vyrn.json): it needs `i >= 0`, and `i` is a parameter, so the function cannot \
+                know what its callers pass; add `where value >= 0` to `i`, and each call checks \
+                it where the caller cannot show it\n";
+    assert!(err.ends_with(says), "{err}");
+    let why = vyrn()
+        .args(["why", "--cost"])
+        .arg(proved("core/bad.vyrn"))
+        .output()
+        .unwrap();
+    assert_eq!(why.status.code(), Some(0));
+    assert!(norm(&why.stdout).contains("    3           index check refused: it needs `i >= 0`"));
+}
+
+/// A proved module's own checks are proved, its call rows' clause checks
+/// included. A call into it from an unproved module keeps the clause check at
+/// run time, and it traps there.
+#[test]
+fn a_call_into_a_proved_module_keeps_its_clause_check_outside() {
+    let main = proved("main.vyrn");
+    assert_eq!(
+        rows_of(&proved("core/scan.vyrn"), "total"),
+        ["proved where-arg"]
+    );
+    assert_eq!(rows_of(&main, "pick"), ["check where-arg"]);
+    let out = vyrn().arg("run").arg(&main).output().unwrap();
+    assert_eq!(
+        (norm(&out.stdout).as_str(), norm(&out.stderr).as_str()),
+        (
+            "30\n20\n",
+            "error: validation failed for parameter `i` of `at`\n"
+        )
+    );
+}

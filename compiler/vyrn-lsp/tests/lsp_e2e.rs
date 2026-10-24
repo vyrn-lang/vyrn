@@ -1743,6 +1743,45 @@ fn component_tag_definition_opens_the_sibling() {
     );
 }
 
+/// The editor reads the manifest's `proved` key as `vyrn check` does: a check
+/// a module under its globs keeps is a diagnostic with the reason, and the same
+/// body outside them is accepted.
+#[test]
+fn a_kept_check_in_a_proved_module_is_a_diagnostic() {
+    let n = SCRATCH_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let dir = std::env::temp_dir().join(format!("vyrn_lsp_proved_{}_{n}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("core")).unwrap();
+    std::fs::write(dir.join("vyrn.json"), r#"{ "proved": ["core/**"] }"#).unwrap();
+    let src = "export fn get(xs: Array<Int64>, i: Int64) -> Int64 {
+    return xs[i]
+}
+";
+    std::fs::write(dir.join("core/get.vyrn"), src).unwrap();
+    std::fs::write(dir.join("get.vyrn"), src).unwrap();
+    let mut client = spawn_client();
+    let messages = |client: &mut LspClient, file: &str| {
+        let uri = file_uri(&dir.join(file));
+        did_open(client, &uri, "vyrn", src);
+        let notif = read_diags_for(client, file);
+        let diags = notif
+            .pointer("/params/diagnostics")
+            .and_then(|d| d.as_array())
+            .cloned();
+        (diags.unwrap_or_default().iter())
+            .filter_map(|d| Some(d.get("message")?.as_str()?.to_string()))
+            .collect::<Vec<_>>()
+    };
+    let proved = messages(&mut client, "core/get.vyrn");
+    assert!(
+        proved.iter().any(|m| m.starts_with(
+            "the index check stays at run time, and this module is in `proved` (vyrn.json)"
+        )),
+        "{proved:?}"
+    );
+    assert_eq!(messages(&mut client, "get.vyrn"), Vec::<String>::new());
+}
+
 /// The `inputs` globs of a workspace folder's `vyrn.json` reach the client as
 /// dynamic registrations, one per method the client can register, each with
 /// the globs relative to the manifest's directory.

@@ -10126,10 +10126,12 @@ impl<'a, 'p> Fn_<'a, 'p> {
             return;
         }
         // A kept check makes no block; counting its runs is not part of this instrument.
-        let Some(verb) = kind
-            .verb()
-            .filter(|v| *v != vyrn_lower::insight::Verb::Keeps)
-        else {
+        let Some(verb) = kind.verb().filter(|v| {
+            !matches!(
+                v,
+                vyrn_lower::insight::Verb::Keeps | vyrn_lower::insight::Verb::Refuses
+            )
+        }) else {
             return;
         };
         let at = b.here();

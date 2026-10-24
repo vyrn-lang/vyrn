@@ -1,0 +1,4 @@
+/// A proved module with a check the prover keeps: refused.
+export fn get(xs: Array<Int64>, i: Int64) -> Int64 {
+    return xs[i]
+}
