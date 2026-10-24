@@ -84,6 +84,12 @@ pub const ROWS: &[Row] = &[
         rule: "where-result",
         carriers: &[Carrier::Wasm],
     },
+    // The emitter writes a `let` clause's check after each write of the
+    // binding.
+    Row {
+        rule: "where-let",
+        carriers: &[Carrier::Wasm],
+    },
     // The check over the bytes is `std/text`'s `stringFault`, which every engine
     // calls; each engine keeps only the build, which allocates.
     Row {

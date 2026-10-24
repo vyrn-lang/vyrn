@@ -1,0 +1,2 @@
+a_promise_broken_in_a_loop_is_refused_at_the_write.vyrn:6:0: the push on line 6 may break the promise of `ys` on line 4, `sorted<Asc<Int64>>(value)`
+  fix: drop the promise first: `let mut ys: Array<Int64> = ys`

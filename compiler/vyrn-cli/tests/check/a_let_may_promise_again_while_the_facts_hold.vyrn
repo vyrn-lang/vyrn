@@ -1,0 +1,13 @@
+import { Asc, sort, insertSorted } from "std/order"
+
+fn grow(raw: consume Array<Int64>, x: Int64) -> Array<Int64> {
+    let mut xs: Array<Int64> where sorted<Asc<Int64>>(value) = sort<Asc<Int64>>(raw)
+    let mut ys: Array<Int64> = xs
+    let mut zs: Array<Int64> where sorted<Asc<Int64>>(value) = ys
+    zs = insertSorted<Asc<Int64>>(zs, x)
+    return zs
+}
+
+fn main() -> Int64 {
+    return grow([3, 1], 2).length
+}

@@ -12,7 +12,7 @@
 //! the instance counts as unlowered.
 
 use std::borrow::Cow;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
 use vyrn_frontend::ast::{
@@ -29,9 +29,11 @@ use vyrn_frontend::prelude;
 pub use vyrn_frontend::prelude::Spec;
 use vyrn_frontend::project::is_place_read;
 
+use crate::fact_flow::Built;
 use crate::kernel::{MissingKind, Root};
 use crate::world::{Fns, Stated};
 use crate::{Instance, NodeTypes, OutsideBody, World};
+use vyrn_frontend::core::check::Promise;
 use vyrn_frontend::core::{
     count_reads, names_in, rows, Arg, Arm, Body, BorrowKind, Callee, Cand, Copied, Ctor, Facts,
     Lit, Name, NameInfo, NotOwned, Old, Op, Opaque, Payload, Place, Rhs, Site, St, Target, Test,
@@ -1512,6 +1514,7 @@ impl<'a> Builder<'a> {
                 params: Vec::new(),
                 assumes: Vec::new(),
                 ensures: None,
+                promises: Vec::new(),
                 stmts: Vec::new(),
                 lambdas: Vec::new(),
                 cands: Vec::new(),
@@ -3102,16 +3105,26 @@ impl<'a> Builder<'a> {
                 line,
                 ty: annotation,
                 mutable,
+                clause,
                 ..
-            } => self.bind_let(
-                Some(s),
-                name,
-                value,
-                annotation.as_ref(),
-                *mutable,
-                *line,
-                out,
-            )?,
+            } => {
+                self.bind_let(
+                    Some(s),
+                    name,
+                    value,
+                    annotation.as_ref(),
+                    *mutable,
+                    *line,
+                    out,
+                )?;
+                // A clause the checker refused states nothing.
+                if let (Some(_), Some(n)) = (clause, self.lookup(name)) {
+                    let (decls, orders) = (self.proto.types(), &self.program.orders);
+                    if let Ok(Some(p)) = Promise::of(s, self.bounds, decls, orders) {
+                        self.body.promises.push((n, p));
+                    }
+                }
+            }
             Stmt::Assign {
                 name,
                 value,
@@ -5425,6 +5438,7 @@ impl<'a> Builder<'a> {
                 params: Vec::new(),
                 assumes: Vec::new(),
                 ensures: None,
+                promises: Vec::new(),
                 stmts: Vec::new(),
                 lambdas: Vec::new(),
                 cands: Vec::new(),
@@ -8137,7 +8151,7 @@ pub fn augment(program: &Program, w: &mut World, judging: bool) {
     // A body that did not build gives the judgment nothing, served or not.
     let late: Vec<(&str, &[Walked])> = states.iter().filter_map(JobState::answered).collect();
     let places = build_places(program, &lowered, own, &mut w.fns);
-    let ((mut state, read, answers, reached, allocating), uses) = crate::effects::judge_built(
+    let ((mut state, read, answers, reached, allocating), uses, ran) = crate::effects::judge_built(
         program,
         &lowered,
         own,
@@ -8259,7 +8273,26 @@ pub fn augment(program: &Program, w: &mut World, judging: bool) {
         },
     );
     let mut outside: Vec<Option<Body>> = Vec::with_capacity(lowered.bodies.len());
-    let facts = crate::fact_flow::Facts::of(program, &w.fns.rows, own.proto.types());
+    let unsolved = BTreeMap::new();
+    let judged: Vec<Built> = (states.iter())
+        .filter_map(|s| match (&s.job, &s.made) {
+            (job, Made::Built(_, Ok(body))) => Some(job.built(body, &unsolved)),
+            _ => None,
+        })
+        .collect();
+    let served = memo.as_ref().map(|_| {
+        (states.iter())
+            .filter_map(|s| match (&s.job, &s.made) {
+                (Job::Inst(inst), Made::Served(_, j)) if !j.summary.is_empty() => {
+                    Some((inst.func_id, inst.type_args.clone(), j.summary.clone()))
+                }
+                _ => None,
+            })
+            .collect()
+    });
+    let decls = own.proto.types();
+    let facts = crate::fact_flow::Facts::of(program, &w.fns, decls, ran, &judged, served);
+    drop(judged);
     for (
         JobState {
             job: j,
@@ -8295,7 +8328,13 @@ pub fn augment(program: &Program, w: &mut World, judging: bool) {
             Ok(b) => b,
             Err(g) => {
                 refuse_gap(g, j.module(), j.owner(), &mut r);
-                remember(memo.as_ref(), key, kept, &r.kernel[refused_before..]);
+                remember(
+                    memo.as_ref(),
+                    key,
+                    kept,
+                    &r.kernel[refused_before..],
+                    Vec::new,
+                );
                 into.push(None);
                 continue;
             }
@@ -8317,18 +8356,19 @@ pub fn augment(program: &Program, w: &mut World, judging: bool) {
             trace,
         );
         let refused = typed(program, own, &mut r, &top, j.module(), j.as_written());
-        let key = key.filter(|_| !refused);
-        remember(memo.as_ref(), key, kept, &r.kernel[refused_before..]);
-        // After the memo: a fact verdict reads other modules' clauses, which
-        // the memo's key does not cover.
+        let b = j.built(&top, &unsolved);
         if let Some(facts) = &facts {
-            match j {
-                Job::Inst(inst) => {
-                    facts.judge(Some(inst.func_id), &inst.subst, &top, &mut r.kernel)
-                }
-                Job::Outside(_) => facts.judge(None, &Default::default(), &top, &mut r.kernel),
-            }
+            facts.judge(&b, &mut r.kernel);
         }
+        let summary = || facts.as_ref().map(|f| f.summary(&b)).unwrap_or_default();
+        let key = key.filter(|_| !refused);
+        remember(
+            memo.as_ref(),
+            key,
+            kept,
+            &r.kernel[refused_before..],
+            summary,
+        );
         into.push(Some(top));
     }
     drop(facts);
@@ -8611,6 +8651,23 @@ impl Job<'_, '_> {
         }
     }
 
+    /// The body `body` of this job, as the fact judgment reads it; `none`
+    /// is the empty substitution.
+    fn built<'b>(&'b self, body: &'b Body, none: &'b BTreeMap<String, Type>) -> Built<'b> {
+        match self {
+            Job::Inst(inst) => Built {
+                decl: Some(inst.func_id),
+                subst: &inst.subst,
+                body,
+            },
+            Job::Outside(_) => Built {
+                decl: None,
+                subst: none,
+                body,
+            },
+        }
+    }
+
     /// The judgment memo's key. A `test` or `bench` body is keyed with its
     /// line too: a test added before it renumbers its `test@<i>` index.
     fn key(&self, memo: &vyrn_frontend::movecheck::Judgments<'_>) -> Option<JudgmentKey> {
@@ -8707,13 +8764,15 @@ fn serve(
     Some((key.clone(), memo?.take(key)?))
 }
 
-/// Records one body's refusals, `refused`, for every body with a key. Serving skips placement too, which a host that
-/// armed the memo does not read ([`movecheck::Judgments`]).
+/// Records one body's refusals, `refused`, and its fact summary for every
+/// body with a key. Serving skips placement too, which a host that armed the
+/// memo does not read ([`movecheck::Judgments`]).
 fn remember(
     memo: Option<&vyrn_frontend::movecheck::Judgments<'_>>,
     key: Option<JudgmentKey>,
     (frames, state): Kept,
     refused: &[Refusal],
+    summary: impl FnOnce() -> Vec<vyrn_frontend::core::check::Fact>,
 ) {
     let (Some(memo), Some(key)) = (memo, key) else {
         return;
@@ -8725,6 +8784,7 @@ fn remember(
             verdict,
             frames,
             state,
+            summary: summary(),
         },
     );
 }

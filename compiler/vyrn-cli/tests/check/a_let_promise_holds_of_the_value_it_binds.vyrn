@@ -1,0 +1,6 @@
+import { Asc } from "std/order"
+
+fn main() -> Int64 {
+    let ys: Array<Int64> where strict<Asc<Int64>>(value) = [3, 1]
+    return ys.length
+}

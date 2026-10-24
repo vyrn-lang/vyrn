@@ -254,11 +254,17 @@ pub(crate) fn each_written_type(program: &mut Program, f: &mut dyn FnMut(&mut Ty
 
         fn stmt(&mut self, s: &mut Stmt, _: &HashSet<String>) {
             if let Stmt::Let {
-                ty: Some(t), line, ..
+                ty: Some(t),
+                clause,
+                line,
+                ..
             } = s
             {
                 let line = *line;
                 crate::types::walk_type_mut(t, &mut |t| (self.0)(t, line));
+                if let Some(c) = clause {
+                    sites_expr(c, &mut HashSet::new(), self);
+                }
             }
         }
 

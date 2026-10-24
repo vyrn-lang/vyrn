@@ -1,0 +1,12 @@
+import { Asc, sort, lowerBound } from "std/order"
+
+fn down(xs: consume Array<Int64>, n: Int64) -> Array<Int64> {
+    if n == 0 {
+        return sort<Asc<Int64>>(xs)
+    }
+    return down(xs, n - 1)
+}
+
+fn main() -> Int64 {
+    return lowerBound<Asc<Int64>>(down([3, 1], 2), 2)
+}

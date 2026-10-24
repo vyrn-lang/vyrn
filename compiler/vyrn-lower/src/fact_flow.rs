@@ -1,8 +1,8 @@
 //! The fact judgment: which arrays are sorted, and by which order, over the
 //! core of every body, after the ownership and effect judgments.
 //!
-//! `core::augment` builds one [`Facts`] and calls [`Facts::judge`] on each
-//! body it built, after the effect judgment. The judgment writes only
+//! `core::augment` builds one [`Facts`] once the effect judgment ran, and
+//! calls [`Facts::judge`] on each body it built. The judgment writes only
 //! refusals. No pass after it reads its state, and the check prover never
 //! takes a fact as a premise, so a wrong fact can wrongly accept a program
 //! but never moves emitted code.
@@ -11,7 +11,8 @@
 //! gains and loses facts through the rows. A parameter holds what its clause
 //! requires; an array of at most one element holds every fact; a move or a
 //! store carries the facts of its value; a call's result holds what its
-//! callee's result clause guarantees. A push keeps a fact only where an
+//! callee's result clause guarantees, or a private callee's summary. A push
+//! keeps a fact only where an
 //! order atom shows the value not before the array's last (`sorted`) or
 //! after it (`strict`); any other write drops the facts of the array it
 //! writes. Order atoms relate terms, a value or an array's last element, and
@@ -20,14 +21,25 @@
 //! the walk knows empty holds. A loop's head keeps what holds at entry and
 //! after every turn (Houdini).
 //!
+//! A private function's summary is what its body shows of every value it
+//! returns: the greatest fixpoint over the call graph from every fact of
+//! the orders its walk and its callees' walks meet, lowered by walking each
+//! body under its callees' summaries ([`crate::fixpoint::descend`],
+//! Houdini). A summary never names a
+//! parameter, so a caller assumes no entry fact it did not prove, and an
+//! exported function has none: across a module boundary only clauses speak.
+//!
 //! The walk refuses only where a fact is needed: at a call whose parameter
-//! clause requires it, and at a return the result clause guarantees it of.
+//! clause requires it, at a return the result clause guarantees it of, and
+//! at a write of a binding whose `let` promises it ([`Body::promises`]): the
+//! `let` itself, a store into the binding or a place under it, and a call
+//! that modifies it. A binding without a promise loses its facts silently.
 //! The sentence names the row that dropped the fact, where one did.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-use vyrn_frontend::ast::{Capability, FnId, Function, Program, Type};
-use vyrn_frontend::core::check::{guarantees, requirements, Guarantee, Requirement, Word};
+use vyrn_frontend::ast::{Capability, FnId, Program, Type};
+use vyrn_frontend::core::check::{guarantees, requirements, Fact, Guarantee, Requirement, Word};
 use vyrn_frontend::core::{Arg, Body, Callee, Ctor, Lit, Name, Place, Rhs, St, Test, Val};
 use vyrn_frontend::diagnostics::Diagnostic;
 use vyrn_frontend::movecheck::Refusal;
@@ -36,25 +48,53 @@ use vyrn_frontend::rule;
 use vyrn_frontend::rules::Rule;
 use vyrn_frontend::types::Decls;
 
-use crate::FnRow;
+use crate::effects::Ran;
+use crate::Fns;
 
-/// The fact clauses of one program's functions and its `before`: what the
-/// judgment reads at each call and return. The placer builds one before its
-/// loop over the built bodies and calls [`Facts::judge`] on each, after the
-/// effect judgment ran.
+/// The fact clauses of one program's functions, its `before` and its
+/// private functions' summaries: what the judgment reads at each call and
+/// return. The placer builds one before its loop over the built bodies and
+/// calls [`Facts::judge`] on each.
 pub(crate) struct Facts<'a> {
-    functions: &'a [Function],
-    /// Per function with a fact clause, by its index in `functions`.
+    program: &'a Program,
+    /// Per function with a fact clause, by its index in `program.functions`.
     clauses: HashMap<usize, (Vec<Requirement>, Vec<Guarantee>)>,
     before: Option<usize>,
-    rows: Rows<'a>,
+    fns: &'a Fns,
+    /// Per summarized function, by its index in `program.functions`, each
+    /// instance's type arguments in parameter order and its index in
+    /// `summaries`.
+    at: HashMap<usize, Vec<(Vec<Type>, usize)>>,
+    /// What each summarized row's result holds.
+    summaries: Vec<Vec<Fact>>,
+}
+
+/// The summaries a judgment memo kept, by function and type arguments.
+pub(crate) type Served = Vec<(FnId, Vec<Type>, Vec<Fact>)>;
+
+/// One body the placer built: the instance of `program.functions[decl]` at
+/// `subst`, or a body no function declares where `decl` is `None`.
+pub(crate) struct Built<'b> {
+    pub(crate) decl: Option<FnId>,
+    pub(crate) subst: &'b BTreeMap<String, Type>,
+    pub(crate) body: &'b Body,
 }
 
 impl<'a> Facts<'a> {
-    /// The facts of `program`, whose function table is `rows`. `None`, with
-    /// nothing allocated, for a program that links no `std/order`, or that
-    /// states no fact and declares no `before`.
-    pub(crate) fn of(program: &'a Program, rows: &'a [FnRow], decls: &dyn Decls) -> Option<Self> {
+    /// The facts of `program`, whose function table is `fns`, once `_after`
+    /// shows the effect judgment ran, with the summary of each private
+    /// function of `built` that returns an array. `served` is `Some` where a
+    /// judgment memo is armed: it holds the summary the memo kept of each
+    /// instance it served, by function and type arguments. `None`, with
+    /// nothing allocated, for a program that links no `std/order`.
+    pub(crate) fn of(
+        program: &'a Program,
+        fns: &'a Fns,
+        decls: &dyn Decls,
+        _after: Ran,
+        built: &[Built<'_>],
+        served: Option<Served>,
+    ) -> Option<Self> {
         let orders = &program.orders;
         if orders.is_empty() {
             return None;
@@ -73,54 +113,236 @@ impl<'a> Facts<'a> {
         }
         let before = orders.name(Known::Before);
         let before = (program.functions.iter()).position(|f| Some(f.name.as_str()) == before);
-        if clauses.is_empty() && before.is_none() {
-            return None;
-        }
-        let rows = Rows {
-            rows,
-            declared: program.functions.len(),
-        };
-        Some(Facts {
-            functions: &program.functions,
+        let mut facts = Facts {
+            program,
             clauses,
             before,
-            rows,
-        })
+            fns,
+            at: HashMap::new(),
+            summaries: Vec::new(),
+        };
+        facts.summarize(built, served, decls);
+        Some(facts)
+    }
+
+    /// The summary of `b`, for the judgment memo; empty for a body with
+    /// none.
+    pub(crate) fn summary(&self, b: &Built<'_>) -> Vec<Fact> {
+        let at = b
+            .decl
+            .and_then(|d| self.instance(d.index(), &self.args(d, b.subst)));
+        at.map(|i| self.summaries[i].clone()).unwrap_or_default()
+    }
+
+    /// The type arguments of the instance of `program.functions[d]` at
+    /// `subst`, in parameter order.
+    fn args(&self, d: FnId, subst: &BTreeMap<String, Type>) -> Vec<Type> {
+        let params = &self.program.functions[d.index()].type_params;
+        params
+            .iter()
+            .filter_map(|p| subst.get(p).cloned())
+            .collect()
+    }
+
+    /// The index in `summaries` of the instance of `program.functions[d]` at
+    /// `args`.
+    fn instance(&self, d: usize, args: &[Type]) -> Option<usize> {
+        let rows = self.at.get(&d)?;
+        rows.iter().find(|(a, _)| a == args).map(|(_, i)| *i)
+    }
+
+    /// The index in `summaries` of the instance a call names: row `g`, whose
+    /// type arguments are its own or, for a declaration's row, the call's
+    /// `solved` under the caller's `subst`.
+    fn called(
+        &self,
+        g: FnId,
+        solved: &[(String, Type)],
+        subst: &HashMap<String, Type>,
+    ) -> Option<usize> {
+        let (d, of) = self.fns.declaration(self.program, g)?;
+        self.at.get(&d.index())?;
+        let args = if of.is_empty() { solved } else { of };
+        let args: Vec<Type> = (args.iter())
+            .map(|(_, t)| vyrn_frontend::types::substitute(t, subst))
+            .collect();
+        self.instance(d.index(), &args)
+    }
+
+    /// Solves the summaries of the private functions of `built` that return
+    /// an array and state no result fact, beside the rows `served` fixes.
+    /// Without a memo, only the summaries a judged body reads are solved;
+    /// with one, every summary is, because the memo keeps each for a caller
+    /// a later analysis builds again.
+    /// A body's candidates are the facts of every order its walk and its
+    /// callees' walks meet ([`crate::fixpoint::solve`]); each starts holding
+    /// all of them, and [`crate::fixpoint::descend`] drops a candidate a
+    /// return of the body does not show.
+    fn summarize(&mut self, built: &[Built<'_>], served: Option<Served>, decls: &dyn Decls) {
+        let every = served.is_some();
+        let served = served.unwrap_or_default();
+        let summarized = |b: &&Built| {
+            let Some(d) = b.decl else { return false };
+            let f = &self.program.functions[d.index()];
+            !f.exported
+                && !f.is_extern
+                && (self.clauses.get(&d.index())).is_none_or(|(_, g)| g.is_empty())
+                && matches!(vyrn_frontend::types::resolve(&f.ret, decls), Type::Array(_))
+        };
+        let walked: Vec<&Built> = built.iter().filter(summarized).collect();
+        if walked.is_empty() && served.is_empty() {
+            return;
+        }
+        let first = walked.len();
+        let decls_args: Vec<(FnId, Vec<Type>)> = (walked.iter())
+            .filter_map(|b| Some((b.decl?, self.args(b.decl?, b.subst))))
+            .chain(served.iter().map(|(d, args, _)| (*d, args.clone())))
+            .collect();
+        for (i, (d, args)) in decls_args.into_iter().enumerate() {
+            if self.instance(d.index(), &args).is_none() {
+                self.at.entry(d.index()).or_default().push((args, i));
+            }
+        }
+        let substs: Vec<HashMap<String, Type>> = (walked.iter())
+            .map(|b| b.subst.clone().into_iter().collect())
+            .collect();
+        // Per walked body, the walked bodies its top frame calls.
+        let callees: Vec<Vec<usize>> = (walked.iter().zip(&substs))
+            .map(|(b, subst)| {
+                let mut out = Vec::new();
+                each_call(&b.body.stmts, &mut |g, solved| {
+                    let at = self.called(g, solved, subst);
+                    out.extend(at.filter(|&j| j < first && !out.contains(&j)));
+                });
+                out
+            })
+            .collect();
+        let mut callers: Vec<Vec<usize>> = vec![Vec::new(); first];
+        for (i, cs) in callees.iter().enumerate() {
+            cs.iter().for_each(|&j| callers[j].push(i));
+        }
+        self.summaries = (walked.iter().map(|_| Vec::new()))
+            .chain(served.into_iter().map(|(_, _, fs)| fs))
+            .collect();
+        // Only a summary a body the judgment walks reads is solved, and the
+        // summaries that one reads.
+        let mut wanted = vec![every; first];
+        let mut todo: Vec<usize> = Vec::new();
+        for b in built.iter().filter(|b| self.needs(b)) {
+            let subst: HashMap<String, Type> = b.subst.clone().into_iter().collect();
+            each_call_in(b.body, &mut |g, solved| {
+                if let Some(j) = self.called(g, solved, &subst).filter(|&j| j < first) {
+                    if !std::mem::replace(&mut wanted[j], true) {
+                        todo.push(j);
+                    }
+                }
+            });
+        }
+        while let Some(i) = todo.pop() {
+            for &j in &callees[i] {
+                if !std::mem::replace(&mut wanted[j], true) {
+                    todo.push(j);
+                }
+            }
+        }
+        let this = &*self;
+        // A body that calls no function with a fact clause and no `before`
+        // meets an order only through its callees.
+        let (met, shown): (Vec<Met>, Vec<Vec<Fact>>) = (walked.iter().zip(&substs).enumerate())
+            .map(|(i, (b, subst))| match wanted[i] && this.calls(b.body) {
+                true => {
+                    let (met, shown) = this.shows(b, subst, &this.summaries, None);
+                    (Met(met), shown)
+                }
+                false => (Met(Vec::new()), Vec::new()),
+            })
+            .unzip();
+        let candidates = crate::fixpoint::solve(met, &callees);
+        // A body whose callees meet no order is solved by its first walk.
+        let open = |i: usize| {
+            !candidates[i].0.is_empty() && callees[i].iter().any(|&j| !candidates[j].0.is_empty())
+        };
+        let start = (shown.into_iter().enumerate())
+            .map(|(i, shown)| match open(i) {
+                true => (candidates[i].0.iter())
+                    .flat_map(|o| [false, true].map(|s| fact(s, o)))
+                    .collect(),
+                false => shown,
+            })
+            .chain(this.summaries[first..].iter().cloned())
+            .collect();
+        let solved = crate::fixpoint::descend(
+            start,
+            (0..first).filter(|&i| open(i)),
+            |i| walked[i].body.stmts.len(),
+            |i, told| (this.shows(walked[i], &substs[i], told, Some(&candidates[i].0))).1,
+            |i, out, values| {
+                let old = &values[i];
+                if old.iter().all(|f| out.contains(f)) {
+                    return Vec::new();
+                }
+                values[i] = (old.iter()).filter(|f| out.contains(f)).cloned().collect();
+                callers[i].clone()
+            },
+        );
+        self.summaries = solved;
+    }
+
+    /// Walks `b`'s top frame, its callees summarized as `told` says. Answers
+    /// the orders the walk met, and each fact over `orders`, or over the
+    /// orders it met where `orders` is `None`, that every return shows.
+    fn shows(
+        &self,
+        b: &Built<'_>,
+        subst: &HashMap<String, Type>,
+        told: &[Vec<Fact>],
+        orders: Option<&[Order]>,
+    ) -> (Vec<Order>, Vec<Fact>) {
+        let assumed = match b.decl.and_then(|d| self.clauses.get(&d.index())) {
+            Some((r, _)) => &r[..],
+            None => &[][..],
+        };
+        let mut j = Judge::new(self, b, b.body, &[], subst, told);
+        j.returned = Some(Vec::new());
+        let entry = j.entry(assumed);
+        j.list(entry.clone(), &b.body.stmts);
+        j.record = true;
+        j.list(entry, &b.body.stmts);
+        let returned = j.returned.take().unwrap_or_default();
+        let met = j.orders.clone();
+        let mut out = Vec::new();
+        for o in orders.unwrap_or(&met) {
+            let order = j.id(o.clone());
+            for strict in [false, true] {
+                let h = Held { strict, order };
+                let all = |(st, r): &(State, Name)| j.holds(st, *r, h);
+                if !returned.is_empty() && returned.iter().all(all) {
+                    out.push(fact(strict, o));
+                }
+            }
+        }
+        (met, out)
     }
 
     /// Appends the refusals of `top` and of its lambdas to `out`. `top` is
     /// the instance of `program.functions[decl]` at `subst`, or a body no
     /// function declares where `decl` is `None`. Allocates nothing for a body
-    /// that calls no function with a fact clause and no `before`, and whose
-    /// own result clause states no fact.
-    pub(crate) fn judge(
-        &self,
-        decl: Option<FnId>,
-        subst: &BTreeMap<String, Type>,
-        top: &Body,
-        out: &mut Vec<Refusal>,
-    ) {
+    /// that calls no function with a fact clause and no `before`, whose own
+    /// result clause states no fact, and whose `let`s promise none.
+    pub(crate) fn judge(&self, b: &Built<'_>, out: &mut Vec<Refusal>) {
+        let (decl, top) = (b.decl, b.body);
         let (assumed, own) = match decl.and_then(|d| self.clauses.get(&d.index())) {
             Some((r, g)) => (&r[..], &g[..]),
             None => (&[][..], &[][..]),
         };
-        if own.is_empty() && !self.calls(top) {
+        if !self.needs(b) {
             return;
         }
-        let subst: HashMap<String, Type> = subst.clone().into_iter().collect();
+        let subst: HashMap<String, Type> = b.subst.clone().into_iter().collect();
         let first = out.len();
         for (k, body) in top.frames().into_iter().enumerate() {
-            let mut j = Judge {
-                body,
-                facts: self,
-                name: decl.map_or(&top.name, |d| &self.functions[d.index()].name),
-                own: if k == 0 { own } else { &[] },
-                subst: &subst,
-                orders: Vec::new(),
-                record: false,
-                loops: Vec::new(),
-                refused: Vec::new(),
-            };
+            let own = if k == 0 { own } else { &[] };
+            let mut j = Judge::new(self, b, body, own, &subst, &self.summaries);
             // A lambda's parameters are no declaration's.
             let entry = j.entry(if k == 0 { assumed } else { &[] });
             j.list(entry.clone(), &body.stmts);
@@ -145,32 +367,84 @@ impl<'a> Facts<'a> {
     /// Whether a frame of `top` calls a function with a fact clause or
     /// `before`.
     fn calls(&self, top: &Body) -> bool {
-        let fact = |s: &St| match s {
-            St::Let(
-                _,
-                Rhs::Call {
-                    kind: Callee::Fn(g),
-                    ..
-                },
-            )
-            | St::Do {
-                rhs:
-                    Rhs::Call {
-                        kind: Callee::Fn(g),
-                        ..
-                    },
-                ..
-            } => (self.rows.decl(g.index()))
-                .is_some_and(|(d, _)| self.clauses.contains_key(&d) || Some(d) == self.before),
-            _ => false,
-        };
-        any(&top.stmts, &fact) || top.lambdas.iter().any(|l| self.calls(l))
+        let mut found = false;
+        each_call_in(top, &mut |g, _| {
+            found |= (self.fns.declaration(self.program, g)).is_some_and(|(d, _)| {
+                self.clauses.contains_key(&d.index()) || Some(d.index()) == self.before
+            });
+        });
+        found
+    }
+
+    /// Whether the judgment of `b` may refuse: it calls a function with a
+    /// fact clause or `before`, its result clause states a fact, or a `let`
+    /// of it promises one. Only such a body reads a summary.
+    fn needs(&self, b: &Built<'_>) -> bool {
+        let own = b.decl.and_then(|d| self.clauses.get(&d.index()));
+        own.is_some_and(|(_, g)| !g.is_empty()) || self.calls(b.body) || promises(b.body)
     }
 }
 
-/// Whether a row of `ss`, or a row under one, satisfies `p`.
-fn any(ss: &[St], p: &impl Fn(&St) -> bool) -> bool {
-    ss.iter().any(|s| p(s) || s.lists().any(|l| any(l, p)))
+/// Whether a `let` of `b` or of its lambdas promises a fact.
+fn promises(b: &Body) -> bool {
+    b.promises.iter().any(|(_, p)| !p.facts.is_empty()) || b.lambdas.iter().any(promises)
+}
+
+/// The orders a body and its callees meet: a summary's candidates.
+struct Met(Vec<Order>);
+
+impl crate::fixpoint::Lattice for Met {
+    fn join(&mut self, other: &Met) -> bool {
+        let before = self.0.len();
+        for o in &other.0 {
+            if !self.0.contains(o) {
+                self.0.push(o.clone());
+            }
+        }
+        self.0.len() > before
+    }
+}
+
+/// `strict<o>` or `sorted<o>` as a clause states it.
+fn fact(strict: bool, o: &Order) -> Fact {
+    Fact {
+        word: if strict { Word::Strict } else { Word::Sorted },
+        order: Type::Order(Box::new(o.clone())),
+    }
+}
+
+/// [`each_call`] over every frame of `b`.
+fn each_call_in(b: &Body, f: &mut impl FnMut(FnId, &[(String, Type)])) {
+    each_call(&b.stmts, f);
+    b.lambdas.iter().for_each(|l| each_call_in(l, f));
+}
+
+/// Calls `f` on the row and the solved type arguments of each function a
+/// row of `ss` calls, a row under one included.
+fn each_call(ss: &[St], f: &mut impl FnMut(FnId, &[(String, Type)])) {
+    for s in ss {
+        if let St::Let(
+            _,
+            Rhs::Call {
+                kind: Callee::Fn(g),
+                solved,
+                ..
+            },
+        )
+        | St::Do {
+            rhs:
+                Rhs::Call {
+                    kind: Callee::Fn(g),
+                    solved,
+                    ..
+                },
+            ..
+        } = s
+        {
+            f(*g, solved);
+        }
+        s.lists().for_each(|l| each_call(l, f));
+    }
 }
 
 /// A term of an order atom: a value's name, the last element of an array
@@ -365,13 +639,44 @@ struct Judge<'a> {
     /// Per enclosing loop, the states its `continue`s and `break`s leave.
     loops: Vec<(Vec<State>, Vec<State>)>,
     refused: Vec<(usize, Rule)>,
+    /// The summaries the walk reads, as [`Facts::summaries`] indexes them.
+    told: &'a [Vec<Fact>],
+    /// Where a summary is solved, the state and the name at each return the
+    /// recording walk meets.
+    returned: Option<Vec<(State, Name)>>,
 }
 
 /// Rounds a loop head may take before it keeps nothing; each round only
 /// drops what a turn breaks, so the corpus's loops settle in two or three.
 const ROUNDS: usize = 32;
 
-impl Judge<'_> {
+impl<'a> Judge<'a> {
+    /// The walk over `body`, a frame of `b`, whose result clause guarantees
+    /// `own`.
+    fn new(
+        facts: &'a Facts<'a>,
+        b: &'a Built<'a>,
+        body: &'a Body,
+        own: &'a [Guarantee],
+        subst: &'a HashMap<String, Type>,
+        told: &'a [Vec<Fact>],
+    ) -> Self {
+        let program = facts.program;
+        Judge {
+            body,
+            facts,
+            name: (b.decl).map_or(&b.body.name, |d| &program.functions[d.index()].name),
+            own,
+            subst,
+            orders: Vec::new(),
+            record: false,
+            loops: Vec::new(),
+            refused: Vec::new(),
+            told,
+            returned: None,
+        }
+    }
+
     fn id(&mut self, o: Order) -> usize {
         match self.orders.iter().position(|x| *x == o) {
             Some(i) => i,
@@ -509,6 +814,7 @@ impl Judge<'_> {
             St::Let(n, rhs) => {
                 let line = self.body.names[n.index()].line;
                 self.rhs(&mut st, Some(*n), rhs, line);
+                self.keeps(&mut st, *n, line);
                 st
             }
             St::Do { rhs, line, .. } => {
@@ -528,10 +834,12 @@ impl Judge<'_> {
                         if had && !st.held.contains_key(x) {
                             st.lost.insert(*x, (Write::Store, *line));
                         }
+                        self.keeps(&mut st, *x, *line);
                     }
                     p => {
-                        if let Some(r) = root(p) {
+                        if let Some(r) = p.root() {
                             st.lose(r, Write::Store, *line);
+                            self.keeps(&mut st, r, *line);
                         }
                     }
                 }
@@ -695,19 +1003,19 @@ impl Judge<'_> {
                 (Callee::Reserved, "@copy", [(Arg::Val(Val::Name(xs)), _)], Some(t)) => {
                     st.copy(*xs, t)
                 }
-                (Callee::Builtin, "@pop", [(xs, _)], Some(t)) => {
-                    match (arg_root(xs), some_tag(rhs)) {
-                        (Some(xs), Some(some)) => self.pop(st, xs, t, some),
-                        _ => self.writes(st, args, line),
+                (Callee::Builtin, "@pop", [(xs, _)], Some(t)) => match (xs.root(), some_tag(rhs)) {
+                    (Some(xs), Some(some)) => self.pop(st, xs, t, some),
+                    _ => self.writes(st, args, line),
+                },
+                (Callee::Fn(g), _, _, _) => {
+                    match self.facts.fns.declaration(self.facts.program, *g) {
+                        // An instance's row holds its type arguments; a call
+                        // into a generic body, which no instance judges, its own.
+                        Some((d, [])) => self.call(st, (d.index(), *g), args, solved, n, line),
+                        Some((d, of)) => self.call(st, (d.index(), *g), args, of, n, line),
+                        None => self.writes(st, args, line),
                     }
                 }
-                (Callee::Fn(g), _, _, _) => match self.facts.rows.decl(g.index()) {
-                    // An instance's row holds its type arguments; a call
-                    // into a generic body, which no instance judges, its own.
-                    Some((d, [])) => self.call(st, d, args, solved, n, line),
-                    Some((d, of)) => self.call(st, d, args, of, n, line),
-                    None => self.writes(st, args, line),
-                },
                 _ => self.writes(st, args, line),
             },
             _ => {}
@@ -792,12 +1100,12 @@ impl Judge<'_> {
         held
     }
 
-    /// A call to the declared function `g`: its requirements of the
-    /// arguments, its writes, and its result's guarantees.
+    /// A call to row `row` of the declared function `g`: its requirements of
+    /// the arguments, its writes, and its result's guarantees or summary.
     fn call(
         &mut self,
         st: &mut State,
-        g: usize,
+        (g, row): (usize, FnId),
         args: &[(Arg, Capability)],
         solved: &[(String, Type)],
         n: Option<Name>,
@@ -818,9 +1126,9 @@ impl Judge<'_> {
             }
             return;
         }
-        let clauses = &self.facts.clauses;
-        let Some((reqs, guars)) = clauses.get(&g) else {
-            return self.writes(st, args, line);
+        let (reqs, guars) = match self.facts.clauses.get(&g) {
+            Some((r, g)) => (&r[..], &g[..]),
+            None => (&[][..], &[][..]),
         };
         for r in reqs {
             let Some(order) = self.order_of(&r.fact.order, solved) else {
@@ -830,17 +1138,20 @@ impl Judge<'_> {
                 strict: r.fact.word == Word::Strict,
                 order,
             };
-            let Some(a) = args.get(r.param).and_then(|(a, _)| arg_root(a)) else {
+            let Some(a) = args.get(r.param).and_then(|(a, _)| a.root()) else {
                 continue;
             };
             if !self.holds(st, a, want) {
-                let callee = self.body.spelled(&self.facts.functions[g].name).to_string();
+                let callee = (self.body).spelled(&self.facts.program.functions[g].name);
+                let callee = callee.to_string();
                 self.refuse_need(st, line, &callee, a, want);
             }
         }
         self.writes(st, args, line);
         let Some(n) = n else { return };
-        for Guarantee(f) in guars {
+        let at = self.facts.called(row, solved, self.subst);
+        let summary = at.map_or(&[][..], |i| &self.told[i][..]);
+        for f in guars.iter().map(|Guarantee(f)| f).chain(summary) {
             if let Some(order) = self.order_of(&f.order, solved) {
                 let h = Held {
                     strict: f.word == Word::Strict,
@@ -855,17 +1166,24 @@ impl Judge<'_> {
     /// facts, and forgets a consumed name.
     fn writes(&mut self, st: &mut State, args: &[(Arg, Capability)], line: usize) {
         for (a, cap) in args {
-            let Some(r) = arg_root(a) else { continue };
+            let Some(r) = a.root() else { continue };
             match cap {
                 Capability::Read => {}
-                Capability::Modify => st.lose(r, Write::Call, line),
+                Capability::Modify => {
+                    st.lose(r, Write::Call, line);
+                    self.keeps(st, r, line);
+                }
                 Capability::Consume => st.kill(r),
             }
         }
     }
 
-    /// Checks the body's result clause at a return of `r`.
+    /// Checks the body's result clause at a return of `r`, and keeps the
+    /// state where a summary is solved.
     fn returns(&mut self, st: &State, r: Name, line: usize) {
+        if let (true, Some(rs)) = (self.record, &mut self.returned) {
+            rs.push((st.clone(), r));
+        }
         for Guarantee(f) in self.own {
             let Some(order) = self.order_of(&f.order, &[]) else {
                 continue;
@@ -893,6 +1211,43 @@ impl Judge<'_> {
                 None => rule!(ResultFactMissing, name, word, order),
             };
             self.refused.push((line, rule));
+        }
+    }
+
+    /// Refuses the write on `line` of `n` where it may break a fact the `let`
+    /// of `n` promises, and then holds the fact, so a later write is judged
+    /// on its own.
+    fn keeps(&mut self, st: &mut State, n: Name, line: usize) {
+        let body = self.body;
+        for (_, p) in body.promises.iter().filter(|(m, _)| *m == n) {
+            for f in &p.facts {
+                let Some(order) = self.order_of(&f.order, &[]) else {
+                    continue;
+                };
+                let want = Held {
+                    strict: f.word == Word::Strict,
+                    order,
+                };
+                if self.holds(st, n, want) {
+                    continue;
+                }
+                let lost = st.lost.remove(&n);
+                st.held.entry(n).or_default().insert(want);
+                if !self.record {
+                    continue;
+                }
+                let (name, word) = (body.spoken(n).into_owned(), f.word.spelled());
+                let order = Type::Order(Box::new(self.orders[order].clone()));
+                let rule = match lost {
+                    Some((w, at)) => {
+                        let ty = body.names[n.index()].ty.clone();
+                        let (write, line) = (w.word(), p.line);
+                        rule!(PromiseBroken, write, at, name, line, word, order, ty)
+                    }
+                    None => rule!(PromiseMissing, name, word, order),
+                };
+                self.refused.push((line, rule));
+            }
         }
     }
 
@@ -945,30 +1300,6 @@ impl Judge<'_> {
     }
 }
 
-/// The World's function table, read by declaration.
-struct Rows<'a> {
-    rows: &'a [FnRow],
-    /// The table's first rows are `program.functions`, in order
-    /// ([`vyrn_frontend::ast::Program::source_names`]).
-    declared: usize,
-}
-
-impl Rows<'_> {
-    /// The declaration row `id` is the body of, as an index into
-    /// `program.functions`, and its instance's type arguments: empty for a
-    /// declaration's own row. `None` for a test, a lambda frame or the
-    /// module state.
-    fn decl(&self, id: usize) -> Option<(usize, &[(String, Type)])> {
-        if id < self.declared {
-            return Some((id, &[]));
-        }
-        match &self.rows.get(id)?.generic {
-            Some((g, args)) if g.index() < self.declared => Some((g.index(), args)),
-            _ => None,
-        }
-    }
-}
-
 /// The tag of `Some` in the `Option` a pop row answers: its one variant
 /// with a payload.
 fn some_tag(rhs: &Rhs) -> Option<u64> {
@@ -983,23 +1314,5 @@ fn some_tag(rhs: &Rhs) -> Option<u64> {
     match (full.next(), full.next()) {
         (Some((i, _)), None) => Some(i),
         _ => None,
-    }
-}
-
-/// The name a place is rooted in.
-fn root(p: &Place) -> Option<Name> {
-    match p {
-        Place::Name(n) => Some(*n),
-        Place::Field(b, _) | Place::Elem(b, _) | Place::Key(b, _) => root(b),
-        Place::Global(_) => None,
-    }
-}
-
-/// The name an argument reads or writes.
-fn arg_root(a: &Arg) -> Option<Name> {
-    match a {
-        Arg::Val(Val::Name(n)) => Some(*n),
-        Arg::Val(Val::Lit(_)) => None,
-        Arg::Place(p) => root(p),
     }
 }

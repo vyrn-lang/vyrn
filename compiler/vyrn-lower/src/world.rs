@@ -100,7 +100,7 @@ pub struct FnRow {
 /// A worker reads the table and adds no row.
 #[derive(Default)]
 pub struct Fns {
-    pub(crate) rows: Vec<FnRow>,
+    rows: Vec<FnRow>,
     /// The first row under each name. A non-generic instance and its frame
     /// are the function's own row.
     ids: HashMap<String, FnId>,
@@ -147,6 +147,25 @@ impl Fns {
         let f = program.functions.get(id.index())?;
         debug_assert_eq!(f.name, name, "the function table is another program's");
         Some((id, f))
+    }
+
+    /// The function of `program` that row `id` is the body of, and the
+    /// instance's type arguments: none for the function's own row. `None` for
+    /// a projection, a test, a lambda frame or the module state. The table
+    /// must be `program`'s.
+    pub(crate) fn declaration(
+        &self,
+        program: &Program,
+        id: FnId,
+    ) -> Option<(FnId, &[(String, Type)])> {
+        let declared = program.functions.len();
+        if id.index() < declared {
+            return Some((id, &[]));
+        }
+        match &self.rows.get(id.index())?.generic {
+            Some((g, args)) if g.index() < declared => Some((*g, args)),
+            _ => None,
+        }
     }
 
     /// The row named `name`, added when there is none.

@@ -303,16 +303,28 @@ The fact judgment (`vyrn_lower::fact_flow`) follows the three. It judges
 which arrays are sorted, and by which order, and writes only refusals into
 the kernel's list. `core::augment` builds one `fact_flow::Facts` from the
 program's `std/order` names and its functions' fact clauses
-(`core::check::requirements`, `core::check::guarantees`), then calls
-`Facts::judge` on each body it built, after the effect judgment and after
-the judgment memo took the body's verdict, because a fact verdict reads
-other modules' clauses and the memo's key does not cover them. A program
+(`core::check::requirements`, `core::check::guarantees`) and the
+`effects::Ran` only the effect judgment returns, so it runs after that
+judgment. It calls `Facts::judge` on each body it built, before the judgment
+memo takes the body's verdict: the memo's declaration fingerprint holds every
+clause a fact verdict reads, so a served body keeps its fact refusals. A program
 that links no `std/order`, and a body that calls no function with a fact
 clause and no `before`, cost no allocation. The walk reads a body's rows:
 an empty array literal, a move or store, `@push` (its obligation), `@pop`
 and its `Option` switch, `@copy`, a `before` call and the `if` on its
-answer, and calls with their requirements and guarantees. Any other write
-drops the facts of the array it writes. A loop's head is the greatest state
+answer, and calls with their requirements and guarantees or summaries. Any other write
+drops the facts of the array it writes. A `let`'s promise
+(`core::check::Promise`, in `Body::promises`) is judged at each row that
+writes its binding, and its comparisons are clause rows after each such
+write (`vyrn_lower::check`). Before the loop, `Facts::of` solves the
+summary of each private function that returns an array and states no
+result fact: its candidates are both facts of every order its walk and its
+callees' walks meet, a least fixpoint by `fixpoint::solve`; each body starts
+holding them all, and `fixpoint::descend` walks it under its callees'
+summaries and drops each candidate a return does not show. A call reads the
+summary of the instance it names, by function and type arguments. The memo
+keeps each body's summary (`movecheck::Judgment::summary`), so a body built
+again reads the summary of a callee the memo served. A loop's head is the greatest state
 that holds at entry and after every turn, within `fact_flow::ROUNDS` rounds.
 No later pass reads a fact, and the check prover takes none as a premise.
 

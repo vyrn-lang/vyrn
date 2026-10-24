@@ -638,6 +638,9 @@ rules! {
     OrderArity { name, want } "`{name}` takes {want}";
     NotAnOrder { ty } "`{ty}` is no order: an order is an `Asc`, a `Desc` or a `Then`";
     FactForm { word } "a fact clause is written `{word}<O>(value)`, with one order";
+    FactConjunct { word }
+        "`{word}` states a fact, which no run-time check decides, so it is joined to \
+        its clause only by `&&`, never under `||` or `!`";
     FactOrder { word, ty }
         "`{word}<{ty}>(value)` names `{ty}`, which is no order: write an `Asc`, a `Desc`, \
         a `Then`, or a type parameter bound by `Order`";
@@ -657,6 +660,20 @@ rules! {
     ResultFactBroken { name, word, order, write, at }
         "the result of `{name}` is {word} by `{order}`, and the {write} on line {at} \
         may break it";
+    LetClauseForm { name }
+        "the `where` clause of `{name}` may compare only `value`, its `.length`, \
+        `.byteLength` or integer field, and integer literals, of one integer type, \
+        and state facts of `value`, joined by `&&`";
+    LetClauseName { binding, name }
+        "the `where` clause of `{binding}` names `{name}`: a `let` clause states a rule \
+        of `value` alone";
+    PromiseMissing { name, word, order }
+        "`{name}` promises `{word}<{order}>(value)`, and nothing shows the value it is \
+        given here holds it";
+    PromiseBroken { write, at, name, line, word, order, ty }
+        "the {write} on line {at} may break the promise of `{name}` on line {line}, \
+        `{word}<{order}>(value)`"
+        fix "drop the promise first: `let mut ys: {ty} = {name}`";
     ResultClauseForm { name }
         "the `where` clause on the result of `{name}` may compare only `value`, a \
         `read` parameter, the `.length`, `.byteLength` or integer field of one, and \

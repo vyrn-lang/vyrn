@@ -1,0 +1,15 @@
+import { Asc, sort, lowerBound } from "std/order"
+
+type Person = { name: String, age: Int64 }
+
+fn roster(raw: consume Array<Person>, p: Person) -> Int64 {
+    let mut ps: Array<Person> where sorted<Asc<Person, age>>(value) = sort<Asc<Person, age>>(raw)
+    let mut ys: Array<Person> = ps
+    let at = lowerBound<Asc<Person, age>>(ys, p)
+    ys.push(p.copy())
+    return at + ys.length
+}
+
+fn main() -> Int64 {
+    return roster([], Person { name: "a", age: 1 })
+}

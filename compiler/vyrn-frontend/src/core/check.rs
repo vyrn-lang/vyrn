@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use super::{Arg, Callee, Lit, Name, Place, Rhs, Val};
-use crate::ast::{BinOp, Capability, Expr, FnId, Function, Type, TypeDecl, UnOp};
+use crate::ast::{BinOp, Capability, Expr, FnId, Function, Stmt, Type, TypeDecl, UnOp};
 use crate::rules::rule;
 use crate::trap::Rule;
 use crate::types::Decls;
@@ -68,6 +68,9 @@ pub enum Raises {
     /// The failure of the function's own result `where` clause
     /// ([`crate::trap::result_clause`]), which [`Guard::Clause`] carries.
     Result,
+    /// The failure of a `let`'s `where` clause after a write of its binding
+    /// ([`crate::trap::let_clause`]), which [`Guard::Clause`] carries.
+    Let,
 }
 
 impl Raises {
@@ -78,6 +81,7 @@ impl Raises {
             Raises::Where => "where",
             Raises::Clause => "where-arg",
             Raises::Result => "where-result",
+            Raises::Let => "where-let",
         }
     }
 }
@@ -117,8 +121,9 @@ pub enum Guard {
     /// ([`scalar_arg`]).
     Scalar(Name, String),
     /// The arguments of the call row after the check satisfy one parameter's
-    /// `where` clause, or the value of the `return` after it satisfies the
-    /// function's result clause: each comparison holds. `says` is the
+    /// `where` clause, the value of the `return` after it satisfies the
+    /// function's result clause, or the binding the row before it wrote
+    /// satisfies its `let`'s clause: each comparison holds. `says` is the
     /// sentence a failure prints. Unlike every other check, it runs where it
     /// stands: its operands are names and literals the row after it reads.
     Clause {
@@ -224,7 +229,7 @@ pub fn clauses(
             ));
         }
         let mut atoms = Vec::new();
-        conjuncts(f, Of::Param(k), e, decls, &mut atoms, &mut Vec::new())
+        conjuncts(Of::Param(f, k), e, decls, &mut atoms, &mut Vec::new())
             .map_err(|r| (p.line, r))?;
         // A fact holds of the argument the call proved it of, whatever the
         // body does with it; a comparison must hold for the whole call.
@@ -283,6 +288,54 @@ pub struct Requirement {
     pub fact: Fact,
 }
 
+/// A `let`'s `where` clause: a promise about the binding that every write
+/// of it keeps. Its comparisons are checked after each write unless proven;
+/// its facts are never checked at run time, and the fact judgment refuses a
+/// write that may break one.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Promise {
+    /// The `let`'s line.
+    pub line: usize,
+    /// The comparisons, over `Val::Name(Name(0))` for `value` ([`Atom::with`]).
+    pub atoms: Vec<Atom>,
+    pub facts: Vec<Fact>,
+    /// The sentence a failed comparison prints ([`crate::trap::let_clause`]).
+    pub says: Arc<str>,
+}
+
+impl Promise {
+    /// The promise of the `let` `s`, in a body whose type parameters `bounds`
+    /// bounds; `None` for a `let` without a clause. The error is the line and
+    /// the rule the checker refuses the clause with.
+    pub fn of(
+        s: &Stmt,
+        bounds: Option<&Bounds>,
+        decls: &dyn Decls,
+        orders: &crate::order::Names,
+    ) -> Result<Option<Promise>, (usize, crate::rules::Rule)> {
+        let Stmt::Let {
+            name,
+            ty: Some(ty),
+            clause: Some(e),
+            line,
+            ..
+        } = s
+        else {
+            return Ok(None);
+        };
+        let of = Of::Let { name, ty, bounds };
+        let mut atoms = Vec::new();
+        conjuncts(of, e, decls, &mut atoms, &mut Vec::new()).map_err(|r| (*line, r))?;
+        let facts = facts(of, e, decls, orders).map_err(|r| (*line, r))?;
+        Ok(Some(Promise {
+            line: *line,
+            atoms,
+            facts,
+            says: crate::trap::let_clause(name).into(),
+        }))
+    }
+}
+
 /// What a result's fact clause guarantees of the result. The body
 /// establishes it at every return.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -299,7 +352,7 @@ pub fn requirements(
     let mut out = Vec::new();
     for (k, p) in f.params.iter().enumerate() {
         let Some(e) = &p.clause else { continue };
-        for fact in facts(f, Of::Param(k), e, decls, orders).map_err(|r| (p.line, r))? {
+        for fact in facts(Of::Param(f, k), e, decls, orders).map_err(|r| (p.line, r))? {
             out.push(Requirement { param: k, fact });
         }
     }
@@ -317,32 +370,29 @@ pub fn guarantees(
         return Ok(Vec::new());
     };
     let line = e.line().max(f.line);
-    let facts = facts(f, Of::Result, e, decls, orders).map_err(|r| (line, r))?;
+    let facts = facts(Of::Result(f), e, decls, orders).map_err(|r| (line, r))?;
     Ok(facts.into_iter().map(Guarantee).collect())
 }
 
 /// The facts the clause `e` of `of` states, each of an array of its order's
 /// element type.
 fn facts(
-    f: &Function,
     of: Of,
     e: &Expr,
     decls: &dyn Decls,
     orders: &crate::order::Names,
 ) -> Result<Vec<Fact>, crate::rules::Rule> {
     let mut calls = Vec::new();
-    conjuncts(f, of, e, decls, &mut Vec::new(), &mut calls)?;
-    let subject = match of {
-        Of::Param(k) => &f.params[k].ty,
-        Of::Result => &f.ret,
-    };
+    conjuncts(of, e, decls, &mut Vec::new(), &mut calls)?;
+    let subject = of.subject();
     let bound = orders.name(crate::order::Known::Order);
     let resolve = |t: &Type| crate::types::resolve(t, decls);
     (calls.into_iter())
         .map(|(word, order)| {
             let elem = match &order {
                 Type::Order(o) => Some(o.elem().clone()),
-                Type::Param(p) => (f.type_bounds.get(p).into_iter().flatten())
+                Type::Param(p) => (of.bounds().and_then(|bs| bs.get(p)).into_iter())
+                    .flatten()
                     .any(|b| Some(b.as_str()) == bound)
                     .then(|| Type::Elem(Box::new(order.clone()))),
                 _ => None,
@@ -379,7 +429,7 @@ impl Ensures {
         };
         let line = e.line().max(f.line);
         let mut atoms = Vec::new();
-        conjuncts(f, Of::Result, e, decls, &mut atoms, &mut Vec::new()).map_err(|r| (line, r))?;
+        conjuncts(Of::Result(f), e, decls, &mut atoms, &mut Vec::new()).map_err(|r| (line, r))?;
         if atoms.is_empty() {
             return Ok(None);
         }
@@ -403,21 +453,49 @@ impl Ensures {
     }
 }
 
-/// Whose `where` clause: parameter `k`'s, whose `value` is `Name(k)`, or the
-/// result's, whose `value` is `Name(0)` and whose parameter `k` is
-/// `Name(k + 1)`.
+/// Whose `where` clause: parameter `k`'s of `f`, whose `value` is
+/// `Name(k)`; the result's of `f`, whose `value` is `Name(0)` and whose
+/// parameter `k` is `Name(k + 1)`; or the `let` of `name`'s, of type `ty`,
+/// in a body whose type parameters `bounds` bounds, whose `value` is
+/// `Name(0)`.
 #[derive(Clone, Copy)]
-enum Of {
-    Param(usize),
-    Result,
+enum Of<'f> {
+    Param(&'f Function, usize),
+    Result(&'f Function),
+    Let {
+        name: &'f str,
+        ty: &'f Type,
+        bounds: Option<&'f Bounds>,
+    },
 }
 
-impl Of {
+/// The bounds of a function's type parameters ([`Function::type_bounds`]).
+type Bounds = std::collections::HashMap<String, Vec<String>>;
+
+impl<'f> Of<'f> {
     /// The rule a clause outside the grammar breaks.
-    fn form(self, f: &Function) -> crate::rules::Rule {
+    fn form(self) -> crate::rules::Rule {
         match self {
-            Of::Param(k) => rule!(ClauseForm, param = f.params[k].name.as_str()),
-            Of::Result => rule!(ResultClauseForm, name = crate::rules::DeclName(&f.name)),
+            Of::Param(f, k) => rule!(ClauseForm, param = f.params[k].name.as_str()),
+            Of::Result(f) => rule!(ResultClauseForm, name = crate::rules::DeclName(&f.name)),
+            Of::Let { name, .. } => rule!(LetClauseForm, name),
+        }
+    }
+
+    /// The type of `value`.
+    fn subject(self) -> &'f Type {
+        match self {
+            Of::Param(f, k) => &f.params[k].ty,
+            Of::Result(f) => &f.ret,
+            Of::Let { ty, .. } => ty,
+        }
+    }
+
+    /// The bounds of the type parameters the clause may name.
+    fn bounds(self) -> Option<&'f Bounds> {
+        match self {
+            Of::Param(f, _) | Of::Result(f) => Some(&f.type_bounds),
+            Of::Let { bounds, .. } => bounds,
         }
     }
 }
@@ -427,7 +505,6 @@ impl Of {
 /// `facts`. A fact word is only ever a conjunct: under `||` or `!` it is no
 /// comparison, and the clause is refused.
 fn conjuncts(
-    f: &Function,
     of: Of,
     e: &Expr,
     decls: &dyn Decls,
@@ -451,35 +528,50 @@ fn conjuncts(
             };
         }
     }
+    let form = || match fact_under(e) {
+        Some(word) => rule!(FactConjunct, word = word.spelled()),
+        None => of.form(),
+    };
     let Expr::Binary { op, lhs, rhs, .. } = e else {
-        return Err(of.form(f));
+        return Err(form());
     };
     if *op == BinOp::And {
-        conjuncts(f, of, lhs, decls, out, facts)?;
-        return conjuncts(f, of, rhs, decls, out, facts);
+        conjuncts(of, lhs, decls, out, facts)?;
+        return conjuncts(of, rhs, decls, out, facts);
     }
-    op.compare().ok_or_else(|| of.form(f))?;
-    let (l, lt) = operand(f, of, lhs, decls)?;
-    let (r, rt) = operand(f, of, rhs, decls)?;
+    op.compare().ok_or_else(form)?;
+    let (l, lt) = operand(of, lhs, decls)?;
+    let (r, rt) = operand(of, rhs, decls)?;
     let ty = match (lt, rt) {
         (Some(a), Some(b)) if a == b => a,
         (Some(a), None) | (None, Some(a)) => a,
         (None, None) => Type::Int,
-        _ => return Err(of.form(f)),
+        _ => return Err(of.form()),
     };
     out.push(Atom { l, op: *op, r, ty });
     Ok(())
 }
 
+/// The first fact word `e` calls, at any depth.
+fn fact_under(e: &Expr) -> Option<Word> {
+    let mut found = None;
+    crate::ast::each_expr_in(e, &mut |x| {
+        if let Expr::Call { name, .. } = x {
+            found = found.or(Word::of(name));
+        }
+        found.is_none()
+    });
+    found
+}
+
 /// One side of a comparison in the clause `of` states in `f`, with its
 /// integer type; `None` for a literal, which takes the other side's.
 fn operand(
-    f: &Function,
     of: Of,
     e: &Expr,
     decls: &dyn Decls,
 ) -> Result<(Operand, Option<Type>), crate::rules::Rule> {
-    let form = || of.form(f);
+    let form = || of.form();
     let lit = |n: Option<i64>| {
         let of = Val::Lit(Lit::Int(n.ok_or_else(form)?));
         Ok((Operand { of, part: None }, None))
@@ -505,7 +597,7 @@ fn operand(
         },
         _ => return Err(form()),
     };
-    let (j, ty) = sibling(f, of, name)?;
+    let (j, ty) = sibling(of, name)?;
     let base = crate::types::resolve(ty, decls);
     let ty = match (&base, part.map(String::as_str)) {
         (_, None) => integer(base)?,
@@ -606,31 +698,30 @@ fn scalar_conjuncts(e: &Expr, ty: &Type, out: &mut Vec<Atom>) -> bool {
     }
 }
 
-/// The name `name` names in the clause `of` states in `f`, as [`Of`]
-/// numbers it, and its declared type. `value` is the clause's own subject.
-/// A parameter clause may name an earlier `read` parameter, a result clause
-/// any `read` parameter.
-fn sibling<'f>(
-    f: &'f Function,
-    of: Of,
-    name: &str,
-) -> Result<(usize, &'f Type), crate::rules::Rule> {
-    let (before, shift) = match of {
-        Of::Param(k) if name == "value" => return Ok((k, &f.params[k].ty)),
-        Of::Result if name == "value" => return Ok((0, &f.ret)),
-        Of::Param(k) => (k, 0),
-        Of::Result => (f.params.len(), 1),
+/// The name `name` names in the clause `of`, as [`Of`] numbers it, and its
+/// declared type. `value` is the clause's own subject. A parameter clause
+/// may name an earlier `read` parameter, a result clause any `read`
+/// parameter, and a `let` clause nothing else.
+fn sibling<'f>(of: Of<'f>, name: &str) -> Result<(usize, &'f Type), crate::rules::Rule> {
+    let (f, before, shift) = match of {
+        Of::Param(_, k) if name == "value" => return Ok((k, of.subject())),
+        Of::Result(_) | Of::Let { .. } if name == "value" => return Ok((0, of.subject())),
+        Of::Let { name: binding, .. } => return Err(rule!(LetClauseName, binding, name)),
+        Of::Param(f, k) => (f, k, 0),
+        Of::Result(f) => (f, f.params.len(), 1),
     };
     let at = f.params[..before].iter().position(|p| p.name == name);
     let fname = crate::rules::DeclName(&f.name);
     match (at, of) {
-        (None, Of::Param(k)) => Err(rule!(ClauseLater, param = f.params[k].name.as_str(), name)),
-        (None, Of::Result) => Err(rule!(ResultClauseName, name = fname, param = name)),
+        (None, Of::Param(_, k)) => Err(rule!(ClauseLater, param = f.params[k].name.as_str(), name)),
+        (None, _) => Err(rule!(ResultClauseName, name = fname, param = name)),
         (Some(j), _) if f.params[j].capability != Capability::Read => {
             let cap = f.params[j].capability.word();
             Err(match of {
-                Of::Param(k) => rule!(ClauseChanges, param = f.params[k].name.as_str(), name, cap),
-                Of::Result => rule!(ResultClauseChanges, name = fname, param = name, cap),
+                Of::Param(_, k) => {
+                    rule!(ClauseChanges, param = f.params[k].name.as_str(), name, cap)
+                }
+                _ => rule!(ResultClauseChanges, name = fname, param = name, cap),
             })
         }
         (Some(j), _) => Ok((j + shift, &f.params[j].ty)),

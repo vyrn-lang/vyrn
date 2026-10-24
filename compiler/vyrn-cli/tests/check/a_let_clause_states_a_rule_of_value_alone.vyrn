@@ -1,0 +1,8 @@
+fn first(n: Int64) -> Int64 {
+    let mut i: Int64 where value < n = 0
+    return i
+}
+
+fn main() -> Int64 {
+    return first(3)
+}

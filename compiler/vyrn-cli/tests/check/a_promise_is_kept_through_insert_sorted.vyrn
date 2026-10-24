@@ -1,0 +1,13 @@
+import { Asc, insertSorted, lowerBound } from "std/order"
+
+fn grow(more: Array<Int64>) -> Int64 {
+    let mut ys: Array<Int64> where sorted<Asc<Int64>>(value) = []
+    for x in more {
+        ys = insertSorted<Asc<Int64>>(ys, x)
+    }
+    return lowerBound<Asc<Int64>>(ys, 2)
+}
+
+fn main() -> Int64 {
+    return grow([3, 1, 2])
+}

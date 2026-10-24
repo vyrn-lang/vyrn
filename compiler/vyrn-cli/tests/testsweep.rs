@@ -229,6 +229,9 @@ const LEFT_THE_CHECKER: &[(&str, &str)] = &[
         "is passed to the same call, so the callee could read what it frees",
         "CONSUMED_AND_PASSED, one call consumes a value and reads it",
     ),
+    // A rule the checker never had: the fact judgment (`vyrn_lower::fact_flow`)
+    // writes into the kernel's list. `tests/check` pins its sentences.
+    ("sorted by `", "a fact a call or a return needs"),
 ];
 
 fn check(path: &Path, no_kernel: bool) -> (bool, String) {

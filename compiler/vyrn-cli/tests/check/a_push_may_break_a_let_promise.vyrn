@@ -1,0 +1,14 @@
+import { Asc, sort, insertSorted } from "std/order"
+
+type Person = { name: String, age: Int64 }
+
+fn roster(raw: consume Array<Person>, p: Person) -> Array<Person> {
+    let mut ps: Array<Person> where sorted<Asc<Person, age>>(value) = sort<Asc<Person, age>>(raw)
+    ps = insertSorted<Asc<Person, age>>(ps, p.copy())
+    ps.push(p.copy())
+    return ps
+}
+
+fn main() -> Int64 {
+    return roster([], Person { name: "a", age: 1 }).length
+}

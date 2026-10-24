@@ -125,11 +125,27 @@ fn main() -> Int64 { return pick(V0(\"a\")) }
     }
     s.push_str("    return s\n}\n");
     out.push(("many generic instances", s));
+
+    // Many private helpers whose facts are summaries: a binary tree of calls,
+    // each leaf sorting, so every summary is solved and the root's is read.
+    let mut s = String::from("import { Asc, sort, lowerBound } from \"std/order\"\n");
+    for i in 0..n {
+        let ret = |k: usize| format!("return h{k}(xs, c)");
+        let body = match (2 * i + 1 < n, 2 * i + 2 < n) {
+            (true, true) => format!("if c {{ {} }}\n    {}", ret(2 * i + 1), ret(2 * i + 2)),
+            (true, false) => ret(2 * i + 1),
+            _ => "return sort<Asc<Int64>>(xs)".to_string(),
+        };
+        let head = format!("fn h{i}(xs: consume Array<Int64>, c: Bool) -> Array<Int64>");
+        writeln!(s, "{head} {{\n    {body}\n}}").unwrap();
+    }
+    s.push_str("fn main() -> Int64 {\n    return lowerBound<Asc<Int64>>(h0([3, 1], true), 2)\n}\n");
+    out.push(("many summarized helpers", s));
     out
 }
 
 #[test]
-#[ignore = "builds eleven generated programs on one thread; named in the gate list"]
+#[ignore = "builds fourteen generated programs on one thread; named in the gate list"]
 fn no_phase_allocates_faster_than_its_input() {
     let dir = scratch("scaling");
     let cache = scratch("scaling-gen");

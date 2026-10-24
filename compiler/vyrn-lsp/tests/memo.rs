@@ -21,7 +21,8 @@ fn analyze(root: &Path, session: &Arc<Session>) -> String {
     let path = root.to_string_lossy().replace('\\', "/");
     let text = std::fs::read_to_string(root).expect("read the root");
     let opts = LoadOptions {
-        std_root: vyrn_frontend::manifest::std_root(),
+        // The test binary sits where `manifest::std_root` finds no `std`.
+        std_root: Some(concat!(env!("CARGO_MANIFEST_DIR"), "/../../std").replace('\\', "/")),
         session: Some(session.clone()),
         ..Default::default()
     };
@@ -294,6 +295,92 @@ fn a_root_protocol_doc_edit_keeps_an_imported_instances_verdict() {
             &[("b.vyrn", IGNORES), ("main.vyrn", &root("A size."))],
             &[("main.vyrn", &first)],
             &[("main.vyrn", &second)],
+        ],
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(got.is_none(), "{}", got.unwrap_or_default());
+}
+
+/// The fact refusal the fact witnesses turn on.
+const UNSORTED: &str = "needs `xs` sorted by `Asc<Int64>`";
+
+const A_SEARCHES: &str = "import { Asc, lowerBound } from \"std/order\"\n\
+    export fn find(xs: Array<Int64>) -> Int64 {\n  return lowerBound<Asc<Int64>>(xs, 3)\n}\n";
+
+const ROOT_FINDS: &str = "import { find } from \"./a\"\n\
+    fn main() -> Int64 {\n  print(find([3, 1, 2]))\n  return 0\n}\n";
+
+/// A root keystroke serves `find` out of the memo, with its fact refusal.
+#[test]
+fn a_root_keystroke_keeps_a_served_bodys_fact_refusal() {
+    let dir = scratch("factkey");
+    let got = drift(
+        &dir,
+        UNSORTED,
+        &[
+            &[("a.vyrn", A_SEARCHES), ("main.vyrn", ROOT_FINDS)],
+            &[("main.vyrn", &format!("{ROOT_FINDS}// k\n"))],
+        ],
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(got.is_none(), "{}", got.unwrap_or_default());
+}
+
+fn b_needs(clause: &str) -> String {
+    format!(
+        "import {{ Asc }} from \"std/order\"\n\
+         export fn need(xs: Array<Int64>{clause}) -> Int64 {{\n  return xs.length\n}}\n"
+    )
+}
+
+const A_NEEDS: &str = "import { need } from \"./b\"\n\
+    export fn find(xs: Array<Int64>) -> Int64 {\n  return need(xs)\n}\n";
+
+/// `a`'s fact verdict reads the clause of `b`'s `need`, which `a`'s hash does
+/// not cover and the declaration fingerprint does.
+#[test]
+fn an_imported_clause_edit_moves_another_imported_fact_verdict() {
+    let dir = scratch("factclause");
+    let (none, sorted) = (b_needs(""), b_needs(" where sorted<Asc<Int64>>(value)"));
+    let got = drift(
+        &dir,
+        UNSORTED,
+        &[
+            &[
+                ("b.vyrn", &none),
+                ("a.vyrn", A_NEEDS),
+                ("main.vyrn", ROOT_FINDS),
+            ],
+            &[("b.vyrn", &sorted)],
+            &[("b.vyrn", &none)],
+        ],
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(got.is_none(), "{}", got.unwrap_or_default());
+}
+
+const A_SORTS_FOR_A_CALLBACK: &str = "import { Asc, sort, lowerBound } from \"std/order\"\n\
+    let mut g: Array<Int64> = [1, 2, 3]\n\
+    export fn bump() -> Int64 {\n  g.push(4)\n  return 0\n}\n\
+    fn helper(xs: consume Array<Int64>) -> Array<Int64> {\n  return sort<Asc<Int64>>(xs)\n}\n\
+    fn use(f: fn() -> Int64, xs: Array<Int64>) -> Int64 {\n  let n = f()\n  \
+    let s = helper([3, 1])\n  return xs[0] + n + lowerBound<Asc<Int64>>(s, 2)\n}\n\
+    export fn run(f: fn() -> Int64) -> Int64 {\n  return use(f, g)\n}\n";
+
+/// A root edit rebuilds `use`, whose callback starts storing into `g`, and
+/// serves `helper`: `use` reads the summary the memo kept of `helper`, so
+/// `lowerBound` is accepted in the editor as in a fresh analysis.
+#[test]
+fn a_rebuilt_body_reads_a_served_helpers_summary() {
+    let dir = scratch("summary");
+    let (pure, writes) = (root_pokes("0", "Int64"), root_pokes("bump()", "Int64"));
+    let got = drift(
+        &dir,
+        STATE,
+        &[
+            &[("a.vyrn", A_SORTS_FOR_A_CALLBACK), ("main.vyrn", &pure)],
+            &[("main.vyrn", &writes)],
+            &[("main.vyrn", &pure)],
         ],
     );
     let _ = std::fs::remove_dir_all(&dir);
