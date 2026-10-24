@@ -329,6 +329,16 @@ pub enum Arg {
 }
 
 impl Arg {
+    /// The name the argument reads or writes through; `None` for a literal
+    /// and for module state.
+    pub fn root(&self) -> Option<Name> {
+        match self {
+            Arg::Val(Val::Name(n)) => Some(*n),
+            Arg::Val(Val::Lit(_)) => None,
+            Arg::Place(p) => p.root(),
+        }
+    }
+
     pub fn val(&self) -> Option<&Val> {
         match self {
             Arg::Val(v) => Some(v),
@@ -948,6 +958,15 @@ impl Rhs {
 }
 
 impl Place {
+    /// The name the place is rooted in; `None` for module state.
+    pub fn root(&self) -> Option<Name> {
+        match self {
+            Place::Name(n) => Some(*n),
+            Place::Field(b, _) | Place::Elem(b, _) | Place::Key(b, _) => b.root(),
+            Place::Global(_) => None,
+        }
+    }
+
     fn operands(&self, f: &mut dyn FnMut(&Val, Use)) {
         match self {
             Place::Name(n) => f(&Val::Name(*n), Use::Root),
@@ -1042,6 +1061,9 @@ pub struct Body {
     /// row before each return states it, and a direct caller assumes it
     /// over its arguments.
     pub ensures: Option<check::Ensures>,
+    /// Each `let` binding with a `where` clause, in source order, and its
+    /// promise.
+    pub promises: Vec<(Name, check::Promise)>,
     pub stmts: Vec<St>,
     /// The bodies of the lambdas this body holds, each its own frame: its
     /// parameters and captures are borrowed inputs, and the plan keys its

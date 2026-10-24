@@ -1,0 +1,16 @@
+/// Row `where-let`. A `let` clause the flow cannot prove is a check after
+/// the write, with the binding's own wording.
+
+fn left(xs: Array<Int64>) -> Int64 {
+    let mut d: Int64 where value >= 0 = 5
+    for x in xs {
+        d = d - x
+    }
+    return d
+}
+
+fn main() -> Int64 {
+    print(left([1, 2]).toString())
+    print(left([9]).toString())
+    return 0
+}

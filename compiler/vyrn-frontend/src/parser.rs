@@ -2761,6 +2761,7 @@ impl Parser {
                 name: b.name.clone(),
                 mutable: false,
                 ty: None,
+                clause: None,
                 value: m,
                 line,
                 col: b.col,
@@ -2794,6 +2795,13 @@ impl Parser {
                 } else {
                     None
                 };
+                let clause = match (&ty, self.peek()) {
+                    (Some(_), Tok::Where) => {
+                        self.advance();
+                        Some(self.expr()?)
+                    }
+                    _ => None,
+                };
                 self.eat(&Tok::Eq)?;
                 let value = self.expr()?;
                 self.eat_semi();
@@ -2802,6 +2810,7 @@ impl Parser {
                     name,
                     mutable,
                     ty,
+                    clause,
                     value,
                     line,
                     col,

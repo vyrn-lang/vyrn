@@ -1,0 +1,4 @@
+fn main() -> Int64 {
+    let mut i: Int64 where value * 2 > 0 = 1
+    return i
+}

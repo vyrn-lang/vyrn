@@ -13,7 +13,8 @@
 //! it. A clause check is the exception: it runs where it stands, over names
 //! the call reads after it ([`Guard::Clause`]). A function's result clause
 //! is a clause check before each `return`, and at the end of a body that
-//! falls off it ([`Body::ensures`]).
+//! falls off it ([`Body::ensures`]). A `let`'s clause is a clause check after
+//! each row that writes its binding ([`Body::promises`]).
 //!
 //! One runtime check is one row. A store that puts a taken element back into
 //! the place it was taken from (`a[i].push(v)`: `take a[i]`, the call, the
@@ -26,7 +27,7 @@ use vyrn_frontend::prelude::Indexes;
 use vyrn_frontend::trap::Rule;
 
 use vyrn_frontend::core::check::{scalar_arg, Check, Guard, Raises, Site, Verdict, Why};
-use vyrn_frontend::core::{Arg, Body, Callee, Op, Place, Rhs, St, Val};
+use vyrn_frontend::core::{Arg, Body, Callee, Name, Op, Place, Rhs, St, Val};
 
 /// What a build does with its check rows, from the environment variable
 /// `VYRN_CHECKS`, which this function alone reads.
@@ -127,6 +128,7 @@ fn list(body: &Body, tys: &Types<'_>, ss: &mut Vec<St>, lines: &mut BTreeMap<usi
         for (rule, guard) in guards {
             out.push(St::Check(row(lines, line, rule, guard)));
         }
+        let kept = promised(body, &s);
         match &mut s {
             St::If { then, els, .. } => {
                 list(body, tys, then, lines);
@@ -141,8 +143,41 @@ fn list(body: &Body, tys: &Types<'_>, ss: &mut Vec<St>, lines: &mut BTreeMap<usi
             _ => {}
         }
         out.push(s);
+        for guard in kept {
+            out.push(St::Check(row(lines, line, Raises::Let, guard)));
+        }
     }
     *ss = out;
+}
+
+/// The check of each promise with comparisons whose binding the row `s`
+/// writes: binds, stores into, or hands a call to modify.
+fn promised(body: &Body, s: &St) -> Vec<Guard> {
+    if body.promises.iter().all(|(_, p)| p.atoms.is_empty()) {
+        return Vec::new();
+    }
+    let modified = |rhs: &Rhs| match rhs {
+        Rhs::Call { args, .. } => (args.iter())
+            .filter(|(_, cap)| *cap == Capability::Modify)
+            .filter_map(|(a, _)| a.root())
+            .collect(),
+        _ => Vec::new(),
+    };
+    let wrote: Vec<Name> = match s {
+        St::Let(n, rhs) => [*n].into_iter().chain(modified(rhs)).collect(),
+        St::Do { rhs, .. } => modified(rhs),
+        St::Store { place, .. } => place.root().into_iter().collect(),
+        _ => Vec::new(),
+    };
+    (body.promises.iter())
+        .filter(|(n, p)| !p.atoms.is_empty() && wrote.contains(n))
+        .map(|(n, p)| Guard::Clause {
+            atoms: (p.atoms.iter())
+                .filter_map(|a| a.with(&|_| Some(Val::Name(*n))))
+                .collect(),
+            says: p.says.clone(),
+        })
+        .collect()
 }
 
 /// A kept check row of `guard` on `line`, numbered after the line's others.

@@ -32,6 +32,7 @@ use vyrn_frontend::project::is_place_read;
 use crate::kernel::{MissingKind, Root};
 use crate::world::{Fns, Stated};
 use crate::{Instance, NodeTypes, OutsideBody, World};
+use vyrn_frontend::core::check::Promise;
 use vyrn_frontend::core::{
     count_reads, names_in, rows, Arg, Arm, Body, BorrowKind, Callee, Cand, Copied, Ctor, Facts,
     Lit, Name, NameInfo, NotOwned, Old, Op, Opaque, Payload, Place, Rhs, Site, St, Target, Test,
@@ -1512,6 +1513,7 @@ impl<'a> Builder<'a> {
                 params: Vec::new(),
                 assumes: Vec::new(),
                 ensures: None,
+                promises: Vec::new(),
                 stmts: Vec::new(),
                 lambdas: Vec::new(),
                 cands: Vec::new(),
@@ -3102,16 +3104,26 @@ impl<'a> Builder<'a> {
                 line,
                 ty: annotation,
                 mutable,
+                clause,
                 ..
-            } => self.bind_let(
-                Some(s),
-                name,
-                value,
-                annotation.as_ref(),
-                *mutable,
-                *line,
-                out,
-            )?,
+            } => {
+                self.bind_let(
+                    Some(s),
+                    name,
+                    value,
+                    annotation.as_ref(),
+                    *mutable,
+                    *line,
+                    out,
+                )?;
+                // A clause the checker refused states nothing.
+                if let (Some(_), Some(n)) = (clause, self.lookup(name)) {
+                    let (decls, orders) = (self.proto.types(), &self.program.orders);
+                    if let Ok(Some(p)) = Promise::of(s, self.bounds, decls, orders) {
+                        self.body.promises.push((n, p));
+                    }
+                }
+            }
             Stmt::Assign {
                 name,
                 value,
@@ -5425,6 +5437,7 @@ impl<'a> Builder<'a> {
                 params: Vec::new(),
                 assumes: Vec::new(),
                 ensures: None,
+                promises: Vec::new(),
                 stmts: Vec::new(),
                 lambdas: Vec::new(),
                 cands: Vec::new(),

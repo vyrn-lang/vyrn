@@ -313,7 +313,10 @@ clause and no `before`, cost no allocation. The walk reads a body's rows:
 an empty array literal, a move or store, `@push` (its obligation), `@pop`
 and its `Option` switch, `@copy`, a `before` call and the `if` on its
 answer, and calls with their requirements and guarantees. Any other write
-drops the facts of the array it writes. A loop's head is the greatest state
+drops the facts of the array it writes. A `let`'s promise
+(`core::check::Promise`, in `Body::promises`) is judged at each row that
+writes its binding, and its comparisons are clause rows after each such
+write (`vyrn_lower::check`). A loop's head is the greatest state
 that holds at entry and after every turn, within `fact_flow::ROUNDS` rounds.
 No later pass reads a fact, and the check prover takes none as a premise.
 

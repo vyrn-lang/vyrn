@@ -1,0 +1,13 @@
+import { Asc, sort } from "std/order"
+
+fn grow(raw: consume Array<Int64>, more: Array<Int64>) -> Int64 {
+    let mut ys: Array<Int64> where sorted<Asc<Int64>>(value) = sort<Asc<Int64>>(raw)
+    for x in more {
+        ys.push(x)
+    }
+    return ys.length
+}
+
+fn main() -> Int64 {
+    return grow([3, 1], [2])
+}

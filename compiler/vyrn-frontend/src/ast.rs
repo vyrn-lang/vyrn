@@ -1490,11 +1490,13 @@ impl At<'_> {
 /// an [`Expr::Match`] whose position the checker reads.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Stmt {
-    /// `let [mut] name [: Type] = value`.
+    /// `let [mut] name [: Type [where clause]] = value`. The clause is a
+    /// promise ([`crate::core::check::Promise`]).
     Let {
         name: String,
         mutable: bool,
         ty: Option<Type>,
+        clause: Option<Expr>,
         value: Expr,
         line: usize,
         /// See [`Binder::col`].
@@ -1944,6 +1946,7 @@ impl Stmt {
             name: name.into(),
             mutable: false,
             ty: None,
+            clause: None,
             value,
             line,
             col: 0,

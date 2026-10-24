@@ -1,0 +1,2 @@
+a_push_may_break_a_let_promise.vyrn:8:0: the push on line 8 may break the promise of `ps` on line 6, `sorted<Asc<Person, age>>(value)`
+  fix: drop the promise first: `let mut ys: Array<Person> = ps`

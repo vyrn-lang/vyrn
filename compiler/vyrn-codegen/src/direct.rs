@@ -6456,7 +6456,7 @@ impl<'p> Fn_<'_, 'p> {
                 // A kept `where` check traps inside its type's constructor
                 // ([`Fn_::core_rule_check`]), and a kept clause check prints
                 // its sentence ([`Fn_::clause_check`]).
-                Raises::Where | Raises::Clause | Raises::Result => {
+                Raises::Where | Raises::Clause | Raises::Result | Raises::Let => {
                     b.ins(&Instruction::Unreachable);
                 }
             },

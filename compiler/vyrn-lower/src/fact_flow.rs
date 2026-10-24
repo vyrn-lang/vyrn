@@ -21,7 +21,10 @@
 //! after every turn (Houdini).
 //!
 //! The walk refuses only where a fact is needed: at a call whose parameter
-//! clause requires it, and at a return the result clause guarantees it of.
+//! clause requires it, at a return the result clause guarantees it of, and
+//! at a write of a binding whose `let` promises it ([`Body::promises`]): the
+//! `let` itself, a store into the binding or a place under it, and a call
+//! that modifies it. A binding without a promise loses its facts silently.
 //! The sentence names the row that dropped the fact, where one did.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -53,8 +56,7 @@ pub(crate) struct Facts<'a> {
 impl<'a> Facts<'a> {
     /// The facts of `program`, whose function table is `fns`, once `_after`
     /// shows the effect judgment ran. `None`, with nothing allocated, for a
-    /// program that links no `std/order`, or that states no fact and declares
-    /// no `before`.
+    /// program that links no `std/order`.
     pub(crate) fn of(
         program: &'a Program,
         fns: &'a Fns,
@@ -79,9 +81,6 @@ impl<'a> Facts<'a> {
         }
         let before = orders.name(Known::Before);
         let before = (program.functions.iter()).position(|f| Some(f.name.as_str()) == before);
-        if clauses.is_empty() && before.is_none() {
-            return None;
-        }
         Some(Facts {
             program,
             clauses,
@@ -93,8 +92,8 @@ impl<'a> Facts<'a> {
     /// Appends the refusals of `top` and of its lambdas to `out`. `top` is
     /// the instance of `program.functions[decl]` at `subst`, or a body no
     /// function declares where `decl` is `None`. Allocates nothing for a body
-    /// that calls no function with a fact clause and no `before`, and whose
-    /// own result clause states no fact.
+    /// that calls no function with a fact clause and no `before`, whose own
+    /// result clause states no fact, and whose `let`s promise none.
     pub(crate) fn judge(
         &self,
         decl: Option<FnId>,
@@ -106,7 +105,7 @@ impl<'a> Facts<'a> {
             Some((r, g)) => (&r[..], &g[..]),
             None => (&[][..], &[][..]),
         };
-        if own.is_empty() && !self.calls(top) {
+        if own.is_empty() && !self.calls(top) && !promises(top) {
             return;
         }
         let subst: HashMap<String, Type> = subst.clone().into_iter().collect();
@@ -169,6 +168,11 @@ impl<'a> Facts<'a> {
         };
         any(&top.stmts, &fact) || top.lambdas.iter().any(|l| self.calls(l))
     }
+}
+
+/// Whether a `let` of `b` or of its lambdas promises a fact.
+fn promises(b: &Body) -> bool {
+    b.promises.iter().any(|(_, p)| !p.facts.is_empty()) || b.lambdas.iter().any(promises)
 }
 
 /// Whether a row of `ss`, or a row under one, satisfies `p`.
@@ -512,6 +516,7 @@ impl Judge<'_> {
             St::Let(n, rhs) => {
                 let line = self.body.names[n.index()].line;
                 self.rhs(&mut st, Some(*n), rhs, line);
+                self.keeps(&mut st, *n, line);
                 st
             }
             St::Do { rhs, line, .. } => {
@@ -531,10 +536,12 @@ impl Judge<'_> {
                         if had && !st.held.contains_key(x) {
                             st.lost.insert(*x, (Write::Store, *line));
                         }
+                        self.keeps(&mut st, *x, *line);
                     }
                     p => {
-                        if let Some(r) = root(p) {
+                        if let Some(r) = p.root() {
                             st.lose(r, Write::Store, *line);
+                            self.keeps(&mut st, r, *line);
                         }
                     }
                 }
@@ -698,12 +705,10 @@ impl Judge<'_> {
                 (Callee::Reserved, "@copy", [(Arg::Val(Val::Name(xs)), _)], Some(t)) => {
                     st.copy(*xs, t)
                 }
-                (Callee::Builtin, "@pop", [(xs, _)], Some(t)) => {
-                    match (arg_root(xs), some_tag(rhs)) {
-                        (Some(xs), Some(some)) => self.pop(st, xs, t, some),
-                        _ => self.writes(st, args, line),
-                    }
-                }
+                (Callee::Builtin, "@pop", [(xs, _)], Some(t)) => match (xs.root(), some_tag(rhs)) {
+                    (Some(xs), Some(some)) => self.pop(st, xs, t, some),
+                    _ => self.writes(st, args, line),
+                },
                 (Callee::Fn(g), _, _, _) => {
                     match self.facts.fns.declaration(self.facts.program, *g) {
                         // An instance's row holds its type arguments; a call
@@ -835,7 +840,7 @@ impl Judge<'_> {
                 strict: r.fact.word == Word::Strict,
                 order,
             };
-            let Some(a) = args.get(r.param).and_then(|(a, _)| arg_root(a)) else {
+            let Some(a) = args.get(r.param).and_then(|(a, _)| a.root()) else {
                 continue;
             };
             if !self.holds(st, a, want) {
@@ -861,10 +866,13 @@ impl Judge<'_> {
     /// facts, and forgets a consumed name.
     fn writes(&mut self, st: &mut State, args: &[(Arg, Capability)], line: usize) {
         for (a, cap) in args {
-            let Some(r) = arg_root(a) else { continue };
+            let Some(r) = a.root() else { continue };
             match cap {
                 Capability::Read => {}
-                Capability::Modify => st.lose(r, Write::Call, line),
+                Capability::Modify => {
+                    st.lose(r, Write::Call, line);
+                    self.keeps(st, r, line);
+                }
                 Capability::Consume => st.kill(r),
             }
         }
@@ -899,6 +907,43 @@ impl Judge<'_> {
                 None => rule!(ResultFactMissing, name, word, order),
             };
             self.refused.push((line, rule));
+        }
+    }
+
+    /// Refuses the write on `line` of `n` where it may break a fact the `let`
+    /// of `n` promises, and then holds the fact, so a later write is judged
+    /// on its own.
+    fn keeps(&mut self, st: &mut State, n: Name, line: usize) {
+        let body = self.body;
+        for (_, p) in body.promises.iter().filter(|(m, _)| *m == n) {
+            for f in &p.facts {
+                let Some(order) = self.order_of(&f.order, &[]) else {
+                    continue;
+                };
+                let want = Held {
+                    strict: f.word == Word::Strict,
+                    order,
+                };
+                if self.holds(st, n, want) {
+                    continue;
+                }
+                let lost = st.lost.remove(&n);
+                st.held.entry(n).or_default().insert(want);
+                if !self.record {
+                    continue;
+                }
+                let (name, word) = (body.spoken(n).into_owned(), f.word.spelled());
+                let order = Type::Order(Box::new(self.orders[order].clone()));
+                let rule = match lost {
+                    Some((w, at)) => {
+                        let ty = body.names[n.index()].ty.clone();
+                        let (write, line) = (w.word(), p.line);
+                        rule!(PromiseBroken, write, at, name, line, word, order, ty)
+                    }
+                    None => rule!(PromiseMissing, name, word, order),
+                };
+                self.refused.push((line, rule));
+            }
         }
     }
 
@@ -965,23 +1010,5 @@ fn some_tag(rhs: &Rhs) -> Option<u64> {
     match (full.next(), full.next()) {
         (Some((i, _)), None) => Some(i),
         _ => None,
-    }
-}
-
-/// The name a place is rooted in.
-fn root(p: &Place) -> Option<Name> {
-    match p {
-        Place::Name(n) => Some(*n),
-        Place::Field(b, _) | Place::Elem(b, _) | Place::Key(b, _) => root(b),
-        Place::Global(_) => None,
-    }
-}
-
-/// The name an argument reads or writes.
-fn arg_root(a: &Arg) -> Option<Name> {
-    match a {
-        Arg::Val(Val::Name(n)) => Some(*n),
-        Arg::Val(Val::Lit(_)) => None,
-        Arg::Place(p) => root(p),
     }
 }

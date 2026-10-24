@@ -1,0 +1,4 @@
+a_store_and_a_modify_call_may_break_a_promise.vyrn:9:0: the store on line 9 may break the promise of `ys` on line 8, `sorted<Asc<Int64>>(value)`
+  fix: drop the promise first: `let mut ys: Array<Int64> = ys`
+a_store_and_a_modify_call_may_break_a_promise.vyrn:10:0: the call on line 10 may break the promise of `ys` on line 8, `sorted<Asc<Int64>>(value)`
+  fix: drop the promise first: `let mut ys: Array<Int64> = ys`

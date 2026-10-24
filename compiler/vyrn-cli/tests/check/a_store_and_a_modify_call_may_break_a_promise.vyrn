@@ -1,0 +1,12 @@
+import { Asc, sort } from "std/order"
+
+fn bump(xs: modify Array<Int64>) {
+    xs.push(0)
+}
+
+fn main() -> Int64 {
+    let mut ys: Array<Int64> where sorted<Asc<Int64>>(value) = sort<Asc<Int64>>([3, 1])
+    ys[0] = 9
+    bump(ys)
+    return ys.length
+}

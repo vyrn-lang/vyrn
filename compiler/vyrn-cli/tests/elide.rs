@@ -195,6 +195,44 @@ export fn get(xs: Array<Int64>, i: Int64) -> Int64 {
     );
 }
 
+/// A `let` clause is a check after each write of its binding: proved where
+/// the flow shows it, kept and trapping where it does not.
+#[test]
+fn a_let_clause_is_a_check_after_each_write() {
+    let src = "fn left(xs: Array<Int64>) -> Int64 {
+    let mut i: Int64 where value >= 0 = 0
+    let mut d: Int64 where value >= 0 = 5
+    while i < xs.length {
+        i = i + 1
+        d = d - xs[i - 1]
+    }
+    return i + d
+}
+";
+    let rows = [
+        "proved where-let",
+        "proved where-let",
+        "proved where-let",
+        "proved array-index",
+        "check where-let",
+    ];
+    assert_eq!(verdicts(src, "left"), rows);
+    let (err, rows) = oracle(src, "    print(left([9]).toString())", "left");
+    assert_eq!(
+        (err.as_str(), rows),
+        (
+            "error: validation failed for the `where` clause of `d`\n",
+            vec![
+                "2 0 where-let proved 1".to_string(),
+                "3 0 where-let proved 1".to_string(),
+                "5 0 where-let proved 1".to_string(),
+                "6 0 array-index proved 1".to_string(),
+                "6 1 where-let kept 1".to_string(),
+            ]
+        )
+    );
+}
+
 #[test]
 fn the_oracle_counts_each_run_of_a_check_row() {
     let src = "fn get(xs: Array<Int64>, i: Int64) -> Int64 {\n    return xs[i]\n}\n";

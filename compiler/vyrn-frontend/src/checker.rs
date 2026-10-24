@@ -3198,11 +3198,15 @@ impl<'a> Checker<'a> {
                 value,
                 line,
                 col,
-                id: _,
+                ..
             } => {
                 if let Some(declared) = ty {
                     self.ensure_type_exists(declared, *line)?;
                 }
+                let frame = self.frame.borrow();
+                crate::core::check::Promise::of(stmt, Some(&frame.bounds), self, self.orders)
+                    .map_err(|(line, rule)| cerr!(line; rule))?;
+                drop(frame);
                 let vty = self.expr(value, scope, ty.as_ref(), Some(ret))?;
                 // The typed judgment refuses a value its slot does not take,
                 // and a Unit bound to a name.
