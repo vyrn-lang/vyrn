@@ -1,0 +1,1 @@
+an_array_sorted_by_another_order_cannot_be_searched.vyrn:6:0: `lowerBound` needs `s` sorted by `Asc<Int64>`, and it is sorted by `Desc<Asc<Int64>>`

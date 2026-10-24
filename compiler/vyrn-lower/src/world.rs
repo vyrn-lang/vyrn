@@ -100,7 +100,7 @@ pub struct FnRow {
 /// A worker reads the table and adds no row.
 #[derive(Default)]
 pub struct Fns {
-    rows: Vec<FnRow>,
+    pub(crate) rows: Vec<FnRow>,
     /// The first row under each name. A non-generic instance and its frame
     /// are the function's own row.
     ids: HashMap<String, FnId>,

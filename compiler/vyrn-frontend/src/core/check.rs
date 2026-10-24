@@ -223,15 +223,144 @@ pub fn clauses(
                 "it takes a `fn` parameter, which a call binds apart from its arguments",
             ));
         }
+        let mut atoms = Vec::new();
+        conjuncts(f, Of::Param(k), e, decls, &mut atoms, &mut Vec::new())
+            .map_err(|r| (p.line, r))?;
+        // A fact holds of the argument the call proved it of, whatever the
+        // body does with it; a comparison must hold for the whole call.
+        if atoms.is_empty() {
+            continue;
+        }
         if p.capability != Capability::Read {
             let (param, cap) = (p.name.as_str(), p.capability.word());
             return Err((p.line, rule!(ClauseChanges, param, name = param, cap)));
         }
-        let mut atoms = Vec::new();
-        conjuncts(f, Of::Param(k), e, decls, &mut atoms).map_err(|r| (p.line, r))?;
         out.push((k, atoms));
     }
     Ok(out)
+}
+
+/// Which fact a fact clause states of a sequence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Word {
+    /// `sorted<O>(value)`: no value is before the one ahead of it under `O`.
+    Sorted,
+    /// `strict<O>(value)`: each value is before the next under `O`.
+    Strict,
+}
+
+impl Word {
+    /// The fact word a clause call spells, if its name is one.
+    pub(crate) fn of(name: &str) -> Option<Word> {
+        match name {
+            "sorted" => Some(Word::Sorted),
+            "strict" => Some(Word::Strict),
+            _ => None,
+        }
+    }
+
+    pub fn spelled(self) -> &'static str {
+        match self {
+            Word::Sorted => "sorted",
+            Word::Strict => "strict",
+        }
+    }
+}
+
+/// A fact of a sequence under an order: the order as the declaration writes
+/// it, a [`Type::Order`] or a type parameter bound by `Order`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct Fact {
+    pub word: Word,
+    pub order: Type,
+}
+
+/// What a parameter's fact clause requires of the argument. Every call
+/// proves it; nothing checks it at run time.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Requirement {
+    pub param: usize,
+    pub fact: Fact,
+}
+
+/// What a result's fact clause guarantees of the result. The body
+/// establishes it at every return.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Guarantee(pub Fact);
+
+/// The facts the parameters' clauses of `f` require, in parameter order.
+/// The error is the line and the rule the checker refuses the first bad
+/// fact with.
+pub fn requirements(
+    f: &Function,
+    decls: &dyn Decls,
+    orders: &crate::order::Names,
+) -> Result<Vec<Requirement>, (usize, crate::rules::Rule)> {
+    let mut out = Vec::new();
+    for (k, p) in f.params.iter().enumerate() {
+        let Some(e) = &p.clause else { continue };
+        for fact in facts(f, Of::Param(k), e, decls, orders).map_err(|r| (p.line, r))? {
+            out.push(Requirement { param: k, fact });
+        }
+    }
+    Ok(out)
+}
+
+/// The facts the result clause of `f` guarantees. The error is as
+/// [`requirements`]'s.
+pub fn guarantees(
+    f: &Function,
+    decls: &dyn Decls,
+    orders: &crate::order::Names,
+) -> Result<Vec<Guarantee>, (usize, crate::rules::Rule)> {
+    let Some(e) = &f.ret_clause else {
+        return Ok(Vec::new());
+    };
+    let line = e.line().max(f.line);
+    let facts = facts(f, Of::Result, e, decls, orders).map_err(|r| (line, r))?;
+    Ok(facts.into_iter().map(Guarantee).collect())
+}
+
+/// The facts the clause `e` of `of` states, each of an array of its order's
+/// element type.
+fn facts(
+    f: &Function,
+    of: Of,
+    e: &Expr,
+    decls: &dyn Decls,
+    orders: &crate::order::Names,
+) -> Result<Vec<Fact>, crate::rules::Rule> {
+    let mut calls = Vec::new();
+    conjuncts(f, of, e, decls, &mut Vec::new(), &mut calls)?;
+    let subject = match of {
+        Of::Param(k) => &f.params[k].ty,
+        Of::Result => &f.ret,
+    };
+    let bound = orders.name(crate::order::Known::Order);
+    let resolve = |t: &Type| crate::types::resolve(t, decls);
+    (calls.into_iter())
+        .map(|(word, order)| {
+            let elem = match &order {
+                Type::Order(o) => Some(o.elem().clone()),
+                Type::Param(p) => (f.type_bounds.get(p).into_iter().flatten())
+                    .any(|b| Some(b.as_str()) == bound)
+                    .then(|| Type::Elem(Box::new(order.clone()))),
+                _ => None,
+            };
+            let elem =
+                elem.ok_or_else(|| rule!(FactOrder, word = word.spelled(), ty = order.clone()))?;
+            match resolve(subject) {
+                Type::Array(e) if resolve(&e) == resolve(&elem) => Ok(Fact { word, order }),
+                ty => Err(rule!(
+                    FactSubject,
+                    word = word.spelled(),
+                    ty,
+                    order = order.clone(),
+                    elem
+                )),
+            }
+        })
+        .collect()
 }
 
 impl Ensures {
@@ -250,7 +379,10 @@ impl Ensures {
         };
         let line = e.line().max(f.line);
         let mut atoms = Vec::new();
-        conjuncts(f, Of::Result, e, decls, &mut atoms).map_err(|r| (line, r))?;
+        conjuncts(f, Of::Result, e, decls, &mut atoms, &mut Vec::new()).map_err(|r| (line, r))?;
+        if atoms.is_empty() {
+            return Ok(None);
+        }
         let says = crate::trap::result_clause(func).into();
         Ok(Some(Ensures { atoms, says, line }))
     }
@@ -291,20 +423,40 @@ impl Of {
 }
 
 /// Appends the comparisons of `e`, the clause `of` states in `f` or one of
-/// its `&&` operands.
+/// its `&&` operands, to `out`, and its fact words with their orders to
+/// `facts`. A fact word is only ever a conjunct: under `||` or `!` it is no
+/// comparison, and the clause is refused.
 fn conjuncts(
     f: &Function,
     of: Of,
     e: &Expr,
     decls: &dyn Decls,
     out: &mut Vec<Atom>,
+    facts: &mut Vec<(Word, Type)>,
 ) -> Result<(), crate::rules::Rule> {
+    if let Expr::Call {
+        name,
+        type_args,
+        args,
+        ..
+    } = e
+    {
+        if let Some(word) = Word::of(name) {
+            return match (type_args.as_slice(), args.as_slice()) {
+                ([o], [Expr::Var { name, .. }]) if name == "value" => {
+                    facts.push((word, o.clone()));
+                    Ok(())
+                }
+                _ => Err(rule!(FactForm, word = word.spelled())),
+            };
+        }
+    }
     let Expr::Binary { op, lhs, rhs, .. } = e else {
         return Err(of.form(f));
     };
     if *op == BinOp::And {
-        conjuncts(f, of, lhs, decls, out)?;
-        return conjuncts(f, of, rhs, decls, out);
+        conjuncts(f, of, lhs, decls, out, facts)?;
+        return conjuncts(f, of, rhs, decls, out, facts);
     }
     op.compare().ok_or_else(|| of.form(f))?;
     let (l, lt) = operand(f, of, lhs, decls)?;

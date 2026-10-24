@@ -1,7 +1,7 @@
 function	provenance	unknown because	hand label	verdict
 std/arrays map	identity pointwise		identity pointwise	agrees
 std/arrays filter	subsequence		subsequence	agrees
-std/arrays sortWith	permutation		permutation	agrees
+std/arrays sortWith	no core body		permutation	differs
 std/arrays sortBy	permutation		permutation	agrees
 std/bench sortedCopy	unknown	no order relates its indexes	permutation	differs
 std/graphql copyGqlErrs	identity pointwise		identity	differs

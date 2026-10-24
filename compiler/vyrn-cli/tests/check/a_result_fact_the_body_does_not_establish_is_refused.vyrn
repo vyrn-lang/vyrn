@@ -1,0 +1,10 @@
+import { Asc } from "std/order"
+
+fn mySort(xs: consume Array<Int64>) -> Array<Int64> where sorted<Asc<Int64>>(value) {
+    return xs
+}
+
+fn main() -> Int64 {
+    let xs: Array<Int64> = [3, 1, 2]
+    return mySort(xs).length
+}

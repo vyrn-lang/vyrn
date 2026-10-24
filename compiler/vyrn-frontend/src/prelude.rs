@@ -305,6 +305,11 @@ fn panic_type(_: &str, _: usize, _: &Type, t: &Type) -> Rule {
     rule!(PanicType, t)
 }
 
+/// `Elem<O>`, the element type of the order parameter `O`.
+fn elem_of_o() -> Type {
+    Type::Elem(Box::new(Type::Param("O".into())))
+}
+
 fn b(name: &'static str) -> Builtin {
     Builtin {
         name,
@@ -963,6 +968,19 @@ fn table() -> Vec<Builtin> {
             .spec(Spec::Effect(Int))
             .home("std/stream")
             .hover("boxStream(s) -> Int64 — move a stream into one heap box and answer its address; only `std/stream` may call it, to keep a wrapper's source"),
+        // `std/order`'s `before` is the one caller: the core lowers each call
+        // into the order's key reads and compares (`vyrn_lower::core`), so no
+        // engine sees it.
+        b(crate::order::BEFORE_BUILTIN)
+            .sig(row(
+                crate::order::BEFORE_BUILTIN,
+                &["O"],
+                &[("a", Read, elem_of_o()), ("b", Read, elem_of_o())],
+                Bool,
+                &[],
+            ))
+            .home(crate::order::SPEC)
+            .hover("orderBefore(a, b) -> Bool — whether `a` is strictly before `b` under the order `O`; `std/order`'s `before` is the one to call"),
         // Hands the stream to the host, which pulls and writes one encoded
         // frame at a time and `close`s it when a write fails. It is a builtin
         // because the stream escapes the call that made it.

@@ -315,6 +315,8 @@ impl Owned {
             | Type::Merge(..)
             | Type::Partial(_)
             | Type::Param(_)
+            | Type::Elem(_)
+            | Type::Order(_)
             | Type::Named(_)
             | Type::App(..) => None,
         }

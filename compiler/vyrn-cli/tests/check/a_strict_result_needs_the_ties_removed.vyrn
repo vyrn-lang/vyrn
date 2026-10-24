@@ -1,0 +1,21 @@
+import { Asc, Order, Elem } from "std/order"
+
+fn reversedTwice<O: Order>(
+    xs: consume Array<Elem<O>> where sorted<O>(value),
+) -> Array<Elem<O>> where strict<O>(value) {
+    let mut ys = xs
+    let mut down: Array<Elem<O>> = []
+    while let Some(x) = ys.pop() {
+        down.push(x)
+    }
+    let mut out: Array<Elem<O>> = []
+    while let Some(x) = down.pop() {
+        out.push(x)
+    }
+    return out
+}
+
+fn main() -> Int64 {
+    let xs: Array<Int64> = []
+    return reversedTwice<Asc<Int64>>(xs).length
+}

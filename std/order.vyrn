@@ -1,0 +1,185 @@
+/// Orders, the comparison under one, and the functions that sort by one.
+/// `Asc`, `Desc`, `Then`, `Elem`, `Order` and `before` are compiler-known:
+/// an order is a type, never a value, and only these three make one.
+
+/// The ascending order of `T`: by each named field in turn, or by `T`'s own
+/// value with no field. `Asc<Person, age>` orders people by age. A key is
+/// an integer, a `Bool` or a `String`; `String`s compare bytewise.
+export type Asc<T> = Never
+
+/// The order `O` reversed.
+export type Desc<O> = Never
+
+/// The order `A`, then `B` among the values `A` ties. `A` and `B` order one
+/// type.
+export type Then<A, B> = Never
+
+/// The type the order `O` compares: `Elem<Asc<Person, age>>` is `Person`.
+export type Elem<O> = Never
+
+/// The bound of a type parameter that stands for an order. `Asc`, `Desc` and
+/// `Then` satisfy it, and nothing else does.
+export protocol Order {}
+
+/// Whether `a` is strictly before `b` under `O`. Two values tie under `O`
+/// when neither is before the other.
+export fn before<O: Order>(a: Elem<O>, b: Elem<O>) -> Bool {
+    return orderBefore<O>(a, b)
+}
+
+/// `xs` sorted by `O`, stably: values that tie keep their order. An
+/// insertion sort, quadratic in the length.
+export fn sort<O: Order>(xs: consume Array<Elem<O>>) -> Array<Elem<O>> where sorted<O>(value) {
+    let mut out: Array<Elem<O>> = []
+    // What `out` held above `x`, largest first; empty between inserts.
+    let mut above: Array<Elem<O>> = []
+    for x in consume xs {
+        while let Some(y) = out.pop() {
+            if before<O>(x, y) {
+                above.push(y)
+            } else {
+                out.push(y)
+                break
+            }
+        }
+        out.push(x)
+        while let Some(y) = above.pop() {
+            out.push(y)
+        }
+    }
+    return out
+}
+
+/// The sorted `xs` with `v` inserted after every value it is not before.
+export fn insertSorted<O: Order>(
+    xs: consume Array<Elem<O>> where sorted<O>(value),
+    v: consume Elem<O>,
+) -> Array<Elem<O>> where sorted<O>(value) {
+    let mut ys = xs
+    // What `ys` held above `v`, largest first.
+    let mut above: Array<Elem<O>> = []
+    while let Some(x) = ys.pop() {
+        if before<O>(v, x) {
+            above.push(x)
+        } else {
+            ys.push(x)
+            break
+        }
+    }
+    ys.push(v)
+    while let Some(x) = above.pop() {
+        ys.push(x)
+    }
+    return ys
+}
+
+/// The sorted `a` and `b` as one sorted array. Of two values that tie, `a`'s
+/// comes first.
+export fn mergeSorted<O: Order>(
+    a: consume Array<Elem<O>> where sorted<O>(value),
+    b: consume Array<Elem<O>> where sorted<O>(value),
+) -> Array<Elem<O>> where sorted<O>(value) {
+    let mut xs = a
+    let mut ys = b
+    // The merge, largest first.
+    let mut down: Array<Elem<O>> = []
+    while true {
+        if let Some(x) = xs.pop() {
+            if let Some(y) = ys.pop() {
+                if before<O>(y, x) {
+                    ys.push(y)
+                    down.push(x)
+                } else {
+                    xs.push(x)
+                    down.push(y)
+                }
+            } else {
+                down.push(x)
+            }
+        } else if let Some(y) = ys.pop() {
+            down.push(y)
+        } else {
+            break
+        }
+    }
+    let mut out: Array<Elem<O>> = []
+    while let Some(x) = down.pop() {
+        out.push(x)
+    }
+    return out
+}
+
+/// The sorted `xs` with each run of values that tie under `O` cut to its
+/// first.
+export fn dedupSorted<O: Order>(
+    xs: consume Array<Elem<O>> where sorted<O>(value),
+) -> Array<Elem<O>> where strict<O>(value) {
+    let mut ys = xs
+    // The values kept, largest first.
+    let mut down: Array<Elem<O>> = []
+    while let Some(x) = ys.pop() {
+        if let Some(d) = down.pop() {
+            if before<O>(x, d) {
+                down.push(d)
+            }
+        }
+        down.push(x)
+    }
+    let mut out: Array<Elem<O>> = []
+    while let Some(x) = down.pop() {
+        out.push(x)
+    }
+    return out
+}
+
+/// The first position in the sorted `xs` whose value `v` is not after: the
+/// count of values before `v`. Binary search.
+export fn lowerBound<O: Order>(
+    xs: Array<Elem<O>> where sorted<O>(value),
+    v: Elem<O>,
+) -> Int64 where value >= 0 && value <= xs.length {
+    let mut lo = 0
+    let mut hi = xs.length
+    while lo < hi {
+        let m = lo + (hi - lo) / 2
+        if before<O>(xs[m], v) {
+            lo = m + 1
+        } else {
+            hi = m
+        }
+    }
+    return lo
+}
+
+test "sort orders integers stably both ways" {
+    let xs: Array<Int64> = [3, 1, 2, 1]
+    let up = sort<Asc<Int64>>(xs.copy())
+    assertEq(up[0], 1)
+    assertEq(up[1], 1)
+    assertEq(up[3], 3)
+    let down = sort<Desc<Asc<Int64>>>(xs)
+    assertEq(down[0], 3)
+    assertEq(down[3], 1)
+}
+
+test "mergeSorted and dedupSorted keep the order" {
+    let a: Array<Int64> = [1, 3, 5]
+    let b: Array<Int64> = [1, 2, 6]
+    let m = mergeSorted<Asc<Int64>>(sort<Asc<Int64>>(a), sort<Asc<Int64>>(b))
+    assertEq(m.length, 6)
+    assertEq(m[1], 1)
+    assertEq(m[2], 2)
+    assertEq(m[5], 6)
+    let d = dedupSorted<Asc<Int64>>(m)
+    assertEq(d.length, 5)
+    assertEq(d[0], 1)
+    assertEq(d[1], 2)
+}
+
+test "lowerBound finds the first value not before" {
+    let xs = sort<Asc<String>>(["e", "c", "a", "c"])
+    assertEq(lowerBound<Asc<String>>(xs, "c"), 1)
+    assertEq(lowerBound<Asc<String>>(xs, "d"), 3)
+    assertEq(lowerBound<Asc<String>>(xs, "z"), 4)
+    assertEq(lowerBound<Asc<String>>(xs, ""), 0)
+}

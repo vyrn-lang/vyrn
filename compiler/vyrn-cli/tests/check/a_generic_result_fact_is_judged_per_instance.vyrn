@@ -1,0 +1,10 @@
+import { Asc, Order, Elem } from "std/order"
+
+fn keep<O: Order>(xs: consume Array<Elem<O>>) -> Array<Elem<O>> where sorted<O>(value) {
+    return xs
+}
+
+fn main() -> Int64 {
+    let xs: Array<Int64> = [3, 1, 2]
+    return keep<Asc<Int64>>(xs).length
+}

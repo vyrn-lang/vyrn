@@ -1,0 +1,8 @@
+import { Asc } from "std/order"
+
+type Person = { name: String, age: Int64 }
+type ByHeight = Asc<Person, height>
+
+fn main() -> Int64 {
+    return 0
+}

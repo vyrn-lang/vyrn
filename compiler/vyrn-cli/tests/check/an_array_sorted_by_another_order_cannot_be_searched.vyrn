@@ -1,0 +1,7 @@
+import { Asc, Desc, sort, lowerBound } from "std/order"
+
+fn main() -> Int64 {
+    let xs: Array<Int64> = [3, 1, 2]
+    let s = sort<Desc<Asc<Int64>>>(xs)
+    return lowerBound<Asc<Int64>>(s, 2)
+}

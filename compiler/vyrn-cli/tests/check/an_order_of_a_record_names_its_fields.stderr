@@ -1,0 +1,1 @@
+an_order_of_a_record_names_its_fields.vyrn:4:0: `Asc<Person>` orders `Person` by its own value, and only an integer, a `Bool` or a `String` has one: name the fields to order by

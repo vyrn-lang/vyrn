@@ -751,6 +751,7 @@ fn generator_program(program: &Program, g: &str) -> Program {
         module_hashes: Default::default(),
         expansions: program.expansions.clone(),
         spellings: program.spellings.clone(),
+        orders: program.orders.clone(),
         session: program.session.clone(),
     }
 }

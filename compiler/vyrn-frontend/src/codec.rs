@@ -343,6 +343,11 @@ mod tests {
             Type::Lazy(b(Type::Int)),
             Type::Never,
             Type::Err,
+            Type::Order(Box::new(
+                crate::order::Order::asc(Type::Int, &[], &HashMap::<String, TypeDecl>::new())
+                    .expect("an integer orders by its value"),
+            )),
+            Type::Elem(b(Type::Param("O".into()))),
         ]
     }
 

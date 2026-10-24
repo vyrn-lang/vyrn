@@ -1,0 +1,1 @@
+a_fact_is_only_a_conjunct.vyrn:3:0: the `where` clause of parameter `xs` may compare only `value`, an earlier `read` parameter, the `.length`, `.byteLength` or integer field of one, and integer literals, of one integer type, joined by `&&`

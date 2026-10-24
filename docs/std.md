@@ -91,6 +91,7 @@ The compiler injects these declarations into every program, so a file names them
 | Module | Provides |
 |---|---|
 | `std/arrays` | `map`, `filter`, `fold`, `any`, `all`, `includes`, `sortWith` (a comparator), `sortBy` (an `Int64` key). |
+| `std/order` | Orders as types: `Asc<T, field..>`, `Desc<O>`, `Then<A, B>`, the `Order` bound and `Elem<O>`, the type an order compares. `before<O>(a, b)` compares under one. `sort`, `insertSorted`, `mergeSorted` and `dedupSorted` establish `sorted<O>` or `strict<O>` facts the flow proves, and `lowerBound` requires one. Each is an insertion or push-and-pop body, quadratic or linear, not in place. |
 | `std/columns` | `columns("./module")`, a generator: each exported record type `T` gets `TColumns`, one array per field under a `where` rule of equal lengths, with `tColumns(capacity)`, `pushT(c, v)` (an in-place push onto every column) and `tAt(c, i)`. `c.f[i]` reads and writes one field in place, and a loop bounded by `c.f.length` indexes every column with no check. |
 | `std/slots` | `Slots<T>` and `Handle<T>`: a generational slab. `insert`, `remove`, `get`, `alive`, `count`, `capacity`, `handles`. `s[h]` and `s[h] = v` index it, `for x in s` visits the live elements, and `s.tryAt(h)` reads in place. A stale or foreign handle is dead, never plausible. |
 | `std/stream` | `unfold(seed, step)` over a `Cursor` (`cursorGet`, `cursorSet`), and the lazy combinators `map`, `filter`, `take`, `merge`. Each takes a stream and returns one the caller must dispose. |

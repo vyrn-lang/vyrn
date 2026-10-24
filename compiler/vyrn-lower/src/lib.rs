@@ -12,6 +12,7 @@ pub mod check;
 pub mod core;
 pub mod effects;
 pub mod elide;
+mod fact_flow;
 pub mod facts;
 mod fixpoint;
 pub mod insight;

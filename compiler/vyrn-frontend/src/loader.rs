@@ -1410,6 +1410,7 @@ fn load_modules(
                     module_hashes: BTreeMap::new(),
                     expansions: Default::default(),
                     spellings: Default::default(),
+                    orders: Default::default(),
                     session: Default::default(),
                 },
                 import_targets: Vec::new(),
@@ -3687,6 +3688,24 @@ fn link(
     opts: &LoadOptions,
 ) -> Result<Program, Vec<Diagnostic>> {
     let mut errors: Vec<Diagnostic> = Vec::new();
+    // The key of `std/order`, whose declarations the compiler reads.
+    // The root's key may spell the file another way (`std/order.vyrn` run as
+    // the root of its own tests); only a root of that file name pays the
+    // path lookup.
+    let order_key = resolve_spec(crate::order::SPEC, root_key, opts)
+        .ok()
+        .map(|k| {
+            let file = |p: &str| {
+                std::path::Path::new(p)
+                    .file_name()
+                    .map(|f| f.to_os_string())
+            };
+            let named = file(root_key) == file(&k);
+            match named && same_file(root_key, &k, opts, &mut HashMap::new()) {
+                true => root_key.to_string(),
+                false => k,
+            }
+        });
     // Fold import aliases into the flat namespace first.
     let alias_span = crate::prof::phase("link: resolve_aliases");
     let spellings = resolve_aliases(&mut modules, &mut errors, root_key);
@@ -4141,6 +4160,8 @@ fn link(
     program.imports.clear(); // consumed
     program.module_hashes = module_hashes;
     program.spellings = std::sync::Arc::new(spellings);
+    let ours = |m: &Option<String>| order_key.as_deref() == Some(m.as_deref().unwrap_or(root_key));
+    program.orders = crate::order::Names::of(&program, &ours);
     drop_unreached(&mut program, lazy, named, &unparsed);
     program.number();
     Ok(program)

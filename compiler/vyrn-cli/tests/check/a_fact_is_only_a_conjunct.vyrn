@@ -1,0 +1,9 @@
+import { Asc } from "std/order"
+
+fn first(xs: Array<Int64> where sorted<Asc<Int64>>(value) || xs.length == 0) -> Int64 {
+    return xs.length
+}
+
+fn main() -> Int64 {
+    return 0
+}
