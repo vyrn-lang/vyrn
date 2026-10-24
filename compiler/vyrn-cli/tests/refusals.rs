@@ -486,6 +486,28 @@ fn census() -> Vec<Row> {
             "`f` argument 1 expects Handle<Person>, found Handle<Order>",
             Kernel::Elsewhere,
         ),
+        row(
+            "r68_a_result_clause_with_arithmetic.vyrn",
+            "a result clause compares single operands",
+            "the `where` clause on the result of `half` may compare only `value`, a `read` \
+             parameter, the `.length`, `.byteLength` or integer field of one, and integer \
+             literals, of one integer type, joined by `&&`",
+            Kernel::Elsewhere,
+        ),
+        row(
+            "r69_a_result_clause_names_no_parameter.vyrn",
+            "a result clause names only parameters",
+            "the `where` clause on the result of `clamp` names `hi`, which is no parameter of \
+             `clamp`",
+            Kernel::Elsewhere,
+        ),
+        row(
+            "r70_a_result_clause_names_a_modify_parameter.vyrn",
+            "a result clause reads only `read` parameters",
+            "the `where` clause on the result of `grow` reads `xs`, a `modify` parameter the \
+             body may change",
+            Kernel::Elsewhere,
+        ),
     ]
 }
 

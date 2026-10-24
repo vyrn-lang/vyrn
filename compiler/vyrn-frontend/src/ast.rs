@@ -723,6 +723,10 @@ pub struct Function {
     pub type_bounds: std::collections::HashMap<String, Vec<String>>,
     pub params: Vec<Param>,
     pub ret: Type,
+    /// `where ..` after the result type: a rule over `value`, the result,
+    /// and the `read` parameters, which a check at every return states and
+    /// every direct caller assumes ([`crate::core::check::ensures`]).
+    pub ret_clause: Option<Expr>,
     pub body: Block,
     pub line: usize,
     /// 1-based column of the NAME, in Unicode scalar values; `0` for a
@@ -762,6 +766,7 @@ impl Function {
             type_bounds: Default::default(),
             params,
             ret,
+            ret_clause: None,
             body: Block { id: Id::NEW, stmts },
             line: 0,
             col: 0,

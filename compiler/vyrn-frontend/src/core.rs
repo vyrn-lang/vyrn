@@ -1038,6 +1038,10 @@ pub struct Body {
     /// What every entry guarantees: the parameters' `where` clauses over
     /// their names. Each call row checks them ([`check::Guard::Clause`]).
     pub assumes: Vec<check::Atom>,
+    /// What every return guarantees: the result's `where` clause. A check
+    /// row before each return states it, and a direct caller assumes it
+    /// over its arguments.
+    pub ensures: Option<check::Ensures>,
     pub stmts: Vec<St>,
     /// The bodies of the lambdas this body holds, each its own frame: its
     /// parameters and captures are borrowed inputs, and the plan keys its

@@ -79,6 +79,11 @@ pub const ROWS: &[Row] = &[
         rule: "where-group",
         carriers: &[Carrier::Vyrn],
     },
+    // The emitter writes a result clause's check before each return.
+    Row {
+        rule: "where-result",
+        carriers: &[Carrier::Wasm],
+    },
     // The check over the bytes is `std/text`'s `stringFault`, which every engine
     // calls; each engine keeps only the build, which allocates.
     Row {

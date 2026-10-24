@@ -1,0 +1,7 @@
+// A result clause names `value` and the function's own parameters.
+fn clamp(n: Int64) -> Int64 where value <= hi {
+    return n
+}
+fn main() -> Int64 {
+    return clamp(4)
+}

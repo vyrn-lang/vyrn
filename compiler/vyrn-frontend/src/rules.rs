@@ -625,6 +625,16 @@ rules! {
         parameter the body may change";
     ClauseEntry { name, why }
         "`{name}` may not carry a `where` clause on a parameter: {why}";
+    ResultClauseForm { name }
+        "the `where` clause on the result of `{name}` may compare only `value`, a \
+        `read` parameter, the `.length`, `.byteLength` or integer field of one, and \
+        integer literals, of one integer type, joined by `&&`";
+    ResultClauseName { name, param }
+        "the `where` clause on the result of `{name}` names `{param}`, which is no \
+        parameter of `{name}`";
+    ResultClauseChanges { name, param, cap }
+        "the `where` clause on the result of `{name}` reads `{param}`, a `{cap}` \
+        parameter the body may change";
     ModifyNotMut { fname, arg, vn }
         "`{fname}` argument {arg} is `modify`, so `{vn}` must be \
         declared `mut`";
