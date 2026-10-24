@@ -23,6 +23,7 @@ pub mod loader;
 pub mod manifest;
 pub mod migrate;
 pub mod movecheck;
+pub mod order;
 pub mod origin;
 pub mod own;
 pub mod par;
@@ -124,8 +125,12 @@ pub fn check_and_synthesize(
 ) {
     let check_span = prof::phase("check");
     ctor::name_unions(program);
+    let unordered: Vec<diagnostics::Diagnostic> = (order::name(program).into_iter())
+        .map(|(line, r)| diagnostics::Diagnostic::refusal(line, 0, "check", r))
+        .collect();
     let ((mut diags, derived, mut refused), binders, record) =
         checker::check_accum_with_sites(program);
+    diags.splice(0..0, unordered);
     let mut record = Some(record);
     // What a `derive` generator writes joins the program and is checked
     // against it, so the second check's answers stand. The `where`

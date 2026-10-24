@@ -1183,6 +1183,10 @@ pub fn substitute(ty: &Type, subst: &HashMap<String, Type>) -> Type {
             Box::new(substitute(ret, subst)),
         ),
         Type::Lazy(inner) => Type::Lazy(Box::new(substitute(inner, subst))),
+        Type::Elem(o) => match substitute(o, subst) {
+            Type::Order(o) => o.elem().clone(),
+            o => Type::Elem(Box::new(o)),
+        },
         other => other.clone(),
     }
 }
@@ -2331,7 +2335,10 @@ pub fn solve_param(pty: &Type, aty: &Type, subst: &mut HashMap<String, Type>) {
         | Type::ConstInt(_)
         | Type::Logger
         | Type::Never
+        | Type::Order(_)
         | Type::Err => {}
+        // `Elem<O>` binds nothing: a call writes its order.
+        Type::Elem(_) => {}
     }
 }
 

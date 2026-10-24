@@ -1,0 +1,1 @@
+an_unsorted_array_cannot_be_searched.vyrn:5:0: `lowerBound` needs `xs` sorted by `Asc<Int64>`, and nothing shows it is

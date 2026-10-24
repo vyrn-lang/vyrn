@@ -170,7 +170,7 @@ fn union_decl(name: String, members: Vec<Type>, types: &dyn Decls) -> TypeDecl {
 pub fn name_unions(program: &mut Program) {
     // A program that writes no union pays one walk and no allocation.
     let mut seen = false;
-    each_written_type(program, &mut |t| seen |= matches!(t, Type::Union(_)));
+    each_written_type(program, &mut |t, _| seen |= matches!(t, Type::Union(_)));
     if !seen {
         return;
     }
@@ -203,7 +203,7 @@ pub fn name_unions(program: &mut Program) {
         }
     }
     let mut made: Vec<TypeDecl> = Vec::new();
-    each_written_type(program, &mut |t| {
+    each_written_type(program, &mut |t, _| {
         let Some(u) = (match t {
             Type::Union(ms) => canonical(ms),
             _ => None,
@@ -241,26 +241,35 @@ pub fn declared_unions(ty: &mut Type, types: &dyn Decls) {
 }
 
 /// Calls `f` on every type `program` writes, and on each part of it, outer
-/// first: a declaration's base, a signature, an annotation and a call's type
-/// arguments.
-fn each_written_type(program: &mut Program, f: &mut dyn FnMut(&mut Type)) {
+/// first, with the line of its site, 0 where the site has none: a
+/// declaration's base, a signature, an annotation, and a call's type
+/// arguments in a body or a clause.
+pub(crate) fn each_written_type(program: &mut Program, f: &mut dyn FnMut(&mut Type, usize)) {
     crate::body_scope_descent!(TypeSites, sites_block, sites_stmt, sites_expr, mut);
 
-    struct Sites<'f>(&'f mut dyn FnMut(&mut Type));
+    struct Sites<'f>(&'f mut dyn FnMut(&mut Type, usize));
 
     impl TypeSites for Sites<'_> {
         const SCOPED: bool = false;
 
         fn stmt(&mut self, s: &mut Stmt, _: &HashSet<String>) {
-            if let Stmt::Let { ty: Some(t), .. } = s {
-                crate::types::walk_type_mut(t, &mut self.0);
+            if let Stmt::Let {
+                ty: Some(t), line, ..
+            } = s
+            {
+                let line = *line;
+                crate::types::walk_type_mut(t, &mut |t| (self.0)(t, line));
             }
         }
 
         fn expr(&mut self, e: &mut Expr, _: &HashSet<String>) -> bool {
-            if let Expr::Call { type_args, .. } = e {
+            if let Expr::Call {
+                type_args, line, ..
+            } = e
+            {
+                let line = *line;
                 for t in type_args {
-                    crate::types::walk_type_mut(t, &mut self.0);
+                    crate::types::walk_type_mut(t, &mut |t| (self.0)(t, line));
                 }
             }
             true
@@ -268,38 +277,47 @@ fn each_written_type(program: &mut Program, f: &mut dyn FnMut(&mut Type)) {
     }
 
     let mut sites = Sites(f);
-    let walk = |t: &mut Type, sites: &mut Sites| crate::types::walk_type_mut(t, &mut sites.0);
+    let walk = |t: &mut Type, line: usize, sites: &mut Sites| {
+        crate::types::walk_type_mut(t, &mut |t| (sites.0)(t, line))
+    };
     for d in &mut program.type_decls {
-        walk(&mut d.base, &mut sites);
+        walk(&mut d.base, d.line, &mut sites);
     }
     let fns = (program.impls.iter_mut()).flat_map(|i| i.methods.iter_mut().chain(&mut i.places));
     for f in program.functions.iter_mut().chain(fns) {
         for p in &mut f.params {
-            walk(&mut p.ty, &mut sites);
+            walk(&mut p.ty, p.line, &mut sites);
+            if let Some(c) = &mut p.clause {
+                sites_expr(c, &mut HashSet::new(), &mut sites);
+            }
         }
-        walk(&mut f.ret, &mut sites);
+        walk(&mut f.ret, f.line, &mut sites);
+        if let Some(c) = &mut f.ret_clause {
+            sites_expr(c, &mut HashSet::new(), &mut sites);
+        }
         sites_block(&mut f.body, &mut HashSet::new(), &mut sites);
     }
     for i in &mut program.impls {
-        walk(&mut i.ty, &mut sites);
+        walk(&mut i.ty, 0, &mut sites);
     }
     for g in &mut program.globals {
+        let line = g.init.line();
         if let Some(t) = &mut g.ty {
-            walk(t, &mut sites);
+            walk(t, line, &mut sites);
         }
         sites_expr(&mut g.init, &mut HashSet::new(), &mut sites);
     }
     for m in program.protocols.iter_mut().flat_map(|p| &mut p.methods) {
         for t in m.params.iter_mut().chain(std::iter::once(&mut m.ret)) {
-            walk(t, &mut sites);
+            walk(t, 0, &mut sites);
         }
     }
     for m in program.contracts.iter_mut().flat_map(|c| &mut c.members) {
         match &mut m.kind {
-            ContractMemberKind::Value { ty, .. } => walk(ty, &mut sites),
+            ContractMemberKind::Value { ty, .. } => walk(ty, 0, &mut sites),
             ContractMemberKind::Fn { params, ret, .. } => {
                 for t in params.iter_mut().chain(std::iter::once(ret)) {
-                    walk(t, &mut sites);
+                    walk(t, 0, &mut sites);
                 }
             }
         }

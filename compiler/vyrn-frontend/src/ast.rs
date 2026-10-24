@@ -301,6 +301,9 @@ pub struct Program {
     pub expansions: std::sync::Arc<crate::project::Expansions>,
     /// How a sentence spells a declaration the loader renamed apart.
     pub spellings: std::sync::Arc<Spellings>,
+    /// The linked names of `std/order`'s compiler-known declarations, which
+    /// the loader records at the link.
+    pub orders: crate::order::Names,
     /// The session of the host that analyses this program. The loader stamps
     /// the load's; a parsed program has none.
     pub session: crate::session::SessionRef,
@@ -946,6 +949,13 @@ pub enum Type {
     Param(String),
     /// A generic named type applied to arguments, such as `Box<Int64>`.
     App(String, Vec<Type>),
+    /// An order of `std/order` in its normal form (`crate::order::name`). A
+    /// type argument only: no value has it.
+    Order(Box<crate::order::Order>),
+    /// `Elem<O>` of a type parameter `O`: the type the order compares, opaque
+    /// in the body as `O` is. A substitution that makes `O` an order makes
+    /// it the order's element type ([`crate::types::substitute`]).
+    Elem(Box<Type>),
     /// A growable heap array: `{ ptr data, i64 len, i64 cap }`.
     Array(Box<Type>),
     /// `Array<T, N>`: the value aggregate `[N x T]`, with no heap.
@@ -1008,7 +1018,9 @@ macro_rules! children {
             | Type::ArrayN(a, _)
             | Type::SmallArray(a, _)
             | Type::Omit(a, _)
+            | Type::Elem(a)
             | Type::Pick(a, _) => ($($ref_)+ [], $($ref_)+ [], $($ref_)+ [], [Some($($ref_)+ **a), None]),
+            Type::Order(o) => ($($ref_)+ [], $($ref_)+ [], $($ref_)+ [], [Some($($ref_)+ o.elem), None]),
             Type::Merge(a, b) | Type::Map(a, b) => {
                 ($($ref_)+ [], $($ref_)+ [], $($ref_)+ [], [Some($($ref_)+ **a), Some($($ref_)+ **b)])
             }
@@ -1165,6 +1177,8 @@ impl Type {
         "Enum",
         "Param",
         "App",
+        "Order",
+        "Elem",
         "Array",
         "ArrayN",
         "SmallArray",
@@ -1204,6 +1218,8 @@ impl Type {
             Type::Enum(_) => "Enum",
             Type::Param(_) => "Param",
             Type::App(..) => "App",
+            Type::Order(_) => "Order",
+            Type::Elem(_) => "Elem",
             Type::Array(_) => "Array",
             Type::ArrayN(..) => "ArrayN",
             Type::SmallArray(..) => "SmallArray",
@@ -1279,6 +1295,8 @@ impl<'a> std::fmt::Display for Said<'a> {
             Type::Omit(b, keys) => write!(f, "Omit<{}, {}>", say(b), keys.join(", ")),
             Type::Pick(b, keys) => write!(f, "Pick<{}, {}>", say(b), keys.join(", ")),
             Type::Merge(a, b) => write!(f, "Merge<{}, {}>", say(a), say(b)),
+            Type::Order(o) => o.write(f, &say(o.elem())),
+            Type::Elem(o) => write!(f, "Elem<{}>", say(o)),
             Type::Partial(b) => write!(f, "Partial<{}>", say(b)),
             // `resolve` turns `Option<T>` and `Result<T, E>` into variant lists;
             // a diagnostic still names them as the user wrote them.

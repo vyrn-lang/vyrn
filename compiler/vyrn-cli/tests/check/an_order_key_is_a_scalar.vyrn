@@ -1,0 +1,8 @@
+import { Asc } from "std/order"
+
+type Person = { name: String, tags: Array<String> }
+type ByTags = Asc<Person, tags>
+
+fn main() -> Int64 {
+    return 0
+}

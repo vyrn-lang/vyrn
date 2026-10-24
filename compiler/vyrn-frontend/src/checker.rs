@@ -283,6 +283,7 @@ pub const RESERVED: &[&str] = &[
     "unboxStream",
     "pullAt",
     "serveStream",
+    "orderBefore",
     "Int64",
     "Int32",
     "Int16",
@@ -967,6 +968,7 @@ fn check_accum_inner(
         shadows: &program.surface_shadows,
         extern_fns: &extern_fns,
         gen_fns: &gen_fns,
+        orders: &program.orders,
         record_reads: recording && program.session.get().is_some(),
         record_uses: USES.with(|u| u.get()),
     };
@@ -1627,6 +1629,8 @@ struct Cx<'a> {
     extern_fns: &'a std::collections::HashSet<String>,
     /// `gen fn`s, which cannot be function values.
     gen_fns: &'a std::collections::HashSet<String>,
+    /// `std/order`'s compiler-known declarations.
+    orders: &'a crate::order::Names,
     /// Whether a recording check records read rows ([`Recorded::reads`]): yes
     /// in a host with a session ([`crate::session`]), which rechecks per
     /// function. `vyrn check` has none, and a row costs a push per name lookup.
@@ -2650,6 +2654,11 @@ impl<'a> Checker<'a> {
             }
             return Ok(());
         }
+        // `std/order`'s types are compiler-known, and an alias of an order is
+        // the order (`order::name`).
+        if self.orders.known(&t.name).is_some() || matches!(t.base, Type::Order(_) | Type::Err) {
+            return Ok(());
+        }
         if !t.base.is_scalar() {
             let name = DeclName(&t.name);
             return Err(cerr!(t.line, ValidatedBaseNotScalar, name));
@@ -2728,6 +2737,11 @@ impl<'a> Checker<'a> {
             },
             "Num" | "Ord" => base.is_numeric(),
             "Eq" => base.is_scalar(),
+            // Only `Asc`, `Desc` and `Then` make an order; no impl does.
+            _ if self.orders.known(bound) == Some(crate::order::Known::Order) => match &base {
+                Type::Param(p) => self.param_has_bound(p, bound),
+                t => matches!(t, Type::Order(_)),
+            },
             // A user protocol: satisfied if the type implements it.
             _ if self
                 .protocol_methods
@@ -2936,6 +2950,10 @@ impl<'a> Checker<'a> {
             self.ensure_type_exists(&f.ret, f.line)?;
             crate::core::check::clauses(f, self).map_err(|(line, rule)| cerr!(line; rule))?;
             crate::core::check::Ensures::of(f, self, &f.name)
+                .map_err(|(line, rule)| cerr!(line; rule))?;
+            crate::core::check::requirements(f, self, self.orders)
+                .map_err(|(line, rule)| cerr!(line; rule))?;
+            crate::core::check::guarantees(f, self, self.orders)
                 .map_err(|(line, rule)| cerr!(line; rule))?;
             // An `extern` import has no body; an `export extern` has one. Both
             // signatures must fit the host ABI.
@@ -6432,6 +6450,20 @@ impl<'a> Checker<'a> {
                     None => Err(cerr!(line, ExpectedResult, aty)),
                 }
             }
+            // `Elem<O>` binds nothing, because a call writes its order: it is
+            // the order's element once `O` is solved, and else matches `Elem`
+            // of the caller's own order parameter.
+            Type::Elem(o) => match (&**o, aty) {
+                (Type::Param(p), _) if matches!(subst.get(p), Some(Type::Order(_))) => {
+                    let Some(Type::Order(ord)) = subst.get(p) else {
+                        unreachable!("matched above")
+                    };
+                    let elem = ord.elem().clone();
+                    self.unify_at(&elem, aty, top, subst, line)
+                }
+                (_, Type::Elem(a)) => self.unify_at(o, a, false, subst, line),
+                _ => Err(cerr!(line, ArgExpected, pty, aty)),
+            },
             Type::App(pn, pargs) => match aty {
                 Type::App(an, aargs) if pn == an && pargs.len() == aargs.len() => {
                     for (p, a) in pargs.iter().zip(aargs) {
@@ -6673,6 +6705,16 @@ pub(crate) fn pred_summary(expr: &Expr) -> String {
         }
         Expr::Call { name, args, .. } if name == crate::project::AT && args.len() == 2 => {
             format!("{}[{}]", pred_summary(&args[0]), pred_summary(&args[1]))
+        }
+        Expr::Call {
+            name,
+            type_args,
+            args,
+            ..
+        } if crate::core::check::Word::of(name).is_some() => {
+            let tys: Vec<String> = type_args.iter().map(|t| t.to_string()).collect();
+            let args: Vec<String> = args.iter().map(pred_summary).collect();
+            format!("{name}<{}>({})", tys.join(", "), args.join(", "))
         }
         Expr::Call { name, .. } => format!("{name}(..)"),
         Expr::Match { .. } => "match { .. }".to_string(),

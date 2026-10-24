@@ -204,7 +204,7 @@ fn the_profile_counts_blocks_per_line() {
     let table = String::from_utf8_lossy(&out.stderr).replace("\r\n", "\n");
     assert!(
         table.contains(
-            "1,334 blocks, 1,395,504 bytes; 1,334 freed; peak live 335,896 bytes; live at exit 0"
+            "1,338 blocks, 1,396,016 bytes; 1,338 freed; peak live 335,896 bytes; live at exit 0"
         ),
         "{table}"
     );

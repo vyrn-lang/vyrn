@@ -1,0 +1,1 @@
+an_order_key_is_a_scalar.vyrn:4:0: `Asc<Person, tags>` orders by `tags`, of type `Array<String>`: an order's key is an integer, a `Bool` or a `String`

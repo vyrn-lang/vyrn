@@ -1,0 +1,1 @@
+then_joins_orders_of_one_type.vyrn:4:0: `Then` joins two orders of one type: `Asc<Person, age>` and `Asc<Int64>` order different types

@@ -737,8 +737,7 @@ examples/knucleotide.vyrn	countKmers	no, it calls `panic`	no, its effect set is 
 examples/knucleotide.vyrn	unpack	no, it keeps an index check	no, its effect set is alloc
 examples/knucleotide.vyrn	pack	yes	no, its effect set is alloc
 examples/knucleotide.vyrn	fixed3	yes	no, its effect set is alloc
-examples/knucleotide.vyrn	byCountThenFrag	yes	no, `a` is Entry, not Int32, UInt32, Bool or a read array of one
-examples/knucleotide.vyrn	ranked	no, it calls `sortWith`, which is not trap-free	no, its effect set is alloc
+examples/knucleotide.vyrn	ranked	yes	no, its effect set is alloc
 examples/knucleotide.vyrn	report	no, it calls `countKmers`, which is not trap-free	no, its effect set is alloc, write-output, module-state, trap
 examples/knucleotide.vyrn	countOf	no, it calls `countKmers`, which is not trap-free	no, its effect set is alloc, module-state, trap
 examples/knucleotide.vyrn	syntheticSequence	yes	no, its effect set is alloc

@@ -718,7 +718,9 @@ pub(crate) fn shape_of(ty: &Type, types: &HashMap<String, TypeDecl>) -> Shape {
         // Unreachable after `resolve` (Named/Union/App/transformers/params reduced
         // away). A bare integer type argument never stands alone: `SmallArray`
         // consumes it. `Err` is the checker's recovery sentinel, and a program
-        // with an `Err` has diagnostics and never reaches codegen.
+        // with an `Err` has diagnostics and never reaches codegen. An order is
+        // a type argument only, and `Elem` of a parameter is substituted away.
+        Type::Order(_) | Type::Elem(_) => Shape::Void,
         Type::Named(_)
         | Type::Union(_)
         | Type::App(..)
@@ -963,6 +965,15 @@ mod tests {
             Type::Lazy(b(Type::Int)),
             Type::Never,
             Type::Err,
+            Type::Order(Box::new(
+                vyrn_frontend::order::Order::asc(
+                    Type::Int,
+                    &[],
+                    &HashMap::<String, vyrn_frontend::ast::TypeDecl>::new(),
+                )
+                .expect("an integer orders by its value"),
+            )),
+            Type::Elem(b(Type::Param("O".into()))),
         ]
     }
 

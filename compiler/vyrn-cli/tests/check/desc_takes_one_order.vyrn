@@ -1,0 +1,7 @@
+import { Asc, Desc } from "std/order"
+
+type Twice = Desc<Asc<Int64>, Asc<Int64>>
+
+fn main() -> Int64 {
+    return 0
+}

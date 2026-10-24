@@ -1,0 +1,1 @@
+a_fact_clause_orders_the_elements_of_its_array.vyrn:3:0: `sorted<Asc<Int64>>(value)` states a fact of an `Array<Int64>`, and `value` is of type `Array<String>`

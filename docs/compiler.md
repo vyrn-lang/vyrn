@@ -299,6 +299,23 @@ The kernel knows no surface syntax. It judges core bodies.
   says which types carry a rule; a sized integer is judged by width and
   signedness.
 
+The fact judgment (`vyrn_lower::fact_flow`) follows the three. It judges
+which arrays are sorted, and by which order, and writes only refusals into
+the kernel's list. `core::augment` builds one `fact_flow::Facts` from the
+program's `std/order` names and its functions' fact clauses
+(`core::check::requirements`, `core::check::guarantees`), then calls
+`Facts::judge` on each body it built, after the effect judgment and after
+the judgment memo took the body's verdict, because a fact verdict reads
+other modules' clauses and the memo's key does not cover them. A program
+that links no `std/order`, and a body that calls no function with a fact
+clause and no `before`, cost no allocation. The walk reads a body's rows:
+an empty array literal, a move or store, `@push` (its obligation), `@pop`
+and its `Option` switch, `@copy`, a `before` call and the `if` on its
+answer, and calls with their requirements and guarantees. Any other write
+drops the facts of the array it writes. A loop's head is the greatest state
+that holds at entry and after every turn, within `fact_flow::ROUNDS` rounds.
+No later pass reads a fact, and the check prover takes none as a premise.
+
 `movecheck.rs` states no rule. It orders refusals by source
 (`movecheck::in_source_order`) and memoizes per-body judgments for the editor (`movecheck::Judgments`), so a
 keystroke re-judges only the bodies whose key changed.

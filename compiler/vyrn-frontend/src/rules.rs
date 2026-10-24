@@ -625,6 +625,38 @@ rules! {
         parameter the body may change";
     ClauseEntry { name, why }
         "`{name}` may not carry a `where` clause on a parameter: {why}";
+    OrderField { order, field, elem }
+        "`{order}` names `{field}`, which is no field of `{elem}`";
+    OrderKey { order, field, ty }
+        "`{order}` orders by `{field}`, of type `{ty}`: an order's key is an integer, \
+        a `Bool` or a `String`";
+    OrderElem { order, elem }
+        "`{order}` orders `{elem}` by its own value, and only an integer, a `Bool` \
+        or a `String` has one: name the fields to order by";
+    OrderThen { a, b }
+        "`Then` joins two orders of one type: `{a}` and `{b}` order different types";
+    OrderArity { name, want } "`{name}` takes {want}";
+    NotAnOrder { ty } "`{ty}` is no order: an order is an `Asc`, a `Desc` or a `Then`";
+    FactForm { word } "a fact clause is written `{word}<O>(value)`, with one order";
+    FactOrder { word, ty }
+        "`{word}<{ty}>(value)` names `{ty}`, which is no order: write an `Asc`, a `Desc`, \
+        a `Then`, or a type parameter bound by `Order`";
+    FactSubject { word, ty, order, elem }
+        "`{word}<{order}>(value)` states a fact of an `Array<{elem}>`, and `value` is of \
+        type `{ty}`";
+    FactMissing { callee, arg, word, order }
+        "`{callee}` needs {arg} {word} by `{order}`, and nothing shows it is";
+    FactOtherOrder { callee, arg, word, order, held }
+        "`{callee}` needs {arg} {word} by `{order}`, and it is sorted by `{held}`";
+    FactBroken { callee, arg, word, order, write, at }
+        "`{callee}` needs {arg} {word} by `{order}`, and the {write} on line {at} may \
+        break it";
+    ResultFactMissing { name, word, order }
+        "the result of `{name}` is {word} by `{order}`, and nothing shows the value \
+        returned here is";
+    ResultFactBroken { name, word, order, write, at }
+        "the result of `{name}` is {word} by `{order}`, and the {write} on line {at} \
+        may break it";
     ResultClauseForm { name }
         "the `where` clause on the result of `{name}` may compare only `value`, a \
         `read` parameter, the `.length`, `.byteLength` or integer field of one, and \

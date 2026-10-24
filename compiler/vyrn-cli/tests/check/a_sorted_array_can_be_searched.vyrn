@@ -1,0 +1,13 @@
+import { Asc, Desc, Then, sort, lowerBound } from "std/order"
+
+type Person = { name: String, age: Int64 }
+type ByAge = Asc<Person, age>
+
+fn main() -> Int64 {
+    let ps: Array<Person> = [Person { name: "b", age: 30 }, Person { name: "a", age: 20 }]
+    let p = Person { name: "c", age: 25 }
+    let byAgeThenName = sort<Then<ByAge, Asc<Person, name>>>(ps.copy())
+    let older = sort<Desc<ByAge>>(ps.copy())
+    print(older[0].name)
+    return lowerBound<ByAge>(sort<ByAge>(ps), p) + lowerBound<ByAge>(byAgeThenName, p)
+}

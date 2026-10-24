@@ -1596,6 +1596,85 @@ impl<'a> Builder<'a> {
         }
     }
 
+    /// `orderBefore<O>(a, b)` as rows: a Bool that `a`'s first key unequal
+    /// to `b`'s decides, by the key's primitive `<` in its direction, and
+    /// that is false where every key ties.
+    fn before(
+        &mut self,
+        order: &vyrn_frontend::order::Order,
+        args: &'a [Expr],
+        line: usize,
+        out: &mut Vec<St>,
+    ) -> Result<Rhs, Gap> {
+        let [a, b] = args else {
+            return gap("an order comparison of other than two values", line);
+        };
+        let (Val::Name(a), Val::Name(b)) = (self.val(a, out)?, self.val(b, out)?) else {
+            return gap("an order comparison of a literal", line);
+        };
+        let r = self.temp(Type::Bool, line);
+        let store = |v: bool| St::Store {
+            place: Place::Name(r),
+            value: Val::Lit(Lit::Bool(v)),
+            old: Old::Nothing,
+            line,
+            site: Site::None,
+            releases: false,
+            holes: Vec::new(),
+        };
+        let decls = self.proto.types();
+        let keys: Vec<(Option<String>, bool, Type)> = (order.keys().iter())
+            .map(|k| {
+                let ty = order
+                    .key_type(k, decls)
+                    .expect("`order::name` checked each key");
+                (k.field.clone(), k.desc, ty)
+            })
+            .collect();
+        let mut rows = vec![store(false)];
+        for (field, desc, ty) in keys.into_iter().rev() {
+            let mut key = |of: Name, rows: &mut Vec<St>| match &field {
+                None => of,
+                Some(f) => {
+                    let n = self.name("@borrow", ty.clone(), false, line);
+                    let place = Place::Field(Box::new(Place::Name(of)), f.clone());
+                    rows.push(St::Let(n, Rhs::Read(place)));
+                    n
+                }
+            };
+            let mut here = Vec::new();
+            let (x, y) = (key(a, &mut here), key(b, &mut here));
+            let (lo, hi) = if desc { (y, x) } else { (x, y) };
+            let mut lt = |l: Name, h: Name, rows: &mut Vec<St>| {
+                let c = self.temp(Type::Bool, line);
+                let cmp = vec![Val::Name(l), Val::Name(h)];
+                rows.push(St::Let(
+                    c,
+                    Rhs::Prim(Op::Bin(BinOp::Lt), cmp, Some(Type::Bool)),
+                ));
+                Val::Name(c)
+            };
+            let before = lt(lo, hi, &mut here);
+            let mut els = Vec::new();
+            let after = lt(hi, lo, &mut els);
+            els.push(St::If {
+                cond: after,
+                then: vec![store(false)],
+                els: rows,
+                site: NodeId::NONE,
+            });
+            here.push(St::If {
+                cond: before,
+                then: vec![store(true)],
+                els,
+                site: NodeId::NONE,
+            });
+            rows = here;
+        }
+        out.extend(rows);
+        Ok(Rhs::Val(Val::Name(r)))
+    }
+
     /// The `@borrow` a read of a place binds, carrying the path the reader
     /// wrote ([`NameInfo::path`]).
     fn borrow_name(&mut self, e: &'a Expr, ty: Type, line: usize) -> Name {
@@ -6546,6 +6625,20 @@ impl<'a> Builder<'a> {
                 return Ok(Rhs::Read(p));
             }
         }
+        if name == vyrn_frontend::order::BEFORE_BUILTIN {
+            let order = (dest
+                .and_then(|e| self.solved.get(&e.id()))
+                .into_iter()
+                .flatten())
+            .find_map(|(p, t)| match t {
+                Type::Order(o) if p == "O" => Some((**o).clone()),
+                _ => None,
+            });
+            // A generic body's call keeps its row; each instance's compares.
+            if let Some(order) = order {
+                return self.before(&order, args, line, out);
+            }
+        }
         // `value(s)` of a String: the box owns its payload (#512), so a String
         // read out of a place is copied first.
         if let ("value", [arg]) = (name, args) {
@@ -8166,6 +8259,7 @@ pub fn augment(program: &Program, w: &mut World, judging: bool) {
         },
     );
     let mut outside: Vec<Option<Body>> = Vec::with_capacity(lowered.bodies.len());
+    let facts = crate::fact_flow::Facts::of(program, &w.fns.rows, own.proto.types());
     for (
         JobState {
             job: j,
@@ -8225,8 +8319,19 @@ pub fn augment(program: &Program, w: &mut World, judging: bool) {
         let refused = typed(program, own, &mut r, &top, j.module(), j.as_written());
         let key = key.filter(|_| !refused);
         remember(memo.as_ref(), key, kept, &r.kernel[refused_before..]);
+        // After the memo: a fact verdict reads other modules' clauses, which
+        // the memo's key does not cover.
+        if let Some(facts) = &facts {
+            match j {
+                Job::Inst(inst) => {
+                    facts.judge(Some(inst.func_id), &inst.subst, &top, &mut r.kernel)
+                }
+                Job::Outside(_) => facts.judge(None, &Default::default(), &top, &mut r.kernel),
+            }
+        }
         into.push(Some(top));
     }
+    drop(facts);
     // Every generic function is built once more with its parameters as
     // written, the way the checker typed it, for the judgment alone. It
     // places no row and is never emitted.
