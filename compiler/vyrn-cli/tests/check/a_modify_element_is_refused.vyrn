@@ -1,0 +1,11 @@
+// An element is no place a `modify` argument reaches, so no index needs to
+// prove `xs[0]` apart from `xs[1]`.
+fn swap(x: modify Int64, y: modify Int64) {
+    x = y
+}
+
+fn main() -> Int64 {
+    let mut xs: Array<Int64> = [1, 2]
+    swap(xs[0], xs[1])
+    return 0
+}

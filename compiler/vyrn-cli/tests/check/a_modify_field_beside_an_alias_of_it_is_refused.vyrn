@@ -1,0 +1,15 @@
+// `r` reads out of `p.a`, so passing it beside `p.a` as `modify` overlaps.
+type Cell = { n: Int64, xs: Array<Int64> }
+
+type Pair = { a: Cell, b: Cell }
+
+fn look(x: modify Cell, y: Cell) {
+    x.n = y.n
+}
+
+fn main() -> Int64 {
+    let mut p = Pair { a: Cell { n: 1, xs: [1] }, b: Cell { n: 2, xs: [] } }
+    let r = p.a
+    look(p.a, r)
+    return 0
+}

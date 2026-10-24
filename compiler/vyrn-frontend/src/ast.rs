@@ -2909,38 +2909,6 @@ pub fn calls_with(e: &Expr, by: &dyn Fn(&[Expr]) -> bool) -> bool {
     v.1
 }
 
-/// Returns whether some path through `e` names the binding. A lambda body
-/// counts though it may never run: narrowing it would widen what compiles.
-pub fn mentions(e: &Expr, name: &str) -> bool {
-    struct Mentions<'n>(&'n str, bool);
-
-    impl AstVisit<'_> for Mentions<'_> {
-        const SCOPED: bool = false;
-
-        fn stmt(&mut self, s: &Stmt, _: &std::collections::HashSet<String>) {
-            self.1 |= matches!(s, Stmt::Drop { name, .. } if name == self.0);
-        }
-
-        fn expr(&mut self, e: &Expr, _: &std::collections::HashSet<String>) -> bool {
-            match e {
-                Expr::Var { name, .. } => self.1 |= name == self.0,
-                // `x.copy()` makes a fresh value: its receiver is read, never aliased.
-                Expr::Call { name, args, .. }
-                    if name == "@copy" && args.first().is_some_and(|a| place_path(a).is_some()) =>
-                {
-                    return false;
-                }
-                _ => {}
-            }
-            !self.1
-        }
-    }
-
-    let mut v = Mentions(name, false);
-    ast_expr(e, &std::collections::HashSet::new(), &mut v);
-    v.1
-}
-
 /// Returns the place `e` reads as `(root, path)`: `r.a.b` gives
 /// `("r", "r.a.b")`. A move takes the root; a diagnostic quotes the path. `None`
 /// for a non-place, which has no earlier owner to move from.

@@ -74,13 +74,16 @@ constructor, returned, captured by a closure that outlives the call, or passed
 to a `consume` parameter. Because a borrow never escapes its call, it needs no
 lifetime annotation.
 
-A `modify` argument is exclusive: the same value may not be passed as `modify`
-and read again in the same call. A `.copy()` of it is a fresh value, not a read
-of it: `f(x, x.copy())` is accepted. The caller sees the callee's writes after
-the call returns. A `consume` argument is exclusive too: no other argument of
-the same call may name it or a place overlapping it, because the callee could
-free the one and then read the other. The receiver of a rebuilding builtin
-(`xs.append(xs)`) is put back, not consumed.
+A `modify` or `consume` argument is exclusive: no other argument of the same
+call may name it or a place overlapping it, because the callee could write or
+free the one and then read the other. Places compare by path. `f(p.a, p.b)`
+passes two fields apart; `f(p, p.a)`, `f(p.a, p.a)` and `f(p.a, p.a.b)` overlap.
+A `modify` argument is a `mut` binding or a field of one; an element is not a
+place it reaches. A `.copy()` is a fresh value, not a read: `f(x, x.copy())` is
+accepted. So is a part that owns no heap, which the caller reads before the
+call: `f(xs, xs.length)`. The caller sees the callee's writes after the call
+returns. The receiver of a rebuilding builtin (`xs.append(xs)`) is put back,
+not consumed.
 
 A `consume` record parameter that the function returns on every path, changed
 only field by field, is the result. The function works in the caller's
@@ -336,6 +339,8 @@ Each rule has one home. The names below are the entry points.
   `St::Drop`. `core::augment` is the placer.
 - `vyrn-lower/src/kernel.rs`: the linear judgment. `kernel::check` refuses a
   body; `kernel::placement` reports the releases it is missing.
+  `Kernel::exclusive` states the exclusivity of a `modify` or `consume`
+  argument, by path.
 - `vyrn-lower/src/typed.rs`: the typed judgment.
 - `vyrn-lower/src/rules.rs`: how the kernel, the typed judgment and the
   builder state a refusal. The rows are `vyrn_frontend::rules::Rule`'s.

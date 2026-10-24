@@ -1078,11 +1078,26 @@ impl<'b> Kernel<'b> {
     }
 
     fn alias_text(&self, a: &Alias) -> String {
-        let root = match &a.root {
+        format!(
+            "{}{}",
+            self.root_text(&a.root),
+            a.path.replace(".[]", "[..]")
+        )
+    }
+
+    fn root_text(&self, r: &Root) -> String {
+        match r {
             Root::N(m) => self.src(*m).to_string(),
             Root::G(g) => self.body.spelled(g).to_string(),
-        };
-        format!("{root}{}", a.path.replace(".[]", "[..]"))
+        }
+    }
+
+    /// A callee as the reader spelled it. An impl method is named by its
+    /// protocol member, so an instance and the generic body word one refusal
+    /// alike.
+    fn callee_text<'c>(&'c self, callee: &'c str) -> &'c str {
+        let member = vyrn_frontend::types::impl_method_member(callee).unwrap_or(callee);
+        self.body.spelled(member.trim_start_matches('@'))
     }
 
     /// A place, spelled for a refusal: `t.xs`, `xs[..]`.
@@ -1178,53 +1193,62 @@ impl<'b> Kernel<'b> {
         self.missing.push(m);
     }
 
-    /// Refuses a call that is handed a `consume` argument and, at another
-    /// position, a place overlapping it: the callee could free the one and
-    /// read the other. A part a `take` moved out needs no comparison: while
-    /// its hole is open, the reads of the rest of the call refuse the whole
-    /// name and an overlapping place first (`WHOLE_WITH_HOLE`,
-    /// `READ_IN_HOLE`). Two `consume` positions are the take rule's: the
-    /// second take is refused. A rebuilding builtin's receiver (`write_back`)
-    /// is put back, not consumed ([`Kernel::take_arg`]).
-    fn consumed_once(
+    /// Refuses a call that is handed a `modify` or `consume` argument and, at
+    /// another position, a place overlapping it ([`overlaps`], through every
+    /// alias): the callee could write or free the one and read the other. A
+    /// `modify` argument is compared with every other argument; two `consume`
+    /// positions are the take rule's, since the second take is refused. A
+    /// part a `take` moved out needs no comparison: while its hole is open,
+    /// the reads of the rest of the call refuse the whole name and an
+    /// overlapping place first (`WHOLE_WITH_HOLE`, `READ_IN_HOLE`). A
+    /// rebuilding builtin's receiver (`write_back`) is put back, not consumed
+    /// ([`Kernel::take_arg`]).
+    fn exclusive(
         &self,
         st: &State,
+        callee: &str,
         args: &[(Arg, Capability)],
         write_back: bool,
     ) -> Result<(), Refusal> {
         let place = |a: &Arg| match a {
-            Arg::Place(p) => root_of(p),
-            Arg::Val(Val::Name(n)) => match st.alias.get(n) {
-                Some(Alias {
-                    root: Root::N(r),
-                    path,
-                    ..
-                }) => Some((*r, path.clone())),
-                Some(_) => None,
-                None => Some((*n, String::new())),
-            },
+            Arg::Place(p) => Some(self.src_of(st, p)),
+            Arg::Val(Val::Name(n)) => Some(self.src_of(st, &Place::Name(*n))),
             Arg::Val(_) => None,
         };
-        let consumed = (args.iter().enumerate())
-            .filter(|(i, (_, c))| *c == Capability::Consume && !(write_back && *i == 0));
-        for (i, (a, _)) in consumed {
-            let Some((r, path)) = place(a) else {
+        let exclusive = (args.iter().enumerate()).filter(|(i, (_, c))| match c {
+            Capability::Modify => true,
+            Capability::Consume => !(write_back && *i == 0),
+            Capability::Read => false,
+        });
+        for (i, (a, cap)) in exclusive {
+            let Some(at) = place(a) else {
                 continue;
             };
-            let others = (args.iter().enumerate())
-                .filter(|(j, (_, c))| *j != i && *c != Capability::Consume);
-            for (_, (b, _)) in others {
-                if place(b).is_some_and(|(q, p)| q == r && overlaps(&p, &path)) {
-                    let (s, o) = (self.arg_text(st, a), self.arg_text(st, b));
-                    let by = &self.by;
-                    let r = self.refuse(self.here, rule!(ConsumedAndPassed, s, by, o));
-                    let fix = match a {
-                        Arg::Val(Val::Name(n)) if !st.alias.contains_key(n) => self.copy_at(*n),
-                        _ => None,
-                    };
-                    return Err(Self::fixed(r, fix));
-                }
+            let overlap = (args.iter().enumerate()).find(|(j, (b, c))| {
+                *j != i
+                    && (*cap == Capability::Modify || *c != Capability::Consume)
+                    && place(b).is_some_and(|o| o.root == at.root && overlaps(&o.path, &at.path))
+            });
+            let Some((_, (b, _))) = overlap else {
+                continue;
+            };
+            if *cap == Capability::Modify {
+                let (path, fname) = (self.arg_text(st, a), self.callee_text(callee));
+                let root = match a {
+                    Arg::Place(p) => self.root_text(&root(p).0),
+                    _ => path.clone(),
+                };
+                let r = rule!(ModifyAliased, path, fname, root);
+                return Err(self.refuse(self.here, r));
             }
+            let (s, o) = (self.arg_text(st, a), self.arg_text(st, b));
+            let by = &self.by;
+            let r = self.refuse(self.here, rule!(ConsumedAndPassed, s, by, o));
+            let fix = match a {
+                Arg::Val(Val::Name(n)) if !st.alias.contains_key(n) => self.copy_at(*n),
+                _ => None,
+            };
+            return Err(Self::fixed(r, fix));
         }
         Ok(())
     }
@@ -2110,6 +2134,7 @@ impl<'b> Kernel<'b> {
                 if let Some(f) = kind.value() {
                     self.read(st, &Val::Name(f))?;
                 }
+                self.exclusive(st, callee, args, *write_back)?;
                 for (a, cap) in args {
                     match a {
                         Arg::Place(p) => self.place(st, p)?,
@@ -2134,7 +2159,6 @@ impl<'b> Kernel<'b> {
                 if !gs.is_empty() {
                     self.state_args(st, args, &gs)?;
                 }
-                self.consumed_once(st, args, *write_back)?;
                 for (i, (a, cap)) in args.iter().enumerate() {
                     if let (Arg::Val(v), Capability::Consume) = (a, cap) {
                         // Only a declared `consume` parameter moves a heapless
@@ -2241,12 +2265,7 @@ impl<'b> Kernel<'b> {
                 Some(n) if self.body.names[n.index()].for_consume => By::ForConsume,
                 _ => By::Value,
             },
-            // An impl method is named by its protocol member, so an instance
-            // and the generic body word one refusal alike.
-            Rhs::Call { callee, .. } => {
-                let member = vyrn_frontend::types::impl_method_member(callee).unwrap_or(callee);
-                By::Call(self.body.spelled(member.trim_start_matches('@')).into())
-            }
+            Rhs::Call { callee, .. } => By::Call(self.callee_text(callee).into()),
             Rhs::Take(_) => By::Consume,
             Rhs::Make(..) => By::Literal,
             Rhs::Read(_) | Rhs::Prim(..) => By::Nothing,

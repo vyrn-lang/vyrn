@@ -1,0 +1,63 @@
+// `modify` arguments compared by path: two fields of one record are apart.
+
+type Tally = { counts: Array<Int64>, total: Int64 }
+
+type Pair = { left: Tally, right: Tally, moves: Int64 }
+
+protocol Merging {
+    fn absorb(modify self, other: modify Tally)
+}
+
+impl Merging for Tally {
+    fn absorb(modify self, other: modify Tally) {
+        for c in other.counts {
+            self.counts.push(c)
+        }
+        self.total = self.total + other.total
+        other.counts = []
+        other.total = 0
+    }
+}
+
+fn record(t: modify Tally, n: Int64) {
+    t.counts.push(n)
+    t.total = t.total + n
+}
+
+fn fill(a: modify Tally, b: modify Tally, n: Int64) {
+    let mut i = 0
+    while i < n {
+        record(a, i)
+        record(b, i * 10)
+        i = i + 1
+    }
+}
+
+fn bump(k: modify Int64) {
+    k = k + 1
+}
+
+fn grow(xs: modify Array<Int64>, n: Int64) {
+    xs.push(n)
+}
+
+let mut calls: Int64 = 0
+
+fn main() -> Int64 {
+    let mut p = Pair { left: Tally { counts: [], total: 0 }, right: Tally { counts: [], total: 0 }, moves: 0 }
+    fill(p.left, p.right, 40)
+    bump(p.moves)
+    print(p.left.total) // 780
+    print(p.right.total) // 7800
+    p.left.absorb(p.right)
+    bump(p.moves)
+    print(p.left.counts.length) // 80
+    print(p.left.total) // 8580
+    print(p.right.counts.length) // 0
+    print(p.moves) // 2
+    grow(p.left.counts, p.left.counts.length)
+    print(p.left.counts[80]) // 80
+    bump(calls)
+    print(calls) // 1
+    return 0
+}
