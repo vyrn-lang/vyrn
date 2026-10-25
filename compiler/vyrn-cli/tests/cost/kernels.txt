@@ -2,18 +2,20 @@ compiler/vyrn-cli/tests/cost/kernels.vyrn
 fn div32(a: Int32, b: Int32) -> Int32
    26           division check: it needs `b >= 1`, and `b` is a parameter, so the function cannot know what its callers pass; add `where value >= 1` to `b`, and each call checks it where the caller cannot show it; division check: it needs `b >= 0`, and `b` is a parameter, so the function cannot know what its callers pass; add `where value >= 0` to `b`, and each call checks it where the caller cannot show it
 fn main() -> Int64
-   68           allocates `Array<Int32>`
-   70           allocates `String` x13
-summary: allocating rows 14 (0 in loops), growing rows 0 (0 in loops), copies 0 (0 in loops), checks kept 2 (0 in loops), checks proved 0 (0 in loops)
-  add32: trap-free: yes; kernel: yes
-  tri: trap-free: yes; kernel: yes
+   79           allocates `Array<Int32>`
+   82           allocates `String` x19
+summary: allocating rows 20 (0 in loops), growing rows 0 (0 in loops), copies 0 (0 in loops), checks kept 2 (0 in loops), checks proved 0 (0 in loops)
+  add32: trap-free: yes; kernel: yes, native
+  tri: trap-free: yes; kernel: yes, native
   shout: trap-free: yes; kernel: no, its effect set is write-output
   div32: trap-free: no, it keeps a division check at line 26; kernel: no, it is not trap-free
   down: trap-free: yes; kernel: no, it is recursive
-  wide: trap-free: yes; kernel: no, `n` is Int64, and WGSL has no 64-bit integer
+  wide: trap-free: yes; kernel: yes, emulated Int64
   half: trap-free: yes; kernel: no, `x` is Float32, and a kernel computes only integers and Bool
   twice: trap-free: yes; kernel: no, `x` is Float64, and WGSL has no 64-bit float
-  byte: trap-free: yes; kernel: no, `x` is UInt8, not Int32, UInt32, Bool or a read array of one
-  countdown: trap-free: yes; kernel: no, the loop at line 56 is no counter loop
-  viaCountdown: trap-free: yes; kernel: no, it calls `countdown` at line 64, which is not a kernel
-  main: trap-free: no, it calls `div32` at line 69, which is not trap-free; kernel: no, its effect set is alloc, write-output
+  byte: trap-free: yes; kernel: yes, packed UInt8
+  viaWide: trap-free: yes; kernel: yes, emulated Int64
+  label: trap-free: yes; kernel: no, `s` is String, not an integer, Bool or a read array of one
+  countdown: trap-free: yes; kernel: no, the loop at line 67 is no counter loop
+  viaCountdown: trap-free: yes; kernel: no, it calls `countdown` at line 75, which is not a kernel
+  main: trap-free: no, it calls `div32` at line 80, which is not trap-free; kernel: no, its effect set is alloc, write-output

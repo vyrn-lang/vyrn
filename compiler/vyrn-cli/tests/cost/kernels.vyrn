@@ -1,5 +1,5 @@
 // One function per rule `vyrn why --cost` checks a kernel against, in the
-// order it checks them, and two kernels.
+// order it checks them, and a kernel of each form.
 
 /// A kernel: 32-bit integers, no effect, no check.
 fn add32(a: Int32, b: Int32) -> Int32 {
@@ -33,6 +33,7 @@ fn down(n: Int32) -> Int32 {
     return down(n - 1)
 }
 
+/// An emulated kernel: a 64-bit integer, held as two 32-bit words.
 fn wide(n: Int64) -> Int64 {
     return n + 1
 }
@@ -45,8 +46,18 @@ fn twice(x: Float64) -> Float64 {
     return x + x
 }
 
+/// A packed kernel: an 8-bit integer, held in a 32-bit word.
 fn byte(x: UInt8) -> UInt8 {
     return x
+}
+
+/// An emulated kernel by its callee's form.
+fn viaWide(n: Int32) -> Int32 {
+    return Int32(wide(Int64(n)))
+}
+
+fn label(s: String) -> Int32 {
+    return 0
 }
 
 /// A loop that counts down is no counter loop.
@@ -67,6 +78,7 @@ fn viaCountdown(n: Int32) -> Int32 {
 fn main() -> Int64 {
     let xs: Array<Int32> = [1, 2]
     let k = add32(1, 2) + tri(xs, 3) + shout(1) + div32(4, 2) + down(3) + viaCountdown(2)
-    print("\{k} \{byte(7)} \{wide(1)} \{half(1.0)} \{twice(1.0)}")
+    let l = label("a")
+    print("\{k} \{byte(7)} \{wide(1)} \{viaWide(1)} \{l} \{half(1.0)} \{twice(1.0)}")
     return 0
 }
