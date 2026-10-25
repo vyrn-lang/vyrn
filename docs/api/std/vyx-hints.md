@@ -49,12 +49,3 @@ fn vyxHintsConfigured(dir: String, config: String) -> String
 [`vyxHints`](#vyxhints) under the `"hints"` object of the JSON document at `config`.
 A config that cannot be read or is refused by `policyOf` is an error, and no
 file is checked.
-
-## vhCheck
-
-```vyrn
-fn vhCheck(p: HintPolicy, src: String, file: String) -> String
-```
-
-Every report `src` (the text of the `.vyx` file at `file`) earns. Exported
-for tests and for reuse under another library's configuration.

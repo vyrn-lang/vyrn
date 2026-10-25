@@ -232,50 +232,6 @@ fn noQuery() -> Query<Unit>
 
 The default `data` for a page that declares none.
 
-## uiNoView
-
-```vyrn
-fn uiNoView() -> Html
-```
-
-The default that makes `page` optional. A page exports `page` or `respond`,
-so this is never substituted.
-
-## uiNoRespond
-
-```vyrn
-fn uiNoRespond() -> Response
-```
-
-The default that makes `respond` optional. See [`uiNoView`](#uinoview).
-
-## uiDataQuery
-
-```vyrn
-fn uiDataQuery() -> Int64
-```
-
-The `data` member's shape indices as `matchedMember` reports them, in the
-declaration order of `contract Page`. `fn data() -> Query<T>`.
-
-## uiDataLazy
-
-```vyrn
-fn uiDataLazy() -> Int64
-```
-
-## uiDataParamQuery
-
-```vyrn
-fn uiDataParamQuery() -> Int64
-```
-
-## uiDataParamLazy
-
-```vyrn
-fn uiDataParamLazy() -> Int64
-```
-
 ## uiWantsData
 
 ```vyrn

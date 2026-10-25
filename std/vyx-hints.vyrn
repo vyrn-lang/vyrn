@@ -137,9 +137,8 @@ fn vhModule(checked: Int64) -> String {
     + "export fn vyxHintsChecked() -> Int64 { return \{checked.toString()} }\n"
 }
 
-/// Every report `src` (the text of the `.vyx` file at `file`) earns. Exported
-/// for tests and for reuse under another library's configuration.
-export gen fn vhCheck(p: HintPolicy, src: String, file: String) -> String {
+/// Every report `src` (the text of the `.vyx` file at `file`) earns.
+gen fn vhCheck(p: HintPolicy, src: String, file: String) -> String {
     let t = vyxParseTemplate(src)
     if t.err != "" {
         // The compile already fails with a better message; lint advice about

@@ -3305,10 +3305,6 @@ std/ui.vyrn	noQuery	yes	no, its effect set is alloc
 std/ui.vyrn	uiNoData	yes	no, the result is Unit, not an integer, Bool or a read array of one
 std/ui.vyrn	uiNoView	yes	no, the value of line 236 is Html, not an integer, Bool or a read array of one
 std/ui.vyrn	uiNoRespond	yes	no, its effect set is alloc
-std/ui.vyrn	uiDataQuery	yes	yes, emulated Int64
-std/ui.vyrn	uiDataLazy	yes	yes, emulated Int64
-std/ui.vyrn	uiDataParamQuery	yes	yes, emulated Int64
-std/ui.vyrn	uiDataParamLazy	yes	yes, emulated Int64
 std/ui.vyrn	uiAcceptNames	yes	no, its effect set is alloc
 std/ui.vyrn	uiWantsData	yes	no, its effect set is alloc
 std/ui.vyrn	uiPayload	no, it calls `derive$json$jsonEncoders$t8084a51b3c649e88`, which is not trap-free	no, its effect set is alloc, trap
@@ -3704,7 +3700,6 @@ std/vyx.vyrn	vyxHeadArgsOk	yes	no, `ptypes` is Array<String>, not an integer, Bo
 std/vyx.vyrn	vyxEmitAccessorHeadFns	yes	no, its effect set is alloc
 std/vyx.vyrn	vyxEmitAccessorHeadTitle	yes	no, its effect set is alloc
 std/vyx.vyrn	vyxEmitHeadTitleFn	yes	no, its effect set is alloc, gen-only
-std/vyx.vyrn	vyxIsIdentByte	yes	yes, packed UInt8
 std/vyx.vyrn	vyxWordUsed	yes	no, its effect set is alloc
 std/vyx.vyrn	vyxIsDataDecl	no, it calls `vyxIsDeclOf`, which is not trap-free	no, its effect set is alloc, trap
 std/vyx.vyrn	vyxStripLoadFn	no, it calls `vyxSlice`, which is not trap-free	no, its effect set is alloc, trap
@@ -3726,7 +3721,6 @@ std/vyx.vyrn	vyxPruneClientImports	no, it calls `lines`, which is not trap-free	
 std/vyx.vyrn	vyxEmitClientRender	yes	no, its effect set is alloc
 std/vyx.vyrn	vyxEmitPageLoading	yes	no, its effect set is alloc
 std/vyx.vyrn	vyxEmitClientRenderLoading	yes	no, its effect set is alloc
-std/vyx.vyrn	vyxBuildPageModule	no, it calls `vyxBuildPageModuleAt`, which is not trap-free	no, its effect set is alloc, trap, gen-only
 std/vyx.vyrn	vyxBuildPageClientModuleAt	no, it calls `vyxBuildPageModuleImpl`, which is not trap-free	no, its effect set is alloc, trap, gen-only
 std/vyx.vyrn	vyxBuildPageModuleAt	no, it calls `vyxBuildPageModuleImpl`, which is not trap-free	no, its effect set is alloc, trap, gen-only
 std/vyx.vyrn	vyxDataCap	yes	no, the result is String, not an integer, Bool or a read array of one
@@ -3736,11 +3730,9 @@ std/vyx.vyrn	vyxPageThemed	no, it calls `vyxDirOf`, which is not trap-free	no, i
 std/vyx.vyrn	vyxPageClient	no, it calls `vyxDirOf`, which is not trap-free	no, its effect set is alloc, fs-read, trap, gen-only
 std/vyx.vyrn	vyxPageClientThemed	no, it calls `vyxDirOf`, which is not trap-free	no, its effect set is alloc, fs-read, trap, gen-only
 std/vyx.vyrn	vyxDirOf	no, it calls `vyxSlice`, which is not trap-free	no, its effect set is alloc
-std/vyx.vyrn	vyxBuildLayoutModule	no, it calls `vyxBuildLayoutModuleAt`, which is not trap-free	no, its effect set is alloc, trap, gen-only
 std/vyx.vyrn	vyxBuildLayoutModuleAt	no, it calls `vyxSlice`, which is not trap-free	no, its effect set is alloc, trap, gen-only
 std/vyx.vyrn	vyxLayout	no, it calls `vyxDirOf`, which is not trap-free	no, its effect set is alloc, fs-read, trap, gen-only
 std/vyx.vyrn	vyxLayoutThemed	no, it calls `vyxDirOf`, which is not trap-free	no, its effect set is alloc, fs-read, trap, gen-only
-std/vyx.vyrn	vyxBuildErrorModule	no, it calls `vyxBuildErrorModuleAt`, which is not trap-free	no, its effect set is alloc, trap, gen-only
 std/vyx.vyrn	vyxBuildErrorModuleAt	no, it calls `vyxSlice`, which is not trap-free	no, its effect set is alloc, trap, gen-only
 std/vyx.vyrn	vyxError	no, it calls `vyxDirOf`, which is not trap-free	no, its effect set is alloc, fs-read, trap, gen-only
 std/vyx.vyrn	vyxErrorThemed	no, it calls `vyxDirOf`, which is not trap-free	no, its effect set is alloc, fs-read, trap, gen-only

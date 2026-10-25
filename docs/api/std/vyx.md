@@ -4,8 +4,9 @@ The `.vyx` single-file component compiler, in comptime-pure Vyrn.
 
 `components(dir)` reads every `<Name>.vyx` in `dir` at compile time and
 synthesizes one module that exports one pure view function per component,
-built from `std/html` calls. `std/ui`'s `pages` reuses the compiler core
-(`vyxCompileComponent`, `vyxBuildModule`) for `.vyx` pages.
+built from `std/html` calls. `std/ui`'s `pages` compiles `.vyx` pages,
+layouts and error pages through `vyxPage`, `vyxLayout` and `vyxError`.
+[`vyxParseTemplate`](#vyxparsetemplate) gives a generator or a tool the parsed `<template>`.
 
   import { components } from "std/vyx"
   import { itemRow, cart } from components("./components")
@@ -87,10 +88,12 @@ diagnostic.
 type VyxAttr = { name: String, value: String, dyn: Bool, evt: Bool, line: Int64, col: Int64 }
 ```
 
-One attribute on a template element. `dyn`: a `:name="expr"` value; `evt`:
-an `@event` binding, `@` stripped. A `v-...` directive is a plain attribute
-that keeps its `v-` prefix and is consumed by the grouping pass.
-`line`/`col`: the 1-based position of the value in the `.vyx` file.
+One attribute of a template element. `name` drops a leading `:` or `@`; a
+`v-` directive keeps its prefix (`v-if`, `v-for`). `value` is the quoted
+text, trimmed, and `""` for a bare attribute (`disabled`). `dyn` marks
+`:name="expr"`, whose value is a Vyrn expression; `evt` marks
+`@event="handler"`. `line` and `col` are 1-based in the `.vyx` file: the
+value's position, or the name's for a bare attribute.
 
 ## VyxNode
 
@@ -98,10 +101,23 @@ that keeps its `v-` prefix and is consumed by the grouping pass.
 type VyxNode = enum { VNText(String), VNInterp(String, Int64, Int64), VNRaw(String, Int64, Int64), VNChildren, VNElem(String, Bool, Array<VyxAttr>, Array<VyxNode>, Int64), VNIf(Array<String>, Array<Int64>, Array<Int64>, Array<VyxBody>, VyxBody, Bool), VNFor(String, String, String, Array<VyxNode>, Int64, Int64, Int64, Int64) }
 ```
 
-A node in a parsed template. Lines are absolute in the `.vyx` file. A
-trailing `(line, col)` pair is the pass-through's position for
-origin directives; `VNFor` carries its iterable's, then its key's, and
-`VNIf` carries parallel per-condition position arrays.
+A node of a parsed template. Lines and columns are 1-based in the `.vyx`
+file. [`vyxParseTemplate`](#vyxparsetemplate) yields four variants:
+
+- `VNText(text)`: literal text, each whitespace run collapsed to one space.
+  A whitespace-only run that holds a line break yields no node.
+- `VNInterp(expr, line, col)`: `{{ expr }}`, the expression trimmed.
+- `VNChildren`: `<slot/>`.
+- `VNElem(tag, isComp, attrs, kids, line)`: an element, or a component when
+  `tag` starts with an uppercase letter (`isComp`). `line` is the `<`'s.
+  A self-closing tag has no `kids`.
+
+The compiler's grouping pass consumes the directives and makes the other
+three: `VNRaw(expr, line, col)` for `v-html`; `VNIf(conds, condLines,
+condCols, bodies, elseBody, hasElse)` for a `v-if` chain, one body per
+condition; and `VNFor(var, iter, key, body, line, col, keyLine, keyCol)` for
+`v-for` with its `:key`. A `match` has no wildcard arm, so a walker names
+them too.
 
 ## VyxBody
 
@@ -109,7 +125,8 @@ origin directives; `VNFor` carries its iterable's, then its key's, and
 type VyxBody = { nodes: Array<VyxNode> }
 ```
 
-A node list, so bodies can nest in a payload without `Array<Array<...>>`.
+One branch of a `VNIf`: a node list, so bodies nest in a payload without
+`Array<Array<VyxNode>>`.
 
 ## VyxTemplate
 
@@ -117,8 +134,9 @@ A node list, so bodies can nest in a payload without `Array<Array<...>>`.
 type VyxTemplate = { nodes: Array<VyxNode>, err: String }
 ```
 
-The parsed `<template>` of a `.vyx` source: its sibling nodes, or the `err`
-that stopped the parse.
+The parsed `<template>` of a `.vyx` source: its top-level nodes, and in
+`err` the diagnostic that stopped the parse, or `""`. After an error,
+`nodes` holds what parsed before it.
 
 ## vyxParseTemplate
 
@@ -126,30 +144,66 @@ that stopped the parse.
 fn vyxParseTemplate(source: String) -> VyxTemplate
 ```
 
-Parses only the `<template>` section of a `.vyx` source into the node tree
-the compiler walks, for checking libraries such as `std/vyx-hints`. No
-props, imports, component resolution or `v-if` grouping: directives stay
-attributes. `err` is non-empty when the template does not parse.
+Parses the `<template>` section of the `.vyx` text `source` into the tree
+the compiler walks, for a generator or a checker such as `std/vyx-hints`.
+It reads no props or imports, resolves no component and groups no
+directive: `v-if`, `v-for` and `v-html` stay attributes. `err` is set when
+`source` has no `<template>` or it does not parse. Call it during
+generation only.
 
-## vyxCompileComponent
-
-```vyrn
-fn vyxCompileComponent(compName: String, source: String, dir: String) -> VyxComp
-```
-
-Compiles one `.vyx` source into a `VyxComp`; component calls are resolved
-later, once every sibling name is known. `compName` is the file stem; `dir`
-rebases relative imports. Exported for `std/ui`'s `pages`.
-
-## vyxBuildModule
+A generator that writes the outline of a template, saved as `outline.vyrn`:
 
 ```vyrn
-fn vyxBuildModule(comps: consume Array<VyxComp>, themed: Bool, theme: String) -> String
+import { vyxParseTemplate, VyxAttr, VyxNode } from "std/vyx"
+
+/// ` :name` for each bound attribute in `attrs`.
+gen fn bound(attrs: Array<VyxAttr>) -> String {
+    let mut out = ""
+    for a in attrs {
+        if a.dyn {
+            out = out + " :" + a.name
+        }
+    }
+    return out
+}
+
+/// One line per element, depth first: its tag, line and bound attributes.
+gen fn walk(nodes: Array<VyxNode>) -> String {
+    let mut out = ""
+    for n in nodes {
+        out = out + match n {
+            VNElem(tag, _, attrs, kids, line) => tag + ":" + line.toString() + bound(attrs) + "\n" + walk(kids),
+            VNText(_) => "",
+            VNInterp(_, _, _) => "",
+            VNRaw(_, _, _) => "",
+            VNChildren => "",
+            VNIf(_, _, _, _, _, _) => "",
+            VNFor(_, _, _, _, _, _, _, _) => "",
+        }
+    }
+    return out
+}
+
+/// Writes `outlineOf() -> String`: the outline of `source`, or why it does
+/// not parse.
+export gen fn outline(source: String) -> String {
+    let t = vyxParseTemplate(source)
+    let text = if t.err != "" { t.err.copy() } else { walk(t.nodes) }
+    return render(vyrn"export fn outlineOf() -> String { return \{text} }")
+}
 ```
 
-Assembles the synthesized module. When `themed`, it imports the theme
-`theme` (resolved like `dir`) and routes every `class` through
-`vyxTheme.cls(...)`. Exported for `std/ui`'s `pages`.
+A program that prints `ul:2` and `li:3 :class`:
+
+```vyrn
+import { outline } from "./outline"
+import { outlineOf } from outline("<template>\n<ul>\n  <li :class=\"c\">{{ x }}</li>\n</ul>\n</template>")
+
+fn main() -> Int64 {
+    print(outlineOf())
+    return 0
+}
+```
 
 ## components
 
@@ -170,105 +224,6 @@ fn componentsThemed(dir: String, theme: String) -> String
 `vyxTheme`, a static class literal is checked against `Tw` at compile time
 at its `.vyx` position, and a dynamic `:class` is coerced at run time.
 `theme` resolves relative to the importing module, like `dir`.
-
-## vyxDataForm
-
-```vyrn
-fn vyxDataForm(ret: String) -> Int64
-```
-
-Which alternative signature of the `std/ui:Page` `data` member a return-type
-spelling names, numbered as `matchedMember` reports, or -1 for none:
-
-  0  `Query<T>`            blocking, no params
-  1  `Lazy<T>`             render-then-fill, no params
-  2  `ParamQuery<P, T>`    blocking, deferred call takes `Params`
-  3  `ParamLazy<P, T>`     render-then-fill, deferred call takes `Params`
-
-## vyxDataFormIsLazy
-
-```vyrn
-fn vyxDataFormIsLazy(form: Int64) -> Bool
-```
-
-Whether a `data` form renders lazily.
-
-## vyxDataFormHasParams
-
-```vyrn
-fn vyxDataFormHasParams(form: Int64) -> Bool
-```
-
-Whether a `data` form's deferred call takes the page's `Params`.
-
-## vyxDataRunner
-
-```vyrn
-fn vyxDataRunner(form: Int64) -> String
-```
-
-The `std/ui` runner that turns a `data` form into the loaded value.
-
-## vyxQueryDataType
-
-```vyrn
-fn vyxQueryDataType(ret: String) -> String
-```
-
-The data type a `data` return-type spelling carries ("" when `ret` is none
-of the four): the last type argument, since a params type comes first. This
-is what the synthesized `load()` returns. Exported so `std/ui` reads a
-`.vyrn` page's `data` the same way.
-
-## vyxPageInterface
-
-```vyrn
-fn vyxPageInterface(source: String) -> ModuleInterface
-```
-
-The public surface of a `.vyx` page's `<script>`, its statement-leading
-`export fn` declarations, as reflection for a contract check. The page has
-no `moduleInterface`, so this reads the source; unexported helpers are
-outside the contract.
-
-## vyxPageShape
-
-```vyrn
-fn vyxPageShape(source: String) -> VyxPageShape
-```
-
-Reflects a `.vyx` page's `<script>`: its `params` fields and loader. `err` is
-set on a malformed `params` block. Exported for `std/ui`.
-
-## vyxBuildPageModule
-
-```vyrn
-fn vyxBuildPageModule(source: String, dir: String, themed: Bool, theme: String) -> String
-```
-
-Builds a `.vyx` page module: the template compiles to a
-`uiPageBody(<params>[, data: Data])` view, and the module exports `page` and
-`Params`. Origins point at a synthetic `UiPageBody.vyx`; the unit tests use
-it.
-
-## vyxBuildPageClientModuleAt
-
-```vyrn
-fn vyxBuildPageClientModuleAt(source: String, srcPath: String, dir: String, themed: Bool, theme: String) -> String
-```
-
-`vyxBuildPageModuleAt` for the client bundle: `load`
-and its dead imports are stripped and `head`/`headTitle` omitted. The view,
-`Params` and `page` are the server module's, byte for byte.
-
-## vyxBuildPageModuleAt
-
-```vyrn
-fn vyxBuildPageModuleAt(source: String, srcPath: String, dir: String, themed: Bool, theme: String) -> String
-```
-
-`vyxBuildPageModule` with the real route-file path: when `srcPath` is set,
-origins target the real `.vyx`. The generated code is the same either way.
 
 ## vyxPage
 
@@ -305,24 +260,6 @@ fn vyxPageClientThemed(vyxPath: String, theme: String) -> String
 
 [`vyxPageClient`](#vyxpageclient) with classes checked against `theme`.
 
-## vyxBuildLayoutModule
-
-```vyrn
-fn vyxBuildLayoutModule(source: String, dir: String, themed: Bool, theme: String) -> String
-```
-
-Builds a `.vyx` layout module: `layout(children: Array<Html>) -> Html` around
-the compiled template, which must contain `<slot/>`, plus `head()` and
-`headTitle()`.
-
-## vyxBuildLayoutModuleAt
-
-```vyrn
-fn vyxBuildLayoutModuleAt(source: String, srcPath: String, dir: String, themed: Bool, theme: String) -> String
-```
-
-`vyxBuildLayoutModule` with the real `layout.vyx` path for origins.
-
 ## vyxLayout
 
 ```vyrn
@@ -338,24 +275,6 @@ fn vyxLayoutThemed(vyxPath: String, theme: String) -> String
 ```
 
 [`vyxLayout`](#vyxlayout) with the layout's classes checked against `theme`.
-
-## vyxBuildErrorModule
-
-```vyrn
-fn vyxBuildErrorModule(source: String, dir: String, themed: Bool, theme: String) -> String
-```
-
-Builds a `.vyx` error module: `errorPage(e: PageError) -> Html` around the
-compiled template, with the injected `error` prop.
-
-## vyxBuildErrorModuleAt
-
-```vyrn
-fn vyxBuildErrorModuleAt(source: String, srcPath: String, dir: String, themed: Bool, theme: String) -> String
-```
-
-`vyxBuildErrorModule` with the real `error.vyx` path. The injected
-`PageError` import has no origin.
 
 ## vyxError
 

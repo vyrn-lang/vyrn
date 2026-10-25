@@ -1327,3 +1327,50 @@ fn a_provider_that_is_not_a_generator_fails_at_the_tag() {
         "the arity diagnostic lands on the tag:\n{err}"
     );
 }
+
+/// The two `vyrn` blocks of the `vyxParseTemplate` doc, a generator and a
+/// program over it, build and print the outline the doc names.
+#[test]
+fn the_vyx_parse_template_doc_example_runs() {
+    let std_vyx = std::fs::read_to_string(repo_file("std/vyx.vyrn")).unwrap();
+    let decl = std_vyx
+        .find("export gen fn vyxParseTemplate(")
+        .expect("vyxParseTemplate is declared");
+    let doc_start = std_vyx[..decl]
+        .trim_end_matches('\n')
+        .rfind("\n\n")
+        .unwrap();
+    let mut blocks: Vec<String> = Vec::new();
+    let mut open: Option<String> = None;
+    for line in std_vyx[doc_start..decl].lines() {
+        let text = line.strip_prefix("///").unwrap_or("");
+        let text = text.strip_prefix(' ').unwrap_or(text);
+        match (text, &mut open) {
+            ("```vyrn", None) => open = Some(String::new()),
+            ("```", Some(_)) => blocks.extend(open.take()),
+            (t, Some(body)) => body.push_str(&format!("{t}\n")),
+            _ => {}
+        }
+    }
+    let [generator, program] = blocks.as_slice() else {
+        panic!("the doc holds {} vyrn blocks, not 2", blocks.len());
+    };
+    let dir = scratch("parsedoc");
+    write(&dir.join("outline.vyrn"), generator);
+    write(&dir.join("main.vyrn"), program);
+    let out = vyrn()
+        .arg("run")
+        .arg(dir.join("main.vyrn"))
+        .output()
+        .expect("run");
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    // The outline ends each line, and `print` adds one.
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        "ul:2\nli:3 :class\n\n"
+    );
+}
