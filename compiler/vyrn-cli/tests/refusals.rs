@@ -2161,6 +2161,26 @@ fn a_generator_import_of_an_export_to_gen_fn_is_refused() {
     );
 }
 
+/// `std/vyx` shares its page reflection with `std/ui` and its editor companion
+/// only.
+#[test]
+fn a_user_import_of_a_std_vyx_helper_for_std_ui_is_refused() {
+    let dir = common::scratch("export-to-std");
+    let src = "import { vyxPageShape } from \"std/vyx\"\nfn main() -> Int64 { return 0 }\n";
+    std::fs::write(dir.join("app.vyrn"), src).expect("write app.vyrn");
+    let out = vyrn()
+        .current_dir(&*dir)
+        .args(["check", "app.vyrn"])
+        .output()
+        .expect("vyrn check");
+    let err = String::from_utf8_lossy(&out.stderr).replace("\r\n", "\n");
+    assert!(!out.status.success(), "accepted");
+    assert_eq!(
+        err,
+        "app.vyrn:1:0: `vyxPageShape` is exported from `std/vyx` only to `std/ui`, `std/ui.editor`\n"
+    );
+}
+
 #[test]
 fn an_export_to_path_that_does_not_resolve_is_refused_at_its_declaration() {
     let src =

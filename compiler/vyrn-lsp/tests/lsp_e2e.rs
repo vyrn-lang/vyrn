@@ -703,6 +703,41 @@ fn main() -> Int64 {
     }
 }
 
+/// A user module's `vyx.` offers `std/vyx`'s public API, and neither a
+/// private helper nor one exported only to `std/ui`.
+#[test]
+fn member_completion_on_std_vyx_offers_only_its_public_api() {
+    let mut client = spawn_client();
+    let uri = "file:///member/vyxns.vyrn";
+    let src = "\
+import * as vyx from \"std/vyx\"
+fn main() -> Int64 {
+    let t = vyx.vyxParseTemplate(\"\")
+    return 0
+}
+";
+    did_open(&mut client, uri, "vyrn", src);
+    let _ = client.read_notification("textDocument/publishDiagnostics");
+    let labels = completion_labels(&mut client, uri, 2, 16);
+    for expected in ["components", "vyxParseTemplate", "VyxNode"] {
+        assert!(
+            labels.iter().any(|l| l == expected),
+            "{expected} missing: {labels:?}"
+        );
+    }
+    for hidden in [
+        "vyxPageShape",
+        "vyxDataRunner",
+        "vyxCompileComponent",
+        "vyxSlice",
+    ] {
+        assert!(
+            !labels.iter().any(|l| l == hidden),
+            "{hidden} offered: {labels:?}"
+        );
+    }
+}
+
 /// A builtin function has no declaration, so its hover is its contract.
 #[test]
 fn hover_on_a_builtin_function_shows_its_contract() {

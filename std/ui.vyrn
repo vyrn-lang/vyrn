@@ -232,31 +232,13 @@ export contract Page {
 
 /// The default that makes `page` optional. A page exports `page` or `respond`,
 /// so this is never substituted.
-export fn uiNoView() -> Html {
+fn uiNoView() -> Html {
     return empty()
 }
 
 /// The default that makes `respond` optional. See [`uiNoView`].
-export fn uiNoRespond() -> Response {
+fn uiNoRespond() -> Response {
     return Response { status: 404, contentType: "text/plain", body: "", vary: "", headers: [:] }
-}
-
-/// The `data` member's shape indices as `matchedMember` reports them, in the
-/// declaration order of `contract Page`. `fn data() -> Query<T>`.
-export fn uiDataQuery() -> Int64 {
-    return 0
-}
-
-export fn uiDataLazy() -> Int64 {
-    return 1
-}
-
-export fn uiDataParamQuery() -> Int64 {
-    return 2
-}
-
-export fn uiDataParamLazy() -> Int64 {
-    return 3
 }
 
 // Runtime helpers the router uses to answer a soft-nav data request with
@@ -735,8 +717,8 @@ type UiPageInfo = {
     dynNames: Array<String>,
     // Parallel to `dynNames`: `Int64` or `String`.
     dynTypes: Array<String>,
-    // The page has data to load. For a `.vyx` page, `vyxBuildPageModule` wraps
-    // its `data` into the `load()` the router calls.
+    // The page has data to load. For a `.vyx` page, the module `vyxPage`
+    // writes wraps its `data` into the `load()` the router calls.
     hasLoad: Bool,
     // The page module itself exports the `data` member, so the router runs the
     // query directly. False for a `.vyx` page.
