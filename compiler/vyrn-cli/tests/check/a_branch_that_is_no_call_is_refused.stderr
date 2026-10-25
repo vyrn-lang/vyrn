@@ -1,0 +1,1 @@
+a_branch_that_is_no_call_is_refused.vyrn:10:0: each branch of `both` is a call of a function, which `both` starts and waits for

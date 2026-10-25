@@ -1,0 +1,67 @@
+// `both` and `race` run waiting calls at once. Each branch starts in argument
+// order and runs to its first `await`; the host's timers decide what ends
+// first. A race cancels its loser where it waits, and the loser's frame
+// releases what it holds.
+import { both, race, sleep, Race } from "std/task"
+
+type Tally = { evens: Array<Int64>, odds: Array<Int64> }
+
+fn pause(label: String, ms: Int64) -> Int64 {
+    let held = "held by \{label}"
+    print("start \{label}")
+    await sleep(ms)
+    print("end \{label}, \{held}")
+    return ms
+}
+
+fn word(label: String, ms: Int64) -> String {
+    await sleep(ms)
+    return "\{label} after \{ms}"
+}
+
+fn count(xs: modify Array<Int64>, from: Int64, ms: Int64) -> Int64 {
+    let mut i = from
+    while i < 6 {
+        await sleep(ms)
+        xs.push(i)
+        i = i + 2
+    }
+    return xs.length
+}
+
+fn twice(label: String, ms: Int64) -> Int64 {
+    let r = await both(pause("\{label}.1", ms), pause("\{label}.2", ms * 2))
+    return r.first + r.second
+}
+
+fn square(n: Int64) -> Int64 {
+    return n * n
+}
+
+fn main() -> Int64 {
+    let r = await both(pause("a", 30), pause("b", 10))
+    print("both: \{r.first} \{r.second}")
+    match await race(word("slow", 40), word("fast", 5)) {
+        First(s) => print("race: first \{s}"),
+        Second(s) => print("race: second \{s}"),
+    }
+    match await race(pause("work", 50), sleep(15)) {
+        First(ms) => print("done in \{ms}"),
+        Second(_) => print("timed out"),
+    }
+    let mut t = Tally { evens: [], odds: [] }
+    let c = await both(count(t.evens, 0, 4), count(t.odds, 1, 3))
+    print("counted \{c.first} \{c.second}: \{t.evens.length} evens, \{t.odds.length} odds")
+    let mixed = await both(square(7), pause("lone", 5))
+    print("mixed: \{mixed.first} \{mixed.second}")
+    let mut total: Int64 = 0
+    let mut i: Int64 = 1
+    while i <= 2 {
+        let n = await both(twice("t\{i}", i), word("w\{i}", 4))
+        print("\{n.second}")
+        total = total + n.first
+        i = i + 1
+    }
+    print("total \{total}")
+    return 0
+}

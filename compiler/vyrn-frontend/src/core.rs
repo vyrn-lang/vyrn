@@ -398,10 +398,10 @@ pub enum Rhs {
         /// is bound to, in the callee's order. An argument no [`Target`] names
         /// stays in `args`.
         targets: Vec<Target>,
-        /// The source marked the call `await`: its cancellation edge. The
-        /// effect judgment refuses a mark on a call that does not wait and a
-        /// waiting call without one.
-        awaits: Option<Box<Cancel>>,
+        /// The source marked the call `await`: its cancellation edge, and a
+        /// fork's branches. The effect judgment refuses a mark on a call that
+        /// does not wait and a waiting call without one.
+        awaits: Option<Box<Await>>,
     },
     /// Arithmetic, comparison, interpolation, conversion: reads its operands.
     /// The last field is the producer type: the operator's own result.
@@ -410,17 +410,70 @@ pub enum Rhs {
     Make(Ctor, Vec<Val>),
 }
 
-/// The cancellation edge of an awaited call. A cancelled wait runs `rows`,
-/// the releases the placer put there, and then the frame exits with no value,
-/// as a `return` does ([`crate::own::Exit::Cancel`]). The edge leaves after the
-/// call took its arguments and before the row binds its result, so no row on
-/// it names the result.
+/// What an awaited call waits on. Its cancellation edge: a cancelled wait
+/// runs `rows`, the releases the placer put there, and then the frame exits
+/// with no value, as a `return` does ([`crate::own::Exit::Cancel`]). The edge
+/// leaves after the call took its arguments and before the row binds its
+/// result, so no row on it names the result.
 #[derive(Debug, Clone)]
-pub struct Cancel {
+pub struct Await {
     pub rows: Vec<St>,
     /// The `await`'s call, the plan's key for the edge's releases.
     pub site: NodeId,
     pub line: usize,
+    /// The branches of a `both` or `race` row, whose kind is [`Callee::Fork`].
+    pub fork: Option<Fork>,
+}
+
+/// The branches of a `both` or `race` call: one call each, whose arguments
+/// are the row's, in order. The row is one call to the kernel, so a `modify`
+/// or `consume` argument of one branch is exclusive of every other branch's.
+#[derive(Debug, Clone)]
+pub struct Fork {
+    pub form: Form,
+    pub branches: Vec<Branch>,
+}
+
+/// How a [`Fork`] settles: `both` when every branch finished, `race` when
+/// the first did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Form {
+    Both,
+    Race,
+}
+
+/// One branch of a [`Fork`]: a call as a [`Rhs::Call`] states it, whose
+/// arguments are the `args` row arguments after those of the branches before
+/// it.
+#[derive(Debug, Clone)]
+pub struct Branch {
+    pub callee: String,
+    pub kind: Callee,
+    pub args: usize,
+    pub ret: Option<Type>,
+    pub solved: Vec<(String, Type)>,
+    pub targets: Vec<Target>,
+    /// The temporary an emitter holds the branch's result in until the row
+    /// binds the fork's value. No row binds it: the result is the fork's own.
+    pub result: Name,
+}
+
+impl Fork {
+    /// Each branch with its arguments, a slice of the row's `args`.
+    pub fn calls<'f, 'a>(
+        &'f self,
+        args: &'a [(Arg, Capability)],
+    ) -> impl Iterator<Item = (&'f Branch, &'a [(Arg, Capability)])> + 'f
+    where
+        'a: 'f,
+    {
+        let mut at = 0;
+        self.branches.iter().map(move |b| {
+            let these = &args[at..at + b.args];
+            at += b.args;
+            (b, these)
+        })
+    }
 }
 
 /// What a `fn`-typed parameter of a specialization calls: one
@@ -480,6 +533,9 @@ pub enum Callee {
     /// the name, so every walker that counts a row's names counts it
     /// ([`Callee::value`]).
     Value(Name),
+    /// A `both` or `race` of `std/task`: its branches are the row's
+    /// [`Fork`], and an emitter calls each branch, never the row's callee.
+    Fork,
 }
 
 impl Callee {
@@ -496,7 +552,7 @@ impl Callee {
     /// whose capabilities `vyrn_lower::core::Builder::call` synthesizes stores its argument
     /// instead, and storing a heapless value copies it.
     pub fn declared(self) -> bool {
-        self.direct() || matches!(self, Callee::Method | Callee::Projection)
+        self.direct() || matches!(self, Callee::Method | Callee::Projection | Callee::Fork)
     }
 
     /// Whether an emitter calls the callee's name directly: a declared
@@ -839,8 +895,8 @@ impl St {
         lists!(self, iter_mut, &mut)
     }
 
-    /// The cancellation edge of an awaited call row.
-    pub fn cancel(&self) -> Option<&Cancel> {
+    /// What an awaited call row waits on.
+    pub fn awaits(&self) -> Option<&Await> {
         match self {
             St::Let(_, Rhs::Call { awaits, .. })
             | St::Do {
@@ -913,6 +969,34 @@ pub enum Copied {
 }
 
 impl Rhs {
+    /// The callee and kind of each call a row runs: a fork's branches, or
+    /// the row's own call. Empty for a row that is no call.
+    fn calls(&self) -> impl Iterator<Item = (&str, Callee)> {
+        let (one, fork) = match self {
+            Rhs::Call {
+                awaits: Some(a),
+                kind: Callee::Fork,
+                ..
+            } => (None, a.fork.as_ref()),
+            Rhs::Call { callee, kind, .. } => (Some((callee.as_str(), *kind)), None),
+            _ => (None, None),
+        };
+        let branches = fork.into_iter().flat_map(|f| f.branches.iter());
+        one.into_iter()
+            .chain(branches.map(|b| (b.callee.as_str(), b.kind)))
+    }
+
+    /// The callee names a call row runs: a fork's branches, or the callee.
+    pub fn callees(&self) -> impl Iterator<Item = &str> {
+        self.calls().map(|(c, _)| c)
+    }
+
+    /// The function values a call row runs through: the callee's, or each
+    /// branch's of a fork.
+    pub fn called(&self) -> impl Iterator<Item = Name> + '_ {
+        self.calls().filter_map(|(_, k)| k.value())
+    }
+
     /// Returns what this row makes when it binds `bound`, an owned name, or
     /// `None` when it makes no block: the row binds nothing owned, it moves
     /// or reads a value, or it is an empty array literal.
@@ -974,8 +1058,8 @@ impl Rhs {
         match self {
             Rhs::Val(v) => f(v, Use::Read),
             Rhs::Read(p) | Rhs::Take(p) => p.operands(f),
-            Rhs::Call { args, kind, .. } => {
-                if let Some(n) = kind.value() {
+            Rhs::Call { args, .. } => {
+                for n in self.called() {
                     f(&Val::Name(n), Use::Read);
                 }
                 for (a, c) in args {
@@ -1210,7 +1294,7 @@ impl Body {
     /// for the frame the core built, instance by instance.
     pub fn waits(&self) -> bool {
         fn any(ss: &[St]) -> bool {
-            (ss.iter()).any(|s| s.cancel().is_some() || s.lists().any(|l| any(l)))
+            (ss.iter()).any(|s| s.awaits().is_some() || s.lists().any(|l| any(l)))
         }
         any(&self.stmts)
     }
@@ -1381,10 +1465,27 @@ impl Body {
 
     fn render_cancel(&self, r: &Rhs, depth: usize, out: &mut String) {
         if let Rhs::Call {
-            awaits: Some(c), ..
+            awaits: Some(c),
+            args,
+            ..
         } = r
         {
-            out.push_str(&format!("{}cancelled:\n", "  ".repeat(depth + 1)));
+            let pad = "  ".repeat(depth + 1);
+            for (b, args) in c.fork.iter().flat_map(|f| f.calls(args)) {
+                let call = Rhs::Call {
+                    callee: b.callee.clone(),
+                    args: args.to_vec(),
+                    write_back: false,
+                    kind: b.kind,
+                    ret: None,
+                    solved: Vec::new(),
+                    targets: Vec::new(),
+                    awaits: None,
+                };
+                let held = self.spell(b.result);
+                out.push_str(&format!("{pad}branch {held} = {}\n", self.rhs(&call)));
+            }
+            out.push_str(&format!("{pad}cancelled:\n"));
             self.render_stmts(&c.rows, depth + 2, out);
         }
     }

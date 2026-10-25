@@ -285,8 +285,20 @@ pub struct Call {
     /// Whether the call binds an owned result, which is the frame's own
     /// allocation when the callee is no user body.
     pub born: bool,
-    /// Whether the source marked the call `await`.
-    pub awaits: bool,
+    pub mark: Mark,
+}
+
+/// How the source marked a [`Call`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mark {
+    /// No `await`.
+    None,
+    /// `await` before the call.
+    Await,
+    /// `await` before a `both` or `race` whose `n` branch calls follow it.
+    Fork(usize),
+    /// A branch of the fork before it, which that fork's mark covers.
+    Branch,
 }
 
 #[cfg(test)]

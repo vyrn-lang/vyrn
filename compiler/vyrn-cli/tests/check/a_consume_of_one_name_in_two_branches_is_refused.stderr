@@ -1,0 +1,2 @@
+a_consume_of_one_name_in_two_branches_is_refused.vyrn:10:0: `s` is used here but was already consumed by `both(..)` on line 10
+  (a `consume` parameter takes ownership; the value can't be used afterward)

@@ -1,0 +1,2 @@
+a_waiting_branch_of_a_both_without_await_is_refused.vyrn:9:0: `pause` waits, and its call has no `await`
+  fix: write `await` before the call

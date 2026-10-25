@@ -26,11 +26,14 @@ the same module to wabt's `wasm2c` and compiles the C with clang; the binary
 runs on the thread's own stack. There is no interpreter. Each host hands a
 stack overflow to the module, which traps `call stack exhausted`.
 
-A module that waits imports `vyrn_wait.sleep(ms) -> id` and exports
-`__vyrn_wake(id, status, payload)`. Each host runs the event loop after
+A module that waits imports `vyrn_wait.sleep(ms) -> id` and
+`vyrn_wait.cancel(id)`, and exports `__vyrn_wake(id, status, payload)`. A
+cancelled operation is never delivered. Each host runs the event loop after
 `_start`, and after each export call that waits: it delivers the earliest
 pending timer, ties by id, as it comes due, until none is pending. The embedded
-wasmtime, the native host and `web/wasi-min.js` share this rule.
+wasmtime, the native host and `web/wasi-min.js` share this rule. The shim arms one
+`setTimeout` per timer, so a timer one task sets while another waits fires at its
+own deadline.
 
 A `gen fn` generator also runs as compiled wasm, in the same embedded engine,
 while the program loads.

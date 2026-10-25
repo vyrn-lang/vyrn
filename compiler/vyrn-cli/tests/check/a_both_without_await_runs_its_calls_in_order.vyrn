@@ -1,0 +1,14 @@
+import { both, race, Race } from "std/task"
+
+fn two(n: Int64) -> Int64 {
+    return n * 2
+}
+
+fn main() -> Int64 {
+    let r = both(two(1), two(2))
+    let q = race(two(3), two(4))
+    if let First(n) = q {
+        return r.first + r.second + n
+    }
+    return 0
+}

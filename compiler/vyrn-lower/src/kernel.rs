@@ -304,12 +304,10 @@ fn writes_of<'s>(
             Rhs::Val(v) => vec![Write::Hand(v, false)],
             Rhs::Make(_, vs) => vs.iter().map(|v| Write::Hand(v, false)).collect(),
             Rhs::Take(p) => vec![Write::Take(p)],
-            Rhs::Call {
-                callee, args, kind, ..
-            } => {
+            Rhs::Call { args, kind, .. } => {
                 let consumed = args.iter().filter(|(_, c)| *c == Capability::Consume);
                 let modified = args.iter().filter(|(_, c)| *c == Capability::Modify);
-                let state = crate::effects::writes_state(state, frame, callee);
+                let state = writes_state_of(state, frame, r);
                 (consumed.filter_map(|(a, _)| Some(Write::Hand(a.val()?, kind.declared()))))
                     .chain(modified.map(|(a, _)| Write::Modify(a)))
                     .chain((!state.is_empty()).then_some(Write::State(state)))
@@ -336,13 +334,33 @@ fn writes_of<'s>(
     w
 }
 
+/// The globals the call row `r` may store into: its callee's, or every
+/// branch's of a fork.
+fn writes_state_of(state: &StateCallees, frame: Option<FnId>, r: &Rhs) -> Vec<String> {
+    state_of(r.callees(), frame, state)
+}
+
 /// The globals the declared releases `runs` may store into, by the effect
 /// judgment of the frame `frame`.
 fn release_state(runs: &[String], frame: Option<FnId>, state: &StateCallees) -> Vec<String> {
-    let mut gs: Vec<String> = (runs.iter())
-        .flat_map(|r| crate::effects::writes_state(state, frame, r))
-        .collect();
-    gs.sort();
+    state_of(runs.iter().map(String::as_str), frame, state)
+}
+
+/// The globals calls of `callees` may store into, by the effect judgment of
+/// the frame `frame`: the declared releases a row runs, or a call's callees.
+fn state_of<'c>(
+    callees: impl IntoIterator<Item = &'c str>,
+    frame: Option<FnId>,
+    state: &StateCallees,
+) -> Vec<String> {
+    let mut gs = (callees.into_iter())
+        .map(|c| crate::effects::writes_state(state, frame, c))
+        .reduce(|mut gs, more| {
+            gs.extend(more);
+            gs
+        })
+        .unwrap_or_default();
+    gs.sort_unstable();
     gs.dedup();
     gs
 }
@@ -2132,7 +2150,7 @@ impl<'b> Kernel<'b> {
             } => {
                 // Reads first, takes after, so one call may read and take the
                 // same receiver (`dup.append(dup)`).
-                if let Some(f) = kind.value() {
+                for f in r.called() {
                     self.read(st, &Val::Name(f))?;
                 }
                 self.exclusive(st, callee, args, *write_back)?;
@@ -2156,7 +2174,7 @@ impl<'b> Kernel<'b> {
                         }
                     }
                 }
-                let gs = crate::effects::writes_state(self.state, self.body.id, callee);
+                let gs = writes_state_of(self.state, self.body.id, r);
                 if !gs.is_empty() {
                     self.state_args(st, args, &gs)?;
                 }

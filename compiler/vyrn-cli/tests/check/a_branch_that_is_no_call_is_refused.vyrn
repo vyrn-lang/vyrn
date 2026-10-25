@@ -1,0 +1,12 @@
+import { both, sleep } from "std/task"
+
+fn pause(ms: Int64) -> Int64 {
+    await sleep(ms)
+    return ms
+}
+
+fn main() -> Int64 {
+    let n: Int64 = 3
+    let r = await both(n, pause(1))
+    return r.second
+}

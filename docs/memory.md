@@ -211,7 +211,9 @@ The compiler releases an owned value at each exit where it is still held:
 - the end of the block that bound it;
 - a `return`, and a `?` that propagates;
 - a `break` or `continue`, for the frames the loop body opened;
-- a cancelled `await`, for what a `return` there would release;
+- a cancelled `await`, for what a `return` there would release; a cancelled
+  `both` or `race`, or a `race` that settled, first cancels each branch still
+  waiting and releases each finished branch's result it does not keep;
 - the end of a `match`, `if let` or `for` that owns a temporary scrutinee;
 - the end of an arm, for a payload binder the arm did not move;
 - each edge of a join where one path consumed the value and another did not.

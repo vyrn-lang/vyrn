@@ -445,10 +445,22 @@ The module's shape:
   the caller down the row's cancellation edge, then out with status 1
   (`Fn_::await_close`).
 - The run queue: `std/task`'s module state holds a task per call that started
-  one, and `wake` runs the woken tasks in wake order. A task's root is `main` (0) or a waiting export (from 1),
+  one and a wait per host operation a task waits on, found by the operation's
+  id, and `wake` runs the woken tasks in wake order. A task's root is `main` (0) or a waiting export (from 1),
   whose export is a step that begins the task. `__vyrn_wake` is `std/task`'s
   `wake`, whose `hostResume` call is the emitter's `$resumeRoot` dispatcher
-  over the roots. `hostSleep` is the import `vyrn_wait.sleep`.
+  over the roots. `hostSleep` is the import `vyrn_wait.sleep`, and `hostCancel`
+  the import `vyrn_wait.cancel`, which drops a cancelled wait's operation.
+- Forks: an awaited `both` or `race` is one call row of kind `Callee::Fork`,
+  whose arguments are every branch's in order and whose `core::Fork` holds each
+  branch's callee and argument count, so the kernel judges the branches as one
+  call. The row is one resume point (`Fn_::core_fork`). Its start calls each
+  branch with frame 0 in argument order; a resume polls each branch still
+  waiting. A branch's call is `Fn_::core_user_call`'s, and its result lands in
+  the branch's `result` name until the fork builds the row's value from them.
+  To cancel a branch the fork polls it between `std/task`'s `cancelBegin` and
+  `cancelEnd`, where every host wait answers cancelled, so each frame on the
+  branch takes its cancellation edge.
 - Traps: a failed check stores its row and value and branches to the one
   `trapAt` call per function. The wording is `vyrn_frontend::trap`'s table,
   laid out as data; `std/runtime` prints it. `tests/traps.rs` fails if any

@@ -1,5 +1,5 @@
 constructor	checker	shared	wasm	types	prelude	editor	all
-Type::Int	31	2	54	11	0	1	99
+Type::Int	31	2	55	11	0	1	100
 Type::IntN	8	2	10	21	4	1	46
 Type::Float	9	2	18	5	0	1	35
 Type::Float32	12	2	17	5	5	0	41
@@ -18,7 +18,7 @@ Type::Omit	2	1	0	6	0	0	9
 Type::Pick	2	1	0	6	0	0	9
 Type::Merge	2	1	0	6	0	0	9
 Type::Partial	2	1	0	6	0	0	9
-Type::Enum	9	5	8	9	1	2	34
+Type::Enum	9	5	9	9	1	2	35
 Type::Param	21	1	2	6	6	1	37
 Type::App	14	1	1	11	1	0	28
 Type::Order	4	1	0	2	0	0	7
@@ -34,4 +34,4 @@ Type::Fn	25	5	20	10	1	0	61
 Type::Lazy	5	1	2	9	0	0	17
 Type::Never	1	2	2	3	2	0	10
 Type::Err	80	1	0	3	0	0	84
-all	434	63	379	226	52	24	1178
+all	434	63	381	226	52	24	1180

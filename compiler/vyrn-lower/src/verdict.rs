@@ -400,7 +400,10 @@ fn reach(program: &Program, world: &World, b: &Body, rhs: &Rhs) -> Reach {
     }
     match kind {
         Callee::Value(_) | Callee::Bound => Reach::Traps(Trap::Value),
-        Callee::Method | Callee::Projection => Reach::Traps(Trap::Unbuilt(name.into())),
+        // A fork runs its branches, which no one body states.
+        Callee::Method | Callee::Projection | Callee::Fork => {
+            Reach::Traps(Trap::Unbuilt(name.into()))
+        }
         Callee::Fn(f) => match program.functions.get(f.index()) {
             Some(d) if d.is_extern => match extern_effect(d) {
                 // A host-boundary extern the runtime implements on every

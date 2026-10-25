@@ -689,6 +689,8 @@ rules! {
         fix "write `await` before the call";
     AwaitNoWait { callee } "`await` marks a call that waits, and `{callee}` does not wait";
     WaitsUnbuilt { name, line } "waiting code does not build yet: `{name}` waits at line {line}";
+    ForkBranch { form }
+        "each branch of `{form}` is a call of a function, which `{form}` starts and waits for";
     InitializerWaits { callee }
         "a module-state initializer cannot wait, and `{callee}` waits: state is set \
         before `main` runs";

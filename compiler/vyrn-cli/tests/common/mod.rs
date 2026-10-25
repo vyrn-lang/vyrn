@@ -228,7 +228,17 @@ pub const ENGINE_TRAP: &[(&str, &str)] = &[("recdepth.vyrn", "recurses until the
 
 /// Examples that wait. The `wasmtime` CLI supplies neither the host's waits nor an
 /// event loop, so `tests/route.rs` compares these with `vyrn run` instead.
-pub const WAITING: &[(&str, &str)] = &[("waiting.vyrn", "waits on the host's timers")];
+pub const WAITING: &[(&str, &str)] = &[
+    (
+        "concurrent.vyrn",
+        "runs waiting calls at once on the host's timers",
+    ),
+    (
+        "fanout.vyrn",
+        "runs one waiting call per element, and one against a timer",
+    ),
+    ("waiting.vyrn", "waits on the host's timers"),
+];
 
 /// Project entries under `examples/*/` that their artifact's floor refuses,
 /// with text the refusal must contain. `tests/floor.rs` asserts each; the corpus

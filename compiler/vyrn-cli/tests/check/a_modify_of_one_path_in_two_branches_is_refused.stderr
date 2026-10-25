@@ -1,0 +1,3 @@
+a_modify_of_one_path_in_two_branches_is_refused.vyrn:13:0: `p.a` is passed to `both` as `modify` and read again in the same call — a `modify` borrow is exclusive
+  fix: `p.copy()` for the second argument
+  fix: or split the call so the two accesses do not overlap

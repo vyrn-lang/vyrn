@@ -1,0 +1,1 @@
+an_await_on_a_both_of_calls_that_do_not_wait_is_refused.vyrn:8:0: `await` marks a call that waits, and `both` does not wait

@@ -990,6 +990,13 @@ fn table() -> Vec<Builtin> {
             .effect(Waits)
             .home("std/task")
             .hover("hostSleep(ms) -> Unit — wait `ms` milliseconds while the host runs other tasks; only `std/task` may call it, and `sleep` is the one to call"),
+        // The host drops the operation of a cancelled wait:
+        // `std/task`'s run queue is the one caller.
+        b("hostCancel")
+            .sig(row("hostCancel", &[], &[("id", Read, Int)], Unit, &[]))
+            .spec(Spec::Effect(Unit))
+            .home("std/task")
+            .hover("hostCancel(id) -> Unit — tell the host to drop operation `id`, whose wait was cancelled; only `std/task`'s run queue calls it"),
         // A step of a task the host started: `std/task`'s run queue is the one caller.
         // It runs the task's code, which may trap.
         b("hostResume")

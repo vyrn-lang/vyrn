@@ -20,7 +20,7 @@ use vyrn_frontend::rules::{rule, DeclName, Rule};
 /// The lattice's table lives in `vyrn_frontend::effects` because the
 /// generation fence reads it mid-check and cannot see this crate.
 pub use vyrn_frontend::effects::{
-    atom, atoms, extern_effect, gen_allows, gen_refusal, Call, Effect, Effects, Walked,
+    atom, atoms, extern_effect, gen_allows, gen_refusal, Call, Effect, Effects, Mark, Walked,
     GEN_ATOM_OVERRIDES,
 };
 
@@ -148,16 +148,23 @@ impl Judged<'_> {
 
     /// Each call of frame `i`, run where `at` says, that breaks a waiting
     /// rule, with its line: a mark on a call that does not wait, and a waiting
-    /// call without one or where nothing may wait.
+    /// call without one or where nothing may wait. A fork waits when one of
+    /// its branches does, and a branch has no mark of its own to break.
     pub fn wait_rules(&self, i: usize, at: Waiting) -> impl Iterator<Item = (usize, Rule)> + '_ {
-        let calls = self.frames[i].calls.iter().zip(&self.resolved[i]);
-        calls.filter_map(move |(c, k)| {
+        let (calls, ks) = (&self.frames[i].calls, &self.resolved[i]);
+        (0..calls.len()).filter_map(move |j| {
+            let c = &calls[j];
             let callee = DeclName(&c.callee);
-            let r = match (self.waits(*k), at, c.awaits) {
+            let waits = match c.mark {
+                Mark::Fork(n) => (j + 1..j + 1 + n).any(|b| self.waits(ks[b])),
+                _ => self.waits(ks[j]),
+            };
+            let r = match (waits, at, c.mark) {
                 (true, Waiting::Initializer, _) => rule!(InitializerWaits, callee),
-                (true, Waiting::Body, false) => rule!(AwaitMissing, callee),
-                (false, _, true) => rule!(AwaitNoWait, callee),
-                (true, Waiting::Body, true) | (false, _, false) => return None,
+                (true, Waiting::Body, Mark::None) => rule!(AwaitMissing, callee),
+                (false, _, Mark::Await | Mark::Fork(_)) => rule!(AwaitNoWait, callee),
+                (true, Waiting::Body, Mark::Await | Mark::Fork(_) | Mark::Branch)
+                | (false, _, Mark::None | Mark::Branch) => return None,
             };
             Some((c.line, r))
         })
@@ -188,9 +195,11 @@ impl Judged<'_> {
             u.effects = u.effects.join(*e);
             u.writes.append(&mut writes);
             u.via = u.via.or(step.and_then(|j| refs.get(j)?.id));
-            u.awaits_at = u
-                .awaits_at
-                .or(f.calls.iter().find(|c| c.awaits).map(|c| c.line));
+            u.awaits_at = u.awaits_at.or(f
+                .calls
+                .iter()
+                .find(|c| c.mark != Mark::None)
+                .map(|c| c.line));
         }
         out
     }
@@ -426,7 +435,7 @@ fn walk(b: &Body) -> Walk<'_> {
     rows(&b.stmts).for_each(|(s, _)| w.stmt(s));
     for info in b.names.iter().filter(|i| !i.borrow) {
         for r in &info.runs {
-            w.call(r, None, info.line, false, false);
+            w.call(r, None, info.line, false, Mark::None);
         }
     }
     w
@@ -510,17 +519,26 @@ impl<'a> Walk<'a> {
                 self.place(p);
             }
         }
-        self.call(callee, kind.value(), line, born, awaits.is_some());
+        let fork = awaits.as_ref().and_then(|a| a.fork.as_ref());
+        let mark = match (awaits, fork) {
+            (_, Some(f)) => Mark::Fork(f.branches.len()),
+            (Some(_), None) => Mark::Await,
+            (None, _) => Mark::None,
+        };
+        self.call(callee, kind.value(), line, born, mark);
+        for b in fork.iter().flat_map(|f| &f.branches) {
+            self.call(&b.callee, b.kind.value(), line, false, Mark::Branch);
+        }
     }
 
     /// Records a call to `callee`, through `value` when it is a function value.
-    fn call(&mut self, callee: &str, value: Option<Name>, line: usize, born: bool, awaits: bool) {
+    fn call(&mut self, callee: &str, value: Option<Name>, line: usize, born: bool, mark: Mark) {
         self.out.calls.push(Call {
             callee: callee.to_string(),
             through: value.map(|n| self.body.names[n.index()].ty.clone()),
             line,
             born,
-            awaits,
+            mark,
         });
     }
 }

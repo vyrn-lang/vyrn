@@ -1,0 +1,15 @@
+import { both, sleep } from "std/task"
+
+type P = { a: Array<Int64>, b: Array<Int64> }
+
+fn fill(xs: modify Array<Int64>, ms: Int64) -> Int64 {
+    await sleep(ms)
+    xs.push(ms)
+    return ms
+}
+
+fn main() -> Int64 {
+    let mut p = P { a: [], b: [] }
+    let r = await both(fill(p.a, 2), fill(p.a, 1))
+    return r.first
+}
