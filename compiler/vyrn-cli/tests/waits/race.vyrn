@@ -1,0 +1,17 @@
+// The host's deliveries decide a race: the timer it delivers first wins, and
+// the other branch is cancelled where it waits.
+import { race, sleep, Race } from "std/task"
+
+fn word(label: String, ms: Int64) -> String {
+    let held = "held by \{label}"
+    await sleep(ms)
+    return "\{label} after \{ms}, \{held}"
+}
+
+fn main() -> Int64 {
+    match await race(word("slow", 50), word("fast", 10)) {
+        First(s) => print("first: \{s}"),
+        Second(s) => print("second: \{s}"),
+    }
+    return 0
+}

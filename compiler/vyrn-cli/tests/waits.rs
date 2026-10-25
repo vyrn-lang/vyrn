@@ -1,8 +1,9 @@
-//! Waiting code runs: `examples/waiting.vyrn` built with the free audit prints its
+//! Waiting code runs: each waiting example built with the free audit prints its
 //! recorded stdout when the host delivers every wait, and frees every frame and
-//! every value whichever wait the host cancels. Each waiting example prints the
-//! same bytes when the host replays what it delivered. The programs under
-//! `tests/waits/` witness `vyrn test`'s clock and what does not build.
+//! every value whichever wait the host cancels. Each prints the same bytes when
+//! the host replays what it delivered. The programs under
+//! `tests/waits/` witness `vyrn test`'s clock, a race the host's delivery order
+//! decides, and what does not build.
 
 mod common;
 use common::*;
@@ -91,6 +92,32 @@ fn a_replay_of_the_recorded_wakes_prints_the_same_bytes() {
         let seen = |o: &vyrn_cli::wasmrun::Outcome| (o.code, o.stdout.clone(), o.stderr.clone());
         assert_eq!(seen(&again), seen(&first), "{name}");
         assert_eq!(again.wakes, first.wakes, "{name}");
+    }
+}
+
+/// A replay is a schedule the clock need not produce: delivered first, the slow timer wins
+/// the race, the fast branch is cancelled where it waits, and its timer is never delivered.
+#[test]
+fn the_wake_a_host_delivers_first_wins_a_race() {
+    let dir = scratch("waits-race");
+    let wasm = dir.join("race.wasm");
+    let out = vyrn()
+        .args(["build", "--target", "wasm", "race.vyrn", "-o"])
+        .arg(&wasm)
+        .env("VYRN_LEAK_CHECK", "1")
+        .current_dir(waits_dir())
+        .output()
+        .expect("run vyrn build");
+    assert!(out.status.success(), "{}", norm(&out.stderr));
+    let bytes = std::fs::read(&wasm).expect("the built module");
+    let clock = run(&bytes, quiet("race.vyrn", None)).expect("the module runs");
+    assert_eq!(norm(&clock.stdout), "second: fast after 10, held by fast\n");
+    let slow = vec![Wake { id: 1, status: 0 }];
+    for _ in 0..2 {
+        let out = run(&bytes, quiet("race.vyrn", Some(slow.clone()))).expect("the module runs");
+        let seen = (out.code, norm(&out.stdout), norm(&out.stderr), out.wakes);
+        let want = "first: slow after 50, held by slow\n".to_string();
+        assert_eq!(seen, (0, want, String::new(), slow.clone()));
     }
 }
 
