@@ -1,7 +1,7 @@
 //! Waiting code runs: `tests/waits/frames.vyrn` built with the free audit prints
 //! its `frames.stdout` when the host delivers every wait, and frees every frame
-//! and every value whichever wait the host cancels. `lambda.vyrn` and
-//! `region.vyrn` witness what does not build.
+//! and every value whichever wait the host cancels. `longsleep.vyrn` witnesses
+//! `vyrn test`'s clock, and `lambda.vyrn` and `region.vyrn` what does not build.
 
 mod common;
 use common::*;
@@ -67,6 +67,24 @@ fn a_cancelled_wait_releases_every_frame_on_its_path() {
             "wake {k}"
         );
     }
+}
+
+/// A test that sleeps an hour passes at once: its timers run on a clock that only
+/// a wake advances.
+#[test]
+fn a_test_sleeps_on_the_virtual_clock() {
+    let begun = std::time::Instant::now();
+    let out = vyrn()
+        .args(["test", "longsleep.vyrn"])
+        .current_dir(waits_dir())
+        .output()
+        .expect("run vyrn test");
+    let report = "test \"an hour's sleep\" ... ok\n\n1 passed, 0 failed\n";
+    assert_eq!(
+        (norm(&out.stdout), norm(&out.stderr)),
+        (report.to_string(), String::new())
+    );
+    assert!(begun.elapsed() < std::time::Duration::from_secs(60));
 }
 
 /// The build refuses what has no lowering yet, naming the function and the line.

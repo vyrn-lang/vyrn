@@ -5856,6 +5856,8 @@ fn bodies_wasm(
         argv: vec![path.to_string()],
         // Read per body: a trap's wording is the `FAILED:` message.
         capture_stderr: true,
+        // A body's timers fire at once, in deadline order.
+        virtual_clock: true,
         ..Default::default()
     };
     let gen = generation.then(|| vyrn_genwasm::GenState::new(&prog));

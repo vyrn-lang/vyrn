@@ -1,0 +1,16 @@
+// `vyrn test` runs timers on a virtual clock: an hour's sleep ends at once.
+import { sleep } from "std/task"
+
+fn pause(ms: Int64) -> Int64 {
+    await sleep(ms)
+    return ms
+}
+
+test "an hour's sleep" {
+    let n = await pause(3600000)
+    assert(n == 3600000)
+}
+
+fn main() -> Int64 {
+    return 0
+}

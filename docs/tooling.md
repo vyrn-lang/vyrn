@@ -148,7 +148,8 @@ through `$VYRN_WASM2C`, `$VYRN_SIMDE` and `$VYRN_WASM_OPT`, then the
 ### `vyrn test [file] [--name <substring>]`
 
 Runs the root file's `test "name" { ... }` blocks in declaration order and exits
-1 if any failed. `assert` and `assertEq` are legal only inside a test body.
+1 if any failed. Timers run on a virtual clock that only a wake advances, so a
+test that sleeps an hour ends at once. `assert` and `assertEq` are legal only inside a test body.
 The root's test blocks are type-checked with the program and stripped from
 `run` and `build`; an imported module's are neither parsed nor checked. A file
 with no tests, or none that `--name` selects, prints `no tests` and exits 0.
