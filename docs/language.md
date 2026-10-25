@@ -322,7 +322,8 @@ fn page(id: Int64) -> String {
 - No task outlives the call that started it: `both` and `race` return only after each branch finished or was cancelled.
 
 `each(xs, f)` calls `f` on every element at once and returns the results in index order; `timeout(ms, f)` is `race(f(), sleep(ms))`, giving `Some` of the result or `None`. Both are `std/task` code over `both` and `race`, so their calls start in order and a timed-out call is cancelled where it waits. `f` is a function, because an argument call would run before `each` or `timeout` starts: `await each(urls, fetchPage)`, `await timeout(500, fetchHome)`. Each needs an `f` that waits.
-- A waiting lambda, an `await` inside a `region` or through a function value, and a waiting export that returns a value do not build yet: ``waiting code does not build yet: `main` waits at line 10``.
+- A lambda waits as a function does, and a call that passes one to a `fn` parameter calls it directly: `await timeout(500, () -> await fetchPage(url))`.
+- An `await` inside a `region` or through a function value, and a waiting export that returns a value, do not build yet: ``waiting code does not build yet: `main` waits at line 10``.
 
 ### Function types
 

@@ -1,5 +1,5 @@
-// A lambda that waits has no lowering yet: a builtin or a call through a
-// function value runs it where no point can resume.
+// A lambda that waits runs where a `fn` parameter's specialization calls it,
+// each call resuming at its own frame: `twice` waits on it twice.
 import { sleep } from "std/task"
 
 fn twice(f: fn(Int64) -> Int64, x: Int64) -> Int64 {

@@ -2844,11 +2844,7 @@ fn lower_body(
     };
     let core = core_body(key, f, &binds, cx);
     // A waiting frame is a heap block with its points in two locals; its last parameter is the
-    // frame's address, 0 on the first call. A lambda's frame is called where no point is.
-    if sig.waits && f.name.starts_with(LAMBDA) {
-        let name = core.as_ref().map_or(owner.as_str(), |c| c.spelled(&owner));
-        return Err(vyrn_frontend::rule!(WaitsUnbuilt, name, line = f.line).render());
-    }
+    // frame's address, 0 on the first call.
     let resume = sig.waits.then(|| Resume {
         at: b.local(ValType::I32),
         cancelled: b.local(ValType::I32),

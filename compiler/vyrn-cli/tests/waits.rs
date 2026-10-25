@@ -139,10 +139,23 @@ fn a_test_sleeps_on_the_virtual_clock() {
     assert!(begun.elapsed() < std::time::Duration::from_secs(60));
 }
 
+/// A waiting lambda a specialization binds is a direct call with its own frame.
+#[test]
+fn a_waiting_lambda_runs_where_its_parameter_is_bound() {
+    let out = vyrn()
+        .args(["run", "lambda.vyrn"])
+        .env("VYRN_LEAK_CHECK", "1")
+        .current_dir(waits_dir())
+        .output()
+        .expect("run vyrn run");
+    let seen = (out.status.code(), norm(&out.stdout), norm(&out.stderr));
+    assert_eq!(seen, (Some(0), "3\n".to_string(), String::new()));
+}
+
 /// The build refuses what has no lowering yet, naming the function and the line.
 #[test]
-fn a_waiting_lambda_and_a_waiting_region_do_not_build_yet() {
-    for (name, line) in [("lambda", 10), ("region", 8)] {
+fn a_waiting_region_does_not_build_yet() {
+    for (name, line) in [("region", 8)] {
         let dir = scratch("waits-refused");
         let out = vyrn()
             .args(["build", "--target", "wasm", &format!("{name}.vyrn"), "-o"])
