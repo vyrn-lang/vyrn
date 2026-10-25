@@ -29,7 +29,8 @@ stack overflow to the module, which traps `call stack exhausted`.
 A module that waits imports `vyrn_wait.sleep(ms) -> id` and exports
 `__vyrn_wake(id, status, payload)`. The host runs the event loop after
 `_start`, and after each export call that waits: it delivers the earliest
-pending timer, ties by id, as it comes due, until none is pending.
+pending timer, ties by id, as it comes due, until none is pending. The embedded
+wasmtime and the native host share this rule.
 
 A `gen fn` generator also runs as compiled wasm, in the same embedded engine,
 while the program loads.

@@ -226,6 +226,10 @@ pub const WASM_ONLY: &[(&str, &str)] = &[(
 /// `tests/route.rs` compares these with `vyrn run` instead.
 pub const ENGINE_TRAP: &[(&str, &str)] = &[("recdepth.vyrn", "recurses until the stack runs out")];
 
+/// Examples that wait. The `wasmtime` CLI supplies neither the host's waits nor an
+/// event loop, so `tests/route.rs` compares these with `vyrn run` instead.
+pub const WAITING: &[(&str, &str)] = &[("waiting.vyrn", "waits on the host's timers")];
+
 /// Project entries under `examples/*/` that their artifact's floor refuses,
 /// with text the refusal must contain. `tests/floor.rs` asserts each; the corpus
 /// harnesses that walk project entries skip them.

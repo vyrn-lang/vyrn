@@ -1,7 +1,7 @@
-//! Waiting code runs: `tests/waits/frames.vyrn` built with the free audit prints
-//! its `frames.stdout` when the host delivers every wait, and frees every frame
-//! and every value whichever wait the host cancels. `longsleep.vyrn` witnesses
-//! `vyrn test`'s clock, and `lambda.vyrn` and `region.vyrn` what does not build.
+//! Waiting code runs: `examples/waiting.vyrn` built with the free audit prints its
+//! recorded stdout when the host delivers every wait, and frees every frame and
+//! every value whichever wait the host cancels. The programs under
+//! `tests/waits/` witness `vyrn test`'s clock and what does not build.
 
 mod common;
 use common::*;
@@ -11,7 +11,7 @@ fn waits_dir() -> std::path::PathBuf {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/waits")
 }
 
-/// The module `name` builds to, with the free audit.
+/// The module the example `name` builds to, with the free audit.
 fn audited(name: &str) -> Vec<u8> {
     let dir = scratch("waits");
     let wasm = dir.join("audited.wasm");
@@ -19,7 +19,7 @@ fn audited(name: &str) -> Vec<u8> {
         .args(["build", "--target", "wasm", name, "-o"])
         .arg(&wasm)
         .env("VYRN_LEAK_CHECK", "1")
-        .current_dir(waits_dir())
+        .current_dir(examples_dir())
         .output()
         .expect("run vyrn build");
     assert!(out.status.success(), "{}", norm(&out.stderr));
@@ -39,9 +39,9 @@ fn quiet(name: &str, replay: Option<Vec<Wake>>) -> Run {
 
 #[test]
 fn a_waiting_program_resumes_at_each_await() {
-    let bytes = audited("frames.vyrn");
-    let out = run(&bytes, quiet("frames.vyrn", None)).expect("the module runs");
-    let want = std::fs::read_to_string(waits_dir().join("frames.stdout")).unwrap();
+    let bytes = audited("waiting.vyrn");
+    let out = run(&bytes, quiet("waiting.vyrn", None)).expect("the module runs");
+    let want = std::fs::read_to_string(examples_dir().join("expected/waiting.stdout")).unwrap();
     assert_eq!(norm(&out.stdout), want);
     assert_eq!((out.code, norm(&out.stderr)), (0, String::new()));
     assert_eq!(out.wakes.len(), 9);
@@ -52,13 +52,13 @@ fn a_waiting_program_resumes_at_each_await() {
 /// every value it held took the cancellation edge.
 #[test]
 fn a_cancelled_wait_releases_every_frame_on_its_path() {
-    let bytes = audited("frames.vyrn");
-    let full = run(&bytes, quiet("frames.vyrn", None)).expect("the module runs");
+    let bytes = audited("waiting.vyrn");
+    let full = run(&bytes, quiet("waiting.vyrn", None)).expect("the module runs");
     let all = norm(&full.stdout);
     for k in 0..full.wakes.len() {
         let mut wakes = full.wakes[..=k].to_vec();
         wakes[k].status = 1;
-        let out = run(&bytes, quiet("frames.vyrn", Some(wakes))).expect("the module runs");
+        let out = run(&bytes, quiet("waiting.vyrn", Some(wakes))).expect("the module runs");
         let printed = norm(&out.stdout);
         assert!(all.starts_with(&printed), "wake {k}: {printed}");
         assert_eq!(
