@@ -469,6 +469,9 @@ examples/finitekeys.vyrn	where$pSection	yes	no, `value` is String, not Int32, UI
 examples/finitekeys.vyrn	where$cSection	no, it calls `panic`	no, its effect set is trap
 examples/finitekeys.vyrn	where$pTransKey	yes	no, `value` is String, not Int32, UInt32, Bool or a read array of one
 examples/finitekeys.vyrn	where$cTransKey	no, it calls `panic`	no, its effect set is trap
+examples/floatbits.vyrn	trip32	yes	no, the value of line 8 is Float32, and a kernel computes only integers and Bool
+examples/floatbits.vyrn	trip64	yes	no, `b` is UInt64, and WGSL has no 64-bit integer
+examples/floatbits.vyrn	main	yes	no, its effect set is alloc, write-output
 examples/floatkey.vyrn		does not check	does not check
 examples/floatmath.vyrn	show	yes	no, its effect set is write-output
 examples/floatmath.vyrn	main	no, it calls `pow`, which is not trap-free	no, its effect set is write-output

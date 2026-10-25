@@ -16,7 +16,7 @@ enum Why {
     Memory,
     /// A host import: `fd_write` cannot be written in terms of itself.
     Syscall,
-    /// A view, not an operation: nothing else builds a `Float64` from bits or a
+    /// A view, not an operation: nothing else builds a float from bits or a
     /// `String` from bytes.
     View,
     /// Vyrn cannot abort except through `panic`, the one irreducible row.
@@ -83,8 +83,10 @@ const CENSUS: &[(&str, Why, &str)] = &[
     ("@error", Syscall, "as `@trace`"),
     ("bytes", View, "String -> Array<UInt8>, whole or a byte range: what all four runtime modules stand on"),
     ("stringFromBytes", View, "the only Array<UInt8> -> String construction there is"),
-    ("floatBits", View, "i64.reinterpret_f64, one instruction"),
-    ("floatFromBits", View, "the other direction"),
+    ("float32Bits", View, "i32.reinterpret_f32, one instruction"),
+    ("float32FromBits", View, "the other direction"),
+    ("float64Bits", View, "i64.reinterpret_f64, one instruction"),
+    ("float64FromBits", View, "the other direction"),
     // Vector arithmetic is a `BinOp`, not a Call arm, so the census covers only
     // construction and lane access.
     ("F32x4", View, "four Float32 lanes into one value"),
@@ -141,11 +143,11 @@ const CENSUS: &[(&str, Why, &str)] = &[
     ("@concat", Measured, "9.7x native / 11x wasm (580 ns against 60 ns): a Vyrn join must revalidate UTF-8"),
     // `examples/simdbench.vyrn` holds the Vyrn implementations and `vyrn bench`
     // prices them against these builtins.
-    ("@f32x4Min", Measured, "3.6x native (44.4 us against 12.3 us per 65536 lanes); Vyrn needs floatBits for -0.0"),
+    ("@f32x4Min", Measured, "3.6x native (44.4 us against 12.3 us per 65536 lanes); Vyrn needs float64Bits for -0.0"),
     ("@f32x4Max", Measured, "3.7x native (44.1 us against 12.1 us per 65536 lanes), the mirror of `min`"),
     // The Vyrn version must reproduce the NaN rule and the sign of a zero,
     // which costs the same at 64 bits. The `f64x2` roundings are left out.
-    ("@f64x2Min", Measured, "2.5x native (39.0 us against 15.2 us per 65536 lanes); the Vyrn version needs floatBits for -0.0"),
+    ("@f64x2Min", Measured, "2.5x native (39.0 us against 15.2 us per 65536 lanes); the Vyrn version needs float64Bits for -0.0"),
     ("@f64x2Max", Measured, "2.5x native (38.7 us against 15.0 us per 65536 lanes), the mirror of `min`"),
     // The mask reductions in Vyrn short-circuit, so on a monotonic array the
     // chain is predicted and the ratio drops to 1.3x / 2.3x. The rows quote
@@ -160,7 +162,7 @@ const CENSUS: &[(&str, Why, &str)] = &[
     ("@f32x4Ceil", Measured, "1.1x native (49.9 us against 56.1 us per 65536 lanes) / 2.3x wasm (54 ms against 126 ms per 102 M lanes), both inline"),
     ("@f32x4Floor", Measured, "1.0x native (53.9 us against 52.7 us) / 2.3x wasm (54 ms against 124 ms), the mirror of `ceil`"),
     // The one row where the builtin is slower natively. Kept for the 1.9x on
-    // wasm and because the Vyrn version needs `floatBits` for the sign of a
+    // wasm and because the Vyrn version needs `float64Bits` for the sign of a
     // zero; an x86-64-v2 baseline would settle it.
     ("@f32x4Trunc", Measured, "0.43x native — the builtin LOSES (97.2 us against 42.0 us, four truncf calls) — and 1.9x wasm (53 ms against 100 ms), which is all that keeps it"),
     ("@f32x4Nearest", Measured, "1.4x native (49.8 us against 70.7 us) / 4.1x wasm (54 ms against 219 ms); ties-to-even by hand is 20 lines and gets `-0.0` wrong first"),

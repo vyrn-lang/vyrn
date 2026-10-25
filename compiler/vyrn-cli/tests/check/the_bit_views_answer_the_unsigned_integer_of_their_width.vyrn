@@ -1,0 +1,2 @@
+// The float bit views take and answer the unsigned integer of their width.
+fn main() -> Int64 { let b: UInt64 = float64Bits(1.0) let f: Float64 = float64FromBits(b) let c: UInt32 = float32Bits(Float32(1.0)) let g: Float32 = float32FromBits(c) return 0 }

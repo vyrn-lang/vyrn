@@ -9682,10 +9682,13 @@ fn builtin_spec(
         return None;
     }
     let ins = match name {
-        // `f64` and `i64` are the same 64 bits on this backend's value stack,
-        // so a reinterpretation is free where a conversion rounds.
-        "floatBits" => Instruction::I64ReinterpretF64,
-        "floatFromBits" => Instruction::F64ReinterpretI64,
+        // A float and the unsigned integer of its width are the same bits on
+        // this backend's value stack, so a reinterpretation is free where a
+        // conversion rounds.
+        "float32Bits" => Instruction::I32ReinterpretF32,
+        "float32FromBits" => Instruction::F32ReinterpretI32,
+        "float64Bits" => Instruction::I64ReinterpretF64,
+        "float64FromBits" => Instruction::F64ReinterpretI64,
         "@f32x4Splat" => Instruction::F32x4Splat,
         "@i32x4Splat" => Instruction::I32x4Splat,
         "@f64x2Splat" => Instruction::F64x2Splat,

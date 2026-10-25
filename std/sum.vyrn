@@ -63,13 +63,13 @@ fn exactBit(acc: Array<Int64>, p: Int64) -> UInt64 {
 fn exactFinish(acc: modify Array<Int64>) -> Float64 {
     let specials = acc[72]
     if specials & 1 != 0 || specials & 6 == 6 {
-        return floatFromBits(9221120237041090560)
+        return float64FromBits(9221120237041090560)
     }
     if specials & 2 != 0 {
-        return floatFromBits(9218868437227405312)
+        return float64FromBits(9218868437227405312)
     }
     if specials & 4 != 0 {
-        return floatFromBits(18442240474082181120)
+        return float64FromBits(18442240474082181120)
     }
     // Carry the signed limbs into 32-bit digits. The sum is below 2^2300, so
     // what is left over is 0 for a non-negative sum and -1 for a negative one.
@@ -108,11 +108,11 @@ fn exactFinish(acc: modify Array<Int64>) -> Float64 {
     // Up to 53 bits the count is the bit pattern itself: a subnormal, or a
     // normal with the smallest exponent.
     if top <= 52 {
-        return floatFromBits(sign | UInt64(acc[0]) | (UInt64(acc[1]) << 32))
+        return float64FromBits(sign | UInt64(acc[0]) | (UInt64(acc[1]) << 32))
     }
     let shift = top - 52
     if shift >= 2046 {
-        return floatFromBits(sign | 9218868437227405312)
+        return float64FromBits(sign | 9218868437227405312)
     }
     let mut q: UInt64 = 0
     let mut j = 52
@@ -142,9 +142,9 @@ fn exactFinish(acc: modify Array<Int64>) -> Float64 {
     // that carries out of the 53 bits lands in the next exponent.
     let bits = (UInt64(shift) << 52) + q
     if bits >= 9218868437227405312 {
-        return floatFromBits(sign | 9218868437227405312)
+        return float64FromBits(sign | 9218868437227405312)
     }
-    return floatFromBits(sign | bits)
+    return float64FromBits(sign | bits)
 }
 
 /// The true sum of `xs`, rounded once to the nearest `Float64` with ties to
@@ -172,7 +172,7 @@ export fn sum(xs: Array<Float64>) -> Float64 {
     }
     if n < 512 {
         for x in xs {
-            let b = floatBits(x)
+            let b = float64Bits(x)
             let idx = b >> 52
             if idx & 2047 == 2047 {
                 exactSpecial(acc, b)
@@ -194,7 +194,7 @@ export fn sum(xs: Array<Float64>) -> Float64 {
         let end = if start + 8192 < n { start + 8192 } else { n }
         let mut i = start
         while i < end {
-            let b = floatBits(xs[i])
+            let b = float64Bits(xs[i])
             let idx = b >> 52
             if idx & 2047 == 2047 {
                 exactSpecial(acc, b)
@@ -247,12 +247,12 @@ fn repeated(x: Float64, n: Int64) -> Array<Float64> {
 
 // The bit pattern of `sum`, so a test compares the result exactly.
 fn sumBits(xs: Array<Float64>) -> UInt64 {
-    return floatBits(sum(xs))
+    return float64Bits(sum(xs))
 }
 
 test "an exact sum survives cancellation" {
-    assertEq(sumBits([pow2(400), 1.0, 0.0 - pow2(400)]), floatBits(1.0))
-    assertEq(sumBits([0.0 - pow2(400), 1.0, pow2(400)]), floatBits(1.0))
+    assertEq(sumBits([pow2(400), 1.0, 0.0 - pow2(400)]), float64Bits(1.0))
+    assertEq(sumBits([0.0 - pow2(400), 1.0, pow2(400)]), float64Bits(1.0))
     let mut long = repeated(1.0, 3000)
     long.push(pow2(300))
     long.push(0.0 - pow2(300))
@@ -261,9 +261,9 @@ test "an exact sum survives cancellation" {
 }
 
 test "an intermediate overflow does not reach the result" {
-    let max = floatFromBits(9218868437227405311)
-    assertEq(sumBits([max, max, 0.0 - max]), floatBits(max))
-    assertEq(sumBits([max, 0.0 - max, max]), floatBits(max))
+    let max = float64FromBits(9218868437227405311)
+    assertEq(sumBits([max, max, 0.0 - max]), float64Bits(max))
+    assertEq(sumBits([max, 0.0 - max, max]), float64Bits(max))
     // The sum itself is out of range: IEEE rounds it to an infinity.
     assertEq(sumBits([max, max]), 9218868437227405312)
     assertEq(sumBits([0.0 - max, 0.0 - max]), 18442240474082181120)
@@ -273,26 +273,26 @@ test "an exact sum rounds once, ties to even" {
     let one = 1.0
     let half = pow2(0 - 53)
     // A tie between 1 and 1 + 2^-52 goes to the even 1.
-    assertEq(sumBits([one, half]), floatBits(one))
+    assertEq(sumBits([one, half]), float64Bits(one))
     // A bit past the tie goes up.
     assertEq(sumBits([one, half, pow2(0 - 105)]), 4607182418800017409)
     assertEq(sumBits([one, pow2(0 - 105), half]), 4607182418800017409)
     // A tie above an odd 1 + 2^-52 goes up to the even 1 + 2^-51.
-    assertEq(sumBits([floatFromBits(4607182418800017409), half]), 4607182418800017410)
-    assertEq(sumBits([0.0 - one, 0.0 - half]), floatBits(0.0 - one))
+    assertEq(sumBits([float64FromBits(4607182418800017409), half]), 4607182418800017410)
+    assertEq(sumBits([0.0 - one, 0.0 - half]), float64Bits(0.0 - one))
     // The largest finite value plus half an ulp is a tie that rounds to an infinity.
-    let max = floatFromBits(9218868437227405311)
+    let max = float64FromBits(9218868437227405311)
     assertEq(sumBits([max, pow2(970)]), 9218868437227405312)
-    assertEq(sumBits([max, pow2(969)]), floatBits(max))
+    assertEq(sumBits([max, pow2(969)]), float64Bits(max))
     // Ten 0.1 sum to 1, and 2000 of them to 200: a loop with `+` does neither.
     assertEq(sum(repeated(0.1, 10)), 1.0)
     assertEq(sum(repeated(0.1, 2000)), 200.0)
 }
 
 test "an exact sum counts subnormals and zeros" {
-    let tiny = floatFromBits(1)
+    let tiny = float64FromBits(1)
     assertEq(sumBits([tiny, tiny, tiny]), 3)
-    assertEq(sumBits([pow2(0 - 1022) - tiny, tiny]), floatBits(pow2(0 - 1022)))
+    assertEq(sumBits([pow2(0 - 1022) - tiny, tiny]), float64Bits(pow2(0 - 1022)))
     assertEq(sumBits([tiny, 0.0, 0.0 - 0.0]), 1)
     let mut zeros = repeated(0.0, 2000)
     zeros.push(tiny)
@@ -303,17 +303,17 @@ test "an exact sum counts subnormals and zeros" {
 }
 
 test "an exact sum follows IEEE for infinities and NaN" {
-    let inf = floatFromBits(9218868437227405312)
-    let nan = floatFromBits(9221120237041090561)
-    assertEq(sumBits([1.0, inf]), floatBits(inf))
-    assertEq(sumBits([0.0 - inf, 1.0]), floatBits(0.0 - inf))
+    let inf = float64FromBits(9218868437227405312)
+    let nan = float64FromBits(9221120237041090561)
+    assertEq(sumBits([1.0, inf]), float64Bits(inf))
+    assertEq(sumBits([0.0 - inf, 1.0]), float64Bits(0.0 - inf))
     assert(sum([inf, 0.0 - inf]) != sum([inf, 0.0 - inf]))
     assert(sum([1.0, nan]) != sum([1.0, nan]))
     assert(sum([nan, inf]) != sum([nan, inf]))
     // The same through the slot tables.
     let mut long = repeated(1.0, 2000)
     long.push(inf)
-    assertEq(sumBits(long), floatBits(inf))
+    assertEq(sumBits(long), float64Bits(inf))
     long.push(0.0 - inf)
     assert(sum(long) != sum(long))
     let mut withNan = repeated(1.0, 2000)
@@ -373,6 +373,6 @@ test "an exact sum carries across the slot blocks" {
     assertEq(sum(repeated(1.0, 8193)), 8193.0)
     assertEq(sum(repeated(1.0, 20000)), 20000.0)
     // The largest fraction in every slot of a block: 1.999... times 20000.
-    let top = floatFromBits(4611686018427387903)
-    assertEq(sumBits(repeated(top, 20000)), floatBits(top * 20000.0))
+    let top = float64FromBits(4611686018427387903)
+    assertEq(sumBits(repeated(top, 20000)), float64Bits(top * 20000.0))
 }

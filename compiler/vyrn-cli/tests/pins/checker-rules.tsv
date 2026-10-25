@@ -128,7 +128,7 @@ checker-rules.vyrn:691:0: `measure` argument 1 expects Int64, found String
 checker-rules.vyrn:694:0: `measure` expects 1 argument(s), got 2
 checker-rules.vyrn:697:0: `declaredOne` argument 1 expects Int64, found T
 checker-rules.vyrn:700:0: `declaredOne` expects 1 argument(s), got 2
-checker-rules.vyrn:703:0: `floatBits` argument 1 expects Float64, found Int64
+checker-rules.vyrn:703:0: `float64Bits` argument 1 expects Float64, found Int64
 checker-rules.vyrn:705:0: `declaredOne` expects 1 argument(s), got 2
 checker-rules.vyrn:710:0: function `fallsThrough` must return Int64 on all paths
 checker-rules.vyrn:716:0: this lambda must return Int64 on all paths

@@ -88,12 +88,12 @@ export fn parityReport() -> String {
     while i < 5 {
         let t = 0.25 * Float64(i)
         let x = field(0.31, 0.17, t)
-        out = out + "field(0.31, 0.17, \{t}) bits = \{floatBits(x)}\n"
+        out = out + "field(0.31, 0.17, \{t}) bits = \{float64Bits(x)}\n"
         i = i + 1
     }
-    out = out + "sin(1) bits = \{floatBits(sin(1.0))}\n"
-    out = out + "noise bits = \{floatBits(noise(0.4, 0.0 - 0.2, 1.5))}\n"
-    out = out + "lattice bits = \{floatBits(lattice(0.4, 0.0 - 0.2, 1.5))}\n"
+    out = out + "sin(1) bits = \{float64Bits(sin(1.0))}\n"
+    out = out + "noise bits = \{float64Bits(noise(0.4, 0.0 - 0.2, 1.5))}\n"
+    out = out + "lattice bits = \{float64Bits(lattice(0.4, 0.0 - 0.2, 1.5))}\n"
     return out + "luminance sweep = \{luminance(0.0, 0.0, 0.0)} \{luminance(0.5, 0.5, 1.0)} \{luminance(0.9, 0.1, 2.0)}"
 }
 

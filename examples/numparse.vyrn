@@ -4,7 +4,7 @@ import { parseFloat32, parseFloat64, parseInt64, parseUInt64 } from "std/num"
 
 fn bitsOf(s: String) -> String {
     return match parseFloat64(s) {
-        Some(v) => floatBits(v).toString(),
+        Some(v) => float64Bits(v).toString(),
         None => "None",
     }
 }

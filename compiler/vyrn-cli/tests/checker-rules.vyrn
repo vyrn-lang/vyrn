@@ -700,7 +700,7 @@ fn callInLambda() -> Int64 {
     let f: fn(Int64) -> Int64 = x -> declaredOne(x, x)
     return 0
 }
-let stateCall = floatBits(7)
+let stateCall = float64Bits(7)
 test "a call in a test body" {
     assertEq(declaredOne(1, 2), 1)
 }

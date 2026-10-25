@@ -463,9 +463,13 @@ fn table() -> Vec<Builtin> {
     let step = || Type::Fn(vec![Int, Int, Bool], Box::new(opt(t())));
     let lists = &[Array, ArrayN, SmallArray];
     // IEEE-754 bit views and SIMD: each operand at the stated type, one
-    // instruction. A bit view reads the same 64 bits at the other type, so it
-    // is not a conversion.
-    let one = |n, p: &Type, r: &Type| b(n).spec(Spec::Typed(vec![p.clone()], r.clone()));
+    // instruction. A bit view reads the bits of one width at the other type,
+    // so it is not a conversion.
+    let view = |n, p, from: Type, to: Type| {
+        let spec = Spec::Typed(vec![from.clone()], to.clone());
+        b(n).spec(spec)
+            .sig(row(n, &[], &[(p, Read, from)], to, &[]))
+    };
     // A method on a number that is one instruction at each admitted type.
     // Narrower integers are left out: they live in an `i32` that `clz` would
     // count from bit 31.
@@ -812,7 +816,7 @@ fn table() -> Vec<Builtin> {
         // `f32::min`). `nearest` rounds ties to even, not away from zero.
         // They sit on the type name so `ceil` stays free for `std/math`. By
         // measurement: `I32x4` has none of these, `abs` is one line of
-        // `floatBits`, and `F64x2` has no rounding.
+        // `float64Bits`, and `F64x2` has no rounding.
         op("@f32x4Min", 2, &f4),
         op("@f32x4Max", 2, &f4),
         op("@f32x4Sqrt", 1, &f4),
@@ -823,20 +827,10 @@ fn table() -> Vec<Builtin> {
         op("@f64x2Min", 2, &d2),
         op("@f64x2Max", 2, &d2),
         op("@f64x2Sqrt", 1, &d2),
-        one("floatBits", &Float, &u64_()).sig(row(
-            "floatBits",
-            &[],
-            &[("x", Read, Float)],
-            u64_(),
-            &[],
-        )),
-        one("floatFromBits", &u64_(), &Float).sig(row(
-            "floatFromBits",
-            &[],
-            &[("b", Read, u64_())],
-            Float,
-            &[],
-        )),
+        view("float32Bits", "x", Type::Float32, u32_()),
+        view("float32FromBits", "b", u32_(), Type::Float32),
+        view("float64Bits", "x", Float, u64_()),
+        view("float64FromBits", "b", u64_(), Float),
         unary("@clz", "clz", ints.clone())
             .hover("x.clz() -> T — the count of zero bits above the highest set bit of an Int32, UInt32, Int64 or UInt64; the width when `x` is 0"),
         unary("@ctz", "ctz", ints.clone())

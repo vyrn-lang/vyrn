@@ -9,7 +9,7 @@ fn min1(a: Float32, b: Float32) -> Float32 {
     }
     if a == b {
         let sign: UInt64 = 9223372036854775808
-        if floatBits(Float64(a)) >= sign {
+        if float64Bits(Float64(a)) >= sign {
             return a
         }
         return b
@@ -29,7 +29,7 @@ fn max1(a: Float32, b: Float32) -> Float32 {
     }
     if a == b {
         let sign: UInt64 = 9223372036854775808
-        if floatBits(Float64(a)) >= sign {
+        if float64Bits(Float64(a)) >= sign {
             return b
         }
         return a
@@ -42,7 +42,7 @@ fn max1(a: Float32, b: Float32) -> Float32 {
 
 fn abs1(x: Float32) -> Float32 {
     let mask: UInt64 = 9223372036854775807
-    return Float32(floatFromBits(floatBits(Float64(x)) & mask))
+    return Float32(float64FromBits(float64Bits(Float64(x)) & mask))
 }
 
 fn trunc1(x: Float32) -> Float32 {
@@ -108,7 +108,7 @@ fn min1w(a: Float64, b: Float64) -> Float64 {
     }
     if a == b {
         let sign: UInt64 = 9223372036854775808
-        if floatBits(a) >= sign {
+        if float64Bits(a) >= sign {
             return a
         }
         return b
@@ -128,7 +128,7 @@ fn max1w(a: Float64, b: Float64) -> Float64 {
     }
     if a == b {
         let sign: UInt64 = 9223372036854775808
-        if floatBits(a) >= sign {
+        if float64Bits(a) >= sign {
             return b
         }
         return a

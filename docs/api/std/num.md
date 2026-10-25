@@ -4,7 +4,7 @@ Text -> number, correctly rounded, and `Float64` -> `%f` text.
 
 A library, not a builtin: the direct wasm backend has no `strtod`, so one
 Vyrn implementation serves every engine. The only primitives are the
-IEEE-754 bit views `floatBits` and `floatFromBits`.
+IEEE-754 bit views `float64Bits` and `float64FromBits`.
 
 The conversion is exact. The decimal stays a digit array, scaled by powers
 of two into `[1/2, 1)`; repeated doubling yields the mantissa bits, and the
