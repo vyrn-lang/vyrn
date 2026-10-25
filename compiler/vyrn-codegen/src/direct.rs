@@ -33,7 +33,7 @@ use vyrn_frontend::core::{
     Arg, Arm, Await, Callee, Ctor, Fork, Form, Lit, Name, NameInfo, Op, Rhs, St, Target, Test, Val,
 };
 use vyrn_frontend::gen::GenError;
-use vyrn_frontend::loader::TASK_PREFIX;
+use vyrn_frontend::loader::{RtWord, RuntimeCalls, RUNTIME_CALLS, TASK_PREFIX};
 use vyrn_frontend::own::DropKind;
 /// Shared with `vyrn-lower` and the other engines, so exits compare without a translation.
 use vyrn_frontend::own::Exit as ExitKind;
@@ -631,12 +631,7 @@ fn compile_inner(program: &Program, world: Arc<vyrn_lower::World>) -> Result<Vec
             cx.rt.intern(&mut m, " bytes, never freed\n"),
             cx.rt.intern(&mut m, "free audit: double or foreign free\n"),
         ];
-        let at = |n: &str| {
-            cx.sigs.get(n).map(|s| s.index).ok_or_else(|| {
-                format!("direct backend: VYRN_LEAK_CHECK is set and `std/runtime` has no `{n}`")
-            })
-        };
-        Some((at("runtime$auditInit")?, at("runtime$auditExit")?, words))
+        Some((cx.rt.audit_init, cx.rt.audit_exit, words))
     } else {
         None
     };
@@ -9648,116 +9643,16 @@ fn reload(b: &mut Frame, spilled: &[Spill]) {
     }
 }
 
-/// Declares the runtime functions written in Vyrn (`std/runtime`): each by the name the module
-/// declares it under, with the wasm signature this emitter calls it with.
-///
-/// Every index is reserved up front, because runtime bodies call each other (`trap` calls
-/// `strLen`). A body arrives when the module's function lowers like any user function, and
-/// [`VyrnRt::take`] checks its declared signature against this one. [`VyrnRt::check`] refuses a
-/// link with no `std/runtime` rather than letting `Module::sweep` panic on an unfilled body.
-/// `Module::sweep` drops the functions no export reaches, with their interned data.
-macro_rules! runtime_fns {
-    ($($(#[$m:meta])* $field:ident = $name:literal ($($p:tt)*) -> ($($r:tt)*);)*) => {
-        const VYRN_RUNTIME: &[(&str, &[ValType], &[ValType])] = {
-            use ValType::{I32, I64};
-            &[$(($name, &[$($p)*], &[$($r)*])),*]
-        };
+type Fns = RuntimeCalls<u32>;
 
-        /// The index of every function in [`VYRN_RUNTIME`], one field per row.
-        #[derive(Clone, Copy, Default)]
-        struct Fns {
-            $($(#[$m])* $field: u32,)*
-        }
-
-        impl Fns {
-            fn bind(v: &VyrnRt) -> Fns {
-                Fns { $($field: v.get($name),)* }
-            }
-        }
-    };
-}
-
-// Each row states a function once: the field call sites read, the name
-// `std/runtime` declares, and the signature. A misspelt field fails the build;
-// a misspelt name fails `VyrnRt::check` on every program.
-runtime_fns! {
-    // The request is an `i64` so `cap * stride` cannot wrap at an `i32` call site; it is the
-    // signature `__vyrn_malloc` exports.
-    /// A segregated free list whose heads and bump offset live in the heap's first 480 bytes.
-    malloc = "malloc" (I64) -> (I32);
-    free = "free" (I32) -> ();
-    // `strFromBytes` returns a flat `Result<Int64, Int64>` as its two words; the check's
-    // answer and the two interned messages are its last three arguments.
-    /// Allocate a `String` buffer: its `{ len, cap }` header, `cap` bytes, and the NUL.
-    /// Returns the address of the bytes, an ordinary NUL-terminated pointer.
-    str_new = "strNew" (I32, I32) -> (I32);
-    concat = "strConcat" (I32, I32) -> (I32);
-    /// Grow a `String` accumulator in place; called at every `s = s + ...`.
-    str_append = "strAppend" (I32, I32, I32) -> (I32);
-    /// Its two failure messages, interned from `io_message`, are its last two arguments, so the
-    /// wording stays `trap.rs`'s. `std/text`'s `stringFault`, called at the site, decides
-    /// between them.
-    str_from_bytes = "strFromBytes" (I32; 5) -> (I64, I64);
-    strlen = "strLen" (I32) -> (I32);
-    strcmp = "strCmp" (I32, I32) -> (I32);
-    /// Called only from `std/runtime`; the row reserves its index.
-    #[allow(dead_code)]
-    starts = "starts" (I32, I32) -> (I32);
-    int_str = "intStr" (I64, I32) -> (I32);
-    /// Called only from `std/runtime`; the row reserves its index.
-    #[allow(dead_code)]
-    str_i64 = "strI64" (I32) -> (I64);
-    /// Called only from `std/runtime`; the row reserves its index.
-    #[allow(dead_code)]
-    utf8_valid = "utf8Valid" (I32, I32, I32) -> (I32);
-    /// `=~`: walk a complete DFA over a NUL-terminated string. One helper serves every
-    /// pattern, because the pattern is entirely in the table it is handed.
-    regex_run = "regexRun" (I32, I32, I32, I32) -> (I32);
-    // The maps: one body over the three key layouts. `kind` and `klen` lead (see
-    // [`MapKey::kind`]). `mapFind`'s key is an `i64`: the value for an `Int64` key, a
-    // zero-extended address otherwise.
-    map_find = "mapFind" (I32, I32, I32, I32, I64, I32, I32) -> (I32);
-    map_put = "mapPut" (I32; 6) -> ();
-    map_reserve = "mapReserve" (I32; 4) -> ();
-    map_remove_at = "mapRemoveAt" (I32; 5) -> ();
-    map_keys_copy = "mapKeysCopy" (I32; 3) -> (I32);
-    // The arrays: `dst` and `src` are header addresses and `stride` the element size. `arrPush`
-    // returns the buffer a growth left behind; the emitter frees it after storing the element.
-    // `a[i]` stays inline, by measurement.
-    arr_push = "arrPush" (I32; 3) -> (I32);
-    // `SmallArray` `push`: the header, the stride, `N` and the inline slots' offset.
-    sa_push = "saPush" (I32, I32, I64, I32) -> (I32);
-    arr_reserve = "arrReserve" (I32, I32, I32, I64) -> ();
-    arr_append = "arrAppend" (I32; 4) -> ();
-    arr_copy_from = "arrCopyFrom" (I32; 4) -> ();
-    arr_clear = "arrClear" (I32; 2) -> ();
-    // `bytes(s, from, to)`: the triple's slot leads.
-    bytes_of = "bytesOf" (I32, I32, I64, I64) -> ();
-    // The I/O family this emitter calls; the builtins route to their own functions
-    // (`loader::RT_MODULES`). The fixed-clock keys trail.
-    /// The ONE place bytes leave a program, with the stdout buffer behind it.
-    write_all = "writeAll" (I32; 3) -> (I32);
-    print_str = "printStr" (I32) -> ();
-    now_millis = "nowMillis" (I32) -> (I64);
-    mono_nanos = "monoNanos" (I32) -> (I64);
-    random_seed = "randomSeedV" (I32) -> (I64);
-    open_at = "openAt" (I32, I32, I64) -> (I32);
-    // The traps and renderers. `boolStr` takes the two interned literals; `trapAt`'s table is
-    // `trap::Rule`'s, laid out by `runtime`.
-    /// Write the canonical line on descriptor 2 and exit 1; every refusal this backend emits
-    /// calls it.
-    trap = "trapV" (I32) -> ();
-    /// Every check the emitter inserts pushes its row number in [`Rt::trap_table`] and calls
-    /// this; the module spells no wording.
-    trap_at = "trapAt" (I32, I64, I32) -> ();
-    print_i64 = "printI64" (I64, I32) -> ();
-    bool_str = "boolStr" (I32; 3) -> (I32);
-    // The region arena: `regionEnter` returns the bump top and `regionExit` restores it. The
-    // nesting counter and its trap stay inline (see [`Fn_::region_enter`]).
-    /// A `return` out of a region calls neither: the value it carries is arena memory the
-    /// caller owns, so the bump stays.
-    region_enter = "regionEnter" () -> (I32);
-    region_exit = "regionExit" (I32) -> ();
+/// The wasm types of a row of [`RUNTIME_CALLS`].
+fn wasm_types(ws: &[RtWord]) -> Vec<ValType> {
+    (ws.iter())
+        .map(|w| match w {
+            RtWord::I32 => ValType::I32,
+            RtWord::I64 => ValType::I64,
+        })
+        .collect()
 }
 
 struct VyrnRt {
@@ -9767,9 +9662,8 @@ struct VyrnRt {
 
 impl VyrnRt {
     fn reserve(m: &mut Module) -> Self {
-        let index = VYRN_RUNTIME
-            .iter()
-            .map(|(name, params, results)| (*name, m.reserve_func(*params, *results)))
+        let index = (RUNTIME_CALLS.iter())
+            .map(|(name, ps, rs)| (*name, m.reserve_func(wasm_types(ps), wasm_types(rs))))
             .collect();
         VyrnRt {
             index,
@@ -9793,10 +9687,11 @@ impl VyrnRt {
         let Some(short) = name.strip_prefix(vyrn_frontend::loader::RUNTIME_PREFIX) else {
             return Ok(None);
         };
-        let Some((key, want_p, want_r)) = VYRN_RUNTIME.iter().find(|(k, ..)| *k == short) else {
+        let Some((key, ps, rs)) = RUNTIME_CALLS.iter().find(|(k, ..)| *k == short) else {
             return Ok(None);
         };
-        if params != *want_p || results != *want_r {
+        let (want_p, want_r) = (wasm_types(ps), wasm_types(rs));
+        if params != want_p || results != want_r {
             return Err(format!(
                 "std/runtime.{short} (line {line}) is declared as {params:?} -> {results:?}; \
                  the emitter calls it as {want_p:?} -> {want_r:?}"
@@ -9807,7 +9702,7 @@ impl VyrnRt {
     }
 
     fn check(&self) -> Result<(), String> {
-        let missing: Vec<&str> = VYRN_RUNTIME
+        let missing: Vec<&str> = RUNTIME_CALLS
             .iter()
             .map(|(k, ..)| *k)
             .filter(|k| !self.filled.contains(k))
@@ -9937,7 +9832,7 @@ fn runtime(m: &mut Module, wasi: &Wasi, v: &VyrnRt) -> Rt {
     // Every field is an index `VyrnRt` reserved or an interned address. No wasm function is
     // emitted here, so nothing needs numbering.
     let mut rt = Rt {
-        fns: Fns::bind(v),
+        fns: Fns::by_name(|n| v.get(n)),
         ..Rt::default()
     };
     rt.proc_exit = proc_exit;
@@ -15843,10 +15738,10 @@ mod tests {
     #[test]
     fn every_runtime_helper_is_declared_once() {
         let names: std::collections::HashSet<&str> =
-            VYRN_RUNTIME.iter().map(|(n, ..)| *n).collect();
+            RUNTIME_CALLS.iter().map(|(n, ..)| *n).collect();
         assert_eq!(
             names.len(),
-            VYRN_RUNTIME.len(),
+            RUNTIME_CALLS.len(),
             "a runtime function is declared twice"
         );
     }

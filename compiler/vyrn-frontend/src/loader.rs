@@ -314,9 +314,15 @@ fn stamp_panic_sites(program: &mut Program, file: &str) {
     crate::project::walk_program(program, &mut panic_stamp(file));
 }
 
-/// The rewrite [`stamp_panic_sites`] makes at each expression.
+/// The rewrite [`stamp_panic_sites`] makes at each expression. None in the
+/// runtime module: its `panic` is a fixed `trap.rs` wording (`malloc`'s `out of
+/// memory`), printed without a site.
 fn panic_stamp(file: &str) -> impl FnMut(&mut Expr) + '_ {
+    let runtime = file.strip_suffix(".vyrn") == Some(RUNTIME_SPEC);
     move |e: &mut Expr| {
+        if runtime {
+            return;
+        }
         if let Expr::Call {
             dot: _,
             awaits: _,
@@ -898,6 +904,123 @@ pub const MEM_PREFIX: &str = "mem$";
 /// The reserved prefix of every `std/runtime` declaration.
 pub const RUNTIME_PREFIX: &str = "runtime$";
 
+/// One word of a runtime call's wasm signature ([`RUNTIME_CALLS`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RtWord {
+    I32,
+    I64,
+}
+
+/// Declares the `std/runtime` functions the emitter calls by name: each by the name the module
+/// declares it under, with the wasm signature the emitter calls it with. The loader keeps each
+/// one in every program, whatever the program spells ([`drop_unreached`]); the emitter reserves
+/// an index per row and checks the declared signature against it.
+macro_rules! runtime_calls {
+    ($($(#[$m:meta])* $field:ident = $name:literal ($($p:tt)*) -> ($($r:tt)*);)*) => {
+        /// Every row: the name, the parameters and the results.
+        pub const RUNTIME_CALLS: &[(&str, &[RtWord], &[RtWord])] = {
+            use RtWord::{I32, I64};
+            &[$(($name, &[$($p)*], &[$($r)*])),*]
+        };
+
+        /// A value per row of [`RUNTIME_CALLS`], one field per row.
+        #[derive(Debug, Clone, Copy, Default)]
+        pub struct RuntimeCalls<T> {
+            $($(#[$m])* pub $field: T,)*
+        }
+
+        impl<T> RuntimeCalls<T> {
+            /// Each row's value, from its name.
+            pub fn by_name(mut f: impl FnMut(&'static str) -> T) -> Self {
+                RuntimeCalls { $($field: f($name),)* }
+            }
+        }
+    };
+}
+
+// Each row states a function once: the field call sites read, the name
+// `std/runtime` declares, and the signature. A misspelt field fails the build;
+// a misspelt name fails the emitter's check on every program.
+runtime_calls! {
+    // The request is an `i64` so `cap * stride` cannot wrap at an `i32` call site; it is the
+    // signature `__vyrn_malloc` exports.
+    /// A segregated free list whose heads and bump offset live in the heap's first 480 bytes.
+    malloc = "malloc" (I64) -> (I32);
+    free = "free" (I32) -> ();
+    // `strFromBytes` returns a flat `Result<Int64, Int64>` as its two words; the check's
+    // answer and the two interned messages are its last three arguments.
+    /// Allocate a `String` buffer: its `{ len, cap }` header, `cap` bytes, and the NUL.
+    /// Returns the address of the bytes, an ordinary NUL-terminated pointer.
+    str_new = "strNew" (I32, I32) -> (I32);
+    concat = "strConcat" (I32, I32) -> (I32);
+    /// Grow a `String` accumulator in place; called at every `s = s + ...`.
+    str_append = "strAppend" (I32, I32, I32) -> (I32);
+    /// Its two failure messages, interned from `io_message`, are its last two arguments, so the
+    /// wording stays `trap.rs`'s. `std/text`'s `stringFault`, called at the site, decides
+    /// between them.
+    str_from_bytes = "strFromBytes" (I32; 5) -> (I64, I64);
+    strlen = "strLen" (I32) -> (I32);
+    strcmp = "strCmp" (I32, I32) -> (I32);
+    /// Called only from `std/runtime`; the row reserves its index.
+    starts = "starts" (I32, I32) -> (I32);
+    int_str = "intStr" (I64, I32) -> (I32);
+    /// Called only from `std/runtime`; the row reserves its index.
+    str_i64 = "strI64" (I32) -> (I64);
+    /// Called only from `std/runtime`; the row reserves its index.
+    utf8_valid = "utf8Valid" (I32, I32, I32) -> (I32);
+    /// `=~`: walk a complete DFA over a NUL-terminated string. One helper serves every
+    /// pattern, because the pattern is entirely in the table it is handed.
+    regex_run = "regexRun" (I32, I32, I32, I32) -> (I32);
+    // The maps: one body over the three key layouts. `kind` and `klen` lead (see
+    // [`MapKey::kind`]). `mapFind`'s key is an `i64`: the value for an `Int64` key, a
+    // zero-extended address otherwise.
+    map_find = "mapFind" (I32, I32, I32, I32, I64, I32, I32) -> (I32);
+    map_put = "mapPut" (I32; 6) -> ();
+    map_reserve = "mapReserve" (I32; 4) -> ();
+    map_remove_at = "mapRemoveAt" (I32; 5) -> ();
+    map_keys_copy = "mapKeysCopy" (I32; 3) -> (I32);
+    // The arrays: `dst` and `src` are header addresses and `stride` the element size. `arrPush`
+    // returns the buffer a growth left behind; the emitter frees it after storing the element.
+    // `a[i]` stays inline, by measurement.
+    arr_push = "arrPush" (I32; 3) -> (I32);
+    // `SmallArray` `push`: the header, the stride, `N` and the inline slots' offset.
+    sa_push = "saPush" (I32, I32, I64, I32) -> (I32);
+    arr_reserve = "arrReserve" (I32, I32, I32, I64) -> ();
+    arr_append = "arrAppend" (I32; 4) -> ();
+    arr_copy_from = "arrCopyFrom" (I32; 4) -> ();
+    arr_clear = "arrClear" (I32; 2) -> ();
+    // `bytes(s, from, to)`: the triple's slot leads.
+    bytes_of = "bytesOf" (I32, I32, I64, I64) -> ();
+    // The I/O family this emitter calls; the builtins route to their own functions
+    // (`loader::RT_MODULES`). The fixed-clock keys trail.
+    /// The ONE place bytes leave a program, with the stdout buffer behind it.
+    write_all = "writeAll" (I32; 3) -> (I32);
+    print_str = "printStr" (I32) -> ();
+    now_millis = "nowMillis" (I32) -> (I64);
+    mono_nanos = "monoNanos" (I32) -> (I64);
+    random_seed = "randomSeedV" (I32) -> (I64);
+    open_at = "openAt" (I32, I32, I64) -> (I32);
+    // The traps and renderers. `boolStr` takes the two interned literals; `trapAt`'s table is
+    // `trap::Rule`'s, laid out by `runtime`.
+    /// Write the canonical line on descriptor 2 and exit 1; every refusal this backend emits
+    /// calls it.
+    trap = "trapV" (I32) -> ();
+    /// Every check the emitter inserts pushes its row number in [`Rt::trap_table`] and calls
+    /// this; the module spells no wording.
+    trap_at = "trapAt" (I32, I64, I32) -> ();
+    print_i64 = "printI64" (I64, I32) -> ();
+    bool_str = "boolStr" (I32; 3) -> (I32);
+    // The region arena: `regionEnter` returns the bump top and `regionExit` restores it. The
+    // nesting counter and its trap stay inline (see [`Fn_::region_enter`]).
+    /// A `return` out of a region calls neither: the value it carries is arena memory the
+    /// caller owns, so the bump stays.
+    region_enter = "regionEnter" () -> (I32);
+    region_exit = "regionExit" (I32) -> ();
+    // The leak instrument's two ends, which only an audited build calls.
+    audit_init = "auditInit" (I32; 5) -> ();
+    audit_exit = "auditExit" () -> ();
+}
+
 /// The module of the host's waits and the run queue.
 pub const TASK_SPEC: &str = "std/task";
 
@@ -1040,6 +1163,17 @@ pub const F64_STR: &str = "num$f64Str";
 /// Not a route: the build of the `String` allocates and stays in the backend,
 /// behind `std/mem`'s fence. `the_string_check_is_std_texts` checks the spelling.
 pub const STRING_FAULT: &str = "text$stringFault";
+
+/// The functions a call of the builtin `name` may run, in their reserved
+/// spellings: its route and its generation twin ([`routed_builtin`]).
+fn routes_of(name: &str) -> impl Iterator<Item = &'static str> {
+    (crate::prelude::builtin(name).into_iter()).flat_map(|b| b.route.into_iter().chain(b.gen_route))
+}
+
+/// A reserved spelling as its module declares it: `runtime$argsV` is `argsV`.
+fn unprefixed(name: &str) -> &str {
+    name.split_once('$').map_or(name, |(_, n)| n)
+}
 
 /// Returns the reserved spelling a routed builtin's call becomes, or `None` for
 /// a name no runtime module implements. A generator host takes the row's
@@ -1355,11 +1489,16 @@ fn load_modules(
             format!("{h:x}:{}", text.len())
         };
         // An imported std module's top-level bodies are parsed when a root
-        // reaches them ([`parse_reached`]). The floor reads every body's
-        // carriers at load, so a load that declares artifacts parses them all.
+        // reaches them ([`parse_reached`]), and `std/runtime`'s where
+        // [`lazy_runtime`] holds. The floor reads every body's carriers at load,
+        // so a load that declares artifacts parses them all.
         let skim = !is_root && opts.artifacts.is_none() && {
             let spec = import_specifier("", key, opts.std_root.as_deref());
-            spec.starts_with("std/") && RT_MODULES.iter().all(|rt| rt.spec != spec)
+            spec.starts_with("std/")
+                && match spec == RUNTIME_SPEC {
+                    true => lazy_runtime(opts),
+                    false => RT_MODULES.iter().all(|rt| rt.spec != spec),
+                }
         };
         // The root parses its `test` and `bench` blocks, an imported module skips
         // them, so one text loaded as both parses twice.
@@ -1561,13 +1700,8 @@ fn load_modules(
         //
         // After the parse cache: two files with identical text share one parse,
         // and must not share one file name.
-        //
-        // Not the runtime module: its `panic` is a fixed `trap.rs` wording
-        // (`malloc`'s `out of memory`), printed without a site.
         let site = site_file(key, root_key, opts.std_root.as_deref());
-        if site != format!("{RUNTIME_SPEC}.vyrn") {
-            stamp_panic_sites(&mut program, &site);
-        }
+        stamp_panic_sites(&mut program, &site);
 
         // `std/result` and `std/option` are validated no-op imports.
         // Recognize the specifier before file resolution, so the builtins are
@@ -4318,10 +4452,14 @@ fn parse_reached(modules: &mut [Module], opts: &LoadOptions) -> Result<(), Vec<D
         let imports = m.program.imports.iter().flat_map(|imp| &imp.names);
         names.extend(imports.map(|n| n.original.as_str()));
     }
+    names.extend(RUNTIME_CALLS.iter().map(|(n, ..)| *n));
     let mut derive = names.contains(&"derive");
     let mut work: Vec<(usize, usize)> = Vec::new();
     for n in names {
         work.extend(waiting.remove(n).into_iter().flatten());
+        for r in routes_of(n) {
+            work.extend(waiting.remove(unprefixed(r)).into_iter().flatten());
+        }
     }
     loop {
         while let Some((mi, fi)) = work.pop() {
@@ -4346,6 +4484,9 @@ fn parse_reached(modules: &mut [Module], opts: &LoadOptions) -> Result<(), Vec<D
             derive |= names.contains(&"derive");
             for n in names {
                 work.extend(waiting.remove(n).into_iter().flatten());
+                for r in routes_of(n) {
+                    work.extend(waiting.remove(unprefixed(r)).into_iter().flatten());
+                }
             }
             if let Some(body) = body {
                 modules[mi].program.functions[fi].body = body;
@@ -4367,9 +4508,18 @@ fn parse_reached(modules: &mut [Module], opts: &LoadOptions) -> Result<(), Vec<D
     Ok(())
 }
 
+/// Whether the load parses and keeps only the `std/runtime` functions a spelling
+/// or [`RUNTIME_CALLS`] reaches. A generator's own load keeps them all, because
+/// its engine adds calls to the program after the load (`vyrn-genwasm`'s
+/// wrapper and decoders).
+fn lazy_runtime(opts: &LoadOptions) -> bool {
+    opts.nest.depth == 0
+}
+
 /// The modules whose unreached functions, tests and benches the link drops:
-/// every `std/` module but the root and the injected runtime modules, whose
-/// functions the emitter and the desugars call by name. Std checks each of its
+/// every `std/` module but the root and the injected runtime modules other than
+/// `std/runtime`, whose functions the emitter and the desugars call by name.
+/// `std/runtime` keeps what [`RUNTIME_CALLS`] names. Std checks each of its
 /// bodies as the root of its own load (`tests/std_suite.rs`, the corpus), and a
 /// body no root reaches adds no verdict to another program's.
 fn lazy_modules(modules: &[Module], root_key: &str, opts: &LoadOptions) -> HashSet<String> {
@@ -4379,7 +4529,11 @@ fn lazy_modules(modules: &[Module], root_key: &str, opts: &LoadOptions) -> HashS
     // The test `import_specifier` spells a `std/` specifier by.
     let std_root = format!("{}/", normalize(std_root));
     (modules.iter())
-        .filter(|m| m.key != root_key && m.injected.is_none() && !is_remote(&m.key))
+        .filter(|m| m.key != root_key && !is_remote(&m.key))
+        .filter(|m| {
+            m.injected
+                .is_none_or(|p| p == RUNTIME_PREFIX && lazy_runtime(opts))
+        })
         .filter(|m| normalize(&m.key).starts_with(&std_root))
         .map(|m| m.key.clone())
         .collect()
@@ -4413,7 +4567,10 @@ fn drop_unreached(
         return;
     }
     let is_lazy = |m: &Option<String>| m.as_ref().is_some_and(|k| lazy.contains(k));
-    let mut roots: Vec<&str> = named.iter().map(String::as_str).collect();
+    let calls: Vec<String> = (RUNTIME_CALLS.iter())
+        .map(|(n, ..)| format!("{RUNTIME_PREFIX}{n}"))
+        .collect();
+    let mut roots: Vec<&str> = named.iter().chain(&calls).map(String::as_str).collect();
     for f in &program.functions {
         if !is_lazy(&f.module) || f.is_extern || f.is_export_extern {
             roots.push(&f.name);
@@ -4459,11 +4616,12 @@ fn drop_unreached(
 }
 
 /// Returns every name `roots` reach in `program`: its functions and module
-/// state, and each other name their bodies spell, a builtin's included. A
-/// local that shares a function's name reaches the function, so the set holds
-/// every name the scoped walk of `gen::generator_program` reaches. Its implicit
-/// roots are that walk's: every `$` name (an injected runtime module's, which
-/// the emitter calls by name, and an impl's flattened method, which dispatch
+/// state, each other name their bodies spell, a builtin's included, and the
+/// functions a reached builtin routes to. A local that shares a function's
+/// name reaches the function, so the set holds every name the scoped walk of
+/// `gen::generator_program` reaches. Its implicit roots are that walk's: every
+/// `$` name but `std/runtime`'s (an injected runtime module's, which the
+/// emitter calls by name, and an impl's flattened method, which dispatch
 /// reaches by type) and every name a contract default, an impl method or a
 /// projection spells.
 fn reached<'a>(program: &'a Program, mut work: Vec<&'a str>) -> HashSet<&'a str> {
@@ -4475,7 +4633,7 @@ fn reached<'a>(program: &'a Program, mut work: Vec<&'a str>) -> HashSet<&'a str>
         .collect();
     work.extend(
         (program.functions.iter())
-            .filter(|f| f.name.contains('$'))
+            .filter(|f| f.name.contains('$') && !f.name.starts_with(RUNTIME_PREFIX))
             .map(|f| f.name.as_str()),
     );
     let defaults = (program.contracts.iter().flat_map(|c| &c.members)).filter_map(|m| m.default());
@@ -4489,6 +4647,9 @@ fn reached<'a>(program: &'a Program, mut work: Vec<&'a str>) -> HashSet<&'a str>
     while let Some(n) = work.pop() {
         if !keep.insert(n) {
             continue;
+        }
+        for r in routes_of(n) {
+            work.push(r);
         }
         if let Some(f) = by_name.get(n) {
             crate::ast::spelled(&f.body, &mut work);
