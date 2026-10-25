@@ -99,7 +99,7 @@ fn httpNeverMissing(why: String) -> Bool {
 }
 
 /// A route with no method yet; `pattern` is already base-qualified. Generated constructors call it.
-export fn httpRoute(pattern: String, run: Handler, derived: String) -> Route {
+export to "./http", "./ui" fn httpRoute(pattern: String, run: Handler, derived: String) -> Route {
     return Route {
         method: "",
         pattern: httpTidy(pattern),
@@ -1087,7 +1087,7 @@ fn httpSubsumes(a: Route, b: Route) -> Bool {
 /// Fields named in `numeric` bind as integers, so `/users/{id}` over an `Int64`
 /// gives `{"id":7}`; a value that does not parse stays a string, for the decoder
 /// to report. A `Float64` path field stays text: `parse` reads integers only.
-export fn httpInput(ps: Map<String, String>, body: String, numeric: Array<String>) -> String {
+export to "./http" fn httpInput(ps: Map<String, String>, body: String, numeric: Array<String>) -> String {
     if ps.length == 0 {
         return body.copy()
     }

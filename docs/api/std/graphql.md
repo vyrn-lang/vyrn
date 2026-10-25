@@ -36,12 +36,6 @@ type graph from the same `gqlMembers`, so schema and executor agree by
 construction. The graph keeps each field's `!` markers, which decide how far
 a `null` propagates.
 
-## gqlRootType
-
-```vyrn
-fn gqlRootType(root: String) -> String
-```
-
 ## sdl
 
 ```vyrn
@@ -139,32 +133,6 @@ type GqlArg = { json: String, err: String }
 ```
 
 One argument as the JSON text `fromJson` reads, or `err != ""`.
-
-## gqlArgOf
-
-```vyrn
-fn gqlArgOf(field: String, args: Array<JsonField>, want: String) -> GqlArg
-```
-
-The `want` argument of `field` as JSON text, decoded by the same
-`fromJson<ReqType>` that `std/rpc` runs on a body, so both wires validate
-alike. Any other argument name is undeclared: the SDL names it `input`.
-
-## gqlNoArgs
-
-```vyrn
-fn gqlNoArgs(field: String, args: Array<JsonField>) -> String
-```
-
-"" when `args` is empty, else the error naming the first undeclared argument.
-
-## gqlArgError
-
-```vyrn
-fn gqlArgError(field: String, issues: Array<Issue>) -> String
-```
-
-The error for an argument the input record refuses: `fromJson`'s issues, as a 422 carries.
 
 ## gqlAnswer
 

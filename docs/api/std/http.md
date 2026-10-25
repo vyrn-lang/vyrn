@@ -64,14 +64,6 @@ Two fn fields, not one plus an adapting closure: an adapter would allocate a
 capture block per subsystem and add a dispatch per request. The policy fields
 are flat rather than a nested record, so no `fn` value sits one record deeper.
 
-## httpRoute
-
-```vyrn
-fn httpRoute(pattern: String, run: Handler, derived: String) -> Route
-```
-
-A route with no method yet; `pattern` is already base-qualified. Generated constructors call it.
-
 ## GET
 
 ```vyrn
@@ -270,18 +262,6 @@ A route that an earlier group, stream or socket already answers traps.
 The audit runs once per process, so `vyrn serve` reports it at startup; an
 app that changes its groups between requests is outside it. Streams and
 sockets are separate lists, because Vyrn has no sum over two record types.
-
-## httpInput
-
-```vyrn
-fn httpInput(ps: Map<String, String>, body: String, numeric: Array<String>) -> String
-```
-
-The JSON a generated adapter hands `fromJson`: the bindings, then the body's
-fields. A bound name wins over a body field; a duplicate key would be a 422.
-Fields named in `numeric` bind as integers, so `/users/{id}` over an `Int64`
-gives `{"id":7}`; a value that does not parse stays a string, for the decoder
-to report. A `Float64` path field stays text: `parse` reads integers only.
 
 ## http
 

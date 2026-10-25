@@ -167,23 +167,23 @@ export fn paramLazy<P, T>(q: consume ParamQuery<P, T>) -> ParamLazy<P, T> {
     return ParamLazy { run: consume q.run }
 }
 
-export fn runQuery<T>(q: Query<T>) -> T {
+export to "./ui", "./vyx" fn runQuery<T>(q: Query<T>) -> T {
     let f = q.run
     return f()
 }
 
 /// Laziness changes how the document is delivered, not whether data is fetched.
-export fn runLazy<T>(q: Lazy<T>) -> T {
+export to "./ui", "./vyx" fn runLazy<T>(q: Lazy<T>) -> T {
     let f = q.run
     return f()
 }
 
-export fn runParamQuery<P, T>(q: ParamQuery<P, T>, p: P) -> T {
+export to "./ui", "./vyx" fn runParamQuery<P, T>(q: ParamQuery<P, T>, p: P) -> T {
     let f = q.run
     return f(p)
 }
 
-export fn runParamLazy<P, T>(q: ParamLazy<P, T>, p: P) -> T {
+export to "./ui", "./vyx" fn runParamLazy<P, T>(q: ParamLazy<P, T>, p: P) -> T {
     let f = q.run
     return f(p)
 }
@@ -256,7 +256,7 @@ fn uiAcceptNames(accept: String, ty: String) -> Bool {
 /// JSON wins only when the client names `application/json` and not
 /// `text/html`. A browser navigation, `*/*` and a missing `Accept` get HTML.
 /// No q-value ranking: no client of this router separates the two by weight.
-export fn uiWantsData(req: Request) -> Bool {
+export to "./ui" fn uiWantsData(req: Request) -> Bool {
     let accept = match req.headers["accept"] {
         Some(v) => toLower(v),
         None => "",
@@ -265,29 +265,29 @@ export fn uiWantsData(req: Request) -> Bool {
 }
 
 /// `props` and `params` are already JSON; `page` and `title` are encoded here.
-export fn uiPayload(page: String, title: String, props: String, params: String) -> String {
+export to "./ui" fn uiPayload(page: String, title: String, props: String, params: String) -> String {
     return "{\"page\":" + toJson(page) + ",\"title\":" + toJson(title) + ",\"props\":" + props + ",\"params\":" + params + "}"
 }
 
 /// The `@error` payload a client renders on a load miss.
-export fn uiErrorPayload(status: Int64, props: String) -> String {
+export to "./ui" fn uiErrorPayload(status: Int64, props: String) -> String {
     return "{\"page\":\"@error\",\"status\":" + status.toString() + ",\"title\":\"Error\",\"props\":" + props + "}"
 }
 
 /// A data fetch always answers 200; the payload says what to render. `vary:
 /// "Accept"` keeps a shared cache from serving a page's JSON to a browser.
-export fn uiDataResponse(body: String) -> Response {
+export to "./ui" fn uiDataResponse(body: String) -> Response {
     return Response { status: 200, contentType: "application/json", body: body.copy(), vary: "Accept", headers: [:] }
 }
 
 /// The data response when no route matched.
-export fn uiDataMiss() -> Response {
+export to "./ui" fn uiDataMiss() -> Response {
     return uiDataResponse(uiErrorPayload(404, "{\"status\":404,\"message\":\"Not Found\"}"))
 }
 
 /// `e` is a typed parameter so `toJson` sees `PageError`: bound from an
 /// `Err(e)` arm it loses its type for `toJson`.
-export fn uiErrorResponseOf(e: PageError) -> Response {
+export to "./ui" fn uiErrorResponseOf(e: PageError) -> Response {
     return uiDataResponse(uiErrorPayload(e.status, toJson(e)))
 }
 

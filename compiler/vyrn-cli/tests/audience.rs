@@ -345,7 +345,7 @@ fn a_vyx_reaching_a_server_module_is_an_error_in_the_half_that_ships() {
 #[test]
 fn a_pages_ssr_half_may_load_from_the_server_that_mounts_it() {
     // The other side of the rule: a page's `data()` runs on the server,
-    // `vyxPageClient` strips it from the client bundle, and the SSR module is compiled
+    // `pagesClient` strips it from the client bundle, and the SSR module is compiled
     // for the server root, so a loader reaching `server/api` is not a widening import.
     let dir = scratch("ssr");
     write(&dir, "vyrn.json", MANIFEST_TWO_ROOTS);
@@ -376,7 +376,7 @@ fn a_pages_ssr_half_may_load_from_the_server_that_mounts_it() {
 import { route } from pages("./app/routes")
 fn main() -> Int64 {
     let r = route(Request { method: "GET", path: "/", headers: [:], body: "" })
-    print("\{r.status}")
+    print("\{r.status} \{r.body}")
     return 0
 }
 "#,
@@ -399,7 +399,10 @@ fn main() -> Int64 {
         "stderr: {}",
         String::from_utf8_lossy(&out.stderr)
     );
-    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "200");
+    // Checking is not rendering: the page carries the server's own value.
+    let html = String::from_utf8_lossy(&out.stdout);
+    assert!(html.starts_with("200 "), "{html}");
+    assert!(html.contains("<main><p>7</p></main>"), "{html}");
     // And the client bundle, which is where a leak would matter, still checks.
     let out = vyrn()
         .arg("check")
@@ -434,10 +437,11 @@ fn a_server_page_mounted_by_the_client_root_is_refused() {
     write(
         &dir,
         "client/boot.vyrn",
-        "import { vyxPage } from \"std/vyx\"\n\
-         import { page } from vyxPage(\"../server/pages/Leak.vyx\")\n\
-         import { toHtmlString } from \"std/html\"\n\
-         fn main() -> Int64 {\n    print(toHtmlString(page()))\n    return 0\n}\n",
+        "import { pages } from \"std/ui\"\n\
+         import { route } from pages(\"../server/pages\")\n\
+         fn main() -> Int64 {\n    \
+         let r = route(Request { method: \"GET\", path: \"/leak\", headers: [:], body: \"\" })\n    \
+         print(r.body)\n    return 0\n}\n",
     );
     let out = vyrn()
         .arg("run")
@@ -473,77 +477,6 @@ fn a_server_page_mounted_by_the_client_root_is_refused() {
     assert!(
         text.contains("client/boot.vyrn -> server/pages/Leak.vyx"),
         "`why` must not deny an edge the checker enforces:\n{text}"
-    );
-}
-
-/// The other half of the rule, which the edge check must not break: one universal page
-/// compiles to two modules on opposite sides of the wire, each legal from
-/// the root that mounts it; the SSR half reaching the server is server-side rendering.
-#[test]
-fn both_halves_of_a_universal_page_mount_from_their_own_root() {
-    let dir = scratch("halves");
-    write(&dir, "vyrn.json", MANIFEST_TWO_ROOTS);
-    write(
-        &dir,
-        "shared/wire.vyrn",
-        "export type Note = { n: Int64 }\n",
-    );
-    write(
-        &dir,
-        "server/api/notes.vyrn",
-        "import { Note } from \"../../shared/wire\"\n\
-         export fn one() -> Note {\n    return Note { n: 7 }\n}\n",
-    );
-    write(
-        &dir,
-        "app/routes/index.vyx",
-        "<script>\nimport { one } from \"../../server/api/notes\"\n\
-         import { Note } from \"../../shared/wire\"\n\
-         import { Query, query } from \"std/ui\"\n\
-         export fn data() -> Query<Note> {\n    return query(one)\n}\n</script>\n\n\
-         <template>\n<main><p>{{ data.n }}</p></main>\n</template>\n",
-    );
-    write(
-        &dir,
-        "server.vyrn",
-        "import { vyxPage } from \"std/vyx\"\nimport { Note } from \"./shared/wire\"\n\
-         import { page } from vyxPage(\"./app/routes/index.vyx\")\n\
-         import { toHtmlString } from \"std/html\"\n\
-         fn main() -> Int64 {\n    print(toHtmlString(page(Note { n: 7 })))\n    return 0\n}\n",
-    );
-    write(
-        &dir,
-        "client/boot.vyrn",
-        "import { vyxPageClient } from \"std/vyx\"\nimport { Note } from \"../shared/wire\"\n\
-         import { page } from vyxPageClient(\"../app/routes/index.vyx\")\n\
-         import { toHtmlString } from \"std/html\"\n\
-         export extern fn v() -> String {\n    return toHtmlString(page(Note { n: 7 }))\n}\n\
-         fn main() -> Int64 {\n    return 0\n}\n",
-    );
-    for root in ["server.vyrn", "client/boot.vyrn"] {
-        let out = vyrn().arg("check").arg(dir.join(root)).output().unwrap();
-        assert!(
-            out.status.success(),
-            "{root} must still mount its own half: {}",
-            String::from_utf8_lossy(&out.stderr)
-        );
-    }
-    // Checking is not rendering: the test runs the SSR half and reads its HTML, so a
-    // build that passes while the page renders nothing fails here.
-    let out = vyrn()
-        .arg("run")
-        .arg(dir.join("server.vyrn"))
-        .output()
-        .unwrap();
-    assert!(
-        out.status.success(),
-        "the SSR half must render: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    let html = String::from_utf8_lossy(&out.stdout);
-    assert!(
-        html.contains("<main><p>7</p></main>"),
-        "the server-rendered page carries the server's own value:\n{html}"
     );
 }
 

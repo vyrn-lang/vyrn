@@ -40,7 +40,7 @@ import { fromBytesOr, indexOf, joinWith, padEnd, substring } from "std/strings"
 import { endsWith, startsWith } from "std/strpred"
 
 /// One declared option, as the generated spec describes it to the walk.
-export type CliOpt = {
+export to "./cli" type CliOpt = {
     long: String,
     short: String,
     field: String,
@@ -82,7 +82,7 @@ fn cliOptAt(opts: Array<CliOpt>, name: String) -> Int64 {
 /// carries its value inline; otherwise an option that takes a value takes the
 /// next token verbatim, so `--port -1` is a port of -1. A literal `--` ends
 /// option parsing. The first occurrence of an option wins, as in `std/args`.
-export fn readArgv(opts: Array<CliOpt>, argv: Array<String>) -> CliRead {
+export to "./cli" fn readArgv(opts: Array<CliOpt>, argv: Array<String>) -> CliRead {
     let mut hits: Array<CliHit> = []
     let mut free: Array<String> = []
     let mut iss: Array<Issue> = []
@@ -136,7 +136,7 @@ export fn readArgv(opts: Array<CliOpt>, argv: Array<String>) -> CliRead {
 }
 
 /// Whether the flag field `field` was seen.
-export fn cliFlag(r: CliRead, field: String) -> Bool {
+export to "./cli" fn cliFlag(r: CliRead, field: String) -> Bool {
     for h in r.hits {
         if h.field == field {
             return true
@@ -146,7 +146,7 @@ export fn cliFlag(r: CliRead, field: String) -> Bool {
 }
 
 /// The text the option field `field` carried; the first occurrence wins.
-export fn cliValue(r: CliRead, field: String) -> Option<String> {
+export to "./cli" fn cliValue(r: CliRead, field: String) -> Option<String> {
     for h in r.hits {
         if h.field == field {
             return Some(h.value.copy())
@@ -156,7 +156,7 @@ export fn cliValue(r: CliRead, field: String) -> Option<String> {
 }
 
 /// The walk's own problems, as the accumulator a generated parser starts from.
-export fn cliIssues(r: CliRead) -> Array<Issue> {
+export to "./cli" fn cliIssues(r: CliRead) -> Array<Issue> {
     let mut out: Array<Issue> = []
     for e in r.issues {
         out.push(cliIssueOf(e.key, e.path, e.message))
@@ -179,23 +179,23 @@ export fn wantsHelp(argv: Array<String>) -> Bool {
 }
 
 /// A required option nobody gave.
-export fn cliMissing(field: String, long: String) -> Issue {
+export to "./cli" fn cliMissing(field: String, long: String) -> Issue {
     return cliIssueOf("cli.missing", field, "required option `" + long + "` is missing")
 }
 
 /// A value that is not a whole number.
-export fn cliNotNumber(field: String, long: String) -> Issue {
+export to "./cli" fn cliNotNumber(field: String, long: String) -> Issue {
     return cliIssueOf("cli.number", field, "option `" + long + "` expects a whole number")
 }
 
 /// A value the field's own type refused. `want` is that type's rule, worded from
 /// its `Schema` by the generator.
-export fn cliRefused(field: String, long: String, want: String) -> Issue {
+export to "./cli" fn cliRefused(field: String, long: String, want: String) -> Issue {
     return cliIssueOf("cli.invalid", field, "option `" + long + "` expects " + want)
 }
 
 /// A free argument in a command that declares no positionals.
-export fn cliUnexpected(value: String) -> Issue {
+export to "./cli" fn cliUnexpected(value: String) -> Issue {
     return cliIssueOf("cli.unexpected", "", "unexpected argument `" + value + "`")
 }
 

@@ -574,7 +574,7 @@ fn gqlRootOf(f: FnInfo) -> String {
     return "query"
 }
 
-export fn gqlRootType(root: String) -> String {
+export to "./graphql" fn gqlRootType(root: String) -> String {
     if root == "mutation" {
         return "Mutation"
     }
@@ -1359,7 +1359,7 @@ export type GqlArg = { json: String, err: String }
 /// The `want` argument of `field` as JSON text, decoded by the same
 /// `fromJson<ReqType>` that `std/rpc` runs on a body, so both wires validate
 /// alike. Any other argument name is undeclared: the SDL names it `input`.
-export fn gqlArgOf(field: String, args: Array<JsonField>, want: String) -> GqlArg {
+export to "./graphql" fn gqlArgOf(field: String, args: Array<JsonField>, want: String) -> GqlArg {
     let stray = gqlNoArgs(field, gqlArgsBesides(args, want))
     if stray != "" {
         return GqlArg { json: "", err: stray }
@@ -1386,7 +1386,7 @@ fn gqlArgsBesides(args: Array<JsonField>, want: String) -> Array<JsonField> {
 }
 
 /// "" when `args` is empty, else the error naming the first undeclared argument.
-export fn gqlNoArgs(field: String, args: Array<JsonField>) -> String {
+export to "./graphql" fn gqlNoArgs(field: String, args: Array<JsonField>) -> String {
     if args.length > 0 {
         return "Unknown argument `" + args[0].key + "` on field `" + field + "`."
     }
@@ -1394,7 +1394,7 @@ export fn gqlNoArgs(field: String, args: Array<JsonField>) -> String {
 }
 
 /// The error for an argument the input record refuses: `fromJson`'s issues, as a 422 carries.
-export fn gqlArgError(field: String, issues: Array<Issue>) -> String {
+export to "./graphql" fn gqlArgError(field: String, issues: Array<Issue>) -> String {
     let mut out = "Field `" + field + "` got an invalid argument"
     // Appends, not an `if` expression whose arms borrow and allocate, so every
     // temporary has one owner.
