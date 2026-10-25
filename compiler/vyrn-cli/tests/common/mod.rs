@@ -460,6 +460,18 @@ pub fn wasmtime() -> Option<PathBuf> {
     require_tools("wasmtime", "VYRN_WASMTIME", found)
 }
 
+/// The Node binary (`VYRN_NODE`, default `node`), which runs `web/wasi-min.js`.
+pub fn node() -> Option<PathBuf> {
+    let node = std::env::var("VYRN_NODE").unwrap_or_else(|_| "node".into());
+    let found = Command::new(&node)
+        .arg("--version")
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|_| PathBuf::from(&node));
+    require_tools("node", "VYRN_NODE", found)
+}
+
 /// Turns a missing tool from a skip into a failure when `VYRN_REQUIRE_TOOLS` is set.
 /// `vyrn-codegen/tests/` shares the one statement.
 pub use vyrn_codegen::toolchain::require_tools;

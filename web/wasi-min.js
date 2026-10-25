@@ -17,6 +17,9 @@
 // is the `extern` story. Anything else is out of scope on purpose — if the
 // import surface ever grows, the instantiate error names the missing function.
 //
+// A module that waits imports `vyrn_wait.sleep` and exports `__vyrn_wake`:
+// `runVyrn` settles every timer before it resolves, as `vyrn run` does.
+//
 // Usage:
 //   const { exitCode, stdout, stdoutRaw, stderr, exports } = await runVyrn(bytes, {
 //     onStdout: line => ..., onStderr: line => ...,   // optional, per-chunk
@@ -407,9 +410,25 @@ export async function runVyrn(wasmBytes, hooks = {}) {
     };
   }
 
+  // The host's waits: each pending timer's deadline, in milliseconds since the
+  // start, and its id, as `Waits` in `vyrn-cli/src/wasmrun.rs` keeps them on
+  // the wall clock.
+  const started = performance.now();
+  const nowMs = () => Math.floor(performance.now() - started);
+  const due = [];
+  let nextWait = 1n;
+  const vyrnWait = {
+    // A timer due `ms` from now; a negative `ms` is due now.
+    sleep: (ms) => {
+      due.push({ at: nowMs() + Math.max(0, Number(ms)), id: nextWait });
+      return nextWait++;
+    },
+  };
+
   const instance = await WebAssembly.instantiate(module, {
     wasi_snapshot_preview1: wasi,
     vyrn,
+    vyrn_wait: vyrnWait,
   });
   memory = instance.exports.memory;
 
@@ -565,15 +584,35 @@ export async function runVyrn(wasmBytes, hooks = {}) {
     overflow &&
     (e instanceof RangeError ||
       (e instanceof WebAssembly.RuntimeError && sp.value >>> 0 >= memory.buffer.byteLength));
-  let exitCode = 0;
-  try {
+  const guarded = (f) => {
     try {
-      instance.exports._start();
+      f();
     } catch (e) {
       if (!overflowed(e)) throw e;
       sp.value = top;
       overflow();
     }
+  };
+  // A `main` that waits returns from `_start` and ends in a wake: deliver each
+  // timer to `__vyrn_wake` as it comes due, earliest first and ties by id, as
+  // `settle_waits` in `wasmrun.rs` does.
+  const settle = async () => {
+    const wake = instance.exports.__vyrn_wake;
+    while (wake && due.length) {
+      let k = 0;
+      for (let i = 1; i < due.length; i++) {
+        if (due[i].at < due[k].at || (due[i].at === due[k].at && due[i].id < due[k].id)) k = i;
+      }
+      const [t] = due.splice(k, 1);
+      const left = t.at - nowMs();
+      if (left > 0) await new Promise((r) => setTimeout(r, left));
+      guarded(() => wake(t.id, 0, 0n));
+    }
+  };
+  let exitCode = 0;
+  try {
+    guarded(() => instance.exports._start());
+    await settle();
   } catch (e) {
     if (e instanceof VyrnExit) {
       exitCode = e.code;

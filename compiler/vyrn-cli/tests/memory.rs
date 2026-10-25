@@ -18,6 +18,8 @@
 //! audit (`VYRN_LEAK_CHECK=1`). The Node tests skip without node, loudly under
 //! `VYRN_REQUIRE_TOOLS`.
 
+mod common;
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -25,27 +27,6 @@ fn repo(rel: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
         .join(rel)
-}
-
-/// The Node binary (`VYRN_NODE`, default `node`), or `None`. Without Node
-/// nothing in the build checks that memory is reclaimed, so
-/// `VYRN_REQUIRE_TOOLS` (which CI exports) turns the skip into a panic.
-fn find_node() -> Option<PathBuf> {
-    let node = std::env::var("VYRN_NODE").unwrap_or_else(|_| "node".into());
-    let found = Command::new(&node)
-        .arg("--version")
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|_| PathBuf::from(&node));
-    if found.is_none() && std::env::var_os("VYRN_REQUIRE_TOOLS").is_some() {
-        panic!(
-            "VYRN_REQUIRE_TOOLS is set and `node` was not found — this run would have \
-             silently skipped the memory census, the only thing here that sees a leak. \
-             Point `VYRN_NODE` at the binary, or unset VYRN_REQUIRE_TOOLS."
-        );
-    }
-    found
 }
 
 /// An export taking a `String` the JS caller allocated in the module, plus a
@@ -84,7 +65,7 @@ console.log(await after(4 * n));
 
 #[test]
 fn the_wasm_heap_reaches_a_steady_state() {
-    let Some(node) = find_node() else {
+    let Some(node) = common::node() else {
         eprintln!("NOTE: no node — wasm reclamation is unverified on this machine");
         return;
     };
@@ -1523,7 +1504,7 @@ for (const name of names) {
 
 #[test]
 fn the_census_shapes_hold_their_measured_baseline() {
-    let Some(node) = find_node() else {
+    let Some(node) = common::node() else {
         eprintln!("NOTE: no node — the census baseline is unmeasured on this machine");
         return;
     };

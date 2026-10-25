@@ -10,24 +10,6 @@ mod common;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-fn find_node() -> Option<PathBuf> {
-    let node = std::env::var("VYRN_NODE").unwrap_or_else(|_| "node".into());
-    let found = Command::new(&node)
-        .arg("--version")
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|_| PathBuf::from(&node));
-    if found.is_none() && std::env::var_os("VYRN_REQUIRE_TOOLS").is_some() {
-        panic!(
-            "VYRN_REQUIRE_TOOLS is set and `node` was not found — this run would have \
-             silently skipped the extern-boundary check, the only thing here that runs \
-             the real shim. Point `VYRN_NODE` at the binary, or unset VYRN_REQUIRE_TOOLS."
-        );
-    }
-    found
-}
-
 fn repo(rel: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
@@ -275,7 +257,7 @@ console.log(JSON.stringify(refused));
 
 #[test]
 fn the_shim_reads_the_declaration_instead_of_the_instruction_shape() {
-    let Some(node) = find_node() else {
+    let Some(node) = common::node() else {
         eprintln!("NOTE: no node — the extern boundary is unverified on this machine");
         return;
     };
@@ -330,43 +312,41 @@ process.stderr.write(r.stderr);
 process.exitCode = r.exitCode;
 "#;
 
-/// A stack overflow ends in the shim as under `vyrn run`: the shim hands V8's
-/// `RangeError`, or the shadow stack's out-of-bounds trap, back to the module,
-/// which flushes stdout and traps with one sentence.
+/// A stack overflow and a program that waits end in the shim as under `vyrn run`.
+/// The shim hands V8's `RangeError`, or the shadow stack's out-of-bounds trap,
+/// back to the module, which flushes stdout and traps with one sentence; it
+/// delivers each timer to `__vyrn_wake` before `runVyrn` resolves.
 #[test]
-fn the_shim_hands_a_stack_overflow_back_to_the_module() {
-    let Some(node) = find_node() else {
-        eprintln!("NOTE: no node, so the shim's stack trap is unverified on this machine");
+fn the_shim_ends_each_program_as_vyrn_run_does() {
+    let Some(node) = common::node() else {
+        eprintln!("NOTE: no node, so the shim's traps and waits are unverified on this machine");
         return;
     };
-    let dir = tmp("overflow");
-    let example = repo("examples/recdepth.vyrn");
-    let wasm = build_wasm(
-        &dir,
-        "recdepth",
-        &std::fs::read_to_string(&example).unwrap(),
-    );
+    let dir = tmp("ends");
     std::fs::write(dir.join("run.mjs"), RUN).unwrap();
     std::fs::copy(repo("web/wasi-min.js"), dir.join("wasi-min.mjs")).unwrap();
-
-    let shim = Command::new(&node)
-        .arg(dir.join("run.mjs"))
-        .arg(&wasm)
-        .output()
-        .expect("node");
-    let engine = Command::new(env!("CARGO_BIN_EXE_vyrn"))
-        .arg("run")
-        .arg(&example)
-        .output()
-        .expect("vyrn run");
-    let say = |o: &std::process::Output| {
-        format!(
-            "exit {:?}\n{}{}",
-            o.status.code(),
-            String::from_utf8_lossy(&o.stdout),
-            String::from_utf8_lossy(&o.stderr)
-        )
-    };
-    assert_eq!(say(&shim), say(&engine));
-    assert_eq!(shim.status.code(), Some(1), "{}", say(&shim));
+    for (name, _why) in common::ENGINE_TRAP.iter().chain(common::WAITING) {
+        let example = repo(&format!("examples/{name}"));
+        let stem = name.trim_end_matches(".vyrn");
+        let wasm = build_wasm(&dir, stem, &std::fs::read_to_string(&example).unwrap());
+        let shim = Command::new(&node)
+            .arg(dir.join("run.mjs"))
+            .arg(&wasm)
+            .output()
+            .expect("node");
+        let engine = Command::new(env!("CARGO_BIN_EXE_vyrn"))
+            .arg("run")
+            .arg(&example)
+            .output()
+            .expect("vyrn run");
+        let say = |o: &std::process::Output| {
+            format!(
+                "exit {:?}\n{}{}",
+                o.status.code(),
+                String::from_utf8_lossy(&o.stdout),
+                String::from_utf8_lossy(&o.stderr)
+            )
+        };
+        assert_eq!(say(&shim), say(&engine), "{name}");
+    }
 }
