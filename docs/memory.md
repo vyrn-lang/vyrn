@@ -211,6 +211,7 @@ The compiler releases an owned value at each exit where it is still held:
 - the end of the block that bound it;
 - a `return`, and a `?` that propagates;
 - a `break` or `continue`, for the frames the loop body opened;
+- a cancelled `await`, for what a `return` there would release;
 - the end of a `match`, `if let` or `for` that owns a temporary scrutinee;
 - the end of an arm, for a payload binder the arm did not move;
 - each edge of a join where one path consumed the value and another did not.
@@ -314,6 +315,10 @@ The target is wasm32. A pointer is 4 bytes.
   it after. An `export` or `gen` function with an aggregate result copies it.
 - A `Map` header is `{ keys, vals, len, cap, idx }`.
 - A boxed enum payload lives in its own block.
+- A function that waits keeps its frame in a heap block, not on the shadow
+  stack. The block holds every local and parameter, 8 bytes each and 16 for a
+  `V128`. The call that enters the function allocates it; the step that
+  returns or is cancelled frees it, so the free audit sees each one.
 
 The allocator is a segregated free list in `std/runtime`, four size classes
 per power of two, with an eight-byte block header. The region arena routes

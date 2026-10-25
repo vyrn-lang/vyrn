@@ -1766,6 +1766,12 @@ examples/vondemo.vyrn	where$pPort	yes	yes, emulated Int64
 examples/vondemo.vyrn	where$cPort	no, it calls `panic`	no, its effect set is trap
 examples/vyxdemo.vyrn	demo	yes	no, its effect set is alloc
 examples/vyxdemo.vyrn	main	no, it calls `toHtmlString`, which is not trap-free	no, its effect set is alloc, write-output, trap
+examples/waiting.vyrn	wait	yes	no, its effect set is alloc, waits
+examples/waiting.vyrn	pause	yes	no, its effect set is alloc, write-output, waits
+examples/waiting.vyrn	area	yes	no, its effect set is alloc, write-output, waits
+examples/waiting.vyrn	collect	yes	no, its effect set is alloc, waits
+examples/waiting.vyrn	mirror	yes	no, its effect set is waits
+examples/waiting.vyrn	main	yes	no, its effect set is alloc, write-output, waits
 examples/wirekey.vyrn	main	no, it calls `derive$json$jsonEncoders$t61b47f29d68a5d7d`, which is not trap-free	no, its effect set is alloc, write-output, trap
 site/app/apidoc.vyrn	offsetOf	no, it keeps an index check	no, it is not trap-free
 site/app/apidoc.vyrn	sigEnd	no, it keeps an index check	no, it is not trap-free
@@ -3195,7 +3201,15 @@ std/symbolmap.vyrn	originJson	yes	no, its effect set is alloc
 std/symbolmap.vyrn	mapJson	no, it calls `emit`, which is not trap-free	no, its effect set is alloc, trap
 std/symbolmap.vyrn	mapSlug	yes	no, its effect set is alloc
 std/symbolmap.vyrn	symbolMapFn	no, it calls `mapJson`, which is not trap-free	no, its effect set is alloc, trap, gen-only
-std/task.vyrn	sleep	yes	no, its effect set is waits
+std/task.vyrn	task$sleep	yes	no, its effect set is waits
+std/task.vyrn	task$taskAt	yes	no, its effect set is module-state
+std/task.vyrn	task$taskEnd	no, it keeps an index check	no, its effect set is module-state
+std/task.vyrn	task$taskBegin	yes	no, its effect set is alloc, module-state
+std/task.vyrn	task$taskSettle	no, it keeps an index check	no, its effect set is module-state
+std/task.vyrn	task$taskFinish	no, it calls `taskEnd`, which is not trap-free	no, its effect set is module-state
+std/task.vyrn	task$waitOn	no, it keeps an index check	no, its effect set is module-state
+std/task.vyrn	task$delivery	no, it keeps an index check	no, its effect set is module-state
+std/task.vyrn	task$wake	no, it keeps an index check	no, its effect set is alloc, module-state, trap
 std/text.vyrn	text$decodeUtf8	yes	no, its effect set is alloc
 std/text.vyrn	text$utf8Width	yes	yes, emulated Int64
 std/text.vyrn	text$stringFault	yes	no, the loop is no counter loop

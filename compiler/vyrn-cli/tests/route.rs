@@ -52,8 +52,8 @@ fn every_example_agrees_between_the_wasm2c_route_and_the_wasm_engine() {
     for path in &names {
         let name = path.file_name().unwrap().to_string_lossy().to_string();
         // Each exclusion is a program that cannot be compared: two lists that
-        // never build, one whose imports only a browser page supplies, and one
-        // whose trap the `wasmtime` CLI words itself.
+        // never build, one whose imports only a browser page supplies, one
+        // whose trap the `wasmtime` CLI words itself, and one that waits.
         let skip = KNOWN_DIVERGENT
             .iter()
             .map(|(n, why)| (*n, *why))
@@ -62,6 +62,7 @@ fn every_example_agrees_between_the_wasm2c_route_and_the_wasm_engine() {
                 WASM_ONLY
                     .iter()
                     .chain(ENGINE_TRAP)
+                    .chain(WAITING)
                     .map(|(n, why)| (*n, *why)),
             )
             .find(|(n, _)| *n == name);
@@ -129,25 +130,21 @@ fn every_example_agrees_between_the_wasm2c_route_and_the_wasm_engine() {
 
 /// The examples the `wasmtime` CLI cannot stand in for: a `WASM_ONLY` example
 /// calls an `extern fn` whose `vyrn` import namespace only a browser page
-/// supplies, and an `ENGINE_TRAP` example ends in a stack overflow the CLI words
-/// itself. `vyrn run` is the reference for both, and each ends in a trap.
+/// supplies, an `ENGINE_TRAP` example ends in a stack overflow the CLI words
+/// itself, and a `WAITING` example needs the host's event loop. `vyrn run` is
+/// the reference for all three; `examples/expected` pins each exit code.
 #[test]
 #[ignore = "needs clang, wasm2c and simde; run explicitly: cargo test -p vyrn-cli --release --test route -- --ignored"]
-fn the_trapping_examples_agree_between_the_route_and_vyrn_run() {
+fn the_examples_the_cli_cannot_run_agree_between_the_route_and_vyrn_run() {
     if route_tools().is_none() {
         eprintln!("SKIP: the wasm2c route's tools are not all present");
         return;
     }
     let dir = examples_dir();
     let out_dir = scratch("route-trap");
-    for (name, _why) in WASM_ONLY.iter().chain(ENGINE_TRAP) {
+    for (name, _why) in WASM_ONLY.iter().chain(ENGINE_TRAP).chain(WAITING) {
         let path = dir.join(name);
         let engine = vyrn().arg("run").arg(&path).output().expect("vyrn run");
-        assert_eq!(
-            engine.status.code(),
-            Some(1),
-            "{name}: the engine must trap"
-        );
 
         let exe = out_dir.join(format!("{name}.exe"));
         let build = vyrn()
@@ -164,11 +161,15 @@ fn the_trapping_examples_agree_between_the_route_and_vyrn_run() {
             norm(&build.stderr)
         );
         let route = Command::new(&exe).output().expect("run the route's binary");
-        assert_eq!(route.status.code(), Some(1), "{name}: the route must trap");
+        assert_eq!(
+            route.status.code(),
+            engine.status.code(),
+            "{name}: exit code"
+        );
         assert_eq!(
             norm(&route.stderr),
             norm(&engine.stderr),
-            "{name}: the two traps must be byte-identical"
+            "{name}: stderr byte-identical"
         );
         assert_eq!(
             norm(&route.stdout),

@@ -398,15 +398,29 @@ pub enum Rhs {
         /// is bound to, in the callee's order. An argument no [`Target`] names
         /// stays in `args`.
         targets: Vec<Target>,
-        /// The source marked the call `await`. The effect judgment refuses a
-        /// mark on a call that does not wait and a waiting call without one.
-        awaits: bool,
+        /// The source marked the call `await`: its cancellation edge. The
+        /// effect judgment refuses a mark on a call that does not wait and a
+        /// waiting call without one.
+        awaits: Option<Box<Cancel>>,
     },
     /// Arithmetic, comparison, interpolation, conversion: reads its operands.
     /// The last field is the producer type: the operator's own result.
     Prim(Op, Vec<Val>, Option<Type>),
     /// A record, array, map or variant literal: takes its parts.
     Make(Ctor, Vec<Val>),
+}
+
+/// The cancellation edge of an awaited call. A cancelled wait runs `rows`,
+/// the releases the placer put there, and then the frame exits with no value,
+/// as a `return` does ([`crate::own::Exit::Cancel`]). The edge leaves after the
+/// call took its arguments and before the row binds its result, so no row on
+/// it names the result.
+#[derive(Debug, Clone)]
+pub struct Cancel {
+    pub rows: Vec<St>,
+    /// The `await`'s call, the plan's key for the edge's releases.
+    pub site: NodeId,
+    pub line: usize,
 }
 
 /// What a `fn`-typed parameter of a specialization calls: one
@@ -792,6 +806,11 @@ macro_rules! lists {
                 St::If { then, els, .. } => (Some(then), Some(els), $($ref_)+ []),
                 St::Loop { body, .. } | St::Block { body, .. } => (Some(body), None, $($ref_)+ []),
                 St::Switch { arms, .. } => (None, None, arms),
+                St::Let(_, Rhs::Call { awaits: Some(c), .. })
+                | St::Do {
+                    rhs: Rhs::Call { awaits: Some(c), .. },
+                    ..
+                } => (Some($($ref_)+ c.rows), None, $($ref_)+ []),
                 St::Let(..)
                 | St::Store { .. }
                 | St::Drop(..)
@@ -809,7 +828,8 @@ macro_rules! lists {
 
 impl St {
     /// The lists of rows this row holds, in program order: an `if`'s then
-    /// and else, a loop's or a block's body, each arm's body.
+    /// and else, a loop's or a block's body, each arm's body, an awaited
+    /// call's cancellation edge.
     pub fn lists(&self) -> impl Iterator<Item = &Vec<St>> {
         lists!(self, iter, &)
     }
@@ -817,6 +837,18 @@ impl St {
     /// [`St::lists`], to write to.
     pub fn lists_mut(&mut self) -> impl Iterator<Item = &mut Vec<St>> {
         lists!(self, iter_mut, &mut)
+    }
+
+    /// The cancellation edge of an awaited call row.
+    pub fn cancel(&self) -> Option<&Cancel> {
+        match self {
+            St::Let(_, Rhs::Call { awaits, .. })
+            | St::Do {
+                rhs: Rhs::Call { awaits, .. },
+                ..
+            } => awaits.as_deref(),
+            _ => None,
+        }
     }
 
     /// This row and every row under it, as [`rows`] walks them.
@@ -1173,6 +1205,16 @@ impl Body {
         row.as_deref().unwrap_or(&self.names[n.index()].holes)
     }
 
+    /// Whether the body waits: it holds an awaited call. The effect judgment
+    /// marks a call `await` exactly where it waits, so this is the judgment
+    /// for the frame the core built, instance by instance.
+    pub fn waits(&self) -> bool {
+        fn any(ss: &[St]) -> bool {
+            (ss.iter()).any(|s| s.cancel().is_some() || s.lists().any(|l| any(l)))
+        }
+        any(&self.stmts)
+    }
+
     /// How many times each name is read, which decides whether an emitter
     /// may leave a value on the operand stack rather than in a local.
     pub fn reads(&self) -> Vec<u32> {
@@ -1337,12 +1379,23 @@ impl Body {
         }
     }
 
+    fn render_cancel(&self, r: &Rhs, depth: usize, out: &mut String) {
+        if let Rhs::Call {
+            awaits: Some(c), ..
+        } = r
+        {
+            out.push_str(&format!("{}cancelled:\n", "  ".repeat(depth + 1)));
+            self.render_stmts(&c.rows, depth + 2, out);
+        }
+    }
+
     fn render_stmts(&self, stmts: &[St], depth: usize, out: &mut String) {
         let pad = "  ".repeat(depth);
         for s in stmts {
             match s {
                 St::Let(n, r) => {
-                    out.push_str(&format!("{pad}let {} = {}\n", self.spell(*n), self.rhs(r)))
+                    out.push_str(&format!("{pad}let {} = {}\n", self.spell(*n), self.rhs(r)));
+                    self.render_cancel(r, depth, out);
                 }
                 St::Store {
                     place,
@@ -1414,7 +1467,10 @@ impl Body {
                         self.render_stmts(&a.body, depth + 2, out);
                     }
                 }
-                St::Do { rhs: r, .. } => out.push_str(&format!("{pad}do {}\n", self.rhs(r))),
+                St::Do { rhs: r, .. } => {
+                    out.push_str(&format!("{pad}do {}\n", self.rhs(r)));
+                    self.render_cancel(r, depth, out);
+                }
                 St::Trap => out.push_str(&format!("{pad}trap\n")),
                 St::Check(c) => out.push_str(&format!("{pad}{}\n", self.check(c))),
             }

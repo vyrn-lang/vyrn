@@ -898,6 +898,12 @@ pub const MEM_PREFIX: &str = "mem$";
 /// The reserved prefix of every `std/runtime` declaration.
 pub const RUNTIME_PREFIX: &str = "runtime$";
 
+/// The module of the host's waits and the run queue.
+pub const TASK_SPEC: &str = "std/task";
+
+/// The reserved prefix of every `std/task` declaration.
+pub const TASK_PREFIX: &str = "task$";
+
 /// Whether this build is audited: `VYRN_LEAK_CHECK` set to anything but `0` in
 /// the compiler's environment, or the profile instrument ([`profile_build`]),
 /// which is the audit plus per-line counters.
@@ -979,6 +985,15 @@ pub const RT_MODULES: &[RtModule] = &[
         prefix: "num$",
         // `assertEq` renders a mismatched float the way `@str` does.
         desugared: &["@str", "print", "assertEq"],
+        always: false,
+    },
+    // The run queue, in every program that waits: such a program imports
+    // `std/task`, whose `sleep` is the one host wait. The emitter calls its
+    // queue by these spellings.
+    RtModule {
+        spec: TASK_SPEC,
+        prefix: TASK_PREFIX,
+        desugared: &[],
         always: false,
     },
     // The runtime, in every program. `std/mem` enters as `std/runtime`'s import;

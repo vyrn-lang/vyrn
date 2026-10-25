@@ -267,10 +267,14 @@ const EXTERN_STUBS_MARKER: &str = "/*@VYRN_EXTERN_STUBS@*/";
 /// match its arity; the signatures come from the header, not from a second
 /// copy of `direct::extern_abi_sig`.
 ///
-/// `VYRN_INSTANTIATE` passes one argument per imported namespace, and a program
-/// with no reachable `extern` has no `vyrn` import (`Module::sweep`).
+/// `VYRN_INSTANTIATE(inst)` passes `&g_<namespace>` for each namespace the
+/// header's instantiate takes, in its order. A program with no reachable
+/// `extern` has no `vyrn` import (`Module::sweep`). `VYRN_WAKE` is defined when
+/// the module exports `__vyrn_wake`, a program that waits.
 pub fn wasi_host_c(w2c_header: &str) -> String {
     let mut stubs = String::new();
+    let mut instantiate = String::from("(inst)");
+    let mut wakes = false;
     for line in w2c_header.lines() {
         let line = line.trim();
         if !line.ends_with(");") {
@@ -280,11 +284,23 @@ pub fn wasi_host_c(w2c_header: &str) -> String {
         let Some((ret, sym)) = line[..open].rsplit_once(' ') else {
             continue;
         };
+        let inner = line[open + 1..line.len() - 2].trim();
+        if sym == "wasm2c_prog_instantiate" {
+            for p in inner.split(',').skip(1) {
+                let ns = p.trim().trim_start_matches("struct w2c_");
+                instantiate.push_str(&format!(", &g_{}", ns.trim_end_matches('*')));
+            }
+            continue;
+        }
+        wakes |= sym == "w2c_prog_0x5F_vyrn_wake";
+        // The `vyrn` namespace's own: `vyrn_wait`'s are `w2c_vyrn__wait_`.
         let Some(mangled) = sym.strip_prefix("w2c_vyrn_") else {
             continue;
         };
+        if !inner.starts_with("struct w2c_vyrn*") {
+            continue;
+        }
         let name = demangle_w2c(mangled);
-        let inner = line[open + 1..line.len() - 2].trim();
         let params: Vec<String> = if inner.is_empty() || inner == "void" {
             Vec::new()
         } else {
@@ -317,15 +333,15 @@ pub fn wasi_host_c(w2c_header: &str) -> String {
         }
         stubs.push_str("}\n");
     }
-    let block = if stubs.is_empty() {
-        "#define VYRN_INSTANTIATE(inst, wasi) wasm2c_prog_instantiate((inst), (wasi))\n".to_string()
-    } else {
-        format!(
-            "struct w2c_vyrn {{\n    int unused;\n}};\nstatic struct w2c_vyrn g_vyrn;\n\
-             #define VYRN_INSTANTIATE(inst, wasi) \
-             wasm2c_prog_instantiate((inst), &g_vyrn, (wasi))\n{stubs}"
-        )
-    };
+    let mut block =
+        format!("#define VYRN_INSTANTIATE(inst) wasm2c_prog_instantiate({instantiate})\n");
+    if wakes {
+        block.push_str("#define VYRN_WAKE 1\n");
+    }
+    if !stubs.is_empty() {
+        block.push_str("struct w2c_vyrn {\n    int unused;\n};\nstatic struct w2c_vyrn g_vyrn;\n");
+        block.push_str(&stubs);
+    }
     WASI_HOST_C.replace(EXTERN_STUBS_MARKER, &block)
 }
 
@@ -469,22 +485,31 @@ fn discover_clang() -> Option<(PathBuf, String, &'static str)> {
 mod tests {
     use super::*;
 
-    /// No `extern` import: the two-argument instantiate and no stub. One: the
-    /// three-argument instantiate, the struct, and a stub at the header's arity,
-    /// where a `String` argument crosses as two values.
+    /// No `extern` import: one namespace to instantiate and no stub. One: the
+    /// struct, and a stub at the header's arity, where a `String` argument crosses
+    /// as two values. The host's wait is no `extern`, and its wake turns on the
+    /// event loop.
     #[test]
     fn the_host_takes_its_extern_stubs_from_the_header() {
-        let none = wasi_host_c("void wasm2c_prog_instantiate(w2c_prog*, struct w2c_x*);\n");
-        assert!(none.contains("wasm2c_prog_instantiate((inst), (wasi))"));
+        let none = wasi_host_c(
+            "void wasm2c_prog_instantiate(w2c_prog*, struct w2c_wasi__snapshot__preview1*);\n",
+        );
+        assert!(none.contains("wasm2c_prog_instantiate((inst), &g_wasi__snapshot__preview1)"));
         assert!(!none.contains("struct w2c_vyrn {"));
+        assert!(!none.contains("#define VYRN_WAKE"));
         assert!(!none.contains(EXTERN_STUBS_MARKER));
 
         let some = wasi_host_c(
             "struct w2c_vyrn;\n\
+             void wasm2c_prog_instantiate(w2c_prog*, struct w2c_vyrn*, struct w2c_vyrn__wait*);\n\
              void w2c_vyrn_jsLog(struct w2c_vyrn*, u32, u64);\n\
-             f64 w2c_vyrn_jsNow(struct w2c_vyrn*);\n",
+             f64 w2c_vyrn_jsNow(struct w2c_vyrn*);\n\
+             u64 w2c_vyrn__wait_sleep(struct w2c_vyrn__wait*, u64);\n\
+             u32 w2c_prog_0x5F_vyrn_wake(w2c_prog*, u64, u32, u64);\n",
         );
-        assert!(some.contains("wasm2c_prog_instantiate((inst), &g_vyrn, (wasi))"));
+        assert!(some.contains("wasm2c_prog_instantiate((inst), &g_vyrn, &g_vyrn__wait)"));
+        assert!(some.contains("#define VYRN_WAKE 1"));
+        assert!(!some.contains("_wait_sleep` is not available"));
         assert!(some.contains("struct w2c_vyrn {"));
         assert!(some.contains("void w2c_vyrn_jsLog(struct w2c_vyrn* a0, u32 a1, u64 a2) {"));
         assert!(some.contains("f64 w2c_vyrn_jsNow(struct w2c_vyrn* a0) {"));

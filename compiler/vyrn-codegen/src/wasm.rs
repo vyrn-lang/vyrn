@@ -825,7 +825,8 @@ fn count(f: &mut Frame, c: Counter) -> Vec<Instruction<'static>> {
     if !f.instrument_all {
         bump(c, c.row, &[I::I64Const(1)], &mut out);
     }
-    let framed = f.bytes() != 0;
+    // A heap frame has no shadow-stack prologue or epilogue to price.
+    let framed = f.bytes() != 0 && !f.heap;
     let (mut pending, mut live) = (1 + 5 * u64::from(framed), true);
     let mut open: Vec<Open> = Vec::new();
     for (k, ins) in body.into_iter().enumerate() {
@@ -946,7 +947,7 @@ fn encode(mut f: Frame, counter: Option<Counter>) -> Function {
     // Claim the frame. Subtracting past 0 wraps, and every access then traps
     // instead of overwriting the data above. Only a hand-built `Frame` reaches
     // the wrap (`tests/wasm_runs.rs`); [`STACK_BYTES`] covers accepted code.
-    if frame != 0 {
+    if frame != 0 && !f.heap {
         out.instruction(&Instruction::GlobalGet(SP))
             .instruction(&Instruction::I32Const(frame as i32))
             .instruction(&Instruction::I32Sub)
@@ -957,7 +958,7 @@ fn encode(mut f: Frame, counter: Option<Counter>) -> Function {
         out.instruction(i);
     }
     // Base plus frame is the value the prologue found.
-    if frame != 0 {
+    if frame != 0 && !f.heap {
         out.instruction(&Instruction::LocalGet(f.base))
             .instruction(&Instruction::I32Const(frame as i32))
             .instruction(&Instruction::I32Add)
@@ -1029,6 +1030,8 @@ pub struct Frame {
     copy_tmp: Option<(u32, u32)>,
     /// Each [`Frame::hole`] not yet filled: its position in `body` and its id.
     holes: Vec<(usize, u32)>,
+    /// The frame is a heap block ([`Frame::heap_prologue`]), not shadow stack.
+    heap: bool,
 }
 
 impl Frame {
@@ -1050,6 +1053,7 @@ impl Frame {
             instrument_all: false,
             copy_tmp: None,
             holes: Vec::new(),
+            heap: false,
         }
     }
 
@@ -1225,6 +1229,84 @@ impl Frame {
     /// Returns the local holding the frame base.
     pub fn base(&self) -> u32 {
         self.base
+    }
+
+    /// Where each local is kept in a heap frame while its body waits: every
+    /// parameter but the last, which is the frame's own address, then every
+    /// declared local, after the slots, 8 bytes each and 16 for a `v128`.
+    /// Returns the rows and the frame's whole size.
+    fn kept(&self) -> (Vec<(u32, ValType, u32)>, u32) {
+        let params = self.params.len() as u32;
+        let locals = (0..params.saturating_sub(1)).map(|i| (i, self.params[i as usize]));
+        let declared = (self.base + 1..).zip(self.locals.iter().copied());
+        let mut at = self.bytes();
+        let mut out = Vec::new();
+        for (i, t) in locals.chain(declared) {
+            let size = if t == ValType::V128 { 16 } else { 8 };
+            at = round_up(at, size);
+            out.push((i, t, at));
+            at += size;
+        }
+        (out, round_up(at, FRAME_ALIGN))
+    }
+
+    /// Appends the stores that keep every local in the heap frame, for a
+    /// suspension ([`Frame::heap_prologue`] reads them back). Call it after the
+    /// last slot and the last local are taken.
+    pub fn save_locals(&mut self) {
+        for (i, t, at) in self.kept().0 {
+            self.body.push(Instruction::LocalGet(self.base));
+            self.body.push(Instruction::LocalGet(i));
+            self.body.push(match t {
+                ValType::I32 => Instruction::I32Store(mem_arg(at, 2)),
+                ValType::I64 => Instruction::I64Store(mem_arg(at, 3)),
+                ValType::F32 => Instruction::F32Store(mem_arg(at, 2)),
+                ValType::F64 => Instruction::F64Store(mem_arg(at, 3)),
+                _ => Instruction::V128Store(mem_arg(at, 4)),
+            });
+        }
+    }
+
+    /// Makes this frame a heap block and puts its prologue first: on a first
+    /// call (the last parameter is 0) `malloc` the frame, else take the frame
+    /// the last parameter names and restore every local [`Frame::save_locals`]
+    /// kept. The body frees the block itself. Call it once, after the body.
+    pub fn heap_prologue(&mut self, malloc: u32) {
+        let (kept, size) = self.kept();
+        let resume = self.params.len() as u32 - 1;
+        let mut pro = vec![
+            Instruction::LocalGet(resume),
+            Instruction::If(BlockType::Empty),
+            Instruction::LocalGet(resume),
+            Instruction::LocalSet(self.base),
+        ];
+        for (i, t, at) in kept {
+            pro.push(Instruction::LocalGet(self.base));
+            pro.push(match t {
+                ValType::I32 => Instruction::I32Load(mem_arg(at, 2)),
+                ValType::I64 => Instruction::I64Load(mem_arg(at, 3)),
+                ValType::F32 => Instruction::F32Load(mem_arg(at, 2)),
+                ValType::F64 => Instruction::F64Load(mem_arg(at, 3)),
+                _ => Instruction::V128Load(mem_arg(at, 4)),
+            });
+            pro.push(Instruction::LocalSet(i));
+        }
+        pro.extend([
+            Instruction::Else,
+            Instruction::I64Const(i64::from(size)),
+            Instruction::Call(malloc),
+            Instruction::LocalSet(self.base),
+            Instruction::End,
+        ]);
+        let n = pro.len();
+        self.body.splice(0..0, pro);
+        for h in &mut self.holes {
+            h.0 += n;
+        }
+        for r in &mut self.instrument {
+            *r = (r.0 + n, r.1 + n);
+        }
+        self.heap = true;
     }
 
     /// Returns the bytes of shadow stack the prologue claims, rounded as

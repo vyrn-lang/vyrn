@@ -46,6 +46,7 @@ pub fn exit_words(e: Exit) -> &'static str {
         Exit::Block => "the end of its scope",
         Exit::Return => "a `return`",
         Exit::Try => "a `?`",
+        Exit::Cancel => "a cancelled `await`",
         Exit::Break => "a `break`",
         Exit::Continue => "a `continue`",
         Exit::Scrutinee => "a scrutinee",

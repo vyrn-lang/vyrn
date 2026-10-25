@@ -1676,7 +1676,8 @@ impl<'b> Kernel<'b> {
             return Ok(());
         }
         // No row repairs a must-use value left held: the reader disposes of it.
-        if self.body.owes(n).is_some() {
+        // A cancelled task disposes of everything it holds.
+        if self.body.owes(n).is_some() && !matches!(end, End::Exit(Exit::Cancel, _)) {
             self.refusals.push(self.obligation(n, false));
             self.unbind(st, n);
             return Ok(());
@@ -2189,6 +2190,27 @@ impl<'b> Kernel<'b> {
 
     /// A statement list that is not a source block: what it binds ends with
     /// it, at site 0.
+    /// The cancellation edge of an awaited call, where it leaves: after the
+    /// call took its arguments and before the row binds the result. Its rows
+    /// run on a copy of the state, then the frame exits as a `return` does.
+    fn cancel(&mut self, st: &State, rhs: &Rhs) -> Result<(), Refusal> {
+        let Rhs::Call {
+            awaits: Some(c), ..
+        } = rhs
+        else {
+            return Ok(());
+        };
+        let row = (self.here, self.stmt, self.by.clone(), self.takes.get());
+        let mut edge = st.clone();
+        self.stmts(&c.rows, &mut edge)?;
+        self.here = c.line;
+        let live = edge.live();
+        self.scope_end(&mut edge, &live, End::Exit(Exit::Cancel, c.site))?;
+        (self.here, self.stmt, self.by) = (row.0, row.1, row.2);
+        self.takes.set(row.3);
+        Ok(())
+    }
+
     fn stmts(&mut self, stmts: &[St], st: &mut State) -> Result<(), Refusal> {
         self.stmts_at(stmts, st, NodeId::NONE)
     }
@@ -2417,6 +2439,7 @@ impl<'b> Kernel<'b> {
                     _ => {}
                 }
                 self.rhs(st, rhs)?;
+                self.cancel(st, rhs)?;
                 if self.owned(*n) {
                     st.set_own(*n, if is_static { Own::Static } else { Own::Held });
                     st.holes.retain(|(h, _)| h != n);
@@ -2742,7 +2765,10 @@ impl<'b> Kernel<'b> {
                 self.scope_end(st, &live, End::Exit(exit, *site))?;
                 st.ended = true;
             }
-            St::Do { rhs, .. } => self.rhs(st, rhs)?,
+            St::Do { rhs, .. } => {
+                self.rhs(st, rhs)?;
+                self.cancel(st, rhs)?;
+            }
             St::Trap => st.ended = true,
             St::Check(_) => {}
         }

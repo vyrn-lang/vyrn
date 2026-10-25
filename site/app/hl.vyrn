@@ -108,7 +108,7 @@ binarySearch(xs, 30)  // needs sorted(byAge)
 }
 
 fn contextual() -> Array<String> {
-    return ["read", "modify", "consume", "gen", "test", "bench", "panic", "from", "as"]
+    return ["read", "modify", "consume", "gen", "test", "bench", "panic", "from", "as", "await"]
 }
 
 fn emit(cls: String, text: String) -> String {
@@ -391,6 +391,10 @@ test "a capability word is a keyword here and an ordinary name is not" {
     assertEq(classOf("ident", "Ticket", false), "t")
     assertEq(classOf("ident", "seats", false), "")
     assertEq(classOf("keyword", "where", false), "k")
+}
+
+test "await is a keyword here" {
+    assertEq(classOf("ident", "await", false), "k")
 }
 
 test "a lower-case callee is a function and a capital one stays a type" {

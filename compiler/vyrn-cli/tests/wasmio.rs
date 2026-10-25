@@ -12,19 +12,7 @@
 
 mod common;
 
-use std::path::PathBuf;
 use std::process::Command;
-
-fn find_node() -> Option<PathBuf> {
-    let node = std::env::var("VYRN_NODE").unwrap_or_else(|_| "node".into());
-    let found = Command::new(&node)
-        .arg("--version")
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|_| PathBuf::from(&node));
-    common::require_tools("node", "VYRN_NODE", found)
-}
 
 const FIXTURE: &str = r#"fn main() -> Int64 {
     let r = match writeFile("out.txt", "hello") {
@@ -93,7 +81,7 @@ inst.exports._start();
 
 #[test]
 fn a_failed_write_is_not_reported_as_a_written_file() {
-    let Some(node) = find_node() else {
+    let Some(node) = common::node() else {
         eprintln!("NOTE: no node — the wasm write-failure path is unverified on this machine");
         return;
     };

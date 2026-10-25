@@ -226,6 +226,10 @@ pub const WASM_ONLY: &[(&str, &str)] = &[(
 /// `tests/route.rs` compares these with `vyrn run` instead.
 pub const ENGINE_TRAP: &[(&str, &str)] = &[("recdepth.vyrn", "recurses until the stack runs out")];
 
+/// Examples that wait. The `wasmtime` CLI supplies neither the host's waits nor an
+/// event loop, so `tests/route.rs` compares these with `vyrn run` instead.
+pub const WAITING: &[(&str, &str)] = &[("waiting.vyrn", "waits on the host's timers")];
+
 /// Project entries under `examples/*/` that their artifact's floor refuses,
 /// with text the refusal must contain. `tests/floor.rs` asserts each; the corpus
 /// harnesses that walk project entries skip them.
@@ -454,6 +458,18 @@ pub fn wasmtime() -> Option<PathBuf> {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let found = vyrn_codegen::toolchain::find_wasmtime_from(&root);
     require_tools("wasmtime", "VYRN_WASMTIME", found)
+}
+
+/// The Node binary (`VYRN_NODE`, default `node`), which runs `web/wasi-min.js`.
+pub fn node() -> Option<PathBuf> {
+    let node = std::env::var("VYRN_NODE").unwrap_or_else(|_| "node".into());
+    let found = Command::new(&node)
+        .arg("--version")
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|_| PathBuf::from(&node));
+    require_tools("node", "VYRN_NODE", found)
 }
 
 /// Turns a missing tool from a skip into a failure when `VYRN_REQUIRE_TOOLS` is set.

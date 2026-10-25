@@ -23,6 +23,16 @@ pub struct Outcome {
     pub meter: Option<Meter>,
     /// What the profile instrument counted, for a module built with it.
     pub counts: Option<Counts>,
+    /// Each completion the host delivered to a waiting module, in order.
+    pub wakes: Vec<Wake>,
+}
+
+/// One completion the host delivered through `__vyrn_wake`: the operation's id and its status,
+/// 0 when it completed and 1 when the host cancelled it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Wake {
+    pub id: i64,
+    pub status: i32,
 }
 
 /// What one function did: the calls it received and the operations its own body executed, as
@@ -60,6 +70,12 @@ pub struct Run {
     pub capture_stderr: bool,
     /// Times the phases into [`Outcome::meter`], for `vyrn run --profile`.
     pub meter: bool,
+    /// Runs a waiting module's timers on a clock that only a wake advances, so `vyrn test`
+    /// waits on nothing; otherwise on the wall clock.
+    pub virtual_clock: bool,
+    /// Delivers these completions in order instead of the clock's, each to an operation the
+    /// module started: a replay of [`Outcome::wakes`], or a cancellation a test asks for.
+    pub replay: Option<Vec<Wake>>,
 }
 
 /// Wall time per host phase of a run.
@@ -72,13 +88,119 @@ pub struct Meter {
     pub run: std::time::Duration,
 }
 
-/// The check oracle's rows: line `k` of the module's `vyrn:sites` section is site `k`'s, and
-/// line 0 the table's address.
-struct Oracle {
+/// This host's state beside WASI's.
+struct Extra {
+    /// The check oracle's rows: line `k` of the module's `vyrn:sites` section is site `k`'s, and
+    /// line 0 the table's address.
     checks: std::sync::Arc<Vec<String>>,
+    waits: Waits,
 }
 
-type Host = wasi::Guest<Oracle>;
+type Host = wasi::Guest<Extra>;
+
+/// The host operations a waiting module started and the host has not woken, and the clock
+/// their deadlines read. The host owns the event loop ([`settle_waits`]); the module's run queue
+/// orders the tasks.
+struct Waits {
+    /// `Some(now)` runs the timers on a clock in milliseconds that only a wake advances;
+    /// `None` on the wall clock from `start`.
+    virtual_now: Option<u64>,
+    start: std::time::Instant,
+    /// The id the next operation takes.
+    next: i64,
+    /// Each pending timer's deadline and id.
+    due: Vec<(u64, i64)>,
+    /// The completions still to replay, last first ([`Run::replay`]).
+    replay: Option<Vec<Wake>>,
+    /// Each completion delivered so far.
+    delivered: Vec<Wake>,
+}
+
+impl Waits {
+    fn new(run: &Run) -> Self {
+        Waits {
+            virtual_now: run.virtual_clock.then_some(0),
+            start: std::time::Instant::now(),
+            next: 1,
+            due: Vec::new(),
+            replay: run.replay.clone().map(|mut r| {
+                r.reverse();
+                r
+            }),
+            delivered: Vec::new(),
+        }
+    }
+
+    fn now(&self) -> u64 {
+        (self.virtual_now).unwrap_or_else(|| self.start.elapsed().as_millis() as u64)
+    }
+
+    /// `vyrn_wait.sleep(ms)`: a timer due `ms` from now; a negative `ms` is due now.
+    fn sleep(&mut self, ms: i64) -> i64 {
+        let id = self.next;
+        self.next += 1;
+        let at = self.now().saturating_add(ms.max(0) as u64);
+        self.due.push((at, id));
+        id
+    }
+
+    /// The next completion to deliver: the next one to replay, or else the earliest pending
+    /// timer, ties by id, once its deadline has come. The virtual clock moves to it, and the
+    /// wall clock is waited out.
+    fn fire(&mut self) -> Result<Option<Wake>, String> {
+        if let Some(r) = &mut self.replay {
+            let Some(w) = r.pop() else {
+                return Ok(None);
+            };
+            let Some(i) = self.due.iter().position(|d| d.1 == w.id) else {
+                return Err(format!("a replayed wake names no pending wait: {}", w.id));
+            };
+            self.due.remove(i);
+            self.delivered.push(w);
+            return Ok(Some(w));
+        }
+        let Some(i) = (0..self.due.len()).min_by_key(|&i| self.due[i]) else {
+            return Ok(None);
+        };
+        let (at, id) = self.due.remove(i);
+        match &mut self.virtual_now {
+            Some(now) => *now = (*now).max(at),
+            None => {
+                let now = self.now();
+                if at > now {
+                    std::thread::sleep(std::time::Duration::from_millis(at - now));
+                }
+            }
+        }
+        let w = Wake { id, status: 0 };
+        self.delivered.push(w);
+        Ok(Some(w))
+    }
+}
+
+/// The host's event loop around a module that waits: delivers each pending timer to
+/// `__vyrn_wake` as it comes due, until none is pending. A module that exports no
+/// `__vyrn_wake` waits for nothing. The error is the wake's, a `proc_exit` included.
+fn settle_waits(store: &mut Store<Host>, inst: &wasmtime::Instance) -> wasmtime::Result<()> {
+    let Ok(wake) = inst.get_typed_func::<(i64, i32, i64), i32>(&mut *store, WAKE) else {
+        return Ok(());
+    };
+    loop {
+        let Some(w) = store
+            .data_mut()
+            .x
+            .waits
+            .fire()
+            .map_err(wasmtime::Error::msg)?
+        else {
+            return Ok(());
+        };
+        wake.call(&mut *store, (w.id, w.status, 0))?;
+    }
+}
+
+/// The export a waiting module takes each completion through.
+const WAKE: &str = "__vyrn_wake";
 
 /// One engine per process, and a second, metered one: fuel is a counter the
 /// guest decrements in every block, so only a run under `VYRN_FUEL` pays for it.
@@ -174,7 +296,7 @@ pub fn run(bytes: &[u8], run: Run) -> Result<Outcome, String> {
         .map_err(|e| format!("_start: {e}"))?;
     let clock = std::time::Instant::now();
     let top = stack_top(&mut store, &inst);
-    let ran = start.call(&mut store, ());
+    let ran = (start.call(&mut store, ())).and_then(|()| settle_waits(&mut store, &inst));
     let code = match wasi::exit_code(ran.map_err(|e| settle(e, &mut store, &inst, top))) {
         Ok(code) => code,
         // A trap the program did not spell (`unreachable`, an out-of-bounds
@@ -211,6 +333,7 @@ pub fn run(bytes: &[u8], run: Run) -> Result<Outcome, String> {
         stderr: host.wasi.stderr.unwrap_or_default(),
         meter,
         counts,
+        wakes: host.x.waits.delivered,
     })
 }
 
@@ -229,11 +352,18 @@ fn open(
         // A budget nothing exhausts: the counter is read, never a stop.
         fuel: module.metered.then_some(u64::MAX),
     };
-    let oracle = Oracle {
+    let extra = Extra {
         checks: module.checks.clone(),
+        waits: Waits::new(run),
     };
     let gen = gen.unwrap_or_default();
-    wasi::instantiate(&module.module, &policy, &run.argv, gen, oracle, |linker| {
+    wasi::instantiate(&module.module, &policy, &run.argv, gen, extra, |linker| {
+        // The host's waits ([`Waits`]).
+        linker.func_wrap(
+            vyrn_codegen::direct::WAIT_IMPORTS,
+            "sleep",
+            |mut c: Caller<'_, Host>, ms: i64| -> i64 { c.data_mut().x.waits.sleep(ms) },
+        )?;
         // After `sweep`, a `vyrn` import is an `extern fn` the program reaches.
         // Only a browser page supplies that namespace. A terminal answers each
         // name with `trap::extern_unavailable`'s sentence on fd 2, then exit 1,
@@ -358,7 +488,7 @@ pub fn start_on(
         .get_typed_func::<(), ()>(&mut store, "_start")
         .map_err(|e| format!("_start: {e}"))?;
     let top = stack_top(&mut store, &inst);
-    let ran = entry.call(&mut store, ());
+    let ran = (entry.call(&mut store, ())).and_then(|()| settle_waits(&mut store, &inst));
     let ran = ran.map_err(|e| settle(e, &mut store, &inst, top));
     let code = wasi::exit_code(ran).map_err(|e| host_trap(&e))?;
     let sp = inst.get_global(&mut store, vyrn_codegen::wasm::SP_EXPORT);
@@ -385,7 +515,8 @@ impl Resident {
             .map_err(|e| format!("{name}: {e}"))?;
         let Some((sp, at)) = self.entry else {
             let top = stack_top(&mut self.store, &self.inst);
-            let out = f.call(&mut self.store, args);
+            let out = (f.call(&mut self.store, args))
+                .and_then(|r| settle_waits(&mut self.store, &self.inst).map(|()| r));
             return Ok(out.map_err(|e| settle(e, &mut self.store, &self.inst, top)));
         };
         // The word lies in the statics, which memory always covers.
@@ -399,7 +530,8 @@ impl Resident {
         let top = sp.get(&mut self.store);
         let mut nesting = [0u8; 4];
         nesting.copy_from_slice(&mem.data(&self.store)[words.clone()]);
-        let out = f.call(&mut self.store, args);
+        let out = (f.call(&mut self.store, args))
+            .and_then(|r| settle_waits(&mut self.store, &self.inst).map(|()| r));
         let out = out.map_err(|e| settle(e, &mut self.store, &self.inst, top.i32()));
         if out.is_err() {
             sp.set(&mut self.store, top)

@@ -10,24 +10,6 @@ mod common;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-fn find_node() -> Option<PathBuf> {
-    let node = std::env::var("VYRN_NODE").unwrap_or_else(|_| "node".into());
-    let found = Command::new(&node)
-        .arg("--version")
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|_| PathBuf::from(&node));
-    if found.is_none() && std::env::var_os("VYRN_REQUIRE_TOOLS").is_some() {
-        panic!(
-            "VYRN_REQUIRE_TOOLS is set and `node` was not found — this run would have \
-             silently skipped the extern-boundary check, the only thing here that runs \
-             the real shim. Point `VYRN_NODE` at the binary, or unset VYRN_REQUIRE_TOOLS."
-        );
-    }
-    found
-}
-
 fn repo(rel: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
@@ -60,7 +42,7 @@ fn build_wasm(dir: &Path, stem: &str, source: &str) -> PathBuf {
 }
 
 /// Decodes the `vyrn:exports` payload into `(name, ret, params)` rows for the
-/// exports and for the `vyrn.*` imports. A second reader written against the
+/// exports and for the `vyrn.*` imports, and the exports that wait. A second reader written against the
 /// documented format, not a call into the emitter, so a format change must be
 /// made on both sides.
 fn read_abi(
@@ -68,6 +50,7 @@ fn read_abi(
 ) -> (
     Vec<(String, String, Vec<String>)>,
     Vec<(String, String, Vec<String>)>,
+    Vec<String>,
 ) {
     let mut i = 8; // magic + version
     let mut payload: Option<&[u8]> = None;
@@ -91,10 +74,11 @@ fn read_abi(
     }
     let b = payload.expect("the module carries a vyrn:exports section");
     let mut i = 0;
-    assert_eq!(b[i], 2, "section version");
+    assert_eq!(b[i], 3, "section version");
     i += 1;
     let mut sides = Vec::new();
-    for _ in 0..2 {
+    let mut waiting = Vec::new();
+    for side in 0..2 {
         let (count, used) = uleb(b, i);
         i += used;
         let mut rows = Vec::new();
@@ -111,6 +95,10 @@ fn read_abi(
                 i += used;
                 params.push(p);
             }
+            if side == 0 && b[i] == 1 {
+                waiting.push(name.clone());
+            }
+            i += usize::from(side == 0);
             rows.push((name, ret, params));
         }
         sides.push(rows);
@@ -118,7 +106,7 @@ fn read_abi(
     assert_eq!(i, b.len(), "the whole payload was consumed");
     let imports = sides.pop().unwrap();
     let exports = sides.pop().unwrap();
-    (exports, imports)
+    (exports, imports, waiting)
 }
 
 fn uleb(b: &[u8], mut i: usize) -> (u32, usize) {
@@ -165,7 +153,8 @@ fn main() -> Int64 { return 0 }
 fn the_section_states_every_declared_signature_on_both_sides() {
     let dir = tmp("section");
     let wasm = std::fs::read(build_wasm(&dir, "boundary", BOUNDARY)).unwrap();
-    let (exports, imports) = read_abi(&wasm);
+    let (exports, imports, waiting) = read_abi(&wasm);
+    assert!(waiting.is_empty(), "no export waits: {waiting:?}");
 
     let row = |rows: &[(String, String, Vec<String>)], name: &str| {
         rows.iter()
@@ -275,7 +264,7 @@ console.log(JSON.stringify(refused));
 
 #[test]
 fn the_shim_reads_the_declaration_instead_of_the_instruction_shape() {
-    let Some(node) = find_node() else {
+    let Some(node) = common::node() else {
         eprintln!("NOTE: no node — the extern boundary is unverified on this machine");
         return;
     };
@@ -330,43 +319,94 @@ process.stderr.write(r.stderr);
 process.exitCode = r.exitCode;
 "#;
 
-/// A stack overflow ends in the shim as under `vyrn run`: the shim hands V8's
-/// `RangeError`, or the shadow stack's out-of-bounds trap, back to the module,
-/// which flushes stdout and traps with one sentence.
+/// A stack overflow and a program that waits end in the shim as under `vyrn run`.
+/// The shim hands V8's `RangeError`, or the shadow stack's out-of-bounds trap,
+/// back to the module, which flushes stdout and traps with one sentence; it
+/// delivers each timer to `__vyrn_wake` before `runVyrn` resolves.
 #[test]
-fn the_shim_hands_a_stack_overflow_back_to_the_module() {
-    let Some(node) = find_node() else {
-        eprintln!("NOTE: no node, so the shim's stack trap is unverified on this machine");
+fn the_shim_ends_each_program_as_vyrn_run_does() {
+    let Some(node) = common::node() else {
+        eprintln!("NOTE: no node, so the shim's traps and waits are unverified on this machine");
         return;
     };
-    let dir = tmp("overflow");
-    let example = repo("examples/recdepth.vyrn");
-    let wasm = build_wasm(
-        &dir,
-        "recdepth",
-        &std::fs::read_to_string(&example).unwrap(),
-    );
+    let dir = tmp("ends");
     std::fs::write(dir.join("run.mjs"), RUN).unwrap();
     std::fs::copy(repo("web/wasi-min.js"), dir.join("wasi-min.mjs")).unwrap();
+    for (name, _why) in common::ENGINE_TRAP.iter().chain(common::WAITING) {
+        let example = repo(&format!("examples/{name}"));
+        let stem = name.trim_end_matches(".vyrn");
+        let wasm = build_wasm(&dir, stem, &std::fs::read_to_string(&example).unwrap());
+        let shim = Command::new(&node)
+            .arg(dir.join("run.mjs"))
+            .arg(&wasm)
+            .output()
+            .expect("node");
+        let engine = Command::new(env!("CARGO_BIN_EXE_vyrn"))
+            .arg("run")
+            .arg(&example)
+            .output()
+            .expect("vyrn run");
+        let say = |o: &std::process::Output| {
+            format!(
+                "exit {:?}\n{}{}",
+                o.status.code(),
+                String::from_utf8_lossy(&o.stdout),
+                String::from_utf8_lossy(&o.stderr)
+            )
+        };
+        assert_eq!(say(&shim), say(&engine), "{name}");
+    }
+}
 
-    let shim = Command::new(&node)
-        .arg(dir.join("run.mjs"))
+/// An export that waits, flagged in the section; its String argument lives as
+/// long as its task.
+const WAITING_EXPORT: &str = r#"import { sleep } from "std/task"
+
+let mut total: Int64 = 0
+
+export extern fn later(name: String) {
+    await sleep(5)
+    total = total + Int64(name.byteLength)
+}
+
+export extern fn sum() -> Int64 { return total }
+
+fn main() -> Int64 { return 0 }
+"#;
+
+const LATER: &str = r#"import { readFile } from "node:fs/promises";
+import { runVyrn } from "./wasi-min.mjs";
+
+const r = await runVyrn(await readFile(process.argv[2]), {});
+const task = r.exports.later("abc");
+console.log(task instanceof Promise, String(r.exports.sum()));
+await task;
+console.log(String(r.exports.sum()));
+"#;
+
+/// The section flags the export that waits, and the shim's wrapper for it
+/// returns a promise that settles once its task ends.
+#[test]
+fn the_shim_settles_the_task_an_export_starts() {
+    let dir = tmp("later");
+    let wasm = build_wasm(&dir, "later", WAITING_EXPORT);
+    let (_, _, waiting) = read_abi(&std::fs::read(&wasm).unwrap());
+    assert_eq!(waiting, ["later"]);
+    let Some(node) = common::node() else {
+        eprintln!("NOTE: no node, so the shim's waiting exports are unverified on this machine");
+        return;
+    };
+    std::fs::write(dir.join("later.mjs"), LATER).unwrap();
+    std::fs::copy(repo("web/wasi-min.js"), dir.join("wasi-min.mjs")).unwrap();
+    let out = Command::new(&node)
+        .arg(dir.join("later.mjs"))
         .arg(&wasm)
         .output()
         .expect("node");
-    let engine = Command::new(env!("CARGO_BIN_EXE_vyrn"))
-        .arg("run")
-        .arg(&example)
-        .output()
-        .expect("vyrn run");
-    let say = |o: &std::process::Output| {
-        format!(
-            "exit {:?}\n{}{}",
-            o.status.code(),
-            String::from_utf8_lossy(&o.stdout),
-            String::from_utf8_lossy(&o.stderr)
-        )
-    };
-    assert_eq!(say(&shim), say(&engine));
-    assert_eq!(shim.status.code(), Some(1), "{}", say(&shim));
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        "true 0\n3\n",
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 }

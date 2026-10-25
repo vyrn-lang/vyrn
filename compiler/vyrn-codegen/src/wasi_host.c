@@ -71,14 +71,22 @@ struct w2c_wasi__snapshot__preview1 {
     int unused;
 };
 
+static struct w2c_wasi__snapshot__preview1 g_wasi__snapshot__preview1;
+
+/* The host's waits, `vyrn_wait`. */
+struct w2c_vyrn__wait {
+    int unused;
+};
+static struct w2c_vyrn__wait g_vyrn__wait;
+
 /* The extern `vyrn` namespace. Only a browser page implements it, so a binary
    answers every name in it with the one refusal the interpreter and the
    embedded engine give — `extern \`name\` is not available on this target` on
    fd 2, exit 1 — and a program that never calls one never reaches a stub. The
    driver writes this block from the header wasm2c just produced, so the
-   signatures cannot disagree with the module's imports, and it defines
-   `VYRN_INSTANTIATE` because the instantiate function takes one argument more
-   when the module has a `vyrn` import than when it has none. */
+   signatures cannot disagree with the module's imports. It defines
+   `VYRN_INSTANTIATE`, whose arguments are the namespaces the module imports,
+   and `VYRN_WAKE` when the module waits. */
 /*@VYRN_EXTERN_STUBS@*/
 
 /* One open descriptor above the preopen: a file, or a directory listing read
@@ -112,6 +120,56 @@ static uint64_t mono_ns(void) {
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
 #endif
+}
+
+/* Each pending timer's deadline, in milliseconds since the start, and its id:
+   `vyrn-cli/src/wasmrun.rs`'s `Waits` on the wall clock. */
+struct timer {
+    uint64_t at;
+    int64_t id;
+};
+static struct timer* g_due;
+static uint32_t g_ndue;
+static int64_t g_next_wait = 1;
+
+static uint64_t now_ms(void) {
+    return (mono_ns() - g_started) / 1000000ull;
+}
+
+/* A timer due `ms` from now; a negative `ms` is due now. */
+u64 w2c_vyrn__wait_sleep(struct w2c_vyrn__wait* w, u64 ms) {
+    (void)w;
+    g_due = realloc(g_due, (g_ndue + 1) * sizeof *g_due);
+    if (!g_due) {
+        fputs("host: out of memory\n", stderr);
+        exit(1);
+    }
+    g_due[g_ndue].at = now_ms() + ((int64_t)ms > 0 ? ms : 0);
+    g_due[g_ndue].id = g_next_wait++;
+    return (u64)g_due[g_ndue++].id;
+}
+
+/* The earliest pending timer, ties by id, once its deadline has come, or 0
+   when none is pending. */
+static int64_t fire(void) {
+    if (!g_ndue) return 0;
+    uint32_t k = 0;
+    for (uint32_t i = 1; i < g_ndue; i++) {
+        if (g_due[i].at < g_due[k].at || (g_due[i].at == g_due[k].at && g_due[i].id < g_due[k].id))
+            k = i;
+    }
+    struct timer t = g_due[k];
+    g_due[k] = g_due[--g_ndue];
+    for (uint64_t now = now_ms(); t.at > now; now = now_ms()) {
+        uint64_t left = t.at - now;
+#ifdef _WIN32
+        Sleep(left > 1u << 30 ? 1u << 30 : (DWORD)left);
+#else
+        struct timespec ts = {(time_t)(left / 1000), (long)(left % 1000) * 1000000L};
+        nanosleep(&ts, NULL);
+#endif
+    }
+    return t.id;
 }
 
 /* A guest pointer checked against the memory's size, or NULL when it is out of
@@ -574,9 +632,8 @@ int main(int argc, char** argv) {
     ULONG guarantee = 64 * 1024;
     SetThreadStackGuarantee(&guarantee);
 #endif
-    static struct w2c_wasi__snapshot__preview1 wasi;
     wasm_rt_init();
-    VYRN_INSTANTIATE(&g_inst, &wasi);
+    VYRN_INSTANTIATE(&g_inst);
     /* `wasm_rt_impl_try` spelled out, without the exceptions runtime it pulls
        in: the same save and setjmp. */
     u32* sp = w2c_prog_0x5F_stack_pointer(&g_inst);
@@ -585,6 +642,12 @@ int main(int argc, char** argv) {
     wasm_rt_trap_t trap = (wasm_rt_trap_t)WASM_RT_SETJMP(g_wasm_rt_jmp_buf);
     if (trap == WASM_RT_TRAP_NONE) {
         w2c_prog_0x5Fstart(&g_inst);
+#ifdef VYRN_WAKE
+        /* A `main` that waits returns from `_start` and ends in a wake: deliver
+           each timer to `__vyrn_wake` as it comes due, as `settle_waits` in
+           `wasmrun.rs` does. */
+        for (int64_t id; (id = fire()) != 0;) w2c_prog_0x5F_vyrn_wake(&g_inst, (u64)id, 0, 0);
+#endif
         /* `_start` ends in `proc_exit`; a plain return is exit 0 too. */
         return 0;
     }

@@ -13,4 +13,5 @@ lazy	0	1	0	0	1
 logging	0	2	0	0	2
 contract	0	1	0	0	1
 to	0	1	0	0	1
-all	0	24	6	0	30
+await	0	1	0	0	1
+all	0	25	6	0	31
