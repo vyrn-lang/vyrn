@@ -41,7 +41,7 @@
 - [std/strpred](std/strpred.md) — The string predicates and `slice`, written on the byte view
 - [std/sum](std/sum.md) — The exact sum of an `Array<Float64>`, written in Vyrn.
 - [std/symbolmap](std/symbolmap.md) — The symbol map of a generated module: for each
-- [std/task](std/task.md) — Waiting for the host: `sleep`, the one host wait.
+- [std/task](std/task.md) — Waiting for the host: `sleep`, the one host wait, and the run queue.
 - [std/text](std/text.md) — UTF-8 decoding and byte-offset line and column, in Vyrn.
 - [std/tile](std/tile.md) — Integer matrix tiles: `mmaInt8` and `mmaUInt8`, the CPU oracle a GPU tile
 - [std/time](std/time.md) — Wall-clock time at the host boundary, and a pure calendar breakdown.

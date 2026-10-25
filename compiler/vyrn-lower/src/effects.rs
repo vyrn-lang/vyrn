@@ -510,7 +510,7 @@ impl<'a> Walk<'a> {
                 self.place(p);
             }
         }
-        self.call(callee, kind.value(), line, born, *awaits);
+        self.call(callee, kind.value(), line, born, awaits.is_some());
     }
 
     /// Records a call to `callee`, through `value` when it is a function value.

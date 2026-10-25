@@ -1,0 +1,16 @@
+// A lambda that waits has no lowering yet: a builtin or a call through a
+// function value runs it where no point can resume.
+import { sleep } from "std/task"
+
+fn twice(f: fn(Int64) -> Int64, x: Int64) -> Int64 {
+    return await f(await f(x))
+}
+
+fn main() -> Int64 {
+    let r = await twice(x -> {
+        await sleep(x)
+        return x + 1
+    }, 1)
+    print("\{r}")
+    return 0
+}

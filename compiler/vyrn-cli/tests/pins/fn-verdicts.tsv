@@ -3195,7 +3195,15 @@ std/symbolmap.vyrn	originJson	yes	no, its effect set is alloc
 std/symbolmap.vyrn	mapJson	no, it calls `emit`, which is not trap-free	no, its effect set is alloc, trap
 std/symbolmap.vyrn	mapSlug	yes	no, its effect set is alloc
 std/symbolmap.vyrn	symbolMapFn	no, it calls `mapJson`, which is not trap-free	no, its effect set is alloc, trap, gen-only
-std/task.vyrn	sleep	yes	no, its effect set is waits
+std/task.vyrn	task$sleep	yes	no, its effect set is waits
+std/task.vyrn	task$taskAt	yes	no, its effect set is module-state
+std/task.vyrn	task$taskEnd	no, it keeps an index check	no, its effect set is module-state
+std/task.vyrn	task$taskBegin	yes	no, its effect set is alloc, module-state
+std/task.vyrn	task$taskSettle	no, it keeps an index check	no, its effect set is module-state
+std/task.vyrn	task$taskFinish	no, it calls `taskEnd`, which is not trap-free	no, its effect set is module-state
+std/task.vyrn	task$waitOn	no, it keeps an index check	no, its effect set is module-state
+std/task.vyrn	task$delivery	no, it keeps an index check	no, its effect set is module-state
+std/task.vyrn	task$wake	no, it keeps an index check	no, its effect set is alloc, module-state, trap
 std/text.vyrn	text$decodeUtf8	yes	no, its effect set is alloc
 std/text.vyrn	text$utf8Width	yes	yes, emulated Int64
 std/text.vyrn	text$stringFault	yes	no, the loop is no counter loop

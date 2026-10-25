@@ -30,9 +30,10 @@ use vyrn_frontend::core::check::{integer_rule, Check, Guard, Raises, Verdict};
 /// The core's statements and values. `Body` stays qualified at each use,
 /// because this file defines its own `Body`.
 use vyrn_frontend::core::{
-    Arg, Arm, Callee, Ctor, Lit, Name, NameInfo, Op, Rhs, St, Target, Test, Val,
+    Arg, Arm, Callee, Cancel, Ctor, Lit, Name, NameInfo, Op, Rhs, St, Target, Test, Val,
 };
 use vyrn_frontend::gen::GenError;
+use vyrn_frontend::loader::TASK_PREFIX;
 use vyrn_frontend::own::DropKind;
 /// Shared with `vyrn-lower` and the other engines, so exits compare without a translation.
 use vyrn_frontend::own::Exit as ExitKind;
@@ -248,12 +249,6 @@ pub fn compile_gen_host(program: &Program) -> Result<Vec<u8>, GenError> {
 
 fn compile_inner(program: &Program, world: Arc<vyrn_lower::World>) -> Result<Vec<u8>, String> {
     let _cg = vyrn_frontend::prof::phase("codegen");
-    // A body that waits has no lowering: no pass turns an `await` into a
-    // resume point.
-    if let Some((f, line)) = world.waiting(program).next() {
-        let name = program.spellings.written(&f.name);
-        return Err(vyrn_frontend::rule!(WaitsUnbuilt, name, line).render());
-    }
     let mut m = Module::new();
     // Imports first — they share the function index space with definitions, so
     // `wasm::Module` panics if one arrives late.
@@ -283,6 +278,13 @@ fn compile_inner(program: &Program, world: Arc<vyrn_lower::World>) -> Result<Vec
             },
         );
     }
+
+    // A program that waits imports the host's wait and reserves the root dispatcher before any
+    // function; every other module is as it was.
+    let waits = world.waiting(program).next().is_some().then(|| Waits {
+        sleep: m.import(WAIT_IMPORTS, "sleep", &[ValType::I64], &[ValType::I64]),
+        resume: m.reserve_func(&[ValType::I32, ValType::I32], &[ValType::I32]),
+    });
 
     // The oracle's counter function is reserved with the other functions, after the last import;
     // its body waits for the table's address.
@@ -366,6 +368,7 @@ fn compile_inner(program: &Program, world: Arc<vyrn_lower::World>) -> Result<Vec
         log_fd: matches!(program.log_sink, LogSink::File(_)).then(|| m.reserve(4, 4)),
         audit,
         profile,
+        waits,
         seed: Caches::default(),
     };
     if profile {
@@ -604,7 +607,7 @@ fn compile_inner(program: &Program, world: Arc<vyrn_lower::World>) -> Result<Vec
     if main.ret != Ret::Scalar(ValType::I64) {
         return unsupported("a `main` that does not return Int64", 0);
     }
-    let main = main.index;
+    let (main, main_waits) = (main.index, main.waits);
     // The log `file(..)` sink: one descriptor opened once and held for the run. `path_open`
     // with CREAT|TRUNC is `fopen(path, "w")`.
     //
@@ -662,31 +665,9 @@ fn compile_inner(program: &Program, world: Arc<vyrn_lower::World>) -> Result<Vec
             .ins(&Instruction::I64Store(mem_arg(0, 3)));
         m.fill(o.hit, b)?;
     }
-    let start = m.func(&[], &[], &[], 0, |b| {
-        // First, so the instrument marks every block: `auditInit` allocates its own state and
-        // then arms.
-        if let Some((init, _, words)) = audit {
-            let at = b.here();
-            for w in words {
-                b.ins(&Instruction::I32Const(w as i32));
-            }
-            b.ins(&Instruction::I32Const(table as i32));
-            b.ins(&Instruction::Call(init));
-            b.instrument_since(at);
-        }
-        // Before the initializers, because a top-level `let` may log.
-        if let Some((at, path, open_at)) = log_open {
-            b.ins(&Instruction::I32Const(at as i32))
-                .ins(&Instruction::I32Const(path as i32))
-                .ins(&Instruction::I32Const(OFLAGS_CREAT_TRUNC))
-                .ins(&Instruction::I64Const(RIGHT_FD_WRITE))
-                .ins(&Instruction::Call(open_at))
-                .ins(&Instruction::I32Store(word()));
-        }
-        if has_globals {
-            b.ins(&Instruction::Call(init_index));
-        }
-        b.ins(&Instruction::Call(main));
+    // What follows `main`, with its exit code on the stack: `_start` runs it after a `main`
+    // that does not wait, and `$mainDone` after one that does, wherever it finishes.
+    let tail = |b: &mut Frame| {
         // Flush what `print` buffered: a zero-length write to a descriptor other than fd 1
         // flushes and writes nothing. Both trap paths write to fd 2 first, so need no flush.
         b.ins(&Instruction::I32Const(2))
@@ -714,6 +695,92 @@ fn compile_inner(program: &Program, world: Arc<vyrn_lower::World>) -> Result<Vec
             .ins(&Instruction::I64And)
             .ins(&Instruction::I32WrapI64)
             .ins(&Instruction::Call(wasi.at("proc_exit")));
+    };
+    // The run queue, in a program that waits: each task's root, `main` 0 and each waiting
+    // export from 1, and `$mainDone(code, status)`, the end of a `main` that waits. A cancelled
+    // `main` exits 1.
+    let run_queue = |n: &str| {
+        (cx.sigs.get(&format!("{TASK_PREFIX}{n}")))
+            .map(|s| s.index)
+            .ok_or_else(|| format!("direct backend: the program waits and `std/task` has no `{n}`"))
+    };
+    let queue = match cx.waits {
+        Some(w) => Some((w, run_queue("taskBegin")?, run_queue("taskSettle")?)),
+        None => None,
+    };
+    let finish = match queue {
+        Some(_) => Some(run_queue("taskFinish")?),
+        None => None,
+    };
+    let main_done = (finish.filter(|_| main_waits)).map(|finish| {
+        m.func(&[ValType::I64, ValType::I32], &[], &[], 0, |b| {
+            b.ins(&Instruction::Call(finish))
+                .ins(&Instruction::I64Const(1))
+                .ins(&Instruction::LocalGet(0))
+                .ins(&Instruction::LocalGet(1))
+                .ins(&Instruction::I32Const(1))
+                .ins(&Instruction::I32Eq)
+                .ins(&Instruction::Select);
+            tail(b);
+        })
+    });
+    let start = m.func(&[], &[], &[], 0, |b| {
+        // First, so the instrument marks every block: `auditInit` allocates its own state and
+        // then arms.
+        if let Some((init, _, words)) = audit {
+            let at = b.here();
+            for w in words {
+                b.ins(&Instruction::I32Const(w as i32));
+            }
+            b.ins(&Instruction::I32Const(table as i32));
+            b.ins(&Instruction::Call(init));
+            b.instrument_since(at);
+        }
+        // Before the initializers, because a top-level `let` may log.
+        if let Some((at, path, open_at)) = log_open {
+            b.ins(&Instruction::I32Const(at as i32))
+                .ins(&Instruction::I32Const(path as i32))
+                .ins(&Instruction::I32Const(OFLAGS_CREAT_TRUNC))
+                .ins(&Instruction::I64Const(RIGHT_FD_WRITE))
+                .ins(&Instruction::Call(open_at))
+                .ins(&Instruction::I32Store(word()));
+        }
+        if has_globals {
+            b.ins(&Instruction::Call(init_index));
+        }
+        // A `main` that waits is the first task: `_start` returns while it waits, and the host
+        // wakes it through `__vyrn_wake`.
+        match (queue, main_done) {
+            (Some((_, begin, settle)), Some(done)) => {
+                let (task, code, st) = (
+                    b.local(ValType::I64),
+                    b.local(ValType::I64),
+                    b.local(ValType::I32),
+                );
+                b.ins(&Instruction::I32Const(0))
+                    .ins(&Instruction::Call(begin))
+                    .ins(&Instruction::LocalSet(task))
+                    .ins(&Instruction::I32Const(0))
+                    .ins(&Instruction::Call(main))
+                    .ins(&Instruction::LocalSet(st))
+                    .ins(&Instruction::LocalSet(code))
+                    .ins(&Instruction::LocalGet(task))
+                    .ins(&Instruction::LocalGet(st))
+                    .ins(&Instruction::Call(settle))
+                    .ins(&Instruction::LocalGet(st))
+                    .ins(&Instruction::I32Const(2))
+                    .ins(&Instruction::I32LtU)
+                    .ins(&Instruction::If(BlockType::Empty))
+                    .ins(&Instruction::LocalGet(code))
+                    .ins(&Instruction::LocalGet(st))
+                    .ins(&Instruction::Call(done))
+                    .ins(&Instruction::End);
+            }
+            _ => {
+                b.ins(&Instruction::Call(main));
+                tail(b);
+            }
+        }
     });
     m.export("_start", start);
     if m.counts_ops() {
@@ -734,11 +801,95 @@ fn compile_inner(program: &Program, world: Arc<vyrn_lower::World>) -> Result<Vec
     if m.counts_ops() {
         m.name(overflow, crate::wasm::OVERFLOW_EXPORT);
     }
-    // An `export extern fn`, under its own name. An export is also a sweep root.
+    // An `export extern fn`, under its own name. An export is also a sweep root. One that waits
+    // is exported as a step that starts its task, the root after `main`'s.
+    let mut roots: Vec<(u32, Option<u32>)> = Vec::new();
+    if let (Some(_), Some(done)) = (queue, main_done) {
+        roots.push((main, Some(done)));
+    }
     for f in &user {
-        if f.is_export_extern {
-            m.export(&f.name, cx.sigs[&f.name].index);
+        let sig = &cx.sigs[&f.name];
+        match queue {
+            Some((_, begin, settle)) if f.is_export_extern && sig.waits => {
+                if sig.ret != Ret::Unit {
+                    let name = program.spellings.written(&f.name);
+                    return Err(vyrn_frontend::rule!(WaitsUnbuilt, name, line = f.line).render());
+                }
+                let (params, _) = cx.wasm_sig(sig, f.line)?;
+                let takes = &params[..params.len() - 1];
+                let root = roots.len() as i32 + i32::from(roots.is_empty());
+                let step = m.func(takes, &[], &[], 0, |b| {
+                    let (task, st) = (b.local(ValType::I64), b.local(ValType::I32));
+                    b.ins(&Instruction::I32Const(root))
+                        .ins(&Instruction::Call(begin))
+                        .ins(&Instruction::LocalSet(task));
+                    for i in 0..takes.len() as u32 {
+                        b.ins(&Instruction::LocalGet(i));
+                    }
+                    b.ins(&Instruction::I32Const(0))
+                        .ins(&Instruction::Call(sig.index))
+                        .ins(&Instruction::LocalSet(st))
+                        .ins(&Instruction::LocalGet(task))
+                        .ins(&Instruction::LocalGet(st))
+                        .ins(&Instruction::Call(settle));
+                });
+                if roots.is_empty() {
+                    roots.push((main, None));
+                }
+                roots.push((sig.index, None));
+                m.export(&f.name, step);
+            }
+            _ if f.is_export_extern => {
+                m.export(&f.name, sig.index);
+            }
+            _ => {}
         }
+    }
+    // `$resumeRoot(root, frame)`: one more step of the task `root` started, `main`'s with its
+    // end when it finishes. A root takes zeros for its parameters on a resume.
+    if let Some((w, ..)) = queue {
+        let mut b = Frame::new(&[ValType::I32, ValType::I32], &[ValType::I32], &[], 0);
+        let st = b.local(ValType::I32);
+        b.ins(&Instruction::Block(BlockType::Result(ValType::I32)));
+        for (r, (index, done)) in roots.iter().enumerate() {
+            let f =
+                (user.iter()).find(|f| cx.sigs[&f.name].index == *index && cx.sigs[&f.name].waits);
+            let Some(f) = f else { continue };
+            let (params, results) = cx.wasm_sig(&cx.sigs[&f.name], f.line)?;
+            b.ins(&Instruction::LocalGet(0))
+                .ins(&Instruction::I32Const(r as i32))
+                .ins(&Instruction::I32Eq)
+                .ins(&Instruction::If(BlockType::Empty));
+            for t in &params[..params.len() - 1] {
+                b.ins(&zero(*t));
+            }
+            b.ins(&Instruction::LocalGet(1))
+                .ins(&Instruction::Call(*index))
+                .ins(&Instruction::LocalSet(st));
+            let code = b.local(ValType::I64);
+            for _ in &results[..results.len() - 1] {
+                match done {
+                    Some(_) => b.ins(&Instruction::LocalSet(code)),
+                    None => b.ins(&Instruction::Drop),
+                };
+            }
+            if let Some(done) = done {
+                b.ins(&Instruction::LocalGet(st))
+                    .ins(&Instruction::I32Const(2))
+                    .ins(&Instruction::I32LtU)
+                    .ins(&Instruction::If(BlockType::Empty))
+                    .ins(&Instruction::LocalGet(code))
+                    .ins(&Instruction::LocalGet(st))
+                    .ins(&Instruction::Call(*done))
+                    .ins(&Instruction::End);
+            }
+            b.ins(&Instruction::LocalGet(st))
+                .ins(&Instruction::Br(1))
+                .ins(&Instruction::End);
+        }
+        b.ins(&Instruction::Unreachable).ins(&Instruction::End);
+        m.fill(w.resume, b)?;
+        m.export("__vyrn_wake", run_queue("wake")?);
     }
     if user.iter().any(|f| f.is_export_extern) {
         m.export_entry_state(cx.rt.region_sp);
@@ -1003,6 +1154,9 @@ struct Sig {
     /// writes no separate result, so the call has no out-pointer and the caller moves the
     /// argument into the call's destination first.
     in_place: Option<usize>,
+    /// The callee's core holds an awaited call ([`vyrn_frontend::core::Body::waits`]): its frame
+    /// is a heap block, it takes the frame's address last and returns its status last.
+    waits: bool,
 }
 
 /// Identifies a body discovered during emission, so a second site reuses its function index.
@@ -1530,6 +1684,65 @@ struct Base<'a> {
     /// arms the instrument. Otherwise the calls are dropped and [`wasm::Module::sweep`] takes the
     /// bodies.
     audit: bool,
+    /// What a program that waits adds to its module; `None` in one that does not.
+    waits: Option<Waits>,
+}
+
+/// The import module of the host's waits. A host starts the operation, returns its id, and
+/// later calls `__vyrn_wake` with that id (`std/task`'s run queue).
+pub const WAIT_IMPORTS: &str = "vyrn_wait";
+
+/// What a program that waits adds to its module ([`Base::waits`]).
+#[derive(Clone, Copy)]
+struct Waits {
+    /// `vyrn_wait.sleep(ms) -> id`: the host starts a timer and wakes its id when it fires.
+    sleep: u32,
+    /// `$resumeRoot(root, frame) -> status`, which `hostResume` calls: the step of the root
+    /// the host started a task with. Filled after every body.
+    resume: u32,
+}
+
+/// The point to resume a waiting body at, kept in locals ([`lower_body`]).
+#[derive(Clone, Copy)]
+struct Resume {
+    /// The point, 1 and up in the core's row order; 0 while the body runs.
+    at: u32,
+    /// 1 once the body took a cancellation edge: the status its exit returns.
+    cancelled: u32,
+}
+
+/// How many awaited call rows `s` holds, itself included: the points of its subtree.
+fn points(s: &St) -> u32 {
+    u32::from(s.cancel().is_some()) + s.lists().map(|l| list_points(l)).sum::<u32>()
+}
+
+/// [`points`] of a list.
+fn list_points(ss: &[St]) -> u32 {
+    ss.iter().map(points).sum()
+}
+
+/// Pushes whether `resumeAt` (local `at`) is one of the `n` points from `lo`.
+fn resuming_into(b: &mut Frame, at: u32, lo: u32, n: u32) {
+    if n == 0 {
+        b.ins(&Instruction::I32Const(0));
+        return;
+    }
+    b.ins(&Instruction::LocalGet(at))
+        .ins(&Instruction::I32Const(lo as i32))
+        .ins(&Instruction::I32Sub)
+        .ins(&Instruction::I32Const(n as i32))
+        .ins(&Instruction::I32LtU);
+}
+
+/// The zero of `t`, for a result a suspension or a cancel exit carries.
+fn zero(t: ValType) -> Instruction<'static> {
+    match t {
+        ValType::I32 => Instruction::I32Const(0),
+        ValType::I64 => Instruction::I64Const(0),
+        ValType::F32 => Instruction::F32Const(0.0f32.into()),
+        ValType::F64 => Instruction::F64Const(0.0f64.into()),
+        _ => Instruction::V128Const(0),
+    }
 }
 
 /// The type questions a [`Cx`] answers once per substituted type. Each answer depends on the
@@ -1976,6 +2189,7 @@ impl<'a> Cx<'a> {
             Ret::Words(fl) if f.is_export_extern || f.is_gen => Ret::Out(fl.layout.clone()),
             r => r,
         };
+        let waits = self.world.body_of(key).is_some_and(|b| b.waits());
         let in_place = (self.world.body_of(key))
             .filter(|_| ret.out().is_some() && !f.is_export_extern)
             .and_then(|body| {
@@ -1997,6 +2211,7 @@ impl<'a> Cx<'a> {
             ret,
             ret_ty: f.ret.clone(),
             in_place,
+            waits,
         })
     }
 
@@ -2021,11 +2236,15 @@ impl<'a> Cx<'a> {
                 None => return unsupported("a Unit parameter", line),
             }
         }
-        let results = match &sig.ret {
+        let mut results = match &sig.ret {
             Ret::Scalar(v) => vec![*v],
             Ret::Words(f) => f.parts.iter().map(|p| p.2).collect(),
             Ret::Unit | Ret::Out(_) => vec![],
         };
+        if sig.waits {
+            params.push(ValType::I32);
+            results.push(ValType::I32);
+        }
         Ok((params, results))
     }
 }
@@ -2418,6 +2637,11 @@ struct Fn_<'a, 'p> {
     /// Tables over [`Fn_::core`], built on first use. Empty again after [`Fn_::core_enter`].
     facts: std::cell::OnceCell<BodyFacts<'a>>,
     lists: std::cell::OnceCell<Vec<(Name, Name)>>,
+    /// A waiting body's point locals; `None` in a body that does not wait.
+    resume: Option<Resume>,
+    /// The awaited call the row being walked makes, with its point: [`Fn_::core_user_call`] or
+    /// [`Fn_::host_wait`] takes it for the row's call.
+    awaiting: Option<(u32, &'a Cancel)>,
 }
 
 /// What the per-name screens ask of the whole body, collected once.
@@ -2460,6 +2684,8 @@ fn top_level<'a, 'p>(cx: &'a Cx<'p>) -> Fn_<'a, 'p> {
         core_w: Walked::default(),
         facts: Default::default(),
         lists: Default::default(),
+        resume: None,
+        awaiting: None,
     }
 }
 
@@ -2571,6 +2797,17 @@ fn lower_body(
         _ => None,
     };
     let core = core_body(key, f, &binds, cx);
+    // A waiting frame is a heap block with its points in two locals; its last parameter is the
+    // frame's address, 0 on the first call. A lambda's frame is called where no point is.
+    if sig.waits && f.name.starts_with(LAMBDA) {
+        let name = core.as_ref().map_or(owner.as_str(), |c| c.spelled(&owner));
+        return Err(vyrn_frontend::rule!(WaitsUnbuilt, name, line = f.line).render());
+    }
+    let resume = sig.waits.then(|| Resume {
+        at: b.local(ValType::I32),
+        cancelled: b.local(ValType::I32),
+    });
+    let first_call = params.len() as u32 - 1;
     let mut cx_fn = Fn_ {
         ret: sig.ret.clone(),
         // As declared, not resolved: a function returning `Age` validates at its `return`,
@@ -2588,6 +2825,7 @@ fn lower_body(
         owner,
         core_key: key.to_string(),
         core: core.as_deref(),
+        resume,
         ..top_level(cx)
     };
     if let Some(core) = cx_fn.core {
@@ -2619,6 +2857,12 @@ fn lower_body(
         }
     };
     let mut copy_out: Vec<(u32, Place, Repr, Type)> = Vec::new();
+    // A waiting frame takes its parameters in on its first call only; a later one restores them.
+    if resume.is_some() {
+        b.ins(&Instruction::LocalGet(first_call));
+        b.ins(&Instruction::I32Eqz);
+        b.ins(&Instruction::If(BlockType::Empty));
+    }
     for (i, p) in f.params.iter().enumerate() {
         let local = shift + i as u32;
         // The declared type, for the same reason as `ret_ty`.
@@ -2679,6 +2923,9 @@ fn lower_body(
         }
         cx_fn.scope.push((p.name.clone(), place, ty));
     }
+    if resume.is_some() {
+        b.ins(&Instruction::End);
+    }
     // The core's parameters are the declaration's, in order.
     if let Some(core) = cx_fn.core.clone() {
         for (i, n) in core.params.iter().enumerate() {
@@ -2692,6 +2939,12 @@ fn lower_body(
     // and branches out of the trap block to the one `trapAt` call. One call site per function,
     // not per check, halved nbody's time under Cranelift.
     cx_fn.trap_site = Some((b.local(ValType::I32), b.local(ValType::I64)));
+    // A waiting frame's two outer blocks: a suspension branches out of the inner one, past the
+    // done exit, to the save of its locals.
+    if resume.is_some() {
+        b.ins(&Instruction::Block(BlockType::Empty));
+        b.ins(&Instruction::Block(BlockType::Empty));
+    }
     // The block every `return` targets. It carries a scalar result; an aggregate travels
     // through `dest` or the `words` locals.
     b.ins(&Instruction::Block(match &sig.ret {
@@ -2730,6 +2983,15 @@ fn lower_body(
     // `trapAt` exits the process.
     b.ins(&Instruction::Unreachable);
     b.ins(&Instruction::End);
+    // A waiting frame's result waits in a local while the frame is freed.
+    let held = match (resume, &sig.ret) {
+        (Some(_), Ret::Scalar(v)) => {
+            let l = b.local(*v);
+            b.ins(&Instruction::LocalSet(l));
+            Some(l)
+        }
+        _ => None,
+    };
 
     // The `modify` copy-out, once, at the one exit. Stack-neutral, so a scalar result on the
     // stack survives it.
@@ -2748,10 +3010,33 @@ fn lower_body(
             _ => return unsupported("a `modify` parameter of this shape", f.line),
         }
     }
+    // A waiting frame's done exit frees it and returns its status; a suspension keeps every
+    // local in it and returns its address.
+    let status = resume.map(|r| {
+        let status = b.local(ValType::I32);
+        b.ins(&Instruction::LocalGet(b.base()))
+            .ins(&Instruction::Call(cx.rt.free))
+            .ins(&Instruction::LocalGet(r.cancelled))
+            .ins(&Instruction::LocalSet(status))
+            .ins(&Instruction::Br(1))
+            .ins(&Instruction::End);
+        b.save_locals();
+        b.ins(&Instruction::LocalGet(b.base()))
+            .ins(&Instruction::LocalSet(status))
+            .ins(&Instruction::End);
+        status
+    });
+    if let Some(l) = held {
+        b.ins(&Instruction::LocalGet(l));
+    }
     if let (Some(first), Ret::Words(fl)) = (words, &sig.ret) {
         for i in 0..fl.parts.len() as u32 {
             b.ins(&Instruction::LocalGet(first + i));
         }
+    }
+    if let Some(status) = status {
+        b.ins(&Instruction::LocalGet(status));
+        b.heap_prologue(cx.rt.malloc);
     }
 
     frame_fits(&b, &f.name, f.line)?;
@@ -5507,6 +5792,7 @@ impl<'p> Fn_<'_, 'p> {
             ret: self.cx.ret(ret, line)?,
             ret_ty: (**ret).clone(),
             in_place: None,
+            waits: false,
         };
         let (wp, wr) = self.cx.wasm_sig(&s, line)?;
         let sig = Sig {
@@ -9892,14 +10178,16 @@ impl<'a, 'p> Fn_<'a, 'p> {
     /// bound. A layout the arm reads out of the scrutinee binds as its address inside the
     /// scrutinee; any other payload moves into a slot.
     #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments)]
     fn core_switch(
         &mut self,
         m: &mut Log,
         b: &mut Frame,
         on: &Val,
-        arms: &[Arm],
+        arms: &'a [Arm],
         owns: bool,
         line: usize,
+        first: u32,
     ) -> Result<(), String> {
         let body = self.body();
         let Val::Name(n) = on else {
@@ -9947,6 +10235,17 @@ impl<'a, 'p> Fn_<'a, 'p> {
             });
         }
         let tags: Vec<Option<usize>> = probes.iter().map(|p| p.0).collect();
+        // Each arm's points, from `first` in source order: a resume takes the arm that holds its
+        // point, and its binders, restored with the frame, are not bound again.
+        let pts: Vec<u32> = arms.iter().map(|a| list_points(&a.body)).collect();
+        let starts: Vec<u32> = (pts.iter())
+            .scan(first, |acc, p| {
+                let at = *acc;
+                *acc += p;
+                Some(at)
+            })
+            .collect();
+        let resume = self.resume.filter(|_| pts.iter().any(|p| *p > 0));
         // The switch carries no value, so the join is empty.
         let mut chain = self.chain_open(b, &tags, BlockType::Empty);
         for (slot, ix) in Self::chain_order(&chain, arms.len())
@@ -9954,7 +10253,7 @@ impl<'a, 'p> Fn_<'a, 'p> {
             .enumerate()
         {
             let arm = &arms[ix];
-            self.chain_enter(b, &mut chain, slot, |b| match (probes[ix], words) {
+            let test = |b: &mut Frame| match (probes[ix], words) {
                 ((_, Some(l)), _) => {
                     b.ins(&Instruction::LocalGet(l));
                 }
@@ -9967,7 +10266,24 @@ impl<'a, 'p> Fn_<'a, 'p> {
                     b.ins(&Instruction::I32Const(1));
                 }
                 ((tag, None), None) => Self::tag_is(b, addr, tag.map(|t| t as u64)),
+            };
+            self.chain_enter(b, &mut chain, slot, |b| match resume {
+                Some(r) => {
+                    b.ins(&Instruction::LocalGet(r.at));
+                    b.ins(&Instruction::If(BlockType::Result(ValType::I32)));
+                    resuming_into(b, r.at, starts[ix] + 1, pts[ix]);
+                    b.ins(&Instruction::Else);
+                    test(b);
+                    b.ins(&Instruction::End);
+                }
+                None => test(b),
             });
+            if let Some(r) = resume {
+                b.ins(&Instruction::LocalGet(r.at));
+                b.ins(&Instruction::I32Eqz);
+                b.ins(&Instruction::If(BlockType::Empty));
+                self.depth += 1;
+            }
             // A payload's slot depends on the widths before it, so the
             // binder needs the variant's whole payload list. The row binds in payload order.
             let ptys: Vec<Type> = match tags[ix] {
@@ -10012,8 +10328,12 @@ impl<'a, 'p> Fn_<'a, 'p> {
                 };
                 self.core_bind(*bn, at, ty)?;
             }
+            if resume.is_some() {
+                b.ins(&Instruction::End);
+                self.depth -= 1;
+            }
             let to = b.mark();
-            self.core_stmts(m, b, &arm.body[arm.reads(on).len()..])?;
+            self.core_stmts(m, b, &arm.body[arm.reads(on).len()..], starts[ix])?;
             // A binder's scope is its arm, so its name and its slots go back
             // at the arm's end.
             self.scope.truncate(scope);
@@ -10062,7 +10382,7 @@ impl<'a, 'p> Fn_<'a, 'p> {
     /// Runs only where [`Fn_::core_walkable`] says the rows carry the whole body;
     /// [`lower_body`] refuses any other.
     fn core_body(&mut self, m: &mut Log, b: &mut Frame) -> Result<(), String> {
-        self.core_stmts(m, b, &self.body().stmts)?;
+        self.core_stmts(m, b, &self.body().stmts, 0)?;
         match self.core_w.checks.iter().find(|(_, ran)| !ran) {
             Some((c, _)) => unsupported("a check row no construct ran", c.site.line),
             None => Ok(()),
@@ -10151,11 +10471,36 @@ impl<'a, 'p> Fn_<'a, 'p> {
         b.instrument_since(at);
     }
 
-    fn core_stmts(&mut self, m: &mut Log, b: &mut Frame, ss: &[St]) -> Result<(), String> {
+    fn core_stmts(
+        &mut self,
+        m: &mut Log,
+        b: &mut Frame,
+        ss: &'a [St],
+        base: u32,
+    ) -> Result<(), String> {
         let body = self.body();
         let ends = vyrn_lower::core::extent_ends(ss, &self.core_w.occurs);
         let mut due = Vec::new();
         let (mut last, mut mark): (Option<usize>, u32) = (None, b.mark());
+        // In a waiting body, row `i` holds the points after `firsts[i]`; a list that holds one
+        // lands a resume before the row that holds it ([`Fn_::resume_dispatch`]).
+        // Any other body allocates neither table.
+        let (pts, firsts): (Vec<u32>, Vec<u32>) = match self.resume {
+            Some(_) => {
+                let pts: Vec<u32> = ss.iter().map(points).collect();
+                let firsts = (pts.iter())
+                    .scan(base, |acc, p| {
+                        let at = *acc;
+                        *acc += p;
+                        Some(at)
+                    })
+                    .collect();
+                (pts, firsts)
+            }
+            None => (Vec::new(), Vec::new()),
+        };
+        let pt = |i: usize| pts.get(i).copied().unwrap_or(0);
+        let landings = self.resume_dispatch(b, &pts, base);
         for (i, s) in ss.iter().enumerate() {
             if let St::Check(c) = s {
                 match &c.guard {
@@ -10168,6 +10513,12 @@ impl<'a, 'p> Fn_<'a, 'p> {
                 core_row_done(b, &self.core_w, &ss[j], mark);
                 self.core_give_back(b, &mut due, &ends[j]);
             }
+            if landings.contains(&i) {
+                b.ins(&Instruction::End);
+                self.depth -= 1;
+            }
+            let first = firsts.get(i).copied().unwrap_or(0);
+            self.awaiting = s.cancel().map(|c| (first + 1, c));
             (last, mark) = (Some(i), b.mark());
             self.core_site(m, b, s);
             if let St::Store {
@@ -10572,6 +10923,7 @@ impl<'a, 'p> Fn_<'a, 'p> {
                         })
                         .any(|g| matches!(g, Guard::Clause { .. }));
                     if info.binding.is_none()
+                        && self.resume.is_none()
                         && self.core_w.reads[n.index()] == 1
                         && !clause
                         && self.core_first_read(next_row(ss, i)) == Some(*n)
@@ -10775,7 +11127,7 @@ impl<'a, 'p> Fn_<'a, 'p> {
                     self.depth += 1;
                     self.loops.push((brk, cont, self.region_depth));
                     let scope = self.scope.len();
-                    let r = self.core_stmts(m, b, inner);
+                    let r = self.core_stmts(m, b, inner, first);
                     self.scope.truncate(scope);
                     self.loops.pop();
                     self.core_w.over.truncate(over);
@@ -10804,15 +11156,28 @@ impl<'a, 'p> Fn_<'a, 'p> {
                 St::If {
                     cond, then, els, ..
                 } => {
-                    self.core_val(m, b, cond, &Type::Bool, 0)?;
+                    // A resume takes the side that holds its point.
+                    match self.resume.filter(|_| pt(i) > 0) {
+                        Some(r) => {
+                            b.ins(&Instruction::LocalGet(r.at));
+                            b.ins(&Instruction::If(BlockType::Result(ValType::I32)));
+                            self.depth += 1;
+                            resuming_into(b, r.at, first + 1, list_points(then));
+                            b.ins(&Instruction::Else);
+                            self.core_val(m, b, cond, &Type::Bool, 0)?;
+                            b.ins(&Instruction::End);
+                            self.depth -= 1;
+                        }
+                        None => self.core_val(m, b, cond, &Type::Bool, 0)?,
+                    }
                     b.ins(&Instruction::If(BlockType::Empty));
                     self.depth += 1;
                     let mark = self.scope.len();
-                    self.core_stmts(m, b, then)?;
+                    self.core_stmts(m, b, then, first)?;
                     self.scope.truncate(mark);
                     if !els.is_empty() {
                         b.ins(&Instruction::Else);
-                        self.core_stmts(m, b, els)?;
+                        self.core_stmts(m, b, els, first + list_points(then))?;
                         self.scope.truncate(mark);
                     }
                     self.depth -= 1;
@@ -10826,16 +11191,23 @@ impl<'a, 'p> Fn_<'a, 'p> {
                     ..
                 } => {
                     let scope = self.scope.len();
+                    // A region's arena is the process's; a task that waits inside one would
+                    // leave it open to the next task that runs.
+                    if *region && pt(i) > 0 {
+                        let line = s.rows().find_map(|(r, _)| r.cancel()).map_or(0, |c| c.line);
+                        let name = body.spelled(&self.owner);
+                        return Err(vyrn_frontend::rule!(WaitsUnbuilt, name, line).render());
+                    }
                     if *region {
                         self.region_enter(b);
                         self.region_depth += 1;
-                        let r = self.core_stmts(m, b, inner);
+                        let r = self.core_stmts(m, b, inner, first);
                         self.region_depth -= 1;
                         let mark = self.region_marks.pop().expect("one mark per open region");
                         r?;
                         self.region_exit(b, mark);
                     } else {
-                        self.core_stmts(m, b, inner)?;
+                        self.core_stmts(m, b, inner, first)?;
                     }
                     self.scope.truncate(scope);
                 }
@@ -10898,7 +11270,7 @@ impl<'a, 'p> Fn_<'a, 'p> {
                     owns,
                     line,
                     ..
-                } => self.core_switch(m, b, on, arms, *owns, *line)?,
+                } => self.core_switch(m, b, on, arms, *owns, *line, first)?,
                 St::Drop(n, _, line, holes) => self.core_drop(m, b, *n, holes, *line)?,
                 St::Trap => {
                     b.ins(&Instruction::Unreachable);
@@ -10936,6 +11308,149 @@ impl<'a, 'p> Fn_<'a, 'p> {
             self.core_give_back(b, &mut due, &ends[j]);
         }
         Ok(())
+    }
+
+    /// Opens a waiting body's list dispatch, for a list whose rows hold `pts` points from
+    /// `base`: one block per row that holds a point, and a `br_table` on `resumeAt` that lands a
+    /// resume at the start of that row and a running body at the first row. Returns the rows
+    /// before which [`Fn_::core_stmts`] closes a block. A list that holds no point opens none.
+    fn resume_dispatch(&mut self, b: &mut Frame, pts: &[u32], base: u32) -> Vec<usize> {
+        let held: Vec<usize> = (0..pts.len()).filter(|&i| pts[i] > 0).collect();
+        let Some(r) = self.resume.filter(|_| !held.is_empty()) else {
+            return Vec::new();
+        };
+        for _ in 0..=held.len() {
+            b.ins(&Instruction::Block(BlockType::Empty));
+            self.depth += 1;
+        }
+        // The index is the point less `base`, or 0 while the body runs.
+        let mut table = vec![0u32];
+        for (j, &i) in held.iter().enumerate() {
+            table.extend(std::iter::repeat_n(j as u32 + 1, pts[i] as usize));
+        }
+        b.ins(&Instruction::LocalGet(r.at))
+            .ins(&Instruction::I32Const(base as i32))
+            .ins(&Instruction::I32Sub)
+            .ins(&Instruction::I32Const(0))
+            .ins(&Instruction::LocalGet(r.at))
+            .ins(&Instruction::Select)
+            .ins(&Instruction::BrTable(table.into(), 0))
+            .ins(&Instruction::End);
+        self.depth -= 1;
+        held
+    }
+
+    /// Opens an await site: the start, which a resume skips, inside `$poll`, inside
+    /// `$settled`. [`Fn_::await_close`] closes both.
+    fn await_open(&mut self, b: &mut Frame, line: usize) -> Result<Resume, String> {
+        let Some(r) = self.resume else {
+            return unsupported("an `await` in a frame that does not wait", line);
+        };
+        b.ins(&Instruction::Block(BlockType::Empty));
+        b.ins(&Instruction::Block(BlockType::Empty));
+        self.depth += 2;
+        b.ins(&Instruction::LocalGet(r.at));
+        b.ins(&Instruction::BrIf(0));
+        Ok(r)
+    }
+
+    /// Closes the await site [`Fn_::await_open`] opened at point `k`, after the start left
+    /// `results` and a status on the stack: a status of 2 or more waits, so the frame suspends
+    /// at `k`; a resume at `k` runs `poll`, which pushes the same, until the status is 0 (the
+    /// results go on) or 1 (the cancellation edge runs and the frame exits). `poll` gets the
+    /// status local, which holds the callee's frame while it waits.
+    #[allow(clippy::too_many_arguments)]
+    fn await_close(
+        &mut self,
+        m: &mut Log,
+        b: &mut Frame,
+        r: Resume,
+        k: u32,
+        cancel: &'a Cancel,
+        results: &[ValType],
+        poll: impl FnOnce(&mut Frame, u32),
+    ) -> Result<(), String> {
+        let st = b.local(ValType::I32);
+        let held: Vec<u32> = results.iter().map(|t| b.local(*t)).collect();
+        let settle = |s: &Self, b: &mut Frame, out: u32| {
+            b.ins(&Instruction::LocalSet(st));
+            for l in held.iter().rev() {
+                b.ins(&Instruction::LocalSet(*l));
+            }
+            b.ins(&Instruction::LocalGet(st))
+                .ins(&Instruction::I32Const(2))
+                .ins(&Instruction::I32LtU)
+                .ins(&Instruction::BrIf(out))
+                .ins(&Instruction::I32Const(k as i32))
+                .ins(&Instruction::LocalSet(r.at))
+                .ins(&Instruction::Br(s.depth + 1));
+        };
+        settle(self, b, 1);
+        b.ins(&Instruction::End);
+        self.depth -= 1;
+        b.ins(&Instruction::I32Const(0));
+        b.ins(&Instruction::LocalSet(r.at));
+        poll(b, st);
+        settle(self, b, 0);
+        b.ins(&Instruction::End);
+        self.depth -= 1;
+        b.ins(&Instruction::LocalGet(st))
+            .ins(&Instruction::I32Const(1))
+            .ins(&Instruction::I32Eq)
+            .ins(&Instruction::If(BlockType::Empty));
+        self.depth += 1;
+        self.core_stmts(m, b, &cancel.rows, 0)?;
+        b.ins(&Instruction::I32Const(1));
+        b.ins(&Instruction::LocalSet(r.cancelled));
+        if let Ret::Scalar(v) = self.ret {
+            b.ins(&zero(v));
+        }
+        b.ins(&Instruction::Br(self.depth));
+        self.depth -= 1;
+        b.ins(&Instruction::End);
+        for l in &held {
+            b.ins(&Instruction::LocalGet(*l));
+        }
+        Ok(())
+    }
+
+    /// A host wait, awaited: the start asks the host for the operation and its id, and the
+    /// running task waits on the id, so the frame always suspends; a resume asks the run queue
+    /// for the id's delivery.
+    fn host_wait(
+        &mut self,
+        m: &mut Log,
+        b: &mut Frame,
+        callee: &str,
+        args: &[(Val, vyrn_frontend::ast::Capability)],
+        line: usize,
+    ) -> Result<Type, String> {
+        let (Some((k, cancel)), Some(w)) = (self.awaiting.take(), self.cx.waits) else {
+            return unsupported(&format!("`{callee}` with no `await`"), line);
+        };
+        let import = match callee {
+            "hostSleep" => w.sleep,
+            _ => return unsupported(&format!("the host wait `{callee}`"), line),
+        };
+        let run_queue = |n: &str| (self.cx.sigs.get(&format!("{TASK_PREFIX}{n}"))).map(|s| s.index);
+        let (Some(wait_on), Some(delivery)) = (run_queue("waitOn"), run_queue("delivery")) else {
+            return unsupported("a host wait with no run queue in `std/task`", line);
+        };
+        let r = self.await_open(b, line)?;
+        for (v, _) in args {
+            self.core_val(m, b, v, &Type::Int, line)?;
+        }
+        let id = b.local(ValType::I64);
+        b.ins(&Instruction::Call(import))
+            .ins(&Instruction::LocalSet(id))
+            .ins(&Instruction::LocalGet(id))
+            .ins(&Instruction::Call(wait_on))
+            .ins(&Instruction::I32Const(2));
+        self.await_close(m, b, r, k, cancel, &[], |b, _| {
+            b.ins(&Instruction::LocalGet(id));
+            b.ins(&Instruction::Call(delivery));
+        })?;
+        Ok(Type::Unit)
     }
 
     /// Places core name `n` in a slot and records the frame marks around it until
@@ -11075,7 +11590,8 @@ impl<'a, 'p> Fn_<'a, 'p> {
                     Ok(ret.clone())
                 }
                 Some(Spec::Traps) => Ok(Type::Never),
-                Some(Spec::Asserts) => Ok(Type::Unit),
+                Some(Spec::Asserts | Spec::HostWait) => Ok(Type::Unit),
+                Some(Spec::Resumes) => Ok(INT32),
                 Some(Spec::Logs) if callee == "logger" => Ok(Type::Logger),
                 Some(Spec::Logs) => Ok(Type::Unit),
                 // [`Fn_::lanes`] types a lane builtin as it emits; the row carries the
@@ -11401,6 +11917,18 @@ impl<'a, 'p> Fn_<'a, 'p> {
             }
             // A pull binds two names, and [`Fn_::core_stmts`] emits it.
             Some(Spec::Pulls) => return unsupported("a pull apart from its loop head", line),
+            Some(Spec::HostWait) => return self.host_wait(m, b, callee, args, line),
+            // The step of a task the run queue resumes: a call of the root dispatcher.
+            Some(Spec::Resumes) => {
+                for (v, _) in args {
+                    self.core_val(m, b, v, &INT32, line)?;
+                }
+                b.ins(&match self.cx.waits {
+                    Some(w) => Instruction::Call(w.resume),
+                    None => Instruction::Unreachable,
+                });
+                return Ok(INT32);
+            }
             // A routed builtin is a declared call, through the signature
             // [`Fn_::core_sig`] answers for the function it names.
             Some(Spec::Routes(_)) | None => {}
@@ -11500,6 +12028,18 @@ impl<'a, 'p> Fn_<'a, 'p> {
                 )
             }
         };
+        // An awaited call waits only through a callee whose frame waits; a call through a
+        // value has no point to resume.
+        let awaited = self.awaiting.take();
+        let site = match (awaited, sig.waits) {
+            (Some(_), true) if self.core_through(kind).is_some() => {
+                let name = self.body().spelled(&self.owner);
+                return Err(vyrn_frontend::rule!(WaitsUnbuilt, name, line).render());
+            }
+            (Some((k, c)), true) => Some((self.await_open(b, line)?, k, c)),
+            (None, false) => None,
+            _ => return unsupported("an `await` that disagrees with its callee's frame", line),
+        };
         // The callee reads a `consume` argument at its address until it returns.
         let hint = hint.filter(|(d, _)| self.dest_apart(*d, &sig, args));
         let dest = self.out_ptr(b, &sig, hint);
@@ -11533,7 +12073,25 @@ impl<'a, 'p> Fn_<'a, 'p> {
                 Ok(())
             })?;
         }
-        b.ins(&Instruction::Call(sig.index));
+        match site {
+            None => {
+                b.ins(&Instruction::Call(sig.index));
+            }
+            Some((r, k, cancel)) => {
+                let (params, mut results) = self.cx.wasm_sig(&sig, line)?;
+                results.pop();
+                let index = sig.index;
+                b.ins(&Instruction::I32Const(0))
+                    .ins(&Instruction::Call(index));
+                self.await_close(m, b, r, k, cancel, &results, |b, st| {
+                    for t in &params[..params.len() - 1] {
+                        b.ins(&zero(*t));
+                    }
+                    b.ins(&Instruction::LocalGet(st));
+                    b.ins(&Instruction::Call(index));
+                })?;
+            }
+        }
         if let Some(at) = hook {
             b.instrument_since(at);
         }
@@ -12744,6 +13302,10 @@ impl<'a, 'p> Fn_<'a, 'p> {
         let St::Let(t, rhs) = &ss[i] else {
             return None;
         };
+        // A resume runs the row's start again, which would take the part's buffer twice.
+        if ss[i].cancel().is_some() {
+            return None;
+        }
         let made =
             matches!(rhs, Rhs::Make(..) | Rhs::Prim(Op::Closure(_), ..)) || self.core_ctor(rhs);
         let taken = self.core_take_part(rhs);
@@ -13340,6 +13902,7 @@ impl<'a, 'p> Fn_<'a, 'p> {
                 ret: self.cx.ret(ret, 0).ok()?,
                 ret_ty: (**ret).clone(),
                 in_place: None,
+                waits: false,
             },
             ncaps: 1,
         })
@@ -13373,6 +13936,7 @@ impl<'a, 'p> Fn_<'a, 'p> {
             ret: self.cx.ret(r, 0).ok()?,
             ret_ty: (**r).clone(),
             in_place: None,
+            waits: false,
         })
     }
 
@@ -14279,6 +14843,8 @@ impl<'a, 'p> Fn_<'a, 'p> {
                 | Spec::Barrier
                 | Spec::Renders(_)
                 | Spec::Effect(_)
+                | Spec::HostWait
+                | Spec::Resumes
                 | Spec::Logs
                 | Spec::Traps
                 | Spec::Asserts,
@@ -14935,6 +15501,7 @@ mod tests {
             log_fd: None,
             audit: false,
             profile: false,
+            waits: None,
             // Every index 0: a `Cx` for a type-level test never emits a call.
             rt: Rt::default(),
             seed: Caches::default(),

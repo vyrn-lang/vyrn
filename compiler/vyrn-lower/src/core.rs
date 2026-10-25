@@ -36,9 +36,9 @@ use crate::world::{Fns, Stated};
 use crate::{Instance, NodeTypes, OutsideBody, World};
 use vyrn_frontend::core::check::{Ensures, Promise, Raises, Verdict};
 use vyrn_frontend::core::{
-    count_reads, names_in, rows, Arg, Arm, Body, BorrowKind, Callee, Cand, Copied, Ctor, Facts,
-    Lit, Name, NameInfo, NotOwned, Old, Op, Opaque, Payload, Place, Rhs, Site, St, Target, Test,
-    Use, Val, Walk,
+    count_reads, names_in, rows, Arg, Arm, Body, BorrowKind, Callee, Cancel, Cand, Copied, Ctor,
+    Facts, Lit, Name, NameInfo, NotOwned, Old, Op, Opaque, Payload, Place, Rhs, Site, St, Target,
+    Test, Use, Val, Walk,
 };
 use vyrn_frontend::rule;
 use vyrn_frontend::rules::Rule;
@@ -3525,7 +3525,7 @@ impl<'a> Builder<'a> {
                                 ret: Some(Type::Bool),
                                 solved: Vec::new(),
                                 targets: Vec::new(),
-                                awaits: false,
+                                awaits: None,
                             },
                         ));
                         (Val::Name(c), Val::Name(c))
@@ -3753,7 +3753,7 @@ impl<'a> Builder<'a> {
                 ret: Some(Type::Str),
                 solved: Vec::new(),
                 targets: Vec::new(),
-                awaits: false,
+                awaits: None,
             },
         ));
         Ok(Val::Name(t))
@@ -4439,7 +4439,7 @@ impl<'a> Builder<'a> {
                         ret: Some(Type::Int),
                         solved: solved.unwrap_or_default(),
                         targets: Vec::new(),
-                        awaits: false,
+                        awaits: None,
                     }
                 }
                 None => return gap("a `for` over a container with no length", line),
@@ -5119,7 +5119,7 @@ impl<'a> Builder<'a> {
             ret: Some(inner),
             solved: Vec::new(),
             targets: Vec::new(),
-            awaits: false,
+            awaits: None,
         })
     }
 
@@ -5764,7 +5764,7 @@ impl<'a> Builder<'a> {
             ret: Some(self.ty_of(e)?.into_owned()),
             solved,
             targets: Vec::new(),
-            awaits: false,
+            awaits: None,
         })
     }
 
@@ -5823,7 +5823,13 @@ impl<'a> Builder<'a> {
         let held = self.frame.held.len();
         let mut r = self.rhs_inner(e, out);
         match &mut r {
-            Ok(Rhs::Call { awaits, .. }) => *awaits = matches!(e, Expr::Call { awaits: true, .. }),
+            Ok(Rhs::Call { awaits, .. }) if matches!(e, Expr::Call { awaits: true, .. }) => {
+                match self.leave_cancel(e.id(), e.line(), held) {
+                    Ok(c) => *awaits = Some(Box::new(c)),
+                    Err(g) => r = Err(g),
+                }
+            }
+            Ok(Rhs::Call { .. }) => {}
             Ok(_) => self.awaits_nothing(e),
             Err(_) => {}
         }
@@ -5831,6 +5837,26 @@ impl<'a> Builder<'a> {
         let mine = std::mem::replace(&mut self.frame.after, outer);
         self.frame.after_of_rhs = mine;
         r
+    }
+
+    /// The cancellation edge of the awaited call at `site`, built while its
+    /// row is: the rows a `?`'s failure exit runs ([`Builder::leave_try`]),
+    /// over the temporaries held before the call (the first `held`), then the
+    /// call's own read temporaries, which its binding would release, then the
+    /// plan's releases.
+    fn leave_cancel(&mut self, site: NodeId, line: usize, held: usize) -> Result<Cancel, Gap> {
+        let mut rows = Vec::new();
+        self.leave_loops(&mut rows);
+        for &t in &self.frame.held[..held] {
+            if self.body.names[t.index()].binding.is_none() {
+                rows.push(St::Drop(t, Site::None, 0, None));
+            }
+        }
+        for &t in &self.frame.after {
+            rows.push(St::Drop(t, Site::None, 0, None));
+        }
+        self.drops_at(Exit::Cancel, site, &mut rows)?;
+        Ok(Cancel { rows, site, line })
     }
 
     /// Refuses the `await` on `e` where the core states the call as no call
@@ -6079,7 +6105,7 @@ impl<'a> Builder<'a> {
                         ret: self.produced(e),
                         solved: Vec::new(),
                         targets: Vec::new(),
-                        awaits: false,
+                        awaits: None,
                     });
                 }
                 if let Some(l) = self.schema(e) {
@@ -6390,7 +6416,7 @@ impl<'a> Builder<'a> {
                                 ret: Some(rt),
                                 solved: Vec::new(),
                                 targets: Vec::new(),
-                                awaits: false,
+                                awaits: None,
                             },
                         ));
                         Some(Val::Name(t))
@@ -6516,7 +6542,7 @@ impl<'a> Builder<'a> {
                 kind: Callee::Fn(is_success),
                 ret: Some(Type::Bool),
                 targets: Vec::new(),
-                awaits: false,
+                awaits: None,
             },
         ));
         let failed = self.temp(Type::Bool, line);
@@ -6544,7 +6570,7 @@ impl<'a> Builder<'a> {
                 kind: Callee::Fn(success_id),
                 ret: Some(self.body.names[res.index()].ty.clone()),
                 targets: Vec::new(),
-                awaits: false,
+                awaits: None,
             },
         ));
         if let Val::Name(n) = sv {
@@ -6733,7 +6759,7 @@ impl<'a> Builder<'a> {
                     ret,
                     solved: Vec::new(),
                     targets: Vec::new(),
-                    awaits: false,
+                    awaits: None,
                 });
             }
         }
@@ -7075,7 +7101,7 @@ impl<'a> Builder<'a> {
             ret,
             solved,
             targets,
-            awaits: false,
+            awaits: None,
         })
     }
 
@@ -8129,7 +8155,7 @@ fn rule_check(to: String, n: Name, line: usize) -> St {
             kind: Callee::Named,
             solved: Vec::new(),
             targets: Vec::new(),
-            awaits: false,
+            awaits: None,
         },
         line,
         site: NodeId::NONE,
@@ -8348,7 +8374,9 @@ pub fn augment(program: &Program, w: &mut World, judging: bool) {
             // memo keeps none of their refusals, because they read the judgment.
             let mut rules = |i: usize, at: Waiting, file: &Option<String>, body: &str| {
                 for (line, rule) in judged.wait_rules(i, at) {
-                    let d = Diagnostic::refusal(line, 0, "check", rule).in_file(file.clone());
+                    let mut d = Diagnostic::refusal(line, 0, "check", rule).in_file(file.clone());
+                    // A callee of `std/task` is linked as `task$sleep`.
+                    d.speak(&program.spellings);
                     // The instances of a generic function share their lines.
                     let same = |r: &Refusal| {
                         let o = &r.diagnostic;

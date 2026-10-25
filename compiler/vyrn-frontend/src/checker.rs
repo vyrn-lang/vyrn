@@ -286,6 +286,7 @@ pub const RESERVED: &[&str] = &[
     "pullAt",
     "serveStream",
     "hostSleep",
+    "hostResume",
     "orderBefore",
     "Int64",
     "Int32",

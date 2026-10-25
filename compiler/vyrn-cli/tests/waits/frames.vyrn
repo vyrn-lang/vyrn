@@ -1,0 +1,77 @@
+// Waiting bodies resume at each `await` with their names intact: an `await`
+// in a loop inside an `if`, in a `match` arm, in a `while` that builds an
+// array, and around owned values that a cancellation releases.
+import { sleep } from "std/task"
+
+type Pt = { x: Int64, y: Int64 }
+
+type Shape = enum {
+    Circle(Int64),
+    Rect(Pt, String) }
+
+fn wait(ms: Int64) -> String {
+    await sleep(ms)
+    return "w\{ms}"
+}
+
+fn pause(label: String, ms: Int64) -> Int64 {
+    let s = "start \{label}"
+    print(s)
+    await sleep(ms)
+    print("end \{label}")
+    return ms
+}
+
+fn area(s: Shape) -> Int64 {
+    match s {
+        Circle(r) => {
+            let t = await wait(r)
+            print("circle \{t}")
+            return r * r * 3
+        }
+        Rect(p, name) => {
+            let label = "\{name}!"
+            let t = await wait(p.x)
+            print("rect \{label} \{t} \{name}")
+            return p.x * p.y
+        }
+    }
+}
+
+fn collect(n: Int64) -> Array<String> {
+    let mut out: Array<String> = []
+    let mut i: Int64 = 0
+    while i < n {
+        let s = await wait(i)
+        out.push(s)
+        i = i + 1
+    }
+    return out
+}
+
+fn mirror(p: Pt) -> Pt {
+    await sleep(1)
+    return Pt { x: p.y, y: p.x }
+}
+
+fn main() -> Int64 {
+    let name = "toy"
+    let mut total: Int64 = 0
+    if name.byteLength > 1 {
+        let mut i: Int64 = 0
+        while i < 3 {
+            total = total + await pause(name, i)
+            i = i + 1
+        }
+    }
+    print("total \{total} \{name}")
+    let a = await area(Circle(2))
+    let b = await area(Rect(Pt { x: 3, y: 4 }, "box"))
+    let xs = await collect(3)
+    for x in xs {
+        print(x)
+    }
+    let q = await mirror(Pt { x: a, y: b + 1 })
+    print("\{q.x} \{q.y}")
+    return a + b - 24
+}

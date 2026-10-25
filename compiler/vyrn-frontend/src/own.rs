@@ -24,6 +24,9 @@ pub enum Exit {
     Return,
     /// A propagating `?`, which releases what a `return` does.
     Try,
+    /// A cancelled `await`, which releases what a `return` does, a must-use
+    /// value included ([`crate::core::Cancel`]).
+    Cancel,
 }
 
 /// One placed release: a binding, how it is reclaimed, and the exit that runs

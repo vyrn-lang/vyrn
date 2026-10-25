@@ -293,7 +293,10 @@ fn twice(ms: Int64) -> Result<Int64, String> {
 - No future or task handle is a value, so a waiting call finishes where it stands.
 - `vyrn why --cost` shows `waits` in a function's effect set, and the editor's hover of a function that waits says so.
 
-Waiting code does not build yet. `vyrn check` judges it, and a build refuses a program with a waiting function: ``waiting code does not build yet: `pause` waits at line 4``.
+Waiting code runs the same on every engine. A `main` that waits is the first task, and each call of an `export extern fn` that waits starts one more. The host delivers each completion through the module's `__vyrn_wake`, and the module resumes the task that waited on it, in the order the completions arrive. So the same deliveries print the same bytes everywhere.
+
+- A cancelled wait ends its task where it waited. Each function on the task's path releases what a `return` there would release, its callers do the same, and a cancelled `main` exits 1.
+- A waiting lambda, an `await` inside a `region` or through a function value, and a waiting export that returns a value do not build yet: ``waiting code does not build yet: `main` waits at line 10``.
 
 ### Function types
 

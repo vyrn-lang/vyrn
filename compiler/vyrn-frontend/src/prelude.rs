@@ -986,10 +986,24 @@ fn table() -> Vec<Builtin> {
         // The one host wait: `std/task`'s `sleep` is the one caller.
         b("hostSleep")
             .sig(row("hostSleep", &[], &[("ms", Read, Int)], Unit, &[]))
-            .spec(Spec::Effect(Unit))
+            .spec(Spec::HostWait)
             .effect(Waits)
             .home("std/task")
             .hover("hostSleep(ms) -> Unit — wait `ms` milliseconds while the host runs other tasks; only `std/task` may call it, and `sleep` is the one to call"),
+        // A step of a task the host started: `std/task`'s run queue is the one caller.
+        // It runs the task's code, which may trap.
+        b("hostResume")
+            .sig(row(
+                "hostResume",
+                &[],
+                &[("root", Read, i32_.clone()), ("frame", Read, i32_.clone())],
+                i32_.clone(),
+                &[],
+            ))
+            .spec(Spec::Resumes)
+            .effect(Trap)
+            .home("std/task")
+            .hover("hostResume(root, frame) -> Int32 — one more step of the task `root` started, whose frame is at `frame`: 0 when it ended, 1 when it was cancelled, else its frame; only `std/task`'s run queue calls it"),
         // The argument is an address, so nothing is consumed; the result's
         // stream type carries the disposal obligation.
         b("unboxStream").takes(&[1], takes_one)
@@ -1341,6 +1355,13 @@ pub enum Spec {
     /// answers whether an element came. A read of the stream at the call's
     /// own name is that element.
     Pulls,
+    /// A host wait, always awaited: the operands at their types start the
+    /// host's operation, and the call returns `Unit` once the host's
+    /// `__vyrn_wake` delivers it (`std/task`'s run queue).
+    HostWait,
+    /// `hostResume(root, frame)`: one more step of the task the host started
+    /// at `root`, a call of the emitter's dispatcher over the roots.
+    Resumes,
 }
 
 /// Returns the seeded row for the name a call site carries.

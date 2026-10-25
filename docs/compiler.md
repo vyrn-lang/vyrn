@@ -95,8 +95,9 @@ the playground serves an embedded `std/`. The loader:
   (`drop_unreached`), so an importer pays to lex the module and to parse and
   check what it calls;
 - links `std/runtime` into every program, each declaration renamed with the
-  `runtime$` prefix, and links `std/json` and similar modules when a builtin
-  that lives in one is mentioned;
+  `runtime$` prefix, `std/task` with the `task$` prefix into a program that
+  imports it, and `std/json` and similar modules when a builtin that lives in
+  one is mentioned;
 - enforces the fences: only `std/runtime` may import `std/mem`, and nothing
   may import `std/runtime` (`runtime_fence`). The audience (`audience.rs`)
   and the floor (`floor.rs`) fence the rest.
@@ -304,8 +305,9 @@ The kernel knows no surface syntax. It judges core bodies.
   module-state initializer, which no call enters, included: a waiting call
   is marked `await`, a marked call waits, and an initializer waits nowhere.
   The builder refuses a mark on a call it states as no call row
-  (`core::Builder::awaits_nothing`), and the emitter refuses a program with a
-  function that waits (`World::waiting`).
+  (`core::Builder::awaits_nothing`). An awaited call row carries its
+  cancellation edge (`core::Cancel`): the releases the placer puts at
+  `own::Exit::Cancel`, which the kernel judges like a `return`.
 - Typed (`typed.rs`). The `vyrn check` rules over the core rows: a store
   into a place not declared `mut`, a store group that leaves a `where` rule
   unchecked, an exit outside a loop, a `drop` that releases nothing, and the
@@ -432,6 +434,21 @@ The module's shape:
 - Control flow: `St::If`, `St::Loop`, `St::Block` and `St::Switch` map onto
   wasm's `if`, `block` and `loop`, and `break` and `continue` onto `br`. A body never emits `return`, which would skip the frame's
   epilogue; a `return` is a `br` to the body's outer block.
+- Waiting bodies: a function that waits takes one more `i32`, its frame, and
+  returns one more `i32`, its status: 0 done, 1 cancelled, else the frame's
+  address while it waits. The frame is a heap block (`Frame::heap_prologue`).
+  Each awaited call row is a resume point, numbered in source order. A
+  suspension saves every local into the frame (`Frame::save_locals`) and
+  returns. A resume restores them, and at each structured construct on the
+  path to the point a `br_table` enters the arm that holds it
+  (`Fn_::resume_dispatch`), so no relooper exists. A cancelled callee sends
+  the caller down the row's cancellation edge, then out with status 1
+  (`Fn_::await_close`).
+- The run queue: `std/task`'s module state holds a task per call that started
+  one, and `wake` runs the woken tasks in wake order. A task's root is `main` (0) or a waiting export (from 1),
+  whose export is a step that begins the task. `__vyrn_wake` is `std/task`'s
+  `wake`, whose `hostResume` call is the emitter's `$resumeRoot` dispatcher
+  over the roots. `hostSleep` is the import `vyrn_wait.sleep`.
 - Traps: a failed check stores its row and value and branches to the one
   `trapAt` call per function. The wording is `vyrn_frontend::trap`'s table,
   laid out as data; `std/runtime` prints it. `tests/traps.rs` fails if any
