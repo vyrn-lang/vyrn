@@ -2872,6 +2872,57 @@ std/math.vyrn	infinity	yes	no, the value of line 752 is Float64, and WGSL has no
 std/math.vyrn	notANumber	yes	no, the value of line 756 is Float64, and WGSL has no 64-bit float
 std/math.vyrn	scalbn	yes	no, `x` is Float64, and WGSL has no 64-bit float
 std/math.vyrn	ulpsApart	yes	no, `a` is Float64, and WGSL has no 64-bit float
+std/narrow.vyrn	f16	yes	no, the value of line 23 is Int64, and WGSL has no 64-bit integer
+std/narrow.vyrn	bf16	yes	no, the value of line 24 is Int64, and WGSL has no 64-bit integer
+std/narrow.vyrn	e4m3	yes	no, the value of line 25 is Int64, and WGSL has no 64-bit integer
+std/narrow.vyrn	e5m2	yes	no, the value of line 26 is Int64, and WGSL has no 64-bit integer
+std/narrow.vyrn	e3m2	yes	no, the value of line 27 is Int64, and WGSL has no 64-bit integer
+std/narrow.vyrn	e2m3	yes	no, the value of line 28 is Int64, and WGSL has no 64-bit integer
+std/narrow.vyrn	e2m1	yes	no, the value of line 29 is Int64, and WGSL has no 64-bit integer
+std/narrow.vyrn	int8	yes	no, the value of line 32 is Int64, and WGSL has no 64-bit integer
+std/narrow.vyrn	over	yes	no, `f` is Format, not Int32, UInt32, Bool or a read array of one
+std/narrow.vyrn	narrow	no, it keeps a shift check	no, it is not trap-free
+std/narrow.vyrn	widen	no, it keeps a shift check	no, it is not trap-free
+std/narrow.vyrn	decode	no, it keeps a shift check	no, it is not trap-free
+std/narrow.vyrn	encode	no, it calls `narrow`, which is not trap-free	no, it is not trap-free
+std/narrow.vyrn	toFloat16	no, it calls `encode`, which is not trap-free	no, it is not trap-free
+std/narrow.vyrn	toFloat16Sat	no, it calls `encode`, which is not trap-free	no, it is not trap-free
+std/narrow.vyrn	toBFloat16	no, it calls `encode`, which is not trap-free	no, it is not trap-free
+std/narrow.vyrn	toBFloat16Sat	no, it calls `encode`, which is not trap-free	no, it is not trap-free
+std/narrow.vyrn	toFloat8E4M3	no, it calls `encode`, which is not trap-free	no, it is not trap-free
+std/narrow.vyrn	toFloat8E4M3Sat	no, it calls `encode`, which is not trap-free	no, it is not trap-free
+std/narrow.vyrn	toFloat8E5M2	no, it calls `encode`, which is not trap-free	no, it is not trap-free
+std/narrow.vyrn	toFloat8E5M2Sat	no, it calls `encode`, which is not trap-free	no, it is not trap-free
+std/narrow.vyrn	larger	yes	no, `top` is Int64, and WGSL has no 64-bit integer
+std/narrow.vyrn	mxScale	no, it keeps a shift check	no, it is not trap-free
+std/narrow.vyrn	mxScaleOf	no, it calls `mxScale`, which is not trap-free	no, it is not trap-free
+std/narrow.vyrn	mxCode	no, it calls `narrow`, which is not trap-free	no, it is not trap-free
+std/narrow.vyrn	mxValue	yes	no, `v` is Float32, and a kernel computes only integers and Bool
+std/narrow.vyrn	mxCodes8	no, it calls `mxCode`, which is not trap-free	no, it is not trap-free
+std/narrow.vyrn	mxCodes6	no, it keeps an index check	no, it is not trap-free
+std/narrow.vyrn	code6	no, it keeps an index check	no, it is not trap-free
+std/narrow.vyrn	nibble	yes	no, `b` is UInt8, not Int32, UInt32, Bool or a read array of one
+std/narrow.vyrn	toMxFp8E4M3	no, it calls `mxScaleOf`, which is not trap-free	no, it is not trap-free
+std/narrow.vyrn	toMxFp8E5M2	no, it calls `mxScaleOf`, which is not trap-free	no, it is not trap-free
+std/narrow.vyrn	toMxFp6E2M3	no, it calls `mxCodes6`, which is not trap-free	no, it is not trap-free
+std/narrow.vyrn	toMxFp6E3M2	no, it calls `mxCodes6`, which is not trap-free	no, it is not trap-free
+std/narrow.vyrn	toMxFp4	no, it calls `mxScaleOf`, which is not trap-free	no, it is not trap-free
+std/narrow.vyrn	toMxInt8	no, it calls `mxScaleOf`, which is not trap-free	no, it is not trap-free
+std/narrow.vyrn	toNvFp4	no, it calls `decode`, which is not trap-free	no, it is not trap-free
+std/narrow.vyrn	packInt4	no, it keeps an index check	no, its effect set is alloc
+std/narrow.vyrn	int4At	no, it keeps an index check	no, it is not trap-free
+std/narrow.vyrn	strideHash	no, it calls `narrow`, which is not trap-free	no, it is not trap-free
+std/narrow.vyrn	Narrow$Float16$toFloat32	no, it calls `decode`, which is not trap-free	no, it is not trap-free
+std/narrow.vyrn	Narrow$BFloat16$toFloat32	no, it calls `decode`, which is not trap-free	no, it is not trap-free
+std/narrow.vyrn	Narrow$Float8E4M3$toFloat32	no, it calls `decode`, which is not trap-free	no, it is not trap-free
+std/narrow.vyrn	Narrow$Float8E5M2$toFloat32	no, it calls `decode`, which is not trap-free	no, it is not trap-free
+std/narrow.vyrn	Block$MxFp8E4M3Block$valueAt	no, it keeps an index check	no, it is not trap-free
+std/narrow.vyrn	Block$MxFp8E5M2Block$valueAt	no, it keeps an index check	no, it is not trap-free
+std/narrow.vyrn	Block$MxFp6E2M3Block$valueAt	no, it calls `code6`, which is not trap-free	no, it is not trap-free
+std/narrow.vyrn	Block$MxFp6E3M2Block$valueAt	no, it calls `code6`, which is not trap-free	no, it is not trap-free
+std/narrow.vyrn	Block$MxFp4Block$valueAt	no, it keeps an index check	no, it is not trap-free
+std/narrow.vyrn	Block$MxInt8Block$valueAt	no, it keeps an index check	no, it is not trap-free
+std/narrow.vyrn	Block$NvFp4Block$valueAt	no, it keeps an index check	no, it is not trap-free
 std/num.vyrn	num$maxDigits	yes	no, the result is Int64, and WGSL has no 64-bit integer
 std/num.vyrn	num$tidy	yes	no, its effect set is alloc
 std/num.vyrn	num$halveBy	yes	no, its effect set is alloc

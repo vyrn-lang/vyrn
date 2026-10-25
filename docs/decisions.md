@@ -328,6 +328,8 @@ pull request.
 - One `String` type, with several algorithms behind one function; the cheap path allocates nothing.
 - Failure in std is a value: `Result` over small per-operation error enums.
 - Floats format through `std/num`'s `f64Str`; text to number is `std/num` over the bit views `float64Bits` and `float64FromBits`. No `parseFloat` builtin.
+- The narrow storage formats (`std/narrow`) are records over integer codes, converted by integer code over the `Float32` bit view, so every engine gives the same bits. They have no arithmetic: a program widens, computes and narrows. `BFloat16` is `Float32` rounded half to even to its upper 16 bits, subnormals kept, because no standard defines it and x86 `VCVTNEPS2BF16` flushes subnormals.
+- A NaN narrows to the format's NaN code with the sign cleared, and E5M2's NaN is 0x7E, because OCP leaves both open. FP6, FP4 and MXINT8 have no NaN, so they exist only as MX or NVFP4 block elements, with no scalar conversion to them: a NaN anywhere in a block sets the scale to its NaN code (0xFF for E8M0, 0x7F for UE4M3).
 - A std integer is unsigned only when it holds bits that never go negative (a byte, a hash word, a bit set, a code point, a random state), in the smallest width that holds them. Lengths, indices, offsets, positions and quantities stay `Int64`, because unsigned arithmetic wraps silently and the check prover keeps no range for a `UInt64`.
 - `std/strings` is ASCII for case and whitespace; `split` on an empty separator returns `[s]`, and `indexOf` returns `Option`.
 - `reserve`, `append`, `copyFrom` and `clear` exist on growable `Array` only, and are refused for elements that own heap.

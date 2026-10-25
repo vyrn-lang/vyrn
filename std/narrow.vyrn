@@ -1,0 +1,619 @@
+/// Narrow number formats for storage: `Float16`, `BFloat16`, the two FP8
+/// formats, the OCP MX blocks, the NVFP4 block and packed Int4. A program
+/// widens a value to `Float32`, computes, and narrows the result; the narrow
+/// types have no arithmetic of their own.
+///
+/// Every conversion is integer code over the `Float32` bit view, so every
+/// engine gives the same bits. `toFloat32` is exact. A narrowing rounds half to
+/// even and gives infinity past the largest finite value where the format has
+/// one, else NaN; its `Sat` form gives the largest finite value. A NaN narrows
+/// to the format's NaN code with the sign cleared. `BFloat16` is `Float32`
+/// rounded to its upper 16 bits, subnormals kept.
+
+import { clamp, max, min } from "std/math"
+
+// A float element's code is a sign bit above a magnitude, and the magnitude is
+// the exponent field above `m` mantissa bits.
+
+/// An element format: `m` mantissa bits, the least normal exponent `emin`, the
+/// largest finite magnitude code, the magnitude codes of infinity and NaN (-1
+/// where there is none), and the width with the sign.
+type Format = { m: Int64, emin: Int64, maxcode: Int64, infcode: Int64, nancode: Int64, bits: Int64 }
+
+fn f16() -> Format { return Format { m: 10, emin: -14, maxcode: 31743, infcode: 31744, nancode: 32256, bits: 16 } }
+fn bf16() -> Format { return Format { m: 7, emin: -126, maxcode: 32639, infcode: 32640, nancode: 32704, bits: 16 } }
+fn e4m3() -> Format { return Format { m: 3, emin: -6, maxcode: 126, infcode: -1, nancode: 127, bits: 8 } }
+fn e5m2() -> Format { return Format { m: 2, emin: -14, maxcode: 123, infcode: 124, nancode: 126, bits: 8 } }
+fn e3m2() -> Format { return Format { m: 2, emin: -2, maxcode: 31, infcode: -1, nancode: -1, bits: 6 } }
+fn e2m3() -> Format { return Format { m: 3, emin: 0, maxcode: 31, infcode: -1, nancode: -1, bits: 6 } }
+fn e2m1() -> Format { return Format { m: 1, emin: 0, maxcode: 7, infcode: -1, nancode: -1, bits: 4 } }
+// The MXINT8 magnitude, 1 integer and 6 fraction bits, is a format whose
+// values all sit below its least normal exponent.
+fn int8() -> Format { return Format { m: 6, emin: 0, maxcode: 127, infcode: -1, nancode: -1, bits: 8 } }
+
+/// The magnitude code `f` gives a value past its largest finite one: that
+/// value when `sat` or where `f` has neither infinity nor NaN, else infinity,
+/// else NaN.
+fn over(f: Format, sat: Bool) -> Int64 {
+    if sat || (f.infcode < 0 && f.nancode < 0) {
+        return f.maxcode
+    }
+    if f.infcode >= 0 {
+        return f.infcode
+    }
+    return f.nancode
+}
+
+/// The code of `f` nearest the `Float32` with bits `x` times 2^-s, ties to
+/// even. `s` is the exponent of a block's scale, 0 outside a block. A NaN gives
+/// the NaN code without a sign, or 0 where `f` has none.
+fn narrow(x: Int64, f: Format, s: Int64, sat: Bool) -> Int64 {
+    let sign = (x >> 31) << (f.bits - 1)
+    let a = x & 2147483647
+    if a > 2139095040 {
+        return max(f.nancode, 0)
+    }
+    if a == 2139095040 {
+        return sign | over(f, sat)
+    }
+    // Dividing by 2^s raises the least normal exponent by s.
+    let emin = f.emin + s
+    let ef = a >> 23
+    let mut e: Int64 = -126
+    let mut sig = a & 8388607
+    if ef != 0 {
+        e = ef - 127
+        sig = sig | 8388608
+    }
+    let mut eq = emin
+    if e > emin {
+        eq = e
+    }
+    // At least 23 - m. From 25 on every significand rounds to 0.
+    let mut shift = eq - f.m - (e - 23)
+    if shift > 40 {
+        shift = 40
+    }
+    let mut n = sig >> shift
+    let rem = sig & ((1 << shift) - 1)
+    let half = 1 << (shift - 1)
+    if rem > half || (rem == half && (n & 1) == 1) {
+        n = n + 1
+    }
+    let code = ((eq - emin) << f.m) + n
+    if code > f.maxcode {
+        return sign | over(f, sat)
+    }
+    return sign | code
+}
+
+/// The `Float32` bits of the magnitude code `c` of `f`. An infinity or a NaN
+/// keeps its mantissa as the top of `Float32`'s, so a NaN keeps its payload.
+fn widen(c: Int64, f: Format) -> Int64 {
+    let mant = c & ((1 << f.m) - 1)
+    if f.nancode >= 0 && c > f.maxcode {
+        return 2139095040 | (mant << (23 - f.m))
+    }
+    // The value is n * 2^q, and the top bit of n is bit p.
+    let field = c >> f.m
+    let mut n = mant
+    let mut q = f.emin - f.m
+    if field != 0 {
+        n = n | (1 << f.m)
+        q = q + field - 1
+    }
+    if n == 0 {
+        return 0
+    }
+    let p = 63 - n.clz()
+    if p + q < -126 {
+        return n << (q + 149)
+    }
+    return ((p + q + 127) << 23) | ((n << (23 - p)) & 8388607)
+}
+
+/// The `Float32` of the code `c` of `f`.
+fn decode(c: Int64, f: Format) -> Float32 {
+    let magnitude = c & ((1 << (f.bits - 1)) - 1)
+    let sign = (c >> (f.bits - 1)) << 31
+    return float32FromBits(UInt32(sign | widen(magnitude, f)))
+}
+
+/// The code of `f` nearest `x`.
+fn encode(x: Float32, f: Format, sat: Bool) -> Int64 {
+    return narrow(Int64(float32Bits(x)), f, 0, sat)
+}
+
+/// A value that widens to `Float32` exactly.
+export protocol Narrow {
+    fn toFloat32(self) -> Float32
+}
+
+/// IEEE-754 binary16: a sign, 5 exponent bits with bias 15 and 10 mantissa
+/// bits. Its largest finite value is 65504 and its NaN code 0x7E00.
+export type Float16 = { f16: UInt16 }
+
+impl Narrow for Float16 {
+    fn toFloat32(self) -> Float32 {
+        return decode(Int64(self.f16), f16())
+    }
+}
+
+/// The `Float16` nearest `x`: infinity where `x` rounds past 65504.
+export fn toFloat16(x: Float32) -> Float16 {
+    return Float16 { f16: UInt16(encode(x, f16(), false)) }
+}
+
+/// The `Float16` nearest `x`: 65504 where `x` rounds past it.
+export fn toFloat16Sat(x: Float32) -> Float16 {
+    return Float16 { f16: UInt16(encode(x, f16(), true)) }
+}
+
+/// The upper 16 bits of a `Float32`: a sign, 8 exponent bits with bias 127 and
+/// 7 mantissa bits. Its NaN code is 0x7FC0.
+export type BFloat16 = { bf16: UInt16 }
+
+impl Narrow for BFloat16 {
+    fn toFloat32(self) -> Float32 {
+        return decode(Int64(self.bf16), bf16())
+    }
+}
+
+/// The `BFloat16` nearest `x`: infinity where `x` rounds past the largest
+/// finite value.
+export fn toBFloat16(x: Float32) -> BFloat16 {
+    return BFloat16 { bf16: UInt16(encode(x, bf16(), false)) }
+}
+
+/// The `BFloat16` nearest `x`: the largest finite value where `x` rounds past
+/// it.
+export fn toBFloat16Sat(x: Float32) -> BFloat16 {
+    return BFloat16 { bf16: UInt16(encode(x, bf16(), true)) }
+}
+
+/// OCP FP8 E4M3: a sign, 4 exponent bits with bias 7 and 3 mantissa bits. It
+/// has no infinity; its largest finite value is 448 and its NaN code 0x7F.
+export type Float8E4M3 = { e4m3: UInt8 }
+
+impl Narrow for Float8E4M3 {
+    fn toFloat32(self) -> Float32 {
+        return decode(Int64(self.e4m3), e4m3())
+    }
+}
+
+/// The `Float8E4M3` nearest `x`: NaN where `x` rounds past 448, an infinity
+/// included.
+export fn toFloat8E4M3(x: Float32) -> Float8E4M3 {
+    return Float8E4M3 { e4m3: UInt8(encode(x, e4m3(), false)) }
+}
+
+/// The `Float8E4M3` nearest `x`: 448 where `x` rounds past it.
+export fn toFloat8E4M3Sat(x: Float32) -> Float8E4M3 {
+    return Float8E4M3 { e4m3: UInt8(encode(x, e4m3(), true)) }
+}
+
+/// OCP FP8 E5M2: a sign, 5 exponent bits with bias 15 and 2 mantissa bits. Its
+/// largest finite value is 57344 and its NaN code 0x7E.
+export type Float8E5M2 = { e5m2: UInt8 }
+
+impl Narrow for Float8E5M2 {
+    fn toFloat32(self) -> Float32 {
+        return decode(Int64(self.e5m2), e5m2())
+    }
+}
+
+/// The `Float8E5M2` nearest `x`: infinity where `x` rounds past 57344.
+export fn toFloat8E5M2(x: Float32) -> Float8E5M2 {
+    return Float8E5M2 { e5m2: UInt8(encode(x, e5m2(), false)) }
+}
+
+/// The `Float8E5M2` nearest `x`: 57344 where `x` rounds past it.
+export fn toFloat8E5M2Sat(x: Float32) -> Float8E5M2 {
+    return Float8E5M2 { e5m2: UInt8(encode(x, e5m2(), true)) }
+}
+
+/// A block of elements that share one scale.
+export protocol Block {
+    /// The value of element `i`, or NaN in a block whose scale is NaN.
+    fn valueAt(self, i: Int64) -> Float32
+}
+
+// An MX block (OCP MX 1.0) holds 32 elements and an E8M0 scale: 2^(k - 127)
+// for a code k below 255, and NaN for 255. A block's elements saturate. A NaN
+// anywhere sets the scale to 255 and every element code to 0.
+
+/// The larger of the magnitude bits `top` and those of `x`. A NaN is above
+/// every number.
+fn larger(top: Int64, x: Float32) -> Int64 {
+    return max(top, Int64(float32Bits(x)) & 2147483647)
+}
+
+/// The scale code of the largest magnitude `top` for elements of `f`, by the
+/// MX algorithm: the exponent of `top` less the largest exponent of `f`,
+/// within -127 to 127, plus 127. An infinity counts as the largest finite
+/// `Float32`, and a NaN gives 255.
+fn mxScale(top: Int64, f: Format) -> Int64 {
+    if top > 2139095040 {
+        return 255
+    }
+    if top == 0 {
+        return 0
+    }
+    let mut e = (min(top, 2139095039) >> 23) - 127
+    if top < 8388608 {
+        e = 63 - top.clz() - 149
+    }
+    return clamp(e - ((f.maxcode >> f.m) - 1 + f.emin), -127, 127) + 127
+}
+
+/// The scale code of the MX block of `xs` for elements of `f`.
+fn mxScaleOf(xs: read Array<Float32, 32>, f: Format) -> Int64 {
+    let mut top: Int64 = 0
+    for x in xs {
+        top = larger(top, x)
+    }
+    return mxScale(top, f)
+}
+
+/// The code of `x` of `f` in an MX block with scale code `k`.
+fn mxCode(x: Float32, f: Format, k: Int64) -> Int64 {
+    if k == 255 {
+        return 0
+    }
+    return narrow(Int64(float32Bits(x)), f, k - 127, true)
+}
+
+/// The element value `v` in an MX block with scale code `k`: `v` times the
+/// scale, rounded once to `Float32`. A NaN element keeps its bits.
+fn mxValue(v: Float32, k: Int64) -> Float32 {
+    if k == 255 {
+        return float32FromBits(2143289344)
+    }
+    if v != v {
+        return v
+    }
+    let mut scale = float32FromBits(4194304)
+    if k > 0 {
+        scale = float32FromBits(UInt32(k << 23))
+    }
+    return v * scale
+}
+
+/// The 8-bit codes of `xs` of `f` in an MX block with scale code `k`.
+fn mxCodes8(xs: read Array<Float32, 32>, f: Format, k: Int64) -> Array<UInt8, 32> {
+    let mut out: Array<UInt8, 32> = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+    let mut i = 0
+    while i < 32 {
+        out[i] = UInt8(mxCode(xs[i], f, k))
+        i = i + 1
+    }
+    return out
+}
+
+/// The 6-bit codes of `xs` of `f` in an MX block with scale code `k`: a stream
+/// of bits, code `i` at bits 6i to 6i + 5, bit `j` in bit `j % 8` of byte
+/// `j / 8`.
+fn mxCodes6(xs: read Array<Float32, 32>, f: Format, k: Int64) -> Array<UInt8, 24> {
+    let mut out: Array<UInt8, 24> = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+    let mut i = 0
+    while i < 32 {
+        let c = mxCode(xs[i], f, k)
+        let at = 6 * i
+        out[at >> 3] = out[at >> 3] | UInt8(c << (at & 7))
+        if (at & 7) > 2 {
+            out[(at >> 3) + 1] = out[(at >> 3) + 1] | UInt8(c >> (8 - (at & 7)))
+        }
+        i = i + 1
+    }
+    return out
+}
+
+/// Code `i` of a stream of 6-bit codes, as [`mxCodes6`] writes it.
+fn code6(b: read Array<UInt8, 24>, i: Int64) -> Int64 {
+    let at = 6 * i
+    let mut w = Int64(b[at >> 3]) >> (at & 7)
+    if (at & 7) > 2 {
+        w = w | (Int64(b[(at >> 3) + 1]) << (8 - (at & 7)))
+    }
+    return w & 63
+}
+
+/// The 4-bit value `i % 2` of byte `b`: the low nibble first.
+fn nibble(b: UInt8, i: Int64) -> Int64 {
+    return (Int64(b) >> ((i & 1) * 4)) & 15
+}
+
+/// MXFP8 with E4M3 elements.
+export type MxFp8E4M3Block = { e8m0: UInt8, e4m3: Array<UInt8, 32> }
+
+impl Block for MxFp8E4M3Block {
+    fn valueAt(self, i: Int64) -> Float32 {
+        return mxValue(decode(Int64(self.e4m3[i]), e4m3()), Int64(self.e8m0))
+    }
+}
+
+/// The MXFP8 E4M3 block of `xs`.
+export fn toMxFp8E4M3(xs: read Array<Float32, 32>) -> MxFp8E4M3Block {
+    let k = mxScaleOf(xs, e4m3())
+    return MxFp8E4M3Block { e8m0: UInt8(k), e4m3: mxCodes8(xs, e4m3(), k) }
+}
+
+/// MXFP8 with E5M2 elements.
+export type MxFp8E5M2Block = { e8m0: UInt8, e5m2: Array<UInt8, 32> }
+
+impl Block for MxFp8E5M2Block {
+    fn valueAt(self, i: Int64) -> Float32 {
+        return mxValue(decode(Int64(self.e5m2[i]), e5m2()), Int64(self.e8m0))
+    }
+}
+
+/// The MXFP8 E5M2 block of `xs`.
+export fn toMxFp8E5M2(xs: read Array<Float32, 32>) -> MxFp8E5M2Block {
+    let k = mxScaleOf(xs, e5m2())
+    return MxFp8E5M2Block { e8m0: UInt8(k), e5m2: mxCodes8(xs, e5m2(), k) }
+}
+
+/// MXFP6 with E2M3 elements, which have no infinity or NaN and reach 7.5.
+export type MxFp6E2M3Block = { e8m0: UInt8, e2m3: Array<UInt8, 24> }
+
+impl Block for MxFp6E2M3Block {
+    fn valueAt(self, i: Int64) -> Float32 {
+        return mxValue(decode(code6(self.e2m3, i), e2m3()), Int64(self.e8m0))
+    }
+}
+
+/// The MXFP6 E2M3 block of `xs`.
+export fn toMxFp6E2M3(xs: read Array<Float32, 32>) -> MxFp6E2M3Block {
+    let k = mxScaleOf(xs, e2m3())
+    return MxFp6E2M3Block { e8m0: UInt8(k), e2m3: mxCodes6(xs, e2m3(), k) }
+}
+
+/// MXFP6 with E3M2 elements, which have no infinity or NaN and reach 28.
+export type MxFp6E3M2Block = { e8m0: UInt8, e3m2: Array<UInt8, 24> }
+
+impl Block for MxFp6E3M2Block {
+    fn valueAt(self, i: Int64) -> Float32 {
+        return mxValue(decode(code6(self.e3m2, i), e3m2()), Int64(self.e8m0))
+    }
+}
+
+/// The MXFP6 E3M2 block of `xs`.
+export fn toMxFp6E3M2(xs: read Array<Float32, 32>) -> MxFp6E3M2Block {
+    let k = mxScaleOf(xs, e3m2())
+    return MxFp6E3M2Block { e8m0: UInt8(k), e3m2: mxCodes6(xs, e3m2(), k) }
+}
+
+/// MXFP4: E2M1 elements, which have no infinity or NaN and reach 6, two to a
+/// byte with element `2i` in the low nibble of byte `i`.
+export type MxFp4Block = { e8m0: UInt8, e2m1: Array<UInt8, 16> }
+
+impl Block for MxFp4Block {
+    fn valueAt(self, i: Int64) -> Float32 {
+        return mxValue(decode(nibble(self.e2m1[i >> 1], i), e2m1()), Int64(self.e8m0))
+    }
+}
+
+/// The MXFP4 block of `xs`.
+export fn toMxFp4(xs: read Array<Float32, 32>) -> MxFp4Block {
+    let k = mxScaleOf(xs, e2m1())
+    let mut out: Array<UInt8, 16> = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+    let mut i = 0
+    while i < 32 {
+        out[i >> 1] = out[i >> 1] | UInt8(mxCode(xs[i], e2m1(), k) << ((i & 1) * 4))
+        i = i + 1
+    }
+    return MxFp4Block { e8m0: UInt8(k), e2m1: out }
+}
+
+/// MXINT8: two's complement elements with an implicit scale of 2^-6. A
+/// narrowing keeps them within -127 to 127.
+export type MxInt8Block = { e8m0: UInt8, int8: Array<Int8, 32> }
+
+impl Block for MxInt8Block {
+    fn valueAt(self, i: Int64) -> Float32 {
+        return mxValue(Float32(self.int8[i]) * 0.015625, Int64(self.e8m0))
+    }
+}
+
+/// The MXINT8 block of `xs`.
+export fn toMxInt8(xs: read Array<Float32, 32>) -> MxInt8Block {
+    let k = mxScaleOf(xs, int8())
+    let mut out: Array<Int8, 32> = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+    let mut i = 0
+    while i < 32 {
+        // A sign above the magnitude, as two's complement.
+        let c = mxCode(xs[i], int8(), k)
+        out[i] = Int8(c & 127)
+        if c > 127 {
+            out[i] = Int8(128 - c)
+        }
+        i = i + 1
+    }
+    return MxInt8Block { e8m0: UInt8(k), int8: out }
+}
+
+/// NVFP4: 16 E2M1 elements, packed as in `MxFp4Block`, and a UE4M3 scale, an
+/// E4M3 code without a sign. A scale code of 127 is NaN; bit 7 is ignored.
+export type NvFp4Block = { ue4m3: UInt8, e2m1: Array<UInt8, 8> }
+
+impl Block for NvFp4Block {
+    fn valueAt(self, i: Int64) -> Float32 {
+        let k = Int64(self.ue4m3) & 127
+        if k == 127 {
+            return float32FromBits(2143289344)
+        }
+        let scale = decode(k, e4m3())
+        return decode(nibble(self.e2m1[i >> 1], i), e2m1()) * scale
+    }
+}
+
+/// The NVFP4 block of `xs`. The scale is the largest magnitude divided by 6,
+/// rounded to UE4M3 and saturated; each element is its value divided by the
+/// scale, rounded to E2M1 and saturated. An infinity counts as the largest
+/// finite `Float32`, and a NaN sets the scale to 127 and every element to 0.
+export fn toNvFp4(xs: read Array<Float32, 16>) -> NvFp4Block {
+    let mut top: Int64 = 0
+    for x in xs {
+        top = larger(top, x)
+    }
+    let mut out: Array<UInt8, 8> = [0, 0, 0, 0, 0, 0, 0, 0]
+    if top > 2139095040 {
+        return NvFp4Block { ue4m3: 127, e2m1: out }
+    }
+    let largest = float32FromBits(UInt32(min(top, 2139095039)))
+    let k = encode(largest / 6.0, e4m3(), true)
+    let scale = decode(k, e4m3())
+    let mut i = 0
+    while i < 16 && k != 0 {
+        out[i >> 1] = out[i >> 1] | UInt8(encode(xs[i] / scale, e2m1(), true) << ((i & 1) * 4))
+        i = i + 1
+    }
+    return NvFp4Block { ue4m3: UInt8(k), e2m1: out }
+}
+
+/// `xs` as Int4 values, two to a byte with element `2i` in the low nibble of
+/// byte `i`. Each value wraps to its low 4 bits, and an odd length leaves the
+/// last high nibble 0.
+export fn packInt4(xs: read Array<Int8>) -> Array<UInt8> {
+    let mut out: Array<UInt8> = []
+    let mut i = 0
+    while i < xs.length {
+        if (i & 1) == 0 {
+            out.push(0)
+        }
+        out[i >> 1] = out[i >> 1] | UInt8((Int64(xs[i]) & 15) << ((i & 1) * 4))
+        i = i + 1
+    }
+    return out
+}
+
+/// Element `i` of Int4 values that `packInt4` packed, from -8 to 7.
+export fn int4At(packed: read Array<UInt8>, i: Int64) -> Int8 {
+    return Int8((nibble(packed[i >> 1], i) ^ 8) - 8)
+}
+
+/// FNV-1a over the codes of `f` that `narrow` gives at every 97th `Float32`.
+fn strideHash(f: Format, sat: Bool) -> UInt64 {
+    let mut h: UInt64 = 14695981039346656037
+    let mut x: Int64 = 0
+    while x < 4294967296 {
+        h = (h ^ UInt64(narrow(x, f, 0, sat))) * 1099511628211
+        x = x + 97
+    }
+    return h
+}
+
+test "the converter gives the hashes of its exhaustively checked C twin" {
+    // conv.c of the storage-format research prints these hashes; its twin of
+    // `narrow` equals a double-precision reference on all 2^32 inputs.
+    let fs = [f16(), bf16(), e4m3(), e5m2(), e3m2(), e2m3(), e2m1()]
+    let want: Array<UInt64> = [12853757198298801328, 6762975106080347177, 1198544221508843811, 7711425281147426490, 3084433108247641546, 7862088063869177370, 6531189329021267061, 3892039697000696120, 17960121474085949224, 17960121474085949224, 17316665191283368571, 17316665191283368571, 16440487813967975805, 16440487813967975805]
+    let mut i = 0
+    while i < 7 {
+        assertEq(strideHash(fs[i], false), want[2 * i])
+        assertEq(strideHash(fs[i], true), want[2 * i + 1])
+        i = i + 1
+    }
+}
+
+test "every finite code widens to the value that narrows back to it" {
+    let fs = [f16(), bf16(), e4m3(), e5m2(), e3m2(), e2m3(), e2m1(), int8()]
+    for f in fs {
+        let mut c: Int64 = 0
+        while c <= f.maxcode {
+            assertEq(narrow(widen(c, f), f, 0, false), c)
+            assertEq(narrow(widen(c, f) | 2147483648, f, 0, false), c | (1 << (f.bits - 1)))
+            c = c + 1
+        }
+    }
+}
+
+test "Float16 widens as F16C does and BFloat16 as a shift" {
+    // FNV-1a over what vcvtph2ps gives for each non-NaN code, in code order.
+    let mut h: UInt64 = 14695981039346656037
+    let mut c: Int64 = 0
+    while c < 65536 {
+        if (c & 31744) != 31744 || (c & 1023) == 0 {
+            h = (h ^ UInt64(float32Bits(Float16 { f16: UInt16(c) }.toFloat32()))) * 1099511628211
+        }
+        assertEq(Int64(float32Bits(BFloat16 { bf16: UInt16(c) }.toFloat32())), c << 16)
+        c = c + 1
+    }
+    assertEq(h, 11876987533077745645)
+}
+
+test "the scalar formats round, overflow and keep a NaN's class" {
+    assertEq(toFloat16(Float32(65519.0)).f16, 31743)
+    assertEq(toFloat16(Float32(65520.0)).f16, 31744)
+    assertEq(toFloat16Sat(Float32(65520.0)).f16, 31743)
+    assertEq(toFloat16(float32FromBits(4290772992)).f16, 32256)
+    assertEq(toFloat16(Float32(-0.0)).f16, 32768)
+    assertEq(toBFloat16(float32FromBits(1065385983)).bf16, 16256)
+    assertEq(toBFloat16(float32FromBits(1065385984)).bf16, 16256)
+    assertEq(toBFloat16(float32FromBits(1065451520)).bf16, 16258)
+    assertEq(toBFloat16(float32FromBits(1)).bf16, 0)
+    assertEq(toBFloat16(float32FromBits(32769)).bf16, 1)
+    assertEq(toFloat8E4M3(Float32(464.0)).e4m3, 126)
+    assertEq(toFloat8E4M3(Float32(465.0)).e4m3, 127)
+    assertEq(toFloat8E4M3Sat(Float32(-465.0)).e4m3, 254)
+    assertEq(toFloat8E5M2(Float32(61440.0)).e5m2, 124)
+    assertEq(toFloat8E5M2(float32FromBits(4286578689)).e5m2, 126)
+    assertEq(Float8E4M3 { e4m3: 1 }.toFloat32(), Float32(0.001953125))
+    assertEq(Float8E5M2 { e5m2: 123 }.toFloat32(), Float32(57344.0))
+}
+
+test "an MX block shares the scale of its largest magnitude" {
+    let mut xs: Array<Float32, 32> = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    xs[0] = 1.0
+    xs[1] = -0.5
+    xs[30] = 3.0
+    xs[31] = 6.0
+    let b4 = toMxFp4(xs)
+    assertEq(b4.e8m0, 127)
+    assertEq(b4.valueAt(0), Float32(1.0))
+    assertEq(b4.valueAt(1), Float32(-0.5))
+    assertEq(b4.valueAt(30), Float32(3.0))
+    assertEq(b4.valueAt(31), Float32(6.0))
+    xs[31] = 1000.0
+    let b8 = toMxFp8E4M3(xs)
+    assertEq(b8.e8m0, 128)
+    assertEq(b8.valueAt(31), Float32(896.0))
+    assertEq(b8.valueAt(1), Float32(-0.5))
+    let b6 = toMxFp6E3M2(xs)
+    assertEq(b6.e8m0, 132)
+    assertEq(b6.valueAt(31), Float32(896.0))
+    assertEq(b6.valueAt(30), Float32(4.0))
+    assertEq(b6.valueAt(0), Float32(0.0))
+    let i8 = toMxInt8(xs)
+    assertEq(i8.e8m0, 136)
+    assertEq(i8.int8[31], 125)
+    assertEq(i8.valueAt(31), Float32(1000.0))
+    assertEq(i8.valueAt(1), Float32(0.0))
+    xs[5] = float32FromBits(2143289345)
+    assertEq(toMxFp6E2M3(xs).e8m0, 255)
+    assertEq(float32Bits(toMxFp8E5M2(xs).valueAt(0)), 2143289344)
+}
+
+test "an NVFP4 block scales by its largest magnitude over 6" {
+    let mut xs: Array<Float32, 16> = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    xs[0] = 12.0
+    xs[1] = -1.0
+    xs[15] = 4.0
+    let b = toNvFp4(xs)
+    assertEq(b.ue4m3, 64)
+    assertEq(b.valueAt(0), Float32(12.0))
+    assertEq(b.valueAt(1), Float32(-1.0))
+    assertEq(b.valueAt(15), Float32(4.0))
+    xs[3] = float32FromBits(2143289344)
+    assertEq(toNvFp4(xs).ue4m3, 127)
+}
+
+test "Int4 values pack two to a byte and wrap" {
+    let packed = packInt4([-8, 7, 3, -1, 9])
+    assertEq(packed.length, 3)
+    assertEq(packed[0], 120)
+    assertEq(int4At(packed, 0), -8)
+    assertEq(int4At(packed, 1), 7)
+    assertEq(int4At(packed, 3), -1)
+    assertEq(int4At(packed, 4), -7)
+}

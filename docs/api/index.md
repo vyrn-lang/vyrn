@@ -24,6 +24,7 @@
 - [std/jsondec](std/jsondec.md) — The untyped half of `fromJson`, and the generator of the
 - [std/jsonread](std/jsonread.md) — The strict JSON reader: `parseJson`, and the cursor `fromJson` reads with.
 - [std/math](std/math.md) — Integer helpers (min, max, abs, clamp) and `Float64` functions (pi,
+- [std/narrow](std/narrow.md) — Narrow number formats for storage: `Float16`, `BFloat16`, the two FP8
 - [std/num](std/num.md) — Text -> number, correctly rounded, and `Float64` -> `%f` text.
 - [std/openapi](std/openapi.md) — The contract as an OpenAPI 3.1 document, built from
 - [std/order](std/order.md) — Orders, the comparison under one, and the functions that sort by one.
