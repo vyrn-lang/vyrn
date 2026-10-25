@@ -1,0 +1,11 @@
+import { sleep } from "std/task"
+
+fn slow(x: Int64) -> Int64 {
+    await sleep(x)
+    return x + 1
+}
+
+export fn run() -> Int64 {
+    let f: fn(Int64) -> Int64 = slow
+    return f(3)
+}

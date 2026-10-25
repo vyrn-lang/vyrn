@@ -1,0 +1,9 @@
+/item/5 after 5
+local 5
+lambda after 5
+/item/30 after 30, lambda after 10
+second: lambda after 20
+/item/3 after 3
+/item/1 after 1
+/item/2 after 2
+reply 4, 4

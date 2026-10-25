@@ -634,6 +634,10 @@ examples/graphql.vyrn	where$pTitle	yes	no, `value` is String, not an integer, Bo
 examples/graphql.vyrn	where$cTitle	no, it calls `panic`	no, its effect set is trap
 examples/graphql.vyrn	where$pUrl	yes	no, `value` is String, not an integer, Bool or a read array of one
 examples/graphql.vyrn	where$cUrl	no, it calls `panic`	no, its effect set is trap
+examples/handlers.vyrn	fetch	yes	no, its effect set is alloc, waits
+examples/handlers.vyrn	local	yes	no, its effect set is alloc
+examples/handlers.vyrn	reply	yes	no, its effect set is alloc, waits
+examples/handlers.vyrn	main	no, it calls a function value	no, its effect set is alloc, write-output, waits
 examples/heapfieldkey.vyrn		does not check	does not check
 examples/heapkey.vyrn		does not check	does not check
 examples/herofield.vyrn	ramp	yes	no, the result is String, not an integer, Bool or a read array of one

@@ -1504,6 +1504,39 @@ pub fn coercible(from: &Type, to: &Type, types: &dyn Decls) -> bool {
     false
 }
 
+/// Deep-normalizes a stored-fn signature so structurally identical
+/// spellings (an alias, a validated scalar, transformer sugar) register and
+/// dispatch as one synthesized enum. It decides which constructions a dispatcher
+/// covers; a second grouping would leave a dispatcher missing a variant.
+pub fn normalize_fn_sig(t: &Type, types: &HashMap<String, TypeDecl>) -> Type {
+    let norm = |x: &Type| normalize_fn_sig(x, types);
+    match resolve(t, types) {
+        Type::Fn(ps, r) => Type::Fn(ps.iter().map(norm).collect(), Box::new(norm(&r))),
+        Type::Array(i) => Type::Array(Box::new(norm(&i))),
+        Type::ArrayN(i, n) => Type::ArrayN(Box::new(norm(&i)), n),
+        Type::Map(k, v) => Type::Map(Box::new(norm(&k)), Box::new(norm(&v))),
+        // Every sum, `Option` and `Result` included. Payloads normalize too, or
+        // a sum registers under a spelling the dispatcher does not look up.
+        Type::Enum(vs) => Type::Enum(
+            vs.iter()
+                .map(|v| EnumVariant {
+                    name: v.name.clone(),
+                    payload: v.payload.iter().map(norm).collect(),
+                })
+                .collect(),
+        ),
+        Type::Record(fs) => Type::Record(
+            fs.iter()
+                .map(|f| Field {
+                    name: f.name.clone(),
+                    ty: norm(&f.ty),
+                })
+                .collect(),
+        ),
+        other => other,
+    }
+}
+
 /// Reduces `ty` to its structural form: a named type to its base, an
 /// application to its substituted base, a transformer to a `Record`, and
 /// `lazy T` to `fn() -> T`. An unknown name is `Unit`.

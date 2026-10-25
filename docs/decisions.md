@@ -137,6 +137,7 @@ pull request.
 - A type that owns heap, directly or transitively, moves on assignment, argument passing and return. Scalars and records of scalars copy.
 - A parameter is `read` (the default), `modify` or `consume`. The capability is the API contract, and bodies need no annotation.
 - `read` and `modify` borrows are second-class. They cannot be stored, captured by an escaping closure, returned or handed to `consume`, so no lifetime annotation exists.
+- A `fn` type waits when its closed set holds a function that waits (`effects::Judged::waiting_values`, `World::waits_through`); the bit is per signature, because the checker runs before the effect judgment and no word spells it. A function that does not wait is a value of a waiting type, because a waiting call handles a callee that finishes at its start. A waiting type's dispatcher is a waiting function with a 16-byte block of its own while its target waits.
 - A `fn` type carries no capabilities: a function value reads every argument, a function with a `consume` or `modify` parameter is no function value, and a lambda takes each parameter by `read`.
 - A `modify` or `consume` argument is exclusive in its call: no other argument names it or a place overlapping it, compared by path, so `f(p.a, p.b)` is accepted. The kernel states it once (`Kernel::exclusive`); a rebuilding builtin's receiver is put back, not consumed.
 - A function returns an owned value. No borrowed return; projections cover in-place access.

@@ -154,17 +154,15 @@ fn a_waiting_lambda_runs_where_its_parameter_is_bound() {
 
 /// The build refuses what has no lowering yet, naming the function and the line.
 #[test]
-fn an_await_through_a_value_does_not_build_yet() {
-    for (name, line) in [("through", 17)] {
-        let dir = scratch("waits-refused");
-        let out = vyrn()
-            .args(["build", "--target", "wasm", &format!("{name}.vyrn"), "-o"])
-            .arg(dir.join("w.wasm"))
-            .current_dir(waits_dir())
-            .output()
-            .expect("run vyrn build");
-        assert!(!out.status.success(), "{name}");
-        let want = format!("error: waiting code does not build yet: `main` waits at line {line}\n");
-        assert_eq!(norm(&out.stderr), want, "{name}");
-    }
+fn a_waiting_export_with_a_result_does_not_build_yet() {
+    let dir = scratch("waits-refused");
+    let out = vyrn()
+        .args(["build", "--target", "wasm", "result.vyrn", "-o"])
+        .arg(dir.join("w.wasm"))
+        .current_dir(waits_dir())
+        .output()
+        .expect("run vyrn build");
+    assert!(!out.status.success());
+    let want = "error: waiting code does not build yet: `later` waits at line 5\n";
+    assert_eq!(norm(&out.stderr), want);
 }

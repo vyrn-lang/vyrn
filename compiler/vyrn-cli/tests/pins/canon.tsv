@@ -1,5 +1,5 @@
 census	count
-roots	435
+roots	436
 roots that do not check	35
 members BoolLambda	5
 members Condition	4423
@@ -12,6 +12,7 @@ unfit Bool functions Effect	10
 unfit Bool functions Loop	79
 unfit Bool functions Switch	22
 unfit Bool functions Writes	11
+unfit lambdas Effect	1
 predicates as 4.5 counts them, across the corpus: members	81
 predicates as 4.5 counts them, across the corpus: L0 identities	73
 predicates as 4.5 counts them, across the corpus: L0 pairs	11

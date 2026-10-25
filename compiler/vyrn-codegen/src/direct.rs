@@ -3291,6 +3291,11 @@ fn lower_shape(
 
 /// One signature's dispatcher: switch on the tag, unpack the capture block, and call the
 /// target directly. Nested `if`/`else` end in an `unreachable` arm, which types the chain.
+///
+/// A waiting type's dispatcher ([`vyrn_lower::World::waits_through`]) takes and returns a frame
+/// as every waiting body does. While its target waits it holds a 16-byte heap block of its own,
+/// the tag at 0 and the target's frame at 8, so a resume needs no argument and finds the target
+/// again. A target that does not wait finishes at its start, with status 0.
 fn lower_dispatcher(m: &mut Log, cx: &Cx<'_>, sig_ty: &Type, dsig: &Sig) -> Result<Frame, String> {
     let Type::Fn(ptys, ret) = sig_ty else {
         return unsupported("a dispatcher for a non-function type", 0);
@@ -3309,6 +3314,16 @@ fn lower_dispatcher(m: &mut Log, cx: &Cx<'_>, sig_ty: &Type, dsig: &Sig) -> Resu
     };
     let shift = u32::from(dest.is_some());
     let fv = shift;
+    let wait = dsig.waits.then(|| DispatchWait {
+        frame: params.len() as u32 - 1,
+        own: b.local(ValType::I32),
+        inner: b.local(ValType::I32),
+        st: b.local(ValType::I32),
+        res: match &dsig.ret {
+            Ret::Scalar(v) => Some(b.local(*v)),
+            _ => None,
+        },
+    });
     for (i, pty) in ptys.iter().enumerate() {
         let local = shift + 1 + i as u32;
         // `Place` cannot name an address in a local, so an aggregate is copied into a slot,
@@ -3330,19 +3345,34 @@ fn lower_dispatcher(m: &mut Log, cx: &Cx<'_>, sig_ty: &Type, dsig: &Sig) -> Resu
     let fl = cx.layout(sig_ty, 0)?;
     let tag = b.local(ValType::I64);
     let pl = b.local(ValType::I32);
+    if let Some(w) = wait {
+        b.ins(&Instruction::LocalGet(w.frame))
+            .ins(&Instruction::I32Eqz)
+            .ins(&Instruction::If(BlockType::Empty));
+    }
     b.ins(&Instruction::LocalGet(fv));
     b.ins(&Instruction::I64Load(at(fl.fields[0])));
     b.ins(&Instruction::LocalSet(tag));
     load_wrapped(&mut b, fv, fl.fields[1]);
     b.ins(&Instruction::LocalSet(pl));
+    if let Some(w) = wait {
+        b.ins(&Instruction::Else)
+            .ins(&Instruction::LocalGet(w.frame))
+            .ins(&Instruction::I64Load(at(0)))
+            .ins(&Instruction::LocalSet(tag))
+            .ins(&Instruction::LocalGet(w.frame))
+            .ins(&Instruction::I32Load(word_at(8)))
+            .ins(&Instruction::LocalSet(w.inner))
+            .ins(&Instruction::End);
+    }
 
     let variants: Vec<(usize, FnVal)> = (cx.reg.borrow().fnvals.iter())
         .enumerate()
         .filter(|(_, v)| v.sig == *sig_ty)
         .map(|(i, v)| (i, v.clone()))
         .collect();
-    let arm_ty = match &dsig.ret {
-        Ret::Scalar(v) => BlockType::Result(*v),
+    let arm_ty = match (&dsig.ret, wait) {
+        (Ret::Scalar(v), None) => BlockType::Result(*v),
         _ => BlockType::Empty,
     };
     for (i, v) in &variants {
@@ -3351,6 +3381,16 @@ fn lower_dispatcher(m: &mut Log, cx: &Cx<'_>, sig_ty: &Type, dsig: &Sig) -> Resu
         b.ins(&Instruction::I64Eq);
         b.ins(&Instruction::If(arm_ty));
         f.depth += 1;
+        let tsig = &v.target.sig;
+        // A waiting target starts on the first call and resumes on the others; one that does
+        // not wait never leaves a frame, so only a first call reaches it.
+        let resumes = wait.filter(|_| tsig.waits);
+        if let Some(w) = resumes {
+            b.ins(&Instruction::LocalGet(w.frame))
+                .ins(&Instruction::I32Eqz)
+                .ins(&Instruction::If(BlockType::Empty));
+            f.depth += 1;
+        }
         // The capture block, copied into a frame slot so each capture has a `Place`.
         let cap_tys = v.target.sig.params[..v.target.ncaps].to_vec();
         let mut all: Vec<(Place, Type)> = Vec::new();
@@ -3377,13 +3417,19 @@ fn lower_dispatcher(m: &mut Log, cx: &Cx<'_>, sig_ty: &Type, dsig: &Sig) -> Resu
             }
         }
         all.extend(args.iter().cloned());
+        if let Some(w) = resumes {
+            dispatch_resumable(m, cx, &mut f, &mut b, (sig_ty, dsig, tsig), &all, w, words)?;
+            f.depth -= 1;
+            b.ins(&Instruction::End);
+            b.ins(&Instruction::Else);
+            continue;
+        }
         // An aggregate result is written through this function's destination.
         if let Some(d) = dest {
             b.ins(&Instruction::LocalGet(d));
         }
         // A target whose result is the signature's, part for part, leaves its parts on the
         // operand stack.
-        let tsig = &v.target.sig;
         let handed = matches!((&dsig.ret, &tsig.ret), (Ret::Words(a), Ret::Words(t)) if a == t)
             && matches!(
                 crate::coerce_plan(&cx.sub(&tsig.ret_ty), &cx.sub(ret), &cx.types),
@@ -3415,6 +3461,13 @@ fn lower_dispatcher(m: &mut Log, cx: &Cx<'_>, sig_ty: &Type, dsig: &Sig) -> Resu
             (Ret::Unit, Repr::Unit, _) => {}
             _ => return unsupported("a stored `fn` whose result shape is not its signature's", 0),
         }
+        if let Some(w) = wait {
+            if let Some(res) = w.res {
+                b.ins(&Instruction::LocalSet(res));
+            }
+            b.ins(&Instruction::I32Const(0))
+                .ins(&Instruction::LocalSet(w.st));
+        }
         b.ins(&Instruction::Else);
     }
     // Unreachable: every tag comes from a registered construction.
@@ -3428,12 +3481,138 @@ fn lower_dispatcher(m: &mut Log, cx: &Cx<'_>, sig_ty: &Type, dsig: &Sig) -> Resu
         f.depth -= 1;
         b.ins(&Instruction::End);
     }
+    if let Some(w) = wait {
+        dispatch_settle(cx, &mut b, w, tag);
+    }
+    if let Some(res) = wait.and_then(|w| w.res) {
+        b.ins(&Instruction::LocalGet(res));
+    }
     if let (Some(first), Ret::Words(fl)) = (words, &dsig.ret) {
         for i in 0..fl.parts.len() as u32 {
             b.ins(&Instruction::LocalGet(first + i));
         }
     }
+    if let Some(w) = wait {
+        b.ins(&Instruction::LocalGet(w.st));
+    }
     Ok(b)
+}
+
+/// The locals of a waiting type's dispatcher ([`lower_dispatcher`]).
+#[derive(Clone, Copy)]
+struct DispatchWait {
+    /// The frame parameter: 0 on a first call, else the dispatcher's own block.
+    frame: u32,
+    /// The dispatcher's own block while its target waits.
+    own: u32,
+    /// The target's frame, read from the block on a resume.
+    inner: u32,
+    /// The target's status, then the dispatcher's.
+    st: u32,
+    /// A scalar result, held while the status settles.
+    res: Option<u32>,
+}
+
+/// One arm of a waiting type's dispatcher for a target that waits: on a first call the
+/// captures and arguments in `all` with frame 0, on a resume zeros and the target's frame.
+/// The target's result is the signature's word for word, so it passes through; an aggregate
+/// one is written through the caller's destination, which outlives the wait.
+#[allow(clippy::too_many_arguments)]
+fn dispatch_resumable(
+    m: &mut Log,
+    cx: &Cx<'_>,
+    f: &mut Fn_<'_, '_>,
+    b: &mut Frame,
+    (sig_ty, dsig, tsig): (&Type, &Sig, &Sig),
+    all: &[(Place, Type)],
+    w: DispatchWait,
+    words: Option<u32>,
+) -> Result<(), String> {
+    let Type::Fn(_, ret) = sig_ty else {
+        return unsupported("a dispatcher for a non-function type", 0);
+    };
+    let (tp, mut tr) = cx.wasm_sig(tsig, 0)?;
+    let (_, mut dr) = cx.wasm_sig(dsig, 0)?;
+    (tr.pop(), dr.pop());
+    let same = matches!(
+        crate::coerce_plan(&cx.sub(&tsig.ret_ty), &cx.sub(ret), &cx.types),
+        crate::Rung::Identity | crate::Rung::FnRetag
+    ) && tr == dr
+        && tsig.ret.out().map(|l| l.size) == dsig.ret.out().map(|l| l.size);
+    let dropped = dr.is_empty() && dsig.ret.out().is_none() && tsig.ret.out().is_none();
+    if !same && !dropped {
+        return unsupported(
+            "a waiting stored `fn` whose result differs from its type's",
+            0,
+        );
+    }
+    let land = |b: &mut Frame| {
+        b.ins(&Instruction::LocalSet(w.st));
+        match (w.res, &dsig.ret, words) {
+            (Some(res), ..) => {
+                b.ins(&Instruction::LocalSet(res));
+            }
+            (None, Ret::Words(fl), Some(first)) => fl.set(b, first),
+            _ => {
+                for _ in &tr {
+                    b.ins(&Instruction::Drop);
+                }
+            }
+        }
+    };
+    if tsig.ret.out().is_some() {
+        b.ins(&Instruction::LocalGet(0));
+    }
+    for ((place, ty), p) in all.iter().zip(&tsig.params) {
+        f.push_place(b, *place, ty, 0)?;
+        f.coerce(m, b, ty, p, 0)?;
+    }
+    b.ins(&Instruction::I32Const(0))
+        .ins(&Instruction::Call(tsig.index));
+    land(b);
+    b.ins(&Instruction::Else);
+    for t in &tp[..tp.len() - 1] {
+        b.ins(&zero(*t));
+    }
+    b.ins(&Instruction::LocalGet(w.inner))
+        .ins(&Instruction::Call(tsig.index));
+    land(b);
+    Ok(())
+}
+
+/// Settles a waiting type's dispatcher after its arm: while the target waits, the dispatcher's
+/// block, made on a first call, holds the tag and the target's frame and is the status;
+/// otherwise the status is the target's, and a resumed dispatcher frees its block.
+fn dispatch_settle(cx: &Cx<'_>, b: &mut Frame, w: DispatchWait, tag: u32) {
+    b.ins(&Instruction::LocalGet(w.st))
+        .ins(&Instruction::I32Const(2))
+        .ins(&Instruction::I32GeU)
+        .ins(&Instruction::If(BlockType::Empty))
+        .ins(&Instruction::LocalGet(w.frame))
+        .ins(&Instruction::I32Eqz)
+        .ins(&Instruction::If(BlockType::Empty))
+        .ins(&Instruction::I64Const(16))
+        .ins(&Instruction::Call(cx.rt.malloc))
+        .ins(&Instruction::LocalSet(w.own))
+        .ins(&Instruction::LocalGet(w.own))
+        .ins(&Instruction::LocalGet(tag))
+        .ins(&Instruction::I64Store(at(0)))
+        .ins(&Instruction::Else)
+        .ins(&Instruction::LocalGet(w.frame))
+        .ins(&Instruction::LocalSet(w.own))
+        .ins(&Instruction::End)
+        .ins(&Instruction::LocalGet(w.own))
+        .ins(&Instruction::LocalGet(w.st))
+        .ins(&Instruction::I32Store(word_at(8)))
+        .ins(&Instruction::LocalGet(w.own))
+        .ins(&Instruction::LocalSet(w.st))
+        .ins(&Instruction::Else)
+        .ins(&Instruction::LocalGet(w.frame))
+        .ins(&Instruction::If(BlockType::Empty))
+        .ins(&Instruction::LocalGet(w.frame))
+        .ins(&Instruction::Call(cx.rt.free))
+        .ins(&Instruction::End)
+        .ins(&Instruction::End);
 }
 
 impl<'p> Fn_<'_, 'p> {
@@ -5891,7 +6070,7 @@ impl<'p> Fn_<'_, 'p> {
             ret: self.cx.ret(ret, line)?,
             ret_ty: (**ret).clone(),
             in_place: None,
-            waits: false,
+            waits: self.cx.world.waits_through(sig_ty),
         };
         let (wp, wr) = self.cx.wasm_sig(&s, line)?;
         let sig = Sig {
@@ -12327,16 +12506,10 @@ impl<'a, 'p> Fn_<'a, 'p> {
                 )
             }
         };
-        // An awaited call waits only through a callee whose frame waits; a call through a
-        // value has no point to resume. A fork branch may finish at its start.
+        // An awaited call waits only through a callee whose frame waits, a waiting type's
+        // dispatcher included. A fork branch may finish at its start.
         let awaited = self.awaiting.take();
         let branch = self.branch.take().map(|(st, _)| st);
-        if (awaited.is_some() || branch.is_some_and(|_| sig.waits))
-            && self.core_through(kind).is_some()
-        {
-            let name = self.body().spelled(&self.owner);
-            return Err(vyrn_frontend::rule!(WaitsUnbuilt, name, line).render());
-        }
         let site = match (awaited, sig.waits) {
             (Some((k, c)), true) => Some((self.await_open(b, line)?, k, c)),
             (None, _) if branch.is_some() => None,
@@ -14262,7 +14435,7 @@ impl<'a, 'p> Fn_<'a, 'p> {
             ret: self.cx.ret(r, 0).ok()?,
             ret_ty: (**r).clone(),
             in_place: None,
-            waits: false,
+            waits: self.cx.world.waits_through(sig_ty),
         })
     }
 

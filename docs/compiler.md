@@ -462,6 +462,10 @@ The module's shape:
   `regionCarry` end it. They use `std/runtime`'s `arenaSwap`, exported only
   to `std/task`, and `regionExit` and `free`, so the emitter writes no arena
   layout.
+- Function values: a waiting type's dispatcher (`World::waits_through`) takes
+  and returns a frame as a waiting body does, and holds a block of its own
+  with the tag and its target's frame while the target waits
+  (`lower_dispatcher`).
 - Forks: an awaited `both` or `race` is one call row of kind `Callee::Fork`,
   whose arguments are every branch's in order and whose `core::Fork` holds each
   branch's callee and argument count, so the kernel judges the branches as one

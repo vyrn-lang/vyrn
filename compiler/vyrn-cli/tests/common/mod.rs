@@ -241,6 +241,7 @@ pub const WAITING: &[(&str, &str)] = &[
         "fanout.vyrn",
         "runs one waiting call per element, and one against a timer",
     ),
+    ("handlers.vyrn", "awaits calls through function values"),
     ("waiting.vyrn", "waits on the host's timers"),
 ];
 

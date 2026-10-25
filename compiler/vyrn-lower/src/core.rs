@@ -8450,6 +8450,7 @@ pub fn augment(program: &Program, w: &mut World, judging: bool) {
     }
     let alone: Vec<&Body> = (inits.iter()).filter_map(|e| e.3.as_ref().ok()).collect();
     let mut waiting: Vec<Refusal> = Vec::new();
+    let mut waiting_values = Vec::new();
     let ((mut state, read, answers, reached, allocating), uses, ran) = crate::effects::judge_built(
         program,
         &lowered,
@@ -8538,6 +8539,7 @@ pub fn augment(program: &Program, w: &mut World, judging: bool) {
             for (k, e) in inits.iter().filter(|e| e.3.is_ok()).enumerate() {
                 rules(first + k, Waiting::Initializer, e.1, e.2);
             }
+            waiting_values = judged.waiting_values(own.proto.types());
             (judged.state_table(refs), read, answers, reached, allocating)
         },
     );
@@ -8545,6 +8547,7 @@ pub fn augment(program: &Program, w: &mut World, judging: bool) {
     drop((tops, late));
     w.reached = reached;
     w.allocating = allocating;
+    w.waiting_values = waiting_values;
     w.state_uses = Arc::new(uses);
     for (s, r) in (states.iter_mut().filter(|s| s.built().is_some())).zip(read) {
         s.kept = r;

@@ -58,6 +58,9 @@ pub struct World {
     /// What a call into each frame the placer built may do, as the effect
     /// judgment found it: what [`World::state_use`] answers.
     pub(crate) state_uses: Arc<HashMap<FnId, crate::effects::StateUse>>,
+    /// The `fn` types a call waits through, as the effect judgment found them:
+    /// what [`World::waits_through`] answers.
+    pub(crate) waiting_values: Vec<Type>,
     /// What every entry and every return of each directly called body
     /// states, made once from `bodies` when an emitter first decides one
     /// ([`World::summaries`]).
@@ -532,6 +535,12 @@ impl World {
     /// Whether `body` is of a module the manifest's `proved` key names.
     pub fn proves(&self, body: &Body) -> bool {
         self.proved.contains(&body.file)
+    }
+
+    /// Whether a call through a value of the `fn` type `ty` waits: the waits bit
+    /// of the type ([`crate::effects::Judged::waiting_values`]).
+    pub fn waits_through(&self, ty: &Type) -> bool {
+        (self.waiting_values.iter()).any(|t| checker::fn_sigs_match(t, ty))
     }
 
     /// What a call into the frame `f` may do. `None` for a frame
