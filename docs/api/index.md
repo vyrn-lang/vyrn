@@ -43,6 +43,7 @@
 - [std/symbolmap](std/symbolmap.md) — The symbol map of a generated module: for each
 - [std/task](std/task.md) — Waiting for the host: `sleep`, the one host wait.
 - [std/text](std/text.md) — UTF-8 decoding and byte-offset line and column, in Vyrn.
+- [std/tile](std/tile.md) — Integer matrix tiles: `mmaInt8` and `mmaUInt8`, the CPU oracle a GPU tile
 - [std/time](std/time.md) — Wall-clock time at the host boundary, and a pure calendar breakdown.
 - [std/tw](std/tw.md) — Theme-derived utility classes as a checked type. `tw(theme)` reads
 - [std/tw.editor](std/tw.editor.md) — Editor support for the theme modules `std/tw` writes.

@@ -85,6 +85,7 @@ The compiler injects these declarations into every program, so a file names them
 | `std/random` | `Rng`, `seededRng`, `nextInt`, `nextInRange`: SplitMix64 as a value, so a seeded run reproduces everywhere. `randomSeed()` is the one host effect. Not for secrets. |
 | `std/sum` | `sum(xs)` adds an `Array<Float64>` exactly: the true sum rounded once to nearest-even, the same bits in any order. A separate module, so `std/math` importers do not compile it. |
 | `std/narrow` | Storage formats: `Float16`, `BFloat16`, `Float8E4M3` and `Float8E5M2`, each with `toFloat32` and a rounding and a saturating narrowing (`toFloat16`, `toFloat16Sat`); the OCP MX blocks (`toMxFp8E4M3` to `toMxInt8`) and `NvFp4Block`, each with `valueAt`; `packInt4` and `int4At`. Integer code over the `Float32` bit view, with no arithmetic on the narrow types. |
+| `std/tile` | `mmaInt8` and `mmaUInt8`: an `Int32` 16x16 accumulator plus a 16x32 A tile times a 32x16 B tile of 8-bit integers, row-major, wrapping. The CPU oracle a GPU tile must equal bit for bit. |
 | `std/hash` | `fnv1a`, `fnv1aStr` (non-cryptographic), `sha1`, `sha1Hex`, and the `Hashable` protocol a `Map` key type implements. |
 
 ### Collections and protocols

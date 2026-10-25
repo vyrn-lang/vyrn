@@ -3204,6 +3204,18 @@ std/text.vyrn	text$charCountV	yes	no, `s` is String, not Int32, UInt32, Bool or 
 std/text.vyrn	text$lineAtV	yes	no, `b` is Array<UInt8>, not Int32, UInt32, Bool or a read array of one
 std/text.vyrn	text$colAtV	yes	no, `b` is Array<UInt8>, not Int32, UInt32, Bool or a read array of one
 std/text.vyrn	text$showCps	yes	no, its effect set is alloc
+std/tile.vyrn	mmaInt8	no, it calls `mmaWith`, which is not trap-free	no, it is not trap-free
+std/tile.vyrn	mmaUInt8	no, it calls `mmaWith`, which is not trap-free	no, it is not trap-free
+std/tile.vyrn	probeInt8A	yes	no, the value of line 48 is Int8, not Int32, UInt32, Bool or a read array of one
+std/tile.vyrn	probeInt8B	yes	no, the value of line 52 is Int8, not Int32, UInt32, Bool or a read array of one
+std/tile.vyrn	probeInt8C	yes	no, the value of line 56 is Array<Int32, 256>, not Int32, UInt32, Bool or a read array of one
+std/tile.vyrn	probeUInt8A	yes	no, the value of line 60 is Array<UInt8, 512>, not Int32, UInt32, Bool or a read array of one
+std/tile.vyrn	probeUInt8B	yes	no, the value of line 64 is Array<UInt8, 512>, not Int32, UInt32, Bool or a read array of one
+std/tile.vyrn	probeUInt8C	yes	no, the value of line 68 is Array<Int32, 256>, not Int32, UInt32, Bool or a read array of one
+std/tile.vyrn	tileHash	yes	no, `d` is Array<Int32, 256>, not Int32, UInt32, Bool or a read array of one
+std/tile.vyrn	filled8	yes	no, `xs` is Array<Int8, 512>, not Int32, UInt32, Bool or a read array of one
+std/tile.vyrn	filled32	yes	no, `xs` is Array<Int32, 256>, not Int32, UInt32, Bool or a read array of one
+std/tile.vyrn	mmaWith	no, it keeps an index check	no, it is not trap-free
 std/time.vyrn	now	yes	no, its effect set is clock
 std/time.vyrn	monotonic	yes	no, its effect set is clock
 std/time.vyrn	toMillis	yes	no, `i` is Instant, and WGSL has no 64-bit integer
