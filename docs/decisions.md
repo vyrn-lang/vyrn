@@ -176,6 +176,7 @@ pull request.
 - The native host on Windows keeps 64 KiB of the main thread's stack for the overflow trap (`SetThreadStackGuarantee`). Windows writes the exception frame on the overflowed stack, and the CPU's XSAVE state sizes it; the default left about 4 KiB after wasm-rt's handler.
 - An array literal holds at most 512 elements, refused by the checker so `check` predicts `build`.
 - A `region` nests at most 64 deep.
+- A `region` that holds an `await` has an arena of its own, swapped by `std/task` at each suspension and resume over accessors `std/runtime` exports only to it (decided 2026-10-25 by the user). The nesting count is per task: a suspension takes off each region it leaves.
 - Allocation failure prints `error: out of memory` and exits 1 on every engine. The bound may differ by engine.
 - Releasing a deep tree recurses, bounded like any recursive walk. No worklist release.
 - No raw-memory view or `unsafe`. `Array` is the primitive and containers over it are ordinary Vyrn; `SmallArray` stays built in because it needs an uninitialized place.

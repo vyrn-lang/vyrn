@@ -154,8 +154,8 @@ fn a_waiting_lambda_runs_where_its_parameter_is_bound() {
 
 /// The build refuses what has no lowering yet, naming the function and the line.
 #[test]
-fn a_waiting_region_does_not_build_yet() {
-    for (name, line) in [("region", 8)] {
+fn an_await_through_a_value_does_not_build_yet() {
+    for (name, line) in [("through", 17)] {
         let dir = scratch("waits-refused");
         let out = vyrn()
             .args(["build", "--target", "wasm", &format!("{name}.vyrn"), "-o"])

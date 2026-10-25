@@ -230,6 +230,10 @@ pub const ENGINE_TRAP: &[(&str, &str)] = &[("recdepth.vyrn", "recurses until the
 /// event loop, so `tests/route.rs` compares these with `vyrn run` instead.
 pub const WAITING: &[(&str, &str)] = &[
     (
+        "arenas.vyrn",
+        "waits inside regions, each with its own arena",
+    ),
+    (
         "concurrent.vyrn",
         "runs waiting calls at once on the host's timers",
     ),

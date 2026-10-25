@@ -3,7 +3,7 @@ import { startsWith, endsWith, contains } from "std/strpred"
 import { includes } from "std/arrays"
 import { escapeHtml } from "./code"
 import { highlightSrc, lineStarts } from "./hl"
-import { quoted, quotedList, branch, lookup, vyrnStems } from "./gensrc"
+import { quoted, quotedList, branch, lookup, vyrnStems, fenced } from "./gensrc"
 
 type Entry = { name: String, kind: String, sig: String, doc: String, line: Int64 }
 
@@ -366,11 +366,6 @@ fn summaryOf(doc: String) -> String {
         i = i + 1
     }
     return linked(inlineHtml(substring(flat, 0, cut)), [])
-}
-
-/// Mirrors `is_fenced` in `compiler/vyrn-frontend/src/loader.rs`, which a generator cannot call.
-fn fenced(name: String) -> Bool {
-    return name == "mem" || name == "runtime"
 }
 
 /// The source of a `Markup` holding `html`, which this file rendered.

@@ -11,6 +11,10 @@ examples/aliascontext.vyrn	where$cAge	no, it calls `panic`	no, its effect set is
 examples/appendowned.vyrn		does not check	does not check
 examples/appendreserve.vyrn	line	yes	no, its effect set is alloc
 examples/appendreserve.vyrn	main	no, it keeps an index check	no, its effect set is alloc, write-output
+examples/arenas.vyrn	worker	yes	no, its effect set is alloc, write-output, waits
+examples/arenas.vyrn	label	yes	no, its effect set is alloc, waits
+examples/arenas.vyrn	polls	yes	no, its effect set is alloc, write-output, waits
+examples/arenas.vyrn	main	no, it calls `both`, which has no body to judge	no, its effect set is alloc, write-output, waits
 examples/args.vyrn	main	yes	no, its effect set is alloc, write-output, args
 examples/argsdemo.vyrn	showOpt	yes	no, its effect set is alloc, write-output
 examples/argsdemo.vyrn	main	no, it calls `flag`, which is not trap-free	no, its effect set is alloc, write-output, args, trap
@@ -1798,7 +1802,6 @@ site/app/apidoc.vyrn	proseHtml	no, it keeps an index check	no, its effect set is
 site/app/apidoc.vyrn	isBanner	yes	no, its effect set is alloc
 site/app/apidoc.vyrn	linked	no, it keeps an index check	no, its effect set is alloc, trap
 site/app/apidoc.vyrn	summaryOf	no, it calls `split`, which is not trap-free	no, its effect set is alloc, trap
-site/app/apidoc.vyrn	fenced	yes	no, `name` is String, not an integer, Bool or a read array of one
 site/app/apidoc.vyrn	trusted	no, it calls `quoted`, which is not trap-free	no, its effect set is alloc, trap
 site/app/apidoc.vyrn	apiDocs	no, it calls `proseHtml`, which is not trap-free	no, its effect set is alloc, fs-read, fs-list, trap, gen-only
 site/app/bench.vyrn	run1File	yes	no, the result is String, not an integer, Bool or a read array of one
@@ -1949,6 +1952,7 @@ site/app/gensrc.vyrn	quotedList	no, it calls `quoted`, which is not trap-free	no
 site/app/gensrc.vyrn	branch	no, it calls `quoted`, which is not trap-free	no, its effect set is alloc, trap
 site/app/gensrc.vyrn	lookup	yes	no, its effect set is alloc
 site/app/gensrc.vyrn	entriesOf	yes	no, its effect set is alloc, fs-list
+site/app/gensrc.vyrn	fenced	yes	no, `name` is String, not an integer, Bool or a read array of one
 site/app/gensrc.vyrn	vyrnStems	no, it calls `substring`, which is not trap-free	no, its effect set is alloc, fs-list, trap
 site/app/github.vyrn	repoName	yes	no, the result is String, not an integer, Bool or a read array of one
 site/app/github.vyrn	ghBlob	yes	no, its effect set is alloc
@@ -2101,7 +2105,7 @@ site/app/pagemd.vyrn	editorsMd	no, it calls `asMarkdown`, which is not trap-free
 site/app/pagemd.vyrn	graphMd	no, it calls `asMarkdown`, which is not trap-free	no, its effect set is alloc, module-state, trap
 site/app/pagemd.vyrn	chapterMd	no, it calls `asMarkdown`, which is not trap-free	no, its effect set is alloc, trap
 site/app/pagemd.vyrn	moduleMd	no, it calls `asMarkdown`, which is not trap-free	no, its effect set is alloc, trap
-site/app/pagemd.vyrn	fenced__from1	no, it calls `trimEnd`, which is not trap-free	no, its effect set is alloc, trap
+site/app/pagemd.vyrn	fenced__from0	no, it calls `trimEnd`, which is not trap-free	no, its effect set is alloc, trap
 site/app/pagemd.vyrn	trailer	yes	no, its effect set is alloc
 site/app/pagemd.vyrn	absolute	no, it calls `substring`, which is not trap-free	no, its effect set is alloc, trap
 site/app/pagemd.vyrn	asMarkdown	no, it calls `substring`, which is not trap-free	no, its effect set is alloc, trap
@@ -3063,6 +3067,7 @@ std/runtime.vyrn	runtime$auditExit	no, it calls `heapBase`, which has no body to
 std/runtime.vyrn	runtime$arenaAlloc	no, it calls `panic`	no, its effect set is alloc, trap
 std/runtime.vyrn	runtime$regionEnter	no, it calls `heapBase`, which has no body to judge	no, it is not trap-free
 std/runtime.vyrn	runtime$regionExit	no, it calls `heapBase`, which has no body to judge	no, it is not trap-free
+std/runtime.vyrn	runtime$arenaSwap	no, it calls `heapBase`, which has no body to judge	no, it is not trap-free
 std/runtime.vyrn	runtime$strNew	no, it calls `heapBase`, which has no body to judge	no, its effect set is alloc, trap
 std/runtime.vyrn	runtime$strConcat	no, it calls `load32`, which has no body to judge	no, its effect set is alloc, trap
 std/runtime.vyrn	runtime$strAppend	no, it calls `load32`, which has no body to judge	no, its effect set is alloc, trap
@@ -3223,6 +3228,9 @@ std/task.vyrn	task$delivery	no, it keeps an index check	no, its effect set is mo
 std/task.vyrn	task$cancelBegin	yes	no, its effect set is module-state
 std/task.vyrn	task$cancelEnd	yes	no, its effect set is module-state
 std/task.vyrn	task$wake	no, it keeps an index check	no, its effect set is alloc, module-state, trap
+std/task.vyrn	task$regionSwap	no, it calls `arenaSwap`, which is not trap-free	no, it is not trap-free
+std/task.vyrn	task$regionClose	no, it calls `regionExit`, which is not trap-free	no, it is not trap-free
+std/task.vyrn	task$regionCarry	no, it calls `arenaSwap`, which is not trap-free	no, it is not trap-free
 std/text.vyrn	text$decodeUtf8	yes	no, its effect set is alloc
 std/text.vyrn	text$utf8Width	yes	yes, emulated Int64
 std/text.vyrn	text$stringFault	yes	no, the loop is no counter loop

@@ -465,6 +465,11 @@ export fn auditExit() {
 // region carries blocks out, so the emitter skips `regionExit` on that edge.
 // The oldest standard 4 KiB chunk is kept, so a `region` in a loop asks the
 // allocator nothing after its first turn.
+//
+// A region that holds an `await` has an arena of its own, which `std/task`
+// swaps in and out through `arenaSwap`. It sees an arena as one word: the
+// chunk in the low half, the next free byte in the high, 0 when empty. Each
+// line here costs every program to lex, so the notes are not doc comments.
 
 /// The bump inside the open region's chunks. A new chunk is an ordinary
 /// `malloc` block, which the flag does not affect.
@@ -529,6 +534,21 @@ export fn regionExit(mark: Int32) {
         cur = c + 8
     }
     store32(base + 472, UInt32(cur))
+}
+
+/// Makes `a` the arena and returns the one it replaced; with `join`, the
+/// replaced arena's chunks go behind the oldest chunk of `a`, which holds one.
+export to "./task" fn arenaSwap(a: Int64, join: Bool) -> Int64 {
+    let was = Int64(load64(heapBase() + 468))
+    let mut c = Int32(a)
+    while join && load32(c) != 0 {
+        c = Int32(load32(c))
+    }
+    if join {
+        store32(c, UInt32(was))
+    }
+    store64(heapBase() + 468, UInt64(a))
+    return was
 }
 
 // Strings. A `String` is the address of its bytes; the eight bytes in front

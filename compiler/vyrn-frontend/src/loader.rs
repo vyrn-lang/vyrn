@@ -688,7 +688,8 @@ fn exported_only_to(
 }
 
 /// Refuses an import of `std/mem` from anywhere but `std/runtime`, and of
-/// `std/runtime` from anywhere.
+/// `std/runtime` from anywhere but `std/task`, which swaps region arenas over
+/// what `std/runtime` exports to it.
 ///
 /// The compiler states this audience, not `vyrn.json`, so no manifest widens it
 /// and it runs whether or not the project opts into audiences. The diagnostic
@@ -710,6 +711,9 @@ fn runtime_fence(
         }
         MEM_SPEC
     } else if is(imported, RUNTIME_SPEC) {
+        if is(importer, TASK_SPEC) {
+            return None;
+        }
         RUNTIME_SPEC
     } else {
         return None;
