@@ -1651,6 +1651,8 @@ pub enum Expr {
         /// Written `recv.name(..)`: `args[0]` is the receiver, and a refusal
         /// numbers the arguments after it (#577).
         dot: bool,
+        /// Written `await f(..)`: the call waits, and the mark says so.
+        awaits: bool,
         /// Explicit type arguments, as in `fromJson<Shape>(s)`; usually empty.
         /// The checker seeds the solve with them and infers the rest, so a
         /// partial list is legal and an over-long one is refused. Backends read
@@ -1894,6 +1896,7 @@ impl Expr {
             name: name.into(),
             args,
             dot: false,
+            awaits: false,
             type_args: Vec::new(),
             line,
             id: Id::NEW,

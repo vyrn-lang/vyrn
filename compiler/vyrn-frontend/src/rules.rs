@@ -684,6 +684,14 @@ rules! {
     ResultClauseChanges { name, param, cap }
         "the `where` clause on the result of `{name}` reads `{param}`, a `{cap}` \
         parameter the body may change";
+    AwaitMissing { callee }
+        "`{callee}` waits, and its call has no `await`"
+        fix "write `await` before the call";
+    AwaitNoWait { callee } "`await` marks a call that waits, and `{callee}` does not wait";
+    WaitsUnbuilt { name, line } "waiting code does not build yet: `{name}` waits at line {line}";
+    InitializerWaits { callee }
+        "a module-state initializer cannot wait, and `{callee}` waits: state is set \
+        before `main` runs";
     ProveValue {}
         "`prove` cannot be used as a function value: a call through a value proves \
         nothing";
@@ -867,6 +875,7 @@ rules! {
     SmallArrayCapacityType {} "`SmallArray<T, N>` needs a non-negative integer capacity";
     NeedsField { name } "`{name}` needs at least one field, e.g. `{name}<T, field>`";
     NestingTooDeep { max } "nesting exceeds {max} levels";
+    AwaitNotCall {} "`await` marks a call: write `await f(..)`";
     GlobalNeedsInit { name }
         "module state `{name}` needs an initializer: write `let {name} = <value>` \
         (top-level `let` has no default value)";

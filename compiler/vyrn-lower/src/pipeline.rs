@@ -145,6 +145,7 @@ fn check(
         binders,
         memory,
         cost: Vec::new(),
+        waits: Vec::new(),
     };
     (out, judged)
 }
@@ -193,20 +194,35 @@ pub fn gen_engine(
 /// The pipeline the editor runs after its load: [`check_and_synthesize`] with
 /// the load's floor decision.
 pub const JUDGE: symbols::Judge = symbols::Judge {
-    check: |program, engine, pending| check(program, engine, pending).0,
+    check: |program, engine, pending| for_editor(program, engine, pending, false),
 };
 
 /// [`JUDGE`] and the cost of each function of the root file ([`crate::insight::fn_costs`]),
 /// which decides the root's bodies: about 9 ms of a keystroke on `site/export.vyrn`.
 pub const JUDGE_COST: symbols::Judge = symbols::Judge {
-    check: |program, engine, pending| {
-        let (mut judged, world) = check(program, engine, pending);
-        if let Some(world) = world {
+    check: |program, engine, pending| for_editor(program, engine, pending, true),
+};
+
+/// [`check`] with what the editor shows of the World: the functions that wait, and the cost of
+/// each function of the root file when `cost` holds.
+fn for_editor(
+    program: &mut ast::Program,
+    engine: Option<&GenEngine>,
+    pending: Option<floor::Pending>,
+    cost: bool,
+) -> symbols::Judged {
+    let (mut judged, world) = check(program, engine, pending);
+    if let Some(world) = world {
+        judged.waits = world
+            .waiting(program)
+            .map(|(f, _)| f.name.clone())
+            .collect();
+        if cost {
             judged.cost = crate::insight::fn_costs(program, &world);
         }
-        judged
-    },
-};
+    }
+    judged
+}
 
 /// Builds the core of every body the checker typed in a refused program, and
 /// returns the typed judgment's refusals of those bodies.

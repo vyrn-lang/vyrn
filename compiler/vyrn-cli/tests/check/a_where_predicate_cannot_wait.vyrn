@@ -1,0 +1,7 @@
+import { pause } from "./a_function_that_reaches_a_wait_waits"
+
+type Slow = Int64 where pause(value) > 0
+
+export fn make(n: Int64) -> Slow {
+    return Slow(n)
+}

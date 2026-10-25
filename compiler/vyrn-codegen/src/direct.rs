@@ -248,6 +248,12 @@ pub fn compile_gen_host(program: &Program) -> Result<Vec<u8>, GenError> {
 
 fn compile_inner(program: &Program, world: Arc<vyrn_lower::World>) -> Result<Vec<u8>, String> {
     let _cg = vyrn_frontend::prof::phase("codegen");
+    // A body that waits has no lowering: no pass turns an `await` into a
+    // resume point.
+    if let Some((f, line)) = world.waiting(program).next() {
+        let name = program.spellings.written(&f.name);
+        return Err(vyrn_frontend::rule!(WaitsUnbuilt, name, line).render());
+    }
     let mut m = Module::new();
     // Imports first — they share the function index space with definitions, so
     // `wasm::Module` panics if one arrives late.

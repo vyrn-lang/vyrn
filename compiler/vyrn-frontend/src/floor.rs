@@ -95,8 +95,8 @@ impl Capability {
     ///
     /// This is the floor's whole vocabulary, read from the lattice rows. `None`
     /// covers an effect every target has (`alloc`, output, the clock, entropy,
-    /// module state, `trap`), one no compiled target has (`serve`), and one that
-    /// exists only in the generator (`gen-only`).
+    /// module state, `trap`, `waits`), one no compiled target has (`serve`),
+    /// and one that exists only in the generator (`gen-only`).
     pub fn of(e: crate::effects::Effect) -> Option<Capability> {
         use crate::effects::Effect;
         Some(match e {
@@ -111,7 +111,8 @@ impl Capability {
             | Effect::Serve
             | Effect::ModuleState
             | Effect::Trap
-            | Effect::GenOnly => return None,
+            | Effect::GenOnly
+            | Effect::Waits => return None,
         })
     }
 }

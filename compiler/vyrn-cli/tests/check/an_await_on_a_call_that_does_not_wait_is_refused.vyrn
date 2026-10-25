@@ -1,0 +1,7 @@
+fn twice(n: Int64) -> Int64 {
+    return n * 2
+}
+
+export fn four() -> Int64 {
+    return await twice(2)
+}

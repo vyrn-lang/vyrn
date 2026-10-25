@@ -445,7 +445,7 @@ cursor, and `.member` completion from protocol impls and record fields),
 document symbols, document highlight, rename (including across a generator
 boundary, through the symbol maps), formatting (the same `fmt`), code actions,
 inlay hints and semantic tokens. Colour and hover use one resolution order, so
-they agree. A generator input, such as a `.vyx` file, is analysed through the
+they agree. The hover of a function that waits says so (language.md, Waiting). A generator input, such as a `.vyx` file, is analysed through the
 module that claims it (`audience::Claim`): of the `MAX_OWNER_CANDIDATES`
 `.vyrn` files nearest it, up to the nearest `vyrn.json`, the first in path
 order whose generator import names the file or a directory above it, and whose

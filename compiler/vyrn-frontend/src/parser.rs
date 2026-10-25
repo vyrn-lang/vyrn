@@ -3210,6 +3210,26 @@ impl Parser {
                     line,
                 })
             }
+            // `await f(..)` marks a waiting call. `await` counts only when a name
+            // follows, so `await(x)` stays a call, and it marks the call under
+            // any `?` after it: `await f(x)?` is `(await f(x))?`.
+            Tok::Ident(id)
+                if id == "await"
+                    && matches!(self.tokens[self.pos + 1].tok, Tok::Ident(_) | Tok::Vself) =>
+            {
+                let col = self.col();
+                self.advance();
+                let mut e = self.postfix()?;
+                let mut at = &mut e;
+                while let Expr::Try { expr, .. } = at {
+                    at = &mut **expr;
+                }
+                match at {
+                    Expr::Call { awaits, .. } => *awaits = true,
+                    _ => return Err(refuse!("parse", line, col, AwaitNotCall)),
+                }
+                Ok(e)
+            }
             _ => self.postfix(),
         }
     }
@@ -3326,6 +3346,7 @@ impl Parser {
                     return Ok(Expr::Call {
                         id: Id::NEW,
                         dot: args.len() > n,
+                        awaits: false,
                         name,
                         args,
                         type_args: Vec::new(),
@@ -3369,6 +3390,7 @@ impl Parser {
                     name: "@at".to_string(),
                     args: vec![e, idx],
                     dot: false,
+                    awaits: false,
                     type_args: Vec::new(),
                     line,
                     id,
@@ -3633,6 +3655,7 @@ impl Parser {
                         Expr::Call {
                             id: spelled,
                             dot: false,
+                            awaits: false,
                             name,
                             args,
                             type_args,
@@ -3988,6 +4011,7 @@ impl Parser {
         let decode = |t: &Expr, text: Expr| Expr::Call {
             id: Id::NEW,
             dot: false,
+            awaits: false,
             name: "fromJson".to_string(),
             args: vec![text],
             type_args: match t {

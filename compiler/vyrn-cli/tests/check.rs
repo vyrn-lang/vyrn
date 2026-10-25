@@ -258,3 +258,27 @@ fn an_editor_analysis_on_one_thread_gives_what_a_fresh_thread_gives() {
     assert_eq!(runs[1], on_thread(vec![second])[0]);
     assert_eq!(runs[2], runs[0]);
 }
+
+/// A program that waits checks, and its build refuses it with one sentence: no body that waits
+/// has a lowering yet.
+#[test]
+fn a_waiting_program_checks_and_its_build_refuses() {
+    let dir = scratch("waits");
+    let out = vyrn()
+        .args([
+            "build",
+            "--target",
+            "wasm",
+            "a_function_that_reaches_a_wait_waits.vyrn",
+        ])
+        .arg("-o")
+        .arg(dir.join("w.wasm"))
+        .current_dir(check_dir())
+        .output()
+        .expect("run vyrn build");
+    assert!(!out.status.success());
+    assert_eq!(
+        norm(&out.stderr),
+        "error: waiting code does not build yet: `pause` waits at line 6\n"
+    );
+}

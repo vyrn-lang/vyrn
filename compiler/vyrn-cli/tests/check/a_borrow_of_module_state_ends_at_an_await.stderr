@@ -1,0 +1,6 @@
+a_borrow_of_module_state_ends_at_an_await.vyrn:14:0: `roster` is written here while `roster.names` still reads out of it
+line 13: ... and `roster.names` is used again here
+  fix: `roster.names.copy()` on line 13, so `roster.names` is a value of its own
+a_borrow_of_module_state_ends_at_an_await.vyrn:14:0: `roster` is written here while `name` still reads out of it
+line 15: ... and `name` is used again here
+  fix: `name.copy()` on line 13, so `name` is a value of its own

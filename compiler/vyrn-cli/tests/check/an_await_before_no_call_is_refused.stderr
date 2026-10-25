@@ -1,0 +1,1 @@
+an_await_before_no_call_is_refused.vyrn:2:12: `await` marks a call: write `await f(..)`

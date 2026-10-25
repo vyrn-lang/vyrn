@@ -3141,6 +3141,7 @@ std/symbolmap.vyrn	originJson	yes	no, its effect set is alloc
 std/symbolmap.vyrn	mapJson	no, it calls `emit`, which is not trap-free	no, its effect set is alloc, trap
 std/symbolmap.vyrn	mapSlug	yes	no, its effect set is alloc
 std/symbolmap.vyrn	symbolMapFn	no, it calls `mapJson`, which is not trap-free	no, its effect set is alloc, trap, gen-only
+std/task.vyrn	sleep	yes	no, its effect set is waits
 std/text.vyrn	text$decodeUtf8	yes	no, its effect set is alloc
 std/text.vyrn	text$utf8Width	yes	no, `b` is Array<UInt8>, not Int32, UInt32, Bool or a read array of one
 std/text.vyrn	text$stringFault	yes	no, `b` is Array<UInt8>, not Int32, UInt32, Bool or a read array of one

@@ -1,0 +1,18 @@
+import { sleep } from "std/task"
+
+type Roster = { names: Array<String> }
+
+let mut roster = Roster { names: ["ada", "grace"] }
+
+export fn rename() {
+    roster.names = ["edsger"]
+}
+
+export fn letters() -> Int64 {
+    let mut n = 0
+    for name in roster.names {
+        await sleep(1)
+        n = n + name.byteLength
+    }
+    return n
+}

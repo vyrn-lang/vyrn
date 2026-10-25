@@ -15,6 +15,7 @@ use vyrn_frontend::floor;
 use vyrn_frontend::own::StateCallees;
 
 use vyrn_frontend::core::{rows, Arg, Body, Made, Name, Place, Rhs, St};
+use vyrn_frontend::rules::{rule, DeclName, Rule};
 
 /// The lattice's table lives in `vyrn_frontend::effects` because the
 /// generation fence reads it mid-check and cannot see this crate.
@@ -99,6 +100,18 @@ pub struct Judged<'a> {
     /// Per body, the globals it or a callee stores into, joined in the same
     /// fixpoint.
     writes: Vec<std::collections::BTreeSet<String>>,
+    /// Every global, which a wait may store into.
+    globals: &'a [&'a str],
+}
+
+/// Where a frame runs, for [`Judged::wait_rules`].
+#[derive(Debug, Clone, Copy)]
+pub enum Waiting {
+    /// A function, lambda, `test` or `bench` body: each waiting call is
+    /// marked `await`.
+    Body,
+    /// A module-state initializer, which runs before `main`.
+    Initializer,
 }
 
 impl Judged<'_> {
@@ -107,19 +120,47 @@ impl Judged<'_> {
     pub fn state_callees(&self, i: usize) -> Vec<(String, Vec<String>)> {
         let mut out: Vec<(String, Vec<String>)> = Vec::new();
         for (c, k) in self.frames[i].calls.iter().zip(&self.resolved[i]) {
-            let Callee::Bodies(idx) = &self.callees[*k] else {
-                continue;
-            };
             if !self.stores[*k] {
                 continue;
             }
-            let gs: std::collections::BTreeSet<&String> =
-                idx.iter().flat_map(|j| &self.writes[*j]).collect();
+            let gs: std::collections::BTreeSet<&str> = match &self.callees[*k] {
+                Callee::Bodies(idx) => (idx.iter())
+                    .flat_map(|j| &self.writes[*j])
+                    .map(String::as_str)
+                    .collect(),
+                _ => self.globals.iter().copied().collect(),
+            };
             if !gs.is_empty() && !out.iter().any(|(m, _)| *m == c.callee) {
-                out.push((c.callee.clone(), gs.into_iter().cloned().collect()));
+                out.push((c.callee.clone(), gs.into_iter().map(String::from).collect()));
             }
         }
         out
+    }
+
+    /// Whether a call to the callee `k` may wait.
+    fn waits(&self, k: usize) -> bool {
+        match &self.callees[k] {
+            Callee::Atom(a) => a.has(Effect::Waits),
+            Callee::Bodies(idx) => idx.iter().any(|j| self.effects[*j].has(Effect::Waits)),
+            Callee::Pure | Callee::Empty | Callee::Unknown => false,
+        }
+    }
+
+    /// Each call of frame `i`, run where `at` says, that breaks a waiting
+    /// rule, with its line: a mark on a call that does not wait, and a waiting
+    /// call without one or where nothing may wait.
+    pub fn wait_rules(&self, i: usize, at: Waiting) -> impl Iterator<Item = (usize, Rule)> + '_ {
+        let calls = self.frames[i].calls.iter().zip(&self.resolved[i]);
+        calls.filter_map(move |(c, k)| {
+            let callee = DeclName(&c.callee);
+            let r = match (self.waits(*k), at, c.awaits) {
+                (true, Waiting::Initializer, _) => rule!(InitializerWaits, callee),
+                (true, Waiting::Body, false) => rule!(AwaitMissing, callee),
+                (false, _, true) => rule!(AwaitNoWait, callee),
+                (true, Waiting::Body, true) | (false, _, false) => return None,
+            };
+            Some((c.line, r))
+        })
     }
 
     /// [`Judged::state_callees`] of every frame of `refs`, by frame id. A
@@ -137,14 +178,19 @@ impl Judged<'_> {
     fn into_state_uses(self, refs: &[&Body]) -> HashMap<FnId, StateUse> {
         let steps = self.state_steps();
         let mut out: HashMap<FnId, StateUse> = HashMap::with_capacity(refs.len());
-        for (((b, e), mut writes), step) in
-            refs.iter().zip(&self.effects).zip(self.writes).zip(steps)
+        for ((((b, e), mut writes), step), f) in (refs.iter().zip(&self.effects))
+            .zip(self.writes)
+            .zip(steps)
+            .zip(self.frames)
         {
             let Some(id) = b.id else { continue };
             let u = out.entry(id).or_default();
             u.effects = u.effects.join(*e);
             u.writes.append(&mut writes);
             u.via = u.via.or(step.and_then(|j| refs.get(j)?.id));
+            u.awaits_at = u
+                .awaits_at
+                .or(f.calls.iter().find(|c| c.awaits).map(|c| c.line));
         }
         out
     }
@@ -191,6 +237,8 @@ pub struct StateUse {
     /// shortest call path ([`crate::World::state_path`]). `None` where its own
     /// statements touch module state, and where it touches none.
     pub via: Option<FnId>,
+    /// The line of its first call marked `await`, if it marks one.
+    pub awaits_at: Option<usize>,
 }
 
 /// The globals a call to `callee` in the frame `frame` may store into, by
@@ -245,9 +293,11 @@ impl crate::fixpoint::Lattice for Fact {
 
 /// Returns the effect set of every frame in `frames`, to a fixpoint.
 /// `resolve` says what a callee name is; `through` says what a function type
-/// may hold, for a call through a local.
+/// may hold, for a call through a local. A wait may store into every one of
+/// `globals`, because the host runs other tasks before it ends.
 pub fn judge<'a>(
     frames: &'a [&'a Walked],
+    globals: &'a [&'a str],
     resolve: &mut dyn FnMut(&str) -> Callee,
     through: &mut dyn FnMut(&Type) -> Callee,
 ) -> Judged<'a> {
@@ -310,7 +360,11 @@ pub fn judge<'a>(
         to.extend(f.lambdas.iter().map(|d| i + d));
         to.sort_unstable();
         to.dedup();
-        own.push(Fact(e, f.writes.clone()));
+        let mut writes = f.writes.clone();
+        if e.has(Effect::Waits) {
+            writes.extend(globals.iter().map(|g| g.to_string()));
+        }
+        own.push(Fact(e, writes));
         edges.push(to);
         resolved.push(ids);
     }
@@ -323,7 +377,8 @@ pub fn judge<'a>(
     let stores = (callees.iter())
         .map(|c| match c {
             Callee::Bodies(idx) => idx.iter().any(|j| !writes[*j].is_empty()),
-            _ => false,
+            Callee::Atom(a) => a.has(Effect::Waits) && !globals.is_empty(),
+            Callee::Pure | Callee::Empty | Callee::Unknown => false,
         })
         .collect();
     Judged {
@@ -337,6 +392,7 @@ pub fn judge<'a>(
         callees,
         stores,
         writes,
+        globals,
     }
 }
 
@@ -370,7 +426,7 @@ fn walk(b: &Body) -> Walk<'_> {
     rows(&b.stmts).for_each(|(s, _)| w.stmt(s));
     for info in b.names.iter().filter(|i| !i.borrow) {
         for r in &info.runs {
-            w.call(r, None, info.line, false);
+            w.call(r, None, info.line, false, false);
         }
     }
     w
@@ -436,7 +492,11 @@ impl<'a> Walk<'a> {
     /// Records `r` when it is a call; `born` when it binds an owned result.
     fn rhs(&mut self, r: &'a Rhs, line: usize, born: bool) {
         let Rhs::Call {
-            callee, kind, args, ..
+            callee,
+            kind,
+            args,
+            awaits,
+            ..
         } = r
         else {
             return;
@@ -450,16 +510,17 @@ impl<'a> Walk<'a> {
                 self.place(p);
             }
         }
-        self.call(callee, kind.value(), line, born);
+        self.call(callee, kind.value(), line, born, *awaits);
     }
 
     /// Records a call to `callee`, through `value` when it is a function value.
-    fn call(&mut self, callee: &str, value: Option<Name>, line: usize, born: bool) {
+    fn call(&mut self, callee: &str, value: Option<Name>, line: usize, born: bool, awaits: bool) {
         self.out.calls.push(Call {
             callee: callee.to_string(),
             through: value.map(|n| self.body.names[n.index()].ty.clone()),
             line,
             born,
+            awaits,
         });
     }
 }
@@ -564,6 +625,7 @@ fn placed_reach(
         &places,
         &tops,
         &[],
+        &[],
         |_, reach, _, top, _| {
             (insts.iter().zip(top))
                 .map(|(i, at)| (i.func.module.clone(), reach.effects[*at]))
@@ -574,9 +636,10 @@ fn placed_reach(
 }
 
 /// The judgment over bodies the caller built: `tops` holds each body with
-/// the name a call spells it by, and `served` each body the judgment memo
-/// served, by its frames as last judged. `places` holds the projection bodies
-/// ([`crate::core::build_places`]). The generic releases are built here, each
+/// the name a call spells it by, `served` each body the judgment memo
+/// served, by its frames as last judged, and `outside` each body no call
+/// enters, judged as one frame after every served one. `places` holds the
+/// projection bodies ([`crate::core::build_places`]). The generic releases are built here, each
 /// frame numbered in `fns` ([`crate::Fns::number`]), and `then` is given
 /// every frame built in the order judged, `top[i]`, the frame index of
 /// `tops[i]`'s own body, and `served_at[i]`, that of `served[i]`'s. Every
@@ -597,6 +660,7 @@ pub(crate) fn judge_built<R>(
     places: &[crate::core::Projection<'_, '_>],
     tops: &[(&str, &Body)],
     served: &[(&str, &[Walked])],
+    outside: &[&Body],
     then: impl FnOnce(&Judged, &Judged, &[&Body], &[usize], &[usize]) -> R,
 ) -> (R, HashMap<FnId, StateUse>, Ran) {
     let mut generic: Vec<(&str, Body)> = Vec::new();
@@ -678,6 +742,8 @@ pub(crate) fn judge_built<R>(
         }
         frames.extend(walked.iter());
     }
+    let alone = walk_frames(outside);
+    frames.extend(alone.iter());
     let mut impl_methods: HashMap<&str, Vec<usize>> = HashMap::new();
     for im in &program.impls {
         for m in im.methods.iter().chain(im.places.iter()) {
@@ -756,10 +822,11 @@ pub(crate) fn judge_built<R>(
             Callee::Bodies(idx)
         }
     };
-    let judged = judge(&frames, &mut resolve, &mut through);
+    let globals: Vec<&str> = program.globals.iter().map(|g| g.name.as_str()).collect();
+    let judged = judge(&frames, &globals, &mut resolve, &mut through);
     let reach = hit.get().then(|| {
         skip.set(true);
-        judge(&frames, &mut resolve, &mut through)
+        judge(&frames, &globals, &mut resolve, &mut through)
     });
     let r = then(
         &judged,

@@ -41,10 +41,12 @@ pub enum Effect {
     Trap,
     /// The compiler's own state is read; exists at generation time only.
     GenOnly,
+    /// The task waits for the host, which may run other tasks meanwhile.
+    Waits,
 }
 
 impl Effect {
-    pub const ALL: [Effect; 14] = [
+    pub const ALL: [Effect; 15] = [
         Effect::Alloc,
         Effect::ReadInput,
         Effect::WriteOutput,
@@ -59,6 +61,7 @@ impl Effect {
         Effect::ModuleState,
         Effect::Trap,
         Effect::GenOnly,
+        Effect::Waits,
     ];
 
     /// The name the table and every printout use.
@@ -78,6 +81,7 @@ impl Effect {
             Effect::ModuleState => "module-state",
             Effect::Trap => "trap",
             Effect::GenOnly => "gen-only",
+            Effect::Waits => "waits",
         }
     }
 
@@ -205,7 +209,8 @@ impl Effect {
             | Effect::Random
             | Effect::Extern
             | Effect::Serve
-            | Effect::ModuleState => false,
+            | Effect::ModuleState
+            | Effect::Waits => false,
         }
     }
 }
@@ -244,6 +249,7 @@ fn refusal(e: Option<Effect>, name: &str) -> String {
     match e {
         Some(Effect::Clock) => "reads the clock".to_string(),
         Some(Effect::Random) => "reads entropy".to_string(),
+        Some(Effect::Waits) => "waits".to_string(),
         Some(Effect::Extern) => format!("calls the extern `{name}`"),
         // Name the word the source wrote: `@info` is the sugar's internal spelling of
         // `log.info(..)`, and no source can lex it.
@@ -279,6 +285,8 @@ pub struct Call {
     /// Whether the call binds an owned result, which is the frame's own
     /// allocation when the callee is no user body.
     pub born: bool,
+    /// Whether the source marked the call `await`.
+    pub awaits: bool,
 }
 
 #[cfg(test)]
