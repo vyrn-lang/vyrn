@@ -1,0 +1,7 @@
+import { pause } from "./a_function_that_reaches_a_wait_waits"
+
+let delay = await pause(5)
+
+export fn current() -> Int64 {
+    return delay
+}

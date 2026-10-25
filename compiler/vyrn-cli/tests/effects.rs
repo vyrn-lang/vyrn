@@ -509,7 +509,8 @@ fn run_corpus() {
         };
         let walked = effects::walk_frames(&refs);
         let frames: Vec<&effects::Walked> = walked.iter().collect();
-        let judged = effects::judge(&frames, &mut resolve, &mut through);
+        let globals: Vec<&str> = program.globals.iter().map(|g| g.name.as_str()).collect();
+        let judged = effects::judge(&frames, &globals, &mut resolve, &mut through);
         through_calls += judged.through.len();
         empty_calls += judged.empty.len();
         // Two reasons only: no collected source matches the callee's function type,
@@ -838,6 +839,7 @@ const LATTICE: &[(&str, &str, bool)] = &[
     ("listDirKinds", "fs-list", true),
     ("args", "args", false),
     ("serveStream", "serve", false),
+    ("hostSleep", "waits", false),
     ("panic", "trap", true),
     ("@panicAt", "trap", true),
     ("assert", "trap", true),

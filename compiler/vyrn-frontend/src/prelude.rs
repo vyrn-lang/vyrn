@@ -434,7 +434,7 @@ impl Builtin {
 /// The rows. Completion offers a shape's methods in this order.
 fn table() -> Vec<Builtin> {
     use crate::effects::Effect::{
-        Args, FsList, FsRead, FsWrite, GenOnly, ReadInput, Serve, Trap, WriteOutput,
+        Args, FsList, FsRead, FsWrite, GenOnly, ReadInput, Serve, Trap, Waits, WriteOutput,
     };
     use Capability::{Consume, Modify, Read};
     use Shape::*;
@@ -989,6 +989,13 @@ fn table() -> Vec<Builtin> {
             .spec(Spec::Effect(Unit))
             .effect(Serve)
             .hover("serveStream(stream) -> Unit — hand a `Stream<String>` of encoded frames to the serving host, which writes each one and closes the stream the first time a write fails; `std/http`'s `sse` is the one to call"),
+        // The one host wait: `std/task`'s `sleep` is the one caller.
+        b("hostSleep")
+            .sig(row("hostSleep", &[], &[("ms", Read, Int)], Unit, &[]))
+            .spec(Spec::Effect(Unit))
+            .effect(Waits)
+            .home("std/task")
+            .hover("hostSleep(ms) -> Unit — wait `ms` milliseconds while the host runs other tasks; only `std/task` may call it, and `sleep` is the one to call"),
         // The argument is an address, so nothing is consumed; the result's
         // stream type carries the disposal obligation.
         b("unboxStream").takes(&[1], takes_one)

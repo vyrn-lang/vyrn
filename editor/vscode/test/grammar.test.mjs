@@ -13,7 +13,7 @@
 //
 // CONTEXTUAL WORDS ARE NOT KEYWORDS and are deliberately not compared. `as`,
 // `gen`, `extern`, `lazy`, `read`, `modify`, `test`, `bench`, `from`,
-// `logging` and `to` are identifiers the parser recognises by position; the grammar
+// `logging`, `to` and `await` are identifiers the parser recognises by position; the grammar
 // matches each with its own lookahead in `#contextual-keywords`.
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -97,6 +97,17 @@ test("to is matched after export, before a path, and nowhere else", async () => 
   assert.ok(to.test('export to "./vyx.editor" fn vyxSlice('), "an export to clause");
   assert.ok(!to.test("let to = 1"), "`to` as a binding must stay plain");
   assert.ok(!to.test("export type to = Int64"), "`to` as a declared name must stay plain");
+});
+
+test("await is matched before a call, and nowhere else", async () => {
+  const g = JSON.parse(
+    await readFile(path.join(here, "..", "vyrn.tmLanguage.json"), "utf8"),
+  );
+  const contextual = g.repository["contextual-keywords"].patterns.map((p) => p.match);
+  const marks = new RegExp(contextual.find((m) => m.includes("await")));
+  assert.ok(marks.test("    let user = await getUser(id)?"), "a marked call");
+  assert.ok(!marks.test("let await = 1"), "`await` as a binding must stay plain");
+  assert.ok(!marks.test("    return await(x)"), "a call of a function named `await` must stay plain");
 });
 
 // A byte literal is scoped `constant.character`, which VS Code reads as code, so

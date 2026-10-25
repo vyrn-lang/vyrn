@@ -1,0 +1,9 @@
+/// Waiting for the host: `sleep`, the one host wait.
+///
+/// A function that reaches a wait waits itself, and each call of it is
+/// marked `await` (language.md, Waiting).
+
+/// Waits `ms` milliseconds while the host runs other tasks.
+export fn sleep(ms: Int64) {
+    await hostSleep(ms)
+}

@@ -1,0 +1,13 @@
+compiler/vyrn-cli/tests/check/a_function_that_reaches_a_wait_waits.vyrn
+fn fetched(ms: Int64) -> Result<Int64, String>
+   16           allocates `Result<Int64, String>`
+   18           allocates `Result<Int64, String>`
+fn total(p: Point) -> Result<Int64, String>
+   26           allocates `Result<Int64, String>`
+   28           allocates `Result<Int64, String>`
+summary: allocating rows 4 (0 in loops), growing rows 0 (0 in loops), copies 0 (0 in loops), checks kept 0 (0 in loops), checks proved 0 (0 in loops)
+  pause: trap-free: yes; kernel: no, its effect set is waits
+  ready: trap-free: yes; kernel: no, its effect set is waits
+  fetched: trap-free: yes; kernel: no, its effect set is alloc, waits
+  moved: trap-free: yes; kernel: no, its effect set is waits
+  total: trap-free: yes; kernel: no, its effect set is alloc, waits

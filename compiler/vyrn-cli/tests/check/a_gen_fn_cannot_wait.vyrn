@@ -1,0 +1,6 @@
+import { sleep } from "std/task"
+
+export gen fn table() -> String {
+    await sleep(1)
+    return "export fn one() -> Int64 { return 1 }\n"
+}

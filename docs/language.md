@@ -20,7 +20,7 @@ fn main() -> Int64 {
 - A statement ends at the end of its line. `;` is an optional separator, so `let x = 1; let y = 2` is two statements.
 - `//` starts a comment. `///` is a documentation comment on the declaration that follows; `vyrn doc` and editor hover read it. There are no block comments.
 - Names are lowerCamelCase for values and functions, UpperCamelCase for types and variants.
-- Keywords: `fn let mut if else while for in drop protocol import export impl self return true false type enum where match region break continue`. The words `gen`, `extern`, `test`, `bench`, `contract`, `logging`, `read`, `modify`, `consume`, `lazy` and `as` are keywords only where the grammar expects them.
+- Keywords: `fn let mut if else while for in drop protocol import export impl self return true false type enum where match region break continue`. The words `gen`, `extern`, `test`, `bench`, `contract`, `logging`, `read`, `modify`, `consume`, `await`, `lazy` and `as` are keywords only where the grammar expects them.
 
 Literals:
 
@@ -266,6 +266,33 @@ The emitter erases a call whose result is `Unit` or unused when its callee, afte
 
 - `vyrn why --cost` prints each lemma call that stays with the first rule its callee fails: ``call kept: `down(..)`, because it is recursive``.
 - A recursive lemma runs: no measure shows that its recursion ends.
+
+### Waiting
+
+A function waits when it reaches a host wait: `sleep` from `std/task`, or a call of a function that waits. Nothing declares it: the compiler infers it as it infers every effect, and `await` marks each call that waits.
+
+```vyrn
+import { sleep } from "std/task"
+
+fn pause(ms: Int64) -> Int64 {
+    await sleep(ms)
+    return ms
+}
+
+fn twice(ms: Int64) -> Result<Int64, String> {
+    let first = await pause(ms)
+    return Ok(first + await pause(ms))
+}
+```
+
+- `await` marks the call after it, as `consume` marks a place. `await f(x)?` is `(await f(x))?`. It takes no name from programs: `let await = 1` is a binding, and `await(x)` is a call of it.
+- A waiting call without `await` is refused, and its fix says to write `await` before the call. `await` before a call that does not wait is refused too, so the mark stands exactly where other code may run.
+- A `gen fn`, a module-state initializer and a `where` predicate cannot wait: a build is deterministic, state is set before `main` runs, and a predicate calls nothing.
+- Other tasks may run while one waits, so an `await` may write every global. It ends every borrow of module state and every fact about it, as a call that writes the global does: a borrow of a module-state field held across an `await` and read after it is refused.
+- No future or task handle is a value, so a waiting call finishes where it stands.
+- `vyrn why --cost` shows `waits` in a function's effect set, and the editor's hover of a function that waits says so.
+
+Waiting code does not build yet. `vyrn check` judges it, and a build refuses a program with a waiting function: ``waiting code does not build yet: `pause` waits at line 4``.
 
 ### Function types
 
@@ -554,7 +581,7 @@ import { squareOf } from squares()
 ```
 
 - The loader runs the call with constant arguments, caches the result by content, and links the returned text as an ordinary module. `vyrn emit-gen file.vyrn` prints what each generator wrote.
-- A generator is comptime-pure, and so is everything it calls: no `extern`, module state, `print`, `writeFile`, `readLine`, `args`, `readFileBytes`, clock, entropy or logging sink. A call to one is refused, naming it. So a generator gives the same answer on every machine.
+- A generator is comptime-pure, and so is everything it calls: no `extern`, module state, `print`, `writeFile`, `readLine`, `args`, `readFileBytes`, clock, entropy, logging sink or wait. A call to one is refused, naming it. So a generator gives the same answer on every machine.
 - A generator may read with `readFile`, `listDir` and `listDirKinds`, limited to the paths its caller passed.
 - `moduleInterface(path)` reflects a module's exported functions and types as a `ModuleInterface` record. `contractOf(Name)` reflects a contract. Both work only during generation.
 - A `TypeInfo`'s `shape` is its declaration as an array of `TypeNode`s, node 0 the root: record fields, enum variants and their payloads, arrays, `Option`, `Result`, `Map`, and each `where` as source. A declared name is a `named` leaf, found in `ModuleInterface.types`.
@@ -667,6 +694,8 @@ Each line is a program the compiler refuses, and the reason.
 - A float or heap-owning `Map` key, or a user key type without `impl Hashable`.
 - `==` on records or enums: equality is defined for scalars and `String`.
 - A `gen fn` that reaches an effect: a build must be deterministic.
+- A waiting call without `await`, and `await` before a call that does not wait: the mark shows where other code may run.
+- A module-state initializer that waits: state is set before `main` runs.
 - A module-state initializer that calls a function of its own module or reads later state.
 - Two modules' exports of one name imported flat: a top-level name is program-wide.
 - An enum variant name declared twice.

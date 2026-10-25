@@ -283,6 +283,7 @@ pub const RESERVED: &[&str] = &[
     "unboxStream",
     "pullAt",
     "serveStream",
+    "hostSleep",
     "orderBefore",
     "Int64",
     "Int32",
@@ -3910,6 +3911,7 @@ impl<'a> Checker<'a> {
             }
             Expr::Call {
                 dot,
+                awaits: _,
                 name,
                 args,
                 type_args,
@@ -6316,6 +6318,7 @@ impl<'a> Checker<'a> {
                 match e {
                     Expr::Call {
                         dot: _,
+                        awaits: _,
                         name,
                         args,
                         line,

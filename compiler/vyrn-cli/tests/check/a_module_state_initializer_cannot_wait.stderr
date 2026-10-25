@@ -1,0 +1,1 @@
+a_module_state_initializer_cannot_wait.vyrn:3:0: a module-state initializer cannot wait, and `pause` waits: state is set before `main` runs

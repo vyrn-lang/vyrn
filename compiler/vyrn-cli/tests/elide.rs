@@ -1619,6 +1619,33 @@ fn clearT<T>(x: T) {
     );
 }
 
+/// An `await` may write every global, so it ends a borrow of one and the facts
+/// the borrow proves, as a call that writes the global does.
+#[test]
+fn an_await_ends_the_facts_of_a_borrow_of_a_global() {
+    let w = |between: &str| {
+        format!(
+            "import {{ sleep }} from \"std/task\"
+type Box = {{ xs: Array<Int64> }}
+let mut g: Box = Box {{ xs: [1, 2, 3] }}
+fn inRange(b: Box, i: Int64) -> Bool {{
+    return i >= 0 && i < b.xs.length
+}}
+fn w(i: Int64) -> Int64 {{
+    let mut s = 0
+    if inRange(g, i) {{
+        {between}
+        s = g.xs[i]
+    }}
+    return s
+}}
+"
+        )
+    };
+    assert_eq!(verdicts(&w("s = 1"), "w"), ["proved array-index"]);
+    assert_eq!(verdicts(&w("await sleep(1)"), "w"), ["check array-index"]);
+}
+
 /// A loop header on a global is not hoisted when a call in the loop writes the
 /// global, so the index check stays. `emit-lowered` prints the emitter's body;
 /// a body built again without the effect judgment hoists the header and

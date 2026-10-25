@@ -384,6 +384,14 @@ mod tests {
     }
 
     #[test]
+    fn formats_an_await_as_a_word_before_its_call() {
+        assert_eq!(
+            f("fn f()->Result<Int64,String>{let y=await  g(1)?\nreturn Ok(y+await h.k())}"),
+            "fn f() -> Result<Int64, String> { let y = await g(1)?\n    return Ok(y + await h.k()) }\n"
+        );
+    }
+
+    #[test]
     fn formats_gen_fn_and_generator_imports() {
         assert_eq!(
             f("gen  fn   make(dir:String)->String{return \"x\"}\n"),

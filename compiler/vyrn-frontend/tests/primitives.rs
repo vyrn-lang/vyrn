@@ -72,6 +72,8 @@ const CENSUS: &[(&str, Why, &str)] = &[
     // The one call that reaches the host's accept loop; the host then owes the
     // stream its `close`.
     ("serveStream", Syscall, "the host's socket: hand a producer to the accept loop, which pulls and closes it"),
+    // No body that waits has a lowering yet, so no emitter reaches it.
+    ("hostSleep", Syscall, "the host's timer: wait while the host runs other tasks"),
     ("print", Syscall, "fd_write on stdout"),
     ("logger", Syscall, "the handle for the five level methods below"),
     ("@trace", Syscall, "fd_write on the configured sink, below a folded threshold"),

@@ -292,12 +292,20 @@ The kernel knows no surface syntax. It judges core bodies.
   rules.
 - Effect (`vyrn_lower::effects`). A body's effect set is the join of its own
   atoms and its callees' sets, taken to a fixpoint by `fixpoint::solve`,
-  callees first. The lattice is `vyrn_frontend::effects::Effect`, fourteen
-  effects: `alloc`, the I/O effects, `extern`, `serve`, module state, `trap`
-  and generation-only. The floor asks it what an artifact reaches
+  callees first. The lattice is `vyrn_frontend::effects::Effect`, fifteen
+  effects: `alloc`, the I/O effects, `extern`, `serve`, module state, `trap`,
+  generation-only and `waits`. The floor asks it what an artifact reaches
   (`effects::reaches`), and the kernel asks it which globals a call may
   write (`effects::writes_state`), because such a call ends every borrow of
-  those globals, its own arguments' too.
+  those globals, its own arguments' too. A frame whose own atoms wait may
+  write every global, so each waiting call ends every borrow of module state
+  and every fact about it. The judgment states the waiting rules
+  (`effects::Judged::wait_rules`) over every frame, served ones and each
+  module-state initializer, which no call enters, included: a waiting call
+  is marked `await`, a marked call waits, and an initializer waits nowhere.
+  The builder refuses a mark on a call it states as no call row
+  (`core::Builder::awaits_nothing`), and the emitter refuses a program with a
+  function that waits (`World::waiting`).
 - Typed (`typed.rs`). The `vyrn check` rules over the core rows: a store
   into a place not declared `mut`, a store group that leaves a `where` rule
   unchecked, an exit outside a loop, a `drop` that releases nothing, and the

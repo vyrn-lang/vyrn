@@ -1,4 +1,4 @@
-//! `vyrn why --cost` over eight programs, each pinned in `tests/cost/`.
+//! `vyrn why --cost` over nine programs, each pinned in `tests/cost/`.
 //!
 //! The pin is the command's whole standard output, run from the repository
 //! root so the header names a relative path. `VYRN_PIN=write` rewrites it.
@@ -47,6 +47,15 @@ fn holds_with(name: &str, file: &str, profiles: &Path) {
     if let Some(diff) = first_diff(name, "pinned", &want, "reported", &got) {
         panic!("tests/cost/{name}.txt has moved; rewrite it with VYRN_PIN=write\n{diff}");
     }
+}
+
+/// A function that reaches a wait has `waits` in its effect set.
+#[test]
+fn a_waiting_function_has_waits_in_its_effect_set() {
+    holds(
+        "waits",
+        "compiler/vyrn-cli/tests/check/a_function_that_reaches_a_wait_waits.vyrn",
+    );
 }
 
 /// Nothing in `advance` or `energy` allocates, copies or keeps a check.

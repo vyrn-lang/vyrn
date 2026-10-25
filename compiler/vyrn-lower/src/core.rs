@@ -15,6 +15,7 @@ use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
+use crate::effects::Waiting;
 use vyrn_frontend::ast::{
     ArmBody, At, BinOp, Binder, Block, Capability, Expr, FnId, Function, Id, LambdaBody, MatchArm,
     MethodId, MethodSig, NodeId, Pattern, Program, SourceBody, Speech, Step, Stmt, Type, TypeDecl,
@@ -3524,6 +3525,7 @@ impl<'a> Builder<'a> {
                                 ret: Some(Type::Bool),
                                 solved: Vec::new(),
                                 targets: Vec::new(),
+                                awaits: false,
                             },
                         ));
                         (Val::Name(c), Val::Name(c))
@@ -3751,6 +3753,7 @@ impl<'a> Builder<'a> {
                 ret: Some(Type::Str),
                 solved: Vec::new(),
                 targets: Vec::new(),
+                awaits: false,
             },
         ));
         Ok(Val::Name(t))
@@ -4436,6 +4439,7 @@ impl<'a> Builder<'a> {
                         ret: Some(Type::Int),
                         solved: solved.unwrap_or_default(),
                         targets: Vec::new(),
+                        awaits: false,
                     }
                 }
                 None => return gap("a `for` over a container with no length", line),
@@ -5115,6 +5119,7 @@ impl<'a> Builder<'a> {
             ret: Some(inner),
             solved: Vec::new(),
             targets: Vec::new(),
+            awaits: false,
         })
     }
 
@@ -5759,6 +5764,7 @@ impl<'a> Builder<'a> {
             ret: Some(self.ty_of(e)?.into_owned()),
             solved,
             targets: Vec::new(),
+            awaits: false,
         })
     }
 
@@ -5815,11 +5821,32 @@ impl<'a> Builder<'a> {
     fn rhs(&mut self, e: &'a Expr, out: &mut Vec<St>) -> Result<Rhs, Gap> {
         let outer = std::mem::take(&mut self.frame.after);
         let held = self.frame.held.len();
-        let r = self.rhs_inner(e, out);
+        let mut r = self.rhs_inner(e, out);
+        match &mut r {
+            Ok(Rhs::Call { awaits, .. }) => *awaits = matches!(e, Expr::Call { awaits: true, .. }),
+            Ok(_) => self.awaits_nothing(e),
+            Err(_) => {}
+        }
         self.frame.held.truncate(held);
         let mine = std::mem::replace(&mut self.frame.after, outer);
         self.frame.after_of_rhs = mine;
         r
+    }
+
+    /// Refuses the `await` on `e` where the core states the call as no call
+    /// row, such as an element read or a trap: it waits for nothing. Every
+    /// other mark goes to its call row ([`Builder::rhs`]).
+    fn awaits_nothing(&mut self, e: &Expr) {
+        if let Expr::Call {
+            awaits: true,
+            name,
+            line,
+            ..
+        } = e
+        {
+            let callee = prelude::method_surface(name);
+            (self.body.refused).push((*line, rule!(AwaitNoWait, callee).render()));
+        }
     }
 
     /// Releases the temporaries queued in `after` since `mark`, where no
@@ -5985,6 +6012,7 @@ impl<'a> Builder<'a> {
             }
             Expr::Call {
                 dot: _,
+                awaits: _,
                 name,
                 args,
                 line,
@@ -6004,6 +6032,7 @@ impl<'a> Builder<'a> {
             // are reads, not calls.
             Expr::Call {
                 dot: _,
+                awaits: _,
                 name,
                 args,
                 line,
@@ -6050,6 +6079,7 @@ impl<'a> Builder<'a> {
                         ret: self.produced(e),
                         solved: Vec::new(),
                         targets: Vec::new(),
+                        awaits: false,
                     });
                 }
                 if let Some(l) = self.schema(e) {
@@ -6360,6 +6390,7 @@ impl<'a> Builder<'a> {
                                 ret: Some(rt),
                                 solved: Vec::new(),
                                 targets: Vec::new(),
+                                awaits: false,
                             },
                         ));
                         Some(Val::Name(t))
@@ -6485,6 +6516,7 @@ impl<'a> Builder<'a> {
                 kind: Callee::Fn(is_success),
                 ret: Some(Type::Bool),
                 targets: Vec::new(),
+                awaits: false,
             },
         ));
         let failed = self.temp(Type::Bool, line);
@@ -6512,6 +6544,7 @@ impl<'a> Builder<'a> {
                 kind: Callee::Fn(success_id),
                 ret: Some(self.body.names[res.index()].ty.clone()),
                 targets: Vec::new(),
+                awaits: false,
             },
         ));
         if let Val::Name(n) = sv {
@@ -6577,6 +6610,7 @@ impl<'a> Builder<'a> {
             Expr::Call {
                 name, args, line, ..
             } if name == "@at" && args.len() == 2 => {
+                self.awaits_nothing(e);
                 if let Some(p) = self.inlined("at", &args[0], &args[1..], *line, out)? {
                     return Ok(p);
                 }
@@ -6699,6 +6733,7 @@ impl<'a> Builder<'a> {
                     ret,
                     solved: Vec::new(),
                     targets: Vec::new(),
+                    awaits: false,
                 });
             }
         }
@@ -7040,6 +7075,7 @@ impl<'a> Builder<'a> {
             ret,
             solved,
             targets,
+            awaits: false,
         })
     }
 
@@ -8093,6 +8129,7 @@ fn rule_check(to: String, n: Name, line: usize) -> St {
             kind: Callee::Named,
             solved: Vec::new(),
             targets: Vec::new(),
+            awaits: false,
         },
         line,
         site: NodeId::NONE,
@@ -8233,6 +8270,26 @@ pub fn augment(program: &Program, w: &mut World, judging: bool) {
     // A body that did not build gives the judgment nothing, served or not.
     let late: Vec<(&str, &[Walked])> = states.iter().filter_map(JobState::answered).collect();
     let places = build_places(program, &lowered, own, &mut w.fns);
+    // Each module-state initializer, for the judgments alone: no call enters
+    // one. An initializer the checker did not type has no core; the checker's
+    // refusal is its sentence.
+    let mut inits: Vec<(FnId, &Option<String>, &str, Result<Body, Gap>)> = Vec::new();
+    for (i, g) in (0..).zip(&program.globals) {
+        if node_ty(own, g.init.id()).is_none() {
+            continue;
+        }
+        let source = Source::Expr {
+            facts: &lowered.globals,
+            file: g.module.clone(),
+            binds: None,
+            e: &g.init,
+        };
+        let top = build_from(program, own, &own.proto, &w.fns, &mut names, &source);
+        let at = program.source_id(SourceBody::Global(i));
+        inits.push((at, &g.module, &g.name, top));
+    }
+    let alone: Vec<&Body> = (inits.iter()).filter_map(|e| e.3.as_ref().ok()).collect();
+    let mut waiting: Vec<Refusal> = Vec::new();
     let ((mut state, read, answers, reached, allocating), uses, ran) = crate::effects::judge_built(
         program,
         &lowered,
@@ -8241,6 +8298,7 @@ pub fn augment(program: &Program, w: &mut World, judging: bool) {
         &places,
         &tops,
         &late,
+        &alone,
         |judged, reach, refs, top, served_at| {
             let rows = |at: usize, n: usize| -> Vec<Vec<(String, Vec<String>)>> {
                 (at..at + n).map(|i| judged.state_callees(i)).collect()
@@ -8286,9 +8344,42 @@ pub fn augment(program: &Program, w: &mut World, judging: bool) {
                     (id, Arc::clone(shared))
                 })
                 .collect();
+            // The waiting rules over every frame, built, served or alone. The
+            // memo keeps none of their refusals, because they read the judgment.
+            let mut rules = |i: usize, at: Waiting, file: &Option<String>, body: &str| {
+                for (line, rule) in judged.wait_rules(i, at) {
+                    let d = Diagnostic::refusal(line, 0, "check", rule).in_file(file.clone());
+                    // The instances of a generic function share their lines.
+                    let same = |r: &Refusal| {
+                        let o = &r.diagnostic;
+                        (&o.file, o.line, &o.message) == (&d.file, d.line, &d.message)
+                    };
+                    if !waiting.iter().any(same) {
+                        let body = body.to_string();
+                        waiting.push(Refusal {
+                            diagnostic: d,
+                            body,
+                        });
+                    }
+                }
+            };
+            for (i, b) in refs.iter().enumerate() {
+                rules(i, Waiting::Body, &b.file, &b.name);
+            }
+            let served_jobs = (states.iter().filter(|s| s.answered().is_some())).map(|s| &s.job);
+            for ((job, at), (_, frames)) in served_jobs.zip(served_at).zip(&late) {
+                for i in *at..*at + frames.len() {
+                    rules(i, Waiting::Body, job.module(), job.owner());
+                }
+            }
+            let first = judged.frames.len() - alone.len();
+            for (k, e) in inits.iter().filter(|e| e.3.is_ok()).enumerate() {
+                rules(first + k, Waiting::Initializer, e.1, e.2);
+            }
             (judged.state_table(refs), read, answers, reached, allocating)
         },
     );
+    r.kernel.extend(waiting);
     drop((tops, late));
     w.reached = reached;
     w.allocating = allocating;
@@ -8481,28 +8572,14 @@ pub fn augment(program: &Program, w: &mut World, judging: bool) {
             Err(g) => refuse_gap(g.clone(), &p.func.module, &p.func.name, &mut r),
         }
     }
-    // Each module-state initializer and each `where` predicate, for the
-    // judgment alone. An initializer the checker did not type has no core;
-    // the checker's refusal is its sentence.
-    for (i, g) in (0..).zip(&program.globals) {
-        if node_ty(own, g.init.id()).is_none() {
-            continue;
-        }
-        let source = Source::Expr {
-            facts: &lowered.globals,
-            file: g.module.clone(),
-            binds: None,
-            e: &g.init,
-        };
-        match build_from(program, own, &own.proto, &w.fns, &mut names, &source) {
+    // Each initializer built above, and each `where` predicate, for the judgment alone.
+    for (at, file, name, top) in inits {
+        match top {
             Ok(top) => {
-                let at = program.source_id(SourceBody::Global(i));
                 crate::world::add_callees(&top, &by_name, calls.entry(at).or_default());
-                typed(program, own, &mut r, &top, &g.module, true);
+                typed(program, own, &mut r, &top, file, true);
             }
-            Err(e) => {
-                refuse_gap(e, &g.module, &g.name, &mut r);
-            }
+            Err(e) => refuse_gap(e, file, name, &mut r),
         }
     }
     for (i, d) in (0..).zip(&program.type_decls) {

@@ -152,6 +152,8 @@ pub struct Analysis {
     /// `vyrn why --cost`, read from [`Judged::cost`]. Empty when the checks did not run, found an
     /// error or no [`Judge`] was given.
     pub cost: Vec<FnCost>,
+    /// The functions that wait, read from [`Judged::waits`]; a function's hover says so.
+    pub waits: Vec<String>,
     /// The hash of every module the document links ([`crate::ast::Program::module_hashes`]),
     /// which stamps a saved profile with the source it ran. Empty when the checks did not run.
     pub module_hashes: std::collections::BTreeMap<String, String>,
@@ -306,6 +308,9 @@ pub struct Judged {
     pub memory: HashMap<crate::ast::FnId, Vec<crate::own::MemoryRow>>,
     /// The cost of each function of the root file; empty for a program the kernel did not judge.
     pub cost: Vec<FnCost>,
+    /// The linked name of each function whose effect set holds `waits`; empty for a program
+    /// the kernel did not judge.
+    pub waits: Vec<String>,
 }
 
 /// Like [`analyze_linked`], but runs the pipeline `vyrn check` runs:
@@ -450,6 +455,7 @@ fn analyze_inner(
     // module, typed, so an unannotated `let x = 5` hovers as `let x: Int64`.
     let mut memory = HashMap::new();
     let mut cost = Vec::new();
+    let mut waits = Vec::new();
     let locals = match &mut checked {
         Some(prog) => {
             let cs = crate::prof::phase("check: the analysis's own");
@@ -458,6 +464,7 @@ fn analyze_inner(
                     let judged = (judge.check)(prog, engine, pending);
                     memory = judged.memory;
                     cost = judged.cost;
+                    waits = judged.waits;
                     (judged.diagnostics, judged.binders)
                 }
                 None => {
@@ -668,6 +675,7 @@ fn analyze_inner(
         diagnostics: diags,
         memory,
         cost,
+        waits,
         module_hashes,
         symbols,
         tokens: tok_info,
@@ -769,6 +777,7 @@ fn empty_analysis(diagnostics: Vec<Diagnostic>) -> Analysis {
         symbol_maps: Vec::new(),
         memory: Vec::new(),
         cost: Vec::new(),
+        waits: Vec::new(),
         module_hashes: Default::default(),
         spellings: Default::default(),
     }
@@ -985,7 +994,11 @@ pub fn resolve(analysis: &Analysis, line: usize, col: usize) -> Option<Resolutio
                 &[],
             ),
         )),
-        Some(Named::Symbol(s)) => Some(at(s, hover_of(&s.detail, &[doc_piece(&s.doc)]))),
+        Some(Named::Symbol(s)) => {
+            let waits = (s.kind == SymbolKind::Function && analysis.waits.contains(&s.name))
+                .then_some("waits: each call of it is marked `await`");
+            Some(at(s, hover_of(&s.detail, &[doc_piece(&s.doc), waits])))
+        }
         // A built-in method or function name (`push`, `info`, `len`), then a
         // built-in function by its contract (`print`), then the ambient
         // `Result` and `Option` and their constructors, imported or not.
@@ -3930,6 +3943,19 @@ fn main() -> Int64 {
         assert!(a.diagnostics.is_empty(), "{:?}", a.diagnostics);
         a.memory = mem_notes();
         a
+    }
+
+    #[test]
+    fn a_waiting_function_hovers_as_waiting() {
+        let mut a =
+            analyze("fn pause() {\n}\nfn main() -> Int64 {\n    pause()\n    return 0\n}\n");
+        a.waits = vec!["pause".to_string()];
+        let r = resolve(&a, 4, 5).expect("pause resolves");
+        assert!(
+            r.hover.contains("waits: each call of it is marked `await`"),
+            "{}",
+            r.hover
+        );
     }
 
     #[test]

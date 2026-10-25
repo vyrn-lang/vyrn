@@ -116,6 +116,7 @@ The compiler injects these declarations into every program, so a file names them
 | `std/args` | `cli()`, `cliOf(list)`, `flag`, `opt`, `positionals`, `rest`: four probes over the argument list. No spec, no help text. |
 | `std/cli` | `cli("./module")`, a generator: every exported record type becomes `parse<Name>(argv) -> Validation<Name>` and `help<Name>()`. Field types decide the flags, and each value is validated by its own type. |
 | `std/bench` | The harness `vyrn bench` links; no program imports it. |
+| `std/task` | `sleep(ms)` waits `ms` milliseconds while the host runs other tasks. A function that calls it waits, and each call is marked `await` (language.md, Waiting). |
 
 ### Generators for the web and for services
 

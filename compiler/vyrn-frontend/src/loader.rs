@@ -319,6 +319,7 @@ fn panic_stamp(file: &str) -> impl FnMut(&mut Expr) + '_ {
     move |e: &mut Expr| {
         if let Expr::Call {
             dot: _,
+            awaits: _,
             name,
             args,
             line,
@@ -3559,6 +3560,7 @@ impl BodyVisitMut for NsResolver<'_> {
             // sugar with the namespace as the first argument, which goes.
             Expr::Call {
                 dot,
+                awaits: _,
                 name,
                 args,
                 type_args,
@@ -4662,6 +4664,7 @@ impl BodyVisit<'_> for RefNames<'_> {
             // namespaces, record the dotted spelling, not a bare `f`.
             Expr::Call {
                 dot: _,
+                awaits: _,
                 name,
                 args,
                 line,

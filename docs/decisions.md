@@ -13,7 +13,9 @@ pull request.
 - No class inheritance. Behaviour is shared through protocols and composition, because base classes are fragile and diamonds are ambiguous.
 - No attributes. Where a rule over a declaration is not enough, name a type.
 - No new keyword for a library domain (RPC, config files, i18n). A generator import is the mechanism; an `rpc` keyword was built and removed.
-- No `async`/`await`, coroutines or blocking run loop. The host owns the event loop and calls exported handlers; wasm cannot suspend, and determinism is the product. Reopen when wasm stack switching ships broadly or handlers need an outbound HTTP client.
+- A function waits when its effect set holds `waits`; the effect judgment infers it, and `await` marks each waiting call. Nothing is declared `async`, and `await` is a contextual word before a call, not a reserved one.
+- No future, promise or task handle is a value, and no task outlives the call that started it; a task the host starts by calling an export lives until it returns. So a frame never moves, and no `Pin` exists.
+- An `await` may write every global: it ends every borrow of module state and every fact about it.
 - No unwinding. A trap ends the process and runs no release path.
 
 ### Types

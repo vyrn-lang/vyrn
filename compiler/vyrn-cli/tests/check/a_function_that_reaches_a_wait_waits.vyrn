@@ -1,0 +1,29 @@
+import { sleep } from "std/task"
+
+type Point = { x: Int64 }
+
+export fn pause(ms: Int64) -> Int64 {
+    await sleep(ms)
+    return ms
+}
+
+fn ready() -> Bool {
+    return await pause(1) > 0
+}
+
+fn fetched(ms: Int64) -> Result<Int64, String> {
+    if await ready() {
+        return Ok(await pause(ms))
+    }
+    return Err("not ready")
+}
+
+fn moved(p: Point) -> Int64 {
+    return await pause(p.x)
+}
+
+export fn total(p: Point) -> Result<Int64, String> {
+    let a = await fetched(2)?
+    await pause(3)
+    return Ok(a + await p.moved())
+}

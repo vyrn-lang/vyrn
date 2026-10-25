@@ -530,6 +530,20 @@ impl World {
         self.state_uses.get(&f)
     }
 
+    /// Every function of `program` whose effect set holds `waits`, in source
+    /// order, with the line of its first `await`, or its own line where it
+    /// marks none and waits through a lambda it builds.
+    pub fn waiting<'a>(
+        &'a self,
+        program: &'a Program,
+    ) -> impl Iterator<Item = (&'a Function, usize)> {
+        (program.functions.iter()).filter_map(|f| {
+            let u = self.state_use(self.fn_id(&f.name)?)?;
+            let waits = u.effects.has(vyrn_frontend::effects::Effect::Waits);
+            waits.then(|| (f, u.awaits_at.unwrap_or(f.line)))
+        })
+    }
+
     /// The frames from `f` to one whose own statements read or store module
     /// state, on a shortest call path by the effect judgment, with the first
     /// global that frame names. `None` when a call into `f` reaches no module

@@ -398,6 +398,9 @@ pub enum Rhs {
         /// is bound to, in the callee's order. An argument no [`Target`] names
         /// stays in `args`.
         targets: Vec<Target>,
+        /// The source marked the call `await`. The effect judgment refuses a
+        /// mark on a call that does not wait and a waiting call without one.
+        awaits: bool,
     },
     /// Arithmetic, comparison, interpolation, conversion: reads its operands.
     /// The last field is the producer type: the operator's own result.
