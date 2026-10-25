@@ -2814,7 +2814,6 @@ fn lower_body(
         at: b.local(ValType::I32),
         cancelled: b.local(ValType::I32),
     });
-    let first_call = params.len() as u32 - 1;
     let mut cx_fn = Fn_ {
         ret: sig.ret.clone(),
         // As declared, not resolved: a function returning `Age` validates at its `return`,
@@ -2866,7 +2865,8 @@ fn lower_body(
     let mut copy_out: Vec<(u32, Place, Repr, Type)> = Vec::new();
     // A waiting frame takes its parameters in on its first call only; a later one restores them.
     if resume.is_some() {
-        b.ins(&Instruction::LocalGet(first_call));
+        let frame = params.len() as u32 - 1;
+        b.ins(&Instruction::LocalGet(frame));
         b.ins(&Instruction::I32Eqz);
         b.ins(&Instruction::If(BlockType::Empty));
     }
