@@ -144,6 +144,11 @@ impl Waits {
         id
     }
 
+    /// `vyrn_wait.cancel(id)`: no wait waits for operation `id`, so its timer never fires.
+    fn cancel(&mut self, id: i64) {
+        self.due.retain(|d| d.1 != id);
+    }
+
     /// The next completion to deliver: the next one to replay, or else the earliest pending
     /// timer, ties by id, once its deadline has come. The virtual clock moves to it, and the
     /// wall clock is waited out.
@@ -363,6 +368,11 @@ fn open(
             vyrn_codegen::direct::WAIT_IMPORTS,
             "sleep",
             |mut c: Caller<'_, Host>, ms: i64| -> i64 { c.data_mut().x.waits.sleep(ms) },
+        )?;
+        linker.func_wrap(
+            vyrn_codegen::direct::WAIT_IMPORTS,
+            "cancel",
+            |mut c: Caller<'_, Host>, id: i64| c.data_mut().x.waits.cancel(id),
         )?;
         // After `sweep`, a `vyrn` import is an `extern fn` the program reaches.
         // Only a browser page supplies that namespace. A terminal answers each

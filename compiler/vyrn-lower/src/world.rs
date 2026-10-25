@@ -344,6 +344,16 @@ pub(crate) fn add_callees(top: &Body, fns: &HashMap<&str, (FnId, &Function)>, ou
             {
                 add(*g);
             }
+            for b in s
+                .awaits()
+                .iter()
+                .flat_map(|a| &a.fork)
+                .flat_map(|f| &f.branches)
+            {
+                if let Callee::Fn(g) = b.kind {
+                    add(g);
+                }
+            }
         }
         let runs = (b.names.iter()).flat_map(|i| &i.runs);
         runs.filter_map(|r| fns.get(r.as_str()))

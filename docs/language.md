@@ -296,6 +296,30 @@ fn twice(ms: Int64) -> Result<Int64, String> {
 Waiting code runs the same on every engine. A `main` that waits is the first task, and each call of an `export extern fn` that waits starts one more. The host delivers each completion through the module's `__vyrn_wake`, and the module resumes the task that waited on it, in the order the completions arrive. So the same deliveries print the same bytes everywhere.
 
 - A cancelled wait ends its task where it waited. Each function on the task's path releases what a `return` there would release, its callers do the same, and a cancelled `main` exits 1.
+
+#### Running calls at once
+
+`both` and `race` from `std/task` run two waiting calls at once. Their arguments are the calls, not their values: `both` starts each and returns `Both { first, second }` once both finished; `race` returns `First(a)` or `Second(b)` for the first to finish.
+
+```vyrn
+import { both, race, sleep, Race } from "std/task"
+
+fn page(id: Int64) -> String {
+    let r = await both(getPosts(id), getLikes(id))
+    match await race(render(r.first, r.second), sleep(2000)) {
+        First(html) => return html,
+        Second(_) => return "timed out",
+    }
+}
+```
+
+- The two calls are one call's arguments. A `modify` or `consume` argument of one branch may not name a place the other names, by path as in one call, so `both(fill(p.a), fill(p.b))` is accepted and `both(fill(p.a), fill(p.a))` is refused. A `read` argument is shared.
+- The arguments of both branches are evaluated first, in order. Then the first branch starts and runs to its first wait, then the second. The host's deliveries decide which branch moves next, so the same deliveries print the same bytes.
+- `race` takes the first branch, in argument order, that has finished once both started; after that, the first to finish. It cancels the other where it waits, and that branch releases what it holds, as a cancelled wait does. A loser that finished is released.
+- If the host cancels a wait inside a branch, `both` or `race` cancels the other branch and is cancelled itself.
+- A branch is a call of a function. Anything else is refused: ``each branch of `both` is a call of a function, which `both` starts and waits for``.
+- A branch that does not wait finishes when it starts. `await` on a `both` or `race` whose branches do not wait is refused, as it is on any call that does not wait; without `await`, `both(f(), g())` calls `f`, then `g`, and `race` returns `First` of the first.
+- No task outlives the call that started it: `both` and `race` return only after each branch finished or was cancelled.
 - A waiting lambda, an `await` inside a `region` or through a function value, and a waiting export that returns a value do not build yet: ``waiting code does not build yet: `main` waits at line 10``.
 
 ### Function types

@@ -1,0 +1,10 @@
+import { both } from "std/task"
+
+fn two(n: Int64) -> Int64 {
+    return n * 2
+}
+
+fn main() -> Int64 {
+    let r = await both(two(1), two(2))
+    return r.first
+}

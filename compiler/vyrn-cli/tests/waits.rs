@@ -40,33 +40,38 @@ fn quiet(name: &str, replay: Option<Vec<Wake>>) -> Run {
 
 #[test]
 fn a_waiting_program_resumes_at_each_await() {
-    let bytes = audited("waiting.vyrn");
-    let out = run(&bytes, quiet("waiting.vyrn", None)).expect("the module runs");
-    let want = std::fs::read_to_string(examples_dir().join("expected/waiting.stdout")).unwrap();
-    assert_eq!(norm(&out.stdout), want);
-    assert_eq!((out.code, norm(&out.stderr)), (0, String::new()));
-    assert_eq!(out.wakes.len(), 9);
+    for (name, _why) in WAITING {
+        let bytes = audited(name);
+        let out = run(&bytes, quiet(name, None)).expect("the module runs");
+        let stem = name.trim_end_matches(".vyrn");
+        let want = std::fs::read_to_string(examples_dir().join(format!("expected/{stem}.stdout")));
+        assert_eq!(norm(&out.stdout), want.unwrap(), "{name}");
+        assert_eq!((out.code, norm(&out.stderr)), (0, String::new()), "{name}");
+    }
 }
 
 /// Each cancellation ends `main` at that wait with exit 1, after the output
-/// before it, and the free audit finds nothing left: every frame on the path and
-/// every value it held took the cancellation edge.
+/// before it, and the free audit finds nothing left: every frame on the path,
+/// every branch a fork cancelled with it, and every value they held took the
+/// cancellation edge.
 #[test]
 fn a_cancelled_wait_releases_every_frame_on_its_path() {
-    let bytes = audited("waiting.vyrn");
-    let full = run(&bytes, quiet("waiting.vyrn", None)).expect("the module runs");
-    let all = norm(&full.stdout);
-    for k in 0..full.wakes.len() {
-        let mut wakes = full.wakes[..=k].to_vec();
-        wakes[k].status = 1;
-        let out = run(&bytes, quiet("waiting.vyrn", Some(wakes))).expect("the module runs");
-        let printed = norm(&out.stdout);
-        assert!(all.starts_with(&printed), "wake {k}: {printed}");
-        assert_eq!(
-            (out.code, norm(&out.stderr)),
-            (1, String::new()),
-            "wake {k}"
-        );
+    for (name, _why) in WAITING {
+        let bytes = audited(name);
+        let full = run(&bytes, quiet(name, None)).expect("the module runs");
+        let all = norm(&full.stdout);
+        for k in 0..full.wakes.len() {
+            let mut wakes = full.wakes[..=k].to_vec();
+            wakes[k].status = 1;
+            let out = run(&bytes, quiet(name, Some(wakes))).expect("the module runs");
+            let printed = norm(&out.stdout);
+            assert!(all.starts_with(&printed), "{name} wake {k}: {printed}");
+            assert_eq!(
+                (out.code, norm(&out.stderr)),
+                (1, String::new()),
+                "{name} wake {k}"
+            );
+        }
     }
 }
 

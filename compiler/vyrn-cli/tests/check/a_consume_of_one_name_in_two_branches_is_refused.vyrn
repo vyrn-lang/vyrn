@@ -1,0 +1,12 @@
+import { both, sleep } from "std/task"
+
+fn eat(s: consume String, ms: Int64) -> Int64 {
+    await sleep(ms)
+    return s.byteLength + ms
+}
+
+fn main() -> Int64 {
+    let s = "abc" + "d"
+    let r = await both(eat(s, 2), eat(s, 1))
+    return r.first
+}

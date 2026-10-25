@@ -36,9 +36,9 @@ use crate::world::{Fns, Stated};
 use crate::{Instance, NodeTypes, OutsideBody, World};
 use vyrn_frontend::core::check::{Ensures, Promise, Raises, Verdict};
 use vyrn_frontend::core::{
-    count_reads, names_in, rows, Arg, Arm, Body, BorrowKind, Callee, Cancel, Cand, Copied, Ctor,
-    Facts, Lit, Name, NameInfo, NotOwned, Old, Op, Opaque, Payload, Place, Rhs, Site, St, Target,
-    Test, Use, Val, Walk,
+    count_reads, names_in, rows, Arg, Arm, Await, Body, BorrowKind, Branch, Callee, Cand, Copied,
+    Ctor, Facts, Fork, Form, Lit, Name, NameInfo, NotOwned, Old, Op, Opaque, Payload, Place, Rhs,
+    Site, St, Target, Test, Use, Val, Walk,
 };
 use vyrn_frontend::rule;
 use vyrn_frontend::rules::Rule;
@@ -108,6 +108,16 @@ pub struct Gap {
     /// about a keyword lives here because the kernel has none
     /// (`consume make()` and `make()` are one value to it).
     pub rule: Option<Box<Diagnostic>>,
+}
+
+/// The fork a `std/task` callee is: `both` or `race`, which the compiler
+/// knows by their declarations' names, as it knows `prove`.
+pub(crate) fn fork_form(callee: &str) -> Option<Form> {
+    match callee.strip_prefix(vyrn_frontend::loader::TASK_PREFIX)? {
+        "both" => Some(Form::Both),
+        "race" => Some(Form::Race),
+        _ => None,
+    }
 }
 
 /// Whether `rhs` is a validated type's constructor over a literal, which
@@ -464,7 +474,12 @@ fn gaps_rhs(body: &Body, r: &Rhs, out: &mut Vec<String>) {
             // either host, so the host is not read.
             if !matches!(
                 kind,
-                Callee::Fn(_) | Callee::Bound | Callee::Ctor | Callee::Named | Callee::Proven
+                Callee::Fn(_)
+                    | Callee::Bound
+                    | Callee::Ctor
+                    | Callee::Named
+                    | Callee::Proven
+                    | Callee::Fork
             ) && builtin_row(callee, false).is_none()
                 && !kind.value().is_some_and(|n| !body.params.contains(&n))
             {
@@ -5821,11 +5836,25 @@ impl<'a> Builder<'a> {
     fn rhs(&mut self, e: &'a Expr, out: &mut Vec<St>) -> Result<Rhs, Gap> {
         let outer = std::mem::take(&mut self.frame.after);
         let held = self.frame.held.len();
-        let mut r = self.rhs_inner(e, out);
+        let fork = match e {
+            Expr::Call {
+                awaits: true,
+                name,
+                args,
+                line,
+                ..
+            } => fork_form(name).map(|form| (form, name, args, *line)),
+            _ => None,
+        };
+        let mut r = match fork {
+            Some((form, name, args, line)) => self.fork(e, form, name, args, line, out),
+            None => self.rhs_inner(e, out),
+        };
         match &mut r {
             Ok(Rhs::Call { awaits, .. }) if matches!(e, Expr::Call { awaits: true, .. }) => {
+                let fork = awaits.take().and_then(|a| a.fork);
                 match self.leave_cancel(e.id(), e.line(), held) {
-                    Ok(c) => *awaits = Some(Box::new(c)),
+                    Ok(c) => *awaits = Some(Box::new(Await { fork, ..c })),
                     Err(g) => r = Err(g),
                 }
             }
@@ -5839,12 +5868,79 @@ impl<'a> Builder<'a> {
         r
     }
 
+    /// An awaited `both` or `race` at `e`: each argument is a branch call,
+    /// built as a call on its own, and the row is one call over every
+    /// branch's arguments ([`vyrn_frontend::core::Fork`]), so the kernel
+    /// judges them as one call's. [`Builder::rhs`] adds the edge.
+    fn fork(
+        &mut self,
+        e: &'a Expr,
+        form: Form,
+        name: &str,
+        branches: &'a [Expr],
+        line: usize,
+        out: &mut Vec<St>,
+    ) -> Result<Rhs, Gap> {
+        let spelled = name.trim_start_matches(vyrn_frontend::loader::TASK_PREFIX);
+        let mut args = Vec::new();
+        let mut fork = Fork {
+            form,
+            branches: Vec::with_capacity(branches.len()),
+        };
+        for b in branches {
+            let call = match b {
+                Expr::Call { awaits: false, .. } => self.rhs_inner(b, out)?,
+                _ => return refuse(rule!(ForkBranch, form = spelled), Vec::new(), line),
+            };
+            let Rhs::Call {
+                callee,
+                args: these,
+                write_back: false,
+                kind: kind @ (Callee::Fn(_) | Callee::Bound | Callee::Value(_)),
+                ret,
+                solved,
+                targets,
+                awaits: None,
+            } = call
+            else {
+                return refuse(rule!(ForkBranch, form = spelled), Vec::new(), line);
+            };
+            let ty = self.ty_of(b)?.into_owned();
+            let result = self.temp(ty, line);
+            fork.branches.push(Branch {
+                callee,
+                kind,
+                args: these.len(),
+                ret,
+                solved,
+                targets,
+                result,
+            });
+            args.extend(these);
+        }
+        Ok(Rhs::Call {
+            callee: name.to_string(),
+            args,
+            write_back: false,
+            kind: Callee::Fork,
+            ret: self.produced(e),
+            solved: self.solved.get(&e.id()).cloned().unwrap_or_default(),
+            targets: Vec::new(),
+            awaits: Some(Box::new(Await {
+                rows: Vec::new(),
+                site: e.id(),
+                line,
+                fork: Some(fork),
+            })),
+        })
+    }
+
     /// The cancellation edge of the awaited call at `site`, built while its
     /// row is: the rows a `?`'s failure exit runs ([`Builder::leave_try`]),
     /// over the temporaries held before the call (the first `held`), then the
     /// call's own read temporaries, which its binding would release, then the
     /// plan's releases.
-    fn leave_cancel(&mut self, site: NodeId, line: usize, held: usize) -> Result<Cancel, Gap> {
+    fn leave_cancel(&mut self, site: NodeId, line: usize, held: usize) -> Result<Await, Gap> {
         let mut rows = Vec::new();
         self.leave_loops(&mut rows);
         for &t in &self.frame.held[..held] {
@@ -5856,7 +5952,12 @@ impl<'a> Builder<'a> {
             rows.push(St::Drop(t, Site::None, 0, None));
         }
         self.drops_at(Exit::Cancel, site, &mut rows)?;
-        Ok(Cancel { rows, site, line })
+        Ok(Await {
+            rows,
+            site,
+            line,
+            fork: None,
+        })
     }
 
     /// Refuses the `await` on `e` where the core states the call as no call
@@ -7527,46 +7628,79 @@ fn bind_targets(ss: &mut [St], bound: &[(Name, Target)], caps: &[(Name, Vec<Name
             args,
             kind,
             targets,
+            awaits,
             ..
         } = rhs
         else {
             return;
         };
-        if let Some(v) = kind.value() {
-            match bound.iter().find(|(n, _)| *n == v) {
-                Some((_, Target::Fn(f))) => {
-                    *kind = Callee::Bound;
-                    *callee = f.clone();
-                }
-                Some((_, Target::Lambda(key, ..))) => {
-                    *kind = Callee::Bound;
-                    *callee = key.clone();
-                    let names = caps.iter().find(|(n, _)| *n == v).map(|(_, ns)| ns);
-                    let lead = names.into_iter().flatten();
-                    let lead = lead.map(|c| (Arg::Val(Val::Name(*c)), Capability::Read));
-                    args.splice(0..0, lead.collect::<Vec<_>>());
-                }
-                Some((_, Target::Value(source))) => *callee = source.clone(),
-                _ => {}
+        // A fork's branches are calls over slices of the row's arguments, so
+        // each binds its own and the slice keeps its length.
+        if let Some(fork) = awaits.as_mut().and_then(|a| a.fork.as_mut()) {
+            let mut at = 0;
+            for b in &mut fork.branches {
+                let mut these: Vec<(Arg, Capability)> = args.drain(at..at + b.args).collect();
+                bind_call(
+                    &mut b.callee,
+                    &mut b.kind,
+                    &mut b.targets,
+                    &mut these,
+                    bound,
+                    caps,
+                );
+                b.args = these.len();
+                args.splice(at..at, these);
+                at += b.args;
             }
+            return;
         }
-        for t in targets.iter_mut() {
-            let Target::Param(p) = t else { continue };
-            let p = *p;
-            let Some((_, to)) = bound.iter().find(|(n, _)| *n == p) else {
-                continue;
-            };
-            *t = to.clone();
-            // A stored value forwards itself, the parameter that
-            // stays under its name.
-            if matches!(to, Target::Value(_)) {
-                args.push((Arg::Val(Val::Name(p)), Capability::Read));
-            }
-            let forwarded = caps.iter().find(|(n, _)| *n == p).map(|(_, ns)| ns);
-            let forwarded = forwarded.into_iter().flatten();
-            args.extend(forwarded.map(|c| (Arg::Val(Val::Name(*c)), Capability::Read)));
-        }
+        bind_call(callee, kind, targets, args, bound, caps);
     });
+}
+
+/// [`bind_targets`] for one call: its callee and its targets, over its arguments.
+fn bind_call(
+    callee: &mut String,
+    kind: &mut Callee,
+    targets: &mut [Target],
+    args: &mut Vec<(Arg, Capability)>,
+    bound: &[(Name, Target)],
+    caps: &[(Name, Vec<Name>)],
+) {
+    if let Some(v) = kind.value() {
+        match bound.iter().find(|(n, _)| *n == v) {
+            Some((_, Target::Fn(f))) => {
+                *kind = Callee::Bound;
+                *callee = f.clone();
+            }
+            Some((_, Target::Lambda(key, ..))) => {
+                *kind = Callee::Bound;
+                *callee = key.clone();
+                let names = caps.iter().find(|(n, _)| *n == v).map(|(_, ns)| ns);
+                let lead = names.into_iter().flatten();
+                let lead = lead.map(|c| (Arg::Val(Val::Name(*c)), Capability::Read));
+                args.splice(0..0, lead.collect::<Vec<_>>());
+            }
+            Some((_, Target::Value(source))) => *callee = source.clone(),
+            _ => {}
+        }
+    }
+    for t in targets.iter_mut() {
+        let Target::Param(p) = t else { continue };
+        let p = *p;
+        let Some((_, to)) = bound.iter().find(|(n, _)| *n == p) else {
+            continue;
+        };
+        *t = to.clone();
+        // A stored value forwards itself, the parameter that
+        // stays under its name.
+        if matches!(to, Target::Value(_)) {
+            args.push((Arg::Val(Val::Name(p)), Capability::Read));
+        }
+        let forwarded = caps.iter().find(|(n, _)| *n == p).map(|(_, ns)| ns);
+        let forwarded = forwarded.into_iter().flatten();
+        args.extend(forwarded.map(|c| (Arg::Val(Val::Name(*c)), Capability::Read)));
+    }
 }
 
 /// The declared `release` bodies the row `s` runs where it stands: a drop or

@@ -149,6 +149,17 @@ u64 w2c_vyrn__wait_sleep(struct w2c_vyrn__wait* w, u64 ms) {
     return (u64)g_due[g_ndue++].id;
 }
 
+/* No wait waits for operation `id`, so its timer never fires. */
+void w2c_vyrn__wait_cancel(struct w2c_vyrn__wait* w, u64 id) {
+    (void)w;
+    for (uint32_t i = 0; i < g_ndue; i++) {
+        if (g_due[i].id == (int64_t)id) {
+            g_due[i] = g_due[--g_ndue];
+            return;
+        }
+    }
+}
+
 /* The earliest pending timer, ties by id, once its deadline has come, or 0
    when none is pending. */
 static int64_t fire(void) {

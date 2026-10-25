@@ -8,6 +8,34 @@ export fn sleep(ms: Int64) {
     await hostSleep(ms)
 }
 
+/// The results of the two branches of a `both`, in argument order.
+export type Both<A, B> = { first: A, second: B }
+
+/// The branch of a `race` that finished first, and its result.
+export type Race<A, B> = enum { First(A), Second(B) }
+
+/// Runs two calls at once and waits for both: `await both(f(a), g(b))`.
+///
+/// Each argument is a call, and the two are one call's arguments, so a
+/// `modify` or `consume` argument of one may not be named by the other.
+/// `both` starts the first, runs it to its first wait, then starts the
+/// second. If one is cancelled, `both` cancels the other and is cancelled.
+/// Without `await`, no branch waits, and the calls run in order.
+export fn both<A, B>(first: consume A, second: consume B) -> Both<A, B> {
+    return Both { first: first, second: second }
+}
+
+/// Runs two calls at once and returns the first to finish, cancelling the
+/// other where it waits: `await race(f(a), sleep(500))`.
+///
+/// `race` starts both as `both` does. The first branch, in argument order,
+/// that has finished when the starts end wins; after that, the first to
+/// finish. A finished loser's result is released. Without `await`, no branch
+/// waits, and the first wins.
+export fn race<A, B>(first: consume A, second: consume B) -> Race<A, B> {
+    return First(first)
+}
+
 // The run queue. The host owns the event loop and delivers each completion
 // through `wake`, which the emitter exports as `__vyrn_wake`; the module runs
 // the woken tasks in wake order, so the same deliveries print the same bytes
@@ -39,6 +67,10 @@ let mut readyAt: Int64 = 0
 let mut running: Int64 = 0
 
 let mut started: Int64 = 0
+
+/// How many cancellations run: while one does, every wait a poll reaches is
+/// cancelled.
+let mut cancelling: Int64 = 0
 
 /// The position of task `id` in `tasks`, or the length when it has ended.
 fn taskAt(id: Int64) -> Int64 {
@@ -104,17 +136,33 @@ fn waitOn(id: Int64) {
 }
 
 /// The wait on `id`: 2 until its wake came, then the status the wake
-/// delivered, and the wait ends.
+/// delivered, and the wait ends. While a cancellation runs, a wait that has
+/// not come ends cancelled, 1, and the host drops its operation.
 fn delivery(id: Int64) -> Int32 {
     let i = waitAt(id)
     if i == waits.length {
         return 2
     }
-    let st = waits[i].status
+    let mut st = waits[i].status
+    if st == 2 && cancelling > 0 {
+        hostCancel(id)
+        st = 1
+    }
     if st != 2 {
         waits.swapRemove(i)
     }
     return st
+}
+
+/// A `both` or `race` cancels a branch by polling it between `cancelBegin`
+/// and `cancelEnd`: every wait the poll reaches is cancelled, so each frame
+/// on the branch takes its cancellation edge.
+fn cancelBegin() {
+    cancelling = cancelling + 1
+}
+
+fn cancelEnd() {
+    cancelling = cancelling - 1
 }
 
 /// `__vyrn_wake`: the host's operation `id` ended with `status`, 0 completed

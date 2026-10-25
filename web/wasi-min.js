@@ -17,8 +17,9 @@
 // is the `extern` story. Anything else is out of scope on purpose — if the
 // import surface ever grows, the instantiate error names the missing function.
 //
-// A module that waits imports `vyrn_wait.sleep` and exports `__vyrn_wake`:
-// `runVyrn` settles every timer before it resolves, as `vyrn run` does.
+// A module that waits imports `vyrn_wait.sleep` and `vyrn_wait.cancel` and
+// exports `__vyrn_wake`: `runVyrn` settles every timer before it resolves, as
+// `vyrn run` does.
 //
 // Usage:
 //   const { exitCode, stdout, stdoutRaw, stderr, exports } = await runVyrn(bytes, {
@@ -431,6 +432,12 @@ export async function runVyrn(wasmBytes, hooks = {}) {
       const at = nowMs() + wait;
       due.set(id, { at, handle: setTimeout(() => deliverThrough(at, id), wait) });
       return id;
+    },
+    // No wait waits for operation `id`, so its timer never fires.
+    cancel: (id) => {
+      const t = due.get(id);
+      if (t) clearTimeout(t.handle);
+      due.delete(id);
     },
   };
   const instance = await WebAssembly.instantiate(module, {
