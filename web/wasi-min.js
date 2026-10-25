@@ -412,20 +412,27 @@ export async function runVyrn(wasmBytes, hooks = {}) {
   }
 
   // The host's waits: each pending timer's deadline, in milliseconds since the
-  // start, and its id, as `Waits` in `vyrn-cli/src/wasmrun.rs` keeps them on
-  // the wall clock.
+  // start, and its `setTimeout` handle, by id, as `Waits` in
+  // `vyrn-cli/src/wasmrun.rs` keeps them on the wall clock.
   const started = performance.now();
   const nowMs = () => Math.floor(performance.now() - started);
-  const due = [];
+  const due = new Map();
   let nextWait = 1n;
+  // Each timer has its own `setTimeout`. When one fires, every pending timer
+  // up to it, earliest first and ties by id, goes to `__vyrn_wake`, as
+  // `settle_waits` in `wasmrun.rs` delivers them; a later timer waits for its
+  // own. A timer may fire a millisecond before `nowMs` reaches its deadline,
+  // so the fired timer bounds the delivery, not the clock.
   const vyrnWait = {
     // A timer due `ms` from now; a negative `ms` is due now.
     sleep: (ms) => {
-      due.push({ at: nowMs() + Math.max(0, Number(ms)), id: nextWait });
-      return nextWait++;
+      const id = nextWait++;
+      const wait = Math.max(0, Number(ms));
+      const at = nowMs() + wait;
+      due.set(id, { at, handle: setTimeout(() => deliverThrough(at, id), wait) });
+      return id;
     },
   };
-
   const instance = await WebAssembly.instantiate(module, {
     wasi_snapshot_preview1: wasi,
     vyrn,
@@ -604,26 +611,40 @@ export async function runVyrn(wasmBytes, hooks = {}) {
       overflow();
     }
   };
-  // A `main` that waits returns from `_start` and ends in a wake: deliver each
-  // timer to `__vyrn_wake` as it comes due, earliest first and ties by id, as
-  // `settle_waits` in `wasmrun.rs` does. One loop runs at a time, and every
-  // caller waits until the timers run out.
-  // A timer set while the loop waits fires no sooner than the one it waits for.
-  let settling = null;
-  const drain = async () => {
-    const wake = instance.exports.__vyrn_wake;
-    while (wake && due.length) {
-      let k = 0;
-      for (let i = 1; i < due.length; i++) {
-        if (due[i].at < due[k].at || (due[i].at === due[k].at && due[i].id < due[k].id)) k = i;
-      }
-      const [t] = due.splice(k, 1);
-      const left = t.at - nowMs();
-      if (left > 0) await new Promise((r) => setTimeout(r, left));
-      guarded(() => wake(t.id, 0, 0n));
-    }
+  // A `main` that waits returns from `_start` and ends in a wake. `settle`
+  // resolves once no timer is pending, and rejects with a trap or the exit a
+  // wake ended in; every caller waits on the same timers.
+  let settling = [];
+  const settled = (err) => {
+    const ws = settling;
+    settling = [];
+    for (const w of ws) (err ? w.reject(err) : w.resolve());
   };
-  const settle = () => (settling ??= drain().finally(() => (settling = null)));
+  const deliverThrough = (at, id) => {
+    const wake = instance.exports.__vyrn_wake;
+    try {
+      for (;;) {
+        let next = null;
+        for (const [k, t] of due) {
+          if (next === null || t.at < next[1].at || (t.at === next[1].at && k < next[0])) next = [k, t];
+        }
+        if (next === null || next[1].at > at || (next[1].at === at && next[0] > id)) break;
+        clearTimeout(next[1].handle);
+        due.delete(next[0]);
+        guarded(() => wake(next[0], 0, 0n));
+      }
+    } catch (e) {
+      for (const t of due.values()) clearTimeout(t.handle);
+      due.clear();
+      settled(e);
+      return;
+    }
+    if (due.size === 0) settled(null);
+  };
+  const settle = () =>
+    due.size === 0 || !instance.exports.__vyrn_wake
+      ? Promise.resolve()
+      : new Promise((resolve, reject) => settling.push({ resolve, reject }));
   let exitCode = 0;
   try {
     guarded(() => instance.exports._start());

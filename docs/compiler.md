@@ -445,7 +445,8 @@ The module's shape:
   the caller down the row's cancellation edge, then out with status 1
   (`Fn_::await_close`).
 - The run queue: `std/task`'s module state holds a task per call that started
-  one, and `wake` runs the woken tasks in wake order. A task's root is `main` (0) or a waiting export (from 1),
+  one and a wait per host operation a task waits on, found by the operation's
+  id, and `wake` runs the woken tasks in wake order. A task's root is `main` (0) or a waiting export (from 1),
   whose export is a step that begins the task. `__vyrn_wake` is `std/task`'s
   `wake`, whose `hostResume` call is the emitter's `$resumeRoot` dispatcher
   over the roots. `hostSleep` is the import `vyrn_wait.sleep`.

@@ -16,13 +16,19 @@ export fn sleep(ms: Int64) {
 
 /// A task the host started by calling `main` or an export that waits: its
 /// number from 1 in start order, the emitter's number of the root that started
-/// it, the root's frame while it waits, the id of the host operation it waits
-/// on, and what the wake delivered: a status, 2 until it came, 0 completed and
-/// 1 cancelled, and a payload.
-type Task = { id: Int64, root: Int32, frame: Int32, wait: Int64, status: Int32, payload: Int64 }
+/// it, and the root's frame while it waits.
+type Task = { id: Int64, root: Int32, frame: Int32 }
+
+/// A host operation a task waits on: its id, the task, and what the wake
+/// delivered: a status, 2 until it came, 0 completed and 1 cancelled, and a
+/// payload. A task waits on one operation per branch that waits.
+type Wait = { id: Int64, task: Int64, status: Int32, payload: Int64 }
 
 /// The tasks that run or wait.
 let mut tasks: Array<Task> = []
+
+/// The operations the tasks wait on, until each wait reads its delivery.
+let mut waits: Array<Wait> = []
 
 /// The woken tasks' ids from `readyAt`, in wake order.
 let mut ready: Array<Int64> = []
@@ -43,6 +49,16 @@ fn taskAt(id: Int64) -> Int64 {
     return i
 }
 
+/// The position of the wait on operation `id` in `waits`, or the length when
+/// no task waits on it.
+fn waitAt(id: Int64) -> Int64 {
+    let mut i: Int64 = 0
+    while i < waits.length && waits[i].id != id {
+        i = i + 1
+    }
+    return i
+}
+
 /// Removes task `id`, which has ended.
 fn taskEnd(id: Int64) {
     let i = taskAt(id)
@@ -54,7 +70,7 @@ fn taskEnd(id: Int64) {
 /// A task for the root the host is starting, which runs from here.
 fn taskBegin(root: Int32) -> Int64 {
     started = started + 1
-    tasks.push(Task { id: started, root: root, frame: 0, wait: 0, status: 2, payload: 0 })
+    tasks.push(Task { id: started, root: root, frame: 0 })
     running = started
     return started
 }
@@ -84,37 +100,41 @@ fn taskFinish() {
 
 /// The running task waits on the host's operation `id`.
 fn waitOn(id: Int64) {
-    let i = taskAt(running)
-    if i < tasks.length {
-        tasks[i].wait = id
-        tasks[i].status = 2
-    }
+    waits.push(Wait { id: id, task: running, status: 2, payload: 0 })
 }
 
-/// The running task's wait on `id`: 2 until its wake came, then the status the
-/// wake delivered.
+/// The wait on `id`: 2 until its wake came, then the status the wake
+/// delivered, and the wait ends.
 fn delivery(id: Int64) -> Int32 {
-    let i = taskAt(running)
-    if i < tasks.length && tasks[i].wait == id {
-        return tasks[i].status
+    let i = waitAt(id)
+    if i == waits.length {
+        return 2
     }
-    return 2
+    let st = waits[i].status
+    if st != 2 {
+        waits.swapRemove(i)
+    }
+    return st
 }
 
 /// `__vyrn_wake`: the host's operation `id` ended with `status`, 0 completed
 /// or 1 cancelled, and `payload`. The task that waits on it joins the ready
-/// queue, and the ready tasks run in wake order until none is ready. Returns
-/// how many tasks still wait. A wake that names no waiting task changes
-/// nothing.
+/// queue, once, and the ready tasks run in wake order until none is ready.
+/// Returns how many tasks still wait. A wake that names no pending wait
+/// changes nothing.
 fn wake(id: Int64, status: Int32, payload: Int64) -> Int32 {
-    let mut i: Int64 = 0
-    while i < tasks.length && !(tasks[i].wait == id && tasks[i].status == 2) {
-        i = i + 1
-    }
-    if i < tasks.length {
-        tasks[i].status = status
-        tasks[i].payload = payload
-        ready.push(tasks[i].id)
+    let i = waitAt(id)
+    if i < waits.length && waits[i].status == 2 {
+        waits[i].status = status
+        waits[i].payload = payload
+        let t = waits[i].task
+        let mut j = readyAt
+        while j < ready.length && ready[j] != t {
+            j = j + 1
+        }
+        if j == ready.length {
+            ready.push(t)
+        }
     }
     while readyAt < ready.length {
         let t = ready[readyAt]

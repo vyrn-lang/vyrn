@@ -410,3 +410,52 @@ fn the_shim_settles_the_task_an_export_starts() {
         String::from_utf8_lossy(&out.stderr)
     );
 }
+
+/// Two waiting exports, each a task: the one that sleeps less ends first, though it
+/// started second.
+const TWO_TASKS: &str = r#"import { sleep } from "std/task"
+
+let mut seen: Int64 = 0
+
+export extern fn later(tag: Int64, ms: Int64) {
+    await sleep(ms)
+    seen = seen * 10 + tag
+}
+
+export extern fn order() -> Int64 { return seen }
+
+fn main() -> Int64 { return 0 }
+"#;
+
+const BOTH_LATER: &str = r#"import { readFile } from "node:fs/promises";
+import { runVyrn } from "./wasi-min.mjs";
+
+const r = await runVyrn(await readFile(process.argv[2]), {});
+await Promise.all([r.exports.later(1n, 60n), r.exports.later(2n, 5n)]);
+console.log(String(r.exports.order()));
+"#;
+
+/// Each timer has its own `setTimeout`: a timer set while another task waits for a later
+/// one fires at its own deadline, so two tasks end in timer order.
+#[test]
+fn the_shim_ends_two_tasks_in_timer_order() {
+    let Some(node) = common::node() else {
+        eprintln!("NOTE: no node, so the shim's timers are unverified on this machine");
+        return;
+    };
+    let dir = tmp("two-tasks");
+    let wasm = build_wasm(&dir, "two", TWO_TASKS);
+    std::fs::write(dir.join("two.mjs"), BOTH_LATER).unwrap();
+    std::fs::copy(repo("web/wasi-min.js"), dir.join("wasi-min.mjs")).unwrap();
+    let out = Command::new(&node)
+        .arg(dir.join("two.mjs"))
+        .arg(&wasm)
+        .output()
+        .expect("node");
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        "21\n",
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
