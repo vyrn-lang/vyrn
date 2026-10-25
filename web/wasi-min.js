@@ -66,8 +66,8 @@ const ERRNO_SPIPE = 29; // stdout/stderr are not seekable
 // `instance.exports` for the export side. So no section walking survives here —
 // `WebAssembly.Module.customSections` hands over the payload.
 //
-// Payload (version 2), all counts and lengths uleb128:
-//   u8 version, uleb exportCount, { name, ret, uleb paramCount, param… }…,
+// Payload (version 3), all counts and lengths uleb128:
+//   u8 version, uleb exportCount, { name, ret, uleb paramCount, param..., u8 waits }...,
 //   uleb importCount, { name, ret, uleb paramCount, param… }…
 // A `kind` is one of: unit bool string i32 u32 i64 u64 f32 f64.
 const ABI_SECTION = "vyrn:exports";
@@ -95,10 +95,10 @@ function readAbi(module) {
     return s;
   };
   const version = b[i++];
-  if (version !== 2) {
+  if (version !== 3) {
     throw new Error(
       `this module declares its boundary in \`${ABI_SECTION}\` version ` +
-        `${version}, and this runtime reads version 2. Rebuild it with a ` +
+        `${version}, and this runtime reads version 3. Rebuild it with a ` +
         `matching \`vyrn build --target wasm\`.`
     );
   }
@@ -110,7 +110,8 @@ function readAbi(module) {
       const params = [];
       const pc = uleb();
       for (let p = 0; p < pc; p++) params.push(str());
-      into.set(name, { params, ret });
+      const waits = into === abi.exports && b[i++] === 1;
+      into.set(name, { params, ret, waits });
     }
   }
   return abi;
@@ -498,7 +499,7 @@ export async function runVyrn(wasmBytes, hooks = {}) {
   // parameter now takes a JS string or refuses.
   const RESERVED = new Set(["memory", "_start", "__vyrn_malloc", "__vyrn_free"]);
   const wrappedExports = {};
-  for (const [field, { params, ret }] of abi.exports) {
+  for (const [field, { params, ret, waits }] of abi.exports) {
     if (RESERVED.has(field) || field.startsWith("__")) continue;
     const raw = instance.exports[field];
     // Declared but swept, or renamed: the section lists what the source says,
@@ -535,6 +536,15 @@ export async function runVyrn(wasmBytes, hooks = {}) {
           call.push(Number(a) | 0); // i32 / u32
         }
       }
+      // A String argument is released once the call is over: at its return, or,
+      // for an export that waits, once the host has settled the task it started,
+      // which borrows its arguments until it ends.
+      const release = () => {
+        // The block base is the pointer less its String header,
+        // which is what `__vyrn_malloc` handed out.
+        const free = instance.exports.__vyrn_free;
+        if (typeof free === "function") for (const p of owned) free(p - STR_HDR);
+      };
       let out;
       try {
         const r = raw(...call);
@@ -557,14 +567,15 @@ export async function runVyrn(wasmBytes, hooks = {}) {
         else if (ret === "u32") out = r >>> 0;
         else if (ret === "u64") out = BigInt.asUintN(64, r);
         else out = r; // i32 / i64 / f32 / f64
-      } finally {
+      } catch (e) {
         // A trap leaves the module unusable, but a `panic` the page catches does
         // not, so the release runs on both paths.
-        // The block base is the pointer less its String header,
-        // which is what `__vyrn_malloc` handed out.
-        const free = instance.exports.__vyrn_free;
-        if (typeof free === "function") for (const p of owned) free(p - STR_HDR);
+        release();
+        throw e;
       }
+      // An export that waits returns `Unit`, as a promise that the task ended.
+      if (waits) return settle().finally(release);
+      release();
       return out;
       // Nothing crosses this boundary to say who owns a return, and nothing has
       // to: every return is owned, and an `export extern fn` that lends fails to
@@ -595,8 +606,11 @@ export async function runVyrn(wasmBytes, hooks = {}) {
   };
   // A `main` that waits returns from `_start` and ends in a wake: deliver each
   // timer to `__vyrn_wake` as it comes due, earliest first and ties by id, as
-  // `settle_waits` in `wasmrun.rs` does.
-  const settle = async () => {
+  // `settle_waits` in `wasmrun.rs` does. One loop runs at a time, and every
+  // caller waits until the timers run out.
+  // A timer set while the loop waits fires no sooner than the one it waits for.
+  let settling = null;
+  const drain = async () => {
     const wake = instance.exports.__vyrn_wake;
     while (wake && due.length) {
       let k = 0;
@@ -609,6 +623,7 @@ export async function runVyrn(wasmBytes, hooks = {}) {
       guarded(() => wake(t.id, 0, 0n));
     }
   };
+  const settle = () => (settling ??= drain().finally(() => (settling = null)));
   let exitCode = 0;
   try {
     guarded(() => instance.exports._start());

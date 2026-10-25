@@ -42,7 +42,7 @@ fn build_wasm(dir: &Path, stem: &str, source: &str) -> PathBuf {
 }
 
 /// Decodes the `vyrn:exports` payload into `(name, ret, params)` rows for the
-/// exports and for the `vyrn.*` imports. A second reader written against the
+/// exports and for the `vyrn.*` imports, and the exports that wait. A second reader written against the
 /// documented format, not a call into the emitter, so a format change must be
 /// made on both sides.
 fn read_abi(
@@ -50,6 +50,7 @@ fn read_abi(
 ) -> (
     Vec<(String, String, Vec<String>)>,
     Vec<(String, String, Vec<String>)>,
+    Vec<String>,
 ) {
     let mut i = 8; // magic + version
     let mut payload: Option<&[u8]> = None;
@@ -73,10 +74,11 @@ fn read_abi(
     }
     let b = payload.expect("the module carries a vyrn:exports section");
     let mut i = 0;
-    assert_eq!(b[i], 2, "section version");
+    assert_eq!(b[i], 3, "section version");
     i += 1;
     let mut sides = Vec::new();
-    for _ in 0..2 {
+    let mut waiting = Vec::new();
+    for side in 0..2 {
         let (count, used) = uleb(b, i);
         i += used;
         let mut rows = Vec::new();
@@ -93,6 +95,10 @@ fn read_abi(
                 i += used;
                 params.push(p);
             }
+            if side == 0 && b[i] == 1 {
+                waiting.push(name.clone());
+            }
+            i += usize::from(side == 0);
             rows.push((name, ret, params));
         }
         sides.push(rows);
@@ -100,7 +106,7 @@ fn read_abi(
     assert_eq!(i, b.len(), "the whole payload was consumed");
     let imports = sides.pop().unwrap();
     let exports = sides.pop().unwrap();
-    (exports, imports)
+    (exports, imports, waiting)
 }
 
 fn uleb(b: &[u8], mut i: usize) -> (u32, usize) {
@@ -147,7 +153,8 @@ fn main() -> Int64 { return 0 }
 fn the_section_states_every_declared_signature_on_both_sides() {
     let dir = tmp("section");
     let wasm = std::fs::read(build_wasm(&dir, "boundary", BOUNDARY)).unwrap();
-    let (exports, imports) = read_abi(&wasm);
+    let (exports, imports, waiting) = read_abi(&wasm);
+    assert!(waiting.is_empty(), "no export waits: {waiting:?}");
 
     let row = |rows: &[(String, String, Vec<String>)], name: &str| {
         rows.iter()
@@ -349,4 +356,57 @@ fn the_shim_ends_each_program_as_vyrn_run_does() {
         };
         assert_eq!(say(&shim), say(&engine), "{name}");
     }
+}
+
+/// An export that waits, flagged in the section; its String argument lives as
+/// long as its task.
+const WAITING_EXPORT: &str = r#"import { sleep } from "std/task"
+
+let mut total: Int64 = 0
+
+export extern fn later(name: String) {
+    await sleep(5)
+    total = total + Int64(name.byteLength)
+}
+
+export extern fn sum() -> Int64 { return total }
+
+fn main() -> Int64 { return 0 }
+"#;
+
+const LATER: &str = r#"import { readFile } from "node:fs/promises";
+import { runVyrn } from "./wasi-min.mjs";
+
+const r = await runVyrn(await readFile(process.argv[2]), {});
+const task = r.exports.later("abc");
+console.log(task instanceof Promise, String(r.exports.sum()));
+await task;
+console.log(String(r.exports.sum()));
+"#;
+
+/// The section flags the export that waits, and the shim's wrapper for it
+/// returns a promise that settles once its task ends.
+#[test]
+fn the_shim_settles_the_task_an_export_starts() {
+    let dir = tmp("later");
+    let wasm = build_wasm(&dir, "later", WAITING_EXPORT);
+    let (_, _, waiting) = read_abi(&std::fs::read(&wasm).unwrap());
+    assert_eq!(waiting, ["later"]);
+    let Some(node) = common::node() else {
+        eprintln!("NOTE: no node, so the shim's waiting exports are unverified on this machine");
+        return;
+    };
+    std::fs::write(dir.join("later.mjs"), LATER).unwrap();
+    std::fs::copy(repo("web/wasi-min.js"), dir.join("wasi-min.mjs")).unwrap();
+    let out = Command::new(&node)
+        .arg(dir.join("later.mjs"))
+        .arg(&wasm)
+        .output()
+        .expect("node");
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        "true 0\n3\n",
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 }

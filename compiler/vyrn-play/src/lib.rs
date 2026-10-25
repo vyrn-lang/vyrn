@@ -107,7 +107,7 @@ fn publish_json(json: String) -> usize {
 /// Words the grammar reads as keywords in position and the lexer returns as
 /// identifiers. The same list as `site/app/hl.vyrn`.
 const CONTEXTUAL: &[&str] = &[
-    "read", "modify", "consume", "gen", "test", "bench", "panic", "from", "as",
+    "read", "modify", "consume", "gen", "test", "bench", "panic", "from", "as", "await",
 ];
 
 /// The stylesheet's CSS class for one lexed item (`k`, `s`, `n`, `c`, `t`,

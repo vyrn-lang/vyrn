@@ -1,6 +1,7 @@
 //! Waiting code runs: `examples/waiting.vyrn` built with the free audit prints its
 //! recorded stdout when the host delivers every wait, and frees every frame and
-//! every value whichever wait the host cancels. The programs under
+//! every value whichever wait the host cancels. Each waiting example prints the
+//! same bytes when the host replays what it delivered. The programs under
 //! `tests/waits/` witness `vyrn test`'s clock and what does not build.
 
 mod common;
@@ -66,6 +67,25 @@ fn a_cancelled_wait_releases_every_frame_on_its_path() {
             (1, String::new()),
             "wake {k}"
         );
+    }
+}
+
+/// The replay gate: each waiting example, run on the wall clock with what the host
+/// delivered recorded, prints the same bytes and exits the same when the host
+/// replays it.
+#[test]
+fn a_replay_of_the_recorded_wakes_prints_the_same_bytes() {
+    for (name, _why) in WAITING {
+        let bytes = audited(name);
+        let wall = Run {
+            virtual_clock: false,
+            ..quiet(name, None)
+        };
+        let first = run(&bytes, wall).expect("the module runs");
+        let again = run(&bytes, quiet(name, Some(first.wakes.clone()))).expect("the module runs");
+        let seen = |o: &vyrn_cli::wasmrun::Outcome| (o.code, o.stdout.clone(), o.stderr.clone());
+        assert_eq!(seen(&again), seen(&first), "{name}");
+        assert_eq!(again.wakes, first.wakes, "{name}");
     }
 }
 

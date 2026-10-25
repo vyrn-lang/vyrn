@@ -27,7 +27,7 @@ runs on the thread's own stack. There is no interpreter. Each host hands a
 stack overflow to the module, which traps `call stack exhausted`.
 
 A module that waits imports `vyrn_wait.sleep(ms) -> id` and exports
-`__vyrn_wake(id, status, payload)`. The host runs the event loop after
+`__vyrn_wake(id, status, payload)`. Each host runs the event loop after
 `_start`, and after each export call that waits: it delivers the earliest
 pending timer, ties by id, as it comes due, until none is pending. The embedded
 wasmtime, the native host and `web/wasi-min.js` share this rule.
@@ -534,7 +534,8 @@ a dependency.
   degradation: no argv, stdin at EOF, no filesystem, so `readFile` returns its
   canonical `Err`. `runVyrn(bytes, { extern: { ... } })` supplies the `extern fn`
   imports; the declared signatures come from the module's `vyrn:exports`
-  section.
+  section. That section flags each export that waits, whose wrapper returns a
+  promise that settles once the timers run out.
 - `vyrn-dom.js`: applies the patch stream `std/html` computes in wasm.
 - `vyrn-nav.js`: soft navigation between server-rendered pages.
 - `vyrn-rpc.js`, `vyrn-query.js`: the client halves of `std/rpc` and page data.

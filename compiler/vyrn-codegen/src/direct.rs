@@ -912,7 +912,7 @@ fn compile_inner(program: &Program, world: Arc<vyrn_lower::World>) -> Result<Vec
     // what a program reaches until its bodies are walked. `Module::sweep_pool` does the same for
     // interned data.
     m.sweep();
-    abi_section(&mut m, &user, program);
+    abi_section(&mut m, &user, program, |f| cx.sigs[&f.name].waits);
     if counted {
         let mut rows = vec![table.to_string()];
         rows.extend((sites.iter()).map(|(f, line, label)| format!("{f}\t{line}\t{label}")));
@@ -952,22 +952,28 @@ fn abi_kind(ty: &Type) -> &'static str {
 /// The wasm ABI loses what a host needs: `String`, `Bool`, `Int32` and `UInt32` all arrive as
 /// `i32`, and a `String` import's two slots look like an `(Int32, Int64)` pair.
 ///
-/// Payload, version 2:
+/// Payload, version 3:
 ///
 /// ```text
-/// u8            version = 2
+/// u8            version = 3
 /// uleb          export count
-///   per entry:  name:str  ret:kind  uleb param count  param:kind …
+///   per entry:  name:str  ret:kind  uleb param count  param:kind …  waits:u8
 /// uleb          import count  (the `vyrn.*` namespace)
 ///   per entry:  name:str  ret:kind  uleb param count  param:kind …
 /// ```
 ///
-/// `str` is a uleb length then UTF-8 bytes; `kind` is a `str` from [`abi_kind`]'s closed set. A
+/// `str` is a uleb length then UTF-8 bytes; `kind` is a `str` from [`abi_kind`]'s closed set.
+/// `waits` is 1 for an export that waits, whose call starts a task the host settles, else 0. A
 /// module with nothing on the boundary carries no section.
 ///
 /// The section lists every declaration, including ones `Module::sweep` dropped: the shim learns
 /// which functions exist from the platform, and reads this only for their types.
-fn abi_section(m: &mut wasm::Module, user: &[&Function], program: &Program) {
+fn abi_section(
+    m: &mut wasm::Module,
+    user: &[&Function],
+    program: &Program,
+    waits: impl Fn(&Function) -> bool,
+) {
     fn leb(out: &mut Vec<u8>, mut n: u32) {
         loop {
             let b = (n & 0x7f) as u8;
@@ -1002,10 +1008,11 @@ fn abi_section(m: &mut wasm::Module, user: &[&Function], program: &Program) {
     if exports.is_empty() && imports.is_empty() {
         return;
     }
-    let mut payload = vec![2u8];
+    let mut payload = vec![3u8];
     leb(&mut payload, exports.len() as u32);
     for f in exports {
         sig(&mut payload, f);
+        payload.push(u8::from(waits(f)));
     }
     leb(&mut payload, imports.len() as u32);
     for f in imports {
