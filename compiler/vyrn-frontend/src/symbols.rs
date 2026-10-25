@@ -2055,8 +2055,13 @@ fn namespace_members(
     let qualified = (program.functions.iter().map(|f| (&f.name, &f.export_to)))
         .chain(program.protocols.iter().map(|p| (&p.name, &p.export_to)))
         .chain(program.type_decls.iter().map(|t| (&t.name, &t.export_to)));
+    // The importer is the open document, which no generator wrote, so no
+    // declarer is asked.
+    let judged = || crate::loader::judged_as(importer, |_| None);
     let shut_out: std::collections::HashSet<&str> = qualified
-        .filter(|(_, to)| !crate::loader::admits(to, target, importer, opts, &mut real_paths))
+        .filter(|(_, to)| {
+            !judged().is_some_and(|j| crate::loader::admits(to, target, j, opts, &mut real_paths))
+        })
         .map(|(name, _)| name.as_str())
         .collect();
     let exported = |of, name: &str, _: &Option<String>, exported| {
