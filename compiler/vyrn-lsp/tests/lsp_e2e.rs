@@ -703,39 +703,73 @@ fn main() -> Int64 {
     }
 }
 
-/// A user module's `vyx.` offers `std/vyx`'s public API, and neither a
-/// private helper nor one exported only to `std/ui`.
-#[test]
-fn member_completion_on_std_vyx_offers_only_its_public_api() {
+/// Asserts that a user module's `ns.` on `spec` offers each of `offered` and
+/// none of `hidden`. `probe` is a public member the line calls.
+fn assert_member_completion(spec: &str, probe: &str, offered: &[&str], hidden: &[&str]) {
     let mut client = spawn_client();
-    let uri = "file:///member/vyxns.vyrn";
-    let src = "\
-import * as vyx from \"std/vyx\"
-fn main() -> Int64 {
-    let t = vyx.vyxParseTemplate(\"\")
+    let uri = "file:///member/stdns.vyrn";
+    let src = format!(
+        "import * as ns from \"{spec}\"
+fn main() -> Int64 {{
+    let t = ns.{probe}
     return 0
-}
-";
-    did_open(&mut client, uri, "vyrn", src);
+}}
+"
+    );
+    did_open(&mut client, uri, "vyrn", &src);
     let _ = client.read_notification("textDocument/publishDiagnostics");
-    let labels = completion_labels(&mut client, uri, 2, 16);
-    for expected in ["components", "vyxParseTemplate", "VyxNode"] {
+    let labels = completion_labels(&mut client, uri, 2, 15);
+    for expected in offered {
         assert!(
             labels.iter().any(|l| l == expected),
             "{expected} missing: {labels:?}"
         );
     }
-    for hidden in [
-        "vyxPageShape",
-        "vyxDataRunner",
-        "vyxCompileComponent",
-        "vyxSlice",
-    ] {
+    for hidden in hidden {
         assert!(
             !labels.iter().any(|l| l == hidden),
             "{hidden} offered: {labels:?}"
         );
     }
+}
+
+/// A user module's `vyx.` offers `std/vyx`'s public API, and neither a
+/// private helper nor one exported only to `std/ui`.
+#[test]
+fn member_completion_on_std_vyx_offers_only_its_public_api() {
+    assert_member_completion(
+        "std/vyx",
+        "vyxParseTemplate(\"\")",
+        &["components", "vyxParseTemplate", "VyxNode"],
+        &[
+            "vyxPageShape",
+            "vyxDataRunner",
+            "vyxCompileComponent",
+            "vyxSlice",
+            "vyxPage",
+            "vyxPageClient",
+            "vyxLayout",
+            "vyxError",
+        ],
+    );
+}
+
+/// A user module's `ui.` offers neither the router glue nor the data runners,
+/// which only code `std/ui` and `std/vyx` generate imports.
+#[test]
+fn member_completion_on_std_ui_offers_no_router_glue() {
+    assert_member_completion(
+        "std/ui",
+        "query(f)",
+        &["pages", "query", "PageError"],
+        &[
+            "uiWantsData",
+            "uiPayload",
+            "uiDataMiss",
+            "runQuery",
+            "runLazy",
+        ],
+    );
 }
 
 /// A builtin function has no declaration, so its hover is its contract.

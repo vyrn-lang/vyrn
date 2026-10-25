@@ -36,14 +36,6 @@ Anything else fails the generation with a sentence naming the field.
 
 Inspect the synthesized module with:  vyrn emit-gen <file>
 
-## CliOpt
-
-```vyrn
-type CliOpt = { long: String, short: String, field: String, takesValue: Bool }
-```
-
-One declared option, as the generated spec describes it to the walk.
-
 ## CliHit
 
 ```vyrn
@@ -63,43 +55,6 @@ What one walk of argv found: the options, the free arguments, and the
 problems with the argv itself (unknown option, missing value). The generated
 parser raises the problems with a value.
 
-## readArgv
-
-```vyrn
-fn readArgv(opts: Array<CliOpt>, argv: Array<String>) -> CliRead
-```
-
-Walks `argv` against `opts`.
-
-A token starting with `-` (not a bare `-`) is an option. `--name=value`
-carries its value inline; otherwise an option that takes a value takes the
-next token verbatim, so `--port -1` is a port of -1. A literal `--` ends
-option parsing. The first occurrence of an option wins, as in `std/args`.
-
-## cliFlag
-
-```vyrn
-fn cliFlag(r: CliRead, field: String) -> Bool
-```
-
-Whether the flag field `field` was seen.
-
-## cliValue
-
-```vyrn
-fn cliValue(r: CliRead, field: String) -> Option<String>
-```
-
-The text the option field `field` carried; the first occurrence wins.
-
-## cliIssues
-
-```vyrn
-fn cliIssues(r: CliRead) -> Array<Issue>
-```
-
-The walk's own problems, as the accumulator a generated parser starts from.
-
 ## wantsHelp
 
 ```vyrn
@@ -108,39 +63,6 @@ fn wantsHelp(argv: Array<String>) -> Bool
 
 Whether `--help` or `-h` appears before a `--` terminator. Ask it before
 parsing: a program asked for help has not given the required options.
-
-## cliMissing
-
-```vyrn
-fn cliMissing(field: String, long: String) -> Issue
-```
-
-A required option nobody gave.
-
-## cliNotNumber
-
-```vyrn
-fn cliNotNumber(field: String, long: String) -> Issue
-```
-
-A value that is not a whole number.
-
-## cliRefused
-
-```vyrn
-fn cliRefused(field: String, long: String, want: String) -> Issue
-```
-
-A value the field's own type refused. `want` is that type's rule, worded from
-its `Schema` by the generator.
-
-## cliUnexpected
-
-```vyrn
-fn cliUnexpected(value: String) -> Issue
-```
-
-A free argument in a command that declares no positionals.
 
 ## cli
 

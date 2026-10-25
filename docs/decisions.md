@@ -367,7 +367,7 @@ pull request.
 - The DOM diff runs in wasm and crosses as a list of patch operations in a fixed order, so a naive applier is correct.
 - `.vyx` templates use one Vue-flavoured grammar: `{{ }}`, `v-if`, `v-for` with a required `:key`, `:attr`, `@event`, `<slot/>`. No `v-model`.
 - `std/vyx` names no component. Every capitalized tag is a sibling `.vyx` file or an imported provider, so it is not a framework.
-- `std/vyx`'s public API is `components`, `componentsThemed`, the `Component` contract and the read-only template AST (`vyxParseTemplate`, `VyxTemplate`, `VyxNode`, `VyxAttr`, `VyxBody`) for generators and tools. What only `std/ui` needs is `export to` it; the generators `std/ui`'s generated router imports (`vyxPage`, `vyxLayout`, `vyxError` and their themed and client forms) stay exported, because a generated module is never a permitted importer.
+- `std/vyx`'s public API is `components`, `componentsThemed`, the `Component` contract and the read-only template AST (`vyxParseTemplate`, `VyxTemplate`, `VyxNode`, `VyxAttr`, `VyxBody`) for generators and tools. What only `std/ui` needs is `export to` it, the generators its router imports included (`vyxPage`, `vyxLayout`, `vyxError` and their themed and client forms); a user mounts a page through `pages`.
 - Pages declare data through `export fn data()` returning `Query`, `Lazy`, `ParamQuery` or `ParamLazy`, and head through `export fn head()`. Laziness is in the type name.
 - A layout is the nearest `layout.vyx`; a load failure renders the nearest `error.vyx`.
 - The first load is full SSR; navigation renders on the client, and falls back to an HTML swap, then a hard navigation. Soft navigation is progressive enhancement, never a correctness layer.

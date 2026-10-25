@@ -2238,6 +2238,25 @@ fn a_user_import_of_a_std_vyx_helper_for_std_ui_is_refused() {
     );
 }
 
+/// A page mounts through `pages`, whose router imports `vyxPage` as `std/ui`.
+#[test]
+fn a_user_import_of_a_vyx_page_generator_is_refused() {
+    let dir = common::scratch("export-to-vyxpage");
+    let src = "import { vyxPage } from \"std/vyx\"\nfn main() -> Int64 { return 0 }\n";
+    std::fs::write(dir.join("app.vyrn"), src).expect("write app.vyrn");
+    let out = vyrn()
+        .current_dir(&*dir)
+        .args(["check", "app.vyrn"])
+        .output()
+        .expect("vyrn check");
+    let err = String::from_utf8_lossy(&out.stderr).replace("\r\n", "\n");
+    assert!(!out.status.success(), "accepted");
+    assert_eq!(
+        err,
+        "app.vyrn:1:0: `vyxPage` is exported from `std/vyx` only to `std/ui`\n"
+    );
+}
+
 #[test]
 fn an_export_to_path_that_does_not_resolve_is_refused_at_its_declaration() {
     let src =

@@ -3973,7 +3973,7 @@ gen fn vyxBuildPageModuleImpl(source: String, srcPath: String, dir: String, them
 /// Synthesizes a `.vyx` page module from `vyxPath`. The
 /// argument is the full `.vyx` path, because the generator sandbox admits reads
 /// of exactly its path arguments.
-export gen fn vyxPage(vyxPath: String) -> String {
+export to "./ui" gen fn vyxPage(vyxPath: String) -> String {
     let read = vyxReadFileOf(vyxPath)
     if read.err != "" {
         return reportHere(Error, vyxCannotRead(vyxPath, read.err))
@@ -3982,7 +3982,7 @@ export gen fn vyxPage(vyxPath: String) -> String {
 }
 
 /// [`vyxPage`] with the page's classes checked against `theme`.
-export gen fn vyxPageThemed(vyxPath: String, theme: String) -> String {
+export to "./ui" gen fn vyxPageThemed(vyxPath: String, theme: String) -> String {
     return match readFile(vyxPath) {
         Ok(v) => vyxBuildPageModuleAt(v, vyxPath, vyxDirOf(vyxPath), true, theme),
         Err(e) => reportHere(Error, vyxCannotRead(vyxPath, e)),
@@ -3991,7 +3991,7 @@ export gen fn vyxPageThemed(vyxPath: String, theme: String) -> String {
 
 /// [`vyxPage`] for the client bundle: no `load`, head or
 /// title, for `std/ui`'s `pagesClient`.
-export gen fn vyxPageClient(vyxPath: String) -> String {
+export to "./ui" gen fn vyxPageClient(vyxPath: String) -> String {
     return match readFile(vyxPath) {
         Ok(v) => vyxBuildPageClientModuleAt(v, vyxPath, vyxDirOf(vyxPath), false, ""),
         Err(e) => reportHere(Error, vyxCannotRead(vyxPath, e)),
@@ -3999,7 +3999,7 @@ export gen fn vyxPageClient(vyxPath: String) -> String {
 }
 
 /// [`vyxPageClient`] with classes checked against `theme`.
-export gen fn vyxPageClientThemed(vyxPath: String, theme: String) -> String {
+export to "./ui" gen fn vyxPageClientThemed(vyxPath: String, theme: String) -> String {
     return match readFile(vyxPath) {
         Ok(v) => vyxBuildPageClientModuleAt(v, vyxPath, vyxDirOf(vyxPath), true, theme),
         Err(e) => reportHere(Error, vyxCannotRead(vyxPath, e)),
@@ -4071,7 +4071,7 @@ gen fn vyxBuildLayoutModuleAt(source: String, srcPath: String, dir: String, them
 }
 
 /// Synthesizes a `.vyx` layout module from `vyxPath`.
-export gen fn vyxLayout(vyxPath: String) -> String {
+export to "./ui" gen fn vyxLayout(vyxPath: String) -> String {
     return match readFile(vyxPath) {
         Ok(v) => vyxBuildLayoutModuleAt(v, vyxPath, vyxDirOf(vyxPath), false, ""),
         Err(e) => reportHere(Error, vyxCannotRead(vyxPath, e)),
@@ -4079,7 +4079,7 @@ export gen fn vyxLayout(vyxPath: String) -> String {
 }
 
 /// [`vyxLayout`] with the layout's classes checked against `theme`.
-export gen fn vyxLayoutThemed(vyxPath: String, theme: String) -> String {
+export to "./ui" gen fn vyxLayoutThemed(vyxPath: String, theme: String) -> String {
     return match readFile(vyxPath) {
         Ok(v) => vyxBuildLayoutModuleAt(v, vyxPath, vyxDirOf(vyxPath), true, theme),
         Err(e) => reportHere(Error, vyxCannotRead(vyxPath, e)),
@@ -4135,7 +4135,7 @@ gen fn vyxBuildErrorModuleAt(source: String, srcPath: String, dir: String, theme
 }
 
 /// Synthesizes a `.vyx` error-page module from `vyxPath`.
-export gen fn vyxError(vyxPath: String) -> String {
+export to "./ui" gen fn vyxError(vyxPath: String) -> String {
     return match readFile(vyxPath) {
         Ok(v) => vyxBuildErrorModuleAt(v, vyxPath, vyxDirOf(vyxPath), false, ""),
         Err(e) => reportHere(Error, vyxCannotRead(vyxPath, e)),
@@ -4143,7 +4143,7 @@ export gen fn vyxError(vyxPath: String) -> String {
 }
 
 /// [`vyxError`] with classes checked against `theme`.
-export gen fn vyxErrorThemed(vyxPath: String, theme: String) -> String {
+export to "./ui" gen fn vyxErrorThemed(vyxPath: String, theme: String) -> String {
     return match readFile(vyxPath) {
         Ok(v) => vyxBuildErrorModuleAt(v, vyxPath, vyxDirOf(vyxPath), true, theme),
         Err(e) => reportHere(Error, vyxCannotRead(vyxPath, e)),

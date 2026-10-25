@@ -198,32 +198,6 @@ fn paramQuery<P, T>(run: consume fn(P) -> T) -> ParamQuery<P, T>
 fn paramLazy<P, T>(q: consume ParamQuery<P, T>) -> ParamLazy<P, T>
 ```
 
-## runQuery
-
-```vyrn
-fn runQuery<T>(q: Query<T>) -> T
-```
-
-## runLazy
-
-```vyrn
-fn runLazy<T>(q: Lazy<T>) -> T
-```
-
-Laziness changes how the document is delivered, not whether data is fetched.
-
-## runParamQuery
-
-```vyrn
-fn runParamQuery<P, T>(q: ParamQuery<P, T>, p: P) -> T
-```
-
-## runParamLazy
-
-```vyrn
-fn runParamLazy<P, T>(q: ParamLazy<P, T>, p: P) -> T
-```
-
 ## noQuery
 
 ```vyrn
@@ -231,58 +205,6 @@ fn noQuery() -> Query<Unit>
 ```
 
 The default `data` for a page that declares none.
-
-## uiWantsData
-
-```vyrn
-fn uiWantsData(req: Request) -> Bool
-```
-
-JSON wins only when the client names `application/json` and not
-`text/html`. A browser navigation, `*/*` and a missing `Accept` get HTML.
-No q-value ranking: no client of this router separates the two by weight.
-
-## uiPayload
-
-```vyrn
-fn uiPayload(page: String, title: String, props: String, params: String) -> String
-```
-
-`props` and `params` are already JSON; `page` and `title` are encoded here.
-
-## uiErrorPayload
-
-```vyrn
-fn uiErrorPayload(status: Int64, props: String) -> String
-```
-
-The `@error` payload a client renders on a load miss.
-
-## uiDataResponse
-
-```vyrn
-fn uiDataResponse(body: String) -> Response
-```
-
-A data fetch always answers 200; the payload says what to render. `vary:
-"Accept"` keeps a shared cache from serving a page's JSON to a browser.
-
-## uiDataMiss
-
-```vyrn
-fn uiDataMiss() -> Response
-```
-
-The data response when no route matched.
-
-## uiErrorResponseOf
-
-```vyrn
-fn uiErrorResponseOf(e: PageError) -> Response
-```
-
-`e` is a typed parameter so `toJson` sees `PageError`: bound from an
-`Err(e)` arm it loses its type for `toJson`.
 
 ## pages
 
