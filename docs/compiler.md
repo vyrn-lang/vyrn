@@ -631,7 +631,8 @@ no cause is trap-free (the greatest fixpoint). It cannot join the effect
 judgment's walk, which runs before `check::state` adds the rows. The kernel
 rules read the effect set the judgment kept (`World::state_use`), the call
 graph's components (`fixpoint::components`), callees first, and the loop form
-`elide::counter_loop`, beside the `elide::bound_test` it starts from.
+`elide::counter_loop`, beside the `elide::bound_test` it starts from. A
+kernel's `verdict::Form` joins its own types' forms with its callees'.
 `tests/fnverdicts.rs` pins both verdicts of every function of the corpus.
 
 `verdict::erased` judges every row a call for its effect (`St::Do`) enters, in

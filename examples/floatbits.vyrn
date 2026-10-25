@@ -1,0 +1,30 @@
+// The float bit views keep every bit. Each pattern below comes back from a
+// round trip through the float unchanged, on both engines: a quiet NaN with a
+// payload, a signalling NaN, a negative NaN, the smallest and largest
+// subnormals, -0.0, the smallest normal, the largest finite value and both
+// infinities.
+
+fn trip32(b: UInt32) -> UInt32 {
+    return float32Bits(float32FromBits(b))
+}
+
+fn trip64(b: UInt64) -> UInt64 {
+    return float64Bits(float64FromBits(b))
+}
+
+fn main() -> Int64 {
+    let singles: Array<UInt32> = [2143289345, 2139095041, 4290847557, 1, 8388607, 2147483648, 8388608, 2139095039, 2139095040, 4286578688]
+    for b in singles {
+        print("\{b} \{trip32(b)}")
+    }
+    let doubles: Array<UInt64> = [9221120237041090561, 9218868437227405313, 18444512289894210236, 1, 4503599627370495, 9223372036854775808, 4503599627370496, 9218868437227405311, 9218868437227405312, 18442240474082181120]
+    for b in doubles {
+        print("\{b} \{trip64(b)}")
+    }
+    let negZero: Float32 = -0.0
+    print(float32Bits(negZero)) // 2147483648
+    let one: Float32 = 1.0
+    print(float32Bits(one)) // 1065353216
+    print(float32FromBits(1069547520)) // 1.500000
+    return 0
+}

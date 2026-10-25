@@ -19,7 +19,7 @@ fn min1(a: Float64, b: Float64) -> Float64 {
     }
     if a == b {
         let sign: UInt64 = 9223372036854775808
-        if floatBits(a) >= sign {
+        if float64Bits(a) >= sign {
             return a
         }
         return b
@@ -39,7 +39,7 @@ fn max1(a: Float64, b: Float64) -> Float64 {
     }
     if a == b {
         let sign: UInt64 = 9223372036854775808
-        if floatBits(a) >= sign {
+        if float64Bits(a) >= sign {
             return b
         }
         return a

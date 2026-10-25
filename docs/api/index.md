@@ -24,6 +24,7 @@
 - [std/jsondec](std/jsondec.md) — The untyped half of `fromJson`, and the generator of the
 - [std/jsonread](std/jsonread.md) — The strict JSON reader: `parseJson`, and the cursor `fromJson` reads with.
 - [std/math](std/math.md) — Integer helpers (min, max, abs, clamp) and `Float64` functions (pi,
+- [std/narrow](std/narrow.md) — Narrow number formats for storage: `Float16`, `BFloat16`, the two FP8
 - [std/num](std/num.md) — Text -> number, correctly rounded, and `Float64` -> `%f` text.
 - [std/openapi](std/openapi.md) — The contract as an OpenAPI 3.1 document, built from
 - [std/order](std/order.md) — Orders, the comparison under one, and the functions that sort by one.
@@ -42,6 +43,7 @@
 - [std/symbolmap](std/symbolmap.md) — The symbol map of a generated module: for each
 - [std/task](std/task.md) — Waiting for the host: `sleep`, the one host wait.
 - [std/text](std/text.md) — UTF-8 decoding and byte-offset line and column, in Vyrn.
+- [std/tile](std/tile.md) — Integer matrix tiles: `mmaInt8` and `mmaUInt8`, the CPU oracle a GPU tile
 - [std/time](std/time.md) — Wall-clock time at the host boundary, and a pure calendar breakdown.
 - [std/tw](std/tw.md) — Theme-derived utility classes as a checked type. `tw(theme)` reads
 - [std/tw.editor](std/tw.editor.md) — Editor support for the theme modules `std/tw` writes.

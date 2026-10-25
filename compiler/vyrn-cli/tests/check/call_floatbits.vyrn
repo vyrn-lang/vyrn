@@ -1,1 +1,1 @@
-fn main() -> Int64 { let b = floatBits(7) return 0 }
+fn main() -> Int64 { let b = float64Bits(7) return 0 }

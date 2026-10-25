@@ -5,7 +5,7 @@ fn main() -> Int64
    48           allocates `Array<Int64>`
 summary: allocating rows 1 (0 in loops), growing rows 0 (0 in loops), copies 0 (0 in loops), checks kept 1 (0 in loops), checks proved 1 (1 in loops)
   depth: trap-free: yes; kernel: no, it is recursive
-  total: trap-free: yes; kernel: no, `xs` is Array<Int64>, and WGSL has no 64-bit integer
+  total: trap-free: yes; kernel: yes, emulated Int64
   fails: trap-free: no, it calls `panic` at line 26; kernel: no, its effect set is trap
   first: trap-free: no, it keeps an index check at line 32; kernel: no, it is not trap-free
   apply: trap-free: no, it calls a function value at line 36; kernel: no, it is not trap-free

@@ -3,7 +3,8 @@
 //! [`table`] judges each function the root file declares twice. It is
 //! trap-free when no row its calls can reach is an explicit trap or a check
 //! row the elision kept ([`Cause`]). It is a kernel, a function a GPU could
-//! run, when it passes every rule of [`Unfit`]. Both read the bodies an
+//! run, when it passes every rule of [`Unfit`], and its [`Form`] says how a
+//! GPU holds its integers. Both read the bodies an
 //! emitter reads ([`World::body_at`]), so they run after the effect
 //! judgment, whose walk sees no check row, and join none of its sets: the
 //! bodies are their own graph, solved by [`crate::fixpoint`].
@@ -92,8 +93,8 @@ pub enum Unfit {
     Traps,
     /// It is in a cycle of the call graph.
     Recursive,
-    /// A parameter, local or result is not `Int32`, `UInt32` or `Bool`, or a
-    /// `read` array of one: who, its type as spelled, and the type's kind.
+    /// A parameter, local or result is not an integer or `Bool`, or a `read`
+    /// array of one: who, its type as spelled, and the type's kind.
     Type(String, String, Scalar),
     /// A loop that is no counter loop ([`crate::elide::counter_loop`]), at
     /// its first line.
@@ -106,16 +107,49 @@ pub enum Unfit {
     Stays(String, usize),
 }
 
-/// A type as a kernel sees it. WGSL has no 64-bit integer or float, and it
-/// leaves `f32` rounding to the device, so only 32-bit integers and `Bool`
-/// fit.
+/// The kind of a type no kernel holds. WGSL has no 64-bit float, and it
+/// leaves `f32` rounding to the device, so a float waits for its step of the
+/// number plan (decisions.md).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Scalar {
-    Fits,
-    Wide,
     Float32,
     Float64,
     Other,
+}
+
+/// How a GPU holds a kernel's integers, by the number plan: 32-bit integers
+/// and `Bool` natively, 8- and 16-bit integers packed into `u32` words, and
+/// 64-bit integers emulated as two `u32` words. `Packed` and `Emulated` name
+/// the first type, in the order [`table`] reads them, that needs the form.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Form {
+    Native,
+    Packed(String),
+    Emulated(String),
+}
+
+impl Form {
+    /// The form, after "yes, ": `native`, `packed UInt8`, `emulated Int64`.
+    pub fn text(&self) -> String {
+        match self {
+            Form::Native => "native".into(),
+            Form::Packed(t) => format!("packed {t}"),
+            Form::Emulated(t) => format!("emulated {t}"),
+        }
+    }
+
+    /// The form that holds both: the later in the plan, `self` on a tie.
+    fn join(self, other: &Form) -> Form {
+        let rank = |f: &Form| match f {
+            Form::Native => 0,
+            Form::Packed(_) => 1,
+            Form::Emulated(_) => 2,
+        };
+        match rank(other) > rank(&self) {
+            true => other.clone(),
+            false => self,
+        }
+    }
 }
 
 impl Unfit {
@@ -134,11 +168,9 @@ impl Unfit {
             Unfit::Type(who, ty, kind) => format!(
                 "{who} is {ty}, {}",
                 match kind {
-                    Scalar::Wide => "and WGSL has no 64-bit integer",
                     Scalar::Float64 => "and WGSL has no 64-bit float",
                     Scalar::Float32 => "and a kernel computes only integers and Bool",
-                    Scalar::Fits | Scalar::Other =>
-                        "not Int32, UInt32, Bool or a read array of one",
+                    Scalar::Other => "not an integer, Bool or a read array of one",
                 }
             ),
             Unfit::Loop(l) => format!("the loop{} is no counter loop", line(l)),
@@ -149,19 +181,19 @@ impl Unfit {
     }
 }
 
-/// One function's verdicts: `None` where it is trap-free and where it is a
-/// kernel.
+/// One function's verdicts: `trap` is `None` where it is trap-free, and
+/// `kernel` is a kernel's form or the first rule it fails.
 #[derive(Debug, Clone)]
 pub struct Verdicts {
     pub id: FnId,
     pub trap: Option<Cause>,
-    pub kernel: Option<Unfit>,
+    pub kernel: Result<Form, Unfit>,
 }
 
 /// The verdicts of each function the root file declares, by its top frame
-/// ([`crate::insight::root_frames`]), in function-table order. `wide`
-/// counts a 64-bit integer as 32-bit, which says what a rewrite to `Int32`
-/// would make a kernel.
+/// ([`crate::insight::root_frames`]), in function-table order. A kernel's
+/// form joins those of its names in order, its result and its callees in
+/// row order.
 ///
 /// A function's own rows give its [`Cause`] first, in row order. Else its
 /// cause is the first call, in row order, into a callee one call nearer to
@@ -169,14 +201,14 @@ pub struct Verdicts {
 /// trap-free when no frame of it reaches a cause: the least fixpoint of
 /// "reaches a cause" is the complement of the greatest of "trap-free", and a
 /// run that traps runs a finite chain of calls to the row that traps.
-pub fn table(program: &Program, world: &World, wide: bool) -> Vec<Verdicts> {
+pub fn table(program: &Program, world: &World) -> Vec<Verdicts> {
     let frames = crate::insight::root_frames(program, world).into_iter();
     let tops: Vec<(FnId, &Body)> = frames
         .filter(|(_, b)| !b.name.contains("@lambda"))
         .collect();
     let graph = Graph::of(program, world, &tops);
     let causes = graph.causes();
-    let unfit = graph.judged(program, world, &causes, Rules::Kernel { wide });
+    let unfit = graph.judged(program, world, &causes, Rules::Kernel);
     (tops.into_iter())
         .filter_map(|(id, b)| {
             let i = *graph.at.get(&b.id?)?;
@@ -439,17 +471,18 @@ impl crate::fixpoint::Lattice for Dist {
 }
 
 /// What [`Graph::judged`] holds a frame to beside an empty effect set, no
-/// trap and no cycle: a kernel's types (`wide` counts a 64-bit integer as
-/// 32-bit), or an erased call's `read` parameters.
+/// trap and no cycle: a kernel's types, or an erased call's `read`
+/// parameters. An erased call needs no form, so its frames pass as
+/// [`Form::Native`].
 #[derive(Clone, Copy)]
 enum Rules {
-    Kernel { wide: bool },
+    Kernel,
     Erased,
 }
 
 impl Graph<'_> {
-    /// Each frame's first rule it fails under `rules`. Frames go by
-    /// component, callees first, so each callee is judged before its
+    /// Each frame's form, or the first rule it fails under `rules`. Frames
+    /// go by component, callees first, so each callee is judged before its
     /// callers; a frame of a cycle fails by its own rules or by the cycle.
     fn judged(
         &self,
@@ -457,30 +490,37 @@ impl Graph<'_> {
         world: &World,
         causes: &[Option<Cause>],
         rules: Rules,
-    ) -> Vec<Option<Unfit>> {
+    ) -> Vec<Result<Form, Unfit>> {
         let edges = self.edges();
-        let mut out: Vec<Option<Unfit>> = vec![None; self.frames.len()];
+        let mut out: Vec<Result<Form, Unfit>> = vec![Ok(Form::Native); self.frames.len()];
         for comp in crate::fixpoint::components(&edges) {
             let cyclic = comp.len() > 1 || edges[comp[0]].contains(&comp[0]);
             for &i in &comp {
                 let (id, b) = self.frames[i];
-                let callee = (self.calls[i].iter()).find(|c| out[c.2].is_some());
                 let own = || match rules {
-                    Rules::Kernel { wide } => unfit_type(program, world, id, b, wide),
-                    Rules::Erased => unfit_param(program, world, id),
+                    Rules::Kernel => kernel_form(program, world, id, b),
+                    Rules::Erased => unfit_param(program, world, id).map_or(Ok(Form::Native), Err),
                 };
                 let called = |c: &Call| match rules {
-                    Rules::Kernel { .. } => Unfit::Callee(c.0.clone(), c.1),
+                    Rules::Kernel => Unfit::Callee(c.0.clone(), c.1),
                     Rules::Erased => Unfit::Stays(c.0.clone(), c.1),
                 };
+                // The first call into a frame that fails, else every
+                // callee's form joined in row order.
+                let callees = |own: Form| {
+                    (self.calls[i].iter()).try_fold(own, |f, c| match &out[c.2] {
+                        Ok(g) => Ok(f.join(g)),
+                        Err(_) => Err(called(c)),
+                    })
+                };
                 out[i] = match world.state_use(id).map(|u| u.effects) {
-                    Some(e) if !e.is_pure() => Some(Unfit::Effects(Some(e))),
-                    None => Some(Unfit::Effects(None)),
-                    Some(_) if causes[i].is_some() => Some(Unfit::Traps),
-                    Some(_) if cyclic => Some(Unfit::Recursive),
+                    Some(e) if !e.is_pure() => Err(Unfit::Effects(Some(e))),
+                    None => Err(Unfit::Effects(None)),
+                    Some(_) if causes[i].is_some() => Err(Unfit::Traps),
+                    Some(_) if cyclic => Err(Unfit::Recursive),
                     Some(_) => own()
-                        .or_else(|| unfit_loop(b))
-                        .or_else(|| callee.map(called)),
+                        .and_then(|f| unfit_loop(b).map_or(Ok(f), Err))
+                        .and_then(callees),
                 };
             }
         }
@@ -568,7 +608,7 @@ pub fn erased(program: &Program, world: &World) -> Erased {
         let i = b.id.and_then(|id| graph.at.get(&id).copied());
         at.insert(
             f,
-            i.map_or(Some(Unfit::Effects(None)), |i| unfit[i].clone()),
+            i.map_or(Some(Unfit::Effects(None)), |i| unfit[i].clone().err()),
         );
     }
     Erased { at }
@@ -595,37 +635,43 @@ fn line_of(s: &St, b: &Body) -> Option<usize> {
     (line > 0).then_some(line)
 }
 
-/// The first parameter, local or result of the frame `b` of row `id` whose
-/// type no kernel holds: the names in order, then the result.
-fn unfit_type(program: &Program, world: &World, id: FnId, b: &Body, wide: bool) -> Option<Unfit> {
+/// The form of the frame `b` of row `id` by its own types, the names in order
+/// and then the result, or the first whose type no kernel holds.
+fn kernel_form(program: &Program, world: &World, id: FnId, b: &Body) -> Result<Form, Unfit> {
     let decls = world.ownership.proto.types();
     let resolve = |t: &Type| vyrn_frontend::types::resolve(t, decls);
     let scalar = |t: &Type| match resolve(t) {
-        Type::Bool | Type::IntN { bits: 32, .. } => Scalar::Fits,
-        Type::Int | Type::IntN { bits: 64, .. } if wide => Scalar::Fits,
-        Type::Int | Type::IntN { bits: 64, .. } => Scalar::Wide,
-        Type::Float32 => Scalar::Float32,
-        Type::Float => Scalar::Float64,
-        _ => Scalar::Other,
+        Type::Bool | Type::IntN { bits: 32, .. } => Ok(Form::Native),
+        t @ Type::IntN { bits: 8 | 16, .. } => Ok(Form::Packed(b.speech().ty(&t).to_string())),
+        t @ (Type::Int | Type::IntN { bits: 64, .. }) => {
+            Ok(Form::Emulated(b.speech().ty(&t).to_string()))
+        }
+        Type::Float32 => Err(Scalar::Float32),
+        Type::Float => Err(Scalar::Float64),
+        _ => Err(Scalar::Other),
     };
+    let mut form = Form::Native;
     for (i, info) in b.names.iter().enumerate() {
         let ty = resolve(&info.ty);
         let read =
             !matches!(&info.borrow_kind, Some(BorrowKind::Param { cap, .. }) if *cap != "read");
         let kind = match ty.elem().filter(|_| ty.is_seq()) {
-            Some(e) => match scalar(e) {
-                Scalar::Fits if !(info.borrow && read) => Scalar::Other,
-                k => k,
-            },
+            Some(e) => scalar(e).and_then(|f| match info.borrow && read {
+                true => Ok(f),
+                false => Err(Scalar::Other),
+            }),
             None => scalar(&ty),
         };
-        if kind != Scalar::Fits {
-            let n = vyrn_frontend::core::Name(i as u32);
-            let who = match info.source.starts_with('@') {
-                true => b.spoken(n).into_owned(),
-                false => format!("`{}`", b.spoken(n)),
-            };
-            return Some(Unfit::Type(who, b.speech().ty(&info.ty).to_string(), kind));
+        match kind {
+            Ok(f) => form = form.join(&f),
+            Err(kind) => {
+                let n = vyrn_frontend::core::Name(i as u32);
+                let who = match info.source.starts_with('@') {
+                    true => b.spoken(n).into_owned(),
+                    false => format!("`{}`", b.spoken(n)),
+                };
+                return Err(Unfit::Type(who, b.speech().ty(&info.ty).to_string(), kind));
+            }
         }
     }
     let row = world.fn_rows().get(id.index());
@@ -637,9 +683,11 @@ fn unfit_type(program: &Program, world: &World, id: FnId, b: &Body, wide: bool) 
         (program.functions.get(f.index())).map(|f| vyrn_frontend::types::substitute(&f.ret, &args));
     let said = |t: &Type| b.speech().ty(t).to_string();
     match ret {
-        Some(t) if scalar(&t) == Scalar::Fits => None,
-        Some(t) => Some(Unfit::Type("the result".into(), said(&t), scalar(&t))),
-        None => Some(Unfit::Type(
+        Some(t) => match scalar(&t) {
+            Ok(f) => Ok(form.join(&f)),
+            Err(kind) => Err(Unfit::Type("the result".into(), said(&t), kind)),
+        },
+        None => Err(Unfit::Type(
             "the result".into(),
             "unknown".into(),
             Scalar::Other,

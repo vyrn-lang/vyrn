@@ -2,7 +2,7 @@
 ///
 /// A library, not a builtin: the direct wasm backend has no `strtod`, so one
 /// Vyrn implementation serves every engine. The only primitives are the
-/// IEEE-754 bit views `floatBits` and `floatFromBits`.
+/// IEEE-754 bit views `float64Bits` and `float64FromBits`.
 ///
 /// The conversion is exact. The decimal stays a digit array, scaled by powers
 /// of two into `[1/2, 1)`; repeated doubling yields the mantissa bits, and the
@@ -209,7 +209,7 @@ fn ldexp(neg: Bool, mIn: Int64, exIn: Int64) -> Float64 {
     let mut ex = exIn
     if m == 0 {
         if neg {
-            return floatFromBits(9223372036854775808)
+            return float64FromBits(9223372036854775808)
         }
         return 0.0
     }
@@ -239,7 +239,7 @@ fn ldexp(neg: Bool, mIn: Int64, exIn: Int64) -> Float64 {
     if neg {
         bits = bits | (UInt64(1) << 63)
     }
-    return floatFromBits(bits)
+    return float64FromBits(bits)
 }
 
 /// `10^k` as an exact `Float64`, for `k` up to 22. Every partial product's odd
@@ -482,7 +482,7 @@ export fn parseUInt64(s: String) -> Option<UInt64> {
 /// ownership analysis frees an `@str` result, so a `.rodata` literal must never
 /// reach it.
 export fn f64Str(x: Float64) -> String {
-    let bits = floatBits(x)
+    let bits = float64Bits(x)
     let neg = (bits >> 63) != 0
     let mut mant = Int64(bits & 4503599627370495) // 2^52 - 1: the fraction field
     let ef = Int64((bits >> 52) & 2047)
@@ -728,27 +728,27 @@ test "floats round to the nearest double, ties to even" {
 /// rounding bug shows in the last mantissa bit.
 test "the mantissa bits are the correctly rounded ones" {
     assertEq(
-        match parseFloat64("0.1") { Some(v) => floatBits(v).toString(), None => "None" },
+        match parseFloat64("0.1") { Some(v) => float64Bits(v).toString(), None => "None" },
         "4591870180066957722",
     )
     // A tie between two doubles: ties-to-even decides it, and round-half-up
     // gets the last bit wrong.
     assertEq(
-        match parseFloat64("9007199254740993") { Some(v) => floatBits(v).toString(), None => "None" },
+        match parseFloat64("9007199254740993") { Some(v) => float64Bits(v).toString(), None => "None" },
         "4845873199050653696",
     )
     assertEq(
-        match parseFloat64("9007199254740995") { Some(v) => floatBits(v).toString(), None => "None" },
+        match parseFloat64("9007199254740995") { Some(v) => float64Bits(v).toString(), None => "None" },
         "4845873199050653698",
     )
     // The smallest subnormal, and half of it, which rounds to zero (to even).
     assertEq(
-        match parseFloat64("5e-324") { Some(v) => floatBits(v).toString(), None => "None" },
+        match parseFloat64("5e-324") { Some(v) => float64Bits(v).toString(), None => "None" },
         "1",
     )
     assertEq(
         match parseFloat64("2.4703282292062327e-324") {
-            Some(v) => floatBits(v).toString(),
+            Some(v) => float64Bits(v).toString(),
             None => "None",
         },
         "0",
@@ -756,13 +756,13 @@ test "the mantissa bits are the correctly rounded ones" {
     // The largest finite double, and the first value that rounds past it.
     assertEq(
         match parseFloat64("1.7976931348623157e308") {
-            Some(v) => floatBits(v).toString(),
+            Some(v) => float64Bits(v).toString(),
             None => "None",
         },
         "9218868437227405311",
     )
     assertEq(
-        match parseFloat64("1.8e308") { Some(v) => floatBits(v).toString(), None => "None" },
+        match parseFloat64("1.8e308") { Some(v) => float64Bits(v).toString(), None => "None" },
         "9218868437227405312",
     )
 }
@@ -772,47 +772,47 @@ test "the mantissa bits are the correctly rounded ones" {
 /// case on the wrong path still fails if its answer is wrong.
 test "the fast path is the correctly rounded one, at its borders" {
     assertEq(
-        match parseFloat64("12345.678") { Some(v) => floatBits(v).toString(), None => "None" },
+        match parseFloat64("12345.678") { Some(v) => float64Bits(v).toString(), None => "None" },
         "4668012722585352536",
     )
     assertEq(
-        match parseFloat64("0.3") { Some(v) => floatBits(v).toString(), None => "None" },
+        match parseFloat64("0.3") { Some(v) => float64Bits(v).toString(), None => "None" },
         "4599075939470750515",
     )
     // 22 is the last exact power of ten, 23 the first inexact one.
     assertEq(
-        match parseFloat64("1e22") { Some(v) => floatBits(v).toString(), None => "None" },
+        match parseFloat64("1e22") { Some(v) => float64Bits(v).toString(), None => "None" },
         "4936209963552724370",
     )
     assertEq(
-        match parseFloat64("1e23") { Some(v) => floatBits(v).toString(), None => "None" },
+        match parseFloat64("1e23") { Some(v) => float64Bits(v).toString(), None => "None" },
         "4950912855330343670",
     )
     assertEq(
-        match parseFloat64("1e-22") { Some(v) => floatBits(v).toString(), None => "None" },
+        match parseFloat64("1e-22") { Some(v) => float64Bits(v).toString(), None => "None" },
         "4277919505920253670",
     )
     assertEq(
-        match parseFloat64("1e-23") { Some(v) => floatBits(v).toString(), None => "None" },
+        match parseFloat64("1e-23") { Some(v) => float64Bits(v).toString(), None => "None" },
         "4262707295203537489",
     )
     assertEq(
         match parseFloat64("123456789012345e-22") {
-            Some(v) => floatBits(v).toString(),
+            Some(v) => float64Bits(v).toString(),
             None => "None",
         },
         "4488544134225830496",
     )
     assertEq(
         match parseFloat64("999999999999999e22") {
-            Some(v) => floatBits(v).toString(),
+            Some(v) => float64Bits(v).toString(),
             None => "None",
         },
         "5160588303184390419",
     )
     // Negation is exact: the bit pattern is the positive one with the sign bit.
     assertEq(
-        match parseFloat64("-12345.678") { Some(v) => floatBits(v).toString(), None => "None" },
+        match parseFloat64("-12345.678") { Some(v) => float64Bits(v).toString(), None => "None" },
         "13891384759440128344",
     )
 }
@@ -833,7 +833,7 @@ test "the six places are the exact ones, rounded half to even" {
     assertEq(f64Str(0.9999999), "1.000000")
     assertEq(f64Str(-0.9999999), "-1.000000")
     // The sign of a zero survives.
-    assertEq(f64Str(floatFromBits(9223372036854775808)), "-0.000000")
+    assertEq(f64Str(float64FromBits(9223372036854775808)), "-0.000000")
 }
 
 test "the extremes print as the backends spell them" {

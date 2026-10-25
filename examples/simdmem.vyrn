@@ -31,10 +31,10 @@ fn select(m: Mask32x4, a: F32x4, b: F32x4) -> F32x4 {
 fn abs(v: F32x4) -> F32x4 {
     let mask: UInt64 = 9223372036854775807
     return F32x4(
-        Float32(floatFromBits(floatBits(Float64(v.lane(0))) & mask)),
-        Float32(floatFromBits(floatBits(Float64(v.lane(1))) & mask)),
-        Float32(floatFromBits(floatBits(Float64(v.lane(2))) & mask)),
-        Float32(floatFromBits(floatBits(Float64(v.lane(3))) & mask)),
+        Float32(float64FromBits(float64Bits(Float64(v.lane(0))) & mask)),
+        Float32(float64FromBits(float64Bits(Float64(v.lane(1))) & mask)),
+        Float32(float64FromBits(float64Bits(Float64(v.lane(2))) & mask)),
+        Float32(float64FromBits(float64Bits(Float64(v.lane(3))) & mask)),
     )
 }
 

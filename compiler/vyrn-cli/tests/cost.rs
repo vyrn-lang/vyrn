@@ -105,8 +105,9 @@ fn a_function_that_is_not_trap_free_names_its_first_cause() {
     holds("traps", "compiler/vyrn-cli/tests/cost/traps.vyrn");
 }
 
-/// Each rule a function fails as a kernel, once and in the order checked, and two kernels: one
-/// with 32-bit integers alone, one with a counter loop and a `read` array.
+/// Each rule a function fails as a kernel, once and in the order checked, and a kernel of each
+/// form: native with 32-bit integers alone and with a counter loop and a `read` array, packed,
+/// emulated, and emulated by a callee's form.
 #[test]
 fn a_function_that_is_no_kernel_names_its_first_rule() {
     holds("kernels", "compiler/vyrn-cli/tests/cost/kernels.vyrn");

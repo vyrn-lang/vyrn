@@ -37,8 +37,8 @@ fn main() -> Int64
        loop 1   allocates `String` x3
 summary: allocating rows 20 (9 in loops), growing rows 6 (5 in loops), copies 5 (4 in loops), checks kept 1 (1 in loops), checks proved 20 (15 in loops)
   namedFragments: trap-free: yes; kernel: no, its effect set is alloc
-  code: trap-free: yes; kernel: no, `b` is UInt8, not Int32, UInt32, Bool or a read array of one
-  modulusOf: trap-free: yes; kernel: no, `k` is Int64, and WGSL has no 64-bit integer
+  code: trap-free: yes; kernel: yes, emulated Int64
+  modulusOf: trap-free: yes; kernel: yes, emulated Int64
   thirdSequence: trap-free: yes; kernel: no, its effect set is alloc, read-input
   countKmers: trap-free: no, it calls `panic` at line 48; kernel: no, its effect set is alloc, module-state, trap
   unpack: trap-free: no, it keeps an index check at line 73; kernel: no, its effect set is alloc

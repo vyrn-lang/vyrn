@@ -131,7 +131,7 @@ fn f64str_is_byte_identical_to_rusts_own_formatter() {
 
     let calls: String = corpus
         .iter()
-        .map(|b| format!("    print(f64Str(floatFromBits({b})))\n"))
+        .map(|b| format!("    print(f64Str(float64FromBits({b})))\n"))
         .collect();
     let src = format!(
         "import {{ f64Str }} from \"std/num\"\nfn main() -> Int64 {{\n{calls}    return 0\n}}\n"
@@ -312,7 +312,7 @@ fn parsefloat64_is_bit_identical_to_rusts_own_parser() {
         .iter()
         .map(|s| {
             format!(
-                "    print(match parseFloat64(\"{}\") {{ Some(v) => floatBits(v).toString(), None => \"None\" }})\n",
+                "    print(match parseFloat64(\"{}\") {{ Some(v) => float64Bits(v).toString(), None => \"None\" }})\n",
                 s.replace('\\', "\\\\").replace('"', "\\\"")
             )
         })

@@ -295,12 +295,16 @@ compile, except `--contract`.
   limit, or a failure inside a builtin with an I/O effect. `kernel:` says
   whether a GPU could run it, by these rules in this order: its effect set
   is empty; it is trap-free; it is in no cycle of the call graph; every
-  parameter, local and result is `Int32`, `UInt32` or `Bool`, or a `read`
-  array of one, so `Int64`, `Float32` and `Float64` are named reasons; every
-  loop is a counter loop; and every callee is a kernel. A counter loop opens
-  with `while k < c`, where `c` is a literal or a value the loop does not
-  write, and each turn steps `k` by a positive literal, its only write. The
-  report emits nothing for a GPU.
+  parameter, local and result is an integer or `Bool`, or a `read` array of
+  one, so `Float32` and `Float64` are named reasons; every loop is a counter
+  loop; and every callee is a kernel. Its `yes` names the form the kernel
+  needs on a GPU and the first type that needs it: `native` for 32-bit
+  integers and `Bool`, `packed` for 8- and 16-bit integers held in `u32`
+  words, and `emulated` for 64-bit integers held as two `u32` words, as in
+  `kernel: yes, emulated Int64`. A callee's form counts, so the type may be a
+  callee's. A counter loop opens with `while k < c`, where `c` is a literal
+  or a value the loop does not write, and each turn steps `k` by a positive
+  literal, its only write. The report emits nothing for a GPU.
 - `vyrn why --provenance <file>`: per function of the file that returns an
   array, which positions of its array parameters the result's positions read,
   such as ``identity+fresh(end) pointwise, from `path` ``. The class is

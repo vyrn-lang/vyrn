@@ -1,1 +1,1 @@
-call_floatbits.vyrn:1:0: `floatBits` argument 1 expects Float64, found Int64
+call_floatbits.vyrn:1:0: `float64Bits` argument 1 expects Float64, found Int64

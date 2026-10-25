@@ -41,7 +41,7 @@ export fn pi() -> Float64 {
 /// `x` rounded toward zero to a whole number. Exact. A zero keeps its sign,
 /// and an infinity or a NaN is returned as it is.
 export fn trunc(x: Float64) -> Float64 {
-    let bits = floatBits(x)
+    let bits = float64Bits(x)
     let e = Int64((bits >> 52) & 2047) - 1023
     // From 2^52 up every `Float64` is whole; 1024 is an infinity or a NaN.
     if e >= 52 {
@@ -49,10 +49,10 @@ export fn trunc(x: Float64) -> Float64 {
     }
     let sign: UInt64 = 9223372036854775808
     if e < 0 {
-        return floatFromBits(bits & sign)
+        return float64FromBits(bits & sign)
     }
     let fraction: UInt64 = 4503599627370495
-    return floatFromBits(bits & ~(fraction >> UInt64(e)))
+    return float64FromBits(bits & ~(fraction >> UInt64(e)))
 }
 
 /// The greatest whole number at or below `x`. Exact, with `trunc`'s zeros,
@@ -182,7 +182,7 @@ export fn exp(x: Float64) -> Float64 {
 /// The natural logarithm of `x`. Within 1 ulp. Zero gives -infinity, a
 /// negative `x` or NaN gives NaN, and infinity gives infinity.
 export fn log(x: Float64) -> Float64 {
-    let mut ui = floatBits(x)
+    let mut ui = float64Bits(x)
     let mut hx = UInt32(ui >> 32)
     let mut k: Int32 = 0
     if hx < 1048576 || (hx >> 31) != 0 {
@@ -194,7 +194,7 @@ export fn log(x: Float64) -> Float64 {
         }
         // A subnormal: scale it by 2^54 into the normal range.
         k = -54
-        ui = floatBits(x * 18014398509481984.0)
+        ui = float64Bits(x * 18014398509481984.0)
         hx = UInt32(ui >> 32)
     } else if hx >= 2146435072 {
         return x
@@ -206,7 +206,7 @@ export fn log(x: Float64) -> Float64 {
     k = k + Int32(hx >> 20) - 1023
     hx = (hx & 1048575) + 1072079006
     let low: UInt64 = 4294967295
-    let f = floatFromBits((UInt64(hx) << 32) | (ui & low)) - 1.0
+    let f = float64FromBits((UInt64(hx) << 32) | (ui & low)) - 1.0
     let hfsq = 0.5 * f * f
     let s = f / (2.0 + f)
     let z = s * s
@@ -451,9 +451,9 @@ export fn atan2(y: Float64, x: Float64) -> Float64 {
     }
     let pi = 3.141592653589793
     let piLo = 0.00000000000000012246467991473532
-    let mut ix = UInt32(floatBits(x) >> 32)
+    let mut ix = UInt32(float64Bits(x) >> 32)
     let lx = loWord(x)
-    let mut iy = UInt32(floatBits(y) >> 32)
+    let mut iy = UInt32(float64Bits(y) >> 32)
     let ly = loWord(y)
     if ((ix - 1072693248) | lx) == 0 {
         return atan(y)
@@ -641,7 +641,7 @@ fn reducePio2Large(x: Float64) -> Quadrant {
     // that let the window start before the binary point.
     let twoOverPi: Array<UInt64, 40> = [0, 0, 2734261102, 1313084713, 4230436817, 4113882560, 3680671129, 1011060801, 4266746795, 3736847713, 3072618042, 1112396512, 105459434, 164729372, 4263373596, 2972297022, 3900847605, 784024708, 3919343654, 3026157121, 965858873, 2203269620, 2625920907, 3187222587, 536385535, 3724908559, 4012839307, 1510632735, 1832287951, 667617719, 1330003814, 2657085997, 1965537991, 3957715323, 1023883767, 2320667370, 1811636145, 529358088, 1443049542, 4235946923]
     let mask: UInt64 = 4294967295
-    let bits = floatBits(x)
+    let bits = float64Bits(x)
     let fraction: UInt64 = 4503599627370495
     let m = (bits & fraction) | (fraction + 1)
     // The window starts e + 62 bits into the padded table, and e >= -32.
@@ -725,42 +725,42 @@ fn reducePio2Large(x: Float64) -> Quadrant {
 // The high word of `x`'s encoding, fdlibm's view: sign, exponent and the
 // top 20 fraction bits.
 fn hiWord(x: Float64) -> Int32 {
-    return Int32(floatBits(x) >> 32)
+    return Int32(float64Bits(x) >> 32)
 }
 
 fn loWord(x: Float64) -> UInt32 {
-    return UInt32(floatBits(x))
+    return UInt32(float64Bits(x))
 }
 
 // `x` with its low word cleared, so the product of two such is exact.
 fn zeroLo(x: Float64) -> Float64 {
     let high: UInt64 = 18446744069414584320
-    return floatFromBits(floatBits(x) & high)
+    return float64FromBits(float64Bits(x) & high)
 }
 
 fn withHi(x: Float64, hi: Int32) -> Float64 {
     let low: UInt64 = 4294967295
-    return floatFromBits((UInt64(UInt32(hi)) << 32) | (floatBits(x) & low))
+    return float64FromBits((UInt64(UInt32(hi)) << 32) | (float64Bits(x) & low))
 }
 
 fn absF(x: Float64) -> Float64 {
     let magnitude: UInt64 = 9223372036854775807
-    return floatFromBits(floatBits(x) & magnitude)
+    return float64FromBits(float64Bits(x) & magnitude)
 }
 
 fn infinity() -> Float64 {
-    return floatFromBits(9218868437227405312)
+    return float64FromBits(9218868437227405312)
 }
 
 fn notANumber() -> Float64 {
-    return floatFromBits(9221120237041090560)
+    return float64FromBits(9221120237041090560)
 }
 
 // `x * 2^n`, rounded once: a subnormal result is scaled in two steps.
 fn scalbn(x: Float64, n0: Int32) -> Float64 {
     // 2^1023, and 2^-969 = 2^-1022 * 2^53.
-    let up = floatFromBits(9214364837600034816)
-    let down = floatFromBits(243194379878006784)
+    let up = float64FromBits(9214364837600034816)
+    let down = float64FromBits(243194379878006784)
     let mut y = x
     let mut n = n0
     if n > 1023 {
@@ -784,7 +784,7 @@ fn scalbn(x: Float64, n0: Int32) -> Float64 {
             }
         }
     }
-    return y * floatFromBits(UInt64(n + 1023) << 52)
+    return y * float64FromBits(UInt64(n + 1023) << 52)
 }
 
 test "sine hits the values the unit circle fixes" {
@@ -816,8 +816,8 @@ test "abs saturates at the minimum instead of wrapping negative" {
 // Each encoding maps onto one increasing line, with both zeros at 2^63.
 fn ulpsApart(a: Float64, b: Float64) -> UInt64 {
     let sign: UInt64 = 9223372036854775808
-    let ka = if floatBits(a) >= sign { sign - (floatBits(a) - sign) } else { floatBits(a) + sign }
-    let kb = if floatBits(b) >= sign { sign - (floatBits(b) - sign) } else { floatBits(b) + sign }
+    let ka = if float64Bits(a) >= sign { sign - (float64Bits(a) - sign) } else { float64Bits(a) + sign }
+    let kb = if float64Bits(b) >= sign { sign - (float64Bits(b) - sign) } else { float64Bits(b) + sign }
     if ka > kb {
         return ka - kb
     }
@@ -827,24 +827,24 @@ fn ulpsApart(a: Float64, b: Float64) -> UInt64 {
 test "the rounding functions are exact and keep the sign of a zero" {
     let negZero: UInt64 = 9223372036854775808
     let inf = 1.0 / 0.0
-    let largest = floatFromBits(9218868437227405311)
-    let tiny = floatFromBits(1)
+    let largest = float64FromBits(9218868437227405311)
+    let tiny = float64FromBits(1)
     assertEq(trunc(2.7), 2.0)
     assertEq(trunc(-2.7), -2.0)
-    assertEq(floatBits(trunc(-0.5)), negZero)
+    assertEq(float64Bits(trunc(-0.5)), negZero)
     assertEq(floor(2.7), 2.0)
     assertEq(floor(-2.7), -3.0)
     assertEq(floor(-3.0), -3.0)
-    assertEq(floatBits(floor(-0.0)), negZero)
+    assertEq(float64Bits(floor(-0.0)), negZero)
     assertEq(floor(-tiny), -1.0)
     assertEq(ceil(2.1), 3.0)
     assertEq(ceil(-2.7), -2.0)
-    assertEq(floatBits(ceil(-0.5)), negZero)
+    assertEq(float64Bits(ceil(-0.5)), negZero)
     assertEq(ceil(tiny), 1.0)
     assertEq(round(2.5), 3.0)
     assertEq(round(-2.5), -3.0)
     assertEq(round(0.49999999999999994), 0.0)
-    assertEq(floatBits(round(-0.4)), negZero)
+    assertEq(float64Bits(round(-0.4)), negZero)
     assertEq(round(4503599627370495.5), 4503599627370496.0)
     assertEq(round(-4503599627370495.5), -4503599627370496.0)
     assertEq(round(4503599627370497.0), 4503599627370497.0)
@@ -859,8 +859,8 @@ test "the rounding functions are exact and keep the sign of a zero" {
 
 test "exp is within 1 ulp and saturates at its edges" {
     let inf = 1.0 / 0.0
-    let largest = floatFromBits(9218868437227405311)
-    let tiny = floatFromBits(1)
+    let largest = float64FromBits(9218868437227405311)
+    let tiny = float64FromBits(1)
     assertEq(exp(0.0), 1.0)
     assertEq(exp(-0.0), 1.0)
     assertEq(exp(tiny), 1.0)
@@ -872,24 +872,24 @@ test "exp is within 1 ulp and saturates at its edges" {
     assert(exp(0.0 / 0.0) != exp(0.0 / 0.0))
     // The largest argument with a finite result, and the smallest with a
     // nonzero one: a subnormal.
-    assert(ulpsApart(exp(709.782712893384), floatFromBits(9218868437227405098)) <= 1)
+    assert(ulpsApart(exp(709.782712893384), float64FromBits(9218868437227405098)) <= 1)
     assert(ulpsApart(exp(-745.1332191019411), tiny) <= 1)
-    assert(ulpsApart(exp(-708.5), floatFromBits(4060456990316460)) <= 1)
-    assert(ulpsApart(exp(-700.5), floatFromBits(55449777393420802)) <= 1)
-    assert(ulpsApart(exp(-20.25), floatFromBits(4475333236920666683)) <= 1)
+    assert(ulpsApart(exp(-708.5), float64FromBits(4060456990316460)) <= 1)
+    assert(ulpsApart(exp(-700.5), float64FromBits(55449777393420802)) <= 1)
+    assert(ulpsApart(exp(-20.25), float64FromBits(4475333236920666683)) <= 1)
     assert(ulpsApart(exp(-1.0), 0.36787944117144233) <= 1)
     assert(ulpsApart(exp(-0.001), 0.999000499833375) <= 1)
     assert(ulpsApart(exp(0.3), 1.3498588075760032) <= 1)
     assert(ulpsApart(exp(1.0), 2.718281828459045) <= 1)
     assert(ulpsApart(exp(2.5), 12.182493960703473) <= 1)
     assert(ulpsApart(exp(10.0), 22026.465794806718) <= 1)
-    assert(ulpsApart(exp(88.7), floatFromBits(5183439786081234524)) <= 1)
-    assert(ulpsApart(exp(700.5), floatFromBits(9158177991636768450)) <= 1)
+    assert(ulpsApart(exp(88.7), float64FromBits(5183439786081234524)) <= 1)
+    assert(ulpsApart(exp(700.5), float64FromBits(9158177991636768450)) <= 1)
 }
 
 test "log is within 1 ulp, subnormals included" {
     let inf = 1.0 / 0.0
-    let largest = floatFromBits(9218868437227405311)
+    let largest = float64FromBits(9218868437227405311)
     assertEq(log(1.0), 0.0)
     assertEq(log(0.0), -inf)
     assertEq(log(-0.0), -inf)
@@ -898,25 +898,25 @@ test "log is within 1 ulp, subnormals included" {
     assert(log(-inf) != log(-inf))
     assert(log(0.0 / 0.0) != log(0.0 / 0.0))
     assert(ulpsApart(log(largest), 709.782712893384) <= 1)
-    assert(ulpsApart(log(floatFromBits(1)), -744.4400719213812) <= 1)
-    assert(ulpsApart(log(floatFromBits(4503599627370496)), -708.3964185322641) <= 1)
-    assert(ulpsApart(log(floatFromBits(118622047889322841)), -690.7755278982137) <= 1)
+    assert(ulpsApart(log(float64FromBits(1)), -744.4400719213812) <= 1)
+    assert(ulpsApart(log(float64FromBits(4503599627370496)), -708.3964185322641) <= 1)
+    assert(ulpsApart(log(float64FromBits(118622047889322841)), -690.7755278982137) <= 1)
     assert(ulpsApart(log(0.001), -6.907755278982137) <= 1)
     assert(ulpsApart(log(0.5), -0.6931471805599453) <= 1)
     assert(ulpsApart(log(0.9999), -0.00010000500033334732) <= 1)
     assert(ulpsApart(log(1.0001), 0.00009999500033329732) <= 1)
     assert(ulpsApart(log(2.0), 0.6931471805599453) <= 1)
     assert(ulpsApart(log(10.0), 2.302585092994046) <= 1)
-    assert(ulpsApart(log(floatFromBits(6103021453049119613)), 230.25850929940458) <= 1)
-    assert(ulpsApart(log(floatFromBits(9094988921128908188)), 690.7755278982137) <= 1)
-    assert(ulpsApart(log(floatFromBits(70840788657559)), -712.5486158596588) <= 1)
+    assert(ulpsApart(log(float64FromBits(6103021453049119613)), 230.25850929940458) <= 1)
+    assert(ulpsApart(log(float64FromBits(9094988921128908188)), 690.7755278982137) <= 1)
+    assert(ulpsApart(log(float64FromBits(70840788657559)), -712.5486158596588) <= 1)
 }
 
 test "pow is within 1 ulp and exact on whole results" {
     let inf = 1.0 / 0.0
     let nan = 0.0 / 0.0
     let negZero: UInt64 = 9223372036854775808
-    let largest = floatFromBits(9218868437227405311)
+    let largest = float64FromBits(9218868437227405311)
     assertEq(pow(nan, 0.0), 1.0)
     assertEq(pow(1.0, nan), 1.0)
     assert(pow(nan, 1.0) != pow(nan, 1.0))
@@ -926,45 +926,45 @@ test "pow is within 1 ulp and exact on whole results" {
     assertEq(pow(1.5, -inf), 0.0)
     assertEq(pow(0.0, -1.0), inf)
     assertEq(pow(-0.0, -1.0), -inf)
-    assertEq(floatBits(pow(-0.0, 3.0)), negZero)
+    assertEq(float64Bits(pow(-0.0, 3.0)), negZero)
     assertEq(pow(inf, -1.0), 0.0)
     assertEq(pow(-inf, 3.0), -inf)
     assertEq(pow(2.0, 1024.0), inf)
-    assertEq(pow(2.0, -1074.0), floatFromBits(1))
+    assertEq(pow(2.0, -1074.0), float64FromBits(1))
     assertEq(pow(2.0, -1076.0), 0.0)
     assertEq(pow(largest, 1.0), largest)
     assertEq(pow(-2.0, 3.0), -8.0)
     assertEq(pow(10.0, 22.0), 10000000000000000000000.0)
     assertEq(pow(3.0, 33.0), 5559060566555523.0)
-    assert(ulpsApart(pow(largest, 0.5), floatFromBits(6913025428013711359)) <= 1)
+    assert(ulpsApart(pow(largest, 0.5), float64FromBits(6913025428013711359)) <= 1)
     assert(ulpsApart(pow(2.0, 0.5), 1.4142135623730951) <= 1)
     assert(ulpsApart(pow(2.5, 3.7), 29.67413253642086) <= 1)
     assert(ulpsApart(pow(10.0, -3.0), 0.001) <= 1)
-    assert(ulpsApart(pow(0.9, 1000.0), floatFromBits(3922615982779712321)) <= 1)
+    assert(ulpsApart(pow(0.9, 1000.0), float64FromBits(3922615982779712321)) <= 1)
     assert(ulpsApart(pow(1.0000001, 10000000.0), 2.7182816941320818) <= 1)
     assert(ulpsApart(pow(7.0, -2.5), 0.007713560673657699) <= 1)
     assert(ulpsApart(pow(-3.0, 5.0), -243.0) <= 1)
     assert(ulpsApart(pow(-0.5, -7.0), -128.0) <= 1)
-    assert(ulpsApart(pow(123.456, 7.89), floatFromBits(4853815956115198930)) <= 1)
-    assert(ulpsApart(pow(floatFromBits(4457293557087583675), 0.3), 0.0010000000000000002) <= 1)
+    assert(ulpsApart(pow(123.456, 7.89), float64FromBits(4853815956115198930)) <= 1)
+    assert(ulpsApart(pow(float64FromBits(4457293557087583675), 0.3), 0.0010000000000000002) <= 1)
 }
 
 test "tan is within 1 ulp at any finite argument" {
     let inf = 1.0 / 0.0
     let negZero: UInt64 = 9223372036854775808
     assertEq(tan(0.0), 0.0)
-    assertEq(floatBits(tan(-0.0)), negZero)
-    assertEq(tan(floatFromBits(1)), floatFromBits(1))
+    assertEq(float64Bits(tan(-0.0)), negZero)
+    assertEq(tan(float64FromBits(1)), float64FromBits(1))
     assert(tan(inf) != tan(inf))
     assert(tan(0.0 / 0.0) != tan(0.0 / 0.0))
     assert(ulpsApart(tan(-1.0), -1.5574077246549023) <= 1)
     // pi/2 rounded, the largest finite value, 10^22, and the Float64 nearest a
     // multiple of pi/2.
     assert(ulpsApart(tan(1.5707963267948966), 16331239353195370.0) <= 1)
-    assert(ulpsApart(tan(floatFromBits(9218868437227405311)), -0.004962015874444895) <= 1)
+    assert(ulpsApart(tan(float64FromBits(9218868437227405311)), -0.004962015874444895) <= 1)
     assert(ulpsApart(tan(10000000000000000000000.0), -1.6287782256068988) <= 1)
-    assert(ulpsApart(tan(floatFromBits(8432616859780293119)), floatFromBits(14104600760957752886)) <= 1)
-    assert(ulpsApart(tan(floatFromBits(4472406533629990549)), floatFromBits(4472406533629990549)) <= 1)
+    assert(ulpsApart(tan(float64FromBits(8432616859780293119)), float64FromBits(14104600760957752886)) <= 1)
+    assert(ulpsApart(tan(float64FromBits(4472406533629990549)), float64FromBits(4472406533629990549)) <= 1)
     assert(ulpsApart(tan(0.5), 0.5463024898437905) <= 1)
     assert(ulpsApart(tan(0.785), 0.9992039901050427) <= 1)
     assert(ulpsApart(tan(1.0), 1.5574077246549023) <= 1)
@@ -973,7 +973,7 @@ test "tan is within 1 ulp at any finite argument" {
     assert(ulpsApart(tan(-100.0), 0.5872139151569291) <= 1)
     assert(ulpsApart(tan(12345.678), -0.9914971407432149) <= 1)
     assert(ulpsApart(tan(10000000000.0), -0.5583496378112418) <= 1)
-    assert(ulpsApart(tan(floatFromBits(9094988921128908188)), 1.4214488238747245) <= 1)
+    assert(ulpsApart(tan(float64FromBits(9094988921128908188)), 1.4214488238747245) <= 1)
 }
 
 test "atan2 is within 2 ulps and takes the quadrant from the signs" {
@@ -981,7 +981,7 @@ test "atan2 is within 2 ulps and takes the quadrant from the signs" {
     let negZero: UInt64 = 9223372036854775808
     let pi = 3.141592653589793
     assertEq(atan2(0.0, 1.0), 0.0)
-    assertEq(floatBits(atan2(-0.0, 1.0)), negZero)
+    assertEq(float64Bits(atan2(-0.0, 1.0)), negZero)
     assertEq(atan2(0.0, -1.0), pi)
     assertEq(atan2(-0.0, -1.0), -pi)
     assertEq(atan2(1.0, 0.0), pi / 2.0)
@@ -990,17 +990,17 @@ test "atan2 is within 2 ulps and takes the quadrant from the signs" {
     assertEq(atan2(-inf, -inf), -3.0 * pi / 4.0)
     assertEq(atan2(1.0, inf), 0.0)
     assertEq(atan2(1.0, -inf), pi)
-    assertEq(atan2(floatFromBits(9218868437227405311), floatFromBits(1)), pi / 2.0)
-    assertEq(atan2(floatFromBits(1), floatFromBits(9218868437227405311)), 0.0)
+    assertEq(atan2(float64FromBits(9218868437227405311), float64FromBits(1)), pi / 2.0)
+    assertEq(atan2(float64FromBits(1), float64FromBits(9218868437227405311)), 0.0)
     assert(atan2(0.0 / 0.0, 1.0) != atan2(0.0 / 0.0, 1.0))
     assert(ulpsApart(atan2(1.0, 2.0), 0.4636476090008061) <= 2)
     assert(ulpsApart(atan2(-1.0, 2.0), -0.4636476090008061) <= 2)
     assert(ulpsApart(atan2(1.0, -2.0), 2.677945044588987) <= 2)
     assert(ulpsApart(atan2(-1.0, -2.0), -2.677945044588987) <= 2)
-    assert(ulpsApart(atan2(3.0, floatFromBits(4457293557087583675)), 1.5707963267615632) <= 2)
+    assert(ulpsApart(atan2(3.0, float64FromBits(4457293557087583675)), 1.5707963267615632) <= 2)
     assert(ulpsApart(atan2(0.5, 0.5), 0.7853981633974483) <= 2)
     assert(ulpsApart(atan2(100.0, -0.01), 1.5708963267945633) <= 2)
     assert(ulpsApart(atan2(-7.0, 3.0), -1.1659045405098132) <= 2)
-    assert(ulpsApart(atan2(floatFromBits(118622047889322841), floatFromBits(268231017195544690)), floatFromBits(4457293557087583674)) <= 2)
-    assert(ulpsApart(atan2(2.0, floatFromBits(4918767769633086136)), floatFromBits(4299526033431425064)) <= 2)
+    assert(ulpsApart(atan2(float64FromBits(118622047889322841), float64FromBits(268231017195544690)), float64FromBits(4457293557087583674)) <= 2)
+    assert(ulpsApart(atan2(2.0, float64FromBits(4918767769633086136)), float64FromBits(4299526033431425064)) <= 2)
 }

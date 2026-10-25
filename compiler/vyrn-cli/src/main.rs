@@ -1627,14 +1627,15 @@ fn why_cost(flags: GlobalFlags, file: &str) -> Outcome {
         count(kept, "checks kept"),
         count(proved, "checks proved"),
     );
-    for v in vyrn_lower::verdict::table(&program, &world, false) {
+    for v in vyrn_lower::verdict::table(&program, &world) {
         let f = &program.functions[v.id.index()];
         let trap = v
             .trap
             .map_or("yes".into(), |c| format!("no, {}", c.text(true)));
-        let kernel = v
-            .kernel
-            .map_or("yes".into(), |u| format!("no, {}", u.text(true)));
+        let kernel = match v.kernel {
+            Ok(form) => format!("yes, {}", form.text()),
+            Err(u) => format!("no, {}", u.text(true)),
+        };
         let name = program.spellings.written(&f.name);
         println!("  {name}: trap-free: {trap}; kernel: {kernel}");
     }

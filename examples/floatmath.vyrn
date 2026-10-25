@@ -4,12 +4,12 @@
 import { exp, log, pow, tan, atan2, trunc, floor, ceil, round } from "std/math"
 
 fn show(x: Float64) {
-    print(floatBits(x))
+    print(float64Bits(x))
 }
 
 fn main() -> Int64 {
-    let tiny = floatFromBits(1)
-    let largest = floatFromBits(9218868437227405311)
+    let tiny = float64FromBits(1)
+    let largest = float64FromBits(9218868437227405311)
     show((2.0).sqrt())
     show(tiny.sqrt())
     show(largest.sqrt())
