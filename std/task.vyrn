@@ -36,6 +36,33 @@ export fn race<A, B>(first: consume A, second: consume B) -> Race<A, B> {
     return First(first)
 }
 
+/// Calls `f` on every element of `xs` at once and waits for every call: the
+/// results, in index order. The calls start in index order, each to its first
+/// wait. If one is cancelled, the others are, and `each` is cancelled.
+export fn each<T, R>(xs: Array<T>, f: fn(T) -> R) -> Array<R> {
+    return await eachUpTo(xs, xs.length, f)
+}
+
+/// `each` over the first `n` elements of `xs`.
+fn eachUpTo<T, R>(xs: Array<T>, n: Int64, f: fn(T) -> R) -> Array<R> {
+    if n == 0 {
+        return []
+    }
+    let r = await both(eachUpTo(xs, n - 1, f), f(xs[n - 1]))
+    let mut out = consume r.first
+    out.push(consume r.second)
+    return out
+}
+
+/// Waits for `f()` at most `ms` milliseconds: `Some` of its result, or `None`
+/// when the time ran out first, and `f` was cancelled where it waited.
+export fn timeout<T>(ms: Int64, f: fn() -> T) -> Option<T> {
+    return match await race(f(), sleep(ms)) {
+        First(v) => Some(v),
+        Second(_) => None,
+    }
+}
+
 // The run queue. The host owns the event loop and delivers each completion
 // through `wake`, which the emitter exports as `__vyrn_wake`; the module runs
 // the woken tasks in wake order, so the same deliveries print the same bytes

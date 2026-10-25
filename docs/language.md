@@ -306,9 +306,9 @@ import { both, race, sleep, Race } from "std/task"
 
 fn page(id: Int64) -> String {
     let r = await both(getPosts(id), getLikes(id))
-    match await race(render(r.first, r.second), sleep(2000)) {
-        First(html) => return html,
-        Second(_) => return "timed out",
+    return match await race(render(r.first, r.second), sleep(2000)) {
+        First(html) => html,
+        Second(_) => "timed out",
     }
 }
 ```
@@ -320,6 +320,8 @@ fn page(id: Int64) -> String {
 - A branch is a call of a function. Anything else is refused: ``each branch of `both` is a call of a function, which `both` starts and waits for``.
 - A branch that does not wait finishes when it starts. `await` on a `both` or `race` whose branches do not wait is refused, as it is on any call that does not wait; without `await`, `both(f(), g())` calls `f`, then `g`, and `race` returns `First` of the first.
 - No task outlives the call that started it: `both` and `race` return only after each branch finished or was cancelled.
+
+`each(xs, f)` calls `f` on every element at once and returns the results in index order; `timeout(ms, f)` is `race(f(), sleep(ms))`, giving `Some` of the result or `None`. Both are `std/task` code over `both` and `race`, so their calls start in order and a timed-out call is cancelled where it waits. `f` is a function, because an argument call would run before `each` or `timeout` starts: `await each(urls, fetchPage)`, `await timeout(500, fetchHome)`. Each needs an `f` that waits.
 - A waiting lambda, an `await` inside a `region` or through a function value, and a waiting export that returns a value do not build yet: ``waiting code does not build yet: `main` waits at line 10``.
 
 ### Function types

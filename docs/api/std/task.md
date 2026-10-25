@@ -56,3 +56,22 @@ other where it waits: `await race(f(a), sleep(500))`.
 that has finished when the starts end wins; after that, the first to
 finish. A finished loser's result is released. Without `await`, no branch
 waits, and the first wins.
+
+## each
+
+```vyrn
+fn each<T, R>(xs: Array<T>, f: fn(T) -> R) -> Array<R>
+```
+
+Calls `f` on every element of `xs` at once and waits for every call: the
+results, in index order. The calls start in index order, each to its first
+wait. If one is cancelled, the others are, and `each` is cancelled.
+
+## timeout
+
+```vyrn
+fn timeout<T>(ms: Int64, f: fn() -> T) -> Option<T>
+```
+
+Waits for `f()` at most `ms` milliseconds: `Some` of its result, or `None`
+when the time ran out first, and `f` was cancelled where it waited.

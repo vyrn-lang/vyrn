@@ -1,0 +1,38 @@
+// `each` runs one waiting call per element at once and returns the results
+// in index order; `timeout` races a call against a timer. Both are `std/task`
+// code over `both` and `race`, so their calls start in order and a timed-out
+// call is cancelled where it waits, releasing what it holds.
+import { each, timeout, sleep } from "std/task"
+
+fn fetch(ms: Int64) -> String {
+    let url = "/item/\{ms}"
+    print("start \{url}")
+    await sleep(ms)
+    print("end \{url}")
+    return "\{url}: \{ms * 2}"
+}
+
+fn slow() -> String {
+    let held = "a slow answer"
+    await sleep(60)
+    return held
+}
+
+fn quick() -> String {
+    await sleep(3)
+    return "a quick answer"
+}
+
+fn main() -> Int64 {
+    let delays: Array<Int64> = [30, 10, 20]
+    let pages = await each(delays, fetch)
+    for p in pages {
+        print(p)
+    }
+    let none: Array<Int64> = []
+    let empty = await each(none, fetch)
+    print("\{empty.length} pages from none")
+    print(await timeout(20, slow) ?? "timed out")
+    print(await timeout(20, quick) ?? "timed out")
+    return 0
+}

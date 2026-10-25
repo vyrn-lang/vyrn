@@ -449,6 +449,10 @@ examples/fannkuchperm.vyrn	zeroes	yes	no, its effect set is alloc
 examples/fannkuchperm.vyrn	foldCount	yes	no, its effect set is alloc
 examples/fannkuchperm.vyrn	fannkuch	yes	no, its effect set is alloc
 examples/fannkuchperm.vyrn	main	no, it keeps a where clause check	no, its effect set is alloc, write-output, module-state
+examples/fanout.vyrn	fetch	yes	no, its effect set is alloc, write-output, waits
+examples/fanout.vyrn	slow	yes	no, its effect set is waits
+examples/fanout.vyrn	quick	yes	no, its effect set is waits
+examples/fanout.vyrn	main	no, it calls `timeout`, which is not trap-free	no, its effect set is alloc, write-output, waits
 examples/fasta.vyrn	nextRandom	yes	no, its effect set is module-state
 examples/fasta.vyrn	cumulative	yes	no, its effect set is alloc
 examples/fasta.vyrn	pick	no, it keeps an index check	no, its effect set is module-state
