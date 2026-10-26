@@ -43,6 +43,17 @@ wasmtime = { version = "47", default-features = false, features = [
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 webpki-root-certs = "1"
 
+# The native host's TLS: `build.rs` builds rustls-ffi's static library with a
+# cargo of its own on this workspace (`cargo rustc -p rustls-ffi`). That cargo
+# finds the package's features only on a normal dependency: as a build- or
+# dev-dependency, or under a target that never matches, cargo 1.98 panics in its
+# feature resolver. No code uses the crate, so nothing of it links into `vyrn`.
+# The same rustls and provider as above, so both hosts verify alike.
+rustls-ffi = { version = "=0.15.7", default-features = false, features = ["ring"] }
+
+[build-dependencies]
+webpki-root-certs = "1"
+
 # `allocs` wraps the allocator in a per-phase counter (`VYRN_BUILD_PROFILE=allocs`).
 # Off by default: the counter's load in every allocation cost 2.5% to 3.7% of a
 # build. `tests/compiler_scaling.rs` and `scripts/check-allocs.sh` need it.

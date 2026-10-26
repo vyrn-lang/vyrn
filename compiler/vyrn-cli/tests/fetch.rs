@@ -423,3 +423,51 @@ fn an_https_request_answers_only_when_its_certificate_verifies() {
     let out = run(&bytes, quiet(false, None)).expect("the module runs");
     assert_eq!(seen(&out), (0, "error: untrusted\n".into(), String::new()));
 }
+
+/// A native build verifies as the embedded engine does: built with the test's root
+/// (`VYRN_TEST_TLS_ROOT`, which the build announces) it prints what `vyrn run` prints with
+/// that root, and built without it the certificate does not verify.
+#[test]
+fn a_native_https_request_answers_as_the_engine_does() {
+    deadline("a_native_https_request_answers_as_the_engine_does", 240);
+    let port = tls_upstream();
+    let dir = scratch("fetch-tls-native");
+    let src = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fetch/tls.vyrn"),
+    )
+    .expect("the program")
+    .replace(
+        "\"https://127.0.0.1:1\"",
+        &format!("\"https://127.0.0.1:{port}\""),
+    );
+    let path = dir.join("tls.vyrn");
+    std::fs::write(&path, src).expect("write the program");
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fetch/root.pem");
+    let build = |exe: &std::path::Path, root: Option<&std::path::Path>| {
+        let mut cmd = vyrn();
+        cmd.arg("build").arg(&path).arg("-o").arg(exe);
+        match root {
+            Some(r) => cmd.env("VYRN_TEST_TLS_ROOT", r),
+            None => cmd.env_remove("VYRN_TEST_TLS_ROOT"),
+        };
+        let out = cmd.output().expect("run vyrn build");
+        assert!(out.status.success(), "{}", norm(&out.stderr));
+        norm(&out.stderr)
+    };
+    let trusted = dir.join("trusted.exe");
+    let said = build(&trusted, Some(&root));
+    assert!(
+        said.contains("trusts an extra TLS root from VYRN_TEST_TLS_ROOT"),
+        "{said}"
+    );
+    let out = std::process::Command::new(&trusted)
+        .output()
+        .expect("run the binary");
+    assert_eq!(say(&out), "exit Some(0)\nbody: secure hello\n");
+    let plain = dir.join("plain.exe");
+    assert_eq!(build(&plain, None), "");
+    let out = std::process::Command::new(&plain)
+        .output()
+        .expect("run the binary");
+    assert_eq!(say(&out), "exit Some(0)\nerror: untrusted\n");
+}

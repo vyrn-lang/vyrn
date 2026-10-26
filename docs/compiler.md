@@ -537,6 +537,17 @@ it holds the object's SHA-256 (the header's length), so a damaged entry is
 rebuilt. The first build of a toolchain fills the directory at the cost of a
 build without the cache; a directory of a retired toolchain is deleted by hand.
 
+A module that imports `vyrn_wait.fetch` also links the client `wasi_net.c`,
+rustls-ffi's static library and an object of the roots. `vyrn-cli/build.rs`
+builds the library with fat LTO through a cargo of its own, takes `rustls.h`
+from rustls-ffi's include directory and writes the roots of
+`webpki-root-certs` as PEM; `vyrn` embeds the three, so a user's machine needs
+no cargo. The library and header names carry `VYRN_TLS_KEY`, a hash of
+the three files. The client's object name hashes that key and its text; the
+roots' object name hashes the PEM, so a `VYRN_TEST_TLS_ROOT` build gets an
+entry of its own. `wasi_net.c` loads the PEM through rustls-ffi's
+`rustls_root_cert_store_builder_add_pem`.
+
 ### Host waits
 
 A host wait is a builtin of `Spec::HostWait`: `hostSleep` (`std/task`) and

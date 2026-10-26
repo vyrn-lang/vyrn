@@ -9,7 +9,12 @@
    byte length in decimal, `:`, its bytes) with the headers sorted by name and
    combined. Each request runs on a thread of its own; `vyrn_net_wait` hands
    the replies to the event loop in the order they finished. It knows nothing
-   of the program. */
+   of the program.
+
+   `https://` is TLS through rustls-ffi with the `ring` provider, the same
+   rustls the embedded engine runs. It trusts the PEM bundle the driver links
+   as `vyrn_roots_pem`: the Mozilla roots of `webpki-root-certs`, the embedded
+   engine's set. Nothing turns the verification off. */
 #ifdef _WIN32
 #define _CRT_SECURE_NO_WARNINGS
 #include <winsock2.h>
@@ -36,11 +41,17 @@ typedef int sock_t;
 #else
 #define SEND_FLAGS 0
 #endif
+#include <errno.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include "rustls.h"
+
+/* The roots, PEM: an object the driver compiles from its bundle. */
+extern const unsigned char vyrn_roots_pem[];
+extern const size_t vyrn_roots_pem_len;
 
 /* A growable byte buffer; `oom` ends the process, as the host's other
    allocations do. */
@@ -126,7 +137,8 @@ static int utf8(const uint8_t* p, size_t n) {
 #define BAD_URL 1
 #define UNREACHABLE 2
 #define BAD_RESPONSE 3
-static const char* OUTCOME[] = {"ok", "badUrl", "unreachable", "badResponse"};
+#define UNTRUSTED 4
+static const char* OUTCOME[] = {"ok", "badUrl", "unreachable", "badResponse", "untrusted"};
 
 /* One request: the event loop's id for it, its bytes, the connection a
    cancellation shuts down, and the reply once it finished. After a
@@ -160,14 +172,76 @@ static uint64_t g_finished;
 /* Buffered reads over a connection. */
 struct rd {
     sock_t s;
+    struct rustls_connection* tls; /* NULL for `http://` */
     uint8_t b[16384];
     size_t at, n;
 };
 
+/* rustls-ffi's network callbacks over the socket at `ud`. */
+static rustls_io_result sock_read(void* ud, uint8_t* buf, size_t n, size_t* out_n) {
+    int got = recv(*(sock_t*)ud, (char*)buf, (int)(n > 1u << 30 ? 1u << 30 : n), 0);
+    if (got < 0) return EIO;
+    *out_n = (size_t)got;
+    return 0;
+}
+
+static rustls_io_result sock_write(void* ud, const uint8_t* buf, size_t n, size_t* out_n) {
+    int k = send(*(sock_t*)ud, (const char*)buf, (int)(n > 1u << 30 ? 1u << 30 : n), SEND_FLAGS);
+    if (k < 0) return EIO;
+    *out_n = (size_t)k;
+    return 0;
+}
+
+/* Sends every TLS byte rustls holds; 0, or -1 on an error. */
+static int tls_flush(struct rd* r) {
+    while (rustls_connection_wants_write(r->tls)) {
+        size_t n = 0;
+        if (rustls_connection_write_tls(r->tls, sock_write, &r->s, &n) || !n) return -1;
+    }
+    return 0;
+}
+
+/* Refills `r->b`: the byte count, 0 at the end of the stream (a TLS peer's
+   close_notify), -1 on an error, a TLS peer that closed without one
+   included, as the embedded engine's rustls reads it. */
+static int fill(struct rd* r) {
+    if (!r->tls) {
+        int got = recv(r->s, (char*)r->b, (int)sizeof r->b, 0);
+        return got < 0 ? -1 : got;
+    }
+    for (;;) {
+        size_t n = 0;
+        rustls_result rr = rustls_connection_read(r->tls, r->b, sizeof r->b, &n);
+        if (rr == RUSTLS_RESULT_OK) return (int)n;
+        if (rr != RUSTLS_RESULT_PLAINTEXT_EMPTY) return -1;
+        size_t got = 0;
+        if (rustls_connection_read_tls(r->tls, sock_read, &r->s, &got)) return -1;
+        if (rustls_connection_process_new_packets(r->tls) != RUSTLS_RESULT_OK || tls_flush(r)) return -1;
+    }
+}
+
+/* Writes all of `p` as plaintext; 0, or -1 on an error. */
+static int put_all(struct rd* r, const uint8_t* p, size_t n) {
+    while (n) {
+        size_t k = 0;
+        if (r->tls) {
+            if (rustls_connection_write(r->tls, p, n, &k) != RUSTLS_RESULT_OK || tls_flush(r))
+                return -1;
+        } else {
+            int sent = send(r->s, (const char*)p, (int)(n > 1u << 30 ? 1u << 30 : n), SEND_FLAGS);
+            if (sent <= 0) return -1;
+            k = (size_t)sent;
+        }
+        p += k;
+        n -= k;
+    }
+    return 0;
+}
+
 /* The next byte, or -1 at the end of the stream, -2 on an error. */
 static int rd_byte(struct rd* r) {
     if (r->at == r->n) {
-        int got = recv(r->s, (char*)r->b, (int)sizeof r->b, 0);
+        int got = fill(r);
         if (got <= 0) return got ? -2 : -1;
         r->at = 0;
         r->n = (size_t)got;
@@ -197,7 +271,7 @@ static int rd_line(struct rd* r, struct buf* line) {
 static int rd_exact(struct rd* r, struct buf* out, size_t n) {
     while (n) {
         if (r->at == r->n) {
-            int got = recv(r->s, (char*)r->b, (int)sizeof r->b, 0);
+            int got = fill(r);
             if (got <= 0) return UNREACHABLE;
             r->at = 0;
             r->n = (size_t)got;
@@ -395,6 +469,7 @@ done:
 
 /* Where a request goes, as `fetch.rs`'s `parse_url` reads an `http://` URL. */
 struct url {
+    int tls;
     char host[1024];
     char port[8];
     char authority[1100];
@@ -404,9 +479,11 @@ struct url {
 };
 
 static int parse_url(const char* u, size_t n, struct url* out) {
-    if (n < 7 || memcmp(u, "http://", 7)) return BAD_URL;
-    const char* rest = u + 7;
-    size_t rn = n - 7;
+    out->tls = n >= 8 && !memcmp(u, "https://", 8);
+    if (!out->tls && (n < 7 || memcmp(u, "http://", 7))) return BAD_URL;
+    const char* rest = u + 7 + out->tls;
+    size_t rn = n - 7 - out->tls;
+    long dflt = out->tls ? 443 : 80;
     for (size_t i = 0; i < rn; i++)
         if (rest[i] == '#') rn = i;
     size_t end = 0;
@@ -424,7 +501,7 @@ static int parse_url(const char* u, size_t n, struct url* out) {
     int bracketed_after = 0;
     for (size_t i = colon; i < an; i++)
         if (auth[i] == ']') bracketed_after = 1;
-    long port = 80;
+    long port = dflt;
     if (colon < an && !bracketed_after) {
         hn = colon;
         int64_t p = number(auth + colon + 1, an - colon - 1, 10);
@@ -440,7 +517,7 @@ static int parse_url(const char* u, size_t n, struct url* out) {
     memcpy(out->host, host, bn);
     out->host[bn] = 0;
     snprintf(out->port, sizeof out->port, "%ld", port);
-    if (port == 80)
+    if (port == dflt)
         snprintf(out->authority, sizeof out->authority, "%.*s", (int)hn, auth);
     else
         snprintf(out->authority, sizeof out->authority, "%.*s:%ld", (int)hn, auth, port);
@@ -451,6 +528,63 @@ static int parse_url(const char* u, size_t n, struct url* out) {
 }
 
 static int send_on(struct req* q, struct span* f, size_t nf);
+static int exchange_on(struct rd* r, const struct url* u, struct span* f, int64_t n,
+                       struct buf* reply);
+
+/* The TLS client every `https://` request shares, built by the first that
+   needs it; NULL when the roots do not load. Called with the lock held. */
+static const struct rustls_client_config* g_tls;
+static const struct rustls_client_config* tls_config(void) {
+    static int tried;
+    if (tried) return g_tls;
+    tried = 1;
+    struct rustls_root_cert_store_builder* rb = rustls_root_cert_store_builder_new();
+    const struct rustls_root_cert_store* roots = NULL;
+    struct rustls_web_pki_server_cert_verifier_builder* vb = NULL;
+    struct rustls_server_cert_verifier* v = NULL;
+    if (rustls_root_cert_store_builder_add_pem(rb, vyrn_roots_pem, vyrn_roots_pem_len, false) ==
+            RUSTLS_RESULT_OK &&
+        rustls_root_cert_store_builder_build(rb, &roots) == RUSTLS_RESULT_OK) {
+        vb = rustls_web_pki_server_cert_verifier_builder_new(roots);
+        if (rustls_web_pki_server_cert_verifier_builder_build(vb, &v) == RUSTLS_RESULT_OK) {
+            struct rustls_client_config_builder* cb = rustls_client_config_builder_new();
+            rustls_client_config_builder_set_server_verifier(cb, v);
+            if (rustls_client_config_builder_build(cb, &g_tls) != RUSTLS_RESULT_OK) g_tls = NULL;
+        }
+    }
+    rustls_server_cert_verifier_free(v);
+    rustls_web_pki_server_cert_verifier_builder_free(vb);
+    rustls_root_cert_store_free(roots);
+    rustls_root_cert_store_builder_free(rb);
+    return g_tls;
+}
+
+/* The TLS handshake to `host` over `r->s`, as the embedded engine's `secure`
+   runs it: a certificate that does not verify is UNTRUSTED, a name rustls
+   refuses BAD_URL, any other failure UNREACHABLE. */
+static int handshake(struct rd* r, const char* host) {
+    LOCK();
+    const struct rustls_client_config* config = tls_config();
+    UNLOCK();
+    if (!config) return UNTRUSTED;
+    rustls_result rr = rustls_client_connection_new(config, host, &r->tls);
+    if (rr != RUSTLS_RESULT_OK)
+        return rr == RUSTLS_RESULT_INVALID_DNS_NAME_ERROR ? BAD_URL : UNREACHABLE;
+    while (rustls_connection_is_handshaking(r->tls)) {
+        if (tls_flush(r)) return UNREACHABLE;
+        if (!rustls_connection_wants_read(r->tls)) continue;
+        size_t got = 0;
+        if (rustls_connection_read_tls(r->tls, sock_read, &r->s, &got) || !got) return UNREACHABLE;
+        rr = rustls_connection_process_new_packets(r->tls);
+        if (rr != RUSTLS_RESULT_OK) {
+            tls_flush(r);
+            return rustls_result_is_cert_error(rr) || rr == RUSTLS_RESULT_NO_CERTIFICATES_PRESENTED
+                       ? UNTRUSTED
+                       : UNREACHABLE;
+        }
+    }
+    return tls_flush(r) ? UNREACHABLE : OK;
+}
 
 /* One request and its response over a connection of its own; the reply goes
    to `q->reply`. */
@@ -490,6 +624,22 @@ static int send_on(struct req* q, struct span* f, size_t nf) {
     int cancelled = q->cancelled;
     UNLOCK();
     if (cancelled) return UNREACHABLE;
+    struct rd* r = calloc(1, sizeof *r);
+    if (!r) oom();
+    r->s = s;
+    rc = u.tls ? handshake(r, u.host) : OK;
+    if (!rc) rc = exchange_on(r, &u, f, n, &q->reply);
+    if (r->tls) rustls_connection_free(r->tls);
+    free(r);
+    return rc;
+}
+
+/* The request in `f`, with `n` headers, to `u` over the connection `r`; the
+   reply goes to `reply`. */
+static int exchange_on(struct rd* r, const struct url* uu, struct span* f, int64_t n,
+                       struct buf* reply) {
+    const struct url u = *uu;
+    int rc;
     struct buf head = {0};
     put(&head, f[0].p, f[0].n);
     put_s(&head, " ");
@@ -512,21 +662,10 @@ static int send_on(struct req* q, struct span* f, size_t nf) {
     }
     put_s(&head, "Connection: close\r\n\r\n");
     put(&head, body.p, body.n);
-    size_t sent = 0;
-    while (sent < head.n) {
-        int k = send(s, (const char*)head.p + sent, (int)(head.n - sent), SEND_FLAGS);
-        if (k <= 0) break;
-        sent += (size_t)k;
-    }
+    rc = put_all(r, head.p, head.n);
     free(head.p);
-    if (sent < head.n) return UNREACHABLE;
-    struct rd* r = malloc(sizeof *r);
-    if (!r) oom();
-    r->s = s;
-    r->at = r->n = 0;
-    rc = read_response(r, f[0].n == 4 && !memcmp(f[0].p, "HEAD", 4), &q->reply);
-    free(r);
-    return rc;
+    if (rc) return UNREACHABLE;
+    return read_response(r, f[0].n == 4 && !memcmp(f[0].p, "HEAD", 4), reply);
 }
 
 #ifdef _WIN32

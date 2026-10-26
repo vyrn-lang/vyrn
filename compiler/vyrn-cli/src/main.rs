@@ -6336,7 +6336,7 @@ fn build_wasm2c(
     // it linked before `std/fetch` existed.
     let sends = vyrn_codegen::toolchain::sends_requests(&header);
     if sends {
-        objs.push(native.net()?);
+        objs.extend(native.net(trusted_test_root()?.as_deref())?);
     }
     let stage = vyrn_frontend::manifest::stage_beside(&out);
     let mut cmd = native.cc();
@@ -6348,8 +6348,8 @@ fn build_wasm2c(
         .arg(&stage)
         .arg(&hdr_def);
     native_link_flags(&mut cmd);
-    if sends && cfg!(windows) {
-        cmd.arg("-lws2_32");
+    if sends {
+        cmd.args(TLS_SYSTEM_LIBS);
     }
     let linked = match cmd.status() {
         Ok(s) if s.success() => Ok(()),
@@ -6363,6 +6363,67 @@ fn build_wasm2c(
         }
     };
     place_built(&stage, &out, linked)
+}
+
+/// The system libraries rustls-ffi's static library needs, as rustls-ffi's
+/// `tests/static_libs.rs` lists them per platform, and the sockets of `wasi_net.c`.
+/// On Windows the library asks for the DLL C runtime; a native binary links the static
+/// one, so it runs without the Visual C++ redistributable, fetching or not.
+#[cfg(windows)]
+const TLS_SYSTEM_LIBS: &[&str] = &[
+    "-lws2_32",
+    "-ladvapi32",
+    "-lbcrypt",
+    "-lcrypt32",
+    "-lcryptnet",
+    "-lkernel32",
+    "-lncrypt",
+    "-llegacy_stdio_definitions",
+    "-lntdll",
+    "-luserenv",
+    "-lsynchronization",
+    "-Wl,/NODEFAULTLIB:msvcrt.lib",
+];
+#[cfg(target_os = "macos")]
+const TLS_SYSTEM_LIBS: &[&str] = &[
+    "-framework",
+    "Security",
+    "-framework",
+    "CoreFoundation",
+    "-liconv",
+    "-lSystem",
+    "-lc",
+    "-lm",
+];
+#[cfg(not(any(windows, target_os = "macos")))]
+const TLS_SYSTEM_LIBS: &[&str] = &[
+    "-lgcc_s",
+    "-lutil",
+    "-lrt",
+    "-lpthread",
+    "-lm",
+    "-ldl",
+    "-lc",
+];
+
+/// The PEM certificate `VYRN_TEST_TLS_ROOT` names, which a native build that sends requests
+/// trusts beside the Mozilla roots: the test harness's root for its own server. The built
+/// binary carries no switch; the build says so on stderr whenever it takes one.
+fn trusted_test_root() -> Result<Option<String>, ()> {
+    let Some(path) = std::env::var_os("VYRN_TEST_TLS_ROOT") else {
+        return Ok(None);
+    };
+    let pem = std::fs::read_to_string(&path).map_err(|e| {
+        eprintln!(
+            "error: VYRN_TEST_TLS_ROOT: cannot read {}: {e}",
+            Path::new(&path).display()
+        )
+    })?;
+    eprintln!(
+        "warning: this build trusts an extra TLS root from VYRN_TEST_TLS_ROOT ({})",
+        Path::new(&path).display()
+    );
+    Ok(Some(pem))
 }
 
 #[cfg(test)]

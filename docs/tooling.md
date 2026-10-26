@@ -50,9 +50,13 @@ wrote with the module's `__vyrn_malloc`, which the module owns. A cancelled
 request is aborted. The embedded wasmtime and the native host speak HTTP/1.1
 over sockets, one request per connection, each on a thread of its own; a native
 binary links that client (`wasi_net.c`) only when its module imports
-`vyrn_wait.fetch`. The embedded wasmtime speaks `https://` through rustls with
-the `ring` provider and trusts the `webpki-root-certs` roots alone; the native host
-speaks `http://` only. No switch turns certificate verification off. The shim sends each request with the page's `fetch` and
+`vyrn_wait.fetch`. Both speak `https://` through rustls with the `ring`
+provider and trust the Mozilla roots of `webpki-root-certs` alone: the embedded
+wasmtime through the crate, a native binary through rustls-ffi's static
+library, which `vyrn` carries. On Windows that binary links the static C
+runtime, as every native binary does. No switch turns certificate verification
+off. A native build also trusts the PEM root that `VYRN_TEST_TLS_ROOT` names and
+says so on stderr; `tests/fetch.rs` uses it for its own server. The shim sends each request with the page's `fetch` and
 aborts it with an `AbortController`, so a page reads only what CORS lets it.
 
 The clock is logical. `sleep(ms)` is due `ms` after the deadline of the wake
@@ -450,7 +454,8 @@ pin.
   per-user secret. Never restore it from another machine or CI run.
 - `~/.vyrn/cache/native/<key>/`: the precompiled header and the objects of the
   native route that no program changes, for one clang, wasm2c, simde and flag
-  set. Safe to delete; the next `vyrn build` refills it.
+  set. A program that sends requests adds rustls-ffi's static library, its
+  header, and the objects of the client and of its roots. Safe to delete; the next `vyrn build` refills it.
 - `~/.vyrn/tools/<sha>/`: downloaded toolchain archives.
 
 Commands:

@@ -161,22 +161,63 @@ impl Native {
         self.object(&name, &show_path(host_c), &[define])
     }
 
-    /// Returns the object of the outbound-request client
-    /// ([`vyrn_codegen::toolchain::WASI_NET_C`]), named by its text's hash. Its source is
-    /// written into the cache beside it, whole or not at all.
-    pub fn net(&self) -> Result<PathBuf, ()> {
+    /// Returns what a module that sends requests links beside its host: the client
+    /// ([`vyrn_codegen::toolchain::WASI_NET_C`]), rustls-ffi's static library, and the
+    /// roots' object. `extra` is a PEM certificate the roots end with: the test harness's
+    /// (`VYRN_TEST_TLS_ROOT`), which names entries of its own.
+    pub fn net(&self, extra: Option<&str>) -> Result<Vec<PathBuf>, ()> {
+        use std::fmt::Write;
+        let key = env!("VYRN_TLS_KEY");
+        let lib = format!("rustls-{key}.{}", if cfg!(windows) { "lib" } else { "a" });
+        let lib = self.placed(&lib, TLS_LIB)?;
+        let include = self.dir.join(format!("rustls-{key}"));
+        std::fs::create_dir_all(&include)
+            .map_err(|e| eprintln!("error: cannot create {}: {e}", include.display()))?;
+        self.placed(&format!("rustls-{key}/rustls.h"), TLS_H.as_bytes())?;
         let text = vyrn_codegen::toolchain::WASI_NET_C;
-        let stem = format!("net-{}", &sha256_hex(text.as_bytes())[..32]);
+        let stem = format!(
+            "net-{}",
+            &sha256_hex(format!("{key}{text}").as_bytes())[..32]
+        );
+        let net = self.compiled(&stem, text, &[&format!("-I{}", show_path(&include))])?;
+        let pem = format!("{TLS_ROOTS}{}", extra.unwrap_or_default());
+        let mut c = format!(
+            "#include <stddef.h>\nconst size_t vyrn_roots_pem_len = {};\n\
+             const unsigned char vyrn_roots_pem[] = {{",
+            pem.len()
+        );
+        for b in pem.bytes() {
+            let _ = write!(c, "{b},");
+        }
+        c.push_str("};\n");
+        let stem = format!("roots-{}", &sha256_hex(pem.as_bytes())[..32]);
+        let roots = self.compiled(&stem, &c, &[])?;
+        Ok(vec![net, roots, lib])
+    }
+
+    /// Returns the object `<stem>.o` of the C source `text`, which is written beside it
+    /// only when the object is built.
+    fn compiled(&self, stem: &str, text: &str, extra: &[&str]) -> Result<PathBuf, ()> {
         let name = format!("{stem}.o");
         if let Some(hit) = self.hit(&name, true) {
             return Ok(hit);
         }
         let src = self.dir.join(format!("{stem}.c"));
-        let tmp = self.dir.join(format!("{stem}.c.{}", tmp_suffix()));
-        std::fs::write(&tmp, text)
-            .and_then(|()| std::fs::rename(&tmp, &src))
-            .map_err(|e| eprintln!("error: cannot write {}: {e}", src.display()))?;
-        self.object(&name, &show_path(&src), &[])
+        place_file(&src, text.as_bytes())?;
+        self.build(&name, true, |c| {
+            c.arg("-c").arg(show_path(&src)).args(extra);
+        })
+    }
+
+    /// The entry `name` holding `bytes`, written once; checked by its length, because
+    /// hashing the library costs more than writing it again.
+    fn placed(&self, name: &str, bytes: &[u8]) -> Result<PathBuf, ()> {
+        let path = self.dir.join(name);
+        if std::fs::metadata(&path).is_ok_and(|m| m.len() == bytes.len() as u64) {
+            return Ok(path);
+        }
+        place_file(&path, bytes)?;
+        Ok(path)
     }
 
     fn object(&self, name: &str, src: &str, extra: &[&str]) -> Result<PathBuf, ()> {
@@ -238,6 +279,22 @@ impl Native {
         }
         Ok(dest)
     }
+}
+
+/// rustls-ffi's static library, its header and the roots of `webpki-root-certs` as PEM, as
+/// `build.rs` made them for this machine; `vyrn` carries them because a user's machine has no
+/// cargo.
+const TLS_LIB: &[u8] = include_bytes!(env!("VYRN_TLS_LIB"));
+const TLS_H: &str = include_str!(env!("VYRN_TLS_H"));
+const TLS_ROOTS: &str = include_str!(env!("VYRN_TLS_ROOTS"));
+
+/// Writes `bytes` to `path` whole, through a temporary and a rename, so a concurrent build
+/// reads all of it or none.
+fn place_file(path: &Path, bytes: &[u8]) -> Result<(), ()> {
+    let tmp = path.with_extension(format!("tmp.{}", tmp_suffix()));
+    std::fs::write(&tmp, bytes)
+        .and_then(|()| std::fs::rename(&tmp, path))
+        .map_err(|e| eprintln!("error: cannot write {}: {e}", path.display()))
 }
 
 /// A temporary's suffix that no other writer, in this process or another,
