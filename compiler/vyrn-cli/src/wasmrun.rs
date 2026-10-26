@@ -70,8 +70,9 @@ pub struct Run {
     pub capture_stderr: bool,
     /// Times the phases into [`Outcome::meter`], for `vyrn run --profile`.
     pub meter: bool,
-    /// Runs a waiting module's timers on a clock that only a wake advances, so `vyrn test`
-    /// waits on nothing; otherwise on the wall clock.
+    /// Delivers each of a waiting module's timers without waiting out its deadline, so
+    /// `vyrn test` waits on nothing; otherwise each waits for its deadline in real time.
+    /// The order of wakes is the same either way ([`Waits`]).
     pub virtual_clock: bool,
     /// Delivers these completions in order instead of the clock's, each to an operation the
     /// module started: a replay of [`Outcome::wakes`], or a cancellation a test asks for.
@@ -101,11 +102,18 @@ type Host = wasi::Guest<Extra>;
 /// The host operations a waiting module started and the host has not woken, and the clock
 /// their deadlines read. The host owns the event loop ([`settle_waits`]); the module's run queue
 /// orders the tasks.
+///
+/// The clock is logical: `now` is the deadline of the wake the module runs in, 0 before the
+/// first, or the time the host began the call that runs ([`Waits::begin`]). A deadline is `now`
+/// plus the sleep, so the time the module computes never moves a later deadline, and the order
+/// of wakes is the same on every host and machine.
 struct Waits {
-    /// `Some(now)` runs the timers on a clock in milliseconds that only a wake advances;
-    /// `None` on the wall clock from `start`.
-    virtual_now: Option<u64>,
+    /// Whether a timer waits for its deadline in real time; `vyrn test` delivers it at once.
+    wall: bool,
+    /// When the module started, in real time.
     start: std::time::Instant,
+    /// The logical clock, in milliseconds since `start`.
+    now: u64,
     /// The id the next operation takes.
     next: i64,
     /// Each pending timer's deadline and id.
@@ -130,8 +138,9 @@ struct Ended {
 impl Waits {
     fn new(run: &Run) -> Self {
         Waits {
-            virtual_now: run.virtual_clock.then_some(0),
+            wall: !run.virtual_clock,
             start: std::time::Instant::now(),
+            now: 0,
             next: 1,
             due: Vec::new(),
             replay: run.replay.clone().map(|mut r| {
@@ -143,15 +152,23 @@ impl Waits {
         }
     }
 
-    fn now(&self) -> u64 {
-        (self.virtual_now).unwrap_or_else(|| self.start.elapsed().as_millis() as u64)
+    /// The real time since the start, in milliseconds, which a wall-clock timer waits out.
+    fn real(&self) -> u64 {
+        self.start.elapsed().as_millis() as u64
     }
 
-    /// `vyrn_wait.sleep(ms)`: a timer due `ms` from now; a negative `ms` is due now.
+    /// The host begins a call: on the wall clock, its task's time starts at its arrival.
+    fn begin(&mut self) {
+        if self.wall {
+            self.now = self.real();
+        }
+    }
+
+    /// `vyrn_wait.sleep(ms)`: a timer due `ms` after `now`; a negative `ms` is due now.
     fn sleep(&mut self, ms: i64) -> i64 {
         let id = self.next;
         self.next += 1;
-        let at = self.now().saturating_add(ms.max(0) as u64);
+        let at = self.now.saturating_add(ms.max(0) as u64);
         self.due.push((at, id));
         id
     }
@@ -161,25 +178,25 @@ impl Waits {
         self.due.retain(|d| d.1 != id);
     }
 
-    /// How long until [`Waits::fire`] has a completion without waiting: zero for a replay and on
-    /// the virtual clock, `None` when nothing is pending.
+    /// How long until [`Waits::fire`] has a completion without waiting: zero for a replay and
+    /// off the wall clock, `None` when nothing is pending.
     fn due_in(&self) -> Option<std::time::Duration> {
         let zero = std::time::Duration::ZERO;
         if let Some(r) = &self.replay {
             return (!r.is_empty()).then_some(zero);
         }
         let at = self.due.iter().min()?.0;
-        match self.virtual_now {
-            Some(_) => Some(zero),
-            None => Some(std::time::Duration::from_millis(
-                at.saturating_sub(self.now()),
-            )),
-        }
+        let left = if self.wall {
+            at.saturating_sub(self.real())
+        } else {
+            0
+        };
+        Some(std::time::Duration::from_millis(left))
     }
 
     /// The next completion to deliver: the next one to replay, or else the earliest pending
-    /// timer, ties by id, once its deadline has come. The virtual clock moves to it, and the
-    /// wall clock is waited out.
+    /// timer, ties by id, its deadline waited out on the wall clock. `now` moves to the
+    /// deadline.
     fn fire(&mut self) -> Result<Option<Wake>, String> {
         if let Some(r) = &mut self.replay {
             let Some(w) = r.pop() else {
@@ -188,7 +205,7 @@ impl Waits {
             let Some(i) = self.due.iter().position(|d| d.1 == w.id) else {
                 return Err(format!("a replayed wake names no pending wait: {}", w.id));
             };
-            self.due.remove(i);
+            self.now = self.due.remove(i).0;
             self.delivered.push(w);
             return Ok(Some(w));
         }
@@ -196,15 +213,11 @@ impl Waits {
             return Ok(None);
         };
         let (at, id) = self.due.remove(i);
-        match &mut self.virtual_now {
-            Some(now) => *now = (*now).max(at),
-            None => {
-                let now = self.now();
-                if at > now {
-                    std::thread::sleep(std::time::Duration::from_millis(at - now));
-                }
-            }
+        let real = self.real();
+        if self.wall && at > real {
+            std::thread::sleep(std::time::Duration::from_millis(at - real));
         }
+        self.now = at;
         let w = Wake { id, status: 0 };
         self.delivered.push(w);
         Ok(Some(w))
@@ -633,6 +646,7 @@ impl Resident {
             .ok_or_else(|| format!("{door}: no such export"))?;
         let id = self.next;
         self.next += 1;
+        self.store.data_mut().x.waits.begin();
         let kind = self.waiting.get(door).cloned();
         let waits = kind.is_some();
         let args: Vec<Val> = (waits.then_some(Val::I64(id)).into_iter())

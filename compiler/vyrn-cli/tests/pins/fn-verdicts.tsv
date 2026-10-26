@@ -291,6 +291,10 @@ examples/clock.vyrn	showFields	yes	no, its effect set is alloc, write-output
 examples/clock.vyrn	main	no, it calls `nextInRange`, which is not trap-free	no, its effect set is alloc, write-output, clock, random
 examples/clock.vyrn	where$pInstant	yes	yes, emulated Int64
 examples/clock.vyrn	where$cInstant	no, it calls `panic`	no, its effect set is trap
+examples/clockorder.vyrn	work	yes	yes, emulated Int64
+examples/clockorder.vyrn	late	yes	no, its effect set is write-output, waits
+examples/clockorder.vyrn	busy	yes	no, its effect set is write-output, waits
+examples/clockorder.vyrn	main	no, it calls `both`, which has no body to judge	no, its effect set is alloc, write-output, waits
 examples/closures2.vyrn	double	yes	yes, emulated Int64
 examples/closures2.vyrn	apply	no, it calls a function value	no, its effect set is alloc
 examples/closures2.vyrn	makeAdder	yes	no, its effect set is alloc

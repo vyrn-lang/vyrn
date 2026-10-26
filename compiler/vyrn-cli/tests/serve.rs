@@ -1414,8 +1414,8 @@ fn a_trap_in_one_of_two_waiting_requests_answers_500_for_it_alone() {
     assert_eq!(body, "/slow before=0 after=2 ended=1");
     let (_, body) = get(s.server.port, "/fast");
     assert_eq!(body, "/fast before=2 after=3 ended=2");
-    let err = wait_for(&s.stderr, "division by zero", Duration::from_secs(5));
-    assert!(err.contains("GET /boom -> 500"), "{err}");
+    let err = wait_for(&s.stderr, "GET /boom -> 500", Duration::from_secs(5));
+    assert!(err.contains("division by zero"), "{err}");
 }
 
 /// A rebuild replaces the instance before the next request, and a request
@@ -1444,8 +1444,11 @@ fn handle(req: Request) -> Response {
     assert_eq!(status, "HTTP/1.1 503 Service Unavailable");
     assert_eq!(body, "the server was rebuilt");
     assert!(took < Duration::from_secs(60), "{took:?}");
-    let err = d.stderr.lock().unwrap().clone();
-    assert!(err.contains("GET /slow -> 503 (rebuilt)"), "{err}");
+    wait_for(
+        &d.stderr,
+        "GET /slow -> 503 (rebuilt)",
+        Duration::from_secs(5),
+    );
 }
 
 /// A `handle` that waits and reads no module state, for `--workers`.

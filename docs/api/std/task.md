@@ -11,7 +11,9 @@ marked `await` (language.md, Waiting).
 fn sleep(ms: Int64) -> Unit
 ```
 
-Waits `ms` milliseconds while the host runs other tasks.
+Waits while the host runs other tasks, until `ms` milliseconds after the
+deadline of the wake this task runs in, or after the start of the program
+or of the request: the time the task computes before it counts against it.
 
 ## Both
 

@@ -43,6 +43,14 @@ wasmtime, the native host and `web/wasi-min.js` share this rule. The shim arms o
 `setTimeout` per timer, so a timer one task sets while another waits fires at its
 own deadline.
 
+The clock is logical. `sleep(ms)` is due `ms` after the deadline of the wake
+the program runs in: 0 at the start, and in `serve`, `dev` and a page's call
+of an export the time the host began the call. A host waits out real time
+before it delivers a timer, but the time the program computes never moves a
+later deadline: a loop of work and `sleep(10)` keeps its rate, and wakes at
+once when it falls behind. So the order of wakes is `vyrn test`'s on every
+host and machine.
+
 A `gen fn` generator also runs as compiled wasm, in the same embedded engine,
 while the program loads.
 
@@ -160,8 +168,8 @@ through `$VYRN_WASM2C`, `$VYRN_SIMDE` and `$VYRN_WASM_OPT`, then the
 ### `vyrn test [file] [--name <substring>]`
 
 Runs the root file's `test "name" { ... }` blocks in declaration order and exits
-1 if any failed. Timers run on a virtual clock that only a wake advances, so a
-test that sleeps an hour ends at once. `assert` and `assertEq` are legal only inside a test body.
+1 if any failed. Timers wake in the order every host gives them without waiting
+out their deadlines, so a test that sleeps an hour ends at once. `assert` and `assertEq` are legal only inside a test body.
 The root's test blocks are type-checked with the program and stripped from
 `run` and `build`; an imported module's are neither parsed nor checked. A file
 with no tests, or none that `--name` selects, prints `no tests` and exits 0.

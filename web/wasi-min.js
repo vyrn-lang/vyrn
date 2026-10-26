@@ -418,23 +418,27 @@ export async function runVyrn(wasmBytes, hooks = {}) {
 
   // The host's waits: each pending timer's deadline, in milliseconds since the
   // start, and its `setTimeout` handle, by id, as `Waits` in
-  // `vyrn-cli/src/wasmrun.rs` keeps them on the wall clock.
+  // `vyrn-cli/src/wasmrun.rs` keeps them. The clock is logical, as there:
+  // `now` is the deadline of the wake the module runs in, 0 before the first,
+  // or the time an export's task began, so the time the module computes never
+  // moves a later deadline.
   const started = performance.now();
-  const nowMs = () => Math.floor(performance.now() - started);
+  const real = () => performance.now() - started;
+  let now = 0;
   const due = new Map();
   let nextWait = 1n;
-  // Each timer has its own `setTimeout`. When one fires, every pending timer
-  // up to it, earliest first and ties by id, goes to `__vyrn_wake`, as
-  // `settle_waits` in `wasmrun.rs` delivers them; a later timer waits for its
-  // own. A timer may fire a millisecond before `nowMs` reaches its deadline,
-  // so the fired timer bounds the delivery, not the clock.
+  // Each timer has its own `setTimeout`, armed for its deadline in real time.
+  // When one fires, every pending timer up to it, earliest first and ties by
+  // id, goes to `__vyrn_wake`, as `settle_waits` in `wasmrun.rs` delivers them;
+  // a later timer waits for its own. Timers fire in the order they come due in
+  // real time, so the fired timer bounds the delivery, not the clock.
   const vyrnWait = {
-    // A timer due `ms` from now; a negative `ms` is due now.
+    // A timer due `ms` after `now`; a negative `ms` is due now.
     sleep: (ms) => {
       const id = nextWait++;
-      const wait = Math.max(0, Number(ms));
-      const at = nowMs() + wait;
-      due.set(id, { at, handle: setTimeout(() => deliverThrough(at, id), wait) });
+      const at = now + Math.max(0, Number(ms));
+      const handle = setTimeout(() => deliverThrough(at, id), Math.max(0, at - real()));
+      due.set(id, { at, handle });
       return id;
     },
     // No wait waits for operation `id`, so its timer never fires.
@@ -617,6 +621,7 @@ export async function runVyrn(wasmBytes, hooks = {}) {
       // its bits.
       const task = nextTask++;
       const ended = new Promise((resolve, reject) => tasks.set(task, { resolve, reject }));
+      now = Math.floor(real());
       try {
         raw(task, ...call);
       } catch (e) {
@@ -688,6 +693,7 @@ export async function runVyrn(wasmBytes, hooks = {}) {
         if (next === null || next[1].at > at || (next[1].at === at && next[0] > id)) break;
         clearTimeout(next[1].handle);
         due.delete(next[0]);
+        now = next[1].at;
         guarded(() => wake(next[0], 0, 0n));
       }
     } catch (e) {

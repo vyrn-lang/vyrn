@@ -1,0 +1,34 @@
+// A sleep's deadline counts from the wake it starts in, not from the end of
+// the work before it. `late` sleeps 3 ms at once; `busy` computes for longer
+// than that and then sleeps 1 ms, so it is due first and wakes first, on every
+// host and however long the work takes.
+import { both, sleep } from "std/task"
+
+fn work(n: Int64) -> Int64 {
+    let mut acc: Int64 = 0
+    let mut i: Int64 = 0
+    while i < n {
+        acc = (acc * 31 + i) % 1000003
+        i = i + 1
+    }
+    return acc
+}
+
+fn late() -> Int64 {
+    await sleep(3)
+    print("waited 3")
+    return 3
+}
+
+fn busy() -> Int64 {
+    let w = work(5000000)
+    await sleep(1)
+    print("worked, then waited 1")
+    return w
+}
+
+fn main() -> Int64 {
+    let r = await both(late(), busy())
+    print("\{r.first} \{r.second}")
+    return 0
+}

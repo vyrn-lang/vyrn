@@ -286,6 +286,7 @@ fn twice(ms: Int64) -> Result<Int64, String> {
 }
 ```
 
+- `sleep(ms)` is due `ms` milliseconds after the deadline of the wake its task runs in, or after the start of the program or of the request: the time the task computes before it counts against the sleep. So a loop of work and `sleep` keeps its rate, and the order of wakes is the same on every host and machine.
 - `await` marks the call after it, as `consume` marks a place. `await f(x)?` is `(await f(x))?`. It takes no name from programs: `let await = 1` is a binding, and `await(x)` is a call of it.
 - A waiting call without `await` is refused, and its fix says to write `await` before the call. `await` before a call that does not wait is refused too, so the mark stands exactly where other code may run.
 - A `gen fn`, a module-state initializer and a `where` predicate cannot wait: a build is deterministic, state is set before `main` runs, and a predicate calls nothing.
