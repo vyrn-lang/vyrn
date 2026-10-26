@@ -3,6 +3,8 @@
 /// A function that reaches a wait waits itself, and each call of it is
 /// marked `await` (language.md, Waiting).
 
+import { arenaSwap, regionExit, free } from "std/runtime"
+
 /// Waits `ms` milliseconds while the host runs other tasks.
 export fn sleep(ms: Int64) {
     await hostSleep(ms)
@@ -227,4 +229,33 @@ fn wake(id: Int64, status: Int32, payload: Int64) -> Int32 {
     ready = []
     readyAt = 0
     return Int32(tasks.length)
+}
+
+// A `region` that holds an `await` has an arena of its own, so tasks and fork
+// branches that wait inside regions never bump or free one arena out of
+// order. The emitter keeps the arena outside such a region in a local of the
+// frame and calls these by name: `regionSwap(0)` where the region opens,
+// `regionSwap` at each suspension and each resume inside it, `regionClose` at
+// its closing brace, a `break`, a `continue` and a cancellation, and
+// `regionCarry` at a `return`.
+
+/// Makes `other` the arena and returns the arena it replaced.
+fn regionSwap(other: Int64) -> Int64 {
+    return arenaSwap(other, false)
+}
+
+/// Frees the region's arena and makes `outer` the arena again: `regionExit(0)`
+/// frees every chunk but the oldest, which the swap hands back to `free`.
+fn regionClose(outer: Int64) {
+    regionExit(0)
+    free(Int32(arenaSwap(outer, false)))
+}
+
+/// Hands the region's chunks to `outer`, whose region frees them: a `return`
+/// carries a value out that may live in them.
+fn regionCarry(outer: Int64) {
+    let mine = arenaSwap(outer, false)
+    if mine != 0 {
+        arenaSwap(mine, true)
+    }
 }

@@ -93,7 +93,11 @@ the playground serves an embedded `std/`. The loader:
   root can reach them by spelling (`parse_reached`), and drops each function,
   test and bench of such a module that no root reaches by name
   (`drop_unreached`), so an importer pays to lex the module and to parse and
-  check what it calls;
+  check what it calls. `std/runtime` is such a module, and its roots include
+  every function the emitter calls by name (`loader::RUNTIME_CALLS`, the one
+  table both read) and every function a reached builtin routes to; a
+  generator's own load keeps it whole, because its engine adds calls after the
+  load (`lazy_runtime`);
 - links `std/runtime` into every program, each declaration renamed with the
   `runtime$` prefix, `std/task` with the `task$` prefix into a program that
   imports it, and `std/json` and similar modules when a builtin that lives in
@@ -451,6 +455,17 @@ The module's shape:
   `wake`, whose `hostResume` call is the emitter's `$resumeRoot` dispatcher
   over the roots. `hostSleep` is the import `vyrn_wait.sleep`, and `hostCancel`
   the import `vyrn_wait.cancel`, which drops a cancelled wait's operation.
+- Regions that wait: a `region` that holds a point keeps the arena outside it
+  in a local (`Region::Own`). `std/task`'s `regionSwap` exchanges the two
+  where the region opens, at each suspension inside it (`Fn_::regions_suspend`)
+  and at each resume that enters it (`Fn_::region_enter`); `regionClose` and
+  `regionCarry` end it. They use `std/runtime`'s `arenaSwap`, exported only
+  to `std/task`, and `regionExit` and `free`, so the emitter writes no arena
+  layout.
+- Function values: a waiting type's dispatcher (`World::waits_through`) takes
+  and returns a frame as a waiting body does, and holds a block of its own
+  with the tag and its target's frame while the target waits
+  (`lower_dispatcher`).
 - Forks: an awaited `both` or `race` is one call row of kind `Callee::Fork`,
   whose arguments are every branch's in order and whose `core::Fork` holds each
   branch's callee and argument count, so the kernel judges the branches as one

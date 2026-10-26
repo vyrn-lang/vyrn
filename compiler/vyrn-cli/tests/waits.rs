@@ -41,7 +41,7 @@ fn quiet(name: &str, replay: Option<Vec<Wake>>) -> Run {
 
 #[test]
 fn a_waiting_program_resumes_at_each_await() {
-    for (name, _why) in WAITING {
+    for name in &waiting() {
         let bytes = audited(name);
         let out = run(&bytes, quiet(name, None)).expect("the module runs");
         let stem = name.trim_end_matches(".vyrn");
@@ -57,7 +57,7 @@ fn a_waiting_program_resumes_at_each_await() {
 /// cancellation edge.
 #[test]
 fn a_cancelled_wait_releases_every_frame_on_its_path() {
-    for (name, _why) in WAITING {
+    for name in &waiting() {
         let bytes = audited(name);
         let full = run(&bytes, quiet(name, None)).expect("the module runs");
         let all = norm(&full.stdout);
@@ -81,7 +81,7 @@ fn a_cancelled_wait_releases_every_frame_on_its_path() {
 /// replays it.
 #[test]
 fn a_replay_of_the_recorded_wakes_prints_the_same_bytes() {
-    for (name, _why) in WAITING {
+    for name in &waiting() {
         let bytes = audited(name);
         let wall = Run {
             virtual_clock: false,
@@ -154,17 +154,15 @@ fn a_waiting_lambda_runs_where_its_parameter_is_bound() {
 
 /// The build refuses what has no lowering yet, naming the function and the line.
 #[test]
-fn a_waiting_region_does_not_build_yet() {
-    for (name, line) in [("region", 8)] {
-        let dir = scratch("waits-refused");
-        let out = vyrn()
-            .args(["build", "--target", "wasm", &format!("{name}.vyrn"), "-o"])
-            .arg(dir.join("w.wasm"))
-            .current_dir(waits_dir())
-            .output()
-            .expect("run vyrn build");
-        assert!(!out.status.success(), "{name}");
-        let want = format!("error: waiting code does not build yet: `main` waits at line {line}\n");
-        assert_eq!(norm(&out.stderr), want, "{name}");
-    }
+fn a_waiting_export_with_a_result_does_not_build_yet() {
+    let dir = scratch("waits-refused");
+    let out = vyrn()
+        .args(["build", "--target", "wasm", "result.vyrn", "-o"])
+        .arg(dir.join("w.wasm"))
+        .current_dir(waits_dir())
+        .output()
+        .expect("run vyrn build");
+    assert!(!out.status.success());
+    let want = "error: waiting code does not build yet: `later` waits at line 5\n";
+    assert_eq!(norm(&out.stderr), want);
 }

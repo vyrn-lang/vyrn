@@ -1,7 +1,7 @@
 import { endsWith } from "std/strpred"
 import { includes } from "std/arrays"
 import { importsOf } from "./guidecode"
-import { quotedList, branch, lookup, entriesOf, vyrnStems } from "./gensrc"
+import { quotedList, branch, lookup, entriesOf, vyrnStems, fenced } from "./gensrc"
 
 type Uses = { path: String, uses: Array<String> }
 
@@ -52,7 +52,13 @@ gen fn depthOf(m: String, all: Array<String>, edges: Array<Uses>, walking: Array
 }
 
 export gen fn moduleDeps(stdDir: String, examplesDir: String) -> String {
-    let all = vyrnStems(stdDir)
+    // The graph draws what the reference lists, and `std/task` imports the fenced runtime.
+    let mut all: Array<String> = []
+    for m in vyrnStems(stdDir) {
+        if !fenced(m) {
+            all.push(m.copy())
+        }
+    }
     let mut edges: Array<Uses> = []
     for m in all {
         edges.push(usesOf(stdDir, m + ".vyrn", m))

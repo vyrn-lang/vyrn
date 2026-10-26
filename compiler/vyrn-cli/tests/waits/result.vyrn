@@ -1,0 +1,12 @@
+// A waiting export that returns a value has no lowering yet: the host would
+// read the result of a call that has not finished.
+import { sleep } from "std/task"
+
+export extern fn later(ms: Int64) -> Int64 {
+    await sleep(ms)
+    return ms
+}
+
+fn main() -> Int64 {
+    return 0
+}

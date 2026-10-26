@@ -1,0 +1,57 @@
+// A `region` that holds an `await` has an arena of its own, so two tasks that
+// wait inside regions at once never bump or free one arena. Worker `x` leaves
+// its region first and writes a long line in a new one; with one arena, that
+// line would land on the bytes of `y`'s strings, which `y` prints later.
+import { both, sleep } from "std/task"
+
+fn worker(name: String, ms: Int64) -> Int64 {
+    region {
+        let first = name + " began"
+        await sleep(ms)
+        let second = name + " slept " + "\{ms}"
+        await sleep(ms)
+        print(first)
+        print(second)
+    }
+    region {
+        let over = name + " wrote a line long enough to cover what the other worker holds"
+        print(over)
+    }
+    return ms
+}
+
+// A value made in the region leaves it with the `return`, and the caller
+// prints it after the region's other blocks are gone.
+fn label(n: Int64) -> String {
+    region {
+        let s = "label " + "\{n}"
+        await sleep(n)
+        return s
+    }
+    return "none"
+}
+
+// A `break` leaves the region inside the loop on its last turn.
+fn polls(n: Int64) -> Int64 {
+    let mut i: Int64 = 0
+    while true {
+        region {
+            let s = "poll " + "\{i}"
+            await sleep(1)
+            print(s)
+            i = i + 1
+            if i == n {
+                break
+            }
+        }
+    }
+    return i
+}
+
+fn main() -> Int64 {
+    let r = await both(worker("x", 10), worker("y", 15))
+    print("\{r.first + r.second}")
+    print(await label(5))
+    print("\{await polls(3)} polls")
+    return 0
+}

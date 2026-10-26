@@ -157,7 +157,7 @@ fn sections() -> Vec<Section> {
         sec("struct Num", Mapping, Neither),
         sec("vyrn_frontend::body_scope_descent!", Shared, Source),
         sec("type Spill", Mapping, Neither),
-        sec("macro_rules! runtime_fns", Runtime, Neither),
+        sec("type Fns = RuntimeCalls", Runtime, Neither),
         sec("struct Rt", Runtime, Neither),
         sec("const SHDR", Runtime, Neither),
         sec("fn runtime", Runtime, Neither),

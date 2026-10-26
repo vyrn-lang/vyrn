@@ -1,0 +1,19 @@
+import { sleep } from "std/task"
+
+fn slow(x: Int64) -> Int64 {
+    await sleep(x)
+    return x + 1
+}
+
+fn quick(x: Int64) -> Int64 {
+    return x * 2
+}
+
+export fn run() -> Int64 {
+    let fs: Array<fn(Int64) -> Int64> = [slow, quick]
+    let mut total: Int64 = 0
+    for f in fs {
+        total = total + await f(3)
+    }
+    return total
+}

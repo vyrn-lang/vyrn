@@ -332,7 +332,9 @@ fn the_shim_ends_each_program_as_vyrn_run_does() {
     let dir = tmp("ends");
     std::fs::write(dir.join("run.mjs"), RUN).unwrap();
     std::fs::copy(repo("web/wasi-min.js"), dir.join("wasi-min.mjs")).unwrap();
-    for (name, _why) in common::ENGINE_TRAP.iter().chain(common::WAITING) {
+    let waiting = common::waiting();
+    let traps = common::ENGINE_TRAP.iter().map(|(n, _)| *n);
+    for name in traps.chain(waiting.iter().map(String::as_str)) {
         let example = repo(&format!("examples/{name}"));
         let stem = name.trim_end_matches(".vyrn");
         let wasm = build_wasm(&dir, stem, &std::fs::read_to_string(&example).unwrap());

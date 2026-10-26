@@ -1,0 +1,50 @@
+// A function value of a type whose stored functions wait is awaited where it
+// is called. A function that does not wait is a value of that type too: its
+// call finishes where it starts. `both`, `race` and `each` take such values as
+// they take functions.
+import { both, race, each, sleep, Race } from "std/task"
+
+type Reply = { name: String, ms: Int64 }
+
+type Step = fn(Int64) -> String
+
+fn fetch(ms: Int64) -> String {
+    let url = "/item/\{ms}"
+    await sleep(ms)
+    return "\{url} after \{ms}"
+}
+
+fn local(ms: Int64) -> String {
+    return "local \{ms}"
+}
+
+fn reply(ms: Int64) -> Reply {
+    await sleep(ms)
+    return Reply { name: "reply \{ms}", ms: ms }
+}
+
+fn main() -> Int64 {
+    let prefix = "lambda"
+    let steps: Array<Step> = [fetch, local, ms -> {
+        await sleep(ms)
+        return "\{prefix} after \{ms}"
+    }]
+    for s in steps {
+        print(await s(5))
+    }
+    let slow = steps[0]
+    let quick = steps[2]
+    let r = await both(slow(30), quick(10))
+    print(r.first + ", " + r.second)
+    match await race(slow(50), quick(20)) {
+        First(a) => print("first: " + a),
+        Second(b) => print("second: " + b),
+    }
+    for page in await each([3, 1, 2], slow) {
+        print(page)
+    }
+    let make: fn(Int64) -> Reply = reply
+    let made = await make(4)
+    print("\{made.name}, \{made.ms}")
+    return 0
+}

@@ -146,6 +146,26 @@ impl Judged<'_> {
         }
     }
 
+    /// Each function type a call waits through, normalized against `decls`: the
+    /// waits bit of a `fn` type. A type waits when a function of its closed set
+    /// waits, so a function that does not wait is a value of a waiting type too,
+    /// and a call through the type finishes at its start.
+    pub fn waiting_values(&self, decls: &HashMap<String, TypeDecl>) -> Vec<Type> {
+        let mut out: Vec<Type> = Vec::new();
+        for (f, ks) in self.frames.iter().zip(&self.resolved) {
+            for (c, k) in f.calls.iter().zip(ks) {
+                let Some(ty) = c.through.as_ref().filter(|_| self.waits(*k)) else {
+                    continue;
+                };
+                let ty = vyrn_frontend::types::normalize_fn_sig(ty, decls);
+                if !out.contains(&ty) {
+                    out.push(ty);
+                }
+            }
+        }
+        out
+    }
+
     /// Each call of frame `i`, run where `at` says, that breaks a waiting
     /// rule, with its line: a mark on a call that does not wait, and a waiting
     /// call without one or where nothing may wait. A fork waits when one of

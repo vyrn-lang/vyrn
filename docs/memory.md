@@ -201,6 +201,13 @@ allocated may not be stored where it outlives the region, and may not be
 passed to a `consume` parameter inside it. A value the block returns is the
 caller's to release.
 
+A region that holds an `await` has an arena of its own, so other tasks and
+fork branches never bump or free it. A suspension inside it makes the arena
+outside current again, and the resume swaps the region's back. Its closing
+brace, a `break`, a `continue` and a cancellation free its arena; a `return`
+hands its chunks to the arena outside, as a `return` out of any region carries
+its blocks out.
+
 ## The compiler places every release
 
 A program never frees memory by hand. `drop x` releases a value early; it is

@@ -226,19 +226,27 @@ pub const WASM_ONLY: &[(&str, &str)] = &[(
 /// `tests/route.rs` compares these with `vyrn run` instead.
 pub const ENGINE_TRAP: &[(&str, &str)] = &[("recdepth.vyrn", "recurses until the stack runs out")];
 
-/// Examples that wait. The `wasmtime` CLI supplies neither the host's waits nor an
-/// event loop, so `tests/route.rs` compares these with `vyrn run` instead.
-pub const WAITING: &[(&str, &str)] = &[
-    (
-        "concurrent.vyrn",
-        "runs waiting calls at once on the host's timers",
-    ),
-    (
-        "fanout.vyrn",
-        "runs one waiting call per element, and one against a timer",
-    ),
-    ("waiting.vyrn", "waits on the host's timers"),
-];
+/// The examples that wait, by name: each imports `std/task`, the module of the host's
+/// waits. The `wasmtime` CLI supplies neither the host's waits nor an event loop, so
+/// `tests/route.rs` compares these with `vyrn run` instead.
+pub fn waiting() -> Vec<String> {
+    let mut out: Vec<String> = (std::fs::read_dir(examples_dir()).expect("read examples/"))
+        .map(|e| e.expect("an examples/ entry").path())
+        .filter(|p| p.extension().is_some_and(|x| x == "vyrn"))
+        .filter(|p| std::fs::read_to_string(p).is_ok_and(|s| s.contains("from \"std/task\"")))
+        .map(|p| {
+            p.file_name()
+                .expect("a file")
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect();
+    out.sort();
+    out
+}
+
+/// Why [`waiting`] leaves an example out of a comparison with the `wasmtime` CLI.
+pub const WAITS: &str = "waits on the host's event loop";
 
 /// Project entries under `examples/*/` that their artifact's floor refuses,
 /// with text the refusal must contain. `tests/floor.rs` asserts each; the corpus
