@@ -4430,33 +4430,59 @@ fn serve_loop(
         }
     };
     banner(None);
-    let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        for s in listener.incoming().flatten() {
-            if tx.send(s).is_err() {
-                break;
-            }
-        }
-    });
+    let accepted = std::sync::Arc::new(Accepted::default());
+    let fill = std::sync::Arc::clone(&accepted);
+    std::thread::spawn(move || fill.fill(listener));
     let newer = |gen: &mut u64| match dev.and_then(|d| d.live.newer(gen)) {
         Some(Served::One(next)) => Some(next),
         _ => None,
     };
-    serve_instance(res, dev, gen, |left| next_conn(&rx, left), newer);
-    Ok(ExitCode::SUCCESS)
+    serve_instance(res, &accepted, dev, gen, newer)
 }
 
-/// The next connection `rx` holds, waited for at most `left`, or until one
-/// comes when `left` is `None`: a timeout means a completion is due.
-fn next_conn(
-    rx: &std::sync::mpsc::Receiver<std::net::TcpStream>,
-    left: Option<std::time::Duration>,
-) -> Result<std::net::TcpStream, std::sync::mpsc::RecvTimeoutError> {
-    match left {
-        Some(d) => rx.recv_timeout(d),
-        None => rx
-            .recv()
-            .map_err(|_| std::sync::mpsc::RecvTimeoutError::Disconnected),
+/// The connections the accept loop took and no instance has yet. An instance
+/// waits on `ready` with the lock released, so instances that wait at once
+/// each wake at their own next completion, and any idle one takes the next
+/// connection.
+#[derive(Default)]
+struct Accepted {
+    queue: std::sync::Mutex<std::collections::VecDeque<std::net::TcpStream>>,
+    ready: std::sync::Condvar,
+}
+
+impl Accepted {
+    /// Queues every connection `listener` accepts; it never returns.
+    fn fill(&self, listener: std::net::TcpListener) -> ! {
+        loop {
+            if let Ok((s, _)) = listener.accept() {
+                vyrn_frontend::session::locked(&self.queue).push_back(s);
+                self.ready.notify_one();
+            }
+        }
+    }
+
+    /// The next connection, waited for at most `left`, or until one comes when
+    /// `left` is `None`. `None` when the time ran out: a completion is due.
+    fn next(&self, left: Option<std::time::Duration>) -> Option<std::net::TcpStream> {
+        use std::sync::PoisonError;
+        let until = left.map(|d| std::time::Instant::now() + d);
+        let mut queue = vyrn_frontend::session::locked(&self.queue);
+        loop {
+            if let Some(s) = queue.pop_front() {
+                return Some(s);
+            }
+            queue = match until {
+                None => (self.ready.wait(queue)).unwrap_or_else(PoisonError::into_inner),
+                Some(t) => {
+                    let left = t.saturating_duration_since(std::time::Instant::now());
+                    if left.is_zero() {
+                        return None;
+                    }
+                    let waited = self.ready.wait_timeout(queue, left);
+                    waited.unwrap_or_else(PoisonError::into_inner).0
+                }
+            };
+        }
     }
 }
 
@@ -4467,24 +4493,22 @@ struct Parked {
     path: String,
 }
 
-/// Answers on `res` each connection `next` hands it, until `next` says none
-/// will come. A request whose `handle` waits parks at its first wait under
-/// its call's id; the next connection or due completion runs, and each answer
-/// goes to its own connection when its call ends. `next` gets how long it may
-/// wait: until the next completion is due, or for ever when none is pending.
+/// Answers on `res` each connection `accepted` hands it, for ever. A request
+/// whose `handle` waits parks at its first wait under its call's id; the next
+/// connection or due completion runs, and each answer goes to its own
+/// connection when its call ends.
 ///
-/// Under `dev`, `newer` hands the instance of a newer build before the next
-/// request; each request parked on the old instance answers 503, because its
-/// task's state does not carry into the new build.
+/// Under `dev`, `newer` hands the instance of a newer build, which replaces
+/// `res` before the next request or completion; each request parked on the
+/// old instance answers 503, because its task's state does not carry into the
+/// new build.
 fn serve_instance(
     mut res: wasmrun::Resident,
+    accepted: &Accepted,
     dev: Option<&DevAssets>,
     mut gen: u64,
-    mut next: impl FnMut(
-        Option<std::time::Duration>,
-    ) -> Result<std::net::TcpStream, std::sync::mpsc::RecvTimeoutError>,
     mut newer: impl FnMut(&mut u64) -> Option<wasmrun::Resident>,
-) {
+) -> ! {
     let mut parked: std::collections::HashMap<i64, Parked> = std::collections::HashMap::new();
     loop {
         let left = res.advance().unwrap_or_else(|e| {
@@ -4492,18 +4516,15 @@ fn serve_instance(
             None
         });
         serve_ended(&mut res, &mut parked, dev.map(|d| (d, gen)));
-        let mut stream = match next(left) {
-            Ok(s) => s,
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
-            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return,
-        };
-        if let Some(next) = newer(&mut gen) {
+        let next = accepted.next(left);
+        if let Some(build) = newer(&mut gen) {
             for (_, mut p) in parked.drain() {
                 eprintln!("{} {} -> 503 (rebuilt)", p.method, p.path);
                 write_response(&mut p.stream, 503, "text/plain", b"the server was rebuilt");
             }
-            res = next;
+            res = build;
         }
+        let Some(mut stream) = next else { continue };
         let dev = dev.map(|d| (d, gen));
         let Some(req) = serve_request(&mut stream, dev) else {
             continue;
@@ -4555,9 +4576,9 @@ fn serve_ended(
 }
 
 /// The `--workers` loop: `n` threads, each with its own instance of `pool`,
-/// take the next connection from the accept loop. Under `dev`, a worker starts
-/// an instance of a newer build before its next request; `gen` names the build
-/// `pool` is.
+/// answer through [`serve_instance`], and an idle one takes the next
+/// connection. Under `dev`, a worker starts an instance of a newer build
+/// before its next request; `gen` names the build `pool` is.
 fn serve_pool(
     pool: &(wasmrun::Compiled, wasmrun::Run),
     n: usize,
@@ -4566,11 +4587,10 @@ fn serve_pool(
     gen: u64,
     banner: impl FnOnce(),
 ) {
-    let (tx, rx) = std::sync::mpsc::channel::<std::net::TcpStream>();
-    let rx = std::sync::Mutex::new(rx);
+    let accepted = Accepted::default();
     std::thread::scope(|s| {
         for i in 0..n {
-            let rx = &rx;
+            let accepted = &accepted;
             let start = move |(m, run): &(_, _)| match wasmrun::start_on(m, run, None) {
                 Ok((res, 0)) => Some(res),
                 Ok((_, code)) => {
@@ -4586,28 +4606,16 @@ fn serve_pool(
                 .stack_size(vyrn_frontend::trap::RUN_STACK_BYTES)
                 .spawn_scoped(s, move || {
                     let Some(res) = start(pool) else { return };
-                    // Each idle worker takes the next connection; with the
-                    // accept loop gone, it drains out.
-                    let next = |left| next_conn(&vyrn_frontend::session::locked(rx), left);
                     let newer = |gen: &mut u64| match dev.and_then(|d| d.live.newer(gen)) {
                         Some(Served::Pool(next)) => start(&*next),
                         _ => None,
                     };
-                    serve_instance(res, dev, gen, next, newer);
+                    serve_instance(res, accepted, dev, gen, newer)
                 })
                 .expect("failed to spawn a worker thread");
         }
         banner();
-        for stream in listener.incoming() {
-            match stream {
-                Ok(s) => {
-                    if tx.send(s).is_err() {
-                        break;
-                    }
-                }
-                Err(_) => continue,
-            }
-        }
+        accepted.fill(listener);
     });
 }
 

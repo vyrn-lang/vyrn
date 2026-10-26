@@ -210,8 +210,11 @@ it. A stream answer is written to its end before anything else runs.
 A trap inside `handle` is logged and answered with a 500 for its own request;
 the requests parked beside it run on, on the same instance. The call stack and
 region nesting return to their state before the call that trapped. Module
-state keeps what the handler wrote, and heap blocks it held leak. `--workers N` runs `handle` on N threads, each with its own
-instance. Startup refuses it, naming the call path, if `handle` reaches module
+state keeps what the handler wrote, and heap blocks it held leak.
+
+`--workers N` runs `handle` on N threads, each with its own instance, which
+interleaves its own waiting requests as the one instance does; an idle worker
+takes the next connection. Startup refuses it, naming the call path, if `handle` reaches module
 state transitively, through a call or a function value. Printing and file I/O do not block workers; each output
 line stays atomic.
 
@@ -231,8 +234,10 @@ length with what it saw before the read; after a change, it builds once no
 further change arrives within one poll, so a burst of saves makes one build.
 The `server`, `client` and `public` keys and the flags are read once, at start.
 
-A good build replaces the server instance before the next request, and its
-`main` runs again: module state does not carry over. A failed build prints its
+A good build replaces the server instance before the next request or due
+timer, and its `main` runs again: module state does not carry over. Each
+request parked at an `await` on the old instance answers 503, because its
+task does not carry over either. A failed build prints its
 diagnostics and leaves the last good build serving, `.vyrn-dev/client.wasm`
 included.
 
