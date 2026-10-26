@@ -913,6 +913,7 @@ fn compile_inner(program: &Program, world: Arc<vyrn_lower::World>) -> Result<Vec
         b.ins(&Instruction::Unreachable).ins(&Instruction::End);
         m.fill(w.resume, b)?;
         m.export("__vyrn_wake", run_queue("wake")?);
+        m.export(TRAPPED_EXPORT, run_queue("taskTrapped")?);
     }
     if user.iter().any(|f| f.is_export_extern) {
         m.export_entry_state(cx.rt.region_sp);
@@ -1753,6 +1754,10 @@ struct Base<'a> {
 /// The import module of the host's waits. A host starts the operation, returns its id, and
 /// later calls `__vyrn_wake` with that id (`std/task`'s run queue).
 pub const WAIT_IMPORTS: &str = "vyrn_wait";
+
+/// The export a host calls after a trap in a module that waits: `std/task`'s `taskTrapped`,
+/// which forgets the task that trapped and returns the host's id for it.
+pub const TRAPPED_EXPORT: &str = "__vyrn_trapped";
 
 /// What a program that waits adds to its module ([`Base::waits`]).
 #[derive(Clone, Copy)]

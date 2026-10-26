@@ -458,6 +458,9 @@ The module's shape:
   `wake`, whose `hostResume` call is the emitter's `$resumeRoot` dispatcher
   over the roots. `hostSleep` is the import `vyrn_wait.sleep`, and `hostCancel`
   the import `vyrn_wait.cancel`, which drops a cancelled wait's operation.
+  After a trap the host calls `__vyrn_trapped`, `std/task`'s `taskTrapped`,
+  which forgets the running task and every wait it held and returns the host's
+  id for it, so the trap ends that task alone.
 - Regions that wait: a `region` that holds a point keeps the arena outside it
   in a local (`Region::Own`). `std/task`'s `regionSwap` exchanges the two
   where the region opens, at each suspension inside it (`Fn_::regions_suspend`)

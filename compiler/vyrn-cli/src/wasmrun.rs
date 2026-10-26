@@ -10,7 +10,7 @@ use std::path::Path;
 use vyrn_frontend::trap;
 use vyrn_genwasm::wasi;
 use vyrn_lower::lastrun::SiteCount;
-use wasmtime::{Caller, Engine, Global, Module, Store, Val};
+use wasmtime::{Caller, Engine, Func, Global, Module, Store, Val};
 
 /// What one run produced. The exit code is `proc_exit`'s argument, or 1 when
 /// the module trapped.
@@ -114,8 +114,6 @@ struct Waits {
     replay: Option<Vec<Wake>>,
     /// Each completion delivered so far.
     delivered: Vec<Wake>,
-    /// The id the next task this host starts takes.
-    next_task: i64,
     /// Each end of a task this host started, as `vyrn_wait.done` reported it, until read.
     ended: Vec<Ended>,
 }
@@ -141,7 +139,6 @@ impl Waits {
                 r
             }),
             delivered: Vec::new(),
-            next_task: 1,
             ended: Vec::new(),
         }
     }
@@ -162,6 +159,22 @@ impl Waits {
     /// `vyrn_wait.cancel(id)`: no wait waits for operation `id`, so its timer never fires.
     fn cancel(&mut self, id: i64) {
         self.due.retain(|d| d.1 != id);
+    }
+
+    /// How long until [`Waits::fire`] has a completion without waiting: zero for a replay and on
+    /// the virtual clock, `None` when nothing is pending.
+    fn due_in(&self) -> Option<std::time::Duration> {
+        let zero = std::time::Duration::ZERO;
+        if let Some(r) = &self.replay {
+            return (!r.is_empty()).then_some(zero);
+        }
+        let at = self.due.iter().min()?.0;
+        match self.virtual_now {
+            Some(_) => Some(zero),
+            None => Some(std::time::Duration::from_millis(
+                at.saturating_sub(self.now()),
+            )),
+        }
     }
 
     /// The next completion to deliver: the next one to replay, or else the earliest pending
@@ -221,6 +234,8 @@ fn settle_waits(store: &mut Store<Host>, inst: &wasmtime::Instance) -> wasmtime:
 
 /// The export a waiting module takes each completion through.
 const WAKE: &str = "__vyrn_wake";
+
+use vyrn_codegen::direct::TRAPPED_EXPORT as TRAPPED;
 
 /// One engine per process, and a second, metered one: fuel is a counter the
 /// guest decrements in every block, so only a run under `VYRN_FUEL` pays for it.
@@ -503,6 +518,12 @@ pub struct Resident {
     /// a door exports (`vyrn_codegen::wasm::Module::export_entry_state`).
     entry: Option<(Global, usize)>,
     waiting: std::sync::Arc<std::collections::HashMap<String, String>>,
+    /// The id the next call this host begins takes.
+    next: i64,
+    /// Each task begun and not ended, by its id, with its export's declared result kind.
+    open: std::collections::HashMap<i64, String>,
+    /// Each end not yet taken, in the order it came ([`Resident::ended`]).
+    ends: Vec<(i64, wasmtime::Result<Option<Val>>)>,
 }
 
 /// The eight-byte `{ len, cap }` header in front of every Vyrn String.
@@ -544,75 +565,143 @@ pub fn start_on(
             inst,
             entry,
             waiting,
+            next: 1,
+            open: std::collections::HashMap::new(),
+            ends: Vec::new(),
         },
         code,
     ))
 }
 
 impl Resident {
-    /// Calls export `name` with `args` and returns its result. An export that
-    /// waits starts a task: the call passes this host's id for it first, runs
-    /// the timers out, and the result is what the task's end delivered, at the
-    /// wasm type of the declared result. The outer error is a missing export,
-    /// the inner one a trap or a cancelled task. A trap abandons the frames and
+    /// One call of `f` into the instance. A trap abandons the frames and
     /// regions the call took, so after one this restores the stack pointer and
-    /// the nesting word it read before. A trapped call's heap blocks stay
-    /// allocated.
-    fn call(&mut self, name: &str, args: &[Val]) -> Result<wasmtime::Result<Option<Val>>, String> {
-        let f = (self.inst)
-            .get_func(&mut self.store, name)
-            .ok_or_else(|| format!("{name}: no such export"))?;
-        let kind = self.waiting.get(name).cloned();
-        let task = kind.as_ref().map(|_| {
-            let waits = &mut self.store.data_mut().x.waits;
-            waits.next_task += 1;
-            waits.next_task - 1
+    /// the nesting word it read before, and in a module that waits hands the
+    /// task that trapped to `__vyrn_trapped`, which forgets it and its waits.
+    /// The error carries the host's id for that task, 0 for none. A trapped
+    /// call's heap blocks stay allocated.
+    fn enter(
+        &mut self,
+        f: Func,
+        args: &[Val],
+        out: &mut [Val],
+    ) -> Result<(), (wasmtime::Error, i64)> {
+        // The word lies in the statics, which memory always covers.
+        let mem = self.store.data().wasi.mem;
+        let saved = (self.entry).zip(mem).map(|((sp, at), mem)| {
+            let mut nesting = [0u8; 4];
+            nesting.copy_from_slice(&mem.data(&self.store)[at..at + 4]);
+            (sp, sp.get(&mut self.store), at, mem, nesting)
         });
-        let args: Vec<Val> = (task.map(Val::I64).into_iter())
+        let top = stack_top(&mut self.store, &self.inst);
+        let ran = f.call(&mut self.store, args, out);
+        let ran = ran.map_err(|e| settle(e, &mut self.store, &self.inst, top));
+        let ran = ran.map_err(|e| {
+            if let Some((sp, top, at, mem, nesting)) = saved {
+                let _ = sp.set(&mut self.store, top);
+                mem.data_mut(&mut self.store)[at..at + 4].copy_from_slice(&nesting);
+            }
+            let trapped = (self.inst).get_typed_func::<(), i64>(&mut self.store, TRAPPED);
+            let host = trapped.and_then(|t| t.call(&mut self.store, ()));
+            (e, host.unwrap_or(0))
+        });
+        // What `vyrn_wait.done` reported during the call.
+        let ended = std::mem::take(&mut self.store.data_mut().x.waits.ended);
+        for Ended {
+            task,
+            status,
+            result,
+        } in ended
+        {
+            let end = match (self.open.remove(&task), status) {
+                (Some(kind), 0) => Ok(result_word(&kind, result)),
+                (Some(_), _) => Err(wasmtime::Error::msg("the task was cancelled")),
+                (None, _) => Err(wasmtime::Error::msg("a task this host never began ended")),
+            };
+            self.ends.push((task, end));
+        }
+        ran
+    }
+
+    /// Begins a call of export `door` with `args` under a new id, which it
+    /// returns. An export that waits takes the id first and starts a task,
+    /// which may end in this call or later; any other call ends now. Each end
+    /// goes to [`Resident::ended`].
+    pub fn begin(&mut self, door: &str, args: &[Val]) -> Result<i64, String> {
+        let f = (self.inst)
+            .get_func(&mut self.store, door)
+            .ok_or_else(|| format!("{door}: no such export"))?;
+        let id = self.next;
+        self.next += 1;
+        let kind = self.waiting.get(door).cloned();
+        let waits = kind.is_some();
+        let args: Vec<Val> = (waits.then_some(Val::I64(id)).into_iter())
             .chain(args.iter().cloned())
             .collect();
         let mut out = vec![Val::I32(0); f.ty(&self.store).results().len()];
-        let mut ran = |r: &mut Self| -> wasmtime::Result<Option<Val>> {
-            f.call(&mut r.store, &args, &mut out)?;
-            let (Some(task), Some(kind)) = (task, &kind) else {
-                return Ok(out.first().cloned());
-            };
-            settle_waits(&mut r.store, &r.inst)?;
-            let ended = &mut r.store.data_mut().x.waits.ended;
-            let Some(at) = ended.iter().position(|e| e.task == task) else {
-                return Err(wasmtime::Error::msg(format!("`{name}` never ended")));
-            };
-            match ended.remove(at) {
-                Ended {
-                    status: 0, result, ..
-                } => Ok(result_word(kind, result)),
-                _ => Err(wasmtime::Error::msg(format!("`{name}` was cancelled"))),
-            }
-        };
-        let Some((sp, at)) = self.entry else {
-            let top = stack_top(&mut self.store, &self.inst);
-            let out = ran(self);
-            return Ok(out.map_err(|e| settle(e, &mut self.store, &self.inst, top)));
-        };
-        // The word lies in the statics, which memory always covers.
-        let words = at..at + 4;
-        let mem = self
-            .store
-            .data()
-            .wasi
-            .mem
-            .expect("memory is set before _start");
-        let top = sp.get(&mut self.store);
-        let mut nesting = [0u8; 4];
-        nesting.copy_from_slice(&mem.data(&self.store)[words.clone()]);
-        let out = ran(self);
-        let out = out.map_err(|e| settle(e, &mut self.store, &self.inst, top.i32()));
-        if out.is_err() {
-            sp.set(&mut self.store, top)
-                .map_err(|e| format!("{name}: {e}"))?;
-            mem.data_mut(&mut self.store)[words].copy_from_slice(&nesting);
+        if let Some(kind) = kind {
+            self.open.insert(id, kind);
         }
-        Ok(out)
+        match self.enter(f, &args, &mut out) {
+            Ok(()) if !waits => self.ends.push((id, Ok(out.first().cloned()))),
+            Ok(()) => {}
+            Err((e, _)) => {
+                self.open.remove(&id);
+                self.ends.push((id, Err(e)));
+            }
+        }
+        Ok(id)
+    }
+
+    /// Delivers the next completion [`Waits::fire`] yields, waiting for it if
+    /// it is not due; false when none is pending. A trap ends the task that
+    /// trapped.
+    fn wake_next(&mut self) -> Result<bool, String> {
+        let Some(w) = self.store.data_mut().x.waits.fire()? else {
+            return Ok(false);
+        };
+        let wake = (self.inst)
+            .get_func(&mut self.store, WAKE)
+            .ok_or_else(|| format!("{WAKE}: no such export"))?;
+        let args = [Val::I64(w.id), Val::I32(w.status), Val::I64(0)];
+        if let Err((e, host)) = self.enter(wake, &args, &mut [Val::I32(0)]) {
+            self.open.remove(&host);
+            self.ends.push((host, Err(e)));
+        }
+        Ok(true)
+    }
+
+    /// Delivers each completion that is due, without waiting. Returns how long
+    /// until the next one is due, `None` when none is pending.
+    pub fn advance(&mut self) -> Result<Option<std::time::Duration>, String> {
+        loop {
+            match self.store.data().x.waits.due_in() {
+                Some(left) if left.is_zero() => self.wake_next()?,
+                left => return Ok(left),
+            };
+        }
+    }
+
+    /// Each end since the last call, in the order it came: the id
+    /// [`Resident::begin`] gave the call, and its result at the wasm type of the
+    /// declared result, or the trap or cancellation that ended it. A trap no
+    /// task this host began owns ends under id 0.
+    pub fn ended(&mut self) -> Vec<(i64, wasmtime::Result<Option<Val>>)> {
+        std::mem::take(&mut self.ends)
+    }
+
+    /// Calls export `name` with `args` and returns its result once it ended:
+    /// an export that waits has every completion delivered first, each waited
+    /// out. The outer error is a missing export or a call that never ended, the
+    /// inner one a trap or a cancelled task.
+    fn call(&mut self, name: &str, args: &[Val]) -> Result<wasmtime::Result<Option<Val>>, String> {
+        let id = self.begin(name, args)?;
+        if self.open.contains_key(&id) {
+            while self.wake_next()? {}
+        }
+        let at = (self.ends.iter().position(|e| e.0 == id))
+            .ok_or_else(|| format!("`{name}` never ended"))?;
+        Ok(self.ends.remove(at).1)
     }
 
     /// Takes what the guest wrote to standard error since the last drain. A
@@ -660,9 +749,9 @@ impl Resident {
             .map_err(|e| format!("__vyrn_free: {e}"))
     }
 
-    /// Reads a returned String up to its NUL, then frees it: the result is the
-    /// caller's.
-    fn text(&mut self, ptr: i32) -> Result<String, String> {
+    /// Reads a returned String, its length from its header, then frees it: the
+    /// result is the caller's.
+    pub fn text(&mut self, ptr: i32) -> Result<String, String> {
         let mem = self
             .store
             .data()
@@ -671,18 +760,19 @@ impl Resident {
             .expect("memory is set before _start");
         let data = mem.data(&self.store);
         let at = ptr as usize;
-        let end = data
-            .get(at..)
-            .and_then(|rest| rest.iter().position(|b| *b == 0))
-            .ok_or_else(|| "a returned String has no terminator".to_string())?;
-        let out = String::from_utf8_lossy(&data[at..at + end]).into_owned();
+        let bytes = (at.checked_sub(STR_HDR as usize))
+            .and_then(|h| data.get(h..h + 4))
+            .map(|n| u32::from_le_bytes([n[0], n[1], n[2], n[3]]) as usize)
+            .and_then(|n| data.get(at..at + n))
+            .ok_or_else(|| "a returned String lies outside memory".to_string())?;
+        let out = String::from_utf8_lossy(bytes).into_owned();
         self.release(ptr)?;
         Ok(out)
     }
 
     /// The message for a trap out of a door: the guest's own `error: ..` line
     /// when it wrote one before `proc_exit`, else this host's wording.
-    fn trapped(&mut self, door: &str, e: wasmtime::Error) -> String {
+    pub fn trapped(&mut self, door: &str, e: wasmtime::Error) -> String {
         match trap::split(&self.drain_err()).1 {
             Some(msg) => msg.to_string(),
             None => format!("{door}: {}", host_trap(&e)),
@@ -744,9 +834,9 @@ impl Resident {
         (self.ask(door, &args)?.i64()).ok_or_else(|| format!("{door}: not an Int64"))
     }
 
-    /// A door that answers a `String`, called with an index or with nothing.
-    pub fn ask_text(&mut self, door: &str, at: Option<i64>) -> Result<String, String> {
-        let args: Vec<Val> = at.map(Val::I64).into_iter().collect();
+    /// A door that answers a `String`, called with `args`.
+    pub fn ask_text(&mut self, door: &str, args: &[i64]) -> Result<String, String> {
+        let args: Vec<Val> = args.iter().map(|a| Val::I64(*a)).collect();
         let p = (self.ask(door, &args)?.i32()).ok_or_else(|| format!("{door}: not a String"))?;
         self.text(p)
     }

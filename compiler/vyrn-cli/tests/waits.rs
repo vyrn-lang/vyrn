@@ -230,13 +230,13 @@ fn the_host_reads_the_result_of_a_task_it_started() {
         vyrn_cli::wasmrun::start(&module, &quiet("result.vyrn", None), None).expect("start");
     assert_eq!(code, 0);
     assert_eq!(res.ask_int("later", &[4]), Ok(8));
-    assert_eq!(res.ask_text("named", Some(2)).as_deref(), Ok("after 2"));
+    assert_eq!(res.ask_text("named", &[2]).as_deref(), Ok("after 2"));
     // `main` waits on operations 1 to 3, so the export's sleep is operation 4.
     let mut cancel: Vec<Wake> = (1..=3).map(|id| Wake { id, status: 0 }).collect();
     cancel.push(Wake { id: 4, status: 1 });
     let (mut res, _) = vyrn_cli::wasmrun::start(&module, &quiet("result.vyrn", Some(cancel)), None)
         .expect("start");
-    let got = res.ask_text("named", Some(2));
+    let got = res.ask_text("named", &[2]);
     assert!(
         got.as_ref().is_err_and(|e| e.contains("was cancelled")),
         "{got:?}"

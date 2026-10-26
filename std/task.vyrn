@@ -246,6 +246,32 @@ fn wake(id: Int64, status: Int32, payload: Int64) -> Int32 {
     return Int32(tasks.length)
 }
 
+/// `__vyrn_trapped`: the running task trapped, so the host gave up its step and
+/// it never ends. Forgets it and every wait it held, whose operations the host
+/// drops, ends any cancellation the trap cut short, and returns the host's id
+/// for the task: 0 for `main`'s, and when no task ran.
+fn taskTrapped() -> Int64 {
+    cancelling = 0
+    let id = running
+    running = 0
+    let i = taskAt(id)
+    if i == tasks.length {
+        return 0
+    }
+    let host = tasks[i].host
+    tasks.swapRemove(i)
+    let mut j: Int64 = 0
+    while j < waits.length {
+        if waits[j].task == id {
+            hostCancel(waits[j].id)
+            waits.swapRemove(j)
+        } else {
+            j = j + 1
+        }
+    }
+    return host
+}
+
 // A `region` that holds an `await` has an arena of its own, so tasks and fork
 // branches that wait inside regions never bump or free one arena out of
 // order. The emitter keeps the arena outside such a region in a local of the

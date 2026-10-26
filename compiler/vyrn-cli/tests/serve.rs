@@ -1309,3 +1309,105 @@ fn dev_builds_nothing_for_a_file_the_build_did_not_read() {
     let err = d.edit(&dev_msg("two"), "dev: rebuilt");
     assert_eq!(err.matches("dev: rebuilt").count(), 1, "{err}");
 }
+
+/// A `handle` that waits: `/slow` and `/boom` wait long, every other path
+/// briefly. Each answer reports `count` before and after its wait and how many
+/// answers ended, so the bodies show which request ended first and what the
+/// others wrote across its wait. `/boom` traps once its wait ends.
+const WAITING_SRC: &str = r#"
+import { sleep } from "std/task"
+
+let mut count: Int64 = 0
+let mut ended: Int64 = 0
+
+fn reply(status: Int64, body: consume String) -> Response {
+    return Response { status: status, contentType: "text/plain", body: body, vary: "", headers: [:] }
+}
+
+fn handle(req: Request) -> Response {
+    let mut ms: Int64 = 10
+    if req.path == "/slow" {
+        ms = 1500
+    }
+    if req.path == "/boom" {
+        ms = 400
+    }
+    let before = count
+    await sleep(ms)
+    count = count + 1
+    if req.path == "/boom" {
+        let z = count - count
+        return reply(200, "\{count / z}")
+    }
+    ended = ended + 1
+    return reply(200, "\{req.path} before=\{before} after=\{count} ended=\{ended}")
+}
+"#;
+
+/// Sends `path` on its own thread, `after` the start, and returns the answer
+/// with the time it took.
+fn get_later(
+    port: u16,
+    path: &'static str,
+    after: Duration,
+) -> std::thread::JoinHandle<((String, String), Duration)> {
+    std::thread::spawn(move || {
+        std::thread::sleep(after);
+        let begun = Instant::now();
+        (get(port, path), begun.elapsed())
+    })
+}
+
+/// A request whose `handle` waits parks at its `await`, and the next request
+/// runs on the same instance: the one that waits less answers first, though
+/// it came second.
+#[test]
+fn overlapping_waiting_requests_answer_in_timer_order() {
+    let s = start_server_on(WAITING_SRC, &[]);
+    let slow = get_later(s.server.port, "/slow", Duration::ZERO);
+    let fast = get_later(s.server.port, "/fast", Duration::from_millis(200));
+    let (fast, fast_took) = fast.join().unwrap();
+    let (slow, _) = slow.join().unwrap();
+    assert_eq!(fast.1, "/fast before=0 after=1 ended=1");
+    assert_eq!(slow.1, "/slow before=0 after=2 ended=2");
+    assert!(fast_took < Duration::from_millis(1000), "{fast_took:?}");
+}
+
+/// Module state may change at an `await`: the slow request read `count`
+/// before its wait, and the fast one wrote it during that wait.
+#[test]
+fn module_state_changes_across_an_await_between_requests() {
+    let s = start_server_on(WAITING_SRC, &[]);
+    let slow = get_later(s.server.port, "/slow", Duration::ZERO);
+    let fast: Vec<_> = (0..3)
+        .map(|k| get_later(s.server.port, "/fast", Duration::from_millis(200 + 150 * k)))
+        .collect();
+    for (k, f) in fast.into_iter().enumerate() {
+        let ((_, body), _) = f.join().unwrap();
+        assert_eq!(
+            body,
+            format!("/fast before={k} after={} ended={}", k + 1, k + 1)
+        );
+    }
+    let ((_, body), _) = slow.join().unwrap();
+    assert_eq!(body, "/slow before=0 after=4 ended=4");
+}
+
+/// A trap ends only the request whose task trapped: it answers 500, the
+/// request parked beside it answers 200, and the instance serves on.
+#[test]
+fn a_trap_in_one_of_two_waiting_requests_answers_500_for_it_alone() {
+    let s = start_server_on(WAITING_SRC, &[]);
+    let slow = get_later(s.server.port, "/slow", Duration::ZERO);
+    let boom = get_later(s.server.port, "/boom", Duration::from_millis(200));
+    let ((status, body), _) = boom.join().unwrap();
+    assert_eq!(status, "HTTP/1.1 500 Internal Server Error");
+    assert_eq!(body, "internal error");
+    let ((status, body), _) = slow.join().unwrap();
+    assert_eq!(status, "HTTP/1.1 200 OK");
+    assert_eq!(body, "/slow before=0 after=2 ended=1");
+    let (_, body) = get(s.server.port, "/fast");
+    assert_eq!(body, "/fast before=2 after=3 ended=2");
+    let err = wait_for(&s.stderr, "division by zero", Duration::from_secs(5));
+    assert!(err.contains("GET /boom -> 500"), "{err}");
+}

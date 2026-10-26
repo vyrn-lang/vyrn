@@ -3930,10 +3930,9 @@ struct ServeResponse {
     pub headers: Vec<(String, String)>,
 }
 
-/// What the host asks the engine for. A stream is pulled after the call that
-/// opened it returned.
+/// What the host asks the engine for while it writes a stream, which is pulled
+/// after the call that opened it ended.
 enum ServeCall {
-    Handle(ServeRequest),
     /// The next frame of the stream the last [`ServeAnswer::Live`] opened.
     Next,
     /// Release that stream: sent when it ends and the first time a write to the
@@ -3960,9 +3959,13 @@ enum ServeAnswer {
 /// so every check judges them with the program.
 ///
 /// - The direct backend exports only `_start` and `export extern fn`s, so
-///   `handle` gets an exported wrapper.
-/// - `Request` and `Response` cross field by field, one call each, under
-///   the extern String ABI.
+///   `handle` gets an exported wrapper, `vyrnServeHandle`. It calls a stand-in
+///   the check judges as not waiting; [`serve_rewrite`] makes it `handle`, and
+///   [`serve_world`] marks the call `await` when `handle` waits.
+/// - `Request` crosses field by field, one call each, under the extern String
+///   ABI. The `Response` is the wrapper's one String result, each field packed
+///   by `vyrnServeField` ([`unpack_response`]), so a waiting `handle`'s answer
+///   reaches the host when its task ends.
 /// - `serveStream` traps in a compiled build, which has no accept loop;
 ///   [`serve_rewrite`] turns it into `vyrnServePark`, which boxes the producer
 ///   into module state for the host to pull a frame at a time.
@@ -3974,12 +3977,6 @@ let mut vyrnServePath: String = ""
 let mut vyrnServeInKeys: Array<String> = []
 let mut vyrnServeInVals: Array<String> = []
 let mut vyrnServeInBody: String = ""
-let mut vyrnServeStatus: Int64 = 0
-let mut vyrnServeType: String = ""
-let mut vyrnServeBody: String = ""
-let mut vyrnServeVary: String = ""
-let mut vyrnServeOutKeys: Array<String> = []
-let mut vyrnServeOutVals: Array<String> = []
 let mut vyrnServeLive: Int64 = 0
 let mut vyrnServeFrame: String = ""
 
@@ -4038,10 +4035,22 @@ export extern fn vyrnServeBodyIs(s: String) {
     vyrnServeInBody = s.copy()
 }
 
-/// Call `handle` on the fields collected above and keep what it answered. The
-/// result says whether a producer is parked behind the response, which is what
-/// makes it a live answer rather than a buffered one.
-export extern fn vyrnServeHandle() -> Bool {
+/// What the check sees `vyrnServeHandle` call: `handle`'s signature, waiting
+/// for nothing.
+fn vyrnServeCall(req: Request) -> Response {
+    return Response { status: 500, contentType: "", body: "", vary: "", headers: [:] }
+}
+
+/// One field of a packed response: its byte length, a colon, its bytes.
+fn vyrnServeField(s: String) -> String {
+    return "\{s.byteLength}:\{s}"
+}
+
+/// Call `handle` on the fields collected above and pack what it answered: the
+/// status, the content type, `vary`, whether a producer is parked behind the
+/// response (a live answer rather than a buffered one), the header count, each
+/// header's name and value, then the body.
+export extern fn vyrnServeHandle() -> String {
     let mut hs: Map<String, String> = [:]
     let mut i = 0
     while i < vyrnServeInKeys.length {
@@ -4056,48 +4065,18 @@ export extern fn vyrnServeHandle() -> Bool {
         headers: hs,
         body: vyrnServeInBody.copy(),
     }
-    let r = handle(req)
-    vyrnServeStatus = r.status
-    vyrnServeType = r.contentType.copy()
-    vyrnServeBody = r.body.copy()
-    vyrnServeVary = r.vary.copy()
-    vyrnServeOutKeys = []
-    vyrnServeOutVals = []
+    let r = vyrnServeCall(req)
+    let live = if vyrnServeLive != 0 { "1" } else { "0" }
+    let head = vyrnServeField(r.status.toString()) + vyrnServeField(r.contentType) + vyrnServeField(r.vary) + vyrnServeField(live)
+    let mut fields = ""
+    let mut n = 0
     for k in r.headers.keys() {
         if let Some(v) = r.headers[k] {
-            vyrnServeOutKeys.push(k.copy())
-            vyrnServeOutVals.push(v.copy())
+            fields = fields + vyrnServeField(k) + vyrnServeField(v)
+            n = n + 1
         }
     }
-    return vyrnServeLive != 0
-}
-
-export extern fn vyrnServeStatusOf() -> Int64 {
-    return vyrnServeStatus
-}
-
-export extern fn vyrnServeTypeOf() -> String {
-    return vyrnServeType.copy()
-}
-
-export extern fn vyrnServeBodyOf() -> String {
-    return vyrnServeBody.copy()
-}
-
-export extern fn vyrnServeVaryOf() -> String {
-    return vyrnServeVary.copy()
-}
-
-export extern fn vyrnServeHeaderCount() -> Int64 {
-    return vyrnServeOutKeys.length
-}
-
-export extern fn vyrnServeHeaderKey(i: Int64) -> String {
-    return vyrnServeOutKeys[i].copy()
-}
-
-export extern fn vyrnServeHeaderValue(i: Int64) -> String {
-    return vyrnServeOutVals[i].copy()
+    return head + vyrnServeField(n.toString()) + fields + vyrnServeField(r.body)
 }
 
 /// One frame off the parked producer. `false` is the end of the stream, and the
@@ -4150,8 +4129,9 @@ fn vyrnServeMain() -> Int64 {
 
 /// Turns a loaded program into the one the serving host runs: every
 /// `serveStream` call becomes `vyrnServePark`, each stand-in call in the
-/// [`SERVE_SHIM`]'s park, next and close becomes its builtin, and
-/// `vyrnServeMain` becomes `main` when the program has none.
+/// [`SERVE_SHIM`]'s park, next and close becomes its builtin, `vyrnServeCall`
+/// in `vyrnServeHandle` becomes `handle`, and `vyrnServeMain` becomes `main`
+/// when the program has none.
 ///
 /// All are renames after the check, sound because each callee has the other's
 /// signature (`vyrnServePark` and `serveStream`: `consume Stream<String>` to
@@ -4174,10 +4154,14 @@ fn serve_rewrite(program: &mut vyrn_frontend::ast::Program) {
         }
         let shim = f.module.is_none()
             && ["vyrnServePark", "vyrnServeNext", "vyrnServeClose"].contains(&f.name.as_str());
+        let door = f.module.is_none() && f.name == "vyrnServeHandle";
         vyrn_frontend::project::walk_block(&mut f.body, &mut |e| {
             if let Expr::Call { name, args, .. } = e {
                 if name == "serveStream" && args.len() == 1 {
                     *name = "vyrnServePark".to_string();
+                }
+                if door && name == "vyrnServeCall" {
+                    *name = "handle".to_string();
                 }
                 if let Some((_, b)) = BOXES.iter().find(|(s, _)| shim && *s == name.as_str()) {
                     *name = b.to_string();
@@ -4187,44 +4171,99 @@ fn serve_rewrite(program: &mut vyrn_frontend::ast::Program) {
     }
 }
 
+/// The World of a served program after [`serve_rewrite`]: when `handle`
+/// waits, the door's call of it is marked `await` first, and the program is
+/// analysed again with the mark.
+fn serve_world(program: &mut vyrn_frontend::ast::Program) -> std::sync::Arc<vyrn_lower::World> {
+    use vyrn_frontend::ast::Expr;
+    let world = vyrn_lower::analyze(program);
+    let waits = (world.fn_id("handle"))
+        .and_then(|f| world.state_use(f))
+        .is_some_and(|u| u.effects.has(vyrn_frontend::effects::Effect::Waits));
+    if !waits {
+        return world;
+    }
+    for f in
+        (program.functions.iter_mut()).filter(|f| f.module.is_none() && f.name == "vyrnServeHandle")
+    {
+        vyrn_frontend::project::walk_block(&mut f.body, &mut |e| {
+            if let Expr::Call { name, awaits, .. } = e {
+                *awaits |= name == "handle";
+            }
+        });
+    }
+    vyrn_lower::analyze(program)
+}
+
+/// Hands `req` to the [`SERVE_SHIM`] and begins `handle` on it. Returns the
+/// call's id, under which [`wasmrun::Resident::ended`] names its end.
+fn serve_begin(res: &mut wasmrun::Resident, req: &ServeRequest) -> Result<i64, String> {
+    res.tell("vyrnServeBegin", &[])?;
+    res.tell("vyrnServeMethodIs", &[&req.method])?;
+    res.tell("vyrnServePathIs", &[&req.path])?;
+    for (k, v) in &req.headers {
+        res.tell("vyrnServeHeaderIs", &[k, v])?;
+    }
+    res.tell("vyrnServeBodyIs", &[&req.body])?;
+    res.begin("vyrnServeHandle", &[])
+}
+
+/// What an ended `vyrnServeHandle` call answered, or the trap that ended it.
+fn serve_end(
+    res: &mut wasmrun::Resident,
+    end: wasmtime::Result<Option<wasmtime::Val>>,
+) -> Result<ServeAnswer, String> {
+    let ptr = match end {
+        Ok(v) => v.and_then(|v| v.i32()),
+        Err(e) => return Err(res.trapped("vyrnServeHandle", e)),
+    };
+    let packed = res.text(ptr.ok_or("vyrnServeHandle: no response")?)?;
+    unpack_response(&packed)
+        .ok_or_else(|| "vyrnServeHandle: a response the host cannot read".into())
+}
+
+/// The response `vyrnServeHandle` packed ([`SERVE_SHIM`]): each field its byte
+/// length, a colon and its bytes. `None` for anything else.
+fn unpack_response(packed: &str) -> Option<ServeAnswer> {
+    let mut rest = packed;
+    let mut field = || -> Option<&str> {
+        let (n, tail) = rest.split_once(':')?;
+        let n: usize = n.parse().ok()?;
+        let f = tail.get(..n)?;
+        rest = tail.get(n..)?;
+        Some(f)
+    };
+    let status = field()?.parse().ok()?;
+    let content_type = field()?.to_string();
+    let vary = field()?.to_string();
+    let live = field()? == "1";
+    let n: usize = field()?.parse().ok()?;
+    let mut headers = Vec::new();
+    for _ in 0..n {
+        headers.push((field()?.to_string(), field()?.to_string()));
+    }
+    let resp = ServeResponse {
+        status,
+        content_type,
+        body: field()?.to_string(),
+        vary,
+        headers,
+    };
+    Some(if live {
+        ServeAnswer::Live(resp)
+    } else {
+        ServeAnswer::Buffered(resp)
+    })
+}
+
 /// Answers one [`ServeCall`] on a resident instance through the
 /// [`SERVE_SHIM`] exports.
 fn serve_wasm_call(res: &mut wasmrun::Resident, call: ServeCall) -> Result<ServeAnswer, String> {
     match call {
-        ServeCall::Handle(req) => {
-            res.tell("vyrnServeBegin", &[])?;
-            res.tell("vyrnServeMethodIs", &[&req.method])?;
-            res.tell("vyrnServePathIs", &[&req.path])?;
-            for (k, v) in &req.headers {
-                res.tell("vyrnServeHeaderIs", &[k, v])?;
-            }
-            res.tell("vyrnServeBodyIs", &[&req.body])?;
-            let live = res.ask_bool("vyrnServeHandle")?;
-            let n = res.ask_int("vyrnServeHeaderCount", &[])?;
-            let mut headers = Vec::with_capacity(n.max(0) as usize);
-            for i in 0..n {
-                headers.push((
-                    res.ask_text("vyrnServeHeaderKey", Some(i))?,
-                    res.ask_text("vyrnServeHeaderValue", Some(i))?,
-                ));
-            }
-            let resp = ServeResponse {
-                status: res.ask_int("vyrnServeStatusOf", &[])?,
-                content_type: res.ask_text("vyrnServeTypeOf", None)?,
-                body: res.ask_text("vyrnServeBodyOf", None)?,
-                vary: res.ask_text("vyrnServeVaryOf", None)?,
-                headers,
-            };
-            Ok(if live {
-                ServeAnswer::Live(resp)
-            } else {
-                ServeAnswer::Buffered(resp)
-            })
-        }
         ServeCall::Next => {
             if res.ask_bool("vyrnServeNext")? {
                 Ok(ServeAnswer::Frame(Some(
-                    res.ask_text("vyrnServeFrameOf", None)?,
+                    res.ask_text("vyrnServeFrameOf", &[])?,
                 )))
             } else {
                 Ok(ServeAnswer::Frame(None))
@@ -4308,13 +4347,13 @@ fn serve_build(
     // Appended before the load, so it is checked and every program line keeps
     // its number.
     let (mut program, _) = p.checked_said(root, &format!("{source}\n{SERVE_SHIM}"), &[])?;
-    serve_rewrite(&mut program);
-    let world = vyrn_lower::analyze(&program);
     if !has_served_handle(&program) {
         return Err(said(format!(
             "`vyrn {what}` needs `fn handle(req: Request) -> Response` in {root}"
         )));
     }
+    serve_rewrite(&mut program);
+    let world = serve_world(&mut program);
     if workers {
         if let Some(refusal) = refuse_workers_if_stateful(&program, &world) {
             return Err(said(refusal));
@@ -4351,9 +4390,9 @@ fn serve_build(
 /// with `build`, then answers on the port until the process ends.
 ///
 /// `build` gets whether `--workers` was given. A [`Served::One`] answers every
-/// request, one at a time, so module state needs no locking; a
-/// [`Served::Pool`] answers through [`serve_pool`]. `banner` prints once the
-/// build is up, given the bound port and the worker count.
+/// request on one instance through [`serve_instance`], so module state needs
+/// no locking; a [`Served::Pool`] answers through [`serve_pool`]. `banner`
+/// prints once the build is up, given the bound port and the worker count.
 ///
 /// `dev` is `vyrn dev`'s static tree and watcher: before each request, the
 /// loop starts a newer build if the watcher published one.
@@ -4380,8 +4419,8 @@ fn serve_loop(
         banner(port, n);
     };
     // The build that answers; a page it serves names it.
-    let mut gen = dev.map_or(0, |d| d.live.first);
-    let mut res = match served {
+    let gen = dev.map_or(0, |d| d.live.first);
+    let res = match served {
         Served::One(res) => res,
         Served::Pool(pool) => {
             // `build` made a pool, so `--workers` was given.
@@ -4391,15 +4430,128 @@ fn serve_loop(
         }
     };
     banner(None);
-    for stream in listener.incoming() {
-        let Ok(mut s) = stream else { continue };
-        if let Some(Served::One(next)) = dev.and_then(|d| d.live.newer(&mut gen)) {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        for s in listener.incoming().flatten() {
+            if tx.send(s).is_err() {
+                break;
+            }
+        }
+    });
+    let newer = |gen: &mut u64| match dev.and_then(|d| d.live.newer(gen)) {
+        Some(Served::One(next)) => Some(next),
+        _ => None,
+    };
+    serve_instance(res, dev, gen, |left| next_conn(&rx, left), newer);
+    Ok(ExitCode::SUCCESS)
+}
+
+/// The next connection `rx` holds, waited for at most `left`, or until one
+/// comes when `left` is `None`: a timeout means a completion is due.
+fn next_conn(
+    rx: &std::sync::mpsc::Receiver<std::net::TcpStream>,
+    left: Option<std::time::Duration>,
+) -> Result<std::net::TcpStream, std::sync::mpsc::RecvTimeoutError> {
+    match left {
+        Some(d) => rx.recv_timeout(d),
+        None => rx
+            .recv()
+            .map_err(|_| std::sync::mpsc::RecvTimeoutError::Disconnected),
+    }
+}
+
+/// A request whose `handle` has not ended: the connection its answer goes to.
+struct Parked {
+    stream: std::net::TcpStream,
+    method: String,
+    path: String,
+}
+
+/// Answers on `res` each connection `next` hands it, until `next` says none
+/// will come. A request whose `handle` waits parks at its first wait under
+/// its call's id; the next connection or due completion runs, and each answer
+/// goes to its own connection when its call ends. `next` gets how long it may
+/// wait: until the next completion is due, or for ever when none is pending.
+///
+/// Under `dev`, `newer` hands the instance of a newer build before the next
+/// request; each request parked on the old instance answers 503, because its
+/// task's state does not carry into the new build.
+fn serve_instance(
+    mut res: wasmrun::Resident,
+    dev: Option<&DevAssets>,
+    mut gen: u64,
+    mut next: impl FnMut(
+        Option<std::time::Duration>,
+    ) -> Result<std::net::TcpStream, std::sync::mpsc::RecvTimeoutError>,
+    mut newer: impl FnMut(&mut u64) -> Option<wasmrun::Resident>,
+) {
+    let mut parked: std::collections::HashMap<i64, Parked> = std::collections::HashMap::new();
+    loop {
+        let left = res.advance().unwrap_or_else(|e| {
+            eprintln!("error: {e}");
+            None
+        });
+        serve_ended(&mut res, &mut parked, dev.map(|d| (d, gen)));
+        let mut stream = match next(left) {
+            Ok(s) => s,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return,
+        };
+        if let Some(next) = newer(&mut gen) {
+            for (_, mut p) in parked.drain() {
+                eprintln!("{} {} -> 503 (rebuilt)", p.method, p.path);
+                write_response(&mut p.stream, 503, "text/plain", b"the server was rebuilt");
+            }
             res = next;
         }
         let dev = dev.map(|d| (d, gen));
-        serve_one(&mut s, dev, &mut |call| serve_wasm_call(&mut res, call));
+        let Some(req) = serve_request(&mut stream, dev) else {
+            continue;
+        };
+        let (method, path) = (req.method.clone(), req.path.clone());
+        match serve_begin(&mut res, &req) {
+            Ok(id) => {
+                parked.insert(
+                    id,
+                    Parked {
+                        stream,
+                        method,
+                        path,
+                    },
+                );
+            }
+            Err(msg) => serve_answer(&mut stream, dev, &method, &path, Err(msg), &mut |call| {
+                serve_wasm_call(&mut res, call)
+            }),
+        }
+        serve_ended(&mut res, &mut parked, dev);
     }
-    Ok(ExitCode::SUCCESS)
+}
+
+/// Answers each parked request whose call ended on `res`. An end no parked
+/// request owns, a trap outside every request, is logged.
+fn serve_ended(
+    res: &mut wasmrun::Resident,
+    parked: &mut std::collections::HashMap<i64, Parked>,
+    dev: Option<(&DevAssets, u64)>,
+) {
+    for (id, end) in res.ended() {
+        let answer = serve_end(res, end);
+        let Some(mut p) = parked.remove(&id) else {
+            if let Err(msg) = answer {
+                eprintln!("error: {msg}");
+            }
+            continue;
+        };
+        serve_answer(
+            &mut p.stream,
+            dev,
+            &p.method,
+            &p.path,
+            answer,
+            &mut |call| serve_wasm_call(res, call),
+        );
+    }
 }
 
 /// The `--workers` loop: `n` threads, each with its own instance of `pool`,
@@ -4418,7 +4570,7 @@ fn serve_pool(
     let rx = std::sync::Mutex::new(rx);
     std::thread::scope(|s| {
         for i in 0..n {
-            let (rx, mut gen) = (&rx, gen);
+            let rx = &rx;
             let start = move |(m, run): &(_, _)| match wasmrun::start_on(m, run, None) {
                 Ok((res, 0)) => Some(res),
                 Ok((_, code)) => {
@@ -4433,21 +4585,15 @@ fn serve_pool(
             std::thread::Builder::new()
                 .stack_size(vyrn_frontend::trap::RUN_STACK_BYTES)
                 .spawn_scoped(s, move || {
-                    let Some(mut res) = start(pool) else { return };
+                    let Some(res) = start(pool) else { return };
                     // Each idle worker takes the next connection; with the
                     // accept loop gone, it drains out.
-                    loop {
-                        let Ok(mut stream) = vyrn_frontend::session::locked(rx).recv() else {
-                            break;
-                        };
-                        if let Some(Served::Pool(next)) = dev.and_then(|d| d.live.newer(&mut gen)) {
-                            res = start(&*next).unwrap_or(res);
-                        }
-                        let dev = dev.map(|d| (d, gen));
-                        serve_one(&mut stream, dev, &mut |call| {
-                            serve_wasm_call(&mut res, call)
-                        });
-                    }
+                    let next = |left| next_conn(&vyrn_frontend::session::locked(rx), left);
+                    let newer = |gen: &mut u64| match dev.and_then(|d| d.live.newer(gen)) {
+                        Some(Served::Pool(next)) => start(&*next),
+                        _ => None,
+                    };
+                    serve_instance(res, dev, gen, next, newer);
                 })
                 .expect("failed to spawn a worker thread");
         }
@@ -4980,18 +5126,18 @@ enum ParseError {
 /// `Origin` passes the gate.
 const MAX_BODY: usize = 8 * 1024 * 1024;
 
-/// Handles one connection: parse, gate, then a static asset or `handle`, then
-/// close. A trap is logged and answered 500, and the server keeps running.
+/// Reads one request off `stream` and answers it unless it is `handle`'s:
+/// the parse, the gate, and under `dev` a static asset or the reload stream.
+/// Returns the request `handle` answers.
 ///
 /// `dev` is `vyrn dev`'s, with the number of the build that answers: a GET or
 /// HEAD that names a static asset is answered off the disk, a GET of
 /// [`RELOAD_PATH`] becomes a page's event stream, and each HTML answer carries
-/// the [`reload_script`]. `None` is `vyrn serve`.
-fn serve_one(
+/// the [`reload_script`] ([`serve_answer`]). `None` is `vyrn serve`.
+fn serve_request(
     stream: &mut std::net::TcpStream,
     dev: Option<(&DevAssets, u64)>,
-    call_handle: &mut dyn FnMut(ServeCall) -> Result<ServeAnswer, String>,
-) {
+) -> Option<ServeRequest> {
     let req = match parse_request(stream) {
         Ok(r) => r,
         Err(ParseError::Chunked { method, path }) => {
@@ -5002,30 +5148,30 @@ fn serve_one(
                 "text/plain",
                 b"chunked transfer-encoding not supported",
             );
-            return;
+            return None;
         }
         Err(ParseError::TooLarge { method, path }) => {
             eprintln!("{method} {path} -> 413");
             write_response(stream, 413, "text/plain", b"request body too large");
-            return;
+            return None;
         }
         Err(ParseError::Bad) => {
             eprintln!("- - -> 400");
             write_response(stream, 400, "text/plain", b"bad request");
-            return;
+            return None;
         }
     };
     // Ahead of static assets and of the 101 upgrade path.
     if let Some(body) = cross_origin_body(&req) {
         write_cross_origin_refusal(stream, &req.method, &req.path, &body);
-        return;
+        return None;
     }
     // GET and HEAD only, so nothing shadows a POST.
     if let Some((assets, gen)) = dev {
         if req.method == "GET" && req.path == RELOAD_PATH {
             eprintln!("GET {RELOAD_PATH} -> 200 (events)");
             assets.live.listen(stream);
-            return;
+            return None;
         }
         if req.method == "GET" || req.method == "HEAD" {
             if let Some(file) = dev_static_path(&req.path, assets) {
@@ -5048,13 +5194,26 @@ fn serve_one(
                         write_response(stream, 500, "text/plain", b"cannot read asset");
                     }
                 }
-                return;
+                return None;
             }
         }
     }
-    let method = req.method.clone();
-    let path = req.path.clone();
-    match call_handle(ServeCall::Handle(req)) {
+    Some(req)
+}
+
+/// Writes `answer`, what `handle` answered to `method` `path` or the trap
+/// that ended it, to `stream`, then closes it. A trap is logged and answered
+/// 500, and the server keeps running. A stream answer pulls its frames
+/// through `call_handle` ([`pump_stream`]).
+fn serve_answer(
+    stream: &mut std::net::TcpStream,
+    dev: Option<(&DevAssets, u64)>,
+    method: &str,
+    path: &str,
+    answer: Result<ServeAnswer, String>,
+    call_handle: &mut dyn FnMut(ServeCall) -> Result<ServeAnswer, String>,
+) {
+    match answer {
         Ok(ServeAnswer::Live(head)) => {
             eprintln!("{method} {path} -> {} (stream)", head.status);
             pump_stream(stream, &head, call_handle);
@@ -6624,9 +6783,11 @@ another bench   # trailing reason
         let port = listener.local_addr().expect("addr").port();
         let server = std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().expect("accept");
-            serve_one(&mut stream, None, &mut |_call| {
-                panic!("the request reached `handle` — the cap did not hold");
-            });
+            let req = serve_request(&mut stream, None);
+            assert!(
+                req.is_none(),
+                "the request reached `handle`: the cap did not hold"
+            );
         });
         let mut client = std::net::TcpStream::connect(("127.0.0.1", port)).expect("connect");
         // A regression fails here instead of hanging the suite.
@@ -6693,7 +6854,7 @@ fn handle(req: Request) -> Response {
             .and_then(|p| p.checked(&key, &source))
             .expect("the doors load and check");
         serve_rewrite(&mut program);
-        let world = vyrn_lower::analyze(&program);
+        let world = serve_world(&mut program);
         let bytes = vyrn_codegen::direct::compile(&program, world).expect("the doors compile");
         let run = wasmrun::Run {
             argv: vec![key.clone()],
@@ -6710,10 +6871,19 @@ fn handle(req: Request) -> Response {
             headers: vec![("host".to_string(), "localhost".to_string())],
             body: String::new(),
         };
+        // `handle` waits for nothing, so its call ends where it begins.
+        let answer = |res: &mut wasmrun::Resident, path: &str| {
+            let id = serve_begin(res, &ask(path)).expect("begin");
+            let mut ends = res.ended();
+            assert_eq!(ends.len(), 1);
+            let (got, end) = ends.remove(0);
+            assert_eq!(got, id);
+            serve_end(res, end)
+        };
 
         // `main` wrote 100 and the store outlived its exit.
         for want in ["101", "102"] {
-            match serve_wasm_call(&mut res, ServeCall::Handle(ask("/x"))) {
+            match answer(&mut res, "/x") {
                 Ok(ServeAnswer::Buffered(r)) => {
                     assert_eq!(r.status, 200);
                     assert_eq!(r.content_type, "text/plain");
@@ -6725,7 +6895,7 @@ fn handle(req: Request) -> Response {
             }
         }
 
-        match serve_wasm_call(&mut res, ServeCall::Handle(ask("/live"))) {
+        match answer(&mut res, "/live") {
             Ok(ServeAnswer::Live(r)) => {
                 assert_eq!(r.status, 200);
                 assert_eq!(r.body, "p", "the prologue crosses with the header block");
@@ -6742,7 +6912,7 @@ fn handle(req: Request) -> Response {
             Ok(ServeAnswer::Released) => {}
             other => panic!("expected a release, got {:?}", other.map(|_| ())),
         }
-        match serve_wasm_call(&mut res, ServeCall::Handle(ask("/x"))) {
+        match answer(&mut res, "/x") {
             Ok(ServeAnswer::Buffered(r)) => assert_eq!(r.body, "104"),
             other => panic!("expected a buffered answer, got {:?}", other.map(|_| ())),
         }
@@ -6753,7 +6923,7 @@ fn handle(req: Request) -> Response {
         for _ in 0..3 {
             let clock = std::time::Instant::now();
             for _ in 0..n {
-                serve_wasm_call(&mut res, ServeCall::Handle(ask("/x"))).expect("answer");
+                answer(&mut res, "/x").expect("answer");
             }
             wasm += clock.elapsed();
         }

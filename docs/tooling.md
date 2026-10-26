@@ -198,11 +198,19 @@ An HTTP/1.1 host on `std::net` that calls the file's
 `Response` are prelude records, so `handle` is an ordinary function that tests
 and `main` can call.
 
-Without `--workers`, requests run one at a time, so module state needs no
-locking. A trap inside `handle` is logged and answered with a 500; the server
-keeps running on the same instance. The call stack and region nesting return
-to their state before the request. Module state keeps what the handler wrote,
-and heap blocks it held leak. `--workers N` runs `handle` on N threads, each with its own
+Without `--workers`, one instance answers every request, so module state
+needs no locking. A `handle` that does not wait runs each request to its end
+before the next starts. A `handle` that waits runs each request as a task on
+that instance: the request parks at its first `await`, the next request or
+due timer runs, and each response goes to its own connection when its task
+ends. So module state may change at an `await` between requests: a request
+that read a global before it waited may find another request's write after
+it. A stream answer is written to its end before anything else runs.
+
+A trap inside `handle` is logged and answered with a 500 for its own request;
+the requests parked beside it run on, on the same instance. The call stack and
+region nesting return to their state before the call that trapped. Module
+state keeps what the handler wrote, and heap blocks it held leak. `--workers N` runs `handle` on N threads, each with its own
 instance. Startup refuses it, naming the call path, if `handle` reaches module
 state transitively, through a call or a function value. Printing and file I/O do not block workers; each output
 line stays atomic.

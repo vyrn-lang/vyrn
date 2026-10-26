@@ -3238,6 +3238,7 @@ std/task.vyrn	task$delivery	no, it keeps an index check	no, its effect set is mo
 std/task.vyrn	task$cancelBegin	yes	no, its effect set is module-state
 std/task.vyrn	task$cancelEnd	yes	no, its effect set is module-state
 std/task.vyrn	task$wake	no, it keeps an index check	no, its effect set is alloc, module-state, trap
+std/task.vyrn	task$taskTrapped	no, it keeps an index check	no, its effect set is module-state
 std/task.vyrn	task$regionSwap	no, it calls `arenaSwap`, which is not trap-free	no, it is not trap-free
 std/task.vyrn	task$regionClose	no, it calls `regionExit`, which is not trap-free	no, it is not trap-free
 std/task.vyrn	task$regionCarry	no, it calls `arenaSwap`, which is not trap-free	no, it is not trap-free
