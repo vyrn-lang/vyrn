@@ -41,7 +41,7 @@ fn quiet(name: &str, replay: Option<Vec<Wake>>) -> Run {
 
 #[test]
 fn a_waiting_program_resumes_at_each_await() {
-    for (name, _why) in WAITING {
+    for name in &waiting() {
         let bytes = audited(name);
         let out = run(&bytes, quiet(name, None)).expect("the module runs");
         let stem = name.trim_end_matches(".vyrn");
@@ -57,7 +57,7 @@ fn a_waiting_program_resumes_at_each_await() {
 /// cancellation edge.
 #[test]
 fn a_cancelled_wait_releases_every_frame_on_its_path() {
-    for (name, _why) in WAITING {
+    for name in &waiting() {
         let bytes = audited(name);
         let full = run(&bytes, quiet(name, None)).expect("the module runs");
         let all = norm(&full.stdout);
@@ -81,7 +81,7 @@ fn a_cancelled_wait_releases_every_frame_on_its_path() {
 /// replays it.
 #[test]
 fn a_replay_of_the_recorded_wakes_prints_the_same_bytes() {
-    for (name, _why) in WAITING {
+    for name in &waiting() {
         let bytes = audited(name);
         let wall = Run {
             virtual_clock: false,

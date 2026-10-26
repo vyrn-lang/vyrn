@@ -49,6 +49,7 @@ fn every_example_agrees_between_the_wasm2c_route_and_the_wasm_engine() {
 
     let mut failures: Vec<String> = Vec::new();
     let (mut checked, mut skipped) = (0usize, 0usize);
+    let waiting = waiting();
     for path in &names {
         let name = path.file_name().unwrap().to_string_lossy().to_string();
         // Each exclusion is a program that cannot be compared: two lists that
@@ -62,9 +63,9 @@ fn every_example_agrees_between_the_wasm2c_route_and_the_wasm_engine() {
                 WASM_ONLY
                     .iter()
                     .chain(ENGINE_TRAP)
-                    .chain(WAITING)
                     .map(|(n, why)| (*n, *why)),
             )
+            .chain(waiting.iter().map(|n| (n.as_str(), WAITS)))
             .find(|(n, _)| *n == name);
         if let Some((_, why)) = skip {
             eprintln!("SKIP  {name}  ({why})");
@@ -142,7 +143,9 @@ fn the_examples_the_cli_cannot_run_agree_between_the_route_and_vyrn_run() {
     }
     let dir = examples_dir();
     let out_dir = scratch("route-trap");
-    for (name, _why) in WASM_ONLY.iter().chain(ENGINE_TRAP).chain(WAITING) {
+    let waiting = waiting();
+    let names = (WASM_ONLY.iter().chain(ENGINE_TRAP)).map(|(n, _)| *n);
+    for name in names.chain(waiting.iter().map(String::as_str)) {
         let path = dir.join(name);
         let engine = vyrn().arg("run").arg(&path).output().expect("vyrn run");
 
