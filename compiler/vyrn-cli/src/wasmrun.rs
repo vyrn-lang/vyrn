@@ -10,7 +10,7 @@ use std::path::Path;
 use vyrn_frontend::trap;
 use vyrn_genwasm::wasi;
 use vyrn_lower::lastrun::SiteCount;
-use wasmtime::{Caller, Engine, Global, Module, Store, WasmParams, WasmResults};
+use wasmtime::{Caller, Engine, Func, Global, Module, Store, Val};
 
 /// What one run produced. The exit code is `proc_exit`'s argument, or 1 when
 /// the module trapped.
@@ -70,8 +70,9 @@ pub struct Run {
     pub capture_stderr: bool,
     /// Times the phases into [`Outcome::meter`], for `vyrn run --profile`.
     pub meter: bool,
-    /// Runs a waiting module's timers on a clock that only a wake advances, so `vyrn test`
-    /// waits on nothing; otherwise on the wall clock.
+    /// Delivers each of a waiting module's timers without waiting out its deadline, so
+    /// `vyrn test` waits on nothing; otherwise each waits for its deadline in real time.
+    /// The order of wakes is the same either way ([`Waits`]).
     pub virtual_clock: bool,
     /// Delivers these completions in order instead of the clock's, each to an operation the
     /// module started: a replay of [`Outcome::wakes`], or a cancellation a test asks for.
@@ -101,11 +102,18 @@ type Host = wasi::Guest<Extra>;
 /// The host operations a waiting module started and the host has not woken, and the clock
 /// their deadlines read. The host owns the event loop ([`settle_waits`]); the module's run queue
 /// orders the tasks.
+///
+/// The clock is logical: `now` is the deadline of the wake the module runs in, 0 before the
+/// first, or the time the host began the call that runs ([`Waits::begin`]). A deadline is `now`
+/// plus the sleep, so the time the module computes never moves a later deadline, and the order
+/// of wakes is the same on every host and machine.
 struct Waits {
-    /// `Some(now)` runs the timers on a clock in milliseconds that only a wake advances;
-    /// `None` on the wall clock from `start`.
-    virtual_now: Option<u64>,
+    /// Whether a timer waits for its deadline in real time; `vyrn test` delivers it at once.
+    wall: bool,
+    /// When the module started, in real time.
     start: std::time::Instant,
+    /// The logical clock, in milliseconds since `start`.
+    now: u64,
     /// The id the next operation takes.
     next: i64,
     /// Each pending timer's deadline and id.
@@ -114,13 +122,25 @@ struct Waits {
     replay: Option<Vec<Wake>>,
     /// Each completion delivered so far.
     delivered: Vec<Wake>,
+    /// Each end of a task this host started, as `vyrn_wait.done` reported it, until read.
+    ended: Vec<Ended>,
+}
+
+/// The end of a task the host started by calling a waiting export: the host's id for the task,
+/// status 0 with the result word or 1 cancelled, as `vyrn_wait.done(task, status, result)`
+/// delivers it.
+struct Ended {
+    task: i64,
+    status: i32,
+    result: i64,
 }
 
 impl Waits {
     fn new(run: &Run) -> Self {
         Waits {
-            virtual_now: run.virtual_clock.then_some(0),
+            wall: !run.virtual_clock,
             start: std::time::Instant::now(),
+            now: 0,
             next: 1,
             due: Vec::new(),
             replay: run.replay.clone().map(|mut r| {
@@ -128,18 +148,27 @@ impl Waits {
                 r
             }),
             delivered: Vec::new(),
+            ended: Vec::new(),
         }
     }
 
-    fn now(&self) -> u64 {
-        (self.virtual_now).unwrap_or_else(|| self.start.elapsed().as_millis() as u64)
+    /// The real time since the start, in milliseconds, which a wall-clock timer waits out.
+    fn real(&self) -> u64 {
+        self.start.elapsed().as_millis() as u64
     }
 
-    /// `vyrn_wait.sleep(ms)`: a timer due `ms` from now; a negative `ms` is due now.
+    /// The host begins a call: on the wall clock, its task's time starts at its arrival.
+    fn begin(&mut self) {
+        if self.wall {
+            self.now = self.real();
+        }
+    }
+
+    /// `vyrn_wait.sleep(ms)`: a timer due `ms` after `now`; a negative `ms` is due now.
     fn sleep(&mut self, ms: i64) -> i64 {
         let id = self.next;
         self.next += 1;
-        let at = self.now().saturating_add(ms.max(0) as u64);
+        let at = self.now.saturating_add(ms.max(0) as u64);
         self.due.push((at, id));
         id
     }
@@ -149,9 +178,25 @@ impl Waits {
         self.due.retain(|d| d.1 != id);
     }
 
+    /// How long until [`Waits::fire`] has a completion without waiting: zero for a replay and
+    /// off the wall clock, `None` when nothing is pending.
+    fn due_in(&self) -> Option<std::time::Duration> {
+        let zero = std::time::Duration::ZERO;
+        if let Some(r) = &self.replay {
+            return (!r.is_empty()).then_some(zero);
+        }
+        let at = self.due.iter().min()?.0;
+        let left = if self.wall {
+            at.saturating_sub(self.real())
+        } else {
+            0
+        };
+        Some(std::time::Duration::from_millis(left))
+    }
+
     /// The next completion to deliver: the next one to replay, or else the earliest pending
-    /// timer, ties by id, once its deadline has come. The virtual clock moves to it, and the
-    /// wall clock is waited out.
+    /// timer, ties by id, its deadline waited out on the wall clock. `now` moves to the
+    /// deadline.
     fn fire(&mut self) -> Result<Option<Wake>, String> {
         if let Some(r) = &mut self.replay {
             let Some(w) = r.pop() else {
@@ -160,7 +205,7 @@ impl Waits {
             let Some(i) = self.due.iter().position(|d| d.1 == w.id) else {
                 return Err(format!("a replayed wake names no pending wait: {}", w.id));
             };
-            self.due.remove(i);
+            self.now = self.due.remove(i).0;
             self.delivered.push(w);
             return Ok(Some(w));
         }
@@ -168,15 +213,11 @@ impl Waits {
             return Ok(None);
         };
         let (at, id) = self.due.remove(i);
-        match &mut self.virtual_now {
-            Some(now) => *now = (*now).max(at),
-            None => {
-                let now = self.now();
-                if at > now {
-                    std::thread::sleep(std::time::Duration::from_millis(at - now));
-                }
-            }
+        let real = self.real();
+        if self.wall && at > real {
+            std::thread::sleep(std::time::Duration::from_millis(at - real));
         }
+        self.now = at;
         let w = Wake { id, status: 0 };
         self.delivered.push(w);
         Ok(Some(w))
@@ -206,6 +247,8 @@ fn settle_waits(store: &mut Store<Host>, inst: &wasmtime::Instance) -> wasmtime:
 
 /// The export a waiting module takes each completion through.
 const WAKE: &str = "__vyrn_wake";
+
+use vyrn_codegen::direct::TRAPPED_EXPORT as TRAPPED;
 
 /// One engine per process, and a second, metered one: fuel is a counter the
 /// guest decrements in every block, so only a run under `VYRN_FUEL` pays for it.
@@ -374,6 +417,18 @@ fn open(
             "cancel",
             |mut c: Caller<'_, Host>, id: i64| c.data_mut().x.waits.cancel(id),
         )?;
+        linker.func_wrap(
+            vyrn_codegen::direct::WAIT_IMPORTS,
+            "done",
+            |mut c: Caller<'_, Host>, task: i64, status: i32, result: i64| {
+                let end = Ended {
+                    task,
+                    status,
+                    result,
+                };
+                c.data_mut().x.waits.ended.push(end);
+            },
+        )?;
         // After `sweep`, a `vyrn` import is an `extern fn` the program reaches.
         // Only a browser page supplies that namespace. A terminal answers each
         // name with `trap::extern_unavailable`'s sentence on fd 2, then exit 1,
@@ -423,6 +478,8 @@ pub struct Compiled {
     sites: Option<String>,
     /// The `vyrn:fns` section: the counter table's address, then a name per function.
     fns: Option<String>,
+    /// Each export that waits, by name, with its declared result kind ([`waiting_exports`]).
+    waiting: std::sync::Arc<std::collections::HashMap<String, String>>,
 }
 
 /// Translates `bytes`; `metered` makes the guest count fuel ([`run`]).
@@ -455,6 +512,7 @@ pub fn compile(bytes: &[u8], metered: bool) -> Result<Compiled, String> {
         ),
         sites,
         fns: custom_section(bytes, "vyrn:fns"),
+        waiting: std::sync::Arc::new(waiting_exports(bytes)),
     })
 }
 
@@ -472,6 +530,13 @@ pub struct Resident {
     /// The stack pointer and the nesting word's address, which a module with
     /// a door exports (`vyrn_codegen::wasm::Module::export_entry_state`).
     entry: Option<(Global, usize)>,
+    waiting: std::sync::Arc<std::collections::HashMap<String, String>>,
+    /// The id the next call this host begins takes.
+    next: i64,
+    /// Each task begun and not ended, by its id, with its export's declared result kind.
+    open: std::collections::HashMap<i64, String>,
+    /// Each end not yet taken, in the order it came ([`Resident::ended`]).
+    ends: Vec<(i64, wasmtime::Result<Option<Val>>)>,
 }
 
 /// The eight-byte `{ len, cap }` header in front of every Vyrn String.
@@ -506,49 +571,151 @@ pub fn start_on(
         .get_global(&mut store, vyrn_codegen::wasm::NESTING_EXPORT)
         .and_then(|g| g.get(&mut store).i32());
     let entry = sp.zip(nesting.map(|at| at as usize));
-    Ok((Resident { store, inst, entry }, code))
+    let waiting = module.waiting.clone();
+    Ok((
+        Resident {
+            store,
+            inst,
+            entry,
+            waiting,
+            next: 1,
+            open: std::collections::HashMap::new(),
+            ends: Vec::new(),
+        },
+        code,
+    ))
 }
 
 impl Resident {
-    /// Calls export `name`. The outer error is a missing or mistyped export,
-    /// the inner one a trap. A trap abandons the frames and regions the call
-    /// took, so after one this restores the stack pointer and the nesting word
-    /// it read before. A trapped call's heap blocks stay allocated.
-    fn call<P: WasmParams, R: WasmResults>(
+    /// One call of `f` into the instance. A trap abandons the frames and
+    /// regions the call took, so after one this restores the stack pointer and
+    /// the nesting word it read before, and in a module that waits hands the
+    /// task that trapped to `__vyrn_trapped`, which forgets it and its waits.
+    /// The error carries the host's id for that task, 0 for none. A trapped
+    /// call's heap blocks stay allocated.
+    fn enter(
         &mut self,
-        name: &str,
-        args: P,
-    ) -> Result<wasmtime::Result<R>, String> {
-        let f = self
-            .inst
-            .get_typed_func::<P, R>(&mut self.store, name)
-            .map_err(|e| format!("{name}: {e}"))?;
-        let Some((sp, at)) = self.entry else {
-            let top = stack_top(&mut self.store, &self.inst);
-            let out = (f.call(&mut self.store, args))
-                .and_then(|r| settle_waits(&mut self.store, &self.inst).map(|()| r));
-            return Ok(out.map_err(|e| settle(e, &mut self.store, &self.inst, top)));
-        };
+        f: Func,
+        args: &[Val],
+        out: &mut [Val],
+    ) -> Result<(), (wasmtime::Error, i64)> {
         // The word lies in the statics, which memory always covers.
-        let words = at..at + 4;
-        let mem = self
-            .store
-            .data()
-            .wasi
-            .mem
-            .expect("memory is set before _start");
-        let top = sp.get(&mut self.store);
-        let mut nesting = [0u8; 4];
-        nesting.copy_from_slice(&mem.data(&self.store)[words.clone()]);
-        let out = (f.call(&mut self.store, args))
-            .and_then(|r| settle_waits(&mut self.store, &self.inst).map(|()| r));
-        let out = out.map_err(|e| settle(e, &mut self.store, &self.inst, top.i32()));
-        if out.is_err() {
-            sp.set(&mut self.store, top)
-                .map_err(|e| format!("{name}: {e}"))?;
-            mem.data_mut(&mut self.store)[words].copy_from_slice(&nesting);
+        let mem = self.store.data().wasi.mem;
+        let saved = (self.entry).zip(mem).map(|((sp, at), mem)| {
+            let mut nesting = [0u8; 4];
+            nesting.copy_from_slice(&mem.data(&self.store)[at..at + 4]);
+            (sp, sp.get(&mut self.store), at, mem, nesting)
+        });
+        let top = stack_top(&mut self.store, &self.inst);
+        let ran = f.call(&mut self.store, args, out);
+        let ran = ran.map_err(|e| settle(e, &mut self.store, &self.inst, top));
+        let ran = ran.map_err(|e| {
+            if let Some((sp, top, at, mem, nesting)) = saved {
+                let _ = sp.set(&mut self.store, top);
+                mem.data_mut(&mut self.store)[at..at + 4].copy_from_slice(&nesting);
+            }
+            let trapped = (self.inst).get_typed_func::<(), i64>(&mut self.store, TRAPPED);
+            let host = trapped.and_then(|t| t.call(&mut self.store, ()));
+            (e, host.unwrap_or(0))
+        });
+        // What `vyrn_wait.done` reported during the call.
+        let ended = std::mem::take(&mut self.store.data_mut().x.waits.ended);
+        for Ended {
+            task,
+            status,
+            result,
+        } in ended
+        {
+            let end = match (self.open.remove(&task), status) {
+                (Some(kind), 0) => Ok(result_word(&kind, result)),
+                (Some(_), _) => Err(wasmtime::Error::msg("the task was cancelled")),
+                (None, _) => Err(wasmtime::Error::msg("a task this host never began ended")),
+            };
+            self.ends.push((task, end));
         }
-        Ok(out)
+        ran
+    }
+
+    /// Begins a call of export `door` with `args` under a new id, which it
+    /// returns. An export that waits takes the id first and starts a task,
+    /// which may end in this call or later; any other call ends now. Each end
+    /// goes to [`Resident::ended`].
+    pub fn begin(&mut self, door: &str, args: &[Val]) -> Result<i64, String> {
+        let f = (self.inst)
+            .get_func(&mut self.store, door)
+            .ok_or_else(|| format!("{door}: no such export"))?;
+        let id = self.next;
+        self.next += 1;
+        self.store.data_mut().x.waits.begin();
+        let kind = self.waiting.get(door).cloned();
+        let waits = kind.is_some();
+        let args: Vec<Val> = (waits.then_some(Val::I64(id)).into_iter())
+            .chain(args.iter().cloned())
+            .collect();
+        let mut out = vec![Val::I32(0); f.ty(&self.store).results().len()];
+        if let Some(kind) = kind {
+            self.open.insert(id, kind);
+        }
+        match self.enter(f, &args, &mut out) {
+            Ok(()) if !waits => self.ends.push((id, Ok(out.first().cloned()))),
+            Ok(()) => {}
+            Err((e, _)) => {
+                self.open.remove(&id);
+                self.ends.push((id, Err(e)));
+            }
+        }
+        Ok(id)
+    }
+
+    /// Delivers the next completion [`Waits::fire`] yields, waiting for it if
+    /// it is not due; false when none is pending. A trap ends the task that
+    /// trapped.
+    fn wake_next(&mut self) -> Result<bool, String> {
+        let Some(w) = self.store.data_mut().x.waits.fire()? else {
+            return Ok(false);
+        };
+        let wake = (self.inst)
+            .get_func(&mut self.store, WAKE)
+            .ok_or_else(|| format!("{WAKE}: no such export"))?;
+        let args = [Val::I64(w.id), Val::I32(w.status), Val::I64(0)];
+        if let Err((e, host)) = self.enter(wake, &args, &mut [Val::I32(0)]) {
+            self.open.remove(&host);
+            self.ends.push((host, Err(e)));
+        }
+        Ok(true)
+    }
+
+    /// Delivers each completion that is due, without waiting. Returns how long
+    /// until the next one is due, `None` when none is pending.
+    pub fn advance(&mut self) -> Result<Option<std::time::Duration>, String> {
+        loop {
+            match self.store.data().x.waits.due_in() {
+                Some(left) if left.is_zero() => self.wake_next()?,
+                left => return Ok(left),
+            };
+        }
+    }
+
+    /// Each end since the last call, in the order it came: the id
+    /// [`Resident::begin`] gave the call, and its result at the wasm type of the
+    /// declared result, or the trap or cancellation that ended it. A trap no
+    /// task this host began owns ends under id 0.
+    pub fn ended(&mut self) -> Vec<(i64, wasmtime::Result<Option<Val>>)> {
+        std::mem::take(&mut self.ends)
+    }
+
+    /// Calls export `name` with `args` and returns its result once it ended:
+    /// an export that waits has every completion delivered first, each waited
+    /// out. The outer error is a missing export or a call that never ended, the
+    /// inner one a trap or a cancelled task.
+    fn call(&mut self, name: &str, args: &[Val]) -> Result<wasmtime::Result<Option<Val>>, String> {
+        let id = self.begin(name, args)?;
+        if self.open.contains_key(&id) {
+            while self.wake_next()? {}
+        }
+        let at = (self.ends.iter().position(|e| e.0 == id))
+            .ok_or_else(|| format!("`{name}` never ended"))?;
+        Ok(self.ends.remove(at).1)
     }
 
     /// Takes what the guest wrote to standard error since the last drain. A
@@ -565,8 +732,10 @@ impl Resident {
     fn alloc(&mut self, s: &str) -> Result<i32, String> {
         let n = s.len() as i32;
         let base = self
-            .call::<i64, i32>("__vyrn_malloc", (STR_HDR + n + 1) as i64)?
-            .map_err(|e| format!("__vyrn_malloc: {e}"))?;
+            .call("__vyrn_malloc", &[Val::I64((STR_HDR + n + 1) as i64)])?
+            .map_err(|e| format!("__vyrn_malloc: {e}"))?
+            .and_then(|v| v.i32())
+            .ok_or("__vyrn_malloc: no address")?;
         let mem = self
             .store
             .data()
@@ -589,13 +758,14 @@ impl Resident {
 
     /// Frees a String argument; the block starts at its header.
     fn release(&mut self, ptr: i32) -> Result<(), String> {
-        self.call::<i32, ()>("__vyrn_free", ptr - STR_HDR)?
+        self.call("__vyrn_free", &[Val::I32(ptr - STR_HDR)])?
+            .map(|_| ())
             .map_err(|e| format!("__vyrn_free: {e}"))
     }
 
-    /// Reads a returned String up to its NUL, then frees it: the result is the
-    /// caller's.
-    fn text(&mut self, ptr: i32) -> Result<String, String> {
+    /// Reads a returned String, its length from its header, then frees it: the
+    /// result is the caller's.
+    pub fn text(&mut self, ptr: i32) -> Result<String, String> {
         let mem = self
             .store
             .data()
@@ -604,18 +774,19 @@ impl Resident {
             .expect("memory is set before _start");
         let data = mem.data(&self.store);
         let at = ptr as usize;
-        let end = data
-            .get(at..)
-            .and_then(|rest| rest.iter().position(|b| *b == 0))
-            .ok_or_else(|| "a returned String has no terminator".to_string())?;
-        let out = String::from_utf8_lossy(&data[at..at + end]).into_owned();
+        let bytes = (at.checked_sub(STR_HDR as usize))
+            .and_then(|h| data.get(h..h + 4))
+            .map(|n| u32::from_le_bytes([n[0], n[1], n[2], n[3]]) as usize)
+            .and_then(|n| data.get(at..at + n))
+            .ok_or_else(|| "a returned String lies outside memory".to_string())?;
+        let out = String::from_utf8_lossy(bytes).into_owned();
         self.release(ptr)?;
         Ok(out)
     }
 
     /// The message for a trap out of a door: the guest's own `error: ..` line
     /// when it wrote one before `proc_exit`, else this host's wording.
-    fn trapped(&mut self, door: &str, e: wasmtime::Error) -> String {
+    pub fn trapped(&mut self, door: &str, e: wasmtime::Error) -> String {
         match trap::split(&self.drain_err()).1 {
             Some(msg) => msg.to_string(),
             None => format!("{door}: {}", host_trap(&e)),
@@ -628,26 +799,22 @@ impl Resident {
         for a in args {
             ptrs.push(self.alloc(a)?);
         }
-        let out = match ptrs.len() {
-            0 => self.call(door, ())?,
-            1 => self.call(door, ptrs[0])?,
-            2 => self.call(door, (ptrs[0], ptrs[1]))?,
-            n => return Err(format!("{door}: {n} arguments is not a door shape")),
-        };
+        let vals: Vec<Val> = ptrs.iter().map(|p| Val::I32(*p)).collect();
+        let out = self.call(door, &vals)?;
         // The caller owns a String argument, so it is freed even after a trap.
         for p in ptrs {
             let _ = self.release(p);
         }
-        out.map_err(|e| self.trapped(door, e))
+        out.map(|_| ()).map_err(|e| self.trapped(door, e))
     }
 
     /// Calls a nullary door and returns what the guest wrote to standard error
     /// before its last `error: ..` line, and that line if it refused. A test
     /// body's output passes through whether the body passed or failed.
     pub fn call_body(&mut self, door: &str) -> (String, Option<String>) {
-        let outcome = match self.call::<(), ()>(door, ()) {
+        let outcome = match self.call(door, &[]) {
             Err(e) => Err(e),
-            Ok(r) => match wasi::exit_code(r) {
+            Ok(r) => match wasi::exit_code(r.map(|_| ())) {
                 Ok(0) => Ok(()),
                 Ok(code) => Err(format!("exit {code}")),
                 Err(e) => Err(host_trap(&e)),
@@ -661,30 +828,31 @@ impl Resident {
         (out.to_string(), Some(msg.map_or(host, str::to_string)))
     }
 
+    /// Calls door `door` with `args` for its one result.
+    fn ask(&mut self, door: &str, args: &[Val]) -> Result<Val, String> {
+        match self.call(door, args)? {
+            Ok(Some(v)) => Ok(v),
+            Ok(None) => Err(format!("{door}: no result")),
+            Err(e) => Err(self.trapped(door, e)),
+        }
+    }
+
     pub fn ask_bool(&mut self, door: &str) -> Result<bool, String> {
-        match self.call::<(), i32>(door, ())? {
-            Ok(v) => Ok(v != 0),
-            Err(e) => Err(self.trapped(door, e)),
-        }
+        let v = (self.ask(door, &[])?.i32()).ok_or_else(|| format!("{door}: not a Bool"))?;
+        Ok(v != 0)
     }
 
-    pub fn ask_int(&mut self, door: &str) -> Result<i64, String> {
-        match self.call::<(), i64>(door, ())? {
-            Ok(v) => Ok(v),
-            Err(e) => Err(self.trapped(door, e)),
-        }
+    /// A door that answers an `Int64`, called with `args`.
+    pub fn ask_int(&mut self, door: &str, args: &[i64]) -> Result<i64, String> {
+        let args: Vec<Val> = args.iter().map(|a| Val::I64(*a)).collect();
+        (self.ask(door, &args)?.i64()).ok_or_else(|| format!("{door}: not an Int64"))
     }
 
-    /// A door that answers a `String`, called with an index or with nothing.
-    pub fn ask_text(&mut self, door: &str, at: Option<i64>) -> Result<String, String> {
-        let got = match at {
-            None => self.call::<(), i32>(door, ())?,
-            Some(i) => self.call::<i64, i32>(door, i)?,
-        };
-        match got {
-            Ok(p) => self.text(p),
-            Err(e) => Err(self.trapped(door, e)),
-        }
+    /// A door that answers a `String`, called with `args`.
+    pub fn ask_text(&mut self, door: &str, args: &[i64]) -> Result<String, String> {
+        let args: Vec<Val> = args.iter().map(|a| Val::I64(*a)).collect();
+        let p = (self.ask(door, &args)?.i32()).ok_or_else(|| format!("{door}: not a String"))?;
+        self.text(p)
     }
 }
 
@@ -692,21 +860,28 @@ fn first_line(s: &str) -> &str {
     s.lines().next().unwrap_or(s)
 }
 
-/// The text of the custom section `name`, `None` for a module without one. The walk trusts the
-/// bytes: the caller passes a module the engine validated or the compiler wrote.
+/// The text of the custom section `name`, `None` for a module without one.
 pub fn custom_section(bytes: &[u8], name: &str) -> Option<String> {
-    fn leb(b: &[u8], at: &mut usize) -> usize {
-        let (mut v, mut shift) = (0usize, 0);
-        while let Some(&x) = b.get(*at) {
-            *at += 1;
-            v |= usize::from(x & 0x7f) << shift;
-            shift += 7;
-            if x & 0x80 == 0 {
-                break;
-            }
+    section(bytes, name).map(|b| String::from_utf8_lossy(b).into_owned())
+}
+
+/// A uleb128 at `at`, which it moves past.
+fn leb(b: &[u8], at: &mut usize) -> usize {
+    let (mut v, mut shift) = (0usize, 0);
+    while let Some(&x) = b.get(*at) {
+        *at += 1;
+        v |= usize::from(x & 0x7f) << shift;
+        shift += 7;
+        if x & 0x80 == 0 {
+            break;
         }
-        v
     }
+    v
+}
+
+/// The payload of the custom section `name`. The walk trusts the bytes: the caller passes a
+/// module the engine validated or the compiler wrote.
+fn section<'b>(bytes: &'b [u8], name: &str) -> Option<&'b [u8]> {
     let mut at = 8;
     while at < bytes.len() {
         let id = bytes[at];
@@ -717,12 +892,52 @@ pub fn custom_section(bytes: &[u8], name: &str) -> Option<String> {
             let mut p = at;
             let n = leb(bytes, &mut p);
             if bytes.get(p..p + n) == Some(name.as_bytes()) {
-                return Some(String::from_utf8_lossy(&bytes[p + n..end]).into_owned());
+                return bytes.get(p + n..end);
             }
         }
         at = end;
     }
     None
+}
+
+/// Each export the `vyrn:exports` section (`vyrn_codegen::direct::abi_section`) flags as
+/// waiting, by name, with its declared result kind. Empty for a module without the section.
+fn waiting_exports(bytes: &[u8]) -> std::collections::HashMap<String, String> {
+    let mut out = std::collections::HashMap::new();
+    let Some(b) = section(bytes, "vyrn:exports") else {
+        return out;
+    };
+    let mut at = 1;
+    let text = |at: &mut usize| {
+        let n = leb(b, at);
+        let s = String::from_utf8_lossy(b.get(*at..*at + n).unwrap_or_default()).into_owned();
+        *at += n;
+        s
+    };
+    for _ in 0..leb(b, &mut at) {
+        let name = text(&mut at);
+        let ret = text(&mut at);
+        for _ in 0..leb(b, &mut at) {
+            text(&mut at);
+        }
+        if b.get(at) == Some(&1) {
+            out.insert(name, ret);
+        }
+        at += 1;
+    }
+    out
+}
+
+/// A task's result word, as `vyrn_wait.done` delivers it, at the wasm type of the declared
+/// result `kind`: an `i32` kind is the low half, a float its bits, `unit` none.
+fn result_word(kind: &str, word: i64) -> Option<Val> {
+    match kind {
+        "unit" => None,
+        "i64" | "u64" => Some(Val::I64(word)),
+        "f64" => Some(Val::F64(word as u64)),
+        "f32" => Some(Val::F32(word as u32)),
+        _ => Some(Val::I32(word as i32)),
+    }
 }
 
 /// Reads the counter tables out of the guest's memory after `_start`: `sites` and `fns` are the

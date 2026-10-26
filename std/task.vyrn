@@ -5,7 +5,9 @@
 
 import { arenaSwap, regionExit, free } from "std/runtime"
 
-/// Waits `ms` milliseconds while the host runs other tasks.
+/// Waits while the host runs other tasks, until `ms` milliseconds after the
+/// deadline of the wake this task runs in, or after the start of the program
+/// or of the request: the time the task computes before it counts against it.
 export fn sleep(ms: Int64) {
     await hostSleep(ms)
 }
@@ -73,8 +75,9 @@ export fn timeout<T>(ms: Int64, f: fn() -> T) -> Option<T> {
 
 /// A task the host started by calling `main` or an export that waits: its
 /// number from 1 in start order, the emitter's number of the root that started
-/// it, and the root's frame while it waits.
-type Task = { id: Int64, root: Int32, frame: Int32 }
+/// it, the root's frame while it waits, the host's id for it (0 for `main`,
+/// which no host names), and the root's result once it returned.
+type Task = { id: Int64, root: Int32, frame: Int32, host: Int64, result: Int64 }
 
 /// A host operation a task waits on: its id, the task, and what the wake
 /// delivered: a status, 2 until it came, 0 completed and 1 cancelled, and a
@@ -120,20 +123,34 @@ fn waitAt(id: Int64) -> Int64 {
     return i
 }
 
-/// Removes task `id`, which has ended.
-fn taskEnd(id: Int64) {
+/// Removes task `id`, which ended with status `st`, 0 returned or 1
+/// cancelled. A host that named the task learns its end, with the result of a
+/// task that returned.
+fn taskEnd(id: Int64, st: Int32) {
     let i = taskAt(id)
     if i < tasks.length {
+        if tasks[i].host != 0 {
+            hostDone(tasks[i].host, st, tasks[i].result)
+        }
         tasks.swapRemove(i)
     }
 }
 
-/// A task for the root the host is starting, which runs from here.
-fn taskBegin(root: Int32) -> Int64 {
+/// A task for the root the host is starting as `host`, which runs from here.
+fn taskBegin(root: Int32, host: Int64) -> Int64 {
     started = started + 1
-    tasks.push(Task { id: started, root: root, frame: 0 })
+    tasks.push(Task { id: started, root: root, frame: 0, host: host, result: 0 })
     running = started
     return started
+}
+
+/// The running task's root returned `result`, one word, as `hostDone` passes
+/// it: the emitter calls this before the task ends.
+fn taskResult(result: Int64) {
+    let i = taskAt(running)
+    if i < tasks.length {
+        tasks[i].result = result
+    }
 }
 
 /// Ends the first step of task `id`, whose root answered `st`: 0 or 1 when it
@@ -141,7 +158,7 @@ fn taskBegin(root: Int32) -> Int64 {
 fn taskSettle(id: Int64, st: Int32) {
     running = 0
     if UInt32(st) < 2 {
-        taskEnd(id)
+        taskEnd(id, st)
         return
     }
     let i = taskAt(id)
@@ -154,7 +171,7 @@ fn taskSettle(id: Int64, st: Int32) {
 /// first step's `taskSettle`, no task runs.
 fn taskFinish() {
     if running != 0 {
-        taskEnd(running)
+        taskEnd(running, 0)
         running = 0
     }
 }
@@ -221,7 +238,7 @@ fn wake(id: Int64, status: Int32, payload: Int64) -> Int32 {
             running = t
             let st = hostResume(tasks[k].root, tasks[k].frame)
             if UInt32(st) < 2 {
-                taskEnd(t)
+                taskEnd(t, st)
             }
             running = 0
         }
@@ -229,6 +246,32 @@ fn wake(id: Int64, status: Int32, payload: Int64) -> Int32 {
     ready = []
     readyAt = 0
     return Int32(tasks.length)
+}
+
+/// `__vyrn_trapped`: the running task trapped, so the host gave up its step and
+/// it never ends. Forgets it and every wait it held, whose operations the host
+/// drops, ends any cancellation the trap cut short, and returns the host's id
+/// for the task: 0 for `main`'s, and when no task ran.
+fn taskTrapped() -> Int64 {
+    cancelling = 0
+    let id = running
+    running = 0
+    let i = taskAt(id)
+    if i == tasks.length {
+        return 0
+    }
+    let host = tasks[i].host
+    tasks.swapRemove(i)
+    let mut j: Int64 = 0
+    while j < waits.length {
+        if waits[j].task == id {
+            hostCancel(waits[j].id)
+            waits.swapRemove(j)
+        } else {
+            j = j + 1
+        }
+    }
+    return host
 }
 
 // A `region` that holds an `await` has an arena of its own, so tasks and fork

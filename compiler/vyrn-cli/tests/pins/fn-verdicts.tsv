@@ -291,6 +291,10 @@ examples/clock.vyrn	showFields	yes	no, its effect set is alloc, write-output
 examples/clock.vyrn	main	no, it calls `nextInRange`, which is not trap-free	no, its effect set is alloc, write-output, clock, random
 examples/clock.vyrn	where$pInstant	yes	yes, emulated Int64
 examples/clock.vyrn	where$cInstant	no, it calls `panic`	no, its effect set is trap
+examples/clockorder.vyrn	work	yes	yes, emulated Int64
+examples/clockorder.vyrn	late	yes	no, its effect set is write-output, waits
+examples/clockorder.vyrn	busy	yes	no, its effect set is write-output, waits
+examples/clockorder.vyrn	main	no, it calls `both`, which has no body to judge	no, its effect set is alloc, write-output, waits
 examples/closures2.vyrn	double	yes	yes, emulated Int64
 examples/closures2.vyrn	apply	no, it calls a function value	no, its effect set is alloc
 examples/closures2.vyrn	makeAdder	yes	no, its effect set is alloc
@@ -1200,6 +1204,11 @@ examples/rest.vyrn	where$pPathDel	yes	no, `value` is String, not an integer, Boo
 examples/rest.vyrn	where$cPathDel	no, it calls `panic`	no, its effect set is trap
 examples/rest.vyrn	where$pUsername	yes	no, `value` is String, not an integer, Bool or a read array of one
 examples/rest.vyrn	where$cUsername	no, it calls `panic`	no, its effect set is trap
+examples/results.vyrn	measure	yes	no, its effect set is alloc, waits
+examples/results.vyrn	report	no, it calls `both`, which has no body to judge	no, its effect set is alloc, waits
+examples/results.vyrn	total	yes	no, its effect set is alloc, waits
+examples/results.vyrn	ready	yes	no, its effect set is waits
+examples/results.vyrn	main	no, it calls `report`, which is not trap-free	no, its effect set is alloc, write-output, waits
 examples/revcomp.vyrn	complementTable	yes	no, its effect set is alloc
 examples/revcomp.vyrn	reverseComplement	yes	no, its effect set is alloc
 examples/revcomp.vyrn	writeReverseComplement	yes	no, its effect set is alloc, write-output
@@ -3225,6 +3234,7 @@ std/task.vyrn	task$taskAt	yes	no, its effect set is module-state
 std/task.vyrn	task$waitAt	yes	no, its effect set is module-state
 std/task.vyrn	task$taskEnd	no, it keeps an index check	no, its effect set is module-state
 std/task.vyrn	task$taskBegin	yes	no, its effect set is alloc, module-state
+std/task.vyrn	task$taskResult	no, it keeps an index check	no, its effect set is module-state
 std/task.vyrn	task$taskSettle	no, it keeps an index check	no, its effect set is module-state
 std/task.vyrn	task$taskFinish	no, it calls `taskEnd`, which is not trap-free	no, its effect set is module-state
 std/task.vyrn	task$waitOn	yes	no, its effect set is alloc, module-state
@@ -3232,6 +3242,7 @@ std/task.vyrn	task$delivery	no, it keeps an index check	no, its effect set is mo
 std/task.vyrn	task$cancelBegin	yes	no, its effect set is module-state
 std/task.vyrn	task$cancelEnd	yes	no, its effect set is module-state
 std/task.vyrn	task$wake	no, it keeps an index check	no, its effect set is alloc, module-state, trap
+std/task.vyrn	task$taskTrapped	no, it keeps an index check	no, its effect set is module-state
 std/task.vyrn	task$regionSwap	no, it calls `arenaSwap`, which is not trap-free	no, it is not trap-free
 std/task.vyrn	task$regionClose	no, it calls `regionExit`, which is not trap-free	no, it is not trap-free
 std/task.vyrn	task$regionCarry	no, it calls `arenaSwap`, which is not trap-free	no, it is not trap-free

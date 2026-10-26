@@ -17,9 +17,10 @@
 // is the `extern` story. Anything else is out of scope on purpose — if the
 // import surface ever grows, the instantiate error names the missing function.
 //
-// A module that waits imports `vyrn_wait.sleep` and `vyrn_wait.cancel` and
-// exports `__vyrn_wake`: `runVyrn` settles every timer before it resolves, as
-// `vyrn run` does.
+// A module that waits imports `vyrn_wait.sleep`, `vyrn_wait.cancel` and
+// `vyrn_wait.done` and exports `__vyrn_wake`: `runVyrn` settles every timer
+// before it resolves, as `vyrn run` does. A waiting export's wrapper returns a
+// promise of its result, which `vyrn_wait.done` delivers when its task ends.
 //
 // Usage:
 //   const { exitCode, stdout, stdoutRaw, stderr, exports } = await runVyrn(bytes, {
@@ -67,10 +68,13 @@ const ERRNO_SPIPE = 29; // stdout/stderr are not seekable
 // `instance.exports` for the export side. So no section walking survives here —
 // `WebAssembly.Module.customSections` hands over the payload.
 //
-// Payload (version 3), all counts and lengths uleb128:
+// Payload (version 4), all counts and lengths uleb128:
 //   u8 version, uleb exportCount, { name, ret, uleb paramCount, param..., u8 waits }...,
 //   uleb importCount, { name, ret, uleb paramCount, param… }…
-// A `kind` is one of: unit bool string i32 u32 i64 u64 f32 f64.
+// A `kind` is one of: unit bool string i32 u32 i64 u64 f32 f64. An export
+// with `waits` 1 takes the host's id for the task it starts before its
+// declared parameters and returns nothing; its result comes through
+// `vyrn_wait.done(task, status, result)`.
 const ABI_SECTION = "vyrn:exports";
 
 function readAbi(module) {
@@ -96,10 +100,10 @@ function readAbi(module) {
     return s;
   };
   const version = b[i++];
-  if (version !== 3) {
+  if (version !== 4) {
     throw new Error(
       `this module declares its boundary in \`${ABI_SECTION}\` version ` +
-        `${version}, and this runtime reads version 3. Rebuild it with a ` +
+        `${version}, and this runtime reads version 4. Rebuild it with a ` +
         `matching \`vyrn build --target wasm\`.`
     );
   }
@@ -414,23 +418,27 @@ export async function runVyrn(wasmBytes, hooks = {}) {
 
   // The host's waits: each pending timer's deadline, in milliseconds since the
   // start, and its `setTimeout` handle, by id, as `Waits` in
-  // `vyrn-cli/src/wasmrun.rs` keeps them on the wall clock.
+  // `vyrn-cli/src/wasmrun.rs` keeps them. The clock is logical, as there:
+  // `now` is the deadline of the wake the module runs in, 0 before the first,
+  // or the time an export's task began, so the time the module computes never
+  // moves a later deadline.
   const started = performance.now();
-  const nowMs = () => Math.floor(performance.now() - started);
+  const real = () => performance.now() - started;
+  let now = 0;
   const due = new Map();
   let nextWait = 1n;
-  // Each timer has its own `setTimeout`. When one fires, every pending timer
-  // up to it, earliest first and ties by id, goes to `__vyrn_wake`, as
-  // `settle_waits` in `wasmrun.rs` delivers them; a later timer waits for its
-  // own. A timer may fire a millisecond before `nowMs` reaches its deadline,
-  // so the fired timer bounds the delivery, not the clock.
+  // Each timer has its own `setTimeout`, armed for its deadline in real time.
+  // When one fires, every pending timer up to it, earliest first and ties by
+  // id, goes to `__vyrn_wake`, as `settle_waits` in `wasmrun.rs` delivers them;
+  // a later timer waits for its own. Timers fire in the order they come due in
+  // real time, so the fired timer bounds the delivery, not the clock.
   const vyrnWait = {
-    // A timer due `ms` from now; a negative `ms` is due now.
+    // A timer due `ms` after `now`; a negative `ms` is due now.
     sleep: (ms) => {
       const id = nextWait++;
-      const wait = Math.max(0, Number(ms));
-      const at = nowMs() + wait;
-      due.set(id, { at, handle: setTimeout(() => deliverThrough(at, id), wait) });
+      const at = now + Math.max(0, Number(ms));
+      const handle = setTimeout(() => deliverThrough(at, id), Math.max(0, at - real()));
+      due.set(id, { at, handle });
       return id;
     },
     // No wait waits for operation `id`, so its timer never fires.
@@ -439,7 +447,19 @@ export async function runVyrn(wasmBytes, hooks = {}) {
       if (t) clearTimeout(t.handle);
       due.delete(id);
     },
+    // The task this side started as `task` ended: 0 with its result word, or
+    // 1 cancelled.
+    done: (task, status, result) => {
+      const t = tasks.get(task);
+      tasks.delete(task);
+      if (status === 0) t.resolve(result);
+      else t.reject(new Error(`the task an export started was cancelled`));
+    },
   };
+  // Each task a waiting export started and has not ended, by the id this side
+  // gave it.
+  const tasks = new Map();
+  let nextTask = 1n;
   const instance = await WebAssembly.instantiate(module, {
     wasi_snapshot_preview1: wasi,
     vyrn,
@@ -551,19 +571,18 @@ export async function runVyrn(wasmBytes, hooks = {}) {
         }
       }
       // A String argument is released once the call is over: at its return, or,
-      // for an export that waits, once the host has settled the task it started,
-      // which borrows its arguments until it ends.
+      // for an export that waits, once the task it started ended, because the
+      // task borrows its arguments until then.
       const release = () => {
         // The block base is the pointer less its String header,
         // which is what `__vyrn_malloc` handed out.
         const free = instance.exports.__vyrn_free;
         if (typeof free === "function") for (const p of owned) free(p - STR_HDR);
       };
-      let out;
-      try {
-        const r = raw(...call);
-        // Decoded BEFORE the release, because an export may return the pointer it
-        // was given and `free` writes its list link into the block.
+      // Decoded BEFORE the release, because an export may return the pointer it
+      // was given and `free` writes its list link into the block.
+      const decode = (r) => {
+        let out;
         if (ret === "unit") out = undefined;
         else if (ret === "string") {
           out = decodeCString(r, field);
@@ -581,21 +600,57 @@ export async function runVyrn(wasmBytes, hooks = {}) {
         else if (ret === "u32") out = r >>> 0;
         else if (ret === "u64") out = BigInt.asUintN(64, r);
         else out = r; // i32 / i64 / f32 / f64
+        return out;
+      };
+      if (!waits) {
+        let out;
+        try {
+          out = decode(raw(...call));
+        } catch (e) {
+          // A trap leaves the module unusable, but a `panic` the page catches
+          // does not, so the release runs on both paths.
+          release();
+          throw e;
+        }
+        release();
+        return out;
+      }
+      // A waiting export's task ends in `vyrn_wait.done`, perhaps before the
+      // call returns, so its promise is registered first. Its result word is
+      // the declared kind's wasm value: an i32 kind in the low half, a float by
+      // its bits.
+      const task = nextTask++;
+      const ended = new Promise((resolve, reject) => tasks.set(task, { resolve, reject }));
+      now = Math.floor(real());
+      try {
+        raw(task, ...call);
       } catch (e) {
-        // A trap leaves the module unusable, but a `panic` the page catches does
-        // not, so the release runs on both paths.
+        tasks.delete(task);
         release();
         throw e;
       }
-      // An export that waits returns `Unit`, as a promise that the task ended.
-      if (waits) return settle().finally(release);
-      release();
-      return out;
+      return ended.then((w) => decode(wasmWord(ret, w))).finally(release);
       // Nothing crosses this boundary to say who owns a return, and nothing has
       // to: every return is owned, and an `export extern fn` that lends fails to
       // compile.
     };
   }
+
+  // A result word as `vyrn_wait.done` delivers it, an i64, as the wasm value of
+  // kind `ret`.
+  const bits = new DataView(new ArrayBuffer(8));
+  const wasmWord = (ret, w) => {
+    if (ret === "i64" || ret === "u64") return w;
+    if (ret === "f64") {
+      bits.setBigInt64(0, w, true);
+      return bits.getFloat64(0, true);
+    }
+    if (ret === "f32") {
+      bits.setUint32(0, Number(BigInt.asUintN(32, w)), true);
+      return bits.getFloat32(0, true);
+    }
+    return Number(BigInt.asIntN(32, w));
+  };
 
   // A stack overflow goes back to the module: `__vyrn_overflow` flushes stdout
   // and traps with Vyrn's sentence, as `vyrn run` does. It is the engine's
@@ -638,11 +693,14 @@ export async function runVyrn(wasmBytes, hooks = {}) {
         if (next === null || next[1].at > at || (next[1].at === at && next[0] > id)) break;
         clearTimeout(next[1].handle);
         due.delete(next[0]);
+        now = next[1].at;
         guarded(() => wake(next[0], 0, 0n));
       }
     } catch (e) {
       for (const t of due.values()) clearTimeout(t.handle);
       due.clear();
+      for (const t of tasks.values()) t.reject(e);
+      tasks.clear();
       settled(e);
       return;
     }

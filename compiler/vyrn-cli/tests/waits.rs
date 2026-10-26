@@ -3,7 +3,7 @@
 //! every value whichever wait the host cancels. Each prints the same bytes when
 //! the host replays what it delivered. The programs under
 //! `tests/waits/` witness `vyrn test`'s clock, a race the host's delivery order
-//! decides, and what does not build.
+//! decides, and a waiting export's result on every host.
 
 mod common;
 use common::*;
@@ -152,17 +152,93 @@ fn a_waiting_lambda_runs_where_its_parameter_is_bound() {
     assert_eq!(seen, (Some(0), "3\n".to_string(), String::new()));
 }
 
-/// The build refuses what has no lowering yet, naming the function and the line.
+/// What `tests/waits/result.vyrn` prints on each host: `vyrn run`, the native build and, where
+/// node runs, the browser shim, each with its exit code.
 #[test]
-fn a_waiting_export_with_a_result_does_not_build_yet() {
-    let dir = scratch("waits-refused");
-    let out = vyrn()
-        .args(["build", "--target", "wasm", "result.vyrn", "-o"])
-        .arg(dir.join("w.wasm"))
+fn a_waiting_export_s_result_prints_the_same_bytes_on_every_host() {
+    let dir = scratch("waits-result");
+    let say = |o: &std::process::Output| {
+        let out = (o.status.code(), norm(&o.stdout), norm(&o.stderr));
+        format!("exit {:?}\n{}{}", out.0, out.1, out.2)
+    };
+    let engine = vyrn()
+        .args(["run", "result.vyrn"])
+        .env("VYRN_LEAK_CHECK", "1")
+        .current_dir(waits_dir())
+        .output()
+        .expect("run vyrn run");
+    assert_eq!(say(&engine), "exit Some(0)\n10\nafter 3\n0.500000\n");
+    let exe = dir.join("result.exe");
+    let built = vyrn()
+        .args(["build", "result.vyrn", "-o"])
+        .arg(&exe)
         .current_dir(waits_dir())
         .output()
         .expect("run vyrn build");
-    assert!(!out.status.success());
-    let want = "error: waiting code does not build yet: `later` waits at line 5\n";
-    assert_eq!(norm(&out.stderr), want);
+    assert!(built.status.success(), "{}", norm(&built.stderr));
+    let native = std::process::Command::new(&exe)
+        .output()
+        .expect("run the binary");
+    assert_eq!(say(&native), say(&engine), "native");
+    let Some(node) = node() else {
+        eprintln!("NOTE: no node, so the shim's run of result.vyrn is unverified on this machine");
+        return;
+    };
+    let wasm = dir.join("result.wasm");
+    let built = vyrn()
+        .args(["build", "--target", "wasm", "result.vyrn", "-o"])
+        .arg(&wasm)
+        .current_dir(waits_dir())
+        .output()
+        .expect("run vyrn build");
+    assert!(built.status.success(), "{}", norm(&built.stderr));
+    let web = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../web/wasi-min.js");
+    std::fs::copy(web, dir.join("wasi-min.mjs")).expect("copy the shim");
+    std::fs::write(dir.join("run.mjs"), SHIM_RUN).expect("write the runner");
+    let shim = std::process::Command::new(node)
+        .arg(dir.join("run.mjs"))
+        .arg(&wasm)
+        .output()
+        .expect("node");
+    assert_eq!(say(&shim), say(&engine), "shim");
+}
+
+const SHIM_RUN: &str = r#"import { readFile } from "node:fs/promises";
+import { runVyrn } from "./wasi-min.mjs";
+
+const r = await runVyrn(await readFile(process.argv[2]), {});
+process.stdout.write(r.stdout);
+process.stderr.write(r.stderr);
+process.exitCode = r.exitCode;
+"#;
+
+/// A host that calls a waiting export reads the result its task returned, once the task
+/// ended, and learns of a task it cancelled, which returned nothing.
+#[test]
+fn the_host_reads_the_result_of_a_task_it_started() {
+    let dir = scratch("waits-host");
+    let wasm = dir.join("result.wasm");
+    let out = vyrn()
+        .args(["build", "--target", "wasm", "result.vyrn", "-o"])
+        .arg(&wasm)
+        .current_dir(waits_dir())
+        .output()
+        .expect("run vyrn build");
+    assert!(out.status.success(), "{}", norm(&out.stderr));
+    let module = std::fs::read(&wasm).expect("the built module");
+    let (mut res, code) =
+        vyrn_cli::wasmrun::start(&module, &quiet("result.vyrn", None), None).expect("start");
+    assert_eq!(code, 0);
+    assert_eq!(res.ask_int("later", &[4]), Ok(8));
+    assert_eq!(res.ask_text("named", &[2]).as_deref(), Ok("after 2"));
+    // `main` waits on operations 1 to 3, so the export's sleep is operation 4.
+    let mut cancel: Vec<Wake> = (1..=3).map(|id| Wake { id, status: 0 }).collect();
+    cancel.push(Wake { id: 4, status: 1 });
+    let (mut res, _) = vyrn_cli::wasmrun::start(&module, &quiet("result.vyrn", Some(cancel)), None)
+        .expect("start");
+    let got = res.ask_text("named", &[2]);
+    assert!(
+        got.as_ref().is_err_and(|e| e.contains("was cancelled")),
+        "{got:?}"
+    );
 }

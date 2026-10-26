@@ -997,6 +997,19 @@ fn table() -> Vec<Builtin> {
             .spec(Spec::Effect(Unit))
             .home("std/task")
             .hover("hostCancel(id) -> Unit — tell the host to drop operation `id`, whose wait was cancelled; only `std/task`'s run queue calls it"),
+        // The host learns that a task it started ended:
+        // `std/task`'s run queue is the one caller.
+        b("hostDone")
+            .sig(row(
+                "hostDone",
+                &[],
+                &[("task", Read, Int), ("status", Read, i32_.clone()), ("result", Read, Int)],
+                Unit,
+                &[],
+            ))
+            .spec(Spec::Effect(Unit))
+            .home("std/task")
+            .hover("hostDone(task, status, result) -> Unit — tell the host that the task it started as `task` ended: 0 with `result`, or 1 cancelled; only `std/task`'s run queue calls it"),
         // A step of a task the host started: `std/task`'s run queue is the one caller.
         // It runs the task's code, which may trap.
         b("hostResume")

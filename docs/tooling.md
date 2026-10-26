@@ -26,14 +26,30 @@ the same module to wabt's `wasm2c` and compiles the C with clang; the binary
 runs on the thread's own stack. There is no interpreter. Each host hands a
 stack overflow to the module, which traps `call stack exhausted`.
 
-A module that waits imports `vyrn_wait.sleep(ms) -> id` and
-`vyrn_wait.cancel(id)`, and exports `__vyrn_wake(id, status, payload)`. A
-cancelled operation is never delivered. Each host runs the event loop after
+A module that waits imports `vyrn_wait.sleep(ms) -> id`,
+`vyrn_wait.cancel(id)` and `vyrn_wait.done(task, status, result)`, and exports
+`__vyrn_wake(id, status, payload)`. A cancelled operation is never delivered.
+A host that calls a waiting export names the task it starts: the wasm function
+takes the host's id for it before the declared parameters and returns nothing.
+When the task ends, the module calls `done` once with that id: status 0 and
+the result as one `i64`, or 1 when it was cancelled. An `i32`-sized result is
+zero-extended, a float crosses by its bits, and a `String` crosses as its
+address, which the host reads and then frees with `__vyrn_free`. `vyrn:exports`
+names the result's type and flags the export as waiting. A native binary only
+runs `_start`, so it starts no such task. Each host runs the event loop after
 `_start`, and after each export call that waits: it delivers the earliest
 pending timer, ties by id, as it comes due, until none is pending. The embedded
 wasmtime, the native host and `web/wasi-min.js` share this rule. The shim arms one
 `setTimeout` per timer, so a timer one task sets while another waits fires at its
 own deadline.
+
+The clock is logical. `sleep(ms)` is due `ms` after the deadline of the wake
+the program runs in: 0 at the start, and in `serve`, `dev` and a page's call
+of an export the time the host began the call. A host waits out real time
+before it delivers a timer, but the time the program computes never moves a
+later deadline: a loop of work and `sleep(10)` keeps its rate, and wakes at
+once when it falls behind. So the order of wakes is `vyrn test`'s on every
+host and machine.
 
 A `gen fn` generator also runs as compiled wasm, in the same embedded engine,
 while the program loads.
@@ -152,8 +168,8 @@ through `$VYRN_WASM2C`, `$VYRN_SIMDE` and `$VYRN_WASM_OPT`, then the
 ### `vyrn test [file] [--name <substring>]`
 
 Runs the root file's `test "name" { ... }` blocks in declaration order and exits
-1 if any failed. Timers run on a virtual clock that only a wake advances, so a
-test that sleeps an hour ends at once. `assert` and `assertEq` are legal only inside a test body.
+1 if any failed. Timers wake in the order every host gives them without waiting
+out their deadlines, so a test that sleeps an hour ends at once. `assert` and `assertEq` are legal only inside a test body.
 The root's test blocks are type-checked with the program and stripped from
 `run` and `build`; an imported module's are neither parsed nor checked. A file
 with no tests, or none that `--name` selects, prints `no tests` and exits 0.
@@ -190,12 +206,23 @@ An HTTP/1.1 host on `std::net` that calls the file's
 `Response` are prelude records, so `handle` is an ordinary function that tests
 and `main` can call.
 
-Without `--workers`, requests run one at a time, so module state needs no
-locking. A trap inside `handle` is logged and answered with a 500; the server
-keeps running on the same instance. The call stack and region nesting return
-to their state before the request. Module state keeps what the handler wrote,
-and heap blocks it held leak. `--workers N` runs `handle` on N threads, each with its own
-instance. Startup refuses it, naming the call path, if `handle` reaches module
+Without `--workers`, one instance answers every request, so module state
+needs no locking. A `handle` that does not wait runs each request to its end
+before the next starts. A `handle` that waits runs each request as a task on
+that instance: the request parks at its first `await`, the next request or
+due timer runs, and each response goes to its own connection when its task
+ends. So module state may change at an `await` between requests: a request
+that read a global before it waited may find another request's write after
+it. A stream answer is written to its end before anything else runs.
+
+A trap inside `handle` is logged and answered with a 500 for its own request;
+the requests parked beside it run on, on the same instance. The call stack and
+region nesting return to their state before the call that trapped. Module
+state keeps what the handler wrote, and heap blocks it held leak.
+
+`--workers N` runs `handle` on N threads, each with its own instance, which
+interleaves its own waiting requests as the one instance does; an idle worker
+takes the next connection. Startup refuses it, naming the call path, if `handle` reaches module
 state transitively, through a call or a function value. Printing and file I/O do not block workers; each output
 line stays atomic.
 
@@ -215,8 +242,10 @@ length with what it saw before the read; after a change, it builds once no
 further change arrives within one poll, so a burst of saves makes one build.
 The `server`, `client` and `public` keys and the flags are read once, at start.
 
-A good build replaces the server instance before the next request, and its
-`main` runs again: module state does not carry over. A failed build prints its
+A good build replaces the server instance before the next request or due
+timer, and its `main` runs again: module state does not carry over. Each
+request parked at an `await` on the old instance answers 503, because its
+task does not carry over either. A failed build prints its
 diagnostics and leaves the last good build serving, `.vyrn-dev/client.wasm`
 included.
 
@@ -538,7 +567,7 @@ a dependency.
   canonical `Err`. `runVyrn(bytes, { extern: { ... } })` supplies the `extern fn`
   imports; the declared signatures come from the module's `vyrn:exports`
   section. That section flags each export that waits, whose wrapper returns a
-  promise that settles once the timers run out.
+  promise of the result, settled when its task ends.
 - `vyrn-dom.js`: applies the patch stream `std/html` computes in wasm.
 - `vyrn-nav.js`: soft navigation between server-rendered pages.
 - `vyrn-rpc.js`, `vyrn-query.js`: the client halves of `std/rpc` and page data.

@@ -1201,16 +1201,8 @@ fn dev_msg(text: &str) -> String {
     format!("export fn msg() -> String {{\n    return \"{text}\"\n}}\n")
 }
 
-fn start_dev() -> Dev {
-    let dir = common::scratch("dev-reload");
-    let files = [
-        (
-            "vyrn.json",
-            r#"{"server": "server.vyrn", "client": "client.vyrn"}"#.to_string(),
-        ),
-        (
-            "server.vyrn",
-            r#"import { msg } from "./msg"
+/// The dev server: `handle` answers `msg()` in a paragraph.
+const DEV_SERVER: &str = r#"import { msg } from "./msg"
 
 fn main() -> Int64 {
     return 0
@@ -1219,11 +1211,25 @@ fn main() -> Int64 {
 fn handle(req: Request) -> Response {
     return Response { status: 200, contentType: "text/html", body: "<p>\{msg()}</p>", vary: "", headers: [:] }
 }
-"#
-            .to_string(),
+"#;
+
+fn start_dev() -> Dev {
+    start_dev_on(DEV_SERVER)
+}
+
+fn start_dev_on(server: &str) -> Dev {
+    let dir = common::scratch("dev-reload");
+    let files = [
+        (
+            "vyrn.json",
+            r#"{"server": "server.vyrn", "client": "client.vyrn"}"#.to_string(),
         ),
+        ("server.vyrn", server.to_string()),
         ("msg.vyrn", dev_msg("one")),
-        ("client.vyrn", "fn main() -> Int64 {\n    return 0\n}\n".to_string()),
+        (
+            "client.vyrn",
+            "fn main() -> Int64 {\n    return 0\n}\n".to_string(),
+        ),
     ];
     for (name, text) in files {
         std::fs::write(dir.join(name), text).unwrap();
@@ -1308,4 +1314,194 @@ fn dev_builds_nothing_for_a_file_the_build_did_not_read() {
     // The watcher is alive: an edit of a file the build read still builds.
     let err = d.edit(&dev_msg("two"), "dev: rebuilt");
     assert_eq!(err.matches("dev: rebuilt").count(), 1, "{err}");
+}
+
+/// A `handle` that waits: `/slow` and `/boom` wait long, every other path
+/// briefly. Each answer reports `count` before and after its wait and how many
+/// answers ended, so the bodies show which request ended first and what the
+/// others wrote across its wait. `/boom` traps once its wait ends.
+const WAITING_SRC: &str = r#"
+import { sleep } from "std/task"
+
+let mut count: Int64 = 0
+let mut ended: Int64 = 0
+
+fn reply(status: Int64, body: consume String) -> Response {
+    return Response { status: status, contentType: "text/plain", body: body, vary: "", headers: [:] }
+}
+
+fn handle(req: Request) -> Response {
+    let mut ms: Int64 = 10
+    if req.path == "/slow" {
+        ms = 1500
+    }
+    if req.path == "/boom" {
+        ms = 400
+    }
+    let before = count
+    await sleep(ms)
+    count = count + 1
+    if req.path == "/boom" {
+        let z = count - count
+        return reply(200, "\{count / z}")
+    }
+    ended = ended + 1
+    return reply(200, "\{req.path} before=\{before} after=\{count} ended=\{ended}")
+}
+"#;
+
+/// Sends `path` on its own thread, `after` the start, and returns the answer
+/// with the time it took.
+fn get_later(
+    port: u16,
+    path: &'static str,
+    after: Duration,
+) -> std::thread::JoinHandle<((String, String), Duration)> {
+    std::thread::spawn(move || {
+        std::thread::sleep(after);
+        let begun = Instant::now();
+        (get(port, path), begun.elapsed())
+    })
+}
+
+/// A request whose `handle` waits parks at its `await`, and the next request
+/// runs on the same instance: the one that waits less answers first, though
+/// it came second.
+#[test]
+fn overlapping_waiting_requests_answer_in_timer_order() {
+    let s = start_server_on(WAITING_SRC, &[]);
+    let slow = get_later(s.server.port, "/slow", Duration::ZERO);
+    let fast = get_later(s.server.port, "/fast", Duration::from_millis(200));
+    let (fast, fast_took) = fast.join().unwrap();
+    let (slow, _) = slow.join().unwrap();
+    assert_eq!(fast.1, "/fast before=0 after=1 ended=1");
+    assert_eq!(slow.1, "/slow before=0 after=2 ended=2");
+    assert!(fast_took < Duration::from_millis(1000), "{fast_took:?}");
+}
+
+/// Module state may change at an `await`: the slow request read `count`
+/// before its wait, and the fast one wrote it during that wait.
+#[test]
+fn module_state_changes_across_an_await_between_requests() {
+    let s = start_server_on(WAITING_SRC, &[]);
+    let slow = get_later(s.server.port, "/slow", Duration::ZERO);
+    let fast: Vec<_> = (0..3)
+        .map(|k| get_later(s.server.port, "/fast", Duration::from_millis(200 + 150 * k)))
+        .collect();
+    for (k, f) in fast.into_iter().enumerate() {
+        let ((_, body), _) = f.join().unwrap();
+        assert_eq!(
+            body,
+            format!("/fast before={k} after={} ended={}", k + 1, k + 1)
+        );
+    }
+    let ((_, body), _) = slow.join().unwrap();
+    assert_eq!(body, "/slow before=0 after=4 ended=4");
+}
+
+/// A trap ends only the request whose task trapped: it answers 500, the
+/// request parked beside it answers 200, and the instance serves on.
+#[test]
+fn a_trap_in_one_of_two_waiting_requests_answers_500_for_it_alone() {
+    let s = start_server_on(WAITING_SRC, &[]);
+    let slow = get_later(s.server.port, "/slow", Duration::ZERO);
+    let boom = get_later(s.server.port, "/boom", Duration::from_millis(200));
+    let ((status, body), _) = boom.join().unwrap();
+    assert_eq!(status, "HTTP/1.1 500 Internal Server Error");
+    assert_eq!(body, "internal error");
+    let ((status, body), _) = slow.join().unwrap();
+    assert_eq!(status, "HTTP/1.1 200 OK");
+    assert_eq!(body, "/slow before=0 after=2 ended=1");
+    let (_, body) = get(s.server.port, "/fast");
+    assert_eq!(body, "/fast before=2 after=3 ended=2");
+    let err = wait_for(&s.stderr, "GET /boom -> 500", Duration::from_secs(5));
+    assert!(err.contains("division by zero"), "{err}");
+}
+
+/// A rebuild replaces the instance before the next request, and a request
+/// parked on the old instance answers 503: its task's state does not carry
+/// into the new build.
+#[test]
+fn dev_answers_a_request_parked_across_a_rebuild_with_503() {
+    let d = start_dev_on(
+        r#"import { msg } from "./msg"
+import { sleep } from "std/task"
+
+fn handle(req: Request) -> Response {
+    if req.path == "/slow" {
+        await sleep(60000)
+    }
+    return Response { status: 200, contentType: "text/plain", body: msg(), vary: "", headers: [:] }
+}
+"#,
+    );
+    let slow = get_later(d.server.port, "/slow", Duration::ZERO);
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(get(d.server.port, "/").1, "one");
+    d.edit(&dev_msg("two"), "dev: rebuilt");
+    assert_eq!(get(d.server.port, "/").1, "two");
+    let ((status, body), took) = slow.join().unwrap();
+    assert_eq!(status, "HTTP/1.1 503 Service Unavailable");
+    assert_eq!(body, "the server was rebuilt");
+    assert!(took < Duration::from_secs(60), "{took:?}");
+    wait_for(
+        &d.stderr,
+        "GET /slow -> 503 (rebuilt)",
+        Duration::from_secs(5),
+    );
+}
+
+/// A `handle` that waits and reads no module state, for `--workers`.
+const WAITING_FREE_SRC: &str = r#"
+import { sleep } from "std/task"
+
+fn handle(req: Request) -> Response {
+    let mut ms: Int64 = 10
+    if req.path == "/slow" {
+        ms = 1500
+    }
+    await sleep(ms)
+    return Response { status: 200, contentType: "text/plain", body: req.path.copy(), vary: "", headers: [:] }
+}
+"#;
+
+/// Each worker's instance interleaves its own requests: with one worker, the
+/// request that waits less answers first, though it came second.
+#[test]
+fn a_worker_interleaves_its_waiting_requests() {
+    let s = start_server_on(WAITING_FREE_SRC, &["--workers", "1"]);
+    let slow = get_later(s.server.port, "/slow", Duration::ZERO);
+    let fast = get_later(s.server.port, "/fast", Duration::from_millis(200));
+    let ((_, body), took) = fast.join().unwrap();
+    assert_eq!(body, "/fast");
+    assert!(took < Duration::from_millis(1000), "{took:?}");
+    assert_eq!(slow.join().unwrap().0 .1, "/slow");
+}
+
+/// Workers that wait at once each wake at their own timers: four requests
+/// that each wait 1.5 s answer together on two workers.
+#[test]
+fn waiting_workers_answer_overlapping_requests_together() {
+    let s = start_server_on(WAITING_FREE_SRC, &["--workers", "2"]);
+    let begun = Instant::now();
+    let slow: Vec<_> = (0..4)
+        .map(|_| get_later(s.server.port, "/slow", Duration::ZERO))
+        .collect();
+    for r in slow {
+        assert_eq!(r.join().unwrap().0 .1, "/slow");
+    }
+    assert!(
+        begun.elapsed() < Duration::from_millis(2900),
+        "{:?}",
+        begun.elapsed()
+    );
+}
+
+/// A waiting `handle` that reads module state is refused under `--workers`,
+/// as any `handle` that does.
+#[test]
+fn workers_refuse_a_waiting_handle_that_reads_module_state() {
+    let err = workers_refusal(WAITING_SRC);
+    assert!(err.contains("module-state-free `handle`"), "{err}");
+    assert!(err.contains("`count`"), "{err}");
 }

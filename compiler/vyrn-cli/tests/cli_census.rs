@@ -128,7 +128,7 @@ fn main_sections() -> Vec<Section> {
         sec("fn dev_cmd", Cmd("dev")),
         sec("struct DevAssets", Cmd("dev")),
         sec("fn request_header", Shared),
-        sec("fn serve_one", Shared),
+        sec("fn serve_request", Shared),
         sec("fn reason_phrase", Shared),
         sec("fn pump_stream", Shared),
         sec("enum WsIn", Shared),

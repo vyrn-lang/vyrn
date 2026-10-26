@@ -122,8 +122,10 @@ static uint64_t mono_ns(void) {
 #endif
 }
 
-/* Each pending timer's deadline, in milliseconds since the start, and its id:
-   `vyrn-cli/src/wasmrun.rs`'s `Waits` on the wall clock. */
+/* Each pending timer's deadline, in milliseconds since the start, and its id,
+   on the logical clock of `vyrn-cli/src/wasmrun.rs`'s `Waits`: `g_now` is the
+   deadline of the wake the module runs in, 0 before the first, so the time the
+   module computes never moves a later deadline. */
 struct timer {
     uint64_t at;
     int64_t id;
@@ -131,12 +133,14 @@ struct timer {
 static struct timer* g_due;
 static uint32_t g_ndue;
 static int64_t g_next_wait = 1;
+static uint64_t g_now;
 
-static uint64_t now_ms(void) {
+/* The real time since the start, which a timer waits out. */
+static uint64_t real_ms(void) {
     return (mono_ns() - g_started) / 1000000ull;
 }
 
-/* A timer due `ms` from now; a negative `ms` is due now. */
+/* A timer due `ms` after `g_now`; a negative `ms` is due now. */
 u64 w2c_vyrn__wait_sleep(struct w2c_vyrn__wait* w, u64 ms) {
     (void)w;
     g_due = realloc(g_due, (g_ndue + 1) * sizeof *g_due);
@@ -144,7 +148,7 @@ u64 w2c_vyrn__wait_sleep(struct w2c_vyrn__wait* w, u64 ms) {
         fputs("host: out of memory\n", stderr);
         exit(1);
     }
-    g_due[g_ndue].at = now_ms() + ((int64_t)ms > 0 ? ms : 0);
+    g_due[g_ndue].at = g_now + ((int64_t)ms > 0 ? ms : 0);
     g_due[g_ndue].id = g_next_wait++;
     return (u64)g_due[g_ndue++].id;
 }
@@ -160,8 +164,18 @@ void w2c_vyrn__wait_cancel(struct w2c_vyrn__wait* w, u64 id) {
     }
 }
 
-/* The earliest pending timer, ties by id, once its deadline has come, or 0
-   when none is pending. */
+/* A binary runs only `_start` and starts no task through an export, so no
+   task of this host's can end: a call is a defect of the module. */
+void w2c_vyrn__wait_done(struct w2c_vyrn__wait* w, u64 task, u32 status, u64 result) {
+    (void)w;
+    (void)status;
+    (void)result;
+    fprintf(stderr, "host: task %lld, which this host never started, ended\n", (long long)task);
+    exit(1);
+}
+
+/* The earliest pending timer, ties by id, once its deadline has come in real
+   time, or 0 when none is pending. `g_now` moves to its deadline. */
 static int64_t fire(void) {
     if (!g_ndue) return 0;
     uint32_t k = 0;
@@ -171,7 +185,7 @@ static int64_t fire(void) {
     }
     struct timer t = g_due[k];
     g_due[k] = g_due[--g_ndue];
-    for (uint64_t now = now_ms(); t.at > now; now = now_ms()) {
+    for (uint64_t now = real_ms(); t.at > now; now = real_ms()) {
         uint64_t left = t.at - now;
 #ifdef _WIN32
         Sleep(left > 1u << 30 ? 1u << 30 : (DWORD)left);
@@ -180,6 +194,7 @@ static int64_t fire(void) {
         nanosleep(&ts, NULL);
 #endif
     }
+    g_now = t.at;
     return t.id;
 }
 

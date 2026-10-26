@@ -451,10 +451,16 @@ The module's shape:
 - The run queue: `std/task`'s module state holds a task per call that started
   one and a wait per host operation a task waits on, found by the operation's
   id, and `wake` runs the woken tasks in wake order. A task's root is `main` (0) or a waiting export (from 1),
-  whose export is a step that begins the task. `__vyrn_wake` is `std/task`'s
+  whose export is a step that begins the task. The step takes the host's id
+  for the task first; the root's end hands its result word to `taskResult`,
+  and `taskEnd` calls `hostDone`, the import `vyrn_wait.done`, with the host's
+  id, the status and the result. `__vyrn_wake` is `std/task`'s
   `wake`, whose `hostResume` call is the emitter's `$resumeRoot` dispatcher
   over the roots. `hostSleep` is the import `vyrn_wait.sleep`, and `hostCancel`
   the import `vyrn_wait.cancel`, which drops a cancelled wait's operation.
+  After a trap the host calls `__vyrn_trapped`, `std/task`'s `taskTrapped`,
+  which forgets the running task and every wait it held and returns the host's
+  id for it, so the trap ends that task alone.
 - Regions that wait: a `region` that holds a point keeps the arena outside it
   in a local (`Region::Own`). `std/task`'s `regionSwap` exchanges the two
   where the region opens, at each suspension inside it (`Fn_::regions_suspend`)

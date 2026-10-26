@@ -1,0 +1,33 @@
+// A waiting export returns a value. `main` awaits it as any waiting call; a
+// host that calls it starts a task and reads the result once the task ends.
+import { both, sleep } from "std/task"
+
+type Reading = { name: String, value: Int64 }
+
+fn measure(name: String, ms: Int64) -> Reading {
+    let label = "\{name}:\{ms}"
+    await sleep(ms)
+    return Reading { name: label, value: ms * 10 }
+}
+
+export extern fn report(ms: Int64) -> String {
+    let r = await both(measure("a", ms), measure("b", ms + 1))
+    return "\{r.first.name}=\{r.first.value} \{r.second.name}=\{r.second.value}"
+}
+
+export extern fn total(ms: Int64) -> Int64 {
+    let r = await measure("t", ms)
+    return r.value
+}
+
+export extern fn ready(ms: Int64) -> Bool {
+    await sleep(ms)
+    return ms > 2
+}
+
+fn main() -> Int64 {
+    print(await report(3))
+    print(await total(2))
+    print(await ready(1))
+    return 0
+}

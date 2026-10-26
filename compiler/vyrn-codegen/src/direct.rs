@@ -284,6 +284,12 @@ fn compile_inner(program: &Program, world: Arc<vyrn_lower::World>) -> Result<Vec
     let waits = world.waiting(program).next().is_some().then(|| Waits {
         sleep: m.import(WAIT_IMPORTS, "sleep", &[ValType::I64], &[ValType::I64]),
         cancel: m.import(WAIT_IMPORTS, "cancel", &[ValType::I64], &[]),
+        done: m.import(
+            WAIT_IMPORTS,
+            "done",
+            &[ValType::I64, ValType::I32, ValType::I64],
+            &[],
+        ),
         resume: m.reserve_func(&[ValType::I32, ValType::I32], &[ValType::I32]),
     });
 
@@ -750,6 +756,7 @@ fn compile_inner(program: &Program, world: Arc<vyrn_lower::World>) -> Result<Vec
                     b.local(ValType::I32),
                 );
                 b.ins(&Instruction::I32Const(0))
+                    .ins(&Instruction::I64Const(0))
                     .ins(&Instruction::Call(begin))
                     .ins(&Instruction::LocalSet(task))
                     .ins(&Instruction::I32Const(0))
@@ -794,7 +801,9 @@ fn compile_inner(program: &Program, world: Arc<vyrn_lower::World>) -> Result<Vec
         m.name(overflow, crate::wasm::OVERFLOW_EXPORT);
     }
     // An `export extern fn`, under its own name. An export is also a sweep root. One that waits
-    // is exported as a step that starts its task, the root after `main`'s.
+    // is exported as a step that starts its task, the root after `main`'s: it takes the host's id
+    // for the task before the declared parameters and returns nothing, and its root's end hands
+    // the result to `taskResult`, which `hostDone` delivers ([`abi_section`]).
     let mut roots: Vec<(u32, Option<u32>)> = Vec::new();
     if let (Some(_), Some(done)) = (queue, main_done) {
         roots.push((main, Some(done)));
@@ -803,32 +812,48 @@ fn compile_inner(program: &Program, world: Arc<vyrn_lower::World>) -> Result<Vec
         let sig = &cx.sigs[&f.name];
         match queue {
             Some((_, begin, settle)) if f.is_export_extern && sig.waits => {
-                if sig.ret != Ret::Unit {
-                    let name = program.spellings.written(&f.name);
-                    return Err(vyrn_frontend::rule!(WaitsUnbuilt, name, line = f.line).render());
-                }
-                let (params, _) = cx.wasm_sig(sig, f.line)?;
-                let takes = &params[..params.len() - 1];
+                let (params, results) = cx.wasm_sig(sig, f.line)?;
+                let takes: Vec<ValType> = std::iter::once(ValType::I64)
+                    .chain(params[..params.len() - 1].iter().copied())
+                    .collect();
+                let done = match results[..results.len() - 1] {
+                    [] => None,
+                    [v] => Some((v, export_done(&mut m, v, run_queue("taskResult")?))),
+                    _ => {
+                        return unsupported(
+                            "a waiting export with a result of several words",
+                            f.line,
+                        )
+                    }
+                };
                 let root = roots.len() as i32 + i32::from(roots.is_empty());
-                let step = m.func(takes, &[], &[], 0, |b| {
+                let step = m.func(&takes, &[], &[], 0, |b| {
                     let (task, st) = (b.local(ValType::I64), b.local(ValType::I32));
                     b.ins(&Instruction::I32Const(root))
+                        .ins(&Instruction::LocalGet(0))
                         .ins(&Instruction::Call(begin))
                         .ins(&Instruction::LocalSet(task));
-                    for i in 0..takes.len() as u32 {
+                    for i in 1..takes.len() as u32 {
                         b.ins(&Instruction::LocalGet(i));
                     }
                     b.ins(&Instruction::I32Const(0))
                         .ins(&Instruction::Call(sig.index))
-                        .ins(&Instruction::LocalSet(st))
-                        .ins(&Instruction::LocalGet(task))
+                        .ins(&Instruction::LocalSet(st));
+                    if let Some((v, done)) = done {
+                        let word = b.local(v);
+                        b.ins(&Instruction::LocalSet(word))
+                            .ins(&Instruction::LocalGet(word))
+                            .ins(&Instruction::LocalGet(st))
+                            .ins(&Instruction::Call(done));
+                    }
+                    b.ins(&Instruction::LocalGet(task))
                         .ins(&Instruction::LocalGet(st))
                         .ins(&Instruction::Call(settle));
                 });
                 if roots.is_empty() {
                     roots.push((main, None));
                 }
-                roots.push((sig.index, None));
+                roots.push((sig.index, done.map(|d| d.1)));
                 m.export(&f.name, step);
             }
             _ if f.is_export_extern => {
@@ -837,8 +862,8 @@ fn compile_inner(program: &Program, world: Arc<vyrn_lower::World>) -> Result<Vec
             _ => {}
         }
     }
-    // `$resumeRoot(root, frame)`: one more step of the task `root` started, `main`'s with its
-    // end when it finishes. A root takes zeros for its parameters on a resume.
+    // `$resumeRoot(root, frame)`: one more step of the task `root` started, with the root's end
+    // when it finishes. A root takes zeros for its parameters on a resume.
     if let Some((w, ..)) = queue {
         let mut b = Frame::new(&[ValType::I32, ValType::I32], &[ValType::I32], &[], 0);
         let st = b.local(ValType::I32);
@@ -858,19 +883,25 @@ fn compile_inner(program: &Program, world: Arc<vyrn_lower::World>) -> Result<Vec
             b.ins(&Instruction::LocalGet(1))
                 .ins(&Instruction::Call(*index))
                 .ins(&Instruction::LocalSet(st));
-            let code = b.local(ValType::I64);
-            for _ in &results[..results.len() - 1] {
-                match done {
-                    Some(_) => b.ins(&Instruction::LocalSet(code)),
-                    None => b.ins(&Instruction::Drop),
-                };
-            }
+            let word = match (done, &results[..results.len() - 1]) {
+                (Some(_), [v]) => {
+                    let word = b.local(*v);
+                    b.ins(&Instruction::LocalSet(word));
+                    word
+                }
+                (_, rest) => {
+                    for _ in rest {
+                        b.ins(&Instruction::Drop);
+                    }
+                    0
+                }
+            };
             if let Some(done) = done {
                 b.ins(&Instruction::LocalGet(st))
                     .ins(&Instruction::I32Const(2))
                     .ins(&Instruction::I32LtU)
                     .ins(&Instruction::If(BlockType::Empty))
-                    .ins(&Instruction::LocalGet(code))
+                    .ins(&Instruction::LocalGet(word))
                     .ins(&Instruction::LocalGet(st))
                     .ins(&Instruction::Call(*done))
                     .ins(&Instruction::End);
@@ -882,6 +913,7 @@ fn compile_inner(program: &Program, world: Arc<vyrn_lower::World>) -> Result<Vec
         b.ins(&Instruction::Unreachable).ins(&Instruction::End);
         m.fill(w.resume, b)?;
         m.export("__vyrn_wake", run_queue("wake")?);
+        m.export(TRAPPED_EXPORT, run_queue("taskTrapped")?);
     }
     if user.iter().any(|f| f.is_export_extern) {
         m.export_entry_state(cx.rt.region_sp);
@@ -911,6 +943,34 @@ fn compile_inner(program: &Program, world: Arc<vyrn_lower::World>) -> Result<Vec
         m.custom("vyrn:sites", rows.join("\n").into_bytes());
     }
     m.finish()
+}
+
+/// The end of a waiting export's root, `(word, status)`: a root that returned (status 0) hands
+/// its result word to `std/task`'s `taskResult` as the one `i64` that `hostDone` delivers. An
+/// `i32` word is zero-extended and a float crosses by its bits; the host reads the word by the
+/// declared kind.
+fn export_done(m: &mut wasm::Module, v: ValType, task_result: u32) -> u32 {
+    m.func(&[v, ValType::I32], &[], &[], 0, |b| {
+        b.ins(&Instruction::LocalGet(1))
+            .ins(&Instruction::I32Eqz)
+            .ins(&Instruction::If(BlockType::Empty))
+            .ins(&Instruction::LocalGet(0));
+        match v {
+            ValType::I32 => {
+                b.ins(&Instruction::I64ExtendI32U);
+            }
+            ValType::F64 => {
+                b.ins(&Instruction::I64ReinterpretF64);
+            }
+            ValType::F32 => {
+                b.ins(&Instruction::I32ReinterpretF32)
+                    .ins(&Instruction::I64ExtendI32U);
+            }
+            _ => {}
+        }
+        b.ins(&Instruction::Call(task_result))
+            .ins(&Instruction::End);
+    })
 }
 
 /// How a value crosses the JS boundary, as declared: `String`, `Bool`, `Int32` and `UInt32` all
@@ -944,10 +1004,10 @@ fn abi_kind(ty: &Type) -> &'static str {
 /// The wasm ABI loses what a host needs: `String`, `Bool`, `Int32` and `UInt32` all arrive as
 /// `i32`, and a `String` import's two slots look like an `(Int32, Int64)` pair.
 ///
-/// Payload, version 3:
+/// Payload, version 4:
 ///
 /// ```text
-/// u8            version = 3
+/// u8            version = 4
 /// uleb          export count
 ///   per entry:  name:str  ret:kind  uleb param count  param:kind …  waits:u8
 /// uleb          import count  (the `vyrn.*` namespace)
@@ -955,8 +1015,12 @@ fn abi_kind(ty: &Type) -> &'static str {
 /// ```
 ///
 /// `str` is a uleb length then UTF-8 bytes; `kind` is a `str` from [`abi_kind`]'s closed set.
-/// `waits` is 1 for an export that waits, whose call starts a task the host settles, else 0. A
-/// module with nothing on the boundary carries no section.
+/// `waits` is 1 for an export that waits, else 0. A waiting export's call starts a task: its wasm
+/// function takes the host's id for the task before the declared parameters and returns
+/// nothing, and the module calls `vyrn_wait.done(task, status, result)` once, when the task ends:
+/// status 0 with the result as one `i64` (an `i32` kind zero-extended, a float by its bits, a
+/// `String`'s address, which the host then owns), or 1 cancelled. A module with nothing on the
+/// boundary carries no section.
 ///
 /// The section lists every declaration, including ones `Module::sweep` dropped: the shim learns
 /// which functions exist from the platform, and reads this only for their types.
@@ -1000,7 +1064,7 @@ fn abi_section(
     if exports.is_empty() && imports.is_empty() {
         return;
     }
-    let mut payload = vec![3u8];
+    let mut payload = vec![4u8];
     leb(&mut payload, exports.len() as u32);
     for f in exports {
         sig(&mut payload, f);
@@ -1691,6 +1755,10 @@ struct Base<'a> {
 /// later calls `__vyrn_wake` with that id (`std/task`'s run queue).
 pub const WAIT_IMPORTS: &str = "vyrn_wait";
 
+/// The export a host calls after a trap in a module that waits: `std/task`'s `taskTrapped`,
+/// which forgets the task that trapped and returns the host's id for it.
+pub const TRAPPED_EXPORT: &str = "__vyrn_trapped";
+
 /// What a program that waits adds to its module ([`Base::waits`]).
 #[derive(Clone, Copy)]
 struct Waits {
@@ -1698,6 +1766,8 @@ struct Waits {
     sleep: u32,
     /// `vyrn_wait.cancel(id)`: the host drops the operation, which no wait waits for.
     cancel: u32,
+    /// `vyrn_wait.done(task, status, result)`: the task the host started as `task` ended.
+    done: u32,
     /// `$resumeRoot(root, frame) -> status`, which `hostResume` calls: the step of the root
     /// the host started a task with. Filled after every body.
     resume: u32,
@@ -9194,6 +9264,15 @@ impl<'p> Fn_<'_, 'p> {
                 self.core_arg(m, b, name, args, 0, Some(&Type::Int), line)?;
                 b.ins(&Instruction::Call(w.cancel));
             }
+            "hostDone" => {
+                let Some(w) = self.cx.waits else {
+                    return unsupported("`hostDone` in a program that does not wait", line);
+                };
+                self.core_arg(m, b, name, args, 0, Some(&Type::Int), line)?;
+                self.core_arg(m, b, name, args, 1, Some(&INT32), line)?;
+                self.core_arg(m, b, name, args, 2, Some(&Type::Int), line)?;
+                b.ins(&Instruction::Call(w.done));
+            }
             "serveStream" => {
                 let msg = m.intern(vyrn_frontend::trap::SERVE_STREAM);
                 self.panic_line(m, b, None, |_, _, b| {
@@ -12385,9 +12464,10 @@ impl<'a, 'p> Fn_<'a, 'p> {
                 };
             }
             Some(Spec::Effect(_)) => {
-                let [_] = args else {
-                    return unsupported(&format!("`{callee}` of other than one value"), line);
-                };
+                let arity = vyrn_frontend::prelude::signature(callee).map(|f| f.params.len());
+                if arity != Some(args.len()) {
+                    return unsupported(&format!("`{callee}` with {} operands", args.len()), line);
+                }
                 return self.effect(m, b, callee, args, line);
             }
             Some(Spec::Logs) => {
