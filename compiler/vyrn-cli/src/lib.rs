@@ -2,4 +2,6 @@
 //! second crate (`vyrn-frontend`'s tests, as a dev-dependency) run compiled
 //! programs through one host.
 
+mod fetch;
 pub mod wasmrun;
+pub mod wire;

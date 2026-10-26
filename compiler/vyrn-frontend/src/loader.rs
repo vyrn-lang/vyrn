@@ -1115,12 +1115,12 @@ pub const RT_MODULES: &[RtModule] = &[
         always: false,
     },
     // The run queue, in every program that waits: such a program imports
-    // `std/task`, whose `sleep` is the one host wait. The emitter calls its
-    // queue by these spellings.
+    // `std/task`, whose `sleep` waits for a timer, or mentions `hostFetch`
+    // through `std/fetch`. The emitter calls its queue by these spellings.
     RtModule {
         spec: TASK_SPEC,
         prefix: TASK_PREFIX,
-        desugared: &[],
+        desugared: &["hostFetch"],
         always: false,
     },
     // The runtime, in every program. `std/mem` enters as `std/runtime`'s import;

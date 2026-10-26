@@ -73,7 +73,8 @@ const CENSUS: &[(&str, Why, &str)] = &[
     // stream its `close`.
     ("serveStream", Syscall, "the host's socket: hand a producer to the accept loop, which pulls and closes it"),
     ("hostSleep", Syscall, "the host's timer: wait while the host runs other tasks"),
-    ("hostCancel", Syscall, "the host's timer: drop the operation of a cancelled wait"),
+    ("hostFetch", Syscall, "the host's socket: send a packed request and wait for its packed reply"),
+    ("hostCancel", Syscall, "the host's wait: drop the operation of a cancelled wait, aborting a request"),
     ("hostDone", Syscall, "the host's task: deliver the end of a task the host started, with its result"),
     ("hostResume", Compiler, "a step of a task: a call of the dispatcher over the roots the emitter numbered"),
     ("print", Syscall, "fd_write on stdout"),

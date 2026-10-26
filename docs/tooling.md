@@ -43,13 +43,25 @@ wasmtime, the native host and `web/wasi-min.js` share this rule. The shim arms o
 `setTimeout` per timer, so a timer one task sets while another waits fires at its
 own deadline.
 
+A module that sends requests also imports `vyrn_wait.fetch(request, length) -> id`.
+The host copies the packed request ([compiler.md](compiler.md), Host waits),
+sends it, and wakes the id with the address of the packed reply, a String it
+wrote with the module's `__vyrn_malloc`, which the module owns. A cancelled
+request is aborted. The embedded wasmtime and the native host speak HTTP/1.1
+over sockets, one request per connection, each on a thread of its own; a native
+binary links that client (`wasi_net.c`) only when its module imports
+`vyrn_wait.fetch`. The shim sends each request with the page's `fetch` and
+aborts it with an `AbortController`, so a page reads only what CORS lets it.
+
 The clock is logical. `sleep(ms)` is due `ms` after the deadline of the wake
 the program runs in: 0 at the start, and in `serve`, `dev` and a page's call
 of an export the time the host began the call. A host waits out real time
 before it delivers a timer, but the time the program computes never moves a
 later deadline: a loop of work and `sleep(10)` keeps its rate, and wakes at
 once when it falls behind. So the order of wakes is `vyrn test`'s on every
-host and machine.
+host and machine. A reply is delivered when it arrives, and now becomes its
+arrival. `vyrn test` delivers every pending reply, in start order, before the
+next timer, so a request takes no time there.
 
 A `gen fn` generator also runs as compiled wasm, in the same embedded engine,
 while the program loads.

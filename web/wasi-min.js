@@ -21,6 +21,8 @@
 // `vyrn_wait.done` and exports `__vyrn_wake`: `runVyrn` settles every timer
 // before it resolves, as `vyrn run` does. A waiting export's wrapper returns a
 // promise of its result, which `vyrn_wait.done` delivers when its task ends.
+// A module that sends requests imports `vyrn_wait.fetch` too, which the page's
+// `fetch` answers; `runVyrn` settles every request as it settles every timer.
 //
 // Usage:
 //   const { exitCode, stdout, stdoutRaw, stderr, exports } = await runVyrn(bytes, {
@@ -441,11 +443,29 @@ export async function runVyrn(wasmBytes, hooks = {}) {
       due.set(id, { at, handle });
       return id;
     },
-    // No wait waits for operation `id`, so its timer never fires.
+    // A request: the packed fields at `at`, `len` bytes, are copied now and
+    // sent with the page's `fetch` (compiler.md, Host waits). Its reply is
+    // packed as every host packs it and delivered as a String the module owns.
+    fetch: (at, len) => {
+      const id = nextWait++;
+      const request = new Uint8Array(memory.buffer, at >>> 0, Number(len)).slice();
+      const abort = new AbortController();
+      flying.set(id, abort);
+      send(request, abort.signal).then((reply) => {
+        if (!flying.delete(id)) return;
+        deliverReply(id, reply);
+      });
+      return id;
+    },
+    // No wait waits for operation `id`, so its timer never fires and its
+    // request is aborted.
     cancel: (id) => {
       const t = due.get(id);
       if (t) clearTimeout(t.handle);
       due.delete(id);
+      const f = flying.get(id);
+      if (f) f.abort();
+      flying.delete(id);
     },
     // The task this side started as `task` ended: 0 with its result word, or
     // 1 cancelled.
@@ -456,6 +476,8 @@ export async function runVyrn(wasmBytes, hooks = {}) {
       else t.reject(new Error(`the task an export started was cancelled`));
     },
   };
+  // Each request in flight, by its operation's id, with what aborts it.
+  const flying = new Map();
   // Each task a waiting export started and has not ended, by the id this side
   // gave it.
   const tasks = new Map();
@@ -481,8 +503,8 @@ export async function runVyrn(wasmBytes, hooks = {}) {
   // pair — an import can't allocate inside the module, but an exported call can.
   const STR_HDR = 8;
   const enc = new TextEncoder();
-  const encodeString = (s) => {
-    const bytes = enc.encode(s);
+  const encodeString = (s) => encodeBytes(enc.encode(s));
+  const encodeBytes = (bytes) => {
     if (typeof instance.exports.__vyrn_malloc !== "function") {
       throw new Error(
         "a String argument needs the module's allocator, but `__vyrn_malloc` is " +
@@ -517,6 +539,75 @@ export async function runVyrn(wasmBytes, hooks = {}) {
       );
     }
     return new TextDecoder().decode(view.subarray(p, e));
+  };
+
+  // --- requests -----------------------------------------------------------
+  // The one field encoding of the host boundary (compiler.md, Host waits):
+  // each field its byte length in decimal, `:`, its bytes.
+  const pack = (fields) => {
+    const parts = fields.map((f) => (typeof f === "string" ? enc.encode(f) : f));
+    const out = [];
+    for (const p of parts) out.push(enc.encode(`${p.length}:`), p);
+    const all = new Uint8Array(out.reduce((n, p) => n + p.length, 0));
+    let at = 0;
+    for (const p of out) {
+      all.set(p, at);
+      at += p.length;
+    }
+    return all;
+  };
+  const unpack = (b) => {
+    const out = [];
+    let i = 0;
+    while (i < b.length) {
+      let n = 0;
+      let j = i;
+      while (j < b.length && b[j] >= 48 && b[j] <= 57) n = n * 10 + b[j++] - 48;
+      if (j === i || b[j] !== 58 || j + 1 + n > b.length) return null;
+      out.push(b.subarray(j + 1, j + 1 + n));
+      i = j + 1 + n;
+    }
+    return out;
+  };
+  // Sends a packed request and answers its packed reply. The page's `fetch`
+  // already lower-cases, sorts and combines the reply's headers.
+  const send = async (request, signal) => {
+    const text = (b) => new TextDecoder().decode(b);
+    const f = unpack(request);
+    const n = f && f.length >= 4 ? Number(text(f[2])) : -1;
+    if (!(n >= 0) || f.length !== 4 + 2 * n) return pack(["badUrl"]);
+    let url, headers;
+    try {
+      url = new URL(text(f[1]));
+      headers = new Headers();
+      for (let k = 0; k < n; k++) headers.append(text(f[3 + 2 * k]), text(f[4 + 2 * k]));
+    } catch {
+      return pack(["badUrl"]);
+    }
+    if (!/^https?:$/.test(url.protocol) || url.username || url.password || !url.hostname) {
+      return pack(["badUrl"]);
+    }
+    const body = f[3 + 2 * n];
+    let r, bytes;
+    try {
+      r = await fetch(url, {
+        method: text(f[0]),
+        headers,
+        body: body.length ? body : undefined,
+        redirect: "manual",
+        signal,
+      });
+      bytes = new Uint8Array(await r.arrayBuffer());
+    } catch {
+      return pack(["unreachable"]);
+    }
+    try {
+      new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+    } catch {
+      return pack(["badResponse"]);
+    }
+    const hs = [...r.headers].filter(([k]) => k !== "set-cookie");
+    return pack(["ok", String(r.status), String(hs.length), ...hs.flat(), bytes]);
   };
 
   // --- wrap exported-extern functions -----------------------------------------
@@ -697,17 +788,35 @@ export async function runVyrn(wasmBytes, hooks = {}) {
         guarded(() => wake(next[0], 0, 0n));
       }
     } catch (e) {
-      for (const t of due.values()) clearTimeout(t.handle);
-      due.clear();
-      for (const t of tasks.values()) t.reject(e);
-      tasks.clear();
-      settled(e);
+      failed(e);
       return;
     }
-    if (due.size === 0) settled(null);
+    if (due.size === 0 && flying.size === 0) settled(null);
+  };
+  // A wake that trapped or exited ends every timer, request and task.
+  const failed = (e) => {
+    for (const t of due.values()) clearTimeout(t.handle);
+    due.clear();
+    for (const f of flying.values()) f.abort();
+    flying.clear();
+    for (const t of tasks.values()) t.reject(e);
+    tasks.clear();
+    settled(e);
+  };
+  // A reply arrived: `now` is its arrival, and the module owns the String.
+  const deliverReply = (id, reply) => {
+    try {
+      const ptr = encodeBytes(reply);
+      now = Math.floor(real());
+      guarded(() => instance.exports.__vyrn_wake(id, 0, BigInt(ptr)));
+    } catch (e) {
+      failed(e);
+      return;
+    }
+    if (due.size === 0 && flying.size === 0) settled(null);
   };
   const settle = () =>
-    due.size === 0 || !instance.exports.__vyrn_wake
+    (due.size === 0 && flying.size === 0) || !instance.exports.__vyrn_wake
       ? Promise.resolve()
       : new Promise((resolve, reject) => settling.push({ resolve, reject }));
   let exitCode = 0;

@@ -803,7 +803,7 @@ pub(crate) fn judge_built<R>(
         .collect();
     let mut resolve = |name: &str| -> Callee {
         if let Some(e) = atom(name) {
-            return Callee::Atom(Effects::of(e));
+            return Callee::Atom(e.set());
         }
         if let Some(&e) = externs.get(name) {
             return Callee::Atom(Effects::of(e));

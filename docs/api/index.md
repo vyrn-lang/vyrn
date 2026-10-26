@@ -10,6 +10,7 @@
 - [std/contract](std/contract.md) — Check a module against a module contract.
 - [std/diag](std/diag.md) — A generator reports a diagnostic, anchored in a file it read.
 - [std/fallible](std/fallible.md) — `Fallible`: the protocol `?` resolves through for a type that is not
+- [std/fetch](std/fetch.md) — Outbound HTTP: `fetch` sends a request and waits for its response while the
 - [std/graphql](std/graphql.md) — The contract as a GraphQL SDL document, built on
 - [std/hash](std/hash.md) — Non-cryptographic byte hashing, and SHA-1 for the
 - [std/hints](std/hints.md) — Policy for checking libraries: per-project rule levels and per-line waivers.
@@ -41,7 +42,7 @@
 - [std/strpred](std/strpred.md) — The string predicates and `slice`, written on the byte view
 - [std/sum](std/sum.md) — The exact sum of an `Array<Float64>`, written in Vyrn.
 - [std/symbolmap](std/symbolmap.md) — The symbol map of a generated module: for each
-- [std/task](std/task.md) — Waiting for the host: `sleep`, the one host wait, and the run queue.
+- [std/task](std/task.md) — Waiting for the host: `sleep`, the host's timer, and the run queue.
 - [std/text](std/text.md) — UTF-8 decoding and byte-offset line and column, in Vyrn.
 - [std/tile](std/tile.md) — Integer matrix tiles: `mmaInt8` and `mmaUInt8`, the CPU oracle a GPU tile
 - [std/time](std/time.md) — Wall-clock time at the host boundary, and a pure calendar breakdown.

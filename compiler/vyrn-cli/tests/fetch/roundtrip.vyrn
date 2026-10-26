@@ -1,0 +1,55 @@
+// The round trips `tests/fetch.rs` runs on every host. The test serves
+// `upstream` and gives `closed` a port nothing listens on; the ports here are
+// placeholders it replaces.
+import { fetch, fetchText, FetchRequest, FetchError } from "std/fetch"
+import { timeout } from "std/task"
+
+let upstream = "http://127.0.0.1:1"
+let closed = "http://127.0.0.1:2"
+
+fn why(e: FetchError) -> String {
+    return match e {
+        BadUrl => "a bad URL",
+        Unreachable => "unreachable",
+        Untrusted => "untrusted",
+        BadResponse => "a bad response",
+    }
+}
+
+fn show(r: Result<String, FetchError>) {
+    match r {
+        Ok(body) => print("body: \{body}"),
+        Err(e) => print("error: \{why(e)}"),
+    }
+}
+
+fn slow() -> Result<String, FetchError> {
+    return await fetchText(upstream + "/slow")
+}
+
+fn main() -> Int64 {
+    let mut hs: Map<String, String> = [:]
+    hs["x-echo"] = "seven"
+    let req = FetchRequest { method: "POST", url: upstream + "/echo?q=1", headers: hs, body: "payload" }
+    match await fetch(req) {
+        Ok(r) => {
+            print("\{r.status} \{r.contentType} vary=\{r.vary}")
+            for k in r.headers.keys() {
+                if let Some(v) = r.headers[k] {
+                    print("\{k}: \{v}")
+                }
+            }
+            print(r.body)
+        },
+        Err(e) => print("error: \{why(e)}"),
+    }
+    show(await fetchText(upstream + "/chunked"))
+    show(await fetchText(upstream + "/latin"))
+    show(await fetchText(closed + "/"))
+    show(await fetchText("ftp://127.0.0.1/"))
+    match await timeout(200, slow) {
+        Some(r) => show(r),
+        None => print("slow: timed out"),
+    }
+    return 0
+}

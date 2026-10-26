@@ -4041,7 +4041,7 @@ fn vyrnServeCall(req: Request) -> Response {
     return Response { status: 500, contentType: "", body: "", vary: "", headers: [:] }
 }
 
-/// One field of a packed response: its byte length, a colon, its bytes.
+/// One field of a packed response (compiler.md, Host waits).
 fn vyrnServeField(s: String) -> String {
     return "\{s.byteLength}:\{s}"
 }
@@ -4222,30 +4222,27 @@ fn serve_end(
         .ok_or_else(|| "vyrnServeHandle: a response the host cannot read".into())
 }
 
-/// The response `vyrnServeHandle` packed ([`SERVE_SHIM`]): each field its byte
-/// length, a colon and its bytes. `None` for anything else.
+/// The response `vyrnServeHandle` packed ([`SERVE_SHIM`]) as fields
+/// ([`vyrn_cli::wire`]). `None` for anything else.
 fn unpack_response(packed: &str) -> Option<ServeAnswer> {
-    let mut rest = packed;
-    let mut field = || -> Option<&str> {
-        let (n, tail) = rest.split_once(':')?;
-        let n: usize = n.parse().ok()?;
-        let f = tail.get(..n)?;
-        rest = tail.get(n..)?;
-        Some(f)
-    };
+    let fields = vyrn_cli::wire::fields(packed.as_bytes())?;
+    let mut fields = fields
+        .iter()
+        .map(|f| String::from_utf8_lossy(f).into_owned());
+    let mut field = || fields.next();
     let status = field()?.parse().ok()?;
-    let content_type = field()?.to_string();
-    let vary = field()?.to_string();
+    let content_type = field()?;
+    let vary = field()?;
     let live = field()? == "1";
     let n: usize = field()?.parse().ok()?;
     let mut headers = Vec::new();
     for _ in 0..n {
-        headers.push((field()?.to_string(), field()?.to_string()));
+        headers.push((field()?, field()?));
     }
     let resp = ServeResponse {
         status,
         content_type,
-        body: field()?.to_string(),
+        body: field()?,
         vary,
         headers,
     };
@@ -6330,11 +6327,17 @@ fn build_wasm2c(
     let pch = native.pch()?;
     // The link order of the single clang call this replaced; it fixes where
     // the program's functions land.
-    let objs = [
+    let mut objs = vec![
         native.host(&host_path, &host_text, &header, &hdr_def)?,
         native.runtime("wasm-rt-impl")?,
         native.runtime("wasm-rt-mem-impl")?,
     ];
+    // Only a module that sends requests links the client, so every other program links what
+    // it linked before `std/fetch` existed.
+    let sends = vyrn_codegen::toolchain::sends_requests(&header);
+    if sends {
+        objs.push(native.net()?);
+    }
     let stage = vyrn_frontend::manifest::stage_beside(&out);
     let mut cmd = native.cc();
     cmd.arg("-include-pch")
@@ -6345,6 +6348,9 @@ fn build_wasm2c(
         .arg(&stage)
         .arg(&hdr_def);
     native_link_flags(&mut cmd);
+    if sends && cfg!(windows) {
+        cmd.arg("-lws2_32");
+    }
     let linked = match cmd.status() {
         Ok(s) if s.success() => Ok(()),
         Ok(s) => {

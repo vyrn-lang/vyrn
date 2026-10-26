@@ -1,8 +1,8 @@
 //! The native route's cache under `~/.vyrn/cache/native/<key>/`.
 //!
-//! Three kinds of file do not depend on the program: wabt's two runtime
-//! objects, the WASI host object, and a precompiled header of wasm-rt, libc
-//! and simde. Compiling them again costs about 0.8 s of a 1.2 s build, so
+//! Four kinds of file do not depend on the program: wabt's two runtime
+//! objects, the WASI host object, the outbound-request client a module that
+//! sends requests links, and a precompiled header of wasm-rt, libc and simde. Compiling them again costs about 0.8 s of a 1.2 s build, so
 //! [`Native::open`] keys a directory on everything that can change one of
 //! them, and each entry is built once.
 //!
@@ -159,6 +159,24 @@ impl Native {
         }
         let name = format!("host-{}.o", &sha256_hex(&k)[..32]);
         self.object(&name, &show_path(host_c), &[define])
+    }
+
+    /// Returns the object of the outbound-request client
+    /// ([`vyrn_codegen::toolchain::WASI_NET_C`]), named by its text's hash. Its source is
+    /// written into the cache beside it, whole or not at all.
+    pub fn net(&self) -> Result<PathBuf, ()> {
+        let text = vyrn_codegen::toolchain::WASI_NET_C;
+        let stem = format!("net-{}", &sha256_hex(text.as_bytes())[..32]);
+        let name = format!("{stem}.o");
+        if let Some(hit) = self.hit(&name, true) {
+            return Ok(hit);
+        }
+        let src = self.dir.join(format!("{stem}.c"));
+        let tmp = self.dir.join(format!("{stem}.c.{}", tmp_suffix()));
+        std::fs::write(&tmp, text)
+            .and_then(|()| std::fs::rename(&tmp, &src))
+            .map_err(|e| eprintln!("error: cannot write {}: {e}", src.display()))?;
+        self.object(&name, &show_path(&src), &[])
     }
 
     fn object(&self, name: &str, src: &str, extra: &[&str]) -> Result<PathBuf, ()> {

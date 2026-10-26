@@ -1,0 +1,133 @@
+/// Outbound HTTP: `fetch` sends a request and waits for its response while the
+/// host runs other tasks, as `sleep` waits for a timer (language.md, Waiting).
+/// A `race` or `timeout` that cancels a fetch aborts its request on the host.
+///
+/// Every host speaks HTTP/1.1 with one request per connection and follows no
+/// redirect. The request and the reply cross the host boundary as packed
+/// fields (compiler.md, Host waits).
+
+import { slice } from "std/strpred"
+import { parseInt64 } from "std/num"
+
+/// An outbound request. `url` is absolute, `http://` or `https://`.
+export type FetchRequest = { method: String, url: String, headers: Map<String, String>, body: String }
+
+/// Why a request has no response.
+///
+/// `BadUrl`: the URL is not `http://` or `https://` with a host, or its port
+/// is not a number. `Unreachable`: the host is not found, refuses the
+/// connection, or closes it before the response ends. `Untrusted`: the
+/// server's certificate does not verify. `BadResponse`: the reply is not
+/// HTTP/1.x, its length or a chunk is malformed, or its body or a header is
+/// not UTF-8.
+export type FetchError = enum { BadUrl, Unreachable, Untrusted, BadResponse }
+
+/// Sends `req` and waits for the whole response. Header names arrive
+/// lower-case, one entry per name with repeated values joined by `, `;
+/// `content-type` and `vary` fill their own fields.
+export fn fetch(req: FetchRequest) -> Result<Response, FetchError> {
+    let mut hs = ""
+    let mut n = 0
+    for k in req.headers.keys() {
+        if let Some(v) = req.headers[k] {
+            hs = hs + fetchField(k) + fetchField(v)
+            n = n + 1
+        }
+    }
+    let packed = fetchField(req.method) + fetchField(req.url) + fetchField(n.toString()) + hs + fetchField(req.body)
+    let reply = await hostFetch(packed)
+    return fetchUnpack(reply)
+}
+
+/// `GET url`: the body of the response, whatever its status.
+export fn fetchText(url: String) -> Result<String, FetchError> {
+    let r = await fetch(FetchRequest { method: "GET", url: url.copy(), headers: [:], body: "" })?
+    return Ok(r.body.copy())
+}
+
+/// One packed field: its byte length, a colon, its bytes.
+fn fetchField(s: String) -> String {
+    return "\{s.byteLength}:\{s}"
+}
+
+/// A field read out of a packed reply, and the offset after it.
+type FetchRead = { text: String, end: Int64 }
+
+/// The field that starts at byte `at` of `s`, or `None` when none does.
+fn fetchFieldAt(s: String, at: Int64) -> Option<FetchRead> {
+    let mut i = at
+    let mut n = 0
+    while i < s.byteLength && s[i] != 58 {
+        if s[i] < 48 || s[i] > 57 {
+            return None
+        }
+        n = n * 10 + Int64(s[i]) - 48
+        i = i + 1
+    }
+    if i == at || i == s.byteLength {
+        return None
+    }
+    return match slice(s, i + 1, i + 1 + n) {
+        Ok(t) => Some(FetchRead { text: t, end: i + 1 + n }),
+        Err(_) => None,
+    }
+}
+
+/// The response or the error a packed reply holds; a reply that does not
+/// unpack is `BadResponse`.
+fn fetchUnpack(reply: String) -> Result<Response, FetchError> {
+    let mut fields: Array<String> = []
+    let mut end = 0
+    while end < reply.byteLength {
+        if let Some(f) = fetchFieldAt(reply, end) {
+            fields.push(f.text.copy())
+            end = f.end
+        } else {
+            return Err(BadResponse)
+        }
+    }
+    if fields.length == 1 && fields[0] == "badUrl" {
+        return Err(BadUrl)
+    }
+    if fields.length == 1 && fields[0] == "unreachable" {
+        return Err(Unreachable)
+    }
+    if fields.length == 1 && fields[0] == "untrusted" {
+        return Err(Untrusted)
+    }
+    if fields.length < 4 || fields[0] != "ok" {
+        return Err(BadResponse)
+    }
+    if let Some(status) = parseInt64(fields[1]) {
+        if let Some(n) = parseInt64(fields[2]) {
+            return fetchResponse(fields, status, n)
+        }
+    }
+    return Err(BadResponse)
+}
+
+/// The response in `fields`: `ok`, the status, the header count `n`, each
+/// header's name and value, the body.
+fn fetchResponse(fields: Array<String>, status: Int64, n: Int64) -> Result<Response, FetchError> {
+    if n < 0 || fields.length != 4 + 2 * n {
+        return Err(BadResponse)
+    }
+    let mut contentType = ""
+    let mut vary = ""
+    let mut headers: Map<String, String> = [:]
+    let mut i = 0
+    while i < n {
+        let name = fields[3 + 2 * i].copy()
+        let value = fields[4 + 2 * i].copy()
+        if name == "content-type" {
+            contentType = value
+        } else if name == "vary" {
+            vary = value
+        } else {
+            headers[name] = value
+        }
+        i = i + 1
+    }
+    let body = fields[3 + 2 * n].copy()
+    return Ok(Response { status: status, contentType: contentType, body: body, vary: vary, headers: headers })
+}

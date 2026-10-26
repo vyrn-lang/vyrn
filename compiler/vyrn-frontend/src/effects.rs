@@ -43,10 +43,13 @@ pub enum Effect {
     GenOnly,
     /// The task waits for the host, which may run other tasks meanwhile.
     Waits,
+    /// An outbound request is made, and the task waits for its reply
+    /// ([`Effect::set`]).
+    Net,
 }
 
 impl Effect {
-    pub const ALL: [Effect; 15] = [
+    pub const ALL: [Effect; 16] = [
         Effect::Alloc,
         Effect::ReadInput,
         Effect::WriteOutput,
@@ -62,6 +65,7 @@ impl Effect {
         Effect::Trap,
         Effect::GenOnly,
         Effect::Waits,
+        Effect::Net,
     ];
 
     /// The name the table and every printout use.
@@ -82,12 +86,22 @@ impl Effect {
             Effect::Trap => "trap",
             Effect::GenOnly => "gen-only",
             Effect::Waits => "waits",
+            Effect::Net => "net",
         }
     }
 
     /// The inverse of [`Effect::name`].
     pub fn parse(s: &str) -> Option<Effect> {
         Effect::ALL.into_iter().find(|e| e.name() == s)
+    }
+
+    /// The set an atom of this effect contributes: the effect itself, and
+    /// `waits` for `net`, because a request is a host wait.
+    pub fn set(self) -> Effects {
+        match self {
+            Effect::Net => Effects::of(Effect::Net).with(Effect::Waits),
+            e => Effects::of(e),
+        }
     }
 }
 
@@ -210,7 +224,8 @@ impl Effect {
             | Effect::Extern
             | Effect::Serve
             | Effect::ModuleState
-            | Effect::Waits => false,
+            | Effect::Waits
+            | Effect::Net => false,
         }
     }
 }
@@ -250,6 +265,7 @@ fn refusal(e: Option<Effect>, name: &str) -> String {
         Some(Effect::Clock) => "reads the clock".to_string(),
         Some(Effect::Random) => "reads entropy".to_string(),
         Some(Effect::Waits) => "waits".to_string(),
+        Some(Effect::Net) => "makes an outbound request".to_string(),
         Some(Effect::Extern) => format!("calls the extern `{name}`"),
         // Name the word the source wrote: `@info` is the sugar's internal spelling of
         // `log.info(..)`, and no source can lex it.

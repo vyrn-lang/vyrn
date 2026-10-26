@@ -434,7 +434,7 @@ impl Builtin {
 /// The rows. Completion offers a shape's methods in this order.
 fn table() -> Vec<Builtin> {
     use crate::effects::Effect::{
-        Args, FsList, FsRead, FsWrite, GenOnly, ReadInput, Serve, Trap, Waits, WriteOutput,
+        Args, FsList, FsRead, FsWrite, GenOnly, Net, ReadInput, Serve, Trap, Waits, WriteOutput,
     };
     use Capability::{Consume, Modify, Read};
     use Shape::*;
@@ -983,13 +983,20 @@ fn table() -> Vec<Builtin> {
             .spec(Spec::Effect(Unit))
             .effect(Serve)
             .hover("serveStream(stream) -> Unit — hand a `Stream<String>` of encoded frames to the serving host, which writes each one and closes the stream the first time a write fails; `std/http`'s `sse` is the one to call"),
-        // The one host wait: `std/task`'s `sleep` is the one caller.
+        // The host waits: `std/task`'s `sleep` and `std/fetch`'s `fetch` are the callers.
         b("hostSleep")
             .sig(row("hostSleep", &[], &[("ms", Read, Int)], Unit, &[]))
-            .spec(Spec::HostWait)
+            .spec(Spec::HostWait(Unit))
             .effect(Waits)
             .home("std/task")
             .hover("hostSleep(ms) -> Unit — wait `ms` milliseconds while the host runs other tasks; only `std/task` may call it, and `sleep` is the one to call"),
+        b("hostFetch")
+            .sig(row("hostFetch", &[], &[("request", Read, Str)], Str, &[]))
+            .spec(Spec::HostWait(Str))
+            .effect(Net)
+            .fresh()
+            .home("std/fetch")
+            .hover("hostFetch(request) -> String — send a packed request and wait for the packed reply while the host runs other tasks; only `std/fetch` may call it, and `fetch` is the one to call"),
         // The host drops the operation of a cancelled wait:
         // `std/task`'s run queue is the one caller.
         b("hostCancel")
@@ -1376,9 +1383,10 @@ pub enum Spec {
     /// own name is that element.
     Pulls,
     /// A host wait, always awaited: the operands at their types start the
-    /// host's operation, and the call returns `Unit` once the host's
-    /// `__vyrn_wake` delivers it (`std/task`'s run queue).
-    HostWait,
+    /// host's operation, and the call returns the stated type once the host's
+    /// `__vyrn_wake` delivers it (`std/task`'s run queue): `Unit`, or a
+    /// `String` the host wrote into the module, which the call owns.
+    HostWait(Type),
     /// `hostResume(root, frame)`: one more step of the task the host started
     /// at `root`, a call of the emitter's dispatcher over the roots.
     Resumes,
