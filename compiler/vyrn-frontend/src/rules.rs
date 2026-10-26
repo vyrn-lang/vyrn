@@ -688,7 +688,6 @@ rules! {
         "`{callee}` waits, and its call has no `await`"
         fix "write `await` before the call";
     AwaitNoWait { callee } "`await` marks a call that waits, and `{callee}` does not wait";
-    WaitsUnbuilt { name, line } "waiting code does not build yet: `{name}` waits at line {line}";
     ForkBranch { form }
         "each branch of `{form}` is a call of a function, which `{form}` starts and waits for";
     InitializerWaits { callee }

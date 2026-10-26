@@ -74,7 +74,7 @@ fn read_abi(
     }
     let b = payload.expect("the module carries a vyrn:exports section");
     let mut i = 0;
-    assert_eq!(b[i], 3, "section version");
+    assert_eq!(b[i], 4, "section version");
     i += 1;
     let mut sides = Vec::new();
     let mut waiting = Vec::new();
@@ -360,15 +360,33 @@ fn the_shim_ends_each_program_as_vyrn_run_does() {
     }
 }
 
-/// An export that waits, flagged in the section; its String argument lives as
-/// long as its task.
+/// Exports that wait, flagged in the section; a String argument lives as long as
+/// its task, and each task's result reaches the shim when the task ends.
 const WAITING_EXPORT: &str = r#"import { sleep } from "std/task"
 
 let mut total: Int64 = 0
 
-export extern fn later(name: String) {
+export extern fn later(name: String) -> Int64 {
     await sleep(5)
     total = total + Int64(name.byteLength)
+    return total * 10
+}
+
+export extern fn label(n: Int64) -> String {
+    await sleep(1)
+    return "n=\{n}"
+}
+
+export extern fn ratio(n: Int64) -> Float32 {
+    await sleep(1)
+    return Float32(n) / Float32(4)
+}
+
+export extern fn quick(n: UInt32) -> UInt32 {
+    if n < 1 {
+        await sleep(1)
+    }
+    return n
 }
 
 export extern fn sum() -> Int64 { return total }
@@ -382,18 +400,20 @@ import { runVyrn } from "./wasi-min.mjs";
 const r = await runVyrn(await readFile(process.argv[2]), {});
 const task = r.exports.later("abc");
 console.log(task instanceof Promise, String(r.exports.sum()));
-await task;
-console.log(String(r.exports.sum()));
+console.log(String(await task), String(r.exports.sum()), await r.exports.label(7n));
+console.log(await r.exports.ratio(3n), await r.exports.quick(3000000000));
 "#;
 
-/// The section flags the export that waits, and the shim's wrapper for it
-/// returns a promise that settles once its task ends.
+/// The section flags each export that waits, and the shim's wrapper for one
+/// returns a promise of the result its task returned: an Int64, a String the
+/// shim frees, a Float32 by its bits. A waiting export whose body reaches no
+/// wait ends in its first step, and its promise holds the result.
 #[test]
 fn the_shim_settles_the_task_an_export_starts() {
     let dir = tmp("later");
     let wasm = build_wasm(&dir, "later", WAITING_EXPORT);
     let (_, _, waiting) = read_abi(&std::fs::read(&wasm).unwrap());
-    assert_eq!(waiting, ["later"]);
+    assert_eq!(waiting, ["later", "label", "ratio", "quick"]);
     let Some(node) = common::node() else {
         eprintln!("NOTE: no node, so the shim's waiting exports are unverified on this machine");
         return;
@@ -407,7 +427,7 @@ fn the_shim_settles_the_task_an_export_starts() {
         .expect("node");
     assert_eq!(
         String::from_utf8_lossy(&out.stdout),
-        "true 0\n3\n",
+        "true 0\n30 3 n=7\n0.75 3000000000\n",
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );

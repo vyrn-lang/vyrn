@@ -4200,7 +4200,7 @@ fn serve_wasm_call(res: &mut wasmrun::Resident, call: ServeCall) -> Result<Serve
             }
             res.tell("vyrnServeBodyIs", &[&req.body])?;
             let live = res.ask_bool("vyrnServeHandle")?;
-            let n = res.ask_int("vyrnServeHeaderCount")?;
+            let n = res.ask_int("vyrnServeHeaderCount", &[])?;
             let mut headers = Vec::with_capacity(n.max(0) as usize);
             for i in 0..n {
                 headers.push((
@@ -4209,7 +4209,7 @@ fn serve_wasm_call(res: &mut wasmrun::Resident, call: ServeCall) -> Result<Serve
                 ));
             }
             let resp = ServeResponse {
-                status: res.ask_int("vyrnServeStatusOf")?,
+                status: res.ask_int("vyrnServeStatusOf", &[])?,
                 content_type: res.ask_text("vyrnServeTypeOf", None)?,
                 body: res.ask_text("vyrnServeBodyOf", None)?,
                 vary: res.ask_text("vyrnServeVaryOf", None)?,

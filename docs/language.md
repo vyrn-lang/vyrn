@@ -293,7 +293,7 @@ fn twice(ms: Int64) -> Result<Int64, String> {
 - No future or task handle is a value, so a waiting call finishes where it stands.
 - `vyrn why --cost` shows `waits` in a function's effect set, and the editor's hover of a function that waits says so.
 
-Waiting code runs the same on every engine. A `main` that waits is the first task, and each call of an `export extern fn` that waits starts one more. The host delivers each completion through the module's `__vyrn_wake`, and the module resumes the task that waited on it, in the order the completions arrive. So the same deliveries print the same bytes everywhere.
+Waiting code runs the same on every engine. A `main` that waits is the first task, and each call of an `export extern fn` that waits starts one more, whose result the host reads once the task ends; a call from Vyrn code is an ordinary awaited call. The host delivers each completion through the module's `__vyrn_wake`, and the module resumes the task that waited on it, in the order the completions arrive. So the same deliveries print the same bytes everywhere.
 
 - A cancelled wait ends its task where it waited. Each function on the task's path releases what a `return` there would release, its callers do the same, and a cancelled `main` exits 1.
 
@@ -325,7 +325,6 @@ fn page(id: Int64) -> String {
 - A lambda waits as a function does, and a call that passes one to a `fn` parameter calls it directly: `await timeout(500, () -> await fetchPage(url))`.
 - An `await` inside a `region` builds: the region has an arena of its own, so tasks that wait inside regions at once never share one ([memory.md](memory.md)).
 - A call through a function value waits when its type waits (Function types), and is marked `await` as any waiting call is: `await handler(req)`.
-- A waiting export that returns a value does not build yet: ``waiting code does not build yet: `later` waits at line 5``.
 
 ### Function types
 

@@ -1,12 +1,26 @@
-// A waiting export that returns a value has no lowering yet: the host would
-// read the result of a call that has not finished.
+// A waiting export returns a value: called from `main`, it is an awaited call;
+// called by the host, its task's end hands the host the result.
 import { sleep } from "std/task"
 
 export extern fn later(ms: Int64) -> Int64 {
     await sleep(ms)
-    return ms
+    return ms * 2
+}
+
+export extern fn named(ms: Int64) -> String {
+    let tag = "after \{ms}"
+    await sleep(ms)
+    return tag
+}
+
+export extern fn half(ms: Int64) -> Float64 {
+    await sleep(ms)
+    return Float64(ms) / 2.0
 }
 
 fn main() -> Int64 {
+    print(await later(5))
+    print(await named(3))
+    print(await half(1))
     return 0
 }

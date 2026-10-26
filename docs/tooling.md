@@ -26,9 +26,17 @@ the same module to wabt's `wasm2c` and compiles the C with clang; the binary
 runs on the thread's own stack. There is no interpreter. Each host hands a
 stack overflow to the module, which traps `call stack exhausted`.
 
-A module that waits imports `vyrn_wait.sleep(ms) -> id` and
-`vyrn_wait.cancel(id)`, and exports `__vyrn_wake(id, status, payload)`. A
-cancelled operation is never delivered. Each host runs the event loop after
+A module that waits imports `vyrn_wait.sleep(ms) -> id`,
+`vyrn_wait.cancel(id)` and `vyrn_wait.done(task, status, result)`, and exports
+`__vyrn_wake(id, status, payload)`. A cancelled operation is never delivered.
+A host that calls a waiting export names the task it starts: the wasm function
+takes the host's id for it before the declared parameters and returns nothing.
+When the task ends, the module calls `done` once with that id: status 0 and
+the result as one `i64`, or 1 when it was cancelled. An `i32`-sized result is
+zero-extended, a float crosses by its bits, and a `String` crosses as its
+address, which the host reads and then frees with `__vyrn_free`. `vyrn:exports`
+names the result's type and flags the export as waiting. A native binary only
+runs `_start`, so it starts no such task. Each host runs the event loop after
 `_start`, and after each export call that waits: it delivers the earliest
 pending timer, ties by id, as it comes due, until none is pending. The embedded
 wasmtime, the native host and `web/wasi-min.js` share this rule. The shim arms one
@@ -538,7 +546,7 @@ a dependency.
   canonical `Err`. `runVyrn(bytes, { extern: { ... } })` supplies the `extern fn`
   imports; the declared signatures come from the module's `vyrn:exports`
   section. That section flags each export that waits, whose wrapper returns a
-  promise that settles once the timers run out.
+  promise of the result, settled when its task ends.
 - `vyrn-dom.js`: applies the patch stream `std/html` computes in wasm.
 - `vyrn-nav.js`: soft navigation between server-rendered pages.
 - `vyrn-rpc.js`, `vyrn-query.js`: the client halves of `std/rpc` and page data.

@@ -160,6 +160,16 @@ void w2c_vyrn__wait_cancel(struct w2c_vyrn__wait* w, u64 id) {
     }
 }
 
+/* A binary runs only `_start` and starts no task through an export, so no
+   task of this host's can end: a call is a defect of the module. */
+void w2c_vyrn__wait_done(struct w2c_vyrn__wait* w, u64 task, u32 status, u64 result) {
+    (void)w;
+    (void)status;
+    (void)result;
+    fprintf(stderr, "host: task %lld, which this host never started, ended\n", (long long)task);
+    exit(1);
+}
+
 /* The earliest pending timer, ties by id, once its deadline has come, or 0
    when none is pending. */
 static int64_t fire(void) {
