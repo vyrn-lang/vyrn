@@ -329,3 +329,97 @@ fn a_request_takes_no_time_on_the_virtual_clock() {
     let want = PRINTED.replace("slow: timed out", "body: late");
     assert_eq!(seen(&out), (0, want, String::new()));
 }
+
+/// The fetch tests' TLS root and the certificate and key it signs for `127.0.0.1`, as DER.
+const ROOT: &[u8] = include_bytes!("fetch/root.der");
+const SERVER_CERT: &[u8] = include_bytes!("fetch/server.der");
+const SERVER_KEY: &[u8] = include_bytes!("fetch/server.key.der");
+
+/// A TLS server that answers every request with `secure hello`; its port.
+fn tls_upstream() -> u16 {
+    use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
+    let provider = std::sync::Arc::new(rustls::crypto::ring::default_provider());
+    let config = rustls::ServerConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+        .expect("the provider's versions")
+        .with_no_client_auth()
+        .with_single_cert(
+            vec![CertificateDer::from(SERVER_CERT.to_vec())],
+            PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(SERVER_KEY.to_vec())),
+        )
+        .expect("the test certificate");
+    let config = std::sync::Arc::new(config);
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind a port");
+    let port = listener.local_addr().expect("the bound port").port();
+    std::thread::spawn(move || {
+        for s in listener.incoming().flatten() {
+            let config = std::sync::Arc::clone(&config);
+            std::thread::spawn(move || {
+                let conn = rustls::ServerConnection::new(config).expect("a TLS session");
+                let mut tls = rustls::StreamOwned::new(conn, s);
+                let mut head = Vec::new();
+                let mut b = [0u8; 1];
+                while !head.ends_with(b"\r\n\r\n") {
+                    match tls.read(&mut b) {
+                        Ok(1) => head.push(b[0]),
+                        _ => return,
+                    }
+                }
+                let reply = b"HTTP/1.1 200 OK\r\nContent-Length: 12\r\nConnection: close\r\n\r\nsecure hello";
+                let _ = tls.write_all(reply);
+                tls.conn.send_close_notify();
+                let _ = tls.flush();
+            });
+        }
+    });
+    port
+}
+
+/// `tests/fetch/tls.vyrn`, audited, against the TLS server on `port`.
+fn tls_module(dir: &std::path::Path, port: u16) -> Vec<u8> {
+    let src = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fetch/tls.vyrn"),
+    )
+    .expect("the program")
+    .replace(
+        "\"https://127.0.0.1:1\"",
+        &format!("\"https://127.0.0.1:{port}\""),
+    );
+    let path = dir.join("tls.vyrn");
+    std::fs::write(&path, src).expect("write the program");
+    let wasm = dir.join("tls.wasm");
+    let out = vyrn()
+        .args(["build", "--target", "wasm"])
+        .arg(&path)
+        .arg("-o")
+        .arg(&wasm)
+        .env("VYRN_LEAK_CHECK", "1")
+        .output()
+        .expect("run vyrn build");
+    assert!(out.status.success(), "{}", norm(&out.stderr));
+    std::fs::read(&wasm).expect("the built module")
+}
+
+/// HTTPS verifies the server: with the test's root the request answers, and without it,
+/// as the `vyrn` binary runs every program, the certificate does not verify.
+#[test]
+fn an_https_request_answers_only_when_its_certificate_verifies() {
+    deadline(
+        "an_https_request_answers_only_when_its_certificate_verifies",
+        60,
+    );
+    let port = tls_upstream();
+    let dir = scratch("fetch-tls");
+    let bytes = tls_module(&dir, port);
+    let trusted = Run {
+        test_roots: vec![ROOT.to_vec()],
+        ..quiet(false, None)
+    };
+    let out = run(&bytes, trusted).expect("the module runs");
+    assert_eq!(
+        seen(&out),
+        (0, "body: secure hello\n".into(), String::new())
+    );
+    let out = run(&bytes, quiet(false, None)).expect("the module runs");
+    assert_eq!(seen(&out), (0, "error: untrusted\n".into(), String::new()));
+}

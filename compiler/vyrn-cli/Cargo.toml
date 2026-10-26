@@ -36,6 +36,13 @@ wasmtime = { version = "47", default-features = false, features = [
     "parallel-compilation",
 ] }
 
+# `https://` for `std/fetch` on the embedded engine: TLS through rustls, its
+# `ring` provider (aws-lc-rs needs cmake and NASM on Windows; ring builds with
+# the C toolchain `mimalloc` already needs), and the Mozilla roots as DER
+# certificates, the one root set both hosts trust.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+webpki-root-certs = "1"
+
 # `allocs` wraps the allocator in a per-phase counter (`VYRN_BUILD_PROFILE=allocs`).
 # Off by default: the counter's load in every allocation cost 2.5% to 3.7% of a
 # build. `tests/compiler_scaling.rs` and `scripts/check-allocs.sh` need it.

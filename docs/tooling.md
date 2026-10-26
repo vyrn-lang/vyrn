@@ -50,7 +50,9 @@ wrote with the module's `__vyrn_malloc`, which the module owns. A cancelled
 request is aborted. The embedded wasmtime and the native host speak HTTP/1.1
 over sockets, one request per connection, each on a thread of its own; a native
 binary links that client (`wasi_net.c`) only when its module imports
-`vyrn_wait.fetch`. The shim sends each request with the page's `fetch` and
+`vyrn_wait.fetch`. The embedded wasmtime speaks `https://` through rustls with
+the `ring` provider and trusts the `webpki-root-certs` roots alone; the native host
+speaks `http://` only. No switch turns certificate verification off. The shim sends each request with the page's `fetch` and
 aborts it with an `AbortController`, so a page reads only what CORS lets it.
 
 The clock is logical. `sleep(ms)` is due `ms` after the deadline of the wake

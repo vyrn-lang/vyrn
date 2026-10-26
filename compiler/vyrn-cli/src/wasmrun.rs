@@ -79,6 +79,9 @@ pub struct Run {
     /// Delivers these completions in order instead of the clock's, each to an operation the
     /// module started: a replay of [`Outcome::wakes`], or a cancellation a test asks for.
     pub replay: Option<Vec<Wake>>,
+    /// DER certificates an `https://` request trusts beside `webpki-root-certs`: a test harness's
+    /// root for its own server. The `vyrn` binary sets none, so no program can add one.
+    pub test_roots: Vec<Vec<u8>>,
 }
 
 /// Wall time per host phase of a run.
@@ -152,7 +155,7 @@ impl Waits {
             next: 1,
             due: Vec::new(),
             fetches: Vec::new(),
-            net: crate::fetch::Net::default(),
+            net: crate::fetch::Net::new(run.test_roots.clone()),
             replay: run.replay.clone().map(|mut r| {
                 r.reverse();
                 r

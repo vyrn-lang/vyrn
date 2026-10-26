@@ -4,7 +4,10 @@
 //! ([`crate::wasmrun`]). A cancelled request is aborted and never posted.
 //!
 //! HTTP/1.1 with one request per connection: `Connection: close`, no
-//! redirect followed, no compression asked for. The reply's headers are the
+//! redirect followed, no compression asked for. `https://` is TLS through
+//! rustls with the `ring` provider, verified against the `webpki-root-certs`
+//! roots and no others but the ones the test harness adds; nothing turns the
+//! verification off. The reply's headers are the
 //! Fetch standard's sort and combine, which a browser's `Headers` iterates:
 //! names lower-case and sorted by bytes, the values of one name joined by
 //! `, `, and `set-cookie` left out.
@@ -19,6 +22,40 @@ pub struct Net {
     rx: mpsc::Receiver<(i64, Vec<u8>)>,
     /// Each request in flight, by its operation's id, in start order.
     flying: Vec<(i64, Arc<Abort>)>,
+    tls: Arc<Tls>,
+}
+
+/// The TLS client every `https://` request of one run shares, built by the
+/// first that needs it.
+struct Tls {
+    /// DER certificates trusted beside `webpki-root-certs`: only a test harness
+    /// adds one ([`crate::wasmrun::Run::test_roots`]).
+    extra: Vec<Vec<u8>>,
+    config: std::sync::OnceLock<Result<Arc<rustls::ClientConfig>, String>>,
+}
+
+impl Tls {
+    fn config(&self) -> Result<Arc<rustls::ClientConfig>, Fail> {
+        let built = self.config.get_or_init(|| {
+            let mut roots = rustls::RootCertStore::empty();
+            roots.add_parsable_certificates(
+                webpki_root_certs::TLS_SERVER_ROOT_CERTS.iter().cloned(),
+            );
+            for der in &self.extra {
+                roots
+                    .add(rustls::pki_types::CertificateDer::from(der.clone()))
+                    .map_err(|e| e.to_string())?;
+            }
+            let provider = Arc::new(rustls::crypto::ring::default_provider());
+            let config = rustls::ClientConfig::builder_with_provider(provider)
+                .with_safe_default_protocol_versions()
+                .map_err(|e| e.to_string())?
+                .with_root_certificates(roots)
+                .with_no_client_auth();
+            Ok(Arc::new(config))
+        });
+        built.clone().map_err(|_| Fail::Untrusted)
+    }
 }
 
 /// What a cancellation reaches of a request's thread: the flag it reads
@@ -29,25 +66,28 @@ struct Abort {
     stream: Mutex<Option<std::net::TcpStream>>,
 }
 
-impl Default for Net {
-    fn default() -> Self {
+impl Net {
+    /// No request in flight; `test_roots` are trusted beside `webpki-root-certs`.
+    pub fn new(test_roots: Vec<Vec<u8>>) -> Self {
         let (tx, rx) = mpsc::channel();
         Net {
             tx,
             rx,
             flying: Vec::new(),
+            tls: Arc::new(Tls {
+                extra: test_roots,
+                config: std::sync::OnceLock::new(),
+            }),
         }
     }
-}
 
-impl Net {
     /// Sends the packed `request` as operation `id` on a thread of its own.
     pub fn start(&mut self, id: i64, request: Vec<u8>) {
         let abort = Arc::new(Abort::default());
         self.flying.push((id, Arc::clone(&abort)));
-        let tx = self.tx.clone();
+        let (tx, tls) = (self.tx.clone(), Arc::clone(&self.tls));
         std::thread::spawn(move || {
-            let reply = send(&request, &abort);
+            let reply = send(&request, &abort, &tls);
             if !abort.cancelled.load(Ordering::SeqCst) {
                 let _ = tx.send((id, reply));
             }
@@ -122,6 +162,7 @@ fn failed(outcome: &str) -> Vec<u8> {
 enum Fail {
     BadUrl,
     Unreachable,
+    Untrusted,
     BadResponse,
 }
 
@@ -130,6 +171,7 @@ impl Fail {
         match self {
             Fail::BadUrl => "badUrl",
             Fail::Unreachable => "unreachable",
+            Fail::Untrusted => "untrusted",
             Fail::BadResponse => "badResponse",
         }
     }
@@ -142,17 +184,18 @@ impl From<std::io::Error> for Fail {
 }
 
 /// Sends the packed `request` and returns the packed reply.
-fn send(request: &[u8], abort: &Abort) -> Vec<u8> {
-    match exchange(request, abort) {
+fn send(request: &[u8], abort: &Abort, tls: &Tls) -> Vec<u8> {
+    match exchange(request, abort, tls) {
         Ok(reply) => reply,
         Err(f) => failed(f.outcome()),
     }
 }
 
-/// Where a request goes: the host as the URL spells it, the port, and the
-/// request target.
+/// Where a request goes: whether over TLS, the host as the URL spells it, the
+/// port, and the request target.
 #[derive(Debug, PartialEq)]
 struct Url<'a> {
+    tls: bool,
     host: &'a str,
     port: u16,
     /// The `Host` header: the host, and the port when it is not the default.
@@ -160,10 +203,15 @@ struct Url<'a> {
     target: String,
 }
 
-/// Reads an `http://` URL. A fragment is dropped; userinfo, an empty host
-/// and a port that is not a number are refused.
+/// Reads an `http://` or `https://` URL. A fragment is dropped; userinfo, an
+/// empty host and a port that is not a number are refused.
 fn parse_url(url: &str) -> Result<Url<'_>, Fail> {
-    let rest = url.strip_prefix("http://").ok_or(Fail::BadUrl)?;
+    let (tls, rest) = match (url.strip_prefix("https://"), url.strip_prefix("http://")) {
+        (Some(rest), _) => (true, rest),
+        (None, Some(rest)) => (false, rest),
+        (None, None) => return Err(Fail::BadUrl),
+    };
+    let default = if tls { 443 } else { 80 };
     let rest = rest.split('#').next().unwrap_or_default();
     let end = rest.find(['/', '?']).unwrap_or(rest.len());
     let (auth, path) = rest.split_at(end);
@@ -178,21 +226,22 @@ fn parse_url(url: &str) -> Result<Url<'_>, Fail> {
         Some(p) => number(p, 10)
             .and_then(|p| u16::try_from(p).ok())
             .ok_or(Fail::BadUrl)?,
-        None => 80,
+        None => default,
     };
     let bare = host.trim_start_matches('[').trim_end_matches(']');
     if bare.is_empty() || bare.len() + 2 < host.len() {
         return Err(Fail::BadUrl);
     }
-    let authority = match port {
-        80 => host.to_string(),
-        p => format!("{host}:{p}"),
+    let authority = match port == default {
+        true => host.to_string(),
+        false => format!("{host}:{port}"),
     };
     let target = match path.starts_with('/') {
         true => path.to_string(),
         false => format!("/{path}"),
     };
     Ok(Url {
+        tls,
         host: bare,
         port,
         authority,
@@ -200,8 +249,33 @@ fn parse_url(url: &str) -> Result<Url<'_>, Fail> {
     })
 }
 
+/// A connection a request is sent and read over: a socket, or TLS over one.
+trait Conn: Read + Write + Send {}
+impl<T: Read + Write + Send> Conn for T {}
+
+/// TLS over `tcp` to `host`, its handshake done: a certificate that does not
+/// verify is `Untrusted`, any other failure `Unreachable`.
+fn secure(tcp: std::net::TcpStream, host: &str, tls: &Tls) -> Result<Box<dyn Conn>, Fail> {
+    let name =
+        rustls::pki_types::ServerName::try_from(host.to_string()).map_err(|_| Fail::BadUrl)?;
+    let conn = rustls::ClientConnection::new(tls.config()?, name).map_err(|_| Fail::Unreachable)?;
+    let mut s = rustls::StreamOwned::new(conn, tcp);
+    while s.conn.is_handshaking() {
+        if let Err(e) = s.conn.complete_io(&mut s.sock) {
+            let cert = e.get_ref().and_then(|i| i.downcast_ref::<rustls::Error>());
+            return Err(match cert {
+                Some(
+                    rustls::Error::InvalidCertificate(_) | rustls::Error::NoCertificatesPresented,
+                ) => Fail::Untrusted,
+                _ => Fail::Unreachable,
+            });
+        }
+    }
+    Ok(Box::new(s))
+}
+
 /// One request and its response over a connection of its own.
-fn exchange(request: &[u8], abort: &Abort) -> Result<Vec<u8>, Fail> {
+fn exchange(request: &[u8], abort: &Abort, tls: &Tls) -> Result<Vec<u8>, Fail> {
     let f = crate::wire::fields(request).ok_or(Fail::BadUrl)?;
     let text = |b: &[u8]| {
         std::str::from_utf8(b)
@@ -217,11 +291,15 @@ fn exchange(request: &[u8], abort: &Abort) -> Result<Vec<u8>, Fail> {
         return Err(Fail::BadUrl);
     }
     let url = parse_url(&url)?;
-    let stream = std::net::TcpStream::connect((url.host, url.port))?;
-    *vyrn_frontend::session::locked(&abort.stream) = Some(stream.try_clone()?);
+    let tcp = std::net::TcpStream::connect((url.host, url.port))?;
+    *vyrn_frontend::session::locked(&abort.stream) = Some(tcp.try_clone()?);
     if abort.cancelled.load(Ordering::SeqCst) {
         return Err(Fail::Unreachable);
     }
+    let mut conn: Box<dyn Conn> = match url.tls {
+        true => secure(tcp, url.host, tls)?,
+        false => Box::new(tcp),
+    };
     let mut head = format!(
         "{method} {} HTTP/1.1\r\nHost: {}\r\n",
         url.target, url.authority
@@ -235,11 +313,10 @@ fn exchange(request: &[u8], abort: &Abort) -> Result<Vec<u8>, Fail> {
         head.push_str(&format!("Content-Length: {}\r\n", body.len()));
     }
     head.push_str("Connection: close\r\n\r\n");
-    let mut w = &stream;
-    w.write_all(head.as_bytes())?;
-    w.write_all(body)?;
-    w.flush()?;
-    read_response(&mut std::io::BufReader::new(&stream), method == "HEAD")
+    conn.write_all(head.as_bytes())?;
+    conn.write_all(body)?;
+    conn.flush()?;
+    read_response(&mut std::io::BufReader::new(conn), method == "HEAD")
 }
 
 /// Reads one response and packs it as a reply: `ok`, the status, the header
@@ -394,6 +471,11 @@ mod tests {
         assert_eq!(
             (u.host, u.port, u.authority.as_str()),
             ("::1", 9, "[::1]:9")
+        );
+        let u = parse_url("https://127.0.0.1/").expect("a URL");
+        assert_eq!(
+            (u.tls, u.port, u.authority.as_str()),
+            (true, 443, "127.0.0.1")
         );
         for bad in [
             "ftp://x/",

@@ -1,0 +1,19 @@
+// The HTTPS request `tests/fetch.rs` runs against its own TLS server, whose
+// certificate only the test's root signs. The port is a placeholder it
+// replaces.
+import { fetchText, FetchError } from "std/fetch"
+
+let upstream = "https://127.0.0.1:1"
+
+fn main() -> Int64 {
+    match await fetchText(upstream + "/") {
+        Ok(body) => print("body: \{body}"),
+        Err(e) => match e {
+            BadUrl => print("error: a bad URL"),
+            Unreachable => print("error: unreachable"),
+            Untrusted => print("error: untrusted"),
+            BadResponse => print("error: a bad response"),
+        },
+    }
+    return 0
+}
