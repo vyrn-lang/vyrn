@@ -575,7 +575,7 @@ import type { User, Port } from "./user.schema.json"
 - A relative specifier resolves beside the importing file, with `.vyrn` appended. `std/name` is the standard library. A bare name resolves through the manifest's `dependencies`.
 - `import { a as b }` binds `a` under the local name `b`. `import * as ns` reaches the exports as `ns.name`.
 - Importing a name the module does not export is refused. An import cycle is refused.
-- `export to "./editor", "std/ui" fn f()` names the only modules that may import `f`. Each path resolves as an import written in the exporting module would; one that does not resolve is refused. Any other import of `f`, a namespace use of it, or a generator call of it is refused with a sentence naming the permitted importers. A module a generator writes imports as the module that declares that `gen fn`. The declaration is still an export everywhere else: in `moduleInterface`, a contract and the module's own uses. `vyrn doc` leaves it off the module's page, and editor completion offers it only where it may be imported. `to` is a word only after `export`, before a path; an `extern fn` takes none.
+- `export to "./editor", "std/ui" fn f()` names the only modules that may import `f`. Each path resolves as an import written in the exporting module would; one that does not resolve is refused. Any other import of `f`, a namespace use of it, or a generator call of it is refused with a sentence naming the permitted importers. An import a generator writes is judged as whoever wrote its `import` keyword: in a `Code` result, the module that holds the quote for quote text, and the file that wrote the generator call for a `String`, number or `Bool` a hole spliced, or `raw` text. A `String` result imports as the module that declares the `gen fn`. The declaration is still an export everywhere else: in `moduleInterface`, a contract and the module's own uses. `vyrn doc` leaves it off the module's page, and editor completion offers it only where it may be imported. `to` is a word only after `export`, before a path; an `extern fn` takes none.
 - Every module links into one program. An exported name is program-wide, so two flat imports of the same name from two modules are refused, even under an alias. Import one of them as a namespace instead. A private name stays private to its module.
 - An `impl` applies program-wide, wherever it is written.
 - `main` and `logging` are root-module only. Module state exists in every module and is private to it; `export let` is refused, so export accessor functions.
@@ -623,11 +623,55 @@ import { squareOf } from squares()
 - A `TypeInfo`'s `shape` is its declaration as an array of `TypeNode`s, node 0 the root: record fields, enum variants and their payloads, arrays, `Option`, `Result`, `Map`, and each `where` as source. A declared name is a `named` leaf, found in `ModuleInterface.types`.
 - `lex(src)` runs the compiler's lexer over text. `std/scan` is a comment- and string-aware cursor for other languages.
 - `derive(g, x)` runs generator `g` after the check, on the type the checker gave `x`, and calls the function it wrote for that type. `g` is a `gen fn g(t: TypeArg) -> String`; for each root node `r` of `t` it defines `fn <t.nodes[r].name>(v: <t.nodes[r].spelling>) -> String`, and `vyrn check` refuses an entry of another signature at the call. Each node is a checked type, with its wire form as `kind`. `g` runs once per program, and its code is checked with the program.
-- A line of generator output can carry a diagnostic; `std/diag`'s `report` writes one, and every tool shows it at the file and line the generator read.
+- A generator reports a diagnostic with `std/diag`'s `report`, which returns `Code`; every tool shows it at the file and line the generator read.
 
 ### Code quotes
 
-A generator can return `Code` instead of `String`. `vyrn"..."` and `vyrn"""..."""` are code quotes, legal only in generation. The quote's text is parsed when the generator itself is checked, so a typo in it is a diagnostic in the generator's file. A hole is spliced by its grammatical position: a `String` in expression position becomes an escaped string literal, a number becomes a literal, a `Code` splices verbatim, and a `String` in identifier position must be a valid identifier. `Code + Code` concatenates, and `render(c)` produces the text. `raw(text)` and `rawAt(text, path, line, col)` splice trusted text, the second with its origin.
+A generator returns `Code`, a value only generation has. `vyrn"..."` and `vyrn"""..."""` are code quotes, legal only in generation. The quote's text is parsed when the generator itself is checked, so a typo in it is a diagnostic in the generator's file. A quote holds holes only; logic lives in ordinary functions that return `Code`.
+
+```vyrn
+import { join } from "std/code"
+
+export gen fn getters(fields: Array<String>) -> Code {
+    let mut fns: Array<Code> = []
+    for f in fields {
+        fns.push(vyrn"""
+            export fn get\{name(f)}(r: Row) -> String {
+                return r.\{name(f)}
+            }
+            """)
+    }
+    return join(fns, vyrn"\n")
+}
+```
+
+A hole means what its type says:
+
+| Hole holds | Becomes |
+|---|---|
+| `Code` | its text, verbatim |
+| `Name` | an identifier |
+| `String` | a string literal, always |
+| number or `Bool` | a literal |
+| `Array<Code>` | refused: write `join(xs, sep)` |
+| `Option<Code>` | refused: write `x ?? vyrn""` |
+
+A hole glued to a word (`get\{n}`) writes part of a name, so it takes a `Name`. A hole alone on its line stands for a list of declarations or statements. A quote that opens with a newline after `"""` drops that newline, its closing line, and the closing line's indentation from each of its lines. A multi-line `Code` spliced into a hole is re-indented to the hole's line; text `codeAt` copied never is.
+
+The whole `Code` API:
+
+| Piece | Import | What it does |
+|---|---|---|
+| `vyrn"..."`, `Code + Code` | none | a quote, and concatenation |
+| `name(s) -> Name` | none | checks that `s` is one identifier; a generator cannot build a `Name` any other way |
+| `join(xs, sep) -> Code` | `std/code` | `xs` with `sep` between each pair |
+| `codeAt(path, line, col, text) -> Code` | none | copies `text` from an input the generator read, checked against the bytes the host read there |
+| `at(c, path, line, col) -> Code` | none | shows an error in `c` at `path:line:col` |
+| `report(..)`, `reportHere(..) -> Code` | `std/diag` | a diagnostic the loader shows |
+| `render(c) -> String` | none | the text, for a test or a `String` generator |
+| `raw(text)`, `rawAt(text, path, line, col)` | none | trusted text, until the last `String` generator is gone |
+
+Each span of a `Code` value has an author: a quote's text is written by the module that holds the quote, text `codeAt` copied by its input file, and a `String`, number, `Bool` or `Name` in a hole, or `raw` text, by the call site. `at` moves where an error shows, never the author. An import a generator writes is judged as its author (see `export to`), so `export to` a generator's module admits the imports its quotes write, and a generator cannot copy past it an import its caller may not write. `name`, `codeAt`, `at` and `diag` mean the builtin only in a call that is no method call and passes their argument count, so `w.at(1)` and `at(w, 1)` stay `Index`'s.
 
 ### Contracts
 

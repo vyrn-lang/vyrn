@@ -59,7 +59,7 @@ fn loader_sections() -> Vec<Section> {
         sec("struct MapResolver", Shared),
         sec("fn normalize", Job),
         sec("fn site_file", Job),
-        sec("fn stamp_panic_sites", Job),
+        sec("fn stamp_sites", Job),
         sec("fn dir_of", Job),
         sec("fn builtin_alias_exports", Job),
         sec("fn resolve_spec", Job),

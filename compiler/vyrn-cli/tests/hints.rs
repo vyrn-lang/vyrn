@@ -287,7 +287,7 @@ export gen fn sqlHints(path: String, config: String) -> String {
         Err(e) => SqlPolicy { policy: noPolicy(), err: e.copy() },
     }
     if cfg.err != "" {
-        return reportHere(Error, "sql-hints: `\{config}` is not a usable config — \{cfg.err}")
+        return render(reportHere(Error, "sql-hints: `\{config}` is not a usable config — \{cfg.err}"))
     }
     let pol = cfg.policy
     let mut out = ""

@@ -802,7 +802,10 @@ pub(crate) fn judge_built<R>(
         .filter_map(|f| Some((f.name.as_str(), extern_effect(f)?)))
         .collect();
     let mut resolve = |name: &str| -> Callee {
-        if let Some(e) = atom(name) {
+        // A surface builtin is a word a program may declare: `fn at` is the
+        // program's function, not the gen-only builtin.
+        let declared = vyrn_frontend::ast::is_surface_builtin(name) && by_name.contains_key(name);
+        if let Some(e) = atom(name).filter(|_| !declared) {
             return Callee::Atom(e.set());
         }
         if let Some(&e) = externs.get(name) {

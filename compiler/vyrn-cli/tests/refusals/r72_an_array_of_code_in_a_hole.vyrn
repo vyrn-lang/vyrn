@@ -1,0 +1,5 @@
+// A hole takes no list of Code: `join` writes the separator.
+export gen fn sum(terms: Array<Code>) -> Code {
+    return vyrn"export fn total() -> Int64 { return \{terms} }"
+}
+fn main() -> Int64 { return 0 }

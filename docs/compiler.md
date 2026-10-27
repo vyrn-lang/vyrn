@@ -575,11 +575,35 @@ prints the `FAILED:` line, and the next body runs.
 
 A `gen fn` runs inside the load. `vyrn-genwasm` compiles the generator's
 module with a synthesized `main` that dispatches on its first argument, runs
-it in wasmtime, and reads the result between two sentinel lines. File reads
+it in wasmtime, and reads the result: a `String` between two sentinel lines on
+stdout, a `Code` value through the `vyrn_gen.result` import. File reads
 go through the loader's resolver and are recorded as the generator's inputs;
 `lex`, `moduleInterface` and `contractOf` cross as a host encoding and a
 synthesized decoder. A generator the engine declines is an error: "the
 installed generation engine declined it".
+
+A `Code` value is a rope of spans (`gen::Rope`): concatenation is a node, not
+a copy. Each span carries its author (`gen::Author`) and where its errors show
+(`gen::Shown`). The loader stamps each quote part `@codeText(text, line, col)`
+with its module's key after the parse, in the walk that stamps `panic`, so a
+quote's text is written by the module that holds it. A `String`, number or
+`Bool` in a hole, and `raw` text, is the call site's. A `Code` result reaches
+the loader as `gen::Written`: the text and a span table sorted by offset. The
+cache entry stores the table inside the authenticated body, and `OriginMaps`
+reads its regions from the table's `shown` column (`add_spans`). A `String`
+result has no table: its regions come from `//@origin` lines and its imports
+are judged by its banner. A report is a `Diag` span (`gen::Kind::Diag`): the
+loader lifts a `Code` result's diagnostics from its `Diag` spans alone, and
+`render` prints a `Diag` span as the `//@diag` line a `String` generator
+writes. Both paths stand until the last `String` generator in std moves to
+`Code`; that commit deletes the directive scan, the `//@diag` text and the
+banner rule.
+
+The link judges each import of a generated module by the span under its
+`import` keyword (`loader::author_of`, the parser records the keyword's column
+in `ImportDecl::col`): a `File` span as that module, a `CallSite` span as the
+file that wrote the generator call. `admits` stays the one visibility rule. A
+refusal there carries a note naming the author and its line (`written_by`).
 
 ## What each gate proves
 

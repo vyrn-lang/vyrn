@@ -22,7 +22,7 @@ function answerGenerator(wasm, ptr, len) {
   let out;
   try {
     const req = parseRequest(new Uint8Array(wasm.memory.buffer, ptr, len).slice());
-    out = runGenerator(req);
+    out = runGenerator(wasm, req);
   } catch (err) {
     status = 1;
     out = encoder.encode(String(err && err.message ? err.message : err));
@@ -48,8 +48,45 @@ function parseRequest(b) {
   return { module, argv, atoms };
 }
 
+// The code imports the compiler serves (`code_call` in vyrn-play), each with the
+// positions of its String arguments. A String crosses as its bytes; the null
+// pointer `splice` sends for any other value stays 0.
+const CODE_IMPORTS = {
+  text: [0, 1],
+  raw: [0],
+  rawAt: [0, 1],
+  name: [0],
+  diag: [0, 1, 2],
+  at: [1],
+  splice: [2, 3],
+  concat: [],
+  result: [],
+  render: [],
+};
+
+// Runs one code import in the compiler; answers its i64 result and the text
+// `render` leaves for `fetch`. Throws why the run ends.
+function codeCall(wasm, name, args) {
+  const word = encoder.encode(name);
+  const parts = [u32(word.length), word, u32(args.length)];
+  for (const a of args) {
+    if (a instanceof Uint8Array) parts.push(Uint8Array.of(1), u32(a.length), a);
+    else parts.push(Uint8Array.of(0), new Uint8Array(BigInt64Array.of(BigInt.asIntN(64, BigInt(a))).buffer));
+  }
+  const req = join(parts);
+  new Uint8Array(wasm.memory.buffer).set(req, wasm.code_request(req.length));
+  const n = wasm.code_call(req.length);
+  const answer = new Uint8Array(wasm.memory.buffer, wasm.code_answer(), n).slice();
+  if (answer[0] !== 0) throw new Error(decoder.decode(answer.subarray(1)));
+  return { value: new DataView(answer.buffer).getBigInt64(1, true), text: answer.subarray(9) };
+}
+
+function u32(n) {
+  return new Uint8Array(Uint32Array.of(n).buffer);
+}
+
 // Synchronous, because the compiler waits for the answer inside its own call.
-function runGenerator({ module: bytes, argv, atoms }) {
+function runGenerator(wasm, { module: bytes, argv, atoms }) {
   const module = new WebAssembly.Module(bytes);
   let memory = null;
   const stdout = [];
@@ -116,6 +153,19 @@ function runGenerator({ module: bytes, argv, atoms }) {
       new Uint8Array(memory.buffer).set(stash, dest);
     },
   };
+  const cstr = (p) => {
+    const mem = new Uint8Array(memory.buffer);
+    const end = mem.indexOf(0, p);
+    return mem.slice(p, end < 0 ? mem.length : end);
+  };
+  for (const [name, strings] of Object.entries(CODE_IMPORTS)) {
+    gen[name] = (...args) => {
+      const sent = args.map((a, i) => (strings.includes(i) && a !== 0 ? cstr(a >>> 0) : a));
+      const { value, text } = codeCall(wasm, name, sent);
+      if (name === "render") stash = text;
+      return value;
+    };
+  }
   const hosts = { wasi_snapshot_preview1: wasi, vyrn_gen: gen };
   const imports = {};
   for (const { module: from, name } of WebAssembly.Module.imports(module)) {

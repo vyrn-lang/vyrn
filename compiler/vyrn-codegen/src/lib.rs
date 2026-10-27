@@ -263,8 +263,18 @@ pub(crate) fn wasi_snake(camel: &str) -> String {
 pub(crate) const CODE_IMPORTS: &[(&str, &[wasm::ValType], &[wasm::ValType])] = {
     use wasm::ValType::{I32, I64};
     &[
-        ("text", &[I32], &[I64]),
-        ("splice", &[I32, I64, I32, I64], &[I64]),
+        // A quote's part: its text, the key of the module that wrote it, and
+        // the part's line and column there.
+        ("text", &[I32, I32, I64, I64], &[I64]),
+        ("raw", &[I32], &[I64]),
+        // A hole's value: its tag, its word, its String, and the indentation
+        // of the hole's line.
+        ("splice", &[I32, I64, I32, I32], &[I64]),
+        ("name", &[I32], &[I64]),
+        // A report: its severity word, its anchor and its message.
+        ("diag", &[I32, I32, I32], &[I64]),
+        ("codeAt", &[I32, I64, I64, I32], &[I64]),
+        ("at", &[I64, I32, I64, I64], &[I64]),
         ("rawAt", &[I32, I32, I64, I64], &[I64]),
         ("concat", &[I64, I64], &[I64]),
         ("render", &[I64], &[I64]),
@@ -280,6 +290,8 @@ pub(crate) const CODE_IMPORTS: &[(&str, &[wasm::ValType], &[wasm::ValType])] = {
         ("nextStr", &[], &[I64]),
         // The mediated read that serves `readFile`, `readFileBytes` and `listDir`.
         ("read", &[I32, I32], &[I64]),
+        // A `Code` generator's result, handed over as its handle.
+        ("result", &[I64], &[]),
     ]
 };
 
@@ -295,7 +307,7 @@ pub use vyrn_frontend::checker::{GEN_ENTRY_LEX, GEN_ENTRY_MODULE_INTERFACE, GEN_
 /// The atom-stream primitives the synthesized decoders call. The checker
 /// declares and types them on a generator host; the emitter lowers them and
 /// `vyrn-genwasm` writes the decoders.
-pub use vyrn_frontend::checker::{GEN_NEXT_INT, GEN_NEXT_STR, GEN_REFLECT};
+pub use vyrn_frontend::checker::{GEN_NEXT_INT, GEN_NEXT_STR, GEN_REFLECT, GEN_RESULT};
 
 /// The `splice` import's value tags: which interpreter `Val` the host rebuilds
 /// from the word. Exactly the set `gen::gen_code_splice` accepts; `pub` so the
@@ -683,7 +695,7 @@ pub(crate) fn shape_of(ty: &Type, types: &HashMap<String, TypeDecl>) -> Shape {
         Type::Enum(vs) => st(words(1 + enum_slots_of(vs, types))),
         // On a generator host, `Code` is an opaque `i64` handle into the host's
         // piece arena: the one `Named` that survives `resolve` undeclared.
-        Type::Named(n) if n == "Code" => leaf(Leaf::I64),
+        Type::Named(n) if vyrn_frontend::ast::is_gen_handle(n) => leaf(Leaf::I64),
         // Unreachable after `resolve` (Named/Union/App/transformers/params reduced
         // away). A bare integer type argument never stands alone: `SmallArray`
         // consumes it. `Err` is the checker's recovery sentinel, and a program

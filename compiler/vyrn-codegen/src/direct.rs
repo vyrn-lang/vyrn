@@ -115,13 +115,19 @@ struct Gen {
     read: u32,
     fetch: u32,
     text: u32,
+    raw: u32,
     splice: u32,
+    name: u32,
+    diag: u32,
+    code_at: u32,
+    at: u32,
     raw_at: u32,
     concat: u32,
     render: u32,
     reflect: u32,
     next_int: u32,
     next_str: u32,
+    result: u32,
 }
 
 fn gen_imports(m: &mut Module) -> Gen {
@@ -136,6 +142,11 @@ fn gen_imports(m: &mut Module) -> Gen {
         read: g("read"),
         fetch: g("fetch"),
         text: g("text"),
+        raw: g("raw"),
+        name: g("name"),
+        diag: g("diag"),
+        code_at: g("codeAt"),
+        at: g("at"),
         splice: g("splice"),
         raw_at: g("rawAt"),
         concat: g("concat"),
@@ -143,6 +154,7 @@ fn gen_imports(m: &mut Module) -> Gen {
         reflect: g("reflect"),
         next_int: g("nextInt"),
         next_str: g("nextStr"),
+        result: g("result"),
     }
 }
 
@@ -2270,7 +2282,7 @@ impl<'a> Cx<'a> {
             Type::Named(n) | Type::App(n, _) => match self.types.get(n) {
                 Some(_) => {}
                 // `Code` and `Token` are builtins `resolve` knows without a decl.
-                None if n == "Code" || n == "Token" => {}
+                None if vyrn_frontend::ast::is_gen_handle(n) || n == "Token" => {}
                 None => return Some(format!("the unknown type `{n}`")),
             },
             _ => {}
@@ -5366,10 +5378,46 @@ impl<'p> Fn_<'_, 'p> {
         };
         let code = Type::Named("Code".to_string());
         match (name, args.len()) {
-            // `raw(s)` is `@codeText(s)`: one verbatim piece, no origin.
-            ("@codeText", 1) | ("raw", 1) => {
+            // A quote's part, with the key the loader stamped and the part's position.
+            ("@codeText", 4) => {
                 self.core_arg(m, b, name, args, 0, Some(&Type::Str), line)?;
+                self.core_arg(m, b, name, args, 1, Some(&Type::Str), line)?;
+                self.core_arg(m, b, name, args, 2, Some(&Type::Int), line)?;
+                self.core_arg(m, b, name, args, 3, Some(&Type::Int), line)?;
                 b.ins(&Instruction::Call(g.text));
+                Ok(code)
+            }
+            ("raw", 1) => {
+                self.core_arg(m, b, name, args, 0, Some(&Type::Str), line)?;
+                b.ins(&Instruction::Call(g.raw));
+                Ok(code)
+            }
+            ("name", 1) => {
+                self.core_arg(m, b, name, args, 0, Some(&Type::Str), line)?;
+                b.ins(&Instruction::Call(g.name));
+                Ok(Type::Named("Name".to_string()))
+            }
+            ("diag", 3) => {
+                for i in 0..3 {
+                    self.core_arg(m, b, name, args, i, Some(&Type::Str), line)?;
+                }
+                b.ins(&Instruction::Call(g.diag));
+                Ok(code)
+            }
+            ("codeAt", 4) => {
+                self.core_arg(m, b, name, args, 0, Some(&Type::Str), line)?;
+                self.core_arg(m, b, name, args, 1, Some(&Type::Int), line)?;
+                self.core_arg(m, b, name, args, 2, Some(&Type::Int), line)?;
+                self.core_arg(m, b, name, args, 3, Some(&Type::Str), line)?;
+                b.ins(&Instruction::Call(g.code_at));
+                Ok(code)
+            }
+            ("at", 4) => {
+                self.core_arg(m, b, name, args, 0, Some(&code), line)?;
+                self.core_arg(m, b, name, args, 1, Some(&Type::Str), line)?;
+                self.core_arg(m, b, name, args, 2, Some(&Type::Int), line)?;
+                self.core_arg(m, b, name, args, 3, Some(&Type::Int), line)?;
+                b.ins(&Instruction::Call(g.at));
                 Ok(code)
             }
             ("rawAt", 4) => {
@@ -5404,16 +5452,23 @@ impl<'p> Fn_<'_, 'p> {
                 self.fetch_str(b, g);
                 Ok(Type::Str)
             }
+            (crate::GEN_RESULT, 1) => {
+                self.core_arg(m, b, name, args, 0, Some(&code), line)?;
+                b.ins(&Instruction::Call(g.result));
+                Ok(Type::Unit)
+            }
             // The value crosses as a compile-time tag naming the `Val` the host rebuilds, a
             // 64-bit word and a String pointer. The tag goes first, so the type is asked first.
-            ("@codeSplice", 2) => {
+            // Whether the hole is glued to a word, and its columns, are the checker's.
+            ("@codeSplice", 5) => {
                 let Some((v, _)) = args.first() else {
                     return unsupported(&format!("`{name}` with too few operands"), line);
                 };
                 let vty = self.cx.resolve(&self.core_ty(v, &Type::Int));
                 let tag = match &vty {
                     Type::Str => crate::TAG_STR,
-                    Type::Named(n) if n == "Code" => crate::TAG_CODE,
+                    // A `Name` is a handle to its identifier's span, spliced as `Code` is.
+                    Type::Named(n) if vyrn_frontend::ast::is_gen_handle(n) => crate::TAG_CODE,
                     Type::Bool => crate::TAG_BOOL,
                     Type::Float => crate::TAG_F64,
                     Type::Float32 => crate::TAG_F32,
@@ -5458,7 +5513,7 @@ impl<'p> Fn_<'_, 'p> {
                     }
                     b.ins(&Instruction::I32Const(0));
                 }
-                self.core_arg(m, b, name, args, 1, Some(&Type::Int), line)?;
+                self.core_arg(m, b, name, args, 2, Some(&Type::Str), line)?;
                 b.ins(&Instruction::Call(g.splice));
                 Ok(code)
             }

@@ -76,6 +76,8 @@ fn in_gen_of(f: &Function, host: Host) -> bool {
 pub const GEN_REFLECT: &str = "__vyrnGenReflect";
 pub const GEN_NEXT_INT: &str = "__vyrnGenNextInt";
 pub const GEN_NEXT_STR: &str = "__vyrnGenNextStr";
+/// Hands a `Code` generator's result to the host; only the engine's wrapper calls it.
+pub const GEN_RESULT: &str = "__vyrnGenResult";
 
 /// The generator-host entry points the engine appends as ordinary functions:
 /// each asks the host for a value and decodes it by its static type. A
@@ -98,6 +100,7 @@ fn gen_host_primitive(name: &str, argc: usize, host: Host) -> Option<Type> {
         (GEN_REFLECT, 2) => Some(Type::Unit),
         (GEN_NEXT_INT, 0) => Some(Type::Int),
         (GEN_NEXT_STR, 0) => Some(Type::Str),
+        (GEN_RESULT, 1) => Some(Type::Unit),
         _ => None,
     }
 }
@@ -2357,9 +2360,9 @@ impl<'a> Checker<'a> {
         match ty {
             // `Code` and `Token` are builtin and generation-only, so no backend
             // sees them. A user declaration of the name wins.
-            Type::Named(n) if n == "Code" && self.decl("Code").is_none() => {
+            Type::Named(n) if crate::ast::is_gen_handle(n) && self.decl(n).is_none() => {
                 if !self.frame.borrow().in_gen {
-                    return Err(cerr!(line, GenOnlyType, name = "Code"));
+                    return Err(cerr!(line, GenOnlyType, name = n));
                 }
                 return Ok(());
             }
@@ -4266,7 +4269,7 @@ impl<'a> Checker<'a> {
                 // so a generic impl solves through the ordinary call path.
                 self.call_declared(
                     &crate::types::impl_method_name(FALLIBLE, &key, "success"),
-                    std::slice::from_ref(expr),
+                    (std::slice::from_ref(expr), false),
                     &[],
                     line,
                     scope,
@@ -4831,7 +4834,15 @@ impl<'a> Checker<'a> {
         let Some(m) = self.show_dispatch(t) else {
             return Ok(false);
         };
-        self.call_declared(&m, args, &[], line, scope, Some(&Type::Str), fn_ret)?;
+        self.call_declared(
+            &m,
+            (args, false),
+            &[],
+            line,
+            scope,
+            Some(&Type::Str),
+            fn_ret,
+        )?;
         Ok(true)
     }
 
@@ -4883,7 +4894,7 @@ impl<'a> Checker<'a> {
                 };
             }
         }
-        self.call_declared(name, args, written, line, scope, expected, fn_ret)
+        self.call_declared(name, (args, dot), written, line, scope, expected, fn_ret)
     }
 
     /// Types a call that no binding answers for: a builtin, a constructor, a
@@ -4893,7 +4904,7 @@ impl<'a> Checker<'a> {
     fn call_declared(
         &self,
         name: &str,
-        args: &[Expr],
+        (args, dot): (&[Expr], bool),
         written: &[Type],
         line: usize,
         scope: &Scope,
@@ -4941,7 +4952,14 @@ impl<'a> Checker<'a> {
         // are the desugar of a `vyrn"..."` literal. The surface names are
         // common words and not reserved: a function or binding of the same
         // name in THIS module shadows them (not one in another module).
-        let surface = crate::ast::is_surface_builtin(name);
+        // A word builtin in a method call, or at another argument count, is not
+        // the builtin: `w.at(1)` and `at(w, 1)` are `Index`'s.
+        let word_miss = crate::ast::is_word_builtin(name)
+            && (dot
+                || crate::prelude::builtin(name)
+                    .and_then(|r| r.arity.as_ref())
+                    .is_some_and(|a| !a.counts.contains(&args.len())));
+        let surface = crate::ast::is_surface_builtin(name) && !word_miss;
         let unshadowed = !self.shadows_here(name) && self.lookup(scope, name).is_none();
         if matches!(name, "@codeText" | "@codeSplice") || (surface && unshadowed) {
             if !self.frame.borrow().in_gen {
@@ -4950,6 +4968,10 @@ impl<'a> Checker<'a> {
                     "rawAt" => "`rawAt` is",
                     "raw" => "`raw` is",
                     "lex" => "`lex` is",
+                    "name" => "`name` is",
+                    "diag" => "`diag` is",
+                    "codeAt" => "`codeAt` is",
+                    "at" => "`at` is",
                     _ => "`vyrn\"…\"` code quotes are",
                 };
                 return Err(cerr!(line, GenOnlySurface, surface));
@@ -4960,14 +4982,37 @@ impl<'a> Checker<'a> {
                     self.expr(&args[0], scope, Some(&Type::Str), fn_ret)?;
                     return Ok(code());
                 }
-                // A String spliced into a hole stays data: the hole's context
-                // escapes or validates it at generation time.
+                // A hole means what its type says: `Code` and `Name` splice
+                // verbatim, anything else scalar is one literal. A hole glued
+                // to a word (`help\{n}`) writes part of an identifier, so it
+                // takes a `Name`.
                 "@codeSplice" => {
                     let t = self.base(&self.expr(&args[0], scope, None, fn_ret)?);
-                    self.expr(&args[1], scope, Some(&Type::Int), fn_ret)?;
-                    let ok = t.is_scalar() || t == Type::Err || t == code();
+                    let name = Type::Named("Name".to_string());
+                    let glued = matches!(args[1], Expr::Int(1, _));
+                    let span = match (&args[3], &args[4]) {
+                        (Expr::Int(a, _), Expr::Int(b, _)) => (*a as usize, *b as usize),
+                        _ => (0, 0),
+                    };
+                    if glued && t != name && t != Type::Err {
+                        return Err(cerr_at!(line, span, QuoteGlued, t));
+                    }
+                    let elem = match &t {
+                        Type::Array(e) => Some((&**e, true)),
+                        _ => crate::types::option_payload(&t).map(|e| (e, false)),
+                    };
+                    match elem {
+                        Some((e, true)) if *e == code() => {
+                            return Err(cerr_at!(line, span, QuoteSpliceArray))
+                        }
+                        Some((e, false)) if *e == code() => {
+                            return Err(cerr_at!(line, span, QuoteSpliceOption))
+                        }
+                        _ => {}
+                    }
+                    let ok = t.is_scalar() || t == Type::Err || t == code() || t == name;
                     if !ok {
-                        return Err(cerr!(line, QuoteSplice, t));
+                        return Err(cerr_at!(line, span, QuoteSplice, t));
                     }
                     return Ok(code());
                 }
@@ -4975,7 +5020,8 @@ impl<'a> Checker<'a> {
             }
         }
         // A surface builtin a declaration here shadows is that declaration's.
-        if let Some(row) = crate::prelude::builtin(name).filter(|_| !surface || unshadowed) {
+        let row = crate::prelude::builtin(name).filter(|_| !word_miss && (!surface || unshadowed));
+        if let Some(row) = row {
             if let Some(a) = &row.arity {
                 if !a.counts.contains(&args.len()) {
                     return Err(cerr!(line; (a.refuse)(name, a.counts[0], args.len())));
@@ -5136,7 +5182,15 @@ impl<'a> Checker<'a> {
             if let Some(key) = crate::types::type_key(&t) {
                 if self.implements(crate::types::COPY, &key) {
                     let mangled = crate::types::impl_method_name(crate::types::COPY, &key, "copy");
-                    return self.call_declared(&mangled, args, &[], line, scope, expected, fn_ret);
+                    return self.call_declared(
+                        &mangled,
+                        (args, false),
+                        &[],
+                        line,
+                        scope,
+                        expected,
+                        fn_ret,
+                    );
                 }
             }
             let mut owned_seen = std::collections::HashSet::new();

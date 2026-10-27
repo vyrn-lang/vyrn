@@ -915,7 +915,7 @@ export gen fn Glyph(attrs: String, file: String, line: Int64, col: Int64) -> Str
     let name = attrOf(attrs, "name")
     let label = attrOf(attrs, "label")
     if name != "github" && name != "discord" {
-        return report(Error, file, line, col, "no glyph `\{name}` here - nearest is `github`")
+        return render(report(Error, file, line, col, "no glyph `\{name}` here - nearest is `github`"))
     }
     let body = if name == "github" { "M8 0 L16 8 L8 16 Z" } else { "M2 2 H14 V14 H2 Z" }
     let mut out = "import { el, text, Attr, Html } from \"std/html\"\n"

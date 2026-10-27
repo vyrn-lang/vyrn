@@ -613,7 +613,10 @@ shows its sentence on hover.
 `site/public/play-worker.js` runs the compiled program with `web/wasi-min.js`.
 A `derive` generator runs in the page: the module calls its one import,
 `vyrn_play.run_generator`, and `site/public/play-wasm.js` instantiates the
-generator's module synchronously and serves it its `TypeArg` and nothing else.
+generator's module synchronously and serves it its `TypeArg`. The generator's
+code imports (`text`, `splice`, `render` and the rest, not `codeAt`) go back
+into the compiler through `code_call`, which runs them in the arena the native
+engine uses.
 `std/` is embedded at build time; a relative import reports
 `module not found`.
 

@@ -1,5 +1,5 @@
 //! Generation machinery: the splice rule, the
-//! `Code` piece list and its renderer, the `lex` token literal, the sandbox's
+//! `Code` rope, its renderer and span table, the `lex` token literal, the sandbox's
 //! path rule, `moduleInterface`'s reflection, and the seam the driver installs
 //! the generation engine through. Nothing here walks a tree: each function
 //! takes a resolver, a path or a source, and returns an `Expr` or a `String`.
@@ -7,45 +7,140 @@
 use crate::ast::{Expr, Id, Program};
 use crate::diagnostics::Diagnostic;
 use std::collections::HashMap;
+use std::sync::Arc;
 
-/// One piece of a `Code` fragment: plain rendered text (from a
-/// quote skeleton, a splice or `raw`), or a region from `rawAt` that `render`
-/// wraps in `//@origin path:line:col` ... `//@origin end`.
-#[derive(Debug, Clone, PartialEq)]
-pub enum CodePiece {
-    /// Verbatim source text with no origin.
-    Text(String),
-    /// A region derived from input at `path:line:col`, bracketed with the
-    /// `//@origin` directives so a diagnostic inside it maps back.
-    Origin {
-        path: String,
-        line: i64,
-        col: i64,
-        text: String,
-    },
+/// A 1-based line and column.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Pos {
+    pub line: usize,
+    pub col: usize,
 }
 
-/// Renders a `Code` piece list to source text (`render`). Each origin
-/// directive sits on its own line, because it governs the lines that follow.
-pub fn render_code(pieces: &[CodePiece]) -> String {
+/// Who wrote a span of generated code. A quote's text is written by the module
+/// that holds the `vyrn"..."`, at the part's position there; a `String`, number
+/// or `Bool` a hole turns into code, and `raw` text, are the call site's data. A
+/// generator cannot name an author.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Author {
+    File { key: String, at: Pos },
+    CallSite,
+}
+
+/// Where a diagnostic inside a span shows: a path relative to the importing
+/// module and a position, as `//@origin` writes them (`rawAt`). It never
+/// changes the author.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Shown {
+    pub path: String,
+    pub at: Pos,
+}
+
+/// What a span holds, beyond its text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Kind {
+    /// Code: a quote's text, which a hole re-indents, or the call site's data.
+    Code,
+    /// Input `codeAt` copied, byte for byte: never re-indented.
+    Copied,
+    /// One `//@diag` line `report` wrote: the loader reads it as a
+    /// diagnostic, and only from a span of this kind.
+    Diag,
+}
+
+/// One span of a `Code` value: its text, its author, where its errors show,
+/// and its kind.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Span {
+    pub text: String,
+    pub author: Author,
+    pub shown: Option<Shown>,
+    pub kind: Kind,
+}
+
+/// A `Code` value: a rope of spans. Concatenation is a node, so a loop of
+/// `acc = acc + piece` is linear.
+#[derive(Debug)]
+pub enum Rope {
+    Leaf(Vec<Span>),
+    Cat(Arc<Rope>, Arc<Rope>),
+}
+
+impl Rope {
+    /// The spans in order. The walk keeps its own stack: a loop's accumulator is
+    /// a left spine as deep as the loop ran.
+    pub fn spans(&self) -> Vec<&Span> {
+        let mut out = Vec::new();
+        let mut todo = vec![self];
+        while let Some(r) = todo.pop() {
+            match r {
+                Rope::Leaf(ss) => out.extend(ss),
+                Rope::Cat(a, b) => {
+                    todo.push(b);
+                    todo.push(a);
+                }
+            }
+        }
+        out
+    }
+}
+
+/// One row of a generated module's span table: the byte offset in the module's
+/// text where a span starts, its author, where its errors show and its kind.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SpanRow {
+    pub offset: usize,
+    pub author: Author,
+    pub shown: Option<Shown>,
+    pub kind: Kind,
+}
+
+/// What a generator wrote: the module's text and, for a `Code` result, its span
+/// table sorted by offset. A `String` result has no table; its module is judged
+/// by its banner and maps errors through `//@origin` lines.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Written {
+    pub source: String,
+    pub spans: Option<Vec<SpanRow>>,
+}
+
+impl Written {
+    /// A `Code` result: the spans' text, one row per non-empty span.
+    pub fn code(rope: &Rope) -> Written {
+        let mut source = String::new();
+        let mut rows = Vec::new();
+        for s in rope.spans().into_iter().filter(|s| !s.text.is_empty()) {
+            rows.push(SpanRow {
+                offset: source.len(),
+                author: s.author.clone(),
+                shown: s.shown.clone(),
+                kind: s.kind,
+            });
+            source.push_str(&s.text);
+        }
+        Written {
+            source,
+            spans: Some(rows),
+        }
+    }
+}
+
+/// Renders a `Code` value to source text (`render`). A span with a `shown`
+/// position is wrapped in `//@origin path:line:col` ... `//@origin end`, each
+/// directive on its own line, because it governs the lines that follow.
+pub fn render_code(rope: &Rope) -> String {
     let mut out = String::new();
     let ensure_nl = |out: &mut String| {
         if !out.is_empty() && !out.ends_with('\n') {
             out.push('\n');
         }
     };
-    for p in pieces {
-        match p {
-            CodePiece::Text(t) => out.push_str(t),
-            CodePiece::Origin {
-                path,
-                line,
-                col,
-                text,
-            } => {
+    for s in rope.spans() {
+        match &s.shown {
+            None => out.push_str(&s.text),
+            Some(Shown { path, at }) => {
                 ensure_nl(&mut out);
-                out.push_str(&format!("//@origin {path}:{line}:{col}\n"));
-                out.push_str(text);
+                out.push_str(&format!("//@origin {path}:{}:{}\n", at.line, at.col));
+                out.push_str(&s.text);
                 ensure_nl(&mut out);
                 out.push_str("//@origin end\n");
             }
@@ -59,10 +154,10 @@ pub fn render_code(pieces: &[CodePiece]) -> String {
 /// The six cases are the six `vyrn_codegen::TAG_*` values, because a compiled
 /// generator names them across the wall: a seventh on either side would be a
 /// tag the other cannot handle.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub enum Spliced {
     Str(String),
-    Code(Vec<CodePiece>),
+    Code(Arc<Rope>),
     Bool(bool),
     /// Any integer width, sign-extended to 64 bits; `signed` picks the decimal
     /// rendering.
@@ -74,93 +169,150 @@ pub enum Spliced {
     F32(f32),
 }
 
-impl Spliced {
-    /// A short kind name for splice diagnostics, in the vocabulary
-    /// [`no_splice_rule`] uses.
-    fn kind(&self) -> &'static str {
-        match self {
-            Spliced::Int { .. } | Spliced::F64(_) | Spliced::F32(_) => "a number",
-            Spliced::Bool(_) => "a Bool",
-            Spliced::Str(_) => "a String",
-            Spliced::Code(_) => "Code",
-        }
-    }
-}
-
-/// Returns the refusal for a value the splice rule has no case for, in context
-/// `ctx`. Public because a value with no [`Spliced`] case (an array, a map) is
-/// refused by the engine before conversion, in the same words.
-fn no_splice_rule(kind: &str, ctx: i64) -> String {
-    if ctx == 0 {
-        format!("cannot splice {kind} into a code quote (expected String, number, Bool, or Code)")
-    } else {
-        format!("cannot splice {kind} in identifier position (only String or Code)")
-    }
-}
-
-/// Applies the splice rule to a value in a hole of context `ctx` (`0`
-/// expression, `1` identifier fragment, `2` standalone identifier or type).
-/// A `String` is data, never code: an escaped string literal in expression
-/// position, a validated identifier elsewhere.
+/// Applies the splice rule to a value in a hole: a `Code` or `Name` splices
+/// verbatim, keeping its authors, and a `String`, number or `Bool` becomes one
+/// literal of the call site's. A quote span of a multi-line `Code` is
+/// re-indented to `indent`, the leading whitespace of the hole's line; a span
+/// `codeAt` copied never is.
 ///
-/// The wasm generation engine applies it host-side, so the
-/// escaping, identifier validation and float formatting have one
-/// implementation.
-pub fn gen_code_splice(val: &Spliced, ctx: i64) -> Result<Vec<CodePiece>, String> {
-    // A `Code` value is already valid code and splices verbatim everywhere.
-    if let Spliced::Code(pieces) = val {
-        return Ok(pieces.clone());
+/// The wasm generation engine applies it host-side, so the escaping and float
+/// formatting have one implementation.
+pub fn gen_code_splice(val: &Spliced, indent: &str) -> Result<Arc<Rope>, String> {
+    let text = |s: String| Ok(Arc::new(Rope::Leaf(vec![Span::data(s)])));
+    match val {
+        Spliced::Code(rope) if indent.is_empty() => Ok(rope.clone()),
+        Spliced::Code(rope) => Ok(Arc::new(Rope::Leaf(reindented(rope, indent)))),
+        Spliced::Str(s) => text(escape_string_literal(s)),
+        Spliced::Int { v, signed } => text(if *signed {
+            v.to_string()
+        } else {
+            (*v as u64).to_string()
+        }),
+        // `NaN` and `inf` have no Vyrn literal, so a non-finite value fails here,
+        // not later as a module that cannot parse.
+        Spliced::F64(f) if f.is_finite() => text(splice_float(format!("{f}"))),
+        Spliced::F32(f) if f.is_finite() => text(splice_float(format!("{f}"))),
+        Spliced::F64(f) => Err(format!(
+            "cannot splice non-finite float {f} into a code quote"
+        )),
+        Spliced::F32(f) => Err(format!(
+            "cannot splice non-finite float {f} into a code quote"
+        )),
+        Spliced::Bool(b) => text(b.to_string()),
     }
-    let text = |s: String| Ok(vec![CodePiece::Text(s)]);
-    match ctx {
-        0 => match val {
-            Spliced::Str(s) => text(escape_string_literal(s)),
-            Spliced::Int { v, signed } => text(if *signed {
-                v.to_string()
-            } else {
-                (*v as u64).to_string()
+}
+
+/// The spans of `rope` with `indent` after each newline of a quote span that
+/// another line follows. A blank line stays blank.
+fn reindented(rope: &Rope, indent: &str) -> Vec<Span> {
+    let spans = rope.spans();
+    let mut out: Vec<Span> = Vec::with_capacity(spans.len());
+    for (i, s) in spans.iter().enumerate() {
+        let quote = s.kind == Kind::Code && matches!(s.author, Author::File { .. });
+        if !quote {
+            out.push((*s).clone());
+            continue;
+        }
+        // The first character after this span, which decides a final newline.
+        let after = spans[i + 1..].iter().find_map(|n| n.text.chars().next());
+        let mut text = String::with_capacity(s.text.len());
+        let mut chars = s.text.chars().peekable();
+        while let Some(c) = chars.next() {
+            text.push(c);
+            let next = chars.peek().copied().or(after);
+            if c == '\n' && next.is_some_and(|n| n != '\n') {
+                text.push_str(indent);
+            }
+        }
+        out.push(Span {
+            text,
+            ..(*s).clone()
+        });
+    }
+    out
+}
+
+/// Returns `s` as a `Name` span, or why it is not one: a `Name` is one
+/// non-keyword Vyrn identifier.
+pub fn name_span(s: &str) -> Result<Span, String> {
+    match is_bare_identifier(s) {
+        true => Ok(Span::data(s.to_string())),
+        false => Err(format!("`name` needs one identifier, and {s:?} is not one")),
+    }
+}
+
+/// Returns the `Diag` span of one report: `//@diag <severity> <anchor>
+/// <message>`, the line `render` prints for a `String` generator. A newline in
+/// any part would end the comment and hand the rest to the parser as code.
+pub fn diag_span(severity: &str, anchor: &str, message: &str) -> Result<Span, String> {
+    let line = format!("//@diag {severity} {anchor} {message}");
+    if line.contains(['\n', '\r']) {
+        return Err(format!("a report is one line, and {line:?} is not"));
+    }
+    Ok(Span {
+        kind: Kind::Diag,
+        ..Span::data(format!("{line}\n"))
+    })
+}
+
+/// Returns the span `codeAt` copies: `text`, which must stand at `line:col`
+/// (1-based) of `bytes`, the input at resolver key `key` that the generator
+/// read, written by that input. `path` is the generator's spelling, which its
+/// errors show under.
+pub fn copied_span(
+    key: &str,
+    path: &str,
+    bytes: &[u8],
+    (line, col): (usize, usize),
+    text: &str,
+) -> Result<Span, String> {
+    let at = Pos { line, col };
+    let held = String::from_utf8_lossy(bytes);
+    let start = held
+        .split_inclusive('\n')
+        .take(line.saturating_sub(1))
+        .map(str::len)
+        .sum::<usize>();
+    let rest = &held[start.min(held.len())..];
+    let from = rest
+        .char_indices()
+        .nth(col.saturating_sub(1))
+        .map(|(i, _)| i);
+    match from.is_some_and(|i| rest[i..].starts_with(text)) && line >= 1 && col >= 1 {
+        true => Ok(Span {
+            text: text.to_string(),
+            author: Author::File {
+                key: key.to_string(),
+                at,
+            },
+            shown: Some(Shown {
+                path: path.to_string(),
+                at,
             }),
-            // `NaN` and `inf` have no Vyrn literal, so a non-finite value fails here,
-            // not later as a module that cannot parse.
-            Spliced::F64(f) if f.is_finite() => text(splice_float(format!("{f}"))),
-            Spliced::F32(f) if f.is_finite() => text(splice_float(format!("{f}"))),
-            Spliced::F64(f) => Err(format!(
-                "cannot splice non-finite float {f} into a code quote"
-            )),
-            Spliced::F32(f) => Err(format!(
-                "cannot splice non-finite float {f} into a code quote"
-            )),
-            Spliced::Bool(b) => text(b.to_string()),
-            Spliced::Code(_) => unreachable!("answered above"),
-        },
-        // Identifier fragment: non-empty `[A-Za-z0-9_]+`. It merges with adjacent
-        // word characters, so a leading digit is fine.
-        1 => match val {
-            Spliced::Str(s) => {
-                if !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
-                    text(s.to_string())
-                } else {
-                    Err(format!(
-                        "cannot splice {s:?} as an identifier fragment: not `[A-Za-z0-9_]+`"
-                    ))
-                }
-            }
-            other => Err(no_splice_rule(other.kind(), ctx)),
-        },
-        // Standalone identifier or type: a valid non-keyword identifier.
-        _ => match val {
-            Spliced::Str(s) => {
-                if is_bare_identifier(s) {
-                    text(s.to_string())
-                } else {
-                    Err(format!(
-                        "cannot splice {s:?} as an identifier: not a valid non-keyword identifier"
-                    ))
-                }
-            }
-            other => Err(no_splice_rule(other.kind(), ctx)),
-        },
+            kind: Kind::Copied,
+        }),
+        false => Err(format!(
+            "`codeAt` was given text that `{path}` does not hold at {line}:{col}"
+        )),
     }
+}
+
+/// `rope` with every span's errors shown at `path:line:col`: `at` moves where
+/// an error shows, never the author.
+pub fn shown_at(rope: &Rope, path: &str, (line, col): (usize, usize)) -> Rope {
+    let shown = Shown {
+        path: path.to_string(),
+        at: Pos { line, col },
+    };
+    Rope::Leaf(
+        rope.spans()
+            .into_iter()
+            .map(|s| Span {
+                shown: Some(shown.clone()),
+                ..s.clone()
+            })
+            .collect(),
+    )
 }
 
 /// Returns shortest-roundtrip float digits as plain decimal text. `Display`
@@ -249,15 +401,27 @@ pub(crate) fn lexed(source: &str) -> Vec<(String, String, i64, i64)> {
     }
 }
 
+impl Span {
+    /// Text the call site supplied as data, with no position.
+    pub fn data(text: String) -> Span {
+        Span {
+            text,
+            author: Author::CallSite,
+            shown: None,
+            kind: Kind::Code,
+        }
+    }
+}
+
 /// One generation read: the resolved key (a file, or a directory with a
 /// trailing `/`) and its content, `None` when the read failed. A failure is
 /// recorded too: "0 examples" stops being right when `examples/` appears.
 pub type GenRead = (String, Option<Vec<u8>>);
 
-/// A generator's result: the module source, and the inputs it read,
-/// which the loader folds into the cache key.
+/// A generator's result: what it wrote, and the inputs it read, which the
+/// loader folds into the cache key.
 pub struct GenOutput {
-    pub source: String,
+    pub written: Written,
     pub reads: Vec<GenRead>,
 }
 
@@ -833,6 +997,7 @@ fn run_derive(
         GenError::Failed(trap) => trap,
         GenError::Unchecked => "the engine asked to check a checked program".to_string(),
     })?
+    .written
     .source;
     let tokens = crate::lexer::lex(&src).map_err(|d| {
         format!(

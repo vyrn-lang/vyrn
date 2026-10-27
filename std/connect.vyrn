@@ -81,20 +81,20 @@ fn connectServiceName(contract: String) -> String {
 /// Reports, through `std/diag`, a procedure with more than one parameter or with
 /// one that is not an exported named type; returns "" for a clean contract.
 /// `reportHere` anchors it, since reflection gives no declaration line.
-fn connectValidateContract(iface: ModuleInterface) -> String {
+gen fn connectValidateContract(iface: ModuleInterface) -> String {
     for f in iface.functions {
         if f.params.length > 1 {
-            return reportHere(
+            return render(reportHere(
                 Error,
                 "procedure `\{f.name}` takes \{f.params.length.toString()} parameters — a Connect procedure takes at most one; gather them into one exported record type",
-            )
+            ))
         }
         if f.params.length == 1 {
             if connectIsNamedType(f.params[0].spelling, iface) == false {
-                return reportHere(
+                return render(reportHere(
                     Error,
                     "procedure `\{f.name}` takes `\{f.params[0].spelling}`, which this contract does not export as a named type — a Connect parameter must be an exported named type so the generated module can decode it",
-                )
+                ))
             }
         }
     }

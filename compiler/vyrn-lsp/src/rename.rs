@@ -676,6 +676,7 @@ fn f() -> Int64 {\n    other.listPastes()\n    return store.listPastes()\n}\n";
             namespace: Some(ns.to_string()),
             source,
             line: 1,
+            col: 1,
         }
     }
 
@@ -691,6 +692,7 @@ fn f() -> Int64 {\n    other.listPastes()\n    return store.listPastes()\n}\n";
             namespace: None,
             source,
             line: 1,
+            col: 1,
         }
     }
 

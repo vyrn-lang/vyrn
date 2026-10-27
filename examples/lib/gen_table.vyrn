@@ -68,25 +68,25 @@ export gen fn table(path: String) -> String {
             let typeCol = typeStart - start + 1
             if contains(names, name) {
                 reports = reports
-                + report(
+                + render(report(
                     Error,
                     path,
                     lineNo,
                     nameCol,
                     "column `\{name}` is declared twice; a table has one column per name",
-                )
+                ))
             } else {
                 names.push(name.copy())
             }
             if ty == "String" {
                 reports = reports
-                + report(
+                + render(report(
                     Warning,
                     path,
                     lineNo,
                     typeCol,
                     "column `\{name}` has no length limit; write `String(120)`",
-                )
+                ))
             }
         }
         i = i + 1
@@ -100,8 +100,8 @@ export gen fn table(path: String) -> String {
 }
 
 /// The input as a whole is missing, so there is no line to point at.
-fn reportHereFailed(path: String) -> String {
-    return reportHere(Error, "cannot read the table definition `\{path}`")
+gen fn reportHereFailed(path: String) -> String {
+    return render(reportHere(Error, "cannot read the table definition `\{path}`"))
     + "export fn columnCount() -> Int64 { return 0 }\n"
     + "export fn columnNames() -> String { return \"\" }\n"
 }

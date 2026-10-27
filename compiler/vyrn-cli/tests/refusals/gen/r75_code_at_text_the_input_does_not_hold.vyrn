@@ -1,0 +1,3 @@
+import { badCopy } from "./badcopy"
+import { forged } from badCopy("./input.txt")
+fn main() -> Int64 { return forged() }

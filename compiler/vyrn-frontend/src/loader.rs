@@ -12,6 +12,7 @@ use std::rc::Rc;
 
 use crate::ast::*;
 use crate::diagnostics::Diagnostic;
+use crate::gen::{Author, Kind, Pos, Shown, SpanRow, Written};
 use crate::rules::{refuse, rule, Rule};
 use crate::{lexer, parser};
 
@@ -308,21 +309,21 @@ fn site_file(key: &str, root_key: &str, std_root: Option<&str>) -> String {
     format!("{}.vyrn", spec.strip_prefix("./").unwrap_or(&spec))
 }
 
-/// Rewrites every `panic(msg)` in `program` to [`PANIC_AT`]`(msg, "file:line")`,
-/// in every body [`crate::project::walk_program`] visits.
-fn stamp_panic_sites(program: &mut Program, file: &str) {
-    crate::project::walk_program(program, &mut panic_stamp(file));
+/// Stamps every body [`crate::project::walk_program`] visits with what only the
+/// loader knows (see [`site_stamp`]).
+fn stamp_sites(program: &mut Program, file: &str, key: &str) {
+    crate::project::walk_program(program, &mut site_stamp(file, key));
 }
 
-/// The rewrite [`stamp_panic_sites`] makes at each expression. None in the
-/// runtime module: its `panic` is a fixed `trap.rs` wording (`malloc`'s `out of
-/// memory`), printed without a site.
-fn panic_stamp(file: &str) -> impl FnMut(&mut Expr) + '_ {
+/// The rewrite [`stamp_sites`] makes at each expression, in one walk:
+/// - `panic(msg)` becomes [`PANIC_AT`]`(msg, "file:line")`. None in the runtime
+///   module: its `panic` is a fixed `trap.rs` wording (`malloc`'s `out of
+///   memory`), printed without a site.
+/// - a quote's part `@codeText(text, line, col)` gains the module key,
+///   `@codeText(text, key, line, col)`: the part's author.
+fn site_stamp<'a>(file: &'a str, key: &'a str) -> impl FnMut(&mut Expr) + 'a {
     let runtime = file.strip_suffix(".vyrn") == Some(RUNTIME_SPEC);
     move |e: &mut Expr| {
-        if runtime {
-            return;
-        }
         if let Expr::Call {
             dot: _,
             awaits: _,
@@ -333,9 +334,11 @@ fn panic_stamp(file: &str) -> impl FnMut(&mut Expr) + '_ {
             id: _,
         } = e
         {
-            if name == "panic" && args.len() == 1 {
+            if name == "panic" && args.len() == 1 && !runtime {
                 *name = PANIC_AT.to_string();
                 args.push(Expr::str(format!("{file}:{line}")));
+            } else if name == "@codeText" && args.len() == 3 {
+                args.insert(1, Expr::str(key));
             }
         }
     }
@@ -647,6 +650,64 @@ pub(crate) fn judged_as<'a>(
     }
 }
 
+/// The author of the byte at `line:col` (1-based) of generated module `m`, with
+/// that byte's line in the author's file; `None` for a module without a span
+/// table. A position past the text is the last span's.
+fn author_at(m: &Module, line: usize, col: usize) -> Option<(&Author, usize)> {
+    let (rows, text) = (m.spans.as_deref()?, m.gen_source.as_deref()?);
+    let start = text
+        .split_inclusive('\n')
+        .take(line.saturating_sub(1))
+        .map(str::len)
+        .sum::<usize>();
+    let rest = &text[start..];
+    let offset = start
+        + rest
+            .char_indices()
+            .nth(col.saturating_sub(1))
+            .map_or(rest.len(), |(i, _)| i);
+    let row = &rows[rows
+        .partition_point(|r| r.offset <= offset)
+        .checked_sub(1)?];
+    let line_in = match &row.author {
+        Author::File { at, .. } => at.line + text[row.offset..offset].matches('\n').count(),
+        Author::CallSite => 0,
+    };
+    Some((&row.author, line_in))
+}
+
+/// Returns the module an import at `line:col` of module `m` is judged as: the
+/// author of its `import` keyword. A quote's text is judged as the module that
+/// holds the quote, and the call site's data as the file that wrote the
+/// generator call (the real file under nested banners). A module without a
+/// span table is judged by [`judged_as`].
+fn author_of<'a>(
+    m: &'a Module,
+    line: usize,
+    col: usize,
+    declarer: impl FnOnce(&str) -> Option<&'a str>,
+) -> Option<Judged<'a>> {
+    match author_at(m, line, col) {
+        None => judged_as(&m.key, declarer),
+        Some((Author::File { key, .. }, _)) => Some(Judged(key)),
+        Some((Author::CallSite, _)) => generated_importer(&m.key).map(Judged),
+    }
+}
+
+/// A note naming who wrote the import at `line:col` of generated module `m`,
+/// for a refusal there; `None` for a module without a span table. A module is
+/// spelled as an import in the generator's importer would spell it.
+fn written_by(m: &Module, line: usize, col: usize, opts: &LoadOptions) -> Option<String> {
+    Some(match author_at(m, line, col)? {
+        (Author::File { key, .. }, at) => {
+            let dir = dir_of(generated_importer(&m.key).unwrap_or(&m.key));
+            let shown = import_specifier(dir, key, opts.std_root.as_deref());
+            format!("written by `{shown}` at line {at}")
+        }
+        (Author::CallSite, _) => "written as data by the generator call".to_string(),
+    })
+}
+
 /// Whether `importer` may import a declaration of `exporter` whose `export to`
 /// paths are `to`. Every module may when `to` is empty. A path resolves as an
 /// import written in `exporter` would; one that does not resolve admits
@@ -802,6 +863,9 @@ struct Module {
     /// The generated source text, for `vyrn emit-gen`; `None` for a
     /// module read from disk.
     gen_source: Option<String>,
+    /// A `Code` result's span table, by offset in `gen_source`; `None` for a
+    /// `String` result and a module read from disk.
+    spans: Option<Rc<[SpanRow]>>,
     /// `Some(prefix)` when a builtin injected this module and nothing imported
     /// it. Its declarations are renamed to that reserved prefix (see
     /// [`RT_PREFIX`]), so they neither collide with nor are captured by a user's.
@@ -1449,6 +1513,7 @@ fn load_modules(
     fn visit(
         key: &str,
         source: Option<&str>,
+        spans: Option<&[SpanRow]>,
         opts: &LoadOptions,
         resolver: &dyn ModuleResolver,
         engine: Option<&crate::gen::GenEngine>,
@@ -1531,16 +1596,29 @@ fn load_modules(
             } else {
                 opts.alias_base.as_str()
             };
-            let comments = match &parsed {
-                Some(p) => p
+            let comments = match (spans, &parsed) {
+                // A `Code` result's reports are its `Diag` spans; no other line
+                // of it is read as a directive.
+                (Some(rows), _) => Some(
+                    rows.iter()
+                        .filter(|r| r.kind == Kind::Diag)
+                        .map(|r| 1 + text[..r.offset].matches('\n').count())
+                        .collect(),
+                ),
+                (None, Some(p)) => p
                     .comment_lines
                     .get_or_init(|| crate::origin::comment_lines(&text))
                     .clone(),
-                None => (scanned.insert(lexer::scan(&text)).as_ref().ok())
+                (None, None) => (scanned.insert(lexer::scan(&text)).as_ref().ok())
                     .map(|s| crate::origin::comments_of(&s.items)),
             };
             let ctx = crate::origin::Context::new(comments, dir_of(importer), project);
-            w.origins.add_module(key, &text, &ctx);
+            // A `Code` result's errors show where its span table says; only a
+            // `String` result's text is scanned for `//@origin` lines.
+            match spans {
+                Some(rows) => w.origins.add_spans(key, &text, rows, &ctx),
+                None => w.origins.add_module(key, &text, &ctx),
+            }
             // The same line-scan lifts `//@diag` directives into diagnostics at
             // the generator's severity. A page is generated twice and a
             // generator can be re-entered, so de-duplicate on file, line and
@@ -1605,6 +1683,7 @@ fn load_modules(
                 },
                 import_targets: Vec::new(),
                 gen_source: None,
+                spans: None,
                 injected: None,
                 hash: None,
                 refs: Rc::default(),
@@ -1698,14 +1777,15 @@ fn load_modules(
             }
         }
 
-        // Stamp every `panic` with its file and line here: the parser
-        // knows only the line, and every later stage clones bodies (a projection
-        // into its access site, a generic per instantiation).
+        // Stamp every `panic` with its file and line, and every quote part with
+        // its author, here: the parser knows neither file nor key, and every
+        // later stage clones bodies (a projection into its access site, a
+        // generic per instantiation).
         //
         // After the parse cache: two files with identical text share one parse,
         // and must not share one file name.
         let site = site_file(key, root_key, opts.std_root.as_deref());
-        stamp_panic_sites(&mut program, &site);
+        stamp_sites(&mut program, &site, key);
 
         // `std/result` and `std/option` are validated no-op imports.
         // Recognize the specifier before file resolution, so the builtins are
@@ -1766,7 +1846,7 @@ fn load_modules(
                 {
                     return Err(vec![in_module(d, key, root_key)]);
                 }
-                visit(&target, None, opts, resolver, engine, w, root_key)?;
+                visit(&target, None, None, opts, resolver, engine, w, root_key)?;
                 import_targets[i] = Some(target);
             }
         }
@@ -1776,7 +1856,7 @@ fn load_modules(
         // not re-run.
         for (i, imp) in program.imports.iter().enumerate() {
             if let ImportSource::Generator { name, args, line } = &imp.source {
-                let (gen_key, gen_source) = run_generator(
+                let (gen_key, written) = run_generator(
                     key,
                     name,
                     args,
@@ -1797,8 +1877,18 @@ fn load_modules(
                 if let Some(d) = audience_objection(key, &gen_key, *line, opts) {
                     return Err(vec![in_module(d, key, root_key)]);
                 }
-                if let Some(src) = gen_source {
-                    visit(&gen_key, Some(&src), opts, resolver, engine, w, root_key)?;
+                if let Some(g) = written {
+                    let spans = g.spans.as_deref();
+                    visit(
+                        &gen_key,
+                        Some(&g.source),
+                        spans,
+                        opts,
+                        resolver,
+                        engine,
+                        w,
+                        root_key,
+                    )?;
                 }
                 import_targets[i] = Some(gen_key);
             }
@@ -1817,6 +1907,7 @@ fn load_modules(
             program,
             import_targets,
             gen_source,
+            spans: spans.map(Rc::from),
             injected: None,
             hash: Some(hash),
             refs: parsed.refs.clone(),
@@ -1829,6 +1920,7 @@ fn load_modules(
     if let Err(diags) = visit(
         &root_key,
         Some(root_source),
+        None,
         opts,
         resolver,
         engine,
@@ -1873,7 +1965,9 @@ fn load_modules(
             continue;
         }
         if !w.states.contains_key(&target) {
-            if let Err(diags) = visit(&target, None, opts, resolver, engine, &mut w, &root_key) {
+            if let Err(diags) = visit(
+                &target, None, None, opts, resolver, engine, &mut w, &root_key,
+            ) {
                 return Err(failed(diags, w.origins));
             }
         }
@@ -1985,10 +2079,11 @@ thread_local! {
 }
 
 /// A generator cache entry: its recorded `(input, hash)` pairs and its output.
-type CacheEntry = (Vec<(String, String)>, String);
+type CacheEntry = (Vec<(String, String)>, Written);
 
 /// Runs a generator-call import target and returns the generated
-/// module's key, with its source, or `None` when it is already synthesized.
+/// module's key, with what the generator wrote, or `None` when it is already
+/// synthesized.
 ///
 /// The arguments must be constants. Identical calls share one key. On a cache
 /// miss the generator is loaded, checked and run in the mediated sandbox, and
@@ -2007,7 +2102,7 @@ fn run_generator(
     identities: &mut HashMap<String, String>,
     read: &mut HashMap<String, Option<String>>,
     root_key: &str,
-) -> Result<(String, Option<String>), Vec<Diagnostic>> {
+) -> Result<(String, Option<Written>), Vec<Diagnostic>> {
     let err = |rule: Rule| -> Vec<Diagnostic> { vec![load_error(importer, root_key, line, rule)] };
 
     // Arguments must be compile-time constants.
@@ -2072,7 +2167,7 @@ fn run_generator(
             got = consts.len()
         )));
     }
-    let source = run_resolved(
+    let written = run_resolved(
         importer,
         name,
         &consts,
@@ -2084,7 +2179,7 @@ fn run_generator(
         engine,
         read,
     )?;
-    Ok((gen_key, Some(source)))
+    Ok((gen_key, Some(written)))
 }
 
 /// The constants of a generator call as its banner spells them.
@@ -2160,7 +2255,7 @@ pub fn call_generator(
         root_key: importer,
     };
     let mut read = HashMap::new();
-    Some(run_resolved(
+    let written = run_resolved(
         importer,
         &name,
         args,
@@ -2171,7 +2266,8 @@ pub fn call_generator(
         resolver,
         engine,
         &mut read,
-    ))
+    );
+    Some(written.map(|w| w.source))
 }
 
 /// What [`gen_export`] answered: the companion and the function, or none, and
@@ -2252,7 +2348,7 @@ fn run_resolved(
     resolver: &dyn ModuleResolver,
     engine: Option<&crate::gen::GenEngine>,
     read: &mut HashMap<String, Option<String>>,
-) -> Result<String, Vec<Diagnostic>> {
+) -> Result<Written, Vec<Diagnostic>> {
     let Site { line, root_key } = site;
     let err = |rule: Rule| -> Vec<Diagnostic> { vec![load_error(importer, root_key, line, rule)] };
     let gen_mod_key = gen_mod_key.to_string();
@@ -2428,11 +2524,11 @@ fn run_resolved(
         if describable {
             resolver.gen_cache_put(
                 &sources_hash,
-                &render_cache_entry(&sources_hash, &inputs, &out.source),
+                &render_cache_entry(&sources_hash, &inputs, &out.written),
             );
         }
     }
-    Ok(out.source)
+    Ok(out.written)
 }
 
 /// A generator module loaded and checked as a runnable program, with its
@@ -2668,22 +2764,104 @@ const ABSENT: &str = "absent";
 /// The cache entry format tag, bumped when an entry's meaning changes.
 /// [`read_cache_entry`] rejects any other tag as a miss, so the generator re-runs
 /// and overwrites the entry.
-const CACHE_ENTRY_TAG: &str = "v3";
+const CACHE_ENTRY_TAG: &str = "v4";
 
 /// Formats this compiler wrote before [`CACHE_ENTRY_TAG`]. Such an entry is
 /// stale, not foreign, so it is ignored without a warning.
-const SUPERSEDED_ENTRY_TAGS: &[&str] = &["v1", "v2"];
+const SUPERSEDED_ENTRY_TAGS: &[&str] = &["v1", "v2", "v3"];
 
-/// Serializes a cache entry: `v3 <tag> <N>`, then `path<TAB>hash` lines, then the
-/// generated source verbatim. The tag authenticates everything after it, and
-/// [`entry_tag`] binds the lookup key into it.
-fn render_cache_entry(key: &str, inputs: &[(String, String)], output: &str) -> String {
+/// Serializes a cache entry: `v4 <tag> <N>`, then `path<TAB>hash` lines, then
+/// the span table ([`span_table`]), then the generated source verbatim. The tag
+/// authenticates everything after it, and [`entry_tag`] binds the lookup key
+/// into it.
+fn render_cache_entry(key: &str, inputs: &[(String, String)], output: &Written) -> String {
     let mut body = format!("{}\n", inputs.len());
     for (p, h) in inputs {
         body.push_str(&format!("{p}\t{h}\n"));
     }
-    body.push_str(output);
+    body.push_str(&span_table(output.spans.as_deref()));
+    body.push_str(&output.source);
     format!("{CACHE_ENTRY_TAG} {} {body}", entry_tag(key, &body))
+}
+
+/// A span table as cache lines: `-` for none (a `String` result), else its row
+/// count, then one `offset<TAB>kind<TAB>author<TAB>shown` line per row. A kind
+/// is `c` (code), `p` (copied) or `d` (a report); an author is `-` for the call
+/// site or `line:col:key`; a shown position is `-` or `line:col:path`. The key
+/// and the path come last, so a colon in them splits nothing.
+fn span_table(spans: Option<&[SpanRow]>) -> String {
+    let Some(rows) = spans else {
+        return "-\n".to_string();
+    };
+    let mut out = format!("{}\n", rows.len());
+    for r in rows {
+        let author = match &r.author {
+            Author::File { key, at } => format!("{}:{}:{key}", at.line, at.col),
+            Author::CallSite => "-".to_string(),
+        };
+        let shown = match &r.shown {
+            Some(s) => format!("{}:{}:{}", s.at.line, s.at.col, s.path),
+            None => "-".to_string(),
+        };
+        let kind = match r.kind {
+            Kind::Code => 'c',
+            Kind::Copied => 'p',
+            Kind::Diag => 'd',
+        };
+        out.push_str(&format!("{}\t{kind}\t{author}\t{shown}\n", r.offset));
+    }
+    out
+}
+
+/// Inverse of [`span_table`]: its first line `head`, and the rest from `next`.
+fn read_span_table<'a>(
+    head: &str,
+    mut next: impl FnMut() -> Option<&'a str>,
+) -> Option<Option<Vec<SpanRow>>> {
+    if head == "-" {
+        return Some(None);
+    }
+    // `line:col:rest`, the rest keeping any colon.
+    let placed = |field: &str| -> Option<(Pos, String)> {
+        let mut f = field.splitn(3, ':');
+        let (line, col) = (f.next()?.parse().ok()?, f.next()?.parse().ok()?);
+        Some((Pos { line, col }, f.next()?.to_string()))
+    };
+    // No `with_capacity`: the count comes from the file.
+    let mut rows = Vec::new();
+    for _ in 0..head.parse::<usize>().ok()? {
+        let mut cols = next()?.splitn(4, '\t');
+        let (offset, kind) = (cols.next()?, cols.next()?);
+        let (author, shown) = (cols.next()?, cols.next()?);
+        let kind = match kind {
+            "c" => Kind::Code,
+            "p" => Kind::Copied,
+            "d" => Kind::Diag,
+            _ => return None,
+        };
+        let author = match author {
+            "-" => Author::CallSite,
+            a => {
+                let (at, key) = placed(a)?;
+                Author::File { key, at }
+            }
+        };
+        let shown = match shown {
+            "-" => None,
+            s => {
+                let (at, path) = placed(s)?;
+                Some(Shown { path, at })
+            }
+        };
+        let offset = offset.parse().ok()?;
+        rows.push(SpanRow {
+            offset,
+            author,
+            shown,
+            kind,
+        });
+    }
+    Some(Some(rows))
 }
 
 /// Inverse of [`render_cache_entry`], for an entry this compiler wrote.
@@ -2748,16 +2926,27 @@ fn read_cache_entry(
         return None;
     }
     let mut idx = first_nl + 1;
+    let mut line = || {
+        let nl = text[idx..].find('\n')? + idx;
+        let l = &text[idx..nl];
+        idx = nl + 1;
+        Some(l)
+    };
     // No `with_capacity(n)`: `n` comes from the file, and a truncated write can
     // make it `usize::MAX`, which aborts on the allocation.
     let mut inputs = Vec::new();
     for _ in 0..n {
-        let nl = text[idx..].find('\n')? + idx;
-        let (p, h) = text[idx..nl].split_once('\t')?;
+        let (p, h) = line()?.split_once('\t')?;
         inputs.push((p.to_string(), h.to_string()));
-        idx = nl + 1;
     }
-    Some((inputs, text[idx..].to_string()))
+    let spans = read_span_table(line()?, &mut line)?;
+    Some((
+        inputs,
+        Written {
+            source: text[idx..].to_string(),
+            spans,
+        },
+    ))
 }
 
 /// Warns of a foreign entry. The LSP validates the same entry on every
@@ -4037,11 +4226,19 @@ fn link(
     // The `export to` paths of `def_module`'s `name` when they leave out
     // `importer`. Every refusal of a qualified export asks this one function.
     let mut real_paths = HashMap::new();
-    let mut shut_out = |name: &str, def_module: &str, importer: &str| {
+    let mut shut_out = |name: &str, def_module: &str, m: &Module, (line, col)| {
         let to: &[String] = qualified.get(&(def_module, name))?;
-        let judged = judged_as(importer, |g| owner.get(g).map(|(m, _)| m.as_str()));
+        let judged = author_of(m, line, col, |g| owner.get(g).map(|(m, _)| m.as_str()));
         let admitted = judged.is_some_and(|j| admits(to, def_module, j, opts, &mut real_paths));
         (!admitted).then_some(to)
+    };
+    // A refusal of an import a generator wrote names the import's author.
+    let refused_import = |m: &Module, imp: &ImportDecl, line: usize, rule: Rule| {
+        let d = load_error(&m.key, root_key, line, rule);
+        match written_by(m, imp.line, imp.col, opts) {
+            Some(note) => d.with_note(note),
+            None => d,
+        }
     };
     for m in &modules {
         let mut visible: HashSet<String> = HashSet::new(); // foreign names imported here
@@ -4051,7 +4248,8 @@ fn link(
             // name those symbols, so they are visible.
             if imp.namespace.is_some() {
                 for (name, (def_module, exported)) in &owner {
-                    if def_module == target && *exported && shut_out(name, target, &m.key).is_none()
+                    let at = (imp.line, imp.col);
+                    if def_module == target && *exported && shut_out(name, target, m, at).is_none()
                     {
                         visible.insert(name.clone());
                     }
@@ -4061,9 +4259,9 @@ fn link(
             // checked here, with its owner's `export to` paths.
             if let ImportSource::Generator { name, line, .. } = &imp.source {
                 if let Some((def_module, _)) = owner.get(name) {
-                    if let Some(to) = shut_out(name, def_module, &m.key) {
+                    if let Some(to) = shut_out(name, def_module, m, (imp.line, imp.col)) {
                         let rule = exported_only_to(name, to, def_module, &m.key, opts);
-                        errors.push(load_error(&m.key, root_key, *line, rule));
+                        errors.push(refused_import(m, imp, *line, rule));
                     }
                 }
             }
@@ -4080,9 +4278,9 @@ fn link(
                                 imp.line,
                                 rule!(NotExported, name, target),
                             ));
-                        } else if let Some(to) = shut_out(name, target, &m.key) {
+                        } else if let Some(to) = shut_out(name, target, m, (imp.line, imp.col)) {
                             let rule = exported_only_to(name, to, target, &m.key, opts);
-                            errors.push(load_error(&m.key, root_key, imp.line, rule));
+                            errors.push(refused_import(m, imp, imp.line, rule));
                         }
                         // Importing an enum brings its variants, and a protocol its
                         // methods; the check below resolves them through this name.
@@ -4191,7 +4389,10 @@ fn link(
                         if gen_importer.as_deref() == Some(def_module.as_str()) {
                             return;
                         }
-                        let rule = match shut_out(name, def_module, &m.key) {
+                        // The use's column is unknown; the start of its line
+                        // only picks the sentence, since the use is refused
+                        // either way.
+                        let rule = match shut_out(name, def_module, m, (line, 1)) {
                             Some(to) => exported_only_to(name, to, def_module, &m.key, opts),
                             None => rule!(NotImported, what, name, def_module),
                         };
@@ -4478,7 +4679,7 @@ fn parse_reached(modules: &mut [Module], opts: &LoadOptions) -> Result<(), Vec<D
                     };
                     let mut body = body.map_err(in_key)?;
                     let site = site_file(&m.key, "", opts.std_root.as_deref());
-                    crate::project::walk_block(&mut body, &mut panic_stamp(&site));
+                    crate::project::walk_block(&mut body, &mut site_stamp(&site, &m.key));
                     Some(body)
                 }
                 None => None,
@@ -5380,15 +5581,26 @@ mod tests {
         );
     }
 
+    /// A `String` result's text, as a cache entry holds it.
+    fn text(source: &str) -> Written {
+        Written {
+            source: source.to_string(),
+            spans: None,
+        }
+    }
+
     #[test]
     fn a_cache_entry_from_an_older_format_misses_instead_of_being_misread() {
-        // A `v1` entry cannot say whether a missing file has since appeared, and
-        // a `v2` entry is not authenticated. Both miss.
+        // A `v1` entry cannot say whether a missing file has since appeared, a
+        // `v2` entry is not authenticated, and a `v3` entry has no span table.
+        // All miss.
         let key = "k";
         let inputs = [("data/a.txt".to_string(), "deadbeef".to_string())];
-        let v3 = render_cache_entry(key, &inputs, "export fn n() -> Int64 { return 1 }");
-        assert!(read_cache_entry(key, &v3, None).is_some());
+        let current =
+            render_cache_entry(key, &inputs, &text("export fn n() -> Int64 { return 1 }"));
+        assert!(read_cache_entry(key, &current, None).is_some());
         for older in [
+            "v3 tag 1\ndata/a.txt\tdeadbeef\nx",
             "v2 1\ndata/a.txt\tdeadbeef\nx",
             "v1\ndata/a.txt\tdeadbeef\nx",
         ] {
@@ -5399,14 +5611,50 @@ mod tests {
         }
     }
 
+    /// A `Code` result's span table survives the cache, a colon in a key or a
+    /// path included.
+    #[test]
+    fn a_cache_entry_keeps_its_span_table() {
+        let inputs = [("g.vyrn".to_string(), "deadbeef".to_string())];
+        let pos = |line, col| Pos { line, col };
+        let written = Written {
+            source: "import { a } from \"./a\"\nfn f() {}\n".to_string(),
+            spans: Some(vec![
+                SpanRow {
+                    offset: 0,
+                    author: Author::File {
+                        key: "C:/p/g.vyrn".to_string(),
+                        at: pos(3, 9),
+                    },
+                    shown: None,
+                    kind: Kind::Code,
+                },
+                SpanRow {
+                    offset: 24,
+                    author: Author::CallSite,
+                    shown: Some(Shown {
+                        path: "C:/p/in.txt".to_string(),
+                        at: pos(1, 1),
+                    }),
+                    kind: Kind::Copied,
+                },
+            ]),
+        };
+        let entry = render_cache_entry("k", &inputs, &written);
+        assert_eq!(
+            read_cache_entry("k", &entry, None),
+            Some((inputs.to_vec(), written))
+        );
+    }
+
     /// A hit is linked without re-running the generator, so an entry written by
     /// anything but this compiler must not be read back.
     #[test]
     fn a_cache_entry_this_compiler_did_not_write_is_refused() {
         let key = "k";
         let inputs = [("data/a.txt".to_string(), "deadbeef".to_string())];
-        let output = "export fn n() -> Int64 { return 1 }";
-        let honest = render_cache_entry(key, &inputs, output);
+        let output = text("export fn n() -> Int64 { return 1 }");
+        let honest = render_cache_entry(key, &inputs, &output);
         assert!(
             read_cache_entry(key, &honest, None).is_some(),
             "the control"

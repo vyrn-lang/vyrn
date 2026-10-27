@@ -1,0 +1,5 @@
+// A hole takes no Option of Code: `?? vyrn""` writes nothing in its place.
+export gen fn maybe(extra: Option<Code>) -> Code {
+    return vyrn"export fn f() -> Int64 { return 0 }\n\{extra}"
+}
+fn main() -> Int64 { return 0 }

@@ -67,7 +67,7 @@ parsing: a program asked for help has not given the required options.
 ## cli
 
 ```vyrn
-fn cli(module: String) -> String
+fn cli(module: String) -> Code
 ```
 
 Emits a module exporting `parse<Name>` and `help<Name>` for every exported

@@ -18,11 +18,14 @@ use std::path::PathBuf;
 #[cfg(feature = "host")]
 use std::sync::mpsc;
 
+use std::sync::Arc;
 use vyrn_frontend::ast::{Block, Expr, Function, Id, Param, Program, Stmt, Type};
 use vyrn_frontend::consteval::ConstVal;
 #[cfg(feature = "host")]
-use vyrn_frontend::gen::{compiler_identity, CodePiece, GenEngine, GenRead, Spliced};
-use vyrn_frontend::gen::{GenError, GenInputs, GenOutput};
+use vyrn_frontend::gen::{compiler_identity, GenEngine, GenRead};
+use vyrn_frontend::gen::{
+    Author, GenError, GenInputs, GenOutput, Kind, Pos, Rope, Shown, Span, Spliced, Written,
+};
 
 /// Calls this path cannot serve; a module containing one is declined (see
 /// [`engine`]). A `gen fn` may not call the write capabilities, so this only
@@ -148,7 +151,7 @@ fn run(
     let persist = inputs.sources_fingerprint.is_some();
     // Judged only when the artifact is built: the key names the program's
     // sources, so a cached artifact is one a program with no unserved call built.
-    let source = run_module(&key, persist, &argv, program, inputs, &mut reads, || {
+    let written = run_module(&key, persist, &argv, program, inputs, &mut reads, || {
         if let Some(what) = reaches_unserved(program) {
             return Err(decline(&format!("the module reaches `{what}`")));
         }
@@ -157,13 +160,13 @@ fn run(
         compile_to_wasm(&key, &wrapper)
     })?;
     trace("run", t.elapsed());
-    if source.len() > inputs.max_output {
+    if written.source.len() > inputs.max_output {
         return Err(EngineError::Failed(format!(
             "generator output exceeds the {} byte cap",
             inputs.max_output
         )));
     }
-    Ok(GenOutput { source, reads })
+    Ok(GenOutput { written, reads })
 }
 
 /// Serves one capability request from the guest as `Interp::gen_read_file` /
@@ -179,6 +182,25 @@ fn serve(
     path: &str,
     mode: i32,
 ) -> Result<Served, String> {
+    // `codeAt` copies only bytes this run read: the bytes the host served for
+    // the path, answered with the key they were read under.
+    if mode == MODE_CODE_AT {
+        let key = vyrn_frontend::gen::gen_scoped_path(
+            &inputs.importer_dir,
+            &inputs.allowed,
+            &inputs.aliased,
+            path,
+        )?;
+        let read = reads
+            .iter()
+            .find_map(|(k, b)| (*k == key).then_some(b.as_ref()));
+        return match read.flatten() {
+            Some(bytes) => Ok(Served::Copy(key, bytes.clone())),
+            None => Err(format!(
+                "`codeAt` copies only an input the generator read, and it did not read `{path}`"
+            )),
+        };
+    }
     // The frontend's own implementation, so the recorded reads are every
     // module the link touched.
     if mode == MODE_MODULE_INTERFACE {
@@ -255,17 +277,18 @@ fn serve(
 
 /// Runs generator `fn_name` without wasmtime, for the playground, where the
 /// browser runs the module. `exec` instantiates the module bytes, runs them
-/// with the argv and the `TypeArg`'s atoms, and answers the module's stdout.
+/// with the argv and the `TypeArg`'s atoms, and answers the module's stdout
+/// and the [`Arena`] its code imports ran in.
 ///
 /// Only a generator whose one parameter is a `TypeArg` is served: `exec`'s
-/// host answers no read, no module reflection and no code quote, so any other
-/// generator is declined (`None`).
+/// host answers no read and no module reflection, so any other generator is
+/// declined (`None`).
 pub fn run_pure(
     program: &Program,
     fn_name: &str,
     args: &[ConstVal],
     inputs: &GenInputs<'_>,
-    exec: impl FnOnce(&[u8], &[String], &[Atom]) -> Result<Vec<u8>, String>,
+    exec: impl FnOnce(&[u8], &[String], &[Atom]) -> Result<(Vec<u8>, Arena), String>,
 ) -> Option<Result<GenOutput, GenError>> {
     let target = program.functions.iter().find(|f| f.name == fn_name)?;
     let arg = inputs.type_arg.as_ref()?;
@@ -275,11 +298,7 @@ pub fn run_pure(
     if reaches_unserved(program).is_some() {
         return None;
     }
-    let types = program
-        .type_decls
-        .iter()
-        .map(|t| (t.name.clone(), t.clone()))
-        .collect();
+    let types = type_map(program);
     let mut atoms = Vec::new();
     let run = || -> Result<GenOutput, GenError> {
         encode(&Type::Named("TypeArg".into()), arg, &types, &mut atoms)
@@ -288,31 +307,43 @@ pub fn run_pure(
             "the wrapper program cannot be synthesized".into(),
         ))?;
         let bytes = vyrn_codegen::direct::compile_gen_host(&wrapper)?;
-        let stdout = exec(&bytes, &[fn_name.to_string()], &atoms).map_err(GenError::Failed)?;
-        let (_, source) = unframe_result(&stdout).map_err(|e| GenError::Failed(e.into()))?;
-        let source = String::from_utf8(source)
-            .map_err(|_| GenError::Failed("generator emitted invalid UTF-8".into()))?;
-        Ok(GenOutput {
-            source,
-            reads: Vec::new(),
-        })
+        let (stdout, mut code) =
+            exec(&bytes, &[fn_name.to_string()], &atoms).map_err(GenError::Failed)?;
+        let written = match code.written() {
+            Some(written) => written,
+            None => {
+                let (_, source) =
+                    unframe_result(&stdout).map_err(|e| GenError::Failed(e.into()))?;
+                let source = String::from_utf8(source)
+                    .map_err(|_| GenError::Failed("generator emitted invalid UTF-8".into()))?;
+                Written {
+                    source,
+                    spans: None,
+                }
+            }
+        };
+        let reads = Vec::new();
+        Ok(GenOutput { written, reads })
     };
     Some(run())
 }
 
 /// Whether the engine can serve this function: an exported `gen fn` returning
-/// `String` and taking `String` or `Int64` parameters (written to argv and read
-/// back, `Int64` by `parse`), or one `TypeArg` (reflected, as `moduleInterface`
-/// is). A generator returning `Code` is not served: the guest would print the
-/// handle.
+/// `String` or `Code` and taking `String` or `Int64` parameters (written to argv
+/// and read back, `Int64` by `parse`), or one `TypeArg` (reflected, as
+/// `moduleInterface` is).
 fn dispatchable(f: &Function) -> bool {
     f.is_gen
         && f.exported
-        && f.ret == Type::Str
+        && (f.ret == Type::Str || returns_code(f))
         && (takes_type_arg(f)
             || f.params
                 .iter()
                 .all(|par| matches!(par.ty, Type::Str | Type::Int)))
+}
+
+fn returns_code(f: &Function) -> bool {
+    f.ret == Type::Named("Code".into())
 }
 
 fn takes_type_arg(f: &Function) -> bool {
@@ -320,7 +351,9 @@ fn takes_type_arg(f: &Function) -> bool {
 }
 
 /// The generator's module with `is_gen` cleared, plus a `main` that dispatches
-/// on `args()[0]` to the requested generator and prints its result.
+/// on `args()[0]` to the requested generator and hands over its result: a
+/// `String` printed between the markers, a `Code` handle through the `result`
+/// import.
 ///
 /// Arguments and the name come from `args()`, so one artifact per module serves
 /// every generator in it for every call; `std/vyx` exports three generators
@@ -348,6 +381,31 @@ fn wrapper_program(program: &Program) -> Option<Program> {
         },
     ];
     for f in p.functions.iter().filter(|f| dispatchable(f)) {
+        let call = Expr::call(
+            &f.name,
+            f.params
+                .iter()
+                .enumerate()
+                .map(|(i, par)| match takes_type_arg(f) {
+                    true => Expr::var("@typeArg", 0),
+                    false => at_type(argv(i + 1), &par.ty),
+                })
+                .collect(),
+            0,
+        );
+        let hand_over = match returns_code(f) {
+            true => vec![Stmt::expr(Expr::call(
+                vyrn_codegen::GEN_RESULT,
+                vec![call],
+                0,
+            ))],
+            // Framed between marker lines; see `unframe_result`.
+            false => vec![
+                Stmt::expr(Expr::call("print", vec![Expr::str(RESULT_BEGIN)], 0)),
+                Stmt::expr(Expr::call("print", vec![call], 0)),
+                Stmt::expr(Expr::call("print", vec![Expr::str(RESULT_END)], 0)),
+            ],
+        };
         body.push(Stmt::If {
             id: Id::NEW,
             cond: Expr::Binary {
@@ -370,28 +428,8 @@ fn wrapper_program(program: &Program) -> Option<Program> {
                         )
                     })
                     .into_iter()
-                    .chain([
-                        // Framed between marker lines; see `unframe_result`.
-                        Stmt::expr(Expr::call("print", vec![Expr::str(RESULT_BEGIN)], 0)),
-                        Stmt::expr(Expr::call(
-                            "print",
-                            vec![Expr::call(
-                                &f.name,
-                                f.params
-                                    .iter()
-                                    .enumerate()
-                                    .map(|(i, par)| match takes_type_arg(f) {
-                                        true => Expr::var("@typeArg", 0),
-                                        false => at_type(argv(i + 1), &par.ty),
-                                    })
-                                    .collect(),
-                                0,
-                            )],
-                            0,
-                        )),
-                        Stmt::expr(Expr::call("print", vec![Expr::str(RESULT_END)], 0)),
-                        Stmt::ret(Expr::int(0), 0),
-                    ])
+                    .chain(hand_over)
+                    .chain([Stmt::ret(Expr::int(0), 0)])
                     .collect(),
             },
             else_block: None,
@@ -817,6 +855,9 @@ const MODE_MODULE_INTERFACE: i32 = 3;
 /// `listDirKinds`: `MODE_LIST`'s encoding with `/` appended to each directory.
 #[cfg(feature = "host")]
 const MODE_LIST_KINDS: i32 = 4;
+/// Not a read: `codeAt` asks for the bytes a read already served.
+#[cfg(feature = "host")]
+const MODE_CODE_AT: i32 = 5;
 
 /// One unit of a structured host result. Encoder and decoder walk the same
 /// static type, so the variant is not a tag the decoder consults: a `nextInt`
@@ -834,9 +875,9 @@ pub struct GenState {
     /// The last served read or `render`, waiting for `fetch` to copy it into
     /// guest memory. The host never allocates on the guest's side.
     stash: Vec<u8>,
-    /// The code-quote arena; a `Code` value is an index into it. Per generation
-    /// run, so a handle from one run is meaningless in the next.
-    code: Vec<Vec<CodePiece>>,
+    /// The code-quote arena. Per generation run, so a handle from one run is
+    /// meaningless in the next.
+    code: Arena,
     /// The structured result being handed over, and the decoder's position. A
     /// stream is fully consumed before the next `reflect`.
     atoms: Vec<Atom>,
@@ -864,21 +905,162 @@ impl GenState {
     }
 }
 
+/// The `Code` values of one generation run, and the one home of what each
+/// `vyrn_gen` code import does: the native linker and the playground's exports
+/// decode the guest's arguments and call the method of the import's name. A
+/// `Code` value is an index into `ropes`. An `Err` is a refusal that ends the
+/// run.
+#[derive(Default)]
+pub struct Arena {
+    ropes: Vec<Arc<Rope>>,
+    /// A `Code` generator's result, set once by the wrapper's `result` call.
+    result: Option<Arc<Rope>>,
+}
+
+impl Arena {
+    /// The rope a handle names. Compiled code only holds handles the imports
+    /// made, but the index is guest-supplied, so it is checked.
+    fn rope(&self, h: i64) -> Result<&Arc<Rope>, String> {
+        (self.ropes.get(h as usize)).ok_or_else(|| format!("bad code handle {h}"))
+    }
+
+    fn intern(&mut self, rope: Arc<Rope>) -> i64 {
+        self.ropes.push(rope);
+        self.ropes.len() as i64 - 1
+    }
+
+    fn leaf(&mut self, span: Span) -> i64 {
+        self.intern(Arc::new(Rope::Leaf(vec![span])))
+    }
+
+    /// A quote's part, written by module `key` at `line:col`; the loader
+    /// stamped the key after the parse.
+    pub fn text(&mut self, text: String, key: String, line: i64, col: i64) -> i64 {
+        let at = Pos {
+            line: line as usize,
+            col: col as usize,
+        };
+        let author = Author::File { key, at };
+        let kind = Kind::Code;
+        self.leaf(Span {
+            text,
+            author,
+            shown: None,
+            kind,
+        })
+    }
+
+    pub fn raw(&mut self, text: String) -> i64 {
+        self.leaf(Span::data(text))
+    }
+
+    pub fn raw_at(&mut self, text: String, path: String, line: i64, col: i64) -> i64 {
+        let at = Pos {
+            line: line as usize,
+            col: col as usize,
+        };
+        let shown = Some(Shown { path, at });
+        self.leaf(Span {
+            shown,
+            ..Span::data(text)
+        })
+    }
+
+    pub fn name(&mut self, s: &str) -> Result<i64, String> {
+        Ok(self.leaf(vyrn_frontend::gen::name_span(s)?))
+    }
+
+    pub fn diag(&mut self, sev: &str, anchor: &str, msg: &str) -> Result<i64, String> {
+        Ok(self.leaf(vyrn_frontend::gen::diag_span(sev, anchor, msg)?))
+    }
+
+    /// `codeAt`: `bytes` are what the run read from `path`, which resolved to
+    /// module `key`.
+    #[cfg(feature = "host")]
+    fn code_at(
+        &mut self,
+        key: &str,
+        path: &str,
+        bytes: &[u8],
+        at: (i64, i64),
+        text: &str,
+    ) -> Result<i64, String> {
+        let at = (at.0.max(0) as usize, at.1.max(0) as usize);
+        Ok(self.leaf(vyrn_frontend::gen::copied_span(key, path, bytes, at, text)?))
+    }
+
+    pub fn at(&mut self, h: i64, path: &str, line: i64, col: i64) -> Result<i64, String> {
+        let at = (line.max(0) as usize, col.max(0) as usize);
+        let rope = vyrn_frontend::gen::shown_at(self.rope(h)?, path, at);
+        Ok(self.intern(Arc::new(rope)))
+    }
+
+    /// Splices the value codegen sent as a tag, one word and, for a `String`,
+    /// its text, re-indented to `indent`. Floats cross as bits because the
+    /// shortest-roundtrip formatting belongs on this side.
+    pub fn splice(
+        &mut self,
+        tag: i32,
+        bits: i64,
+        text: Option<String>,
+        indent: &str,
+    ) -> Result<i64, String> {
+        let val = match (tag, text) {
+            (vyrn_codegen::TAG_STR, Some(s)) => Spliced::Str(s),
+            (vyrn_codegen::TAG_CODE, None) => Spliced::Code(self.rope(bits)?.clone()),
+            (vyrn_codegen::TAG_BOOL, None) => Spliced::Bool(bits != 0),
+            // Codegen sign-extends a signed integer of any width.
+            (vyrn_codegen::TAG_INT, None) => Spliced::Int {
+                v: bits,
+                signed: true,
+            },
+            (vyrn_codegen::TAG_UINT, None) => Spliced::Int {
+                v: bits,
+                signed: false,
+            },
+            (vyrn_codegen::TAG_F64, None) => Spliced::F64(f64::from_bits(bits as u64)),
+            (vyrn_codegen::TAG_F32, None) => Spliced::F32(f32::from_bits(bits as u32)),
+            (other, _) => return Err(format!("bad splice tag {other}")),
+        };
+        Ok(self.intern(vyrn_frontend::gen::gen_code_splice(&val, indent)?))
+    }
+
+    pub fn concat(&mut self, a: i64, b: i64) -> Result<i64, String> {
+        let cat = Rope::Cat(self.rope(a)?.clone(), self.rope(b)?.clone());
+        Ok(self.intern(Arc::new(cat)))
+    }
+
+    pub fn result(&mut self, h: i64) -> Result<(), String> {
+        let rope = self.rope(h)?.clone();
+        match self.result.replace(rope) {
+            Some(_) => Err("the generator handed over two results".into()),
+            None => Ok(()),
+        }
+    }
+
+    pub fn render(&self, h: i64) -> Result<String, String> {
+        Ok(vyrn_frontend::gen::render_code(self.rope(h)?))
+    }
+
+    /// What a `Code` generator wrote: the value its wrapper handed to `result`.
+    /// `None` for a `String` generator, whose result is framed in stdout.
+    pub fn written(&mut self) -> Option<Written> {
+        self.result.take().map(|code| Written::code(&code))
+    }
+}
+
+/// A loop's accumulator is a chain of `Cat` nodes as deep as the loop ran, and
+/// dropping its root first would recurse down the chain. Dropped newest first,
+/// each node's children are still held by the arena, so no drop recurses.
+impl Drop for Arena {
+    fn drop(&mut self) {
+        self.result = None;
+        while self.ropes.pop().is_some() {}
+    }
+}
+
 #[cfg(feature = "host")]
 impl GenState {
-    /// The pieces a handle names. Compiled code only holds handles the imports
-    /// made, but the index is guest-supplied, so it is checked.
-    fn pieces(&self, h: i64) -> wasmtime::Result<&Vec<CodePiece>> {
-        self.code
-            .get(h as usize)
-            .ok_or_else(|| wasmtime::Error::msg(format!("bad code handle {h}")))
-    }
-
-    fn intern(&mut self, pieces: Vec<CodePiece>) -> i64 {
-        self.code.push(pieces);
-        self.code.len() as i64 - 1
-    }
-
     /// Starts handing over `lit` as a value of type `ty`. An unread atom from
     /// the previous stream means the decoder walked a shorter type than the
     /// encoder, and fails the run.
@@ -987,11 +1169,12 @@ struct Caps {
     resp: mpsc::Receiver<Result<Served, String>>,
 }
 
-/// The host thread's answer: bytes for a read or a listing, or the reflection
-/// literal for `moduleInterface`.
+/// The host thread's answer: bytes for a read or a listing, the reflection
+/// literal for `moduleInterface`, or the key and bytes `codeAt` copies from.
 #[cfg(feature = "host")]
 enum Served {
     Bytes(i32, Vec<u8>),
+    Copy(String, Vec<u8>),
     /// Encoded on the guest thread, so one [`encode`] call serves all three
     /// structured builtins.
     Lit(Box<Expr>),
@@ -1013,6 +1196,12 @@ impl std::fmt::Display for Denied {
 
 #[cfg(feature = "host")]
 impl std::error::Error for Denied {}
+
+/// An [`Arena`] refusal as the trap that carries it out.
+#[cfg(feature = "host")]
+fn denied<V>(r: Result<V, String>) -> wasmtime::Result<V> {
+    r.map_err(|m| wasmtime::Error::new(Denied(m)))
+}
 
 /// Serves the `vyrn_gen` imports [`vyrn_codegen::direct::compile_gen_host`]
 /// emits. Splicing, escaping and float formatting are the frontend's own
@@ -1041,7 +1230,9 @@ fn link<X: 'static>(linker: &mut wasmtime::Linker<wasi::Guest<X>>) -> wasmtime::
                     streams.stash = bytes;
                     Ok((status as i64) << 32 | len)
                 }
-                Ok(Ok(Served::Lit(_))) => Err(Error::msg("read answered with a literal")),
+                Ok(Ok(Served::Lit(_) | Served::Copy(..))) => {
+                    Err(Error::msg("read answered with a literal"))
+                }
                 // A scoping violation traps.
                 Ok(Err(msg)) => Err(Error::new(Denied(msg))),
                 Err(_) => Err(Error::msg("generator host is gone")),
@@ -1064,15 +1255,67 @@ fn link<X: 'static>(linker: &mut wasmtime::Linker<wasi::Guest<X>>) -> wasmtime::
     )?;
 
     // The code-quote arena: `Code` is an i64 handle, and every operation on it
-    // runs here.
+    // runs in [`Arena`]; a refusal traps.
     linker.func_wrap(
         "vyrn_gen",
         "text",
+        |mut caller: Caller<'_, T<X>>, s: i32, key: i32, line: i64, col: i64| -> Result<i64> {
+            let (data, host) = guest_mem(&mut caller)?;
+            Ok((host.gen.code).text(cstr(data, s)?, cstr(data, key)?, line, col))
+        },
+    )?;
+    linker.func_wrap(
+        "vyrn_gen",
+        "raw",
         |mut caller: Caller<'_, T<X>>, s: i32| -> Result<i64> {
             let (data, host) = guest_mem(&mut caller)?;
+            Ok(host.gen.code.raw(cstr(data, s)?))
+        },
+    )?;
+    linker.func_wrap(
+        "vyrn_gen",
+        "name",
+        |mut caller: Caller<'_, T<X>>, s: i32| -> Result<i64> {
+            let (data, host) = guest_mem(&mut caller)?;
+            denied(host.gen.code.name(&cstr(data, s)?))
+        },
+    )?;
+    linker.func_wrap(
+        "vyrn_gen",
+        "diag",
+        |mut caller: Caller<'_, T<X>>, sev: i32, anchor: i32, msg: i32| -> Result<i64> {
+            let (data, host) = guest_mem(&mut caller)?;
+            let (sev, anchor, msg) = (cstr(data, sev)?, cstr(data, anchor)?, cstr(data, msg)?);
+            denied(host.gen.code.diag(&sev, &anchor, &msg))
+        },
+    )?;
+    // `codeAt` asks the host thread for the bytes the run read at `path`.
+    linker.func_wrap(
+        "vyrn_gen",
+        "codeAt",
+        |mut caller: Caller<'_, T<X>>, path: i32, line: i64, col: i64, s: i32| -> Result<i64> {
+            let (data, host) = guest_mem(&mut caller)?;
             let streams = &mut host.gen;
-            let text = cstr(data, s)?;
-            Ok(streams.intern(vec![CodePiece::Text(text)]))
+            let (path, text) = (cstr(data, path)?, cstr(data, s)?);
+            let caps = streams.caps.as_ref().ok_or_else(|| Error::msg("no host"))?;
+            caps.req
+                .send((path.clone(), MODE_CODE_AT))
+                .map_err(|_| Error::msg("generator host is gone"))?;
+            let (key, bytes) = match caps.resp.recv() {
+                Ok(Ok(Served::Copy(key, bytes))) => (key, bytes),
+                Ok(Ok(_)) => return Err(Error::msg("codeAt answered with no copy")),
+                Ok(Err(msg)) => return Err(Error::new(Denied(msg))),
+                Err(_) => return Err(Error::msg("generator host is gone")),
+            };
+            denied((streams.code).code_at(&key, &path, &bytes, (line, col), &text))
+        },
+    )?;
+    linker.func_wrap(
+        "vyrn_gen",
+        "at",
+        |mut caller: Caller<'_, T<X>>, h: i64, path: i32, line: i64, col: i64| -> Result<i64> {
+            let (data, host) = guest_mem(&mut caller)?;
+            denied(host.gen.code.at(h, &cstr(data, path)?, line, col))
         },
     )?;
     linker.func_wrap(
@@ -1080,38 +1323,32 @@ fn link<X: 'static>(linker: &mut wasmtime::Linker<wasi::Guest<X>>) -> wasmtime::
         "rawAt",
         |mut caller: Caller<'_, T<X>>, s: i32, path: i32, line: i64, col: i64| -> Result<i64> {
             let (data, host) = guest_mem(&mut caller)?;
-            let streams = &mut host.gen;
-            let text = cstr(data, s)?;
-            let path = cstr(data, path)?;
-            Ok(streams.intern(vec![CodePiece::Origin {
-                path,
-                line,
-                col,
-                text,
-            }]))
+            Ok((host.gen.code).raw_at(cstr(data, s)?, cstr(data, path)?, line, col))
         },
     )?;
+    // A `String` crosses as a pointer and anything else as `bits` and a null.
     linker.func_wrap(
         "vyrn_gen",
         "splice",
-        |mut caller: Caller<'_, T<X>>, tag: i32, bits: i64, p: i32, ctx: i64| -> Result<i64> {
+        |mut caller: Caller<'_, T<X>>, tag: i32, bits: i64, p: i32, indent: i32| -> Result<i64> {
             let (data, host) = guest_mem(&mut caller)?;
-            let streams = &mut host.gen;
-            let val = splice_value(tag, bits, p, data, streams)?;
-            // A splice violation traps.
-            let pieces = vyrn_frontend::gen::gen_code_splice(&val, ctx)
-                .map_err(|m| Error::new(Denied(m)))?;
-            Ok(caller.data_mut().gen.intern(pieces))
+            let text = (p != 0).then(|| cstr(data, p)).transpose()?;
+            let indent = cstr(data, indent)?;
+            denied(host.gen.code.splice(tag, bits, text, &indent))
         },
     )?;
     linker.func_wrap(
         "vyrn_gen",
         "concat",
         |mut caller: Caller<'_, T<X>>, a: i64, b: i64| -> Result<i64> {
-            let s = &mut caller.data_mut().gen;
-            let mut pieces = s.pieces(a)?.clone();
-            pieces.extend(s.pieces(b)?.iter().cloned());
-            Ok(s.intern(pieces))
+            denied(caller.data_mut().gen.code.concat(a, b))
+        },
+    )?;
+    linker.func_wrap(
+        "vyrn_gen",
+        "result",
+        |mut caller: Caller<'_, T<X>>, h: i64| -> Result<()> {
+            denied(caller.data_mut().gen.code.result(h))
         },
     )?;
     linker.func_wrap(
@@ -1119,8 +1356,7 @@ fn link<X: 'static>(linker: &mut wasmtime::Linker<wasi::Guest<X>>) -> wasmtime::
         "render",
         |mut caller: Caller<'_, T<X>>, h: i64| -> Result<i64> {
             let s = &mut caller.data_mut().gen;
-            let text = vyrn_frontend::gen::render_code(s.pieces(h)?);
-            s.stash = text.into_bytes();
+            s.stash = denied(s.code.render(h))?.into_bytes();
             Ok(s.stash.len() as i64)
         },
     )?;
@@ -1144,7 +1380,7 @@ fn link<X: 'static>(linker: &mut wasmtime::Linker<wasi::Guest<X>>) -> wasmtime::
                         .map_err(|_| Error::msg("generator host is gone"))?;
                     let lit = match caps.resp.recv() {
                         Ok(Ok(Served::Lit(lit))) => lit,
-                        Ok(Ok(Served::Bytes(..))) => {
+                        Ok(Ok(Served::Bytes(..) | Served::Copy(..))) => {
                             return Err(Error::msg("moduleInterface answered with bytes"))
                         }
                         // A scoping violation traps.
@@ -1230,37 +1466,6 @@ fn cstr(data: &[u8], at: i32) -> wasmtime::Result<String> {
         .ok_or_else(|| wasmtime::Error::msg("bad string pointer"))?;
     let n = rest.iter().position(|b| *b == 0).unwrap_or(rest.len());
     Ok(String::from_utf8_lossy(&rest[..n]).into_owned())
-}
-
-/// Rebuilds the value a `@codeSplice` call splices, from the tag codegen chose
-/// and the one word it sent, so the frontend's one splice rule runs on it.
-/// Floats cross as bits because the shortest-roundtrip formatting belongs on
-/// this side.
-#[cfg(feature = "host")]
-fn splice_value(
-    tag: i32,
-    bits: i64,
-    p: i32,
-    data: &[u8],
-    streams: &GenState,
-) -> wasmtime::Result<Spliced> {
-    Ok(match tag {
-        vyrn_codegen::TAG_STR => Spliced::Str(cstr(data, p)?),
-        vyrn_codegen::TAG_CODE => Spliced::Code(streams.pieces(bits)?.clone()),
-        vyrn_codegen::TAG_BOOL => Spliced::Bool(bits != 0),
-        // Codegen sign-extends a signed integer of any width.
-        vyrn_codegen::TAG_INT => Spliced::Int {
-            v: bits,
-            signed: true,
-        },
-        vyrn_codegen::TAG_UINT => Spliced::Int {
-            v: bits,
-            signed: false,
-        },
-        vyrn_codegen::TAG_F64 => Spliced::F64(f64::from_bits(bits as u64)),
-        vyrn_codegen::TAG_F32 => Spliced::F32(f32::from_bits(bits as u32)),
-        other => return Err(wasmtime::Error::msg(format!("bad splice tag {other}"))),
-    })
 }
 
 /// The key of a compiled artifact: the generator's whole module closure, not
@@ -1380,7 +1585,7 @@ fn module_cache() -> &'static std::sync::Mutex<std::collections::HashMap<String,
     CACHE.get_or_init(Default::default)
 }
 
-/// Compiles once and runs, returning the source the guest framed on stdout.
+/// Compiles once and runs, returning what the generator wrote.
 /// Three tiers, cheapest first: this process's modules, artifacts on disk,
 /// then emit plus Cranelift.
 #[cfg(feature = "host")]
@@ -1392,7 +1597,7 @@ fn run_module(
     inputs: &GenInputs<'_>,
     reads: &mut Vec<GenRead>,
     build: impl FnOnce() -> Result<Vec<u8>, EngineError>,
-) -> Result<String, EngineError> {
+) -> Result<Written, EngineError> {
     let cached = module_cache().lock().ok().and_then(|c| c.get(key).cloned());
     let module = match cached {
         Some(m) => m,
@@ -1516,11 +1721,11 @@ fn run_hosted(
     program: &Program,
     inputs: &GenInputs<'_>,
     reads: &mut Vec<GenRead>,
-) -> Result<String, EngineError> {
+) -> Result<Written, EngineError> {
     let fuel = wasm_fuel(inputs.fuel);
     let (req_tx, req_rx) = mpsc::channel::<(String, i32)>();
     let (resp_tx, resp_rx) = mpsc::channel::<Result<Served, String>>();
-    let (done_tx, done_rx) = mpsc::channel::<Result<String, EngineError>>();
+    let (done_tx, done_rx) = mpsc::channel::<Result<Written, EngineError>>();
 
     let prepared = prepared(key, module, program)?;
     let argv: Vec<String> = argv.to_vec();
@@ -1558,8 +1763,9 @@ fn run_hosted(
     }
 }
 
-/// Instantiates the module under [`wasi::Policy::generator`] and returns the
-/// source it framed on stdout.
+/// Instantiates the module under [`wasi::Policy::generator`] and returns what
+/// the generator wrote: a `String` framed on stdout, or a `Code` handed over
+/// through the `result` import.
 ///
 /// Embedded rather than spawned: the `wasmtime` CLI's launch measured ~106 ms.
 #[cfg(feature = "host")]
@@ -1569,7 +1775,7 @@ fn run_wasm(
     type_arg: Option<Expr>,
     fuel: u64,
     caps: Caps,
-) -> Result<String, EngineError> {
+) -> Result<Written, EngineError> {
     let gen = GenState {
         caps: Some(caps),
         types: prepared.types.clone(),
@@ -1593,7 +1799,7 @@ fn run_wasm(
         let spent = fuel - store.get_fuel().unwrap_or(0);
         eprintln!("genwasm fuel: {spent}");
     }
-    let guest = store.into_data();
+    let mut guest = store.into_data();
     match wasi::exit_code(result) {
         Ok(0) => {}
         // The guest failed on its own terms. The prefix comes off because
@@ -1628,10 +1834,18 @@ fn run_wasm(
         .drained()
         .map_err(|e| EngineError::Failed(e.to_string()))?;
     // Compile-time prints go to the compiler's stdout, never into the source.
+    // A `Code` result came through the `result` import, so all of stdout is
+    // prints.
     let stdout = guest.wasi.stdout.unwrap_or_default();
-    let (prints, source) = match unframe_result(&stdout) {
-        Ok(framed) => framed,
-        Err(why) => return Err(decline(why)),
+    let (prints, written) = match guest.gen.code.written() {
+        Some(written) => (stdout, written),
+        None => {
+            let (prints, source) = unframe_result(&stdout).map_err(decline)?;
+            let source = String::from_utf8(source)
+                .map_err(|_| EngineError::Failed("generator emitted invalid UTF-8".into()))?;
+            let spans = None;
+            (prints, Written { source, spans })
+        }
     };
     if !prints.is_empty() {
         use std::io::Write;
@@ -1639,8 +1853,7 @@ fn run_wasm(
         let _ = out.write_all(&prints);
         let _ = out.flush();
     }
-    String::from_utf8(source)
-        .map_err(|_| EngineError::Failed("generator emitted invalid UTF-8".into()))
+    Ok(written)
 }
 
 #[cfg(test)]
@@ -1679,6 +1892,22 @@ mod tests {
         // The result contains a marker: two ends.
         let inside = framed("", &format!("fn f() -> Str {{ return \"{RESULT_END}\" }}"));
         assert!(unframe_result(&inside).is_err());
+    }
+
+    #[test]
+    fn a_long_concatenation_chain_drops_without_recursing() {
+        let mut arena = Arena::default();
+        let leaf = arena.leaf(Span::data("x".into()));
+        let mut acc = leaf;
+        for _ in 0..1_000_000 {
+            let cat = Rope::Cat(
+                arena.rope(acc).unwrap().clone(),
+                arena.rope(leaf).unwrap().clone(),
+            );
+            acc = arena.intern(Arc::new(cat));
+        }
+        arena.result = arena.rope(acc).ok().cloned();
+        drop(arena);
     }
 
     /// `load_artifact` maps its bytes in as native code, so this is its

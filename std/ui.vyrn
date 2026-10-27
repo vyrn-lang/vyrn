@@ -752,7 +752,7 @@ type UiPageInfo = {
 /// Line 1, column 1: reflection gives a module's surface, not the line of a
 /// declaration, so the file is the finest correct anchor.
 gen fn uiPageErrAt(path: String, message: String) -> String {
-    return report(Error, path, 1, 1, message)
+    return render(report(Error, path, 1, 1, message))
 }
 
 gen fn uiContractErrs(iface: ModuleInterface, path: String) -> String {
@@ -1252,10 +1252,10 @@ gen fn uiCollisionErrors(pages: Array<UiPageInfo>) -> String {
         while j < pages.length {
             if uiCollisionKey(pages[i].segs) == uiCollisionKey(pages[j].segs) {
                 err = err
-                + reportHere(
+                + render(reportHere(
                     Error,
                     "pages `\{pages[i].modPath}` and `\{pages[j].modPath}` both claim route `\{uiUrlPatternOf(pages[i].segs)}` — one URL reaches one page, so move or rename one of them",
-                )
+                ))
             }
             j = j + 1
         }
@@ -1277,10 +1277,10 @@ gen fn uiHelperCollisions(pages: Array<UiPageInfo>) -> String {
             let sameRoute = uiCollisionKey(pages[i].segs) == uiCollisionKey(pages[j].segs)
             if sameName && sameRoute == false {
                 out = out
-                + reportHere(
+                + render(reportHere(
                     Error,
                     "routes `\{uiUrlPatternOf(pages[i].segs)}` and `\{uiUrlPatternOf(pages[j].segs)}` both name the typed-URL helper `\{uiHelperNameOf(pages[i])}` — a URL slug and a Vyrn identifier are different alphabets, and these two slugs convert to one identifier; rename one route",
-                )
+                ))
             }
             j = j + 1
         }
@@ -2048,12 +2048,12 @@ export gen fn pages(dir: String) -> String {
     let infos = scan.pages
     if infos.length == 0 {
         if scan.err != "" {
-            return reportHere(Error, "std/ui cannot read `\{dir}`: \{scan.err}")
+            return render(reportHere(Error, "std/ui cannot read `\{dir}`: \{scan.err}"))
         }
-        return reportHere(
+        return render(reportHere(
             Error,
             "no page modules under `\{dir}` — a page is a `.vyrn` or `.vyx` file in that directory, and its path is its route",
-        )
+        ))
     }
     let mut err = scan.err
     for p in infos {
@@ -2073,12 +2073,12 @@ export gen fn pagesThemed(dir: String, theme: String) -> String {
     let infos = scan.pages
     if infos.length == 0 {
         if scan.err != "" {
-            return reportHere(Error, "std/ui cannot read `\{dir}`: \{scan.err}")
+            return render(reportHere(Error, "std/ui cannot read `\{dir}`: \{scan.err}"))
         }
-        return reportHere(
+        return render(reportHere(
             Error,
             "no page modules under `\{dir}` — a page is a `.vyrn` or `.vyx` file in that directory, and its path is its route",
-        )
+        ))
     }
     let mut err = scan.err
     for p in infos {
@@ -2324,12 +2324,12 @@ export gen fn pagesClient(dir: String) -> String {
     let infos = scan.pages
     if infos.length == 0 {
         if scan.err != "" {
-            return reportHere(Error, "std/ui cannot read `\{dir}`: \{scan.err}")
+            return render(reportHere(Error, "std/ui cannot read `\{dir}`: \{scan.err}"))
         }
-        return reportHere(
+        return render(reportHere(
             Error,
             "no page modules under `\{dir}` — a page is a `.vyrn` or `.vyx` file in that directory, and its path is its route",
-        )
+        ))
     }
     let mut err = scan.err
     for p in infos {
@@ -2348,12 +2348,12 @@ export gen fn pagesClientThemed(dir: String, theme: String) -> String {
     let infos = scan.pages
     if infos.length == 0 {
         if scan.err != "" {
-            return reportHere(Error, "std/ui cannot read `\{dir}`: \{scan.err}")
+            return render(reportHere(Error, "std/ui cannot read `\{dir}`: \{scan.err}"))
         }
-        return reportHere(
+        return render(reportHere(
             Error,
             "no page modules under `\{dir}` — a page is a `.vyrn` or `.vyx` file in that directory, and its path is its route",
-        )
+        ))
     }
     let mut err = scan.err
     for p in infos {

@@ -4,6 +4,7 @@
 - [std/arrays](std/arrays.md) — Higher-order array helpers such as `map`, `filter` and `fold`, in Vyrn.
 - [std/bench](std/bench.md) — The runtime the `vyrn bench` transform links against.
 - [std/cli](std/cli.md) — The command line is a record type, and `cli` writes its parser and help.
+- [std/code](std/code.md) — The `Code` helpers a generator writes in Vyrn: list forms over code quotes.
 - [std/codecs](std/codecs.md) — Hex, base64 and percent encoding over UTF-8 bytes. These are the
 - [std/columns](std/columns.md) — A record type laid out as one array per field.
 - [std/connect](std/connect.md) — Connect wire compatibility as a library, built on

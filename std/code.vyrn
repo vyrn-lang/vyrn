@@ -1,0 +1,30 @@
+/// The `Code` helpers a generator writes in Vyrn: list forms over code quotes.
+///
+/// A quote holds holes only, and logic lives in ordinary functions that return
+/// `Code`. `join` is the one list form: a hole takes no `Array<Code>`.
+///
+/// ```vyrn
+/// import { join } from "std/code"
+///
+/// export gen fn sum(names: Array<String>) -> Code {
+///     let mut terms: Array<Code> = []
+///     for n in names {
+///         terms.push(vyrn"\{name(n)}()")
+///     }
+///     return vyrn"export fn total() -> Int64 { return \{join(terms, vyrn" + ")} }"
+/// }
+/// ```
+
+/// Joins `xs` with `sep` between each pair; no element gives empty `Code`.
+export gen fn join(xs: Array<Code>, sep: Code) -> Code {
+    let mut out = vyrn""
+    let mut i = 0
+    while i < xs.length {
+        if i > 0 {
+            out = out + sep
+        }
+        out = out + xs[i]
+        i = i + 1
+    }
+    return out
+}

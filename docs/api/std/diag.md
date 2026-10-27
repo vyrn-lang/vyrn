@@ -2,25 +2,24 @@
 
 A generator reports a diagnostic, anchored in a file it read.
 
-A line of a `gen fn`'s output may be a report: a severity, an anchor in a
-file the generator read, and a message. The loader lifts it out, and every
-tool shows it like any other diagnostic.
+A report is `Code`: a generator returns it with the module it writes, and
+the loader shows it like any other diagnostic. Only a report is read as one,
+so text a generator copies cannot forge a diagnostic.
 
 ```vyrn
 import { report, Severity } from "std/diag"
 
-export gen fn table(path: String) -> String {
-    let mut out = ""
-    out = out + report(Warning, path, 9, 3, "column `email` has no length limit")
-    out = out + "export fn columnCount() -> Int64 { return 3 }\n"
-    return out
+export gen fn table(path: String) -> Code {
+    let warn = report(Warning, path, 9, 3, "column `email` has no length limit")
+    return warn + vyrn"export fn columnCount() -> Int64 { return 3 }"
 }
 ```
 
 A `Warning` changes no exit code and no output byte, unless the build passes
 `--deny-warnings`. An `Error` fails the load at the anchor. The anchor is a
-1-based line and column, in `//@origin` notation, resolved
-against the module that imported the generator.
+1-based line and column, resolved against the module that imported the
+generator. A generator that returns a `String` writes `render(report(..))`,
+a `//@diag` line, until the last `String` generator is gone.
 
 ## Severity
 
@@ -33,7 +32,7 @@ type Severity = enum { Warning, Error }
 ## report
 
 ```vyrn
-fn report(severity: Severity, file: String, line: Int64, col: Int64, message: String) -> String
+fn report(severity: Severity, file: String, line: Int64, col: Int64, message: String) -> Code
 ```
 
 A report anchored in an input file, at a 1-based `line` and `col`.
@@ -41,7 +40,7 @@ A report anchored in an input file, at a 1-based `line` and `col`.
 ## reportHere
 
 ```vyrn
-fn reportHere(severity: Severity, message: String) -> String
+fn reportHere(severity: Severity, message: String) -> Code
 ```
 
 A report with no position, shown at the generated line it sits on: for a

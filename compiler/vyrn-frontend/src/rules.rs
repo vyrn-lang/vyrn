@@ -498,7 +498,14 @@ rules! {
     GenOnlySurface { surface } "{surface} only available during generation";
     QuoteSplice { t }
         "cannot splice {t} into a code quote \
-        (expected String, number, Bool, or Code)";
+        (expected String, number, Bool, Name or Code)";
+    GenArity { name, want, got } "`{name}` takes {want} arguments, got {got}";
+    QuoteSpliceArray {} "cannot splice an `Array<Code>` into a code quote"
+        fix "join the elements with `join(xs, sep)` from `std/code`";
+    QuoteSpliceOption {} "cannot splice an `Option<Code>` into a code quote"
+        fix "write `x ?? vyrn\"\"` for nothing in its place";
+    QuoteGlued { t } "a hole glued to a word writes part of a name, so it takes a `Name`, found {t}"
+        fix "make the `Name` with `name(s)`, which checks the identifier";
     RenderType { t } "`render` needs a Code value, found {t}";
     RawAtArity { got } "`rawAt` takes 4 arguments (text, path, line, col), got {got}";
     BytesArity { got } "`bytes` takes 1 argument, or 3 with a byte range, got {got}";
