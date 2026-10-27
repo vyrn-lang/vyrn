@@ -242,6 +242,132 @@ thread_local! {
     /// The page's answer to [`run_generator`]: the module's stdout, or why it
     /// did not run.
     static GEN_OUT: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
+    /// The `Code` values of the generator the page is running: the page serves
+    /// its code imports through [`code_call`].
+    static CODE: RefCell<vyrn_genwasm::Arena> = RefCell::default();
+    /// A [`code_call`] request, then its answer.
+    static CODE_IO: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Reserves `len` bytes for a [`code_call`] request and returns where to write
+/// them.
+#[no_mangle]
+pub extern "C" fn code_request(len: usize) -> *mut u8 {
+    CODE_IO.with(|o| {
+        let mut b = o.borrow_mut();
+        b.clear();
+        b.resize(len, 0);
+        b.as_mut_ptr()
+    })
+}
+
+/// Where the last [`code_call`]'s answer begins; its length was that call's
+/// return value.
+#[no_mangle]
+pub extern "C" fn code_answer() -> *const u8 {
+    CODE_IO.with(|o| o.borrow().as_ptr())
+}
+
+/// Serves one code import of the generator the page is running, while
+/// [`run_generator`] waits. The request is the import's name (`u32` length,
+/// bytes), then its arguments as [`gen_request`] writes atoms, a guest
+/// `String` as its bytes. The answer is 0, the `i64` result and the text
+/// `render` leaves for `fetch`; or 1 and why the run ends.
+#[no_mangle]
+pub extern "C" fn code_call(len: usize) -> usize {
+    let req = CODE_IO.with(|o| std::mem::take(&mut *o.borrow_mut()));
+    let answer = match decode_call(&req[..len.min(req.len())]) {
+        Some((name, args)) => CODE.with(|c| code_import(&mut c.borrow_mut(), &name, args)),
+        None => Err("a code import's request does not decode".to_string()),
+    };
+    let bytes = match answer {
+        Ok((v, text)) => [&[0], &v.to_le_bytes()[..], &text].concat(),
+        Err(why) => [&[1], why.as_bytes()].concat(),
+    };
+    CODE_IO.with(|o| {
+        *o.borrow_mut() = bytes;
+        o.borrow().len()
+    })
+}
+
+/// A `code_call` argument.
+enum Arg {
+    Int(i64),
+    Str(String),
+}
+
+fn decode_call(b: &[u8]) -> Option<(String, Vec<Arg>)> {
+    let mut r = Reader(b);
+    let name = String::from_utf8(r.bytes()?.to_vec()).ok()?;
+    let args = (0..r.u32()?)
+        .map(|_| match r.take(1)?[0] {
+            0 => Some(Arg::Int(i64::from_le_bytes(r.take(8)?.try_into().ok()?))),
+            _ => Some(Arg::Str(String::from_utf8_lossy(r.bytes()?).into_owned())),
+        })
+        .collect::<Option<_>>()?;
+    r.0.is_empty().then_some((name, args))
+}
+
+struct Reader<'a>(&'a [u8]);
+
+impl<'a> Reader<'a> {
+    fn take(&mut self, n: usize) -> Option<&'a [u8]> {
+        let (head, rest) = (self.0.len() >= n).then(|| self.0.split_at(n))?;
+        self.0 = rest;
+        Some(head)
+    }
+
+    fn u32(&mut self) -> Option<u32> {
+        Some(u32::from_le_bytes(self.take(4)?.try_into().ok()?))
+    }
+
+    fn bytes(&mut self) -> Option<&'a [u8]> {
+        let n = self.u32()? as usize;
+        self.take(n)
+    }
+}
+
+/// Runs code import `name` in `code`, as the native linker does: the result,
+/// and the text `render` leaves for `fetch`. A null `String` pointer, which
+/// `splice` sends for a value that is no `String`, arrives as `0`.
+fn code_import(
+    code: &mut vyrn_genwasm::Arena,
+    name: &str,
+    mut args: Vec<Arg>,
+) -> Result<(i64, Vec<u8>), String> {
+    use std::mem::take;
+    use Arg::{Int, Str};
+    let v = match (name, args.as_mut_slice()) {
+        ("text", [Str(s), Str(key), Int(line), Int(col)]) => {
+            code.text(take(s), take(key), *line, *col)
+        }
+        ("raw", [Str(s)]) => code.raw(take(s)),
+        ("rawAt", [Str(s), Str(path), Int(line), Int(col)]) => {
+            code.raw_at(take(s), take(path), *line, *col)
+        }
+        ("name", [Str(s)]) => code.name(s)?,
+        ("diag", [Str(sev), Str(anchor), Str(msg)]) => code.diag(sev, anchor, msg)?,
+        ("at", [Int(h), Str(path), Int(line), Int(col)]) => code.at(*h, path, *line, *col)?,
+        ("splice", [Int(tag), Int(bits), text, Str(indent)]) => {
+            let text = match text {
+                Str(s) => Some(take(s)),
+                Int(_) => None,
+            };
+            code.splice(*tag as i32, *bits, text, indent)?
+        }
+        ("concat", [Int(a), Int(b)]) => code.concat(*a, *b)?,
+        ("result", [Int(h)]) => code.result(*h).map(|()| 0)?,
+        ("render", [Int(h)]) => {
+            let text = code.render(*h)?.into_bytes();
+            return Ok((text.len() as i64, text));
+        }
+        _ => {
+            return Err(format!(
+                "`vyrn_gen.{name}` was called with arguments of another shape"
+            ))
+        }
+    };
+    Ok((v, Vec::new()))
 }
 
 /// Reserves `len` bytes for the page's answer to `run_generator` and returns
@@ -266,16 +392,18 @@ extern "C" {
     fn page_run_generator(req: *const u8, len: usize) -> u32;
 }
 
-/// Runs a generator module in the page and answers its stdout.
+/// Runs a generator module in the page and answers its stdout and the `Code`
+/// values its code imports made.
 fn run_generator(
     module: &[u8],
     argv: &[String],
     atoms: &[vyrn_genwasm::Atom],
-) -> Result<Vec<u8>, String> {
+) -> Result<(Vec<u8>, vyrn_genwasm::Arena), String> {
     let status = page_run(&gen_request(module, argv, atoms))?;
     let out = GEN_OUT.with(|o| std::mem::take(&mut *o.borrow_mut()));
+    let code = CODE.with(|c| c.take());
     match status {
-        0 => Ok(out),
+        0 => Ok((out, code)),
         _ => Err(String::from_utf8_lossy(&out).into_owned()),
     }
 }
