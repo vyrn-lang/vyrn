@@ -1319,18 +1319,24 @@ fn dev_builds_nothing_for_a_file_the_build_did_not_read() {
 /// A `handle` that waits: `/slow` and `/boom` wait long, every other path
 /// briefly. Each answer reports `count` before and after its wait and how many
 /// answers ended, so the bodies show which request ended first and what the
-/// others wrote across its wait. `/boom` traps once its wait ends.
+/// others wrote across its wait. `/boom` traps once its wait ends. `/parked`
+/// answers at once how many requests reached their wait ([`wait_parked`]).
 const WAITING_SRC: &str = r#"
 import { sleep } from "std/task"
 
 let mut count: Int64 = 0
 let mut ended: Int64 = 0
+let mut parked: Int64 = 0
 
 fn reply(status: Int64, body: consume String) -> Response {
     return Response { status: status, contentType: "text/plain", body: body, vary: "", headers: [:] }
 }
 
 fn handle(req: Request) -> Response {
+    let before = count
+    if req.path == "/parked" {
+        return reply(200, "\{parked}")
+    }
     let mut ms: Int64 = 10
     if req.path == "/slow" {
         ms = 1500
@@ -1338,7 +1344,7 @@ fn handle(req: Request) -> Response {
     if req.path == "/boom" {
         ms = 400
     }
-    let before = count
+    parked = parked + 1
     await sleep(ms)
     count = count + 1
     if req.path == "/boom" {
@@ -1349,6 +1355,19 @@ fn handle(req: Request) -> Response {
     return reply(200, "\{req.path} before=\{before} after=\{count} ended=\{ended}")
 }
 "#;
+
+/// Returns once `/parked` answers `n`: that many requests reached their wait.
+/// It asks again every 10 ms, for at most 10 s.
+fn wait_parked(port: u16, n: usize) {
+    let start = Instant::now();
+    while get(port, "/parked").1 != n.to_string() {
+        assert!(
+            start.elapsed() < Duration::from_secs(10),
+            "{n} requests never parked"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
 
 /// Sends `path` on its own thread, `after` the start, and returns the answer
 /// with the time it took.
@@ -1380,16 +1399,15 @@ fn overlapping_waiting_requests_answer_in_timer_order() {
 }
 
 /// Module state may change at an `await`: the slow request read `count`
-/// before its wait, and the fast one wrote it during that wait.
+/// before its wait, and each fast one, sent once the one before answered,
+/// wrote it during that wait.
 #[test]
 fn module_state_changes_across_an_await_between_requests() {
     let s = start_server_on(WAITING_SRC, &[]);
     let slow = get_later(s.server.port, "/slow", Duration::ZERO);
-    let fast: Vec<_> = (0..3)
-        .map(|k| get_later(s.server.port, "/fast", Duration::from_millis(200 + 150 * k)))
-        .collect();
-    for (k, f) in fast.into_iter().enumerate() {
-        let ((_, body), _) = f.join().unwrap();
+    wait_parked(s.server.port, 1);
+    for k in 0..3 {
+        let (_, body) = get(s.server.port, "/fast");
         assert_eq!(
             body,
             format!("/fast before={k} after={} ended={}", k + 1, k + 1)
@@ -1405,8 +1423,8 @@ fn module_state_changes_across_an_await_between_requests() {
 fn a_trap_in_one_of_two_waiting_requests_answers_500_for_it_alone() {
     let s = start_server_on(WAITING_SRC, &[]);
     let slow = get_later(s.server.port, "/slow", Duration::ZERO);
-    let boom = get_later(s.server.port, "/boom", Duration::from_millis(200));
-    let ((status, body), _) = boom.join().unwrap();
+    wait_parked(s.server.port, 1);
+    let (status, body) = get(s.server.port, "/boom");
     assert_eq!(status, "HTTP/1.1 500 Internal Server Error");
     assert_eq!(body, "internal error");
     let ((status, body), _) = slow.join().unwrap();
@@ -1427,8 +1445,14 @@ fn dev_answers_a_request_parked_across_a_rebuild_with_503() {
         r#"import { msg } from "./msg"
 import { sleep } from "std/task"
 
+let mut parked: Int64 = 0
+
 fn handle(req: Request) -> Response {
+    if req.path == "/parked" {
+        return Response { status: 200, contentType: "text/plain", body: "\{parked}", vary: "", headers: [:] }
+    }
     if req.path == "/slow" {
+        parked = parked + 1
         await sleep(60000)
     }
     return Response { status: 200, contentType: "text/plain", body: msg(), vary: "", headers: [:] }
@@ -1436,7 +1460,7 @@ fn handle(req: Request) -> Response {
 "#,
     );
     let slow = get_later(d.server.port, "/slow", Duration::ZERO);
-    std::thread::sleep(Duration::from_millis(300));
+    wait_parked(d.server.port, 1);
     assert_eq!(get(d.server.port, "/").1, "one");
     d.edit(&dev_msg("two"), "dev: rebuilt");
     assert_eq!(get(d.server.port, "/").1, "two");
