@@ -1,4 +1,4 @@
-/// Waiting for the host: `sleep`, the one host wait, and the run queue.
+/// Waiting for the host: `sleep`, the host's timer, and the run queue.
 ///
 /// A function that reaches a wait waits itself, and each call of it is
 /// marked `await` (language.md, Waiting).
@@ -198,6 +198,16 @@ fn delivery(id: Int64) -> Int32 {
         waits.swapRemove(i)
     }
     return st
+}
+
+/// The payload the wake on `id` delivered, 0 until it came: a host wait that
+/// answers a value reads it here before `delivery` ends the wait.
+fn payloadOf(id: Int64) -> Int64 {
+    let i = waitAt(id)
+    if i == waits.length {
+        return 0
+    }
+    return waits[i].payload
 }
 
 /// A `both` or `race` cancels a branch by polling it between `cancelBegin`

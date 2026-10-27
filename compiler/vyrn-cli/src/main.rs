@@ -193,8 +193,14 @@ const DEFAULT_NATIVE_TARGET: NativeTarget = NativeTarget::V2;
 ///   engines. Passed unconditionally: aarch64's baseline has FMA. At v2 the
 ///   assembly is identical with and without it.
 /// - `-pthread`: worker threads. Win32 threads need no flag.
+/// - `-mmacosx-version-min`: the oldest macOS a binary runs on, the value the
+///   rustls-ffi library is built for too (`VYRN_MACOS_MIN`, `build.rs`), so ld
+///   links no object built for a newer one.
 fn native_compile_flags(cmd: &mut Command, target: NativeTarget) {
     cmd.arg("-O2").arg("-ffp-contract=off");
+    if cfg!(target_os = "macos") {
+        cmd.arg(concat!("-mmacosx-version-min=", env!("VYRN_MACOS_MIN")));
+    }
     // `VYRN_DEBUG_SYMBOLS=1` keeps debug info for a symbolizer; `-g` changes
     // no codegen under -O2.
     if std::env::var_os("VYRN_DEBUG_SYMBOLS").is_some() {
@@ -209,6 +215,8 @@ fn native_compile_flags(cmd: &mut Command, target: NativeTarget) {
 }
 
 /// The flags only the link step takes; clang warns about them on a compile.
+/// A module that sends requests adds [`TLS_SYSTEM_LIBS`]. A flag both lists
+/// name is passed once, at its first place: ld64 warns on a repeated library.
 ///
 /// - `-lm`: below SSE4.1 the vector roundings scalarize to `ceilf`/`floorf`/
 ///   `truncf`/`rintf`, in libm on Unix. Windows links them from the UCRT by
@@ -216,16 +224,26 @@ fn native_compile_flags(cmd: &mut Command, target: NativeTarget) {
 /// - `/STACK`: the run stack; see `trap::RUN_STACK_BYTES`.
 /// - `-lbcrypt`: `random_get` is `BCryptGenRandom`, as in
 ///   `vyrn-genwasm/src/wasi.rs`.
-fn native_link_flags(cmd: &mut Command) {
-    if cfg!(windows) {
-        cmd.arg(format!(
-            "-Wl,/STACK:{}",
-            vyrn_frontend::trap::RUN_STACK_BYTES
-        ));
-        cmd.arg("-lbcrypt");
+fn native_link_flags(cmd: &mut Command, sends: bool) {
+    let own = if cfg!(windows) {
+        vec![
+            format!("-Wl,/STACK:{}", vyrn_frontend::trap::RUN_STACK_BYTES),
+            "-lbcrypt".to_string(),
+        ]
     } else {
-        cmd.arg("-lm");
+        vec!["-lm".to_string()]
+    };
+    let tls = TLS_SYSTEM_LIBS
+        .iter()
+        .filter(|_| sends)
+        .map(|f| f.to_string());
+    let mut flags: Vec<String> = Vec::new();
+    for f in own.into_iter().chain(tls) {
+        if !flags.contains(&f) {
+            flags.push(f);
+        }
     }
+    cmd.args(flags);
 }
 
 /// The compiler is allocation-bound; see `mimalloc` in `Cargo.toml`. The `allocs`
@@ -4041,7 +4059,7 @@ fn vyrnServeCall(req: Request) -> Response {
     return Response { status: 500, contentType: "", body: "", vary: "", headers: [:] }
 }
 
-/// One field of a packed response: its byte length, a colon, its bytes.
+/// One field of a packed response (compiler.md, Host waits).
 fn vyrnServeField(s: String) -> String {
     return "\{s.byteLength}:\{s}"
 }
@@ -4222,30 +4240,27 @@ fn serve_end(
         .ok_or_else(|| "vyrnServeHandle: a response the host cannot read".into())
 }
 
-/// The response `vyrnServeHandle` packed ([`SERVE_SHIM`]): each field its byte
-/// length, a colon and its bytes. `None` for anything else.
+/// The response `vyrnServeHandle` packed ([`SERVE_SHIM`]) as fields
+/// ([`vyrn_cli::wire`]). `None` for anything else.
 fn unpack_response(packed: &str) -> Option<ServeAnswer> {
-    let mut rest = packed;
-    let mut field = || -> Option<&str> {
-        let (n, tail) = rest.split_once(':')?;
-        let n: usize = n.parse().ok()?;
-        let f = tail.get(..n)?;
-        rest = tail.get(n..)?;
-        Some(f)
-    };
+    let fields = vyrn_cli::wire::fields(packed.as_bytes())?;
+    let mut fields = fields
+        .iter()
+        .map(|f| String::from_utf8_lossy(f).into_owned());
+    let mut field = || fields.next();
     let status = field()?.parse().ok()?;
-    let content_type = field()?.to_string();
-    let vary = field()?.to_string();
+    let content_type = field()?;
+    let vary = field()?;
     let live = field()? == "1";
     let n: usize = field()?.parse().ok()?;
     let mut headers = Vec::new();
     for _ in 0..n {
-        headers.push((field()?.to_string(), field()?.to_string()));
+        headers.push((field()?, field()?));
     }
     let resp = ServeResponse {
         status,
         content_type,
-        body: field()?.to_string(),
+        body: field()?,
         vary,
         headers,
     };
@@ -4443,11 +4458,15 @@ fn serve_loop(
 /// The connections the accept loop took and no instance has yet. An instance
 /// waits on `ready` with the lock released, so instances that wait at once
 /// each wake at their own next completion, and any idle one takes the next
-/// connection.
+/// connection. A reply to a request an instance sent wakes every instance
+/// ([`Accepted::reply`]); each one with nothing due waits again.
 #[derive(Default)]
 struct Accepted {
     queue: std::sync::Mutex<std::collections::VecDeque<std::net::TcpStream>>,
     ready: std::sync::Condvar,
+    /// How many replies came: an instance reads it before it delivers what is
+    /// due, and stops waiting once it moved.
+    replies: std::sync::atomic::AtomicU64,
 }
 
 impl Accepted {
@@ -4461,15 +4480,34 @@ impl Accepted {
         }
     }
 
+    /// A reply came on a request's thread. The count moves before the lock is
+    /// taken, so an instance that read the count under it either sees the move
+    /// or already waits and is woken.
+    fn reply(&self) {
+        self.replies
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let _queue = vyrn_frontend::session::locked(&self.queue);
+        self.ready.notify_all();
+    }
+
+    /// How many replies came so far, for [`Accepted::next`].
+    fn replies(&self) -> u64 {
+        self.replies.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
     /// The next connection, waited for at most `left`, or until one comes when
-    /// `left` is `None`. `None` when the time ran out: a completion is due.
-    fn next(&self, left: Option<std::time::Duration>) -> Option<std::net::TcpStream> {
+    /// `left` is `None`. `None` when the time ran out or a reply came after
+    /// [`Accepted::replies`] read `seen`: a completion is due.
+    fn next(&self, left: Option<std::time::Duration>, seen: u64) -> Option<std::net::TcpStream> {
         use std::sync::PoisonError;
         let until = left.map(|d| std::time::Instant::now() + d);
         let mut queue = vyrn_frontend::session::locked(&self.queue);
         loop {
             if let Some(s) = queue.pop_front() {
                 return Some(s);
+            }
+            if self.replies() != seen {
+                return None;
             }
             queue = match until {
                 None => (self.ready.wait(queue)).unwrap_or_else(PoisonError::into_inner),
@@ -4504,24 +4542,29 @@ struct Parked {
 /// new build.
 fn serve_instance(
     mut res: wasmrun::Resident,
-    accepted: &Accepted,
+    accepted: &std::sync::Arc<Accepted>,
     dev: Option<&DevAssets>,
     mut gen: u64,
     mut newer: impl FnMut(&mut u64) -> Option<wasmrun::Resident>,
 ) -> ! {
+    let bell = std::sync::Arc::clone(accepted);
+    let bell: std::sync::Arc<dyn Fn() + Send + Sync> = std::sync::Arc::new(move || bell.reply());
+    res.on_reply(std::sync::Arc::clone(&bell));
     let mut parked: std::collections::HashMap<i64, Parked> = std::collections::HashMap::new();
     loop {
+        let seen = accepted.replies();
         let left = res.advance().unwrap_or_else(|e| {
             eprintln!("error: {e}");
             None
         });
         serve_ended(&mut res, &mut parked, dev.map(|d| (d, gen)));
-        let next = accepted.next(left);
-        if let Some(build) = newer(&mut gen) {
+        let next = accepted.next(left, seen);
+        if let Some(mut build) = newer(&mut gen) {
             for (_, mut p) in parked.drain() {
                 eprintln!("{} {} -> 503 (rebuilt)", p.method, p.path);
                 write_response(&mut p.stream, 503, "text/plain", b"the server was rebuilt");
             }
+            build.on_reply(std::sync::Arc::clone(&bell));
             res = build;
         }
         let Some(mut stream) = next else { continue };
@@ -4587,7 +4630,7 @@ fn serve_pool(
     gen: u64,
     banner: impl FnOnce(),
 ) {
-    let accepted = Accepted::default();
+    let accepted = std::sync::Arc::new(Accepted::default());
     std::thread::scope(|s| {
         for i in 0..n {
             let accepted = &accepted;
@@ -6330,11 +6373,17 @@ fn build_wasm2c(
     let pch = native.pch()?;
     // The link order of the single clang call this replaced; it fixes where
     // the program's functions land.
-    let objs = [
+    let mut objs = vec![
         native.host(&host_path, &host_text, &header, &hdr_def)?,
         native.runtime("wasm-rt-impl")?,
         native.runtime("wasm-rt-mem-impl")?,
     ];
+    // Only a module that sends requests links the client, so every other program links what
+    // it linked before `std/fetch` existed.
+    let sends = vyrn_codegen::toolchain::sends_requests(&header);
+    if sends {
+        objs.extend(native.net(trusted_test_root()?.as_deref())?);
+    }
     let stage = vyrn_frontend::manifest::stage_beside(&out);
     let mut cmd = native.cc();
     cmd.arg("-include-pch")
@@ -6344,7 +6393,7 @@ fn build_wasm2c(
         .arg("-o")
         .arg(&stage)
         .arg(&hdr_def);
-    native_link_flags(&mut cmd);
+    native_link_flags(&mut cmd, sends);
     let linked = match cmd.status() {
         Ok(s) if s.success() => Ok(()),
         Ok(s) => {
@@ -6357,6 +6406,66 @@ fn build_wasm2c(
         }
     };
     place_built(&stage, &out, linked)
+}
+
+/// The system libraries rustls-ffi's static library needs, as rustls-ffi's
+/// `tests/static_libs.rs` lists them per platform, and the sockets of `wasi_net.c`.
+/// Each entry is one argument, so [`native_link_flags`] can drop a repeat.
+/// On Windows the library asks for the DLL C runtime; a native binary links the static
+/// one, so it runs without the Visual C++ redistributable, fetching or not. On macOS
+/// clang links libSystem into every program, so the list leaves out `-lSystem`.
+#[cfg(windows)]
+const TLS_SYSTEM_LIBS: &[&str] = &[
+    "-lws2_32",
+    "-ladvapi32",
+    "-lbcrypt",
+    "-lcrypt32",
+    "-lcryptnet",
+    "-lkernel32",
+    "-lncrypt",
+    "-llegacy_stdio_definitions",
+    "-lntdll",
+    "-luserenv",
+    "-lsynchronization",
+    "-Wl,/NODEFAULTLIB:msvcrt.lib",
+];
+#[cfg(target_os = "macos")]
+const TLS_SYSTEM_LIBS: &[&str] = &[
+    "-Wl,-framework,Security",
+    "-Wl,-framework,CoreFoundation",
+    "-liconv",
+    "-lc",
+    "-lm",
+];
+#[cfg(not(any(windows, target_os = "macos")))]
+const TLS_SYSTEM_LIBS: &[&str] = &[
+    "-lgcc_s",
+    "-lutil",
+    "-lrt",
+    "-lpthread",
+    "-lm",
+    "-ldl",
+    "-lc",
+];
+
+/// The PEM certificate `VYRN_TEST_TLS_ROOT` names, which a native build that sends requests
+/// trusts beside the Mozilla roots: the test harness's root for its own server. The built
+/// binary carries no switch; the build says so on stderr whenever it takes one.
+fn trusted_test_root() -> Result<Option<String>, ()> {
+    let Some(path) = std::env::var_os("VYRN_TEST_TLS_ROOT") else {
+        return Ok(None);
+    };
+    let pem = std::fs::read_to_string(&path).map_err(|e| {
+        eprintln!(
+            "error: VYRN_TEST_TLS_ROOT: cannot read {}: {e}",
+            Path::new(&path).display()
+        )
+    })?;
+    eprintln!(
+        "warning: this build trusts an extra TLS root from VYRN_TEST_TLS_ROOT ({})",
+        Path::new(&path).display()
+    );
+    Ok(Some(pem))
 }
 
 #[cfg(test)]

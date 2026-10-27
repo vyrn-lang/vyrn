@@ -112,7 +112,11 @@ fn the_wake_a_host_delivers_first_wins_a_race() {
     let bytes = std::fs::read(&wasm).expect("the built module");
     let clock = run(&bytes, quiet("race.vyrn", None)).expect("the module runs");
     assert_eq!(norm(&clock.stdout), "second: fast after 10, held by fast\n");
-    let slow = vec![Wake { id: 1, status: 0 }];
+    let slow = vec![Wake {
+        id: 1,
+        status: 0,
+        reply: None,
+    }];
     for _ in 0..2 {
         let out = run(&bytes, quiet("race.vyrn", Some(slow.clone()))).expect("the module runs");
         let seen = (out.code, norm(&out.stdout), norm(&out.stderr), out.wakes);
@@ -232,8 +236,18 @@ fn the_host_reads_the_result_of_a_task_it_started() {
     assert_eq!(res.ask_int("later", &[4]), Ok(8));
     assert_eq!(res.ask_text("named", &[2]).as_deref(), Ok("after 2"));
     // `main` waits on operations 1 to 3, so the export's sleep is operation 4.
-    let mut cancel: Vec<Wake> = (1..=3).map(|id| Wake { id, status: 0 }).collect();
-    cancel.push(Wake { id: 4, status: 1 });
+    let mut cancel: Vec<Wake> = (1..=3)
+        .map(|id| Wake {
+            id,
+            status: 0,
+            reply: None,
+        })
+        .collect();
+    cancel.push(Wake {
+        id: 4,
+        status: 1,
+        reply: None,
+    });
     let (mut res, _) = vyrn_cli::wasmrun::start(&module, &quiet("result.vyrn", Some(cancel)), None)
         .expect("start");
     let got = res.ask_text("named", &[2]);

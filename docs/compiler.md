@@ -297,9 +297,10 @@ The kernel knows no surface syntax. It judges core bodies.
   rules.
 - Effect (`vyrn_lower::effects`). A body's effect set is the join of its own
   atoms and its callees' sets, taken to a fixpoint by `fixpoint::solve`,
-  callees first. The lattice is `vyrn_frontend::effects::Effect`, fifteen
+  callees first. The lattice is `vyrn_frontend::effects::Effect`, sixteen
   effects: `alloc`, the I/O effects, `extern`, `serve`, module state, `trap`,
-  generation-only and `waits`. The floor asks it what an artifact reaches
+  generation-only, `waits` and `net`. An atom of `net` also waits
+  (`Effect::set`). The floor asks it what an artifact reaches
   (`effects::reaches`), and the kernel asks it which globals a call may
   write (`effects::writes_state`), because such a call ends every borrow of
   those globals, its own arguments' too. A frame whose own atoms wait may
@@ -456,7 +457,8 @@ The module's shape:
   and `taskEnd` calls `hostDone`, the import `vyrn_wait.done`, with the host's
   id, the status and the result. `__vyrn_wake` is `std/task`'s
   `wake`, whose `hostResume` call is the emitter's `$resumeRoot` dispatcher
-  over the roots. `hostSleep` is the import `vyrn_wait.sleep`, and `hostCancel`
+  over the roots. `hostSleep` is the import `vyrn_wait.sleep`, `hostFetch` the
+  import `vyrn_wait.fetch`, whose wake's payload `payloadOf` reads, and `hostCancel`
   the import `vyrn_wait.cancel`, which drops a cancelled wait's operation.
   After a trap the host calls `__vyrn_trapped`, `std/task`'s `taskTrapped`,
   which forgets the running task and every wait it held and returns the host's
@@ -534,6 +536,37 @@ from that header. Every entry is renamed into place, and a `.sum` file beside
 it holds the object's SHA-256 (the header's length), so a damaged entry is
 rebuilt. The first build of a toolchain fills the directory at the cost of a
 build without the cache; a directory of a retired toolchain is deleted by hand.
+
+A module that imports `vyrn_wait.fetch` also links the client `wasi_net.c`,
+rustls-ffi's static library and an object of the roots. `vyrn-cli/build.rs`
+builds the library with fat LTO through a cargo of its own, takes `rustls.h`
+from rustls-ffi's include directory and writes the roots of
+`webpki-root-certs` as PEM; `vyrn` embeds the three, so a user's machine needs
+no cargo. The library and header names carry `VYRN_TLS_KEY`, a hash of
+the three files. The client's object name hashes that key and its text; the
+roots' object name hashes the PEM, so a `VYRN_TEST_TLS_ROOT` build gets an
+entry of its own. `wasi_net.c` loads the PEM through rustls-ffi's
+`rustls_root_cert_store_builder_add_pem`.
+
+### Host waits
+
+A host wait is a builtin of `Spec::HostWait`: `hostSleep` (`std/task`) and
+`hostFetch` (`std/fetch`), each an import of `vyrn_wait`. Its call starts the
+operation, takes the host's id and waits on it; the wake's payload is its
+result. `hostFetch` is the floor's `net` carrier.
+
+A value that crosses the boundary as a String is a list of fields: each its
+byte length in decimal ASCII, `:`, then its bytes (`vyrn_cli::wire`). `vyrn
+serve`'s packed response is one. `std/fetch` packs a request as the method,
+the URL, the header count, each header's name and value, and the body. A reply
+is `ok`, the status, the header count, each header's name and value and the
+body, or one of `badUrl`, `unreachable`, `untrusted` and `badResponse` alone.
+Its headers are the Fetch standard's sort and combine, which a page's `fetch`
+applies itself: names lower-case and sorted by bytes, the values of one name
+joined by `, `, and `set-cookie` left out. A body or a value that is not UTF-8
+makes the reply `badResponse`. The embedded host (`vyrn-cli/src/fetch.rs`),
+the native host (`wasi_net.c`) and `web/wasi-min.js` each produce these bytes,
+and `tests/fetch.rs` holds the three to one output.
 
 `vyrn test` and `vyrn bench --check` compile the selected bodies into one
 module, each an exported `__vyrn_body_<k>`, and run them in one instance, so

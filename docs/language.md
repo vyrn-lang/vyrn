@@ -270,7 +270,7 @@ The emitter erases a call whose result is `Unit` or unused when its callee, afte
 
 ### Waiting
 
-A function waits when it reaches a host wait: `sleep` from `std/task`, or a call of a function that waits. Nothing declares it: the compiler infers it as it infers every effect, and `await` marks each call that waits.
+A function waits when it reaches a host wait: `sleep` from `std/task`, `fetch` from `std/fetch`, or a call of a function that waits. Nothing declares it: the compiler infers it as it infers every effect, and `await` marks each call that waits.
 
 ```vyrn
 import { sleep } from "std/task"
@@ -297,6 +297,7 @@ fn twice(ms: Int64) -> Result<Int64, String> {
 Waiting code runs the same on every engine. A `main` that waits is the first task, and each call of an `export extern fn` that waits starts one more, whose result the host reads once the task ends; a call from Vyrn code is an ordinary awaited call. The host delivers each completion through the module's `__vyrn_wake`, and the module resumes the task that waited on it, in the order the completions arrive. So the same deliveries print the same bytes everywhere.
 
 - A cancelled wait ends its task where it waited. Each function on the task's path releases what a `return` there would release, its callers do the same, and a cancelled `main` exits 1.
+- `fetch(req)` from `std/fetch` sends an HTTP request and waits for the whole response: `Ok` of the prelude `Response`, or `Err` of a `FetchError` (`BadUrl`, `Unreachable`, `Untrusted`, `BadResponse`). A fetch that a `race` or `timeout` cancels is aborted on the host and, as any cancelled wait, yields no value. `fetchText(url)` is the body of a `GET`.
 
 #### Running calls at once
 

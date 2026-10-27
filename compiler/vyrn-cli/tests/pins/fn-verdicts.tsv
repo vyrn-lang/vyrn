@@ -2368,6 +2368,12 @@ std/diag.vyrn	reportHere	no, it calls `oneLine`, which is not trap-free	no, its 
 std/diag.vyrn	word	yes	no, `severity` is Severity, not an integer, Bool or a read array of one
 std/diag.vyrn	oneLine	no, it calls `replace`, which is not trap-free	no, its effect set is alloc, trap
 std/diag.vyrn	atLeastOne	yes	yes, emulated Int64
+std/fetch.vyrn	fetch	no, it calls `fetchUnpack`, which is not trap-free	no, its effect set is alloc, waits, net
+std/fetch.vyrn	fetchText	no, it calls `fetch`, which is not trap-free	no, its effect set is alloc, waits, net
+std/fetch.vyrn	fetchField	yes	no, its effect set is alloc
+std/fetch.vyrn	fetchFieldAt	no, it keeps an index check	no, its effect set is alloc
+std/fetch.vyrn	fetchUnpack	no, it calls `fetchFieldAt`, which is not trap-free	no, its effect set is alloc
+std/fetch.vyrn	fetchResponse	no, it keeps an index check	no, its effect set is alloc
 std/graphql.vyrn	gqlSlice	no, it keeps an index check	no, its effect set is alloc
 std/graphql.vyrn	gqlIsWs	yes	yes, packed UInt8
 std/graphql.vyrn	gqlStripBang	no, it calls `gqlSlice`, which is not trap-free	no, its effect set is alloc
@@ -3239,6 +3245,7 @@ std/task.vyrn	task$taskSettle	no, it keeps an index check	no, its effect set is 
 std/task.vyrn	task$taskFinish	no, it calls `taskEnd`, which is not trap-free	no, its effect set is module-state
 std/task.vyrn	task$waitOn	yes	no, its effect set is alloc, module-state
 std/task.vyrn	task$delivery	no, it keeps an index check	no, its effect set is module-state
+std/task.vyrn	task$payloadOf	no, it keeps an index check	no, its effect set is module-state
 std/task.vyrn	task$cancelBegin	yes	no, its effect set is module-state
 std/task.vyrn	task$cancelEnd	yes	no, its effect set is module-state
 std/task.vyrn	task$wake	no, it keeps an index check	no, its effect set is alloc, module-state, trap

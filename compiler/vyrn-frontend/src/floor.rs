@@ -40,11 +40,13 @@ pub enum Capability {
     Args,
     /// A host function imported by name: a call to an `extern fn` import.
     Extern,
+    /// An outbound request: `std/fetch`'s host wait.
+    Net,
 }
 
 /// The vocabulary, for a diagnostic that names it back; it must match
 /// [`Capability::parse`].
-pub const CAPABILITIES: &str = "fs, stdin, args, extern";
+pub const CAPABILITIES: &str = "fs, stdin, args, extern, net";
 
 impl Capability {
     /// The manifest-facing spelling.
@@ -54,6 +56,7 @@ impl Capability {
             Capability::Stdin => "stdin",
             Capability::Args => "args",
             Capability::Extern => "extern",
+            Capability::Net => "net",
         }
     }
 
@@ -65,6 +68,7 @@ impl Capability {
             "stdin" => Capability::Stdin,
             "args" => Capability::Args,
             "extern" => Capability::Extern,
+            "net" => Capability::Net,
             _ => return None,
         })
     }
@@ -77,6 +81,7 @@ impl Capability {
             Capability::Stdin => "it reads stdin",
             Capability::Args => "it reads the command line",
             Capability::Extern => "it imports a host function",
+            Capability::Net => "it makes outbound requests",
         }
     }
 
@@ -88,6 +93,7 @@ impl Capability {
             Capability::Stdin => "no stdin",
             Capability::Args => "no command line",
             Capability::Extern => "no host to import from",
+            Capability::Net => "no network",
         }
     }
 
@@ -104,6 +110,7 @@ impl Capability {
             Effect::ReadInput => Capability::Stdin,
             Effect::Args => Capability::Args,
             Effect::Extern => Capability::Extern,
+            Effect::Net => Capability::Net,
             Effect::Alloc
             | Effect::WriteOutput
             | Effect::Clock
@@ -123,10 +130,15 @@ impl Capability {
 /// `wasi` and `browser` run identical bytes under two hosts. A WASI host
 /// answers `path_open`, `fd_read` and `args_get`; a page answers `NOENT`, EOF
 /// and an empty list, and is the `vyrn` import namespace an `extern` needs.
+/// Every host sends a request: the embedded engine and the native host over
+/// sockets, a page through its `fetch`.
 pub fn capabilities(target: Target) -> &'static [Capability] {
+    use Capability::*;
     match target {
-        Target::Native | Target::Wasi => &[Capability::Fs, Capability::Stdin, Capability::Args],
-        Target::Browser => &[Capability::Extern],
+        Target::Native | Target::Wasi => &[Fs, Stdin, Args, Net],
+        Target::Browser => &[Extern, Net],
+        #[cfg(test)]
+        Target::Offline => &[Fs, Stdin, Args],
     }
 }
 
@@ -631,6 +643,7 @@ mod tests {
                 Capability::Stdin,
                 Capability::Args,
                 Capability::Extern,
+                Capability::Net,
             ] {
                 let g = graph(&[("/p/client/boot.vyrn", &[], &[(cap, "x")])]);
                 let got = objection(&g, "/p/client/boot.vyrn", &map(target)).is_some();
@@ -691,6 +704,32 @@ mod tests {
             crossing("C:/a/boot.vyrn", "D:/b/db.vyrn"),
             "connect(\"D:/b/db\")"
         );
+    }
+
+    /// The witness for `net`: every real target has it, so a test-only target
+    /// without it refuses a request with the floor's sentence.
+    #[test]
+    fn a_target_without_a_network_refuses_a_request() {
+        let g = graph(&[
+            ("/p/client/boot.vyrn", &["std/fetch.vyrn"], &[]),
+            ("std/fetch.vyrn", &[], &[(Capability::Net, "hostFetch")]),
+        ]);
+        let d = objection(&g, "/p/client/boot.vyrn", &map(Target::Offline)).expect("refused");
+        assert_eq!(
+            d.message,
+            "artifact `app` (offline) cannot include `std/fetch.vyrn`: it makes outbound requests"
+        );
+        let note = d.note.unwrap();
+        assert!(
+            note.contains("`hostFetch` needs `net`; target `offline` has no network"),
+            "{note}"
+        );
+        for target in [Target::Native, Target::Wasi, Target::Browser] {
+            assert!(
+                objection(&g, "/p/client/boot.vyrn", &map(target)).is_none(),
+                "{target}"
+            );
+        }
     }
 
     /// A root no artifact names gets no floor, whatever it carries.

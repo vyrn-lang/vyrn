@@ -26,3 +26,6 @@
 # or `VYRN_WASM_MANIFEST=write` writes the right one. The driver is set once per
 # clone: `git config merge.pin.driver true`.
 compiler/vyrn-cli/tests/pins/** merge=pin
+
+# The fetch tests' certificate and key, as DER.
+*.der binary

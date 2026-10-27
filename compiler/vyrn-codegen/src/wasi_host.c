@@ -86,7 +86,7 @@ static struct w2c_vyrn__wait g_vyrn__wait;
    driver writes this block from the header wasm2c just produced, so the
    signatures cannot disagree with the module's imports. It defines
    `VYRN_INSTANTIATE`, whose arguments are the namespaces the module imports,
-   and `VYRN_WAKE` when the module waits. */
+   `VYRN_WAKE` when the module waits, and `VYRN_FETCH` when it sends requests. */
 /*@VYRN_EXTERN_STUBS@*/
 
 /* One open descriptor above the preopen: a file, or a directory listing read
@@ -153,9 +153,39 @@ u64 w2c_vyrn__wait_sleep(struct w2c_vyrn__wait* w, u64 ms) {
     return (u64)g_due[g_ndue++].id;
 }
 
-/* No wait waits for operation `id`, so its timer never fires. */
+#ifdef VYRN_FETCH
+/* `wasi_net.c`, linked beside this host when the module sends requests. */
+void vyrn_net_start(int64_t id, const uint8_t* bytes, size_t len);
+int vyrn_net_cancel(int64_t id);
+int vyrn_net_wait(int64_t ms, int64_t* id, uint8_t** reply, size_t* len);
+static uint32_t g_fetching;
+static void* mem_at(uint32_t off, uint32_t len);
+
+/* A request: the packed fields at `at` are copied and sent as operation `id`. */
+u64 w2c_vyrn__wait_fetch(struct w2c_vyrn__wait* w, u32 at, u64 len) {
+    (void)w;
+    const uint8_t* p = len >> 32 ? NULL : mem_at(at, (uint32_t)len);
+    if (!p) {
+        fputs("host: a request outside memory\n", stderr);
+        exit(1);
+    }
+    int64_t id = g_next_wait++;
+    g_fetching++;
+    vyrn_net_start(id, p, (size_t)len);
+    return (u64)id;
+}
+#endif
+
+/* No wait waits for operation `id`, so its timer never fires and its request
+   is aborted. */
 void w2c_vyrn__wait_cancel(struct w2c_vyrn__wait* w, u64 id) {
     (void)w;
+#ifdef VYRN_FETCH
+    if (vyrn_net_cancel((int64_t)id)) {
+        g_fetching--;
+        return;
+    }
+#endif
     for (uint32_t i = 0; i < g_ndue; i++) {
         if (g_due[i].id == (int64_t)id) {
             g_due[i] = g_due[--g_ndue];
@@ -638,6 +668,41 @@ uint32_t w2c_wasi__snapshot__preview1_random_get(struct w2c_wasi__snapshot__prev
 #endif
 }
 
+#ifdef VYRN_FETCH
+/* Waits for the first reply until the earliest timer is due; with one, `now`
+   becomes its arrival and the module gets it as a String it owns. Returns 0
+   when the timer came first. */
+static int deliver_reply(void) {
+    int64_t ms = -1;
+    if (g_ndue) {
+        uint64_t at = g_due[0].at, real = real_ms();
+        for (uint32_t i = 1; i < g_ndue; i++)
+            if (g_due[i].at < at) at = g_due[i].at;
+        ms = at > real ? (int64_t)(at - real) : 0;
+    }
+    int64_t id;
+    uint8_t* reply;
+    size_t len;
+    if (!vyrn_net_wait(ms, &id, &reply, &len)) return 0;
+    g_fetching--;
+    g_now = real_ms();
+    u32 base = w2c_prog_0x5F_vyrn_malloc(&g_inst, (u64)len + 9);
+    uint8_t* p = mem_at(base, (uint32_t)len + 9);
+    if (!p) {
+        fputs("host: the module's memory is too small for a reply\n", stderr);
+        exit(1);
+    }
+    uint32_t n = (uint32_t)len;
+    memcpy(p, &n, 4);
+    memcpy(p + 4, &n, 4);
+    memcpy(p + 8, reply, len);
+    p[8 + len] = 0;
+    free(reply);
+    w2c_prog_0x5F_vyrn_wake(&g_inst, (u64)id, 0, (u64)(base + 8));
+    return 1;
+}
+#endif
+
 int main(int argc, char** argv) {
     /* Bytes pass through unchanged: no CRLF, no ^Z, as under the wasm engine. */
 #ifdef _WIN32
@@ -670,9 +735,16 @@ int main(int argc, char** argv) {
         w2c_prog_0x5Fstart(&g_inst);
 #ifdef VYRN_WAKE
         /* A `main` that waits returns from `_start` and ends in a wake: deliver
-           each timer to `__vyrn_wake` as it comes due, as `settle_waits` in
-           `wasmrun.rs` does. */
-        for (int64_t id; (id = fire()) != 0;) w2c_prog_0x5F_vyrn_wake(&g_inst, (u64)id, 0, 0);
+           each timer to `__vyrn_wake` as it comes due, and each reply as it
+           arrives, as `settle_waits` in `wasmrun.rs` does. */
+        for (;;) {
+#ifdef VYRN_FETCH
+            if (g_fetching && deliver_reply()) continue;
+#endif
+            int64_t id = fire();
+            if (!id) break;
+            w2c_prog_0x5F_vyrn_wake(&g_inst, (u64)id, 0, 0);
+        }
 #endif
         /* `_start` ends in `proc_exit`; a plain return is exit 0 too. */
         return 0;

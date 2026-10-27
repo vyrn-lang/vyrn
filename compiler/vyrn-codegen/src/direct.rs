@@ -283,6 +283,12 @@ fn compile_inner(program: &Program, world: Arc<vyrn_lower::World>) -> Result<Vec
     // function; every other module is as it was.
     let waits = world.waiting(program).next().is_some().then(|| Waits {
         sleep: m.import(WAIT_IMPORTS, "sleep", &[ValType::I64], &[ValType::I64]),
+        fetch: m.import(
+            WAIT_IMPORTS,
+            "fetch",
+            &[ValType::I32, ValType::I64],
+            &[ValType::I64],
+        ),
         cancel: m.import(WAIT_IMPORTS, "cancel", &[ValType::I64], &[]),
         done: m.import(
             WAIT_IMPORTS,
@@ -292,6 +298,11 @@ fn compile_inner(program: &Program, world: Arc<vyrn_lower::World>) -> Result<Vec
         ),
         resume: m.reserve_func(&[ValType::I32, ValType::I32], &[ValType::I32]),
     });
+
+    // A program that sends a request gets its replies as Strings the host writes into it.
+    let net = (program.functions.iter())
+        .filter_map(|f| world.state_use(world.fn_id(&f.name)?))
+        .any(|u| u.effects.has(vyrn_frontend::effects::Effect::Net));
 
     // The oracle's counter function is reserved with the other functions, after the last import;
     // its body waits for the table's address.
@@ -919,16 +930,20 @@ fn compile_inner(program: &Program, world: Arc<vyrn_lower::World>) -> Result<Vec
         m.export_entry_state(cx.rt.region_sp);
     }
     // A `String` argument to an export is a pointer into this module's memory, so the JS caller
-    // must allocate in it first. The emitted `malloc` takes an `i64`, the BigInt `wasi-min.js`
-    // passes, so it is exported as itself.
+    // must allocate in it first, and so must a host that answers a request with a reply. The
+    // emitted `malloc` takes an `i64`, the BigInt `wasi-min.js` passes, so it is exported as
+    // itself.
     //
     // The caller owns a `String` argument and a `String` result, and
     // across this boundary the caller is JS, so `__vyrn_free` goes out too. The two go out
     // together because the free list belongs to the allocator.
-    if user.iter().any(|f| {
-        f.is_export_extern
-            && (f.params.iter().any(|p| matches!(p.ty, Type::Str)) || matches!(f.ret, Type::Str))
-    }) {
+    if net
+        || user.iter().any(|f| {
+            f.is_export_extern
+                && (f.params.iter().any(|p| matches!(p.ty, Type::Str))
+                    || matches!(f.ret, Type::Str))
+        })
+    {
         m.export("__vyrn_malloc", cx.rt.malloc);
         m.export("__vyrn_free", cx.rt.free);
     }
@@ -1764,6 +1779,9 @@ pub const TRAPPED_EXPORT: &str = "__vyrn_trapped";
 struct Waits {
     /// `vyrn_wait.sleep(ms) -> id`: the host starts a timer and wakes its id when it fires.
     sleep: u32,
+    /// `vyrn_wait.fetch(request, length) -> id`: the host copies the packed request, sends it,
+    /// and wakes its id with the address of the packed reply, a String it wrote into the module.
+    fetch: u32,
     /// `vyrn_wait.cancel(id)`: the host drops the operation, which no wait waits for.
     cancel: u32,
     /// `vyrn_wait.done(task, status, result)`: the task the host started as `task` ended.
@@ -11697,7 +11715,9 @@ impl<'a, 'p> Fn_<'a, 'p> {
 
     /// A host wait, awaited: the start asks the host for the operation and its id, and the
     /// running task waits on the id, so the frame always suspends; a resume asks the run queue
-    /// for the id's delivery.
+    /// for the id's delivery. `hostSleep` passes its milliseconds; `hostFetch` passes its
+    /// String as an address and a byte length and answers the String the host wrote into the
+    /// module, the wake's payload.
     fn host_wait(
         &mut self,
         m: &mut Log,
@@ -11709,29 +11729,52 @@ impl<'a, 'p> Fn_<'a, 'p> {
         let (Some((k, cancel)), Some(w)) = (self.awaiting.take(), self.cx.waits) else {
             return unsupported(&format!("`{callee}` with no `await`"), line);
         };
-        let import = match callee {
-            "hostSleep" => w.sleep,
-            _ => return unsupported(&format!("the host wait `{callee}`"), line),
-        };
         let (wait_on, delivery) = (
             self.cx.task("waitOn", line)?,
             self.cx.task("delivery", line)?,
         );
         let r = self.await_open(b, line)?;
-        for (v, _) in args {
-            self.core_val(m, b, v, &Type::Int, line)?;
-        }
+        let (import, ret) = match (callee, args) {
+            ("hostSleep", [(ms, _)]) => {
+                self.core_val(m, b, ms, &Type::Int, line)?;
+                (w.sleep, Type::Unit)
+            }
+            ("hostFetch", [(req, _)]) => {
+                self.core_val(m, b, req, &Type::Str, line)?;
+                let at = b.local(ValType::I32);
+                b.ins(&Instruction::LocalTee(at))
+                    .ins(&Instruction::LocalGet(at));
+                str_len(b);
+                b.ins(&Instruction::I64ExtendI32U);
+                (w.fetch, Type::Str)
+            }
+            _ => return unsupported(&format!("the host wait `{callee}`"), line),
+        };
         let id = b.local(ValType::I64);
         b.ins(&Instruction::Call(import))
-            .ins(&Instruction::LocalSet(id))
-            .ins(&Instruction::LocalGet(id))
+            .ins(&Instruction::LocalSet(id));
+        if ret == Type::Str {
+            b.ins(&Instruction::I32Const(0));
+        }
+        b.ins(&Instruction::LocalGet(id))
             .ins(&Instruction::Call(wait_on))
             .ins(&Instruction::I32Const(2));
-        self.await_close(m, b, r, k, cancel, &[], |b, _| {
+        let results: &[ValType] = if ret == Type::Str {
+            &[ValType::I32]
+        } else {
+            &[]
+        };
+        let payload = self.cx.task("payloadOf", line)?;
+        self.await_close(m, b, r, k, cancel, results, |b, _| {
+            if ret == Type::Str {
+                b.ins(&Instruction::LocalGet(id))
+                    .ins(&Instruction::Call(payload))
+                    .ins(&Instruction::I32WrapI64);
+            }
             b.ins(&Instruction::LocalGet(id));
             b.ins(&Instruction::Call(delivery));
         })?;
-        Ok(Type::Unit)
+        Ok(ret)
     }
 
     /// An awaited `both` or `race` ([`vyrn_frontend::core::Fork`]), one resume point. The
@@ -12144,7 +12187,8 @@ impl<'a, 'p> Fn_<'a, 'p> {
                     Ok(ret.clone())
                 }
                 Some(Spec::Traps) => Ok(Type::Never),
-                Some(Spec::Asserts | Spec::HostWait) => Ok(Type::Unit),
+                Some(Spec::Asserts) => Ok(Type::Unit),
+                Some(Spec::HostWait(ret)) => Ok(ret.clone()),
                 Some(Spec::Resumes) => Ok(INT32),
                 Some(Spec::Logs) if callee == "logger" => Ok(Type::Logger),
                 Some(Spec::Logs) => Ok(Type::Unit),
@@ -12475,7 +12519,7 @@ impl<'a, 'p> Fn_<'a, 'p> {
             }
             // A pull binds two names, and [`Fn_::core_stmts`] emits it.
             Some(Spec::Pulls) => return unsupported("a pull apart from its loop head", line),
-            Some(Spec::HostWait) => return self.host_wait(m, b, callee, args, line),
+            Some(Spec::HostWait(_)) => return self.host_wait(m, b, callee, args, line),
             // The step of a task the run queue resumes: a call of the root dispatcher.
             Some(Spec::Resumes) => {
                 for (v, _) in args {
@@ -15430,7 +15474,7 @@ impl<'a, 'p> Fn_<'a, 'p> {
                 | Spec::Barrier
                 | Spec::Renders(_)
                 | Spec::Effect(_)
-                | Spec::HostWait
+                | Spec::HostWait(_)
                 | Spec::Resumes
                 | Spec::Logs
                 | Spec::Traps

@@ -43,13 +43,31 @@ wasmtime, the native host and `web/wasi-min.js` share this rule. The shim arms o
 `setTimeout` per timer, so a timer one task sets while another waits fires at its
 own deadline.
 
+A module that sends requests also imports `vyrn_wait.fetch(request, length) -> id`.
+The host copies the packed request ([compiler.md](compiler.md), Host waits),
+sends it, and wakes the id with the address of the packed reply, a String it
+wrote with the module's `__vyrn_malloc`, which the module owns. A cancelled
+request is aborted. The embedded wasmtime and the native host speak HTTP/1.1
+over sockets, one request per connection, each on a thread of its own; a native
+binary links that client (`wasi_net.c`) only when its module imports
+`vyrn_wait.fetch`. Both speak `https://` through rustls with the `ring`
+provider and trust the Mozilla roots of `webpki-root-certs` alone: the embedded
+wasmtime through the crate, a native binary through rustls-ffi's static
+library, which `vyrn` carries. On Windows that binary links the static C
+runtime, as every native binary does. No switch turns certificate verification
+off. A native build also trusts the PEM root that `VYRN_TEST_TLS_ROOT` names and
+says so on stderr; `tests/fetch.rs` uses it for its own server. The shim sends each request with the page's `fetch` and
+aborts it with an `AbortController`, so a page reads only what CORS lets it.
+
 The clock is logical. `sleep(ms)` is due `ms` after the deadline of the wake
 the program runs in: 0 at the start, and in `serve`, `dev` and a page's call
 of an export the time the host began the call. A host waits out real time
 before it delivers a timer, but the time the program computes never moves a
 later deadline: a loop of work and `sleep(10)` keeps its rate, and wakes at
 once when it falls behind. So the order of wakes is `vyrn test`'s on every
-host and machine.
+host and machine. A reply is delivered when it arrives, and now becomes its
+arrival. `vyrn test` delivers every pending reply, in start order, before the
+next timer, so a request takes no time there.
 
 A `gen fn` generator also runs as compiled wasm, in the same embedded engine,
 while the program loads.
@@ -141,7 +159,9 @@ runtime and host objects come from `~/.vyrn/cache/native`, which the first
 build of a toolchain fills (about as slow as a build was before the cache).
 
 Every native build passes `-O2 -ffp-contract=off`: contraction into FMA would
-change float bits. The microarchitecture comes from a curated set, never a
+change float bits. On macOS it also passes `-mmacosx-version-min` with
+`MACOS_MIN` from `vyrn-cli/build.rs`, the minimum rustls-ffi's library is
+built for too, so the link mixes no newer objects. The microarchitecture comes from a curated set, never a
 pass-through `-march`:
 
 | Value | Meaning |
@@ -209,14 +229,15 @@ and `main` can call.
 Without `--workers`, one instance answers every request, so module state
 needs no locking. A `handle` that does not wait runs each request to its end
 before the next starts. A `handle` that waits runs each request as a task on
-that instance: the request parks at its first `await`, the next request or
-due timer runs, and each response goes to its own connection when its task
-ends. So module state may change at an `await` between requests: a request
+that instance: the request parks at its first `await`, the next request,
+due timer or arrived reply to a `fetch` runs, and each response goes to its own
+connection when its task ends. So module state may change at an `await` between requests: a request
 that read a global before it waited may find another request's write after
 it. A stream answer is written to its end before anything else runs.
 
-A trap inside `handle` is logged and answered with a 500 for its own request;
-the requests parked beside it run on, on the same instance. The call stack and
+A trap inside `handle` is logged and answered with a 500 for its own request,
+and the requests its task sent are aborted; the requests parked beside it run
+on, on the same instance. The call stack and
 region nesting return to their state before the call that trapped. Module
 state keeps what the handler wrote, and heap blocks it held leak.
 
@@ -245,7 +266,8 @@ The `server`, `client` and `public` keys and the flags are read once, at start.
 A good build replaces the server instance before the next request or due
 timer, and its `main` runs again: module state does not carry over. Each
 request parked at an `await` on the old instance answers 503, because its
-task does not carry over either. A failed build prints its
+task does not carry over either, and each request the old instance sent is
+aborted. A failed build prints its
 diagnostics and leaves the last good build serving, `.vyrn-dev/client.wasm`
 included.
 
@@ -436,7 +458,8 @@ pin.
   per-user secret. Never restore it from another machine or CI run.
 - `~/.vyrn/cache/native/<key>/`: the precompiled header and the objects of the
   native route that no program changes, for one clang, wasm2c, simde and flag
-  set. Safe to delete; the next `vyrn build` refills it.
+  set. A program that sends requests adds rustls-ffi's static library, its
+  header, and the objects of the client and of its roots. Safe to delete; the next `vyrn build` refills it.
 - `~/.vyrn/tools/<sha>/`: downloaded toolchain archives.
 
 Commands:

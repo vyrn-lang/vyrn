@@ -118,6 +118,7 @@ The compiler injects these declarations into every program, so a file names them
 | `std/args` | `cli()`, `cliOf(list)`, `flag`, `opt`, `positionals`, `rest`: four probes over the argument list. No spec, no help text. |
 | `std/cli` | `cli("./module")`, a generator: every exported record type becomes `parse<Name>(argv) -> Validation<Name>` and `help<Name>()`. Field types decide the flags, and each value is validated by its own type. |
 | `std/bench` | The harness `vyrn bench` links; no program imports it. |
+| `std/fetch` | `fetch(req)` sends a `FetchRequest` and waits for the `Response` or a `FetchError`; `fetchText(url)` is the body of a `GET`. A cancelled fetch is aborted on the host. HTTP/1.1, no redirect followed. |
 | `std/task` | `sleep(ms)` waits `ms` milliseconds while the host runs other tasks. A function that calls it waits, and each call is marked `await` (language.md, Waiting). `both(f(a), g(b))` and `race(f(a), g(b))` run two calls at once, giving a `Both` record or a `Race` enum; `each(xs, f)` and `timeout(ms, f)` are written over them (language.md, Running calls at once). |
 
 ### Generators for the web and for services

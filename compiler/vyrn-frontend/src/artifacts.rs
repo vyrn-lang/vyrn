@@ -29,6 +29,10 @@ pub enum Target {
     Wasi,
     /// The same wasm in a page: a clock and a CSPRNG, and no filesystem.
     Browser,
+    /// A host with no network, which no manifest can name: the floor's
+    /// witness that `net` is refused where it is missing.
+    #[cfg(test)]
+    Offline,
 }
 
 /// The values `artifacts.<name>.target` accepts, for diagnostics; it must
@@ -52,6 +56,8 @@ impl std::fmt::Display for Target {
             Target::Native => "native",
             Target::Wasi => "wasi",
             Target::Browser => "browser",
+            #[cfg(test)]
+            Target::Offline => "offline",
         })
     }
 }

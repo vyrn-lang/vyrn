@@ -634,3 +634,22 @@ pub fn alloc_phases(args: &[&str], cwd: &Path, cache: &Path) -> Vec<(String, u64
         })
         .collect()
 }
+
+/// A watchdog that ends the process when the test that holds it still runs after its
+/// time, so a hang fails in seconds and not at the harness's limit. Dropping it, as the
+/// test ends, disarms it.
+#[must_use = "the watchdog is disarmed when this is dropped"]
+pub struct Deadline(std::sync::mpsc::Sender<()>);
+
+/// Arms a [`Deadline`] of `secs` seconds for `test`.
+pub fn deadline(test: &'static str, secs: u64) -> Deadline {
+    let (tx, rx) = std::sync::mpsc::channel::<()>();
+    std::thread::spawn(move || {
+        let wait = std::time::Duration::from_secs(secs);
+        if let Err(std::sync::mpsc::RecvTimeoutError::Timeout) = rx.recv_timeout(wait) {
+            eprintln!("{test}: still running after {secs} s");
+            std::process::exit(101);
+        }
+    });
+    Deadline(tx)
+}

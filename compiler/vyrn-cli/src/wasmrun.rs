@@ -28,11 +28,13 @@ pub struct Outcome {
 }
 
 /// One completion the host delivered through `__vyrn_wake`: the operation's id and its status,
-/// 0 when it completed and 1 when the host cancelled it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// 0 when it completed and 1 when the host cancelled it, and for a request that completed the
+/// packed reply ([`crate::wire`]), which the payload is a String of.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Wake {
     pub id: i64,
     pub status: i32,
+    pub reply: Option<Vec<u8>>,
 }
 
 /// What one function did: the calls it received and the operations its own body executed, as
@@ -77,6 +79,9 @@ pub struct Run {
     /// Delivers these completions in order instead of the clock's, each to an operation the
     /// module started: a replay of [`Outcome::wakes`], or a cancellation a test asks for.
     pub replay: Option<Vec<Wake>>,
+    /// DER certificates an `https://` request trusts beside `webpki-root-certs`: a test harness's
+    /// root for its own server. The `vyrn` binary sets none, so no program can add one.
+    pub test_roots: Vec<Vec<u8>>,
 }
 
 /// Wall time per host phase of a run.
@@ -106,7 +111,9 @@ type Host = wasi::Guest<Extra>;
 /// The clock is logical: `now` is the deadline of the wake the module runs in, 0 before the
 /// first, or the time the host began the call that runs ([`Waits::begin`]). A deadline is `now`
 /// plus the sleep, so the time the module computes never moves a later deadline, and the order
-/// of wakes is the same on every host and machine.
+/// of wakes is the same on every host and machine. A request's reply is delivered when it
+/// arrives, and `now` becomes that time; on the virtual clock a request takes no time, so every
+/// pending reply, in start order, comes before the next timer.
 struct Waits {
     /// Whether a timer waits for its deadline in real time; `vyrn test` delivers it at once.
     wall: bool,
@@ -118,6 +125,10 @@ struct Waits {
     next: i64,
     /// Each pending timer's deadline and id.
     due: Vec<(u64, i64)>,
+    /// Each pending request's id, in start order.
+    fetches: Vec<i64>,
+    /// The requests in flight; a replay sends none.
+    net: crate::fetch::Net,
     /// The completions still to replay, last first ([`Run::replay`]).
     replay: Option<Vec<Wake>>,
     /// Each completion delivered so far.
@@ -143,6 +154,8 @@ impl Waits {
             now: 0,
             next: 1,
             due: Vec::new(),
+            fetches: Vec::new(),
+            net: crate::fetch::Net::new(run.test_roots.clone()),
             replay: run.replay.clone().map(|mut r| {
                 r.reverse();
                 r
@@ -173,17 +186,35 @@ impl Waits {
         id
     }
 
-    /// `vyrn_wait.cancel(id)`: no wait waits for operation `id`, so its timer never fires.
-    fn cancel(&mut self, id: i64) {
-        self.due.retain(|d| d.1 != id);
+    /// `vyrn_wait.fetch(request)`: sends the packed request, unless this is a replay, which
+    /// delivers the recorded reply instead.
+    fn fetch(&mut self, request: Vec<u8>) -> i64 {
+        let id = self.next;
+        self.next += 1;
+        self.fetches.push(id);
+        if self.replay.is_none() {
+            self.net.start(id, request);
+        }
+        id
     }
 
-    /// How long until [`Waits::fire`] has a completion without waiting: zero for a replay and
-    /// off the wall clock, `None` when nothing is pending.
-    fn due_in(&self) -> Option<std::time::Duration> {
+    /// `vyrn_wait.cancel(id)`: no wait waits for operation `id`, so its timer never fires and
+    /// its request is aborted.
+    fn cancel(&mut self, id: i64) {
+        self.due.retain(|d| d.1 != id);
+        self.fetches.retain(|&f| f != id);
+        self.net.cancel(id);
+    }
+
+    /// How long until [`Waits::fire`] has a completion without waiting: zero for a replay, off
+    /// the wall clock, and once a reply came; `None` when no timer is pending and no reply came.
+    fn due_in(&mut self) -> Option<std::time::Duration> {
         let zero = std::time::Duration::ZERO;
         if let Some(r) = &self.replay {
             return (!r.is_empty()).then_some(zero);
+        }
+        if !self.fetches.is_empty() && (!self.wall || self.net.arrived()) {
+            return Some(zero);
         }
         let at = self.due.iter().min()?.0;
         let left = if self.wall {
@@ -202,14 +233,33 @@ impl Waits {
             let Some(w) = r.pop() else {
                 return Ok(None);
             };
-            let Some(i) = self.due.iter().position(|d| d.1 == w.id) else {
+            if let Some(i) = self.due.iter().position(|d| d.1 == w.id) {
+                self.now = self.due.remove(i).0;
+            } else if let Some(i) = self.fetches.iter().position(|&f| f == w.id) {
+                self.fetches.remove(i);
+            } else {
                 return Err(format!("a replayed wake names no pending wait: {}", w.id));
-            };
-            self.now = self.due.remove(i).0;
-            self.delivered.push(w);
+            }
+            self.delivered.push(w.clone());
             return Ok(Some(w));
         }
-        let Some(i) = (0..self.due.len()).min_by_key(|&i| self.due[i]) else {
+        let timer = (0..self.due.len()).min_by_key(|&i| self.due[i]);
+        if !self.fetches.is_empty() {
+            let left = match timer {
+                Some(i) if self.wall => Some(std::time::Duration::from_millis(
+                    self.due[i].0.saturating_sub(self.real()),
+                )),
+                _ => None,
+            };
+            if let Some((id, reply)) = self.net.next(left, !self.wall) {
+                self.fetches.retain(|&f| f != id);
+                if self.wall {
+                    self.now = self.real();
+                }
+                return Ok(Some(self.deliver(id, Some(reply))));
+            }
+        }
+        let Some(i) = timer else {
             return Ok(None);
         };
         let (at, id) = self.due.remove(i);
@@ -218,9 +268,18 @@ impl Waits {
             std::thread::sleep(std::time::Duration::from_millis(at - real));
         }
         self.now = at;
-        let w = Wake { id, status: 0 };
-        self.delivered.push(w);
-        Ok(Some(w))
+        Ok(Some(self.deliver(id, None)))
+    }
+
+    /// Records the completion of operation `id`, with a request's reply.
+    fn deliver(&mut self, id: i64, reply: Option<Vec<u8>>) -> Wake {
+        let w = Wake {
+            id,
+            status: 0,
+            reply,
+        };
+        self.delivered.push(w.clone());
+        w
     }
 }
 
@@ -241,8 +300,38 @@ fn settle_waits(store: &mut Store<Host>, inst: &wasmtime::Instance) -> wasmtime:
         else {
             return Ok(());
         };
-        wake.call(&mut *store, (w.id, w.status, 0))?;
+        let payload = match &w.reply {
+            Some(reply) if w.status == 0 => guest_string(store, inst, reply)?,
+            _ => 0,
+        };
+        wake.call(&mut *store, (w.id, w.status, i64::from(payload)))?;
     }
+}
+
+/// Writes `bytes` into the guest as a String it owns: a block from its `__vyrn_malloc`, with
+/// the `{ len, cap }` header and a NUL. Returns the String's address.
+fn guest_string(
+    store: &mut Store<Host>,
+    inst: &wasmtime::Instance,
+    bytes: &[u8],
+) -> wasmtime::Result<i32> {
+    let malloc = inst.get_typed_func::<i64, i32>(&mut *store, "__vyrn_malloc")?;
+    let base = malloc.call(&mut *store, i64::from(STR_HDR) + bytes.len() as i64 + 1)?;
+    let mem = (store.data().wasi.mem).ok_or_else(|| wasmtime::Error::msg("no memory"))?;
+    place_string(mem.data_mut(&mut *store), base, bytes)
+        .ok_or_else(|| wasmtime::Error::msg("the guest's memory is too small for the String"))
+}
+
+/// Lays `bytes` out as a String in the block at `base` of `data`: header, bytes, NUL. Returns
+/// the String's address, eight bytes past the block's.
+fn place_string(data: &mut [u8], base: i32, bytes: &[u8]) -> Option<i32> {
+    let n = u32::try_from(bytes.len()).ok()?;
+    wasi::wr32(data, base, n)?;
+    wasi::wr32(data, base + 4, n)?;
+    let at = (base + STR_HDR) as usize;
+    data.get_mut(at..at + bytes.len())?.copy_from_slice(bytes);
+    *data.get_mut(at + bytes.len())? = 0;
+    Some(base + STR_HDR)
 }
 
 /// The export a waiting module takes each completion through.
@@ -411,6 +500,18 @@ fn open(
             vyrn_codegen::direct::WAIT_IMPORTS,
             "sleep",
             |mut c: Caller<'_, Host>, ms: i64| -> i64 { c.data_mut().x.waits.sleep(ms) },
+        )?;
+        linker.func_wrap(
+            vyrn_codegen::direct::WAIT_IMPORTS,
+            "fetch",
+            |mut c: Caller<'_, Host>, at: i32, len: i64| -> wasmtime::Result<i64> {
+                let mem = (c.data().wasi.mem).ok_or_else(|| wasmtime::Error::msg("no memory"))?;
+                let request = (mem.data(&c).get(at as u32 as usize..))
+                    .and_then(|d| d.get(..usize::try_from(len).ok()?))
+                    .ok_or_else(|| wasmtime::Error::msg("a request outside memory"))?
+                    .to_vec();
+                Ok(c.data_mut().x.waits.fetch(request))
+            },
         )?;
         linker.func_wrap(
             vyrn_codegen::direct::WAIT_IMPORTS,
@@ -677,7 +778,15 @@ impl Resident {
         let wake = (self.inst)
             .get_func(&mut self.store, WAKE)
             .ok_or_else(|| format!("{WAKE}: no such export"))?;
-        let args = [Val::I64(w.id), Val::I32(w.status), Val::I64(0)];
+        let payload = match &w.reply {
+            Some(reply) if w.status == 0 => self.alloc(reply)?,
+            _ => 0,
+        };
+        let args = [
+            Val::I64(w.id),
+            Val::I32(w.status),
+            Val::I64(i64::from(payload)),
+        ];
         if let Err((e, host)) = self.enter(wake, &args, &mut [Val::I32(0)]) {
             self.open.remove(&host);
             self.ends.push((host, Err(e)));
@@ -685,11 +794,20 @@ impl Resident {
         Ok(true)
     }
 
+    /// Calls `bell` on another thread whenever a reply to a request comes, so an
+    /// event loop that waits for other events too, with [`Resident::advance`]'s
+    /// time as its limit, wakes to deliver it. A request already in flight keeps
+    /// the bell it started with.
+    pub fn on_reply(&mut self, bell: std::sync::Arc<dyn Fn() + Send + Sync>) {
+        self.store.data_mut().x.waits.net.on_reply = Some(bell);
+    }
+
     /// Delivers each completion that is due, without waiting. Returns how long
-    /// until the next one is due, `None` when none is pending.
+    /// until the next one is due, `None` when no timer is pending and no reply
+    /// came: a request in flight then wakes the loop through [`Resident::on_reply`].
     pub fn advance(&mut self) -> Result<Option<std::time::Duration>, String> {
         loop {
-            match self.store.data().x.waits.due_in() {
+            match self.store.data_mut().x.waits.due_in() {
                 Some(left) if left.is_zero() => self.wake_next()?,
                 left => return Ok(left),
             };
@@ -727,12 +845,12 @@ impl Resident {
         }
     }
 
-    /// Writes a String argument into guest memory: header, bytes, NUL. Returns
+    /// Writes `bytes` into guest memory as a String: header, bytes, NUL. Returns
     /// the string's address; the block starts eight bytes before.
-    fn alloc(&mut self, s: &str) -> Result<i32, String> {
-        let n = s.len() as i32;
+    fn alloc(&mut self, bytes: &[u8]) -> Result<i32, String> {
+        let n = bytes.len() as i64;
         let base = self
-            .call("__vyrn_malloc", &[Val::I64((STR_HDR + n + 1) as i64)])?
+            .call("__vyrn_malloc", &[Val::I64(i64::from(STR_HDR) + n + 1)])?
             .map_err(|e| format!("__vyrn_malloc: {e}"))?
             .and_then(|v| v.i32())
             .ok_or("__vyrn_malloc: no address")?;
@@ -742,18 +860,8 @@ impl Resident {
             .wasi
             .mem
             .expect("memory is set before _start");
-        let data = mem.data_mut(&mut self.store);
-        let mut write = || -> Option<()> {
-            wasi::wr32(data, base, n as u32)?;
-            wasi::wr32(data, base + 4, n as u32)?;
-            let at = (base + STR_HDR) as usize;
-            data.get_mut(at..at + s.len())?
-                .copy_from_slice(s.as_bytes());
-            *data.get_mut(at + s.len())? = 0;
-            Some(())
-        };
-        write().ok_or_else(|| "the guest's memory is too small for the argument".to_string())?;
-        Ok(base + STR_HDR)
+        place_string(mem.data_mut(&mut self.store), base, bytes)
+            .ok_or_else(|| "the guest's memory is too small for the String".to_string())
     }
 
     /// Frees a String argument; the block starts at its header.
@@ -797,7 +905,7 @@ impl Resident {
     pub fn tell(&mut self, door: &str, args: &[&str]) -> Result<(), String> {
         let mut ptrs = Vec::with_capacity(args.len());
         for a in args {
-            ptrs.push(self.alloc(a)?);
+            ptrs.push(self.alloc(a.as_bytes())?);
         }
         let vals: Vec<Val> = ptrs.iter().map(|p| Val::I32(*p)).collect();
         let out = self.call(door, &vals)?;

@@ -840,6 +840,7 @@ const LATTICE: &[(&str, &str, bool)] = &[
     ("args", "args", false),
     ("serveStream", "serve", false),
     ("hostSleep", "waits", false),
+    ("hostFetch", "net", false),
     ("hostResume", "trap", true),
     ("panic", "trap", true),
     ("@panicAt", "trap", true),

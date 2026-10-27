@@ -1319,18 +1319,24 @@ fn dev_builds_nothing_for_a_file_the_build_did_not_read() {
 /// A `handle` that waits: `/slow` and `/boom` wait long, every other path
 /// briefly. Each answer reports `count` before and after its wait and how many
 /// answers ended, so the bodies show which request ended first and what the
-/// others wrote across its wait. `/boom` traps once its wait ends.
+/// others wrote across its wait. `/boom` traps once its wait ends. `/parked`
+/// answers at once how many requests reached their wait ([`wait_parked`]).
 const WAITING_SRC: &str = r#"
 import { sleep } from "std/task"
 
 let mut count: Int64 = 0
 let mut ended: Int64 = 0
+let mut parked: Int64 = 0
 
 fn reply(status: Int64, body: consume String) -> Response {
     return Response { status: status, contentType: "text/plain", body: body, vary: "", headers: [:] }
 }
 
 fn handle(req: Request) -> Response {
+    let before = count
+    if req.path == "/parked" {
+        return reply(200, "\{parked}")
+    }
     let mut ms: Int64 = 10
     if req.path == "/slow" {
         ms = 1500
@@ -1338,7 +1344,7 @@ fn handle(req: Request) -> Response {
     if req.path == "/boom" {
         ms = 400
     }
-    let before = count
+    parked = parked + 1
     await sleep(ms)
     count = count + 1
     if req.path == "/boom" {
@@ -1349,6 +1355,19 @@ fn handle(req: Request) -> Response {
     return reply(200, "\{req.path} before=\{before} after=\{count} ended=\{ended}")
 }
 "#;
+
+/// Returns once `/parked` answers `n`: that many requests reached their wait.
+/// It asks again every 10 ms, for at most 10 s.
+fn wait_parked(port: u16, n: usize) {
+    let start = Instant::now();
+    while get(port, "/parked").1 != n.to_string() {
+        assert!(
+            start.elapsed() < Duration::from_secs(10),
+            "{n} requests never parked"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
 
 /// Sends `path` on its own thread, `after` the start, and returns the answer
 /// with the time it took.
@@ -1380,16 +1399,15 @@ fn overlapping_waiting_requests_answer_in_timer_order() {
 }
 
 /// Module state may change at an `await`: the slow request read `count`
-/// before its wait, and the fast one wrote it during that wait.
+/// before its wait, and each fast one, sent once the one before answered,
+/// wrote it during that wait.
 #[test]
 fn module_state_changes_across_an_await_between_requests() {
     let s = start_server_on(WAITING_SRC, &[]);
     let slow = get_later(s.server.port, "/slow", Duration::ZERO);
-    let fast: Vec<_> = (0..3)
-        .map(|k| get_later(s.server.port, "/fast", Duration::from_millis(200 + 150 * k)))
-        .collect();
-    for (k, f) in fast.into_iter().enumerate() {
-        let ((_, body), _) = f.join().unwrap();
+    wait_parked(s.server.port, 1);
+    for k in 0..3 {
+        let (_, body) = get(s.server.port, "/fast");
         assert_eq!(
             body,
             format!("/fast before={k} after={} ended={}", k + 1, k + 1)
@@ -1405,8 +1423,8 @@ fn module_state_changes_across_an_await_between_requests() {
 fn a_trap_in_one_of_two_waiting_requests_answers_500_for_it_alone() {
     let s = start_server_on(WAITING_SRC, &[]);
     let slow = get_later(s.server.port, "/slow", Duration::ZERO);
-    let boom = get_later(s.server.port, "/boom", Duration::from_millis(200));
-    let ((status, body), _) = boom.join().unwrap();
+    wait_parked(s.server.port, 1);
+    let (status, body) = get(s.server.port, "/boom");
     assert_eq!(status, "HTTP/1.1 500 Internal Server Error");
     assert_eq!(body, "internal error");
     let ((status, body), _) = slow.join().unwrap();
@@ -1427,8 +1445,14 @@ fn dev_answers_a_request_parked_across_a_rebuild_with_503() {
         r#"import { msg } from "./msg"
 import { sleep } from "std/task"
 
+let mut parked: Int64 = 0
+
 fn handle(req: Request) -> Response {
+    if req.path == "/parked" {
+        return Response { status: 200, contentType: "text/plain", body: "\{parked}", vary: "", headers: [:] }
+    }
     if req.path == "/slow" {
+        parked = parked + 1
         await sleep(60000)
     }
     return Response { status: 200, contentType: "text/plain", body: msg(), vary: "", headers: [:] }
@@ -1436,7 +1460,7 @@ fn handle(req: Request) -> Response {
 "#,
     );
     let slow = get_later(d.server.port, "/slow", Duration::ZERO);
-    std::thread::sleep(Duration::from_millis(300));
+    wait_parked(d.server.port, 1);
     assert_eq!(get(d.server.port, "/").1, "one");
     d.edit(&dev_msg("two"), "dev: rebuilt");
     assert_eq!(get(d.server.port, "/").1, "two");
@@ -1504,4 +1528,252 @@ fn workers_refuse_a_waiting_handle_that_reads_module_state() {
     let err = workers_refusal(WAITING_SRC);
     assert!(err.contains("module-state-free `handle`"), "{err}");
     assert!(err.contains("`count`"), "{err}");
+}
+
+/// The server a fetching `handle` calls, on a port the system picks. `/now` answers `now`
+/// at once. `/held` reports on `arrived`, then answers `held` once the test sends on
+/// `release`. `/hang` reports on `arrived`, never answers, and reports on `aborted` when
+/// its client leaves.
+struct Upstream {
+    port: u16,
+    arrived: std::sync::mpsc::Receiver<()>,
+    release: std::sync::mpsc::Sender<()>,
+    aborted: std::sync::mpsc::Receiver<()>,
+}
+
+fn upstream() -> Upstream {
+    use std::sync::mpsc::channel;
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind a port");
+    let port = listener.local_addr().expect("the bound port").port();
+    let (arrived_tx, arrived) = channel();
+    let (release, release_rx) = channel::<()>();
+    let (aborted_tx, aborted) = channel();
+    let release_rx = Arc::new(Mutex::new(release_rx));
+    std::thread::spawn(move || {
+        for mut s in listener.incoming().flatten() {
+            let (arrived, aborted) = (arrived_tx.clone(), aborted_tx.clone());
+            let release = Arc::clone(&release_rx);
+            std::thread::spawn(move || {
+                let mut head = Vec::new();
+                let mut b = [0u8; 1];
+                while !head.ends_with(b"\r\n\r\n") {
+                    match s.read(&mut b) {
+                        Ok(1) => head.push(b[0]),
+                        _ => return,
+                    }
+                }
+                let head = String::from_utf8_lossy(&head).into_owned();
+                let body = match head.split_whitespace().nth(1).unwrap_or_default() {
+                    "/now" => "now",
+                    "/held" => {
+                        let _ = arrived.send(());
+                        let _ = release.lock().unwrap().recv();
+                        "held"
+                    }
+                    "/hang" => {
+                        let _ = arrived.send(());
+                        let _ = s.set_read_timeout(Some(Duration::from_secs(30)));
+                        let left = match s.read(&mut b) {
+                            Ok(0) => true,
+                            Err(e) => !matches!(
+                                e.kind(),
+                                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                            ),
+                            Ok(_) => false,
+                        };
+                        if left {
+                            let _ = aborted.send(());
+                        }
+                        return;
+                    }
+                    _ => "missing",
+                };
+                let _ = write!(
+                    s,
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+            });
+        }
+    });
+    Upstream {
+        port,
+        arrived,
+        release,
+        aborted,
+    }
+}
+
+/// A `handle` that fetches from the upstream on `port`. `/timeout` gives a request that
+/// never answers 200 ms; `/trap` races one against a branch that traps; any other path
+/// is fetched from the upstream and its body answered.
+fn fetching_src(port: u16) -> String {
+    r#"
+import { fetchText, FetchError } from "std/fetch"
+import { race, Race, sleep, timeout } from "std/task"
+
+fn upstream() -> String {
+    return "http://127.0.0.1:PORT"
+}
+
+fn reply(body: consume String) -> Response {
+    return Response { status: 200, contentType: "text/plain", body: body, vary: "", headers: [:] }
+}
+
+fn hang() -> Result<String, FetchError> {
+    return await fetchText(upstream() + "/hang")
+}
+
+fn boom(n: Int64) -> Int64 {
+    await sleep(100)
+    return n / (n - n)
+}
+
+fn handle(req: Request) -> Response {
+    if req.path == "/timeout" {
+        return match await timeout(200, hang) {
+            Some(_) => reply("answered"),
+            None => reply("fallback"),
+        }
+    }
+    if req.path == "/trap" {
+        return match await race(hang(), boom(1)) {
+            First(_) => reply("answered"),
+            Second(_) => reply("trap missed"),
+        }
+    }
+    return match await fetchText(upstream() + req.path) {
+        Ok(body) => reply("\{req.path} \{body}"),
+        Err(_) => reply("failed"),
+    }
+}
+"#
+    .replace("PORT", &port.to_string())
+}
+
+/// A `handle` that fetches parks at the fetch and answers with what the upstream sent.
+#[test]
+fn a_handle_that_fetches_answers_with_the_upstream_body() {
+    let _deadline = common::deadline("a_handle_that_fetches_answers_with_the_upstream_body", 120);
+    let up = upstream();
+    let s = start_server_on(&fetching_src(up.port), &[]);
+    assert_eq!(
+        get(s.server.port, "/now"),
+        ("HTTP/1.1 200 OK".into(), "/now now".into())
+    );
+}
+
+/// Two fetching requests overlap on one instance: the second's upstream answers first, so
+/// the second answers while the first still waits, and the first answers once released.
+#[test]
+fn overlapping_fetching_requests_answer_in_completion_order() {
+    let _deadline = common::deadline(
+        "overlapping_fetching_requests_answer_in_completion_order",
+        120,
+    );
+    let up = upstream();
+    let s = start_server_on(&fetching_src(up.port), &[]);
+    let held = get_later(s.server.port, "/held", Duration::ZERO);
+    up.arrived
+        .recv_timeout(Duration::from_secs(30))
+        .expect("the held request arrived");
+    assert_eq!(get(s.server.port, "/now").1, "/now now");
+    assert!(
+        !held.is_finished(),
+        "the held request answered before its upstream did"
+    );
+    up.release.send(()).expect("release the held request");
+    assert_eq!(held.join().unwrap().0 .1, "/held held");
+}
+
+/// A worker wakes at its own fetches' replies as it does at its timers: with one worker,
+/// the request whose upstream answers first answers first.
+#[test]
+fn a_worker_answers_its_fetching_requests_in_completion_order() {
+    let _deadline = common::deadline(
+        "a_worker_answers_its_fetching_requests_in_completion_order",
+        120,
+    );
+    let up = upstream();
+    let s = start_server_on(&fetching_src(up.port), &["--workers", "1"]);
+    let held = get_later(s.server.port, "/held", Duration::ZERO);
+    up.arrived
+        .recv_timeout(Duration::from_secs(30))
+        .expect("the held request arrived");
+    assert_eq!(get(s.server.port, "/now").1, "/now now");
+    assert!(
+        !held.is_finished(),
+        "the held request answered before its upstream did"
+    );
+    up.release.send(()).expect("release the held request");
+    assert_eq!(held.join().unwrap().0 .1, "/held held");
+}
+
+/// A `timeout` around an upstream that never answers answers its fallback, and the
+/// upstream request is aborted.
+#[test]
+fn a_timeout_around_a_slow_upstream_answers_its_fallback_and_aborts_the_request() {
+    let _deadline = common::deadline(
+        "a_timeout_around_a_slow_upstream_answers_its_fallback_and_aborts_the_request",
+        120,
+    );
+    let up = upstream();
+    let s = start_server_on(&fetching_src(up.port), &[]);
+    assert_eq!(get(s.server.port, "/timeout").1, "fallback");
+    let aborted = up.aborted.recv_timeout(Duration::from_secs(10));
+    assert!(aborted.is_ok(), "the upstream request was not aborted");
+}
+
+/// A trap while a fetch waits answers 500 for its request alone, aborts the fetch, and the
+/// instance serves on.
+#[test]
+fn a_trap_while_a_fetch_waits_answers_500_and_aborts_the_request() {
+    let _deadline = common::deadline(
+        "a_trap_while_a_fetch_waits_answers_500_and_aborts_the_request",
+        120,
+    );
+    let up = upstream();
+    let s = start_server_on(&fetching_src(up.port), &[]);
+    let (status, body) = get(s.server.port, "/trap");
+    assert_eq!(status, "HTTP/1.1 500 Internal Server Error");
+    assert_eq!(body, "internal error");
+    let aborted = up.aborted.recv_timeout(Duration::from_secs(10));
+    assert!(aborted.is_ok(), "the upstream request was not aborted");
+    assert_eq!(get(s.server.port, "/now").1, "/now now");
+    let err = wait_for(&s.stderr, "GET /trap -> 500", Duration::from_secs(5));
+    assert!(err.contains("division by zero"), "{err}");
+}
+
+/// Under `dev`, the build that replaces the instance answers its own fetches, and a fetch
+/// parked on the old instance is aborted with its request's 503.
+#[test]
+fn dev_aborts_a_fetch_parked_across_a_rebuild_and_the_new_build_fetches() {
+    let _deadline = common::deadline(
+        "dev_aborts_a_fetch_parked_across_a_rebuild_and_the_new_build_fetches",
+        180,
+    );
+    let up = upstream();
+    let src = r#"import { msg } from "./msg"
+import { fetchText } from "std/fetch"
+
+fn handle(req: Request) -> Response {
+    let body = match await fetchText("http://127.0.0.1:PORT" + req.path) {
+        Ok(b) => b,
+        Err(_) => "failed",
+    }
+    return Response { status: 200, contentType: "text/plain", body: "\{msg()} \{body}", vary: "", headers: [:] }
+}
+"#;
+    let d = start_dev_on(&src.replace("PORT", &up.port.to_string()));
+    assert_eq!(get(d.server.port, "/now").1, "one now");
+    let hang = get_later(d.server.port, "/hang", Duration::ZERO);
+    up.arrived
+        .recv_timeout(Duration::from_secs(30))
+        .expect("the parked fetch arrived");
+    d.edit(&dev_msg("two"), "dev: rebuilt");
+    assert_eq!(get(d.server.port, "/now").1, "two now");
+    let ((status, _), _) = hang.join().unwrap();
+    assert_eq!(status, "HTTP/1.1 503 Service Unavailable");
+    let aborted = up.aborted.recv_timeout(Duration::from_secs(10));
+    assert!(aborted.is_ok(), "the parked fetch was not aborted");
 }

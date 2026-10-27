@@ -1,19 +1,19 @@
 command	lines	sentences
 why	781	12
-serve, dev	672	6
+serve, dev	697	6
 bench	500	11
 dev	408	15
+build	355	20
 (dispatch)	336	4
 doc	293	9
-build	289	18
 routes	263	1
 run	209	2
 deps	198	3
 update	194	5
 fmt	186	5
 fix	140	1
+build, bench	138	0
 test, bench	128	2
-build, bench	120	0
 (global)	94	2
 test	76	0
 vendor	64	6

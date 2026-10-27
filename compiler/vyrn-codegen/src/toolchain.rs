@@ -256,6 +256,16 @@ pub fn simde_from(start: &Path) -> Option<(PathBuf, &'static str)> {
 /// `VYRN_W2C_HEADER` to the header wasm2c wrote.
 const WASI_HOST_C: &str = include_str!("wasi_host.c");
 
+/// The outbound-request client a module that imports `vyrn_wait.fetch` links beside the
+/// host: threads, sockets and HTTP/1.1, the same requests `vyrn-cli/src/fetch.rs` sends.
+pub const WASI_NET_C: &str = include_str!("wasi_net.c");
+
+/// Whether the module whose wasm2c header is `w2c_header` sends requests: it imports
+/// `vyrn_wait.fetch`, so its host defines `VYRN_FETCH` and links [`WASI_NET_C`].
+pub fn sends_requests(w2c_header: &str) -> bool {
+    w2c_header.contains("w2c_vyrn__wait_fetch(")
+}
+
 /// The marker [`wasi_host_c`] fills with the `vyrn` namespace's stubs.
 const EXTERN_STUBS_MARKER: &str = "/*@VYRN_EXTERN_STUBS@*/";
 
@@ -337,6 +347,9 @@ pub fn wasi_host_c(w2c_header: &str) -> String {
         format!("#define VYRN_INSTANTIATE(inst) wasm2c_prog_instantiate({instantiate})\n");
     if wakes {
         block.push_str("#define VYRN_WAKE 1\n");
+    }
+    if sends_requests(w2c_header) {
+        block.push_str("#define VYRN_FETCH 1\n");
     }
     if !stubs.is_empty() {
         block.push_str("struct w2c_vyrn {\n    int unused;\n};\nstatic struct w2c_vyrn g_vyrn;\n");
