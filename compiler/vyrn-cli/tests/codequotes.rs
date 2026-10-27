@@ -195,6 +195,96 @@ fn rawat_origin_maps_a_check_error_back_to_the_source() {
     );
 }
 
+/// `helper` is exported only to `./gen`, whose quotes import it: `make` writes
+/// the import in a quote, `copy` copies it from an input as data.
+fn authors_app(tag: &str, app: &str) -> std::process::Output {
+    let dir = scratch(tag);
+    write(
+        &dir.join("lib.vyrn"),
+        "export to \"./gen\" fn helper() -> Int64 { return 7 }\n",
+    );
+    write(
+        &dir.join("script.txt"),
+        "import { helper } from \"./lib\"\nexport fn made() -> Int64 { return helper() }\n",
+    );
+    let gen = "export gen fn make() -> Code {\n\
+               return vyrn\"\"\"import { helper } from \"./lib\"\n\
+               export fn made() -> Int64 { return helper() }\n\
+               \"\"\"\n\
+               }\n\
+               export gen fn copy(path: String) -> Code {\n\
+               let text = match readFile(path) {\n\
+               Ok(t) => t,\n\
+               Err(e) => panic(e),\n\
+               }\n\
+               return rawAt(text, path, 1, 1)\n\
+               }\n";
+    write(&dir.join("gen.vyrn"), gen);
+    write(
+        &dir.join("wrap.vyrn"),
+        "import { make } from \"./gen\"\n\
+               export gen fn wrap() -> Code {\n\
+               return vyrn\"\"\"// wrapped\n\\{make()}\"\"\"\n\
+               }\n",
+    );
+    write(&dir.join("stray.vyrn"), "export gen fn stray() -> Code {\n\
+               return vyrn\"import { helper } from \\\"./lib\\\"\\nexport fn made() -> Int64 { return helper() }\"\n\
+               }\n");
+    write(&dir.join("app.vyrn"), app);
+    vyrn()
+        .arg("run")
+        .arg(dir.join("app.vyrn"))
+        .output()
+        .unwrap()
+}
+
+/// A quote in a module `export to` does not name is refused, and the refusal
+/// names the quote's module and line.
+#[test]
+fn an_import_a_stray_quote_writes_is_refused_naming_its_author() {
+    let app = "import { stray } from \"./stray\"\n\
+               import { made } from stray()\n\
+               fn main() -> Int64 { return made() }\n";
+    let out = authors_app("stray", app);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("written by `./stray` at line 2"), "{err}");
+}
+
+/// An import a quote writes is judged as the module that holds the quote, even
+/// when another generator splices the quote's `Code` into its own.
+#[test]
+fn an_import_a_quote_writes_is_judged_as_the_quotes_module() {
+    for (tag, gen, from) in [("direct", "make", "./gen"), ("wrapped", "wrap", "./wrap")] {
+        let app = format!(
+            "import {{ {gen} }} from \"{from}\"\n\
+             import {{ made }} from {gen}()\n\
+             fn main() -> Int64 {{ return made() }}\n"
+        );
+        let out = authors_app(tag, &app);
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(7), "{tag}:\n{err}");
+    }
+}
+
+/// An import a generator copies from its input is the call site's data, so it
+/// is judged as the importer, and the refusal says who wrote it.
+#[test]
+fn an_import_a_generator_copies_is_judged_as_the_importer() {
+    let app = "import { copy } from \"./gen\"\n\
+               import { made } from copy(\"./script.txt\")\n\
+               fn main() -> Int64 { return made() }\n";
+    let out = authors_app("copied", app);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("`helper` is exported from `./lib` only to `./gen`"),
+        "{err}"
+    );
+    assert!(
+        err.contains("written as data by the generator call"),
+        "{err}"
+    );
+}
+
 /// A `Code` result has no `//@origin` lines; its span table places the error.
 #[test]
 fn rawat_in_a_code_result_maps_a_check_error_back_to_the_source() {

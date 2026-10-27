@@ -596,6 +596,12 @@ are judged by its banner. Both paths stand until the last `String` generator
 in std moves to `Code`; that commit deletes the directive scan and the banner
 rule.
 
+The link judges each import of a generated module by the span under its
+`import` keyword (`loader::author_of`, the parser records the keyword's column
+in `ImportDecl::col`): a `File` span as that module, a `CallSite` span as the
+file that wrote the generator call. `admits` stays the one visibility rule. A
+refusal there carries a note naming the author and its line (`written_by`).
+
 ## What each gate proves
 
 `AGENTS.md` lists the commands and when to run them. This section says what

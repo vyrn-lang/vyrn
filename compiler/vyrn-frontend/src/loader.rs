@@ -650,6 +650,64 @@ pub(crate) fn judged_as<'a>(
     }
 }
 
+/// The author of the byte at `line:col` (1-based) of generated module `m`, with
+/// that byte's line in the author's file; `None` for a module without a span
+/// table. A position past the text is the last span's.
+fn author_at(m: &Module, line: usize, col: usize) -> Option<(&Author, usize)> {
+    let (rows, text) = (m.spans.as_deref()?, m.gen_source.as_deref()?);
+    let start = text
+        .split_inclusive('\n')
+        .take(line.saturating_sub(1))
+        .map(str::len)
+        .sum::<usize>();
+    let rest = &text[start..];
+    let offset = start
+        + rest
+            .char_indices()
+            .nth(col.saturating_sub(1))
+            .map_or(rest.len(), |(i, _)| i);
+    let row = &rows[rows
+        .partition_point(|r| r.offset <= offset)
+        .checked_sub(1)?];
+    let line_in = match &row.author {
+        Author::File { at, .. } => at.line + text[row.offset..offset].matches('\n').count(),
+        Author::CallSite => 0,
+    };
+    Some((&row.author, line_in))
+}
+
+/// Returns the module an import at `line:col` of module `m` is judged as: the
+/// author of its `import` keyword. A quote's text is judged as the module that
+/// holds the quote, and the call site's data as the file that wrote the
+/// generator call (the real file under nested banners). A module without a
+/// span table is judged by [`judged_as`].
+fn author_of<'a>(
+    m: &'a Module,
+    line: usize,
+    col: usize,
+    declarer: impl FnOnce(&str) -> Option<&'a str>,
+) -> Option<Judged<'a>> {
+    match author_at(m, line, col) {
+        None => judged_as(&m.key, declarer),
+        Some((Author::File { key, .. }, _)) => Some(Judged(key)),
+        Some((Author::CallSite, _)) => generated_importer(&m.key).map(Judged),
+    }
+}
+
+/// A note naming who wrote the import at `line:col` of generated module `m`,
+/// for a refusal there; `None` for a module without a span table. A module is
+/// spelled as an import in the generator's importer would spell it.
+fn written_by(m: &Module, line: usize, col: usize, opts: &LoadOptions) -> Option<String> {
+    Some(match author_at(m, line, col)? {
+        (Author::File { key, .. }, at) => {
+            let dir = dir_of(generated_importer(&m.key).unwrap_or(&m.key));
+            let shown = import_specifier(dir, key, opts.std_root.as_deref());
+            format!("written by `{shown}` at line {at}")
+        }
+        (Author::CallSite, _) => "written as data by the generator call".to_string(),
+    })
+}
+
 /// Whether `importer` may import a declaration of `exporter` whose `export to`
 /// paths are `to`. Every module may when `to` is empty. A path resolves as an
 /// import written in `exporter` would; one that does not resolve admits
@@ -805,6 +863,9 @@ struct Module {
     /// The generated source text, for `vyrn emit-gen`; `None` for a
     /// module read from disk.
     gen_source: Option<String>,
+    /// A `Code` result's span table, by offset in `gen_source`; `None` for a
+    /// `String` result and a module read from disk.
+    spans: Option<Rc<[SpanRow]>>,
     /// `Some(prefix)` when a builtin injected this module and nothing imported
     /// it. Its declarations are renamed to that reserved prefix (see
     /// [`RT_PREFIX`]), so they neither collide with nor are captured by a user's.
@@ -1614,6 +1675,7 @@ fn load_modules(
                 },
                 import_targets: Vec::new(),
                 gen_source: None,
+                spans: None,
                 injected: None,
                 hash: None,
                 refs: Rc::default(),
@@ -1837,6 +1899,7 @@ fn load_modules(
             program,
             import_targets,
             gen_source,
+            spans: spans.map(Rc::from),
             injected: None,
             hash: Some(hash),
             refs: parsed.refs.clone(),
@@ -4142,11 +4205,19 @@ fn link(
     // The `export to` paths of `def_module`'s `name` when they leave out
     // `importer`. Every refusal of a qualified export asks this one function.
     let mut real_paths = HashMap::new();
-    let mut shut_out = |name: &str, def_module: &str, importer: &str| {
+    let mut shut_out = |name: &str, def_module: &str, m: &Module, (line, col)| {
         let to: &[String] = qualified.get(&(def_module, name))?;
-        let judged = judged_as(importer, |g| owner.get(g).map(|(m, _)| m.as_str()));
+        let judged = author_of(m, line, col, |g| owner.get(g).map(|(m, _)| m.as_str()));
         let admitted = judged.is_some_and(|j| admits(to, def_module, j, opts, &mut real_paths));
         (!admitted).then_some(to)
+    };
+    // A refusal of an import a generator wrote names the import's author.
+    let refused_import = |m: &Module, imp: &ImportDecl, line: usize, rule: Rule| {
+        let d = load_error(&m.key, root_key, line, rule);
+        match written_by(m, imp.line, imp.col, opts) {
+            Some(note) => d.with_note(note),
+            None => d,
+        }
     };
     for m in &modules {
         let mut visible: HashSet<String> = HashSet::new(); // foreign names imported here
@@ -4156,7 +4227,8 @@ fn link(
             // name those symbols, so they are visible.
             if imp.namespace.is_some() {
                 for (name, (def_module, exported)) in &owner {
-                    if def_module == target && *exported && shut_out(name, target, &m.key).is_none()
+                    let at = (imp.line, imp.col);
+                    if def_module == target && *exported && shut_out(name, target, m, at).is_none()
                     {
                         visible.insert(name.clone());
                     }
@@ -4166,9 +4238,9 @@ fn link(
             // checked here, with its owner's `export to` paths.
             if let ImportSource::Generator { name, line, .. } = &imp.source {
                 if let Some((def_module, _)) = owner.get(name) {
-                    if let Some(to) = shut_out(name, def_module, &m.key) {
+                    if let Some(to) = shut_out(name, def_module, m, (imp.line, imp.col)) {
                         let rule = exported_only_to(name, to, def_module, &m.key, opts);
-                        errors.push(load_error(&m.key, root_key, *line, rule));
+                        errors.push(refused_import(m, imp, *line, rule));
                     }
                 }
             }
@@ -4185,9 +4257,9 @@ fn link(
                                 imp.line,
                                 rule!(NotExported, name, target),
                             ));
-                        } else if let Some(to) = shut_out(name, target, &m.key) {
+                        } else if let Some(to) = shut_out(name, target, m, (imp.line, imp.col)) {
                             let rule = exported_only_to(name, to, target, &m.key, opts);
-                            errors.push(load_error(&m.key, root_key, imp.line, rule));
+                            errors.push(refused_import(m, imp, imp.line, rule));
                         }
                         // Importing an enum brings its variants, and a protocol its
                         // methods; the check below resolves them through this name.
@@ -4296,7 +4368,10 @@ fn link(
                         if gen_importer.as_deref() == Some(def_module.as_str()) {
                             return;
                         }
-                        let rule = match shut_out(name, def_module, &m.key) {
+                        // The use's column is unknown; the start of its line
+                        // only picks the sentence, since the use is refused
+                        // either way.
+                        let rule = match shut_out(name, def_module, m, (line, 1)) {
                             Some(to) => exported_only_to(name, to, def_module, &m.key, opts),
                             None => rule!(NotImported, what, name, def_module),
                         };

@@ -1569,7 +1569,7 @@ impl Parser {
     /// `import { a, b } from "path"`; `from` is contextual. `import type { .. }`
     /// marks a JSON Schema import; the loader dispatches on the path's extension.
     fn import_decl(&mut self) -> Result<ImportDecl, Diagnostic> {
-        let line = self.line();
+        let (line, col) = (self.line(), self.col());
         self.eat(&Tok::Import)?;
         // `import * as ns from <source>` binds one name and adds none of
         // the target's exports to the flat namespace.
@@ -1608,6 +1608,7 @@ impl Parser {
                 namespace: Some(ns),
                 source,
                 line,
+                col,
             });
         }
         if *self.peek() == Tok::Type {
@@ -1654,6 +1655,7 @@ impl Parser {
             namespace: None,
             source,
             line,
+            col,
         })
     }
 

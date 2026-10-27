@@ -438,7 +438,9 @@ pub struct ImportDecl {
     /// foreign declaration's symbol, so no later stage knows namespaces.
     pub namespace: Option<String>,
     pub source: ImportSource,
+    /// The `import` keyword's line and column.
     pub line: usize,
+    pub col: usize,
 }
 
 /// The right-hand side of `import { .. } from <source>`.
