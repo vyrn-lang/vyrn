@@ -64,6 +64,27 @@ fn emit_gen_emits_escaped_and_spliced_source() {
 }
 
 #[test]
+fn a_generator_returning_code_is_an_import_target() {
+    let gen = "export gen fn make() -> Code {\n\
+               return vyrn\"export fn made() -> Int64 { return 7 }\"\n\
+               }\n";
+    let app = "import { make } from \"./gen\"\n\
+               import { made } from make()\n\
+               fn main() -> Int64 { return made() }\n";
+    let out = vyrn()
+        .arg("run")
+        .arg(gen_app("code", gen, app))
+        .output()
+        .unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(7),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
 fn injection_attempt_becomes_an_inert_string_literal() {
     let gen = "export gen fn mkMod(name: String) -> String {\n\
                let evil = \"\\\"; dropTables(); \\\"\"\n\

@@ -280,6 +280,8 @@ pub(crate) const CODE_IMPORTS: &[(&str, &[wasm::ValType], &[wasm::ValType])] = {
         ("nextStr", &[], &[I64]),
         // The mediated read that serves `readFile`, `readFileBytes` and `listDir`.
         ("read", &[I32, I32], &[I64]),
+        // A `Code` generator's result, handed over as its handle.
+        ("result", &[I64], &[]),
     ]
 };
 
@@ -295,7 +297,7 @@ pub use vyrn_frontend::checker::{GEN_ENTRY_LEX, GEN_ENTRY_MODULE_INTERFACE, GEN_
 /// The atom-stream primitives the synthesized decoders call. The checker
 /// declares and types them on a generator host; the emitter lowers them and
 /// `vyrn-genwasm` writes the decoders.
-pub use vyrn_frontend::checker::{GEN_NEXT_INT, GEN_NEXT_STR, GEN_REFLECT};
+pub use vyrn_frontend::checker::{GEN_NEXT_INT, GEN_NEXT_STR, GEN_REFLECT, GEN_RESULT};
 
 /// The `splice` import's value tags: which interpreter `Val` the host rebuilds
 /// from the word. Exactly the set `gen::gen_code_splice` accepts; `pub` so the

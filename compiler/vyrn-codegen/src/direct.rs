@@ -122,6 +122,7 @@ struct Gen {
     reflect: u32,
     next_int: u32,
     next_str: u32,
+    result: u32,
 }
 
 fn gen_imports(m: &mut Module) -> Gen {
@@ -143,6 +144,7 @@ fn gen_imports(m: &mut Module) -> Gen {
         reflect: g("reflect"),
         next_int: g("nextInt"),
         next_str: g("nextStr"),
+        result: g("result"),
     }
 }
 
@@ -5403,6 +5405,11 @@ impl<'p> Fn_<'_, 'p> {
                 b.ins(&Instruction::Call(g.next_str));
                 self.fetch_str(b, g);
                 Ok(Type::Str)
+            }
+            (crate::GEN_RESULT, 1) => {
+                self.core_arg(m, b, name, args, 0, Some(&code), line)?;
+                b.ins(&Instruction::Call(g.result));
+                Ok(Type::Unit)
             }
             // The value crosses as a compile-time tag naming the `Val` the host rebuilds, a
             // 64-bit word and a String pointer. The tag goes first, so the type is asked first.

@@ -575,7 +575,8 @@ prints the `FAILED:` line, and the next body runs.
 
 A `gen fn` runs inside the load. `vyrn-genwasm` compiles the generator's
 module with a synthesized `main` that dispatches on its first argument, runs
-it in wasmtime, and reads the result between two sentinel lines. File reads
+it in wasmtime, and reads the result: a `String` between two sentinel lines on
+stdout, a `Code` value through the `vyrn_gen.result` import. File reads
 go through the loader's resolver and are recorded as the generator's inputs;
 `lex`, `moduleInterface` and `contractOf` cross as a host encoding and a
 synthesized decoder. A generator the engine declines is an error: "the

@@ -76,6 +76,8 @@ fn in_gen_of(f: &Function, host: Host) -> bool {
 pub const GEN_REFLECT: &str = "__vyrnGenReflect";
 pub const GEN_NEXT_INT: &str = "__vyrnGenNextInt";
 pub const GEN_NEXT_STR: &str = "__vyrnGenNextStr";
+/// Hands a `Code` generator's result to the host; only the engine's wrapper calls it.
+pub const GEN_RESULT: &str = "__vyrnGenResult";
 
 /// The generator-host entry points the engine appends as ordinary functions:
 /// each asks the host for a value and decodes it by its static type. A
@@ -98,6 +100,7 @@ fn gen_host_primitive(name: &str, argc: usize, host: Host) -> Option<Type> {
         (GEN_REFLECT, 2) => Some(Type::Unit),
         (GEN_NEXT_INT, 0) => Some(Type::Int),
         (GEN_NEXT_STR, 0) => Some(Type::Str),
+        (GEN_RESULT, 1) => Some(Type::Unit),
         _ => None,
     }
 }

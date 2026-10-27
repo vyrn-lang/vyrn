@@ -269,7 +269,9 @@ pub fn run_pure(
 ) -> Option<Result<GenOutput, GenError>> {
     let target = program.functions.iter().find(|f| f.name == fn_name)?;
     let arg = inputs.type_arg.as_ref()?;
-    if !dispatchable(target) || !takes_type_arg(target) || !args.is_empty() {
+    // The page serves no code import, so a `Code` result is declined too.
+    if !dispatchable(target) || returns_code(target) || !takes_type_arg(target) || !args.is_empty()
+    {
         return None;
     }
     if reaches_unserved(program).is_some() {
@@ -301,18 +303,21 @@ pub fn run_pure(
 }
 
 /// Whether the engine can serve this function: an exported `gen fn` returning
-/// `String` and taking `String` or `Int64` parameters (written to argv and read
-/// back, `Int64` by `parse`), or one `TypeArg` (reflected, as `moduleInterface`
-/// is). A generator returning `Code` is not served: the guest would print the
-/// handle.
+/// `String` or `Code` and taking `String` or `Int64` parameters (written to argv
+/// and read back, `Int64` by `parse`), or one `TypeArg` (reflected, as
+/// `moduleInterface` is).
 fn dispatchable(f: &Function) -> bool {
     f.is_gen
         && f.exported
-        && f.ret == Type::Str
+        && (f.ret == Type::Str || returns_code(f))
         && (takes_type_arg(f)
             || f.params
                 .iter()
                 .all(|par| matches!(par.ty, Type::Str | Type::Int)))
+}
+
+fn returns_code(f: &Function) -> bool {
+    f.ret == Type::Named("Code".into())
 }
 
 fn takes_type_arg(f: &Function) -> bool {
@@ -320,7 +325,9 @@ fn takes_type_arg(f: &Function) -> bool {
 }
 
 /// The generator's module with `is_gen` cleared, plus a `main` that dispatches
-/// on `args()[0]` to the requested generator and prints its result.
+/// on `args()[0]` to the requested generator and hands over its result: a
+/// `String` printed between the markers, a `Code` handle through the `result`
+/// import.
 ///
 /// Arguments and the name come from `args()`, so one artifact per module serves
 /// every generator in it for every call; `std/vyx` exports three generators
@@ -348,6 +355,31 @@ fn wrapper_program(program: &Program) -> Option<Program> {
         },
     ];
     for f in p.functions.iter().filter(|f| dispatchable(f)) {
+        let call = Expr::call(
+            &f.name,
+            f.params
+                .iter()
+                .enumerate()
+                .map(|(i, par)| match takes_type_arg(f) {
+                    true => Expr::var("@typeArg", 0),
+                    false => at_type(argv(i + 1), &par.ty),
+                })
+                .collect(),
+            0,
+        );
+        let hand_over = match returns_code(f) {
+            true => vec![Stmt::expr(Expr::call(
+                vyrn_codegen::GEN_RESULT,
+                vec![call],
+                0,
+            ))],
+            // Framed between marker lines; see `unframe_result`.
+            false => vec![
+                Stmt::expr(Expr::call("print", vec![Expr::str(RESULT_BEGIN)], 0)),
+                Stmt::expr(Expr::call("print", vec![call], 0)),
+                Stmt::expr(Expr::call("print", vec![Expr::str(RESULT_END)], 0)),
+            ],
+        };
         body.push(Stmt::If {
             id: Id::NEW,
             cond: Expr::Binary {
@@ -370,28 +402,8 @@ fn wrapper_program(program: &Program) -> Option<Program> {
                         )
                     })
                     .into_iter()
-                    .chain([
-                        // Framed between marker lines; see `unframe_result`.
-                        Stmt::expr(Expr::call("print", vec![Expr::str(RESULT_BEGIN)], 0)),
-                        Stmt::expr(Expr::call(
-                            "print",
-                            vec![Expr::call(
-                                &f.name,
-                                f.params
-                                    .iter()
-                                    .enumerate()
-                                    .map(|(i, par)| match takes_type_arg(f) {
-                                        true => Expr::var("@typeArg", 0),
-                                        false => at_type(argv(i + 1), &par.ty),
-                                    })
-                                    .collect(),
-                                0,
-                            )],
-                            0,
-                        )),
-                        Stmt::expr(Expr::call("print", vec![Expr::str(RESULT_END)], 0)),
-                        Stmt::ret(Expr::int(0), 0),
-                    ])
+                    .chain(hand_over)
+                    .chain([Stmt::ret(Expr::int(0), 0)])
                     .collect(),
             },
             else_block: None,
@@ -837,6 +849,8 @@ pub struct GenState {
     /// The code-quote arena; a `Code` value is an index into it. Per generation
     /// run, so a handle from one run is meaningless in the next.
     code: Vec<Vec<CodePiece>>,
+    /// A `Code` generator's result, set once by the wrapper's `result` call.
+    result: Option<Vec<CodePiece>>,
     /// The structured result being handed over, and the decoder's position. A
     /// stream is fully consumed before the next `reflect`.
     atoms: Vec<Atom>,
@@ -1112,6 +1126,18 @@ fn link<X: 'static>(linker: &mut wasmtime::Linker<wasi::Guest<X>>) -> wasmtime::
             let mut pieces = s.pieces(a)?.clone();
             pieces.extend(s.pieces(b)?.iter().cloned());
             Ok(s.intern(pieces))
+        },
+    )?;
+    linker.func_wrap(
+        "vyrn_gen",
+        "result",
+        |mut caller: Caller<'_, T<X>>, h: i64| -> Result<()> {
+            let s = &mut caller.data_mut().gen;
+            let pieces = s.pieces(h)?.clone();
+            if s.result.replace(pieces).is_some() {
+                return Err(Error::msg("the generator handed over two results"));
+            }
+            Ok(())
         },
     )?;
     linker.func_wrap(
@@ -1628,10 +1654,15 @@ fn run_wasm(
         .drained()
         .map_err(|e| EngineError::Failed(e.to_string()))?;
     // Compile-time prints go to the compiler's stdout, never into the source.
+    // A `Code` result came through the `result` import, so all of stdout is
+    // prints.
     let stdout = guest.wasi.stdout.unwrap_or_default();
-    let (prints, source) = match unframe_result(&stdout) {
-        Ok(framed) => framed,
-        Err(why) => return Err(decline(why)),
+    let (prints, source) = match guest.gen.result {
+        Some(code) => (stdout, vyrn_frontend::gen::render_code(&code).into_bytes()),
+        None => match unframe_result(&stdout) {
+            Ok(framed) => framed,
+            Err(why) => return Err(decline(why)),
+        },
     };
     if !prints.is_empty() {
         use std::io::Write;

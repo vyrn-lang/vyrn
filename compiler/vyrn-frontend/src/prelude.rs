@@ -1251,6 +1251,7 @@ fn table() -> Vec<Builtin> {
         b(crate::checker::GEN_REFLECT).spec(Spec::Host),
         b(crate::checker::GEN_NEXT_INT).spec(Spec::Host),
         b(crate::checker::GEN_NEXT_STR).spec(Spec::Host),
+        b(crate::checker::GEN_RESULT).spec(Spec::Host),
     ]);
     rows
 }
