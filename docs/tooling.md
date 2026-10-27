@@ -227,14 +227,15 @@ and `main` can call.
 Without `--workers`, one instance answers every request, so module state
 needs no locking. A `handle` that does not wait runs each request to its end
 before the next starts. A `handle` that waits runs each request as a task on
-that instance: the request parks at its first `await`, the next request or
-due timer runs, and each response goes to its own connection when its task
-ends. So module state may change at an `await` between requests: a request
+that instance: the request parks at its first `await`, the next request,
+due timer or arrived reply to a `fetch` runs, and each response goes to its own
+connection when its task ends. So module state may change at an `await` between requests: a request
 that read a global before it waited may find another request's write after
 it. A stream answer is written to its end before anything else runs.
 
-A trap inside `handle` is logged and answered with a 500 for its own request;
-the requests parked beside it run on, on the same instance. The call stack and
+A trap inside `handle` is logged and answered with a 500 for its own request,
+and the requests its task sent are aborted; the requests parked beside it run
+on, on the same instance. The call stack and
 region nesting return to their state before the call that trapped. Module
 state keeps what the handler wrote, and heap blocks it held leak.
 
@@ -263,7 +264,8 @@ The `server`, `client` and `public` keys and the flags are read once, at start.
 A good build replaces the server instance before the next request or due
 timer, and its `main` runs again: module state does not carry over. Each
 request parked at an `await` on the old instance answers 503, because its
-task does not carry over either. A failed build prints its
+task does not carry over either, and each request the old instance sent is
+aborted. A failed build prints its
 diagnostics and leaves the last good build serving, `.vyrn-dev/client.wasm`
 included.
 

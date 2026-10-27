@@ -4440,11 +4440,15 @@ fn serve_loop(
 /// The connections the accept loop took and no instance has yet. An instance
 /// waits on `ready` with the lock released, so instances that wait at once
 /// each wake at their own next completion, and any idle one takes the next
-/// connection.
+/// connection. A reply to a request an instance sent wakes every instance
+/// ([`Accepted::reply`]); each one with nothing due waits again.
 #[derive(Default)]
 struct Accepted {
     queue: std::sync::Mutex<std::collections::VecDeque<std::net::TcpStream>>,
     ready: std::sync::Condvar,
+    /// How many replies came: an instance reads it before it delivers what is
+    /// due, and stops waiting once it moved.
+    replies: std::sync::atomic::AtomicU64,
 }
 
 impl Accepted {
@@ -4458,15 +4462,34 @@ impl Accepted {
         }
     }
 
+    /// A reply came on a request's thread. The count moves before the lock is
+    /// taken, so an instance that read the count under it either sees the move
+    /// or already waits and is woken.
+    fn reply(&self) {
+        self.replies
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let _queue = vyrn_frontend::session::locked(&self.queue);
+        self.ready.notify_all();
+    }
+
+    /// How many replies came so far, for [`Accepted::next`].
+    fn replies(&self) -> u64 {
+        self.replies.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
     /// The next connection, waited for at most `left`, or until one comes when
-    /// `left` is `None`. `None` when the time ran out: a completion is due.
-    fn next(&self, left: Option<std::time::Duration>) -> Option<std::net::TcpStream> {
+    /// `left` is `None`. `None` when the time ran out or a reply came after
+    /// [`Accepted::replies`] read `seen`: a completion is due.
+    fn next(&self, left: Option<std::time::Duration>, seen: u64) -> Option<std::net::TcpStream> {
         use std::sync::PoisonError;
         let until = left.map(|d| std::time::Instant::now() + d);
         let mut queue = vyrn_frontend::session::locked(&self.queue);
         loop {
             if let Some(s) = queue.pop_front() {
                 return Some(s);
+            }
+            if self.replies() != seen {
+                return None;
             }
             queue = match until {
                 None => (self.ready.wait(queue)).unwrap_or_else(PoisonError::into_inner),
@@ -4501,24 +4524,29 @@ struct Parked {
 /// new build.
 fn serve_instance(
     mut res: wasmrun::Resident,
-    accepted: &Accepted,
+    accepted: &std::sync::Arc<Accepted>,
     dev: Option<&DevAssets>,
     mut gen: u64,
     mut newer: impl FnMut(&mut u64) -> Option<wasmrun::Resident>,
 ) -> ! {
+    let bell = std::sync::Arc::clone(accepted);
+    let bell: std::sync::Arc<dyn Fn() + Send + Sync> = std::sync::Arc::new(move || bell.reply());
+    res.on_reply(std::sync::Arc::clone(&bell));
     let mut parked: std::collections::HashMap<i64, Parked> = std::collections::HashMap::new();
     loop {
+        let seen = accepted.replies();
         let left = res.advance().unwrap_or_else(|e| {
             eprintln!("error: {e}");
             None
         });
         serve_ended(&mut res, &mut parked, dev.map(|d| (d, gen)));
-        let next = accepted.next(left);
-        if let Some(build) = newer(&mut gen) {
+        let next = accepted.next(left, seen);
+        if let Some(mut build) = newer(&mut gen) {
             for (_, mut p) in parked.drain() {
                 eprintln!("{} {} -> 503 (rebuilt)", p.method, p.path);
                 write_response(&mut p.stream, 503, "text/plain", b"the server was rebuilt");
             }
+            build.on_reply(std::sync::Arc::clone(&bell));
             res = build;
         }
         let Some(mut stream) = next else { continue };
@@ -4584,7 +4612,7 @@ fn serve_pool(
     gen: u64,
     banner: impl FnOnce(),
 ) {
-    let accepted = Accepted::default();
+    let accepted = std::sync::Arc::new(Accepted::default());
     std::thread::scope(|s| {
         for i in 0..n {
             let accepted = &accepted;

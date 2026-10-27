@@ -169,16 +169,6 @@ fn say(o: &std::process::Output) -> String {
     )
 }
 
-/// Ends the test binary with a failure once `secs` have passed, so a run that never settles
-/// fails in seconds rather than at the suite's timeout. Each test arms it first.
-fn deadline(test: &'static str, secs: u64) {
-    std::thread::spawn(move || {
-        std::thread::sleep(Duration::from_secs(secs));
-        eprintln!("{test}: still running after {secs} s");
-        std::process::exit(101);
-    });
-}
-
 /// The `/slow` request each host ran was aborted where the `timeout` cancelled it.
 fn aborted(up: &Upstream, host: &str) {
     let got = up.aborted.recv_timeout(Duration::from_secs(10));
@@ -187,7 +177,7 @@ fn aborted(up: &Upstream, host: &str) {
 
 #[test]
 fn a_round_trip_prints_the_same_bytes_on_every_host() {
-    deadline("a_round_trip_prints_the_same_bytes_on_every_host", 240);
+    let _deadline = deadline("a_round_trip_prints_the_same_bytes_on_every_host", 240);
     let up = upstream();
     let dir = scratch("fetch");
     let src = program(&dir, &up);
@@ -283,7 +273,7 @@ fn seen(o: &Outcome) -> (i32, String, String) {
 /// and leaves nothing for the free audit.
 #[test]
 fn a_replay_of_the_recorded_replies_prints_the_same_bytes() {
-    deadline(
+    let _deadline = deadline(
         "a_replay_of_the_recorded_replies_prints_the_same_bytes",
         120,
     );
@@ -321,7 +311,7 @@ fn a_replay_of_the_recorded_replies_prints_the_same_bytes() {
 /// timer, whatever its delay.
 #[test]
 fn a_request_takes_no_time_on_the_virtual_clock() {
-    deadline("a_request_takes_no_time_on_the_virtual_clock", 60);
+    let _deadline = deadline("a_request_takes_no_time_on_the_virtual_clock", 60);
     let up = upstream();
     let dir = scratch("fetch-virtual");
     let bytes = audited(&dir, &up);
@@ -404,7 +394,7 @@ fn tls_module(dir: &std::path::Path, port: u16) -> Vec<u8> {
 /// as the `vyrn` binary runs every program, the certificate does not verify.
 #[test]
 fn an_https_request_answers_only_when_its_certificate_verifies() {
-    deadline(
+    let _deadline = deadline(
         "an_https_request_answers_only_when_its_certificate_verifies",
         60,
     );
@@ -429,7 +419,7 @@ fn an_https_request_answers_only_when_its_certificate_verifies() {
 /// that root, and built without it the certificate does not verify.
 #[test]
 fn a_native_https_request_answers_as_the_engine_does() {
-    deadline("a_native_https_request_answers_as_the_engine_does", 240);
+    let _deadline = deadline("a_native_https_request_answers_as_the_engine_does", 240);
     let port = tls_upstream();
     let dir = scratch("fetch-tls-native");
     let src = std::fs::read_to_string(

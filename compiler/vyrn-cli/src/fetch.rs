@@ -22,6 +22,11 @@ pub struct Net {
     rx: mpsc::Receiver<(i64, Vec<u8>)>,
     /// Each request in flight, by its operation's id, in start order.
     flying: Vec<(i64, Arc<Abort>)>,
+    /// The replies taken off the channel and not yet delivered, in arrival order.
+    held: Vec<(i64, Vec<u8>)>,
+    /// Called on a request's thread after it posts its reply: an event loop that waits
+    /// for more than replies ([`crate::wasmrun::Resident::on_reply`]) wakes on it.
+    pub on_reply: Option<Arc<dyn Fn() + Send + Sync>>,
     tls: Arc<Tls>,
 }
 
@@ -74,6 +79,8 @@ impl Net {
             tx,
             rx,
             flying: Vec::new(),
+            held: Vec::new(),
+            on_reply: None,
             tls: Arc::new(Tls {
                 extra: test_roots,
                 config: std::sync::OnceLock::new(),
@@ -85,11 +92,17 @@ impl Net {
     pub fn start(&mut self, id: i64, request: Vec<u8>) {
         let abort = Arc::new(Abort::default());
         self.flying.push((id, Arc::clone(&abort)));
-        let (tx, tls) = (self.tx.clone(), Arc::clone(&self.tls));
+        let (tx, tls, bell) = (
+            self.tx.clone(),
+            Arc::clone(&self.tls),
+            self.on_reply.clone(),
+        );
         std::thread::spawn(move || {
             let reply = send(&request, &abort, &tls);
-            if !abort.cancelled.load(Ordering::SeqCst) {
-                let _ = tx.send((id, reply));
+            if !abort.cancelled.load(Ordering::SeqCst) && tx.send((id, reply)).is_ok() {
+                if let Some(bell) = bell {
+                    bell();
+                }
             }
         });
     }
@@ -107,6 +120,14 @@ impl Net {
         }
     }
 
+    /// Whether a reply of a request in flight came, without waiting for one.
+    pub fn arrived(&mut self) -> bool {
+        self.held.extend(self.rx.try_iter());
+        let flying = &self.flying;
+        self.held.retain(|h| flying.iter().any(|f| f.0 == h.0));
+        !self.held.is_empty()
+    }
+
     /// The next reply, waited for at most `left`, or until one comes when
     /// `left` is `None`; `None` when the time ran out or nothing is in flight.
     /// `first` waits for the earliest request in start order alone, the
@@ -116,37 +137,42 @@ impl Net {
         left: Option<std::time::Duration>,
         first: bool,
     ) -> Option<(i64, Vec<u8>)> {
-        let mut early: Vec<(i64, Vec<u8>)> = Vec::new();
-        let got = loop {
-            if first {
-                let want = self.flying.first()?.0;
-                if let Some(at) = early.iter().position(|e| e.0 == want) {
-                    break Some(early.remove(at));
-                }
-            } else if self.flying.is_empty() {
-                break None;
-            }
-            let r = match left {
-                Some(d) if !first => self.rx.recv_timeout(d).ok(),
-                _ => self.rx.recv().ok(),
+        let until = left.map(|d| std::time::Instant::now() + d);
+        loop {
+            self.arrived();
+            let want = if first {
+                let id = self.flying.first()?.0;
+                self.held.iter().position(|h| h.0 == id)
+            } else {
+                (!self.held.is_empty()).then_some(0)
             };
-            let Some((id, reply)) = r else { break None };
-            if !self.flying.iter().any(|f| f.0 == id) {
-                continue;
+            if let Some(at) = want {
+                let (id, reply) = self.held.remove(at);
+                self.flying.retain(|f| f.0 != id);
+                return Some((id, reply));
             }
-            if first {
-                early.push((id, reply));
-                continue;
+            if self.flying.is_empty() {
+                return None;
             }
-            break Some((id, reply));
-        };
-        // A reply that came before the one waited for goes back for the next call.
-        for e in early {
-            let _ = self.tx.send(e);
+            let got = match until {
+                Some(t) if !first => {
+                    let left = t.saturating_duration_since(std::time::Instant::now());
+                    self.rx.recv_timeout(left).ok()?
+                }
+                _ => self.rx.recv().ok()?,
+            };
+            self.held.push(got);
         }
-        let (id, reply) = got?;
-        self.flying.retain(|f| f.0 != id);
-        Some((id, reply))
+    }
+}
+
+impl Drop for Net {
+    /// Aborts every request in flight: an instance that ends, as a `vyrn dev` rebuild ends
+    /// the one it replaces, leaves no connection open.
+    fn drop(&mut self) {
+        while let Some(&(id, _)) = self.flying.first() {
+            self.cancel(id);
+        }
     }
 }
 

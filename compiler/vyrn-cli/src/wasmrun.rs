@@ -206,14 +206,14 @@ impl Waits {
         self.net.cancel(id);
     }
 
-    /// How long until [`Waits::fire`] has a completion without waiting: zero for a replay and
-    /// off the wall clock, `None` when nothing is pending.
-    fn due_in(&self) -> Option<std::time::Duration> {
+    /// How long until [`Waits::fire`] has a completion without waiting: zero for a replay, off
+    /// the wall clock, and once a reply came; `None` when no timer is pending and no reply came.
+    fn due_in(&mut self) -> Option<std::time::Duration> {
         let zero = std::time::Duration::ZERO;
         if let Some(r) = &self.replay {
             return (!r.is_empty()).then_some(zero);
         }
-        if !self.wall && !self.fetches.is_empty() {
+        if !self.fetches.is_empty() && (!self.wall || self.net.arrived()) {
             return Some(zero);
         }
         let at = self.due.iter().min()?.0;
@@ -794,11 +794,20 @@ impl Resident {
         Ok(true)
     }
 
+    /// Calls `bell` on another thread whenever a reply to a request comes, so an
+    /// event loop that waits for other events too, with [`Resident::advance`]'s
+    /// time as its limit, wakes to deliver it. A request already in flight keeps
+    /// the bell it started with.
+    pub fn on_reply(&mut self, bell: std::sync::Arc<dyn Fn() + Send + Sync>) {
+        self.store.data_mut().x.waits.net.on_reply = Some(bell);
+    }
+
     /// Delivers each completion that is due, without waiting. Returns how long
-    /// until the next one is due, `None` when none is pending.
+    /// until the next one is due, `None` when no timer is pending and no reply
+    /// came: a request in flight then wakes the loop through [`Resident::on_reply`].
     pub fn advance(&mut self) -> Result<Option<std::time::Duration>, String> {
         loop {
-            match self.store.data().x.waits.due_in() {
+            match self.store.data_mut().x.waits.due_in() {
                 Some(left) if left.is_zero() => self.wake_next()?,
                 left => return Ok(left),
             };
