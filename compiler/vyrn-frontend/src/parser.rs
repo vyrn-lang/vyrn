@@ -358,6 +358,33 @@ fn is_separator(src: &str) -> bool {
     })
 }
 
+/// Whether every bracket `src` closes was opened in `src` first, and every one
+/// it opens is closed.
+fn balanced(src: &str) -> bool {
+    let Ok(toks) = crate::lexer::lex(src) else {
+        return false;
+    };
+    let mut depth = 0usize;
+    for t in &toks {
+        let (kind, text) = crate::lexer::token_name_and_text(&t.tok);
+        match (kind.as_str(), text.as_str()) {
+            ("punct", "(" | "[" | "{") => depth += 1,
+            ("punct", ")" | "]" | "}") => match depth.checked_sub(1) {
+                Some(d) => depth = d,
+                None => return false,
+            },
+            _ => {}
+        }
+    }
+    depth == 0
+}
+
+/// Whether the hole between parts `before` and `after` is all that stands
+/// between a bracket and its closing one: `f(\{args})`, `P { \{fields} }`.
+fn alone_in_brackets(before: &str, after: &str) -> bool {
+    before.trim_end().ends_with(['(', '[', '{']) && after.trim_start().starts_with([')', ']', '}'])
+}
+
 /// Whether the hole between parts `before` and `after` is alone on its line;
 /// `first` says `before` starts the quote, so it starts a line.
 fn alone_on_line(before: &str, after: &str, first: bool) -> bool {
@@ -3871,10 +3898,15 @@ impl Parser {
     /// A multi-line quote first drops the indentation of its closing `"""`
     /// line from each of its lines, and the newline after its opening `"""`
     /// ([`dedent`]). The parts, with each hole replaced by a `__vyrn_holeN`
-    /// placeholder, form a skeleton. It must parse here in one of four modes
-    /// (declarations, statements, expression, type); a failure is a parse
-    /// diagnostic at the literal. A hole alone on its line stands for a list of
-    /// items of its block, so its placeholder may also be a declaration. The
+    /// placeholder, form a skeleton. It must parse here as declarations,
+    /// statements, an expression, a type, or one item of a list
+    /// ([`Self::parses_as_item`]); a failure is a parse diagnostic at the
+    /// literal. A hole alone on its line stands for a list of items of its
+    /// block, so its placeholder may also be a declaration; a hole alone in
+    /// its brackets stands for the whole list there, so its placeholder may
+    /// also be empty, though an import list cannot; any other hole's
+    /// placeholder may also be a string literal, which an import's `from`
+    /// needs. The
     /// quote lowers to a `@codeText(part, line, col) + @codeSplice(hole, glued,
     /// indent, from, to) + ...` chain: `glued` is `1` for a hole touching a word
     /// character, which the checker requires to be a `Name`, `indent` is the
@@ -3890,25 +3922,36 @@ impl Parser {
     ) -> Result<Expr, Diagnostic> {
         dedent(&mut parts);
         let word = |c: char| c.is_ascii_alphanumeric() || c == '_';
-        let skeleton = |item: bool| {
+        let skeleton = |item: bool, empty: bool, lit: bool| {
             let mut skel = String::new();
             for (i, part) in parts.iter().enumerate() {
                 skel.push_str(part);
                 if i < exprs.len() {
-                    let alone = item && alone_on_line(&parts[i], &parts[i + 1], i == 0);
-                    match alone {
-                        true => skel.push_str(&format!("let __vyrn_hole{i} = 0")),
-                        false => skel.push_str(&format!("__vyrn_hole{i}")),
-                    }
+                    let (before, after) = (&parts[i], &parts[i + 1]);
+                    let placeholder = if item && alone_on_line(before, after, i == 0) {
+                        format!("let __vyrn_hole{i} = 0")
+                    } else if item && alone_in_brackets(before, after) {
+                        if empty {
+                            String::new()
+                        } else {
+                            format!("__vyrn_hole{i}")
+                        }
+                    } else if lit {
+                        format!("\"__vyrn_hole{i}\"")
+                    } else {
+                        format!("__vyrn_hole{i}")
+                    };
+                    skel.push_str(&placeholder);
                 }
             }
             skel
         };
-        let skel = skeleton(false);
+        let skel = skeleton(false, false, false);
         let separator = exprs.is_empty() && is_separator(&skel);
+        let tries = [(true, true, false), (true, true, true), (true, false, true)];
         if !separator
             && !self.skeleton_parses_any(&skel)
-            && !self.skeleton_parses_any(&skeleton(true))
+            && !(tries.iter()).any(|&(i, e, l)| self.skeleton_parses_any(&skeleton(i, e, l)))
         {
             let (rule, skel_line, skel_col) = self.skeleton_error_detail(&skel);
             let rline = line + skel_line.saturating_sub(1);
@@ -3985,6 +4028,18 @@ impl Parser {
             || self.parses_as_stmts(src)
             || self.parses_as_expr(src)
             || self.parses_as_type(src)
+            || self.parses_as_item(src)
+    }
+
+    /// List-item mode: `src` is one item of a record literal (`port: v`), a
+    /// `match` (`Some(x) => x`) or a parameter list (`n: Int64`), each wrapped
+    /// in the smallest unit that holds it. Its brackets must balance, so a
+    /// wrapper cannot close one the quote opened.
+    fn parses_as_item(&self, src: &str) -> bool {
+        balanced(src)
+            && (self.parses_as_expr(&format!("__vyrn_r {{ {src} }}"))
+                || self.parses_as_expr(&format!("match __vyrn_m {{ {src} }}"))
+                || self.parses_as_decls(&format!("fn __vyrn_f({src}) {{}}")))
     }
 
     fn parses_as_decls(&self, src: &str) -> bool {

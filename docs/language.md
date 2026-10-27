@@ -627,7 +627,7 @@ import { squareOf } from squares()
 
 ### Code quotes
 
-A generator returns `Code`, a value only generation has. `vyrn"..."` and `vyrn"""..."""` are code quotes, legal only in generation. The quote's text is parsed when the generator itself is checked, so a typo in it is a diagnostic in the generator's file. A quote holds holes only; logic lives in ordinary functions that return `Code`.
+A generator returns `Code`, a value only generation has. `vyrn"..."` and `vyrn"""..."""` are code quotes, legal only in generation. The quote's text is parsed when the generator itself is checked, so a typo in it is a diagnostic in the generator's file. It parses as declarations, statements, an expression, a type, or one item of a record literal, a `match` or a parameter list. A quote holds holes only; logic lives in ordinary functions that return `Code`.
 
 ```vyrn
 import { join } from "std/code"

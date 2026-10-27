@@ -401,6 +401,73 @@ fn gettwo() -> Int64 { return 4 }
     assert_eq!(code, Some(7), "{err}");
 }
 
+/// A quote may be one item of a list: a record field, a `match` arm or a
+/// parameter, each joined into its list.
+#[test]
+fn a_quote_is_one_item_of_a_list() {
+    let gen = r#"import { join } from "std/code"
+export gen fn mk() -> Code {
+    let mut fields: Array<Code> = []
+    let mut params: Array<Code> = []
+    for f in ["x", "y"] {
+        fields.push(vyrn"\{name(f)}: \{name(f)}")
+        params.push(vyrn"\{name(f)}: Int64")
+    }
+    let arms: Array<Code> = [vyrn"Some(v) => v.x + v.y", vyrn"None => 0"]
+    return vyrn"""
+        type P = { x: Int64, y: Int64 }
+        fn mkP(\{join(params, vyrn", ")}) -> P { return P { \{join(fields, vyrn", ")} } }
+        export fn sum() -> Int64 {
+            let o: Option<P> = Some(mkP(3, 4))
+            return match o { \{join(arms, vyrn", ")} }
+        }
+        """
+}
+"#;
+    let app = "import { mk } from \"./gen\"\nimport { sum } from mk()\nfn main() -> Int64 { return sum() }\n";
+    let (code, err) = run_gen("items", gen, app);
+    assert_eq!(code, Some(7), "{err}");
+}
+
+/// An import's list may be one joined hole and its `from` a `String` hole.
+#[test]
+fn a_quote_writes_an_import_from_a_string() {
+    let gen = r#"import { join } from "std/code"
+export gen fn mk(spec: String) -> Code {
+    let names: Array<Code> = [vyrn"seven"]
+    return vyrn"""
+        import { \{join(names, vyrn", ")} } from \{spec}
+        export fn got() -> Int64 { return seven() }
+        """
+}
+"#;
+    let app = "import { mk } from \"./gen\"\nimport { got } from mk(\"./lib\")\nfn main() -> Int64 { return got() }\n";
+    let app = gen_app("import_from", gen, app);
+    write(
+        &app.with_file_name("lib.vyrn"),
+        "export fn seven() -> Int64 { return 7 }\n",
+    );
+    let out = vyrn().arg("run").arg(&app).output().unwrap();
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(7), "{err}");
+}
+
+/// A quote that closes a bracket it did not open is no unit, though a wrapper
+/// would pair it.
+#[test]
+fn a_quote_that_closes_what_it_did_not_open_is_refused() {
+    let gen = "export gen fn mk() -> Code {\n    return vyrn\") {} fn g(\"\n}\n";
+    let app =
+        "import { mk } from \"./gen\"\nimport { g } from mk()\nfn main() -> Int64 { return 0 }\n";
+    let out = vyrn()
+        .arg("check")
+        .arg(gen_app("unbalanced", gen, app))
+        .output()
+        .unwrap();
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("skeleton does not parse"), "{err}");
+}
+
 /// A multi-line quote drops its closing indentation, a hole alone on its line
 /// takes declarations, and a spliced quote is re-indented to its hole.
 #[test]
