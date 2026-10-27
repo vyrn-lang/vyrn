@@ -4575,7 +4575,9 @@ fn link(
 /// Whether a skimmed body's tokens can mention a builtin whose mention links a
 /// runtime module ([`RT_MODULES`]): its name, or a `save`, `load`, `loadOr` or
 /// template, which the parser desugars to `toJson`, `fromJson` and `@str`
-/// (`Parser::storage_desugar`, `Parser::template`).
+/// (`Parser::storage_desugar`, `Parser::template`). A code quote `vyrn"..."`
+/// desugars to host calls, so it mentions only what its holes mention: a
+/// runtime name, or a template.
 fn mentions_runtime(tokens: &[lexer::Token]) -> bool {
     static NAMES: std::sync::OnceLock<HashSet<&'static str>> = std::sync::OnceLock::new();
     let names = NAMES.get_or_init(|| {
@@ -4589,8 +4591,16 @@ fn mentions_runtime(tokens: &[lexer::Token]) -> bool {
         .chain(["save", "load", "loadOr"])
         .collect()
     });
-    tokens.iter().any(|t| match &t.tok {
+    let quote = |at: usize| match (at.checked_sub(1)).map(|i| &tokens[i]) {
+        Some(t) => t.tok == lexer::Tok::Ident("vyrn".into()) && t.line == tokens[at].line,
+        None => false,
+    };
+    tokens.iter().enumerate().any(|(at, t)| match &t.tok {
         lexer::Tok::Ident(n) => names.contains(n.as_str()),
+        lexer::Tok::TemplateStr { exprs, .. } if quote(at) => exprs.iter().any(|h| {
+            let word = |c: char| c.is_alphanumeric() || c == '_';
+            h.src.contains("\\{") || h.src.split(|c| !word(c)).any(|w| names.contains(w))
+        }),
         lexer::Tok::TemplateStr { .. } => true,
         _ => false,
     })
@@ -5579,6 +5589,17 @@ mod tests {
             "{}",
             e[0].message
         );
+    }
+
+    /// A code quote in an unreached body costs no parse at load; a template
+    /// in its hole still does, because it desugars to `@str`.
+    #[test]
+    fn a_code_quote_mentions_only_what_its_holes_mention() {
+        let mentions = |src: &str| mentions_runtime(&lexer::lex(src).unwrap());
+        assert!(!mentions(r#"return vyrn"let \{a} = f(\{b})""#));
+        assert!(mentions(r#"return vyrn"let \{a} = \{toJson(b)}""#));
+        assert!(mentions(r#"return vyrn"let x = \{name("v\{n}")}""#));
+        assert!(mentions(r#"return "let \{a}""#));
     }
 
     /// A `String` result's text, as a cache entry holds it.
