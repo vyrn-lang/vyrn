@@ -1,0 +1,5 @@
+// A hole glued to a word writes part of a name, so a String there is refused.
+export gen fn getter(field: String) -> Code {
+    return vyrn"fn get\{field}() -> Int64 { return 0 }"
+}
+fn main() -> Int64 { return 0 }

@@ -121,7 +121,7 @@ export fn levelOf(p: HintPolicy, code: String, dflt: Severity) -> String {
 
 /// One `//@diag` report line, or `""` when `code` is off or waived at `line`.
 /// `src` is the text of `file`; the waiver marker is read from it.
-export fn hint(
+export gen fn hint(
     p: HintPolicy,
     code: String,
     dflt: Severity,
@@ -139,7 +139,7 @@ export fn hint(
         return ""
     }
     let severity = if level == "error" { Error } else { Warning }
-    return report(severity, file, line, col, "\{code}: \{message}")
+    return render(report(severity, file, line, col, "\{code}: \{message}"))
 }
 
 /// Whether `code` is waived at `line` of `src`: a `vyrn-ignore <code>` marker
@@ -221,7 +221,7 @@ fn waivesLine(line: String, code: String) -> Bool {
 ///
 /// Reports go through [`hint`] with `p`, so `hint/unused-waiver` is configured
 /// and waived like any other rule.
-export fn unusedWaivers(p: HintPolicy, src: String, file: String, raw: String) -> String {
+export gen fn unusedWaivers(p: HintPolicy, src: String, file: String, raw: String) -> String {
     let mut out = ""
     let n = src.byteLength
     let mut lineNo = 1

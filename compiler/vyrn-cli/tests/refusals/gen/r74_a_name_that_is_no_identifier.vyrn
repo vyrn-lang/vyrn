@@ -1,0 +1,3 @@
+import { badName } from "./badname"
+import { real } from badName()
+fn main() -> Int64 { return 0 }

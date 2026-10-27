@@ -503,8 +503,8 @@ fn cliHelpText(t: TypeInfo, plans: Array<CliPlan>) -> String {
 /// The `help<Name>()` accessor. `\{text}` sits in expression position of a code
 /// quote, so the compiler escapes a user's `///` prose into a string literal and
 /// a stray quote or backslash cannot become code.
-gen fn cliEmitHelp(name: String, text: String) -> String {
-    return render(vyrn"""export fn help\{name}() -> String {
+gen fn cliEmitHelp(typeName: String, text: String) -> String {
+    return render(vyrn"""export fn help\{name(typeName)}() -> String {
     return \{text}
 }
 """)

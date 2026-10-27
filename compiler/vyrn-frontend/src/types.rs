@@ -1595,8 +1595,9 @@ fn resolve_d<'a>(ty: &'a Type, types: &'a dyn Decls, depth: usize) -> Cow<'a, Ty
         return Owned(Type::Unit);
     }
     match ty {
-        // The builtin opaque `Code` resolves to itself; a user `type Code` wins.
-        Type::Named(n) if n == "Code" && types.decl("Code").is_none() => Borrowed(ty),
+        // The builtin opaque `Code` and `Name` resolve to themselves; a user
+        // declaration wins.
+        Type::Named(n) if crate::ast::is_gen_handle(n) && types.decl(n).is_none() => Borrowed(ty),
         // The builtin record `lex()` returns; a user `type Token` wins.
         Type::Named(n) if n == "Token" && types.decl("Token").is_none() => {
             Owned(Type::Record(vec![

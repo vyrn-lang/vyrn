@@ -225,8 +225,8 @@ fn a_splice_with_no_rule_traps() {
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(
         dir.join("gen.vyrn"),
-        "export gen fn mk(name: String) -> String {\n\
-         \x20   return render(vyrn\"export fn \\{name}() -> Int64 { return 1 }\")\n\
+        "export gen fn mk(fname: String) -> String {\n\
+         \x20   return render(vyrn\"export fn \\{name(fname)}() -> Int64 { return 1 }\")\n\
          }\n",
     )
     .unwrap();
@@ -245,7 +245,7 @@ fn a_splice_with_no_rule_traps() {
         "the invalid identifier should have failed"
     );
     assert!(
-        String::from_utf8_lossy(&out.stderr).contains("not a valid non-keyword identifier"),
+        String::from_utf8_lossy(&out.stderr).contains("`name` needs one identifier"),
         "unexpected failure: {}",
         String::from_utf8_lossy(&out.stderr)
     );

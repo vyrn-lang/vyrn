@@ -364,10 +364,26 @@ pub const DEFAULT_LOG_LEVEL: usize = 2;
 /// They are not reserved: a module that declares or imports one means its own.
 /// The question is asked of the calling module's scope, never of the linked
 /// program (see [`Program::surface_shadows`]).
-pub const SURFACE_BUILTINS: [&str; 4] = ["render", "rawAt", "raw", "lex"];
+pub const SURFACE_BUILTINS: [&str; 8] = [
+    "render", "rawAt", "raw", "lex", "name", "diag", "codeAt", "at",
+];
 
 pub fn is_surface_builtin(name: &str) -> bool {
     SURFACE_BUILTINS.contains(&name)
+}
+
+/// The surface builtins spelled as words a program also uses for methods: `at`
+/// is `Index`'s, and `name` a common one. Each means the builtin only in a call
+/// that is no method call and passes the builtin's argument count.
+pub fn is_word_builtin(name: &str) -> bool {
+    matches!(name, "name" | "diag" | "codeAt" | "at")
+}
+
+/// The builtin generation-only types a compiled generator holds as an `i64`
+/// handle into the host's code arena: `Code`, and `Name`, which only `name(s)`
+/// makes. A user declaration of the name wins.
+pub fn is_gen_handle(name: &str) -> bool {
+    matches!(name, "Code" | "Name")
 }
 
 /// The five log levels, lowest first, in the spelling a call carries: the sugar

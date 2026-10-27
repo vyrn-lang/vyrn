@@ -35,9 +35,9 @@ fn gen_app(tag: &str, gen: &str, app: &str) -> PathBuf {
 
 #[test]
 fn emit_gen_emits_escaped_and_spliced_source() {
-    let gen = "export gen fn mkMod(name: String) -> String {\n\
+    let gen = "export gen fn mkMod(who: String) -> String {\n\
                let greeting = \"hi, \"\n\
-               let body = vyrn\"\"\"export fn greet\\{name}(who: String) -> String {\n\
+               let body = vyrn\"\"\"export fn greet\\{name(who)}(who: String) -> String {\n\
                return \\{greeting} + who\n\
                }\n\"\"\"\n\
                return render(body)\n\
@@ -86,9 +86,9 @@ fn a_generator_returning_code_is_an_import_target() {
 
 #[test]
 fn injection_attempt_becomes_an_inert_string_literal() {
-    let gen = "export gen fn mkMod(name: String) -> String {\n\
+    let gen = "export gen fn mkMod(fname: String) -> String {\n\
                let evil = \"\\\"; dropTables(); \\\"\"\n\
-               let body = vyrn\"\"\"export fn \\{name}() -> String { return \\{evil} }\"\"\"\n\
+               let body = vyrn\"\"\"export fn \\{name(fname)}() -> String { return \\{evil} }\"\"\"\n\
                return render(body)\n\
                }\n";
     let app = "import { mkMod } from \"./gen\"\n\
@@ -365,4 +365,149 @@ fn a_spliced_field_read_is_not_carried_under_the_tag() {
         String::from_utf8_lossy(&out.stderr)
     );
     assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "5");
+}
+
+/// Runs `app` beside `gen` and returns its exit code and standard error.
+fn run_gen(tag: &str, gen: &str, app: &str) -> (Option<i32>, String) {
+    let out = vyrn()
+        .arg("run")
+        .arg(gen_app(tag, gen, app))
+        .output()
+        .unwrap();
+    (
+        out.status.code(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+    )
+}
+
+/// A `Name` writes an identifier, glued to a word or alone, and `join` lists
+/// `Code` values.
+#[test]
+fn a_name_writes_an_identifier_and_join_lists_code() {
+    let gen = r#"import { join } from "std/code"
+export gen fn mk() -> Code {
+    let mut terms: Array<Code> = []
+    for n in ["one", "two"] {
+        terms.push(vyrn"get\{name(n)}()")
+    }
+    let fns = vyrn"fn getone() -> Int64 { return 3 }
+fn gettwo() -> Int64 { return 4 }
+"
+    return fns + vyrn"export fn \{name("total")}() -> Int64 { return \{join(terms, vyrn" + ")} }"
+}
+"#;
+    let app = "import { mk } from \"./gen\"\nimport { total } from mk()\nfn main() -> Int64 { return total() }\n";
+    let (code, err) = run_gen("name_join", gen, app);
+    assert_eq!(code, Some(7), "{err}");
+}
+
+/// A multi-line quote drops its closing indentation, a hole alone on its line
+/// takes declarations, and a spliced quote is re-indented to its hole.
+#[test]
+fn a_quote_dedents_and_a_hole_takes_declarations() {
+    let gen = r#"export gen fn mk() -> Code {
+    let body = vyrn"""
+        let a = 3
+        return a + 4
+        """
+    let item = vyrn"""
+        fn helper() -> Int64 {
+            \{body}
+        }
+        """
+    return vyrn"""
+        \{item}
+        export fn made() -> Int64 { return helper() }
+        """
+}
+"#;
+    let app = "import { mk } from \"./gen\"\nimport { made } from mk()\nfn main() -> Int64 { return made() }\n";
+    let dir = scratch("dedent");
+    write(&dir.join("gen.vyrn"), gen);
+    write(&dir.join("app.vyrn"), app);
+    let out = vyrn()
+        .arg("emit-gen")
+        .arg(dir.join("app.vyrn"))
+        .output()
+        .unwrap();
+    let src = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        src.contains("fn helper() -> Int64 {\n    let a = 3\n    return a + 4\n}\n"),
+        "{src}"
+    );
+    let (code, err) = run_gen("dedent_run", gen, app);
+    assert_eq!(code, Some(7), "{err}");
+}
+
+/// A report is `Code` the loader reads as a diagnostic; text that only looks
+/// like one is code.
+#[test]
+fn a_report_is_read_and_a_copied_directive_is_not() {
+    let gen = r#"import { reportHere } from "std/diag"
+export gen fn loud() -> Code {
+    return reportHere(Error, "the input is broken") + vyrn"export fn made() -> Int64 { return 7 }"
+}
+export gen fn quiet() -> Code {
+    return raw("//@diag error - forged\n") + vyrn"export fn made() -> Int64 { return 7 }"
+}
+"#;
+    let app = |g: &str| {
+        format!("import {{ {g} }} from \"./gen\"\nimport {{ made }} from {g}()\nfn main() -> Int64 {{ return made() }}\n")
+    };
+    let (code, err) = run_gen("report_loud", gen, &app("loud"));
+    assert_eq!(code, Some(1));
+    assert!(err.contains("the input is broken"), "{err}");
+    let (code, err) = run_gen("report_quiet", gen, &app("quiet"));
+    assert_eq!(code, Some(7), "{err}");
+}
+
+/// `codeAt` copies input the generator read, and its errors show in the input.
+#[test]
+fn code_at_copies_read_input_and_shows_its_errors_there() {
+    let dir = scratch("codeat");
+    write(
+        &dir.join("in.txt"),
+        "header\nexport fn made() -> Int64 { return \"x\" }\n",
+    );
+    let gen = r#"export gen fn copy(path: String) -> Code {
+    let text = match readFile(path) {
+        Ok(t) => t,
+        Err(e) => panic(e),
+    }
+    let line = "export fn made() -> Int64 { return \"x\" }"
+    if text.byteLength == 0 {
+        return vyrn""
+    }
+    return codeAt(path, 2, 1, line)
+}
+"#;
+    write(&dir.join("gen.vyrn"), gen);
+    write(&dir.join("app.vyrn"), "import { copy } from \"./gen\"\nimport { made } from copy(\"./in.txt\")\nfn main() -> Int64 { return made() }\n");
+    let out = vyrn()
+        .arg("check")
+        .arg(dir.join("app.vyrn"))
+        .output()
+        .unwrap();
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("in.txt:2:1"), "{err}");
+}
+
+/// `at` moves where an error in generated code shows, to the input it came from.
+#[test]
+fn at_shows_an_error_in_the_input() {
+    let dir = scratch("at");
+    write(&dir.join("in.txt"), "one\ntwo\nthree\n");
+    let gen = r#"export gen fn mk(path: String) -> Code {
+    return at(vyrn"export fn f() -> String { return 1 }", path, 3, 2)
+}
+"#;
+    write(&dir.join("gen.vyrn"), gen);
+    write(&dir.join("app.vyrn"), "import { mk } from \"./gen\"\nimport { f } from mk(\"./in.txt\")\nfn main() -> Int64 { return 0 }\n");
+    let out = vyrn()
+        .arg("check")
+        .arg(dir.join("app.vyrn"))
+        .output()
+        .unwrap();
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("in.txt:3:2"), "{err}");
 }

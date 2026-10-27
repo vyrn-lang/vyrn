@@ -24,7 +24,7 @@ use vyrn_frontend::ast::{Block, Expr, Function, Id, Param, Program, Stmt, Type};
 use vyrn_frontend::consteval::ConstVal;
 #[cfg(feature = "host")]
 use vyrn_frontend::gen::{
-    compiler_identity, Author, GenEngine, GenRead, Pos, Rope, Shown, Span, Spliced,
+    compiler_identity, Author, GenEngine, GenRead, Kind, Pos, Rope, Shown, Span, Spliced,
 };
 use vyrn_frontend::gen::{GenError, GenInputs, GenOutput, Written};
 
@@ -183,6 +183,25 @@ fn serve(
     path: &str,
     mode: i32,
 ) -> Result<Served, String> {
+    // `codeAt` copies only bytes this run read: the bytes the host served for
+    // the path, answered with the key they were read under.
+    if mode == MODE_CODE_AT {
+        let key = vyrn_frontend::gen::gen_scoped_path(
+            &inputs.importer_dir,
+            &inputs.allowed,
+            &inputs.aliased,
+            path,
+        )?;
+        let read = reads
+            .iter()
+            .find_map(|(k, b)| (*k == key).then_some(b.as_ref()));
+        return match read.flatten() {
+            Some(bytes) => Ok(Served::Copy(key, bytes.clone())),
+            None => Err(format!(
+                "`codeAt` copies only an input the generator read, and it did not read `{path}`"
+            )),
+        };
+    }
     // The frontend's own implementation, so the recorded reads are every
     // module the link touched.
     if mode == MODE_MODULE_INTERFACE {
@@ -836,6 +855,9 @@ const MODE_MODULE_INTERFACE: i32 = 3;
 /// `listDirKinds`: `MODE_LIST`'s encoding with `/` appended to each directory.
 #[cfg(feature = "host")]
 const MODE_LIST_KINDS: i32 = 4;
+/// Not a read: `codeAt` asks for the bytes a read already served.
+#[cfg(feature = "host")]
+const MODE_CODE_AT: i32 = 5;
 
 /// One unit of a structured host result. Encoder and decoder walk the same
 /// static type, so the variant is not a tag the decoder consults: a `nextInt`
@@ -909,7 +931,7 @@ impl Arena {
     }
 
     fn leaf(&mut self, span: Span) -> i64 {
-        self.intern(Arc::new(Rope::Leaf(span)))
+        self.intern(Arc::new(Rope::Leaf(vec![span])))
     }
 }
 
@@ -1034,11 +1056,12 @@ struct Caps {
     resp: mpsc::Receiver<Result<Served, String>>,
 }
 
-/// The host thread's answer: bytes for a read or a listing, or the reflection
-/// literal for `moduleInterface`.
+/// The host thread's answer: bytes for a read or a listing, the reflection
+/// literal for `moduleInterface`, or the key and bytes `codeAt` copies from.
 #[cfg(feature = "host")]
 enum Served {
     Bytes(i32, Vec<u8>),
+    Copy(String, Vec<u8>),
     /// Encoded on the guest thread, so one [`encode`] call serves all three
     /// structured builtins.
     Lit(Box<Expr>),
@@ -1088,7 +1111,9 @@ fn link<X: 'static>(linker: &mut wasmtime::Linker<wasi::Guest<X>>) -> wasmtime::
                     streams.stash = bytes;
                     Ok((status as i64) << 32 | len)
                 }
-                Ok(Ok(Served::Lit(_))) => Err(Error::msg("read answered with a literal")),
+                Ok(Ok(Served::Lit(_) | Served::Copy(..))) => {
+                    Err(Error::msg("read answered with a literal"))
+                }
                 // A scoping violation traps.
                 Ok(Err(msg)) => Err(Error::new(Denied(msg))),
                 Err(_) => Err(Error::msg("generator host is gone")),
@@ -1129,6 +1154,7 @@ fn link<X: 'static>(linker: &mut wasmtime::Linker<wasi::Guest<X>>) -> wasmtime::
                     },
                 },
                 shown: None,
+                kind: Kind::Code,
             };
             Ok(host.gen.code.leaf(span))
         },
@@ -1140,6 +1166,59 @@ fn link<X: 'static>(linker: &mut wasmtime::Linker<wasi::Guest<X>>) -> wasmtime::
             let (data, host) = guest_mem(&mut caller)?;
             let text = cstr(data, s)?;
             Ok(host.gen.code.leaf(Span::data(text)))
+        },
+    )?;
+    linker.func_wrap(
+        "vyrn_gen",
+        "name",
+        |mut caller: Caller<'_, T<X>>, s: i32| -> Result<i64> {
+            let (data, host) = guest_mem(&mut caller)?;
+            let span = vyrn_frontend::gen::name_span(&cstr(data, s)?);
+            Ok(host.gen.code.leaf(span.map_err(|m| Error::new(Denied(m)))?))
+        },
+    )?;
+    linker.func_wrap(
+        "vyrn_gen",
+        "diag",
+        |mut caller: Caller<'_, T<X>>, sev: i32, anchor: i32, msg: i32| -> Result<i64> {
+            let (data, host) = guest_mem(&mut caller)?;
+            let (sev, anchor, msg) = (cstr(data, sev)?, cstr(data, anchor)?, cstr(data, msg)?);
+            let span = vyrn_frontend::gen::diag_span(&sev, &anchor, &msg);
+            Ok(host.gen.code.leaf(span.map_err(|m| Error::new(Denied(m)))?))
+        },
+    )?;
+    // `codeAt` asks the host thread for the bytes the run read at `path`.
+    linker.func_wrap(
+        "vyrn_gen",
+        "codeAt",
+        |mut caller: Caller<'_, T<X>>, path: i32, line: i64, col: i64, s: i32| -> Result<i64> {
+            let (data, host) = guest_mem(&mut caller)?;
+            let streams = &mut host.gen;
+            let (path, text) = (cstr(data, path)?, cstr(data, s)?);
+            let caps = streams.caps.as_ref().ok_or_else(|| Error::msg("no host"))?;
+            caps.req
+                .send((path.clone(), MODE_CODE_AT))
+                .map_err(|_| Error::msg("generator host is gone"))?;
+            let (key, bytes) = match caps.resp.recv() {
+                Ok(Ok(Served::Copy(key, bytes))) => (key, bytes),
+                Ok(Ok(_)) => return Err(Error::msg("codeAt answered with no copy")),
+                Ok(Err(msg)) => return Err(Error::new(Denied(msg))),
+                Err(_) => return Err(Error::msg("generator host is gone")),
+            };
+            let at = (line.max(0) as usize, col.max(0) as usize);
+            let span = vyrn_frontend::gen::copied_span(&key, &path, &bytes, at, &text);
+            Ok(streams.code.leaf(span.map_err(|m| Error::new(Denied(m)))?))
+        },
+    )?;
+    linker.func_wrap(
+        "vyrn_gen",
+        "at",
+        |mut caller: Caller<'_, T<X>>, h: i64, path: i32, line: i64, col: i64| -> Result<i64> {
+            let (data, host) = guest_mem(&mut caller)?;
+            let path = cstr(data, path)?;
+            let at = (line.max(0) as usize, col.max(0) as usize);
+            let rope = vyrn_frontend::gen::shown_at(host.gen.code.rope(h)?, &path, at);
+            Ok(host.gen.code.intern(Arc::new(rope)))
         },
     )?;
     linker.func_wrap(
@@ -1165,12 +1244,13 @@ fn link<X: 'static>(linker: &mut wasmtime::Linker<wasi::Guest<X>>) -> wasmtime::
     linker.func_wrap(
         "vyrn_gen",
         "splice",
-        |mut caller: Caller<'_, T<X>>, tag: i32, bits: i64, p: i32, ctx: i64| -> Result<i64> {
+        |mut caller: Caller<'_, T<X>>, tag: i32, bits: i64, p: i32, indent: i32| -> Result<i64> {
             let (data, host) = guest_mem(&mut caller)?;
             let streams = &mut host.gen;
             let val = splice_value(tag, bits, p, data, streams)?;
+            let indent = cstr(data, indent)?;
             // A splice violation traps.
-            let rope = vyrn_frontend::gen::gen_code_splice(&val, ctx)
+            let rope = vyrn_frontend::gen::gen_code_splice(&val, &indent)
                 .map_err(|m| Error::new(Denied(m)))?;
             Ok(caller.data_mut().gen.code.intern(rope))
         },
@@ -1226,7 +1306,7 @@ fn link<X: 'static>(linker: &mut wasmtime::Linker<wasi::Guest<X>>) -> wasmtime::
                         .map_err(|_| Error::msg("generator host is gone"))?;
                     let lit = match caps.resp.recv() {
                         Ok(Ok(Served::Lit(lit))) => lit,
-                        Ok(Ok(Served::Bytes(..))) => {
+                        Ok(Ok(Served::Bytes(..) | Served::Copy(..))) => {
                             return Err(Error::msg("moduleInterface answered with bytes"))
                         }
                         // A scoping violation traps.

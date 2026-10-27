@@ -93,30 +93,30 @@ fn rpcWhyNotSerializable(spelling: String, uncodable: String, iface: ModuleInter
 /// the same procedures under the same rule.
 export gen fn validateContract(iface: ModuleInterface) -> String {
     for iss in checkContract(iface, contractOf(Api)) {
-        return reportHere(Error, iss.message)
+        return render(reportHere(Error, iss.message))
     }
     for f in iface.functions {
         if f.params.length > 1 {
-            return reportHere(
+            return render(reportHere(
                 Error,
                 "procedure `\{f.name}` takes \{f.params.length.toString()} parameters — a procedure takes at most one; gather them into one exported record type",
-            )
+            ))
         }
         if f.params.length == 1 {
             let why = rpcWhyNotSerializable(f.params[0].spelling, f.params[0].uncodable, iface)
             if why != "" {
-                return reportHere(
+                return render(reportHere(
                     Error,
                     "procedure `\{f.name}` takes `\{f.params[0].spelling}`, which cannot cross the wire: \{why}",
-                )
+                ))
             }
         }
         let whyRet = rpcWhyNotSerializable(f.ret, f.retUncodable, iface)
         if whyRet != "" {
-            return reportHere(
+            return render(reportHere(
                 Error,
                 "procedure `\{f.name}` returns `\{f.ret}`, which cannot cross the wire: \{whyRet}",
-            )
+            ))
         }
     }
     return ""
@@ -550,16 +550,16 @@ gen fn rpcRoutesOf(mods: Array<RpcModule>, cfg: RpcConfig) -> Array<RpcRoute> {
 
 /// The first two routes deriving one path, reported naming both, or "". Pins and
 /// a `{name}`-only template can collide, and only the author can settle it.
-fn rpcCollision(routes: Array<RpcRoute>) -> String {
+gen fn rpcCollision(routes: Array<RpcRoute>) -> String {
     let mut i = 0
     while i < routes.length {
         let mut j = i + 1
         while j < routes.length {
             if routes[i].path == routes[j].path {
-                return reportHere(
+                return render(reportHere(
                     Error,
                     "procedures `\{routes[i].key}` and `\{routes[j].key}` both answer `\{routes[i].path}` — two procedures may not derive one path, so repin one of them",
-                )
+                ))
             }
             j = j + 1
         }
@@ -611,13 +611,13 @@ gen fn rpcTypeCollision(mods: Array<RpcModule>) -> String {
             if prior.name == "" {
                 defs.push(RpcDef { name: t.name.copy(), source: t.source.copy(), from: t.origin.file.copy() })
             } else if prior.source != t.source {
-                return report(
+                return render(report(
                     Error,
                     t.origin.file,
                     t.origin.line,
                     t.origin.col,
                     "`\{t.name}` is declared here as `\{t.source}`, and in `\{prior.from}` as `\{prior.source}` — one api directory derives one module, so one name may carry only one shape; rename one of them, or declare it once in a module both import",
-                )
+                ))
             }
         }
     }
@@ -656,16 +656,16 @@ gen fn rpcQualifiedCollision(mods: Array<RpcModule>) -> String {
 }
 
 /// The pairwise scan, apart so the wording is testable without an interface.
-fn rpcQualClash(quals: Array<String>, keys: Array<String>) -> String {
+gen fn rpcQualClash(quals: Array<String>, keys: Array<String>) -> String {
     let mut i = 0
     while i < quals.length {
         let mut j = i + 1
         while j < quals.length {
             if quals[i] == quals[j] {
-                return reportHere(
+                return render(reportHere(
                     Error,
                     "procedures `\{keys[i]}` and `\{keys[j]}` both derive the flat name `\{quals[i]}` — camel-joining a module path and an export name is not unique, so rename one of them",
-                )
+                ))
             }
             j = j + 1
         }

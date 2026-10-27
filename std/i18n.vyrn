@@ -825,7 +825,7 @@ gen fn emitChain(clauses: Array<String>, bodies: Array<String>, otherBody: Strin
 /// A report anchored at line 1, column 1 of a locale file: a flattened entry
 /// keeps no offset into its JSON.
 gen fn localeErr(dir: String, tag: String, message: String) -> String {
-    return report(Error, dir + "/" + tag + ".json", 1, 1, message)
+    return render(report(Error, dir + "/" + tag + ".json", 1, 1, message))
 }
 
 /// Whether a message has an unmatched `{` or a stray `}`, quote-aware. An
@@ -995,10 +995,10 @@ export gen fn i18n(dir: String) -> String {
         }
     }
     if tags.length == 0 {
-        return reportHere(
+        return render(reportHere(
             Error,
             "no locale files under `\{dir}` — i18n reads one `<locale>.json` per locale, so add at least one",
-        )
+        ))
     }
 
     // Two keys that produce one function name fail with a report naming both.

@@ -1,0 +1,1 @@
+export fn real() -> Int64 { return 1 }

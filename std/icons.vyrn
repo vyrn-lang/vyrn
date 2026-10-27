@@ -47,7 +47,7 @@ import { report, reportHere, Severity } from "std/diag"
 export gen fn icons(collection: String, names: String) -> String {
     return match readFile(collection) {
         Ok(text) => iconsModule(text, collection, names, "", 0, 0),
-        Err(why) => reportHere(Error, cannotRead(collection, why)),
+        Err(why) => render(reportHere(Error, cannotRead(collection, why))),
     }
 }
 
@@ -539,30 +539,30 @@ export gen fn iconProvider(
 ) -> String {
     let bound = splitWhitespace(collections)
     if bound.length == 0 {
-        return report(
+        return render(report(
             Error,
             file,
             line,
             col,
             "this `<Icon>` provider binds no collection — name each pinned collection's `vyrn.json` alias, `iconProvider(attrs, file, line, col, \"ui\")`",
-        )
+        ))
     }
     let ask = iconRequest(attrs)
     if ask.error != "" {
-        return report(Error, file, line, col, ask.error)
+        return render(report(Error, file, line, col, ask.error))
     }
     if ask.name == "" {
-        return report(
+        return render(report(
             Error,
             file,
             line,
             col,
             "`<Icon>` needs a `name` — the glyph to draw, `name=\"\{bound[0]}:github\"`",
-        )
+        ))
     }
     let at = iconCollectionOf(ask.name, bound)
     if at.error != "" {
-        return report(Error, file, line, col, at.error)
+        return render(report(Error, file, line, col, at.error))
     }
     return iconProviderModule(at.collection, at.glyph, ask, file, line, col)
 }
@@ -716,11 +716,11 @@ fn iconAttrNamed(
 }
 
 /// Anchors in the collection file when `anchorFile` is empty.
-fn anchored(anchorFile: String, path: String, line: Int64, col: Int64, why: String) -> String {
+gen fn anchored(anchorFile: String, path: String, line: Int64, col: Int64, why: String) -> String {
     if anchorFile == "" {
-        return report(Error, path, 1, 1, why)
+        return render(report(Error, path, 1, 1, why))
     }
-    return report(Error, anchorFile, line, col, why)
+    return render(report(Error, anchorFile, line, col, why))
 }
 
 /// `circle-check` becomes `circleCheck`; `1-circle` becomes `icon1Circle`,

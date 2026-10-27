@@ -12,7 +12,7 @@ use std::rc::Rc;
 
 use crate::ast::*;
 use crate::diagnostics::Diagnostic;
-use crate::gen::{Author, Pos, Shown, SpanRow, Written};
+use crate::gen::{Author, Kind, Pos, Shown, SpanRow, Written};
 use crate::rules::{refuse, rule, Rule};
 use crate::{lexer, parser};
 
@@ -1596,12 +1596,20 @@ fn load_modules(
             } else {
                 opts.alias_base.as_str()
             };
-            let comments = match &parsed {
-                Some(p) => p
+            let comments = match (spans, &parsed) {
+                // A `Code` result's reports are its `Diag` spans; no other line
+                // of it is read as a directive.
+                (Some(rows), _) => Some(
+                    rows.iter()
+                        .filter(|r| r.kind == Kind::Diag)
+                        .map(|r| 1 + text[..r.offset].matches('\n').count())
+                        .collect(),
+                ),
+                (None, Some(p)) => p
                     .comment_lines
                     .get_or_init(|| crate::origin::comment_lines(&text))
                     .clone(),
-                None => (scanned.insert(lexer::scan(&text)).as_ref().ok())
+                (None, None) => (scanned.insert(lexer::scan(&text)).as_ref().ok())
                     .map(|s| crate::origin::comments_of(&s.items)),
             };
             let ctx = crate::origin::Context::new(comments, dir_of(importer), project);
@@ -2777,10 +2785,10 @@ fn render_cache_entry(key: &str, inputs: &[(String, String)], output: &Written) 
 }
 
 /// A span table as cache lines: `-` for none (a `String` result), else its row
-/// count, then one `offset<TAB>author<TAB>shown` line per row. An author is `-`
-/// for the call site or `line:col:key`; a shown position is `-` or
-/// `line:col:path`. The key and the path come last, so a colon in them splits
-/// nothing.
+/// count, then one `offset<TAB>kind<TAB>author<TAB>shown` line per row. A kind
+/// is `c` (code), `p` (copied) or `d` (a report); an author is `-` for the call
+/// site or `line:col:key`; a shown position is `-` or `line:col:path`. The key
+/// and the path come last, so a colon in them splits nothing.
 fn span_table(spans: Option<&[SpanRow]>) -> String {
     let Some(rows) = spans else {
         return "-\n".to_string();
@@ -2795,7 +2803,12 @@ fn span_table(spans: Option<&[SpanRow]>) -> String {
             Some(s) => format!("{}:{}:{}", s.at.line, s.at.col, s.path),
             None => "-".to_string(),
         };
-        out.push_str(&format!("{}\t{author}\t{shown}\n", r.offset));
+        let kind = match r.kind {
+            Kind::Code => 'c',
+            Kind::Copied => 'p',
+            Kind::Diag => 'd',
+        };
+        out.push_str(&format!("{}\t{kind}\t{author}\t{shown}\n", r.offset));
     }
     out
 }
@@ -2817,8 +2830,15 @@ fn read_span_table<'a>(
     // No `with_capacity`: the count comes from the file.
     let mut rows = Vec::new();
     for _ in 0..head.parse::<usize>().ok()? {
-        let mut cols = next()?.splitn(3, '\t');
-        let (offset, author, shown) = (cols.next()?, cols.next()?, cols.next()?);
+        let mut cols = next()?.splitn(4, '\t');
+        let (offset, kind) = (cols.next()?, cols.next()?);
+        let (author, shown) = (cols.next()?, cols.next()?);
+        let kind = match kind {
+            "c" => Kind::Code,
+            "p" => Kind::Copied,
+            "d" => Kind::Diag,
+            _ => return None,
+        };
         let author = match author {
             "-" => Author::CallSite,
             a => {
@@ -2838,6 +2858,7 @@ fn read_span_table<'a>(
             offset,
             author,
             shown,
+            kind,
         });
     }
     Some(Some(rows))
@@ -5606,6 +5627,7 @@ mod tests {
                         at: pos(3, 9),
                     },
                     shown: None,
+                    kind: Kind::Code,
                 },
                 SpanRow {
                     offset: 24,
@@ -5614,6 +5636,7 @@ mod tests {
                         path: "C:/p/in.txt".to_string(),
                         at: pos(1, 1),
                     }),
+                    kind: Kind::Copied,
                 },
             ]),
         };

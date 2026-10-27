@@ -1246,6 +1246,28 @@ fn table() -> Vec<Builtin> {
             .effect(GenOnly)
             .takes(&[4], |_, _, got| rule!(RawAtArity, got))
             .typed(vec![Str, Str, Int, Int], code(), None),
+        b("name")
+            .spec(Spec::Host)
+            .effect(GenOnly)
+            .takes(&[1], takes_one)
+            .typed(vec![Str], Type::Named("Name".to_string()), None),
+        b("diag")
+            .spec(Spec::Host)
+            .effect(GenOnly)
+            .takes(&[3], |n, want, got| rule!(GenArity, name = n, want, got))
+            .typed(vec![Str, Str, Str], code(), None),
+        // Input copied as code, checked against the bytes the host read.
+        b("codeAt")
+            .spec(Spec::Host)
+            .effect(GenOnly)
+            .takes(&[4], |n, want, got| rule!(GenArity, name = n, want, got))
+            .typed(vec![Str, Int, Int, Str], code(), None),
+        // Where errors in a `Code` show; never its author.
+        b("at")
+            .spec(Spec::Host)
+            .effect(GenOnly)
+            .takes(&[4], |n, want, got| rule!(GenArity, name = n, want, got))
+            .typed(vec![code(), Str, Int, Int], code(), None),
         b("@codeText").spec(Spec::Host).effect(GenOnly),
         b("@codeSplice").spec(Spec::Host).effect(GenOnly),
         b(crate::checker::GEN_REFLECT).spec(Spec::Host),

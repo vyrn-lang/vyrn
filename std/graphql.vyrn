@@ -541,13 +541,13 @@ fn gqlDefinedBy(defs: Array<GqlDef>, name: String) -> String {
 /// Registers one definition, or reports a name already taken. Not a rename:
 /// these names are the wire surface, and which definition gives way is the
 /// author's decision.
-fn gqlDefine(defs: modify Array<GqlDef>, name: String, from: String) -> String {
+gen fn gqlDefine(defs: modify Array<GqlDef>, name: String, from: String) -> String {
     let taken = gqlDefinedBy(defs, name)
     if taken != "" {
-        return reportHere(
+        return render(reportHere(
             Error,
             "the GraphQL document would define `\{name}` twice — \{taken}, and \{from}; a document may not define one name twice, so rename the contract's type",
-        )
+        ))
     }
     defs.push(GqlDef { name: name.copy(), from: from.copy() })
     return ""
@@ -555,12 +555,12 @@ fn gqlDefine(defs: modify Array<GqlDef>, name: String, from: String) -> String {
 
 /// Reports a name starting with `__`, reserved for introspection. Checked once
 /// per declaration, so a record and its `Input` twin get one diagnostic.
-fn gqlReservedName(name: String) -> String {
+gen fn gqlReservedName(name: String) -> String {
     if name.startsWith("__") {
-        return reportHere(
+        return render(reportHere(
             Error,
             "the GraphQL document would define `\{name}` — a name beginning with `__` is reserved for introspection, so rename the contract's type",
-        )
+        ))
     }
     return ""
 }

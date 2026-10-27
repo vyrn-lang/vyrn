@@ -144,7 +144,8 @@ Each of these is a library of `gen fn`s. The compiler knows none of their domain
 | Module | Provides |
 |---|---|
 | `std/contract` | `checkContract(iface, contractOf(Name))` and the member queries, returning `Issue`s. |
-| `std/diag` | `report` and `reportHere`: a generator emits a diagnostic at a file and line it read. |
+| `std/code` | `join(xs, sep)`: the one list form a code quote takes. |
+| `std/diag` | `report` and `reportHere`: a generator's diagnostic at a file and line it read, as `Code`. |
 | `std/hints` | Per-project rule levels and per-line waivers for checking libraries. |
 | `std/vyx-hints` | Accessibility, security and performance rules for `.vyx` files, reported through `std/hints`. |
 | `std/imports` | `importBlock`: the `import` lines of a generated module, one per module that declares a type it uses. |

@@ -1,0 +1,11 @@
+// `codeAt` refuses text the input does not hold where it says.
+export gen fn badCopy(path: String) -> Code {
+    let text = match readFile(path) {
+        Ok(t) => t,
+        Err(e) => panic(e),
+    }
+    if text.byteLength == 0 {
+        return vyrn""
+    }
+    return codeAt(path, 1, 1, "export fn forged() -> Int64 { return 0 }")
+}

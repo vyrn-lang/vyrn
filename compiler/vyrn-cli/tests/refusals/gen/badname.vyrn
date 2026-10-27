@@ -1,0 +1,4 @@
+// `name` refuses a String that is no identifier.
+export gen fn badName() -> Code {
+    return vyrn"export fn \{name("a b")}() -> Int64 { return 0 }"
+}

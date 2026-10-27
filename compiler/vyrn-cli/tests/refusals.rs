@@ -509,6 +509,24 @@ fn census() -> Vec<Row> {
              body may change",
             Kernel::Elsewhere,
         ),
+        row(
+            "r71_a_glued_hole_takes_a_name.vyrn",
+            "a hole glued to a word takes a Name",
+            "a hole glued to a word writes part of a name, so it takes a `Name`, found String",
+            Kernel::Elsewhere,
+        ),
+        row(
+            "r72_an_array_of_code_in_a_hole.vyrn",
+            "a hole takes no Array<Code>",
+            "cannot splice an `Array<Code>` into a code quote",
+            Kernel::Elsewhere,
+        ),
+        row(
+            "r73_an_option_of_code_in_a_hole.vyrn",
+            "a hole takes no Option<Code>",
+            "cannot splice an `Option<Code>` into a code quote",
+            Kernel::Elsewhere,
+        ),
     ]
 }
 
@@ -634,6 +652,29 @@ fn the_census_is_what_the_two_passes_say() {
         "the census has moved:\n  {}",
         bad.join("\n  ")
     );
+}
+
+/// The refusals a generator meets while it runs: each needs a generator module
+/// and an engine, so they live in `refusals/gen/`, which the editor's column
+/// pin does not walk.
+#[test]
+fn the_generation_refusals_are_what_the_engine_says() {
+    let rows = [
+        (
+            "r74_a_name_that_is_no_identifier.vyrn",
+            "generator `badName()` failed: `name` needs one identifier, and \"a b\" is not one",
+        ),
+        (
+            "r75_code_at_text_the_input_does_not_hold.vyrn",
+            "generator `badCopy(\"./input.txt\")` failed: `codeAt` was given text that \
+             `./input.txt` does not hold at 1:1",
+        ),
+    ];
+    for (file, says) in rows {
+        let (ok, text) = refusal_in(dir().join("gen"), file, false);
+        assert!(!ok, "{file}: accepted");
+        assert_eq!(split_head(&text).1, says, "{file}");
+    }
 }
 
 #[test]

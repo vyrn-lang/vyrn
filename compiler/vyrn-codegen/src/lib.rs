@@ -267,7 +267,14 @@ pub(crate) const CODE_IMPORTS: &[(&str, &[wasm::ValType], &[wasm::ValType])] = {
         // the part's line and column there.
         ("text", &[I32, I32, I64, I64], &[I64]),
         ("raw", &[I32], &[I64]),
-        ("splice", &[I32, I64, I32, I64], &[I64]),
+        // A hole's value: its tag, its word, its String, and the indentation
+        // of the hole's line.
+        ("splice", &[I32, I64, I32, I32], &[I64]),
+        ("name", &[I32], &[I64]),
+        // A report: its severity word, its anchor and its message.
+        ("diag", &[I32, I32, I32], &[I64]),
+        ("codeAt", &[I32, I64, I64, I32], &[I64]),
+        ("at", &[I64, I32, I64, I64], &[I64]),
         ("rawAt", &[I32, I32, I64, I64], &[I64]),
         ("concat", &[I64, I64], &[I64]),
         ("render", &[I64], &[I64]),
@@ -688,7 +695,7 @@ pub(crate) fn shape_of(ty: &Type, types: &HashMap<String, TypeDecl>) -> Shape {
         Type::Enum(vs) => st(words(1 + enum_slots_of(vs, types))),
         // On a generator host, `Code` is an opaque `i64` handle into the host's
         // piece arena: the one `Named` that survives `resolve` undeclared.
-        Type::Named(n) if n == "Code" => leaf(Leaf::I64),
+        Type::Named(n) if vyrn_frontend::ast::is_gen_handle(n) => leaf(Leaf::I64),
         // Unreachable after `resolve` (Named/Union/App/transformers/params reduced
         // away). A bare integer type argument never stands alone: `SmallArray`
         // consumes it. `Err` is the checker's recovery sentinel, and a program
