@@ -14,6 +14,12 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+/// The oldest macOS a native binary runs on. The library's prebuilt
+/// `compiler_builtins` objects are built for rustc's minimum, 11.0 on
+/// aarch64-apple-darwin and 10.12 on x86_64, so a lower value would link
+/// objects built for a newer macOS than the binary states.
+const MACOS_MIN: &str = "11.0";
+
 fn main() {
     let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
     let workspace = manifest.join("../Cargo.toml");
@@ -23,10 +29,17 @@ fn main() {
     let out = PathBuf::from(std::env::var_os("OUT_DIR").expect("cargo sets OUT_DIR"));
     let target = out.join("rustls-ffi");
     let cargo = std::env::var_os("CARGO").expect("cargo sets CARGO");
+    println!("cargo:rustc-env=VYRN_MACOS_MIN={MACOS_MIN}");
     // A jobserver or rustflags of the outer build are not this build's: the
     // first could starve one build of the other's tokens, the second could
     // change what the library holds.
-    let built = Command::new(cargo)
+    let mut inner = Command::new(cargo);
+    // ring's C and assembly and the Rust objects are built for the native
+    // route's macOS, which clang's `-mmacosx-version-min` states (main.rs).
+    if cfg!(target_os = "macos") {
+        inner.env("MACOSX_DEPLOYMENT_TARGET", MACOS_MIN);
+    }
+    let built = inner
         .args([
             "rustc",
             "--release",

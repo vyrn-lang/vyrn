@@ -193,8 +193,14 @@ const DEFAULT_NATIVE_TARGET: NativeTarget = NativeTarget::V2;
 ///   engines. Passed unconditionally: aarch64's baseline has FMA. At v2 the
 ///   assembly is identical with and without it.
 /// - `-pthread`: worker threads. Win32 threads need no flag.
+/// - `-mmacosx-version-min`: the oldest macOS a binary runs on, the value the
+///   rustls-ffi library is built for too (`VYRN_MACOS_MIN`, `build.rs`), so ld
+///   links no object built for a newer one.
 fn native_compile_flags(cmd: &mut Command, target: NativeTarget) {
     cmd.arg("-O2").arg("-ffp-contract=off");
+    if cfg!(target_os = "macos") {
+        cmd.arg(concat!("-mmacosx-version-min=", env!("VYRN_MACOS_MIN")));
+    }
     // `VYRN_DEBUG_SYMBOLS=1` keeps debug info for a symbolizer; `-g` changes
     // no codegen under -O2.
     if std::env::var_os("VYRN_DEBUG_SYMBOLS").is_some() {
@@ -209,6 +215,8 @@ fn native_compile_flags(cmd: &mut Command, target: NativeTarget) {
 }
 
 /// The flags only the link step takes; clang warns about them on a compile.
+/// A module that sends requests adds [`TLS_SYSTEM_LIBS`]. A flag both lists
+/// name is passed once, at its first place: ld64 warns on a repeated library.
 ///
 /// - `-lm`: below SSE4.1 the vector roundings scalarize to `ceilf`/`floorf`/
 ///   `truncf`/`rintf`, in libm on Unix. Windows links them from the UCRT by
@@ -216,16 +224,26 @@ fn native_compile_flags(cmd: &mut Command, target: NativeTarget) {
 /// - `/STACK`: the run stack; see `trap::RUN_STACK_BYTES`.
 /// - `-lbcrypt`: `random_get` is `BCryptGenRandom`, as in
 ///   `vyrn-genwasm/src/wasi.rs`.
-fn native_link_flags(cmd: &mut Command) {
-    if cfg!(windows) {
-        cmd.arg(format!(
-            "-Wl,/STACK:{}",
-            vyrn_frontend::trap::RUN_STACK_BYTES
-        ));
-        cmd.arg("-lbcrypt");
+fn native_link_flags(cmd: &mut Command, sends: bool) {
+    let own = if cfg!(windows) {
+        vec![
+            format!("-Wl,/STACK:{}", vyrn_frontend::trap::RUN_STACK_BYTES),
+            "-lbcrypt".to_string(),
+        ]
     } else {
-        cmd.arg("-lm");
+        vec!["-lm".to_string()]
+    };
+    let tls = TLS_SYSTEM_LIBS
+        .iter()
+        .filter(|_| sends)
+        .map(|f| f.to_string());
+    let mut flags: Vec<String> = Vec::new();
+    for f in own.into_iter().chain(tls) {
+        if !flags.contains(&f) {
+            flags.push(f);
+        }
     }
+    cmd.args(flags);
 }
 
 /// The compiler is allocation-bound; see `mimalloc` in `Cargo.toml`. The `allocs`
@@ -6375,10 +6393,7 @@ fn build_wasm2c(
         .arg("-o")
         .arg(&stage)
         .arg(&hdr_def);
-    native_link_flags(&mut cmd);
-    if sends {
-        cmd.args(TLS_SYSTEM_LIBS);
-    }
+    native_link_flags(&mut cmd, sends);
     let linked = match cmd.status() {
         Ok(s) if s.success() => Ok(()),
         Ok(s) => {
@@ -6395,8 +6410,10 @@ fn build_wasm2c(
 
 /// The system libraries rustls-ffi's static library needs, as rustls-ffi's
 /// `tests/static_libs.rs` lists them per platform, and the sockets of `wasi_net.c`.
+/// Each entry is one argument, so [`native_link_flags`] can drop a repeat.
 /// On Windows the library asks for the DLL C runtime; a native binary links the static
-/// one, so it runs without the Visual C++ redistributable, fetching or not.
+/// one, so it runs without the Visual C++ redistributable, fetching or not. On macOS
+/// clang links libSystem into every program, so the list leaves out `-lSystem`.
 #[cfg(windows)]
 const TLS_SYSTEM_LIBS: &[&str] = &[
     "-lws2_32",
@@ -6414,12 +6431,9 @@ const TLS_SYSTEM_LIBS: &[&str] = &[
 ];
 #[cfg(target_os = "macos")]
 const TLS_SYSTEM_LIBS: &[&str] = &[
-    "-framework",
-    "Security",
-    "-framework",
-    "CoreFoundation",
+    "-Wl,-framework,Security",
+    "-Wl,-framework,CoreFoundation",
     "-liconv",
-    "-lSystem",
     "-lc",
     "-lm",
 ];

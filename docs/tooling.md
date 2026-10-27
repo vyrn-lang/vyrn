@@ -159,7 +159,9 @@ runtime and host objects come from `~/.vyrn/cache/native`, which the first
 build of a toolchain fills (about as slow as a build was before the cache).
 
 Every native build passes `-O2 -ffp-contract=off`: contraction into FMA would
-change float bits. The microarchitecture comes from a curated set, never a
+change float bits. On macOS it also passes `-mmacosx-version-min` with
+`MACOS_MIN` from `vyrn-cli/build.rs`, the minimum rustls-ffi's library is
+built for too, so the link mixes no newer objects. The microarchitecture comes from a curated set, never a
 pass-through `-march`:
 
 | Value | Meaning |
