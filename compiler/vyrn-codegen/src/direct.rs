@@ -115,6 +115,7 @@ struct Gen {
     read: u32,
     fetch: u32,
     text: u32,
+    raw: u32,
     splice: u32,
     raw_at: u32,
     concat: u32,
@@ -137,6 +138,7 @@ fn gen_imports(m: &mut Module) -> Gen {
         read: g("read"),
         fetch: g("fetch"),
         text: g("text"),
+        raw: g("raw"),
         splice: g("splice"),
         raw_at: g("rawAt"),
         concat: g("concat"),
@@ -5368,10 +5370,18 @@ impl<'p> Fn_<'_, 'p> {
         };
         let code = Type::Named("Code".to_string());
         match (name, args.len()) {
-            // `raw(s)` is `@codeText(s)`: one verbatim piece, no origin.
-            ("@codeText", 1) | ("raw", 1) => {
+            // A quote's part, with the key the loader stamped and the part's position.
+            ("@codeText", 4) => {
                 self.core_arg(m, b, name, args, 0, Some(&Type::Str), line)?;
+                self.core_arg(m, b, name, args, 1, Some(&Type::Str), line)?;
+                self.core_arg(m, b, name, args, 2, Some(&Type::Int), line)?;
+                self.core_arg(m, b, name, args, 3, Some(&Type::Int), line)?;
                 b.ins(&Instruction::Call(g.text));
+                Ok(code)
+            }
+            ("raw", 1) => {
+                self.core_arg(m, b, name, args, 0, Some(&Type::Str), line)?;
+                b.ins(&Instruction::Call(g.raw));
                 Ok(code)
             }
             ("rawAt", 4) => {

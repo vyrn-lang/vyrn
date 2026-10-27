@@ -263,7 +263,10 @@ pub(crate) fn wasi_snake(camel: &str) -> String {
 pub(crate) const CODE_IMPORTS: &[(&str, &[wasm::ValType], &[wasm::ValType])] = {
     use wasm::ValType::{I32, I64};
     &[
-        ("text", &[I32], &[I64]),
+        // A quote's part: its text, the key of the module that wrote it, and
+        // the part's line and column there.
+        ("text", &[I32, I32, I64, I64], &[I64]),
+        ("raw", &[I32], &[I64]),
         ("splice", &[I32, I64, I32, I64], &[I64]),
         ("rawAt", &[I32, I32, I64, I64], &[I64]),
         ("concat", &[I64, I64], &[I64]),

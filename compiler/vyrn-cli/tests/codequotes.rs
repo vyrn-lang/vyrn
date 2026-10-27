@@ -195,6 +195,34 @@ fn rawat_origin_maps_a_check_error_back_to_the_source() {
     );
 }
 
+/// A `Code` result has no `//@origin` lines; its span table places the error.
+#[test]
+fn rawat_in_a_code_result_maps_a_check_error_back_to_the_source() {
+    let dir = scratch("rawat_code");
+    write(&dir.join("input.txt"), "placeholder\n");
+    let gen = "export gen fn mkMod(p: String) -> Code {\n\
+               let bad = rawAt(\"\\\"x\\\" + 1\", \"./input.txt\", 1, 5)\n\
+               return vyrn\"\"\"export fn f() -> String {\n\
+               return \\{bad}\n\
+               }\"\"\"\n\
+               }\n";
+    write(&dir.join("gen.vyrn"), gen);
+    let app = "import { mkMod } from \"./gen\"\n\
+               import { f } from mkMod(\"./input.txt\")\n\
+               fn main() -> Int64 { return 0 }\n";
+    write(&dir.join("app.vyrn"), app);
+    let out = vyrn()
+        .arg("check")
+        .arg(dir.join("app.vyrn"))
+        .output()
+        .unwrap();
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("input.txt:1:5"),
+        "remapped to the origin:\n{err}"
+    );
+}
+
 #[test]
 fn i18n_translation_with_quotes_and_backslashes_bakes_losslessly() {
     // The i18n generator bakes each translation through the `strLit` code quote,

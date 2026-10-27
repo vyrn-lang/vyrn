@@ -1,7 +1,9 @@
 //! Origin maps. A generator's output may carry
 //! `//@origin <path>:<line>:<col>` comments; each governs the generated lines
 //! after it, until the next one or `//@origin end`. `path` is relative to the
-//! importing module and positions are 1-based. [`OriginMaps::remap`] moves a
+//! importing module and positions are 1-based. A `Code` result carries no
+//! directives: its span table's `shown` column states the same regions
+//! ([`OriginMaps::add_spans`]). [`OriginMaps::remap`] moves a
 //! diagnostic to its origin, and [`OriginMaps::regions_for`] inverts the table
 //! for the LSP. A malformed directive never loses a diagnostic: it stays at the
 //! generated location with a note.
@@ -149,6 +151,56 @@ impl OriginMaps {
                 }),
             }
         }
+        self.insert(banner, dirs, total);
+    }
+
+    /// Reads the regions of the synthesized module `banner`, a `Code` result,
+    /// from its span table: a span with a `shown` position governs from the line
+    /// it starts on, and the next span without one ends the region after the
+    /// last line the region touches.
+    pub fn add_spans(
+        &mut self,
+        banner: &str,
+        source: &str,
+        rows: &[crate::gen::SpanRow],
+        ctx: &Context<'_>,
+    ) {
+        let line_of = |offset: usize| 1 + source[..offset].matches('\n').count();
+        let mut dirs: Vec<Directive> = Vec::new();
+        let mut open = false;
+        for r in rows {
+            let gen_line = line_of(r.offset);
+            match &r.shown {
+                Some(s) => {
+                    let (origin, malformed) =
+                        match anchor(&format!("{}:{}:{}", s.path, s.at.line, s.at.col), ctx) {
+                            Ok(o) => (Some(o), None),
+                            Err(reason) => (None, Some(reason)),
+                        };
+                    dirs.push(Directive {
+                        gen_line,
+                        origin,
+                        malformed,
+                    });
+                    open = true;
+                }
+                None if open => {
+                    let mid_line = !source[..r.offset].ends_with('\n');
+                    dirs.push(Directive {
+                        gen_line: gen_line + mid_line as usize,
+                        origin: None,
+                        malformed: None,
+                    });
+                    open = false;
+                }
+                None => {}
+            }
+        }
+        self.insert(banner, dirs, source.lines().count());
+    }
+
+    /// Records `banner`'s directives, sorted by line, and its line count.
+    fn insert(&mut self, banner: &str, mut dirs: Vec<Directive>, total: usize) {
         if !dirs.is_empty() {
             dirs.sort_by_key(|d| d.gen_line);
             self.modules.insert(banner.to_string(), dirs);

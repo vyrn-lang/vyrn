@@ -3814,7 +3814,8 @@ impl Parser {
     /// expression, type); a failure is a parse diagnostic at the literal. Each
     /// hole's context ([`Parser::hole_context`]) becomes the flag argument to
     /// `@codeSplice`, which applies the splice rule at generation time. The quote
-    /// lowers to a `@codeText(part) + @codeSplice(hole, flag) + ...` chain.
+    /// lowers to a `@codeText(part, line, col) + @codeSplice(hole, flag) + ...`
+    /// chain.
     fn code_quote(
         &self,
         parts: Vec<String>,
@@ -3848,21 +3849,37 @@ impl Parser {
                 },
             });
         };
-        let code_text = |s: &str| Expr::call("@codeText", vec![Expr::str(s)], line);
+        // Each part carries where it starts in this file, and the loader adds the
+        // module's key: the part's author.
+        let code_text = |s: &str, (l, c): (usize, usize)| {
+            let pos = [l, c].map(|n| Expr::int(n as i64));
+            Expr::call("@codeText", [vec![Expr::str(s)], pos.into()].concat(), line)
+        };
+        // The first part starts after `vyrn"`, so a triple quote's first column
+        // is two short; each later part starts after its hole's `}`.
+        let mut at = (line, col + 5);
         for (i, part) in parts.iter().enumerate() {
             if !part.is_empty() {
-                add(&mut acc, code_text(part));
+                add(&mut acc, code_text(part, at));
             }
-            if i < exprs.len() {
+            if let Some(hole) = exprs.get(i) {
                 let ctx = self.hole_context(&parts, &exprs, i);
-                let value = self.parse_hole(&exprs[i], line, col)?;
+                let value = self.parse_hole(hole, line, col)?;
                 let splice = Expr::call("@codeSplice", vec![value, Expr::int(ctx)], line);
                 add(&mut acc, splice);
+                at = hole
+                    .src
+                    .chars()
+                    .fold((hole.line, hole.col), |(l, c), ch| match ch {
+                        '\n' => (l + 1, 1),
+                        _ => (l, c + 1),
+                    });
+                at.1 += 1;
             }
         }
         // The lexer always yields a part, but an all-empty skeleton still needs a
         // `Code` value.
-        Ok(acc.unwrap_or_else(|| code_text("")))
+        Ok(acc.unwrap_or_else(|| code_text("", at)))
     }
 
     /// The context of hole `i` in a code quote, the flag `@codeSplice` takes:

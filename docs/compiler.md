@@ -582,6 +582,20 @@ go through the loader's resolver and are recorded as the generator's inputs;
 synthesized decoder. A generator the engine declines is an error: "the
 installed generation engine declined it".
 
+A `Code` value is a rope of spans (`gen::Rope`): concatenation is a node, not
+a copy. Each span carries its author (`gen::Author`) and where its errors show
+(`gen::Shown`). The loader stamps each quote part `@codeText(text, line, col)`
+with its module's key after the parse, in the walk that stamps `panic`, so a
+quote's text is written by the module that holds it. A `String`, number or
+`Bool` in a hole, and `raw` text, is the call site's. A `Code` result reaches
+the loader as `gen::Written`: the text and a span table sorted by offset. The
+cache entry stores the table inside the authenticated body, and `OriginMaps`
+reads its regions from the table's `shown` column (`add_spans`). A `String`
+result has no table: its regions come from `//@origin` lines and its imports
+are judged by its banner. Both paths stand until the last `String` generator
+in std moves to `Code`; that commit deletes the directive scan and the banner
+rule.
+
 ## What each gate proves
 
 `AGENTS.md` lists the commands and when to run them. This section says what

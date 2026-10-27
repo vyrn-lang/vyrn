@@ -1,5 +1,5 @@
 //! Generation machinery: the splice rule, the
-//! `Code` piece list and its renderer, the `lex` token literal, the sandbox's
+//! `Code` rope, its renderer and span table, the `lex` token literal, the sandbox's
 //! path rule, `moduleInterface`'s reflection, and the seam the driver installs
 //! the generation engine through. Nothing here walks a tree: each function
 //! takes a resolver, a path or a source, and returns an `Expr` or a `String`.
@@ -7,45 +7,124 @@
 use crate::ast::{Expr, Id, Program};
 use crate::diagnostics::Diagnostic;
 use std::collections::HashMap;
+use std::sync::Arc;
 
-/// One piece of a `Code` fragment: plain rendered text (from a
-/// quote skeleton, a splice or `raw`), or a region from `rawAt` that `render`
-/// wraps in `//@origin path:line:col` ... `//@origin end`.
-#[derive(Debug, Clone, PartialEq)]
-pub enum CodePiece {
-    /// Verbatim source text with no origin.
-    Text(String),
-    /// A region derived from input at `path:line:col`, bracketed with the
-    /// `//@origin` directives so a diagnostic inside it maps back.
-    Origin {
-        path: String,
-        line: i64,
-        col: i64,
-        text: String,
-    },
+/// A 1-based line and column.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Pos {
+    pub line: usize,
+    pub col: usize,
 }
 
-/// Renders a `Code` piece list to source text (`render`). Each origin
-/// directive sits on its own line, because it governs the lines that follow.
-pub fn render_code(pieces: &[CodePiece]) -> String {
+/// Who wrote a span of generated code. A quote's text is written by the module
+/// that holds the `vyrn"..."`, at the part's position there; a `String`, number
+/// or `Bool` a hole turns into code, and `raw` text, are the call site's data. A
+/// generator cannot name an author.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Author {
+    File { key: String, at: Pos },
+    CallSite,
+}
+
+/// Where a diagnostic inside a span shows: a path relative to the importing
+/// module and a position, as `//@origin` writes them (`rawAt`). It never
+/// changes the author.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Shown {
+    pub path: String,
+    pub at: Pos,
+}
+
+/// One span of a `Code` value: its text, its author, and where its errors show.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Span {
+    pub text: String,
+    pub author: Author,
+    pub shown: Option<Shown>,
+}
+
+/// A `Code` value: a rope of spans. Concatenation is a node, so a loop of
+/// `acc = acc + piece` is linear.
+#[derive(Debug)]
+pub enum Rope {
+    Leaf(Span),
+    Cat(Arc<Rope>, Arc<Rope>),
+}
+
+impl Rope {
+    /// The spans in order. The walk keeps its own stack: a loop's accumulator is
+    /// a left spine as deep as the loop ran.
+    pub fn spans(&self) -> Vec<&Span> {
+        let mut out = Vec::new();
+        let mut todo = vec![self];
+        while let Some(r) = todo.pop() {
+            match r {
+                Rope::Leaf(s) => out.push(s),
+                Rope::Cat(a, b) => {
+                    todo.push(b);
+                    todo.push(a);
+                }
+            }
+        }
+        out
+    }
+}
+
+/// One row of a generated module's span table: the byte offset in the module's
+/// text where a span starts, its author and where its errors show.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SpanRow {
+    pub offset: usize,
+    pub author: Author,
+    pub shown: Option<Shown>,
+}
+
+/// What a generator wrote: the module's text and, for a `Code` result, its span
+/// table sorted by offset. A `String` result has no table; its module is judged
+/// by its banner and maps errors through `//@origin` lines.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Written {
+    pub source: String,
+    pub spans: Option<Vec<SpanRow>>,
+}
+
+impl Written {
+    /// A `Code` result: the spans' text, one row per non-empty span.
+    pub fn code(rope: &Rope) -> Written {
+        let mut source = String::new();
+        let mut rows = Vec::new();
+        for s in rope.spans().into_iter().filter(|s| !s.text.is_empty()) {
+            rows.push(SpanRow {
+                offset: source.len(),
+                author: s.author.clone(),
+                shown: s.shown.clone(),
+            });
+            source.push_str(&s.text);
+        }
+        Written {
+            source,
+            spans: Some(rows),
+        }
+    }
+}
+
+/// Renders a `Code` value to source text (`render`). A span with a `shown`
+/// position is wrapped in `//@origin path:line:col` ... `//@origin end`, each
+/// directive on its own line, because it governs the lines that follow.
+pub fn render_code(rope: &Rope) -> String {
     let mut out = String::new();
     let ensure_nl = |out: &mut String| {
         if !out.is_empty() && !out.ends_with('\n') {
             out.push('\n');
         }
     };
-    for p in pieces {
-        match p {
-            CodePiece::Text(t) => out.push_str(t),
-            CodePiece::Origin {
-                path,
-                line,
-                col,
-                text,
-            } => {
+    for s in rope.spans() {
+        match &s.shown {
+            None => out.push_str(&s.text),
+            Some(Shown { path, at }) => {
                 ensure_nl(&mut out);
-                out.push_str(&format!("//@origin {path}:{line}:{col}\n"));
-                out.push_str(text);
+                out.push_str(&format!("//@origin {path}:{}:{}\n", at.line, at.col));
+                out.push_str(&s.text);
                 ensure_nl(&mut out);
                 out.push_str("//@origin end\n");
             }
@@ -59,10 +138,10 @@ pub fn render_code(pieces: &[CodePiece]) -> String {
 /// The six cases are the six `vyrn_codegen::TAG_*` values, because a compiled
 /// generator names them across the wall: a seventh on either side would be a
 /// tag the other cannot handle.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub enum Spliced {
     Str(String),
-    Code(Vec<CodePiece>),
+    Code(Arc<Rope>),
     Bool(bool),
     /// Any integer width, sign-extended to 64 bits; `signed` picks the decimal
     /// rendering.
@@ -106,12 +185,13 @@ fn no_splice_rule(kind: &str, ctx: i64) -> String {
 /// The wasm generation engine applies it host-side, so the
 /// escaping, identifier validation and float formatting have one
 /// implementation.
-pub fn gen_code_splice(val: &Spliced, ctx: i64) -> Result<Vec<CodePiece>, String> {
-    // A `Code` value is already valid code and splices verbatim everywhere.
-    if let Spliced::Code(pieces) = val {
-        return Ok(pieces.clone());
+pub fn gen_code_splice(val: &Spliced, ctx: i64) -> Result<Arc<Rope>, String> {
+    // A `Code` value is already valid code and splices verbatim everywhere,
+    // keeping its authors.
+    if let Spliced::Code(rope) = val {
+        return Ok(rope.clone());
     }
-    let text = |s: String| Ok(vec![CodePiece::Text(s)]);
+    let text = |s: String| Ok(Arc::new(Rope::Leaf(Span::data(s))));
     match ctx {
         0 => match val {
             Spliced::Str(s) => text(escape_string_literal(s)),
@@ -249,15 +329,26 @@ pub(crate) fn lexed(source: &str) -> Vec<(String, String, i64, i64)> {
     }
 }
 
+impl Span {
+    /// Text the call site supplied as data, with no position.
+    pub fn data(text: String) -> Span {
+        Span {
+            text,
+            author: Author::CallSite,
+            shown: None,
+        }
+    }
+}
+
 /// One generation read: the resolved key (a file, or a directory with a
 /// trailing `/`) and its content, `None` when the read failed. A failure is
 /// recorded too: "0 examples" stops being right when `examples/` appears.
 pub type GenRead = (String, Option<Vec<u8>>);
 
-/// A generator's result: the module source, and the inputs it read,
-/// which the loader folds into the cache key.
+/// A generator's result: what it wrote, and the inputs it read, which the
+/// loader folds into the cache key.
 pub struct GenOutput {
-    pub source: String,
+    pub written: Written,
     pub reads: Vec<GenRead>,
 }
 
@@ -833,6 +924,7 @@ fn run_derive(
         GenError::Failed(trap) => trap,
         GenError::Unchecked => "the engine asked to check a checked program".to_string(),
     })?
+    .written
     .source;
     let tokens = crate::lexer::lex(&src).map_err(|d| {
         format!(

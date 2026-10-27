@@ -321,7 +321,7 @@ pull request.
 - A generator emits code through code quotes (`vyrn"..."`). A string spliced into an expression becomes an escaped literal and into an identifier is validated; there is no way to splice a string as code.
 - Code quotes and `lex` exist only during generation and are not reserved words.
 - A column layout (one array per field of a record) is `std/columns`, an import-target generator over `moduleInterface`, not a language feature. Its container's `where` rule states that every column has the first one's length, so a loop bounded by one column indexes all of them unchecked. `derive` cannot write it, because its call answers `String` and renames the types it writes. A push appends to every column in place, as one group of stores whose rule check the prover drops.
-- Generated code maps back to its input through `//@origin path:line:col` lines, which any generator may emit. A diagnostic that cannot be remapped stays at the generated location; it is never dropped.
+- A `Code` result maps back to its input through its span table, which only the host writes; a `String` result maps through `//@origin path:line:col` lines, which any generator may emit, until the last `String` generator is gone. A diagnostic that cannot be remapped stays at the generated location; it is never dropped.
 - A generator reports a diagnostic by writing `//@diag <severity> <anchor> <message>` into its output, so the report survives the cache. Two severities; an unknown word is a warning.
 - The compiler knows no lint rule names, codes, registry or suppression syntax.
 - A generator symbol map is an exported function inside the generated module, so it cannot go stale against cached code.

@@ -12,6 +12,7 @@ use std::rc::Rc;
 
 use crate::ast::*;
 use crate::diagnostics::Diagnostic;
+use crate::gen::{Author, Pos, Shown, SpanRow, Written};
 use crate::rules::{refuse, rule, Rule};
 use crate::{lexer, parser};
 
@@ -308,21 +309,21 @@ fn site_file(key: &str, root_key: &str, std_root: Option<&str>) -> String {
     format!("{}.vyrn", spec.strip_prefix("./").unwrap_or(&spec))
 }
 
-/// Rewrites every `panic(msg)` in `program` to [`PANIC_AT`]`(msg, "file:line")`,
-/// in every body [`crate::project::walk_program`] visits.
-fn stamp_panic_sites(program: &mut Program, file: &str) {
-    crate::project::walk_program(program, &mut panic_stamp(file));
+/// Stamps every body [`crate::project::walk_program`] visits with what only the
+/// loader knows (see [`site_stamp`]).
+fn stamp_sites(program: &mut Program, file: &str, key: &str) {
+    crate::project::walk_program(program, &mut site_stamp(file, key));
 }
 
-/// The rewrite [`stamp_panic_sites`] makes at each expression. None in the
-/// runtime module: its `panic` is a fixed `trap.rs` wording (`malloc`'s `out of
-/// memory`), printed without a site.
-fn panic_stamp(file: &str) -> impl FnMut(&mut Expr) + '_ {
+/// The rewrite [`stamp_sites`] makes at each expression, in one walk:
+/// - `panic(msg)` becomes [`PANIC_AT`]`(msg, "file:line")`. None in the runtime
+///   module: its `panic` is a fixed `trap.rs` wording (`malloc`'s `out of
+///   memory`), printed without a site.
+/// - a quote's part `@codeText(text, line, col)` gains the module key,
+///   `@codeText(text, key, line, col)`: the part's author.
+fn site_stamp<'a>(file: &'a str, key: &'a str) -> impl FnMut(&mut Expr) + 'a {
     let runtime = file.strip_suffix(".vyrn") == Some(RUNTIME_SPEC);
     move |e: &mut Expr| {
-        if runtime {
-            return;
-        }
         if let Expr::Call {
             dot: _,
             awaits: _,
@@ -333,9 +334,11 @@ fn panic_stamp(file: &str) -> impl FnMut(&mut Expr) + '_ {
             id: _,
         } = e
         {
-            if name == "panic" && args.len() == 1 {
+            if name == "panic" && args.len() == 1 && !runtime {
                 *name = PANIC_AT.to_string();
                 args.push(Expr::str(format!("{file}:{line}")));
+            } else if name == "@codeText" && args.len() == 3 {
+                args.insert(1, Expr::str(key));
             }
         }
     }
@@ -1449,6 +1452,7 @@ fn load_modules(
     fn visit(
         key: &str,
         source: Option<&str>,
+        spans: Option<&[SpanRow]>,
         opts: &LoadOptions,
         resolver: &dyn ModuleResolver,
         engine: Option<&crate::gen::GenEngine>,
@@ -1540,7 +1544,12 @@ fn load_modules(
                     .map(|s| crate::origin::comments_of(&s.items)),
             };
             let ctx = crate::origin::Context::new(comments, dir_of(importer), project);
-            w.origins.add_module(key, &text, &ctx);
+            // A `Code` result's errors show where its span table says; only a
+            // `String` result's text is scanned for `//@origin` lines.
+            match spans {
+                Some(rows) => w.origins.add_spans(key, &text, rows, &ctx),
+                None => w.origins.add_module(key, &text, &ctx),
+            }
             // The same line-scan lifts `//@diag` directives into diagnostics at
             // the generator's severity. A page is generated twice and a
             // generator can be re-entered, so de-duplicate on file, line and
@@ -1698,14 +1707,15 @@ fn load_modules(
             }
         }
 
-        // Stamp every `panic` with its file and line here: the parser
-        // knows only the line, and every later stage clones bodies (a projection
-        // into its access site, a generic per instantiation).
+        // Stamp every `panic` with its file and line, and every quote part with
+        // its author, here: the parser knows neither file nor key, and every
+        // later stage clones bodies (a projection into its access site, a
+        // generic per instantiation).
         //
         // After the parse cache: two files with identical text share one parse,
         // and must not share one file name.
         let site = site_file(key, root_key, opts.std_root.as_deref());
-        stamp_panic_sites(&mut program, &site);
+        stamp_sites(&mut program, &site, key);
 
         // `std/result` and `std/option` are validated no-op imports.
         // Recognize the specifier before file resolution, so the builtins are
@@ -1766,7 +1776,7 @@ fn load_modules(
                 {
                     return Err(vec![in_module(d, key, root_key)]);
                 }
-                visit(&target, None, opts, resolver, engine, w, root_key)?;
+                visit(&target, None, None, opts, resolver, engine, w, root_key)?;
                 import_targets[i] = Some(target);
             }
         }
@@ -1776,7 +1786,7 @@ fn load_modules(
         // not re-run.
         for (i, imp) in program.imports.iter().enumerate() {
             if let ImportSource::Generator { name, args, line } = &imp.source {
-                let (gen_key, gen_source) = run_generator(
+                let (gen_key, written) = run_generator(
                     key,
                     name,
                     args,
@@ -1797,8 +1807,18 @@ fn load_modules(
                 if let Some(d) = audience_objection(key, &gen_key, *line, opts) {
                     return Err(vec![in_module(d, key, root_key)]);
                 }
-                if let Some(src) = gen_source {
-                    visit(&gen_key, Some(&src), opts, resolver, engine, w, root_key)?;
+                if let Some(g) = written {
+                    let spans = g.spans.as_deref();
+                    visit(
+                        &gen_key,
+                        Some(&g.source),
+                        spans,
+                        opts,
+                        resolver,
+                        engine,
+                        w,
+                        root_key,
+                    )?;
                 }
                 import_targets[i] = Some(gen_key);
             }
@@ -1829,6 +1849,7 @@ fn load_modules(
     if let Err(diags) = visit(
         &root_key,
         Some(root_source),
+        None,
         opts,
         resolver,
         engine,
@@ -1873,7 +1894,9 @@ fn load_modules(
             continue;
         }
         if !w.states.contains_key(&target) {
-            if let Err(diags) = visit(&target, None, opts, resolver, engine, &mut w, &root_key) {
+            if let Err(diags) = visit(
+                &target, None, None, opts, resolver, engine, &mut w, &root_key,
+            ) {
                 return Err(failed(diags, w.origins));
             }
         }
@@ -1985,10 +2008,11 @@ thread_local! {
 }
 
 /// A generator cache entry: its recorded `(input, hash)` pairs and its output.
-type CacheEntry = (Vec<(String, String)>, String);
+type CacheEntry = (Vec<(String, String)>, Written);
 
 /// Runs a generator-call import target and returns the generated
-/// module's key, with its source, or `None` when it is already synthesized.
+/// module's key, with what the generator wrote, or `None` when it is already
+/// synthesized.
 ///
 /// The arguments must be constants. Identical calls share one key. On a cache
 /// miss the generator is loaded, checked and run in the mediated sandbox, and
@@ -2007,7 +2031,7 @@ fn run_generator(
     identities: &mut HashMap<String, String>,
     read: &mut HashMap<String, Option<String>>,
     root_key: &str,
-) -> Result<(String, Option<String>), Vec<Diagnostic>> {
+) -> Result<(String, Option<Written>), Vec<Diagnostic>> {
     let err = |rule: Rule| -> Vec<Diagnostic> { vec![load_error(importer, root_key, line, rule)] };
 
     // Arguments must be compile-time constants.
@@ -2072,7 +2096,7 @@ fn run_generator(
             got = consts.len()
         )));
     }
-    let source = run_resolved(
+    let written = run_resolved(
         importer,
         name,
         &consts,
@@ -2084,7 +2108,7 @@ fn run_generator(
         engine,
         read,
     )?;
-    Ok((gen_key, Some(source)))
+    Ok((gen_key, Some(written)))
 }
 
 /// The constants of a generator call as its banner spells them.
@@ -2160,7 +2184,7 @@ pub fn call_generator(
         root_key: importer,
     };
     let mut read = HashMap::new();
-    Some(run_resolved(
+    let written = run_resolved(
         importer,
         &name,
         args,
@@ -2171,7 +2195,8 @@ pub fn call_generator(
         resolver,
         engine,
         &mut read,
-    ))
+    );
+    Some(written.map(|w| w.source))
 }
 
 /// What [`gen_export`] answered: the companion and the function, or none, and
@@ -2252,7 +2277,7 @@ fn run_resolved(
     resolver: &dyn ModuleResolver,
     engine: Option<&crate::gen::GenEngine>,
     read: &mut HashMap<String, Option<String>>,
-) -> Result<String, Vec<Diagnostic>> {
+) -> Result<Written, Vec<Diagnostic>> {
     let Site { line, root_key } = site;
     let err = |rule: Rule| -> Vec<Diagnostic> { vec![load_error(importer, root_key, line, rule)] };
     let gen_mod_key = gen_mod_key.to_string();
@@ -2428,11 +2453,11 @@ fn run_resolved(
         if describable {
             resolver.gen_cache_put(
                 &sources_hash,
-                &render_cache_entry(&sources_hash, &inputs, &out.source),
+                &render_cache_entry(&sources_hash, &inputs, &out.written),
             );
         }
     }
-    Ok(out.source)
+    Ok(out.written)
 }
 
 /// A generator module loaded and checked as a runnable program, with its
@@ -2668,22 +2693,91 @@ const ABSENT: &str = "absent";
 /// The cache entry format tag, bumped when an entry's meaning changes.
 /// [`read_cache_entry`] rejects any other tag as a miss, so the generator re-runs
 /// and overwrites the entry.
-const CACHE_ENTRY_TAG: &str = "v3";
+const CACHE_ENTRY_TAG: &str = "v4";
 
 /// Formats this compiler wrote before [`CACHE_ENTRY_TAG`]. Such an entry is
 /// stale, not foreign, so it is ignored without a warning.
-const SUPERSEDED_ENTRY_TAGS: &[&str] = &["v1", "v2"];
+const SUPERSEDED_ENTRY_TAGS: &[&str] = &["v1", "v2", "v3"];
 
-/// Serializes a cache entry: `v3 <tag> <N>`, then `path<TAB>hash` lines, then the
-/// generated source verbatim. The tag authenticates everything after it, and
-/// [`entry_tag`] binds the lookup key into it.
-fn render_cache_entry(key: &str, inputs: &[(String, String)], output: &str) -> String {
+/// Serializes a cache entry: `v4 <tag> <N>`, then `path<TAB>hash` lines, then
+/// the span table ([`span_table`]), then the generated source verbatim. The tag
+/// authenticates everything after it, and [`entry_tag`] binds the lookup key
+/// into it.
+fn render_cache_entry(key: &str, inputs: &[(String, String)], output: &Written) -> String {
     let mut body = format!("{}\n", inputs.len());
     for (p, h) in inputs {
         body.push_str(&format!("{p}\t{h}\n"));
     }
-    body.push_str(output);
+    body.push_str(&span_table(output.spans.as_deref()));
+    body.push_str(&output.source);
     format!("{CACHE_ENTRY_TAG} {} {body}", entry_tag(key, &body))
+}
+
+/// A span table as cache lines: `-` for none (a `String` result), else its row
+/// count, then one `offset<TAB>author<TAB>shown` line per row. An author is `-`
+/// for the call site or `line:col:key`; a shown position is `-` or
+/// `line:col:path`. The key and the path come last, so a colon in them splits
+/// nothing.
+fn span_table(spans: Option<&[SpanRow]>) -> String {
+    let Some(rows) = spans else {
+        return "-\n".to_string();
+    };
+    let mut out = format!("{}\n", rows.len());
+    for r in rows {
+        let author = match &r.author {
+            Author::File { key, at } => format!("{}:{}:{key}", at.line, at.col),
+            Author::CallSite => "-".to_string(),
+        };
+        let shown = match &r.shown {
+            Some(s) => format!("{}:{}:{}", s.at.line, s.at.col, s.path),
+            None => "-".to_string(),
+        };
+        out.push_str(&format!("{}\t{author}\t{shown}\n", r.offset));
+    }
+    out
+}
+
+/// Inverse of [`span_table`]: its first line `head`, and the rest from `next`.
+fn read_span_table<'a>(
+    head: &str,
+    mut next: impl FnMut() -> Option<&'a str>,
+) -> Option<Option<Vec<SpanRow>>> {
+    if head == "-" {
+        return Some(None);
+    }
+    // `line:col:rest`, the rest keeping any colon.
+    let placed = |field: &str| -> Option<(Pos, String)> {
+        let mut f = field.splitn(3, ':');
+        let (line, col) = (f.next()?.parse().ok()?, f.next()?.parse().ok()?);
+        Some((Pos { line, col }, f.next()?.to_string()))
+    };
+    // No `with_capacity`: the count comes from the file.
+    let mut rows = Vec::new();
+    for _ in 0..head.parse::<usize>().ok()? {
+        let mut cols = next()?.splitn(3, '\t');
+        let (offset, author, shown) = (cols.next()?, cols.next()?, cols.next()?);
+        let author = match author {
+            "-" => Author::CallSite,
+            a => {
+                let (at, key) = placed(a)?;
+                Author::File { key, at }
+            }
+        };
+        let shown = match shown {
+            "-" => None,
+            s => {
+                let (at, path) = placed(s)?;
+                Some(Shown { path, at })
+            }
+        };
+        let offset = offset.parse().ok()?;
+        rows.push(SpanRow {
+            offset,
+            author,
+            shown,
+        });
+    }
+    Some(Some(rows))
 }
 
 /// Inverse of [`render_cache_entry`], for an entry this compiler wrote.
@@ -2748,16 +2842,27 @@ fn read_cache_entry(
         return None;
     }
     let mut idx = first_nl + 1;
+    let mut line = || {
+        let nl = text[idx..].find('\n')? + idx;
+        let l = &text[idx..nl];
+        idx = nl + 1;
+        Some(l)
+    };
     // No `with_capacity(n)`: `n` comes from the file, and a truncated write can
     // make it `usize::MAX`, which aborts on the allocation.
     let mut inputs = Vec::new();
     for _ in 0..n {
-        let nl = text[idx..].find('\n')? + idx;
-        let (p, h) = text[idx..nl].split_once('\t')?;
+        let (p, h) = line()?.split_once('\t')?;
         inputs.push((p.to_string(), h.to_string()));
-        idx = nl + 1;
     }
-    Some((inputs, text[idx..].to_string()))
+    let spans = read_span_table(line()?, &mut line)?;
+    Some((
+        inputs,
+        Written {
+            source: text[idx..].to_string(),
+            spans,
+        },
+    ))
 }
 
 /// Warns of a foreign entry. The LSP validates the same entry on every
@@ -4478,7 +4583,7 @@ fn parse_reached(modules: &mut [Module], opts: &LoadOptions) -> Result<(), Vec<D
                     };
                     let mut body = body.map_err(in_key)?;
                     let site = site_file(&m.key, "", opts.std_root.as_deref());
-                    crate::project::walk_block(&mut body, &mut panic_stamp(&site));
+                    crate::project::walk_block(&mut body, &mut site_stamp(&site, &m.key));
                     Some(body)
                 }
                 None => None,
@@ -5380,15 +5485,26 @@ mod tests {
         );
     }
 
+    /// A `String` result's text, as a cache entry holds it.
+    fn text(source: &str) -> Written {
+        Written {
+            source: source.to_string(),
+            spans: None,
+        }
+    }
+
     #[test]
     fn a_cache_entry_from_an_older_format_misses_instead_of_being_misread() {
-        // A `v1` entry cannot say whether a missing file has since appeared, and
-        // a `v2` entry is not authenticated. Both miss.
+        // A `v1` entry cannot say whether a missing file has since appeared, a
+        // `v2` entry is not authenticated, and a `v3` entry has no span table.
+        // All miss.
         let key = "k";
         let inputs = [("data/a.txt".to_string(), "deadbeef".to_string())];
-        let v3 = render_cache_entry(key, &inputs, "export fn n() -> Int64 { return 1 }");
-        assert!(read_cache_entry(key, &v3, None).is_some());
+        let current =
+            render_cache_entry(key, &inputs, &text("export fn n() -> Int64 { return 1 }"));
+        assert!(read_cache_entry(key, &current, None).is_some());
         for older in [
+            "v3 tag 1\ndata/a.txt\tdeadbeef\nx",
             "v2 1\ndata/a.txt\tdeadbeef\nx",
             "v1\ndata/a.txt\tdeadbeef\nx",
         ] {
@@ -5399,14 +5515,48 @@ mod tests {
         }
     }
 
+    /// A `Code` result's span table survives the cache, a colon in a key or a
+    /// path included.
+    #[test]
+    fn a_cache_entry_keeps_its_span_table() {
+        let inputs = [("g.vyrn".to_string(), "deadbeef".to_string())];
+        let pos = |line, col| Pos { line, col };
+        let written = Written {
+            source: "import { a } from \"./a\"\nfn f() {}\n".to_string(),
+            spans: Some(vec![
+                SpanRow {
+                    offset: 0,
+                    author: Author::File {
+                        key: "C:/p/g.vyrn".to_string(),
+                        at: pos(3, 9),
+                    },
+                    shown: None,
+                },
+                SpanRow {
+                    offset: 24,
+                    author: Author::CallSite,
+                    shown: Some(Shown {
+                        path: "C:/p/in.txt".to_string(),
+                        at: pos(1, 1),
+                    }),
+                },
+            ]),
+        };
+        let entry = render_cache_entry("k", &inputs, &written);
+        assert_eq!(
+            read_cache_entry("k", &entry, None),
+            Some((inputs.to_vec(), written))
+        );
+    }
+
     /// A hit is linked without re-running the generator, so an entry written by
     /// anything but this compiler must not be read back.
     #[test]
     fn a_cache_entry_this_compiler_did_not_write_is_refused() {
         let key = "k";
         let inputs = [("data/a.txt".to_string(), "deadbeef".to_string())];
-        let output = "export fn n() -> Int64 { return 1 }";
-        let honest = render_cache_entry(key, &inputs, output);
+        let output = text("export fn n() -> Int64 { return 1 }");
+        let honest = render_cache_entry(key, &inputs, &output);
         assert!(
             read_cache_entry(key, &honest, None).is_some(),
             "the control"

@@ -18,11 +18,15 @@ use std::path::PathBuf;
 #[cfg(feature = "host")]
 use std::sync::mpsc;
 
+#[cfg(feature = "host")]
+use std::sync::Arc;
 use vyrn_frontend::ast::{Block, Expr, Function, Id, Param, Program, Stmt, Type};
 use vyrn_frontend::consteval::ConstVal;
 #[cfg(feature = "host")]
-use vyrn_frontend::gen::{compiler_identity, CodePiece, GenEngine, GenRead, Spliced};
-use vyrn_frontend::gen::{GenError, GenInputs, GenOutput};
+use vyrn_frontend::gen::{
+    compiler_identity, Author, GenEngine, GenRead, Pos, Rope, Shown, Span, Spliced,
+};
+use vyrn_frontend::gen::{GenError, GenInputs, GenOutput, Written};
 
 /// Calls this path cannot serve; a module containing one is declined (see
 /// [`engine`]). A `gen fn` may not call the write capabilities, so this only
@@ -148,7 +152,7 @@ fn run(
     let persist = inputs.sources_fingerprint.is_some();
     // Judged only when the artifact is built: the key names the program's
     // sources, so a cached artifact is one a program with no unserved call built.
-    let source = run_module(&key, persist, &argv, program, inputs, &mut reads, || {
+    let written = run_module(&key, persist, &argv, program, inputs, &mut reads, || {
         if let Some(what) = reaches_unserved(program) {
             return Err(decline(&format!("the module reaches `{what}`")));
         }
@@ -157,13 +161,13 @@ fn run(
         compile_to_wasm(&key, &wrapper)
     })?;
     trace("run", t.elapsed());
-    if source.len() > inputs.max_output {
+    if written.source.len() > inputs.max_output {
         return Err(EngineError::Failed(format!(
             "generator output exceeds the {} byte cap",
             inputs.max_output
         )));
     }
-    Ok(GenOutput { source, reads })
+    Ok(GenOutput { written, reads })
 }
 
 /// Serves one capability request from the guest as `Interp::gen_read_file` /
@@ -295,7 +299,10 @@ pub fn run_pure(
         let source = String::from_utf8(source)
             .map_err(|_| GenError::Failed("generator emitted invalid UTF-8".into()))?;
         Ok(GenOutput {
-            source,
+            written: Written {
+                source,
+                spans: None,
+            },
             reads: Vec::new(),
         })
     };
@@ -846,11 +853,9 @@ pub struct GenState {
     /// The last served read or `render`, waiting for `fetch` to copy it into
     /// guest memory. The host never allocates on the guest's side.
     stash: Vec<u8>,
-    /// The code-quote arena; a `Code` value is an index into it. Per generation
-    /// run, so a handle from one run is meaningless in the next.
-    code: Vec<Vec<CodePiece>>,
-    /// A `Code` generator's result, set once by the wrapper's `result` call.
-    result: Option<Vec<CodePiece>>,
+    /// The code-quote arena. Per generation run, so a handle from one run is
+    /// meaningless in the next.
+    code: Arena,
     /// The structured result being handed over, and the decoder's position. A
     /// stream is fully consumed before the next `reflect`.
     atoms: Vec<Atom>,
@@ -878,21 +883,49 @@ impl GenState {
     }
 }
 
+/// The `Code` values of one generation run: a `Code` value is an index into
+/// `ropes`.
+#[derive(Default)]
 #[cfg(feature = "host")]
-impl GenState {
-    /// The pieces a handle names. Compiled code only holds handles the imports
+struct Arena {
+    ropes: Vec<Arc<Rope>>,
+    /// A `Code` generator's result, set once by the wrapper's `result` call.
+    result: Option<Arc<Rope>>,
+}
+
+#[cfg(feature = "host")]
+impl Arena {
+    /// The rope a handle names. Compiled code only holds handles the imports
     /// made, but the index is guest-supplied, so it is checked.
-    fn pieces(&self, h: i64) -> wasmtime::Result<&Vec<CodePiece>> {
-        self.code
+    fn rope(&self, h: i64) -> wasmtime::Result<&Arc<Rope>> {
+        self.ropes
             .get(h as usize)
             .ok_or_else(|| wasmtime::Error::msg(format!("bad code handle {h}")))
     }
 
-    fn intern(&mut self, pieces: Vec<CodePiece>) -> i64 {
-        self.code.push(pieces);
-        self.code.len() as i64 - 1
+    fn intern(&mut self, rope: Arc<Rope>) -> i64 {
+        self.ropes.push(rope);
+        self.ropes.len() as i64 - 1
     }
 
+    fn leaf(&mut self, span: Span) -> i64 {
+        self.intern(Arc::new(Rope::Leaf(span)))
+    }
+}
+
+/// A loop's accumulator is a chain of `Cat` nodes as deep as the loop ran, and
+/// dropping its root first would recurse down the chain. Dropped newest first,
+/// each node's children are still held by the arena, so no drop recurses.
+#[cfg(feature = "host")]
+impl Drop for Arena {
+    fn drop(&mut self) {
+        self.result = None;
+        while self.ropes.pop().is_some() {}
+    }
+}
+
+#[cfg(feature = "host")]
+impl GenState {
     /// Starts handing over `lit` as a value of type `ty`. An unread atom from
     /// the previous stream means the decoder walked a shorter type than the
     /// encoder, and fails the run.
@@ -1079,14 +1112,34 @@ fn link<X: 'static>(linker: &mut wasmtime::Linker<wasi::Guest<X>>) -> wasmtime::
 
     // The code-quote arena: `Code` is an i64 handle, and every operation on it
     // runs here.
+    // A quote's part, written by module `key` at `line:col`; the loader
+    // stamped the key after the parse.
     linker.func_wrap(
         "vyrn_gen",
         "text",
+        |mut caller: Caller<'_, T<X>>, s: i32, key: i32, line: i64, col: i64| -> Result<i64> {
+            let (data, host) = guest_mem(&mut caller)?;
+            let span = Span {
+                text: cstr(data, s)?,
+                author: Author::File {
+                    key: cstr(data, key)?,
+                    at: Pos {
+                        line: line as usize,
+                        col: col as usize,
+                    },
+                },
+                shown: None,
+            };
+            Ok(host.gen.code.leaf(span))
+        },
+    )?;
+    linker.func_wrap(
+        "vyrn_gen",
+        "raw",
         |mut caller: Caller<'_, T<X>>, s: i32| -> Result<i64> {
             let (data, host) = guest_mem(&mut caller)?;
-            let streams = &mut host.gen;
             let text = cstr(data, s)?;
-            Ok(streams.intern(vec![CodePiece::Text(text)]))
+            Ok(host.gen.code.leaf(Span::data(text)))
         },
     )?;
     linker.func_wrap(
@@ -1095,14 +1148,18 @@ fn link<X: 'static>(linker: &mut wasmtime::Linker<wasi::Guest<X>>) -> wasmtime::
         |mut caller: Caller<'_, T<X>>, s: i32, path: i32, line: i64, col: i64| -> Result<i64> {
             let (data, host) = guest_mem(&mut caller)?;
             let streams = &mut host.gen;
-            let text = cstr(data, s)?;
-            let path = cstr(data, path)?;
-            Ok(streams.intern(vec![CodePiece::Origin {
-                path,
-                line,
-                col,
-                text,
-            }]))
+            let shown = Shown {
+                path: cstr(data, path)?,
+                at: Pos {
+                    line: line as usize,
+                    col: col as usize,
+                },
+            };
+            let span = Span {
+                shown: Some(shown),
+                ..Span::data(cstr(data, s)?)
+            };
+            Ok(streams.code.leaf(span))
         },
     )?;
     linker.func_wrap(
@@ -1113,28 +1170,27 @@ fn link<X: 'static>(linker: &mut wasmtime::Linker<wasi::Guest<X>>) -> wasmtime::
             let streams = &mut host.gen;
             let val = splice_value(tag, bits, p, data, streams)?;
             // A splice violation traps.
-            let pieces = vyrn_frontend::gen::gen_code_splice(&val, ctx)
+            let rope = vyrn_frontend::gen::gen_code_splice(&val, ctx)
                 .map_err(|m| Error::new(Denied(m)))?;
-            Ok(caller.data_mut().gen.intern(pieces))
+            Ok(caller.data_mut().gen.code.intern(rope))
         },
     )?;
     linker.func_wrap(
         "vyrn_gen",
         "concat",
         |mut caller: Caller<'_, T<X>>, a: i64, b: i64| -> Result<i64> {
-            let s = &mut caller.data_mut().gen;
-            let mut pieces = s.pieces(a)?.clone();
-            pieces.extend(s.pieces(b)?.iter().cloned());
-            Ok(s.intern(pieces))
+            let s = &mut caller.data_mut().gen.code;
+            let cat = Rope::Cat(s.rope(a)?.clone(), s.rope(b)?.clone());
+            Ok(s.intern(Arc::new(cat)))
         },
     )?;
     linker.func_wrap(
         "vyrn_gen",
         "result",
         |mut caller: Caller<'_, T<X>>, h: i64| -> Result<()> {
-            let s = &mut caller.data_mut().gen;
-            let pieces = s.pieces(h)?.clone();
-            if s.result.replace(pieces).is_some() {
+            let s = &mut caller.data_mut().gen.code;
+            let rope = s.rope(h)?.clone();
+            if s.result.replace(rope).is_some() {
                 return Err(Error::msg("the generator handed over two results"));
             }
             Ok(())
@@ -1145,7 +1201,7 @@ fn link<X: 'static>(linker: &mut wasmtime::Linker<wasi::Guest<X>>) -> wasmtime::
         "render",
         |mut caller: Caller<'_, T<X>>, h: i64| -> Result<i64> {
             let s = &mut caller.data_mut().gen;
-            let text = vyrn_frontend::gen::render_code(s.pieces(h)?);
+            let text = vyrn_frontend::gen::render_code(s.code.rope(h)?);
             s.stash = text.into_bytes();
             Ok(s.stash.len() as i64)
         },
@@ -1272,7 +1328,7 @@ fn splice_value(
 ) -> wasmtime::Result<Spliced> {
     Ok(match tag {
         vyrn_codegen::TAG_STR => Spliced::Str(cstr(data, p)?),
-        vyrn_codegen::TAG_CODE => Spliced::Code(streams.pieces(bits)?.clone()),
+        vyrn_codegen::TAG_CODE => Spliced::Code(streams.code.rope(bits)?.clone()),
         vyrn_codegen::TAG_BOOL => Spliced::Bool(bits != 0),
         // Codegen sign-extends a signed integer of any width.
         vyrn_codegen::TAG_INT => Spliced::Int {
@@ -1406,7 +1462,7 @@ fn module_cache() -> &'static std::sync::Mutex<std::collections::HashMap<String,
     CACHE.get_or_init(Default::default)
 }
 
-/// Compiles once and runs, returning the source the guest framed on stdout.
+/// Compiles once and runs, returning what the generator wrote.
 /// Three tiers, cheapest first: this process's modules, artifacts on disk,
 /// then emit plus Cranelift.
 #[cfg(feature = "host")]
@@ -1418,7 +1474,7 @@ fn run_module(
     inputs: &GenInputs<'_>,
     reads: &mut Vec<GenRead>,
     build: impl FnOnce() -> Result<Vec<u8>, EngineError>,
-) -> Result<String, EngineError> {
+) -> Result<Written, EngineError> {
     let cached = module_cache().lock().ok().and_then(|c| c.get(key).cloned());
     let module = match cached {
         Some(m) => m,
@@ -1542,11 +1598,11 @@ fn run_hosted(
     program: &Program,
     inputs: &GenInputs<'_>,
     reads: &mut Vec<GenRead>,
-) -> Result<String, EngineError> {
+) -> Result<Written, EngineError> {
     let fuel = wasm_fuel(inputs.fuel);
     let (req_tx, req_rx) = mpsc::channel::<(String, i32)>();
     let (resp_tx, resp_rx) = mpsc::channel::<Result<Served, String>>();
-    let (done_tx, done_rx) = mpsc::channel::<Result<String, EngineError>>();
+    let (done_tx, done_rx) = mpsc::channel::<Result<Written, EngineError>>();
 
     let prepared = prepared(key, module, program)?;
     let argv: Vec<String> = argv.to_vec();
@@ -1584,8 +1640,9 @@ fn run_hosted(
     }
 }
 
-/// Instantiates the module under [`wasi::Policy::generator`] and returns the
-/// source it framed on stdout.
+/// Instantiates the module under [`wasi::Policy::generator`] and returns what
+/// the generator wrote: a `String` framed on stdout, or a `Code` handed over
+/// through the `result` import.
 ///
 /// Embedded rather than spawned: the `wasmtime` CLI's launch measured ~106 ms.
 #[cfg(feature = "host")]
@@ -1595,7 +1652,7 @@ fn run_wasm(
     type_arg: Option<Expr>,
     fuel: u64,
     caps: Caps,
-) -> Result<String, EngineError> {
+) -> Result<Written, EngineError> {
     let gen = GenState {
         caps: Some(caps),
         types: prepared.types.clone(),
@@ -1619,7 +1676,7 @@ fn run_wasm(
         let spent = fuel - store.get_fuel().unwrap_or(0);
         eprintln!("genwasm fuel: {spent}");
     }
-    let guest = store.into_data();
+    let mut guest = store.into_data();
     match wasi::exit_code(result) {
         Ok(0) => {}
         // The guest failed on its own terms. The prefix comes off because
@@ -1657,12 +1714,15 @@ fn run_wasm(
     // A `Code` result came through the `result` import, so all of stdout is
     // prints.
     let stdout = guest.wasi.stdout.unwrap_or_default();
-    let (prints, source) = match guest.gen.result {
-        Some(code) => (stdout, vyrn_frontend::gen::render_code(&code).into_bytes()),
-        None => match unframe_result(&stdout) {
-            Ok(framed) => framed,
-            Err(why) => return Err(decline(why)),
-        },
+    let (prints, written) = match guest.gen.code.result.take() {
+        Some(code) => (stdout, Written::code(&code)),
+        None => {
+            let (prints, source) = unframe_result(&stdout).map_err(decline)?;
+            let source = String::from_utf8(source)
+                .map_err(|_| EngineError::Failed("generator emitted invalid UTF-8".into()))?;
+            let spans = None;
+            (prints, Written { source, spans })
+        }
     };
     if !prints.is_empty() {
         use std::io::Write;
@@ -1670,8 +1730,7 @@ fn run_wasm(
         let _ = out.write_all(&prints);
         let _ = out.flush();
     }
-    String::from_utf8(source)
-        .map_err(|_| EngineError::Failed("generator emitted invalid UTF-8".into()))
+    Ok(written)
 }
 
 #[cfg(test)]
@@ -1710,6 +1769,22 @@ mod tests {
         // The result contains a marker: two ends.
         let inside = framed("", &format!("fn f() -> Str {{ return \"{RESULT_END}\" }}"));
         assert!(unframe_result(&inside).is_err());
+    }
+
+    #[test]
+    fn a_long_concatenation_chain_drops_without_recursing() {
+        let mut arena = Arena::default();
+        let leaf = arena.leaf(Span::data("x".into()));
+        let mut acc = leaf;
+        for _ in 0..1_000_000 {
+            let cat = Rope::Cat(
+                arena.rope(acc).unwrap().clone(),
+                arena.rope(leaf).unwrap().clone(),
+            );
+            acc = arena.intern(Arc::new(cat));
+        }
+        arena.result = arena.rope(acc).ok().cloned();
+        drop(arena);
     }
 
     /// `load_artifact` maps its bytes in as native code, so this is its
