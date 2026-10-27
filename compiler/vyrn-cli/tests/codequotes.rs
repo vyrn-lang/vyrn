@@ -452,6 +452,25 @@ export gen fn mk(spec: String) -> Code {
     assert_eq!(out.status.code(), Some(7), "{err}");
 }
 
+/// A one-line quote of an escaped newline keeps it: only a `"""` quote dedents.
+#[test]
+fn a_newline_separator_survives() {
+    let gen = r#"import { join } from "std/code"
+export gen fn mk() -> Code {
+    let fns: Array<Code> = [vyrn"fn one() -> Int64 { return 3 }", vyrn"export fn two() -> Int64 { return one() + 4 }"]
+    return join(fns, vyrn"\n")
+}
+"#;
+    let app = "import { mk } from \"./gen\"\nimport { two } from mk()\nfn main() -> Int64 { return two() }\n";
+    let out = vyrn()
+        .arg("emit-gen")
+        .arg(gen_app("newline", gen, app))
+        .output()
+        .unwrap();
+    let src = String::from_utf8_lossy(&out.stdout);
+    assert!(src.contains("return 3 }\nexport fn two"), "{src}");
+}
+
 /// A quote that closes a bracket it did not open is no unit, though a wrapper
 /// would pair it.
 #[test]

@@ -309,38 +309,6 @@ fn if_let(pattern: Pattern, scrutinee: Expr, then: Block, els: Option<Block>, li
     Stmt::expr(m)
 }
 
-/// Drops a multi-line quote's closing indentation, Swift's rule: when the text
-/// opens with a newline and its last line holds only whitespace, that
-/// whitespace leaves the start of every line, and the opening newline and the
-/// last line with the newline before it go. A part that starts after a hole
-/// starts mid-line, so only text after a newline is a line start.
-fn dedent(parts: &mut [String]) {
-    let Some(last) = parts.last() else { return };
-    let Some(nl) = last.rfind('\n') else { return };
-    let close = last[nl + 1..].to_string();
-    let opens = parts.first().is_some_and(|p| p.starts_with('\n'));
-    if opens && close.trim().is_empty() {
-        let n = parts.len();
-        parts[n - 1].truncate(nl);
-        for (i, part) in parts.iter_mut().enumerate() {
-            let mut out = String::with_capacity(part.len());
-            for (j, line) in part.split_inclusive('\n').enumerate() {
-                let start = j > 0 || i == 0;
-                out.push_str(match start {
-                    true => line.strip_prefix(close.as_str()).unwrap_or(line),
-                    false => line,
-                });
-            }
-            *part = out;
-        }
-        if let Some(first) = parts.first_mut() {
-            if first.starts_with('\n') {
-                first.remove(0);
-            }
-        }
-    }
-}
-
 /// Whether `src` is a separator `join` puts between items (`", "`, `" else "`):
 /// punctuation and keywords, no bracket, no name and no literal, which no mode
 /// parses alone and no unit of code can open or close.
@@ -3895,9 +3863,8 @@ impl Parser {
 
     /// Desugars a `vyrn"..."` code quote into a `Code` expression.
     ///
-    /// A multi-line quote first drops the indentation of its closing `"""`
-    /// line from each of its lines, and the newline after its opening `"""`
-    /// ([`dedent`]). The parts, with each hole replaced by a `__vyrn_holeN`
+    /// The lexer has dropped a `vyrn"""` quote's closing indentation
+    /// (`lexer::dedent`). The parts, with each hole replaced by a `__vyrn_holeN`
     /// placeholder, form a skeleton. It must parse here as declarations,
     /// statements, an expression, a type, or one item of a list
     /// ([`Self::parses_as_item`]); a failure is a parse diagnostic at the
@@ -3915,12 +3882,11 @@ impl Parser {
     /// of it shows.
     fn code_quote(
         &self,
-        mut parts: Vec<String>,
+        parts: Vec<String>,
         exprs: Vec<Hole>,
         line: usize,
         col: usize,
     ) -> Result<Expr, Diagnostic> {
-        dedent(&mut parts);
         let word = |c: char| c.is_ascii_alphanumeric() || c == '_';
         let skeleton = |item: bool, empty: bool, lit: bool| {
             let mut skel = String::new();
