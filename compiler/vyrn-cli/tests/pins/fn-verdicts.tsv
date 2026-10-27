@@ -2302,11 +2302,13 @@ std/cli.vyrn	cliDeclaresHelp	yes	no, `plans` is Array<CliPlan>, not an integer, 
 std/cli.vyrn	cliHelpLeft	yes	no, its effect set is alloc
 std/cli.vyrn	cliHelpRight	yes	no, its effect set is alloc
 std/cli.vyrn	cliHelpText	no, it calls `padEnd`, which is not trap-free	no, its effect set is alloc, trap
-std/cli.vyrn	cliEmitHelp	yes	no, its effect set is alloc, gen-only
-std/cli.vyrn	cliEmitSpec	yes	no, its effect set is alloc
-std/cli.vyrn	cliStore	yes	no, its effect set is alloc
-std/cli.vyrn	cliEmitAccept	yes	no, its effect set is alloc
-std/cli.vyrn	cliEmitField	yes	no, its effect set is alloc
+std/cli.vyrn	cliEmitHelp	yes	no, its effect set is gen-only
+std/cli.vyrn	cliOptRow	yes	no, its effect set is gen-only
+std/cli.vyrn	cliEmitSpec	yes	no, its effect set is alloc, gen-only
+std/cli.vyrn	cliLocal	yes	no, its effect set is alloc, gen-only
+std/cli.vyrn	cliStore	yes	no, its effect set is alloc, gen-only
+std/cli.vyrn	cliEmitAccept	yes	no, its effect set is alloc, gen-only
+std/cli.vyrn	cliEmitField	yes	no, its effect set is alloc, gen-only
 std/cli.vyrn	cliCommand	no, it calls `cliPlansOf`, which is not trap-free	no, its effect set is alloc, trap, gen-only
 std/cli.vyrn	cli	no, it calls `panic`	no, its effect set is alloc, trap, gen-only
 std/cli.vyrn	twoOpts	yes	no, its effect set is alloc
@@ -2743,8 +2745,8 @@ std/icons.vyrn	beforeColon	yes	no, its effect set is alloc
 std/icons.vyrn	afterColon	yes	no, its effect set is alloc
 std/icons.vyrn	jsonKind	yes	no, `j` is Json, not an integer, Bool or a read array of one
 std/icons.vyrn	toyCollection	yes	no, the result is String, not an integer, Bool or a read array of one
-std/imports.vyrn	procImports	yes	no, its effect set is alloc
-std/imports.vyrn	importBlock	yes	no, its effect set is alloc
+std/imports.vyrn	procImports	yes	no, its effect set is alloc, gen-only
+std/imports.vyrn	importBlock	yes	no, its effect set is alloc, gen-only
 std/json.vyrn	json$copyJson	yes	no, its effect set is alloc
 std/json.vyrn	json$copyJsonArray	yes	no, its effect set is alloc
 std/json.vyrn	json$copyJsonFields	yes	no, its effect set is alloc

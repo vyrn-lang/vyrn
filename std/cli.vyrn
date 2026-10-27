@@ -35,6 +35,7 @@
 /// Inspect the synthesized module with:  vyrn emit-gen <file>
 
 import { includes } from "std/arrays"
+import { join } from "std/code"
 import { importBlock, procImports } from "std/imports"
 import { fromBytesOr, indexOf, joinWith, padEnd, substring } from "std/strings"
 import { endsWith, startsWith } from "std/strpred"
@@ -500,108 +501,135 @@ fn cliHelpText(t: TypeInfo, plans: Array<CliPlan>) -> String {
     return joinWith(out, "\n") + "\n"
 }
 
-/// The `help<Name>()` accessor. `\{text}` sits in expression position of a code
-/// quote, so the compiler escapes a user's `///` prose into a string literal and
-/// a stray quote or backslash cannot become code.
-gen fn cliEmitHelp(typeName: String, text: String) -> String {
-    return render(vyrn"""export fn help\{name(typeName)}() -> String {
-    return \{text}
+/// The `help<Name>()` accessor. `\{text}` is a `String` hole, so the compiler
+/// writes a user's `///` prose as a string literal and a stray quote or
+/// backslash cannot become code.
+gen fn cliEmitHelp(n: Name, text: String) -> Code {
+    return vyrn"""
+        export fn help\{n}() -> String {
+            return \{text}
+        }
+        """
 }
-""")
+
+/// One row of the option spec.
+gen fn cliOptRow(long: String, short: String, field: String, takesValue: Bool) -> Code {
+    return vyrn"CliOpt { long: \{long}, short: \{short}, field: \{field}, takesValue: \{takesValue} }"
 }
 
 /// The option spec the walk reads.
-fn cliEmitSpec(name: String, plans: Array<CliPlan>) -> String {
-    let mut out = "fn cliSpec" + name + "() -> Array<CliOpt> {\n    return [\n"
+gen fn cliEmitSpec(n: Name, plans: Array<CliPlan>) -> Code {
+    let mut rows: Array<Code> = []
     for p in plans {
         if p.kind != "free" {
-            let takes = if p.kind == "value" { "true" } else { "false" }
-            out = out + "        CliOpt { long: \"" + p.long + "\", short: \"" + p.short + "\", field: \"" + p.field + "\", takesValue: " + takes + " },\n"
+            rows.push(cliOptRow(p.long, p.short, p.field, p.kind == "value"))
         }
     }
     if !cliDeclaresHelp(plans) {
-        out = out + "        CliOpt { long: \"--help\", short: \"-h\", field: \"help\", takesValue: false },\n"
+        rows.push(cliOptRow("--help", "-h", "help", false))
     }
-    return out + "    ]\n}\n"
+    return vyrn"""
+        fn cliSpec\{n}() -> Array<CliOpt> {
+            return [
+                \{join(rows, vyrn",\n")},
+            ]
+        }
+        """
+}
+
+/// The field's local: `v<field>`.
+gen fn cliLocal(p: CliPlan) -> Name {
+    return name("v" + p.field)
 }
 
 /// The assignment that puts an accepted value in the field's local.
-fn cliStore(p: CliPlan, value: String) -> String {
-    let v = "v" + p.field
+gen fn cliStore(p: CliPlan, value: Name) -> Code {
     if p.optional {
-        return v + " = Some(" + value + ")"
+        return vyrn"\{cliLocal(p)} = Some(\{value})"
     }
-    return v + " = " + value
+    return vyrn"\{cliLocal(p)} = \{value}"
 }
 
 /// The `Port?(n)` hop (the type's own check, which is also the program's), or
 /// the plain assignment when the field's type is not a named validated one.
-fn cliEmitAccept(p: CliPlan, raw: String, pad: String) -> String {
+gen fn cliEmitAccept(p: CliPlan, value: Name) -> Code {
     if p.named == "" {
-        return pad + cliStore(p, raw) + "\n"
+        return cliStore(p, value)
     }
-    let refused = "iss.push(cliRefused(\"" + p.field + "\", \"" + p.long + "\", \"" + cliWant(p.named, p.base, p.bounds) + "\"))"
-    let ok = "ok" + cliCapFirst(p.field)
-    let mut out = pad + "if let Some(" + ok + ") = " + p.named + "?(" + raw + ") {\n"
-    out = out + pad + "    " + cliStore(p, ok) + "\n"
-    out = out + pad + "} else {\n"
-    out = out + pad + "    " + refused + "\n"
-    out = out + pad + "}\n"
-    return out
+    let ok = name("ok" + cliCapFirst(p.field))
+    let want = cliWant(p.named, p.base, p.bounds)
+    return vyrn"""
+        if let Some(\{ok}) = \{name(p.named)}?(\{value}) {
+            \{cliStore(p, ok)}
+        } else {
+            iss.push(cliRefused(\{p.field}, \{p.long}, \{want}))
+        }
+        """
 }
 
 /// One field's contribution to the parse: its local, and the reason it may fail.
-fn cliEmitField(p: CliPlan) -> String {
-    let v = "v" + p.field
+gen fn cliEmitField(p: CliPlan) -> Code {
+    let v = cliLocal(p)
     if p.kind == "free" {
-        let mut out = "    let mut " + v + ": Array<String> = []\n"
-        out = out + "    for one in r.free {\n        " + v + ".push(one.copy())\n    }\n"
-        return out
+        return vyrn"""
+            let mut \{v}: Array<String> = []
+            for one in r.free {
+                \{v}.push(one.copy())
+            }
+            """
     }
     if p.kind == "flag" {
-        return "    let " + v + " = cliFlag(r, \"" + p.field + "\")\n"
+        return vyrn"let \{v} = cliFlag(r, \{p.field})"
     }
     // A value option. The local opens empty; the record literal, the one place a
     // validated type is enforced, is reached only with no issues.
-    let mut out = ""
-    if p.optional {
-        let inner = if p.named == "" { p.base.copy() } else { p.named.copy() }
-        out = out + "    let mut " + v + ": Option<" + inner + "> = None\n"
+    let inner = if p.named == "" { p.base.copy() } else { p.named.copy() }
+    let local = if p.optional {
+        vyrn"let mut \{v}: Option<\{name(inner)}> = None"
     } else if p.base == "Int64" {
-        out = out + "    let mut " + v + " = 0\n"
+        vyrn"let mut \{v} = 0"
     } else {
-        out = out + "    let mut " + v + " = \"\"\n"
+        vyrn"let mut \{v} = \{""}"
     }
     // Every local carries the field's name: two sibling `if let`s that bind one
     // name, the first moved into a validated construction, are refused as one
     // moved binding (a checker defect).
-    let text = "text" + cliCapFirst(p.field)
-    let num = "num" + cliCapFirst(p.field)
-    out = out + "    if let Some(" + text + ") = cliValue(r, \"" + p.field + "\") {\n"
-    if p.base == "Int64" {
-        out = out + "        if let Some(" + num + ") = parse(" + text + ") {\n"
-        out = out + cliEmitAccept(p, num, "            ")
-        out = out + "        } else {\n"
-        out = out + "            iss.push(cliNotNumber(\"" + p.field + "\", \"" + p.long + "\"))\n"
-        out = out + "        }\n"
+    let text = name("text" + cliCapFirst(p.field))
+    let num = name("num" + cliCapFirst(p.field))
+    let accept = if p.base == "Int64" {
+        vyrn"""
+            if let Some(\{num}) = parse(\{text}) {
+                \{cliEmitAccept(p, num)}
+            } else {
+                iss.push(cliNotNumber(\{p.field}, \{p.long}))
+            }
+            """
     } else {
-        out = out + cliEmitAccept(p, text, "        ")
+        cliEmitAccept(p, text)
     }
-    out = out + "    }"
     if p.optional {
-        return out + "\n"
+        return vyrn"""
+            \{local}
+            if let Some(\{text}) = cliValue(r, \{p.field}) {
+                \{accept}
+            }
+            """
     }
-    return out + " else {\n        iss.push(cliMissing(\"" + p.field + "\", \"" + p.long + "\"))\n    }\n"
+    return vyrn"""
+        \{local}
+        if let Some(\{text}) = cliValue(r, \{p.field}) {
+            \{accept}
+        } else {
+            iss.push(cliMissing(\{p.field}, \{p.long}))
+        }
+        """
 }
 
 /// One command record: its spec, its parser, and its help.
-gen fn cliCommand(t: TypeInfo, iface: ModuleInterface) -> String {
+gen fn cliCommand(t: TypeInfo, iface: ModuleInterface) -> Code {
     let plans = cliPlansOf(t, iface)
-    let name = t.name.copy()
-    let mut out = cliEmitSpec(name, plans)
-    out = out + "export fn parse" + name + "(argv: Array<String>) -> Validation<" + name + "> {\n"
-    out = out + "    let r = readArgv(cliSpec" + name + "(), argv)\n"
-    out = out + "    let mut iss: Array<Issue> = cliIssues(r)\n"
+    let n = name(t.name)
+    let mut steps: Array<Code> = []
     let mut frees = 0
     for p in plans {
         if p.kind == "free" {
@@ -609,47 +637,54 @@ gen fn cliCommand(t: TypeInfo, iface: ModuleInterface) -> String {
         }
     }
     if frees == 0 {
-        out = out + "    for one in r.free {\n        iss.push(cliUnexpected(one))\n    }\n"
+        steps.push(vyrn"""
+            for one in r.free {
+                iss.push(cliUnexpected(one))
+            }
+            """)
     }
+    let mut fields: Array<Code> = []
     for p in plans {
-        out = out + cliEmitField(p)
+        steps.push(cliEmitField(p))
+        fields.push(vyrn"\{name(p.field)}: \{cliLocal(p)}")
     }
-    out = out + "    if iss.length > 0 {\n        return Invalid(iss)\n    }\n"
-    out = out + "    return Valid(" + name + " {"
-    let mut i = 0
-    for p in plans {
-        if i > 0 {
-            out = out + ","
+    return vyrn"""
+        \{cliEmitSpec(n, plans)}
+        export fn parse\{n}(argv: Array<String>) -> Validation<\{n}> {
+            let r = readArgv(cliSpec\{n}(), argv)
+            let mut iss: Array<Issue> = cliIssues(r)
+            \{join(steps, vyrn"\n")}
+            if iss.length > 0 {
+                return Invalid(iss)
+            }
+            return Valid(\{n} { \{join(fields, vyrn", ")} })
         }
-        out = out + " " + p.field + ": v" + p.field
-        i = i + 1
-    }
-    out = out + " })\n}\n"
-    return out + cliEmitHelp(name, cliHelpText(t, plans))
+        \{cliEmitHelp(n, cliHelpText(t, plans))}
+        """
 }
 
 /// Emits a module exporting `parse<Name>` and `help<Name>` for every exported
 /// record type `module` declares.
 export gen fn cli(module: String) -> Code {
     let iface = moduleInterface(module)
-    let mut out = importBlock(iface, "", [])
-    let mut commands = 0
+    let mut commands: Array<Code> = []
     for t in iface.types {
         if t.schema.base == "record" {
-            out = out + cliCommand(t, iface)
-            commands = commands + 1
+            commands.push(cliCommand(t, iface))
         }
     }
-    if commands == 0 {
+    if commands.length == 0 {
         panic(
             "std/cli: `" + module + "` exports no record type, so there is no command to derive. Export a record whose fields are the options.",
         )
     }
     // The import of this module's helpers is quote text, so it is judged as
     // `std/cli`, which they are exported to.
-    return vyrn"""/// Generated by std/cli `cli` — do not edit.
-import { CliOpt, readArgv, cliFlag, cliValue, cliIssues, cliMissing, cliNotNumber, cliRefused, cliUnexpected } from "std/cli"
-""" + raw(out)
+    return vyrn"""
+        import { CliOpt, readArgv, cliFlag, cliValue, cliIssues, cliMissing, cliNotNumber, cliRefused, cliUnexpected } from "std/cli"
+        \{importBlock(iface, "", [])}
+        \{join(commands, vyrn"\n")}
+        """
 }
 
 // The generated parsers are tested by `examples/clidemo.vyrn`.
