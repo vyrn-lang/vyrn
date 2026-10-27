@@ -4488,6 +4488,7 @@ fn link(
         let imports = m.program.imports.iter().flat_map(|imp| &imp.names);
         named.extend(imports.map(|n| n.original.clone()));
     }
+    let generators: HashSet<String> = generator_calls(&modules).map(str::to_string).collect();
     let unparsed: HashMap<String, Vec<(usize, usize)>> = (modules.iter())
         .filter(|m| !m.unparsed.is_empty())
         .map(|m| (m.key.clone(), m.unparsed.clone()))
@@ -4567,7 +4568,7 @@ fn link(
             .cloned()
             .collect();
     }
-    drop_unreached(&mut program, lazy, named, &unparsed);
+    drop_unreached(&mut program, lazy, named, &generators, &unparsed);
     program.number();
     Ok(program)
 }
@@ -4606,6 +4607,15 @@ fn mentions_runtime(tokens: &[lexer::Token]) -> bool {
     })
 }
 
+/// Every `gen fn` name an import line of `modules` calls (`from g(..)`). A
+/// generator call names the exported `gen fn` it runs by its declared name.
+fn generator_calls(modules: &[Module]) -> impl Iterator<Item = &str> {
+    (modules.iter().flat_map(|m| &m.program.imports)).filter_map(|imp| match &imp.source {
+        ImportSource::Generator { name, .. } => Some(name.as_str()),
+        ImportSource::Path(_) => None,
+    })
+}
+
 /// Parses the skimmed body of each function a root can reach by its spelling,
 /// and records in [`Module::unparsed`] each one it leaves unparsed.
 ///
@@ -4617,6 +4627,7 @@ fn mentions_runtime(tokens: &[lexer::Token]) -> bool {
 /// function the link's walk keeps ([`drop_unreached`]) is parsed, and it
 /// asserts so. A program that calls `derive` parses every skimmed body.
 fn parse_reached(modules: &mut [Module], opts: &LoadOptions) -> Result<(), Vec<Diagnostic>> {
+    let generators: HashSet<String> = generator_calls(modules).map(str::to_string).collect();
     // The skimmed modules' top-level functions no spelling reached yet, by
     // name. A body that mentions a runtime builtin was parsed at load.
     let mut waiting: HashMap<String, Vec<(usize, usize)>> = HashMap::new();
@@ -4665,7 +4676,8 @@ fn parse_reached(modules: &mut [Module], opts: &LoadOptions) -> Result<(), Vec<D
             crate::ast::expr_spelled(d, &mut names);
         }
         let imports = m.program.imports.iter().flat_map(|imp| &imp.names);
-        names.extend(imports.map(|n| n.original.as_str()));
+        let imported = imports.map(|n| n.original.as_str());
+        names.extend(imported.filter(|n| !generators.contains(*n)));
     }
     names.extend(RUNTIME_CALLS.iter().map(|(n, ..)| *n));
     let mut derive = names.contains(&"derive");
@@ -4765,6 +4777,10 @@ fn lazy_modules(modules: &[Module], root_key: &str, opts: &LoadOptions) -> HashS
 /// A program that calls `derive` drops nothing: its generator writes calls
 /// after the check, to any function of the program.
 ///
+/// `generators` names each `gen fn` an import line calls ([`generator_calls`]).
+/// Its import is no root, so a `lazy` one is kept only where a kept body spells
+/// it.
+///
 /// `unparsed` names, by module and position, each function whose body
 /// [`parse_reached`] left unparsed. The walk reaching one panics: the link
 /// would hand the checker an empty block for a body it never read.
@@ -4772,6 +4788,7 @@ fn drop_unreached(
     program: &mut Program,
     lazy: &HashSet<String>,
     named: Vec<String>,
+    generators: &HashSet<String>,
     unparsed: &HashMap<String, Vec<(usize, usize)>>,
 ) {
     if lazy.is_empty() {
@@ -4785,7 +4802,11 @@ fn drop_unreached(
     let calls: Vec<String> = (RUNTIME_CALLS.iter())
         .map(|(n, ..)| format!("{RUNTIME_PREFIX}{n}"))
         .collect();
-    let mut roots: Vec<&str> = named.iter().chain(&calls).map(String::as_str).collect();
+    // The importer only runs a generator its import line calls, so the import
+    // reaches nothing. Only a std one drops: std bodies are judged as their
+    // own load roots, and a user module's functions are all roots.
+    let named = named.iter().filter(|n| !generators.contains(*n));
+    let mut roots: Vec<&str> = named.chain(&calls).map(String::as_str).collect();
     for f in &program.functions {
         if !is_lazy(&f.module) || f.is_extern || f.is_export_extern {
             roots.push(&f.name);
