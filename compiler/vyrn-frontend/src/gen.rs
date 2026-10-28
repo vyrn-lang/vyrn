@@ -685,6 +685,12 @@ fn executable_id(
     }
 }
 
+/// Whether a `gen fn` returning `ret` writes a module a load can link or
+/// `derive` can call: its text as a `String`, or its spans as `Code`.
+pub fn writes_module(ret: &crate::ast::Type) -> bool {
+    matches!(ret, crate::ast::Type::Str) || matches!(ret, crate::ast::Type::Named(n) if n == "Code")
+}
+
 /// Runs `fn_name` in `program` as a generation target on `inputs.engine`,
 /// under the sandbox in `inputs`, with the compile-time constants `args`. Returns the
 /// module source and the recorded reads, or why the run failed. `program`

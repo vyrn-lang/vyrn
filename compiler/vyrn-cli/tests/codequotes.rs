@@ -471,6 +471,30 @@ export gen fn mk() -> Code {
     assert!(src.contains("return 3 }\nexport fn two"), "{src}");
 }
 
+/// `derive` runs a generator that returns `Code`.
+#[test]
+fn derive_runs_a_code_generator() {
+    let app = r#"export gen fn kindOf(t: TypeArg) -> Code {
+    let n = t.nodes[t.roots[0]]
+    return vyrn"fn \{name(n.name)}(v: \{name(n.spelling)}) -> String { return \{n.kind} }"
+}
+
+type Point = { x: Int64, y: Int64 }
+
+fn main() -> Int64 {
+    print(derive(kindOf, Point { x: 1, y: 2 }))
+    return 0
+}
+"#;
+    let out = vyrn()
+        .arg("run")
+        .arg(gen_app("derive_code", "", app))
+        .output()
+        .unwrap();
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "record\n", "{err}");
+}
+
 /// A quote that closes a bracket it did not open is no unit, though a wrapper
 /// would pair it.
 #[test]

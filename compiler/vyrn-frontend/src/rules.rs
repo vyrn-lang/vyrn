@@ -555,7 +555,7 @@ rules! {
     ToJsonArity { got } "`toJson` takes 1 argument (a value), got {got}";
     ToJsonUncodable { off } "`toJson` cannot encode `{off}` (not a codable type)";
     DeriveArity {} "`derive` takes a generator's name and a value: `derive(g, x)`";
-    DeriveUnknownGen { g } "`derive` needs a `gen fn {g}(t: TypeArg) -> String`; `{g}` is not one";
+    DeriveUnknownGen { g } "`derive` needs a `gen fn {g}(t: TypeArg)` returning `Code` or `String`; `{g}` is not one";
     DeriveUncodable { g, off } "`derive({g}, ..)` cannot reflect `{off}`: it has no wire form";
     DeriveEntryMismatch { g, got, want }
         "generator `{g}` wrote the entry `{got}`, and this call needs `{want}`";

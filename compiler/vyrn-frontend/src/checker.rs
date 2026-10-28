@@ -5324,7 +5324,8 @@ impl<'a> Checker<'a> {
                 _ => return Err(cerr!(line, DeriveArity)),
             };
             let arg = Type::Named("TypeArg".to_string());
-            if self.sig(g) != Some(&(vec![arg], Type::Str)) || !self.gen_fns.contains(g) {
+            let takes = matches!(self.sig(g), Some((ps, r)) if *ps == [arg] && crate::gen::writes_module(r));
+            if !takes || !self.gen_fns.contains(g) {
                 return Err(cerr!(line, DeriveUnknownGen, g));
             }
             let at = self.expr(&args[1], scope, None, fn_ret)?;

@@ -335,7 +335,7 @@ pub fn run_pure(
 fn dispatchable(f: &Function) -> bool {
     f.is_gen
         && f.exported
-        && (f.ret == Type::Str || returns_code(f))
+        && vyrn_frontend::gen::writes_module(&f.ret)
         && (takes_type_arg(f)
             || f.params
                 .iter()
