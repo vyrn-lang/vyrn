@@ -2764,9 +2764,10 @@ std/json.vyrn	json$spaces	no, it calls `panic`	no, its effect set is alloc, trap
 std/json.vyrn	json$prettyIntoAt	no, it calls `emitNumber`, which is not trap-free	no, its effect set is alloc, module-state, trap
 std/json.vyrn	json$emitPretty	no, it calls `prettyIntoAt`, which is not trap-free	no, its effect set is alloc, module-state, trap
 std/json.vyrn	json$jsonEq	no, it calls `emit`, which is not trap-free	no, its effect set is alloc, trap
-std/json.vyrn	json$jsonEncoders	no, it keeps an index check	no, its effect set is alloc
-std/json.vyrn	json$jsonEncoderBody	no, it keeps an index check	no, its effect set is alloc
-std/json.vyrn	json$jsonVariant	no, it keeps an index check	no, its effect set is alloc
+std/json.vyrn	json$jsonEncoders	no, it keeps an index check	no, its effect set is alloc, gen-only
+std/json.vyrn	json$jsonEncoder	no, it keeps an index check	no, its effect set is alloc, gen-only
+std/json.vyrn	json$jsonEncoderBody	no, it keeps an index check	no, its effect set is alloc, gen-only
+std/json.vyrn	json$jsonVariant	no, it calls `jsonEncoder`, which is not trap-free	no, its effect set is alloc, gen-only
 std/json.vyrn	Copy$json$Json$copy	yes	no, its effect set is alloc
 std/json.vyrn	Owned$json$Json$release	yes	no, it is recursive
 std/json5.vyrn	maxDepth	yes	yes, emulated Int64

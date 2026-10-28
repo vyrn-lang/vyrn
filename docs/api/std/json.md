@@ -94,7 +94,7 @@ is kept and numbers keep their raw text.
 ## jsonEncoders
 
 ```vyrn
-fn jsonEncoders(t: TypeArg) -> String
+fn jsonEncoders(t: TypeArg) -> Code
 ```
 
 Writes the encoders `toJson` calls: for each root, the function that renders
