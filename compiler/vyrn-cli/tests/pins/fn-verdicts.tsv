@@ -2334,12 +2334,14 @@ std/connect.vyrn	connectCapFirst	yes	no, its effect set is alloc
 std/connect.vyrn	connectIsNamedType	yes	no, `spelling` is String, not an integer, Bool or a read array of one
 std/connect.vyrn	connectServiceName	yes	no, its effect set is alloc
 std/connect.vyrn	connectValidateContract	no, it calls `reportHere`, which is not trap-free	no, its effect set is alloc, trap, gen-only
-std/connect.vyrn	connectDispatchFn	yes	no, its effect set is alloc
-std/connect.vyrn	connectRouterFn	yes	no, its effect set is alloc
+std/connect.vyrn	connectDispatchFn	yes	no, its effect set is alloc, gen-only
+std/connect.vyrn	connectRouterFn	yes	no, its effect set is alloc, gen-only
 std/connect.vyrn	connectServer	no, it calls `connectValidateContract`, which is not trap-free	no, its effect set is alloc, trap, gen-only
-std/connect.vyrn	connectUnifyFn	yes	no, its effect set is alloc
-std/connect.vyrn	connectProcFns	yes	no, its effect set is alloc
+std/connect.vyrn	connectServerModule	yes	no, its effect set is alloc, gen-only
+std/connect.vyrn	connectUnifyFn	yes	no, its effect set is alloc, gen-only
+std/connect.vyrn	connectProcFns	yes	no, its effect set is alloc, gen-only
 std/connect.vyrn	connectClient	no, it calls `connectValidateContract`, which is not trap-free	no, its effect set is alloc, trap, gen-only
+std/connect.vyrn	connectClientModule	yes	no, its effect set is alloc, gen-only
 std/contract.vyrn	nearThreshold	yes	yes, emulated Int64
 std/contract.vyrn	trimSpaces	no, it calls `panic`	no, its effect set is alloc, trap
 std/contract.vyrn	isTypeParam	yes	no, its effect set is alloc
