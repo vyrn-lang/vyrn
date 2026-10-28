@@ -93,8 +93,10 @@ the playground serves an embedded `std/`. The loader:
   root can reach them by spelling (`parse_reached`), and drops each function,
   test and bench of such a module that no root reaches by name
   (`drop_unreached`), so an importer pays to lex the module and to parse and
-  check what it calls. The import of a generator an import line calls reaches
-  nothing, because the importer only runs it. `std/runtime` is such a module, and its roots include
+  check what it calls. A gen fn that only an import line or a `toJson` or
+  `fromJson` site names is not reached, because it runs only in its own load.
+  An injected runtime module's other functions are roots, because the emitter
+  and the desugars call them by name, except `std/runtime`'s: its roots include
   every function the emitter calls by name (`loader::RUNTIME_CALLS`, the one
   table both read) and every function a reached builtin routes to; a
   generator's own load keeps it whole, because its engine adds calls after the

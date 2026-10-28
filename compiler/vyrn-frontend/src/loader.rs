@@ -1612,11 +1612,7 @@ fn load_modules(
         // so a load that declares artifacts parses them all.
         let skim = !is_root && opts.artifacts.is_none() && {
             let spec = import_specifier("", key, opts.std_root.as_deref());
-            spec.starts_with("std/")
-                && match spec == RUNTIME_SPEC {
-                    true => lazy_runtime(opts),
-                    false => RT_MODULES.iter().all(|rt| rt.spec != spec),
-                }
+            spec.starts_with("std/") && (spec != RUNTIME_SPEC || lazy_runtime(opts))
         };
         // The root parses its `test` and `bench` blocks, an imported module skips
         // them, so one text loaded as both parses twice.
@@ -4726,6 +4722,15 @@ fn parse_reached(modules: &mut [Module], opts: &LoadOptions) -> Result<(), Vec<D
     };
     let mut names: Vec<&str> = opts.host_calls.to_vec();
     for (mi, m) in modules.iter().enumerate() {
+        if called_by_name(&m.key, opts) {
+            names.extend(
+                m.program
+                    .functions
+                    .iter()
+                    .filter(|f| !f.is_gen)
+                    .map(|f| f.name.as_str()),
+            );
+        }
         for f in m.program.functions.iter().filter(|f| !unparsed(mi, f)) {
             crate::ast::spelled(&f.body, &mut names);
         }
@@ -4810,6 +4815,14 @@ fn parse_reached(modules: &mut [Module], opts: &LoadOptions) -> Result<(), Vec<D
     Ok(())
 }
 
+/// Whether `key` is a runtime module ([`RT_MODULES`]) other than `std/runtime`:
+/// the emitter and the desugars call each of its functions but its gen fns by
+/// its reserved spelling, which no source spells, so each is a root.
+fn called_by_name(key: &str, opts: &LoadOptions) -> bool {
+    let spec = import_specifier("", key, opts.std_root.as_deref());
+    spec != RUNTIME_SPEC && RT_MODULES.iter().any(|rt| rt.spec == spec)
+}
+
 /// Whether the load parses and keeps only the `std/runtime` functions a spelling
 /// or [`RUNTIME_CALLS`] reaches. A generator's own load keeps them all, because
 /// its engine adds calls to the program after the load (`vyrn-genwasm`'s
@@ -4819,11 +4832,13 @@ fn lazy_runtime(opts: &LoadOptions) -> bool {
 }
 
 /// The modules whose unreached functions, tests and benches the link drops:
-/// every `std/` module but the root and the injected runtime modules other than
-/// `std/runtime`, whose functions the emitter and the desugars call by name.
-/// `std/runtime` keeps what [`RUNTIME_CALLS`] names. Std checks each of its
-/// bodies as the root of its own load (`tests/std_suite.rs`, the corpus), and a
-/// body no root reaches adds no verdict to another program's.
+/// every `std/` module but the root, and `std/runtime` only where
+/// [`lazy_runtime`] holds. A runtime module's other functions stay, because the
+/// emitter and the desugars call them by name ([`called_by_name`]); only its
+/// unreached gen fns leave. `std/runtime` keeps what [`RUNTIME_CALLS`] names.
+/// Std checks each of its bodies as the root of its own load
+/// (`tests/std_suite.rs`, the corpus), and a body no root reaches adds no
+/// verdict to another program's.
 fn lazy_modules(modules: &[Module], root_key: &str, opts: &LoadOptions) -> HashSet<String> {
     let Some(std_root) = &opts.std_root else {
         return HashSet::new();
@@ -4834,7 +4849,7 @@ fn lazy_modules(modules: &[Module], root_key: &str, opts: &LoadOptions) -> HashS
         .filter(|m| m.key != root_key && !is_remote(&m.key))
         .filter(|m| {
             m.injected
-                .is_none_or(|p| p == RUNTIME_PREFIX && lazy_runtime(opts))
+                .is_none_or(|p| p != RUNTIME_PREFIX || lazy_runtime(opts))
         })
         .filter(|m| normalize(&m.key).starts_with(&std_root))
         .map(|m| m.key.clone())
@@ -4876,9 +4891,10 @@ fn drop_unreached(
     let calls: Vec<String> = (RUNTIME_CALLS.iter())
         .map(|(n, ..)| format!("{RUNTIME_PREFIX}{n}"))
         .collect();
-    // The importer only runs a generator its import line calls, so the import
-    // reaches nothing. Only a std one drops: std bodies are judged as their
-    // own load roots, and a user module's functions are all roots.
+    // A gen fn runs only in its own load, an import line's or a derive's
+    // (checked_generator), so neither the import nor a toJson or fromJson site
+    // reaches it. Only a std one drops: std bodies are judged as their own load
+    // roots, and a user module's functions are all roots.
     let named = named.iter().filter(|n| !generators.contains(*n));
     let mut roots: Vec<&str> = named.chain(&calls).map(String::as_str).collect();
     for f in &program.functions {
@@ -4978,9 +4994,10 @@ fn assert_parsed(
 /// state, each other name their bodies spell, a builtin's included, and the
 /// functions a reached builtin routes to. A local that shares a function's
 /// name reaches the function. Its implicit roots are every `$` name but
-/// `std/runtime`'s (an injected runtime module's, which the emitter calls by
-/// name, and an impl's flattened method, which dispatch reaches by type) and
-/// every name a contract default, an impl method or a projection spells.
+/// `std/runtime`'s and a gen fn's (an injected runtime module's, which the
+/// emitter calls by name, and an impl's flattened method, which dispatch
+/// reaches by type) and every name a contract default, an impl method or a
+/// projection spells.
 fn reached<'a>(program: &'a Program, mut work: Vec<&'a str>) -> HashSet<&'a str> {
     let by_name: HashMap<&str, &Function> = (program.functions.iter())
         .map(|f| (f.name.as_str(), f))
@@ -4990,7 +5007,7 @@ fn reached<'a>(program: &'a Program, mut work: Vec<&'a str>) -> HashSet<&'a str>
         .collect();
     work.extend(
         (program.functions.iter())
-            .filter(|f| f.name.contains('$') && !f.name.starts_with(RUNTIME_PREFIX))
+            .filter(|f| f.name.contains('$') && !f.name.starts_with(RUNTIME_PREFIX) && !f.is_gen)
             .map(|f| f.name.as_str()),
     );
     let defaults = (program.contracts.iter().flat_map(|c| &c.members)).filter_map(|m| m.default());
