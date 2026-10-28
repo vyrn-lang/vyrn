@@ -3037,18 +3037,23 @@ std/rpc.vyrn	capFirst	yes	no, its effect set is alloc
 std/rpc.vyrn	isNamedType	yes	no, `spelling` is String, not an integer, Bool or a read array of one
 std/rpc.vyrn	rpcWhyNotSerializable	yes	no, its effect set is alloc
 std/rpc.vyrn	validateContract	no, it calls `reportHere`, which is not trap-free	no, its effect set is alloc, trap, gen-only
-std/rpc.vyrn	rpcObjection	yes	no, its effect set is alloc, gen-only
-std/rpc.vyrn	rpcReplyTypes	yes	no, its effect set is alloc
-std/rpc.vyrn	serverHandlerFn	yes	no, its effect set is alloc
-std/rpc.vyrn	serverSchemaFn	yes	no, its effect set is alloc
-std/rpc.vyrn	serverRouterFn	yes	no, its effect set is alloc
+std/rpc.vyrn	rpcReplyTypes	yes	no, its effect set is gen-only
+std/rpc.vyrn	rpcHandlerFn	yes	no, its effect set is alloc, gen-only
+std/rpc.vyrn	rpcSchemaEntry	yes	no, its effect set is gen-only
+std/rpc.vyrn	rpcSchemaFn	yes	no, its effect set is gen-only
+std/rpc.vyrn	rpcRouterFn	yes	no, its effect set is alloc, gen-only
+std/rpc.vyrn	rpcRouterArm	yes	no, its effect set is alloc, gen-only
 std/rpc.vyrn	rpcServer	no, it calls `validateContract`, which is not trap-free	no, its effect set is alloc, trap, gen-only
-std/rpc.vyrn	clientUnifyFn	yes	no, its effect set is alloc
-std/rpc.vyrn	cbType	yes	no, its effect set is alloc
-std/rpc.vyrn	clientProcFns	yes	no, its effect set is alloc
+std/rpc.vyrn	rpcServerModule	yes	no, its effect set is alloc, gen-only
+std/rpc.vyrn	rpcUnifyFn	yes	no, its effect set is alloc, gen-only
+std/rpc.vyrn	rpcCbType	yes	no, its effect set is gen-only
+std/rpc.vyrn	rpcClientFns	yes	no, its effect set is alloc, gen-only
+std/rpc.vyrn	rpcClientPrelude	yes	no, its effect set is gen-only
 std/rpc.vyrn	rpcClient	no, it calls `validateContract`, which is not trap-free	no, its effect set is alloc, trap, gen-only
-std/rpc.vyrn	inProcStub	yes	no, its effect set is alloc
+std/rpc.vyrn	rpcClientModule	yes	no, its effect set is alloc, gen-only
+std/rpc.vyrn	rpcInProcStub	yes	no, its effect set is gen-only
 std/rpc.vyrn	rpcInProcess	no, it calls `validateContract`, which is not trap-free	no, its effect set is alloc, trap, gen-only
+std/rpc.vyrn	rpcInProcessModule	yes	no, its effect set is alloc, gen-only
 std/rpc.vyrn	rpcStem	yes	no, its effect set is alloc
 std/rpc.vyrn	rpcScan	no, it calls `panic`	no, its effect set is alloc, fs-list, trap
 std/rpc.vyrn	rpcReadJson	no, it calls `parseJson`, which is not trap-free	no, its effect set is alloc, fs-read
@@ -3062,23 +3067,22 @@ std/rpc.vyrn	rpcValidateAll	no, it calls `rpcQualifiedCollision`, which is not t
 std/rpc.vyrn	rpcDefinedAs	yes	no, its effect set is alloc
 std/rpc.vyrn	rpcTypeCollision	no, it calls `report`, which is not trap-free	no, its effect set is alloc, trap, gen-only
 std/rpc.vyrn	rpcQualified	no, it calls `split`, which is not trap-free	no, its effect set is alloc, trap
-std/rpc.vyrn	rpcQualifiedCollision	no, it calls `rpcQualClash`, which is not trap-free	no, its effect set is alloc, trap, gen-only
-std/rpc.vyrn	rpcQualClash	no, it keeps an index check	no, its effect set is alloc, trap, gen-only
+std/rpc.vyrn	rpcQualifiedCollision	no, it calls `rpcQualified`, which is not trap-free	no, its effect set is alloc, trap, gen-only
+std/rpc.vyrn	rpcQualClash	no, it calls `rpcQualClashMessage`, which is not trap-free	no, its effect set is alloc, trap, gen-only
+std/rpc.vyrn	rpcQualClashMessage	no, it keeps an index check	no, its effect set is alloc
 std/rpc.vyrn	rpcDerived	yes	no, its effect set is alloc
 std/rpc.vyrn	rpcProcSymbol	no, it calls `rpcTemplatePath`, which is not trap-free	no, its effect set is alloc, trap
 std/rpc.vyrn	rpcNs	yes	no, its effect set is alloc
 std/rpc.vyrn	rpcDirImports	no, it calls `rpcHasPair`, which is not trap-free	no, its effect set is alloc, gen-only
 std/rpc.vyrn	rpcHasPair	no, it keeps an index check	no, it is not trap-free
-std/rpc.vyrn	rpcDirHandler	yes	no, its effect set is alloc
-std/rpc.vyrn	rpcDirSchema	no, it calls `rpcPathFor`, which is not trap-free	no, its effect set is alloc, trap, gen-only
-std/rpc.vyrn	rpcDirRouter	no, it calls `rpcQualified`, which is not trap-free	no, its effect set is alloc, trap, gen-only
-std/rpc.vyrn	rpc	no, it calls `rpcScan`, which is not trap-free	no, its effect set is alloc, fs-read, fs-list, trap, gen-only
-std/rpc.vyrn	rpcDirUnifyFn	yes	no, its effect set is alloc
-std/rpc.vyrn	rpcDirClientFns	yes	no, its effect set is alloc
-std/rpc.vyrn	rpcClientTypes	yes	no, its effect set is alloc, gen-only
-std/rpc.vyrn	client	no, it calls `rpcScan`, which is not trap-free	no, its effect set is alloc, fs-read, fs-list, trap, gen-only
-std/rpc.vyrn	rpcDirInProcStub	yes	no, its effect set is alloc
+std/rpc.vyrn	rpcDirForm	no, it calls `rpcScan`, which is not trap-free	no, its effect set is alloc, fs-read, fs-list, trap, gen-only
+std/rpc.vyrn	rpcDirRouted	no, it calls `rpcDirClient`, which is not trap-free	no, its effect set is alloc, fs-read, trap, gen-only
+std/rpc.vyrn	rpc	no, it calls `rpcDirForm`, which is not trap-free	no, its effect set is alloc, fs-read, fs-list, trap, gen-only
+std/rpc.vyrn	rpcDirServer	no, it calls `rpcDirImports`, which is not trap-free	no, its effect set is alloc, trap, gen-only
+std/rpc.vyrn	client	no, it calls `rpcDirForm`, which is not trap-free	no, its effect set is alloc, fs-read, fs-list, trap, gen-only
+std/rpc.vyrn	rpcDirClient	no, it calls `rpcQualified`, which is not trap-free	no, its effect set is alloc, trap, gen-only
 std/rpc.vyrn	clientInProcess	no, it calls `rpcScan`, which is not trap-free	no, its effect set is alloc, fs-list, trap, gen-only
+std/rpc.vyrn	rpcDirInProcess	no, it calls `rpcDirImports`, which is not trap-free	no, its effect set is alloc, trap, gen-only
 std/runtime.vyrn	runtime$strLen	no, it calls `load8`, which has no body to judge	no, it is not trap-free
 std/runtime.vyrn	runtime$strCmp	no, it calls `load8`, which has no body to judge	no, it is not trap-free
 std/runtime.vyrn	runtime$starts	no, it calls `load8`, which has no body to judge	no, it is not trap-free

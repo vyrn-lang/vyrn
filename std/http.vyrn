@@ -1297,7 +1297,7 @@ export gen fn http(module: String) -> String {
         syms.push(symbol(f.name, f.origin, []))
         syms.push(symbol("Path" + httpCapFirst(f.name), f.origin, []))
     }
-    out = out + symbolMapFn("http(" + module + ")", syms)
+    out = out + render(symbolMapFn("http(" + module + ")", syms))
     return out
 }
 

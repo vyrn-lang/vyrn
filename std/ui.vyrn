@@ -2025,7 +2025,7 @@ gen fn uiEmitMountable(call: String, pages: Array<UiPageInfo>) -> String {
         let pat = uiStrLit(uiWirePatternOf(pages[order].segs))
         out = out + "        GET(httpRoute(" + pat + ", uiPageRun, " + uiStrLit(uiPageKeyOf(pages[order].segs)) + ")),\n"
     }
-    return out + "    ]\n}\n" + symbolMapFn(call, syms)
+    return out + "    ]\n}\n" + render(symbolMapFn(call, syms))
 }
 
 /// Fewer dynamic segments first, so a static route beats a dynamic one at the
