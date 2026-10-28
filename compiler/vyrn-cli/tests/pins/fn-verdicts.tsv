@@ -811,7 +811,7 @@ examples/lib/gen_projection_site.vyrn	d1	yes	no, its effect set is write-output
 examples/lib/gen_projection_site.vyrn	probe	yes	no, `q` is Q, not an integer, Bool or a read array of one
 examples/lib/gen_projection_site.vyrn	mk	yes	no, `a` is String, not an integer, Bool or a read array of one
 examples/lib/gen_shape.vyrn	describe	no, it keeps an index check	no, its effect set is alloc
-examples/lib/gen_shape.vyrn	shapeOf	no, it keeps an index check	no, its effect set is alloc
+examples/lib/gen_shape.vyrn	shapeOf	no, it keeps an index check	no, its effect set is alloc, gen-only
 examples/lib/gen_surface.vyrn	surface	yes	no, its effect set is alloc, gen-only
 examples/lib/gen_table.vyrn	table	no, it keeps an index check	no, its effect set is alloc, fs-read, trap, gen-only
 examples/lib/gen_table.vyrn	reportHereFailed	no, it calls `reportHere`, which is not trap-free	no, its effect set is alloc, trap, gen-only

@@ -27,12 +27,17 @@ gen fn describe(t: TypeArg, i: Int64) -> String {
     return n.kind.copy()
 }
 
-export gen fn shapeOf(t: TypeArg) -> String {
-    let mut out = ""
+export gen fn shapeOf(t: TypeArg) -> Code {
+    let mut out = vyrn""
     for r in t.roots {
-        let n = t.nodes[r].shape
-        out = out + "fn " + n.name + "(v: " + n.spelling + ") -> String {\n"
-        out = out + "    return \"" + n.spelling + " is " + describe(t, r) + "\"\n}\n"
+        let n = t.nodes[r]
+        let words = n.shape.spelling + " is " + describe(t, r)
+        out = out + vyrn"""
+            fn \{name(n.shape.name)}(v: \{n.code}) -> String {
+                return \{words}
+            }
+
+            """
     }
     return out
 }
