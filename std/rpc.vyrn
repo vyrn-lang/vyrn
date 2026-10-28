@@ -87,17 +87,17 @@ fn rpcWhyNotSerializable(spelling: String, uncodable: String, iface: ModuleInter
     return ""
 }
 
-/// The first objection to `iface` as a procedure module, or "": the `Api`
+/// The first objection to `iface` as a procedure module, or `None`: the `Api`
 /// contract, then serializability. A `gen fn`, because `contractOf` has no
-/// runtime lowering. Exported for `std/http`'s REST projection, which publishes
-/// the same procedures under the same rule.
-export gen fn validateContract(iface: ModuleInterface) -> String {
+/// runtime lowering. Exported for `std/http`'s REST projection and
+/// `std/graphql`'s executor, which publish the same procedures under the same rule.
+export gen fn validateContract(iface: ModuleInterface) -> Option<Code> {
     for iss in checkContract(iface, contractOf(Api)) {
-        return render(reportHere(Error, iss.message))
+        return Some(reportHere(Error, iss.message))
     }
     for f in iface.functions {
         if f.params.length > 1 {
-            return render(reportHere(
+            return Some(reportHere(
                 Error,
                 "procedure `\{f.name}` takes \{f.params.length.toString()} parameters — a procedure takes at most one; gather them into one exported record type",
             ))
@@ -105,7 +105,7 @@ export gen fn validateContract(iface: ModuleInterface) -> String {
         if f.params.length == 1 {
             let why = rpcWhyNotSerializable(f.params[0].spelling, f.params[0].uncodable, iface)
             if why != "" {
-                return render(reportHere(
+                return Some(reportHere(
                     Error,
                     "procedure `\{f.name}` takes `\{f.params[0].spelling}`, which cannot cross the wire: \{why}",
                 ))
@@ -113,13 +113,21 @@ export gen fn validateContract(iface: ModuleInterface) -> String {
         }
         let whyRet = rpcWhyNotSerializable(f.ret, f.retUncodable, iface)
         if whyRet != "" {
-            return render(reportHere(
+            return Some(reportHere(
                 Error,
                 "procedure `\{f.name}` returns `\{f.ret}`, which cannot cross the wire: \{whyRet}",
             ))
         }
     }
-    return ""
+    return None
+}
+
+/// A `String` generator's form of an objection: its rendered `//@diag`, or "".
+gen fn rpcObjection(c: Option<Code>) -> String {
+    return match c {
+        Some(d) => render(d),
+        None => "",
+    }
 }
 
 /// The reply surface every client flavor exports: `RpcIssue`,
@@ -245,7 +253,7 @@ fn serverRouterFn(iface: ModuleInterface) -> String {
 /// `rpcHandle(req: Request) -> Option<Response>`.
 export gen fn rpcServer(contract: String) -> String {
     let iface = moduleInterface(contract)
-    let err = validateContract(iface)
+    let err = rpcObjection(validateContract(iface))
     if err != "" {
         return err
     }
@@ -338,7 +346,7 @@ fn clientProcFns(f: FnInfo) -> String {
 /// passes the callback inline: `createPaste(req, |res| match res { .. })`.
 export gen fn rpcClient(contract: String) -> String {
     let iface = moduleInterface(contract)
-    let err = validateContract(iface)
+    let err = rpcObjection(validateContract(iface))
     if err != "" {
         return err
     }
@@ -389,7 +397,7 @@ fn inProcStub(f: FnInfo) -> String {
 /// same name the wire client exposes, running the real procedure synchronously.
 export gen fn rpcInProcess(contract: String) -> String {
     let iface = moduleInterface(contract)
-    let err = validateContract(iface)
+    let err = rpcObjection(validateContract(iface))
     if err != "" {
         return err
     }
@@ -572,7 +580,7 @@ gen fn rpcCollision(routes: Array<RpcRoute>) -> String {
 /// serializability, then type and flat-name collisions; "" when clean.
 gen fn rpcValidateAll(mods: Array<RpcModule>) -> String {
     for m in mods {
-        let err = validateContract(moduleInterface(m.modPath))
+        let err = rpcObjection(validateContract(moduleInterface(m.modPath)))
         if err != "" {
             return err
         }

@@ -16,13 +16,13 @@ with `vyrn routes <file>`.
 ## validateContract
 
 ```vyrn
-fn validateContract(iface: ModuleInterface) -> String
+fn validateContract(iface: ModuleInterface) -> Option<Code>
 ```
 
-The first objection to `iface` as a procedure module, or "": the `Api`
+The first objection to `iface` as a procedure module, or `None`: the `Api`
 contract, then serializability. A `gen fn`, because `contractOf` has no
-runtime lowering. Exported for `std/http`'s REST projection, which publishes
-the same procedures under the same rule.
+runtime lowering. Exported for `std/http`'s REST projection and
+`std/graphql`'s executor, which publish the same procedures under the same rule.
 
 ## rpcServer
 

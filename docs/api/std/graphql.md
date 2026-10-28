@@ -39,7 +39,7 @@ a `null` propagates.
 ## sdl
 
 ```vyrn
-fn sdl(contract: String) -> String
+fn sdl(contract: String) -> Code
 ```
 
 Emits a module exporting `sdlText() -> String`, the contract's SDL as a constant.
@@ -150,7 +150,7 @@ leaves the siblings in `data`. Argument decode faults surface per field.
 ## graphqlServer
 
 ```vyrn
-fn graphqlServer(contract: String) -> String
+fn graphqlServer(contract: String) -> Code
 ```
 
 Emits a module exposing `graphqlHandle(req: Request) -> Option<Response>`,

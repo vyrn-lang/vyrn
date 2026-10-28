@@ -2467,11 +2467,13 @@ std/graphql.vyrn	gqlValidate	no, it calls `gqlValidateSel`, which is not trap-fr
 std/graphql.vyrn	gqlAnswer	no, it calls a function value	no, its effect set is alloc, trap
 std/graphql.vyrn	gqlAnswerOne	no, it calls a function value	no, its effect set is alloc
 std/graphql.vyrn	gqlAnswerValue	no, it calls `gqlCheckSel`, which is not trap-free	no, its effect set is alloc
-std/graphql.vyrn	gqlResolverTable	no, it calls `gqlRootMembers`, which is not trap-free	no, its effect set is alloc, trap
-std/graphql.vyrn	gqlResolverArm	yes	no, its effect set is alloc
-std/graphql.vyrn	gqlSchemaTable	no, it calls `gqlSplitDecl`, which is not trap-free	no, its effect set is alloc, trap
-std/graphql.vyrn	gqlSchemaArm	yes	no, its effect set is alloc
-std/graphql.vyrn	graphqlServer	no, it calls `gqlSchemaTable`, which is not trap-free	no, its effect set is alloc, trap, gen-only
+std/graphql.vyrn	gqlResolverTable	no, it calls `gqlRootMembers`, which is not trap-free	no, its effect set is alloc, trap, gen-only
+std/graphql.vyrn	gqlRunner	yes	no, its effect set is alloc, gen-only
+std/graphql.vyrn	gqlResolverArm	yes	no, its effect set is alloc, gen-only
+std/graphql.vyrn	gqlSchemaTable	no, it calls `gqlSplitDecl`, which is not trap-free	no, its effect set is alloc, trap, gen-only
+std/graphql.vyrn	gqlSchemaArm	yes	no, its effect set is gen-only
+std/graphql.vyrn	graphqlServer	no, it calls `validateContract`, which is not trap-free	no, its effect set is alloc, trap, gen-only
+std/graphql.vyrn	gqlServerModule	no, it calls `gqlSchemaTable`, which is not trap-free	no, its effect set is alloc, trap, gen-only
 std/graphql.vyrn	gqlTestValue	yes	no, its effect set is alloc
 std/graphql.vyrn	gqlTestSchema	yes	no, its effect set is alloc
 std/graphql.vyrn	gqlTestProject	no, it keeps an index check	no, its effect set is alloc, trap
@@ -3035,6 +3037,7 @@ std/rpc.vyrn	capFirst	yes	no, its effect set is alloc
 std/rpc.vyrn	isNamedType	yes	no, `spelling` is String, not an integer, Bool or a read array of one
 std/rpc.vyrn	rpcWhyNotSerializable	yes	no, its effect set is alloc
 std/rpc.vyrn	validateContract	no, it calls `reportHere`, which is not trap-free	no, its effect set is alloc, trap, gen-only
+std/rpc.vyrn	rpcObjection	yes	no, its effect set is alloc, gen-only
 std/rpc.vyrn	rpcReplyTypes	yes	no, its effect set is alloc
 std/rpc.vyrn	serverHandlerFn	yes	no, its effect set is alloc
 std/rpc.vyrn	serverSchemaFn	yes	no, its effect set is alloc
