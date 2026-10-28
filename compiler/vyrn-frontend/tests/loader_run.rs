@@ -1615,6 +1615,93 @@ fn main() -> Int64 { return shape().byteLength }"#;
         assert_eq!(run(root, &[("gen.vyrn", gen)]).unwrap(), 42);
     }
 
+    /// A `derive` generator that writes, for each root, a function returning
+    /// `word`'s byte length.
+    fn derive_gen(word: &str) -> String {
+        format!(
+            "export gen fn tag(t: TypeArg) -> String {{\n    let mut out = \"\"\n    \
+             for r in t.roots {{\n        let n = t.nodes[r].shape\n        \
+             out = out + \"fn \" + n.name + \"(v: \" + n.spelling + \") -> String {{ return \\\"{word}\\\" }}\\n\"\n    \
+             }}\n    return out\n}}\n"
+        )
+    }
+
+    const DERIVE_ROOT: &str = "import { tag } from \"./gen\"\ntype P = { x: Int64 }\n\
+                               fn main() -> Int64 {\n    return derive(tag, P { x: 1 }).byteLength\n}\n";
+
+    /// Loads through the pipeline, whose check runs each `derive`, and runs the
+    /// program; an error is every diagnostic, rendered.
+    fn derive_with(root: &str, r: &dyn ModuleResolver) -> Result<i64, String> {
+        let program = vyrn_lower::load(root, "main.vyrn", &shared_opts(), r, Some(&*engine()))
+            .map_err(|ds| ds.iter().map(|d| d.render()).collect::<Vec<_>>().join("\n"))?;
+        run_compiled(&program)
+    }
+
+    /// A `derive` generator's output is cached as an import generator's is: a
+    /// warm load runs nothing and gives the cold load's output.
+    #[test]
+    fn a_derive_hit_skips_the_run_and_gives_the_same_output() {
+        let r = CachingResolver::new(&[("gen.vyrn", &derive_gen("one"))]);
+        let before = gen_run_count();
+        assert_eq!(derive_with(DERIVE_ROOT, &r), Ok(3), "cold");
+        assert_eq!(gen_run_count(), before + 1, "cold: one run");
+        assert_eq!(derive_with(DERIVE_ROOT, &r), Ok(3), "warm");
+        assert_eq!(gen_run_count(), before + 1, "warm: a hit, no run");
+    }
+
+    /// A hit gives the cold load's diagnostics, byte for byte.
+    #[test]
+    fn a_derive_hit_gives_the_same_diagnostics() {
+        let gen = derive_gen("one").replace("\\\"one\\\"", "7");
+        let r = CachingResolver::new(&[("gen.vyrn", &gen)]);
+        let before = gen_run_count();
+        let cold = derive_with(DERIVE_ROOT, &r).expect_err("the written code is refused");
+        assert_eq!(derive_with(DERIVE_ROOT, &r), Err(cold));
+        assert_eq!(gen_run_count(), before + 1, "warm: a hit, no run");
+    }
+
+    /// A refused generator writes no entry, cold or warm.
+    #[test]
+    fn a_refused_derive_generator_writes_no_entry() {
+        let gen = derive_gen("one").replace("let mut out = \"\"", "let mut out = 1");
+        let r = CachingResolver::new(&[("gen.vyrn", &gen)]);
+        let cold = derive_with(DERIVE_ROOT, &r).expect_err("the generator is refused");
+        assert!(r.cache.borrow().is_empty(), "cold: no entry");
+        assert_eq!(derive_with(DERIVE_ROOT, &r), Err(cold));
+        assert!(r.cache.borrow().is_empty(), "warm: no entry");
+    }
+
+    /// The generator's source is an input of its entry: editing it misses.
+    #[test]
+    fn editing_a_derive_generator_misses() {
+        let mut r = CachingResolver::new(&[("gen.vyrn", &derive_gen("one"))]);
+        let before = gen_run_count();
+        assert_eq!(derive_with(DERIVE_ROOT, &r), Ok(3));
+        r.files.insert("gen.vyrn".to_string(), derive_gen("three"));
+        assert_eq!(derive_with(DERIVE_ROOT, &r), Ok(5), "fresh output");
+        assert_eq!(gen_run_count(), before + 2, "edited: a second run");
+    }
+
+    /// The `TypeArg` is in the key: editing the derived type misses, and an
+    /// edit that leaves every reflected type alone hits.
+    #[test]
+    fn editing_only_the_derived_type_misses() {
+        let r = CachingResolver::new(&[("gen.vyrn", &derive_gen("one"))]);
+        let before = gen_run_count();
+        assert_eq!(derive_with(DERIVE_ROOT, &r), Ok(3));
+        let other = DERIVE_ROOT.replace(
+            "fn main",
+            "fn unused() -> Int64 {\n    return 0\n}\nfn main",
+        );
+        assert_eq!(derive_with(&other, &r), Ok(3));
+        assert_eq!(gen_run_count(), before + 1, "another edit: a hit");
+        let typed = DERIVE_ROOT
+            .replace("{ x: Int64 }", "{ x: Int64, y: Int64 }")
+            .replace("P { x: 1 }", "P { x: 1, y: 2 }");
+        assert_eq!(derive_with(&typed, &r), Ok(3));
+        assert_eq!(gen_run_count(), before + 2, "the type edited: a second run");
+    }
+
     #[test]
     fn two_generators_same_args_do_not_share_a_cache_entry() {
         // One module may export several `gen fn`s; distinct generators over the

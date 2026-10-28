@@ -657,7 +657,9 @@ pub fn compiler_identity() -> String {
                 std::fs::read(exe.as_ref()?).ok()
             }),
             // A build that cannot be identified must not reuse outputs across
-            // processes.
+            // processes. A page has no executable and no process id, and its
+            // cache never leaves the page (`vyrn-play`).
+            None if cfg!(target_os = "unknown") => "page".to_string(),
             None => format!("unknown-{}", std::process::id()),
         };
         format!("{}:{exe_id}", env!("CARGO_PKG_VERSION"))
@@ -720,14 +722,6 @@ pub fn derived_name(g: &str, ty: &crate::ast::Type) -> String {
     format!("derive${g}$t{}", crate::types::struct_key(ty))
 }
 
-thread_local! {
-    /// Each generator run's parsed output, keyed by the generator, the
-    /// fingerprint of its checked program and its `TypeArg`, so the editor's
-    /// re-check of an unchanged program does not run the generator again.
-    static DERIVED: std::cell::RefCell<HashMap<[u64; 2], Derived>> =
-        std::cell::RefCell::new(HashMap::new());
-}
-
 /// What a derive generator wrote: its functions and type declarations, each
 /// renamed under `derive$g$`, which no source can spell.
 pub type Derived = (Vec<crate::ast::Function>, Vec<crate::ast::TypeDecl>);
@@ -747,9 +741,10 @@ pub struct Site {
 ///
 /// `sites` are in source order. Each generator runs once per
 /// program, over all of its types as one `TypeArg`: a run per type would write a
-/// shared subtype's function twice. Its program is its module loaded as its own
-/// root through `linker` ([`crate::loader::checked_generator`]), as an import
-/// line's generator is. With no `linker`, every site fails. The output is not
+/// shared subtype's function twice. It runs through `linker` as an import
+/// line's generator does ([`crate::loader::generation`]): its module loaded as
+/// its own root, and its output cached under the `TypeArg`. With no `linker`,
+/// every site fails. The output is not
 /// checked here, except each entry's signature against its site; the caller
 /// checks the program it joins. A generator's own program may call `derive` (a
 /// `std/ui` generator reaches `toJson`), but not reach itself.
@@ -810,71 +805,40 @@ pub fn derive(
                 .map(|d| format!("generator `{g}` does not check: {}", d.render()))
                 .collect()
         };
-        let checked = crate::loader::checked_generator(
+        // The cache key holds the `TypeArg` literal, so a change to a reflected
+        // type misses and any other edit of the program hits.
+        let call = crate::loader::GenCall {
+            consts: &[],
+            type_arg: Some(&arg),
+            arg_repr: format!("{arg:?}"),
+            importer_dir: String::new(),
+            allowed: Vec::new(),
+            aliased: Vec::new(),
+        };
+        let gen = crate::loader::generation;
+        let written = gen(
             key,
             name,
-            (true, true),
+            call,
+            (true, false),
             &inner,
             resolver,
             engine,
             &mut read,
-        )
-        .map_err(|e| match e {
-            Ok(ds) => unplaced(refused(ds)),
-            Err(why) => {
+        );
+        let written = written.map_err(|f| match f {
+            crate::loader::GenFault::Load(ds) => unplaced(refused(ds)),
+            crate::loader::GenFault::Reread(why) => {
                 let rule = crate::rules::rule!(GenModuleReread, module = key, why);
                 Diagnostic::refusal(0, 0, "check", rule)
             }
-        })?;
-        // 128 bits of SipHash over the fingerprint, which names every input of
-        // the generator's check. A program with no fingerprint is not memoized.
-        let memo = checked.fingerprint.as_ref().map(|fp| {
-            [0u8, 1].map(|salt| {
-                use std::hash::{Hash, Hasher};
-                let mut h = std::collections::hash_map::DefaultHasher::new();
-                (salt, g, fp, format!("{arg:?}")).hash(&mut h);
-                h.finish()
-            })
-        });
-        let cached = memo.and_then(|k| DERIVED.with(|d| d.borrow().get(&k).cloned()));
-        let (fns, decls) = match cached {
-            Some(d) => d,
-            None => {
-                let src = generate(
-                    &checked.program,
-                    &checked.name,
-                    &[],
-                    GenInputs {
-                        engine,
-                        resolver,
-                        opts: &inner,
-                        importer_dir: String::new(),
-                        allowed: Vec::new(),
-                        aliased: Vec::new(),
-                        fuel: crate::loader::GEN_FUEL,
-                        max_output: crate::loader::GEN_MAX_OUTPUT,
-                        sources_fingerprint: checked.fingerprint.clone(),
-                        type_arg: Some(arg),
-                        checked: checked.checked,
-                    },
-                )
-                .map_err(|e| match e {
-                    GenError::Refused(ds) => refused(ds),
-                    GenError::Failed(trap) => trap,
-                    GenError::Unchecked => {
-                        "the engine asked to check a checked program".to_string()
-                    }
-                })
-                .map_err(unplaced)?
-                .written
-                .source;
-                let written = adopt(&src, g).map_err(unplaced)?;
-                if let Some(k) = memo {
-                    DERIVED.with(|d| d.borrow_mut().insert(k, written.clone()));
-                }
-                written
+            crate::loader::GenFault::Run(GenError::Refused(ds)) => unplaced(refused(ds)),
+            crate::loader::GenFault::Run(GenError::Failed(trap)) => unplaced(trap),
+            crate::loader::GenFault::Run(GenError::Unchecked) => {
+                unplaced("the engine asked to check a checked program".to_string())
             }
-        };
+        })?;
+        let (fns, decls) = adopt(&written.source, g).map_err(unplaced)?;
         for s in sites.iter().filter(|s| s.g == g) {
             let Some(f) = fns.iter().find(|f| f.name == derived_name(g, &s.ty)) else {
                 return Err(unplaced(format!(

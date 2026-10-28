@@ -131,9 +131,10 @@ generator input on every load. Every load links the whole program again.
    from this record and derives none of its own. The bodies a `derive` or the
    synthesis appends add their types to it (`Recorded::extend`), so the
    judgments read the one record this check made.
-   If the program calls `derive(g, x)`, `gen::derive` loads each generator's
-   module through the load that linked the program (`checked_generator`) and
-   runs it once over a `TypeArg` of the types its sites need. The functions it
+   If the program calls `derive(g, x)`, `gen::derive` runs each generator
+   once over a `TypeArg` of the types its sites need, through the load that
+   linked the program and the generator cache import lines use
+   (`loader::generation`). The functions it
    writes join the program with the type declarations it writes and the
    `where` constructors. Each site's entry must have the signature its call
    needs. `checker::check_appended` types their bodies

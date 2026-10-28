@@ -2410,11 +2410,9 @@ struct Site<'a> {
 }
 
 /// Runs `name` of the generator module `gen_mod_key` on `consts`, as a call
-/// written in `importer`: the cache, the sandbox's input roots, the load and
-/// check of the generator's program, and the run. Returns the output text.
-/// `(cache, memo)`: with `cache` false the output is neither looked up nor
-/// stored; with `memo` a checked generator program is reused while its sources
-/// are unchanged, which the editor's and the tools' calls ask for.
+/// written in `importer` ([`generation`]), with the sandbox's input roots its
+/// path arguments name. Returns the output text, or the diagnostics at the
+/// call. `(cache, memo)` is [`generation`]'s.
 #[allow(clippy::too_many_arguments)]
 fn run_resolved(
     importer: &str,
@@ -2430,7 +2428,6 @@ fn run_resolved(
 ) -> Result<Written, Vec<Diagnostic>> {
     let Site { line, root_key } = site;
     let err = |rule: Rule| -> Vec<Diagnostic> { vec![load_error(importer, root_key, line, rule)] };
-    let gen_mod_key = gen_mod_key.to_string();
     let arg_repr = args_repr(consts);
     let importer_dir = dir_of(generated_importer(importer).unwrap_or(importer)).to_string();
     let join_dir = |s: &str| join_importer_dir(importer, s);
@@ -2459,12 +2456,101 @@ fn run_resolved(
             }
         }
     }
-    let sources_hash = generator_cache_key(
-        &crate::gen::compiler_identity(),
+    let call = GenCall {
+        consts,
+        type_arg: None,
+        arg_repr: arg_repr.clone(),
+        importer_dir,
+        allowed,
+        aliased,
+    };
+    let inner = generator_opts(opts);
+    generation(
         &gen_mod_key,
         name,
-        &arg_repr,
-        &allowed,
+        call,
+        (cache, memo),
+        &inner,
+        resolver,
+        engine,
+        read,
+    )
+    .map_err(|f| match f {
+        GenFault::Load(ds) => ds,
+        GenFault::Reread(why) => err(rule!(GenModuleReread, module = gen_mod_key, why)),
+        // The generator's module is the root of its own load, so a refusal
+        // there carries no file; in this load it names the module.
+        GenFault::Run(crate::gen::GenError::Refused(ds)) => ds
+            .into_iter()
+            .map(|d| match d.file {
+                Some(_) => d,
+                None => in_module(d, &gen_mod_key, root_key),
+            })
+            .collect(),
+        GenFault::Run(crate::gen::GenError::Failed(trap)) => {
+            err(rule!(GenFailed, name, args = arg_repr, trap))
+        }
+        GenFault::Run(crate::gen::GenError::Unchecked) => err(rule!(
+            GenFailed,
+            name,
+            args = arg_repr,
+            trap = "the engine asked to check a checked program"
+        )),
+    })
+}
+
+/// What one generation runs on ([`generation`]): an import line's constants,
+/// or a `derive` site's `TypeArg`.
+pub(crate) struct GenCall<'a> {
+    pub(crate) consts: &'a [crate::consteval::ConstVal],
+    pub(crate) type_arg: Option<&'a Expr>,
+    /// The arguments as the cache key spells them: the constants, or the
+    /// `TypeArg` literal.
+    pub(crate) arg_repr: String,
+    /// The directory a relative read resolves against.
+    pub(crate) importer_dir: String,
+    /// The sandbox's input roots, and the alias pairs it cannot resolve.
+    pub(crate) allowed: Vec<String>,
+    pub(crate) aliased: Vec<(String, String)>,
+}
+
+/// Why a generation wrote nothing ([`generation`]).
+pub(crate) enum GenFault {
+    /// The generator's own load refused; a diagnostic with no file is its module's.
+    Load(Vec<Diagnostic>),
+    /// The generator's module could not be read again.
+    Reread(String),
+    /// The run failed.
+    Run(crate::gen::GenError),
+}
+
+/// Runs gen fn `name` of the module `gen_mod_key` on `call`, under `inner`
+/// ([`generator_opts`]): the cache, the load and check of the generator's
+/// program, and the run. An import line's generator and a `derive` generator
+/// share this path and its cache. The key names the compiler, the module, the
+/// gen fn, the arguments and the input roots ([`generator_cache_key`]); the
+/// entry records every input the run read and the generator's sources, and a
+/// hit re-hashes each one. `(cache, memo)`: with `cache` false the output is
+/// neither looked up nor stored; with `memo` a checked generator program is
+/// reused while its sources are unchanged, which the editor's and the tools'
+/// calls ask for.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn generation(
+    gen_mod_key: &str,
+    name: &str,
+    call: GenCall<'_>,
+    (cache, memo): (bool, bool),
+    inner: &LoadOptions,
+    resolver: &dyn ModuleResolver,
+    engine: Option<&crate::gen::GenEngine>,
+    read: &mut HashMap<String, Option<String>>,
+) -> Result<Written, GenFault> {
+    let sources_hash = generator_cache_key(
+        &crate::gen::compiler_identity(),
+        gen_mod_key,
+        name,
+        &call.arg_repr,
+        &call.allowed,
     );
     let no_cache = !cache || std::env::var("VYRN_NO_GEN_CACHE").is_ok();
 
@@ -2476,7 +2562,7 @@ fn run_resolved(
         // forged list passes `all`. The call site decides first: an entry that
         // does not record `gen_mod_key` is not this generation.
         let valid = |inputs: &[(String, String)], read: &mut HashMap<String, Option<String>>| {
-            inputs.iter().any(|(path, _)| path == &gen_mod_key)
+            inputs.iter().any(|(path, _)| path == gen_mod_key)
                 && inputs.iter().all(|(path, hash)| {
                     current_input_hash(resolver, path, read).unwrap_or_else(|| ABSENT.to_string())
                         == *hash
@@ -2488,7 +2574,7 @@ fn run_resolved(
         let remembered = GEN_ENTRIES.with(|m| m.borrow().get(&sources_hash).cloned());
         let hit = remembered.filter(|e| valid(&e.0, read)).or_else(|| {
             let cached = resolver.gen_cache_get(&sources_hash)?;
-            let entry = read_cache_entry(&sources_hash, &cached, opts.session.as_deref())?;
+            let entry = read_cache_entry(&sources_hash, &cached, inner.session.as_deref())?;
             valid(&entry.0, read).then(|| Rc::new(entry))
         });
         if let Some(entry) = hit {
@@ -2509,7 +2595,6 @@ fn run_resolved(
     // Cache miss: load and check the generator as a runnable program. Skipping
     // this on a hit is sound: an entry is written only after a run that passed
     // this check, and an edit to the generator's sources misses.
-    let inner = generator_opts(opts);
     // Run the generator in the mediated sandbox. The engine judges its
     // program with the lowering's judgments first. An editor call (`memo`)
     // runs a generator unchecked while the engine holds its compiled module
@@ -2519,34 +2604,35 @@ fn run_resolved(
     let mut check = !memo;
     let (checked, out) = loop {
         let checked = checked_generator(
-            &gen_mod_key,
+            gen_mod_key,
             name,
             (memo, check),
-            &inner,
+            inner,
             resolver,
             engine,
             read,
         )
-        .map_err(|e| {
-            e.unwrap_or_else(|why| err(rule!(GenModuleReread, module = gen_mod_key, why)))
+        .map_err(|e| match e {
+            Ok(ds) => GenFault::Load(ds),
+            Err(why) => GenFault::Reread(why),
         })?;
         let out = crate::gen::generate(
             &checked.program,
             &checked.name,
-            consts,
+            call.consts,
             crate::gen::GenInputs {
                 engine,
                 resolver,
-                opts: &inner,
-                importer_dir: importer_dir.clone(),
-                allowed: allowed.clone(),
-                aliased: aliased.clone(),
+                opts: inner,
+                importer_dir: call.importer_dir.clone(),
+                allowed: call.allowed.clone(),
+                aliased: call.aliased.clone(),
                 fuel: GEN_FUEL_OVERRIDE.with(|c| c.get()).unwrap_or(GEN_FUEL),
                 max_output: GEN_MAX_OUTPUT_OVERRIDE
                     .with(|c| c.get())
                     .unwrap_or(GEN_MAX_OUTPUT),
                 sources_fingerprint: checked.fingerprint.clone(),
-                type_arg: None,
+                type_arg: call.type_arg.cloned(),
                 checked: checked.checked,
             },
         );
@@ -2555,25 +2641,7 @@ fn run_resolved(
             out => break (checked, out),
         }
     };
-    let (gen_sources, describable) = (checked.sources.clone(), checked.describable);
-    let out = out.map_err(|e| match e {
-        // The generator's module is the root of its own load, so a refusal
-        // there carries no file; in this load it names the module.
-        crate::gen::GenError::Refused(ds) => ds
-            .into_iter()
-            .map(|d| match d.file {
-                Some(_) => d,
-                None => in_module(d, &gen_mod_key, root_key),
-            })
-            .collect(),
-        crate::gen::GenError::Failed(trap) => err(rule!(GenFailed, name, args = arg_repr, trap)),
-        crate::gen::GenError::Unchecked => err(rule!(
-            GenFailed,
-            name,
-            args = arg_repr,
-            trap = "the engine asked to check a checked program"
-        )),
-    })?;
+    let out = out.map_err(GenFault::Run)?;
     bump_gen_runs();
 
     // Cache the output under its recorded inputs, for the next load and the
@@ -2592,15 +2660,15 @@ fn run_resolved(
             .collect();
         // The generator's own transitive sources join the recorded inputs, so
         // the entry carries its own validity and the lookup key stays cheap.
-        inputs.extend(gen_sources);
+        inputs.extend(checked.sources.iter().cloned());
         // Recorded unconditionally: a hit is validated against the generator
         // module the call site named.
-        if !inputs.iter().any(|(p, _)| p == &gen_mod_key) {
-            if let Some(h) = current_input_hash(resolver, &gen_mod_key, read) {
-                inputs.push((gen_mod_key.clone(), h));
+        if !inputs.iter().any(|(p, _)| p == gen_mod_key) {
+            if let Some(h) = current_input_hash(resolver, gen_mod_key, read) {
+                inputs.push((gen_mod_key.to_string(), h));
             }
         }
-        if describable {
+        if checked.describable {
             resolver.gen_cache_put(
                 &sources_hash,
                 &render_cache_entry(&sources_hash, &inputs, &out.written),
@@ -2612,19 +2680,19 @@ fn run_resolved(
 
 /// A generator module loaded and checked as a runnable program, with its
 /// transitive sources and the fingerprint the engine keys its artifact on.
-pub(crate) struct CheckedGen {
-    pub(crate) program: Program,
+struct CheckedGen {
+    program: Program,
     /// The gen fn's name in `program` ([`own_gen`]).
-    pub(crate) name: String,
+    name: String,
     /// Each source of the generator's closure with its content hash.
     sources: Vec<(String, String)>,
     /// Whether every source has a readable file. A generated module's banner key
     /// has none, and a closure holding one has no fingerprint: no cache entry,
     /// since an unverifiable input is worse than a miss, and no artifact key.
     describable: bool,
-    pub(crate) fingerprint: Option<String>,
+    fingerprint: Option<String>,
     /// Whether `program` passed its check; see [`checked_generator`].
-    pub(crate) checked: bool,
+    checked: bool,
 }
 
 thread_local! {
@@ -2654,7 +2722,7 @@ pub(crate) fn generator_opts(opts: &LoadOptions) -> LoadOptions {
 /// `memo`, a program checked before under the same context is reused while its
 /// sources are unchanged. The error is the loader's diagnostics, or the reason
 /// the module could not be read again.
-pub(crate) fn checked_generator(
+fn checked_generator(
     gen_mod_key: &str,
     name: &str,
     (memo, check): (bool, bool),
@@ -3159,9 +3227,13 @@ fn fresh_secret() -> Vec<u8> {
         h.write_u64(i);
         seed.extend_from_slice(&h.finish().to_le_bytes());
     }
-    seed.extend_from_slice(&std::process::id().to_le_bytes());
-    if let Ok(d) = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
-        seed.extend_from_slice(&d.as_nanos().to_le_bytes());
+    // A page has neither a process id nor a clock (`vyrn-play`), and its
+    // entries never leave it.
+    if !cfg!(target_os = "unknown") {
+        seed.extend_from_slice(&std::process::id().to_le_bytes());
+        if let Ok(d) = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+            seed.extend_from_slice(&d.as_nanos().to_le_bytes());
+        }
     }
     crate::hash::sha256_hex(&seed).into_bytes()
 }
