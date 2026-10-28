@@ -171,9 +171,12 @@ fn parse_with(
         (program, errors) = p.program_accum();
     }
     // The prelude: the declarations every program gets, stated in `prelude.vyrn`.
-    program
-        .type_decls
-        .extend(crate::prelude::type_decls().iter().cloned());
+    // Only the root's parse carries them, so a linked program holds one copy.
+    if !imported {
+        program
+            .type_decls
+            .extend(crate::prelude::type_decls().iter().cloned());
+    }
     // Flatten each `impl P for T` method into a mangled top-level function
     // (`types::impl_method_name`); protocol-method calls resolve to these names
     // by the receiver's type. Impls on unsupported targets are left for the

@@ -3266,7 +3266,7 @@ struct Decl<'a> {
     /// The `export to` paths ([`Function::export_to`]).
     export_to: &'a [String],
     line: usize,
-    /// A parser-injected builtin type ([`is_injected`]), present in every file.
+    /// A parser-injected builtin type ([`is_injected`]), present in the root.
     injected: bool,
     /// An `extern fn`: a host-ABI contract under its source spelling,
     /// so no rule here may rename it.
@@ -4687,7 +4687,7 @@ fn link(
                 module_hashes.insert(m.key.clone(), h);
             }
             let p = m.program;
-            extra_types.extend(p.type_decls.into_iter().filter(|t| !is_injected(t)));
+            extra_types.extend(p.type_decls);
             extra_fns.extend(p.functions);
             extra_protocols.extend(p.protocols);
             extra_contracts.extend(p.contracts);
