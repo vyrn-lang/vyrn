@@ -2834,14 +2834,19 @@ std/jsondec.vyrn	jsondec$dIntRange	no, it calls `readJsonNumber`, which is not t
 std/jsondec.vyrn	jsondec$dUIntMax	no, it calls `readJsonNumber`, which is not trap-free	no, its effect set is alloc
 std/jsondec.vyrn	jsondec$dFloat64	no, it calls `readJsonNumber`, which is not trap-free	no, its effect set is alloc
 std/jsondec.vyrn	jsondec$dFloat32	no, it calls `readJsonNumber`, which is not trap-free	no, its effect set is alloc
-std/jsondec.vyrn	jsondec$jsonDecoders	no, it keeps an index check	no, its effect set is alloc
+std/jsondec.vyrn	jsondec$jsonDecoders	no, it keeps an index check	no, its effect set is alloc, gen-only
+std/jsondec.vyrn	jsondec$jsonDecoder	no, it keeps an index check	no, its effect set is alloc, gen-only
 std/jsondec.vyrn	jsondec$isName	yes	no, its effect set is alloc
-std/jsondec.vyrn	jsondec$expectLine	yes	no, its effect set is alloc
-std/jsondec.vyrn	jsondec$jsonDecoderBody	no, it keeps an index check	no, its effect set is alloc
-std/jsondec.vyrn	jsondec$jsonRecordBody	no, it keeps an index check	no, its effect set is alloc
-std/jsondec.vyrn	jsondec$jsonVariantsBody	no, it calls `jsonPayloadArm`, which is not trap-free	no, its effect set is alloc
-std/jsondec.vyrn	jsondec$jsonPayloadArm	no, it keeps an index check	no, its effect set is alloc
-std/jsondec.vyrn	jsondec$jsonScalarBody	yes	no, its effect set is alloc
+std/jsondec.vyrn	jsondec$expectLine	yes	no, its effect set is gen-only
+std/jsondec.vyrn	jsondec$arm	yes	no, its effect set is gen-only
+std/jsondec.vyrn	jsondec$ifChain	yes	no, its effect set is gen-only
+std/jsondec.vyrn	jsondec$ifChainOr	yes	no, its effect set is gen-only
+std/jsondec.vyrn	jsondec$jsonDecoderBody	no, it keeps an index check	no, its effect set is alloc, gen-only
+std/jsondec.vyrn	jsondec$jsonRecordBody	no, it keeps an index check	no, its effect set is alloc, gen-only
+std/jsondec.vyrn	jsondec$jsonVariantsBody	no, it keeps an index check	no, its effect set is alloc, gen-only
+std/jsondec.vyrn	jsondec$jsonPayloadArm	no, it keeps an index check	no, its effect set is alloc, gen-only
+std/jsondec.vyrn	jsondec$jsonScalarBody	no, it keeps an index check	no, its effect set is gen-only
+std/jsondec.vyrn	jsondec$narrowed	yes	no, its effect set is gen-only
 std/jsonread.vyrn	maxDepth	yes	yes, emulated Int64
 std/jsonread.vyrn	jsonReader	yes	no, its effect set is alloc
 std/jsonread.vyrn	peek	yes	no, `p` is JsonReader, not an integer, Bool or a read array of one

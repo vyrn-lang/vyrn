@@ -344,7 +344,7 @@ A JSON number as a `Float32`, rounded once: decimal -> `Float64` ->
 ## jsonDecoders
 
 ```vyrn
-fn jsonDecoders(t: TypeArg) -> String
+fn jsonDecoders(t: TypeArg) -> Code
 ```
 
 Writes the decoders `fromJson` calls: for each root, the entry that reads a
