@@ -130,14 +130,28 @@ fn emit_gen_shows_the_synthesized_router() {
         "route entry:\n{src}"
     );
 
-    // The tree is mountable: one `//@route` per page on the channel
-    // `std/rpc` uses, so `vyrn routes` prints pages too, and a `routes()` group in
-    // dispatch order, so first-match agrees with `route`'s static-before-dynamic.
+    // The tree is mountable: one symbol map row per page, the channel `std/rpc`
+    // uses, so `vyrn routes` prints pages too, and a `routes()` group in dispatch
+    // order, so first-match agrees with `route`'s static-before-dynamic.
+    let rows: Vec<String> = vyrn_frontend::symbolmap::read(&src)
+        .iter()
+        .map(|m| {
+            ["kind", "method", "path", "key", "source"]
+                .map(|k| m.derived(k).unwrap_or("-"))
+                .join(" ")
+        })
+        .collect();
+    assert_eq!(
+        rows,
+        [
+            "page GET / index convention",
+            "page GET /items items convention",
+            "page GET /items/{id} items/[id] convention",
+            "page GET /users/{id} users/[id] convention",
+        ],
+        "{src}"
+    );
     for want in [
-        "//@route GET / index convention",
-        "//@route GET /items items convention",
-        "//@route GET /items/{id} items/[id] convention",
-        "//@route GET /users/{id} users/[id] convention",
         "GET(httpRoute(\"/\", uiPageRun, \"index\")),",
         "GET(httpRoute(\"/users/{id}\", uiPageRun, \"users/[id]\")),",
     ] {

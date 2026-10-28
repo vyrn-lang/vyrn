@@ -383,10 +383,10 @@ compile, except `--contract`.
 ### `vyrn routes [file] [--json]`
 
 Prints the resolved wire table: every derived, pinned, hand-written and page
-path the router mounts, with its source. It reads what generators wrote
-(`//@route` lines) and what the program hands `mount(..)`; it never recomputes
-a path. `--json` attaches each route's declaration from the generator symbol
-maps.
+path the router mounts, with its source. It reads the symbol maps generators
+bake in (rpc procedures and pages) and what the program hands `mount(..)`; it
+never recomputes a path. `--json` prints the same rows, each with the
+declaration its symbol map names, or `null` for a page or a hand-written route.
 
 ### The `emit-*` commands dump to stdout
 

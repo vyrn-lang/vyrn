@@ -235,7 +235,7 @@ fn routes_shows_the_hand_written_projection_beside_the_derived_surface() {
         .map(|l| l.split_whitespace().collect::<Vec<_>>().join(" "))
         .collect();
     for want in [
-        // The derived surface: its rows come from `//@route`.
+        // The derived surface: its rows come from `rpc`'s symbol map.
         "POST /_/pastes/byId pastes/byId convention",
         "POST /_/pastes/create pastes/create convention",
         "POST /_/pastes/recent pastes/recent convention",
@@ -261,8 +261,32 @@ fn routes_shows_the_hand_written_projection_beside_the_derived_surface() {
     }
     assert_eq!(rows.len(), 12, "{text}");
     // The `surface(\"/_\", rpcHandle)` in the same `mount` call is not a thirteenth row:
-    // the directives already list that subsystem one row at a time.
+    // the symbol map already lists that subsystem one row at a time.
     assert!(!text.contains("/_ "), "{text}");
+}
+
+/// A page row and an rpc row, as `--json` prints them. Both come from the symbol
+/// maps: a page has no one declaration, so its origin is `null`; a procedure's
+/// is the declaration `rpc` reflected.
+#[test]
+fn routes_json_pins_a_page_row_and_an_rpc_row() {
+    let out = vyrn()
+        .args(["routes", "server.vyrn", "--json"])
+        .current_dir(repo_dir("examples/bin"))
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let text = String::from_utf8_lossy(&out.stdout);
+    for row in [
+        r#"  { "method": "GET", "path": "/p/{id}", "procedure": "p/[id]", "source": "convention", "origin": null },"#,
+        r#"  { "method": "POST", "path": "/_/pastes/byId", "procedure": "pastes/byId", "source": "convention", "origin": { "file": "server/api/pastes.vyrn", "line": 19, "col": 11, "name": "byId" } },"#,
+    ] {
+        assert!(text.lines().any(|l| l == row), "missing `{row}`:\n{text}");
+    }
 }
 
 /// `--json` is the same table plus each route's declaration, read from the symbol map the
@@ -315,8 +339,7 @@ fn routes_json_carries_the_declaration_each_path_came_from() {
             .is_some_and(|f| f.ends_with("pastes.vyrn")),
         "{text}"
     );
-    // A line and a column the text table has nowhere to put: why the JSON reads the map
-    // rather than re-formatting the directives.
+    // A line and a column the text table has nowhere to put.
     assert!(
         matches!(origin.get("line"), Some(vyrn_frontend::schema::Json::Num(n)) if *n > 0.0),
         "{text}"
@@ -732,49 +755,5 @@ fn a_module_vyrn_is_configuration_not_wire_surface() {
     assert!(
         !table.contains("notAProcedure"),
         "a config module must not be mounted:\n{table}"
-    );
-}
-
-/// The route table is a scan over generated text, and generated text is data. A
-/// generator copies its input verbatim, so a string literal can put `//@route` at the
-/// start of a generated line; only lines the lexer calls comments carry a directive, or
-/// the table would list a row no procedure serves.
-#[test]
-fn a_route_directive_inside_a_string_literal_is_not_a_route() {
-    let dir = scratch("ghostroute");
-    write(&dir, "vyrn.json", "{ \"name\": \"ghost\" }\n");
-    write(
-        &dir,
-        "gen.vyrn",
-        "export gen fn surface(x: String) -> String {\n    \
-         return \"//@route GET /_/real/row real/row convention\\n\
-         export fn body() -> String {\\n    return \\\"a\\n\
-         //@route GET /_/ghost/row ghost/row convention\\n\
-         b\\\"\\n}\\n\"\n}\n",
-    );
-    write(
-        &dir,
-        "app.vyrn",
-        "import { surface } from \"./gen\"\n\
-         import { body } from surface(\"x\")\n\
-         fn main() -> Int64 {\n    print(body())\n    return 0\n}\n",
-    );
-    let out = vyrn()
-        .arg("routes")
-        .arg(dir.join("app.vyrn"))
-        .output()
-        .unwrap();
-    assert!(
-        out.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    let table = String::from_utf8_lossy(&out.stdout);
-    // The generator's own directive is a comment and is honoured, so the test cannot
-    // pass by the scan having stopped working.
-    assert!(table.contains("/_/real/row"), "{table}");
-    assert!(
-        !table.contains("/_/ghost/row"),
-        "a string literal must not add a route:\n{table}"
     );
 }

@@ -3056,7 +3056,7 @@ std/rpc.vyrn	rpcApplyConfig	yes	no, its effect set is alloc
 std/rpc.vyrn	rpcConfig	no, it calls `rpcReadJson`, which is not trap-free	no, its effect set is alloc, fs-read
 std/rpc.vyrn	rpcTemplatePath	no, it calls `replace`, which is not trap-free	no, its effect set is alloc, trap
 std/rpc.vyrn	rpcPathFor	no, it calls `rpcTemplatePath`, which is not trap-free	no, its effect set is alloc, trap
-std/rpc.vyrn	rpcRoutesOf	no, it calls `rpcTemplatePath`, which is not trap-free	no, its effect set is alloc, trap, gen-only
+std/rpc.vyrn	rpcRoutesOf	no, it calls `rpcPathFor`, which is not trap-free	no, its effect set is alloc, trap, gen-only
 std/rpc.vyrn	rpcCollision	no, it calls `reportHere`, which is not trap-free	no, its effect set is alloc, trap, gen-only
 std/rpc.vyrn	rpcValidateAll	no, it calls `rpcQualifiedCollision`, which is not trap-free	no, its effect set is alloc, trap, gen-only
 std/rpc.vyrn	rpcDefinedAs	yes	no, its effect set is alloc
@@ -3066,7 +3066,6 @@ std/rpc.vyrn	rpcQualifiedCollision	no, it calls `rpcQualClash`, which is not tra
 std/rpc.vyrn	rpcQualClash	no, it keeps an index check	no, its effect set is alloc, trap, gen-only
 std/rpc.vyrn	rpcDerived	yes	no, its effect set is alloc
 std/rpc.vyrn	rpcProcSymbol	no, it calls `rpcTemplatePath`, which is not trap-free	no, its effect set is alloc, trap
-std/rpc.vyrn	rpcRouteDirectives	yes	no, its effect set is alloc
 std/rpc.vyrn	rpcNs	yes	no, its effect set is alloc
 std/rpc.vyrn	rpcDirImports	no, it calls `rpcHasPair`, which is not trap-free	no, its effect set is alloc, gen-only
 std/rpc.vyrn	rpcHasPair	no, it keeps an index check	no, it is not trap-free
@@ -3375,7 +3374,7 @@ std/ui.vyrn	headHtml	yes	no, its effect set is alloc
 std/ui.vyrn	headTitleOf	yes	no, its effect set is alloc
 std/ui.vyrn	noQuery	yes	no, its effect set is alloc
 std/ui.vyrn	uiNoData	yes	no, the result is Unit, not an integer, Bool or a read array of one
-std/ui.vyrn	uiNoView	yes	no, the value of line 236 is Html, not an integer, Bool or a read array of one
+std/ui.vyrn	uiNoView	yes	no, the value of line 237 is Html, not an integer, Bool or a read array of one
 std/ui.vyrn	uiNoRespond	yes	no, its effect set is alloc
 std/ui.vyrn	uiAcceptNames	yes	no, its effect set is alloc
 std/ui.vyrn	uiWantsData	yes	no, its effect set is alloc
@@ -3464,8 +3463,8 @@ std/ui.vyrn	uiAnyStrSeg	yes	no, `pages` is Array<UiPageInfo>, not an integer, Bo
 std/ui.vyrn	uiAnyVyx	yes	no, `pages` is Array<UiPageInfo>, not an integer, Bool or a read array of one
 std/ui.vyrn	uiVyxGenImports	yes	no, its effect set is alloc
 std/ui.vyrn	uiEmitChromeImport	yes	no, its effect set is alloc, gen-only
-std/ui.vyrn	uiBuildModule	no, it calls `uiRoutePathBranch`, which is not trap-free	no, its effect set is alloc, gen-only
-std/ui.vyrn	uiEmitMountable	no, it calls `uiWirePatternOf`, which is not trap-free	no, its effect set is alloc, gen-only
+std/ui.vyrn	uiBuildModule	no, it calls `uiRoutePathBranch`, which is not trap-free	no, its effect set is alloc, trap, gen-only
+std/ui.vyrn	uiEmitMountable	no, it calls `uiWirePatternOf`, which is not trap-free	no, its effect set is alloc, trap, gen-only
 std/ui.vyrn	uiDispatchOrder	yes	no, its effect set is alloc
 std/ui.vyrn	pages	no, it calls `uiScanAll`, which is not trap-free	no, its effect set is alloc, fs-read, fs-list, trap, gen-only
 std/ui.vyrn	pagesThemed	no, it calls `uiScanAll`, which is not trap-free	no, its effect set is alloc, fs-read, fs-list, trap, gen-only

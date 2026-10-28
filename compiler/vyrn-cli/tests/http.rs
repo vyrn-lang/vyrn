@@ -288,7 +288,7 @@ fn a_projection_beside_the_procedures_is_not_mounted_as_one() {
     );
     let src = String::from_utf8_lossy(&out.stdout);
     assert!(
-        src.contains("//@route POST /_/users/byId"),
+        src.contains("fn rpcHandleUsersById(body: String) -> Response {"),
         "the derived surface is intact:\n{src}"
     );
     // No procedure namespace for it, and no route to its `routes()` export.
