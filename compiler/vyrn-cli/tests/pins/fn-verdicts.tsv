@@ -2990,7 +2990,6 @@ std/num.vyrn	num$parseUInt64	yes	no, its effect set is alloc
 std/num.vyrn	num$f64Str	no, it keeps an index check	no, its effect set is alloc, trap
 std/num.vyrn	num$asciiStr	no, it calls `panic`	no, its effect set is alloc, trap
 std/openapi.vyrn	oaBaseName	yes	no, its effect set is alloc
-std/openapi.vyrn	oaEscBody	yes	no, its effect set is alloc
 std/openapi.vyrn	oaSorted	yes	no, its effect set is alloc
 std/openapi.vyrn	oaIsNamedType	yes	no, `spelling` is String, not an integer, Bool or a read array of one
 std/openapi.vyrn	oaIssuesSchema	yes	no, the result is String, not an integer, Bool or a read array of one
