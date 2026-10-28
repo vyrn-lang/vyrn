@@ -2588,6 +2588,47 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// One hole of a quote: `hole` starts at its value, then glued, indent,
+    /// line, from and to ([`crate::ast::QUOTE`]). A hole means what its type
+    /// says: `Code` and `Name` splice verbatim, anything else scalar is one
+    /// literal. A hole glued to a word (`help\{n}`) writes part of an
+    /// identifier, so it takes a `Name`.
+    fn quote_hole(
+        &self,
+        hole: &[Expr],
+        scope: &Scope,
+        fn_ret: Option<&Type>,
+    ) -> Result<(), Diagnostic> {
+        let code = Type::Named("Code".to_string());
+        let name = Type::Named("Name".to_string());
+        let t = self.base(&self.expr(&hole[0], scope, None, fn_ret)?);
+        let int = |e: &Expr| match e {
+            Expr::Int(n, _) => *n as usize,
+            _ => 0,
+        };
+        let (glued, line, span) = (
+            int(&hole[1]) == 1,
+            int(&hole[3]),
+            (int(&hole[4]), int(&hole[5])),
+        );
+        if glued && t != name && t != Type::Err {
+            return Err(cerr_at!(line, span, QuoteGlued, t));
+        }
+        let elem = match &t {
+            Type::Array(e) => Some((&**e, true)),
+            _ => crate::types::option_payload(&t).map(|e| (e, false)),
+        };
+        match elem {
+            Some((e, true)) if *e == code => return Err(cerr_at!(line, span, QuoteSpliceArray)),
+            Some((e, false)) if *e == code => return Err(cerr_at!(line, span, QuoteSpliceOption)),
+            _ => {}
+        }
+        if !(t.is_scalar() || t == Type::Err || t == code || t == name) {
+            return Err(cerr_at!(line, span, QuoteSplice, t));
+        }
+        Ok(())
+    }
+
     fn check_type_decl(&self, t: &TypeDecl) -> Result<(), Diagnostic> {
         if t.predicate.is_some() && self.contains_fn(&t.base) {
             return Err(cerr!(t.line, FnTypeWhere));
@@ -4957,8 +4998,8 @@ impl<'a> Checker<'a> {
         if name == "moduleInterface" && !self.frame.borrow().in_gen {
             return Err(cerr!(line, GenOnly, name = "moduleInterface"));
         }
-        // Code quotes, generation-only. `@codeText`/`@codeSplice`
-        // are the desugar of a `vyrn"..."` literal. The surface names are
+        // Code quotes, generation-only. `ast::QUOTE` is the desugar of a
+        // `vyrn"..."` literal. The surface names are
         // common words and not reserved: a function or binding of the same
         // name in THIS module shadows them (not one in another module).
         // A word builtin in a method call, or at another argument count, is not
@@ -4970,7 +5011,7 @@ impl<'a> Checker<'a> {
                     .is_some_and(|a| !a.counts.contains(&args.len())));
         let surface = crate::ast::is_surface_builtin(name) && !word_miss;
         let unshadowed = !self.shadows_here(name) && self.lookup(scope, name).is_none();
-        if matches!(name, "@codeText" | "@codeSplice") || (surface && unshadowed) {
+        if name == crate::ast::QUOTE || (surface && unshadowed) {
             if !self.frame.borrow().in_gen {
                 let surface = match name {
                     "render" => "`render` is",
@@ -4986,46 +5027,16 @@ impl<'a> Checker<'a> {
                 return Err(cerr!(line, GenOnlySurface, surface));
             }
             let code = || Type::Named("Code".to_string());
-            match name {
-                "@codeText" => {
-                    self.expr(&args[0], scope, Some(&Type::Str), fn_ret)?;
-                    return Ok(code());
+            if name == crate::ast::QUOTE {
+                let q =
+                    crate::ast::Quote::of(args).ok_or_else(|| cerr!(line, SkeletonUnparsable))?;
+                for i in 0..q.parts() {
+                    self.expr(&args[q.part(i)], scope, Some(&Type::Str), fn_ret)?;
                 }
-                // A hole means what its type says: `Code` and `Name` splice
-                // verbatim, anything else scalar is one literal. A hole glued
-                // to a word (`help\{n}`) writes part of an identifier, so it
-                // takes a `Name`.
-                "@codeSplice" => {
-                    let t = self.base(&self.expr(&args[0], scope, None, fn_ret)?);
-                    let name = Type::Named("Name".to_string());
-                    let glued = matches!(args[1], Expr::Int(1, _));
-                    let span = match (&args[3], &args[4]) {
-                        (Expr::Int(a, _), Expr::Int(b, _)) => (*a as usize, *b as usize),
-                        _ => (0, 0),
-                    };
-                    if glued && t != name && t != Type::Err {
-                        return Err(cerr_at!(line, span, QuoteGlued, t));
-                    }
-                    let elem = match &t {
-                        Type::Array(e) => Some((&**e, true)),
-                        _ => crate::types::option_payload(&t).map(|e| (e, false)),
-                    };
-                    match elem {
-                        Some((e, true)) if *e == code() => {
-                            return Err(cerr_at!(line, span, QuoteSpliceArray))
-                        }
-                        Some((e, false)) if *e == code() => {
-                            return Err(cerr_at!(line, span, QuoteSpliceOption))
-                        }
-                        _ => {}
-                    }
-                    let ok = t.is_scalar() || t == Type::Err || t == code() || t == name;
-                    if !ok {
-                        return Err(cerr_at!(line, span, QuoteSplice, t));
-                    }
-                    return Ok(code());
+                for i in 0..q.parts() - 1 {
+                    self.quote_hole(&args[q.hole(i)..], scope, fn_ret)?;
                 }
-                _ => {}
+                return Ok(code());
             }
         }
         // A surface builtin a declaration here shadows is that declaration's.

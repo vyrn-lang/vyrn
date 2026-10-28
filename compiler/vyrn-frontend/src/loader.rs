@@ -319,8 +319,7 @@ fn stamp_sites(program: &mut Program, file: &str, key: &str) {
 /// - `panic(msg)` becomes [`PANIC_AT`]`(msg, "file:line")`. None in the runtime
 ///   module: its `panic` is a fixed `trap.rs` wording (`malloc`'s `out of
 ///   memory`), printed without a site.
-/// - a quote's part `@codeText(text, line, col)` gains the module key,
-///   `@codeText(text, key, line, col)`: the part's author.
+/// - a quote ([`crate::ast::QUOTE`]) gains the module key, its parts' author.
 fn site_stamp<'a>(file: &'a str, key: &'a str) -> impl FnMut(&mut Expr) + 'a {
     let runtime = file.strip_suffix(".vyrn") == Some(RUNTIME_SPEC);
     move |e: &mut Expr| {
@@ -337,7 +336,9 @@ fn site_stamp<'a>(file: &'a str, key: &'a str) -> impl FnMut(&mut Expr) + 'a {
             if name == "panic" && args.len() == 1 && !runtime {
                 *name = PANIC_AT.to_string();
                 args.push(Expr::str(format!("{file}:{line}")));
-            } else if name == "@codeText" && args.len() == 3 {
+            } else if name == crate::ast::QUOTE
+                && crate::ast::Quote::of(args).is_some_and(|q| q.key().is_none())
+            {
                 args.insert(1, Expr::str(key));
             }
         }

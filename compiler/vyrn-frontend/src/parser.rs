@@ -3874,12 +3874,7 @@ impl Parser {
     /// also be empty, though an import list cannot; any other hole's
     /// placeholder may also be a string literal, which an import's `from`
     /// needs. The
-    /// quote lowers to a `@codeText(part, line, col) + @codeSplice(hole, glued,
-    /// indent, from, to) + ...` chain: `glued` is `1` for a hole touching a word
-    /// character, which the checker requires to be a `Name`, `indent` is the
-    /// leading whitespace of the hole's line, which a multi-line `Code` is
-    /// re-indented to, and `from..to` are the hole's columns, where a refusal
-    /// of it shows.
+    /// quote lowers to one call, [`crate::ast::QUOTE`].
     fn code_quote(
         &self,
         parts: Vec<String>,
@@ -3924,34 +3919,17 @@ impl Parser {
             let rcol = if skel_line <= 1 { col } else { skel_col };
             return Err(Diagnostic::refusal(rline, rcol, "parse", rule));
         }
-        let mut acc: Option<Expr> = None;
-        let add = |acc: &mut Option<Expr>, e: Expr| {
-            *acc = Some(match acc.take() {
-                None => e,
-                Some(prev) => Expr::Binary {
-                    id: Id::NEW,
-                    op: BinOp::Add,
-                    lhs: Box::new(prev),
-                    rhs: Box::new(e),
-                    line,
-                },
-            });
-        };
-        // Each part carries where it starts in this file, and the loader adds the
-        // module's key: the part's author.
-        let code_text = |s: &str, (l, c): (usize, usize)| {
-            let pos = [l, c].map(|n| Expr::int(n as i64));
-            Expr::call("@codeText", [vec![Expr::str(s)], pos.into()].concat(), line)
-        };
-        // The first part starts after `vyrn"`, so a triple quote's first column
-        // is two short; each later part starts after its hole's `}`.
+        // Every part, empty ones too, with where it starts in this file; the
+        // loader adds the module's key, the parts' author. The first part
+        // starts after `vyrn"`, so a triple quote's first column is two short;
+        // each later part starts after its hole's `}`.
+        let int = |n: usize| Expr::int(n as i64);
+        let mut args = vec![int(parts.len())];
         let mut at = (line, col + 5);
         // The leading whitespace of the line the next hole sits on.
         let mut indent = String::new();
         for (i, part) in parts.iter().enumerate() {
-            if !part.is_empty() {
-                add(&mut acc, code_text(part, at));
-            }
+            args.extend([Expr::str(part), int(at.0), int(at.1)]);
             if let Some(nl) = part.rfind('\n') {
                 indent.clear();
                 let rest = &part[nl + 1..];
@@ -3961,13 +3939,16 @@ impl Parser {
                 let before = part.chars().next_back().is_some_and(word);
                 let after = parts[i + 1].chars().next().is_some_and(word);
                 let value = self.parse_hole(hole, line, col)?;
-                let glued = Expr::int((before || after) as i64);
                 // `\{` before the hole's source and `}` after it, for a refusal.
                 let len = hole.src.chars().count();
-                let span = [hole.col.saturating_sub(2), hole.col + len];
-                let [from, to] = span.map(|c| Expr::int(c as i64));
-                let args = vec![value, glued, Expr::str(indent.clone()), from, to];
-                add(&mut acc, Expr::call("@codeSplice", args, hole.line));
+                args.extend([
+                    value,
+                    int((before || after) as usize),
+                    Expr::str(indent.clone()),
+                    int(hole.line),
+                    int(hole.col.saturating_sub(2)),
+                    int(hole.col + len),
+                ]);
                 at = hole
                     .src
                     .chars()
@@ -3978,9 +3959,7 @@ impl Parser {
                 at.1 += 1;
             }
         }
-        // The lexer always yields a part, but an all-empty skeleton still needs a
-        // `Code` value.
-        Ok(acc.unwrap_or_else(|| code_text("", at)))
+        Ok(Expr::call(crate::ast::QUOTE, args, line))
     }
 
     /// A sub-parser over `src` with the enclosing generic parameters, so a skeleton

@@ -131,7 +131,7 @@ fn sections() -> Vec<Section> {
         sec("fn emit_validation", Mapping, Neither),
         sec("fn regex_dfa", Builtin, Neither),
         sec("fn str_bin", Mapping, Neither),
-        sec("fn host", Builtin, Neither),
+        sec("fn host", Builtin, Core),
         sec("fn is_extern", Mapping, Neither),
         sec("fn print_value", Builtin, Neither),
         sec("fn core_mem", Mapping, Neither),
