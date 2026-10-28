@@ -98,9 +98,9 @@ the playground serves an embedded `std/`. The loader:
   An injected runtime module's other functions are roots, because the emitter
   and the desugars call them by name, except `std/runtime`'s: its roots include
   every function the emitter calls by name (`loader::RUNTIME_CALLS`, the one
-  table both read) and every function a reached builtin routes to; a
-  generator's own load keeps it whole, because its engine adds calls after the
-  load (`lazy_runtime`);
+  table both read) and every function a reached builtin routes to. A
+  generator's own load also roots each builtin its engine calls in what it adds
+  after the load (`loader::GEN_HOST`, which `vyrn-genwasm` spells its calls by);
 - loads a generator's module as its own root, for an import line's generator
   and a `derive` generator alike (`checked_generator`), and links only what its
   gen fn reaches (`keep_reached`);

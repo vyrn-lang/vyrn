@@ -1021,6 +1021,42 @@ pub const MEM_PREFIX: &str = "mem$";
 /// The reserved prefix of every `std/runtime` declaration.
 pub const RUNTIME_PREFIX: &str = "runtime$";
 
+/// The builtins `vyrn-genwasm` calls in what it adds to a generator's program
+/// after the load: its `main` wrapper and its `TypeArg` decoders. The engine
+/// spells each call by its field here, and a generator's own load keeps what
+/// [`GenHost::calls`] route to ([`keep_reached`]).
+#[derive(Clone, Copy)]
+pub struct GenHost {
+    pub args: &'static str,
+    pub at: &'static str,
+    pub print: &'static str,
+    pub parse: &'static str,
+    pub push: &'static str,
+}
+
+/// The one [`GenHost`].
+pub const GEN_HOST: GenHost = GenHost {
+    args: "args",
+    at: "@at",
+    print: "print",
+    parse: "parse",
+    push: "@push",
+};
+
+impl GenHost {
+    /// Every call, read by destructuring, so a new field cannot be left out.
+    pub const fn calls(self) -> [&'static str; 5] {
+        let GenHost {
+            args,
+            at,
+            print,
+            parse,
+            push,
+        } = self;
+        [args, at, print, parse, push]
+    }
+}
+
 /// One word of a runtime call's wasm signature ([`RUNTIME_CALLS`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RtWord {
@@ -1607,13 +1643,11 @@ fn load_modules(
             format!("{h:x}:{}", text.len())
         };
         // An imported std module's top-level bodies are parsed when a root
-        // reaches them ([`parse_reached`]), and `std/runtime`'s where
-        // [`lazy_runtime`] holds. The floor reads every body's carriers at load,
-        // so a load that declares artifacts parses them all.
-        let skim = !is_root && opts.artifacts.is_none() && {
-            let spec = import_specifier("", key, opts.std_root.as_deref());
-            spec.starts_with("std/") && (spec != RUNTIME_SPEC || lazy_runtime(opts))
-        };
+        // reaches them ([`parse_reached`]). The floor reads every body's
+        // carriers at load, so a load that declares artifacts parses them all.
+        let skim = !is_root
+            && opts.artifacts.is_none()
+            && import_specifier("", key, opts.std_root.as_deref()).starts_with("std/");
         // The root parses its `test` and `bench` blocks, an imported module skips
         // them, so one text loaded as both parses twice.
         let cache_key = match (is_root, skim) {
@@ -4760,6 +4794,9 @@ fn parse_reached(modules: &mut [Module], opts: &LoadOptions) -> Result<(), Vec<D
         names.extend(imported.filter(|n| !generators.contains(*n)));
     }
     names.extend(RUNTIME_CALLS.iter().map(|(n, ..)| *n));
+    if opts.nest.gen.is_some() {
+        names.extend(GEN_HOST.calls());
+    }
     let mut derive = names.contains(&"derive");
     let mut work: Vec<(usize, usize)> = Vec::new();
     for n in names {
@@ -4823,19 +4860,11 @@ fn called_by_name(key: &str, opts: &LoadOptions) -> bool {
     spec != RUNTIME_SPEC && RT_MODULES.iter().any(|rt| rt.spec == spec)
 }
 
-/// Whether the load parses and keeps only the `std/runtime` functions a spelling
-/// or [`RUNTIME_CALLS`] reaches. A generator's own load keeps them all, because
-/// its engine adds calls to the program after the load (`vyrn-genwasm`'s
-/// wrapper and decoders).
-fn lazy_runtime(opts: &LoadOptions) -> bool {
-    opts.nest.depth == 0
-}
-
 /// The modules whose unreached functions, tests and benches the link drops:
-/// every `std/` module but the root, and `std/runtime` only where
-/// [`lazy_runtime`] holds. A runtime module's other functions stay, because the
-/// emitter and the desugars call them by name ([`called_by_name`]); only its
-/// unreached gen fns leave. `std/runtime` keeps what [`RUNTIME_CALLS`] names.
+/// every `std/` module but the root. A runtime module's other functions stay,
+/// because the emitter and the desugars call them by name ([`called_by_name`]);
+/// only its unreached gen fns leave. `std/runtime` keeps what [`RUNTIME_CALLS`]
+/// names.
 /// Std checks each of its bodies as the root of its own load
 /// (`tests/std_suite.rs`, the corpus), and a body no root reaches adds no
 /// verdict to another program's.
@@ -4847,10 +4876,6 @@ fn lazy_modules(modules: &[Module], root_key: &str, opts: &LoadOptions) -> HashS
     let std_root = format!("{}/", normalize(std_root));
     (modules.iter())
         .filter(|m| m.key != root_key && !is_remote(&m.key))
-        .filter(|m| {
-            m.injected
-                .is_none_or(|p| p != RUNTIME_PREFIX || lazy_runtime(opts))
-        })
         .filter(|m| normalize(&m.key).starts_with(&std_root))
         .map(|m| m.key.clone())
         .collect()
@@ -4931,13 +4956,17 @@ fn drop_unreached(
 
 /// Keeps what the gen fn `gen` reaches ([`reached`]) in every module and drops
 /// each other function and module-state binding, and every test and bench: a
-/// generator's own load ([`Nest::gen`]). The roots are `gen`, every
-/// `std/runtime` function ([`lazy_runtime`] says why) and each name a `where`
+/// generator's own load ([`Nest::gen`]). The roots are `gen`, each
+/// `std/runtime` function the emitter calls by name ([`RUNTIME_CALLS`]), each
+/// call the engine adds after the load ([`GEN_HOST`]) and each name a `where`
 /// predicate spells.
 fn keep_reached(program: &mut Program, gen: &str, unparsed: &HashMap<String, Vec<(usize, usize)>>) {
+    let calls: Vec<String> = (RUNTIME_CALLS.iter())
+        .map(|(n, ..)| format!("{RUNTIME_PREFIX}{n}"))
+        .collect();
     let mut roots: Vec<&str> = own_gen(program, gen).into_iter().collect();
-    let runtime = (program.functions.iter()).filter(|f| f.name.starts_with(RUNTIME_PREFIX));
-    roots.extend(runtime.map(|f| f.name.as_str()));
+    roots.extend(calls.iter().map(String::as_str));
+    roots.extend(GEN_HOST.calls());
     for p in program
         .type_decls
         .iter()
