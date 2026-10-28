@@ -2135,6 +2135,58 @@ fn a_generator_cannot_call_the_reflected_type_primitive() {
     );
 }
 
+/// `moduleCode`'s entry exists only in a generator host, which the engine
+/// builds after the check, so no generator calls it past `moduleCode`'s gate.
+#[test]
+fn a_generator_cannot_call_the_module_code_entry() {
+    let dir = common::scratch("gen-module-code-entry");
+    std::fs::write(
+        dir.join("lib.vyrn"),
+        "export gen fn mk(p: String) -> Code {\n\
+         \x20   let m = __vyrnGenModuleCode(p)\n\
+         \x20   return m.types[0].decl\n\
+         }\n",
+    )
+    .expect("write lib.vyrn");
+    std::fs::write(dir.join("c.vyrn"), "export type T = { n: Int64 }\n").expect("write c.vyrn");
+    std::fs::write(
+        dir.join("host.vyrn"),
+        "import { mk } from \"./lib\"\n\
+         import { T } from mk(\"./c\")\n\
+         \n\
+         fn main() -> Int64 { return 0 }\n",
+    )
+    .expect("write host.vyrn");
+    let cold = refused_cold_and_warm(&dir, &["check", "host.vyrn"]);
+    assert!(
+        cold.contains("call to unknown function `__vyrnGenModuleCode`"),
+        "{cold}"
+    );
+}
+
+/// A prelude record that holds `Code` is generation-only as `Code` is, so a
+/// user record cannot carry one out of generation.
+#[test]
+fn a_user_record_cannot_hold_a_param_code() {
+    let dir = common::scratch("param-code-record");
+    std::fs::write(
+        dir.join("host.vyrn"),
+        "type Kept = { p: ParamCode }\n\nfn main() -> Int64 { return 0 }\n",
+    )
+    .expect("write host.vyrn");
+    let out = vyrn()
+        .current_dir(&*dir)
+        .args(["check", "host.vyrn"])
+        .output()
+        .expect("vyrn check");
+    let err = String::from_utf8_lossy(&out.stderr).replace("\r\n", "\n");
+    assert!(!out.status.success(), "accepted:\n{err}");
+    assert!(
+        err.starts_with("host.vyrn:1:0: the `ParamCode` type is only available during generation"),
+        "{err}"
+    );
+}
+
 /// A gen fn no program runs as a generator is judged by the program that
 /// holds it, which is the only build that sees it.
 #[test]

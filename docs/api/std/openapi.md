@@ -18,5 +18,5 @@ No callbacks, webhooks or auth schemes.
 ## openapi
 
 ```vyrn
-fn openapi(contract: String) -> String
+fn openapi(contract: String) -> Code
 ```

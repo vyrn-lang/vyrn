@@ -2334,12 +2334,14 @@ std/connect.vyrn	connectCapFirst	yes	no, its effect set is alloc
 std/connect.vyrn	connectIsNamedType	yes	no, `spelling` is String, not an integer, Bool or a read array of one
 std/connect.vyrn	connectServiceName	yes	no, its effect set is alloc
 std/connect.vyrn	connectValidateContract	no, it calls `reportHere`, which is not trap-free	no, its effect set is alloc, trap, gen-only
-std/connect.vyrn	connectDispatchFn	yes	no, its effect set is alloc
-std/connect.vyrn	connectRouterFn	yes	no, its effect set is alloc
+std/connect.vyrn	connectDispatchFn	yes	no, its effect set is alloc, gen-only
+std/connect.vyrn	connectRouterFn	yes	no, its effect set is alloc, gen-only
 std/connect.vyrn	connectServer	no, it calls `connectValidateContract`, which is not trap-free	no, its effect set is alloc, trap, gen-only
-std/connect.vyrn	connectUnifyFn	yes	no, its effect set is alloc
-std/connect.vyrn	connectProcFns	yes	no, its effect set is alloc
+std/connect.vyrn	connectServerModule	yes	no, its effect set is alloc, gen-only
+std/connect.vyrn	connectUnifyFn	yes	no, its effect set is alloc, gen-only
+std/connect.vyrn	connectProcFns	yes	no, its effect set is alloc, gen-only
 std/connect.vyrn	connectClient	no, it calls `connectValidateContract`, which is not trap-free	no, its effect set is alloc, trap, gen-only
+std/connect.vyrn	connectClientModule	yes	no, its effect set is alloc, gen-only
 std/contract.vyrn	nearThreshold	yes	yes, emulated Int64
 std/contract.vyrn	trimSpaces	no, it calls `panic`	no, its effect set is alloc, trap
 std/contract.vyrn	isTypeParam	yes	no, its effect set is alloc
@@ -2465,11 +2467,13 @@ std/graphql.vyrn	gqlValidate	no, it calls `gqlValidateSel`, which is not trap-fr
 std/graphql.vyrn	gqlAnswer	no, it calls a function value	no, its effect set is alloc, trap
 std/graphql.vyrn	gqlAnswerOne	no, it calls a function value	no, its effect set is alloc
 std/graphql.vyrn	gqlAnswerValue	no, it calls `gqlCheckSel`, which is not trap-free	no, its effect set is alloc
-std/graphql.vyrn	gqlResolverTable	no, it calls `gqlRootMembers`, which is not trap-free	no, its effect set is alloc, trap
-std/graphql.vyrn	gqlResolverArm	yes	no, its effect set is alloc
-std/graphql.vyrn	gqlSchemaTable	no, it calls `gqlSplitDecl`, which is not trap-free	no, its effect set is alloc, trap
-std/graphql.vyrn	gqlSchemaArm	yes	no, its effect set is alloc
-std/graphql.vyrn	graphqlServer	no, it calls `gqlSchemaTable`, which is not trap-free	no, its effect set is alloc, trap, gen-only
+std/graphql.vyrn	gqlResolverTable	no, it calls `gqlRootMembers`, which is not trap-free	no, its effect set is alloc, trap, gen-only
+std/graphql.vyrn	gqlRunner	yes	no, its effect set is alloc, gen-only
+std/graphql.vyrn	gqlResolverArm	yes	no, its effect set is alloc, gen-only
+std/graphql.vyrn	gqlSchemaTable	no, it calls `gqlSplitDecl`, which is not trap-free	no, its effect set is alloc, trap, gen-only
+std/graphql.vyrn	gqlSchemaArm	yes	no, its effect set is gen-only
+std/graphql.vyrn	graphqlServer	no, it calls `validateContract`, which is not trap-free	no, its effect set is alloc, trap, gen-only
+std/graphql.vyrn	gqlServerModule	no, it calls `gqlSchemaTable`, which is not trap-free	no, its effect set is alloc, trap, gen-only
 std/graphql.vyrn	gqlTestValue	yes	no, its effect set is alloc
 std/graphql.vyrn	gqlTestSchema	yes	no, its effect set is alloc
 std/graphql.vyrn	gqlTestProject	no, it keeps an index check	no, its effect set is alloc, trap
@@ -2988,7 +2992,6 @@ std/num.vyrn	num$parseUInt64	yes	no, its effect set is alloc
 std/num.vyrn	num$f64Str	no, it keeps an index check	no, its effect set is alloc, trap
 std/num.vyrn	num$asciiStr	no, it calls `panic`	no, its effect set is alloc, trap
 std/openapi.vyrn	oaBaseName	yes	no, its effect set is alloc
-std/openapi.vyrn	oaEscBody	yes	no, its effect set is alloc
 std/openapi.vyrn	oaSorted	yes	no, its effect set is alloc
 std/openapi.vyrn	oaIsNamedType	yes	no, `spelling` is String, not an integer, Bool or a read array of one
 std/openapi.vyrn	oaIssuesSchema	yes	no, the result is String, not an integer, Bool or a read array of one
@@ -3034,6 +3037,7 @@ std/rpc.vyrn	capFirst	yes	no, its effect set is alloc
 std/rpc.vyrn	isNamedType	yes	no, `spelling` is String, not an integer, Bool or a read array of one
 std/rpc.vyrn	rpcWhyNotSerializable	yes	no, its effect set is alloc
 std/rpc.vyrn	validateContract	no, it calls `reportHere`, which is not trap-free	no, its effect set is alloc, trap, gen-only
+std/rpc.vyrn	rpcObjection	yes	no, its effect set is alloc, gen-only
 std/rpc.vyrn	rpcReplyTypes	yes	no, its effect set is alloc
 std/rpc.vyrn	serverHandlerFn	yes	no, its effect set is alloc
 std/rpc.vyrn	serverSchemaFn	yes	no, its effect set is alloc

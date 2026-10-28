@@ -1279,7 +1279,10 @@ fn httpBraced(fields: Array<String>) -> Array<String> {
 /// constructor per procedure, under the base path its stem derives.
 export gen fn http(module: String) -> String {
     let iface = moduleInterface(module)
-    let err = validateContract(iface)
+    let err = match validateContract(iface) {
+        Some(d) => render(d),
+        None => "",
+    }
     if err != "" {
         return err
     }

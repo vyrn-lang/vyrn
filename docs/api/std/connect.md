@@ -19,7 +19,7 @@ Wire semantics:
 ## connectServer
 
 ```vyrn
-fn connectServer(contract: String) -> String
+fn connectServer(contract: String) -> Code
 ```
 
 Emits a module exposing `connectHandle(req: Request) -> Option<Response>`.
@@ -29,7 +29,7 @@ cannot itself be named `connectHandle` (as `rpcServer` emits `rpcHandle`).
 ## connectClient
 
 ```vyrn
-fn connectClient(contract: String) -> String
+fn connectClient(contract: String) -> Code
 ```
 
 Emits the client: the contract's type declarations, one stub per procedure

@@ -133,6 +133,14 @@ type TypeInfo = {
 
 type ModuleInterface = { functions: Array<FnInfo>, types: Array<TypeInfo> }
 
+// `moduleCode(p)`: `moduleInterface(p)` with each type a generator writes
+// paired with it as `Code`. `ret` is `None` for a `Unit` return, and `decl`
+// is `TypeInfo.source`. Only generation makes or reads one.
+type ParamCode = { info: ParamInfo, ty: Code }
+type FnCode = { info: FnInfo, params: Array<ParamCode>, ret: Option<Code> }
+type TypeCode = { info: TypeInfo, decl: Code }
+type ModuleCode = { iface: ModuleInterface, functions: Array<FnCode>, types: Array<TypeCode> }
+
 // Contract reflection: `contractOf(Name)` returns the declared
 // shape of a module contract — `moduleInterface`'s counterpart on the
 // *expectation* side, so `std/contract:checkContract(iface, contractOf(P))`
