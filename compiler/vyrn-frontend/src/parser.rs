@@ -364,6 +364,15 @@ fn alone_on_line(before: &str, after: &str, first: bool) -> bool {
     (first || before.contains('\n')) && head.trim().is_empty() && tail.trim().is_empty()
 }
 
+/// Whether the hole after part `before` is an import's specifier: it follows
+/// the word `from`.
+fn is_specifier(before: &str) -> bool {
+    before
+        .trim_end()
+        .strip_suffix("from")
+        .is_some_and(|rest| !rest.ends_with(|c: char| c.is_ascii_alphanumeric() || c == '_'))
+}
+
 fn as_fn_body(src: &str) -> String {
     format!("fn __vyrn_probe__() {{\n{src}\n}}")
 }
@@ -3874,9 +3883,8 @@ impl Parser {
     /// literal. A hole alone on its line stands for a list of items of its
     /// block, so its placeholder may also be a declaration; a hole alone in
     /// its brackets stands for the whole list there, so its placeholder may
-    /// also be empty, though an import list cannot; any other hole's
-    /// placeholder may also be a string literal, which an import's `from`
-    /// needs. The
+    /// also be empty, though an import list cannot; a hole after an import's
+    /// `from` may also be a string literal, which the specifier needs. The
     /// quote lowers to one call, [`crate::ast::QUOTE`].
     fn code_quote(
         &self,
@@ -3900,7 +3908,7 @@ impl Parser {
                         } else {
                             format!("__vyrn_hole{i}")
                         }
-                    } else if lit {
+                    } else if lit && is_specifier(before) {
                         format!("\"__vyrn_hole{i}\"")
                     } else {
                         format!("__vyrn_hole{i}")

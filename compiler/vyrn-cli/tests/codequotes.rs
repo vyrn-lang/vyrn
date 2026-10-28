@@ -84,6 +84,44 @@ fn a_generator_returning_code_is_an_import_target() {
     );
 }
 
+/// A namespace import takes a `Name` hole for its alias and a `String` hole for
+/// its specifier in one quote: only the hole after `from` is a string literal
+/// in the skeleton.
+#[test]
+fn a_namespace_import_splices_its_alias_and_its_specifier() {
+    let dir = scratch("nsimport");
+    write(
+        &dir.join("lib.vyrn"),
+        "export fn seven() -> Int64 { return 7 }\n",
+    );
+    write(
+        &dir.join("gen.vyrn"),
+        "export gen fn make(spec: String) -> Code {\n\
+         \x20   return vyrn\"\"\"\n\
+         \x20       import * as \\{name(\"lib\")} from \\{spec}\n\
+         \x20       export fn made() -> Int64 { return lib.seven() }\n\
+         \x20       \"\"\"\n\
+         }\n",
+    );
+    write(
+        &dir.join("app.vyrn"),
+        "import { make } from \"./gen\"\n\
+         import { made } from make(\"./lib\")\n\
+         fn main() -> Int64 { return made() }\n",
+    );
+    let out = vyrn()
+        .arg("run")
+        .arg(dir.join("app.vyrn"))
+        .output()
+        .unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(7),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
 #[test]
 fn injection_attempt_becomes_an_inert_string_literal() {
     let gen = "export gen fn mkMod(fname: String) -> String {\n\
