@@ -3968,9 +3968,11 @@ impl Parser {
         Some(self.sub(crate::lexer::lex(src).ok()?))
     }
 
+    /// Statements first: most quotes are statement lists, and each mode that
+    /// fails costs a whole parse.
     fn skeleton_parses_any(&self, src: &str) -> bool {
-        self.parses_as_decls(src)
-            || self.parses_as_stmts(src)
+        self.parses_as_stmts(src)
+            || self.parses_as_decls(src)
             || self.parses_as_expr(src)
             || self.parses_as_type(src)
             || self.parses_as_item(src)
