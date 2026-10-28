@@ -167,25 +167,16 @@ mod tests {
             .chain(RT_FILES.iter().copied())
             .collect();
         let files = &files[..];
-        let mut program = load(
+        // The pipeline's load checks the linked program, and its derive sites
+        // run through the load that linked it.
+        let program = vyrn_lower::load(
             root,
             "main.vyrn",
             &shared_opts(),
             &map(files),
             Some(&*engine()),
         )
-        .map_err(|ds| {
-            ds.iter().map(|d| d.render()).collect::<Vec<_>>().join(
-                "
-",
-            )
-        })?;
-        // A linked program runs only once the JSON builtins' generated Vyrn is synthesized;
-        // `loader::load` stops at the link, so a bare check fails with "no decoder".
-        let diags = vyrn_lower::check_and_synthesize(&mut program, Some(&*engine()));
-        if let Some(d) = diags.first() {
-            return Err(d.render());
-        }
+        .map_err(|ds| ds.iter().map(|d| d.render()).collect::<Vec<_>>().join("\n"))?;
         run_compiled(&program)
     }
 

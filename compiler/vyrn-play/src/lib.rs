@@ -460,15 +460,8 @@ fn engine() -> Box<vyrn_frontend::gen::GenEngine> {
 fn options(expansions: std::sync::Arc<vyrn_frontend::project::Expansions>) -> LoadOptions {
     LoadOptions {
         std_root: Some("std".into()),
-        aliases: Default::default(),
-        alias_base: String::new(),
-        audience: None,
-        artifacts: None,
-        proved: Default::default(),
         expansions,
-        session: None,
-        nest: Default::default(),
-        host_calls: &[],
+        ..Default::default()
     }
 }
 

@@ -99,6 +99,9 @@ the playground serves an embedded `std/`. The loader:
   table both read) and every function a reached builtin routes to; a
   generator's own load keeps it whole, because its engine adds calls after the
   load (`lazy_runtime`);
+- loads a generator's module as its own root, for an import line's generator
+  and a `derive` generator alike (`checked_generator`), and links only what its
+  gen fn reaches (`keep_reached`);
 - links `std/runtime` into every program, each declaration renamed with the
   `runtime$` prefix, `std/task` with the `task$` prefix into a program that
   imports it, and `std/json` and similar modules when a builtin that lives in
@@ -126,8 +129,9 @@ generator input on every load. Every load links the whole program again.
    from this record and derives none of its own. The bodies a `derive` or the
    synthesis appends add their types to it (`Recorded::extend`), so the
    judgments read the one record this check made.
-   If the program calls `derive(g, x)`, `gen::derive` runs each generator
-   once over a `TypeArg` of the types its sites need, and the functions it
+   If the program calls `derive(g, x)`, `gen::derive` loads each generator's
+   module through the load that linked the program (`checked_generator`) and
+   runs it once over a `TypeArg` of the types its sites need. The functions it
    writes join the program with the type declarations it writes and the
    `where` constructors. Each site's entry must have the signature its call
    needs. `checker::check_appended` types their bodies

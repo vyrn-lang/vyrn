@@ -286,6 +286,7 @@ pub struct Judge {
         &mut crate::ast::Program,
         Option<&crate::gen::GenEngine>,
         Option<crate::floor::Pending>,
+        Option<Linker<'_>>,
     ) -> Judged,
 }
 
@@ -459,9 +460,13 @@ fn analyze_inner(
     let locals = match &mut checked {
         Some(prog) => {
             let cs = crate::prof::phase("check: the analysis's own");
+            let rooted = (linker.as_ref())
+                .map(|(path, _, resolver)| crate::loader::WithRoot::new(path, source, *resolver));
+            let linker =
+                (linker.zip(rooted.as_ref())).map(|((path, opts, _), r)| (path, opts, r as _));
             let (checked_diags, binders) = checker::with_uses(|| match judge {
                 Some(judge) => {
-                    let judged = (judge.check)(prog, engine, pending);
+                    let judged = (judge.check)(prog, engine, pending, linker);
                     memory = judged.memory;
                     cost = judged.cost;
                     waits = judged.waits;

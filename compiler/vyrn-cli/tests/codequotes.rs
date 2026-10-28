@@ -535,6 +535,41 @@ fn main() -> Int64 {
     );
 }
 
+/// A derive generator's own program may call `derive`: its `toJson` runs
+/// `std/json`'s generator in a load one deeper.
+#[test]
+fn a_derive_generator_may_call_to_json() {
+    let app = r#"export gen fn tagged(t: TypeArg) -> String {
+    let mut out = ""
+    for r in t.roots {
+        let n = t.nodes[r].shape
+        out = out + "fn " + n.name + "(v: " + n.spelling + ") -> String { return " + toJson(n.kind) + " }
+"
+    }
+    return out
+}
+
+type Point = { x: Int64, y: Int64 }
+
+fn main() -> Int64 {
+    print(derive(tagged, Point { x: 1, y: 2 }))
+    return 0
+}
+"#;
+    let out = vyrn()
+        .arg("run")
+        .arg(gen_app("derive_nested", "", app))
+        .output()
+        .unwrap();
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        "record
+",
+        "{err}"
+    );
+}
+
 /// A quote that closes a bracket it did not open is no unit, though a wrapper
 /// would pair it.
 #[test]
