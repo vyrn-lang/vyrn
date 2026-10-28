@@ -266,7 +266,7 @@ sockets are separate lists, because Vyrn has no sum over two record types.
 ## http
 
 ```vyrn
-fn http(module: String) -> String
+fn http(module: String) -> Code
 ```
 
 The REST projection of one procedure module: a placeholder-checked

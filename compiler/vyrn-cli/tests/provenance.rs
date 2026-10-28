@@ -31,7 +31,6 @@ const CENSUS: &[(&str, &str, &str)] = &[
     ("std/html.vyrn", "listInsert", "identity+fresh(inside)"),
     ("std/html.vyrn", "listMove", "gather"),
     ("std/http.vyrn", "httpNamesOf", "fresh"),
-    ("std/http.vyrn", "httpBraced", "identity pointwise"),
     ("std/json.vyrn", "copyJsonArray", "identity"),
     ("std/json.vyrn", "copyJsonFields", "identity"),
     ("std/json.vyrn", "sortKeysArray", "identity pointwise"),

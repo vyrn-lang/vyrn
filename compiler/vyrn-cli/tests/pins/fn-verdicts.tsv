@@ -2631,11 +2631,12 @@ std/http.vyrn	httpFields	no, it keeps an index check	no, its effect set is alloc
 std/http.vyrn	httpIsNumeric	yes	no, `n` is TypeNode, not an integer, Bool or a read array of one
 std/http.vyrn	httpIsNumericBase	yes	no, `spelling` is String, not an integer, Bool or a read array of one
 std/http.vyrn	httpNamesOf	yes	no, its effect set is alloc
-std/http.vyrn	httpNumericLit	yes	no, its effect set is alloc
+std/http.vyrn	httpNumericLit	yes	no, its effect set is alloc, gen-only
 std/http.vyrn	httpPathRegex	yes	no, its effect set is alloc
-std/http.vyrn	httpProcedure	no, it keeps an index check	no, its effect set is alloc
-std/http.vyrn	httpBraced	yes	no, its effect set is alloc
-std/http.vyrn	http	no, it calls `httpBasePath`, which is not trap-free	no, its effect set is alloc, trap, gen-only
+std/http.vyrn	httpAdapter	yes	no, its effect set is alloc, gen-only
+std/http.vyrn	httpProcedure	no, it keeps an index check	no, its effect set is alloc, gen-only
+std/http.vyrn	http	no, it calls `httpModule`, which is not trap-free	no, its effect set is alloc, trap, gen-only
+std/http.vyrn	httpModule	no, it calls `httpBasePath`, which is not trap-free	no, its effect set is alloc, trap, gen-only
 std/http.vyrn	mountedRows	yes	no, its effect set is alloc
 std/http.vyrn	Policy$Route$cacheFor	yes	no, its effect set is alloc
 std/http.vyrn	Policy$Route$etag	yes	no, its effect set is alloc
