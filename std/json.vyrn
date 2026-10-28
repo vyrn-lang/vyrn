@@ -439,12 +439,13 @@ export fn jsonEq(a: Json, b: Json) -> Bool {
 export gen fn jsonEncoders(t: TypeArg) -> String {
     let mut out = ""
     for r in t.roots {
-        let n = t.nodes[r]
+        let n = t.nodes[r].shape
         // Bound, not returned inline: an argument temporary's tree would leak.
         out = out + "fn " + n.name + "(v: " + n.spelling + ") -> String {\n"
         out = out + "    let t: VyrnRt_Json = e" + n.name + "(v)\n    let s = VyrnRt_emit(t)\n    return s\n}\n"
     }
-    for n in t.nodes {
+    for each in t.nodes {
+        let n = each.shape
         out = out + "fn e" + n.name + "(v: " + n.spelling + ") -> VyrnRt_Json {\n"
         out = out + jsonEncoderBody(t, n) + "}\n"
     }
@@ -454,16 +455,16 @@ export gen fn jsonEncoders(t: TypeArg) -> String {
 gen fn jsonEncoderBody(t: TypeArg, n: TypeNode) -> String {
     // A `where` type or a union encodes as its base.
     if n.kind == "where" || n.kind == "union" {
-        return jsonEncoderBody(t, t.nodes[n.args[0]])
+        return jsonEncoderBody(t, t.nodes[n.args[0]].shape)
     }
     let fs = "    let mut fs: Array<VyrnRt_JsonField> = []\n"
     if n.kind == "record" {
         let mut out = fs
         for m in n.members {
-            let f = t.nodes[m.args[0]]
+            let f = t.nodes[m.args[0]].shape
             // A `None` field is omitted; `push` returns the array.
             if f.kind == "option" {
-                out = out + "    fs = match v." + m.name + " { Some(x) => fs.push(VyrnRt_JsonField { key: \"" + m.name + "\", value: e" + t.nodes[f.args[0]].name + "(x) }), None => fs }\n"
+                out = out + "    fs = match v." + m.name + " { Some(x) => fs.push(VyrnRt_JsonField { key: \"" + m.name + "\", value: e" + t.nodes[f.args[0]].shape.name + "(x) }), None => fs }\n"
             } else {
                 out = out + "    fs.push(VyrnRt_JsonField { key: \"" + m.name + "\", value: e" + f.name + "(v." + m.name + ") })\n"
             }
@@ -471,15 +472,15 @@ gen fn jsonEncoderBody(t: TypeArg, n: TypeNode) -> String {
         return out + "    return VyrnRt_JObj(fs)\n"
     }
     if n.kind == "option" {
-        return "    return match v { Some(x) => e" + t.nodes[n.args[0]].name + "(x), None => VyrnRt_JNull }\n"
+        return "    return match v { Some(x) => e" + t.nodes[n.args[0]].shape.name + "(x), None => VyrnRt_JNull }\n"
     }
     if n.kind == "array" {
-        return "    let mut out: Array<VyrnRt_Json> = []\n    for it in v { out.push(e" + t.nodes[n.args[0]].name + "(it)) }\n    return VyrnRt_JArr(out)\n"
+        return "    let mut out: Array<VyrnRt_Json> = []\n    for it in v { out.push(e" + t.nodes[n.args[0]].shape.name + "(it)) }\n    return VyrnRt_JArr(out)\n"
     }
     if n.kind == "map" {
         // An `Int64` key is the decimal text `toString` writes.
-        let key = if t.nodes[n.args[0]].kind == "String" { "k" } else { "k.toString()" }
-        return fs + "    for k in v.keys() {\n        fs = match v[k] { Some(x) => fs.push(VyrnRt_JsonField { key: " + key + ", value: e" + t.nodes[n.args[1]].name + "(x) }), None => fs }\n    }\n    return VyrnRt_JObj(fs)\n"
+        let key = if t.nodes[n.args[0]].shape.kind == "String" { "k" } else { "k.toString()" }
+        return fs + "    for k in v.keys() {\n        fs = match v[k] { Some(x) => fs.push(VyrnRt_JsonField { key: " + key + ", value: e" + t.nodes[n.args[1]].shape.name + "(x) }), None => fs }\n    }\n    return VyrnRt_JObj(fs)\n"
     }
     if n.kind == "enum" {
         let mut arms = ""
@@ -510,7 +511,7 @@ gen fn jsonVariant(t: TypeArg, m: TypeMember) -> String {
     for a in m.args {
         let sep = if i == 0 { "" } else { ", " }
         binds = binds + sep + "p" + i.toString()
-        items = items + sep + "e" + t.nodes[a].name + "(p" + i.toString() + ")"
+        items = items + sep + "e" + t.nodes[a].shape.name + "(p" + i.toString() + ")"
         i = i + 1
     }
     let value = if m.args.length == 1 { items } else { "VyrnRt_JArr([" + items + "])" }

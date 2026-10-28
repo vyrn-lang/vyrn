@@ -130,6 +130,7 @@ const CENSUS: &[(&str, Why, &str)] = &[
     ("__vyrnGenReflect", Compiler, "a generator host's reflection, moved out as atoms"),
     ("__vyrnGenNextInt", Compiler, "as `__vyrnGenReflect`: the next Int64 atom"),
     ("__vyrnGenNextStr", Compiler, "as `__vyrnGenReflect`: the next String atom"),
+    ("__vyrnGenCode", Compiler, "as `__vyrnGenReflect`: a reflected type's spelling as `Code`, through the `raw` import"),
     ("__vyrnGenResult", Compiler, "hands a `Code` generator's result to the host"),
     ("Some", Compiler, "a constructor of the compiler's own Option"),
     ("Ok", Compiler, "a constructor of the compiler's own Result"),

@@ -3,7 +3,7 @@ type Age = Int64 where value >= 0
 export gen fn holds(t: TypeArg) -> String {
     let mut out = ""
     for r in t.roots {
-        let n = t.nodes[r]
+        let n = t.nodes[r].shape
         out = out + "fn " + n.name + "(v: " + n.spelling + ") -> String {\n"
         out = out + "    return VyrnWp_" + n.spelling + "(v)\n}\n"
     }

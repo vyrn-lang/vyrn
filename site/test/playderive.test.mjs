@@ -11,7 +11,7 @@ const bytes = await readFile(fileURLToPath(new URL("out/play.wasm", root)));
 const src = `export gen fn fieldsOf(t: TypeArg) -> String {
     let mut out = ""
     for r in t.roots {
-        let n = t.nodes[r]
+        let n = t.nodes[r].shape
         let mut names = ""
         for m in n.members {
             names = names + " " + m.name
@@ -51,7 +51,7 @@ test("a generator that asks the page for more than its TypeArg is refused, not r
 });
 
 const code = `export gen fn fieldsOf(t: TypeArg) -> Code {
-    let n = t.nodes[t.roots[0]]
+    let n = t.nodes[t.roots[0]].shape
     let mut names = n.kind
     for m in n.members {
         names = names + " " + m.name

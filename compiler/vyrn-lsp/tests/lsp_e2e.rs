@@ -5531,7 +5531,7 @@ fn project_diagnostics(tag: &str, files: &[(&str, &str)], root: &str) -> Vec<(u6
 fn derive_gen(ret: &str) -> String {
     format!(
         "export gen fn bad(t: TypeArg) -> String {{\n    let mut out = \"\"\n    \
-         for r in t.roots {{\n        let n = t.nodes[r]\n        \
+         for r in t.roots {{\n        let n = t.nodes[r].shape\n        \
          out = out + \"fn \" + n.name + \"(v: \" + n.spelling + \") -> String {{\n    \
          return {ret}\n}}\n\"\n    }}\n    return out\n}}\n"
     )

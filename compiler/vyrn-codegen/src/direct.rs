@@ -5452,6 +5452,12 @@ impl<'p> Fn_<'_, 'p> {
                 self.fetch_str(b, g);
                 Ok(Type::Str)
             }
+            // A reflected type's spelling as `Code`, the call site's data, as `raw` makes it.
+            (crate::GEN_CODE, 1) => {
+                self.core_arg(m, b, name, args, 0, Some(&Type::Str), line)?;
+                b.ins(&Instruction::Call(g.raw));
+                Ok(code)
+            }
             (crate::GEN_RESULT, 1) => {
                 self.core_arg(m, b, name, args, 0, Some(&code), line)?;
                 b.ins(&Instruction::Call(g.result));

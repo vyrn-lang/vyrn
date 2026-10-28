@@ -6,16 +6,16 @@ import { joinWith } from "std/strings"
 /// The words for one node: its kind, with a record's fields and an array's
 /// element spelled out one level deep.
 gen fn describe(t: TypeArg, i: Int64) -> String {
-    let n = t.nodes[i]
+    let n = t.nodes[i].shape
     if n.kind == "record" {
         let mut fields: Array<String> = []
         for m in n.members {
-            fields.push(m.name + ": " + t.nodes[m.args[0]].kind)
+            fields.push(m.name + ": " + t.nodes[m.args[0]].shape.kind)
         }
         return "record { " + joinWith(fields, ", ") + " }"
     }
     if n.kind == "array" || n.kind == "option" {
-        return n.kind + " of " + t.nodes[n.args[0]].kind
+        return n.kind + " of " + t.nodes[n.args[0]].shape.kind
     }
     if n.kind == "enum" {
         let mut arms: Array<String> = []
@@ -30,7 +30,7 @@ gen fn describe(t: TypeArg, i: Int64) -> String {
 export gen fn shapeOf(t: TypeArg) -> String {
     let mut out = ""
     for r in t.roots {
-        let n = t.nodes[r]
+        let n = t.nodes[r].shape
         out = out + "fn " + n.name + "(v: " + n.spelling + ") -> String {\n"
         out = out + "    return \"" + n.spelling + " is " + describe(t, r) + "\"\n}\n"
     }

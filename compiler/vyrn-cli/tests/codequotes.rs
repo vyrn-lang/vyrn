@@ -476,7 +476,7 @@ export gen fn mk() -> Code {
 fn derive_runs_a_code_generator() {
     let app = r#"export gen fn kindOf(t: TypeArg) -> Code {
     let n = t.nodes[t.roots[0]]
-    return vyrn"fn \{name(n.name)}(v: \{name(n.spelling)}) -> String { return \{n.kind} }"
+    return vyrn"fn \{name(n.shape.name)}(v: \{n.code}) -> String { return \{n.shape.kind} }"
 }
 
 type Point = { x: Int64, y: Int64 }
@@ -493,6 +493,46 @@ fn main() -> Int64 {
         .unwrap();
     let err = String::from_utf8_lossy(&out.stderr);
     assert_eq!(String::from_utf8_lossy(&out.stdout), "record\n", "{err}");
+}
+
+/// A reflected type's `code` writes a type no identifier spells, and only a
+/// type the checker resolved.
+#[test]
+fn a_derive_generator_splices_each_reflected_type_as_code() {
+    let app = r#"import { join } from "std/code"
+
+export gen fn kindOf(t: TypeArg) -> Code {
+    let mut fns: Array<Code> = []
+    for r in t.roots {
+        let n = t.nodes[r]
+        fns.push(vyrn"fn \{name(n.shape.name)}(v: \{n.code}) -> String { return \{n.shape.kind} }")
+    }
+    return join(fns, vyrn"\n")
+}
+
+type Point = { x: Int64, y: Int64 }
+
+fn main() -> Int64 {
+    let pts: Array<Point> = [Point { x: 1, y: 2 }]
+    print(derive(kindOf, pts))
+    let m: Map<String, Int64> = [:]
+    print(derive(kindOf, m))
+    let r: Result<Int64, String> = Ok(1)
+    print(derive(kindOf, r))
+    return 0
+}
+"#;
+    let out = vyrn()
+        .arg("run")
+        .arg(gen_app("derive_types", "", app))
+        .output()
+        .unwrap();
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        "array\nmap\nenum\n",
+        "{err}"
+    );
 }
 
 /// A quote that closes a bracket it did not open is no unit, though a wrapper

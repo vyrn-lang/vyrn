@@ -652,6 +652,11 @@ impl Decoders {
     fn decode(&mut self, ty: &Type) -> Option<Expr> {
         Some(match vyrn_frontend::types::resolve(ty, &self.types) {
             Type::Str => Expr::call(vyrn_codegen::GEN_NEXT_STR, vec![], 0),
+            Type::Named(n) if n == "Code" => Expr::call(
+                vyrn_codegen::GEN_CODE,
+                vec![Expr::call(vyrn_codegen::GEN_NEXT_STR, vec![], 0)],
+                0,
+            ),
             Type::Int | Type::IntN { .. } => Expr::call(vyrn_codegen::GEN_NEXT_INT, vec![], 0),
             Type::Bool => Expr::Binary {
                 id: Id::NEW,
@@ -1120,6 +1125,16 @@ pub fn encode(
         },
         Type::Bool => match lit {
             Expr::Bool(b, _) => out.push(Atom::Int(*b as i64)),
+            _ => return Err(wrong()),
+        },
+        // A reflected type: its spelling, which the decoder turns into `Code`.
+        Type::Named(n) if n == "Code" => match lit {
+            Expr::Call { name, args, .. } if name == vyrn_codegen::GEN_CODE => {
+                match args.as_slice() {
+                    [Expr::Str(s, _)] => out.push(Atom::Str(s.clone().into_bytes())),
+                    _ => return Err(wrong()),
+                }
+            }
             _ => return Err(wrong()),
         },
         // One presence atom, then the payload if there is one.

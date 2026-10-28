@@ -76,6 +76,9 @@ fn in_gen_of(f: &Function, host: Host) -> bool {
 pub const GEN_REFLECT: &str = "__vyrnGenReflect";
 pub const GEN_NEXT_INT: &str = "__vyrnGenNextInt";
 pub const GEN_NEXT_STR: &str = "__vyrnGenNextStr";
+/// Turns a reflected type's spelling, the next atom, into `Code`: the decoder
+/// of a reflected `Code` field calls it.
+pub const GEN_CODE: &str = "__vyrnGenCode";
 /// Hands a `Code` generator's result to the host; only the engine's wrapper calls it.
 pub const GEN_RESULT: &str = "__vyrnGenResult";
 
@@ -100,6 +103,7 @@ fn gen_host_primitive(name: &str, argc: usize, host: Host) -> Option<Type> {
         (GEN_REFLECT, 2) => Some(Type::Unit),
         (GEN_NEXT_INT, 0) => Some(Type::Int),
         (GEN_NEXT_STR, 0) => Some(Type::Str),
+        (GEN_CODE, 1) => Some(Type::Named("Code".into())),
         (GEN_RESULT, 1) => Some(Type::Unit),
         _ => None,
     }
@@ -2602,7 +2606,12 @@ impl<'a> Checker<'a> {
                     ));
                 }
                 self.ensure_no_stream(&f.ty, t.line, "a record field")?;
-                self.ensure_type_exists(&f.ty, t.line)?;
+                // A prelude record (line 0) may hold a generation-only handle,
+                // `TypeArgNode.code`: only generation makes or reads one.
+                let handle = matches!(&f.ty, Type::Named(n) if crate::ast::is_gen_handle(n));
+                if !(t.line == 0 && handle) {
+                    self.ensure_type_exists(&f.ty, t.line)?;
+                }
             }
             let binds = fields.iter().map(|f| (f.name.clone(), f.ty.clone()));
             self.check_predicate(t, "cross-field", binds)?;
