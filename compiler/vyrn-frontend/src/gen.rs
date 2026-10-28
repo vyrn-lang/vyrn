@@ -501,12 +501,13 @@ pub fn gen_scoped_path(
     Ok(resolved)
 }
 
-/// Serves `moduleInterface(path)`: reads the module, links it to
-/// follow its type closure, and builds its `ModuleInterface`
+/// Serves `moduleInterface(path)` and `moduleCode(path)`, as `kind` picks:
+/// reads the module, links it to follow its type closure, and builds its
 /// literal. Every module the link touched is appended to `reads`, so editing
 /// a closure type's defining file misses the generator cache. The wasm
-/// generation engine serves its `moduleInterface` import from here.
-pub fn gen_module_interface_lit(
+/// generation engine serves both imports from here.
+pub fn gen_module_lit(
+    kind: crate::schema_reflect::Reflect,
     engine: Option<&GenEngine>,
     resolver: &dyn crate::loader::ModuleResolver,
     opts: &crate::loader::LoadOptions,
@@ -530,13 +531,15 @@ pub fn gen_module_interface_lit(
     let resolved = gen_scoped_path(importer_dir, allowed, aliased, &spec)?;
     let source = resolver.read(&resolved).map_err(|e| {
         format!(
-            "moduleInterface {}: {e}",
+            "{} {}: {e}",
+            kind.builtin(),
             crate::trap::io_at("readerr", &path)
         )
     })?;
     reads.push((resolved.clone(), Some(source.clone().into_bytes())));
 
-    linked_module_interface(
+    linked_module_lit(
+        kind,
         engine,
         resolver,
         opts,
@@ -555,16 +558,17 @@ pub fn gen_module_interface_lit(
         let msg = d
             .map(|d| d.message.clone())
             .unwrap_or_else(|| "load failed".to_string());
-        format!("moduleInterface `{path}`{where_}: {msg}")
+        format!("{} `{path}`{where_}: {msg}", kind.builtin())
     })
 }
 
 /// Links `source` (the module at `resolved`) to follow its type closure and
-/// builds its `ModuleInterface` literal, as `moduleInterface` does. `path` is
-/// the spelling the reflected module's own types keep. Every other module the
+/// builds the literal `kind` names, as its builtin does. `path` is the
+/// spelling the reflected module's own types keep. Every other module the
 /// link read is appended to `reads`. A module that does not link yields the
 /// loader's diagnostics.
-pub fn linked_module_interface(
+pub fn linked_module_lit(
+    kind: crate::schema_reflect::Reflect,
     engine: Option<&GenEngine>,
     resolver: &dyn crate::loader::ModuleResolver,
     opts: &crate::loader::LoadOptions,
@@ -607,10 +611,11 @@ pub fn linked_module_interface(
             .iter()
             .map(|(k, f, s)| (k.clone(), f.as_str(), s.as_str())),
     );
-    Ok(crate::schema_reflect::module_interface_lit(
+    Ok(crate::schema_reflect::module_lit(
         &program,
         &specifiers,
         &origins,
+        kind,
     ))
 }
 

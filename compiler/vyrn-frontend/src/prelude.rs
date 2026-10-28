@@ -1213,6 +1213,16 @@ fn table() -> Vec<Builtin> {
             ))
             .spec(Spec::Routes(crate::checker::GEN_ENTRY_MODULE_INTERFACE))
             .effect(GenOnly),
+        b("moduleCode")
+            .sig(row(
+                "moduleCode",
+                &[],
+                &[("p", Read, Str)],
+                Type::Named("ModuleCode".to_string()),
+                &[],
+            ))
+            .spec(Spec::Routes(crate::checker::GEN_ENTRY_MODULE_CODE))
+            .effect(GenOnly),
         // The argument is a contract name, not a value: inert. The checker
         // refuses anything but a declared contract name.
         b("contractOf")
@@ -1488,7 +1498,7 @@ mod tests {
     /// reordered prelude moves every declaration index. Anything but a type
     /// or a protocol here would enter every program.
     #[test]
-    fn the_prelude_declares_nineteen_types_five_protocols_and_nothing_else() {
+    fn the_prelude_declares_twenty_three_types_five_protocols_and_nothing_else() {
         let names: Vec<&str> = type_decls().iter().map(|t| t.name.as_str()).collect();
         assert_eq!(
             names,
@@ -1504,6 +1514,10 @@ mod tests {
                 "FnInfo",
                 "TypeInfo",
                 "ModuleInterface",
+                "ParamCode",
+                "FnCode",
+                "TypeCode",
+                "ModuleCode",
                 "MemberInfo",
                 "ContractInfo",
                 "Request",
@@ -1649,6 +1663,7 @@ mod tests {
             ("listDir", "Result<Array<String>, String>"),
             ("listDirKinds", "Result<Array<String>, String>"),
             ("moduleInterface", "ModuleInterface"),
+            ("moduleCode", "ModuleCode"),
             ("contractOf", "ContractInfo"),
         ] {
             assert_eq!(of(name), ty, "`{name}` answers the wrong type");

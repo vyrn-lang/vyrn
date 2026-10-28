@@ -16,7 +16,9 @@
 //! `type` declaration text; `uncodable` and `retUncodable` are
 //! [`crate::codec`]'s verdict on crossing a JSON wire; `mutates` is the
 //! author's `mut fn` marker; `origin` is where the declaration is written;
-//! `shape` is the declaration's base as a tree (`push_node`).
+//! `shape` is the declaration's base as a tree (`push_node`). `moduleCode(path)`
+//! returns the same literal inside a `ModuleCode`, with each type a generator
+//! writes paired with itself as `Code` ([`Reflect::Code`]).
 //!
 //! `contractOf(Name)` reflects a `contract` declaration the same
 //! way, so `std/contract:checkContract` compares expectation against reality
@@ -102,10 +104,14 @@ impl Origins {
 /// source order, then foreign ones in linker order; `load` refuses a name
 /// declared twice. `specifiers` maps a declaration's module to the import
 /// specifier a generator uses to reach it; a missing entry gives `""`.
-pub fn module_interface_lit(
+///
+/// `Reflect::Code` wraps the same literal in a `ModuleCode`, which pairs each
+/// parameter type, return type and type declaration with itself as `Code`.
+pub fn module_lit(
     program: &Program,
     specifiers: &HashMap<Option<String>, String>,
     origins: &Origins,
+    kind: Reflect,
 ) -> Expr {
     let types: HashMap<String, TypeDecl> = program
         .type_decls
@@ -117,12 +123,11 @@ pub fn module_interface_lit(
     // has no surface.
     let is_root_fn = |f: &Function| f.exported && !f.is_extern && f.module.is_none();
 
-    let mut fn_infos = Vec::new();
-    for f in &program.functions {
-        if is_root_fn(f) {
-            fn_infos.push(fn_info_lit(f, &types, origins));
-        }
-    }
+    let roots: Vec<&Function> = program.functions.iter().filter(|f| is_root_fn(f)).collect();
+    let params: Vec<Vec<Expr>> = roots
+        .iter()
+        .map(|f| f.params.iter().map(|p| param_info_lit(p, &types)).collect())
+        .collect();
 
     // Seed the closure from the roots' signatures, then walk declarations.
     let mut reachable: HashSet<String> = HashSet::new();
@@ -145,26 +150,101 @@ pub fn module_interface_lit(
         }
     }
 
-    let mut type_infos = Vec::new();
-    for t in &program.type_decls {
-        // Skip injected (line 0) and synthetic (`Name.field`) declarations.
-        if !t.exported || t.line == 0 || is_synthetic(&t.name) {
-            continue;
-        }
-        // Own declarations always; foreign ones when the closure reaches them.
-        if t.module.is_none() || reachable.contains(&t.name) {
-            let spec = specifiers.get(&t.module).map(|s| s.as_str()).unwrap_or("");
-            type_infos.push(type_info_lit(t, spec, &types, origins));
+    // Skip injected (line 0) and synthetic (`Name.field`) declarations. Own
+    // declarations always; foreign ones when the closure reaches them.
+    let decls: Vec<&TypeDecl> = program
+        .type_decls
+        .iter()
+        .filter(|t| t.exported && t.line != 0 && !is_synthetic(&t.name))
+        .filter(|t| t.module.is_none() || reachable.contains(&t.name))
+        .collect();
+    let type_info = |t: &TypeDecl| {
+        let spec = specifiers.get(&t.module).map(|s| s.as_str()).unwrap_or("");
+        type_info_lit(t, spec, &types, origins)
+    };
+    let iface = |fns: Vec<Expr>, tys: Vec<Expr>| {
+        struct_lit(
+            "ModuleInterface",
+            vec![("functions", array_lit(fns)), ("types", array_lit(tys))],
+        )
+    };
+    let fn_info = |f: &Function, ps: Vec<Expr>| fn_info_lit(f, ps, &types, origins);
+    match kind {
+        Reflect::Interface => iface(
+            roots
+                .iter()
+                .zip(params)
+                .map(|(f, ps)| fn_info(f, ps))
+                .collect(),
+            decls.iter().map(|t| type_info(t)).collect(),
+        ),
+        Reflect::Code => {
+            let mut fn_infos = Vec::new();
+            let mut fn_codes = Vec::new();
+            for (f, ps) in roots.iter().zip(params) {
+                let info = fn_info(f, ps.clone());
+                let param_codes = f.params.iter().zip(ps).map(|(p, info)| {
+                    struct_lit(
+                        "ParamCode",
+                        vec![("info", info), ("ty", type_code(p.ty.to_string()))],
+                    )
+                });
+                let ret = match f.ret {
+                    Type::Unit => none(),
+                    ref ret => Expr::call("Some", vec![type_code(ret.to_string())], 0),
+                };
+                fn_codes.push(struct_lit(
+                    "FnCode",
+                    vec![
+                        ("info", info.clone()),
+                        ("params", array_lit(param_codes.collect())),
+                        ("ret", ret),
+                    ],
+                ));
+                fn_infos.push(info);
+            }
+            let mut type_infos = Vec::new();
+            let mut type_codes = Vec::new();
+            for t in decls {
+                let info = type_info(t);
+                type_codes.push(struct_lit(
+                    "TypeCode",
+                    vec![
+                        ("info", info.clone()),
+                        ("decl", type_code(render_type_decl(t, &types))),
+                    ],
+                ));
+                type_infos.push(info);
+            }
+            struct_lit(
+                "ModuleCode",
+                vec![
+                    ("iface", iface(fn_infos, type_infos)),
+                    ("functions", array_lit(fn_codes)),
+                    ("types", array_lit(type_codes)),
+                ],
+            )
         }
     }
+}
 
-    struct_lit(
-        "ModuleInterface",
-        vec![
-            ("functions", array_lit(fn_infos)),
-            ("types", array_lit(type_infos)),
-        ],
-    )
+/// Which literal [`module_lit`] builds, and the builtin that asks for it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Reflect {
+    /// `moduleInterface(p) -> ModuleInterface`.
+    Interface,
+    /// `moduleCode(p) -> ModuleCode`, generation-only.
+    Code,
+}
+
+impl Reflect {
+    /// The builtin's name, as its diagnostics spell it.
+    pub fn builtin(self) -> &'static str {
+        match self {
+            Reflect::Interface => "moduleInterface",
+            Reflect::Code => "moduleCode",
+        }
+    }
 }
 
 /// Builds the `ContractInfo` literal for a contract declaration.
@@ -228,22 +308,25 @@ pub fn contract_info_lit(c: &ContractDecl) -> Expr {
     )
 }
 
-fn fn_info_lit(f: &Function, types: &HashMap<String, TypeDecl>, origins: &Origins) -> Expr {
-    let params: Vec<Expr> = f
-        .params
-        .iter()
-        .map(|p| {
-            struct_lit(
-                "ParamInfo",
-                vec![
-                    ("name", Expr::str(p.name.clone())),
-                    ("spelling", Expr::str(p.ty.to_string())),
-                    ("schema", schema_lit_for_type(&p.ty, types)),
-                    ("uncodable", Expr::str(uncodable_of(&p.ty, types, true))),
-                ],
-            )
-        })
-        .collect();
+fn param_info_lit(p: &Param, types: &HashMap<String, TypeDecl>) -> Expr {
+    struct_lit(
+        "ParamInfo",
+        vec![
+            ("name", Expr::str(p.name.clone())),
+            ("spelling", Expr::str(p.ty.to_string())),
+            ("schema", schema_lit_for_type(&p.ty, types)),
+            ("uncodable", Expr::str(uncodable_of(&p.ty, types, true))),
+        ],
+    )
+}
+
+/// `params` are the function's `ParamInfo` literals, in order.
+fn fn_info_lit(
+    f: &Function,
+    params: Vec<Expr>,
+    types: &HashMap<String, TypeDecl>,
+    origins: &Origins,
+) -> Expr {
     // A `Unit` return spells as `""`.
     let ret_spelling = if f.ret == Type::Unit {
         String::new()
@@ -479,10 +562,10 @@ pub(crate) const PLACEHOLDERS: &[(&str, &str)] = &[
     ("VyrnWp_", crate::ctor::PRED_PREFIX),
 ];
 
-/// A reflected type as `Code`: its spelling, which the generator host turns
-/// into a span the call site wrote (`checker::GEN_CODE`), because the type
-/// resolves in the importer's scope. A type holds no import or specifier, so
-/// its author cannot change a verdict.
+/// A reflected type or type declaration as `Code`: its text, which the
+/// generator host turns into a span the call site wrote (`checker::GEN_CODE`),
+/// because the type resolves in the importer's scope. Neither holds an import
+/// or specifier, so its author cannot change a verdict.
 fn type_code(spelling: String) -> Expr {
     Expr::call(crate::checker::GEN_CODE, vec![Expr::str(spelling)], 0)
 }
@@ -1008,7 +1091,7 @@ mod tests {
                    fn hidden() -> Int64 { return 0 }";
         let (program, _) = crate::parser::parse_accum(crate::lexer::lex(src).unwrap());
         let origins = Origins::new([(None, "m.vyrn", src)]);
-        let iface = module_interface_lit(&program, &HashMap::new(), &origins);
+        let iface = module_lit(&program, &HashMap::new(), &origins, Reflect::Interface);
 
         let fns = elems(field(&iface, "functions"));
         assert_eq!(fns.len(), 1);
@@ -1062,7 +1145,7 @@ mod tests {
                    export type Id = Int64 where value >= 1\n";
         let (program, _) = crate::parser::parse_accum(crate::lexer::lex(src).unwrap());
         let origins = Origins::new([(None, "m.vyrn", src)]);
-        let iface = module_interface_lit(&program, &HashMap::new(), &origins);
+        let iface = module_lit(&program, &HashMap::new(), &origins, Reflect::Interface);
 
         let f = &elems(field(&iface, "functions"))[0];
         let o = field(f, "origin");
@@ -1079,8 +1162,12 @@ mod tests {
         let two = "\n\nexport fn pong() -> String { return \"\" }\n";
         let origin_of = |src: &str| {
             let (p, _) = crate::parser::parse_accum(crate::lexer::lex(src).unwrap());
-            let iface =
-                module_interface_lit(&p, &HashMap::new(), &Origins::new([(None, "m.vyrn", src)]));
+            let iface = module_lit(
+                &p,
+                &HashMap::new(),
+                &Origins::new([(None, "m.vyrn", src)]),
+                Reflect::Interface,
+            );
             field(&elems(field(&iface, "functions"))[0], "origin").clone()
         };
         let a = origin_of(one);
@@ -1119,7 +1206,7 @@ mod tests {
             srcs.push((key, k, v));
         }
         let origins = Origins::new(srcs);
-        module_interface_lit(&program, &specs, &origins)
+        module_lit(&program, &specs, &origins, Reflect::Interface)
     }
 
     fn type_names_of(iface: &Expr) -> Vec<String> {

@@ -586,9 +586,9 @@ module with a synthesized `main` that dispatches on its first argument, runs
 it in wasmtime, and reads the result: a `String` between two sentinel lines on
 stdout, a `Code` value through the `vyrn_gen.result` import. File reads
 go through the loader's resolver and are recorded as the generator's inputs;
-`lex`, `moduleInterface` and `contractOf` cross as a host encoding and a
-synthesized decoder. A generator the engine declines is an error: "the
-installed generation engine declined it".
+`lex`, `moduleInterface`, `moduleCode` and `contractOf` cross as a host
+encoding and a synthesized decoder. A generator the engine declines is an
+error: "the installed generation engine declined it".
 
 A `Code` value is a rope of spans (`gen::Rope`): concatenation is a node, not
 a copy. Each span carries its author (`gen::Author`) and where its errors show

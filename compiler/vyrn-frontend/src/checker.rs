@@ -86,6 +86,7 @@ pub const GEN_RESULT: &str = "__vyrnGenResult";
 /// each asks the host for a value and decodes it by its static type. A
 /// builtin's call site is redirected to one.
 pub const GEN_ENTRY_MODULE_INTERFACE: &str = "__vyrnGenModuleInterface";
+pub const GEN_ENTRY_MODULE_CODE: &str = "__vyrnGenModuleCode";
 pub const GEN_ENTRY_LEX: &str = "__vyrnGenLex";
 pub const GEN_ENTRY_TYPE_ARG: &str = "__vyrnGenTypeArg";
 
@@ -270,6 +271,7 @@ pub const RESERVED: &[&str] = &[
     "lineAt",
     "colAt",
     "moduleInterface",
+    "moduleCode",
     // The log levels (`info`, ...) are not reserved: the sugar carries `@info`
     // (see `crate::prelude::Builtin::method`).
     "value",
@@ -2355,6 +2357,21 @@ impl<'a> Checker<'a> {
         Ok(())
     }
 
+    /// Whether `ty` names `Code`, `Name` or a prelude record that holds one,
+    /// directly or through another prelude record. `fuel` is the prelude's
+    /// type count: a longer descent repeats a record.
+    fn gen_only(&self, ty: &Type, fuel: usize) -> bool {
+        let mut hit = false;
+        crate::loader::type_heads(ty, &mut |n| {
+            hit = hit
+                || match self.decl(n) {
+                    None => crate::ast::is_gen_handle(n),
+                    Some(d) => d.line == 0 && fuel > 0 && self.gen_only(&d.base, fuel - 1),
+                }
+        });
+        hit
+    }
+
     fn ensure_type_exists(&self, ty: &Type, line: usize) -> Result<(), Diagnostic> {
         // A stream's lifetime is a scope: legal only at the root of
         // a binding, parameter or return type, where movecheck can see it.
@@ -2369,6 +2386,13 @@ impl<'a> Checker<'a> {
                     return Err(cerr!(line, GenOnlyType, name = n));
                 }
                 return Ok(());
+            }
+            Type::Named(n)
+                if self.decl(n).is_some_and(|d| d.line == 0)
+                    && !self.frame.borrow().in_gen
+                    && self.gen_only(ty, crate::prelude::type_decls().len()) =>
+            {
+                return Err(cerr!(line, GenOnlyType, name = n));
             }
             Type::Named(n) if n == "Token" && self.decl("Token").is_none() => {
                 if !self.frame.borrow().in_gen {
@@ -2647,10 +2671,9 @@ impl<'a> Checker<'a> {
                     ));
                 }
                 self.ensure_no_stream(&f.ty, t.line, "a record field")?;
-                // A prelude record (line 0) may hold a generation-only handle,
+                // A prelude record (line 0) may hold a generation-only type,
                 // `TypeArgNode.code`: only generation makes or reads one.
-                let handle = matches!(&f.ty, Type::Named(n) if crate::ast::is_gen_handle(n));
-                if !(t.line == 0 && handle) {
+                if !(t.line == 0 && self.gen_only(&f.ty, crate::prelude::type_decls().len())) {
                     self.ensure_type_exists(&f.ty, t.line)?;
                 }
             }
@@ -4995,8 +5018,8 @@ impl<'a> Checker<'a> {
         // refusal about the element type.
 
         // Generation-only: no backend lowers it, so the one refusal lives here.
-        if name == "moduleInterface" && !self.frame.borrow().in_gen {
-            return Err(cerr!(line, GenOnly, name = "moduleInterface"));
+        if matches!(name, "moduleInterface" | "moduleCode") && !self.frame.borrow().in_gen {
+            return Err(cerr!(line, GenOnly, name = name));
         }
         // Code quotes, generation-only. `ast::QUOTE` is the desugar of a
         // `vyrn"..."` literal. The surface names are

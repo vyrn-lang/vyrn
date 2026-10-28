@@ -849,6 +849,7 @@ const LATTICE: &[(&str, &str, bool)] = &[
     ("runtime$trap", "trap", true),
     ("mem$trap", "trap", true),
     ("moduleInterface", "gen-only", true),
+    ("moduleCode", "gen-only", true),
     ("contractOf", "gen-only", true),
     ("lex", "gen-only", true),
     ("render", "gen-only", true),

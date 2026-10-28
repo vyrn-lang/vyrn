@@ -204,8 +204,9 @@ fn serve(
     }
     // The frontend's own implementation, so the recorded reads are every
     // module the link touched.
-    if mode == MODE_MODULE_INTERFACE {
-        return vyrn_frontend::gen::gen_module_interface_lit(
+    if let Some(kind) = reflect_of(mode) {
+        return vyrn_frontend::gen::gen_module_lit(
+            kind,
             inputs.engine,
             inputs.resolver,
             inputs.opts,
@@ -586,6 +587,16 @@ fn reflect_entries(p: &mut Program) -> Option<()> {
             &mut dec,
         )?;
     }
+    if reaches("moduleCode") {
+        entry(
+            vyrn_codegen::GEN_ENTRY_MODULE_CODE.to_string(),
+            vec![str_param("path")],
+            named("ModuleCode"),
+            vyrn_codegen::REFLECT_MODULE_CODE,
+            Expr::var("path", 0),
+            &mut dec,
+        )?;
+    }
     // `prepare` has cleared `is_gen`, so `dispatchable` no longer answers.
     if p.functions.iter().any(|f| f.exported && takes_type_arg(f)) {
         entry(
@@ -868,6 +879,19 @@ const MODE_LIST: i32 = 2;
 /// served on the host thread like one.
 #[cfg(feature = "host")]
 const MODE_MODULE_INTERFACE: i32 = 3;
+/// `moduleCode`: served as `MODE_MODULE_INTERFACE` is.
+#[cfg(feature = "host")]
+const MODE_MODULE_CODE: i32 = 6;
+/// The module reflection a mode asks for, if it asks for one.
+#[cfg(feature = "host")]
+fn reflect_of(mode: i32) -> Option<vyrn_frontend::schema_reflect::Reflect> {
+    use vyrn_frontend::schema_reflect::Reflect;
+    match mode {
+        MODE_MODULE_INTERFACE => Some(Reflect::Interface),
+        MODE_MODULE_CODE => Some(Reflect::Code),
+        _ => None,
+    }
+}
 /// `listDirKinds`: `MODE_LIST`'s encoding with `/` appended to each directory.
 #[cfg(feature = "host")]
 const MODE_LIST_KINDS: i32 = 4;
@@ -1399,21 +1423,26 @@ fn link<X: 'static>(linker: &mut wasmtime::Linker<wasi::Guest<X>>) -> wasmtime::
             let arg = cstr(data, arg)?;
             match kind {
                 // Needs the resolver, so it goes to the host thread.
-                vyrn_codegen::REFLECT_MODULE_INTERFACE => {
+                vyrn_codegen::REFLECT_MODULE_INTERFACE | vyrn_codegen::REFLECT_MODULE_CODE => {
+                    let (mode, ty) = if kind == vyrn_codegen::REFLECT_MODULE_CODE {
+                        (MODE_MODULE_CODE, "ModuleCode")
+                    } else {
+                        (MODE_MODULE_INTERFACE, "ModuleInterface")
+                    };
                     let caps = streams.caps.as_ref().ok_or_else(|| Error::msg("no host"))?;
                     caps.req
-                        .send((arg, MODE_MODULE_INTERFACE))
+                        .send((arg, mode))
                         .map_err(|_| Error::msg("generator host is gone"))?;
                     let lit = match caps.resp.recv() {
                         Ok(Ok(Served::Lit(lit))) => lit,
                         Ok(Ok(Served::Bytes(..) | Served::Copy(..))) => {
-                            return Err(Error::msg("moduleInterface answered with bytes"))
+                            return Err(Error::msg("module reflection answered with bytes"))
                         }
                         // A scoping violation traps.
                         Ok(Err(msg)) => return Err(Error::new(Denied(msg))),
                         Err(_) => return Err(Error::msg("generator host is gone")),
                     };
-                    streams.stream(&Type::Named("ModuleInterface".into()), &lit)
+                    streams.stream(&Type::Named(ty.into()), &lit)
                 }
                 // The generator's module closure carries its contracts.
                 vyrn_codegen::REFLECT_CONTRACT_OF => {

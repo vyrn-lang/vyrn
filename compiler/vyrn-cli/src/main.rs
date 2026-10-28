@@ -1082,11 +1082,17 @@ fn why_cmd(call: &Call) -> Outcome {
     // page that does not compile has no interface to judge. A generator input is
     // reflected from its view, which no load links.
     let interface = if !path.ends_with(".vyrn") {
-        use vyrn_frontend::schema_reflect::{module_interface_lit, Origins};
-        module_interface_lit(&module, &Default::default(), &Origins::new([]))
+        use vyrn_frontend::schema_reflect::{module_lit, Origins, Reflect};
+        module_lit(
+            &module,
+            &Default::default(),
+            &Origins::new([]),
+            Reflect::Interface,
+        )
     } else {
         let importer_dir = path.rsplit_once('/').map_or(".", |(d, _)| d);
-        let linked = vyrn_frontend::gen::linked_module_interface(
+        let linked = vyrn_frontend::gen::linked_module_lit(
+            vyrn_frontend::schema_reflect::Reflect::Interface,
             Some(&*engine()),
             &p.resolver,
             &p.opts,

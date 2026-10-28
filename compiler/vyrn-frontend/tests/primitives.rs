@@ -110,6 +110,7 @@ const CENSUS: &[(&str, Why, &str)] = &[
     ("toJson", Compiler, "the walk needs the argument's static type; the writer is std/json"),
     ("fromJson", Compiler, "as `toJson`; the reader is std/jsonread + std/jsondec"),
     ("moduleInterface", Compiler, "reads the module graph"),
+    ("moduleCode", Compiler, "reads the module graph"),
     ("schemaOf", Compiler, "reflects a type DECLARATION into a Schema literal"),
     ("contractOf", Compiler, "reflects a module contract"),
     ("jsonSchema", Compiler, "renders a declaration as JSON Schema at compile time"),
